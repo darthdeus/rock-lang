@@ -1,16 +1,4 @@
-//! The Lua wide-value calling convention.
-//!
-//! An ORDINARY `value` whose PAYLOAD leaf count exceeds
-//! `WIDE_VALUE_PAYLOAD_LEAF_CUT` crosses a Rock-to-Rock Lua call as ONE slot
-//! (its existing boxed form) instead of N scalar lanes, and a signature whose
-//! surviving scalar lanes exceed `SIGNATURE_SCALAR_LANE_BUDGET` boxes its
-//! widest remaining ordinary values until it fits. A `nobox` value is never
-//! boxed by either rule and counts toward no budget decision: the only
-//! rejection it can meet is the emit-time frame-limit check.
-//!
-//! These tests assert the EMITTED SHAPE -- the emitted Lua parameter lists --
-//! not merely that the program runs, because "it runs" is equally true of the
-//! old all-scalar wire for every case below 250 frame slots.
+//! Check the concrete Lua ABI for values wide enough to pressure frame limits.
 
 use skull_mir::lower::{SIGNATURE_SCALAR_LANE_BUDGET, WIDE_VALUE_PAYLOAD_LEAF_CUT};
 

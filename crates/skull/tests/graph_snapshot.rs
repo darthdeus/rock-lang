@@ -1,16 +1,4 @@
-//! The canonical-snapshot oracle the persistent graph updater is gated on
-//!.
-//!
-//! Two properties, and the second is what makes the first worth anything: the
-//! snapshot must be STABLE across builds that mean the same thing, and it must
-//! CHANGE for any one-sided semantic change. A snapshot that omitted a field
-//! would satisfy stability perfectly and detect nothing.
-//!
-//! Completeness is asserted at FIELD granularity, not section granularity. Each
-//! arm below builds two graphs differing in exactly one field of one record and
-//! requires the canonical form to tell them apart -- so a rendering that drops a
-//! nested payload (an edge's span, a bound tree's sub-witnesses, a
-//! disagreement's two substitutions) is red here rather than silently equal.
+//! Compare graph snapshots across arenas using canonical type identities.
 
 use crate::common::ws_of_files;
 use std::collections::{BTreeMap, BTreeSet};

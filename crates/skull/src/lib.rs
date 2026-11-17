@@ -33,19 +33,8 @@ use skull_parser::CompilerError;
 /// Per-nominal-type layout hash, keyed by type name (unique workspace-wide).
 pub type ShapeHashes = rustc_hash::FxHashMap<ustr::Ustr, u64>;
 
-/// Hash every nominal type's RUNTIME LAYOUT for the hot-reload schema-drift
-/// restart trigger: live data outlives
-/// a reload, so a layout change means the process must restart. The hash
-/// covers exactly what determines how live values are laid out -- ordered
-/// (field name, field type) pairs for structs (+ the value/cdata flag),
-/// ordered (variant name, payload shape) for enums, the wrapped type for
-/// newtypes. Bodies, spans, defaults, and comments do not participate, so a
-/// hot body edit or a doc tweak never restarts. A BOXED field needs no
-/// transitive hash: the parent holds a pointer either way, so a nested type's
-/// OWN entry changing is the whole signal. An `embed` field is the exception --
-/// see [`struct_shape_hash`]. Known over-trigger (accepted,
-/// uniform-predictable): reordering a boxed enum's variants restarts even
-/// though its live tags are name strings.
+/// Hash type layouts to detect reloads that cannot preserve live values.
+/// Boxed children have independent entries. Inline children affect the parent.
 pub fn type_shape_hashes(ws: &Workspace) -> Result<ShapeHashes, CompilerError> {
     use bone_semantic::hir::VariantPayload;
     use std::hash::{Hash, Hasher};
@@ -89,23 +78,8 @@ pub fn type_shape_hashes(ws: &Workspace) -> Result<ShapeHashes, CompilerError> {
     Ok(out)
 }
 
-/// One struct's layout hash. An `embed` field contributes the embedded type's
-/// SHAPE HASH, not just its rendered name: the child has no box of its own, so
-/// its leaves ARE this struct's physical keys and widening the child relayouts
-/// the PARENT.
-///
-/// That extra contribution also covers the flag flip, since an embed field
-/// hashes strictly more than a boxed one: flipping `f: Task?` to
-/// `embed f: Task?` leaves every rendered field type identical and touches no
-/// other type, so before this the whole workspace hashed clean and NO restart
-/// fired. The planned inline/direct decision is hashed explicitly, so the
-/// layout bit remains load-bearing on its own and does not depend on how the
-/// child happens to contribute.
-///
-/// `visiting` breaks a cycle with a stable sentinel. bone rejects a cyclic
-/// embed graph (`check_embed_site_legality`), so this is unreachable by
-/// construction; it exists so a malformed workspace reaching codegen produces a
-/// wrong-but-finite hash instead of hanging the compiler.
+/// Inline children contribute their own layout hashes. The recursion guard keeps
+/// an invalid embed cycle finite even if it passes semantic checking.
 fn struct_shape_hash(
     ws: &Workspace,
     s: &bone_semantic::hir::StructDef,
@@ -441,59 +415,9 @@ pub(crate) fn decorator_call_args(
 /// enough — the stdlib's accessors (`__rock_create_struct`, `vec_new`)
 /// nil-guard per-key, so they self-heal off a present-but-empty registry.
 fn runtime_prelude() -> &'static str {
-    // Runtime setup has two parts:
-    //   1. LuaJIT mcode/trace tuning. skull emits more Lua
-    //      than LuaJIT's small-script defaults assume (32 KB mcode blocks /
-    //      512 KB total / 1000 traces). Exhausting the mcode arena triggers a
-    //      global trace flush, dropping hot loops back to the interpreter.
-    //      A trace must fit one `sizemcode` block. On arm64 macOS, later
-    //      mappings can prevent a second block near the VM, so the first one
-    //      must hold the hot set: size == max on both arches, one 64 MB block.
-    //      x64 has a +/-2 GB jump range; arm64's +/-128 MB range still permits
-    //      a 64 MB block, with placement checked by LuaJIT's allocator. A 32 MB
-    //      budget still causes global flushes on larger hot sets; 64 MB avoids
-    //      them and has been validated on arm64 macOS.
-    //      ROCK_JIT_MCODE_KB overrides the shared default, so the budget can
-    //      be swept without a rebuild; this prelude runs at chunk load and
-    //      beats any -O flag passed on the command line.
-    //      `hotexit` is raised from LuaJIT's default 10 to 100 because a side
-    //      trace that FAILS is never penalised or blacklisted
-    //      (lj_trace.c:596-606) and snap->count only saturates on success, so a
-    //      doomed exit is re-recorded ~245 times for nothing. application's hottest
-    //      exits are doomed: they die in asm_head_side and never appear as a
-    //      parent for any other trace. Measured -57% aborts and -22% mean frame
-    //      on two independent workloads (a scripted combat sim and a recorded
-    //      play session), both disjoint across interleaved arms.
-    //      NOT validated on a workload whose side traces mostly SUCCEED, where
-    //      a higher threshold would cost real compiled coverage; and 250 beat
-    //      100 on every metric without the curve flattening, so this is a
-    //      conservative pick rather than a tuned one. ROCK_JIT_HOTEXIT
-    //      overrides it, so a regression reverts without a rebuild.
-    //      `maxtrace` is 32000 (LuaJIT default 1000, previously 4000 here).
-    //      An application combat session compiles ~24,600 traces; at 4000 the trace
-    //      array filled six times per benchmark run and every fill flushed
-    //      the whole cache -- all compiled code, every side-exit counter and
-    //      every abort penalty -- so the working set was re-recorded from
-    //      scratch six times. At 32000 the benchmark never flushes: aborts
-    //      11.1-11.5k -> 3.9k, mean frame 7.1 -> 4.7-5.1 ms, frames over
-    //      16.7 ms 37-39 -> 3-4, two interleaved pairs, peak RSS unchanged.
-    //      The trace array is 16 bytes per slot, so the fixed cost is 512 KB.
-    //      ROCK_JIT_MAXTRACE overrides it. `maxirconst` stays at LuaJIT's 500
-    //      (ROCK_JIT_MAXIRCONST): every "trace too long" in the census is the
-    //      constant limit, not maxrecord, but raising it only converts the
-    //      aborts into tail-call unroll aborts at the same starts.
-    //      `hotloop` and `loopunroll` stay at LuaJIT's defaults (56, 15) but
-    //      are exposed as ROCK_JIT_HOTLOOP / ROCK_JIT_LOOPUNROLL: application's inner
-    //      loops (glyphs per string, points per ribbon) run fewer than 56
-    //      iterations, so they never become loop traces and get unrolled by
-    //      whichever function-entry trace reaches them, which is where the
-    //      "trace too long" aborts come from. Sweepable without a rebuild.
-    //   2. 32-bit RNG (stdlib `random_*` inline(lua) bodies call
-    //      `__rock_rng_next`/`__rock_rng_seed` by name); seeded from
-    //      ROCK_TEST_SEED for deterministic test runs.
-    // The CodeRef runtime is appended by assembly only when this artifact has an
-    // escaping Rock function value. This keeps direct-call-only output free of
-    // slot machinery while retaining one canonical runtime definition.
+    // LuaJIT can fail to place a second nearby mcode block on arm64. The first block
+    // holds the full budget. Higher exit and trace limits reduce repeated recording
+    // and global trace flushes. The environment overrides support tuning.
     static PRELUDE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         let out = PRELUDE_TEMPLATE
             .replace("{FN_MT}", "")
@@ -504,12 +428,7 @@ fn runtime_prelude() -> &'static str {
                 "{NB_PRIM_STORAGE}",
                 &skull_mir::lower::nb_prim_storage_lua(),
             );
-        // `str::replace` on a placeholder that drifted out of the template is a
-        // NO-OP, and the survivor is valid Lua: `= {LEAF_VIEWS}` reads an unset
-        // global, so the table is EMPTY rather than a syntax error. `pairs({})`
-        // then makes `__nb_refresh_views` do nothing and every view dangles
-        // after a grow -- silently, which is the class that killed application's
-        // spell_damages once already. Fail loudly at build time instead.
+        // An unsubstituted placeholder is valid Lua and leaves the view registry empty.
         assert!(
             !out.contains("{LEAF_VIEWS}"),
             "prelude template still contains an unsubstituted {{LEAF_VIEWS}} placeholder"
@@ -1035,23 +954,7 @@ fn cdata_alias_fields(
     Ok(out)
 }
 
-/// Emit the `ffi.cdef` typedefs + `<Name>_ct = ffi.typeof(...)` constructors for
-/// every FFI-clean `value` struct, so value-struct construction (`V2_ct(x, y)`)
-/// and `NativeBuffer<V2>` (`ffi.new("V2[?]", n)`) work. Returns
-/// `(lua, ffi_emitted, gc_emitted)`:
-/// - `ffi_emitted` -- names a cdef typedef was emitted for (the gate
-///   `value_struct_metatypes` / `c_struct_inspect_defs` share: an
-///   `ffi.metatype`/`ffi.istype` on an undeclared ctype errors).
-/// - `gc_emitted` -- the GC-carrying (table-repr) names, materialized by
-///   `value_struct_gc_defs` as `<Name>_vt` table ctors (the tier is decided by
-///   `skull_mir::lower::ValueStorage`; this replaces the old silent
-///   skip-then-`Name_ct`-nil-crash, unfuck backlog #51).
-///
-/// C requires a nested struct's typedef to precede its use, so FFI-clean
-/// emission is dependency-ordered: each round emits the structs whose
-/// value-struct fields are all emitted. A round with no progress is a
-/// definition cycle: rejected, not emitted broken. A GC-carrying struct never
-/// enters the cdef ordering (a table has no C layout to sequence).
+/// Emit C declarations in dependency order and report which types use GC tables.
 fn value_struct_defs(
     ws: &Workspace,
     vstructs: &[&bone_semantic::hir::StructDef],
@@ -1220,29 +1123,8 @@ end
 if jit and jit.off then jit.off(__rock_layout_check) end
 "#;
 
-/// Assert, once at chunk load, that skull's C layout model agrees with LuaJIT's
-/// for every leaf of every FFI-clean value struct -- and, from that same checked
-/// layout, register each struct as `NativeBuffer` storage in
-/// `_G.__ROCK_NB_STORAGE` (whose primitive/sized half the prelude declares).
-///
-/// One walk, two emitted views. The registry states what a buffer of this
-/// element is made of; the assertions state that the model producing it agrees
-/// with LuaJIT. Deriving both from the same owned RepPlan C-layout result
-/// is what keeps them from describing different layouts.
-///
-/// Leaf addressing indexes typed
-/// views with COMPILER-COMPUTED byte offsets — a literal constant per leaf, which
-/// is the whole point, since a runtime offset lookup would cost what the boxing
-/// cost. If that model ever disagreed with LuaJIT's, every element access would
-/// read and write the wrong address: silent memory corruption, not a failure.
-/// So the two are cross-checked against `ffi.offsetof` composed along each leaf's
-/// field chain, and a mismatch aborts loudly at load.
-///
-/// Every name here is already in the FFI-clean emitted set, so a missing layout
-/// (or a disagreement between the two leaf walkers) is an INVARIANT FAILURE, not
-/// an optional check to skip: skipping would emit a type whose offsets nothing
-/// validated, and leaf addressing would then read and write unvalidated
-/// addresses. Rejected with the type named.
+/// Check the compiler offsets against LuaJIT and register buffer layouts from
+/// the same plan. Wrong offsets can corrupt storage during typed leaf access.
 fn value_leaf_layout_checks(
     ws: &Workspace,
     emitted: &rustc_hash::FxHashSet<ustr::Ustr>,
@@ -1301,18 +1183,7 @@ fn value_leaf_layout_checks(
     Ok((out, storage))
 }
 
-/// Emit the table-repr materialization defs for every GC-carrying value struct:
-/// a `<Name>_vt(...)` ctor building an immutable Lua table tagged `__ty`, plus a
-/// shared per-type metatable (`__rock_vt_<Name>`) carrying value `__eq`
-/// (scalar/value fields structural, GC-ref fields by reference) and
-/// `__tostring`. The single-call wire shape matches `<Name>_ct`, so pack sites
-/// choose a ctor NAME by tier, not a new code path.
-///
-/// The metatable table is preserved across hot reloads (`= X or {}`, then its
-/// fields reassigned) so tables built before a reload keep the SAME metatable
-/// identity -- LuaJIT only fires `__eq` when both operands share the metamethod.
-/// Rendering is handled by the generic table `inspect` path (a `__ty`-tagged
-/// table), so no `__ROCK_C_STRUCT` (ffi.istype) entry is needed.
+/// Emit constructors and metamethods for GC-backed value structs.
 fn value_struct_gc_defs(
     ws: &Workspace,
     vstructs: &[&bone_semantic::hir::StructDef],
@@ -1710,32 +1581,8 @@ fn value_struct_metatypes(
     out
 }
 
-/// Emit per-enum runtime defs. Two cases, split on representation:
-///
-/// - A **payload-free** enum (all unit variants) is an `int` value globally (the
-///   variant's declaration-order ordinal). No singleton tables -- construction,
-///   `match`, `==`, Map keys, and value-struct fields are all plain ints. We emit
-///   only a `__rock_enum_<E>_names = { [0]="<E>::<V0>", ... }` table (0-indexed by
-///   ordinal, pre-prefixed) for static-type-driven stringify of `{x}` interp holes
-///   (see `lower::stringify`). It must match rock's `inspect` output EXACTLY.
-///
-/// - A **mixed** enum (has payload variants) keeps its values as self-describing
-///   tables; its unit variants lower to an interned singleton
-///   (`__rock_enum_<E>_<V> = <self> or { __variant=.., __ty=.. }`), so they're
-///   stable Lua map keys and reference-equal across uses
-///   (see `skull_mir::mangle::enum_singleton_global`).
-///
-/// The `<global> = <global> or { ... }` preserve-if-exists form is
-/// load-bearing for HOT RELOAD: a reload re-dofiles the whole chunk, and a
-/// bare re-creation would mint a NEW table, breaking reference-
-/// equality with enum values stored in preserved globals (e.g. a `GRID:
-/// []<TileType>` whose `TileType::Wall` entries would no longer `==` the
-/// freshly-created singleton -> walls silently stop rendering). A payload-free
-/// enum sidesteps this entirely: its values are ints, identity-free by nature.
-/// A value struct's table-building constructor (`<Sym>_lct` from leaves,
-/// `<Sym>_vt` for a GC table) and its definition. Generated code is its only
-/// caller, so assembly defines just the ones the emitted text calls; each
-/// depends only on its struct's ctype or metatable.
+/// Unit-only enums use numeric tags and a names table. Mixed enums keep unit
+/// singletons across reloads so preserved values retain identity.
 pub(crate) type ValueCtors = Vec<(ustr::Ustr, String)>;
 
 const VALUE_CTOR_SUFFIXES: [&str; 2] = ["_lct", "_vt"];
@@ -1872,27 +1719,8 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
     out
 }
 
-/// Register an `inspect`/`copy`/`name` closure into `_G.__ROCK_C_STRUCT` for
-/// every value cdata the compiler mints. That registry is what a consumer asks
-/// "what is this cdata, and how do I copy it": the stdlib `inspect` renders it
-/// structurally through the registered inspect renderer instead of
-/// printing an address, `deepcopy` copies it instead of SHARING it, and the sim
-/// checkpoint census classifies it as `value_cdata` instead of refusing it as
-/// unmodelled.
-///
-/// Every consumer asks through the stdlib's `__rock_c_struct_of`, which
-/// memoizes the `ffi.istype` scan per CTypeID in `__ROCK_C_STRUCT_BY_CTYPE`.
-/// The rows own that memo's lifetime: it is reset here, after the rows, so a
-/// re-emission (a hot reload that re-runs this scaffolding) can never serve a
-/// row that no longer exists or predates its replacement.
-///
-/// Two producers, one registry. `value` structs are gated by `emitted` — exactly
-/// the structs `value_struct_defs` declared a ctype for, so `ffi.istype` never
-/// names an undefined type. A cdata-eligible enum ([`enum_cdata_defs`]) is the
-/// same layout tier: a typedef'd anonymous struct `{ int __tag; <slots> }`
-/// copied through its own `<Enum>_ct`. Its `inspect` delegates to `tostring`,
-/// which reaches the metatype `__tostring` [`enum_cdata_metatypes`] emitted --
-/// the enum's rendering has one source, not two that can drift.
+/// Register inspection and copy functions for C-backed values. Invalidate the
+/// ctype lookup cache on reload so it sees the new registry.
 fn c_struct_inspect_defs(
     ws: &Workspace,
     vstructs: &[&bone_semantic::hir::StructDef],

@@ -1,6 +1,3 @@
-//! Stage 0d properties for the shadow instance graph
-//!.
-
 use crate::common::{
     body_id, emit_full_of, fn_name, fn_ref, key, name_matches, ws_and_graph, ws_with_stdlib,
 };
@@ -54,7 +51,6 @@ fn main() {
     );
 }
 
-/// The graph must not depend on the order roots are discovered in (plan S 20g.4).
 #[test]
 fn a_deep_capped_graph_is_independent_of_discovery_order() {
     // The fixture MUST reach the expansion cap, or it proves nothing: a shallow
@@ -99,9 +95,7 @@ fn main() { near(); far() }
     );
 }
 
-/// Every complete generic call identity recovered from typed bindings must
-/// appear in the instance graph. A miss whose CALLING body the graph never
-/// reached is a reachability difference, not a missing instance.
+/// Only calls in reached bodies contribute concrete instances.
 #[test]
 fn every_concrete_call_identity_appears_in_the_instance_graph() {
     use bone_semantic::hir::BodyOwner;
@@ -204,10 +198,6 @@ fn main() {
     );
 }
 
-/// Every level of a combinator chain gets a concrete `next` instance. Without
-/// reading `next_generics` a witness has no instantiation and its edge is lost
-/// entirely -- which is how the first version of this walk reported zero
-/// iterator edges over the whole corpus while looking healthy.
 #[test]
 fn a_chained_iterator_reaches_each_next_instance() {
     let (ws, g) = ws_and_graph(
@@ -283,13 +273,6 @@ fn main() {}
     );
 }
 
-/// An `extern` is available exactly where the target supplies foreign symbols.
-/// The `Invalid boundary` outcome (plan S 10) is per-target, so this is what
-/// makes an artifact's capability read load-bearing rather than decorative.
-///
-/// Cross-artifact IDENTITY is not tested here -- it belongs with the artifact
-/// view and is asserted over the shared `Instance` in
-/// `artifact_view::cross_artifact_identity_is_the_instance_and_not_the_spelling`.
 #[test]
 fn extern_availability_distinguishes_backend_owned_js_boundary() {
     use skull::artifact::{self, ArtifactRequest, Exclusion, Unrealizable};
@@ -419,12 +402,6 @@ fn main() { let c = ticker(); let _ = c.resume() }
         assert!(compared > 0, "fixture produced no concrete coroutine plan");
     }
 }
-/// S 0g: the graph must be stable with inlining DISABLED and under a perturbed
-/// discovery order.
-///
-/// This holds BY CONSTRUCTION -- `instance_graph::build` walks bone's HIR and
-/// inference and never runs the inliner -- and "by construction" is a claim
-/// about code that can be edited, which is what this pins.
 #[test]
 fn the_graph_is_stable_with_inlining_disabled() {
     let src = r#"
@@ -469,13 +446,6 @@ fn main() {
         order_diff.join("\n")
     );
 }
-
-// ---------------------------------------------------------------------------
-// Stage 2: the three decided rejections at instance construction (plan S 0h).
-// Each has a control that must NOT be rejected beside it -- a rejection whose
-// only evidence is the rejected input proves the gate fires, not that it
-// discriminates.
-// ---------------------------------------------------------------------------
 
 fn rejections_of(
     ws: &Workspace,
@@ -545,13 +515,7 @@ fn main() { first(); second() }
     }
 }
 
-/// The other decided rejections: mutual polymorphic recursion, where the type
-/// grows around a two-function cycle so no single edge changes a function's
-/// own arguments; a GENERIC function taken as a value, which has no call site
-/// to key an instantiation on (THE WATCH ITEM, plan S 0h) and must be rejected
-/// rather than instantiated at an invented type or dropped; and a type argument
-/// no constraint reaches, where every site carrying the unbound variable is
-/// rejected -- `len` is called on the `[T]` that `make` returned.
+/// The mutual recursion case changes type arguments across two functions.
 #[test]
 fn decided_rejections_name_their_sites() {
     use instance_graph::RejectionKind::*;
@@ -603,9 +567,6 @@ fn main() {
         }
     }
 }
-/// CONTROL: ordinary same-instance recursion, direct and mutual, is finite and
-/// must survive. It is the shape the corpus actually contains (11 direct, 9
-/// mutual), so a gate that rejected it would reject every real program.
 #[test]
 fn same_instance_recursion_is_not_rejected() {
     let (ws, g) = ws_and_graph(
@@ -660,7 +621,6 @@ fn main() {
     );
 }
 
-/// CONTROL: a concrete function taken as a value is ordinary and must survive.
 #[test]
 fn a_concrete_fn_value_is_not_rejected() {
     let (ws, g) = ws_and_graph(
@@ -688,10 +648,7 @@ fn main() {
     );
 }
 
-/// CONTROL: a type variable constrained anywhere in the body -- not at the call
-/// -- still unifies to a concrete type and must NOT be rejected. This is the
-/// arm that decides whether the gate reads "unconstrained" or merely "not
-/// constrained by the call's own arguments".
+/// A use in the body can constrain the type variable.
 #[test]
 fn a_body_constrained_type_variable_is_not_rejected() {
     let (ws, g) = ws_and_graph(
@@ -725,23 +682,7 @@ fn main() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Stage 2: synthesized `iter` witnesses resolve to concrete instances.
-//
-// A synthesized `iter` call has no call expr, so it can never be keyed in
-// `call_generic_bindings`. bone now retains the substitution it already
-// computed while resolving the witness -- symmetric to `next_generics` -- and
-// the walk instantiates from that record. The two routes are independent: the
-// `for` head (`for_iter_protocol`) and an iterable argument coerced at an
-// `Iterator`-bounded param (`implicit_iter_args`).
-// ---------------------------------------------------------------------------
-
-/// A synthesized `iter` witness over a GENERIC `iter` (the stdlib's own
-/// `iter<T>(Arena<T>)`) is instantiated from bone's retained record, through
-/// both routes: the `for` head (`for_iter_protocol`) and an iterable argument
-/// coerced at an `Iterator`-bounded param (`implicit_iter_args`), from a
-/// function body and from an always-emitted global initializer. The `next`
-/// witness's own record is separate and must stay concrete beside it.
+/// Exercise both iterator witness routes from a function and a global initializer.
 #[test]
 fn generic_iter_witnesses_are_instantiated() {
     let for_head = "let a: Arena<int> = arena_new()\n    let total = 0\n    for (e, v) in a { total = total + v }";
@@ -806,8 +747,6 @@ fn generic_iter_witnesses_are_instantiated() {
         }
     }
 }
-/// CONTROL: a NON-generic `iter` witness needs no record and must keep working
-/// through the empty-substitution path.
 #[test]
 fn a_concrete_iter_witness_still_resolves() {
     let (ws, g) = ws_and_graph(
@@ -842,16 +781,8 @@ fn main() {
     );
 }
 
-/// HOSTILE: the witness record is keyed by the RESOLVED declaration's `VarId`s,
-/// but the walk instantiates the declaration the TARGET selects. Sibling
-/// declarations are separate functions with separate `VarId`s, so reading the
-/// record against the selected variant's generics finds nothing and the witness
-/// silently degrades to `*-generic-unbound` on the non-default target only.
-///
-/// The corpus cannot catch this: it has no generic backend-sibling `iter`. The
-/// fixture supplies one, and the Lua view is the control -- the same witness
-/// must be instantiated identically on both targets, because instance identity
-/// is target-neutral (plan S 20a).
+/// Backend siblings have distinct generic variables. Both targets must retain
+/// the same concrete instance of the shared representative.
 #[test]
 fn a_generic_witness_survives_backend_variant_selection() {
     let src = r#"
@@ -921,10 +852,7 @@ fn main() {
     );
 }
 
-/// Encoder injectivity is the property `symbol` CANNOT provide. The
-/// render-collision adversary produces two instances that display alike; their
-/// LOGICAL symbols must still differ. The final emitted spelling is an
-/// artifact-ABI-plan property (plan S 0h) and is not what this asserts.
+/// Distinct types can have the same rendered name.
 #[test]
 fn instances_that_render_alike_get_distinct_logical_symbols() {
     let (ws, g) = ws_and_graph(
@@ -965,15 +893,6 @@ fn main() {
     );
 }
 
-/// A call INSIDE a shared generic body, walked at an instance, resolves through
-/// the caller's substitution and reaches a CONCRETE callee.
-///
-/// Emission measurements price this population at 43 pairs / 46 sites
-/// / 23 callees, but that is measured on the EMISSION path, which still lowers
-/// shared generic bodies. In the graph every walked body is an instance, so the
-/// binding always has a substitution to resolve against, and no `unbound-generic`
-/// can arise; the inner call binds a collection over the caller's own generic
-/// rather than the generic itself.
 #[test]
 fn a_callee_binding_inside_a_generic_body_is_concrete() {
     let (ws, g) = ws_and_graph(
@@ -1013,20 +932,7 @@ fn main() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Stage 2: `@intrinsic` is not unconditionally a boundary.
-// ---------------------------------------------------------------------------
-
-/// HOSTILE: an `@intrinsic` whose body is a portable ROCK fallback. Emit
-/// resolution is `backend mapping > portable fallback > reject`, so the shared
-/// graph must EXPAND that fallback -- it is the body a target with no mapping
-/// runs, and its callees are real edges. `@native_required` SKIPS the fallback
-/// rung, and an intrinsic with only a FOREIGN body has nothing to expand: both
-/// stay boundaries with no outgoing edges.
-///
-/// Each helper is GENERIC so that only an instantiation puts it in the graph:
-/// a non-generic callee is an emission root in its own right, so its presence
-/// would prove nothing about whether the fallback body was walked.
+/// Use generic helpers so only traversing the fallback instantiates them.
 #[test]
 fn an_intrinsic_expands_only_a_portable_rock_fallback() {
     let cases = [
@@ -1094,22 +1000,8 @@ fn main() { mapped_op(1) }
         }
     }
 }
-/// A generic emission root can have concrete instances from other call sites
-/// and STILL be a hole. Its obligation is to exist under a BARE name that
-/// opaque Lua text can call; instances do not discharge that, a boundary
-/// contract has to.
-///
-/// The root is recorded before the worklist runs, so at insertion time no
-/// instance of it exists -- which is how a name that later calls fully
-/// instantiated went on reading as having no concrete body at all. The record
-/// retains both its named bare-name obligation and the reached instance count.
-///
-/// The fixture DECLARES its own `@nomangle` generic rather than borrowing a
-/// stdlib one. A stdlib name is a live entry in the obligation matrix, so
-/// closing that entry silently disarms this test while it stays green -- which
-/// is what happened when `vec_push`'s last opaque caller was removed and its
-/// `@nomangle` dropped. A declaration the test owns cannot be closed out from
-/// under it.
+/// Declare the generic root locally so changing an stdlib entry cannot remove
+/// the bare-name obligation the fixture tests.
 #[test]
 fn a_root_with_instances_reports_them_and_stays_a_hole() {
     let (_, g) = ws_and_graph(
@@ -1136,13 +1028,6 @@ fn main() {
     );
 }
 
-/// The narrowing in `generic_root_obligation`, both sides. A generic emission
-/// root whose emitted symbol is MANGLED carries no bare-name obligation --
-/// opaque text cannot spell a mangling the compiler owns -- while the same
-/// declaration with `@nomangle` does.
-///
-/// Both arms come from ONE source differing only in the annotation, so a
-/// difference cannot be an artifact of two fixtures.
 #[test]
 fn only_a_bare_symbol_carries_a_bare_name_obligation() {
     let src = |anno: &str| {
@@ -1180,18 +1065,7 @@ fn main() {{ let a = keep(1) }}
     );
 }
 
-/// The `stdlib-funcref` excusal is a DECLARATION property, never a name one.
-/// `ERASED_RUNTIME_ENTRIES` holds NAMES, and membership alone is a proxy for
-/// "this is the entry `stdlib_funcref` resolves to" -- a weaker question. A
-/// `@nomangle` generic sharing a catalogue name is not that entry when another
-/// declaration shares the name too.
-///
-/// The stdlib's own runtime entries are all non-generic, so the fixture loads
-/// no stdlib declarations and marks its one synthetic source as compiler-owned.
-/// A/B on exactly that, one fixture differing only by a shadowing overload:
-/// alone, the entry is what the resolver selects and is excused; with the
-/// overload the resolver is ambiguous -- what `stdlib_funcref` itself rejects
-/// on -- so nothing is excused and the obligation stands.
+/// Match the stdlib declaration by identity even if a user declares the same name.
 #[test]
 fn the_funcref_excusal_follows_the_declaration_not_the_name() {
     let entry = "@nomangle fn __rock_col_sort<T>(x: T) -> int { return 1 }\nfn main() { }\n";
@@ -1240,18 +1114,7 @@ fn the_funcref_excusal_follows_the_declaration_not_the_name() {
     );
 }
 
-/// The OTHER cause: a call from an always-emitted body (here a global
-/// initializer) whose instantiation fails. It has no `from` instance to be
-/// filed against as an [`Unresolved`] or a [`Rejection`], but it carries the
-/// same reason those would.
-///
-/// The corpus has NO population for this cause -- all 14 of its holes are
-/// generic emission roots -- so this fixture is its only evidence.
-///
-/// The fixture is built with a project root the test module does NOT sit under,
-/// which makes every fn in it a library fn. Without that, `<test>` is the
-/// project and `pick` is an emission root too, so the two causes coincide and
-/// the fixture cannot show that this one fires on its own.
+/// Use a project path that keeps the callee out of the explicit emission roots.
 #[test]
 fn an_always_emitted_call_hole_keeps_its_reason_and_span() {
     let ws = ws_with_stdlib(
@@ -1371,12 +1234,6 @@ fn main() {
     );
 }
 
-/// HOSTILE: an opaque `inline(lua)` body that CALLS a compiler-owned runtime
-/// entry. No Rock call site reaches it, no lowering arm synthesizes it, and the
-/// walk cannot enter the body -- so without the dependency scan the symbol
-/// vanishes from the graph while emission still has to emit it. That is exactly
-/// how `__rock_vec_column_elements` disappeared once the name-keyed
-/// over-approximation stopped covering for it.
 #[test]
 fn an_opaque_body_declares_its_runtime_dependency() {
     let (ws, g) = ws_and_graph(
@@ -1444,19 +1301,7 @@ fn main() { let y = F(1) }
     );
 }
 
-/// Each recorder's own `Unresolved` write: `record_call`, `record_witness` and
-/// `record_bound_next` push independently, so covering one says nothing about
-/// the others. `record_call` answers `no-bindings` when a generic call has no
-/// `call_generic_bindings` record, which the plan measured 126 times on valid
-/// corpus code before the graph fix -- so each fixture removes a RECORD from a
-/// successfully inferred workspace rather than corrupting the source.
-/// `BodyInference` is public result data, so this reaches the recorder without
-/// inventing an invalid program, and it is what makes a `Span::unknown`
-/// mutation in a recorder visible.
-///
-/// The two witness halves both fail through `instantiate_witness` with
-/// `witness-generic-unbound`, so each case requires every site of its reason to
-/// name its own callee, and keeps the OTHER half's edge as a control.
+/// Remove each inference record separately and verify the unresolved span.
 #[test]
 fn a_call_or_witness_with_no_generic_record_is_unresolved_with_a_span() {
     let for_loop = r#"
@@ -1521,16 +1366,6 @@ fn main() {
         }
     }
 }
-/// Plan S 9's precondition: a `ConcreteBody`'s type tables are built under the
-/// instance's substitution, so that substitution must be a FUNCTION OF THE
-/// INSTANCE. Nothing structural forces it -- the `VarId` keys come from
-/// `generic_var_of` reading the CALLER's `BodyInference`, and the worklist
-/// keeps whichever substitution arrived first -- so two callers of one instance
-/// could disagree and the kept one would depend on discovery order.
-///
-/// The fixture reaches one instance from several callers, and the assertion is
-/// on the COMPARISON count: an instance reached exactly once never tests
-/// agreement, so a zero over recorded substitutions would say nothing.
 #[test]
 fn an_instance_substitution_does_not_depend_on_which_caller_reached_it() {
     let (ws, g) = ws_and_graph(

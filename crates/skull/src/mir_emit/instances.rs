@@ -136,32 +136,8 @@ type SpecOutcome = (String, Instance, Result<Chunk, CompilerError>);
 /// rejected, in installation order.
 pub(super) type SpecChunks = (FxHashMap<Instance, Chunk>, Vec<(String, CompilerError)>);
 
-/// **The specialized-body population: a SpecDemand closure over the retained
-/// ordinary population -- not `lua_view.instances` directly, and not a
-/// reachability walk.** Holds which instances have been admitted (each is
-/// decided once, whatever thread demands it) and every outcome so far.
-///
-/// `lua_view` answers RETENTION (is this instance part of the program at
-/// all), which is a different question from DELIVERY (does it need a
-/// standalone Lua definition, or is every call to it spliced/inlined away at
-/// the call site). Delivery is decided per call site during lowering and is
-/// exactly what a chunk's own `specs: Vec<SpecDemand>` records. A generic
-/// instance the graph retains but nothing DEMANDS standalone (every caller
-/// spliced it) has no chunk to build at all: `map_new<int, IVec2>` is such a
-/// case in the shipped corpus (found empirically -- every real project
-/// reaches it only through a global's `Map<int, IVec2> = map_new()`
-/// initializer, which the column-storage inliner splices away entirely, so
-/// building it standalone hits a REAL rejection -- `transmute` cannot build a
-/// column-stored `Map` -- for an instance nothing ever calls that way).
-///
-/// A full build admits each retained body's demand the moment the fan-out
-/// lowers that body, and the decorator and global units' demand after it; an
-/// incremental build seeds from the retained chunks
-/// ([`view_driven_specialized_chunks`]). Each built chunk's own `.specs` is
-/// admitted the moment that chunk is done. Each instance's tree is the
-/// concrete plan's resolved bound tree, which the graph installs as part of
-/// that owner plan. A demand clash (`has_bound_tree_disagreement`) rejects
-/// that one instance rather than picking an arbitrary tree.
+/// Build each demanded specialization once. Inlining can deliver a retained
+/// specialization entirely through its callers.
 pub(super) struct SpecQueue<'a> {
     ws: &'a Workspace,
     scx: &'a skull_mir::lower::ScalarCtx,
@@ -385,22 +361,8 @@ pub(super) fn shared(fref: FuncRef) -> Instance {
     Instance::base(fref)
 }
 
-/// Whether `self_ref`'s OWN ordinary/coroutine chunk must be emitted, per
-/// `view` -- the exact predicate a population-source cutover would gate the
-/// module-fn loop's `emit_def` with. TWO independent reasons, matching this
-/// session's author decision:
-///
-/// - **call-serving**: `self_ref` is the declaration `realize_decl` SELECTED
-///   to serve calls to its canonical `Instance` (which may be a DIFFERENT
-///   `FuncRef` than `self_ref` when `self_ref` is a non-representative
-///   sibling, and vice versa when `self_ref` IS the representative but a
-///   same-name sibling serves calls instead).
-/// - **publication**: `self_ref` carries an explicit `@nomangle` root whose
-///   own bare-name promise the artifact must publish regardless of whether
-///   any resolved call reaches it that way.
-///
-/// A declaration can be neither (pruned), either, or -- the whole point of
-/// modeling publication separately -- BOTH under two different symbols.
+/// A definition can serve calls through a sibling group, fulfill an exact
+/// bare-name publication, or do both.
 pub(super) fn should_emit_via_view(
     ws: &Workspace,
     view: &crate::artifact::ArtifactView,
@@ -415,27 +377,8 @@ pub(super) fn should_emit_via_view(
     call_serving || publication
 }
 
-/// Whether a FOREIGN (`inline(lua)`) body needs a standalone definition.
-///
-/// Retention alone over-emits here: a `@pure @inline` stdlib operator is
-/// retained (something calls `+`) and spliced away at every call site, so the
-/// question is delivery, not membership. Four independent reasons force a
-/// definition -- a bare-name publication promise, being a DECLARED root in its
-/// own right (an own-project `inline(lua)` fn is rooted with no caller at all,
-/// same reasoning as `main`/`@sim`/`@test`), a residual non-spliced call, or a
-/// FUNCTION-VALUE take, which is not a call and so has nothing to splice into:
-/// the program stores the definition itself under its own symbol.
-///
-/// `declared_roots`, not `roots`: the latter also carries the graph's own
-/// "callee of an always-emitted body, no incoming edge" category, which is an
-/// ordinary reached instance subject to the same splicing question (found
-/// empirically -- `__op_mul`/`__op_div`, reached from a global initializer's
-/// constant expression, are not declared roots and are spliced away
-/// everywhere). A generic declaration has no base instance and so is never in
-/// the set.
-///
-/// ONE oracle: the definition loop and the emitted-body census both call it, so
-/// they cannot disagree about what the assembly contains.
+/// An opaque body needs a definition for a publication, explicit root,
+/// function value, or residual call.
 pub(super) fn emits_foreign_definition(
     ws: &Workspace,
     view: &crate::artifact::ArtifactView,

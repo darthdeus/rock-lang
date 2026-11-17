@@ -351,21 +351,7 @@ fn candidate_setup_attribution(cache: &SkullEmitCache) -> AttributionAccumulator
     attribution
 }
 
-/// **Foreign-body (`inline(lua)`/`extern`) DELIVERY, separate from
-/// RETENTION.** `lua_view` (and `should_emit_via_view`'s call-serving half)
-/// answers "is this declaration's canonical Instance part of the program",
-/// which is not the same question as "does anything call it in RESIDUAL
-/// (non-spliced) form" -- `@pure @inline` stdlib operators (`+`, `-`, ...)
-/// are retained (something calls `+`) but almost always fully spliced away
-/// at every call site, so a naive retention-only gate emitted them
-/// standalone anyway (found empirically: `__op_add_int_int` and
-/// siblings newly appeared in every project's output the moment retention
-/// alone drove the inline-body gate). Splicing eligibility is a LOWERING
-/// decision the graph does not model (same class of fact as a generic's
-/// standalone-vs-spliced `SpecDemand`, just for a NON-generic body), so
-/// this is collected from what already-lowered chunks record they still
-/// call after inlining (`Chunk::calls`), exactly as `chunk.specs` seeds
-/// `view_driven_specialized_chunks`.
+/// Collect opaque callees that still need definitions after inlining.
 fn collect_needed_foreign(
     ws: &Workspace,
     cache: &SkullEmitCache,
@@ -879,16 +865,8 @@ impl UnitFacts {
     }
 }
 
-/// The lowered units, folded: their definitions as two scoped sections, the
-/// initializers' pending `(global, init key, load line)` rows, and the rest.
-///
-/// Decorator DEFINITIONS are workspace-wide: each `deco <name> { .. }` -> a
-/// fn `__deco_<name>(target, <params>)`. Unlike JS, Lua emits every
-/// program-defined decorator, applied or not.
-///
-/// Global initializers are emitted later, in their original slot, but they
-/// are LOWERED early: their call edges are reachability roots (a global init
-/// is always emitted), so the walk needs them before the fn-def loop runs.
+/// Scoped decorator and global definitions, with initializer calls held for
+/// dependency ordering.
 struct FoldedUnits {
     decorator_lua: String,
     globals_lua: String,
@@ -1078,21 +1056,7 @@ pub(super) fn assemble(
     asm.out.push_str(&decorator_lua);
     step("assembly: prelude+globals", &mut steps);
 
-    // **Whole-program population, driven by `cache.lua_view` -- Phase 2.**
-    // `should_emit_via_view` decides every ordinary/coroutine/inline
-    // definition below; `view_driven_specialized_chunks` decides every
-    // specialized one. Corpus-verified before this cutover landed (every real
-    // `stick.toml` project, both directions: zero instances the old walk
-    // emitted that the view did not retain, and the reverse direction's only
-    // difference was instances nothing ever DEMANDS standalone -- see that
-    // fn's own doc). `always_emitted_calls` / `always_emitted_names`:
-    // still collected above (decorator/global lowering needs its own direct
-    // calls for OTHER bookkeeping -- global-read ordering, static baselines --
-    // untouched by this cutover), but no longer fed to a root-discovery walk.
-    // Generated-glue obligations (`register_sim`, shader dependencies) are part
-    // of the ROOT INPUT the graph and the view were built from -- see
-    // [`all_roots`] -- so there is no second population source here.
-    // A full build delivers its specializations from the fan-out.
+    // Start from the artifact view, then check which definitions still need delivery.
     let (mut spec_chunks, spec_rejected) = specs.unwrap_or_else(|| {
         view_driven_specialized_chunks(ws, &cache.cg, &cache.scx, cache, &asm.needed_specs)
     });

@@ -1,25 +1,5 @@
-//! The TARGET SPECS an artifact view is taken through.
-//!
-//! **Three independent axes, not a target enum** (plan S 20a). The variants a
-//! flat enum would grow -- `LuaDesktop`, `LuaIos`, `JsWeb`, `CAndroid`,
-//! `WasmWasi` -- are cross products of things that vary separately:
-//! [`PlatformSpec`] is where an artifact RUNS, [`ExecutionTargetSpec`] is what
-//! emits and executes its CPU code, and [`ShaderTargetSpec`] is what is packaged
-//! beside it. [`TargetSpec`] holds one of each, so a new target is a
-//! COMBINATION, not a match arm in every consumer.
-//!
-//! **Shader packaging cannot affect CPU realization.** Artifact admission takes
-//! [`CpuTargetSpec`] -- platform plus execution -- because host capabilities
-//! affect available boundaries. It cannot inspect the optional shader target.
-//! `shader_packaging_does_not_decide_cpu_realization` measures that separation.
-//!
-//! The COUNT-ONLY projection this module used to return is gone. Counting
-//! `g.boundaries` answered a symbol-keyed question -- two `@nomangle` backend
-//! siblings share one entry there -- and a count cannot say WHICH declaration a
-//! target keeps, which is the only form in which "identity survives
-//! realization differing" is checkable. `crate::artifact::realize` returns the
-//! realized sets instead; this module keeps the specs and the two per-target
-//! predicates they answer.
+//! Targets combine a platform, an execution backend and optional shader packaging.
+//! CPU admission sees only the platform and execution backend.
 
 use crate::instance_graph::BoundaryClass;
 

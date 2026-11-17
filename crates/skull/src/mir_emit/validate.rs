@@ -2,19 +2,8 @@
 
 use super::*;
 
-/// Every rejection one assembly found, across all four kinds of emitted
-/// definition (decorator body, global initializer, function chunk, specialized
-/// instantiation). Filled in a fixed order -- source order within each kind, the
-/// kinds in the order `assemble` visits them -- so the reported list never
-/// depends on thread scheduling or hash-map iteration.
-///
-/// The accumulation boundary is the DEFINITION: each one either emits or does
-/// not, and rejections within one body are already collected by
-/// [`BodyRejection`]. Aborting at the first definition is what made every count
-/// of remaining rejections a floor -- every rejection here is fully computed
-/// before any is reported, so the abort hid them rather than preventing them.
-/// Accumulating does not soften anything: a non-empty set fails the build, and
-/// the emitted Lua is discarded with the `Err`.
+/// Collect definition errors in assembly order so parallel completion cannot
+/// change diagnostic order.
 #[derive(Default)]
 pub(super) struct Rejections(Vec<CompilerError>);
 
@@ -38,18 +27,7 @@ impl Rejections {
     }
 }
 
-/// Post-transform gate: no whole-element access to a column-stored Vec may reach
-/// the emitter. Column storage has no element table, so there is no single slot
-/// to read or write; lowering decomposes every such access into per-column ones
-/// (`column_element_repr` / `column_element_store`). Anything left is a
-/// decomposition the lowerer does not implement yet -- today, a stdlib Vec entry
-/// point that still goes through the boxed `_data` (`enumerate` is the one real
-/// game code hits, in an application's update loop).
-///
-/// The emitter already refuses these (`write_index`'s `unreachable!`), but a
-/// panic in a parallel emit worker is the wrong shape of loud: no span, no source
-/// location, and the process exit code depends on the caller. Rejecting here
-/// gives the same guarantee as a spanned `CompilerError`.
+/// A column-backed vector has no whole-element slot to address.
 fn validate_no_whole_element_column_access(mf: &skull_mir::mir::MirFunc) -> Result<(), String> {
     use skull_mir::mir::{
         ContainerKind::{VecValueColumns, VecValueStrided},
@@ -81,12 +59,7 @@ fn validate_no_whole_element_column_access(mf: &skull_mir::mir::MirFunc) -> Resu
     Ok(())
 }
 
-/// Why an about-to-be-emitted body was rejected: every INDEPENDENT finding in
-/// it, first reported as the primary and the rest as siblings. A body holds
-/// several sinks often enough that reporting one turns any count of remaining
-/// sinks into a floor, and it can hold several KINDS of finding at once (a
-/// column-access gap and a `nobox` sink), which reporting only the first check
-/// to fire also hides.
+/// Retain all independent findings from validating a body.
 #[derive(Default)]
 pub(super) struct BodyRejection {
     findings: Vec<Finding>,

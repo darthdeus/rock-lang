@@ -1,31 +1,5 @@
-//! The target-neutral instance graph.
-//!
-//! It owns logical instance reachability below the target artifact views.
-//!
-//! An [`Instance`] is `(FuncRef, Vec<MonoTyId>)` -- a function plus the total
-//! logical types of its generic arguments, keyed on
-//! [`MonoTy`](skull_mir::monoty::MonoTy), so `f<Vec2, unit>` and
-//! `f<Vec2, any>` get distinct `InstanceId`s.
-//!
-//! **Roots come from production.** [`super::mir_emit::is_emission_root`] is the
-//! same predicate `reachable_fns` seeds its walk with; re-deriving it would make
-//! any difference between this graph and the real one an artifact of the copy.
-//!
-//! **Transitive instantiation is the core.** Walking a callee's body under the
-//! CALLER's substitution is what makes `count<I>` at `I = VecIter<Vec2>` a
-//! different instance from the same fn at `VecIter<int>`.
-//!
-//! **Two outcomes are not the same.** [`Unresolved`] is a construction the walk
-//! could not complete -- data. [`Rejection`] is one the concrete-program model
-//! refuses. The graph records its span and message; emission reports the error.
-//!
-//! **Where the graph is still incomplete**, stated so a reader does not mistake
-//! the histogram for the whole graph: a call lowering synthesizes to a named
-//! runtime entry has no edge (every build roots those entries instead), and a
-//! coroutine's `__defer`/`__on_*` helpers exist only after the MIR transform so
-//! nothing here can count them. Every edge recorded is real;
-//! [`InstanceGraph::uninstantiated_roots`] records the generic roots no
-//! instantiation reached.
+//! Walk checked bodies from the supplied roots and collect concrete instances.
+//! Each contribution belongs to one body and can be replaced on an edit.
 
 use bone_core::prelude::Instant;
 use parking_lot::Mutex;
@@ -50,14 +24,7 @@ pub use skull_mir::instance::{DeclKey, Instance};
 /// lowering-side rejection cannot drift into separate vocabularies.
 pub use skull_mir::lower::BoundaryClass;
 
-/// One reached boundary, classified from the DECLARATION alone.
-///
-/// `symbol` is the name emission must produce: bare for `extern`/`@nomangle`,
-/// mangled otherwise -- the rule `skull_mir::mangle` applies, read from it
-/// rather than restated.
-///
-/// Target support is an artifact property, reported per call as a `Severed`
-/// (`artifact::Unrealizable::ForeignToArtifact`).
+/// Boundary classification at the shared declaration, before target selection.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Boundary {
     pub class: BoundaryClass,
@@ -182,12 +149,7 @@ pub enum RejectionKind {
     /// instantiation on, and inferring one from the instances reachable
     /// elsewhere is explicitly not the rule.
     GenericFnValue,
-    /// A COMPILER INVARIANT, not a language decision: a type that should have
-    /// been concrete here is recovery poison, names no node, or resolves
-    /// cyclically. Unlike the author-call variants, no valid program admits
-    /// this -- the program should have been rejected upstream. It is a rejection rather than
-    /// a silent negative because the alternative is picking a representation for
-    /// a type the compiler could not resolve.
+    /// A concrete type required by a coroutine helper was unavailable.
     ConcreteTypeUnavailable,
     /// A type argument no constraint reaches, so it has no concrete type to
     /// instantiate at. Distinct from a declared generic read inside a shared
@@ -231,13 +193,7 @@ pub struct Unresolved {
     pub span: Span,
 }
 
-/// WHICH body's walk produced a set of facts.
-///
-/// The two kinds are not a labelling of one thing: an instance's callees are
-/// its own obligations and carry an [`Edge`] and a [`Site`], while an
-/// always-emitted body's callees are ROOTS with neither -- production emits
-/// that body regardless of any call (`mir_emit::reachable_fns`'s
-/// `extra_roots`), so nothing points at them.
+/// The key of a body contribution. Globals and decorators have no Instance.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Owner {
     /// One instance's own body, plus the struct-field defaults it injects.
@@ -294,13 +250,7 @@ fn body_owner_key(o: BodyOwner) -> (u8, u32) {
     }
 }
 
-/// **Everything ONE body's walk produced**, kept as the primary record the
-/// graph's flat fields are DERIVED from rather than accumulated into them.
-///
-/// A re-walk REPLACES a contribution wholesale and the flat fields are rebuilt
-/// from the whole set, which is what makes removal expressible at all: an
-/// accumulated total can only be added to, and a subtraction from one cannot be
-/// checked against the population it summarizes.
+/// All facts produced by walking one body.
 #[derive(Clone, Default, Debug)]
 pub struct Contribution {
     /// Outgoing edges. Empty for an always-emitted body, whose callees are
@@ -326,12 +276,7 @@ pub struct Contribution {
     pub reached: Vec<(Instance, MonoSubst)>,
     /// Concrete conformance witnesses this walk supplied to its callees.
     pub bound_trees: Vec<(Instance, InstanceBoundTree)>,
-    /// The FILES this contribution's spans point into.
-    ///
-    /// It is not always the owner's own file. A struct literal that omits a
-    /// field injects that field's initializer from the DECLARING struct's
-    /// module, so the injecting instance records sites spanned in a file it
-    /// does not live in -- and an edit anywhere in that file shifts them.
+    /// Source files referenced by recorded spans, for relocation on body edits.
     pub span_files: BTreeSet<ustr::Ustr>,
     /// Whether the walk ENTERED the body. False for a boundary, a body with no
     /// usable inference, and a depth-capped instance.
@@ -399,16 +344,7 @@ fn percentile<T: Copy + Default + Ord>(values: &mut [T], percentile: usize) -> T
     values[(values.len() - 1) * percentile / 100]
 }
 
-/// **The one walk context.** A full build and an incremental re-walk both run
-/// through it, so neither can record a fact the other does not.
-///
-/// It holds the interner (shared and monotonic), the owner's OWN
-/// conformance witnesses -- the single cross-owner read the walk makes -- and
-/// the contribution being produced. Nothing else of the graph is reachable
-/// from here, which is what stops a walk from depending on what some other
-/// owner happened to record first.
-/// What a thread keeps between the bodies it walks. Both answer by type or
-/// by declaration, so one serves every body.
+/// Scratch caches reused across an owner walk's sites.
 #[derive(Default)]
 struct WalkScratch {
     /// Where the walk asks how a type is represented.
@@ -439,12 +375,7 @@ impl Walk<'_> {
         result
     }
 
-    /// Record what one source operation resolved to.
-    ///
-    /// Every recorder funnels through here, so a site cannot be recorded in one
-    /// place and resolved in another. A repeat key is kept as a finding rather
-    /// than overwritten: silently replacing it would make the second operation
-    /// vanish from the tables while the counts still looked total.
+    /// Keep a finding for a repeated site key so the overwritten row remains detectable.
     fn record_site(
         &mut self,
         from: Option<&Instance>,
@@ -490,17 +421,6 @@ impl Walk<'_> {
         resolved
     }
 
-    /// Reach `to` at `subst`.
-    ///
-    /// The substitution must be a FUNCTION OF THE INSTANCE -- a specialized
-    /// body's shape comes from declarations plus the instance substitution, so
-    /// two callers reaching one instance must agree on it. That is not
-    /// self-evident: the `VarId` keys come from `generic_var_of` reading the
-    /// CALLER's `BodyInference`, so nothing structural forces agreement. Every
-    /// reach is kept HERE, with its own caller; the comparison that decides
-    /// agreement happens once, over the whole contribution set
-    /// ([`InstanceGraph::derive`]), because the walk is no longer the thing
-    /// that owns the answer.
     fn reach(&mut self, to: Instance, subst: MonoSubst) {
         self.out.reached.push((to, subst));
     }
@@ -534,13 +454,7 @@ impl Walk<'_> {
         }
     }
 
-    /// A call from an always-emitted body whose instantiation failed. There is
-    /// no `from` instance to file an [`Unresolved`] or a [`Rejection`] against,
-    /// but the REASON and the SPAN are the same ones those carry and are kept.
-    ///
-    /// Per SITE, not per reason: two failures of one callee are two diagnostics
-    /// at two places, and a set keyed on the reason reports them as one fact
-    /// with no location.
+    /// Keep each failed site separately so diagnostics retain their individual spans.
     fn record_always_emitted_hole(
         &mut self,
         name: String,
@@ -560,17 +474,7 @@ impl Walk<'_> {
 /// A root's substitution, which is empty rather than absent.
 static EMPTY_SUBST: std::sync::LazyLock<MonoSubst> = std::sync::LazyLock::new(MonoSubst::default);
 
-/// **Everything derived from more than one contribution.**
-///
-/// A substitution is recorded by the CALLER, not by the instance whose body it
-/// belongs to, so "what is this instance's substitution" is not a question a
-/// single record can answer. Keeping the per-owner answers rather than one
-/// merged value is what makes removal expressible: dropping a caller drops its
-/// opinion and the remaining ones still decide.
-///
-/// The agreed answer is the FIRST owner's in [`Owner`] order, which makes it a
-/// function of the contribution SET rather than of the order the walk
-/// discovered it in -- so a fresh build and an update cannot pick differently.
+/// Shared indexes over contributions. When owners disagree, the first owner decides.
 #[derive(Default, Debug, Clone)]
 pub struct Indices {
     /// Instance -> who reached it and what they said. Hashed: every reached
@@ -586,18 +490,7 @@ pub struct Indices {
     /// instance set, so this is what tells them which declarations ENTERED or
     /// LEFT the graph -- the only ones whose answer can have moved.
     pub decls: FxHashMap<FuncRef, usize>,
-    /// Instance -> the instances with an edge INTO it.
-    ///
-    /// Forward adjacency needs no index -- an owner's successors are its own
-    /// contribution's edges. The reverse is what pruning needs and what no
-    /// single record holds: to decide whether a stranded instance still has a
-    /// way in, you have to ask who points AT it.
-    ///
-    /// HASHED, not ordered. It is written once per EDGE -- 32k times per build
-    /// on a large corpus -- and an `Instance`'s `Ord` compares a `Vec<MonoTyId>` element by
-    /// element, which cost 65 ms of a 127 ms build. Nothing reads it in order:
-    /// the only question asked of it is whether ANY predecessor lies outside a
-    /// region.
+    /// Predecessors for incremental pruning. Hashed because no reader needs edge order.
     pub preds: FxHashMap<Instance, FxHashSet<Instance>>,
     /// Declaration -> its live concrete instances. Body edits use this index
     /// to revisit every specialization without scanning the whole graph.
@@ -611,17 +504,8 @@ pub struct Indices {
 /// the same policy as the session and the lint cache.
 pub use bone_core::text_edit::TextEditDelta;
 
-/// **One fact several owners assert, with the agreement kept rather than
-/// assumed.**
-///
-/// The value is stored ONCE for every owner that agrees on it: they are equal
-/// by definition, so keeping a copy per owner would be 32k substitution clones
-/// per build on a large corpus to represent 5k distinct answers. An owner that says
-/// something DIFFERENT is kept in full, because that is the finding.
-///
-/// `total` is the number of times the fact was asserted, which is not
-/// `owners.len()`: one body can reach one callee from several sites, and the
-/// agreement counters are per ASSERTION.
+/// Store one copy of an agreed fact and retain disagreements per owner.
+/// The total counts assertions, including repeated sites in a single owner.
 #[derive(Clone, Debug)]
 pub struct Agreed<T> {
     /// Owners asserting [`Self::value`].
@@ -731,13 +615,7 @@ pub struct InstanceGraph {
     /// update-only rows from the graph it was realized from, so it checks the
     /// revision it saw rather than trusting the call order.
     revision: u64,
-    /// **The build's one arena, SHARED rather than owned.**
-    ///
-    /// A retained graph and the emission that consumes it both mint and read
-    /// [`Instance`]s, so neither can own the arena outright: moving it into
-    /// `ScalarCtx` would leave this graph's `MonoTyId`s dangling, and keeping a
-    /// copy here would give instances a second identity. Both sides hold a
-    /// clone of the durable arena handle.
+    /// The arena whose type IDs key instances and their lowering plans.
     interner: std::sync::Arc<MonoInterner>,
     /// The primary records. Every flat field below is derived from these plus
     /// [`Self::root_instances`]; nothing writes a flat field directly.
@@ -785,32 +663,13 @@ pub struct InstanceGraph {
     /// Helper symbols owned by coroutine instances.
     pub coroutine_helpers: BTreeSet<CoroutineHelper>,
     coroutine_helpers_by_owner: BTreeMap<String, BTreeSet<CoroutineHelper>>,
-    /// Runtime entries an opaque `inline(lua)` body calls: the owning
-    /// DECLARATION -> the entries its text names. Emission must emit these even
-    /// though no Rock call site reaches them.
-    ///
-    /// Keyed by `FuncRef`, not by mangled symbol: two `@nomangle` backend
-    /// siblings share one symbol, so a symbol key merges a Lua body's
-    /// dependencies with a JS body's and no artifact can tell which are its
-    /// own. The ENTRY names stay names here -- resolving one to a declaration
-    /// is a per-artifact decision (`crate::artifact`), because the serving
-    /// declaration differs by target.
+    /// Runtime entries used by the body of each opaque declaration.
     pub inline_body_deps: BTreeMap<DeclKey, BTreeSet<&'static str>>,
     /// Bare `@nomangle` declarations named by retained `inline(js)` bodies.
     /// The graph records the opaque-boundary root obligation; a target view
     /// filters it to the declarations it actually realizes.
     pub inline_body_nomangle_roots: BTreeMap<DeclKey, FxHashSet<FuncRef>>,
-    /// Instances that lost an incoming edge since the last [`Self::derive`].
-    ///
-    /// The prune candidates, and the reason an update does not have to walk
-    /// the whole graph to find them: only an instance whose in-edges changed
-    /// can have become unreachable. Cleared by `derive`.
-    ///
-    /// A re-installed owner takes its own targets back OUT: re-walking a body
-    /// that still calls what it called before loses nothing, and leaving them
-    /// in made the suspect region the whole reachable graph -- 3.3 ms of a 7 ms
-    /// application update, where 33 owners were re-walked and almost every edge
-    /// came back identical.
+    /// Targets that may have lost reachability and need a pruning check.
     lost: BTreeSet<Instance>,
     /// **The cross-owner facts, maintained where a contribution is installed
     /// or removed.** Public for the same reason [`Self::contributions`] is --
@@ -907,16 +766,6 @@ fn generic_root_obligation(ws: &Workspace, r: FuncRef, f: &Function) -> Option<&
 /// and both emitters cannot drift. See `too_deep_to_instantiate` there.
 pub use skull_mir::monoty::MAX_INSTANTIATION_DEPTH;
 
-/// Whether an instance's substitution makes it a CONCRETE shape -- the one
-/// question every declaration-based pass has to ask before it may answer.
-///
-/// Three answers, not two. `unwrap_or(true)` on a missing record collapsed
-/// [`Self::Missing`] into [`Self::Concrete`], so an instance whose substitution
-/// the walk never recorded was handed to a declaration-based oracle as if the
-/// declaration WERE its shape. `reach` records a substitution for every
-/// instance it reaches -- roots included, whose substitution is EMPTY and not
-/// absent -- so a missing record is an INVARIANT BREAK, and the honest answer
-/// to "is this concrete" is that nothing knows.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Concreteness {
     /// The declaration IS the shape: no logical arguments and an empty recorded
@@ -989,12 +838,7 @@ impl InstanceGraph {
     }
 }
 
-/// What the same failure WOULD have been recorded as if the body it happened in
-/// had an instance to file it against.
-///
-/// The distinction is the classification itself, not a label: an
-/// [`Unresolved`] is data the walk could not complete, a [`Rejection`] is a
-/// construction the model refuses and reports as a compile error.
+/// The failure classification before locating it in an always-emitted body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlwaysEmittedOutcome {
     Unresolved(&'static str),
@@ -1031,22 +875,7 @@ pub struct AlwaysEmittedHole {
     pub failure: AlwaysEmittedFailure,
 }
 
-/// Why one name has no concrete instance covering its obligation.
-///
-/// The two causes are different obligations:
-///
-/// - a generic EMISSION ROOT is a body production emits regardless of any call
-///   (`@nomangle`, `extern`, `@test`/`@sim`, a decorator root), so its
-///   obligation is to exist under a BARE name that opaque Lua text can call.
-///   Instances cannot discharge it; a boundary contract has to.
-/// - a call from an ALWAYS-EMITTED body (a global initializer or a decorator
-///   definition) that failed to instantiate is an ordinary unresolved call that
-///   merely has no `from` instance to be filed against. Its reason is the same
-///   `Fail::reason` an instantiated body's call would carry.
-///
-/// A root can be listed here and have concrete instances from other call sites.
-/// The bare-name obligation survives, distinguishing "no concrete body exists"
-/// from "Rock calls are covered but the opaque-caller entry is not".
+/// Unfulfilled generic root and always-emitted call obligations for a symbol.
 #[derive(Debug, Default, Clone)]
 pub struct RootHole {
     /// A generic function that is an emission root: production emits its body
@@ -1324,12 +1153,6 @@ impl InstanceGraph {
         }
     }
 
-    /// The instances production roots regardless of any call, and the generic
-    /// roots no instantiation can discharge.
-    ///
-    /// Interface-tier state: it is a function of the ROOT SET, so a body edit
-    /// leaves it alone and re-seeding it is cheap enough to do unconditionally
-    /// rather than keep a second answer about when it moved.
     fn seed_roots(&mut self, ws: &Workspace, roots: Vec<FuncRef>) {
         self.root_instances.clear();
         self.uninstantiated_roots.clear();
@@ -1389,13 +1212,7 @@ impl InstanceGraph {
         out
     }
 
-    /// Expand owners until nothing new is reached.
-    ///
-    /// `pending` is the set to (re-)walk unconditionally; everything they reach
-    /// that has no contribution yet joins them. A full build hands it the
-    /// always-emitted bodies and lets the roots come through
-    /// [`Self::merge_reached`]; an update hands it the owners whose bodies
-    /// changed. One driver, so the two cannot walk differently.
+    /// Walk pending owners unconditionally, then follow demands for missing owners.
     fn run(
         &mut self,
         ws: &Workspace,
@@ -1520,24 +1337,8 @@ impl InstanceGraph {
                                 Owner::AlwaysEmitted(..) => stats.always_emitted_owner_visits += 1,
                             }
                         }
-                        // **An instance that lost its last namer DURING this run is not
-                        // walkable, and is not an invariant break.**
-                        //
-                        // The prune runs in `derive`, AFTER this loop, so a stranded
-                        // instance can still be sitting in `pending` -- an edit
-                        // invalidates every owner that QUOTES the edited file, which in
-                        // a single-file program is every owner, including ones the same
-                        // edit is about to strand. Its substitution was retracted by its
-                        // caller's re-walk a moment ago, so `expand` would find none and
-                        // the invariant assertion would fire on a body that is simply
-                        // gone.
-                        //
-                        // Skipping leaves it with its old contribution, which `derive`
-                        // then prunes: membership is root reachability, and nothing
-                        // points at it any more. Found by driving a real body edit
-                        // through `update_chunk_cache` -- the graph fixtures live in a
-                        // multi-file project, where the stranded owner does not quote
-                        // the edited file and never reaches this loop.
+                        // Retraction can remove a pending instance's substitution mid-wave.
+                        // Keep its old contribution until pruning checks its reachability.
                         if let Owner::Instance(i) = &owner {
                             if self.substitution(i).is_none() {
                                 if timing_enabled {
@@ -2181,16 +1982,7 @@ impl OwnerWalk {
 }
 
 impl InstanceGraph {
-    /// **Install a contribution, replacing whatever the owner had.**
-    ///
-    /// The ONE indexing path. A full build only ever installs; an update
-    /// installs over an existing record and prunes through
-    /// [`Self::uninstall`]. Both go through here, so an index cannot be
-    /// maintained one way on one path and another way on the other -- which is
-    /// what `derive` re-deriving the substitution maps behind `commit`'s back
-    /// used to be.
-    ///
-    /// Returns the owners the contribution newly demands.
+    /// Replace an owner's contribution and return owners it newly demands.
     fn install(
         &mut self,
         owner: Owner,
@@ -2712,13 +2504,7 @@ impl InstanceGraph {
         self.refresh_root_hole_sites_for_names(&names)
     }
 
-    /// What a fresh build keeps beside its contributions: the instance set
-    /// and the whole-graph post-passes.
-    ///
-    /// Nothing is pruned: `run` only ever walks owners a root or an
-    /// always-emitted seed demanded, so every owner it installed is
-    /// root-reachable. `uninstantiated_roots` is not reset here;
-    /// [`Self::seed_roots`] owns that reset and runs first.
+    /// Compute fresh-build postpasses. Every walked instance is already reachable.
     fn derive(&mut self, ws: &Workspace) {
         let derive_start = Instant::now();
         self.lost.clear();
@@ -2968,26 +2754,8 @@ impl InstanceGraph {
         out
     }
 
-    /// **Update the graph for a BODY-ONLY change**, in place, against the same
-    /// monotonic [`MonoArena`].
-    ///
-    /// `changed` is the reinferred `(ModuleId, BodyOwner)` population
-    /// incremental inference already produces
-    /// (`bone_incremental::UpdateResult::reinferred`). Only the owners those
-    /// bodies belong to are re-walked; everything they newly reach is walked
-    /// too, and everything no root reaches any more is PRUNED -- including
-    /// groups of instances that keep each other alive, which a reference count
-    /// could never drop to zero.
-    ///
-    /// It is the same walk, the same reachability and the same derivation a
-    /// full [`build`] runs; what differs is only which owners are re-walked.
-    /// The arena alone stays monotonic: a pruned instance's interned types go
-    /// unreferenced, which is what keeps ids stable across edits.
-    ///
-    /// **INTERFACE-tier changes are not this function's job.** A changed
-    /// signature moves the root set, the mangling and every caller's
-    /// instantiation; `bone_incremental::UpdateTier` names that case and the
-    /// caller must rebuild instead.
+    /// Replace contributions affected by reinferred bodies and prune newly unreachable
+    /// instances. Type IDs stay stable across edits. Interface edits require a rebuild.
     pub fn update_bodies_with_edits(
         &mut self,
         ws: &Workspace,
@@ -3181,19 +2949,7 @@ impl InstanceGraph {
         }
     }
 
-    /// Which owners a changed body invalidates.
-    ///
-    /// Two causes, and the second is the one a "re-walk the edited body" rule
-    /// misses. An owner's contribution is stale if
-    ///
-    ///
-    /// Coordinate relocation is handled separately by
-    /// [`Self::shift_contribution_spans`]. An owner quoting the edited file is
-    /// not semantically stale merely because its source coordinates moved.
-    ///
-    /// Total over [`BodyOwner`] on purpose: an arm that silently did nothing
-    /// would leave a stale contribution behind and the graph would still look
-    /// consistent with itself.
+    /// Revisit owners whose inference changed. Span shifts are handled separately.
     fn affected_owners(&self, ws: &Workspace, changed: &[(ModuleId, BodyOwner)]) -> Vec<Owner> {
         let mut changed_seeds: Vec<Owner> = Vec::new();
         for (module, body_owner) in changed {
@@ -3221,16 +2977,7 @@ impl InstanceGraph {
                 BodyOwner::Global(_) => {
                     changed_seeds.push(Owner::AlwaysEmitted(*module, *body_owner));
                 }
-                // **Not reachable from a body-only edit, and rejected rather
-                // than handled.** A struct, an enum, a newtype and a decorator
-                // each hash their WHOLE item into the interface print, so any
-                // edit to one is an interface change: it moves the root set, the
-                // manglings and every caller's instantiation, none of which this
-                // function claims to maintain. Handling the arm anyway would be
-                // a mechanism with no way in, and a silent no-op would leave a
-                // stale contribution behind while the graph still looked
-                // consistent with itself. Pinned by
-                // `a_struct_enum_newtype_or_decorator_edit_is_interface_tier`.
+                // These items hash their whole body into the interface.
                 BodyOwner::Decorator(_)
                 | BodyOwner::StructDefaults(_)
                 | BodyOwner::Enum(_)
@@ -4002,12 +3749,6 @@ pub struct RunStats {
     pub bound_tree_rows: usize,
     pub bound_call_rows: usize,
     pub iterator_rows: usize,
-    /// How many times the conformance fixpoint had to walk owners again.
-    ///
-    /// Published because a guard with no population reads as load-bearing when
-    /// it is not: this is 0 on every fixture and on all three real projects, so
-    /// it is what makes the result independent of walk ORDER rather than a pass
-    /// the answer depends on.
     pub settle_rounds: usize,
 }
 
@@ -4041,13 +3782,7 @@ struct Prune {
     boundary_predecessor_edges_examined: usize,
 }
 
-/// What one [`InstanceGraph::update_bodies`] did, as a structural census.
-///
-/// Canonical equality against a fresh build cannot tell an update from a hidden
-/// full rebuild -- a rebuild reaches the right answer too. These are what
-/// separate them, which is why they are reported rather than inferred from wall
-/// time: every number here has a total beside it, so "small" is a comparison
-/// rather than an adjective.
+/// Work and changes recorded during a body edit.
 #[derive(Default, Debug, Clone)]
 pub struct UpdateStats {
     /// Owners re-walked because their body changed.
@@ -4516,27 +4251,10 @@ fn record_instantiation(
     Some(to)
 }
 
-/// A recursive edge must preserve its instance arguments.
-///
-/// Polymorphic recursion does NOT appear as a cycle over instances: every
-/// instance on the chain is distinct, which is exactly why it diverges. It
-/// appears as a PATH from one instance of a function to a DIFFERENT instance of
-/// that same function. That reachability test is the whole discriminant, and it
-/// is what keeps two independent instantiations of one recursive function legal:
-/// `hold<int>` and `hold<string>` never reach each other.
-///
-/// The fresh and incremental paths share the instance search below. The fresh
-/// path builds borrowed adjacency once; the incremental path looks up only the
-/// seed region affected by the edit.
-/// The whole-graph search: how many instances it started from, and what it
-/// found.
+/// Polymorphic recursion reaches a different instance of the same declaration.
+/// Independent specializations of ordinary recursion never reach each other.
 fn detect_changing_instance_recursion(g: &InstanceGraph, ws: &Workspace) -> Vec<RecursionFinding> {
-    // Instance-level adjacency, carrying each edge's span so a rejection can
-    // name the call that changed the arguments.
-    // Adjacency by REFERENCE into the contributions. Looking a successor's
-    // edges back out of `contributions` instead costs an `Instance` clone per
-    // node visited, because the map is keyed by `Owner` -- measured at 3.8 ms
-    // against 1.3 for the map on a large corpus.
+    // Borrow edges to avoid cloning instance keys at every step of the search.
     let mut succ: FxHashMap<&Instance, &[Edge]> = FxHashMap::default();
     for (owner, c) in &g.contributions {
         if let Some(i) = owner.instance() {
@@ -4673,13 +4391,7 @@ fn search_changing_instance_recursion<'a>(
     found
 }
 
-/// A synthesized `iter` witness: the `for` head's or a coerced argument's.
-///
-/// It has no call expr, so it can never appear in `call_generic_bindings`, and
-/// its instantiation comes from the substitution bone retained while resolving
-/// it. That record has the same shape as `next_generics`, so the same
-/// instantiation route serves both -- one oracle for what a synthesized call
-/// instantiates at, rather than a second one per witness kind.
+/// Both for loops and implicit iterable arguments carry a witness substitution.
 #[allow(clippy::too_many_arguments)]
 fn record_witness(
     w: &mut Walk,
@@ -4710,22 +4422,8 @@ fn record_witness(
     );
 }
 
-/// The callee obligations an instance picks up from the field DEFAULTS of the
-/// struct literals it contains.
-///
-/// A literal that omits a field lowers that field's initializer -- from the
-/// declaring struct's `BodyOwner::StructDefaults` body, in that struct's module
-/// -- into this instance's CFG. Those calls are this instance's obligations,
-/// but their expressions index the DEFAULTS arena, which is what
-/// [`SiteDomain::StructDefaults`] states.
-///
-/// Only the OMITTED fields, and only the expressions their initializers
-/// actually reach: walking the whole defaults body would make a callee
-/// reachable because some other field of the same struct defaults to it, which
-/// is an emitted body the program never calls.
-///
-/// A `..base` functional update writes every field the literal does not, so a
-/// literal with a base omits nothing.
+/// Walk only omitted default fields. Record sites under the declaring struct's
+/// arena and type arguments. A struct update with a base omits no fields.
 fn walk_struct_default_edges(
     w: &mut Walk,
     ws: &Workspace,
@@ -4736,15 +4434,8 @@ fn walk_struct_default_edges(
     subst: &MonoSubst,
 ) {
     use bone_core::hir::Expr as E;
-    // One entry per (struct, ARGUMENTS, omitted field) this instance reaches,
-    // deduplicated: two literals of one struct omitting one field are one
-    // obligation set, but `Box<int> {}` and `Box<string> {}` are two -- the
-    // initializers are shared text resolving different callees.
-    //
-    // Keyed by module INDEX rather than `ModuleId`, which has no `Ord`, and by
-    // the arguments' CANONICAL encoding, which is what identity keys on; the
-    // `ModuleId` and the arguments themselves travel in the value so the domain
-    // keeps them.
+    // Distinct concrete argument lists can resolve different callees in one default.
+    // Sort by canonical type encoding rather than interner insertion order.
     type Key = (usize, u32, Vec<String>);
     let mut omitted: BTreeMap<
         Key,
@@ -4755,14 +4446,7 @@ fn walk_struct_default_edges(
             BTreeSet<ustr::Ustr>,
         ),
     > = BTreeMap::new();
-    // A DEFAULT can itself be a struct literal that omits a field --
-    // `timers: MobTimers = MobTimers {}` inside `Mob`, whose own
-    // `idle_timer = random_range(1, 4)` is the call two arenas down -- so the
-    // scan is a worklist over bodies, not one pass over the instance's own.
-    //
-    // Each entry carries the inference and SUBSTITUTION in force for that body,
-    // exactly as `Builder::with_struct_default` nests them: a nested defaults
-    // body resolves under its own struct's slot bindings, not the outer one's.
+    // Defaults can contain literals that introduce further omitted fields.
     let Some(top_inf) = ws
         .inference(module)
         .and_then(|ir| ir.per_fn.get(&top_owner))
@@ -5129,15 +4813,7 @@ fn generic_parameter_is_observable(
         .any(|ty| mentions(ws, Some(inf), ty, var, &mut seen))
 }
 
-/// A SYNTHESIZED call's instantiation, from the record bone kept for it: the
-/// `for`-protocol `next` witness (`next_generics`), the `for`-head `iter` and
-/// the coerced-argument `iter` (`IterWitness::generics`) all take this route.
-///
-/// Such a call has no call expr, so it can never appear in
-/// `call_generic_bindings`; resolve the witness at instantiation instead.
-/// Reading the callee's DECLARED generics and looking each up here is the same
-/// route `spec_key_from_next_generics` takes -- a shape comes from a
-/// declaration, never from the body's own inference.
+/// Instantiate a witness using the inference record keyed by its generic variables.
 fn instantiate_witness(
     interner: &MonoInterner,
     ws: &Workspace,
@@ -5165,19 +4841,7 @@ fn instantiate_witness(
     Ok((args, callee_subst))
 }
 
-/// Why an instantiation produced no instance.
-///
-/// [`Fail::Unresolved`] is data: the walk had no binding to key an
-/// instantiation on, which is a property of the RECORD, not of the types.
-/// [`Fail::Unconstrained`] is a decided rejection
-/// ([`RejectionKind::UnconstrainedTypeVar`]).
-///
-/// **`UnboundGeneric` is a rejection here, not data.** A shared generic root is
-/// never put on the worklist -- it goes to
-/// [`InstanceGraph::uninstantiated_roots`] -- so every body the walk enters is
-/// INSTANTIATED, and a declared generic missing from the enclosing substitution
-/// means that substitution is incomplete. The boxed answer belongs only to
-/// legacy lowering, where shared snapshots actually exist.
+/// An unresolved record and an unconstrained type have different diagnostics.
 enum Fail {
     Unresolved(&'static str),
     Unconstrained,
@@ -5199,17 +4863,7 @@ fn convert_fail(r: MonoTyReason) -> Fail {
     }
 }
 
-/// Every `Expr::Global(name)` in `body` that names a FUNCTION -- skull's own
-/// fn-value discriminant (`lower/expr.rs:75`).
-///
-/// Resolution mirrors `fn_value_symbol`: bone's recorded overload wins;
-/// otherwise the candidates are backend VARIANTS of one `(name, signature)` and
-/// mangle identically, so any of them names the same instance. A genuine
-/// unresolved overload (candidates with distinct manglings) is skipped here --
-/// `fn_value_symbol` REJECTS it, so it cannot occur in a program that compiles.
-///
-/// A `Expr::Global` in `Callee::Value` position is an indirect CALL, not a value
-/// take, and is excluded.
+/// Collect function values, excluding global expressions used as indirect callees.
 fn fn_value_sites(
     ws: &Workspace,
     inf: &BodyInference,
@@ -5269,12 +4923,6 @@ fn fn_value_sites(
     out
 }
 
-/// Every callee obligation a CONDITIONALLY-synthesized call carries in this
-/// body, under this instance's substitution.
-///
-/// The two constructs -- an interpolation hole and `==`/`!=` -- name no callee,
-/// so this function decides nothing itself: it asks `skull_mir::lower::dispatch`, the
-/// same plan lowering RENDERS, so the walk cannot be weaker than the pass.
 fn dispatched_sites(
     ws: &Workspace,
     inf: &BodyInference,
@@ -5374,17 +5022,7 @@ fn dispatched_sites(
     out
 }
 
-/// The GROUP REPRESENTATIVE of the stdlib function `name` -- the target-neutral
-/// form of the lookup `Builder::stdlib_funcref` performs, and it fails on the
-/// same conditions (missing name, residual ambiguity).
-///
-/// A compiler-generated entry may be declared as a backend-variant group
-/// (`inline(lua)` + `inline(js)` of one signature). Filtering candidates by a
-/// TARGET would put target selection back into the walk, and filtering by `Any`
-/// -- which serves everything -- would call every such group ambiguous. So every
-/// declaration is canonicalized through the ONE grouping oracle and the answer
-/// must be unanimous: a name whose declarations are NOT one backend-variant
-/// group is the residual ambiguity `stdlib_funcref` also refuses.
+/// Resolve a bare runtime entry to its target-neutral declaration.
 pub fn stdlib_entry_representative(ws: &Workspace, name: &str) -> Option<FuncRef> {
     let decls = ws.functions_by_name.get(&ustr::Ustr::from(name))?;
     let mut reps = decls
@@ -5609,18 +5247,6 @@ fn classify_boundaries(g: &mut InstanceGraph, ws: &Workspace, decls: &[DeclKey])
     }
 }
 
-/// The helper symbols each coroutine instance owns.
-///
-/// The suffix list comes from the instance's own [`CoroutinePlan`], which is
-/// the emitters' input too. `__advance` exists only on the concrete frame-slot
-/// channel, and the base is the instance symbol used by its emitted body.
-///
-/// Defers (`__defer<k>`) and lifecycle hooks (`__on_*`) are NOT counted: they
-/// come from `CoroLowered`, which exists only after the MIR transform, so there
-/// is no graph-side oracle for them.
-/// Keyed by INSTANCE, so it is refreshed for the instances that entered or
-/// left rather than for the whole graph. `removed` runs first: an instance that
-/// was replaced appears in both lists and must end up recorded.
 fn record_coroutine_helpers(
     g: &mut InstanceGraph,
     ws: &Workspace,

@@ -1,10 +1,4 @@
-//! `ConcreteBody` type tables.
-//!
-//! The property under test is not "a table exists". It is that the table is a
-//! function of the INSTANCE: one generic body reached at two instantiations has
-//! two tables that disagree on the same slot, and neither carries a free
-//! generic. A table built under an empty substitution would fail every generic
-//! slot instead, which is what the mutation arm at the bottom asserts.
+//! Check that each concrete plan uses its own instance substitution.
 
 use crate::common::{body_id, fn_name, graph_of, module_id, scalar_ctx, ws_with_stdlib};
 use bone_semantic::hir::{BodyOwner, Expr, TypeExpr};

@@ -1,18 +1,5 @@
-//! **`InstanceGraph::update_bodies` against a fresh build.**
-//!
-//! The oracle is `graph_snapshot::canonical`: raw field equality is invalid
-//! across arenas, because the updated graph's arena is the one v1 interned into
-//! and a fresh build's is not.
-//!
-//! **Equality alone is not the whole assertion.** An updater that quietly
-//! rebuilt the world would satisfy it perfectly, so edits also assert that the
-//! update walked a small part of the graph. And an arm that asserted only "the
-//! fact is gone" would pass over a fixture that never produced it, so every arm
-//! asserts its v1 population first.
-//!
-//! Edits go through a real `bone_incremental::Session`, so the changed-body set
-//! is `UpdateResult::reinferred` rather than a hand-written guess at what an
-//! edit touches.
+//! Compare incremental graphs against fresh builds by canonical type identity.
+//! Use real inference updates, and assert the amount of work on body edits.
 
 use crate::common::{body_id, key, stdlib_asts, ws_of_files};
 use std::collections::BTreeSet;
@@ -1144,11 +1131,7 @@ fn relay<T>(x: [T]) -> int { return 0 }
     case.assert_matches_fresh("recursion removed through a helper");
 }
 
-/// Issue #7. `walk` has two DISCONNECTED changing-recursion regions, one per
-/// iterator witness. A full build reports only the first start per declaration,
-/// so the second region's finding is suppressed while the first exists.
-/// Retracting the first must expose the second on the incremental path too,
-/// even though nothing the edit touched reaches it.
+/// Removing a recursion witness can expose another in a disconnected region.
 #[test]
 fn retracting_one_recursion_witness_exposes_a_disconnected_alternative() {
     let recursive = r#"

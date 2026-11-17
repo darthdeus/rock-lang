@@ -78,12 +78,7 @@ fn is_global_emission_root(f: &bone_semantic::hir::Function, decorators: &Decora
     decorators.is_decorated(f)
 }
 
-/// Every `@sim`-annotated fn in the workspace, paired with its module file and
-/// wire name (the `@sim("name")` string arg, else the fn name). The SINGLE
-/// source of the `@sim` walk + wire derivation, shared by the codegen registry
-/// ([`sim_registration_lines`]) and the rock-cli sim runner
-/// (`collect_skull_sims`) so the registered name and the name the runner asks
-/// to dispatch cannot drift.
+/// Collect sim roots with the same wire-name rules as CLI dispatch.
 pub fn collect_sim_fns(ws: &Workspace) -> Vec<(Ustr, &bone_semantic::hir::Function, String)> {
     let mut sims = Vec::new();
     for module in ws.source_modules() {

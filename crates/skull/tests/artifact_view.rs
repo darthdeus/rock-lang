@@ -1,15 +1,3 @@
-//! The first TARGET ARTIFACT VIEW.
-//!
-//! An artifact view is a target's REALIZATION of the one shared
-//! [`InstanceGraph`]: which declarations it retains, how each boundary is
-//! actually supplied, and what it spells each retained instance. It may drop
-//! and it may reject, but it may never DISCOVER -- plan S 20g.1 asks whether
-//! logical identity survives realization differing, so a view that invented an
-//! instance would be answering its own question.
-//!
-//! Each realization test checks its shared-graph preconditions before the
-//! artifact outcome, so dropping everything cannot satisfy the assertions.
-
 use crate::common::{fn_name, graph_for, key, module_id, name_matches, ws_with_stdlib};
 use bone_semantic::hir::{BodyOwner, FnBackend};
 use bone_semantic::inference::Workspace;
@@ -23,9 +11,6 @@ use skull::target_projection::{
 use skull_mir::intrinsics::BackendRealization;
 use skull_mir::mir::FuncRef;
 
-/// A planner that spells everything with a target prefix. It exists so
-/// "both artifacts spell this instance alike" cannot be mistaken for the
-/// identity property: plan S 0h puts the spelling under the ARTIFACT.
 struct Prefixed(&'static str);
 impl artifact::SymbolPlanner for Prefixed {
     fn symbol(
@@ -152,17 +137,6 @@ impl BackendRealization for Supplies {
     }
 }
 
-// ---------------------------------------------------------------------------
-// PREMISE 1 -- the shared graph retains one backend-group representative.
-// ---------------------------------------------------------------------------
-
-/// ONE shared instance, realized to the sibling each artifact serves. The
-/// luajit artifact selects the Lua declaration and the javascript artifact the
-/// JS one -- the same `Instance` key in both views, a different `Realized::decl`
-/// in each.
-///
-/// Neither is decided through `InstanceGraph::boundaries`, which is keyed by
-/// mangled symbol and therefore cannot tell the two apart at all.
 #[test]
 fn an_artifact_realizes_the_shared_instance_to_the_sibling_that_serves_it() {
     let ws = ws_with_stdlib("fn main() { let b: NativeBuffer<int> = nb_new(4); let x = b[0] }");
@@ -281,10 +255,6 @@ fn main() { let x = sibling_probe(1) }
     );
 }
 
-// ---------------------------------------------------------------------------
-// PREMISE 2 -- `@native_required` availability from an actual native mapping.
-// ---------------------------------------------------------------------------
-
 const NATIVE_REQUIRED: &str = r#"
 @intrinsic @native_required
 fn fast_op(x: int) -> int { return x * 2 }
@@ -394,10 +364,6 @@ fn native_required_mapping_controls_fallback_and_severed_calls() {
         "mapping the callee left the call severed"
     );
 }
-
-// ---------------------------------------------------------------------------
-// PREMISE 3 -- opaque `inline(lua)` dependencies are name metadata.
-// ---------------------------------------------------------------------------
 
 /// The artifact resolves each dependency to a declaration IT retains, and says
 /// so per dependency rather than as a total.
@@ -515,16 +481,6 @@ fn main() { let n = selected_dep_probe(1) }
     );
 }
 
-// ---------------------------------------------------------------------------
-// PREMISE 4 -- one deterministic, injective symbol per (artifact, instance).
-// ---------------------------------------------------------------------------
-
-/// Every retained instance gets exactly one symbol, and no two share one.
-///
-/// The `@nomangle` sibling pair that used to collide here is one instance in
-/// the shared graph
-/// (`an_artifact_realizes_the_shared_instance_to_the_sibling_that_serves_it`), so
-/// injectivity is not being bought by retention dropping a duplicate.
 #[test]
 fn an_artifact_symbol_is_total_and_injective_over_what_it_retains() {
     let ws = ws_with_stdlib(
@@ -583,13 +539,6 @@ fn main() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// The two cross-cutting properties.
-// ---------------------------------------------------------------------------
-
-/// A view may DROP and it may REJECT; it may never DISCOVER. Asserted as a
-/// subset relation over the actual instances, not over counts -- two sets of
-/// equal size can still disagree.
 #[test]
 fn realization_never_invents_an_instance() {
     let ws = ws_with_stdlib(REACH);
@@ -638,14 +587,8 @@ fn main() {
 }
 "#;
 
-/// Retention is a WALK, not a declaration filter. A declaration this artifact
-/// could compile but no root of ITS reaches is `Unreachable` -- a filter would
-/// keep it, and the two causes must not be one bucket.
-///
-/// The graph is built from the FULL root set and the artifact is given a
-/// narrower one, which is plan S 11's "the target may change roots" stated as a
-/// fixture: the instance exists in the shared graph and is simply not this
-/// artifact's program.
+/// Give the view fewer roots than the shared graph, so it has realizable
+/// instances that it cannot reach.
 #[test]
 fn retention_is_reachability_not_a_declaration_filter() {
     let ws = ws_with_stdlib(REACH);
@@ -730,13 +673,7 @@ fn retention_is_reachability_not_a_declaration_filter() {
     }
 }
 
-/// Identity across artifacts is the shared `Instance`, NOT the spelling.
-///
-/// Plan S 0h: `InstanceId` is target-neutral and the ARTIFACT owns the emitted
-/// spelling. The default planner happens to be target-neutral; a hostile one
-/// that renames deliberately must leave identity intact and each artifact's own
-/// table total and injective. Asserting spelling equality across artifacts
-/// would forbid exactly what the plan permits.
+/// Use different symbol planners to exercise target-local names.
 #[test]
 fn cross_artifact_identity_is_the_instance_and_not_the_spelling() {
     let ws = ws_with_stdlib(REACH);
@@ -898,19 +835,7 @@ fn main() { let x = 1; host_tick(x) }
     }
 }
 
-/// The ambiguity arm's PRECONDITION, measured rather than assumed.
-///
-/// `InlineDep` must name one instance, not one declaration, so `realize` refuses
-/// a declaration with several. That arm has no population and a mutation that
-/// picks the first candidate reddens nothing -- so this records WHY rather than
-/// leaving a dead branch: every erased runtime entry is non-generic, so each has
-/// at most its one base instance. `__rock_col_sort` was the last generic entry
-/// and had no instance at all, because a synthesized call to a generic entry
-/// has no binding record; it now takes `any` like its siblings, and its
-/// synthesized call resolves to that one instance.
-///
-/// A generic catalogue entry fails the first assertion below -- the point at
-/// which the ambiguity arm starts mattering and needs a fixture of its own.
+/// Erased runtime entries are non-generic and therefore have at most one instance.
 #[test]
 fn every_inline_dependency_target_has_at_most_one_instance() {
     let ws = ws_with_stdlib(
@@ -1119,20 +1044,7 @@ fn shader_packaging_uses_the_desktop_source_profile() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// S 20a -- platform, execution and shader are SEPARATE axes.
-// ---------------------------------------------------------------------------
-
-/// A fixture with all three axes in play: an `extern` and a Lua-only inline body
-/// (so boundaries and severed calls both have a population), a generic so
-/// realization has more than one instance per declaration, an opaque body with a
-/// runtime dependency, and a portable/`inline(lua)` pair.
-///
-/// That last one is why it is here rather than the simpler `NativeBuffer`
-/// program: `__nb_checked_index`'s representative is already the Lua sibling, so
-/// the LUAJIT artifact selects nothing and the declaration comparison below
-/// would have been vacuous on the very axis under test. A portable
-/// representative with an exact Lua sibling makes luajit select too.
+/// A portable representative with a Lua sibling makes Lua select a sibling too.
 const AXES: &str = r#"
 extern(ffi, "host") fn host_tick(n: int) -> int
 inline(lua) fn only_lua(x: int) -> int = "return x + 1"
@@ -1149,20 +1061,6 @@ fn main() {
 }
 "#;
 
-/// **The S 20a separation, measured.** Two targets whose CPU target is
-/// identical decide the same thing under different shader packaging: same
-/// reachability, same selected declarations, same realizations, same severed
-/// classifications.
-///
-/// Plan S 20a: "CPU function ABI depends on `ExecutionTargetSpec`, not on which
-/// optional shader target is packaged beside it." The property is enforced by
-/// the signature -- `artifact::realize_decl` takes a `&ExecutionTargetSpec` --
-/// and measured here, because a signature says what a function CAN read and
-/// this says what the answer actually is.
-///
-/// A target NAME decides nothing either: the hostile control against a
-/// consumer that reaches for `spec.name` instead of a capability -- the one
-/// thing structured axes cannot rule out by construction.
 #[test]
 fn shader_packaging_and_target_name_do_not_decide_cpu_realization() {
     use skull::target_projection as tp;
@@ -1359,11 +1257,6 @@ fn target_realization_uses_mappings_and_stops_at_boundaries() {
     );
 }
 
-/// **The JS view's reachable `inline(js)` population, with its publisher
-/// lanes.** Two halves that a count cannot separate: a body a JS root reaches
-/// is retained AND states the width of its result wire (plan S 13b: the
-/// publisher's arity comes from the concrete ABI, never from the body text),
-/// while a body nothing reaches is `Unreachable` and states nothing.
 #[test]
 fn the_js_view_retains_reachable_inline_js_bodies_with_their_lanes() {
     let ws = ws_with_stdlib(
@@ -1424,18 +1317,7 @@ fn main() {
     );
 }
 
-/// **A generic foreign body's publisher width comes from its INSTANCE.**
-///
-/// The declaration says `-> T`, which is one boxed slot on every wire it could
-/// name; the two instances below put a different number of values on the wire
-/// (`(bool, float)` splats to two lanes, `int` rides one). A declaration-based
-/// oracle can answer neither, so it reported both unstated -- correct, and not
-/// a width. `publisher_lanes` is keyed by INSTANCE, so the two answers coexist,
-/// which is the property a per-declaration plan structurally cannot hold.
-///
-/// The `int` arm is the scalar/boxed admission control: it must reach the
-/// stated population at width 1 rather than being excluded alongside the
-/// tuple, or "the generic was answered" and "generics are skipped" look alike.
+/// Use both a scalar and a tuple to require two widths from the same declaration.
 #[test]
 fn a_generic_foreign_body_takes_its_publisher_width_from_its_instance() {
     let ws = ws_with_stdlib(
@@ -1487,11 +1369,6 @@ fn main() {
         "a generic instance went unanswered for a reason other than its own width"
     );
 }
-
-// ---------------------------------------------------------------------------
-// PUBLICATION obligations: an `@nomangle` root's bare-name promise is a
-// DIFFERENT question from which declaration serves a resolved call.
-// ---------------------------------------------------------------------------
 
 const PUBLICATION_FIXTURE: &str = r#"
 @nomangle fn portable(x: int) -> int { return x + 1 }
@@ -1894,12 +1771,7 @@ fn dec(x: int) -> int { return x - 1 }\n\
 global F: fn(int) -> int = dec\n\
 fn main() { print(\"{F(1)} {dec(1)}\") }";
 
-// A global initializer has no caller instance, so its value take is not a site
-// the per-caller fn-value walk reaches. The program still stores the function.
-//
-// Re-pointing the initializer at a function that was already an instance
-// changes no instance's own body, so only the always-emitted owner is affected
-// by the local update.
+// A value taken by a global initializer is recorded without a caller instance.
 #[test]
 fn a_global_initializer_fn_value_target_follows_a_local_retarget() {
     let LocalUpdate {

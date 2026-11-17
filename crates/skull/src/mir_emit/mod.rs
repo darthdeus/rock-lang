@@ -1,16 +1,5 @@
-//! Whole-workspace Lua emit: the cell-model IR (`skull-mir`) lowered and
-//! printed by `skull-codegen-lua`, assembled into a complete runnable Lua chunk
-//! together with the IR-agnostic load-time helpers (runtime prelude,
-//! value-struct cdefs, enum singletons, type tables).
-//!
-//! A definition that fails to lower rejects the compile, stdlib or not.
-//! inline(lua) bodies emit verbatim,
-//! externs are pre-existing Lua globals (no def), coroutines lower via the
-//! `skull-transform` stackless pass, decorators via `lower_decorator`.
-//!
-//! Global inits are emitted in transitive-dependency order (`direct_refs` ->
-//! `transitive_global_reads` -> `sort_global_init_lines`): a global read through
-//! a call chain still inits first, mirroring rock's `global_dependencies`.
+//! Lower concrete plans to MIR and assemble emitted definitions with the Lua runtime.
+//! Global initializers are ordered by transitive dependencies.
 
 use bone_core::prelude::Instant;
 use bone_semantic::hir::{BodyOwner, Expr};
@@ -128,13 +117,7 @@ pub struct MirEmit {
     pub graph_census: crate::instance_graph::RunStats,
     /// Concrete-plan ownership and assembly populations from this emission.
     pub concrete_stats: crate::concrete_body::ConcreteBuildStats,
-    /// Whether this emission defines the game entry point `main`, so the caller
-    /// can append `__rock_main_wrapper(main)`.
-    ///
-    /// Reported by the emitter rather than recovered from the text: a caller
-    /// that searched `lua` for `function main(` silently stopped finding it the
-    /// moment callee binding moved the body inside a factory, and the game booted to a chunk that defined everything and ran
-    /// nothing.
+    /// Whether the host should append the generated main call.
     pub emits_main: bool,
     /// Every shader this artifact registers, as the source the registration
     /// carries, in registration order. Shared with the emit cache, which
@@ -165,15 +148,7 @@ pub fn emit_workspace_mir(ws: &Workspace, user_mid: ModuleId) -> Result<MirEmit,
         .map(|(emit, _cache)| emit)
 }
 
-/// Full emit: populate the chunk cache for every retained ordinary/coroutine
-/// body, then assemble. Byte-identical to the pre-cache emit. Returns the cache
-/// so a later [`emit_incremental`] can reuse the unchanged chunks.
-///
-/// The per-body chunk emit runs in PARALLEL ([`par_map_with`], one
-/// [`InlineCache`](skull_transform::InlineCache) per rayon worker) by default;
-/// `--features sequential` forces single-threaded iteration. The cache is keyed by
-/// [`FuncRef`], so the (nondeterministic) insertion order never reaches the output
-/// — `assemble` walks modules in source order and pulls by key.
+/// Emit all required definitions and retain chunks for incremental edits.
 pub fn emit_full(
     ws: &Workspace,
     user_mid: ModuleId,

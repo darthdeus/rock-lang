@@ -1,34 +1,5 @@
-//! A target's ARTIFACT VIEW of the shared instance graph.
-//!
-//! An artifact view is one target's REALIZATION of a graph it did not build:
-//! which instances it REACHES, how each is supplied, which opaque dependency
-//! resolves to which callee, and what it spells each retained instance.
-//!
-//! **It may DROP and it may REJECT; it may never DISCOVER.** [`realize`] takes
-//! `&InstanceGraph`, so it cannot rebuild or extend what it measures.
-//!
-//! **It is a REACHABLE view, not a declaration filter.** Retention is a walk
-//! from the artifact's own roots over the graph's recorded call sites, so a
-//! declaration this target could compile but nothing here calls is
-//! [`Exclusion::Unreachable`], not retained. And a retained caller whose
-//! concrete callee is unrealizable is a [`Severed`] call -- the diagnostic a
-//! filter cannot produce at all, because a filter never looks at an edge.
-//!
-//! **There is ONE graph, and it is target-neutral.** It records bone's collapsed
-//! group REPRESENTATIVE at every callee, so selecting the backend sibling that
-//! serves a target happens here, in [`realize_decl`], and nowhere else. One
-//! shared [`Instance`] therefore realizes to a DIFFERENT declaration -- and a
-//! different [`BoundaryId`] -- on two artifacts while remaining one logical
-//! identity.
-//!
-//! **Identity across artifacts is the shared [`Instance`], NOT the spelling.**
-//! `InstanceId` is target-neutral and the artifact owns the emitted
-//! spelling, one symbol per `(artifact, instance)`. Two artifacts may legally
-//! spell one instance differently, so this module asserts totality and
-//! injectivity INSIDE each artifact and leaves cross-artifact comparison to the
-//! `Instance`. The default [`SymbolPlanner`] happens to be target-neutral;
-//! the renaming planner in `artifact_view` exists so that fact cannot be
-//! mistaken for a requirement.
+//! Project the shared instance graph onto one backend. Select declarations,
+//! check boundary delivery, and assign emitted symbols to retained instances.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -44,27 +15,7 @@ use crate::instance_graph::{
 use crate::target_projection::{supports, CpuTargetSpec, TargetSpec};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-/// Where an artifact's realization of a callee comes from, when the
-/// declaration's own body is not it.
-///
-/// Two independent sources, both real:
-///
-/// - **the body slot**, which IS luajit's mapping (`skull_mir::intrinsics`'
-///   body-slot rule: an `inline(lua)` body is the luajit implementation of an
-///   `@intrinsic`). A rule about the declaration, not a table.
-/// - **the backend's own realization oracle**, for a backend that supplies
-///   callees from Rust: its `@intrinsic` mappings AND everything else it
-///   renders itself, layered in its own precedence
-///   ([`BackendRealization`]).
-///
-/// ONE oracle for the second, not one per mechanism. The JS backend renders
-/// `nb_get` from an `@intrinsic` template and `phantom` from a hand-written one
-/// with no marker at all, and a view that knew about one severed the other --
-/// so `skull_codegen_js` publishes a single `js_supply` that `render_call`,
-/// `discover_callees` and this view all read.
-///
-/// A target with neither maps nothing, which is the honest answer for a
-/// synthetic fixture: it has no backend to map with.
+/// Native mappings are supplied by matching inline bodies or by the backend.
 #[derive(Clone, Copy, Default)]
 pub struct ArtifactMappings<'a> {
     /// The backend whose in-source body slot IS this artifact's mapping.
@@ -287,13 +238,6 @@ impl Realization {
     }
 }
 
-/// One instance, realized: the DECLARATION this artifact selected for it and how
-/// that declaration is supplied.
-///
-/// The declaration is not `Instance::func`. The graph holds the target-neutral
-/// representative; a backend sibling serving this artifact is a different
-/// `FuncRef`, and it is the one whose body is emitted and whose contract a
-/// [`BoundaryId`] names.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Realized {
     pub decl: FuncRef,
@@ -403,28 +347,10 @@ pub struct ArtifactView {
     /// The artifact's root instances -- realizable emission roots, plus the
     /// callees of always-emitted bodies, which have no incoming edge.
     pub roots: BTreeSet<Instance>,
-    /// The subset of [`Self::roots`] that this artifact was ASKED for --
-    /// `ArtifactRequest::roots`, canonicalized -- as distinct from the
-    /// structural roots the graph adds because they carry no incoming edge
-    /// (`is_always_emitted_target`).
-    ///
-    /// The two are different obligations and a consumer that conflates them is
-    /// wrong in both directions: a declared root's own body must exist whether
-    /// or not any call reaches it, while a structural root is an ordinary
-    /// reached instance whose splicing eligibility is still open. Recorded here
-    /// so emission reads root PROVENANCE off the view instead of re-running the
-    /// root predicate beside it.
-    ///
-    /// A generic root contributes nothing: it has no base instance to emit.
+    /// Realizable request roots. Their definitions are required even when
+    /// every call is inlined.
     pub declared_roots: BTreeSet<Instance>,
-    /// Retained instances a retained body reaches by taking the function as a
-    /// VALUE (`SiteOp::FnValue`) rather than by calling it.
-    ///
-    /// A value take is not spliceable: there is no call for a body to be
-    /// substituted into, so the program stores the definition itself under its
-    /// own symbol. That makes it a DELIVERY fact a residual-call scan cannot
-    /// produce -- and a foreign (`inline(lua)`) body reached only this way was
-    /// retained, called by name and never defined.
+    /// Function values need addressable definitions even with no direct calls.
     pub fn_value_targets: BTreeSet<Instance>,
     /// Retained ROCK instances: reachable from `roots`, realizable here, and
     /// lowered from a Rock body. A SUBSET of `g.instances`.
@@ -432,13 +358,7 @@ pub struct ArtifactView {
     /// A boundary has no body the artifact lowers, so enqueueing it as an
     /// instance would ask for callees it does not have.
     pub instances: BTreeSet<Instance>,
-    /// Retained BOUNDARIES: the identity a call must name, PER INSTANCE.
-    /// Reached, never traversed.
-    ///
-    /// Keyed by [`Instance`] rather than by [`BoundaryId`]. A boundary is
-    /// retained because an instance reached it, so the instance is the identity
-    /// that cannot collide; keying the other way made two instances of one
-    /// generic boundary declaration overwrite each other.
+    /// Boundary identities keyed by shared instance, including generic arguments.
     pub boundaries: BTreeMap<Instance, BoundaryId>,
     /// How each retained instance is supplied here, and by which declaration.
     pub realization: BTreeMap<Instance, Realized>,
@@ -455,66 +375,17 @@ pub struct ArtifactView {
     /// declarations. These are opaque-boundary obligations, not MIR delivery
     /// edges; JS adds the targets to its next graph/view construction.
     pub opaque_boundary_roots: BTreeMap<DeclKey, FxHashSet<FuncRef>>,
-    /// The physical RESULT LANES of every retained instance the artifact emits
-    /// as a foreign body: how many values its result wire carries. The
-    /// JS publisher takes its arity from this, so an artifact that
-    /// retains a multi-lane `inline(js)` body states the lane count here rather
-    /// than leaving emission to read it out of the body text.
-    ///
-    /// Derived from `skull_mir::lower::BackendFnAbiPlan`, built under the
-    /// instance's own substitution -- the same ABI policy definitions and call
-    /// sites read, asked of the shape this artifact actually carries.
-    ///
-    /// Recorded for EVERY artifact, including luajit, even though only the JS
-    /// publisher needs the number spelled out: the width is a property of the
-    /// wire, and luajit carrying it on native multi-return is that backend's
-    /// answer to it rather than an absence of one.
+    /// Foreign result widths derived from each concrete instance ABI.
     pub publisher_lanes: BTreeMap<Instance, usize>,
-    /// **An invariant finding, not an unknown.** Retained instances the shared
-    /// graph holds no substitution record for at all. `reach` records one for
-    /// every instance it reaches, roots included, so an absent record means a
-    /// producer bypassed the recorder -- and until it is explained, nothing may
-    /// read a shape for the instance at all. This is the ONLY way a retained
-    /// foreign body can go without a stated wire: there is no "generic, so the
-    /// declaration cannot answer" population any more, because the width is
-    /// built from the instance's substitution rather than from the declaration.
+    /// Retained instances whose substitution is missing from the shared graph.
     pub missing_substitutions: BTreeSet<Instance>,
     /// The shared population this view was taken over -- the denominator.
     pub shared_instances: usize,
     pub deferred: Vec<&'static str>,
-    /// **Bare-name PUBLICATION obligations, distinct from [`Self::realization`].**
-    ///
-    /// `realization` (and `instances`/`boundaries` derived from it) answers
-    /// "how are CALLS to this canonical `Instance` served on this artifact" --
-    /// `realize_decl`'s sibling selection may legitimately route every call to
-    /// a same-signature backend sibling. A `publication` answers a different
-    /// question: "which EXACT declarations does the program's source demand
-    /// exist under their own name regardless of any call". An explicit
-    /// `@nomangle` root is the source of that demand -- its whole contract is a
-    /// stable bare-named entry point for code OUTSIDE the MIR call graph
-    /// (hand-written Lua, FFI callbacks), which backend-variant collapse must
-    /// not silently erase just because some sibling happens to serve the calls
-    /// this artifact CAN see.
-    ///
-    /// Keyed by the EXACT declaration's own `Instance` (never canonicalized
-    /// away), which can legitimately equal a key in `realization` naming a
-    /// DIFFERENT `decl` -- one `Instance` can carry both a call-serving
-    /// realization through a sibling and a publication obligation for its own
-    /// body, and that is not a conflict: a publication is not a call.
-    ///
-    /// Reuses the graph's OWN expansion for the exact declaration -- no second
-    /// discovery walk. An `@nomangle` root that is not, itself, the graph's own
-    /// canonical representative for its declaration has no contribution record
-    /// this pass can reuse, and is reported via
-    /// [`Self::unrepresented_publications`] rather than silently dropped.
+    /// Required `@nomangle` definitions keyed by the exact declaration. Calls can
+    /// still resolve via a sibling in `realization`.
     pub publications: BTreeMap<Instance, String>,
-    /// `@nomangle` roots whose exact declaration is not the graph's own
-    /// canonical representative (so this pass has no expansion to reuse for
-    /// it) -- an invariant finding this pass fails closed on rather than
-    /// silently omitting the promise. Not expected in the shipped corpus: an
-    /// ordinary `@nomangle` declaration with no `inline`/`extern` annotation is
-    /// backend `Any`, which is always the LOWEST backend-rank in its group and
-    /// therefore always the representative already.
+    /// Publication obligations with no exact expansion in the shared graph.
     pub unrepresented_publications: Vec<FuncRef>,
     pub publication_collisions: Vec<PublicationCollision>,
     index: ArtifactIndex,
@@ -1531,46 +1402,16 @@ impl ArtifactView {
     }
 }
 
-/// How this artifact realizes `f`, or why it cannot.
-///
-/// **The intrinsic arm does NOT route through
-/// [`instance_graph::boundary_class_for`].** That classifier answers "does the
-/// WALK enter this body", and it folds `@native_required` into its own answer:
-/// a `@native_required` intrinsic is a boundary there precisely BECAUSE it is
-/// `@native_required`. Asking it here and then also asking
-/// `is_native_required` is a proxy for the same fact, so the second question
-/// can never disagree with the first -- measured: deleting the
-/// `is_native_required` arm changed no test, because the reject fell out of the
-/// classifier that had already consulted it.
-///
-/// The artifact asks its own question in its own order, which is
-/// `skull_mir::intrinsics`' emit resolution: **backend mapping > portable
-/// fallback > reject**, with `@native_required` skipping the middle rung. That
-/// is the only order under which a view cannot answer "available" where
-/// emission would reject.
+/// The emitter's precedence is native mapping, portable fallback, then rejection.
+/// `@native_required` disables the fallback.
 fn realize_decl(
     ws: &Workspace,
     rep: FuncRef,
     target: &CpuTargetSpec,
     mappings: &ArtifactMappings<'_>,
 ) -> Result<Realized, Unrealizable> {
-    // THE BODY-INDEPENDENT RUNGS, first, and IN THE EMITTER'S OWN ORDER. Each
-    // answers without emitting any declaration's body, so "which backend wrote
-    // the source body" has no consumer -- and asking for a sibling ahead of
-    // them rejects work the artifact actually performs. Measured on the JS
-    // corpus: `nb_get` (1,127 sites) is mapped by `JsIntrinsics` and
-    // `rock_shader` is expanded at MIR lowering, and both were
-    // `foreign-to-artifact` because the sibling question came first.
-    //
-    // The ORDER is not a preference either. `skull_codegen_js`'s callee walk
-    // skips a host-bound callee BEFORE it reaches the `inline(js)` co-emit and
-    // plain-Rock branches, and `render_call` reaches for a host template before
-    // the intrinsic table -- so a host binding wins over the declaration's own
-    // body, whatever that body is. `map_new` is the case that makes this
-    // load-bearing: it is a PURE ROCK body the JS backend renders as
-    // `new Map()`, so classifying it by its body would have the artifact
-    // traverse a body emission never emits. The portable-fallback rung stays
-    // below with the selected declaration, because a fallback IS a Rock body.
+    // Expansions and backend mappings must win before sibling selection.
+    // They can serve a call even without a source body for this backend.
     let rep_f = &ws.module(rep.module).functions[rep.func];
     if intrinsics::expand_kind(rep_f).is_some() && supports(target, BoundaryClass::Intrinsic) {
         return Ok(Realized {
@@ -1591,24 +1432,13 @@ fn realize_decl(
         return Ok(Realized { decl: rep, kind });
     }
 
-    // SIBLING SELECTION, and this is the only place it happens. `rep` is the
-    // shared graph's target-neutral representative; `backend_variant` is
-    // production's own selector, so the declaration this artifact emits is the
-    // one lowering would pick. `Err` -- nothing in the group serves this
-    // artifact -- is the `@nomangle`-sibling case: a JS body asked of a Lua
-    // artifact.
     let selected: Result<FuncRef, Unrealizable> = match target.execution.backend {
         Some(b) => {
             let name = ws.module(rep.module).functions[rep.func].name;
             skull_mir::lower::backend_variant(ws, name, rep, b)
                 .map_err(|_| Unrealizable::ForeignToArtifact)
         }
-        // A target with no Rock-level backend of its own names no host, so there
-        // is no sibling to select and only a declaration that names none --
-        // `FnBackend::Any`, a portable Rock body -- serves it. Deliberately NOT
-        // `serves(f.backend, Any)`, which answers yes to everything: that is the
-        // "any target" convenience and would keep `extern(lua) fn print` on a C
-        // artifact.
+        // A target without an execution backend can only serve portable declarations.
         None => {
             if ws.module(rep.module).functions[rep.func].backend != FnBackend::Any {
                 Err(Unrealizable::ForeignToArtifact)
@@ -1699,12 +1529,7 @@ fn has_rock_body(ws: &Workspace, decl: FuncRef) -> bool {
         .contains_key(&bone_core::hir::BodyOwner::Function(decl.func))
 }
 
-/// Realize the shared `g` for `req`. Read-only in the type system, not just by
-/// convention: `g` is `&`, so no discovery can happen here.
-///
-/// Every artifact realizes the SAME graph. There is no per-target build and
-/// therefore no mismatch to detect -- backend-sibling selection lives in
-/// [`realize_decl`], which is reached from here and from nowhere else.
+/// Realize existing graph instances for the artifact request.
 pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> ArtifactView {
     // Shader packaging is absent from this value by construction. Platform
     // capabilities remain available for host boundary admission.
@@ -1722,13 +1547,8 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         realizable.insert(i.clone(), realized);
     }
 
-    // The artifact's ROOTS: its emission roots that are realizable here, plus
-    // the callees of always-emitted bodies, which carry no incoming edge and
-    // would otherwise read as unreachable.
-    //
-    // Canonicalized, because an instance names the group REPRESENTATIVE while
-    // production hands over whichever declaration it discovered. A root given as
-    // a backend sibling would otherwise match nothing.
+    // Canonicalize request roots to the representatives used as instance keys.
+    // Always-emitted callees are roots because they have no caller instance.
     let root_decls: BTreeSet<DeclKey> = req
         .roots
         .iter()
@@ -1763,16 +1583,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     let mut severed: Vec<Severed> = Vec::new();
     let mut sites_walked = 0usize;
 
-    // Admitting one reached instance. EVERY reached callee goes through here --
-    // roots and call sites alike -- so the `Rock` / `Boundary` split is
-    // made once. Only a Rock body is ENQUEUED: a boundary has no body the
-    // artifact lowers, which is the same rule the graph walk follows when it
-    // stops at a boundary rather than enumerating its callees.
-    //
-    // The boundary's IDENTITY is not minted here. It needs this artifact's
-    // spelling, which is the planner's answer over the full retained set, so it
-    // is built once below -- see `boundaries`.
-    // The ordered records are built once from the admitted set afterwards.
+    // Walk outgoing sites only for retained Rock bodies.
     struct Admission<'g> {
         admitted: FxHashSet<&'g Instance>,
         reached: Vec<(&'g Instance, Realized)>,
@@ -1986,28 +1797,13 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     // artifact's own execution backend.
     let scalar_context = std::cell::OnceCell::new();
     let scx = req.scalar_context(ws, g, &scalar_context);
-    // ...under THAT INSTANCE's own substitution, which is what makes the width
-    // a property of the instance and not of the declaration: `-> T` is one
-    // boxed slot on the declaration and two lanes at `T = (bool, float)`, and
-    // `publisher_lanes` is keyed by instance so both answers coexist.
-    //
-    // The only thing that can leave an instance unanswered is the graph having
-    // no record at all -- an invariant finding, below. There is no "generic, so
-    // unknown" arm to be in.
     let mut publisher_lanes: BTreeMap<Instance, usize> = BTreeMap::new();
     if let Some(scx) = &scx {
         for (i, r) in &realization {
             if !matches!(r.kind, Realization::ForeignBody(BoundaryClass::InlineBody)) {
                 continue;
             }
-            // The graph must have a record, or this instance is the invariant
-            // finding below rather than a lane width. The plan is then built
-            // POSITIONALLY, from the instance's own arguments against the
-            // SELECTED declaration's generics -- the same route every emitted
-            // body's plan takes. It used to pass the recorded substitution
-            // instead, which is keyed by `i.func`'s `VarId`s and applied to a
-            // possibly-different backend sibling; the declaration supplies the
-            // order, and a sibling is chosen for having the same signature.
+            // Use the instance arguments positionally for the selected sibling's ABI.
             if g.substitution(i).is_none() {
                 continue;
             }
@@ -2051,15 +1847,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         .cloned()
         .collect();
 
-    // **Bare-name PUBLICATION obligations** -- see `ArtifactView::publications`.
-    // An explicit `@nomangle` root's promise is about the EXACT declaration a
-    // program wrote, never about whichever sibling `backend_variant` would
-    // pick for a resolved call; ordinary call-serving realization above
-    // (`realizable`/`realization`) is untouched by this, and
-    // `backend_variant_group`/`canonical_variant` are not consulted here at
-    // all -- this is a second, independent obligation over the SAME graph, not
-    // a second discovery walk: the exact instance's own contribution, if the
-    // graph has one, is what `g.instances`/`g.sites_of` already recorded.
+    // The exact declaration must have a graph expansion to publish its bare name.
     let publication_candidates = publication_candidates(ws, req);
     for (instance, symbol) in &publication_candidates {
         index

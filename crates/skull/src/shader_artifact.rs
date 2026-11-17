@@ -1,27 +1,5 @@
-//! The GLSL half of an artifact.
-//!
-//! A [`TargetSpec`] carries an OPTIONAL shader axis beside its CPU axes, and
-//! this is what that axis packages: the concrete shader entries the artifact
-//! registers, the helpers those entries actually reach, and GLSL's own
-//! rejections over exactly that retained set.
-//!
-//! **It realizes the SAME shared graph the CPU view does.** [`realize_shader`]
-//! takes `&InstanceGraph` and walks the recorded call sites, so there is no
-//! second reachability mechanism and no shader-specific graph -- the GPU side
-//! of one program is a different ROOT SET over one instance graph, which is
-//! the whole content of "one target-neutral graph, several artifact views".
-//!
-//! **The profile is the axis's typed value.** `skull::mir_emit` picks
-//! `Core330` for desktop OpenGL; that
-//! is a packaging decision, and a view that re-derived it could not report
-//! what a target actually carries.
-//!
-//! **GLSL's rejections stay GLSL's.** Recursion (no call stack) and the strict
-//! tier-0 signature pass are `skull_codegen_glsl`'s, called here over the
-//! retained set rather than reimplemented -- a second copy would be free to
-//! disagree with the emitter. And they are the SHADER artifact's findings: the
-//! CPU artifact over the same program compiles a recursive fn happily, which
-//! is why shader decisions may not reach CPU admission.
+//! Realize shader roots and their helpers from the shared instance graph.
+//! The GLSL backend checks the retained bodies against the requested profile.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
@@ -264,23 +242,7 @@ pub(crate) fn realize_shader_with_context_and_plans(
             })
             .collect()
     };
-    // THE PROFILE PASS IS EMISSION'S OWN, run per ENTRY.
-    // The view-aware checker is the whole of what the view-driven emitter does
-    // before it writes GLSL: stage classification of the entry's signature (an
-    // `@uniform` block param is legal there and is NOT a tier-0 leaf -- asking
-    // the fn-library check of an entry rejected 1,539 real shaders), the
-    // entry's own lowering and tier-0 body pass, the graph/view population
-    // over its callees (which rejects recursion, a foreign body with no GLSL
-    // mapping and a helper outside tier 0), and the stage-specific builtin
-    // validation.
-    // A summary of those checks written here could disagree with the emitter;
-    // this cannot.
-    //
-    // What the walk above still owns is PACKAGING -- which concrete instances
-    // this artifact carries -- and the structural cycle finding that TYPES a
-    // failure as recursion. The two are cross-checked rather than trusted: a
-    // cycle the emitter accepts, or an emitter recursion rejection over an
-    // acyclic retained relation, is a recorded `disagreements` entry.
+    // Validate each retained entry with its stage and requested profile.
     let cyclic = cyclic_instances(&roots, &edges);
     let programs: Vec<(&ShaderProgram, &ShaderProgramView)> =
         req.programs.iter().zip(&program_views).collect();

@@ -1,17 +1,4 @@
-//! Lowering-shape oracle for flat `Vec<T>` element storage, T an all-scalar
-//! `value` struct. A `[V2]` stores its
-//! elements FLAT -- one ordinary Lua array per leaf -- so no per-element table
-//! exists at any point: no `V2_ct(..)` on push, no whole-element
-//! `__vec_checked_get` on read.
-//!
-//! Every assertion is on EMITTED SHAPE. A runtime-value assertion cannot
-//! distinguish "flat" from "boxed and unboxed again", which is the vacuity
-//! class that kept the `embed` tests green while the headline property was
-//! false. Behavioral coverage belongs beside this in a `.rock` test.
-//!
-//! Layout under test (K <= 4 leaves, the only tier v1 builds):
-//!     { ["@vec"] = { repr, elem, cap }, <leaf0> = {..}, .., len = n }
-//! Columns are 1-indexed to match today's `_data`.
+//! Check Lua lowering and runtime behavior for vectors backed by leaf columns.
 
 use crate::common::{emit_module, function_body};
 
@@ -274,21 +261,7 @@ fn main() {
 }
 "#;
 
-/// The stdlib Vec surface over column storage, end to end. These are PLAIN
-/// generics -- no `@inline`, no `@pure` -- so nothing used to specialize them and
-/// every one reached the shared `_data` body: `xs.set(..)` failed at top level,
-/// and `Vec.clear` is what stopped an application running.
-///
-/// They work now because a column-eligible instantiation forces specialization
-/// whether or not the callee opted in, and because the specialized copy is
-/// emitted standalone rather than needing a splice. Inside it,
-/// `__vec_data_get/_set/_unset` see the concrete element through the `SpecSubst`
-/// and lower to column operations.
-///
-/// Asserted on VALUES, not shape. `swap_remove` moving the last element into the
-/// hole and `pop` returning the right one are exactly the properties a
-/// per-column decomposition can get subtly wrong while still emitting
-/// column-shaped code.
+/// Call through the ordinary Vec surface so specialization and lowering both run.
 #[test]
 fn stdlib_vec_surface_works_over_column_storage() {
     let lua =

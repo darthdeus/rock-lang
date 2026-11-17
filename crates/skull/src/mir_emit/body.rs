@@ -51,18 +51,7 @@ pub(super) fn emit_named_with_allocation_report(
     })
 }
 
-/// **The one Lua emission of a `co fn`**, shared by the declaration's own body
-/// and by each specialized instantiation of a generic one.
-///
-/// Coroutines are not inlined into and do not inline: the call constructs a
-/// coroutine object rather than running the body, which is why specialization
-/// here is delivered by a standalone definition instead of a splice. That is the
-/// whole difference from an ordinary specialization, and it is why this is not
-/// [`prepare_instance_body_with_plans`] -- there is no inline pass, no `convert_closures`
-/// (the step's lambdas convert framed, inside `emit_coroutine`) and no FORL
-/// recovery (codegen's relooper does it).
-///
-/// The concrete body plan decides the instance symbol and yield channel.
+/// Coroutine calls construct objects, so their bodies only emit standalone.
 fn emit_coroutine_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -609,20 +598,8 @@ pub fn is_cached_body(f: &bone_semantic::hir::Function) -> bool {
     !f.is_extern && f.inline_body.is_none() && !f.has_iterator_bounds() && !is_generic(f)
 }
 
-/// Whether THIS EMITTED BODY is a cached [`Chunk`] -- the same question
-/// [`is_cached_body`] answers for a declaration, asked of the body actually
-/// being emitted.
-///
-/// A SPECIALIZATION always is. It is a concrete instance with a body of its own,
-/// so the two reasons a declaration is not cached under E1 -- it is generic, or
-/// it is `Iterator`-bounded -- are precisely the reasons the specialization
-/// EXISTS. Only opacity survives the distinction, and an opaque declaration has
-/// no specializations to begin with.
-///
-/// Asking the declaration's predicate of an emitted body is what deleted a
-/// generic's specialized chunk on every edit: `is_cached_body` said false, the
-/// caller took its "regenerated, drop the chunk" branch, and the overlay then
-/// found nothing to redefine.
+/// A concrete specialization has a cacheable body even when its declaration
+/// has no standalone definition.
 pub(crate) fn is_cached_emitted_body(f: &bone_semantic::hir::Function, body: &Instance) -> bool {
     if body.args.is_empty() {
         return is_cached_body(f);
@@ -630,46 +607,11 @@ pub(crate) fn is_cached_emitted_body(f: &bone_semantic::hir::Function, body: &In
     !f.is_extern && f.inline_body.is_none()
 }
 
-/// Whether the fn declares generics, and so has NO declaration-owned body.
-///
-/// This is the E1 cut stated as a predicate. A generic declaration is not a
-/// definition that happens to be shared across its instantiations -- it is not a
-/// definition at all, the way an `extern` or an `inline(lua)` body is not one.
-/// Every emitted body comes from an instance, and a declaration nothing
-/// instantiates emits nothing.
 pub fn is_generic(f: &bone_semantic::hir::Function) -> bool {
     !f.generics.is_empty()
 }
 
-/// Emit one top-level Lua function per distinct `(callee, instantiation)` a body
-/// asked for, under the name its call sites already target (`spec_fn_name`).
-///
-/// This is what lets specialization reach contexts the inliner cannot enter. A
-/// splice needs a caller whose CFG the inliner will walk; a standalone definition
-/// needs nothing, so a coroutine's `__step` and a global initializer -- neither of
-/// which runs an inline pass -- call the specialized copy exactly as any other
-/// body does.
-///
-/// A worklist, not a loop over the initial set: a specialized body is lowered
-/// under its own substitution and can therefore require further specializations
-/// that no shared body ever mentions (`Vec<Vec2>.remove_at` calling
-/// `__vec_data_set` at `T = Vec2`). `done` keys on the full `Instance`
-/// so each is defined exactly once no matter how many bodies requested it.
-///
-/// A failing specialization does NOT stop the worklist: each instantiation is an
-/// independent definition, and bailing at the first one made every census of
-/// remaining nobox rejections a floor -- the three members of the column-read
-/// class were each found one behind another. The rejections are returned (sorted
-/// by specialized name, since the worklist order is a pop order and two
-/// instantiations of one generic share its span) and the caller fails the build
-/// on all of them; a rejected specialization contributes NO Lua.
-/// Build ONE specialized body's chunk -- the same transform sequence and the
-/// same rendering the worklist ran inline before it was a chunk.
-///
-/// `deps` carries the DECLARATION this specializes as well as its splices and
-/// residual callees. That edge is what makes editing a generic's body invalidate
-/// every specialization of it: nothing else names the connection, since a
-/// specialization is not reached through the declaration's own chunk.
+/// Emit one concrete body with its recorded witnesses.
 pub(super) fn emit_spec_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -758,19 +700,7 @@ pub(super) fn emit_spec_chunk(
     )
 }
 
-/// Place every specialized body the liveness walk found, in the order the
-/// assembled text has always had.
-///
-/// This ORDERS text; it does not decide or discover. The worklist is still LIFO
-/// and still dedupes, because that is what fixes the order, but every body it
-/// pops was already reached and built by [`live_bodies`]. A body it cannot find
-/// is an invariant failure rather than something to quietly build: two places
-/// that can decide a definition into the program is exactly the pair this step
-/// removes.
-///
-/// It only records references. A body built for this build stays in `live`
-/// and is named in `moved`, which the caller moves into `built` once nothing
-/// borrows it.
+/// Use LIFO demand order to preserve the ordering of specialized definitions.
 pub(super) fn order_specialized_callees<'c>(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
