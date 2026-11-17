@@ -7,6 +7,46 @@
 
 use crate::common::{emit_module, function_body, run_luajit, run_main};
 
+#[test]
+fn nullable_map_coalesce_keeps_only_the_insert_box() {
+    for (fields, init, fallback, ctor, expected) in [
+        (
+            "a: int, b: int",
+            "a: seed, b: seed + 1",
+            "a: 0, b: 0",
+            "P_ct(",
+            0,
+        ),
+        (
+            "a: int, b: string",
+            "a: seed, b: \"x\"",
+            "a: 0, b: \"fallback\"",
+            "P_vt(",
+            1,
+        ),
+    ] {
+        let lua = emit_module(&format!(
+            r#"
+value P {{ {fields} }}
+@nomangle fn round_trip(seed: int) -> int {{
+    let values: Map<string, P?> = map_new()
+    values["p"] = P {{ {init} }}
+    let p = values.get("p") ?? P {{ {fallback} }}
+    return p.a
+}}
+fn main() {{ print(round_trip(7)) }}
+"#,
+        ));
+        let body = function_body(&lua, "round_trip");
+        assert_eq!(
+            body.matches(ctor).count(),
+            expected,
+            "column storage needs no box; a GC map needs only the insert box:\n{body}"
+        );
+        assert_eq!(run_main(&lua), "7");
+    }
+}
+
 const PIPELINE: &str = r#"
 nobox value Pipeline {
     shader_name: string,

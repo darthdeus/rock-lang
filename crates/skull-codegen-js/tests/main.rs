@@ -6,6 +6,7 @@ mod affine_bounds;
 mod backend_externs;
 mod bounded_standalone_emission;
 mod closure;
+mod coalesce;
 mod common;
 mod deepcopy;
 mod defer_unwind;
