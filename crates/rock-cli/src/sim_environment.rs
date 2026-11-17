@@ -3,7 +3,7 @@
 /// Use a 16:9 window for sims that do not measure pixels.
 pub(crate) const SIM_SMALL_WINDOW: &str = "320x180";
 
-/// Raw FFI readers cannot trigger a render on demand.
+/// Readback and presented UI geometry both depend on the window size.
 pub(crate) static SIM_PIXEL_PREFIXES: &[&str] = &[
     "pixel_readback",
     "stone_pixel_readback",
@@ -19,7 +19,7 @@ fn sim_name_reads_pixels(declared: &str) -> bool {
             .any(|prefix| declared.starts_with(prefix))
 }
 
-/// Pixel readers require rendering and complete image data.
+/// These calls keep the normal window size, including queries of its render targets.
 pub(crate) static SIM_PIXEL_ROOTS: &[&str] = &[
     "take_screenshot",
     "window_probe_new",
@@ -55,7 +55,7 @@ pub(crate) static SIM_PIXEL_ROOTS: &[&str] = &[
     "stone_canvas_bound_as_target",
 ];
 
-/// Scene capacity affects the shape of rendered buffers.
+/// The number and capacity of scene buffers also depend on the window size.
 pub(crate) static SIM_CAPACITY_GLOBALS: &[&str] = &["BLOOM_LEVELS", "SCENE_CAPACITY"];
 
 type FnKey = (
