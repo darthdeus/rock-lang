@@ -18,9 +18,7 @@ fn main() {
     let sum = calculate_sum(5, 3)
 }
 ---
-OPERATION: workspace_symbols
 QUERY: calculate
----
 EXPECTED:
 calculate_sum: Function
 calculate_product: Function
@@ -49,9 +47,7 @@ fn get_user_by_id(id: int) -> UserAccount {
     return UserAccount { id: id, name: "User" }
 }
 ---
-OPERATION: workspace_symbols
 QUERY: User
----
 EXPECTED:
 UserAccount: Struct
 UserProfile: Struct
@@ -85,9 +81,7 @@ fn process_handler(handler: Handler) {
     // Process
 }
 ---
-OPERATION: workspace_symbols
 QUERY: hand
----
 EXPECTED:
 handle_request: Function
 handle_response: Function
@@ -113,9 +107,7 @@ fn POINT_DISTANCE(p1: Point, p2: Point) -> float {
     return dx * dx + dy * dy
 }
 ---
-OPERATION: workspace_symbols
 QUERY: point
----
 EXPECTED:
 Point: Struct
 create_point: Function
@@ -138,9 +130,7 @@ enum Baz {
     Two,
 }
 ---
-OPERATION: workspace_symbols
 QUERY:
----
 EXPECTED:
 foo: Function
 Bar: Struct
@@ -174,9 +164,7 @@ fn main() {
     let v = MathVector { x: 1.0, y: 2.0 }
 }
 ---
-OPERATION: workspace_symbols
 QUERY:
----
 EXPECTED:
 math_add: Function
 MathVector: Struct

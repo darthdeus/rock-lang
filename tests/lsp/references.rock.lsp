@@ -10,9 +10,7 @@ fn main() {
     }
 }
 ---
-OPERATION: references
 POSITION: line=1, character=8
----
 EXPECTED:
 file: main.rock
 line: 1
@@ -44,9 +42,7 @@ fn main() {
     print(calculate(x, y))
 }
 ---
-OPERATION: references
 POSITION: line=0, character=3
----
 EXPECTED:
 file: main.rock
 line: 0
@@ -78,9 +74,7 @@ fn main() {
     print(result)
 }
 ---
-OPERATION: references
 POSITION: line=9, character=23
----
 EXPECTED:
 file: main.rock
 line: 4
@@ -107,9 +101,7 @@ fn main() {
     let p = Point { x: 3.0, y: 4.0 }
 }
 ---
-OPERATION: references
 POSITION: line=0, character=7
----
 EXPECTED:
 file: main.rock
 line: 0
@@ -148,9 +140,7 @@ fn main() {
     }
 }
 ---
-OPERATION: references
 POSITION: line=1, character=4
----
 EXPECTED:
 file: main.rock
 line: 1
@@ -185,9 +175,7 @@ fn main() {
     greet("World", 3)
 }
 ---
-OPERATION: references
 POSITION: line=0, character=9
----
 EXPECTED:
 file: main.rock
 line: 0
@@ -206,9 +194,7 @@ macro decl(Name: ident, Elem: ty) {
     struct Name { v: Elem }
 }
 ---
-OPERATION: references
 POSITION: line=0, character=11
----
 EXPECTED:
 file: main.rock
 line: 0
@@ -220,14 +206,8 @@ character: 11
 
 TEST: find_references_macro_param_ty_fragment
 TYPE: references
----
-macro decl(Name: ident, Elem: ty) {
-    struct Name { v: Elem }
-}
----
-OPERATION: references
+SOURCE: find_references_macro_param_ident_fragment
 POSITION: line=0, character=24
----
 EXPECTED:
 file: main.rock
 line: 0

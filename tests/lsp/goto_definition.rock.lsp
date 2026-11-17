@@ -9,9 +9,7 @@ fn main() {
     let result = calculate(5, 3)
 }
 ---
-OPERATION: goto_definition
 POSITION: line=5, character=17
----
 EXPECTED:
 file: main.rock
 line: 0
@@ -27,9 +25,7 @@ fn main() {
     print(doubled)
 }
 ---
-OPERATION: goto_definition
 POSITION: line=2, character=18
----
 EXPECTED:
 file: main.rock
 line: 1
@@ -49,9 +45,7 @@ fn main() {
     let coordinate = p.x
 }
 ---
-OPERATION: goto_definition
 POSITION: line=7, character=23
----
 EXPECTED:
 file: main.rock
 line: 1
@@ -70,9 +64,7 @@ fn create_vector() -> Vector {
     return Vector { x: 0.0, y: 0.0 }
 }
 ---
-OPERATION: goto_definition
 POSITION: line=5, character=22
----
 EXPECTED:
 file: main.rock
 line: 0
@@ -87,9 +79,7 @@ fn process(data: string, count: int) -> string {
     return result
 }
 ---
-OPERATION: goto_definition
 POSITION: line=1, character=17
----
 EXPECTED:
 file: main.rock
 line: 0
@@ -106,9 +96,7 @@ fn calculate() {
     print(result)
 }
 ---
-OPERATION: goto_definition
 POSITION: line=3, character=17
----
 EXPECTED:
 file: main.rock
 line: 1
@@ -131,8 +119,6 @@ fn main() {
     let p = Point { «cursor»x, y }
 }
 ---
-OPERATION: goto_definition
----
 EXPECTED:
 file: main.rock
 line: 6
@@ -141,22 +127,9 @@ character: 8
 
 TEST: goto_def_shorthand_y_value
 TYPE: goto_definition
----
-struct Point {
-    x: int
-    y: int
-}
-
-fn main() {
-    let x = 100
-    let y = 200
-
-    // Goto definition on 'y' value part
-    let p = Point { x, «cursor»y }
-}
----
-OPERATION: goto_definition
----
+SOURCE: goto_def_shorthand_x_value
+REPLACE: ["    // Goto definition on 'x' value part (should go to variable)", "    // Goto definition on 'y' value part"]
+POSITION: line=10, character=23
 EXPECTED:
 file: main.rock
 line: 7
@@ -178,8 +151,6 @@ fn main() {
     let p = Point { «cursor»x, y: 200 }
 }
 ---
-OPERATION: goto_definition
----
 EXPECTED:
 file: main.rock
 line: 6
@@ -198,8 +169,6 @@ fn main() {
     let player = «cursor»Player { name: "Hero", health: 100 }
 }
 ---
-OPERATION: goto_definition
----
 EXPECTED:
 file: main.rock
 line: 0
@@ -217,8 +186,6 @@ fn main() {
     let e: Enemy = «cursor»Enemy { kind: "goblin" }
 }
 ---
-OPERATION: goto_definition
----
 EXPECTED:
 file: main.rock
 line: 0
@@ -235,8 +202,6 @@ struct Box<T> {
 fn main() {
     let b = «cursor»Box { item: 42 }
 }
----
-OPERATION: goto_definition
 ---
 EXPECTED:
 file: main.rock
@@ -256,8 +221,6 @@ fn main() {
     let s = Shape::«cursor»Circle { radius: 5.0 }
 }
 ---
-OPERATION: goto_definition
----
 EXPECTED:
 file: main.rock
 line: 1
@@ -276,8 +239,6 @@ fn main() {
     let y = «cursor»double(x)
 }
 ---
-OPERATION: goto_definition
----
 EXPECTED:
 file: main.rock
 line: 0
@@ -294,8 +255,6 @@ fn main() {
     }
 }
 ---
-OPERATION: goto_definition
----
 EXPECTED:
 file: main.rock
 line: 1
@@ -309,8 +268,6 @@ fn main() {
     let base = 10
     let f = (x: int) => x + «cursor»base
 }
----
-OPERATION: goto_definition
 ---
 EXPECTED:
 file: main.rock
@@ -334,8 +291,6 @@ fn main() {
     let v = o.inner.«cursor»value
 }
 ---
-OPERATION: goto_definition
----
 EXPECTED:
 file: main.rock
 line: 1
@@ -355,8 +310,6 @@ fn main() {
     let c = Color::«cursor»Red
 }
 ---
-OPERATION: goto_definition
----
 EXPECTED:
 file: main.rock
 line: 1
@@ -375,8 +328,6 @@ fn main() {
     let d = Direction::«cursor»Down
 }
 ---
-OPERATION: goto_definition
----
 EXPECTED:
 file: main.rock
 line: 2
@@ -391,8 +342,6 @@ global counter: int = 0
 fn main() {
     «cursor»counter = 42
 }
----
-OPERATION: goto_definition
 ---
 EXPECTED:
 file: main.rock
@@ -412,8 +361,6 @@ fn main() {
     let p = Point { «cursor»x: 1.0, y: 2.0 }
 }
 ---
-OPERATION: goto_definition
----
 EXPECTED:
 file: main.rock
 line: 1
@@ -427,21 +374,14 @@ co fn producer() -> «cursor»Coroutine<int> {
     yield 42
 }
 ---
-OPERATION: goto_definition
----
 EXPECTED:
 file: unified.rock
 ===
 
 TEST: goto_def_keyword_yield_returns_empty
 TYPE: goto_definition
----
-co fn producer() -> Coroutine<int> {
-    «cursor»yield 42
-}
----
-OPERATION: goto_definition
----
+SOURCE: goto_def_builtin_coroutine_jumps_to_stdlib_resume_landmark
+POSITION: line=1, character=4
 EXPECTED:
 none
 ===
@@ -452,8 +392,6 @@ TYPE: goto_definition
 fn make() -> Vec<«cursor»int> {
     return vec_new()
 }
----
-OPERATION: goto_definition
 ---
 EXPECTED:
 none
@@ -466,8 +404,6 @@ fn make() -> «cursor»Map<string, int> {
     return map_new()
 }
 ---
-OPERATION: goto_definition
----
 EXPECTED:
 file: unified.rock
 ===
@@ -479,21 +415,14 @@ fn use_coroutine(c: «cursor»Coroutine<int>) -> int? {
     return resume(c)
 }
 ---
-OPERATION: goto_definition
----
 EXPECTED:
 file: unified.rock
 ===
 
 TEST: goto_def_builtin_vec_jumps_to_stdlib_vec_struct
 TYPE: goto_definition
----
-fn make() -> «cursor»Vec<int> {
-    return vec_new()
-}
----
-OPERATION: goto_definition
----
+SOURCE: goto_def_primitive_type_returns_empty
+POSITION: line=0, character=13
 EXPECTED:
 file: unified.rock
 ===
@@ -504,8 +433,6 @@ TYPE: goto_definition
 fn make() -> «cursor»NativeBuffer<int> {
     return native_buffer_int(10)
 }
----
-OPERATION: goto_definition
 ---
 EXPECTED:
 file: unified.rock
@@ -518,8 +445,6 @@ fn make() -> «cursor»NativeBufferU8 {
     return native_buffer_u8(10)
 }
 ---
-OPERATION: goto_definition
----
 EXPECTED:
 file: unified.rock
 ===
@@ -530,8 +455,6 @@ TYPE: goto_definition
 fn make() -> «cursor»int {
     return 42
 }
----
-OPERATION: goto_definition
 ---
 EXPECTED:
 none
@@ -553,8 +476,6 @@ fn main() {
     }
 }
 ---
-OPERATION: goto_definition
----
 EXPECTED:
 file: main.rock
 line: 1
@@ -573,8 +494,6 @@ fn main() {
     }
 }
 ---
-OPERATION: goto_definition
----
 EXPECTED:
 file: main.rock
 line: 0
@@ -592,9 +511,7 @@ fn main() {
     twice(41)
 }
 ---
-OPERATION: goto_definition
 POSITION: line=5, character=6
----
 EXPECTED:
 file: main.rock
 line: 0
@@ -615,9 +532,7 @@ fn main() {
     pick(1, 2)
 }
 ---
-OPERATION: goto_definition
 POSITION: line=8, character=5
----
 EXPECTED:
 file: main.rock
 line: 3

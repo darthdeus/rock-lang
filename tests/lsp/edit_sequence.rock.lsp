@@ -16,30 +16,17 @@ EXPECTED:
 min_tokens: 5
 ---
 STEP 2:
-struct Player {
-    health: int,
-    name: string,
-}
-
-fn main() {
-    let p = Player { health: 100, name: "Hero" }
-    print(p.health.to_string())
-    print(p.name)
-}
+SOURCE: 1
+REPLACE: ["    health: int,\n", "    health: int,\n    name: string,\n"]
+REPLACE: ["    let p = Player { health: 100 }\n", "    let p = Player { health: 100, name: \"Hero\" }\n"]
+REPLACE: ["    print(p.health.to_string())\n", "    print(p.health.to_string())\n    print(p.name)\n"]
 ---
 CHECK: semantic_tokens
 EXPECTED:
 min_tokens: 5
 ---
 STEP 3:
-struct Player {
-    health: int,
-}
-
-fn main() {
-    let p = Player { health: 100 }
-    print(p.health.to_string())
-}
+SOURCE: 1
 ---
 CHECK: semantic_tokens
 EXPECTED:
@@ -69,38 +56,15 @@ EXPECTED:
 min_tokens: 8
 ---
 STEP 2:
-struct Enemy {
-    health: int,
-    damage: int,
-}
-
-fn attack(e: Enemy) -> int {
-    return e.damage
-}
-
-fn main() {
-    let e = Enemy { health: 50, damage: 10 }
-    let d = attack(
-}
+SOURCE: 1
+REPLACE: ["    let d = attack(e)", "    let d = attack("]
 ---
 CHECK: semantic_tokens
 EXPECTED:
 non_zero
 ---
 STEP 3:
-struct Enemy {
-    health: int,
-    damage: int,
-}
-
-fn attack(e: Enemy) -> int {
-    return e.damage
-}
-
-fn main() {
-    let e = Enemy { health: 50, damage: 10 }
-    let d = attack(e)
-}
+SOURCE: 1
 ---
 CHECK: semantic_tokens
 EXPECTED:
@@ -142,13 +106,9 @@ EXPECTED:
 min_tokens: 8
 ---
 STEP 3:
-fn farewell(name: string) -> string {
-    return "Goodbye " + name
-}
-
-fn main() {
-    print(farewell("world"))
-}
+SOURCE: 2
+REPLACE: ["fn greet(name: string) -> string {\n    return \"Hello \" + name\n}\n\n", ""]
+REPLACE: ["    print(greet(\"world\"))\n", ""]
 ---
 CHECK: semantic_tokens
 EXPECTED:
@@ -252,16 +212,7 @@ EXPECTED:
 min_tokens: 15
 ---
 STEP 3:
-struct FixVec2 {
-    x: float,
-    y: float,
-}
-
-fn distance(a: FixVec2, b: FixVec2) -> float {
-    let dx = b.x - a.x
-    let dy = b.y - a.y
-    return (dx * dx + dy * dy).sqrt()
-}
+SOURCE: 1
 ---
 CHECK: semantic_tokens
 EXPECTED:

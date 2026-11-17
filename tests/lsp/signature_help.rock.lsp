@@ -11,9 +11,7 @@ fn main() {
     greet("World", 3)
 }
 ---
-OPERATION: signature_help
 POSITION: line=7, character=10
----
 EXPECTED:
 greet(name: string, times: int)
 ===
@@ -33,9 +31,7 @@ fn main() {
     let result = multiply(add(2, 3), 4)
 }
 ---
-OPERATION: signature_help
 POSITION: line=9, character=30
----
 EXPECTED:
 add(a: int, b: int) -> int
 ===
@@ -61,9 +57,7 @@ fn main() {
     let s = process("test")
 }
 ---
-OPERATION: signature_help
 POSITION: line=14, character=20
----
 EXPECTED:
 ACTIVE: fn process(x: float) -> float
 ===
@@ -85,9 +79,7 @@ fn main() {
     let result = compute(calc, 5, 3)
 }
 ---
-OPERATION: signature_help
 POSITION: line=11, character=30
----
 EXPECTED:
 compute(self: Calculator, x: int, y: int) -> int
 ===
@@ -107,9 +99,7 @@ fn main() {
     let numbers = map([1, 2, 3], (x) => x * 2)
 }
 ---
-OPERATION: signature_help
 POSITION: line=9, character=22
----
 EXPECTED:
 fn map(items: [T], mapper: fn(T) -> U) -> [U]
 ===
@@ -126,9 +116,7 @@ fn main() {
     let p = Point { x: 3.0, y: 4.0 }
 }
 ---
-OPERATION: signature_help
 POSITION: line=6, character=21
----
 EXPECTED:
 Point { x: float, y: float }
 ===
@@ -145,9 +133,7 @@ fn main() {
     let msg = format("Hello %s", "Alice")
 }
 ---
-OPERATION: signature_help
 POSITION: line=6, character=21
----
 EXPECTED:
 format(template: string, arg: any) -> string
 ===
@@ -169,9 +155,7 @@ fn main() {
     let evens = filter([1, 2, 3, 4], (x) => x % 2 == 0)
 }
 ---
-OPERATION: signature_help
 POSITION: line=11, character=37
----
 EXPECTED:
 fn filter(items: [T], predicate: fn(T) -> bool) -> [T]
 ===

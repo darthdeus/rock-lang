@@ -9,8 +9,6 @@ fn main() {
     let x = greet(gr«cursor»)
 }
 ---
-OPERATION: completion
----
 EXPECTED:
 - greeting:
 ===
@@ -25,8 +23,6 @@ fn main() {
     configure(«cursor»)
 }
 ---
-OPERATION: completion
----
 EXPECTED:
 - width:
 - height:
@@ -35,16 +31,9 @@ EXPECTED:
 
 TEST: named_arg_completion_skips_earlier_named
 TYPE: completion
----
-fn configure(width: int, height: int, title: string) {
-}
-
-fn main() {
-    configure(width: 10, «cursor»)
-}
----
-OPERATION: completion
----
+SOURCE: named_arg_completion_empty_prefix
+REPLACE: ["    configure()", "    configure(width: 10, )"]
+POSITION: line=4, character=25
 EXPECTED:
 - height:
 - title:
@@ -52,16 +41,9 @@ EXPECTED:
 
 TEST: named_arg_completion_skips_positional
 TYPE: completion
----
-fn configure(width: int, height: int, title: string) {
-}
-
-fn main() {
-    configure(10, «cursor»)
-}
----
-OPERATION: completion
----
+SOURCE: named_arg_completion_empty_prefix
+REPLACE: ["    configure()", "    configure(10, )"]
+POSITION: line=4, character=18
 EXPECTED:
 - height:
 - title:

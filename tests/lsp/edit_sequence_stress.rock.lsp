@@ -242,19 +242,10 @@ EXPECTED:
 min_tokens: 5
 ---
 STEP 5:
-struct Config {
-    width: int,
-    height: int,
-    title: string,
-    fullscreen: bool,
-}
-
-fn main() {
-    let c = Config { width: 800, height: 600, title: "Game", fullscreen: false }
-    print(c.width.to_string())
-    print(c.height.to_string())
-    print(c.title)
-}
+SOURCE: 1
+REPLACE: ["    width: int,\n", "    width: int,\n    height: int,\n    title: string,\n    fullscreen: bool,\n"]
+REPLACE: ["    let c = Config { width: 800 }\n", "    let c = Config { width: 800, height: 600, title: \"Game\", fullscreen: false }\n"]
+REPLACE: ["    print(c.width.to_string())\n", "    print(c.width.to_string())\n    print(c.height.to_string())\n    print(c.title)\n"]
 ---
 CHECK: semantic_tokens
 EXPECTED:

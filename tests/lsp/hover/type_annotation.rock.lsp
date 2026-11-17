@@ -8,8 +8,6 @@ struct Mob {
 fn describe(m: «cursor»Mob) {
 }
 ---
-OPERATION: hover
----
 EXPECTED:
 struct Mob {
   hp: int,

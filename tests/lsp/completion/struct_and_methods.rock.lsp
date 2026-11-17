@@ -7,8 +7,6 @@ fn run() {
     let v = FixVec2 { «cursor»
 }
 ---
-OPERATION: completion
----
 EXPECTED:
 - x: float
 - y: float
@@ -25,8 +23,6 @@ fn run() {
     let v = FixVec2 { x: 1.0, y: 2.0 }
     v.«cursor»
 }
----
-OPERATION: completion
 ---
 EXPECTED:
 - x: float
@@ -45,8 +41,6 @@ fn run() {
 }
 
 fn dist(a: FixVec2) -> float { a.x }
----
-OPERATION: completion
 ---
 EXPECTED:
 - x: float

@@ -7,7 +7,5 @@ fn r(mob: Mob) {
     kill_co(mob, .«cursor»attack_co)
 }
 ---
-OPERATION: hover
----
 EXPECTED:
 attack_co: int? (field of Mob)

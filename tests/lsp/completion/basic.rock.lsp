@@ -11,8 +11,6 @@ fn main() {
     p.«cursor»
 }
 ---
-OPERATION: completion
----
 EXPECTED:
 - x: int
 - y: int
@@ -31,8 +29,6 @@ fn main() {
     rect.«cursor»
 }
 ---
-OPERATION: completion
----
 EXPECTED:
 - width: float
 - height: float
@@ -50,8 +46,6 @@ fn calculate() {
     let sum = fi«cursor»
 }
 ---
-OPERATION: completion
----
 EXPECTED:
 - first_number
 ===
@@ -64,8 +58,6 @@ fn process(input_data: string, max_length: int, verbose: bool) {
         print("debug")
     }
 }
----
-OPERATION: completion
 ---
 EXPECTED:
 - verbose
@@ -89,8 +81,6 @@ fn main() {
     let x = sq«cursor»
 }
 ---
-OPERATION: completion
----
 EXPECTED:
 - sqrt
 ===
@@ -107,8 +97,6 @@ struct Player {
 fn foo(player: Player) {
     if player.pos«cursor»
 }
----
-OPERATION: completion
 ---
 EXPECTED:
 - position_x: float
@@ -127,8 +115,6 @@ struct Vector3 {
 fn process(v: Vector3) {
     print(v.«cursor»
 }
----
-OPERATION: completion
 ---
 EXPECTED:
 - x: float
@@ -151,8 +137,6 @@ fn setup() {
     }
 }
 ---
-OPERATION: completion
----
 EXPECTED:
 - debug_mode: bool
 ===
@@ -167,8 +151,6 @@ fn calculate() {
     
     let result = fi«cursor»
 }
----
-OPERATION: completion
 ---
 EXPECTED:
 - first_value
@@ -185,8 +167,6 @@ struct Database {
 fn check_status(db: Database) {
     let status = db.«cursor» && some_undefined_var
 }
----
-OPERATION: completion
 ---
 EXPECTED:
 - connection_count: int
@@ -210,8 +190,6 @@ fn get_distance(line: Line) {
     let dx = line.start.«cursor»
     // Missing closing brace and rest of function
 ---
-OPERATION: completion
----
 EXPECTED:
 - x: float
 - y: float
@@ -229,8 +207,6 @@ struct Config {
 fn setup(cfg: Config) {
     let message = "Host: " + cfg.«cursor»
     // String concatenation incomplete
----
-OPERATION: completion
 ---
 EXPECTED:
 - host: string
@@ -251,8 +227,6 @@ fn process_items(item: Item) {
     let items = [item.«cursor»
     // Array literal not closed
 ---
-OPERATION: completion
----
 EXPECTED:
 - id: int
 - name: string
@@ -272,8 +246,6 @@ fn compute() -> Result {
     let res = Result { value: 42, success: true, error: "" }
     return res.«cursor»
     // Function ends abruptly
----
-OPERATION: completion
 ---
 EXPECTED:
 - value: int
@@ -301,8 +273,6 @@ fn check_user(user: User) {
         Status::Active => user.«cursor»
         // Missing other arms and closing brace
 ---
-OPERATION: completion
----
 EXPECTED:
 - name: string
 - status: Status
@@ -322,8 +292,6 @@ fn count(counter: Counter) {
     while counter.«cursor»
     // While loop body missing
 ---
-OPERATION: completion
----
 EXPECTED:
 - value: int
 - max: int
@@ -342,8 +310,6 @@ struct Range {
 fn iterate(range: Range) {
     for i in range.«cursor»
     // For loop body missing
----
-OPERATION: completion
 ---
 EXPECTED:
 - start: int
@@ -365,8 +331,6 @@ fn calculate(v1: Vector, v2: Vector) {
     // No space after operator
 }
 ---
-OPERATION: completion
----
 EXPECTED:
 - x: float
 - y: float
@@ -387,8 +351,6 @@ fn update(game: Game) {
     if game.player_x > 100 {
         if game.«cursor»
         // Nested if incomplete
----
-OPERATION: completion
 ---
 EXPECTED:
 - player_x: float
@@ -416,8 +378,6 @@ fn create(entity: CompletionEntity) {
         pos: entity.«cursor»
         // Struct literal incomplete
 ---
-OPERATION: completion
----
 EXPECTED:
 - health: int
 - name: string
@@ -435,8 +395,6 @@ struct Data {
 fn process(d: Data) {
     do_something(d.first,d.«cursor»
     // No space after comma, function call incomplete
----
-OPERATION: completion
 ---
 EXPECTED:
 - first: int
@@ -459,8 +417,6 @@ fn main() {
     }
 }
 ---
-OPERATION: completion
----
 EXPECTED:
 - name: string
 - count: int
@@ -478,8 +434,6 @@ fn main() {
     let enemies: [Enemy] = vec_new()
     let alive = enemies.filter((e: Enemy) => e.«cursor»)
 }
----
-OPERATION: completion
 ---
 EXPECTED:
 - health: int
@@ -504,8 +458,6 @@ fn main() {
     let x = p.pos.«cursor»
 }
 ---
-OPERATION: completion
----
 EXPECTED:
 - x: float
 - y: float
@@ -524,8 +476,6 @@ global state: GameState = GameState { score: 0, level: 1 }
 fn main() {
     let s = state.«cursor»
 }
----
-OPERATION: completion
 ---
 EXPECTED:
 - score: int
@@ -549,8 +499,6 @@ fn main() {
     let x = o?.inner?.«cursor»
 }
 ---
-OPERATION: completion
----
 EXPECTED:
 - value: int
 - name: string
@@ -569,8 +517,6 @@ enum Direction {
 fn main() {
     let d = Direction::«cursor»
 }
----
-OPERATION: completion
 ---
 EXPECTED:
 - Up
@@ -592,8 +538,6 @@ fn main() {
     let s = AiState::Wan«cursor»
 }
 ---
-OPERATION: completion
----
 EXPECTED:
 - Wander
 ===
@@ -610,8 +554,6 @@ fn main() {
     let p = Pair { first: 1, second: "hi" }
     let x = p.«cursor»
 }
----
-OPERATION: completion
 ---
 EXPECTED:
 - first: int
@@ -636,8 +578,6 @@ fn main() {
     }
 }
 ---
-OPERATION: completion
----
 EXPECTED:
 - x: int
 - y: int
@@ -645,24 +585,9 @@ EXPECTED:
 
 TEST: complete_in_match_arm_braced_body
 TYPE: completion
----
-struct Point { x: int, y: int }
-
-enum Opt {
-    None,
-    Some(Point),
-}
-
-fn main() {
-    let o = Opt::Some(Point { x: 1, y: 2 })
-    match o {
-        Opt::Some(p) => { p.«cursor» },
-        Opt::None => {},
-    }
-}
----
-OPERATION: completion
----
+SOURCE: complete_in_match_arm_body
+REPLACE: ["        Opt::Some(p) => p.,", "        Opt::Some(p) => { p. },"]
+POSITION: line=10, character=28
 EXPECTED:
 - x: int
 - y: int
@@ -670,24 +595,9 @@ EXPECTED:
 
 TEST: complete_in_match_arm_without_trailing_comma
 TYPE: completion
----
-struct Point { x: int, y: int }
-
-enum Opt {
-    None,
-    Some(Point),
-}
-
-fn main() {
-    let o = Opt::Some(Point { x: 1, y: 2 })
-    match o {
-        Opt::Some(p) => p.«cursor»
-        Opt::None => {},
-    }
-}
----
-OPERATION: completion
----
+SOURCE: complete_in_match_arm_body
+REPLACE: ["        Opt::Some(p) => p.,", "        Opt::Some(p) => p."]
+POSITION: line=10, character=26
 EXPECTED:
 - x: int
 - y: int
@@ -705,8 +615,6 @@ fn main() {
     let e = Effect::Bandage { «cursor» }
 }
 ---
-OPERATION: completion
----
 EXPECTED:
 - duration: float
 - heal_amount: int
@@ -714,18 +622,9 @@ EXPECTED:
 
 TEST: complete_enum_record_variant_field_with_prefix
 TYPE: completion
----
-enum Effect {
-    Bandage { duration: float, heal_amount: int },
-    Other(int),
-}
-
-fn main() {
-    let e = Effect::Bandage { dura«cursor» }
-}
----
-OPERATION: completion
----
+SOURCE: complete_enum_record_variant_fields
+REPLACE: ["    let e = Effect::Bandage {  }", "    let e = Effect::Bandage { dura }"]
+POSITION: line=6, character=34
 EXPECTED:
 - duration: float
 ===
@@ -744,8 +643,6 @@ fn f(s: Shape) -> int {
     }
     1
 }
----
-OPERATION: completion
 ---
 EXPECTED:
 - Circle

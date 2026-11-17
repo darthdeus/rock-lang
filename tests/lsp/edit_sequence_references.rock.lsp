@@ -54,14 +54,8 @@ EXPECTED:
 7:19
 ---
 STEP 2:
-fn alpha() -> int {
-    return 1
-}
-
-fn beta() -> int {
-    let count = 2
-    return count + count
-}
+SOURCE: 1
+REPLACE: ["    let pad = 0\n", ""]
 ---
 CHECK: references(5, 8)
 EXPECTED:
@@ -89,14 +83,8 @@ EXPECTED:
 5:21
 ---
 STEP 2:
-fn alpha() -> int {
-    let pad = 0
-    return 1 + pad
-}
-
-fn beta() -> int {
-    return alpha() + alpha()
-}
+SOURCE: 1
+REPLACE: ["    return 1\n", "    let pad = 0\n    return 1 + pad\n"]
 ---
 CHECK: references(6, 12)
 EXPECTED:

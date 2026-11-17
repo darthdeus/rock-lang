@@ -13,8 +13,6 @@ fn main() {
     let «cursor»mob = spawn()
 }
 ---
-OPERATION: goto_type_definition
----
 EXPECTED:
 file: main.rock
 line: 0
@@ -37,8 +35,6 @@ fn main() {
     let other = «cursor»mob
 }
 ---
-OPERATION: goto_type_definition
----
 EXPECTED:
 file: main.rock
 line: 0
@@ -55,8 +51,6 @@ fn main() {
     let o = Outer { inner: Inner { value: 1 } }
     let i = o.«cursor»inner
 }
----
-OPERATION: goto_type_definition
 ---
 EXPECTED:
 file: main.rock
@@ -79,8 +73,6 @@ fn main() {
     let m = «cursor»find()
 }
 ---
-OPERATION: goto_type_definition
----
 EXPECTED:
 file: main.rock
 line: 0
@@ -96,8 +88,6 @@ fn main() {
     let «cursor»c = Color::Red
 }
 ---
-OPERATION: goto_type_definition
----
 EXPECTED:
 file: main.rock
 line: 0
@@ -111,8 +101,6 @@ fn main() {
     let «cursor»xs = [1, 2, 3]
 }
 ---
-OPERATION: goto_type_definition
----
 EXPECTED:
 file: unified.rock
 ===
@@ -123,8 +111,6 @@ TYPE: goto_type_definition
 fn main() {
     let «cursor»n = 42
 }
----
-OPERATION: goto_type_definition
 ---
 EXPECTED:
 none
@@ -143,8 +129,6 @@ fn main() {
     let «cursor»c = maker()
 }
 ---
-OPERATION: goto_type_definition
----
 EXPECTED:
 file: main.rock
 line: 0
@@ -161,8 +145,6 @@ co fn nums() -> Coroutine<int> {
 fn main() {
     let «cursor»c = nums()
 }
----
-OPERATION: goto_type_definition
 ---
 EXPECTED:
 none

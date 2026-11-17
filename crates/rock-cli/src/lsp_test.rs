@@ -312,7 +312,7 @@ fn looks_like_directive(line: &str) -> bool {
 /// Parse an LSP test file
 fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
     let contents = fs_err::read_to_string(path)?;
-    let mut tests = Vec::new();
+    let mut tests: Vec<LspTest> = Vec::new();
     let mut lines = contents.lines().peekable();
 
     while let Some(line) = lines.next() {
@@ -363,16 +363,60 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
         }
 
         // Multi-file mode: `FILES:` after `TYPE:` instead of a code block.
-        let is_multi_file = lines.peek().map(|l| l.trim() == "FILES:").unwrap_or(false);
+        let source = lines.next_if(|line| line.starts_with("SOURCE:"));
+        let shared = source
+            .map(|line| {
+                let source = line.strip_prefix("SOURCE:").unwrap().trim();
+                tests
+                    .iter()
+                    .find(|test| test.name == source)
+                    .ok_or_else(|| {
+                        fixture_error(path, &name, format!("unknown earlier SOURCE {source:?}"))
+                    })
+            })
+            .transpose()?;
+        let is_multi_file = shared.map_or_else(
+            || lines.peek().is_some_and(|line| line.trim() == "FILES:"),
+            |test| !test.files.is_empty(),
+        );
 
         let mut files: Vec<(String, String)> = Vec::new();
         let mut primary_file = String::new();
         let mut cursor: Option<(usize, usize)> = None;
         let mut code = String::new();
 
-        if is_multi_file {
+        if let Some(test) = shared {
+            code = test.code.clone();
+            files = test.files.clone();
+            primary_file = test.primary_file.clone();
+            if !files.is_empty()
+                && lines
+                    .peek()
+                    .is_some_and(|line| line.starts_with("REPLACE:"))
+            {
+                return Err(fixture_error(
+                    path,
+                    &name,
+                    "source replacements require a single file",
+                ));
+            }
+            while let Some(line) = lines.next_if(|line| line.starts_with("REPLACE:")) {
+                replace_fixture_source(&mut code, line, path, &name)?;
+            }
+        } else if is_multi_file {
             lines.next(); // consume `FILES:`
-            let (parsed_files, cur) = parse_files_block(&mut lines, &["OPERATION:"], path, &name)?;
+            let (parsed_files, cur) = parse_files_block(
+                &mut lines,
+                &[
+                    "OPERATION:",
+                    "POSITION:",
+                    "NEW_NAME:",
+                    "QUERY:",
+                    "EXPECTED:",
+                ],
+                path,
+                &name,
+            )?;
             if let Some((fname, l, c)) = cur {
                 primary_file = fname.clone();
                 cursor = Some((l, c));
@@ -430,19 +474,11 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
             code = code_lines.join("\n");
         }
 
-        let op_type = match lines.next() {
-            Some(op_line) => match op_line.strip_prefix("OPERATION:") {
-                Some(op) => op.trim(),
-                None => {
-                    return Err(fixture_error(
-                        path,
-                        &name,
-                        format!("expected `OPERATION:` after the code block, found {op_line:?}"),
-                    ));
-                }
-            },
-            None => return Err(fixture_error(path, &name, "file ends before `OPERATION:`")),
-        };
+        let op_type = lines
+            .next_if(|line| line.starts_with("OPERATION:"))
+            .map_or(test_type.as_str(), |line| {
+                line.strip_prefix("OPERATION:").unwrap().trim()
+            });
         let at = |lines: &mut std::iter::Peekable<_>| {
             operation_position(lines, cursor, path, &name, op_type)
         };
@@ -685,7 +721,7 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
                         .filter_map(|l| l.strip_prefix("- ").map(str::to_string)),
                 );
             } else if rename_lines.iter().any(|l| !l.trim().is_empty()) {
-                expected_code = Some(rename_lines.join("\n"));
+                expected_code = Some(fixture_result(&code, &rename_lines, path, &name)?);
             }
         }
 
@@ -709,7 +745,9 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
                 (false, None) => {
                     return Err(fixture_error(path, &name, "code action has no `RESULT:`"));
                 }
-                (false, Some(result)) => expected_code = Some(result.join("\n")),
+                (false, Some(result)) => {
+                    expected_code = Some(fixture_result(&code, &result, path, &name)?)
+                }
             }
         }
 
@@ -741,6 +779,41 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
     }
 
     Ok(tests)
+}
+
+fn fixture_result(source: &str, lines: &[String], path: &Path, name: &str) -> Result<String> {
+    if !lines
+        .first()
+        .is_some_and(|line| line.starts_with("REPLACE:"))
+    {
+        return Ok(lines.join("\n"));
+    }
+    let mut result = source.to_string();
+    for line in lines {
+        replace_fixture_source(&mut result, line, path, name)?;
+    }
+    Ok(result)
+}
+
+fn replace_fixture_source(source: &mut String, line: &str, path: &Path, name: &str) -> Result<()> {
+    let pair = line.strip_prefix("REPLACE:").ok_or_else(|| {
+        fixture_error(
+            path,
+            name,
+            "REPLACE expectations cannot mix with source text",
+        )
+    })?;
+    let (old, new): (String, String) = serde_json::from_str(pair)
+        .map_err(|error| fixture_error(path, name, format!("invalid REPLACE: {error}")))?;
+    if old.is_empty() || !source.contains(&old) {
+        return Err(fixture_error(
+            path,
+            name,
+            "REPLACE source is empty or absent",
+        ));
+    }
+    *source = source.replace(&old, &new);
+    Ok(())
 }
 
 /// The two numbers of a `LINE:COL` or `LINE, COL` pair, or `None` when the text
@@ -832,7 +905,7 @@ fn parse_edit_sequence_tests(path: &Path) -> Result<Vec<EditSequenceTest>> {
             }
         }
 
-        let mut steps = Vec::new();
+        let mut steps: Vec<EditStep> = Vec::new();
 
         // Parse steps until ===
         while let Some(next) = lines.next() {
@@ -867,6 +940,35 @@ fn parse_edit_sequence_tests(path: &Path) -> Result<Vec<EditSequenceTest>> {
             let mode = parse_step_mode(step_line, code_lines.join("\n")).ok_or_else(|| {
                 fixture_error(path, &name, format!("malformed step header {step_line:?}"))
             })?;
+
+            let mode = match mode {
+                StepMode::FullReplace { code } if code.starts_with("SOURCE:") => {
+                    let mut body = code.lines();
+                    let source = body.next().unwrap().strip_prefix("SOURCE:").unwrap().trim();
+                    let reference = source
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|n| n.checked_sub(1))
+                        .and_then(|index| steps.get(index));
+                    let Some(EditStep {
+                        mode: StepMode::FullReplace { code },
+                        ..
+                    }) = reference
+                    else {
+                        return Err(fixture_error(
+                            path,
+                            &name,
+                            "SOURCE must name an earlier full-document step",
+                        ));
+                    };
+                    let mut code = code.clone();
+                    for replacement in body {
+                        replace_fixture_source(&mut code, replacement, path, &name)?;
+                    }
+                    StepMode::FullReplace { code }
+                }
+                mode => mode,
+            };
 
             // Parse checks for this step
             let mut checks = Vec::new();
@@ -3189,6 +3291,60 @@ min_tokens: 5\n\
         tests.pop().unwrap()
     }
 
+    #[test]
+    fn fixtures_can_share_source_and_describe_exact_replacements() {
+        let fixtures = format!(
+            "{RENAME_FIXTURE}\nTEST: another rename\nTYPE: rename\nSOURCE: stub rename\nPOSITION: line=1, character=8\nNEW_NAME: sum\nEXPECTED:\nREPLACE: [\"count\", \"sum\"]\n===\n"
+        );
+        let tests = parse_fixtures(&fixtures).unwrap();
+        assert_eq!(tests.len(), 2);
+        assert_eq!(tests[1].code, tests[0].code);
+        let edited = fixtures.replace(
+            "SOURCE: stub rename\n",
+            "SOURCE: stub rename\nREPLACE: [\"1\", \"2\"]\n",
+        );
+        let edited = parse_fixtures(&edited).unwrap();
+        assert_eq!(edited[1].code, tests[0].code.replace('1', "2"));
+        assert_eq!(
+            edited[1].expected_code.as_deref(),
+            Some("fn main() {\nlet sum = 2\nprint(sum)\n}")
+        );
+        assert_eq!(
+            tests[1].expected_code.as_deref(),
+            Some("fn main() {\nlet sum = 1\nprint(sum)\n}")
+        );
+        assert!(
+            matches!(&tests[1].operation, LspOperation::Rename { line: 1, character: 8, new_name } if new_name == "sum")
+        );
+        for invalid in [
+            fixtures.replace("SOURCE: stub rename", "SOURCE: missing"),
+            fixtures.replace("[\"count\", \"sum\"]", "[\"missing\", \"sum\"]"),
+            fixtures.replace("[\"count\", \"sum\"]", "[]"),
+        ] {
+            assert!(parse_fixtures(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn full_document_steps_can_replace_text_from_an_earlier_step() {
+        let fixture = "TEST: replace step\nTYPE: edit_sequence\n---\nSTEP 1:\nfn main() { print(1) }\n---\nSTEP 2:\nSOURCE: 1\nREPLACE: [\"print(1)\", \"print(2)\"]\n---\n===\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sequence.rock.lsp");
+        std::fs::write(&path, fixture).unwrap();
+        let tests = parse_edit_sequence_tests(&path).unwrap();
+        assert!(
+            matches!(&tests[0].steps[1].mode, StepMode::FullReplace { code } if code == "fn main() { print(2) }")
+        );
+        for reference in ["0", "2", "missing"] {
+            std::fs::write(
+                &path,
+                fixture.replace("SOURCE: 1", &format!("SOURCE: {reference}")),
+            )
+            .unwrap();
+            assert!(parse_edit_sequence_tests(&path).is_err());
+        }
+    }
+
     /// The fixture must fail, and the failure must name the request and quote
     /// the raw reply.
     fn assert_fixture_fails(fixture: &str, reply: &str, request: &str) -> String {
@@ -3333,7 +3489,7 @@ min_tokens: 5\n\
             ),
             (
                 hover_with("EXPECTED:\nfn main()\n===\n"),
-                "expected `OPERATION:`",
+                "needs a `POSITION:` line or a cursor marker",
             ),
             (
                 hover_with("OPERATION: hover\nEXPECTED:\nfn main()\n===\n"),

@@ -10,8 +10,6 @@ fn name(k: MobKind) -> string {
     }
 }
 ---
-OPERATION: hover
----
 EXPECTED:
 ```rock
 MobKind::Skeleton
@@ -20,18 +18,8 @@ MobKind::Skeleton
 
 TEST: hover_enum_qualifier_in_pattern_shows_the_body
 TYPE: hover
----
-enum MobKind { Skeleton, Zombie }
-
-fn name(k: MobKind) -> string {
-    match k {
-        «cursor»MobKind::Skeleton => "s"
-        MobKind::Zombie => "z"
-    }
-}
----
-OPERATION: hover
----
+SOURCE: hover_enum_variant_pattern_names_the_variant
+POSITION: line=4, character=8
 EXPECTED:
 ```rock
 enum MobKind {
@@ -43,18 +31,8 @@ enum MobKind {
 
 TEST: hover_double_colon_in_pattern_shows_the_enum_body
 TYPE: hover
----
-enum MobKind { Skeleton, Zombie }
-
-fn name(k: MobKind) -> string {
-    match k {
-        MobKind«cursor»::Skeleton => "s"
-        MobKind::Zombie => "z"
-    }
-}
----
-OPERATION: hover
----
+SOURCE: hover_enum_qualifier_in_pattern_shows_the_body
+POSITION: line=4, character=15
 EXPECTED:
 ```rock
 enum MobKind {

@@ -6,14 +6,10 @@ fn main() {
     print(x)
 }
 ---
-OPERATION: code_action
----
 EXPECTED:
 ACTION_TITLE: Inline local `x`
 RESULT:
-fn main() {
-    print(42)
-}
+REPLACE: ["    let x = 42\n    print(x)\n", "    print(42)\n"]
 ===
 
 TEST: inline_variable_multiple_uses
@@ -26,16 +22,10 @@ fn main() {
     return result
 }
 ---
-OPERATION: code_action
----
 EXPECTED:
 ACTION_TITLE: Inline local `value`
 RESULT:
-fn main() {
-    print(10 + 20)
-    let result = (10 + 20) * 2
-    return result
-}
+REPLACE: ["    let value = 10 + 20\n    print(value)\n    let result = value * 2\n", "    print(10 + 20)\n    let result = (10 + 20) * 2\n"]
 ===
 
 TEST: inline_variable_with_complex_expression
@@ -46,14 +36,10 @@ fn calculate(x: int) -> int {
     return temp * temp
 }
 ---
-OPERATION: code_action
----
 EXPECTED:
 ACTION_TITLE: Inline local `temp`
 RESULT:
-fn calculate(x: int) -> int {
-    return (x * 2 + 1) * (x * 2 + 1)
-}
+REPLACE: ["    let temp = x * 2 + 1\n    return temp * temp\n", "    return (x * 2 + 1) * (x * 2 + 1)\n"]
 ===
 
 TEST: inline_variable_in_function_call
@@ -69,19 +55,10 @@ fn main() {
     print(result)
 }
 ---
-OPERATION: code_action
----
 EXPECTED:
 ACTION_TITLE: Inline local `num`
 RESULT:
-fn process(value: int) -> int {
-    return value * 2
-}
-
-fn main() {
-    let result = process(42)
-    print(result)
-}
+REPLACE: ["    let num = 42\n    let result = process(num)\n", "    let result = process(42)\n"]
 ===
 
 TEST: inline_variable_with_side_effects
@@ -97,8 +74,6 @@ fn main() {
     print(x)
     print(x)
 }
----
-OPERATION: code_action
 ---
 EXPECTED:
 NO_ACTION: Inline local `x`
@@ -117,19 +92,10 @@ fn main() {
     print(x)
 }
 ---
-OPERATION: code_action
----
 EXPECTED:
 ACTION_TITLE: Inline local `x`
 RESULT:
-fn get_value() -> int {
-    print("Getting value")
-    return 42
-}
-
-fn main() {
-    print(get_value())
-}
+REPLACE: ["    let x = get_value()\n    print(x)\n", "    print(get_value())\n"]
 ===
 
 TEST: no_inline_of_a_side_effecting_initializer_used_in_a_loop
@@ -146,8 +112,6 @@ fn main() {
         print(x + i)
     }
 }
----
-OPERATION: code_action
 ---
 EXPECTED:
 NO_ACTION: Inline local `x`
@@ -167,8 +131,6 @@ fn main() {
     print(f())
 }
 ---
-OPERATION: code_action
----
 EXPECTED:
 NO_ACTION: Inline local `x`
 ===
@@ -182,8 +144,6 @@ fn main() {
     print(x)
     print(x)
 }
----
-OPERATION: code_action
 ---
 EXPECTED:
 NO_ACTION: Inline local `x`
@@ -204,21 +164,10 @@ fn main() {
     print(s)
 }
 ---
-OPERATION: code_action
----
 EXPECTED:
 ACTION_TITLE: Inline local `s`
 RESULT:
-struct Point {
-    x: int
-    y: int
-}
-
-fn main() {
-    let p = Point { x: 1, y: 2 }
-    print(p.x + p.y)
-    print(p.x + p.y)
-}
+REPLACE: ["    let s = p.x + p.y\n    print(s)\n    print(s)\n", "    print(p.x + p.y)\n    print(p.x + p.y)\n"]
 ===
 
 TEST: inline_variable_in_if_condition
@@ -231,16 +180,10 @@ fn main() {
     }
 }
 ---
-OPERATION: code_action
----
 EXPECTED:
 ACTION_TITLE: Inline local `condition`
 RESULT:
-fn main() {
-    if true {
-        print("Yes")
-    }
-}
+REPLACE: ["    let condition = true\n    if condition {\n", "    if true {\n"]
 ===
 
 TEST: inline_string_variable
@@ -251,14 +194,10 @@ fn main() {
     print(message)
 }
 ---
-OPERATION: code_action
----
 EXPECTED:
 ACTION_TITLE: Inline local `message`
 RESULT:
-fn main() {
-    print("Hello, World!")
-}
+REPLACE: ["    let message = \"Hello, World!\"\n    print(message)\n", "    print(\"Hello, World!\")\n"]
 ===
 
 TEST: inline_variable_nested_scope
@@ -272,15 +211,9 @@ fn main() {
     }
 }
 ---
-OPERATION: code_action
----
 EXPECTED:
 ACTION_TITLE: Inline local `outer`
 RESULT:
-fn main() {
-    {
-        let inner = 10 + 5
-        print(inner)
-    }
-}
+REPLACE: ["    let outer = 10\n", ""]
+REPLACE: ["        let inner = outer + 5\n", "        let inner = 10 + 5\n"]
 ===

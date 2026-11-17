@@ -8,8 +8,6 @@ fn main() {
     let w = true
 }
 ---
-OPERATION: inlay_hints
----
 EXPECTED:
 fn main() {
     let x«hint:: int» = 42
@@ -33,8 +31,6 @@ fn main() {
     let map = map_new()
     map.insert("origin", p)
 }
----
-OPERATION: inlay_hints
 ---
 EXPECTED:
 struct Point {
@@ -65,8 +61,6 @@ fn main() {
     let result = calculate(10, 20, "add")
 }
 ---
-OPERATION: inlay_hints
----
 EXPECTED:
 fn calculate(x: int, y: int, operation: string) -> int {
     if operation == "add" {
@@ -93,8 +87,6 @@ fn main() {
     let text = identity("hello")
     let list = identity([1, 2, 3])
 }
----
-OPERATION: inlay_hints
 ---
 EXPECTED:
 fn identity<T>(value: T) -> T {
@@ -124,8 +116,6 @@ fn main() {
     let missing = find_user(999)
 }
 ---
-OPERATION: inlay_hints
----
 EXPECTED:
 fn find_user(id: int) -> string? {
     if id == 1 {
@@ -150,8 +140,6 @@ fn main() {
     let greet = (name) => print("Hello, " + name)
 }
 ---
-OPERATION: inlay_hints
----
 EXPECTED:
 fn main() {
     let add = (a, b) => a + b
@@ -170,8 +158,6 @@ fn main() {
         print(item.name)
     }
 }
----
-OPERATION: inlay_hints
 ---
 EXPECTED:
 struct Item { name: string }
@@ -202,8 +188,6 @@ fn main() {
     }
 }
 ---
-OPERATION: inlay_hints
----
 EXPECTED:
 struct Point { x: int, y: int }
 
@@ -233,8 +217,6 @@ fn Mob.take_damage(m, amount: float) {
 fn Vec<T>.first(v) -> T {
     return v[0]
 }
----
-OPERATION: inlay_hints
 ---
 EXPECTED:
 struct Mob { health: float }

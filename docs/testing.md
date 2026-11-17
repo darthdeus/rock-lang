@@ -106,6 +106,14 @@ For behavior that depends on prior edits, use an `edit_sequence` fixture such
 as [`edit_sequence.rock.lsp`](../tests/lsp/edit_sequence.rock.lsp). Query and
 protocol tests also live in the `bone-query` and `rock-lsp` crates.
 
+`TYPE:` supplies the operation unless an explicit `OPERATION:` follows the
+source. A case can reuse an earlier case's text with `SOURCE: case_name` and
+choose its cursor with `POSITION:`. Literal `REPLACE: ["old", "new"]` pairs
+after `SOURCE:` describe source variants. The same pairs in a rename's
+`EXPECTED:` or an action's `RESULT:` construct the exact expected whole file.
+Full-document edit steps can use `SOURCE: N` to reuse an earlier step and apply
+literal replacements before sending the complete document.
+
 ## Stone simulations
 
 A `@sim` runs a Stone game through the real engine loop in a fresh process.

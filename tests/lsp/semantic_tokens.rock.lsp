@@ -20,8 +20,6 @@ fn main() {
     print("Distance: " + dist.to_string())
 }
 ---
-OPERATION: semantic_tokens
----
 EXPECTED:
 min_tokens: 30
 ===
@@ -40,8 +38,6 @@ struct Rectangle {
     height: float,
     color: Color,
 }
----
-OPERATION: semantic_tokens
 ---
 EXPECTED:
 min_tokens: 10
@@ -70,8 +66,6 @@ fn process_shape(shape: ShapeKind) {
     }
 }
 ---
-OPERATION: semantic_tokens
----
 EXPECTED:
 min_tokens: 5
 ===
@@ -91,8 +85,6 @@ fn handle_string(text: string?) {
     let result = text ?? "default"
     print(result)
 }
----
-OPERATION: semantic_tokens
 ---
 EXPECTED:
 min_tokens: 10
@@ -125,8 +117,6 @@ fn update_entities() {
     let another_sprite = Sprite { width: 32, height: 32 }
     draw_sprite(another_sprite, pos, rect(0, 0, 32, 32))
 }
----
-OPERATION: semantic_tokens
 ---
 EXPECTED:
 min_tokens: 20
@@ -163,8 +153,6 @@ fn game_loop() {
     }
 }
 ---
-OPERATION: semantic_tokens
----
 EXPECTED:
 min_tokens: 15
 ===
@@ -179,8 +167,6 @@ co fn outer() -> Coroutine<int> {
     await inner()
     yield 3
 }
----
-OPERATION: semantic_tokens
 ---
 EXPECTED:
 min_tokens: 14

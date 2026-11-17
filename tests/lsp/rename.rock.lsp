@@ -6,14 +6,9 @@ fn main() {
     print(foo)
 }
 ---
-OPERATION: rename
 NEW_NAME: bar
----
 EXPECTED:
-fn main() {
-    let bar = 42
-    print(bar)
-}
+REPLACE: ["foo", "bar"]
 ===
 
 TEST: rename_function_parameter
@@ -28,18 +23,9 @@ fn main() {
     print(result)
 }
 ---
-OPERATION: rename
 NEW_NAME: value
----
 EXPECTED:
-fn calculate(value: int, y: int) -> int {
-    return value + y * value
-}
-
-fn main() {
-    let result = calculate(10, 20)
-    print(result)
-}
+REPLACE: ["x", "value"]
 ===
 
 TEST: rename_struct_field
@@ -59,23 +45,9 @@ fn main() {
     print(p.x)
 }
 ---
-OPERATION: rename
 NEW_NAME: x_coord
----
 EXPECTED:
-struct Point {
-    x_coord: float,
-    y: float,
-}
-
-fn distance(p: Point) -> float {
-    return (p.x_coord * p.x_coord + p.y * p.y).sqrt()
-}
-
-fn main() {
-    let p = Point { x_coord: 3.0, y: 4.0 }
-    print(p.x_coord)
-}
+REPLACE: ["x", "x_coord"]
 ===
 
 TEST: rename_function_used_as_bare_value
@@ -94,22 +66,9 @@ fn main() {
     print(result)
 }
 ---
-OPERATION: rename
 NEW_NAME: triple
----
 EXPECTED:
-fn apply(f: fn(int) -> int, x: int) -> int {
-    return f(x)
-}
-
-fn triple(x: int) -> int {
-    return x * 2
-}
-
-fn main() {
-    let result = apply(triple, 10)
-    print(result)
-}
+REPLACE: ["double", "triple"]
 ===
 
 TEST: rename_function_name
@@ -128,50 +87,25 @@ fn main() {
     print(area(c))
 }
 ---
-OPERATION: rename
 NEW_NAME: calculate_area
----
 EXPECTED:
-struct Circle {
-    radius: float,
-}
-
-fn calculate_area(c: Circle) -> float {
-    return 3.14159 * c.radius * c.radius
-}
-
-fn main() {
-    let c = Circle { radius: 5.0 }
-    print(calculate_area(c))
-}
+REPLACE: ["area", "calculate_area"]
 ===
 
 TEST: rename_to_keyword_error
 TYPE: rename
----
-fn main() {
-    let «start»foo«end» = 42
-    print(foo)
-}
----
-OPERATION: rename
+SOURCE: rename_local_variable_simple
+POSITION: line=1, character=8
 NEW_NAME: fn
----
 EXPECTED:
 REFUSED: cannot rename to `fn`: not an identifier
 ===
 
 TEST: rename_to_several_tokens_error
 TYPE: rename
----
-fn main() {
-    let «start»foo«end» = 42
-    print(foo)
-}
----
-OPERATION: rename
+SOURCE: rename_local_variable_simple
+POSITION: line=1, character=8
 NEW_NAME: 1 bad
----
 EXPECTED:
 REFUSED: cannot rename to `1 bad`: not an identifier
 ===
@@ -187,17 +121,9 @@ fn map_pair<T, U>(first: T, second: U) -> (T, U) {
     return (first, second)
 }
 ---
-OPERATION: rename
 NEW_NAME: Element
----
 EXPECTED:
-fn identity<Element>(value: Element) -> Element {
-    return value
-}
-
-fn map_pair<T, U>(first: T, second: U) -> (T, U) {
-    return (first, second)
-}
+REPLACE: ["fn identity<T>(value: T) -> T {", "fn identity<Element>(value: Element) -> Element {"]
 ===
 
 TEST: rename_in_pattern_match
@@ -215,21 +141,9 @@ fn my_unwrap<T>(opt: Option<T>) -> T? {
     }
 }
 ---
-OPERATION: rename
 NEW_NAME: inner
----
 EXPECTED:
-enum Option<T> {
-    Some(T),
-    None,
-}
-
-fn my_unwrap<T>(opt: Option<T>) -> T? {
-    match opt {
-        Option::Some(inner) => inner,
-        Option::None => null,
-    }
-}
+REPLACE: ["value", "inner"]
 ===
 
 TEST: rename_shorthand_var_x
@@ -249,59 +163,24 @@ fn main() {
     print(x)
 }
 ---
-OPERATION: rename
 NEW_NAME: x_coord
----
 EXPECTED:
-struct Point {
-    x: int
-    y: int
-}
-
-fn main() {
-    let x_coord = 100
-    let y = 200
-
-    // Rename on shorthand variable 'x'
-    let p = Point { x: x_coord, y }
-    print(x_coord)
-}
+REPLACE: ["    let x = 100", "    let x_coord = 100"]
+REPLACE: ["    let p = Point { x, y }", "    let p = Point { x: x_coord, y }"]
+REPLACE: ["    print(x)", "    print(x_coord)"]
 ===
 
 TEST: rename_shorthand_var_y
 TYPE: rename
----
-struct Point {
-    x: int
-    y: int
-}
-
-fn main() {
-    let x = 100
-    let y = 200
-
-    // Rename on shorthand variable 'y'
-    let p = Point { x, «cursor»y }
-    print(y)
-}
----
-OPERATION: rename
+SOURCE: rename_shorthand_var_x
+REPLACE: ["    // Rename on shorthand variable 'x'", "    // Rename on shorthand variable 'y'"]
+REPLACE: ["    print(x)", "    print(y)"]
+POSITION: line=10, character=23
 NEW_NAME: y_coord
----
 EXPECTED:
-struct Point {
-    x: int
-    y: int
-}
-
-fn main() {
-    let x = 100
-    let y_coord = 200
-
-    // Rename on shorthand variable 'y'
-    let p = Point { x, y: y_coord }
-    print(y_coord)
-}
+REPLACE: ["    let y = 200", "    let y_coord = 200"]
+REPLACE: ["    let p = Point { x, y }", "    let p = Point { x, y: y_coord }"]
+REPLACE: ["    print(y)", "    print(y_coord)"]
 ===
 
 TEST: rename_enum_variant_from_decl
@@ -326,28 +205,9 @@ fn main() {
     print(describe(c))
 }
 ---
-OPERATION: rename
 NEW_NAME: Crimson
----
 EXPECTED:
-enum Color {
-    Crimson,
-    Green,
-    Blue,
-}
-
-fn describe(c: Color) -> int {
-    match c {
-        Color::Crimson => 1,
-        Color::Green => 2,
-        Color::Blue => 3,
-    }
-}
-
-fn main() {
-    let c = Color::Crimson
-    print(describe(c))
-}
+REPLACE: ["Red", "Crimson"]
 ===
 
 TEST: rename_enum_variant_from_use
@@ -363,19 +223,9 @@ fn main() {
     print(c)
 }
 ---
-OPERATION: rename
 NEW_NAME: Crimson
----
 EXPECTED:
-enum Color {
-    Crimson,
-    Green,
-}
-
-fn main() {
-    let c = Color::Crimson
-    print(c)
-}
+REPLACE: ["Red", "Crimson"]
 ===
 
 TEST: rename_enum_variant_from_pattern
@@ -397,25 +247,9 @@ fn main() {
     print(describe(Color::Red))
 }
 ---
-OPERATION: rename
 NEW_NAME: Crimson
----
 EXPECTED:
-enum Color {
-    Crimson,
-    Green,
-}
-
-fn describe(c: Color) -> int {
-    match c {
-        Color::Crimson => 1,
-        Color::Green => 2,
-    }
-}
-
-fn main() {
-    print(describe(Color::Crimson))
-}
+REPLACE: ["Red", "Crimson"]
 ===
 
 TEST: rename_enum_tuple_variant
@@ -438,26 +272,9 @@ fn main() {
     print(area(s))
 }
 ---
-OPERATION: rename
 NEW_NAME: Round
----
 EXPECTED:
-enum Shape {
-    Round(float),
-    Square(float),
-}
-
-fn area(s: Shape) -> float {
-    match s {
-        Shape::Round(r) => r * r * 3.14,
-        Shape::Square(w) => w * w,
-    }
-}
-
-fn main() {
-    let s = Shape::Round(2.0)
-    print(area(s))
-}
+REPLACE: ["Circle", "Round"]
 ===
 
 TEST: rename_enum_variant_same_name_other_enum_untouched
@@ -480,9 +297,7 @@ fn main() {
     print(p)
 }
 ---
-OPERATION: rename
 NEW_NAME: Crimson
----
 EXPECTED:
 enum Color {
     Crimson,
@@ -522,26 +337,9 @@ fn main() {
     print(describe(c))
 }
 ---
-OPERATION: rename
 NEW_NAME: Hue
----
 EXPECTED:
-enum Hue {
-    Red,
-    Green,
-}
-
-fn describe(c: Hue) -> int {
-    match c {
-        Hue::Red => 1,
-        Hue::Green => 2,
-    }
-}
-
-fn main() {
-    let c = Hue::Red
-    print(describe(c))
-}
+REPLACE: ["Color", "Hue"]
 ===
 
 TEST: rename_generic_type_param_scoped
@@ -555,17 +353,9 @@ fn second<T>(v: T) -> T {
     return v
 }
 ---
-OPERATION: rename
 NEW_NAME: Item
----
 EXPECTED:
-fn first<Item>(x: Item, y: Item) -> Item {
-    return x
-}
-
-fn second<T>(v: T) -> T {
-    return v
-}
+REPLACE: ["fn first<T>(x: T, y: T) -> T {", "fn first<Item>(x: Item, y: Item) -> Item {"]
 ===
 
 TEST: rename_pattern_shorthand_binding
@@ -582,20 +372,9 @@ fn get_sum(p: Point) -> int {
     }
 }
 ---
-OPERATION: rename
 NEW_NAME: qx
----
 EXPECTED:
-struct Point {
-    x: int
-    y: int
-}
-
-fn get_sum(p: Point) -> int {
-    match p {
-        Point { x: qx, y } => qx + y,
-    }
-}
+REPLACE: ["        Point { x, y } => x + y,", "        Point { x: qx, y } => qx + y,"]
 ===
 
 TEST: rename_struct_field_with_shorthand_literal
@@ -613,21 +392,11 @@ fn main() {
     print(p.x)
 }
 ---
-OPERATION: rename
 NEW_NAME: px
----
 EXPECTED:
-struct Point {
-    px: int
-    y: int
-}
-
-fn main() {
-    let x = 1
-    let y = 2
-    let p = Point { px: x, y }
-    print(p.px)
-}
+REPLACE: ["    x: int", "    px: int"]
+REPLACE: ["    let p = Point { x, y }", "    let p = Point { px: x, y }"]
+REPLACE: ["    print(p.x)", "    print(p.px)"]
 ===
 
 TEST: rename_struct_in_nullable_annotation
@@ -648,24 +417,9 @@ fn give() -> Mob? {
     return held
 }
 ---
-OPERATION: rename
 NEW_NAME: Beast
----
 EXPECTED:
-struct Beast {
-    hp: int
-}
-
-global CACHED: Beast? = null
-
-fn take(m: Beast?) {
-    print(m)
-}
-
-fn give() -> Beast? {
-    let held: Beast? = null
-    return held
-}
+REPLACE: ["Mob", "Beast"]
 ===
 
 TEST: rename_field_through_safe_nav
@@ -684,22 +438,9 @@ fn main() {
     print(o.inner?.text ?? "none")
 }
 ---
-OPERATION: rename
 NEW_NAME: label
----
 EXPECTED:
-struct Inner {
-    label: string
-}
-
-struct Outer {
-    inner: Inner?
-}
-
-fn main() {
-    let o = Outer { inner: null }
-    print(o.inner?.label ?? "none")
-}
+REPLACE: ["text", "label"]
 ===
 
 TEST: rename_fn_at_safe_nav_call_site
@@ -718,22 +459,9 @@ fn main() {
     print(m?.mob_heal() ?? 0)
 }
 ---
-OPERATION: rename
 NEW_NAME: mob_restore
----
 EXPECTED:
-struct Mob {
-    hp: int
-}
-
-fn mob_restore(m: Mob) -> int {
-    return m.hp
-}
-
-fn main() {
-    let m: Mob? = Mob { hp: 1 }
-    print(m?.mob_restore() ?? 0)
-}
+REPLACE: ["mob_heal", "mob_restore"]
 ===
 
 TEST: rename_field_with_sibling_ref_default
@@ -749,19 +477,9 @@ fn main() {
     print(s.boosted)
 }
 ---
-OPERATION: rename
 NEW_NAME: strength
----
 EXPECTED:
-struct Spell {
-    strength: int,
-    boosted: int = .strength,
-}
-
-fn main() {
-    let s = Spell { strength: 2 }
-    print(s.boosted)
-}
+REPLACE: ["power", "strength"]
 ===
 
 TEST: rename_param_updates_named_arg_call_sites
@@ -777,19 +495,9 @@ fn main() {
     spawn_it(4, size: 2.0)
 }
 ---
-OPERATION: rename
 NEW_NAME: amount
----
 EXPECTED:
-fn spawn_it(amount: int, size: float) {
-    print(amount)
-    print(size)
-}
-
-fn main() {
-    spawn_it(amount: 3, size: 1.0)
-    spawn_it(4, size: 2.0)
-}
+REPLACE: ["count", "amount"]
 ===
 
 TEST: rename_field_at_fieldref_key_path_arg
@@ -804,18 +512,9 @@ fn main() {
     print("{field_get(m, .health)}")
 }
 ---
-OPERATION: rename
 NEW_NAME: vitality
----
 EXPECTED:
-struct Mob {
-    vitality: int,
-}
-
-fn main() {
-    let m = Mob { vitality: 10 }
-    print("{field_get(m, .vitality)}")
-}
+REPLACE: ["health", "vitality"]
 ===
 
 TEST: rename_global_from_decl
@@ -832,20 +531,9 @@ fn main() {
     print("s {SCORE}")
 }
 ---
-OPERATION: rename
 NEW_NAME: POINTS
----
 EXPECTED:
-global POINTS: int = 0
-
-fn bump() {
-    POINTS = POINTS + 1
-}
-
-fn main() {
-    bump()
-    print("s {POINTS}")
-}
+REPLACE: ["SCORE", "POINTS"]
 ===
 
 TEST: rename_global_from_use_site
@@ -859,17 +547,10 @@ fn bump() {
     SCOREBOARD = 2
 }
 ---
-OPERATION: rename
 NEW_NAME: POINTS
----
 EXPECTED:
-global POINTS: int = 0
-global SCOREBOARD: int = 1
-
-fn bump() {
-    POINTS = POINTS + 1
-    SCOREBOARD = 2
-}
+REPLACE: ["global SCORE: int = 0", "global POINTS: int = 0"]
+REPLACE: ["    SCORE = SCORE + 1", "    POINTS = POINTS + 1"]
 ===
 
 TEST: rename_newtype_from_decl
@@ -886,50 +567,18 @@ fn main() {
     greet(id)
 }
 ---
-OPERATION: rename
 NEW_NAME: PlayerId
----
 EXPECTED:
-newtype PlayerId(int)
-
-fn greet(id: PlayerId) {
-    print(id)
-}
-
-fn main() {
-    let id = PlayerId(42)
-    greet(id)
-}
+REPLACE: ["UserId", "PlayerId"]
 ===
 
 TEST: rename_newtype_from_annotation
 TYPE: rename
----
-newtype UserId(int)
-
-fn greet(id: «cursor»UserId) {
-    print(id)
-}
-
-fn main() {
-    let id = UserId(42)
-    greet(id)
-}
----
-OPERATION: rename
+SOURCE: rename_newtype_from_decl
+POSITION: line=2, character=13
 NEW_NAME: PlayerId
----
 EXPECTED:
-newtype PlayerId(int)
-
-fn greet(id: PlayerId) {
-    print(id)
-}
-
-fn main() {
-    let id = PlayerId(42)
-    greet(id)
-}
+REPLACE: ["UserId", "PlayerId"]
 ===
 
 TEST: rename_record_variant_field_from_decl
@@ -948,22 +597,11 @@ fn main() {
     }
 }
 ---
-OPERATION: rename
 NEW_NAME: power
----
 EXPECTED:
-enum Item {
-    Potion { power: int },
-    Coin,
-}
-
-fn main() {
-    let i = Item::Potion { power: 3 }
-    match i {
-        Item::Potion { power: strength } => print(strength),
-        Item::Coin => print(0),
-    }
-}
+REPLACE: ["    Potion { strength: int },", "    Potion { power: int },"]
+REPLACE: ["    let i = Item::Potion { strength: 3 }", "    let i = Item::Potion { power: 3 }"]
+REPLACE: ["        Item::Potion { strength } => print(strength),", "        Item::Potion { power: strength } => print(strength),"]
 ===
 
 TEST: rename_record_variant_field_from_literal
@@ -978,18 +616,9 @@ fn main() {
     print(i)
 }
 ---
-OPERATION: rename
 NEW_NAME: power
----
 EXPECTED:
-enum Item {
-    Potion { power: int },
-}
-
-fn main() {
-    let i = Item::Potion { power: 3 }
-    print(i)
-}
+REPLACE: ["strength", "power"]
 ===
 
 TEST: rename_decorator_from_decl
@@ -1009,23 +638,9 @@ fn other() {
     print(2)
 }
 ---
-OPERATION: rename
 NEW_NAME: fancy
----
 EXPECTED:
-deco fancy {
-    print(1)
-}
-
-@fancy
-fn thing() {
-    print(1)
-}
-
-@fancy
-fn other() {
-    print(2)
-}
+REPLACE: ["cool", "fancy"]
 ===
 
 TEST: rename_decorator_from_application
@@ -1040,16 +655,7 @@ fn thing() {
     print(1)
 }
 ---
-OPERATION: rename
 NEW_NAME: fancy
----
 EXPECTED:
-deco fancy {
-    print(1)
-}
-
-@fancy
-fn thing() {
-    print(1)
-}
+REPLACE: ["cool", "fancy"]
 ===

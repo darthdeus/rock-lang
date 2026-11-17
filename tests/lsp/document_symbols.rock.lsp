@@ -21,8 +21,6 @@ fn main() {
     let s = Status::Pending
 }
 ---
-OPERATION: document_symbols
----
 EXPECTED:
 Point: Struct
 Status: Enum
@@ -49,8 +47,6 @@ fn perimeter(rect: Rectangle) -> float {
 fn create_square(size: float) -> Rectangle {
     return Rectangle { width: size, height: size }
 }
----
-OPERATION: document_symbols
 ---
 EXPECTED:
 Rectangle: Struct
@@ -83,8 +79,6 @@ fn draw_shape(shape: Shape) {
     // Draw implementation
 }
 ---
-OPERATION: document_symbols
----
 EXPECTED:
 Color: Struct
 Shape: Enum
@@ -114,8 +108,6 @@ fn pop_item<T>(container: Container<T>) -> T? {
 fn process<T, U>(input: T, mapper: fn(T) -> U) -> U {
     return mapper(input)
 }
----
-OPERATION: document_symbols
 ---
 EXPECTED:
 Container: Struct
@@ -160,8 +152,6 @@ fn bounds(self: Circle) -> Rectangle {
     }
 }
 ---
-OPERATION: document_symbols
----
 EXPECTED:
 Point: Struct
 Rectangle: Struct
@@ -184,8 +174,6 @@ fn calculate_area(radius: float) -> float {
 fn get_default_counter() -> int {
     return 0
 }
----
-OPERATION: document_symbols
 ---
 EXPECTED:
 MAX_SIZE: Constant

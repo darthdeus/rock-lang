@@ -14,9 +14,7 @@ struct Point {
     y: float,
 }
 ---
-OPERATION: hover
 POSITION: line=1, character=8
----
 EXPECTED:
 Type: int
 ===
@@ -32,9 +30,7 @@ fn main() {
     let result = add(5, 3)
 }
 ---
-OPERATION: hover
 POSITION: line=0, character=3
----
 EXPECTED:
 ```rock
 fn add(a: int, b: int) -> int
@@ -53,9 +49,7 @@ fn main() {
     let p = Point { x: 1.0, y: 2.0 }
 }
 ---
-OPERATION: hover
 POSITION: line=0, character=7
----
 EXPECTED:
 struct Point {
   x: float,
@@ -75,9 +69,7 @@ fn main() {
     let text = identity("hello")
 }
 ---
-OPERATION: hover
 POSITION: line=5, character=8
----
 EXPECTED:
 Type: int
 ===
@@ -97,9 +89,7 @@ fn main() {
     let user = find_user(1)
 }
 ---
-OPERATION: hover
 POSITION: line=9, character=8
----
 EXPECTED:
 Type: string?
 ===
@@ -113,9 +103,7 @@ fn main() {
     let matrix = [[1, 2], [3, 4]]
 }
 ---
-OPERATION: hover
 POSITION: line=1, character=8
----
 EXPECTED:
 Type: [int]
 ===
@@ -136,30 +124,15 @@ fn main() {
     let p = Point { «cursor»x, y }
 }
 ---
-OPERATION: hover
----
 EXPECTED:
 Type: int
 ===
 
 TEST: hover_shorthand_y
 TYPE: hover
----
-struct Point {
-    x: int
-    y: int
-}
-
-fn main() {
-    let x = 100
-    let y = 200
-
-    // Shorthand syntax - hover on 'y' field
-    let p = Point { x, «cursor»y }
-}
----
-OPERATION: hover
----
+SOURCE: hover_shorthand_x
+REPLACE: ["    // Shorthand syntax - hover on 'x' field", "    // Shorthand syntax - hover on 'y' field"]
+POSITION: line=10, character=23
 EXPECTED:
 Type: int
 ===
@@ -191,8 +164,6 @@ fn main() {
     let rect = Rectangle { «cursor»top_left, width, height }
 }
 ---
-OPERATION: hover
----
 EXPECTED:
 Type: struct Point
 ===
@@ -212,8 +183,6 @@ fn main() {
     let p = Point { «cursor»x, y: 200 }
 }
 ---
-OPERATION: hover
----
 EXPECTED:
 Type: int
 ===
@@ -232,8 +201,6 @@ fn main() {
     }
 }
 ---
-OPERATION: hover
----
 EXPECTED:
 Type: struct Item
 ===
@@ -245,8 +212,6 @@ fn main() {
     let «cursor»f = (x: int) => x * 2
 }
 ---
-OPERATION: hover
----
 EXPECTED:
 Type: fn(int) -> int
 ===
@@ -257,8 +222,6 @@ TYPE: hover
 fn main() {
     let «cursor»x: int? = null
 }
----
-OPERATION: hover
 ---
 EXPECTED:
 Type: int?
@@ -277,8 +240,6 @@ fn main() {
     let «cursor»c = Color::Red
 }
 ---
-OPERATION: hover
----
 EXPECTED:
 Type: enum Color
 ===
@@ -294,8 +255,6 @@ fn main() {
     let «cursor»b = Box { item: 42 }
 }
 ---
-OPERATION: hover
----
 EXPECTED:
 Type: Box<int>
 ===
@@ -308,8 +267,6 @@ global score: int = 0
 fn main() {
     «cursor»score = 100
 }
----
-OPERATION: hover
 ---
 EXPECTED:
 Type: int
@@ -327,8 +284,6 @@ fn main() {
     let «cursor»n = p?.name
 }
 ---
-OPERATION: hover
----
 EXPECTED:
 Type: string?
 ===
@@ -340,8 +295,6 @@ fn main() {
     let x: int? = null
     let «cursor»y = x ?? 42
 }
----
-OPERATION: hover
 ---
 EXPECTED:
 Type: int
@@ -355,8 +308,6 @@ fn main() {
     let («cursor»a, b) = pair
 }
 ---
-OPERATION: hover
----
 EXPECTED:
 Type: int
 ===
@@ -368,8 +319,6 @@ fn main() {
     let pair = ((1, 2), "hello")
     let ((«cursor»a, b), c) = pair
 }
----
-OPERATION: hover
 ---
 EXPECTED:
 Type: int
@@ -391,30 +340,15 @@ fn main() {
     }
 }
 ---
-OPERATION: hover
----
 EXPECTED:
 Type: int
 ===
 
 TEST: hover_match_record_binding_explicit
 TYPE: hover
----
-enum Opt {
-    Some { value: int },
-    None,
-}
-
-fn main() {
-    let o = Opt::Some { value: 42 }
-    match o {
-        Opt::Some { value: «cursor»v } => { print(v) },
-        Opt::None => {},
-    }
-}
----
-OPERATION: hover
----
+SOURCE: hover_match_record_binding_shorthand
+REPLACE: ["        Opt::Some { value } => { print(value) },", "        Opt::Some { value: v } => { print(v) },"]
+POSITION: line=8, character=27
 EXPECTED:
 Type: int
 ===
@@ -435,8 +369,6 @@ fn main() {
     }
 }
 ---
-OPERATION: hover
----
 EXPECTED:
 Type: int
 ===
@@ -452,8 +384,6 @@ fn main() {
     }
 }
 ---
-OPERATION: hover
----
 EXPECTED:
 Type: int
 ===
@@ -467,8 +397,6 @@ fn main() {
         print(val)
     }
 }
----
-OPERATION: hover
 ---
 EXPECTED:
 Type: int
@@ -489,8 +417,6 @@ fn f(e: E) -> int {
     }
 }
 ---
-OPERATION: hover
----
 EXPECTED:
 ```rock
 E::B { y: int, z: int }
@@ -499,43 +425,16 @@ E::B { y: int, z: int }
 
 TEST: hover_match_arm_record_variant_field_binding
 TYPE: hover
----
-enum E {
-    A(x: int),
-    B { y: int, z: int },
-}
-
-fn f(e: E) -> int {
-    match e {
-        E::A(n) => n
-        E::B { «cursor»y, z } => y + z
-    }
-}
----
-OPERATION: hover
----
+SOURCE: hover_match_arm_record_variant
+POSITION: line=8, character=15
 EXPECTED:
 Type: int
 ===
 
 TEST: hover_match_record_variant_field_name
 TYPE: hover
----
-enum Opt {
-    Some { value: int },
-    None,
-}
-
-fn main() {
-    let o = Opt::Some { value: 42 }
-    match o {
-        Opt::Some { «cursor»value: v } => { print(v) },
-        Opt::None => {},
-    }
-}
----
-OPERATION: hover
----
+SOURCE: hover_match_record_binding_explicit
+POSITION: line=8, character=20
 EXPECTED:
 value: int (field of Opt::Some)
 ===
@@ -551,8 +450,6 @@ fn main() {
         Point { «cursor»x: a, y: b } => { print(a + b) },
     }
 }
----
-OPERATION: hover
 ---
 EXPECTED:
 x: int (field of Point)

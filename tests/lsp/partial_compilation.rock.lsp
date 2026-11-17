@@ -11,8 +11,6 @@ fn main() {
     // Syntax error: unclosed function call
 }
 ---
-OPERATION: completion
----
 EXPECTED:
 - x
 - y
@@ -41,8 +39,6 @@ fn main() {
     // This line has invalid syntax but completion should still work
 }
 ---
-OPERATION: completion
----
 EXPECTED:
 - create_point
 - Point
@@ -64,9 +60,7 @@ fn main() {
     let broken = this is invalid syntax
 }
 ---
-OPERATION: hover
 POSITION: line=1, character=12
----
 EXPECTED:
 Type: int
 
@@ -87,8 +81,6 @@ fn get_result() -> string {
 fn main() {
     let broken = invalid syntax here!!!
 }
----
-OPERATION: inlay_hints
 ---
 EXPECTED:
 fn process(value: int) -> string {

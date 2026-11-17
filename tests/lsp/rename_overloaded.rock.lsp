@@ -29,10 +29,8 @@ fn main() {
     let f2 = process(2.71)
 }
 ---
-OPERATION: rename
 POSITION: line=0, character=3
 NEW_NAME: transform
----
 EXPECTED:
 - transform(x: int) -> int
 - transform(x: float) -> float
@@ -67,10 +65,8 @@ fn main() {
     let s = process("test")
 }
 ---
-OPERATION: rename
 POSITION: line=13, character=12
 NEW_NAME: convert
----
 EXPECTED:
 - convert(x: int) -> int
 - convert(x: float) -> float
@@ -100,10 +96,8 @@ fn main() {
     let result2 = calculate([1, 2, 3, 4, 5])
 }
 ---
-OPERATION: rename
 POSITION: line=0, character=13
 NEW_NAME: a
----
 EXPECTED:
 - calculate(a: int, y: int)
 - return a + y
@@ -130,10 +124,8 @@ fn main() {
     let single = convert(d, 0)
 }
 ---
-OPERATION: rename
 POSITION: line=0, character=3
 NEW_NAME: transform
----
 EXPECTED:
 - transform<T>(items: [T]
 ===

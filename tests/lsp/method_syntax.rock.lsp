@@ -7,9 +7,7 @@ fn Mob.take_damage(m, amount: int) -> int {
     return m.hp - amount
 }
 ---
-OPERATION: hover
 POSITION: line=3, character=11
----
 EXPECTED:
 Type: struct Mob
 ===
@@ -28,9 +26,7 @@ fn main() {
     print(mob.take_damage(3))
 }
 ---
-OPERATION: goto_definition
 POSITION: line=8, character=15
----
 EXPECTED:
 file: main.rock
 line: 2

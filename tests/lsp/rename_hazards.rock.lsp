@@ -15,9 +15,7 @@ fn main() {
     spawn_it(count: "a")
 }
 ---
-OPERATION: rename
 NEW_NAME: amount
----
 EXPECTED:
 fn spawn_it(amount: int, size: float) {
     print(amount)
@@ -36,24 +34,9 @@ fn main() {
 
 TEST: rename_param_from_caller_named_label_other_overload
 TYPE: rename
----
-fn spawn_it(count: int, size: float) {
-    print(count)
-    print(size)
-}
-
-fn spawn_it(count: string) {
-    print(count)
-}
-
-fn main() {
-    spawn_it(count: 3, size: 1.0)
-    spawn_it(«cursor»count: "a")
-}
----
-OPERATION: rename
+SOURCE: rename_param_from_caller_named_label
+POSITION: line=11, character=13
 NEW_NAME: label
----
 EXPECTED:
 fn spawn_it(count: int, size: float) {
     print(count)
@@ -79,25 +62,16 @@ fn main() {
     print(«cursor»double(5))
 }
 ---
-OPERATION: rename
 NEW_NAME: twice
----
 EXPECTED:
 REFUSED: cannot rename a macro
 ===
 
 TEST: rename_macro_name_from_decl_refused
 TYPE: rename
----
-macro «cursor»double(x: expr) -> int { x + x }
-
-fn main() {
-    print(double(5))
-}
----
-OPERATION: rename
+SOURCE: rename_macro_name_from_call_refused
+POSITION: line=0, character=6
 NEW_NAME: twice
----
 EXPECTED:
 REFUSED: cannot rename a macro
 ===
@@ -113,9 +87,7 @@ fn main() {
     print(count)
 }
 ---
-OPERATION: rename
 NEW_NAME: total
----
 EXPECTED:
 REFUSED: .rock:5 that rename cannot rewrite
 ===
@@ -132,31 +104,18 @@ fn main() {
     print(SCORE)
 }
 ---
-OPERATION: rename
 NEW_NAME: POINTS
----
 EXPECTED:
 REFUSED: .rock:6 that rename cannot rewrite
 ===
 
 TEST: rename_macro_param
 TYPE: rename
----
-macro double(«cursor»x: expr) -> int { x + x }
-
-fn main() {
-    print(double(5))
-}
----
-OPERATION: rename
+SOURCE: rename_macro_name_from_call_refused
+POSITION: line=0, character=13
 NEW_NAME: v
----
 EXPECTED:
-macro double(v: expr) -> int { v + v }
-
-fn main() {
-    print(double(5))
-}
+REPLACE: ["macro double(x: expr) -> int { x + x }", "macro double(v: expr) -> int { v + v }"]
 ===
 
 TEST: rename_local_passed_as_macro_arg
@@ -169,16 +128,10 @@ fn main() {
     print(double(n))
 }
 ---
-OPERATION: rename
 NEW_NAME: m
----
 EXPECTED:
-macro double(x: expr) -> int { x + x }
-
-fn main() {
-    let m = 5
-    print(double(m))
-}
+REPLACE: ["    let n = 5", "    let m = 5"]
+REPLACE: ["    print(double(n))", "    print(double(m))"]
 ===
 
 TEST: rename_fn_called_inside_macro_body
@@ -195,50 +148,28 @@ fn main() {
     print(helper(2))
 }
 ---
-OPERATION: rename
 NEW_NAME: inc
----
 EXPECTED:
-fn inc(x: int) -> int {
-    return x + 1
-}
-
-macro twice(x: expr) -> int { inc(inc(x)) }
-
-fn main() {
-    print(twice(1))
-    print(inc(2))
-}
+REPLACE: ["helper", "inc"]
 ===
 
 TEST: rename_inline_lua_param_refused
 TYPE: rename
----
-inline(lua) fn probe(«cursor»x: int) -> int = "return x + 1"
-
-fn main() {
-    print(probe(1))
-}
----
-OPERATION: rename
+SOURCE: rename_macro_name_from_call_refused
+REPLACE: ["macro double(x: expr) -> int { x + x }", "inline(lua) fn probe(x: int) -> int = \"return x + 1\""]
+REPLACE: ["    print(double(5))", "    print(probe(1))"]
+POSITION: line=0, character=21
 NEW_NAME: y
----
 EXPECTED:
 REFUSED: cannot rename `x`: the opaque inline(lua) body of `probe` (
 ===
 
 TEST: rename_inline_js_param_refused
 TYPE: rename
----
-inline(js) fn probe(«cursor»x: int) -> int = "return x + 1;"
-
-fn main() {
-    print(probe(1))
-}
----
-OPERATION: rename
+SOURCE: rename_inline_lua_param_refused
+REPLACE: ["inline(lua) fn probe(x: int) -> int = \"return x + 1\"", "inline(js) fn probe(x: int) -> int = \"return x + 1;\""]
+POSITION: line=0, character=20
 NEW_NAME: y
----
 EXPECTED:
 REFUSED: the opaque inline(js) body of `probe`
 ===
@@ -257,9 +188,7 @@ fn main() {
     print(call_helper(1))
 }
 ---
-OPERATION: rename
 NEW_NAME: helper2
----
 EXPECTED:
 REFUSED: cannot rename `helper`: `@nomangle` keeps its emitted name
 ===
@@ -276,9 +205,7 @@ fn main() {
     print(«cursor»helper(1))
 }
 ---
-OPERATION: rename
 NEW_NAME: helper2
----
 EXPECTED:
 REFUSED: `@nomangle` keeps its emitted name, which code outside Rock calls
 ===
@@ -297,9 +224,7 @@ fn main() {
     print(peek(m))
 }
 ---
-OPERATION: rename
 NEW_NAME: health
----
 EXPECTED:
 REFUSED: the opaque inline(lua) body of `peek`
 ===
@@ -315,9 +240,7 @@ fn main() {
     print(peek())
 }
 ---
-OPERATION: rename
 NEW_NAME: POINTS
----
 EXPECTED:
 REFUSED: the opaque inline(lua) body of `peek`
 ===
@@ -335,31 +258,18 @@ fn main() {
     print(is_mob(Mob { hp: 1 }))
 }
 ---
-OPERATION: rename
 NEW_NAME: Beast
----
 EXPECTED:
 REFUSED: the opaque inline(lua) body of `is_mob`
 ===
 
 TEST: rename_inline_fn_name_is_fine
 TYPE: rename
----
-inline(lua) fn «cursor»probe(x: int) -> int = "return x + 1"
-
-fn main() {
-    print(probe(1))
-}
----
-OPERATION: rename
+SOURCE: rename_inline_lua_param_refused
+POSITION: line=0, character=15
 NEW_NAME: probe2
----
 EXPECTED:
-inline(lua) fn probe2(x: int) -> int = "return x + 1"
-
-fn main() {
-    print(probe2(1))
-}
+REPLACE: ["probe", "probe2"]
 ===
 
 TEST: rename_field_not_named_by_any_inline_body
@@ -377,41 +287,21 @@ fn main() {
     print(m.hp + peek(m))
 }
 ---
-OPERATION: rename
 NEW_NAME: health
----
 EXPECTED:
-struct Mob {
-    health: int,
-    mana: int,
-}
-
-inline(lua) fn peek(m: Mob) -> int = "return m.mana"
-
-fn main() {
-    let m = Mob { health: 4, mana: 2 }
-    print(m.health + peek(m))
-}
+REPLACE: ["hp", "health"]
 ===
 
 TEST: rename_param_sharing_a_word_with_another_inline_body
 TYPE: rename
----
-inline(lua) fn probe(x: int) -> int = "return x + 1"
-
-fn twice(«cursor»x: int) -> int {
-    return probe(x) * 2
-}
----
-OPERATION: rename
+SOURCE: rename_inline_fn_name_is_fine
+REPLACE: ["fn main() {", "fn twice(x: int) -> int {"]
+REPLACE: ["    print(probe(1))", "    return probe(x) * 2"]
+POSITION: line=2, character=9
 NEW_NAME: n
----
 EXPECTED:
-inline(lua) fn probe(x: int) -> int = "return x + 1"
-
-fn twice(n: int) -> int {
-    return probe(n) * 2
-}
+REPLACE: ["fn twice(x: int) -> int {", "fn twice(n: int) -> int {"]
+REPLACE: ["    return probe(x) * 2", "    return probe(n) * 2"]
 ===
 
 TEST: rename_fn_named_in_a_string_literal
@@ -426,18 +316,10 @@ fn main() {
     print(helper(1))
 }
 ---
-OPERATION: rename
 NEW_NAME: helper2
----
 EXPECTED:
-fn helper2(x: int) -> int {
-    return x * 2
-}
-
-fn main() {
-    print("helper")
-    print(helper2(1))
-}
+REPLACE: ["fn helper(x: int) -> int {", "fn helper2(x: int) -> int {"]
+REPLACE: ["    print(helper(1))", "    print(helper2(1))"]
 ===
 
 TEST: rename_global_read_by_inline_body_in_another_file_refused
@@ -526,18 +408,10 @@ fn main() {
     print(x)
 }
 ---
-OPERATION: rename
 NEW_NAME: y
----
 EXPECTED:
-fn main() {
-    let x = 1
-    if true {
-        let y = 2
-        print(y)
-    }
-    print(x)
-}
+REPLACE: ["        let x = 2", "        let y = 2"]
+REPLACE: ["        print(x)", "        print(y)"]
 ===
 
 TEST: rename_shadowed_local_in_same_block
@@ -549,15 +423,10 @@ fn main() {
     print(x)
 }
 ---
-OPERATION: rename
 NEW_NAME: y
----
 EXPECTED:
-fn main() {
-    let y = 1
-    let x = y + 1
-    print(x)
-}
+REPLACE: ["    let x = 1", "    let y = 1"]
+REPLACE: ["    let x = x + 1", "    let x = y + 1"]
 ===
 
 TEST: rename_fn_from_ufcs_call
@@ -577,23 +446,9 @@ fn main() {
     print(area(c))
 }
 ---
-OPERATION: rename
 NEW_NAME: size
----
 EXPECTED:
-struct Circle {
-    radius: float,
-}
-
-fn size(c: Circle) -> float {
-    return c.radius * c.radius
-}
-
-fn main() {
-    let c = Circle { radius: 1.0 }
-    print(c.size())
-    print(size(c))
-}
+REPLACE: ["area", "size"]
 ===
 
 TEST: rename_receiver_form_fn
@@ -613,23 +468,9 @@ fn main() {
     print(shift(p, 2))
 }
 ---
-OPERATION: rename
 NEW_NAME: nudge
----
 EXPECTED:
-struct Point {
-    x: int,
-}
-
-fn Point.nudge(p, dx: int) -> int {
-    return p.x + dx
-}
-
-fn main() {
-    let p = Point { x: 1 }
-    print(p.nudge(1))
-    print(nudge(p, 2))
-}
+REPLACE: ["shift", "nudge"]
 ===
 
 TEST: rename_field_leaves_same_named_field_of_other_struct
@@ -649,9 +490,7 @@ fn main() {
     print(a.hp + b.hp)
 }
 ---
-OPERATION: rename
 NEW_NAME: health
----
 EXPECTED:
 struct A {
     health: int,
@@ -676,14 +515,10 @@ fn main() {
     print("n = {n}")
 }
 ---
-OPERATION: rename
 NEW_NAME: count
----
 EXPECTED:
-fn main() {
-    let count = 5
-    print("n = {count}")
-}
+REPLACE: ["    let n = 5", "    let count = 5"]
+REPLACE: ["    print(\"n = {n}\")", "    print(\"n = {count}\")"]
 ===
 
 TEST: rename_lambda_param
@@ -694,14 +529,9 @@ fn main() {
     print(f(1))
 }
 ---
-OPERATION: rename
 NEW_NAME: b
----
 EXPECTED:
-fn main() {
-    let f = (b: int) => b + 1
-    print(f(1))
-}
+REPLACE: ["    let f = (a: int) => a + 1", "    let f = (b: int) => b + 1"]
 ===
 
 TEST: rename_struct_generic_param_reaches_its_uses
@@ -716,16 +546,7 @@ fn main() {
     print(b.value)
 }
 ---
-OPERATION: rename
 NEW_NAME: U
----
 EXPECTED:
-struct Box<U> {
-    value: U,
-}
-
-fn main() {
-    let b = Box { value: 1 }
-    print(b.value)
-}
+REPLACE: ["T", "U"]
 ===
