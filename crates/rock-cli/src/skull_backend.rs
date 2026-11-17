@@ -3534,64 +3534,9 @@ impl IncrementalProject {
         main_path: &std::path::Path,
         incremental_path: &std::path::Path,
     ) -> Result<SkullReload> {
-        let started = self.route_profile_enabled.then(Instant::now);
-        self.last_route_profile = None;
-        let project_started = self.route_profile_enabled.then(Instant::now);
-        let publication = self.project.recompile_for_publication(changed);
-        let project_call_ns = project_started.map_or(0, |started| started.elapsed().as_nanos());
-        let (update, snapshot) = match publication {
-            Ok(value) => value,
-            Err(error) => {
-                let mut profile = SkullRouteProfile::from_live(self.project.take_route_timing());
-                profile.live_project_call_ns = project_call_ns;
-                self.finish_route_profile(started, profile);
-                return Err(error);
-            }
-        };
-        let mut profile = SkullRouteProfile::from_live(self.project.take_route_timing());
-        profile.live_project_call_ns = project_call_ns;
-        let route_started = self.route_profile_enabled.then(Instant::now);
-        let result = self.route_and_emit(
-            update,
-            main_path,
-            incremental_path,
-            self.route_profile_enabled.then_some(&mut profile),
-        );
-        if let Some(started) = route_started {
-            profile.route_emit_call_ns += started.elapsed().as_nanos();
-        }
-        match result {
-            Ok(reload) => {
-                self.project.commit_body_transaction();
-                self.finish_route_profile(started, profile);
-                Ok(reload)
-            }
-            Err(error) => {
-                let rollback_started = self.route_profile_enabled.then(Instant::now);
-                let restored = self.project.restore(snapshot);
-                let cache_restored = if restored.is_ok() {
-                    self.cache.rollback_body_edit(self.project.workspace())
-                } else {
-                    Ok(())
-                };
-                profile.add_live(self.project.take_route_timing());
-                if let Some(started) = rollback_started {
-                    profile.rollback_ns += started.elapsed().as_nanos();
-                }
-                self.finish_route_profile(started, profile);
-                if let Err(restore) = restored {
-                    return Err(anyhow::anyhow!(
-                        "skull publication rollback failed after disk edit: {restore}; original error: {error}"
-                    ));
-                }
-                if let Err(restore) = cache_restored {
-                    return Err(anyhow::anyhow!(
-                        "skull cache rollback failed after disk edit: {restore}; original error: {error}"
-                    ));
-                }
-                Err(error)
-            }
-        }
+        self.publish_edit(main_path, incremental_path, "disk edit", |project| {
+            project.recompile_for_publication(changed)
+        })
     }
 
     /// In-memory edit: replace one source's contents WITHOUT touching disk and
@@ -3607,10 +3552,27 @@ impl IncrementalProject {
         main_path: &std::path::Path,
         incremental_path: &std::path::Path,
     ) -> Result<SkullReload> {
+        self.publish_edit(main_path, incremental_path, "in-memory edit", |project| {
+            project.apply_edit_for_publication(path, new_text)
+        })
+    }
+
+    fn publish_edit(
+        &mut self,
+        main_path: &std::path::Path,
+        incremental_path: &std::path::Path,
+        edit: &str,
+        change: impl FnOnce(
+            &mut crate::live_project::LiveProject,
+        ) -> Result<(
+            crate::live_project::LiveUpdate,
+            crate::live_project::LiveProjectSnapshot,
+        )>,
+    ) -> Result<SkullReload> {
         let started = self.route_profile_enabled.then(Instant::now);
         self.last_route_profile = None;
         let project_started = self.route_profile_enabled.then(Instant::now);
-        let publication = self.project.apply_edit_for_publication(path, new_text);
+        let publication = change(&mut self.project);
         let project_call_ns = project_started.map_or(0, |started| started.elapsed().as_nanos());
         let (update, snapshot) = match publication {
             Ok(value) => value,
@@ -3654,12 +3616,12 @@ impl IncrementalProject {
                 self.finish_route_profile(started, profile);
                 if let Err(restore) = restored {
                     return Err(anyhow::anyhow!(
-                        "skull publication rollback failed after in-memory edit: {restore}; original error: {error}"
+                        "skull publication rollback failed after {edit}: {restore}; original error: {error}"
                     ));
                 }
                 if let Err(restore) = cache_restored {
                     return Err(anyhow::anyhow!(
-                        "skull cache rollback failed after in-memory edit: {restore}; original error: {error}"
+                        "skull cache rollback failed after {edit}: {restore}; original error: {error}"
                     ));
                 }
                 Err(error)
