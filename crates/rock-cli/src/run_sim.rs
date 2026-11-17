@@ -328,18 +328,8 @@ fn sim_output_dir() -> Result<TempDir> {
     Ok(dir)
 }
 
-fn compile_sims(
-    project_path: PathBuf,
-    output_path: PathBuf,
-) -> Result<(
-    Vec<String>,
-    HashMap<String, Vec<(String, String)>>,
-    HashMap<String, String>,
-    crate::skull_backend::IncrementalProject,
-)> {
-    let (names, env, sources, session, _) =
-        compile_sims_with_allocation(project_path, output_path, None, &[])?;
-    Ok((names, env, sources, session))
+fn compile_sims(project_path: PathBuf, output_path: PathBuf) -> Result<CompiledSims> {
+    compile_sims_with_allocation(project_path, output_path, None, &[])
 }
 
 const SIM_COMPILE_RECEIPT_DIR_ENV: &str = "ROCK_SIM_COMPILE_RECEIPT_DIR";
@@ -366,7 +356,7 @@ fn child_sim_selection() -> Result<Vec<String>> {
 
 mod worker_admission;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 struct SimReceiptInput {
     kind: String,
     path: String,
@@ -374,10 +364,23 @@ struct SimReceiptInput {
 }
 
 struct PreparedSims {
+    registry: SimRegistry,
+    stone: Option<crate::skull_backend::IncrementalProject>,
+}
+
+/// The names and source mapping emitted by a sim compile, shared by in-process
+/// builds, compile receipts, and worker setup.
+#[derive(Debug)]
+struct SimRegistry {
     wire_names: Vec<String>,
     env_by_wire: HashMap<String, Vec<(String, String)>>,
     source_files: HashMap<String, String>,
-    stone: Option<crate::skull_backend::IncrementalProject>,
+}
+
+struct CompiledSims {
+    registry: SimRegistry,
+    stone: crate::skull_backend::IncrementalProject,
+    selection_is_full: bool,
 }
 
 /// Resolve the receipt's workspace-relative sim sources against this
@@ -456,31 +459,47 @@ fn receipt_source_inputs_from_pairs(
     Ok(inputs)
 }
 
-fn receipt_inputs_from_stone(
-    project: &Path,
-    stone: &crate::skull_backend::IncrementalProject,
-) -> Result<Vec<SimReceiptInput>> {
-    let sources = stone
-        .sources()
+fn receipt_source_pairs(sources: &rock_core::SourceFiles) -> Vec<(String, String)> {
+    sources
         .files
         .iter()
         .map(|source| {
             let source = source.borrow();
             (source.file.to_id_path(), source.contents.clone())
         })
-        .collect();
-    let comptime_files = stone.comptime_watch_files_with_hashes();
+        .collect()
+}
+
+fn receipt_embedded_inputs(
+    paths: impl IntoIterator<Item = PathBuf>,
+) -> Result<Vec<SimReceiptInput>> {
+    paths
+        .into_iter()
+        .map(|path| {
+            let canonical = canonical_string(&path)?;
+            let bytes = std::fs::read(&path)
+                .with_context(|| format!("read sim receipt embedded input {}", path.display()))?;
+            Ok(SimReceiptInput {
+                kind: "embedded".to_string(),
+                path: canonical,
+                sha256: sha256_bytes(&bytes),
+            })
+        })
+        .collect()
+}
+
+fn receipt_inputs_from_stone(
+    project: &Path,
+    stone: &crate::skull_backend::IncrementalProject,
+) -> Result<Vec<SimReceiptInput>> {
+    let sources = receipt_source_pairs(stone.sources());
     let mut inputs = receipt_source_inputs_from_pairs(project, sources)?;
-    for (path, _) in comptime_files {
-        let canonical = canonical_string(&path)?;
-        let bytes = std::fs::read(&path)
-            .with_context(|| format!("read sim receipt embedded input {}", path.display()))?;
-        inputs.push(SimReceiptInput {
-            kind: "embedded".to_string(),
-            path: canonical,
-            sha256: sha256_bytes(&bytes),
-        });
-    }
+    inputs.extend(receipt_embedded_inputs(
+        stone
+            .comptime_watch_files_with_hashes()
+            .into_iter()
+            .map(|(path, _)| path),
+    )?);
     inputs.sort_by(|a, b| (&a.kind, &a.path).cmp(&(&b.kind, &b.path)));
     Ok(inputs)
 }
@@ -488,31 +507,7 @@ fn receipt_inputs_from_stone(
 fn current_receipt_source_inputs(project: &Path) -> Result<Vec<SimReceiptInput>> {
     let spec = crate::unified_compile::SourceSpec::Directory(project.to_path_buf());
     let sources = crate::unified_compile::discover_sources(&spec)?;
-    let pairs = sources
-        .files
-        .iter()
-        .map(|source| {
-            let source = source.borrow();
-            (source.file.to_id_path(), source.contents.clone())
-        })
-        .collect();
-    receipt_source_inputs_from_pairs(project, pairs)
-}
-
-/// The receipt context and discovered inputs of a project as it is now: what
-/// a receipt must match before a run may load it.
-struct CurrentReceiptState {
-    context: serde_json::Value,
-    inputs: Vec<SimReceiptInput>,
-}
-
-impl CurrentReceiptState {
-    fn of(project: &Path) -> Result<Self> {
-        Ok(Self {
-            context: sim_receipt_context(project)?,
-            inputs: current_receipt_source_inputs(project)?,
-        })
-    }
+    receipt_source_inputs_from_pairs(project, receipt_source_pairs(&sources))
 }
 
 fn sim_receipt_context(project: &Path) -> Result<serde_json::Value> {
@@ -538,21 +533,6 @@ fn sim_receipt_context(project: &Path) -> Result<serde_json::Value> {
     }))
 }
 
-fn receipt_inputs_json(inputs: &[SimReceiptInput]) -> serde_json::Value {
-    serde_json::Value::Array(
-        inputs
-            .iter()
-            .map(|input| {
-                serde_json::json!({
-                    "kind": input.kind,
-                    "path": input.path,
-                    "sha256": input.sha256,
-                })
-            })
-            .collect(),
-    )
-}
-
 fn parse_receipt_inputs(value: &serde_json::Value) -> Result<Vec<SimReceiptInput>> {
     let rows = value
         .as_array()
@@ -574,19 +554,20 @@ fn parse_receipt_inputs(value: &serde_json::Value) -> Result<Vec<SimReceiptInput
         .collect()
 }
 
-fn registry_json(
-    wire_names: &[String],
-    env_by_wire: &HashMap<String, Vec<(String, String)>>,
-    source_files: &HashMap<String, String>,
-) -> Result<serde_json::Value> {
-    let rows = wire_names
+fn registry_json(registry: &SimRegistry) -> Result<serde_json::Value> {
+    let rows = registry
+        .wire_names
         .iter()
         .map(|name| {
-            let source_file = source_files
+            let source_file = registry
+                .source_files
                 .get(name)
                 .filter(|source_file| !source_file.is_empty())
                 .ok_or_else(|| anyhow!("compiled @sim `{name}` has no recorded source file"))?;
-            let env = env_by_wire.get(name).map_or(&[][..], Vec::as_slice);
+            let env = registry
+                .env_by_wire
+                .get(name)
+                .map_or(&[][..], Vec::as_slice);
             Ok(serde_json::json!({
                 "wire_name": name,
                 "env": env.iter().map(|(key, value)| serde_json::json!([key, value])).collect::<Vec<_>>(),
@@ -597,13 +578,7 @@ fn registry_json(
     Ok(serde_json::Value::Array(rows))
 }
 
-fn parse_registry(
-    value: &serde_json::Value,
-) -> Result<(
-    Vec<String>,
-    HashMap<String, Vec<(String, String)>>,
-    HashMap<String, String>,
-)> {
+fn parse_registry(value: &serde_json::Value) -> Result<SimRegistry> {
     let rows = value
         .as_array()
         .ok_or_else(|| anyhow!("sim compile receipt `registry` is not an array"))?;
@@ -649,7 +624,11 @@ fn parse_registry(
             })?;
         source_files.insert(name, source_file.to_owned());
     }
-    Ok((names, env_by_wire, source_files))
+    Ok(SimRegistry {
+        wire_names: names,
+        env_by_wire,
+        source_files,
+    })
 }
 
 fn publish_sim_receipt(
@@ -657,9 +636,7 @@ fn publish_sim_receipt(
     receipt_dir: &Path,
     project: &Path,
     output: &Path,
-    wire_names: &[String],
-    env_by_wire: &HashMap<String, Vec<(String, String)>>,
-    source_files: &HashMap<String, String>,
+    registry: &SimRegistry,
     inputs: &[SimReceiptInput],
     selection: &[String],
 ) -> Result<()> {
@@ -682,8 +659,8 @@ fn publish_sim_receipt(
         "context": sim_receipt_context(project)?,
         "selection": selection,
         "main_sha256": sha256_bytes(&main_bytes),
-        "inputs": receipt_inputs_json(inputs),
-        "registry": registry_json(wire_names, env_by_wire, source_files)?,
+        "inputs": serde_json::to_value(inputs)?,
+        "registry": registry_json(registry)?,
     });
     let mut manifest_bytes =
         serde_json::to_vec_pretty(&manifest).context("serialize sim compile receipt")?;
@@ -701,15 +678,7 @@ fn publish_sim_receipt(
     Ok(())
 }
 
-fn load_sim_receipt(
-    receipt_dir: &Path,
-    project: &Path,
-    output: &Path,
-) -> Result<(
-    Vec<String>,
-    HashMap<String, Vec<(String, String)>>,
-    HashMap<String, String>,
-)> {
+fn load_sim_receipt(receipt_dir: &Path, project: &Path, output: &Path) -> Result<SimRegistry> {
     let manifest_path = receipt_dir.join("receipt.json");
     let manifest_bytes = std::fs::read(&manifest_path)
         .with_context(|| format!("read sim compile receipt {}", manifest_path.display()))?;
@@ -727,8 +696,9 @@ fn load_sim_receipt(
     let expected_context = manifest
         .get("context")
         .ok_or_else(|| anyhow!("sim compile receipt has no context"))?;
-    let current = CurrentReceiptState::of(project)?;
-    if expected_context != &current.context {
+    let current_context = sim_receipt_context(project)?;
+    let mut current_inputs = current_receipt_source_inputs(project)?;
+    if expected_context != &current_context {
         return Err(anyhow!(
             "sim compile receipt context changed; prepare a new receipt for this test lane"
         ));
@@ -739,7 +709,6 @@ fn load_sim_receipt(
             .get("inputs")
             .ok_or_else(|| anyhow!("sim compile receipt has no inputs"))?,
     )?;
-    let mut current_inputs = current.inputs;
     for expected in expected_inputs
         .iter()
         .filter(|input| input.kind == "embedded")
@@ -807,13 +776,10 @@ fn prepare_sims(project_path: PathBuf, output_path: PathBuf) -> Result<PreparedS
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
     else {
-        let (wire_names, env_by_wire, source_files, stone, _) =
-            compile_sims_with_allocation(project_path, output_path, None, &selection)?;
+        let compiled = compile_sims_with_allocation(project_path, output_path, None, &selection)?;
         return Ok(PreparedSims {
-            wire_names,
-            env_by_wire,
-            source_files,
-            stone: Some(stone),
+            registry: compiled.registry,
+            stone: Some(compiled.stone),
         });
     };
     let project_path = project_path.canonicalize().with_context(|| {
@@ -835,30 +801,26 @@ fn prepare_sims(project_path: PathBuf, output_path: PathBuf) -> Result<PreparedS
             root.display()
         ));
     }
-    let (wire_names, env_by_wire, source_files, stone, selection_is_full) =
+    let compiled =
         compile_sims_with_allocation(project_path.clone(), output_path.clone(), None, &selection)?;
-    let inputs = receipt_inputs_from_stone(&project_path, &stone)?;
-    let receipt_selection = if selection_is_full {
+    let inputs = receipt_inputs_from_stone(&project_path, &compiled.stone)?;
+    let receipt_selection = if compiled.selection_is_full {
         Vec::new()
     } else {
         selection
     };
-    drop(stone);
+    drop(compiled.stone);
     publish_sim_receipt(
         &root,
         &receipt_dir,
         &project_path,
         &output_path,
-        &wire_names,
-        &env_by_wire,
-        &source_files,
+        &compiled.registry,
         &inputs,
         &receipt_selection,
     )?;
     Ok(PreparedSims {
-        wire_names,
-        env_by_wire,
-        source_files,
+        registry: compiled.registry,
         stone: None,
     })
 }
@@ -869,12 +831,9 @@ fn consume_sim_receipt(
     output_path: &Path,
 ) -> Result<PreparedSims> {
     crate::package::prepare_sound_bank(&project_path.to_string_lossy())?;
-    let (wire_names, env_by_wire, source_files) =
-        load_sim_receipt(receipt_dir, project_path, output_path)?;
+    let registry = load_sim_receipt(receipt_dir, project_path, output_path)?;
     Ok(PreparedSims {
-        wire_names,
-        env_by_wire,
-        source_files,
+        registry,
         stone: None,
     })
 }
@@ -1107,34 +1066,12 @@ fn source_root_for_sim_project(project_dir: &std::path::Path) -> Result<std::pat
     Ok(project_dir)
 }
 
-/// Discover sim identities from the same checked workspace that produced the chunk.
-#[cfg(test)]
-pub(crate) fn skull_compile_game_and_collect_sims(
-    dir: &str,
-    main_path: &std::path::Path,
-) -> Result<(
-    Vec<String>,
-    HashMap<String, Vec<(String, String)>>,
-    HashMap<String, String>,
-    IncrementalProject,
-)> {
-    let (names, env, sources, session, _) =
-        skull_compile_game_and_collect_sims_with_allocation(dir, main_path, None, &[])?;
-    Ok((names, env, sources, session))
-}
-
 fn skull_compile_game_and_collect_sims_with_allocation(
     dir: &str,
     main_path: &std::path::Path,
     allocation_manifest: Option<&std::path::Path>,
     selection: &[String],
-) -> Result<(
-    Vec<String>,
-    HashMap<String, Vec<(String, String)>>,
-    HashMap<String, String>,
-    IncrementalProject,
-    bool,
-)> {
+) -> Result<CompiledSims> {
     // Session-based build (same machinery as `rock stone`, tests included so the
     // `@sim` bodies are in the program). The live IncrementalProject is returned so the
     // runner can serve mid-sim `reload_edit` ops through the REAL incremental
@@ -1174,12 +1111,14 @@ fn skull_compile_game_and_collect_sims_with_allocation(
         let selected = stone.registered_sim_names();
         sims.retain(|(wire, _, _)| selected.contains(wire));
     }
-    let mut wire_names = Vec::with_capacity(sims.len());
-    let mut env_by_wire = HashMap::with_capacity(sims.len());
-    let mut source_files = HashMap::with_capacity(sims.len());
+    let mut registry = SimRegistry {
+        wire_names: Vec::with_capacity(sims.len()),
+        env_by_wire: HashMap::with_capacity(sims.len()),
+        source_files: HashMap::with_capacity(sims.len()),
+    };
     let mut relative_by_source = HashMap::new();
     for (wire, source_file, env) in sims {
-        wire_names.push(wire.clone());
+        registry.wire_names.push(wire.clone());
         let relative_source = match relative_by_source.entry(source_file.clone()) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => entry.insert(
@@ -1187,16 +1126,16 @@ fn skull_compile_game_and_collect_sims_with_allocation(
                     .with_context(|| format!("record source for @sim `{wire}`"))?,
             ),
         };
-        source_files.insert(wire.clone(), relative_source.clone());
-        env_by_wire.insert(wire, env);
+        registry
+            .source_files
+            .insert(wire.clone(), relative_source.clone());
+        registry.env_by_wire.insert(wire, env);
     }
-    Ok((
-        wire_names,
-        env_by_wire,
-        source_files,
+    Ok(CompiledSims {
+        registry,
         stone,
         selection_is_full,
-    ))
+    })
 }
 
 #[cfg(test)]
@@ -1315,13 +1254,7 @@ fn compile_sims_with_allocation(
     output_path: PathBuf,
     allocation_manifest: Option<&Path>,
     selection: &[String],
-) -> Result<(
-    Vec<String>,
-    HashMap<String, Vec<(String, String)>>,
-    HashMap<String, String>,
-    crate::skull_backend::IncrementalProject,
-    bool,
-)> {
+) -> Result<CompiledSims> {
     rock_host::process_management::report_spawn_phase("compile");
     crate::package::prepare_sound_bank(&project_path.to_string_lossy())?;
     let main_path = output_path.join(rock_host::project::MAIN_LUA_FILENAME);
@@ -1362,7 +1295,7 @@ fn reload_lane_session(
             stone
         }
         // A receipt contains emitted code, but no editable compiler Session.
-        None => compile_sims(project_path.to_path_buf(), dir.path().to_path_buf())?.3,
+        None => compile_sims(project_path.to_path_buf(), dir.path().to_path_buf())?.stone,
     };
     if !quiet {
         println!("[sim] hot-reload lane: isolated chunk with the shared callee shape");
@@ -1389,7 +1322,7 @@ pub(crate) fn do_list_sims(project: &str) -> Result<()> {
 
     let out_dir = sim_output_dir()?;
     let prepared = prepare_sims(project_path, out_dir.path().to_path_buf())?;
-    for name in prepared.wire_names {
+    for name in prepared.registry.wire_names {
         println!("{}", name);
     }
     Ok(())
@@ -1451,42 +1384,40 @@ fn do_run_sim_opts_recorded(
         prepare_run(project, &[sim_name.to_string()], recorder)?;
     let output = out_dir.path().to_string_lossy().into_owned();
     let output_path = out_dir.path().to_path_buf();
-    let sim_name = resolve_sim_specs(&prepared.wire_names, &[sim_name.to_string()])?.remove(0);
+    let sim_name =
+        resolve_sim_specs(&prepared.registry.wire_names, &[sim_name.to_string()])?.remove(0);
     let sim_name = sim_name.as_str();
     // A reload sim needs the editable compiler session that a receipt omits.
-    if prepared.stone.is_none() && entry_is_reload_lane(sim_name, &prepared.env_by_wire) {
-        let (wire_names, env_by_wire, source_files, stone) = recorder
-            .phase("compile_reload_session", || {
-                compile_sims(project_path.clone(), output_path)
-            })?;
+    if prepared.stone.is_none() && entry_is_reload_lane(sim_name, &prepared.registry.env_by_wire) {
+        let compiled = recorder.phase("compile_reload_session", || {
+            compile_sims(project_path.clone(), output_path)
+        })?;
         prepared = PreparedSims {
-            wire_names,
-            env_by_wire,
-            source_files,
-            stone: Some(stone),
+            registry: compiled.registry,
+            stone: Some(compiled.stone),
         };
     }
     let entry_ids = recorder.plan_entries(&[sim_name.to_string()]);
     recorder.configure(
         &project_path,
-        &prepared.wire_names,
+        &prepared.registry.wire_names,
         requested_jobs,
         1,
         None,
         1,
         update_snapshots,
-        &prepared.source_files,
+        &prepared.registry.source_files,
     );
     emit_bytecode_image(Path::new(&output));
 
-    let sim_sources = resolve_sim_sources(&project_path, &prepared.source_files)?;
+    let sim_sources = resolve_sim_sources(&project_path, &prepared.registry.source_files)?;
     let (display_name, summary) = run_named_entry(
         sim_name,
         quiet,
         false,
         update_snapshots,
         &output,
-        &prepared.env_by_wire,
+        &prepared.registry.env_by_wire,
         &sim_sources,
         prepared.stone.as_mut(),
         None,
@@ -1707,9 +1638,11 @@ fn do_run_sims_recorded(
     let (project_path, out_dir, prepared) = prepare_run(project, names, recorder)?;
     let project = project_path.to_string_lossy().into_owned();
     let output = out_dir.path().to_string_lossy().into_owned();
-    let wire_names = prepared.wire_names;
-    let env_by_wire = prepared.env_by_wire;
-    let source_files = prepared.source_files;
+    let SimRegistry {
+        wire_names,
+        env_by_wire,
+        source_files,
+    } = prepared.registry;
     let sim_sources = resolve_sim_sources(&project_path, &source_files)?;
     let specs = if suite {
         wire_names.clone()
@@ -2307,6 +2240,22 @@ fn allocation_census_record(
     (record, rank_values)
 }
 
+fn compile_sim_diagnostic(
+    project: &str,
+    allocation_manifest: Option<&Path>,
+) -> Result<(PathBuf, TempDir, CompiledSims)> {
+    let project_path = rock_engine_host::project::resolve_project_dir(project)?;
+    rock_engine_host::engine_build::build_engine_libs(&project_path.to_string_lossy())?;
+    let out_dir = sim_output_dir()?;
+    let compiled = compile_sims_with_allocation(
+        project_path.clone(),
+        out_dir.path().to_path_buf(),
+        allocation_manifest,
+        &[],
+    )?;
+    Ok((project_path, out_dir, compiled))
+}
+
 fn census_rankings(
     ranked: &[(String, &'static str, f64, f64, usize)],
     by_gross: bool,
@@ -2347,27 +2296,24 @@ pub(crate) fn do_run_allocation_census(
         std::fs::remove_file(&path)
             .with_context(|| format!("removing stale census artifact `{}`", path.display()))?;
     }
-    let project_path = rock_engine_host::project::resolve_project_dir(project)?;
+    let (project_path, out_dir, compiled) = compile_sim_diagnostic(project, None)?;
     let project = project_path.to_string_lossy().into_owned();
-    rock_engine_host::engine_build::build_engine_libs(&project)?;
-
-    let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let (wire_names, env_by_wire, source_files, stone) =
-        compile_sims(project_path.clone(), PathBuf::from(&output))?;
-    let sim_sources = resolve_sim_sources(&project_path, &source_files)?;
+    let sim_sources = resolve_sim_sources(&project_path, &compiled.registry.source_files)?;
+    let registry = compiled.registry;
+    let stone = compiled.stone;
     emit_bytecode_image(Path::new(&output));
 
     let selected = if names.is_empty() {
-        wire_names.clone()
+        registry.wire_names.clone()
     } else {
-        resolve_sim_specs(&wire_names, names)?
+        resolve_sim_specs(&registry.wire_names, names)?
     };
     if selected.is_empty() {
         return Err(anyhow!("no @sim coroutines found in project `{project}`"));
     }
-    let (reload_idx, ordinary_idx): (Vec<usize>, Vec<usize>) =
-        (0..selected.len()).partition(|&i| entry_is_reload_lane(&selected[i], &env_by_wire));
+    let (reload_idx, ordinary_idx): (Vec<usize>, Vec<usize>) = (0..selected.len())
+        .partition(|&i| entry_is_reload_lane(&selected[i], &registry.env_by_wire));
     let jobs = resolve_pool_jobs(jobs, None, false)?;
     // Reload entries own the Session and an isolated copy of the boot chunk.
     let mut reload_lane = reload_lane_session(
@@ -2388,7 +2334,7 @@ pub(crate) fn do_run_allocation_census(
             true,
             false,
             entry_output,
-            &env_by_wire,
+            &registry.env_by_wire,
             &sim_sources,
             stone,
             Some(DEFAULT_SIM_ALLOCATION_WARMUP_FRAMES),
@@ -2602,21 +2548,12 @@ pub(crate) fn do_run_allocation_sites(
     let artifact_dir = fs_err::canonicalize(&artifact_dir)?;
     let manifest_path = artifact_dir.join("manifest.txt");
 
-    let project_path = rock_engine_host::project::resolve_project_dir(project)?;
+    let (project_path, out_dir, compiled) = compile_sim_diagnostic(project, Some(&manifest_path))?;
     let project = project_path.to_string_lossy().into_owned();
-    rock_engine_host::engine_build::build_engine_libs(&project)?;
-
-    let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let (wire_names, env_by_wire, source_files, stone, _) = compile_sims_with_allocation(
-        project_path.clone(),
-        PathBuf::from(&output),
-        Some(&manifest_path),
-        &[],
-    )?;
-    let sim_sources = resolve_sim_sources(&project_path, &source_files)?;
-    let artifact_fingerprint = stone.artifact_fingerprint().to_string();
-    drop(stone);
+    let sim_sources = resolve_sim_sources(&project_path, &compiled.registry.source_files)?;
+    let artifact_fingerprint = compiled.stone.artifact_fingerprint().to_string();
+    drop(compiled.stone);
     let generated_lua_path = artifact_dir.join("main.lua");
     fs_err::copy(
         Path::new(&output).join(rock_host::project::MAIN_LUA_FILENAME),
@@ -2626,15 +2563,15 @@ pub(crate) fn do_run_allocation_sites(
     let generated_lua = fs_err::read_to_string(&generated_lua_path)?;
 
     let selected = if names.is_empty() {
-        wire_names.clone()
+        compiled.registry.wire_names.clone()
     } else {
-        resolve_sim_specs(&wire_names, names)?
+        resolve_sim_specs(&compiled.registry.wire_names, names)?
     };
     if selected.is_empty() {
         return Err(anyhow!("no @sim coroutines found in project `{project}`"));
     }
     for name in &selected {
-        if entry_is_reload_lane(name, &env_by_wire) {
+        if entry_is_reload_lane(name, &compiled.registry.env_by_wire) {
             return Err(anyhow!(
                 "allocation-site diagnostics do not support reload sim `{name}` because its emitted site IDs can change after the initial manifest"
             ));
@@ -2646,7 +2583,7 @@ pub(crate) fn do_run_allocation_sites(
         let name = &selected[index];
         let stem = allocation_site_artifact_stem(index, name);
         let activation_path = artifact_dir.join(format!("{stem}.activation.tsv"));
-        let mut instrumented_env = env_by_wire.clone();
+        let mut instrumented_env = compiled.registry.env_by_wire.clone();
         instrumented_env.entry(name.clone()).or_default().push((
             "SKULL_ALLOCATION_ACTIVATION".to_string(),
             activation_path.to_string_lossy().into_owned(),
@@ -2720,7 +2657,11 @@ pub(crate) fn do_run_allocation_sites(
                     None,
                 )?;
                 fs_err::write(&joined_path, joined)?;
-                let env = env_by_wire.get(name).map_or(&[][..], Vec::as_slice);
+                let env = compiled
+                    .registry
+                    .env_by_wire
+                    .get(name)
+                    .map_or(&[][..], Vec::as_slice);
                 records.push(serde_json::json!({
                     "sim_name": display_name,
                     "status": status,
@@ -2822,90 +2763,20 @@ enum ReloadRequestState {
     Failed,
 }
 
-/// The one parent-side accounting authority for the request -> publication ->
-/// watcher-consumption path. A request is booked before compilation, becomes
-/// published only after `IncrementalProject` writes the overlay, and can become
-/// terminal only after the production watcher reports what it consumed.
-#[derive(Default, Debug)]
-struct ReloadLedger {
-    requests: BTreeMap<u64, ReloadRequestState>,
-}
-
-impl ReloadLedger {
-    fn book(&mut self, request_id: u64) -> Result<()> {
-        if self
-            .requests
-            .insert(request_id, ReloadRequestState::Booked)
-            .is_some()
-        {
-            return Err(anyhow!("reload request {request_id} was booked twice"));
-        }
-        Ok(())
-    }
-
-    fn publish(&mut self, request_id: u64) -> Result<()> {
-        match self.requests.get_mut(&request_id) {
-            Some(state @ ReloadRequestState::Booked) => {
-                *state = ReloadRequestState::Published;
-                Ok(())
-            }
-            Some(state) => Err(anyhow!(
-                "reload request {request_id} published from terminal/non-booked state {state:?}"
-            )),
-            None => Err(anyhow!(
-                "reload request {request_id} published before it was booked"
-            )),
+fn reload_ledger_summary(requests: &BTreeMap<u64, ReloadRequestState>) -> ReloadLedgerSummary {
+    let mut summary = ReloadLedgerSummary {
+        requests: requests.len(),
+        ..Default::default()
+    };
+    for state in requests.values() {
+        match state {
+            ReloadRequestState::Booked | ReloadRequestState::Published => summary.pending += 1,
+            ReloadRequestState::Applied => summary.applied += 1,
+            ReloadRequestState::Rejected => summary.rejected += 1,
+            ReloadRequestState::Failed => summary.failed += 1,
         }
     }
-
-    fn reject(&mut self, request_id: u64) -> Result<()> {
-        match self.requests.get_mut(&request_id) {
-            Some(state @ ReloadRequestState::Booked) => {
-                *state = ReloadRequestState::Rejected;
-                Ok(())
-            }
-            Some(state) => Err(anyhow!(
-                "reload request {request_id} rejected from state {state:?}"
-            )),
-            None => Err(anyhow!(
-                "reload request {request_id} rejected before it was booked"
-            )),
-        }
-    }
-
-    fn complete(&mut self, request_id: u64, terminal: ReloadTerminal) -> Result<()> {
-        match self.requests.get_mut(&request_id) {
-            Some(state @ ReloadRequestState::Published) => {
-                *state = match terminal {
-                    ReloadTerminal::Applied => ReloadRequestState::Applied,
-                    ReloadTerminal::Failed => ReloadRequestState::Failed,
-                };
-                Ok(())
-            }
-            Some(state) => Err(anyhow!(
-                "reload request {request_id} completed before publication or twice (state {state:?})"
-            )),
-            None => Err(anyhow!(
-                "reload request {request_id} completed before it was booked"
-            )),
-        }
-    }
-
-    fn summary(&self) -> ReloadLedgerSummary {
-        let mut summary = ReloadLedgerSummary {
-            requests: self.requests.len(),
-            ..Default::default()
-        };
-        for state in self.requests.values() {
-            match state {
-                ReloadRequestState::Booked | ReloadRequestState::Published => summary.pending += 1,
-                ReloadRequestState::Applied => summary.applied += 1,
-                ReloadRequestState::Rejected => summary.rejected += 1,
-                ReloadRequestState::Failed => summary.failed += 1,
-            }
-        }
-        summary
-    }
+    summary
 }
 
 /// Apply a unique replacement against the session's current text, including earlier edits.
@@ -2949,11 +2820,19 @@ fn service_reload_edit(
     }
 }
 
-fn book_reload_request(ledger: &mut ReloadLedger, req: &ReloadEditReq) -> Result<u64> {
+fn book_reload_request(
+    ledger: &mut BTreeMap<u64, ReloadRequestState>,
+    req: &ReloadEditReq,
+) -> Result<u64> {
     let request_id = req
         .request_id
         .ok_or_else(|| anyhow!("reload_edit omitted request_id"))?;
-    ledger.book(request_id)?;
+    if ledger
+        .insert(request_id, ReloadRequestState::Booked)
+        .is_some()
+    {
+        return Err(anyhow!("reload request {request_id} was booked twice"));
+    }
     Ok(request_id)
 }
 
@@ -2961,7 +2840,7 @@ fn book_reload_request(ledger: &mut ReloadLedger, req: &ReloadEditReq) -> Result
 /// broke the ledger protocol.
 fn drain_reload_completions(
     completions: &mpsc::Receiver<ReloadCompletion>,
-    ledger: &mut ReloadLedger,
+    ledger: &mut BTreeMap<u64, ReloadRequestState>,
     errors: &mut Vec<SiteMessage>,
 ) -> bool {
     let mut protocol_error = false;
@@ -2986,13 +2865,30 @@ fn drain_reload_completions(
 }
 
 fn consume_reload_completion(
-    ledger: &mut ReloadLedger,
+    ledger: &mut BTreeMap<u64, ReloadRequestState>,
     completion: ReloadCompletion,
 ) -> Result<u64> {
     let request_id = completion
         .request_id
         .ok_or_else(|| anyhow!("reload_terminal omitted request_id"))?;
-    ledger.complete(request_id, completion.terminal)?;
+    match ledger.get_mut(&request_id) {
+        Some(state @ ReloadRequestState::Published) => {
+            *state = match completion.terminal {
+                ReloadTerminal::Applied => ReloadRequestState::Applied,
+                ReloadTerminal::Failed => ReloadRequestState::Failed,
+            };
+        }
+        Some(state) => {
+            return Err(anyhow!(
+                "reload request {request_id} completed before publication or twice (state {state:?})"
+            ));
+        }
+        None => {
+            return Err(anyhow!(
+                "reload request {request_id} completed before it was booked"
+            ));
+        }
+    }
     Ok(request_id)
 }
 
@@ -3509,6 +3405,7 @@ struct Envelope {
     name: String,
     started: bool,
     ended: bool,
+    poisoned: bool,
 }
 
 /// What one observed line meant to the envelope.
@@ -3524,45 +3421,26 @@ enum EnvelopeStep {
     Raw,
 }
 
-/// The live half of the wedged-child guard: the deadline anchor resets
-/// exactly on the accepted `entry_start`. The first violation poisons the
-/// guard, so no later line can extend the deadline; the violation itself is
-/// reported after the exit by `split_child_stream`.
-struct DeadlineGuard {
-    envelope: Option<Envelope>,
-}
-
-impl DeadlineGuard {
-    fn new(name: &str) -> Self {
-        Self {
-            envelope: Some(Envelope::new(name)),
-        }
-    }
-
-    /// True exactly when `line` must reset the deadline anchor.
-    #[cfg(test)]
-    fn observe_resets(&mut self, line: &str) -> bool {
-        matches!(self.observe_boundary(line), Some(EnvelopeStep::Started))
-    }
-
-    fn observe_boundary(&mut self, line: &str) -> Option<EnvelopeStep> {
-        match self.envelope.as_mut().map(|t| t.observe(line)) {
-            Some(Ok(step)) => Some(step),
-            Some(Err(_)) => {
-                self.envelope = None;
-                None
-            }
-            None => None,
-        }
-    }
-}
-
 impl Envelope {
     fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
             started: false,
             ended: false,
+            poisoned: false,
+        }
+    }
+
+    fn observe_boundary(&mut self, line: &str) -> Option<EnvelopeStep> {
+        if self.poisoned {
+            return None;
+        }
+        match self.observe(line) {
+            Ok(step) => Some(step),
+            Err(_) => {
+                self.poisoned = true;
+                None
+            }
         }
     }
 
@@ -3692,25 +3570,6 @@ fn acquire_worker_slot(
         let blocked = rock_core::clock::Instant::now();
         std::thread::sleep(Duration::from_millis(100));
         *waits.entry(reason).or_default() += blocked.elapsed();
-    }
-}
-
-struct AdmittedWorker {
-    child: crate::headless_scope::BoundChild,
-    _slot: std::fs::File,
-    _phase: worker_admission::WorkerPhase,
-}
-
-impl std::ops::Deref for AdmittedWorker {
-    type Target = crate::headless_scope::BoundChild;
-    fn deref(&self) -> &Self::Target {
-        &self.child
-    }
-}
-
-impl std::ops::DerefMut for AdmittedWorker {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.child
     }
 }
 
@@ -3853,11 +3712,9 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
     // Until the PID is published the admission lease reserves the full estimate.
     // Keep the child bound if publishing fails, so it is reaped before the lease drops.
     worker_admission::publish_pid(&sim_worker_slot_directory(), &mut worker_slot, child.id())?;
-    let mut child = AdmittedWorker {
-        child,
-        _slot: worker_slot,
-        _phase: worker_phase,
-    };
+    // Declared after the leases, so the bound child is reaped before capacity
+    // and the admission phase are released, including on early return.
+    let mut child = child;
     let process_id = child.id();
     if let Some(recorder) = recorder {
         recorder.worker_started(worker_attempt, process_id);
@@ -3890,7 +3747,7 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
         let reload_completion_tx = reload_completion_tx;
         let recorder = recorder.cloned();
         let (occurrence_id, name) = (part.occurrence_id, part.name.clone());
-        let mut deadline_guard = DeadlineGuard::new(&part.name);
+        let mut deadline_guard = Envelope::new(&part.name);
         // Buffered runs must not write anything from this thread: several
         // children are live, so a direct write here interleaves into the middle
         // of another sim's locked record. The lines are retained and handed
@@ -4010,7 +3867,7 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
     let mut runner_killed = false;
     let mut pristine: HashMap<String, String> = HashMap::new();
     let mut reload_errors: Vec<SiteMessage> = Vec::new();
-    let mut reload_ledger = ReloadLedger::default();
+    let mut reload_ledger = BTreeMap::new();
     let mut stone = stone;
     let (status, timed_out) = 'child: loop {
         if drain_reload_completions(
@@ -4085,20 +3942,14 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
                         };
                         match serviced {
                             Ok(crate::skull_backend::SkullReload::Incremental { .. }) => {
-                                if let Err(e) = reload_ledger.publish(request_id) {
-                                    let _ = reload_ledger.reject(request_id);
-                                    reload_errors.push(SiteMessage {
-                                        message: format!("reload publication: {e}"),
-                                        site: compress_site(&req.site),
-                                    });
-                                    break 'child (terminate_reload_child(&mut child)?, false);
-                                }
+                                // Only this thread owns the ledger, and this request was just booked.
+                                reload_ledger.insert(request_id, ReloadRequestState::Published);
                             }
                             Ok(other) => {
                                 let e = anyhow!(
                                     "reload_edit returned non-incremental result {other:?}"
                                 );
-                                let _ = reload_ledger.reject(request_id);
+                                reload_ledger.insert(request_id, ReloadRequestState::Rejected);
                                 let site = compress_site(&req.site);
                                 reload_errors.push(SiteMessage {
                                     message: format!("reload_edit: {e}"),
@@ -4107,7 +3958,7 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
                                 break 'child (terminate_reload_child(&mut child)?, false);
                             }
                             Err(e) => {
-                                let _ = reload_ledger.reject(request_id);
+                                reload_ledger.insert(request_id, ReloadRequestState::Rejected);
                                 let site = compress_site(&req.site);
                                 // Stream now for a single run; buffered callers emit
                                 // the retained error under their record lock.
@@ -4164,7 +4015,7 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
     while let Ok(req) = reload_rx.try_recv() {
         match book_reload_request(&mut reload_ledger, &req) {
             Ok(request_id) => {
-                let _ = reload_ledger.reject(request_id);
+                reload_ledger.insert(request_id, ReloadRequestState::Rejected);
                 reload_errors.push(SiteMessage {
                     message: format!(
                         "reload_edit for `{}` arrived after the child exited (emit it before a wait_for on its effect)",
@@ -4205,7 +4056,7 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
         &mut reload_ledger,
         &mut reload_errors,
     );
-    let reload_summary = reload_ledger.summary();
+    let reload_summary = reload_ledger_summary(&reload_ledger);
     if reload_summary.pending > 0 {
         reload_errors.push(SiteMessage {
             message: format!(

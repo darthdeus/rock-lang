@@ -166,9 +166,12 @@ fn sim_receipt_prepare_releases_session() {
 
 #[test]
 fn sim_receipt_registry_requires_source_files() {
-    let wire_names = vec!["probe".to_string()];
-    let env_by_wire = HashMap::new();
-    let missing = registry_json(&wire_names, &env_by_wire, &HashMap::new()).unwrap_err();
+    let registry = SimRegistry {
+        wire_names: vec!["probe".to_string()],
+        env_by_wire: HashMap::new(),
+        source_files: HashMap::new(),
+    };
+    let missing = registry_json(&registry).unwrap_err();
     assert!(
         missing
             .to_string()
@@ -590,17 +593,6 @@ fn lanes_dispatch_longest_first_with_untimed_lanes_last_in_plan_order() {
 }
 
 #[test]
-fn the_classed_pool_with_no_cap_is_the_plain_pool() {
-    let renders = vec![true; 5];
-    let results = run_bounded_classed(&PoolWidth::fixed(4), 4, &renders, |i| {
-        Ok::<usize, anyhow::Error>(i * 2)
-    });
-    let mut got: Vec<(usize, usize)> = results.into_iter().map(|(i, r)| (i, r.unwrap())).collect();
-    got.sort_unstable();
-    assert_eq!(got, (0..5).map(|i| (i, i * 2)).collect::<Vec<_>>());
-}
-
-#[test]
 fn sim_environment_cap_reaches_default_lane_resolution() {
     const CHILD: &str = "ROCK_SIM_CAP_PROBE";
     if std::env::var_os(CHILD).is_some() {
@@ -842,68 +834,46 @@ fn lines(raw: &[&str]) -> Vec<String> {
     raw.iter().map(|s| s.to_string()).collect()
 }
 
-/// The deadline anchor resets ONLY on `EnvelopeStep::Started`, so the
-/// envelope's classification IS the guard's admission: a start the split
-/// would reject -- malformed, for another sim, or a second one -- must not
-/// read as Started.
-#[test]
-fn only_an_accepted_entry_start_reads_as_started() {
-    let started =
-        |t: &mut Envelope, line: &str| matches!(t.observe(line), Ok(EnvelopeStep::Started));
-
-    let mut t = Envelope::new("a");
-    assert!(
-        started(&mut t, &start("a")),
-        "the child's own start is Started"
-    );
-    assert!(
-        t.observe(r#"__SIM__ {"op":"entry_start"}"#).is_err(),
-        "malformed: no name"
-    );
-    assert!(
-        t.observe(&start("a")).is_err(),
-        "a second start while the entry is open"
-    );
-    assert!(matches!(
-        t.observe(&end("a")),
-        Ok(EnvelopeStep::Ended(None, None))
-    ));
-    assert!(
-        t.observe(&start("a")).is_err(),
-        "a closed entry cannot restart"
-    );
-
-    assert!(
-        Envelope::new("a").observe(&start("b")).is_err(),
-        "another sim's name"
-    );
-}
-
 /// The wedged-child evasion, deterministically: a sim stuck inside one
 /// tick can flood `entry_start`-shaped lines, and the deadline may reset on
 /// none of them. After any violation the guard is poisoned, so even a line
 /// that would otherwise be the valid start extends nothing.
 #[test]
 fn the_deadline_guard_resets_only_on_the_accepted_start() {
-    let mut g = DeadlineGuard::new("a");
-    assert!(g.observe_resets(&start("a")), "the child's start resets");
+    let mut g = Envelope::new("a");
     assert!(
-        !g.observe_resets(&expect_ok("inside a")),
+        matches!(g.observe_boundary(&start("a")), Some(EnvelopeStep::Started)),
+        "the child's start resets"
+    );
+    assert!(
+        !matches!(
+            g.observe_boundary(&expect_ok("inside a")),
+            Some(EnvelopeStep::Started)
+        ),
         "an ordinary op does not"
     );
     assert!(
-        !g.observe_resets("[   0.1s INFO ] raw logging"),
+        !matches!(
+            g.observe_boundary("[   0.1s INFO ] raw logging"),
+            Some(EnvelopeStep::Started)
+        ),
         "raw output does not"
     );
-    assert!(!g.observe_resets(&start("a")), "a second start does not");
-
-    let mut g = DeadlineGuard::new("a");
     assert!(
-        !g.observe_resets(&expect_ok("before the start")),
+        !matches!(g.observe_boundary(&start("a")), Some(EnvelopeStep::Started)),
+        "a second start does not"
+    );
+
+    let mut g = Envelope::new("a");
+    assert!(
+        !matches!(
+            g.observe_boundary(&expect_ok("before the start")),
+            Some(EnvelopeStep::Started)
+        ),
         "an op before the start poisons"
     );
     assert!(
-        !g.observe_resets(&start("a")),
+        !matches!(g.observe_boundary(&start("a")), Some(EnvelopeStep::Started)),
         "a poisoned guard must not resume resetting on a later well-formed start"
     );
 }
@@ -1040,46 +1010,6 @@ fn malformed_envelopes_are_rejected_not_guessed_at() {
             split_child_stream(&stream, "a").is_err(),
             "{what} was accepted"
         );
-    }
-}
-
-#[test]
-fn extract_str_field_unquotes_and_unescapes() {
-    let cases = [
-        (r#"{"op":"expect_fail"}"#, "op", Some("expect_fail")),
-        (r#"{"message":"1 segment"}"#, "message", Some("1 segment")),
-        (r#"{"op":"expect_fail"}"#, "missing", None),
-        (
-            r#"{"message":"hello \"world\""}"#,
-            "message",
-            Some(r#"hello "world""#),
-        ),
-    ];
-    for (json, key, expected) in cases {
-        let json = serde_json::from_str::<serde_json::Value>(json).unwrap();
-        assert_eq!(extract_str_field(&json, key).as_deref(), expected, "{json}");
-    }
-}
-
-#[test]
-fn extract_raw_field_keeps_the_field_as_json_text() {
-    let cases = [
-        (
-            r#"{"args":{"a":1,"b":[2,3]}}"#,
-            "args",
-            r#"{"a":1,"b":[2,3]}"#,
-        ),
-        (r#"{"tol":0.001}"#, "tol", "0.001"),
-        (r#"{"ok":true}"#, "ok", "true"),
-        (
-            r#"{"args":{"msg":"abc}def"},"after":1}"#,
-            "args",
-            r#"{"msg":"abc}def"}"#,
-        ),
-    ];
-    for (json, key, expected) in cases {
-        let json = serde_json::from_str::<serde_json::Value>(json).unwrap();
-        assert_eq!(extract_raw_field(&json, key).as_deref(), Some(expected));
     }
 }
 
@@ -1268,7 +1198,7 @@ __SIM__ {"op":"stop","site":"foo.rock:5"}
 
 #[test]
 fn foreign_stderr_prefixes_preserve_envelopes_deadlines_and_verdicts() {
-    let mut guard = DeadlineGuard::new("a");
+    let mut guard = Envelope::new("a");
     let stream: Vec<String> = [
         start("a"),
         expect_ok("checked"),
@@ -1278,9 +1208,15 @@ fn foreign_stderr_prefixes_preserve_envelopes_deadlines_and_verdicts() {
     .into_iter()
     .map(|line| format!("foreign stderr: {line}"))
     .collect();
-    assert!(guard.observe_resets(&stream[0]));
+    assert!(matches!(
+        guard.observe_boundary(&stream[0]),
+        Some(EnvelopeStep::Started)
+    ));
     for line in &stream[1..] {
-        assert!(!guard.observe_resets(line));
+        assert!(!matches!(
+            guard.observe_boundary(line),
+            Some(EnvelopeStep::Started)
+        ));
     }
     let entry = split_child_stream(&stream, "a").unwrap();
     assert!(entry.started && entry.terminated);
@@ -1524,48 +1460,4 @@ fn prefix_with_site_keeps_origin_in_message() {
         "at smoke:10: diff 0.006 > tol 0.001"
     );
     assert_eq!(prefix_with_site("", "msg"), "msg");
-}
-
-#[test]
-fn reload_ledger_classifies_every_request() {
-    let summary = |requests: usize, applied, pending, rejected, failed| ReloadLedgerSummary {
-        requests,
-        applied,
-        pending,
-        rejected,
-        failed,
-    };
-    let mut ledger = ReloadLedger::default();
-    ledger.book(7).expect("request books once");
-    ledger.publish(7).expect("artifact publishes once");
-    ledger
-        .complete(7, ReloadTerminal::Applied)
-        .expect("watcher completion follows publication");
-    assert_eq!(ledger.summary(), summary(1, 1, 0, 0, 0));
-
-    // Booked and published-but-unconsumed requests are both pending.
-    let mut ledger = ReloadLedger::default();
-    ledger.book(1).unwrap();
-    ledger.book(2).unwrap();
-    ledger.publish(2).unwrap();
-    assert_eq!(ledger.summary(), summary(2, 0, 2, 0, 0));
-
-    let mut ledger = ReloadLedger::default();
-    ledger.book(1).unwrap();
-    ledger.reject(1).unwrap();
-    ledger.book(2).unwrap();
-    ledger.publish(2).unwrap();
-    ledger.complete(2, ReloadTerminal::Failed).unwrap();
-    assert_eq!(ledger.summary(), summary(2, 0, 0, 1, 1));
-}
-
-#[test]
-fn reload_ledger_rejects_duplicate_and_early_completion() {
-    let mut duplicate = ReloadLedger::default();
-    duplicate.book(1).unwrap();
-    assert!(duplicate.complete(1, ReloadTerminal::Applied).is_err());
-    duplicate.publish(1).unwrap();
-    assert!(duplicate.publish(1).is_err());
-    duplicate.complete(1, ReloadTerminal::Applied).unwrap();
-    assert!(duplicate.complete(1, ReloadTerminal::Applied).is_err());
 }

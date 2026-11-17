@@ -3,7 +3,14 @@
 // an explicit `@sim_env("STONE_WINDOW", ...)` always wins. Compile-only: the
 // test asserts the collected env, it never runs these sims.
 fn small_window_capture_helper() {
-    take_screenshot("tmp/sim-small-window-helper.png")
+    let recurse = small_window_recursive_helper
+    let capture = take_screenshot
+    recurse()
+    capture("tmp/sim-small-window-helper.png", 0, null)
+}
+
+fn small_window_recursive_helper() {
+    small_window_capture_helper()
 }
 
 @sim

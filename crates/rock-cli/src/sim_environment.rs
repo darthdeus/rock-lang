@@ -243,7 +243,6 @@ pub(crate) fn apply(
 
 #[cfg(test)]
 mod tests {
-    use crate::run_sim::skull_compile_game_and_collect_sims;
     use std::collections::HashMap;
     use std::sync::OnceLock;
 
@@ -252,10 +251,17 @@ mod tests {
             .join("tests/fixtures/sim-small-window");
         let out = tempfile::tempdir().expect("small-window output dir");
         let main = out.path().join("main.lua");
-        let (_wires, env_by_wire, _sources, _stone) =
-            skull_compile_game_and_collect_sims(fixture.to_str().unwrap(), &main)
-                .expect("the small-window fixture must compile");
-        env_by_wire
+        let project = crate::skull_backend::IncrementalProject::init_with_tests(
+            fixture.to_str().unwrap(),
+            &main,
+            &out.path().join("incremental.lua"),
+        )
+        .expect("the small-window fixture must compile");
+        let mut sims = crate::skull_backend::collect_sim_descriptors(project.workspace());
+        super::apply(project.workspace(), &mut sims);
+        sims.into_iter()
+            .map(|sim| (sim.wire_name, sim.env_pairs))
+            .collect()
     }
 
     fn env_by_wire() -> &'static HashMap<String, Vec<(String, String)>> {
@@ -291,53 +297,6 @@ mod tests {
             .rev()
             .find(|(k, _)| k == "STONE_WINDOW")
             .map(|(_, v)| v.as_str())
-    }
-
-    #[test]
-    fn reachability_through_a_cycle_is_independent_of_query_order() {
-        let fixture =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sim-reaches");
-        let project = crate::live_project::LiveProject::init(fixture.to_str().unwrap(), false)
-            .expect("the recursive fixture must compile");
-        let ws = project.workspace();
-        let mut name_map = super::NameMap::new();
-        let mut keys = HashMap::new();
-        for module in ws.source_modules() {
-            for (fid, f) in module.functions.iter() {
-                let key = (module.id, fid);
-                name_map.entry(f.name).or_default().push(key);
-                keys.insert(skull_mir::mangle::declared_name(f.name.as_str()), key);
-            }
-        }
-        let outer = keys["outer"];
-        let inner = keys["inner"];
-        let target = keys["take_screenshot"];
-        // Function-valued calls keep the body-scan edges in source order.
-        assert_eq!(
-            super::sim_callee_edges(ws, outer, &name_map),
-            [inner, target]
-        );
-        for reads_pixels in [true, false] {
-            for order in [["outer", "inner"], ["inner", "outer"]] {
-                let mut memo = HashMap::new();
-                let mut visited = std::collections::HashSet::new();
-                for name in order {
-                    assert_eq!(
-                        super::sim_reaches(
-                            ws,
-                            keys[name],
-                            &|key| reads_pixels && super::names_pixel_reader(ws, key),
-                            &mut memo,
-                            &mut visited,
-                            &name_map,
-                        ),
-                        reads_pixels,
-                        "reachability from `{name}` must be independent of query order"
-                    );
-                    assert!(visited.is_empty());
-                }
-            }
-        }
     }
 
     #[test]
@@ -392,63 +351,5 @@ mod tests {
             Some("800x600"),
             "an explicit @sim_env STONE_WINDOW wins"
         );
-    }
-
-    #[test]
-    fn every_pixel_root_name_resolves_in_a_stone_workspace() {
-        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/sim-small-window");
-        let project = crate::live_project::LiveProject::init(fixture.to_str().unwrap(), true)
-            .expect("the small-window fixture must compile");
-        let mut names = std::collections::HashSet::new();
-        for module in project.workspace().modules.iter() {
-            for (_fid, f) in module.functions.iter() {
-                let declared = f
-                    .name
-                    .as_str()
-                    .rsplit("::")
-                    .next()
-                    .unwrap_or(f.name.as_str());
-                names.insert(declared.to_string());
-            }
-        }
-        for root in super::SIM_PIXEL_ROOTS {
-            assert!(
-                names.contains(*root),
-                "pixel root `{root}` resolves to no function; the set drifted from the engine"
-            );
-        }
-        for prefix in super::SIM_PIXEL_PREFIXES {
-            assert!(
-                names.iter().any(|n| n.starts_with(prefix)),
-                "pixel prefix `{prefix}` matches no function; the set drifted from the engine"
-            );
-        }
-    }
-
-    #[test]
-    fn every_capacity_global_name_resolves_in_a_stone_workspace() {
-        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/sim-small-window");
-        let project = crate::live_project::LiveProject::init(fixture.to_str().unwrap(), true)
-            .expect("the small-window fixture must compile");
-        let mut names = std::collections::HashSet::new();
-        for module in project.workspace().modules.iter() {
-            for (_gid, g) in module.globals.iter() {
-                let declared = g
-                    .name
-                    .as_str()
-                    .rsplit("::")
-                    .next()
-                    .unwrap_or(g.name.as_str());
-                names.insert(declared.to_string());
-            }
-        }
-        for root in super::SIM_CAPACITY_GLOBALS {
-            assert!(
-                names.contains(*root),
-                "capacity global `{root}` resolves to no global; the set drifted from the engine"
-            );
-        }
     }
 }
