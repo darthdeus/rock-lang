@@ -23,24 +23,15 @@ pub(crate) fn is_identity_struct_type(gamma: &Gamma, ty: TyId) -> bool {
 }
 
 pub(crate) fn frame_ref_target(gamma: &Gamma, ty: TyId) -> Option<TyId> {
+    let ty = match *gamma.get(ty) {
+        TypeExpr::Nullable(inner) => ty.with_idx(inner),
+        _ => ty,
+    };
     match *gamma.get(ty) {
         TypeExpr::App {
             ctor: TypeCtor::Ref,
-            params,
-        } => params.into_iter().next().map(|inner| ty.with_idx(inner)),
-        TypeExpr::Nullable(inner) => {
-            let inner_ty = ty.with_idx(inner);
-            match *gamma.get(inner_ty) {
-                TypeExpr::App {
-                    ctor: TypeCtor::Ref,
-                    params,
-                } => params
-                    .into_iter()
-                    .next()
-                    .map(|target| inner_ty.with_idx(target)),
-                _ => None,
-            }
-        }
+            mut params,
+        } => params.next().map(|inner| ty.with_idx(inner)),
         _ => None,
     }
 }
@@ -146,39 +137,27 @@ fn map_structural_type<E>(
 pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), CompilerError> {
     let a = resolve(gamma, a, span);
     let b = resolve(gamma, b, span);
-
-    match (gamma.get(a), gamma.get(b)) {
-        (TypeExpr::Builtin(x), TypeExpr::Builtin(y)) if x == y => {}
-
+    let (params, other_params, returns, arity_error) = match (*gamma.get(a), *gamma.get(b)) {
+        (TypeExpr::Builtin(x), TypeExpr::Builtin(y)) if x == y => return Ok(()),
         (TypeExpr::Builtin(BuiltinTy::Never | BuiltinTy::Error), _)
-        | (_, TypeExpr::Builtin(BuiltinTy::Never | BuiltinTy::Error)) => {}
-
-        (TypeExpr::Generic(x, _), TypeExpr::Generic(y, _)) if x == y => {}
-        (TypeExpr::Infer(va, _), TypeExpr::Infer(vb, _)) if va == vb => {}
-
-        (TypeExpr::Infer(va, _), _) => {
-            let va = *va;
-            bind_var_checked(gamma, va, b, span)?;
+        | (_, TypeExpr::Builtin(BuiltinTy::Never | BuiltinTy::Error)) => return Ok(()),
+        (TypeExpr::Generic(x, _), TypeExpr::Generic(y, _)) if x == y => return Ok(()),
+        (TypeExpr::Infer(x, _), TypeExpr::Infer(y, _)) if x == y => return Ok(()),
+        (TypeExpr::Infer(var, _), _) => return bind_var_checked(gamma, var, b, span),
+        (_, TypeExpr::Infer(var, _)) => return bind_var_checked(gamma, var, a, span),
+        (TypeExpr::Nullable(inner), TypeExpr::Nullable(other)) => {
+            return unify(gamma, a.with_idx(inner), b.with_idx(other), span);
         }
-
-        (_, TypeExpr::Infer(vb, _)) => {
-            let vb = *vb;
-            bind_var_checked(gamma, vb, a, span)?;
-        }
-
+        (_, TypeExpr::Nullable(inner)) => return unify(gamma, a, b.with_idx(inner), span),
         (
+            TypeExpr::App { ctor, params },
             TypeExpr::App {
-                ctor: ctor_a,
-                params: params_a,
-            },
-            TypeExpr::App {
-                ctor: ctor_b,
-                params: params_b,
+                ctor: other,
+                params: other_params,
             },
         ) => {
-            if ctor_a != ctor_b {
-                // Mention generic constructors only when either side has args.
-                let detail = if params_a.is_empty() && params_b.is_empty() {
+            if ctor != other {
+                let detail = if params.is_empty() && other_params.is_empty() {
                     ""
                 } else {
                     " (different type constructors)"
@@ -189,100 +168,48 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
                     "type mismatch: expected `{}`, found `{}`{detail}",
                     gamma.render(b),
                     gamma.render(a)
-                )
+                );
             }
-
-            if params_a.len() != params_b.len() {
-                unify_fail!(
-                    gamma,
-                    span,
-                    "Failed to unify {} and {}, generics of different length",
-                    gamma.render(a),
-                    gamma.render(b)
-                )
-            }
-
-            for (ea, eb) in (*params_a).zip(*params_b) {
-                unify(gamma, a.with_idx(ea), b.with_idx(eb), span)?;
-            }
+            (params, other_params, None, "generics of different length")
         }
-
+        (TypeExpr::Tuple { elements }, TypeExpr::Tuple { elements: other }) => {
+            (elements, other, None, "tuples of different length")
+        }
         (
-            TypeExpr::Tuple {
-                elements: elements_a,
-            },
-            TypeExpr::Tuple {
-                elements: elements_b,
-            },
-        ) => {
-            if elements_a.len() != elements_b.len() {
-                unify_fail!(
-                    gamma,
-                    span,
-                    "Failed to unify {} and {}, tuples of different length",
-                    gamma.render(a),
-                    gamma.render(b)
-                )
-            }
-
-            for (ea, eb) in (*elements_a).zip(*elements_b) {
-                unify(gamma, a.with_idx(ea), b.with_idx(eb), span)?;
-            }
-        }
-
-        (TypeExpr::Nullable(ia), TypeExpr::Nullable(ib)) => {
-            let (ia, ib) = (*ia, *ib);
-
-            unify(gamma, a.with_idx(ia), b.with_idx(ib), span)?;
-        }
-
-        (_, TypeExpr::Nullable(ib)) => {
-            let ib = *ib;
-
-            unify(gamma, a, b.with_idx(ib), span)?;
-        }
-
-        (
+            TypeExpr::Function { params, ret },
             TypeExpr::Function {
-                params: pa,
-                ret: ra,
+                params: other_params,
+                ret: other_ret,
             },
-            TypeExpr::Function {
-                params: pb,
-                ret: rb,
-            },
-        ) => {
-            if pa.len() != pb.len() {
-                unify_fail!(
-                    gamma,
-                    span,
-                    "Failed to unify {} and {}, functions with different arity",
-                    gamma.render(a),
-                    gamma.render(b)
-                )
-            }
-
-            let (ra, rb) = (*ra, *rb);
-
-            for (ea, eb) in (*pa).zip(*pb) {
-                unify(gamma, a.with_idx(ea), b.with_idx(eb), span)?;
-            }
-
-            unify(gamma, a.with_idx(ra), b.with_idx(rb), span)?;
-        }
-
-        // `coerce` passes actual before expected, so `b` is expected here.
-        _ => {
-            unify_fail!(
-                gamma,
-                span,
-                "type mismatch: expected `{}`, found `{}`",
-                gamma.render(b),
-                gamma.render(a)
-            )
-        }
+        ) => (
+            params,
+            other_params,
+            Some((ret, other_ret)),
+            "functions with different arity",
+        ),
+        _ => unify_fail!(
+            gamma,
+            span,
+            "type mismatch: expected `{}`, found `{}`",
+            gamma.render(b),
+            gamma.render(a)
+        ),
+    };
+    if params.len() != other_params.len() {
+        unify_fail!(
+            gamma,
+            span,
+            "Failed to unify {} and {}, {arity_error}",
+            gamma.render(a),
+            gamma.render(b)
+        );
     }
-
+    for (param, other) in params.zip(other_params) {
+        unify(gamma, a.with_idx(param), b.with_idx(other), span)?;
+    }
+    if let Some((ret, other)) = returns {
+        unify(gamma, a.with_idx(ret), b.with_idx(other), span)?;
+    }
     Ok(())
 }
 

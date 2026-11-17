@@ -1293,27 +1293,37 @@ pub(crate) fn spread_constituents(
     }
 }
 
-pub(crate) fn resolve_named_call_with_generics(
+pub(crate) fn call_parts(
+    body: &Body,
+    expr: Idx<Expr>,
+) -> (CallFamily, IdxRange<Expr>, IdxRange<TypeExpr>) {
+    match body.expr_arena[expr] {
+        Expr::Call {
+            family,
+            args,
+            generic_args,
+            ..
+        } => (family, args, generic_args),
+        Expr::SafeNavCall { family, args, .. } => (family, args, IdxRange::new_empty()),
+        Expr::Not(inner, family) | Expr::UnaryMinus(inner, family) => (
+            family,
+            IdxRange::new_inclusive(inner..=inner),
+            IdxRange::new_empty(),
+        ),
+        _ => unreachable!("named call expression"),
+    }
+}
+
+pub(crate) fn resolve_named_call(
     gamma: &mut Gamma,
     c: BodyCtx,
-    family: CallFamily,
-    recv_override: Option<TyId>,
-    args: IdxRange<Expr>,
-    generic_args: IdxRange<TypeExpr>,
     call_expr: Idx<Expr>,
-    span: Span,
+    recv_override: Option<TyId>,
 ) -> Result<TyId, CompilerError> {
+    let (family, args, _) = call_parts(c.body, call_expr);
+    let span = c.body.expr_spans[call_expr];
     let name = family.key();
-    let res = resolve_named_call_inner(
-        gamma,
-        c,
-        family,
-        recv_override,
-        args,
-        generic_args,
-        call_expr,
-        span,
-    );
+    let res = resolve_named_call_inner(gamma, c, call_expr, recv_override);
 
     let Err(e) = res else { return res };
     // A failed operand already has a diagnostic. Suppress the cascading call error.
@@ -1406,16 +1416,14 @@ fn unary_operator_error(
     )
 }
 
-pub(crate) fn resolve_named_call_inner(
+fn resolve_named_call_inner(
     gamma: &mut Gamma,
     c: BodyCtx,
-    family: CallFamily,
-    recv_override: Option<TyId>,
-    args: IdxRange<Expr>,
-    generic_args: IdxRange<TypeExpr>,
     call_expr: Idx<Expr>,
-    span: Span,
+    recv_override: Option<TyId>,
 ) -> Result<TyId, CompilerError> {
+    let (family, args, generic_args) = call_parts(c.body, call_expr);
+    let span = c.body.expr_spans[call_expr];
     let name = family.key();
     let _span = tracing::info_span!("named_call", name = %name).entered();
     let Callees {
@@ -1655,10 +1663,8 @@ pub(crate) fn resolve_named_call_inner(
                                 v,
                                 Pending {
                                     kind: PendingKind::Call {
-                                        family,
                                         call_expr,
                                         recv_override,
-                                        args: arg_list,
                                         arg_ty,
                                         arg_tys,
                                         preinferred,

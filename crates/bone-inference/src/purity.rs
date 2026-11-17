@@ -57,112 +57,59 @@ pub(crate) fn fn_has_anno(f: &Function, name: &str) -> bool {
     f.annotations.iter().any(|a| a.is_builtin(name))
 }
 
-/// Static initializers cannot capture locals; nested functions cannot capture
-/// enclosing locals but may refer to statics and sibling functions.
-#[derive(Copy, Clone)]
-pub(crate) enum CaptureCtx {
-    StaticInit,
-    NestedFnBody,
-}
-
-pub(crate) fn reject_static_init_captures(
-    c: BodyCtx,
-    root: Idx<Expr>,
-    site: Span,
-) -> Result<(), CompilerError> {
-    let root_span = c.body.expr_spans[root];
-    reject_captures(
-        c,
-        HirChild::Expr(root),
-        root_span,
-        site,
-        CaptureCtx::StaticInit,
-    )
-}
-
-/// Check captures using the full declaration span so the nested function's
-/// parameters count as local to its body.
-pub(crate) fn reject_nested_fn_captures(
-    c: BodyCtx,
-    body: Idx<Expr>,
-    decl_span: Span,
-) -> Result<(), CompilerError> {
-    reject_captures(
-        c,
-        HirChild::Expr(body),
-        decl_span,
-        decl_span,
-        CaptureCtx::NestedFnBody,
-    )
-}
-
-/// Reject references to enclosing locals; declarations inside `root_span` are
-/// local to the hoisted construct.
-pub(crate) fn reject_captured_binding(
-    c: BodyCtx,
-    b: Idx<hir::BindingInfo>,
-    root_span: Span,
-    site: Span,
-    mode: CaptureCtx,
-) -> Result<(), CompilerError> {
-    let bspan = c.body.binding_arena[b].span;
-    let inside = bspan.offset_range().0 >= root_span.offset_range().0
-        && bspan.offset_range().1 <= root_span.offset_range().1;
-    if inside {
-        return Ok(());
-    }
-    let name = c.body.binding_arena[b].name;
-    match mode {
-        CaptureCtx::StaticInit => comp_error!(
-            site,
-            "static initializer may not read local `{}`: the initializer runs once, not per call",
-            name
-        ),
-        CaptureCtx::NestedFnBody => {
-            if matches!(
-                c.body.binding_arena[b].kind,
-                hir::BindingKind::Let | hir::BindingKind::Param
-            ) {
-                comp_error!(
-                    site,
-                    "nested function may not read enclosing local `{}`: it is hoisted to module scope with no access to the enclosing frame",
-                    name
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn reject_captures(
     c: BodyCtx,
-    node: HirChild,
+    root: Idx<Expr>,
     root_span: Span,
     site: Span,
-    mode: CaptureCtx,
+    static_init: bool,
 ) -> Result<(), CompilerError> {
-    match node {
-        HirChild::Expr(e) => match c.body.expr_arena[e] {
-            // Calling an enclosing local is a capture; sibling functions are not.
-            Expr::Var(b)
+    fn visit(
+        c: BodyCtx,
+        node: HirChild,
+        root_span: Span,
+        site: Span,
+        static_init: bool,
+    ) -> Result<(), CompilerError> {
+        if let HirChild::Expr(expr) = node
+            && let Expr::Var(binding)
             | Expr::Call {
-                callee: Callee::Local(b),
+                callee: Callee::Local(binding),
                 ..
-            } => reject_captured_binding(c, b, root_span, site, mode)?,
-            _ => {}
-        },
-        // Nested function bodies are checked separately and lie inside this
-        // declaration span.
-        HirChild::Statement(_) => {}
-        HirChild::Pattern(_) => return Ok(()),
+            } = c.body.expr_arena[expr]
+        {
+            let binding = &c.body.binding_arena[binding];
+            let (start, end) = binding.span.offset_range();
+            let (root_start, root_end) = root_span.offset_range();
+            if !(root_start <= start && end <= root_end) {
+                let message = if static_init {
+                    Some(format!(
+                        "static initializer may not read local `{}`: the initializer runs once, not per call",
+                        binding.name
+                    ))
+                } else if matches!(binding.kind, BindingKind::Let | BindingKind::Param) {
+                    Some(format!(
+                        "nested function may not read enclosing local `{}`: it is hoisted to module scope with no access to the enclosing frame",
+                        binding.name
+                    ))
+                } else {
+                    None
+                };
+                if let Some(message) = message {
+                    return Err(CompilerError::new_with_label(site, message));
+                }
+            }
+        }
+        if matches!(node, HirChild::Pattern(_)) {
+            return Ok(());
+        }
+        c.body
+            .try_for_each_child(node, |child| visit(c, child, root_span, site, static_init))
     }
-    c.body.try_for_each_child(node, |child| {
-        reject_captures(c, child, root_span, site, mode)
-    })
+    visit(c, HirChild::Expr(root), root_span, site, static_init)
 }
 
-/// Report impure constructs in `node`; lambda and nested-function bodies are
-/// not traversed.
+/// Report impure constructs in evaluation order, excluding nested function bodies.
 pub(crate) fn verify_pure(
     c: BodyCtx,
     ws: &Workspace,
@@ -170,114 +117,58 @@ pub(crate) fn verify_pure(
     node: HirChild,
     errors: &mut Vec<CompilerError>,
 ) {
-    let descend = match node {
-        HirChild::Expr(e) => verify_pure_expr(c, ws, resolved, e, errors),
-        HirChild::Statement(s) => verify_pure_stmt(c, s, errors),
-        HirChild::Pattern(_) => false,
+    let (span, message, descend) = match node {
+        HirChild::Pattern(_) => return,
+        HirChild::Statement(stmt) => {
+            let message = match c.body.statement_arena[stmt] {
+                Statement::Static { .. } => {
+                    Some("`@pure` function declares a `static` (writes module state)")
+                }
+                Statement::Fn { .. } => Some(
+                    "`@pure` function declares a nested `fn` (its body is not vetted for purity)",
+                ),
+                _ => None,
+            };
+            (
+                c.body.statement_spans[stmt],
+                message.map(String::from),
+                message.is_none(),
+            )
+        }
+        HirChild::Expr(expr) => {
+            let mut descend = true;
+            let message = match c.body.expr_arena[expr] {
+                Expr::Global(name) if !ws.const_globals.contains(&name) =>
+                    Some(format!("`@pure` function reads global `{name}` (mutable state)")),
+                Expr::Assign { .. } => Some("`@pure` function performs an assignment (mutation)".into()),
+                Expr::CompoundAssign { .. } => Some("`@pure` function performs a compound assignment (mutation)".into()),
+                Expr::IncDec { .. } => Some("`@pure` function performs an increment/decrement (mutation)".into()),
+                Expr::Call { callee: Callee::Local(_) | Callee::Value(_), .. } =>
+                    Some("`@pure` function calls a function value, whose body is not provably pure".into()),
+                Expr::Call { .. } | Expr::SafeNavCall { .. } => resolved.get(&expr).and_then(|&(mid, fid)| {
+                    let function = &ws.module(mid).functions[fid];
+                    (!fn_has_anno(function, "pure") && !fn_has_anno(function, "debug_impure"))
+                        .then(|| format!("`@pure` function calls `{}` which is not provably pure", function.name))
+                }),
+                Expr::Index { .. } => Some("`@pure` function indexes a collection (reads potentially-mutable state)".into()),
+                Expr::Array(_) => Some("`@pure` function builds an array literal (allocates a heap table, identity observable)".into()),
+                Expr::StructLiteral { name, .. } if !ws.struct_by_name.get(&name)
+                    .is_some_and(|sid| ws.module(sid.module).structs[sid.def].is_value) =>
+                    Some("`@pure` function constructs a heap struct literal (identity observable); only `value` structs are allowed".into()),
+                Expr::Lambda { .. } => {
+                    descend = false;
+                    Some("`@pure` function creates a lambda (closure identity / captured state not vetted)".into())
+                }
+                _ => None,
+            };
+            (c.body.expr_spans[expr], message, descend)
+        }
     };
+    if let Some(message) = message {
+        errors.push(CompilerError::new_with_label(span, message));
+    }
     if descend {
         c.body
             .for_each_child(node, |child| verify_pure(c, ws, resolved, child, errors));
     }
-}
-
-fn verify_pure_expr(
-    c: BodyCtx,
-    ws: &Workspace,
-    resolved: &FxHashMap<Idx<Expr>, (ModuleId, Idx<Function>)>,
-    e: Idx<Expr>,
-    errors: &mut Vec<CompilerError>,
-) -> bool {
-    let span = c.body.expr_spans[e];
-    let mut reject = |message: String| errors.push(CompilerError::new_with_label(span, message));
-    match c.body.expr_arena[e] {
-        Expr::Global(name) => {
-            // Const globals are read-only; only mutable global reads break purity.
-            if !ws.const_globals.contains(&name) {
-                reject(format!(
-                    "`@pure` function reads global `{}` (mutable state)",
-                    name
-                ))
-            }
-        }
-        Expr::Assign { .. } => {
-            reject("`@pure` function performs an assignment (mutation)".to_string())
-        }
-        Expr::CompoundAssign { .. } => reject(
-            "`@pure` function performs a compound assignment (mutation)".to_string(),
-        ),
-        Expr::IncDec { .. } => reject(
-            "`@pure` function performs an increment/decrement (mutation)".to_string(),
-        ),
-        // Function values have no declaration whose purity can be checked.
-        Expr::Call {
-            callee: Callee::Local(_) | Callee::Value(_),
-            ..
-        } => reject(
-            "`@pure` function calls a function value, whose body is not provably pure".to_string(),
-        ),
-        Expr::Call { .. } | Expr::SafeNavCall { .. } => {
-            if let Some(&(mid, fid)) = resolved.get(&e) {
-                let callee_fn = &ws.module(mid).functions[fid];
-                if !fn_has_anno(callee_fn, "pure") && !fn_has_anno(callee_fn, "debug_impure") {
-                    reject(format!(
-                        "`@pure` function calls `{}` which is not provably pure",
-                        callee_fn.name
-                    ));
-                }
-            }
-        }
-        Expr::Index { .. } => reject(
-            "`@pure` function indexes a collection (reads potentially-mutable state)"
-                .to_string(),
-        ),
-        // Array identity is observable across evaluations; tuples are values.
-        Expr::Array(_) => reject(
-            "`@pure` function builds an array literal (allocates a heap table, identity observable)"
-                .to_string(),
-        ),
-        // Heap struct identity is observable; value structs are byte-values.
-        Expr::StructLiteral { name, .. } => {
-            let is_value = ws
-                .struct_by_name
-                .get(&name)
-                .is_some_and(|sid| ws.module(sid.module).structs[sid.def].is_value);
-            if !is_value {
-                reject(
-                    "`@pure` function constructs a heap struct literal (identity observable); only `value` structs are allowed"
-                        .to_string(),
-                );
-            }
-        }
-        // Lambda identity and captured state are observable; its body is not vetted.
-        Expr::Lambda { .. } => {
-            reject(
-                "`@pure` function creates a lambda (closure identity / captured state not vetted)"
-                    .to_string(),
-            );
-            return false;
-        }
-        // Match and recursion do not add impurity by themselves.
-        _ => {}
-    }
-    true
-}
-
-fn verify_pure_stmt(c: BodyCtx, s: Idx<Statement>, errors: &mut Vec<CompilerError>) -> bool {
-    let message = match c.body.statement_arena[s] {
-        Statement::Static { .. } => {
-            "`@pure` function declares a `static` (writes module state)".to_string()
-        }
-        // The nested body is checked separately.
-        Statement::Fn { .. } => {
-            "`@pure` function declares a nested `fn` (its body is not vetted for purity)"
-                .to_string()
-        }
-        _ => return true,
-    };
-    errors.push(CompilerError::new_with_label(
-        c.body.statement_spans[s],
-        message,
-    ));
-    false
 }

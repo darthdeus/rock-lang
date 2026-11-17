@@ -20,10 +20,8 @@ pub(crate) struct Pending {
 #[derive(Debug)]
 pub(crate) enum PendingKind {
     Call {
-        family: CallFamily,
         call_expr: Idx<Expr>,
         recv_override: Option<TyId>,
-        args: Vec<Idx<Expr>>,
         arg_ty: FxHashMap<Idx<Expr>, TyId>,
         arg_tys: Vec<TyId>,
         preinferred: FxHashMap<Idx<Expr>, TyId>,
@@ -116,10 +114,8 @@ fn retry_pending(gamma: &mut Gamma, pending: Pending) -> Result<(), CompilerErro
     let span = pending.span;
     let ret = match &pending.kind {
         PendingKind::Call {
-            family,
             call_expr,
             recv_override,
-            args,
             arg_ty,
             arg_tys,
             preinferred,
@@ -127,15 +123,17 @@ fn retry_pending(gamma: &mut Gamma, pending: Pending) -> Result<(), CompilerErro
             if gamma.out.resolved_overload_calls.contains_key(call_expr) {
                 return Ok(());
             }
+            let (family, args, _) = call_parts(c.body, *call_expr);
+            let args = args.into_iter().collect_vec();
             let name = family.key();
-            let candidates = resolve_callee(gamma, family);
+            let candidates = resolve_callee(gamma, &family);
             match select_overload(
                 c,
                 gamma,
-                *family,
+                family,
                 &candidates,
                 *recv_override,
-                args,
+                &args,
                 arg_ty,
                 arg_tys,
                 name,
@@ -148,7 +146,7 @@ fn retry_pending(gamma: &mut Gamma, pending: Pending) -> Result<(), CompilerErro
                     mid,
                     fid,
                     *recv_override,
-                    args,
+                    &args,
                     preinferred,
                     IdxRange::new_empty(),
                     *call_expr,

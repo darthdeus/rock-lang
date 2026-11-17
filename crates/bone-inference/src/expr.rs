@@ -228,7 +228,7 @@ pub(crate) fn infer_statement(
 
             gamma.assign_named_type(*name, binding_ty)?;
 
-            reject_static_init_captures(c, *value, c.body.statement_spans[s])?;
+            reject_captures(c, *value, c.body.expr_spans[*value], span, true)?;
         }
 
         Statement::Fn {
@@ -307,7 +307,7 @@ pub(crate) fn infer_statement(
             gamma.allow_frame_ref_return_place = saved_ref_source;
             result?;
 
-            reject_nested_fn_captures(c, body, span)?;
+            reject_captures(c, body, span, span, false)?;
         }
 
         Statement::Comment(_) => (),
@@ -503,23 +503,14 @@ pub(crate) fn infer_expr_used(
 
             gamma.workspace.builtins.string()
         }
-        Expr::Not(inner, family) => {
+        Expr::Not(inner, _) => {
             let inner_ty = infer_expr(c, gamma, *inner)?;
             let resolved = resolve(gamma, inner_ty, c.body.expr_spans[*inner]);
 
             if matches!(gamma.get(resolved), TypeExpr::Builtin(BuiltinTy::Bool)) {
                 gamma.workspace.builtins.bool()
             } else {
-                resolve_named_call_with_generics(
-                    gamma,
-                    c,
-                    *family,
-                    None,
-                    IdxRange::new_inclusive(*inner..=*inner),
-                    IdxRange::new_empty(),
-                    e,
-                    expr_span,
-                )?
+                resolve_named_call(gamma, c, e, None)?
             }
         }
 
@@ -580,7 +571,7 @@ pub(crate) fn infer_expr_used(
             inner_r
         }
 
-        Expr::UnaryMinus(inner, family) => {
+        Expr::UnaryMinus(inner, _) => {
             let inner_ty = infer_expr(c, gamma, *inner)?;
             let resolved = resolve(gamma, inner_ty, c.body.expr_spans[*inner]);
 
@@ -595,16 +586,7 @@ pub(crate) fn infer_expr_used(
                     ..
                 } if resolve_newtype(gamma, name).is_some() => resolved,
 
-                _ => resolve_named_call_with_generics(
-                    gamma,
-                    c,
-                    *family,
-                    None,
-                    IdxRange::new_inclusive(*inner..=*inner),
-                    IdxRange::new_empty(),
-                    e,
-                    expr_span,
-                )?,
+                _ => resolve_named_call(gamma, c, e, None)?,
             }
         }
 
@@ -1093,21 +1075,12 @@ pub(crate) fn infer_expr_used(
             callee,
             args,
             generic_args,
-            family,
+            ..
         } => {
             let args = *args;
 
             match callee {
-                hir::Callee::Unresolved { .. } => resolve_named_call_with_generics(
-                    gamma,
-                    c,
-                    *family,
-                    None,
-                    args,
-                    *generic_args,
-                    e,
-                    expr_span,
-                )?,
+                hir::Callee::Unresolved { .. } => resolve_named_call(gamma, c, e, None)?,
 
                 hir::Callee::Local(binding) => {
                     let binding = *binding;
@@ -1281,13 +1254,8 @@ pub(crate) fn infer_expr_used(
             nullable_of(gamma, body_ty, expr_span)
         }
 
-        Expr::SafeNavCall {
-            receiver,
-            args,
-            family,
-            ..
-        } => {
-            let (receiver, args, family) = (*receiver, *args, *family);
+        Expr::SafeNavCall { receiver, .. } => {
+            let receiver = *receiver;
             let recv_ty = infer_expr(c, gamma, receiver)?;
             if redundant_optional_on(gamma, recv_ty, expr_span) {
                 comp_error!(
@@ -1297,16 +1265,7 @@ pub(crate) fn infer_expr_used(
             }
             let inner = peel_nullable(gamma, recv_ty, expr_span);
 
-            let ret = resolve_named_call_with_generics(
-                gamma,
-                c,
-                family,
-                Some(inner),
-                args,
-                IdxRange::new_empty(),
-                e,
-                expr_span,
-            )?;
+            let ret = resolve_named_call(gamma, c, e, Some(inner))?;
 
             nullable_of(gamma, ret, expr_span)
         }
@@ -2274,22 +2233,11 @@ pub(crate) fn check_cast(
         ));
     }
 
-    if matches!(
-        (gamma.get(from_r), gamma.get(to_r)),
-        (
-            TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint),
-            TypeExpr::Builtin(BuiltinTy::Float)
-        ) | (
-            TypeExpr::Builtin(BuiltinTy::Float),
-            TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint)
-        ) | (
-            TypeExpr::Builtin(BuiltinTy::Int),
-            TypeExpr::Builtin(BuiltinTy::Uint)
-        ) | (
-            TypeExpr::Builtin(BuiltinTy::Uint),
-            TypeExpr::Builtin(BuiltinTy::Int)
-        )
-    ) {
+    if let (TypeExpr::Builtin(from), TypeExpr::Builtin(to)) = (gamma.get(from_r), gamma.get(to_r))
+        && from != to
+        && matches!(from, BuiltinTy::Int | BuiltinTy::Uint | BuiltinTy::Float)
+        && matches!(to, BuiltinTy::Int | BuiltinTy::Uint | BuiltinTy::Float)
+    {
         return Ok(());
     }
 

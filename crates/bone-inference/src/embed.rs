@@ -103,31 +103,18 @@ pub(crate) fn verify_embed_projection(c: BodyCtx, gamma: &mut Gamma) {
         return;
     }
 
-    let mut errors: Vec<CompilerError> = Vec::new();
-    let accesses: Vec<(Idx<Expr>, Idx<Expr>, Ustr)> = c
+    let embedded = c
         .body
         .expr_arena
         .iter()
-        .filter_map(|(e, expr)| match *expr {
-            Expr::FieldAccess { base, field } | Expr::SafeNav { base, field } => {
-                Some((e, base, field))
-            }
-            _ => None,
+        .filter_map(|(expr, node)| {
+            let (Expr::FieldAccess { base, field } | Expr::SafeNav { base, field }) = *node else {
+                return None;
+            };
+            let ty = gamma.out.expr_types.get(base).copied()?;
+            embed_field_of(gamma, ty, field, c.body.expr_spans[expr]).then_some((expr, field))
         })
-        .collect();
-    if accesses.is_empty() {
-        return;
-    }
-
-    let mut embedded: Vec<(Idx<Expr>, Ustr)> = Vec::new();
-    for (e, base, field) in accesses {
-        let Some(base_ty) = gamma.out.expr_types.get(base).copied() else {
-            continue;
-        };
-        if embed_field_of(gamma, base_ty, field, c.body.expr_spans[e]) {
-            embedded.push((e, field));
-        }
-    }
+        .collect_vec();
     if embedded.is_empty() {
         return;
     }
@@ -140,7 +127,7 @@ pub(crate) fn verify_embed_projection(c: BodyCtx, gamma: &mut Gamma) {
         if ok.contains(&e) {
             continue;
         }
-        errors.push(CompilerError::new_with_label(
+        gamma.body_errors.push(CompilerError::new_with_label(
             c.body.expr_spans[e],
             format!(
                 "`{field}` is an `embed` field: it has no independently storable value, so it \
@@ -150,6 +137,4 @@ pub(crate) fn verify_embed_projection(c: BodyCtx, gamma: &mut Gamma) {
             ),
         ));
     }
-
-    gamma.body_errors.append(&mut errors);
 }
