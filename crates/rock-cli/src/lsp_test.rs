@@ -429,7 +429,9 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
         let Some((op_reply, subcommand, args)) = fixture_request(op_type) else {
             return Err(anyhow::anyhow!(
                 "{}: test '{}' has OPERATION '{}', which has no reply decoder",
-                path.display(), name, op_type
+                path.display(),
+                name,
+                op_type
             ));
         };
         let position = match args {
