@@ -337,9 +337,9 @@ fn literal_and_block_contexts_offer() {
         // Candidates come from `deco` declarations, not the fn namespace.
         (
             "decorators",
-            "deco init late_draw {}\ndeco init late_update {}\ndeco init update {}\n\
-             @late_dra<|>\nfn my_ui() {}\n",
-            &["late_draw", "!update", "!my_ui"],
+            "deco init late_update {}\ndeco init late_draw {}\ndeco init update {}\n\
+             @late<|>\nfn my_ui() {}\n",
+            &["late_draw", "late_update", "!update", "!my_ui"],
         ),
     ]);
 }
@@ -667,9 +667,9 @@ fn field_refs_offer_exactly_the_fields_of_their_value_type() {
         ),
         (
             "V = int",
-            "struct Mob { health: int, attack_co: int?, name: string }\n\
+            "struct Mob { mana: int, health: int, attack_co: int?, name: string }\n\
              fn want_int(f: FieldRef<Mob, int>) {}\nfn main() {\n  want_int(.<|>)\n}\n",
-            &[".health: int", "!.attack_co*"],
+            &[".health: int", ".mana: int", "!.attack_co*"],
         ),
         (
             "T bound by a sibling arg",
