@@ -1,9 +1,4 @@
-//! Host-side resolution of comptime inputs:
-//! turn a project's `[build.vars]` plus the invocation's `--channel`/`--var`
-//! selection into the `ComptimeInputs` skull's `build_var`/`embed_string`
-//! expansion reads off the Workspace. Commands run here, once per session build,
-//! at the compile chokepoints -- never from the LSP, which performs no
-//! emission and so never reaches this module.
+//! Resolve and stamp host-owned comptime inputs.
 
 use anyhow::{Context, Result};
 use bone_semantic::inference::{ComptimeInputs, ComptimeVarValue};
@@ -96,12 +91,7 @@ mod tests {
     }
 }
 
-/// Stamp `ws` with the inputs resolved from `anchor`'s enclosing project.
-/// This is the ONE resolution seam every EMITTING entry point routes through
-/// -- per-site `ws.comptime_inputs = ...` assignments are how `rock test`,
-/// `rock watch` and the profiling tools shipped broken (each new entry point
-/// silently forgot the obligation). Type-check-only paths never need values
-/// and the LSP never runs commands, so neither reaches this.
+/// A single-file build inherits build variables from its enclosing project.
 pub(crate) fn stamp_workspace(
     ws: &mut bone_semantic::inference::Workspace,
     anchor: &Path,
@@ -129,12 +119,6 @@ pub(crate) fn inputs_for_entry_path(anchor: &Path) -> Result<ComptimeInputs> {
     inputs_for_project_dir(dir)
 }
 
-/// Resolve the comptime inputs for the project at/above `dir`: find its
-/// stick.toml, validate `[build]`, run each var's source under the selected
-/// channel, and hand back the map plus the embed root (the stick.toml dir).
-/// No stick.toml means empty inputs -- unless the invocation selected a
-/// channel, which nothing declares, and that rejects rather than silently
-/// resolving nothing.
 pub(crate) fn inputs_for_project_dir(dir: &Path) -> Result<ComptimeInputs> {
     inputs_for_project_dir_as(dir, None)
 }

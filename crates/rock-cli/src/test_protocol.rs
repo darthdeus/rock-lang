@@ -227,8 +227,6 @@ mod tests {
 
     #[test]
     fn unknown_or_malformed_result_marker_is_rejected_not_counted() {
-        // An unknown kind used to be counted as a PASS (passed = results -
-        // fails - values). Every malformed shape below must reject the run.
         for bad in [
             "__SKULL__\tSKIP\tt_a\n",
             "__SKULL__\tPASSED\t\n",

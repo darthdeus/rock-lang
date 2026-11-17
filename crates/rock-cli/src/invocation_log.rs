@@ -1,14 +1,4 @@
-//! One JSON line per dev-loop `rock` invocation, appended to `ROCK_INVOCATION_LOG`
-//! when explicitly configured, so
-//! edit-to-feedback times can be mined with a log consumer.
-//!
-//! The record is written once, at exit: `finish` from `main` or `exit`, and an
-//! `atexit` fallback for paths that leave through `std::process::exit` outside
-//! this crate or unwind out of `main` (exit code `null`). HEAD and branch are
-//! read from the repository files; dirty state comes from one background
-//! `git status` started only once the command has run for `GIT_DELAY`, so it
-//! overlaps a long command and never contends with a short one. Recording never changes the command's outcome:
-//! write errors are logged and dropped.
+//! Append one JSON record per dev-loop invocation when invocation logging is enabled.
 
 use bone_core::prelude::Instant;
 use serde_json::{Map, Value, json};

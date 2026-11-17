@@ -126,13 +126,7 @@ pub fn check_with_stdlib(
     check_modules(&mut skull::pipeline::with_stdlib(user).map_err(|e| vec![e])?)
 }
 
-/// A bone incremental `Session` warmed with the stdlib — the watch/hot-reload
-/// counterpart to [`check_with_stdlib`]. Every `Session::new` site passes the
-/// same shared `skull_parser::stdlib::cached()` warm set; funnel them here.
-///
-/// This form does NOT resolve comptime inputs; it is for type-check-only
-/// sessions (bone watch, iter benches, LSP survey, tests). A session whose
-/// workspace will be EMITTED constructs through [`bone_session_for_emission`].
+/// Warm a session with the stdlib and baseline comptime inputs.
 pub(crate) fn bone_session(
     files: Vec<bone_incremental::session::SessionFile>,
 ) -> std::result::Result<bone_incremental::session::Session, CompilerError> {
@@ -208,15 +202,7 @@ fn bone_pipeline_timed(src: &str) -> (std::result::Result<(), Vec<CompilerError>
     (res, times)
 }
 
-/// Parse every loaded *user* file into a bone module (timed) and identify the
-/// entry module (`main.rock`, else the first file). Cross-file references only
-/// resolve when the whole project is type-checked as one workspace, so this is
-/// the parse step shared by the whole-project bone (`bone_workspace_timed`) and
-/// skull (`skull_workspace_timed`) timers and by `skull_assemble_project`.
-///
-/// A `ModuleId` (a file's first-item span file) appearing twice would silently
-/// merge in bone's by-id map and mispair arena indices, so duplicates are
-/// rejected here rather than producing wrong results downstream.
+/// Parse user files before mounting the statically embedded stdlib.
 pub(crate) fn parse_user_modules(
     sources: &SourceFiles,
 ) -> std::result::Result<(Vec<skull_parser::Ast>, ustr::Ustr, Duration), Vec<CompilerError>> {
@@ -397,12 +383,6 @@ pub(crate) fn categorize(msg: &str) -> String {
     }
 }
 
-/// `rock check`: type-check only. Exits 0
-/// silently when the source type-checks; otherwise prints every diagnostic and
-/// exits 1. A directory is checked as one workspace (the only way cross-file
-/// references resolve); a bare file goes through the single-source pipeline.
-/// `iters` repeats the check and reports the mean per-stage timing on the
-/// `PROFILE` log target.
 pub(crate) fn bone_check_single(path: &str, iters: usize) -> Result<()> {
     if Path::new(path).is_dir() {
         return bone_check_project(path, iters);

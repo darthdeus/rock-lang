@@ -1,16 +1,7 @@
 //! Machine-wide memory budget for concurrent full compiles.
 //!
-//! The slot directory holds a pool of memory. Each compile reserves its
-//! estimated peak ([`estimate_reserve`]), takes a numbered ticket in `queue/`
-//! and, once admitted, holds a `held-<ticket>` file at the top level until it
-//! drops its guard. An owner keeps an exclusive advisory lock on its ticket
-//! and held file for their whole life, so a file whose lock can be taken
-//! belongs to a dead owner and the next caller removes it. Any other locked
-//! file at the top level also counts as a holder, reserving what its record
-//! names or else a full compile.
-//!
-//! A configured preferred slot is outside the pool. A process must not hold a slot while it
-//! waits on another process that may need one.
+//! Locks distinguish live reservations and waiters from files left by killed processes.
+//! Waiters acquire reservations in order. Never hold one while waiting for a child that may need it.
 
 use anyhow::{Context, Result, anyhow};
 use bone_core::prelude::Instant;
@@ -332,13 +323,7 @@ fn acquire_reserving(
     }
 }
 
-/// How many waiters at the head of `queue` may hold the pool now.
-///
-/// Head-of-line rule: strict FIFO. Waiters are admitted in ticket order, each
-/// once the holders and every older waiter leave room for its reservation;
-/// no waiter passes an older one that does not fit. A large request at the
-/// head therefore waits only for holders to finish, never for later small
-/// ones, and small requests share the pool whenever they are next in line.
+/// Only a prefix fits; a smaller reservation cannot pass an older waiter.
 fn admitted_prefix(pool_mib: u64, held_mib: u64, queue: &[Entry]) -> usize {
     let mut used = held_mib;
     queue

@@ -1,16 +1,4 @@
-//! `rock test <path> --backend js` -- execute the `@test` suite under node via
-//! the JS-subset emitter (`skull-codegen-js`).
-//!
-//! Shares the backend-neutral half of the test driver with the luajit path
-//! (`skull_backend::skull_test`): unit discovery (`collect_test_units`), the
-//! `@test` metadata (`skull::module_tests_with_ids`), the compile-failure
-//! expect-failure fallback, and the `__SKULL__` protocol parser
-//! (`test_protocol`). Per-backend here: per-test callee-closure emission
-//! (`skull_codegen_js::emit::emit_with_closure`), the node batch runner, and
-//! SKIP(reason) reporting -- a test whose closure hits anything outside the JS
-//! subset reports as SKIP carrying the reject message, never FAIL, never
-//! silently dropped. The end-of-run skip-reason histogram is the emitter work
-//! list.
+//! Emit each JS-eligible test and its callees, execute the batch under Node, and report emission rejects.
 
 use crate::Result;
 use crate::test_protocol::{parse_skull_markers, reason_histogram};
@@ -19,37 +7,25 @@ use bone_core::prelude::Instant;
 use colored::Colorize;
 use skull_mir::mir::FuncRef;
 
-/// Every reason one emission rejection carries: the emitter's primary plus its
-/// siblings (independent findings from the same pass). One skipped test can owe
-/// the subset several constructs.
 fn all_reasons(e: &rock_core::CompilerError) -> Vec<String> {
     std::iter::once(e.message.clone())
         .chain(e.siblings.iter().map(|s| s.message.clone()))
         .collect()
 }
 
-/// The verdicts of one unit (file or package) bone accepted, or whose every
-/// `@test` expected the rejection (each then counts as passing).
 #[derive(Default)]
 struct JsUnitRun {
     passed: usize,
     /// FAIL detail lines (throw under node, or a harness-invariant breach).
     fails: Vec<String>,
-    /// (test name, EVERY skip reason) for tests outside the JS subset. All
-    /// of them, not just the emitter's primary: the reason histogram is the
-    /// subset's work list, and one reason per skipped test makes it a floor
-    /// (the emitter computes the rest of the list in the same pass).
+    /// All findings take part in the skip-reason histogram.
     skips: Vec<(String, Vec<String>)>,
     /// Tests `@test(backends = ...)` limits to other backends.
     other_backend: usize,
 }
 
-/// A unit bone rejected unexpectedly, or whose emitted JS failed to load
-/// under node (a backend bug, not a test failure).
 type JsUnitOutcome = std::result::Result<JsUnitRun, UnitFailure>;
 
-/// `rock test --backend js` entry: run, print per-file lines + the end-of-run
-/// summary and skip histogram, exit non-zero on any FAIL or unit failure.
 pub fn js_test(paths: &[String]) -> Result<()> {
     let start = Instant::now();
     let (files, package_dirs) = crate::skull_backend::collect_test_units(paths)?;
@@ -166,8 +142,6 @@ pub fn js_test(paths: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// One test unit (a file, or a package built as ONE workspace with its tests),
-/// its `@test`s run via per-test closure emission and one node batch.
 fn js_build_unit(unit: &str, is_package: bool) -> JsUnitOutcome {
     if let Err(error) = (crate::registry::RuntimeServices::registered().prepare_unit)(unit) {
         return Err(UnitFailure {
@@ -191,10 +165,7 @@ fn js_build_unit(unit: &str, is_package: bool) -> JsUnitOutcome {
     }
 }
 
-/// Per-test closure emission + one node invocation for the unit's tests that
-/// apply to JS, speaking the `__SKULL__` protocol. A test limited by
-/// `@test(backends = ...)` to other backends is neither emitted nor run; it is
-/// counted apart so it never reads as a JS gap.
+/// Run JS-eligible tests in one Node batch.
 fn js_run_tests(
     ws: &bone_semantic::inference::Workspace,
     tests: &[(FuncRef, skull::SkullTest)],
@@ -376,12 +347,7 @@ fn js_run_tests(
     })
 }
 
-/// `rock run <file> --backend js`: emit the whole file (+ stdlib) as ONE node
-/// program via `emit_program`, prepend the runtime preludes + a DIRECT
-/// (unbuffered) `print`/`put`, append `<main>();` when the entry module defines a
-/// nullary `main`, and STREAM it through node with no timeout (a real program
-/// can run arbitrarily long), propagating node's exit code. A bone rejection or
-/// emit reject prints the diagnostic and exits non-zero -- never a silent fallback.
+/// Stream a complete emitted program through Node and propagate its exit status.
 pub(crate) fn js_run(path: &str) -> Result<()> {
     let emitted = if std::path::Path::new(path).is_dir() {
         emit_js_program_project(path)
@@ -400,8 +366,6 @@ pub(crate) fn js_run(path: &str) -> Result<()> {
     }
 }
 
-/// Emit the whole program for a single `.rock` file. Diagnoses
-/// and exits on any parse/check/emit rejection -- never a silent fallback.
 fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
     let src = match fs_err::read_to_string(path) {
         Ok(s) => s,
@@ -450,11 +414,6 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
     }
 }
 
-/// Emit the whole program for a project directory (`rock run <dir> --backend
-/// js`): discover the deterministic module set, bone-check, resolve the entry
-/// module, then emit the whole program as the single-file path does. Game
-/// projects drop test-only files. Any rejection prints the project diagnostic
-/// and exits.
 fn emit_js_program_project(dir: &str) -> skull_codegen_js::emit::JsProgram {
     match try_emit_js_program_project(dir) {
         Ok(emitted) => emitted,
@@ -487,9 +446,6 @@ fn try_emit_js_program_project(dir: &str) -> Result<skull_codegen_js::emit::JsPr
         .map_err(|e| anyhow::anyhow!("{}", crate::skull_backend::render_project_err(&sources, &e)))
 }
 
-/// The streaming run program: the shipped prelude over node's host (direct,
-/// unbuffered writes), the whole emitted program, then `<main>();` when the
-/// entry defines one. A bare call matches luajit's single-file path.
 fn build_run_program(emitted: &skull_codegen_js::emit::JsProgram) -> String {
     let mut p = skull_codegen_js::assemble_prelude(
         &emitted.program,

@@ -2,20 +2,13 @@ use crate::*;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-/// What a successful (re)compile asks of the runtime beyond hot-reloading.
 #[derive(Default)]
 pub struct CompileOutcome {
-    /// Reasons whose live state or runtime registry cannot take the compatible
-    /// fast path. The watcher requests the existing clean process restart for
-    /// these changes; body-only edits remain on the CodeRef overlay path.
+    /// Safety gates can require a clean process restart.
     pub restart_reasons: Vec<String>,
 }
 
-/// The incremental game compiler. Owns all cross-reload state and the output
-/// paths; `compile` writes `<out>/main.lua` (+ optional `<out>/incremental.lua`
-/// overlay) that the running engine hot-reloads. The caller picks `<out>`:
-/// `tmp/` for run/frame/perf, a private `tmp/stone/<game>-<pid>/` per `rock
-/// stone` session.
+/// The watcher owns one incremental game compiler and its output paths.
 pub struct GameCompiler {
     stone: Option<crate::skull_backend::IncrementalProject>,
     dir: String,
@@ -37,13 +30,6 @@ impl GameCompiler {
         }
     }
 
-    /// (Re)compile the project. `changed` = game source paths the watcher saw
-    /// since the last call (empty on the initial build). `force_full` forces a
-    /// from-scratch rebuild (set after a compiler-binary rebuild wiped caches).
-    /// Writes the engine-loadable Lua, EXCEPT when the outcome requests a
-    /// restart (see `CompileOutcome`). The backend logs its own reload detail
-    /// (skull: full vs overlay vs no-change) internally. Err => the caller
-    /// reports the error and keeps serving the last good output.
     pub fn compile(
         &mut self,
         changed: &HashSet<PathBuf>,
@@ -117,11 +103,6 @@ impl GameCompiler {
     /// Fold any overlay back into `main.lua` so a *process restart* (luajit
     /// loads `main.lua` only) gets the complete current program.
     pub fn canonicalize_for_restart(&mut self) -> Result<()> {
-        // A restart re-spawns luajit, which loads main.lua only -- it does NOT
-        // dual-load the accumulated incremental.lua. Fold the overlay back in
-        // first so the restarted process gets the complete current program.
-        // Runs when an overlay is on disk (body edits since the last full
-        // build) or a safety-gated full publication was deferred.
         if self.incremental_path.exists() || self.pending_full_write {
             if let Some(st) = &mut self.stone {
                 log::info!(target: "STONE", "skull: canonicalizing main.lua before restart");
@@ -147,9 +128,6 @@ impl GameCompiler {
         self.stone.as_ref().map(|stone| stone.package_roots())
     }
 
-    /// The exact compiler-owned identity of the Artifact the next process
-    /// would execute. A missing value is an error at every replay/recording
-    /// launch boundary; callers must not invent a development identity.
     pub fn artifact_fingerprint(&self) -> Result<String> {
         self.stone
             .as_ref()

@@ -5,14 +5,7 @@ use crate::headless_scope::BoundChild;
 use crate::*;
 use std::process::Stdio;
 
-/// Replace this process with the freshly rebuilt `rock` binary, preserving the
-/// original `stone` arguments. The new process re-runs `do_stone_watch` from
-/// scratch -- `IncrementalProject::init` re-emits main.lua with the NEW codegen -- so a
-/// compiler edit takes effect live without a manual restart. The game child is
-/// killed first: `exec` keeps our PID, so its PDEATHSIG never fires and it would
-/// otherwise linger as a second luajit beside the one the new process spawns. On
-/// Unix `exec` only returns on failure (logged; caller falls back to the old
-/// binary). Non-Unix has no `exec`, so spawn a replacement and exit.
+/// Re-exec keeps our PID, so explicitly drop the game child before replacing the compiler.
 fn reexec_with_new_binary(game_process: &mut Option<BoundChild>) {
     drop(game_process.take());
     info!("Compiler changed -- re-exec'ing rock with the new binary");
@@ -306,10 +299,7 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
     );
     let mut changed_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
-    // embed_string inputs are sources the extension filter can't know
-    // : the set comes from the compiled program, seeded
-    // after every successful build, and shared with the watcher's filter.
-    // `watched` mirrors the shared set for routing; every reseed writes both.
+    // Route changes to declared inputs using the same set as the watcher.
     let comptime_watch: crate::file_watcher::SharedWatchSet = Default::default();
     let mut sound_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     if let Some(sound_project) =
@@ -325,8 +315,6 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
     });
     let mut watched: std::collections::HashSet<PathBuf> = sound_paths.clone();
 
-    // Do initial compilation.
-    // If it fails, we'll continue watching and start the game when compilation succeeds
     let report_initial_failure = |error: &dyn std::fmt::Display| {
         let error_message = format!("Initial compilation failed: {}", error);
         log::error!(target: "STONE", "{}", error_message);
@@ -562,13 +550,7 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
             }
         }
 
-        // A successful compiler rebuild put a NEW `rock` binary on disk, but THIS
-        // process is still the old one -- it would keep emitting with the old
-        // in-memory codegen. Re-exec the freshly built binary so the new compiler
-        // actually takes effect: the re-spawned process's `init` regenerates
-        // main.lua from the new codegen (no manual restart, no stale-overlay
-        // desync). Only returns if the exec itself failed, in which case we log
-        // and fall through to a best-effort rebuild+restart on the old binary.
+        // This process still has the previous compiler mapped.
         if compiler_rebuilt {
             wait_for_reload_resume(&reload_control)?;
             reexec_with_new_binary(&mut game_process);
@@ -664,13 +646,6 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
     Ok(())
 }
 
-/// Startup build: rock compiler, then stone-rs and optional extras. Streams
-/// cargo output directly so the user sees "Compiling ..." progress instead of
-/// a silent pause.
-///
-/// Used at `rock stone` startup. The watch loop's incremental rebuilds keep
-/// using the per-target `build_engine_libs` / `build_compiler` since they
-/// fire selectively based on which files changed.
 fn build_all_for_game(game_path: &str) -> Result<()> {
     if rock_engine_host::engine_build::prebuilt_game() {
         // Validate every required staged library; the engine helper refuses

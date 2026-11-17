@@ -1,27 +1,9 @@
 //! Stone sim environment policy.
 
-/// The headless window sims that never read pixels boot in. 320x180 is 16:9
-/// like the 1920x1080 game default at a thirty-sixth of the pixels, so scene
-/// render targets shrink to a few megabytes. A game's live window can have a
-/// different aspect: window-derived camera framing must refresh on resize
-/// before a worker entry runs. Four capture sims already run this size
-/// by explicit choice (`frame_stream_capture`, `low_fps_nudge`,
-/// `meme_capture_sound`), so it is a blessed sim size, not a new extreme.
+/// Use a 16:9 window for sims that do not measure pixels.
 pub(crate) const SIM_SMALL_WINDOW: &str = "320x180";
 
-/// Declared-name prefixes of the engine's async pixel-readback family and its
-/// FFI, plus the imgui test-geometry and synthetic-input families: every
-/// `pixel_readback_*` wrapper, `stone_pixel_readback_*` call, `imgui_test_*`
-/// UI automation helper (scroll/click/drag by presented position), and
-/// `imgui_inject_*` synthetic input call (mouse buttons, text), present and
-/// future. The families are large, uniformly prefixed, and call no shared
-/// funnel, so a prefix covers their growth; over-matching stays on the safe
-/// side (a lifecycle call keeps the window). The imgui families read or drive
-/// presented geometry (item rects, visibility, widget input) rather than
-/// pixels, but that geometry is window-derived exactly like a readback: the
-/// seam proof showed a palette-click sim failing at every size below 1080p
-/// while its siblings pass at 320x180, and the full proof showed a
-/// synthetic-mouse toggle sim failing 6/20 at 320x180.
+/// Raw FFI readers cannot trigger a render on demand.
 pub(crate) static SIM_PIXEL_PREFIXES: &[&str] = &[
     "pixel_readback",
     "stone_pixel_readback",
@@ -37,33 +19,7 @@ fn sim_name_reads_pixels(declared: &str) -> bool {
             .any(|prefix| declared.starts_with(prefix))
 }
 
-/// Declared names of the engine's pixel readers: captures, canvas, window and
-/// depth readback and frame streams, plus the FFI
-/// roots sims may call directly and `sim_submit_guard`, which every guarded
-/// reader funnels through. The tail of the list reads presented-output-derived
-/// state rather than pixels, which the full proof showed is equally
-/// window-derived: the window size (`stone_get_window_size`, asserted 1280x800
-/// by an agent sim), the live view scale (`scene_scale` reads 64 at 1080p but
-/// 6.3 at 320x180; `resolve_view_for` resolves it), the presented UI geometry
-/// census (`imgui_bodies_with_prefix`, `imgui_body_ran`, `imgui_total_vtx_count`;
-/// a prop grid draws zero cards at 320x180), the synthetic mouse position
-/// (`imgui_set_mouse_pos`, the non-inject-prefixed half of the input pair),
-/// and the render-target capacity readers: the native storage queries
-/// (`stone_canvas_capacity_*`, `stone_canvas_boot_*`, `stone_canvas_active_*`,
-/// `stone_canvas_bound_as_target`), the pyramid step (`pyramid_active_step`
-/// derives pyramid geometry from the capacity), and the capacity
-/// re-specification (`ensure_scene_capacity`). Existence and the Rock
-/// active-rect readers are deliberately not listed: `canvas_is_live` funnels
-/// through `stone_canvas_exists`, and `canvas_active` is called by shared
-/// helpers, so matching either keeps hundreds of sims that own fixed-size
-/// canvases. Each name is unique workspace-wide (D-form methods desugar to
-/// bare names, so no method is listed: a sim reading probe bytes created its
-/// probe through `window_probe_new` in the same entry). The async readback,
-/// imgui test-geometry and imgui synthetic-input families are covered by
-/// [`SIM_PIXEL_PREFIXES`]; the scene capacity globals are covered by
-/// [`SIM_CAPACITY_GLOBALS`]. A sim whose transitive callees name one of these
-/// keeps the game's window; anything else boots in [`SIM_SMALL_WINDOW`]
-/// unless it declares its own `STONE_WINDOW`.
+/// Pixel readers require rendering and complete image data.
 pub(crate) static SIM_PIXEL_ROOTS: &[&str] = &[
     "take_screenshot",
     "window_probe_new",
@@ -99,18 +55,7 @@ pub(crate) static SIM_PIXEL_ROOTS: &[&str] = &[
     "stone_canvas_bound_as_target",
 ];
 
-/// Declared names of the scene capacity globals: the bloom pyramid levels and
-/// the capacity the scene target set was built for
-/// (`stone/engine/rendering/draw.rock`). Both follow the boot window: sample
-/// boots 6 bloom levels at 1280x720 but 4 at 320x180, so a sim asserting a
-/// level count or a capacity panics or fails small. A sim whose transitive
-/// bodies reference one of these keeps the game's window, like a pixel reader.
-/// Matched by declared (bare) name. The drawable size is matched by call
-/// (`drawable_size`, `stone_get_drawable_size` in [`SIM_PIXEL_ROOTS`]), not by
-/// its `DRAWABLE_SIZE` global, which shared helpers read: matching the global
-/// keeps hundreds of sims that never query the size. Liveness and ownership
-/// queries (`canvas_is_live`, `new_canvas`, `destroy_canvas`) do not match and
-/// stay small.
+/// Scene capacity affects the shape of rendered buffers.
 pub(crate) static SIM_CAPACITY_GLOBALS: &[&str] = &["BLOOM_LEVELS", "SCENE_CAPACITY"];
 
 type FnKey = (

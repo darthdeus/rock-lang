@@ -1,12 +1,4 @@
-//! Opt-in compile budget records: `ROCK_COMPILE_STATS=<file>` appends one JSON
-//! line per compile. The record's `budget` is a tree in which every node's
-//! `wall_ms` is the sum of its children, with an explicit `other` child for
-//! the remainder, so a serial tail cannot hide between two timers. Phase
-//! boundaries are wall time; codegen also carries the summed per-unit time of
-//! each emit pass (`unit_cpu`), which overlaps across workers and is
-//! comparable between passes and commits, not with a wall window.
-//!
-//! `perf/run.py` reads these records into the compiler's performance history.
+//! Append one JSON timing record per compile when ROCK_COMPILE_STATS names a file.
 
 use bone_core::prelude::Instant;
 use serde_json::{Value, json};

@@ -1,12 +1,4 @@
-//! Children whose lifetime is bound to this launcher process.
-//!
-//! `rock run` hands the terminal to a `luajit` child and waits. A plain
-//! `kill` of the launcher used to leave that child playing on with its
-//! window and its agent-daemon session. Two mechanisms close that:
-//! SIGTERM/SIGINT/SIGHUP to the launcher are forwarded to every bound child
-//! before the launcher dies of the same signal, and on Linux the child asks
-//! the kernel for SIGTERM when its parent thread dies by any route,
-//! SIGKILL included.
+//! Bind child lifetimes to the launcher, including an abrupt launcher exit.
 
 use std::io;
 use std::process::{Child, Command};

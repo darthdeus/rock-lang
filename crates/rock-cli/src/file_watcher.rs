@@ -21,17 +21,7 @@ pub(crate) type WatchHandle =
 #[cfg(target_os = "macos")]
 pub(crate) type WatchHandle = macos::MacHandle;
 
-/// True for files inside a project's *own* `tmp/` output directory
-/// (compiler scratch: `main.lua`, etc.). Explicit restart inputs bypass this filter.
-///
-/// The `tmp` segment is matched only in the path **relative to its
-/// watched root** — so a project that itself lives under a `tmp`
-/// component (every Linux `tempfile::tempdir()` is `/tmp/...`, and
-/// scratch projects commonly sit under `/tmp`) is not misclassified.
-/// Anchoring to the root is the whole point: an unrooted `tmp`
-/// component match silently drops every source change under `/tmp`
-/// and kills hot reload with no error or log. One predicate so the
-/// two call sites can't drift.
+/// Match tmp components relative to a watched root, including projects under a system temp directory.
 fn is_tmp_scratch_file(path: &Path, roots: &[PathBuf]) -> bool {
     match roots.iter().find_map(|r| path.strip_prefix(r).ok()) {
         Some(rel) => rel
@@ -45,7 +35,6 @@ fn is_tmp_scratch_file(path: &Path, roots: &[PathBuf]) -> bool {
 
 /// Unified file watcher for Rock compiler
 pub struct FileWatcher {
-    /// Debounce delay in milliseconds
     debounce_ms: u64,
     /// Whether to filter out metadata-only changes (like touch)
     filter_metadata: bool,
@@ -54,7 +43,6 @@ pub struct FileWatcher {
     /// Exact restart files outside the source roots; their parents are watched
     /// non-recursively so scratch output never becomes a source root.
     restart_files: Vec<PathBuf>,
-    /// File extensions to watch (e.g., ["rock"])
     watch_extensions: Vec<String>,
     watch_all_files: bool,
     ignored_roots: Vec<PathBuf>,
@@ -242,9 +230,7 @@ impl FileWatcher {
 /// File change event data
 #[derive(Debug, Clone)]
 pub struct FileChangeEvent {
-    /// Paths that changed
     pub paths: HashSet<PathBuf>,
-    /// Whether this is a restart trigger event
     pub is_restart_trigger: bool,
 }
 
@@ -270,7 +256,6 @@ impl FileWatcher {
         }
     }
 
-    /// Enable/disable metadata change filtering
     pub fn with_metadata_filter(mut self, filter: bool) -> Self {
         self.filter_metadata = filter;
         self
@@ -315,7 +300,6 @@ impl FileWatcher {
         self
     }
 
-    /// Start watching the specified paths
     pub fn watch(
         self,
         paths: Vec<PathBuf>,

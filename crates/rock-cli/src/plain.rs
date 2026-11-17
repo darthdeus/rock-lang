@@ -282,8 +282,6 @@ pub(crate) static SKULL: BackendSpec = BackendSpec {
             let path = cx.get_project_dir_or_current()?;
             rock_cli::skull_backend::skull_watch(&path, cx.args.output.clone())
         }),
-        // frame/perf/sim are backend-parameterized: the compile + @sim
-        // collection routes through skull, the spawn/profile/run half is shared.
     ],
     filter_rejection: None,
 };
@@ -409,12 +407,7 @@ pub fn command_metadata(command: &CliCommand) -> registry::CommandMetadata {
 }
 
 pub static EARLY_ENTRIES: &[registry::EarlyEntry] = &[
-    // `rock lsp <subcommand>` is the LSP server + one-shot CLI handlers (there
-    // is no separate `rock-lsp` binary: folding it in keeps a single `rock`
-    // artifact that can't go stale against the embedded stdlib). It is an early
-    // entry because the LSP path installs its own env_logger (ROCK_LSP_DEBUG ->
-    // file) and a global logger can only be set once. The synthetic argv[0]
-    // makes its clap usage/errors read as `rock lsp ...`.
+    // LSP owns its logger, so dispatch it before the process installs the CLI logger.
     registry::EarlyEntry {
         name: "lsp",
         run: |rest| {

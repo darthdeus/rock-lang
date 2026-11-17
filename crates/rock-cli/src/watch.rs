@@ -72,12 +72,6 @@ pub(crate) fn reexec_current_binary() -> Result<()> {
     }
 }
 
-/// Shared compile-watch skeleton: build the default rock-source `FileWatcher`
-/// on `watch_paths`, log `watching_msg` on the `WATCH` target, then call
-/// `on_event` for every change until the channel closes. The initial build is
-/// the caller's responsibility (per-backend state + signatures differ); this
-/// owns only the watcher + event-pump boilerplate that the bone and skull
-/// compile-watch loops both hand-rolled identically.
 pub(crate) fn run_compile_watch_loop(
     mut watch_paths: Vec<PathBuf>,
     watching_msg: &str,

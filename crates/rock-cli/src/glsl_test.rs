@@ -1,32 +1,5 @@
-//! `rock test <path> --backend glsl` -- execute the value-test class
-//! (`@test(returns = <literal>)`) on the GPU via the GLSL emitter
-//! (`skull-codegen-glsl`).
-//!
-//! Shares the backend-neutral half of the test driver with the luajit and node
-//! paths: unit discovery (`collect_test_units`), the `@test` metadata
-//! (`skull::module_tests_with_ids`), the `__SKULL__` protocol parser and the
-//! ONE comparison site (`test_protocol::{parse_skull_markers, compare_value}`).
-//! The host side never learns the lines came from a GPU -- G1 is a transport
-//! for `__SKULL__` lines (the seam contract).
-//!
-//! GLSL cannot print, so ONLY the value class transfers. Two-tier skip:
-//!   1. a test with no `returns=` is outside the value class -- reported as ONE
-//!      collapsed count, never a histogram line (most of the suite is
-//!      *permanently* ineligible, unlike JS).
-//!   2. a test WITH `returns=` whose GLSL emission rejects is a real
-//!      SKIP(reason); that per-profile histogram is the A1 fn-emission work
-//!      list.
-//!
-//! The desktop profile (330 core) runs by default, with per-profile verdicts
-//! (`name [330core]`). The heavy lifting -- creating a headless
-//! GL context, compiling the shader, drawing to a 1x1 R32I/R32F target and
-//! reading the pixel back -- lives in the standalone external GLSL runner binary
-//! (spawned per unit+profile), so the `rock` compiler/LSP binary never links
-//! SDL2. The runner is a workspace artifact, so a missing/broken runner is a
-//! hard error (a gate that can't run must not read as green); only a genuine
-//! no-display/driver environment (runner exit 2) may be skipped with the explicit
-//! `--skip-gpu` option. Without it, every profile requires a display and GL
-//! driver. A GL error mid-run is a loud FAIL, never a silent skip.
+//! Run value tests on the GPU using the external GLSL runner, which owns the GL context.
+//! Only the runner's no-context exit can be skipped with --skip-gpu.
 
 use crate::Result;
 use crate::test_protocol::{compare_value, parse_skull_markers, reason_histogram};
@@ -37,36 +10,24 @@ use skull::ValueExpect;
 use skull_codegen_glsl::{GlslProfile, ValueTestShaders, emit_value_test};
 use skull_mir::mir::FuncRef;
 
-/// GLSL is validated widely enough that f32 arithmetic and the R32F round-trip
-/// introduce error well above the 1e-12 luajit/node tolerance -- ~1e-6 is f32
-/// territory (24-bit mantissa). int/bool stay exact regardless.
+/// Use f32 tolerance for GLSL shader arithmetic and framebuffer readback.
 const GLSL_FLOAT_REL_TOL: f64 = 1e-6;
 
-/// The GL profile every test and shader validates against.
 const PROFILE_NAME: &str = "330core";
 const PROFILE: GlslProfile = GlslProfile::Core330;
 
-/// `rock test --backend glsl` entry: run, print per-unit lines + the
-/// end-of-run summary, exit non-zero on any FAIL or unit failure.
 pub(crate) fn glsl_test(paths: &[String], skip_gpu: bool) -> Result<()> {
     let start = Instant::now();
     let (files, package_dirs) = crate::skull_backend::collect_test_units(paths)?;
 
-    // A missing runner is a hard error (workspace artifact -- build it). The
-    // probe's exit 2 (no GL context) requires an explicit GPU opt-out; any
-    // other probe anomaly is a hard error.
     let runner = locate_runner()?;
     let gl_available = probe_gl(&runner, PROFILE_NAME, skip_gpu)?;
 
-    // `@test` fns with no `returns=` (outside the value class). One collapsed
-    // number, never a histogram.
     let mut outside_value_class = 0;
-    // bone-rejected units (unexpected compile failure) / harness breaches.
     let mut unit_failures = 0;
     let mut passed_total = 0;
     // FAIL detail lines (a GL compile/link/render error, or a value mismatch).
     let mut failed_total: Vec<String> = Vec::new();
-    // SKIP reasons (emission rejected).
     let mut skip_reasons: Vec<String> = Vec::new();
 
     let outcomes = crate::test_unit::build_units(&files, &package_dirs, |unit, is_package| {
@@ -169,7 +130,6 @@ pub(crate) fn glsl_test(paths: &[String], skip_gpu: bool) -> Result<()> {
     Ok(())
 }
 
-/// One unit's value-test results.
 #[derive(Default)]
 struct UnitRun {
     outside_value_class: usize,
@@ -179,8 +139,6 @@ struct UnitRun {
     skips: Vec<(String, String)>,
 }
 
-/// One test unit (a file, or a package built as ONE workspace with its tests):
-/// emit + run its value tests.
 fn build_unit(
     unit: &str,
     is_package: bool,
@@ -211,7 +169,6 @@ fn build_unit(
     })
 }
 
-/// Emit + GPU-run one unit's value tests.
 fn run_tests(
     ws: &bone_semantic::inference::Workspace,
     tests: &[(FuncRef, skull::SkullTest)],

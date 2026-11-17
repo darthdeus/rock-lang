@@ -1,10 +1,4 @@
-/// Run `work` over `items` on `threads` dedicated workers and return the
-/// results in input order.
-///
-/// Not the rayon pool: compiler passes fan out on it, and a pool thread
-/// blocked in one unit's join may steal another whole unit, nesting a second
-/// compile inside the first's thread-local state (compile records, caches).
-/// Workers get the compiler stack.
+/// Run work on dedicated threads, preserving input order in the results.
 pub(crate) fn map_in_order<T, R, F>(items: &[T], threads: usize, work: F) -> Vec<R>
 where
     T: Sync,

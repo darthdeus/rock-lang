@@ -131,21 +131,7 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
         &format!("{:?}", args.backend).to_lowercase(),
     );
 
-    // Cap rayon's global thread pool. Default rayon uses
-    // available_parallelism (== logical core count), but on hybrid and
-    // many-core hosts the compiler's per-stage parallel jobs mostly add
-    // contention past ~6 threads: on a loaded 32-thread host `rock compile
-    // project` took 6.2 s at 6 threads, 6.6 s at 8 and 9.2 s at 16, with system
-    // time rising from 6 s to 19 s. The C test lane keeps a wider pool of
-    // its own (c_test.rs).
-    //
-    // Honor RAYON_NUM_THREADS / ROCK_NUM_THREADS if set; otherwise
-    // cap at 6.
-    //
-    // Under `--features sequential` we skip building the pool entirely:
-    // with bone-semantic's work also serial under that feature, no
-    // rayon worker threads spawn at all, so a sampling profile of the
-    // front end carries no rayon pool/teardown frames.
+    // On many-core hosts a larger default pool adds compiler contention. Sequential builds skip the pool.
     #[cfg(not(feature = "sequential"))]
     {
         let cap_threads = rock_cli::common::requested_thread_count().unwrap_or_else(|| {

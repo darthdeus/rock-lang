@@ -40,20 +40,13 @@ impl CommandContext {
         Self { args }
     }
 
-    /// Run the command directly without server
     pub fn run(&self) -> Result<()> {
         self.require_backend_options()?;
         if self.args.verbose {
             log::debug!(target: "CLI", "using direct compilation");
         }
         self.require_optional_features()?;
-        // `--profile` is global in the clap definition but only `rock shader`
-        // acts on it: the profile is a property of the GL context, and the
-        // engine adapts the header per context at shader-compile time. Every
-        // other command would accept-and-ignore it, which reads as "ES was
-        // selected" while emitting desktop headers.
-        // The build lint pass runs deep inside the backends, far from `Args`, so
-        // the reporting policy is installed once here.
+        // The build lint pass reads its policy after dispatch, far from Args.
         crate::lint_pass::set_policy(if self.args.no_lints {
             crate::lint_pass::LintReport::Off
         } else if self.args.lint_summary {
@@ -92,28 +85,22 @@ impl CommandContext {
         Ok(file)
     }
 
-    /// Get output file for compile command, handling both --output flag and positional argument
     pub(crate) fn get_compile_output(&self) -> Result<Option<String>> {
         let output = match (&self.args.output, self.args.files.len()) {
-            // Both --output flag and second positional argument provided - error
             (Some(_), n) if n >= 2 => {
                 anyhow::bail!(
                     "Cannot specify both --output flag and positional output argument.\n\
                      Use either: 'rock compile input.rock --output output.lua' or 'rock compile input.rock output.lua'"
                 );
             }
-            // Too many arguments provided
             (None, n) if n > 2 => {
                 anyhow::bail!(
                     "Too many arguments provided. Expected: 'rock compile input.rock [output.lua]'\n\
                      Use --output flag for explicit output file specification."
                 );
             }
-            // --output flag provided
             (Some(output), _) => Some(output.clone()),
-            // Second positional argument as output
             (None, 2) => Some(self.args.files[1].clone()),
-            // No output specified
             (None, _) => None,
         };
 
@@ -186,9 +173,6 @@ impl CommandContext {
         Ok(files)
     }
 
-    /// The one capability gate: reject a `--backend`/command combination the
-    /// selected backend's registration does not serve, with a uniform error
-    /// whose "Supported" list is generated from the registration.
     fn require_backend_support(&self) -> Result<()> {
         if let Some(msg) = self.args.backend.reject_reason(self.args.command) {
             anyhow::bail!("{}", msg);

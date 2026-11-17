@@ -349,10 +349,7 @@ mod fuzz_graph {
 
 #[cfg(test)]
 mod incremental_watch_tests {
-    //! Session edit oracles for `emit_incremental`: byte identity with fresh builds
-    //! under global calls, and runtime values under bound calls whose cached ranks
-    //! can differ from a fresh build. Mirrors `skull/tests/incremental_emit.rs`
-    //! through the actual Session edit path, covering whether `reinferred` is enough.
+    //! Exercise full reassembly after real Session edits.
 
     use super::{files, session_file};
     use crate::bone_backend::bone_session;
@@ -480,17 +477,6 @@ mod incremental_watch_tests {
         );
     }
 
-    // --- fuzz oracle: incremental == fresh over random valid body edits -------
-    //
-    // The plan is emphatic that hand-picked tests miss codegen-dep undercoverage
-    // ("only the incremental==fresh fuzz catches it" — rock's deletion bug). This
-    // builds a function call/inline graph, then mutates random bodies (always
-    // type-valid by construction: every fn is `-> int`, every callee is a
-    // lower-indexed fn so the graph is a DAG, no recursion), driving the REAL
-    // `Session.update_file` -> `emit_incremental` path. After each edit it asserts
-    // the global-shape assembly is byte-identical to `emit_full` of the SAME
-    // (edited) workspace — the fresh build is the ground truth. A divergence means
-    // a chunk that should have re-emitted (an inline-dependent caller) didn't.
 
     use super::fuzz_graph::{Body, Rng, initial_bodies, mutate, render};
 
@@ -745,27 +731,7 @@ mod incremental_watch_tests {
 
 #[cfg(test)]
 mod overlay_runtime_tests {
-    //! Runtime-equivalence oracle for the TWO-FILE SPLIT (`main.lua` +
-    //! `incremental.lua`). The byte-identical oracles (`incremental_watch_tests`,
-    //! `skull/tests/incremental_emit.rs`) cover the full-reassembly
-    //! `emit_incremental` path; they say nothing about the overlay, which is NOT
-    //! byte-equal to a full build by design (Lua later-definition-wins). The only
-    //! correctness gate for the split is BEHAVIORAL: a frozen `main.lua` (the
-    //! stale baseline) + an accumulating overlay, EXECUTED under luajit, must
-    //! print exactly what a fresh full build of the final source prints.
-    //!
-    //! This exercises three things no other test does at runtime:
-    //!   1. later-definition-wins -- the overlay's fresh `foo` overrides the
-    //!      stale `foo` baked into the frozen baseline;
-    //!   2. accumulation -- edit A then B, the overlay must still carry A' (else A
-    //!      silently reverts to the baseline's stale copy);
-    //!   3. inline-dependent caller re-emit -- editing an inlined callee must
-    //!      re-emit its callers into the overlay (the callers' chunks contain the
-    //!      callee's body), or the caller runs the stale inlined value.
-    //!
-    //! Strategy mirrors `IncrementalProject`: drive edits through a real `bone_semantic::Session`'s
-    //! `update_file` -> `reinferred`, `emit_overlay` from the SAME accumulating
-    //! cache, and compose `frozen_baseline ++ overlay` against a fresh `emit_full`.
+    //! Compare replaying the two-file overlay with a fresh compile.
 
     use super::super::{IncrementalProject, SkullReload};
     use super::files;
@@ -1286,17 +1252,6 @@ mod overlay_runtime_tests {
         );
     }
 
-    // --- runtime accumulation fuzz: frozen v0 baseline + cumulative overlay -----
-    //
-    // The byte-identical fuzz (`incremental_watch_tests::fuzz_incremental_matches_fresh`)
-    // proves global-shape `emit_incremental` (full reassembly) == fresh. This one RUNS the
-    // OVERLAY: a single frozen `main.lua` (v0) plus an overlay that accumulates
-    // EVERY change from v0 through vk -- never a full rebuild in between, the
-    // worst case for the accumulation rule. After each edit, `frozen ++ overlay`
-    // executed under luajit must print exactly what a fresh `emit_full(vk)` prints.
-    // Editing an inlined callee forces its callers (incl. `main`, which inlines
-    // them) into the overlay; a dropped accumulation or a missed caller re-emit
-    // surfaces as a wrong line of output.
 
     use super::fuzz_graph::{Rng, initial_bodies, mutate, render};
 
@@ -1378,12 +1333,6 @@ mod overlay_runtime_tests {
         runtime_accumulation_fuzz_seed4 = 4,
     }
 
-    // --- sim tier: a registry retains and observes a CodeRef -------------------
-    //
-    // The corpus tier can't reach this: a `@update`/`@draw` decorator registers a
-    // function VALUE into a registry (`UpdateSystem { func, name, stage }`). The
-    // stored value is a CodeRef, so an overlay must refresh it without a
-    // name-based registry repair.
 
     /// A minimal game-shaped module: one `@update` system whose body writes
     /// `tick_val` to an observable global, plus the engine's deco/registry/clear
@@ -2182,17 +2131,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
     }
 
-    /// PREMISE pin for the schema-drift restart policy:
-    /// a struct SHAPE edit is an
-    /// Interface-tier full rebuild, but the full reload is a re-`dofile` that
-    /// preserves any mutable global whose declared-type STRING is unchanged --
-    /// and `"Mob?"` names the shape without describing it. A live instance
-    /// therefore SURVIVES the reload with its old field set while every reader
-    /// recompiles to the new one: the recompiled reader nil-reads the added
-    /// field and dies on the first arithmetic touch (or silently propagates
-    /// nil through dynamic sinks). Non-inverted -- this documents the emit
-    /// layer's real behavior; the restart policy prevents the scenario one
-    /// layer up (the project watcher), which this harness deliberately bypasses.
+    /// Equal type names can hide incompatible layouts in a live LuaJIT process.
     #[test]
     fn struct_field_add_full_reload_nil_poisons_live_instances() {
         let v0 = "struct Mob { hp: int }\n\
@@ -2252,15 +2191,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
     }
 
-    /// PREMISE pin for the schema-drift restart policy, value-struct class:
-    /// LuaJIT `ffi.cdef` typedef
-    /// redefinition is a SILENT NO-OP -- the v1 chunk's cdef "succeeds" but
-    /// `ffi.typeof` keeps the ORIGINAL layout for the life of the process.
-    /// Value-struct construction is POSITIONAL in declared-field order
-    /// (`P_ct(a, b)`), so after a field REORDER the v1 ctor call feeds v1-order
-    /// args into the frozen v0 ctype: every field silently gets the wrong
-    /// value. Not even a fresh post-reload construction is safe -- this is the
-    /// class where no in-process response exists, the core restart argument.
+    /// A new cdef cannot replace a layout already loaded by LuaJIT.
     #[test]
     fn value_struct_reorder_full_reload_is_caught_by_the_layout_check() {
         let v0 = "value P { x: int, y: int }\n\
@@ -2428,14 +2359,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
     }
 
-    // -- frame-lambda hoist ----------
-    // These pin the reload/layout contract of P1's co-fn lambda hoist: a
-    // capturing co-fn lambda is an env record whose `__fn` names a hoisted
-    // top-level body emitted IN THE SAME CHUNK as the step (const-hoist
-    // precedent), so a BodyOnly overlay carries it. A test that would also pass
-    // against pre-P1 emission (inline `function(...)` closures, no
-    // `gen_0__step__lambda<k>` global) is not evidence -- each asserts the
-    // hoisted body is present in the overlay.
 
     /// The frame layout stamp for a coroutine ctor `function <ctor>()`: the
     /// `__layout = <N>` literal the ctor writes. Two builds whose only diff is a
@@ -2742,13 +2665,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 }
 #[cfg(test)]
 mod shape_drift_tests {
-    //! The schema-drift restart trigger:
-    //! a type-SHAPE edit returns `ShapeChanged` (restart request) and DEFERS the
-    //! `main.lua` write -- the running process must never hot-reload a program
-    //! whose live data layout it doesn't have. Body and signature-only edits
-    //! stay on the hot paths. The premise repros for the corruption itself are
-    //! `struct_field_add_full_reload_nil_poisons_live_instances` and
-    //! `value_struct_reorder_full_reload_is_caught_by_the_layout_check`.
 
     use super::super::SkullReload;
     use super::ProjectFixture;
@@ -3649,12 +3565,6 @@ fn main() {}
 
 #[cfg(test)]
 mod force_full_tests {
-    //! `force_full` is the project restart-path canonicalizer: after body edits
-    //! have accumulated into `incremental.lua` (overlaying a stale `main.lua`),
-    //! it must fold the overlay back so the next `main.lua`-only process load is
-    //! the complete current program. Gate: the produced `main.lua` is
-    //! byte-identical to a from-scratch full build of the edited source, and the
-    //! overlay file is gone.
 
     use super::super::IncrementalProject;
     use super::ProjectFixture;

@@ -1,11 +1,4 @@
-//! Static CLI registrations. Library callers use the plain public default;
-//! a process may install its host table once, before parsing or dispatch.
-//!
-//! Cross-crate composition uses `extend` to concatenate static commands and
-//! backend operations at compile time. Backends and host tables use Rust struct
-//! updates to inherit public entries, including option rules. The private host
-//! replaces runtime policy as one service table. No copied public handlers or
-//! runtime table allocation are needed. Reading the default does not install it or block a later host.
+//! Library callers use the plain registry until a process installs its host table.
 
 use crate::{Args, Backend, CommandContext};
 use anyhow::Result;
@@ -197,17 +190,13 @@ pub enum Route {
     Omitted(&'static str),
 }
 
-/// One `rock <command>` registration. Commands are positional clap values,
-/// not clap subcommands; the accepted names are the registered names in
-/// registration order.
+/// Commands are positional Clap values in registration order.
 pub struct CliCommand {
     pub name: &'static str,
     pub route: Route,
 }
 
 impl CliCommand {
-    /// User-facing kebab-case name (what the user types and what error
-    /// messages echo).
     pub(crate) fn cli_name(&self) -> &'static str {
         self.name
     }
@@ -231,7 +220,6 @@ impl CliCommand {
         registered().commands
     }
 
-    /// The clap parser for the positional `command` argument.
     pub(crate) fn value_parser() -> impl clap::builder::TypedValueParser<Value = &'static CliCommand>
     {
         use clap::builder::TypedValueParser;
@@ -302,7 +290,6 @@ impl BackendSpec {
             .map(|(_, h)| *h)
     }
 
-    /// The clap parser for `--backend`.
     pub(crate) fn value_parser() -> impl clap::builder::TypedValueParser<Value = Backend> {
         use clap::builder::TypedValueParser;
         clap::builder::PossibleValuesParser::new(
@@ -326,7 +313,6 @@ impl Backend {
             .unwrap_or_else(|| panic!("backend {self:?} has no registration"))
     }
 
-    /// `--backend` value name, used in messages.
     pub fn name(self) -> &'static str {
         self.spec().name
     }
@@ -361,8 +347,6 @@ impl Backend {
         })
     }
 
-    /// `Some(message)` if this backend cannot serve `cmd`; `None` if it can.
-    /// The capability gate (`require_backend_support`) is the only caller.
     pub(crate) fn reject_reason(self, cmd: &CliCommand) -> Option<String> {
         if let Some(message) = self.omitted_reason() {
             return Some(message);

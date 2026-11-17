@@ -1,20 +1,4 @@
-//! `rock sim-report` -- a read-only report over one retained `rock sim` run
-//! written by `sim_observability::SimRunRecorder` to
-//! `.sim-runs/<run-id>/` (`ROCK_SIM_LOG_DIR` overrides the root).
-//!
-//! Interpretation rules:
-//!
-//! * `worker_started` -> `worker_first_entry` is **startup latency**.
-//! * A worker may be reaped before its reader drains already-buffered lines,
-//!   so `entry_*` events can legitimately follow that worker's `worker_end`.
-//!   Worker spans are widened over that drain rather than assuming an order,
-//!   and the overhang is reported on its own line so the child-process
-//!   lifetime stays recoverable.
-//! * `PASS` / `FAIL` / `INCOMPLETE` come from `run_end`. A record with no
-//!   `run_end` is an incomplete invocation and has no authoritative wall time.
-//!
-//! The reader is strictly read-only over the history: it never writes, prunes
-//! or mutates a run record. History is deliberately never auto-pruned.
+//! Summarize one retained sim run. Entry results and observed timing remain independent when the record is incomplete.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};

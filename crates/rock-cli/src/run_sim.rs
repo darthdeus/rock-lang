@@ -1,13 +1,4 @@
-//! `rock sim <project> <name>` — runner for Rock-native `@sim`
-//! coroutines.
-//!
-//! Orchestrates: compile project + spawn the game with
-//! `ROCK_RUN_SIM=<name>` set, demux `__SIM__`-prefixed JSON lines from
-//! stderr, pretty-print pass/fail, return non-zero on any expect_fail.
-//!
-//! Side-channel format: stderr lines with the literal prefix
-//! `__SIM__ {json}\n`, where each JSON object has `op: string` and
-//! op-specific fields. See `stone/engine/sim.rock`.
+//! Run Stone's @sim coroutines in fresh processes and read their __SIM__ stderr events.
 
 use crate::sim_observability::SimRunRecorder;
 use crate::skull_backend::{IncrementalProject, collect_sim_descriptors};
@@ -25,19 +16,12 @@ use tempfile::TempDir;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 
-/// Frame budget for a sim that declares none. Sims terminate naturally via the
-/// runner's `sim_done` check; this is the upper bound for a runaway / hung
-/// body. A sim overrides it with `@sim_env("FRAME_COUNT", "<n>")`.
 const DEFAULT_FRAME_BUDGET: usize = 600;
 
 fn sim_env_value<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
     env.iter().rfind(|(k, _)| k == key).map(|(_, v)| v.as_str())
 }
 
-/// The budget one entry runs on: its own `@sim_env("FRAME_COUNT", ...)`, or the
-/// default. Rejects a value that is not a positive integer rather than falling
-/// back -- a sim asking for a bound the runner silently replaces would be
-/// guarded by a number nobody wrote.
 fn frame_budget_for(sim_name: &str, env_pairs: &[(String, String)]) -> Result<usize> {
     let Some(raw) = sim_env_value(env_pairs, "FRAME_COUNT") else {
         return Ok(DEFAULT_FRAME_BUDGET);
@@ -47,10 +31,6 @@ fn frame_budget_for(sim_name: &str, env_pairs: &[(String, String)]) -> Result<us
     })
 }
 
-/// The wall-clock budget one entry runs on: its own
-/// `@sim_env("ROCK_SIM_TIMEOUT_SECS", ...)`, or the process-wide
-/// `sim_timeout_secs()`. Rejects a value that is not a positive integer,
-/// like the frame budget -- a silently replaced bound guards nothing.
 fn timeout_for(sim_name: &str, env_pairs: &[(String, String)]) -> Result<Duration> {
     let Some(raw) = sim_env_value(env_pairs, "ROCK_SIM_TIMEOUT_SECS") else {
         return Ok(Duration::from_secs(sim_timeout_secs()));
@@ -60,29 +40,10 @@ fn timeout_for(sim_name: &str, env_pairs: &[(String, String)]) -> Result<Duratio
     })
 }
 
-/// Wall-clock timeout. An INDEPENDENT bound, not a backstop for the frame
-/// budget: it is the only thing that catches a child which never advances a
-/// frame at all -- an infinite loop inside one tick, a blocked FFI call, a
-/// driver stall -- where `FRAME_COUNT` can never be reached and so can never
-/// fire. Neither bound subsumes the other.
-///
-/// It bounds ONE entry: boot up to its `entry_start`, then the sim from that
-/// start.
-///
-/// Deliberately generous, because it is a wedge detector and not a deadline.
-/// Per-child wall time rises sharply under `--jobs` (render-heavy game sims have
-/// been measured taking 15 s for a single frame with four children live), and a
-/// value tuned for serial runs kills healthy children. Override with
-/// `ROCK_SIM_TIMEOUT_SECS` for a genuinely long-running sim, or per entry
-/// with `@sim_env("ROCK_SIM_TIMEOUT_SECS", ...)` (see `timeout_for`).
+/// A hung tick never reaches the frame budget. Give each entry its own wall-clock deadline.
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
-/// Resident-plus-swap ceiling for one sim child, in MB. A sim that loops
-/// while allocating grows until the machine's OOM killer picks a victim, and
-/// that victim's cgroup can take unrelated processes down with it; the
-/// wall-clock watchdog is far too slow to stop it (one looping sim reached
-/// ~25 GB inside the 300 s timeout, 2026-09-18). A normal game sim child peaks
-/// under 3 GB. `ROCK_SIM_MEMORY_MB` overrides; `0` disables the cap.
+/// Limit memory independently of the wall clock to contain runaway allocation.
 const DEFAULT_MEMORY_CAP_MB: u64 = 8192;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -205,11 +166,7 @@ fn sim_memory_cap_mb() -> Option<u64> {
     }
 }
 
-/// Resident plus swapped memory of a live process, in MB. Swap counts: the
-/// looping sim that set the cap held 20 of its 25 GB in swap. None while the
-/// process still runs on this process's address space: `spawn` can return
-/// while the child is inside execve, before its new mm replaces the runner's,
-/// and /proc then reports the runner's memory as the child's.
+/// A child still inside exec can share the launcher's address space.
 #[cfg(target_os = "linux")]
 fn process_memory_mb(pid: u32) -> Option<u64> {
     // Checked before the read: once the child's mm differs it never reverts.
@@ -305,17 +262,7 @@ fn process_memory_mb(_pid: u32) -> Option<u64> {
     None
 }
 
-/// Map each part of each requested spec to its registered wire name. A v1
-/// package registers sims under canonical DefKeys (`game::module::name`); a
-/// trailing `::`-segment path such as the declared name selects the one sim it
-/// ends (spec sections 15 and 16). An exact wire name always wins.
-///
-/// Every name must be a registered sim, checked here before anything boots: a
-/// helper coroutine named in a batch would otherwise kill its whole worker
-/// with `unknown sim`, and a name holding whitespace (one argv element of
-/// newline-joined names) splits the worker's entry-plan line. Every problem is
-/// reported at once, one `unknown sim: <name>` line per name, so a batch is
-/// fixed in one pass.
+/// Exact wire names win. Otherwise a unique trailing sequence of scope segments selects the sim.
 pub(crate) fn resolve_sim_specs(wire_names: &[String], specs: &[String]) -> Result<Vec<String>> {
     let mut problems = Vec::new();
     let mut resolved = Vec::with_capacity(specs.len());
@@ -366,31 +313,14 @@ fn resolve_sim_name(wire_names: &[String], name: &str) -> std::result::Result<St
     }
 }
 
-/// A sim invocation's private directory for `main.lua` + its `incremental.lua`
-/// overlay.
-///
-/// This MUST NOT be a fixed workspace path. Two `rock sim` invocations (or a
-/// `rock stone` watcher alongside one) each compile their own `@sim` registry,
-/// and a shared path lets the second compile replace the chunk the first is
-/// about to run -- the first then reports `unknown sim: <name>` for names its
-/// own registry contains. Pinned by
-/// `tests/sim_concurrent_invocations.rs`.
-///
-/// Lives under `tmp/` rather than the system temp dir so a failing run's build
-/// is still findable next to `tmp/libstone.so` for `luajit main.lua` debugging.
-/// In a source workspace the engine cdylibs stay in `tmp/` itself: they are
-/// staged before any spawn and children resolve them through the relative
-/// `tmp` entry that `rock_engine_host::runtime::lib_path_value` puts on the library
-/// search path. An SDK resolves them from its own `lib/` instead.
+/// Keep each invocation's chunks separate while sharing native libraries staged in tmp/.
 fn sim_output_dir() -> Result<TempDir> {
     fs_err::create_dir_all("tmp").context("creating tmp/ for sim output")?;
     let mut dir = tempfile::Builder::new()
         .prefix("sim-")
         .tempdir_in("tmp")
         .context("creating sim output directory")?;
-    // A JIT abort census names `main.lua:<line>`, which is unreadable once the
-    // build that produced it is gone. Retaining it is opt-in because every
-    // ordinary sim run would otherwise leave a 20MB directory behind.
+    // Keep the chunk on request so JIT traces can be mapped back to its lines.
     if std::env::var_os("ROCK_SIM_KEEP_BUILD").is_some() {
         dir.disable_cleanup(true);
         ::log::info!(target: "SIM", "retaining sim build at {}", dir.path().display());
@@ -398,12 +328,6 @@ fn sim_output_dir() -> Result<TempDir> {
     Ok(dir)
 }
 
-/// Compile `project` into `output_path` and walk the `@sim` registry
-/// once, returning registry-ordered wire names, source paths and each sim's
-/// `@sim_env` pairs. Single source of suite discovery for the list, single-run,
-/// and run-all paths so they can't drift in which sims they see. Does not
-/// validate the project dir or build engine libs -- callers own that (listing
-/// needs neither).
 fn compile_sims(
     project_path: PathBuf,
     output_path: PathBuf,
@@ -955,17 +879,7 @@ fn consume_sim_receipt(
     })
 }
 
-/// `prepare_sims` for a `rock sim` run: the compile happens in a child `rock`
-/// that publishes a receipt, so the runner never holds the compiler's memory
-/// while sims run. Compiling game with every sim peaks at about 4.4 GB, which an
-/// in-process compile kept resident beside every sim child; a child's exit
-/// returns all of it, whatever the allocator does with freed pages. A reload
-/// entry still compiles its live session in-process, as it does under any
-/// receipt.
-///
-/// Each run compiles into a one-run receipt. An explicit receipt lane (`ROCK_SIM_COMPILE_RECEIPT_DIR`) keeps its own
-/// rules. The compile child is `rock_exe`: the CLI passes itself, a test
-/// harness the `rock` binary it was built beside.
+/// Compile in a child so its compiler memory is reclaimed before workers spawn.
 fn prepare_sims_out_of_process(
     project_path: PathBuf,
     output_path: PathBuf,
@@ -1193,12 +1107,7 @@ fn source_root_for_sim_project(project_dir: &std::path::Path) -> Result<std::pat
     Ok(project_dir)
 }
 
-/// Build the skull game program for `dir`, write the game-shaped `main.lua`
-/// (preamble + entry + the `@sim` registry) to `main_path`, and collect the
-/// project's `@sim` wire names, source paths and env pairs from the SAME
-/// workspace build. The skull counterpart of rock's `compile_sims` -- one
-/// type-check feeds both the emitted registry and the runner's wire/env list,
-/// so they cannot drift.
+/// Discover sim identities from the same checked workspace that produced the chunk.
 #[cfg(test)]
 pub(crate) fn skull_compile_game_and_collect_sims(
     dir: &str,
@@ -1414,11 +1323,6 @@ fn compile_sims_with_allocation(
     bool,
 )> {
     rock_host::process_management::report_spawn_phase("compile");
-    // Only skull serves sims now (bone has no codegen, rock is gone): build the
-    // bone workspace once (a live Session, tests included), emit the game-shaped
-    // main.lua with its `@sim` registry, and collect the wire/env list from the
-    // same build. Source paths are captured from the same HIR declarations, and
-    // the returned IncrementalProject serves mid-sim `reload_edit` ops.
     crate::package::prepare_sound_bank(&project_path.to_string_lossy())?;
     let main_path = output_path.join(rock_host::project::MAIN_LUA_FILENAME);
     skull_compile_game_and_collect_sims_with_allocation(
@@ -1480,18 +1384,12 @@ fn any_reload_lane_selected(
         .any(|spec| entry_is_reload_lane(spec, env_by_wire))
 }
 
-/// Compile the project and print each `@sim` wire name on stdout, one
-/// per line, sorted by source span. Lets scripts enumerate the suite without
-/// hardcoding names.
 pub(crate) fn do_list_sims(project: &str) -> Result<()> {
     let project_path = rock_engine_host::project::resolve_project_dir(project)?;
 
     let out_dir = sim_output_dir()?;
     let prepared = prepare_sims(project_path, out_dir.path().to_path_buf())?;
     for name in prepared.wire_names {
-        // Result output, NOT logging: `--list` exists to print the sim
-        // names to stdout — this is the command's answer, consumed by
-        // callers/CI, not a diagnostic.
         println!("{}", name);
     }
     Ok(())
@@ -1555,9 +1453,7 @@ fn do_run_sim_opts_recorded(
     let output_path = out_dir.path().to_path_buf();
     let sim_name = resolve_sim_specs(&prepared.wire_names, &[sim_name.to_string()])?.remove(0);
     let sim_name = sim_name.as_str();
-    // Receipt consumers do not retain the compiler session. A reload entry is
-    // the one exception: it edits that live session, so preserve the existing
-    // fresh-compile behavior for that explicitly selected lane.
+    // A reload sim needs the editable compiler session that a receipt omits.
     if prepared.stone.is_none() && entry_is_reload_lane(sim_name, &prepared.env_by_wire) {
         let (wire_names, env_by_wire, source_files, stone) = recorder
             .phase("compile_reload_session", || {
@@ -1629,18 +1525,13 @@ fn sim_outcome(summary: &SimSummary, sim_name: &str) -> Result<()> {
         ));
     }
     if summary.has_failures() {
-        // Caller decides exit code; `rock sim` maps this to a non-zero
-        // process exit in `dispatcher.rs`.
         let fails = summary.expects_fail.len();
         let errs = summary.errors.len();
         return Err(anyhow!(
             "sim `{sim_name}` had {fails} expect failure(s), {errs} error(s)"
         ));
     }
-    // A sim that never reached stop_sim() ran incompletely -- a coroutine
-    // abort / swallowed runtime error mid-body. That is a failure even
-    // when no expect explicitly failed; otherwise an aborted sim exits 0
-    // and silently "passes" (every real sim ends in stop_sim()).
+    // A coroutine can abort without reporting a failed check.
     if !summary.saw_stop {
         return Err(anyhow!(
             "sim `{sim_name}` aborted before stop_sim() -- incomplete run (likely a swallowed runtime error)"
@@ -1655,10 +1546,6 @@ fn sim_outcome(summary: &SimSummary, sim_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run one named entry into a fresh tempdir, exposed to the child as `OUT`,
-/// returning its name and summary. Shared by the single-run path and
-/// `run_fresh_entries` so the tempdir / cleanup handling can't drift between
-/// them.
 fn run_named_entry(
     name: &str,
     quiet: bool,
@@ -1771,13 +1658,6 @@ fn verdict_word(summary: &SimSummary) -> &'static str {
     }
 }
 
-/// Run the whole suite (`rock sim <project>`, `names` empty) or the named
-/// sims (`rock sim <project> a b c`). A single name delegates to
-/// `do_run_sim_opts_with_request` and streams full per-expect detail. Otherwise
-/// the project compiles once, each entry runs in its own child with its own
-/// `$OUT`, and a final tally follows. A serial suite streams live; named runs
-/// and concurrent suites print each record whole. Returns Err (non-zero exit)
-/// if any entry failed.
 pub(crate) fn do_run_sims(
     project: &str,
     names: &[String],
@@ -1979,15 +1859,6 @@ struct FreshRun<'a> {
     entry_ids: &'a [u64],
 }
 
-/// Run every spec in its own fresh child process and return the summaries in
-/// `specs` order.
-///
-/// Reload-lane entries share the lane's one compile session, so they run one
-/// at a time beside the pool (`beside_reload_lane`). The pool starts the
-/// longest recorded entries first, so the suite's tail starts while the pool is
-/// still full, and holds at most `full_asset_jobs` full-asset children at
-/// once. Each record prints whole under one lock, so concurrent records never
-/// interleave.
 fn run_fresh_entries(run: FreshRun<'_>) -> Result<Vec<(String, SimSummary)>> {
     let FreshRun {
         output,
@@ -2221,14 +2092,7 @@ fn longest_first(estimates: &[Option<u64>]) -> Vec<usize> {
     order
 }
 
-/// Run the ordinary `pool` and the hot-reload `lane` at the same time.
-///
-/// The lane boots a chunk of its own from a session of its own
-/// (`reload_lane_session`), and no reload fixture writes a file an ordinary
-/// entry reads, so an ordinary child cannot observe it. The lane's entries stay
-/// serial among themselves because they share that one session. While the lane
-/// has work it holds one of the `jobs`; when it finishes, the pool widens to
-/// all of them.
+/// The reload lane claims one job until its final entry completes.
 fn beside_reload_lane<A, B>(
     jobs: usize,
     lane_has_work: bool,
@@ -2278,14 +2142,7 @@ fn run_reload_lane_serially<T>(
         .collect()
 }
 
-/// `run_bounded` with a second cap: at most `capped_jobs` of the `jobs`
-/// threads may be inside a task whose `capped[i]` is true at any moment.
-///
-/// Capped tasks are handed out in index order and the others fill every slot
-/// the cap leaves free, so a full pool stays full whenever there is uncapped
-/// work; a thread only waits when the cap is reached AND nothing else
-/// remains. With `capped_jobs >= jobs` the schedule is the plain pool's, task
-/// order included, so the uncapped run is not a second policy.
+/// Bound full-asset workers independently of the total pool width.
 fn run_bounded_classed<T, F>(
     width: &PoolWidth,
     capped_jobs: usize,
@@ -2478,9 +2335,7 @@ fn census_rankings(
         .collect()
 }
 
-/// Run each selected sim in its own process with the allocator census enabled.
-/// This is deliberately separate from ordinary `rock sim`: the sensor is a
-/// discovery instrument, not a default test-suite cost or a regression gate.
+/// Allocation census runs opt in so ordinary sims do not pay for instrumentation.
 pub(crate) fn do_run_allocation_census(
     project: &str,
     names: &[String],
@@ -2928,8 +2783,6 @@ pub(crate) fn do_run_allocation_sites(
     Ok(())
 }
 
-/// A mid-sim `reload_edit` request parsed off the `__SIM__` side channel
-///.
 #[derive(Debug)]
 struct ReloadEditReq {
     request_id: Option<u64>,
@@ -3055,13 +2908,7 @@ impl ReloadLedger {
     }
 }
 
-/// Apply one `reload_edit`: in-memory find/replace on the file's CURRENT
-/// in-session text, recompiled through the real incremental path
-/// (`IncrementalProject::apply_edit`), which writes the overlay the running game
-/// hot-reloads. BodyOnly edits only -- any other tier is a sim-author error
-/// (an interface edit would rewrite main.lua under the running child).
-/// `pristine` records each file's pre-edit text at first touch so
-/// `revert_reload_edits` can restore the session after the child exits.
+/// Apply a unique replacement against the session's current text, including earlier edits.
 fn service_reload_edit(
     stone: &mut crate::skull_backend::IncrementalProject,
     output: &str,
@@ -3212,28 +3059,9 @@ fn resolve_full_asset_jobs(requested: Option<usize>, jobs: usize) -> usize {
         .clamp(1, jobs.max(1))
 }
 
-/// How many full-asset lanes (`entry_full_assets`) may be live at once unless
-/// `--full-asset-jobs` says otherwise.
-///
-/// Measured 2026-09-13 on the game suite at `-j 14` with `footprint -p` per
-/// worker (`IOAccelerator (graphics)`): a capped lane holds 0.2-0.4 GB of GPU
-/// memory whether or not it renders, and a full-asset lane 2.0-4.3 GB. With
-/// fourteen lanes the capped floor is ~5.6 GB, so two full-asset lanes peak
-/// near 14 GB and three near 18.5 GB. On the Linux workstation a capped
-/// worker lane grows to ~2 GiB, so there the job budget (`SIM_LANE_VRAM_MIB`)
-/// is what bounds GPU memory and this cap only spreads the heaviest lanes.
-/// `SIM_DRAW` is not the variable (the earlier `--render-jobs` cap
-/// serialised 49 lanes for 100 s of wall and changed no verdict).
 const DEFAULT_FULL_ASSET_JOBS: usize = 2;
 
-/// Resolve the requested job count. `--update-snapshots` pins to serial: it
-/// rewrites image baseline files, and the runner does not yet prove every
-/// destination path is unique before spawning (several `@sim`s can share one
-/// source file, so its `.snap` directory is shared too).
-///
-/// `lanes` is the number of entries for an explicit (named) request: a
-/// request above it asks for lanes that will never run, so it is narrowed
-/// before the budget check rather than rejected for them.
+/// Snapshot updates run serially because different sims can write the same baseline directory.
 pub(crate) fn resolve_jobs(
     requested: Option<usize>,
     lanes: Option<usize>,
@@ -3466,12 +3294,7 @@ fn emit_bytecode_image(output: &Path) {
     }
 }
 
-/// The chunk a child boots from: the bytecode image when one exists, except for
-/// the reload lane, which must keep the source file. `check_hot_reload`
-/// derives the overlay path by replacing `main.lua` in the running script's
-/// own path (`stone/engine/hot_reload.rock`), and `read_chunk_source_dir`
-/// reads line 1 of the chunk as text to decide whether it is this game's;
-/// neither question has an answer against a bytecode image.
+/// Reload needs the source chunk to locate the overlay and recover the source directory.
 fn worker_chunk_path(output: &Path, reload: bool) -> PathBuf {
     let main = output.join(rock_host::project::MAIN_LUA_FILENAME);
     if reload {
@@ -3481,43 +3304,13 @@ fn worker_chunk_path(output: &Path, reload: bool) -> PathBuf {
     if bytecode.is_file() { bytecode } else { main }
 }
 
-/// Whether a sim belongs to the exclusive reload lane.
-///
-/// Reload sims drive `IncrementalProject::apply_edit` against the one live session and
-/// the one `incremental.lua`, so they cannot share the runner with any other
-/// child. Opting in is `@sim_env("STONE_HOT_RELOAD", "1")` -- the same switch
-/// that makes the child's watcher poll the overlay at all, so a sim that could
-/// observe a reload is exactly a sim that declares this.
 pub(crate) fn is_reload_lane(env_pairs: &[(String, String)]) -> bool {
     env_pairs
         .iter()
         .any(|(k, v)| k == "STONE_HOT_RELOAD" && v != "0")
 }
 
-/// Fixed values the runner publishes to EVERY sim child, layered BEFORE
-/// `preset_env` so a declaration still wins.
-///
-/// `STONE_IMAGE_MAX_SIDE` holds every loaded image's GL storage to this many
-/// texels on the longer side while its LOGICAL size stays the file's own, so
-/// frame rects, sheet indices and UVs are unchanged and only sampling
-/// resolution drops. A rendering game worker holds 3.2 GB of RGBA8 texture
-/// pixels without it, which is what stops a second suite fitting in this
-/// machine's memory. A
-/// sim whose assertion genuinely needs the file's own texels declares
-/// `@sim_env("STONE_IMAGE_MAX_SIDE", "0")`. No production boot publishes it: `rock
-/// run`, `rock frame`, `rock perf` and `rock stone` build their own child
-/// environments and never read this table.
-///
-/// 256 is the value the author asked for, and it is reachable because the one
-/// thing that refused it is now declared rather than resampled. game's rendered
-/// sims used to pass at 2048 and 1024 and fail at 512 and 256 with a Metal GPU
-/// hang on the first rendered frame rather than an assertion. The cause was a
-/// single asset family: the relight caster bakes are a bounding-volume
-/// hierarchy packed into RGBA8, they are 768 texels wide, and any cap below
-/// that resampled an index structure into garbage. They now load with
-/// `exact_texels` and decline every cap, so the width of a bake no longer sets
-/// the floor for this constant. See the report section dated 2026-09-12 in the
-/// file above.
+/// Apply before sim-specific declarations. Limit texture storage without changing logical image sizes.
 const RUNNER_BASELINE_ENV: &[(&str, &str)] = &[
     ("ROCK_TEST_SEED", "42"),
     ("SIM_DRAW", "none"),
@@ -3526,34 +3319,12 @@ const RUNNER_BASELINE_ENV: &[(&str, &str)] = &[
     ("XDG_DATA_HOME", "$OUT/data"),
 ];
 
-/// Whether an entry RENDERS, from the effective `SIM_DRAW` value.
-///
-/// Read last-wins off the resolved pairs, never from the source annotations:
-/// `@sim_render` is lowered to `SIM_DRAW=on_demand` before an explicit
-/// `@sim_env` is appended (`sim_environment::apply`), so a sim
-/// carrying both is whatever it says LAST. Classifying on the annotations would
-/// disagree with the value the child actually boots with.
-///
-/// A sim declaring nothing does not render: draw systems are skipped by default
-/// under the harness. `commands` (draw phase on, nothing submitted to the GPU)
-/// is NOT rendering here: its process needs no image pixels and holds no
-/// rendered frame, which is what this oracle decides (the asset stub).
+/// The last SIM_DRAW wins. Command-only runs do not submit to the GPU.
 fn entry_renders(env: &[(String, String)]) -> bool {
     sim_env_value(env, "SIM_DRAW").is_some_and(|v| matches!(v, "on_demand" | "every_frame"))
 }
 
-/// Whether this entry's process holds every image at the file's own size:
-/// real assets (`STONE_ASSET_STUB=0`) with the storage cap declined
-/// (`STONE_IMAGE_MAX_SIDE=0`). Either alone is cheap -- a stub image is one
-/// texel whatever the cap says, and a capped real image is at most 256 texels
-/// a side -- so only the pair marks the lanes the full-asset cap counts.
-///
-/// Read last-wins off the resolved pairs, like `entry_renders`, over the same
-/// defaults the child boots with: `default_stub` is the runner's asset-stub
-/// value for this invocation and the cap default is `RUNNER_BASELINE_ENV`'s.
-/// `SIM_DRAW` is deliberately not consulted: a `commands` process with
-/// full assets holds them all the same (measured 2.0 GB against 2.4-4.3 GB
-/// for its rendering siblings).
+/// Reserve a full-asset lane for uncapped real images, even when the sim does not draw.
 fn entry_full_assets(env: &[(String, String)], default_stub: &str) -> bool {
     let stub = sim_env_value(env, "STONE_ASSET_STUB").unwrap_or(default_stub);
     let cap_default = RUNNER_BASELINE_ENV
@@ -3582,28 +3353,12 @@ fn workload_env(env: &[(String, String)]) -> Vec<(String, String)> {
     effective.into_iter().collect()
 }
 
-/// `STONE_ASSET_STUB` for a sim child: headers-only assets, whether or not
-/// anything in the process renders.
-///
-/// A rendering sim gets ONE WHITE TEXEL per image and asserts on layout,
-/// silhouettes and gameplay all the same; decoding game's sheets for it costs
-/// about 6 s of CPU and 456 MB of driver allocation per rendering process, and
-/// the probe over all 132 non-manual rendering sims found only 22 that read
-/// texels at all. Those 22 and the manual texel readers declare
-/// `@sim_env("STONE_ASSET_STUB", "0")`, which wins because `preset_env` is
-/// layered after this.
+/// Sims that examine actual texels override the one-texel default.
 fn asset_stub_value() -> &'static str {
     unstub_override("STONE_ASSET_STUB")
 }
 
-/// A stub knob's value, honouring an inherited request to load for real.
-///
-/// The parent environment can only ever turn stubbing OFF. Letting it turn
-/// stubbing ON would let a stray shell variable strip the pixels out of a
-/// image snapshot sim, which fails as a wrong image rather than as a missing one;
-/// the other direction just makes a run slower and more real, which is exactly
-/// what someone debugging a stubbed sim wants -- and it makes the whole suite
-/// A/B-able without rebuilding.
+/// The shell can request real assets. It cannot force stubs on pixel-reading sims.
 fn unstub_override(var: &str) -> &'static str {
     unstub_from(std::env::var(var).ok().as_deref())
 }
@@ -3631,10 +3386,7 @@ struct WorkerPart {
     source_file: Option<PathBuf>,
 }
 
-/// CPU timing accumulated by the child for one closed entry. The values are
-/// optional in the envelope so retained journals from before this probe remain
-/// readable. Microseconds keep the side channel integer-only and avoid
-/// formatting a floating point value in the Rock runner.
+/// Keep timing optional so older entry journals remain readable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct EntryFrameTiming {
     frames: usize,

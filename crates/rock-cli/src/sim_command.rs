@@ -59,8 +59,6 @@ pub(crate) fn handle_sim(cx: &crate::CommandContext) -> Result<()> {
     } else if cx.args.files.is_empty() {
         anyhow::bail!("sim needs a project: rock sim <project> [name]");
     } else {
-        // files[0] = project, files[1..] = sim names (none: the whole suite).
-        // Each name may itself be a `a,b` multi-start chain.
         crate::run_sim::do_run_sims(
             &cx.args.files[0],
             &cx.args.files[1..],

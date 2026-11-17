@@ -235,14 +235,7 @@ fn error_text(errs: &[rock_core::errors::CompilerError]) -> String {
     out.join("\n")
 }
 
-/// Full-pipeline extension: does skull EMISSION reject this bone-accepted case?
-/// Emit-time rejections (a reserved body-local name `r<N>`/`c<N>`/`__rock_env`,
-/// or a compiler-minted synthetic-name collision) never reach the bone front
-/// end, so a `.rock.err` for them is invisible to `bone_check_case`. Running
-/// skull's MIR emit on each user module and treating a codegen `CompilerError`
-/// as the case's rejection makes the suite STAGE-AGNOSTIC: a `.rock.err` says
-/// "this must be rejected", and either bone or skull-emit may be the stage that
-/// raises it. Only reached when bone already accepted, so it reuses `ws`.
+/// A Bone-accepted case can still fail during Skull emission.
 fn skull_emit_rejects(
     ws: &bone_semantic::inference::Workspace,
     files: &[(String, String)],
@@ -255,17 +248,7 @@ fn skull_emit_rejects(
     })
 }
 
-/// Third gate, same principle as [`skull_emit_rejects`]: an `Error`-severity
-/// lint finding fails a real build (`rock lint`, and the pass every
-/// compile/run/test drives), so a `.rock.err` may name it as the rejecting
-/// stage. Soft tiers are ignored -- a `Warning` prints and builds, so it is not
-/// a rejection. Sources come from `files`, which is also where
-/// `// rock: allow(...)` suppression is read from, so a case can pin that an
-/// allow comment does NOT rescue an unsuppressable lint.
-///
-/// The DEFAULT tier is what runs, matching a build: an opt-in lint
-/// (`bone_lints::OPT_IN_LINTS`) is unreachable from any build, so a `.rock.err`
-/// must not be able to name one as its rejector.
+/// Error-severity build lints also reject programs the type checker accepted.
 fn lint_rejects(
     ws: &bone_semantic::inference::Workspace,
     files: &[(String, String)],

@@ -1,23 +1,4 @@
-//! `rock lsp-survey <project>` -- systematically hunt for the slowest LSP edit.
-//!
-//! The driver uses compiler stats to find where the expensive paths hide and
-//! profiles a spread of edit kinds:
-//!
-//! 1. Compile the project once and collect per-module + per-function stats from
-//!    the bone `Workspace`: body size, call fan-in (call sites resolving to a
-//!    fn, from `resolved_overload_calls`), and module fan-in (modules depending
-//!    on a symbol, from `Session.dependents`).
-//! 2. Rank targets and generate candidate edits across all three tiers:
-//!    - BODY     (numeric literal change inside a body)         -> `BodyOnly`
-//!    - SIGNATURE (insert a param -> arity change)              -> `Interface`
-//!      (re-infers every dependent module)
-//!    - BROKEN   (unterminated `"` in a body)                   -> parse error
-//!      (Session fails-fast + reverts to last-good -- the CHEAP realistic
-//!      mid-typing path; included to confirm it stays cheap, not to find slow)
-//! 3. Profile each candidate through `BoneWorkspace` (the live LSP path),
-//!    cross-checking the real `UpdateTier`/reinferred count against a Session.
-//! 4. Report the ranked worst edits + a stats summary. `--format json` dumps the
-//!    full per-module/per-function stats and every candidate's samples.
+//! Time candidate body, signature and broken edits through the live LSP update and refresh path.
 
 use anyhow::Result;
 use bone_core::prelude::Instant;
@@ -381,10 +362,7 @@ fn end_of_first_param(orig: &str, start: usize) -> Option<usize> {
     None
 }
 
-/// BROKEN edit: insert an unterminated `"` just inside the body -- reliably
-/// breaks tokenization through EOF, the way starting to type a string does.
-/// `Session::update_file` then fails-fast and reverts to last-good, so this
-/// measures the (cheap) realistic mid-typing parse-error path, NOT a slow one.
+/// Insert an unterminated quote to exercise mid-edit parsing.
 fn make_broken_edit(orig: &str, f: &FnStat) -> Option<String> {
     let at = f.body_range.start + 1;
     let mut out = String::with_capacity(orig.len() + 1);

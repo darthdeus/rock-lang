@@ -6,9 +6,6 @@ pub use walkdir::WalkDir;
 #[cfg(windows)]
 pub use std::os::windows::io::AsRawHandle;
 
-// rock-cli's prelude: symbols the kept code reaches through `crate::*`. Core
-// types come straight from rock_core + rock_tokenizer, host helpers from
-// rock_host, and the rest from std / common deps.
 pub use anyhow::{Result, bail};
 pub use atomic_refcell::AtomicRefCell;
 pub use log::{debug, error, info, trace, warn};
@@ -93,12 +90,6 @@ pub enum Backend {
     Glsl,
 }
 
-/// Resolve the effective backend for an invocation. An explicit choice (the
-/// `--backend` flag or `ROCK_BACKEND` env, pre-parsed into `explicit`) is
-/// honored verbatim -- the capability gate may then reject an unsupported
-/// command. With no explicit choice, the default is `skull`. The
-/// backend-agnostic kept commands (fmt, completions) are dispatched
-/// before the backend switch, so a `skull` default never rejects them.
 pub(crate) fn resolve_backend(explicit: Option<Backend>) -> Backend {
     explicit.unwrap_or(Backend::Skull)
 }
@@ -186,9 +177,6 @@ impl Args {
         Self::from_matches(Self::command().get_matches())
     }
 
-    /// Construct the clap `Command` for the rock CLI. Public so
-    /// `rock completions` (`registrations.rs`) can hand it to
-    /// `clap_complete::generate`.
     pub fn command() -> clap::Command {
         use clap::{Arg, ArgAction};
         let command = clap::Command::new("rock")
@@ -254,7 +242,6 @@ impl Args {
         (registry::registered().arguments)(command)
     }
 
-    /// Convert matches from this registry-backed CLI command definition.
     pub fn from_matches(m: clap::ArgMatches) -> Self {
         let many_str = |name: &str| -> Vec<String> {
             m.get_many::<String>(name)
@@ -312,13 +299,7 @@ impl Args {
             ignore_types: m.get_one::<String>("ignore-types").cloned(),
             union: m.get_flag("union"),
             consumers: m.get_one::<String>("consumers").cloned(),
-            // Backend selection. An explicit `--backend` flag wins; otherwise an
-            // explicit `ROCK_BACKEND` env var; otherwise the implicit default is
-            // `skull`. An explicit `--backend` on a command that
-            // backend can't serve still rejects (the capability gate's
-            // diagnostic). The backend-agnostic kept commands (fmt, completions,
-            // host commands) are dispatched before the backend switch, so the
-            // default never rejects them.
+            // An explicit flag takes precedence over ROCK_BACKEND.
             backend: {
                 let explicit = m.get_one::<Backend>("backend").copied().or_else(|| {
                     let name = std::env::var("ROCK_BACKEND").ok()?;

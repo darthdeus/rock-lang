@@ -42,16 +42,9 @@ pub(crate) fn run_stone_test(root: &Path) -> Result<()> {
         anyhow::bail!("stone-test root must be a directory: {}", root.display());
     }
 
-    // Output directory for compiled Lua, under root so the harness's tempdir
-    // cleanup sweeps it.
     let output_path = root.join(".stone-test-out");
     std::fs::create_dir_all(&output_path)?;
 
-    // Skull is the default backend for every execution path; the stone-test
-    // harness compiles via `IncrementalProject` (bone `Session` + skull codegen -- the
-    // same incremental compiler `rock stone` drives), NOT the legacy rock
-    // pipeline. `init` produces the full `main.lua`; `recompile` emits the
-    // overlay or a full rebuild and returns the hot-vs-restart decision.
     let dir = root.to_string_lossy().to_string();
     let main_path = output_path.join("main.lua");
     let incremental_path = output_path.join("incremental.lua");
@@ -59,19 +52,15 @@ pub(crate) fn run_stone_test(root: &Path) -> Result<()> {
 
     let (ctl_tx, ctl_rx) = channel::<Ctl>();
 
-    // embed_string inputs are sources the extension filter can't know; the
-    // set comes from the compiled program, refreshed after every build
-    // (mirrors `rock stone`).
+    // Refresh declared embed inputs after each compile.
     let comptime_watch: crate::file_watcher::SharedWatchSet = Default::default();
 
-    // Watcher thread: forwards FileChangeEvents into ctl_rx.
     let _debouncer = {
         let (fc_tx, fc_rx) = channel::<crate::file_watcher::FileChangeEvent>();
         // Same debounce as `rock stone`, so a burst of saves is one reload.
         let watcher = crate::file_watcher::FileWatcher::default_for_rock_sources()
             .with_metadata_filter(true)
-            // "toml" mirrors `rock stone`: a stick.toml edit is a session
-            // rebuild (declared inputs re-resolve), not a dropped event.
+            // Manifest edits re-resolve declared inputs.
             .with_extensions(vec!["rock".to_string(), "toml".to_string()])
             .with_shared_extra_files(comptime_watch.clone());
         let debouncer = watcher.watch(vec![root.clone()], fc_tx)?;
@@ -132,10 +121,6 @@ pub(crate) fn run_stone_test(root: &Path) -> Result<()> {
         })
     };
 
-    // Mirror `rock stone`: do one initial compile on startup if there are
-    // .rock files in `root`, before the watcher loop. `IncrementalProject::init`
-    // builds the full `main.lua`; the harness's `await_reload_count(1)` then
-    // sees this seed reload, which production also produces.
     let mut reload_n = 0u64;
     let mut compile = |files: Vec<PathBuf>| {
         let start = Instant::now();

@@ -1,10 +1,4 @@
-//! `@test` discovery for the skull/bone test path's compile-failure fallback.
-//! When `skull_emit_full` fails (a file that was *supposed* to fail to
-//! compile), `skull_backend` re-parses the source here — front end only, via
-//! `skull_parser` — to check whether every `@test` expected the failure
-//! (`expect_failure` / `@ignore`). The happy path discovers tests from the
-//! typechecked workspace (`skull::module_tests`); this fallback runs when a
-//! compile failure means there is no typechecked workspace to read.
+//! Discover expected compile failures from the syntax tree when type checking rejects a test file.
 
 use crate::*;
 
@@ -130,9 +124,6 @@ mod tests {
         find_test_functions_from_sources(&crate::common::single_source("t.rock", src))
     }
 
-    // Pins the compile-failure fallback's contract: it discovers every `@test`
-    // fn and reports the two flags its sole caller keys off — `expect_failure`
-    // and `@ignore`. (Guards the skull-parser `@test` discovery path.)
     #[test]
     fn discovers_test_flags() {
         let src = "\
@@ -177,8 +168,6 @@ fn not_a_test() {}
         );
     }
 
-    // A file that doesn't parse cleanly contributes no discoverable tests
-    // (the fallback skips it, matching the old parser's skip-on-Err).
     #[test]
     fn unparseable_file_yields_nothing() {
         assert!(discover("fn broken( {").is_empty());

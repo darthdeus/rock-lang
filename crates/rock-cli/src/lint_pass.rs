@@ -1,11 +1,4 @@
-//! The lint pass every build runs, and the `rock lint` driver behind it.
-//!
-//! Lints belong to the compiler, not to the editor: a finding that only appears
-//! in the LSP is one an author can ignore indefinitely and CI can never enforce.
-//! So the same `rock-lang/crates/bone-lints` engine the LSP drives also runs as a pass over
-//! bone's already-typechecked output on every `compile`/`run`/`test`/`engine`
-//! build. `Error`-severity findings FAIL the build; `Warning`/`Advice` report
-//! only.
+//! Run build lints and apply the invocation's reporting policy.
 
 use bone_core::prelude::{FxHashMap, FxHashSet, ModuleId, Ustr};
 use bone_semantic::inference::Workspace;
@@ -65,19 +58,7 @@ pub fn policy() -> LintReport {
     }
 }
 
-/// Run the lint catalog over a checked workspace, report the `Warning`/`Advice`
-/// tiers per the invocation's policy, and RETURN the `Error`-severity findings
-/// for the caller to render and fail on. Returning them (rather than printing
-/// here) lets each build surface fail through the error path it already has, so
-/// a lint error reads exactly like a type error.
-///
-/// `sources` are the USER files of this build: everything else in `ws` (the
-/// stdlib) is warm and never reported on. `root` selects the `stick.toml` whose
-/// package type gates the closed-world lints.
-///
-/// Under `--no-lints` the pass still RUNS and still returns `Error` findings;
-/// the flag silences the noisy tiers, it is not an escape hatch from a
-/// correctness lint.
+/// Return error-level findings so callers use the same rendering path as type errors.
 pub(crate) fn run_build_lints(
     ws: &Workspace,
     sources: &SourceFiles,
@@ -196,12 +177,7 @@ fn present_soft(
     }
 }
 
-/// Whether this build's sources are the author's WHOLE project. A game build
-/// drops each package's own `tests/` files
-/// (`rock_host::source_files::production_only`), so `@sim`/`@test` roots and
-/// every call they make are missing from the workspace -- the closed-world lints
-/// (`unused_fn`) would report a sim-only helper as dead. They run only for a
-/// [`Scope::WholeProject`] source set; the per-body lints run either way.
+/// Only a whole project can run closed-world lints: production builds omit test roots.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Scope {
     WholeProject,
@@ -268,13 +244,6 @@ pub fn findings_with(
     })
 }
 
-/// The files a lint invocation REPORTS on: this project's own, never a
-/// `stick.toml` dependency's. Published because anything that must agree with
-/// the finding set -- the `row_escape` census denominator -- has to be measured
-/// over exactly this set. A second copy of the rule would drift, and a
-/// denominator drawn from a wider set than its numerator is worse than none:
-/// every project that merely DEPENDS on an arena consumer would report a
-/// nonzero population it does not own.
 pub fn report_files(sources: &SourceFiles, root: &Path) -> FxHashSet<Ustr> {
     with_source_texts(sources, |texts| owned_files(texts, root))
 }
@@ -310,14 +279,7 @@ fn summary_line(soft: &[bone_lints::Finding], root: &Path) -> String {
     )
 }
 
-/// The modules of `ws` that are NOT part of this build's user sources: the
-/// stdlib, plus anything else warmed in. Read-only references to the author, so
-/// no lint reports on them.
-/// The `unused_fn` findings for files under `report_root`, judged against
-/// `consumer`'s closed world. The union pass's per-consumer probe: it inverts
-/// the usual report set (report on the DEPENDENCY, not the project) because the
-/// question is what this consumer fails to reach in a library it depends on.
-/// One consumer's answer is never a finding on its own -- see `lint_union`.
+/// Judge the library's reachability in one consumer. The union pass intersects these findings.
 pub(crate) fn unused_fns_under(
     ws: &Workspace,
     sources: &SourceFiles,

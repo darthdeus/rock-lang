@@ -3,20 +3,13 @@ use std::io::{BufRead, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// LSP test file structure
 #[derive(Debug, Clone)]
 struct LspTest {
     name: String,
     test_type: String,
     reply_kind: ReplyKind,
     code: String,
-    /// Multi-file projects use `FILES:` / `FILE:` blocks in the test source.
-    /// When non-empty, `code` holds the content of the primary file (the one
-    /// containing the `«cursor»` or `«start»` marker), and `files` holds every
-    /// file in the project including the primary. `primary_file` names the
-    /// primary file's relative path within the project.
-    ///
-    /// Empty for single-file tests.
+    /// A multi-file fixture selects its primary file using the cursor marker.
     files: Vec<(String, String)>,
     primary_file: String,
     operation: LspOperation,
@@ -51,17 +44,14 @@ enum LspOperation {
     },
 }
 
-/// An edit sequence test: multiple steps driving a persistent LSP server
 #[derive(Debug, Clone)]
 struct EditSequenceTest {
     name: String,
     steps: Vec<EditStep>,
 }
 
-/// How a step modifies the document
 #[derive(Debug, Clone)]
 enum StepMode {
-    /// Replace the full document at once (existing behavior)
     FullReplace { code: String },
     /// Type characters one at a time, starting at (line, col) in the previous document
     TypeAt {
@@ -77,16 +67,12 @@ enum StepMode {
     },
 }
 
-/// A single step in an edit sequence
 #[derive(Debug, Clone)]
 struct EditStep {
-    /// How this step modifies the document
     mode: StepMode,
-    /// Checks to perform after applying this step
     checks: Vec<EditStepCheck>,
 }
 
-/// A check to perform after an edit step
 #[derive(Debug, Clone)]
 struct EditStepCheck {
     operation: EditStepOperation,
@@ -132,9 +118,6 @@ fn strip_markers(raw: &str) -> (String, Option<usize>) {
     (clean, cursor_pos)
 }
 
-/// A malformed-fixture error naming the file and the test. Every input the
-/// parser cannot read lands here: a fixture that is skipped instead would
-/// drop out of the run and its absence would pass unnoticed.
 fn fixture_error(path: &Path, name: &str, msg: impl std::fmt::Display) -> anyhow::Error {
     anyhow::anyhow!("{}: test '{}': {}", path.display(), name, msg)
 }
@@ -290,7 +273,6 @@ fn looks_like_directive(line: &str) -> bool {
         || (!keyword.is_empty() && keyword.chars().all(|c| c.is_ascii_uppercase() || c == '_'))
 }
 
-/// Parse an LSP test file
 fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
     let contents = fs_err::read_to_string(path)?;
     let mut tests: Vec<LspTest> = Vec::new();
@@ -312,10 +294,6 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
         let name = name.trim().to_string();
 
         let test_type = fixture_directive(&mut lines, path, &name, "TYPE:", "`TEST:`")?;
-        // A TYPE the harness cannot decode is refused here, naming itself: a
-        // dropped fixture is a vacuous pass, and comparing its raw reply
-        // would accept output the server never shaped. `edit_sequence`
-        // fixtures are read by `parse_edit_sequence_tests`.
         if test_type == "edit_sequence" {
             skip_to_block_end(&mut lines, path, &name)?;
             continue;
@@ -1157,18 +1135,11 @@ fn check_rename_refusal(test: &LspTest, request: &str, json: &serde_json::Value)
     }
 }
 
-/// Decode a fixture reply. A reply is JSON by contract, so one that does not
-/// decode is a server bug: it fails the fixture and quotes the raw text.
-/// Falling back to a substring match would pass malformed output that happens
-/// to contain the expected text.
 fn decode_reply(request: &str, raw: &str) -> Result<serde_json::Value> {
     serde_json::from_str(raw)
         .map_err(|e| anyhow::anyhow!("{request}: reply is not JSON ({e}); raw reply: {raw}"))
 }
 
-/// The array every reply to `request` must carry under `key`. This is the shape
-/// check that runs before any comparison, so a reply missing the field cannot
-/// pass as an empty result.
 fn reply_array<'a>(
     request: &str,
     raw: &str,
@@ -1277,8 +1248,6 @@ fn run_lsp_test(test: &LspTest, server: LspServerCmd) -> Result<bool> {
 
     let _ = fs_err::remove_dir_all(&project_dir);
 
-    // Check if there was a real error (not just warnings)
-    // Only fail if we see actual error output patterns, not just the word "error" in warnings
     if !output.status.success() {
         if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
             eprintln!(
@@ -1292,7 +1261,6 @@ fn run_lsp_test(test: &LspTest, server: LspServerCmd) -> Result<bool> {
         return Ok(false);
     }
 
-    // Names the request in every decode and shape failure below.
     let request = format!("{} test '{}'", test.test_type, test.name);
 
     let all_found = match test.reply_kind {
@@ -1314,7 +1282,6 @@ fn run_lsp_test(test: &LspTest, server: LspServerCmd) -> Result<bool> {
         ReplyKind::Rename => check_rename_reply(test, &request, &stdout)?,
     };
 
-    // Debug output if verbose and test failed
     if std::env::var("ROCK_TEST_VERBOSE").is_ok() && !all_found {
         eprintln!("    Actual output: {}", stdout);
     }
@@ -1348,12 +1315,7 @@ fn write_fixture_project(test: &LspTest) -> Result<(PathBuf, PathBuf)> {
         };
         Ok((proj.join(&primary), proj))
     } else {
-        // Each single-file test gets its OWN subdirectory without a manifest,
-        // not a shared file in `.lsp-test-tmp/`. Operations that scan the whole
-        // project (`references`, `workspace-symbols` -> `load_project`) would
-        // otherwise pick up sibling fixtures' symbols and race against their
-        // parallel create/delete. Isolating per test makes the project bound
-        // to exactly this standalone file.
+        // Isolate each file so requests that load its project never see parallel fixtures.
         let tf = proj.join(format!("{}.rock", safe_name));
         fs_err::write(&tf, &test.code)?;
         Ok((tf, proj))
@@ -1575,10 +1537,6 @@ fn check_signature_help_reply(test: &LspTest, request: &str, stdout: &str) -> Re
 
 fn check_inlay_hints_reply(test: &LspTest, request: &str, stdout: &str) -> Result<bool> {
     let mut all_found = true;
-    // Parse `«hint::LABEL»` markers out of the expected source and
-    // assert each (line, char, label) triple appears in the LSP's
-    // `hints` array. Subset semantics — extra hints are allowed; every
-    // expected hint must be found.
     let expected_hints = parse_hint_markers(&test.expected);
     let json = decode_reply(request, stdout)?;
     let actual: Vec<(u64, u64, String)> = reply_array(request, stdout, &json, "hints")?
@@ -1597,15 +1555,7 @@ fn check_inlay_hints_reply(test: &LspTest, request: &str, stdout: &str) -> Resul
         })
         .collect();
 
-    // Match on (line, normalised_label). Column is intentionally
-    // loose — test files place `«hint:...»` right before the value,
-    // but the LSP reports `position` differently for type hints
-    // (padding_left, before the value) vs parameter hints
-    // (padding_right, at the leading whitespace), so column
-    // equality is off by one in some cases. Normalised label
-    // strips a leading `:` so that `: int` (type-hint LSP label)
-    // and `«hint:: int»` (marker content `: int`) both match, as
-    // does `«hint::key:»` (marker content `:key:`) vs `key:`.
+    // Type and parameter hints disagree about the padding column.
     for (line, _ch, label) in &expected_hints {
         let norm_exp = normalise_hint_label(label);
         let found = actual
@@ -2892,11 +2842,6 @@ mod runner_tests {
         (result, invocations)
     }
 
-    // --- Reply strictness ---------------------------------------------------
-    //
-    // Every reply below either is malformed or lacks the array its request
-    // answers with, yet contains the fixture's EXPECTED text verbatim. A
-    // fixture over such a reply must fail; a substring fallback would pass it.
 
     macro_rules! fixture {
         ($name:literal, $kind:literal, $code:expr, $expected:literal $(, $options:literal)?) => {
@@ -3090,9 +3035,6 @@ mod runner_tests {
         }
     }
 
-    /// Every fixture type the parser accepts must reject a reply that only
-    /// carries the expected text: none of them may fall back to a raw-output
-    /// comparison, and none of them may reach a missing decoder.
     #[test]
     fn every_fixture_type_rejects_a_reply_that_only_quotes_the_expected_text() {
         let cases: [(&str, &str, &str); 9] = [
@@ -3165,8 +3107,6 @@ mod runner_tests {
         }
     }
 
-    /// Each reachable malformed shape, as (fixture, text the error must carry).
-    /// Every one used to drop its fixture, or an expectation in it, silently.
     #[test]
     fn every_malformed_block_is_a_parse_error_naming_the_fixture() {
         let hover_with = |operation_and_expected: &str| {
@@ -3333,8 +3273,6 @@ mod runner_tests {
         }
     }
 
-    /// `Name: Kind` lines without a `- ` used to be dropped, leaving the
-    /// symbol fixtures with nothing to assert. The server sends numeric kinds.
     #[test]
     fn bare_symbol_lines_are_checked_against_numeric_kinds() {
         let fixture = SYMBOLS_FIXTURE.replace("- Widget: struct", "Widget: Struct");
@@ -3362,9 +3300,6 @@ mod runner_tests {
         }
     }
 
-    /// Stubs that answer with the documented shape still pass, so the strict
-    /// path does not reject well-formed, empty or partial replies. The stub
-    /// records every spawn, so each case also proves which binary ran.
     #[test]
     fn well_formed_replies_pass_the_fixtures() {
         let cases = [
@@ -3409,7 +3344,6 @@ mod runner_tests {
         }
     }
 
-    // --- Code actions -----------------------------------------------------
 
     // No `\` line continuations: they would strip the indentation the
     // positions below depend on.

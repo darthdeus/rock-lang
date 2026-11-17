@@ -15,14 +15,6 @@ use rock_core::source_file_from_path_and_contents;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-/// Parse `src`, type-check it through bone WITH the stdlib injected (so
-/// operators/`print`/`assert` resolve, exactly like `rock check`), then emit
-/// Lua for the user module via skull. The stdlib module isn't emitted — its
-/// symbols are referenced by name (resolved at runtime by a real stdlib
-/// prelude, or simply not called under the load-only validity gate).
-/// Returns the emitted Lua and the emitter's own `emits_main`, which decides
-/// whether the caller appends the entry call. Not recovered from the text: the
-/// emitted spelling of a definition is the emitter's business.
 fn skull_emit(file: &str, src: &str) -> std::result::Result<(String, bool), Vec<CompilerError>> {
     let (emit, _) = skull_emit_full(file, src, |ws, mid, _| skull::module_tests(ws, mid))
         .map_err(EmitFullErr::into_errs)?;
@@ -227,9 +219,7 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
     }
 }
 
-/// Emit the workspace and also discover the user module's `@test` functions
-/// with `discover` (for execution). `file` is stamped as the source-file id so
-/// spans (and `__SITE__`) carry the real path.
+/// Use the real source path for spans and __SITE__.
 fn skull_emit_full(
     file: &str,
     src: &str,
@@ -301,13 +291,6 @@ pub(crate) struct SkullPhaseTimes {
     pub concrete_stats: skull::concrete_body::ConcreteBuildStats,
 }
 
-/// Whole-project skull timing: parse all user files, type-check them together
-/// with the stdlib as ONE workspace (bone's front half), then emit Lua for the
-/// entry module. Returns whether Lua was emitted (the skull "pass" condition,
-/// same gate as `skull_emit`) and the per-phase timing. `parse`/`semantic`
-/// mirror `bone_workspace_timed`; `emit` is skull's codegen on top. Used by
-/// `backend-stats` — a per-file loop would never reach emit because bone rejects
-/// any file that references a sibling (so emit would always read ~0).
 pub(crate) fn skull_workspace_timed(
     sources: &SourceFiles,
     project_path: &std::path::Path,
@@ -398,14 +381,6 @@ pub(crate) fn skull_workspace_timed(
     (emit_ok, times)
 }
 
-/// Assemble a whole *project* directory (a dir with a `stick.toml`) into bone
-/// modules: every project + dependency `.rock` file (via the normal compiler's
-/// dependency resolver) plus the bone stdlib. Returns the parsed modules and the
-/// entry-module file path (`main.rock`, else the first project file); resolve it
-/// to a `ModuleId` via `bone_backend::entry_module_id` once the workspace exists.
-///
-/// Unlike the single-file path, the embedded compiler stdlib is NOT pulled from
-/// `discover_sources` — bone supplies its own, shared ([`skull::pipeline::with_stdlib`]).
 pub(crate) fn skull_assemble_project(
     sources: &SourceFiles,
 ) -> std::result::Result<(skull_parser::stdlib::ModuleSet, ustr::Ustr), Vec<CompilerError>> {
@@ -426,16 +401,7 @@ pub(crate) fn check_project(
     ))
 }
 
-/// A Lua harness appended after the emitted module: it runs each `@test` fn with
-/// its `print` AND `io.write` captured (both restored before the markers are
-/// written), and writes one `__SKULL__<TAB>PASS|FAIL<TAB>detail` line and one
-/// wall-time `TIME` line per test. Before each test it writes a
-/// `ROCK_TEST_START` marker with this run's `token` to stderr; the token and
-/// ordinal also trail the TIME line so the host can count completed tests as
-/// progress. `ROCK_TEST_SHARD_TESTS` (1-based indices)
-/// restricts a process to one shard's tests; start ordinals count within it.
-/// Capturing `io.write` too is required: tests that emit via `io.write` (raw,
-/// no trailing newline) would otherwise bypass the buffer and read as empty.
+/// Run each test under pcall so a thrown error cannot stop its siblings.
 fn build_test_harness(tests: &[&skull::SkullTest], token: &str) -> String {
     fn lua_str(s: &str) -> String {
         let mut o = String::from("\"");
@@ -809,13 +775,6 @@ pub(crate) fn all_tests_expect_compile_failure(
         .then_some(test_fns)
 }
 
-/// Given emitted workspace Lua and the `@test` fns discovered in it, run them
-/// via the harness (or the load-only validity gate when there are none) and
-/// classify the outcome. Shared by the per-file path ([`skull_build`]) and the
-/// whole-package path ([`skull_build_package`]). `filter` selects the tests
-/// that run; `shards` LuaJIT processes split the selected tests and their
-/// results merge into one outcome. `release_memory` returns the freed program
-/// text to the OS before the tests start, for a host that then only waits.
 fn run_emitted_tests(
     lua: impl Into<TestProgram>,
     tests: &[skull::SkullTest],
@@ -1301,13 +1260,6 @@ fn run_test_program(
     result
 }
 
-/// A directory that is a `stick.toml` package -- the unit `rock test` builds as
-/// ONE whole workspace (all its files + deps + its own `tests/`) rather than
-/// file-by-file. A `type=lib` split across files can only be tested this way:
-/// per-file, a file referencing a sibling's symbol fails to compile. Root
-/// `tests/` (no stick.toml, hundreds of independent colliding programs) is NOT
-/// a package and stays on the per-file path; a package NESTED under it is one,
-/// and [`walk_test_units`] finds it.
 fn is_test_package_dir(path: &str) -> bool {
     let p = std::path::Path::new(path);
     p.is_dir() && p.join("stick.toml").is_file()
@@ -1336,18 +1288,7 @@ fn is_rock_test_source(path: &std::path::Path) -> bool {
     path.extension().is_some_and(|e| e == "rock") && !path.to_string_lossy().ends_with('~')
 }
 
-/// Split the `.rock` files under `path` into loose-file units and PACKAGE
-/// units. A directory holding a `stick.toml` is a package: it becomes one unit
-/// compiled through its own manifest, and the walk does not descend into it.
-///
-/// Building a package's sources as loose files drops the manifest that supplies
-/// their ownership and dependencies, so package-scoped names fail to resolve --
-/// an emit failure that says nothing about the package they came from. The ownership rule: a nested
-/// manifest starts a different package and is not absorbed as
-/// source of the tree above it.
-///
-/// Single-file and directory inputs use the same source filter. `.lsp` and
-/// `.err` fixtures belong only to their dedicated suites.
+/// Package tests share one workspace. Loose files each compile independently.
 fn walk_test_units(
     path: &str,
     files: &mut Vec<String>,
@@ -1656,15 +1597,7 @@ fn emit_shader_program_with_view(
     skull_codegen_glsl::emit_shader_with_view(ws, &shader_scx, program_view, profile)
 }
 
-/// `rock shader <file.rock> <fn> [fn...] [--output <file.glsl>]` -- GLSL emission.
-/// Three forms:
-///   - fn library (route B): plain roots, no `#version` line -- `--profile`
-///     rejects here (nothing for it to select).
-///   - single `@shader(fragment)` root (A1 fullscreen) and
-///     `<vert_fn> <frag_fn>` (A2 pipeline, selected when a root is
-///     `@shader(vertex)`): both take `[--profile 330core]`.
-///
-/// A profile violation renders spanned against the source and exits non-zero.
+/// Emit an entry or a library of GLSL functions. Only an entry carries a profile header.
 pub(crate) fn skull_shader(
     files: &[String],
     output: Option<String>,
@@ -1906,12 +1839,6 @@ pub(crate) fn skull_compile_single(path: &str, output: Option<String>) -> Result
     }
 }
 
-/// `rock watch --backend skull` — live recompile loop: on each change,
-/// re-discover sources, bone-check, and emit the full `.lua` via the new
-/// (cell-model) path to `output` (default `tmp/main.lua`). A parse/type error
-/// renders and serves the previous good output; the loop keeps running. (The old
-/// IncrementalEmitter was retired with the old IR; a batch re-emit is fast —
-/// a game project assembles in a few ms.)
 pub(crate) fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
     let out_file = output
         .map(std::path::PathBuf::from)
@@ -2133,13 +2060,6 @@ pub(crate) fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError])
     crate::bone_backend::render_errs(&sf, errs)
 }
 
-/// Discover + assemble + bone-typecheck + skull-emit a whole project directory
-/// into one Lua program string. The shared core of `run <dir>` and `compile
-/// <dir>` (the single-file forms share [`skull_emit_full`]); only the tail
-/// differs — `run` wraps `main()` and execs, `compile` writes the string out.
-/// Renders against the project sources and exits 1 on any discovery / type /
-/// emit failure. The `bool` is the emitter's own `emits_main`, which decides
-/// whether the caller appends the `__rock_main_wrapper(main)` entry.
 fn skull_emit_project(dir: &str) -> Result<(GameProgram, bool)> {
     let inputs = crate::comptime::ProjectInputs::resolve(std::path::Path::new(dir));
     skull_emit_project_with_inputs(dir, inputs)
@@ -2255,13 +2175,7 @@ fn skull_emit_project_with_inputs(
         }
     };
     crate::compile_budget::phase("global accessors");
-    // The bone Workspace and the rest of the emission are dead once `lua` is
-    // built -- this is a terminal compile path (`compile`/`run` of a project;
-    // never looped in tests or backend-stats), so the only thing after this is
-    // the output write / a luajit exec / process exit. Hand the drop to the
-    // rayon pool so it overlaps that tail. `sources` (rock SourceFiles,
-    // RefCell-backed and ~0.01ms to drop) stays inline. A `sequential` build
-    // drops inline.
+    // Overlap workspace destruction with the final output write or runtime launch.
     #[cfg(not(feature = "sequential"))]
     rayon::spawn(move || drop((ws, emit)));
     #[cfg(feature = "sequential")]
@@ -2676,14 +2590,6 @@ fn print_slowest_tests(timings: &[(String, TestTiming)]) {
     }
 }
 
-/// `rock test <paths> --backend skull` — for every `.rock` file, run the skull
-/// pipeline and the luajit validity gate; report pass/fail + a bucketed
-/// failure-reason histogram (the skull analogue of the bone test histogram).
-/// Split `paths` into test UNITS: isolated files (root `tests/`: independent
-/// programs that would collide in one workspace) and whole `stick.toml`
-/// packages built as ONE workspace each. A cross-file lib can only be tested
-/// the second way -- per-file, any file referencing a sibling's symbol fails to
-/// compile. Shared by every test executor (luajit + JS).
 pub(crate) fn collect_test_units(paths: &[String]) -> Result<(Vec<String>, Vec<String>)> {
     let mut files = Vec::new();
     let mut package_dirs = Vec::new();
@@ -3011,13 +2917,6 @@ pub(crate) fn body_numeric_edit(
 // Incremental compiler: two-file output (main.lua + incremental.lua)
 // ---------------------------------------------------------------------------
 
-/// Game-shaped `main.lua`: preamble + emit + `__rock_main_wrapper(main)` entry.
-///
-/// `emits_main` comes from the emitter, not from searching `emit_lua`: the
-/// emitted spelling of a definition is the emitter's business and has already
-/// changed once (callee binding moves every body into a
-/// factory, so `function main(` appears nowhere), which left a chunk that
-/// defined the whole game and then ran nothing.
 pub(crate) fn skull_game_main<'a>(
     preamble: &'a str,
     program: &'a GameProgram,
@@ -3303,13 +3202,6 @@ impl IncrementalProject {
         &self.project.workspace().comptime_inputs
     }
 
-    /// On a watch event: refresh the cached sources (re-read only `changed` off
-    /// disk, or fully re-discover if the file SET changed), `update_file` every
-    /// source (the Session content-hashes unchanged ones to a no-op), then route
-    /// by the worst tier -- any interface/structural edit -> full `main.lua` +
-    /// wipe overlay; otherwise the accumulated body edits -> `incremental.lua`
-    /// overlay. `changed` is the watcher's changed-path set; pass empty to force a
-    /// full re-discover.
     pub fn recompile(
         &mut self,
         changed: &[std::path::PathBuf],
@@ -3321,12 +3213,7 @@ impl IncrementalProject {
         })
     }
 
-    /// In-memory edit: replace one source's contents WITHOUT touching disk and
-    /// route/emit exactly like a watcher edit. The sim reload-injection path:
-    /// the runner edits a source in memory
-    /// and writes only the overlay; the project tree is never mutated. Rejects
-    /// a path the build didn't discover -- an edit to an unknown file would
-    /// otherwise silently do nothing.
+    /// Apply against the live session without modifying the source file.
     pub fn apply_edit(
         &mut self,
         path: &std::path::Path,
@@ -3419,11 +3306,7 @@ impl IncrementalProject {
             .collect()
     }
 
-    /// Feed source edits into the Session and route by the worst tier. Body-only
-    /// edits write `incremental.lua`; a full artifact is either written or
-    /// returned as `FullRequired` when a safety gate defers publication.
-    /// Shared by the disk-driven watcher and in-memory sim reload paths.
-    /// `t_cook` is the caller's front-end timer (includes its feed construction).
+    /// Defer full publication when existing runtime state requires a restart.
     fn route_and_emit(
         &mut self,
         update: crate::live_project::LiveUpdate,
@@ -3461,12 +3344,7 @@ impl IncrementalProject {
             });
         }
         if full {
-            // Schema-drift gate: live
-            // data outlives every reload tier, so if any type's runtime layout
-            // moved, hot-reloading the recompiled program would drive old-shape
-            // state with new-shape readers. Request a complete reconstruction
-            // and defer ALL writes until the restart path. Re-baseline the stored hashes now: the
-            // delta is consumed by this one full publication.
+            // A live process still owns old-layout values until it restarts.
             let new_shapes = skull::type_shape_hashes(self.project.workspace())
                 .map_err(|e| anyhow::anyhow!(e.message))?;
             let drifted = skull::shape_diff(&self.shape_hashes, &new_shapes);
@@ -3605,19 +3483,7 @@ impl IncrementalProject {
         }
     }
 
-    /// Canonicalize to a single-file program: `emit_full` from the CURRENT
-    /// session workspace -> `main.lua`, and wipe `incremental.lua`. Same effect
-    /// as the full-rebuild branch of `recompile`, but driven by a caller rather
-    /// than an edit tier and with no re-discovery (the session is already
-    /// current).
-    ///
-    /// Used on the engine restart path: a process restart (engine library/compiler
-    /// rebuild) re-spawns luajit, which loads `main.lua` only -- it never
-    /// dual-loads the accumulated `incremental.lua` the way the live hot-reload
-    /// watcher does. Folding the overlay back into `main.lua` before the restart
-    /// means the new process gets the complete current program. The overlay
-    /// stays a within-process, single-consumer artifact that never has to cross
-    /// a process boundary.
+    /// A restarted process reads only main.lua, so fold its overlay before launch.
     pub fn force_full(
         &mut self,
         main_path: &std::path::Path,

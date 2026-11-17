@@ -1,26 +1,4 @@
-//! `rock backend-stats <X>` — performance comparison of the two live backend
-//! stages on the same input, where `X` is a `.rock` file, a test file, or a
-//! stick project directory.
-//!
-//! Two columns, the second a strict superset of the first in work done:
-//!   - **bone**  — `parse` + `passes::semantic_pass` (fused lower + check),
-//!     which IS bone's semantic stage. No codegen — the type-check floor.
-//!   - **skull** — bone's parse + semantic, THEN `skull::emit_workspace_mir`
-//!     (Lua codegen). skull shares bone's front half, so its `emit` phase is
-//!     the codegen delta over bone.
-//!
-//! (The old three-way `rock`/`bone`/`skull` A/B/C is gone — rock was deleted in
-//! the rock-deletion arc, `3e204ead6`; bone/skull are the source of truth.)
-//!
-//! Both consume the SAME loaded source set and type-check it as ONE workspace
-//! (the only way cross-file references resolve — a per-file loop would reject
-//! every file that names a sibling, and skull's `emit` would never run). Honest
-//! asymmetries are reported, not hidden: if bone has a feature gap that rejects
-//! the workspace, its semantic time stops at the failure and skull's `emit` is
-//! skipped (reads 0); the report prints bone's type-check verdict so a 0 emit is
-//! never silent. bone/skull are timed externally at the call boundaries only
-//! (parse, semantic_pass, emit); finer bone granularity comes from bone's own
-//! per-phase counters (`Workspace::phase_timings`).
+//! Time Bone type checking and Skull emission over one shared source set.
 
 use crate::Result;
 use crate::bone_backend::{self, BonePhaseTimes};
@@ -29,10 +7,7 @@ use colored::Colorize;
 use rock_core::SourceFiles;
 use std::time::Duration;
 
-/// Counters + timings from type-checking the whole loaded source set through
-/// bone as one workspace. `ok` is whether bone accepted the project. `phases` is
-/// bone's own per-phase breakdown (`Workspace::phase_timings`), summed across
-/// timed iters in run order.
+/// Bone's phase timings are summed across timed iterations in phase order.
 #[derive(Default)]
 struct BoneStats {
     times: BonePhaseTimes,
@@ -53,9 +28,6 @@ fn merge_phases(acc: &mut Vec<(&'static str, Duration)>, new: &[(&'static str, D
     }
 }
 
-/// Counters + timings from running skull (bone front-half + Lua codegen) over
-/// the whole loaded source set as one workspace. `ok` is whether bone accepted
-/// the project AND skull emitted Lua for the entry module.
 #[derive(Default)]
 struct SkullStats {
     times: SkullPhaseTimes,
@@ -64,45 +36,26 @@ struct SkullStats {
     failure: Option<rock_core::CompilerError>,
     setup_failed: bool,
     emit_failed: bool,
-    /// skull's emit phases summed across timed runs (mean = value / iters), in
-    /// run order — same element-wise accumulation as bone's `phases`. `setup:`
-    /// entries are direct wall-clock measurements; the remaining entries are
-    /// per-unit elapsed timers that overlap under parallel emit.
+    /// Per-unit timers overlap under parallel emission. Setup timers measure wall time.
     emit_phases: Vec<(&'static str, Duration)>,
-    /// ABI-plan memo counters summed across timed runs. Counts, not times, so
-    /// they are load-immune and identical run to run.
     abi_plan_stats: skull_mir::lower::AbiPlanMemoStats,
-    /// Shared-arena traffic split from the LAST timed run (counts are stable
-    /// run to run modulo worker scheduling, so one run is representative).
+    /// Traffic, attribution and their counters describe the last timed run.
     arena_traffic: skull::mir_emit::ArenaTraffic,
-    /// Body attribution from the LAST timed run. Durations are intentionally
-    /// not summed across runs: the distribution and top-owner rows are one
-    /// concrete corpus run, while phase wall shares above are run means.
     attribution: skull::mir_emit::EmitAttribution,
-    /// Setup-lane census from the LAST timed run; overlap is an interval fact,
-    /// not a ratio inferred from noisy wall-clock totals.
     setup_lanes: skull::mir_emit::SetupLaneAttribution,
-    /// Graph operation census from the LAST timed run.
     graph_census: skull::instance_graph::RunStats,
-    /// Concrete-plan ownership census from the LAST timed run.
     concrete_stats: skull::concrete_body::ConcreteBuildStats,
 }
 
 pub(crate) fn do_backend_stats(input: &str, iters: usize, warmup: usize, json: bool) -> Result<()> {
     let iters = iters.max(1);
 
-    // One source load, consumed by both backends so the input is identical. Both
-    // type-check the whole set as one workspace (the only way cross-file
-    // references resolve); bone supplies the stdlib via `skull_parser::stdlib::modules`.
     let source_spec = crate::common::path_to_source_spec(input);
     let sources = crate::unified_compile::discover_sources(&source_spec)?;
     if sources.files.is_empty() {
         anyhow::bail!("no Rock source files found at `{}`", input);
     }
 
-    // Real-bench shape: `warmup` untimed runs per backend (warm the allocator,
-    // JIT, LazyLock stdlib parse, OS caches) before the `iters` timed runs, so
-    // the reported means aren't skewed by first-run cold-start cost.
     let bone = run_bone(&sources, iters, warmup);
     let skull = run_skull(&sources, std::path::Path::new(input), iters, warmup);
 
@@ -128,16 +81,11 @@ pub(crate) fn do_backend_stats(input: &str, iters: usize, warmup: usize, json: b
     Ok(())
 }
 
-/// Type-check the whole loaded source set through bone as one workspace,
-/// `warmup` untimed + `iters` timed runs, accumulating per-stage timing only for
-/// the timed runs; `ok` is the final run's verdict.
 fn run_bone(sources: &SourceFiles, iters: usize, warmup: usize) -> BoneStats {
     let mut stats = BoneStats::default();
     for i in 0..(warmup + iters) {
         let (res, times) = bone_backend::bone_workspace_timed(sources);
-        // `Ok(ws)` only means lowered-and-checked; the verdict must include
-        // per-body type errors (`bone_backend::body_errors`), else a
-        // project with broken bodies reports as passing.
+        // Body diagnostics can exist in a successful semantic-pass result.
         stats.ok = res
             .as_ref()
             .is_ok_and(|ws| bone_backend::body_errors(ws).is_empty());
@@ -148,7 +96,6 @@ fn run_bone(sources: &SourceFiles, iters: usize, warmup: usize) -> BoneStats {
         stats.times.semantic += times.semantic;
         stats.times.stdlib_assemble += times.stdlib_assemble;
         stats.times.semantic_call += times.semantic_call;
-        // bone's per-phase split lives on the checked Workspace.
         if let Ok(ws) = &res {
             merge_phases(&mut stats.phases, &ws.phase_timings);
         }
@@ -157,10 +104,6 @@ fn run_bone(sources: &SourceFiles, iters: usize, warmup: usize) -> BoneStats {
     stats
 }
 
-/// Run skull over the whole loaded source set as one workspace, `warmup`
-/// untimed + `iters` timed runs, accumulating per-stage timing (parse + semantic
-/// shared with bone, plus skull's emit) only for the timed runs; `ok` is the
-/// final run's emit verdict.
 fn run_skull(
     sources: &SourceFiles,
     project_path: &std::path::Path,
@@ -697,9 +640,7 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
                     println!("    {:28} {:>9.3} ms", name, ms(*dur));
                 }
             }
-            // Joined-group children: they overlap each other (and the group
-            // row above already holds the joined wall time), so they are
-            // labeled and NEVER added into the setup total.
+            // Joined-group children overlap, so the group total already includes their wall time.
             for (name, dur) in &skull.emit_phases {
                 if name.starts_with("join: ") {
                     println!("    {:28} {:>9.3} ms  (overlapping child)", name, ms(*dur));
@@ -709,14 +650,7 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
         }
         let phase_sum: Duration = emit_phases.iter().map(|(_, d)| *d).sum();
         let emit_body = skull.times.emit.saturating_sub(setup_sum);
-        // skull emits PIPELINE-parallel: each function runs its whole
-        // lower->cleanup->regalloc->stringify pipeline on one rayon worker, so the
-        // per-unit phase timers are elapsed-time measurements and their SUM exceeds the wall-clock
-        // `emit` line (phases interleave across workers — there is no global
-        // per-phase wall span to measure). Setup is already a direct wall-clock
-        // measurement, so estimate only the remaining emit time from the
-        // per-unit elapsed share. `--features sequential` makes the phase timers
-        // non-overlapping wall-clock measurements, so the scaling is a no-op.
+        // Per-unit timers overlap. Estimate their wall shares after subtracting the measured setup time.
         let parallel = phase_sum > emit_body;
         if parallel {
             println!(

@@ -1,11 +1,5 @@
 use crate::*;
 
-/// Expand every argument into the `.rock` files it names: a file argument
-/// contributes itself, a directory argument everything under it. A file named
-/// by more than one argument is formatted once.
-///
-/// `rock fmt` used to take a single path, so a file list silently formatted
-/// (or `--check`ed) only its first entry and reported success for the rest.
 pub(crate) fn collect_rock_files(paths: &[String]) -> Result<Vec<String>> {
     use fs_err as fs;
 

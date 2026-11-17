@@ -1,13 +1,4 @@
-//! `rock incremental-stats <project>` -- time the hot-reload compile path.
-//!
-//! `lsp-survey` times the language server's in-memory update; this command
-//! times what `rock stone` does after a save: feed the edit into the warm
-//! `IncrementalProject` and publish either `incremental.lua` (a body edit) or a
-//! full `main.lua` (a signature edit). Candidates come from the same project
-//! statistics as `lsp-survey`: the largest bodies take body edits, the most
-//! called and most depended-on functions take signature edits. Each candidate
-//! alternates the edited and the original text, so every sample is a real
-//! change and the project ends in its original state.
+//! Time edits through Stone's warm compiler and on-disk artifact publication.
 
 use crate::lsp_survey::{EditKind, FnStat, collect_stats, make_edit, read_survey_source};
 use crate::skull_backend::{IncrementalProject, SkullReload};
@@ -53,11 +44,7 @@ fn reload_label(reload: &SkullReload) -> &'static str {
     }
 }
 
-/// SIGNATURE edit for a compiling project: append a trailing defaulted
-/// parameter. The arity change is an interface edit, and every call site still
-/// type-checks, so the full rebuild it triggers can be timed. (`lsp-survey`
-/// inserts a required parameter instead, which the language server tolerates
-/// but a hot reload rejects.)
+/// Append a defaulted parameter so existing callers still type-check.
 fn make_signature_edit(orig: &str, f: &FnStat) -> Option<String> {
     let open = orig[f.name_off..f.span_end].find('(')? + f.name_off;
     let mut depth = 0usize;
@@ -142,9 +129,7 @@ pub(crate) fn incremental_stats(
             .unwrap_or_else(|| path.to_string())
     );
 
-    // Project statistics from a throwaway Session: the IncrementalProject
-    // keeps its own Session private, and the stats need the dependents map.
-    // Its sources are the reloaded project's, so every candidate is editable.
+    // Use the live compiler's source selection so every ranked candidate is editable.
     let sources = crate::live_project::project_sources(&dir_str, false)?;
     let session = crate::bone_backend::bone_session(crate::bone_backend::session_files(&sources))
         .map_err(|e| anyhow::anyhow!("bone session warm failed: {}", e.message))?;
