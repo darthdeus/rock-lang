@@ -26,41 +26,7 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::mpsc::channel;
-
-/// One reload event sent to the controlling process.
-#[derive(Clone)]
-struct ReloadRecord {
-    n: u64,
-    files: Vec<PathBuf>,
-    decision: &'static str, // "hot" | "restart"
-    compile_ms: f64,
-    error: Option<String>,
-}
-
-impl ReloadRecord {
-    fn to_event_json(&self) -> Value {
-        if let Some(err) = &self.error {
-            json!({
-                "kind": "event",
-                "type": "compile_error",
-                "n": self.n,
-                "files": self.files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
-                "message": err,
-            })
-        } else {
-            json!({
-                "kind": "event",
-                "type": "reload",
-                "n": self.n,
-                "files": self.files.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
-                "decision": self.decision,
-                "compile_ms": self.compile_ms,
-            })
-        }
-    }
-}
 
 /// Internal control messages the worker thread reacts to.
 enum Ctl {
@@ -90,10 +56,6 @@ pub(crate) fn run_stone_test(root: &Path) -> Result<()> {
     let main_path = output_path.join("main.lua");
     let incremental_path = output_path.join("incremental.lua");
     let mut stone: Option<IncrementalProject> = None;
-
-    // Stdout writes must be serialized: events and responses share the
-    // same fd, and a half-written line corrupts the protocol.
-    let stdout_mu = Arc::new(std::sync::Mutex::new(()));
 
     let (ctl_tx, ctl_rx) = channel::<Ctl>();
 
@@ -127,7 +89,6 @@ pub(crate) fn run_stone_test(root: &Path) -> Result<()> {
     // Stdin commands run separately so shutdown can reach the compile loop.
     let stdin_handle = {
         let ctl_tx = ctl_tx.clone();
-        let stdout_mu = stdout_mu.clone();
         std::thread::spawn(move || {
             let stdin = std::io::stdin();
             let reader = BufReader::new(stdin.lock());
@@ -139,43 +100,31 @@ pub(crate) fn run_stone_test(root: &Path) -> Result<()> {
                 let msg: Value = match serde_json::from_str(&line) {
                     Ok(v) => v,
                     Err(e) => {
-                        write_response(
-                            &stdout_mu,
-                            &json!({
-                                "kind": "response",
-                                "ok": false,
-                                "error": format!("bad json: {}", e),
-                            }),
-                        );
+                        write_message(&json!({
+                            "kind": "response",
+                            "ok": false,
+                            "error": format!("bad json: {}", e),
+                        }));
                         continue;
                     }
                 };
                 let seq = msg.get("seq").cloned().unwrap_or(Value::Null);
                 let cmd = msg.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
                 match cmd {
-                    "ping" => write_response(
-                        &stdout_mu,
-                        &json!({
-                            "seq": seq, "kind": "response", "ok": true,
-                        }),
-                    ),
+                    "ping" => write_message(&json!({
+                        "seq": seq, "kind": "response", "ok": true,
+                    })),
                     "shutdown" => {
-                        write_response(
-                            &stdout_mu,
-                            &json!({
-                                "seq": seq, "kind": "response", "ok": true,
-                            }),
-                        );
+                        write_message(&json!({
+                            "seq": seq, "kind": "response", "ok": true,
+                        }));
                         let _ = ctl_tx.send(Ctl::Shutdown);
                         return;
                     }
-                    other => write_response(
-                        &stdout_mu,
-                        &json!({
-                            "seq": seq, "kind": "response", "ok": false,
-                            "error": format!("unknown cmd: {}", other),
-                        }),
-                    ),
+                    other => write_message(&json!({
+                        "seq": seq, "kind": "response", "ok": false,
+                        "error": format!("unknown cmd: {}", other),
+                    })),
                 }
             }
             // EOF on stdin: shut the worker down.
@@ -187,124 +136,63 @@ pub(crate) fn run_stone_test(root: &Path) -> Result<()> {
     // .rock files in `root`, before the watcher loop. `IncrementalProject::init`
     // builds the full `main.lua`; the harness's `await_reload_count(1)` then
     // sees this seed reload, which production also produces.
-    let mut reload_n: u64 = 0;
+    let mut reload_n = 0u64;
+    let mut compile = |files: Vec<PathBuf>| {
+        let start = Instant::now();
+        let outcome = match &mut stone {
+            None => IncrementalProject::init(&dir, &main_path, &incremental_path).map(|project| {
+                stone = Some(project);
+                Some("restart")
+            }),
+            Some(project) => project
+                .recompile(&files, &main_path, &incremental_path)
+                .and_then(|reload| match reload {
+                    SkullReload::Incremental { .. } => Ok(Some("hot")),
+                    SkullReload::Full { .. } => Ok(Some("restart")),
+                    // The harness has no runtime to restart, so finish the deferred write here.
+                    SkullReload::ShapeChanged { .. } | SkullReload::FullRequired { .. } => {
+                        project.force_full(&main_path, &incremental_path)?;
+                        Ok(Some("restart"))
+                    }
+                    SkullReload::NoChange => Ok(None),
+                }),
+        };
+        let compile_ms = start.elapsed().as_secs_f64() * 1000.0;
+        if let Some(project) = &stone {
+            comptime_watch.replace_with_hashes(project.comptime_watch_files_with_hashes());
+        }
+        let mut event = match outcome {
+            Ok(None) => return,
+            Ok(Some(decision)) => json!({
+                "type": "reload", "decision": decision, "compile_ms": compile_ms,
+            }),
+            Err(error) => json!({"type": "compile_error", "message": format!("{error:#}")}),
+        };
+        reload_n += 1;
+        event["kind"] = json!("event");
+        event["n"] = json!(reload_n);
+        event["files"] = json!(
+            files
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+        );
+        write_message(&event);
+    };
+
     let initial_files = collect_rock_files(&root)?;
     if !initial_files.is_empty() {
-        let t0 = Instant::now();
-        let result = IncrementalProject::init(&dir, &main_path, &incremental_path);
-        let compile_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        reload_n += 1;
-        let record = match result {
-            Ok(st) => {
-                comptime_watch.replace_with_hashes(st.comptime_watch_files_with_hashes());
-                stone = Some(st);
-                ReloadRecord {
-                    n: reload_n,
-                    files: initial_files,
-                    decision: "restart", // initial build is a full main.lua
-                    compile_ms,
-                    error: None,
-                }
-            }
-            Err(e) => ReloadRecord {
-                n: reload_n,
-                files: initial_files,
-                decision: "restart",
-                compile_ms,
-                error: Some(format!("{:#}", e)),
-            },
-        };
-        emit_event(&stdout_mu, &record.to_event_json());
+        compile(initial_files);
     }
+    write_message(&json!({"kind": "event", "type": "ready"}));
 
-    // Announce readiness so the harness knows the watcher is armed and
-    // any initial-compile event has been emitted.
-    emit_event(&stdout_mu, &json!({"kind": "event", "type": "ready"}));
-
-    // Worker loop: react to file events and run compiles via IncrementalProject.
-    while let Ok(ctl) = ctl_rx.recv() {
-        match ctl {
-            Ctl::Shutdown => break,
-            Ctl::Files(paths) => {
-                // Filter paths to those under root (skips our own output dir).
-                let in_scope: HashSet<PathBuf> = paths
-                    .into_iter()
-                    .filter(|p| !p.starts_with(&output_path))
-                    .collect();
-                if in_scope.is_empty() {
-                    continue;
-                }
-                let changed_vec: Vec<PathBuf> = in_scope.iter().cloned().collect();
-
-                let t0 = Instant::now();
-                // A body edit emits an overlay (`hot`); an interface/structural
-                // edit (e.g. a global's type change) does a full rebuild
-                // (`restart`). If the seed compile failed, retry a full init.
-                let outcome: Result<Option<&'static str>> = match &mut stone {
-                    Some(st) => st
-                        .recompile(&changed_vec, &main_path, &incremental_path)
-                        .and_then(|r| match r {
-                            SkullReload::Full { .. } => Ok(Some("restart")),
-                            SkullReload::Incremental { .. } => Ok(Some("hot")),
-                            // A shape change defers the main.lua write (the live
-                            // stone loop restarts the process); this harness has
-                            // no live process, so materialize the program now
-                            // and report the full-reload event.
-                            SkullReload::ShapeChanged { .. } => {
-                                st.force_full(&main_path, &incremental_path)?;
-                                Ok(Some("restart"))
-                            }
-                            SkullReload::FullRequired { .. } => {
-                                st.force_full(&main_path, &incremental_path)?;
-                                Ok(Some("restart"))
-                            }
-                            SkullReload::NoChange => Ok(None),
-                        }),
-                    None => {
-                        IncrementalProject::init(&dir, &main_path, &incremental_path).map(|st| {
-                            stone = Some(st);
-                            Some("restart")
-                        })
-                    }
-                };
-                let compile_ms = t0.elapsed().as_secs_f64() * 1000.0;
-                let files: Vec<PathBuf> = in_scope.into_iter().collect();
-                if let Some(st) = stone.as_ref() {
-                    comptime_watch.replace_with_hashes(st.comptime_watch_files_with_hashes());
-                }
-
-                match outcome {
-                    Ok(None) => {} // no source-level change -> no reload event
-                    Ok(Some(decision)) => {
-                        reload_n += 1;
-                        emit_event(
-                            &stdout_mu,
-                            &ReloadRecord {
-                                n: reload_n,
-                                files,
-                                decision,
-                                compile_ms,
-                                error: None,
-                            }
-                            .to_event_json(),
-                        );
-                    }
-                    Err(e) => {
-                        reload_n += 1;
-                        emit_event(
-                            &stdout_mu,
-                            &ReloadRecord {
-                                n: reload_n,
-                                files,
-                                decision: "restart",
-                                compile_ms,
-                                error: Some(format!("{:#}", e)),
-                            }
-                            .to_event_json(),
-                        );
-                    }
-                }
-            }
+    while let Ok(Ctl::Files(paths)) = ctl_rx.recv() {
+        let paths: HashSet<_> = paths
+            .into_iter()
+            .filter(|path| !path.starts_with(&output_path))
+            .collect();
+        if !paths.is_empty() {
+            compile(paths.into_iter().collect());
         }
     }
 
@@ -313,17 +201,9 @@ pub(crate) fn run_stone_test(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn emit_event(stdout_mu: &Arc<std::sync::Mutex<()>>, v: &Value) {
-    let _g = stdout_mu.lock().unwrap();
+fn write_message(value: &Value) {
     let mut out = std::io::stdout().lock();
-    let _ = writeln!(out, "{}", v);
-    let _ = out.flush();
-}
-
-fn write_response(stdout_mu: &Arc<std::sync::Mutex<()>>, v: &Value) {
-    let _g = stdout_mu.lock().unwrap();
-    let mut out = std::io::stdout().lock();
-    let _ = writeln!(out, "{}", v);
+    let _ = writeln!(out, "{value}");
     let _ = out.flush();
 }
 

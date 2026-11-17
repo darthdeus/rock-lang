@@ -43,28 +43,28 @@ fn is_tmp_scratch_file(path: &Path, roots: &[PathBuf]) -> bool {
     }
 }
 
-/// Configuration for the file watcher
-pub(crate) struct FileWatcherConfig {
+/// Unified file watcher for Rock compiler
+pub struct FileWatcher {
     /// Debounce delay in milliseconds
-    pub debounce_ms: u64,
+    debounce_ms: u64,
     /// Whether to filter out metadata-only changes (like touch)
-    pub filter_metadata: bool,
+    filter_metadata: bool,
     /// Optional relative path suffix that the host treats as a restart input.
-    pub restart_suffix: Option<PathBuf>,
+    restart_suffix: Option<PathBuf>,
     /// Exact restart files outside the source roots; their parents are watched
     /// non-recursively so scratch output never becomes a source root.
-    pub restart_files: Vec<PathBuf>,
+    restart_files: Vec<PathBuf>,
     /// File extensions to watch (e.g., ["rock"])
-    pub watch_extensions: Vec<String>,
-    pub watch_all_files: bool,
-    pub ignored_roots: Vec<PathBuf>,
+    watch_extensions: Vec<String>,
+    watch_all_files: bool,
+    ignored_roots: Vec<PathBuf>,
     /// Exact files watched IN ADDITION to the extension filter, shared with
     /// the owner so it can be updated after watcher creation. Used for
     /// embed_string inputs: the set is only known
     /// after a compile, and grows/shrinks as the game's embeds change.
-    pub extra_files: Option<SharedWatchSet>,
+    extra_files: Option<SharedWatchSet>,
     /// Ignore macOS create history for unchanged files present when a watch starts.
-    pub ignore_existing_creates: bool,
+    ignore_existing_creates: bool,
 }
 
 /// Canonicalized paths consulted by the debounce filter on every event, plus
@@ -231,27 +231,11 @@ impl InitialFiles {
     }
 }
 
-impl FileWatcherConfig {
+impl FileWatcher {
     fn matches_restart_suffix(&self, path: &Path) -> bool {
         self.restart_suffix
             .as_ref()
             .is_some_and(|suffix| path.ends_with(suffix))
-    }
-}
-
-impl Default for FileWatcherConfig {
-    fn default() -> Self {
-        Self {
-            debounce_ms: 5,
-            filter_metadata: false,
-            restart_suffix: None,
-            restart_files: Vec::new(),
-            watch_extensions: vec!["rock".to_string()],
-            watch_all_files: false,
-            ignored_roots: Vec::new(),
-            extra_files: None,
-            ignore_existing_creates: false,
-        }
     }
 }
 
@@ -264,85 +248,70 @@ pub struct FileChangeEvent {
     pub is_restart_trigger: bool,
 }
 
-/// Unified file watcher for Rock compiler
-pub struct FileWatcher {
-    config: FileWatcherConfig,
-}
-
 impl FileWatcher {
-    /// Create a new file watcher with default configuration
     pub fn new() -> Self {
         Self {
-            config: FileWatcherConfig::default(),
+            debounce_ms: 5,
+            filter_metadata: false,
+            restart_suffix: None,
+            restart_files: Vec::new(),
+            watch_extensions: vec!["rock".to_string()],
+            watch_all_files: false,
+            ignored_roots: Vec::new(),
+            extra_files: None,
+            ignore_existing_creates: false,
         }
     }
 
-    /// Canonical watcher preset for Rock source trees, shared by
-    /// `rock engine` and `rock watch`. Single
-    /// source of truth for the settings these used to each hand-roll
-    /// (and drift on): 100ms debounce to batch rapid editor saves,
-    /// metadata events allowed so `touch` retriggers, `.rock`
-    /// extension, no restart inputs. Hosts supply restart inputs and extra
-    /// extensions.
-    ///
-    /// Only `debounce` differs from `FileWatcherConfig::default()`;
-    /// the rest is spelled out so the canonical intent survives a
-    /// future change to the struct default.
     pub(crate) fn default_for_rock_sources() -> Self {
-        Self::new()
-            .with_debounce(100)
-            .with_metadata_filter(false)
-            .with_extensions(vec!["rock".to_string()])
-    }
-
-    /// Set debounce delay in milliseconds
-    pub(crate) fn with_debounce(mut self, ms: u64) -> Self {
-        self.config.debounce_ms = ms;
-        self
+        Self {
+            debounce_ms: 100,
+            ..Self::new()
+        }
     }
 
     /// Enable/disable metadata change filtering
     pub fn with_metadata_filter(mut self, filter: bool) -> Self {
-        self.config.filter_metadata = filter;
+        self.filter_metadata = filter;
         self
     }
 
     /// Supply a host's relative restart path, including inputs below skipped scratch directories.
     pub fn with_restart_suffix(mut self, suffix: PathBuf) -> Self {
-        self.config.restart_suffix = Some(suffix);
+        self.restart_suffix = Some(suffix);
         self
     }
 
     pub(crate) fn with_restart_files(mut self, files: Vec<PathBuf>) -> Self {
-        self.config.restart_files = files;
+        self.restart_files = files;
         self
     }
 
     /// Set file extensions to watch
     pub(crate) fn with_extensions(mut self, extensions: Vec<String>) -> Self {
-        self.config.watch_extensions = extensions;
+        self.watch_extensions = extensions;
         self
     }
 
     pub(crate) fn with_all_files(mut self) -> Self {
-        self.config.watch_all_files = true;
+        self.watch_all_files = true;
         self
     }
 
     /// Watch these exact files as well as the extension set; the shared handle
     /// stays with the caller, which refreshes it after each compile.
     pub(crate) fn with_shared_extra_files(mut self, files: SharedWatchSet) -> Self {
-        self.config.extra_files = Some(files);
+        self.extra_files = Some(files);
         self
     }
 
     pub fn with_ignored_roots(mut self, roots: Vec<PathBuf>) -> Self {
-        self.config.ignored_roots = roots;
+        self.ignored_roots = roots;
         self
     }
 
-    pub(crate) fn with_initial_create_filter(mut self, enabled: bool) -> Self {
-        self.config.ignore_existing_creates = enabled;
+    pub(crate) fn filter_initial_creates(mut self) -> Self {
+        self.ignore_existing_creates = true;
         self
     }
 
@@ -354,7 +323,7 @@ impl FileWatcher {
     ) -> Result<WatchHandle> {
         #[cfg(target_os = "macos")]
         {
-            macos::start(self.config, paths, change_tx)
+            macos::start(self, paths, change_tx)
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -368,7 +337,7 @@ impl FileWatcher {
         paths: Vec<PathBuf>,
         change_tx: Sender<FileChangeEvent>,
     ) -> Result<WatchHandle> {
-        let config = self.config;
+        let config = self;
 
         // Canonicalized watched roots, captured for `is_tmp_scratch_file`'s
         // root-relative `tmp/` check. notify reports event paths under the
@@ -738,7 +707,7 @@ mod macos {
         verified_at: SystemTime,
     }
     struct Observation {
-        config: FileWatcherConfig,
+        config: FileWatcher,
         roots: Vec<PathBuf>,
         directories: HashMap<PathBuf, Directory>,
         files: HashMap<PathBuf, FileState>,
@@ -1051,7 +1020,7 @@ mod macos {
     }
     #[cfg(target_os = "macos")]
     pub fn start(
-        mut config: FileWatcherConfig,
+        mut config: FileWatcher,
         paths: Vec<PathBuf>,
         change_tx: Sender<FileChangeEvent>,
     ) -> Result<MacHandle> {
@@ -1133,7 +1102,7 @@ mod macos {
     #[cfg(test)]
     mod tests {
         use super::*;
-        fn observation(root: PathBuf, config: FileWatcherConfig) -> Observation {
+        fn observation(root: PathBuf, config: FileWatcher) -> Observation {
             let mut observation = Observation {
                 config,
                 roots: vec![root],
@@ -1183,10 +1152,10 @@ mod macos {
             std::fs::write(root.join("stick.toml"), "manifest seed").unwrap();
             std::fs::write(&input, "input seed").unwrap();
             let extra: SharedWatchSet = Default::default();
-            let config = FileWatcherConfig {
+            let config = FileWatcher {
                 watch_extensions: vec!["rock".into(), "toml".into()],
                 extra_files: Some(extra.clone()),
-                ..Default::default()
+                ..FileWatcher::new()
             };
             let mut observation = observation(root, config);
             assert!(observation.scan(false).unwrap().paths.is_empty());
@@ -1229,9 +1198,9 @@ mod macos {
             std::fs::write(&source, "before").unwrap();
             let mut observation = observation(
                 root.clone(),
-                FileWatcherConfig {
+                FileWatcher {
                     filter_metadata: true,
-                    ..Default::default()
+                    ..FileWatcher::new()
                 },
             );
             let modified = std::fs::metadata(&source).unwrap().modified().unwrap();
@@ -1300,7 +1269,7 @@ mod macos {
                 )
                 .unwrap();
             }
-            let mut observation = observation(root.clone(), Default::default());
+            let mut observation = observation(root.clone(), FileWatcher::new());
             assert_eq!(observation.files.len(), 1);
             // Age directories past the filesystem tick; recent ones are reread
             // until the tick passes so same-tick changes are not missed.
@@ -1343,13 +1312,13 @@ mod macos {
             let restart = root.join("tmp/reload.signal");
             std::fs::write(&restart, "trigger").unwrap();
             for config in [
-                FileWatcherConfig {
+                FileWatcher {
                     restart_files: vec![restart.clone()],
-                    ..Default::default()
+                    ..FileWatcher::new()
                 },
-                FileWatcherConfig {
+                FileWatcher {
                     restart_suffix: Some(PathBuf::from("tmp/reload.signal")),
-                    ..Default::default()
+                    ..FileWatcher::new()
                 },
             ] {
                 std::fs::write(&restart, "trigger").unwrap();
@@ -1372,9 +1341,9 @@ mod macos {
             std::fs::write(&manifest, "").unwrap();
             let (tx, rx) = channel();
             let _handle = start(
-                FileWatcherConfig {
+                FileWatcher {
                     restart_files: vec![restart.clone()],
-                    ..Default::default()
+                    ..FileWatcher::new()
                 },
                 vec![root.join("game"), manifest],
                 tx,
@@ -1393,7 +1362,7 @@ mod macos {
             let source = root.join("main.rock");
             let broken = root.join("broken.rock");
             std::fs::write(&source, "before").unwrap();
-            let mut observation = observation(root.clone(), Default::default());
+            let mut observation = observation(root.clone(), FileWatcher::new());
             std::fs::write(&source, "after").unwrap();
             // A symlink loop is a deterministic metadata IO error even as root.
             std::os::unix::fs::symlink(&broken, &broken).unwrap();
@@ -1422,9 +1391,9 @@ mod macos {
             std::os::unix::fs::symlink(&root, external.path().join("cycle")).unwrap();
             let mut observation = observation(
                 root.clone(),
-                FileWatcherConfig {
+                FileWatcher {
                     watch_all_files: true,
-                    ..Default::default()
+                    ..FileWatcher::new()
                 },
             );
             std::fs::write(external.path().join("data.txt"), "after").unwrap();
@@ -1439,7 +1408,7 @@ mod macos {
             let root = dir.path().canonicalize().unwrap();
             let source = root.join("main.rock");
             std::fs::write(&source, "AAAA").unwrap();
-            let mut observation = observation(root.clone(), Default::default());
+            let mut observation = observation(root.clone(), FileWatcher::new());
             std::fs::write(&source, "BBBB").unwrap();
             let recorded = observation.files.get(&source).unwrap().stamp.clone();
             set_mtime(&source, modified_time(&recorded));
@@ -1462,7 +1431,7 @@ mod macos {
             let pkg = root.join("pkg");
             std::fs::create_dir(&pkg).unwrap();
             std::fs::write(pkg.join("main.rock"), "source").unwrap();
-            let mut observation = observation(root.clone(), Default::default());
+            let mut observation = observation(root.clone(), FileWatcher::new());
             let added = pkg.join("added.rock");
             std::fs::write(&added, "added").unwrap();
             let recorded = observation.directories.get(&pkg).unwrap().stamp.clone();
@@ -1484,9 +1453,9 @@ mod macos {
             let compiled =
                 skull_mir::mir::comptime_value_hash(&std::fs::read_to_string(&input).unwrap());
             let extra: SharedWatchSet = Default::default();
-            let config = FileWatcherConfig {
+            let config = FileWatcher {
                 extra_files: Some(extra.clone()),
-                ..Default::default()
+                ..FileWatcher::new()
             };
             let mut observation = observation(root.clone(), config);
             std::fs::write(&input, "edited!!").unwrap();

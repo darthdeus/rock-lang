@@ -13,7 +13,6 @@ fn apply_perf_env(cmd: &mut Command) {
 }
 
 pub(crate) fn do_perf(
-    backend: crate::Backend,
     path: &str,
     output: String,
     frames: usize,
@@ -29,7 +28,7 @@ pub(crate) fn do_perf(
 
     rock_host::process_management::report_spawn_phase("compile");
     crate::package::check_project_assets(Path::new(path))?;
-    let (_invocation, compiled) = compile_frame_invocation(backend, path, &output)?;
+    let (_invocation, compiled) = compile_frame_invocation(path, &output)?;
     let lua_file = &compiled.lua_file;
     rock_host::process_management::report_spawn_phase("runtime-prepare");
 
@@ -285,7 +284,6 @@ fn frame_timeout_override() -> Option<Duration> {
 /// This is useful for debugging and testing - compiles the game and runs it
 /// for N frames, taking a screenshot at the end.
 pub(crate) fn do_one_frame(
-    backend: crate::Backend,
     path: &str,
     output: String,
     frames: usize,
@@ -294,7 +292,7 @@ pub(crate) fn do_one_frame(
     use crate::common::ProcessManager;
 
     rock_host::process_management::report_spawn_phase("compile");
-    let (_invocation, compiled) = compile_frame_invocation(backend, path, &output)?;
+    let (_invocation, compiled) = compile_frame_invocation(path, &output)?;
     let lua_file = &compiled.lua_file;
     rock_host::process_management::report_spawn_phase("runtime-prepare");
 
@@ -416,17 +414,11 @@ fn perf_stderr_lines(stderr: &str, child_failed: bool) -> Vec<&str> {
         })
         .collect()
 }
-/// `rock frame` on the skull backend (do_one_frame is backend-parameterized).
+/// `rock frame` on the skull backend.
 pub(crate) fn handle_frame(cx: &CommandContext) -> Result<()> {
     let file = get_game_file(cx)?;
     let output = cx.args.output.clone().unwrap_or_else(|| "tmp".into());
-    do_one_frame(
-        cx.args.backend,
-        &file,
-        output,
-        cx.args.frames,
-        &cx.args.app_args,
-    )
+    do_one_frame(&file, output, cx.args.frames, &cx.args.app_args)
 }
 
 /// `rock perf` on the skull backend.
@@ -434,7 +426,6 @@ pub(crate) fn handle_perf(cx: &CommandContext) -> Result<()> {
     let file = get_game_file(cx)?;
     let output = cx.args.output.clone().unwrap_or_else(|| "tmp".into());
     do_perf(
-        cx.args.backend,
         &file,
         output,
         cx.args.frames,

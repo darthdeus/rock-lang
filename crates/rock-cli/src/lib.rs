@@ -363,7 +363,6 @@ mod asset_selection;
 mod compiler_watch;
 pub(crate) mod frame_commands;
 pub(crate) mod frame_runtime;
-pub(crate) mod game_compile;
 pub mod game_runtime;
 pub mod headless_scope;
 mod log_record;

@@ -1,4 +1,5 @@
-use crate::{Backend, Result};
+use crate::Result;
+use anyhow::Context as _;
 use std::path::PathBuf;
 
 pub(crate) struct CompiledGame {
@@ -6,24 +7,9 @@ pub(crate) struct CompiledGame {
     pub artifact_fingerprint: String,
 }
 
-pub(crate) fn compile_game_for_run(
-    backend: Backend,
-    path: &str,
-    output: &str,
-) -> Result<CompiledGame> {
-    let artifact = with_game_prepared(path, || {
-        crate::game_compile::compile_game(backend, path, std::path::Path::new(output))
-    })?;
-    Ok(CompiledGame {
-        lua_file: PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME),
-        artifact_fingerprint: artifact.artifact_fingerprint,
-    })
-}
-
 // Keep this directory alive until the child exits. The requested output directory
 // may also be targeted by a compiler, watcher or another bounded invocation.
 pub(crate) fn compile_frame_invocation(
-    backend: Backend,
     path: &str,
     output: &str,
 ) -> Result<(tempfile::TempDir, CompiledGame)> {
@@ -34,26 +20,43 @@ pub(crate) fn compile_frame_invocation(
     let project = std::path::Path::new(path)
         .canonicalize()
         .map_err(|error| anyhow::anyhow!("canonicalize game {path}: {error}"))?;
-    let compiled = compile_game_for_run(
-        backend,
-        &project.to_string_lossy(),
-        &invocation.path().to_string_lossy(),
-    )?;
+    let project = project.to_string_lossy();
+    let private_output = PathBuf::from(invocation.path().to_string_lossy().into_owned());
+    let lua_file = private_output.join(rock_host::project::MAIN_LUA_FILENAME);
+    let artifact_fingerprint = with_game_prepared(&project, || {
+        std::fs::create_dir_all(&private_output)
+            .with_context(|| format!("create {}", private_output.display()))?;
+        let compiler = rock_host::timed("compile", || {
+            crate::skull_backend::IncrementalProject::init(
+                &project,
+                &lua_file,
+                &lua_file.with_file_name("incremental.lua"),
+            )
+        })?;
+        let fingerprint = compiler.artifact_fingerprint().to_string();
+        crate::allocator::drop_and_release_in_background(compiler);
+        Ok(fingerprint)
+    })?;
     // Profiling tools inspect this diagnostic copy after the run. Execution uses
     // only the private file, so another invocation can safely replace this copy.
     rock_host::timed("diagnostic copy", || {
         diagnostic_copy(
-            &compiled.lua_file,
+            &lua_file,
             &PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME),
         )
     })?;
-    Ok((invocation, compiled))
+    Ok((
+        invocation,
+        CompiledGame {
+            lua_file,
+            artifact_fingerprint,
+        },
+    ))
 }
 
 /// Install `source` as `destination` and wipe the overlay beside it, as a full
 /// compile does.
 fn diagnostic_copy(source: &std::path::Path, destination: &std::path::Path) -> Result<()> {
-    use anyhow::Context;
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }

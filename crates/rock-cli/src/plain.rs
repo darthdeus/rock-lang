@@ -264,12 +264,7 @@ pub(crate) static SKULL: BackendSpec = BackendSpec {
         (Operation::Sim, crate::sim_command::handle_sim),
         (Operation::Stone, |cx| {
             let path = cx.get_project_dir_or_current()?;
-            crate::stone_watch::do_stone_watch(
-                &path,
-                cx.args.quiet,
-                &cx.args.app_args,
-                Backend::Skull,
-            )
+            crate::stone_watch::do_stone_watch(&path, cx.args.quiet, &cx.args.app_args)
         }),
         (Operation::Test, |cx| {
             let files = cx.get_test_files()?;

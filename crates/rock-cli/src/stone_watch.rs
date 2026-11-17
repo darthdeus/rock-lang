@@ -184,7 +184,7 @@ impl StoneWatcher {
         // Arm new roots and input parents before dropping the previous watches.
         let handle = FileWatcher::default_for_rock_sources()
             .with_restart_suffix(PathBuf::from("tmp/restart.txt"))
-            .with_initial_create_filter(true)
+            .filter_initial_creates()
             .with_restart_files(self.restart_files.clone())
             .with_extensions(vec![
                 "rock".to_string(),
@@ -267,13 +267,7 @@ fn wait_for_reload_resume(control: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn do_stone_watch(
-    path: &str,
-    quiet: bool,
-    app_args: &[String],
-    backend: crate::Backend,
-) -> Result<()> {
-    debug_assert_eq!(backend, crate::Backend::Skull);
+pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Result<()> {
     if !quiet {
         info!("Starting Stone development environment");
         info!("Watching: {}, stdlib/, stone/, compiler", path);
