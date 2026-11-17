@@ -599,9 +599,8 @@ fn main() {
 
 ## Modules and use
 
-A project is a directory with a `stick.toml`. By default its `.rock`
-files use the legacy flat namespace, so helpers need no import. A package
-can opt into scoped modules:
+A project is a directory with a `stick.toml`. Its `.rock` files contribute
+to scoped modules. A standalone file has an implicit one-file package:
 
 ```toml
 [package]
@@ -611,7 +610,7 @@ name = "greeter"
 modules = "v1"
 ```
 
-In a v1 package, a `mod` header assigns a file to a logical module;
+A `mod` header assigns a file to a logical module;
 without a header it belongs to the package root. Multiple files can
 contribute to the same module. Items are private to their defining module
 and its descendants unless exported. Here `super::` addresses the parent
@@ -641,7 +640,7 @@ fn whisper(s: string) -> string {
 
 The files live in `16_modules/`; `rock run 16_modules` (or `rock run .`
 inside it) prints `HELLO!`. See the [modules reference](modules.md) for
-imports, visibility, and how v1 and legacy packages relate.
+imports, visibility, and package dependencies.
 
 ## Tests
 

@@ -53,7 +53,8 @@ and [admission tests](../crates/bone-semantic/tests/structural.rs).
 
 `as` checks an independently inferred operand against the target type; it allows
 assignment-compatible types and numeric conversions. Contextual type ascription
-supplies a type to the operand (`::` in legacy syntax, `: Type` in modules v1).
+supplies a type to the operand: `(expression : Type)`. `::` separates module
+path segments.
 Use `cast<T>` to extract a nominal value from `any`.
 
 ## Function forms and static locals
@@ -140,7 +141,7 @@ takes precedence over a variadic one. A variadic macro can
 expand recursively using `rest: ...expr` and `...rest`. A macro body can use
 `_G.name` for an explicit global and `^name` for a binding in the caller's
 scope. Macro-introduced local bindings do not capture substituted arguments.
-Macros currently use legacy global lookup even in modules v1; see
+Macros currently use global lookup; see
 [Modules](modules.md).
 
 ## Embedded fields

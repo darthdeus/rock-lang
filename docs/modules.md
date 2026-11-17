@@ -1,15 +1,12 @@
 # Modules
 
-Modules v1 give a package compile-time namespaces and visibility boundaries.
-Select them in `stick.toml`:
-
-```toml
-[language]
-modules = "v1"
-```
-
-The choice is per package. An absent setting or `modules = "legacy"` keeps
-legacy flat lookup and syntax; unknown values are errors. Modules do not
+Modules give every package compile-time namespaces and visibility boundaries.
+Modules v1 is the only dialect. The optional `[language] modules = "v1"`
+manifest setting and `//! modules: v1` source directive are accepted for
+compatibility. `modules = "legacy"` and `//! modules: legacy` are errors;
+migrate contextual ascriptions from `expression :: Type` to `(expression : Type)`.
+A standalone source has an implicit one-file package rooted in that file.
+Modules do not
 create runtime namespace objects or copies of definitions. Aliases share the
 same definition and storage. Source visibility does not disable lifecycle
 discovery: private hooks remain discoverable, and aliases do not register the
@@ -44,7 +41,7 @@ must be declared even when a path is fully qualified; transitive dependencies
 are not automatically available as roots. `::name::item` anchors a path at a
 root name when a local binding shadows it.
 
-In v1, `::` separates path segments. Contextual type ascription is written
+`::` separates path segments. Contextual type ascription is written
 `(expression : Type)`.
 
 ## Imports and lookup
@@ -74,7 +71,7 @@ wins, with the nearer tier breaking an otherwise equal match. An equal match
 within a tier is ambiguous. Imports of the same definition do not duplicate it.
 A qualified call selects from the named module's family. Operators and UFCS
 calls use the same visibility and overload rules; importing a type alone does
-not import its extension functions. Macros retain their legacy global behavior.
+not import its extension functions. Macros retain global lookup.
 
 ## Visibility and fields
 
@@ -109,10 +106,3 @@ site lacks; an owner can deliberately delegate an allowed capability.
 Public APIs must expose accessible types for their public signatures and fields.
 A public item can be re-exported from an otherwise private implementation
 module, provided the re-export does not expose a private definition.
-
-## Legacy packages
-
-A package depends only on packages with the same `[language] modules`
-setting: a legacy package cannot depend on a v1 package, and a v1 package
-cannot depend on a legacy one. The package graph rejects such an edge. Both
-dialects reach the compiler-owned standard library.
