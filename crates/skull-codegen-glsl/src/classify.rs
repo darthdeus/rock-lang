@@ -133,7 +133,7 @@ pub(crate) struct VertexShape {
     /// `@attr` first, then `@instance` -- the numbering continues).
     pub(crate) attr_params: Vec<usize>,
     /// The attribute structs in location-assignment order, in the NEUTRAL
-    /// vocabulary. Locations come from `ShaderAbiPlan::attribute_locations`;
+    /// vocabulary. Locations follow declaration order;
     /// the spelling from `attr_glsl_ty` at the point of emission.
     pub(crate) inputs: Vec<LogicalVertexInput>,
     pub(crate) res: StageResources,

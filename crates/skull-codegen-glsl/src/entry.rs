@@ -394,14 +394,7 @@ pub(crate) fn render_shader_entry(
     let f = &ws.module(plan.fref.module).functions[plan.fref.func];
     let shape = &plan.shape;
 
-    // Resolve the fragment ABI before writing its declarations.
-    let program = ProgramAbi::of(
-        &plan.interface,
-        &plan.abi,
-        &[IrStage::Fragment],
-        f.name_span,
-    )?;
-    let resolved = program.stage(IrStage::Fragment)?;
+    let resolved = stage_abi(&plan.interface, &plan.abi, IrStage::Fragment);
 
     let mut px = String::new();
     px.push_str("in vec2 TexCoord;\nout vec4 FragColor;\n\n");

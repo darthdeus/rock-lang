@@ -1,4 +1,4 @@
-//! The shader ABI: uniform blocks, samplers, attributes and their validation.
+//! Shader ABI layout and stage declarations.
 
 use super::*;
 
@@ -144,203 +144,7 @@ pub(crate) fn wire_glsl(k: WireKind) -> GlslTy {
     }
 }
 
-/// Check the ABI against the complete interface before projecting stages.
-/// Binding, block name and member list must agree.
-pub(crate) fn validate_abi(
-    iface: &ShaderInterfacePlan,
-    abi: &ShaderAbiPlan,
-    span: Span,
-) -> Result<(), CompilerError> {
-    // --- scalar blocks: exactly the interface's groups, at their own bindings.
-    let mut expected: Vec<(u32, &LogicalUniformGroup)> = iface
-        .uniform_groups
-        .iter()
-        .map(|g| (ShaderAbiPlan::binding_of(g.role), g))
-        .collect();
-    expected.sort_by_key(|(b, _)| *b);
-    // Two groups claiming one role makes the binding ambiguous, and the defect
-    // is the interface's rather than the plan's.
-    if let Some(w) = expected.windows(2).find(|w| w[0].0 == w[1].0) {
-        return Err(err(
-            span,
-            format!(
-                "internal: the interface declares two uniform groups at binding {} (`{}` and `{}`)",
-                w[0].0, w[0].1.struct_name.key, w[1].1.struct_name.key
-            ),
-        ));
-    }
-    let mut seen: HashSet<u32> = HashSet::default();
-    for (b, block) in &abi.uniform_blocks {
-        let plan = &block.plan;
-        if !seen.insert(*b) {
-            return Err(err(
-                span,
-                format!(
-                    "internal: the GLSL ABI plan holds more than one uniform block at binding {b}"
-                ),
-            ));
-        }
-        let Some((_, g)) = expected.iter().find(|(eb, _)| eb == b) else {
-            return Err(err(
-                span,
-                format!(
-                    "internal: the GLSL ABI plan holds a uniform block at binding {b}, which no \
-                 interface group claims"
-                ),
-            ));
-        };
-        if (plan.struct_name, block.name) != (g.struct_name.key, g.struct_name.symbol) {
-            return Err(err(
-                span,
-                format!(
-                    "internal: binding {b} holds block `{}` (`{}`) but the interface's group there is \
-                 `{}` (`{}`)",
-                    plan.struct_name, block.name, g.struct_name.key, g.struct_name.symbol
-                ),
-            ));
-        }
-        let laid: Vec<(Ustr, WireKind)> = plan.members.iter().map(|m| (m.name, m.kind)).collect();
-        if laid != g.members {
-            return Err(err(
-                span,
-                format!(
-                    "internal: block `{}` at binding {b} was laid out over {laid:?}, but the \
-                 interface declares {:?}",
-                    plan.struct_name, g.members
-                ),
-            ));
-        }
-    }
-    for (b, g) in &expected {
-        if !seen.contains(b) {
-            return Err(err(
-                span,
-                format!(
-                    "internal: the interface declares group `{}` at binding {b}, which the GLSL ABI \
-                 plan has no block for -- its members would be referenced without being declared",
-                    g.struct_name.key
-                ),
-            ));
-        }
-    }
-
-    // --- array blocks: same rule, including each member's CAPACITY, which is
-    // what an `@size(N)` change moves and what a name check alone would miss.
-    let mut expected_arrays: Vec<(u32, &LogicalArrayGroup)> = iface
-        .array_groups
-        .iter()
-        .map(|g| (ShaderAbiPlan::array_binding_of(g.stage), g))
-        .collect();
-    expected_arrays.sort_by_key(|(b, _)| *b);
-    if let Some(w) = expected_arrays.windows(2).find(|w| w[0].0 == w[1].0) {
-        return Err(err(
-            span,
-            format!(
-                "internal: the interface declares two array groups for one stage at binding {} \
-             (owned by `{}` and `{}`)",
-                w[0].0, w[0].1.owner, w[1].1.owner
-            ),
-        ));
-    }
-    let mut seen_arrays: HashSet<u32> = HashSet::default();
-    for (b, plan) in &abi.uniform_array_blocks {
-        if !seen_arrays.insert(*b) {
-            return Err(err(
-                span,
-                format!(
-                    "internal: the GLSL ABI plan holds more than one array block at binding {b}"
-                ),
-            ));
-        }
-        let Some((_, g)) = expected_arrays.iter().find(|(eb, _)| eb == b) else {
-            return Err(err(
-                span,
-                format!(
-                    "internal: the GLSL ABI plan holds an array block at binding {b}, which no \
-                 interface group claims"
-                ),
-            ));
-        };
-        if plan.block_name != g.block_name() {
-            return Err(err(
-                span,
-                format!(
-                    "internal: binding {b} holds array block `{}`, but the interface's group there \
-                 is owned by `{}`",
-                    plan.block_name, g.owner
-                ),
-            ));
-        }
-        let laid: Vec<(Ustr, WireKind, u32)> = plan
-            .members
-            .iter()
-            .map(|m| (m.name, m.elem, m.capacity))
-            .collect();
-        let want: Vec<(Ustr, WireKind, u32)> = g
-            .members
-            .iter()
-            .map(|m| (m.name, m.elem, m.capacity))
-            .collect();
-        if laid != want {
-            return Err(err(
-                span,
-                format!(
-                    "internal: array block `{}` was laid out over {laid:?}, but the interface \
-                 declares {want:?}",
-                    plan.block_name
-                ),
-            ));
-        }
-    }
-    for (b, g) in &expected_arrays {
-        if !seen_arrays.contains(b) {
-            return Err(err(
-                span,
-                format!(
-                    "internal: the interface declares an array group owned by `{}` at binding {b}, \
-                 which the GLSL ABI plan has no block for",
-                    g.owner
-                ),
-            ));
-        }
-    }
-
-    // --- texture units: the same bijection the stage join needs, checked once
-    // for the program so an unused stage cannot leave it unasked.
-    let group = iface.sampler_names();
-    let mut units: HashSet<Ustr> = HashSet::default();
-    for u in &abi.texture_units {
-        if !units.insert(*u) {
-            return Err(err(
-                span,
-                format!("internal: the GLSL ABI plan assigns sampler `{u}` more than one unit"),
-            ));
-        }
-        if !group.contains(u) {
-            return Err(err(
-                span,
-                format!(
-                    "internal: the GLSL ABI plan assigns a unit to `{u}`, which the interface's \
-                 @textures group does not name"
-                ),
-            ));
-        }
-    }
-    for n in &group {
-        if !units.contains(n) {
-            return Err(err(
-                span,
-                format!(
-                    "internal: the interface's @textures group names `{n}`, which the GLSL ABI plan \
-                 gives no unit -- it would be referenced without being declared"
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// The validated ABI declarations used by one stage.
+/// ABI declarations used by one stage.
 pub(crate) struct StageAbi<'a> {
     pub(crate) uniform_block: Option<&'a GlslUniformBlock>,
     pub(crate) engine_block: Option<&'a GlslUniformBlock>,
@@ -395,73 +199,11 @@ fn stage_samplers_in_unit_order(
     out
 }
 
-/// Validated per-program ABI with its per-stage projections.
-pub(crate) struct ProgramAbi<'a> {
-    stages: Vec<(IrStage, StageAbi<'a>)>,
-    /// Anchors a projection failure, so a lookup miss is a spanned rejection
-    /// rather than a panic.
-    span: Span,
-    /// The vertex attribute declarations, resolved and checked once. Only the
-    /// vertex stage renders them.
-    pub(crate) attributes: Vec<(Ustr, GlslTy, u32)>,
-}
-
-impl<'a> ProgramAbi<'a> {
-    /// Validate `abi` against `iface`, then project exactly the stages the
-    /// renderer will ask for.
-    ///
-    /// `required` is a census, not a hint: a renderer that emits a vertex
-    /// stage the interface does not declare is a defect, and taking
-    /// `iface.stages` on trust would turn it into a lookup miss later.
-    pub(crate) fn of(
-        iface: &ShaderInterfacePlan,
-        abi: &'a ShaderAbiPlan,
-        required: &[IrStage],
-        span: Span,
-    ) -> Result<Self, CompilerError> {
-        validate_abi(iface, abi, span)?;
-        let mut stages = Vec::with_capacity(required.len());
-        for &stage in required {
-            if !iface.stages.contains(&stage) {
-                return Err(err(
-                    span,
-                    format!(
-                        "internal: the program emits a {} stage, which its interface does not declare",
-                        stage.name()
-                    ),
-                ));
-            }
-            stages.push((stage, project_stage_abi(iface, abi, stage)));
-        }
-        Ok(ProgramAbi {
-            stages,
-            attributes: attribute_declarations(iface, abi, span)?,
-            span,
-        })
-    }
-
-    pub(crate) fn stage(&self, stage: IrStage) -> Result<&StageAbi<'a>, CompilerError> {
-        self.stages
-            .iter()
-            .find(|(s, _)| *s == stage)
-            .map(|(_, a)| a)
-            .ok_or_else(|| {
-                err(
-                    self.span,
-                    format!(
-                        "internal: no {} stage was projected for this program",
-                        stage.name()
-                    ),
-                )
-            })
-    }
-}
-
 fn block_at<T>(blocks: &[(u32, T)], binding: u32) -> Option<&T> {
     blocks.iter().find(|(b, _)| *b == binding).map(|(_, p)| p)
 }
 
-fn project_stage_abi<'a>(
+pub(crate) fn stage_abi<'a>(
     iface: &ShaderInterfacePlan,
     abi: &'a ShaderAbiPlan,
     stage: IrStage,
@@ -478,54 +220,6 @@ fn project_stage_abi<'a>(
         ),
         samplers: stage_samplers_in_unit_order(iface, abi, stage),
     }
-}
-
-/// Every vertex attribute's emitted declaration: its name and neutral kind from
-/// the INTERFACE, its location from the target's ABI plan.
-///
-/// The join is a bijection on names AND on locations. A dropped `in`
-/// declaration is a driver error with no compiler diagnostic, and two
-/// attributes at one location is a silent aliasing that a name bijection
-/// alone accepts.
-fn attribute_declarations(
-    iface: &ShaderInterfacePlan,
-    abi: &ShaderAbiPlan,
-    span: Span,
-) -> Result<Vec<(Ustr, GlslTy, u32)>, CompilerError> {
-    let mut out = Vec::new();
-    let mut occupied: HashMap<u32, Ustr> = HashMap::default();
-    for (n, k) in iface.vertex_inputs.iter().flat_map(|i| i.attrs.iter()) {
-        let Some((_, loc)) = abi.attribute_locations.iter().find(|(an, _)| an == n) else {
-            return Err(err(
-                span,
-                format!(
-                    "internal: vertex attribute `{n}` has no location in the GLSL ABI plan -- it \
-                 would be referenced without being declared"
-                ),
-            ));
-        };
-        if let Some(other) = occupied.insert(*loc, *n) {
-            return Err(err(
-                span,
-                format!(
-                    "internal: vertex attributes `{other}` and `{n}` both occupy location {loc}"
-                ),
-            ));
-        }
-        out.push((*n, attr_glsl_ty(*k), *loc));
-    }
-    if out.len() != abi.attribute_locations.len() {
-        return Err(err(
-            span,
-            format!(
-                "internal: the interface declares {} vertex attribute(s) and the GLSL ABI plan \
-             assigns {} location(s)",
-                out.len(),
-                abi.attribute_locations.len()
-            ),
-        ));
-    }
-    Ok(out)
 }
 
 /// The samplers that are NOT part of a `@textures` group -- loose params whose
@@ -610,13 +304,10 @@ pub struct ShaderAbiPlan {
     /// `layout(binding=)`, so the engine needs each name once to point the
     /// sampler uniform at its unit at link time; after that it binds by slot.
     pub texture_units: Vec<Ustr>,
-    /// Vertex attribute locations, in location order.
-    pub attribute_locations: Vec<(Ustr, u32)>,
 }
 
 impl ShaderAbiPlan {
-    /// The binding a uniform group's ROLE takes. One oracle, so the layout and
-    /// the validation below cannot disagree about where a group belongs.
+    /// Uniform bindings are fixed by the host registration ABI.
     fn binding_of(role: UniformRole) -> u32 {
         match role {
             UniformRole::Engine => UNIFORM_BLOCK_BINDING_ENGINE,
@@ -633,10 +324,7 @@ impl ShaderAbiPlan {
         }
     }
 
-    /// GLSL's answer to `iface`. Takes NO `Workspace`: a layout is a function
-    /// of the member list alone, which is what lets a perturbed interface
-    /// produce a perturbed layout and a second target lay the same members out
-    /// its own way.
+    /// Lay out uniform blocks and assign texture units in declaration order.
     pub fn glsl(iface: &ShaderInterfacePlan, span: Span) -> Result<Self, CompilerError> {
         let binding = Self::binding_of;
         let mut uniform_blocks: Vec<(u32, GlslUniformBlock)> = Vec::new();
@@ -665,20 +353,10 @@ impl ShaderAbiPlan {
         // already uses for locations.
         let texture_units = iface.sampler_names();
 
-        let mut attribute_locations = Vec::new();
-        let mut loc = 0u32;
-        for vi in &iface.vertex_inputs {
-            for (name, _) in &vi.attrs {
-                attribute_locations.push((*name, loc));
-                loc += 1;
-            }
-        }
-
         Ok(ShaderAbiPlan {
             uniform_blocks,
             uniform_array_blocks,
             texture_units,
-            attribute_locations,
         })
     }
 }

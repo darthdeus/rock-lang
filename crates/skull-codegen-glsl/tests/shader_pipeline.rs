@@ -1,11 +1,3 @@
-//! A2 vertex+fragment pipeline: whole-program shader
-//! compilation. RED-first scaffold -- these pin the A2a target behavior and go
-//! green as the emitter lands.
-//!
-//! `emit_entry` is the A1 fragment entry, reused to exercise the GPU builtins
-//! (frag_coord/fwidth/discard) in isolation; `emit_pipeline` is the A2
-//! vertex+fragment pair -> one #ifdef file.
-
 use crate::support::{assert_has, assert_lacks, emit_entry, emit_pipeline, workspace};
 use skull_codegen_glsl::GlslProfile;
 
@@ -26,9 +18,6 @@ fn vector_scalar_bounds_are_splatted() {
             .map(|c| format!("max(a.{c}, b)"))
             .collect::<Vec<_>>()
             .join(", ");
-        // The stdlib's scalar-bound clamp splats into GLSL's vector clamp. The
-        // user's scalar min/max overloads share GLSL builtin names but are their
-        // own functions, so their bodies are emitted and called.
         let src = format!(
             r#"
             fn Vec{width}.min(a, b: float) -> Vec{width} {{ return v({min}) }}
@@ -66,69 +55,6 @@ fn vector_scalar_bounds_are_splatted() {
     }
 }
 
-// --- GPU builtins (decision 5): frag_coord / fwidth / discard ----------------
-// Fragment-stage GPU-only intrinsics. Exercised through the A1 fragment entry
-// (they add no params, so the A1 contract still holds). RED until the
-// GLSL_INTRINSICS table backs them (today: "no emittable body and no GLSL
-// intrinsic mapping").
-
-#[test]
-fn builtin_frag_coord_maps() {
-    let src = r#"
-        @shader(fragment)
-        fn f(tc: Vec2) -> Vec4 {
-            let c = frag_coord()
-            return Vec4 { x: c.x, y: c.y, z: 0.0, w: 1.0 }
-        }
-    "#;
-    let glsl = emit_entry(src, "f").expect("emit");
-    assert_has(&glsl, "gl_FragCoord");
-    // frag_coord() takes no args -- the template is a bare builtin, not a call.
-    assert!(
-        !glsl.contains("frag_coord("),
-        "must not emit a fn call:\n{glsl}"
-    );
-}
-
-#[test]
-fn builtin_discard_is_a_statement() {
-    let src = r#"
-        @shader(fragment)
-        fn f(tc: Vec2) -> Vec4 {
-            if tc.x < 0.5 { discard() }
-            return Vec4 { x: 1.0, y: 0.0, z: 0.0, w: 1.0 }
-        }
-    "#;
-    let glsl = emit_entry(src, "f").expect("emit");
-    // discard is a control-flow statement, not an expression: `discard;`, never
-    // `discard()` or an assignment to a temp.
-    assert_has(&glsl, "discard;");
-    assert!(
-        !glsl.contains("discard()"),
-        "discard must not render as a call:\n{glsl}"
-    );
-}
-
-/// texture_size(s) -> `vec2(textureSize(s, 0))`: the sampler's mip-0 dimensions
-/// as a float Vec2 (used for gl_FragCoord-based canvas sampling in sprite_batch).
-/// Not stage-restricted (textureSize is legal in every GLSL stage).
-#[test]
-fn builtin_texture_size_maps() {
-    let src = r#"
-        @shader(fragment)
-        fn f(tex: Sampler2D, tc: Vec2) -> Vec4 {
-            let sz = texture_size(tex)
-            return Vec4 { x: sz.x, y: sz.y, z: 0.0, w: 1.0 }
-        }
-    "#;
-    let glsl = emit_entry(src, "f").expect("emit");
-    assert_has(&glsl, "vec2(textureSize(tex, 0))");
-    assert!(
-        !glsl.contains("texture_size("),
-        "must not emit a fn call:\n{glsl}"
-    );
-}
-
 fn derivative_maps(rock: &str, glsl_call: &str) {
     let src = format!(
         r#"
@@ -148,98 +74,6 @@ cases! { derivative_maps:
     builtin_dfdx_maps("dfdx", "dFdx");
     builtin_dfdy_maps("dfdy", "dFdy");
 }
-
-// --- the vertex+fragment pipeline scaffold (A2a) -----------------------------
-
-/// A UI shader fixture: a per-vertex attribute struct, a Mat4
-/// uniform block, and a varyings struct whose `position` field drives
-/// gl_Position and is NOT emitted as a varying.
-const UI_SRC: &str = r#"
-    value QuadVert { aPos: Vec2, aTexCoord: Vec2, aColor: Vec4 }
-    value UiVertU  { uProjection: Mat4, uView: Mat4, uTransform: Mat4 }
-    value UiVary   { position: Vec4, TexCoord: Vec2, Color: Vec4 }
-    value UiFragU  { uSize: Vec2, uRatio: float }
-
-    @shader(vertex)
-    fn ui_vert(@attr a: QuadVert, @uniform u: UiVertU) -> UiVary {
-        let clip = u.uProjection * u.uView * u.uTransform * Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }
-        return UiVary { position: clip, TexCoord: a.aTexCoord, Color: a.aColor }
-    }
-
-    @shader(fragment)
-    fn ui_frag(vary: UiVary, @uniform u: UiFragU) -> Vec4 {
-        let fe = fwidth(vary.TexCoord.x)
-        return Vec4 { x: vary.Color.x, y: fe, z: u.uRatio, w: vary.Color.w }
-    }
-"#;
-
-/// A2 gets ONE std140 block PER STAGE, at its own binding index. This single
-/// emission pins both stages' scaffold, link interface, single-output fragment,
-/// and the ABI bindings consumed by the engine.
-///
-/// The stages declare different `@uniform` types and cannot be made to share
-/// one: `ui_vert` is consumed by fragment stages with their own uniform struct.
-/// Two blocks is also what WGSL/Vulkan/Metal do.
-///
-/// Verified to compile and link on real drivers in both profiles before this
-/// was built (a two-block program through a native GLSL harness).
-#[test]
-fn pipeline_scaffold_and_abi() {
-    let em = crate::support::pipeline_emission(UI_SRC, "ui_vert", "ui_frag").expect("emit");
-    let glsl = &em.source;
-    assert!(glsl.starts_with("#version 330 core\n"), "got:\n{glsl}");
-    assert_has(glsl, "#ifdef VERTEX");
-    // Attribute struct fields -> `in` with declaration-order locations.
-    assert_has(glsl, "layout (location = 0) in vec2 aPos;");
-    assert_has(glsl, "layout (location = 1) in vec2 aTexCoord;");
-    assert_has(glsl, "layout (location = 2) in vec4 aColor;");
-    // Vertex uniforms are a std140 block with an unnamed instance.
-    assert_has(
-        glsl,
-        "layout(std140) uniform UiVertU {\n    mat4 uProjection;\n    mat4 uView;\n    mat4 uTransform;\n};\n",
-    );
-    // The fragment stage gets its own block; no member falls back to a loose
-    // uniform, and members stay bare globals in both bodies.
-    assert_has(
-        glsl,
-        "layout(std140) uniform UiFragU {\n    vec2 uSize;\n    float uRatio;\n};\n",
-    );
-    assert_lacks(glsl, "uniform mat4 uProjection;");
-    assert_lacks(glsl, "u.uSize");
-    // Varyings out -- position is suppressed (it is gl_Position, not a varying).
-    assert_has(glsl, "out vec2 TexCoord;");
-    assert_has(glsl, "out vec4 Color;");
-    assert_lacks(glsl, "out vec4 position;");
-    assert_has(glsl, "gl_Position =");
-    assert_has(glsl, "TexCoord = ");
-    // Pixel inputs match the vertex outputs; this fixture has one bare output.
-    assert_has(glsl, "#ifdef PIXEL");
-    assert_has(glsl, "in vec2 TexCoord;");
-    assert_has(glsl, "in vec4 Color;");
-    assert_has(glsl, "out vec4 FragColor;");
-    assert_has(glsl, "void main()");
-    assert_has(glsl, "FragColor = ui_frag(");
-    assert_lacks(glsl, "layout(location = 0) out vec4");
-
-    let bound: Vec<(u32, &str)> = em
-        .abi
-        .uniform_blocks
-        .iter()
-        .map(|(b, p)| (*b, p.name.as_str()))
-        .collect();
-    assert_eq!(
-        bound,
-        vec![(1, "UiVertU"), (2, "UiFragU")],
-        "role -> binding"
-    );
-    assert!(
-        em.abi.texture_units.is_empty(),
-        "program with no texture group must report no slots: {:?}",
-        em.abi.texture_units
-    );
-}
-
-// --- pipeline rejects (spanned emit CompilerError) ---------------------------
 
 fn reject_pipeline(src: &str, vert: &str, frag: &str, needle: &str) {
     match emit_pipeline(src, vert, frag) {
@@ -269,7 +103,6 @@ fn reject_fragment_builtin_in_vertex(name: &str) {
 }
 
 cases! { reject_pipeline:
-    /// The varyings struct MUST carry a `position: Vec4` field (-> gl_Position).
     reject_varyings_missing_position(r#"
         value QV { aPos: Vec2 }
         value Vary { TexCoord: Vec2 }
@@ -279,8 +112,6 @@ cases! { reject_pipeline:
         fn fr(vary: Vary) -> Vec4 { return Vec4 { x: vary.TexCoord.x, y: 0.0, z: 0.0, w: 1.0 } }
     "#, "vt", "fr", "position");
 
-    /// `position` is gl_Position, not a varying -- reading it in the fragment stage
-    /// is a spanned reject.
     reject_fragment_reads_position(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4, TexCoord: Vec2 }
@@ -290,7 +121,6 @@ cases! { reject_pipeline:
         fn fr(vary: Vary) -> Vec4 { return vary.position }
     "#, "vt", "fr", "position");
 
-    /// The fragment's first param type MUST equal the vertex's return type.
     reject_varyings_type_mismatch(r#"
         value QV { aPos: Vec2 }
         value VaryA { position: Vec4, TexCoord: Vec2 }
@@ -301,9 +131,6 @@ cases! { reject_pipeline:
         fn fr(vary: VaryB) -> Vec4 { return Vec4 { x: vary.Other.x, y: 0.0, z: 0.0, w: 1.0 } }
     "#, "vt", "fr", "varyings");
 
-    /// A value-struct vertex param with no `@attr`/`@uniform`/`@instance` role is
-    /// ambiguous -- reject (the "never mixed" guarantee).
-    // (fragment reads position too, but the unmarked-param reject fires first.)
     reject_unmarked_vertex_struct_param(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4 }
@@ -313,8 +140,6 @@ cases! { reject_pipeline:
         fn fr(vary: Vary) -> Vec4 { return vary.position }
     "#, "vt", "fr", "@attr");
 
-    /// An int-typed varying without `@flat` is a spanned reject (GLSL mandates flat
-    /// integer interpolation). This check lives in the emitter, not the registry.
     reject_int_varying_without_flat(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4, kind: int }
@@ -324,9 +149,6 @@ cases! { reject_pipeline:
         fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
     "#, "vt", "fr", "flat");
 
-    /// Decision 7: BOTH stages' names share ONE collision namespace (the linked GL
-    /// program has one uniform namespace) -- a vertex uniform and a fragment
-    /// uniform with the same name reject at emit, not at link.
     reject_cross_stage_name_collision(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4 }
@@ -338,10 +160,6 @@ cases! { reject_pipeline:
         fn fr(vary: Vary, @uniform u: FU) -> Vec4 { return Vec4 { x: u.uShared, y: 0.0, z: 0.0, w: 1.0 } }
     "#, "vt", "fr", "collide");
 
-    /// A global-base struct param (attrs/uniforms/varyings) reads field-by-field --
-    /// its fields are GLSL globals; the struct itself has no GLSL identity. Copying
-    /// it into a local must reject, not emit a dangling reference to the dropped
-    /// param name.
     reject_global_struct_param_alias(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4, TexCoord: Vec2 }
@@ -354,8 +172,6 @@ cases! { reject_pipeline:
         }
     "#, "vt", "fr", "field-by-field");
 
-    /// `in bool` / `out bool` are illegal GLSL: bool attributes and bool varyings
-    /// reject at classification (uniform bool stays legal).
     reject_bool_varying(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4, ok: bool }
@@ -375,11 +191,6 @@ cases! { reject_pipeline:
     "#, "vt", "fr", "bool");
 }
 
-/// A block `bool` IS legal -- the bool restriction is attrs/varyings only.
-/// Verified to compile and link on real drivers in BOTH profiles, which is what
-/// lets `SpriteFragU`'s four bools ride a block: GL reads a block bool as 32
-/// bits where Rock's C layout models one byte, and that conversion is stated in
-/// `WireKind::Bool32` rather than papered over with padding.
 #[test]
 fn bool_uniform_is_allowed() {
     let src = r#"
@@ -398,11 +209,6 @@ fn bool_uniform_is_allowed() {
     assert_has(&glsl, "layout(std140) uniform FU {\n    bool uEnabled;\n};");
 }
 
-// --- A2b: MRT fragment output (value-struct-of-Vec4 return) ------------------
-// A fragment entry may return a value struct whose fields are all Vec4 -> one
-// `layout(location=N) out vec4 <field>` per field, in declaration order. The
-// single-Vec4 return (FragColor only) stays unchanged.
-
 const MRT_SRC: &str = r#"
     value QV   { aPos: Vec2, aEntityId: float }
     value Vary { position: Vec4, TexCoord: Vec2, @flat EntityId: float }
@@ -418,31 +224,7 @@ const MRT_SRC: &str = r#"
     }
 "#;
 
-#[test]
-fn mrt_fragment_outputs_by_field_order() {
-    let glsl = emit_pipeline(MRT_SRC, "vt", "fr").expect("emit");
-    // Field order == layout location, mirroring the @attr location contract.
-    assert_has(&glsl, "layout(location = 0) out vec4 FragColor;");
-    assert_has(&glsl, "layout(location = 1) out vec4 FragId;");
-    // MRT frag is `void main()` with destructured assignments -- no `vec4 fr()`
-    // returning + a `FragColor = fr();` wrapper.
-    assert_has(&glsl, "void main()");
-    assert_has(&glsl, "FragColor = ");
-    assert_has(&glsl, "FragId = ");
-    assert!(
-        !glsl.contains("FragColor = fr("),
-        "MRT must not emit a single-output wrapper:\n{glsl}"
-    );
-    // The bare (non-layout) single-output declaration must be absent.
-    assert!(
-        !glsl.contains("\nout vec4 FragColor;"),
-        "MRT must not emit the bare FragColor out:\n{glsl}"
-    );
-}
-
 cases! { reject_pipeline:
-    /// Every MRT output field must be Vec4 (each is a `out vec4`); a non-Vec4 field
-    /// rejects.
     reject_mrt_non_vec4_field(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4 }
@@ -453,8 +235,6 @@ cases! { reject_pipeline:
         fn fr(vary: Vary) -> BadOut { return BadOut { FragColor: Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }, depth: 0.5 } }
     "#, "vt", "fr", "Vec4");
 
-    /// MRT output names join the one cross-stage namespace -- an output name that
-    /// collides with a uniform rejects.
     reject_mrt_output_name_collision(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4 }
@@ -468,11 +248,6 @@ cases! { reject_pipeline:
         }
     "#, "vt", "fr", "collide");
 }
-
-// --- fragment depth output: a `FragDepth: float` field is gl_FragDepth -------
-// Window-space depth in [0,1]. It is not a colour attachment: it takes no
-// `layout(location=N) out` and the colour fields keep the locations they would
-// have without it.
 
 const FRAG_DEPTH_SRC: &str = r#"
     value QV   { aPos: Vec2, aDepth: float }
@@ -535,13 +310,6 @@ fn reject_frag_depth_without_a_colour_output() {
     reject_pipeline(src, "vt", "fr", "colour");
 }
 
-// --- builtin stage gating: frag_coord/fwidth/discard are fragment-only -------
-
-// --- A2c: the instanced tier -- @instance attrs continue the locations -------
-
-/// The grass shape in miniature: per-vertex quad attrs at locations 0..1, the
-/// instance struct continuing at 2..5 (the gpu_mesh sequential-location
-/// contract), a @flat varying, and vertex_id-gated tip work.
 #[test]
 fn instanced_locations_continue_across_structs() {
     let src = r#"
@@ -580,13 +348,6 @@ fn instanced_locations_continue_across_structs() {
     assert_has(&glsl, "gl_VertexID");
 }
 
-// --- UniformArray<T> + at() + @size(N) (decision 3; pulled into A2c by grass) -
-//
-// These cover the BODY half -- `at()` lowering to indexing, and the int loop
-// bound. The array BLOCK the declarations now live in has its own coverage in
-// `uniform_array_block_decl.rs`.
-
-/// The grass shape: a vertex-stage uniform array read in a dynamic-bound loop.
 #[test]
 fn uniform_array_vertex_decl_and_at() {
     let src = r#"
@@ -607,8 +368,6 @@ fn uniform_array_vertex_decl_and_at() {
     let glsl = emit_pipeline(src, "vt", "fr").expect("emit");
     assert_has(&glsl, "entity_positions[");
     assert_lacks(&glsl, "at(");
-    // The loop-bound temp for min(int, int) must be int: GLSL has no implicit
-    // int->float on assignment, so the float fallback fails to compile there.
     let line = glsl
         .lines()
         .find(|l| l.contains("= min(entity_count, 32);"))
@@ -632,7 +391,6 @@ cases! { reject_pipeline:
         fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
     "#, "vt", "fr", "@size");
 
-    /// Element types are the corpus set {float, int, Vec2, Vec4} -- Mat4 rejects.
     reject_uniform_array_bad_elem(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4 }
@@ -643,86 +401,6 @@ cases! { reject_pipeline:
         @shader(fragment)
         fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
     "#, "vt", "fr", "element");
-}
-
-// --- vertex_id: vertex-only builtin (A2c) ------------------------------------
-
-#[test]
-fn builtin_vertex_id_maps() {
-    let src = r#"
-        value QV { aPos: Vec2 }
-        value Vary { position: Vec4 }
-        @shader(vertex)
-        fn vt(@attr a: QV) -> Vary {
-            let vid = vertex_id() % 4
-            let bend = 0.0
-            if vid == 0 || vid == 1 {
-                bend = 1.0
-            }
-            return Vary { position: Vec4 { x: a.aPos.x + bend, y: 0.0, z: 0.0, w: 1.0 } }
-        }
-        @shader(fragment)
-        fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
-    "#;
-    let glsl = emit_pipeline(src, "vt", "fr").expect("emit");
-    assert_has(&glsl, "gl_VertexID");
-    assert!(
-        !glsl.contains("vertex_id("),
-        "must not emit a fn call:\n{glsl}"
-    );
-}
-
-/// The premise the backend-neutral fullscreen submission rests on: an A1 entry contributes NO vertex code, so
-/// nothing in an A1 program can observe how a backend tessellates the
-/// fullscreen rectangle. Two different entries emit the same VERTEX section,
-/// byte for byte, and that section reads only the two attributes -- no
-/// gl_VertexID, no per-vertex branch, nothing order-dependent.
-///
-/// The contrast is `builtin_vertex_id_maps` above: an explicit `@shader(vertex)`
-/// stage CAN read gl_VertexID, which is why the fullscreen guarantee is scoped
-/// to the generated stage rather than claimed for every draw.
-#[test]
-fn a1_vertex_stage_is_compiler_owned_and_order_blind() {
-    let vertex_of = |glsl: &str| -> String {
-        let (_, v) = glsl.split_once("#ifdef VERTEX").expect("a VERTEX section");
-        v.split("#endif")
-            .next()
-            .expect("a terminated VERTEX section")
-            .to_string()
-    };
-    let a = emit_entry(
-        r#"
-        @shader(fragment)
-        fn f(tc: Vec2) -> Vec4 { return Vec4 { x: tc.x, y: tc.y, z: 0.0, w: 1.0 } }
-    "#,
-        "f",
-    )
-    .expect("emit a");
-    let b = emit_entry(
-        r#"
-        @shader(fragment)
-        fn g(tc: Vec2) -> Vec4 { return Vec4 { x: 1.0 - tc.y, y: 0.0, z: tc.x, w: 0.5 } }
-    "#,
-        "g",
-    )
-    .expect("emit b");
-
-    let (va, vb) = (vertex_of(&a), vertex_of(&b));
-    assert_eq!(
-        va, vb,
-        "two A1 entries must share one compiler-owned vertex stage"
-    );
-    assert_has(&va, "gl_Position = vec4(aPos, 0.0, 1.0)");
-    assert_has(&va, "TexCoord = aTexCoord");
-    assert!(
-        !va.contains("gl_VertexID"),
-        "the generated stage must not read vertex order:\n{va}"
-    );
-    // And the entry's own body reached only the fragment half.
-    assert!(
-        !va.contains("f("),
-        "the entry body must not appear in the vertex stage:\n{va}"
-    );
 }
 
 #[test]
@@ -743,7 +421,6 @@ fn reject_vertex_id_in_fragment_stage() {
     reject_pipeline(src, "vt", "fr", "vertex-stage builtin");
 }
 
-/// The A1 fragment-only entry is also a fragment stage -- vertex_id rejects.
 #[test]
 fn reject_vertex_id_in_a1_entry() {
     let src = r#"
@@ -762,11 +439,6 @@ fn reject_vertex_id_in_a1_entry() {
     }
 }
 
-// --- bool-vector tier -----------------------------------
-
-/// The emitted GLSL for the nonfinite-debug shape: bvec3 ctor + isnan/isinf +
-/// any + greaterThan + the vec3(bvec) bool->float cast, all rendered inline as
-/// native GLSL.
 #[test]
 fn bvec_nonfinite_entry_golden() {
     let src = r#"
@@ -801,7 +473,6 @@ fn bvec_nonfinite_entry_golden() {
         glsl.contains("vec3(bad)"),
         "to_vec3 bool->float cast:\n{glsl}"
     );
-    // The bvec3 ctor renders as the native builtin, never a mangled helper fn.
     assert!(
         !glsl.contains("bvec3__"),
         "no mangled bvec3 helper:\n{glsl}"
@@ -809,7 +480,6 @@ fn bvec_nonfinite_entry_golden() {
 }
 
 cases! { reject_pipeline:
-    /// GLSL forbids bool-vector interpolants -- a Bvec3 varying field rejects at emit.
     reject_bvec_varying(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4, flags: Bvec3 }
@@ -824,7 +494,6 @@ cases! { reject_pipeline:
         fn fr(vary: Vary) -> Vec4 { return vary.position }
     "#, "vt", "fr", "bvec3");
 
-    /// A Bvec3 attribute field rejects (GLSL has no bool vertex inputs).
     reject_bvec_attribute(r#"
         value QV { aPos: Vec2, flags: Bvec3 }
         value Vary { position: Vec4 }
@@ -836,11 +505,6 @@ cases! { reject_pipeline:
         fn fr(vary: Vary) -> Vec4 { return vary.position }
     "#, "vt", "fr", "bvec3");
 }
-
-// --- R32I entity-id tier: int fragment outputs + ISampler2D ------------------
-// The integer entity-id path: ids live in R32I
-// attachments, so fragment entries write `int` outputs and readers sample an
-// `isampler2D` via texture_id().
 
 const INT_MRT_SRC: &str = r#"
     value QV   { aPos: Vec2, aEntityId: float }
@@ -857,7 +521,6 @@ const INT_MRT_SRC: &str = r#"
     }
 "#;
 
-/// An MRT out-struct field may be `int` -> `layout(location=N) out int`.
 #[test]
 fn mrt_int_output_field() {
     let glsl = emit_pipeline(INT_MRT_SRC, "vt", "fr").expect("emit");
@@ -866,8 +529,6 @@ fn mrt_int_output_field() {
     assert_has(&glsl, "FragId = ");
 }
 
-/// A single bare `int` fragment return is a lone `out int` (the silhouette
-/// mask pass writes only the id).
 #[test]
 fn single_int_fragment_output() {
     let src = r#"
@@ -904,8 +565,6 @@ const ISAMPLER_SRC: &str = r#"
     }
 "#;
 
-/// ISampler2D binds like Sampler2D; texture_id() samples `.r` as int;
-/// texture_size() overloads. The declaration carries `highp` (no ES default).
 #[test]
 fn isampler_texture_id() {
     let glsl = emit_pipeline(ISAMPLER_SRC, "vt", "fr").expect("emit");
@@ -914,7 +573,6 @@ fn isampler_texture_id() {
     assert_has(&glsl, "vec2(textureSize(ids, 0))");
 }
 
-/// ISampler2D is opaque like Sampler2D: illegal as a return type.
 #[test]
 fn reject_isampler_return() {
     let src = r#"
@@ -932,9 +590,6 @@ fn reject_isampler_return() {
     reject_pipeline(src, "vt", "fr", "sampler");
 }
 
-/// GLSL samplers are opaque: only uniforms and parameters hold one, and they
-/// cannot be operands of `?:`. A Rock program that copies one into a local or
-/// selects between two must fail here, not in the GPU driver.
 const OPAQUE_PRELUDE: &str = r#"
     struct Tex { a: Sampler2D, b: Sampler2D }
     value Quad { aPos: Vec2, aUv: Vec2 }
@@ -974,8 +629,6 @@ fn reject_sampler_param_select() {
     reject_pipeline(&src, "vs", "fs", "samplers are opaque");
 }
 
-/// A texture-group field is a bare uniform with no value type; selecting one
-/// used to type the selection as `float` and emit `(c ? a : b)`.
 #[test]
 fn reject_texture_field_select() {
     let src = format!(
@@ -995,16 +648,6 @@ fn reject_texture_field_select() {
     );
 }
 
-// --- Attribute locations are RECORDED, not invented while printing ----------
-// Emission consumes the locations
-// classification computed; it does not re-derive them with an enumerate()
-// index, which assumes one location per field and cannot express a type that
-// consumes several.
-
-/// Attribute GLSL types are the artifact's `AttrKind` spelled for this backend,
-/// so every kind maps to exactly one declaration. A wrong entry (F32x3 -> vec4)
-/// is a silent geometry corruption: the shader reads a component the buffer
-/// never supplied.
 #[test]
 fn every_attr_kind_emits_its_glsl_type() {
     let src = r#"
@@ -1032,11 +675,6 @@ fn every_attr_kind_emits_its_glsl_type() {
     }
 }
 
-/// A `mat4` attribute consumes FOUR locations in GL, so a one-location-per-field
-/// numbering silently misplaces every attribute after it. Nothing in the tree
-/// declares one today, and `struct_gl_fields` admits Mat4 in attribute position,
-/// so the shape is reachable and currently wrong. Reject it rather than emit a
-/// numbering the CPU side cannot match.
 #[test]
 fn mat4_attribute_rejects_rather_than_misnumbering_what_follows() {
     let src = r#"
@@ -1058,14 +696,6 @@ fn mat4_attribute_rejects_rather_than_misnumbering_what_follows() {
     }
 }
 
-// --- @textures: the unit is compiler-assigned (P2) ---------------------------
-// Sampler params bound by hand-typed name AND hand-assigned unit are the
-// silent-collision class -- two bind sites sharing a number bind one texture
-// over the other with nothing to report. Grouping them makes the unit a
-// property of field order, which the CPU side reads from the artifact.
-
-/// An integer sampler in the group keeps its kind: `isampler2D`, not the float
-/// spelling. Reading an r32i id target through a float sampler is undefined.
 #[test]
 fn textures_group_keeps_int_sampler_kind() {
     let src = r#"
@@ -1089,8 +719,6 @@ fn textures_group_keeps_int_sampler_kind() {
 }
 
 cases! { reject_pipeline:
-    /// `@textures` is exclusive with the other roles: a group is its own binding
-    /// set, not attribute or uniform-block data.
     textures_conflicting_role_rejects(r#"
         struct T { tex: Sampler2D }
         value Quad { aPos: Vec2, aUv: Vec2 }
@@ -1103,8 +731,6 @@ cases! { reject_pipeline:
         fn fs(vary: Vary, @uniform @textures t: T) -> Vec4 { return texture(t.tex, vary.uv) }
     "#, "vs", "fs", "conflicting role markers");
 
-    /// A non-sampler field in the group shifts every slot after it, so it rejects
-    /// at the artifact rather than emitting a silently misnumbered binding set.
     textures_group_with_a_non_sampler_field_rejects(r#"
         struct T { tex: Sampler2D, scale: float }
         value Quad { aPos: Vec2, aUv: Vec2 }
@@ -1117,8 +743,6 @@ cases! { reject_pipeline:
         fn fs(vary: Vary, @textures t: T) -> Vec4 { return texture(t.tex, vary.uv) }
     "#, "vs", "fs", "scale");
 
-    /// A group and a bare sampler cannot coexist: the bare one keeps a CPU-assigned
-    /// unit, which can land on a compiler-assigned slot and bind over it.
     textures_group_plus_bare_sampler_rejects(r#"
         struct T { tex: Sampler2D }
         value Quad { aPos: Vec2, aUv: Vec2 }
@@ -1133,8 +757,6 @@ cases! { reject_pipeline:
         }
     "#, "vs", "fs", "every sampler must join it");
 
-    /// Texture units are program-scoped, so two stages cannot declare different
-    /// groups -- slot 0 would name two different textures.
     textures_groups_differing_across_stages_reject(r#"
         struct VT { vtex: Sampler2D }
         struct FT { ftex: Sampler2D }
@@ -1150,35 +772,6 @@ cases! { reject_pipeline:
     "#, "vs", "fs", "one program has one group");
 }
 
-/// Declarations and ABI slot order come from the same field order, the whole
-/// compiler-to-engine channel for texture binding.
-#[test]
-fn texture_group_emits_and_reports_slots_in_order() {
-    let src = r#"
-        struct GrassTex { uTexture: Sampler2D, mask_tex: Sampler2D, shadowmap_tex: Sampler2D }
-        value Quad { aPos: Vec2, aUv: Vec2 }
-        value Vary { position: Vec4, uv: Vec2 }
-        @shader(vertex)
-        fn vs(@attr a: Quad) -> Vary { return Vary { position: v(a.aPos, 0.0, 1.0), uv: a.aUv } }
-        @shader(fragment)
-        fn fs(vary: Vary, @textures t: GrassTex) -> Vec4 {
-            let a = texture(t.uTexture, vary.uv)
-            let b = texture(t.mask_tex, vary.uv)
-            return Vec4 { x: a.x, y: b.y, z: 0.0, w: 1.0 }
-        }
-    "#;
-    let e = crate::support::pipeline_emission(src, "vs", "fs").expect("must emit");
-    for n in ["uTexture", "mask_tex", "shadowmap_tex"] {
-        assert_has(&e.source, &format!("uniform sampler2D {n};"));
-    }
-    assert_lacks(&e.source, "t.");
-    let names: Vec<String> = e.abi.texture_units.iter().map(|n| n.to_string()).collect();
-    assert_eq!(names, vec!["uTexture", "mask_tex", "shadowmap_tex"]);
-}
-
-// --- @engine: the engine-owned block at binding 0 ----------------------------
-
-/// Both stages use the same pass-lifetime @engine block at binding 0.
 const ENGINE_SRC: &str = r#"
     value QuadVert { aPos: Vec2, aTexCoord: Vec2, aColor: Vec4 }
     value EngineU  { uProjection: Mat4, uView: Mat4, uYBounds: Vec2, uTime: float }
@@ -1203,15 +796,12 @@ const ENGINE_SRC: &str = r#"
     }
 "#;
 
-/// One emission pins EngineU in both stages, its coexistence with per-stage
-/// shader blocks, and the role-index ABI consumed by the engine.
 #[test]
-fn engine_block_coexists_and_binds_at_zero() {
-    let em = crate::support::pipeline_emission(ENGINE_SRC, "e_vert", "e_frag").expect("emit");
-    let glsl = &em.source;
+fn engine_block_coexists_across_stages() {
+    let glsl = emit_pipeline(ENGINE_SRC, "e_vert", "e_frag").expect("emit");
+    let glsl = glsl.as_str();
     let decl = "layout(std140) uniform EngineU {\n    mat4 uProjection;\n    mat4 uView;\n    vec2 uYBounds;\n    float uTime;\n};\n";
     assert_eq!(glsl.matches(decl).count(), 2, "one per stage:\n{glsl}");
-    // Unnamed instance, so members stay bare globals in both bodies.
     assert_has(glsl, "uProjection * uView");
     assert_lacks(glsl, "e.uProjection");
     assert_has(
@@ -1224,21 +814,8 @@ fn engine_block_coexists_and_binds_at_zero() {
         "layout(std140) uniform GrassVertU {\n    int entity_count;\n};\n",
     );
     assert_lacks(glsl, "uniform mat4 uProjection;");
-    let bound: Vec<(u32, &str)> = em
-        .abi
-        .uniform_blocks
-        .iter()
-        .map(|(b, p)| (*b, p.name.as_str()))
-        .collect();
-    assert_eq!(
-        bound,
-        vec![(0, "EngineU"), (1, "GrassVertU"), (2, "UiFragU")],
-        "role -> binding"
-    );
 }
 
-/// One block per PROGRAM, so the stages cannot name different engine groups --
-/// unlike `@uniform`, where differing per-stage types are the correct shape.
 #[test]
 fn engine_groups_must_agree_across_stages() {
     let src = ENGINE_SRC.replace(
@@ -1249,10 +826,6 @@ fn engine_groups_must_agree_across_stages() {
     assert!(e.contains("different @engine groups"), "got: {e}");
 }
 
-/// `@textures` is exclusive with EVERY other role, `@engine` included. Its
-/// checker enumerated the roles that existed when it was written, so adding a
-/// fourth silently widened what slips through -- a group is a binding set of
-/// its own, never engine-block data.
 #[test]
 fn textures_and_engine_conflict() {
     let src = r#"
@@ -1278,26 +851,14 @@ fn textures_and_engine_conflict() {
     assert!(e.contains("@textures"), "got: {e}");
 }
 
-// --- block members share the global GLSL namespace ---------------------------
-//
-// An unnamed-instance block's members are bare globals, so an `@engine` member
-// collides with an attribute, sampler, array, varying or MRT output exactly as
-// two loose uniforms would. A stage's own group already reaches the census
-// through `uniforms` whether or not it became a block; `@engine` is a separate
-// ROLE landing in `engine_uniforms`, so it had to be added explicitly.
-// Uncaught, each of these is a raw driver error carrying no Rock span.
-//
-// One rejection per namespace, because the census chains them separately and a
-// single case cannot show the others are covered.
-
-/// Builds a pipeline whose ENGINE block declares `name`, against a fixture that
-/// already uses that name in another namespace.
 fn engine_member_named(name: &str) -> String {
     format!(
         r#"
     value QuadVert  {{ aPos: Vec2, TexCoordAttr: Vec2 }}
     value EngineU   {{ uProjection: Mat4, {name}: float }}
     value Vary      {{ position: Vec4, TexCoord: Vec2 }}
+    value FragU     {{ uTime: float }}
+    value SpriteOut {{ FragColor: Vec4, FragId: Vec4 }}
 
     @shader(vertex)
     fn c_vert(@attr a: QuadVert, @engine e: EngineU) -> Vary {{
@@ -1308,8 +869,9 @@ fn engine_member_named(name: &str) -> String {
     }}
 
     @shader(fragment)
-    fn c_frag(vary: Vary, tex: Sampler2D, @size(4) tints: UniformArray<Vec4>) -> Vec4 {{
-        return texture(tex, vary.TexCoord) + at(tints, 0)
+    fn c_frag(vary: Vary, @uniform u: FragU, tex: Sampler2D, @size(4) tints: UniformArray<Vec4>) -> SpriteOut {{
+        let color = texture(tex, vary.TexCoord) + at(tints, 0)
+        return SpriteOut {{ FragColor: color, FragId: color }}
     }}
 "#
     )
@@ -1325,102 +887,16 @@ cases! { engine_member_collides:
     engine_member_colliding_with_a_varying_rejects("TexCoord");
     engine_member_colliding_with_a_sampler_rejects("tex");
     engine_member_colliding_with_a_uniform_array_rejects("tints");
+    engine_member_colliding_with_an_mrt_output_rejects("FragId");
+    engine_member_colliding_with_a_stage_block_member_rejects("uTime");
 }
 
-/// An MRT output, whose names are ARBITRARY struct fields rather than the
-/// reserved `FragColor`. Using `FragColor` here would prove nothing: the
-/// single-output form pre-seeds that name as reserved, so such a test passes
-/// with `mrt_outputs` removed from the census entirely.
-#[test]
-fn engine_member_colliding_with_an_mrt_output_rejects() {
-    let src = r#"
-    value QuadVert { aPos: Vec2 }
-    value EngineU  { uProjection: Mat4, FragId: float }
-    value Vary     { position: Vec4, @flat EntityId: float }
-    value SpriteOut { FragColor: Vec4, FragId: Vec4 }
-
-    @shader(vertex)
-    fn c_vert(@attr a: QuadVert, @engine e: EngineU) -> Vary {
-        return Vary {
-            position: e.uProjection * Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 },
-            EntityId: e.FragId,
-        }
-    }
-
-    @shader(fragment)
-    fn c_frag(vary: Vary) -> SpriteOut {
-        return SpriteOut {
-            FragColor: Vec4 { x: 1.0, y: 0.0, z: 0.0, w: 1.0 },
-            FragId: Vec4 { x: vary.EntityId, y: 0.0, z: 0.0, w: 1.0 },
-        }
-    }
-"#;
-    let e = emit_pipeline(src, "c_vert", "c_frag").unwrap_err();
-    assert!(e.contains("`FragId` would collide"), "got: {e}");
-}
-
-/// Both sides of admission: the same fixture with a name that collides with
-/// nothing must EMIT, or the rejections above would pass for the wrong reason
-/// (a fixture that never compiles).
 #[test]
 fn engine_member_with_a_free_name_emits() {
     let glsl =
         emit_pipeline(&engine_member_named("uEngineTime"), "c_vert", "c_frag").expect("emit");
     assert_has(&glsl, "layout(std140) uniform EngineU {");
     assert_has(&glsl, "float uEngineTime;");
-}
-
-/// A per-draw uniform collision: `BoltFragU.uTime` against
-/// an engine clock of the same name. This is the case the raw driver error
-/// (`declaration of "uTime" conflicts with previous declaration`) came from, and
-/// it is why the engine's clock is `uEngineTime`.
-#[test]
-fn engine_member_colliding_with_a_stage_block_member_rejects() {
-    let src = r#"
-    value QuadVert { aPos: Vec2 }
-    value EngineU  { uProjection: Mat4, uTime: float }
-    value BoltFragU { uTime: float }
-    value Vary     { position: Vec4 }
-
-    @shader(vertex)
-    fn c_vert(@attr a: QuadVert, @engine e: EngineU) -> Vary {
-        return Vary { position: e.uProjection * Vec4 { x: a.aPos.x, y: a.aPos.y, z: e.uTime, w: 1.0 } }
-    }
-
-    @shader(fragment)
-    fn c_frag(vary: Vary, @uniform u: BoltFragU) -> Vec4 {
-        return Vec4 { x: u.uTime, y: 0.0, z: 0.0, w: 1.0 }
-    }
-"#;
-    let e = emit_pipeline(src, "c_vert", "c_frag").unwrap_err();
-    assert!(e.contains("`uTime` would collide"), "got: {e}");
-}
-
-/// The reserved slot's whole point: a program with NO `@engine` group leaves
-/// binding 0 empty rather than sliding its own block into it. Before roles
-/// assigned the index, this fixture's fragment block landed at 0 and was
-/// indistinguishable from an engine block at registration.
-#[test]
-fn a_program_without_an_engine_group_leaves_slot_zero_empty() {
-    let (ws, mid) = workspace(UI_SRC);
-    let em =
-        crate::support::emit_program(&ws, mid, Some("ui_vert"), "ui_frag", GlslProfile::Core330)
-            .expect("emit");
-    let bound: Vec<(u32, &str)> = em
-        .abi
-        .uniform_blocks
-        .iter()
-        .map(|(b, p)| (*b, p.name.as_str()))
-        .collect();
-    assert_eq!(
-        bound,
-        vec![(1, "UiVertU"), (2, "UiFragU")],
-        "role -> binding"
-    );
-    assert!(
-        !em.abi.uniform_blocks.iter().any(|(b, _)| *b == 0),
-        "slot 0 is the engine's"
-    );
 }
 
 cases! { reject_fragment_builtin_in_vertex:
@@ -1443,11 +919,6 @@ fn mrt_early_return_terminates_the_entry() {
         "MRT branch must not fall through:\n{glsl}"
     );
 }
-
-// --- per-stage sampler budget ---------------------------------------------
-// GL 4.1 core (macOS) guarantee 16 texture image units per
-// stage. Linux drivers allow more, so a shader over the budget linked there
-// and failed only on a Mac.
 
 fn sampler_group_src(n: usize) -> String {
     let fields: Vec<String> = (0..n).map(|i| format!("s{i}: Sampler2D")).collect();

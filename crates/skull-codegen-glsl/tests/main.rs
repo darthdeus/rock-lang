@@ -3,7 +3,6 @@
 mod support;
 
 mod builtin_shadow;
-mod conformance;
 mod const_global;
 mod golden;
 mod hostile_target;

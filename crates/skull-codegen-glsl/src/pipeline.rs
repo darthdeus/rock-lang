@@ -18,9 +18,9 @@ fn emit_vertex_stage(
     stage: &StagePlan,
     v: &VertexShape,
     iface: &ShaderInterfacePlan,
-    program: &ProgramAbi<'_>,
+    abi: &ShaderAbiPlan,
 ) -> Result<String, CompilerError> {
-    let resolved = program.stage(IrStage::Vertex)?;
+    let resolved = stage_abi(iface, abi, IrStage::Vertex);
     let shape = EntryShape {
         global_params: v
             .attr_params
@@ -51,11 +51,15 @@ fn emit_vertex_stage(
     };
 
     let mut out = String::new();
-    for (n, t, loc) in &program.attributes {
+    for (loc, (name, kind)) in iface
+        .vertex_inputs
+        .iter()
+        .flat_map(|input| &input.attrs)
+        .enumerate()
+    {
         out.push_str(&format!(
-            "layout (location = {loc}) in {} {};\n",
-            t.name(),
-            n
+            "layout (location = {loc}) in {} {name};\n",
+            attr_glsl_ty(*kind).name(),
         ));
     }
     out.push('\n');
@@ -81,11 +85,11 @@ fn emit_fragment_stage(
     stage: &StagePlan,
     fs: &FragShape,
     iface: &ShaderInterfacePlan,
-    program: &ProgramAbi<'_>,
+    abi: &ShaderAbiPlan,
 ) -> Result<String, CompilerError> {
     let fref = stage.ir.entry.fref();
     let entry_f = &ws.module(fref.module).functions[fref.func];
-    let resolved = program.stage(IrStage::Fragment)?;
+    let resolved = stage_abi(iface, abi, IrStage::Fragment);
     // MRT: the entry is emitted as `void main()` destructuring its returned
     // output struct into the `layout(location=N) out` globals (like the vertex
     // varyings path). Single-output keeps the `vec4 <fn>()` + wrapper form.
@@ -451,25 +455,13 @@ pub(crate) fn render_shader_pipeline(
     plan: &PipelinePlan,
     profile: GlslProfile,
 ) -> Result<ShaderEmission, CompilerError> {
-    // Validated ONCE for the program: an unknown binding belongs to no stage,
-    // so re-running the check per stage says nothing the first run did not.
-    let vspan = ws.module(plan.vert.ir.entry.fref().module).functions
-        [plan.vert.ir.entry.fref().func]
-        .name_span;
-    let program = ProgramAbi::of(
-        &plan.interface,
-        &plan.abi,
-        &[IrStage::Vertex, IrStage::Fragment],
-        vspan,
-    )?;
-
     let vertex_block = emit_vertex_stage(
         ws,
         interner,
         &plan.vert,
         &plan.vshape,
         &plan.interface,
-        &program,
+        &plan.abi,
     )?;
     let pixel_block = emit_fragment_stage(
         ws,
@@ -477,7 +469,7 @@ pub(crate) fn render_shader_pipeline(
         &plan.frag,
         &plan.fshape,
         &plan.interface,
-        &program,
+        &plan.abi,
     )?;
 
     let version = profile_header(profile);
