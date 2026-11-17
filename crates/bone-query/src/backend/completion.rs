@@ -23,13 +23,11 @@ struct Request<'a> {
     next_is_open_paren: bool,
 }
 
-/// The project caches the general pipeline reads, each built by the first
-/// completion after an interface edit; `None` on the one-shot CLI path, which
-/// builds throwaways.
+/// Project indexes shared across completion requests until the interface changes.
 struct Caches<'a> {
-    reach: Option<&'a crate::reachability::ReachabilityIndex>,
-    freq: Option<&'a HashMap<Ustr, u32>>,
-    call_through: Option<&'a CallThroughIndex>,
+    reach: &'a crate::reachability::ReachabilityIndex,
+    freq: &'a HashMap<Ustr, u32>,
+    call_through: &'a CallThroughIndex,
     scoped_call_through: &'a mut HashMap<Ustr, ScopedCallThroughIndex>,
     visible_bindings: &'a mut HashMap<Ustr, Vec<crate::query::VisibleBinding>>,
 }
@@ -84,16 +82,16 @@ impl BoneWorkspace {
         let ws = session.workspace();
         let reach =
             &*reach.get_or_insert_with(|| crate::reachability::ReachabilityIndex::build(ws));
-        if let Some(items) = contextual_completions(session, Some(reach), &rq, &cx) {
+        if let Some(items) = contextual_completions(session, reach, &rq, &cx) {
             return items;
         }
         let ws = session.workspace();
         let freq = &*freq.get_or_insert_with(|| build_freq_index(ws));
         let call_through = &*call_through.get_or_insert_with(|| build_call_through(ws, reach));
         let caches = Caches {
-            reach: Some(reach),
-            freq: Some(freq),
-            call_through: Some(call_through),
+            reach,
+            freq,
+            call_through,
             scoped_call_through,
             visible_bindings,
         };
@@ -149,7 +147,7 @@ fn lexical_gate(src: &str, offset: usize, space_triggered: bool) -> Option<Vec<C
 /// dependencies) resolves a cross-file receiver type at incremental cost.
 fn contextual_completions(
     session: &mut Session,
-    reach: Option<&crate::reachability::ReachabilityIndex>,
+    reach: &crate::reachability::ReachabilityIndex,
     rq: &Request,
     cx: &CompletionCx,
 ) -> Option<Vec<CompletionItem>> {
@@ -229,7 +227,7 @@ fn contextual_completions(
 /// workspace), so here we just pass the enclosing (callee, arg index).
 fn member_access(
     session: &mut Session,
-    reach: Option<&crate::reachability::ReachabilityIndex>,
+    reach: &crate::reachability::ReachabilityIndex,
     rq: &Request,
     cx: &CompletionCx,
 ) -> Option<Vec<CompletionItem>> {
@@ -237,7 +235,7 @@ fn member_access(
     let arg_slot = cx
         .arg_call
         .as_ref()
-        .map(|(callee, idx, _)| (callee.clone(), *idx as usize));
+        .map(|(callee, idx, _)| (callee.as_str(), *idx as usize));
     // The receiver expression's inferred type. `None` means it isn't a
     // members-bearing type (`scale(x)` -> int).
     let by_recv = member_completions(
@@ -246,7 +244,7 @@ fn member_access(
         rq.src,
         rq.offset,
         &rq.prefix,
-        arg_slot.clone(),
+        arg_slot,
         cx.anchor,
         reach,
         cx.bool_chain,
@@ -279,7 +277,7 @@ fn member_access(
     // offering globals would be invalid UFCS suggestions) or it's a name
     // path. Only a receiver that ISN'T a members type (`scale(x).|` -> int)
     // falls through to general.
-    if !(resolved || cx.member.is_some() || !items.is_empty()) {
+    if !resolved && cx.member.is_none() {
         return None;
     }
     if rq.next_is_open_paren {
@@ -439,19 +437,17 @@ fn general_completions(
     // rendered-string type compare.
     let mut expected = cx.expected(ws, mid, inf, rq.offset);
     let t_build = bone_core::prelude::Instant::now();
-    let freq_owned;
-    let freq: &HashMap<Ustr, u32> = match caches.freq {
-        Some(f) => f,
-        None => {
-            freq_owned = build_freq_index(ws);
-            &freq_owned
-        }
-    };
     let has_expected = expected.is_some();
     let max_items = max_completion_items();
     let mut general: Vec<Cand> = {
-        let mut ranker =
-            GeneralRanker::new(&g, rq, cx, pattern_enum.as_deref(), expected.as_mut(), freq);
+        let mut ranker = GeneralRanker::new(
+            &g,
+            rq,
+            cx,
+            pattern_enum.as_deref(),
+            expected.as_mut(),
+            caches.freq,
+        );
         cands.into_iter().map(|c| ranker.rank(c)).collect()
     };
     // We only need the BEST `max_items`, not a full ordering -- the final
@@ -1124,20 +1120,12 @@ fn push_coroutine_synths(g: &GeneralCx, rq: &Request, cx: &CompletionCx, sink: &
 /// apply the fragment resolver before materializing names.
 fn push_reach_paths(
     g: &GeneralCx,
-    reach: Option<&crate::reachability::ReachabilityIndex>,
+    reach: &crate::reachability::ReachabilityIndex,
     rq: &Request,
     expected_types: &[String],
     sink: &mut Sink,
 ) {
     let (ws, frag) = (g.ws, g.frag);
-    let reach_owned;
-    let reach = match reach {
-        Some(r) => r,
-        None => {
-            reach_owned = crate::reachability::ReachabilityIndex::build(ws);
-            &reach_owned
-        }
-    };
     let pfx = rq.prefix.as_bytes();
     let show_private = rq.prefix.starts_with('_');
     let callable_spellings =
@@ -1224,10 +1212,6 @@ fn push_reach_paths(
     }
 }
 
-/// Whole-call-through-first-param candidates. The reach index (for
-/// local-arg expansion) and the precomputed call-through index are cached
-/// on the project and rebuilt only on non-BodyOnly edits; the one-shot CLI
-/// path builds throwaways.
 fn push_call_through(
     g: &GeneralCx,
     caches: &mut Caches,
@@ -1237,37 +1221,21 @@ fn push_call_through(
     sink: &mut Sink,
 ) -> CtCounts {
     let ws = g.ws;
-    let reach_owned;
-    let reach = match caches.reach {
-        Some(r) => r,
-        None => {
-            reach_owned = crate::reachability::ReachabilityIndex::build(ws);
-            &reach_owned
-        }
-    };
-    let ct_owned;
-    let ct = match caches.call_through {
-        Some(c) => c,
-        None => {
-            ct_owned = build_call_through(ws, reach);
-            &ct_owned
-        }
-    };
     let file = ws.module(g.mid).file;
     let scoped_index = caches
         .scoped_call_through
         .entry(file)
-        .or_insert_with(|| build_scoped_call_through(ws, g.frag, ct));
+        .or_insert_with(|| build_scoped_call_through(ws, g.frag, caches.call_through));
     call_through_param_completions(
         ws,
         g.mid,
         g.inf,
         rq.offset,
         &rq.prefix,
-        ct,
+        caches.call_through,
         g.frag,
         scoped_index,
-        reach,
+        caches.reach,
         score_leads,
         expected,
         g.enclosing_fn.as_deref(),

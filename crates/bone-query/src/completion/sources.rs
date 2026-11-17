@@ -1366,9 +1366,9 @@ pub(crate) fn member_completions(
     src: &str,
     offset: usize,
     prefix: &str,
-    arg_slot: Option<(String, usize)>,
+    arg_slot: Option<(&str, usize)>,
     anchor: Option<SlotAnchor>,
-    reach: Option<&crate::reachability::ReachabilityIndex>,
+    reach: &crate::reachability::ReachabilityIndex,
     bool_ctx: bool,
     members: impl Fn(&Workspace, ModuleId) -> Option<crate::query::Members<'_>>,
 ) -> Option<Vec<CompletionItem>> {
@@ -1384,7 +1384,7 @@ pub(crate) fn member_completions(
                 offset,
                 members(ws, mid)?,
                 prefix,
-                arg_slot.clone(),
+                arg_slot,
                 anchor,
                 reach,
                 bool_ctx,
@@ -1539,9 +1539,9 @@ fn build_member_items(
     offset: usize,
     members: crate::query::Members<'_>,
     prefix: &str,
-    arg_slot: Option<(String, usize)>,
+    arg_slot: Option<(&str, usize)>,
     anchor: Option<SlotAnchor>,
-    reach: Option<&crate::reachability::ReachabilityIndex>,
+    reach: &crate::reachability::ReachabilityIndex,
     bool_ctx: bool,
     // A `(` already follows the cursor -- method items insert the bare name so
     // accepting doesn't double the parens (`recv.le|()` -> `recv.len()`).
@@ -1582,9 +1582,8 @@ fn build_member_items(
         // filtered `.rendered` still feeds the string-keyed reach index. None
         // when not in an arg slot or the body has no cached inference -- then
         // there's no type direction (kind/name order), same as before.
-        let mut expected = arg_slot.as_ref().and_then(|(callee, idx)| {
-            let inf = ws.inference(mid)?;
-            ExpectedArg::for_call(ws, mid, inf, offset, callee, *idx, None)
+        let mut expected = arg_slot.and_then(|(callee, idx)| {
+            ExpectedArg::for_call(ws, mid, ws.inference(mid)?, offset, callee, idx, None)
         });
         if expected.is_none() {
             // Slot-anchored contexts (assignment/comparison RHS, typed-`let`,
@@ -1809,25 +1808,11 @@ fn build_member_items(
                 });
             }
         }
-        // In a call-arg position with a known expected type, also offer
-        // TRANSITIVE suffix paths through the receiver -- fields, UFCS method
-        // returns, or a MIX (`movable.to_ivec()` when the param wants an IVec2)
-        // -- via the reachability index. Multi-hop only: 1-hop fields/methods are
-        // already in `field_items`/`method_items` above. The index keys on
-        // type-name strings, so the live-built one serves the munged buffer; if
-        // it's missing, build a local one from this workspace.
+        // The live index uses type names, so it also serves the speculative workspace.
         let reach_targets: &[String] = expected.as_ref().map_or(&[], |e| &e.rendered);
         if !reach_targets.is_empty() {
             if let Some(rs) = recv_struct {
-                let local_idx;
-                let idx = match reach {
-                    Some(r) => r,
-                    None => {
-                        local_idx = crate::reachability::ReachabilityIndex::build(ws);
-                        &local_idx
-                    }
-                };
-                let res = idx.paths_to(rs.as_str(), reach_targets, REACH_CAP, Some((ws, frag)));
+                let res = reach.paths_to(rs.as_str(), reach_targets, REACH_CAP, Some((ws, frag)));
                 let pfx = prefix.as_bytes();
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 for p in res.paths {
