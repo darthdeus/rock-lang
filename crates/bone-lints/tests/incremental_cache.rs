@@ -136,26 +136,35 @@ fn local_body_findings_can_be_added_and_removed() {
 
 #[test]
 fn suppression_edits_hide_and_restore_findings() {
-    let old = "fn main() {\n    let unused = 1\n}\n";
-    let suppressed = "fn main() {\n    // rock: allow(unused_var)\n    let unused = 1\n}\n";
-    let at = suppressed.find("// rock").expect("suppression");
-    let mut cache = seed(old);
-
-    let (hidden, _) = edit(
-        &mut cache,
-        suppressed,
-        None,
-        Some(shift(at, old, suppressed, 1)),
-    );
-    assert!(hidden.is_empty());
-
-    let (shown, _) = edit(
-        &mut cache,
-        old,
-        Some("main"),
-        Some(shift(at, suppressed, old, -1)),
-    );
-    assert!(shown.iter().any(|finding| finding.lint == UNUSED_VAR));
+    for (old, suppressed, lint) in [
+        (
+            "fn main() {\n    let unused = 1\n}\n",
+            "fn main() {\n    // rock: allow(unused_var)\n    let unused = 1\n}\n",
+            UNUSED_VAR,
+        ),
+        (
+            "fn dead() {}\nfn main() {}\n",
+            "// rock: allow(unused_fn)\nfn dead() {}\nfn main() {}\n",
+            bone_lints::UNUSED_FN,
+        ),
+    ] {
+        let at = suppressed.find("// rock").expect("suppression");
+        let mut cache = seed(old);
+        let (hidden, _) = edit(
+            &mut cache,
+            suppressed,
+            None,
+            Some(shift(at, old, suppressed, 1)),
+        );
+        assert!(hidden.is_empty());
+        let (shown, _) = edit(
+            &mut cache,
+            old,
+            Some("main"),
+            Some(shift(at, suppressed, old, -1)),
+        );
+        assert_eq!(shown.iter().filter(|f| f.lint == lint).count(), 1);
+    }
 }
 
 #[test]

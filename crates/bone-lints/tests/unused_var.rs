@@ -70,6 +70,7 @@ fn unread_bindings_are_flagged() {
 #[test]
 fn used_or_exempt_bindings_are_not_flagged() {
     let cases: &[&str] = &[
+        "enum Opt { Some { value: int } }\nfn f() -> Opt { let n = 1; Opt::Some { value: n } }",
         // x is read, must not be flagged
         "fn f() -> int {\n    let x = 5\n    x\n}",
         // `_x` opts out of the warning

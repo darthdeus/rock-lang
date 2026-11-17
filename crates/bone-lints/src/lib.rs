@@ -1239,18 +1239,9 @@ impl IncrementalLintCache {
         let variants = self.variants.clone();
         let suppression_only =
             !suppression_changed_files.is_empty() && change.reinferred.is_empty();
-        let flat_enabled = sel.enabled(UNUSED_VAR) || sel.enabled(UNUSED_PURE_EXPR);
-        let inference_enabled = sel.enabled(TRANSMUTE_OF_NULLABLE)
-            || sel.enabled(TASK_NULL_ABANDON)
-            || sel.enabled(ROW_ESCAPE)
-            || sel.enabled(STDLIB_UFCS)
-            || sel.enabled(DEPRECATED);
         let mut flat_targets: FxHashSet<(ModuleId, BodyOwner)> = FxHashSet::default();
-        let mut inference_targets: FxHashSet<(ModuleId, BodyOwner)> = if inference_enabled {
-            change.reinferred.iter().copied().collect()
-        } else {
-            FxHashSet::default()
-        };
+        let mut inference_targets: FxHashSet<(ModuleId, BodyOwner)> =
+            change.reinferred.iter().copied().collect();
         if !reseeded_files.is_empty() {
             inference_targets.retain(|(mid, _)| !reseeded_files.contains(&ws.module(*mid).file));
         }
@@ -1268,19 +1259,13 @@ impl IncrementalLintCache {
                 continue;
             }
             let owners = || module.bodies.keys().map(|&owner| (module.id, owner));
-            if flat_enabled {
-                flat_targets.extend(owners());
-            }
-            if inference_enabled {
-                inference_targets.extend(owners());
-            }
+            flat_targets.extend(owners());
+            inference_targets.extend(owners());
         }
-        if flat_enabled {
-            flat_targets.extend(change.reinferred.iter().copied().filter(|(mid, _)| {
-                let file = ws.module(*mid).file;
-                change.changed_files.contains(&file) && !reseeded_files.contains(&file)
-            }));
-        }
+        flat_targets.extend(change.reinferred.iter().copied().filter(|(mid, _)| {
+            let file = ws.module(*mid).file;
+            change.changed_files.contains(&file) && !reseeded_files.contains(&file)
+        }));
 
         let mut dirty_output_files = change.changed_files.clone();
         dirty_output_files.extend(

@@ -134,3 +134,18 @@ fn flags_logical_binop() {
         "a logical `&&` root is generic, not a comparison"
     );
 }
+
+#[test]
+fn macro_diagnostics_share_the_invocation_span() {
+    let src = "macro declare() -> int { 1; 2; 0 }\nfn main() { let _a = declare() }";
+    let fs = findings(src);
+    assert_eq!(fs.len(), 2);
+    assert_eq!(fs[0].error.message, fs[1].error.message);
+    let start = src.rfind("declare()").unwrap();
+    for f in fs {
+        assert_eq!(
+            f.error.labels[0].span.offset_range(),
+            (start, start + "declare()".len())
+        );
+    }
+}
