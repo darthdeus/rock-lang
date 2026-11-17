@@ -1,6 +1,6 @@
 //! Printing order and edge classification over a reducible CFG's placement.
 
-use super::structure::Placement;
+use super::structure::{Placement, Succ};
 use crate::mir::{Block, Inst, Lit, MirFunc, Term};
 use comfy_la_arena::Idx;
 
@@ -49,6 +49,23 @@ pub fn thread_forwarders(
         }
     }
     forward
+}
+
+/// Successor table after threading edges through empty forwarding blocks.
+pub fn threaded_successors(func: &MirFunc, forward: &[u32]) -> Succ {
+    let n = func.blocks.len();
+    let mut succ = Succ {
+        offsets: Vec::with_capacity(n + 1),
+        targets: Vec::with_capacity(n * 2),
+    };
+    succ.offsets.push(0);
+    for (_, block) in func.blocks.iter() {
+        super::successors(&block.term, |target| {
+            succ.targets.push(forward[index(target)]);
+        });
+        succ.offsets.push(succ.targets.len() as u32);
+    }
+    succ
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

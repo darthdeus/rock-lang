@@ -2,9 +2,7 @@
 
 use super::*;
 use skull_mir::cfg::placement::{self as walk, BlockFlow, NativeLoop, PlacementEmit};
-use skull_mir::cfg::structure::{
-    self as cfg_structure, CountedBound, CountedLoop, Placement, Succ,
-};
+use skull_mir::cfg::structure::{self as cfg_structure, CountedBound, CountedLoop, Placement};
 
 const NESTING_COST_ELSE_IF: u32 = 2;
 const NESTING_COST_BRANCH: u32 = 5;
@@ -35,17 +33,7 @@ impl Shape {
             !counted.contains_key(&b) && !em.block_has_statement(b)
         });
 
-        let mut succ = Succ {
-            offsets: Vec::with_capacity(func.blocks.len() + 1),
-            targets: Vec::with_capacity(func.blocks.len() * 2),
-        };
-        succ.offsets.push(0);
-        for (_, block) in func.blocks.iter() {
-            skull_mir::cfg::successors(&block.term, |target| {
-                succ.targets.push(forward[raw(target) as usize]);
-            });
-            succ.offsets.push(succ.targets.len() as u32);
-        }
+        let succ = walk::threaded_successors(func, &forward);
 
         let mut unplaced = Vec::with_capacity(counted.len());
         for (&header, loop_info) in &counted {

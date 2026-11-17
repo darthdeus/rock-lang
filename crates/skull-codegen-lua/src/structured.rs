@@ -22,7 +22,7 @@
 //! time the label would be printed.
 
 use super::*;
-use skull_mir::cfg::structure::{Placement, Succ, place};
+use skull_mir::cfg::structure::{Placement, place};
 
 #[inline]
 fn bx(b: Idx<Block>) -> usize {
@@ -64,17 +64,7 @@ impl Shape {
         {
             return None;
         }
-        // An unreachable block's edges are listed unthreaded; `place` never
-        // reads them.
-        let mut succ = Succ {
-            offsets: Vec::with_capacity(n + 1),
-            targets: Vec::with_capacity(n * 2),
-        };
-        succ.offsets.push(0);
-        for (_, blk) in func.blocks.iter() {
-            successors(&blk.term, |s| succ.targets.push(forward[bx(s)]));
-            succ.offsets.push(succ.targets.len() as u32);
-        }
+        let succ = placement::threaded_successors(func, &forward);
         let mut latch_of = vec![NONE; n];
         let mut unplaced: Vec<Idx<Block>> = Vec::with_capacity(counted.len());
         for (&h, cl) in counted {
