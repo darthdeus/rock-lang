@@ -77,15 +77,15 @@ fn kill_pid(pid: u32) -> bool {
 
 #[cfg(all(test, unix))]
 mod tests {
+    // Kills only its own child: cleanup_all_children would also kill
+    // children registered by tests running concurrently in this binary.
     #[test]
-    fn cleanup_kills_registered_children() {
+    fn kill_pid_kills_a_running_child() {
         let mut child = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
             .unwrap();
-        super::register_child_process(child.id());
-        super::cleanup_all_children();
-        super::unregister_child_process(child.id());
+        assert!(super::kill_pid(child.id()));
         assert!(!child.wait().unwrap().success());
     }
 }
