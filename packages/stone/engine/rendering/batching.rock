@@ -121,6 +121,46 @@ fn sprite_batch(
     )
 }
 
+// Each quad supplies a batch-local row through Vertex.colorize. Equal texture,
+// pipeline and ordering state share a draw; full uniform arrays spill into the
+// same bounded slot scheme as parametric UI quads.
+pub fn parametric_sprite_batch(
+    image: SampledTexture,
+    layer: int = DEFAULT_RENDER_LAYER,
+    depth: DepthMode = DepthMode::TestWrite,
+    blend: BlendMode = BlendMode::Alpha,
+    pixel_snap: bool = false,
+    normal: SampledTexture? = null,
+    surface: SampledTexture? = null,
+    pipeline: Pipeline? = null,
+    unlit: bool = false,
+    sampling: TextureFilter? = null,
+    order: int = 0,
+) -> RenderBatch {
+    let pipe = pipeline ?? { error("parametric_sprite_batch requires a pipeline"); return sprite_batch(image) }
+    if !pipe.parametric_quads { error("parametric_sprite_batch requires parametric_quad_pipeline") }
+    let lit = unlit || blend == BlendMode::Additive
+    let batch = ensure_batch_of(image, layer, blend, pixel_snap, depth,
+        order: order, normal: normal, pipeline: pipe, unlit: lit,
+        sampling: sampling, surface: surface, shared_pipeline: true)
+    batch_parametric_shader_layout(batch, pipe.shader_name)
+    if parametric_batch_has_room(batch) { return batch }
+    let base = batch_key_of(image, layer, blend, pixel_snap, depth, order,
+        normal, pipe, lit, resolve_sampling(image, sampling), shared_pipeline: true, surface: surface)
+    let slot = parametric_batch_slot(base)
+    while !parametric_batch_has_room(batch) {
+        batch = ensure_batch_of(image, layer, blend, pixel_snap, depth,
+            order: order, normal: normal, pipeline: pipe, unlit: lit,
+            sampling: sampling, surface: surface, shared_pipeline: true, parametric_slot: slot)
+        batch_parametric_shader_layout(batch, pipe.shader_name)
+        if parametric_batch_has_room(batch) { break }
+        let cursor = PARAMETRIC_BATCH_CURSOR.get(base).unwrap()
+        cursor.slot += 1
+        slot = cursor.slot
+    }
+    return batch
+}
+
 // The batch a sprite-quad draw lands in, as its own step. `draw_sprite_quad`
 // resolves one per call; a caller emitting many quads that all share a batch
 // resolves it ONCE outside its loop and pushes through `draw_sprite_quad_into`.

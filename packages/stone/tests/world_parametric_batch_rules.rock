@@ -1,0 +1,63 @@
+use stone::*
+
+@shader(fragment)
+fn world_parametric_frag(vary: SpriteVary,
+    @size(128) p0: UniformArray<Vec4>, @size(128) p1: UniformArray<Vec4>,
+    @size(128) p2: UniformArray<Vec4>, @size(128) p3: UniformArray<Vec4>,
+    @size(128) p4: UniformArray<Vec4>, @size(128) p5: UniformArray<Vec4>,
+    @size(128) p6: UniformArray<Vec4>) -> Vec4 {
+    let i = vary.Colorize as int
+    let sum = at(p0, i) + at(p1, i) + at(p2, i) + at(p3, i)
+        + at(p4, i) + at(p5, i) + at(p6, i)
+    return v(sum.xyz / 7.0, 1.0)
+}
+
+fn world_parametric_emit(image: SampledTexture, pipe: Pipeline, pos: Vec2, value: float) -> RenderBatch {
+    let b = parametric_sprite_batch(image, pipeline: pipe)
+    let row = batch_parametric_reserve(b)
+    for column in 0..7 {
+        let component = value * float(column + 1) / 4.0
+        batch_parametric_write(b, row, column, v(component, component, component, 1.0))
+    }
+    draw_sprite_into(b, image, pos, irect(0, 0, 1, 1), v(2.0, 2.0), v(0.5, 0.5),
+        0.0, false, false, WHITE, 0.0, null, 0, row as float)
+    return b
+}
+
+@test
+fn world_parametric_sprites_pack_shader_sized_rows_and_reuse_overflow() {
+    world_flush_fixture(() => {
+        let image = sampled_image(WHITE_PIXEL.unwrap())
+        let pipe = parametric_quad_pipeline(rock_shader(sprite_batch_vert, world_parametric_frag))
+        let first = world_parametric_emit(image, pipe, v(-3.0, 0.0), 0.125)
+        let keys = BATCH_KEY_BUILDS
+        for _ in 1..128 { let _ = world_parametric_emit(image, pipe, v(-3.0, 0.0), 0.25) }
+        assert_eq(BATCH_KEY_BUILDS, keys, "warm world sprites share the texture-keyed fast path")
+        let second = world_parametric_emit(image, pipe, v(3.0, 0.0), 0.75)
+        assert(first != second, "full shader arrays spill into a separate batch")
+        assert_eq(first.parametric_capacity, 128)
+        assert_eq(first.parametric_columns.len(), 7)
+        assert_eq(first.parametric_count, 128)
+        assert_eq(second.parametric_count, 1)
+        for column in 0..7 {
+            assert_eq(first.parametric_columns[column][127 * 4], 0.25 * float(column + 1) / 4.0)
+            assert_eq(second.parametric_columns[column][0], 0.75 * float(column + 1) / 4.0)
+        }
+        for vertex in 0..6 {
+            assert_eq(first.verts[127 * 6 + vertex].colorize, 127.0)
+            assert_eq(second.verts[vertex].colorize, 0.0)
+        }
+        let values = world_flush_frame([v(-3.0, 0.0), v(3.0, 0.0)])
+        assert(abs(values[0] - 0.25) < 0.02, "all seven columns reach the first batch's shader")
+        assert(abs(values[1] - 0.75) < 0.02, "overflow row zero retains its own parameters")
+        RENDER_FRAME += 1
+        let births = POOL_BIRTHS
+        let reused = world_parametric_emit(image, pipe, v(-3.0, 0.0), 0.5)
+        assert_eq(reused, first)
+        assert_eq(POOL_BIRTHS, births, "the next frame reuses its base batch")
+        assert_eq(first.parametric_count, 1)
+        assert_eq(first.verts[0].colorize, 0.0)
+        let updated = world_flush_frame([v(-3.0, 0.0)])
+        assert(abs(updated[0] - 0.5) < 0.02, "frame reuse uploads the new payload")
+    })
+}

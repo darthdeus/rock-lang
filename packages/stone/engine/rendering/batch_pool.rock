@@ -147,9 +147,9 @@ fn render_batch_retire(rows: Arena<RenderBatch>, handle: Entity<RenderBatch>) {
     batch.pipeline = null
     batch.block = null
     batch.block_frame = -1
-    batch.parametric_0 = null
-    batch.parametric_1 = null
-    batch.parametric_2 = null
+    batch.parametric_columns.clear()
+    batch.parametric_capacity = PARAMETRIC_QUAD_CAP
+    batch.parametric_layout_frame = -1
     let _ = handle.remove()
 }
 
