@@ -188,21 +188,6 @@ fn source_file_from_canonical_path(path: &Path, preprocess: bool) -> Result<Sour
     create_source_file(file, source)
 }
 
-pub fn source_file_from_code(id_path: String, contents: String) -> SourceFile {
-    let source = preprocess_content(&contents, false).unwrap_or_else(|e| {
-        eprintln!("rock: preprocessor error for `{id_path}`: {e:#}");
-        PreprocessedSource {
-            content: contents.clone(),
-            is_script: false,
-            is_test: false,
-            is_test_util: false,
-            used_packages: vec![],
-        }
-    });
-    let file = FileContents::Code { id_path, contents };
-    create_source_file(file, source).unwrap_or_else(|e| panic!("rock: {e:#}"))
-}
-
 #[cfg(test)]
 mod production_tests {
     use rock_core::SourceFiles;
@@ -242,8 +227,6 @@ mod production_tests {
             .collect();
 
         assert_eq!(paths.as_slice(), std::slice::from_ref(&main_path));
-        assert!(!SourceFiles::is_test_only_path(&main_path, &project_root).unwrap());
-        assert!(SourceFiles::is_test_only_path(&broken_path, &project_root).unwrap());
     }
 }
 

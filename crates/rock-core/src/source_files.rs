@@ -110,25 +110,6 @@ impl SourceFiles {
         }
     }
 
-    /// Whether a package-owned path sits under a `tests` component of `root`.
-    /// Path components above `root` are ignored, and a path outside `root` is
-    /// an error rather than a guess. Unowned sources may legitimately live
-    /// outside the project root, so production filtering calls the private
-    /// helper with `tagged = false` for them.
-    pub fn is_test_only_path(path: &str, root: &Path) -> Result<bool, CompilerError> {
-        Self::is_test_only_path_for_source(path, root, true)
-    }
-
-    fn is_test_only_path_for_source(
-        path: &str,
-        root: &Path,
-        tagged: bool,
-    ) -> Result<bool, CompilerError> {
-        let canonical_root = root.canonicalize().map_err(|error| error.to_string());
-        let canonical_root = Self::canonical_root_for(path, root, &canonical_root)?;
-        Self::is_test_only_path_under(path, root, canonical_root, tagged, &mut Default::default())
-    }
-
     fn canonical_root_for<'a>(
         path: &str,
         root: &Path,
@@ -372,13 +353,16 @@ mod tests {
         let out_of_tests = project_root.join("tests/production/main.rock");
         let plain = project_root.join("src/main.rock");
 
-        assert!(
-            SourceFiles::is_test_only_path(through_link.to_str().unwrap(), &project_root).unwrap()
-        );
-        assert!(
-            !SourceFiles::is_test_only_path(out_of_tests.to_str().unwrap(), &project_root).unwrap()
-        );
-        assert!(!SourceFiles::is_test_only_path(plain.to_str().unwrap(), &project_root).unwrap());
+        let sources = SourceFiles::empty();
+        let filter = sources.production_filter(&project_root);
+        let keeps = |path: &Path| {
+            filter
+                .keeps(&source(path.to_str().unwrap()), &mut Default::default())
+                .unwrap()
+        };
+        assert!(!keeps(&through_link));
+        assert!(keeps(&out_of_tests));
+        assert!(keeps(&plain));
         std::fs::remove_dir_all(temp_root).unwrap();
     }
 }

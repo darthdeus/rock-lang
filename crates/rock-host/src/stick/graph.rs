@@ -432,12 +432,6 @@ impl PackageGraph {
         best.map(|(id, _)| id)
     }
 
-    /// Whether `owner` contributes `path` to the compile set. A nested package
-    /// owns its files instead of its enclosing package.
-    pub fn owns_file(&self, owner: PackageId, path: &Path) -> bool {
-        self.owns(owner, path, |path| self.package_of_file(path))
-    }
-
     fn owns(
         &self,
         owner: PackageId,
@@ -839,9 +833,9 @@ mod tests {
             .id;
         let root_file = fs::canonicalize(root.join("root.rock")).unwrap();
         let inner_file = fs::canonicalize(inner.join("inner.rock")).unwrap();
-        assert!(graph.owns_file(root_id, &root_file));
-        assert!(!graph.owns_file(root_id, &inner_file));
-        assert!(graph.owns_file(inner_id, &inner_file));
+        assert!(graph.includes_file(root_id, &root_file));
+        assert!(!graph.includes_file(root_id, &inner_file));
+        assert!(graph.includes_file(inner_id, &inner_file));
     }
 
     #[test]
@@ -964,9 +958,9 @@ mod tests {
         let root_id = graph.root();
         let main = fs::canonicalize(root.join("main.rock")).expect("canonical main");
         let inner_lib = fs::canonicalize(inner.join("lib.rock")).expect("canonical inner");
-        assert!(graph.owns_file(root_id, &main));
+        assert!(graph.includes_file(root_id, &main));
         assert!(
-            !graph.owns_file(root_id, &inner_lib),
+            !graph.includes_file(root_id, &inner_lib),
             "inner's file is not the root's"
         );
         let inner_id = graph

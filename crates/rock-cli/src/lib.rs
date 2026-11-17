@@ -14,9 +14,7 @@ pub use atomic_refcell::AtomicRefCell;
 pub use log::{debug, error, info, trace, warn};
 pub use rock_core::*;
 pub use rock_host::process_management::*;
-pub use rock_host::source_files::{
-    SourceFilesExt, source_file_from_code, source_file_new_preprocessed,
-};
+pub use rock_host::source_files::SourceFilesExt;
 pub use rock_host::stick::{
     StickConfig,
     graph::{PackageGraph, PackageId, PackageNode},

@@ -71,10 +71,6 @@ impl ModuleSet {
         &self.owned
     }
 
-    pub fn rest_mut(&mut self) -> &mut [Ast] {
-        &mut self.owned
-    }
-
     /// Append an owned module.
     pub fn push(&mut self, module: Ast) {
         self.owned.push(module);
