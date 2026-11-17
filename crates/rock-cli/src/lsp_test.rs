@@ -7,7 +7,8 @@ use std::process::{Command, Stdio};
 #[derive(Debug, Clone)]
 struct LspTest {
     name: String,
-    test_type: String, // completion, goto_definition, hover, etc.
+    test_type: String,
+    reply_kind: ReplyKind,
     code: String,
     /// Multi-file projects use `FILES:` / `FILE:` blocks in the test source.
     /// When non-empty, `code` holds the content of the primary file (the one
@@ -39,40 +40,10 @@ struct LspTest {
 
 #[derive(Debug, Clone)]
 enum LspOperation {
-    Completion {
-        line: usize,
-        character: usize,
-    },
-    GotoDefinition {
-        line: usize,
-        character: usize,
-    },
-    GotoTypeDefinition {
-        line: usize,
-        character: usize,
-    },
-    Hover {
-        line: usize,
-        character: usize,
-    },
-    References {
-        line: usize,
-        character: usize,
-    },
-    InlayHints,
-    Rename {
-        line: usize,
-        character: usize,
-        new_name: String,
-    },
-    SemanticTokens,
-    SignatureHelp {
-        line: usize,
-        character: usize,
-    },
-    DocumentSymbols,
-    WorkspaceSymbols {
-        query: String,
+    OneShot {
+        subcommand: &'static str,
+        position: Option<(usize, usize)>,
+        argument: Option<String>,
     },
     CodeAction {
         line: usize,
@@ -171,14 +142,11 @@ fn fixture_error(path: &Path, name: &str, msg: impl std::fmt::Display) -> anyhow
 /// Consume a block's remaining lines through its `===` terminator (or the end
 /// of the file). A `TEST:` line before `===` means the terminator is missing,
 /// which would merge two fixtures.
-fn skip_to_block_end<'a, I>(
-    lines: &mut std::iter::Peekable<I>,
+fn skip_to_block_end<'a>(
+    lines: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
     path: &Path,
     name: &str,
-) -> Result<()>
-where
-    I: Iterator<Item = &'a str>,
-{
+) -> Result<()> {
     while let Some(line) = lines.peek() {
         if line.starts_with("TEST:") {
             return Err(fixture_error(path, name, "block has no closing `===`"));
@@ -194,25 +162,20 @@ where
 /// with one of `stop_prefixes`. Returns the collected files (name, content)
 /// with all cursor markers stripped, plus the cursor position if any.
 #[allow(clippy::type_complexity)]
-fn parse_files_block<'a, I>(
-    lines: &mut std::iter::Peekable<I>,
+fn parse_files_block<'a>(
+    lines: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
     stop_prefixes: &[&str],
     path: &Path,
     name: &str,
 ) -> Result<(
     Vec<(String, String)>,
     Option<(String, usize, usize)>, // (file_name, line, char)
-)>
-where
-    I: Iterator<Item = &'a str>,
-{
+)> {
     let mut files: Vec<(String, String)> = Vec::new();
     let mut cursor: Option<(String, usize, usize)> = None;
 
     // Optional leading `---` after `FILES:` / `EXPECTED:`
-    if lines.peek().map(|l| l.starts_with("---")).unwrap_or(false) {
-        lines.next();
-    }
+    lines.next_if(|l| l.starts_with("---"));
 
     while let Some(line) = lines.peek() {
         if stop_prefixes.iter().any(|p| line.starts_with(p)) {
@@ -222,31 +185,17 @@ where
             let file_name = rest.trim().to_string();
             lines.next();
             // consume leading `---`
-            if lines.peek().map(|l| l.starts_with("---")).unwrap_or(false) {
-                lines.next();
+            lines.next_if(|l| l.starts_with("---"));
+            let (content, position) = source_lines(lines, |line| {
+                line.starts_with("---") || stop_prefixes.iter().any(|p| line.starts_with(p))
+            });
+            lines.next_if(|line| line.starts_with("---"));
+            if let Some((line, character)) = position {
+                if cursor.is_none() {
+                    cursor = Some((file_name.clone(), line, character));
+                }
             }
-            // collect content until next `---` or stop prefix
-            let mut content_lines: Vec<String> = Vec::new();
-            let mut file_line_num: usize = 0;
-            while let Some(l) = lines.peek() {
-                if l.starts_with("---") {
-                    lines.next();
-                    break;
-                }
-                if stop_prefixes.iter().any(|p| l.starts_with(p)) {
-                    break;
-                }
-                let raw = lines.next().unwrap();
-                let (clean, cursor_pos) = strip_markers(raw);
-                if let Some(c) = cursor_pos {
-                    if cursor.is_none() {
-                        cursor = Some((file_name.clone(), file_line_num, c));
-                    }
-                }
-                content_lines.push(clean);
-                file_line_num += 1;
-            }
-            files.push((file_name, content_lines.join("\n")));
+            files.push((file_name, content));
         } else if line.trim().is_empty() {
             lines.next();
         } else {
@@ -268,19 +217,51 @@ where
     Ok((files, cursor))
 }
 
+fn source_lines<'a>(
+    lines: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+    stop: impl Fn(&str) -> bool,
+) -> (String, Option<(usize, usize)>) {
+    let mut content = Vec::new();
+    let mut cursor = None;
+    while let Some(line) = lines.next_if(|line| !stop(line)) {
+        let (clean, column) = strip_markers(line);
+        if let Some(column) = column {
+            cursor.get_or_insert((content.len(), column));
+        }
+        content.push(clean);
+    }
+    (content.join("\n"), cursor)
+}
+
+fn fixture_directive<'a>(
+    lines: &mut impl Iterator<Item = &'a str>,
+    path: &Path,
+    name: &str,
+    directive: &str,
+    after: &str,
+) -> Result<&'a str> {
+    let line = lines
+        .next()
+        .ok_or_else(|| fixture_error(path, name, format!("file ends before `{directive}`")))?;
+    line.strip_prefix(directive).map(str::trim).ok_or_else(|| {
+        fixture_error(
+            path,
+            name,
+            format!("expected `{directive}` after {after}, found {line:?}"),
+        )
+    })
+}
+
 /// The position a positional operation runs at: an explicit `POSITION:` line,
 /// else the code block's cursor marker. A fixture with neither has nowhere to
 /// send the request.
-fn operation_position<'a, I>(
-    lines: &mut std::iter::Peekable<I>,
+fn operation_position<'a>(
+    lines: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
     cursor: Option<(usize, usize)>,
     path: &Path,
     name: &str,
     op_type: &str,
-) -> Result<(usize, usize)>
-where
-    I: Iterator<Item = &'a str>,
-{
+) -> Result<(usize, usize)> {
     if let Some(pos_line) = lines.next_if(|l| l.starts_with("POSITION:")) {
         return parse_position(pos_line).map_err(|e| fixture_error(path, name, e));
     }
@@ -330,37 +311,23 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
         };
         let name = name.trim().to_string();
 
-        let test_type = match lines.next() {
-            Some(next_line) if next_line.starts_with("TYPE:") => {
-                next_line.strip_prefix("TYPE:").unwrap().trim().to_string()
-            }
-            Some(next_line) => {
-                return Err(fixture_error(
-                    path,
-                    &name,
-                    format!("expected `TYPE:` after `TEST:`, found {next_line:?}"),
-                ));
-            }
-            None => return Err(fixture_error(path, &name, "file ends before `TYPE:`")),
-        };
-
+        let test_type = fixture_directive(&mut lines, path, &name, "TYPE:", "`TEST:`")?;
         // A TYPE the harness cannot decode is refused here, naming itself: a
         // dropped fixture is a vacuous pass, and comparing its raw reply
         // would accept output the server never shaped. `edit_sequence`
         // fixtures are read by `parse_edit_sequence_tests`.
-        let type_kind = fixture_reply_kind(&test_type);
-        if type_kind.is_none() && test_type != "edit_sequence" {
+        if test_type == "edit_sequence" {
+            skip_to_block_end(&mut lines, path, &name)?;
+            continue;
+        }
+        let Some((reply_kind, _, _)) = fixture_request(test_type) else {
             return Err(anyhow::anyhow!(
                 "{}: test '{}' has TYPE '{}', which has no reply decoder",
                 path.display(),
                 name,
                 test_type
             ));
-        }
-        if test_type == "edit_sequence" {
-            skip_to_block_end(&mut lines, path, &name)?;
-            continue;
-        }
+        };
 
         // Multi-file mode: `FILES:` after `TYPE:` instead of a code block.
         let source = lines.next_if(|line| line.starts_with("SOURCE:"));
@@ -476,103 +443,51 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
 
         let op_type = lines
             .next_if(|line| line.starts_with("OPERATION:"))
-            .map_or(test_type.as_str(), |line| {
+            .map_or(test_type, |line| {
                 line.strip_prefix("OPERATION:").unwrap().trim()
             });
-        let at = |lines: &mut std::iter::Peekable<_>| {
-            operation_position(lines, cursor, path, &name, op_type)
+        let Some((op_reply, subcommand, args)) = fixture_request(op_type) else {
+            return Err(anyhow::anyhow!(
+                "{}: test '{}' has OPERATION '{}', which has no reply decoder",
+                path.display(), name, op_type
+            ));
         };
-        let operation = match op_type {
-            "inlay_hints" => LspOperation::InlayHints,
-            "semantic_tokens" => LspOperation::SemanticTokens,
-            "document_symbols" => LspOperation::DocumentSymbols,
-            "workspace_symbols" => {
-                let query = match lines.next_if(|l| l.starts_with("QUERY:")) {
-                    Some(q) => q.strip_prefix("QUERY:").unwrap().trim().to_string(),
-                    None => String::new(),
-                };
-                LspOperation::WorkspaceSymbols { query }
-            }
-            "completion" => {
-                let (line, character) = at(&mut lines)?;
-                LspOperation::Completion { line, character }
-            }
-            "goto_definition" => {
-                let (line, character) = at(&mut lines)?;
-                LspOperation::GotoDefinition { line, character }
-            }
-            "goto_type_definition" => {
-                let (line, character) = at(&mut lines)?;
-                LspOperation::GotoTypeDefinition { line, character }
-            }
-            "hover" => {
-                let (line, character) = at(&mut lines)?;
-                LspOperation::Hover { line, character }
-            }
-            "references" => {
-                let (line, character) = at(&mut lines)?;
-                LspOperation::References { line, character }
-            }
-            "signature_help" => {
-                let (line, character) = at(&mut lines)?;
-                LspOperation::SignatureHelp { line, character }
-            }
-            "code_action" => {
-                let (line, character) = at(&mut lines)?;
-                LspOperation::CodeAction { line, character }
-            }
-            "rename" => {
-                let (line, character) = at(&mut lines)?;
-                let new_name = match lines.next_if(|l| l.starts_with("NEW_NAME:")) {
-                    Some(n) => n.strip_prefix("NEW_NAME:").unwrap().trim().to_string(),
-                    None => "renamed".to_string(),
-                };
-                LspOperation::Rename {
-                    line,
-                    character,
-                    new_name,
-                }
-            }
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "{}: test '{}' has OPERATION '{}', which has no reply decoder",
-                    path.display(),
-                    name,
-                    op_type
-                ));
+        let position = match args {
+            RequestArgs::File | RequestArgs::Query => None,
+            _ => Some(operation_position(
+                &mut lines, cursor, path, &name, op_type,
+            )?),
+        };
+        let operation = if matches!(args, RequestArgs::CodeAction) {
+            let (line, character) = position.unwrap();
+            LspOperation::CodeAction { line, character }
+        } else {
+            let argument = match args {
+                RequestArgs::Query => Some(optional_directive(&mut lines, "QUERY:", "")),
+                RequestArgs::Rename => Some(optional_directive(&mut lines, "NEW_NAME:", "renamed")),
+                _ => None,
+            };
+            LspOperation::OneShot {
+                subcommand,
+                position,
+                argument,
             }
         };
-
-        // The TYPE names the decoder and the OPERATION names the request; a
-        // fixture whose halves disagree would run one request through another
-        // type's validator.
-        if let Some(type_kind) = type_kind {
-            if type_kind != operation.reply_kind() {
-                return Err(anyhow::anyhow!(
-                    "{}: test '{}' has TYPE '{}' but OPERATION '{}' answers a {:?} reply",
-                    path.display(),
-                    name,
-                    test_type,
-                    op_type,
-                    operation.reply_kind()
-                ));
-            }
+        if reply_kind != op_reply {
+            return Err(anyhow::anyhow!(
+                "{}: test '{}' has TYPE '{}' but OPERATION '{}' answers a {:?} reply",
+                path.display(),
+                name,
+                test_type,
+                op_type,
+                op_reply
+            ));
         }
 
         // Skip separator if present
         lines.next_if(|l| l.starts_with("---"));
 
-        match lines.next() {
-            Some(exp_line) if exp_line.starts_with("EXPECTED:") => {}
-            Some(exp_line) => {
-                return Err(fixture_error(
-                    path,
-                    &name,
-                    format!("expected `EXPECTED:` after the operation, found {exp_line:?}"),
-                ));
-            }
-            None => return Err(fixture_error(path, &name, "file ends before `EXPECTED:`")),
-        }
+        fixture_directive(&mut lines, path, &name, "EXPECTED:", "the operation")?;
 
         let mut expected = Vec::new();
         let mut expected_code: Option<String> = None;
@@ -764,7 +679,8 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
 
         tests.push(LspTest {
             name,
-            test_type,
+            test_type: test_type.to_string(),
+            reply_kind,
             code,
             files,
             primary_file,
@@ -854,9 +770,8 @@ fn parse_step_mode(header: &str, body: String) -> Option<StepMode> {
 /// The request a `CHECK:` line names, or `None` when it names none the runner
 /// sends or its position does not parse.
 fn parse_check_operation(op: &str) -> Option<EditStepOperation> {
-    match op {
-        "semantic_tokens" => return Some(EditStepOperation::SemanticTokens),
-        _ => {}
+    if op == "semantic_tokens" {
+        return Some(EditStepOperation::SemanticTokens);
     }
     let (kind, args) = op.split_once('(')?;
     let (line, character) = parse_pair(args.strip_suffix(')')?, ',')?;
@@ -1176,43 +1091,42 @@ enum ReplyKind {
     CodeAction,
 }
 
-impl LspOperation {
-    fn reply_kind(&self) -> ReplyKind {
-        match self {
-            LspOperation::Completion { .. } => ReplyKind::Completion,
-            LspOperation::GotoDefinition { .. } | LspOperation::GotoTypeDefinition { .. } => {
-                ReplyKind::Definition
-            }
-            LspOperation::Hover { .. } => ReplyKind::Hover,
-            LspOperation::References { .. } => ReplyKind::References,
-            LspOperation::InlayHints => ReplyKind::InlayHints,
-            LspOperation::Rename { .. } => ReplyKind::Rename,
-            LspOperation::SemanticTokens => ReplyKind::SemanticTokens,
-            LspOperation::SignatureHelp { .. } => ReplyKind::SignatureHelp,
-            LspOperation::DocumentSymbols | LspOperation::WorkspaceSymbols { .. } => {
-                ReplyKind::Symbols
-            }
-            LspOperation::CodeAction { .. } => ReplyKind::CodeAction,
-        }
-    }
+enum RequestArgs {
+    File,
+    Position,
+    Rename,
+    Query,
+    CodeAction,
 }
 
-/// The decoder a fixture's `TYPE:` names, or `None` when the harness has none.
-/// `edit_sequence` fixtures are read by `parse_edit_sequence_tests` instead.
-fn fixture_reply_kind(test_type: &str) -> Option<ReplyKind> {
-    Some(match test_type {
-        "completion" => ReplyKind::Completion,
-        "goto_definition" | "goto_type_definition" => ReplyKind::Definition,
-        "references" => ReplyKind::References,
-        "semantic_tokens" => ReplyKind::SemanticTokens,
-        "signature_help" => ReplyKind::SignatureHelp,
-        "inlay_hints" => ReplyKind::InlayHints,
-        "hover" => ReplyKind::Hover,
-        "document_symbols" | "workspace_symbols" => ReplyKind::Symbols,
-        "rename" => ReplyKind::Rename,
-        "code_action" => ReplyKind::CodeAction,
+fn fixture_request(name: &str) -> Option<(ReplyKind, &'static str, RequestArgs)> {
+    use ReplyKind::*;
+    Some(match name {
+        "completion" => (Completion, "completion", RequestArgs::Position),
+        "goto_definition" => (Definition, "definition", RequestArgs::Position),
+        "goto_type_definition" => (Definition, "type-definition", RequestArgs::Position),
+        "references" => (References, "references", RequestArgs::Position),
+        "semantic_tokens" => (SemanticTokens, "semantic-tokens", RequestArgs::File),
+        "signature_help" => (SignatureHelp, "signature-help", RequestArgs::Position),
+        "inlay_hints" => (InlayHints, "inlay-hints", RequestArgs::File),
+        "hover" => (Hover, "hover", RequestArgs::Position),
+        "document_symbols" => (Symbols, "document-symbols", RequestArgs::File),
+        "workspace_symbols" => (Symbols, "workspace-symbols", RequestArgs::Query),
+        "rename" => (Rename, "rename", RequestArgs::Rename),
+        "code_action" => (CodeAction, "", RequestArgs::CodeAction),
         _ => return None,
     })
+}
+
+fn optional_directive<'a>(
+    lines: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+    prefix: &str,
+    default: &str,
+) -> String {
+    lines
+        .next_if(|line| line.starts_with(prefix))
+        .map_or(default, |line| line[prefix.len()..].trim())
+        .to_string()
 }
 
 /// The refusal half of a rename reply. A fixture that expects `REFUSED:` needs
@@ -1332,16 +1246,31 @@ fn symbol_kind_name(kind: &serde_json::Value) -> Option<&str> {
 fn run_lsp_test(test: &LspTest, server: LspServerCmd) -> Result<bool> {
     let (test_file, project_dir) = write_fixture_project(test)?;
 
-    let Some(args) = one_shot_args(&test.operation, &test_file) else {
-        let LspOperation::CodeAction { line, character } = test.operation else {
-            unreachable!("only a code action has no one-shot subcommand");
-        };
-        let result = run_code_action_test(test, server, &test_file, line, character);
-        let _ = fs_err::remove_dir_all(&project_dir);
-        return result;
+    let (subcommand, position, argument) = match &test.operation {
+        LspOperation::OneShot {
+            subcommand,
+            position,
+            argument,
+        } => (subcommand, position, argument),
+        LspOperation::CodeAction { line, character } => {
+            let result = run_code_action_test(test, server, &test_file, *line, *character);
+            let _ = fs_err::remove_dir_all(&project_dir);
+            return result;
+        }
     };
 
-    let output = server.command().args(&args).output()?;
+    let target = match position {
+        Some((line, character)) => {
+            format!("{}:{}:{}", test_file.display(), line + 1, character + 1)
+        }
+        None => test_file.display().to_string(),
+    };
+    let output = server
+        .command()
+        .arg(subcommand)
+        .arg(target)
+        .args(argument)
+        .output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1366,11 +1295,7 @@ fn run_lsp_test(test: &LspTest, server: LspServerCmd) -> Result<bool> {
     // Names the request in every decode and shape failure below.
     let request = format!("{} test '{}'", test.test_type, test.name);
 
-    // `fixture_reply_kind` keeps fixture TYPE dispatch exhaustive, so no
-    // request falls through to raw text matching.
-    let kind =
-        fixture_reply_kind(&test.test_type).expect("fixture type was validated at parse time");
-    let all_found = match kind {
+    let all_found = match test.reply_kind {
         ReplyKind::Completion => check_completion_reply(test, &request, &stdout)?,
         ReplyKind::Definition => check_definition_reply(test, &request, &stdout)?,
         ReplyKind::References => check_references_reply(test, &request, &stdout)?,
@@ -1458,66 +1383,6 @@ fn new_fixture_project(name: &str, with_manifest: bool) -> Result<(String, PathB
     Ok((safe_name, project_dir))
 }
 
-/// The `rock lsp` subcommand and arguments that answer `op` on `test_file`,
-/// or `None` when no one-shot subcommand answers it. The CLI takes 1-indexed
-/// lines and columns.
-fn one_shot_args(op: &LspOperation, test_file: &Path) -> Option<Vec<String>> {
-    Some(match op {
-        LspOperation::Completion { line, character } => vec![
-            "completion".to_string(),
-            format!("{}:{}:{}", test_file.display(), line + 1, character + 1),
-        ],
-        LspOperation::GotoDefinition { line, character } => vec![
-            "definition".to_string(),
-            format!("{}:{}:{}", test_file.display(), line + 1, character + 1),
-        ],
-        LspOperation::GotoTypeDefinition { line, character } => vec![
-            "type-definition".to_string(),
-            format!("{}:{}:{}", test_file.display(), line + 1, character + 1),
-        ],
-        LspOperation::Hover { line, character } => vec![
-            "hover".to_string(),
-            format!("{}:{}:{}", test_file.display(), line + 1, character + 1),
-        ],
-        LspOperation::References { line, character } => vec![
-            "references".to_string(),
-            format!("{}:{}:{}", test_file.display(), line + 1, character + 1),
-        ],
-        LspOperation::InlayHints => {
-            vec!["inlay-hints".to_string(), test_file.display().to_string()]
-        }
-        LspOperation::Rename {
-            line,
-            character,
-            new_name,
-        } => vec![
-            "rename".to_string(),
-            format!("{}:{}:{}", test_file.display(), line + 1, character + 1),
-            new_name.clone(),
-        ],
-        LspOperation::SemanticTokens => vec![
-            "semantic-tokens".to_string(),
-            test_file.display().to_string(),
-        ],
-        LspOperation::SignatureHelp { line, character } => vec![
-            "signature-help".to_string(),
-            format!("{}:{}:{}", test_file.display(), line + 1, character + 1),
-        ],
-        LspOperation::DocumentSymbols => vec![
-            "document-symbols".to_string(),
-            test_file.display().to_string(),
-        ],
-        LspOperation::WorkspaceSymbols { query } => vec![
-            "workspace-symbols".to_string(),
-            test_file.display().to_string(),
-            query.clone(),
-        ],
-        // No one-shot subcommand answers a code action; it goes to the
-        // interactive server over JSON-RPC, as an editor sends it.
-        LspOperation::CodeAction { .. } => return None,
-    })
-}
-
 fn check_completion_reply(test: &LspTest, request: &str, stdout: &str) -> Result<bool> {
     let json = decode_reply(request, stdout)?;
     let labels: Vec<String> = reply_array(request, stdout, &json, "completions")?
@@ -1537,119 +1402,66 @@ fn check_completion_reply(test: &LspTest, request: &str, stdout: &str) -> Result
 }
 
 fn check_definition_reply(test: &LspTest, request: &str, stdout: &str) -> Result<bool> {
-    let mut all_found = true;
-    // For goto_definition / goto_type_definition, check the output format
-    // (both emit the same `definitions` array shape).
     let json = decode_reply(request, stdout)?;
     let definitions = reply_array(request, stdout, &json, "definitions")?;
-    // The actual LSP output has definitions[0].range.start.{line,character}
-    let definition = definitions.first();
-
-    // Support `EXPECTED: none` — assert that goto-def found no targets.
-    // Useful for built-in types, keywords, and positions that have no
-    // definition to navigate to (the LSP should return [] not an error).
-    let expects_none = test
-        .expected
-        .iter()
-        .any(|e| e.trim().eq_ignore_ascii_case("none"));
-    if expects_none {
-        if !definitions.is_empty() {
-            all_found = false;
-            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                eprintln!("    Expected no definitions, got {:?}", definitions);
-            }
+    let verbose = std::env::var("ROCK_TEST_VERBOSE").is_ok();
+    if expects_no_locations(&test.expected) {
+        if verbose && !definitions.is_empty() {
+            eprintln!("    Expected no definitions, got {:?}", definitions);
         }
-    } else if let Some(def) = definition {
-        // Check file, line, character in the definition
-        for expected_item in &test.expected {
-            if expected_item.starts_with("file:") {
-                // For goto_definition tests, we're actually testing the same file,
-                // so we can skip the file check since it will be the temp file
-                // The test expectations use "main.rock" but that's just a placeholder
-                continue;
-            } else if expected_item.starts_with("line:") {
-                let expected_line: usize = expected_item
-                    .strip_prefix("line:")
-                    .unwrap()
-                    .trim()
-                    .parse()
-                    .unwrap_or(0);
-                if let Some(line) = def
-                    .get("range")
-                    .and_then(|r| r.get("start"))
-                    .and_then(|s| s.get("line"))
-                    .and_then(|l| l.as_u64())
-                {
-                    if line != expected_line as u64 {
-                        all_found = false;
-                        if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                            eprintln!("    Expected line {}, got {}", expected_line, line);
-                        }
-                    }
-                } else {
-                    all_found = false;
-                    if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                        eprintln!("    No line field found in definition range");
-                    }
-                }
-            } else if expected_item.starts_with("character:") {
-                let expected_char: usize = expected_item
-                    .strip_prefix("character:")
-                    .unwrap()
-                    .trim()
-                    .parse()
-                    .unwrap_or(0);
-                if let Some(character) = def
-                    .get("range")
-                    .and_then(|r| r.get("start"))
-                    .and_then(|s| s.get("character"))
-                    .and_then(|c| c.as_u64())
-                {
-                    if character != expected_char as u64 {
-                        all_found = false;
-                        if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                            eprintln!(
-                                "    Expected character {}, got {}",
-                                expected_char, character
-                            );
-                        }
-                    }
-                } else {
-                    all_found = false;
-                    if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                        eprintln!("    No character field found in definition range");
-                    }
-                }
-            }
-        }
-    } else {
-        all_found = false;
-        if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+        return Ok(definitions.is_empty());
+    }
+    let Some(definition) = definitions.first() else {
+        if verbose {
             eprintln!("    No definitions found in output");
             eprintln!("    Actual output: {}", stdout);
         }
+        return Ok(false);
+    };
+    let mut matches = true;
+    for item in &test.expected {
+        let Some((key @ ("line" | "character"), value)) = item.split_once(':') else {
+            continue;
+        };
+        let expected = value.trim().parse::<usize>().unwrap_or(0) as u64;
+        match definition["range"]["start"][key].as_u64() {
+            Some(actual) if actual == expected => {}
+            Some(actual) => {
+                matches = false;
+                if verbose {
+                    eprintln!("    Expected {key} {expected}, got {actual}");
+                }
+            }
+            None => {
+                matches = false;
+                if verbose {
+                    eprintln!("    No {key} field found in definition range");
+                }
+            }
+        }
     }
-    Ok(all_found)
+    Ok(matches)
+}
+
+fn expects_no_locations(expected: &[String]) -> bool {
+    expected
+        .iter()
+        .any(|line| line.trim().eq_ignore_ascii_case("none"))
+}
+
+fn reference_start(location: &serde_json::Value) -> Option<(u64, u64)> {
+    let start = &location["range"]["start"];
+    Some((start["line"].as_u64()?, start["character"].as_u64()?))
 }
 
 fn check_references_reply(test: &LspTest, request: &str, stdout: &str) -> Result<bool> {
     let json = decode_reply(request, stdout)?;
     let actual: Vec<(u64, u64)> = reply_array(request, stdout, &json, "references")?
         .iter()
-        .filter_map(|location| {
-            let start = location.get("range")?.get("start")?;
-            Some((
-                start.get("line")?.as_u64()?,
-                start.get("character")?.as_u64()?,
-            ))
-        })
+        .filter_map(reference_start)
         .collect();
-    let no_references_expected = test
-        .expected
-        .iter()
-        .any(|item| item.trim().eq_ignore_ascii_case("none"));
     let mut expected = Vec::new();
-    if !no_references_expected {
+    if !expects_no_locations(&test.expected) {
         let mut line = None;
         for item in &test.expected {
             let item = item.trim();
@@ -1843,64 +1655,35 @@ fn check_hover_reply(test: &LspTest, request: &str, stdout: &str) -> Result<bool
 }
 
 fn check_symbols_reply(test: &LspTest, request: &str, stdout: &str) -> Result<bool> {
-    let mut all_found = true;
-    // For symbol tests, check the symbol names and kinds
     let json = decode_reply(request, stdout)?;
-    let symbols = if let Some(syms) = json.get("symbols").and_then(|s| s.as_array()) {
-        syms.clone()
-    } else if let Some(syms) = json.as_array() {
-        syms.clone()
-    } else {
-        return Err(anyhow::anyhow!(
-            "{request}: reply has no `symbols` array; raw reply: {stdout}"
-        ));
-    };
-
-    for expected_item in &test.expected {
-        // Expected format: "SymbolName: SymbolKind"
-        let parts: Vec<&str> = expected_item.split(':').collect();
-        if parts.len() == 2 {
-            let expected_name = parts[0].trim();
-            let expected_kind = parts[1].trim();
-
-            let found = symbols.iter().any(|sym| {
-                let name_matches = sym
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .map(|n| n == expected_name)
-                    .unwrap_or(false);
-
-                let kind_matches = sym
-                    .get("kind")
-                    .and_then(symbol_kind_name)
-                    .map(|k| k.to_lowercase().contains(&expected_kind.to_lowercase()))
-                    .unwrap_or(false);
-
-                name_matches && kind_matches
-            });
-
-            if !found {
-                all_found = false;
-                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                    eprintln!(
-                        "    Expected symbol '{}' of kind '{}' not found",
-                        expected_name, expected_kind
-                    );
-                }
-            }
-        } else {
-            // Just check for symbol name
-            let found = symbols.iter().any(|sym| {
-                sym.get("name")
-                    .and_then(|n| n.as_str())
-                    .map(|n| n == expected_item)
-                    .unwrap_or(false)
-            });
-
-            if !found {
-                all_found = false;
-                if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                    eprintln!("    Expected symbol '{}' not found", expected_item);
+    let symbols = json["symbols"]
+        .as_array()
+        .or_else(|| json.as_array())
+        .ok_or_else(|| {
+            anyhow::anyhow!("{request}: reply has no `symbols` array; raw reply: {stdout}")
+        })?;
+    let verbose = std::env::var("ROCK_TEST_VERBOSE").is_ok();
+    let mut all_found = true;
+    for item in &test.expected {
+        let (name, kind) = match item.split_once(':') {
+            Some((name, kind)) if !kind.contains(':') => (name.trim(), Some(kind.trim())),
+            _ => (item.as_str(), None),
+        };
+        let found = symbols.iter().any(|symbol| {
+            symbol["name"].as_str() == Some(name)
+                && kind.is_none_or(|kind| {
+                    symbol_kind_name(&symbol["kind"])
+                        .is_some_and(|actual| actual.to_lowercase().contains(&kind.to_lowercase()))
+                })
+        });
+        if !found {
+            all_found = false;
+            if verbose {
+                match kind {
+                    Some(kind) => {
+                        eprintln!("    Expected symbol '{name}' of kind '{kind}' not found")
+                    }
+                    None => eprintln!("    Expected symbol '{name}' not found"),
                 }
             }
         }
@@ -2766,17 +2549,7 @@ fn check_references_response(
     let got: Vec<(u64, u64)> = response
         .get("result")
         .and_then(|r| r.as_array())
-        .map(|locs| {
-            locs.iter()
-                .filter_map(|loc| {
-                    let start = loc.get("range")?.get("start")?;
-                    Some((
-                        start.get("line")?.as_u64()?,
-                        start.get("character")?.as_u64()?,
-                    ))
-                })
-                .collect()
-        })
+        .map(|locs| locs.iter().filter_map(reference_start).collect())
         .unwrap_or_default();
     let want: Vec<(u64, u64)> = expected
         .iter()
@@ -2856,6 +2629,18 @@ struct FileTestResult {
     failed_test_details: Vec<(String, String)>,
 }
 
+impl FileTestResult {
+    fn record(&mut self, name: &str, kind: &str, failure: Option<String>) {
+        if let Some(detail) = failure {
+            self.failed += 1;
+            self.failed_test_details
+                .push((format!("{name} ({kind})"), detail));
+        } else {
+            self.passed += 1;
+        }
+    }
+}
+
 /// Print one file's result as `name ...... ok (10/12 tests, 45ms)`, then its
 /// failures.
 fn print_file_result(r: &FileTestResult) {
@@ -2910,15 +2695,7 @@ fn run_lsp_file(file: &Path, display_name: &str, server: LspServerCmd) -> FileTe
             Ok(false) => Some(String::new()),
             Err(e) => Some(e.to_string()),
         };
-        match detail {
-            None => result.passed += 1,
-            Some(detail) => {
-                result.failed += 1;
-                result
-                    .failed_test_details
-                    .push((format!("{} ({})", test.name, test.test_type), detail));
-            }
-        }
+        result.record(&test.name, &test.test_type, detail);
     }
 
     // Each edit sequence drives its own persistent server.
@@ -2928,15 +2705,7 @@ fn run_lsp_file(file: &Path, display_name: &str, server: LspServerCmd) -> FileTe
             Ok(failures) => Some(failures.join(", ")),
             Err(e) => Some(e.to_string()),
         };
-        match detail {
-            None => result.passed += 1,
-            Some(detail) => {
-                result.failed += 1;
-                result
-                    .failed_test_details
-                    .push((format!("{} (edit_sequence)", seq_test.name), detail));
-            }
-        }
+        result.record(&seq_test.name, "edit_sequence", detail);
     }
 
     result.duration = start_time.elapsed();
@@ -3129,147 +2898,75 @@ mod runner_tests {
     // answers with, yet contains the fixture's EXPECTED text verbatim. A
     // fixture over such a reply must fail; a substring fallback would pass it.
 
-    const COMPLETION_FIXTURE: &str = "\
-TEST: stub completion\n\
-TYPE: completion\n\
----\n\
-fn main() {\n\
-    let count = 1;\n\
-    let other = cou«cursor»nt;\n\
-}\n\
----\n\
-OPERATION: completion\n\
-EXPECTED:\n\
-- count\n\
-===\n";
+    macro_rules! fixture {
+        ($name:literal, $kind:literal, $code:expr, $expected:literal $(, $options:literal)?) => {
+            concat!(
+                "TEST: stub ", $name, "\nTYPE: ", $kind, "\n---\n", $code,
+                "\n---\nOPERATION: ", $kind, "\n", $($options,)?
+                "EXPECTED:\n", $expected, "\n===\n",
+            )
+        };
+    }
 
-    const DEFINITION_FIXTURE: &str = "\
-TEST: stub definition\n\
-TYPE: goto_definition\n\
----\n\
-fn main() {\n\
-    let count = 1;\n\
-    let other = cou«cursor»nt;\n\
-}\n\
----\n\
-OPERATION: goto_definition\n\
-EXPECTED:\n\
-line: 2\n\
-character: 12\n\
-===\n";
+    macro_rules! count_source {
+        () => {
+            "fn main() {\nlet count = 1;\nlet other = cou\u{ab}cursor\u{bb}nt;\n}"
+        };
+    }
 
-    const DEFINITION_NONE_FIXTURE: &str = "\
-TEST: stub definition none\n\
-TYPE: goto_definition\n\
----\n\
-fn main() {\n\
-    let other = cou«cursor»nt;\n\
-}\n\
----\n\
-OPERATION: goto_definition\n\
-EXPECTED:\n\
-none\n\
-===\n";
-
-    const REFERENCES_NONE_FIXTURE: &str = "\
-TEST: stub references none\n\
-TYPE: references\n\
----\n\
-fn main() {\n\
-    let count = 1;\n\
-    let other = cou«cursor»nt;\n\
-}\n\
----\n\
-OPERATION: references\n\
-EXPECTED:\n\
-none\n\
-===\n";
-
-    const SIGNATURE_HELP_FIXTURE: &str = "\
-TEST: stub signature help\n\
-TYPE: signature_help\n\
----\n\
-fn greet(name: string) {}\n\
-fn main() {\n\
-    gre«cursor»et(\n\
-}\n\
----\n\
-OPERATION: signature_help\n\
-EXPECTED:\n\
-greet(name: string)\n\
-===\n";
-
-    const SYMBOLS_FIXTURE: &str = "\
-TEST: stub symbols\n\
-TYPE: document_symbols\n\
----\n\
-struct Widget {\n\
-}\n\
----\n\
-OPERATION: document_symbols\n\
-EXPECTED:\n\
-- Widget: struct\n\
-===\n";
-
-    const HOVER_FIXTURE: &str = "\
-TEST: stub hover\n\
-TYPE: hover\n\
----\n\
-fn main() {\n\
-    mai«cursor»n();\n\
-}\n\
----\n\
-OPERATION: hover\n\
-EXPECTED:\n\
-fn main()\n\
-===\n";
-
-    const INLAY_HINTS_FIXTURE: &str = "\
-TEST: stub inlay hints\n\
-TYPE: inlay_hints\n\
----\n\
-fn main() {\n\
-    let count = 1\n\
-}\n\
----\n\
-OPERATION: inlay_hints\n\
-EXPECTED:\n\
-fn main() {\n\
-    let count«hint:: int» = 1\n\
-}\n\
-===\n";
-
-    const RENAME_FIXTURE: &str = "\
-TEST: stub rename\n\
-TYPE: rename\n\
----\n\
-fn main() {\n\
-    let «start»count«end» = 1\n\
-    print(count)\n\
-}\n\
----\n\
-OPERATION: rename\n\
-NEW_NAME: total\n\
----\n\
-EXPECTED:\n\
-fn main() {\n\
-    let total = 1\n\
-    print(total)\n\
-}\n\
-===\n";
-
-    const SEMANTIC_TOKENS_FIXTURE: &str = "\
-TEST: stub semantic tokens\n\
-TYPE: semantic_tokens\n\
----\n\
-fn main() {\n\
-    let count = 1;\n\
-}\n\
----\n\
-OPERATION: semantic_tokens\n\
-EXPECTED:\n\
-min_tokens: 5\n\
-===\n";
+    const COMPLETION_FIXTURE: &str =
+        fixture!("completion", "completion", count_source!(), "- count");
+    const DEFINITION_FIXTURE: &str = fixture!(
+        "definition",
+        "goto_definition",
+        count_source!(),
+        "line: 2\ncharacter: 12"
+    );
+    const DEFINITION_NONE_FIXTURE: &str = fixture!(
+        "definition none",
+        "goto_definition",
+        "fn main() {\nlet other = cou\u{ab}cursor\u{bb}nt;\n}",
+        "none"
+    );
+    const REFERENCES_NONE_FIXTURE: &str =
+        fixture!("references none", "references", count_source!(), "none");
+    const SIGNATURE_HELP_FIXTURE: &str = fixture!(
+        "signature help",
+        "signature_help",
+        "fn greet(name: string) {}\nfn main() {\ngre\u{ab}cursor\u{bb}et(\n}",
+        "greet(name: string)"
+    );
+    const SYMBOLS_FIXTURE: &str = fixture!(
+        "symbols",
+        "document_symbols",
+        "struct Widget {\n}",
+        "- Widget: struct"
+    );
+    const HOVER_FIXTURE: &str = fixture!(
+        "hover",
+        "hover",
+        "fn main() {\nmai\u{ab}cursor\u{bb}n();\n}",
+        "fn main()"
+    );
+    const INLAY_HINTS_FIXTURE: &str = fixture!(
+        "inlay hints",
+        "inlay_hints",
+        "fn main() {\nlet count = 1\n}",
+        "fn main() {\nlet count\u{ab}hint:: int\u{bb} = 1\n}"
+    );
+    const RENAME_FIXTURE: &str = fixture!(
+        "rename",
+        "rename",
+        "fn main() {\nlet \u{ab}start\u{bb}count\u{ab}end\u{bb} = 1\nprint(count)\n}",
+        "fn main() {\nlet total = 1\nprint(total)\n}",
+        "NEW_NAME: total\n---\n"
+    );
+    const SEMANTIC_TOKENS_FIXTURE: &str = fixture!(
+        "semantic tokens",
+        "semantic_tokens",
+        "fn main() {\nlet count = 1;\n}",
+        "min_tokens: 5"
+    );
 
     /// The parse error `fixture` must produce.
     fn parse_error_of(fixture: &str) -> String {
