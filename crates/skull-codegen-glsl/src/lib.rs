@@ -24,7 +24,6 @@ use bone_core::prelude::{FnList, ModuleId, Span};
 use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
-use skull_codegen_shader::{const_lit, inst_kind, is_tier0_inst, non_tier0_error};
 use skull_graph::instance_graph::{InstanceGraph, SiteOutcome};
 use skull_graph::shader::ShaderLibraryView;
 use skull_graph::shader::{ShaderProgramView, ShaderStageView};
@@ -199,6 +198,16 @@ fn ty_expr(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
     }
 }
 
+fn builtin_glsl_ty(ty: BuiltinTy) -> Option<GlslTy> {
+    match ty {
+        BuiltinTy::Float => Some(GlslTy::Float),
+        BuiltinTy::Int => Some(GlslTy::Int),
+        BuiltinTy::Uint => Some(GlslTy::Uint),
+        BuiltinTy::Bool => Some(GlslTy::Bool),
+        _ => None,
+    }
+}
+
 /// The tier-0 GLSL type of a nominal, or `None`.
 fn nominal_glsl_ty(n: &str) -> Option<GlslTy> {
     match n {
@@ -269,10 +278,7 @@ fn glsl_ty(
         )
     };
     match ty_expr(ws, ty) {
-        Some(TypeExpr::Builtin(BuiltinTy::Float)) => Ok(GlslTy::Float),
-        Some(TypeExpr::Builtin(BuiltinTy::Int)) => Ok(GlslTy::Int),
-        Some(TypeExpr::Builtin(BuiltinTy::Uint)) => Ok(GlslTy::Uint),
-        Some(TypeExpr::Builtin(BuiltinTy::Bool)) => Ok(GlslTy::Bool),
+        Some(TypeExpr::Builtin(ty)) => builtin_glsl_ty(ty).ok_or_else(reject),
         Some(TypeExpr::Generic(var, name)) => match subst.get(&var) {
             Some(bound) => mono_glsl_ty(bound).ok_or_else(|| {
                 err(span, format!(

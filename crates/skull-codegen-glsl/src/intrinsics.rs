@@ -255,46 +255,6 @@ pub fn is_lowered_native_operator(
     })
 }
 
-pub(crate) struct GlslShaderPolicy;
-
-impl skull_codegen_shader::ShaderPlannerPolicy for GlslShaderPolicy {
-    fn inline_call(&self, function: &Function) -> bool {
-        renders_inline(function)
-    }
-
-    fn backend_name(&self) -> &'static str {
-        "GLSL"
-    }
-
-    fn validate_concrete_signature(
-        &self,
-        interner: &MonoInterner,
-        signature: &ConcreteSignature,
-        span: Span,
-    ) -> Result<(), CompilerError> {
-        check_tier0_signature_concrete(interner, signature, span)
-    }
-
-    fn inline_instance(
-        &self,
-        ws: &Workspace,
-        function: &Function,
-        instance: &Instance,
-        interner: &MonoInterner,
-    ) -> bool {
-        renders_inline_instance(ws, function, instance, interner)
-    }
-
-    fn lowered_native_operator(
-        &self,
-        ws: &Workspace,
-        function: &Function,
-        instance: &Instance,
-        interner: &MonoInterner,
-    ) -> bool {
-        is_lowered_native_operator(ws, function, instance, interner)
-    }
-}
 /// The GLSL infix operator symbol for a non-scalar `__op_*` (Vec operator) call.
 pub(crate) fn vec_op_symbol(name: &str) -> Option<&'static str> {
     match name {

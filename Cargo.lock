@@ -2280,7 +2280,6 @@ dependencies = [
  "rock-stdlib",
  "rustc-hash",
  "skull",
- "skull-codegen-shader",
  "skull-graph",
  "skull-mir",
  "skull-parser",
@@ -2318,20 +2317,6 @@ dependencies = [
  "skull-mir",
  "skull-parser",
  "skull-transform",
- "ustr",
-]
-
-[[package]]
-name = "skull-codegen-shader"
-version = "0.1.0"
-dependencies = [
- "bone-core",
- "comfy-la-arena",
- "rock-host",
- "rock-stdlib",
- "rustc-hash",
- "skull-mir",
- "skull-parser",
  "ustr",
 ]
 

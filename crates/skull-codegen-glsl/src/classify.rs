@@ -422,7 +422,11 @@ fn texture_group_samplers(
     let sname = nominal_name(ws, ty).ok_or_else(|| {
         err(
             span,
-            format!("shader {stage}: an @textures param must be a struct"),
+            if stage == "entry" {
+                "shader entry: an @textures param must be a value struct".to_owned()
+            } else {
+                format!("shader {stage}: an @textures param must be a struct")
+            },
         )
     })?;
     let ts = texture_slots(ws, sname).map_err(|e| err(span, e.message))?;
@@ -805,6 +809,166 @@ pub(crate) fn reject_position_read(
                     "shader fragment: `position` is gl_Position (vertex-only) and is not emitted as a varying -- it cannot be read in the fragment stage",
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) struct EntryClass {
+    pub global_params: Vec<usize>,
+    pub sampler_params: Vec<usize>,
+    pub samplers: Vec<(usize, Ustr, SamplerKind)>,
+    pub texture_group: Option<Ustr>,
+    pub uniform_group: Option<Ustr>,
+}
+
+pub(crate) fn classify_entry(
+    ws: &Workspace,
+    function: &Function,
+) -> Result<EntryClass, CompilerError> {
+    let span = function.name_span;
+    let mut uniform_param = None;
+    let mut samplers = Vec::new();
+    let mut tex_coord = None;
+    let mut texture_params = Vec::new();
+    let mut texture_group = None;
+    let mut uniform_group = None;
+    for (index, param) in function.param_decls.iter().enumerate() {
+        if has_anno(&param.annotations, "textures") {
+            reject_conflicting_texture_role(&param.annotations, param.name, span, "entry")?;
+            if texture_group.is_some() {
+                return Err(err(
+                    span,
+                    "shader entry: at most one @textures group param is allowed",
+                ));
+            }
+            texture_group = nominal_name(ws, param.ty);
+            samplers.extend(texture_group_samplers(ws, param.ty, index, span, "entry")?);
+            texture_params.push(index);
+            continue;
+        }
+        match fullscreen_ty(ws, param.ty, span, "parameter") {
+            Ok(ty) if ty.is_sampler() => samplers.push((index, param.name, sampler_kind_of(ty))),
+            Ok(GlslTy::Vec2) => {
+                if tex_coord.replace(index).is_some() {
+                    return Err(err(
+                        span,
+                        "shader entry: exactly one Vec2 UV parameter is allowed",
+                    ));
+                }
+            }
+            Ok(other) => {
+                return Err(err(
+                    span,
+                    format!(
+                        "shader entry: param `{}` ({}) is not a fullscreen UV, sampler, or uniform struct",
+                        param.name,
+                        match other {
+                            GlslTy::Vec3 => "Vec3",
+                            GlslTy::Vec4 => "Vec4",
+                            GlslTy::Bvec3 => "Bvec3",
+                            GlslTy::Mat4 => "Mat4",
+                            _ => other.name(),
+                        }
+                    ),
+                ));
+            }
+            Err(error) => {
+                let Some(group) = nominal_name(ws, param.ty) else {
+                    return Err(error);
+                };
+                if !has_anno(&param.annotations, "uniform") {
+                    return Err(err(
+                        span,
+                        format!(
+                            "shader entry: value-struct param `{}` needs @uniform",
+                            param.name
+                        ),
+                    ));
+                }
+                if uniform_param.is_some() {
+                    return Err(err(
+                        span,
+                        "shader entry: at most one uniform struct param is allowed",
+                    ));
+                }
+                uniform_param = Some(index);
+                uniform_group = Some(group);
+            }
+        }
+    }
+    if tex_coord.is_none() {
+        return Err(err(span, "shader entry: a Vec2 UV parameter is required"));
+    }
+    if !matches!(
+        function
+            .return_ty
+            .and_then(|ty| fullscreen_ty(ws, ty, span, "return").ok()),
+        Some(GlslTy::Vec4)
+    ) {
+        return Err(err(span, "shader entry: the return type must be Vec4"));
+    }
+    Ok(EntryClass {
+        global_params: uniform_param.into_iter().chain(texture_params).collect(),
+        sampler_params: samplers.iter().map(|(index, _, _)| *index).collect(),
+        samplers,
+        texture_group,
+        uniform_group,
+    })
+}
+
+fn fullscreen_ty(
+    ws: &Workspace,
+    ty: TyId,
+    span: Span,
+    what: &str,
+) -> Result<GlslTy, CompilerError> {
+    let ty = match ty_expr(ws, ty) {
+        Some(TypeExpr::Builtin(ty)) => builtin_glsl_ty(ty),
+        Some(TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        }) => nominal_glsl_ty(name.as_str()),
+        Some(TypeExpr::Generic(_, name)) => {
+            return Err(err(
+                span,
+                format!(
+                    "shader artifact: {what} type `{name}` has no admitted concrete shader shape"
+                ),
+            ));
+        }
+        _ => None,
+    };
+    ty.ok_or_else(|| err(span,
+        format!("shader artifact: {what} type is outside the admitted scalar/vector shader vocabulary")))
+}
+
+pub(crate) fn check_entry_collisions(
+    interface: &ShaderInterfacePlan,
+    span: Span,
+) -> Result<(), CompilerError> {
+    let mut seen: HashSet<Ustr> = [Ustr::from("TexCoord"), Ustr::from("FragColor")]
+        .into_iter()
+        .collect();
+    let names = interface
+        .uniform_groups
+        .iter()
+        .flat_map(|group| group.members.iter().map(|(name, _)| *name))
+        .chain(
+            interface
+                .textures
+                .iter()
+                .flat_map(|group| group.samplers.iter().map(|(name, _)| *name)),
+        )
+        .chain(interface.bare_samplers.iter().map(|sampler| sampler.name));
+    for name in names {
+        if !seen.insert(name) {
+            return Err(err(
+                span,
+                format!(
+                    "shader entry: uniform name `{name}` would collide (fields, samplers, TexCoord and FragColor share the generated namespace)"
+                ),
+            ));
         }
     }
     Ok(())

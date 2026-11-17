@@ -165,17 +165,83 @@ pub(crate) fn plan_stage_from_view(
             view.stage
         )));
     }
-    let input = skull_codegen_shader::ConcreteStageInput {
-        stage: expected,
-        entry: view.entry.clone(),
-        retained: view.retained.iter().cloned().collect(),
-        helpers: view.helpers.iter().cloned().collect(),
-        builtins: view.builtins.iter().cloned().collect(),
-        order: view.order.clone(),
-        dependencies: view.dependencies.clone(),
-        concrete_plans: Arc::clone(concrete_plans),
+    let order_set: BTreeSet<_> = view.order.iter().cloned().collect();
+    if order_set.len() != view.order.len()
+        || order_set != view.helpers
+        || order_set.contains(&view.entry)
+    {
+        return Err(CompilerError::new_no_location(
+            "shader graph/view helper order is not a unique retained helper population".to_string(),
+        ));
+    }
+    let mut expected_retained = order_set;
+    expected_retained.insert(view.entry.clone());
+    if view.retained != expected_retained {
+        return Err(CompilerError::new_no_location(
+            "shader graph/view retained population is not entry plus helpers".to_string(),
+        ));
+    }
+    let entry = ShaderInstance::new(view.entry.clone());
+    let mut const_globals = HashMap::default();
+    let mut builtins = BTreeSet::new();
+    let mut calls = HashMap::default();
+    let mut lower = |instance: &ShaderInstance, is_entry| -> Result<MirFunc, CompilerError> {
+        let (body, callees) = lower_profiled_body(
+            ws,
+            scx,
+            &instance.inst,
+            concrete_plans,
+            is_entry,
+            Some(&mut const_globals),
+        )?;
+        let callees = checked_body_calls(
+            ws,
+            instance,
+            callees,
+            &view.retained,
+            scx.interner(),
+            &mut builtins,
+            "shader graph/view",
+        )?;
+        calls.insert(instance.clone(), callees);
+        Ok(body)
     };
-    let ir = skull_codegen_shader::plan_stage_from_concrete(ws, scx, &input, &GlslShaderPolicy)?;
+    let body = lower(&entry, true)?;
+    let mut bodies = HashMap::default();
+    let order: Vec<_> = view
+        .order
+        .iter()
+        .cloned()
+        .map(ShaderInstance::new)
+        .collect();
+    for helper in &order {
+        bodies.insert(helper.clone(), lower(helper, false)?);
+    }
+    let declarations = |instances: &BTreeSet<Instance>| -> HashSet<FuncRef> {
+        instances.iter().map(|instance| instance.func).collect()
+    };
+    if declarations(&builtins) != declarations(&view.builtins) {
+        return Err(CompilerError::new_no_location(
+            "shader graph/view builtin declaration population differs from lowered calls"
+                .to_string(),
+        ));
+    }
+    reject_population_cycles(ws, &calls)?;
+    let span = ws.module(entry.fref().module).functions[entry.fref().func].name_span;
+    reject_stage_violations(ws, view.stage, bodies.values().chain([&body]), span)?;
+    let ir = ShaderStageIr {
+        stage: view.stage,
+        entry,
+        body,
+        order,
+        bodies,
+        const_globals,
+    };
+    if ir.declarations() != view.dependencies {
+        return Err(CompilerError::new_no_location(
+            "shader graph/view hot-reload dependencies differ from lowered order".to_string(),
+        ));
+    }
     Ok(StagePlan {
         ir,
         dependencies: view.dependencies.clone(),
@@ -302,7 +368,7 @@ pub(crate) fn plan_shader_entry_program(
     // the fn-library tier-0 leaf check: an `@uniform` block param is legal here
     // and is not a tier-0 leaf (asking the library check of an entry rejected
     // 1,539 real shaders).
-    let class = skull_codegen_shader::classify_entry(ws, f)?;
+    let class = classify_entry(ws, f)?;
     let stage = plan_stage_from_view(ws, scx, stage_view, IrStage::Fragment, &view.concrete_plans)?;
     let interface = ShaderInterfacePlan {
         stages: vec![IrStage::Fragment],
@@ -329,7 +395,7 @@ pub(crate) fn plan_shader_entry_program(
         // an A2 feature, so these are absences rather than omissions.
         ..Default::default()
     };
-    skull_codegen_shader::check_entry_collisions(&interface, f.name_span)?;
+    check_entry_collisions(&interface, f.name_span)?;
     check_stage_sampler_budget(&interface, IrStage::Fragment, &f.name, f.name_span)?;
     let abi = ShaderAbiPlan::glsl(&interface, f.name_span)?;
     let shape = entry_shape(&class.global_params, &class.sampler_params, &interface);

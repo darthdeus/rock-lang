@@ -228,48 +228,6 @@ pub fn shader_library_session(
     Ok(ShaderLibrarySession { scx, view })
 }
 
-fn checked_library_callees(
-    ws: &Workspace,
-    caller: &ShaderInstance,
-    callees: Vec<ShaderInstance>,
-    allowed: &BTreeSet<Instance>,
-    interner: &MonoInterner,
-    builtins: &mut BTreeSet<Instance>,
-) -> Result<Vec<ShaderInstance>, CompilerError> {
-    let caller_f = &ws.module(caller.fref().module).functions[caller.fref().func];
-    let mut retained = Vec::new();
-    for callee in callees {
-        let f = &ws.module(callee.fref().module).functions[callee.fref().func];
-        if renders_inline_instance(ws, f, &callee.inst, interner) {
-            builtins.insert(callee.inst.clone());
-            continue;
-        }
-        if is_lowered_native_operator(ws, f, &callee.inst, interner) {
-            continue;
-        }
-        if f.is_extern || f.inline_body.is_some() {
-            return Err(err(
-                f.name_span,
-                format!(
-                    "shader profile: `{}` has no emittable body and no GLSL intrinsic mapping",
-                    f.name
-                ),
-            ));
-        }
-        if !allowed.contains(&callee.inst) {
-            return Err(err(
-                caller_f.name_span,
-                format!(
-                    "shader library view omitted the concrete callee `{}` reached by `{}`",
-                    f.name, caller_f.name
-                ),
-            ));
-        }
-        retained.push(callee);
-    }
-    Ok(retained)
-}
-
 /// Emit a no-`#version` GLSL function library from a supplied graph population.
 /// The view owns identity, retention, builtins, order and dependencies; this
 /// function only lowers those instances, validates their bodies and renders them.
@@ -292,33 +250,15 @@ pub fn emit_shader_library_with_view(
     let mut discovered_builtins = BTreeSet::new();
     for raw in &view.order {
         let instance = ShaderInstance::new(raw.clone());
-        let f = &ws.module(instance.fref().module).functions[instance.fref().func];
-        let plan = view.concrete_plans.get(raw).ok_or_else(|| {
-            err(
-                f.name_span,
-                format!("shader profile: no concrete plan for `{}`", f.name),
-            )
-        })?;
-        check_tier0_signature_concrete(scx.interner(), &plan.signature, f.name_span)?;
-        let body = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &view.concrete_plans)
-            .map_err(|e| {
-                err(
-                    f.name_span,
-                    format!(
-                        "shader profile: `{}` cannot lower for GLSL: {}",
-                        f.name, e.message
-                    ),
-                )
-            })?;
-        let mut direct = Vec::new();
-        profile_body(ws, f, &body, &mut direct)?;
-        let retained = checked_library_callees(
+        let (body, direct) = lower_profiled_body(ws, scx, raw, &view.concrete_plans, false, None)?;
+        let retained = checked_body_calls(
             ws,
             &instance,
             direct,
             allowed,
             scx.interner(),
             &mut discovered_builtins,
+            "shader library view",
         )?;
         calls.insert(instance.clone(), retained);
         bodies.insert(instance, body);

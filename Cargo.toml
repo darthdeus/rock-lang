@@ -7,7 +7,6 @@ members = [
     "crates/rock-engine-host",
     "crates/rock-cli",
     "crates/skull",
-    "crates/skull-codegen-shader",
     "crates/skull-codegen-glsl",
     "crates/stone-glsl-runner",
     "crates/skull-codegen-lua",
@@ -47,7 +46,6 @@ members = [
 default-members = [
     "crates/rock-cli",
     "crates/skull",
-    "crates/skull-codegen-shader",
     "crates/skull-codegen-glsl",
     "crates/skull-codegen-lua",
     "crates/skull-codegen-js",
@@ -94,7 +92,6 @@ regex-lite = "0.1"
 rock-log = { path = "crates/rock-log" }
 skull-fmt = { path = "crates/skull-fmt" }
 skull = { path = "crates/skull" }
-skull-codegen-shader = { path = "crates/skull-codegen-shader" }
 skull-codegen-glsl = { path = "crates/skull-codegen-glsl" }
 skull-codegen-lua = { path = "crates/skull-codegen-lua" }
 skull-codegen-js = { path = "crates/skull-codegen-js" }
