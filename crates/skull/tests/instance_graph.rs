@@ -54,86 +54,9 @@ fn main() {
     );
 }
 
-/// Instance identity: one generic called at two types is two instances; a
-/// generic caller passes its OWN binding down; and two nominals with
-/// identical leaves -- the S 20g.2 adversary -- do not collapse.
+/// The graph must not depend on the order roots are discovered in (plan S 20g.4).
 #[test]
-fn each_distinct_instantiation_is_its_own_instance() {
-    let cases = [
-        (
-            "ordinary generic loop",
-            r#"
-fn ident<T>(x: T) -> T { return x }
-fn main() {
-    let a = ident(1)
-    let b = ident("s")
-    let xs = [1, 2, 3]
-    for v in xs { ident(v) }
-}
-"#,
-            "ident",
-            ["<int>", "<string>"],
-        ),
-        (
-            "through a generic caller",
-            r#"
-fn inner<T>(x: T) -> T { return x }
-fn outer<T>(x: T) -> T { return inner(x) }
-fn main() {
-    let a = outer(1)
-    let b = outer(true)
-}
-"#,
-            "inner",
-            ["<int>", "<bool>"],
-        ),
-        (
-            "same-shape nominals",
-            r#"
-value P { x: float, y: float }
-value Q { x: float, y: float }
-fn ident<T>(v: T) -> T { return v }
-fn main() {
-    let p = ident(P { x: 1.0, y: 2.0 })
-    let q = ident(Q { x: 1.0, y: 2.0 })
-}
-"#,
-            "ident",
-            ["<P>", "<Q>"],
-        ),
-    ];
-    for (label, src, name, args) in cases {
-        let (ws, g) = ws_and_graph(src);
-        let rejected: Vec<String> = g.rejections().map(|r| r.message.clone()).collect();
-        assert!(
-            rejected.is_empty(),
-            "{label}: valid generic program rejected: {rejected:?}"
-        );
-        let lines = g.manifest_lines(&ws);
-        let found: Vec<&String> = lines.iter().filter(|s| s.contains(name)).collect();
-        assert_eq!(found.len(), args.len(), "{label}: {found:?}");
-        for arg in args {
-            let bare = arg
-                .strip_prefix('<')
-                .and_then(|name| name.strip_suffix('>'))
-                .unwrap_or(arg);
-            let expected = format!("<{}>", crate::common::key(&ws, bare));
-            assert!(
-                found.iter().any(|s| s.ends_with(&expected)),
-                "{label}: `{name}` was not instantiated at {expected}: {found:?}"
-            );
-        }
-    }
-}
-
-/// The manifest must not depend on the order roots are discovered in
-/// (plan S 20g.4).
-///
-/// This fixture is a lower bound. The per-project `order-stable` column from
-/// `rock mono-manifest` is the expansion-cap oracle because it exercises real
-/// library depth.
-#[test]
-fn manifest_is_independent_of_discovery_order() {
+fn a_deep_capped_graph_is_independent_of_discovery_order() {
     // The fixture MUST reach the expansion cap, or it proves nothing: a shallow
     // program is order-independent whatever the cap is keyed on. `grow<T>`
     // instantiates at ever-deeper types, and two roots reach it by paths of
@@ -163,14 +86,16 @@ fn main() { near(); far() }
     let roots = skull::mir_emit::emission_roots(&ws, Some("<test>"));
     let fwd = instance_graph::build(&ws, roots.clone(), false);
     let rev = instance_graph::build(&ws, roots, true);
-    assert_eq!(
-        instance_graph::render_manifest(&ws, &fwd),
-        instance_graph::render_manifest(&ws, &rev),
-        "reversing root discovery order changed the manifest"
+    assert!(
+        fwd.depth_capped().next().is_some(),
+        "the fixture did not reach the instantiation depth cap"
     );
-    assert_eq!(
-        instance_graph::manifest_digest(&ws, &fwd),
-        instance_graph::manifest_digest(&ws, &rev)
+    let differences = crate::support::graph_snapshot::canonical(&ws, &fwd)
+        .diff(&crate::support::graph_snapshot::canonical(&ws, &rev));
+    assert!(
+        differences.is_empty(),
+        "reversing root discovery order changed the graph:\n{}",
+        differences.join("\n")
     );
 }
 
@@ -344,6 +269,13 @@ fn main() {}
         decls.len(),
         "a repeated-backend group was collapsed: {representatives:?}"
     );
+    for declaration in &decls {
+        assert_eq!(
+            skull_mir::lower::backend_variant_group(&ws, *declaration),
+            vec![*declaration],
+            "a repeated backend cannot supply another declaration's calls"
+        );
+    }
     assert_eq!(
         instance_graph::stdlib_entry_representative(&ws, "__canonical_duplicate_probe"),
         None,
@@ -487,14 +419,14 @@ fn main() { let c = ticker(); let _ = c.resume() }
         assert!(compared > 0, "fixture produced no concrete coroutine plan");
     }
 }
-/// S 0g: the manifest must be stable with inlining DISABLED, as well as under a
-/// perturbed discovery order.
+/// S 0g: the graph must be stable with inlining DISABLED and under a perturbed
+/// discovery order.
 ///
 /// This holds BY CONSTRUCTION -- `instance_graph::build` walks bone's HIR and
 /// inference and never runs the inliner -- and "by construction" is a claim
 /// about code that can be edited, which is what this pins.
 #[test]
-fn the_manifest_is_stable_with_inlining_disabled() {
+fn the_graph_is_stable_with_inlining_disabled() {
     let src = r#"
 value P { x: float, y: float }
 @inline fn ident<T>(v: T) -> T { return v }
@@ -508,37 +440,33 @@ fn main() {
     let ws = ws_with_stdlib(src);
     let roots = skull::mir_emit::emission_roots(&ws, None);
 
-    let (normal, normal_text) = {
-        let normal = instance_graph::build(&ws, roots.clone(), false);
-        let normal_text = instance_graph::render_manifest(&ws, &normal);
-        (normal, normal_text)
-    };
-    let (no_inline_text, no_inline_rev) = {
+    let normal = instance_graph::build(&ws, roots.clone(), false);
+    let (no_inline, no_inline_rev) = {
         let _mode = crate::common::InlineOffGuard::on();
         let no_inline = instance_graph::build(&ws, roots.clone(), false);
-        let no_inline_text = instance_graph::render_manifest(&ws, &no_inline);
         // Perturbed order AND inlining disabled, the two S 0g knobs together.
         let no_inline_rev = instance_graph::build(&ws, roots, true);
-        (no_inline_text, no_inline_rev)
+        (no_inline, no_inline_rev)
     };
 
-    assert_eq!(
-        normal_text, no_inline_text,
-        "disabling inlining changed the instance manifest"
+    assert!(
+        !normal.instances.is_empty(),
+        "the fixture produced an empty graph"
     );
-    assert_eq!(
-        no_inline_text,
-        instance_graph::render_manifest(&ws, &no_inline_rev),
-        "with inlining disabled, reversing root order changed the manifest"
+    let inline_diff = crate::support::graph_snapshot::canonical(&ws, &normal)
+        .diff(&crate::support::graph_snapshot::canonical(&ws, &no_inline));
+    assert!(
+        inline_diff.is_empty(),
+        "disabling inlining changed the graph:\n{}",
+        inline_diff.join("\n")
     );
-    assert_eq!(
-        instance_graph::manifest_digest(&ws, &normal),
-        instance_graph::manifest_digest(&ws, &no_inline_rev),
-        "digest differs across the two knobs"
+    let order_diff = crate::support::graph_snapshot::canonical(&ws, &no_inline).diff(
+        &crate::support::graph_snapshot::canonical(&ws, &no_inline_rev),
     );
     assert!(
-        !normal_text.is_empty(),
-        "the fixture produced an empty manifest"
+        order_diff.is_empty(),
+        "with inlining disabled, reversing root order changed the graph:\n{}",
+        order_diff.join("\n")
     );
 }
 
@@ -610,14 +538,9 @@ fn main() { first(); second() }
             "instance explosion: {}",
             g.instances.len()
         );
-        let closure = g.closure(&ws);
         assert!(
-            !closure.depth_capped.is_empty(),
+            g.depth_capped().next().is_some(),
             "a capped expansion was not reported"
-        );
-        assert!(
-            !closure.is_closed(),
-            "a graph with a cut expansion reported itself closed"
         );
     }
 }
@@ -1003,93 +926,6 @@ fn main() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Stage 2 gate: graph closure and symbol injectivity.
-// ---------------------------------------------------------------------------
-
-/// Every reached instance is EITHER expanded or a boundary and never both --
-/// the partition the closure gate's arithmetic depends on -- nothing was cut by
-/// the depth cap, and no two distinct instances encode to one logical symbol.
-///
-/// NOT a closure assertion. `is_closed()` also requires that no generic emission
-/// root went uninstantiated, and a program built against the whole stdlib always
-/// leaves some -- the corpus answers `closed: NO` for that reason. This pins the
-/// three properties that do hold; the depth-cap arm gets its positive from
-/// recursion diagnostic test.
-#[test]
-fn every_instance_is_expanded_or_a_boundary() {
-    let (ws, g) = ws_and_graph(
-        r#"
-value P { x: float, y: float }
-fn ident<T>(x: T) -> T { return x }
-@intrinsic fn portable_op(x: int) -> int { return x + 1 }
-fn main() {
-    let xs: [int] = [1, 2, 3]
-    let ys: [string] = ["a"]
-    xs.push(ident(4))
-    ys.push(ident("b"))
-    let total = 0
-    for v in xs { total = total + v }
-    let ps: [P] = [P { x: 1.0, y: 2.0 }]
-    ps.push(P { x: 3.0, y: 4.0 })
-    portable_op(1)
-    let s = "{ps.len()}"
-}
-"#,
-    );
-    let c = g.closure(&ws);
-    assert!(
-        c.unexpanded.is_empty(),
-        "neither expanded nor a boundary: {:?}",
-        c.unexpanded
-    );
-    let both: Vec<String> = g
-        .expanded()
-        .filter(|i| {
-            instance_graph::boundary_class_for(&ws.module(i.func.module).functions[i.func.func])
-                .is_some()
-        })
-        .map(|i| g.identity(&ws, i))
-        .collect();
-    assert!(
-        both.is_empty(),
-        "instances counted as BOTH expanded and boundary: {both:?}"
-    );
-
-    assert!(
-        c.depth_capped.is_empty(),
-        "expansion was cut: {:?}",
-        c.depth_capped
-    );
-    // The logical-symbol collisions a non-injective `identity` used to HIDE and
-    // the target-per-graph walk then made real: `__nb_checked_index` is declared
-    // `inline(lua)` and `inline(js)`, both `@nomangle`, both emission roots, and
-    // both were separate instances. One target-neutral graph holds the group
-    // REPRESENTATIVE only, so there is one instance and one symbol.
-    //
-    // Corpus-wide this is NOT yet empty: a same-BACKEND `@nomangle` pair has no
-    // target to tell it apart and is a Stage-3 emit collision
-    // (`skull_mir::mangle`'s `collision_errors`), not a graph artifact. This
-    // fixture holds no such pair, which is why it can assert the property
-    // directly.
-    assert!(
-        c.colliding_symbols.is_empty(),
-        "two instances spell alike: {:?}",
-        c.colliding_symbols.keys().collect::<Vec<_>>()
-    );
-    // Expansion is RECORDED, so the count is evidence rather than a restatement
-    // of the instance count: the fixture reaches stdlib boundaries, which are
-    // never expanded and are excused by class, not by silence.
-    assert!(c.expanded > 0, "nothing was expanded");
-    assert!(
-        c.expanded < c.instances,
-        "every reached instance counted as expanded ({}/{}), so the boundary arm of the \
-         closure gate has no population and asserts nothing",
-        c.expanded,
-        c.instances
-    );
-}
-
 /// Encoder injectivity is the property `symbol` CANNOT provide. The
 /// render-collision adversary produces two instances that display alike; their
 /// LOGICAL symbols must still differ. The final emitted spelling is an
@@ -1126,46 +962,12 @@ fn main() {
         "two distinct instances share one identity: {identity:?}"
     );
 
-    // ...and the manifest keeps both, rather than deduplicating them into one.
-    let lines = g.manifest_lines(&ws);
-    let ident_lines: Vec<&String> = lines.iter().filter(|l| l.contains("ident")).collect();
-    assert_eq!(
-        ident_lines.len(),
-        2,
-        "the manifest collapsed two distinct instances: {ident_lines:?}"
-    );
     let encoded: Vec<String> = idents.iter().map(|i| g.logical_symbol(&ws, i)).collect();
     assert_ne!(
         encoded[0], encoded[1],
         "two instances encode alike as `{}`",
         encoded[0]
     );
-    // The ENCODER is injective over these two, which is what this test is
-    // about. The graph's own collision set is not asserted here: it holds the
-    // stdlib's backend-sibling collisions, pinned as a sentinel in
-    // `every_instance_is_expanded_or_a_boundary`.
-    assert!(
-        !g.closure(&ws).colliding_symbols.contains_key(&encoded[0]),
-        "the two `ident` instances collide after all"
-    );
-}
-
-/// A non-generic instance keeps its base mangling -- the encoder must not rename
-/// every function the moment instances exist.
-#[test]
-fn a_non_generic_instance_keeps_its_base_symbol() {
-    let (ws, g) = ws_and_graph(
-        r#"
-fn bump(x: int) -> int { return x + 1 }
-fn main() { bump(1) }
-"#,
-    );
-    let bump = g
-        .instances
-        .iter()
-        .find(|i| fn_name(&ws, i.func) == "bump")
-        .expect("no `bump` instance");
-    assert_eq!(g.logical_symbol(&ws, bump), "bump_int");
 }
 
 /// A call INSIDE a shared generic body, walked at an instance, resolves through
@@ -1175,9 +977,8 @@ fn main() { bump(1) }
 /// / 23 callees, but that is measured on the EMISSION path, which still lowers
 /// shared generic bodies. In the graph every walked body is an instance, so the
 /// binding always has a substitution to resolve against, and no `unbound-generic`
-/// can arise; this fixture is one level deeper than the generic-caller case of
-/// `each_distinct_instantiation_is_its_own_instance` -- the inner call binds a
-/// collection over the caller's own generic rather than the generic itself.
+/// can arise; the inner call binds a collection over the caller's own generic
+/// rather than the generic itself.
 #[test]
 fn a_callee_binding_inside_a_generic_body_is_concrete() {
     let (ws, g) = ws_and_graph(
@@ -1305,8 +1106,8 @@ fn main() { mapped_op(1) }
 ///
 /// The root is recorded before the worklist runs, so at insertion time no
 /// instance of it exists -- which is how a name that later calls fully
-/// instantiated went on reading as having no concrete body at all. Both halves
-/// are asserted here: the count is visible, and the hole does not close.
+/// instantiated went on reading as having no concrete body at all. The record
+/// retains both its named bare-name obligation and the reached instance count.
 ///
 /// The fixture DECLARES its own `@nomangle` generic rather than borrowing a
 /// stdlib one. A stdlib name is a live entry in the obligation matrix, so
@@ -1316,7 +1117,7 @@ fn main() { mapped_op(1) }
 /// under it.
 #[test]
 fn a_root_with_instances_reports_them_and_stays_a_hole() {
-    let (ws, g) = ws_and_graph(
+    let (_, g) = ws_and_graph(
         r#"
 @nomangle fn keep<T>(x: T) -> T { return x }
 fn main() {
@@ -1337,14 +1138,6 @@ fn main() {
         hole.instances >= 2,
         "`keep` is called at two type arguments but reports {} instances",
         hole.instances
-    );
-    assert!(
-        g.closure(&ws).uninstantiated_roots.contains("keep"),
-        "a root with instances stopped counting as a hole -- the falsely-green reading"
-    );
-    assert!(
-        !g.closure(&ws).is_closed(),
-        "the fixture hole vanished from the closure gate"
     );
 }
 

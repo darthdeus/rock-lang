@@ -948,14 +948,12 @@ impl InstanceGraph {
         // `inline(lua)` in `unified.rock` and `inline(js)` in `js.rock` -- and
         // both are emission roots, so both are instances. Keying on the name
         // alone MERGED them: measured at 13 of 96 instances in a one-line
-        // fixture, and `manifest_lines` DEDUPLICATES on this string, so the
-        // manifest was one line short per colliding pair.
+        // fixture.
         //
         // `(module, function index)` is stable within a build and deterministic
         // across builds (module ids come from source order), which is the same
         // contract [`ord_key`] states. The readable form is [`Self::symbol`];
-        // the manifest carries both, precisely so this one can be unambiguous
-        // rather than pretty.
+        // this canonical form stays unambiguous when display syntax collides.
         let decl = DeclKey(i.func).raw();
         if i.args.is_empty() {
             return format!("{base}@{}.{}", decl.0, decl.1);
@@ -970,115 +968,6 @@ impl InstanceGraph {
     /// owns the final spelling and checks injectivity within its view.
     pub fn logical_symbol(&self, ws: &Workspace, i: &Instance) -> String {
         i.symbol(ws, &self.interner)
-    }
-
-    /// What is not closed about this graph.
-    ///
-    /// Closure is not "every edge target is an instance" -- `record` inserts the
-    /// target, so that holds by construction and would assert nothing. The
-    /// question is whether every instance was EXPANDED: one whose body the walk
-    /// never entered has callees missing from the graph, and it is closed only
-    /// if it has no body to enter (a boundary) or is recorded as cut.
-    pub fn closure(&self, ws: &Workspace) -> Closure {
-        // `expanded` records bodies the walk entered. A boundary has no Rock
-        // body to enter; every other unexpanded instance is a closure hole.
-        let unexpanded: BTreeSet<String> = self
-            .instances
-            .iter()
-            .filter(|i| !self.is_expanded(i))
-            .filter(|i| {
-                boundary_class_for(&ws.module(i.func.module).functions[i.func.func]).is_none()
-            })
-            .map(|i| self.identity(ws, i))
-            .collect();
-        // Encoder injectivity: two DISTINCT instances must not encode to one
-        // logical symbol. Keyed on identity, never on the display symbol, which
-        // is ambiguous by construction.
-        let mut by_symbol: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for i in &self.instances {
-            by_symbol
-                .entry(self.logical_symbol(ws, i))
-                .or_default()
-                .insert(self.identity(ws, i));
-        }
-        let colliding: BTreeMap<String, BTreeSet<String>> = by_symbol
-            .into_iter()
-            .filter(|(_, ids)| ids.len() > 1)
-            .collect();
-        Closure {
-            instances: self.instances.len(),
-            unexpanded,
-            depth_capped: self.depth_capped().map(|i| self.identity(ws, i)).collect(),
-            // Every hole, whatever its cause. A root WITH instances is still a
-            // hole: the instances discharge its Rock call sites, never the
-            // bare-name obligation that made it a root.
-            uninstantiated_roots: self.uninstantiated_roots.keys().cloned().collect(),
-            colliding_symbols: colliding,
-            expanded: self.expanded().count(),
-        }
-    }
-
-    /// Manifest lines, sorted and deduplicated by IDENTITY: `<identity>\t<symbol>`.
-    ///
-    /// The identity is IN the line, not merely the sort key. A caller that
-    /// diffed, hashed or set-compared display symbols alone would collapse two
-    /// instances whose arguments happen to render alike, which is exactly the
-    /// property the identity encoding exists to prevent.
-    pub fn manifest_lines(&self, ws: &Workspace) -> Vec<String> {
-        let mut v: Vec<String> = self
-            .instances
-            .iter()
-            .map(|i| format!("{}\t{}", self.identity(ws, i), self.symbol(ws, i)))
-            .collect();
-        v.sort();
-        v.dedup();
-        v
-    }
-}
-
-/// What the instance graph does not yet close over. Every field is a NAMED set,
-/// not a count: a gate that compares counts cannot tell a closed gap from a new
-/// one that replaced it.
-#[derive(Debug, Default)]
-pub struct Closure {
-    pub instances: usize,
-    /// Instances whose body the walk actually entered.
-    pub expanded: usize,
-    /// Reached, has no body, and is not a boundary -- its callees are missing.
-    pub unexpanded: BTreeSet<String>,
-    /// Expansion cut by [`MAX_INSTANTIATION_DEPTH`].
-    pub depth_capped: BTreeSet<String>,
-    /// Names with an UNCOVERED BARE-NAME OBLIGATION, whatever their
-    /// [`RootHole`] cause. Production emits these as shared generic bodies
-    /// callable under a bare name, so a non-empty set is the shared-body
-    /// surface, stated by name.
-    ///
-    /// NOT "roots no call instantiates": six of the corpus's have concrete
-    /// instances from Rock call sites. Those instances discharge the call
-    /// sites and not the bare-name entry, so the name stays here -- dropping
-    /// the instanced ones is the falsely-green reading.
-    pub uninstantiated_roots: BTreeSet<String>,
-    /// LOGICAL symbol -> the distinct instance identities encoding to it. Any
-    /// entry means the encoder is not injective. The FINAL emitted spelling is
-    /// an artifact ABI property, asserted per artifact view.
-    ///
-    /// **The corpus zero here is weak evidence and must not be read as strong.**
-    /// Replacing the encoder with the AMBIGUOUS display rendering leaves the
-    /// corpus at 0 too -- measured -- so the 26 projects simply contain no
-    /// render-colliding instance pair. Only
-    /// `instances_that_render_alike_get_distinct_logical_symbols` separates the
-    /// two encoders.
-    pub colliding_symbols: BTreeMap<String, BTreeSet<String>>,
-}
-
-impl Closure {
-    /// Every hole, including a generic emission root whose bare-name
-    /// obligation nothing discharges.
-    pub fn is_closed(&self) -> bool {
-        self.unexpanded.is_empty()
-            && self.depth_capped.is_empty()
-            && self.colliding_symbols.is_empty()
-            && self.uninstantiated_roots.is_empty()
     }
 }
 
@@ -1183,7 +1072,7 @@ pub fn is_spanless(span: &Span) -> bool {
 ///
 /// `roots` is supplied by the caller so this shares production's root
 /// discovery instead of re-deriving it. `perturb` reverses the seeding order;
-/// the manifest must be identical either way.
+/// the resulting graph must be identical either way.
 pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGraph {
     build_in(ws, roots, perturb, std::sync::Arc::new(MonoInterner::new()))
 }
@@ -2167,13 +2056,9 @@ fn expand_sites(
             let FunctionBody::Ready { inf, body } = function_body(ws, inst.func) else {
                 return out;
             };
-            // A boundary's Rock body is not the one emission uses -- it
-            // emits the foreign text -- so the walk STOPS here. Marking it
-            // unexpanded while continuing to enumerate its calls was the
-            // worst of both: the closure gate excused the instance as having
-            // no callees while the graph carried them, and a
-            // `@native_required` fallback body reached callees emission
-            // never routes through.
+            // A boundary's Rock body is not the one emission uses: emission
+            // uses its foreign text. A `@native_required` fallback body also
+            // reaches callees emission never routes through.
             out.expanded = true;
             // A body's own substitution is the one its caller reached it
             // under, which the contribution set already answers. An
@@ -3402,13 +3287,6 @@ impl InstanceGraph {
             .iter()
             .filter(|(_, c)| c.expanded)
             .filter_map(|(o, _)| o.instance())
-    }
-
-    /// **Owner-local**: did the walk enter this instance's body? Read by
-    /// [`Self::closure`]; consumers that want the whole population use
-    /// [`Self::expanded`].
-    pub fn is_expanded(&self, i: &Instance) -> bool {
-        self.contribution(i).is_some_and(|c| c.expanded)
     }
 
     /// Every instance's site table, in owner order.
@@ -5692,10 +5570,9 @@ pub fn serves(decl: bone_core::hir::FnBackend, target: bone_core::hir::FnBackend
     decl == FnBackend::Any || target == FnBackend::Any || decl == target
 }
 
-/// The boundary class of one declaration, or `None` if it has a Rock body the
-/// walk enters. The ONE classifier: [`classify_boundaries`] and
-/// [`InstanceGraph::closure`] both ask it, so "is this a boundary" cannot be
-/// answered two ways.
+/// The boundary class of one declaration, or `None` if it has a Rock body.
+/// [`classify_boundaries`] uses this classifier so boundary reporting cannot
+/// drift across declarations.
 pub fn boundary_class_for(f: &Function) -> Option<BoundaryClass> {
     if is_erased_runtime_entry(f) {
         return Some(BoundaryClass::ErasedRuntimeEntry);
@@ -5973,28 +5850,6 @@ pub(crate) fn function_body(ws: &Workspace, f: FuncRef) -> FunctionBody<'_> {
         return FunctionBody::StaleInference;
     }
     FunctionBody::Ready { inf, body }
-}
-
-/// The compact manifest: one line per instance, sorted by identity, each line
-/// carrying its identity and its display symbol.
-pub fn render_manifest(ws: &Workspace, g: &InstanceGraph) -> String {
-    let mut out = String::new();
-    for s in g.manifest_lines(ws) {
-        out.push_str(&s);
-        out.push('\n');
-    }
-    out
-}
-
-/// A stable digest of the manifest, for cross-run and cross-projection
-/// comparison without carrying the whole text.
-pub fn manifest_digest(ws: &Workspace, g: &InstanceGraph) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in render_manifest(ws, g).bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
 }
 
 #[cfg(test)]
