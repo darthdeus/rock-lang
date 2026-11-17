@@ -12,6 +12,7 @@ const BOUNDARY_OVERFLOW: float = 1e308 * 1e308
 const BOUNDARY_LIMIT: int = 9007199254740991
 const BOUNDARY_OUTSIDE: int = BOUNDARY_LIMIT + 2
 const BOUNDARY_NEGATIVE_ZERO: float = -0.0 * 2.0
+const BOUNDARY_BOOL: bool = true
 const BOUNDARY_FOLDED_BASE: int = 8
 const BOUNDARY_FOLDED_INT: int = BOUNDARY_FOLDED_BASE * 128
 const BOUNDARY_SUM: float = 1.0 + 0.000001
@@ -28,6 +29,7 @@ fn scalar_constant_values_preserve_runtime_boundaries() {
     assert(BOUNDARY_OVERFLOW > 1e308, "overflow remains infinite")
     assert_eq(BOUNDARY_OUTSIDE, 9007199254740991 + 2)
     assert(1.0 / BOUNDARY_NEGATIVE_ZERO < 0.0, "negative zero survives")
+    assert(BOUNDARY_BOOL, "boolean constants remain true")
     assert_eq(BOUNDARY_FOLDED_INT, 1024)
     assert_eq(BOUNDARY_SUM, 1.000001)
     assert_eq(BOUNDARY_SCALE, 6.0)

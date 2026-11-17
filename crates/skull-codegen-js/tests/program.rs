@@ -248,3 +248,13 @@ fn irreducible_mir_uses_a_trampoline_that_executes_the_return_path() {
         "{js}\nfor (const enterRight of [false, true]) for (const loopAgain of [false, true]) if (root(enterRight, loopAgain) !== 42) throw new Error('wrong return');"
     ));
 }
+
+#[test]
+fn a_generic_entry_requires_a_concrete_call_demand() {
+    let ws = ws_with("fn identity<T>(value: T) -> T { value }");
+    let error = crate::common::emit_closure(&ws, "identity").expect_err("uninstantiated root");
+    assert!(
+        error.contains("has no base InstanceGraph instance"),
+        "{error}"
+    );
+}
