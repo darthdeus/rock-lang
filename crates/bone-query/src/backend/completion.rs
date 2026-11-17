@@ -562,10 +562,15 @@ fn push_macro_candidates(
             .map_or_else(String::new, |r| format!(" -> {r}"));
         cands.push(crate::query::CompletionEntry {
             detail: Some(format!("macro {name}({}){ret}", params.join(", "))),
-            takes_params: !md.params.is_empty(),
             test_scoped: crate::query::is_test_path(def_file.as_str())
                 || name.as_str().starts_with("test_"),
-            ..crate::query::CompletionEntry::new(name, SymCat::Macro, def_file)
+            ..crate::query::CompletionEntry::new(
+                name,
+                crate::query::CompletionSymbol::Macro {
+                    takes_params: !md.params.is_empty(),
+                },
+                def_file,
+            )
         });
     }
 }
@@ -720,7 +725,7 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
         // the cap keeps the best `max_items`, and burying types under every
         // stdlib fn would truncate them away entirely; within bucket 2 the
         // `method` tiebreak already orders non-fns ahead of functions.
-        let kind = match c.kind {
+        let kind = match c.kind() {
             // Test-scoped symbols (tests/-dir or test_-named) sink to the
             // bottom kind bucket OUTSIDE test files; the band rung still
             // leads, so an explicitly typed `test_` prefix surfaces them.
@@ -739,7 +744,7 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
             _ => 2,
         };
         let type_rank = self.type_rank(&c);
-        let method = u8::from(c.kind == SymCat::Function);
+        let method = u8::from(c.kind() == SymCat::Function);
         let name = c.name.as_str();
         // Smart-case leading rank, untyped slots only: measure against the
         // variant NAME (the user types it; `Enum::` uppercasing would skew
@@ -747,7 +752,7 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
         // expected-TYPE bucket must stay dominant over case, so leave case
         // neutral (0) there.
         let case_rank = if !self.has_expected && self.pattern_enum.is_none() && !self.for_in {
-            let case_target = if c.kind == SymCat::Variant {
+            let case_target = if c.kind() == SymCat::Variant {
                 name.rsplit("::").next().unwrap_or(name)
             } else {
                 name
@@ -756,7 +761,7 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
         } else {
             0
         };
-        let (score, lead) = if c.kind == SymCat::Variant {
+        let (score, lead) = if c.kind() == SymCat::Variant {
             // The user types the variant NAME (`nog` -> `NotGround`); score
             // against it, but keep the qualified score too so a `tarnog`
             // (Enum + variant) query still ranks.
@@ -779,7 +784,7 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
         // tail too (the user types `Combat`, not `MobAiState::Combat`),
         // mirroring the score's vname handling.
         let (exact, band) = match_band_exact(name, q, q_raw);
-        let freq_name = c.signature_key.unwrap_or(c.name);
+        let freq_name = c.key();
         let key = RankKey {
             exact,
             type_rank,
@@ -790,12 +795,12 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
             method,
             fine: RankKey::fine(score),
             prox: self.prox(c.def_file),
-            freq: match c.kind {
+            freq: match c.kind() {
                 // Locals ride the recency rung instead.
                 SymCat::Local | SymCat::Param => 0,
                 _ => freq_bucket(self.freq.get(&freq_name).copied().unwrap_or(0)),
             },
-            rec: c.rec,
+            rec: c.rec(),
             len: RankKey::len_key(score, name.len()),
         };
         Cand::new(key, CandName::Sym(c.name), CandShape::Entry(c))
@@ -810,8 +815,8 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
             // pattern of the expected type (locals/fns don't pattern-match;
             // they stay offered but below, fail-open). The variant carries
             // its canonical enum key separately from its display detail.
-            return match c.kind {
-                SymCat::Variant if c.variant_enum_key.is_some_and(|key| key.as_str() == pe) => 0,
+            return match c.kind() {
+                SymCat::Variant if c.variant_enum().is_some_and(|key| key.as_str() == pe) => 0,
                 _ => 2,
             };
         }
@@ -822,19 +827,15 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
             let Some(oracle) = self.for_in_oracle.as_mut() else {
                 return 2;
             };
-            return match c.kind {
+            return match c.kind() {
                 SymCat::Local | SymCat::Param | SymCat::Global
-                    if c.ty.is_some_and(|t| oracle.iterable(t)) =>
+                    if c.ty().is_some_and(|t| oracle.iterable(t)) =>
                 {
                     0
                 }
                 SymCat::Function
-                    if fn_unique_return_ty_in_scope(
-                        ws,
-                        c.signature_key.unwrap_or(c.name).as_str(),
-                        self.g.frag,
-                    )
-                    .is_some_and(|t| oracle.iterable(t)) =>
+                    if fn_unique_return_ty_in_scope(ws, c.key().as_str(), self.g.frag)
+                        .is_some_and(|t| oracle.iterable(t)) =>
                 {
                     1
                 }
@@ -845,8 +846,8 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
             // No expected type: the kind ladder is the whole bucket.
             return 0;
         };
-        let def_key = c.signature_key.unwrap_or(c.name);
-        match c.kind {
+        let def_key = c.key();
+        match c.kind() {
             // A local/param/global whose type COERCES into the expected slot
             // (bone's real relation: generics instantiate, `int` fits
             // `int?`/`float`/`any`), OR an enum variant whose enum is the
@@ -854,12 +855,12 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
             // TargetError -> `TargetError::NotGround`; the variant carries
             // its enum name in `detail`).
             SymCat::Local | SymCat::Param | SymCat::Global
-                if c.ty.is_some_and(|t| exp.accepts(t)) =>
+                if c.ty().is_some_and(|t| exp.accepts(t)) =>
             {
                 0
             }
             SymCat::Variant
-                if c.variant_enum_key
+                if c.variant_enum()
                     .is_some_and(|key| exp.expects_nominal(key.as_str())) =>
             {
                 0

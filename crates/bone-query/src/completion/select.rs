@@ -2,7 +2,7 @@ use bone_semantic::prelude::Workspace;
 
 use lsp_types::{CompletionItem, CompletionItemKind, CompletionItemLabelDetails, InsertTextFormat};
 
-use crate::query::SymCat;
+use crate::query::{CompletionSymbol, SymCat};
 use crate::rank_key::RankKey;
 
 use super::rank::ci_cmp;
@@ -241,21 +241,24 @@ pub(crate) fn materialize_cand(
     let sort_text = Some(cand.key.encode(cand.name.as_str()));
     match cand.shape {
         CandShape::Entry(c) => {
+            let kind = c.kind();
             let name = bone_core::modules::display_name(c.name.as_str());
             // Function/global detail is materialized HERE for survivors only.
             // Resolve the exact accessible overload under the request's scope.
-            let detail = match c.kind {
+            let detail = match c.symbol {
                 // `name` is presentation spelling and may be an imported
                 // alias. Every function candidate carries its canonical HIR
                 // key, so falling back to the spelling could show an
                 // unrelated same-named function if the cache ever drifted.
-                SymCat::Function => c.detail.or_else(|| {
-                    c.signature_key.and_then(|key| {
-                        crate::query::render_deferred_signature(ws, fragment_file, key, c.name)
-                    })
+                CompletionSymbol::Function { key, .. } => c.detail.or_else(|| {
+                    crate::query::render_deferred_signature(ws, fragment_file, key, c.name)
                 }),
-                SymCat::Global => c.detail.or_else(|| {
-                    c.ty.and_then(|ty| {
+                CompletionSymbol::Variable {
+                    kind: SymCat::Global,
+                    ty,
+                    ..
+                } => c.detail.or_else(|| {
+                    ty.and_then(|ty| {
                         let rendered = ws.render(None, ty);
                         (!rendered.is_empty()).then_some(rendered)
                     })
@@ -265,7 +268,7 @@ pub(crate) fn materialize_cand(
             // The full detail goes in the panel; a concise form renders
             // inline next to the label in the popup (a fn's `(params) ->
             // ret`, a binding's `: type`).
-            let label_details = fn_or_type_label_details(c.kind, detail.as_deref());
+            let label_details = fn_or_type_label_details(kind, detail.as_deref());
             // A function with params accepts as a snippet `name($0)` ->
             // inserts `name()` with the cursor parked between the parens
             // (the client shows a snippet marker, e.g. nvim-cmp's `~`). A
@@ -274,28 +277,37 @@ pub(crate) fn materialize_cand(
             // A qualified `Enum::Variant` value in an expression slot
             // carries the same payload template as the `Enum::` path:
             // tuple -> `($0)`, record -> `{ $0 }`, unit -> bare.
-            let (insert_text, insert_text_format) = match c.kind {
+            let (insert_text, insert_text_format) = match c.symbol {
                 // `on_killed`/`on_resume`/`on_hot_reload` are contextual
                 // lifecycle-hook keywords with a statement BLOCK form
                 // (`on_killed { .. }`) -- complete to the block, not a call.
-                SymCat::Function if is_lifecycle_hook(c.name.as_str()) => (
+                CompletionSymbol::Function { .. } if is_lifecycle_hook(c.name.as_str()) => (
                     Some(format!("{name} {{ $0 }}")),
                     Some(InsertTextFormat::SNIPPET),
                 ),
-                SymCat::Function | SymCat::Macro if strip_call => (Some(name.to_string()), None),
-                SymCat::Function | SymCat::Macro if c.takes_params => {
+                CompletionSymbol::Function { .. } | CompletionSymbol::Macro { .. }
+                    if strip_call =>
+                {
+                    (Some(name.to_string()), None)
+                }
+                CompletionSymbol::Function {
+                    takes_params: true, ..
+                }
+                | CompletionSymbol::Macro { takes_params: true } => {
                     (Some(format!("{name}($0)")), Some(InsertTextFormat::SNIPPET))
                 }
-                SymCat::Function | SymCat::Macro => (Some(format!("{name}()")), None),
-                SymCat::Variant if pattern => (None, None),
-                SymCat::Variant => match c.variant_shape {
-                    Some(crate::query::VariantShape::Tuple) if strip_call => {
+                CompletionSymbol::Function { .. } | CompletionSymbol::Macro { .. } => {
+                    (Some(format!("{name}()")), None)
+                }
+                CompletionSymbol::Variant { .. } if pattern => (None, None),
+                CompletionSymbol::Variant { shape, .. } => match shape {
+                    crate::query::VariantShape::Tuple if strip_call => {
                         (Some(name.to_string()), None)
                     }
-                    Some(crate::query::VariantShape::Tuple) => {
+                    crate::query::VariantShape::Tuple => {
                         (Some(format!("{name}($0)")), Some(InsertTextFormat::SNIPPET))
                     }
-                    Some(crate::query::VariantShape::Record) => (
+                    crate::query::VariantShape::Record => (
                         Some(format!("{name} {{ $0 }}")),
                         Some(InsertTextFormat::SNIPPET),
                     ),
@@ -305,7 +317,7 @@ pub(crate) fn materialize_cand(
             };
             CompletionItem {
                 label: name.to_string(),
-                kind: Some(completion_kind(c.kind)),
+                kind: Some(completion_kind(kind)),
                 label_details,
                 detail,
                 insert_text,
