@@ -1,6 +1,7 @@
 //! Dispatch contextual completion and rank candidates for general completion.
 
 use super::*;
+use crate::cursor_context::Record;
 
 /// The request-wide facts every source reads.
 struct Request<'a> {
@@ -182,7 +183,7 @@ fn contextual_completions(
             Context::Record(record) => {
                 let written = match record {
                     Record::Struct { brace_open, .. } => {
-                        rq.src.get(brace_open + 1..rq.offset).unwrap_or("")
+                        rq.src.get(*brace_open + 1..rq.offset).unwrap_or("")
                     }
                     Record::Variant { .. } => "",
                 };

@@ -18,7 +18,9 @@ use crate::query::clean_match;
 use crate::rank_key::RankKey;
 use crate::types::{self, ty_of};
 
-use super::classify::{Record, SlotAnchor, balance_delimiters, completion_munges};
+use crate::cursor_context::Record;
+
+use super::classify::{SlotAnchor, balance_delimiters, completion_munges};
 use super::rank::*;
 use super::select::*;
 
@@ -955,7 +957,7 @@ pub(crate) fn record_candidates(
     ws: &Workspace,
     file: Ustr,
     prefix: &[u8],
-    record: Record<'_>,
+    record: &Record,
     written: &str,
 ) -> Option<Vec<Cand>> {
     let key = crate::modules_scope::resolve_type_key_in_file(ws, file, record.name())?;

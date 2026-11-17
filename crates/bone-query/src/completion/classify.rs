@@ -6,6 +6,7 @@
 use bone_semantic::prelude::{InferenceResult, ModuleId, Workspace};
 
 use crate::backend::{ExpectedArg, expected_for_anchor, fn_unique_return_ty_in_scope};
+use crate::cursor_context::{CursorAst, Record};
 
 /// True when a leading `.` sits just before the partial identifier under the
 /// cursor (a key-path `.field`, not member access -- `receiver_path` already
@@ -413,20 +414,6 @@ pub(crate) fn for_in_iterable_slot(src: &str, offset: usize) -> bool {
     &b[p..for_end] == b"for"
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum Record<'a> {
-    Struct { name: &'a str, brace_open: usize },
-    Variant { name: &'a str, variant: &'a str },
-}
-
-impl<'a> Record<'a> {
-    pub(crate) fn name(self) -> &'a str {
-        match self {
-            Self::Struct { name, .. } | Self::Variant { name, .. } => name,
-        }
-    }
-}
-
 pub(crate) enum Context<'a> {
     Member {
         receiver: usize,
@@ -437,7 +424,7 @@ pub(crate) enum Context<'a> {
         index: usize,
         receiver: Option<usize>,
     },
-    Record(Record<'a>),
+    Record(&'a Record),
     ModulePath,
     Enum(&'a str),
     Decorator,
@@ -459,12 +446,8 @@ pub(crate) struct CompletionCx {
     /// Enclosing call with the cursor in an ARG slot: (callee, idx,
     /// receiver end). Field-ref gate + expected-type input.
     pub(crate) arg_call: Option<(String, u32, Option<usize>)>,
-    /// `Enum::Variant { fi| }` record-literal field names.
-    pub(crate) enum_record: Option<(String, String)>,
-    /// `Enum::|` / `Struct::|` qualified-path members.
-    pub(crate) qualified: Option<String>,
-    /// `Name { fi| }` struct-literal field-NAME slot.
-    pub(crate) struct_literal: Option<(String, usize)>,
+    record: Option<Record>,
+    qualified: Option<String>,
     /// `@deco|` decorator namespace (byte trigger; live even when the
     /// module dropped out).
     pub(crate) decorator: bool,
@@ -502,7 +485,7 @@ pub(crate) struct CompletionCx {
 pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
     let ast = crate::cursor_context::CursorAst::at(src, offset);
     let cx = ast.as_ref();
-    let field_value = cx.and_then(|c| c.struct_field_value());
+    let (record, field_value) = cx.map_or((None, None), CursorAst::record_contexts);
     // An inner call slot can take precedence over the enclosing field value.
     let has_field_value = field_value.is_some();
     let arg_call = if has_field_value {
@@ -514,9 +497,8 @@ pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
     CompletionCx {
         member: cx.and_then(|c| c.member_path()),
         member_recv_end: cx.and_then(|c| c.member_receiver_end()),
-        enum_record: cx.and_then(|c| c.enum_record()),
+        record,
         qualified: cx.and_then(|c| c.qualified_base()),
-        struct_literal: cx.and_then(|c| c.struct_literal()),
         decorator: decorator_context(src, offset),
         field_value,
         anchor: cx.and_then(slot_anchor),
@@ -555,17 +537,16 @@ impl CompletionCx {
                     index: *index as usize,
                     receiver: *receiver,
                 }),
-            self.enum_record
+            self.record
                 .as_ref()
-                .map(|(name, variant)| Context::Record(Record::Variant { name, variant })),
+                .filter(|r| matches!(r, Record::Variant { .. }))
+                .map(Context::Record),
             Some(Context::ModulePath),
             self.qualified.as_deref().map(Context::Enum),
-            self.struct_literal.as_ref().map(|(name, brace_open)| {
-                Context::Record(Record::Struct {
-                    name,
-                    brace_open: *brace_open,
-                })
-            }),
+            self.record
+                .as_ref()
+                .filter(|r| matches!(r, Record::Struct { .. }))
+                .map(Context::Record),
             self.decorator.then_some(Context::Decorator),
         ]
         .into_iter()

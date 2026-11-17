@@ -86,33 +86,24 @@ pub(crate) struct NamedArgSlot {
     pub spread_probes: Vec<usize>,
 }
 
-enum RecordHead {
-    /// (name, name-ident end offset)
-    Struct(String, usize),
-    /// A qualified record literal. The resolver decides whether the final
-    /// two path segments are an enum variant or the full path names a struct.
-    Path(Vec<String>, usize),
+pub(crate) enum Record {
+    Struct { name: String, brace_open: usize },
+    Variant { name: String, variant: String },
 }
 
-fn enum_path_names(path: &Path) -> Option<(&skull_parser::ast::Ident, &skull_parser::ast::Ident)> {
-    let len = path.segments.len();
-    (len >= 2).then(|| (&path.segments[len - 2], &path.segments[len - 1]))
-}
-
-impl RecordHead {
-    fn end(&self) -> usize {
+impl Record {
+    pub(crate) fn name(&self) -> &str {
         match self {
-            RecordHead::Struct(_, e) | RecordHead::Path(_, e) => *e,
+            Self::Struct { name, .. } | Self::Variant { name, .. } => name,
         }
     }
 }
 
-struct RecordCtx {
-    head: RecordHead,
-    /// Offset of the literal's `{` (starts before the cursor, so live-valid).
-    brace: usize,
-    /// `(field name, cursor-in-lambda-body)` when in a field VALUE slot.
-    value_field: Option<(String, bool)>,
+type FieldValue = (String, String, bool);
+
+fn enum_path_names(path: &Path) -> Option<(&skull_parser::ast::Ident, &skull_parser::ast::Ident)> {
+    let len = path.segments.len();
+    (len >= 2).then(|| (&path.segments[len - 2], &path.segments[len - 1]))
 }
 
 /// A call the byte scanner treats as a paren-arg context: every form that
@@ -379,102 +370,61 @@ impl CursorAst {
         })
     }
 
-    /// Enclosing record literal with the cursor inside its BRACES, innermost
-    /// first. `value_field` is
-    /// set when the cursor sits in a field's VALUE expr (not a pun -- a pun's
-    /// "value" is the written field name itself, i.e. a NAME slot).
-    fn record_ctx(&self) -> Option<RecordCtx> {
-        for &node in self.chain.iter() {
-            let (head, fields) = match &self.expr(node).kind {
-                ExprKind::PathStructLiteral { path, fields, .. } => {
-                    let end = path.segments.last()?.span.offset_range().1;
-                    let head = if path.segments.len() == 1 && !path.from_root {
-                        RecordHead::Struct(path.segments[0].name.to_string(), end)
-                    } else {
-                        RecordHead::Path(
-                            path.segments
-                                .iter()
-                                .map(|segment| segment.name.to_string())
-                                .collect(),
-                            end,
-                        )
-                    };
-                    (head, fields)
-                }
-                _ => continue,
-            };
-            let head_end = head.end();
-            let Some(brace) = self.text[head_end..].find('{').map(|i| head_end + i) else {
+    pub(crate) fn record_contexts(&self) -> (Option<Record>, Option<FieldValue>) {
+        self.record_literal().unwrap_or_else(|| {
+            let fields = self
+                .pattern_record()
+                .map(|(name, variant)| Record::Variant { name, variant });
+            (fields, self.decl_field_default())
+        })
+    }
+
+    fn record_literal(&self) -> Option<(Option<Record>, Option<FieldValue>)> {
+        for &node in &self.chain {
+            let ExprKind::PathStructLiteral { path, fields, .. } = &self.expr(node).kind else {
                 continue;
             };
-            if self.probe <= brace {
-                continue; // cursor in the head, not the braces
+            let name = path.segments.last()?;
+            let end = name.span.offset_range().1;
+            let Some(brace_open) = self.text[end..].find('{').map(|i| end + i) else {
+                continue;
+            };
+            if self.probe <= brace_open {
+                continue;
             }
-            let mut value_field: Option<(String, bool)> = None;
-            for (path, val) in fields {
-                let v = self.expr(*val);
-                let (vs, ve) = v.span.offset_range();
-                if vs <= self.probe && self.probe < ve {
-                    let pun =
-                        path.len() == 1 && path[0].span.offset_range() == v.span.offset_range();
-                    if !pun {
-                        let fname = path.last()?.name.to_string();
-                        value_field = Some((fname, self.lambda_body_contains(v)));
+            if path.segments.len() != 1 || path.from_root {
+                let record = enum_path_names(path).map(|(name, variant)| Record::Variant {
+                    name: name.name.to_string(),
+                    variant: variant.name.to_string(),
+                });
+                return Some((record, None));
+            }
+            for (path, value) in fields {
+                let expr = self.expr(*value);
+                let (start, end) = expr.span.offset_range();
+                if start <= self.probe && self.probe < end {
+                    if path.len() == 1 && path[0].span.offset_range() == (start, end) {
+                        break; // the span of a punned field covers its name
                     }
-                    break;
+                    return Some((
+                        None,
+                        Some((
+                            name.name.to_string(),
+                            path.last()?.name.to_string(),
+                            self.lambda_body_contains(expr),
+                        )),
+                    ));
                 }
             }
-            return Some(RecordCtx {
-                head,
-                brace,
-                value_field,
-            });
+            return Some((
+                Some(Record::Struct {
+                    name: name.name.to_string(),
+                    brace_open,
+                }),
+                None,
+            ));
         }
         None
-    }
-
-    /// `Name { <cursor> }` field-NAME slot: `(struct name, brace offset)`.
-    /// None in a field-VALUE slot (type-directed completion handles those).
-    pub(crate) fn struct_literal(&self) -> Option<(String, usize)> {
-        let c = self.record_ctx()?;
-        if c.value_field.is_some() {
-            return None;
-        }
-        match c.head {
-            RecordHead::Struct(name, _) => Some((name, c.brace)),
-            RecordHead::Path(..) => None,
-        }
-    }
-
-    /// `Enum::Variant { <cursor> }`: `(enum, variant)`. Fires for any slot
-    /// inside the braces -- parity with the byte scanner, which serves field
-    /// names there regardless of slot -- and inside record PATTERNS, where
-    /// field names are just as completable.
-    pub(crate) fn enum_record(&self) -> Option<(String, String)> {
-        match self.record_ctx().map(|c| c.head) {
-            Some(RecordHead::Path(path, _)) if path.len() >= 2 => {
-                Some((path[path.len() - 2].clone(), path[path.len() - 1].clone()))
-            }
-            Some(RecordHead::Struct(..) | RecordHead::Path(..)) => None,
-            None => self.pattern_record(),
-        }
-    }
-
-    /// `Name { field: <cursor> }` field-VALUE slot: `(struct, field,
-    /// is_lambda_body)` -- is_lambda_body when the value is a lambda and the
-    /// cursor sits in its BODY (type-direct on the fn's return type).
-    pub(crate) fn struct_field_value(&self) -> Option<(String, String, bool)> {
-        match self.record_ctx() {
-            Some(c) => {
-                let (field, is_lambda) = c.value_field?;
-                match c.head {
-                    RecordHead::Struct(name, _) => Some((name, field, is_lambda)),
-                    RecordHead::Path(..) => None,
-                }
-            }
-            // A struct DECL field's default expr type-directs the same way.
-            None => self.decl_field_default(),
-        }
     }
 
     pub(crate) fn assign_lhs(&self) -> Option<usize> {
@@ -1039,7 +989,9 @@ mod gaps {
         let (_, _, cx) = cx(
             "enum E { B { d: int, h: int } }\nfn t(e: E) {\n  match e {\n    E::B { $0d, .. } => {}\n    _ => {}\n  }\n}\n",
         );
-        assert_eq!(cx.enum_record(), Some(("E".to_string(), "B".to_string())));
+        assert!(
+            matches!(cx.record_contexts().0, Some(Record::Variant { name, variant }) if name == "E" && variant == "B")
+        );
     }
 
     #[test]
@@ -1050,7 +1002,7 @@ mod gaps {
         // behavior is worth keeping on purpose.
         let (_, _, cx) = cx("struct S {\n  dur: float = 0.$00,\n  n: int = 1,\n}\n");
         assert_eq!(
-            cx.struct_field_value(),
+            cx.record_contexts().1,
             Some(("S".to_string(), "dur".to_string(), false))
         );
     }

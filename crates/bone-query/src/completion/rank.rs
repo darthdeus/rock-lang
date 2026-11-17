@@ -1,20 +1,13 @@
-//! Completion ranking primitives: the shared fuzzy
-//! DP, the coarse match bands, and the `RankKey` constructors every source
-//! ranks through. `clean_match`/`fz_boundary` stay in `crate::query` -- they
-//! are the centralized matchers (shared LSP architecture).
+//! Rank completion names and share fuzzy scoring across call-through candidates.
 
 use crate::query::fz_boundary;
 use crate::rank_key::RankKey;
 
-// Shared fuzzy-scoring constants + boundary rule -- used by `fuzzy_score` and by
-// the call-through partition decomposition (`fuzzy_prefix_scores` /
-// `fuzzy_suffix_scores`), which MUST score identically to `fuzzy_score` for the
-// decomposition `score = max_s(prefix[s] + suffix[s])` to stay byte-exact.
-pub(crate) const FZ_MISS: i32 = -1_000_000;
-pub(crate) const FZ_BASE: i32 = 1;
-pub(crate) const FZ_BOUNDARY: i32 = 10; // matched char at a word start
-pub(crate) const FZ_CONSEC: i32 = 10; // matched char right after the previous match (run); == FZ_BOUNDARY so a contiguous run is never worth less than a one-char boundary hop
-pub(crate) const FZ_FIRST: i32 = 10; // extra for matching at absolute position 0
+const MISS: i32 = -1_000_000;
+const BASE: i32 = 1;
+const BOUNDARY: i32 = 10;
+const CONSECUTIVE: i32 = 10;
+const FIRST: i32 = 10;
 
 /// How many leading chars of `query` (already lowercased) match the START of
 /// `cand` contiguously, case-insensitively. `lootpa` vs `LOOT_PANEL` = 4
@@ -30,216 +23,97 @@ pub(crate) fn leading_run_len(cand: &[u8], query: &[u8]) -> usize {
 }
 
 pub(crate) fn fuzzy_score(cand: &[u8], query: &[u8]) -> i32 {
-    const MISS: i32 = FZ_MISS;
-    const BASE: i32 = FZ_BASE;
-    const BOUNDARY: i32 = FZ_BOUNDARY;
-    const CONSEC: i32 = FZ_CONSEC;
-    const FIRST: i32 = FZ_FIRST;
+    let score = fuzzy_scores::<false>(cand, query, &mut []);
+    if score > MISS
+        && !query.is_empty()
+        && cand
+            .get(..query.len())
+            .is_some_and(|s| s.eq_ignore_ascii_case(query))
+    {
+        score + 1000
+    } else {
+        score
+    }
+}
+
+pub(crate) fn fuzzy_prefix_scores(cand: &[u8], query: &[u8], out: &mut Vec<i32>) {
+    out.resize(query.len() + 1, 0);
+    out[0] = 0;
+    fuzzy_scores::<false>(cand, query, &mut out[1..]);
+}
+
+pub(crate) fn fuzzy_suffix_scores(cand: &[u8], query: &[u8], out: &mut Vec<i32>) {
+    out.resize(query.len() + 1, 0);
+    out[query.len()] = 0;
+    fuzzy_scores::<true>(cand, query, &mut out[..query.len()]);
+}
+
+// The '(' in a synthesized call breaks consecutive runs. Score the name
+// left-to-right and the argument right-to-left so every split of the query
+// can reuse these scores. The argument starts at a word boundary, not byte 0
+// of the full call.
+fn fuzzy_scores<const BACKWARD: bool>(cand: &[u8], query: &[u8], scores: &mut [i32]) -> i32 {
     if query.is_empty() {
         return 0;
     }
-    let n = cand.len();
-    if n == 0 {
-        return MISS;
-    }
-    let boundary = |j: usize| fz_boundary(cand, j);
-    // The two DP rows (`prev`/`cur`, each `n` wide) are reused from a thread-
-    // local scratch -- `fuzzy_score` is called hundreds of times per keystroke
-    // (clean_match per candidate fn, arg_rank_key per survivor, the general
-    // ranking), and a per-call `vec![MISS; n]` x2 was the dominant short-prefix
-    // cost. `resize` reuses the existing capacity, so steady state is alloc-free.
     thread_local! {
-        static SCRATCH: std::cell::RefCell<(Vec<i32>, Vec<i32>)> =
+        static ROWS: std::cell::RefCell<(Vec<i32>, Vec<i32>)> =
             const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
     }
-    SCRATCH.with(|sc| {
-        let (prev, cur) = &mut *sc.borrow_mut();
-        prev.clear();
-        prev.resize(n, MISS); // best score with query[i-1] ending at each cand pos
-        cur.clear();
-        cur.resize(n, MISS);
-        for (i, &qc) in query.iter().enumerate() {
-            // `max_prev` = best prev[k] for k < j (query[i-1] somewhere before j).
-            let mut max_prev = MISS;
-            for j in 0..n {
-                cur[j] = MISS;
-                if cand[j].to_ascii_lowercase() == qc {
-                    let mut b = BASE;
-                    if boundary(j) {
-                        b += BOUNDARY;
-                    }
-                    if j == 0 {
-                        b += FIRST;
-                    }
-                    if i == 0 {
-                        cur[j] = b;
-                    } else {
-                        let mut s = MISS;
-                        if max_prev > MISS {
-                            s = max_prev + b;
-                        }
-                        // Consecutive: query[i-1] ended exactly at j-1 -> extend the run.
-                        if j > 0 && prev[j - 1] > MISS {
-                            s = s.max(prev[j - 1] + b + CONSEC);
-                        }
-                        cur[j] = s;
-                    }
-                }
-                if prev[j] > max_prev {
-                    max_prev = prev[j];
-                }
+    ROWS.with(|rows| {
+        let (prev, cur) = &mut *rows.borrow_mut();
+        prev.resize(cand.len(), MISS);
+        prev.fill(MISS);
+        cur.resize(cand.len(), MISS);
+        let mut best = MISS;
+        for step in 0..query.len() {
+            let i = if BACKWARD {
+                query.len() - step - 1
+            } else {
+                step
+            };
+            let qc = query[i];
+            let mut earlier = MISS;
+            let mut adjacent = MISS;
+            for (j, cell) in cur.iter_mut().enumerate() {
+                let k = if BACKWARD { cand.len() - j - 1 } else { j };
+                let previous = if step == 0 {
+                    0
+                } else if adjacent != MISS {
+                    earlier.max(adjacent + CONSECUTIVE)
+                } else {
+                    earlier
+                };
+                *cell = if cand[k].to_ascii_lowercase() == qc && previous != MISS {
+                    previous
+                        + BASE
+                        + if fz_boundary(cand, k) { BOUNDARY } else { 0 }
+                        + if !BACKWARD && k == 0 { FIRST } else { 0 }
+                } else {
+                    MISS
+                };
+                adjacent = prev[j];
+                earlier = earlier.max(adjacent);
+            }
+            if !scores.is_empty() || step + 1 == query.len() {
+                best = cur.iter().copied().max().unwrap_or(MISS);
+            }
+            if !scores.is_empty() {
+                scores[i] = best;
             }
             std::mem::swap(prev, cur);
-        }
-        let mut best = prev.iter().copied().max().unwrap_or(MISS);
-        // A true whole-string prefix (typing the name/root from its start) is the
-        // strongest signal -- it must beat any boundary-aligned partial match
-        // elsewhere (`play` -> `player...` over `pixel_LAYer...`). Dominant bonus.
-        if best > MISS
-            && cand.len() >= query.len()
-            && cand[..query.len()].eq_ignore_ascii_case(query)
-        {
-            best += 1000;
         }
         best
     })
 }
 
-// --- Call-through partition decomposition (lever A) ---------------------------
-//
-// `fuzzy_score(name + "(" + arg + ")", q)` is a max over alignments of `q`. Each
-// alignment splits `q` at some index `s`: `q[..s]` matches inside the name,
-// `q[s..]` inside the arg. The `(` between them breaks any consecutive-run bonus,
-// so the two halves score INDEPENDENTLY:
-//
-//     score(name, arg, q) = max over s of [ prefix_name[s] + suffix_arg[s] ]
-//
-// `prefix_name[s]` depends only on (name, q); `suffix_arg[s]` only on (arg, q) --
-// so the arg half is computed ONCE and shared by every fn in a group, and the
-// per-(fn,arg) cost drops from a full DP to a length-`|q|` combine. EXACT: the
-// `+1000` whole-query-prefix bonus never applies to call-through (a passing fn's
-// name cannot contain all of `q`, by the noise guard `k < q.len()`), so it is
-// intentionally omitted here.
-
-/// `out[s]` = best `fuzzy_score`-style score of the prefix `q[..s]` matched as a
-/// subsequence of `cand` (`s = 0..=q.len()`), WITHOUT the `+1000` bonus. `out[0]
-/// = 0`; `out[s] = FZ_MISS` when `q[..s]` is not a subsequence. The forward DP is
-/// `fuzzy_score`'s, recording the row max after each query char.
-pub(crate) fn fuzzy_prefix_scores(cand: &[u8], query: &[u8], out: &mut Vec<i32>) {
-    out.clear();
-    out.push(0); // s = 0: empty prefix
-    let m = query.len();
-    let n = cand.len();
-    if m == 0 {
-        return;
-    }
-    if n == 0 {
-        out.resize(m + 1, FZ_MISS);
-        return;
-    }
-    let mut prev = vec![FZ_MISS; n];
-    let mut cur = vec![FZ_MISS; n];
-    for (i, &qc) in query.iter().enumerate() {
-        let mut max_prev = FZ_MISS;
-        let mut rowmax = FZ_MISS;
-        for j in 0..n {
-            cur[j] = FZ_MISS;
-            if cand[j].to_ascii_lowercase() == qc {
-                let mut b = FZ_BASE;
-                if fz_boundary(cand, j) {
-                    b += FZ_BOUNDARY;
-                }
-                if j == 0 {
-                    b += FZ_FIRST;
-                }
-                if i == 0 {
-                    cur[j] = b;
-                } else {
-                    let mut s = FZ_MISS;
-                    if max_prev > FZ_MISS {
-                        s = max_prev + b;
-                    }
-                    if j > 0 && prev[j - 1] > FZ_MISS {
-                        s = s.max(prev[j - 1] + b + FZ_CONSEC);
-                    }
-                    cur[j] = s;
-                }
-            }
-            if prev[j] > max_prev {
-                max_prev = prev[j];
-            }
-            if cur[j] > rowmax {
-                rowmax = cur[j];
-            }
-        }
-        out.push(rowmax); // best score of q[..=i] = prefix length i+1
-        std::mem::swap(&mut prev, &mut cur);
-    }
-}
-
-/// `out[s]` = best `fuzzy_score`-style score of the suffix `q[s..]` matched as a
-/// subsequence of `cand`, scored AS IF `cand` sits right after a `(`: `cand[0]`
-/// is a word boundary (it is -- preceded by `(`) but NOT absolute position 0, so
-/// it gets `FZ_BOUNDARY` but NOT `FZ_FIRST`. `out[q.len()] = 0`; `out[s] =
-/// FZ_MISS` when `q[s..]` is not a subsequence. Backward DP: `next[j]` = best
-/// score of `q[i+1..]` with `q[i+1]` starting at position `j`.
-pub(crate) fn fuzzy_suffix_scores(cand: &[u8], query: &[u8], out: &mut Vec<i32>) {
-    let m = query.len();
-    out.clear();
-    out.resize(m + 1, FZ_MISS);
-    out[m] = 0; // empty suffix
-    let n = cand.len();
-    if m == 0 || n == 0 {
-        return;
-    }
-    let mut next = vec![FZ_MISS; n]; // matchStart for q[i+1..]
-    let mut cur = vec![FZ_MISS; n];
-    for i in (0..m).rev() {
-        let qc = query[i];
-        let last = i + 1 == m;
-        // `suffmax` = max next[j'] for j' > current j (scanning j descending).
-        let mut suffmax = FZ_MISS;
-        let mut rowmax = FZ_MISS;
-        for j in (0..n).rev() {
-            cur[j] = FZ_MISS;
-            if cand[j].to_ascii_lowercase() == qc {
-                let mut b = FZ_BASE;
-                if fz_boundary(cand, j) {
-                    b += FZ_BOUNDARY; // boundary; never FZ_FIRST (not at absolute 0)
-                }
-                let cont = if last {
-                    0 // last query char: empty continuation
-                } else {
-                    // q[i+1] at some j' > j; +CONSEC only when adjacent (j'==j+1).
-                    let mut c = suffmax;
-                    if j + 1 < n && next[j + 1] > FZ_MISS {
-                        c = c.max(next[j + 1] + FZ_CONSEC);
-                    }
-                    c
-                };
-                if cont > FZ_MISS {
-                    cur[j] = b + cont;
-                }
-            }
-            if next[j] > suffmax {
-                suffmax = next[j];
-            }
-            if cur[j] > rowmax {
-                rowmax = cur[j];
-            }
-        }
-        out[i] = rowmax;
-        std::mem::swap(&mut next, &mut cur);
-    }
-}
-
 /// `max over s of prefix[s] + suffix[s]` -- the call-through partition combine.
-/// Both vectors are `q.len()+1` long; `FZ_MISS` entries (non-subsequence splits)
-/// are skipped. Returns `FZ_MISS` if no split is viable.
+/// Both vectors are `q.len()+1` long; `MISS` entries (non-subsequence splits)
+/// are skipped. Returns `MISS` if no split is viable.
 pub(crate) fn combine_scores(prefix: &[i32], suffix: &[i32]) -> i32 {
-    let mut best = FZ_MISS;
+    let mut best = MISS;
     for s in 0..prefix.len() {
-        if prefix[s] > FZ_MISS && suffix[s] > FZ_MISS {
+        if prefix[s] > MISS && suffix[s] > MISS {
             best = best.max(prefix[s] + suffix[s]);
         }
     }
