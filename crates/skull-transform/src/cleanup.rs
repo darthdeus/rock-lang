@@ -311,7 +311,7 @@ pub(crate) fn cleanup_in(ws: Option<&Workspace>, func: &mut MirFunc) -> Result<(
         // Inside the loop, because SROA is what CREATES the shape: forwarding a
         // nullable value field's read to the literal that filled it leaves a
         // presence test whose operand is now a fresh ctor.
-        let folded = fold_never_nil_compares(func);
+        let folded = fold_known_compares(func);
         if changed || folded || stale {
             let cp = copy_propagate_analysis(func, ws);
             stale = dce_core(func, cp.as_ref()) || cp.as_ref().is_some_and(|cp| cp.exposes_more);
@@ -325,7 +325,7 @@ pub(crate) fn cleanup_in(ws: Option<&Workspace>, func: &mut MirFunc) -> Result<(
     // Copy propagation can hand a nil test a literal operand: an inlined
     // default prologue testing the argument its caller stored. Deciding it
     // removes a join, so the code after it starts from that literal again.
-    let mut decided = fold_never_nil_compares(func);
+    let mut decided = fold_known_compares(func);
     while fold_const_branches(func) {
         if !decided {
             dce(func);
@@ -333,7 +333,7 @@ pub(crate) fn cleanup_in(ws: Option<&Workspace>, func: &mut MirFunc) -> Result<(
         }
         let cp = copy_propagate_analysis(func, ws);
         dce_core(func, cp.as_ref());
-        decided = fold_never_nil_compares(func);
+        decided = fold_known_compares(func);
     }
     if decided {
         // A decided test that folded no branch still leaves its operands.
@@ -430,12 +430,14 @@ fn assert_round_settled(ws: Option<&Workspace>, func: &MirFunc) {
 /// it turns the operand into a ctor. 18 generated shapes boxed a value twice and
 /// branched on the result purely for this, and the value oracle read every one as
 /// CORRECT because the ANSWER was right.
-fn fold_never_nil_compares(func: &mut MirFunc) -> bool {
+/// Literal string tags also decide enum arms before checking refined payloads.
+fn fold_known_compares(func: &mut MirFunc) -> bool {
     let never_nil = skull_mir::nilness::constructed_never_nil;
     let is_nil = |func: &MirFunc, v: Idx<Inst>| matches!(&func.insts[v], Inst::Const(Lit::Nil));
-    let literal_against_sentinel =
+    let literal_equality =
         |func: &MirFunc, a: Idx<Inst>, b: Idx<Inst>| match (&func.insts[a], &func.insts[b]) {
             (Inst::Const(lit), Inst::Const(s @ (Lit::Nil | Lit::Omitted))) => Some(lit == s),
+            (Inst::Const(Lit::Str(a)), Inst::Const(Lit::Str(b))) => Some(a == b),
             _ => None,
         };
 
@@ -451,7 +453,7 @@ fn fold_never_nil_compares(func: &mut MirFunc) -> bool {
         if known {
             rewrites.push((iid, !eq));
         } else if let Some(equal) =
-            literal_against_sentinel(func, a, b).or_else(|| literal_against_sentinel(func, b, a))
+            literal_equality(func, a, b).or_else(|| literal_equality(func, b, a))
         {
             rewrites.push((iid, equal == eq));
         }
@@ -605,7 +607,7 @@ mod tests {
         let test = f.emit(f.entry, Inst::Eq(widened, nil));
         f.set_term(f.entry, Term::Return(vec![test]));
 
-        assert!(!fold_never_nil_compares(&mut f), "{f}");
+        assert!(!fold_known_compares(&mut f), "{f}");
         assert!(matches!(f.insts[test], Inst::Eq(..)), "{f}");
     }
 
@@ -620,7 +622,7 @@ mod tests {
         let test = f.emit(f.entry, Inst::Eq(made, nil));
         f.set_term(f.entry, Term::Return(vec![test]));
 
-        assert!(fold_never_nil_compares(&mut f), "{f}");
+        assert!(fold_known_compares(&mut f), "{f}");
         assert!(
             matches!(f.insts[test], Inst::Const(Lit::Bool(false))),
             "{f}"

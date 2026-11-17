@@ -730,6 +730,16 @@ impl<'a> Builder<'a> {
             Scrut::Val(_) | Scrut::Tuple(_) => None,
         };
         if let Some(tag) = flat_tag {
+            if let Inst::Const(Lit::Str(actual)) = self.f.insts[tag] {
+                // Inactive flat payload lanes may carry a different literal type.
+                let cont = self.f.new_block();
+                self.f.set_term(
+                    self.cur,
+                    Term::Goto(if actual == variant { cont } else { fail }),
+                );
+                self.cur = cont;
+                return;
+            }
             let want = self.emit_cur(Inst::Const(Lit::Str(variant)));
             let cond = self.emit_cur(Inst::Eq(tag, want));
             self.branch_or_fail(cond, fail);

@@ -1,0 +1,43 @@
+enum MixedPayload { Number(int), Text(string) }
+
+@test(output = "text")
+fn constant_enum_match_prunes_other_payload_types() {
+    match MixedPayload::Text("text") {
+        Number(n) => print(n + 1),
+        Text(s) => print(s),
+    }
+}
+
+co fn constant_enum_stream() -> Coroutine<int> {
+    match MixedPayload::Text("text") {
+        Number(n) => { if n + 1 == 2 { yield n } },
+        Text(s) => print(s),
+    }
+    yield 0
+}
+
+@test(output = "text")
+fn constant_enum_match_in_coroutine() {
+    let c = constant_enum_stream()
+    c.resume()
+    c.resume()
+}
+
+@test(output = "42")
+fn constant_enum_match_keeps_selected_payload() {
+    match MixedPayload::Number(41) {
+        Number(n) => print(n + 1),
+        Text(s) => print(s),
+    }
+}
+
+nobox value PairPayload { x: int, y: int }
+enum WideMixedPayload { Pair(PairPayload), Text(string) }
+
+@test(output = "text")
+fn constant_enum_match_with_widened_payload() {
+    match WideMixedPayload::Text("text") {
+        Pair(p) => print(p.x + p.y),
+        Text(s) => print(s),
+    }
+}
