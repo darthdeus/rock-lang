@@ -417,3 +417,20 @@ fn chain_else_is_shared_by_every_miss() {
     let empty = map_new<int, int>()
     print(chain_miss_source(empty, null))
 }
+
+fn chain_else_sees_unnarrowed(w: int?, v: int?) -> int {
+    // `v` is still nullable in the else: the chain's own refinement does not
+    // reach it, so `??` here is meaningful rather than "redundant".
+    if v != null && let y = w {
+        return y
+    } else {
+        return v ?? -99
+    }
+}
+
+@test(output = "-99\n4\n7")
+fn chain_else_keeps_nullable_view() {
+    print(chain_else_sees_unnarrowed(null, null))
+    print(chain_else_sees_unnarrowed(null, 4))
+    print(chain_else_sees_unnarrowed(7, 1))
+}

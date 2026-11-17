@@ -405,6 +405,25 @@ fn branch_narrows<'n>(c: BodyCtx, branch: Idx<Expr>, narrows: &'n [Narrow]) -> &
     }
 }
 
+/// Type a shared chain `else` ONCE, here, before any clause refinement is in
+/// scope. Inference caches by index, so whichever arrival types it first wins
+/// for all of them -- and only the outermost chain node's context (the one
+/// before the chain narrowed anything) holds on every arrival.
+fn pin_shared_else(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    else_branch: Option<Idx<Expr>>,
+    used: Use,
+) -> Result<(), CompilerError> {
+    if let Some(e) = else_branch
+        && c.body.shared_branch_targets.contains(&e)
+        && gamma.out.expr_types.get(e).is_none()
+    {
+        infer_expr_used(c, gamma, e, used)?;
+    }
+    Ok(())
+}
+
 /// Whether a statement list ends in a loop/function exit (`return`/`break`/
 /// `continue`), ignoring trailing comments. The one syntactic divergence test,
 /// shared by block `never` inference and guard narrowing.
@@ -1013,6 +1032,7 @@ pub(crate) fn infer_expr_used(
             unify(gamma, cond_ty, gamma.workspace.builtins.bool(), expr_span)?;
 
             let (narrow_then, narrow_else) = detect_null_narrow(gamma, c, *cond);
+            pin_shared_else(c, gamma, *else_branch, used)?;
 
             match used {
                 Use::Discard => {
@@ -1532,6 +1552,7 @@ pub(crate) fn infer_expr_used(
 
             unqualified_arm_variant(c, gamma, *pattern, unwrapped, expr_span)?;
             check_pattern(c, gamma, *pattern, unwrapped, expr_span)?;
+            pin_shared_else(c, gamma, *else_branch, used)?;
 
             let result = match used {
                 Use::Discard => {

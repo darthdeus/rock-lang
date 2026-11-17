@@ -70,3 +70,28 @@ fn probe(m: Map<int, int>, x: int?) -> int {
     }
 }
 fn main() {}
+
+//=== TEST CASE: chain_else_narrowing_condition_first_Generic ===
+//! expect: expects operands (int, int)
+// Same rule with the narrowing condition FIRST: its refinement is ambient
+// while the later clauses are checked, but it does not hold on the arrival
+// where the condition itself failed.
+fn probe(m: Map<int, int>, x: int?) -> int {
+    if x != null && let a = m.get(1) {
+        return a
+    } else {
+        return x + 100
+    }
+}
+fn main() {}
+
+//=== TEST CASE: chain_else_narrowing_condition_middle_Generic ===
+//! expect: expects operands (int, int)
+fn probe(m: Map<int, int>, w: int?, v: int?) -> int {
+    if let y = w && v != null && let z = m.get(1) {
+        return y + z
+    } else {
+        return v + 1
+    }
+}
+fn main() {}
