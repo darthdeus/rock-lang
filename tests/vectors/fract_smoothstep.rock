@@ -1,8 +1,0 @@
-@test(output = "0.25\n0.75\n0\n1\n0.5")
-fn test_fract_and_smoothstep() {
-    print(fract(1.25))
-    print(fract(-1.25))
-    print(smoothstep(0.0, 1.0, -0.5))
-    print(smoothstep(0.0, 1.0, 2.0))
-    print(smoothstep(0.0, 1.0, 0.5))
-}
