@@ -1,0 +1,36 @@
+//! Error: token forms that are valid only in specific lexical or syntax contexts
+//! Tags: tokenizer, directives, members
+
+//=== TEST CASE: unterminated_single_quoted_string ===
+//! expect: unterminated string literal
+fn main() {
+    let text = 'unterminated
+}
+
+//=== TEST CASE: compiler_directives_are_unsupported_items ===
+//! expect: Unsupported top level item
+#if lua
+fn selected() {}
+#elseif js
+fn selected() {}
+#else
+fn selected() {}
+#end
+
+//=== TEST CASE: block_use_is_unsupported ===
+//! expect: `use` declarations require module resolution
+fn main() {
+    use missing
+}
+
+//=== TEST CASE: hash_comments_keep_the_member_diagnostic ===
+//! expect: cannot access field `__rock_or` on non-struct type int
+#
+# comment
+#unknown
+#endif
+#ELSE
+fn main() {
+    let value = 1.or
+}
+#

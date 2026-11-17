@@ -1,0 +1,8 @@
+mod self;
+
+@test
+fn token_forms_keep_lexical_edges() {
+    assert_eq(-.5, -0.5)
+    assert_eq('world', "world")
+    assert_eq('', "")
+}

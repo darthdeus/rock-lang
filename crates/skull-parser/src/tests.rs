@@ -304,3 +304,17 @@ fn a_comment_may_sit_before_any_list_comma() {
         parse(src);
     }
 }
+
+#[test]
+fn extended_declarations_have_no_syntax_errors() {
+    parse(
+        r#"mod self;
+use a::{b::c, operator(!)};
+inline fn native_body() -> int { return 1 }
+fn lib::Actor<T>.heal<U>(self, amount: U) -> ::a::B<int> {
+    use a::b::c;
+    ::app::Actor
+}
+"#,
+    );
+}
