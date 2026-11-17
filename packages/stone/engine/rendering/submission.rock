@@ -194,13 +194,8 @@ pub struct GpuTracedPass {
 }
 
 global GPU_TRACE_ON: bool = false
-global GPU_TRACE: [GpuTracedPass]
+global GPU_TRACE: [GpuTracedPass] = []
 pub global GPU_TRACE_DRAW_RETAINS: int = 0
-
-@init
-fn init_gpu_trace() {
-    GPU_TRACE = vec_new()
-}
 
 pub fn gpu_trace_begin() {
     GPU_TRACE.clear()

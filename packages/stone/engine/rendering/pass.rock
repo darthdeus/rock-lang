@@ -359,12 +359,7 @@ pub fn run_passes(passes: [Pass]) {
 // Queue from any @update/@draw system; the pool clears every frame
 // like LIGHTS. For passes over the final TONEMAPPED image (color
 // grading, CRT) use queue_final_pass below instead.
-pub global SCENE_PASSES: [Pass]
-
-@init
-fn init_scene_passes() {
-    SCENE_PASSES = vec_new()
-}
+pub global SCENE_PASSES: [Pass] = []
 
 // Game-owned textures needed by this frame's world sprites (lighting, caches).
 pub global WORLD_PREPARE_PASSES: [Pass] = []
@@ -536,12 +531,7 @@ pub fn run_scene_passes() {
 //     (it would double-present).
 //
 // Queue every frame like SCENE_PASSES/LIGHTS; cleared after run.
-pub global FINAL_PASSES: [Pass]
-
-@init
-fn init_final_passes() {
-    FINAL_PASSES = vec_new()
-}
+pub global FINAL_PASSES: [Pass] = []
 
 pub fn queue_final_pass(p: Pass) {
     FINAL_PASSES.push(p)
