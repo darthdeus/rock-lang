@@ -279,3 +279,98 @@ fn enumerated_iteration_agrees_with_indexing() {
     assert_eq(seen, 32.0)
     assert_eq(last, 1)
 }
+
+// ======== Stored in a STRUCT FIELD / RECORD VARIANT / NEWTYPE ========
+//
+// A field (or wrapped value, or record-variant field) holding a splatting
+// tuple stores the same flat box every other position does; the pattern and
+// repr readers rebuild the parts by SLOT off the field's declared type. A
+// generic enum's payload answers from the scrutinee's own instance type.
+
+nobox value FNV { x: float, y: float }
+
+struct Carrier {
+    t: (FNV, float),
+    n: int,
+}
+
+@test(output = "1 10 5\n1 2 10")
+fn struct_field_splatting_tuple() {
+    let c = Carrier { t: (FNV { x: 1.0, y: 2.0 }, 10.0), n: 5 }
+    let (v, f) = c.t
+    print("{v.x as int} {f as int} {c.n}")
+    let Carrier { t: (w, g), .. } = c
+    print("{w.x as int} {w.y as int} {g as int}")
+}
+
+fn carry(c: Carrier) -> string {
+    let (v, f) = c.t
+    return "{v.x as int} {f as int} {c.n}"
+}
+
+@test(output = "1 10 5")
+fn struct_field_through_a_param() {
+    print(carry(Carrier { t: (FNV { x: 1.0, y: 2.0 }, 10.0), n: 5 }))
+}
+
+enum Rec {
+    Stop,
+    Node { t: (FNV, float), tag: int },
+}
+
+@test(output = "1 10 7")
+fn record_variant_field_splatting_tuple() {
+    let r = Rec::Node { t: (FNV { x: 1.0, y: 2.0 }, 10.0), tag: 7 }
+    match r {
+        Rec::Node { t: (v, f), tag } => print("{v.x as int} {f as int} {tag}"),
+        Rec::Stop => print("stop"),
+    }
+}
+
+newtype WrapT((FNV, float))
+
+@test(output = "1 10\n3 30")
+fn newtype_wrapping_splatting_tuple() {
+    let w = WrapT((FNV { x: 1.0, y: 2.0 }, 10.0))
+    let WrapT((v, f)) = w
+    print("{v.x as int} {f as int}")
+    let xs: [WrapT] = [WrapT((FNV { x: 3.0, y: 4.0 }, 30.0))]
+    if let WrapT((a, b)) = xs.get(0) {
+        print("{a.x as int} {b as int}")
+    }
+}
+
+enum MyOpt<T> {
+    Nope,
+    Got(T),
+}
+
+@test(output = "1 10\nnope")
+fn generic_enum_instantiated_at_splatting_tuple() {
+    let o: MyOpt<(FNV, float)> = MyOpt::Got((FNV { x: 1.0, y: 2.0 }, 10.0))
+    match o {
+        MyOpt::Got((v, f)) => print("{v.x as int} {f as int}"),
+        MyOpt::Nope => print("nope"),
+    }
+    let n: MyOpt<(FNV, float)> = MyOpt::Nope
+    match n {
+        MyOpt::Got((v, f)) => print("{v.x as int} {f as int}"),
+        MyOpt::Nope => print("nope"),
+    }
+}
+
+struct NullableCarrier {
+    t: ((int, FNV), float)?,
+}
+
+@test(output = "2 1 20\ntrue")
+fn nullable_nested_splatting_field() {
+    let h = NullableCarrier { t: ((2, FNV { x: 1.0, y: 0.0 }), 20.0) }
+    if let ((n, v), f) = h.t {
+        print("{n} {v.x as int} {f as int}")
+    } else {
+        print("none")
+    }
+    let e = NullableCarrier { t: null }
+    print(e.t == null)
+}

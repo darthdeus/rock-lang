@@ -1452,7 +1452,13 @@ impl BindingPattern {
 pub(crate) fn binding_view(body: &Body, p: Idx<Pattern>) -> Option<BindingPattern> {
     match body.pattern_arena[p] {
         Pattern::Bind(b) => Some(BindingPattern::Leaf(b)),
-        Pattern::Newtype { sub, .. } => binding_view(body, sub),
+        // Transparent only down to a single name: a tuple INSIDE the newtype
+        // must consult the wrapped type's layout (a splatting tuple's box is
+        // flat), which the names-only fast path cannot.
+        Pattern::Newtype { sub, .. } => match body.pattern_arena[sub] {
+            Pattern::Bind(b) => Some(BindingPattern::Leaf(b)),
+            _ => None,
+        },
         Pattern::Tuple { elements } => elements
             .into_iter()
             .map(|e| binding_view(body, e))
@@ -1653,6 +1659,7 @@ fn lower_body(
         shareable_value_boxes: HashSet::default(),
         callback_records: HashSet::default(),
         unshareable_value_cells: HashSet::default(),
+        payload_splat_shapes: rustc_hash::FxHashMap::default(),
         shallow_pack: false,
         lending_pack: false,
         f32_round_exprs: HashSet::default(),
@@ -2272,6 +2279,11 @@ struct Builder<'a> {
     callback_records: HashSet<Idx<Inst>>,
     /// Shallow local snapshots cannot be lent across a call or return.
     unshareable_value_cells: HashSet<Idx<Cell>>,
+    /// Per-match instance payload shapes: `(enum, variant, position)` of the
+    /// CURRENT scrutinee whose payload instantiates to a SPLATTING tuple --
+    /// the generic-enum case the declared-type lookup cannot answer. Set
+    /// around one match walk, from the scrutinee's own concrete type.
+    payload_splat_shapes: rustc_hash::FxHashMap<(Ustr, Ustr, usize), TupleRetShape>,
     /// A local snapshot may defer child copies until its whole-value escape.
     shallow_pack: bool,
     /// Immutable call, return and local uses may share proven immutable boxes.
@@ -2383,6 +2395,7 @@ impl<'a> Builder<'a> {
             shareable_value_boxes: HashSet::default(),
             callback_records: HashSet::default(),
             unshareable_value_cells: HashSet::default(),
+            payload_splat_shapes: rustc_hash::FxHashMap::default(),
             shallow_pack: false,
             lending_pack: false,
             f32_round_exprs: HashSet::default(),
@@ -3642,6 +3655,15 @@ impl<'a> Builder<'a> {
         if let ValueRepr::Scalar(v) = &r {
             if !matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
                 let v = *v;
+                // Only a STORED box (a container or field read) is known to be
+                // the flat wire in a table; an explicit `materialize` box keeps
+                // per-element user layout and still gaps here, as before.
+                if !self.reads_stored_box(v) && !self.lowering_stdlib_body() {
+                    return Err(gap(
+                        "returning an already-packed nullable tuple through the splatting ABI \
+                         (return the tuple literal or `null` directly)",
+                    ));
+                }
                 let probe = self.absent_tuple_slots(shape);
                 let cells = self.fresh_cells(probe.len());
                 let present_bb = self.f.new_block();
@@ -3650,13 +3672,10 @@ impl<'a> Builder<'a> {
                 self.branch_on_nil(v, absent_bb, present_bb);
 
                 self.cur = present_bb;
-                // The box IS the wire put in a table (`tuple_box_shape`), so
-                // the present arm reads the slots back flat: presence, then
-                // one TupleIndex per wire slot.
                 let mut vals = Vec::with_capacity(probe.len());
                 vals.push(self.emit_cur(Inst::Const(Lit::Bool(true))));
-                for i in 0..probe.len().saturating_sub(1) {
-                    vals.push(self.emit_cur(Inst::TupleIndex { base: v, index: i }));
+                for index in 0..probe.len().saturating_sub(1) {
+                    vals.push(self.emit_cur(Inst::TupleIndex { base: v, index }));
                 }
                 for (cell, val) in cells.iter().copied().zip(vals) {
                     self.store_cell(cell, val);
@@ -3682,6 +3701,27 @@ impl<'a> Builder<'a> {
     /// where `f()` lowered to `MakeTuple(loads)`) is elided to its operands -- no
     /// table alloc. A tuple value from elsewhere (a var/field holding a packed
     /// table) is unpacked with `TupleIndex`.
+    /// Whether `v` reads a STORED value back out of a container or field --
+    /// the box layouts that are the flat wire in a table. An explicit
+    /// `materialize` box (a fresh `MakeTuple`) and a value crossing an opaque
+    /// generic boundary keep per-element user layout and are NOT stored boxes.
+    fn reads_stored_box(&self, v: Idx<Inst>) -> bool {
+        matches!(self.f.insts[v], Inst::Index { .. } | Inst::Field { .. })
+    }
+
+    /// Whether the body being lowered is a standard-library one. The stdlib's
+    /// container bodies hand STORED values (flat tuple boxes) through generic
+    /// returns; user code never legitimately returns a packed splatting tuple.
+    fn lowering_stdlib_body(&self) -> bool {
+        match &self.concrete_plan.owner {
+            crate::concrete::ConcreteOwner::Function(inst) => {
+                let m = self.ws.module(inst.func.module);
+                bone_core::modules::is_stdlib_module_file(m.file.as_str())
+            }
+            _ => false,
+        }
+    }
+
     fn tuple_return_operands(&mut self, v: Idx<Inst>, n: usize) -> Vec<Idx<Inst>> {
         if let Inst::MakeTuple(vs) = &self.f.insts[v] {
             if vs.len() == n {
@@ -3729,6 +3769,18 @@ impl<'a> Builder<'a> {
             ValueRepr::Tuple { parts, .. } if parts.len() == shape.slots.len() => parts,
             other => {
                 let base = self.pack(other)?;
+                // A box read out of STORAGE (a field or container read) is the
+                // flat wire in a table; an explicit `materialize` box (a fresh
+                // `MakeTuple`, a loaded local) keeps per-element user layout.
+                if shape.splats() && self.reads_stored_box(base) {
+                    let mut out = Vec::with_capacity(shape.slot_count());
+                    out.extend(present);
+                    let n = shape.slot_count() - shape.nullable as usize;
+                    for index in 0..n {
+                        out.push(self.emit_cur(Inst::TupleIndex { base, index }));
+                    }
+                    return Ok(out);
+                }
                 (0..shape.slots.len())
                     .map(|index| ValueRepr::Scalar(self.emit_cur(Inst::TupleIndex { base, index })))
                     .collect()

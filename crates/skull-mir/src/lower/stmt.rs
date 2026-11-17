@@ -262,6 +262,7 @@ impl<'a> Builder<'a> {
             shareable_value_boxes: HashSet::default(),
             callback_records: HashSet::default(),
             unshareable_value_cells: HashSet::default(),
+            payload_splat_shapes: rustc_hash::FxHashMap::default(),
             shallow_pack: false,
             lending_pack: false,
             f32_round_exprs: HashSet::default(),
