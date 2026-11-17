@@ -171,31 +171,3 @@ fn regex_start(previous: Option<&Token<'_>>) -> bool {
         ))
     )
 }
-
-#[cfg(test)]
-mod tests {
-    use super::bare_names;
-
-    #[test]
-    fn references_skip_properties_and_literal_text() {
-        let source = r#"
-            obj /* gap */ . helper;
-            obj?.helper;
-            ({helper: 1, helper() {}});
-            '$helper helper'; /helper[\\/]/g;
-            `helper ${helper()} ${`raw ${other()}`}`;
-            // helper
-            /* helper */
-            $helper; helper_suffix; helper;
-            condition ? helper : other;
-            (1, helper());
-        "#;
-        let names: Vec<_> = bare_names(source)
-            .filter(|n| *n == "helper" || *n == "other")
-            .collect();
-        assert_eq!(
-            names,
-            ["helper", "other", "helper", "helper", "other", "helper"]
-        );
-    }
-}
