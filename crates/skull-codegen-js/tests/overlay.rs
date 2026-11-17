@@ -26,6 +26,29 @@ fn js_runtime() -> String {
     )
 }
 
+fn overlay_after_edit(
+    before: &str,
+    after: &str,
+    edited: impl FnOnce(&bone_core::workspace::Workspace) -> (bone_core::prelude::ModuleId, BodyOwner),
+) -> (String, String) {
+    let before = ws_with(before);
+    let after = ws_with(after);
+    let mid = crate::common::test_mid(&before);
+    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
+    let overlay = skull_codegen_js::emit::emit_overlay(&after, mid, &mut cache, &[edited(&after)])
+        .unwrap()
+        .expect_overlay();
+    (program.program, overlay)
+}
+
+fn function_change(
+    ws: &bone_core::workspace::Workspace,
+    name: &str,
+) -> (bone_core::prelude::ModuleId, BodyOwner) {
+    let f = crate::common::test_fn_ref(ws, name);
+    (f.module, BodyOwner::Function(f.func))
+}
+
 #[test]
 fn lifecycle_selector_schedules_only_changed_gated_entries_and_plain_entries() {
     let source = format!(
@@ -288,24 +311,15 @@ fn const_value_overlay_redefines_users_without_reinitializing_state() {
         @nomangle fn hot() -> int { WISP_COUNT }\n\
         fn main() { print(hot()) }\n";
     let after_source = replace_once(SOURCE, "WISP_COUNT: int = 5", "WISP_COUNT: int = 10");
-    let before = ws_with(SOURCE);
-    let after = ws_with(&after_source);
-    let mid = crate::common::test_fn_ref(&before, "main").module;
-    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-    let (global_mid, global_id) = global(&after, "WISP_COUNT");
-    let overlay = skull_codegen_js::emit::emit_overlay(
-        &after,
-        mid,
-        &mut cache,
-        &[(global_mid, BodyOwner::Global(global_id))],
-    )
-    .unwrap()
-    .expect_overlay();
+    let (program, overlay) = overlay_after_edit(SOURCE, &after_source, |ws| {
+        let (mid, gid) = global(ws, "WISP_COUNT");
+        (mid, BodyOwner::Global(gid))
+    });
 
     let output = run_node(&format!(
         "{}\nvar __G = {{}};\n{}\n__rock_globals[\"global:<test>::STATE::value\"] = 99;\n{}\nconsole.log(__rock_globals[\"global:<test>::STATE::value\"] + ':' + hot());",
         js_runtime(),
-        program.program,
+        program,
         overlay
     ));
     assert_eq!(output.trim(), "99:10");
@@ -318,24 +332,15 @@ fn const_value_overlay_reinitializes_dependent_constants() {
         @nomangle fn hot() -> int { COUNT }\n\
         fn main() { print(hot()) }\n";
     let after_source = replace_once(SOURCE, "BASE: int = 5", "BASE: int = 10");
-    let before = ws_with(SOURCE);
-    let after = ws_with(&after_source);
-    let mid = crate::common::test_fn_ref(&before, "main").module;
-    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-    let (global_mid, global_id) = global(&after, "BASE");
-    let overlay = skull_codegen_js::emit::emit_overlay(
-        &after,
-        mid,
-        &mut cache,
-        &[(global_mid, BodyOwner::Global(global_id))],
-    )
-    .unwrap()
-    .expect_overlay();
+    let (program, overlay) = overlay_after_edit(SOURCE, &after_source, |ws| {
+        let (mid, gid) = global(ws, "BASE");
+        (mid, BodyOwner::Global(gid))
+    });
 
     let output = run_node(&format!(
         "{}\nvar __G = {{}};\n{}\n{}\nconsole.log(hot());",
         js_runtime(),
-        program.program,
+        program,
         overlay
     ));
     assert_eq!(output.trim(), "11");
@@ -347,18 +352,14 @@ fn overlay_redefines_a_function_without_reinitializing_global_state() {
         @nomangle fn hot() -> int { 1 }\n\
         fn main() { print(hot()) }\n";
     let after_source = replace_once(SOURCE, "fn hot() -> int { 1 }", "fn hot() -> int { 2 }");
-    let before = ws_with(SOURCE);
-    let after = ws_with(&after_source);
-    let mid = crate::common::test_fn_ref(&before, "main").module;
-    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-    let hot = crate::common::test_fn_ref(&after, "hot");
-    let overlay = crate::common::overlay_of_fn(&after, mid, &mut cache, hot);
+    let (program, overlay) =
+        overlay_after_edit(SOURCE, &after_source, |ws| function_change(ws, "hot"));
 
     assert!(!overlay.contains("__rock_globals[\"global:<test>::STATE::value\"] = "));
     let output = run_node(&format!(
         "{}\n{}\n__rock_globals[\"global:<test>::STATE::value\"] = 99;\n{}\nconsole.log(__rock_globals[\"global:<test>::STATE::value\"] + ':' + hot());",
         js_runtime(),
-        program.program,
+        program,
         overlay
     ));
     assert_eq!(output.trim(), "99:2");
@@ -535,17 +536,13 @@ fn changed_static_initializer_resets_only_its_live_cell() {
     }\n\
     fn main() { print(hot()) }\n";
     let after_source = replace_once(SOURCE, "static count = 1", "static count = 10");
-    let before = ws_with(SOURCE);
-    let after = ws_with(&after_source);
-    let mid = crate::common::test_fn_ref(&before, "main").module;
-    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-    let hot = crate::common::test_fn_ref(&after, "hot");
-    let overlay = crate::common::overlay_of_fn(&after, mid, &mut cache, hot);
+    let (program, overlay) =
+        overlay_after_edit(SOURCE, &after_source, |ws| function_change(ws, "hot"));
 
     let output = run_node(&format!(
         "{}\n{}\nhot(); hot();\n{}\nconsole.log(hot());",
         js_runtime(),
-        program.program,
+        program,
         overlay
     ));
     assert_eq!(output.trim(), "11");
@@ -553,26 +550,21 @@ fn changed_static_initializer_resets_only_its_live_cell() {
 
 #[test]
 fn a_body_edit_that_removes_a_static_drops_its_cells() {
-    let before = ws_with(
-        "@nomangle fn hot() -> int {\n\
+    let before = "@nomangle fn hot() -> int {\n\
              static count = 1\n\
              count += 1\n\
              count\n\
          }\n\
-         fn main() { print(hot()) }\n",
-    );
-    let after = ws_with("@nomangle fn hot() -> int { 7 }\nfn main() { print(hot()) }\n");
-    let mid = crate::common::test_fn_ref(&before, "main").module;
-    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-    let hot = crate::common::test_fn_ref(&after, "hot");
-    let overlay = crate::common::overlay_of_fn(&after, mid, &mut cache, hot);
+         fn main() { print(hot()) }\n";
+    let after = "@nomangle fn hot() -> int { 7 }\nfn main() { print(hot()) }\n";
+    let (program, overlay) = overlay_after_edit(before, after, |ws| function_change(ws, "hot"));
 
     let output = run_node(&format!(
         "{}\n{}\nhot();\n\
          function cells() {{ return Object.keys(__rock_globals).filter(k => k.includes('::count#')).length; }}\n\
          let live = cells();\n{}\nconsole.log(live + ':' + cells() + ':' + hot());",
         js_runtime(),
-        program.program,
+        program,
         overlay
     ));
     assert_eq!(output.trim(), "2:0:7");

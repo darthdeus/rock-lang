@@ -54,14 +54,14 @@ impl Emitter<'_> {
             ),
             Inst::UintMod(a, b) => bin(a, "%", b, self)?,
             Inst::FloatDiv(a, b) => bin(a, "/", b, self)?,
-            Inst::IntLt(a, b) | Inst::FloatLt(a, b) => bin(a, "<", b, self)?,
-            Inst::IntLeq(a, b) | Inst::FloatLeq(a, b) => bin(a, "<=", b, self)?,
-            Inst::IntGt(a, b) | Inst::FloatGt(a, b) => bin(a, ">", b, self)?,
-            Inst::IntGeq(a, b) | Inst::FloatGeq(a, b) => bin(a, ">=", b, self)?,
-            Inst::UintLt(a, b) => bin(a, "<", b, self)?,
-            Inst::UintLeq(a, b) => bin(a, "<=", b, self)?,
-            Inst::UintGt(a, b) => bin(a, ">", b, self)?,
-            Inst::UintGeq(a, b) => bin(a, ">=", b, self)?,
+            Inst::IntLt(a, b) | Inst::UintLt(a, b) | Inst::FloatLt(a, b) => bin(a, "<", b, self)?,
+            Inst::IntLeq(a, b) | Inst::UintLeq(a, b) | Inst::FloatLeq(a, b) => {
+                bin(a, "<=", b, self)?
+            }
+            Inst::IntGt(a, b) | Inst::UintGt(a, b) | Inst::FloatGt(a, b) => bin(a, ">", b, self)?,
+            Inst::IntGeq(a, b) | Inst::UintGeq(a, b) | Inst::FloatGeq(a, b) => {
+                bin(a, ">=", b, self)?
+            }
             // Loose `== null` / `!= null` when either side is `nil`: it matches
             // JS `undefined` too, so an OMITTED defaulted arg (JS passes nothing
             // -> `undefined`, not `null`) still trips the callee's `x == nil`
@@ -243,13 +243,7 @@ impl Emitter<'_> {
             }
             // An indirect call: foreign raw functions call directly; Rock values
             // resolve their slot through `__rock_call`.
-            Inst::CallValue { callee, args } => {
-                let mut rendered = vec![self.render_val(*callee)?];
-                for a in args {
-                    rendered.push(self.render_val(*a)?);
-                }
-                format!("__rock_call({})", rendered.join(", "))
-            }
+            Inst::CallValue { callee, args } => self.indirect_call(*callee, args)?,
             // NativeBuffer variants share the equality runtime's buffer tag.
             Inst::MakeStruct { ty, fields } => {
                 let name = ty
@@ -899,6 +893,18 @@ impl Emitter<'_> {
             .callees
             .instance_for_call(self.ws, self.mf, iid, func)?;
         self.callees.get(&body)
+    }
+
+    pub(super) fn indirect_call(
+        &self,
+        callee: Idx<Inst>,
+        args: &[Idx<Inst>],
+    ) -> Result<String, CompilerError> {
+        let operands = std::iter::once(callee)
+            .chain(args.iter().copied())
+            .map(|value| self.render_val(value))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(format!("__rock_call({})", operands.join(", ")))
     }
 
     pub(super) fn render_call(

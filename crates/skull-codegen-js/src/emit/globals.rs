@@ -244,30 +244,15 @@ pub(super) fn schedule_residual_calls(
     mf: &MirFunc,
     st: &mut WorklistState,
 ) -> Result<(), CompilerError> {
-    // Each call resolves against its own body's site tables: a hoisted body
-    // has its own instruction ids.
-    fn direct_calls<'m>(mf: &'m MirFunc, out: &mut Vec<(&'m MirFunc, Idx<Inst>, FuncRef)>) {
-        for (_, block) in mf.blocks.iter() {
-            for &iid in &block.insts {
-                if mf.spec_bindings.contains_key(&iid) {
-                    continue;
-                }
-                match &mf.insts[iid] {
-                    Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
-                        out.push((mf, iid, *func))
-                    }
-                    _ => {}
-                }
-            }
-        }
-        for nested in &mf.nested_fns {
-            direct_calls(nested, out);
-        }
-    }
-
     let mut findings = Vec::new();
     let mut calls = Vec::new();
-    direct_calls(mf, &mut calls);
+    visit_placed(mf, &mut |body, iid| {
+        if !body.spec_bindings.contains_key(&iid)
+            && let Inst::Call { func, .. } | Inst::CallMulti { func, .. } = body.insts[iid]
+        {
+            calls.push((body, iid, func));
+        }
+    });
     for (body, iid, requested) in calls {
         let requested_f = &ws.module(requested.module).functions[requested.func];
         if js_supply(ws, requested_f).is_some() {
@@ -493,24 +478,14 @@ pub(super) fn schedule_global_reads(
 /// resolvable and contribute no ordering edge -- parity with the luajit backend's
 /// direct-call facts (`skull::mir_emit::direct_calls`).
 fn direct_callees(mf: &MirFunc, names: &CalleeNames) -> Vec<ustr::Ustr> {
-    pub(super) fn walk(mf: &MirFunc, names: &CalleeNames, out: &mut Vec<ustr::Ustr>) {
-        for (_, block) in mf.blocks.iter() {
-            for &iid in &block.insts {
-                let fr = match &mf.insts[iid] {
-                    Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
-                    _ => continue,
-                };
-                if let Some(n) = names.get(&Instance::base(fr)) {
-                    out.push(ustr::Ustr::from(n.as_str()));
-                }
-            }
-        }
-        for nf in &mf.nested_fns {
-            walk(nf, names, out);
-        }
-    }
     let mut out = Vec::new();
-    walk(mf, names, &mut out);
+    visit_placed(mf, &mut |body, iid| {
+        if let Inst::Call { func, .. } | Inst::CallMulti { func, .. } = body.insts[iid]
+            && let Some(name) = names.get(&Instance::base(func))
+        {
+            out.push(Ustr::from(name.as_str()));
+        }
+    });
     out
 }
 
@@ -600,94 +575,68 @@ fn global_init_line(
     g: &GlobalInit,
     state_slots: &HashMap<ustr::Ustr, String>,
 ) -> Result<GlobalInitLine, CompilerError> {
-    Ok(GlobalInitLine {
-        name: g.name,
-        js: match (g.is_const, &g.leaves) {
-            (true, Some(leaves)) => {
-                let mut js = format!(
-                    "{} = {}();",
-                    js_member("__G", leaves[0].as_str())?,
-                    g.init_name
-                );
-                for (i, leaf) in leaves.iter().enumerate().skip(1) {
-                    js.push_str(&format!(
-                        " {} = __rock_ret{i};",
-                        js_member("__G", leaf.as_str())?
-                    ));
-                }
-                js.push('\n');
-                js
+    let slot = |name: Ustr, scalar: bool| {
+        if g.is_const {
+            return js_member("__G", name.as_str());
+        }
+        let key = if scalar { symbol_of_key(name) } else { name };
+        let key = state_slots.get(&key).ok_or_else(|| {
+            let mut message = format!("JS: global `{}` has no compiler-owned storage slot", g.name);
+            if !scalar {
+                message.push_str(&format!(" for `{name}`"));
             }
-            (true, None) => format!(
-                "{} = {}();\n",
-                js_member("__G", g.name.as_str())?,
-                g.init_name
-            ),
-            // Leaf storage: the ginit splats, so the extra leaves come
-            // back through the scratch bank and must be read off it
-            // before anything else can call and clobber it.
-            (false, Some(leaves)) => {
-                let keys: Vec<&str> = leaves
-                    .iter()
-                    .map(|leaf| {
-                        state_slots.get(leaf).map(String::as_str).ok_or_else(|| {
-                            err(format!(
-                                "JS: global `{}` has no compiler-owned storage slot for `{leaf}`",
-                                g.name
-                            ))
-                        })
-                    })
-                    .collect::<Result<_, _>>()?;
-                let mut js = format!(
-                    "if (__rock_globals_fresh) {{ __rock_globals[{:?}] = {}();",
-                    keys[0], g.init_name
-                );
-                for (i, _) in leaves.iter().enumerate().skip(1) {
-                    let key = keys[i];
-                    js.push_str(&format!(" __rock_globals[{key:?}] = __rock_ret{i};"));
-                }
-                js.push_str(" }\n");
-                js
-            }
-            (false, None) => {
-                let key = state_slots.get(&symbol_of_key(g.name)).ok_or_else(|| {
-                    err(format!(
-                        "JS: global `{}` has no compiler-owned storage slot",
-                        g.name
-                    ))
-                })?;
-                format!(
-                    "if (__rock_globals_fresh) __rock_globals[{key:?}] = {}();\n",
-                    g.init_name
-                )
-            }
-        },
-    })
+            err(message)
+        })?;
+        Ok(format!("__rock_globals[{key:?}]"))
+    };
+    let mut js = String::new();
+    if !g.is_const {
+        js.push_str("if (__rock_globals_fresh) ");
+    }
+    if let Some(leaves) = &g.leaves {
+        if !g.is_const {
+            js.push_str("{ ");
+        }
+        js.push_str(&format!("{} = {}();", slot(leaves[0], false)?, g.init_name));
+        // Read the scratch return bank before another initializer can call.
+        for (i, &leaf) in leaves.iter().enumerate().skip(1) {
+            js.push_str(&format!(" {} = __rock_ret{i};", slot(leaf, false)?));
+        }
+        if !g.is_const {
+            js.push_str(" }");
+        }
+    } else {
+        js.push_str(&format!("{} = {}();", slot(g.name, true)?, g.init_name));
+    }
+    js.push('\n');
+    Ok(GlobalInitLine { name: g.name, js })
 }
 
 /// Every `Inst::Global` read + `Inst::StoreGlobal` write name in `mf` (main body
 /// and hoisted nested fns) -- the module-global surface the emitter must resolve
 /// (state, fn-value, or reject). Names are deduped in source order.
 fn global_refs(mf: &MirFunc) -> Vec<ustr::Ustr> {
-    pub(super) fn walk(mf: &MirFunc, out: &mut Vec<ustr::Ustr>, seen: &mut HashSet<ustr::Ustr>) {
-        for (_, block) in mf.blocks.iter() {
-            for &iid in &block.insts {
-                let name = match &mf.insts[iid] {
-                    Inst::Global(n) => *n,
-                    Inst::StoreGlobal { name, .. } => *name,
-                    _ => continue,
-                };
-                if seen.insert(name) {
-                    out.push(name);
-                }
-            }
-        }
-        for nf in &mf.nested_fns {
-            walk(nf, out, seen);
-        }
-    }
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    walk(mf, &mut out, &mut seen);
+    visit_placed(mf, &mut |body, iid| {
+        let name = match body.insts[iid] {
+            Inst::Global(name) | Inst::StoreGlobal { name, .. } => name,
+            _ => return,
+        };
+        if seen.insert(name) {
+            out.push(name);
+        }
+    });
     out
+}
+
+fn visit_placed<'a>(body: &'a MirFunc, visit: &mut impl FnMut(&'a MirFunc, Idx<Inst>)) {
+    for (_, block) in body.blocks.iter() {
+        for &iid in &block.insts {
+            visit(body, iid);
+        }
+    }
+    for nested in &body.nested_fns {
+        visit_placed(nested, visit);
+    }
 }

@@ -82,15 +82,12 @@ pub(super) fn assemble_program_core(
         // body's `spec_bindings` as demands -- so a specialization a deco
         // body was the only caller of was never queued, and the call site
         // spelled a name nothing emitted.
-        let mut findings: Vec<CompilerError> = Vec::new();
-        findings.extend(
-            JsDelivery {
-                ws,
-                scx,
-                st: &mut st,
-            }
-            .schedule_body(&mf)?,
-        );
+        let findings = JsDelivery {
+            ws,
+            scx,
+            st: &mut st,
+        }
+        .schedule_body(&mf)?;
         match merge_findings(findings) {
             Some(e) => st.reject(&deco_name, e),
             None => deco_bodies.push((deco_name, mf)),
@@ -106,12 +103,10 @@ pub(super) fn assemble_program_core(
     let mut out = String::new();
     let mut stable = String::new();
     let mut code_artifact = CodeArtifact::default();
-    let mut all_statics = Vec::new();
     for (name, mf) in &deco_bodies {
         let mut artifact = js_code_artifact(ws, mf);
         artifact.set_body_names(mf, name);
         code_artifact.merge(artifact);
-        all_statics.extend(collect_statics(mf));
     }
     out.push_str(&tables);
     stable.push_str(&tables);
@@ -144,14 +139,8 @@ pub(super) fn assemble_program_core(
         |fr, mf, js, artifact| {
             out.push_str(&js);
             code_artifact.merge(artifact);
-            all_statics.extend(collect_statics(mf));
-            chunks.insert(
-                fr,
-                JsChunk {
-                    js,
-                    statics: collect_statics(mf),
-                },
-            );
+            let statics = collect_statics(mf);
+            chunks.insert(fr, JsChunk { js, statics });
         },
     )?;
     // 2a. standalone specialized copies. They are keyed by Instance so an
@@ -161,9 +150,6 @@ pub(super) fn assemble_program_core(
     for chunk in ordered_spec_chunks(&spec_chunks, &st.spec_lowered) {
         out.push_str(&chunk.js);
         code_artifact.merge(chunk.code_artifact.clone());
-    }
-    for (_, mf) in &st.spec_lowered {
-        all_statics.extend(collect_statics(mf));
     }
     // 2b. inline(js) fns, emitted verbatim.
     for body in &st.inline_js {
@@ -193,7 +179,6 @@ pub(super) fn assemble_program_core(
         let mut artifact = js_code_artifact(ws, &g.mf);
         artifact.set_body_names(&g.mf, &g.init_name);
         code_artifact.merge(artifact);
-        all_statics.extend(collect_statics(&g.mf));
         if g.is_const {
             const_chunks
                 .entry(g.name)

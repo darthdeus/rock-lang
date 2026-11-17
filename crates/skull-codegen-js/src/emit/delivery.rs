@@ -51,24 +51,9 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
                 return Ok(());
             }
         };
-        if mf.is_coroutine {
-            if let Err(e) = skull_transform::cleanup_with_nobox(self.ws, &mut mf) {
-                self.st.reject(&name, e);
-                return Ok(());
-            }
-        } else {
-            if let Err(e) = prepare_body(
-                self.ws,
-                self.scx,
-                fr,
-                &mut mf,
-                &name,
-                &mut self.st.cache,
-                self.st.concrete,
-            ) {
-                self.st.reject(&name, e);
-                return Ok(());
-            }
+        if let Err(e) = self.prepare_fn(fr, &mut mf, &name) {
+            self.st.reject(&name, e);
+            return Ok(());
         }
         let mut findings: Vec<CompilerError> = Vec::new();
         collect(
@@ -199,24 +184,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
             self.st.reject(&name, e);
             return Ok(());
         }
-        // A specialized `co fn` takes cleanup only, like an unspecialized one:
-        // closure conversion here would erase the lambdas of its detached
-        // defer copies (unreachable from the entry) before the coroutine
-        // preparation splits them out.
-        let prepared = if mf.is_coroutine {
-            skull_transform::cleanup_with_nobox(self.ws, &mut mf)
-        } else {
-            prepare_body(
-                self.ws,
-                self.scx,
-                fr,
-                &mut mf,
-                &name,
-                &mut self.st.cache,
-                self.st.concrete,
-            )
-        };
-        if let Err(e) = prepared {
+        if let Err(e) = self.prepare_fn(fr, &mut mf, &name) {
             self.st.reject(&name, e);
             return Ok(());
         }
@@ -229,6 +197,28 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
             None => self.st.spec_lowered.push((inst, mf)),
         }
         Ok(())
+    }
+
+    fn prepare_fn(
+        &mut self,
+        fr: FuncRef,
+        mf: &mut MirFunc,
+        name: &str,
+    ) -> Result<(), CompilerError> {
+        // Coroutine defer copies live outside the entry CFG until coroutine lowering.
+        if mf.is_coroutine {
+            skull_transform::cleanup_with_nobox(self.ws, mf)
+        } else {
+            prepare_body(
+                self.ws,
+                self.scx,
+                fr,
+                mf,
+                name,
+                &mut self.st.cache,
+                self.st.concrete,
+            )
+        }
     }
 
     /// Lower one module global's initializer (never inlined, mirroring the luajit

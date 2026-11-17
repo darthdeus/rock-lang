@@ -172,11 +172,7 @@ impl Emitter<'_> {
                     callee,
                     args,
                 } => {
-                    let mut rendered = vec![self.render_val(*callee)?];
-                    for a in args {
-                        rendered.push(self.render_val(*a)?);
-                    }
-                    let call = format!("__rock_call({})", rendered.join(", "));
+                    let call = self.indirect_call(*callee, args)?;
                     let line = self.multi_assign(dests, &call);
                     self.push(&line);
                 }
@@ -314,21 +310,12 @@ impl Emitter<'_> {
                 ));
                 self.push(&s);
             }
-            Term::Return(vs) => match vs.as_slice() {
-                [] => self.push("return;"),
-                [v] => {
-                    let s = self.render_val(*v)?;
-                    self.push(&format!("return {s};"));
+            Term::Return(vs) => {
+                if vs.len() > 1 && !self.pack_multi_return {
+                    return Err(err("JS subset: multi-value coroutine return"));
                 }
-                // Scalarized value-struct / tuple return: leaf 0 in the return
-                // value, leaves 1..N in the scratch bank, shared with the
-                // structured `emit_return` so a body that falls back to the
-                // trampoline keeps its calling convention. Only the ordinary-body fallback opts in; a
-                // coroutine step's return channels through the step protocol, so
-                // it keeps the reject.
-                _ if self.pack_multi_return => self.emit_multi_return(&vs)?,
-                _ => return Err(err("JS subset: multi-value coroutine return")),
-            },
+                self.emit_return(&vs)?;
+            }
             Term::Unreachable => self.emit_unreachable(),
             Term::Yield { .. } => {
                 return Err(err(
