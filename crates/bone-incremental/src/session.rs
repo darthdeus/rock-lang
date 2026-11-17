@@ -35,18 +35,7 @@ pub struct BodyUpdate {
     pub span_only: bool,
 }
 
-/// Represents a kind of update necessary after change detection
-///
-/// - NoChange: nothing really changed (e.g. watcher detected a file save without any changes)
-/// - BodyOnly: body of some items changed, but their interface remains, meaning we can do a local
-///   recompile of the bodies only
-/// - Interface: a "public API" of an item changed, all of its users/callers need to be invalidated
-///   and recompiled as well
-/// - Scope: the namespace tree's inputs changed (a `mod` header, a `use`, or a v1 definition's
-///   name, kind or visibility). The tree is re-assembled, and the edited file plus every file whose lowering read a changed fact re-lower,
-///   then the interface cascade runs (scope epochs)
-/// - FullUser: a full recompile of every user file
-///
+/// The broadest rebuild needed after an edit.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum UpdateTier {
     #[default]
@@ -67,11 +56,7 @@ pub struct UpdateResult {
     pub body_update: BodyUpdate,
 }
 
-/// The namespace facts one edit changed, in the terms a lowering records
-/// them ([`ScopeProbe`]): a module's member of one name, every member of a
-/// module (its presence or its glob export bindings changed), a module entered
-/// as a path segment (its presence or visibility). Plus the files whose own
-/// fragment scope changed.
+/// Namespace changes keyed by the facts recorded as scope probes.
 #[derive(Clone, Debug, Default)]
 struct ScopeDelta {
     members: FxHashSet<(u32, Ustr, Ustr)>,
@@ -223,14 +208,7 @@ fn changed_keys<V: PartialEq>(old: &FxHashMap<Ustr, V>, new: &FxHashMap<Ustr, V>
 /// earlier lowerings' entries.
 const MAX_KEPT_ARENA_GROWTH: usize = 16;
 
-/// Whether the warm modules can be lowered and inferred once, alone, and
-/// reused by every build. Warm ASTs are immutable for the session's lifetime
-/// and a stdlib file consults no user scope.
-/// Standalone user definitions have package-qualified keys, so only bare
-/// operator names and macros can affect the warm modules. A build reuses the
-/// warm-alone state only when no user macro takes a name a warm expansion can
-/// look up (`Session::apart_from_warm`) and the warm-alone build is clean.
-/// Otherwise it lowers warm and user files together, as a fresh build does.
+/// Reuse the warm-only workspace when no user macro can affect warm expansion.
 #[derive(Clone, Debug)]
 enum WarmBase {
     /// Not built yet: every build so far had a collision.
@@ -256,22 +234,13 @@ pub struct Session {
     /// of `dependents`, kept so a body edit can update just the edited module's
     /// entry in O(its deps) instead of rescanning the whole workspace.
     pub module_dep_names: FxHashMap<ModuleId, FxHashSet<Ustr>>,
-    /// Reverse index for INTERFACE-position type references: type-name -> modules
-    /// whose signatures / globals / fields name it. The interface twin of
-    /// `dependents` (which tracks body references). An interface change re-LOWERS
-    /// these dependents (their signatures must re-resolve the name); a body change
-    /// only re-infers `dependents`. Rebuilt from cached lowered-interface names
-    /// in `rebuild_dependents`.
+    /// Reverse dependencies from type names to interfaces that mention them.
     pub dependents_iface: FxHashMap<Ustr, FxHashSet<ModuleId>>,
     /// Independent of inference: even a module with body errors has interface
     /// deps. Invalidated when its lowered interface is replaced or purged.
     module_iface_dep_names: FxHashMap<ModuleId, FxHashSet<Ustr>>,
     pub registry: MacroRegistry,
-    /// Macros defined by the WARM (stdlib) modules, paired with their defining
-    /// file. `files` only covers user macros, so without this the stdlib ones
-    /// (`log_once`, `log_throttled`) are invisible to every consumer that reads
-    /// macro defs. Warm ASTs are fixed for the session's lifetime, so this is
-    /// computed once at construction rather than walked per query.
+    /// Warm macro signatures, captured before expansion removes their definitions.
     pub warm_macros: Vec<(Ustr, MacroDef)>,
     /// The package graph's alias tables, kept because every O(workspace)
     /// rebuild runs `build_namespaces` again and needs them.
@@ -286,11 +255,7 @@ pub struct Session {
     /// The warm modules' namespace contributions (the `std` root), computed
     /// once: warm ASTs are immutable. User files keep theirs on `UserFile`.
     warm_contributions: Vec<FragmentContribution>,
-    /// The package facts a host declared for a file that was
-    /// not in the initial set ([`Session::declare_file_facts`]). A held file
-    /// keeps its facts on its `UserFile`; these are read when the file enters
-    /// through `update_file` or `with_file_variant`, and survive a refused
-    /// entry, so the next attempt parses the same way.
+    /// Keep host package facts even when a new file fails to enter the session.
     declared_facts: FxHashMap<String, (Option<PackageTag>, GlobalPolicy)>,
 }
 
@@ -336,19 +301,8 @@ impl SessionFile {
 pub struct UserFile {
     pub text_hash: u64,
     pub item_prints: Vec<ItemPrint>,
-    /// The file's current source text -- the single source of truth for this
-    /// file's parse. A body edit byte-diffs old vs new to localize the change to
-    /// one item (`try_incremental_body_edit`); the slow/full paths re-parse from
-    /// it on demand. The AST is NOT persisted: the per-body HIR (`Module.bodies`)
-    /// is the incremental store, so a stored AST would be a redundant second copy
-    /// that drifts.
     pub text: String,
-    /// The macros this file defines (Functions with `is_macro`), captured at
-    /// parse time. Kept so an interface edit can ask "did a macro change?"
-    /// (`touches_macro`) without a retained AST -- and so consumers (ctags) can
-    /// read macro signatures, which are dropped from the cooked HIR by expansion.
-    /// Each def's `span` is shifted on the fast body-edit path, so its line stays
-    /// accurate without a reparse.
+    /// Keep macro signatures for editor queries after expansion.
     pub macros: Vec<MacroDef>,
     /// The package that owns this file, from the package graph. Kept here
     /// because every re-parse -- a full file reparse, a one-item fast edit, an
@@ -954,23 +908,8 @@ impl Session {
         &self.ws
     }
 
-    /// Run `f` against the workspace with `path`'s text temporarily replaced by
-    /// `variant`, then restore the original state. The speculative-analysis
-    /// primitive for IDE paths (completion munges): the variant goes through the
-    /// normal update tiers, so a body-local munge costs one body re-inference --
-    /// not the from-scratch project pass `combined_unexpanded` + `semantic_pass`
-    /// would be.
-    ///
-    /// An UNTRACKED `path` (a file this session refused because its live text
-    /// never lowered clean, or one it has never seen) is speculatively tracked
-    /// for the duration of `f` and removed again -- the session ends as
-    /// untracked as it started.
-    ///
-    /// Not panic-safe: a panicking `f` leaves the variant applied (the IDE
-    /// queries this serves don't panic). A failed variant update is restored
-    /// before the error propagates; a failed RESTORE propagates itself -- the
-    /// original text round-tripped before, so that failure is a real bug and
-    /// must not be swallowed.
+    /// Query a temporary file variant through the normal update tiers, then restore
+    /// its original text or remove the added file. The callback must not unwind.
     pub fn with_file_variant<R>(
         &mut self,
         path: &str,
@@ -1020,11 +959,6 @@ impl Session {
             }
         }
 
-        // Fast path: a single edit localized to one Rock-bodied function's
-        // interior re-parses ONLY that item (no whole-file reparse/clone). Bails
-        // (Ok(None)) to the full parse below for anything non-localized; the
-        // re-parsed item's interface hash is re-checked, so a mis-localized
-        // interface edit also falls through.
         if let Some(result) = self.try_incremental_body_edit(path, text, hash)? {
             return Ok(result);
         }
@@ -1162,16 +1096,8 @@ impl Session {
         })
     }
 
-    /// Build every module into a new workspace from `unexpanded` (the warm
-    /// modules followed by the user files, un-expanded): the namespace tree
-    /// from every file's contribution, expansion against `registry`, lowering
-    /// and inference, and the whole-program API-closure gate -- the pass
-    /// order `Session::new` and `rebuild_users` share with the batch
-    /// `semantic_pass`. The tree comes FIRST, because it turns v1 headers,
-    /// inline `mod` blocks and `use` declarations into the scopes lowering
-    /// reads. When the warm modules are independent of the user files
-    /// ([`WarmBase`]) the build starts from their warm-alone state and lowers
-    /// only the user files. Returns the workspace and the user modules' ids.
+    /// Build from unexpanded inputs. Namespace assembly must precede expansion
+    /// and lowering so files can resolve module paths and uses.
     fn build(
         &mut self,
         unexpanded: ModuleSet,
@@ -1301,11 +1227,7 @@ impl Session {
             bone_semantic::stdlib_base::warm_names(&self.warm, &self.warm_contributions);
     }
 
-    /// The scope path: re-assemble the namespace tree from the
-    /// stored contributions (the edited file's is already the new one), diff
-    /// it against the current tree, commit it, and run the interface cascade
-    /// with every module whose lowering read a changed fact added to the
-    /// re-lower set. The warm modules never read a user fact.
+    /// Reassemble the namespace and use changed scope probes to find affected files.
     fn rebuild_scope(
         &mut self,
         module: Ast,
@@ -1342,11 +1264,7 @@ impl Session {
             .collect()
     }
 
-    /// The interface cascade: re-lower the edited module and the modules its
-    /// edit can re-resolve, re-infer the body-dependents of what changed.
-    /// `delta` holds namespace facts that changed already (the scope path's
-    /// tree diff); this adds the edited module's own nominal-type facts, and
-    /// every module whose lowering read one of them re-lowers too.
+    /// Re-lower modules whose scopes changed and re-infer callers of changed definitions.
     fn rebuild_interface(
         &mut self,
         module: Ast,
@@ -1449,11 +1367,8 @@ impl Session {
             asts.push(a);
         }
 
-        // An edit confined to function items cannot change what any other item
-        // of this module lowers to, so a caller of an untouched definition keeps
-        // its inference. That inference holds `TyId`s into this module's arena:
-        // keep the entries in place and lower after them. The item lists are
-        // compared after lowering, since a caller also stores item indices.
+        // Callers keep type and item ids. Seed the retained type arena and check
+        // that the item indexes stay stable before reusing their inference.
         let kept = (only_functions
             && to_relower.is_empty()
             && delta.is_empty()
@@ -1472,12 +1387,7 @@ impl Session {
         let f_mids = lower_modules_seeded(&mut self.ws, &asts, seeds)?;
         let narrow = old_items.is_some_and(|items| items == item_names(self.ws.module(mid)));
 
-        // Names whose definition may have shifted: the edited module's interface
-        // diff PLUS every name exported by a RE-LOWERED module (re-lowering may
-        // have changed any of its signatures / fields -- e.g. `Wrap { inner: T }`
-        // becoming `inner: Error` when `T` was removed). Body-dependents of any of
-        // these must re-infer. Re-INFERRED-only modules don't propagate: their
-        // interface is unchanged, so their exported definitions are stable.
+        // Re-lowering can change any exported definition, so invalidate all its users.
         let mut reinfer_names: FxHashSet<Ustr> = changed.clone();
         for &m in &f_mids {
             let module = self.ws.module(m);
@@ -1523,17 +1433,7 @@ impl Session {
             .filter(|m| m.index() < self.ws.modules.len())
             .collect();
 
-        // Body-granular re-inference. A dependent module's TEXT is unchanged, so
-        // only its bodies whose `deps` reference a changed name can have changed
-        // inference -- the rest reuse their cached BodyInference (their generation
-        // still matches). Take each module's cached inference and keep only the
-        // reusable bodies as `prev`; `check_module_incremental` then re-runs
-        // check_function for exactly the dropped (dep-touching or previously-
-        // errored) bodies and reuses the rest. This is sound by the same relation
-        // the module-level `dependents` index already trusts: a body with deps
-        // disjoint from `changed` is no more affected than one in a module that
-        // wasn't selected at all (which is never re-inferred). Globals/decorators/
-        // struct-defaults always re-check inside check_module_incremental.
+        // Reuse successful function checks whose dependencies did not change.
         let mut reused: FxHashSet<BodyId> = FxHashSet::default();
         let prevs: Vec<(ModuleId, InferenceResult)> = ids
             .iter()
@@ -1667,12 +1567,7 @@ impl Session {
         });
 
         self.ws.globals_by_name.clear();
-        // `const_globals` accumulates the same way and must be rebuilt in lockstep:
-        // it's an insert-only set (`lower_modules` never removes), so without this a
-        // global flipped `const` -> mutable (or a deleted const) would stay in the
-        // set and keep producing a phantom "cannot assign to const" diagnostic until
-        // an LSP restart. `lower_modules` re-adds the edited/relowered modules' consts;
-        // this re-adds the KEPT ones, matching `globals_by_name`.
+        // Rebuild both global indexes so a removed const stops restricting assignments.
         self.ws.const_globals.clear();
 
         // Skip evicted
@@ -1687,17 +1582,7 @@ impl Session {
     }
 
     pub fn rebuild_users(&mut self) -> Result<UpdateResult, CompilerError> {
-        // Build into a LOCAL workspace and commit to `self.ws` only once lowering
-        // and inference have BOTH succeeded. `expand_and_desugar` / `lower_and_infer`
-        // intern modules (bumping `module_ids`) well before `insert_module` grows the
-        // `modules` vec, so a mid-build `Err` used to leave `self.ws` half-built --
-        // `module_ids` running ahead of `modules` -- and the next `ws.module(mid)`
-        // panicked with `len is 1 but index is N`. This bit during fast typing: a
-        // broken `global x =` fails the rebuild, `rebuild_or_revert` reverts to the
-        // PREVIOUS keystroke's text (also broken mid-word), so the recovery rebuild
-        // failed too and the corrupted ws stuck around for every later query. Keeping
-        // the last-good ws on any failure makes the session queryable after a failed
-        // rebuild instead of crash-on-next-touch.
+        // Build off to the side. A failed lowering may intern ids without inserting modules.
         let unexpanded = self.combined_unexpanded()?;
         let registry = collect_registry(unexpanded.iter());
         reject_macro_name_collisions(&unexpanded)?;
@@ -1752,11 +1637,7 @@ impl Session {
             self.module_dep_names.insert(mid, names);
         }
 
-        // Interface-position references: each nominal type name a module's
-        // INTERFACE arena mentions (signatures / globals / fields / enum payloads).
-        // Cache from the lowered HIR, not inference -- a module with no inference
-        // (e.g. a body-error-only module) still has interface deps. Kept interfaces
-        // need no arena walk; `retain_modules` invalidates the replaced ones.
+        // Lowered types give interface dependencies even when inference failed.
         for module in self.ws.user_modules(&self.warm_mids) {
             let mid = module.id;
             let names = self
@@ -1769,11 +1650,7 @@ impl Session {
         }
     }
 
-    /// Incremental dep-index update for ONE re-inferred module: diff its new dep
-    /// names against the cached forward index and patch only the changed reverse
-    /// entries. O(mid's deps), not O(workspace) -- the body-edit fast path. Sound
-    /// because a body edit changes ONLY the edited module's outgoing deps (its
-    /// interface is unchanged, so no other module's deps move).
+    /// A body edit changes only the edited module's outgoing dependencies.
     pub(crate) fn update_dependents_for(&mut self, mid: ModuleId) {
         if !Workspace::is_user_module(mid, &self.warm_mids) {
             return;
@@ -1935,11 +1812,7 @@ impl Session {
         })
     }
 
-    /// Fast path for a single body edit: re-parse ONLY the edited item (no
-    /// whole-file reparse), feed it to the per-body lowerer, and patch the kept
-    /// state. Returns `Ok(None)` to bail to the full-parse path for ANY edit that
-    /// is not a clean single-Rock-body-interior change -- so this never produces a
-    /// wrong result, only ever skips work.
+    /// Reparse just one item when the edit stays within its function body.
     fn try_incremental_body_edit(
         &mut self,
         path: &str,
@@ -2182,11 +2055,7 @@ impl Session {
         cook_one(&mut edited, &self.registry)?;
         let cook_dur = t_cook.elapsed();
 
-        // Defensive: the edited item should survive cooking unchanged. If it
-        // doesn't, `edited` is already cooked (re-cooking would double-desugar),
-        // so re-parse the stored text for a fresh un-cooked module to hand to the
-        // whole-module path. Effectively unreachable for a classify-confirmed
-        // body edit.
+        // The fallback needs a fresh AST because cooking twice would repeat desugaring.
         let item = edited.items.iter().find_map(|it| match &it.kind {
             ItemKind::Function(f) if it.span.offset_range().0 == new_start => Some((it, f)),
             _ => None,

@@ -170,13 +170,7 @@ fn definition_node_name_contains(body: &hir::Body, node: NodeRef, offset: usize)
     }
 }
 
-/// The declaration of the *type* of the value/binding under `offset` (LSP
-/// `textDocument/typeDefinition`). Unlike [`definition_at`], which jumps to where
-/// a name is bound, this jumps to where that name's type is declared: on `mob` in
-/// `let mob = spawn()` it lands on `struct Mob`. Resolution reads the inferred
-/// type of the expression or binding node, peels a leading `?`, and reuses the
-/// same nominal/builtin landmark resolution as type-annotation goto-def. `None`
-/// for primitives, function types, and anything without a navigable declaration.
+/// Find the declaration of the type inferred at the cursor.
 pub(crate) fn type_definition_at(
     ws: &Workspace,
     mid: ModuleId,
@@ -270,11 +264,6 @@ fn variant_field_span(
     }
 }
 
-/// A name inside a record pattern resolves to the field's *declaration*:
-/// `Struct { field: bind }` -> the struct's field decl, `Enum::Variant { field }`
-/// -> the variant payload field. Shorthand `{ field }` is excluded (the name is
-/// the binding; the node dispatch resolves it). `None` if `offset` isn't on a
-/// record-pattern field name.
 fn pattern_field_def(ws: &Workspace, body: &Body, offset: usize) -> Option<Span> {
     let (enum_name, name, field) = record_pat_field_at(body, offset)?;
     if enum_name.is_none() {
@@ -318,21 +307,7 @@ fn builtin_type_landmark(name: Ustr, ws: &Workspace) -> Option<Span> {
         .flatten()
 }
 
-/// Hover content + highlight span at `offset`, formatted to rock's hover
-/// conventions:
-/// - a value/binding renders `Type: <T>`, where a bare nominal struct/enum is
-///   prefixed (`struct Item`, `enum Color`) and a generic instance stays
-///   `Box<int>` (matching rock's `to_simple_string`);
-/// - a function renders a fenced ```rock fn name(..) -> R``` signature;
-/// - a struct-literal head (`Player { .. }`) renders the full `struct Player {
-///   .. }` definition.
-///
-/// Not yet handled (need bone to record the relevant identifier spans, shared
-/// with the goto-definition name-span work): a struct/enum *declaration* name,
-/// a struct-literal *field* name (vs the head), and pattern field names.
-/// Hover tie-break rank: 0 if the node has an informative type, 1 if it has none
-/// or resolves to `never`/`<error>`. Used to prefer a concrete-typed node over an
-/// equal-span wrapper node (e.g. a lambda body vs its `never`-typed wrapper).
+/// Rank nodes with absent, never or error types below informative types.
 fn node_ty_uninformative(ws: &Workspace, bi: &BodyInference, node: NodeRef) -> u8 {
     let ty = match node {
         NodeRef::Expr(e) => bi.expr_types.get(e).copied(),
@@ -372,13 +347,7 @@ pub fn hover_at(
             if let Some(hit) = hover_record_pat(ws, body, offset) {
                 return Some(hit);
             }
-            // Prefer the node with an INFORMATIVE type, then the smallest --
-            // belt-and-suspenders against small uninformative overlays (e.g. a
-            // brace marker or `never`-typed wrapper sharing an offset with a
-            // typed node) shadowing the node the user is actually on. A genuine
-            // `never` expr with no informative sibling still wins. Offset
-            // stability across every identifier char is pinned by
-            // bone-query/tests/{completion_sweep,phantom_block_sentinel}.rs.
+            // An uninformative wrapper can overlap a smaller typed node.
             if let Some(iv) = body
                 .node_index()
                 .find(offset, offset + 1)
@@ -627,11 +596,7 @@ fn fenced(body: &str) -> String {
     format!("```rock\n{}\n```", body)
 }
 
-/// Hover markup for a call to `name`: every overload's signature, fenced. When
-/// bone resolved the call to one overload (`selected`), that signature leads and
-/// the rest follow under a labeled fence; an unresolved/ambiguous call lists all
-/// of them. `None` if no function by that name exists. A lone overload renders
-/// as the bare fenced signature (unchanged single-fn hover).
+/// Show each accessible overload and mark the selected one.
 fn render_call_overloads_hover(
     ws: &Workspace,
     name: Ustr,
@@ -693,12 +658,7 @@ fn render_call_overloads_hover(
     Some(out)
 }
 
-/// Hover for a function's SIGNATURE region -- `fn` keyword, name, param parens,
-/// `->`, return type -- i.e. anything in the function's span before its body's
-/// opening `{`. Needs `src` to locate that brace (no `{` appears in a Rock
-/// signature). Body-interior tokens (`let`, `for`, ...) are past the brace and
-/// fall through to the normal node resolution. Skips compiler-generated `__`
-/// ops (their name_span is the decl name).
+/// Fallback for signature punctuation outside the name and type nodes.
 pub(crate) fn fn_signature_hover(
     ws: &Workspace,
     mid: ModuleId,
@@ -2260,13 +2220,8 @@ fn local_references(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Vec<
     Some(out)
 }
 
-/// When `offset` targets a declared PARAM of a fn (decl name or a body use),
-/// the named-arg label sites at every call that RESOLVES to that fn
-/// (`spawn_it(count: 3)`), exact per-overload via `resolved_overload_calls`.
-/// HIR keeps arg-name labels without spans (`Body::arg_names`), so the label
-/// token is located in source text directly before the arg value's span.
-/// Empty when the target isn't a fn param (lambda params have no named-arg
-/// call sites) or text is unavailable -- fail open, never mis-spanned.
+/// Resolve named arguments through the selected overload. HIR keeps label names
+/// but no spans, so locate the token immediately before the value.
 fn param_named_arg_sites<'t>(
     ws: &Workspace,
     mid: ModuleId,
@@ -2335,11 +2290,7 @@ fn param_named_arg_sites<'t>(
     out
 }
 
-/// The declaration name of the parameter whose named-arg label (`count` in
-/// `spawn_it(count: 3)`) the cursor is on, in the overload the call resolved
-/// to. HIR keeps labels without spans, so the label token is located in the
-/// source text before the argument's value, as `param_named_arg_sites` does.
-/// None off a label or when the call has no resolved overload.
+/// Find the parameter for a named argument through the selected overload.
 pub(crate) fn named_arg_param_at<'t>(
     ws: &Workspace,
     mid: ModuleId,
@@ -2440,11 +2391,7 @@ fn named_label_before(text: &str, value_start: usize, label: &str, like: &Span) 
     Some(like.with_offset_range((start, end)))
 }
 
-/// The first whole-word occurrence of `ident` inside `text[start..end)`, as a
-/// span cloned from `like`. `None` when absent (fail open). With
-/// `before_open`, only an occurrence whose next non-ws byte is `(` or `{`
-/// matches -- the decl-NAME position in `deco [init] name[(..)] { .. }`
-/// (`deco init init {` needs it: the first `init` is the contextual kind).
+/// Match a whole identifier and apply the caller's additional filter.
 fn ident_span_in(text: &str, start: usize, end: usize, ident: &str, like: &Span) -> Option<Span> {
     ident_span_where(text, start, end, ident, like, false)
 }
@@ -2551,14 +2498,7 @@ fn function_target(
     None
 }
 
-/// Every declaration and call site of a function `name`, across all modules.
-/// Name-based (not a single `(mid, fid)`) so renaming touches **all overloads**
-/// sharing the name and **every** call that resolves to any of them -- rename
-/// of an overloaded or cross-file function is then complete.
-/// Reference spans for a function `name`. `target = None` walks EVERY overload's
-/// decl + all calls resolving to any overload of the name (rename: the shared
-/// name renames together). `target = Some((mid, fid))` restricts to that one
-/// overload's decl + the calls that resolve to exactly it (find-usages).
+/// Find function sites across the workspace, optionally restricted to one overload.
 fn function_references_by_name<'t>(
     ws: &Workspace,
     name: Ustr,
@@ -2708,11 +2648,7 @@ pub(crate) fn inferred_let_bindings(
     out
 }
 
-/// Parameter-name hints: `name:` immediately before each positional argument of
-/// a resolved call, mapping arg `i` to the callee's declared parameter `i`. The
-/// span is the argument's; the facade renders it as a leading hint. Variadic
-/// callees are skipped (the arg<->param mapping past the fixed params is
-/// ambiguous). Range-filtered to `[start, end)`.
+/// Hints for positional arguments to resolved calls.
 pub(crate) fn call_param_hints(
     ws: &Workspace,
     mid: ModuleId,
@@ -2766,12 +2702,7 @@ pub(crate) fn call_param_hints(
     out
 }
 
-/// Receiver-type hints for D-form method definitions (`fn Mob.take_damage(m,
-/// ..)`): a `: <receiver>` hint after the bare receiver param `m`, so its type
-/// reads like the annotated params beside it. Gated on `receiver_surface` (the
-/// parser's D-form marker) -- ordinary annotated params already show their type
-/// in source and get no hint. The type is rendered off the surface AST because
-/// bone drops `receiver_surface` at lowering. Range-filtered to `[start, end)`.
+/// Read D-form receiver types from the AST because lowering drops the surface type.
 pub(crate) fn receiver_param_hints(ast: &Ast, start: usize, end: usize) -> Vec<(Span, String)> {
     let mut out = Vec::new();
     for item in &ast.items {
@@ -2855,19 +2786,7 @@ fn render_type_expr(ast: &Ast, idx: skull_parser::Idx<skull_parser::TypeExprData
     }
 }
 
-/// In-scope locals + params at `offset`: every param of the enclosing function
-/// body, plus `let` bindings whose declaration ends before the cursor. Each
-/// paired with its kind and rendered inferred type (bone-native text). Drives
-/// local/param completion.
-///
-/// Approximation: bindings from sibling/nested blocks that have already closed
-/// before the cursor are still included (over-completion, never a wrong type).
-/// Proper lexical scoping via `scope_arena` is a follow-up.
-///
-/// Inference may be absent for this body -- completion runs on in-progress code
-/// where a single unresolved identifier drops the body from `per_fn`. Bindings
-/// still come from lowering (`binding_arena`); types render only when inference
-/// is present, else the detail is empty.
+/// Bindings visible at the cursor, with their type and declaration where available.
 pub(crate) fn locals_in_scope(
     ws: &Workspace,
     mid: ModuleId,
@@ -2886,11 +2805,7 @@ pub(crate) fn locals_in_scope(
     };
     let bi = inf.per_fn.get(&owner);
 
-    // A `let`-statement binding is in scope only PAST its initializer, not past
-    // its name -- `let x = x` must not offer `x` in its own RHS (non-recursive
-    // let). Map each let-bound binding to its initializer's end offset; bindings
-    // with no entry (for/while-let/if-let/match patterns) keep the name-span
-    // fallback below.
+    // A binding is invisible inside its initializer, where an outer name may still resolve.
     let mut init_end: std::collections::HashMap<Idx<hir::BindingInfo>, usize> = Default::default();
     for (_, stmt) in body.statement_arena.iter() {
         let (leaves, value) = match stmt {
@@ -2943,12 +2858,7 @@ pub(crate) fn locals_in_scope(
 // member completion: `receiver.<field>` -> the receiver's struct fields
 // ---------------------------------------------------------------------------
 
-/// Fields (name, rendered type, TyId) + struct name of the struct `recv`
-/// denotes, typed by inference for that instance (`Box<Mob>` yields
-/// `items: [Mob]`) in a scratch Gamma over the body at `offset`. A field's
-/// TyId is dropped when substitution built a type the caller's body arena
-/// lacks. Falls back to the declared fields by name when there is no
-/// inference. `None` when `recv` isn't a struct.
+/// Substituted fields of the receiver. A substituted type may lack a TyId.
 fn struct_fields_of_ty(
     ws: &Workspace,
     mid: ModuleId,
@@ -3759,12 +3669,7 @@ fn smallest_expr_covering(
         .map(|(_, e)| e)
 }
 
-/// If `offset` is inside a `match` whose scrutinee is an enum with uncovered
-/// variants (and no catch-all arm), return the match expression's span and the
-/// generated arm patterns for the missing variants -- `EnumName::Variant => {}`,
-/// with payload patterns `(_, _)` (tuple) / `{ .. }` (record). The facade turns
-/// these into the edit. None when the cursor isn't in such a match, every
-/// variant is already covered, or a `_`/binding arm already makes it exhaustive.
+/// Offer match arms for uncovered enum variants.
 pub(crate) fn match_arms_fill(
     ws: &Workspace,
     mid: ModuleId,
@@ -3785,11 +3690,7 @@ pub(crate) fn match_arms_fill(
     Some((*body.expr_spans.get(e)?, arms_text))
 }
 
-/// The uncovered variants of the `match` at `e`, with its enum, or None when `e`
-/// isn't an enum match, is already exhaustive, or a `_`/binding arm makes it so.
-/// Drives the fill-match-arms code action. (The non-exhaustive *diagnostic* now
-/// comes from bone inference itself -- `bone-inference` `Expr::Match` -- and
-/// reaches the LSP via `session.diagnostics()`, so this is the action's only job.)
+/// Skip exhaustive matches, including those with a catch-all arm.
 fn match_missing_variants<'a>(
     ws: &'a Workspace,
     body: &Body,
@@ -3831,14 +3732,7 @@ fn match_missing_variants<'a>(
     Some((enum_name, missing))
 }
 
-/// If `offset` is inside a struct literal `Name { ... }` that's missing one or
-/// more REQUIRED fields (declared on the struct, no default, not already given),
-/// return the literal's span and a ready insertion snippet per missing field in
-/// declaration order: the shorthand `field` when an in-scope binding matches the
-/// field's name and type, else a `field: ?` hole. None when the cursor isn't in
-/// such a literal, the struct is unknown, or every required field is already
-/// present. Fields WITH a default are not reported -- omitting them is legal, so
-/// the literal isn't incomplete without them.
+/// Offer missing required fields on the enclosing struct literal.
 pub(crate) fn struct_fields_fill(
     ws: &Workspace,
     mid: ModuleId,
@@ -3923,14 +3817,7 @@ pub struct InlineLocalSites {
     pub parenthesize: bool,
 }
 
-/// When `offset` is on a `let x = <init>` binding or any of its uses, the data
-/// to inline it. None for params / `for` vars / tuple- and newtype-lets (only a
-/// plain single-binding `let` is inlineable) or when the cursor is elsewhere.
-/// Also None when the initializer is not pure and inlining would change how
-/// often it runs: no use, several uses, or a use inside a loop, closure,
-/// nested function or `defer` that does not also hold the `let`.
-/// Effectful operators also prevent inlining a single use, which could move
-/// their effects past another expression.
+/// Find a let binding and the uses where its initializer can be safely inlined.
 pub fn inline_local(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<InlineLocalSites> {
     let module = ws.modules.get(mid.index())?;
     let owner = module.body_at(offset)?;
@@ -4150,11 +4037,7 @@ mod rerun_region_tests {
     }
 }
 
-/// Whether an initializer expression must be wrapped in `(..)` when spliced into
-/// a use site. Atomic primaries (literals, vars, calls, indexing, field/member
-/// access, struct/enum literals, tuples, interpolated strings) bind tighter than
-/// any surrounding operator and need none; everything else (binops, casts,
-/// unary, ranges, lambdas, assignments, control-flow exprs) does.
+/// Parenthesize when the containing expression could bind to part of the initializer.
 fn init_needs_parens(e: &hir::Expr) -> bool {
     !matches!(
         e,
@@ -4558,25 +4441,7 @@ pub struct SignatureEntry {
 // completion
 // ---------------------------------------------------------------------------
 
-/// Completion candidates at `offset`.
-///
-/// IMPLEMENTED for the **global namespace** by mining the per-module name
-/// indexes (`functions_by_name` / `struct_by_name` / `enums_by_name` /
-/// `newtype_by_name` / `global_by_name`) across every module in the workspace
-/// (user code + warm stdlib + builtin). Functions get a rendered signature as
-/// `detail`. The facade filters these by the identifier prefix at the cursor.
-///
-/// In-scope **locals and params** (from [`locals_in_scope`]) are
-/// offered first and shadow same-named globals. NOT yet covered: member/`.`
-/// completion (needs the receiver's type + its fields/methods).
-///
-/// `expr_position` (the cursor is in a value slot, not a type slot) governs enum
-/// completion: in an expression slot a user enum is offered as its qualified
-/// `Enum::Variant` values (the bare name isn't a usable value); in a type slot
-/// the bare `Enum` name is offered instead. Mirrors rock-lsp.
-/// [`completion`]'s global candidates in a modules-v1 fragment: each name
-/// the fragment's tiers bind (`modules_scope::bound_names`), offered under
-/// that name with the entry shape of the definition it binds.
+/// Resolve names from the fragment scope and describe the definitions they bind.
 fn v1_scope_entries(
     ws: &Workspace,
     frag: &bone_core::modules::FragmentScope,
@@ -4855,16 +4720,7 @@ pub(crate) fn completion_with_visible_bindings(
     let mut seen: FxHashSet<ustr::Ustr> = FxHashSet::default();
     let mut out = Vec::new();
 
-    // Filter by the identifier query HERE, before rendering any per-candidate
-    // detail (function signatures cost a render each). A post-filter in the
-    // caller would render every signature in the workspace and then throw most
-    // away. Match is a CLEAN fuzzy match (`clean_match`): the query is a
-    // subsequence whose first char is at a word boundary and the rest land at
-    // boundaries / in a run -- so `tilecen` finds `tile_center` across the `_`
-    // and `log` finds `event_log`, but a mid-word scatter (`nog` across
-    // `__eve(n)t_l(o)(g)`) is dropped rather than shown ranked low. The fuzzy
-    // score in the caller (`arg_sort_text`) then ranks tight runs first.
-    // `prefix` is already lowercased.
+    // Filter before rendering details, which is more expensive than matching names.
     let pfx = prefix.as_bytes();
     // `_`-prefixed symbols are soft-private (the member-completion
     // convention): hidden unless the user is explicitly typing a `_` prefix.
@@ -4877,11 +4733,6 @@ pub(crate) fn completion_with_visible_bindings(
         crate::completion::match_policy::admit(name.as_bytes(), pfx)
     };
 
-    // A TYPE slot offers the type universe only: structs / bare enums /
-    // newtypes / builtins. Locals, globals, and functions are values -- not
-    // valid in a type position, so they're gated out entirely (misclassified
-    // slots fail open: `expr_position` defaults true when no type node
-    // encloses the cursor).
 
     // Locals/params in scope shadow the global namespace -- emit them first and
     // let the shared `seen` set suppress a same-named global.
@@ -4943,11 +4794,7 @@ pub(crate) fn completion_with_visible_bindings(
         &mut seen,
         &mut out,
     );
-    // Builtin type names, in a TYPE slot only. `Coroutine`/`Map` are compiler
-    // builtins with no entry in the workspace name-index, and the scalar
-    // primitives aren't nominal types at all -- neither flows through the loops
-    // above. (Stdlib structs like `Vec`/`Entity`/`Arena`/`NativeBuffer*`/`Ptr*`
-    // already come through `struct_by_name`.)
+    // Vec and native buffers already come from the struct declarations.
     if !expr_position {
         for name in BUILTIN_TYPE_NAMES {
             let n = ustr::Ustr::from(name);
@@ -5149,14 +4996,7 @@ fn param_default_src(
     src.get(s..e).map(|t| t.trim().to_string())
 }
 
-/// Per-function ctags signature pieces, keyed by declaration-span start:
-/// `(params, returns)` where `params` is `"(a: int, b: int)"` and `returns` is
-/// the rendered return type (None for a unit/no-return fn). Split form -- not
-/// `render_fn_signature`'s combined string -- because ctags carries `signature:`
-/// and `returns:` as separate extended fields. Keyed by span start (unique per
-/// declaration, so overloads don't collide). Only the on-save ctags path calls
-/// this; `document_symbols` stays signature-free so the hot `workspace_symbols`
-/// query doesn't render types it won't show.
+/// Render ctags signatures separately from the document-symbol request.
 pub(crate) fn fn_ctags_signatures(
     ws: &Workspace,
     mid: ModuleId,
@@ -5180,11 +5020,7 @@ pub(crate) fn fn_ctags_signatures(
 // document symbols
 // ---------------------------------------------------------------------------
 
-/// Top-level items declared in `mid` (functions, types, globals) with spans.
-///
-/// Walks the module's item arenas directly -- no inference needed, every item
-/// carries its name + declaration `Span`. The facade maps each `SymbolEntry`
-/// to a `DocumentSymbol`.
+/// List top-level declarations in arena order.
 pub fn document_symbols(ws: &Workspace, mid: ModuleId) -> Vec<SymbolEntry> {
     let Some(m) = ws.modules.get(mid.index()) else {
         return Vec::new();
@@ -5223,20 +5059,7 @@ pub fn document_symbols(ws: &Workspace, mid: ModuleId) -> Vec<SymbolEntry> {
 // signature help
 // ---------------------------------------------------------------------------
 
-/// Signature(s) of the call (or struct-literal constructor) enclosing `offset`,
-/// plus that expr's source span so the facade can compute the active argument
-/// index from cursor position.
-///
-/// Three resolution tiers, in order of precision:
-/// 1. A function call bone resolved to a single overload (`resolved_overload_calls`,
-///    same data as goto-definition) -> that one signature.
-/// 2. A function call bone could NOT resolve (e.g. a generic call with a lambda
-///    arg bone can't disambiguate -> "ambiguous overload") -> every function with
-///    the callee's name, the standard LSP overload list. Inference isn't needed.
-/// 3. A struct literal `Name { .. }` -> a `Name { f: T, .. }` constructor signature.
-///
-/// The active-parameter index is intentionally NOT computed here -- it's a
-/// cursor/source concern, so the facade fills it from the returned span.
+/// Prefer the selected overload, then fall back to by-name signatures or a constructor.
 pub fn signature_help(
     ws: &Workspace,
     mid: ModuleId,
@@ -5379,12 +5202,7 @@ pub enum HoleKind {
     Expr,
 }
 
-/// The typed-hole report: kind, the inferred/expected type (when known), and the
-/// bindings in scope at the hole. The type is the hole's solved type -- for a
-/// type hole the inference var the `?` lowered to, for an expression hole the
-/// fresh var coerced to its surrounding expected type (`int` in `let x: int = ?`,
-/// an unsolved `?H` when nothing constrains it). `None` only if inference left
-/// the node typeless.
+/// The hole kind, its solved type when available, and nearby bindings.
 pub struct HoleInfo {
     pub kind: HoleKind,
     pub ty: Option<String>,
@@ -5393,11 +5211,6 @@ pub struct HoleInfo {
     pub span: Span,
 }
 
-/// Hole-info at `offset`, or None when the cursor isn't on a `?` hole. The hole
-/// is detected on the raw (pre-lowering) AST (where both kinds survive with a
-/// span); the type comes from the lowered node at the cursor -- a type
-/// annotation for type holes, an `Expr` for expression holes -- rendered through
-/// the body's substitution chain.
 pub fn hole_info(
     ws: &Workspace,
     mid: ModuleId,
@@ -5419,11 +5232,6 @@ pub fn hole_info(
     })
 }
 
-/// Every `?` hole in `ast`, each with its kind, solved/expected type (when
-/// inference could resolve it), and source span. Powers the unfilled-hole
-/// diagnostics: expression holes warn ("fill me in"), resolved type holes hint
-/// ("inferred as T"). Same detection as `hole_kind_at`, swept over the whole
-/// module instead of one cursor offset.
 pub(crate) fn all_holes(
     ws: &Workspace,
     mid: ModuleId,
@@ -5493,17 +5301,7 @@ pub(crate) fn fz_boundary(cand: &[u8], j: usize) -> bool {
     j == 0 || matches!(cand[j - 1], b'_' | b'.' | b'(' | b')' | b':' | b' ')
 }
 
-/// Does `query` (already lowercased) match `cand` (ORIGINAL case) CLEANLY -- the
-/// FIRST char at a word boundary, and every later char either at a word boundary
-/// or immediately after the previous match (a run)? Word boundaries are
-/// delimiters (`_ . ( ) : space`) AND camelCase transitions (a lower/digit
-/// followed by an upper -- `NotGround`'s `G`), so PascalCase variant/type names
-/// match by their inner words. This is how people fuzzy-type (`tc` / `tilecen`
-/// -> `tile_center`, `log` -> `event_log`, `nog` -> `NotGround`), and it drops
-/// coincidental mid-word scatter (`nog` across `__eve(n)t_l(o)(g)` or
-/// `Bloody(B)anda(g)e`). Filters completion candidates; ranking still uses the
-/// finer `fuzzy_score`. Boolean DP over (query x cand); char compare is
-/// case-insensitive. Empty = clean.
+/// A clean subsequence starts at word boundaries or continues an existing run.
 pub(crate) fn clean_match(cand: &[u8], query: &[u8]) -> bool {
     if query.is_empty() {
         return true;

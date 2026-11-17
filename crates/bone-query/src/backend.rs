@@ -1,12 +1,4 @@
-//! The LSP's facade over the `bone` typechecker.
-//!
-//! Each `*_workspace` handler calls the matching method here; the persistent
-//! server holds one [`BoneWorkspace`]. [`gaps`] holds the thin delegations into
-//! `crate::query`.
-//!
-//! Consumes bone's public pipeline (`bone_incremental::session::Session`,
-//! `bone_semantic::query`) plus this crate's IDE-navigation queries
-//! (`crate::query`).
+//! Connect the incremental session and typed queries to the LSP protocol.
 
 mod completion;
 mod macro_refs;
@@ -121,14 +113,7 @@ fn stdlib_paths() -> &'static [(String, String)] {
     })
 }
 
-/// The session keys the stdlib by the loader's stdlib ids (`<stdlib>/name`,
-/// the CLI's spelling), because bone reads std ownership -- the v1 prelude,
-/// the std-only primitives -- from that spelling. The editor names the same
-/// files by their real paths. These two functions are the only translation
-/// between the two: every public entry maps an editor path in through
-/// [`session_file_id`] (via `canon`), and everything handed back to the editor
-/// -- a location, a diagnostic's file, a symbol -- goes out through
-/// [`editor_path`].
+/// Keep loader ids in the session and convert them to editor paths at the boundary.
 fn session_file_id(canonical_path: String) -> String {
     match stdlib_paths().iter().find(|(_, p)| *p == canonical_path) {
         Some((id, _)) => id.clone(),
@@ -158,9 +143,7 @@ fn stdlib_texts() -> Vec<(String, String)> {
 // BoneWorkspace: one Session per stick-project root
 // ---------------------------------------------------------------------------
 
-/// Per-root bone state: the incremental session plus the latest text of every
-/// tracked file (needed because bone queries are keyed on byte offsets, but the
-/// session does not retain raw text).
+/// The session retains the last good text. The editor may hold a rejected edit.
 struct BoneProject {
     fallbacks: FallbackReports,
     lint_options: bone_lints::LintOptions,
@@ -174,27 +157,14 @@ struct BoneProject {
     /// Workspace reference counts per name (`build_freq_index`) -- the
     /// `freq` prior. Rebuilt with the other type caches.
     freq: Option<HashMap<ustr::Ustr, u32>>,
-    /// Per-file unfilled-hole diagnostics, cached across edits. `hole_diagnostics_for`
-    /// REPARSES a file, so recomputing it for every tracked file on every keystroke
-    /// reparses the whole compilation unit (over a hundred files in a large project) when only the edited
-    /// file + its reinferred dependents can have changed holes. Invalidated for
-    /// exactly those files in `update`.
+    /// Cache authoritative hole diagnostics, including known-empty files.
     hole_cache: HashMap<String, Vec<Diagnostic>>,
     /// The shared lint derivation cache. It is also the cache used by the live
     /// compiler; this project stores only the LSP rendering policy at the edge.
     lint_cache: bone_lints::IncrementalLintCache,
-    /// Type-reachability index for type-directed completion paths. A pure
-    /// function of the type graph (struct fields + fn signatures), so it is
-    /// rebuilt only on a non-`BodyOnly` edit and reused across body keystrokes.
-    /// `None` until the first build (in `update`).
+    /// Type-reachability index, built lazily by completion.
     reach: Option<crate::reachability::ReachabilityIndex>,
-    /// Precomputed call-through index (fused-query completion, `rejtanog ->
-    /// reject_target(..)`). Like `reach`, a pure function of the type
-    /// graph (fn names + first-param types, enum variants, reach-from-globals),
-    /// so it survives `BodyOnly` keystrokes and is rebuilt only on a
-    /// non-`BodyOnly` edit. Without it, `call_through_param_completions` rebuilt
-    /// an O(types*globals) reachability expansion on EVERY keystroke (the
-    /// 20-50ms per-keystroke stall). `None` until the first build (in `update`).
+    /// Project-wide call-through candidates, rebuilt after an interface change.
     call_through: Option<CallThroughIndex>,
     /// Fragment-scoped spellings and visibility for `call_through`. Reused on
     /// body edits and cleared with the type caches when a scope can change.
@@ -208,24 +178,13 @@ struct BoneProject {
     /// public API has no in-project caller yet isn't dead -- so it runs only
     /// when this is true. Computed once at load, not per keystroke.
     is_bin: bool,
-    /// This project's root (the `stick.toml` directory keying the session). The
-    /// REPORT SET: a tracked file outside it is a DEPENDENCY -- scanned, so the
-    /// call graph is whole, but never reported on. Same rule as the build pass
-    /// (`rock-cli/src/lint_pass.rs`), and it matters most for `unused_fn`: a
-    /// session holds its whole compilation unit, so without this a game would
-    /// judge the shared engine's reachability against one consumer's world.
     root: PathBuf,
     /// Last time each module was (re)inferred, keyed by module file. Stamped for
     /// every file at load and for the `update.reinferred` set on each edit, so
     /// `rock/modules` can render "how long ago did this recompile" -- the
     /// incremental-perf watch view. Modules never yet touched are absent.
     module_touched: HashMap<String, bone_core::prelude::Instant>,
-    /// The package graph of this root's manifest, built once when the
-    /// project is created. It supplies the resolver's alias tables and the
-    /// package policy of a file that enters after the load (see
-    /// `update`). `None` for a root with no manifest, or one whose graph does
-    /// not build (logged): every file is then a standalone v1 source,
-    /// as in a compile.
+    /// Use the same package ownership and visibility as the compiler.
     graph: Option<rock_host::stick::graph::PackageGraph>,
 }
 
@@ -477,13 +436,7 @@ pub struct BoneWorkspace {
     source_load_errors: HashMap<PathBuf, String>,
     /// A stdlib replacing the process one ([`Self::with_stdlib`]).
     stdlib: Option<Result<Arc<[skull_parser::Ast]>, CompilerError>>,
-    /// Verbatim editor path -> canonical path. Project discovery keys modules
-    /// by the canonicalized path (`project_sources`), but LSP clients send the
-    /// URI-decoded spelling (`C:\...` not `\\?\C:\...`; `/./` segments), so
-    /// every public entry canonicalizes its `path` to this form first. Cached
-    /// because `canonicalize` is a filesystem syscall and `update` is the
-    /// keystroke hot path -- `update` warms the cache so the same-keystroke
-    /// read queries hit it syscall-free.
+    /// Cache canonical paths so editor queries avoid filesystem calls.
     path_canon: HashMap<String, String>,
 }
 
@@ -513,14 +466,7 @@ pub struct GenerateFunctionEdit {
     pub fn_name: String,
 }
 
-/// Whether the initializer SOURCE has a binary/unary operator at bracket depth 0
-/// (outside strings) -- e.g. a constant-folded `1 + 2`. Postfix `.`/`::`/`?.` and
-/// operators inside a call/index/literal don't count, so `g(v)` / `a.b` / `S{..}`
-/// stay unparenthesized while `a + b` / `-x` / `a as int` get wrapped.
-/// Whether `src[start..end]` fills a whole delimited slot: a call argument,
-/// tuple or array element, or index, with only `(`/`[`/`,` before it and
-/// `)`/`]`/`,` after it. An expression spliced there keeps its precedence
-/// without parens. A method receiver is followed by `.`, so it is not one.
+/// A top-level operator can change binding when the initializer is spliced at a use.
 fn is_delimited_slot(src: &str, start: usize, end: usize) -> bool {
     let before = src[..start].trim_end().as_bytes().last();
     let after = src[end..].trim_start().as_bytes().first();
@@ -567,17 +513,7 @@ pub struct InlineLocalEdits {
     pub edits: Vec<TextEdit>,
 }
 
-/// Canonicalize `path` WITHOUT Windows' `\\?\` extended-length prefix, falling
-/// back to the input verbatim if it doesn't resolve (an unsaved buffer).
-///
-/// `fs_err::canonicalize` (= `std::fs::canonicalize`) returns the verbatim
-/// `\\?\C:\...` form on Windows. That prefix disables path normalization in
-/// downstream Windows APIs (breaking compilation-unit file discovery) and never
-/// string-matches a path produced any other way -- and module lookup here is an
-/// exact `Ustr` compare (`user_module_for_path`). Stripping it keeps every path
-/// in the plain `C:\...` form so discovery, the editor's path, and the module
-/// keys all agree. No-op on Unix (no prefix to strip). Mirrors the `dunce`
-/// crate; kept dependency-free since the LSP only ever sees normal file paths.
+/// Canonicalize a source without the Windows verbatim prefix, including unsaved files.
 pub fn canonicalize_lenient(path: &str) -> String {
     let canon = match fs_err::canonicalize(path) {
         Ok(p) => p.to_string_lossy().to_string(),
@@ -755,20 +691,11 @@ impl BoneWorkspace {
         Some((path, proj, src, offset, ws, mid))
     }
 
-    /// Load every `.rock` file under `path`'s project root into the session, so
-    /// cross-file queries (references/rename) see the whole project rather than
-    /// only the files an editor happened to open. Idempotent; reads from disk.
-    /// The one-shot CLI calls this before a cross-file query; an interactive
-    /// server can call it once per project root to index it eagerly.
     pub fn load_project(&mut self, path: &str) {
         self.batch_load_for_file(path);
     }
 
-    /// Per-project module summary for the `rock/modules` introspection request:
-    /// `(root, sorted [ModuleRecency])` for every indexed project, each module
-    /// carrying how long ago it last (re)inferred. The LSP serves one root per
-    /// server, but a session can hold several (scratch files keyed by parent
-    /// dir), so this returns all of them as separate contexts.
+    /// Module recency for the editor's `rock/modules` request.
     pub fn projects_summary(&self) -> Vec<(String, Vec<ModuleRecency>)> {
         let now = bone_core::prelude::Instant::now();
         let mut out: Vec<(String, Vec<ModuleRecency>)> = self
@@ -794,24 +721,9 @@ impl BoneWorkspace {
         out
     }
 
-    /// Batch-create the session from `file_path`'s whole compilation unit -- the
-    /// project's own files PLUS its `stick.toml` path-dependencies (e.g. a game's
-    /// engine) -- so cross-file and cross-package references resolve. The file set
-    /// is exactly the one a real `rock compile` uses
-    /// (`compilation_units::load_sources_for_compilation_unit`), so the LSP sees
-    /// the same program the compiler does. Incremental `update_file` reverts a
-    /// module whose dependencies load later, so a one-file-at-a-time load would
-    /// flag every cross-file symbol as unknown; batching avoids that. Falls back
-    /// to per-file incremental loading if the batch fails (e.g. a file with a
-    /// parse error, which `Session::new` rejects wholesale). Marks the root loaded
-    /// so `update` won't re-index (and clobber unsaved buffers).
+    /// Load the compilation unit once so later updates preserve unsaved buffers.
     fn batch_load_for_file(&mut self, file_path: &str) {
         let root = Self::root_for(file_path);
-        // The alias table the resolver needs comes from the same manifest that
-        // selected these files, so a v1 package in the editor resolves its
-        // dependencies exactly as a compile does. `root` is the deepest
-        // enclosing `stick.toml` directory, or a scratch file's own parent,
-        // whose missing manifest means the empty table.
         let inputs = Self::project_sources(file_path)
             .map_err(|cause| format!("Cannot load project sources for `{file_path}`: {cause}"))
             .and_then(|files| {
@@ -902,11 +814,7 @@ impl BoneWorkspace {
         }
     }
 
-    /// The (canonical-path, contents) of every source file in `file_path`'s
-    /// compilation unit: the project plus its `stick.toml` dependencies, the same
-    /// resolution `rock compile` performs. Paths are canonicalized so they match
-    /// the canonical paths the LSP queries with (`root_for` / the CLI's
-    /// `canonical`); a mismatch would leave the opened file's module unfindable.
+    /// Read the same compilation unit as the compiler and canonicalize session keys.
     fn project_sources(file_path: &str) -> Result<Vec<SessionFile>, String> {
         // New buffers and stale session entries have no disk file. Discover
         // their enclosing project, then let update apply the editor's text.
@@ -948,12 +856,7 @@ impl BoneWorkspace {
         // (duplicate module -> "duplicate struct" / a half-built session crash).
         let path_c = self.canon_cached(path);
         let path = path_c.as_str();
-        // First touch of a real (`stick.toml`) project root: batch-index its
-        // siblings so cross-file types/functions resolve. Without this, opening
-        // one file of a multi-file project flags every cross-file reference as
-        // "unknown". Scratch files (no `stick.toml`) stay single-file. The
-        // edited file's buffer text is applied below, overriding the disk copy
-        // the batch load read.
+        // Load dependencies before applying the editor buffer over the disk copy.
         if let Some(proj_root) = Self::stick_root(path) {
             if !self.loaded_roots.contains(&proj_root) {
                 self.batch_load_for_file(path);
@@ -1002,21 +905,12 @@ impl BoneWorkspace {
         }
         proj.texts.insert(path.to_string(), text.clone());
 
-        // A parse/lower failure of *this* file reverts the session to its last
-        // good state for it; surface that one error on this file directly.
-        // Holes can only change in files that were re-typechecked, so collect
-        // the changed set (edited file + reinferred dependents) to drive the
-        // hole cache below.
+        // The session keeps the last good state after a failed edit.
         let mut this_file_parse_err: Option<CompilerError> = None;
         let mut changed: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut lint_change = bone_lints::LintCacheUpdate::body_only([], [], []);
         changed.insert(path.to_string());
-        // Tier governs the type-graph-derived caches (reachability index +
-        // completion signature cache): both depend only on the type graph
-        // (struct fields + fn signatures), which a `BodyOnly` edit cannot
-        // change -- so drop them only on a non-`BodyOnly` edit. The next
-        // completion rebuilds them, so a run of edits with no completion
-        // between them pays for none of it.
+        // Body-only edits preserve the type and signature indexes.
         let mut drop_type_caches = false;
         // A file the session does not hold yet takes its package facts from
         // the manifest, like the batch load's files.
@@ -1136,20 +1030,8 @@ impl BoneWorkspace {
             );
         }
 
-        // Unfilled-hole diagnostics. `hole_diagnostics_for` REPARSES, so we
-        // recompute as few files as possible (a full scan reparses the whole
-        // compilation unit every keystroke). A file's hole POSITIONS come from
-        // its text and its hole TYPE MESSAGES from its inference, so recompute
-        // when either could have changed:
-        //   - the edited file (text changed -> positions may change), always;
-        //   - a reinferred dependent (text UNCHANGED this edit, inference
-        //     changed -> only messages can shift): recompute ONLY if it had
-        //     holes last time -- an authoritatively hole-free file with
-        //     unchanged text is still hole-free, so skip its reparse;
-        //   - everything else: serve the cache (compute once if never seen).
-        // `None` from hole_diagnostics_for means "couldn't compute" (no
-        // inference / parse fail) -- never cached, so it isn't mistaken for a
-        // known-hole-free file.
+        // Hole positions depend on the buffer and hole types depend on inference.
+        // Skip unchanged files cached as hole-free, even if they were reinferred.
         for (p, diags) in by_file.iter_mut() {
             if proj.rejected_updates.contains_key(p) {
                 // The session retains this file's last-good state, so its
@@ -1244,18 +1126,14 @@ impl BoneWorkspace {
         self.open_file(path).map(|(_, _, src)| src)
     }
 
-    // -- Feature: hover (implemented via bone_semantic::query::type_at) ---------------
+    // hover
 
     pub fn hover(&self, path: &str, pos: Position) -> Option<Hover> {
         let (path, proj, src) = self.open_file(path)?;
         let path = path.as_str();
         let offset = offset_at_line_col(src, pos.line, pos.character);
 
-        // Whitespace guard: hovering the blanks between tokens resolves to
-        // nothing. Without this, container exprs (match/if/block) -- which now
-        // render their value for their keyword/braces -- would be a catch-all
-        // hover over the whitespace inside them. ASCII-only (whitespace is ASCII;
-        // a multi-byte char's lead byte isn't whitespace, so it proceeds).
+        // Enclosing expressions cover whitespace between their tokens.
         if src
             .as_bytes()
             .get(offset)
@@ -1268,11 +1146,7 @@ impl BoneWorkspace {
         let mid = user_module_for_path(ws, path)?;
         let inf = ws.inference(mid)?;
 
-        // A `?` hole under the cursor gets the full typed-hole report (kind +
-        // inferred/expected type + in-scope bindings) -- the same content the
-        // `rock-lsp hole-info` CLI prints -- rather than `hover_at`'s bare
-        // `Type: ...`. Fenced so the multi-line "In scope:" block keeps its
-        // formatting in a Markdown editor.
+        // Fence the report so Markdown preserves its in-scope list.
         let raw_ast = proj.reparse_user_file(path, "hover");
         if let Some(hi) = raw_ast
             .as_ref()
@@ -1372,7 +1246,7 @@ impl BoneWorkspace {
             .collect()
     }
 
-    // -- Feature: goto-definition ----------------------------------------------
+    // goto-definition
 
     pub fn definition(&self, path: &str, pos: Position) -> Option<Location> {
         let (path, proj, _, offset, ws, mid) = self.cursor(path, pos)?;
@@ -1410,7 +1284,7 @@ impl BoneWorkspace {
         self.location_from_span(proj, &span)
     }
 
-    // -- Feature: goto-type-definition -----------------------------------------
+    // goto-type-definition
 
     /// LSP `textDocument/typeDefinition`: jump from the value under the cursor to
     /// the declaration of its *type* (on `mob` -> `struct Mob`). None when the
@@ -1422,7 +1296,7 @@ impl BoneWorkspace {
         self.location_from_span(proj, &span)
     }
 
-    // -- Feature: find-references ----------------------------------------------
+    // find-references
 
     pub fn references(&self, path: &str, pos: Position) -> Vec<Location> {
         let Some((path, proj, src)) = self.open_file(path) else {
@@ -1444,11 +1318,7 @@ impl BoneWorkspace {
         .collect()
     }
 
-    /// Occurrences of the symbol under the cursor WITHIN `path` (the LSP
-    /// document-highlight feature). Reuses the symbol-aware `references` query
-    /// and keeps only the current file's sites, so a local/param/field/callee
-    /// highlights every use in this buffer. Kind is left unset (Text) -- bone's
-    /// reference spans don't distinguish read vs write access.
+    /// References in the current document.
     pub fn document_highlight(&self, path: &str, pos: Position) -> Vec<DocumentHighlight> {
         let path_c = self.canon(path);
         let path = path_c.as_str();
@@ -1467,11 +1337,6 @@ impl BoneWorkspace {
             .collect()
     }
 
-    /// Plain-text typed-hole report (kind + inferred type + in-scope bindings)
-    /// for the `?` hole under the cursor, or None if the cursor isn't on a hole.
-    /// Drives the `rock-lsp hole-info` CLI on bone. Type holes carry their solved
-    /// type; expression holes don't yet (bone rejects them at lowering -- see the
-    /// LSP roadmap), but still list the bindings in scope.
     pub fn hole_info(&self, path: &str, pos: Position) -> Option<String> {
         let (path, proj, _, offset, ws, mid) = self.cursor(path, pos)?;
         let path = path.as_str();
@@ -1481,11 +1346,6 @@ impl BoneWorkspace {
         Some(format_hole_report(&hi))
     }
 
-    /// A "fill in missing match arms" edit when the cursor is inside a `match`
-    /// over an enum that's missing variants (the classic `match x {}` action).
-    /// Returns the text edit (a replacement of the whitespace before the closing
-    /// `}` with the generated `EnumName::Variant => {}` arms) and the count, or
-    /// None when there's nothing to fill. See `query::match_arms_fill`.
     pub fn fill_match_arms(&self, path: &str, pos: Position) -> Option<MatchArmsFill> {
         let (_, _, src, offset, ws, mid) = self.cursor(path, pos)?;
         let inf = ws.inference(mid)?;
@@ -1524,11 +1384,6 @@ impl BoneWorkspace {
         })
     }
 
-    /// A "fill struct fields" edit when the cursor is inside a struct literal
-    /// `Name { ... }` missing required fields. For each missing field inserts the
-    /// shorthand `field` when an in-scope binding matches its name and type, else
-    /// a `field: ?` hole, keeping the literal's single- or multi-line shape, or
-    /// None when nothing's missing. See `query::struct_fields_fill`.
     pub fn fill_struct_fields(&self, path: &str, pos: Position) -> Option<StructFieldsFill> {
         let (_, _, src, offset, ws, mid) = self.cursor(path, pos)?;
         let inf = ws.inference(mid)?;
@@ -1643,11 +1498,6 @@ impl BoneWorkspace {
         })
     }
 
-    /// A "Generate function" edit when the cursor is on a call to an undeclared
-    /// function: inserts a stub `fn name(params) [-> ret] { ? }` after the
-    /// enclosing function. Param types come from the argument types (`any` when
-    /// unknown), the return type from a concrete use site (else Unit), and the
-    /// body is a `?` hole. See `query::generate_function`.
     pub fn generate_function(&self, path: &str, pos: Position) -> Option<GenerateFunctionEdit> {
         let (_, _, src, offset, ws, mid) = self.cursor(path, pos)?;
         let inf = ws.inference(mid)?;
@@ -1860,18 +1710,13 @@ impl BoneWorkspace {
         )
     }
 
-    // -- Feature: completion (the request lives in `completion.rs`) ---------------
+    // completion (the request lives in `completion.rs`)
 
     pub fn completion(&mut self, path: &str, pos: Position) -> Vec<CompletionItem> {
         self.completion_with_trigger(path, pos, false)
     }
 
-    /// Completion, told whether this request was auto-fired by the space trigger
-    /// character. A space trigger on a line whose prefix (up to the cursor) is
-    /// only whitespace is auto-indentation inserted by `<CR>`, not a real
-    /// "space after a token" context (`let x = |`); we suppress it so a bare
-    /// newline doesn't pop the menu (and `<CR><CR>` doesn't accept item 1).
-    /// Manual invokes / identifier typing pass `false` and are never suppressed.
+    /// Suppress space-triggered completion on auto-indent.
     pub fn completion_with_trigger(
         &mut self,
         path: &str,
@@ -1894,7 +1739,7 @@ impl BoneWorkspace {
         items
     }
 
-    // -- Feature: rename + prepare-rename -------------------------------------
+    // rename + prepare-rename
 
     /// The identifier range a rename at `pos` would rewrite: `Ok(None)` when
     /// nothing there is renameable, `Err` when the symbol is renameable in
@@ -1909,12 +1754,7 @@ impl BoneWorkspace {
         };
         let path = path.as_str();
         let offset = offset_at_line_col(src, pos.line, pos.character);
-        // Reuse the exact reference resolution `rename` uses, so prepare-rename
-        // and rename can never disagree: the token is renameable iff it has
-        // reference sites, and the editable range is the cursor's own site (the
-        // identifier token). `definition_at` + `type_at` did neither -- None
-        // at a declaration name ("nothing to rename" on `fn foo`), and the whole
-        // enclosing `Call` span at a callee (prefilling `foo(args)`, not `foo`).
+        // Find a name span even when the selected node covers an entire call.
         let here = self
             .rename_plan(proj, path, offset)?
             .into_iter()
@@ -2028,7 +1868,7 @@ impl BoneWorkspace {
         Ok(sites)
     }
 
-    // -- Feature: document symbols (stubbed: crate::query::document_symbols) ---------
+    // document symbols
 
     pub fn document_symbols(&self, path: &str) -> Vec<DocumentSymbol> {
         let Some((path, proj, src)) = self.open_file(path) else {
@@ -2058,16 +1898,9 @@ impl BoneWorkspace {
             .collect()
     }
 
-    // -- Feature: workspace symbols -----------------------------------------
+    // workspace symbols
 
-    /// All top-level symbols across every loaded project whose own name matches
-    /// `query` (case-insensitive substring; empty query = everything). Queries
-    /// containing `::` match the qualified name instead. Builtin `@test`
-    /// functions follow non-test symbols, preserving order within each group.
-    /// Returned names retain their qualification. Visits every tracked `.rock`
-    /// file, reusing the per-module `crate::query::document_symbols` walk. Spans every
-    /// project the session has loaded (the one-shot CLI loads exactly one; the
-    /// interactive server accumulates each opened root).
+    /// Match the bare name unless the query uses qualification. Put tests after other symbols.
     pub fn workspace_symbols(&self, query: &str) -> Vec<SymbolInformation> {
         let needle = query.to_lowercase();
         let qualified = needle.contains("::");
@@ -2138,17 +1971,9 @@ impl BoneWorkspace {
         out
     }
 
-    // -- Feature: ctags emission (project `.rock.tags`) ----------------------
+    // ctags emission (project `.rock.tags`)
 
-    /// Regenerate the `.rock.tags` (extended ctags) file for the project that
-    /// owns `path`, writing it to `<project-root>/.rock.tags`. Enumerates every
-    /// top-level symbol (functions, structs, enums, newtypes, globals) across the
-    /// project's tracked files from bone's HIR -- the same `document_symbols`
-    /// walk `workspace_symbols` uses -- so the tags match the live program. The
-    /// LSP calls this on `textDocument/didSave`; the stdlib IS included (warm
-    /// modules carry real paths), so its symbols are jump-to-by-name. A path with
-    /// no session yet writes nothing and returns 0. Returns the number of symbols
-    /// written.
+    /// Write tags for the project containing `path`, including its stdlib.
     pub fn write_ctags(&self, path: &str) -> std::io::Result<usize> {
         let path_c = self.canon(path);
         let path = path_c.as_str();
@@ -2159,15 +1984,7 @@ impl BoneWorkspace {
         self.write_ctags_for(&root, proj)
     }
 
-    /// Regenerate `.rock.tags` for every loaded STICK project root, not just the
-    /// edited file's. The editor holds one tags file per open package and any
-    /// of them may be stale (a sibling package edited last session, never
-    /// re-saved this one); refreshing all of them on save keeps cross-package
-    /// tag jumps accurate. Standalone-file roots (a scratch `.rock` with no
-    /// `stick.toml`, keyed by its parent dir) are skipped -- an all-roots sweep
-    /// must not scatter `.rock.tags` into `~` or `/tmp`. Per-root `(root, result)`
-    /// so the caller can log individual failures; one root's error never blocks
-    /// the others.
+    /// Write tags for manifest roots only. Scratch-file directories do not own tag files.
     pub fn write_all_ctags(&self) -> Vec<(PathBuf, std::io::Result<usize>)> {
         self.projects
             .iter()
@@ -2180,13 +1997,6 @@ impl BoneWorkspace {
         let ws = proj.session.workspace();
 
         let mut entries = Vec::new();
-        // Every USER module the session loaded -- the whole compilation unit
-        // (project + stick.toml deps), NOT just the files open in the editor.
-        // Iterating the workspace modules directly (vs `texts.keys()` +
-        // `user_module_for_path`) can't silently drop a file on a path mismatch
-        // and needs no canonicalization round-trip. The warm stdlib is included
-        // (written under its real path, `editor_path`), so `vec_push` & co. are
-        // jump-to-by-name; only the builtin (pathless) module is excluded.
         for m in ws.source_modules() {
             let mid = m.id;
             let file = editor_path(m.file.as_str()).into_owned();
@@ -2276,11 +2086,7 @@ impl BoneWorkspace {
                 });
             }
 
-            // Macros (kind `M`). They are expanded away before bone lowering, so
-            // the workspace HIR has no record of them -- but the Session captured
-            // each file's macro signatures at parse time (`UserFile.macros`), so
-            // read them directly. No reparse; the recorded spans are shifted on
-            // incremental edits, so the lines stay accurate.
+            // Read captured macros because expansion removes them from HIR.
             if let Some(uf) = proj.session.files.get(m.file.as_str()) {
                 for md in &uf.macros {
                     let params = crate::query::rendered_macro_params(md);
@@ -2303,7 +2109,7 @@ impl BoneWorkspace {
         crate::ctags::write_tags_file(&root.join(".rock.tags"), entries)
     }
 
-    // -- Feature: signature help (stubbed: crate::query::signature_help) -------------
+    // signature help
 
     pub fn signature_help(&self, path: &str, pos: Position) -> Option<SignatureHelp> {
         let (_, proj, src, offset, ws, mid) = self.cursor(path, pos)?;
@@ -2352,7 +2158,7 @@ impl BoneWorkspace {
         })
     }
 
-    // -- Feature: inlay hints ------------------------------------------------
+    // inlay hints
 
     pub fn inlay_hints(&self, path: &str, range: Range) -> Vec<InlayHint> {
         let Some((path, proj, src)) = self.open_file(path) else {
@@ -2510,23 +2316,13 @@ impl BoneWorkspace {
         })
     }
 
-    /// Lexical semantic tokens for the whole file, delta-encoded per the LSP
-    /// spec. Built from the tokenizer (robust on broken/incomplete code, where
-    /// the HIR may be partial); identifiers are enriched from the file's module
-    /// name indexes (struct/enum/newtype/function), defaulting to `variable`.
-    /// Token-type indices match [`semantic_tokens_legend`].
-    /// Lexical+semantic tokens for the whole file (`textDocument/semanticTokens/full`).
     pub fn semantic_tokens(&self, path: &str) -> SemanticTokens {
         let path_c = self.canon(path);
         let path = path_c.as_str();
         self.semantic_tokens_impl(path, None)
     }
 
-    /// Tokens for a viewport (`textDocument/semanticTokens/range`). The file is
-    /// still tokenized whole (cheap, and multi-line `"""` strings make partial
-    /// lexing unsafe), but classification skips bodies outside the range and only
-    /// in-range tokens are emitted -- so the O(file) classify + the wire shrink to
-    /// the viewport. `range` is byte offsets `[lo, hi)`.
+    /// Classify only bodies intersecting the requested viewport.
     pub fn semantic_tokens_range(&self, path: &str, range: Range) -> SemanticTokens {
         let path_c = self.canon(path);
         let path = path_c.as_str();
@@ -2822,14 +2618,8 @@ fn classify_token(
         {
             (TT_KEYWORD, 0)
         }
-        // A macro invocation (`get_speed()`): the call-site ident is a bare token
-        // whose name resolves to a MACRO in the name map. Macro expansion retags
-        // the expanded template body onto the whole invocation span, so the HIR
-        // offset map can carry the template's first ref (e.g. a global ->
-        // VARIABLE+STATIC) at the call-site offset and would otherwise win. Claim
-        // the call site as MACRO here, gated on call position (`(` next) and
-        // non-member, so a local that merely shadows a macro name (used as a
-        // value, no following paren) keeps its HIR classification.
+        // Macro expansion can reuse the invocation span for another name, so claim
+        // the macro call before consulting HIR.
         T::Ident(n)
             if !is_member
                 && matches!(next_kind, Some(T::OpenParen))
@@ -2874,13 +2664,7 @@ fn classify_token(
         T::Comment(_) => (TT_COMMENT, 0),
         T::Int(..) | T::Float(_) => (TT_NUMBER, 0),
         T::String(_) | T::RawString(_) => (TT_STRING, 0),
-        // Identifiers: the HIR's precise classification (param vs local, field
-        // declarations/literal fields, plus the nullable/refined modifier) wins;
-        // then the `.`/`?.` field-access heuristic; then the workspace name map
-        // (cross-file type / function names); else a bare variable. The lexer
-        // stays the lexical layer (keywords/literals/comments) and the fallback
-        // on broken code, where the HIR is stale. Only HIR-classified bindings
-        // carry modifiers; the fallbacks emit none.
+        // Use lexical and workspace-name heuristics when HIR has no token classification.
         T::Ident(n) => hir
             .get(&offset)
             .copied()
@@ -2896,14 +2680,7 @@ fn classify_token(
             // A glued `@ident` the HIR didn't claim: statement/item-level
             // annotations that never reach hir.
             .or_else(|| is_annotation.then_some((TT_DECORATOR, 0)))
-            // A named-argument label (`f(width: 3)`): an ident the HIR doesn't
-            // claim, directly followed by `:`. It names a PARAMETER -- classify
-            // it as one, BEFORE the workspace name map, which would otherwise
-            // color a label that collides with a global fn (`fn width`) as
-            // FUNCTION while non-colliding labels fell to VARIABLE (inconsistent).
-            // HIR-claimed `ident:` positions (struct-lit fields -> property,
-            // param/typed-let bindings) already returned above, so only genuine
-            // call labels reach here.
+            // Classify a label before a same-named function can claim it.
             .or_else(|| matches!(next_kind, Some(T::Colon)).then_some((TT_PARAMETER, 0)))
             .or_else(|| names.get(n).map(|&t| (t, 0)))
             .unwrap_or((TT_VARIABLE, 0)),
@@ -2911,13 +2688,7 @@ fn classify_token(
     })
 }
 
-/// Per-offset identifier classifications drawn from the module's HIR -- the
-/// authoritative source the tokenizer lacks: parameters vs locals (binding
-/// kind), struct field declarations, and struct-literal field names, all as the
-/// `property`/`parameter`/`variable` they actually are. Keyed by the span's
-/// start offset (the tokenizer and HIR share rock-core spans). When the file is
-/// mid-edit-broken the HIR is the last-good state, so edited-line offsets may not
-/// line up -- those tokens fall back to the lexer heuristics, no worse than before.
+/// Use the current inference when available. Spans from the last good parse may be stale.
 fn semantic_classifications(
     ws: &Workspace,
     mid: ModuleId,
@@ -3381,11 +3152,7 @@ fn compiler_position(text: Option<&str>, line: usize, col: usize) -> Position {
     Position::new(line as u32, units.unwrap_or(col as u32))
 }
 
-/// Byte offsets of each line start in `src`, for O(log n + col) repeated
-/// offset->Position conversion. A bare `offset_to_position` is O(offset) (it
-/// rescans from the file start every call), so converting many offsets in one
-/// request -- e.g. one per inlay hint -- is O(hits * filesize). Build this once
-/// and resolve each offset via [`LineIndex::position`] instead.
+/// Index line starts once for batches of span-to-position conversions.
 pub struct LineIndex {
     line_starts: Vec<usize>,
 }
@@ -3450,19 +3217,7 @@ fn line_indent_at(src: &str, pos: usize) -> String {
         .collect()
 }
 
-/// Byte offset of the call's OWN opening `(` -- the top-level paren group
-/// that is still unclosed at `offset` (i.e. actually contains the cursor).
-/// `call_start` is the byte offset of the whole call EXPRESSION, which for a
-/// UFCS/method call includes the receiver (`get_screen().rect_outline(|)`
-/// starts at `get_screen`, not `rect_outline`); a receiver that is itself a
-/// call has its own top-level paren pair, fully closed before the real one
-/// opens, so tracking depth alone and taking the FIRST `(` would anchor on
-/// the receiver's parens instead. Depth resets to 0 between sibling groups,
-/// so the position is retaken (and forgotten again if that group closes
-/// too) every time depth returns to 0 -- the group left open at `offset` is
-/// the answer. `None` when no paren is still open at `offset` (shouldn't
-/// happen for a real call/struct-literal site, but the caller degrades to
-/// arg 0 / non-UFCS rather than panic).
+/// Find the call paren while skipping groups inside its receiver.
 fn active_call_paren_start(src: &str, call_start: usize, offset: usize) -> Option<usize> {
     let b = src.as_bytes();
     let end = offset.min(b.len());
@@ -3491,12 +3246,7 @@ fn active_call_paren_start(src: &str, call_start: usize, offset: usize) -> Optio
     active
 }
 
-/// Active argument index for signature help: count of top-level commas
-/// between the call's own opening `(` (`paren_start`, from
-/// `active_call_paren_start`) and the cursor. Depth tracks nested parens so a
-/// comma inside a nested call doesn't advance the outer arg; a naive
-/// string-skip keeps commas inside string literals from counting (no escape
-/// handling -- fine for a cursor heuristic).
+/// Count top-level commas in the argument list.
 fn active_param(src: &str, paren_start: usize, offset: usize) -> u32 {
     let end = offset.min(src.len());
     let start = paren_start.min(end);
@@ -3564,15 +3314,8 @@ pub(crate) fn callee_slot_is_field_of_in_scope(
     any.then_some(found)
 }
 
-/// Typed expected-type oracle for one completion request's arg slot.
-/// The callee's surviving overloads' params are
-/// instantiated ONCE per overload (fresh vars) in a scratch
-/// `Gamma::for_query` seeded from the cursor body's inference; candidate
-/// compatibility is bone's REAL `coerce` under trial, rolled back per
-/// candidate so one candidate's bindings never leak into the next. A UFCS
-/// receiver coerces into each overload's first param and its bindings are
-/// KEPT -- the receiver's instantiation is what the arg slot must agree with
-/// (`nums.add_all(|)`: receiver `[int]` binds T, so the slot expects `[int]`).
+/// Use inference to test candidates against a completion slot. Receiver and
+/// preceding arguments may bind the slot's generic parameters.
 pub(crate) struct ExpectedArg<'a> {
     frag: &'a bone_core::modules::FragmentScope,
     gamma: Gamma<'a>,
@@ -3948,23 +3691,7 @@ pub(crate) fn bind_generic(
     }
 }
 
-/// fzf-style fuzzy score of an already-lowercased `query` against an
-/// already-lowercased candidate `cand` (higher = better match). Rewards long
-/// CONTIGUOUS runs and matches at WORD BOUNDARIES (string start, or after a
-/// `_`/`.`/`(`/`)`/`:`/space), so `tilecen` scores far higher on `tile_center`
-/// (runs `tile` + boundary `cen`) than scattered across `table_new_with_size`,
-/// and `tc` beats `tt` on `tile_center` (both letters at word starts). A small
-/// DP over (query x cand) maximizing the bonus sum -- the same shape fzf uses.
-/// Returns `MISS` when `query` isn't even a subsequence (callers pre-filter, so
-/// that doesn't normally happen). Case is already folded by the caller.
-/// Fuzzy subsequence score. The candidate is lowercased INLINE (ASCII), so
-/// callers pass it raw -- no per-candidate `to_lowercase()` allocation. `query`
-/// must already be lowercased (the typed prefix is).
-/// Per-call phase timings for `completion()`, captured into a thread-local so a
-/// recorder can attribute per-keystroke latency to the
-/// general-candidate, reachability, and call-through pipelines without parsing
-/// log lines. Only the plain identifier-prefix path records these (the member /
-/// enum / struct-literal early-returns leave the previous value untouched).
+/// Timings for the most recent general completion on this thread.
 #[derive(Clone, Copy)]
 pub struct CompletionPhaseTimings {
     pub candidates_ms: f64,
@@ -4048,11 +3775,7 @@ fn reparse_with_project(
         combined.into_parts()
     };
     users.retain(|a| a.file.as_str() != path);
-    // The munge is a half-typed buffer (missing bracket, `recv.` mid-edit). The
-    // parse is total -- skull-parser drops the broken statement and keeps the rest
-    // (the recovery error stays on `recovery_errors`, which the LSP path never
-    // gates on) -- so completion still resolves from the best-effort tree (backlog
-    // #21). Only a hard tokenizer failure is `Err`/`None` here.
+    // Recovery parsing retains partial items in the speculative buffer.
     let parsed = fallbacks.result(
         session.parse_buffer(path, munged),
         request,
@@ -4088,13 +3811,7 @@ fn reparse_with_project(
     )
 }
 
-/// Analyze one completion munge: apply it as a speculative Session variant
-/// (incremental cost -- a body-local munge re-infers one body) and run `f`
-/// against the variant workspace. If the session REFUSES the variant (strict
-/// rejection: a name colliding with the stdlib, macro-expansion failure, hard
-/// tokenize error), fall back to a single-file scratch pass over the munged
-/// text alone -- same-file types still resolve, the last rung of the old
-/// reparse ladder. `None` only when both rungs fail.
+/// Try an incremental variant first, then a fresh recovery workspace.
 pub(crate) fn analyze_variant<R>(
     session: &mut Session,
     path: &str,
@@ -4219,11 +3936,7 @@ fn location_range(
     )
 }
 
-/// One `(file, Diagnostic)` per label the compiler underlined, so every flagged
-/// location becomes its own squiggle carrying that label's note (a multi-label
-/// error like the `./` hint -- the `/` cause plus the use site -- surfaces at
-/// both). Labels can live in different files (returned per-label so the caller
-/// files each correctly). A label-less error falls back to the error location.
+/// Publish each label in its own file. Use the primary location for an unlabeled error.
 pub(crate) fn compiler_error_to_diagnostics(
     e: &CompilerError,
     text_of: crate::query::TextOf<'_, '_>,
@@ -4456,18 +4169,8 @@ fn format_hole_report(hi: &crate::query::HoleInfo) -> String {
     out
 }
 
-/// Unfilled-hole diagnostics for one file: a WARNING per expression hole ("fill
-/// me in, expecting T") and a HINT per resolved type hole ("inferred as T").
-/// These ride alongside bone's typecheck errors (a file with holes still
-/// type-checks), turning every `?` -- hand-written or inserted by a code action
-/// -- into a visible, typed TODO that clears when the `?` is replaced. Empty
-/// when the file isn't loaded / hasn't been inferred.
-/// `Some(diags)` is an AUTHORITATIVE result (parse + inference both succeeded) --
-/// an empty vec means "this file genuinely has no holes". `None` means the holes
-/// COULD NOT be computed (file untracked / no module / no inference / parse
-/// failed); the caller must not cache `None` as a known-hole-free file, or it
-/// would later skip recomputing one that became computable. The distinction is
-/// what makes the hole-free-dependent skip in `update` sound.
+/// Warn on expression holes and hint at resolved type holes. Return `None`
+/// when analysis was unavailable so the caller can retry, even if it has no hits.
 fn hole_diagnostics_for(proj: &BoneProject, path: &str) -> Option<Vec<Diagnostic>> {
     let src = proj.texts.get(path)?;
     let ws = proj.session.workspace();

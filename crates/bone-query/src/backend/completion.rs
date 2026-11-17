@@ -1,8 +1,4 @@
-//! The completion request: the lexical gate, the context-specific sources
-//! the cursor classification routes to, and the general pipeline (gather,
-//! rank, synthesize, select, materialize). It lives under `backend` because
-//! the contextual sources analyze completion munges as speculative variants
-//! of the project's live `Session`.
+//! Dispatch contextual completion and rank candidates for general completion.
 
 use super::*;
 
@@ -15,11 +11,7 @@ struct Request<'a> {
     prefix_raw: &'a str,
     /// `prefix_raw` lowercased: the match and rank query.
     prefix: String,
-    /// A `(` directly after the cursor means the call parens already exist
-    /// (e.g. `cw` over the callee in `world_to_screen(x)`): a `name($0)`
-    /// snippet would double them (`world_to_design()(x)`).
-    /// `strip_call_template` reuses the existing parens for every
-    /// fn/method/tuple-variant item.
+    /// Reuse existing call parentheses when inserting a completion.
     next_is_open_paren: bool,
 }
 
@@ -106,11 +98,7 @@ fn lexical_gate(src: &str, offset: usize, space_triggered: bool) -> Option<Vec<C
     if space_triggered && line_prefix_is_blank(src, offset) {
         return Some(Vec::new());
     }
-    // Neither a comment nor a string literal's text is code, so generic
-    // symbol/type completion is short-circuited in both. An interpolation
-    // hole reports `Code` and completes normally. The `// rock: ...`
-    // directive is the sole comment exception -- its own early-exit context
-    // (the `allow` verb / known lint names), NOT a name-gate through `admit`.
+    // Only directives within comments and code inside interpolation holes complete.
     match rock_tokenizer::region_at(src, offset) {
         rock_tokenizer::LexRegion::Comment => {
             // Ordinary comments have no magic directive candidates.
@@ -134,17 +122,8 @@ fn lexical_gate(src: &str, offset: usize, space_triggered: bool) -> Option<Vec<C
 
 // -- Contextual sources -------------------------------------------------------
 
-/// The context-specific sources, most specific first. Classification is
-/// syntactic, so a source may still decline at runtime (an `X {` head that
-/// is not a struct, a call slot that is not a field ref) and the next one is
-/// tried; `None` from all of them means general completion.
-///
-/// Member and enum-qualified completion analyze a munged copy of the file,
-/// so they run before the general path's live-module guard: the trigger
-/// `.`/`::` can drop the whole module from the live session (an incomplete
-/// `for i in x.` leaves no user module). The munge is applied as a
-/// speculative Session variant, so the whole project (warm stdlib and
-/// dependencies) resolves a cross-file receiver type at incremental cost.
+/// Try speculative sources before requiring a live module. An incomplete
+/// receiver or qualifier may prevent the live file from lowering.
 fn contextual_completions(
     session: &mut Session,
     reach: &crate::reachability::ReachabilityIndex,
@@ -220,11 +199,6 @@ fn contextual_completions(
     None
 }
 
-/// Member access `recv.<cursor>`, one dispatch for every receiver shape.
-/// In a call-arg position this also surfaces TRANSITIVE suffix paths whose
-/// deep type matches the expected param (`recv.movable.grid`); the typed
-/// session is built INSIDE the variant (member TyIds live in that
-/// workspace), so here we just pass the enclosing (callee, arg index).
 fn member_access(
     session: &mut Session,
     reach: &crate::reachability::ReachabilityIndex,
@@ -271,12 +245,8 @@ fn member_access(
             .unwrap_or_default();
         }
     }
-    // This is member access: `recv.` never completes to a bare global (Rock
-    // has no namespaces). Suppress general completion whenever the receiver
-    // resolved to a members-bearing type (even if the prefix matched none --
-    // offering globals would be invalid UFCS suggestions) or it's a name
-    // path. Only a receiver that ISN'T a members type (`scale(x).|` -> int)
-    // falls through to general.
+    // A resolved member type or dotted name suppresses bare globals, even
+    // when the prefix matches no member.
     if !resolved && cx.member.is_none() {
         return None;
     }
@@ -286,13 +256,7 @@ fn member_access(
     Some(items)
 }
 
-/// Field-reference key path: a call-arg slot whose expected param is
-/// `FieldRef<Struct, V>` completes to Struct's fields of type V (the
-/// typechecker's invariance) -- offered whether or not the leading `.` is
-/// typed yet, with a generic `T` resolved from a sibling arg. Analyzes a
-/// munged variant so the callee + args resolve through an incomplete `.`.
-/// Declines (enum-shorthand `.Variant` in an arg, a non-field-ref slot) so
-/// normal completion runs.
+/// Complete fields compatible with the call slot's `FieldRef<Owner, Value>`.
 fn field_ref_arg(
     session: &mut Session,
     rq: &Request,
@@ -301,12 +265,7 @@ fn field_ref_arg(
     let (callee, arg_idx, recv_end) = cx.arg_call.as_ref()?;
     let arg_idx = *arg_idx as usize;
     let lead_dot = leading_dot(rq.src, rq.offset);
-    // Skip the variant only when the live signature is KNOWN and clearly not
-    // a field ref. If the callee is unknown live (the incomplete arg broke
-    // the current file) or the slot is FieldRef, analyze the munge to
-    // resolve it -- so normal `foo(arg` stays variant-free but a field-ref
-    // slot is caught even through a parse error. The gate reads the param's
-    // nominal HEAD (`TypeCtor`), not a rendered substring.
+    // An unresolved live call may become a field reference after recovery.
     let definitely_not_field_ref = matches!(
         callee_slot_is_field_of_in_scope(
             session.workspace(),
@@ -362,12 +321,8 @@ fn general_completions(
     rq: &Request,
     cx: &CompletionCx,
 ) -> Vec<CompletionItem> {
-    // PatternPos: a match-arm pattern HEAD is a slot for the scrutinee's
-    // enum. Resolve the scrutinee type at the classifier's anchor (through
-    // the variant munges -- the half-typed head usually breaks the live
-    // parse); when it names an enum, its variants take the type rung and
-    // reach/call-through synths (not valid patterns) stay out. Fails open:
-    // an unresolved scrutinee or a non-enum match changes nothing.
+    // Use the scrutinee type to rank variants and suppress synthesized calls
+    // and reach paths in a pattern.
     let pattern_pos = cx.pattern_scrutinee.is_some();
     let pattern_enum: Option<String> = cx
         .pattern_scrutinee
@@ -428,13 +383,6 @@ fn general_completions(
     let cands_ms = t_cands.elapsed().as_secs_f64() * 1000.0;
     let n_cands = cands.len();
 
-    // Type-directed ranking: inside `f(|)` with a known expected param type,
-    // a variable of that type ranks first, a function returning it second,
-    // then everything else. The TYPED oracle (`ExpectedArg`: bone's `coerce`
-    // on TyIds, so generics / nullable widening / numeric top-level coercion
-    // all rank correctly) decides; with no typed session there is no
-    // type-directed ranking or reach (kind-based only), never a
-    // rendered-string type compare.
     let mut expected = cx.expected(ws, mid, inf, rq.offset);
     let t_build = bone_core::prelude::Instant::now();
     let has_expected = expected.is_some();
@@ -450,11 +398,7 @@ fn general_completions(
         );
         cands.into_iter().map(|c| ranker.rank(c)).collect()
     };
-    // We only need the BEST `max_items`, not a full ordering -- the final
-    // sort re-orders the kept set anyway. So select the top-N in O(n)
-    // (`select_nth_unstable_by`) rather than sort all in O(n log n); at empty
-    // prefix that is ~2500 candidates. `cand_cmp` IS the sort_text encoding
-    // order, so the select agrees with the final sort by construction.
+    // Partition by the same comparator that orders the final response.
     if general.len() > max_items {
         general.select_nth_unstable_by(max_items, cand_cmp);
         general.truncate(max_items);
@@ -482,14 +426,8 @@ fn general_completions(
     // pattern head like reach: `f(arg)` is not a pattern.
     let t_ct = bone_core::prelude::Instant::now();
     let mut ct_counts = CtCounts::default();
-    // Skip call-through entirely when the general (+ reach) candidates
-    // already fill the cap: MOST call-through items are bucket 4 (sort_text
-    // "1..."), sorting AFTER every general (bucket 0-3) / reach item, so the
-    // final cap truncates them -- computing them is waste. Removes the worst
-    // keystrokes (high-general-count short prefixes, `sp` -> 229). Known gap:
-    // a LOCAL-SEEDED promoted call-through (bucket 0/1) could survive the
-    // cap but is skipped here at a >=MAX short prefix; acceptable under the
-    // `isIncomplete` contract (the user narrows and it reappears).
+    // When the cap is already met, skip call-through even though a local-seeded
+    // call may outrank some entries. Narrowing the prefix can surface it.
     if cx.expr_position && !pattern_pos && sink.len() < max_items {
         ct_counts = push_call_through(
             &g,
@@ -701,12 +639,6 @@ fn push_import_candidates(
     import_edits
 }
 
-/// Ranks EVERY general candidate (full accuracy) as a fact-shaped `Cand`;
-/// only the post-cap survivors are materialized (`materialize_cand`). The
-/// rank is a `RankKey` whose `Ord` IS the `sort_text` encoding, so the O(n)
-/// select and the final string sort cannot disagree. Ranking allocates
-/// NOTHING per candidate: `fuzzy_score` lowercases the name inline and the
-/// tiebreak compares names case-insensitively inline (`ci_cmp`).
 struct GeneralRanker<'a, 'w> {
     g: &'a GeneralCx<'w>,
     path: &'a str,
@@ -962,13 +894,7 @@ fn freq_bucket(n: u32) -> u8 {
     }
 }
 
-/// Synthesized generic `Entity<..>` from the param-name + fn-prefix
-/// heuristic (param TYPE slot only): a param named `e`/`entity` suggests the
-/// (generic) `Entity` type; the enclosing fn's name prefix picks the payload
-/// (`mob_attack_co` -> `Mob` -> `Entity<Mob>`). Emitted directly (not a
-/// workspace symbol) with the minimal rank key so it ranks first among the
-/// type candidates. With no inferable payload the suggestion is the snippet
-/// `Entity<$0>` (cursor parked in the generic slot), never bare `Entity`.
+/// Offer an Entity template in typed parameter declarations.
 fn push_entity_synth(g: &GeneralCx, rq: &Request, cx: &CompletionCx, sink: &mut Sink) {
     let Some((pn, fn_name)) = cx.param_type.as_ref() else {
         return;
@@ -994,12 +920,7 @@ fn push_entity_synth(g: &GeneralCx, rq: &Request, cx: &CompletionCx, sink: &mut 
     }
 }
 
-/// Named-arg completions: at a DIRECT call arg slot, offer the callee's
-/// still-unsupplied params as `name:` items. Additive to the value-expression
-/// candidates and ranked in the top (type_rank 0) bucket, so `greet(gr|)`
-/// surfaces `greeting:` above the identifier fallback while `grid` etc.
-/// stay. Skips params already passed positionally, by name, or by a
-/// `..spread` operand's fields.
+/// Offer unused parameter names. A spread may already supply some of them.
 fn push_named_args(g: &GeneralCx, rq: &Request, cx: &CompletionCx, sink: &mut Sink) {
     let Some(nargs) = cx.named_arg.as_ref() else {
         return;
@@ -1108,16 +1029,7 @@ fn push_coroutine_synths(g: &GeneralCx, rq: &Request, cx: &CompletionCx, sink: &
     }
 }
 
-/// Reachability-path candidates: with a known expected type, every in-scope
-/// root from which a value of that type is reachable -- through struct
-/// fields, UFCS method returns, or a MIX (`player.movable.to_ivec()`) -- is
-/// offered as a dotted path. `expected_types` are the declared renders of
-/// the typed session's surviving slots, receiver-FILTERED by construction
-/// (only overloads the receiver coerces into contribute). The index is
-/// precomputed (rebuilt only on Interface-tier edits), so this is
-/// O(in-scope roots) guided lookups against a prebuilt table. Reach and
-/// call-through indexes retain canonical DefKeys internally; their readers
-/// apply the fragment resolver before materializing names.
+/// Offer paths from visible roots to an expected type using cached DefKeys.
 fn push_reach_paths(
     g: &GeneralCx,
     reach: &crate::reachability::ReachabilityIndex,
@@ -1132,13 +1044,6 @@ fn push_reach_paths(
         crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Callable);
     let type_spellings =
         crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Type);
-    // Roots: in-scope locals/params PLUS every global (Rock has one global
-    // namespace across files, so `player.movable.grid` works where `player`
-    // is a global from another file -- `locals_in_scope` omits globals).
-    // Root locality rides the kind rung: a path seeded from a LOCAL ranks
-    // with locals (a method on a local yielding the type is a top-tier
-    // candidate), a global-rooted path with globals -- so a deep chain off
-    // some global can't outrank a direct right-type global.
     let body_owner = ws.module(g.mid).body_at(rq.offset);
     let body_inference = body_owner.and_then(|owner| g.inf.per_fn.get(&owner));
     let mut roots: Vec<(String, String, u8)> =
@@ -1189,14 +1094,7 @@ fn push_reach_paths(
             if !sink.admit(&key) {
                 continue;
             }
-            // A FIELD-final reach path IS a stored value of the expected type
-            // (type_rank 0, root locality). A METHOD-final path COMPUTES the
-            // value via a UFCS call -- it is morally "a fn returning the slot
-            // type" (type_rank 1, fn-kind 2), same tier as the direct fn it
-            // wraps, so `RED.wisp_trail_new()` can't bury the direct
-            // `wisp_trail_new($0)` (it loses on the hop-distance rung
-            // instead). The shared key still folds in match quality, the hop
-            // distance, and field-before-method.
+            // Rank stored fields with values and method results with calls.
             let (type_rank, kind) = if p.is_method { (1, 2) } else { (0, root_kind) };
             let rk = arg_rank_key(type_rank, kind, &key, pfx, p.dist, u8::from(p.is_method), 0);
             sink.push(Cand::new(
@@ -1243,11 +1141,6 @@ fn push_call_through(
     )
 }
 
-/// ONE select over the facts, then materialization of the survivors. The
-/// list is served `isIncomplete: true`, so it is capped: the client
-/// re-queries per keystroke and the server re-scores, so returning the whole
-/// workspace (2539 items at empty prefix) is pure wasted serialization -- the
-/// dominant end-to-end completion cost.
 fn finish(
     g: &GeneralCx,
     mut sink: Sink,
