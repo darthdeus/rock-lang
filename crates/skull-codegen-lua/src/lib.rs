@@ -180,23 +180,11 @@ mod constant_tests {
     }
 }
 
-/// The env-record parameter name of a hoisted capturing lambda body
-/// (`function <name>__lambda<k>(<ENV_PARAM>, <params>)`). A reserved
-/// double-underscore rock name so a user global/fn read inside the body
-/// (`Inst::Global` emits the bare name) can never collide with it -- user
-/// identifiers can't legally start with `__rock`. (The `e` local in
-/// `FN_MT_PRELUDE`'s `__call` is a private Lua closure param, unaffected.)
+/// Reserved names cannot collide with user identifiers.
 const ENV_PARAM: &str = "__rock_env";
 
 thread_local! {
-    /// Cumulative time spent in register allocation (`regalloc::color_values`
-    /// AND `regalloc::color_cells`) across every `render_scope`/`emit_*` call on
-    /// this thread — including nested closures. Lets `emit_workspace_mir` split
-    /// its "emit lua" stage into regalloc vs stringify for `backend-stats`. It's
-    /// PER-THREAD: under parallel emit each unit resets it just before its own
-    /// emit and reads it right after (a unit runs to completion on one rayon
-    /// worker), so the per-unit value is exact and the summed total is correct
-    /// regardless of feature.
+    // Per-thread accounting lets parallel emit report register allocation time per body.
     static REGALLOC_TIME: std::cell::Cell<std::time::Duration> =
         const { std::cell::Cell::new(std::time::Duration::ZERO) };
 }
@@ -293,47 +281,26 @@ fn push_uint(out: &mut String, mut n: u32) {
     out.push_str(std::str::from_utf8(&buf[i..]).unwrap());
 }
 
-/// Whole-workspace codegen input not derivable from a single [`MirFunc`]: the
-/// map of every real top-level Lua name (function names + globals) to its source
-/// span (guards every synthetic `<name>__lambda<k>` / `<co>__step` / `__on_*` /
-/// ... name against clobber). Computed once per emit.
+/// Workspace-wide names, storage and diagnostics shared by function emitters.
 pub struct CodegenCtx {
-    /// Every REAL top-level Lua name (a function's mangled name or a global's
-    /// name) -> the span of its source definition. A synthetic name minted
-    /// through [`mint_synthetic`] that lands here would clobber the user's def
-    /// last-write-wins, so it is rejected (span points at the user's def).
+    /// Source spans used to reject collisions with synthetic top-level names.
     reserved: HashMap<String, Span>,
-    /// Rejections recorded during (parallel) emit -- name collisions and broken
-    /// codegen invariants alike; drained by [`take_rejection`] at each public
-    /// emit boundary. `Mutex` because `&CodegenCtx` is shared across rayon
-    /// workers; contention is nil (a few per fn).
+    /// Parallel emitters record errors here; emit boundaries drain them in key order.
     rejections: Mutex<Vec<(String, CompilerError)>>,
-    /// The mangled name of every declaration some body has called or
-    /// referenced so far, derived once per build instead of once per site.
-    /// Readers share the lock; a miss takes the write side once.
+    /// Declaration names cached once per build.
     mangled: std::sync::RwLock<HashMap<FuncRef, ustr::Ustr>>,
-    /// Keys the per-thread table of specialized symbols ([`Self::instance_symbol`]);
-    /// no two contexts share one, so a table never outlives its context.
+    /// Separates this context's per-thread specialized-symbol cache from older builds.
     symbols_epoch: u64,
     /// Compiler-assigned storage slots for mutable globals.
     state_slots: HashMap<ustr::Ustr, u32>,
     scalar_constants: HashMap<ustr::Ustr, Lit>,
     /// The scalar constants whose global nothing can read ([`unread_constants`]).
     unread_constants: HashSet<ustr::Ustr>,
-    /// Every function's strongly connected component number over the
-    /// whole-program call graph, from [`call_sccs`]. Read ONLY by
-    /// [`callee_binding_plan`]; empty on any path that never populated it,
-    /// which binds nothing rather than binding unsoundly.
+    /// An empty graph conservatively disables callee binding.
     call_sccs: HashMap<FuncRef, u32>,
-    /// Whether a body over LuaJIT's parse-time frame limits is rejected
-    /// ([`frame_limits`]). Always true in production; the boundary-agreement
-    /// test turns it off so it can obtain the Lua whose `loadfile` verdict the
-    /// check is compared against. There is deliberately NO environment switch:
-    /// a program the check rejects cannot load, so shipping an escape hatch
-    /// would only trade a Rock diagnostic for LuaJIT's.
+    /// Disabled only by boundary tests that compare our rejection with LuaJIT loadfile.
     frame_limits: bool,
-    /// Whether emitted functions carry LuaJIT `# <line> "<file>"` directives
-    /// mapping their statements to Rock source ([`line_directives_mode`]).
+    /// LuaJIT line directives mapping emitted statements to Rock source.
     line_directives: bool,
     trace_frames: Option<Mutex<trace_frames::Contributors>>,
 }
@@ -373,9 +340,6 @@ fn is_reserved_lexical(name: &str) -> bool {
     !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// Record a spanned rejection if `name` (a user def's emitted Lua name) lands in
-/// the reserved lexical namespace. Same sink as [`CodegenCtx::mint_synthetic`],
-/// drained at the same emit boundaries.
 fn reserved_namespace_collision(name: &str, span: Span, sink: &mut Vec<(String, CompilerError)>) {
     if !is_reserved_lexical(name) {
         return;
@@ -644,16 +608,11 @@ impl CodegenCtx {
         }
     }
 
-    /// The table a mutable-global access indexes: the chunk-level storage
-    /// cell every chunk (a full program or an overlay) declares.
     pub fn state_table(&self) -> &'static str {
         STATE_CELL
     }
 
-    /// Turn the LuaJIT frame-limit rejection off for this context. ONLY the
-    /// boundary-agreement test does this: it needs the emitted Lua of a body
-    /// the check rejects so it can ask the bundled LuaJIT whether that Lua
-    /// really fails to load. Production always leaves it on.
+    /// Boundary tests need the Lua of rejected bodies to check LuaJIT loadfile.
     pub fn set_frame_limits(&mut self, on: bool) {
         self.frame_limits = on;
     }
@@ -662,8 +621,7 @@ impl CodegenCtx {
         self.frame_limits
     }
 
-    /// Override the line-directive switch this context was built with. The
-    /// production path takes it from `ROCK_SKULL_LINE_DIRECTIVES`.
+    /// Override `ROCK_SKULL_LINE_DIRECTIVES` for this context.
     pub fn set_line_directives(&mut self, on: bool) {
         self.line_directives = on;
     }
@@ -698,16 +656,12 @@ impl CodegenCtx {
         }
     }
 
-    /// Record every function's call-graph strongly connected component. The
-    /// caller owns the graph this is derived from (`skull::mir_emit` projects
-    /// the whole-program instance graph onto declarations, which can only MERGE
-    /// components and so only ever binds less); codegen only reads the answer.
+    /// The driver projects instance-graph SCCs onto declarations. Merging components
+    /// only disables bindings, so codegen may conservatively use that projection.
     pub fn set_call_sccs(&mut self, sccs: HashMap<FuncRef, u32>) {
         self.call_sccs = sccs;
     }
 
-    /// `func`'s strongly connected component number, or `None` when the graph
-    /// this context was given does not mention it.
     pub fn scc_of(&self, func: FuncRef) -> Option<u32> {
         self.call_sccs.get(&func).copied()
     }
@@ -766,9 +720,7 @@ impl CodegenCtx {
         name
     }
 
-    /// Record a rejection found mid-emit, keyed by `key` for deterministic
-    /// ordering across rayon scheduling. THE sink for anything the render path
-    /// cannot return a `Result` from.
+    /// Keyed errors keep parallel emission diagnostics deterministic.
     pub fn reject(&self, key: String, err: CompilerError) {
         self.rejections
             .lock()
@@ -776,19 +728,14 @@ impl CodegenCtx {
             .push((key, err));
     }
 
-    /// Drain the recorded rejections and return the first (by key, for
-    /// determinism across rayon scheduling), or `None`. Called at each public
-    /// emit boundary; draining clears the sink so a later emit on the same
-    /// (cached) ctx starts fresh.
+    /// Drain all errors and return the first by key.
     pub fn take_rejection(&self) -> Option<CompilerError> {
         let mut sink = self.rejections.lock().expect("rejection sink");
         sink.sort_by(|a, b| a.0.cmp(&b.0));
         sink.drain(..).next().map(|(_, e)| e)
     }
 
-    /// The storage slot of `name`. The map is keyed on the emitted SYMBOL, so a
-    /// caller may hand over either spelling of a v1 global: its DefKey (what MIR
-    /// carries) or the symbol (what the schema publishes).
+    /// Accept either the global's DefKey or its emitted symbol.
     pub fn state_slot(&self, name: ustr::Ustr) -> Option<u32> {
         self.state_slots
             .get(&skull_mir::mangle::symbol_of_key(name))

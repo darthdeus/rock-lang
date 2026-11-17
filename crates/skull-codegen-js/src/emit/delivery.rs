@@ -262,15 +262,8 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
         Ok(())
     }
 
-    /// Queue everything this body still needs after inlining, returning the
-    /// body's delivery findings (unmapped callees) for the caller to accumulate.
-    ///
-    /// An `Err` is the ONE scheduling outcome that is not a census finding:
-    /// global scheduling rejects exactly once, on a read of a
-    /// decorator-populated global, and the per-test driver matches that message
-    /// to RETRY the file in program mode (where the applications are emitted).
-    /// Demoting it to a sibling would turn a test that lifts into a test that
-    /// skips, so it aborts the emission immediately as before.
+    /// Queue residual dependencies and collect unmapped callees. Return decorator
+    /// global scheduling errors immediately so the driver retries in program mode.
     pub(super) fn schedule_body(
         &mut self,
         mf: &MirFunc,
@@ -458,15 +451,9 @@ pub(super) fn emit_spec_bodies(
         .collect()
 }
 
-/// Scalar-ABI mismatch guard: a value-struct arg scalarizes to N leaf values at
-/// the call, but a co-emitted callee that uses the param as a WHOLE value keeps
-/// a single MIR param -- so `argc > arity` would silently drop leaves. Residual
-/// co-emitted callees were NOT inlined (whole-value use blocks eligibility), so
-/// reject rather than emit-and-hope. `argc < arity` down to the count of params
-/// WITHOUT a default is the legitimate omitted-defaulted-arg shape.
-///
-/// Every offending BODY, keyed by its name: one mismatch per body used to abort
-/// the emission, hiding the others.
+/// Reject calls whose scalarized argument lanes would be dropped by a callee
+/// retaining a whole-value parameter. Omitted defaulted parameters are legal.
+/// Report one mismatch per body so all offending bodies remain visible.
 pub(super) fn check_scalar_abi(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,

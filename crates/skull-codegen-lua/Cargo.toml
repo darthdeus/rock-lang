@@ -7,13 +7,6 @@ repository.workspace = true
 publish = false
 description = "Lua emission, local allocation and frame limits"
 
-# skull-codegen-lua: the dumb Lua printer over skull-mir's typed cell-model CFG.
-# Goto + labels (luajit has real `goto`), liveness-based local naming later. The
-# printer never dispatches on operand types (the IR is already typed -- D8/P3);
-# it depends on `bone` ONLY to resolve a `Call`'s `FuncRef` to its `Function`
-# (mangling + extern/inline-lua emission shape -- bone-mir-design lines 160-164),
-# never to look up an operand's type.
-
 [dependencies]
 bone-core = { workspace = true }
 comfy-la-arena = { workspace = true }

@@ -265,9 +265,7 @@ pub fn emit_with_closure(
     out.push_str(&ret_slot_decls(
         max_multi_wire(&bodies)?.max(max_published_lanes(&session.view, &st.inline_js)?),
     ));
-    // Global initializers first (`function __ginit_<name>() {...}`), then the
-    // load-time assignment lines in dependency order, then the fn defs. (The
-    // program path reorders these; per-test order is pinned by the JS suite.)
+    // Define initializers before ordinary functions; assignments wait for code slots.
     for g in &st.ginits {
         match emit_ginit_with_nested(ws, g, &st.names, &hoisted, &st.gctx) {
             Ok(js) => {

@@ -17,11 +17,8 @@ const fn global(name: &'static str, arity: usize) -> (&'static str, usize, Emiss
     (name, arity, Emission::Global(name))
 }
 
-/// (declaration key, arity) -> JS emission. Keys are source names or declared
-/// signature mangles for independently mapped overloads. Single source for both
-/// [`JsIntrinsics::lookup`] and [`JsIntrinsics::entries`]. Every entry is backed
-/// by an `@intrinsic` declaration in the stdlib or the test-local `put`
-/// fixture (pinned by `every_js_entry_is_backed_by_a_declared_intrinsic`).
+/// Maps stdlib intrinsic declarations and host globals to JS emissions.
+/// Shared by `JsIntrinsics::lookup` and `JsIntrinsics::entries`.
 pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     // base math
     template("sin", 1, "Math.sin($1)"),

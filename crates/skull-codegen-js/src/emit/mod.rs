@@ -229,12 +229,8 @@ fn js_number(f: f64) -> Result<String, CompilerError> {
     }
 }
 
-/// A JS double-quoted string literal escaping the control chars a JS lexer
-/// needs. Non-ASCII chars encode as `\u` escapes (UTF-16 code units, the same
-/// scheme the driver's `js_str` uses) -- JS string LENGTH then counts UTF-16
-/// units where Lua counts bytes, a known cross-backend divergence for
-/// non-ASCII content; rejecting outright bricked whole game builds over an
-/// em-dash in a log message.
+/// Quote strings with UTF-16 escapes. JS string length counts UTF-16 code units,
+/// while Lua string length counts bytes.
 fn js_string_lit(s: &str) -> String {
     let mut o = String::from("\"");
     for c in s.chars() {

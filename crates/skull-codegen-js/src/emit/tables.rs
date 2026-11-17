@@ -380,12 +380,7 @@ pub(super) fn emit_inspect_enum_payloads(ws: &Workspace) -> String {
     out
 }
 
-/// Per-type `__rock_col_mat` registry for every element type the program stores
-/// as columns: the JS half of luajit's `__rock_materialize_column_type`, which
-/// reads `_G.__ROCK_TYPE_TABLE` for the field walk. JS has no type table and is
-/// not getting one (luajit's is slated for deletion),
-/// and the element type is a compile-time fact at every column site anyway --
-/// that is exactly why `spec_key_has_target_storage` forces specialization for one.
+/// Rebuild column values from their compile-time representation plans.
 pub(super) fn emit_col_mat(
     ws: &Workspace,
     registry: Option<&skull_mir::lower::StructRegistryPlan>,
@@ -716,11 +711,7 @@ fn build_inspect_ty_defs(
     plans: &std::collections::BTreeMap<ustr::Ustr, skull_mir::lower::RepId>,
     names: &BTreeSet<ustr::Ustr>,
 ) -> Result<String, CompilerError> {
-    // Self-declaring: `JS_INSPECT_RUNTIME` also declares the table, but a caller
-    // that assembles a program without it (the emitter's own unit tests, which
-    // pull only the consts their assertion needs) would otherwise get defs
-    // assigning into an undeclared name. `|| {}` keeps the runtime's table when
-    // the prelude did supply one -- it always precedes the emitted program.
+    // Callers may omit JS_INSPECT_RUNTIME; preserve its table when it is present.
     let mut out = String::new();
     for name in names {
         let sid = ws.struct_by_name.get(name).ok_or_else(|| {
