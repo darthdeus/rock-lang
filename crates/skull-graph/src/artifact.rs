@@ -572,6 +572,17 @@ impl<'g> ArtifactSiteRows<'g> {
 }
 
 impl ArtifactIndex {
+    fn record_inline_dependency(&mut self, owner: DeclKey, dependency: DeclKey) {
+        self.inline_consumers
+            .entry(dependency)
+            .or_default()
+            .insert(owner);
+        self.inline_dependencies_by_owner
+            .entry(owner)
+            .or_default()
+            .insert(dependency);
+    }
+
     // The owner's old rows must be retracted before installing its replacement.
     fn install_site_rows(&mut self, owner: &Instance, rows: ArtifactSiteRows<'_>) {
         self.site_counts.insert(owner.clone(), rows.site_count);
@@ -585,6 +596,22 @@ impl ArtifactIndex {
                 .insert(owner.clone());
         }
     }
+}
+
+fn inline_callee<'a>(
+    mut instances: impl Iterator<Item = &'a Instance>,
+    boundaries: &BTreeMap<Instance, BoundaryId>,
+) -> Result<RealizedCallee, &'static str> {
+    let Some(instance) = instances.next() else {
+        return Err("the serving declaration is not retained by the artifact");
+    };
+    if instances.next().is_some() {
+        return Err("the serving declaration has more than one retained instance");
+    }
+    Ok(match boundaries.get(instance) {
+        Some(id) => RealizedCallee::Boundary(id.clone()),
+        None => RealizedCallee::Rock(instance.clone()),
+    })
 }
 
 fn severed_order(left: &Severed, right: &Severed) -> std::cmp::Ordering {
@@ -621,21 +648,32 @@ fn declared_root(ws: &Workspace, root_decls: &BTreeSet<DeclKey>, i: &Instance) -
         && !skull_mir::lower::is_shader_entry(&ws.module(i.func.module).functions[i.func.func])
 }
 
+fn publication_candidate(
+    ws: &Workspace,
+    target: &CpuTargetSpec,
+    declaration: FuncRef,
+) -> Option<(Instance, String)> {
+    let f = &ws.module(declaration.module).functions[declaration.func];
+    (f.annotations
+        .iter()
+        .any(|a| a.name.name.as_str() == "nomangle")
+        && instance_graph::serves(
+            f.backend,
+            target.execution.backend.unwrap_or(FnBackend::Any),
+        ))
+    .then(|| {
+        (
+            Instance::base(declaration),
+            skull_mir::mangle::mangle_fn(ws, f),
+        )
+    })
+}
+
 fn publication_candidates(ws: &Workspace, req: &ArtifactRequest<'_>) -> BTreeMap<Instance, String> {
     let target = req.spec.cpu();
     req.roots
         .iter()
-        .filter_map(|r| {
-            let f = &ws.module(r.module).functions[r.func];
-            (f.annotations
-                .iter()
-                .any(|a| a.name.name.as_str() == "nomangle")
-                && instance_graph::serves(
-                    f.backend,
-                    target.execution.backend.unwrap_or(FnBackend::Any),
-                ))
-            .then(|| (Instance::base(*r), skull_mir::mangle::mangle_fn(ws, f)))
-        })
+        .filter_map(|&root| publication_candidate(ws, &target, root))
         .collect()
 }
 
@@ -1210,59 +1248,28 @@ impl ArtifactView {
             let mut inline = Vec::new();
             let mut unresolved = Vec::new();
             for entry in entries {
-                let Some(rep) = instance_graph::stdlib_entry_representative(ws, entry) else {
-                    unresolved.push(UnresolvedInlineDep {
-                        owner: owner.0,
-                        entry,
-                        reason: "no single declaration supplies this entry",
-                    });
-                    continue;
+                let callee = match instance_graph::stdlib_entry_representative(ws, entry) {
+                    Some(rep) => {
+                        self.index.record_inline_dependency(*owner, DeclKey(rep));
+                        inline_callee(
+                            self.index.instances_by_decl.get(&rep).into_iter().flatten(),
+                            &self.boundaries,
+                        )
+                    }
+                    None => Err("no single declaration supplies this entry"),
                 };
-                let dependency = DeclKey(rep);
-                self.index
-                    .inline_consumers
-                    .entry(dependency)
-                    .or_default()
-                    .insert(*owner);
-                self.index
-                    .inline_dependencies_by_owner
-                    .entry(*owner)
-                    .or_default()
-                    .insert(dependency);
-                let Some(instances) = self.index.instances_by_decl.get(&rep) else {
-                    unresolved.push(UnresolvedInlineDep {
+                match callee {
+                    Ok(callee) => inline.push(InlineDep {
                         owner: owner.0,
                         entry,
-                        reason: "the serving declaration is not retained by the artifact",
-                    });
-                    continue;
-                };
-                let mut matching = instances.iter();
-                let Some(inst) = matching.next() else {
-                    unresolved.push(UnresolvedInlineDep {
+                        callee,
+                    }),
+                    Err(reason) => unresolved.push(UnresolvedInlineDep {
                         owner: owner.0,
                         entry,
-                        reason: "the serving declaration is not retained by the artifact",
-                    });
-                    continue;
-                };
-                if matching.next().is_some() {
-                    unresolved.push(UnresolvedInlineDep {
-                        owner: owner.0,
-                        entry,
-                        reason: "the serving declaration has more than one retained instance",
-                    });
-                    continue;
+                        reason,
+                    }),
                 }
-                let callee = match self.boundaries.get(inst) {
-                    Some(id) => RealizedCallee::Boundary(id.clone()),
-                    None => RealizedCallee::Rock(inst.clone()),
-                };
-                inline.push(InlineDep {
-                    owner: owner.0,
-                    entry,
-                    callee,
-                });
             }
             for dep in inline {
                 let position = self
@@ -1339,20 +1346,9 @@ impl ArtifactView {
         }
         let target = req.spec.cpu();
         for decl in root_added {
-            let f = &ws.module(decl.0.module).functions[decl.0.func];
-            if !f
-                .annotations
-                .iter()
-                .any(|a| a.name.name.as_str() == "nomangle")
-                || !instance_graph::serves(
-                    f.backend,
-                    target.execution.backend.unwrap_or(FnBackend::Any),
-                )
-            {
+            let Some((instance, symbol)) = publication_candidate(ws, &target, decl.0) else {
                 continue;
-            }
-            let instance = Instance::base(decl.0);
-            let symbol = skull_mir::mangle::mangle_fn(ws, f);
+            };
             if self
                 .index
                 .publication_candidates
@@ -1954,74 +1950,32 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     for (owner, entries) in &g.inline_body_deps {
         let owner_retained = retained_decls.contains(owner);
         for entry in entries {
-            // The REPRESENTATIVE, because that is what an instance is keyed by.
-            // Which declaration serves this artifact was already decided by
-            // `realize_decl`, and asking a target-specific lookup here would be
-            // a second selector answering the same question.
-            let Some(rep) = instance_graph::stdlib_entry_representative(ws, entry) else {
-                if owner_retained {
-                    unresolved_inline_deps.push(UnresolvedInlineDep {
-                        owner: owner.0,
-                        entry,
-                        reason: "no single declaration supplies this entry",
-                    });
-                }
-                continue;
-            };
-            let dependency = DeclKey(rep);
-            index
-                .inline_consumers
-                .entry(dependency)
-                .or_default()
-                .insert(*owner);
-            index
-                .inline_dependencies_by_owner
-                .entry(*owner)
-                .or_default()
-                .insert(dependency);
-            // An owner this artifact dropped carries no obligation: its text is
-            // never emitted here. Keep its reverse rows for future local updates.
+            let representative = instance_graph::stdlib_entry_representative(ws, entry);
+            if let Some(rep) = representative {
+                index.record_inline_dependency(*owner, DeclKey(rep));
+            }
             if !owner_retained {
                 continue;
             }
-            // WHICH instance, not merely which declaration. A runtime entry is
-            // non-generic so one instance is expected, but picking the first of
-            // several would silently choose.
-            let Some(instances) = instances_by_decl.get(&rep) else {
-                unresolved_inline_deps.push(UnresolvedInlineDep {
-                    owner: owner.0,
-                    entry,
-                    reason: "the serving declaration is not retained by the artifact",
-                });
-                continue;
+            let callee = match representative {
+                Some(rep) => inline_callee(
+                    instances_by_decl.get(&rep).into_iter().flatten().copied(),
+                    &boundaries,
+                ),
+                None => Err("no single declaration supplies this entry"),
             };
-            let mut matching = instances.iter();
-            let Some(inst) = matching.next() else {
-                unresolved_inline_deps.push(UnresolvedInlineDep {
+            match callee {
+                Ok(callee) => inline_deps.push(InlineDep {
                     owner: owner.0,
                     entry,
-                    reason: "the serving declaration is not retained by the artifact",
-                });
-                continue;
-            };
-            if matching.next().is_some() {
-                unresolved_inline_deps.push(UnresolvedInlineDep {
+                    callee,
+                }),
+                Err(reason) => unresolved_inline_deps.push(UnresolvedInlineDep {
                     owner: owner.0,
                     entry,
-                    reason: "the serving declaration has more than one retained instance",
-                });
-                continue;
+                    reason,
+                }),
             }
-            let inst = (*inst).clone();
-            let callee = match boundaries.get(&inst) {
-                Some(id) => RealizedCallee::Boundary(id.clone()),
-                None => RealizedCallee::Rock(inst),
-            };
-            inline_deps.push(InlineDep {
-                owner: owner.0,
-                entry,
-                callee,
-            });
         }
     }
     inline_deps.sort_by(inline_dep_order);
