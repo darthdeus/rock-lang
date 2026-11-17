@@ -24,25 +24,11 @@ pub struct ShaderArtifactRequest<'a> {
     pub programs: &'a [ShaderProgram],
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum ShaderRejectionKind {
-    /// A cycle among retained shader instances. GLSL has no call stack, so this
-    /// is a rejection and not a cost.
-    Recursion,
-    /// Anything else the strict pass refused: a signature outside tier 0, a
-    /// body that cannot lower, a foreign body with no GLSL mapping, a
-    /// wrong-stage builtin.
-    Profile,
-}
-
-/// One retained shader instance this artifact cannot package, with the span the
-/// diagnostic attaches to at the Stage-3 cutover.
+/// An entry rejected by GLSL planning.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ShaderRejection {
-    /// The ENTRY the GLSL pass refused. Its own signature, its body, or
-    /// anything it reaches -- `message` and `span` name which.
+    /// The entry whose signature, body or helper the GLSL pass refused.
     pub instance: Instance,
-    pub kind: ShaderRejectionKind,
     /// The emitter's own diagnostic, verbatim.
     pub message: String,
     pub span: Span,
@@ -61,29 +47,6 @@ pub struct ShaderArtifactView {
     /// emitted as a definition -- `skull_codegen_glsl`'s own leaf rule.
     pub builtins: BTreeSet<Instance>,
     pub rejections: Vec<ShaderRejection>,
-    /// **An invariant finding.** Retained shader instances the shared graph
-    /// holds no substitution record for. Not "concrete by default": a missing
-    /// record means a producer bypassed `reach`'s recorder, and a program that
-    /// reaches one is excluded from validation.
-    pub missing_substitutions: BTreeSet<Instance>,
-    /// Where the structural cycle finding and the GLSL pass disagree. Both
-    /// answer "is this recursive"; keeping the comparison is what makes the
-    /// typed `Recursion` kind evidence rather than a second opinion.
-    pub disagreements: Vec<String>,
-    /// PROGRAMS the GLSL pass actually ran over -- the denominator for
-    /// `rejections`.
-    pub entries_checked: usize,
-    /// Programs excluded from that denominator because the graph holds no
-    /// substitution for something under them -- an invariant break, and the
-    /// only remaining reason a program goes unchecked. `entries_checked +
-    /// programs_unchecked == programs`, so a zero rejection count cannot hide
-    /// a population that was never asked.
-    pub programs_unchecked: usize,
-    /// Registered programs -- the total the two above partition.
-    pub programs: usize,
-    /// Call sites the retention walk traversed -- the denominator for
-    /// `rejections`, so zero rejections over zero sites cannot read as clean.
-    pub sites_walked: usize,
     /// Per-program roots and retained populations, aligned with the request's
     /// `programs` slice. Missing graph roots remain represented by an empty
     /// stage list so a denominator cannot silently shrink.
@@ -168,13 +131,11 @@ pub(crate) fn realize_shader_with_context_and_plans(
     let mut seen: BTreeSet<Instance> = roots.clone();
     let mut queue: VecDeque<Instance> = roots.iter().cloned().collect();
     let mut edges: BTreeMap<Instance, Vec<(Instance, Span)>> = BTreeMap::new();
-    let mut sites_walked = 0usize;
     while let Some(caller) = queue.pop_front() {
         let Some(sites) = g.sites_of(&caller) else {
             continue;
         };
         for rec in sites.values() {
-            sites_walked += 1;
             let SiteOutcome::Resolved(callee) = &rec.outcome else {
                 continue;
             };
@@ -231,55 +192,28 @@ pub(crate) fn realize_shader_with_context_and_plans(
             .collect()
     };
     // Validate each retained entry with its stage and requested profile.
-    let cyclic = cyclic_instances(&roots, &edges);
     let programs: Vec<(&ShaderProgram, &ShaderProgramView)> =
         req.programs.iter().zip(&program_views).collect();
-    let checks: Vec<ProgramCheck> = {
+    let checks: Vec<_> = {
         use bone_core::prelude::*;
         programs
             .par_iter()
             .map(|(program, program_view)| {
-                check_program(ws, g, scx, &roots, &edges, &cyclic, program, program_view)
+                check_program(ws, g, scx, &roots, &edges, program, program_view)
             })
             .collect()
     };
-    let mut rejections: Vec<ShaderRejection> = Vec::new();
-    let mut disagreements: Vec<String> = Vec::new();
-    let mut checked = 0usize;
-    let mut missing_substitutions: BTreeSet<Instance> = BTreeSet::new();
-    let mut programs_unchecked = 0usize;
+    let mut rejections = Vec::new();
     let mut program_plans = Vec::with_capacity(program_views.len());
     for check in checks {
-        match check {
-            ProgramCheck::Skipped => program_plans.push(None),
-            ProgramCheck::Unchecked { missing } => {
-                programs_unchecked += 1;
-                missing_substitutions.extend(missing);
-                program_plans.push(None);
+        program_plans.push(match check {
+            Some(Ok(plan)) => Some(Arc::new(plan)),
+            Some(Err(rejection)) => {
+                rejections.push(rejection);
+                None
             }
-            ProgramCheck::Checked {
-                rejection,
-                disagreements: program_disagreements,
-                plan,
-            } => {
-                checked += 1;
-                rejections.extend(rejection);
-                disagreements.extend(program_disagreements);
-                program_plans.push(plan.map(Arc::new));
-            }
-        }
-    }
-
-    // ...and the same invariant check over the WHOLE retained set, so an
-    // instance no registered program's walk reached (a second instantiation of
-    // an entry declaration) is still reported rather than silently absent. The
-    // per-program loop above decides what gets VALIDATED; this decides what
-    // gets REPORTED, and the reported set is the larger of the two by
-    // construction.
-    for i in roots.iter().chain(helpers.iter()) {
-        if g.concreteness(i) == Concreteness::Missing {
-            missing_substitutions.insert(i.clone());
-        }
+            None => None,
+        });
     }
 
     Some(ShaderArtifactView {
@@ -288,129 +222,61 @@ pub(crate) fn realize_shader_with_context_and_plans(
         helpers,
         builtins,
         rejections,
-        missing_substitutions,
-        disagreements,
-        entries_checked: checked,
-        programs_unchecked,
-        programs: req.programs.len(),
-        sites_walked,
         program_views,
         program_plans,
     })
 }
 
-/// One program's outcome in the profile pass, folded into the view in
-/// program order.
-enum ProgramCheck {
-    /// No fragment instance: nothing to check.
-    Skipped,
-    /// A root the graph holds no instance or no substitution for.
-    Unchecked { missing: Vec<Instance> },
-    Checked {
-        rejection: Option<ShaderRejection>,
-        disagreements: Vec<String>,
-        /// The accepted program's plan, kept for emission.
-        plan: Option<skull_codegen_glsl::ShaderPlan>,
-    },
-}
-
-#[allow(clippy::too_many_arguments)]
 fn check_program(
     ws: &Workspace,
     g: &InstanceGraph,
     scx: &skull_mir::lower::ScalarCtx,
     roots: &BTreeSet<Instance>,
     edges: &BTreeMap<Instance, Vec<(Instance, Span)>>,
-    cyclic: &BTreeSet<Instance>,
     program: &ShaderProgram,
     program_view: &ShaderProgramView,
-) -> ProgramCheck {
-    let mut disagreements = Vec::new();
-    {
-        // The PROGRAM's own root instances -- the fragment entry, and the
-        // vertex stage when the pair has one.
-        let entry_of = |r: FuncRef| -> Option<&Instance> {
-            let key = DeclKey(skull_mir::lower::canonical_variant(ws, r));
-            roots.iter().find(|i| DeclKey(i.func) == key)
-        };
-        let Some(root) = entry_of(program.frag) else {
-            return ProgramCheck::Skipped;
-        };
-        let mut program_roots: Vec<Instance> = vec![root.clone()];
-        if let Some(v) = program.vert {
-            match entry_of(v) {
-                Some(i) => program_roots.push(i.clone()),
-                // A registered vertex stage the graph holds no instance for is
-                // not something this pass may check around.
-                None => {
-                    return ProgramCheck::Unchecked {
-                        missing: Vec::new(),
-                    };
-                }
+) -> Option<Result<skull_codegen_glsl::ShaderPlan, ShaderRejection>> {
+    // The PROGRAM's own root instances -- the fragment entry, and the
+    // vertex stage when the pair has one.
+    let entry_of = |r: FuncRef| -> Option<&Instance> {
+        let key = DeclKey(skull_mir::lower::canonical_variant(ws, r));
+        roots.iter().find(|i| DeclKey(i.func) == key)
+    };
+    let root = entry_of(program.frag)?;
+    let mut program_roots: Vec<Instance> = vec![root.clone()];
+    if let Some(v) = program.vert {
+        match entry_of(v) {
+            Some(i) => program_roots.push(i.clone()),
+            // A registered vertex stage the graph holds no instance for is
+            // not something this pass may check around.
+            None => {
+                return None;
             }
-        }
-
-        // THE COMPLETE RETAINED SET FOR THIS PROGRAM, not just its entries.
-        // A GENERIC instance is answerable now: GLSL lowers each one under the
-        // instantiation the call site recorded, so `passthrough<float>` and
-        // `passthrough<int>` are two checked, emitted definitions. What is still
-        // unanswerable is a MISSING record -- the graph being incomplete is not
-        // a shape, and a program reaching one may not enter the
-        // `entries_checked` denominator.
-        let retained = reachable_from(&program_roots, edges);
-        let missing: Vec<Instance> = retained
-            .iter()
-            .filter(|i| g.concreteness(i) == Concreteness::Missing)
-            .cloned()
-            .collect();
-        if !missing.is_empty() {
-            return ProgramCheck::Unchecked { missing };
-        }
-
-        let entry_cycle = cyclic.contains(root) || reaches_cycle(root, edges, cyclic);
-        // The profile pass IS the planning of the program; the plan it
-        // produces is kept so emission renders it instead of planning again.
-        let outcome = skull_codegen_glsl::plan_shader_with_view(ws, scx, program_view);
-        let mut plan = None;
-        let rejection = match outcome {
-            Ok(planned) => {
-                if entry_cycle {
-                    disagreements.push(format!(
-                        "`{}`: the retained instance relation has a cycle the GLSL pass accepted",
-                        ws.module(root.func.module).functions[root.func.func].name
-                    ));
-                }
-                plan = Some(planned);
-                None
-            }
-            Err(e) => {
-                let f = &ws.module(root.func.module).functions[root.func.func];
-                let span = e.labels.first().map(|l| l.span).unwrap_or(f.name_span);
-                let kind = if entry_cycle {
-                    ShaderRejectionKind::Recursion
-                } else {
-                    ShaderRejectionKind::Profile
-                };
-                if entry_cycle && !e.message.contains("recursion") {
-                    disagreements.push(format!(
-                        "`{}`: cyclic retained relation, but the GLSL pass rejected it as: {}",
-                        f.name, e.message
-                    ));
-                }
-                Some(ShaderRejection {
-                    instance: root.clone(),
-                    kind,
-                    message: e.message.clone(),
-                    span,
-                })
-            }
-        };
-        ProgramCheck::Checked {
-            rejection,
-            disagreements,
-            plan,
         }
     }
+
+    if reachable_from(&program_roots, edges)
+        .iter()
+        .any(|i| g.concreteness(i) == Concreteness::Missing)
+    {
+        return None;
+    }
+    // The profile pass IS the planning of the program; the plan it
+    // produces is kept so emission renders it instead of planning again.
+    Some(
+        skull_codegen_glsl::plan_shader_with_view(ws, scx, program_view).map_err(|error| {
+            let f = &ws.module(root.func.module).functions[root.func.func];
+            ShaderRejection {
+                instance: root.clone(),
+                span: error
+                    .labels
+                    .first()
+                    .map(|label| label.span)
+                    .unwrap_or(f.name_span),
+                message: error.message,
+            }
+        }),
+    )
 }
 
 fn stage_view(
@@ -508,66 +374,4 @@ fn reachable_from(
         }
     }
     seen
-}
-
-/// Whether `root` reaches any instance on a cycle.
-fn reaches_cycle(
-    root: &Instance,
-    edges: &BTreeMap<Instance, Vec<(Instance, Span)>>,
-    cyclic: &BTreeSet<Instance>,
-) -> bool {
-    let mut seen: BTreeSet<&Instance> = BTreeSet::new();
-    let mut queue: VecDeque<&Instance> = VecDeque::new();
-    queue.push_back(root);
-    while let Some(n) = queue.pop_front() {
-        if cyclic.contains(n) {
-            return true;
-        }
-        for (callee, _) in edges.get(n).into_iter().flatten() {
-            if seen.insert(callee) {
-                queue.push_back(callee);
-            }
-        }
-    }
-    false
-}
-
-/// Instances on a cycle in the RETAINED shader call relation.
-///
-/// Over the recorded edges, not a second resolution of the program: the walk
-/// above already asked what each site calls, and this only asks whether that
-/// relation has a cycle. It does not decide the artifact's verdict --
-/// `plan_shader_with_view` does -- it TYPES one, and the two are compared.
-fn cyclic_instances(
-    roots: &BTreeSet<Instance>,
-    edges: &BTreeMap<Instance, Vec<(Instance, Span)>>,
-) -> BTreeSet<Instance> {
-    let mut out: BTreeSet<Instance> = BTreeSet::new();
-    let mut done: BTreeSet<Instance> = BTreeSet::new();
-    for root in roots {
-        let mut path: Vec<(Instance, usize)> = vec![(root.clone(), 0)];
-        let mut on_path: BTreeSet<Instance> = [root.clone()].into_iter().collect();
-        while let Some((node, idx)) = path.pop() {
-            let next = edges.get(&node).and_then(|es| es.get(idx)).cloned();
-            match next {
-                Some((callee, _)) => {
-                    path.push((node, idx + 1));
-                    if on_path.contains(&callee) {
-                        out.insert(callee);
-                        continue;
-                    }
-                    if done.contains(&callee) {
-                        continue;
-                    }
-                    on_path.insert(callee.clone());
-                    path.push((callee, 0));
-                }
-                None => {
-                    on_path.remove(&node);
-                    done.insert(node);
-                }
-            }
-        }
-    }
-    out
 }

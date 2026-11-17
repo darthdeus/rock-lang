@@ -641,8 +641,6 @@ pub struct InstanceGraph {
     /// Helper symbols owned by coroutine instances.
     pub coroutine_helpers: BTreeSet<CoroutineHelper>,
     coroutine_helpers_by_owner: BTreeMap<String, BTreeSet<CoroutineHelper>>,
-    /// Runtime entries used by the body of each opaque declaration.
-    pub inline_body_deps: BTreeMap<DeclKey, BTreeSet<&'static str>>,
     /// Bare `@nomangle` declarations named by retained `inline(js)` bodies.
     /// The graph records the opaque-boundary root obligation; a target view
     /// filters it to the declarations it actually realizes.
@@ -1109,7 +1107,6 @@ impl InstanceGraph {
             boundaries: BTreeMap::new(),
             coroutine_helpers: BTreeSet::new(),
             coroutine_helpers_by_owner: BTreeMap::new(),
-            inline_body_deps: BTreeMap::new(),
             inline_body_nomangle_roots: BTreeMap::new(),
         }
     }
@@ -2439,22 +2436,16 @@ impl InstanceGraph {
 
         self.run_stats.derive_ns = derive_start.elapsed().as_nanos() as u64;
         let post_pass_start = Instant::now();
-        // The three read only the workspace and the installed records, so
+        // Both read only the workspace and the installed records, so
         // they run beside each other; what they found is recorded in order.
-        let (inline_deps, (nomangle_roots, recursion_findings)) = {
+        let (nomangle_roots, recursion_findings) = {
             use bone_core::prelude::par_join;
             let graph = &*self;
             par_join(
-                || inline_body_dep_rows(ws, &decls),
-                || {
-                    par_join(
-                        || opaque_boundary_roots_for_decls(ws, decls.iter().map(|decl| decl.0)),
-                        || detect_changing_instance_recursion(graph, ws),
-                    )
-                },
+                || opaque_boundary_roots_for_decls(ws, decls.iter().map(|decl| decl.0)),
+                || detect_changing_instance_recursion(graph, ws),
             )
         };
-        self.record_inline_body_dep_rows(inline_deps);
         self.inline_body_nomangle_roots.extend(nomangle_roots);
         for finding in recursion_findings {
             self.install_recursion_finding(finding);
@@ -2506,7 +2497,6 @@ impl InstanceGraph {
         for decl in &touched_decls {
             for member in skull_mir::lower::backend_variant_group(ws, decl.0) {
                 let member = DeclKey(member);
-                self.remove_inline_body_deps(&member);
                 self.inline_body_nomangle_roots.remove(&member);
                 let f = &ws.module(member.0.module).functions[member.0.func];
                 let name = mangle_fn(ws, f);
@@ -2517,7 +2507,6 @@ impl InstanceGraph {
             }
         }
         let active_decl_vec: Vec<DeclKey> = active_decls.iter().cloned().collect();
-        record_inline_body_deps(self, ws, &active_decl_vec);
         record_inline_body_nomangle_roots(self, ws, active_decl_vec.iter().map(|decl| decl.0));
         classify_boundaries(self, ws, &active_decl_vec);
         self.refresh_coroutine_rejections(ws, touched_instances.iter().cloned());
@@ -3049,19 +3038,6 @@ impl InstanceGraph {
         let mut graph: Vec<_> = self.graph_rejections.iter().collect();
         graph.sort_by_cached_key(|rejection| self.diagnostic_key(&rejection.at));
         ordinary.into_iter().chain(graph)
-    }
-
-    fn record_inline_body_dep_rows(&mut self, rows: Vec<(DeclKey, &'static str)>) {
-        for (member, name) in rows {
-            self.inline_body_deps
-                .entry(member)
-                .or_default()
-                .insert(name);
-        }
-    }
-
-    fn remove_inline_body_deps(&mut self, decl: &DeclKey) {
-        self.inline_body_deps.remove(decl);
     }
 
     /// **What an edit stranded**, searched over the affected region only.
@@ -4860,62 +4836,6 @@ pub fn boundary_class_for(f: &Function) -> Option<BoundaryClass> {
 /// target's mapping. That is an artifact decision, not a shared-graph one.
 fn declared_boundary(f: &Function) -> Option<BoundaryClass> {
     skull_mir::lower::declared_boundary_class(f)
-}
-
-/// Whether the declaration carries a portable Rock body, as opposed to only a
-/// foreign one. `has_body` on the module is the walk's own question; this is the
-/// declaration-level form the classifier needs before any module lookup.
-/// Runtime entries an opaque inline body CALLS.
-///
-/// An inline body is foreign text, so the walk cannot lower it -- but emission
-/// still has to emit every symbol it names, and "opaque by design" cannot make a
-/// required symbol vanish from the graph. The corpus's case is
-/// `__rock_vec_column_elements`: the reflection walker calls it from Lua and no
-/// lowering arm synthesizes it.
-///
-/// The scan is over [`ERASED_RUNTIME_ENTRIES`] only. That is deliberate: a
-/// general Lua parse is not what this needs, and the catalogue is the closed set
-/// of compiler-owned runtime symbols an opaque body may depend on. A name
-/// appearing in a comment or a string inside the body would be a false positive;
-/// none exists in the corpus, and a false POSITIVE keeps a symbol alive, where a
-/// false negative drops one emission requires.
-fn record_inline_body_deps(g: &mut InstanceGraph, ws: &Workspace, decls: &[DeclKey]) {
-    g.record_inline_body_dep_rows(inline_body_dep_rows(ws, decls));
-}
-
-/// Each erased runtime entry an inline body of `decls` names, with the
-/// declaration whose body names it.
-fn inline_body_dep_rows(ws: &Workspace, decls: &[DeclKey]) -> Vec<(DeclKey, &'static str)> {
-    // METADATA ONLY so far: each sibling's dependency is recorded, but it is
-    // not yet resolved to a `BoundaryId` or an
-    // instance the way a call edge is. That resolution belongs to the artifact
-    // view, which is what decides the emitted spelling and the retention set;
-    // recording it here without a target would be a second, weaker reachability
-    // mechanism. All members of a represented backend-variant group are scanned;
-    // the artifact later reads only the declaration it selected.
-    // Few declarations have an inline body; finding them is the work, and
-    // each declaration's group is read independently.
-    use bone_core::prelude::*;
-    decls
-        .par_iter()
-        .map(|decl| {
-            let mut found = Vec::new();
-            for member in skull_mir::lower::backend_variant_group(ws, decl.0) {
-                let f = &ws.module(member.module).functions[member.func];
-                let Some(body) = &f.inline_body else { continue };
-                let text = body.1.as_str();
-                for name in ERASED_RUNTIME_ENTRIES {
-                    if text.contains(name) {
-                        found.push((DeclKey(member), *name));
-                    }
-                }
-            }
-            found
-        })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .flatten()
-        .collect()
 }
 
 /// Resolve bare `@nomangle` names in JS opaque bodies into root declarations.
