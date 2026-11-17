@@ -22,12 +22,7 @@ pub(crate) struct Parser<'a> {
     /// True while parsing a no-parens call's argument list, to block recursive
     /// no-parens (`f a b` is `f(a, b)`, not `f(a(b))`).
     in_no_parens_args: bool,
-    /// While parsing a match-arm guard, suppress the bare-ident (`name => ..`)
-    /// and paren-form (`(name) => ..`) lambda commits so the arm's `=>` isn't
-    /// swallowed. Mirrors rock's `arrow_lambda_blocked`. The flag persists
-    /// through binary-op RHS / postfix recursion (covers `name && x`,
-    /// `name.field`); inside parens the arm `=>` is unreachable so it's not
-    /// reset at delimiter boundaries.
+    /// Keep the match-arm delimiter `=>` from parsing as a lambda.
     arrow_lambda_blocked: bool,
     /// Set by `parse_operator` so `parse_item` can replicate rock's implicit
     /// `@inline` on block-bodied operator overloads (the `@_transparent` model).
@@ -217,11 +212,7 @@ impl<'a> Parser<'a> {
         out
     }
 
-    /// Parse the whole token stream as a module, consuming the parser and
-    /// returning the populated arena AST.
-    ///
-    /// Invalid item headers drop the item; invalid statements recover within
-    /// their block so editor queries can use the surrounding scope.
+    /// Parse items and collect recoverable syntax errors in the AST.
     pub fn parse_module(mut self) -> PResult<Ast> {
         let mut seen_item = false;
         loop {
@@ -237,11 +228,7 @@ impl<'a> Parser<'a> {
                     "`@memory` was removed; delete it: files have no memory class".to_string(),
                 ));
             }
-            // The `mod a::b;` file header: first non-comment item,
-            // `;`-terminated. A later one is a misplaced header, not a
-            // Rust-style load request. A visibility prefix
-            // (`pub mod combat;`) is part of the header; on a false lead the
-            // position rewinds and parse_item handles the item.
+            // The header must precede every item except comments.
             if !seen_item {
                 let save = self.pos;
                 let start = self.span();
@@ -293,13 +280,6 @@ impl<'a> Parser<'a> {
             match self.parse_item() {
                 Ok(item) => self.ast.items.push(item),
                 Err(e) => {
-                    // Record EVERY failed item, not just `fn`: a malformed
-                    // struct/enum/newtype/global/decorator/macro/directive must
-                    // be surfaced on `recovery_errors` (the downstream compile gate
-                    // rejects on it), not silently dropped. Valid input never reaches
-                    // here (every
-                    // supported item start has a branch in `parse_item_inner`), so
-                    // this stays empty for well-formed programs.
                     self.ast.recovery_errors.push(e);
                     self.too_deep = false;
                     self.recover_to_next_item(self.pos > item_start);
@@ -309,13 +289,7 @@ impl<'a> Parser<'a> {
         Ok(self.ast)
     }
 
-    /// Parse exactly ONE top-level item from the token stream and return the
-    /// populated single-item arena AST. The incremental driver tokenizes just an
-    /// edited item's text (with `Tokenizer::new_with_offset`, so spans are
-    /// absolute) and re-parses it here, feeding the result straight to the
-    /// per-body lowerer -- no whole-module reparse, no shared-arena splice.
-    /// Errors (a malformed body) propagate so the caller falls back to a full
-    /// reparse rather than installing a half-item.
+    /// Parse a fragment tokenized at its original file offsets for incremental edits.
     pub(crate) fn parse_single_item(mut self) -> PResult<Ast> {
         self.skip_comments_as_items();
         let item = self.parse_item()?;
@@ -323,15 +297,7 @@ impl<'a> Parser<'a> {
         Ok(self.ast)
     }
 
-    /// Skip a balanced span of tokens up to the next top-level `fn`. Used to
-    /// step over unsupported items (and malformed `fn`s) without aborting
-    /// the whole module.
-    /// `made_progress` says the failed item parse consumed at least one token, so
-    /// the loop is already guaranteed to advance. Only when it consumed NOTHING
-    /// must recovery force a token, and forcing it unconditionally is how a
-    /// neighbour's error ate a valid function: an item error detected AT an item
-    /// boundary leaves the parser on the next `fn`, and consuming that `fn` sent
-    /// the scan to the one after it.
+    /// Recover at any top-level item starter once the failed parse made progress.
     fn recover_to_next_item(&mut self, made_progress: bool) {
         let mut depth: i32 = 0;
         if !made_progress && !self.at_end() {
@@ -394,13 +360,7 @@ impl<'a> Parser<'a> {
         )
     }
 
-    /// After a failed statement inside a block, skip tokens to the next
-    /// statement boundary so the rest of the block still parses (a broken
-    /// statement no longer drops the whole `fn` to item-level recovery).
-    /// Returns `false` if the block's `}` or EOF is reached (the block loop
-    /// should stop), `true` if a resync point was found. Like rock's
-    /// `recover_to_next_statement`, brace depth is not tracked -- a stray inner
-    /// `}` ends recovery, matching rock's behavior on the same input.
+    /// Recover at the next statement boundary at the current brace depth.
     fn recover_to_next_statement(&mut self) -> bool {
         while !self.at_end() {
             match self.kind() {
@@ -605,11 +565,6 @@ impl<'a> Parser<'a> {
                 .map(|t| t.kind)
                 .unwrap_or(TokenKind::EOF)
         };
-        // The token kinds that can follow a committed visibility modifier: the
-        // item keywords, the contextual item words (Ident), an item's leading
-        // annotation, a root-anchored use path, an inline mod block, or a
-        // qualifier paren. `macro` is absent on purpose: macros expand before
-        // the namespace tree exists, so a visibility on one would be inert.
         let starts_item_like = |k: &TokenKind| {
             matches!(
                 k,
@@ -696,11 +651,6 @@ impl<'a> Parser<'a> {
         Ok(mods)
     }
 
-    /// `use` declaration after any `pub`/`private` prefix:
-    /// `use <path><suffix>;` where suffix is nothing (bind the tail),
-    /// `as alias`, `*`, `operator(op)` (optionally `as alias`), or
-    /// `{ sub-trees }`.
-    /// `use ... as _` rejects (no activation semantics).
     fn parse_use_decl(&mut self, start: Span, vis: Option<Visibility>) -> PResult<UseDecl> {
         debug_assert!(matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "use"));
         self.advance(); // `use`
@@ -1561,27 +1511,14 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Parse a macro body `{ ... }`: item declarations (`fn`/`inline(lua) fn`/
-    /// `extern fn`/`struct`/`enum`/`newtype`, optionally annotated) collect into
-    /// `Vec<Item>`; the remaining statements form the block whose trailing
-    /// expression is the expression-position expansion. Mirrors rock's
-    /// `parse_macro_body_block`.
+    /// Keep item declarations separate from a macro body's statements.
     fn parse_macro_body(&mut self) -> PResult<(Idx<BlockData>, Vec<Item>)> {
         let mut items = Vec::new();
         let block = self.parse_braced_block(Some(&mut items))?;
         Ok((block, items))
     }
 
-    /// Does the current token start an item declaration valid inside a macro
-    /// body? (`@anno` / `fn` / `co` / `extern` / `struct` / `value` / `enum` /
-    /// `newtype` / `inline(lua) fn`.) Mirrors rock's `token_starts_macro_body_item`.
-    ///
-    /// `use`/`mod` are included so they parse as ITEMS and `macro_expand`
-    /// rejects them by name (a macro must not change the module
-    /// graph). Left out, they fell through to `parse_statement` and a
-    /// `use a::b;` in a macro body compiled to nothing at all. Both are
-    /// contextual words, so the lookahead is what separates the declaration
-    /// from `mod(a, b)` or an assignment to a binding spelled `mod`.
+    /// Recognize `use` and `mod` so expansion can reject edits to the module graph.
     fn token_starts_macro_body_item(&self) -> bool {
         match self.kind() {
             TokenKind::At
@@ -2233,12 +2170,8 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Parse one expression or block level, rejecting source nested deeper
-    /// than [`MAX_NESTING_DEPTH`]. Later passes recurse over the tree, so the
-    /// limit is the tree's height, not only this parser's recursion: a
-    /// left-associative chain is parsed by a loop but nests one level per
-    /// operand. `nesting` stops the descent; `nested_height` measures the
-    /// finished tree bottom-up, with the expression loop adding one per fold.
+    /// Bound tree height as well as recursion depth: a Pratt loop can build
+    /// a deep left-associative tree without a deep parser call stack.
     fn nesting_level<T>(&mut self, parse: impl FnOnce(&mut Self) -> PResult<T>) -> PResult<T> {
         if self.nesting >= MAX_NESTING_DEPTH {
             return Err(self.too_deep_error(self.span()));
@@ -2876,11 +2809,6 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    /// rock's no-parens call: `foo a b` becomes `foo(a, b)` when `foo` is an
-    /// ident/paren, the next token starts a value (not an operator), the callee
-    /// and first arg share a line, and we are not already inside a no-parens
-    /// arg list or a high-precedence context (`min_bp >= 50`). Returns the
-    /// built call, or None if the form does not apply (cursor untouched).
     fn try_no_parens_call(
         &mut self,
         func: Idx<ExprData>,
@@ -2960,13 +2888,8 @@ impl<'a> Parser<'a> {
         )))
     }
 
-    /// rock's newline rule: a postfix/infix operator on a fresh line does
-    /// not continue the expression, except inside `(`/`[` (where it does,
-    /// unless we are also inside a `{ }` code block). The rule applies ONLY to
-    /// operators whose postfix use yields to a fresh expression (see
-    /// `op_starts_expr`). Binary operators (`+`, `-`, `*`, `&&`) on a fresh
-    /// line continue the expression regardless of indentation. A `-` in a
-    /// prefix context is still parsed by `parse_prefix` as unary negation.
+    /// Inside parentheses and brackets, only a nested code block makes
+    /// newlines significant again.
     fn newline_breaks(&self) -> bool {
         self.prev_trailing_newlines() > 0 && (self.delimiter_depth == 0 || self.brace_depth > 0)
     }
@@ -2988,11 +2911,6 @@ impl<'a> Parser<'a> {
                 },
             );
         }
-        // Compound assignment (`+= -= *= /=`) is a plain BinOp in rock — it
-        // renders `(+= a b)` via the op's to_code, NOT `(= a b)` — so let it
-        // fall through to the BinOp arm below rather than building an Assign.
-        // `a $ b` is low-precedence application — `a(b)` (a normal call), the
-        // lowest-binding operator. rock folds it to a call; skull must too.
         if op == TokenKind::Dollar {
             return self.ast.expr(
                 span,
@@ -3150,11 +3068,7 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    /// `@` trailing-lambda operator: `f(args) @ rhs` becomes
-    /// `f(args, () => rhs)` and `f(args) @ { .. }` passes the block body
-    /// directly. A non-call `left` becomes a call with the lambda as its only
-    /// arg. Right-associative at bp 10. Mirrors rock's `At` transform; the
-    /// resulting `FunctionCall` renders as a normal `(call ..)`.
+    /// `f(args) @ expr` appends a zero-argument lambda to the call.
     fn parse_at(&mut self, left: Idx<ExprData>) -> PResult<Idx<ExprData>> {
         self.advance(); // consume `@`
 
@@ -3297,12 +3211,8 @@ impl<'a> Parser<'a> {
         if kind == TokenKind::TripleDot {
             self.advance();
             let operand = self.parse_expr(0)?;
-            // End at the operand, NOT the current position: parsing `...y` before
-            // a closing `]`/`)` runs the infix loop's `skip_comments_in_expr`,
-            // which consumes a trailing `// comment` (the closer counts as `is_op`).
-            // A `span_from(start)` would then swallow that comment into the spread
-            // span, and the formatter would emit it twice (verbatim slice + the
-            // re-applied trailing comment).
+            // The Pratt loop can consume a trailing comment before a closer.
+            // Keep it outside the spread span so formatting emits it once.
             let span = self.merge_spans(start, self.ast.exprs[operand].span);
             return Ok(self.ast.expr(span, ExprKind::Spread(operand)));
         }
@@ -3318,11 +3228,7 @@ impl<'a> Parser<'a> {
             return Ok(self.ast.expr(self.span_from(start), expr));
         }
 
-        // `?` / `?name` typed hole in value position. At expression start `?`
-        // can only be a hole (postfix unwrap / infix `??` are handled in the
-        // pratt loop, which always has a left operand). The name must be
-        // byte-adjacent (`?foo`); any gap means an anonymous hole followed by a
-        // separate expression — mirrors rock's `exprs.rs` hole arm.
+        // Only a byte-adjacent name belongs to the hole.
         if kind == TokenKind::QuestionMark {
             self.advance();
             let id = self.gen_hole_id();
@@ -3433,11 +3339,7 @@ impl<'a> Parser<'a> {
                     // Span the whole `()`, not just the open paren.
                     return Ok(self.ast.expr(self.span_from(start), ExprKind::Unit));
                 }
-                // `(expr : Type)` - the contextual-ascription form. While the
-                // paren group's head and elements parse, the Pratt loop BREAKS
-                // at `:` so this arm owns the colon: one expression, one
-                // colon, one complete type, then `)`. `(a : T, ..)` is NOT a
-                // typed-tuple form and rejects.
+                // The paren head stops Pratt parsing at the ascription colon.
                 let first =
                     self.with_paren_head(|p| p.with_allow_literals(true, |p| p.parse_expr(0)))?;
                 let kind = if self.eat(TokenKind::Colon) {
@@ -3666,11 +3568,7 @@ impl<'a> Parser<'a> {
         line: usize,
         column: usize,
     ) -> PResult<Idx<ExprData>> {
-        // `new_with_offset` seeds the sub-tokenizer with the embedded
-        // expression's position in the enclosing file, so its tokens carry
-        // file-relative spans rather than substring-local ones. `map` then
-        // corrects for the enclosing literal's escapes, which cost a source byte
-        // each: without it every span after a `\"` in the hole lands short.
+        // Map cooked hole offsets back to source after escape sequences.
         let mut tokens = Tokenizer::new_with_offset(src, file, map[0], line, column).tokenize()?;
         if map.windows(2).any(|w| w[1] > w[0] + 1) {
             let base = map[0];
@@ -3708,11 +3606,7 @@ impl<'a> Parser<'a> {
         result
     }
 
-    /// Parse the `:spec` of `{expr:spec}` into a `FormatSpec`, mirroring rock's
-    /// `parse_format_specifier`. `fmt_*` describe the position of the first
-    /// char of `format_str` in the enclosing file (used only for the spans of
-    /// dynamic `{w}`/`{p}` sub-expressions). Errors on a malformed spec, like
-    /// rock — the spec is parsed-and-stored, never silently dropped.
+    /// Parse the specifier with source positions for dynamic width and precision.
     fn parse_format_spec(
         &mut self,
         format_str: &str,
@@ -3924,11 +3818,7 @@ impl<'a> Parser<'a> {
             fields.push((names, value));
             self.skip_comments();
             if !self.eat(TokenKind::Comma) {
-                // Recover a missing `,`: if another field plausibly follows (an
-                // ident or a `..` spread, not `}`/EOF), record the error and keep
-                // parsing the literal instead of bailing. Lets completion inside
-                // an unterminated value above the next field (`z: st.<cursor>`)
-                // still see the whole literal.
+                // A plausible next field lets recovery keep both fields.
                 if matches!(self.kind(), TokenKind::Ident(_) | TokenKind::DoubleDot) {
                     self.ast
                         .recovery_errors
@@ -4166,11 +4056,7 @@ impl<'a> Parser<'a> {
     /// True if the tokens from the current `(` form `(ident, ...) =>` — a
     /// lambda parameter list rather than a parenthesized expr / tuple.
     fn looks_like_lambda_params(&self) -> bool {
-        // Scan the balanced `( .. )` from the current `(` -- params may carry
-        // `: Type` annotations (incl. nested `(`/`[`) -- then a lambda is
-        // distinguished from a parenthesized expr / tuple by a trailing `=>`.
-        // In expression position only a lambda has `(...) =>` (match patterns
-        // are parsed elsewhere), so the `=>` check is decisive.
+        // A balanced parameter list followed by `=>` commits to a lambda.
         let at = |i: usize| self.tokens.get(i).map(|t| t.kind).unwrap_or(TokenKind::EOF);
         let mut i = self.pos;
         let mut depth = 0i32;
@@ -4336,12 +4222,7 @@ impl<'a> Parser<'a> {
         // when the token after the comment continues the expression.
         while matches!(self.kind(), TokenKind::Comment(_)) {
             let next = self.peek_kind();
-            // A fresh-line expression-starter after the comment (an annotation,
-            // a unary `-`, ...) begins a NEW statement/item, not
-            // a continuation of this expression -- the postfix/infix loop breaks
-            // on it via `op_starts_expr && newline_breaks`, so stop here too and
-            // leave the standalone comment for the item/statement loop to capture
-            // instead of silently consuming it (widening the expression span).
+            // A fresh-line expression starter after a comment belongs to the next statement.
             let next_on_fresh_line = self
                 .tokens
                 .get(self.pos)
@@ -4366,14 +4247,7 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Postfix operators whose use yields to a fresh expression after a newline.
-/// `Minus` is deliberately absent: once the Pratt loop has a left operand it
-/// is binary subtraction, consistent with `Plus`; in a prefix context it is
-/// still unary negation. `++` and `--` remain here because their prefix and
-/// postfix forms are genuinely indistinguishable from token context alone.
-/// Consume a brace-balanced `{...}` body (cursor positioned just after the
-/// opening `{`), returning the inner text. Mirror of rock's
-/// `take_balanced_brace_body`. Errors on an unmatched `{`.
+/// Operators that can begin a new expression after a newline.
 fn take_balanced_brace_body(
     chars: &mut std::iter::Peekable<std::str::Chars>,
     full_spec: &str,

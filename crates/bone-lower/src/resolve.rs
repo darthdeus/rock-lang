@@ -1,23 +1,5 @@
-//! Modules-v1 name resolution.
-//!
-//! The one lookup authority over the namespace tree in `Workspace.ns`.
-//! Compiler-owned synthetic modules have no fragment scope: a bare name is
-//! already its key.
-//!
-//! Tier policy for a BARE name in a v1 fragment:
-//!   1. lexical locals — handled by `lookup_in_scope` before this runs;
-//!   2. the current logical module's own definitions and named export
-//!      bindings;
-//!   3. the fragment's explicit imports;
-//!   4. glob bindings visible to the fragment, including what the globbed
-//!      modules re-export;
-//!   5. the compiler-owned std view (the standard library's own members).
-//!
-//! Values shadow; callables accumulate: the first tier that binds the name
-//! decides, except that in callee position a first tier that binds callables
-//! opens one family with the callables of every lower tier, which overload
-//! resolution ranks by fit with the tier as the tie-breaker. Lower-tier
-//! non-callables neither join nor block.
+//! Resolve module definitions, explicit imports, globs, and standard-library
+//! names in that order. A callable first tier admits lower-tier overloads.
 
 use bone_core::hir::{FamilyMember, FamilyTier, unary_operator_entry};
 use bone_core::modules::{
@@ -27,11 +9,7 @@ use bone_core::workspace::Workspace;
 use ustr::Ustr;
 
 std::thread_local! {
-    /// The probes of the lookup running on this thread, when one is being
-    /// recorded ([`with_probes`]). Thread-local rather than a parameter
-    /// because every resolver function takes `&Workspace` and a lookup is
-    /// one sequential call on one thread: the frame opens and closes around
-    /// it, so no parallel work can interleave with it.
+    /// Record namespace dependencies for the active lookup on this thread.
     static PROBES: std::cell::RefCell<Option<Vec<ScopeProbe>>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -174,11 +152,7 @@ fn resolved_kind(kind: bone_core::modules::DefKind) -> ResolvedKind {
     }
 }
 
-/// Resolve a bare name in a v1 fragment through the tier policy.
-/// The first tier that binds the name decides; a bound-but-broken target
-/// is a diagnostic, never a fallthrough. Several explicit imports
-/// (or glob candidates) of one name are one family only in callee position
-/// (`resolve_v1_callee`); anywhere else they are a diagnostic.
+/// The first binding tier decides even when its target fails to resolve.
 pub fn resolve_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Resolved, String> {
     bare_binding(ws, frag, name)?.ok_or_else(|| unbound(name))
 }
@@ -220,12 +194,7 @@ pub(crate) fn decorator_binding(
     }
 }
 
-/// A bare name in callee position in a v1 fragment. When the
-/// first tier that binds the name binds callables, the family is those and
-/// the callables of every lower tier, each member tagged with its tier for
-/// the exact-tie break; that tier's composition must be all callables. A
-/// first tier that binds a non-callable wins alone. Operators are no
-/// different: a module's own `operator +` and std's are one family.
+/// A callable can collect candidates from lower-priority tiers.
 pub fn resolve_v1_callee(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -389,11 +358,7 @@ fn bind_tiers(
     Ok(tiers)
 }
 
-/// The definitions the fragment's explicit imports bind `name` to, sorted by
-/// key and deduplicated (several routes to one definition are that
-/// definition once), or `None` when no import binds it. `below` is set when a
-/// nearer tier already bound callables: an import landing on a module is
-/// then left out instead of rejected.
+/// Resolve explicit imports, dropping module targets below a callable tier.
 fn import_tier(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -539,12 +504,7 @@ fn std_definition(ws: &Workspace, name: Ustr) -> Option<Resolved> {
     Some(Resolved { key, kind })
 }
 
-/// Tier 4 candidates for `name`, deduplicated and sorted by key: what every
-/// module the fragment globs offers under `name`, plus the current module's
-/// own glob export bindings. A glob opens only members accessible from
-/// `frag`, so an inaccessible one never shadows a lower tier or
-/// makes a glob ambiguous; it opens the target's export bindings
-/// as well as its owned names.
+/// Deduplicated candidates from glob imports.
 fn glob_candidates(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -668,11 +628,7 @@ impl Members {
     }
 }
 
-/// Bindings being followed, for cycle detection: (package, module key, name)
-/// plus which guard pushed it. Opening a module's glob exports and following
-/// a module's named export binding of the same name are different steps, so
-/// they keep separate keys: a glob of `hub` that opens `facade` must still
-/// follow `facade`'s own `pub use a::bump`.
+/// Active export lookups, distinguished by the kind of export.
 type Visiting = Vec<(u32, Ustr, Ustr, Guard)>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -686,13 +642,7 @@ enum Guard {
     Import,
 }
 
-/// The one member lookup: what module `path` of `pkg_id` offers under `name`
-/// to `viewers`. Owned definitions and named export bindings bind the name
-/// explicitly and hide the module's glob export bindings; otherwise every
-/// glob export contributes (overlapping globs are ambiguous at use
-/// unless the exporting module disambiguates). Export targets resolve from
-/// the exporting module, which must itself be permitted to name them, and are
-/// followed to a fixed point with canonical keys deduplicated.
+/// Explicit members shadow glob exports, including inaccessible members.
 pub fn module_members(
     ws: &Workspace,
     viewers: &[&FragmentScope],
@@ -974,19 +924,7 @@ fn check_key_access(ws: &Workspace, frag: &FragmentScope, key: Ustr) -> Result<(
     Err(format!("`{name}` is not accessible from this module"))
 }
 
-/// Visibility applies to MODULES too, so traversing
-/// a path segment is an access, exactly like naming the definition at its end.
-///
-/// A module item is declared in its PARENT, so its audience is measured from
-/// the parent's path: an undeclared `mod x;` (or an explicit `private mod x;`)
-/// is private to the declaring module's subtree. At the package root that is
-/// the whole package and no consumer: private root items are effectively
-/// accessible throughout the package. The package root node itself
-/// has no declaring parent and is implicitly public.
-///
-/// Both walkers call this; neither carries its own policy. Without it a
-/// consumer could write `dep::private_module::pub_item` and reach straight
-/// through the closed door, because only the final segment was ever checked.
+/// Check visibility of each segment relative to the module that declares it.
 fn check_module_access(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -1031,11 +969,7 @@ pub fn resolve_path(
     }
 }
 
-/// Check a fragment's own `use` target where it is declared (an
-/// unresolved path is a diagnostic, never a silent no-op). A glob must land
-/// on a module; a named import must bind a definition, an export binding or a
-/// module (`use p;`, `use a::b as c;`). Ambiguity and pure export cycles stay
-/// diagnostics at use, where they are decided.
+/// Check the declared target even when no binding is referenced.
 pub fn check_use_target(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -1120,12 +1054,7 @@ fn check_target(
     }
 }
 
-/// Check the name a named `use` leaf binds. `self`, `super`
-/// and `std` are reserved path roots. A binding that lands on a module is a
-/// path anchor for `site` (a fragment, or the exporting module for a shared
-/// binding), so it may not take the name of a child module of `site`'s
-/// module, a dependency alias or the package's own name unless it is that
-/// same module: two anchors under one name are never picked between.
+/// Reject reserved roots and imports that would make a module anchor ambiguous.
 pub fn check_use_binding(
     ws: &Workspace,
     site: &FragmentScope,
@@ -1378,12 +1307,7 @@ enum WalkMode {
     Module,
 }
 
-/// Shared first-segment anchor for `walk_path` and `resolve_member_path`.
-/// `::x` is root-anchored; `self`/`super`/`std`/package self-name/alias
-/// bind; a first segment the current module binds as a module (a child or
-/// a named export binding, tier 2) is relative to it; otherwise a
-/// fragment import that lands on a module anchors the path there (tier 3);
-/// anything else is relative to the current module.
+/// Resolve explicit roots and imported module aliases before descending.
 fn resolve_anchor(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -1438,11 +1362,7 @@ fn resolve_anchor(
     Ok(relative)
 }
 
-/// The module a fragment's explicit import of `name` lands on, if it lands
-/// on one (`use p::m;`, `use p::m as n;`, `use p::m::{self}`).
-/// Each import path resolves from the fragment like any path it writes; an
-/// import being followed is skipped while its own path resolves, so
-/// `use inner;` names the child `inner` and an alias cycle names nothing.
+/// Resolve the module bound by a named import, including a `self` leaf.
 fn imported_module(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -1494,13 +1414,7 @@ fn imported_module(
     }
 }
 
-/// Where the module segment `seg` of module `cur` leads: a child module, or
-/// a named export binding of a module (a re-export is another path
-/// to the same module). `None` when `seg` names no module there. A child is
-/// an access to that module; an export binding is checked as the
-/// facade path `frag` wrote -- the binding's own visibility -- while its
-/// target resolves from the exporting module, which must be permitted to
-/// name it.
+/// Resolve a child module or a module re-export.
 fn step_module(
     ws: &Workspace,
     frag: &FragmentScope,

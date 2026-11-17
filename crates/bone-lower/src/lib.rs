@@ -28,12 +28,7 @@ pub(crate) enum TyPos {
     Body,
 }
 
-/// Record how each segment of a v1 fragment's `use` items resolved
-/// ([`hir::PathSegmentRef`]), on the module; `use a::f as g` also records
-/// `g` as an alias of what `f` names. The targets are checked where they are
-/// declared (`validate_v1_use_targets`), so a segment that does not resolve
-/// here records nothing rather than a second diagnostic. Inline `mod` blocks
-/// use a child fragment path while resolving their `use` items.
+/// Record resolved import segments and aliases for navigation.
 pub fn record_use_paths(a: &Ast, ctx: &mut LowerCtx) {
     if ctx.workspace.skip_session_facts {
         return;
@@ -169,11 +164,7 @@ pub struct LowerCtx<'w, 'm> {
     /// lowering such a node again yields a read of its temporary, so the place
     /// can be both read and written without evaluating it twice.
     pub(crate) place_temps: Vec<(usize, Idx<BindingInfo>)>,
-    /// While a function body lowers, the names it could not resolve. A name
-    /// recorded here lowers to a placeholder and lowering continues, so one
-    /// pass reports every such name; the body is then dropped as failed, so
-    /// the placeholders never reach inference. `None` outside a body: a name
-    /// error there is returned as before.
+    /// Collect unresolved names while lowering a recoverable body.
     pub(crate) name_errors: std::cell::RefCell<Option<Vec<CompilerError>>>,
 }
 
@@ -255,12 +246,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         &self.workspace.fragment_scopes[&self.module.file]
     }
 
-    /// How each segment of the v1 `path` resolved, `last` being what the
-    /// whole path resolved to ([`hir::PathSegmentRef`]). A segment before the
-    /// last is the module the resolver's own walk reaches through it -- or,
-    /// right before a variant, the variant's enum. A prefix that reaches no
-    /// module (a type) records nothing. The walks are probed like the lookup
-    /// itself, so a tree edit that moves a segment re-lowers this module.
+    /// Resolve module prefixes, with the supplied target at the final segment.
     fn path_segment_refs(
         &self,
         from_root: bool,
@@ -428,11 +414,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         Ok(self.resolve_bare(name, span)?.key)
     }
 
-    /// The DefKey of a v1 path that is CALLED BY NAME -- a callable family, or a
-    /// newtype, whose constructor is a call on the type's own name and which the
-    /// bare-name route already resolves this way. `None` for a synthetic module, a path that does not
-    /// resolve, or one that names a struct, enum, global or enum variant --
-    /// those keep the general call route.
+    /// Resolve direct calls to callable families and newtype constructors.
     fn v1_path_callable(&self, path: &skull_parser::Path) -> Option<Ustr> {
         let frag = self.fragment_scope();
         let use_path = use_path_ref(path);
@@ -489,12 +471,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         .map_err(|msg| CompilerError::new_with_label(span, msg))
     }
 
-    /// A bare name in callee position: the spelling the callee carries and
-    /// its overload family. User modules go through the namespace tiers;
-    /// synthetic modules keep the source spelling. A family spanning
-    /// several definitions keeps the bare name as its spelling -- which is
-    /// also what lets scalar operands of a merged operator lower natively --
-    /// and records its member keys on the module for inference.
+    /// Resolve a name and its visible overload family.
     fn resolve_callee_family(
         &mut self,
         name: Ustr,
@@ -767,13 +744,7 @@ pub(crate) fn lower_type_expr_local(
     lower_type_expr_in(ctx, a, body, TyPos::Body, te)
 }
 
-/// Whether a `Static` type's source span is safe to record in `module.ty_spans`
-/// (keyed by the freshly-allocated `ty_arena` idx). True for every non-`Ident`
-/// type and for `Ident`s that resolve to a nominal struct/enum/newtype -- those
-/// get a fresh per-occurrence idx, so per-occurrence span recording is correct
-/// and lets hover / goto-definition resolve `m: Mob` / `-> Vec2`. Skipped for
-/// generics-in-scope and `_`, which resolve to a SHARED/pre-existing `TyId`
-/// (recording would clobber another occurrence's span).
+/// Record spans only for new arena entries. Generics and `_` can share type IDs.
 fn span_recordable(
     ctx: &LowerCtx,
     kind: &skull_parser::TypeExprKind,
@@ -2378,11 +2349,7 @@ fn reject_generic_defaults(
     Ok(())
 }
 
-/// Validate and declare a type decl's generics, returning their ids and the
-/// decl's body. Each default is also lowered (result discarded) so an unknown
-/// type name or a bare generic type (`= Entity` for `Entity<T>`) errors at the
-/// DECL's span rather than at some distant use site's pad; validation runs
-/// first, so sibling refs never reach the generics-in-scope lookup.
+/// Validate defaults even when their lowered forms are unused here.
 fn type_def_generics(
     ctx: &mut LowerCtx,
     a: &Ast,
@@ -2407,12 +2374,7 @@ fn insert_item_body(ctx: &mut LowerCtx, owner: BodyOwner, body: Body, span: Span
     ctx.module.make_lapper(start, stop, owner);
 }
 
-/// Decl-side validation for type-decl generic defaults (the authoritative,
-/// spanned counterpart of the pre-pass classification): defaults must be
-/// trailing, index-free (a builtin or a bare named type), and must not
-/// reference a sibling type parameter. Name RESOLUTION of a `Named` default is
-/// checked by the caller lowering the default expr (unknown / bare-generic
-/// names error there with the decl's span).
+/// Validate the trailing default forms the pre-pass can publish.
 fn validate_generic_defaults(
     what: &str,
     generics: &[skull_parser::Generic],
@@ -2605,15 +2567,8 @@ fn install_relowered_body(
     }
 }
 
-/// Lower a function's BODY into `body`, given its already-resolved param types
-/// (`param_tys`, one per `f.params`, in order). This allocates ONLY into `body`
-/// (its binding / expr / scope / `lowered_tys` arenas) -- it never touches the
-/// module `ty_arena`. That invariant is what lets the body-edit fast path
-/// (`relower_function_in_place`) reuse the unchanged signature's interface
-/// types instead of re-lowering them: re-lowering a signature appends fresh
-/// entries to `module.ty_arena` and orphans the old ones, leaking one slot per
-/// edit (pinned by the `bone-incremental` `body_edit_does_not_grow_module_ty_arena`).
-///
+/// Lower the body using resolved interface types. Body-only refreshes must
+/// avoid appending replacements to the module type arena.
 fn lower_fn_body_into(
     ctx: &mut LowerCtx,
     a: &Ast,
@@ -2721,13 +2676,7 @@ pub fn relower_function_in_place(
     ws.relowered_body_count
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    // Body-only fast path. The caller (`classify`) guarantees the signature TEXT
-    // is unchanged, so REUSE the existing signature -- crucially its module
-    // `ty_arena` indices -- and re-lower only the body. Re-running the full
-    // `build_function` would re-lower the signature, appending fresh interface
-    // type-exprs to `module.ty_arena` and orphaning the old ones: one leaked slot
-    // per edit, unbounded over an editing session (pinned by the `bone-incremental`
-    // `body_edit_does_not_grow_module_ty_arena`).
+    // Reuse the signature types so body edits do not grow the module arena.
     let sig_reusable = module.functions[fid].param_decls.len() == f.params.len()
         && module.functions[fid].generics.len() == f.generics.len();
 
@@ -2769,14 +2718,7 @@ pub fn relower_function_in_place(
 
     let mut body = Body::default();
 
-    // Register the signature's type-expr spans in the body's node lapper so
-    // `type_at` / goto-definition still resolve on the edited fn's params +
-    // return type. Lowered BODY-LOCAL (`TyPos::Body`), NOT into the module
-    // `ty_arena`: `StaticTy` and `LocalTy` resolve identically for hover + goto
-    // (they both read the `TypeExpr`'s nominal name -- see the bone-semantic
-    // `hover_inbody_annotation` fixture), and the body arena is rebuilt wholesale
-    // each edit, so this adds nothing to the leak-prone module arena. The
-    // function's `param_decls` / `return_ty` keep their existing `Static` ids.
+    // Rebuild the signature's navigation spans with body-local type IDs.
     if let Some(ret_ty) = &f.return_ty {
         lower_type_expr_local(&mut ctx, a, &mut body, a.te(ret_ty))?;
     }
@@ -3918,13 +3860,7 @@ fn classify_anno_value(a: &Ast, e: Idx<ExprData>) -> hir::AnnoValue {
     }
 }
 
-/// The subexpressions of a compound-assignment place that `place op= value`
-/// must evaluate into temporaries before it reads and writes the place: every
-/// index and every non-place base (a call, a method call), in evaluation
-/// order. Empty when none of them has an effect, so the common pure place
-/// (`v[i] += 1`) keeps the plain `place = place op value` desugar. Once one
-/// part needs a temporary, every earlier and later part gets one too (except
-/// literals), so the evaluation order of the parts is unchanged.
+/// Capture effectful place components before duplicating the read and write.
 fn compound_place_temps(a: &Ast, place: &Idx<ExprData>) -> Vec<Idx<ExprData>> {
     use skull_parser::ExprKind;
 
@@ -3961,11 +3897,7 @@ fn lower_named_call(
     args_range: IdxRange<Expr>,
     generic_args: IdxRange<TypeExpr>,
 ) -> Result<Expr, CompilerError> {
-    // A local fn-typed binding is called through its value, everything else
-    // resolves at a top-level by name. A v1 fragment resolves the
-    // name through the namespace tiers.
-    // A local is called through its value, and inference never asks
-    // its family for a name, so a local resolves nothing further.
+    // A local value shadows the visible callable family.
     let local = lookup_local(body, scope, name.name);
     let (callee_key, family) = if local.is_none() && name.name.as_str() != "_" {
         // Keep an unbound call in HIR so inference can report the missing

@@ -1,10 +1,4 @@
-//! Walks the raw skull-parser AST into a `Doc` layout.
-//!
-//! Constructs whose source spelling the raw AST does not fully preserve
-//! (inline-lua / extern bodies; `operator +` folded to `fn __op_add`;
-//! decorators; compiler directives; macro invocations) are sliced verbatim from
-//! source. Everything else is built structurally so width-driven wrapping and
-//! spacing are normalized.
+//! Build formatter documents from the raw AST and source trivia.
 
 use std::collections::HashSet;
 
@@ -69,12 +63,7 @@ impl<'a> Printer<'a> {
         crate::trivia::source_slice(self.src, b0, b1)
     }
 
-    /// Did the author write a trailing comma after this (last) entry? Scan the
-    /// source from the entry's end past whitespace and `//` line comments: the
-    /// first significant char is either the author's `,` or the closing
-    /// delimiter. ASCII bytes only -- a multibyte char's high bit makes it fall
-    /// to the `false` arm, which is correct (any non-`,` significant char means
-    /// no trailing comma).
+    /// Detect an authored comma past whitespace and trailing line comments.
     fn source_trailing_comma(&self, last: Span) -> bool {
         let bytes = self.src.as_bytes();
         let mut i = last.offset_range().1.min(bytes.len());
@@ -162,11 +151,6 @@ impl<'a> Printer<'a> {
             let cur_multiline = self.item_forces_blank(item, &item_doc);
             if let Some(prev) = prev_end {
                 parts.push(hardline());
-                // A declaration that renders as a multi-line `{ .. }` block
-                // (struct/enum with members, a multi-line fn body) is always
-                // separated from its neighbour by a blank line; runs of one-line
-                // decls (globals, operators, inline/extern fns, newtypes) stay
-                // adjacent. A leading comment stays attached to its item.
                 let source_blanks = self
                     .trivia
                     .blank_count_between(prev, self.item_top_line(item));
@@ -206,11 +190,7 @@ impl<'a> Printer<'a> {
         }
     }
 
-    /// Whether `item` is separated from its neighbours by a blank line: it
-    /// renders as a multi-line declaration. Struct/enum with members and a
-    /// multi-line-bodied Rock fn qualify; globals, newtypes, and inline-lua /
-    /// extern fns are one-liner decls even when a verbatim multi-line string body
-    /// spans lines, so they stay adjacent.
+    /// Multiline declarations get a blank line on either side.
     fn item_forces_blank(&self, item: &Item, item_doc: &Doc) -> bool {
         match &item.kind {
             // A multi-line `{ .. }` def forces a blank; a single-line one
@@ -266,13 +246,7 @@ impl<'a> Printer<'a> {
             return self.with_trailing_comment(Doc::text(decl), item.span, 'N');
         }
         if self.is_verbatim_item(item) {
-            // Render annotations structurally (a standalone annotation joins the
-            // declaration line) then slice the declaration verbatim, stripping a
-            // trailing `;`. The body (inline-lua / extern / operator) isn't
-            // recoverable from the AST, so it stays byte-for-byte.
-            // An unannotated item's slice starts at `item.span`, which covers
-            // its visibility; an annotated one starts after the last
-            // annotation, so the visibility is printed ahead of them.
+            // Normalize the annotations while preserving the declaration source.
             let mut parts = Vec::new();
             if !item.annotations.is_empty() {
                 parts.extend(item_visibility(item.vis.as_ref()));
@@ -365,11 +339,7 @@ impl<'a> Printer<'a> {
         doc
     }
 
-    /// Annotations in a NON-ITEM position (a fn parameter, a struct or
-    /// record-variant field): they sit inline ahead of the thing they mark,
-    /// one space apart, rather than on their own lines the way an item's do.
-    /// `AnnoPos` (`crates/bone-core/src/annotations.rs`) is the full list of
-    /// positions the parser accepts.
+    /// Parameter and field annotations are inline.
     fn leading_annotations(&self, annos: &[Annotation]) -> Vec<Doc> {
         annos
             .iter()
@@ -443,13 +413,7 @@ impl<'a> Printer<'a> {
             sig.push(Doc::text(" -> "));
             sig.push(self.type_expr(ret));
         }
-        // Freeze the signature layout by rendering it standalone (fns are always
-        // top-level, so indent 0). The params then wrap only when the SIGNATURE
-        // itself overflows -- not because a wide single-line body shares the
-        // line during the fit check. The body's inline-vs-expanded form differs
-        // pass-to-pass, so measuring params against it made the params oscillate.
-        // Measure WITH the trailing ` {` (the opening brace shares the signature
-        // line), then strip it back off -- the body block re-emits the `{`.
+        // Lay out the signature alone so body width cannot wrap its parameters.
         sig.push(Doc::text(" {"));
         let sig_brace = crate::doc::render(
             &Doc::concat(sig),
@@ -608,11 +572,7 @@ impl<'a> Printer<'a> {
         Doc::text(format!("//{text}"))
     }
 
-    /// If `span` is a single source line that carries a block comment the
-    /// structural render would drop, slice it verbatim -- block comments are a
-    /// preserve-verbatim trigger with no structural home in headers/types/arms.
-    /// Multi-line spans keep structural rendering (verbatim would un-format a
-    /// nested body).
+    /// Slice single-line spans containing block comments with no structural home.
     fn maybe_verbatim_line(&self, span: Span, fallback: impl FnOnce() -> Doc) -> Doc {
         if span.line_range().0 == span.line_range().1
             && self
@@ -778,17 +738,7 @@ impl<'a> Printer<'a> {
 
     // ---- blocks -----------------------------------------------------------
 
-    /// A `{ ... }` block.
-    ///
-    /// `Collapse` (if/else) collapses a single simple statement onto one line
-    /// whenever it fits, regardless of how the source was written. `Preserve`
-    /// (fn/lambda bodies) only stays inline if the source already was. `Multi`
-    /// (for/while/match arms) never collapses.
-    /// fn / lambda / `@` / bare-block bodies. A single simple statement the
-    /// author wrote on one source line stays inline when it fits the width (the
-    /// group collapses); a wide or multi-statement or control-flow body expands.
-    /// Distinct from `flow_block` -- a definition body is canonically multi-line,
-    /// so a degenerate one-liner `fn f(){...}` is cleaned up to the block form.
+    /// A simple single-line body can stay inline if it fits the width.
     fn block(&self, block_idx: Idx<BlockData>) -> Doc {
         let block = self.ast.b(&block_idx);
         let stmts = &block.statements;
@@ -814,11 +764,7 @@ impl<'a> Printer<'a> {
         self.expanded_block(stmts)
     }
 
-    /// Control-flow bodies (for / while / loop / while-let) and match arms.
-    /// PRESERVES the author's layout: a body written on one source line stays
-    /// inline (`while c { a; b }`, control-flow and multiple statements
-    /// included), a multi-line one expands. Unlike `block`, there is no
-    /// width-driven collapse -- the author's line breaks are authoritative.
+    /// Control-flow and match-arm bodies preserve their source line breaks.
     fn flow_block(&self, block_idx: Idx<BlockData>) -> Doc {
         if let Some(d) = self.inline_single_line_block(block_idx) {
             return d;
@@ -985,16 +931,7 @@ impl<'a> Printer<'a> {
         Doc::concat(parts)
     }
 
-    /// A brace-delimited, always-multi-line block of comma-separated entries
-    /// (struct fields, enum variants, match arms). Each entry carries its source
-    /// `(start_line, end_line)`; the comma is placed *before* any trailing
-    /// comment, and blank-line groups between entries are preserved.
-    /// The last entry gets a trailing comma iff the author wrote one (preserve,
-    /// not normalize -- the comma is cosmetic in the source-driven layout world).
-    /// When `body_span` is `Some((open, close))` -- the lines of the enclosing
-    /// delimiters -- standalone comments the parser dropped inside the body are
-    /// recovered by position, with or without entries; `None` skips the search,
-    /// for callers that know the body holds none.
+    /// Render entries on separate lines with their source commas and comments.
     fn comma_block(
         &self,
         entries: impl IntoIterator<Item = (Doc, Span)>,
@@ -1114,15 +1051,8 @@ impl<'a> Printer<'a> {
         docs
     }
 
-    /// A multi-line bracketed construct rendered by SOURCE LINE rather than
-    /// one-element-per-line: elements that shared a source line are sliced
-    /// VERBATIM together, preserving the author's intra-row column alignment and
-    /// field packing (the formatter is a layout-preserver here, not a
-    /// normalizer). An element
-    /// that is itself multi-line recurses structurally (its pre-rendered `doc`)
-    /// so nested levels re-indent correctly. Trailing comma: non-last rows
-    /// always; last row source-derived. No interior-comment handling -- callers
-    /// route comment-bearing constructs through `comma_block` instead.
+    /// Keep the text of entries sharing a line. Render multiline entries
+    /// structurally so they can be indented at their new nesting depth.
     fn verbatim_rows(&self, rows: Vec<(Span, Doc)>, open: &str, close: &str) -> Doc {
         let last_span = rows.last().map(|(s, _)| *s);
         let mut groups = rows
@@ -1185,11 +1115,7 @@ impl<'a> Printer<'a> {
         i
     }
 
-    /// Token-start columns of a source line and the subset reached via 2+ spaces
-    /// of padding (an alignment point the author inserted). Spaces inside strings
-    /// or after a `//` comment don't count. Columns are relative to the line's
-    /// first token, which is shared across siblings at the same indent -- so two
-    /// lines align iff they share a token-start column padded on at least one side.
+    /// Token boundaries and alignment columns marked by at least two spaces.
     fn aligned_columns(&self, line: &str) -> (HashSet<usize>, HashSet<usize>) {
         let b = line.as_bytes();
         let n = b.len();
@@ -1247,14 +1173,8 @@ impl<'a> Printer<'a> {
         (bounds, padded)
     }
 
-    /// Indices belonging to a hand-aligned run: a maximal run of >=2 `eligible`
-    /// siblings where each adjacent pair shares a token-boundary column padded on
-    /// at least one side (the author lined a column up). `skip` items (e.g. a
-    /// trailing-comment `Comment` item re-emitted elsewhere) are transparent --
-    /// they neither align nor break a run. Callers replace these indices' docs
-    /// with a VERBATIM source slice, preserving the column alignment structural
-    /// rendering would collapse. Verbatim-slicing a non-aligned line would
-    /// suppress normalization (`x=1` -> `x = 1`), so only detected runs qualify.
+    /// Keep adjacent entries with shared padded token columns verbatim.
+    /// Skipped comments are transparent to alignment detection.
     fn aligned_indices(&self, spans: &[Span], eligible: &[bool], skip: &[bool]) -> Vec<usize> {
         let n = spans.len();
         let cols = |i: usize| self.aligned_columns(self.slice(spans[i]));
@@ -1361,12 +1281,7 @@ impl<'a> Printer<'a> {
     // ---- statements -------------------------------------------------------
 
     fn stmt(&self, s: Idx<StatementData>) -> Doc {
-        // A single-line statement carrying a block comment -- mid-expression
-        // (`let x = 1 + /* c */ 2`) or trailing (`let x = 5 /* note */`, which
-        // sits just past the statement span, so extend to cover it) -- has no
-        // structural home, so slice it verbatim. Multi-line statements (for/if
-        // with bodies) keep structural rendering; their headers are handled by
-        // `header_verbatim`.
+        // Slice single-line statements whose inline block comments lack a structural slot.
         let mut span = self.ast.s(&s).span;
         if let Some((cs, ce)) = self
             .trivia
@@ -1605,11 +1520,7 @@ impl<'a> Printer<'a> {
                 Doc::text("]"),
             ]),
 
-            // Preserve the author's layout: a binary expression written across
-            // source lines is kept VERBATIM (the author's operator placement --
-            // leading or trailing -- and column alignment), NOT collapsed to one
-            // line regardless of width and NOT restructured (a leading `-`/`+`
-            // would reparse as unary). A single-line one renders structurally.
+            // Multiline operators keep their authored placement.
             ExprKind::BinOp {
                 left, op, right, ..
             } => {
@@ -1951,12 +1862,7 @@ impl<'a> Printer<'a> {
         let head_span = match written_args.last() {
             None => f,
             Some(last) => {
-                // The head call's own span (callee .. closing paren), NOT the
-                // whole `f(args) @ {...}` span -- otherwise the multi-line
-                // `@`-block makes the preserve check expand the head call's
-                // args. The `@` overwrote the call's span, so find the `)`
-                // again: comments before it belong to the arguments, comments
-                // after it to the `@`.
+                // Exclude the trailing lambda from the head argument layout.
                 let last = self.ast.e(&last.value).span;
                 let (end, end_line) = self
                     .trivia
@@ -2005,13 +1911,7 @@ impl<'a> Printer<'a> {
         let rhs = rhs_expr
             .map(|e| self.expr(e))
             .unwrap_or_else(|| self.block(body));
-        // A `//` comment on the `@` line (`head @ // note\n rhs`) has no
-        // structural home once the parser desugars `@` away -- recover it as the
-        // `@`-line trailing comment and keep the rhs on the next line. Gated on
-        // the rhs actually starting on a LATER line: a genuine `@`-line comment
-        // eats the rest of that line, forcing rhs down. Without that guard a
-        // single-line `head @ rhs // note` mis-claims the statement's own
-        // trailing comment here AND lets the statement handler emit it -> dup.
+        // A comment after `@` would swallow the lambda body on that line.
         let rhs_line = rhs_expr
             .map(|e| self.ast.e(&e).span.line_range().0)
             .unwrap_or_else(|| self.ast.b(&body).span.line_range().0);
@@ -2085,26 +1985,12 @@ impl<'a> Printer<'a> {
             || self
                 .trivia
                 .has_block_comment_in(span.offset_range().0, span.offset_range().1);
-        // Preserve the author's layout: a call written across multiple source
-        // lines expands one arg per line; one on a single line stays inline --
-        // even past the width limit, so a hand-compacted call (e.g. inside a
-        // data-table row) is kept, not exploded. Comments force the multi-line
-        // form (so they survive).
-        // An argument that renders across lines (a one-line multi-statement
-        // block, a block lambda) makes the output multi-line; lay it out as the
-        // next pass will read it, or the formatter never reaches a fixed point.
+        // A rendered line break can change how the next pass sees the call.
         let docs: Vec<Doc> = args.iter().map(render_arg).collect();
         let renders_multiline = docs.iter().any(Doc::has_hard_line);
         let source_multiline = span.line_range().0 != span.line_range().1 || renders_multiline;
-        // Trailing-argument hug: when the author wrote the call with a sole or
-        // last collection/struct-literal argument opening on the call line
-        // (`push(Foo {`, `arena_insert(prefabs, Prefab {`), keep it hugging --
-        // the arg's own delimiters break against the parens instead of indenting
-        // the whole argument an extra level. Source-aware so a deliberately
-        // broken call (`f(\n  Foo { .. }\n)`) is preserved too.
-        // Not gated on `!has_comments`: the hugging arg renders its OWN interior
-        // comments (`insert(Corpse { ..  // note\n .. })`), and if a comment
-        // preceded the arg it wouldn't be on the call line, so it wouldn't hug.
+        // A trailing collection opening on the call line keeps its own indentation,
+        // including any comments it renders inside its delimiters.
         if source_multiline && self.hugs_trailing_arg(args, span) {
             let n = args.len();
             let mut parts = vec![Doc::text("(")];
@@ -2175,14 +2061,7 @@ impl<'a> Printer<'a> {
             let ExprKind::FieldAccess(recv, method) = &self.ast.e(&cur_func).kind else {
                 return None;
             };
-            // The segment's OWN call span (method name -> closing `)`), not the
-            // cumulative receiver chain. call_args reads `line_range` to decide
-            // whether to expand the arg list; using the cumulative span made that
-            // depend on how the chain itself was broken across lines -- so once
-            // the formatter put a segment on its own line, the next pass saw a
-            // two-line cumulative span and expanded the (single-line) args, an
-            // oscillation. The own span tracks only the
-            // author's arg-list layout, which is stable under chain reflow.
+            // Lay out each segment's arguments independently of earlier chain breaks.
             let own_span = cur_span
                 .with_line_range((method.span.line_range().0, cur_span.line_range().1))
                 .with_col_range((method.span.col_range().0, cur_span.col_range().1))
@@ -2269,11 +2148,7 @@ impl<'a> Printer<'a> {
         )
     }
 
-    /// The author wrote the trailing argument hugging the call parens: the last
-    /// arg is a huggable literal opening on the same source line as the
-    /// preceding content (the `(` for a sole arg, else the previous arg). Prior
-    /// args must be single-line so they sit inline before the hug. Source-aware,
-    /// so it preserves both a hugged call and a deliberately-broken one.
+    /// Whether the final collection opens alongside the call delimiter.
     fn hugs_trailing_arg(&self, args: &[FunctionCallArg], span: Span) -> bool {
         let Some(last) = args.last() else {
             return false;
@@ -2300,15 +2175,8 @@ impl<'a> Printer<'a> {
         last_line == prev_line
     }
 
-    /// A multi-line call's arguments, preserving the author's per-line grouping.
-    /// Args that shared a source line are sliced verbatim together; the first
-    /// group hugs `(` when the author opened the call on that line (`f(a, b,` ...),
-    /// else it starts on its own indented line (`f(\n  a, ...`), and the close `)`
-    /// hugs the last arg when the author wrote it there. Produces the same
-    /// exploded shape as `comma_block` for a one-arg-per-line call (so those don't
-    /// churn). `None` -- caller falls back to `comma_block` -- when any argument
-    /// spans multiple source lines or is a splat (the verbatim slice can't carry
-    /// those).
+    /// Preserve per-line argument packing and hanging delimiters. Spreads
+    /// and multiline arguments need structural formatting instead.
     fn call_arg_rows(&self, args: &[FunctionCallArg], span: Span) -> Option<Doc> {
         // (start_line, end_line, start_offset, end_offset) per arg, or None if the
         // arg isn't a single-line non-splat value.
@@ -2361,11 +2229,7 @@ impl<'a> Printer<'a> {
     }
 
     fn tuple(&self, items: &[Idx<ExprData>], span: Span) -> Doc {
-        // Preserve the author's layout (a tuple takes a trailing comma only with
-        // one element, where `(x)` would be a parenthesized `x`): a single-line
-        // tuple stays inline; a multi-line one expands one per line.
-        // An element that renders across lines expands the tuple, as the next
-        // pass would.
+        // A singleton tuple needs a comma to distinguish it from grouping.
         let trailing = if items.len() == 1 { "," } else { "" };
         let docs: Vec<Doc> = items.iter().map(|i| self.expr(*i)).collect();
         if span.line_range().0 == span.line_range().1 && !docs.iter().any(Doc::has_hard_line) {
@@ -2480,12 +2344,7 @@ impl<'a> Printer<'a> {
             );
             Doc::concat([key, Doc::text(": "), self.expr(*value)])
         };
-        // A field with a trailing comment, or a standalone comment in the body,
-        // forces the comment-preserving multi-line layout (a `// ...` can't sit
-        // inside an inline `{ a, b }`). A field claims a trailing comment only if
-        // nothing but whitespace/`,` sits between the field's end and the `//`: on
-        // a single-line literal the comment trails the `}` and belongs to the
-        // enclosing statement (`global g = Foo { a: 1 }  // c`).
+        // A trailing comment after the closing brace belongs to the outer node.
         let field_has_comment = |value: &Idx<ExprData>| {
             let v = self.ast.e(value);
             match self.trivia.trailing_comment(v.span.line_range().1) {
@@ -2575,12 +2434,7 @@ impl<'a> Printer<'a> {
         else_branch: Option<Idx<BlockData>>,
         if_span: Span,
     ) -> Doc {
-        // The whole if-expression is ONE group: if it doesn't fit on a line,
-        // every branch breaks together (matching the corpus). Each nested `if`
-        // is its own group, so it collapses independently when it fits.
-        // Preserve the author's break before `else`/`else if`: if the keyword
-        // sits on a later source line than the preceding branch body ended, keep
-        // it on its own line (`if c { x }\nelse { y }`), else inline (`} else {`).
+        // Break all branches together while keeping the authored placement of `else`.
         let mut parts = Vec::new();
         for (i, (cond, body)) in branches.iter().enumerate() {
             if i == 0 {
@@ -2717,11 +2571,7 @@ impl<'a> Printer<'a> {
                 Doc::join(Doc::text(", "), tys.iter().map(|t| self.type_expr(*t))),
                 Doc::text(")"),
             ]),
-            // Two source spellings the AST doesn't distinguish: `fn(A) -> B` and
-            // `(A) -> B`. Detect the prefix from the span START (reliable), but
-            // render params and return STRUCTURALLY -- the function type's own
-            // span over-extends past `>>` in `App<.., fn-returning-generic>`
-            // (`Map<.., () -> Foo<Bar>>`), so a verbatim slice grabs an extra `>`.
+            // Recover the spelling of function types from the start of the source span.
             TypeExprKind::Function { params, ret } => {
                 let source = self.slice(data.span).trim_start();
                 let starts_fn =

@@ -202,16 +202,8 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
-    /// Scan an identifier and return it as a borrowed slice of `input` -- no
-    /// per-char `String`, no per-char `advance`. The cursor and line/column
-    /// bookkeeping are advanced past the whole identifier in one step.
-    ///
-    /// The returned slice has the input's lifetime `'a`, not the `&mut self`
-    /// borrow, so the caller can match it against keywords and intern it
-    /// without copying. `next_token` only enters here on an ASCII alpha / `_`,
-    /// so the first byte is ASCII; the tight loop stays on bytes and only
-    /// drops to UTF-8 decoding when a non-ASCII byte appears (Unicode letters
-    /// mid-identifier), preserving the old `char::is_alphanumeric` behavior.
+    /// Scan ASCII directly, decoding Unicode letters inside the identifier.
+    /// Positions count bytes for offsets and characters for columns.
     fn read_ident(&mut self) -> &'a str {
         let input = self.input; // copy the &'a str out, decoupled from &mut self
         let bytes = input.as_bytes();
@@ -248,11 +240,7 @@ impl<'a> Tokenizer<'a> {
         &input[start..i]
     }
 
-    /// Scan from the current position to the end of the line (NOT consuming the
-    /// terminating `\n`) and return the borrowed slice -- for line comments,
-    /// whose body is verbatim with no escapes. The body holds no newline, so
-    /// `line` is unchanged; `column` advances by the char count (counted from
-    /// UTF-8 lead bytes, i.e. bytes that are not `10xxxxxx` continuations).
+    /// Line comment text, leaving the newline for tokenization.
     fn read_line_rest(&mut self) -> &'a str {
         let input = self.input;
         let bytes = input.as_bytes();
@@ -273,13 +261,8 @@ impl<'a> Tokenizer<'a> {
         &input[start..i]
     }
 
-    /// Fast path for a single-line string with no escapes, interpolation, or
-    /// raw newline: scan to the closing `"` and return a verbatim slice. Bails
-    /// (returns `None`, cursor untouched) the instant a `\`, `{`, or newline
-    /// appears, so the caller falls back to [`read_escaped_string`]. The
-    /// opening `"` must already be consumed. `{` forces the slow path because
-    /// interpolation makes a later `"` non-closing; `}` and `}}` are verbatim
-    /// and stay on the fast path, matching the slow path's behavior.
+    /// Scan a plain double-quoted body. Leave the cursor in place if an
+    /// escape, line break, or interpolation needs the full string scanner.
     fn try_read_plain_string(&mut self) -> Option<&'a str> {
         let input = self.input;
         let bytes = input.as_bytes();
@@ -311,20 +294,11 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
-    /// Read the string literal starting at `start` (the opening delimiter's
-    /// first byte), advancing the cursor past it. One reader for every flavor --
-    /// `"`, `"""`, `r"`, `r"""`, `'` -- over the shared `interp::scan_string`,
-    /// so the terminator rule the lexer applies is the same one the parser and
-    /// the LSP see. The cursor may already sit anywhere from `start` up to the
-    /// literal's end (the `"` fast path pre-consumes the opening quote).
+    /// Use the shared string scanner for escaped and multiline literals.
     fn read_string_literal(&mut self, start: usize) -> Result<TokenKind, CompilerError> {
         let open_span = self.start_span();
         let scan = crate::interp::scan_string(self.input, start);
-        // Only `"..."` raises on an unclosed hole: there a bare `{` makes the
-        // next `"` non-closing, so the literal would swallow the rest of the
-        // file. `"""` closes on its own delimiter regardless of brace depth, so
-        // a stray `{` is just text -- which is exactly why `inline(lua)` bodies
-        // (full of braces) are written triple-quoted.
+        // Triple-quoted inline bodies allow unmatched opening braces.
         let unclosed_hole = scan.flavor == crate::interp::Flavor::Quoted
             && matches!(
                 scan.pieces.last(),
@@ -871,11 +845,7 @@ impl<'a> Tokenizer<'a> {
     }
 
     pub(crate) fn end_span(&self, start: LineCol) -> Span {
-        // `col_range` end is exclusive. Use `self.column` directly — it
-        // tracks columns in characters (incremented per char by `advance`),
-        // whereas `byte_offset` counts bytes (UTF-8 length per char), so
-        // `start.col + (byte_offset - start.offset)` would skew columns
-        // past any multibyte char in a token.
+        // Columns count characters; offsets count UTF-8 bytes.
         let end_col = self.column;
         let offset_range = (start.offset, self.byte_offset);
 

@@ -28,11 +28,7 @@ pub struct Workspace {
     pub inferences: Vec<Option<InferenceResult>>,
 
     pub struct_by_name: FxHashMap<Ustr, StructId>,
-    /// Any struct anywhere declares an `embed` field. Set (never cleared) while
-    /// registering struct fields, so the per-body projection-only check can bail
-    /// in O(1) on the overwhelmingly common workspace that uses no `embed` at
-    /// all. Monotonic on purpose: staying true after the last embed field is
-    /// deleted costs a check, whereas a stale false would skip enforcement.
+    /// Set when an embed field is registered. A stale true only costs a check.
     pub has_embed_fields: bool,
     pub enums_by_name: FxHashMap<Ustr, EnumId>,
     pub newtypes_by_name: FxHashMap<Ustr, NewtypeId>,
@@ -47,11 +43,8 @@ pub struct Workspace {
     pub const_globals: FxHashSet<Ustr>,
 
     pub functions_by_name: FxHashMap<Ustr, FnList>,
-    /// Every lowered function's declared parameter types, rendered and
-    /// `\u{1}`-joined, per module. Half of [`Workspace::backend_variant_key`].
-    /// `insert_module` indexes the module it stores; a caller that replaces
-    /// one function's signature in place re-indexes it with
-    /// [`Workspace::index_param_signature`].
+    /// Declared parameter types with a `\u{1}` separator. Keep indexed when
+    /// replacing a function signature in place.
     pub param_signatures: Vec<ArenaMap<Idx<Function>, Ustr>>,
 
     /// Workspace-wide `deco` declaration names, collected from the ASTs in
@@ -65,23 +58,13 @@ pub struct Workspace {
     /// recorded only while [`MODULE_TIMINGS`] is set.
     pub module_timings: Vec<(ModuleId, &'static str, Duration)>,
 
-    /// Count of function bodies actually re-inferred (check_function run, NOT
-    /// reused) since the last reset. `check_module_incremental` bumps it on the
-    /// non-reuse branch; the incremental `Session` resets it per `update_file`,
-    /// so a test/profiler can read EXACTLY how many bodies re-inferred -- a
-    /// deterministic signal for reuse, replacing flaky phase-timing ratios. Arc
-    /// keeps `Workspace: Clone` and lets the parallel dependent re-check (which
-    /// holds `&Workspace`) share one counter across threads.
+    /// Counts re-inferred bodies since the last session update reset. Parallel
+    /// checks share this counter.
     pub reinferred_body_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Per-function memory effects (`crate::effects`), computed on first use
     /// from the current inferences and dropped when one is replaced.
     pub vec_effects: std::sync::OnceLock<crate::effects::EffectTable>,
-    /// Count of function bodies LOWERED since the last reset: every function
-    /// a full or partial module lowering builds, including one whose body
-    /// fails to lower, and the one function the body fast path re-lowers.
-    /// The lowering twin of `reinferred_body_count`, reset by the session per
-    /// update; `UpdateResult.relowered` is derived from inference keys, so a
-    /// body that re-lowers into a lowering error is only visible here.
+    /// Counts even failed body lowerings, which have no inference keys.
     pub relowered_body_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 
     /// Package namespace scope, including implicit standalone packages.
@@ -93,13 +76,7 @@ pub struct Workspace {
     /// definitions can keep bare-name keys without metadata.
     pub defs: FxHashMap<Ustr, crate::modules::DefMeta>,
 
-    /// Resolved compile-time inputs, set by the host before emission. Declared
-    /// source fingerprints refresh on edits. bone itself never reads them
-    /// -- values don't affect types -- but they live here because every
-    /// consumer (skull's `build_var`/`embed_string` expansion at MIR lowering,
-    /// on all backends) already holds a `&Workspace` and nothing else with
-    /// that reach exists. Empty in LSP/typecheck-only contexts, where no
-    /// expansion runs.
+    /// Host inputs stamped after checking for expansion during code generation.
     pub comptime_inputs: ComptimeInputs,
 
     /// Enforce identity storage in files outside any package instead of
@@ -107,11 +84,7 @@ pub struct Workspace {
     /// harness sets it: its programs are the rule's fixtures.
     pub identity_storage_enforce_unpackaged: bool,
 
-    /// Lowering records none of the facts only a retained session reads:
-    /// scope probes (`hir::Module::scope_probes`), which decide what an edit
-    /// re-lowers, and the body node intervals and path segments editor
-    /// queries locate nodes by. A pass whose workspace no session retains
-    /// sets this.
+    /// Skip recording scope probes and navigation spans when no session retains HIR.
     pub skip_session_facts: bool,
 }
 
@@ -267,11 +240,7 @@ impl Workspace {
         node.callable_members.get(&meta.name).map(Vec::as_slice)
     }
 
-    /// The declared visibility of the lowered callable `fid` among its
-    /// family's `members`, matched by source file and per-file overload
-    /// ordinal. The source namespace table remains authoritative, so a
-    /// visibility-only edit does not require a second visibility field on HIR
-    /// functions.
+    /// Match a callable to its family member by source file and overload ordinal.
     fn member_visibility<'a>(
         &self,
         members: &'a [crate::modules::CallableMember],
@@ -467,13 +436,7 @@ impl Workspace {
         )
     }
 
-    /// The backend-variant group identity of a lowered function: its name
-    /// (the family key) and its declared parameter types. Declarations with
-    /// equal keys and distinct backends are one logical function. Return type
-    /// is excluded because overload resolution keys on parameters. The name
-    /// matters for a merged compiler-owned family, whose members are unrelated
-    /// definitions: identical signatures there are not backend siblings
-    /// but a tie.
+    /// Group backend variants by callable name and declared parameter types.
     pub fn backend_variant_key(&self, mid: ModuleId, fid: Idx<Function>) -> (Ustr, Ustr) {
         (
             self.module(mid).functions[fid].name,
@@ -489,13 +452,7 @@ impl Workspace {
         self.module(ModuleId::builtin())
     }
 
-    // Module lifetime and iteration contract. `modules` holds the synthetic
-    // builtin module (index 0, owner of every `Builtins` type node) beside the
-    // modules compiled from source. The builtin module is permanent: evicting
-    // it would dangle every builtin `TyId`, so eviction keeps it
-    // (`is_permanent_module`) and source-module counts and per-module
-    // iteration leave it out. Readers iterate through these methods instead of
-    // filtering `modules` themselves.
+    // Evicting the synthetic module at index zero would dangle builtin type IDs.
 
     /// Whether eviction must keep `mid`: only the builtin module.
     pub fn is_permanent_module(mid: ModuleId) -> bool {
@@ -722,13 +679,7 @@ pub enum BoundNext {
     Concrete {
         func: (ModuleId, Idx<Function>),
         sub: BoundTree,
-        /// `func`'s own generic instantiation at this site, callee `VarId` ->
-        /// caller-arena `TyId`. A `for`-protocol `next` call is SYNTHESIZED (it
-        /// has no call expr), so it can never be keyed in
-        /// `call_generic_bindings` -- this is the only record of what its
-        /// generics bound to, and skull needs it to specialize the callee body
-        /// (`VecIter<Vec2>.next` reading flat element storage rather than the
-        /// shared generic snapshot's boxed one).
+        /// Synthetic calls have no expression key in `call_generic_bindings`.
         next_generics: FxHashMap<VarId, TyId>,
     },
     /// The instantiation was the ENCLOSING fn's own bounded generic (bound
@@ -750,25 +701,14 @@ impl BoundTree {
     }
 }
 
-/// A synthesized `iter` call: the resolved fn plus its own generic
-/// instantiation, callee `VarId` -> caller-arena `TyId`.
-///
-/// Symmetric to [`BoundNext::Concrete`]'s `next_generics`, and for the same
-/// reason: a synthesized call has no call expr, so it can never be keyed in
-/// `call_generic_bindings`, and this is the only record of what its generics
-/// bound to. Empty for a non-generic `iter`. Resolution computes this
-/// substitution to type the call; retaining it recomputes nothing.
+/// The iterator protocol witness and its caller-arena type substitution.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IterWitness {
     pub func: (ModuleId, Idx<Function>),
     pub generics: FxHashMap<VarId, TyId>,
 }
 
-/// `for x in coll` resolution through the iterator protocol: the optional
-/// `iter` witness (`None` = identity, the collection IS the iterator -- bare
-/// combinator chains and bounded generics iterate as themselves) and how
-/// `next` resolves (concrete fn + bound tree, or the enclosing fn's bounded
-/// generic).
+/// Iterator witnesses. `None` for `iter` means the input is already an iterator.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ForIterInfo {
     pub iter: Option<IterWitness>,
@@ -786,17 +726,10 @@ pub struct BodyInference {
     /// MIR uses this to preserve the argument place instead of copying it.
     pub ref_call_args: FxHashMap<Idx<Expr>, Vec<Idx<Expr>>>,
     pub resolved_overload_calls: FxHashMap<Idx<Expr>, (ModuleId, Idx<Function>)>,
-    /// Calls to GENERIC fns: the winning candidate's instantiated generics in
-    /// declaration order, keyed like `resolved_overload_calls`. Entries may
-    /// still be inference vars at record time -- readers resolve through
-    /// `substitutions` like `expr_types`. skull's inliner reads this to
-    /// specialize value-instantiated `@inline` splices.
+    /// Instantiated generics in declaration order. Resolve them through
+    /// `substitutions` before use.
     pub call_generic_bindings: FxHashMap<Idx<Expr>, Vec<TyId>>,
-    /// `for x in <coll>` over a user type: the resolved iter/next protocol for
-    /// the desugar, keyed by the For's iter `Idx<Expr>`. Separate from
-    /// `resolved_overload_calls` so it can't collide with the collection
-    /// expr's own call resolution (e.g. `for x in foo()`). skull's `lower_for`
-    /// reads it to emit the desugared loop.
+    /// Iterator protocol witnesses, keyed by the loop's iter expression.
     pub for_iter_protocol: FxHashMap<Idx<Expr>, ForIterInfo>,
     /// In a body with `I: Iterator<E>` bounds: `next(x)` calls where `x: I`.
     /// Keyed by the call expr; value = the generic's index into the enclosing
@@ -823,20 +756,7 @@ pub struct BodyInference {
     /// wraps the lowered arg value in this call (the call-argument analog of
     /// `for_iter_protocol`'s `iter`).
     pub implicit_iter_args: FxHashMap<Idx<Expr>, IterWitness>,
-    /// `StructDefaults` bodies only: the fresh inference var each of the
-    /// struct's DECLARED generics was instantiated to, in declaration order.
-    /// Empty for every other body owner.
-    ///
-    /// Checking a field default replaces the declared `Generic(T)` with a fresh
-    /// var and coerces the initializer against the substituted field type, so
-    /// the default's own generic joins that var's class. Without this the map
-    /// is local to the check, and a consumer holding `Box<int>` cannot say
-    /// which var is `Box`'s generic 0 -- so the default lowers to the SHARED
-    /// generic body and names no instance. skull's `with_struct_default` binds
-    /// these to the literal's concrete arguments.
-    ///
-    /// Entries may still be unbound vars at record time; readers resolve
-    /// through `substitutions`, like `expr_types`.
+    /// Inferred variables for the declared generics in a struct default body.
     pub struct_default_generic_slots: Vec<TyId>,
 
     pub ty_arena: Arena<TypeExpr>,

@@ -1,17 +1,5 @@
-//! Macro expansion on skull-parser's arena AST.
-//!
-//! Runs as the FIRST cook stage, before desugar (bone's order), so the
-//! desugars see fully-expanded code.
-//!
-//! Expression-position macros (`macro f(a: expr, ...) { <rock body> }`),
-//! selected by arity (defaults widen the range), params substituted by deep
-//! copy, the call replaced by a `Block` of the substituted body. Macro bodies
-//! live in their defining module's arena, so inlining a body into a caller is a
-//! cross-arena graft (`graft.rs`). Macro defs are dropped after expansion.
-//!
-//! Expansion grafts the body in one copy that freshens its binders (hygiene),
-//! stamps the call site's span, splats `...rest` args and substitutes params.
-//! Item macros splice their substituted items at top level.
+//! Expand macro templates before desugaring. Expression calls graft a body
+//! into the caller; top-level invocations splice items into the module.
 
 use crate::ast::*;
 use crate::desugar::{BlockEdges, ExprEdges, child_blocks, child_exprs};
@@ -63,12 +51,7 @@ enum Frag {
 
 type Registry = UstrMap<Vec<MacroTemplate>>;
 
-/// Opaque, reusable macro registry: every macro overload collected from a whole
-/// workspace, keyed by name. Built once from the UN-expanded modules (expansion
-/// drops the defs, so it can't be rebuilt from already-expanded ASTs), then
-/// handed to `expand_one` / `cook_one` to expand a single module against it --
-/// the building block for re-cooking just one edited file incrementally. Holds
-/// its own grafted arenas, so it outlives the source modules.
+/// Pre-expansion templates owned independently of the source modules.
 #[derive(Clone, Debug, Default)]
 pub struct MacroRegistry(Registry);
 
@@ -77,12 +60,7 @@ impl MacroRegistry {
         self.0.is_empty()
     }
 
-    /// The definition name-span of the macro overload that `name(<argc args>)`
-    /// expands to, selected by the SAME arity rule as expansion
-    /// (`select_overload`), or None if no macro overload matches this arity --
-    /// so a same-named FN call (a different arity, e.g. the 3-arg `run_into`
-    /// fns beside the 2-arg macro) returns None and falls through to normal
-    /// definition resolution. Drives IDE goto-def on a macro invocation name.
+    /// Source name span used for navigation after an invocation is expanded.
     pub fn def_name_span(&self, name: Ustr, argc: usize) -> Option<Span> {
         select_overload(self.0.get(&name)?, argc).map(|t| t.def_name_span)
     }
@@ -95,20 +73,9 @@ pub fn collect_registry<'a>(modules: impl IntoIterator<Item = &'a Ast>) -> Macro
     MacroRegistry(build_registry(modules))
 }
 
-/// Every name expanding `ast` against a registry can look up: each
-/// identifier and member name in its expressions, each top-level invocation,
-/// and each macro it defines.
-///
-/// Expansion looks a name up only for a call whose callee is an identifier
-/// or a member, and for a top-level invocation; a same-named macro elsewhere
-/// joins a module's own overloads. Every expression an expansion of these
-/// modules builds is copied from their arenas (the call's arguments, the
-/// grafted bodies, defaults and items of their macros), or renamed to a
-/// hygiene local ([`is_hygiene_name`]). So expanding a set of modules
-/// against a non-empty registry plus macros under none of the names the set
-/// reaches, and no hygiene name, expands every module as the registry alone
-/// does. (Against an empty registry a top-level invocation is not expanded
-/// at all; a set with one needs a registry that holds a macro.)
+/// Names whose registry entries could affect expansion of this AST.
+/// Include member calls and top-level invocations so a retained module
+/// can be recooked when one of their macro definitions changes.
 pub fn macro_reach(ast: &Ast) -> impl Iterator<Item = Ustr> + '_ {
     let exprs = ast.exprs.values().filter_map(|data| match &data.kind {
         ExprKind::Ident(id) => Some(id.name),
@@ -131,15 +98,7 @@ pub fn is_hygiene_name(name: &str) -> bool {
 
 const HYGIENE_PREFIX: &str = "__inline_local_";
 
-/// A macro name must be UNIQUE against top-level FUNCTION names across the whole
-/// module set: `foo(...)` in call position is ambiguous when both a `macro foo`
-/// and a `fn foo` exist (expansion would silently claim the call and shadow the
-/// fn), so it is rejected -- a macro always has exactly one meaning. Macro
-/// OVERLOADS stay legal when no argument count selects two of them; a same-named LOCAL binding
-/// (param, nested fn, `let`) legally shadows a macro and is not a top-level fn,
-/// so it never collides. Cross-module: all parsed modules share one namespace,
-/// so this runs over the full parsed set before expansion erases the macro defs.
-/// Run on the pre-expansion modules (expansion drops the `is_macro` items).
+/// Reject conflicting function names and overlapping overloads of equal priority.
 pub fn check_macro_name_uniqueness<'a>(
     modules: impl IntoIterator<Item = &'a Ast> + Clone,
 ) -> Vec<CompilerError> {
@@ -269,13 +228,7 @@ fn call_label_errors(m: &Ast, reg: &Registry) -> Vec<CompilerError> {
     errs
 }
 
-/// Expand every macro call in a SINGLE module against a prebuilt `registry`,
-/// then drop that module's macro defs. This is the per-module unit that
-/// `expand_macros` applies to each module -- exposed so an incremental driver
-/// can re-expand just one edited file. Independent across modules (the registry
-/// is prebuilt and expansion only mutates `ast`), so `expand_one` over each
-/// module yields exactly the batch `expand_macros` result. Idempotent on an
-/// already-expanded module: defs are gone and no registered call remains.
+/// Expand a module using the workspace registry, then remove its macro definitions.
 pub(crate) fn expand_one(ast: &mut Ast, registry: &MacroRegistry) {
     let reg = &registry.0;
     let errors = call_label_errors(ast, reg);
@@ -313,13 +266,7 @@ pub fn expand_macros(modules: &mut [Ast]) {
     });
 }
 
-/// Allocation-free over-approximation of "does any expression in `ast` invoke a
-/// registered macro?": a flat scan of the expr arena for a `FunctionCall` whose
-/// callee is an `Ident` naming a registry key — exactly `try_expand`'s trigger.
-/// A `false` is exact (the recursive walk would do nothing); a `true` may also
-/// match a macro-def body's inner call (those items are skipped by
-/// `expand_in_ast` anyway), so the worst case is a redundant walk, never a
-/// missed expansion. Output stays byte-identical (gated by `skull-cook-diff`).
+/// Skip the recursive walk only if no expression can name a registered macro.
 fn module_calls_macro(ast: &Ast, reg: &Registry) -> bool {
     ast.exprs.values().any(|data| {
         if let ExprKind::FunctionCall { func, .. } = &data.kind {
@@ -587,11 +534,7 @@ fn expand_in_ast(ast: &mut Ast, reg: &Registry) {
     }
 }
 
-/// Names bound by enclosing user scopes at the current point of the expansion
-/// walk. A call whose callee is shadowed is a real call to that binding (a
-/// fn-typed param, a local fn value, a nested `fn`), never a macro invocation —
-/// without this, `macro key(..)` captures the stdlib's `min_by(it, key: ..)`
-/// body call `key(x)` and splices itself into the stdlib AST.
+/// A local binding shadows a bare macro callee of the same name.
 type ShadowScope = UstrSet;
 
 fn is_shadowed(stack: &[ShadowScope], name: Ustr) -> bool {
@@ -852,13 +795,7 @@ fn try_expand(
         return;
     }
 
-    // Bind params: a regular param takes the arg that names it or the next
-    // positional one (or its default); a variadic param captures all trailing
-    // args, spliced wherever the body forwards `...rest`.
-    //
-    // A binding error is reported by the expansion preflight, which runs the
-    // same binder before the compile proceeds; leaving the call unexpanded here
-    // is what makes that report the only thing the user sees.
+    // The preflight already reports invalid labels. Leave the call in place.
     let Ok(bound) = bind_macro_args(&tmpl.params, &macro_args(receiver, args)) else {
         return;
     };
@@ -890,12 +827,7 @@ fn try_expand(
     // Expand macros that appear inside the spliced body (macros calling macros).
     expand_block(ast, body, reg, depth + 1, stack);
 
-    // Reduce the body to its yielded value (rock's `extract_body_expr`): a lone
-    // statement collapses to its bare trailing expr, a multi-statement body stays
-    // a block. A declared return type then ascribes the result, giving bone the
-    // same expected-type signal rock's expansion does
-    // (e.g. nullable-branch unification in a `-> int?` macro). Unconditional when
-    // a return type is present (rock parity, `8bb1ea55e`).
+    // Preserve the expected type supplied by a macro return annotation.
     let value = extract_body_value(ast, body);
     ast.exprs[e].kind = match tmpl.return_ty {
         Some(rt) => {

@@ -1,9 +1,4 @@
-//! Arena-allocated surface AST for skull-parser.
-//!
-//! Every child edge is an arena `Idx` instead of a `Box`/`Vec<T>`, and
-//! there is no `AstNodeId` — an `Idx<ExprData>` *is* the node's identity
-//! within a module (plan decision 5). One `Ast` per parsed module
-//! (decision 6).
+//! Surface syntax and source spans stored in typed arenas.
 
 use crate::OrderedFloat;
 pub use comfy_la_arena::{Arena, Idx};
@@ -18,14 +13,7 @@ pub struct Ident {
 }
 
 impl Ident {
-    /// If this ident names a tuple/newtype positional field (`.0`, `.1`,
-    /// ...), return the index. The parser emits `.N`/`?.N` as a
-    /// `FieldAccess`/`SafeNavigation` with an all-digit field name; since
-    /// Rock identifiers cannot begin with a digit, an all-digit name can
-    /// only be such a synthetic index (and is always canonical, no leading
-    /// zeros — it round-trips through `to_string`). This is the single
-    /// source of truth for "is this a tuple index?" across resolution,
-    /// codegen, the formatter, and the LSP.
+    /// Decode a positional field, such as `.0`. The parser sets its span to the digits.
     pub fn tuple_index(&self) -> Option<usize> {
         self.name.parse::<usize>().ok()
     }
@@ -325,11 +313,7 @@ pub enum Pattern {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockData {
     pub span: Span,
-    /// Real `{` / `}` token spans. `None` for synthetic braceless blocks
-    /// (lambda `=> expr` bodies, `@`-trailing-lambda bodies, match-arm
-    /// `=> expr` bodies, macro-expansion retagged blocks) -- consumers that
-    /// mark brace positions (bone-lower's block lapper entries) must emit
-    /// nothing for these rather than derive positions from `span`.
+    /// Delimiters for written blocks. Synthetic blocks have no brace spans.
     pub braces: Option<(Span, Span)>,
     pub statements: Vec<Idx<StatementData>>,
 }
@@ -411,11 +395,7 @@ pub struct Static {
     pub value: Idx<ExprData>,
 }
 
-/// `fn <name>(params) [-> ret] { body }` written inside a fn body -- hoisted to
-/// a private top-level function, callable by name and passable as a zero-alloc
-/// value. v1: no generics, no annotations,
-/// decl-before-use (self-recursion ok, no forward/mutual recursion) -- the last
-/// enforced in bone-lower, not here.
+/// A named block-bodied function declared in another function.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NestedFn {
     pub span: Span,
@@ -528,17 +508,7 @@ pub struct Generic {
     pub default: Option<Idx<TypeExprData>>,
 }
 
-/// Which backend a function's body / extern binding targets. `Lua` and `Js` are
-/// the concrete codegen targets; a backend-specific body (`inline(lua)` /
-/// `inline(js)`) or extern (`extern(lua)` / `extern(js)`) is emitted only by its
-/// backend and inert on the others. `Any` is not produced by the parser (a plain
-/// Rock body / `extern` / `extern(ffi,..)` carries no explicit backend tag here);
-/// it exists so the HIR-side [`FnBackend`] the bone layer reuses can mark portable
-/// decls that any backend may emit.
-/// Declaration order is bone's `backend_rank` (`bone-inference/src/calls.rs`):
-/// `Any` < `Lua` < `Js`, the preference order a backend-variant group collapses
-/// to its representative by. `Ord` is derived from it so a key that includes a
-/// backend cannot introduce a second one.
+/// Concrete target of an inline or foreign declaration. `Any` is portable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FnBackend {
     Any,
@@ -602,11 +572,7 @@ pub struct FunctionDef {
     /// for non-macros and expression-only macros. Spliced at module scope when
     /// the macro is invoked as a top-level statement.
     pub macro_items: Vec<Item>,
-    /// D-form surface (`fn Mob.take_damage(m, ..)`), set only by the parser:
-    /// the receiver path ident as written + how many leading entries of
-    /// `generics` came from the path (the print split point). The DESUGARED
-    /// truth lives in the normal fields (generics merged, param 0 carries the
-    /// receiver type); every consumer except skull-fmt must ignore this.
+    /// Written receiver tail and the formatter's split in the generics list.
     pub receiver_surface: Option<(Ident, usize)>,
 }
 
@@ -779,11 +745,7 @@ pub enum UseSuffix {
     BindAs(Ident),
     /// `use a::*;` — immediate accessible members.
     Glob,
-    /// `use a::operator(+);` — the glyph family under a nameable selector;
-    /// `op` is its internal family name (`__op_add`, or the unary family
-    /// name for `!`). `-` uses its binary name as the selector anchor and the
-    /// resolver follows its unary sibling. With `as add` the
-    /// import binds only `add`, not the glyph.
+    /// Operator family name and the written selector span.
     Operator { op: Ident, alias: Option<Ident> },
     /// `use a::b::{ .. }` — sub-trees, each relative (`c`, `d::e as f`,
     /// `self`, `operator(+)', nested braces).
@@ -859,20 +821,9 @@ pub struct Ast {
     pub blocks: Arena<BlockData>,
     pub types: Arena<TypeExprData>,
     pub items: Vec<Item>,
-    /// Syntax errors the parser recovered from (item- and statement-level
-    /// recovery dropped the malformed span to keep parsing). NON-EMPTY means the
-    /// source did not parse cleanly. The parse is TOTAL -- `parse_module` always
-    /// returns the best-effort `Ast` with these attached; strictness is a
-    /// downstream policy (the CLI compile/test gate in `rock-cli` rejects on the
-    /// first, while the interactive `Session`/LSP keep the partial tree and surface
-    /// them as diagnostics). Empty for any valid program.
+    /// Item and statement errors from recovery. A nonempty list rejects compilation.
     pub recovery_errors: Vec<CompilerError>,
-    /// Per macro parameter, the spans of its declaration and every use inside
-    /// the macro's template (body + spliced items) -- recorded by the parser as
-    /// it finishes a macro definition (`finish_fn_def` -> `index_macro_param_refs`),
-    /// since the parser is the one phase that sees the template with its source
-    /// spans (expansion retags clones onto the call site). Drives IDE
-    /// references/rename for macro params.
+    /// Declaration and use spans from macro templates, before expansion rewrites them.
     pub macro_param_refs: Vec<MacroParamRef>,
 }
 
@@ -891,13 +842,7 @@ impl Ast {
         Self::default()
     }
 
-    /// Pre-size the arenas from the module's token count so a parse does a
-    /// single up-front allocation per arena instead of the ~log2(N) doubling
-    /// reallocations (each a memmove of the live elements) a from-empty grow
-    /// incurs. Ratios measured over a corpus of real modules:
-    /// exprs ~0.40, stmts ~0.09, types ~0.043, blocks ~0.028 of tokens; the
-    /// divisors round up a margin so a typical module never re-grows. `items`
-    /// is a plain `Vec` reserved by the same model.
+    /// Size the arenas from the token count to avoid growing them during parsing.
     pub fn with_capacity(tokens: usize) -> Self {
         Ast {
             exprs: Arena::with_capacity(tokens / 2),
