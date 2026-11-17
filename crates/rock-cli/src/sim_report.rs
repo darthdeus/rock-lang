@@ -17,8 +17,10 @@
 //! or mutates a run record. History is deliberately never auto-pruned.
 
 use anyhow::{Context, Result, bail};
-use serde_json::{Map, Value, json};
-use std::collections::{BTreeMap, HashMap};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 /// The only schema this reader knows how to interpret.
@@ -221,7 +223,7 @@ impl Envelope {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 struct FrameTiming {
     frames: i64,
     draw_frames: i64,
@@ -233,69 +235,35 @@ struct FrameTiming {
 
 impl FrameTiming {
     fn parse(value: Option<&Value>, frame_count: Option<i64>) -> (Option<Self>, bool) {
-        let Some(value) = value.filter(|value| !value.is_null()) else {
-            return (None, false);
+        let object = match value {
+            None | Some(Value::Null) => return (None, false),
+            Some(value @ Value::Object(_)) => value,
+            Some(_) => return (None, true),
         };
-        let number = |name: &str| value.get(name).and_then(Value::as_i64);
-        let Some(frames) = number("frames") else {
-            return (None, true);
-        };
-        let Some(draw_frames) = number("draw_frames") else {
-            return (None, true);
-        };
-        let Some(submitted_frames) = number("submitted_frames") else {
-            return (None, true);
-        };
-        let Some(logic_us) = number("logic_us") else {
-            return (None, true);
-        };
-        let Some(render_cpu_us) = number("render_cpu_us") else {
-            return (None, true);
-        };
-        let Some(present_us) = number("present_us") else {
+        let Ok(timing) = Self::deserialize(object) else {
             return (None, true);
         };
         if [
-            frames,
-            draw_frames,
-            submitted_frames,
-            logic_us,
-            render_cpu_us,
-            present_us,
+            timing.frames,
+            timing.draw_frames,
+            timing.submitted_frames,
+            timing.logic_us,
+            timing.render_cpu_us,
+            timing.present_us,
         ]
         .iter()
         .any(|value| *value < 0)
-            || frame_count.is_some_and(|count| count != frames)
-            || draw_frames > frames
-            || submitted_frames > draw_frames
+            || frame_count.is_some_and(|count| count != timing.frames)
+            || timing.draw_frames > timing.frames
+            || timing.submitted_frames > timing.draw_frames
         {
             return (None, true);
         }
-        (
-            Some(Self {
-                frames,
-                draw_frames,
-                submitted_frames,
-                logic_us,
-                render_cpu_us,
-                present_us,
-            }),
-            false,
-        )
-    }
-
-    fn value(&self) -> Value {
-        json!({
-            "frames": self.frames,
-            "draw_frames": self.draw_frames,
-            "submitted_frames": self.submitted_frames,
-            "logic_us": self.logic_us,
-            "render_cpu_us": self.render_cpu_us,
-            "present_us": self.present_us,
-        })
+        (Some(timing), false)
     }
 }
 
+#[derive(Default)]
 struct FrameTimingStats {
     known: usize,
     missing: usize,
@@ -310,17 +278,7 @@ struct FrameTimingStats {
 
 impl FrameTimingStats {
     fn from_envelopes(envelopes: &[Envelope]) -> Self {
-        let mut stats = Self {
-            known: 0,
-            missing: 0,
-            invalid: 0,
-            frames: 0,
-            draw_frames: 0,
-            submitted_frames: 0,
-            logic_us: 0,
-            render_cpu_us: 0,
-            present_us: 0,
-        };
+        let mut stats = Self::default();
         for envelope in envelopes {
             if envelope.frame_timing_invalid {
                 stats.invalid += 1;
@@ -550,15 +508,9 @@ pub(crate) fn analyze(record: &RunRecord) -> SimRunAnalysis {
         .flatten();
 
     let mut verdicts: BTreeMap<String, i64> = BTreeMap::new();
-    let mut verdict_by_entry: HashMap<(i64, i64), String> = HashMap::new();
     for result in record.of("entry_result") {
         if let Some(verdict) = text(result, "verdict") {
             *verdicts.entry(verdict.to_string()).or_insert(0) += 1;
-            if let (Some(occurrence), Some(attempt)) =
-                (int(result, "occurrence_id"), int(result, "worker_attempt"))
-            {
-                verdict_by_entry.insert((occurrence, attempt), verdict.to_string());
-            }
         }
     }
 
@@ -593,7 +545,7 @@ pub(crate) fn analyze(record: &RunRecord) -> SimRunAnalysis {
         open.entry(key).or_insert(start);
     }
     let mut envelopes = Vec::new();
-    let mut closed: HashMap<(i64, i64), ()> = HashMap::new();
+    let mut closed = HashSet::new();
     let mut entries_ended_without_start = 0usize;
     for end in record.of("entry_end") {
         let key = (
@@ -604,7 +556,7 @@ pub(crate) fn analyze(record: &RunRecord) -> SimRunAnalysis {
             entries_ended_without_start += 1;
             continue;
         };
-        if closed.insert(key, ()).is_some() {
+        if !closed.insert(key) {
             continue;
         }
         let frame_count = int(end, "frame_count");
@@ -861,26 +813,27 @@ impl SimRunAnalysis {
     }
 
     pub(crate) fn render_json(&self) -> Result<String> {
-        let mut run = Map::new();
-        run.insert("run_id".into(), json!(self.run_id));
-        run.insert("directory".into(), json!(self.dir.to_string_lossy()));
-        run.insert("status".into(), json!(self.status));
-        run.insert("complete".into(), json!(self.complete));
-        run.insert("run_end_present".into(), json!(self.run_end_present));
-        run.insert("wall_ms".into(), json!(self.wall_ms));
-        run.insert("observed_span_ms".into(), json!(self.observed_span_ms));
-        run.insert("planned_entries".into(), json!(self.planned_entries));
-        run.insert("finalized_entries".into(), json!(self.finalized_entries));
-        run.insert("verdicts".into(), json!(self.verdicts));
-        run.insert("error".into(), json!(self.error));
-        run.insert("project".into(), json!(self.project));
-        run.insert("selection".into(), json!(self.selection));
-        run.insert("revision".into(), json!(self.revision));
-        run.insert("dirty".into(), json!(self.dirty));
-        run.insert("requested_jobs".into(), json!(self.requested_jobs));
-        run.insert("effective_jobs".into(), json!(self.effective_jobs));
-        run.insert("boots".into(), json!(self.workers.len()));
-        run.insert("skipped_records".into(), json!(self.skipped_records));
+        let run = json!({
+            "run_id": self.run_id,
+            "directory": self.dir.to_string_lossy(),
+            "status": self.status,
+            "complete": self.complete,
+            "run_end_present": self.run_end_present,
+            "wall_ms": self.wall_ms,
+            "observed_span_ms": self.observed_span_ms,
+            "planned_entries": self.planned_entries,
+            "finalized_entries": self.finalized_entries,
+            "verdicts": self.verdicts,
+            "error": self.error,
+            "project": self.project,
+            "selection": self.selection,
+            "revision": self.revision,
+            "dirty": self.dirty,
+            "requested_jobs": self.requested_jobs,
+            "effective_jobs": self.effective_jobs,
+            "boots": self.workers.len(),
+            "skipped_records": self.skipped_records,
+        });
 
         let time = json!({
             "entries_with_envelope": self.envelopes.len(),
@@ -934,7 +887,7 @@ impl SimRunAnalysis {
                     "end_ms": envelope.end_ms,
                     "duration_ms": envelope.duration_ms(),
                     "frame_count": envelope.frame_count,
-                    "frame_timing": envelope.frame_timing.as_ref().map(FrameTiming::value),
+                    "frame_timing": envelope.frame_timing,
                 })
             })
             .collect();
@@ -998,7 +951,7 @@ impl SimRunAnalysis {
 
         Ok(serde_json::to_string_pretty(&json!({
             "mode": "run",
-            "run": Value::Object(run),
+            "run": run,
             "time": time,
             "slowest_entries": slowest,
             "boot": boot,
@@ -1015,388 +968,308 @@ impl SimRunAnalysis {
             "timings": timings,
         }))?)
     }
+}
 
-    pub(crate) fn render_text(&self) -> String {
-        let mut out = String::new();
-        let push = |out: &mut String, line: String| {
-            out.push_str(&line);
-            out.push('\n');
-        };
-
-        push(&mut out, format!("sim run {}", self.run_id));
-        push(
-            &mut out,
-            format!("  record          {}", self.dir.display()),
-        );
-        push(
-            &mut out,
-            format!(
-                "  status          {}{}",
-                self.status,
-                if self.run_end_present {
-                    String::new()
-                } else {
-                    " (no run_end: the invocation ended before the parent wrote it)".to_string()
-                }
-            ),
-        );
+impl fmt::Display for SimRunAnalysis {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(out, "sim run {}", self.run_id)?;
+        writeln!(out, "  record          {}", self.dir.display())?;
+        writeln!(
+            out,
+            "  status          {}{}",
+            self.status,
+            if self.run_end_present {
+                String::new()
+            } else {
+                " (no run_end: the invocation ended before the parent wrote it)".to_string()
+            },
+        )?;
         if let Some(error) = &self.error {
-            push(&mut out, format!("  error           {error}"));
+            writeln!(out, "  error           {error}")?;
         }
         match self.wall_ms {
-            Some(wall) => push(&mut out, format!("  wall            {}", secs(wall))),
-            None => push(
-                &mut out,
-                format!(
-                    "  wall            unavailable; observed span {}",
-                    secs(self.observed_span_ms)
-                ),
-            ),
+            Some(wall) => writeln!(out, "  wall            {}", secs(wall))?,
+            None => writeln!(
+                out,
+                "  wall            unavailable; observed span {}",
+                secs(self.observed_span_ms),
+            )?,
         }
-        push(
-            &mut out,
-            format!(
-                "  entries         {} planned / {} finalized",
-                self.planned_entries, self.finalized_entries
-            ),
-        );
+        writeln!(
+            out,
+            "  entries         {} planned / {} finalized",
+            self.planned_entries, self.finalized_entries,
+        )?;
         let verdicts = self
             .verdicts
             .iter()
             .map(|(verdict, count)| format!("{count} {verdict}"))
             .collect::<Vec<_>>()
             .join(", ");
-        push(
-            &mut out,
-            format!(
-                "  verdicts        {}",
-                if verdicts.is_empty() {
-                    "none recorded".to_string()
-                } else {
-                    verdicts
-                }
-            ),
-        );
-        push(
-            &mut out,
-            format!(
-                "  source          {}{}",
-                self.revision.as_deref().unwrap_or("unavailable"),
-                match self.dirty {
-                    Some(true) => " (dirty)",
-                    Some(false) => " (clean)",
-                    None => "",
-                }
-            ),
-        );
-        push(
-            &mut out,
-            format!(
-                "  jobs            {} requested / {} effective",
-                self.requested_jobs
-                    .map(|j| j.to_string())
-                    .unwrap_or_else(|| "?".into()),
-                self.effective_jobs
-                    .map(|j| j.to_string())
-                    .unwrap_or_else(|| "?".into())
-            ),
-        );
-        push(
-            &mut out,
-            format!("  workers         {} boots", self.workers.len()),
-        );
+        writeln!(
+            out,
+            "  verdicts        {}",
+            if verdicts.is_empty() {
+                "none recorded".to_string()
+            } else {
+                verdicts
+            },
+        )?;
+        writeln!(
+            out,
+            "  source          {}{}",
+            self.revision.as_deref().unwrap_or("unavailable"),
+            match self.dirty {
+                Some(true) => " (dirty)",
+                Some(false) => " (clean)",
+                None => "",
+            },
+        )?;
+        writeln!(
+            out,
+            "  jobs            {} requested / {} effective",
+            self.requested_jobs
+                .map(|j| j.to_string())
+                .unwrap_or_else(|| "?".into()),
+            self.effective_jobs
+                .map(|j| j.to_string())
+                .unwrap_or_else(|| "?".into()),
+        )?;
+        writeln!(out, "  workers         {} boots", self.workers.len())?;
         if self.skipped_records > 0 {
-            push(
-                &mut out,
-                format!(
-                    "  skipped         {} record(s) this reader could not interpret",
-                    self.skipped_records
-                ),
-            );
+            writeln!(
+                out,
+                "  skipped         {} record(s) this reader could not interpret",
+                self.skipped_records,
+            )?;
         }
 
-        push(&mut out, String::new());
-        push(&mut out, "time decomposition".to_string());
-        push(
-            &mut out,
-            format!(
-                "  worker span     {}   ({} worker(s))",
-                secs(self.worker_span_total_ms),
-                self.workers.len()
-            ),
-        );
-        push(
-            &mut out,
-            format!(
-                "    in envelopes  {}  {:>5.1}%",
-                secs(self.inside_envelopes_ms),
-                pct(self.inside_envelopes_ms, self.worker_span_total_ms)
-            ),
-        );
-        push(
-            &mut out,
-            format!(
-                "    startup       {}  {:>5.1}%   {} boot(s), median {}",
-                secs(self.startup_latency_ms),
-                pct(self.startup_latency_ms, self.worker_span_total_ms),
-                self.startup_boots,
-                self.startup_median_ms
-                    .map(|v| format!("{v} ms"))
-                    .unwrap_or_else(|| "n/a".into())
-            ),
-        );
-        push(
-            &mut out,
-            format!(
-                "    remainder     {}  {:>5.1}%",
-                secs(self.remainder_ms),
-                pct(self.remainder_ms, self.worker_span_total_ms)
-            ),
-        );
+        writeln!(out)?;
+        writeln!(out, "time decomposition")?;
+        writeln!(
+            out,
+            "  worker span     {}   ({} worker(s))",
+            secs(self.worker_span_total_ms),
+            self.workers.len(),
+        )?;
+        writeln!(
+            out,
+            "    in envelopes  {}  {:>5.1}%",
+            secs(self.inside_envelopes_ms),
+            pct(self.inside_envelopes_ms, self.worker_span_total_ms),
+        )?;
+        writeln!(
+            out,
+            "    startup       {}  {:>5.1}%   {} boot(s), median {}",
+            secs(self.startup_latency_ms),
+            pct(self.startup_latency_ms, self.worker_span_total_ms),
+            self.startup_boots,
+            self.startup_median_ms
+                .map(|v| format!("{v} ms"))
+                .unwrap_or_else(|| "n/a".into()),
+        )?;
+        writeln!(
+            out,
+            "    remainder     {}  {:>5.1}%",
+            secs(self.remainder_ms),
+            pct(self.remainder_ms, self.worker_span_total_ms),
+        )?;
         if self.drain_overhang_ms > 0 || self.workers_without_end > 0 {
-            push(
-                &mut out,
-                format!(
-                    "  drain overhang  {} (entry lines read after the reap); {} worker(s) never reaped",
-                    secs(self.drain_overhang_ms),
-                    self.workers_without_end
-                ),
-            );
+            writeln!(
+                out,
+                "  drain overhang  {} (entry lines read after the reap); {} worker(s) never reaped",
+                secs(self.drain_overhang_ms),
+                self.workers_without_end,
+            )?;
         }
-        push(
-            &mut out,
-            format!(
-                "  envelopes       {} over {} entry/entries",
-                secs(self.inside_envelopes_ms),
-                self.envelopes.len()
-            ),
-        );
+        writeln!(
+            out,
+            "  envelopes       {} over {} entry/entries",
+            secs(self.inside_envelopes_ms),
+            self.envelopes.len(),
+        )?;
         if self.entries_started_without_end > 0 || self.entries_ended_without_start > 0 {
-            push(
-                &mut out,
-                format!(
-                    "  unmatched       {} started without an end, {} ended without a start",
-                    self.entries_started_without_end, self.entries_ended_without_start
-                ),
-            );
+            writeln!(
+                out,
+                "  unmatched       {} started without an end, {} ended without a start",
+                self.entries_started_without_end, self.entries_ended_without_start,
+            )?;
         }
         if let (Some(wall), Some(ideal)) = (self.wall_ms, self.ideal_ms_at_effective_jobs()) {
-            push(
-                &mut out,
-                format!(
-                    "  vs wall         {} wall, {} ideal at {} job(s)",
-                    secs(wall),
-                    secs(ideal),
-                    self.effective_jobs.or(self.requested_jobs).unwrap_or(0)
-                ),
-            );
+            writeln!(
+                out,
+                "  vs wall         {} wall, {} ideal at {} job(s)",
+                secs(wall),
+                secs(ideal),
+                self.effective_jobs.or(self.requested_jobs).unwrap_or(0),
+            )?;
         }
-        push(
-            &mut out,
-            "  note: worker_started -> worker_first_entry is startup latency.".to_string(),
-        );
-        push(
-            &mut out,
-            format!(
-                "  frames          {}/{} known, total {}, min {}, median {}, max {}",
-                self.frame_counts.known,
-                self.frame_counts.known + self.frame_counts.missing,
-                self.frame_counts.total,
-                self.frame_counts
-                    .min
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "n/a".into()),
-                self.frame_counts
-                    .median
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "n/a".into()),
-                self.frame_counts
-                    .max
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "n/a".into())
-            ),
-        );
+        writeln!(
+            out,
+            "  note: worker_started -> worker_first_entry is startup latency."
+        )?;
+        writeln!(
+            out,
+            "  frames          {}/{} known, total {}, min {}, median {}, max {}",
+            self.frame_counts.known,
+            self.frame_counts.known + self.frame_counts.missing,
+            self.frame_counts.total,
+            self.frame_counts
+                .min
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "n/a".into()),
+            self.frame_counts
+                .median
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "n/a".into()),
+            self.frame_counts
+                .max
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "n/a".into()),
+        )?;
         let frame_timing_entries =
             self.frame_timing.known + self.frame_timing.missing + self.frame_timing.invalid;
-        push(
-            &mut out,
-            format!(
-                "  frame phases    {}/{} known, {} frames, {} draw, {} submitted; logic {:.3}s, render CPU {:.3}s, present {:.3}s",
-                self.frame_timing.known,
-                frame_timing_entries,
-                self.frame_timing.frames,
-                self.frame_timing.draw_frames,
-                self.frame_timing.submitted_frames,
-                self.frame_timing.logic_us as f64 / 1_000_000.0,
-                self.frame_timing.render_cpu_us as f64 / 1_000_000.0,
-                self.frame_timing.present_us as f64 / 1_000_000.0,
-            ),
-        );
+        writeln!(
+            out,
+            "  frame phases    {}/{} known, {} frames, {} draw, {} submitted; logic {:.3}s, render CPU {:.3}s, present {:.3}s",
+            self.frame_timing.known,
+            frame_timing_entries,
+            self.frame_timing.frames,
+            self.frame_timing.draw_frames,
+            self.frame_timing.submitted_frames,
+            self.frame_timing.logic_us as f64 / 1_000_000.0,
+            self.frame_timing.render_cpu_us as f64 / 1_000_000.0,
+            self.frame_timing.present_us as f64 / 1_000_000.0,
+        )?;
         if self.frame_timing.invalid > 0 {
-            push(
-                &mut out,
-                format!(
-                    "  frame phases    {} invalid entry timing record(s); totals exclude them",
-                    self.frame_timing.invalid
-                ),
-            );
+            writeln!(
+                out,
+                "  frame phases    {} invalid entry timing record(s); totals exclude them",
+                self.frame_timing.invalid,
+            )?;
         }
-        push(
-            &mut out,
+        writeln!(
+            out,
             "  note: render CPU ends before swap; it is not GPU time, and present may include sync wait."
-                .to_string(),
-        );
-        push(&mut out, String::new());
-        push(
-            &mut out,
-            format!("slowest entry envelopes (top {DEFAULT_TOP})"),
-        );
+        )?;
+        writeln!(out)?;
+        writeln!(out, "slowest entry envelopes (top {DEFAULT_TOP})")?;
         for envelope in self.slowest() {
-            push(
-                &mut out,
-                format!(
-                    "  {:>9}  {}  (occurrence {}, worker {}, frames {})",
-                    secs(envelope.duration_ms()),
-                    envelope.name,
-                    envelope.occurrence_id,
-                    envelope.worker_attempt,
-                    envelope
-                        .frame_count
-                        .map(|value| value.to_string())
-                        .unwrap_or_else(|| "n/a".into())
-                ),
-            );
+            writeln!(
+                out,
+                "  {:>9}  {}  (occurrence {}, worker {}, frames {})",
+                secs(envelope.duration_ms()),
+                envelope.name,
+                envelope.occurrence_id,
+                envelope.worker_attempt,
+                envelope
+                    .frame_count
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "n/a".into()),
+            )?;
         }
 
-        push(&mut out, String::new());
-        push(&mut out, "boot".to_string());
-        push(&mut out, "  worst boot:work".to_string());
+        writeln!(out)?;
+        writeln!(out, "boot")?;
+        writeln!(out, "  worst boot:work")?;
         for (worker, ratio) in self.worst_boot_to_work() {
-            push(
-                &mut out,
-                format!(
-                    "    {:>6.2}x  {}  (boot {}, work {}, {} entry/entries)",
-                    ratio,
-                    worker.first_entry_name.as_deref().unwrap_or("<unknown>"),
-                    secs(worker.startup_ms.unwrap_or(0)),
-                    secs(worker.work_ms),
-                    worker.entries
-                ),
-            );
+            writeln!(
+                out,
+                "    {:>6.2}x  {}  (boot {}, work {}, {} entry/entries)",
+                ratio,
+                worker.first_entry_name.as_deref().unwrap_or("<unknown>"),
+                secs(worker.startup_ms.unwrap_or(0)),
+                secs(worker.work_ms),
+                worker.entries,
+            )?;
         }
 
-        push(&mut out, String::new());
-        push(
-            &mut out,
-            "worker admission (overlapping worker-time, not gate wall time)".to_string(),
-        );
+        writeln!(out)?;
+        writeln!(
+            out,
+            "worker admission (overlapping worker-time, not gate wall time)"
+        )?;
         if self.admissions.is_empty() {
-            push(
-                &mut out,
-                "  unavailable: no completed admission observations".to_string(),
-            );
+            writeln!(out, "  unavailable: no completed admission observations")?;
         }
         for row in self.admissions.iter().take(5) {
-            push(
-                &mut out,
-                format!(
-                    "  {}: {:.3}s admission, {:.3}s checks; wait_ms_by_reason={:?}",
-                    row.name,
-                    row.admission_ms as f64 / 1000.0,
-                    row.checks_ms as f64 / 1000.0,
-                    row.wait_ms_by_reason
-                ),
-            );
+            writeln!(
+                out,
+                "  {}: {:.3}s admission, {:.3}s checks; wait_ms_by_reason={:?}",
+                row.name,
+                row.admission_ms as f64 / 1000.0,
+                row.checks_ms as f64 / 1000.0,
+                row.wait_ms_by_reason,
+            )?;
         }
         if self.invalid_admissions > 0 {
-            push(
-                &mut out,
-                format!(
-                    "  {} invalid admission observations",
-                    self.invalid_admissions
-                ),
-            );
+            writeln!(
+                out,
+                "  {} invalid admission observations",
+                self.invalid_admissions,
+            )?;
         }
-        push(&mut out, "worker occupancy".to_string());
+        writeln!(out, "worker occupancy")?;
         for (live, span) in self.occupancy.histogram.iter().rev() {
-            push(
-                &mut out,
-                format!(
-                    "  {live:>3} live  {:>9}  {:>5.1}% of {}",
-                    secs(*span),
-                    pct(*span, self.occupancy.base_ms),
-                    if self.wall_ms.is_some() {
-                        "wall"
-                    } else {
-                        "observed span"
-                    }
-                ),
-            );
+            writeln!(
+                out,
+                "  {live:>3} live  {:>9}  {:>5.1}% of {}",
+                secs(*span),
+                pct(*span, self.occupancy.base_ms),
+                if self.wall_ms.is_some() {
+                    "wall"
+                } else {
+                    "observed span"
+                },
+            )?;
         }
-        push(
-            &mut out,
-            format!("  mean live       {:.2}", self.occupancy.mean_live),
-        );
-        push(
-            &mut out,
-            format!(
-                "  ramp to full    {}",
-                self.occupancy
-                    .ramp_to_full_ms
-                    .map(secs)
-                    .unwrap_or_else(|| "never reached the effective job count".into())
-            ),
-        );
-        push(
-            &mut out,
-            format!(
-                "  under-occupied tail  {}",
-                secs(self.occupancy.under_occupied_tail_ms)
-            ),
-        );
-        push(
-            &mut out,
-            format!(
-                "  idle            {} before the first worker, {} after the last reap",
-                secs(self.occupancy.idle_before_first_worker_ms),
-                secs(self.occupancy.idle_after_last_worker_ms)
-            ),
-        );
+        writeln!(out, "  mean live       {:.2}", self.occupancy.mean_live)?;
+        writeln!(
+            out,
+            "  ramp to full    {}",
+            self.occupancy
+                .ramp_to_full_ms
+                .map(secs)
+                .unwrap_or_else(|| "never reached the effective job count".into()),
+        )?;
+        writeln!(
+            out,
+            "  under-occupied tail  {}",
+            secs(self.occupancy.under_occupied_tail_ms),
+        )?;
+        writeln!(
+            out,
+            "  idle            {} before the first worker, {} after the last reap",
+            secs(self.occupancy.idle_before_first_worker_ms),
+            secs(self.occupancy.idle_after_last_worker_ms),
+        )?;
 
-        push(&mut out, String::new());
+        writeln!(out)?;
         match &self.timings {
             Some(view) => {
-                push(&mut out, "timings.json".to_string());
-                push(
-                    &mut out,
-                    format!(
-                        "  {} entries, {} passed, {} completed, accepted={}",
-                        view.entries, view.passed, view.completed, view.accepted
-                    ),
-                );
-                push(
-                    &mut out,
-                    format!("  duration total  {}", secs(view.duration_total_ms)),
-                );
+                writeln!(out, "timings.json")?;
+                writeln!(
+                    out,
+                    "  {} entries, {} passed, {} completed, accepted={}",
+                    view.entries, view.passed, view.completed, view.accepted,
+                )?;
+                writeln!(out, "  duration total  {}", secs(view.duration_total_ms))?;
                 if view.envelope_mismatches > 0 || view.missing_from_events > 0 {
-                    push(
-                        &mut out,
-                        format!(
-                            "  {} entry/entries disagree with the recorded envelope, {} absent from events.jsonl",
-                            view.envelope_mismatches, view.missing_from_events
-                        ),
-                    );
+                    writeln!(
+                        out,
+                        "  {} entry/entries disagree with the recorded envelope, {} absent from events.jsonl",
+                        view.envelope_mismatches, view.missing_from_events,
+                    )?;
                 }
             }
-            None => push(
-                &mut out,
+            None => writeln!(
+                out,
                 "timings.json  absent (this record predates it, or the invocation \
                  ended before it was written)"
-                    .to_string(),
-            ),
+            )?,
         }
 
-        out
+        Ok(())
     }
 }
 
@@ -1414,7 +1287,7 @@ pub(crate) fn run(log_dir: Option<&str>, run_id: Option<&str>, format: &str) -> 
     let analysis = analyze(&record);
     match format {
         "json" => println!("{}", analysis.render_json()?),
-        _ => print!("{}", analysis.render_text()),
+        _ => print!("{analysis}"),
     }
     Ok(())
 }

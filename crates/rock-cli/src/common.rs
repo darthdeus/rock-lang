@@ -50,7 +50,14 @@ impl ProcessManager {
     /// pipe buffer (~64KB on macOS/Linux) blocks on write(), the parent's
     /// try_wait() never sees an exit, and the process appears to hang until timeout.
     pub fn wait_with_timeout(child: &mut Child, timeout: Duration) -> Result<ProcessResult> {
-        Self::wait_with_policy(child, WaitPolicy::Total(timeout), false, false)
+        Self::wait_with_policy_and_tests(
+            child,
+            WaitPolicy::Total(timeout),
+            false,
+            false,
+            None,
+            None,
+        )
     }
 
     /// Bound startup and inactivity using a caller-supplied stderr decoder.
@@ -111,15 +118,6 @@ impl ProcessManager {
             Some(watch),
             None,
         )
-    }
-
-    fn wait_with_policy(
-        child: &mut Child,
-        policy: WaitPolicy,
-        forward_stdout: bool,
-        forward_stderr: bool,
-    ) -> Result<ProcessResult> {
-        Self::wait_with_policy_and_tests(child, policy, forward_stdout, forward_stderr, None, None)
     }
 
     pub(crate) fn wait_with_policy_and_tests<P: Send + 'static>(
@@ -262,15 +260,11 @@ impl ProcessManager {
             last_completed: None,
         });
         let mut last_test_cpu = child_process_cpu_time(child_pid);
-        let mut saw_progress = false;
-        let timed_out;
-        let timeout_phase;
-        let status;
         // Most children exit within a few milliseconds, so start polling
         // fast and back off to the long-running interval.
         let mut poll = Duration::from_millis(1);
 
-        loop {
+        let (status, timeout_phase) = loop {
             if let Some(rx) = &progress_rx {
                 for event in rx.try_iter() {
                     let accepted = match &event.progress {
@@ -285,7 +279,6 @@ impl ProcessManager {
                     if !accepted {
                         continue;
                     }
-                    saw_progress = true;
                     last_progress_at = if matches!(policy, WaitPolicy::Test { .. }) {
                         last_progress_at.max(event.at)
                     } else {
@@ -304,89 +297,65 @@ impl ProcessManager {
                 }
             }
 
-            match child.try_wait()? {
-                Some(s) => {
-                    status = s;
-                    timed_out = false;
-                    timeout_phase = None;
-                    break;
-                }
-                None => {
-                    let (elapsed, limit, phase) = match policy {
-                        WaitPolicy::Total(timeout) => {
-                            (start_time.elapsed(), timeout, TimeoutPhase::TotalBudget)
-                        }
-                        WaitPolicy::Progress {
-                            startup,
-                            inactivity,
-                        } => {
-                            if saw_progress {
-                                (
-                                    last_progress_at.elapsed(),
-                                    inactivity,
-                                    TimeoutPhase::ProgressInactivity,
-                                )
-                            } else {
-                                (start_time.elapsed(), startup, TimeoutPhase::Startup)
-                            }
-                        }
-                        WaitPolicy::Test {
-                            cpu_limit,
-                            wall_limit,
-                        } => {
-                            let wall_elapsed = last_progress_at.elapsed();
-                            let cpu_elapsed = child_process_cpu_time(child_pid)
-                                .zip(last_test_cpu)
-                                .map(|(now, baseline)| now.saturating_sub(baseline));
-                            if cpu_elapsed.is_some_and(|elapsed| elapsed >= cpu_limit) {
-                                child.kill()?;
-                                status = child.wait()?;
-                                timed_out = true;
-                                timeout_phase = Some(if saw_progress {
-                                    TimeoutPhase::TestCpu
-                                } else {
-                                    TimeoutPhase::StartupCpu
-                                });
-                                break;
-                            }
-                            if wall_elapsed >= wall_limit {
-                                child.kill()?;
-                                status = child.wait()?;
-                                timed_out = true;
-                                timeout_phase = Some(if saw_progress {
-                                    TimeoutPhase::TestWall
-                                } else {
-                                    TimeoutPhase::StartupWall
-                                });
-                                break;
-                            }
-                            (
-                                wall_elapsed,
-                                wall_limit,
-                                if saw_progress {
-                                    TimeoutPhase::TestWall
-                                } else {
-                                    TimeoutPhase::StartupWall
-                                },
-                            )
-                        }
-                        WaitPolicy::ProgressBudget { startup, budget } => match first_progress_at {
-                            Some(first) => (first.elapsed(), budget, TimeoutPhase::ProgressBudget),
-                            None => (start_time.elapsed(), startup, TimeoutPhase::Startup),
-                        },
-                    };
-                    if !matches!(policy, WaitPolicy::Test { .. }) && elapsed >= limit {
-                        child.kill()?;
-                        status = child.wait()?;
-                        timed_out = true;
-                        timeout_phase = Some(phase);
-                        break;
-                    }
-                    thread::sleep(poll);
-                    poll = (poll * 2).min(Duration::from_millis(50));
-                }
+            if let Some(status) = child.try_wait()? {
+                break (status, None);
             }
-        }
+            let saw_progress = first_progress_at.is_some();
+            let (elapsed, limit, phase) = match policy {
+                WaitPolicy::Total(timeout) => {
+                    (start_time.elapsed(), timeout, TimeoutPhase::TotalBudget)
+                }
+                WaitPolicy::Progress {
+                    startup,
+                    inactivity,
+                } => {
+                    if saw_progress {
+                        (
+                            last_progress_at.elapsed(),
+                            inactivity,
+                            TimeoutPhase::ProgressInactivity,
+                        )
+                    } else {
+                        (start_time.elapsed(), startup, TimeoutPhase::Startup)
+                    }
+                }
+                WaitPolicy::Test {
+                    cpu_limit,
+                    wall_limit,
+                } => {
+                    let wall_elapsed = last_progress_at.elapsed();
+                    let cpu_elapsed = child_process_cpu_time(child_pid)
+                        .zip(last_test_cpu)
+                        .map(|(now, baseline)| now.saturating_sub(baseline));
+                    if let Some(elapsed) = cpu_elapsed.filter(|elapsed| *elapsed >= cpu_limit) {
+                        let phase = if saw_progress {
+                            TimeoutPhase::TestCpu
+                        } else {
+                            TimeoutPhase::StartupCpu
+                        };
+                        (elapsed, cpu_limit, phase)
+                    } else {
+                        let phase = if saw_progress {
+                            TimeoutPhase::TestWall
+                        } else {
+                            TimeoutPhase::StartupWall
+                        };
+                        (wall_elapsed, wall_limit, phase)
+                    }
+                }
+                WaitPolicy::ProgressBudget { startup, budget } => match first_progress_at {
+                    Some(first) => (first.elapsed(), budget, TimeoutPhase::ProgressBudget),
+                    None => (start_time.elapsed(), startup, TimeoutPhase::Startup),
+                },
+            };
+            if elapsed >= limit {
+                child.kill()?;
+                break (child.wait()?, Some(phase));
+            }
+            thread::sleep(poll);
+            poll = (poll * 2).min(Duration::from_millis(50));
+        };
+        let timed_out = timeout_phase.is_some();
 
         // A pipe the caller did not capture has no output; a captured one must
         // drain completely.
@@ -441,7 +410,7 @@ impl ProcessManager {
             running_test,
             last_completed_test,
             progress_stopped: matches!(policy, WaitPolicy::Progress { .. })
-                && saw_progress
+                && first_progress_at.is_some()
                 && timed_out,
         })
     }
