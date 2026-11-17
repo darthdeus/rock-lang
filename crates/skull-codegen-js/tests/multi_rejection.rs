@@ -20,42 +20,29 @@ fn reject_messages(src: &str) -> Vec<String> {
         .collect()
 }
 
-/// Two DIFFERENT definitions in one closure, each unemittable for its own
-/// reason. The walk used to abort at the first body it could not finish, so `b`
-/// was invisible until `a` was supported.
-#[test]
-fn every_failing_definition_is_reported_not_just_the_first() {
-    let all = reject_messages(
-        "inline(lua) fn lua_one(x: int) -> int = \"\"\" return x \"\"\"\n\
-         inline(lua) fn lua_two(x: int) -> int = \"\"\" return x \"\"\"\n\
-         fn a(x: int) -> int { let v = lua_one(x); v + 1 }\n\
-         fn b(x: int) -> int { let v = lua_two(x); v + 2 }\n\
-         fn root(y: int) -> int { a(y) + b(y) }\n",
-    );
-    for want in ["lua_one", "lua_two"] {
-        assert!(
-            all.iter().any(|m| m.contains(want)),
-            "no rejection names `{want}`:\n{}",
-            all.join("\n")
-        );
-    }
-}
+const TWO_UNMAPPED_DEFINITIONS: &str = "inline(lua) fn lua_one(x: int) -> int = \"\"\" return x \"\"\"\n\
+     inline(lua) fn lua_two(x: int) -> int = \"\"\" return x \"\"\"\n\
+     fn a(x: int) -> int { let v = lua_one(x); v + 1 }\n\
+     fn b(x: int) -> int { let v = lua_two(x); v + 2 }\n\
+     fn root(y: int) -> int { a(y) + b(y) }\n";
 
-/// Two unmapped callees in ONE body: the discovery scan reported the first and
-/// dropped the rest, so a body needing two intrinsics looked like it needed one.
 #[test]
-fn every_unmapped_callee_in_one_body_is_reported() {
-    let all = reject_messages(
-        "inline(lua) fn lua_one(x: int) -> int = \"\"\" return x \"\"\"\n\
+fn rejection_discovery_reports_multiple_failures() {
+    let same_body = "inline(lua) fn lua_one(x: int) -> int = \"\"\" return x \"\"\"\n\
          inline(lua) fn lua_two(x: int) -> int = \"\"\" return x \"\"\"\n\
-         fn root(y: int) -> int { lua_one(y) + lua_two(y) }\n",
-    );
-    for want in ["lua_one", "lua_two"] {
-        assert!(
-            all.iter().any(|m| m.contains(want)),
-            "no rejection names `{want}`:\n{}",
-            all.join("\n")
-        );
+         fn root(y: int) -> int { lua_one(y) + lua_two(y) }\n";
+    for (label, source) in [
+        ("separate definitions", TWO_UNMAPPED_DEFINITIONS),
+        ("same body", same_body),
+    ] {
+        let messages = reject_messages(source);
+        for name in ["lua_one", "lua_two"] {
+            assert!(
+                messages.iter().any(|message| message.contains(name)),
+                "{label}: no rejection names `{name}`:\n{}",
+                messages.join("\n")
+            );
+        }
     }
 }
 
@@ -93,14 +80,9 @@ fn root(y: float) -> int { a(y) + b(y) }
 /// primary would be flaky rather than wrong.
 #[test]
 fn the_rejection_order_is_deterministic() {
-    const SRC: &str = "inline(lua) fn lua_one(x: int) -> int = \"\"\" return x \"\"\"\n\
-         inline(lua) fn lua_two(x: int) -> int = \"\"\" return x \"\"\"\n\
-         fn a(x: int) -> int { let v = lua_one(x); v + 1 }\n\
-         fn b(x: int) -> int { let v = lua_two(x); v + 2 }\n\
-         fn root(y: int) -> int { a(y) + b(y) }\n";
-    let first = reject_messages(SRC);
+    let first = reject_messages(TWO_UNMAPPED_DEFINITIONS);
     for _ in 0..4 {
-        assert_eq!(first, reject_messages(SRC));
+        assert_eq!(first, reject_messages(TWO_UNMAPPED_DEFINITIONS));
     }
 }
 

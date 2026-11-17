@@ -22,67 +22,42 @@ fn emit(src: &str, root: &str) -> String {
     crate::common::emit_closure(&ws, root).unwrap_or_else(|e| panic!("emit: {e}"))
 }
 
-/// The program's widest MIR wire is 1 (nothing multi-value), so MIR sizing alone
-/// declares nothing -- yet a 2-lane `inline(js)` body publishes a slot.
 #[test]
-fn a_published_lane_is_declared() {
-    let js = emit(
-        r#"
+fn each_published_lane_source_declares_the_bank() {
+    let cases = [
+        (
+            "single inline publisher lane",
+            r#"
 @nomangle inline(js) fn publish(v: int) -> (bool, int) = "return __rock_publish(false, v);"
 fn main() { let (ok, n) = publish(1) }
 "#,
-        "main",
-    );
-    assert!(
-        js.contains("var __rock_ret1"),
-        "an `inline(js)` body published lane 1 and the bank never declared it:\n{js}"
-    );
-}
-
-/// Wider than any MIR wire in the program: a 3-lane result declares two slots.
-#[test]
-fn a_wide_published_result_declares_every_lane() {
-    let js = emit(
-        r#"
+            "main",
+            "var __rock_ret1",
+        ),
+        (
+            "wide inline publisher result",
+            r#"
 nobox value P2 { x: float, y: float }
 @nomangle @scalar_abi inline(js) fn publish_wide(p: P2) -> (bool, P2) =
     "return __rock_publish(false, p__x, p__y);"
 fn main() { let (ok, p) = publish_wide(P2 { x: 1.0, y: 2.0 }) }
 "#,
-        "main",
-    );
-    assert!(
-        js.contains("var __rock_ret1, __rock_ret2"),
-        "the bank must span every ABI lane the publisher carries:\n{js}"
-    );
-}
-
-/// **The arm's own population**: a publisher emitted with NO Rock call site.
-/// Every CALLED publisher is already covered by the MIR wire its caller
-/// captures, so this is the only shape in which the ABI-derived half of the
-/// sizing decides anything -- without it the arm would be untestable and dead.
-#[test]
-fn a_publisher_with_no_mir_caller_is_still_declared() {
-    // Reached the way the web boot seam reaches its targets: named in another
-    // opaque body's TEXT, so it is emitted with no MIR call site to size from.
-    let js = emit(
-        r#"
+            "main",
+            "var __rock_ret1, __rock_ret2",
+        ),
+        (
+            "opaque-only publisher with no MIR call site",
+            r#"
 @nomangle inline(js) fn lone_publisher(v: int) -> (bool, int) = "return __rock_publish(false, v);"
 @nomangle inline(js) fn seam() -> int = "lone_publisher(1); return 0;"
 fn main() { let _ = seam() }
 "#,
-        "main",
-    );
-    assert!(
-        js.contains("var __rock_ret1"),
-        "a publisher with no MIR call site left its lane undeclared:\n{js}"
-    );
-}
-
-#[test]
-fn an_owned_mir_result_plan_declares_the_return_bank() {
-    let js = emit(
-        r#"
+            "main",
+            "var __rock_ret1",
+        ),
+        (
+            "called owned MIR result plan",
+            r#"
 nobox value P2 { x: float, y: float }
 @scalar_abi fn pair(p: P2) -> P2 { return p }
 fn main() {
@@ -91,33 +66,21 @@ fn main() {
     print("{q.x}")
 }
 "#,
-        "main",
-    );
-    assert!(
-        js.contains("var __rock_ret1"),
-        "a multi-lane MIR result's owned ABI plan must size the bank:\n{js}"
-    );
-}
-
-#[test]
-fn a_rooted_mir_body_uses_its_owned_return_plan_without_a_call_site() {
-    let js = emit(
-        r#"
+            "main",
+            "var __rock_ret1",
+        ),
+        (
+            "rooted owned MIR result without a call site",
+            r#"
 nobox value P2 { x: float, y: float }
 @scalar_abi fn pair(p: P2) -> P2 { return p }
 "#,
-        "pair",
-    );
-    assert!(
-        js.contains("var __rock_ret1"),
-        "a rooted multi-lane body must size the bank from its owned result plan:\n{js}"
-    );
-}
-
-#[test]
-fn a_hoisted_nested_body_keeps_its_own_return_plan() {
-    let js = emit(
-        r#"
+            "pair",
+            "var __rock_ret1",
+        ),
+        (
+            "hoisted nested MIR body",
+            r#"
 nobox value P2 { x: float, y: float }
 fn outer(p: P2) -> P2 {
     fn pair(q: P2) -> P2 { return q }
@@ -129,12 +92,15 @@ fn main() {
     print("{q.x}")
 }
 "#,
-        "main",
-    );
-    assert!(
-        js.contains("var __rock_ret1"),
-        "a hoisted body must size the bank from its own owned return plan:\n{js}"
-    );
+            "main",
+            "var __rock_ret1",
+        ),
+    ];
+
+    for (label, source, root, marker) in cases {
+        let js = emit(source, root);
+        assert!(js.contains(marker), "{label}: expected `{marker}`:\n{js}");
+    }
 }
 
 /// **The bank is not sized by the body TEXT.** A slot named in a comment widens

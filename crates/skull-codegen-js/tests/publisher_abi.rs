@@ -49,23 +49,6 @@ fn lanes(src: &str, name: &str) -> usize {
     .result_lanes()
 }
 
-/// The LEGACY sizing, reproduced here as a SEPARATE structure: the widest
-/// `__rock_retN` a body text mentions, as a wire width. The comparison below is
-/// what says the ABI oracle describes the same transport the hand-written
-/// bodies did -- without either side computing the other.
-fn textual_wire_width(body: &str) -> usize {
-    let mut hi = 0usize;
-    let mut rest = body;
-    while let Some(at) = rest.find("__rock_ret") {
-        rest = &rest[at + "__rock_ret".len()..];
-        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if let Ok(n) = digits.parse::<usize>() {
-            hi = hi.max(n + 1);
-        }
-    }
-    hi
-}
-
 const SHAPES: &str = r#"
 nobox value Vec2P { x: float, y: float }
 
@@ -82,32 +65,16 @@ fn main() {
 }
 "#;
 
-/// **The ABI is the sizing oracle, and it agrees with the transport the
-/// hand-written bodies encoded.** Every shape the web stubs use, compared
-/// against the legacy textual width computed independently above.
+/// The compiler ABI owns the publisher width for scalar, tuple, and value lanes.
 #[test]
-fn abi_lanes_equal_the_legacy_hand_published_width() {
-    for (name, legacy_body, want) in [
-        // `@scalar_abi -> Vec2`: `__rock_ret1 = y; return x;`
-        ("pub_value", "__rock_ret1 = 0; return 0;", 2usize),
-        // `-> (bool, float)`: `__rock_ret1 = value; return false;`
-        ("pub_pair", "__rock_ret1 = value; return false;", 2),
-        // `@scalar_abi -> (bool, Vec2)`: two published lanes.
-        (
-            "pub_pair_value",
-            "__rock_ret1 = v__x; __rock_ret2 = v__y; return false;",
-            3,
-        ),
-        // A scalar result publishes nothing at all.
-        ("pub_scalar", "return v;", 1),
+fn result_lanes_match_the_concrete_abi() {
+    for (name, expected) in [
+        ("pub_value", 2),
+        ("pub_pair", 2),
+        ("pub_pair_value", 3),
+        ("pub_scalar", 1),
     ] {
-        assert_eq!(lanes(SHAPES, name), want, "ABI lanes for `{name}`");
-        let legacy = textual_wire_width(legacy_body).max(1);
-        assert_eq!(
-            lanes(SHAPES, name),
-            legacy,
-            "the ABI lane count disagrees with the transport `{name}`'s hand-written body encoded"
-        );
+        assert_eq!(lanes(SHAPES, name), expected, "ABI lanes for `{name}`");
     }
 }
 

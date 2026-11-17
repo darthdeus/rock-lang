@@ -59,18 +59,14 @@ fn main() {
 /// rejected. luajit compiled and ran the same source correctly, which is what a
 /// rejection on one emitter and not its sibling always looks like.
 #[test]
-fn an_omitted_defaulted_arg_is_admitted_at_a_specialized_callee() {
-    if let Err(m) = emit_res(OMITTED_DEFAULT_AT_SPEC, "main") {
-        panic!("an omitted defaulted arg must be admitted at a specialization: {m}");
-    }
-}
-
-/// The admission control: the same call with the argument supplied. Without it
-/// the test above could pass because the gate stopped rejecting anything.
-#[test]
-fn the_same_call_with_the_default_supplied_is_admitted() {
-    if let Err(m) = emit_res(EXPLICIT_ARG_AT_SPEC, "main") {
-        panic!("a fully-applied specialized call must be admitted: {m}");
+fn specialized_default_argument_shapes_are_admitted() {
+    for (label, source) in [
+        ("omitted default", OMITTED_DEFAULT_AT_SPEC),
+        ("explicit default", EXPLICIT_ARG_AT_SPEC),
+    ] {
+        if let Err(error) = emit_res(source, "main") {
+            panic!("{label} must be admitted at a specialization: {error}");
+        }
     }
 }
 

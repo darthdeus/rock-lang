@@ -42,34 +42,28 @@ fn reject(src: &str) -> skull_parser::CompilerError {
     emit_main(src).expect_err("invalid native-buffer element must reject")
 }
 
-fn assert_planner_rejection(error: &skull_parser::CompilerError, element: &str) {
+fn assert_planner_rejection(error: &skull_parser::CompilerError, label: &str, element: &str) {
     let msg = &error.message;
     assert!(
         msg.contains("requires a valid native-buffer element ctype") && msg.contains(element),
-        "{msg}"
+        "{label}: {msg}"
     );
     assert!(
         !error.labels.is_empty(),
-        "native-buffer rejection must be located"
+        "{label}: native-buffer rejection must be located"
     );
 }
 
 #[test]
-fn native_buffer_string_rejects_at_the_planner_boundary() {
-    let msg = reject(NATIVEBUFFER_STRING);
-    assert_planner_rejection(&msg, "string");
-}
-
-#[test]
-fn flat_vec_string_rejects_through_its_allocation_route() {
-    let msg = reject(FLATVEC_STRING);
-    assert_planner_rejection(&msg, "string");
-}
-
-#[test]
-fn gc_carrying_value_rejects_with_its_concrete_name() {
-    let msg = reject(GC_VALUE);
-    assert_planner_rejection(&msg, "GcValue");
+fn invalid_native_buffer_elements_reject_at_the_planner_boundary() {
+    for (label, source, element) in [
+        ("NativeBuffer<string>", NATIVEBUFFER_STRING, "string"),
+        ("FlatVec<string>", FLATVEC_STRING, "string"),
+        ("NativeBuffer<GcValue>", GC_VALUE, "GcValue"),
+    ] {
+        let error = reject(source);
+        assert_planner_rejection(&error, label, element);
+    }
 }
 
 #[test]

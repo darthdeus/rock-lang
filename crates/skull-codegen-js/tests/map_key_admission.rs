@@ -22,108 +22,74 @@ fn program_result(src: &str) -> Result<String, String> {
     }
 }
 
-fn rejects(src: &str, expect_fragment: &str) {
+fn map_source(declaration: &str, key_type: &str, key: &str) -> String {
+    format!(
+        "{declaration}\nfn main() {{ let m: Map<{key_type}, string> = map_new(); m.insert({key}, \"x\") }}"
+    )
+}
+
+fn rejects(label: &str, src: &str, expect_fragment: &str) {
     match program_result(src) {
-        Ok(js) => panic!("JS emission accepted an identity-keyed Map key; got:\n{js}"),
+        Ok(js) => panic!("JS emission accepted {label}; got:\n{js}"),
         Err(msg) => assert!(
             msg.contains(expect_fragment),
-            "rejected, but not for the key: expected `{expect_fragment}` in `{msg}`"
+            "{label}: expected `{expect_fragment}` in `{msg}`"
         ),
     }
 }
 
-fn accepts(src: &str) {
+fn accepts(label: &str, src: &str) {
     if let Err(msg) = program_result(src) {
-        panic!("JS emission rejected an admitted Map key: {msg}");
+        panic!("JS emission rejected {label}: {msg}");
     }
 }
 
 #[test]
-fn js_rejects_a_value_struct_map_key() {
-    rejects(
-        r#"
-        value VKey { a: int }
-        fn main() {
-            let m: Map<VKey, string> = map_new()
-            m.insert(VKey { a: 1 }, "x")
-        }
-        "#,
-        "`VKey` is a `value` struct",
-    );
-}
+fn js_map_key_admission_tracks_key_representation() {
+    for (label, declaration, key_type, key, diagnostic) in [
+        (
+            "value struct key",
+            "value VKey { a: int }",
+            "VKey",
+            "VKey { a: 1 }",
+            "`VKey` is a `value` struct",
+        ),
+        (
+            "tuple key",
+            "",
+            "(int, int)",
+            "(1, 2)",
+            "a tuple is an aggregate",
+        ),
+        (
+            "payload-carrying enum key",
+            "enum Ev { Tick(int), Idle }",
+            "Ev",
+            "Ev::Tick(1)",
+            "payload-carrying variants",
+        ),
+        (
+            "newtype over a value struct key",
+            "value VKey { a: int }\nnewtype WrapValue(VKey)",
+            "WrapValue",
+            "WrapValue(VKey { a: 1 })",
+            "wraps",
+        ),
+    ] {
+        rejects(label, &map_source(declaration, key_type, key), diagnostic);
+    }
 
-#[test]
-fn js_rejects_a_tuple_map_key() {
-    rejects(
-        r#"
-        fn main() {
-            let m: Map<(int, int), string> = map_new()
-            m.insert((1, 2), "x")
-        }
-        "#,
-        "a tuple is an aggregate",
-    );
-}
-
-#[test]
-fn js_rejects_a_payload_carrying_enum_map_key() {
-    rejects(
-        r#"
-        enum Ev { Tick(int), Idle }
-        fn main() {
-            let m: Map<Ev, string> = map_new()
-            m.insert(Ev::Tick(1), "x")
-        }
-        "#,
-        "payload-carrying variants",
-    );
-}
-
-/// The escape hatch the old diagnostic recommended. A newtype is keyed as what
-/// it wraps, so this one is still cdata.
-#[test]
-fn js_rejects_a_newtype_over_a_value_struct_map_key() {
-    rejects(
-        r#"
-        value VKey { a: int }
-        newtype WrapValue(VKey)
-        fn main() {
-            let m: Map<WrapValue, string> = map_new()
-            m.insert(WrapValue(VKey { a: 1 }), "x")
-        }
-        "#,
-        "wraps",
-    );
-}
-
-#[test]
-fn js_accepts_scalar_and_scalar_newtype_map_keys() {
-    accepts(
-        r#"
-        newtype Id(int)
-        fn main() {
-            let a: Map<string, int> = map_new()
-            a.insert("k", 1)
-            let b: Map<int, string> = map_new()
-            b.insert(1, "v")
-            let c: Map<Id, string> = map_new()
-            c.insert(Id(1), "v")
-        }
-        "#,
-    );
-}
-
-/// A payload-free enum lowers to an int ordinal, so it is genuinely value-keyed
-/// and must survive. Rejecting the whole `Nominal` class would take this with it.
-#[test]
-fn js_accepts_a_payload_free_enum_map_key() {
-    accepts(
-        r#"
-        enum Color { Red, Green, Blue }
-        fn main() {
-            let m: Map<Color, string> = map_new()
-            m.insert(Color::Red, "r")
-        }
-        "#,
-    );
+    for (label, declaration, key_type, key) in [
+        ("string key", "", "string", "\"k\""),
+        ("integer key", "", "int", "1"),
+        ("scalar newtype key", "newtype Id(int)", "Id", "Id(1)"),
+        (
+            "payload-free enum key",
+            "enum Color { Red, Green, Blue }",
+            "Color",
+            "Color::Red",
+        ),
+    ] {
+        accepts(label, &map_source(declaration, key_type, key));
+    }
 }

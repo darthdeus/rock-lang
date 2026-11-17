@@ -86,33 +86,21 @@ fn lua(src: &str) -> Result<(), String> {
 }
 
 #[test]
-fn a_flatvec_at_a_leaf_addressed_element_rejects_on_js() {
-    let msg = js(FLATVEC_PARAM).expect_err("must reject on JS");
-    assert!(
-        msg.contains("FlatVec<G>") && msg.contains("probe"),
-        "got: {msg}"
-    );
-}
-
-/// The TARGET bound. luajit's `ptr` is an `E*`, so the identical body is right
-/// there -- without this the rejection above would read as "FlatVec is banned".
-#[test]
-fn the_same_flatvec_body_is_admitted_on_lua() {
-    assert!(
-        lua(FLATVEC_PARAM).is_ok(),
-        "luajit `ptr[i]` is an element reference"
-    );
-}
-
-#[test]
-fn a_native_buffer_at_a_leaf_addressed_element_rejects_on_js() {
-    let msg = js(NATIVEBUFFER_PARAM).expect_err("must reject on JS");
-    assert!(msg.contains("NativeBuffer<G>"), "got: {msg}");
-}
-
-#[test]
-fn the_same_native_buffer_body_is_admitted_on_lua() {
-    assert!(lua(NATIVEBUFFER_PARAM).is_ok());
+fn leaf_addressed_container_params_are_target_specific() {
+    for (name, source, diagnostic) in [
+        ("FlatVec<G>", FLATVEC_PARAM, Some("probe")),
+        ("NativeBuffer<G>", NATIVEBUFFER_PARAM, None),
+    ] {
+        let error = js(source).expect_err("leaf-addressed element must reject on JS");
+        assert!(error.contains(name), "{name}: {error}");
+        if let Some(diagnostic) = diagnostic {
+            assert!(error.contains(diagnostic), "{name}: {error}");
+        }
+        assert!(
+            lua(source).is_ok(),
+            "luajit element references admit {name}"
+        );
+    }
 }
 
 #[test]

@@ -27,71 +27,10 @@ fn the_stdlib_js_sibling_file_is_loaded() {
     );
 }
 
-/// A lua/js sibling pair is one function with two bodies, and nothing binds them
-/// together: they sit in different files and the emitter resolves whichever
-/// serves the target. JS then drops surplus arguments and passes `undefined` for
-/// missing ones, so a param added to one side is silently positional garbage on
-/// the other -- never a build error, never a runtime throw.
-///
-/// `__rock_col_insert` gained a `len` param on the lua side while the JS sibling
-/// kept three, so every column insert spliced in the LENGTH instead of the value
-/// and read back as a present element.
-#[test]
-fn a_stdlib_sibling_pair_agrees_on_arity() {
-    use std::collections::HashMap;
-    let mut lua: HashMap<String, usize> = HashMap::new();
-    let mut js: HashMap<String, usize> = HashMap::new();
-    for f in rock_stdlib::stdlib_files() {
-        let ast =
-            skull_parser::parse_module_clean(f.contents, Ustr::from(f.name)).expect("stdlib parse");
-        for item in &ast.items {
-            let ItemKind::Function(fun) = &item.kind else {
-                continue;
-            };
-            // `@scalar_abi` params explode into leaves on the JS side, so the two
-            // declared arities are legitimately incomparable.
-            if item
-                .annotations
-                .iter()
-                .any(|a| a.name.name.as_str() == "scalar_abi")
-            {
-                continue;
-            }
-            let name = fun.name.name.to_string();
-            match fun.body {
-                FunctionBody::Inline(bone_core::hir::FnBackend::Lua, _) => {
-                    lua.insert(name, fun.params.len());
-                }
-                FunctionBody::ExternJs | FunctionBody::Inline(bone_core::hir::FnBackend::Js, _) => {
-                    js.insert(name, fun.params.len());
-                }
-                _ => {}
-            }
-        }
-    }
-    let paired: Vec<&String> = js.keys().filter(|n| lua.contains_key(*n)).collect();
-    assert!(
-        paired.len() >= 10,
-        "only {} lua/js sibling pairs found -- the scan is broken, not the stdlib",
-        paired.len()
-    );
-    let drifted: Vec<String> = paired
-        .iter()
-        .filter(|n| lua[**n] != js[**n])
-        .map(|n| format!("{n} (lua={}, js={})", lua[*n], js[*n]))
-        .collect();
-    assert!(
-        drifted.is_empty(),
-        "these stdlib siblings declare different param counts, so the JS body binds \
-         its params to the wrong arguments: {drifted:?}"
-    );
-}
-
-fn sibling_facts_with(
+fn sibling_facts(
     src: &str,
     id: &str,
     want_js: bool,
-    native_side: bool,
 ) -> std::collections::HashMap<String, (usize, std::collections::BTreeSet<String>)> {
     let ast = skull_parser::parse_module_clean(src, Ustr::from(id)).expect("parse");
     assert!(ast.recovery_errors.is_empty(), "{id} must parse cleanly");
@@ -107,7 +46,7 @@ fn sibling_facts_with(
         let is_lua = matches!(
             f.body,
             FunctionBody::Inline(bone_core::hir::FnBackend::Lua, _)
-        ) || (native_side && matches!(f.body, FunctionBody::Ffi(..)));
+        );
         if is_js != want_js || (!is_js && !is_lua) {
             continue;
         }
@@ -129,14 +68,6 @@ fn sibling_facts_with(
     out
 }
 
-fn sibling_facts(
-    src: &str,
-    id: &str,
-    want_js: bool,
-) -> std::collections::HashMap<String, (usize, std::collections::BTreeSet<String>)> {
-    sibling_facts_with(src, id, want_js, false)
-}
-
 #[test]
 fn a_sibling_pair_agrees_on_arity_and_annotations() {
     let mut stdlib_lua = std::collections::HashMap::new();
@@ -145,37 +76,26 @@ fn a_sibling_pair_agrees_on_arity_and_annotations() {
         stdlib_lua.extend(sibling_facts(f.contents, f.name, false));
         stdlib_js.extend(sibling_facts(f.contents, f.name, true));
     }
-    let pairs: Vec<(&str, _, _, &[&str])> = vec![("stdlib", stdlib_lua, stdlib_js, &[][..])];
-
+    let paired: Vec<&String> = stdlib_js
+        .keys()
+        .filter(|name| stdlib_lua.contains_key(*name))
+        .collect();
+    assert!(
+        paired.len() >= 10,
+        "only {} sibling pairs found -- the scan is broken, not the source",
+        paired.len()
+    );
     let mut drifted: Vec<String> = Vec::new();
-    for (label, lua, js, ignored) in &pairs {
-        let paired: Vec<&String> = js.keys().filter(|n| lua.contains_key(*n)).collect();
-        assert!(
-            paired.len() >= 10,
-            "{label}: only {} sibling pairs found -- the scan is broken, not the source",
-            paired.len()
-        );
-        for n in paired {
-            let (la, laa) = &lua[n];
-            let (ja, jaa) = &js[n];
-            if la != ja {
-                drifted.push(format!("{label}::{n} arity lua={la} js={ja}"));
-            }
-            let keep =
-                |s: &std::collections::BTreeSet<String>| -> std::collections::BTreeSet<String> {
-                    s.iter()
-                        .filter(|a| !ignored.contains(&a.as_str()))
-                        .cloned()
-                        .collect()
-                };
-            let (laa, jaa) = (keep(laa), keep(jaa));
-            if laa != jaa {
-                let lua_only: Vec<&String> = laa.difference(&jaa).collect();
-                let js_only: Vec<&String> = jaa.difference(&laa).collect();
-                drifted.push(format!(
-                    "{label}::{n} lua-only={lua_only:?} js-only={js_only:?}"
-                ));
-            }
+    for name in paired {
+        let (lua_arity, lua_annotations) = &stdlib_lua[name];
+        let (js_arity, js_annotations) = &stdlib_js[name];
+        if lua_arity != js_arity {
+            drifted.push(format!("{name} arity lua={lua_arity} js={js_arity}"));
+        }
+        if lua_annotations != js_annotations {
+            let lua_only: Vec<&String> = lua_annotations.difference(js_annotations).collect();
+            let js_only: Vec<&String> = js_annotations.difference(lua_annotations).collect();
+            drifted.push(format!("{name} lua-only={lua_only:?} js-only={js_only:?}"));
         }
     }
     assert!(
