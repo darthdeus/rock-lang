@@ -56,38 +56,20 @@ pub(crate) fn reconcile_suffix(items: &mut [CompletionItem], tail: &str) {
     }
 }
 
-// === Completion tuning =======================================================
-// Every cap/threshold the ranking pipeline exposes, in one block. The fuzzy
-// score weights (FZ_*) live next to the DP above; the RankKey field order is
-// the ladder itself (rank_key.rs).
-
 /// Cap general results because incomplete lists are re-requested per keystroke.
 pub(crate) const MAX_COMPLETION_ITEMS: usize = 200;
 
-/// Max reach paths expanded per ROOT toward the expected type -- a principled
-/// "k shortest ways" (ranked by distance), not a depth limit. Shared by the
-/// general arg-position expansion and the member transitive-path expansion.
+/// Cap paths per root independently of path depth.
 pub(crate) const REACH_CAP: usize = 64;
 
-/// Frequency prior buckets (`RankKey::freq`): >= HOT refs -> 0, >= WARM ->
-/// 1, else 2. Placeholder thresholds until the replay corpus tunes them.
 pub(crate) const FREQ_HOT: u32 = 16;
 pub(crate) const FREQ_WARM: u32 = 3;
 
-/// Call-through: max synthesized `f(arg)` items kept overall, and max
-/// METHOD-CHAIN args kept per fn (direct values / field paths are uncapped so
-/// sibling fields stay browsable; the global cap backstops the total).
+/// Limit method chains per function while leaving sibling fields browsable.
 pub(crate) const CALL_THROUGH_CAP: usize = 10;
 pub(crate) const PER_FN_METHOD_CAP: usize = 2;
 
-// === Completion candidate pipeline ===========================================
-//
-// Defer materializing completion items until after ranking and capping.
-
-/// The name a candidate ranks and sorts under -- the string `RankKey::encode`
-/// appends and the ci-alphabetical tiebreak compares. NOT always the display
-/// label: a named-arg `greeting:` ranks under `greeting`, a reach item
-/// labeled `player.grid: IVec2` under `player.grid`.
+/// Display labels may include text that does not participate in ranking.
 pub(crate) enum CandName {
     Sym(ustr::Ustr),
     Owned(String),
@@ -102,29 +84,19 @@ impl CandName {
     }
 }
 
-/// Materialization facts: everything `materialize_cand` needs to render a
-/// survivor's label / insert / detail / kind.
 pub(crate) enum CandShape {
-    /// A scope/global-namespace symbol from `crate::query::completion`.
     Entry(crate::query::CompletionEntry),
-    /// Param-name + fn-prefix `Entity<..>` type synth: a known payload
-    /// renders concrete `Entity<Mob>`, an unknown one the `Entity<$0>`
-    /// snippet.
     EntitySynth {
         payload: Option<ustr::Ustr>,
     },
-    /// A callee param offered as `name:` at a direct call-arg slot.
     NamedArg {
         pname: ustr::Ustr,
         pty: String,
     },
-    /// `Wait` in the first generic slot of `Coroutine<..>`.
     Wait,
-    /// `Coroutine<Wait>` / `Coroutine<$0>` replacing the bare type name.
     Coroutine {
         with_wait: bool,
     },
-    /// `-> Coroutine<..>` return type offered after `co fn name()`.
     CoReturn {
         has_wait: bool,
     },
@@ -163,10 +135,7 @@ pub(crate) enum CandShape {
     EntityUnwrap,
 }
 
-/// A fact-shaped completion candidate: rank key + rank/tiebreak name +
-/// materialization facts. `key` is stored CLAMPED (`RankKey::clamped`) so
-/// `cand_cmp` and the client's sort_text string order agree at any field
-/// value.
+/// Clamp rank fields so comparison and the encoded sort text agree.
 pub(crate) struct Cand {
     pub(crate) key: RankKey,
     pub(crate) name: CandName,
@@ -183,10 +152,7 @@ impl Cand {
     }
 }
 
-/// Stage-B sink: sources emit `Cand`s here in source order. Owns the
-/// cross-source dedup namespace (reach access forms and call-through call
-/// strings share it) and the synth-shadowing retain (a synth item
-/// superseding the same-named workspace symbol).
+/// Reach paths and synthesized calls share the deduplication set.
 pub(crate) struct Sink {
     pub(crate) cands: Vec<Cand>,
     pub(crate) seen: std::collections::HashSet<String>,
@@ -204,8 +170,6 @@ impl Sink {
         self.cands.push(cand);
     }
 
-    /// Admit `name` once across every deduping source: true the first time,
-    /// false for a duplicate (the caller skips the emit).
     pub(crate) fn admit(&mut self, name: &str) -> bool {
         if self.seen.contains(name) {
             return false;
@@ -214,8 +178,6 @@ impl Sink {
         true
     }
 
-    /// Drop an already-emitted candidate a synth supersedes (e.g. the plain
-    /// `Wait` struct symbol when the coroutine-slot synth takes over).
     pub(crate) fn retain_not_named(&mut self, name: &str) {
         self.cands.retain(|c| c.name.as_str() != name);
     }
@@ -225,24 +187,13 @@ impl Sink {
     }
 }
 
-/// The ONE candidate ordering: clamped `RankKey`, then the ci name tiebreak
-/// -- by construction the order the client's `sort_text` string sort
-/// produces (`RankKey::encode` appends the lowercased name).
 pub(crate) fn cand_cmp(a: &Cand, b: &Cand) -> std::cmp::Ordering {
     a.key
         .cmp(&b.key)
         .then_with(|| ci_cmp(a.name.as_str().as_bytes(), b.name.as_str().as_bytes()))
 }
 
-/// Stage D: render ONE surviving candidate to its `CompletionItem`. Every
-/// display string (label, insert, detail, sort_text) is built here and only
-/// here. `strip_call` = the cursor sits directly before an existing `(`
-/// (e.g. `cw` over the callee of `world_to_screen(x)`): call-template
-/// shapes insert the bare name so the existing parens are reused instead of
-/// doubled. `pattern` = the cursor sits in a match-arm pattern HEAD:
-/// patterns bind, they don't construct, so a variant inserts its bare
-/// qualified name and never the payload template (the same rule the
-/// `Enum::|` qualified path applies).
+/// Preserve existing call parentheses and leave payloads out of patterns.
 pub(crate) fn materialize_cand(
     cand: Cand,
     ws: &Workspace,
@@ -255,13 +206,8 @@ pub(crate) fn materialize_cand(
         CandShape::Entry(c) => {
             let kind = c.kind();
             let name = bone_core::modules::display_name(c.name.as_str());
-            // Function/global detail is materialized HERE for survivors only.
-            // Resolve the exact accessible overload under the request's scope.
             let detail = match c.symbol {
-                // `name` is presentation spelling and may be an imported
-                // alias. Every function candidate carries its canonical HIR
-                // key, so falling back to the spelling could show an
-                // unrelated same-named function if the cache ever drifted.
+                // An alias can share its display spelling with another definition.
                 CompletionSymbol::Function { key, .. } => c.detail.or_else(|| {
                     crate::query::render_deferred_signature(ws, fragment_file, key, c.name)
                 }),
@@ -277,22 +223,8 @@ pub(crate) fn materialize_cand(
                 }),
                 _ => c.detail,
             };
-            // The full detail goes in the panel; a concise form renders
-            // inline next to the label in the popup (a fn's `(params) ->
-            // ret`, a binding's `: type`).
             let label_details = fn_or_type_label_details(kind, detail.as_deref());
-            // A function with params accepts as a snippet `name($0)` ->
-            // inserts `name()` with the cursor parked between the parens
-            // (the client shows a snippet marker, e.g. nvim-cmp's `~`). A
-            // param-less function inserts `name()` as plain text so the
-            // cursor lands AFTER the `)` -- there's nothing to fill.
-            // A qualified `Enum::Variant` value in an expression slot
-            // carries the same payload template as the `Enum::` path:
-            // tuple -> `($0)`, record -> `{ $0 }`, unit -> bare.
             let (insert_text, insert_text_format) = match c.symbol {
-                // `on_killed`/`on_resume`/`on_hot_reload` are contextual
-                // lifecycle-hook keywords with a statement BLOCK form
-                // (`on_killed { .. }`) -- complete to the block, not a call.
                 CompletionSymbol::Function { .. } if is_lifecycle_hook(c.name.as_str()) => (
                     Some(format!("{name} {{ $0 }}")),
                     Some(InsertTextFormat::SNIPPET),
@@ -400,8 +332,6 @@ pub(crate) fn materialize_cand(
                 (ArgPayload::Record, true) => (format!("{fname}({a} {{ $1 }}, $0)"), true),
             };
             let insert_text_format = is_snippet.then_some(InsertTextFormat::SNIPPET);
-            // Label shows the payload shape so a tuple/record variant reads
-            // as a call to fill, not a bare value.
             let label = match payload {
                 ArgPayload::None => format!("{fname}({a})"),
                 ArgPayload::Tuple => format!("{fname}({a}(...))"),
@@ -544,24 +474,7 @@ pub(crate) fn is_lifecycle_hook(name: &str) -> bool {
     matches!(name, "on_killed" | "on_resume" | "on_hot_reload")
 }
 
-/// Completion-parseable variants of the source up to `offset`: keep the prefix
-/// (where the receiver and earlier decls live), drop the broken tail, insert a
-/// synthetic identifier so the trigger `.` has a field, then close every open
-/// `([{`. This is the standard "parse up to the cursor" fixup -- structural
-/// resolution needs only a parseable prefix, not a correct whole file.
-///
-/// Two candidates are tried in order: the bare prefix, then the prefix with an
-/// empty block appended -- the latter recovers a dangling block header
-/// (`if x.`, `while x.`, `for i in x.`) whose body the user hasn't typed.
-///
-/// Caveat: delimiter counting ignores string/comment contents, and declarations
-/// *after* the cursor are dropped -- acceptable for completion, which edits in
-/// the middle of an otherwise-defined file.
-/// Inline `labelDetails.detail` for a completion item, rendered directly after
-/// the label in the popup: a function shows `(params) -> ret` (the signature
-/// minus the redundant `fn name`); a binding/global shows `: type`. None when
-/// there's no detail. Structs/enums (label is the bare name, kind conveys it)
-/// and fields (label already `name: type`) pass `None`.
+/// Show parameter lists and binding types inline with a bare label.
 pub(crate) fn fn_or_type_label_details(
     kind: SymCat,
     detail: Option<&str>,

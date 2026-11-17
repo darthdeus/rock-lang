@@ -3,14 +3,11 @@
 use super::*;
 use crate::cursor_context::Record;
 
-/// The request-wide facts every source reads.
 struct Request<'a> {
     path: &'a str,
     src: &'a str,
     offset: usize,
-    /// The identifier under the cursor as typed.
     prefix_raw: &'a str,
-    /// `prefix_raw` lowercased: the match and rank query.
     prefix: String,
     /// Reuse existing call parentheses when inserting a completion.
     next_is_open_paren: bool,
@@ -290,9 +287,7 @@ fn member_candidates_at(
     resolved.then(Vec::new)
 }
 
-/// Completion after a module path in a modules-v1 fragment
-/// (`modules_scope::path_members`). `None` for a synthetic module or a prefix
-/// that does not resolve to a module, leaving enum paths to their own source.
+/// A name that is not a module may still qualify an enum variant.
 fn module_path_candidates(
     ws: &Workspace,
     path: &str,
@@ -336,29 +331,17 @@ fn module_path_candidates(
     )
 }
 
-// -- General pipeline ---------------------------------------------------------
-
-/// The resolved workspace view of the general pipeline.
 struct GeneralCx<'w> {
     ws: &'w Workspace,
     mid: ModuleId,
     inf: &'w InferenceResult,
     /// The request file's fragment scope (modules v1).
     frag: &'w bone_core::modules::FragmentScope,
-    /// The fn whose body holds the cursor. Inside its own body it must not
-    /// be PROMOTED as a way to produce a value -- a call-through autofill, a
-    /// reach path, or a fn-returning-the-slot-type -- because that is a
-    /// recursive self-call, which buries the direct constructor the user is
-    /// naming (a struct fill inside its own function body). It stays offered
-    /// (plain candidate) for genuine recursion, just not lifted above
-    /// type-directed candidates.
+    /// Offer recursion as an ordinary completion, without type-directed promotion.
     enclosing_fn: Option<Ustr>,
-    /// PatternPos: the cursor is in a match-arm pattern HEAD.
     pattern_pos: bool,
 }
 
-/// Scope and global namespace completion: gather every candidate, rank it,
-/// add the synthesized items, then select and materialize the survivors.
 fn general_completions(
     session: &mut Session,
     fallbacks: &FallbackReports,
@@ -374,10 +357,7 @@ fn general_completions(
         .and_then(|a| pattern_scrutinee_enum(session, rq.path, rq.src, rq.offset, a));
     let session: &Session = session;
     let live = session.workspace();
-    // Scope + global namespace needs a workspace with the user module.
-    // Prefer the live session; but if the buffer is broken so the strict
-    // session dropped the module, reparse it with RECOVERY so scope
-    // completion still works mid-edit.
+    // An incomplete buffer can be absent from the live session.
     let fallback_ws: Option<Workspace> = if user_module_for_path(live, rq.path).is_none() {
         recovery_workspace(session, fallbacks, rq, pattern_pos)
     } else {
@@ -409,9 +389,6 @@ fn general_completions(
         pattern_pos,
     };
 
-    // The prefix filter happens inside the completion query before
-    // per-candidate detail rendering -- so typing narrows the work, not just
-    // the result.
     let t_cands = bone_core::prelude::Instant::now();
     let mut cands = scope_candidates(
         &g,
@@ -455,8 +432,6 @@ fn general_completions(
     let rank_ms = t_build.elapsed().as_secs_f64() * 1000.0;
 
     let t_reach = bone_core::prelude::Instant::now();
-    // A pattern head is not a value slot: a dotted reach path is not a valid
-    // pattern, so the expansion is suppressed there.
     if let Some(exp) = expected.as_ref() {
         if !exp.rendered.is_empty() && !pattern_pos {
             push_reach_paths(&g, caches.reach, rq, &exp.rendered, &mut sink);
@@ -464,10 +439,6 @@ fn general_completions(
     }
     let reach_ms = t_reach.elapsed().as_secs_f64() * 1000.0;
 
-    // Whole-call-through-first-param candidates (`rejtanog` ->
-    // `reject_target(TargetError::NotGround)`). Expression position only (a
-    // value slot), additive to the normal candidates. Suppressed in a
-    // pattern head like reach: `f(arg)` is not a pattern.
     let t_ct = bone_core::prelude::Instant::now();
     let mut ct_counts = CtCounts::default();
     // When the cap is already met, skip call-through even though a local-seeded
@@ -975,10 +946,7 @@ fn push_named_args(g: &GeneralCx, rq: &Request, cx: &CompletionCx, sink: &mut Si
     }
 }
 
-/// Coroutine ergonomics: `Wait` is the common host yield type (~75% of
-/// `Coroutine<..>` annotations), so surface it. All gated on a `Wait` type
-/// existing (the host's `Wait` is an enum); otherwise the generic
-/// `Coroutine<$0>` snippet stands in.
+/// Prefer the host yield type when the project declares it.
 fn push_coroutine_synths(g: &GeneralCx, rq: &Request, cx: &CompletionCx, sink: &mut Sink) {
     let has_wait = nominal_exists(g.ws, g.frag, "Wait");
     let q = rq.prefix.as_bytes();

@@ -24,9 +24,7 @@ use super::classify::{SlotAnchor, balance_delimiters, completion_munges};
 use super::rank::*;
 use super::select::*;
 
-/// Declared params of every accessible fn named `callee`, unioned across
-/// overloads in first-seen order (param name + rendered declared type). Drives
-/// named-arg completion at a call site.
+/// Union parameter names across accessible overloads in first-seen order.
 pub(crate) fn callee_param_names_in_scope(
     ws: &Workspace,
     callee: &str,
@@ -45,10 +43,7 @@ pub(crate) fn callee_param_names_in_scope(
     out
 }
 
-/// Struct `t_name`'s field names whose declared type is equivalent to the
-/// static type `v` -- the field-set a `FieldRef<t_name, V>` slot admits
-/// (typechecker invariance). Deduped, first-seen order. Shared by the arg-position field-ref
-/// path and the method-selection-time pre-fill in `build_member_items`.
+/// FieldRef is invariant in its value type.
 pub(crate) fn fields_of_type(ws: &Workspace, t_name: Ustr, v: TyId) -> Vec<Ustr> {
     let mut seen: std::collections::HashSet<Ustr> = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -134,10 +129,7 @@ fn fieldref_slot_owner(
     Some((owner, v))
 }
 
-/// Bind a generic named `gname` from a PRECEDING paren arg's inferred type --
-/// the non-UFCS prefix-call owner path (`poll_slot(e, .co)` binds `T` = Mob
-/// from `e`). `recv_offset` shifts the param index for a UFCS receiver (paren
-/// arg `j` is `param_decls[j + recv_offset]`).
+/// For UFCS, the receiver shifts the written argument indices by one.
 fn sibling_owner_bind(
     ws: &Workspace,
     path: &str,
@@ -226,8 +218,6 @@ pub(crate) fn field_ref_candidates(
     )
 }
 
-/// Per-fn counters accumulated inside `call_through_param_completions`, returned
-/// to `completion()` so it can fold them into the phase timings.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct CtCounts {
     pub(crate) fns: usize,
@@ -260,9 +250,6 @@ pub(crate) fn arg_matches_residual(q: &[u8], k: usize, arg: &str) -> bool {
     qi == q.len()
 }
 
-/// One call-through-eligible function: its canonical key, the first-param type
-/// (rendered), and whether it has more than one param. A scoped request builds
-/// display spellings and their lowercase forms at read time.
 pub(crate) struct CtFn {
     pub(crate) key: ustr::Ustr,
     pub(crate) mid: ModuleId,
@@ -278,10 +265,6 @@ pub(crate) struct ScopedCtFn {
     name_lc: String,
 }
 
-/// One candidate arg value for a call-through synth, with the structural
-/// facts recorded at construction (not re-derived from the rendered text):
-/// `method` = the path traverses a method call on ANY hop (the per-fn
-/// method-chain cap and the confident-autofill exclusion key off it).
 #[derive(Clone)]
 pub(crate) struct CtArg {
     pub(crate) text: String,
@@ -339,9 +322,6 @@ pub(crate) struct CallThroughIndex {
     pub(crate) global_type_args: HashMap<String, Vec<CtArg>>,
 }
 
-/// Build the call-through index from a checked workspace + reach index. This is
-/// the work that used to run per keystroke -- the O(types*globals) reach
-/// expansion -- now done once per non-`BodyOnly` edit (alongside `reach`).
 pub(crate) fn build_call_through(
     ws: &Workspace,
     reach: &crate::reachability::ReachabilityIndex,
@@ -375,10 +355,7 @@ pub(crate) fn build_call_through(
             ));
         }
     }
-    // Static args per distinct first-param type. Seed each needed type with its
-    // global-direct values + enum variants (no reach), then fill reach-from-
-    // globals in ONE pass over globals -- a depth-<=2 path LOOKUP per global
-    // (`arg_paths_from`), bucketed by target type. No per-(type,global) DFS.
+    // Visit reach paths once per global and bucket by the type at the end.
     let needed: std::collections::HashSet<&str> =
         fns.iter().map(|c| c.first_param_ty.as_str()).collect();
     let mut global_type_args: HashMap<String, Vec<CtArg>> = HashMap::new();
@@ -588,16 +565,6 @@ pub(crate) fn call_through_param_completions(
         })
         .collect();
 
-    // Call-through is a synthesized, bottom-ranked (bucket 4) convenience; the
-    // GLOBAL `CALL_THROUGH_CAP` keeps it from burying the direct candidates. Per fn, the
-    // per-fn cap applies ONLY to METHOD-chain args (`x.foo().bar()`), which are
-    // unbounded reach-noise; direct values + field paths are NOT capped, so a
-    // committed query (`tilecenp` -> `tile_center`) can explore all the sibling
-    // fields it could pass (e.g. `player.movable.grid` AND `.prev_grid`).
-    // Call-through is the ONLY arg-suggestion path while the fn name is still an
-    // abbreviation -- arg completion needs a resolved callee to know the param
-    // type, which `tilecen(` doesn't give -- so it must be browsable, not capped.
-
     // Group by expected type and residual query after matching the function name.
     let mut passing: Vec<(usize, usize)> = Vec::new(); // (fn index, k)
     // Fns whose name FULLY covers the query (`k == q.len()`): normally suppressed
@@ -672,10 +639,6 @@ pub(crate) fn call_through_param_completions(
         let group = match_memo.entry((t, k)).or_insert_with(|| {
             let gargs = global_type_args.get(t).unwrap_or(&empty);
             let largs = local_args.get(t).unwrap_or(&empty);
-            // Trailing `bool` = LOCAL-seeded: an arg drawn from an in-scope local
-            // (or reachable from one), vs a global. Local-seeded partial matches
-            // promote (type_rank 1) so a fn accepting your local surfaces above
-            // unrelated fns; globals stay bucketed last.
             let mut v: Vec<(&CtArg, Vec<i32>, i32, bool)> = Vec::new();
             for (a, local) in gargs
                 .iter()
@@ -695,8 +658,6 @@ pub(crate) fn call_through_param_completions(
             v
         });
         counts.survivors += group.len();
-        // Prefix scores for THIS fn's name (one forward DP, reused buffer), then
-        // combine with each arg's shared suffix vector.
         fuzzy_prefix_scores(scoped_fns[si].name.as_bytes(), q, &mut prefix_scores);
         let mut scored: Vec<(i32, &CtArg, bool)> = Vec::with_capacity(group.len());
         for (a, suffix, penalty, local) in group.iter() {
@@ -706,15 +667,10 @@ pub(crate) fn call_through_param_completions(
             let score = combine_scores(&prefix_scores, suffix) - penalty;
             scored.push((score, a, *local));
         }
-        // Cap only METHOD-chain args (`CtArg::method` -- the unbounded
-        // `x.foo().bar()` reach-noise); keep ALL direct values / field
-        // paths so sibling fields are browsable. The global `CALL_THROUGH_CAP` backstops the
-        // total. (Method args still sort against everything in the final cap.)
+        // Leave direct values and sibling fields browsable.
         let (mut methods, simple): (Vec<_>, Vec<_>) =
             scored.into_iter().partition(|(_, a, _)| a.method);
         if methods.len() > PER_FN_METHOD_CAP {
-            // Best by score DESC, then arg lexical CASE-INSENSITIVE (so an
-            // UPPER_CASE global doesn't beat a lowercase field path on a tie).
             methods.select_nth_unstable_by(PER_FN_METHOD_CAP, |x, y| {
                 y.0.cmp(&x.0)
                     .then_with(|| ci_cmp(x.1.text.as_bytes(), y.1.text.as_bytes()))
@@ -731,7 +687,6 @@ pub(crate) fn call_through_param_completions(
         let t = cf.first_param_ty.as_str();
         let confident: Vec<&CtArg> = local_args
             .get(t)
-            // No locals of this type means no confident autofill candidate.
             .map(|v| v.iter().filter(|a| !a.method).collect())
             .unwrap_or_default();
         if let [a] = confident.as_slice() {
@@ -855,11 +810,6 @@ pub(crate) fn build_freq_index(ws: &Workspace) -> HashMap<Ustr, u32> {
     counts
 }
 
-/// True if any overload of `name` declares a return type rendering to one of
-/// `expected`. Used to rank functions returning the wanted type just below
-/// variables of that type.
-/// Whether any function named `name` in the workspace is a `co fn`. Drives
-/// coroutine-fn ranking after a `yield`/`await`.
 pub(crate) fn fn_is_coroutine_in_scope(
     ws: &Workspace,
     name: &str,
@@ -891,9 +841,7 @@ pub(crate) fn nominal_exists(
         .any(|m| m.struct_by_name.contains_key(&key) || m.enums_by_name.contains_key(&key))
 }
 
-/// The struct named by a fn-name's first `_`-segment, capitalized (`mob_attack_co`
-/// -> `Mob`), if such a struct exists -- the payload `T` for a synthesized
-/// `Entity<T>`. None when the segment doesn't name a struct.
+/// Infer an Entity payload from the first name segment that names a struct.
 pub(crate) fn fn_prefix_struct(
     ws: &Workspace,
     frag: &bone_core::modules::FragmentScope,
@@ -1068,10 +1016,7 @@ pub(crate) fn pattern_scrutinee_enum(
     None
 }
 
-/// Whether an open paren already follows the cursor (skipping inline
-/// whitespace) -- `recv.le|()`. A method item must then insert the bare name,
-/// not `name()`/`name($0)`, or the accepted completion doubles the parens.
-/// Read from the ORIGINAL source, before any completion munge.
+/// Reuse parentheses even when separated from a member by inline whitespace.
 pub(crate) fn open_paren_follows(src: &str, offset: usize) -> bool {
     src.as_bytes()[offset..]
         .iter()
@@ -1079,11 +1024,7 @@ pub(crate) fn open_paren_follows(src: &str, offset: usize) -> bool {
         == Some(&b'(')
 }
 
-/// Whether a member of type `ty_id` (rendered `ty_render`) type-directs into
-/// the expected arg slot. Bone's `coerce` on the TyId when present (so an `int`
-/// field boosts in an `int?`/`float`/`any` slot); rendered-string equality when
-/// the member has no stored TyId (a generic-substituted field) or there's no
-/// session. False with no session at all.
+/// Substituted fields can lack an arena type ID and only have rendered text.
 fn member_ty_match(
     mut expected: Option<&mut ExpectedArg>,
     ty_id: Option<TyId>,

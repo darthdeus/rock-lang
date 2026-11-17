@@ -62,8 +62,7 @@ fn matching_brace(b: &[u8], open: usize) -> Option<usize> {
     None
 }
 
-/// Structural anchor for a UFCS call's receiver (CursorAst
-/// flip 6): how to resolve the receiver's type without byte-rescanning.
+/// Locate the UFCS receiver even if its trailing arguments fail to parse.
 pub(crate) enum ReceiverAnchor {
     /// Receiver ends here; `type_at` on its last byte resolves it (variable /
     /// field path -- survives the broken trailing arg).
@@ -106,8 +105,6 @@ fn enum_path_names(path: &Path) -> Option<(&skull_parser::ast::Ident, &skull_par
     (len >= 2).then(|| (&path.segments[len - 2], &path.segments[len - 1]))
 }
 
-/// A call the byte scanner treats as a paren-arg context: every form that
-/// resolves as a plain call except the no-parens one, plus `@` calls.
 fn is_paren_call(syntax: &CallSyntax) -> bool {
     matches!(
         syntax,
@@ -207,9 +204,7 @@ impl CursorAst {
         chain
     }
 
-    /// `yield <cursor>` / `await <cursor>`: the cursor node is the DIRECT
-    /// operand of a yield (matching the byte scanner's "immediately after
-    /// `yield`" semantics -- `yield foo.b|` is member context, not this).
+    /// A direct yield operand can promote coroutine candidates.
     pub(crate) fn after_yield(&self) -> bool {
         let chain = &self.chain;
         chain.windows(2).any(|w| match self.expr(w[1]).kind {
@@ -601,10 +596,7 @@ impl CursorAst {
     fn enclosing_arg_call(&self) -> Option<(Idx<ExprData>, Option<Idx<ExprData>>, usize)> {
         let chain = &self.chain;
         for (ci, &node) in chain.iter().enumerate() {
-            // A lambda between the cursor and any enclosing call, with the
-            // cursor OUTSIDE its body, means the cursor declares a param (or
-            // return type): a declaration position, not a value slot -- no
-            // arg context (F3 flip-5 design decision).
+            // Stop at a lambda parameter or return annotation.
             if matches!(&self.expr(node).kind, ExprKind::Lambda { .. })
                 && !self.lambda_body_contains(self.expr(node))
             {
@@ -616,9 +608,6 @@ impl CursorAst {
             else {
                 continue;
             };
-            // Operator calls (`a + |`) and the no-parens surface form are not
-            // paren-arg contexts for the byte scanner; keep parity for now
-            // (NoParens is a candidate improvement, noted in the plan doc).
             if !is_paren_call(syntax) {
                 continue;
             }
@@ -941,10 +930,6 @@ mod gaps {
 
     #[test]
     fn call_arg_suppressed_in_a_lambda_param_list() {
-        // F3 flip-5 design decision: `apply(3, (x$0) => ..)` -- the cursor
-        // declares a lambda PARAM; it is not a value slot of `apply`, so no
-        // arg context (no type-directed ranking, no field-ref path). The
-        // byte scanner miscounted this as arg 1.
         let (_, _, cx) = cx(
             "fn apply(n: int, f: (int) -> int) -> int { return f(n) }\nfn t() {\n  apply(3, (x$0: int) => x * x)\n}\n",
         );
@@ -983,9 +968,6 @@ mod gaps {
 
     #[test]
     fn enum_record_fires_in_a_record_pattern() {
-        // `match e { StatusEffect::Bandaging {| heal_amount, .. } => .. }` --
-        // field-name completion is just as useful in a record PATTERN as in a
-        // literal; the byte scanner (brace-blind) serves it, so must we.
         let (_, _, cx) = cx(
             "enum E { B { d: int, h: int } }\nfn t(e: E) {\n  match e {\n    E::B { $0d, .. } => {}\n    _ => {}\n  }\n}\n",
         );
@@ -996,10 +978,6 @@ mod gaps {
 
     #[test]
     fn struct_field_value_fires_in_a_decl_field_default() {
-        // `struct S { dur: float = 0.|0 }` -- the default is a value expr
-        // typed against the field's declared type; the byte scanner
-        // type-directs there (it can't tell a decl from a literal) and the
-        // behavior is worth keeping on purpose.
         let (_, _, cx) = cx("struct S {\n  dur: float = 0.$00,\n  n: int = 1,\n}\n");
         assert_eq!(
             cx.record_contexts().1,
@@ -1015,7 +993,6 @@ mod gaps {
 
     #[test]
     fn coroutine_first_arg_false_in_a_comment() {
-        // The byte scanner is comment-blind here; the classifier sees no type.
         let (_, _, cx) = cx("fn t() {\n  // Coroutine<x$0\n}\n");
         assert!(!cx.coroutine_first_generic_arg());
     }
@@ -1120,9 +1097,6 @@ mod tokenize_frontier {
 mod type_position_matrix {
     use super::*;
 
-    /// `|` marks the cursor (removed). Ported from the byte scanner's case
-    /// matrix when position.rs was deleted -- same coverage, classifier
-    /// answers.
     fn classify(src: &str) -> bool {
         let at = src.find('|').expect("mark the cursor with `|`");
         let cleaned: String = src[..at].to_string() + &src[at + 1..];
