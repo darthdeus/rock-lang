@@ -52,7 +52,9 @@ struct EditSequenceTest {
 
 #[derive(Debug, Clone)]
 enum StepMode {
-    FullReplace { code: String },
+    FullReplace {
+        code: String,
+    },
     /// Type characters one at a time, starting at (line, col) in the previous document
     TypeAt {
         line: usize,
@@ -2842,7 +2844,6 @@ mod runner_tests {
         (result, invocations)
     }
 
-
     macro_rules! fixture {
         ($name:literal, $kind:literal, $code:expr, $expected:literal $(, $options:literal)?) => {
             concat!(
@@ -3343,7 +3344,6 @@ mod runner_tests {
             );
         }
     }
-
 
     // No `\` line continuations: they would strip the indentation the
     // positions below depend on.

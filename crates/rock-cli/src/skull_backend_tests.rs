@@ -477,7 +477,6 @@ mod incremental_watch_tests {
         );
     }
 
-
     use super::fuzz_graph::{Body, Rng, initial_bodies, mutate, render};
 
     fn assert_fuzz_values(lua: &str, calls: &str, expected: &str, context: &str) {
@@ -1252,7 +1251,6 @@ mod overlay_runtime_tests {
         );
     }
 
-
     use super::fuzz_graph::{Rng, initial_bodies, mutate, render};
 
     /// Render the f-graph plus a stable `main` that prints every fN on its own
@@ -1332,7 +1330,6 @@ mod overlay_runtime_tests {
         runtime_accumulation_fuzz_seed3 = 3,
         runtime_accumulation_fuzz_seed4 = 4,
     }
-
 
     /// A minimal game-shaped module: one `@update` system whose body writes
     /// `tick_val` to an observable global, plus the engine's deco/registry/clear
@@ -2358,7 +2355,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
             "fire must run the EDITED @on_reload body through its CodeRef",
         );
     }
-
 
     /// The frame layout stamp for a coroutine ctor `function <ctor>()`: the
     /// `__layout = <N>` literal the ctor writes. Two builds whose only diff is a
