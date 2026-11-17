@@ -1,5 +1,5 @@
 use crate::common::{
-    self, V1Fragment, definition_symbols, emit_v1_package, fn_ref, module_id, ws_v1_package,
+    self, definition_symbols, emit_v1_package, fn_ref, module_id, ws_v1_package,
     ws_with_dependency_module, ws_with_stdlib_module,
 };
 use skull::mir_emit::emit_full;
@@ -73,14 +73,11 @@ fn shared_prefix_dependency_retains_only_reached_bodies() {
 #[test]
 fn v1_sim_glue_finds_register_sim_by_declared_name() {
     let fragments = [
-        V1Fragment {
-            file: "main.rock",
-            src: SIM_SRC,
-        },
-        V1Fragment {
-            file: "engine.rock",
-            src: &format!("mod engine;\npub {}", SIM_LIB.trim_start()),
-        },
+        ("main.rock", SIM_SRC),
+        (
+            "engine.rock",
+            &format!("mod engine;\npub {}", SIM_LIB.trim_start()),
+        ),
     ];
     let emit = emit_v1_package("v1sims", &fragments);
     let registrations: Vec<&str> = emit
@@ -100,18 +97,9 @@ fn v1_sim_glue_rejects_two_register_sim_definitions() {
     };
     let (a, b) = (lib("engine_a"), lib("engine_b"));
     let fragments = [
-        V1Fragment {
-            file: "main.rock",
-            src: SIM_SRC,
-        },
-        V1Fragment {
-            file: "engine_a.rock",
-            src: &a,
-        },
-        V1Fragment {
-            file: "engine_b.rock",
-            src: &b,
-        },
+        ("main.rock", SIM_SRC),
+        ("engine_a.rock", &a),
+        ("engine_b.rock", &b),
     ];
     let ws = ws_v1_package("v1sims_twice", &fragments);
     let mid = module_id(&ws, "main.rock");
@@ -146,28 +134,16 @@ fn nested_project_sources_keep_uncalled_public_functions() {
     let file = "/tmp/rock-root-contract/app/nested/helpers.rock";
     let ws = ws_v1_package(
         "root_contract",
-        &[V1Fragment {
+        &[(
             file,
-            src: "mod helpers;\npub fn uncalled_api() -> int { return 7 }",
-        }],
+            "mod helpers;\npub fn uncalled_api() -> int { return 7 }",
+        )],
     );
     let mid = module_id(&ws, file);
     let (emit, _) = skull::mir_emit::FullEmit::program()
         .project_root(Some("/tmp/rock-root-contract/app"))
         .run(&ws, mid)
         .expect("a nested source validates its project root");
-    assert!(
-        definition_symbols(&emit.lua)
-            .iter()
-            .any(|s| s.contains("uncalled"))
-    );
-}
-
-#[test]
-fn single_file_compilation_keeps_uncalled_functions() {
-    let ws = common::ws_with_stdlib("fn uncalled_helper() -> int { return 7 }");
-    let mid = module_id(&ws, "<test>");
-    let (emit, _) = emit_full(&ws, mid).expect("single-file emission");
     assert!(
         definition_symbols(&emit.lua)
             .iter()

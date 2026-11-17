@@ -105,16 +105,10 @@ pub fn emit_module(src: &str) -> String {
     emit_mir(src).lua
 }
 
-pub struct V1Fragment<'a> {
-    pub file: &'a str,
-    pub src: &'a str,
-}
-
-pub fn ws_v1_package(package: &str, fragments: &[V1Fragment]) -> Workspace {
+pub fn ws_v1_package(package: &str, fragments: &[(&str, &str)]) -> Workspace {
     let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([]).expect("stdlib parses");
-    for fragment in fragments {
-        let mut module = skull_parser::parse_module_clean(fragment.src, Ustr::from(fragment.file))
-            .expect("parse");
+    for &(file, src) in fragments {
+        let mut module = skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse");
         module.package = Some(skull_parser::PackageTag {
             id: 0,
             self_name: package.to_string(),
@@ -140,9 +134,9 @@ fn shared_test_package() -> skull_parser::PackageTag {
     }
 }
 
-pub fn emit_v1_package(package: &str, fragments: &[V1Fragment]) -> skull::mir_emit::MirEmit {
+pub fn emit_v1_package(package: &str, fragments: &[(&str, &str)]) -> skull::mir_emit::MirEmit {
     let ws = ws_v1_package(package, fragments);
-    let mid = module_id(&ws, fragments[0].file);
+    let mid = module_id(&ws, fragments[0].0);
     skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit")
 }
 
@@ -621,29 +615,8 @@ pub fn compile_and_run(src: &str) -> String {
     run_main(&emit_module(src))
 }
 
-pub struct InlineOffGuard(#[allow(dead_code)] skull_transform::InlineOffGuard);
-
-impl InlineOffGuard {
-    pub fn on() -> Self {
-        InlineOffGuard(skull_transform::inline_off_guard())
-    }
-}
-
-pub struct AllocationReportGuard(#[allow(dead_code)] skull::allocation_report::Scope);
-
-impl AllocationReportGuard {
-    pub fn on() -> Self {
-        AllocationReportGuard(skull::allocation_report::scope(true))
-    }
-}
-
-pub struct AllocationActivationGuard(#[allow(dead_code)] skull::allocation_report::ActivationScope);
-
-impl AllocationActivationGuard {
-    pub fn on() -> Self {
-        AllocationActivationGuard(skull::allocation_report::activation_scope(true))
-    }
-}
+pub use skull::allocation_report::{activation_scope, scope as allocation_scope};
+pub use skull_transform::inline_off_guard;
 
 pub fn has_vec_header(lua: &str, repr: &str, elem: Option<&str>) -> bool {
     let (own, shared) = match elem {

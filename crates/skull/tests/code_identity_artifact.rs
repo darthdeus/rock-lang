@@ -14,29 +14,11 @@ fn main() {}
     );
     assert!(crate::common::definitions_matching(&emit.lua, "__deco_tick").is_empty());
     assert!(!emit.lua.contains("__deco_tick({"));
-    let first = emit
-        .lua
-        .find("name = \"first\", stage = 7")
-        .expect("first plan entry");
-    let second = emit
-        .lua
-        .find("name = \"second\", stage = 7")
-        .expect("second plan entry");
-    let defaulted = emit
-        .lua
-        .find("name = \"defaulted\", stage = 100")
-        .expect("defaulted plan entry");
-    assert!(first < second && second < defaulted);
-    // `func` is now a compiler-synthesized uniform thunk (`scene_id -> ()`),
-    // not the raw CodeRef slot -- calling it is what proves the slot behind
-    // it resolved (an unadmitted key throws "missing Rock code slot" at plan
-    // construction, before this snippet even runs); `key` on the entry
-    // itself carries the same identity string the thunk closed over.
     let out = run_luajit(&format!(
-        "{}\nlocal p = _G.__ROCK_LIFECYCLE_PLAN.update; p._data[1].func(0); print(p.len .. ':' .. p._data[1].key)",
+        "{}\nlocal p = _G.__ROCK_LIFECYCLE_PLAN.update; for i=1,p.len do local e = p._data[i]; e.func(0); print(e.name .. ':' .. e.stage) end",
         emit.lua
     ));
-    assert!(out.starts_with("3:named:<test>::first_0<>"));
+    assert_eq!(out, "first:7\nsecond:7\ndefaulted:100");
 }
 
 #[test]
@@ -68,38 +50,6 @@ fn main() { ROOT = load() }
 }
 
 #[test]
-fn artifact_definition_metadata_emits_a_keyed_plan_without_running_the_decorator() {
-    let emit = emit_mir(
-        r#"
-@artifact_definition(catalog="widgets", key_param="key")
-deco init widget(key: string) {}
-@widget(key="alpha") fn make_alpha() -> int { return 1 }
-@widget(key="beta") fn make_beta() -> int { return 2 }
-fn main() {}
-"#,
-    );
-    assert!(crate::common::definitions_matching(&emit.lua, "__deco_widget").is_empty());
-    assert!(!emit.lua.contains("__deco_widget({"));
-    assert!(emit.lua.contains("__rock_definition_plan_stage({"));
-    let alpha = emit.lua.find("key = \"alpha\"").expect("alpha plan entry");
-    let beta = emit.lua.find("key = \"beta\"").expect("beta plan entry");
-    assert!(alpha < beta);
-    assert!(
-        emit.lua
-            .contains("factory = __rock_code_slot_pending_ref(\"named:<test>::make_alpha_0<>\")")
-    );
-    assert!(
-        emit.lua
-            .contains("factory = __rock_code_slot_pending_ref(\"named:<test>::make_beta_0<>\")")
-    );
-    let out = run_luajit(&format!(
-        "{}\nlocal p = _G.__ROCK_DEFINITION_PLAN.widgets; print(p.len .. ':' .. p._data[1].key .. ':' .. p._data[1].factory())",
-        emit.lua
-    ));
-    assert_eq!(out, "2:alpha:1");
-}
-
-#[test]
 fn typed_catalog_accessor_is_compiler_owned_and_returns_the_published_view() {
     let emit = emit_mir(
         r#"
@@ -113,6 +63,7 @@ deco init empty(key: string) {}
 @artifact_catalog(catalog="empty")
 @intrinsic extern(lua) fn empty_definition_plan() -> [ArtifactDefinition<WidgetDef>]
 @widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
+@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { value: 2 } }
 fn main() {}
 "#,
     );
@@ -123,10 +74,10 @@ fn main() {}
     );
     assert!(!emit.lua.contains("__ROCK_DEFINITION_PLAN or {}"));
     let out = run_luajit(&format!(
-        "{}\nlocal p = widget_definition_plan(); local e = empty_definition_plan(); local missing = not pcall(function() return __rock_definition_catalog('missing') end); print(p.len .. ':' .. p._data[1].key .. ':' .. p._data[1].definition.value .. ':' .. e.len .. ':' .. tostring(missing))",
+        "{}\nlocal p = widget_definition_plan(); local e = empty_definition_plan(); local missing = not pcall(function() return __rock_definition_catalog('missing') end); print(p.len .. ':' .. p._data[1].key .. ':' .. p._data[1].factory().value .. ':' .. p._data[2].key .. ':' .. e.len .. ':' .. tostring(missing))",
         emit.lua
     ));
-    assert_eq!(out, "1:alpha:1:0:true");
+    assert_eq!(out, "2:alpha:1:beta:0:true");
 }
 
 #[test]

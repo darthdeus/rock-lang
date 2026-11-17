@@ -1,6 +1,4 @@
-use crate::common::{
-    V1Fragment, emit_module, emit_v1_package, function_body, mangled_name, run_luajit,
-};
+use crate::common::{emit_module, emit_v1_package, function_body, mangled_name, run_luajit};
 
 const HOLDER: &str = r#"
 value V2 { x: float, y: float }
@@ -42,13 +40,7 @@ pub fn probe() -> float {
 
 #[test]
 fn user_value_named_like_a_descriptor_keeps_scalarization() {
-    let emitted = emit_v1_package(
-        "userdesc",
-        &[V1Fragment {
-            file: "main.rock",
-            src: USER_NAMED,
-        }],
-    );
+    let emitted = emit_v1_package("userdesc", &[("main.rock", USER_NAMED)]);
     let take = mangled_name(&emitted.lua, "take");
     let header = emitted
         .lua

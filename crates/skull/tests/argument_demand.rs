@@ -3,7 +3,7 @@ use skull::mir_emit::emit_full;
 
 #[test]
 fn compact_arguments_keep_discarded_errors_before_later_argument_effects() {
-    let _inline = crate::common::InlineOffGuard::on();
+    let _inline = crate::common::inline_off_guard();
     let ws = ws_with_stdlib(
         r#"
 value Sample { kept: int, dropped: uint }
@@ -30,7 +30,7 @@ fn mark() -> int { marks += 1; return 0 }
 
 #[test]
 fn compact_arguments_keep_discarded_field_errors() {
-    let _inline = crate::common::InlineOffGuard::on();
+    let _inline = crate::common::inline_off_guard();
     let ws = ws_with_stdlib(
         r#"
 struct Ref { n: int }
@@ -53,7 +53,7 @@ fn demand_read(v: Sample) -> int { return v.kept }
 
 #[test]
 fn changed_parameter_demand_rebuilds_residual_callers_and_checks_overlay_compatibility() {
-    let _inline = crate::common::InlineOffGuard::on();
+    let _inline = crate::common::inline_off_guard();
     let before = r#"
 nobox value Sample { x: int, y: int, z: int }
 fn forward(n: int) -> int { return n }
@@ -103,7 +103,7 @@ fn function_value_exposure_restores_full_transport_in_incremental_and_overlay() 
 
 #[test]
 fn match_guard_demand_edit_updates_residual_calls_and_live_callables() {
-    let _inline = crate::common::InlineOffGuard::on();
+    let _inline = crate::common::inline_off_guard();
     let before = r#"
 nobox value MatchPayload { a: int, b: int, c: int, d: int }
 enum MatchSubject { Present(MatchPayload), Empty }
@@ -160,7 +160,7 @@ fn demand_match_read(event: MatchEvent) -> int {
 
 #[test]
 fn match_unit_enum_result_preserves_payload_variants_and_absence() {
-    let _inline = crate::common::InlineOffGuard::on();
+    let _inline = crate::common::inline_off_guard();
     let ws = ws_with_stdlib(
         r#"
 nobox value DirectionIdentity { scene: int, arena: int, index: int, generation: int }
@@ -202,7 +202,7 @@ fn demand_direction_result(event: DirectionEvent) -> DirectionResult? {
 
 #[test]
 fn unused_parameters_are_not_passed_and_their_arguments_still_run() {
-    let _inline = crate::common::InlineOffGuard::on();
+    let _inline = crate::common::inline_off_guard();
     let ws = ws_with_stdlib(
         r#"
 global marks: int = 0
@@ -223,7 +223,7 @@ fn skip_middle(a: int, unused: int, b: string) -> string { return "{a}{b}" }
 
 #[test]
 fn a_function_value_keeps_its_unused_parameters() {
-    let _inline = crate::common::InlineOffGuard::on();
+    let _inline = crate::common::inline_off_guard();
     let ws = ws_with_stdlib(
         r#"
 fn skip_middle(a: int, unused: int, b: int) -> int { return a + b }
@@ -243,7 +243,7 @@ fn skip_middle(a: int, unused: int, b: int) -> int { return a + b }
 
 #[test]
 fn a_lambda_capture_keeps_the_whole_parameter() {
-    let _inline = crate::common::InlineOffGuard::on();
+    let _inline = crate::common::inline_off_guard();
     let ws = ws_with_stdlib(
         r#"
 value Pair { a: int, b: int }
@@ -261,7 +261,7 @@ fn reader(p: Pair, unused: int) -> fn() -> int { return () => p.a }
 
 #[test]
 fn reading_an_unused_parameter_rebuilds_its_callers() {
-    let _inline = crate::common::InlineOffGuard::on();
+    let _inline = crate::common::inline_off_guard();
     let before = r#"
 fn pick(a: int, b: int) -> int { return a }
 @nomangle fn caller() -> int { return pick(3, 4) }
@@ -298,7 +298,7 @@ fn pick(a: int, b: int) -> int { return a }
 
 #[test]
 fn a_demanded_boxed_value_child_keeps_the_whole_parameter() {
-    let _inline = crate::common::InlineOffGuard::on();
+    let _inline = crate::common::inline_off_guard();
     let ws = ws_with_stdlib(
         r#"
 value In { c: int, s: string }

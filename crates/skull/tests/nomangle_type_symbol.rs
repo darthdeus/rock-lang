@@ -3,9 +3,9 @@ use crate::common::module_id;
 fn a_nomangle_v1_type_keeps_its_declared_symbol() {
     let emitted = crate::common::emit_v1_package(
         "v1abi",
-        &[crate::common::V1Fragment {
-            file: "main.rock",
-            src: r#"
+        &[(
+            "main.rock",
+            r#"
 pub @nomangle value AbiStats { hits: int, ratio: float }
 pub @nomangle struct AbiHandle { handle: int }
 
@@ -25,7 +25,7 @@ pub @nomangle fn probe() -> string {
 }
 fn main() {}
 "#,
-        }],
+        )],
     );
     let out = crate::common::run_luajit(&format!("{}\nprint(probe())\n", emitted.lua));
     assert_eq!(out, "0.5 AbiHandle 3");
@@ -35,13 +35,13 @@ fn main() {}
 fn a_nomangle_type_cannot_take_a_legacy_types_symbol() {
     let ws = crate::common::ws_v1_package(
         "v1clash",
-        &[crate::common::V1Fragment {
-            file: "main.rock",
-            src: r#"
+        &[(
+            "main.rock",
+            r#"
 pub @nomangle value Vec2 { a: float, b: float }
 fn main() {}
 "#,
-        }],
+        )],
     );
     let mid = module_id(&ws, "main.rock");
     let err = match skull::mir_emit::emit_workspace_mir(&ws, mid) {

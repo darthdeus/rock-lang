@@ -7,7 +7,7 @@ fn first_function_value_exposure_initializes_runtime_slots_without_narrowing() {
 }
 
 pub(crate) fn check_function_value_exposure(annotation: &str) {
-    let _inline = crate::common::InlineOffGuard::on();
+    let _inline = crate::common::inline_off_guard();
     let before = r#"
 nobox value DemandRecord { x: int, y: int }
 fn demand_leaf(v: DemandRecord) -> int { return v.y }

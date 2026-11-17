@@ -1,4 +1,4 @@
-use crate::common::{V1Fragment, emit_v1_package, module_id, run_luajit, run_main, ws_v1_package};
+use crate::common::{emit_v1_package, module_id, run_luajit, run_main, ws_v1_package};
 
 const MAIN: &str = r#"
 use facade::tick as first;
@@ -24,16 +24,7 @@ pub use ::tick;
 fn v1_lifecycle_aliases_register_one_private_hook() {
     let emitted = emit_v1_package(
         "v1lifecycle",
-        &[
-            V1Fragment {
-                file: "main.rock",
-                src: MAIN,
-            },
-            V1Fragment {
-                file: "facade.rock",
-                src: FACADE,
-            },
-        ],
+        &[("main.rock", MAIN), ("facade.rock", FACADE)],
     );
     assert_eq!(emitted.lifecycle_plan.entries.len(), 1);
     let out = run_luajit(&format!(
@@ -46,9 +37,9 @@ fn v1_lifecycle_aliases_register_one_private_hook() {
 #[test]
 fn v1_decorator_named_test_is_not_a_builtin_test() {
     let fragments = [
-        V1Fragment {
-            file: "main.rock",
-            src: r#"
+        (
+            "main.rock",
+            r#"
 use facade::test;
 
 @test
@@ -58,15 +49,15 @@ fn main() {}
 
 deco init test {}
 "#,
-        },
-        V1Fragment {
-            file: "facade.rock",
-            src: r#"
+        ),
+        (
+            "facade.rock",
+            r#"
 mod facade;
 
 pub use ::test;
 "#,
-        },
+        ),
     ];
     let ws = ws_v1_package("v1custom", &fragments);
     let mid = module_id(&ws, "main.rock");
@@ -84,9 +75,9 @@ pub use ::test;
 #[test]
 fn v1_wire_alias_resolves_its_const_by_definition_key() {
     let fragments = [
-        V1Fragment {
-            file: "main.rock",
-            src: r#"
+        (
+            "main.rock",
+            r#"
 use facade::wire as hook;
 
 const DEP: int = 1
@@ -99,15 +90,15 @@ fn apply() {}
 
 fn main() {}
 "#,
-        },
-        V1Fragment {
-            file: "facade.rock",
-            src: r#"
+        ),
+        (
+            "facade.rock",
+            r#"
 mod facade;
 
 pub use ::wire;
 "#,
-        },
+        ),
     ];
     let ws = ws_v1_package("v1wire", &fragments);
     let plan = skull_mir::lifecycle::collect(&ws).expect("lifecycle plan");
@@ -118,9 +109,9 @@ pub use ::wire;
 #[test]
 fn v1_wire_const_arithmetic_admits_a_namespaced_operator_family() {
     let fragments = [
-        V1Fragment {
-            file: "main.rock",
-            src: r#"
+        (
+            "main.rock",
+            r#"
 use geometry::*;
 const BASE: int = 2
 const DEP: int = BASE + 1
@@ -130,15 +121,15 @@ deco init wire {}
 fn apply() {}
 fn main() { print(DEP) }
 "#,
-        },
-        V1Fragment {
-            file: "geometry.rock",
-            src: r#"
+        ),
+        (
+            "geometry.rock",
+            r#"
 mod geometry;
 pub struct Point { x: int }
 pub operator +(a: Point, b: Point) -> Point { Point { x: a.x + b.x } }
 "#,
-        },
+        ),
     ];
     let emitted = emit_v1_package("wire_ops", &fragments);
     assert_eq!(emitted.lifecycle_plan.entries.len(), 1);
@@ -154,9 +145,9 @@ pub operator +(a: Point, b: Point) -> Point { Point { x: a.x + b.x } }
 
 #[test]
 fn v1_wire_still_rejects_a_namespaced_ordinary_function_dependency() {
-    let fragments = [V1Fragment {
-        file: "main.rock",
-        src: r#"
+    let fragments = [(
+        "main.rock",
+        r#"
 fn helper() -> int { 3 }
 const DEP: int = helper()
 @lifecycle(phase="wire", owner="process")
@@ -165,7 +156,7 @@ deco init wire {}
 fn apply() {}
 fn main() {}
 "#,
-    }];
+    )];
     let ws = ws_v1_package("wire_functions", &fragments);
     let error = skull_mir::lifecycle::collect(&ws)
         .expect_err("ordinary functions are not const identities");
@@ -174,9 +165,9 @@ fn main() {}
 
 #[test]
 fn v1_fn_named_like_a_builtin_annotation_keeps_the_builtin() {
-    let fragments = [V1Fragment {
-        file: "main.rock",
-        src: r#"
+    let fragments = [(
+        "main.rock",
+        r#"
 fn pure(x: int) -> int { return x }
 fn test(x: int) -> int { return x }
 
@@ -188,7 +179,7 @@ fn doubles() { assert(twice(pure(test(3))) == 6, "doubled") }
 
 fn main() {}
 "#,
-    }];
+    )];
     let ws = ws_v1_package("v1builtin", &fragments);
     let mid = module_id(&ws, "main.rock");
     let tests = skull::module_tests(&ws, mid).expect("test discovery");
@@ -200,19 +191,19 @@ fn v1_imported_generic_iterator_executes_tuple_yields() {
     let emitted = emit_v1_package(
         "sequence_test",
         &[
-            V1Fragment {
-                file: "main.rock",
-                src: r#"
+            (
+                "main.rock",
+                r#"
 use sequence::{Sequence, iter, next};
 fn main() {
     let values = Sequence { item: 7 }
     for (index, item) in values { print(index + item) }
 }
 "#,
-            },
-            V1Fragment {
-                file: "sequence.rock",
-                src: r#"
+            ),
+            (
+                "sequence.rock",
+                r#"
 mod sequence;
 pub value Sequence<T> { item: T }
 pub struct Cursor<T> { item: T, done: bool = false }
@@ -223,7 +214,7 @@ pub fn next<T>(cursor: Cursor<T>) -> (bool, int, T) {
     return (live, 3, cursor.item)
 }
 "#,
-            },
+            ),
         ],
     );
     assert_eq!(run_main(&emitted.lua), "10");

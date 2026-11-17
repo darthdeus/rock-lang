@@ -180,13 +180,7 @@ fn main() {}
     );
 
     let v1_src = src.replace("fn probe()", "pub fn probe()");
-    let emitted = crate::common::emit_v1_package(
-        "v1embed",
-        &[crate::common::V1Fragment {
-            file: "main.rock",
-            src: &v1_src,
-        }],
-    );
+    let emitted = crate::common::emit_v1_package("v1embed", &[("main.rock", &v1_src)]);
     let probe = crate::common::mangled_name(&emitted.lua, "probe");
     assert_eq!(
         crate::common::run_luajit(&format!("{}\nprint({probe}())\n", emitted.lua)),

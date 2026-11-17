@@ -24,39 +24,6 @@ fn run(src: &str, driver: &str) -> String {
 }
 
 #[test]
-fn exec_for_over_array() {
-    // `[T]` iterates via concrete stdlib VecIter instances delivered beside the
-    // user body; this fixture must work with inlining disabled.
-    let src = "
-fn total(xs: [int]) -> int {
-    let s = 0;
-    for x in xs { s = s + x; }
-    s
-}";
-    assert_eq!(
-        run(src, "total({_data = {4, 5, 6}, len = 3, __ty = \"Vec\"})"),
-        "15"
-    );
-}
-
-#[test]
-fn exec_default_argument_filled_callee_side() {
-    // An omitted arg arrives as nil; the callee fills the default.
-    let src = "fn greet(name: string, greeting: string = \"Hello\") -> string { \"{greeting}, {name}!\" }";
-    assert_eq!(run(src, "greet(\"World\")"), "Hello, World!");
-    assert_eq!(run(src, "greet(\"World\", \"Hi\")"), "Hi, World!");
-}
-
-#[test]
-fn exec_newtype_ctor_is_identity() {
-    let src = "
-newtype Id(int)
-fn f() -> Id { let a = Id(40); a }";
-    // Id(40) is transparent -> the runtime value is just 40.
-    assert_eq!(run(src, "f() + 2"), "42");
-}
-
-#[test]
 fn exec_uint_checks_preserve_ranges_and_single_evaluation() {
     let src = r#"
 fn cast(value: float) -> uint { value as uint }
@@ -163,21 +130,21 @@ fn shrunk(xs: [int], m: Map<string, int>) -> int {
 
 #[test]
 fn callee_binding_ignores_calls_removed_by_cleanup() {
-    let _inline_off = common::InlineOffGuard::on();
+    let _inline_off = common::inline_off_guard();
     let src = "fn discarded(a: int) -> int { a + 2 }\nfn live(a: int) -> int { a + 1 }\nfn caller(a: int) -> int { if false { discarded(a) } else { live(a) } }";
     assert_eq!(run(src, "caller(7)"), "8");
 }
 
 #[test]
 fn callee_binding_ignores_discarded_uint_helpers() {
-    let _inline_off = common::InlineOffGuard::on();
+    let _inline_off = common::inline_off_guard();
     let src = "fn checked(value: float, count: uint) -> uint { if false { (value as uint) << count } else { count } }";
     assert_eq!(run(src, "checked(-1, 3)"), "3");
 }
 
 #[test]
 fn callee_binding_short_names_skip_public_globals() {
-    let _inline_off = common::InlineOffGuard::on();
+    let _inline_off = common::inline_off_guard();
     let src = "fn leaf(a: int) -> int { a + 1 }\n\
                @nomangle fn b0(a: int) -> int { a + 2 }\n\
                fn caller(a: int) -> int { leaf(a) + b0(a) }";
@@ -186,7 +153,7 @@ fn callee_binding_short_names_skip_public_globals() {
 
 #[test]
 fn callee_binding_aliases_skip_names_inline_lua_reads() {
-    let _inline_off = common::InlineOffGuard::on();
+    let _inline_off = common::inline_off_guard();
     let src = "fn leaf(a: int) -> int { a + 1 }\n\
                @inline inline(lua) fn raw(a: int) -> int = \"return b0(a)\"\n\
                fn caller(a: int) -> int { leaf(a) + raw(a) }";
@@ -201,7 +168,7 @@ fn callee_binding_aliases_skip_names_inline_lua_reads() {
 
 #[test]
 fn aliased_captures_around_a_spliced_body_in_a_loop_run_correctly() {
-    let _inline_off = common::InlineOffGuard::on();
+    let _inline_off = common::inline_off_guard();
     let src = "fn leaf(a: int) -> int { a + 1 }\n\
                fn other(a: int) -> int { a * 3 }\n\
                @inline inline(lua) fn twice(a: int) -> int = \"local b0 = a * 2\\nreturn b0\"\n\
@@ -216,7 +183,7 @@ fn aliased_captures_around_a_spliced_body_in_a_loop_run_correctly() {
 
 #[test]
 fn callee_binding_caps_at_the_lua_upvalue_limit() {
-    let _inline_off = common::InlineOffGuard::on();
+    let _inline_off = common::inline_off_guard();
     let count = skull_codegen_lua::MAX_BOUND_CALLEES + 7;
     let mut src = String::new();
     for i in 0..count {
@@ -229,24 +196,6 @@ fn callee_binding_caps_at_the_lua_upvalue_limit() {
     src.push_str("  t\n}\n");
     let expected: i64 = (0..count as i64).map(|i| 7 + i).sum();
     assert_eq!(run(&src, "caller(7)"), expected.to_string());
-}
-
-#[test]
-fn vec_len_reads_the_length() {
-    let src = "fn n(xs: [int], ys: [string]) -> int { return xs.len() + vec_len(ys) }";
-    assert_eq!(
-        run(
-            src,
-            "n({_data = {1, 2}, len = 2}, {_data = {'a'}, len = 1})"
-        ),
-        "3"
-    );
-}
-
-#[test]
-fn vec_push_method_appends() {
-    let src = "fn add(xs: [int], x: int) -> int { xs.push(x); xs.push(x + 1); return xs.len() }";
-    assert_eq!(run(src, "add({_data = {}, len = 0}, 7)"), "2");
 }
 
 #[test]

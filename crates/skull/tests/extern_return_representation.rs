@@ -208,15 +208,15 @@ fn go() -> int { poll(-1) }
 fn a_v1_extern_wrapper_uses_the_declared_symbol() {
     let emitted = crate::common::emit_v1_package(
         "v1extern",
-        &[crate::common::V1Fragment {
-            file: "main.rock",
-            src: r#"
+        &[(
+            "main.rock",
+            r#"
 extern(ffi, "m") fn ret_int() -> int
 extern(ffi, "m") fn ret_bool() -> bool
 pub fn probe() -> string { return "{ret_int()} {ret_bool()}" }
 fn main() {}
 "#,
-        }],
+        )],
     );
     let out = crate::common::run_luajit(&format!(
         "m = {{ ret_int = function() return 7 end, ret_bool = function() return 1 end }}\n{}\nprint(ret_int(), ret_bool())\n",
@@ -229,9 +229,9 @@ fn main() {}
 fn a_v1_extern_value_return_allocates_by_the_type_symbol() {
     let emitted = crate::common::emit_v1_package(
         "v1extval",
-        &[crate::common::V1Fragment {
-            file: "main.rock",
-            src: r#"
+        &[(
+            "main.rock",
+            r#"
 pub value Pair { a: float, b: float }
 extern(ffi, "m") fn get_pair() -> Pair
 pub @nomangle fn probe() -> string {
@@ -240,7 +240,7 @@ pub @nomangle fn probe() -> string {
 }
 fn main() {}
 "#,
-        }],
+        )],
     );
     let out = crate::common::run_luajit(&format!(
         "m = {{ get_pair = function(out) out[0].a = 3; out[0].b = 4 end }}\n{}\nprint(probe())\n",

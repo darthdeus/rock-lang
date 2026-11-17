@@ -1,4 +1,4 @@
-use crate::common::{V1Fragment, emit_v1_package, run_main};
+use crate::common::{emit_v1_package, run_main};
 
 const MAIN: &str = r#"
 enum MobKind { Skeleton, Zombie }
@@ -62,22 +62,10 @@ fn package() -> skull::mir_emit::MirEmit {
     emit_v1_package(
         "pkgenum",
         &[
-            V1Fragment {
-                file: "main.rock",
-                src: MAIN,
-            },
-            V1Fragment {
-                file: "status.rock",
-                src: STATUS,
-            },
-            V1Fragment {
-                file: "actor_identity.rock",
-                src: ACTOR_IDENTITY,
-            },
-            V1Fragment {
-                file: "movement.rock",
-                src: MOVEMENT,
-            },
+            ("main.rock", MAIN),
+            ("status.rock", STATUS),
+            ("actor_identity.rock", ACTOR_IDENTITY),
+            ("movement.rock", MOVEMENT),
         ],
     )
 }

@@ -438,7 +438,7 @@ fn a_body_edit_to_a_generic_coroutine_reemits_its_specializations() {
 
 #[test]
 fn a_standalone_bounded_body_survives_an_incremental_rebuild() {
-    let _inline = crate::common::InlineOffGuard::on();
+    let _inline = crate::common::inline_off_guard();
     let v1 = "fn total<I: Iterator<int>>(it: I) -> int {\n\
               \x20   let s = 0\n\
               \x20   for v in it { s = s + v }\n\

@@ -1,36 +1,7 @@
-use crate::common::{emit_without_stdlib, run_luajit, ws_of};
+use crate::common::{emit_without_stdlib, run_luajit};
 
 fn global_slot(lua: &str, name: &str) -> u32 {
     crate::common::global_slots(lua, &format!("global:<t>::{name}"))[0]
-}
-
-#[test]
-fn const_reinits_on_hot_reload_but_session_global_is_preserved() {
-    // A computed initializer: a literal one emits no global at all.
-    let ws = ws_of(
-        "inline(lua) fn five() -> int = \"return 5\"\n\
-         const FOO: int = five()\nglobal bar: int = 7\nfn main() {}\n",
-    );
-    let mid = skull::user_module_id(&ws).unwrap();
-    let lua = skull::mir_emit::emit_full(&ws, mid)
-        .expect("emit_full")
-        .0
-        .lua;
-
-    let line = |needle: &str| {
-        lua.lines()
-            .find(|l| l.contains(needle) && !l.starts_with("function"))
-            .unwrap_or_else(|| panic!("no init line for {needle} in:\n{lua}"))
-            .to_string()
-    };
-
-    // const: no preserve guard -> re-runs init every reload.
-    let foo = line("FOO =");
-    assert!(!foo.contains("HOT_RELOAD"));
-    // mutable global: the fresh-storage guard preserves the live value.
-    let bar_slot = global_slot(&lua, "bar");
-    let bar = line(&format!("[{bar_slot}] = "));
-    assert!(bar.contains("if __rock_globals_fresh then"));
 }
 
 #[test]

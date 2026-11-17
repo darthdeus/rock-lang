@@ -1,4 +1,4 @@
-use crate::common::{V1Fragment, emit_v1_package, name_matches, run_luajit, ws_of};
+use crate::common::{emit_v1_package, name_matches, run_luajit, ws_of};
 use bone_semantic::hir::BodyOwner;
 use skull::mir_emit::{emit_full, emit_incremental, emit_overlay};
 
@@ -35,14 +35,14 @@ fn json_default_factories_keep_module_scope() {
     let emitted = emit_v1_package(
         "jsondefaults",
         &[
-            V1Fragment {
-                file: "a.rock",
-                src: "mod a;\nfn initial() -> int { return 7 }\nstruct Row { @json_default value: int = initial() }",
-            },
-            V1Fragment {
-                file: "b.rock",
-                src: "mod b;\nfn initial() -> int { return 13 }\nstruct Row { @json_default value: int = initial() }",
-            },
+            (
+                "a.rock",
+                "mod a;\nfn initial() -> int { return 7 }\nstruct Row { @json_default value: int = initial() }",
+            ),
+            (
+                "b.rock",
+                "mod b;\nfn initial() -> int { return 13 }\nstruct Row { @json_default value: int = initial() }",
+            ),
         ],
     );
     let script = format!(

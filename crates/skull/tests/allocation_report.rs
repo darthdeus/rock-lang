@@ -1,4 +1,4 @@
-use crate::common::{AllocationActivationGuard, AllocationReportGuard, InlineOffGuard, emit_mir};
+use crate::common::{activation_scope, allocation_scope, emit_mir, inline_off_guard};
 
 #[test]
 fn report_is_opt_in_non_invasive_and_renders_sites_and_routes() {
@@ -30,7 +30,7 @@ fn update_root() -> int {
     assert!(!ordinary.lua.contains("__rock_alloc_hit"));
 
     let reported = {
-        let _report = AllocationReportGuard::on();
+        let _report = allocation_scope(true);
         emit_mir(source)
     };
     assert_eq!(ordinary.lua, reported.lua);
@@ -54,8 +54,8 @@ fn update_root() -> int {
 
 #[test]
 fn activation_instruments_manifest_sites_in_rock_and_coroutine_bodies() {
-    let _inline = InlineOffGuard::on();
-    let _activation = AllocationActivationGuard::on();
+    let _inline = inline_off_guard();
+    let _activation = activation_scope(true);
     let emit = emit_mir(
         r#"
 enum Event { Text(string) }
@@ -197,11 +197,11 @@ io.write("SLOTS ", best)
 
 #[test]
 fn activation_does_not_add_register_slots_to_a_wide_luajit_frame() {
-    let _inline = InlineOffGuard::on();
+    let _inline = inline_off_guard();
     let source = wide_value_fixture(60, 123);
     let ordinary = emit_mir(&source);
     let instrumented = {
-        let _activation = AllocationActivationGuard::on();
+        let _activation = activation_scope(true);
         emit_mir(&source)
     };
     assert_eq!(max_stack_slots(&ordinary.lua, "ordinary"), Ok(249));

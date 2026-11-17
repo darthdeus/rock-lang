@@ -1,11 +1,10 @@
 use crate::common::{
-    AllocationActivationGuard, compile_and_run, emit_mir, emit_module, run_luajit, run_main,
-    try_emit_module,
+    activation_scope, compile_and_run, emit_mir, emit_module, run_luajit, run_main, try_emit_module,
 };
 
 #[test]
 fn a_read_only_snapshot_does_not_rebox_its_nullable_child() {
-    let _inline = crate::common::InlineOffGuard::on();
+    let _inline = crate::common::inline_off_guard();
     let fields = (0..50)
         .map(|i| format!("f{i}: int = 0"))
         .collect::<Vec<_>>()
@@ -138,7 +137,7 @@ fn main() { let _ = retain(relay(make(42.0))) }
 "#;
 
 fn allocation_probe(probe: &str) -> String {
-    let _activation = AllocationActivationGuard::on();
+    let _activation = activation_scope(true);
     let emit = emit_mir(SOURCE);
     let mut lua = emit.lua;
     lua.push_str("\nlocal constructors = {\n");

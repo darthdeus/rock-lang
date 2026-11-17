@@ -1,4 +1,4 @@
-use crate::common::{InlineOffGuard, emit_module, run_main};
+use crate::common::{emit_module, inline_off_guard, run_main};
 
 const BOUNDED: &str = r#"
 fn total<I: Iterator<int>>(it: I) -> int {
@@ -28,7 +28,7 @@ fn main() {
 
 #[test]
 fn bounded_bodies_and_nested_witnesses_run_without_inlining() {
-    let _inline = InlineOffGuard::on();
+    let _inline = inline_off_guard();
     for (source, expected) in [
         (BOUNDED.to_string(), "6"),
         (

@@ -1,4 +1,4 @@
-use crate::common::{V1Fragment, emit_module, emit_v1_package, function_body, mangled_name};
+use crate::common::{emit_module, emit_v1_package, function_body, mangled_name};
 
 const SRC: &str = r#"
 enum Wait { Frame, Secs(float), Until(() -> bool, int) }
@@ -19,13 +19,7 @@ fn an_if_joined_v1_enum_stays_in_leaves() {
         "{}\npub fn probe() -> int {{ return begin(1.0).n }}\nfn main() {{}}",
         SRC
     );
-    let emitted = emit_v1_package(
-        "v1join",
-        &[V1Fragment {
-            file: "main.rock",
-            src: &v1_src,
-        }],
-    );
+    let emitted = emit_v1_package("v1join", &[("main.rock", &v1_src)]);
     let body = function_body(&emitted.lua, &mangled_name(&emitted.lua, "begin"));
     assert!(!body.contains("{__variant"));
     // The scalarized `__ty` leaf is the runtime tag every box of the type carries.

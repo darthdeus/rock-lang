@@ -1,4 +1,4 @@
-use crate::common::{V1Fragment, emit_module, emit_v1_package, function_body, run_main};
+use crate::common::{emit_module, emit_v1_package, function_body, run_main};
 
 fn count(hay: &str, needle: &str) -> usize {
     hay.matches(needle).count()
@@ -72,16 +72,7 @@ pub fn label(p: Pt) -> string {
 fn hoisted_package_value_ctor_uses_the_emitted_type_symbol() {
     let emitted = emit_v1_package(
         "kcpkg",
-        &[
-            V1Fragment {
-                file: "main.rock",
-                src: PACKAGE_MAIN,
-            },
-            V1Fragment {
-                file: "a.rock",
-                src: PACKAGE_MOD_A,
-            },
-        ],
+        &[("main.rock", PACKAGE_MAIN), ("a.rock", PACKAGE_MOD_A)],
     );
     assert!(emitted.lua.contains("__skull_kc_"));
     let out = run_main(&emitted.lua);

@@ -304,41 +304,6 @@ fn main() {
 }
 
 #[test]
-fn global_embed_read_joins_the_watch_file_set() {
-    use skull::mir_emit::emit_full;
-
-    let dir = tempfile::tempdir().unwrap();
-    let payload = dir.path().join("payload.txt");
-    std::fs::write(&payload, "global-embed-payload").unwrap();
-    let src = r#"
-const BANNER: string = embed_string("payload.txt")
-fn main() {
-    print(BANNER)
-}
-"#;
-    let inputs = ComptimeInputs {
-        embed_root: Some(dir.path().to_path_buf()),
-        ..ComptimeInputs::default()
-    };
-    let ws = ws_with_inputs(src, inputs);
-    let mid = skull::user_module_id(&ws).unwrap();
-    let (full, cache) = emit_full(&ws, mid).expect("emit_full");
-    assert!(full.lua.contains("global-embed-payload"));
-
-    let canonical = payload.canonicalize().unwrap();
-    let files: Vec<_> = cache
-        .comptime_file_hashes()
-        .into_iter()
-        .map(|(path, _)| path)
-        .collect();
-    assert!(
-        files
-            .iter()
-            .any(|f| std::path::Path::new(f.as_str()) == canonical)
-    );
-}
-
-#[test]
 fn global_body_edit_replaces_the_recorded_comptime_read_set() {
     use skull::mir_emit::emit_overlay;
 

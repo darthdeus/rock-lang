@@ -2,7 +2,7 @@ use crate::common::{compile_and_run, emit_module, run_luajit, run_main};
 
 #[test]
 fn immediate_nullable_enum_projection_reads_only_selected_field() {
-    let _inline = crate::common::InlineOffGuard::on();
+    let _inline = crate::common::inline_off_guard();
     let lua = emit_module(
         r#"
 enum Count { Zero, Seven }
@@ -34,7 +34,7 @@ fn main() {
 
 #[test]
 fn reference_owned_value_projection_reads_only_the_selected_field() {
-    let _inline = crate::common::InlineOffGuard::on();
+    let _inline = crate::common::inline_off_guard();
     let fields = (0..50)
         .map(|i| format!("unused_sibling{i}: int = {i}"))
         .collect::<Vec<_>>()
@@ -110,7 +110,7 @@ fn main() {{
 
 #[test]
 fn enum_projection_does_not_expand_sibling_fields() {
-    let _inline = crate::common::InlineOffGuard::on();
+    let _inline = crate::common::inline_off_guard();
     let lua = emit_module(
         r#"
 enum Choice { Empty, Number(int), Text(string) }
@@ -144,7 +144,7 @@ fn main() {
 
 #[test]
 fn enum_projections_preserve_nullable_children_and_argument_snapshots() {
-    let _inline = crate::common::InlineOffGuard::on();
+    let _inline = crate::common::inline_off_guard();
     assert_eq!(
         compile_and_run(
             r#"

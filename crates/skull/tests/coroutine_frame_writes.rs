@@ -144,9 +144,9 @@ fn spilled_int_to_float_alias_reads_a_valid_slot_after_resume() {
 fn a_resumed_v1_enum_box_carries_the_types_runtime_tag() {
     let emitted = common::emit_v1_package(
         "v1yield",
-        &[common::V1Fragment {
-            file: "main.rock",
-            src: r#"
+        &[(
+            "main.rock",
+            r#"
 enum Step { Go(string), Done }
 co fn steps() -> Coroutine<Step> { yield Step::Go("one") }
 inline(lua) fn erased_resume_tag(c: Coroutine<Step>) -> string = "return c.__resume(c).__ty"
@@ -156,7 +156,7 @@ pub fn probe() -> string {
 }
 fn main() {}
 "#,
-        }],
+        )],
     );
     let probe = common::mangled_name(&emitted.lua, "probe");
     let out = common::run_luajit(&format!("{}\nprint({probe}())\n", emitted.lua));

@@ -1,4 +1,4 @@
-use crate::common::{InlineOffGuard, V1Fragment, emit_v1_package, run_main};
+use crate::common::{emit_v1_package, inline_off_guard, run_main};
 
 const MAIN: &str = r#"
 fn main() {
@@ -49,19 +49,7 @@ pub fn color_text() -> string {
 "#;
 
 fn package() -> skull::mir_emit::MirEmit {
-    emit_v1_package(
-        "v1ty",
-        &[
-            V1Fragment {
-                file: "main.rock",
-                src: MAIN,
-            },
-            V1Fragment {
-                file: "a.rock",
-                src: MOD_A,
-            },
-        ],
-    )
+    emit_v1_package("v1ty", &[("main.rock", MAIN), ("a.rock", MOD_A)])
 }
 
 #[test]
@@ -147,16 +135,7 @@ fn tag(m: Move) -> string {
 fn v1_mixed_enum_variants_construct_and_match() {
     let emitted = emit_v1_package(
         "v1enum",
-        &[
-            V1Fragment {
-                file: "main.rock",
-                src: PAYLOAD_MAIN,
-            },
-            V1Fragment {
-                file: "a.rock",
-                src: PAYLOAD_MOD,
-            },
-        ],
+        &[("main.rock", PAYLOAD_MAIN), ("a.rock", PAYLOAD_MOD)],
     );
     let out = run_main(&emitted.lua);
     assert_eq!(out, "step2 jump13 pass 4");
@@ -191,19 +170,10 @@ pub fn total() -> int {
 #[test]
 fn a_generic_specialized_at_a_v1_nominal_emits_runnable_lua() {
     // Keep the specialized definition available for the identifier checks.
-    let _inline = InlineOffGuard::on();
+    let _inline = inline_off_guard();
     let emitted = emit_v1_package(
         "v1spec",
-        &[
-            V1Fragment {
-                file: "main.rock",
-                src: SPEC_MAIN,
-            },
-            V1Fragment {
-                file: "a.rock",
-                src: SPEC_MOD_A,
-            },
-        ],
+        &[("main.rock", SPEC_MAIN), ("a.rock", SPEC_MOD_A)],
     );
     let digest = skull_mir::mangle::prefix_digest("v1spec::a");
     let nominal = format!("Step_{digest}");
@@ -271,13 +241,10 @@ fn user_json_field_keeps_its_nominal_descriptor() {
     let emitted = emit_v1_package(
         "presence",
         &[
-            V1Fragment {
-                file: "main.rock",
-                src: "fn main() { a::verify() }",
-            },
-            V1Fragment {
-                file: "a.rock",
-                src: r#"
+            ("main.rock", "fn main() { a::verify() }"),
+            (
+                "a.rock",
+                r#"
 mod a;
 value JsonField { value: int }
 struct Holder { field: JsonField }
@@ -291,7 +258,7 @@ pub fn verify() {
     check(Holder { field: JsonField { value: 7 } })
 }
 "#,
-            },
+            ),
         ],
     );
     assert_eq!(run_main(&emitted.lua), "ok");

@@ -1,8 +1,8 @@
-use crate::common::{InlineOffGuard, bound_callee_name, emit_module, function_body, ws_of_files};
+use crate::common::{bound_callee_name, emit_module, function_body, inline_off_guard, ws_of_files};
 
 #[test]
 fn dispatched_operations_emit_only_the_helpers_they_need() {
-    let _inline = InlineOffGuard::on();
+    let _inline = inline_off_guard();
     let lua = emit_module(
         r#"
 struct P { x: int, y: int }

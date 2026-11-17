@@ -2,7 +2,7 @@ use crate::common::{emit_module, run_main};
 
 #[test]
 fn iterator_witnesses_deliver_their_standalone_bodies() {
-    let _inline = crate::common::InlineOffGuard::on();
+    let _inline = crate::common::inline_off_guard();
     let lua = emit_module(
         r#"
 fn main() {
