@@ -8,20 +8,6 @@ use bone_semantic::prelude::*;
 const FILE: &str = "<incremental-cache>";
 const ACTION_FILE: &str = "app/player.rock";
 
-fn workspace_many(srcs: &[(&str, &str)]) -> Workspace {
-    let asts = srcs
-        .iter()
-        .map(|(file, src)| support::parse(file, src))
-        .collect::<Vec<_>>();
-    support::workspace(asts)
-}
-
-fn sources_many<'a>(srcs: &'a [(&'a str, &'a str)]) -> FxHashMap<Ustr, &'a str> {
-    srcs.iter()
-        .map(|(file, src)| (Ustr::from(file), *src))
-        .collect()
-}
-
 fn run_update(
     cache: &mut IncrementalLintCache,
     ws: &Workspace,
@@ -78,8 +64,7 @@ fn sibling_selection() -> LintOptions {
 /// A cache after a full lint of `parts`, which must agree with a fresh lint.
 fn seeded_cache(parts: &[(&str, &str)], selection: &LintOptions) -> IncrementalLintCache {
     let mut cache = IncrementalLintCache::default();
-    let ws = workspace_many(parts);
-    let sources = sources_many(parts);
+    let (ws, sources) = support::setup(parts);
     let (rebuilt, _) = run_update(
         &mut cache,
         &ws,
@@ -115,8 +100,7 @@ fn body_edit(
     function: Option<&str>,
     edit: Option<TextEditDelta>,
 ) -> (Vec<Finding>, LintCacheStats) {
-    let ws = workspace_many(parts);
-    let sources = sources_many(parts);
+    let (ws, sources) = support::setup(parts);
     let reinferred = function.map(|name| function_owner(&ws, name));
     let change =
         LintCacheUpdate::body_only(changed.iter().map(|f| Ustr::from(f)), reinferred, edit);
@@ -219,8 +203,8 @@ fn production_only_cache_scans_but_does_not_report_test_files() {
         ("<production>", "fn main() {}\n"),
         ("<sim>", "fn sim_only() {}\n"),
     ];
-    let ws = workspace_many(&parts);
-    let sources = sources_many(&parts[..1]);
+    let (ws, mut sources) = support::setup(&parts);
+    sources.remove(&Ustr::from("<sim>"));
     let mut cache = IncrementalLintCache::default();
     let (findings, stats) = run_update(
         &mut cache,
@@ -240,10 +224,11 @@ fn cached_findings_match_fresh_after_body_edit_and_span_shift() {
     let old = "fn first() {\n    let first_unused = 1\n}\nfn second() {\n    let second_unused = 2\n}\nfn main() { first(); second() }\n";
     let new = "fn first() {\n    let first_unused = 1\n}\n// inserted before an unchanged finding\nfn second() {\n    let second_unused = 2\n}\nfn main() { first(); second() }\n";
     let mut cache = IncrementalLintCache::default();
+    let (ws, sources) = support::setup(&[(FILE, old)]);
     let (_, initial_stats) = run_update(
         &mut cache,
-        &workspace_many(&[(FILE, old)]),
-        &sources_many(&[(FILE, old)]),
+        &ws,
+        &sources,
         &LintOptions::default(),
         &LintCacheUpdate::full(),
     );
@@ -748,10 +733,9 @@ fn suppression_removal_after_a_suppressed_rebuild_restores_the_finding() {
 fn tied_findings_are_ordered_by_label_spans_in_full_and_cached_lints() {
     let src = "fn main() { let value = 1\n let value = 2\n }\n";
     let parts = [(FILE, src)];
-    let sources = sources_many(&parts);
     let options = LintOptions::default();
     for ends in [[19, 18], [18, 19]] {
-        let mut ws = workspace_many(&parts);
+        let (mut ws, sources) = support::setup(&parts);
         let (mid, owner) = function_owner(&ws, "main");
         let body = ws.module_mut(mid).bodies.get_mut(&owner).expect("body");
         // Simulate findings with the same primary position and message but

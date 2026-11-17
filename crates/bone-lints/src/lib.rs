@@ -2163,12 +2163,8 @@ impl IncrementalLintCache {
             sources,
             sel,
             Some(&self.dependency.body_edges),
-            |module, src, raw| {
-                (
-                    module.file,
-                    report_findings(module, src, raw.clone(), sel),
-                    raw,
-                )
+            |module, src, raw, advice| {
+                (module.file, report_findings(src, raw.clone(), advice), raw)
             },
         );
         self.initialized = true;
@@ -2501,10 +2497,10 @@ fn shift_findings(findings: &mut [Finding], edit: &TextEditDelta) -> usize {
     shifted
 }
 
-/// One advice per selected action-layer lint when no policy is configured.
-fn missing_policy_advice(module: &Module, sel: &LintOptions) -> Vec<Finding> {
+/// One notice for the run when any action-layer lint needs a missing policy.
+fn missing_policy_advice(module: &Module, sel: &LintOptions) -> Option<Finding> {
     if sel.action_policy.is_some() {
-        return Vec::new();
+        return None;
     }
     [
         ACTION_CALLERS,
@@ -2512,7 +2508,7 @@ fn missing_policy_advice(module: &Module, sel: &LintOptions) -> Vec<Finding> {
         RAW_INPUT_CLASSIFICATION,
     ]
     .into_iter()
-    .filter(|lint| sel.enabled(lint))
+    .find(|lint| sel.enabled(lint))
     .map(|lint| Finding {
         lint,
         error: CompilerError::new_with_label(
@@ -2522,7 +2518,6 @@ fn missing_policy_advice(module: &Module, sel: &LintOptions) -> Vec<Finding> {
         .with_level(CompilerErrorLevel::Advice),
         line: 0,
     })
-    .collect()
 }
 
 /// The lints that read only a body's HIR -- no inference, no other file. A
@@ -2710,26 +2705,26 @@ pub fn lint_workspace(
     sources: &FxHashMap<Ustr, &str>,
     sel: &LintOptions,
 ) -> Vec<Finding> {
-    lint_modules(ws, warm, is_bin, sources, sel, None, |module, src, raw| {
-        report_findings(module, src, raw, sel)
-    })
+    lint_modules(
+        ws,
+        warm,
+        is_bin,
+        sources,
+        sel,
+        None,
+        |_, src, raw, advice| report_findings(src, raw, advice),
+    )
     .into_iter()
     .flatten()
     .collect()
 }
 
 /// What every surface reports for one module, given its unsuppressed
-/// findings: the survivors of its allow comments, plus the missing-policy
-/// notice, which is about the project configuration rather than a site and so
-/// is never suppressed, ordered by position.
-fn report_findings(
-    module: &Module,
-    src: &str,
-    raw: Vec<Finding>,
-    sel: &LintOptions,
-) -> Vec<Finding> {
+/// findings: the survivors of its allow comments, plus any missing-policy
+/// notice. The notice concerns project configuration and is never suppressed.
+fn report_findings(src: &str, raw: Vec<Finding>, advice: Option<&Finding>) -> Vec<Finding> {
     let mut out = filter_suppressed_findings(raw, src);
-    out.extend(missing_policy_advice(module, sel));
+    out.extend(advice.cloned());
     out.sort_by(cmp_by_offset);
     out
 }
@@ -2745,7 +2740,7 @@ fn lint_modules<'ws, T: Send>(
     sources: &FxHashMap<Ustr, &str>,
     sel: &LintOptions,
     edges: Option<&UserBodyEdges>,
-    report: impl Fn(&'ws Module, &str, Vec<Finding>) -> T + Sync,
+    report: impl Fn(&'ws Module, &str, Vec<Finding>, Option<&Finding>) -> T + Sync,
 ) -> Vec<T> {
     let mut by_file = workspace_findings_by_file(ws, warm, is_bin, sel, edges);
     let variants = enum_variant_names(ws, warm);
@@ -2763,13 +2758,23 @@ fn lint_modules<'ws, T: Send>(
         };
         per_module.push((module, src, by_file.remove(&module.file)));
     }
+    let advice = per_module
+        .first()
+        .and_then(|(module, _, _)| missing_policy_advice(module, sel));
     per_module
         .into_par_iter()
         .map(|(module, src, workspace_findings)| {
             let mut found = flat_findings_with(ws, &variants, warm, module.id, src, sel, &types);
             found.extend(inference_findings_with(ws, warm, module.id, sel));
             found.extend(workspace_findings.into_iter().flatten());
-            report(module, src, found)
+            report(
+                module,
+                src,
+                found,
+                advice
+                    .as_ref()
+                    .filter(|finding| finding.file() == module.file),
+            )
         })
         .collect()
 }

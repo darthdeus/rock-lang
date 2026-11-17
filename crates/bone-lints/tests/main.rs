@@ -5,11 +5,8 @@ use bone_semantic::prelude::*;
 mod support;
 
 fn lint(files: &[(&str, &str)], options: &LintOptions, is_bin: bool) -> Vec<Finding> {
-    let mut asts: Vec<skull_parser::Ast> = files
-        .iter()
-        .map(|(name, src)| support::parse(name, src))
-        .collect();
-    lint_asts(&mut asts, files, options, is_bin)
+    let (ws, sources) = support::setup(files);
+    lint_workspace(&ws, &support::warm(&ws), is_bin, &sources, options)
 }
 
 fn lint_asts(

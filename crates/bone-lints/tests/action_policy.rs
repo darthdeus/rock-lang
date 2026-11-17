@@ -22,6 +22,91 @@ fn workspace(file: &str, source: &str) -> Workspace {
     semantic_pass(&mut [ast]).unwrap()
 }
 
+const FILES: [(&str, &str); 2] = [
+    ("game/player.rock", "fn main() {}\n"),
+    ("game/input.rock", "fn input() {}\n"),
+];
+
+fn policy_workspace() -> Workspace {
+    let mut asts = FILES
+        .map(|(file, source)| skull_parser::parse_module_clean(source, Ustr::from(file)).unwrap());
+    semantic_pass(&mut asts).unwrap()
+}
+
+#[test]
+fn missing_policy_notice_is_once_per_workspace_lint() {
+    let ws = policy_workspace();
+    let sources = FILES
+        .map(|(file, source)| (Ustr::from(file), source))
+        .into_iter()
+        .collect();
+    let lints = [
+        ACTION_CALLERS,
+        RAW_INPUT_MIGRATION,
+        RAW_INPUT_CLASSIFICATION,
+    ];
+    for selection in [&lints[..1], &lints[1..2], &lints[2..], &lints[..]] {
+        let options = LintOptions::only(selection.iter().map(|lint| (*lint).to_owned()));
+        let found = lint_workspace(&ws, &FxHashSet::default(), true, &sources, &options);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].error.message, "no action-layer policy configured");
+    }
+}
+
+#[test]
+fn incremental_missing_policy_notice_survives_updates_and_report_changes() {
+    let ws = policy_workspace();
+    let all_sources: FxHashMap<_, _> = FILES
+        .map(|(file, source)| (Ustr::from(file), source))
+        .into_iter()
+        .collect();
+    let mut cache = IncrementalLintCache::default();
+    let plain = LintOptions::only(
+        [
+            ACTION_CALLERS,
+            RAW_INPUT_MIGRATION,
+            RAW_INPUT_CLASSIFICATION,
+        ]
+        .map(str::to_owned),
+    );
+    let configured = plain.clone().with_action_policy(Some(&POLICY));
+    let disabled = LintOptions::only([]);
+    let mut sources = all_sources.clone();
+    for (options, change, report_second_only) in [
+        (&plain, LintCacheUpdate::full(), false),
+        (&plain, LintCacheUpdate::body_only([], [], []), false),
+        (
+            &plain,
+            LintCacheUpdate::body_only([Ustr::from(FILES[0].0)], [], []),
+            false,
+        ),
+        (&plain, LintCacheUpdate::body_only([], [], []), true),
+        (&configured, LintCacheUpdate::body_only([], [], []), false),
+        (&plain, LintCacheUpdate::body_only([], [], []), false),
+        (&disabled, LintCacheUpdate::body_only([], [], []), false),
+        (&plain, LintCacheUpdate::body_only([], [], []), false),
+    ] {
+        sources.clone_from(&all_sources);
+        if report_second_only {
+            sources.remove(&Ustr::from(FILES[0].0));
+        }
+        let (cached, _) =
+            cache.update(&ws, &FxHashSet::default(), true, &sources, options, &change);
+        let fresh = lint_workspace(&ws, &FxHashSet::default(), true, &sources, options);
+        assert_eq!(format!("{cached:?}"), format!("{fresh:?}"));
+        let notices = cached
+            .iter()
+            .filter(|finding| finding.error.message == "no action-layer policy configured")
+            .count();
+        assert_eq!(notices, usize::from(options == &plain), "{cached:?}");
+        let per_file: usize = FILES
+            .iter()
+            .map(|(file, _)| cache.findings_for_file(Ustr::from(file)).len())
+            .sum();
+        assert_eq!(per_file, cached.len());
+    }
+}
+
 #[test]
 fn caller_policy_controls_root_prefix_registration_and_diagnostic() {
     let source = "global DO_MOVE: int = 1\nglobal OTHER: int = 2\nfn register_controls() { let value = DO_MOVE }\nfn main() { register_controls() }\n";

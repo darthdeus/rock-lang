@@ -29,7 +29,16 @@ pub fn warm(ws: &Workspace) -> FxHashSet<ModuleId> {
         .collect()
 }
 
-/// Lint `files` as a bin package with no warm module, selecting only `lint`.
+pub fn setup<'a>(files: &[(&str, &'a str)]) -> (Workspace, FxHashMap<Ustr, &'a str>) {
+    let modules = files.iter().map(|(file, src)| parse(file, src)).collect();
+    let sources = files
+        .iter()
+        .map(|&(file, src)| (Ustr::from(file), src))
+        .collect();
+    (workspace(modules), sources)
+}
+
+/// Lint `files` as a bin package, selecting only `lint`.
 pub fn lint_only(files: &[(&str, &str)], lint: &str) -> Vec<Finding> {
     crate::lint(files, &LintOptions::only([lint.to_owned()]), true)
 }
