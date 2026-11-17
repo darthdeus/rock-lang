@@ -34,20 +34,6 @@ fn nobox_field_is_stored_as_parent_leaves() {
     );
 }
 
-const NOBOX_FIELD_BIND: &str = r#"
-nobox value NV2 { x: float, y: float }
-struct Player { pos: NV2 }
-
-fn sum_pos(p: Player) -> float {
-    let v = p.pos
-    return v.x + v.y
-}
-
-fn main() {
-    let _ = sum_pos(Player { pos: NV2 { x: 1.0, y: 2.0 } })
-}
-"#;
-
 const NOBOX_EXPLICIT_MATERIALIZE: &str = r#"
 nobox value NV2 { x: float, y: float }
 
@@ -72,93 +58,6 @@ fn explicit_materialize_authorizes_exactly_one_box() {
         "materialize must introduce exactly one deliberate box:\n{body}"
     );
 }
-
-const NOBOX_WHOLE_VALUE_OPERATORS: &str = r#"
-nobox value NV2 { x: float, y: float }
-
-fn same(a: NV2, b: NV2) -> bool {
-    return a == b
-}
-
-fn absent(v: NV2?) -> bool {
-    return v == null
-}
-
-fn render(v: NV2) -> string {
-    return "{v}"
-}
-
-fn main() {}
-"#;
-
-const NOBOX_NULLABLE_CALL: &str = r#"
-nobox value NV2 { x: float, y: float }
-
-fn absent(v: NV2?) -> bool {
-    return v == null
-}
-
-fn relay(v: NV2?) -> NV2? {
-    return v
-}
-
-fn check() -> bool {
-    return absent(relay(null)) && !absent(relay(NV2 { x: 1.0, y: 2.0 }))
-}
-
-fn main() {
-    print(check())
-}
-"#;
-
-const NOBOX_NULLABLE_LOCAL: &str = r#"
-nobox value NV2 { x: float, y: float }
-
-fn render(flag: bool) -> string {
-    let v: NV2? = null
-    if flag {
-        v = NV2 { x: 1.0, y: 2.0 }
-    }
-    return "{v}"
-}
-
-fn main() {
-    print(render(false))
-    print(render(true))
-}
-"#;
-
-const NOBOX_FIELD_WIDEN: &str = r#"
-nobox value NV2 { x: float, y: float }
-struct Player { pos: NV2, hp: int }
-
-fn absent(v: NV2? = null) -> bool { return v == null }
-fn sum(v: NV2? = null) -> float {
-    if v == null { return -1.0 }
-    let u = v
-    return u.x + u.y
-}
-
-// The shape: a value loaded from a struct FIELD, widened to `T?`. A LITERAL
-// ctor and a CALL RESULT at the same param already thread as leaves.
-fn from_field(p: Player) -> bool { return absent(p.pos) }
-fn sum_field(p: Player) -> float { return sum(p.pos) }
-
-// The same widening into a nullable LOCAL rather than a param.
-fn to_local(p: Player) -> float {
-    let q: NV2? = null
-    q = p.pos
-    if q == null { return -1.0 }
-    return q.x
-}
-
-fn main() {
-    let p = Player { pos: NV2 { x: 1.0, y: 2.0 }, hp: 1 }
-    print(absent(p.pos))
-    print(sum_field(p))
-    print(to_local(p))
-}
-"#;
 
 const NOBOX_NULLABLE_FIELD: &str = r#"
 nobox value NV2 { x: float, y: float }
@@ -268,22 +167,6 @@ fn every_nobox_violation_in_one_body_is_reported() {
         "both sinks reported at the same line, so one span is standing in for two: {lines:?}"
     );
 }
-
-const NOBOX_NESTED_FIELD_WIDEN: &str = r#"
-nobox value NV2 { x: float, y: float }
-nobox value Nest { a: NV2, s: float }
-struct Deep { n: Nest }
-
-fn mk_nest() -> Nest { return Nest { a: NV2 { x: 4.0, y: 5.0 }, s: 6.0 } }
-fn nested_absent(v: Nest? = null) -> bool { return v == null }
-fn from_nested_field(d: Deep) -> bool { return nested_absent(d.n) }
-
-fn main() {
-    let n = mk_nest()
-    let d = Deep { n: n }
-    print(from_nested_field(d))
-}
-"#;
 
 const NOBOX_NESTED_PLAIN_OWNER_FIELD_READ: &str = r#"
 nobox value Id { value: int }
@@ -439,23 +322,6 @@ fn a_column_read_widens_to_nullable_without_materializing() {
     }
     assert_eq!(run_main(&lua), "1\n12\n34\n-1\n56\n12\n34\n-1\n-1\n78");
 }
-
-const NOBOX_CALL_RETURN: &str = r#"
-nobox value NV2 { x: float, y: float }
-
-fn bounce(v: NV2) -> NV2 {
-    return v
-}
-
-fn use(v: NV2) -> float {
-    let next = bounce(v)
-    return next.x + next.y
-}
-
-fn main() {
-    let _ = use(NV2 { x: 1.0, y: 2.0 })
-}
-"#;
 
 #[test]
 fn nobox_escape_sinks_reject_with_specific_diagnostics() {
@@ -929,41 +795,6 @@ fn a_nested_fn_with_an_inferred_nobox_return_threads_leaves() {
     assert_eq!(run_main(&lua), "3");
 }
 
-const NOBOX_SCALAR_ABI_FFI: &str = r#"
-nobox value NV2 { x: float, y: float }
-
-@scalar_abi inline(lua) fn ffi_take(p: NV2, k: float) -> float = "return p__x + p__y + k"
-@scalar_abi inline(lua) fn ffi_make() -> NV2 = "return 3.0, 4.0"
-
-fn main() {
-    let v = ffi_make()
-    print("{ffi_take(v, 1.0)} {ffi_take(k: 1.0, p: v)}")
-}
-"#;
-
-const NOBOX_NESTED_FN_BY_VALUE: &str = r#"
-nobox value NV2 { x: float, y: float }
-
-fn apply(f: fn(NV2) -> float, v: NV2) -> float { return f(v) }
-
-fn outer(p: NV2) -> float {
-    fn sum(v: NV2) -> float { return v.x + v.y }
-    return apply(sum, p)
-}
-
-// The RETURN half of the same ABI: a lambda handing back a nobox value.
-fn arc(r: float) -> (float) -> NV2 {
-    t => NV2 { x: t * r, y: t * 2.0 }
-}
-
-fn main() {
-    print(outer(NV2 { x: 1.0, y: 2.0 }))
-    let stroke = arc(2.0)
-    let q = stroke(3.0)
-    print(q.x + q.y)
-}
-"#;
-
 const NOBOX_FN_TYPE_AGREES: &str = r#"
 nobox value NV2 { x: float, y: float }
 
@@ -1168,24 +999,6 @@ fn nullable_generic_params_keep_their_declared_abis() {
     );
 }
 
-const NOBOX_NULLABLE_BINDINGS: &str = r#"
-nobox value NV2 { x: float, y: float }
-
-fn coalesce(p: NV2?) -> float {
-    let q = p ?? NV2 { x: 5.0, y: 6.0 }
-    return q.x + q.y
-}
-
-fn if_let(p: NV2?) -> float {
-    if let q = p { return q.x + q.y }
-    return -1.0
-}
-
-fn main() {
-    print("{coalesce(NV2 { x: 1.0, y: 2.0 })} {coalesce(null)} {if_let(NV2 { x: 3.0, y: 4.0 })} {if_let(null)}")
-}
-"#;
-
 const NOBOX_REJECTION_SITE: &str = r#"
 nobox value NV2 { x: float, y: float }
 
@@ -1305,61 +1118,6 @@ fn a_nobox_value_in_a_tuple_return_carries_its_leaves() {
     // Runtime return/value coverage is in `tests/nobox/tuple.rock`.
 }
 
-const NOBOX_PHI_CONTROLS: &str = r#"
-nobox value NV2 { x: float, y: float }
-enum Choice { A, B, C }
-
-fn pick_two(right: bool) -> NV2 {
-    let p = if right { NV2 { x: 3.0, y: 4.0 } } else { NV2 { x: 1.0, y: 2.0 } }
-    return p
-}
-
-fn pick_flat(c: Choice) -> NV2 {
-    let p = match c {
-        Choice::A => NV2 { x: 5.0, y: 6.0 },
-        Choice::B => NV2 { x: 7.0, y: 8.0 },
-        Choice::C => NV2 { x: 9.0, y: 10.0 },
-    }
-    return p
-}
-
-fn main() {
-    let a = pick_two(true)
-    let b = pick_flat(Choice::B)
-    print("{a.x} {a.y} {b.x} {b.y}")
-}
-"#;
-
-const NOBOX_PHI_AGGREGATES: &str = r#"
-nobox value NV2 { x: float, y: float }
-enum Choice { A, B, C }
-
-fn pick_nested(n: int) -> NV2 {
-    let p = if n == 0 {
-        NV2 { x: 1.0, y: 2.0 }
-    } else if n == 1 {
-        NV2 { x: 3.0, y: 4.0 }
-    } else {
-        NV2 { x: 5.0, y: 6.0 }
-    }
-    return p
-}
-
-fn pick_pair(c: Choice) -> (NV2, NV2) {
-    return match c {
-        Choice::A => (NV2 { x: 1.0, y: 2.0 }, NV2 { x: 3.0, y: 4.0 }),
-        Choice::B => (NV2 { x: 7.0, y: 8.0 }, NV2 { x: 9.0, y: 10.0 }),
-        Choice::C => (NV2 { x: 11.0, y: 12.0 }, NV2 { x: 13.0, y: 14.0 }),
-    }
-}
-
-fn main() {
-    let p = pick_nested(1)
-    let (a, b) = pick_pair(Choice::B)
-    print("{p.x} {p.y} {a.x} {a.y} {b.x} {b.y}")
-}
-"#;
-
 const NOBOX_OPAQUE_TUPLE_RETURN: &str = r#"
 nobox value NV2 { x: float, y: float }
 
@@ -1390,40 +1148,9 @@ fn nobox_tuple_return_rejects_an_opaque_callee() {
     );
 }
 
-const NOBOX_SCALAR_ABI_TUPLE_RETURN: &str = r#"
-nobox value NV2 { x: float, y: float }
-
-@scalar_abi @nomangle inline(lua) fn foreign_pair() -> (bool, NV2) = """return true, 1.0, 2.0"""
-
-fn use_it() -> float {
-    let (ok, v) = foreign_pair()
-    if !ok { return -1.0 }
-    return v.x + v.y
-}
-
-fn main() {
-    print("{use_it()}")
-}
-"#;
-
 // A `for` over a Vec goes through the user-iterator protocol, whose `next`
 // returns `(bool, T)` -- so the loop element only stays unboxed if that tuple
 // return carries T's leaves.
-const NOBOX_LOOP_ELEMENT: &str = r#"
-nobox value NV2 { x: float, y: float }
-
-fn last_x(ps: [NV2]) -> float {
-    let seen: NV2? = null
-    for p in ps { seen = p }
-    if let q = seen { return q.x }
-    return -1.0
-}
-
-fn main() {
-    print("{last_x([NV2 { x: 1.0, y: 2.0 }, NV2 { x: 3.0, y: 4.0 }])} {last_x([])}")
-}
-"#;
-
 // A GC-tier `value` (its array field keeps it off the cdata and leaf-table
 // tiers) holding `nobox` fields: the `ScenarioMap` shape.
 const NOBOX_IN_GC_VALUE_DECLS: &str = r#"
@@ -1745,68 +1472,230 @@ fn an_enum_in_a_nobox_field_of_a_boxed_gc_tier_local_reads_by_leaf() {
 
 #[test]
 fn nobox_boundaries_keep_values_in_leaf_cells() {
-    for (source, functions, output) in [
-        (NOBOX_FIELD_BIND, &["sum_pos"] as &[_], None),
-        (
-            NOBOX_WHOLE_VALUE_OPERATORS,
-            &["same", "absent", "render"],
-            None,
-        ),
-        (
-            NOBOX_NULLABLE_CALL,
-            &["absent", "relay", "check"],
-            Some("true"),
-        ),
-        (
-            NOBOX_NULLABLE_LOCAL,
-            &["render"],
-            Some("nil\nNV2 { x: 1, y: 2 }"),
-        ),
-        (
-            NOBOX_FIELD_WIDEN,
-            &["from_field", "sum_field", "to_local"],
-            Some("false\n3\n1"),
-        ),
-        (
-            NOBOX_NESTED_FIELD_WIDEN,
-            &["mk_nest", "nested_absent", "from_nested_field"],
-            Some("false"),
-        ),
-        (NOBOX_CALL_RETURN, &["bounce", "use"], None),
-        (NOBOX_SCALAR_ABI_FFI, &["main"], Some("8 8")),
-        (
-            NOBOX_NESTED_FN_BY_VALUE,
-            &["apply", "outer", "arc"],
-            Some("3\n12"),
-        ),
-        (
-            NOBOX_NULLABLE_BINDINGS,
-            &["coalesce", "if_let"],
-            Some("3 11 7 -1"),
-        ),
-        (
-            NOBOX_PHI_CONTROLS,
-            &["pick_two", "pick_flat"],
-            Some("3 4 7 8"),
-        ),
-        (
-            NOBOX_PHI_AGGREGATES,
-            &["pick_nested", "pick_pair"],
-            Some("3 4 7 8 9 10"),
-        ),
-        (NOBOX_SCALAR_ABI_TUPLE_RETURN, &["use_it"], Some("3")),
-        (NOBOX_LOOP_ELEMENT, &["last_x"], Some("3 -1")),
-    ] {
-        let lua = emit_module(source);
-        for name in functions {
-            let body = function_body(&lua, name);
-            assert!(
-                !body.contains("NV2_ct("),
-                "`{name}` materialized a nobox value:\n{body}\nsource:\n{source}"
-            );
-        }
-        if let Some(expected) = output {
-            assert_eq!(run_main(&lua), expected, "source:\n{source}");
-        }
+    let lua = emit_module(
+        r#"
+nobox value NV2 { x: float, y: float }
+
+struct Player { pos: NV2 }
+
+fn sum_pos(p: Player) -> float {
+    let v = p.pos
+    return v.x + v.y
+}
+
+fn same(a: NV2, b: NV2) -> bool {
+    return a == b
+}
+
+fn absent(v: NV2?) -> bool {
+    return v == null
+}
+
+fn render(v: NV2) -> string {
+    return "{v}"
+}
+
+fn relay(v: NV2?) -> NV2? {
+    return v
+}
+
+fn check() -> bool {
+    return absent(relay(null)) && !absent(relay(NV2 { x: 1.0, y: 2.0 }))
+}
+
+fn format_optional(flag: bool) -> string {
+    let v: NV2? = null
+    if flag {
+        v = NV2 { x: 1.0, y: 2.0 }
     }
+    return "{v}"
+}
+
+struct PlayerWithHp { pos: NV2, hp: int }
+
+fn default_absent(v: NV2? = null) -> bool { return v == null }
+fn sum(v: NV2? = null) -> float {
+    if v == null { return -1.0 }
+    let u = v
+    return u.x + u.y
+}
+
+// The shape: a value loaded from a struct FIELD, widened to `T?`. A LITERAL
+// ctor and a CALL RESULT at the same param already thread as leaves.
+fn from_field(p: PlayerWithHp) -> bool { return default_absent(p.pos) }
+fn sum_field(p: PlayerWithHp) -> float { return sum(p.pos) }
+
+// The same widening into a nullable LOCAL rather than a param.
+fn to_local(p: PlayerWithHp) -> float {
+    let q: NV2? = null
+    q = p.pos
+    if q == null { return -1.0 }
+    return q.x
+}
+
+nobox value Nest { a: NV2, s: float }
+struct Deep { n: Nest }
+
+fn mk_nest() -> Nest { return Nest { a: NV2 { x: 4.0, y: 5.0 }, s: 6.0 } }
+fn nested_absent(v: Nest? = null) -> bool { return v == null }
+fn from_nested_field(d: Deep) -> bool { return nested_absent(d.n) }
+
+fn bounce(v: NV2) -> NV2 {
+    return v
+}
+
+fn use(v: NV2) -> float {
+    let next = bounce(v)
+    return next.x + next.y
+}
+
+@scalar_abi inline(lua) fn ffi_take(p: NV2, k: float) -> float = "return p__x + p__y + k"
+@scalar_abi inline(lua) fn ffi_make() -> NV2 = "return 3.0, 4.0"
+
+fn exercise_ffi() {
+    let v = ffi_make()
+    print("{ffi_take(v, 1.0)} {ffi_take(k: 1.0, p: v)}")
+}
+
+fn apply(f: fn(NV2) -> float, v: NV2) -> float { return f(v) }
+
+fn outer(p: NV2) -> float {
+    fn sum(v: NV2) -> float { return v.x + v.y }
+    return apply(sum, p)
+}
+
+// The RETURN half of the same ABI: a lambda handing back a nobox value.
+fn arc(r: float) -> (float) -> NV2 {
+    t => NV2 { x: t * r, y: t * 2.0 }
+}
+
+fn coalesce(p: NV2?) -> float {
+    let q = p ?? NV2 { x: 5.0, y: 6.0 }
+    return q.x + q.y
+}
+
+fn if_let(p: NV2?) -> float {
+    if let q = p { return q.x + q.y }
+    return -1.0
+}
+
+enum Choice { A, B, C }
+
+fn pick_two(right: bool) -> NV2 {
+    let p = if right { NV2 { x: 3.0, y: 4.0 } } else { NV2 { x: 1.0, y: 2.0 } }
+    return p
+}
+
+fn pick_flat(c: Choice) -> NV2 {
+    let p = match c {
+        Choice::A => NV2 { x: 5.0, y: 6.0 },
+        Choice::B => NV2 { x: 7.0, y: 8.0 },
+        Choice::C => NV2 { x: 9.0, y: 10.0 },
+    }
+    return p
+}
+
+fn pick_nested(n: int) -> NV2 {
+    let p = if n == 0 {
+        NV2 { x: 1.0, y: 2.0 }
+    } else if n == 1 {
+        NV2 { x: 3.0, y: 4.0 }
+    } else {
+        NV2 { x: 5.0, y: 6.0 }
+    }
+    return p
+}
+
+fn pick_pair(c: Choice) -> (NV2, NV2) {
+    return match c {
+        Choice::A => (NV2 { x: 1.0, y: 2.0 }, NV2 { x: 3.0, y: 4.0 }),
+        Choice::B => (NV2 { x: 7.0, y: 8.0 }, NV2 { x: 9.0, y: 10.0 }),
+        Choice::C => (NV2 { x: 11.0, y: 12.0 }, NV2 { x: 13.0, y: 14.0 }),
+    }
+}
+
+@scalar_abi @nomangle inline(lua) fn foreign_pair() -> (bool, NV2) = """return true, 1.0, 2.0"""
+
+fn use_it() -> float {
+    let (ok, v) = foreign_pair()
+    if !ok { return -1.0 }
+    return v.x + v.y
+}
+
+fn last_x(ps: [NV2]) -> float {
+    let seen: NV2? = null
+    for p in ps { seen = p }
+    if let q = seen { return q.x }
+    return -1.0
+}
+
+fn main() {
+    let _ = sum_pos(Player { pos: NV2 { x: 1.0, y: 2.0 } })
+    print(check())
+    print(format_optional(false))
+    print(format_optional(true))
+    let p = PlayerWithHp { pos: NV2 { x: 1.0, y: 2.0 }, hp: 1 }
+    print(default_absent(p.pos))
+    print(sum_field(p))
+    print(to_local(p))
+    let n = mk_nest()
+    let d = Deep { n: n }
+    print(from_nested_field(d))
+    let _ = use(NV2 { x: 1.0, y: 2.0 })
+    exercise_ffi()
+    print(outer(NV2 { x: 1.0, y: 2.0 }))
+    let stroke = arc(2.0)
+    let q = stroke(3.0)
+    print(q.x + q.y)
+    print("{coalesce(NV2 { x: 1.0, y: 2.0 })} {coalesce(null)} {if_let(NV2 { x: 3.0, y: 4.0 })} {if_let(null)}")
+    let a = pick_two(true)
+    let b = pick_flat(Choice::B)
+    print("{a.x} {a.y} {b.x} {b.y}")
+    let joined_p = pick_nested(1)
+    let (joined_a, joined_b) = pick_pair(Choice::B)
+    print("{joined_p.x} {joined_p.y} {joined_a.x} {joined_a.y} {joined_b.x} {joined_b.y}")
+    print("{use_it()}")
+    print("{last_x([NV2 { x: 1.0, y: 2.0 }, NV2 { x: 3.0, y: 4.0 }])} {last_x([])}")
+}
+"#,
+    );
+    for name in [
+        "sum_pos",
+        "same",
+        "absent",
+        "render",
+        "relay",
+        "check",
+        "format_optional",
+        "from_field",
+        "sum_field",
+        "to_local",
+        "mk_nest",
+        "nested_absent",
+        "from_nested_field",
+        "bounce",
+        "use",
+        "exercise_ffi",
+        "apply",
+        "outer",
+        "arc",
+        "coalesce",
+        "if_let",
+        "pick_two",
+        "pick_flat",
+        "pick_nested",
+        "pick_pair",
+        "use_it",
+        "last_x",
+    ] {
+        let body = function_body(&lua, name);
+        assert!(
+            !body.contains("NV2_ct("),
+            "`{name}` materialized a nobox value:\n{body}"
+        );
+    }
+    assert_eq!(
+        run_main(&lua),
+        "true\nnil\nNV2 { x: 1, y: 2 }\nfalse\n3\n1\nfalse\n8 8\n3\n12\n3 11 7 -1\n3 4 7 8\n3 4 7 8 9 10\n3\n3 -1"
+    );
 }
