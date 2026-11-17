@@ -89,7 +89,7 @@ fn main() { }
         .find(|line| line.contains("__deco_system({"))
         .expect("decorator application");
     assert!(
-        application.contains("__rock_code_slot_ref(\"named:<test>::alpha<>\")"),
+        application.contains("__rock_code_slot_ref(\"named:<test>::alpha_0<>\")"),
         "generated decorator target must be a CodeRef: {application}"
     );
     assert!(
@@ -144,7 +144,7 @@ fn main() {}
         emit.lua
     ));
     assert!(
-        out.starts_with("3:named:<test>::first<>"),
+        out.starts_with("3:named:<test>::first_0<>"),
         "plan targets must be admitted CodeRef roots: {out}"
     );
 }
@@ -235,11 +235,11 @@ fn main() {}
     assert!(alpha < beta, "definition order is declaration order");
     assert!(
         emit.lua
-            .contains("factory = __rock_code_slot_pending_ref(\"named:<test>::make_alpha<>\")")
+            .contains("factory = __rock_code_slot_pending_ref(\"named:<test>::make_alpha_0<>\")")
     );
     assert!(
         emit.lua
-            .contains("factory = __rock_code_slot_pending_ref(\"named:<test>::make_beta<>\")")
+            .contains("factory = __rock_code_slot_pending_ref(\"named:<test>::make_beta_0<>\")")
     );
     let out = run_luajit(&format!(
         "{}\nlocal p = _G.__ROCK_DEFINITION_PLAN.widgets; print(p.len .. ':' .. p._data[1].key .. ':' .. p._data[1].factory())",

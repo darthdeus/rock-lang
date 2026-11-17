@@ -116,9 +116,9 @@ fn each_column_instantiation_owns_its_own_step_symbol() {
 }
 
 /// Every top-level definition whose symbol starts with `prefix`, and every
-/// symbol with that prefix the chunk REFERENCES anywhere but its own definition
-/// header. The two are compared, so a body that is defined and never reached, or
-/// reached and never defined, is visible.
+/// symbol with that prefix the chunk REFERENCES outside logical code-slot keys
+/// and its own definition header. The two are compared, so a body that is defined
+/// and never reached, or reached and never defined, is visible.
 ///
 /// REFERENCED, not called: a coroutine's helpers are reached as VALUES --
 /// `pcall(..__step, s, arg)` and `__resume = ..__resume` -- so a call-shaped
@@ -127,6 +127,9 @@ fn defined_and_referenced(lua: &str, prefix: &str) -> (BTreeSet<String>, BTreeSe
     let mut defined = BTreeSet::new();
     let mut referenced = BTreeSet::new();
     for (i, _) in lua.match_indices(prefix) {
+        if lua[..i].ends_with("::") {
+            continue;
+        }
         let rest = &lua[i..];
         let len = rest
             .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))

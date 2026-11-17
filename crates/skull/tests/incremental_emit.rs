@@ -989,7 +989,7 @@ fn main() { let _ = helper() }
             "{edited}: the overlay must retain the publication boundary"
         );
         if let Some(stage) = staged.first() {
-            assert!(stage.contains("named:<t>::first<>"), "{stage}");
+            assert!(stage.contains("named:<t>::first_0<>"), "{stage}");
             let stage_offset = overlay.find("__rock_code_slot_stage(").unwrap();
             let body_offset = overlay.find("function first").expect("changed body");
             assert!(

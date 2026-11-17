@@ -125,7 +125,8 @@ impl CodeIdentity {
     }
 
     /// A stable runtime key. It names the compiler-owned source/mono identity
-    /// and deliberately excludes backend symbols, arena indices and pointers.
+    /// using the shared declaration mangling to distinguish overloads, and
+    /// deliberately excludes arena indices and pointers.
     pub fn logical_key(
         &self,
         ws: &bone_core::workspace::Workspace,
@@ -134,6 +135,8 @@ impl CodeIdentity {
         let instance_key = |instance: &Instance| {
             let module = ws.module(instance.func.module);
             let function = &module.functions[instance.func.func];
+            let def_key = logical_def_key(module.logical_file, function.name);
+            let (scope, _) = def_key.rsplit_once("::").expect("logical definition scope");
             let args = instance
                 .arg_types(interner)
                 .iter()
@@ -141,8 +144,9 @@ impl CodeIdentity {
                 .collect::<Vec<_>>()
                 .join(",");
             format!(
-                "{}<{}>",
-                logical_def_key(module.logical_file, function.name),
+                "{}::{}<{}>",
+                scope,
+                crate::mangle::mangle_fn(ws, function),
                 args
             )
         };

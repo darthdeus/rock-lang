@@ -186,10 +186,10 @@ fn main() {
     );
 }
 
-/// A v1 function's code identity is its DefKey too: the hot-reload code slot of
-/// a function that moves between fragments of one module must not change.
+/// A v1 function's code key uses its module scope and signature: moving the
+/// function between fragments of one module must not change its code slot.
 #[test]
-fn v1_code_identity_is_its_def_key() {
+fn v1_code_identity_uses_module_scope_and_signature() {
     let fragments = [
         V1Fragment {
             file: "main.rock",
@@ -233,15 +233,15 @@ fn v1_code_identity_is_its_def_key() {
     );
     assert_eq!(
         bump.logical_key(&ws, &interner),
-        "named:v1state::a::bump<>",
-        "a v1 function's logical code identity is its DefKey, not its fragment"
+        "named:v1state::a::bump_1c91355d_0<>",
+        "a v1 function's logical code identity uses its module scope, not its fragment"
     );
 }
 
 /// A `static` inside a v1 function is keyed on its owning callable, so the same
 /// rule reaches it through the owner's logical key.
 #[test]
-fn v1_static_identity_is_keyed_on_its_owner_def_key() {
+fn v1_static_identity_is_keyed_on_its_owner_code_key() {
     let emitted = emit_v1_package(
         "v1state",
         &[
@@ -256,8 +256,10 @@ fn v1_static_identity_is_keyed_on_its_owner_def_key() {
         ],
     );
     assert!(
-        emitted.lua.contains("static:named:v1state::a::tick<>::n#0"),
-        "a v1 static is keyed on its owner's DefKey, not on the owner's file"
+        emitted
+            .lua
+            .contains("static:named:v1state::a::tick_1c91355d_0<>::n#0"),
+        "a v1 static is keyed on its owner's code key, not on the owner's file"
     );
     let out = run_main(&emitted.lua);
     assert_eq!(

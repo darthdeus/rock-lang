@@ -1,0 +1,19 @@
+fn count(value: int) -> int {
+    static n = 0
+    n = n + 1
+    return n
+}
+
+fn count(value: string) -> int {
+    static n = 0
+    n = n + 1
+    return n
+}
+
+@test
+fn overload_statics_keep_separate_cells() {
+    assert_eq(count(41), 1)
+    assert_eq(count("hello"), 1)
+    assert_eq(count(41), 2)
+    assert_eq(count("hello"), 2)
+}

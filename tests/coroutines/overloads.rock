@@ -1,0 +1,20 @@
+co fn read(number: int) -> Coroutine<int> {
+    yield number
+    yield number + 1
+}
+
+co fn read(text: string) -> Coroutine<string> {
+    yield text
+    yield text + "!"
+}
+
+@test
+fn coroutine_overloads_keep_separate_frame_layouts() {
+    let number = read(41)
+    let text = read("hello")
+
+    assert_eq(number.resume() ?? -1, 41)
+    assert_eq(text.resume() ?? "missing", "hello")
+    assert_eq(number.resume() ?? -1, 42)
+    assert_eq(text.resume() ?? "missing", "hello!")
+}

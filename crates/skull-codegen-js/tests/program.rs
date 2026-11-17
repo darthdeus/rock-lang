@@ -35,7 +35,7 @@ fn main() { for s in SYSTEMS { s.func() } }
         .find(|l| l.contains("__deco_system(") && l.contains("\"alpha\""))
         .unwrap_or_else(|| panic!("no alpha application line:\n{js}"));
     assert!(
-        alpha_app.contains("func: __rock_code_slot_ref(\"named:<test>::alpha<>\")"),
+        alpha_app.contains("func: __rock_code_slot_ref(\"named:<test>::alpha_0<>\")"),
         "{alpha_app}"
     );
     assert!(!alpha_app.contains("func: alpha"), "{alpha_app}");
@@ -279,8 +279,8 @@ fn main() {}
     let alpha = js.find("key: \"alpha\"").expect("alpha plan entry");
     let beta = js.find("key: \"beta\"").expect("beta plan entry");
     assert!(alpha < beta);
-    assert!(js.contains("factory: __rock_code_slot_pending_ref(\"named:<test>::make_alpha<>\")"));
-    assert!(js.contains("factory: __rock_code_slot_pending_ref(\"named:<test>::make_beta<>\")"));
+    assert!(js.contains("factory: __rock_code_slot_pending_ref(\"named:<test>::make_alpha_0<>\")"));
+    assert!(js.contains("factory: __rock_code_slot_pending_ref(\"named:<test>::make_beta_0<>\")"));
     let source = format!(
         "var __G = {{}};\n{}\n{}\n{}\nconsole.log(__G.__ROCK_DEFINITION_PLAN.widgets.len + ':' + __G.__ROCK_DEFINITION_PLAN.widgets._data[0].key + ':' + __rock_call(__G.__ROCK_DEFINITION_PLAN.widgets._data[0].factory));",
         skull_codegen_js::JS_GLOBALS_RUNTIME,

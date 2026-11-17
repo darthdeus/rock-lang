@@ -1914,10 +1914,12 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
         assert!(
             overlay.contains("function gen_0__advance(")
-                && overlay
-                    .contains("__rock_code_slot_ref(\"generated:<backend-test>::gen<>::advance\")")
-                && overlay
-                    .contains("__rock_code_slot_ref(\"generated:<backend-test>::gen<>::resume\")"),
+                && overlay.contains(
+                    "__rock_code_slot_ref(\"generated:<backend-test>::gen_0<>::advance\")"
+                )
+                && overlay.contains(
+                    "__rock_code_slot_ref(\"generated:<backend-test>::gen_0<>::resume\")"
+                ),
             "overlay must re-emit the per-co-fn __advance/__resume fns + CodeRefs in the ctor:\n{}",
             overlay
         );
