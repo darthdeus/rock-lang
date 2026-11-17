@@ -30,8 +30,7 @@ const SEP: &str = "_";
 ///
 /// Derived from [`mangle_fn`] plus the reified type trees in declaration order, so the
 /// definition and every call site agree without a side table, exactly as the base
-/// mangle does. `None` for an EMPTY key -- no instantiation to spell -- which
-/// producers no longer hand out, so this is the floor rather than a decision.
+/// mangle does. `None` for an empty key, which has no instantiation to spell.
 ///
 /// An exempt (`@nomangle`, `extern`, ...) callee still gets a suffixed name here.
 /// Its bare name belongs to the ONE body the author owns; a specialized copy is a
@@ -211,9 +210,8 @@ pub fn mangle_fn(ws: &Workspace, f: &Function) -> String {
         // carries its module prefix, which none of those consumers know.
         return declared_name(f.name.as_str()).to_string();
     }
-    // Append directly into one buffer -- no per-fragment `String`/`Vec` (this is
-    // on the per-call-site codegen path; the old collect+join allocated N+2
-    // strings + a vec per reference).
+    // Append directly into one buffer to avoid per-fragment allocations on the
+    // call-site codegen path.
     let mut out = String::with_capacity(f.name.len() + 16);
     // Synthetic operators already carry package identity in their parameter types.
     let name = if f.is_synthetic && declared_name(f.name.as_str()).starts_with("__op_") {

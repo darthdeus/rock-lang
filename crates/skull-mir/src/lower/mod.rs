@@ -1,20 +1,4 @@
-//! bone HIR -> skull MIR lowering (Phase 1: the straight-line spine).
-//!
-//! A type-directed mechanical walk over bone's already-resolved HIR (names,
-//! overloads, operators, and types are all decided by `semantic_pass`). A
-//! `Builder` holds a cursor on the "current block" and appends instructions;
-//! `lower_expr` returns the [`Idx<Inst>`] that holds the expression's value.
-//!
-//! Variables (`let`/param) become mutable [`Cell`]s; a `Var` read is an
-//! [`Inst::Load`], a binding's initializer an [`Inst::Store`]. Arithmetic
-//! arrives as `__op_*` calls (rock's desugar) and is dispatched to **typed**
-//! ops at build time (decision 8): `int`+`int` -> [`Inst::IntAdd`], `float` ->
-//! [`Inst::FloatAdd`], `string`+`+` -> [`Inst::StringConcat`].
-//!
-//! Phase 1 is straight-line ONLY: control flow (`if`/`&&`/`??`/loops/`match`),
-//! coroutines, calls-to-`FuncRef`, and aggregates are not here yet — they
-//! `gap` (return a clear error) and land in later phases. The gate is the real
-//! corpus, not this comment.
+//! Lower resolved HIR into MIR blocks, cells and typed instructions.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -119,13 +103,6 @@ pub(crate) fn required_wire_slot<T>(
         .map(to_slot)
         .ok_or_else(|| missing(format!("{context} has no ABI slot {index}")))
 }
-// --- scalarized value ABI (rock parity) -------------------------------------
-//
-// A `value` struct is passed/returned as its flattened primitive LEAF scalars
-// (no per-call cdata at the ABI boundary), reconstructed where a real value is
-// needed. The static shape drives flatten/rebuild; the runtime carrier `ValueRepr`
-// threads the unboxed form through lowering; `pack` is the single place a Group
-// becomes a real `<name>_ct(...)` cdata (an escape). See the plan doc.
 
 /// Whether a fn with backend `b` can serve codegen `target`: an `Any` (portable
 /// Rock) body serves every target, else the backend must match exactly.
@@ -208,19 +185,7 @@ pub use storage::SYNTHESIZED_ENTRIES;
 mod structs;
 mod types;
 
-// A flattened child field's physical slots are DOTTED parent keys, the same
-// encoding `embed` uses. `.` is
-// not an identifier character, so a slot key can never equal a legal user field
-// name -- which the `__`-based encoding this replaced could: an enum field `sig`
-// and a user field `sig__tag` both wrote `sig__tag`, so the table ctor emitted
-// the key twice and Lua's last-write-wins clobbered the discriminant, silently
-// breaking every match on that enum.
-//
-// The three forms are disjoint by their suffix: `#` for the discriminant (not an
-// identifier character and not a digit), all-digits for a positional payload (an
-// identifier cannot start with a digit), an identifier for a named payload. They
-// cannot collide with an `embed` leaf key either, because both are prefixed by
-// the owning parent FIELD name and a field name denotes exactly one field.
+// Flat enum payload slots use dotted physical keys on the parent.
 
 /// Re-key relative embed leaf paths under an owning field: `[("x", v)]` under
 /// `p` becomes `[("p.x", v)]`. Relative paths let a leaf list be computed once
@@ -332,13 +297,7 @@ struct ValueReferences {
 pub struct ScalarCtx {
     global_read_checks: OnceLock<HashMap<Ustr, crate::global_storage::GlobalReadCheck>>,
     value_references: std::sync::Arc<ValueReferences>,
-    /// When set, the scalarized value ABI is disabled workspace-wide: every fn
-    /// keeps value structs as first-class single values (params/returns/args),
-    /// never splatting them to leaf scalars. Used by the GLSL backend, where a
-    /// `value` struct is a first-class `vecN`, not the luajit-shaped scalar leaves. The toggle is
-    /// contained in the ABI
-    /// policy behind [`BackendFnAbiPlan`], which definitions and direct calls
-    /// both read.
+    /// Use first-class value structs on targets with native aggregate values.
     values_first_class: bool,
     native_flat_enums: bool,
     /// Keep value-struct Vec elements as first-class rows. Native backends use
@@ -351,20 +310,7 @@ pub struct ScalarCtx {
     /// when the collapsed representative is a luajit-native variant. `Any`
     /// disables the filtering entirely (the GLSL backend + generic/test callers).
     target: bone_core::hir::FnBackend,
-    /// **The build's one type arena.**
-    ///
-    /// An [`Instance`](crate::instance::Instance) is an identity only while one
-    /// arena is reachable from everything that mints or reads one, and lowering
-    /// is where a callee instantiation is first named. It lives here because
-    /// this is the build-scoped context every lowering entry point already
-    /// carries -- threading a second parameter through them would put the same
-    /// object in two places and let a caller supply the wrong one.
-    ///
-    /// It is a SHARED HANDLE, not an owned arena. The retained
-    /// `InstanceGraph` mints instances against the same object, and neither
-    /// side can own it outright: moving the arena here would leave the graph's
-    /// `MonoTyId`s dangling, and copying it would be the second identity this
-    /// stage exists to remove. [`ScalarCtx::sharing`] is how the two are joined.
+    /// Concrete plans and codegen share the same type arena.
     interner: std::sync::Arc<crate::monoty::MonoInterner>,
     /// The build's one physical representation arena. It follows this context
     /// so target-specific ABI identities survive from body entry through calls
@@ -479,13 +425,6 @@ impl ScalarCtx {
         &self.interner
     }
 
-    /// Share the arena a retained `InstanceGraph` mints against, so the graph's
-    /// ids and emission's ids are the same ids.
-    ///
-    /// Takes the HANDLE, not an arena: the graph keeps minting after this, so a
-    /// snapshot would go stale the moment an incremental update expanded it.
-    /// The arena is monotonic, so emission naming a type the graph never
-    /// reached simply extends the shared one.
     pub fn sharing(mut self, interner: std::sync::Arc<crate::monoty::MonoInterner>) -> Self {
         // The representation arena indexes its type facts by this arena's ids,
         // so it follows the handle; nothing may have been planned yet.
@@ -560,13 +499,7 @@ impl ScalarCtx {
         Self::new_with_value_mode(ws, true)
     }
 
-    /// Incrementally fold one re-inferred body's value-reference contribution into
-    /// the cached set, and return the names whose GLOBAL taken-by-ref membership
-    /// FLIPPED (entered or left the set). A flip means a fn's scalar-ABI
-    /// eligibility changed, so the named fn(s) and every direct caller must
-    /// re-emit -- the caller adds the flipped names to the affected set.
-    /// Body edits keep the body SET fixed (add/remove fn is interface-tier ->
-    /// full rebuild), so diffing only the re-inferred bodies is complete.
+    /// Return names whose function-value uses change ABI eligibility after an edit.
     pub fn update_body(&mut self, ws: &Workspace, mid: ModuleId, owner: BodyOwner) -> Vec<Ustr> {
         // An edit can flip taken-by-ref membership, and the memoized ABI plans
         // read it -- drop them all rather than tracking which flips reach which
@@ -643,33 +576,7 @@ impl NestedFn {
     }
 }
 
-/// THE invariant: a function's emitted Lua parameter list must be INJECTIVE.
-///
-/// The scalar-ABI leaf encoding joins nested field names with `__`, and `__` is
-/// legal in a Rock identifier, so the join cannot be made injective on its own.
-/// Two distinct sources can land on one emitted name:
-///   - two leaves of the same value param (`value Bad { tl__x: float, tl: V2 }`
-///     flattens both `tl__x` and `tl.x` to `r__tl__x`), or
-///   - a leaf and a SIBLING param (`fn f(r: V2, r__x: float)` emits
-///     `f(r__x, r__y, r__x)`).
-///
-/// Either way Lua binds the later one and the body silently reads the wrong
-/// value. Reject rather than emit the duplicate -- same discipline as
-/// [`crate::mangle::collision_errors`].
-///
-/// Keyed on the SIGNATURE, at the point leaves actually become parameter names --
-/// not on the value declaration. A declaration key is both unsound and
-/// over-broad: it misses the sibling-param collision entirely (the struct is
-/// clean there), and it rejects a program whose ambiguous shape never reaches a
-/// param list at all, which is legal and observably correct today.
-///
-/// The names come from [`scalar_abi_lua_param_names`] -- the very list the
-/// emitter writes -- so the checker cannot disagree with what is emitted.
-///
-/// Scoped to `inline(lua)` bodies because that is the ONLY emission that names
-/// leaves: an ordinary Rock fn's params are emitted as `c<N>` cells, positional
-/// and injective by construction, so an ambiguous shape flowing through one is
-/// harmless and must keep compiling.
+/// Reject source parameters that collide after scalar expansion.
 pub fn scalar_abi_param_collisions(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -714,12 +621,6 @@ pub fn scalar_abi_param_collisions(
     out
 }
 
-/// A human description per emitted parameter, positionally parallel to
-/// [`scalar_abi_lua_param_names`]: either the declared param itself, or which
-/// leaf of which value param it flattens from (dotted, so it is readable and
-/// unambiguous). Built by the same walk under the `.` separator, over the SAME
-/// plan the names come from -- a second plan here would be free to describe a
-/// different parameter list than the one being checked.
 fn scalar_abi_param_origins(ws: &Workspace, plan: &BackendFnAbiPlan) -> Vec<String> {
     if !plan.uses_scalar_abi() {
         return Vec::new();
@@ -798,13 +699,6 @@ enum FmtPiece {
     DynInt(Idx<Expr>),
 }
 
-/// Decompose an interpolation spec into `string.format` conversion pieces
-/// (`%[flags][width][.precision]type`). All-`Lit` => a static conversion; any
-/// `DynInt` => assemble at runtime. `inferred_ty` supplies the conversion letter
-/// when the spec omits one. `skip_width` leaves width out (the caller pads after
-/// grouping); `skip_pad_attrs` leaves alignment/fill to the pad helper. `None`
-/// for specs with no printf equivalent (custom fill / center alignment) — the
-/// caller gaps so we never silently mis-format. Mirrors old skull `fmt_pieces`.
 fn fmt_pieces(
     spec: &bone_core::hir::InterpSpec,
     inferred_ty: Option<char>,
@@ -2157,17 +2051,6 @@ struct Builder<'a> {
     /// In a `co fn`, the cell that `yield e` evaluates to (the value passed to
     /// the next `resume(arg)`). `None` outside a coroutine.
     resume_arg: Option<Idx<Cell>>,
-    /// True while lowering a body whose calls this pass cannot give the
-    /// specialized scalar ABI: a closure sub-CFG, a hoisted nested fn, a
-    /// coroutine, a global init, or a decorator. A call here must NOT take the
-    /// SPECIALIZED scalar ABI (splatting a value arg to leaves), which is only
-    /// sound when the inliner replaces the call with the matching specialized
-    /// body -- an unspliced residual would call the SHARED generic body (`T` = one
-    /// boxed slot) with splatted args and drop every leaf but the first. Boxing
-    /// the value arg matches the shared body exactly.
-    /// Per-param physical representation identity, parallel to
-    /// `body.param_bindings`. Shape structs are projected only at the
-    /// flatten/rebuild seams; this is the body-owned ABI answer.
     param_reps: Vec<RepId>,
     /// The ordinary body's ABI owns this immutable parameter slice.
     param_plan: Option<BackendFnAbiPlanHandle>,
@@ -2181,16 +2064,6 @@ struct Builder<'a> {
     /// [`MirFunc::inst_spans`] so the diagnostic points at the construct rather
     /// than at the enclosing fn.
     cur_span: Option<Span>,
-    /// The source EXPRESSION currently being lowered, maintained by
-    /// [`Builder::lower_expr`] exactly beside [`Self::cur_span`]. Together with
-    /// [`Self::cur_op`] this is the [`crate::site::Site`] every call
-    /// instruction emitted from here down is stamped with, so the identity is
-    /// recorded at ONE choke point ([`Builder::emit_cur`]) rather than at each
-    /// of the call-emitting sites -- a per-site record would make a MISSING one
-    /// indistinguishable from a legitimately siteless call.
-    ///
-    /// `None` only outside any expression (a fn prologue), which is the
-    /// exclusion the site census reports by cause.
     cur_expr: Option<Idx<Expr>>,
     /// WHICH expression arena [`Self::cur_expr`] indexes. A struct-default
     /// initializer is lowered from the declaring struct's `StructDefaults` body
@@ -2198,19 +2071,7 @@ struct Builder<'a> {
     /// its index is only meaningful against THAT arena -- and the walk records
     /// it under the same domain.
     cur_domain: crate::site::SiteDomain,
-    /// The concrete INSTANCE being lowered, which OWNS every site recorded from
-    /// this builder.
-    /// `None` for the always-emitted units -- a global initializer and a
-    /// decorator body are not functions and have no `FuncRef`, so their calls
-    /// carry no site and the census reports them under that cause rather than
-    /// losing them.
     site_owner: Option<crate::instance::Instance>,
-    /// Which OPERATION of [`Self::cur_expr`] is being lowered. `DirectCall` is
-    /// the default because a call emitted while lowering an expression is that
-    /// expression's own call; the witness and synthesized routes override it
-    /// for their sub-lowering through [`Builder::with_site_op`], because one
-    /// expression carries several distinct callee obligations and they must
-    /// stay distinguishable.
     cur_op: crate::site::SiteOp,
     /// A scalarized binding -> (its leaves, shape). A read of the binding
     /// reconstructs the unboxed `Group` from these; a field read projects a
@@ -2723,24 +2584,7 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        // THE choke point for call-site identity: every call FORM entering the
-        // arena is stamped here, so a missing stamp is a property of this ONE
-        // branch rather than of 48 call-emitting sites each remembering to
-        // record. `CallBoundMulti` is included: it is the `for` protocol's
-        // `next` witness on the caller-generic path, and its concrete sibling on
-        // the other arm carries a site, so leaving it out made the SAME source
-        // construct recorded or not depending on which arm it took. It is still
-        // a call a body may not carry into emission, which is a separate
-        // rejection.
-        //
-        // Not yet total: a call emitted outside any expression carries no site,
-        // reported by the site-join census in skull's tests rather than assumed away.
-        // A fn-value MINT is stamped too. It is not a call, but it is a callee
-        // OBLIGATION -- the one place a declaration becomes a spelled value --
-        // and the graph records it at the same `Site { expr, FnValue }`. Keyed
-        // on the operation rather than on the instruction, because
-        // `Inst::Global` is also a module global and a `static` cell and those
-        // name no callee.
+        // Record the source site before instruction indices enter later passes.
         let is_mint = self.cur_op == crate::site::SiteOp::FnValue;
         if is_call || is_mint {
             if let (Some(owner), Some(expr)) = (self.site_owner.clone(), self.cur_expr) {
@@ -2859,15 +2703,7 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Lower `f` with the site EXPRESSION overridden, restoring it after.
-    ///
-    /// The symmetric half of [`Self::with_site_op`]. Most calls inherit the
-    /// cursor `lower_expr`/`lower_expr_repr` install, but a PLACE expression is
-    /// never lowered as a value -- `lower_assign_effect` dispatches on
-    /// `expr_arena[target]` directly -- so the calls its arms synthesize had no
-    /// cursor at all in statement position, and the enclosing one in value
-    /// position. Both are wrong against a walk that keys those obligations on
-    /// the `Expr::Index` node itself.
+    /// Set the source expression for a synthesized call.
     fn with_site_expr<T>(&mut self, expr: Idx<Expr>, f: impl FnOnce(&mut Self) -> T) -> T {
         let outer = self.cur_expr.replace(expr);
         let out = f(self);
@@ -2875,12 +2711,6 @@ impl<'a> Builder<'a> {
         out
     }
 
-    /// Lower `f` with the site DOMAIN overridden, restoring it after.
-    ///
-    /// The third scoped half, beside the expression and the operation: a body
-    /// lowered from another arena keeps its own indices, and the domain is what
-    /// makes them readable. A flag rather than a cursor swap, because the nested
-    /// `lower_expr` installs the foreign index itself.
     fn in_domain<T>(
         &mut self,
         domain: crate::site::SiteDomain,
@@ -2975,16 +2805,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Bind one declared param to the cells its wire slot occupies, in the Lua
-    /// parameter list.
-    ///
-    /// THE definition-side counterpart of `slot_param_names`, and the single
-    /// implementation for all three definition forms (a top-level body, a
-    /// hoisted nested fn, a lambda). They must agree with the caller on both the
-    /// COUNT and the depth-first ORDER: Lua nil-fills a short call rather than
-    /// rejecting it, so a disagreement here is a silent wrong answer, not an
-    /// error. A splatting param has no single cell, so it binds as a GROUP (a
-    /// value's leaves) or a TUPLE (a tuple's slots) and reads rebuild from them.
+    /// Bind the parameter in physical slot order.
     pub(crate) fn bind_param_slot(
         &mut self,
         pb: Idx<BindingInfo>,
@@ -3228,12 +3049,7 @@ impl<'a> Builder<'a> {
         Some(CallParamDefault::Vector { shape, literals })
     }
 
-    /// Constants read in the callee's lexical owner, independent of its wire ABI.
-    /// Passing them explicitly avoids nil side exits with the caller's floats
-    /// live. A default that is not a constant stays the callee's to evaluate:
-    /// `None` passes nil, except that a nullable parameter with a non-null
-    /// default gets [`Lit::Omitted`], because nil is its explicit `null`
-    /// ([`param_null_overrides_default`]).
+    /// Emit simple defaults at same-target call sites to avoid optional argument guards.
     pub(crate) fn call_param_defaults(&self, func: FuncRef) -> Vec<Option<CallParamDefault>> {
         let module = self.ws.module(func.module);
         let decl = &module.functions[func.func];
@@ -3346,16 +3162,7 @@ impl<'a> Builder<'a> {
         Ok(out)
     }
 
-    /// Callee-side default fill: an omitted argument arrives as Lua `nil`, so for
-    /// each defaulted param emit `if cell == nil { cell = <default> }` at the top
-    /// of the body (rock's convention — the default expr lives in THIS body's
-    /// arena). Direct calls pass supported constants themselves; unsupported
-    /// defaults and callers the emitter cannot see still need this prologue.
-    /// A `null` default on a scalar cell emits nothing: omitted already is null.
-    /// A nullable param with a non-null default tests for [`Lit::Omitted`]
-    /// instead, so an explicit `null` stays null. A scalarized value param
-    /// needs no marker: an explicit null value arrives with a `false` presence
-    /// leaf, an omitted one with nil.
+    /// Opaque callers may omit arguments, so fill defaults in the callee too.
     fn fill_param_defaults(&mut self) -> Result<(), CompilerError> {
         let pbs: Vec<Idx<BindingInfo>> = self.body.param_bindings.into_iter().collect();
         let defaults = self.body.param_defaults.clone();
@@ -3466,15 +3273,7 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Reject a REACHABLE fall-off in a `co fn` whose declared result R is a
-    /// concrete non-unit, non-nullable type: bone coerces only explicit
-    /// `return <expr>` statements to R (a coroutine's body tail is discarded,
-    /// never coerced), so a fall-off would stamp the completed terminal with
-    /// `__return` nil and `result()`/`take_result` would hand out a nil typed
-    /// as R. Unit R (the default) and nullable R (nil is a legal value) stay
-    /// admitted. R is read from the concrete plan, so a generic R is judged
-    /// at each instantiation. Called only when the body's end is reachable,
-    /// so `while true` bodies never trip it.
+    /// Reachable fallthrough in a non-null, non-unit coroutine would publish a missing result.
     fn reject_nonunit_coroutine_falloff(&self) -> Result<(), CompilerError> {
         let plan = self.concrete_plan;
         let Some(result_id) = plan.signature.result else {
@@ -3514,13 +3313,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// A return is an expression destination, rather than a consumer of a
-    /// materialized expression value. Tail blocks and branches can forward that
-    /// destination; only the leaves cross the existing return ABI boundary.
-    ///
-    /// Keep structured backends, coroutine completion and deferred scopes on
-    /// value lowering. In particular, distributing a destination across a defer
-    /// would duplicate cleanup and can move snapshot conversion across cleanup.
+    /// Forward the return slot plan through tail control flow.
     fn lower_return(&mut self, opt: Option<Idx<Expr>>) -> Result<(), CompilerError> {
         let direct = self.scx.target == bone_core::hir::FnBackend::Lua
             && !self.f.is_coroutine
@@ -3690,14 +3483,6 @@ impl<'a> Builder<'a> {
         out
     }
 
-    /// The `present, <slots...>` wire for a `-> (..)?` return, the tuple analogue
-    /// of the nullable arms in [`Self::repr_to_leaves`]: a literal `null` folds to
-    /// `false, nil, ...` and a tuple value leads with `true`.
-    ///
-    /// A tuple-or-nil arriving as an already-packed SCALAR (a container read:
-    /// the stdlib `get`/`pop` instances return `_data[i]` whole) is tested at
-    /// runtime and unpacked per arm -- the stored box becomes the wire's
-    /// slots, so the nobox element still travels unboxed from here on.
     fn nullable_tuple_return_slots(
         &mut self,
         e: Idx<Expr>,
@@ -3751,15 +3536,7 @@ impl<'a> Builder<'a> {
         self.tuple_repr_to_slots(r, shape)
     }
 
-    /// The N return operands for a tuple-return `return <v>`. A fresh `MakeTuple`
-    /// in return position (the common `return (a, b)` and the `return f()` forward
-    /// where `f()` lowered to `MakeTuple(loads)`) is elided to its operands -- no
-    /// table alloc. A tuple value from elsewhere (a var/field holding a packed
-    /// table) is unpacked with `TupleIndex`.
-    /// Whether `v` reads a STORED value back out of a container or field --
-    /// the box layouts that are the flat wire in a table. An explicit
-    /// `materialize` box (a fresh `MakeTuple`) and a value crossing an opaque
-    /// generic boundary keep per-element user layout and are NOT stored boxes.
+    /// Forward the members of a fresh tuple without building or reading its box.
     fn reads_stored_box(&self, v: Idx<Inst>) -> bool {
         matches!(self.f.insts[v], Inst::Index { .. } | Inst::Field { .. })
     }
@@ -3788,17 +3565,6 @@ impl<'a> Builder<'a> {
             .collect()
     }
 
-    /// Flatten a tuple repr to the slot values `shape` describes -- the tuple
-    /// analogue of [`Self::repr_to_leaves`]. A `Tuple` repr (a splatting call
-    /// forwarded straight out, or a tuple literal) yields its parts; anything
-    /// else is a packed tuple, so each element is read back with `TupleIndex`
-    /// and a `Leaves` slot is field-read off the box.
-    ///
-    /// This owns the leading presence at a nullable shape, both arms, so it is
-    /// the exact inverse of [`Self::tuple_from_slots`] -- one oracle for where
-    /// presence sits on the wire. A repr that carries its OWN tag forwards that
-    /// tag: `return maybe(b)` hands on the callee's presence, and synthesizing
-    /// `true` here instead reported every absent forward as present.
     fn tuple_repr_to_slots(
         &mut self,
         r: ValueRepr,
@@ -3846,12 +3612,7 @@ impl<'a> Builder<'a> {
         for (slot, part) in shape.slots.iter().zip(parts) {
             match slot {
                 RetSlot::Opaque => out.push(self.pack(part)?),
-                // A BOXED source at a non-nullable splatting slot is the iterator
-                // protocol's "no element" placeholder (`return (false,
-                // phantom())`), which is nil -- field-reading it would fault, and
-                // the slot is dead anyway because the tuple's own flag guards it.
-                // The nullable spread already branches on nil, so borrow it and
-                // drop the presence leaf.
+                // The iterator's missing element can leave an otherwise non-null slot empty.
                 RetSlot::Leaves(vs) if !vs.nullable && !matches!(part, ValueRepr::Group { .. }) => {
                     let mut nullable = vs.clone();
                     nullable.nullable = true;
@@ -3976,12 +3737,7 @@ impl<'a> Builder<'a> {
     }
 }
 
-/// EXPLICIT_NULL_DEFAULT: whether parameter `index` of `body`, declared `ty`,
-/// is nullable with a default other than `null`. Only such a parameter tells
-/// an omitted argument from an explicit `null`: its callers pass
-/// [`Lit::Omitted`] (or the constant default) when they omit it, and its
-/// default fill tests for that marker instead of nil. Any other omitted
-/// argument is nil, because nil and the default agree there.
+/// A nullable parameter with a non-null default treats explicit null as a supplied value.
 pub fn param_null_overrides_default(ws: &Workspace, body: &Body, index: usize, ty: TyId) -> bool {
     let Some(Some(default)) = body.param_defaults.get(index) else {
         return false;
@@ -4015,19 +3771,6 @@ fn resolve_tyid(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<TyId> {
     }
 }
 
-/// Why `K` cannot be a `Map` key, or `None` when it is admitted.
-///
-/// An ALLOW-LIST, not a scan for known-bad shapes. Lua keys a table by identity
-/// for everything that is not a scalar, so the admitted set is the closed one --
-/// int/float/string/bool are value-keyed, and a `newtype` is admitted exactly
-/// when what it wraps is. Every other concrete key misses silently: a cdata
-/// (`value` struct, cdata-tier payload enum) hashes by pointer, and a table
-/// (tuple, array, plain struct, table-tier payload enum) by table identity.
-///
-/// An UNRESOLVED key is admitted, and that is load-bearing rather than lenient:
-/// `fn Map<K, V>.insert` in the stdlib is generic, and rejecting a type
-/// parameter would refuse the declaration of every Map method. Only a key that
-/// resolves to a concrete non-admitted type is a finding.
 fn map_key_rejection_reason(
     ws: &Workspace,
     inf: &BodyInference,
@@ -4115,14 +3858,6 @@ fn map_key_rejected(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<Str
     map_key_rejection_reason(ws, inf, k, 0)
 }
 
-/// Scan module `mid`'s function bodies for a `Map<K, V>` whose key `K` is not
-/// value-keyed, and return the first offending (message, span).
-///
-/// The failure this prevents is SILENT: a runtime-built key misses an entry
-/// stored under an equal-by-value one, so `m.insert(k, v)` twice at equal `k`
-/// grows the map instead of replacing (measured: `Map<(int,int), string>` -> len
-/// 2, against a string control at len 1). Nothing at runtime reports it, and
-/// `a == b` can be true on the very keys that miss.
 pub fn map_key_rejection(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)> {
     let module = ws.module(mid);
     let ir = ws.inference(mid)?;
@@ -4166,12 +3901,7 @@ fn gc_value_under_newtypes(
     Ok(nominal_is_gc_value(ws, name).then_some(name))
 }
 
-/// Reject a GC-carrying value struct used at a genuine C boundary (an `extern`
-/// signature) -- a spanned emit-time error, since
-/// the cdef the boundary needs was never emitted for this tier. Replaces the old
-/// silent skip-then-crash (unfuck #51). Returns `(message, span)` for the first
-/// offender, scanning externs then body types. FFI-clean value structs are
-/// unaffected (they have a cdef and stay boundary-legal).
+/// Extern C signatures require value structs that can cross a genuine C boundary.
 pub fn gc_value_c_boundary(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)> {
     let module = ws.module(mid);
     // 1. extern signatures: a param/return that is a GC-carrying value struct.
@@ -4308,14 +4038,6 @@ fn struct_expand_rejection_for_call(
     None
 }
 
-/// A resolved `rock_shader(...)` pipeline. Two forms:
-/// - two-arg `rock_shader(vert, frag)`: `vert = Some(..)`, `key = "<vert>+<frag>"`;
-///   the driver runs `emit_shader_with_view`.
-/// - one-arg fullscreen `rock_shader(frag)`: `vert = None`, `key = "<frag>"` (a
-///   bare name, never containing '+', so it can never collide with a pair key);
-///   the driver runs `emit_shader_with_view`.
-///
-/// `key` is the pipeline name const `pipeline()` looks up.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShaderPair {
     pub key: String,
@@ -4388,13 +4110,6 @@ fn resolve_shader_arg(
     }
 }
 
-/// Resolve a `rock_shader(...)` call's args to a [`ShaderPair`], or the first
-/// spanned rejection. Arity dispatches the form: one arg -> fullscreen
-/// (`vert = None`, key = bare frag name), two args -> pair (key = `"<vert>+<frag>"`).
-/// Any other arity rejects, naming BOTH legal forms. Shared by the lowering
-/// expander ([`Builder::expand_shader_pipeline`]), the fatal gate
-/// ([`shader_expand_rejection`]), and the driver collector
-/// ([`collect_shader_pairs`]) -- one resolver, never forked.
 pub(crate) fn resolve_shader_pair(
     ws: &Workspace,
     body: &Body,
@@ -4524,12 +4239,7 @@ fn uniform_values_rejection_for_call(
     None
 }
 
-/// Resolve a `build_var("NAME")` / `embed_string("path")` call to its value. THE shared resolver:
-/// the lowering expander
-/// and the fatal gate both call it, so they cannot diverge on what they
-/// accept. The argument must be a plain string literal -- interpolation or any
-/// computed expression rejects, because the input has to be knowable without
-/// running the body.
+/// Share comptime input resolution with validation.
 pub(crate) fn resolve_comptime_value(
     ws: &Workspace,
     body: &Body,
@@ -5023,12 +4733,6 @@ fn const_int(body: &Body, e: Idx<Expr>) -> Option<i64> {
     }
 }
 
-/// Scan module `mid`'s bodies for a `string_char(<literal>)` call whose literal
-/// argument is outside ASCII 0..=127. `string_char` is `string.char` on luajit:
-/// a code > 127 emits a lone high byte (invalid UTF-8 alone, a different code
-/// unit on a UTF-16 backend); a negative code aborts `string.char` at runtime.
-/// Portable only for 0..=127; for code points use `from_codepoint`. Dynamic
-/// (non-literal) arguments are out of scope. Returns the offending arg's span.
 pub fn string_char_literal_out_of_range(ws: &Workspace, mid: ModuleId) -> Option<Span> {
     let module = ws.module(mid);
     for body in module.bodies.values() {

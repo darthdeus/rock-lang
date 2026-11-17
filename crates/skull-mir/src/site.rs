@@ -1,27 +1,10 @@
-//! **The neutral identity of one callee obligation** (plan S 9, Stage 3).
+//! The neutral identity of one callee obligation.
 //!
 //! An [`Idx<Expr>`] alone is not a site identity: one `for` header carries both
 //! an `iter` and a `next` witness, one bounded call carries a whole conformance
 //! tree, and one column-Map index can emit two runtime entries. Each of those
 //! is a separate callee obligation at the same expression, so the operation is
 //! part of the key.
-//!
-//! This type lives in `skull-mir` -- the lowest crate every consumer shares --
-//! precisely so there is ONE site vocabulary rather than two equivalent ones
-//! with a translation between them. Its consumers are:
-//!
-//! - `skull_mir::mir::MirFunc::call_sites`, the site a lowered call instruction
-//!   came from;
-//! - `skull::instance_graph::InstanceGraph::call_sites`, what the walk resolved
-//!   each site to;
-//! - `skull::concrete_body::ConcreteBody`'s callee tables, keyed by it.
-//!
-//! Those three are INTENDED to agree, and the agreement is MEASURED rather than
-//! assumed: the site-join census in skull's tests reports the join with every
-//! exclusion named by cause. It is not yet total.
-//!
-//! Correlating them by span could not even detect a disagreement -- several of
-//! these share one span, which is the whole reason the operation is in the key.
 
 use bone_core::hir::Expr;
 use bone_core::prelude::Idx;

@@ -1,27 +1,5 @@
-//! skull MIR: HIR, flattened into a cell-model CFG.
-//!
-//! The cell-model CFG has these invariants:
-//!   - A function is a graph of [`Block`]s; control flow lives ONLY in a block's
-//!     [`Term`]inator.
-//!   - An instruction's `Idx<Inst>` **IS its value** (exactly like `Idx<Expr>`
-//!     in HIR). There is no separate `Value`/`Op` wrapper. A value-producing
-//!     `Inst` is referenced by its id; an effectful one ([`Inst::Store`]) has an
-//!     id nobody references.
-//!   - **Variables are mutable [`Cell`]s** (a cell = a Lua local): read with
-//!     [`Inst::Load`], written with [`Inst::Store`]. Loop-carried updates and
-//!     reassignment ride on cells with no SSA construction.
-//!   - **Expression results are single-use values** born and consumed within one
-//!     block. Anything that must cross a block boundary (an `if`-as-value result,
-//!     a loop-carried var) is a cell — so merges go through cells, **not phi**.
-//!     [`Block`] therefore has **no params**; SSA + block params arrive later as
-//!     an additive `mem2reg` pass.
-//!   - Ops are **typed at build time** (decision 8): `int` vs `float` vs `string`
-//!     arithmetic are distinct `Inst`s, so the backend never looks up a type.
-//!   - Calls carry a [`FuncRef`] (module + function index), **not a mangled
-//!     string** (decision: mangling is the codegen's job).
-//!
-//! The taxonomy grows as lowering phases land (constructors, container ops,
-//! cast, stringify/format, inline-lua) — see the plan's phase checklist.
+//! MIR blocks contain instructions and end in terminators. Instruction indices
+//! name their results, and mutable cells carry variables across control flow.
 
 use bone_core::hir::TyId;
 use bone_core::prelude::Instant;
@@ -109,7 +87,7 @@ pub enum Lit {
 }
 
 /// How a collection is represented in the target, so index/length ops emit the
-/// right shape (decision 9: the IR is 0-based; the Lua printer adds `+1` on
+/// right shape (the IR is 0-based; the Lua printer adds `+1` on
 /// sequence access only, never on `Map` keys or arithmetic). Determined from the
 /// base's inferred type at lower time, so the backend never guesses.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -314,7 +292,7 @@ pub enum Inst {
     /// Read a variable cell.
     Load(Idx<Cell>),
 
-    // --- typed arithmetic (decision 8: built-time int/float/string split) ---
+    // --- typed arithmetic ---
     IntAdd(Idx<Inst>, Idx<Inst>),
     IntSub(Idx<Inst>, Idx<Inst>),
     IntMul(Idx<Inst>, Idx<Inst>),
@@ -1255,7 +1233,7 @@ pub struct StaticCell {
 
 /// Emission identities for a dense arena whose source had unreachable entries
 /// removed. Physical indices remain dense for MIR and backend side tables; these
-/// identities preserve the old arena order at the output boundary.
+/// identities preserve source arena order at the output boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EmitIds {
     pub insts: Vec<u32>,
@@ -1482,11 +1460,9 @@ pub struct MirFunc {
     /// native backends consume this build-owned identity instead of guessing
     /// them from a constructor's field shape.
     pub inst_logical_types: bone_core::prelude::FxHashMap<Idx<Inst>, crate::monoty::MonoTyId>,
-    /// **Which callee obligation of the source body each call instruction is**
-    /// (plan S 9, Stage 3). The join key between a lowered call and the callee
-    /// `skull::concrete_body::ConcreteBody` already resolved for that site, so
-    /// instance-driven emission can consume the graph's answer instead of
-    /// resolving one again.
+    /// Which callee obligation each call instruction represents. This joins a
+    /// lowered call to the concrete body already resolved for that site, so
+    /// instance-driven emission can consume the graph's answer.
     ///
     /// A span cannot serve as this key and never could: a `for` head's `iter`
     /// and `next` live at one expression and share one span, so the OPERATION

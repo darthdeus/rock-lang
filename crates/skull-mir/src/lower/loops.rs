@@ -35,12 +35,6 @@ impl<'a> Builder<'a> {
             .push((cont, brk, self.defers.len(), break_depth));
     }
 
-    /// `while cond { body }`: header (test) -> body -> back-edge to header; exit
-    /// on false. `continue` -> header, `break` -> exit.
-    /// Returns true when the statement TERMINATES the enclosing list: a
-    /// `while true` (constant cond) whose exit no `break` ever targeted -- its
-    /// fall-through is unreachable, so the caller must not lower trailing
-    /// statements into it (and a co fn body ending in one is not a fall-off).
     pub(crate) fn lower_while(
         &mut self,
         cond: Idx<Expr>,
@@ -167,13 +161,7 @@ impl<'a> Builder<'a> {
             return self.lower_for_array(vars, iter, body);
         }
         match self.coll_kind(iter)? {
-            // `for x in [T]` always arrives with `for_iter_protocol` populated
-            // (bone routes Array to the stdlib VecIter protocol); reaching the
-            // dispatch means bone and skull disagree -- reject, don't emit a
-            // second lowering. `enumerate(vec)` keeps its own path above.
-            // Either Vec flavor: columns change storage, not the iteration
-            // protocol -- `VecIter.next` reads `it.vec[it.i]`, which is an
-            // `Index` and picks up the column kind on its own.
+            // Array iteration normally uses the resolved VecIter witness.
             ContainerKind::Vec
             | ContainerKind::VecNonNull
             | ContainerKind::VecValueColumns(_)
@@ -199,20 +187,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// `for <pat> in <coll>` over a user type via the iter/next protocol (bone
-    /// recorded the resolution). Desugars to:
-    ///   it = iter(coll)        -- or `it = coll` when iter is identity
-    ///   loop { let (ok, <pat>) = next(it); if !ok break; <body> }
-    /// `next` returns a tuple, so slice-1's multi-return ABI makes the per-element
-    /// `next` call zero-alloc (a `CallMulti` into `[ok, elem..]` dests). `it` lives
-    /// in a cell so `next` mutates the same cursor each turn. `continue` re-enters
-    /// the header (runs `next` again); `break` exits.
-    ///
-    /// A `Concrete` next with a non-empty bound tree is a combinator-chain root:
-    /// the tree is recorded against the emitted `CallMulti` so the inliner can
-    /// substitute the placeholders inside the spliced callee. A `CallerGeneric`
-    /// next (a `for` over a bounded generic inside a bounded body) emits the
-    /// placeholder [`Inst::CallBoundMulti`] directly.
     pub(crate) fn lower_for_user_iter(
         &mut self,
         vars: &BindingPattern,
@@ -220,13 +194,7 @@ impl<'a> Builder<'a> {
         body: Idx<Expr>,
         info: &ForIterInfo,
     ) -> Result<(), CompilerError> {
-        // The `for` protocol's witnesses belong to the HEAD expression, which is
-        // the key `inf.for_iter_protocol` -- and therefore the instance graph --
-        // records them under. The enclosing cursor names the whole construct
-        // (and is absent entirely when the `for` is a statement), so both halves
-        // are set explicitly here rather than inherited from a cursor that names
-        // the wrong expression. Same reason `lower_expr` sets them for an
-        // implicit-iter coercion.
+        // Use the iterator head as the synthesized call site.
         let outer_expr = self.cur_expr.replace(iter_expr);
         let out = self.lower_for_user_iter_witnessed(vars, iter_expr, body, info);
         self.cur_expr = outer_expr;
@@ -309,13 +277,7 @@ impl<'a> Builder<'a> {
         } else {
             None
         };
-        // A placeholder next is `(bool, E)` by bound conformance, but `E`'s SHAPE
-        // is this body's own specialization to answer -- the concrete callee is
-        // only the source of how many values come back, and the two agree because
-        // both read the same instantiation. Resolving it here is what splits a
-        // presence-carrying element into {presence cell, leaf cells} at the point
-        // the shape is known; leaving it opaque forces the splice to rebuild an
-        // aggregate, and a presence leaf has no field to rebuild into.
+        // Resolve the yielded element layout in the current specialization.
         let ret_shape = match &info.next {
             BoundNext::Concrete { .. } => self
                 .callee_abi_plan_for_instance(
@@ -353,14 +315,7 @@ impl<'a> Builder<'a> {
                         module: *m,
                         func: *f,
                     });
-                // The synthesized `next` call has no expr to key
-                // `call_generic_bindings` by, so its instantiation comes from
-                // bone's recorded `next_generics`. Without this the inliner
-                // splices the SHARED generic snapshot, whose element access was
-                // lowered against the boxed representation -- which reads a
-                // `_data` that column storage does not have.
-                // The `for` protocol's `next` witness -- the sibling of the
-                // `ForIter` above at the SAME expression.
+                // Use the iterator witness for the synthesized call's instance.
                 let call = self.with_site_op(crate::site::SiteOp::ForNext(Box::default()), |b| {
                     b.emit_cur(Inst::CallMulti {
                         dests: dests.clone(),
@@ -585,12 +540,6 @@ impl<'a> Builder<'a> {
         false
     }
 
-    /// `for (e, v) in arena` / `for item in arena` (optionally `enumerate(arena)`)
-    /// over the stdlib `Arena { entries: Vec<ArenaEntry>, .. }`: a numeric walk
-    /// over `entries` skipping nil / unoccupied slots, yielding the `(Entity,
-    /// data)` pair (two vars bind them apart; one var binds the 2-tuple). Mirrors
-    /// rock-codegen's `IterKind::Arena`. `enumerate` binds the FIRST var to a
-    /// 0-based counter advancing per yielded (occupied) element.
     pub(crate) fn lower_for_arena(
         &mut self,
         vars: &BindingPattern,
@@ -680,16 +629,7 @@ impl<'a> Builder<'a> {
 
         // do: build Entity, bind, run body.
         self.cur = do_bb;
-        // A slot's index IS its position, so the loop counter is the Entity's
-        // `_slot` and only the generation needs a column read. The built
-        // value is an `Entity` whose fields are `_`-prefixed (soft-private).
-        // `Entity` is a `value` struct (GC-carrying tier): build it as a
-        // `MakeValueStruct` so it scalarizes (a non-escaping `for (e, _)` scan
-        // builds no table) and, where it escapes, materializes through
-        // `Entity_vt` -- carrying the `__ty` tag + the value-`__eq` metatable.
-        // A raw `MakeStruct` here would leak an un-tagged, metatable-less table
-        // whose `==` silently mis-compares (arena-scan entities not equal to
-        // pairs-scan entities).
+        // Reconstruct an Entity's slot from the counter and read its generation.
         let entity = if let Some(generations) = generations {
             let e_gen = self.read_index(generations, idx, self.boxed_vec_kind(Some(&MonoTy::Int)));
             let entity_representation =
@@ -996,13 +936,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// `for (i, x) in enumerate(coll)` (split bindings) or `for pair in
-    /// enumerate(coll)` (one binding to the `(index, element)` tuple), over an
-    /// indexable collection. The counter is a cell; `x = coll[i]`.
-    /// `for <pat> in coll` (`enumerated` false) or `for <pat> in
-    /// enumerate(coll)` over an indexable collection, as a counted loop over
-    /// its storage. The collection and its length are read once, as the
-    /// iterator protocol's counted form reads them.
     pub(crate) fn lower_for_vec(
         &mut self,
         vars: &BindingPattern,
@@ -1152,12 +1085,7 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// A loop binding reads its element out of the collection (a Vec element,
-    /// a Map value), which the body can still write (`xs[0].f0 = 99`), so a
-    /// boxed element of an ordinary value type `ty` is snapshot at the binding,
-    /// as `let v = xs[i]` is. A captured or otherwise unscalarized binding
-    /// would read the write through the shared box. A leaf repr is already
-    /// its own copy.
+    /// Snapshot a boxed value before the loop body can mutate its source element.
     fn loop_element_snapshot(
         &mut self,
         ty: Option<std::borrow::Cow<'a, MonoTy>>,
@@ -1193,15 +1121,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// [`Self::bind_for_pattern`] for an element that arrived as a repr: a
-    /// `nobox` element binds its LEAVES (`group_binds`, the shape a scalarized
-    /// value param takes) instead of a packed box.
-    ///
-    /// Packing is what the mark forbids, and for a NULLABLE element it is also
-    /// lossy in a way no later pass can undo: `pack` drops the Group's presence,
-    /// so the absent elements would come back as a struct of nils rather than as
-    /// `null`. SROA peels a redundant pack for the non-nullable case, which is
-    /// why that one worked through the boxed bind; presence has no such recovery.
     pub(crate) fn bind_loop_element_repr(
         &mut self,
         vars: &BindingPattern,
@@ -1307,13 +1226,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// [`Self::bind_for_pattern`] against a SPLATTING tuple's flat slot values.
-    /// A `Leaves` slot binds its leaves into `group_binds` cells -- the same form
-    /// a scalarized value param takes -- so reading the binding never rebuilds a
-    /// box. Any pattern/slot pairing that does not line up (a single binding for
-    /// a whole nested tuple, say) rebuilds and falls back to the boxed bind,
-    /// which is where a whole-value use of a `nobox` element meets the
-    /// guarantee's rejection.
     pub(crate) fn bind_pattern_slot(
         &mut self,
         vars: &BindingPattern,

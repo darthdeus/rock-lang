@@ -152,14 +152,7 @@ impl<'a> Builder<'a> {
         Ok(true)
     }
 
-    /// Lower a statement sequence into the current block. Returns `true` if a
-    /// `return` terminated the block (the rest is dead).
-    /// `static name = init` -> a private global cell + done-flag, guarded so the
-    /// initializer runs only on the first reach:
-    /// `if not <done> then <cell> = <init>; <done> = true end`. Cell/done-flag
-    /// names are recorded on `MirFunc::statics` for the mir_emit reload preamble;
-    /// reads/writes of the binding resolve to the cell global via the
-    /// `static_cells` guards in the read/assign/compound/incdec paths.
+    /// A static initializer runs once, even across reloads.
     pub(crate) fn lower_static(
         &mut self,
         name: Idx<BindingInfo>,
@@ -793,13 +786,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// One inline defer splice. With a co-fn terminal flag the splice is
-    /// `if flag { flag = false; <body> }` — the SAME guarded shape as the
-    /// detached kill copy, so kill-then-splice and splice-then-kill both run
-    /// the defer exactly once (a body that kills its own handle mid-run
-    /// otherwise double-fires on the trailing scope exit). An unwind defer
-    /// pops its cleanup closure first, so an error raised by the body itself
-    /// does not run it again.
+    /// Clear the frame flag before running a coroutine's cleanup.
     pub(crate) fn lower_defer_splice(
         &mut self,
         body: Idx<Expr>,
@@ -887,18 +874,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Lower the detached cleanup copy of a `defer` body, ending in a bare
-    /// return, in blocks UNREACHABLE from the fn entry (like closure bodies —
-    /// the coroutine transform and DCE leave them alone), and return its entry.
-    /// A co fn copy (`flag` set) is guarded `if flag { flag = false; <body> }`
-    /// and compiles to a standalone `<name>__defer<k>(s)` fn: the ctor stores
-    /// them BY VALUE on the frame so a stale (stamp-killed) coroutine runs ITS
-    /// OWN layout's cleanup. An ordinary fn copy is a closure body
-    /// (`register_unwind_defer`). Lowered at the registration site with the
-    /// same binds; the resolution maps are snapshotted so `let`s inside the
-    /// copy can't leak into main-body lowering, loop targets are cleared so a
-    /// stray `break` can't jump into the main CFG, and the pending-defer stack
-    /// is isolated so the copy never splices enclosing defers.
+    /// Coroutine termination can enter this cleanup from outside the main CFG.
     pub(crate) fn lower_detached_defer(
         &mut self,
         body: Idx<Expr>,

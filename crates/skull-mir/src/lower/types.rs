@@ -466,10 +466,6 @@ impl<'a> Builder<'a> {
         self.concrete_rep_id(&ty, RepUse::Value, tuple_spelled, nobox)
     }
 
-    /// Read field `fname` from an already-lowered spread base: project a Group
-    /// part, or read the field off the packed cdata; a missing base falls back
-    /// to the struct default. `origin` is the base expression, which types a
-    /// generic field.
     pub(crate) fn spread_base_field_repr(
         &mut self,
         base_repr: &Option<ValueRepr>,
@@ -520,10 +516,7 @@ impl<'a> Builder<'a> {
         self.dispatch().expr_ty(e)
     }
 
-    /// The type a field access on `base` projects out of: [`Self::expr_ty`]
-    /// with a `ref T` seen through to `T`. A ref IS its referent's storage, so
-    /// the referent's field plan (inline leaves, flat slots) is the one its
-    /// fields are read and written by.
+    /// Field lookup sees through a reference to its referent.
     pub(crate) fn field_base_ty(&self, base: Idx<Expr>) -> Option<TypeExpr> {
         let dispatch = self.dispatch();
         let mut ty = *self.inf?.expr_types.get(base)?;
@@ -616,20 +609,11 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// `Some` iff `e`'s concrete or inferred type is a (non-nullable) tuple. Used
-    /// to route a tuple result across a call boundary (the call expr's own type
-    /// IS the callee's return type, so direct and INDIRECT calls agree).
-    /// `resolve_tyid` (not `resolve_ty`) so a `Nullable(Tuple)` doesn't peel to a
-    /// bare tuple and get mis-splatted.
     pub(crate) fn expr_tuple_shape(
         &self,
         e: Idx<Expr>,
     ) -> Result<Option<TupleRetShape>, CompilerError> {
-        // A bound `next` answers from its DECLARATION, never from the type this
-        // body's single generic check left on the call: the destructure that
-        // consumes the shape and the call that emits it must read the same
-        // oracle, or the binding takes a different number of leaves than the
-        // call returns and the difference is made up with a constant.
+        // Use the bound declaration's return ABI instead of the generic call type.
         if let Some(&gidx) = self.inf.and_then(|inf| inf.bound_calls.get(&e)) {
             return self.bound_next_tuple_shape(gidx).map(Some);
         }
@@ -645,17 +629,10 @@ impl<'a> Builder<'a> {
         if let Some(shape) = self.expr_tuple_shape(e)?.filter(TupleRetShape::splats) {
             return Ok(Some(RetSlot::Nested(shape)));
         }
-        // A `?.` yielding a TUPLE. `expr_tuple_shape` declines a `Nullable(Tuple)`
-        // on purpose -- it is the CALL-boundary oracle, and no callee puts that
-        // presence on the wire. This join does: it mints the tag itself, exactly
-        // as the arm-widening below mints one for a value.
+        // A join can keep a nullable tuple's presence slot.
         if let Some(shape) = self.nullable_tuple_wire_shape(e)? {
             return Ok(Some(RetSlot::Nested(shape)));
         }
-        // A non-null flat enum joins in its leaves, so an arm that yields a
-        // threaded value (a ctor, a leaf-bound `other`) is never boxed to cross
-        // the join. A nullable one keeps the packed cell: its nil is the value.
-        // Native backends join their own tagged enum value.
         if let Some(shape) = self.flat_enum_value_shape_of(e)? {
             let non_null = self
                 .concrete_expr_ty(e)
@@ -688,18 +665,7 @@ impl<'a> Builder<'a> {
         Ok(Some(RetSlot::Leaves(shape)))
     }
 
-    /// The slot layout of a tuple's BOX: `Some` exactly when some element splats,
-    /// so its `nobox` leaves ride the box instead of a `<name>_ct` inside it.
-    ///
-    /// The SAME `TupleRetShape` the multi-return wire uses -- a boxed tuple is
-    /// that wire written into a table rather than into registers. Producer
-    /// ([`Expr::Tuple`]) and every reader (slot projection, destructure) derive
-    /// the layout here and nowhere else, so they cannot disagree about how many
-    /// table slots an element occupies. That disagreement is silent, not a
-    /// rejection: Lua reads a missing slot as nil.
-    ///
-    /// `None` for every tuple that has no `nobox` element -- which is every tuple
-    /// that compiled before this existed, so their boxes are byte-identical.
+    /// A boxed tuple can carry `nobox` fields as flattened slots.
     pub(crate) fn tuple_box_shape(
         &self,
         e: Idx<Expr>,
@@ -736,20 +702,7 @@ impl<'a> Builder<'a> {
         Ok(shape)
     }
 
-    /// The C-array element type name for a `native_buffer_alloc<T>()` call whose
-    /// result type is `NativeBuffer<T>` -- an FFI-clean value struct's cdef name,
-    /// or `int`/`float`/`bool`. A GC-carrying value struct, an unresolved (opaque
-    /// generic `T`), or any other element rejects with a spanned emit-time error:
-    /// the intrinsic can only emit `ffi.new("<ctype>[?]")` when the concrete
-    /// element type is known here. `span` labels the call expression.
-    /// The `(field, view)` pairs a `NativeBuffer` of element `ctype` carries --
-    /// one typed leaf view per distinct primitive C type among its leaves.
-    /// Empty for a primitive or non-leaf-addressable element, which keeps those
-    /// buffers exactly as they are today.
-    ///
-    /// Attached at CONSTRUCTION so the cast happens once per buffer. Casting per
-    /// access would allocate a pointer cdata each time, which is the allocation
-    /// leaf addressing exists to remove.
+    /// Derive the FFI element type from the allocation's concrete result type.
     pub(crate) fn leaf_view_fields(
         &mut self,
         ctype: Ustr,

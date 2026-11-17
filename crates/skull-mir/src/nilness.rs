@@ -31,12 +31,9 @@ use comfy_la_arena::Idx;
 /// presence test on it is decided: the constructor cannot have produced
 /// nil. This is the only tier a consumer may use to DELETE a test.
 ///
-/// It stays at the shape SROA manufactures (forwarding a nullable value
-/// field's read to the literal behind it) and nothing more. Widening it to
-/// every never-nil instruction was measured to leave two real programs
-/// byte-identical, while each added member is another chance to delete a
-/// live branch -- which is exactly how a widened version deleted presence
-/// tests on int-to-float-widened nullables.
+/// It covers aggregate constructors. SROA forwards a field read to its
+/// constructor before this check; a broader classification could delete a live
+/// branch, as with presence tests on int-to-float-widened nullable values.
 pub fn constructed_never_nil(func: &MirFunc, id: Idx<Inst>) -> bool {
     matches!(
         &func.insts[id],

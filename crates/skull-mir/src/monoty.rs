@@ -1070,23 +1070,10 @@ fn convert_at<S: std::hash::BuildHasher>(
     })
 }
 
-/// Polymorphic recursion (`f<T> -> f<[T]>`) does not terminate under
-/// demand-driven instantiation (plan S 7). The cap turns divergence into a
-/// REPORT: a capped instance is a changing-instance recursion candidate.
-///
-/// It caps the STRUCTURAL DEPTH of the instantiation types, not the path length
-/// from a root. A path length is a property of how the walk arrived, so capping
-/// on it makes graph MEMBERSHIP depend on discovery order -- measured: with a
-/// path cap, a recursive corpus project produced two different manifests under
-/// forward and reversed root order, failing plan S 20g.4. Type depth is a
-/// property of the instance itself, so the same instance is capped or not
-/// regardless of how it was reached.
-///
-/// It lives HERE, in the lowest crate that owns [`MonoTy`], so the instance
-/// graph and BOTH emitters read one decision. Sharing only the constant is not
-/// enough: three call sites each aggregating depth their own way is three
-/// implementations that can drift, and the one that lacked the check entirely
-/// did not miscompile -- it HUNG.
+/// Polymorphic recursion (`f<T> -> f<[T]>`) can produce infinitely many
+/// instantiations. Cap structural type depth so admissibility depends on the
+/// instance itself, not the path by which graph traversal discovered it.
+/// Callers use a capped instance as a changing-instance recursion candidate.
 pub const MAX_INSTANTIATION_DEPTH: u32 = 12;
 
 /// **THE admissibility decision for an instantiation's type arguments.**

@@ -231,17 +231,9 @@ fn preflight_collect_reads(
     });
 }
 
-/// Everything a direct call to a statically-known callee carries besides its
-/// operands: the bound-conformance tree, the concrete delivery instance, the
-/// callee's concrete INSTANCE, and the ABI plan of the body the call TARGETS.
-///
-/// ONE bundle, built once by [`Builder::plan_direct_call`], because these four
-/// facts are one decision and a path that computes a SUBSET is silently wrong
-/// rather than merely incomplete. The UFCS path under `?.` computed exactly
-/// that subset -- the instance, no tree, no key, and the DECLARATION's ABI plan
-/// instead of the target's -- so `x?.m()` on a `value` receiver named an
-/// instantiation it never delivered, and the callee was then reached at its
-/// declaration with no body to serve it.
+/// Resolved identity and ABI facts for a direct call. Keeping the concrete
+/// callee, optional delivery instance, bound tree, and target ABI together
+/// ensures the arguments and emitted call use the same instance.
 pub(crate) struct DirectCall<'a> {
     pub(crate) tree: Option<bone_core::prelude::BoundTree>,
     /// The concrete body delivered by this call, when it has one. An
@@ -976,24 +968,11 @@ impl<'a> Builder<'a> {
                             ));
                         }
                     }
-                    // A tuple whose BOX widened: its `nobox` part rides the box as
-                    // leaves, so the table holds one slot per LEAF, not one per
-                    // element. Typed readers derive that from the declared tuple
-                    // type; `inspect` walks the table at RUNTIME and would report a
-                    // wider tuple. Interpolation lowers to `inspect`, so this one
-                    // check covers `"{t}"` too.
-                    //
-                    // Keyed by callee NAME beside its column sibling, and NOT on
-                    // the param being `any`: `any` is also how the stdlib spells
-                    // pure STORAGE (`__vec_data_set`, `push`'s primitives), which
-                    // never look inside the value and must keep working -- they are
-                    // the whole point of the widening.
-                    //
-                    // Rejecting matters more here than for a nominal nobox: this
-                    // shape leaves no `<name>_ct` behind, so the residue check
-                    // cannot catch it and an unrejected one is a SILENT wrong
-                    // answer. Escape: `(materialize(v), n)` stops that slot
-                    // splatting, so the box is one-slot-per-element again.
+                    // A widened tuple stores one table slot per leaf, while
+                    // `inspect` walks slots at runtime and would report a wider
+                    // tuple. Reject this reader by resolved callee; storage-only
+                    // `any` helpers remain valid. `materialize(v)` keeps the
+                    // tuple in one slot per element.
                     if let Some(shape) = self.tuple_box_shape(arg)? {
                         return Err(CompilerError::new_with_label(
                             self.body.expr_spans[e],
@@ -1017,18 +996,10 @@ impl<'a> Builder<'a> {
                 .map(ValueRepr::Scalar)
                 .and_then(|value| self.value_bundle_for_expr(e, value));
         }
-        // `cast<T>(v)` is identity at runtime (`return value`), so a `nobox`
-        // RESULT threads the argument's repr instead of packing it for the boxed
-        // `any` param and field-reading the leaves back off that box. This is
-        // what lets a whole COLUMN element read widen to `T?`: every stdlib
-        // entry point that widens one spells it `cast(__vec_data_get(..))`, and
-        // `__vec_data_get` already lowers to a Group of column reads -- the box
-        // was minted only to cross `cast`. Same identity treatment the newtype
-        // ctor and the bound `iter` call below already get.
-        // Keyed on the RESOLVED callee, never the spelling: a user fn named
-        // `cast` returning a nobox value is a different function, and threading
-        // its argument through would delete the call and emit a leaf read of
-        // whatever was passed in (pinned by tests/nobox/cast_identity.rock).
+        // The inline builtin `cast<T>(v)` is identity, so a `nobox` result can
+        // keep the argument representation instead of boxing and rereading its
+        // leaves. Match the resolved builtin, not its name, so a user `cast`
+        // function still emits its call.
         if let Callee::Unresolved { name, .. } = callee {
             if name.as_str() == "cast" && self.nobox_value_name(e).is_some() {
                 if let [inner] = arg_idxs[..] {
@@ -1218,18 +1189,10 @@ impl<'a> Builder<'a> {
             if let Some(r) = self.strided_data_primitive(e, name.as_str(), &arg_idxs)? {
                 return Ok(r);
             }
-            // The three raw-backing primitives ARE the representation boundary.
-            // Nearly every stdlib Vec helper -- `get`, `set`, `pop`, `clear`,
-            // `insert_at`, `remove_at`, `swap_remove` -- reaches storage only
-            // through these, so making them column-aware here converts that whole
-            // surface at once instead of intercepting each helper by name.
-            //
-            // This works inside a GENERIC body because `vec_column_elem_of`
-            // resolves through the active `SpecSubst`: in the shared snapshot of
-            // `Vec<T>.clear` the element is an opaque `T` and the boxed `_data`
-            // body stands, while the snapshot specialized at `T = Vec2` sees the
-            // concrete element and lowers to column operations. Static, per
-            // instantiation -- never a runtime test for whether `_data` exists.
+            // These raw-backing primitives are the representation boundary for
+            // Vec helpers. Resolve the element through the active substitution:
+            // generic snapshots keep boxed storage, while concrete value
+            // instantiations lower to column operations.
             if let Some(r) = self.column_data_primitive(e, name.as_str(), &arg_idxs)? {
                 return Ok(r);
             }
@@ -1575,26 +1538,9 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Lower a direct (statically-resolved) call. When the callee uses the scalar
-    /// value ABI, value args splat to leaves and a value return arrives as N
-    /// leaves via [`Inst::CallMulti`] (rebuilt into a `Group`); otherwise it is a
-    /// plain boxed [`Inst::Call`].
-    ///
-    /// A call of an `Iterator`-bounded callee carries bone's resolution tree
-    /// (keyed by the call expr `e`); it is re-recorded against the emitted call
-    /// inst so the inliner can substitute the placeholders inside the callee.
-    /// The specialization decision for a call `e` to `func`: `Some((key, subst))`
-    /// iff `func` is a splice-able generic `@inline`/`@pure` callee whose per-site
-    /// bindings (`call_generic_bindings[e]`) include at least one VALUE-struct
-    /// leaf. A primitive-only / non-leaf instantiation, or a non-inline generic,
-    /// keeps the shared generic snapshot (byte-identical). Eligibility is a subset
-    /// of the inliner's `classify` (not extern / lua / coroutine) so a specialized
-    /// splice always resolves; a residual case falls to the site-aware rejection.
-    /// Build the [`DirectCall`] bundle for a call at `e` to `func`.
-    ///
-    /// The delivery decision comes first because the ABI plan depends on it: a
-    /// served instantiation targets the specialized definition, whose parameter
-    /// list is what the caller's argument splat has to match.
+    /// Resolve the concrete callee, delivery instance, bound tree, and ABI for
+    /// this call site. The ABI is derived from the same instance that receives
+    /// the arguments.
     pub(crate) fn plan_direct_call(
         &mut self,
         e: Idx<Expr>,
@@ -1630,9 +1576,7 @@ impl<'a> Builder<'a> {
 
     /// Attach the bundle's identity records to the emitted call inst.
     ///
-    /// Takes the whole [`DirectCall`] rather than the three records loosely,
-    /// because the loose form is what let a caller pass `None, None` for the
-    /// two it had not computed and still typecheck.
+    /// Record all call identity and ABI facts from the same [`DirectCall`].
     pub(crate) fn record_call(
         &mut self,
         call: Idx<Inst>,
@@ -1693,20 +1637,9 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// THE tuple-return shape of a call, read off the CALLEE's declared return
-    /// type under the CALLEE's instantiation.
-    ///
-    /// One oracle, because there were two and they disagreed. `lower_call`
-    /// computed this under the call's own `SpecSubst` while the presence
-    /// consumers (`nullable_tuple_call_shape`) computed it under the ENCLOSING
-    /// body's -- empty in a non-generic caller, so the callee's generic stayed
-    /// unbound, every slot came back `Opaque`, and the tuple-plan guard answered
-    /// `None`. The callee then faithfully
-    /// returned its `false` presence slot and the call site threw it away:
-    /// `!= null` fell through to packing a `MakeTuple`, which is structurally
-    /// never nil, so it const-folded to `true` and `if let` emitted no branch at
-    /// all. A shape disagreement here cannot fail loudly -- it just branches on
-    /// a slot that is not there, or fails to.
+    /// Tuple-return shape from the concrete callee ABI. Consumers must use the
+    /// callee's instantiation so generic tuple slots and presence agree with the
+    /// emitted call.
     pub(crate) fn call_ret_tuple_shape(
         &self,
         e: Idx<Expr>,
@@ -1718,14 +1651,8 @@ impl<'a> Builder<'a> {
         Ok(abi.ret_tuple())
     }
 
-    /// Lower a direct (statically-resolved) call. When the callee uses the scalar
-    /// value ABI, value args splat to leaves and a value return arrives as N
-    /// leaves via [`Inst::CallMulti`] (rebuilt into a `Group`); otherwise it is a
-    /// plain boxed [`Inst::Call`].
-    ///
-    /// A call of an `Iterator`-bounded callee carries bone's resolution tree
-    /// (keyed by the call expr `e`); it is re-recorded against the emitted call
-    /// inst so the inliner can substitute the placeholders inside the callee.
+    /// Lower a statically resolved call using its concrete ABI plan. Bounded
+    /// calls also attach their resolution tree to the emitted call for inlining.
     pub(crate) fn lower_direct_call_repr(
         &mut self,
         e: Idx<Expr>,
@@ -1733,26 +1660,10 @@ impl<'a> Builder<'a> {
         arg_idxs: &[Idx<Expr>],
         any_named: bool,
     ) -> Result<ValueBundle, CompilerError> {
-        // A value-instantiated `@inline` generic call takes the specialized scalar
-        // ABI: value args splat, the return arrives as leaves, and the emitted call
-        // is tagged so the inliner splices the matching specialized snapshot. Empty
-        // `subst` = the shared (unspecialized) path, byte-identical. In an unspliced
-        // context the splice never fires, so the splatted call would reach the
-        // SHARED generic body and drop leaves -- keep the shared boxed ABI there.
-        // In an unspliced context an ABI-only specialization is dropped: no splice
-        // will fire, and the splatted call would reach the SHARED generic body and
-        // drop every leaf but the first, so the boxed ABI is kept to match it.
-        //
-        // A column-eligible instantiation is NOT dropped, because the shared body
-        // is wrong rather than merely unspecialized, and because a splice is no
-        // longer the only thing that can serve it: the call targets a standalone
-        // specialized copy, lowered under this same substitution, so the two agree
-        // on the ABI without an inliner ever running.
-        //
-        // The instantiation key rides the emitted call inst whenever this is a
-        // specialized call -- even on the boxed (non-scalar-ABI) path, because the
-        // specialized body still differs (e.g. a `native_buffer_alloc<T>` ctype
-        // resolves) though the param/return ABI is unchanged.
+        // A specialized body and its call use the same ABI. Keep the shared
+        // generic body's boxed ABI when no specialized body is delivered; a
+        // column-specific body can be delivered directly. Record specialization
+        // identity on boxed calls too, since body lowering may still differ.
         let dc = self.plan_direct_call(e)?;
         let value = (|| -> Result<ValueRepr, CompilerError> {
             let callee = &self.ws.module(func.module).functions[func.func];
@@ -2003,21 +1914,9 @@ impl<'a> Builder<'a> {
         Ok(ValueRepr::Scalar(call))
     }
 
-    /// A direct call to a tuple-returning fn under the multi-return ABI: the
-    /// callee returns its slots, captured into that many dest cells via
-    /// [`Inst::CallMulti`]. The result value is `MakeTuple(loads)` -- a boxed use
-    /// materializes the table (same as the old ABI), a destructure elides it
-    /// (`bind_for_pattern`). When the shape splats, the result is instead a
-    /// `Tuple` repr whose splatting elements are Groups rebuilt from their
-    /// leaves, so a `nobox` element never becomes a box on the way to a bind.
-    ///
-    /// `dc` carries the `Iterator`-bound resolution recorded against the emitted
-    /// call inst (chain roots like a directly-called bounded `next`).
-    ///
-    /// A tuple return does not exempt the call from its concrete owner:
-    /// under column storage an erased body could read a `_data` the
-    /// instantiation does not have, so the concrete plan is the only correct
-    /// target.
+    /// Capture tuple-return slots from a direct call. Rebuild splatting elements
+    /// from leaves and retain the concrete callee identity for bound-call
+    /// resolution and column-specialized bodies.
     pub(crate) fn emit_tuple_call_tree(
         &mut self,
         e: Idx<Expr>,
@@ -2047,12 +1946,8 @@ impl<'a> Builder<'a> {
         self.tuple_from_slots(shape, slots, &mut idx)
     }
 
-    /// An indirect call whose fn TYPE carries `nobox` values: value args splat to
-    /// their leaves and a value return arrives as leaves through
-    /// `CallValueMulti`, matching what the lambda/nested fn on the other end
-    /// emitted from the SAME type. The callee is opaque here by construction --
-    /// that is the whole point of keying on the function-value representation
-    /// plan.
+    /// Lower a function-value call using the ABI derived from its function type.
+    /// Splat value arguments and rebuild tuple/value returns from captured slots.
     pub(crate) fn indirect_call_by_plan(
         &mut self,
         plan: FunctionRepPlan,
@@ -2098,14 +1993,8 @@ impl<'a> Builder<'a> {
         ))
     }
 
-    /// An indirect call `callee(args)`. If the call's result type is a tuple, the
-    /// fn-value (a lambda or named fn used as a value) returns N values under the
-    /// multi-return ABI, captured via [`Inst::CallValueMulti`] -- a multi-assign
-    /// `d0, d1 = callee(args)` (a plain `CallValue` in table position would
-    /// truncate to the first return). The result is `MakeTuple(loads)`: boxed use
-    /// materializes the table, a destructure elides it. The ABI is decided by the
-    /// call's STATIC type, so direct and indirect callees of the same fn-type
-    /// agree with no callee-identity analysis.
+    /// Lower an opaque function-value call. Tuple returns use a multi-return
+    /// capture so no slots are lost before the tuple is packed.
     pub(crate) fn emit_call_value(
         &mut self,
         e: Idx<Expr>,
@@ -2123,18 +2012,9 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// A UFCS call `method(recv, args)` where `recv` is an already-lowered value
-    /// -- the safe-nav receiver. The receiver fills param 0 (splat to its leaves
-    /// when that param is a value), args fill the rest.
-    ///
-    /// THE `?.` UFCS entry, scalar and boxed ABI alike, and it consumes the same
-    /// [`DirectCall`] bundle [`Self::lower_direct_call_repr`] does. Splitting the
-    /// two ABIs across two call sites is how the boxed one came to record a key
-    /// the scalar one did not, and how both came to read the DECLARATION's ABI
-    /// plan rather than the target's.
-    ///
-    /// A value callee hands back its leaves, so a safe-nav join that stores PER
-    /// SLOT never has to take a box apart again.
+    /// Lower a safe-navigation UFCS call with its already-lowered receiver in
+    /// parameter zero. Both ABI modes use the direct-call plan; value results
+    /// remain leaf-shaped for the safe-nav join.
     pub(crate) fn ufcs_call_repr(
         &mut self,
         e: Idx<Expr>,
@@ -2464,13 +2344,9 @@ impl<'a> Builder<'a> {
         self.pack_boxed(r, BoxKind::Implicit)
     }
 
-    /// [`Self::pack`] with the box's AUTHORIZATION carried through the whole
-    /// tree. This is the one packer: `materialize(v)` differs from an ordinary
-    /// escape only in which ctor instruction each `value`-struct box mints, so
-    /// it takes this path rather than a parallel one. A second recursion went
-    /// wrong at every tier the first one had grown an arm for -- a flat-enum
-    /// field reached it as if it were a struct, and a leaf-table struct emitted
-    /// a declared-form ctor against a leaf-table plan.
+    /// [`Self::pack`] with authorization carried through nested boxes. Explicit
+    /// materialization uses the same tier-specific constructors as ordinary
+    /// packing, while tagging each box with its authorization.
     pub(crate) fn pack_boxed(
         &mut self,
         r: ValueRepr,
@@ -2534,19 +2410,9 @@ impl<'a> Builder<'a> {
                 };
                 Ok(self.materialize_flat_cells(&shape, cells))
             }
-            // `present` is deliberately NOT consulted here. Packing an absent
-            // Group to `nil` is what a `== nil` consumer needs, but `pack` cannot
-            // see its consumer, and the consumers that DO need it already branch
-            // on presence themselves (`??`, safe-nav). Branching here instead
-            // puts the ctor behind a cell, which stops SROA forwarding it, so the
-            // box survives to the residue check -- measured as
-            // `nobox_coalesce_at_ctor_field` regressing CORRECT -> LOUD REJECT,
-            // avoiding the per-call wrapper overhead.
-            // Narrowing to a static presence does not help: at a `??` the
-            // presence is dynamic and the coalesce consumes it anyway.
-            // An ORDINARY value has no residue check to catch a lost presence,
-            // and its consumers (`let`, `== null`, a boxed argument) pack
-            // without branching, so its box must be `nil` when absent.
+            // Packing does not inspect presence: nil-sensitive consumers branch
+            // before packing, while ordinary nullable boxes must become nil when
+            // absent. Branching here would also hide the ctor from SROA.
             ValueRepr::Group {
                 name,
                 parts,
@@ -2638,23 +2504,15 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// [`Self::pack`] for a consumer that can observe NIL-ness of the result --
-    /// a boxed slot an absent value has to reach as `nil`, not as a statically
-    /// non-nil ctor.
-    ///
-    /// `pack` itself deliberately ignores `present` (see its Group arm): it
-    /// cannot see its consumer, and branching for every consumer puts the ctor
-    /// behind a cell, which stops SROA forwarding it and costs
-    /// `nobox_coalesce_at_ctor_field`. The branch is legal HERE because the slot
-    /// is already an escape -- the ctor survives either way, so honouring
-    /// presence buys the correct `nil` for free. Same split safe-nav uses.
+    /// Pack a value for a consumer that must observe absence as `nil`. This
+    /// branches only at the escaping slot; general packing leaves presence to
+    /// consumers so SROA can still forward the ctor.
     pub(crate) fn pack_maybe_absent(&mut self, r: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
         self.pack_maybe_absent_boxed(r, BoxKind::Implicit)
     }
 
-    /// A presence-carrying group as one typed nullable value. Straight-line,
-    /// unlike [`Self::pack_maybe_absent_boxed`]'s nil-or-box join, which has no
-    /// single C representation inside a parent constructor.
+    /// Pack a presence-carrying group as one typed nullable value. Parent
+    /// constructors need a single representation, so this does not emit a join.
     fn pack_typed_nullable(
         &mut self,
         name: Ustr,
@@ -2816,26 +2674,9 @@ impl<'a> Builder<'a> {
         Ok(self.emit_cur(ctor))
     }
 
-    /// Flatten a `ValueRepr` to its primitive leaf values per `shape` (the wire
-    /// ABI). A boxed `Scalar` (e.g. a global cdata / if-join) is field-read.
-    /// Arguments for an `iter`/`pairs` WITNESS call -- the `for` protocol's and
-    /// the implicit iterable->iterator coercion's. The collection obeys the same
-    /// scalar ABI as any other direct-call parameter, so a `value`-struct
-    /// collection (an `Arena<T>` handle) splats to its leaves; handing the
-    /// materialized aggregate over instead gives a multi-parameter body one
-    /// argument and nils the rest.
-    ///
-    /// No scalar ABI means the boxed convention, which takes the collection
-    /// whole -- that is `Opaque`. A scalar ABI with an EMPTY parameter list is a
-    /// different thing entirely: the witness would have no collection parameter
-    /// to receive anything, so treating it as `Opaque` would silently pass an
-    /// argument nothing binds. Reject instead.
-    /// Takes the witness INSTANCE, not its declaration. The call this shapes
-    /// arguments for targets the specialized definition, so asking the
-    /// declaration would splat against one ABI and be received by another --
-    /// the same mismatch the safe-navigation UFCS path had. Unification rather
-    /// than a measured fix: `iter<T>`'s collection parameter is an array, which
-    /// is `Opaque` at every instantiation, so the two answers agree today.
+    /// Build collection arguments for an iterator witness from its selected
+    /// instance ABI. A boxed ABI takes the collection whole; a scalar ABI with
+    /// no first parameter is invalid rather than silently dropping the value.
     pub(crate) fn iter_witness_args(
         &mut self,
         inst: &crate::instance::Instance,
@@ -3507,17 +3348,10 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// A whole-value read of value struct `name` out of a BOXED place (struct
-    /// field, global, container element): split the box into leaves and rebuild a
-    /// fresh `Group`, so `pack` materializes a COPY instead of aliasing the stored
-    /// box. This is the same split-and-repack that already makes fn round-trips
-    /// copy (params/returns ride the scalar ABI).
-    ///
-    /// Nested value fields recurse, so the snapshot survives a later place write
-    /// through the owner -- a shallow expansion would snapshot the nested box's
-    /// POINTER. A GC leaf is one slot, so its pointee stays shared by design. A
-    /// leaf projection off the `Group` reads its snapshot slot. Physical reads
-    /// keep their error behavior even when the resulting leaf is unused.
+    /// Snapshot a boxed whole-value read by splitting it into leaves and
+    /// rebuilding a `Group`. Recurse into nested values so later place writes
+    /// cannot mutate the snapshot; GC leaf pointees remain shared. Preserve
+    /// physical read errors even when a resulting leaf is unused.
     pub(crate) fn boxed_value_copy_repr(
         &mut self,
         boxed: Idx<Inst>,

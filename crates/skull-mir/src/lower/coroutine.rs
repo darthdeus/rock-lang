@@ -1,14 +1,4 @@
-//! **The emission plan of one `co fn` body** (mono cut C+D step D-3).
-//!
-//! A transformed `co fn` is not one function: it is a step, a resume, an
-//! optional advance, a defer per terminal-cleanup site and a body per lifecycle
-//! hook, all minted from one base symbol. The graph and emitters consume the
-//! instance-owned symbol and concrete result type so they agree on the helper
-//! family for each instantiation.
-//!
-//! Graph helper accounting uses `from_concrete_signature` before body tables
-//! exist; emitted bodies use `from_concrete_plan`, whose result and channel
-//! come from the selected concrete signature.
+//! The transport plan for a lowered coroutine body.
 
 use bone_core::workspace::Workspace;
 
@@ -88,10 +78,6 @@ impl CoroutinePlan {
         format!("{}__resume", self.base)
     }
 
-    /// `None` when there is no frame-slot channel: the constructor emits
-    /// `__advance` only for one, and stating that here is what keeps the minting
-    /// side and the emitting side from disagreeing about whether the symbol
-    /// exists.
     pub fn advance(&self) -> Option<String> {
         self.channel
             .as_ref()

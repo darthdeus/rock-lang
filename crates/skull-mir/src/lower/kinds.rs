@@ -98,11 +98,6 @@ impl<'a> Builder<'a> {
         false
     }
 
-    /// The value-STRUCT element of `e`'s `NativeBuffer<E>` / `FlatVec<E>` type,
-    /// or `None` when `E` is a primitive / unresolved generic / not value-shaped.
-    /// Drives [`ContainerKind::NativeBufferValue`]; an opaque generic `E` stays
-    /// plain `NativeBuffer` (matching the alloc intrinsic, which also requires a
-    /// concrete element).
     pub(crate) fn nb_value_elem(&self, e: Idx<Expr>) -> Result<Option<Ustr>, CompilerError> {
         let Some(concrete) = self.concrete_expr_ty(e) else {
             return Ok(None);
@@ -130,13 +125,6 @@ impl<'a> Builder<'a> {
         Ok(plan.ffi_element_name(arena))
     }
 
-    /// The concrete `value`-struct element of `e`'s `NativeBuffer<E>` /
-    /// `FlatVec<E>` TYPE, independent of the container's storage
-    /// representation. [`Self::nb_value_elem`] answers the representation-gated
-    /// question element access and literal leaf views need; the `@vertex_expand`
-    /// expander consumes this one, because the vertex layout is derived from the
-    /// element's C leaf layout whether the container stores rows, columns, or
-    /// leaf views.
     pub(crate) fn nb_type_value_elem(&self, e: Idx<Expr>) -> Result<Option<Ustr>, CompilerError> {
         let Some(concrete) = self.concrete_expr_ty(e) else {
             return Ok(None);
@@ -200,11 +188,6 @@ impl<'a> Builder<'a> {
         Ok(false)
     }
 
-    /// The column-eligible element of `e`'s `Arena<E>` type, if any. The twin of
-    /// [`Self::vec_column_elem_of`] one container out: an arena's `data` field is
-    /// an ordinary `[E]`, so it columnizes on exactly the same rule, and the
-    /// hardcoded `for`-over-arena walk has to read it the same way the Vec path
-    /// would. A thin caller of the one oracle, like its Vec and Map siblings.
     pub(crate) fn arena_column_elem_of(
         &self,
         e: Idx<Expr>,
@@ -214,10 +197,6 @@ impl<'a> Builder<'a> {
             .and_then(|plan| plan.column_elem(self.scx.rep_arena())))
     }
 
-    /// The Vec container kind for base expr `e`: an all-scalar value-struct
-    /// element stores as flat columns, everything else keeps the single `_data`
-    /// backing. An unresolved / generic element is NOT eligible -- the columns
-    /// need a concrete value-struct leaf list, and an opaque `T` has none.
     pub(crate) fn vec_kind(&self, e: Idx<Expr>) -> Result<ContainerKind, CompilerError> {
         if let Some(elem) = self.vec_column_elem_of(e)? {
             return Ok(ContainerKind::VecValueColumns(elem));
@@ -248,13 +227,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The column-eligible value-struct element of `e`'s `[E]` type, if any.
-    ///
-    /// Resolves through the active [`SpecSubst`], so inside a SPECIALIZED body
-    /// (`VecIter<Vec2>.next`, `fn f<T>(xs: [T])` at a `[Vec2]` site) the element
-    /// is the concrete struct rather than an opaque `T`. Without this the
-    /// stdlib iterator lowers `it.vec[it.i]` against the boxed representation
-    /// and reads a `_data` that column storage does not have.
     pub(crate) fn vec_column_elem_of(
         &self,
         e: Idx<Expr>,
@@ -295,11 +267,7 @@ impl<'a> Builder<'a> {
             .map(|plan| plan.strided_elem(self.scx.rep_arena()))
     }
 
-    /// The column shape of `elem`: its value shape, marked nullable when the
-    /// ELEMENT type is. Every column site builds its shape here, so the leaf
-    /// wire (`repr_to_leaves` / `rebuild_from_leaves`, which both lead a nullable
-    /// shape with presence) and the column keys ([`column_leaf_paths`]) can only
-    /// agree.
+    /// Nullable elements add a presence column.
     pub(crate) fn column_shape(&self, elem: ColumnElem) -> Result<ValueShape, CompilerError> {
         let shape = self
             .scx
@@ -310,16 +278,6 @@ impl<'a> Builder<'a> {
         Ok(shape)
     }
 
-    /// The column-eligible value-struct VALUE of `e`'s `Map<K, V>` type, if any.
-    ///
-    /// The Map sibling of [`Self::vec_column_elem_of`], resolving through the
-    /// active [`SpecSubst`] for the same reason: inside a specialized generic
-    /// body the value must read as the concrete struct, or the body lowers
-    /// against a bare table the column representation does not have.
-    ///
-    /// The KEY is deliberately not consulted -- a value-struct key rejects
-    /// upstream (LuaJIT hashes cdata by pointer), and the spine stores whatever
-    /// key the boxed representation already stored.
     pub(crate) fn map_column_value_of(
         &self,
         e: Idx<Expr>,
@@ -329,34 +287,7 @@ impl<'a> Builder<'a> {
             .and_then(|plan| plan.column_elem(self.scx.rep_arena())))
     }
 
-    /// The expression's CONCRETE type under the active specialization.
-    ///
-    /// Failure is not uniformly "boxed". Three outcomes, and which reason lands
-    /// in which is the whole point -- reading them all as a negative picks a
-    /// REPRESENTATION for a type the compiler could not resolve, and that is the
-    /// silent fallback this codebase rejects.
-    ///
-    /// - `UnboundGeneric` -> `None`, correctly. This body is the SHARED generic
-    ///   snapshot, lowered with no instantiation, so its element is opaque and
-    ///   not column-eligible; it must keep the representation every
-    ///   instantiation can read. Same answer the `TypeExpr` walk gave by falling
-    ///   out of its `Generic` arm.
-    /// - `UnresolvedInfer` -> `None`, and NOT because it is benign. It is the
-    ///   S 0h decided rejection (a type argument no constraint reaches:
-    ///   `let v = vec_new()` whose element is never used), which the instance
-    ///   graph already records as `RejectionKind::UnconstrainedTypeVar` with a
-    ///   span. Emission still runs the pre-mono path, so making it fatal HERE
-    ///   would reject `tests/vectors/sort.rock` and `tests/iterators/enumerate.rock`
-    ///   ahead of the cutover -- measured, both fail to emit. The rejection lands
-    ///   with Stage 3, in one place, not twice on two schedules.
-    /// - A missing `BodyInference`, or an expression bone typed nothing for ->
-    ///   a spanned error for the same reason: absence of a type is not evidence
-    ///   of a representation.
-    /// - Everything else -> a spanned error. Recovery poison means the program
-    ///   should have been rejected upstream, a missing node means a `TyId` names
-    ///   nothing, and a depth limit means a cyclic substitution chain. None of
-    ///   the three occurs over the corpus or the Rock suite, so this arm has
-    ///   teeth without a population.
+    /// A planned expression table is authoritative under specialization.
     pub(crate) fn concrete_ty(&self, e: Idx<Expr>) -> Result<Option<&'a MonoTy>, CompilerError> {
         if self.concrete_expr_is_untyped(e) {
             return Ok(None);
@@ -385,12 +316,7 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Lower an index-expr base to `(base inst, container kind)`. A
-    /// `FlatVec<T>` base indexes its `buf` NativeBuffer storage -- project the
-    /// field and index with NativeBuffer semantics, so the value-element slot
-    /// machinery and debug bounds check apply unchanged. Note `fv[i]` is
-    /// therefore CAPACITY-checked in debug; `fv.get(i)` is the len-checked
-    /// accessor.
+    /// FlatVec indexing addresses the backing NativeBuffer.
     pub(crate) fn lower_index_base(
         &mut self,
         base: Idx<Expr>,
@@ -410,10 +336,6 @@ impl<'a> Builder<'a> {
         Ok((b, kind))
     }
 
-    /// The collection kind of a base expression, from its inferred type — drives
-    /// the index/length shape (decision 9). bone's index/iter whitelist is closed
-    /// (`Vec`/`Map`/`NativeBuffer`+sized), so any other type reaching here is a
-    /// front-end/back-end disagreement, not a program the user could write.
     pub(crate) fn coll_kind(&self, base: Idx<Expr>) -> Result<ContainerKind, CompilerError> {
         if let Some(ty) = self.concrete_expr_ty(base) {
             let (payload, _) = ty.peel_nullable();
@@ -469,14 +391,7 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// int->float subsumption funnel. Wraps `value` in [`Inst::IntToFloat`] iff
-    /// bone typed `value_expr` int and `expected` resolves to float -- the single
-    /// sink for general int->float coercion (`fn f(i: int) -> float { return i }`,
-    /// `takes_float(int_expr)`, an int literal in a float slot). Fires ONLY
-    /// int-expr-in-float-slot; never int->int (loop counters/bounds, idiv/imod
-    /// operands, int==int stay untouched -- the counted-loop latch recognition
-    /// keeps matching `Const(Lit::Int(1))`). Identity on luajit; materialized by
-    /// non-Lua backends.
+    /// Coerce typed integer reads at expected-float boundaries.
     pub(crate) fn coerced(
         &mut self,
         value: Idx<Inst>,

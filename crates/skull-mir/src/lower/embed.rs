@@ -29,14 +29,7 @@ impl<'a> Builder<'a> {
         Ok(plan)
     }
 
-    // --- `embed` storage: a child's leaves ARE the parent's physical keys ---
-    //
-    // Key encoding is the dotted path shared with flattened enum fields (see
-    // `flat_tag_slot`): `embed a: X` with leaf `b` lives at `parent["a.b"]`,
-    // recursively. `.` is not an identifier character, so the encoding cannot
-    // collide with a user field or a control key, and it is injective over
-    // paths. Enforcement of the source-level rules (projection-only, site
-    // legality) is bone's half; this is storage only.
+    // Embedded children use dotted keys on the parent.
 
     /// Physical key and holder for a field projection.
     pub(crate) fn physical_field(
@@ -176,10 +169,7 @@ impl<'a> Builder<'a> {
         Ok((storage == ValueStorage::LeafTable).then_some(sname))
     }
 
-    /// The plain (not `nobox`) value child `field` of leaf-table value `sname`.
-    /// Its field plan is `Direct`, yet the parent keys every nested leaf by
-    /// dotted path, so the child has no key of its own: `pos` of a leaf-table
-    /// parent lives at `pos.x`/`pos.y`, exactly like an inline child.
+    /// A nested value may occupy leaves even under a Direct field plan.
     pub(crate) fn leaf_table_value_child(
         &self,
         sname: Ustr,
@@ -236,11 +226,6 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Re-materialize an embedded field `parent.{prefix}` from its physical
-    /// leaves, at a whole-value-read boundary (a scalar-ABI call argument, `==`,
-    /// interpolation). Projection-only guarantees the result is a TRANSIENT --
-    /// it can never be bound, returned, captured or stored -- so it stays
-    /// sinkable rather than becoming the storage the feature removed.
     pub(crate) fn materialize_embed(
         &mut self,
         parent: Idx<Inst>,
@@ -265,25 +250,7 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The rebuilt child's slots: for each of `cname`'s fields, the key it holds
-    /// on the CHILD paired with the read of the key it lives at on `parent`.
-    /// `rel` is the child-relative prefix, so this is the exact inverse of the
-    /// store side's keying ([`Builder::embed_field_slots`]: relative leaves under
-    /// the field name, presence tag at the field name itself).
-    ///
-    /// An embed field stays FLAT here, for the reason the flat-enum arm already
-    /// gives: a `Mid` whose `inner` is embedded is canonically
-    /// `{["inner.v"]=3, inner=true, m=9}`, so re-boxing `inner` under its own name
-    /// hands consumers a shape they never read. Recursing into a nested box (which
-    /// is what this did) miscompiled BOTH directions across a call boundary -- an
-    /// absent inner came back non-nil because the box always had one, and a
-    /// PRESENT inner's leaf came back nil because the callee reads `["inner.v"]`
-    /// and the box stored a table at `inner`.
-    ///
-    /// The presence tag needs no branch: an absent field's leaves and tag are all
-    /// nil on the parent, and nil at those keys IS the canonical absent form (the
-    /// ctor emits `["inner.v"] = nil, inner = nil`), so an unconditional read
-    /// reproduces it.
+    /// Map the child's keys to the parent's storage for the same fields.
     pub(crate) fn collect_embed_slots(
         &mut self,
         parent: Idx<Inst>,
@@ -328,10 +295,6 @@ impl<'a> Builder<'a> {
         self.nominal_rep_shape(cname, true)
     }
 
-    /// A whole read of a `nobox` embed field, as an unboxed Group over the
-    /// parent's dotted leaves. Driven by the SHAPE rather than by the field
-    /// list, so the parts line up with [`Builder::repr_to_leaves`]' order by
-    /// construction instead of by two walks agreeing.
     pub(crate) fn embed_group(
         &mut self,
         parent: Idx<Inst>,
@@ -371,17 +334,7 @@ impl<'a> Builder<'a> {
         Ok(repr)
     }
 
-    /// The `(physical key, value)` pairs for an embedded field's leaves, the one
-    /// source for both a parent literal's splice and a whole-field write.
-    ///
-    /// A DIRECT child literal FUSES: its field expressions lower straight into
-    /// the parent's leaf slots, so the child box is never built at all. Any
-    /// other expression is lowered once and read leaf-wise -- correct, and a
-    /// transient the later passes can still sink. Mirrors `lower_flat_value`,
-    /// which fuses a direct `E::V(..)` ctor the same way.
-    ///
-    /// All leaves are evaluated BEFORE any caller stores them, so a whole-field
-    /// write is not observable half-applied.
+    /// Share key order between literals and whole-field writes.
     pub(crate) fn embed_leaf_values(
         &mut self,
         cname: Ustr,
@@ -504,13 +457,7 @@ impl<'a> Builder<'a> {
         Ok(out)
     }
 
-    /// `(presence, leaves)` for a NULLABLE embed field. Callers publish presence
-    /// LAST, so an error or yield mid-assignment leaves the field ABSENT rather
-    /// than present-and-half-built.
-    ///
-    /// A statically-known null or a direct child literal needs no branch; any
-    /// other expression is tested once at runtime, because reading leaves off an
-    /// absent child would index nil.
+    /// Publish presence last so errors or yields cannot expose a partial value.
     pub(crate) fn embed_nullable_leaf_values(
         &mut self,
         cname: Ustr,
@@ -530,10 +477,7 @@ impl<'a> Builder<'a> {
             let present = self.emit_cur(Inst::Const(Lit::Bool(true)));
             return Ok((present, leaves));
         }
-        // A `nobox` child already threads as presence-plus-leaves, so take the
-        // repr rather than a boxed value: no box to test, and no branch either,
-        // because the repr carries its own presence and its leaves are nil on
-        // the absent path by construction.
+        // Read the presence bit from the existing representation.
         if let Some(mut shape) = self.nobox_embed_group_shape(cname)? {
             let paths = value_leaf_paths(&shape);
             shape.nullable = true;
@@ -641,10 +585,6 @@ impl<'a> Builder<'a> {
         Ok((None, self.embed_leaf_values(cname, value)?))
     }
 
-    /// Absolute `(physical key, value)` pairs for embed field `field`: the
-    /// child's leaves under the dotted path, plus the presence slot LAST when
-    /// the field is nullable. The one source for a parent literal's splice and
-    /// for a whole-field write, so the two cannot drift.
     pub(crate) fn embed_field_slots(
         field: Ustr,
         (present, leaves): (Option<Idx<Inst>>, Vec<(Ustr, Idx<Inst>)>),

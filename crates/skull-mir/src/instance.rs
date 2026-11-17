@@ -1,16 +1,8 @@
 //! **The one identity of a function at one instantiation.**
 //!
-//! This lives in `skull-mir` -- the lowest crate every consumer shares -- for
-//! the same reason [`crate::site`] does: so there is ONE vocabulary rather than
-//! two equivalent ones with a translation between them. It was in
-//! `skull::instance_graph`, which put it above emission and left emission to key
-//! its bodies on a parallel instantiation key.
-//!
-//! The placement is the only thing that moved. `skull::instance_graph` remains
-//! the AUTHORITY: it builds instances against its [`crate::monoty::MonoArena`],
-//! and an [`Instance`]'s `args` are ids into that arena, meaningless without it.
-//! Nothing here mints an arena-free instance of the same shape -- that would be
-//! the second identity this stage exists to remove.
+//! The instance graph owns the [`crate::monoty::MonoArena`] and builds these
+//! values. An [`Instance`]'s `args` are ids in that arena and have no meaning
+//! without it.
 
 use bone_core::workspace::Workspace;
 
@@ -30,13 +22,8 @@ pub struct Instance {
 }
 
 impl Instance {
-    /// The one instance of a NON-GENERIC declaration.
-    ///
-    /// Named rather than spelled `Instance { func, args: vec![] }` at each site
-    /// so the empty argument list reads as what it is. It is not a sentinel: a
-    /// non-generic function has no type arguments, and asking whether a
-    /// declaration is generic is a question about the DECLARATION
-    /// ([`Self::is_generic`]), never about how many arguments happen to be here.
+    /// The instance of a non-generic declaration. An empty argument list is
+    /// not a shared-body sentinel.
     pub fn base(func: FuncRef) -> Self {
         Self {
             func,

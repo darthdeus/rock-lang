@@ -95,12 +95,7 @@ impl<'a> Builder<'a> {
     ) -> Result<Idx<Inst>, CompilerError> {
         match op {
             BinOp::Lt | BinOp::Leq | BinOp::Gt | BinOp::Geq => {
-                // Lua `<`/`>`/... orders numbers AND strings (lexicographic), and
-                // the typed Int*/Float* variants render the SAME operator — so a
-                // string or generic-`T` comparison uses the non-float variant.
-                // bone has type-checked both sides to the same orderable type
-                // (rock emits a native compare here too). A genuinely unorderable
-                // operand would be a type error upstream.
+                // Both value backends compare strings with the same operator syntax as numbers.
                 let lf = self.arith_ty(lhs);
                 let rf = self.arith_ty(rhs);
                 let float = lf == Some(ArithTy::Float) || rf == Some(ArithTy::Float);
@@ -250,12 +245,7 @@ impl<'a> Builder<'a> {
                         return self.lower_leafwise_value_eq(op, lhs, rhs, &shape);
                     }
                 }
-                // A `value` that is not `nobox` (every generic one, e.g. `Entity<T>`)
-                // still arrives as leaf cells wherever its ABI splats it. Packing
-                // both operands to reach the per-type `__eq` allocated two tables
-                // per comparison; comparing the leaves is the same answer, since
-                // that metamethod is the field-wise `==` over the same leaves.
-                // Lua only: native C compares its own handle and struct layouts.
+                // Ordinary values can arrive as leaves under a scalar ABI.
                 let same_value = self.scx.target() == bone_core::hir::FnBackend::Lua
                     && !self.scx.values_first_class
                     && matches!(
@@ -372,12 +362,7 @@ impl<'a> Builder<'a> {
                         });
                     }
                 }
-                // Non-scalar equality is STRUCTURAL, not Lua reference
-                // equality: it routes through the stdlib `__op_eq`/`__op_ne`,
-                // which walk fields via `pairs()` (cdata value structs hit the
-                // `==` primitive fast path = byte-value compare). Which of the
-                // two it is comes from the ONE dispatch oracle the instance
-                // walk reads, not from a second reading of the operand types.
+                // Use the stdlib for structural equality on aggregates.
                 let route = self.dispatch().eq_route(lhs, rhs);
                 let lv = self.lower_expr(lhs)?;
                 let rv = self.lower_expr(rhs)?;
@@ -591,21 +576,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// The nil-guarded join every `?.` form shares, storing PER SLOT.
-    ///
-    /// The three safe-nav lowerings differ only in what the non-nil arm computes,
-    /// and each joined its arms through ONE result cell. A `nobox` value is leaves
-    /// plus a presence tag and does not fit one cell, so it packed to a box --
-    /// the materialization the mark forbids. This is the same multi-cell join
-    /// `if`/`match` as values already use ([`Self::store_bundle_and_join`]); safe-nav
-    /// was simply never dispatched through it.
-    ///
-    /// The nil arm needs no special case: `repr_to_leaves` already folds a
-    /// `Const(Nil)` at a nullable shape to `false` plus one nil per leaf.
-    ///
-    /// `value_arm` receives the receiver VALUE, lowered once before the test --
-    /// re-lowering the receiver expression on the non-nil arm would run its side
-    /// effects twice (`none()?.v` would call `none` again).
+    /// Lower the receiver once and preserve the result's per-slot representation.
     pub(crate) fn safe_nav_repr(
         &mut self,
         receiver: Idx<Expr>,
@@ -689,15 +660,7 @@ impl<'a> Builder<'a> {
         self.store_slots_and_join(results, &slots, join)
     }
 
-    /// [`Self::store_bundle_and_join`] for an arm whose slots are already in hand
-    /// rather than still a repr -- a `??` lhs, whose slots were read before the
-    /// branch.
-    ///
-    /// The guard is here and not only at the caller because that is the whole
-    /// point of the split: a diverged arm has nothing to store, and every
-    /// hand-rolled copy of this loop so far dropped it. `?? return x` splatted
-    /// leaves off a nil and emitted `(nil).x` in front of the divergence
-    /// (`6132c8c2e`).
+    /// A coalesce arm can reuse slots evaluated before branching.
     pub(crate) fn store_slots_and_join(
         &mut self,
         results: &[Idx<Cell>],

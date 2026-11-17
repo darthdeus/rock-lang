@@ -333,12 +333,6 @@ impl<'a> Builder<'a> {
                 } else {
                     name
                 };
-                // Emit the discriminant tag test for an enum-variant record
-                // pattern: qualified (`enum_name` set) OR an unqualified variant
-                // name belonging to the scrutinee enum (`top`, like the Bind case).
-                // A plain struct-destructure record pattern (`name` not a variant)
-                // emits none. Without this, an unqualified `Circle { .. }` arm with
-                // no tag test would match ANY variant and index missing fields.
                 let en = enum_name.or(scrut_enum);
                 if let Some(variant) = name {
                     if enum_name.is_some() || (top && variants.contains(&variant)) {
@@ -354,25 +348,14 @@ impl<'a> Builder<'a> {
                     && en.is_some_and(|e| {
                         EnumPlan::for_name(self.ws, e).is_some_and(|plan| plan.cdata().is_some())
                     });
-                // A struct destructure reads fields out of an owner the arm can
-                // still write (`src.w.f0 = 99`), so a bound value field is a
-                // snapshot, as `let w = src.w` is. An enum payload cannot be
-                // written through its owner; its binder copies where a ref
-                // borrow could write it, and its `V?` descendants where it
-                // escapes ([`Self::owned_value_children`]).
+                // Snapshot a bound value before an arm can write back into its source.
                 let struct_destructure = name
                     .is_some_and(|n| self.ws.struct_by_name.contains_key(&n))
                     && enum_name.is_none()
                     && !(top && name.is_some_and(|n| variants.contains(&n)));
                 for rfidx in fields {
                     let rpf = self.body.record_pat_field_arena[rfidx];
-                    // An embed/nobox field has NO slot under its own name, so a
-                    // BINDING for it rebuilds from the parent's dotted leaves --
-                    // the same rule the field-read paths follow. `scrut_named`
-                    // would emit `Inst::Field` against a key that does not exist.
-                    // The shared field-storage plan fails closed on anything that is not
-                    // a plain struct (an enum variant name is not in
-                    // `struct_by_name`), so a variant record falls through.
+                    // Embedded children need to be rebuilt from their parent's leaves.
                     let embedded = match (name, scrut) {
                         (Some(sname), Scrut::Val(_))
                             if self.ws.struct_by_name.contains_key(&sname) =>
@@ -619,15 +602,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The leaf shape of THIS VARIANT's payload at position `i`, when the position
-    /// is widened to a scalarizable value's leaves. `None` for every ordinary position.
-    ///
-    /// Both the position AND the variant have to be asked. A position is widened
-    /// because SOME variant carries a scalarizable value there; a sibling variant with
-    /// an ordinary payload at the same position occupies only the first slot, and
-    /// reading it through the widened shape binds a float as if it were a value
-    /// struct. Read off the enum DECLARATION, the same source the ctor's placement
-    /// reads, so a write and a read of one position cannot disagree.
     pub(crate) fn flat_payload_leaf_shape(
         &self,
         enum_name: Option<Ustr>,
@@ -667,16 +641,7 @@ impl<'a> Builder<'a> {
             .collect()
     }
 
-    /// A widened payload position holding a nested FLAT enum, read as that enum's
-    /// own cells from the parent's slots starting at `slot`. `None` when the
-    /// position is widened for a value struct instead.
-    ///
-    /// The inner enum's OWN plan sizes the read, because that is the plan the
-    /// ctor's leaf bundle writes with (`lower_flat_value` -> `repr_to_leaves_bundle`
-    /// over the inner `Group`): `[__tag, _0.., <rec>..]`. `vs` is what the PARENT
-    /// reserved for the position, so a parent that reserved less than the inner
-    /// plan needs would read a neighbouring position's slot; that is a plan
-    /// disagreement, not something to paper over.
+    /// Read a nested flat enum beginning at its position in the outer wire.
     pub(crate) fn nested_flat_enum_scrut(
         &mut self,
         scrut: &Scrut,
@@ -1360,20 +1325,7 @@ impl<'a> Builder<'a> {
         Ok(shape.nullable.then_some(shape))
     }
 
-    /// THE oracle for "a presence slot for this nullable tuple is really on the
-    /// wire" -- what every consumer of one (`let`, `== null`, `if let`) reads,
-    /// so none of them can branch on a slot another one did not put there.
-    ///
-    /// Each source carries its own warrant for answering, and none of them is
-    /// the expression's own type:
-    /// - a direct CALL answers from the callee's DECLARED return
-    ///   ([`Self::nullable_tuple_call_shape`]);
-    /// - a NAME answers from the shape its slot cells were bound with, which is
-    ///   whatever this oracle said at the `let`;
-    /// - a SAFE-NAV answers from its own join, which manufactures the presence
-    ///   rather than receiving it -- the sanctioned exception `repr_join_slot`
-    ///   already relies on, and the reason the shape is built here instead of
-    ///   read off a declaration.
+    /// An actual nullable tuple wire carries presence; a boxed tuple can simply be nil.
     pub(crate) fn nullable_tuple_wire_shape(
         &self,
         e: Idx<Expr>,
@@ -1419,14 +1371,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// [`Self::bind_pattern_slot`] driven by a `Pattern` instead of a
-    /// `BindingPattern`, for the `if let` forms. Only the shapes the pattern arena
-    /// can spell and the binding arena cannot are handled here -- a HOLE, which
-    /// has no `BindingInfo` to name -- and everything else delegates, so the two
-    /// cannot drift about what a slot is.
-    ///
-    /// A hole still CONSUMES its slots: the values are positional, so binding
-    /// nothing without advancing would hand the next element this one's leaves.
     fn bind_names_slot(
         &mut self,
         pat: Idx<Pattern>,

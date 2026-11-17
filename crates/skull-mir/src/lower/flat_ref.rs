@@ -1,14 +1,5 @@
-//! A `ref` to a container element that Lua stores flat -- the value columns of
-//! a Vec, a Map's or an Arena's data column, or a strided row -- has no element
-//! table to alias. It travels as the column vec plus the element's checked
-//! slot, and every read and write through it goes to the element's leaves.
-//!
-//! A callee reached with such an argument is lowered again for that argument
-//! storage: a flat variant is the callee's body with each flat `ref` parameter
-//! bound to a vec and a slot, hoisted beside the caller like a nested fn. A
-//! `ref` return that addresses a flat element returns `vec, slot`. A body that
-//! never reaches a flat element emits exactly as before, so the cost is paid
-//! only where a flat element is borrowed.
+//! Flat-stored element references carry their container and checked slot.
+//! A callee uses a specialized body for each argument storage signature.
 use super::call::DirectCall;
 use super::*;
 use crate::instance::Instance;

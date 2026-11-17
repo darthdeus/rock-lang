@@ -134,10 +134,7 @@ impl<'a> Builder<'a> {
         // from here down came from `e` unless a nested `lower_expr` narrows it,
         // and the restore puts the enclosing expression back on the way out.
         let outer = self.cur_span.replace(self.body.expr_spans[e]);
-        // The site's EXPRESSION half, tracked exactly beside the span half. A
-        // nested `lower_expr` narrows it and the restore puts the enclosing
-        // expression back, so a call always carries the innermost expression
-        // that produced it -- which is the key `ConcreteBody` is built on.
+        // Keep the span and expression together when switching call sites.
         let outer_expr = self.cur_expr.replace(e);
         let v = match self.body.expr_arena[e] {
             Expr::Var(binding)
@@ -218,10 +215,7 @@ impl<'a> Builder<'a> {
         if coerce_iterator && let Some(w) = self.inf.and_then(|i| i.implicit_iter_args.get(&e)) {
             let (m, f) = w.func;
             let iter_ref = FuncRef { module: m, func: f };
-            // This coercion belongs to `e`, but the cursor was already restored
-            // to the ENCLOSING expression above -- so set both halves of the
-            // site explicitly rather than inheriting a cursor that names the
-            // wrong expression.
+            // Attribute the coercion to this expression after restoring its caller.
             let outer_expr = self.cur_expr.replace(e);
             // The instance is resolved BEFORE the arguments are shaped: they are
             // splatted against the ABI of the body the call targets, not the
@@ -255,18 +249,10 @@ impl<'a> Builder<'a> {
                     args,
                 }))
             })?;
-            // DELIVERY, exactly as the `for` head's witness does it. Both forms
-            // are ordinary calls to a generic `iter`, so under instance-owned
-            // emission both must name an instance; recording identity without
-            // delivering it spells a symbol nothing defines.
             if let Some(delivery) = self.concrete_delivery_instance(&witness) {
                 self.f.spec_bindings.insert(call, delivery);
             }
-            // IDENTITY beside delivery, the plan's split, and the same pair the
-            // `for` witness records. Delivery alone leaves the site's own claim
-            // unstated, which the census reports as `callee-no-instance` -- it
-            // was invisible only because the census runs POST-TRANSFORM and a
-            // splice removed the site before it could be examined.
+            // Record the concrete iterator owner alongside the delivery target.
             let iter_decl = &self.ws.module(m).functions[f];
             if iter_decl.generics.is_empty() || !witness.args.is_empty() {
                 crate::site::record_call_owner(&mut self.f, call, &witness);
@@ -289,15 +275,6 @@ impl<'a> Builder<'a> {
         let outer_span = self.cur_span.replace(self.body.expr_spans[e]);
         let outer_expr = self.cur_expr.replace(e);
         let result = (|| -> Result<Idx<Inst>, CompilerError> {
-            // A `nobox` param arrives as leaves, so the lambda binds a Group
-            // over N cells instead of one -- the same shape a scalar-ABI fn
-            // gives its params. The lambda and call site read the same
-            // function-value representation plan.
-            // Param shapes come from the param BINDINGS, which is where a
-            // lambda's param types actually land -- its own `fn(..) -> ..`
-            // node can still hold unresolved vars at this point, while the
-            // bindings carry what inference unified them WITH, i.e. the same
-            // types the call site reads off the fn type.
             let param_slots: Vec<RetSlot> = params
                 .into_iter()
                 .enumerate()
@@ -308,10 +285,7 @@ impl<'a> Builder<'a> {
                     Ok(self.scx.rep_arena().ret_slot(*id))
                 })
                 .collect::<Result<_, CompilerError>>()?;
-            // A lambda's params land in the SAME cell namespace as the
-            // enclosing body's, so it collects its own list off `f.params`
-            // rather than owning it -- but the binding rule itself is
-            // `bind_param_slot`, shared with the other two definition forms.
+            // Lambda parameter cells share the enclosing arena.
             let before = self.f.params.len();
             for (i, pb) in params.into_iter().enumerate() {
                 let pname = self.body.binding_arena[pb].name;
@@ -326,40 +300,17 @@ impl<'a> Builder<'a> {
             self.cur = entry;
             let lambda_params: Vec<Idx<BindingInfo>> = params.into_iter().collect();
             self.copy_ref_borrowed_params(&lambda_params)?;
-            // The lambda body returns via the LAMBDA's ABI, not the enclosing
-            // fn's: a bone-desugared `() => e` body is a block with a `return e`
-            // statement, so the return machinery (`return_leaves`) must see the
-            // lambda's own return shape. A tuple-returning lambda splats N values
-            // so an indirect call site can capture them (multi-return ABI); the
-            // enclosing value-struct result never applies (a lambda is
-            // called through a boxed fn-value). Save/restore around the body.
+            // Use the lambda's return representation while lowering its body.
             let saved_ret_rep = self.ret_rep.take();
             let saved_flat_ret = self.flat_ret.take();
-            // Isolate the defer state, like `lower_nested_fn`. A lambda body
-            // is its OWN fn scope: bone desugars `() => e` to a block with
-            // `return e`, so the body's return runs `run_all_defers` -- which
-            // must see only the lambda's own pending defers, never the
-            // enclosing fn's. Leaving the stack shared spliced every pending
-            // enclosing defer into the lambda body (it then ran on every call)
-            // and, when the defer body was what created the lambda, recursed
-            // forever (run_all_defers re-splices the still-pending defer ->
-            // re-lowers the lambda). `in_defer_body` resets to false: the
-            // lambda body is not the defer body's code (a `yield`/`await`
-            // there is already rejected by bone as yield-in-plain-lambda, so
-            // the reset unmasks no diagnostic -- it just makes the flag honest).
+            // A return from the lambda runs only the lambda's defers.
             let saved_defers = std::mem::take(&mut self.defers);
             let saved_in_defer = std::mem::replace(&mut self.in_defer_body, false);
-            // A lambda body is emitted as its own hoisted fn, so its
-            // defers unwind on error wherever the lambda was created,
-            // including inside a co fn.
+            // A lambda can unwind even when created inside a coroutine.
             let saved_mode = std::mem::replace(
                 &mut self.defer_mode,
                 super::stmt::DeferMode::for_body(false, self.call_scx.target),
             );
-            // Box value args (see field docs). A lambda body IS spliced into
-            // now -- `convert_closures` splits it out and the inliner runs
-            // over the standalone body -- but that happens after lowering, so
-            // this decision cannot see the specialized callee it would need.
             self.ret_rep = lam_plan.result();
             let leaves = if self.ret_rep.is_none() {
                 self.lower_stmt_expr(body)?;
@@ -485,10 +436,7 @@ impl<'a> Builder<'a> {
                 let r = self.lower_expr_repr(e)?.into_value();
                 self.pack_maybe_absent(r)
             }
-            // A value local held as ONE box, used whole in a boxed context: copy
-            // it, like a read out of a place. A place store keeps the box it is
-            // handed, so sharing this one would alias the local and every place
-            // it reached. The unboxed route (`lower_expr_repr`) only reads leaves.
+            // Snapshot a boxed value local on read.
             Expr::Var(b) if let Some(name) = self.boxed_value_local(b, e) => {
                 let boxed = self.emit_cur(Inst::Load(self.binds[&raw(b)]));
                 if self.lending_pack && self.binding_value_is_shareable(b) {
@@ -512,10 +460,6 @@ impl<'a> Builder<'a> {
                     .ok_or_else(|| gap("read of an unbound variable"))?;
                 Ok(self.emit_cur(Inst::Load(cell)))
             }
-            // A bare name resolving to a FUNCTION taken by value (`let f = adder`,
-            // passing `adder` as an arg, a `func: adder` field) is stamped as a
-            // FnValue site for every backend. The backend owns the emitted symbol,
-            // but the graph needs the target-neutral obligation before that choice.
             Expr::Global(name) if self.ws.functions_by_name.contains_key(&name) => {
                 let fref = self.resolve_funcref(e, name)?;
                 self.reject_fn_value_abi_mismatch(e, fref)?;
@@ -527,10 +471,7 @@ impl<'a> Builder<'a> {
                 let id = self.with_site_op(crate::site::SiteOp::FnValue, |b| {
                     b.emit_cur(Inst::Global(crate::names::ustr(sym.as_str())))
                 });
-                // The one place a callee DECLARATION becomes a spelled value.
-                // Recorded here rather than recovered downstream from the name:
-                // `Inst::Global` is also a module global and a `static` cell,
-                // and a name comparison could not tell them apart.
+                // Record identity before lowering erases the source name.
                 self.f.fn_value_symbols.insert(id, fref);
                 if let Some(instance) =
                     self.concrete_callee_for_site_op(e, crate::site::SiteOp::FnValue)?
@@ -560,10 +501,6 @@ impl<'a> Builder<'a> {
                 Ok(self.emit_cur(Inst::Global(name)))
             }
 
-            // A reached `?` hole is a not-yet-filled marker: raise a readable
-            // runtime error (naming the hole) rather than silently evaluating to
-            // nil. `error` diverges, so the trailing nil is never read -- it only
-            // satisfies the expression's value slot.
             Expr::Hole(name) => {
                 let label = match name {
                     Some(n) => format!("reached unfilled hole ?{n}"),
@@ -663,27 +600,14 @@ impl<'a> Builder<'a> {
 
             Expr::Call { callee, args, .. } => self.lower_call(e, callee, args),
 
-            // --- aggregates + projections + container reads ---
-            // A BOXED tuple slot can be observed for nil-ness (`t.0 == null`), so
-            // an absent nullable value element has to land there as `nil` rather
-            // than as the ctor `pack` builds regardless of presence. The
-            // splatting form keeps its own repr path in `lower_expr_repr`, where
-            // the presence tag stays a leaf and is never at risk.
+            // An absent tuple slot must stay nil so a presence test can see it.
             Expr::Tuple(elems) => {
                 let vs = self.lower_tuple_operands(e, elems)?;
                 Ok(self.emit_cur(Inst::MakeTuple(vs)))
             }
             Expr::Array(elems) => self.lower_array_literal(e, elems),
             Expr::Index { base, index } => {
-                // A whole-value read of a value-struct element COPIES (via the repr
-                // layer's per-field Group -> `pack` rebuilds a fresh cdata) rather
-                // than binding the interior array reference.
-                //
-                // Column storage routes on the CONTAINER, not on the element
-                // type: inside a body specialized at `T = E?` the element type is
-                // an unsubstituted generic (a nullable binding has no
-                // synthesizable node), so the type predicates below see nothing
-                // while the storage still has no element slot to name.
+                // Snapshot a whole value before later stores through the container.
                 if self.vec_column_elem_of(base)?.is_some()
                     || self.vec_strided_elem_of(base)?.is_some()
                     || (!self.scx.values_first_class
@@ -732,12 +656,6 @@ impl<'a> Builder<'a> {
                 fields,
                 bases,
             } => self.lower_struct_literal(e, name, fields, bases),
-            // A FLAT enum's payload threads as leaves, so a boxed context must
-            // build the Group and let `pack` box it -- the same repr-then-pack
-            // route the cdata-eligible enum takes inside `lower_enum_variant`.
-            // Lowering the payload args directly instead packs each one on its
-            // own, which boxes a `nobox` payload the enum would have stored
-            // splat (`tests/nobox/enum_payload_container.rock`).
             Expr::EnumVariant { enum_name, .. }
                 if EnumPlan::for_name(self.ws, enum_name)
                     .is_some_and(|plan| plan.flat().is_some()) =>
@@ -922,10 +840,6 @@ impl<'a> Builder<'a> {
                 }))
             }
 
-            // `return e` in expression position (`x ?? return`, `cond ? a : return`).
-            // Diverges: run defers, set the Return terminator. The block is now
-            // closed, so callers skip any fall-through (via `is_open()`); the
-            // placeholder value is never used.
             Expr::Return(opt) => {
                 self.lower_return(opt)?;
                 Ok(self.emit_cur(Inst::Const(Lit::Nil)))
@@ -960,15 +874,7 @@ impl<'a> Builder<'a> {
         let outer = self.cur_span.replace(self.body.expr_spans[e]);
         let outer_expr = self.cur_expr.replace(e);
         let result = (|| {
-            // A `nobox` element rides the BOX as its leaves, on the same slot
-            // list the multi-return wire uses -- so the box is the wire put in
-            // a table, and `tuple_box_shape` is the one oracle both this
-            // producer and every reader derive the layout from. Without it a
-            // `nobox` part packs to a `<name>_ct` and the guarantee is gone the
-            // moment the tuple escapes into a container (matrix row 13).
-            //
-            // `None` when nothing splats, which is every tuple that compiled
-            // before: those keep today's one-value-per-element box exactly.
+            // A tuple box uses the same slot order as the multi-return ABI.
             let shape = self.tuple_box_shape(e)?;
             let mut vs = Vec::new();
             for (i, el) in elems.into_iter().enumerate() {
@@ -1017,10 +923,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// A `ref` borrow (local initializer, argument or returned place): the place
-    /// itself, as [`Self::lower_place_base`] lowers it, with its root cell marked
-    /// [`Cell::borrowed`]. Marked whatever the borrowed type is: a borrowed
-    /// struct can still reach a `value` field that is written through the alias.
+    /// Mark the root cell so lowering preserves aliasing.
     pub(crate) fn lower_ref_borrow(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
         if let Some(vec) = self.capture_flat_ref_arg(e)? {
             return Ok(vec);
@@ -1047,12 +950,7 @@ impl<'a> Builder<'a> {
         Ok(place)
     }
 
-    /// A field place held wholly in a scalarized binding's leaf cells
-    /// ([`Builder::group_binds`]): the cells it spans and its shape. A write
-    /// replaces those leaves, which is the whole-value replacement a value
-    /// local or parameter field write means, and the only form a `nobox`
-    /// binding has. `None` once the path leaves the cells, through a reference
-    /// or an opaque value child.
+    /// Find the leaf cells spanned by a projected field.
     fn group_leaf_place(&self, e: Idx<Expr>) -> Option<(Vec<GroupLeaf>, FieldShape)> {
         match self.group_leaf_walk(e)? {
             (guards, cells, selected) if guards.is_empty() => Some((cells, selected)),
@@ -1115,10 +1013,7 @@ impl<'a> Builder<'a> {
         Some((guards, cells[range].to_vec(), selected))
     }
 
-    /// One leaf of a scalarized binding used as a place base: a reference is
-    /// written through, while an opaque value child may share its box with the
-    /// source the binding was read from, so the write lands on a copy stored
-    /// back into the leaf.
+    /// Allow reference writes through a leaf, but reject aliasing a shared value box.
     fn group_leaf_place_base(
         &mut self,
         e: Idx<Expr>,
@@ -1183,11 +1078,7 @@ impl<'a> Builder<'a> {
         Some((*self.binds.get(&raw(b))?, path))
     }
 
-    /// Replace the whole value in `cell` with a copy whose field at `path`
-    /// is `update(old)`. A first-class value has no storage a field store
-    /// could name, so the write is the whole-value replacement it means.
-    /// With `result` set, returns the old (`Some(true)`) or new field value,
-    /// readable after the write.
+    /// Rebuild each first-class value along the field path.
     fn first_class_field_update(
         &mut self,
         cell: Idx<Cell>,
@@ -1258,15 +1149,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// `target = value` -> a `Store`/`StoreField`/`StoreIndex`/`StoreGlobal`
-    /// (the effect; no value). The expression form wraps this with a unit value.
-    /// The BASE of an assignment target, lowered as a PLACE: the slot itself,
-    /// never a packed copy of it. `lower_expr` on a value-struct element/field is
-    /// an RVALUE read and rebuilds a fresh box (the whole-value copy rule), so
-    /// using it here would land the store on a temporary. The syntactic position
-    /// ("I am an assignment target's base") is known here, so nothing needs to be
-    /// plumbed down from bone. Recurses the whole chain: `a.b[i].c.x = 5` must not
-    /// pack at any level.
+    /// Recursively read the storage of an assignment target's base.
     pub(crate) fn lower_place_base(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
         let value = self.lower_place_base_inner(e)?;
         self.mark_record_base(e, value);
@@ -1304,10 +1187,6 @@ impl<'a> Builder<'a> {
                 let i = self.lower_expr(index)?;
                 Ok(self.read_index(b, i, kind))
             }
-            // A `nobox` global has no single slot -- `Inst::Global(name)` would
-            // read a nil global and the write would land on nothing. Every
-            // reachable place form (whole group, leaf field) is handled before
-            // this; reject rather than emit that silent nil.
             Expr::Global(name) if nobox_global_place.is_some() => {
                 Err(CompilerError::new_with_label(
                     self.body.expr_spans[e],
@@ -1351,17 +1230,7 @@ impl<'a> Builder<'a> {
                 let b = self.lower_place_base(pbase)?;
                 Ok(self.read_field(b, key))
             }
-            // A call returning a VALUE is not storage: the rvalue lowering packs a
-            // fresh box, so the store lands on a temporary and emits
-            // `(Pt_ct(a, b)).x = v` -- not valid Lua, so the whole chunk fails to
-            // parse at load. bone rejects the reachable form (`1dd209b65`), so
-            // this is unreachable by construction; it rejects rather than falls
-            // back so a future admission change surfaces here instead of as an
-            // unparseable chunk.
-            //
-            // A call returning a REFERENCE struct IS storage -- it hands back the
-            // shared table, so the write is real. `o.next.unwrap().value = v` is
-            // the live shape (`tests/closures/assignment_in_lambda.rock`).
+            // Reject a value temporary as an assignment base.
             Expr::Call { .. } | Expr::SafeNavCall { .. } if self.expr_is_value_struct(e) => {
                 Err(CompilerError::new_with_label(
                     self.body.expr_spans[e],
@@ -1525,12 +1394,7 @@ impl<'a> Builder<'a> {
                 let v = self.lower_expr(value)?;
                 self.emit_cur(Inst::StoreGlobal { name, value: v });
             }
-            // A binding to a flat element is a vec and a slot under one static
-            // key, so it can be rebound only to another element of that same
-            // storage: the return scan and every read through the binding
-            // address leaves by that key. Any other right-hand side (a boxed
-            // `ref`, differently stored element, or plain value) would need the
-            // binding's storage to vary at run time.
+            // All uses of a flat reference need the same storage layout.
             Expr::Var(b) if self.flat_ref_binds.contains_key(&raw(b)) => {
                 let key = self.flat_ref_binds[&raw(b)];
                 if self.classify_flat_ref(value)? != Some(key) {
@@ -1634,11 +1498,7 @@ impl<'a> Builder<'a> {
                         }
                     };
                 }
-                // `buf[i].pos = v` / `buf[i].id = v` / `buf[i].lo.n = v` on a
-                // leaf-addressed NativeBuffer: there is no element slot to take a
-                // place base of, so the write lands in the leaves under this
-                // field's path. A whole nested field spans several leaves; a
-                // primitive field is exactly one.
+                // A leaf-addressed buffer has no whole-element place to write through.
                 if let Some((buf, idx, elem, path)) = self.nb_leaf_field_place(base, field)? {
                     return self.nb_leaf_field_store(buf, idx, elem, &path, value);
                 }
@@ -1752,11 +1612,7 @@ impl<'a> Builder<'a> {
                 let v = self.lower_expr_with_expected(value, expected)?;
                 self.write_field(b, key, v);
             }
-            // `target` IS the `Expr::Index` node, the site of this arm's
-            // synthesized calls. The place expression is never lowered as a
-            // value, so nothing else installs it: in statement position the
-            // cursor is absent entirely and in value position it names the
-            // enclosing assignment.
+            // The synthesized store call belongs to the target expression.
             Expr::Index { base, index } => self.with_site_expr(target, |s| {
                 let (b, kind) = s.lower_index_base(base)?;
                 let i = s.lower_expr(index)?;
@@ -1791,12 +1647,7 @@ impl<'a> Builder<'a> {
                 let v = self.lower_expr(value)?;
                 self.emit_cur(Inst::StoreGlobal { name, value: v });
             }
-            // `base?.field = value` — silently skip if any `?.` link is null (the
-            // receiver `base` lowers to nil then). `value` evaluates ONLY on the
-            // non-null path. Deep `a?.b?.c = v` works: `base` (`a?.b`) is itself
-            // a SafeNav that lowers to nil if any inner link is null.
-            // The same through a scalarized binding's leaves: test the
-            // presence leaves, then write the field's leaves.
+            // An absent link skips evaluation of the right-hand side.
             Expr::SafeNav { .. }
                 if let Some((guards, cells, selected)) = self.group_leaf_walk(target) =>
             {
@@ -1822,13 +1673,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// `target <op>= value` == `target = target <op> value` (the effect), over
-    /// var / global / field / index targets. The place is read and written
-    /// through a SINGLE base/index evaluation (no double side effects). A scalar
-    /// target uses native arith; a non-scalar target (struct/value with an
-    /// operator overload) routes `op_fn(target, value)` through the resolved
-    /// overload (bone records it on the CompoundAssign expr).
-    /// Whether `target` is a field declared `f32`, so a write rounds.
+    /// Evaluate the read-modify-write target once, before the right-hand side.
     pub(crate) fn assign_target_is_f32(&self, target: Idx<Expr>) -> bool {
         let (Expr::FieldAccess { base, field } | Expr::SafeNav { base, field }) =
             self.body.expr_arena[target]
@@ -2003,10 +1848,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// `target++` / `target--` (prefix or postfix). Reads the target, adds or
-    /// subtracts one with the target's scalar instruction family, writes it back,
-    /// and yields the OLD value (postfix) or NEW value (prefix). Var / global /
-    /// field / index targets, mirroring assignment.
     pub(crate) fn lower_incdec(
         &mut self,
         target: Idx<Expr>,
@@ -2145,10 +1986,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The non-nil arm of `recv?.method(args)`, with the receiver already
-    /// lowered. Returns a plan-owned bundle: a scalar-ABI value callee yields its leaves, so a
-    /// per-slot join never has to take a box apart again. Shared by the scalar
-    /// lowering and the repr twin -- one value arm, two joins.
     pub(crate) fn safe_nav_call_value_repr(
         &mut self,
         e: Idx<Expr>,
@@ -2173,11 +2010,6 @@ impl<'a> Builder<'a> {
                 .ok_or_else(|| self.gap_here("fn-field call has no concrete function ABI plan"))?;
             self.indirect_call_by_plan(abi, fieldv, &call_args)
         } else {
-            // `recv?.method(args)` UFCS: `method(recv, args)`, recv as arg 0.
-            // The whole call -- both ABIs, the delivery key, the bound tree, the
-            // callee instance and the target ABI plan -- is the ordinary direct
-            // call's business, so it happens there rather than being reassembled
-            // here from the DECLARATION's plan.
             let func = self.resolve_funcref(e, method)?;
             let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
             self.ufcs_call_repr(e, func, recv, &arg_idxs)
@@ -2238,28 +2070,12 @@ impl<'a> Builder<'a> {
         self.lower_safe_nav_receiver(base)
     }
 
-    /// `recv?.method(args)` — `nil` if `recv` is nil, else the UFCS call
-    /// `method(recv, args)` (cdata-everywhere: no scalar splat). Args evaluate
-    /// only on the non-null path. Result flows through a cell.
-    /// Lower a safe-nav RECEIVER once, keeping whatever tells it apart from nil.
-    ///
-    /// An unboxed nullable value carries its own presence tag, and that tag is
-    /// the only honest absence test: packing the Group to compare it against nil
-    /// builds a ctor, which is statically non-nil, so the absent arm gets
-    /// const-folded away and the miss path runs the hit code on nil leaves. The
-    /// box cannot be moved into `pack` instead -- `pack` cannot see whether its
-    /// consumer needs nil-ness, and putting the ctor behind a branch there costs
-    /// SROA the forwarding that keeps `??`-at-a-ctor-field boxless.
+    /// Evaluate call arguments only when the receiver is present.
     pub(crate) fn lower_safe_nav_receiver(
         &mut self,
         receiver: Idx<Expr>,
     ) -> Result<SafeNavRecv, CompilerError> {
-        // Asked of the REPR, not of a `nobox` shape query: this is not a nobox
-        // rule. A plain unmarked `value` read out of a `Map`/`Vec`/embed field
-        // arrives as a Group with a presence tag too, and it is the unmarked case
-        // that crashed. `lower_expr_repr` is a superset of `lower_expr` -- every
-        // form it does not special-case falls through to `Scalar(lower_expr(e))`
-        // -- so nothing outside the Group case changes shape.
+        // A boxed read can already carry an unboxed nullable representation.
         let r = self.lower_expr_repr(receiver)?.into_value();
         if let ValueRepr::Group {
             present: Some(p), ..
@@ -2439,11 +2255,6 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// [`Expr::SafeNav`] joining PER SLOT. Only the `nobox`/embed field read
-    /// differs from the scalar arm: it builds the child's Group off the parent's
-    /// dotted leaves instead of materializing a box from them, which is the whole
-    /// point -- `materialize_embed` IS the packing this path had to do to fit one
-    /// cell. Every other field flavour packs as before and rides one slot.
     pub(crate) fn safe_nav_field_repr(
         &mut self,
         e: Idx<Expr>,

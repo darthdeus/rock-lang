@@ -81,12 +81,7 @@ impl<'a> Builder<'a> {
         Ok(Some(cells))
     }
 
-    /// Lower an enum-typed value into its flattened cells: the discriminant
-    /// (variant-name string) plus ALL union slots (every positional + every record
-    /// field), nil where the live variant doesn't fill them so stale slots from a
-    /// prior wider/other-shaped variant are cleared. A direct `E::V(..)` ctor fuses
-    /// to a string const + the lowered args (no box); any other enum expression is
-    /// lowered to a box once and spread through the nil-safe leaf projection.
+    /// Lower the tag followed by the shared payload slots.
     pub(crate) fn lower_flat_value(
         &mut self,
         shape: &EnumFlatShape,
@@ -120,10 +115,6 @@ impl<'a> Builder<'a> {
                 return self.flat_ctor_cells(shape, variant, positional, rec_args);
             }
         }
-        // General enum value: thread it as a repr. A flat-enum Group (a scalarized
-        // param/return/local, or a fresh ctor) yields its cells directly -- no box;
-        // a Scalar (a genuinely boxed source: global singleton, `any`, if-join) is
-        // spread back out.
         let r = self.lower_expr_repr(value)?.into_value();
         match r {
             ValueRepr::Group { name, parts, .. }
@@ -138,11 +129,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The cells of `shape::variant(positional.., rec_args..)`. Positional
-    /// payloads are placed at their POSITION's slot offset, and a scalarizable
-    /// value spreads into its leaves there -- the layout comes from the enum
-    /// declaration, so a source ctor, a compiler-built variant and the match arm
-    /// that reads it back agree without seeing each other.
     pub(crate) fn flat_ctor_cells(
         &mut self,
         shape: &EnumFlatShape,
@@ -154,10 +140,7 @@ impl<'a> Builder<'a> {
         let mut slots: Vec<Option<Idx<Inst>>> = vec![None; shape.tuple_width()];
         for (pos, arg) in positional.into_iter().enumerate() {
             let off = shape.slot_offset(pos);
-            // Widened only for THIS variant's own shape: a sibling carrying an
-            // ordinary payload, or a scalarizable value of another shape,
-            // addresses its own leading slots and the rest of the position
-            // nil-pads.
+            // Use this variant's payload width and leave the remaining slots inactive.
             match self.flat_payload_leaf_shape(Some(shape.name), variant, pos) {
                 Some(vs) => {
                     // The enum is immutable and outlives its operands, so its

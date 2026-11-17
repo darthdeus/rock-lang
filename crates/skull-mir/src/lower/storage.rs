@@ -489,19 +489,8 @@ impl<'a> Builder<'a> {
         Ok(vec)
     }
 
-    /// A column-stored element (`xs[i]` where `xs: [E]` stores flat columns) as
-    /// an unboxed `Group`: bounds-check `i` once, then read leaf `k` from column
-    /// `k`. No element table is touched because none exists.
-    ///
-    /// `value_leaf_paths` and `rebuild_from_leaves` both walk fields in
-    /// declaration order depth-first, so the flat read order lines up with the
-    /// nested shape without a second traversal.
-    /// `Some((buf, checked_index, elem, dotted_path))` iff `<base>.<field>` is a
-    /// field path rooted at `buf[i]` over a leaf-addressed NativeBuffer.
-    ///
-    /// Peels the FieldAccess chain to build the dotted path the leaf plan is
-    /// keyed by (`buf[i].lo.n` -> `"lo.n"`), so a write at ANY depth lands on
-    /// the right leaves. The bounds check is emitted once, here.
+    /// Resolve `base.field` inside a leaf-addressed NativeBuffer element. The
+    /// returned dotted path selects its planned leaf; the index is checked once.
     pub(crate) fn nb_leaf_field_place(
         &mut self,
         base: Idx<Expr>,
@@ -593,16 +582,9 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Whether `elem` is leaf-addressable: it has a validated C leaf layout
-    /// whose every leaf divides its view cleanly. `false` keeps the buffer on
-    /// the existing slot-reference path, which is CORRECT, just boxier --
-    /// leaf addressing does not change storage, so the two address the same
-    /// bytes and a program may mix them freely.
-    ///
-    /// Both targets. The views are `ffi.cast` pointers on luajit and TypedArrays
-    /// over one ArrayBuffer on JS, but the ADDRESSING is the same C layout either
-    /// way -- the owned leaf-address projection's stride and offset are already in units of each
-    /// view's own element type, so one lowering serves both.
+    /// Whether `elem` has a validated C leaf layout. Otherwise the existing
+    /// slot-reference path remains valid but boxier. Lua pointers and JS
+    /// TypedArrays use the same planned C offsets and strides.
     fn native_buffer_plan(&self, elem: Ustr) -> Result<ContainerPlan, CompilerError> {
         let ty = MonoTy::App {
             ctor: crate::monoty::MonoCtor::Nominal(crate::names::ustr("NativeBuffer")),
@@ -618,17 +600,9 @@ impl<'a> Builder<'a> {
         Ok(self.native_buffer_plan(elem)?.is_leaf_addressed())
     }
 
-    /// Read `buf[i].<path>`'s single primitive leaf, for a read-modify-write
-    /// (`buf[i].pos.x++`, `buf[i].w += 1`). `None` when `target` is not such a
-    /// place, or when the path is not exactly ONE leaf -- a `+=` over an
-    /// aggregate has no scalar to combine.
-    ///
-    /// JS ONLY, deliberately. Every other read/write shape is leaf-addressed on
-    /// both targets, but a read-modify-write reads a PLACE: luajit's `.ptr[i]`
-    /// is a struct reference, so `buf[i].pos.x` is a real assignable lvalue and
-    /// the ordinary field path is both correct and tighter. JS has no such
-    /// reference -- `ptr[i]` is a number -- so without this the whole element is
-    /// materialized and the write lands on a copy.
+    /// Resolve a single-leaf NativeBuffer read-modify-write place. JS needs this
+    /// path because TypedArray elements are values; Lua's FFI element is an
+    /// assignable struct reference. Aggregate paths have no scalar update.
     pub(crate) fn nb_leaf_rmw_place(
         &mut self,
         target: Idx<Expr>,
@@ -1044,19 +1018,9 @@ impl<'a> Builder<'a> {
                 let value = self.clone_column_data(vec, elem)?;
                 Ok(Some(self.value_bundle_for_expr(e, value)?))
             }
-            // The two ops that need the LOGICAL elements, not the physical
-            // columns: a sort key is a function of the whole element, and
-            // `to_lua_array`'s whole contract is handing a Lua array of elements
-            // to a foreign API. `to_lua_array` redirects to the materializing
-            // helper -- the storage contract's third category (erased/external
-            // boundaries materialize explicitly), and the only place a column Vec
-            // builds element tables.
-            //
-            // `sort` needs the element only to APPLY THE KEY, and the key is
-            // reached through a fn value, whose ABI is derived from the fn type.
-            // At a `nobox` element that ABI is the leaves, which are the columns,
-            // so the key applies with no element at all and the two forms split
-            // here rather than at a box the mark would forbid.
+            // Sorting applies the key to the logical element; `to_lua_array`
+            // explicitly materializes elements for a foreign API. A `nobox`
+            // sort key uses its function-value ABI and reads the columns directly.
             ("__vec_data_sort", [recv, key_fn]) => {
                 let Some(elem) = self.vec_column_elem_of(*recv)? else {
                     return Ok(None);
@@ -1171,15 +1135,9 @@ impl<'a> Builder<'a> {
         }))
     }
 
-    /// Column-aware lowering of the Map storage boundary when the receiver's
-    /// VALUE type is concretely column-stored. `Ok(None)` = not one of these, or
-    /// a boxed value, in which case the stdlib body stands.
-    ///
-    /// Resolves through the active `SpecSubst` for the same reason
-    /// [`Self::column_data_primitive`] does: the shared snapshot of a generic
-    /// body keeps the bare-table representation, the snapshot specialized at a
-    /// column-eligible value lowers to spine operations. Static per
-    /// instantiation, never a runtime test for whether a spine exists.
+    /// Lower Map storage operations when the receiver's concrete value type is
+    /// column-stored. Generic snapshots keep table storage; concrete
+    /// instantiations resolve through `SpecSubst` and use spine operations.
     pub(crate) fn map_column_primitive(
         &mut self,
         e: Idx<Expr>,
@@ -1578,17 +1536,9 @@ impl<'a> Builder<'a> {
         self.column_element_store_bundle(vec, index, &repr, elem)
     }
 
-    /// A synthesized call to a named runtime entry: the column-storage spine helpers and the
-    /// `NativeBuffer` bounds
-    /// check. Non-generic by necessity -- `Inst::Call` carries no generic
-    /// arguments, so a generic Rock helper could never specialize here.
-    ///
-    /// ONE entry point for every synthesized runtime call. `name` is
-    /// `&'static str` because it IS the site's operation identity
-    /// (`SiteOp::Synthesized`): the call belongs to the enclosing expression but
-    /// is not that expression's own callee, and stamping it `DirectCall` makes
-    /// it collide with the expression's real callee -- which the join then
-    /// reports as a callee mismatch. Every caller already passes a literal.
+    /// Emit a call to a non-generic synthesized runtime entry. Its
+    /// `SiteOp::Synthesized(name)` keeps it distinct from the enclosing
+    /// expression's own callee in the concrete call plan.
     pub(crate) fn call_spine(
         &mut self,
         name: &'static str,
@@ -1720,21 +1670,10 @@ impl<'a> Builder<'a> {
         self.column_element_repr(data, slot, elem)
     }
 
-    /// `m.get(k)` on a column-stored Map: a `V?` whose presence is the SPINE.
-    ///
-    /// The columns are read only in the present arm -- at a missing key the slot
-    /// is -1 and indexing `data` would fault, and a freed slot still holds stale
-    /// leaves that must not be observable.
-    ///
-    /// Which repr the miss arm has to produce is decided by how `V?` is
-    /// represented OUTSIDE this expression, and that is `is_nobox_struct` -- the
-    /// one predicate every representation decision reaches. Column ELIGIBILITY
-    /// is a storage rule (`vec_column_elem`) and says nothing about it: an
-    /// unmarked `value` struct is stored in columns here and is a boxed
-    /// nil-or-cdata everywhere else. So an unmarked V builds its ctor INSIDE the
-    /// present arm and misses as a plain `nil`; handing its boxed consumers the
-    /// tagged Group instead makes them pack a ctor after the join, over the miss
-    /// arm's nil leaves.
+    /// `m.get(k)` on a column Map returns `V?` with presence determined by the
+    /// spine. Read columns only in the present arm: a missing slot is `-1`, and
+    /// freed slots may contain stale leaves. Unmarked values build their box in
+    /// the present arm; `nobox` results remain leaf groups across the join.
     pub(crate) fn map_column_get_repr(
         &mut self,
         m: Idx<Inst>,

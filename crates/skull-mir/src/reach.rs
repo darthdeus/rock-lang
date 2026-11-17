@@ -36,15 +36,9 @@ impl GlobalReach {
     }
 }
 
-/// The globals each body reads, transitively through the bodies it calls.
-///
-/// Bodies in one call-graph cycle read the same globals, so the closure is
-/// computed once per strongly connected component, in the reverse
-/// topological order Tarjan's search yields: by the time a component is
-/// finished every component it calls into already has its set, and the
-/// union is one pass over bitsets. The old per-body fixpoint loop re-scanned
-/// every edge until nothing changed, which on a large program was several
-/// milliseconds of the serial assembly.
+/// Globals each body reads, transitively through its callees. Compute one
+/// closure per strongly connected component; Tarjan returns callees first, so
+/// each component can union the completed closures of its callees once.
 pub fn transitive_global_reads<G: AsRef<[Ustr]>, C: AsRef<[Ustr]>>(
     direct_globals: &FxHashMap<Ustr, G>,
     direct_calls: &FxHashMap<Ustr, C>,
@@ -295,8 +289,7 @@ pub fn order_global_inits<T>(
     Ok(ordered)
 }
 
-/// THE blocks of `mf` that emission renders -- one oracle, because "which
-/// blocks count" was answered three different ways and two of them were wrong.
+/// The blocks of `mf` that emission renders.
 ///
 /// A body is not one CFG. It is a set of REGIONS, each entered on its own:
 ///
@@ -308,12 +301,9 @@ pub fn order_global_inits<T>(
 ///   peels to the constructor;
 /// - every `coro_defers` region.
 ///
-/// That is the same set `coroutine_emit` renders -- the step, its hoisted
-/// siblings, one aux fn per defer entry, and one per hook lambda entry. The
-/// defer arm is completeness against THAT list, not a measured fix: deleting it
-/// leaves every gate green, so a defer region is reachable some other way
-/// today. The hook arm is the opposite -- delete it and the hook fixture goes
-/// red on both backends.
+/// Coroutine emission includes the step, its hoisted siblings, one auxiliary
+/// function per defer entry, and one per hook lambda entry. Defer entries and
+/// hook lambdas are roots even though they are not reached by terminators.
 ///
 /// NOT every block in the arena, which is the tempting shortcut and is
 /// incorrect: a hoisted lambda body is a full arena clone of its parent that
@@ -386,29 +376,15 @@ pub fn global_ref_names(mf: &MirFunc) -> Vec<Ustr> {
     out
 }
 
-/// Every call target in `mf` that is reached through the callee's DECLARATION
-/// body, walking BLOCK inst-lists (not the raw arena) so a spliced-away call's
-/// stale arena inst is not re-discovered -- only the calls that survive inlining
-/// co-emit. Hoisted closure bodies are separate `nested_fns` after
-/// `convert_closures`, so their calls are walked too.
+/// Call targets found in block instruction lists, including unreachable
+/// lowering artifacts and hoisted bodies. Spliced-away instructions are absent
+/// from block lists. This intentionally differs from [`emitted_blocks`]: this
+/// walk decides which declarations stay alive, while `spec_bound_calls` records
+/// specialized bodies that must be emitted.
 ///
-/// Deliberately NOT [`emitted_blocks`], and the asymmetry is the point: this
-/// walk decides what stays ALIVE, where over-approximating costs an unused
-/// definition, while `spec_bound_calls` decides what gets DEFINED, where
-/// under-approximating ships a call to nothing. Measured over the 18 bin
-/// projects plus `tests/` -- 260,154 bodies, 260,076 agreeing as sets, and in
-/// `keys` and `run_into` the oracle misses a callee this walk finds. Until
-/// those two are explained, the safe side of the asymmetry is where each walk
-/// already sits. (The 2,876 multiset disagreements are just the clone re-walk:
-/// a hoisted body is a full arena copy, so its parent's calls are counted
-/// twice, and reachability dedups them anyway.)
-///
-/// A site carrying a `spec_bindings` entry names a SPECIALIZED body, and
-/// [`spec_bound_calls`] emits that edge as a `SpecDemand`. Yielding its
-/// declaration here as well would keep the callee's shared body reachable on
-/// the strength of a call that does not target it -- which is how a generic
-/// declaration stayed live with every one of its call sites specialized. The
-/// two functions partition one edge set; neither is the whole of it.
+/// Calls with `spec_bindings` are omitted because they target specialized
+/// bodies. Keeping their declarations alive on those edges would retain a
+/// shared body that those calls do not invoke.
 pub fn call_targets(mf: &MirFunc) -> Vec<FuncRef> {
     fn walk(mf: &MirFunc, out: &mut Vec<FuncRef>) {
         for (_, block) in mf.blocks.iter() {
@@ -431,33 +407,20 @@ pub fn call_targets(mf: &MirFunc) -> Vec<FuncRef> {
     out
 }
 
-/// Every `(callee, instantiation)` pair `mf` still asks for after inlining: the
-/// `spec_bindings` entries the inliner did not splice away. A residual one is a
-/// call the SHARED body cannot serve -- its value args are splatted to leaves,
-/// and a column-stored element's storage has no `_data` the shared body could
-/// read -- so each pair needs its own standalone emitted copy.
+/// Every `(callee, instantiation)` pair still required after inlining. A shared
+/// body cannot serve residual calls whose value arguments are splatted or whose
+/// column-stored elements have no `_data` backing, so each pair needs an
+/// emitted specialized copy.
 ///
 /// EMITTED blocks only ([`emitted_blocks`]): a hoisted lambda body is a full
 /// arena clone of its parent that differs only in `entry`, so it carries the
 /// parent's unreachable blocks and their bindings. Judging those would
 /// specialize for a call the body does not contain.
 ///
-/// Entry-reachability alone was too NARROW in the other direction, and silently:
-/// a `co fn`'s lambda and lifecycle-hook regions are entered through
-/// `Inst::Lambda`, never a terminator, so their demands were never filed while
-/// their ordinary callees were discovered normally. The emitted chunk then
-/// called a specialization nothing defined -- a nil global on luajit, a refusal
-/// to emit on JS.
-///
-/// Per BODY, not per tree -- the caller recurses into `nested_fns` itself. A
-/// nested `fn` and a `co fn`'s state machine are their own emitted callables, and
-/// leaving them unchecked makes a missing splice silent (the nested fn dies at
-/// runtime on a nil `_data`).
-/// Each demand also carries the bound-conformance tree the callee's own
-/// placeholders resolve through, resolved HERE -- in the body that records it,
-/// where its inference arena is in scope. That is what lets a demand travel to
-/// a standalone emission at all: a raw [`bone_core::prelude::BoundTree`] is
-/// stated in this body's `TyId`s and means nothing anywhere else.
+/// Use [`emitted_blocks`] because lambda and lifecycle-hook regions are reached
+/// through `Inst::Lambda`, not terminators. Call once per body; the caller
+/// recurses through `nested_fns`. Resolve each demand's bound-conformance tree
+/// in the body that owns its inference arena.
 pub fn spec_bound_calls(
     ws: &bone_core::workspace::Workspace,
     mf: &MirFunc,

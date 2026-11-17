@@ -6,11 +6,8 @@
 use crate::mir::{Block, MirFunc, Term};
 use comfy_la_arena::Idx;
 
-/// Successor blocks of a terminator, in branch order (for reverse-postorder).
-/// Visit each successor block of `term` (callback form — avoids the per-call
-/// `Vec` alloc; this runs per block, per iteration inside the regalloc liveness
-/// fixpoints, where it was a malloc/memmove hot spot). No caller needs the set
-/// materialized.
+/// Successor blocks of a terminator, in branch order. The callback avoids a
+/// temporary vector when callers only need to visit each successor.
 pub fn successors(term: &Term, mut f: impl FnMut(Idx<Block>)) {
     match term {
         Term::Return(_) | Term::Unreachable => {}
@@ -33,10 +30,8 @@ pub fn successors(term: &Term, mut f: impl FnMut(Idx<Block>)) {
 
 /// Blocks reachable from `entry`, in arena-id order. Pure `goto`+labels means
 /// label order is irrelevant to correctness, so emit in source-faithful id order
-/// rather than RPO; unreachable blocks (dead lowering artifacts) are dropped so
-/// no dangling `goto` reaches the printer. (RPO returns once counted-loop
-/// recovery lands — a real `for` needs its preheader emitted just before the
-/// header, which id order doesn't guarantee.)
+/// rather than RPO; unreachable blocks are dropped so no dangling `goto` reaches
+/// the printer. Counted loops use RPO so their preheaders precede their headers.
 pub fn reachable_blocks_from(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block>> {
     let mut visited = vec![false; func.blocks.len()];
     // Each block is pushed at most once, so the stack never grows.

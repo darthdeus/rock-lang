@@ -1,10 +1,4 @@
-//! Structural value formatting: the one diagnostic text for enums, value
-//! records and handles.
-//!
-//! [`format_tree`] decides the text from the logical type alone, so a flat,
-//! cdata, boxed or leaf-widened enum renders identically. Lowering walks the
-//! tree against whatever representation the value arrived in; the instance
-//! walk reads the same tree's [`FmtNode::obligations`].
+//! Structural display for enums, value records and handles.
 use super::*;
 use crate::monoty::{MonoSubst, convert_decl};
 use bone_core::hir::VariantPayload;

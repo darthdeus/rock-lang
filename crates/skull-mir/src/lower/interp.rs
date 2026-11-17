@@ -3,14 +3,6 @@
 use super::*;
 
 impl<'a> Builder<'a> {
-    /// Lower an interpolated string to a left-folded `..` chain. A `Literal` part
-    /// is a string const; a `{x}` hole stringifies by its static type (D8: the
-    /// dispatch is decided HERE, not at the backend) — scalar -> [`Inst::ToString`]
-    /// (`tostring`), float -> a `__rock_format_float` call, enum / value record /
-    /// handle -> the structural rendering (`format.rs`), other composite ->
-    /// `inspect`, transparent newtype -> `Name(<tostring inner>)`. A `{x:spec}` hole gaps
-    /// (format-spec lowering is its own follow-up; skull refuses rather than
-    /// mis-format). An empty interpolation is the `""` const.
     pub(crate) fn lower_interp(
         &mut self,
         parts: IdxRange<bone_core::hir::InterpPart>,
@@ -44,17 +36,7 @@ impl<'a> Builder<'a> {
             None if self.dispatch().structural_route(expr).is_some() => {
                 self.stringify_structural(expr)
             }
-            // A tuple whose box would WIDEN is packed narrow here -- one slot
-            // per element, the nobox part materialized. The widening exists for
-            // readers that derive the layout from the declared type; `inspect`
-            // walks the table at runtime and would render a wider tuple.
-            //
-            // Packing rather than rejecting on the spot is deliberate: the
-            // resulting `<name>_ct` is what the post-transform residue check
-            // already reports, so this boundary keeps the attribution (`while
-            // emitting <fn>`) and the per-body sibling accumulation that a fresh
-            // lowering-time error would lose. Pinned by `multi_rejection` and
-            // `nobox_diagnostic_attribution`.
+            // Display tuples use one slot per logical member, including materialized children.
             None if self.tuple_box_shape(expr)?.is_some() => {
                 let r = self.lower_expr_repr(expr)?.into_value();
                 let v = self.pack(r)?;
@@ -169,11 +151,7 @@ impl<'a> Builder<'a> {
         if matches!(self.body.expr_arena[expr], Expr::Null) {
             return Ok(self.emit_cur(Inst::ToString(v)));
         }
-        // `expr_ty` PEELS `Nullable`, so every arm below is picked from the
-        // NON-NULL shape while the value can still arrive nil. Guard once here
-        // instead of per arm: the float and payload-free-enum renderings fault on
-        // nil and a newtype renders `Id(nil)`, and the arms that already render
-        // "nil" are unaffected by the branch.
+        // Guard against absence before dispatching the non-null formatting route.
         if self.expr_is_nullable(expr) {
             return self.nil_guarded_render(v, |s| s.stringify_non_null(expr, v));
         }
@@ -217,12 +195,7 @@ impl<'a> Builder<'a> {
         self.render_stringify(&route, Vec::new(), v)
     }
 
-    /// Render ONE [`StringifyRoute`]. The route is decided by
-    /// `skull_mir::lower::dispatch`, which the instance walk reads too; this is
-    /// the rendering half and makes no type decision of its own.
-    ///
-    /// `path` identifies the obligation within its hole -- empty for the hole,
-    /// a field-index chain for a nobox value's leaf.
+    /// Share route selection with the instance graph.
     pub(crate) fn render_stringify(
         &mut self,
         route: &StringifyRoute,
@@ -246,14 +219,7 @@ impl<'a> Builder<'a> {
                 let a = self.emit_cur(Inst::StringConcat(open, inner));
                 Ok(self.emit_cur(Inst::StringConcat(a, close)))
             }
-            // A payload-free enum value is its ordinal int -> render the variant
-            // name statically from `__rock_enum_<E>_names[tag]` (0-indexed, the
-            // table holds the full `<E>::<V>` display string, matching rock's
-            // inspect output -- verified by skull-diff). No `inspect` round-trip;
-            // the value carries no type tag at runtime, so this is the only point
-            // the static type is known. The `inspect(any)` escape (a payload-free
-            // enum passed to `inspect`/stored in `any`/inside a composite) is the
-            // deferred box-on-escape-into-`any` work.
+            // Look up the name by the enum's zero-based integer tag.
             StringifyRoute::EnumNames(name) => {
                 let names = self.emit_cur(Inst::Global(crate::mangle::enum_names_global(
                     self.ws, *name,
@@ -276,12 +242,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Format value `v` of `expr` per `spec` (`{x:.2f}` etc.). A static spec
-    /// emits one `string.format("<fmt>", v)`; dynamic width/precision assemble
-    /// the conversion at runtime (`FormatDyn`); grouping/center/fill wrap with
-    /// the stdlib `__rock_fmt_grouping`/`__rock_fmt_pad`; a composite with `.N`
-    /// precision routes through `inspect_formatted`. The `%`/`b` conversions
-    /// (raw prelude globals, not FuncRef-resolvable) gap for now.
     pub(crate) fn lower_format(
         &mut self,
         expr: Idx<Expr>,

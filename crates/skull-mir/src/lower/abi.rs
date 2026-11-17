@@ -1,23 +1,7 @@
-//! **The backend ABI of one emitted body** (plan S 13, cut C+D step A\*).
+//! Target-specific ABI planning for one emitted function body.
 //!
-//! Every question about how a function's values cross the wire -- which params
-//! splat to leaves, what the return carries, how many lanes a JS result
-//! publishes, what an `inline(lua)` body's params are spelled -- is answered
-//! here, for one [`Instance`](crate::instance::Instance) under one execution
-//! target, by one [`BackendFnAbiPlan`].
-//!
-//! The policy itself ([`fn_scalar_abi_spec`]) is PRIVATE to this module. That
-//! is the whole point of the module boundary: a definition's parameter list and
-//! the call that targets it used to reach the policy independently, so they
-//! agreed only by being asked the same question in two places. They cannot
-//! diverge if there is no second place to ask from.
-//!
-//! The execution target is part of the key rather than a formality.
-//! [`ScalarCtx`] carries `values_first_class`, `total_specialization` and the
-//! codegen backend, and the derived facts are split across targets too --
-//! `result_lanes` is a JS transport fact luajit never reads, and
-//! `lua_param_names` spells a foreign body's params. One physical plan shared
-//! across targets would be answering with another target's ABI.
+//! [`BackendFnAbiPlan`] owns the parameter and result representations plus
+//! derived transport facts, so callers and definitions consume the same plan.
 
 use rustc_hash::FxHashMap as HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -484,14 +468,8 @@ struct AbiCounters {
     duplicate_cold_stores: std::sync::atomic::AtomicU64,
 }
 
-/// Build-scoped memo for [`BackendFnAbiPlan`] derivations, owned by
-/// [`ScalarCtx`] so every target/value-mode context has its own table and the
-/// context's one mutation point ([`ScalarCtx::update_body`]) clears it. A plan
-/// is a pure function of its key under a fixed (workspace, context, concrete
-/// plans), so equal keys always store equal plans; caching only the `Ok` side
-/// keeps every error path re-derived and spanned exactly as before. Lowering
-/// workers ask it at every call site, so answers sit in a lock-free table
-/// indexed by instance id.
+/// Build-scoped ABI memo owned by [`ScalarCtx`]. Context updates clear it;
+/// only successful plans are cached so failures retain their source spans.
 #[derive(Default)]
 pub(super) struct AbiPlanCache {
     /// Shared by clones: the ids stay meaningful in every copy of the slots.
@@ -599,22 +577,9 @@ impl AbiPlanCache {
     }
 }
 
-/// The one build-scoped physical representation arena.  `ScalarCtx` owns the
-/// handle and every ABI plan references the same arena, so equal answers are
-/// equal identities rather than merely equal cloned shapes.
-///
-/// The counters ride outside `inner` so [`RepArenaInner`]'s plan equality
-/// (the [`BackendFnAbiPlan`] identity check) never compares them.
-///
-/// READS ARE SERVED THROUGH A WORKER-LOCAL CACHE. The arena is monotonic
-/// (plans push-only, `by_key` insert-only, nothing published ever changes), so
-/// a thread may keep private copies of the `(RepId -> RepPlan)` and
-/// `(key -> RepId)` facts it has already paid the mutex for; a cold id or key
-/// reads through to the lock. Aggregate layout payloads are immutable handles,
-/// so plan reads do not recursively copy their fields or tuple slots.
-/// `arena_gen` is a process-unique id keying that
-/// cache, so two live arenas (the Lua and shader contexts) or an arena
-/// allocated at a reused address can never serve each other's plans.
+/// Build-scoped interned representation plans shared by ABI plans. Published
+/// plans and keys are immutable and append-only, so worker-local caches keyed
+/// by the unique arena id remain valid. Counters stay outside plan equality.
 pub struct RepArena {
     /// Plans by index. Readers borrow them without a lock; new plans are
     /// pushed only while `by_key` is write-locked, so an index and its key
@@ -767,49 +732,16 @@ fn value_shape_facts(ws: &Workspace, name: Ustr) -> (Option<ValueStorage>, bool,
     )
 }
 
-/// The Lua wide-value calling convention. An ORDINARY `value`
-/// whose PAYLOAD leaf count is greater than this crosses a Rock-to-Rock Lua
-/// call as ONE slot -- its existing boxed form -- instead of N scalar lanes.
-///
-/// The PAYLOAD count is compared, not [`ValueShape::leaf_count`], which also
-/// counts the nullable presence flag, so `T` and `T?` take the same wire
-/// instead of `T?` boxing one leaf sooner than `T`.
-///
-/// `nobox` values are exempt (decision 3): they keep scalar lanes at any width.
-///
-/// 48 sits ABOVE every ordinary `value` that crosses a call in a game today
-/// (the widest is `EngineU` at 41), and below the 58-leaf uniform this ABI
-/// exists to make loadable. That placement is deliberate, not incidental:
-/// LuaJIT sinks a box of 37 leaves or more not at all, so any per-frame type
-/// this cut boxed would pay one real allocation per crossing, and the defect
-/// being fixed is a load-time frame overflow, not an allocation. A cut that
-/// boxes nothing a game passes fixes it for free.
-///
-/// It also pairs exactly with [`SIGNATURE_SCALAR_LANE_BUDGET`]: a signature
-/// that passes and returns one value AT the cut is `2 * K` = 96 lanes, which
-/// the budget permits, so the two rules meet at the boundary instead of
-/// overlapping.
+/// Ordinary values with more than 48 payload leaves use one boxed slot on Lua
+/// call wires. Nullable presence is excluded from the count, and `nobox` values
+/// remain scalar at every width. One value at the cut passed and returned uses
+/// exactly [`SIGNATURE_SCALAR_LANE_BUDGET`] lanes.
 pub const WIDE_VALUE_PAYLOAD_LEAF_CUT: usize = 48;
 
-/// The per-signature lane budget. Per-value `K` does not bound a signature's
-/// width -- five values at the cut are `5 * K` lanes with every one of them
-/// legal -- so after the per-value cut a signature whose surviving lanes exceed this boxes
-/// its widest remaining ORDINARY values, widest first, until it fits.
-///
-/// Lane accounting: the sum over every parameter of that parameter's
-/// [`RepPlan::lanes`] plus the result's, each at its post-cut width. A boxed
-/// value is one lane; a `nobox` value's real lanes count, presence flags
-/// included.
-///
-/// 96 is `2 * WIDE_VALUE_PAYLOAD_LEAF_CUT`, so one value at the cut passed and
-/// returned is exactly at the budget rather than over it. Worst case a call
-/// that passes and receives a full budget costs 2 x 96 + 2 = 194 of LuaJIT's
-/// 250 frame slots; the emit-time frame-limit check is the backstop for a body
-/// that still does not fit, which is what makes a generous budget safe.
-///
-/// `nobox` values are never candidates and are never rejected by the budget: a
-/// signature whose `nobox` lanes alone exceed it keeps them, and the emit-time
-/// frame-limit check (`skull_codegen_lua::frame_limits`) is its only diagnostic.
+/// Maximum scalar lanes across a signature after per-value planning. Count
+/// every parameter and result lane, including nullable presence. While over
+/// budget, box the widest eligible ordinary value; `nobox` values are never
+/// candidates. Remaining overflow is diagnosed by Lua's frame-limit check.
 pub const SIGNATURE_SCALAR_LANE_BUDGET: usize = 96;
 
 /// The leaf count the per-value cut compares: the payload, without the nullable
@@ -818,20 +750,9 @@ fn payload_leaf_count(shape: &ValueShape) -> usize {
     shape.leaf_count() - usize::from(shape.nullable)
 }
 
-/// Whether boxing `ty` would IMPLICITLY materialize a `nobox` child, which the
-/// `nobox` guarantee forbids.
-///
-/// Two of the three value tiers have an answer already. A CDATA box is
-/// normalized by `flatten_nobox_nested_ctors` (`crates/skull-transform`), which
-/// splices a `nobox` child's leaves into the parent's physical fields so the
-/// child is never built; a LEAF-TABLE box is assembled from the parent's leaves
-/// by `pack` for the same reason. A GC-TABLE box keeps its DECLARED keys, so a
-/// `nobox` child inside one is a real box and
-/// `nobox_materialization_violations` rejects it at its own span.
-///
-/// The ABI cut therefore leaves a GC-tier value carrying a `nobox` descendant
-/// on the scalar wire. Its bodies keep today's frame cost and today's spanned
-/// frame-limit diagnostic; what they do not get is the new wire.
+/// Whether boxing a GC-table value would materialize a `nobox` child. Cdata
+/// and leaf-table boxes flatten child leaves; GC tables retain declared keys,
+/// so the materialization verifier rejects this case.
 fn box_would_materialize_nobox(ws: &Workspace, name: Ustr) -> bool {
     super::shape::planned_value(ws, name).is_some_and(|plan| plan_box_materializes_nobox(ws, &plan))
 }
@@ -849,20 +770,9 @@ fn plan_box_materializes_nobox(ws: &Workspace, plan: &super::shape::PlannedValue
     })
 }
 
-/// **The one per-value wire choice**, consulted by BOTH ABI modes.
-/// `Some(shape)` is the scalar wire; `None` is the aggregate wire, which the
-/// caller renders as the same [`RepLayout::Opaque`] the boxed ABI already uses.
-///
-/// - A `nobox` value is never boxed, in any mode, at any width (decision 3).
-/// - An ordinary `value` is boxed when the mode demands it -- `nobox_only`
-///   (a taken-by-ref body, whose indirect callers can only derive `nobox`
-///   shapes from the fn type) or a tuple element -- and, on a direct call
-///   wire, when its payload is wider than [`WIDE_VALUE_PAYLOAD_LEAF_CUT`].
-/// - Off the call wire (a global's storage, a container element) width decides
-///   nothing: those are not frames.
-///
-/// Boxing an ordinary value is SILENT (decision 3). There is no shape the wire
-/// cannot handle: a value either has a planned leaf shape or is already opaque.
+/// Select a leaf shape for scalar transport, or `None` for an opaque slot.
+/// `nobox` values always keep leaves; ordinary values may be boxed by ABI mode,
+/// tuple position, or the call-wire width cut. Storage width does not affect ABI.
 fn wire_value_shape(
     ws: &Workspace,
     ty: &crate::monoty::MonoTy,
@@ -1553,21 +1463,10 @@ impl RepArena {
         }
     }
 
-    /// Apply [`SIGNATURE_SCALAR_LANE_BUDGET`] to one signature, after the
-    /// per-value cut has already run: while the signature's lanes exceed the
-    /// budget, box the widest remaining ORDINARY value.
-    ///
-    /// The result is a pure function of the positions' representations, so the
-    /// definition and every caller reach the same answer: candidates are ranked
-    /// by lane count and, for a tie, by wire position (parameters in order, the
-    /// result last), and the loop stops as soon as the budget is met. A
-    /// `nobox` value is never a candidate, so a signature the budget cannot
-    /// satisfy keeps its lanes rather than acquiring a diagnostic here.
-    /// Legality comes from each position's own [`RepPlan::boxable`], derived
-    /// once when its concrete type was planned: false for an ordinary value
-    /// whose box would materialize a `nobox` child
-    /// ([`box_would_materialize_nobox`]); a `nobox` value is excluded
-    /// separately, by [`RepPlan::nobox`].
+    /// Box the widest eligible ordinary values until the signature fits the
+    /// lane budget. Ties choose earlier wire positions; `nobox` values and
+    /// values whose boxes would materialize a `nobox` child are ineligible.
+    /// Any remaining overflow is left for the backend frame-limit diagnostic.
     fn apply_lane_budget(
         &self,
         target: FnBackend,
@@ -2025,15 +1924,10 @@ pub(super) fn callee_abi_plan_for_instance(
     Ok(derived)
 }
 
-/// ABI of the target-selected SIBLING body serving a canonical instance: the
-/// sibling's own concrete plan when the registry has one, the canonical plan's
-/// signature under the sibling's declaration otherwise, and the opaque
-/// boundary when the sibling needs no body plan. Shared by call-site
-/// resolution (`Builder::callee_abi_plan_for_instance`'s selected arm) and
-/// the JS emitter's scalar-ABI check. NOT memoized here: the signature rung's
-/// answer depends on the canonical plan, which no single-instance key names --
-/// the Builder memoizes the whole callee question under `Callee(inst)`, where
-/// the canonical identity is part of the key.
+/// ABI for a selected backend sibling. Use its concrete plan when available,
+/// otherwise the canonical signature under the sibling declaration; siblings
+/// without body plans use the opaque boundary ABI. Callers memoize the result
+/// because signature fallback depends on the canonical instance.
 pub fn selected_sibling_abi_plan(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -2153,16 +2047,8 @@ fn abi_mode_spec(
     })
 }
 
-/// **The backend ABI of one emitted body**, under one execution target.
-///
-/// Built from a declaration and the substitution its [`AbiSubject`] resolves
-/// to. The substitution is what makes a per-body answer different from a
-/// per-declaration one rather than merely more precise: `T` is one boxed slot
-/// on the declaration and two lanes at `T = (bool, float)`.
-///
-/// The derived spellings are METHODS, not fields, so the ordinary lowering path
-/// -- which needs only the wire shapes -- never pays for the leaf-name strings
-/// that exist for foreign bodies.
+/// Target-specific ABI and transport facts for one emitted function body.
+/// Leaf spellings are derived lazily so ordinary lowering carries only wire shapes.
 #[derive(Clone, Debug)]
 pub struct BackendFnAbiPlan {
     pub subject: crate::instance::Instance,
@@ -2677,16 +2563,9 @@ impl BackendFnAbiPlan {
             .and_then(|id| self.arena.tuple_shape(id))
     }
 
-    /// Physical values on the result wire: 0 with no return, 1 for an ordinary
-    /// one, more for the two shapes that splat -- a tuple return (each element
-    /// its own slot, a `nobox` element into its leaves) and a bare `nobox`
-    /// value return under the scalar ABI.
-    ///
-    /// **A JS transport fact.** Plan S 13b: leaf 0 rides the ordinary JS
-    /// `return`, lanes 1..N ride the module-scope scratch bank. Luajit has native multi-return and
-    /// consults nothing here; the artifact view still records the width for
-    /// every artifact, because it is a property of the wire rather than of the
-    /// backend that happens to need it spelled out.
+    /// Physical result lanes: zero for no return, one for an ordinary value,
+    /// or one per tuple slot/value leaf when the result splats. JS transports
+    /// lanes after the first through its scratch bank.
     pub fn result_lanes(&self) -> usize {
         self.representation.return_lanes()
     }

@@ -20,9 +20,8 @@ const CHECKS_OFF: u8 = 2;
 /// Whether the consistency checks that only ever catch compiler bugs run in
 /// this process: this verifier between passes, and lowering's audit of the
 /// concrete plans it was handed. The build default is on with debug
-/// assertions, so every test exercises them; the `rock` binary turns them
-/// off for an ordinary compile (they are a measurable share of every body's
-/// time in a dev build) unless `ROCK_MIR_CHECKS` asks for them.
+/// assertions, so every test exercises them; the `rock` binary turns them off
+/// for an ordinary compile unless `ROCK_MIR_CHECKS` asks for them.
 static CHECKS: AtomicU8 = AtomicU8::new(CHECKS_BUILD_DEFAULT);
 
 pub fn checks_enabled() -> bool {

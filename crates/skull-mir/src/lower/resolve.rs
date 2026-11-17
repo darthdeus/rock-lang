@@ -7,22 +7,7 @@ use super::*;
 /// a rejection or a deferral is the caller's call, so this carries no span.
 pub struct NoServingBinding;
 
-/// Pick the backend-variant of a collapsed call `rep` that serves `target`.
-/// bone typechecks one backend-agnostic HIR and records ONE representative per
-/// overload; codegen selects here:
-///
-/// - `Any` target (GLSL / generic): no filtering, `rep` as-is.
-/// - `rep` already serves the target: `rep` as-is (the common Lua path).
-/// - a same-signature sibling serves the target: use it (the JS side of a
-///   same-name pair -- the representative is the luajit variant, the sibling
-///   the `inline(js)`/`extern(js)` one).
-/// - otherwise `Err`: `Lua` rejects, `Js` defers to its own emitter's
-///   host-mapping. [`Builder::select_backend_variant`] applies that policy.
-///
-/// Free rather than a `Builder` method because the shadow instance graph
-/// (`skull::instance_graph`) selects variants per target too, and a second
-/// implementation would let the two views of "which body serves this target"
-/// drift.
+/// Prefer the exact target's declaration, then a portable body.
 pub fn backend_variant(
     ws: &Workspace,
     name: ustr::Ustr,
@@ -37,10 +22,7 @@ pub fn backend_variant(
     if rep_backend == target {
         return Ok(rep);
     }
-    // A backend sibling can exist ONLY when the name has >=2 candidates
-    // (bone collapsed a backend-variant group to `rep`). The overwhelmingly
-    // common single-candidate call skips the sibling scan entirely, keeping
-    // the `Any`-serves-everything fast path off the hot overload-select path.
+    // Skip the sibling lookup for single-candidate names.
     let has_variants = ws
         .functions_by_name
         .get(&name)
@@ -52,10 +34,6 @@ pub fn backend_variant(
             Err(NoServingBinding)
         };
     }
-    // An exact-target sibling outranks an `Any` representative: backend
-    // mapping beats the portable fallback (the intrinsics precedence
-    // doctrine). Without this an `inline(js)` variant of a portable-bodied
-    // fn is unreachable, since `Any` serves every target.
     if let Some(sib) = sibling_variant(ws, rep, target, true) {
         return Ok(sib);
     }
@@ -85,17 +63,7 @@ pub fn backend_variant_instance(
     })
 }
 
-/// The backend-variant group representative of `rep` -- the declaration bone
-/// would have collapsed the group to, whichever member a caller happens to hold.
-///
-/// The inverse direction of [`backend_variant`]: that goes representative ->
-/// serving sibling for a target, this goes any member -> representative. A
-/// target-neutral consumer (`skull::instance_graph`) needs it for roots, which
-/// production hands it as raw declarations rather than as bone-resolved callees.
-///
-/// The preference order IS bone's `backend_rank` (`Any` < `Lua` < `Js`,
-/// `bone-inference/src/calls.rs`) and [`backend_variant_group`] owns the complete
-/// grouping rule, including bone's repeated-backend refusal.
+/// Use bone's backend order when recovering a group's representative.
 pub fn canonical_variant(ws: &Workspace, rep: FuncRef) -> FuncRef {
     // `backend_variant_group` without its two allocations: every lowered call
     // asks this, and most names have one member.
@@ -122,12 +90,7 @@ pub fn canonical_variant(ws: &Workspace, rep: FuncRef) -> FuncRef {
     best.map_or(rep, |(_, member)| member)
 }
 
-/// The backend-variant group containing `member`.
-///
-/// This is bone's complete collapse rule: equal
-/// [`Workspace::backend_variant_key`], with every backend distinct. A repeated
-/// backend is a genuine overload ambiguity, so no group exists and the member
-/// stays by itself.
+/// A repeated backend is an overload ambiguity, so the member stays alone.
 pub fn backend_variant_group(ws: &Workspace, member: FuncRef) -> Vec<FuncRef> {
     let key = ws.backend_variant_key(member.module, member.func);
     let Some(cands) = ws.functions_by_name.get(&key.0) else {
@@ -179,16 +142,8 @@ pub fn sibling_variant(
 }
 
 impl<'a> Builder<'a> {
-    /// Lower an expression to a plan-owned bundle: a value param read / value field
-    /// projection / value literal / scalar-ABI value call stays UNBOXED (a
-    /// `Group`); everything else is a `Scalar`. The ABI boundaries
-    /// (params/returns/call args) consume this to splat without a cdata round-trip.
     pub(crate) fn lower_expr_repr(&mut self, e: Idx<Expr>) -> Result<ValueBundle, CompilerError> {
-        // The unboxed route is a SECOND entry into expression lowering, so it
-        // narrows the source cursor exactly as [`Self::lower_expr`] does. Without
-        // this a scalar-ABI argument's own calls are stamped with the ENCLOSING
-        // expression -- `mote_value_noise(v(..))` filed the `v` call under the
-        // `mote_value_noise` site, which then selected the wrong callee.
+        // Use the expression's own span for errors on the unboxed path.
         let outer = self.cur_span.replace(self.body.expr_spans[e]);
         let outer_expr = self.cur_expr.replace(e);
         let out = match self.flat_ref_read(e) {
@@ -492,10 +447,7 @@ impl<'a> Builder<'a> {
         Ok(Some(repr))
     }
 
-    /// Extracting an opaque value child from its parent group makes it an
-    /// independent value read. Apply the ordinary value/place copy policy;
-    /// the parent's borrowed-child pack policy no longer covers a standalone
-    /// scalar. Nullable presence and borrowed reads must remain projection-only.
+    /// A projected value child must have its own snapshot.
     fn snapshot_projected_value(
         &mut self,
         e: Idx<Expr>,
@@ -730,10 +682,7 @@ impl<'a> Builder<'a> {
                 }
                 Ok(repr)
             }
-            // A borrowed box splits to a Group, as a place read does: a leaf
-            // consumer projects a part and the unread leaves die in DCE, while
-            // any consumer that packs it (a join, tuple, block tail or value
-            // child) builds a fresh box instead of escaping the borrowed one.
+            // Keep borrowed projections in leaves so unused reads can disappear.
             Expr::Var(b) if let Some(name) = self.boxed_value_local(b, e) => {
                 let boxed = self.emit_cur(Inst::Load(self.binds[&raw(b)]));
                 if self.lending_pack && self.binding_value_is_shareable(b) {
@@ -781,21 +730,12 @@ impl<'a> Builder<'a> {
                     let parent = self.lower_expr(base)?;
                     return Ok(ValueRepr::Scalar(self.read_field(parent, field)));
                 }
-                // An embedded field read as a WHOLE value re-materializes from
-                // its leaves. Projection-only keeps every such read transient
-                // (never bound, returned, captured or stored), so this is the
-                // consuming boundary, not a reintroduced box.
                 if let Some(TypeExpr::App {
                     ctor: TypeCtor::Nominal(sname),
                     ..
                 }) = self.field_base_ty(base)
                     && let Some((cname, _)) = self.struct_field_plan(sname, field, false)?.embed()
                 {
-                    // A leaf-table VALUE parent can still be UNBOXED here (a
-                    // local, a param, a call result): project the part off the
-                    // Group rather than packing a table just to read dotted keys
-                    // back out of it. A reference parent is never a Group, so
-                    // this changes nothing for the `embed` case proper.
                     let br = self.lower_expr_repr_inner(base)?.into_value();
                     if let ValueRepr::Group { name, parts, .. } = &br {
                         if let Some(i) = self.field_index(*name, field) {
@@ -866,11 +806,7 @@ impl<'a> Builder<'a> {
                     return Ok(ValueRepr::Scalar(self.read_field(parent, key)));
                 }
                 let mut br = self.lower_expr_repr_inner(base)?.into_value();
-                // A leaf-table BOX has no declared-field keys -- a nested child
-                // lives at dotted leaves and its own name holds only presence,
-                // so `Field { base, "pos" }` would hand the consumer a bool.
-                // Split it back into leaves and project the rebuilt Group; the
-                // leaves nothing reads die in DCE.
+                // A nested child uses dotted leaf keys and its name is its presence flag.
                 if let ValueRepr::Scalar(v) = br {
                     br = match self.leaf_table_base(base)? {
                         Some(sname) => {
@@ -884,17 +820,8 @@ impl<'a> Builder<'a> {
                         return self.snapshot_projected_value(e, parts[i].clone());
                     }
                 }
-                // A boxed base: read the field directly. A payload-free enum field
-                // is a plain `int` (the enum value IS the int), so no conversion --
-                // same as any primitive field. A VALUE-struct field is a whole-value
-                // read out of a mutable place, so it copies.
                 let basev = self.pack(br)?;
                 let fv = self.read_field(basev, field);
-                // A `nobox` field splits to leaves whatever the base is: the box
-                // is the guarantee's violation, not just a copy that would sink.
-                // It also carries presence STATICALLY -- a Group widening to `T?`
-                // supplies `true`, where a Scalar would have to ask `~= nil` at
-                // runtime, and that test pins the cell feeding it against SROA.
                 if let Some(name) = self.value_struct_of(e) {
                     if self.is_mutable_place(base)? || self.is_nobox_struct(name) {
                         return self.boxed_value_copy_repr(fv, name, self.concrete_expr_ty(e));
@@ -909,10 +836,7 @@ impl<'a> Builder<'a> {
                     None => Ok(ValueRepr::Scalar(fv)),
                 }
             }
-            // Native first-class values are copied by the target's value load. In
-            // particular, a nullable global may be statically narrowed after a
-            // presence guard while its storage still carries the wrapper; keep
-            // that wrapper until the native consumer reads it.
+            // A refined nullable global may need a value extraction on load.
             Expr::Global(g)
                 if self.scx.values_first_class && !self.ws.functions_by_name.contains_key(&g) =>
             {
@@ -1001,16 +925,7 @@ impl<'a> Builder<'a> {
                 lhs,
                 rhs,
             } if self.nobox_value_name(e).is_some() => self.nullcoalesce_repr(e, lhs, rhs),
-            // A BOXED tuple whose layout splats -- read from a container, a field,
-            // an opaque call. Rebuild the unboxed `Tuple` repr from the box's
-            // slots, the exact inverse of the producer in `Expr::Tuple`, so a
-            // `nobox` part comes back as leaves instead of being indexed out as a
-            // single value that no longer exists there.
-            //
-            // Rebuilding HERE rather than at each reader is what keeps the readers
-            // honest: slot projection, `let (a, b) =`, and the `for` destructure
-            // all already consume a `ValueRepr::Tuple`, so none of them needs to
-            // know the box widened. Slots the consumer ignores are DCE'd.
+            // Recover the stored leaf layout when reading a boxed tuple.
             _ if tuple_box_shape.is_some() => {
                 let shape = tuple_box_shape.expect("guard matched");
                 let base = self.lower_expr(e)?;
@@ -1087,14 +1002,7 @@ impl<'a> Builder<'a> {
         Ok(self.rebuild_from_leaves(&shape, &loads, &mut idx))
     }
 
-    /// [`Self::nullcoalesce_repr`] for a nullable TUPLE lhs, and the same rule one
-    /// level up: the lhs presence SLOT is the condition, both arms join slot-wise.
-    ///
-    /// Without this the lhs went through `lower_expr`, which packs a `MakeTuple` --
-    /// structurally never nil, so `Eq(lv, nil)` const-folded, the rhs arm was
-    /// deleted outright, and `maybe(false) ?? fallback` evaluated to the ABSENT
-    /// wire's nil leaves. That is the same "a box is never nil" trap the `!= null`
-    /// tuple case already carries.
+    /// Branch on the tuple's presence slot. Packing first would hide absence.
     pub(crate) fn nullcoalesce_tuple_repr(
         &mut self,
         lhs: Idx<Expr>,
@@ -1147,10 +1055,7 @@ impl<'a> Builder<'a> {
         fields: comfy_la_arena::IdxRange<bone_core::hir::StructLitField>,
         bases: comfy_la_arena::IdxRange<bone_core::hir::Expr>,
     ) -> Result<ValueRepr, CompilerError> {
-        // Functional-update base: evaluate once (before fields). A Group base
-        // projects its parts directly (no cdata); a boxed base reads fields off
-        // the packed cdata (the normal value-field read). Inference guarantees
-        // at most one base of this struct's type.
+        // Evaluate the base before fields, including when it needs unboxing.
         let base = bases.into_iter().next();
         let base_repr: Option<ValueRepr> = match base {
             Some(b) => Some(self.lower_expr_repr_inner(b)?.into_value()),
@@ -1206,14 +1111,6 @@ impl<'a> Builder<'a> {
             .map(|(module, func)| FuncRef { module, func })
     }
 
-    /// Resolve a named call to a [`FuncRef`]. bone records overload-resolved
-    /// targets in `resolved_overload_calls`; a non-overloaded name resolves
-    /// uniquely through `functions_by_name`.
-    /// The emitted symbol for a FUNCTION taken by value (`let f = adder`). Prefer
-    /// bone's recorded overload resolution (an overload disambiguated by the
-    /// value's expected type); otherwise every candidate is a backend VARIANT of
-    /// one `(name, signature)` and so mangles identically -- dedup and take it.
-    /// A genuine unresolved overload rejects (reject, don't fall back).
     pub(crate) fn fn_value_symbol(
         &self,
         e: Idx<Expr>,
@@ -1251,12 +1148,7 @@ impl<'a> Builder<'a> {
         )))
     }
 
-    /// Whether the call at `e` resolves to an `inline(lua)`-bodied definition of
-    /// `name`. Guards the name-keyed intrinsic fast paths: a user fn may legally
-    /// share a stdlib name, and rewriting ITS call as the intrinsic miscompiles.
-    /// A rock-bodied user fn has no inline body, which is the discriminant --
-    /// module identity is not, because the test harnesses build their own
-    /// stdlib. Fails CLOSED: an unresolved callee is not the intrinsic.
+    /// Check the resolved declaration before using a name-keyed intrinsic.
     pub(crate) fn resolves_to_inline_builtin(&self, e: Idx<Expr>, name: ustr::Ustr) -> bool {
         let Ok(fref) = self.resolve_funcref(e, name) else {
             return false;
@@ -1281,20 +1173,6 @@ impl<'a> Builder<'a> {
         self.select_backend_variant(e, name, rep)
     }
 
-    /// Pick the backend-variant of a collapsed call `rep` that serves the current
-    /// codegen [`target`](ScalarCtx::target). bone typechecks one backend-agnostic
-    /// HIR and records ONE representative per overload; codegen selects here:
-    ///
-    /// - `Any` target (GLSL / generic): no filtering, `rep` as-is.
-    /// - `rep` already serves the target: `rep` as-is (the common Lua path).
-    /// - a same-signature sibling serves the target: use it (the JS side of a
-    ///   same-name pair -- the representative is the luajit variant, the sibling
-    ///   the `inline(js)`/`extern(js)` one).
-    /// - `Lua` target, no lua/any binding: REJECT (a JS-only decl called from
-    ///   lua-reachable code).
-    /// - `Js` target, no js/any binding and no sibling: leave `rep` for the JS
-    ///   emitter's own host-mapping / reject (a `inline(lua)` stdlib primitive with
-    ///   a hand-written JS template must still resolve there).
     pub(crate) fn select_backend_variant(
         &self,
         e: Idx<Expr>,
@@ -1307,10 +1185,7 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// No servable binding for `target` was found: a `Lua` target REJECTS (a
-    /// js-only decl reached from lua-reachable code); a `Js` target defers `rep`
-    /// to the JS emitter (which may host-map a lua-bodied stdlib primitive, or
-    /// reject with its own message).
+    /// JS can supply a host mapping for a Lua-only declaration.
     pub(crate) fn reject_or_defer(
         &self,
         e: Idx<Expr>,
@@ -1330,10 +1205,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// `await sub` — drive the inner coroutine `sub` through its `.resume()`,
-    /// re-yielding each value; the expression's value is `sub`'s return value.
-    /// Built as a normal pump loop with a `yield` inside, so the coroutine
-    /// transform splits it like any other yield.
     pub(crate) fn lower_yield_delegate(
         &mut self,
         sub_expr: Idx<Expr>,
@@ -1345,10 +1216,7 @@ impl<'a> Builder<'a> {
         // Register `sub` as the active inner (kill() chains into it).
         self.emit_cur(Inst::CoroSetInner(sub));
 
-        // A flat-enum delegation threads the inner's yield leaves through the
-        // frame-slot channel (advance + read `sub.__frame.__y*`), re-yielding them
-        // as leaves -- no per-yield box on either coroutine. Otherwise the boxed
-        // path below drives the inner's generic `resume`.
+        // Keep the yielded enum in frame slots throughout the pump.
         if let Some(shape) = self.coroutine_yield_flat_shape(sub_expr) {
             return self.lower_yield_delegate_flat(sub, rac, &shape);
         }
@@ -1408,11 +1276,6 @@ impl<'a> Builder<'a> {
         Ok(self.read_field(sub, crate::names::ustr("__return")))
     }
 
-    /// `await sub` where `sub` yields a flat enum: drive the inner via its
-    /// frame-slot channel (`__advance` + the `__y*` slots on the object, which IS
-    /// its frame) and re-yield the leaves through THIS coroutine's frame slots.
-    /// Zero boxes on either side -- the outer transform copies `sub.__y*` into
-    /// `s.__y*` at the yield point.
     pub(crate) fn lower_yield_delegate_flat(
         &mut self,
         sub: Idx<Inst>,

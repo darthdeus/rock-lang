@@ -1,25 +1,8 @@
-//! `nobox` policy: the authorized-box mints (`materialize`, the `@gpu_only`
-//! call boundary), the rejections that keep an implicit box from being emitted,
-//! and the fn-value ABI compatibility check.
-//!
-//! This is the ENFORCEMENT side of the mark. The representation it enforces is
-//! described in `shape`.
+//! Explicit materialization and ABI checks for `nobox` values.
 use super::*;
 
 impl<'a> Builder<'a> {
-    /// The caller reaches this only when the body keeps the boxed ABI
-    /// (`BackendFnAbiPlan::scalar` is `None`).
-    /// Under `values_first_class`, a `value` struct is already a first-class
-    /// `vecN`, so there is no box to authorize.
-    /// Re-mark a nobox box packed for a `@gpu_only` callee as an EXPLICIT one.
-    ///
-    /// Emission is identical (both render `<name>_ct`), the verifier ignores
-    /// `MaterializeValueStruct`, and the flatten pass already treats it as
-    /// sanctioned -- so this authorizes exactly the box the GPU boundary needs
-    /// through the channel that already exists for authorized boxes, instead of
-    /// switching the guarantee off for the calling body.
-    ///
-    /// Args are lowered per call site, so each box here is this call's own.
+    /// Reject implicit boxing at opaque call boundaries.
     pub(crate) fn authorize_gpu_boundary_boxes(&mut self, func: &FuncRef, args: &[Idx<Inst>]) {
         let callee = &self.ws.module(func.module).functions[func.func];
         if !crate::intrinsics::is_gpu_only(callee) {
@@ -30,12 +13,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Re-mark one implicit nobox box as AUTHORIZED, in place. The single
-    /// conversion point: every boundary the compiler MINTS a sanctioned box at
-    /// goes through here, so "which boxes are authorized" is one list of callers
-    /// rather than a repeated `MakeValueStruct` -> `MaterializeValueStruct`
-    /// rewrite. A no-op on anything that is not an implicit box of a `nobox`
-    /// struct.
     pub(crate) fn authorize_nobox_box(&mut self, inst: Idx<Inst>) {
         let Inst::MakeValueStruct {
             name,
@@ -58,19 +35,6 @@ impl<'a> Builder<'a> {
         };
     }
 
-    /// ARGUMENTS ONLY -- there is no return-position sibling, and that is an
-    /// open hole, not a decision.
-    ///
-    /// A generic `-> V` instantiated at a `nobox` value crosses an opaque
-    /// boundary unrejected and reads a key that does not exist: a `nobox` field
-    /// flattens to per-leaf keys, so `field_get(row, .pos)` for a `Vec2` field
-    /// emits `o["pos"]` and dies on nil, while `field_set` of that same field
-    /// IS rejected here. The opaque-CONTAINER check below reads declared slots
-    /// INCLUDING the return through the concrete callee signature; this one
-    /// stops at the caller's argument expressions.
-    ///
-    /// Pinned with its controls and the measured exempt population in
-    /// `crates/skull/tests/nobox_generic_return_boundary_sentinel.rs`.
     pub(crate) fn reject_nobox_boxed_call_args(
         &self,
         func: FuncRef,
@@ -80,12 +44,7 @@ impl<'a> Builder<'a> {
             return Ok(());
         }
         let callee = &self.ws.module(func.module).functions[func.func];
-        // A `@gpu_only` intrinsic's boxed param is not a real boundary: on the
-        // GPU the arg is a native `vec2`/`vec4` and no box exists, and the Lua
-        // body only `error(...)`s. Rather than exempting the CALLER's whole
-        // body, the box is AUTHORIZED at this one boundary
-        // ([`Self::authorize_gpu_boundary_boxes`]) -- the guarantee keeps
-        // applying to everything else the caller does.
+        // GPU-only calls use native values in GLSL and never execute on Lua.
         if crate::intrinsics::is_gpu_only(callee) {
             return Ok(());
         }
@@ -113,37 +72,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// An OPAQUE body cannot be handed a COLUMN container.
-    ///
-    /// A column-stored `[P]` is per-leaf arrays with no `_data` at all. Codegen
-    /// routes its OWN container operations around the stdlib primitives -- a
-    /// column `push` emits stores and no call -- but that routing covers only the
-    /// hand-maintained primitive set and reaches nothing a user writes. An
-    /// `inline(lua)`/`inline(js)` body is a string to the compiler and an
-    /// `extern` has no body at all, so neither can be adapted to the
-    /// representation: `v._data` is simply `nil`, and the call silently answers
-    /// wrong or dies indexing it.
-    ///
-    /// Not a `nobox` rule, unlike its sibling: an UNMARKED value struct is
-    /// column-eligible on the same terms and fails identically. The element type
-    /// is the discriminant -- a boxed `[int]` keeps `_data` and is fine.
-    ///
-    /// Keyed on the DECLARED SEMANTIC param type under the concrete
-    /// substitution, not the argument's. A
-    /// param spelled `[T]` or `Map<K, V>` states that the body expects that
-    /// container's boxed representation, and a column-stored one is not it. A
-    /// param spelled `any` states the opposite -- it claims no representation at
-    /// all -- and the column-introspection probes that read `v["@vec"]`
-    /// deliberately take `any`, so keying on the argument would reject the
-    /// bodies that handle columns CORRECTLY.
-    ///
-    /// A method's IMPLICIT receiver is such a declared type: it is `param_decls`
-    /// slot 0 and carries the semantic `Map<K, V>` though the source writes no
-    /// type for it. Reading the written syntax instead would miss every method.
-    ///
-    /// The intercepted stdlib names are exempt BY CONSTRUCTION, not by an
-    /// exception here: `lower_call` replaces them and returns before this check
-    /// is reached.
+    /// Opaque bodies may assume row storage, including inside tuple parameters.
     pub(crate) fn reject_column_container_opaque_slots(
         &self,
         e: Idx<Expr>,
@@ -168,11 +97,7 @@ impl<'a> Builder<'a> {
         )
     }
 
-    /// A present `[T]?` and a tuple's element are the same container by
-    /// reference, so a PARAM wrapping a column container hands the body the same
-    /// representation. Results do not look through: `Map<K, V>.get -> V?` only
-    /// passes a stored value out, and the declared type cannot tell that from
-    /// a body that builds one.
+    /// Nullable and tuple slots can still carry the same underlying container.
     fn param_slot_hazard_mono(
         &self,
         mono: &crate::monoty::MonoTy,
@@ -325,12 +250,6 @@ impl<'a> Builder<'a> {
         ))
     }
 
-    /// Whether parameter `i` of `func` carries the `@repr(opaque)` contract.
-    ///
-    /// Read off `ParamDecl::annotations`, the declaration -- never off the
-    /// call. The registry (`bone_core::annotations`) has already checked the
-    /// kind and that the enclosing fn is an opaque boundary, so reaching here
-    /// with the name present means the contract is valid.
     fn param_is_repr_opaque(&self, func: FuncRef, i: usize) -> bool {
         self.ws.module(func.module).functions[func.func]
             .param_decls
@@ -338,12 +257,7 @@ impl<'a> Builder<'a> {
             .is_some_and(|pd| pd.annotations.iter().any(|a| a.is_builtin("repr")))
     }
 
-    /// A fn taken BY VALUE must have the ABI an indirect caller can derive.
-    ///
-    /// A definition reads its [`BackendFnAbiPlan`]; an indirect call site reads
-    /// the same [`FunctionRepPlan`] projection from the function type. When the
-    /// two disagree the program cannot be emitted correctly, so the mismatch is
-    /// rejected rather than repaired with a second shape calculation.
+    /// A named function value must match the ABI derived from its type.
     pub(crate) fn reject_fn_value_abi_mismatch(
         &self,
         e: Idx<Expr>,
@@ -372,12 +286,6 @@ impl<'a> Builder<'a> {
         ))
     }
 
-    /// The return-position companion of [`Self::reject_nobox_boxed_call_args`]:
-    /// a `nobox` element only rides a tuple return as leaves if skull emits the
-    /// callee's body. An `extern`, or an `inline(lua)` body that has not opted
-    /// in with `@scalar_abi`, writes its own `return` -- so the call site would
-    /// read leaves the body never produced. That is a boxed boundary; reject it
-    /// where an argument would be rejected.
     pub(crate) fn reject_nobox_opaque_tuple_return(
         &self,
         e: Idx<Expr>,
@@ -402,16 +310,6 @@ impl<'a> Builder<'a> {
         ))
     }
 
-    /// The BARE-return companion of [`Self::reject_nobox_opaque_tuple_return`].
-    /// That one covers `-> (bool, NV2)`; a plain `-> NV2` had no check in any
-    /// position, so an opaque body handing back a hand-built box compiled clean
-    /// AND PASSED -- Lua's `.field` does not distinguish a table from cdata, so
-    /// the guarantee was violated with no diagnostic. Live shape:
-    /// a text-measurement FFI function and its `inline(js)` twin.
-    ///
-    /// Keyed on the SIGNATURE, which is transport-independent -- the JS backend
-    /// packs leaves into an array rather than multi-returning them, and this
-    /// check is correct for both.
     pub(crate) fn reject_nobox_opaque_value_return(
         &self,
         e: Idx<Expr>,
@@ -477,10 +375,6 @@ impl<'a> Builder<'a> {
         sd.fields.iter().find(|f| f.name == field).map(|f| f.ty)
     }
 
-    /// Round `value` when it is written into an `f32` field of struct `name`.
-    /// Every write path calls this, so the field's number never depends on
-    /// whether it lands in cdata, a table or scalarized leaves.
-    /// Whether struct `name` declares `field` with `f32` storage.
     pub(crate) fn field_is_f32(&self, name: Ustr, field: Ustr) -> bool {
         self.ws.struct_by_name.get(&name).is_some_and(|sid| {
             self.ws.modules[sid.module.index()].structs[sid.def].fields.iter().any(|f| {
@@ -583,19 +477,7 @@ impl<'a> Builder<'a> {
         self.dispatch().nobox_value_name(e)
     }
 
-    /// Under `values_first_class` NOTHING is nobox: the flag says the target has no
-    /// boxed representation to avoid, so a `value` struct is already a first-class
-    /// `vecN` and there is no leaf form to prefer. Answering `true` here would put
-    /// a local into leaf cells named `<name>__<i>`, which is both a duplicated
-    /// initializer and a RESERVED GLSL identifier.
-    ///
-    /// The gate lives on the predicate rather than on each shape helper because
-    /// every representation decision reaches nobox-ness through here -- binding
-    /// shapes, expression shapes, signature splat gates and the column-storage
-    /// rejections alike. Gating one consumer leaves the others to remember it, and
-    /// they did not: `Statement::Let` falls through `nobox_binding_shape` to
-    /// `nobox_value_shape_of`, so gating the binding shape alone still emitted
-    /// `shift__0`.
+    /// First-class values need no box, so the target already meets the guarantee.
     pub(crate) fn is_nobox_struct(&self, name: Ustr) -> bool {
         self.dispatch().is_nobox_struct(name)
     }
@@ -670,12 +552,6 @@ impl<'a> Builder<'a> {
         self.rep_shape_for_ty(ty, RepUse::Value, true)
     }
 
-    /// The leaf globals a place rooted at a `nobox` global denotes, plus the
-    /// shape of the projected part (`None` = one primitive leaf). `SPOT` is the
-    /// whole group, `SPOT.x` / `SPOT.a.b` a contiguous sub-range of it -- the
-    /// leaf order is `repr_to_leaves`', so a projection is a slice, never a
-    /// scatter. `Ok(None)` when the place is not rooted at a `nobox` global.
-    /// A planning failure is an error rather than an ordinary-slot fallback.
     pub(crate) fn nobox_global_place(
         &self,
         e: Idx<Expr>,
@@ -684,10 +560,7 @@ impl<'a> Builder<'a> {
             return Ok(None);
         }
         match self.body.expr_arena[e] {
-            // The DECLARED type, never `e`'s: a refined read of a `global X: NV2?`
-            // has expr type `NV2`, whose 2-leaf shape would address the presence
-            // leaf as `x`. Storage layout is a property of the global, not of the
-            // read site.
+            // Use the global's declared nullability to preserve its leaf positions.
             Expr::Global(name) => {
                 let Some(&ty) = self.ws.globals_by_name.get(&name) else {
                     return Ok(None);
