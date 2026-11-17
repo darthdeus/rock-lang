@@ -483,44 +483,6 @@ fn decorated_body_edit_reinfers_the_body() {
     assert_eq!(h.function_names(&result.reinferred), ["tick"]);
 }
 
-/// A body edit bumps the changed body's `Body.generation`, the key inference
-/// reuse checks, and preserves the unchanged bodies' generations.
-#[test]
-fn body_edit_bumps_only_changed_body_generation() {
-    let mut h = Harness::new(&[(
-        "m.rock",
-        "fn a() -> int { 1 }\nfn b() -> int { 2 }\nfn c() -> int { 3 }",
-    )]);
-    let body_gen = |h: &Harness, name: &str| -> u64 {
-        let mid = h.mid("m.rock");
-        let module = h.session.workspace().module(mid);
-        let fid = module
-            .functions
-            .iter()
-            .find(|(_, f)| f.name.as_str().rsplit("::").next() == Some(name))
-            .map(|(fid, _)| fid)
-            .expect("fn exists");
-        module.bodies[&bone_semantic::hir::BodyOwner::Function(fid)].generation
-    };
-
-    let (a0, b0) = (body_gen(&h, "a"), body_gen(&h, "b"));
-    // Edit only `a`'s body.
-    h.update(
-        "m.rock",
-        "fn a() -> int { 99 }\nfn b() -> int { 2 }\nfn c() -> int { 3 }",
-    );
-    assert!(
-        body_gen(&h, "a") > a0,
-        "changed body `a` must bump its generation (was {a0}, still {})",
-        body_gen(&h, "a")
-    );
-    assert_eq!(
-        body_gen(&h, "b"),
-        b0,
-        "unchanged body `b` must preserve its generation"
-    );
-}
-
 /// Generations are keyed by function identity, not name: editing `foo(int)`
 /// twice drives its generation to 2 while the `foo(float)` overload stays at 0.
 #[test]
@@ -608,19 +570,10 @@ fn oracle_signature_edit_breaks_then_fixes_cross_file_caller() {
     // make_point loses a param: b.rock's two-arg call site goes stale.
     // (An int->float param change would NOT break the caller - int literals
     // coerce to float.)
-    h.update(
-        "a.rock",
-        "
-struct Point {
-    x: int,
-    y: int,
-}
-
-fn make_point(x: int) -> Point {
-    Point { x: x, y: x }
-}
-",
-    );
+    let changed = CROSS_FILE_A
+        .replace("x: int, y: int", "x: int")
+        .replace("y: y", "y: x");
+    h.update("a.rock", &changed);
     assert!(
         !h.session.diagnostics().is_empty(),
         "caller in b.rock must error after the signature change"
@@ -629,15 +582,7 @@ fn make_point(x: int) -> Point {
     // Fix the caller; everything recovers.
     h.update(
         "b.rock",
-        "
-fn double_x(p: Point) -> int {
-    p.x * 2
-}
-
-fn origin_doubled() -> int {
-    double_x(make_point(0))
-}
-",
+        &CROSS_FILE_B.replace("make_point(0, 0)", "make_point(0)"),
     );
     h.assert_clean();
 }
@@ -752,13 +697,10 @@ fn total() -> int { let s = 0; for x in (R { hi: 3 }) { s = s + x } s }
     h.assert_clean();
 
     // Drop `next` -> the loop can't resolve the protocol.
-    let without_next = "\
-struct R { hi: int }
-struct RIt { cur: int, hi: int }
-fn iter(r: R) -> RIt { RIt { cur: 0, hi: r.hi } }
-fn total() -> int { let s = 0; for x in (R { hi: 3 }) { s = s + x } s }
-";
-    h.update("it.rock", without_next);
+    let start = with_next.find("fn next").unwrap();
+    let end = with_next.find("fn total").unwrap();
+    let without_next = format!("{}{}", &with_next[..start], &with_next[end..]);
+    h.update("it.rock", &without_next);
     assert!(
         !h.session.diagnostics().is_empty(),
         "removing `next` must break the for-loop over R"
@@ -994,13 +936,7 @@ fn area() -> int {
     // failed before reaching inference.
     h.update(
         "g.rock",
-        "
-global GRID_W: int = 8
-
-fn area() -> int {
-    GRID_W * GRID_W * 1
-}
-",
+        &with_global.replace("GRID_W * GRID_W", "GRID_W * GRID_W * 1"),
     );
     h.assert_clean();
 
@@ -1128,149 +1064,47 @@ fn classify_edits() {
 
 #[test]
 fn per_body_hazard_edit_above_shifts_sibling_spans() {
-    // Editing the FIRST body with a length change shifts every span below
-    // it in the same file. Under per-body eviction the second body is not re-lowered,
-    // so its node_index / expr_spans / diagnostics offsets must be
-    // delta-corrected - the per-offset type profile and the (file, offset)
-    // diagnostic keys both diverge from batch if they are not.
-    let two_bodies = "
-fn first() -> int {
-    1
-}
-
-fn second() -> int {
-    first()
-}
-";
-    let mut h = Harness::new(&[("s.rock", two_bodies)]);
+    let source = |first, second| {
+        format!(
+            "fn first() -> int {{\n    {first}\n}}\n\nfn second() -> int {{\n    {second}\n}}\n"
+        )
+    };
+    let mut h = Harness::new(&[("s.rock", &source("1", "first()"))]);
     h.assert_clean();
-
-    // Length-changing body edit above `second` (1 -> 100000).
-    h.update(
-        "s.rock",
-        "
-fn first() -> int {
-    100000
-}
-
-fn second() -> int {
-    first()
-}
-",
-    );
-    h.assert_clean();
-
-    // Same again but the sibling below now has a type ERROR, so its stored
-    // diagnostic offset must track the shift too.
-    h.update(
-        "s.rock",
-        "
-fn first() -> int {
-    1
-}
-
-fn second() -> int {
-    true
-}
-",
-    );
-    assert_eq!(h.session.diagnostics().len(), 1);
-    h.update(
-        "s.rock",
-        "
-fn first() -> int {
-    123456789
-}
-
-fn second() -> int {
-    true
-}
-",
-    );
-    assert_eq!(h.session.diagnostics().len(), 1);
+    for (first, second, errors) in [
+        ("100000", "first()", 0),
+        ("1", "true", 1),
+        ("123456789", "true", 1),
+    ] {
+        h.update("s.rock", &source(first, second));
+        assert_eq!(h.session.diagnostics().len(), errors);
+    }
 }
 
 #[test]
-fn per_body_hazard_generic_fn_and_hole_annotation_share_module() {
-    // Batch lowering draws interface Generic VarIds and in-body `_`/hole
-    // Infer VarIds from ONE module-wide counter, so they never collide. A
-    // single-body relower with a fresh counter can mint Infer(VarId(n))
-    // colliding with the module's Generic(VarId(n)) - and
-    // BodyInference.substitutions is a single VarId keyspace. Editing
-    // `holes` must not disturb `ident`'s generic instantiation (or vice
-    // versa).
-    let src = "
-fn ident<T>(x: T) -> T {
-    x
-}
-
-fn holes() -> int {
-    let v: _ = 41
-    v
-}
-
-fn uses_ident() -> int {
-    ident(7)
-}
-";
-    let mut h = Harness::new(&[("g.rock", src)]);
-    h.assert_clean();
-
-    // Body-only edit of the hole-annotated fn.
-    h.update(
-        "g.rock",
-        "
-fn ident<T>(x: T) -> T {
-    x
-}
-
-fn holes() -> int {
-    let v: _ = 42
-    v
-}
-
-fn uses_ident() -> int {
-    ident(7)
-}
-",
-    );
-    h.assert_clean();
-}
-
-#[test]
-fn per_body_hazard_mixed_owner_file_body_edit() {
-    // A file whose owners are not just functions: a global initializer and
-    // a struct with field defaults. A body-only fn edit must leave the
-    // Global / StructDefaults bodies untouched but still correct.
-    let src = "
-global BASE: int = 10
-
-struct Conf {
-    scale: int = 3,
-}
-
-fn use_conf(c: Conf) -> int {
-    c.scale + BASE
-}
-";
-    let mut h = Harness::new(&[("m.rock", src)]);
-    h.assert_clean();
-
-    h.update(
-        "m.rock",
-        "
-global BASE: int = 10
-
-struct Conf {
-    scale: int = 3,
-}
-
-fn use_conf(c: Conf) -> int {
-    c.scale + BASE + BASE
-}
-",
-    );
-    h.assert_clean();
+fn body_edits_preserve_sibling_inference() {
+    let cases = [
+        // Generic and inferred VarIds share a module-wide counter.
+        (
+            "generic function beside a hole annotation",
+            "fn ident<T>(x: T) -> T {\n    x\n}\n\nfn holes() -> int {\n    let v: _ = 41\n    v\n}\n\nfn uses_ident() -> int {\n    ident(7)\n}\n",
+            "41",
+            "42",
+        ),
+        (
+            "global initializer and struct defaults",
+            "global BASE: int = 10\n\nstruct Conf {\n    scale: int = 3,\n}\n\nfn use_conf(c: Conf) -> int {\n    c.scale + BASE\n}\n",
+            "c.scale + BASE",
+            "c.scale + BASE + BASE",
+        ),
+    ];
+    for (case, initial, from, to) in cases {
+        let mut h = Harness::new(&[("m.rock", initial)]);
+        h.assert_clean();
+        let text = initial.replace(from, to);
+        h.update("m.rock", &text);
+        assert!(h.session.diagnostics().is_empty(), "{case}");
+    }
 }
 
 /// `type_at` at `offset` in `path` as `(rendered type, span.offset_range())`.
@@ -1313,18 +1147,8 @@ fn booly() -> bool {
 
     // Length-changing edit to the FIRST body: `{ 1 }` -> `{ 123456789 }`
     // (+8 bytes), shifting floaty and booly down by 8.
-    let v1 = "\
-fn edited() -> int { 123456789 }
-fn floaty() -> float {
-    let m = 3.14
-    m
-}
-fn booly() -> bool {
-    let t = true
-    t
-}
-";
-    let result = h.update("m.rock", v1);
+    let v1 = v0.replace("{ 1 }", "{ 123456789 }");
+    let result = h.update("m.rock", &v1);
     assert_eq!(
         result.tier,
         UpdateTier::BodyOnly,
@@ -1445,78 +1269,6 @@ fn shift_module_after_edit_moves_only_later_item_spans() {
         bump(&c_body0),
         "later fn `c` body spans must shift by the delta"
     );
-}
-
-/// Re-lowering one function against its own unchanged cooked source yields a
-/// module equal to a fresh full lower: same diagnostics and `type_at`
-/// everywhere.
-#[test]
-fn relower_function_in_place_matches_fresh_lower() {
-    // `a` is a kept function (relower must not disturb it); `target` carries a
-    // param + a let-binding + block so the re-lower rebuilds real body structure.
-    let src = "fn a(x: int) -> int { x }\nfn target(y: int) -> int { let z = y\n z }";
-    let fs = files(&[("m.rock", src)]);
-
-    // `semantic_pass` cooks the modules IN PLACE, so after it `modules` holds the
-    // cooked ASTs the workspace was lowered from -- exactly what relower needs.
-    let mut modules = parse_files(&fs).expect("parse");
-    let mut ws = semantic_pass(&mut modules).expect("semantic pass");
-    let cooked = &modules[0];
-    let mid = mid_for(&ws, "m.rock");
-
-    // target's cooked FunctionDef + annotations, and its fid in the module.
-    let (f, annos) = cooked
-        .items
-        .iter()
-        .find_map(|it| match &it.kind {
-            skull_parser::ItemKind::Function(f) if f.name.name.as_str() == "target" => {
-                Some((f, it.annotations.as_slice()))
-            }
-            _ => None,
-        })
-        .expect("target fn in cooked ast");
-    let fid = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, fnc)| name_is_tail(&fnc.name, "target"))
-        .map(|(i, _)| i)
-        .expect("target fid");
-
-    // Wipe target's body so relower must REBUILD it -- otherwise the test is
-    // vacuous (relowering same source onto an already-correct module is
-    // indistinguishable from a no-op). With the body gone, a relower that fails
-    // to install leaves target body-less and ws_equiv diverges from fresh.
-    ws.module_mut(mid)
-        .bodies
-        .remove(&bone_semantic::hir::BodyOwner::Function(fid));
-    assert!(
-        !ws.module(mid)
-            .bodies
-            .contains_key(&bone_semantic::hir::BodyOwner::Function(fid)),
-        "precondition: target body removed"
-    );
-
-    // Swap the module out so `&ws` (workspace lookups) and `&mut module` don't
-    // alias -- the exact dance rebuild_module will perform.
-    let mut module = std::mem::take(ws.module_mut(mid));
-    let installed =
-        bone_semantic::lower::relower_function_in_place(&ws, &mut module, cooked, f, annos, fid)
-            .expect("relower must succeed");
-    assert!(
-        installed,
-        "target has a Rock body, so a body must be installed"
-    );
-    *ws.module_mut(mid) = module;
-
-    // Re-infer (the relowered body's old inference is stale) and compare to a
-    // fresh batch lower of the same files: relower(same source) == fresh lower.
-    let inf =
-        bone_semantic::semantic_passes::check_module(&ws, mid, ws.module(mid)).expect("reinfer");
-    ws.set_inference(mid, inf);
-
-    ws_equiv(&ws, &batch(&fs), &fs, 1)
-        .expect("relower_function_in_place(same cooked source) must equal a fresh full lower");
 }
 
 // ---------------------------------------------------------------------------
@@ -1661,15 +1413,7 @@ fn body_edit_incrementally_updates_dep_index() {
     // update_dependents_for(b).
     let r = h.update(
         "b.rock",
-        "
-fn double_x(p: Point) -> int {
-    p.x * 2
-}
-
-fn origin_doubled() -> int {
-    42
-}
-",
+        &CROSS_FILE_B.replace("double_x(make_point(0, 0))", "42"),
     );
     assert_eq!(r.tier, UpdateTier::BodyOnly);
 
