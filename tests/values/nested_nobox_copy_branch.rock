@@ -1,0 +1,47 @@
+// https://github.com/darthdeus/rock-lang/issues/404
+value CopyChild { x: int, y: int }
+nobox value FlatChild { x: int, y: int }
+value CopyParent { value: CopyChild, flat: FlatChild }
+
+fn observe_copy_parent(x: CopyParent) { print(x.flat.x) }
+
+fn copy_parent_across_branch(input: int) {
+    let flat = FlatChild { x: -1, y: 0 }
+    let value = CopyChild { x: input, y: input }
+    let whole = CopyParent { value: value, flat: flat }
+    let copy = whole
+    if false { print(0) }
+    observe_copy_parent(whole)
+    observe_copy_parent(copy)
+}
+
+@test(output = "-1\n-1")
+fn nested_nobox_copy_across_branch() {
+    copy_parent_across_branch(3)
+}
+
+nobox value SingleChild { x: int }
+value SingleParent { child: SingleChild }
+
+fn copy_single_parent_across_branch(input: int) {
+    let whole = SingleParent { child: SingleChild { x: input } }
+    let copy = whole
+    if input > 0 {}
+    print(whole.child.x)
+    print(copy.child.x)
+}
+
+@test(output = "0\n0\n1\n1")
+fn single_nobox_child_copy_across_dynamic_branch() {
+    for input in 0..2 { copy_single_parent_across_branch(input) }
+}
+
+@test
+fn nested_nobox_copy_remains_a_snapshot() {
+    let whole = SingleParent { child: SingleChild { x: 3 } }
+    let copy = whole
+    if false { print(0) }
+    whole.child.x = 7
+    assert_eq(whole.child.x, 7)
+    assert_eq(copy.child.x, 3)
+}

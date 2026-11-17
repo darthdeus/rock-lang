@@ -362,6 +362,50 @@ pub fn flatten_nobox_nested_ctors(
     Ok(true)
 }
 
+// A promoted cell can expose a nobox constructor to projections in another
+// block. Eliminate only those projections: general cleanup can fold ordinary
+// value constructors that a ref call has since mutated.
+fn fold_nobox_projections(ws: &Workspace, func: &mut MirFunc) {
+    let mut subst = Vec::new();
+    for (_, block) in func.blocks.iter() {
+        for &iid in &block.insts {
+            let Some((base, field)) = func.field_projection(iid) else {
+                continue;
+            };
+            let Inst::MakeValueStruct { name, fields, .. } = &func.insts[base] else {
+                continue;
+            };
+            if !ws
+                .struct_by_name
+                .get(name)
+                .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox)
+            {
+                continue;
+            }
+            if let Some((_, value)) = fields.iter().find(|(name, _)| *name == field) {
+                if subst.is_empty() {
+                    subst.resize(func.insts.len(), None);
+                }
+                subst[iid.into_raw().into_u32() as usize] = Some(*value);
+            }
+        }
+    }
+    if subst.is_empty() {
+        return;
+    }
+    let remap = |value| crate::resolve_subst(&subst, value);
+    for (_, inst) in func.insts.iter_mut() {
+        inst.remap_uses(&remap);
+    }
+    for (_, block) in func.blocks.iter_mut() {
+        block.term.remap_uses(&remap);
+        block
+            .insts
+            .retain(|iid| subst[iid.into_raw().into_u32() as usize].is_none());
+    }
+    dce(func);
+}
+
 /// [`cleanup`] plus nobox nested-ctor normalization and the DCE that clears the
 /// ctors it orphans. Every emit path that is followed by
 /// [`nobox_materialization_violations`] must use THIS, not `cleanup`:
@@ -389,6 +433,7 @@ pub fn cleanup_with_nobox(ws: &Workspace, func: &mut MirFunc) -> Result<(), Comp
     // Each successful flatten is followed by cleanup's fixed-point DCE;
     // the final unsuccessful flatten leaves the live program unchanged.
     promote_direct_cells(func);
+    fold_nobox_projections(ws, func);
     // After promotion, so a rounding that reached the store through a cell
     // (an inlined constructor with a defaulted argument) is seen directly.
     if drop_f32_rounding_into_float_views(func) {
