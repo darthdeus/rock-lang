@@ -1,8 +1,7 @@
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::visit::raw;
+use crate::visit::{raw, top_level_blocks_from};
 use comfy_la_arena::Idx;
-use skull_mir::cfg::successors;
 use skull_mir::mir::*;
 
 /// Materialize a coroutine region's frame accesses as MIR (the JS path's
@@ -42,20 +41,7 @@ fn materialize_frame_inner(
     strict: bool,
 ) {
     let field_of = |slot: u32| ustr::Ustr::from(format!("c{slot}").as_str());
-    let mut region: Vec<Idx<Block>> = Vec::new();
-    {
-        let mut seen: HashSet<Idx<Block>> = HashSet::default();
-        let mut stack = vec![entry];
-        seen.insert(entry);
-        while let Some(b) = stack.pop() {
-            region.push(b);
-            successors(&mf.blocks[b].term, |t| {
-                if seen.insert(t) {
-                    stack.push(t);
-                }
-            });
-        }
-    }
+    let region = top_level_blocks_from(mf, entry);
     let mut minted: HashSet<Idx<Cell>> = HashSet::default();
     for &bid in &region {
         let old: Vec<Idx<Inst>> = std::mem::take(&mut mf.blocks[bid].insts);
