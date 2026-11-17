@@ -1,4 +1,7 @@
-use crate::support::{assert_has, emit_checked_entry as emit_entry, emit_library as emit};
+use crate::support::{
+    assert_has, emit_checked_entry as emit_entry, emit_library as emit,
+    emit_library_with as emit_with,
+};
 
 fn golden(src: &str, root: &str, contains: &[&str], lacks: &[&str]) {
     let glsl = emit(src, &[root]).expect("emit");
@@ -13,6 +16,17 @@ fn golden(src: &str, root: &str, contains: &[&str], lacks: &[&str]) {
     }
 }
 
+fn nobox_vec2_stdlib() -> Vec<skull_parser::Ast> {
+    rock_stdlib::stdlib_files()
+        .iter()
+        .map(|f| {
+            let src = f.contents.replace("\nvalue Vec2 {", "\nnobox value Vec2 {");
+            let id = ustr::Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
+            skull_parser::parse_module_clean(&src, id).expect("stdlib parse")
+        })
+        .collect()
+}
+
 #[test]
 fn a_user_fn_named_like_an_intrinsic_is_its_own_function() {
     let src = r#"
@@ -22,6 +36,94 @@ fn a_user_fn_named_like_an_intrinsic_is_its_own_function() {
     let glsl = emit(src, &["root"]).expect("emit");
     assert_has(&glsl, "int abs_bool(bool b) {");
     assert_has(&glsl, "return ((abs_bool(true) * 10) + abs_bool(false));");
+}
+
+cases! { golden:
+    generic_and_plain_callees(
+        r#"
+            @pure fn identity<T>(x: T) -> T { return x }
+            @pure fn twice(x: float) -> float { return x * 2.0 }
+            @pure fn root(x: float) -> float {
+                let a = twice(identity(x))
+                let b = identity(3)
+                return a + float(b)
+            }
+        "#,
+        "root",
+        &[
+            "float identity_T_spec_p_float(float x) {",
+            "int identity_T_spec_p_int(int x) {",
+            "twice_float(identity_T_spec_p_float(x))",
+            "b = identity_T_spec_p_int(3);",
+        ],
+        &["identity("],
+    );
+
+    trivial_vector_swizzle(
+        "fn f(t: float) -> Vec2 { return v(t + 1.0, 2.0).yx }",
+        "f",
+        &["return vec2(vec2((t + 1.0), 2.0).y, vec2((t + 1.0), 2.0).x);"],
+        &["call_result"],
+    );
+
+    value_struct_literal_is_a_vector_constructor(
+        "fn f(s: Sampler2D, x: float, y: float) -> Vec4 { return texture(s, Vec2 { x: x, y: y }) }",
+        "f",
+        &["texture(s, vec2(x, y))"],
+        &["Vec2("],
+    );
+
+    repeated_vector_operator_stays_inline(
+        "fn f(p: Vec2) -> Vec2 { return (p + v(1.0, 2.0)).xx }",
+        "f",
+        &["return vec2((p + vec2(1.0, 2.0)).x, (p + vec2(1.0, 2.0)).x);"],
+        &["call_result"],
+    );
+}
+
+fn call_once(src: &str, root: &str, call: &str, expression: &str) {
+    let glsl = emit(src, &[root]).expect("emit");
+    assert_eq!(glsl.matches(call).count(), 1, "{glsl}");
+    assert_has(&glsl, expression);
+}
+
+cases! { call_once:
+    folded_call_swizzle_evaluates_once(
+        "fn source(t: float) -> float { return sin(t) }
+         fn selected(flag: bool, t: float) -> Vec2 {
+             return v(if flag { source(t) } else { 0.0 }, 1.0).xx
+         }",
+        "selected",
+        "source_float(t)",
+        "flag ? source_float(t) : 0.0",
+    );
+}
+
+#[test]
+fn retained_call_stays_in_its_if_arm() {
+    let glsl = emit(
+        "fn source(p: Vec2) -> Vec4 { return v(sin(p.x), cos(p.y), 0.0, 1.0) }
+         fn choose(flag: bool, p: Vec2) -> Vec2 {
+             let result = if flag { source(p).yx } else { v(0.0, 1.0) }
+             return result
+         }",
+        &["choose"],
+    )
+    .expect("emit");
+    let body = glsl.split("vec2 choose_bool_Vec2(").nth(1).expect(&glsl);
+    let branch = body.find("if (flag) {").expect(&glsl);
+    let call = body.find("= source_Vec2(p);").expect(&glsl);
+    let otherwise = body.find("} else {").expect(&glsl);
+    assert!(branch < call && call < otherwise, "{glsl}");
+    assert_eq!(body.matches("source_Vec2(p)").count(), 1, "{glsl}");
+}
+
+#[test]
+fn gpu_intrinsic_accepts_a_materialized_nobox_vector_literal() {
+    let stdlib = nobox_vec2_stdlib();
+    let src = "fn shade(s: Sampler2D, x: float, y: float) -> Vec4 { return texture(s, Vec2 { x: x, y: y }) }";
+    let glsl = emit_with(&stdlib, src, &["shade"]).expect("emit");
+    assert_has(&glsl, "texture(s, vec2(x, y))");
 }
 
 #[test]

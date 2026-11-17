@@ -15,6 +15,10 @@ fn reject(src: &str, roots: &[&str], needle: &str) {
 }
 
 cases! { reject:
+    reject_unconstrained_generic_call(
+        "fn make<T>() -> [T] { return [] } fn root() -> int { let xs = make(); return xs.len() }",
+        &["root"], "unconstrained-type-var");
+
     reject_recursion(r#"
         @pure fn fact(n: float) -> float {
             return fact(n - 1.0)
@@ -206,4 +210,11 @@ fn reject_struct_expand_pairs_in_shader() {
         }
     "#;
     reject(src, &["shader_uses_pairs"], "not tier 0");
+}
+
+#[test]
+fn unconstrained_entry_call_reports_profile_lowering_context() {
+    let source = "fn make<T>() -> [T] { return [] } @shader(fragment) fn root(tc: Vec2) -> Vec4 { let xs = make(); let n = xs.len(); return v(n as float, 0.0, 0.0, 1.0) }";
+    let error = emit_entry(source, "root").expect_err("unconstrained call cannot lower");
+    assert!(error.contains("cannot lower for GLSL"), "{error}");
 }
