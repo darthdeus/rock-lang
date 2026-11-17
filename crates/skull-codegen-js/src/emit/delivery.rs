@@ -13,58 +13,95 @@ pub(super) struct JsDelivery<'a, 'b> {
 }
 
 impl<'a, 'b> JsDelivery<'a, 'b> {
-    /// Lower + transform one fn through the same per-body pipeline the luajit
-    /// path runs (lower -> inline -> cleanup -> closures -> FORL -> residual-
-    /// bound-call validation; coroutines skip inline/FORL), then record it.
-    /// A rejected body is recorded and delivery continues; its residual facts
-    /// are still scheduled so a sibling definition is not hidden by the error.
-    fn visit_fn(&mut self, fr: FuncRef) -> Result<(), CompilerError> {
+    fn visit_fn(
+        &mut self,
+        fr: FuncRef,
+        specialization: Option<Instance>,
+    ) -> Result<(), CompilerError> {
         let f = &self.ws.module(fr.module).functions[fr.func];
-        let name = self
-            .st
-            .names
-            .name_for_decl(self.ws, fr)
-            .expect("queued fn has a name")
-            .clone();
-        let plan = match self.st.concrete.get(&Instance::base(fr)) {
-            Some(plan) => plan,
-            None => {
-                self.st.reject(
-                    &name,
-                    err(format!(
-                        "JS: no concrete plan for retained function `{}`",
-                        f.name
-                    )),
-                );
-                return Ok(());
-            }
+        let name = match &specialization {
+            Some(inst) => match self.st.names.get(inst) {
+                Some(name) => name.clone(),
+                None => {
+                    self.st.reject(
+                        &format!("instance:{fr:?}"),
+                        err("JS: the artifact view has no symbol for a retained instance"),
+                    );
+                    return Ok(());
+                }
+            },
+            None => self
+                .st
+                .names
+                .name_for_decl(self.ws, fr)
+                .expect("queued fn has a name")
+                .clone(),
         };
-        let mut mf = match skull_mir::lower::lower_instance_with_plans(
-            self.ws,
-            self.scx,
-            plan,
-            self.st.concrete,
-        ) {
+        let selected = Instance {
+            func: fr,
+            args: specialization
+                .as_ref()
+                .map(|inst| inst.args.clone())
+                .unwrap_or_default(),
+        };
+        let prepared = (|| {
+            let plan = self.st.concrete.get(&selected).ok_or_else(|| {
+                err(match specialization {
+                    Some(_) => "JS: no concrete plan for the selected retained body".to_string(),
+                    None => format!("JS: no concrete plan for retained function `{}`", f.name),
+                })
+            })?;
+            let mut mf = skull_mir::lower::lower_instance_with_plans(
+                self.ws,
+                self.scx,
+                plan,
+                self.st.concrete,
+            )?;
+            if specialization.is_some() {
+                // Resolve bounded placeholders before any transform consumes the body.
+                if f.has_iterator_bounds() && plan.bound_tree.is_empty() {
+                    return Err(CompilerError::new_with_label(
+                        f.name_span,
+                        "JS: the concrete plan has no resolved bound tree for a bounded specialization".to_string(),
+                    ));
+                }
+                skull_transform::bound::resolve_standalone_bound_calls(
+                    self.ws,
+                    self.scx,
+                    self.scx.interner(),
+                    &mut mf,
+                    &plan.bound_tree,
+                    self.st.concrete,
+                )?;
+            }
+            self.prepare_fn(fr, &mut mf, &name)?;
+            Ok(mf)
+        })();
+        let mut mf = match prepared {
             Ok(mf) => mf,
-            Err(e) => {
-                self.st.reject(&name, e);
+            Err(error) => {
+                self.st.reject(&name, error);
                 return Ok(());
             }
         };
-        if let Err(e) = self.prepare_fn(fr, &mut mf, &name) {
-            self.st.reject(&name, e);
-            return Ok(());
+        let mut findings = Vec::new();
+        if specialization.is_none() {
+            collect(
+                &mut findings,
+                skull_transform::validate_no_residual_bound_calls(self.ws, f, &mf),
+            );
         }
-        let mut findings: Vec<CompilerError> = Vec::new();
-        collect(
-            &mut findings,
-            skull_transform::validate_no_residual_bound_calls(self.ws, f, &mf),
-        );
         nobox_tree_errs(self.ws, &mf, &mut findings);
+        if specialization.is_some() {
+            mf.name = Ustr::from(name.as_str());
+        }
         findings.extend(self.schedule_body(&mf)?);
-        match merge_findings(findings) {
-            Some(e) => self.st.reject(&name, e),
-            None => self.st.lowered.push((fr, mf)),
+        if let Some(error) = merge_findings(findings) {
+            self.st.reject(&name, error);
+        } else if let Some(inst) = specialization {
+            self.st.spec_lowered.push((inst, mf));
+        } else {
+            self.st.lowered.push((fr, mf));
         }
         Ok(())
     }
@@ -124,79 +161,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
             );
             return Ok(());
         };
-        let Some(name) = self.st.names.get(&inst).cloned() else {
-            self.st.reject(
-                &format!("instance:{:?}", fr),
-                err("JS: the artifact view has no symbol for a retained instance"),
-            );
-            return Ok(());
-        };
-        let lowered_inst = Instance {
-            func: fr,
-            args: inst.args.clone(),
-        };
-        let plan = match self.st.concrete.get(&lowered_inst) {
-            Some(plan) => plan,
-            None => {
-                self.st.reject(
-                    &name,
-                    err("JS: no concrete plan for the selected retained body"),
-                );
-                return Ok(());
-            }
-        };
-        let mut mf = match skull_mir::lower::lower_instance_with_plans(
-            self.ws,
-            self.scx,
-            plan,
-            self.st.concrete,
-        ) {
-            Ok(mf) => mf,
-            Err(e) => {
-                self.st.reject(&name, e);
-                return Ok(());
-            }
-        };
-        let f = &self.ws.module(fr.module).functions[fr.func];
-        // BEFORE every transform, and for the same reason as the luajit path:
-        // an `Iterator`-bounded body's placeholders are what make it unemittable
-        // on its own, and the demand that reached here is what resolves them.
-        let tree = plan.bound_tree.clone();
-        if f.has_iterator_bounds() && tree.is_empty() {
-            self.st.reject(
-                &name,
-                CompilerError::new_with_label(
-                    f.name_span,
-                    "JS: the concrete plan has no resolved bound tree for a bounded specialization"
-                        .to_string(),
-                ),
-            );
-            return Ok(());
-        }
-        if let Err(e) = skull_transform::bound::resolve_standalone_bound_calls(
-            self.ws,
-            self.scx,
-            self.scx.interner(),
-            &mut mf,
-            &tree,
-            self.st.concrete,
-        ) {
-            self.st.reject(&name, e);
-            return Ok(());
-        }
-        if let Err(e) = self.prepare_fn(fr, &mut mf, &name) {
-            self.st.reject(&name, e);
-            return Ok(());
-        }
-        let mut findings: Vec<CompilerError> = Vec::new();
-        nobox_tree_errs(self.ws, &mf, &mut findings);
-        mf.name = ustr::Ustr::from(name.as_str());
-        findings.extend(self.schedule_body(&mf)?);
-        match merge_findings(findings) {
-            Some(e) => self.st.reject(&name, e),
-            None => self.st.spec_lowered.push((inst, mf)),
-        }
-        Ok(())
+        self.visit_fn(fr, Some(inst))
     }
 
     fn prepare_fn(
@@ -356,7 +321,7 @@ pub(super) fn drain_worklists(
     let mut spec_cursor = 0;
     loop {
         while let Some(fr) = delivery.st.queue.pop() {
-            delivery.visit_fn(fr)?;
+            delivery.visit_fn(fr, None)?;
         }
         delivery.st.queue_opaque_js_global_initializers(ws);
         while let Some((gname, _)) = delivery.st.ginit_queue.pop() {
