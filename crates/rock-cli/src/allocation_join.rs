@@ -35,6 +35,22 @@ impl RouteFilter {
             Self::Outside => "outside",
         }
     }
+
+    fn site_index(self) -> usize {
+        match self {
+            Self::Update => 0,
+            Self::Draw => 1,
+            Self::Coroutine => 2,
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RouteEvidence<'a> {
+    chain: &'a str,
+    callers: &'a str,
+    loop_depth: u32,
 }
 
 #[derive(Debug)]
@@ -47,16 +63,8 @@ struct Site<'a> {
     aggregate_type: &'a str,
     aggregate_fields: u32,
     lua_body_line: Option<u32>,
-    update_chain: Option<&'a str>,
-    draw_chain: Option<&'a str>,
-    coroutine_chain: Option<&'a str>,
-    update_callers: Option<&'a str>,
-    draw_callers: Option<&'a str>,
-    coroutine_callers: Option<&'a str>,
+    routes: [Option<RouteEvidence<'a>>; 3],
     local_loop_depth: u32,
-    update_loop_depth: Option<u32>,
-    draw_loop_depth: Option<u32>,
-    coroutine_loop_depth: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -258,16 +266,8 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
                             aggregate_type,
                             aggregate_fields,
                             lua_body_line,
-                            update_chain: None,
-                            draw_chain: None,
-                            coroutine_chain: None,
-                            update_callers: None,
-                            draw_callers: None,
-                            coroutine_callers: None,
+                            routes: [None; 3],
                             local_loop_depth,
-                            update_loop_depth: None,
-                            draw_loop_depth: None,
-                            coroutine_loop_depth: None,
                         },
                     )
                     .is_some()
@@ -302,24 +302,11 @@ fn parse_manifest(manifest: &str) -> Result<BTreeMap<&str, Site<'_>>> {
         let site = sites
             .get_mut(id)
             .ok_or_else(|| anyhow::anyhow!("allocation route site {id} is absent from manifest"))?;
-        match route.expect("route checked above") {
-            RouteFilter::Update => {
-                site.update_chain = Some(chain);
-                site.update_callers = Some(callers);
-                site.update_loop_depth = Some(loop_depth);
-            }
-            RouteFilter::Draw => {
-                site.draw_chain = Some(chain);
-                site.draw_callers = Some(callers);
-                site.draw_loop_depth = Some(loop_depth);
-            }
-            RouteFilter::Coroutine => {
-                site.coroutine_chain = Some(chain);
-                site.coroutine_callers = Some(callers);
-                site.coroutine_loop_depth = Some(loop_depth);
-            }
-            _ => unreachable!(),
-        }
+        site.routes[route.expect("route checked above").site_index()] = Some(RouteEvidence {
+            chain,
+            callers,
+            loop_depth,
+        });
     }
     if sites.is_empty() {
         anyhow::bail!("allocation manifest contains no emitted sites");
@@ -455,14 +442,10 @@ pub(crate) fn render_joined_report_with_jit(
         let site = &sites[hit.id];
         match filter {
             RouteFilter::All => true,
-            RouteFilter::Update => site.update_chain.is_some(),
-            RouteFilter::Draw => site.draw_chain.is_some(),
-            RouteFilter::Coroutine => site.coroutine_chain.is_some(),
-            RouteFilter::Outside => {
-                site.update_chain.is_none()
-                    && site.draw_chain.is_none()
-                    && site.coroutine_chain.is_none()
+            route @ (RouteFilter::Update | RouteFilter::Draw | RouteFilter::Coroutine) => {
+                site.routes[route.site_index()].is_some()
             }
+            RouteFilter::Outside => site.routes.iter().all(Option::is_none),
         }
     });
     hits.sort_by(|a, b| b.frame_hits.cmp(&a.frame_hits).then_with(|| a.id.cmp(b.id)));
@@ -519,14 +502,11 @@ pub(crate) fn render_joined_report_with_jit(
     for hit in hits {
         let id = hit.id;
         let site = &sites[id];
-        let routes = [
-            ("update", site.update_chain),
-            ("draw", site.draw_chain),
-            ("coroutine", site.coroutine_chain),
-        ]
-        .into_iter()
-        .filter_map(|(name, chain)| chain.map(|chain| (name, chain)))
-        .collect::<Vec<_>>();
+        let routes = ["update", "draw", "coroutine"]
+            .into_iter()
+            .zip(site.routes.iter())
+            .filter_map(|(name, route)| route.as_ref().map(|route| (name, route)))
+            .collect::<Vec<_>>();
         let route = if routes.is_empty() {
             "outside".to_string()
         } else {
@@ -537,33 +517,30 @@ pub(crate) fn render_joined_report_with_jit(
                 .join("+")
         };
         let chain = if routes.len() == 1 {
-            routes[0].1.to_string()
+            routes[0].1.chain.to_string()
         } else {
             routes
                 .iter()
-                .map(|(name, chain)| format!("{name}:{chain}"))
+                .map(|(name, route)| format!("{name}:{}", route.chain))
                 .collect::<Vec<_>>()
                 .join(" | ")
         };
-        let callers = [
-            site.update_callers,
-            site.draw_callers,
-            site.coroutine_callers,
-        ]
-        .into_iter()
-        .flatten()
-        .flat_map(|callers| callers.split(" | "))
-        .filter(|caller| !caller.is_empty())
-        .collect::<BTreeSet<_>>();
+        let callers = site
+            .routes
+            .iter()
+            .flatten()
+            .flat_map(|route| route.callers.split(" | "))
+            .filter(|caller| !caller.is_empty())
+            .collect::<BTreeSet<_>>();
         let caller_count = callers.len();
         let callers = callers.into_iter().collect::<Vec<_>>().join(" | ");
-        let structural_loop_depth = [site.local_loop_depth]
-            .into_iter()
-            .chain(site.update_loop_depth)
-            .chain(site.draw_loop_depth)
-            .chain(site.coroutine_loop_depth)
-            .max()
-            .unwrap_or(0);
+        let structural_loop_depth = site
+            .routes
+            .iter()
+            .flatten()
+            .fold(site.local_loop_depth, |depth, route| {
+                depth.max(route.loop_depth)
+            });
         let artifact_line = match (site.lua_body_line, lua_lines.as_ref()) {
             (Some(body_line), Some(lines)) => {
                 let body_start = body_starts.get(site.body).ok_or_else(|| {
