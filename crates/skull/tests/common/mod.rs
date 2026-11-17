@@ -28,8 +28,12 @@ fn semantic_pass(
 /// against a new stdlib overload) would otherwise flow on with missing
 /// resolutions and turn shape assertions vacuously green.
 fn assert_no_bone_errors(ws: &Workspace) {
-    let errs: Vec<String> = ws
-        .inferences
+    let errs: Vec<_> = recorded_bone_errors(ws).map(|e| &e.message).collect();
+    assert!(errs.is_empty(), "bone recorded errors: {errs:#?}");
+}
+
+fn recorded_bone_errors(ws: &Workspace) -> impl Iterator<Item = &skull_parser::CompilerError> {
+    ws.inferences
         .iter()
         .flatten()
         .flat_map(|inf| inf.errors.values().flatten())
@@ -39,9 +43,6 @@ fn assert_no_bone_errors(ws: &Workspace) {
                 .flat_map(|m| m.lowering_errors.values().flatten()),
         )
         .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter()))
-        .map(|e| e.message.clone())
-        .collect();
-    assert!(errs.is_empty(), "bone recorded errors: {errs:#?}");
 }
 
 /// The messages bone recorded for `src`, without emitting.
@@ -67,18 +68,7 @@ pub fn bone_rejection_errors(src: &str) -> Vec<skull_parser::CompilerError> {
         Ok(ws) => ws,
         Err(e) => return vec![e],
     };
-    ws.inferences
-        .iter()
-        .flatten()
-        .flat_map(|inf| inf.errors.values().flatten())
-        .chain(
-            ws.modules
-                .iter()
-                .flat_map(|m| m.lowering_errors.values().flatten()),
-        )
-        .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter()))
-        .cloned()
-        .collect()
+    recorded_bone_errors(&ws).cloned().collect()
 }
 
 /// Full MIR emit for `src` (the `<test>` module) through the skull pipeline
@@ -86,35 +76,44 @@ pub fn bone_rejection_errors(src: &str) -> Vec<skull_parser::CompilerError> {
 /// `%`/arithmetic ops resolve to their stdlib helpers -- else the using fns fail
 /// to lower and are silently skipped.
 pub fn emit_mir(src: &str) -> skull::mir_emit::MirEmit {
-    let mut modules = with_stdlib(src, "<test>");
-    let ws = semantic_pass(&mut modules).expect("semantic_pass");
-    assert_no_bone_errors(&ws);
-    let mid = module_id(&ws, "<test>");
-    skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit")
+    emit_at(&checked_workspace(src, "<test>"), "<test>").expect("emit")
 }
 
 pub fn emit_mir_with_inputs(
     src: &str,
     inputs: bone_semantic::inference::ComptimeInputs,
 ) -> skull::mir_emit::MirEmit {
-    let mut modules = with_stdlib(src, "<test>");
-    let mut ws = semantic_pass(&mut modules).expect("semantic_pass");
-    assert_no_bone_errors(&ws);
-    ws.comptime_inputs = inputs;
-    let mid = module_id(&ws, "<test>");
-    skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit")
+    try_emit_mir_with_inputs(src, inputs).expect("emit")
 }
 
 pub fn try_emit_mir_with_inputs(
     src: &str,
     inputs: bone_semantic::inference::ComptimeInputs,
 ) -> Result<skull::mir_emit::MirEmit, skull_parser::CompilerError> {
-    let mut modules = with_stdlib(src, "<test>");
-    let mut ws = semantic_pass(&mut modules).expect("semantic_pass");
-    assert_no_bone_errors(&ws);
+    emit_with_inputs(src, "<test>", inputs)
+}
+
+fn emit_with_inputs(
+    src: &str,
+    file: &str,
+    inputs: bone_semantic::inference::ComptimeInputs,
+) -> Result<skull::mir_emit::MirEmit, skull_parser::CompilerError> {
+    let mut ws = checked_workspace(src, file);
     ws.comptime_inputs = inputs;
-    let mid = module_id(&ws, "<test>");
-    skull::mir_emit::emit_workspace_mir(&ws, mid)
+    emit_at(&ws, file)
+}
+
+fn checked_workspace(src: &str, file: &str) -> Workspace {
+    let ws = semantic_pass(&mut with_stdlib(src, file)).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    ws
+}
+
+fn emit_at(
+    ws: &Workspace,
+    file: &str,
+) -> Result<skull::mir_emit::MirEmit, skull_parser::CompilerError> {
+    skull::mir_emit::emit_workspace_mir(ws, module_id(ws, file))
 }
 
 /// A workspace of `src` (the `<test>` module) over the real stdlib -- for tests
@@ -134,15 +133,21 @@ pub fn stdlib_asts() -> Vec<skull_parser::Ast> {
 /// A workspace of `files` (`(file id, source)` pairs, in order) over the real
 /// stdlib.
 pub fn ws_of_files(files: &[(&str, &str)]) -> Workspace {
+    semantic_pass(&mut parse_files(files).expect("parse")).expect("semantic_pass")
+}
+
+fn parse_files(
+    files: &[(&str, &str)],
+) -> Result<skull_parser::stdlib::ModuleSet, skull_parser::CompilerError> {
     let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([]).expect("stdlib parses");
     for (file, src) in files {
-        let mut ast = skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse");
+        let mut ast = skull_parser::parse_module_clean(src, Ustr::from(file))?;
         if files.len() > 1 {
             ast.package = Some(shared_test_package());
         }
         modules.push(ast);
     }
-    semantic_pass(&mut modules).expect("semantic_pass")
+    Ok(modules)
 }
 
 /// Emitted Lua for `src` (the common case; `emit_mir(src).lua`).
@@ -205,12 +210,7 @@ pub fn try_emit_module_with(
     src: &str,
     inputs: bone_semantic::inference::ComptimeInputs,
 ) -> Result<String, skull_parser::CompilerError> {
-    let mut modules = with_stdlib(src, "<test>");
-    let mut ws = semantic_pass(&mut modules).expect("semantic_pass");
-    assert_no_bone_errors(&ws);
-    ws.comptime_inputs = inputs;
-    let mid = module_id(&ws, "<test>");
-    skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
+    try_emit_module_with_file(src, "<test>", inputs)
 }
 
 /// [`try_emit_module_with`] with a caller-chosen module FILE path -- for
@@ -221,23 +221,14 @@ pub fn try_emit_module_with_file(
     file: &str,
     inputs: bone_semantic::inference::ComptimeInputs,
 ) -> Result<String, skull_parser::CompilerError> {
-    let mut modules = with_stdlib(src, file);
-    let mut ws = semantic_pass(&mut modules).expect("semantic_pass");
-    assert_no_bone_errors(&ws);
-    ws.comptime_inputs = inputs;
-    let mid = module_id(&ws, file);
-    skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
+    emit_with_inputs(src, file, inputs).map(|e| e.lua)
 }
 
 /// Like [`emit_mir`] but surfaces the codegen `Result` (a rejection such as a
 /// reserved synthetic-name collision) instead of `.expect`ing success. Semantic
 /// errors still panic (a malformed test, not what these cases probe).
 pub fn try_emit_module(src: &str) -> Result<String, skull_parser::CompilerError> {
-    let mut modules = with_stdlib(src, "<test>");
-    let ws = semantic_pass(&mut modules).expect("semantic_pass");
-    assert_no_bone_errors(&ws);
-    let mid = module_id(&ws, "<test>");
-    skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
+    emit_at(&checked_workspace(src, "<test>"), "<test>").map(|e| e.lua)
 }
 
 /// The message emission rejects `src` with; panics if it emits.
@@ -286,9 +277,7 @@ pub fn emit_module_shaped(
     file: &str,
     shapes: skull::mir_emit::ShapeOverrides,
 ) -> String {
-    let mut modules = with_stdlib(src, file);
-    let ws = semantic_pass(&mut modules).expect("semantic_pass");
-    assert_no_bone_errors(&ws);
+    let ws = checked_workspace(src, file);
     let mid = module_id(&ws, file);
     skull::mir_emit::FullEmit::program()
         .shapes(shapes)
@@ -555,19 +544,7 @@ pub fn try_emit_with_stdlib_module(
     lib: &str,
     src: &str,
 ) -> Result<String, skull_parser::CompilerError> {
-    let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([]).expect("stdlib parses");
-    modules.push(
-        skull_parser::parse_module_clean(
-            lib,
-            Ustr::from(rock_stdlib::stdlib_file_id("probe").as_str()),
-        )
-        .expect("parse lib"),
-    );
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let ws = semantic_pass(&mut modules).expect("semantic_pass");
-    assert_no_bone_errors(&ws);
-    let mid = module_id(&ws, "<test>");
-    skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
+    emit_at(&ws_with_stdlib_module(lib, src), "<test>").map(|e| e.lua)
 }
 
 /// Like [`ws_with_stdlib`] but ALSO loads `lib` as an extra stdlib module, so a
@@ -844,8 +821,7 @@ pub fn require_luajit() {
     }
 }
 
-/// Run `prog` under luajit, returning its success flag and stdout + stderr.
-pub fn run_luajit_capturing(prog: &str) -> (bool, String) {
+fn luajit_output(prog: &str) -> std::process::Output {
     let path = temp_lua_path();
     std::fs::write(&path, prog).expect("write program");
     let out = std::process::Command::new("luajit")
@@ -853,6 +829,12 @@ pub fn run_luajit_capturing(prog: &str) -> (bool, String) {
         .output()
         .expect("spawn luajit");
     let _ = std::fs::remove_file(&path);
+    out
+}
+
+/// Run `prog` under luajit, returning its success flag and stdout + stderr.
+pub fn run_luajit_capturing(prog: &str) -> (bool, String) {
+    let out = luajit_output(prog);
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -864,13 +846,7 @@ pub fn run_luajit_capturing(prog: &str) -> (bool, String) {
 /// Run `prog` under luajit, returning trimmed stdout (panicking with stderr on a
 /// non-zero exit).
 pub fn run_luajit(prog: &str) -> String {
-    let path = temp_lua_path();
-    std::fs::write(&path, prog).expect("write program");
-    let out = std::process::Command::new("luajit")
-        .arg(&path)
-        .output()
-        .expect("spawn luajit");
-    let _ = std::fs::remove_file(&path);
+    let out = luajit_output(prog);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(
         out.status.success(),
@@ -940,22 +916,7 @@ pub fn has_vec_header(lua: &str, repr: &str, elem: Option<&str>) -> bool {
 /// not parse or bone records an error -- for tests that sweep a corpus which
 /// includes deliberately rejected programs.
 pub fn try_ws_of_files(files: &[(&str, &str)]) -> Option<Workspace> {
-    let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([]).expect("stdlib parses");
-    for (file, src) in files {
-        let mut ast = skull_parser::parse_module_clean(src, Ustr::from(file)).ok()?;
-        if files.len() > 1 {
-            ast.package = Some(shared_test_package());
-        }
-        modules.push(ast);
-    }
-    let ws = semantic_pass(&mut modules).ok()?;
-    let clean = ws
-        .inferences
-        .iter()
-        .flatten()
-        .all(|inf| inf.errors.values().all(|e| e.is_empty()))
-        && ws.modules.iter().all(|m| {
-            m.lowering_errors.values().all(|e| e.is_empty()) && m.interface_errors.is_empty()
-        });
+    let ws = semantic_pass(&mut parse_files(files).ok()?).ok()?;
+    let clean = recorded_bone_errors(&ws).next().is_none();
     clean.then_some(ws)
 }

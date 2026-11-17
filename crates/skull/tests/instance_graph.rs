@@ -746,21 +746,27 @@ fn main() {
 fn generic_iter_witnesses_are_instantiated() {
     let for_head = "let a: Arena<int> = arena_new()\n    let total = 0\n    for (e, v) in a { total = total + v }";
     let implicit = "let a: Arena<int> = arena_new()\n    let n = a.count()";
-    for (label, src, kind, no_record) in [
+    for (label, body, initializer, kind, no_record, names) in [
         (
             "for head",
-            format!("fn main() {{\n    {for_head}\n}}\n"),
+            for_head,
+            format!("{for_head}\n    total"),
             SiteOp::ForIter,
             "iter-witness-no-instantiation-record",
+            &["iter", "next"][..],
         ),
         (
             "implicit iter",
-            format!("fn main() {{\n    {implicit}\n}}\n"),
+            implicit,
+            implicit.replace("let n = ", ""),
             SiteOp::ImplicitIter,
             "implicit-iter-witness-no-instantiation-record",
+            &["count", "iter", "next"][..],
         ),
     ] {
-        let (ws, g) = ws_and_graph(&src);
+        let (ws, g) = ws_and_graph(&format!(
+            "global TOTAL: int = {{\n    {initializer}\n}}\nfn main() {{\n    {body}\n    print(\"{{TOTAL}}\")\n}}"
+        ));
         let iters: Vec<String> = resolved_sites(&g)
             .filter(|(site, _)| site.op == kind)
             .map(|(_, target)| g.symbol(&ws, target))
@@ -784,23 +790,12 @@ fn generic_iter_witnesses_are_instantiated() {
             nexts.iter().all(|target| !target.args.is_empty()),
             "{label}: a `next` witness lost its instantiation"
         );
-    }
-    for (label, body, names) in [
-        (
-            "for head",
-            format!("{for_head}\n    total"),
-            &["iter", "next"][..],
-        ),
-        (
-            "implicit iter",
-            implicit.replace("let n = ", ""),
-            &["count", "iter", "next"][..],
-        ),
-    ] {
-        let (ws, g) = ws_and_graph(&format!(
-            "global TOTAL: int = {{\n    {body}\n}}\nfn main() {{ print(\"{{TOTAL}}\") }}\n"
-        ));
-        let symbols: Vec<String> = g.instances.iter().map(|i| g.symbol(&ws, i)).collect();
+        let symbols: Vec<_> = g
+            .instances
+            .iter()
+            .filter(|i| g.is_always_emitted_target(i))
+            .map(|i| g.symbol(&ws, i))
+            .collect();
         for name in names {
             assert!(
                 symbols

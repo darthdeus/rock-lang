@@ -593,44 +593,37 @@ fn main() {
 #[test]
 fn realization_never_invents_an_instance() {
     let ws = ws_with_stdlib(REACH);
+    let (g, roots) = graph_for(&ws);
     for spec in [LUAJIT_DESKTOP, JAVASCRIPT_WEB, NATIVE_C64_DESKTOP] {
-        let (g, roots) = graph_for(&ws);
         let view = realize(&ws, &g, spec, &roots);
-        for i in view.retained() {
-            assert!(
-                g.instances.contains(i),
-                "`{}` realized an instance the shared graph does not have: {}",
-                spec.name,
-                g.identity(&ws, i)
-            );
-        }
-        // The accounting is a PARTITION: every shared instance is retained or
-        // has one exclusion cause -- never quietly absent from the view.
-        let retained: std::collections::BTreeSet<Instance> = view.retained().cloned().collect();
-        let excluded: std::collections::BTreeSet<Instance> = view
-            .excluded
-            .iter()
-            .map(|entry| entry.instance.clone())
-            .collect();
-        assert_eq!(
-            excluded.len(),
-            view.excluded.len(),
-            "`{}` recorded an instance as excluded more than once",
-            spec.name
-        );
-        assert!(
-            retained.is_disjoint(&excluded),
-            "`{}` both retained and excluded an instance",
-            spec.name
-        );
-        let accounted: std::collections::BTreeSet<Instance> =
-            retained.union(&excluded).cloned().collect();
-        assert_eq!(
-            accounted, g.instances,
-            "`{}` lost instances between the graph and the view",
-            spec.name
-        );
+        assert_instance_partition(&view, &g);
     }
+}
+
+fn assert_instance_partition(view: &artifact::ArtifactView, graph: &InstanceGraph) {
+    use std::collections::BTreeSet;
+
+    let name = view.spec.name;
+    let retained: BTreeSet<_> = view.retained().cloned().collect();
+    let excluded: BTreeSet<_> = view
+        .excluded
+        .iter()
+        .map(|row| row.instance.clone())
+        .collect();
+    assert_eq!(
+        excluded.len(),
+        view.excluded.len(),
+        "{name}: duplicate excluded instance"
+    );
+    assert!(
+        retained.is_disjoint(&excluded),
+        "{name}: retained and excluded the same instance"
+    );
+    assert_eq!(
+        retained.union(&excluded).cloned().collect::<BTreeSet<_>>(),
+        graph.instances,
+        "{name}: did not account for every shared instance"
+    );
 }
 
 /// A fixture with a declaration nothing calls, so `unreachable` has a
@@ -900,30 +893,8 @@ fn main() { let x = 1; host_tick(x) }
     );
     assert_eq!(c64.shared_instances, g.instances.len());
     assert_eq!(wasm.shared_instances, g.instances.len());
-    for (name, view) in [("C64", &c64), ("Wasm32", &wasm)] {
-        let retained: std::collections::BTreeSet<Instance> = view.retained().cloned().collect();
-        let excluded: std::collections::BTreeSet<Instance> = view
-            .excluded
-            .iter()
-            .map(|entry| entry.instance.clone())
-            .collect();
-        assert_eq!(
-            excluded.len(),
-            view.excluded.len(),
-            "{name} recorded an instance as excluded more than once"
-        );
-        assert!(
-            retained.is_disjoint(&excluded),
-            "{name} both retained and excluded an instance"
-        );
-        assert_eq!(
-            retained
-                .union(&excluded)
-                .cloned()
-                .collect::<std::collections::BTreeSet<_>>(),
-            g.instances,
-            "{name} did not account for every shared instance"
-        );
+    for view in [&c64, &wasm] {
+        assert_instance_partition(view, &g);
     }
 }
 
