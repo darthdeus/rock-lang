@@ -86,6 +86,21 @@ fn validate_one(
         comp_error!(anno.span, "unknown annotation `@{name}`");
     }
     match name.as_str() {
+        "deprecated" => {
+            at(anno, pos, AnnoPos::FnItem)?;
+            if anno.args.len() > 1
+                || anno
+                    .args
+                    .iter()
+                    .any(|arg| arg.name.is_some() || !matches!(arg.value, AnnoValue::String(_)))
+            {
+                comp_error!(
+                    anno.span,
+                    "`@deprecated` takes an optional replacement message string"
+                );
+            }
+            Ok(())
+        }
         "test" => {
             at(anno, pos, AnnoPos::FnItem)?;
             test_args(anno)
@@ -536,6 +551,58 @@ fn test_args(anno: &Annotation) -> Result<(), CompilerError> {
 #[cfg(test)]
 mod tests {
     use super::{TestBackend, parse_test_backends};
+
+    #[test]
+    fn deprecated_accepts_only_an_optional_positional_string_on_functions() {
+        use super::*;
+        use crate::hir::AnnoArg;
+        use skull_parser::Ident;
+
+        let span = Span::new(Ustr::from("<annotation>"), (0, 0), (0, 0), (0, 0));
+        let ident = |name| Ident {
+            name: Ustr::from(name),
+            span,
+        };
+        let mut annotation = Annotation {
+            name: ident("deprecated"),
+            span,
+            args: Vec::new(),
+            resolved_name: None,
+            resolved_ident_list: None,
+        };
+        let names = FxHashSet::default();
+        assert!(
+            validate_annotations(AnnoPos::FnItem, std::slice::from_ref(&annotation), &names)
+                .is_ok()
+        );
+        annotation.args.push(AnnoArg {
+            name: None,
+            value: AnnoValue::String(Ustr::from("use fresh")),
+        });
+        assert!(
+            validate_annotations(AnnoPos::FnItem, std::slice::from_ref(&annotation), &names)
+                .is_ok()
+        );
+        annotation.args[0].name = Some(ident("message"));
+        assert!(
+            validate_annotations(AnnoPos::FnItem, std::slice::from_ref(&annotation), &names)
+                .is_err()
+        );
+        annotation.args[0].name = None;
+        annotation.args[0].value = AnnoValue::Int(1);
+        assert!(
+            validate_annotations(AnnoPos::FnItem, std::slice::from_ref(&annotation), &names)
+                .is_err()
+        );
+        annotation.args[0].value = AnnoValue::String(Ustr::from("use fresh"));
+        annotation.args.push(annotation.args[0].clone());
+        assert!(
+            validate_annotations(AnnoPos::FnItem, std::slice::from_ref(&annotation), &names)
+                .is_err()
+        );
+        annotation.args.clear();
+        assert!(validate_annotations(AnnoPos::Param, &[annotation], &names).is_err());
+    }
 
     #[test]
     fn backends_list_parses_single_and_comma_separated_names() {

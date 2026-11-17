@@ -38,6 +38,31 @@ pub fn setup<'a>(files: &[(&str, &'a str)]) -> (Workspace, FxHashMap<Ustr, &'a s
     (workspace(modules), sources)
 }
 
+pub fn checked_lint(files: &[(&str, &str)], options: &LintOptions) -> Vec<Finding> {
+    let (ws, sources) = setup(files);
+    let warm = warm(&ws);
+    for module in ws.user_modules(&warm) {
+        assert!(
+            module.interface_errors.is_empty(),
+            "{:?}",
+            module.interface_errors
+        );
+        assert!(
+            module.lowering_errors.values().all(Vec::is_empty),
+            "{:?}",
+            module.lowering_errors
+        );
+        if let Some(inference) = ws.inference(module.id) {
+            assert!(
+                inference.errors.values().all(Vec::is_empty),
+                "{:?}",
+                inference.errors
+            );
+        }
+    }
+    bone_lints::lint_workspace(&ws, &warm, true, &sources, options)
+}
+
 /// Lint `files` as a bin package, selecting only `lint`.
 pub fn lint_only(files: &[(&str, &str)], lint: &str) -> Vec<Finding> {
     crate::lint(files, &LintOptions::only([lint.to_owned()]), true)

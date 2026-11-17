@@ -198,6 +198,37 @@ fn reinferred_consumer_refreshes_when_a_callee_changes() {
 }
 
 #[test]
+fn deprecated_findings_refresh_in_reinferred_consumers() {
+    let main = "fn main() { old() }\n";
+    let before = "fn old() {}\n";
+    let after = "@deprecated(\"use fresh\")\nfn old() {}\n";
+    let options = LintOptions::default();
+    let mut cache = seeded_cache(&[("<dep-main>", main), ("<dep-callee>", before)], &options);
+    let (findings, stats) = body_edit(
+        &mut cache,
+        &[("<dep-main>", main), ("<dep-callee>", after)],
+        &options,
+        &["<dep-callee>"],
+        Some("main"),
+        None,
+    );
+    assert_eq!(
+        findings.iter().filter(|f| f.lint == "deprecated").count(),
+        1
+    );
+    assert!(stats.inference_body_requests > 0);
+    let (findings, _) = body_edit(
+        &mut cache,
+        &[("<dep-main>", main), ("<dep-callee>", before)],
+        &options,
+        &["<dep-callee>"],
+        Some("main"),
+        None,
+    );
+    assert!(findings.iter().all(|f| f.lint != "deprecated"));
+}
+
+#[test]
 fn production_only_cache_scans_but_does_not_report_test_files() {
     let parts = [
         ("<production>", "fn main() {}\n"),

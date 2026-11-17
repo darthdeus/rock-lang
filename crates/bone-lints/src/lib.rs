@@ -13,6 +13,9 @@ use rock_core::errors::CompilerErrorLevel;
 use std::collections::BTreeSet;
 use std::hash::Hash;
 
+mod call_lints;
+pub use call_lints::{DEPRECATED, STDLIB_UFCS};
+
 /// An `unused-var` finding: a local binding that is never read.
 #[derive(Clone, Debug)]
 pub(crate) struct UnusedVar {
@@ -164,6 +167,8 @@ pub const KNOWN_LINTS: &[&str] = &[
     TASK_NULL_ABANDON,
     BACKEND_SIBLING_MISMATCH,
     METHOD_SYNTAX,
+    STDLIB_UFCS,
+    DEPRECATED,
     ROW_ESCAPE,
     RAW_INPUT_MIGRATION,
     RAW_INPUT_CLASSIFICATION,
@@ -180,6 +185,7 @@ pub const KNOWN_LINTS: &[&str] = &[
 pub const OPT_IN_LINTS: &[&str] = &[
     BACKEND_SIBLING_MISMATCH,
     METHOD_SYNTAX,
+    STDLIB_UFCS,
     ROW_ESCAPE,
     RAW_INPUT_MIGRATION,
     RAW_INPUT_CLASSIFICATION,
@@ -1850,7 +1856,9 @@ impl IncrementalLintCache {
         let flat_enabled = sel.enabled(UNUSED_VAR) || sel.enabled(UNUSED_PURE_EXPR);
         let inference_enabled = sel.enabled(TRANSMUTE_OF_NULLABLE)
             || sel.enabled(TASK_NULL_ABANDON)
-            || sel.enabled(ROW_ESCAPE);
+            || sel.enabled(ROW_ESCAPE)
+            || sel.enabled(STDLIB_UFCS)
+            || sel.enabled(DEPRECATED);
         let mut flat_targets: FxHashSet<(ModuleId, BodyOwner)> = FxHashSet::default();
         let mut inference_targets: FxHashSet<(ModuleId, BodyOwner)> = if inference_enabled {
             change.reinferred.iter().copied().collect()
@@ -2387,7 +2395,10 @@ fn cacheable_selection(sel: &LintOptions) -> bool {
 }
 
 fn is_inference_lint(lint: &str) -> bool {
-    matches!(lint, TRANSMUTE_OF_NULLABLE | TASK_NULL_ABANDON | ROW_ESCAPE)
+    matches!(
+        lint,
+        TRANSMUTE_OF_NULLABLE | TASK_NULL_ABANDON | ROW_ESCAPE | STDLIB_UFCS | DEPRECATED
+    )
 }
 
 fn finding_offset(finding: &Finding) -> usize {
@@ -2570,6 +2581,9 @@ fn inference_body_findings(
     if sel.enabled(ROW_ESCAPE) {
         let found = row_escapes_in_body(ws, bi, body, tail_sink(module, &owner));
         out.extend(found.iter().map(Finding::of));
+    }
+    if sel.enabled(STDLIB_UFCS) || sel.enabled(DEPRECATED) {
+        out.extend(call_lints::findings(ws, bi, body, sel));
     }
     out
 }
