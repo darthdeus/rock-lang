@@ -6,7 +6,7 @@
 //!  - Tokens: keywords and punctuation resolve to the enclosing construct;
 //!    whitespace resolves to nothing. See hover token resolution contract.
 
-use crate::fixture::{PATH, hover_markup, pos, workspace};
+use crate::fixture::{PATH, assert_text, hover_markup, pos, workspace};
 use bone_query::BoneWorkspace;
 use lsp_types::Position;
 
@@ -143,15 +143,14 @@ fn hover_cases() {
     let overloads = "struct A {}\nstruct B {}\nstruct C {}\nfn foo(a: A) -> int { 1 }\nfn foo(b: B) -> int { 2 }\n";
     let resolved = format!("{overloads}fn main() {{\n  let x = A {{}}\n  let r = foo(x)\n}}\n");
     let unresolved = format!("{overloads}fn main() {{\n  let c = C {{}}\n  let r = foo(c)\n}}\n");
-    // (case, source, needle, offset into it, must contain, must not contain)
-    let cases: &[(&str, &str, &str, usize, &[&str], &[&str])] = &[
+    // (case, source, needle, offset, text fragments; `!` forbids a fragment)
+    let cases: &[(&str, &str, &str, usize, &[&str])] = &[
         (
             "resolved overloaded call lists every overload",
             &resolved,
             "= foo",
             4,
             &["fn foo(a: A) -> int", "fn foo(b: B) -> int"],
-            &[],
         ),
         // With no resolution, the name still shows what shapes exist.
         (
@@ -160,7 +159,6 @@ fn hover_cases() {
             "= foo",
             4,
             &["fn foo(a: A) -> int", "fn foo(b: B) -> int"],
-            &[],
         ),
         // Inference types an assign target `()`; hover shows the binding.
         (
@@ -168,26 +166,19 @@ fn hover_cases() {
             "struct Widget { id: int }\nfn f(acc: Widget, other: Widget) {\nacc = other\n}\n",
             "acc = other",
             1,
-            &["Widget"],
-            &["()"],
+            &["Widget", "!()"],
         ),
         (
             "field ref names the field, not the FieldRef wrapper",
             "struct Mob { health: int, attack_co: int? }\nfn kill_co<T>(o: T, f: FieldRef<T, int?>) {}\nfn r(mob: Mob) {\n    kill_co(mob, .attack_co)\n}\n",
             ".attack_co",
             9,
-            &["attack_co", "field of Mob"],
-            &["FieldRef"],
+            &["attack_co", "field of Mob", "!FieldRef"],
         ),
     ];
-    for (case, src, needle, into, wanted, unwanted) in cases {
+    for (case, src, needle, into, patterns) in cases {
         let h = hover_at(&workspace(src), pos(src, needle, *into));
-        for w in *wanted {
-            assert!(h.contains(w), "{case}: missing {w:?} in {h:?}");
-        }
-        for u in *unwanted {
-            assert!(!h.contains(u), "{case}: unexpected {u:?} in {h:?}");
-        }
+        assert_text(case, &h, patterns);
     }
     let h = hover_at(&workspace(&resolved), pos(&resolved, "= foo", 4));
     assert!(

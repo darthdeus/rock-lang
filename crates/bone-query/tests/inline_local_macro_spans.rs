@@ -1,6 +1,5 @@
-use crate::fixture::{Project, apply_edits, pos};
+use crate::fixture::{Project, apply_edits, assert_no_errors, pos};
 use bone_query::BoneWorkspace;
-use lsp_types::DiagnosticSeverity;
 
 #[test]
 fn inlining_distinguishes_macro_default_and_call_site_spans() {
@@ -28,13 +27,7 @@ fn inlining_distinguishes_macro_default_and_call_site_spans() {
         let mut bone = BoneWorkspace::new();
         bone.update(&project.path("defs.rock"), defs.to_string());
         let diagnostics = bone.update(&main, src.to_string());
-        assert!(
-            diagnostics
-                .iter()
-                .flat_map(|(_, d)| d)
-                .all(|d| { d.severity != Some(DiagnosticSeverity::ERROR) }),
-            "{src}: {diagnostics:?}"
-        );
+        assert_no_errors(&diagnostics);
         let cursor = pos(src, "let y", 4);
         assert!(
             bone.hover(&main, cursor).is_some(),

@@ -1,6 +1,6 @@
 //! Workspace-symbol queries across packages, through the server adapter.
 
-use crate::fixture::Project;
+use crate::fixture::{Project, assert_no_errors};
 use lsp_types::*;
 use rock_lsp::do_workspace_symbols_workspace;
 
@@ -44,14 +44,10 @@ fn package_workspace() -> (Project, rock_lsp::LspWorkspace) {
         ("app/main.rock", app_src),
     ]);
     let mut ws = rock_lsp::LspWorkspace::new();
-    let errors: Vec<_> = ws
+    let diagnostics = ws
         .bone
-        .update(&project.path("app/main.rock"), app_src.to_string())
-        .into_iter()
-        .flat_map(|(_, diagnostics)| diagnostics)
-        .filter(|diagnostic| diagnostic.severity == Some(DiagnosticSeverity::ERROR))
-        .collect();
-    assert!(errors.is_empty(), "fixture must build cleanly: {errors:?}");
+        .update(&project.path("app/main.rock"), app_src.to_string());
+    assert_no_errors(&diagnostics);
     (project, ws)
 }
 

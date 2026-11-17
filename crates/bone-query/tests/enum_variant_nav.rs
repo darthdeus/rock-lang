@@ -2,7 +2,7 @@
 //! Patterns (an AST walk) and construction (HIR nodes) take different paths,
 //! so each is pinned.
 
-use crate::fixture::{PATH, hover_markup, pos, workspace};
+use crate::fixture::{PATH, assert_no_errors, hover_markup, pos, workspace};
 use bone_query::BoneWorkspace;
 use lsp_types::{HoverContents, Position, Range};
 
@@ -113,13 +113,7 @@ fn main() {
     let path = project.path("main.rock");
     let mut b = BoneWorkspace::new();
     let diagnostics = b.update(&path, main.to_string());
-    assert!(
-        diagnostics
-            .iter()
-            .flat_map(|(_, ds)| ds)
-            .all(|d| d.severity != Some(lsp_types::DiagnosticSeverity::ERROR)),
-        "valid qualified constructors: {diagnostics:#?}"
-    );
+    assert_no_errors(&diagnostics);
     for (prefix, file, src, payload) in [
         ("shapes::Shape::", "shapes.rock", shapes, "radius: float"),
         ("Figure::", "shapes.rock", shapes, "radius: float"),

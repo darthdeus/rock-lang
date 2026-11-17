@@ -147,3 +147,32 @@ pub fn hover_markup(bone: &BoneWorkspace, path: &str, pos: Position) -> Option<S
         HoverContents::Markup(m) => m.value,
     })
 }
+
+/// Required text fragments; a `!` prefix forbids a fragment instead.
+#[track_caller]
+pub fn assert_text(case: &str, text: &str, patterns: &[&str]) {
+    for pattern in patterns {
+        let (needle, required) = pattern
+            .strip_prefix('!')
+            .map_or((*pattern, true), |p| (p, false));
+        assert_eq!(
+            text.contains(needle),
+            required,
+            "{case}: {pattern:?} in {text:?}"
+        );
+    }
+}
+
+/// Every file in an update must be free of errors.
+#[track_caller]
+pub fn assert_no_errors(per_file: &[(String, Vec<Diagnostic>)]) {
+    let errors: Vec<_> = per_file
+        .iter()
+        .flat_map(|(path, ds)| {
+            ds.iter()
+                .filter(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR))
+                .map(move |d| (path, d))
+        })
+        .collect();
+    assert!(errors.is_empty(), "{errors:#?}");
+}

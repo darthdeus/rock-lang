@@ -1,7 +1,8 @@
 //! End-to-end tests for the bone-backed LSP facade (`bone_query`): feed a
 //! file in, query it, assert the LSP-shaped result.
 
-use crate::fixture::{PATH, Project, diagnostics_in, hover_markup, workspace};
+use crate::completion::{assert_labels, complete_in, labels_of};
+use crate::fixture::{PATH, Project, assert_text, diagnostics_in, hover_markup, workspace};
 use crate::label_asserts::assert_offers;
 use bone_query::BoneWorkspace;
 use lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
@@ -16,78 +17,68 @@ fn hover_cases() {
     let mob = "struct Mob { hp: int }\n";
     let signature = format!("{mob}fn use_it(x: Mob) -> Mob {{\n  x\n}}\n");
     let enum_match = "enum MobKind { Skeleton, Zombie }\nfn name(k: MobKind) -> string {\n  match k {\n    MobKind::Skeleton => \"s\"\n    MobKind::Zombie => \"z\"\n  }\n}\n";
-    // (case, source, position, must contain, must not contain)
-    let cases: &[(&str, &str, (u32, u32), &[&str], &[&str])] = &[
+    // (case, source, position, text fragments; `!` forbids a fragment)
+    let cases: &[(&str, &str, (u32, u32), &[&str])] = &[
         (
             "let binding",
             "fn main() {\n  let x = 1\n}\n",
             (1, 6),
             &["int"],
-            &[],
         ),
         (
             "uint keeps its signedness",
             "fn main() {\n  let x: uint = 42\n  x\n}\n",
             (1, 6),
-            &["uint"],
-            &["Type: int"],
+            &["uint", "!Type: int"],
         ),
         (
             "type hole reports kind and scope",
             "fn main() {\n  let count = 5\n  let x: ? = count + 1\n}\n",
             (2, 9),
             &["Type hole", "count: int"],
-            &[],
         ),
         (
             "expression hole reports expected type and scope",
             "fn main() {\n  let a = 1\n  let x: int = ?\n}\n",
             (2, 15),
             &["Expression hole expecting: int", "a: int"],
-            &[],
         ),
         (
             "global declaration",
             "global score: int\nfn main() {}\n",
             (0, 9),
             &["int"],
-            &[],
         ),
         (
             "body type annotation",
             &format!("{mob}fn main() {{\n  let m: Mob = Mob {{ hp: 1 }}\n}}\n"),
             (2, 10),
             &["struct Mob", "hp: int"],
-            &[],
         ),
         (
             "param type",
             &signature,
             (1, 14),
             &["struct Mob", "hp: int"],
-            &[],
         ),
         (
             "return type",
             &signature,
             (1, 22),
             &["struct Mob", "hp: int"],
-            &[],
         ),
         (
             "struct field declaration",
             "struct FixVec2 { x: float, y: float }\nstruct Mob {\n  pos: FixVec2,\n  dir: int,\n}\n",
             (2, 3),
             &["pos: FixVec2 (field of Mob)"],
-            &[],
         ),
         // A newtype's generated `__op_add` shares the newtype's name span.
         (
             "newtype declaration",
             "newtype Health(int)\nfn main() {}\n",
             (0, 9),
-            &["newtype Health(int)"],
-            &["__op"],
+            &["newtype Health(int)", "!__op"],
         ),
         (
             "record pattern head",
@@ -96,21 +87,18 @@ fn hover_cases() {
             ),
             (3, 5),
             &["struct Mob"],
-            &[],
         ),
         (
             "enum variant in a pattern",
             enum_match,
             (3, 16),
-            &["MobKind::Skeleton"],
-            &["string"],
+            &["MobKind::Skeleton", "!string"],
         ),
         (
             "enum qualifier in a pattern",
             enum_match,
             (3, 5),
             &["enum MobKind", "Skeleton", "Zombie"],
-            &[],
         ),
         // A value-less global has no inference body.
         (
@@ -118,31 +106,23 @@ fn hover_cases() {
             &format!("{mob}global boss: Mob\nfn main() {{}}\n"),
             (1, 14),
             &["struct Mob", "hp: int"],
-            &[],
         ),
         (
             "enum declaration",
             "enum Color { Red, Green }\nfn main() {}\n",
             (0, 6),
             &["Color"],
-            &[],
         ),
         (
             "callee shows param defaults",
             "fn plot(x: int, y: int = 0) {\n}\nfn main() {\n  plot(1)\n}\n",
             (3, 3),
             &["y: int = 0"],
-            &[],
         ),
     ];
-    for (case, src, (line, ch), wanted, unwanted) in cases {
+    for (case, src, (line, ch), patterns) in cases {
         let text = hover_text(&workspace(src), Position::new(*line, *ch));
-        for w in *wanted {
-            assert!(text.contains(w), "{case}: missing {w:?} in {text:?}");
-        }
-        for u in *unwanted {
-            assert!(!text.contains(u), "{case}: unexpected {u:?} in {text:?}");
-        }
+        assert_text(case, &text, patterns);
     }
 }
 
@@ -527,94 +507,62 @@ fn completion_offers_global_namespace_by_fuzzy_prefix() {
 
 #[test]
 fn completion_cases() {
-    // (case, source, position, offered labels, absent labels)
-    let cases: &[(&str, &str, (u32, u32), &[&str], &[&str])] = &[
+    // (case, source with cursor, label patterns; `!` forbids a label)
+    let cases: &[(&str, &str, &[&str])] = &[
         (
             "in-scope local",
-            "fn f(count: int) -> int {\n  let total = 5\n  t\n}\n",
-            (2, 3),
+            "fn f(count: int) -> int {\n  let total = 5\n  t<|>\n}\n",
             &["total"],
-            &[],
         ),
         (
             "in-scope param",
-            "fn f(count: int) -> int {\n  let total = 5\n  c\n}\n",
-            (2, 3),
+            "fn f(count: int) -> int {\n  let total = 5\n  c<|>\n}\n",
             &["count"],
-            &[],
         ),
         (
             "local declared after the cursor",
-            "fn f() -> int {\n  l\n  let later = 5\n  later\n}\n",
-            (1, 3),
-            &[],
-            &["later"],
+            "fn f() -> int {\n  l<|>\n  let later = 5\n  later\n}\n",
+            &["!later"],
         ),
         // The trigger `.` breaks the body's syntax.
         (
             "fields on a broken dot",
-            "struct Point { x: int, y: int }\nfn f(p: Point) {\n  p.\n}\n",
-            (2, 4),
+            "struct Point { x: int, y: int }\nfn f(p: Point) {\n  p.<|>\n}\n",
             &["x: int", "y: int"],
-            &[],
         ),
         (
             "chained field of a struct-literal let",
-            "struct FixVec2 { x: float, y: float }\nstruct Player { pos: FixVec2, name: string }\nfn main() {\n  let p = Player { pos: FixVec2 { x: 0.0, y: 0.0 }, name: \"h\" }\n  p.pos.\n}\n",
-            (4, 8),
+            "struct FixVec2 { x: float, y: float }\nstruct Player { pos: FixVec2, name: string }\nfn main() {\n  let p = Player { pos: FixVec2 { x: 0.0, y: 0.0 }, name: \"h\" }\n  p.pos.<|>\n}\n",
             &["x: float"],
-            &[],
         ),
         (
             "field prefix filters members",
-            "struct Player { position_x: float, health: float }\nfn foo(player: Player) {\n  player.pos\n}\n",
-            (2, 12),
-            &["position_x: float"],
-            &["health: float"],
+            "struct Player { position_x: float, health: float }\nfn foo(player: Player) {\n  player.pos<|>\n}\n",
+            &["position_x: float", "!health: float"],
         ),
         (
             "for-loop variable takes the element type",
-            "struct Item { name: string, count: int }\nfn main() {\n  let items: [Item] = vec_new()\n  for item in items {\n    item.\n  }\n}\n",
-            (4, 9),
+            "struct Item { name: string, count: int }\nfn main() {\n  let items: [Item] = vec_new()\n  for item in items {\n    item.<|>\n  }\n}\n",
             &["name: string", "count: int"],
-            &[],
         ),
         (
             "qualified enum lists variants",
-            "enum Direction { Up, Down, Left, Right }\nfn main() {\n  let d = Direction::\n}\n",
-            (2, 21),
+            "enum Direction { Up, Down, Left, Right }\nfn main() {\n  let d = Direction::<|>\n}\n",
             &["Up", "Down", "Left", "Right"],
-            &[],
         ),
         (
             "match binding takes the payload type",
-            "struct Point { x: int, y: int }\nenum Opt { None, Some(Point) }\nfn main() {\n  let o = Opt::Some(Point { x: 1, y: 2 })\n  match o {\n    Opt::Some(p) => p.\n    Opt::None => {}\n  }\n}\n",
-            (5, 22),
+            "struct Point { x: int, y: int }\nenum Opt { None, Some(Point) }\nfn main() {\n  let o = Opt::Some(Point { x: 1, y: 2 })\n  match o {\n    Opt::Some(p) => p.<|>\n    Opt::None => {}\n  }\n}\n",
             &["x: int", "y: int"],
-            &[],
         ),
         (
             "record enum variant fields",
-            "enum Effect { Bandage { duration: float, heal_amount: int }, Other(int) }\nfn main() {\n  let e = Effect::Bandage { \n}\n",
-            (2, 27),
+            "enum Effect { Bandage { duration: float, heal_amount: int }, Other(int) }\nfn main() {\n  let e = Effect::Bandage {<|> \n}\n",
             &["duration: float", "heal_amount: int"],
-            &[],
         ),
     ];
-    for (case, src, (line, ch), wanted, unwanted) in cases {
-        let labels = completion_labels(src, *line, *ch);
-        for w in *wanted {
-            assert!(
-                labels.contains(&w.to_string()),
-                "{case}: no `{w}` in {labels:?}"
-            );
-        }
-        for u in *unwanted {
-            assert!(
-                !labels.contains(&u.to_string()),
-                "{case}: `{u}` in {labels:?}"
-            );
-        }
+    for (case, marked, patterns) in cases {
+        assert_labels(case, &labels_of(&complete_in(PATH, marked)), patterns);
     }
 }
 

@@ -3,8 +3,8 @@
 //! follows what the resolver recorded -- module paths, aliases, globs and
 //! re-exports -- to the defining item.
 
-use crate::completion::{assert_invariants, find, labels_of};
-use crate::fixture::{Project, covered, position_of_offset};
+use crate::completion::{assert_invariants, assert_labels, find, labels_of};
+use crate::fixture::{Project, assert_no_errors, covered, position_of_offset};
 use crate::label_asserts::{assert_lacks, assert_offers};
 use bone_query::BoneWorkspace;
 use lsp_types::Position;
@@ -128,15 +128,16 @@ impl V1Project {
     /// real regression, not a broken fixture.
     pub fn open(&self) -> BoneWorkspace {
         let (bone, diags) = self.0.open("main.rock");
-        assert!(
-            diags
-                .iter()
-                .flat_map(|(_, ds)| ds)
-                .all(|d| { d.severity != Some(lsp_types::DiagnosticSeverity::ERROR) }),
-            "the fixture package must build clean: {diags:#?}"
-        );
+        assert_no_errors(&diags);
         bone
     }
+}
+
+fn opened() -> (V1Project, BoneWorkspace, String) {
+    let project = V1Project::new();
+    let bone = project.open();
+    let main = project.path("main.rock");
+    (project, bone, main)
 }
 
 /// The LSP position of the `nth` (0-based) occurrence of `needle` in `text`,
@@ -320,9 +321,7 @@ fn definition_line(
 
 #[test]
 fn an_inline_module_use_item_records_each_path_segment() {
-    let project = V1Project::new();
-    let mut bone = project.open();
-    let main = project.path("main.rock");
+    let (_project, mut bone, main) = opened();
     let text = format!(
         "{MAIN}\n\
          pub mod inline {{\n\
@@ -374,9 +373,7 @@ fn hover_on_v1_signature_types_records_each_nominal_spelling() {
 /// segments, shifted with the text under them.
 #[test]
 fn segments_after_a_body_edit_still_navigate() {
-    let project = V1Project::new();
-    let mut bone = project.open();
-    let main = project.path("main.rock");
+    let (_project, mut bone, main) = opened();
     let edited = MAIN.replace(
         "    let a = shapes::inner::depth()\n",
         "    let a = shapes::inner::depth()\n    let z = 1\n",
@@ -418,9 +415,7 @@ fn complete_in_sizes(typed: &str) -> Vec<lsp_types::CompletionItem> {
 }
 
 fn complete_at_anchor(typed: &str, anchor: &str) -> Vec<lsp_types::CompletionItem> {
-    let project = V1Project::new();
-    let mut bone = project.open();
-    let main = project.path("main.rock");
+    let (_project, mut bone, main) = opened();
     let text = with_completion(typed, anchor);
     bone.update(&main, text.clone());
     let items = complete_at(&mut bone, &main, &text, typed);
@@ -499,15 +494,7 @@ fn bare_completion_offers_what_the_tiers_bind_by_their_bound_names() {
 #[test]
 fn bare_completion_of_an_unimported_accessible_name_carries_an_import_edit() {
     let items = complete_in_main("let q = dept");
-    let depth = items
-        .iter()
-        .find(|c| c.label == "depth")
-        .unwrap_or_else(|| {
-            panic!(
-                "`depth` is accessible and offered with an import: {:?}",
-                labels(&items)
-            )
-        });
+    let depth = find(&items, "depth");
     let edits = depth
         .additional_text_edits
         .as_ref()
@@ -530,51 +517,33 @@ fn bare_completion_of_a_bound_name_carries_no_import_edit() {
 }
 
 #[test]
-fn v1_call_through_uses_bound_spelling_and_hides_private_globals() {
-    let items = complete_in_main("let q = boxwidthb");
-    let labels = labels(&items);
-    assert_offers(&labels, &["box_width(BOX)"]);
-    assert!(
-        !labels.iter().any(|label| label.contains("SECRET_BOX")),
-        "private global leaked: {labels:?}"
-    );
-    assert!(
-        !labels.iter().any(|label| label.contains("app::shapes::")),
-        "DefKey leaked: {labels:?}"
-    );
-}
-
-#[test]
-fn v1_reach_completion_uses_bound_spelling_and_field_visibility() {
-    let items = complete_in_sizes("widthvaluebw");
-    let labels = labels(&items);
-    assert_offers(&labels, &["width_value(BOX.w)"]);
-    assert!(
-        !labels.iter().any(|label| label.contains("b.secret")),
-        "private field leaked: {labels:?}"
-    );
-    assert!(
-        !labels.iter().any(|label| label.contains("app::shapes::")),
-        "DefKey leaked: {labels:?}"
-    );
-}
-
-#[test]
-fn v1_call_through_filters_private_fields_on_public_global_roots() {
-    let items = complete_in_sizes("widthvalues");
-    let labels = labels(&items);
-    assert_lacks(&labels, &["width_value(BOX.secret)"]);
-    assert!(
-        !labels.iter().any(|label| label.contains("app::shapes::")),
-        "DefKey leaked: {labels:?}"
-    );
-}
-
-#[test]
-fn v1_call_through_hides_inaccessible_callable_members() {
-    let items = complete_in_main("let q = hiddenwidthb");
-    let labels = labels(&items);
-    assert_lacks(&labels, &["hidden_width(BOX)"]);
+fn synthesized_completions_respect_bound_spelling_and_visibility() {
+    let cases: &[(bool, &str, &[&str])] = &[
+        (
+            false,
+            "let q = boxwidthb",
+            &["box_width(BOX)", "!*SECRET_BOX*", "!*app::shapes::*"],
+        ),
+        (
+            true,
+            "widthvaluebw",
+            &["width_value(BOX.w)", "!*b.secret*", "!*app::shapes::*"],
+        ),
+        (
+            true,
+            "widthvalues",
+            &["!width_value(BOX.secret)", "!*app::shapes::*"],
+        ),
+        (false, "let q = hiddenwidthb", &["!hidden_width(BOX)"]),
+    ];
+    for (sizes, typed, patterns) in cases {
+        let items = if *sizes {
+            complete_in_sizes(typed)
+        } else {
+            complete_in_main(typed)
+        };
+        assert_labels(typed, &labels(&items), patterns);
+    }
 }
 
 #[test]
@@ -615,9 +584,7 @@ fn changing_v1_visibility_invalidates_completion_caches() {
 
 #[test]
 fn changing_v1_import_alias_invalidates_bound_completion_cache() {
-    let project = V1Project::new();
-    let mut bone = project.open();
-    let main = project.path("main.rock");
+    let (_project, mut bone, main) = opened();
     let text = with_completion("let q = surf", MAIN_ANCHOR);
     bone.update(&main, text.clone());
     let pos = pos_of(&text, "let q = surf", 0, "let q = surf".len());
@@ -650,10 +617,7 @@ fn changing_v1_import_alias_invalidates_bound_completion_cache() {
         !after.iter().any(|item| item.label == "surface"),
         "old alias survived bound cache"
     );
-    let surf = after
-        .iter()
-        .find(|item| item.label == "surf")
-        .expect("new alias is offered");
+    let surf = find(&after, "surf");
     assert_eq!(surf.detail.as_deref(), Some("fn surf(w: int) -> int"));
 }
 
@@ -674,9 +638,7 @@ fn aliased_callable_completion_carries_signature_detail() {
 
 #[test]
 fn v1_global_completion_detail_survives_body_updates() {
-    let project = V1Project::new();
-    let mut bone = project.open();
-    let main = project.path("main.rock");
+    let (_project, mut bone, main) = opened();
     let text = with_completion("let q = LIM", MAIN_ANCHOR);
     bone.update(&main, text.clone());
     let marker = "let q = LIM";
@@ -931,15 +893,7 @@ fn no_completion_in_a_v1_file_spells_a_def_key() {
     let text = std::fs::read_to_string(&source).expect("chess completion fixture is readable");
     let mut bone = BoneWorkspace::new();
     let diags = bone.update(&file, text.clone());
-    let errors: Vec<_> = diags
-        .iter()
-        .flat_map(|(_, ds)| ds)
-        .filter(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR))
-        .collect();
-    assert!(
-        errors.is_empty(),
-        "fixture package must build clean: {errors:#?}"
-    );
+    assert_no_errors(&diags);
     let at = pos_of(&text, "ch_type(p)", 0, 4);
     let items = bone.completion(&file, at);
     assert!(!items.is_empty());
@@ -966,12 +920,7 @@ fn a_module_alias_segment_lands_on_the_aliased_module() {
     std::fs::write(&main, &main_text).unwrap();
     let mut bone = BoneWorkspace::new();
     let diags = bone.update(&main, main_text.clone());
-    let errors: Vec<_> = diags
-        .iter()
-        .flat_map(|(_, d)| d.iter())
-        .filter(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR))
-        .collect();
-    assert!(errors.is_empty(), "{errors:#?}");
+    assert_no_errors(&diags);
     assert_eq!(
         definition_line(&bone, &main, &main_text, "deep::depth", 0, 1),
         ("shapes_inner.rock".into(), 0)
@@ -988,9 +937,7 @@ fn a_module_alias_segment_lands_on_the_aliased_module() {
 
 #[test]
 fn an_import_edit_goes_in_sorted_position_among_the_uses() {
-    let project = V1Project::new();
-    let mut bone = project.open();
-    let main = project.path("main.rock");
+    let (_project, mut bone, main) = opened();
     let head = "use shapes::area as surface;\nuse shapes::*;\nuse shapes::Box as Crate;\n";
     let sorted = "use shapes::*;\nuse shapes::Box as Crate;\nuse shapes::area as surface;\nuse shapes::perimeter;\n";
     assert!(MAIN.contains(head));
@@ -1170,13 +1117,7 @@ fn main() {
 
     let mut bone = BoneWorkspace::new();
     let diags = bone.update(&project.path("main.rock"), GET_MAIN.to_string());
-    assert!(
-        diags
-            .iter()
-            .flat_map(|(_, d)| d)
-            .all(|d| d.severity != Some(lsp_types::DiagnosticSeverity::ERROR)),
-        "{diags:#?}"
-    );
+    assert_no_errors(&diags);
     let shapes = project.path("shapes.rock");
     let edits = rename_edits(&bone, &shapes, pos_of(GET_SHAPES, "get", 0, 1), "fetch");
     let want: Vec<(String, u32, String, String)> = vec![
