@@ -305,6 +305,47 @@ impl<'a> BodyCtx<'a> {
         }
     }
 
+    fn for_each_value_carrier(&self, e: Idx<Expr>, visit: &mut impl FnMut(Idx<Expr>)) {
+        match &self.body.expr_arena[e] {
+            Expr::FieldAccess { base, .. }
+            | Expr::SafeNav { base, .. }
+            | Expr::TupleIndex { tuple: base, .. }
+            | Expr::As { value: base, .. } => visit(*base),
+            Expr::Block {
+                tail: Some(tail), ..
+            } => visit(*tail),
+            Expr::If {
+                then_branch,
+                else_branch,
+                ..
+            }
+            | Expr::IfLet {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                visit(*then_branch);
+                if let Some(branch) = else_branch {
+                    visit(*branch);
+                }
+            }
+            Expr::Match { arms, .. } => {
+                for arm in *arms {
+                    visit(self.body.match_arm_arena[arm].body);
+                }
+            }
+            Expr::BinOp {
+                op: BinOp::NullCoalesce,
+                lhs,
+                rhs,
+            } => {
+                visit(*lhs);
+                visit(*rhs);
+            }
+            _ => {}
+        }
+    }
+
     fn ref_params(&self, e: Idx<Expr>, out: &mut BTreeSet<u16>, seen: &mut FxHashSet<Idx<Expr>>) {
         if !seen.insert(e) {
             return;
@@ -318,47 +359,12 @@ impl<'a> BodyCtx<'a> {
                     self.ref_params(value, out, seen);
                 }
             }
-            Expr::FieldAccess { base, .. }
-            | Expr::SafeNav { base, .. }
-            | Expr::TupleIndex { tuple: base, .. }
-            | Expr::As { value: base, .. } => self.ref_params(base, out, seen),
-            Expr::Block {
-                tail: Some(tail), ..
-            } => self.ref_params(tail, out, seen),
-            Expr::If {
-                then_branch,
-                else_branch,
-                ..
-            }
-            | Expr::IfLet {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                self.ref_params(then_branch, out, seen);
-                if let Some(branch) = else_branch {
-                    self.ref_params(branch, out, seen);
-                }
-            }
-            Expr::Match { arms, .. } => {
-                for arm in arms {
-                    self.ref_params(self.body.match_arm_arena[arm].body, out, seen);
-                }
-            }
-            Expr::BinOp {
-                op: BinOp::NullCoalesce,
-                lhs,
-                rhs,
-            } => {
-                self.ref_params(lhs, out, seen);
-                self.ref_params(rhs, out, seen);
-            }
             Expr::Call { .. } | Expr::SafeNavCall { .. } => {
                 for &arg in self.bi.ref_call_args.get(&e).into_iter().flatten() {
                     self.ref_params(arg, out, seen);
                 }
             }
-            _ => {}
+            _ => self.for_each_value_carrier(e, &mut |child| self.ref_params(child, out, seen)),
         }
     }
 
@@ -376,13 +382,13 @@ impl<'a> BodyCtx<'a> {
         }
     }
 
-    fn call_args(&self, call: Idx<Expr>) -> Option<Vec<Idx<Expr>>> {
+    fn call_args(&self, call: Idx<Expr>) -> Vec<Idx<Expr>> {
         match &self.body.expr_arena[call] {
-            Expr::Call { args, .. } => Some((*args).into_iter().collect()),
+            Expr::Call { args, .. } => (*args).into_iter().collect(),
             Expr::SafeNavCall { receiver, args, .. } => {
-                Some(std::iter::once(*receiver).chain(*args).collect())
+                std::iter::once(*receiver).chain(*args).collect()
             }
-            _ => None,
+            _ => unreachable!("call arguments requested for a non-call"),
         }
     }
 
@@ -467,7 +473,7 @@ impl<'a> BodyCtx<'a> {
             Some(bindings) => bindings.iter().map(|&ty| self.key(ty)).collect(),
             None => Vec::new(),
         };
-        let args = self.bind_args(function, &self.call_args(call).unwrap_or_default());
+        let args = self.bind_args(function, &self.call_args(call));
         CallSite::Known(Edge {
             callee,
             generics,
@@ -512,11 +518,6 @@ impl<'a> BodyCtx<'a> {
                     self.element_roots_inner(value, out, seen);
                 }
             }
-            Expr::FieldAccess { base, .. } | Expr::SafeNav { base, .. } => {
-                self.element_roots_inner(*base, out, seen)
-            }
-            Expr::TupleIndex { tuple, .. } => self.element_roots_inner(*tuple, out, seen),
-            Expr::As { value, .. } => self.element_roots_inner(*value, out, seen),
             Expr::Index { base, .. } => match self.element_key(*base) {
                 Some(key) => out.push(Root {
                     key,
@@ -524,37 +525,6 @@ impl<'a> BodyCtx<'a> {
                 }),
                 None => self.element_roots_inner(*base, out, seen),
             },
-            Expr::BinOp {
-                op: BinOp::NullCoalesce,
-                lhs,
-                rhs,
-            } => {
-                self.element_roots_inner(*lhs, out, seen);
-                self.element_roots_inner(*rhs, out, seen);
-            }
-            Expr::Block {
-                tail: Some(tail), ..
-            } => self.element_roots_inner(*tail, out, seen),
-            Expr::If {
-                then_branch,
-                else_branch,
-                ..
-            }
-            | Expr::IfLet {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                self.element_roots_inner(*then_branch, out, seen);
-                if let Some(else_branch) = else_branch {
-                    self.element_roots_inner(*else_branch, out, seen);
-                }
-            }
-            Expr::Match { arms, .. } => {
-                for arm in *arms {
-                    self.element_roots_inner(self.body.match_arm_arena[arm].body, out, seen);
-                }
-            }
             Expr::Call { .. } | Expr::SafeNavCall { .. } => {
                 if let Some(target) = self.ty(e).and_then(|ty| ref_target(self.ws, self.bi, ty)) {
                     // A generic summary may discover Arena<T> before T is
@@ -575,7 +545,7 @@ impl<'a> BodyCtx<'a> {
                             });
                         }
                     }
-                    for arg in self.call_args(e).unwrap_or_default() {
+                    for arg in self.call_args(e) {
                         if let Some(element) = self
                             .ty(arg)
                             .and_then(|ty| arena_element(self.ws, Some(self.bi), ty))
@@ -598,7 +568,8 @@ impl<'a> BodyCtx<'a> {
                     self.element_roots_inner(arg, out, seen);
                 }
             }
-            _ => {}
+            _ => self
+                .for_each_value_carrier(e, &mut |child| self.element_roots_inner(child, out, seen)),
         }
     }
 }
@@ -1223,7 +1194,7 @@ impl<'a> Program<'a> {
     ) -> Effect {
         let mut effect = effects[&call].clone();
         let taken = ctx.body.expr_spans[ref_arg];
-        for arg in ctx.call_args(call).unwrap_or_default() {
+        for arg in ctx.call_args(call) {
             let span = ctx.body.expr_spans[arg];
             if span.offset_range().0 <= taken.offset_range().0 {
                 continue;

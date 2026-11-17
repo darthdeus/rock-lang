@@ -983,9 +983,7 @@ fn is_type_publicly_accessible(
     false
 }
 
-/// One type an exported definition's interface names: the nominal it
-/// requires, why, and whether that nominal supports the exporter's public
-/// audience.
+/// One inaccessible type an exported definition's interface names.
 struct ClosureRequirement {
     /// The nominal type's key.
     required: Ustr,
@@ -994,7 +992,6 @@ struct ClosureRequirement {
     /// `type of exported global`.
     reason: &'static str,
     span: Span,
-    satisfied: bool,
 }
 
 type ExportReachability =
@@ -1009,76 +1006,83 @@ fn export_reachability(ws: &Workspace) -> ExportReachability {
         .collect()
 }
 
-/// The [`ClosureRequirement`]s one exported definition imposes; none for a
-/// definition that is not exported.
-fn api_closure_requirements_of(
+/// The first inaccessible type required by one exported definition.
+fn api_closure_failure_of(
     ws: &Workspace,
     reachability: &ExportReachability,
     def_key: &Ustr,
     meta: &bone_core::modules::DefMeta,
-) -> Vec<ClosureRequirement> {
-    let mut out = Vec::new();
-    {
-        let pkg_id = meta.package;
-        let Some((reachable_modules, reachable_defs)) = reachability.get(&pkg_id) else {
-            return out;
-        };
+) -> std::ops::ControlFlow<ClosureRequirement> {
+    let pkg_id = meta.package;
+    let Some((reachable_modules, reachable_defs)) = reachability.get(&pkg_id) else {
+        return std::ops::ControlFlow::Continue(());
+    };
 
-        let module_reachable =
-            ws.ns.package(pkg_id).is_some() && reachable_modules.contains(&meta.node);
-        let is_exported = match meta.kind {
-            bone_core::modules::DefKind::Callable => {
-                // Reachability first: it is two set lookups, and most
-                // callables are not reachable from their package's root.
-                (reachable_defs.contains(def_key) || module_reachable)
-                    && ws.functions_by_name.get(def_key).is_some_and(|fns| {
-                        fns.iter()
-                            .any(|&(mid, fid)| ws.callable_member_is_public(*def_key, mid, fid))
-                    })
-            }
-            _ => {
-                reachable_defs.contains(def_key)
-                    || (matches!(meta.vis, NsVisibility::Pub) && module_reachable)
-            }
-        };
-
-        if !is_exported {
-            return out;
+    let module_reachable =
+        ws.ns.package(pkg_id).is_some() && reachable_modules.contains(&meta.node);
+    let is_exported = match meta.kind {
+        bone_core::modules::DefKind::Callable => {
+            // Reachability first: it is two set lookups, and most
+            // callables are not reachable from their package's root.
+            (reachable_defs.contains(def_key) || module_reachable)
+                && ws.functions_by_name.get(def_key).is_some_and(|fns| {
+                    fns.iter()
+                        .any(|&(mid, fid)| ws.callable_member_is_public(*def_key, mid, fid))
+                })
         }
+        _ => {
+            reachable_defs.contains(def_key)
+                || (matches!(meta.vis, NsVisibility::Pub) && module_reachable)
+        }
+    };
 
-        let mut need = |ty: TyId, span: Span, reason: &'static str| {
-            collect_type_closure(ws, ty, &mut |required| {
-                out.push(ClosureRequirement {
+    let need = |ty: TyId, span: Span, reason: &'static str| {
+        let mut failure = None;
+        ws.type_any(None, ty, &mut |node| {
+            if let TypeExpr::App {
+                ctor: TypeCtor::Nominal(required),
+                ..
+            } = node
+                && !is_type_publicly_accessible(
+                    ws,
+                    pkg_id,
+                    required,
+                    reachable_modules,
+                    reachable_defs,
+                )
+            {
+                failure = Some(ClosureRequirement {
                     required,
                     reason,
                     span,
-                    satisfied: is_type_publicly_accessible(
-                        ws,
-                        pkg_id,
-                        required,
-                        reachable_modules,
-                        reachable_defs,
-                    ),
                 });
-            });
-        };
+                return true;
+            }
+            false
+        });
+        failure.map_or(
+            std::ops::ControlFlow::Continue(()),
+            std::ops::ControlFlow::Break,
+        )
+    };
 
+    if is_exported {
         match meta.kind {
             bone_core::modules::DefKind::Callable => {
                 if let Some(fn_list) = ws.functions_by_name.get(def_key) {
-                    for &(mid, fid) in fn_list.iter() {
+                    for &(mid, fid) in fn_list {
                         if !ws.callable_member_is_public(*def_key, mid, fid) {
                             continue;
                         }
                         let f = &ws.module(mid).functions[fid];
                         for p in &f.param_decls {
-                            need(p.ty, f.span, "public function");
+                            need(p.ty, f.span, "public function")?;
                         }
                         if let Some(ret) = f.return_ty {
-                            need(ret, f.span, "public function");
+                            need(ret, f.span, "public function")?;
                         }
                         for bound_ty in f.generic_bounds.iter().flatten() {
-                            need(*bound_ty, f.span, "generic bound");
+                            need(*bound_ty, f.span, "generic bound")?;
                         }
                     }
                 }
@@ -1088,7 +1092,7 @@ fn api_closure_requirements_of(
                     let s = &ws.module(sid.module).structs[sid.def];
                     for f in &s.fields {
                         if f.read_vis == NsVisibility::Pub {
-                            need(f.ty, f.span, "field type of exported record");
+                            need(f.ty, f.span, "field type of exported record")?;
                         }
                     }
                 } else if let Some(eid) = ws.enums_by_name.get(def_key) {
@@ -1098,19 +1102,19 @@ fn api_closure_requirements_of(
                             VariantPayload::Unit => {}
                             VariantPayload::Tuple(tys) => {
                                 for ty in tys {
-                                    need(*ty, v.name_span, "payload of exported enum");
+                                    need(*ty, v.name_span, "payload of exported enum")?;
                                 }
                             }
                             VariantPayload::Record(fields) => {
                                 for f in fields {
-                                    need(f.ty, f.span, "payload of exported enum");
+                                    need(f.ty, f.span, "payload of exported enum")?;
                                 }
                             }
                         }
                     }
                 } else if let Some(nid) = ws.newtypes_by_name.get(def_key) {
                     let nt = &ws.module(nid.module).newtypes[nid.def];
-                    need(nt.wrapped, nt.span, "payload of exported newtype");
+                    need(nt.wrapped, nt.span, "payload of exported newtype")?;
                 }
             }
             bone_core::modules::DefKind::Global => {
@@ -1119,27 +1123,13 @@ fn api_closure_requirements_of(
                     .get(&meta.name)
                     .or_else(|| ws.globals_by_name.get(def_key))
                 {
-                    need(ty, meta.span, "type of exported global");
+                    need(ty, meta.span, "type of exported global")?;
                 }
             }
             _ => {}
         }
     }
-    out
-}
-
-/// Every nominal constructor inside `ty`, outermost first.
-fn collect_type_closure(ws: &Workspace, ty: TyId, found: &mut impl FnMut(Ustr)) {
-    ws.type_any(None, ty, &mut |node| {
-        if let TypeExpr::App {
-            ctor: TypeCtor::Nominal(name),
-            ..
-        } = node
-        {
-            found(name);
-        }
-        false
-    });
+    std::ops::ControlFlow::Continue(())
 }
 
 /// Public-API type-closure gate: reject the first type a public interface names that does
@@ -1148,13 +1138,10 @@ pub fn pass_validate_api_closure(ws: &Workspace) -> Result<(), CompilerError> {
     if ws.fragment_scopes.is_empty() || ws.ns.packages.is_empty() {
         return Ok(());
     }
-    // The first unsatisfied requirement in map order, without keeping the
-    // satisfied ones.
+    // The first failure in map order.
     let reachability = export_reachability(ws);
     let unsatisfied = ws.defs.par_iter().find_map_first(|(def_key, meta)| {
-        api_closure_requirements_of(ws, &reachability, def_key, meta)
-            .into_iter()
-            .find(|r| !r.satisfied)
+        api_closure_failure_of(ws, &reachability, def_key, meta).break_value()
     });
     if let Some(r) = unsatisfied {
         let display_name = ws
@@ -1199,7 +1186,7 @@ pub fn semantic_pass_without_closure_gate(
     modules: &mut ModuleSet,
     aliases: &bone_core::modules::NsAliases,
 ) -> Result<Workspace, CompilerError> {
-    semantic_pass_after_gate(modules, aliases, &|_| Vec::new()).map_err(PassFailure::ungated)
+    semantic_pass_owned(modules, aliases)
 }
 
 /// A check of the un-expanded modules whose diagnostics come before any the
@@ -1214,16 +1201,6 @@ pub enum PassFailure {
     Pass(CompilerError),
 }
 
-impl PassFailure {
-    /// The pass's error, from a pass behind a gate that rejects nothing.
-    fn ungated(self) -> CompilerError {
-        match self {
-            PassFailure::Gate(_) => unreachable!("an empty gate rejects nothing"),
-            PassFailure::Pass(error) => error,
-        }
-    }
-}
-
 /// [`semantic_pass_without_closure_gate`] behind `gate`. The gate reads the
 /// modules before expansion.
 pub fn semantic_pass_after_gate(
@@ -1235,6 +1212,13 @@ pub fn semantic_pass_after_gate(
     if !errors.is_empty() {
         return Err(PassFailure::Gate(errors));
     }
+    semantic_pass_owned(modules, aliases).map_err(PassFailure::Pass)
+}
+
+fn semantic_pass_owned(
+    modules: &mut ModuleSet,
+    aliases: &bone_core::modules::NsAliases,
+) -> Result<Workspace, CompilerError> {
     let timer = Instant::now();
     let owned = modules.make_owned();
     let mut ws = Workspace {
@@ -1242,7 +1226,7 @@ pub fn semantic_pass_after_gate(
         ..Workspace::default()
     };
     ws.log_time("own stdlib", timer);
-    semantic_pass_into(ws, owned, aliases).map_err(PassFailure::Pass)
+    semantic_pass_into(ws, owned, aliases)
 }
 
 /// [`semantic_pass`] enforcing identity storage in unpackaged files: the bone
@@ -1501,33 +1485,12 @@ pub fn assemble_namespaces(
         // registering owned definitions and collecting use declarations.
         let file = contribution.file;
         let mut errs: Vec<CompilerError> = Vec::new();
-        if let Some(h) = &contribution.header {
-            if let Some(vis) = &h.vis {
-                let ns_vis = NsVisibility::from_parser(vis);
-                let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package ensured");
-                let key = NsPackage::path_key(&module_path);
-                let node = pkg.nodes.entry(key).or_insert_with(|| NsNode {
-                    path_key: key,
-                    segments: module_path.clone(),
-                    ..Default::default()
-                });
-                if let Some(existing) = &node.vis {
-                    if *existing != ns_vis {
-                        return Err(CompilerError::new_with_label(
-                            h.span,
-                            format!(
-                                "conflicting visibility for module `{}`",
-                                module_path
-                                    .iter()
-                                    .map(|s| s.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join("::")
-                            ),
-                        ));
-                    }
-                }
-                node.vis = Some(ns_vis);
-            }
+        if let Some(header) = &contribution.header
+            && let Some(vis) = &header.vis
+        {
+            set_module_visibility(ws, pkg_id, &module_path, vis, header.span, || {
+                module_path.iter().map(|name| name.as_str()).join("::")
+            })?;
         }
 
         register_items(
@@ -1547,6 +1510,44 @@ pub fn assemble_namespaces(
         ws.fragment_scopes.insert(file, scope);
     }
     validate_v1_use_targets(ws, contributions)
+}
+
+fn ensure_namespace_node<'a>(
+    ws: &'a mut Workspace,
+    pkg_id: bone_core::modules::PackageId,
+    path: &[ustr::Ustr],
+    key: Ustr,
+) -> &'a mut NsNode {
+    let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package ensured");
+    pkg.nodes.entry(key).or_insert_with(|| NsNode {
+        path_key: key,
+        segments: path.to_vec(),
+        ..Default::default()
+    })
+}
+
+fn set_module_visibility(
+    ws: &mut Workspace,
+    pkg_id: bone_core::modules::PackageId,
+    path: &[ustr::Ustr],
+    vis: &skull_parser::Visibility,
+    span: Span,
+    name: impl FnOnce() -> String,
+) -> Result<(), CompilerError> {
+    let node = ensure_namespace_node(ws, pkg_id, path, NsPackage::path_key(path));
+    let ns_vis = NsVisibility::from_parser(vis);
+    if node
+        .vis
+        .as_ref()
+        .is_some_and(|existing| *existing != ns_vis)
+    {
+        return Err(CompilerError::new_with_label(
+            span,
+            format!("conflicting visibility for module `{}`", name()),
+        ));
+    }
+    node.vis = Some(ns_vis);
+    Ok(())
 }
 
 /// Every `use` target in a v1 fragment resolves where it is declared, once
@@ -1586,7 +1587,8 @@ fn validate_use_items(
             ScopeItem::Use(decl) => {
                 let mut leaves = Vec::new();
                 collect_use_leaves(&decl.tree, &[], false, &mut leaves);
-                for (local, target, glob) in leaves {
+                for (local, target) in leaves {
+                    let glob = local.is_none();
                     let checked = if decl.vis.is_some() {
                         bone_lower::resolve::check_export_target(
                             ws,
@@ -1604,23 +1606,22 @@ fn validate_use_items(
                             format!("invalid `use` target: {message}"),
                         )
                     })?;
-                    if glob {
-                        continue;
-                    }
-                    let exporter;
-                    let site = if decl.vis.is_some() {
-                        exporter = FragmentScope {
-                            package: frag.package,
-                            package_name: frag.package_name,
-                            module_path: path.to_vec(),
-                            ..Default::default()
+                    if let Some(local) = local {
+                        let exporter;
+                        let site = if decl.vis.is_some() {
+                            exporter = FragmentScope {
+                                package: frag.package,
+                                package_name: frag.package_name,
+                                module_path: path.to_vec(),
+                                ..Default::default()
+                            };
+                            &exporter
+                        } else {
+                            frag
                         };
-                        &exporter
-                    } else {
-                        frag
-                    };
-                    bone_lower::resolve::check_use_binding(ws, site, local, &target)
-                        .map_err(|message| CompilerError::new_with_label(decl.span, message))?;
+                        bone_lower::resolve::check_use_binding(ws, site, local, &target)
+                            .map_err(|message| CompilerError::new_with_label(decl.span, message))?;
+                    }
                 }
             }
             ScopeItem::Def { .. } => {}
@@ -1695,7 +1696,7 @@ fn collect_use_leaves(
     tree: &skull_parser::UseTree,
     prefix: &[ustr::Ustr],
     from_root: bool,
-    out: &mut Vec<(ustr::Ustr, UsePathRef, bool)>,
+    out: &mut Vec<(Option<ustr::Ustr>, UsePathRef)>,
 ) {
     let skull_parser::UseTree::Path {
         from_root: tree_root,
@@ -1714,57 +1715,31 @@ fn collect_use_leaves(
     if self_leaf {
         full.pop();
     }
-    match kind {
+    let local = match kind {
         skull_parser::UseSuffix::Bind => {
-            if let Some(&local) = full.last() {
-                out.push((
-                    local,
-                    UsePathRef {
-                        from_root: path_root,
-                        segments: full,
-                    },
-                    false,
-                ));
-            }
+            let Some(&local) = full.last() else { return };
+            Some(local)
         }
-        skull_parser::UseSuffix::BindAs(alias) => {
-            out.push((
-                alias.name,
-                UsePathRef {
-                    from_root: path_root,
-                    segments: full,
-                },
-                false,
-            ));
-        }
+        skull_parser::UseSuffix::BindAs(alias) => Some(alias.name),
         skull_parser::UseSuffix::Operator { op, alias } => {
             full.push(op.name);
-            let local = alias.as_ref().map_or(op.name, |a| a.name);
-            out.push((
-                local,
-                UsePathRef {
-                    from_root: path_root,
-                    segments: full,
-                },
-                false,
-            ));
+            Some(alias.as_ref().map_or(op.name, |a| a.name))
         }
-        skull_parser::UseSuffix::Glob => {
-            out.push((
-                ustr::Ustr::from("*"),
-                UsePathRef {
-                    from_root: path_root,
-                    segments: full,
-                },
-                true,
-            ));
-        }
+        skull_parser::UseSuffix::Glob => None,
         skull_parser::UseSuffix::Nested(children) => {
             for child in children {
                 collect_use_leaves(child, &full, path_root, out);
             }
+            return;
         }
-    }
+    };
+    out.push((
+        local,
+        UsePathRef {
+            from_root: path_root,
+            segments: full,
+        },
+    ));
 }
 
 /// Register one file's items into the namespace tree under `path`,
@@ -1796,31 +1771,20 @@ fn register_items(
     scope: &mut FragmentScope,
     errs: &mut Vec<CompilerError>,
 ) {
-    let ensure_node = |ws: &mut Workspace, path: &[ustr::Ustr]| -> ustr::Ustr {
-        let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package ensured");
-        let key = NsPackage::path_key(path);
-        pkg.nodes.entry(key).or_insert_with(|| NsNode {
-            path_key: key,
-            segments: path.to_vec(),
-            ..Default::default()
-        });
-        key
-    };
-
     // Ensure ancestors exist so mid-path traversal always lands, and
     // record each segment as a child of its parent (file headers create
     // nodes without an inline `mod` item).
     for i in 1..=path.len() {
-        let child_key = ensure_node(ws, &path[..i]);
-        let parent_key = ensure_node(ws, &path[..i - 1]);
-        let seg = path[i - 1];
-        let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package ensured");
-        if let Some(parent) = pkg.nodes.get_mut(&parent_key) {
-            parent.children.entry(seg).or_insert(child_key);
-        }
+        let child = &path[..i];
+        let parent = &path[..i - 1];
+        let child_key = NsPackage::path_key(child);
+        ensure_namespace_node(ws, pkg_id, child, child_key);
+        ensure_namespace_node(ws, pkg_id, parent, NsPackage::path_key(parent))
+            .children
+            .entry(path[i - 1])
+            .or_insert(child_key);
     }
 
-    // Every definition of this call sits on the node of `path`.
     let node_key = NsPackage::path_key(path);
     let mut def_key_buf = scope.package_name.to_string();
     for seg in path {
@@ -1850,13 +1814,7 @@ fn register_items(
                 }
                 // Record the child on the parent node.
                 {
-                    let parent_key = node_key;
-                    let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package");
-                    let parent = pkg.nodes.entry(parent_key).or_insert_with(|| NsNode {
-                        path_key: parent_key,
-                        segments: path.to_vec(),
-                        ..Default::default()
-                    });
+                    let parent = ensure_namespace_node(ws, pkg_id, path, node_key);
                     if parent.owned_types.contains_key(block_name)
                         || parent.owned_globals.contains_key(block_name)
                         || parent.owned_callables.contains_key(block_name)
@@ -1876,25 +1834,15 @@ fn register_items(
                     }
                 }
                 // Child visibility from the block header (`pub mod x { .. }`).
-                if let Some(vis) = block_vis.clone() {
-                    let child_key = NsPackage::path_key(&child);
-                    let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package");
-                    let node = pkg.nodes.entry(child_key).or_insert_with(|| NsNode {
-                        path_key: child_key,
-                        segments: child.clone(),
-                        ..Default::default()
-                    });
-                    let ns_vis = NsVisibility::from_parser(&vis);
-                    if let Some(existing) = &node.vis {
-                        if *existing != ns_vis {
-                            errs.push(CompilerError::new_with_label(
-                                *item_span,
-                                format!("conflicting visibility for module `{}`", block_name),
-                            ));
-                            continue;
-                        }
+                if let Some(vis) = block_vis {
+                    if let Err(error) =
+                        set_module_visibility(ws, pkg_id, &child, vis, *item_span, || {
+                            block_name.to_string()
+                        })
+                    {
+                        errs.push(error);
+                        continue;
                     }
-                    node.vis = Some(ns_vis);
                 }
                 register_items(ws, pkg_id, file, &child, block_items, scope, errs);
             }
@@ -1922,13 +1870,7 @@ fn register_items(
                         continue;
                     }
                 }
-                let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package");
-                let key = node_key;
-                let node = pkg.nodes.entry(key).or_insert_with(|| NsNode {
-                    path_key: key,
-                    segments: path.to_vec(),
-                    ..Default::default()
-                });
+                let node = ensure_namespace_node(ws, pkg_id, path, node_key);
                 // `def_key(package, path, bare)` without joining the path again.
                 def_key_buf.truncate(def_key_prefix);
                 def_key_buf.push_str(&bare);
@@ -1984,7 +1926,7 @@ fn register_items(
                 let meta = bone_core::modules::DefMeta {
                     package: pkg_id,
                     module: path.to_vec(),
-                    node: key,
+                    node: node_key,
                     kind: def_kind,
                     name: bare,
                     // Callable families use `callable_members`; retaining the
@@ -2016,8 +1958,7 @@ fn flatten_use_decl(
 ) {
     let mut leaves = Vec::new();
     collect_use_leaves(&decl.tree, &[], false, &mut leaves);
-    for (local, target, glob) in leaves {
-        let local = (!glob).then_some(local);
+    for (local, target) in leaves {
         match (local, decl.vis.is_some()) {
             (local, true) => share_export(ws, pkg_id, path, local, target, decl, errs),
             (Some(local), false) => scope.named.entry(local).or_default().push(target),
@@ -2042,13 +1983,7 @@ fn share_export(
         target,
         vis: NsVisibility::from_parser(&vis.unwrap_or(skull_parser::Visibility::Private)),
     };
-    let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package");
-    let key = NsPackage::path_key(path);
-    let node = pkg.nodes.entry(key).or_insert_with(|| NsNode {
-        path_key: key,
-        segments: path.to_vec(),
-        ..Default::default()
-    });
+    let node = ensure_namespace_node(ws, pkg_id, path, NsPackage::path_key(path));
     let Some(local) = local else {
         UsePathRef::insert_sorted(&mut node.glob_exports, binding, |b| &b.target);
         return;
