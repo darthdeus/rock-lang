@@ -1,12 +1,4 @@
-//! Substituting a placeholder bound-call with its concrete `next`.
-//!
-//! ONE rewrite, driven from two places. The tree that resolves a placeholder
-//! comes from different records depending on how the bounded body reaches the
-//! program -- the SITE's tree when the inliner splices it, the specialization
-//! DEMAND's tree when it is emitted standalone -- but the rewrite that consumes
-//! the resolved leaf is the same operation either way: retarget the call,
-//! record the callee's own specialization, and correct the element the
-//! placeholder's fixed `(bool, E)` arity could not describe.
+//! Resolve bounded iterator calls and adapt their concrete return layout.
 
 use bone_core::prelude::CompilerError;
 use bone_core::workspace::Workspace;
@@ -18,17 +10,7 @@ use skull_mir::lower::{BoundNextElem, ElemRebuild, bound_next_shape_from_concret
 use skull_mir::mir::*;
 use skull_mir::monoty::MonoInterner;
 
-/// Resolve every placeholder in a body that is being emitted STANDALONE at one
-/// instantiation, from the tree its specialization demand carried.
-///
-/// The counterpart of the splice path: there the placeholders arrive as clones
-/// inside the caller and the tree is the site's, here they are the body's own
-/// and the tree is the demand's. Same rewrite, and the two cannot drift because
-/// there is only one of it.
-///
-/// Nested bodies are included: a hoisted lambda or a nested `fn` inside a
-/// bounded body carries the same placeholders and resolves through the same
-/// tree, and leaving them out makes the residue surface at runtime.
+/// Resolve a standalone instantiation from its specialization demand.
 pub fn resolve_standalone_bound_calls(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -54,12 +36,7 @@ pub fn resolve_standalone_bound_calls(
             )));
         };
         let (split, leaf) = (mf.bound_next_split.contains(&id), leaf.clone());
-        // The witness this resolves to may be bounded ITSELF, and its resolution
-        // is the leaf's `sub`. Attach it to the retargeted call so the demand
-        // `reach::spec_bound_calls` files for that witness carries it; without
-        // this the demand goes out with an EMPTY tree and the witness reaches its
-        // own standalone emission with nothing to resolve from. The splice path
-        // grafts the raw `sub` at the same point for the same reason.
+        // A bounded witness's own demand needs its subtree.
         if let ResolvedBoundNext::Concrete { sub, .. } = &leaf {
             if !sub.is_empty() {
                 mf.resolved_bound_trees.insert(id, sub.clone());
@@ -83,16 +60,8 @@ pub fn resolve_standalone_bound_calls(
     Ok(())
 }
 
-/// Rewrite the placeholder [`Inst::CallBoundMulti`] at `call` into a concrete
-/// [`Inst::CallMulti`] on `leaf`'s witness.
-///
-/// `already_split` is the body's own record that the LOWERING sized this
-/// placeholder's dests to the real return arity and bound the loop pattern to
-/// the leaves ([`MirFunc::bound_next_split`]); it is not derivable from
-/// `dests.len()`, because a one-leaf element is two dests either way.
-///
-/// A `CallerGeneric` leaf is the genuinely unresolved case: the enclosing body
-/// is still generic in that position, so nothing here can name a callee.
+/// Use the lowering's split marker: a one-leaf element has the same
+/// destination count as an unsplit element.
 pub(crate) fn substitute_bound_call(
     func: &mut MirFunc,
     call: Idx<Inst>,
@@ -128,18 +97,7 @@ pub(crate) fn substitute_bound_call(
     if !owner.args.is_empty() {
         func.spec_bindings.insert(call, owner.clone());
     }
-    // The placeholder's arity is `(bool, E)` because bound conformance
-    // fixes it there; the CONCRETE callee is only known here. When its
-    // element splats into leaves, the extra returns were being dropped
-    // by Lua and `E` bound the first leaf -- so the body then projected
-    // a field off a number. Size the dests to what the callee really
-    // returns and repack the element, so the body's own view of `E` is
-    // unchanged. The repack is a transient: SROA folds the field reads
-    // straight to the leaf cells, and a body that never touches the
-    // element (`count`) drops it as dead -- which is why this does not
-    // reintroduce the box the mark forbids, and why it does not
-    // over-reject `count` the way a splice-time arity check did.
-    // The instance the shape is read at is carried by the resolved leaf.
+    // Repack a split result for a body that expects the whole iterator element.
     let inst = owner;
     if already_split {
         check_bound_next_split(func, call, scx, ws, interner, &inst, concrete_plans)
@@ -170,15 +128,7 @@ fn bound_next_shape_for_instance(
         .map_err(|error| CompilerError::new_no_location(error.message))
 }
 
-/// The lowering already split this placeholder's element into leaf cells, so
-/// there is nothing to rebuild -- only the two sides' agreement to confirm.
-///
-/// They read the same instantiation from opposite ends: the lowering from the
-/// loop pattern's binding types, this from the concrete callee's return type. A
-/// disagreement means the body binds a different number of leaves than the call
-/// returns, which is a positional mis-pairing -- a leaf's value landing in
-/// another leaf's cell, silently. Rejected rather than repacked, because a
-/// repack over an already-split element would write into a cell nothing reads.
+/// Check the destinations against the witness ABI when lowering already split them.
 fn check_bound_next_split(
     func: &MirFunc,
     call: Idx<Inst>,
@@ -205,14 +155,7 @@ fn check_bound_next_split(
     )))
 }
 
-/// Re-size a just-substituted `next` call to the concrete callee's real return
-/// arity, and rebuild the element from the extra leaves into the cell the body
-/// already reads.
-///
-/// Only the placeholder path needs this. `lower_for_user_iter` sizes its dests
-/// from `ret_shape.slot_count()` at lowering time because it has the concrete
-/// callee in hand; a generic combinator body does not, so the correction lands
-/// here, at the first point the callee is known.
+/// Rebuild the element from the concrete witness's flat return lanes.
 fn repack_bound_next_element(
     func: &mut MirFunc,
     call: Idx<Inst>,
@@ -227,17 +170,10 @@ fn repack_bound_next_element(
         return Ok(());
     };
     let dests = dests.clone();
-    // Triggered by the element SPLATTING, never by the arity growing. A ONE-leaf
-    // element returns `(ok, leaf)` -- the same arity the placeholder assumed -- and
-    // still needs the repack, because what lands in the element cell is a bare
-    // leaf the body then projects a field off. Gating on arity leaves exactly that
-    // case broken, which is the seed's "NOT arity" probe.
+    // A one-leaf element has the same arity before and after splitting.
     let plan = match &shape.elem {
         BoundNextElem::Opaque => return Ok(()),
         BoundNextElem::Rebuild(plan) => plan,
-        // Never rewrite the call without knowing how to put the element back
-        // together: the leaves would land in cells nothing reads while the body
-        // still projects fields off one of them.
         BoundNextElem::Unsupported => {
             return Err(CompilerError::new_no_location(format!(
                 "`{}` returns {} values at this specialization but its element \
@@ -290,14 +226,7 @@ fn repack_bound_next_element(
     )))
 }
 
-/// Emit the rebuild of one element from `cells`, consuming them left to right,
-/// appending every inst it creates to `tail` in evaluation order. Returns the
-/// value the element cell should hold.
-///
-/// The rebuild is a TRANSIENT in every arm: copy-prop forwards a field read of a
-/// `MakeValueStruct` and a `TupleIndex` of a `MakeTuple` to the construction
-/// operand, so the aggregates die in DCE and the `nobox` guarantee still holds
-/// over the emitted body.
+/// Consume flat cells in order while rebuilding nested element values.
 fn emit_elem_rebuild(
     func: &mut MirFunc,
     plan: &ElemRebuild,

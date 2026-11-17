@@ -2,7 +2,6 @@ use comfy_la_arena::Idx;
 use skull_mir::cfg::successors;
 use skull_mir::mir::*;
 
-/// Field name for a frame cell in the state table.
 #[inline]
 pub(crate) fn raw<T>(i: Idx<T>) -> usize {
     i.into_raw().into_u32() as usize

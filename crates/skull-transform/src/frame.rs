@@ -6,14 +6,7 @@ use crate::visit::{raw, top_level_blocks_from};
 use comfy_la_arena::Idx;
 use skull_mir::mir::*;
 
-/// Materialize a coroutine region's frame accesses as MIR (the JS path's
-/// analog of codegen-lua's root `FrameCtx` rendering): over the blocks
-/// reachable from `entry` via terminators, a bare `Load`/`Store` of a cell in
-/// `slots` becomes a `Field`/`StoreField` on `s` (field `c<slot>`), and a
-/// multi-call dest that is a frame cell is redirected through a fresh temp
-/// cell + a spliced store-back. `MapNext`'s key and value cells use the same
-/// seeded-temp/store-back shape. Non-frame cells remain ordinary step locals;
-/// every remaining bare frame cell is a transform finding.
+/// Rewrite JS step frame cells as field accesses and check for residual reads and writes.
 pub fn materialize_frame(
     mf: &mut MirFunc,
     entry: Idx<Block>,
@@ -23,9 +16,7 @@ pub fn materialize_frame(
     materialize_frame_inner(mf, entry, s_cell, slots, true);
 }
 
-/// Materialize only the selected shared frame cells in an ordinary detached
-/// function. Its other cells are real locals, so the strict exhaustiveness check
-/// used by the coroutine step does not apply here.
+/// Rewrite the shared frame cells of an ordinary detached body.
 pub fn materialize_frame_cells(
     mf: &mut MirFunc,
     entry: Idx<Block>,
@@ -95,12 +86,7 @@ fn materialize_frame_inner(
                         store_back(mf, &mut new, s_cell, slots[&frame_cell], temp);
                     }
                 }
-                // `key, val = next(t, key)` with a framed cursor/value cell:
-                // redirect both to fresh temps, SEED the key temp from its frame
-                // field first (the key cell is IN/OUT -- the cursor carried across
-                // iterations), then store both temps back to their fields. Without
-                // this a framed cursor would read from `s.c<slot>` (materialized
-                // `Load`) but be written to a bare local, so the loop never advances.
+                // The key is also the cursor input, so seed its temp before the call.
                 Inst::MapNext {
                     key_cell,
                     val_cell,
@@ -149,9 +135,6 @@ fn materialize_frame_inner(
     if !strict {
         return;
     }
-    // Exhaustiveness: a surviving bare cell is permitted only when it is not a
-    // planned frame slot. Precise liveness intentionally leaves segment-local
-    // cells bare; the slot check still catches a missed materialization.
     for &bid in &region {
         for &id in &mf.blocks[bid].insts {
             let bad = match &mf.insts[id] {

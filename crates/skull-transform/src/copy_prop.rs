@@ -24,19 +24,12 @@ pub(crate) struct CopyProp {
 /// nothing (the common case for small bodies), so callers skip the remap
 /// entirely. [`cleanup`] folds the remap into DCE's count scan.
 pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) -> Option<CopyProp> {
-    // A cell STORED inside a closure body can be mutated indirectly by ANY call
-    // (the call may invoke that closure — e.g. `with_callback(() => { count = .. })`),
-    // so its cached value is not stable across calls. Exclude such cells entirely
-    // (treat as opaque). Closure bodies are the blocks NOT reachable from entry.
+    // A call can invoke a closure that writes a cell.
     let mut main = vec![false; func.blocks.len()];
     for b in top_level_blocks(func) {
         main[raw(b)] = true;
     }
-    // Dense per-id side-tables (raw-keyed) replace the Idx HashMaps/HashSets:
-    // `escaping` cell flag, `subst` value->value chain, and per-block `cur`
-    // cell->value. `cur` is reset between blocks via a touched-list so the clear
-    // stays O(stores-in-block), not O(cells).
-    // A `ref`-borrowed cell is written through an alias this pass cannot see.
+    // Borrowed cells can be written through aliases.
     let mut escaping: Vec<bool> = func.cells.iter().map(|(_, cell)| cell.borrowed).collect();
     let mut holds_value = vec![false; func.cells.len()];
     let mut field_written = vec![false; func.cells.len()];
@@ -94,10 +87,8 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
     let mut exposes_more = false;
     let mut cur: Vec<Option<Idx<Inst>>> = vec![None; func.cells.len()];
     let mut touched: Vec<usize> = Vec::new();
-    // A block entered only by a `Goto` starts with the literals its predecessor
-    // left in its cells: an inlined callee's body starts a block, and its default
-    // prologue tests the argument the caller just stored. Literals only, so no
-    // value's live range grows across blocks.
+    // Carry literals across a single goto predecessor so an inlined default
+    // can fold without extending any value's live range.
     let mut entry_literals: Vec<Option<Vec<(usize, Idx<Inst>)>>> = vec![None; func.blocks.len()];
     for (bid, b) in func.blocks.iter() {
         for &t in &touched {
@@ -131,9 +122,6 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                 checked_vecs.remove(&rebound);
             }
             match &func.insts[id] {
-                // A repeat of a check that still holds: the operands are the same
-                // values, and nothing since could have changed the Vec's length.
-                // The first check raised already if the index was out of bounds.
                 Inst::VecCheckedIndex { vec, index } => {
                     let key = (
                         operand_key(func, &subst, &escaping, *vec),
@@ -178,15 +166,7 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                 Inst::Store { cell, value } if !escaping[raw(*cell)] => {
                     let ck = raw(*cell);
                     let v = resolve_subst(&subst, *value);
-                    // A store that writes back the value the cell already holds is a
-                    // no-op -- invisible to `is_dead_rc`, which only drops a store
-                    // whose cell has no loads. `cur` is the value last stored to this
-                    // cell in THIS block, so comparing against it rejects the
-                    // load-then-other-store shape: a load taken BEFORE an intervening
-                    // store is not the cell's current value, and storing it back is a
-                    // RESTORE, not a no-op. Before the block's first store `cur` is
-                    // None, so a load of the cell itself is the value the store writes
-                    // (no store can have intervened), which is the proof there.
+                    // Without a visible source, storing the current load is still a no-op.
                     let noop = match cur[ck] {
                         Some(w) => resolve_subst(&subst, w) == v,
                         None => matches!(&func.insts[*value], Inst::Load(d) if *d == *cell),
@@ -208,14 +188,8 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                         any_subst = true;
                     }
                 }
-                // `Field(<value-struct ctor>, f) -> the ctor's operand for f`. A
-                // `value` cdata (incl. a cdata ENUM, which packs to a `MakeValueStruct`
-                // `<Enum>_ct(tag, _0)`) is IMMUTABLE, so its field is always the
-                // construction operand -- sound to forward regardless of intervening
-                // code. Kills the repack-to-match cdata: a scalar-ABI enum param that
-                // `match` rebuilds (`X_ct(tag,_0).__tag`) folds to the tag leaf, and the
-                // now-dead ctor DCEs. A mutable `MakeStruct` needs the stricter
-                // single-use proof below, since a store could change its field.
+                // A value field can forward through its constructor while the constructor's
+                // contents are still the observed snapshot.
                 Inst::Field { .. }
                 | Inst::Index {
                     kind: ContainerKind::Record,
@@ -257,9 +231,7 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                         && let Inst::MakeStruct { fields, .. } = &func.insts[base]
                         && let Some((_, op)) = fields.iter().find(|(name, _)| *name == field)
                     {
-                        // The fresh object is used only by this field read: no
-                        // alias can mutate it or observe its identity. Operands
-                        // have already run in source order, including unused ones.
+                        // An aliased mutable record cannot be read from its original operands.
                         nonthrowing[raw(id)] = true;
                         subst[raw(id)] = Some(resolve_subst(&subst, *op));
                         any_subst = true;
@@ -282,13 +254,7 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                         }
                     }
                 }
-                // `TupleIndex(<tuple ctor>, i) -> the ctor's i-th operand`. A Rock
-                // tuple has no assignable place, so a `MakeTuple` is immutable for
-                // the same reason a `MakeValueStruct` is. This is what lets a
-                // combinator's `let (ok, x) = next(inner)` reach the element the
-                // mechanism-I repack built: without it the element stays behind an
-                // un-forwarded `TupleIndex`, and the presence test on it is a
-                // whole-value use that pins the box `nobox` forbids.
+                // A fresh tuple is immutable.
                 Inst::TupleIndex { base, index } => {
                     let (base, index) = (*base, *index);
                     let rb = resolve_subst(&subst, base);
@@ -347,10 +313,7 @@ fn operand_key(
     }
 }
 
-/// Whether `inst` certainly leaves every Vec's length alone, so a bounds check
-/// before it still holds after it. An allow-list: any call (direct, indirect or
-/// through a global) may push or pop, as may a `len` store, an append, a
-/// whole-element write or a coroutine operation.
+/// Whether an instruction can invalidate a vector bounds check.
 fn keeps_vec_lengths(inst: &Inst) -> bool {
     match inst {
         // A cell write rebinds a local; facts keyed on that cell are dropped

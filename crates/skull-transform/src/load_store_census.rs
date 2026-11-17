@@ -1,11 +1,4 @@
-//! Producer attribution for the `Load`/`Store` instructions the pre-emit cleanup
-//! unlinks. Measurement only: it observes a cleanup run and never changes what
-//! the cleanup does. A cell's [`CellProducer`] names the lowering or inlining
-//! code that minted it; the census charges each unlinked access to its cell's
-//! producer, and separately counts accesses the inline splice created.
-//!
-//! Unlinked counts say where the cleanup spends work, not that a producer could
-//! skip the cell: mutation, aliasing and snapshot semantics still decide that.
+//! Attribute load and store traffic removed by cleanup to each cell producer.
 
 use crate::nobox::cleanup_with_nobox;
 use crate::visit::raw;

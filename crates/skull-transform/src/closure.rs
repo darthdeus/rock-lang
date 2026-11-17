@@ -1,20 +1,4 @@
-//! Closure conversion as a shared MIR->MIR pass.
-//! Replaces the per-backend closure
-//! machinery (codegen-lua's `HoistPlan`/`EnvCtx`; the JS T5/T7/T8c native-arrow
-//! path) with ONE transform: every `Inst::Lambda` becomes either a bare
-//! [`Inst::Global`] (capture-free) or an env-record [`Inst::MakeEnv`] (capturing),
-//! and its sub-CFG is split out to a sibling [`MirFunc`] in `nested_fns`.
-//!
-//! The capture SEMANTICS (by-value vs box, per-iteration loop bindings, the
-//! dominance rail) live in `crate::scope` + `non_dominating_by_value_captures`
-//! (moved here from codegen-lua at S3), so there is one mechanism and no
-//! divergence. What is new is that the analysis result is MATERIALIZED as MIR
-//! (`MakeEnv` records, `Field`/`StoreField` env access, box tables) instead of
-//! being consumed at render time.
-//!
-//! Every servable path routes through this pass (S1 JS, S2 ordinary Lua fns, S3
-//! coroutine steps + global-init/decorator units), so post-pass codegen sees
-//! `MakeEnv`/`Global`, never an `Inst::Lambda`.
+//! Hoist lambda bodies and replace their implicit captures with environment fields.
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
@@ -83,20 +67,11 @@ fn forwarded_defer_capture(
     }
 }
 
-/// The dense frame-field name a coroutine frame cell renders under (`c<slot>`) --
-/// keyed on the DENSE slot, NOT the raw id (the P2-finding fix). Must match
-/// `FrameCtx`'s `write_cellname` (`s.c<slot>` in the step) and the constructor's
-/// seeded field names.
+/// Use the same dense slot names in constructors and frame accesses.
 pub(crate) fn frame_field(slot: u32) -> Ustr {
     skull_mir::names::indexed("c", "", slot as usize)
 }
 
-/// What the shared pass needs of a coroutine step's frame (a subset of codegen's
-/// `FrameCtx`): the state-table cell `s`, the frame-field cell set, and the dense
-/// slot per frame cell. Threaded in only when converting the STEP `MirFunc`
-/// (`emit_coroutine`); `None` for ordinary fns and the JS path (no coroutines).
-/// A captured frame cell collapses to a capture of `s` (D2), and a frame-cell
-/// access inside a hoisted lambda body materializes `e.c<S>.c<slot>` (D3).
 pub(crate) struct FrameInfo<'a> {
     pub s_cell: Idx<Cell>,
     pub slots: &'a HashMap<Idx<Cell>, u32>,
@@ -110,39 +85,13 @@ impl FrameInfo<'_> {
     }
 }
 
-/// Convert every closure in `mf` to a defunctionalized record + a hoisted sibling
-/// fn. `name_base` is the enclosing fn's UNIQUE emitted name (the JS name on this
-/// slice; the mangled Lua name at S2): hoisted bodies are `<name_base>__lambda<k>`
-/// (`k` = the `Inst::Lambda`'s inst-arena order). Post-pass no `Inst::Lambda`
-/// survives (asserted); the enclosing region keeps its blocks (lambda regions go
-/// unreachable in it) and APPENDS one `nested_fn` per live lambda (preserving any
-/// named nested `fn`s lowering already hoisted there).
-///
-/// DEVIATION from the plan's `convert_closures(mf)` signature: the unique name is
-/// passed IN (the pass is MirFunc-local and has no name-mangling context of its
-/// own). The caller supplies a collision-free base -- on JS that is
-/// `callee_js_name`, itself overload-resolved -- so `<base>__lambda<k>` is unique
-/// by construction.
-/// The frame-less entry (ordinary fns + the JS path): no coroutine frame, builds
-/// its own scope tree.
+/// Name hoisted bodies within the enclosing emitted name.
 pub fn convert_closures(mf: &mut MirFunc, name_base: &str) {
     convert_closures_framed(mf, name_base, None, None);
 }
 
-/// Convert closures under an optional coroutine frame (`emit_coroutine` supplies
-/// [`FrameInfo`] for the STEP `MirFunc`). With a frame, captured frame cells
-/// collapse to a capture of `s` (D2) except provenance-tagged loop bindings no
-/// lambda writes, which snapshot by value (D4(b)); a frame-cell access inside a
-/// hoisted body materializes `e.c<S>.c<slot>` (D3). Detached hook/defer regions
-/// are converted by [`lower_detached_region`] before they reach either backend.
-///
-/// `precomputed` reuses the coroutine transform's `ScopeTree`+`Ownership` (the
-/// SAME basis `frame.fields` was derived from). This is not merely the P2
-/// single-build optimization: it is REQUIRED for soundness under a frame -- the
-/// transform's tree is built pre-yield-rewrite, and a freshly-rebuilt tree can
-/// disagree about a frame cell's owner (a cell the transform classed ROOT-owned
-/// -> a frame field can rebuild as lambda-owned), leaving a frame-cell access
-/// with no env to reach `s` through. Ordinary fns pass `None` and build their own.
+/// Reuse the pre-yield scope tree for a coroutine step. Rebuilding it after
+/// dispatch rewriting could make a root frame cell look lambda-owned.
 pub fn convert_closures_framed(
     mf: &mut MirFunc,
     name_base: &str,
@@ -158,9 +107,6 @@ pub fn convert_closures_framed(
         return;
     }
 
-    // --- Analysis: REUSE the Lua path's classification verbatim. The frame
-    // partition (D2/D4(b)) is applied to the per-scope capture sets below; the
-    // frame-cell body access (D3) is materialized in the block loop. ---
     let owned_tree;
     let owned_own;
     let (tree, own): (&ScopeTree, &Ownership) = match precomputed {
@@ -172,8 +118,6 @@ pub fn convert_closures_framed(
         }
     };
     let mut boxed: HashSet<Idx<Cell>> = tree.boxed_cells(own);
-    // Frame cells are table-mediated (via `s` or a by-value loop-binding snapshot
-    // of a frame field), never boxed -- matches codegen's `b.retain(!frame)`.
     if let Some(f) = frame {
         boxed.retain(|c| !f.slots.contains_key(c));
     }
@@ -185,7 +129,6 @@ pub fn convert_closures_framed(
         frame.map(|f| f.slots),
     ));
 
-    // lambda inst -> its scope.
     let mut lambda_sid: HashMap<Idx<Inst>, ScopeId> = HashMap::default();
     for (sid, s) in tree.scopes.iter().enumerate() {
         if let Some(lid) = s.lambda {
@@ -193,8 +136,7 @@ pub fn convert_closures_framed(
         }
     }
     let seeded_boxes = seeded_box_initializers(mf, tree, own, &boxed, &lambda_sid);
-    // Live lambdas in inst-arena order (k). A DCE'd lambda (no scope) has no k
-    // consumer beyond the counter -- so a dead one never shifts the live names.
+    // Keep the names indexed by lambda order in the instruction arena.
     let mut ordered: Vec<(usize, ScopeId)> = Vec::new();
     {
         let mut k = 0usize;
@@ -226,23 +168,13 @@ pub fn convert_closures_framed(
     let topology = LambdaTopologyFingerprint::from_sites(&topology_sites);
     refresh_owner_compatibility(mf, frame, topology);
 
-    // Per live lambda scope: hoisted name, sorted captures, an env param cell
-    // (only when it captures anything -- a capture-free body takes no env).
     let mut hoisted_name: HashMap<ScopeId, Ustr> = HashMap::default();
     let mut env_plans: HashMap<ScopeId, ClosureEnvPlan> = HashMap::default();
-    // Post-partition capture set per scope, for O(1) membership in the block loop:
-    // a member is captured DIRECTLY (env field `e.c<slot>`); a frame cell NOT in the
-    // set (collapsed to `s`) reaches via `e.c<S>.c<slot>` instead.
     for &(k, sid) in &ordered {
         hoisted_name.insert(sid, Ustr::from(format!("{name_base}__lambda{k}").as_str()));
         let mut caps: Vec<Idx<Cell>> = own.captures[sid].iter().copied().collect();
-        // Frame partition (D2 + D4(b)), ported
-        // verbatim from `build_hoist_plan`: a captured FRAME cell either snapshots
-        // by value at record creation (a provenance-tagged loop binding no lambda
-        // writes -- per-iteration, the non-frame rule) or collapses to a capture of
-        // `s` itself (shared through the frame table; the body composes
-        // `e.c<S>.c<slot>`). Lambda-owned cells (nested captures) keep the standard
-        // classification.
+        // Loop bindings snapshot each iteration. Other frame captures reach
+        // shared slots through a single capture of the frame itself.
         if let Some(f) = frame {
             let mut via_s = false;
             caps.retain(|c| {
@@ -260,10 +192,7 @@ pub fn convert_closures_framed(
                     false
                 }
             });
-            // A detached hook/defer has only `s` as a parameter. Rebuilding its
-            // scope tree therefore makes a frame field used solely by a nested
-            // lambda look lambda-owned; the coroutine transform remains the
-            // authority for that cell's ownership.
+            // A frame cell used only by a detached lambda may look lambda-owned.
             via_s |= f.slots.keys().any(|c| own.owner.get(c) == Some(&sid));
             if via_s {
                 caps.push(f.s_cell);
@@ -300,11 +229,6 @@ pub fn convert_closures_framed(
         }
     }
 
-    // --- Rewrite every scoped block: captured/boxed cell accesses become env /
-    // `.v` projections, and each `Inst::Lambda` creation site becomes its record
-    // (or a bare global). Helper insts are spliced immediately before the inst
-    // that reads them; the original id is REPURPOSED as the final projection so
-    // every existing reference to it resolves to the projected value. ---
     let block_ids: Vec<Idx<Block>> = mf.blocks.iter().map(|(b, _)| b).collect();
     for b in block_ids {
         let Some(s) = tree.scope_of_block(b) else {
@@ -386,9 +310,6 @@ pub fn convert_closures_framed(
                     }
                     if caps.is_empty() {
                         let hoisted = hoisted_name[&child];
-                        // A capture-free lambda becomes a top-level fn of THIS
-                        // body's own output, so the name it is now called
-                        // through is not a callee declaration's symbol.
                         if !mf.hoisted_fn_globals.contains(&hoisted) {
                             mf.hoisted_fn_globals.push(hoisted);
                         }
@@ -396,9 +317,7 @@ pub fn convert_closures_framed(
                         new.push(id);
                         continue;
                     }
-                    // Record field values: each capture's SLOT (box table / value)
-                    // read FROM this scope -- a transitive capture threads through
-                    // this scope's own env.
+                    // Pass the box itself along a transitive capture.
                     let mut fields: Vec<(Ustr, Idx<Inst>)> = Vec::with_capacity(caps.len());
                     for &cc in caps {
                         let slot = slot_in_scope(mf, own, &env_plans, s, cc, &mut new);
@@ -416,8 +335,6 @@ pub fn convert_closures_framed(
         mf.blocks[b].insts = new;
     }
 
-    // --- Unseeded locals still need an entry box. Parameters seed from their
-    // incoming argument before rebinding; proven local initializers seed in place. ---
     let mut entry_prepend: HashMap<Idx<Block>, Vec<Idx<Inst>>> = HashMap::default();
     // Sorted so the created boxes / declarations are traversal-independent.
     let mut boxed_sorted: Vec<Idx<Cell>> = boxed.iter().copied().collect();
@@ -458,8 +375,6 @@ pub fn convert_closures_framed(
         mf.blocks[entry].insts = pre;
     }
 
-    // --- Neutralize any residual (dead, scope-less) `Inst::Lambda`; a lambda in a
-    // REACHABLE block was converted above, so a survivor there is a pass bug. ---
     let live: HashSet<Idx<Block>> = reachable_blocks_from(mf, mf.entry).into_iter().collect();
     for b in &live {
         for &iid in &mf.blocks[*b].insts {
@@ -469,9 +384,7 @@ pub fn convert_closures_framed(
             );
         }
     }
-    // Detached regions are lowered independently by `lower_detached_region`.
-    // The step arena therefore has no emitted residual closure producers; only
-    // the frame-less path also nils any dead ordinary-function residue.
+    // Framed detached regions have their own conversion path.
     if frame.is_none() {
         for (_, inst) in mf.insts.iter_mut() {
             if matches!(inst, Inst::Lambda { .. }) {
@@ -480,9 +393,6 @@ pub fn convert_closures_framed(
         }
     }
 
-    // --- Split each live lambda body into a sibling MirFunc holding only the
-    // region its entry reaches (already fully rewritten above); the enclosing and
-    // sibling regions stay in `mf`, unreachable there as before. ---
     let mut nested: Vec<MirFunc> = Vec::with_capacity(ordered.len());
     let facts = crate::inline::ArenaFacts::of(mf);
     for &(_k, sid) in &ordered {
@@ -530,16 +440,8 @@ pub fn convert_closures_framed(
         header.params = params;
         header.abi_representation = mf.lambda_abi_representations.get(&lambda).cloned();
         header.entry = tree.scopes[sid].entry;
-        // The split body shares `mf`'s `Idx` space only through the copy: it
-        // keeps the instructions, cells and blocks its entry reaches, with
-        // every side-table entry keyed to them (specialized bindings, call
-        // sites and owners, spans, ABI plans) remapped along, so a lambda's own
-        // calls keep their records.
         nested.push(crate::inline::compact_split_body(&header, mf, &facts));
     }
-    // APPEND, don't overwrite: lowering already hoisted the enclosing fn's named
-    // nested `fn`s into `mf.nested_fns`, and clobbering them would drop those
-    // definitions from the chunk. Detached regions use the same sibling shape.
     mf.nested_fns.extend(nested);
 }
 
@@ -629,10 +531,7 @@ fn seeded_box_initializers(
     seeded
 }
 
-/// Where a scope's body starts in `mf`. A coroutine step's scope tree is
-/// built before the yield rewrite, so its root entry is the first state's
-/// block; the rewritten step enters through its state dispatch, which is the
-/// only block that dominates every state.
+/// State dispatch dominates the coroutine root after rewriting yields.
 fn scope_entry(mf: &MirFunc, tree: &ScopeTree, scope: ScopeId) -> Idx<Block> {
     if scope == crate::scope::ROOT {
         mf.entry
@@ -714,10 +613,7 @@ fn read_capture(
     f
 }
 
-/// The inst yielding cell `cc`'s SLOT (helper used by the record-field lowering). (the box TABLE if boxed, else the plain
-/// value) as seen from scope `s`, WITHOUT the `.v` projection -- used as an
-/// env-record field value (a boxed capture threads the shared table; a by-value
-/// capture snapshots the value). Helper insts are appended to `new`.
+/// Read the capture slot itself, so a boxed capture passes its shared table.
 fn slot_in_scope(
     mf: &mut MirFunc,
     own: &Ownership,
@@ -726,14 +622,7 @@ fn slot_in_scope(
     cc: Idx<Cell>,
     new: &mut Vec<Idx<Inst>>,
 ) -> Idx<Inst> {
-    // `s_cell` (the frame's synthetic state param, pushed into a lambda's caps by
-    // the D2 collapse) is ROOT-owned but has NO owner in the reused transform tree
-    // -- that tree is built pre-yield-rewrite, before `s_cell` is ever used. Treat
-    // owner-None as ROOT: the only owner-None cell that reaches here is `s_cell`
-    // (ghost cells never enter a capture set). So at ROOT it reads as the step's
-    // param local (`Load`), and at a nested scope it threads via the env (whose
-    // existence is guaranteed -- the nested scope captured the real frame cell
-    // that collapsed to `s`, so it has an env).
+    // The synthetic state parameter is root-owned but absent from the pre-yield tree.
     let owner = own.owner.get(&cc).copied().unwrap_or(crate::scope::ROOT);
     if owner == s {
         let l = mf.alloc_inst(Inst::Load(cc));

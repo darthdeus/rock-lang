@@ -6,46 +6,20 @@ use bone_core::workspace::Workspace;
 use comfy_la_arena::{Idx, RawIdx};
 use skull_mir::mir::*;
 
-/// Dead-code elimination over a [`MirFunc`] (a CFG->CFG cleanup, run before emit).
-/// Removes, to a fixpoint: (a) pure value-producing insts with no users — the
-/// dead `Load`/`Const`/arith/`Field` left by the cell-model's literal lowering;
-/// (b) `Store` to a cell that is never `Load`ed anywhere — the dead result cells
-/// of statement-position control flow. Side-effecting insts (`Call`/`CallValue`/
-/// `CallMulti`/`StoreField`/`StoreIndex`/`StoreGlobal`/`MapNext`/`ArrayPush`/
-/// coroutine ops) are always kept (an unused call result still runs the call).
-/// This shrinks LuaJIT's snapshot width (fewer live locals at a side-exit), the
-/// named trigger of skull's trace-cache thrash. Scans ALL blocks (incl. closure
-/// sub-CFGs in the same arena), so a value/cell used only inside a lambda body
-/// is correctly seen as live.
+/// Remove unreferenced pure values and unread stores, including closure blocks.
 pub(crate) fn dce(func: &mut MirFunc) {
     dce_core(func, None);
 }
 
-/// DCE, optionally fusing a copy-prop analysis into the count scan: with [`CopyProp`]
-/// the value operands (and each terminator's) are remapped through its
-/// substitution as they are counted, and its proven no-op stores are seeded
-/// dead -- so DCE's post-substitution reference counts and the store deletion
-/// fall out of work DCE needs anyway. With `None` it is plain DCE.
-///
-/// Returns whether a removal can let a later copy-prop analysis prove more
-/// (see [`cleanup_in`]).
+/// Apply copy substitutions during the reference count scan when available.
 fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) -> bool {
     let ni = func.insts.len();
     let nc = func.cells.len();
-    // Reference counts over the CURRENT program (dense, raw-id keyed): live value
-    // uses per inst, `Load(c)` count per cell, and stores per cell (for the CSR
-    // index below). A value/store dies when its count reaches 0; removing an inst
-    // decrements the counts of what it referenced, cascading via a worklist — so
-    // the load->store->value chains the cell model leaves converge in ONE pass
-    // instead of the old fixpoint's ~2.2 full re-scans.
+    // Reference counts for a worklist that cascades through dead operands.
     let mut use_count = vec![0u32; ni];
     let mut load_count = vec![0u32; nc];
     let mut store_n = vec![0u32; nc];
     {
-        // Split the `&mut MirFunc` into independent field borrows so a `Store`
-        // value can be remapped in `insts` while iterating `blocks` (a term is
-        // remapped through `&mut b.term`). Cells/opcodes are never rewritten, so
-        // the Load/Store accounting below is unaffected by the substitution.
         let MirFunc { blocks, insts, .. } = &mut *func;
         for (_, b) in blocks.iter_mut() {
             for &i in &b.insts {
@@ -62,8 +36,6 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) -> bool {
             if let Some(cp) = cp {
                 b.term.remap_uses(&|x| resolve_subst(&cp.subst, x));
             }
-            // Terminator operands are permanent uses (terms are never removed), so
-            // their +1 is never decremented — a value used by a term stays live.
             b.term.uses_each(&mut |v| use_count[raw(v)] += 1);
         }
     }
@@ -89,9 +61,6 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) -> bool {
         }
     }
 
-    // Seed the worklist with everything dead in the initial program, then cascade;
-    // a store proven a no-op by the copy-prop analysis is dead whatever its cell's
-    // load count.
     let mut dead = vec![false; ni];
     let mut work: Vec<Idx<Inst>> = Vec::new();
     for (_, b) in func.blocks.iter() {
@@ -164,11 +133,8 @@ enum ProjectionBase {
     Cell(Idx<Cell>),
 }
 
-/// Drop an unused projection when another projection of the same operand stays
-/// in its run: the stretch of a block with no effect or other possible error
-/// between them. They all fail together, on a bad operand with one message, so
-/// one of them raises it. A run with none used keeps its first. Copying a
-/// `value` out reads every field; this drops the reads its user never makes.
+/// An unused read may go when another read of the same base still raises
+/// before any intervening side effect or different error.
 fn drop_repeated_projections(
     func: &MirFunc,
     use_count: &[u32],
@@ -232,21 +198,8 @@ fn drop_flagged(func: &mut MirFunc, dead: &[bool]) {
     }
 }
 
-/// Whether an `Index` read must execute even when its result is unused -- i.e.
-/// whether the bounds check rides ON this inst. Every ordinary container index
-/// errors on OOB, so it does.
-///
-/// LEAF reads are the exception: one ELEMENT access is decomposed into K leaf
-/// reads sharing ONE hoisted check (`__nb_checked_index` for a NativeBuffer;
-/// `Inst::VecCheckedIndex` for columns and strided rows -- "one call per
-/// ELEMENT access, not per column"). Each leaf read is then a raw pointer read
-/// carrying no error of its own, so reading one field of a K-leaf element would
-/// otherwise emit all K loads and discard K-1. The shared check itself stays
-/// live, so an element read whose leaves are all unused still raises.
-///
-/// Consulted by BOTH [`is_dead_rc`] (initial seeding) and [`is_dead_value`]
-/// (cascade). They must agree: a kind dead in one and live in the other either
-/// leaks the loads back or deletes a real bounds error.
+/// Checked reads and accesses that can call Lua metamethods must run
+/// even when the result is unused.
 fn index_read_is_checked(kind: &ContainerKind) -> bool {
     !matches!(
         kind,
@@ -267,14 +220,7 @@ fn is_dead_value(inst: &Inst) -> bool {
     }
 }
 
-/// The pre-emit MIR cleanup: copy-propagate intra-block loads, then DCE the dead
-/// loads/values/stores they leave (including the stores copy propagation proves
-/// write back the value their cell already holds). Run per-function in `mir_emit`.
-///
-/// The two passes are FUSED: copy-prop's substitution is applied as DCE's count
-/// scan walks each inst, so the value-operand remap (`Inst::remap_uses` over every
-/// inst) and the use-counting share one traversal instead of two back-to-back.
-/// The standalone `dce` keeps its independent behavior.
+/// Cleanup for a lowered body before it becomes an inline template.
 pub fn cleanup(func: &mut MirFunc) -> Result<(), CompilerError> {
     cleanup_in(None, func)
 }
@@ -285,22 +231,8 @@ pub(crate) fn cleanup_in(ws: Option<&Workspace>, func: &mut MirFunc) -> Result<(
     if has_unreached_code(func) {
         clear_unreachable_blocks(func);
     }
-    // SROA and copy-prop/DCE INTERLEAVE to a fixpoint: peeling a cursor struct
-    // leaves its (now-dead) ctor behind, and that ctor's operand uses pin the
-    // NEXT nesting level's cell as escaping (iterator combinator chains nest
-    // cursors: MapIter{__inner: VecIter{..}}). Sweeping between rounds lets
-    // each level peel; depth = chain nesting, so this converges fast. The ctor
-    // store prefilter avoids allocating the per-cell analysis for no-op rounds.
-    //
-    // A round where neither SROA nor the nil fold changed anything reruns
-    // copy-prop/DCE only when the previous round's removals or substitution
-    // can let the analysis prove more. Otherwise DCE is at its fixpoint and the
-    // analysis would find what it found last round, which is already applied.
-    // Copy-prop facts that removals can extend: a cell stops escaping once its
-    // stores inside closures are gone, a cell-keyed bounds-check fact survives
-    // a removed store, a fresh `MakeStruct` read by one field read folds once
-    // its other uses are gone or its base is substituted, and a store becomes a
-    // provable no-op once its value is substituted by a load of its own cell.
+    // A dead outer constructor can keep the inner cursor escaping. Sweep
+    // between SROA rounds so nested cursors can split one level at a time.
     let mut stale = true;
     loop {
         let changed = if has_scalarizable_store(func) {
@@ -308,9 +240,6 @@ pub(crate) fn cleanup_in(ws: Option<&Workspace>, func: &mut MirFunc) -> Result<(
         } else {
             false
         };
-        // Inside the loop, because SROA is what CREATES the shape: forwarding a
-        // nullable value field's read to the literal that filled it leaves a
-        // presence test whose operand is now a fresh ctor.
         let folded = fold_known_compares(func);
         if changed || folded || stale {
             let cp = copy_propagate_analysis(func, ws);
@@ -322,9 +251,7 @@ pub(crate) fn cleanup_in(ws: Option<&Workspace>, func: &mut MirFunc) -> Result<(
             break;
         }
     }
-    // Copy propagation can hand a nil test a literal operand: an inlined
-    // default prologue testing the argument its caller stored. Deciding it
-    // removes a join, so the code after it starts from that literal again.
+    // Forwarding a default argument can make its callee prologue constant.
     let mut decided = fold_known_compares(func);
     while fold_const_branches(func) {
         if !decided {
@@ -416,21 +343,8 @@ fn assert_round_settled(ws: Option<&Workspace>, func: &MirFunc) {
     );
 }
 
-/// Fold a nil test whose operand is a freshly CONSTRUCTED aggregate: a ctor result
-/// is never nil, so `Eq(ctor, nil)` is statically false and `NotEq` statically true.
-/// [`fold_const_branches`] then turns the branch into a `Goto` and DCE removes the
-/// unreachable arm along with the boxes only it used.
-///
-/// A literal tested against `nil` or the omitted-argument marker is decided the
-/// same way: no other literal equals either.
-///
-/// This exists because SROA manufactures the shape rather than the lowering emitting
-/// it: a presence-aware read of a nullable value field tests `Inst::Field` against
-/// nil, which is a real test, and forwarding that field read to the literal behind
-/// it turns the operand into a ctor. 18 generated shapes boxed a value twice and
-/// branched on the result purely for this, and the value oracle read every one as
-/// CORRECT because the ANSWER was right.
-/// Literal string tags also decide enum arms before checking refined payloads.
+/// Fold comparisons with known tags or nilness. A value-producing
+/// conversion alone does not prove its operand non-null.
 fn fold_known_compares(func: &mut MirFunc) -> bool {
     let never_nil = skull_mir::nilness::constructed_never_nil;
     let is_nil = |func: &MirFunc, v: Idx<Inst>| matches!(&func.insts[v], Inst::Const(Lit::Nil));
@@ -467,12 +381,7 @@ fn fold_known_compares(func: &mut MirFunc) -> bool {
     true
 }
 
-/// Fold `Branch` on a constant bool condition into a `Goto`, then clear blocks
-/// no longer reachable (see [`clear_unreachable_blocks`]).
-/// `loop {}` lowers to a `while true` shape whose const branch hides the loop
-/// head from the FORL matcher's goto-chase (the filter combinator's skip loop)
-/// and leaves a dead exit arm in the emitted Lua. Returns whether anything
-/// changed (the dead `Const` conditions are left for a DCE round).
+/// Fold known branches and clear the detached blocks and their emit provenance.
 pub(crate) fn fold_const_branches(func: &mut MirFunc) -> bool {
     let bids: Vec<Idx<Block>> = func.blocks.iter().map(|(b, _)| b).collect();
     let mut changed = false;
@@ -496,9 +405,6 @@ pub(crate) fn fold_const_branches(func: &mut MirFunc) -> bool {
     true
 }
 
-/// Whether a block the entry and defer guards do not reach still holds code
-/// or a forced cell. A cheap filter for [`clear_unreachable_blocks`]: it
-/// leaves lambda entries out, so a body with a lambda always passes.
 fn has_unreached_code(func: &MirFunc) -> bool {
     let mut reach = vec![false; func.blocks.len()];
     let mut stack = vec![func.entry];
@@ -528,9 +434,7 @@ fn has_unreached_code(func: &MirFunc) -> bool {
         })
 }
 
-/// Clear blocks no longer reachable from any root (fn entry, lambda entries,
-/// co-fn defer guards -- the latter two are detached sub-CFGs by design and
-/// must survive). Returns whether a cleared block held anything.
+/// Keep lambda bodies and coroutine defer entries as independent roots.
 fn clear_unreachable_blocks(func: &mut MirFunc) -> bool {
     let mut roots = vec![func.entry];
     roots.extend(func.coro_defers.iter().map(|(_, e)| *e));
@@ -576,11 +480,6 @@ fn clear_unreachable_blocks(func: &mut MirFunc) -> bool {
     cleared
 }
 
-/// Whether instruction `i` is removable given the current reference counts: a
-/// pure value-producing inst with no users (`use_count == 0`), or a `Store` to a
-/// never-loaded cell (`load_count == 0`). `Call`/`CallValue` produce a value but
-/// have side effects, so an unused result does NOT make them dead; a bounds-
-/// checked `Index` read can error, so a discarded read must still run.
 fn is_dead_rc(inst: &Inst, i: Idx<Inst>, use_count: &[u32], load_count: &[u32]) -> bool {
     match inst {
         Inst::Store { cell, .. } => load_count[raw(*cell)] == 0,

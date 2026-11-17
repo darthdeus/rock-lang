@@ -1,82 +1,16 @@
-//! Bounds-check elision for `[T]` element accesses: a forward dataflow over
-//! in-bounds facts marks every `xs[i]` read or write whose index is provably in
-//! `[0, xs.len)` as [`ContainerKind::VecInBounds`], which the backends index
-//! raw, and replaces a proven column check ([`Inst::VecCheckedIndex`], the
-//! one check shared by the leaf reads of a column-stored or strided element)
-//! with the bare slot ([`Inst::VecIndexSlot`]). A `NativeBuffer` has the same
-//! `len` and the same proof: a proven element access becomes
-//! [`ContainerKind::NativeBufferInBounds`] and a proven `__nb_checked_index`
-//! call becomes [`Inst::NbIndexSlot`]. A call whose callee declares
-//! `@returns_index_below("<param>.<field>..")` or `@returns_nonneg` seeds the
-//! matching fact about its result. Results and errors are unchanged: an access is only marked where the
-//! check could not have raised.
+//! Prove vector and native-buffer bounds with forward dataflow.
 //!
-//! Three core facts are tracked about a *key*, which is either the value an
-//! instruction produced or a place (a local cell, a global, a field or an
-//! element of another key):
+//! Keys identify produced values and storage locations. A load ties its value
+//! to its current place until a write invalidates the tie. Joins intersect
+//! facts; a yield drops them. Unknown calls and Lua metamethods can invalidate
+//! memory and length facts.
 //!
-//! - `nonneg(k)`: the integer at `k` is `>= 0`.
-//! - `le_len(k, v)`: the integer at `k` is at most the live length of the
-//!   vector at `v`. A `len` read yields one; a push keeps it (the length only
-//!   grew); anything that may shrink a vector drops every one.
-//! - `lt(k, v)`: the integer at `k` is below the live length of `v`. Taking
-//!   the true edge of `k < b` with `le_len(b, v)` yields one, as does a checked
-//!   access `v[k]` (it would have raised otherwise).
+//! For affine indexes, a true ordered edge gives integer bounds only when
+//! whole operands and exact arithmetic can be established. Snapshot ties
+//! prevent using a reexecuted operand to justify an older product.
 //!
-//! A value and a place are tied by `same(value, place)`: the value is what the
-//! place holds right now. A load ties its value to its cell, a field read to
-//! the field of its base's key, and a store ties the stored value to the cell;
-//! the tie breaks when the place is written. Facts flow across a tie in both
-//! directions, so a bound read into a cell in the loop's preheader reaches the
-//! compare that loads the cell in the header, and a guard on one load of `i`
-//! covers the access that loads `i` again. A value that was read before its
-//! place changed keeps only its own facts, which is what makes a stale snapshot
-//! harmless.
-//!
-//! An access `v[k]` is in bounds when `nonneg(k)` and `lt(k, v)` both hold
-//! before it. This covers a counted `for i in lo..xs.len()` (the bound cell is
-//! `le_len`, the counter starts nonnegative and only increments), a
-//! `while i < xs.len` (the header re-reads the length), a dominating guard
-//! `if i >= 0 && i < xs.len`, and a dominating checked access `xs[i]` before
-//! `xs[i] = ..`.
-//!
-//! Constant-stride `row * stride + lane` also uses true-edge ordered
-//! comparisons and whole-number certificates. A bounded query proves both
-//! products and the sum exact in binary64, `row < rows`, `lane < stride`,
-//! and `rows * stride <= len`. False comparison edges do not establish these
-//! facts because they admit NaN. Arithmetic snapshot ties prevent expanding an
-//! old result using operands whose instructions have since executed again.
-//!
-//! Facts die at the writes that could falsify them. A store to a cell drops
-//! facts about that cell; a field store drops facts through that field name,
-//! and a `len` store drops every length fact; a global store drops facts
-//! through that global; an element store drops facts through any element. A
-//! boxed Vec, Map, or heap-record lookup/store can enter a Lua metamethod, so it drops all
-//! memory facts. A call drops every length fact and every fact through memory
-//! (a global, a field or an element): the callee may shrink any vector it can
-//! reach or rebind any field. `@pure` is not trusted, since the checker admits
-//! `@debug_impure` callees and never verifies an `inline(lua)` or `extern`
-//! body. A yield drops everything. An instruction that executes
-//! again (a loop) drops the facts about its previous value.
-//!
-//! Fresh Lua boxed Vecs and records carry local, must-private allocation identities.
-//! Local copies preserve them; publishing any alias revokes its whole family.
-//! Private record reads cannot call a getter. A private ArrayPush or recognized
-//! boxed stdlib push cannot call a setter, so it invalidates current length and
-//! element places without discarding captured bounds. Opaque calls still drop
-//! memory facts. Container contents are not tracked; backing exposure escapes.
-//!
-//! Merging at a join intersects the incoming facts, so a fact that reaches the
-//! loop header around the back edge must have survived the whole body: a body
-//! that pops, clears or calls into unknown code keeps its checks. Early exits
-//! need no care: a `break` or `return` only removes later accesses.
-//!
-//! Runs after closure conversion, so every cell is a plain local of this body:
-//! a captured mutable variable is a box reached through a field by then. A
-//! body that still holds a lambda is left alone.
-//!
-//! `ROCK_SKULL_BOUNDS_OFF=1` keeps every check, so the output with and without
-//! the pass can be compared; a measurement switch, never a shipped mode.
+//! Fresh Lua tables are private until any alias escapes. Reads of private
+//! records and recognized pushes cannot invoke metamethods.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -93,10 +27,7 @@ use skull_mir::mir::*;
 use crate::visit::raw;
 use ustr::Ustr;
 
-/// Mark every provably in-bounds `[T]` element access in `func`, returning how
-/// many accesses were marked. Adds only allocation guarantees of the actual
-/// emission target. In particular, fresh JS arrays can inherit setters; fresh
-/// Lua tables have no metatable.
+/// Use the allocation guarantees of the selected backend.
 pub fn elide_bounds_checks_for_target(
     ws: Option<&Workspace>,
     func: &mut MirFunc,
@@ -374,9 +305,7 @@ fn disabled_by_env() -> bool {
     })
 }
 
-/// Cover every backward-edge interval in RPO. Every cyclic block lies in one:
-/// its cycle must cross its rank backwards. Acyclic crossedges can also cover
-/// blocks, so an unmarked block cannot execute twice.
+/// Every cyclic block lies within a backward-edge interval in RPO.
 fn reexecuting_blocks(func: &MirFunc, rpo: &[Idx<Block>]) -> Vec<bool> {
     let mut order = vec![usize::MAX; func.blocks.len()];
     for (at, &b) in rpo.iter().enumerate() {
@@ -464,9 +393,7 @@ impl<'a> Ctx<'a> {
                 relevant[raw(cond)] = true;
             }
         }
-        // Arithmetic and compares pass relevance to their operands; in reverse
-        // postorder a use follows its definition, so one pass over the blocks in
-        // reverse reaches every operand.
+        // Propagate relevance backward through arithmetic and comparisons.
         for &b in rpo.iter().rev() {
             for &id in func.blocks[b].insts.iter().rev() {
                 if !relevant[raw(id)] {
@@ -557,9 +484,7 @@ struct Interned {
     mentions: Mentions,
 }
 
-/// A summary of the keys a key mentions: values and cells hashed into 64
-/// bits, and which of the place kinds appear. Two summaries that do not meet
-/// prove that no key of one is a key of the other.
+/// A cheap conservative filter for keys affected by a write.
 #[derive(Clone, Copy, Default)]
 struct Mentions {
     values: u64,
@@ -721,9 +646,7 @@ struct Facts {
     whole: HashSet<Key>,
     // Ordered comparisons, seeded only by true edges (false admits NaN).
     ordered: HashSet<(Key, Key, bool)>,
-    // A local reference to a fresh Lua table whose allocation never escaped.
-    // Allocation sites identify alias families; reexecution may conservatively
-    // join several private instances of one site into the same family.
+    // One allocation site may represent several private objects in a loop.
     private_tables: HashSet<(Key, Idx<Inst>)>,
 }
 
@@ -771,9 +694,7 @@ impl Facts {
         self.forget(func, Mentions::cell(cell), |k| k == KeyData::Cell(cell));
     }
 
-    /// Runs at every value an instruction in a loop produces, and almost
-    /// never finds a fact to drop: rule the value out by the keys' summaries
-    /// before rebuilding every set.
+    /// Use the summaries to skip invalidation when no fact mentions this value.
     fn forget_value(&mut self, func: &Body<'_>, id: Idx<Inst>) {
         let mask = Mentions::value(id);
         let found = {
@@ -840,9 +761,7 @@ impl Facts {
     }
 
     fn nonneg(&self, func: &Body<'_>, id: Idx<Inst>) -> bool {
-        // Only integer arithmetic over proven operands: a `len` field can be
-        // written by source code, and the unsigned representation is not
-        // vouched for here.
+        // A user-written length field need not be a valid length.
         match &func.insts[id] {
             Inst::Const(Lit::Int(n)) => *n >= 0,
             Inst::IntAdd(a, b) | Inst::IntMul(a, b) => {
@@ -1129,10 +1048,8 @@ impl Facts {
             .collect()
     }
 
-    /// The vectors whose live length `id` is below, by a recorded fact or
-    /// floor modulo with a positive divisor. Subtracting a positive integer
-    /// from a length does not prove a strict bound: infinity and large
-    /// floating-point integers can remain unchanged by the subtraction.
+    /// Subtracting a positive integer does not prove a strict bound:
+    /// large floating-point integers and infinity can round back to themselves.
     fn lt_of(&self, func: &Body<'_>, id: Idx<Inst>) -> Vec<Key> {
         let keys = self.keys_of(func, id);
         let mut out: Vec<Key> = self
@@ -1266,11 +1183,7 @@ fn leq_fact(facts: &mut Facts, func: &Body<'_>, a: Idx<Inst>, b: Idx<Inst>) {
     }
 }
 
-/// What a direct call may have written, from the whole-program effect table
-/// (`bone_core::effects`): a callee that writes nothing keeps every fact, a
-/// push drops only facts through `len`, a callee that may shrink a vector
-/// drops the length facts, and field, global and element writes drop the
-/// facts through those places. Without a workspace every call is unknown.
+/// Use known callee effects for a direct call.
 fn after_direct_call(facts: &mut Facts, func: &Body<'_>, ctx: &Ctx<'_>, fref: FuncRef) {
     let Some(ws) = ctx.ws else {
         facts.after_unknown_call(func);
@@ -1331,10 +1244,7 @@ fn constant_scale(func: &MirFunc, id: Idx<Inst>) -> Option<(Idx<Inst>, i64)> {
 
 const LEN: &str = "len";
 
-/// The facts a callee declares about its result: `@returns_nonneg`, and
-/// `@returns_index_below("<param>[.field]*")`, which names a vector held by
-/// an argument's place when the call returns. A promise about a body the
-/// compiler cannot read, so it rides on the same review as the body.
+/// Seed bounds declared by the callee.
 fn seed_declared_result_facts(
     facts: &mut Facts,
     func: &Body<'_>,

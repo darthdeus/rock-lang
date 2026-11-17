@@ -1,57 +1,10 @@
-//! FORL recovery: rewrite the desugared `for x in <user iter>` loop (after
-//! inlining + SROA) into the exact goto-loop shape `skull-codegen-lua`'s
-//! `CountedLoop` detector recognizes, so it prints as a native Lua numeric
-//! `for` (LuaJIT FORL bytecode: hoisted bounds check, counted back-edge,
-//! int<->double transition tolerance). The goto-LOOP form of the same loop
-//! measures 1.8x slower on a type-stable 2M-element sum.
+//! Recover a counted loop from an inlined iterator's test, yield and done arms.
+//! Only tagged iterator loops may snapshot their bound. A handwritten while
+//! must still read it on each iteration.
 //!
-//! Fires ONLY on loops tagged by `lower_for_user_iter`
-//! (`MirFunc::for_iter_headers`). The one observable change is bound SNAPSHOT:
-//! the per-iteration bound read (e.g. the inlined `it.vec.len`) moves to the
-//! preheader and is evaluated once per loop. That diverges only when the body
-//! mutates the collection being iterated, which is recorded UB. The sanction is exactly why the
-//! pass is tag-gated
-//! -- a user-written `while i < xs.len` must keep re-reading its bound.
-//!
-//! Post-inline shape matched (H = the tagged head):
-//! ```text
-//! P:  ...; store slot = <init>; goto H       -- unique non-back-edge pred
-//! H:  goto.. T                               -- back-edge/continue target
-//! T:  l = load slot; <bound chain>; c = cmp(l, B); branch c -> D | Y
-//! D:  store flag = false; store elem = <const|phantom()>; goto.. J
-//! Y:  <elem reads>; store slot = slot + 1; store flag = true; ..; goto.. J
-//! J:  f = load flag; branch f -> BODY | EXIT
-//! ```
-//! Rewrite: hoist the bound chain T->P; T becomes `load slot; IntLt/IntLeq`
-//! branching yield-arm/EXIT; Y drops the increment and jumps straight to BODY;
-//! a fresh 4-inst latch L (`load; 1; add; store; goto T`) takes every former
-//! back-edge/continue; the preheader targets T; H/D/J are cleared (the
-//! detector's `slot_sound` scans ALL arena blocks, incl. unreachable ones).
-//!
-//! Skip-loop layers (filter/take_while) extend the join cascade with three
-//! shapes, turning the chain into a flat `for + skip-branch`:
-//! - **skip edge** (filter reject): a yield-path branch whose reject arm
-//!   chases back to the fetch head (T or a guard). Rewritten to target the
-//!   latch -- a `continue`.
-//! - **stop edge** (take_while reject): a yield-path branch whose reject arm
-//!   chases to a droppable done block storing the NEXT level's flag `false`.
-//!   Rewritten to target EXIT -- a `break`.
-//! - **guard** (take_while `__done`): a head-chain block
-//!   `g = load cell; branch g -> done | fetch`. `g` is provably false at
-//!   every entry (init-false store outside the loop; `true` stores only in
-//!   done/stop blocks, which exit the rewritten loop and are cleared; no
-//!   other reader), so the guard drops with the head chain.
-//!
-//! Continue stays correct: the old code increments PRE-body (inside the
-//! inlined `next`), so `continue -> H` re-tested an already-advanced slot; the
-//! new code strips that increment and `continue -> L` performs it instead --
-//! same test values, one increment per iteration either way. The in-body slot
-//! value differs by one, which is unobservable because the matcher rejects any
-//! slot read outside T's compare and Y's pre-increment reads.
-//!
-//! Every bail leaves the loop untouched. The rewrite itself is
-//! semantics-preserving even when the downstream detector then declines
-//! (worst case: a correct goto loop with a dedicated latch).
+//! The rewrite keeps yield-path copies, routes filter rejects to the latch
+//! and take_while rejects to the exit, and clears the obsolete flag branches.
+//! The latch now advances the cursor, so continue advances it once as before.
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
@@ -60,9 +13,7 @@ use comfy_la_arena::Idx;
 use skull_mir::cfg::successors;
 use skull_mir::mir::*;
 
-/// Rewrite every tagged, matching desugared-iterator loop in `func` into the
-/// codegen `CountedLoop` shape. Run after `inline_functions_with_plans` + `cleanup` (the
-/// slot only exists as a scalar cell once SROA has peeled the cursor struct).
+/// Run after scalarization exposes the iterator cursor as a cell.
 pub fn recover_counted_loops(ws: &Workspace, func: &mut MirFunc) {
     if func.for_iter_headers.is_empty() {
         return;
@@ -89,38 +40,24 @@ struct LoopMatch {
     t: Idx<Block>,
     /// Unique non-back-edge pred of the head; must end `Goto(head)`.
     p: Idx<Block>,
-    /// Yield-path block (stores the increment + `flag = true`).
     y: Idx<Block>,
-    /// T's branch arm on the yield side (pre-chase, kept as the `for` body entry).
     y_arm: Idx<Block>,
     exit: Idx<Block>,
     slot: Idx<Cell>,
-    /// The non-slot compare operand (the bound value).
     bound: Idx<Inst>,
-    /// Continue while `slot <= bound` (else `<`).
     inclusive: bool,
-    /// Position of the increment `Store{slot}` in `y.insts`.
     incr_pos: usize,
-    /// Bound-chain insts currently listed in T, in T order (to hoist).
     chain: Vec<Idx<Inst>>,
-    /// Former back-edge preds of the head (body end + every `continue`).
     back: Vec<Idx<Block>>,
-    /// Scaffolding to clear: head chain + every done-path block/chain.
     clear: Vec<Idx<Block>>,
-    /// The join cascade, innermost first: `(join block, insts to drop -- the
-    /// flag load and optional `not` --, yield-continuation target)`. Each is
-    /// rewritten into a pass-through (elem copies kept, `Goto(cont)`); the
-    /// LAST one's cont is the loop body.
+    /// Join rewrites in order from the iterator toward the loop body.
     joins: Vec<(Idx<Block>, Vec<Idx<Inst>>, Idx<Block>)>,
     /// Skip-reject arms `(branch block, raw arm target)`: a filter reject
     /// that re-enters the fetch. Retargeted to the latch (a `continue`).
     skips: Vec<(Idx<Block>, Idx<Block>)>,
-    /// Stop-reject arms `(branch block, raw arm target)`: a take_while
-    /// reject whose done path exits the loop. Retargeted to EXIT (a `break`).
     stops: Vec<(Idx<Block>, Idx<Block>)>,
 }
 
-/// A take_while `__done` guard on the head chain.
 struct GuardInfo {
     b: Idx<Block>,
     gload: Idx<Inst>,
@@ -182,11 +119,7 @@ fn try_match(
     h: Idx<Block>,
     idom: &mut Option<skull_mir::cfg::Dominators>,
 ) -> Option<LoopMatch> {
-    // Head -> test block through empty gotos, allowing take_while `__done`
-    // GUARD blocks on the way: `g = load cell; branch g -> done | fetch`
-    // (possibly through a `not`). The continue arm must be the g == false arm
-    // -- the guard is dropped on the proof that g is false at every entry,
-    // verified fn-wide after the peel.
+    // A take_while done guard can disappear if false on every retained entry.
     let mut head_chain = Vec::new();
     let mut guards: Vec<GuardInfo> = Vec::new();
     let mut cur = h;
@@ -240,7 +173,6 @@ fn try_match(
         cur = cont_arm;
     };
 
-    // The compare, with the slot on either side.
     let (less, equal, a, b) = match func.insts[cond] {
         Inst::IntLt(a, b) => (true, false, a, b),
         Inst::IntLeq(a, b) => (true, true, a, b),
@@ -293,7 +225,6 @@ fn try_match(
     }
     let inclusive = equal == yield_is_then;
 
-    // Both paths must converge on the flag-join block J.
     let Term::Goto(jy) = func.blocks[y].term else {
         return None;
     };
@@ -307,7 +238,6 @@ fn try_match(
         return None;
     }
 
-    // D must be droppable: consts, stores to non-slot cells, or `phantom()`.
     let d_droppable = |blk: Idx<Block>| -> bool {
         func.blocks[blk]
             .insts
@@ -329,7 +259,6 @@ fn try_match(
                 if matches!(func.insts[value], Inst::Const(Lit::Bool(false))))
         })
     };
-    // Flag is stored as literal `want` in `blk`, exactly once.
     let flag_const = |blk: Idx<Block>, flag: Idx<Cell>, want: bool| -> bool {
         let mut seen = false;
         for &i in &func.blocks[blk].insts {
@@ -347,32 +276,18 @@ fn try_match(
         seen
     };
 
-    // Peel the JOIN CASCADE. A plain user iterator has ONE flag join
-    // (`J: f = load flag; branch f -> BODY | EXIT`). An inlined combinator
-    // chain (MapIter over VecIter, ..) has one PER LAYER: each inner `next`'s
-    // ok-flag joins into the enclosing `next`'s destructure, whose `if !ok`
-    // branches to the NEXT done-propagation block (false side) or continues
-    // transforming the element (true side) toward the next join. Peel level by
-    // level: the false side chasing to a droppable done block that stores the
-    // next flag `false` means one more level; anything else is the loop EXIT
-    // and the true side is the BODY. Each join is later rewritten into a
-    // pass-through (its elem-copy insts kept, flag load dropped), so the
-    // yield path runs straight T -> Y -> J1' -> .. -> Jn' -> BODY.
+    // Each combinator can add one flag join. Follow its true arm through the
+    // element copies and use its false arm to find the next join or the exit.
     struct Join {
         j: Idx<Block>,
-        /// Insts to drop from J at rewrite (the flag load + optional `not`).
         drop: Vec<Idx<Inst>>,
-        /// The yield-continuation arm J branches to (raw, pre-chase).
         cont: Idx<Block>,
         flag: Idx<Cell>,
     }
     let mut joins: Vec<Join> = Vec::new();
     let mut done_blocks: Vec<Idx<Block>> = vec![d];
     let mut done_chains: Vec<Idx<Block>> = d_join_chain;
-    // Per level: the yield-side blocks that must store `flag = true`.
     let mut yield_sources: Vec<Vec<Idx<Block>>> = vec![vec![y]];
-    // Yield-path hop blocks (live after the rewrite; part of the flag-read
-    // live set below).
     let mut live_hops: Vec<Idx<Block>> = y_join_chain;
     let mut skips: Vec<(Idx<Block>, Idx<Block>)> = Vec::new();
     let mut stops: Vec<(Idx<Block>, Idx<Block>)> = Vec::new();
@@ -380,7 +295,6 @@ fn try_match(
     // once that flag is known (top of the following peel iteration).
     let mut pending_stops: Vec<(Idx<Block>, Idx<Block>, Idx<Block>)> = Vec::new();
     let mut stop_dones: Vec<Idx<Block>> = Vec::new();
-    // Reject-arm hop chains + stop done chains: dead after the retarget.
     let mut reject_chains: Vec<Idx<Block>> = Vec::new();
     let mut cur_j = j;
     let (body, exit) = loop {
@@ -391,12 +305,7 @@ fn try_match(
         if !d_droppable(cur_d) {
             return None;
         }
-        // J's insts: the flag load feeding the branch (directly or through a
-        // single `not`), plus elem copies (loads / stores to non-slot cells /
-        // consts) that stay on the rewritten pass-through. A store to the
-        // flag cell itself is an elem copy REUSING the cell (SROA coalesces a
-        // level's ok flag onto the for-desugar's dest cells) -- allowed only
-        // AFTER the flag load, so the branch still tests the entry value.
+        // SROA can reuse the flag cell for an element copy after the flag load.
         let Term::Branch {
             cond: jc,
             then_bb,
@@ -445,8 +354,6 @@ fn try_match(
                 _ => return None,
             }
         }
-        // Stop arms recorded on the walk INTO this join reject at this
-        // level: their done block must store this flag false.
         for (sb, sa, sd) in pending_stops.drain(..) {
             if !d_droppable(sd) || !flag_const(sd, flag, false) {
                 return None;
@@ -454,8 +361,6 @@ fn try_match(
             stops.push((sb, sa));
             stop_dones.push(sd);
         }
-        // `flag == true` is the yield side (stored true by this level's yield
-        // sources, false by its done block).
         let (cont_arm, done_arm) = if flag_is_then {
             (then_bb, else_bb)
         } else {
@@ -479,8 +384,6 @@ fn try_match(
             flag,
         });
 
-        // Probe the done arm: another done-propagation block means one more
-        // level; anything else is the real EXIT.
         let mut done_arm_chain = Vec::new();
         let dn = chase(func, done_arm, &mut done_arm_chain);
         let deeper =
@@ -491,18 +394,13 @@ fn try_match(
         done_blocks.push(dn);
         done_chains.extend(done_arm_chain);
 
-        // Walk the yield side to the next join (the done side's convergence).
-        // The path is goto-linked, insts allowed; a BRANCH block on it must
-        // have exactly one reject arm -- a skip (chases to the fetch head: T
-        // or a guard) or a stop (chases to a droppable done block converging
-        // at the next join) -- and the walk continues on the other arm.
+        // A branch on the path to the next join needs one skip or stop arm.
         let Term::Goto(dgoto) = func.blocks[dn].term else {
             return None;
         };
         let mut next_chain = Vec::new();
         let next_j = chase(func, dgoto, &mut next_chain);
         done_chains.extend(next_chain);
-        // `Some((target, is_skip))` = reject arm; `None` = not one.
         let classify =
             |arm: Idx<Block>, chains: &mut Vec<Idx<Block>>| -> Option<(Idx<Block>, bool)> {
                 let mut hops = Vec::new();
@@ -526,8 +424,6 @@ fn try_match(
         let mut yb = cont_arm;
         let mut steps = 0;
         loop {
-            // Yield-side hop blocks stay LIVE (the rewritten pass-through path
-            // runs through them) -- never into the clear list.
             let mut hops = Vec::new();
             let c = chase(func, yb, &mut hops);
             live_hops.extend(hops);
@@ -574,7 +470,6 @@ fn try_match(
         return None;
     }
 
-    // Y: exactly one slot store, a `slot + 1` increment, no slot read after it.
     let yinsts = &func.blocks[y].insts;
     let mut incr_pos = None;
     for (pos, &i) in yinsts.iter().enumerate() {
@@ -603,14 +498,7 @@ fn try_match(
         }
     }
 
-    // Preds of the head: a back edge is a pred the head DOMINATES; the
-    // preheader is the single one it does not, and must be a plain goto (it
-    // falls through into the emitted `for`). Forward reachability from BODY is
-    // the wrong split: inside an enclosing loop the preheader is reachable
-    // from the body through the outer back edge, so every nested iterator
-    // loop read as having two preheaders and stayed a goto loop. A pred the
-    // entry cannot reach has no dominator entry and counts as a preheader,
-    // which bails the same way it always did.
+    // Dominance distinguishes a latch from a preheader inside an outer loop.
     let idom = idom.get_or_insert_with(|| skull_mir::cfg::dominators(func, func.entry()));
     let mut back = Vec::new();
     let mut pre = Vec::new();
@@ -654,10 +542,7 @@ fn try_match(
     }
     let in_loop: HashSet<Idx<Block>> = region.iter().copied().chain([h, t]).collect();
 
-    // Slot soundness, fn-wide (all arena blocks, incl. closures/unreachable):
-    // exactly one init store outside the loop, no other in-loop store than the
-    // increment, loads only in T (the compare) and Y (pre-increment, checked
-    // above), never a multi-call dest / map-next out-cell / lambda param.
+    // Other readers could observe the change from pre-body to latch increment.
     let mut init_stores = 0usize;
     for (bid, blk) in func.blocks.iter() {
         let inside = in_loop.contains(&bid);
@@ -694,14 +579,8 @@ fn try_match(
         return None;
     }
 
-    // Guard verification (post-peel, in_loop known). Each guard's done arm
-    // must chase to a droppable block storing some peeled join's flag `false`
-    // and converging at that join (structurally a done block for that level);
-    // it joins the clear list. The guard cell `g` must be provably false at
-    // every loop entry: all out-of-loop stores are `false` (>=1), all in-loop
-    // stores are `true` AND sit in blocks whose control exits the rewritten
-    // loop (done/stop/guard-done blocks -- all cleared), and the guard load
-    // is g's only read fn-wide.
+    // Guard stores must start false. True writes only occur on paths
+    // removed by the rewrite, which exit the loop.
     let mut guard_clear: Vec<Idx<Block>> = Vec::new();
     for g in &guards {
         let mut hops = Vec::new();
@@ -770,13 +649,7 @@ fn try_match(
         }
     }
 
-    // Flag hygiene, per level: every read of a level flag must sit on the
-    // LIVE yield path (T, Y, the joins, yield-source blocks and their hops)
-    // -- there no store feeding it is dropped, so it sees identical values
-    // pre/post rewrite. SROA reuses one cell as several levels' flags and as
-    // an elem temp (the for-desugar dest cells), so "only the join's own
-    // fload" is too strict; a read anywhere else (body, after the loop, a
-    // closure) could observe a dropped done-path store.
+    // Flag cells may be shared by levels, but reads must stay on the live yield path.
     let live_set: HashSet<Idx<Block>> = joins
         .iter()
         .map(|jn| jn.j)
@@ -809,10 +682,7 @@ fn try_match(
         }
     }
 
-    // Bound chain: the T-resident insts computing the bound. `Load`s of cells
-    // unwritten in the loop, `Field` projections over them (the `.len` read --
-    // hoisting it is the sanctioned snapshot), and consts. An operand defined
-    // OUTSIDE T already dominates the loop and needs no move.
+    // Hoist only a bound derived from values whose cells stay stable in the loop.
     let tset: HashSet<Idx<Inst>> = func.blocks[t].insts.iter().copied().collect();
     if !tset.contains(&slot_load) || !tset.contains(&cond) {
         return None;
@@ -848,11 +718,6 @@ fn try_match(
         .filter(|i| chain_set.contains(i))
         .collect();
 
-    // Scaffolding to clear once unlinked: the head chain (guards included),
-    // every done-path block (stop and guard done blocks too), and the
-    // reject-arm hop chains. The joins are NOT cleared -- they rewrite into
-    // yield pass-throughs -- and neither are the Y->J hop chains or
-    // yield-walk hops (live on the yield path).
     let mut clear = head_chain;
     clear.extend(done_blocks);
     clear.extend(d_chain);
@@ -889,12 +754,10 @@ fn try_match(
 }
 
 fn rewrite(func: &mut MirFunc, h: Idx<Block>, m: LoopMatch) {
-    // Hoist the bound chain into the preheader (snapshot; order preserved).
     let chain_set: HashSet<Idx<Inst>> = m.chain.iter().copied().collect();
     func.blocks[m.t].insts.retain(|i| !chain_set.contains(i));
     func.blocks[m.p].insts.extend(m.chain.iter().copied());
 
-    // T becomes the detector header: `load slot; cmp` -> Branch(yield, exit).
     let sl = func.alloc_inst(Inst::Load(m.slot));
     let ncond = func.alloc_inst(if m.inclusive {
         Inst::IntLeq(sl, m.bound)
@@ -908,21 +771,13 @@ fn rewrite(func: &mut MirFunc, h: Idx<Block>, m: LoopMatch) {
         else_bb: m.exit,
     };
 
-    // Y drops the increment (the `for` owns it now) and keeps flowing into
-    // the join cascade; each join becomes a pass-through -- flag load (and
-    // `not`) dropped, elem copies kept, straight `Goto` to its yield arm (the
-    // last one's arm IS the body). The now-dead flag stores fall to DCE.
     func.blocks[m.y].insts.remove(m.incr_pos);
     for (jb, drop, cont) in &m.joins {
         func.blocks[*jb].insts.retain(|i| !drop.contains(i));
         func.blocks[*jb].term = Term::Goto(*cont);
     }
 
-    // Dedicated 4-inst latch (the exact `latch_slot` shape); every former
-    // back-edge -- loop end AND continue -- goes through it. A filter's skip
-    // edge becomes a `continue` (through the latch: the element was fetched,
-    // so the slot advances); a take_while's stop edge becomes a `break`
-    // (straight to EXIT -- its done-propagation path is cleared).
+    // Codegen recognizes this latch as the numeric-for increment.
     let l = func.new_block();
     let ll = func.alloc_inst(Inst::Load(m.slot));
     let lc = func.alloc_inst(Inst::Const(Lit::Int(1)));
@@ -944,9 +799,7 @@ fn rewrite(func: &mut MirFunc, h: Idx<Block>, m: LoopMatch) {
     }
     func.blocks[m.p].term = Term::Goto(m.t);
 
-    // Clear the unlinked scaffolding: the detector's fn-wide scans
-    // (`slot_sound`, DCE's use counts) see ALL arena blocks, so stale insts in
-    // unreachable blocks would keep dead stores alive or veto the match.
+    // The counted-loop detector scans even unreachable blocks for cursor uses.
     for &bk in &m.clear {
         func.blocks[bk].insts.clear();
         func.blocks[bk].term = Term::Unreachable;

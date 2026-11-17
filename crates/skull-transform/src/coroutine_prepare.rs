@@ -1,7 +1,4 @@
-//! The backend-neutral front half of `co fn` emission. Both drivers render
-//! from a [`PreparedCoroutine`]: the transformed step, its detached defer and
-//! hook bodies, the converted closures and the finished code artifact with
-//! the keys the constructor publishes.
+//! Build the coroutine step, hooks, defers, and reload metadata for emission.
 
 use rustc_hash::FxHashSet as HashSet;
 
@@ -41,15 +38,8 @@ pub struct PreparedCoroutine {
     pub keys: CoroutineKeys,
 }
 
-/// Transform `func`, split out its detached regions, convert closures,
-/// validate the step and build its code artifact.
-///
-/// `reserve` sees every synthetic global name this coroutine mints, so a
-/// backend can reject a user definition that collides with one.
-///
-/// Coroutine bodies are never inlined, so a tagged iterator loop in a hoisted
-/// lambda, defer or hook still calls `next` and `recover_counted_loops` could
-/// not match it. Those bodies take cleanup only.
+/// Prepare the step and detached regions for both emitters. Report synthetic
+/// names through `reserve` so they can be checked for collisions.
 pub fn prepare_coroutine(
     ws: &Workspace,
     interner: &skull_mir::monoty::MonoInterner,
@@ -61,16 +51,12 @@ pub fn prepare_coroutine(
     let channel = plan.channel.as_ref();
     let mut lowered = crate::transform_coroutine(func, channel, plan.has_return_value());
     crate::body_chain::debug_verify(&lowered.step, Stage::LOWERED, &"the coroutine transform");
-    // `__resume`/`__advance` are rendered by the constructor from the plan;
-    // whether an `__advance` exists is the plan's answer.
     reserve(&plan.resume());
     if let Some(advance) = plan.advance() {
         reserve(&advance);
     }
     let step_name = plan.step();
     reserve(&step_name);
-    // Detached regions become ordinary MirFuncs, so their own lambda
-    // parameters and locals cannot be rendered as coroutine frame fields.
     let frame_info = crate::closure::FrameInfo {
         s_cell: lowered.s_cell,
         slots: lowered.frame_plan.slots(),
@@ -185,9 +171,7 @@ pub fn prepare_coroutine(
         artifact.set_body_names(aux, aux.name.as_str());
         code_artifact.merge(artifact);
     }
-    // Step, defer and hook regions share this coroutine's owner but computed
-    // their lambda topologies from disjoint populations; present one value
-    // per owner before the generated entries inherit the root's.
+    // Generated entries under one owner share its combined lambda topology.
     code_artifact.unify_owner_topologies();
     let keys = add_coroutine_code_values(
         ws,

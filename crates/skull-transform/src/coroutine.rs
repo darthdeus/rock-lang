@@ -1,27 +1,4 @@
-//! Coroutine transform: a `co fn` (lowered to a cell CFG with `Term::Yield`)
-//! becomes an ordinary stackless state-machine `__step` function plus a
-//! constructor. No LuaJIT
-//! coroutines.
-//!
-//! The cell model SIMPLIFIES this vs the old SSA backend: **only cells cross an
-//! await** (values are single-block), so there is NO value spill/reload and NO
-//! "block-param value crossing a suspend" case. The frame (state-table fields)
-//! is just cells — rendered as `s.<field>` by `skull-codegen-lua`'s `FrameCtx`,
-//! so the transform doesn't even rewrite cell Load/Store; it only:
-//!   1. turns each `Term::Yield { value, resume }` block into `s.__state = k;
-//!      return value` (the `resume` block becomes a dispatch target),
-//!   2. turns a normal `return v` into `s.__return = v; s.__state = -3; return`
-//!      (-3 = completed normally, distinct from killed -1 so
-//!      `completed()` can tell a natural finish from a kill or error). Both stamps (yield and
-//!      completion) are guarded on `state != -1`: a body that killed its own
-//!      handle mid-run stays killed,
-//!   3. rewrites `CoroSetInner(x)` (the `await` pseudo-op) to `s.__inner = x`,
-//!   4. prepends a dispatch entry that branches on `s.__state` to the resume
-//!      block for each state (falling through to the original entry for state 0).
-//!
-//! Frame = cells live at a resume point, plus parameters and cells retained by a
-//! closure or detached lifecycle body. The constructor seeds only the declared
-//! param fields.
+//! Lower suspension to a state-machine step and retain values live across a yield.
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
@@ -34,7 +11,6 @@ use skull_mir::mir::*;
 
 pub const STATE: &str = "__state";
 
-/// The physical frame layout chosen for one transformed coroutine body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoroutineFramePlan {
     frame_cells: HashSet<Idx<Cell>>,
@@ -83,17 +59,11 @@ pub struct CoroLowered {
     pub step: MirFunc,
     pub s_cell: Idx<Cell>,
     pub frame_plan: CoroutineFramePlan,
-    /// Declared param cells (constructor seeds a state-table field for each).
     pub params: Vec<Idx<Cell>>,
-    /// Whether the step needs a terminal-cleanup error boundary.
     pub needs_protected_resume: bool,
-    /// `on_killed`/`on_resume`/`on_hot_reload` hooks peeled to the constructor:
-    /// `(kind, detached body entry)`. The body is emitted as its own ordinary
-    /// `MirFunc`, just like a closure sibling.
+    /// Lifecycle hooks are emitted as ordinary bodies receiving the frame.
     pub hooks: Vec<(CoroHookKind, Idx<Block>)>,
-    /// The scope tree + ownership built (once) for frame membership, threaded to
-    /// `emit_named_framed` so the step's hoist plan reuses them instead of
-    /// rebuilding on the post-rewrite CFG (they are stable across the rewrite).
+    /// Closure conversion uses the same ownership as frame planning.
     pub step_tree: crate::scope::ScopeTree,
     pub step_own: crate::scope::Ownership,
 }
@@ -109,7 +79,6 @@ fn fnv1a32(s: &str) -> u32 {
     h
 }
 
-/// Append `inst` to block `bid` of `f`, returning its id.
 fn emit(f: &mut MirFunc, bid: Idx<Block>, inst: Inst) -> Idx<Inst> {
     let id = f.alloc_inst(inst);
     f.blocks[bid].insts.push(id);
@@ -164,20 +133,14 @@ fn vfield(v: Idx<Inst>) -> ustr::Ustr {
     ustr::Ustr::from(format!("v{}", raw(v)).as_str())
 }
 
-/// Spill a CROSS-BLOCK value that is also live across a suspension to the state
-/// table at its def and reload it at each using block. Values crossing ordinary
-/// branches stay as step locals; only a value live into a yield's resume block
-/// needs persistence. Constants are rematerialized at each use block: they have
-/// no evaluation-time identity to preserve, and polymorphic null has no
-/// standalone physical type for a frame field. Returns the sorted spilled
-/// values; their `v<N>` fields are part of the frame layout stamp.
+/// Spill values live across a suspension. Rematerialize constants on the
+/// other side, where untyped nil needs no physical frame field.
 fn spill_cross_block_values(
     step: &mut MirFunc,
     s_cell: Idx<Cell>,
     block_ids: &[Idx<Block>],
     resume_blocks: &[Idx<Block>],
 ) -> Vec<Idx<Inst>> {
-    // def block of every value.
     let mut def_block: HashMap<Idx<Inst>, Idx<Block>> = HashMap::default();
     for &bid in block_ids {
         for &id in &step.blocks[bid].insts {
@@ -186,7 +149,6 @@ fn spill_cross_block_values(
             }
         }
     }
-    // cross_block_values = values used in a block other than where defined.
     let mut cross_block_values: HashSet<Idx<Inst>> = HashSet::default();
     for &bid in block_ids {
         let mut used: Vec<Idx<Inst>> = Vec::new();
@@ -219,8 +181,6 @@ fn spill_cross_block_values(
     }
 
     for &bid in block_ids {
-        // Reloads needed in this block: frame values used here but defined
-        // elsewhere. Sorted for deterministic output.
         let mut used_here: Vec<Idx<Inst>> = Vec::new();
         {
             let mut seen = HashSet::default();
@@ -267,7 +227,6 @@ fn spill_cross_block_values(
         for id in old {
             step.insts[id].remap_uses(&m);
             new_list.push(id);
-            // Spill right after a frame value's def.
             if frame_values.contains(&id) && def_block.get(&id) == Some(&bid) {
                 let sv = step.alloc_inst(Inst::Load(s_cell));
                 let st = step.alloc_inst(Inst::StoreField {
@@ -289,10 +248,7 @@ fn spill_cross_block_values(
     values
 }
 
-/// Cells needed on the far side of at least one suspension. Ordinary CFG
-/// branches do not make a cell persistent; only a cell live into a yield's
-/// resume block does. The dataflow is deliberately cell-only because MIR
-/// values crossing blocks already use `spill_cross_block_values`.
+/// Find cells live into a suspension resume block.
 fn cells_live_at_yield_resumes(func: &MirFunc, blocks: &[Idx<Block>]) -> HashSet<Idx<Cell>> {
     let mut block_use: HashMap<Idx<Block>, HashSet<Idx<Cell>>> = HashMap::default();
     let mut block_def: HashMap<Idx<Block>, HashSet<Idx<Cell>>> = HashMap::default();
@@ -396,8 +352,6 @@ fn lambda_site(func: &MirFunc, lambda: Idx<Inst>) -> Option<LambdaSiteId> {
         .and_then(LambdaSiteId::from_span)
 }
 
-/// Values live into resume blocks, used to narrow the cross-block spill
-/// candidates to values that must survive a suspension rather than a branch.
 fn values_live_at_resume_blocks(
     func: &MirFunc,
     blocks: &[Idx<Block>],
@@ -436,7 +390,6 @@ fn values_live_at_resume_blocks(
     live
 }
 
-/// Transform a lowered `co fn` into its `__step` state machine + frame info.
 pub fn transform_coroutine(
     func: &MirFunc,
     channel: Option<&skull_mir::lower::EnumFlatShape>,
@@ -452,18 +405,10 @@ pub fn transform_coroutine(
             role: ustr::Ustr::from("coroutine-frame"),
         });
 
-    // Only the co-fn's TOP-LEVEL blocks are transformed — NOT closure sub-blocks
-    // (which share the arena but are their own CFGs, reached via `Inst::Lambda`,
-    // not terminator successors). A closure body must keep its own `return`s and
-    // never get coroutine state machinery; it reads captured frame cells as
-    // `s.<field>` purely via codegen's `FrameCtx`.
+    // A closure has its own returns and lexical scope.
     let orig_blocks: Vec<Idx<Block>> = top_level_blocks(&step);
 
-    // 0. Peel `on_killed`/`on_resume` hook registrations to the constructor so a
-    // kill before the first resume still fires (the body would otherwise run the
-    // registration only on first resume). Both the `CoroHook` effect and its
-    // lambda `Inst` are removed from every block's inst list; the lambda stays in
-    // the arena (its body is hoisted to a top-level `<name>__on_<hook>` fn).
+    // Hooks run outside the step, so their bodies need separate control flow.
     let mut hooks: Vec<(CoroHookKind, Idx<Block>)> = Vec::new();
     let mut hook_lambdas: HashSet<Idx<Inst>> = HashSet::default();
     for &bid in &orig_blocks {
@@ -499,19 +444,7 @@ pub fn transform_coroutine(
                     .any(|&id| matches!(step.insts[id], Inst::CoroSetInner(_)))
             }));
 
-    // 0b. Frame membership is liveness-based with ownership pins (P1):
-    // root cells live at a resume point
-    // become fields. Root cells captured by a live lambda or referenced by a
-    // detached hook/defer stay fields even when the local CFG has no later use.
-    // Built post-peel so hook lambdas are detached, pre-rewrite so `Yield`
-    // resume edges still link the CFG.
-    // The tree + ownership are built ONCE here (post-hook-peel, pre-yield-rewrite)
-    // and threaded to emission through `CoroLowered` -- emission reuses them for
-    // the step's hoist plan instead of rebuilding on the post-rewrite CFG. The
-    // facts are stable across the yield rewrite: lambda sub-CFGs (which own every
-    // hoisted cell) are untouched, and the rewrite only ADDS ROOT-region blocks +
-    // `s`-field accesses, which the frame collapses to `s` anyway. Byte-identity
-    // of emitted Lua is the standing oracle for that stability.
+    // Analyze ownership while the yield edges still connect the root CFG.
     let tree = crate::scope::ScopeTree::build(&step);
     let own = tree.analyze(&step);
     let frame_cells: HashSet<Idx<Cell>> = {
@@ -542,13 +475,9 @@ pub fn transform_coroutine(
         fields.retain(|cell| *cell != s_cell && *cell != resume_arg && root_owned(cell));
         fields
     };
-    // Dense per-frame slots: frame cells numbered 0.. in raw-id order. Both the
-    // emitted `s.c<slot>` field names and the layout canon key on the slot, so a
-    // lambda-internal cell-count edit (which perturbs raw ids after the lambda)
-    // leaves every frame slot fixed -- the P2 finding fix.
+    // A lambda's private cell IDs must not shift its parent's frame slots.
     let frame_slots = dense_slots(frame_cells.iter().copied());
 
-    // 1. Rewrite `CoroSetInner(x)` -> `s.__inner = x` (rebuild affected blocks).
     for &bid in &orig_blocks {
         let has = step.blocks[bid]
             .insts
@@ -574,10 +503,7 @@ pub fn transform_coroutine(
         }
     }
 
-    // 2. Yields: `s.__state = k; return value`. Record (resume block) per state.
-    // Per state, also record the yielded variant tag when statically known (a
-    // `Const` tag leaf) -- a layout-stamp input that catches cross-variant yield
-    // reordering, which cell/spill/state-count hashing alone cannot see.
+    // Static yield tags distinguish states in the frame layout stamp.
     let suspension_resumes: Vec<Idx<Block>> = orig_blocks
         .iter()
         .filter_map(|&block| match step.blocks[block].term {
@@ -603,10 +529,7 @@ pub fn transform_coroutine(
                 .unwrap_or_else(|| "dyn".to_string());
             state_tags.push(tag);
             yield_blocks.insert(bid);
-            // Frame-slot channel (flat-enum yield): write the leaves to reused
-            // `s.__y*` slots and return nothing (0 alloc per yield). The consumer
-            // reads the slots at the concrete resume site. Otherwise the value(s)
-            // multi-return directly (scalar / bare yield -- no box to remove).
+            // Reuse frame slots for flat enum yields to avoid per-yield allocation.
             if frame_slot_channel {
                 for (i, &v) in values.iter().enumerate() {
                     state_store(&mut step, bid, s_cell, skull_mir::lower::yield_slot(i), v);
@@ -643,24 +566,14 @@ pub fn transform_coroutine(
         step.blocks[killed_bb].term = Term::Return(Vec::new());
     }
 
-    // 3b. Spill cross-block values (loop-carried collections/bounds, multi-yield
-    // args) so they survive a suspend/resume — see `spill_cross_block_values`.
     let spill_values =
         spill_cross_block_values(&mut step, s_cell, &orig_blocks, &suspension_resumes);
 
-    // 3c. Frame layout stamp. Hash everything that fixes the frame's field
-    // meanings + the state numbering: (cell idx, source name) pairs, the spill
-    // field set, per-state variant tags, and the yield-channel shape. Body
-    // LOGIC/values/spans are deliberately excluded so a layout-stable edit keeps
-    // live coroutines running (the live-update feature). The ctor writes the
-    // stamp; the step's entry (below) rejects a frame with a different one --
-    // through `error()`, which propagates to the resumer.
+    // The layout stamp lets compatible body edits keep live coroutines.
+    // It describes frame fields and resume states, excluding body logic.
     let mut canon = String::new();
     {
         use std::fmt::Write as _;
-        // Slot order == raw-id order (dense_slots numbers by raw id, cells.iter()
-        // yields by raw id), so hashing `c<slot>:<name>` here matches both the
-        // emitted field names and the slot ordinals.
         for (id, cell) in step.cells.iter() {
             if let Some(&slot) = frame_slots.get(&id) {
                 let _ = write!(
@@ -692,8 +605,6 @@ pub fn transform_coroutine(
     }
     let layout_hash = fnv1a32(&canon) as i64;
 
-    // 4. Dispatch entry: read s.__state, branch to each resume block; fall
-    // through to the original entry (state 0). A chain of one block per state.
     let entry = step.new_block();
     let frame = emit(&mut step, entry, Inst::Load(s_cell));
     let saved_state = emit(
@@ -743,7 +654,6 @@ pub fn transform_coroutine(
         step.blocks[d].term = Term::Goto(orig_entry);
         step.entry = d;
     } else {
-        // Build check blocks bottom-up so each `else` targets the next check.
         let check_blocks: Vec<Idx<Block>> = (0..num_states).map(|_| step.new_block()).collect();
         for k in 0..num_states {
             let bid = check_blocks[k];
@@ -763,10 +673,7 @@ pub fn transform_coroutine(
         step.entry = check_blocks[0];
     }
 
-    // 4b. Layout-stamp check ABOVE the dispatch: a frame written by a
-    // different layout (a live coroutine surviving a layout-shifting reload)
-    // must not be driven. Cancel its old frame (including an awaited child),
-    // then raise. A fresh coroutine always matches (ctor + step emitted together).
+    // Reject a changed frame layout before resuming into the new body.
     {
         let dispatch = step.entry;
         let chk = step.new_block();
@@ -834,7 +741,6 @@ pub fn transform_coroutine(
     step.blocks[call_hook].term = Term::Goto(step.entry);
     step.entry = entry;
 
-    // 5. The step is an ordinary fn `(s, __resume_arg)`.
     step.name = ustr::Ustr::from(format!("{}__step", func.name).as_str());
     step.params = vec![s_cell, resume_arg];
     step.is_coroutine = false;
@@ -852,7 +758,6 @@ pub fn transform_coroutine(
     }
 }
 
-/// Dense per-frame slot map: the given cells numbered 0.. by raw-id order.
 fn dense_slots(cells: impl Iterator<Item = Idx<Cell>>) -> HashMap<Idx<Cell>, u32> {
     let mut v: Vec<Idx<Cell>> = cells.collect();
     v.sort_by_key(|c| raw(*c));

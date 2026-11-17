@@ -6,9 +6,6 @@ use bone_core::prelude::CompilerError;
 use comfy_la_arena::{Idx, RawIdx};
 use skull_mir::mir::*;
 
-/// A scalarizable aggregate ctor's identity, consistent across all stores to one
-/// cell (a cell holds one type). The rewrite is identical for all; the variant
-/// only distinguishes the ctor instructions for the consistency check.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StructId {
     /// `MakeValueStruct` -- an immutable `value` cdata.
@@ -16,19 +13,13 @@ enum StructId {
     /// `MakeStruct` -- a mutable plain-struct table (`ty` is the `__ty` nominal,
     /// `None` for a foreign nominal).
     Plain(Option<ustr::Ustr>),
-    /// `MakeEnum` / `MakeEnumDyn` -- a payload-variant enum table
-    /// (`{__variant, __ty, [i]=..}`).
-    /// Keyed by the ENUM name (`__ty`), so every variant of one enum stored to a
-    /// cell is consistent (the field union covers all variants' payload slots).
+    /// One enum family shares the union of its variants' fields.
     Enum(ustr::Ustr),
     /// `MakeTuple` -- a positional table (`{v0, v1, ..}`), keyed by width. Fields
     /// are `_<i>`, the same naming `TupleIndex` reads already rewrite through.
     Tuple(usize),
 }
 
-/// The source of a scalarized field's value: an existing operand, or a string
-/// CONST to materialize (an enum table bakes `__variant`/`__ty` as literals, not
-/// operands, so splitting it must emit the `Const(Str)` insts).
 #[derive(Clone, Copy)]
 enum FieldSrc {
     Operand(Idx<Inst>),
@@ -36,24 +27,12 @@ enum FieldSrc {
     /// Leaf-wise copy from another family member's field cell (a value-struct
     /// alias member, see `copy_alias`) -- materializes a `Load` at the store site.
     CellLoad(Idx<Cell>),
-    /// A nullable value cell's presence leaf on a ctor store.
+    /// A presence leaf represents nullable value cells.
     ConstTrue,
     ConstNil,
 }
 
-/// If `inst` is a scalarizable aggregate ctor, its identity + logical field list.
-/// A `value`/plain struct's fields are its declared (name, operand) pairs. An
-/// enum's are `__variant`/`__ty` (string consts) + one `_<i>` per positional
-/// payload + each record-payload field by name -- the table's runtime keys (the
-/// payload is at positional Lua index `[i+1]`, read via `TupleIndex`, named `_<i>`
-/// here so a `match` payload read rewrites to the same field cell).
-///
-/// `enum_hint` is the cell's enum name (from its `MakeEnum` stores). A unit
-/// variant of a MIXED enum is stored as a reference to a shared singleton GLOBAL
-/// `__rock_enum_<symbol(E)>_<V>` (not a `MakeEnum`); given `enum_hint = E` we recognize it
-/// as the same enum's ctor with fields `{__variant=V, __ty=E}` (no payload), so a
-/// cell mixing payload + unit variants stays uniform and splits. The hint is what
-/// disambiguates `V` from `E` in the underscore-joined global name.
+/// Use the enum hint to identify a unit variant stored as a shared global.
 fn ctor_fields(
     inst: &Inst,
     enum_hint: Option<ustr::Ustr>,
@@ -141,15 +120,7 @@ fn ctor_fields(
     }
 }
 
-/// One SROA round; returns whether it rewrote anything (drives the fixpoint).
-///
-/// The round runs in two halves. Analysis builds a [`Families`] table over the
-/// cells that exist when the round starts: candidate collection from the
-/// stores, alias-family resolution, the escape scan over every load, and the
-/// family-wide settling of disqualification. The rewrite then allocates field
-/// cells on demand ([`FieldCells`]) and redirects nil tests, projections,
-/// stores and escaping loads onto them, splicing new insts into their blocks
-/// last.
+/// Split eligible aggregate cells and preserve their projections and escaping values.
 pub(crate) fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError> {
     let mut fam = Families::collect(func);
     fam.resolve_aliases();
@@ -205,35 +176,17 @@ fn captured_cells(func: &MirFunc) -> HashSet<Idx<Cell>> {
 /// A value ctor's declared field names, with its representation and form.
 type ValueOrder = (Vec<ustr::Ustr>, skull_mir::lower::RepId, ValueCtorForm);
 
-/// The per-cell analysis tables of one SROA round, indexed by raw cell id.
-/// Every table has `nc` entries: field cells allocated during the rewrite lie
-/// past it and are never candidates this round.
+/// These tables cover cells present before the rewrite starts.
 struct Families {
     nc: usize,
-    // A cell is a candidate iff every store to it is a struct ctor of one
-    // consistent type. `cand[c]`: None = not yet seen / disqualified, Some(id) =
-    // all stores so far are that struct. `cand_fields[c]` is its declared field
-    // set, used to reject a `Field`/`StoreField` of an undeclared field (e.g. a
-    // `__ty` reflective read) -- splitting one would read a never-stored cell.
+    // A projection may split only to a field present in the constructor family.
     cand: Vec<Option<StructId>>,
     cand_fields: Vec<Option<HashSet<ustr::Ustr>>>,
     disq: Vec<bool>,
     cell_enum: Vec<Option<ustr::Ustr>>,
-    // ALIAS stores (`Store(c, Load(o))`): a cell whose every store copies
-    // another candidate cell is the SAME object under Rock's by-ref struct
-    // semantics (the shape a spliced inner `next`'s param has after the outer
-    // cursor peels -- combinator chains nest cursors). Such a cell is UNIFIED
-    // with its root: its field accesses share the root's field cells (so
-    // by-ref mutation still lands in the shared cells) and the alias store
-    // deletes. `alias[c] = Some(o)`; mixed ctor+alias stores stay whole.
+    // A mutable record alias shares its root's field cells.
     alias: Vec<Option<Idx<Cell>>>,
-    // Escape-site rematerialization (item 8): a whole-value load of a
-    // `nonnull_value_struct` binding that would otherwise ESCAPE (disqualifying
-    // its family) is instead rebuilt from the ctor's per-field cells AT the use
-    // site. `value_order` keeps each value ctor's declared field order (the
-    // rebuilt `MakeValueStruct` is positional); `escape_loads` are the loads to
-    // rewrite. The flag -- set at lowering only for non-null value bindings --
-    // is the ONLY license: no store/CFG heuristic (both proven unsound/too weak).
+    // Only a known non-null value can be rebuilt from its scalar fields when it escapes.
     value_order: HashMap<usize, ValueOrder>,
     /// Each alias member's ctor-rooted representative (itself when none).
     rep: Vec<usize>,
@@ -323,10 +276,7 @@ impl Families {
                         disq[ck] = true;
                         continue;
                     }
-                    // A plain nil store (a folded `phantom()` on an iterator done
-                    // path) is compatible with any ctor candidate: it neither
-                    // establishes nor breaks the cell's struct id. The rewrite
-                    // expands it to per-field nil stores.
+                    // Nil is compatible with any aggregate shape.
                     if matches!(&func.insts[*value], Inst::Const(Lit::Nil)) {
                         continue;
                     }
@@ -374,9 +324,7 @@ impl Families {
         }
     }
 
-    /// Resolve alias chains to their ctor-rooted representative. A chain that
-    /// cycles, or doesn't end at a live ctor candidate, stays whole. Alias
-    /// members adopt the root's struct id; their field set IS the root's.
+    /// Cycles and chains without a constructor remain whole.
     fn resolve_aliases(&mut self) {
         let Families {
             nc,
@@ -398,12 +346,7 @@ impl Families {
                     Some(o) if steps <= nc => {
                         cur = raw(o);
                         steps += 1;
-                        // An alias THROUGH a disqualified cell must not resolve past it:
-                        // a disqualified intermediate stays a whole aggregate whose value
-                        // is not its first alias's (e.g. a mixed-alias `if`-result cell,
-                        // stored `a` on one arm and `b` on the other). Following its stale
-                        // `alias[]` to that first root would unify this member with the
-                        // wrong value -- latent until escape-remat actually reads the rep.
+                        // An intermediate assigned from several roots cannot share any one of them.
                         if disq[cur] {
                             break None;
                         }
@@ -422,20 +365,8 @@ impl Families {
         }
     }
 
-    /// An immutable aggregate alias member whose lifetime can escape is a
-    /// distinct BINDING, not the same object. Value structs already keep their
-    /// own leaves because whole-value rematerialization is available for them.
-    /// An enum needs distinct leaves only when a closure captures the alias;
-    /// otherwise the root cannot change before the alias's last observable use,
-    /// and sharing its scalar cells avoids rematerializing enum tables.
-    /// In either case,
-    /// collapsing the cells hands the member the ROOT's live range -- which a
-    /// closure capture observes: the leaves of a per-iteration `for` binding
-    /// become the loop cursor's multi-store slots, boxed once for the whole
-    /// function and nil-ed on the exhausted path. Such a member keeps its own
-    /// leaf cells and its alias store expands to leaf-wise copies. Reference
-    /// structs still unify: there `let q = p` aliases and by-ref mutation must
-    /// land in shared cells.
+    /// Value aliases and captured enum aliases get their own field cells.
+    /// Otherwise a later write to the root could change the captured snapshot.
     fn split_copy_aliases(&mut self, func: &MirFunc) {
         let captured = std::cell::OnceCell::new();
         let Families {
@@ -470,11 +401,7 @@ impl Families {
         }
     }
 
-    /// Escape analysis. A `Load` of a candidate cell may be used ONLY as a
-    /// field projection base -- or as the value of an accepted alias store
-    /// within the same family (that store deletes). Map each such load to its
-    /// cell, then scan every operand use: any other consumer means the whole
-    /// struct escapes -> disqualify.
+    /// A candidate load must have only projections or supported escape uses.
     fn scan_load_uses(&mut self, func: &MirFunc) -> LoadUses {
         let Families {
             cand,
@@ -555,11 +482,6 @@ impl Families {
                                 }
                                 is_nil
                             }
-                            // The alias store itself: `Store(y, Load(x))` where y and x
-                            // unify to the same root (deleted by the rewrite), or where
-                            // y copies x's leaves (expanded to leaf-wise stores). A copy
-                            // of a copy (`let t = h.t ?? return` feeding a loop body's
-                            // binding) reads its immediate source's leaves.
                             Inst::Store { cell, value } => {
                                 let yk = raw(*cell);
                                 let accepted = *value == op
@@ -633,9 +555,6 @@ impl Families {
             copy_alias,
             ..
         } = self;
-        // Disqualification is family-wide: an escaping alias member keeps the
-        // whole object (root + every member) as an aggregate, and a dead root
-        // takes its members with it. Two passes settle it (rep is one level deep).
         for _ in 0..2 {
             for k in 0..*nc {
                 if rep[k] != k {
@@ -646,10 +565,7 @@ impl Families {
                         disq[k] = true;
                     }
                 }
-                // A copy member reads the root's leaf cells, so a whole root takes
-                // the member with it -- and a whole member's surviving `Store(k,
-                // Load(root))` would read the root's now-uninit aggregate, so it
-                // takes the root too.
+                // An alias copy needs the source leaf cells to exist.
                 if let Some(root) = copy_alias[k] {
                     let rk = raw(root);
                     if disq[k] {
@@ -663,9 +579,6 @@ impl Families {
         }
     }
 
-    /// A family whose nullable value is nil-tested carries a presence leaf,
-    /// written by every store: a constant on a ctor, nil on a nil store. Copy
-    /// members read the root's leaves, so the whole family gets it.
     fn add_presence_leaves(&mut self, value_nil_tests: &[(Idx<Inst>, Idx<Inst>, Idx<Cell>)]) {
         let present_field = present_field();
         for (_, _, c) in value_nil_tests {
@@ -687,10 +600,7 @@ impl Families {
         k < self.nc && self.presence_roots.contains(&self.leaf_root(k))
     }
 
-    // `k < nc` guards the field cells `get_field_cell` allocates during the
-    // rewrite (a `StoreField`->`Store` rewrite emits a `Store` to a fresh field
-    // cell that the later `store_expansions` scan sees): they are never candidates
-    // this round, and indexing the round's `nc`-sized arrays with them would panic.
+    // Field cells allocated while rewriting cannot be candidates this round.
     fn is_cand(&self, c: Idx<Cell>) -> bool {
         let k = raw(c);
         k < self.nc && self.cand[k].is_some() && !self.disq[k]
@@ -759,9 +669,7 @@ impl FieldCells {
     }
 }
 
-/// Answer each recorded nil test from a field cell: an enum's `__ty` (every
-/// enum ctor writes a nonnil one; exhaustion nils every lane) or a value
-/// family's presence leaf. The new load is spliced right before its test.
+/// Use the enum tag or nullable value presence field for nil tests.
 fn rewrite_nil_tests(
     func: &mut MirFunc,
     fam: &Families,
@@ -868,19 +776,8 @@ fn uses_once(func: &MirFunc, i: Idx<Inst>, value: Idx<Inst>) -> bool {
     count == 1
 }
 
-/// Rewrite a field read in place into `Load(field_cell)`, and a field write
-/// into `Store(field_cell, value)`. Re-check `is_cand`: `load_cell` is not
-/// pruned as cells get disqualified mid-analysis, so a cell escaping via a
-/// non-projection use (e.g. whole-struct `==`) keeps its aggregate, and its
-/// field accesses must stay on it -- rewriting them without expanding the
-/// store gives an uninit cell.
-/// Only a field the CTOR actually provides has a cell to redirect to. A
-/// nested value member is stored under its dotted LEAF names (`params.x`,
-/// `params.y`), so the immediate `.params` read names no cell, and minting
-/// one gives a load nothing ever stores -- the uninit-cell failure the
-/// comment above describes, reached the other way. Such a read stays a
-/// `Field` on the aggregate, which the `escape_loads` rebuild below
-/// reconstitutes at exactly this load.
+/// Only declared fields can get field cells. A dotted leaf layout may have
+/// no cell for a whole nested member; let its escaping load rebuild the value.
 fn rewrite_projections(
     func: &mut MirFunc,
     fam: &Families,
@@ -945,9 +842,6 @@ fn rewrite_projections(
 /// One candidate store and the per-field sources that replace it.
 type StoreExpansion = (Idx<Inst>, Idx<Cell>, Vec<(ustr::Ustr, FieldSrc)>);
 
-/// Plan the expansion of each `Store { cand, ctor }` into per-field stores.
-/// Collect first (immutable read of the ctor fields); [`expand_stores`] then
-/// emits them.
 fn plan_store_expansions(
     func: &MirFunc,
     fam: &Families,
@@ -1014,22 +908,13 @@ fn alias_deletions(func: &MirFunc, fam: &Families) -> HashMap<Idx<Inst>, Vec<Idx
         .collect()
 }
 
-/// Emit the planned per-field stores. An enum's `__variant`/`__ty` are
-/// `ConstStr` (baked literals, not operands), so materialize the `Const(Str)`
-/// inst here before storing it to the field cell.
 fn expand_stores(
     func: &mut MirFunc,
     cells: &mut FieldCells,
     store_expansions: Vec<StoreExpansion>,
     replacement: &mut HashMap<Idx<Inst>, Vec<Idx<Inst>>>,
 ) {
-    // A field cell that ALWAYS holds a value-struct ctor inherits the parent's
-    // non-null licence, so a later round can split it in turn instead of
-    // disqualifying its family when the field escapes whole (`Outer { ..o }`
-    // rebuilds `o.inner` as one operand). Nullable fields are excluded by
-    // construction: a nil store expands to `Const(Nil)` per field, which is not
-    // a ctor -- the licence `nonnull_value_struct` grants is exactly "this cell
-    // can be rebuilt from its leaves", and nil cannot be.
+    // A field of a non-null value inherits that guarantee only if every store is a value constructor.
     let mut nn_field: HashMap<(Idx<Cell>, ustr::Ustr), bool> = HashMap::default();
     for (_, c, fields) in &store_expansions {
         if !func.cells[*c].nonnull_value_struct {
@@ -1046,9 +931,6 @@ fn expand_stores(
         for (fname, src) in fields {
             let fval = match src {
                 FieldSrc::Operand(v) => v,
-                // A materialized const is a NEW value-producing inst: it must be
-                // spliced into the block (in `news`) BEFORE the store that reads it,
-                // or it floats free of any block and regalloc/codegen never emit it.
                 FieldSrc::ConstStr(s) => {
                     let cv = func.alloc_inst(Inst::Const(Lit::Str(s)));
                     news.push(cv);
@@ -1084,13 +966,7 @@ fn expand_stores(
     }
 }
 
-/// Rematerialize each escaping value-struct load L in place: `Load(cell)` ->
-/// `MakeValueStruct{name, [(field, Load(field_cell))..]}`, with the field loads
-/// spliced before it. Reads the same field cells the ctor store now writes;
-/// a load only reached on a non-materializing path (an arena-scan MISS) runs
-/// no ctor. The escaping cell is flagged non-null, so its family root is a
-/// value ctor candidate carrying `value_order` -- else the family stayed whole
-/// and the load is untouched (a boxed read of the intact aggregate).
+/// Rebuild a known non-null value at its escaping load.
 fn rematerialize_escapes(
     func: &mut MirFunc,
     fam: &Families,

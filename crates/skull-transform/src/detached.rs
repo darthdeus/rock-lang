@@ -7,9 +7,7 @@ use skull_mir::cfg::successors;
 use skull_mir::mir::*;
 use ustr::Ustr;
 
-/// Blocks reachable from a detached entry through ordinary CFG edges and
-/// nested lambda entries. A detached region owns its own ordinary `MirFunc`;
-/// the source co-fn arena is only used as the physical source of the clone.
+/// Include nested lambda entries in the detached region.
 pub(crate) fn detached_region_blocks(func: &MirFunc, entry: Idx<Block>) -> HashSet<Idx<Block>> {
     let mut seen = HashSet::default();
     let mut stack = vec![entry];
@@ -27,10 +25,7 @@ pub(crate) fn detached_region_blocks(func: &MirFunc, entry: Idx<Block>) -> HashS
     seen
 }
 
-/// Copy one hook/defer region into an ordinary MIR function and run the shared
-/// closure conversion over it. The detached function receives the coroutine
-/// state table as its only parameter; cells owned by the coroutine root still
-/// resolve through that table, while cells introduced by the region are locals.
+/// Copy a detached body into an ordinary function that takes the frame.
 pub(crate) fn lower_detached_region(
     source: &MirFunc,
     entry: Idx<Block>,
@@ -74,9 +69,7 @@ pub(crate) fn lower_detached_region(
         !matches!(aux.insts[*inst], Inst::Lambda { entry, .. } if !region.contains(&entry))
     });
 
-    // The hook's outer lambda is a registration artifact, not a closure inside
-    // the detached body. Remove it from the clone before ScopeTree sees it;
-    // nested lambdas whose entries are inside the region remain for conversion.
+    // The hook's registration lambda is outside the detached body.
     for (_, inst) in aux.insts.iter_mut() {
         if let Inst::Lambda {
             entry: lambda_entry,
@@ -112,10 +105,7 @@ fn detached_region_site(
         .and_then(skull_mir::code_identity::LambdaSiteId::from_span)
 }
 
-/// Remove the detached closure producers from the shared coroutine arena after
-/// their ordinary `MirFunc` copies have been made. This keeps the old inline
-/// emitter path structurally unreachable and gives the residual census a single
-/// zero-valued answer.
+/// Remove the original closure producers after their regions have been split.
 pub(crate) fn erase_detached_lambdas(
     func: &mut MirFunc,
     entries: impl IntoIterator<Item = Idx<Block>>,

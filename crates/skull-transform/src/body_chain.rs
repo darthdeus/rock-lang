@@ -1,7 +1,4 @@
-//! The per-body pass chain both backends run before rendering: inline,
-//! cleanup, closure conversion, counted-loop recovery and, for Lua's ordinary
-//! bodies, inlining into the hoisted bodies. One sequence, so a new pass is
-//! added in one place; the real backend differences are [`ChainOptions`].
+//! MIR preparation shared by Lua and JS emission.
 
 use rustc_hash::FxHashSet as HashSet;
 
@@ -122,9 +119,7 @@ pub struct ChainError {
     pub error: CompilerError,
 }
 
-/// Inline, then [`convert_body`], then (when asked) inline into the hoisted
-/// bodies. Returns every callee whose body was spliced in, plus the sources
-/// of flat variants among the hoisted bodies.
+/// Inline the root body and optionally its hoisted bodies. Return embedded sources.
 pub fn prepare_body(
     ws: &Workspace,
     mut inliner: Inliner<'_>,
@@ -143,9 +138,7 @@ pub fn prepare_body(
     Ok(spliced)
 }
 
-/// Cleanup, closure conversion (the root, then each named nested fn
-/// depth-first) and counted-loop recovery: the chain for a body that is not
-/// inlined.
+/// Prepare a body without inlining.
 pub fn convert_body(
     ws: &Workspace,
     mf: &mut MirFunc,
@@ -226,10 +219,7 @@ fn cleanup(
     Ok(())
 }
 
-/// Inline into a hoisted-body tree depth-first, so a lambda nested in a lambda
-/// is reached too. The inliner never scans a closure sub-CFG (a cell used in a
-/// lambda body is an upvalue), so this runs only once conversion has split
-/// those bodies out.
+/// Visit hoisted bodies after closure conversion separates their upvalues.
 fn inline_hoisted(
     ws: &Workspace,
     inliner: &mut Inliner<'_>,

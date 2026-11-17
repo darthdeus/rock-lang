@@ -1,18 +1,5 @@
-//! Function inlining: a MIR->MIR pass that splices an eligible callee's body
-//! into the caller so a hot loop traces with no per-call frame. Re-fit of the
-//! deleted hybrid-SSA `skull/src/inline.rs` onto the cell-model CFG.
-//!
-//! The cell model makes the splice simpler than the old SSA one: there are NO
-//! block params, so arg-binding is a `Store` into the callee's (cloned) param
-//! cell and a returned value is a `Store` into a result/dest cell — the caller's
-//! `cleanup` (copy-prop + DCE) then elides the round-trips.
-//!
-//! Policy is ANNOTATION-GATED: only `@inline`/`@pure` functions inline. This
-//! keeps the hot-reload re-emit
-//! fan-out + overlay small (a body edit re-emits every fn that inlined the
-//! changed callee, so fewer inlines = fewer dependents). The hot stdlib helpers
-//! (math, getters, value-struct ctors) carry `@inline`/`@pure`, so they still
-//! inline; incidental small accessors no longer do.
+//! Splice eligible direct calls and record the concrete bodies embedded in each caller.
+//! Annotation gating limits the number of chunks a body edit invalidates.
 
 use bone_core::prelude::Instant;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
@@ -32,16 +19,8 @@ use ustr::Ustr;
 
 use crate::top_level_blocks;
 
-/// Per-caller splice budget — bounds mutual-recursion expansion. A remaining
-/// real call is always correct.
 const MAX_INLINES_PER_FN: usize = 1000;
-/// Max cells a caller may hold before inlining stops (the call stays — always
-/// correct). This is a RAW cell count, but skull-codegen-lua now COLORS cells
-/// (liveness-coalesced onto Lua's 200-local cap), so a function with N raw cells
-/// emits far fewer locals (e.g. 193 raw -> 28 colored). The
-/// budget therefore guards against runaway expansion / the rare all-simultaneously
-/// -live pathological case, not the typical local count; 400 matches the value
-/// the old (coloring-aware) skull validated across the corpus.
+/// Bound expansion even when register allocation can coalesce most cells.
 const CELL_BUDGET: usize = 400;
 
 thread_local! {
@@ -56,7 +35,6 @@ pub fn inline_off_guard() -> InlineOffGuard {
     inline_mode_guard(true)
 }
 
-/// Set this thread's inline mode to exactly `off` until the guard drops.
 pub fn inline_mode_guard(off: bool) -> InlineOffGuard {
     let previous = INLINE_OFF.with(|cell| cell.replace(off));
     InlineOffGuard { previous }
@@ -72,10 +50,7 @@ impl Drop for InlineOffGuard {
     }
 }
 
-/// `ROCK_SKULL_INLINE_OFF=1` turns the function inliner off for the whole
-/// process: a measurement switch for sizing what splicing adds to the output
-/// and the compile time (`perf/output_census.py`), never a shipped mode. The
-/// per-thread guard above stays the programmatic form the tests use.
+/// Process-wide switch for comparing emitted code with and without inlining.
 fn inline_disabled_by_env() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| env_disables_inline(std::env::var("ROCK_SKULL_INLINE_OFF").ok().as_deref()))
@@ -89,16 +64,12 @@ fn inline_disabled() -> bool {
     inline_off_active() || inline_disabled_by_env()
 }
 
-/// Whether a candidate callee is a single straight-line block or a CFG.
 #[derive(Copy, Clone, PartialEq)]
 enum Kind {
     Straight,
     General,
 }
 
-/// A pristine lowered snapshot of an eligible callee — every splice clones from
-/// this clean body (transitive inlining re-scans the caller, never mutates a
-/// candidate).
 #[derive(Clone)]
 struct CalleeBody {
     func: MirFunc,
@@ -108,39 +79,18 @@ struct CalleeBody {
     /// The concrete body this snapshot was lowered from. A declaration-level
     /// snapshot is not a valid source for a concrete splice.
     subject: Instance,
-    /// The one ABI plan both the snapshot and its call site must use.
     abi: BackendFnAbiPlanHandle,
     kind: Kind,
-    /// Uniform `Return` value count (0 for void, 1 for a scalar, N for a
-    /// scalarized value struct). Matched against the call site's result shape.
     ret_arity: usize,
-    /// The callee's reachable blocks (general candidates only — the straight path
-    /// clones no blocks). After a general splice their clones become reachable
-    /// top-level blocks of the caller; the driver adds them to its top-level set.
+    /// Blocks the CFG splice adds to the caller's reachable set.
     reachable: Vec<Idx<Block>>,
-    /// Reachable inst count of the (cleaned) body — the code each splice copies.
-    /// Diagnostic only (feeds the inline census); not used by the policy.
     insts: usize,
-    /// Iterator-bounded body, which has no standalone placeholder-bearing emit.
     bounded: bool,
-    /// Source/live arena and side-table populations. The first census uses the
-    /// live closure to expose dead cloning; the template cut later reuses this
-    /// same closure as its canonical clone source.
     template: InlineCloneStats,
-    /// Param cells this callee NEVER whole-`Store`s (only reads / `Field` /
-    /// `StoreField`). Their arg can be COALESCED — an arg that is a plain
-    /// `Load(c)` binds the cloned param directly to the caller cell `c` instead
-    /// of copying `Store(param, Load(c))`. Removing the whole-cell copy is what
-    /// lets a mutated-by-ref cursor struct stay a SINGLE cell so
-    /// `scalarize_struct_cells` (SROA) can peel it (the zero-alloc iterator
-    /// path). Sound because field-writeback through a by-ref arg is already the
-    /// language semantics, and a param the callee reassigns whole is excluded
-    /// (aliasing it to the caller cell would clobber the caller's variable).
+    /// Coalescing preserves field mutation through a shared argument. A
+    /// parameter assigned as a whole needs its own cell.
     coalescable_params: Vec<bool>,
-    /// Reads of a coalescable parameter, by parameter index. A splice that
-    /// copies the argument rewires them to it directly, so the copy has no
-    /// reader. Empty for a body with a lambda, whose sub-CFG reads cells, not
-    /// outer values.
+    /// A lambda sub-CFG reads captured cells, so its body cannot forward these reads.
     forwardable_reads: Vec<(usize, Idx<Inst>)>,
     /// Whether `forwardable_reads` covers every read of a coalescable parameter.
     forwards_reads: bool,
@@ -154,15 +104,11 @@ impl CalleeBody {
     }
 }
 
-/// One splice the inliner performed, for the inline census
-/// (`inline_functions_with_plans` returns these alongside its dependency set). Records the
-/// callee whose body was copied in, its shape, and how much code it added.
 pub struct SpliceRecord {
     pub callee: FuncRef,
     pub straight: bool,
     pub bounded: bool,
     pub transitive: bool,
-    /// Reachable inst count of the callee body copied at this site.
     pub callee_insts: usize,
     pub clone: InlineCloneStats,
     pub splice_ns: u64,
@@ -276,8 +222,6 @@ pub struct InlineScanStats {
     pub targeted_binding_terminators: usize,
     pub targeted_binding_replacements: usize,
     pub targeted_binding_ns: u64,
-    /// Cleanup Load/Store attribution by cell producer, filled by the emit
-    /// driver around each post-inline cleanup when the census is enabled.
     pub load_store: crate::LoadStoreCensus,
 }
 
@@ -400,15 +344,7 @@ impl InlineScanStats {
     }
 }
 
-/// Lazy callee-eligibility cache, keyed by [`FuncRef`]. `None` = looked up and
-/// not inlinable. Lives across a whole-workspace emit so each callee lowers +
-/// classifies once -- and, in the incremental emit, ACROSS body edits: a callee
-/// whose body and scalar ABI are unchanged keeps its cached lowered body instead
-/// of re-lowering every edit. The driver [`invalidate`](Self::invalidate)s the
-/// affected callees per edit so no stale body is ever cloned.
-/// Cache key: the callee [`Instance`] -- the same concrete-body identity the
-/// chunk cache and both emitters key on. Each distinct instantiation gets its
-/// own snapshot, so compile cost scales with element types used, not call sites.
+/// Cache one result per concrete instantiation, including rejected candidates.
 type CacheKey = Instance;
 
 pub struct InlineCandidateTable {
@@ -585,9 +521,7 @@ impl InlineCandidateTable {
         }
     }
 
-    /// Publish an edit-local candidate delta over the prior immutable table.
-    /// Unchanged entries stay in the parent; only invalidated, added, and
-    /// removed identities occupy this layer.
+    /// Share unchanged candidates with the previous incremental snapshot.
     pub fn from_warms_incremental(
         base: Arc<Self>,
         warms: Vec<InlineCandidateWarm>,
@@ -649,12 +583,7 @@ impl InlineCandidateTable {
         self.lookup(key).is_some()
     }
 
-    /// Whether a previously residual call remains a candidate with the same
-    /// candidate-side eligibility facts after a body edit. `self` is the prior
-    /// table and `other` is its replacement. Only two eligible entries can
-    /// prove stability; missing or rejected entries conservatively return
-    /// `false`. Body contents may differ because callers track embedded bodies
-    /// separately when an earlier inline pass spliced them.
+    /// Compare the eligibility facts required to reuse a residual caller.
     pub fn residual_eligibility_matches(&self, other: &Self, key: &Instance) -> bool {
         let (Some(Some(before)), Some(Some(after))) = (self.lookup(key), other.lookup(key)) else {
             return false;
@@ -724,13 +653,9 @@ enum UseSite {
     Term(Idx<Block>),
 }
 
-/// Exact value-use ownership for one caller. The inliner changes a small set of
-/// instructions per splice, so keeping the users lets straight-result binding
-/// rewrite cross-block uses without rescanning the caller arena.
+/// Index uses so a splice can bind its result without scanning the caller.
 #[derive(Default)]
 struct UseIndex {
-    /// Dense by instruction id; a splice's fresh instructions grow it. Most
-    /// values have one or two users, which then need no allocation.
     users: Vec<SmallVec<[UseSite; 2]>>,
 }
 
@@ -808,7 +733,6 @@ impl UseIndex {
         });
     }
 
-    /// Index every instruction allocated at or after arena position `mark`.
     fn add_insts_from(&mut self, func: &MirFunc, mark: usize) {
         for (iid, _) in func.insts.iter().skip(mark) {
             self.add_inst(func, iid);
@@ -833,9 +757,6 @@ impl UseIndex {
         });
     }
 
-    /// Replace one value in its exact users. The returned counts are attribution
-    /// only: unlike the removed `subst_all`, they cover users that actually had
-    /// to be touched.
     fn replace(
         &mut self,
         func: &mut MirFunc,
@@ -969,12 +890,7 @@ impl InlineCache {
         })
     }
 
-    /// Drop every local cached candidate for `fref` so the next lookup consumes
-    /// the replacement shared snapshot. A fref's
-    /// cached body goes stale iff its own body changed OR a fn it calls flipped
-    /// scalar ABI -- both are within the emit's `affected` set, which the
-    /// incremental driver invalidates wholesale. A body edit must also drop the
-    /// specialized snapshots keyed off it, so this matches on the `fref` component.
+    /// Drop every concrete specialization when the declaration's cached body is stale.
     pub fn invalidate(&mut self, fref: FuncRef) {
         self.cands.retain(|inst, _| inst.func != fref);
     }
@@ -1008,9 +924,7 @@ struct LiveClosure {
     cells: HashSet<Idx<Cell>>,
 }
 
-/// Per-arena facts every region compacted out of one arena shares, computed
-/// once so splitting k regions out of an n-instruction arena does not hash
-/// all n instructions k times.
+/// Share these tables when compacting several regions from one body.
 pub(crate) struct ArenaFacts {
     /// `(emit cell, emit block)` of every lambda parameter, sorted.
     lambda_params: Vec<(u32, u32)>,
@@ -1080,8 +994,6 @@ fn live_closure(func: &MirFunc) -> LiveClosure {
     live_closure_at(func, func)
 }
 
-/// The live closure of `header`'s entry, parameters and coroutine cells over
-/// `func`'s arena.
 fn live_closure_at(header: &MirFunc, func: &MirFunc) -> LiveClosure {
     let mut live = LiveClosure::default();
     let mut blocks = vec![header.entry];
@@ -1236,9 +1148,7 @@ fn template_counts(func: &MirFunc, live: &LiveClosure) -> InlineCloneStats {
     }
 }
 
-/// Cut one canonical pristine candidate down to the closure consumed by a
-/// splice. Arena IDs are compacted once here; every later splice remaps from
-/// this template and never pays for source entries outside the live closure.
+/// Compact the candidate once before it is used at multiple call sites.
 fn compact_live_template(
     mut source: MirFunc,
     live: &LiveClosure,
@@ -1248,9 +1158,7 @@ fn compact_live_template(
     compact_region(&source, &source, &facts, nested, live, &[])
 }
 
-/// [`compact_live_template`] with the header fields (name, identity, params,
-/// entry, coroutine cells, statics) read from `header` and the arena and its
-/// side tables from `arena`.
+/// Use the split body header with the original arena and its side tables.
 fn compact_region(
     header: &MirFunc,
     arena: &MirFunc,
@@ -1263,7 +1171,6 @@ fn compact_region(
     let source_cell_span = arena.emit_cell_span();
     let source_block_span = arena.emit_block_span();
     let source_forced_cells = facts.forced_cells(arena, header.entry);
-    // Arena order, walked over the live entries only.
     let mut live_cells: Vec<Idx<Cell>> = live.cells.iter().copied().collect();
     live_cells.sort_unstable_by_key(|id| u32::from(id.into_raw()));
     let mut live_blocks: Vec<Idx<Block>> = live.blocks.iter().copied().collect();
@@ -1493,11 +1400,7 @@ fn compact_region(
     (template, block_map)
 }
 
-/// Build a body split out of `arena` (a hoisted lambda) from the region its
-/// entry reaches, keeping the arena's emission identities so the output is the
-/// same as for a full arena copy. `header` carries the split body's own name,
-/// identity, parameters and entry. Later passes then cost the region, not the
-/// whole arena, which made many lambdas in one large body quadratic.
+/// Copy only the hoisted body's region and preserve emission IDs.
 pub(crate) fn compact_split_body(header: &MirFunc, arena: &MirFunc, facts: &ArenaFacts) -> MirFunc {
     let live = live_closure_at(header, arena);
     let (mut compact, _) = compact_region(
@@ -1628,10 +1531,6 @@ fn reject_candidate(
     Ok(None)
 }
 
-/// Lower `fref` and classify it as an inline candidate. Hard exclusions: extern,
-/// `inline(lua)`, `co fn`, lambda-bearing, self-recursive, or reachable `Yield`.
-/// General splices preserve `Unreachable` traps and route only `Return` to the
-/// caller continuation.
 fn classify(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -1655,16 +1554,11 @@ fn classify(
         .iter()
         .any(|a| a.name.name.as_str() == "inline");
     let has_pure = f.annotations.iter().any(|a| a.name.name.as_str() == "pure");
-    // An `Iterator`-bounded body carries placeholder calls until a concrete
-    // splice or standalone demand resolves them, so inline eligibility forces
-    // the optimization when the body is otherwise eligible.
+    // Bounded candidates can resolve their witnesses at the call site.
     let has_bounds = f.generic_bounds.iter().any(Option::is_some);
     if !annotation_gate(has_inline, has_pure) && !has_bounds {
         return reject_candidate(&mut timing, "missing_inline_annotation");
     }
-    // A snapshot lowers the body as if hand-written for the concrete
-    // instantiation; a non-generic instance's is the
-    // declaration's own body.
     let Some(plan) = concrete_plans.get(inst) else {
         return reject_candidate(&mut timing, "missing_concrete_plan");
     };
@@ -1696,8 +1590,7 @@ fn classify(
             timing.full_clone_block_capacity = mf.blocks.capacity();
         }
     }
-    // Cleanup first so the size gate reflects emitted size and the splice clones
-    // a tight body (the caller re-runs cleanup over the whole result anyway).
+    // Apply the splice budget to the cleaned candidate.
     let cleanup_started = timing.as_ref().map(|_| Instant::now());
     crate::cleanup(&mut mf)?;
     if let Some(start) = cleanup_started {
@@ -1708,17 +1601,11 @@ fn classify(
             timing.cleaned_blocks = mf.blocks.len();
         }
     }
-    // Structural exclusions over the whole arena.
     let mut has_lambda = false;
     for (_, inst) in mf.insts.iter() {
         match inst {
             Inst::Lambda { .. } => {
-                // A lambda's sub-CFG + captured cells only clone through the
-                // block-cloning General splice. A bounded fn has no standalone
-                // emission, so refusing it would leave the caller a residual
-                // bounded call (an emit error); force it through General below.
-                // Non-bounded fns keep the v0 refusal (they have a real
-                // emission to fall back on).
+                // A bounded body can inline a nested lambda only through the CFG splice.
                 if !has_bounds {
                     return reject_candidate(&mut timing, "lambda");
                 }
@@ -1732,9 +1619,7 @@ fn classify(
     }
 
     let source_reachable = top_level_blocks(&mf);
-    // Yield requires coroutine state that an ordinary caller cannot supply.
-    // Unreachable is a terminal trap, including an exhaustive match's fallback;
-    // the general splice preserves it without routing it to the continuation.
+    // An ordinary caller cannot supply the callee's coroutine state.
     for &b in &source_reachable {
         match &mf.blocks[b].term {
             Term::Yield { .. } => return reject_candidate(&mut timing, "yield_terminator"),
@@ -1746,10 +1631,6 @@ fn classify(
         .map(|&b| mf.blocks[b].insts.len())
         .sum();
 
-    // A param is coalescable iff nothing in the body rebinds its cell WHOLE (a
-    // `Store` to it, or defining it as a multi-return dest / map cursor). Reads
-    // and `Field`/`StoreField` don't count — those are exactly what coalescing
-    // preserves (field-writeback through the shared cell).
     let mut rebound: HashSet<Idx<Cell>> = HashSet::default();
     for (_, inst) in mf.insts.iter() {
         inst.cell_writes_each(&mut |cell| {
@@ -1814,10 +1695,7 @@ fn classify(
     }))
 }
 
-/// Rewire the cloned forwardable reads of each copied parameter to its
-/// argument; returns the `(read, argument)` pairs for the caller to drop from
-/// the blocks. The loads stay allocated, outside any block, so arena and emit
-/// numbering are what they were with the copy.
+/// Leave forwarded loads allocated, preserving arena and emission IDs.
 fn forward_param_reads(
     func: &mut MirFunc,
     cand: &CalleeBody,
@@ -1844,7 +1722,6 @@ fn forward_param_reads(
     forwarded
 }
 
-/// `v`, or the argument a forwarded parameter read `v` was rewired to.
 fn forwarded_to(forwarded: &[(Idx<Inst>, Idx<Inst>)], v: Idx<Inst>) -> Idx<Inst> {
     forwarded
         .iter()
@@ -1858,9 +1735,6 @@ fn copy_unread(cand: &CalleeBody, i: usize) -> bool {
     cand.forwards_reads && cand.coalescable_params.get(i).copied().unwrap_or(false)
 }
 
-/// Whether a splice hands `arg` to the parameter's reads. An aggregate
-/// constructor keeps its parameter cell: scalar replacement splits a
-/// constructor stored to a cell, not one whose fields are read off the value.
 fn forwards_arg(func: &MirFunc, arg: Idx<Inst>) -> bool {
     !matches!(
         func.insts[arg],
@@ -1872,8 +1746,6 @@ fn forwards_arg(func: &MirFunc, arg: Idx<Inst>) -> bool {
     )
 }
 
-/// The reads of a body's coalescable parameters that a splice may rewire to
-/// the argument (see [`CalleeBody::forwardable_reads`]).
 fn forwardable_param_reads(
     mf: &MirFunc,
     coalescable: &[bool],
@@ -1897,7 +1769,6 @@ fn forwardable_param_reads(
     reads
 }
 
-/// Get (lowering+classifying on first sight) the candidate for `inst`.
 fn get<'a>(
     cache: &'a mut InlineCache,
     ws: &Workspace,
@@ -1963,11 +1834,6 @@ fn get<'a>(
     Ok(cache.cands[inst].as_deref())
 }
 
-/// One resolved, eligible call site in the caller, extracted before the splice.
-/// `inst` is the concrete body it targets, read from the caller's
-/// `callee_instances`; a delivery record is only checked against it when one
-/// exists. A missing generic owner leaves the call residual rather than guessing
-/// a declaration-level body.
 struct Site {
     pos: (Idx<Block>, usize),
     call_id: Idx<Inst>,
@@ -1977,9 +1843,7 @@ struct Site {
     abi: BackendFnAbiPlanHandle,
 }
 
-/// Resolve a lowered call's authoritative concrete owner. The delivery map is
-/// only an agreement check: it is absent for valid residual concrete calls and
-/// must never be used to invent the candidate identity.
+/// The delivery record must agree with the concrete owner already on the call.
 fn call_target(
     func: &MirFunc,
     call_id: Idx<Inst>,
@@ -2028,19 +1892,8 @@ fn call_target(
     Ok(Some((inst, abi)))
 }
 
-/// Scan the caller for the next eligible call site (Call/CallMulti to a cached
-/// candidate with matching arity, not the caller itself), starting AT `resume`.
-///
-/// `top` is the caller's own top-level blocks (NEVER a closure sub-CFG — a cell
-/// used in a lambda body is an upvalue, so inlining there piles onto LuaJIT's
-/// 60-upvalue cap, and the block-split assumes the top-level CFG). The driver
-/// maintains it incrementally so this never recomputes reachability.
-///
-/// Blocks are visited in arena-id order (stable: a splice only appends blocks
-/// with higher ids and only inserts insts AT/after its own position), so resuming
-/// at the last splice point is sound — no eligible call can appear before it (the
-/// prefix was already scanned and a splice introduces calls only within the
-/// inlined body, at/after that point).
+/// Resume at the last splice: it only inserts calls at or after that position.
+/// Scan the root CFG, since a closure body's cells are still upvalues.
 fn find_site(
     func: &MirFunc,
     ws: &Workspace,
@@ -2062,7 +1915,6 @@ fn find_site(
         if !top.contains(&bid) {
             continue;
         }
-        // Find the inst index to start scanning this block from.
         let start = match resume {
             Some((rb, ri)) if !started => {
                 if bid != rb {
@@ -2120,11 +1972,7 @@ fn find_site(
                     - site_coalesced_cells(func, cand, &site, pinned)
                     > CELL_BUDGET
             {
-                // Each argument is charged as if a caller local held it: one the
-                // splice coalesces already sits in a counted caller cell, any
-                // other costs one. `let x = e; f(x)` and `f(e)` then meet the
-                // budget at the same size, so binding a local without a cell
-                // cannot change what inlines.
+                // A coalesced argument already occupies a counted caller cell.
                 Some("cell_budget")
             } else {
                 None
@@ -2140,7 +1988,6 @@ fn find_site(
     Ok(None)
 }
 
-/// How many of `cand`'s parameters the splice at `site` would coalesce.
 fn site_coalesced_cells(
     func: &MirFunc,
     cand: &CalleeBody,
@@ -2160,9 +2007,7 @@ fn mark_forwarded_params(caller: &mut MirFunc, callee: &MirFunc, scratch: &Inlin
     }
 }
 
-/// Clone the callee's cells, blocks, AND insts into `caller`. Returns
-/// `(inst_map, cell_map, block_map)`. Two-pass (alloc-then-remap) so it is
-/// independent of arena order.
+/// Allocate every clone before remapping its operands.
 fn clone_body(
     caller: &mut MirFunc,
     callee: &MirFunc,
@@ -2183,7 +2028,6 @@ fn clone_body(
     scratch.cell_map.reserve(callee.cells.len());
     let mut skipped_cells = 0u32;
     for (cid, cell) in callee.cells.iter() {
-        // A coalesced param maps to the caller cell its arg loads (no fresh copy).
         let mapped = if let Some(&mapped) = scratch.overrides.get(&cid) {
             skipped_cells += 1;
             mapped
@@ -2243,7 +2087,6 @@ fn clone_body(
         );
     }
     if kind == Kind::General {
-        // Fill cloned block inst-lists + terminators.
         for (bid, block) in callee.blocks.iter() {
             let nbid = scratch.block_map[&bid];
             caller.blocks[nbid].insts = block.insts.iter().map(|i| scratch.inst_map[i]).collect();
@@ -2306,8 +2149,6 @@ fn import_cleanup_load_cells(
     }
 }
 
-/// Remap a freshly-cloned inst's value (via [`Inst::remap_uses`]), cell, and block
-/// operands through the clone maps.
 fn remap_clone(
     inst: &mut Inst,
     im: &HashMap<Idx<Inst>, Idx<Inst>>,
@@ -2341,7 +2182,6 @@ fn remap_clone(
     }
 }
 
-/// Remap a cloned terminator's inst operands AND block targets.
 fn remap_term_clone(
     term: &mut Term,
     im: &HashMap<Idx<Inst>, Idx<Inst>>,
@@ -2351,12 +2191,7 @@ fn remap_term_clone(
     term.remap_targets(&|x| bm[&x]);
 }
 
-/// For each coalescable param whose arg is a plain `Load(c)` that still holds
-/// when the body runs ([`snapshot_holds`]), map the callee param cell -> the
-/// caller cell `c` (so the clone binds the param directly to it) and flag the
-/// param so the splice skips its `Store(param, arg)` copy.
-/// Removing that whole-cell copy is what keeps a by-ref-mutated cursor struct a
-/// SINGLE cell, which SROA can then scalarize (the zero-alloc iterator path).
+/// Coalesce only if the argument cell still holds the value its load read.
 fn coalesce_overrides(
     caller: &MirFunc,
     cand: &CalleeBody,
@@ -2375,8 +2210,6 @@ fn coalesce_overrides(
     })
 }
 
-/// Visit each parameter `i` the splice at `pos` binds directly to caller cell
-/// `c`; returns how many there are.
 fn for_each_coalesced(
     caller: &MirFunc,
     cand: &CalleeBody,
@@ -2404,13 +2237,7 @@ fn for_each_coalesced(
     count
 }
 
-/// Whether cell `c` still holds the value `load` read when the call at
-/// `bid[idx]` runs, and keeps it for the whole spliced body. The parameter is a
-/// snapshot of its argument: coalescing it onto `c` is only sound when nothing
-/// can write `c` from the read to the end of the body. The callee itself never
-/// rebinds a coalescable parameter, so the writers left are caller code on a
-/// path from the read to the call (a later argument, or a body spliced for an
-/// earlier call) and closures the body can reach (`pinned`, see [`pin_cells`]).
+/// A copied argument is a snapshot until the call and throughout the splice.
 fn snapshot_holds(
     caller: &MirFunc,
     pinned: &HashSet<Idx<Cell>>,
@@ -2438,10 +2265,7 @@ fn snapshot_holds(
     if !clear(call_prefix) {
         return false;
     }
-    // The read is in another block. It dominates the call, so walking
-    // predecessors back from the call without passing the read's block visits
-    // exactly the blocks a path from the read to the call can cross; re-entering
-    // the read's block would re-run the read, so only its tail counts.
+    // The load dominates the call, so all intervening paths must keep the value.
     let preds = preds.get_or_insert_with(|| {
         let mut map: HashMap<Idx<Block>, Vec<Idx<Block>>> = HashMap::default();
         for (from, block) in caller.blocks.iter() {
@@ -2472,11 +2296,6 @@ fn snapshot_holds(
     found
 }
 
-/// Add the caller cells a spliced body could observe changing behind a
-/// coalesced parameter: those written inside a closure body (any block outside
-/// `top`), since the body could call that closure. A `ref` alias writes fields
-/// of the object a cell holds, never the cell, so it does not pin. Only blocks at or past `blocks_from` are examined, so each splice
-/// pins just what it imported.
 fn pin_cells(
     func: &MirFunc,
     top: &HashSet<Idx<Block>>,
@@ -2523,11 +2342,7 @@ fn graft_resolved_bound_tree(
     Ok(out)
 }
 
-/// After cloning a callee body into the caller: substitute every cloned
-/// placeholder [`Inst::CallBoundMulti`] with the concrete `next` from the
-/// site's tree, and import the callee's own carried `bound_trees` (keys
-/// remapped, `CallerGeneric` leaves grafted through the site tree) so the
-/// fixpoint can keep inlining the now-concrete calls.
+/// Resolve cloned placeholders using the call site's witness tree.
 fn resolve_cloned_bound_calls(
     func: &mut MirFunc,
     callee: &MirFunc,
@@ -2652,9 +2467,7 @@ fn rename_nested_tree(nested: &mut [MirFunc], names: &HashMap<Ustr, Ustr>) {
     }
 }
 
-/// Carry named nested bodies across a splice. Their names are private globals,
-/// so each splice needs a fresh namespace and every reference in the cloned
-/// parent and child arenas must move with it.
+/// Rename private hoisted definitions that collide in the caller.
 fn import_nested_fns(
     func: &mut MirFunc,
     callee: &MirFunc,
@@ -2694,14 +2507,7 @@ fn import_nested_fns(
     names
 }
 
-/// Import the cloned callee body's `spec_bindings` into the caller (keys remapped
-/// through the clone) so a specialized call INSIDE a spliced body is itself found
-/// and specialized by the fixpoint -- the `spec_bindings` analogue of
-/// `resolve_cloned_bound_calls` importing `bound_trees`.
-///
-/// Resolved bound trees are instruction-keyed too. They carry concrete leaves
-/// from a prior splice or standalone substitution, so dropping one would make
-/// the next splice re-derive a foreign tree from the caller's inference arena.
+/// Carry instruction metadata through the splice remap.
 fn import_spec_bindings(
     func: &mut MirFunc,
     callee: &MirFunc,
@@ -2713,8 +2519,6 @@ fn import_spec_bindings(
             func.spec_bindings.insert(new_id, key.clone());
         }
     }
-    // The IDENTITY record travels with the body for the same reason the site
-    // does: a spliced call still targets the instance the callee body named.
     for (old_id, inst) in &callee.callee_instances {
         if let Some(&new_id) = inst_map.get(old_id) {
             func.callee_instances.insert(new_id, inst.clone());
@@ -2745,11 +2549,6 @@ fn import_spec_bindings(
             func.resolved_bound_trees.insert(new_id, tree.clone());
         }
     }
-    // A minted fn-value symbol travels with the body that mints it: the callee's
-    // `let f = adder` is still a reference to `adder` after the splice, and the
-    // census joins it there. Dropping it would leave a spelled callee symbol in
-    // the caller with no recorded declaration -- exactly the fail-open the
-    // record exists to prevent.
     for (old_id, fref) in &callee.fn_value_symbols {
         if let Some(&new_id) = inst_map.get(old_id) {
             func.fn_value_symbols.insert(new_id, *fref);
@@ -2760,8 +2559,6 @@ fn import_spec_bindings(
             func.code_value_identities.insert(new_id, identity.clone());
         }
     }
-    // A spliced lambda is closure-converted in the caller, which reads its call
-    // ABI from these tables for the hot-reload compatibility record.
     for (old_id, fingerprint) in &callee.lambda_abi_fingerprints {
         if let Some(&new_id) = inst_map.get(old_id) {
             func.lambda_abi_fingerprints
@@ -2784,9 +2581,7 @@ fn import_spec_bindings(
             func.hoisted_fn_globals.push(n);
         }
     }
-    // The callee's instruction spans come across with its body, so a rejection
-    // raised after inlining still points at the construct in the CALLEE's source
-    // rather than at the call site that absorbed it.
+    // Preserve the callee source location for diagnostics after inlining.
     for (old_id, span) in callee.inst_spans.iter() {
         if let Some(&new_id) = inst_map.get(&old_id) {
             func.inst_spans.insert(new_id, *span);
@@ -2797,12 +2592,7 @@ fn import_spec_bindings(
             func.inst_logical_types.insert(new_id, *ty);
         }
     }
-    // Site identity travels with the body, and its OWNER travels with it: a
-    // spliced call is the CALLEE instance's obligation, so the owner is
-    // re-interned into the caller's table and the entry re-pointed. Copying the
-    // `OwnerRef` verbatim would silently reinterpret the callee's index in the
-    // caller's table -- index 0 there is the CALLER, so every spliced call
-    // would join through the wrong body while looking perfectly well-formed.
+    // Intern each callee owner in the caller before remapping its sites.
     let mut owner_map: HashMap<u32, skull_mir::site::OwnerRef> = HashMap::default();
     for (old_id, cs) in &callee.call_sites {
         let Some(&new_id) = inst_map.get(old_id) else {
@@ -2829,9 +2619,6 @@ fn import_spec_bindings(
     }
 }
 
-/// Splice candidate `cand` into `func` at `site`, removing the call. Returns the
-/// new top-level (reachable) blocks the splice added, for the driver to fold into
-/// its top-level set (straight adds none).
 fn splice(
     func: &mut MirFunc,
     site: Site,
@@ -2912,10 +2699,7 @@ fn bind_params(
     }
 }
 
-/// Straight splice: the callee is a single Return-terminated block. Inline its
-/// insts into the caller block in place of the call; no new blocks (the callee
-/// is lambda-free, so its insts reference no block). The caller block keeps its
-/// own terminator.
+/// Inline within the caller block, preserving its terminator.
 fn splice_straight(
     func: &mut MirFunc,
     site: &Site,
@@ -2957,9 +2741,7 @@ fn splice_straight(
         }
         None => {
             let call_id = site.call_id;
-            // Preserve the old straight-line MIR shape: the returned value
-            // replaces the call at its exact indexed users, including uses in
-            // successor blocks. No bridge cell or whole-caller scan is needed.
+            // Replace the call in all of its users, including successor blocks.
             let to = match &callee.blocks[callee.entry].term {
                 Term::Return(values) => match values
                     .first()
@@ -2991,10 +2773,7 @@ fn splice_straight(
     }
 }
 
-/// General splice: the callee has internal control flow. Split the caller block
-/// at the call; the prefix arg-stores + `Goto` the cloned entry; a continuation
-/// block holds the post-call tail. Each cloned `Return` binds its values and
-/// `Goto`s the continuation.
+/// Branch into the clone and send its returns to the continuation.
 fn splice_general(
     func: &mut MirFunc,
     site: &Site,
@@ -3006,22 +2785,18 @@ fn splice_general(
     let callee = &cand.func;
     let entry_clone = scratch.block_map[&callee.entry];
 
-    // Split the caller block at the call.
     let old = std::mem::take(&mut func.blocks[bid].insts);
     let before: Vec<Idx<Inst>> = old[..idx].to_vec();
     let after: Vec<Idx<Inst>> = old[idx + 1..].to_vec();
     let orig_term = func.blocks[bid].term.clone();
     uses.remove_term(func, bid);
 
-    // Continuation block: post-call tail + the caller's original terminator.
     let cont = func.new_block();
     func.blocks[cont].insts = after;
     func.blocks[cont].term = orig_term;
     uses.add_term(func, cont);
 
-    // Single-result: a result cell read back in the continuation. Repurpose the
-    // call inst id in place as `Load(rc)` at the front of `cont` so downstream
-    // refs (single-block, all in `cont`) resolve unchanged.
+    // Reuse the call ID for a load from the result cell.
     let result_cell = match &site.dests {
         None => {
             let call_id = site.call_id;
@@ -3034,16 +2809,12 @@ fn splice_general(
         Some(_) => None,
     };
 
-    // Prefix: before | arg-stores; Goto the cloned entry. Coalesced params are
-    // aliased to the caller cell (via `overrides`), so they need no copy.
     let mut prefix = before;
     bind_params(func, site, cand, scratch, uses, &mut prefix);
     func.blocks[bid].insts = prefix;
     func.blocks[bid].term = Term::Goto(entry_clone);
 
-    // Route each cloned TOP-LEVEL Return to the continuation, binding return
-    // values. Only the callee's reachable blocks: a lambda sub-CFG's Return is
-    // the LAMBDA's return, not the callee's, and must stay put.
+    // Only the callee CFG returns to the caller. Lambda returns stay in their sub-CFGs.
     for &source_block in &cand.reachable {
         let nb = scratch.block_map[&source_block];
         let vs = match &func.blocks[nb].term {
@@ -3081,26 +2852,13 @@ fn splice_general(
         func.blocks[nb].term = Term::Goto(cont);
         uses.add_term(func, nb);
     }
-    // New top-level blocks: the REACHABLE clones (cand.reachable mapped through
-    // the clone) + the continuation. Dead cloned blocks are unreachable and must
-    // NOT enter the top-level set (the old full re-scan never visited them).
     scratch
         .added_blocks
         .extend(cand.reachable.iter().map(|b| scratch.block_map[b]));
     scratch.added_blocks.push(cont);
 }
 
-/// Inline eligible direct calls in `func` (an ordinary, non-coroutine caller).
-/// Drives [`find_site`] -> [`splice`] to a fixpoint, bounded by the per-caller
-/// budget. `self_ref` is the caller's own [`FuncRef`] (so a self-call is never
-/// inlined). Run BEFORE `cleanup`.
-///
-/// Returns the set of callee [`FuncRef`]s spliced in, splice records, and the
-/// instruction-scan census. The dependency set is the transitive closure of
-/// bodies whose source now lives in `func`'s emitted chunk (the driver visits
-/// each, including ones the inlined bodies themselves introduced). These are the
-/// caller chunk's INLINE codegen dependencies: incremental emit must re-emit
-/// `func` when any of them change.
+/// Return the concrete splice dependencies needed for incremental emission.
 pub(crate) fn inline_functions_with_plans(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -3116,7 +2874,6 @@ pub(crate) fn inline_functions_with_plans(
         ..InlineScanStats::default()
     };
     cache.reset_census();
-    // Kill-switch for perf attribution / bisecting a suspected inline bug.
     if inline_disabled() {
         return Ok((spliced, records, scan_stats));
     }
@@ -3132,14 +2889,8 @@ pub(crate) fn inline_functions_with_plans(
     // Caller cells a closure body writes; see [`pin_cells`].
     let mut pinned: HashSet<Idx<Cell>> = HashSet::default();
     pin_cells(func, &top, 0, &mut pinned);
-    // Only a splice reads the use index or the calls the body started with
-    // (which tell a transitive splice apart), and most bodies never have one,
-    // so both are built at the first site, while the body is still untouched.
     let mut uses: Option<UseIndex> = None;
     let mut original_calls: Option<HashSet<Idx<Inst>>> = None;
-    // Resume cursor: the position of the last splice. No eligible call can appear
-    // before it, so the next scan starts there (turns the per-splice full re-scan
-    // from O(splices x size) into a single forward sweep).
     let mut resume: Option<(Idx<Block>, usize)> = None;
     let mut cell_budget = func.cells.len() + func.value_leaves;
     let mut budget = MAX_INLINES_PER_FN;
@@ -3192,15 +2943,10 @@ pub(crate) fn inline_functions_with_plans(
         let destination_elements = site.dests.as_ref().map_or(0, Vec::len);
         let prefix = pos.1;
         let tail = func.blocks[pos.0].insts.len().saturating_sub(pos.1 + 1);
-        // Re-borrow the candidate immutably for the splice (distinct from `func`).
         let (cands, census, scratch) = (&cache.cands, &mut cache.census, &mut cache.scratch);
         let cand = cands[&site.inst]
             .as_ref()
             .expect("site implies a cached candidate");
-        // SAFETY-of-borrows: `splice` mutates `func`, reads `cand` (in `cache`);
-        // they are different objects. The borrow checker can't see that through
-        // the `&mut cache` in `find_site`, so split the lookup out here where
-        // only `&cache` is held.
         let splice_start = cache.census_enabled.then(Instant::now);
         let arena_capacities = cache.census_enabled.then(|| {
             (
@@ -3257,12 +3003,7 @@ pub(crate) fn inline_functions_with_plans(
             ),
             splice_ns,
         });
-        // The callee's `static` cells now live in THIS body: the spliced code
-        // reads and writes them, and a `static` is one cell per owning fn, so
-        // the cell is the same one every call site shares. Carrying them here is
-        // the only way a cell whose owner has no standalone emission -- every
-        // `Iterator`-bounded fn -- reaches the emitted program's registry.
-        // Deduped below; one callee can be spliced at many sites.
+        // The caller must import cells referenced by the spliced body.
         func.statics.extend(cand.func.statics.iter().cloned());
         func.comptime_reads
             .extend(cand.func.comptime_reads.iter().cloned());
@@ -3301,24 +3042,11 @@ pub(crate) fn inline_functions_with_plans(
     Ok((spliced, records, scan_stats))
 }
 
-/// Whether the fn declares any `Iterator` bound on its generics -- such a fn has
-/// no standalone emission (it exists only inlined at its call sites).
 fn fn_has_bounds(f: &bone_core::hir::Function) -> bool {
     f.generic_bounds.iter().any(Option::is_some)
 }
 
-/// Post-inline gate: a body about to be emitted must contain no placeholder
-/// bound-call, and no residual call to a bounded fn that NAMES NOTHING.
-///
-/// A residual call is fine when the lowerer gave it a specialization: it spells
-/// the specialized symbol (`callee_name` / `spec_fn_name`), and that definition
-/// is emitted standalone from the demand this same call site raises, with its
-/// placeholders resolved by the demand's tree
-/// (`skull_transform::bound::resolve_standalone_bound_calls`). What is still a
-/// rejection is a residual call the inliner did not splice AND the lowerer did
-/// not specialize -- there is then no body anywhere that serves it.
-///
-/// Shared by the luajit driver (`skull::mir_emit`) and the JS closure emitter.
+/// Report any unresolved bound calls before rendering.
 pub fn validate_no_residual_bound_calls(
     ws: &Workspace,
     f: &bone_core::hir::Function,
