@@ -95,28 +95,20 @@ impl<'de> serde::Deserialize<'de> for NumberOrString {
     }
 }
 
-/// Position in a text document expressed as zero-based line and character offset.
-/// A position is between two characters like an 'insert' cursor in a editor.
-#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Copy, Clone, Default, Hash)]
-pub struct Position {
-    /// Line position in a document (zero-based).
-    pub line: u32,
-    /// Character offset on a line in a document (zero-based). The meaning of this
-    /// offset is determined by the negotiated `PositionEncodingKind`.
-    ///
-    /// If the character value is greater than the line length it defaults back
-    /// to the line length.
-    pub character: u32,
+lsp_struct! {
+    both
+    /// Position in a text document expressed as zero-based line and character offset.
+    /// A position is between two characters like an 'insert' cursor in a editor.
+    #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Copy, Clone, Default, Hash)]
+    pub struct Position {
+        /// Line position in a document (zero-based).
+        required pub line: u32 = "line",
+        /// offset is determined by the negotiated `PositionEncodingKind`.
+        ///
+        /// If the character value is greater than the line length it defaults back
+        /// to the line length.
+        required pub character: u32 = "character",}
 }
-
-impl_lsp_struct!(
-    both Position,
-    required {
-        line: u32 = "line",
-        character: u32 = "character",
-    },
-    optional {}
-);
 
 impl Position {
     pub fn new(line: u32, character: u32) -> Position {
@@ -124,24 +116,16 @@ impl Position {
     }
 }
 
-/// A range in a text document expressed as (zero-based) start and end positions.
-/// A range is comparable to a selection in an editor. Therefore the end position is exclusive.
-#[derive(Debug, Eq, PartialEq, Copy, Clone, Default, Hash)]
-pub struct Range {
-    /// The range's start position.
-    pub start: Position,
-    /// The range's end position.
-    pub end: Position,
+lsp_struct! {
+    both
+    /// A range in a text document expressed as (zero-based) start and end positions.
+    /// A range is comparable to a selection in an editor. Therefore the end position is exclusive.
+    #[derive(Debug, Eq, PartialEq, Copy, Clone, Default, Hash)]
+    pub struct Range {
+        /// The range's start position.
+        required pub start: Position = "start",
+        required pub end: Position = "end",}
 }
-
-impl_lsp_struct!(
-    both Range,
-    required {
-        start: Position = "start",
-        end: Position = "end",
-    },
-    optional {}
-);
 
 impl Range {
     pub fn new(start: Position, end: Position) -> Range {
@@ -149,56 +133,30 @@ impl Range {
     }
 }
 
-/// Represents a location inside a resource, such as a line inside a text file.
-#[derive(Debug, Eq, PartialEq, Clone, Hash)]
-pub struct Location {
-    pub uri: Uri,
-    pub range: Range,
+lsp_struct! {
+    out
+    /// Represents a location inside a resource, such as a line inside a text file.
+    #[derive(Debug, Eq, PartialEq, Clone, Hash)]
+    pub struct Location {
+        required pub uri: Uri = "uri",
+        required pub range: Range = "range",}
 }
 
-impl_lsp_struct!(
-    out Location,
-    required {
-        uri: Uri = "uri",
-        range: Range = "range",
-    },
-    optional {}
-);
-
-/// Represents a diagnostic, such as a compiler error or warning.
-/// Diagnostic objects are only valid in the scope of a resource.
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct Diagnostic {
-    /// The range at which the message applies.
-    pub range: Range,
-
-    /// The diagnostic's severity. Can be omitted. If omitted it is up to the
-    /// client to interpret diagnostics as error, warning, info or hint.
-    pub severity: Option<DiagnosticSeverity>,
-
-    /// The diagnostic's code. Can be omitted.
-    pub code: Option<NumberOrString>,
-
-    /// A human-readable string describing the source of this
-    /// diagnostic, e.g. 'typescript' or 'super lint'.
-    pub source: Option<String>,
-
-    /// The diagnostic's message.
-    pub message: String,
+lsp_struct! {
+    both
+    /// Represents a diagnostic, such as a compiler error or warning.
+    /// Diagnostic objects are only valid in the scope of a resource.
+    #[derive(Debug, Eq, PartialEq, Clone, Default)]
+    pub struct Diagnostic {
+        /// The range at which the message applies.
+        required pub range: Range = "range",
+        /// client to interpret diagnostics as error, warning, info or hint.
+        optional pub severity: DiagnosticSeverity = "severity",
+        optional pub code: NumberOrString = "code",
+        /// diagnostic, e.g. 'typescript' or 'super lint'.
+        optional pub source: String = "source",
+        required pub message: String = "message",}
 }
-
-impl_lsp_struct!(
-    both Diagnostic,
-    required {
-        range: Range = "range",
-        message: String = "message"
-    },
-    optional {
-        severity: DiagnosticSeverity = "severity",
-        code: NumberOrString = "code",
-        source: String = "source",
-    }
-);
 
 /// The protocol currently supports the following diagnostic severities:
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone, Copy)]
@@ -214,69 +172,47 @@ impl DiagnosticSeverity {
 }
 }
 
-/// Represents a reference to a command. Provides a title which will be used to represent a command in the UI.
-/// Commands are identified by a string identifier. The recommended way to handle commands is to implement
-/// their execution on the server side if the client and server provides the corresponding capabilities.
-/// Alternatively the tool extension code could handle the command.
-/// The protocol currently doesn’t specify a set of well-known commands.
-#[derive(Debug, PartialEq, Clone, Default)]
-pub struct Command {
-    /// Title of the command, like `save`.
-    pub title: String,
-    /// The identifier of the actual command handler.
-    pub command: String,
-    /// Arguments that the command handler should be
-    /// invoked with.
-    pub arguments: Option<Vec<Value>>,
+lsp_struct! {
+    out
+    /// Represents a reference to a command. Provides a title which will be used to represent a command in the UI.
+    /// Commands are identified by a string identifier. The recommended way to handle commands is to implement
+    /// their execution on the server side if the client and server provides the corresponding capabilities.
+    /// Alternatively the tool extension code could handle the command.
+    /// The protocol currently doesn’t specify a set of well-known commands.
+    #[derive(Debug, PartialEq, Clone, Default)]
+    pub struct Command {
+        /// Title of the command, like `save`.
+        required pub title: String = "title",
+        required pub command: String = "command",
+        /// invoked with.
+        optional pub arguments: Vec<Value> = "arguments",}
 }
 
-impl_lsp_struct!(out Command,
-    required {
-        title: String = "title",
-        command: String = "command",
-    },
-    optional {
-        arguments: Vec<Value> = "arguments",
+lsp_struct! {
+    out
+    /// A textual edit applicable to a text document.
+    ///
+    /// If n `TextEdit`s are applied to a text document all text edits describe changes to the initial document version.
+    /// Execution wise text edits should applied from the bottom to the top of the text document. Overlapping text edits
+    /// are not supported.
+    #[derive(Debug, Eq, PartialEq, Clone, Default)]
+    pub struct TextEdit {
+        /// The range of the text document to be manipulated. To insert
+        /// text into a document create a range where start === end.
+        required pub range: Range = "range",
+        /// empty string.
+        required pub new_text: String = "newText",}
+}
+
+lsp_struct! {
+    out
+    /// A workspace edit represents changes to many resources managed in the workspace.
+    #[derive(Debug, Eq, PartialEq, Clone, Default)]
+    pub struct WorkspaceEdit {
+        /// Holds changes to existing resources.
+        optional pub changes: HashMap<Uri, Vec<TextEdit>> = "changes",
     }
-);
-
-/// A textual edit applicable to a text document.
-///
-/// If n `TextEdit`s are applied to a text document all text edits describe changes to the initial document version.
-/// Execution wise text edits should applied from the bottom to the top of the text document. Overlapping text edits
-/// are not supported.
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct TextEdit {
-    /// The range of the text document to be manipulated. To insert
-    /// text into a document create a range where start === end.
-    pub range: Range,
-    /// The string to be inserted. For delete operations use an
-    /// empty string.
-    pub new_text: String,
 }
-
-impl_lsp_struct!(
-    out TextEdit,
-    required {
-        range: Range = "range",
-        new_text: String = "newText",
-    },
-    optional {}
-);
-
-/// A workspace edit represents changes to many resources managed in the workspace.
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct WorkspaceEdit {
-    /// Holds changes to existing resources.
-    pub changes: Option<HashMap<Uri, Vec<TextEdit>>>, //    changes?: { [uri: string]: TextEdit[]; };
-}
-
-impl_lsp_struct!(out WorkspaceEdit,
-    required {},
-    optional {
-        changes: HashMap<Uri, Vec<TextEdit>> = "changes",
-    }
-);
 
 impl WorkspaceEdit {
     #[allow(clippy::mutable_key_type)]
@@ -287,67 +223,41 @@ impl WorkspaceEdit {
     }
 }
 
-/// Text documents are identified using a URI. On the protocol level, URIs are passed as strings.
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct TextDocumentIdentifier {
-    /// The text document's URI.
-    pub uri: Uri,
+lsp_struct! {
+    in
+    /// Text documents are identified using a URI. On the protocol level, URIs are passed as strings.
+    #[derive(Debug, Eq, PartialEq, Clone)]
+    pub struct TextDocumentIdentifier {
+        /// The text document's URI.
+        required pub uri: Uri = "uri",}
 }
 
-impl_lsp_struct!(
-    in TextDocumentIdentifier,
-    required { uri: Uri = "uri" },
-    optional {}
-);
-
-/// Params of a request about a whole text document.
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct TextDocumentParams {
-    pub text_document: TextDocumentIdentifier,
+lsp_struct! {
+    in
+    /// Params of a request about a whole text document.
+    #[derive(Debug, Eq, PartialEq, Clone)]
+    pub struct TextDocumentParams {
+        required pub text_document: TextDocumentIdentifier = "textDocument",}
 }
 
-impl_lsp_struct!(
-    in TextDocumentParams,
-    required {
-        text_document: TextDocumentIdentifier = "textDocument"
-    },
-    optional {}
-);
-
-/// Params of a request about a range of a text document.
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct TextDocumentRangeParams {
-    pub text_document: TextDocumentIdentifier,
-    pub range: Range,
+lsp_struct! {
+    in
+    /// Params of a request about a range of a text document.
+    #[derive(Debug, Eq, PartialEq, Clone)]
+    pub struct TextDocumentRangeParams {
+        required pub text_document: TextDocumentIdentifier = "textDocument",
+        required pub range: Range = "range",}
 }
 
-impl_lsp_struct!(
-    in TextDocumentRangeParams,
-    required {
-        text_document: TextDocumentIdentifier = "textDocument",
-        range: Range = "range",
-    },
-    optional {}
-);
-
-/// A parameter literal used in requests to pass a text document and a position inside that document.
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct TextDocumentPositionParams {
-    /// The text document.
-    pub text_document: TextDocumentIdentifier,
-
-    /// The position inside the text document.
-    pub position: Position,
+lsp_struct! {
+    in
+    /// A parameter literal used in requests to pass a text document and a position inside that document.
+    #[derive(Debug, Eq, PartialEq, Clone)]
+    pub struct TextDocumentPositionParams {
+        /// The text document.
+        required pub text_document: TextDocumentIdentifier = "textDocument",
+        required pub position: Position = "position",}
 }
-
-impl_lsp_struct!(
-    in TextDocumentPositionParams,
-    required {
-        text_document: TextDocumentIdentifier = "textDocument",
-        position: Position = "position",
-    },
-    optional {}
-);
 
 /// A symbol kind.
 #[derive(Debug, Eq, PartialEq, Copy, Clone)]
@@ -365,22 +275,14 @@ impl SymbolKind {
 }
 }
 
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct PublishDiagnosticsParams {
-    /// The URI for which diagnostic information is reported.
-    pub uri: Uri,
-
-    /// An array of diagnostic information items.
-    pub diagnostics: Vec<Diagnostic>,
+lsp_struct! {
+    out
+    #[derive(Debug, Eq, PartialEq, Clone)]
+    pub struct PublishDiagnosticsParams {
+        /// The URI for which diagnostic information is reported.
+        required pub uri: Uri = "uri",
+        required pub diagnostics: Vec<Diagnostic> = "diagnostics",}
 }
-
-impl_lsp_struct!(out PublishDiagnosticsParams,
-    required {
-        uri: Uri = "uri",
-        diagnostics: Vec<Diagnostic> = "diagnostics",
-    },
-    optional {}
-);
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum Documentation {
@@ -393,21 +295,14 @@ impl_untagged_enum!(Documentation {
     String,
 });
 
-#[derive(Debug, PartialEq, Clone, Default)]
-pub struct ExecuteCommandParams {
-    /// The identifier of the actual command handler.
-    pub command: String,
-    /// Arguments that the command should be invoked with.
-    pub arguments: Vec<Value>,
+lsp_struct! {
+    in
+    #[derive(Debug, PartialEq, Clone, Default)]
+    pub struct ExecuteCommandParams {
+        /// The identifier of the actual command handler.
+        required pub command: String = "command",
+        required pub arguments: Vec<Value> = "arguments",}
 }
-
-impl_lsp_struct!(in ExecuteCommandParams,
-    required {
-        command: String = "command",
-        arguments: Vec<Value> = "arguments",
-    },
-    optional {}
-);
 
 /// Describes the content type that a client supports in various
 /// result literals like `Hover`, `ParameterInfo` or `CompletionItem`.
@@ -431,43 +326,36 @@ impl serde::Serialize for MarkupKind {
     }
 }
 
-/// A `MarkupContent` literal represents a string value which content can be represented in different formats.
-/// Currently `plaintext` and `markdown` are supported formats. A `MarkupContent` is usually used in
-/// documentation properties of result literals like `CompletionItem` or `SignatureInformation`.
-/// If the format is `markdown` the content should follow the [GitHub Flavored Markdown Specification](https://github.github.com/gfm/).
-///
-/// Here is an example how such a string can be constructed using JavaScript / TypeScript:
-///
-/// ```ignore
-/// let markdown: MarkupContent = {
-///     kind: MarkupKind::Markdown,
-///     value: [
-///         "# Header",
-///         "Some text",
-///         "```typescript",
-///         "someCode();",
-///         "```"
-///     ]
-///     .join("\n"),
-/// };
-/// ```
-///
-/// Please *Note* that clients might sanitize the return markdown. A client could decide to
-/// remove HTML from the markdown to avoid script execution.
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct MarkupContent {
-    pub kind: MarkupKind,
-    pub value: String,
+lsp_struct! {
+    out
+    /// A `MarkupContent` literal represents a string value which content can be represented in different formats.
+    /// Currently `plaintext` and `markdown` are supported formats. A `MarkupContent` is usually used in
+    /// documentation properties of result literals like `CompletionItem` or `SignatureInformation`.
+    /// If the format is `markdown` the content should follow the [GitHub Flavored Markdown Specification](https://github.github.com/gfm/).
+    ///
+    /// Here is an example how such a string can be constructed using JavaScript / TypeScript:
+    ///
+    /// ```ignore
+    /// let markdown: MarkupContent = {
+    ///     kind: MarkupKind::Markdown,
+    ///     value: [
+    ///         "# Header",
+    ///         "Some text",
+    ///         "```typescript",
+    ///         "someCode();",
+    ///         "```"
+    ///     ]
+    ///     .join("\n"),
+    /// };
+    /// ```
+    ///
+    /// Please *Note* that clients might sanitize the return markdown. A client could decide to
+    /// remove HTML from the markdown to avoid script execution.
+    #[derive(Debug, Eq, PartialEq, Clone)]
+    pub struct MarkupContent {
+        required pub kind: MarkupKind = "kind",
+        required pub value: String = "value",}
 }
-
-impl_lsp_struct!(
-    out MarkupContent,
-    required {
-        kind: MarkupKind = "kind",
-        value: String = "value",
-    },
-    optional {}
-);
 
 #[cfg(test)]
 mod tests {

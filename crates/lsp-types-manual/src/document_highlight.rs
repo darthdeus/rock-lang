@@ -1,26 +1,16 @@
 use crate::Range;
 
-/// A document highlight is a range inside a text document which deserves
-/// special attention. Usually a document highlight is visualized by changing
-/// the background color of its range.
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct DocumentHighlight {
-    /// The range this highlight applies to.
-    pub range: Range,
-
-    /// The highlight kind, default is DocumentHighlightKind.Text.
-    pub kind: Option<DocumentHighlightKind>,
+lsp_struct! {
+    out
+    /// A document highlight is a range inside a text document which deserves
+    /// special attention. Usually a document highlight is visualized by changing
+    /// the background color of its range.
+    #[derive(Debug, Eq, PartialEq, Clone)]
+    pub struct DocumentHighlight {
+        /// The range this highlight applies to.
+        required pub range: Range = "range",
+        optional pub kind: DocumentHighlightKind = "kind",}
 }
-
-impl_lsp_struct!(
-    out DocumentHighlight,
-    required {
-        range: Range = "range"
-    },
-    optional {
-        kind: DocumentHighlightKind = "kind"
-    }
-);
 
 /// A document highlight kind.
 #[derive(Debug, Eq, PartialEq, Copy, Clone)]

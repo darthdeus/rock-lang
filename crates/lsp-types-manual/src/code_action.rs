@@ -1,27 +1,15 @@
 use crate::{Diagnostic, Range, TextDocumentIdentifier, WorkspaceEdit};
 
-/// Params for the CodeActionRequest
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct CodeActionParams {
-    /// The document in which the command was invoked.
-    pub text_document: TextDocumentIdentifier,
-
-    /// The range for which the command was invoked.
-    pub range: Range,
-
-    /// Context carrying additional information.
-    pub context: CodeActionContext,
+lsp_struct! {
+    in
+    /// Params for the CodeActionRequest
+    #[derive(Debug, Eq, PartialEq, Clone)]
+    pub struct CodeActionParams {
+        /// The document in which the command was invoked.
+        required pub text_document: TextDocumentIdentifier = "textDocument",
+        required pub range: Range = "range",
+        required pub context: CodeActionContext = "context",}
 }
-
-impl_lsp_struct!(
-    in CodeActionParams,
-    required {
-        text_document: TextDocumentIdentifier = "textDocument",
-        range: Range = "range",
-        context: CodeActionContext = "context",
-    },
-    optional {}
-);
 
 #[derive(Debug, Eq, PartialEq, Hash, PartialOrd, Clone)]
 pub struct CodeActionKind(&'static str);
@@ -55,34 +43,24 @@ impl CodeActionKind {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Default)]
-pub struct CodeAction {
-    pub title: String,
-    pub kind: Option<CodeActionKind>,
-    pub diagnostics: Option<Vec<Diagnostic>>,
-    pub edit: Option<WorkspaceEdit>,
+lsp_struct! {
+    out
+    #[derive(Debug, PartialEq, Clone, Default)]
+    pub struct CodeAction {
+        required pub title: String = "title",
+        optional pub kind: CodeActionKind = "kind",
+        optional pub diagnostics: Vec<Diagnostic> = "diagnostics",
+        optional pub edit: WorkspaceEdit = "edit",}
 }
 
-impl_lsp_struct!(out CodeAction,
-    required { title: String = "title" },
-    optional {
-        kind: CodeActionKind = "kind",
-        diagnostics: Vec<Diagnostic> = "diagnostics",
-        edit: WorkspaceEdit = "edit",
-    }
-);
-
-/// Contains additional diagnostic information about the context in which
-/// a code action is run.
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct CodeActionContext {
-    pub diagnostics: Vec<Diagnostic>,
+lsp_struct! {
+    in
+    /// Contains additional diagnostic information about the context in which
+    /// a code action is run.
+    #[derive(Debug, Eq, PartialEq, Clone, Default)]
+    pub struct CodeActionContext {
+        required pub diagnostics: Vec<Diagnostic> = "diagnostics",}
 }
-
-impl_lsp_struct!(in CodeActionContext,
-    required { diagnostics: Vec<Diagnostic> = "diagnostics" },
-    optional {}
-);
 
 #[cfg(test)]
 mod tests {

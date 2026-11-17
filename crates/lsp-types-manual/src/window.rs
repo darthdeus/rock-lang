@@ -7,17 +7,10 @@ impl MessageType {
 }
 }
 
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct ShowMessageParams {
-    pub typ: MessageType,
-    pub message: String,
+lsp_struct! {
+    out
+    #[derive(Debug, Eq, PartialEq, Clone)]
+    pub struct ShowMessageParams {
+        required pub typ: MessageType = "type",
+        required pub message: String = "message",}
 }
-
-impl_lsp_struct!(
-    out ShowMessageParams,
-    required {
-        typ: MessageType = "type",
-        message: String = "message",
-    },
-    optional {}
-);

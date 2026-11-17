@@ -28,43 +28,24 @@ impl CompletionItemKind {
 }
 }
 
-#[derive(Debug, PartialEq, Clone)]
-pub struct CompletionParams {
-    pub text_document: TextDocumentIdentifier,
-    pub position: Position,
-    pub context: Option<CompletionContext>,
+lsp_struct! {
+    in
+    #[derive(Debug, PartialEq, Clone)]
+    pub struct CompletionParams {
+        required pub text_document: TextDocumentIdentifier = "textDocument",
+        required pub position: Position = "position",
+        optional pub context: CompletionContext = "context",}
 }
 
-impl_lsp_struct!(
-    in CompletionParams,
-    required {
-        text_document: TextDocumentIdentifier = "textDocument",
-        position: Position = "position",
-    },
-    optional {
-        context: CompletionContext = "context"
-    }
-);
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct CompletionContext {
-    /// How the completion was triggered.
-    pub trigger_kind: CompletionTriggerKind,
-
-    /// The trigger character (a single character) that has trigger code complete.
-    /// Is undefined if `triggerKind !== CompletionTriggerKind.TriggerCharacter`
-    pub trigger_character: Option<String>,
+lsp_struct! {
+    in
+    #[derive(Debug, PartialEq, Clone)]
+    pub struct CompletionContext {
+        /// How the completion was triggered.
+        required pub trigger_kind: CompletionTriggerKind = "triggerKind",
+        /// Is undefined if `triggerKind !== CompletionTriggerKind.TriggerCharacter`
+        optional pub trigger_character: String = "triggerCharacter",}
 }
-
-impl_lsp_struct!(
-    in CompletionContext,
-    required {
-        trigger_kind: CompletionTriggerKind = "triggerKind"
-    },
-    optional {
-        trigger_character: String = "triggerCharacter"
-    }
-);
 
 /// How a completion was triggered.
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
@@ -75,112 +56,64 @@ impl CompletionTriggerKind {
 }
 }
 
-/// Represents a collection of [completion items](#CompletionItem) to be presented
-/// in the editor.
-#[derive(Debug, PartialEq, Clone, Default)]
-pub struct CompletionList {
-    /// This list it not complete. Further typing should result in recomputing
-    /// this list.
-    pub is_incomplete: bool,
-
-    /// The completion items.
-    pub items: Vec<CompletionItem>,
+lsp_struct! {
+    out
+    /// Represents a collection of [completion items](#CompletionItem) to be presented
+    /// in the editor.
+    #[derive(Debug, PartialEq, Clone, Default)]
+    pub struct CompletionList {
+        /// This list it not complete. Further typing should result in recomputing
+        /// this list.
+        required pub is_incomplete: bool = "isIncomplete",
+        required pub items: Vec<CompletionItem> = "items",}
 }
 
-impl_lsp_struct!(out CompletionList,
-    required {
-        is_incomplete: bool = "isIncomplete",
-        items: Vec<CompletionItem> = "items",
-    },
-    optional {}
-);
+lsp_struct! {
+    out
+    #[derive(Debug, PartialEq, Default, Clone)]
+    pub struct CompletionItem {
+        /// The label of this completion item. By default
+        /// also the text that is inserted when selecting
+        /// this completion.
+        required pub label: String = "label",
+        ///
+        /// @since 3.17.0
+        optional pub label_details: CompletionItemLabelDetails = "labelDetails",
+        /// an icon is chosen by the editor.
+        optional pub kind: CompletionItemKind = "kind",
+        /// about this item, like type or symbol information.
+        optional pub detail: String = "detail",
+        /// with other items. When `falsy` the label is used
+        /// as the sort text for this item.
+        optional pub sort_text: String = "sortText",
+        /// completion items. When `falsy` the label is used as the
+        /// filter text for this item.
+        optional pub filter_text: String = "filterText",
+        /// this completion. When `falsy` the label is used as the insert text
+        /// for this item.
+        optional pub insert_text: String = "insertText",
+        /// and the `newText` property of a provided `textEdit`. If omitted defaults to `InsertTextFormat.PlainText`.
+        ///
+        /// @since 3.16.0
+        optional pub insert_text_format: InsertTextFormat = "insertTextFormat",
+        /// selecting this completion. Edits must not overlap with the main edit
+        /// nor with themselves.
+        optional pub additional_text_edits: Vec<TextEdit> = "additionalTextEdits",
+        optional pub command: Command = "command",}
+}
 
-#[derive(Debug, PartialEq, Default, Clone)]
-pub struct CompletionItem {
-    /// The label of this completion item. By default
-    /// also the text that is inserted when selecting
-    /// this completion.
-    pub label: String,
-
-    /// Additional details for the label
+lsp_struct! {
+    out
+    /// Additional details for a completion item label.
     ///
     /// @since 3.17.0
-    pub label_details: Option<CompletionItemLabelDetails>,
-
-    /// The kind of this completion item. Based of the kind
-    /// an icon is chosen by the editor.
-    pub kind: Option<CompletionItemKind>,
-
-    /// A human-readable string with additional information
-    /// about this item, like type or symbol information.
-    pub detail: Option<String>,
-
-    /// A string that should be used when comparing this item
-    /// with other items. When `falsy` the label is used
-    /// as the sort text for this item.
-    pub sort_text: Option<String>,
-
-    /// A string that should be used when filtering a set of
-    /// completion items. When `falsy` the label is used as the
-    /// filter text for this item.
-    pub filter_text: Option<String>,
-
-    /// A string that should be inserted into a document when selecting
-    /// this completion. When `falsy` the label is used as the insert text
-    /// for this item.
-    pub insert_text: Option<String>,
-
-    /// The format of the insert text. The format applies to both the `insertText` property
-    /// and the `newText` property of a provided `textEdit`. If omitted defaults to `InsertTextFormat.PlainText`.
-    ///
-    /// @since 3.16.0
-    pub insert_text_format: Option<InsertTextFormat>,
-
-    /// An optional array of additional text edits that are applied when
-    /// selecting this completion. Edits must not overlap with the main edit
-    /// nor with themselves.
-    pub additional_text_edits: Option<Vec<TextEdit>>,
-
-    /// An optional command that is executed *after* inserting this completion.
-    pub command: Option<Command>,
+    #[derive(Debug, PartialEq, Default, Clone)]
+    pub struct CompletionItemLabelDetails {
+        /// An optional string which is rendered less prominently directly after
+        /// {@link CompletionItemLabel.label label}, without any spacing. Should be
+        /// used for function signatures or type annotations.
+        optional pub detail: String = "detail",
+        /// {@link CompletionItemLabel.detail}. Should be used for fully qualified
+        /// names or file path.
+        optional pub description: String = "description",}
 }
-
-impl_lsp_struct!(out CompletionItem,
-    required { label: String = "label" },
-    optional {
-        label_details: CompletionItemLabelDetails = "labelDetails",
-        kind: CompletionItemKind = "kind",
-        detail: String = "detail",
-        sort_text: String = "sortText",
-        filter_text: String = "filterText",
-        insert_text: String = "insertText",
-        insert_text_format: InsertTextFormat = "insertTextFormat",
-        additional_text_edits: Vec<TextEdit> = "additionalTextEdits",
-        command: Command = "command",
-    }
-);
-
-/// Additional details for a completion item label.
-///
-/// @since 3.17.0
-#[derive(Debug, PartialEq, Default, Clone)]
-pub struct CompletionItemLabelDetails {
-    /// An optional string which is rendered less prominently directly after
-    /// {@link CompletionItemLabel.label label}, without any spacing. Should be
-    /// used for function signatures or type annotations.
-    pub detail: Option<String>,
-
-    /// An optional string which is rendered less prominently after
-    /// {@link CompletionItemLabel.detail}. Should be used for fully qualified
-    /// names or file path.
-    pub description: Option<String>,
-}
-
-impl_lsp_struct!(
-    out CompletionItemLabelDetails,
-    required {},
-    optional {
-        detail: String = "detail",
-        description: String = "description",
-    }
-);

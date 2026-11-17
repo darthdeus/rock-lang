@@ -1,64 +1,38 @@
 use crate::{Location, Range, SymbolKind};
 
-/// Represents programming constructs like variables, classes, interfaces etc.
-/// that appear in a document. Document symbols can be hierarchical and they have two ranges:
-/// one that encloses its definition and one that points to its most interesting range,
-/// e.g. the range of an identifier.
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct DocumentSymbol {
-    pub name: String,
-    pub detail: Option<String>,
-    pub kind: SymbolKind,
-    pub range: Range,
-    pub selection_range: Range,
-    pub children: Option<Vec<DocumentSymbol>>,
+lsp_struct! {
+    out
+    /// Represents programming constructs like variables, classes, interfaces etc.
+    /// that appear in a document. Document symbols can be hierarchical and they have two ranges:
+    /// one that encloses its definition and one that points to its most interesting range,
+    /// e.g. the range of an identifier.
+    #[derive(Debug, Eq, PartialEq, Clone)]
+    pub struct DocumentSymbol {
+        required pub name: String = "name",
+        optional pub detail: String = "detail",
+        required pub kind: SymbolKind = "kind",
+        required pub range: Range = "range",
+        required pub selection_range: Range = "selectionRange",
+        optional pub children: Vec<DocumentSymbol> = "children",}
 }
 
-impl_lsp_struct!(out DocumentSymbol,
-    required {
-        name: String = "name",
-        kind: SymbolKind = "kind",
-        range: Range = "range",
-        selection_range: Range = "selectionRange",
-    },
-    optional {
-        detail: String = "detail",
-        children: Vec<DocumentSymbol> = "children",
-    }
-);
-
-/// Represents information about programming constructs like variables, classes,
-/// interfaces etc.
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct SymbolInformation {
-    pub name: String,
-    pub kind: SymbolKind,
-    pub location: Location,
-    pub container_name: Option<String>,
+lsp_struct! {
+    out
+    /// Represents information about programming constructs like variables, classes,
+    /// interfaces etc.
+    #[derive(Debug, Eq, PartialEq, Clone)]
+    pub struct SymbolInformation {
+        required pub name: String = "name",
+        required pub kind: SymbolKind = "kind",
+        required pub location: Location = "location",
+        optional pub container_name: String = "containerName",}
 }
 
-impl_lsp_struct!(out SymbolInformation,
-    required {
-        name: String = "name",
-        kind: SymbolKind = "kind",
-        location: Location = "location",
-    },
-    optional {
-        container_name: String = "containerName",
-    }
-);
-
-/// The parameters of a Workspace Symbol Request.
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct WorkspaceSymbolParams {
-    /// A non-empty query string
-    pub query: String,
+lsp_struct! {
+    in
+    /// The parameters of a Workspace Symbol Request.
+    #[derive(Debug, Eq, PartialEq, Clone, Default)]
+    pub struct WorkspaceSymbolParams {
+        /// A non-empty query string
+        required pub query: String = "query",}
 }
-
-impl_lsp_struct!(
-    in WorkspaceSymbolParams,
-    required {
-        query: String = "query"
-    },
-    optional {}
-);

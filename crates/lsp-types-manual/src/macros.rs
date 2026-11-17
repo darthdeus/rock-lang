@@ -1,52 +1,59 @@
-/// Generate serde impls for an LSP struct whose fields map to JSON keys.
-///
-/// The leading direction picks the impls: `out` for what the server only
-/// sends (`Serialize`), `in` for what it only reads (`Deserialize`), `both`
-/// for both.
-///
-/// ```ignore
-/// impl_lsp_struct!(out TypeName,
-///     required { field: Type = "jsonKey", ... },
-///     optional { field: Type = "jsonKey", ... }
-/// );
-/// ```
-///
-/// `optional` fields are `Option<Type>`: left out of the JSON when `None`, and
-/// `None` when the key is absent. Unknown keys are ignored on input.
-macro_rules! impl_lsp_struct {
-    (both $T:ident, $($fields:tt)*) => {
-        impl_lsp_struct!(out $T, $($fields)*);
-        impl_lsp_struct!(in $T, $($fields)*);
+/// Declare an LSP struct and its JSON fields together. The direction is from
+/// the server's point of view. Optional fields are omitted when absent.
+macro_rules! lsp_struct {
+    (
+        $direction:ident
+        $(#[$attr:meta])*
+        $vis:vis struct $T:ident {
+            $($(#[$field_attr:meta])* $mode:ident $fv:vis $f:ident: $ty:ty = $key:literal),* $(,)?
+        }
+    ) => {
+        $(#[$attr])*
+        $vis struct $T {
+            $($(#[$field_attr])* $fv $f: lsp_struct!(@type $mode $ty),)*
+        }
+        lsp_struct!(@impl $direction $T { $($mode $f: $ty = $key),* });
     };
 
-    (
-        out $T:ident,
-        required { $( $rf:ident : $rt:ty = $rk:literal ),* $(,)? },
-        optional { $( $of:ident : $ot:ty = $ok:literal ),* $(,)? }
-    ) => {
+    (@type required $ty:ty) => { $ty };
+    (@type optional $ty:ty) => { Option<$ty> };
+
+    (@impl both $T:ident { $($fields:tt)* }) => {
+        lsp_struct!(@impl out $T { $($fields)* });
+        lsp_struct!(@impl in $T { $($fields)* });
+    };
+
+    (@impl out $T:ident { $($mode:ident $f:ident: $ty:ty = $key:literal),* }) => {
         #[allow(deprecated)]
         impl serde::Serialize for $T {
             fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
                 use serde::ser::SerializeStruct;
-                let hint: usize = 0 $( + { let _: &str = $rk; 1 } )* $( + { let _: &str = $ok; 1 } )*;
+                let hint: usize = 0 $( + { let _: &str = $key; 1 } )*;
                 #[allow(unused_mut)]
                 let mut st = s.serialize_struct(stringify!($T), hint)?;
-                $( st.serialize_field($rk, &self.$rf)?; )*
-                $( if let Some(ref v) = self.$of { st.serialize_field($ok, v)?; } )*
+                $(lsp_struct!(@write_required $mode st self $f $key);)*
+                $(lsp_struct!(@write_optional $mode st self $f $key);)*
                 st.end()
             }
         }
     };
 
-    (
-        in $T:ident,
-        required { $( $rf:ident : $rt:ty = $rk:literal ),* $(,)? },
-        optional { $( $of:ident : $ot:ty = $ok:literal ),* $(,)? }
-    ) => {
+    (@write_required required $st:ident $self:ident $f:ident $key:literal) => {
+        $st.serialize_field($key, &$self.$f)?
+    };
+    (@write_required optional $($unused:tt)*) => {};
+    (@write_optional required $($unused:tt)*) => {};
+    (@write_optional optional $st:ident $self:ident $f:ident $key:literal) => {
+        if let Some(ref value) = $self.$f {
+            $st.serialize_field($key, value)?;
+        }
+    };
+
+    (@impl in $T:ident { $($mode:ident $f:ident: $ty:ty = $key:literal),* }) => {
         impl<'de> serde::Deserialize<'de> for $T {
             fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-                struct __Visitor;
-                impl<'de> serde::de::Visitor<'de> for __Visitor {
+                struct Visitor;
+                impl<'de> serde::de::Visitor<'de> for Visitor {
                     type Value = $T;
                     fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                         write!(f, concat!("struct ", stringify!($T)))
@@ -55,25 +62,27 @@ macro_rules! impl_lsp_struct {
                         self,
                         mut map: A,
                     ) -> Result<$T, A::Error> {
-                        $( let mut $rf: Option<$rt> = None; )*
-                        $( let mut $of: Option<$ot> = None; )*
+                        $(let mut $f: Option<$ty> = None;)*
                         while let Some(key) = map.next_key::<String>()? {
                             match key.as_str() {
-                                $( $rk => { $rf = Some(map.next_value()?); } )*
-                                $( $ok => { $of = map.next_value()?; } )*
+                                $($key => $f = lsp_struct!(@read $mode map),)*
                                 _ => { let _ = map.next_value::<serde::de::IgnoredAny>()?; }
                             }
                         }
                         Ok($T {
-                            $( $rf: $rf.ok_or_else(|| serde::de::Error::missing_field($rk))?, )*
-                            $( $of, )*
+                            $($f: lsp_struct!(@finish $mode $f $key),)*
                         })
                     }
                 }
-                d.deserialize_map(__Visitor)
+                d.deserialize_map(Visitor)
             }
         }
     };
+
+    (@read required $map:ident) => { Some($map.next_value()?) };
+    (@read optional $map:ident) => { $map.next_value()? };
+    (@finish required $f:ident $key:literal) => { $f.ok_or_else(|| serde::de::Error::missing_field($key))? };
+    (@finish optional $f:ident $key:literal) => { $f };
 }
 
 /// Generate `Serialize` for an untagged enum whose variants each wrap one

@@ -1,28 +1,18 @@
 use crate::Position;
 
-/// Inlay hint information.
-///
-/// @since 3.17.0
-#[derive(Debug, Clone)]
-pub struct InlayHint {
-    pub position: Position,
-    pub label: InlayHintLabel,
-    pub kind: Option<InlayHintKind>,
-    pub padding_left: Option<bool>,
-    pub padding_right: Option<bool>,
+lsp_struct! {
+    out
+    /// Inlay hint information.
+    ///
+    /// @since 3.17.0
+    #[derive(Debug, Clone)]
+    pub struct InlayHint {
+        required pub position: Position = "position",
+        required pub label: InlayHintLabel = "label",
+        optional pub kind: InlayHintKind = "kind",
+        optional pub padding_left: bool = "paddingLeft",
+        optional pub padding_right: bool = "paddingRight",}
 }
-
-impl_lsp_struct!(out InlayHint,
-    required {
-        position: Position = "position",
-        label: InlayHintLabel = "label",
-    },
-    optional {
-        kind: InlayHintKind = "kind",
-        padding_left: bool = "paddingLeft",
-        padding_right: bool = "paddingRight",
-    }
-);
 
 #[derive(Debug, Clone)]
 pub enum InlayHintLabel {
@@ -32,20 +22,14 @@ pub enum InlayHintLabel {
 
 impl_untagged_enum!(InlayHintLabel { LabelParts, String });
 
-/// An inlay hint label part allows for interactive and composite labels
-/// of inlay hints.
-#[derive(Debug, Clone, Default)]
-pub struct InlayHintLabelPart {
-    pub value: String,
+lsp_struct! {
+    out
+    /// An inlay hint label part allows for interactive and composite labels
+    /// of inlay hints.
+    #[derive(Debug, Clone, Default)]
+    pub struct InlayHintLabelPart {
+        required pub value: String = "value",}
 }
-
-impl_lsp_struct!(
-    out InlayHintLabelPart,
-    required {
-        value: String = "value"
-    },
-    optional {}
-);
 
 /// Inlay hint kinds.
 ///

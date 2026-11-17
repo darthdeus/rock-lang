@@ -80,23 +80,15 @@ impl SemanticTokenModifier {
     }
 }
 
-/// @since 3.16.0
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct SemanticTokensLegend {
-    /// The token types a server uses.
-    pub token_types: Vec<SemanticTokenType>,
-
-    /// The token modifiers a server uses.
-    pub token_modifiers: Vec<SemanticTokenModifier>,
+lsp_struct! {
+    out
+    /// @since 3.16.0
+    #[derive(Debug, Eq, PartialEq, Clone, Default)]
+    pub struct SemanticTokensLegend {
+        /// The token types a server uses.
+        required pub token_types: Vec<SemanticTokenType> = "tokenTypes",
+        required pub token_modifiers: Vec<SemanticTokenModifier> = "tokenModifiers",}
 }
-
-impl_lsp_struct!(out SemanticTokensLegend,
-    required {
-        token_types: Vec<SemanticTokenType> = "tokenTypes",
-        token_modifiers: Vec<SemanticTokenModifier> = "tokenModifiers",
-    },
-    optional {}
-);
 
 /// The actual tokens.
 #[derive(Debug, Eq, PartialEq, Copy, Clone, Default)]
@@ -182,37 +174,24 @@ impl_untagged_enum!(SemanticTokensFullDeltaResult {
     TokensDelta
 });
 
-/// @since 3.16.0
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct SemanticTokensDelta {
-    pub result_id: Option<String>,
-    /// For a detailed description how these edits are structured please see
-    /// <https://github.com/microsoft/vscode-extension-samples/blob/5ae1f7787122812dcc84e37427ca90af5ee09f14/semantic-tokens-sample/vscode.proposed.d.ts#L131>
-    pub edits: Vec<SemanticTokensEdit>,
+lsp_struct! {
+    out
+    /// @since 3.16.0
+    #[derive(Debug, Eq, PartialEq, Clone, Default)]
+    pub struct SemanticTokensDelta {
+        optional pub result_id: String = "resultId",
+        /// <https://github.com/microsoft/vscode-extension-samples/blob/5ae1f7787122812dcc84e37427ca90af5ee09f14/semantic-tokens-sample/vscode.proposed.d.ts#L131>
+        required pub edits: Vec<SemanticTokensEdit> = "edits",}
 }
 
-impl_lsp_struct!(out SemanticTokensDelta,
-    required { edits: Vec<SemanticTokensEdit> = "edits" },
-    optional { result_id: String = "resultId" }
-);
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct SemanticTokensDeltaParams {
-    /// The text document.
-    pub text_document: TextDocumentIdentifier,
-
-    /// The result id of a previous response.
-    pub previous_result_id: String,
+lsp_struct! {
+    in
+    #[derive(Debug, Eq, PartialEq, Clone)]
+    pub struct SemanticTokensDeltaParams {
+        /// The text document.
+        required pub text_document: TextDocumentIdentifier = "textDocument",
+        required pub previous_result_id: String = "previousResultId",}
 }
-
-impl_lsp_struct!(
-    in SemanticTokensDeltaParams,
-    required {
-        text_document: TextDocumentIdentifier = "textDocument",
-        previous_result_id: String = "previousResultId",
-    },
-    optional {}
-);
 
 #[cfg(test)]
 mod tests {
