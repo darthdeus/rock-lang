@@ -85,82 +85,63 @@ fn validate_one(
         }
         comp_error!(anno.span, "unknown annotation `@{name}`");
     }
-    match name.as_str() {
-        "deprecated" => {
-            at(anno, pos, AnnoPos::FnItem)?;
-            if anno.args.len() > 1
-                || anno
-                    .args
-                    .iter()
-                    .any(|arg| arg.name.is_some() || !matches!(arg.value, AnnoValue::String(_)))
-            {
-                comp_error!(
-                    anno.span,
-                    "`@deprecated` takes an optional replacement message string"
-                );
-            }
-            Ok(())
+    use AnnoPos::*;
+    let args = anno.args.as_slice();
+    let positional = |len, value_matches: fn(&AnnoValue) -> bool| {
+        args.len() == len
+            && args
+                .iter()
+                .all(|arg| arg.name.is_none() && value_matches(&arg.value))
+    };
+    let string = |value: &AnnoValue| matches!(value, AnnoValue::String(_));
+    let nonempty_string =
+        |value: &AnnoValue| matches!(value, AnnoValue::String(name) if !name.is_empty());
+    let ident = |value: &AnnoValue| matches!(value, AnnoValue::Ident(_));
+    let check = |allowed, valid: bool, message: &str| {
+        at(anno, pos, allowed)?;
+        if !valid {
+            comp_error!(anno.span, "{message}");
         }
+        Ok(())
+    };
+    let no_args_at = |allowed| {
+        at(anno, pos, allowed)?;
+        no_args(anno)
+    };
+    match name.as_str() {
+        "deprecated" => check(
+            FnItem,
+            args.is_empty() || positional(1, string),
+            "`@deprecated` takes an optional replacement message string",
+        ),
         "test" => {
-            at(anno, pos, AnnoPos::FnItem)?;
+            at(anno, pos, FnItem)?;
             test_args(anno)
         }
-        "json_omit_if" => {
-            at(anno, pos, AnnoPos::StructField)?;
-            if anno.args.len() != 1
-                || anno.args[0].name.is_some()
-                || !matches!(&anno.args[0].value, AnnoValue::Ident(_))
-            {
-                comp_error!(
-                    anno.span,
-                    "`@json_omit_if` requires one predicate function name"
-                );
-            }
-            Ok(())
-        }
-        "json_default" | "json_skip" => {
-            at(anno, pos, AnnoPos::StructField)?;
-            no_args(anno)
-        }
-        "json_name" => {
-            at(anno, pos, AnnoPos::StructField)?;
-            if anno.args.len() != 1
-                || anno.args[0].name.is_some()
-                || !matches!(&anno.args[0].value, AnnoValue::String(name) if !name.is_empty())
-            {
-                comp_error!(
-                    anno.span,
-                    "`@json_name` requires one nonempty string argument"
-                );
-            }
-            Ok(())
-        }
-        // The author asserts callee(receiver, args) is equivalent to
-        // tail(prepare(receiver), args). Lowering proves only that arguments
-        // can safely be constructed after prepare.
-        "preflight" => {
-            at(anno, pos, AnnoPos::FnItem)?;
-            if anno.args.len() != 2
-                || anno.args.iter().any(|arg| {
-                    arg.name.is_some()
-                        || !matches!(&arg.value, AnnoValue::String(name) if !name.is_empty())
-                })
-            {
-                comp_error!(
-                    anno.span,
-                    "`@preflight` requires prepare and tail function name strings"
-                );
-            }
-            Ok(())
-        }
+        "json_omit_if" => check(
+            StructField,
+            positional(1, ident),
+            "`@json_omit_if` requires one predicate function name",
+        ),
+        "json_name" => check(
+            StructField,
+            positional(1, nonempty_string),
+            "`@json_name` requires one nonempty string argument",
+        ),
+        // The author asserts equivalence to tail(prepare(receiver), args).
+        // Lowering only checks whether args can be constructed after prepare.
+        "preflight" => check(
+            FnItem,
+            positional(2, nonempty_string),
+            "`@preflight` requires prepare and tail function name strings",
+        ),
         "nomangle" => {
-            match pos {
-                AnnoPos::FnItem | AnnoPos::StructItem => {}
-                _ => comp_error!(
+            if !matches!(pos, FnItem | StructItem) {
+                comp_error!(
                     anno.span,
                     "annotation `@nomangle` is not allowed on {} -- it applies to a fn or a struct",
                     pos.describe()
-                ),
+                );
             }
             no_args(anno)
         }
@@ -169,40 +150,18 @@ fn validate_one(
         | "relocates" | "struct_expand" | "shader_expand" | "vertex_expand" | "uniform_expand"
         | "build_var_expand" | "embed_expand" | "uniform_values" | "scene_type_key"
         | "materialize" | "sort_key_wide" | "sort_key_lt" | "gpu_only" | "scalar_abi"
-        | "inline" | "sim" | "sim_entry" | "sim_render" | "shadow_root" => {
-            at(anno, pos, AnnoPos::FnItem)?;
-            no_args(anno)
-        }
-        // `@returns_index_below("<param>[.field]*")`: the result is below the
-        // live length of the vector that place holds when the call returns.
-        "returns_index_below" => {
-            at(anno, pos, AnnoPos::FnItem)?;
-            let ok = anno.args.len() == 1
-                && anno.args[0].name.is_none()
-                && matches!(anno.args[0].value, AnnoValue::String(_));
-            if !ok {
-                comp_error!(
-                    anno.span,
-                    "`@returns_index_below` takes one string: a parameter name, optionally followed by `.field`s"
-                );
-            }
-            Ok(())
-        }
-        "sim_env" => {
-            at(anno, pos, AnnoPos::FnItem)?;
-            let ok = anno.args.len() == 2
-                && anno
-                    .args
-                    .iter()
-                    .all(|a| a.name.is_none() && matches!(a.value, AnnoValue::String(_)));
-            if !ok {
-                comp_error!(
-                    anno.span,
-                    "`@sim_env` takes exactly two string arguments: @sim_env(\"KEY\", \"VALUE\")"
-                );
-            }
-            Ok(())
-        }
+        | "inline" | "sim" | "sim_entry" | "sim_render" | "shadow_root" => no_args_at(FnItem),
+        // The result is below the place's live length at return.
+        "returns_index_below" => check(
+            FnItem,
+            positional(1, string),
+            "`@returns_index_below` takes one string: a parameter name, optionally followed by `.field`s",
+        ),
+        "sim_env" => check(
+            FnItem,
+            positional(2, string),
+            "`@sim_env` takes exactly two string arguments: @sim_env(\"KEY\", \"VALUE\")",
+        ),
         "state" => comp_error!(
             anno.span,
             "`@state` was removed; delete it: globals have no ownership/world/realization metadata"
@@ -211,188 +170,104 @@ fn validate_one(
             anno.span,
             "`@host_resource` was removed; delete it: type declarations no longer carry host-projection metadata"
         ),
-        "shader" => {
-            at(anno, pos, AnnoPos::FnItem)?;
-            let ok = anno.args.len() == 1
-                && anno.args[0].name.is_none()
-                && matches!(&anno.args[0].value, AnnoValue::Ident(id) if matches!(id.name.as_str(), "vertex" | "fragment"));
-            if !ok {
-                comp_error!(anno.span, "shader stage must be vertex or fragment");
-            }
-            Ok(())
-        }
-        "allow" => {
-            at(anno, pos, AnnoPos::FnItem)?;
-            let ok = match anno.args.as_slice() {
-                [l] => l.name.is_none() && matches!(l.value, AnnoValue::Ident(_)),
-                [l, j] => {
-                    l.name.is_none()
-                        && matches!(l.value, AnnoValue::Ident(_))
-                        && j.name.is_none()
-                        && matches!(j.value, AnnoValue::String(_))
-                }
-                _ => false,
-            };
-            if !ok {
-                comp_error!(
-                    anno.span,
-                    "`@allow` takes a lint name and an optional justification string: @allow(long_inline_lua, \"why\")"
-                );
-            }
-            Ok(())
-        }
-        "consume" => {
-            at(anno, pos, AnnoPos::StructItem)?;
-            no_args(anno)
-        }
-        "size" => {
-            at(anno, pos, AnnoPos::Param)?;
-            let ok = anno.args.len() == 1
-                && anno.args[0].name.is_none()
-                && matches!(anno.args[0].value, AnnoValue::Int(_));
-            if !ok {
-                comp_error!(
-                    anno.span,
-                    "`@size` takes exactly one int argument: @size(32)"
-                );
-            }
-            Ok(())
-        }
-        // The callee strips the nullable off this argument (`unwrap`,
-        // `expect`, `unwrap_or`), so a non-nullable argument is a redundant
-        // call, rejected like `??` on a non-nullable.
-        "instance" | "unwraps" => {
-            at(anno, pos, AnnoPos::Param)?;
-            no_args(anno)
-        }
-        // The parameter-level REPRESENTATION contract.
-        // `opaque` states that the body
-        // makes no assumption about this parameter's physical form, so the
-        // column-container rejection skips it. It names a KIND rather than
-        // being nullary because the same slot is where a future `boxed` /
-        // `columns` contract belongs; an unrecognized kind rejects rather than
-        // reading as "some contract is in force".
-        //
-        // Whether the fn is an opaque boundary at all is checked where the
-        // param is built (`bone-lower`), which has the fn in hand; this table
-        // sees the annotation alone.
-        "repr" => {
-            at(anno, pos, AnnoPos::Param)?;
-            let kind = match &anno.args[..] {
-                [a] if a.name.is_none() => match &a.value {
-                    AnnoValue::Ident(k) => Some(k.name),
-                    _ => None,
+        "shader" => check(
+            FnItem,
+            positional(
+                1,
+                |value| matches!(value, AnnoValue::Ident(id) if matches!(id.name.as_str(), "vertex" | "fragment")),
+            ),
+            "shader stage must be vertex or fragment",
+        ),
+        "allow" => check(
+            FnItem,
+            args.first()
+                .is_some_and(|a| a.name.is_none() && ident(&a.value))
+                && match args {
+                    [_] => true,
+                    [_, a] => a.name.is_none() && string(&a.value),
+                    _ => false,
                 },
-                _ => None,
-            };
-            match kind {
-                Some(k) if k.as_str() == "opaque" => Ok(()),
-                Some(k) => comp_error!(
-                    anno.span,
-                    "unknown `@repr` kind `{k}` -- the only kind is `opaque`"
-                ),
-                None => comp_error!(
-                    anno.span,
-                    "`@repr` takes exactly one bare kind identifier: @repr(opaque)"
-                ),
-            }
-        }
-        // GLSL entry input roles: the value-struct param they
-        // mark is per-vertex attribute data (`@attr`) or a uniform block
-        // (`@uniform`). `@instance` is the per-instance attribute divisor.
-        // `@textures` groups sampler params into one struct so the texture unit
-        // is compiler-assigned by field order, not hand-numbered at the bind
-        // site where two entries can silently share a number. `@engine` is the
-        // engine-owned frame/pass block at binding 0 -- a separate ROLE from
-        // `@uniform` because it differs in producer and lifetime, not in layout.
-        "attr" | "uniform" | "textures" | "engine" => {
-            at(anno, pos, AnnoPos::Param)?;
-            no_args(anno)
-        }
-        "flat" | "identity_storage" => {
-            at(anno, pos, AnnoPos::StructField)?;
-            no_args(anno)
-        }
-        "lifecycle" => {
-            at(anno, pos, AnnoPos::DecoItem)?;
-            const KEYS: &[&str] = &["phase", "owner", "stage_param"];
-            for arg in &anno.args {
-                let Some(key) = arg.name.as_ref() else {
-                    comp_error!(
+            "`@allow` takes a lint name and an optional justification string: @allow(long_inline_lua, \"why\")",
+        ),
+        "size" => check(
+            Param,
+            positional(1, |value| matches!(value, AnnoValue::Int(_))),
+            "`@size` takes exactly one int argument: @size(32)",
+        ),
+        "consume" => no_args_at(StructItem),
+        "instance" | "unwraps" | "attr" | "uniform" | "textures" | "engine" => no_args_at(Param),
+        "json_default" | "json_skip" | "flat" | "identity_storage" => no_args_at(StructField),
+        // Opaque boundaries make no assumption about the parameter's representation.
+        "repr" => {
+            at(anno, pos, Param)?;
+            match args {
+                [arg] if arg.name.is_none() => match &arg.value {
+                    AnnoValue::Ident(k) if k.name.as_str() == "opaque" => return Ok(()),
+                    AnnoValue::Ident(k) => comp_error!(
                         anno.span,
-                        "`@lifecycle` arguments must be named: phase=, owner=, stage_param="
-                    );
-                };
-                if !KEYS.contains(&key.name.as_str()) || !matches!(arg.value, AnnoValue::String(_))
-                {
-                    comp_error!(
-                        anno.span,
-                        "`@lifecycle` accepts string arguments phase=, owner=, optional stage_param="
-                    );
-                }
+                        "unknown `@repr` kind `{}` -- the only kind is `opaque`",
+                        k.name
+                    ),
+                    _ => {}
+                },
+                _ => {}
             }
-            let has = |name: &str| {
-                anno.args
-                    .iter()
-                    .any(|a| a.name.as_ref().is_some_and(|n| n.name.as_str() == name))
-            };
-            if !has("phase") || !has("owner") {
-                comp_error!(anno.span, "`@lifecycle` requires phase= and owner=");
-            }
-            Ok(())
+            comp_error!(
+                anno.span,
+                "`@repr` takes exactly one bare kind identifier: @repr(opaque)"
+            );
         }
-        "artifact_definition" => {
-            at(anno, pos, AnnoPos::DecoItem)?;
-            const KEYS: &[&str] = &["catalog", "key_param"];
-            for arg in &anno.args {
-                let Some(key) = arg.name.as_ref() else {
-                    comp_error!(
-                        anno.span,
-                        "`@artifact_definition` arguments must be named: catalog=, key_param="
-                    );
-                };
-                if !KEYS.contains(&key.name.as_str()) || !matches!(arg.value, AnnoValue::String(_))
-                {
-                    comp_error!(
-                        anno.span,
-                        "`@artifact_definition` accepts string arguments catalog= and key_param="
-                    );
-                }
-            }
-            let has = |name: &str| {
-                anno.args
-                    .iter()
-                    .any(|a| a.name.as_ref().is_some_and(|n| n.name.as_str() == name))
-            };
-            if !has("catalog") || !has("key_param") {
-                comp_error!(
-                    anno.span,
-                    "`@artifact_definition` requires catalog= and key_param="
-                );
-            }
-            Ok(())
+        "lifecycle" | "artifact_definition" => {
+            at(anno, pos, DecoItem)?;
+            validate_decorator_args(anno)
         }
-        "artifact_catalog" => {
-            at(anno, pos, AnnoPos::FnItem)?;
-            if anno.args.len() != 1
-                || anno.args[0]
-                    .name
-                    .as_ref()
-                    .is_none_or(|name| name.name.as_str() != "catalog")
-                || !matches!(anno.args[0].value, AnnoValue::String(_))
-            {
-                comp_error!(
-                    anno.span,
-                    "`@artifact_catalog` requires one named string argument: catalog="
-                );
-            }
-            Ok(())
-        }
-        _ if deco_names.contains(&name) => at(anno, pos, AnnoPos::FnItem),
-        _ => {
-            comp_error!(anno.span, "unknown annotation `@{name}`");
+        "artifact_catalog" => check(
+            FnItem,
+            matches!(args, [a] if a.name.as_ref().is_some_and(|n| n.name.as_str() == "catalog") && string(&a.value)),
+            "`@artifact_catalog` requires one named string argument: catalog=",
+        ),
+        _ if deco_names.contains(&name) => at(anno, pos, FnItem),
+        _ => comp_error!(anno.span, "unknown annotation `@{name}`"),
+    }
+}
+
+fn validate_decorator_args(anno: &Annotation) -> Result<(), CompilerError> {
+    let (required, optional, unnamed, invalid, missing) = if anno.is_builtin("lifecycle") {
+        (
+            ["phase", "owner"],
+            Some("stage_param"),
+            "`@lifecycle` arguments must be named: phase=, owner=, stage_param=",
+            "`@lifecycle` accepts string arguments phase=, owner=, optional stage_param=",
+            "`@lifecycle` requires phase= and owner=",
+        )
+    } else {
+        (
+            ["catalog", "key_param"],
+            None,
+            "`@artifact_definition` arguments must be named: catalog=, key_param=",
+            "`@artifact_definition` accepts string arguments catalog= and key_param=",
+            "`@artifact_definition` requires catalog= and key_param=",
+        )
+    };
+    for arg in &anno.args {
+        let Some(key) = &arg.name else {
+            comp_error!(anno.span, "{unnamed}");
+        };
+        let key = key.name.as_str();
+        if !(Some(key) == optional || required.contains(&key))
+            || !matches!(arg.value, AnnoValue::String(_))
+        {
+            comp_error!(anno.span, "{invalid}");
         }
     }
+    if !required.into_iter().all(|key| {
+        anno.args
+            .iter()
+            .any(|a| a.name.as_ref().is_some_and(|n| n.name.as_str() == key))
+    }) {
+        comp_error!(anno.span, "{missing}");
+    }
+    Ok(())
 }
 
 /// `@repr(opaque)` waives a rule that exists ONLY for bodies the compiler
