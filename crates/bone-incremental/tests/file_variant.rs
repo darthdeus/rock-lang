@@ -10,9 +10,7 @@ use bone_semantic::prelude::*;
 
 use crate::common;
 
-fn files(list: &[(&str, &str)]) -> Vec<SessionFile> {
-    list.iter().map(|(p, t)| common::v1(p, t)).collect()
-}
+use common::files;
 
 fn fixture() -> Vec<SessionFile> {
     files(&[

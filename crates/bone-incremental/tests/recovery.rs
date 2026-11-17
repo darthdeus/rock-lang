@@ -7,7 +7,7 @@
 //! body under a failed scrutinee is still analyzed. Session-side cascade and
 //! convergence across files: `incremental.rs`.
 
-use bone_incremental::session::Session;
+use crate::common;
 use bone_semantic::prelude::*;
 
 fn check(src: &str) -> (Workspace, ModuleId) {
@@ -52,12 +52,8 @@ fn workspace_diags(ws: &Workspace) -> Vec<String> {
         .collect()
 }
 
-fn session() -> Session {
-    Session::new(vec![], vec![], &bone_core::modules::NsAliases::default()).expect("session")
-}
-
 fn session_diags(src: &str) -> Vec<String> {
-    let mut s = session();
+    let mut s = common::session(&[]);
     let _ = s.update_file("c.rock", src);
     s.diagnostics().iter().map(|e| e.message.clone()).collect()
 }
@@ -157,7 +153,7 @@ fn recovered_errors_commit_and_clear_on_fix() {
         ),
     ];
     for (broken, fixed) in cases {
-        let mut s = session();
+        let mut s = common::session(&[]);
         let _ = s.update_file("c.rock", broken);
         assert!(!s.diagnostics().is_empty(), "the error surfaces: {broken}");
         let mid = s.workspace().module_ids[&Ustr::from("c.rock")];

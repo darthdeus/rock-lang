@@ -60,3 +60,13 @@ pub fn in_package(
 pub fn v1(path: &str, text: &str) -> bone_incremental::session::SessionFile {
     in_package(1, PACKAGE, path, text)
 }
+
+/// Single-package fixtures share the same package facts on every parse.
+pub fn files(list: &[(&str, &str)]) -> Vec<bone_incremental::session::SessionFile> {
+    list.iter().map(|(path, text)| v1(path, text)).collect()
+}
+
+pub fn session(list: &[(&str, &str)]) -> bone_incremental::Session {
+    bone_incremental::Session::new(vec![], files(list), &Default::default())
+        .expect("session builds")
+}

@@ -32,9 +32,7 @@ fn warm_prelude() -> skull_parser::Ast {
 
 type Files = Vec<bone_incremental::session::SessionFile>;
 
-fn files(list: &[(&str, &str)]) -> Files {
-    list.iter().map(|(p, t)| common::v1(p, t)).collect()
-}
+use common::files;
 
 /// True if `mid` is a warm stdlib module. With an opaque id, stdlib-ness is
 /// read off the module's file, not the id.
