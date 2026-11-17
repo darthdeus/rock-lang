@@ -107,260 +107,100 @@ impl<'de> serde::Deserialize<'de> for RequestId {
     }
 }
 
-// --- Request ---
-
-#[derive(Debug, Clone)]
-pub struct Request {
-    pub id: RequestId,
-    pub method: String,
-    pub params: serde_json::Value,
-}
-
-impl serde::Serialize for Request {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let n = if self.params.is_null() { 2 } else { 3 };
-        let mut m = s.serialize_map(Some(n))?;
-        m.serialize_entry("id", &self.id)?;
-        m.serialize_entry("method", &self.method)?;
-        if !self.params.is_null() {
-            m.serialize_entry("params", &self.params)?;
+// Accept absent or null params and omit them on output. An explicit null
+// response result, on the other hand, is a valid successful response.
+macro_rules! message_fields {
+    ($name:ident { $($mode:ident $field:ident: $ty:ty),* $(,)? }) => {
+        #[derive(Debug, Clone)]
+        pub struct $name {
+            $(pub $field: message_fields!(@type $mode $ty),)*
         }
-        m.end()
-    }
-}
-impl<'de> serde::Deserialize<'de> for Request {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Vis;
-        impl<'de> serde::de::Visitor<'de> for Vis {
-            type Value = Request;
-            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                write!(f, "struct Request")
+
+        impl serde::Serialize for $name {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::SerializeMap;
+                $(let $field = message_fields!(@value $mode self.$field);)*
+                let n = 0 $(+ usize::from($field.is_some()))*;
+                let mut map = s.serialize_map(Some(n))?;
+                $(if let Some(value) = $field {
+                    map.serialize_entry(stringify!($field), value)?;
+                })*
+                map.end()
             }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<Request, A::Error> {
-                let mut id: Option<RequestId> = None;
-                let mut method: Option<String> = None;
-                let mut params = serde_json::Value::Null;
-                while let Some(key) = map.next_key::<String>()? {
-                    match key.as_str() {
-                        "id" => {
-                            id = Some(map.next_value()?);
+        }
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                struct Visitor;
+                impl<'de> serde::de::Visitor<'de> for Visitor {
+                    type Value = $name;
+                    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                        write!(f, concat!("struct ", stringify!($name)))
+                    }
+                    fn visit_map<A: serde::de::MapAccess<'de>>(
+                        self,
+                        mut map: A,
+                    ) -> Result<Self::Value, A::Error> {
+                        $(let mut $field: Option<$ty> = None;)*
+                        while let Some(key) = map.next_key::<String>()? {
+                            match key.as_str() {
+                                $(stringify!($field) => $field = message_fields!(@read $mode map),)*
+                                _ => { let _ = map.next_value::<serde_json::Value>()?; }
+                            }
                         }
-                        "method" => {
-                            method = Some(map.next_value()?);
-                        }
-                        "params" => {
-                            params = map.next_value()?;
-                        }
-                        _ => {
-                            let _ = map.next_value::<serde_json::Value>()?;
-                        }
+                        Ok($name {
+                            $($field: message_fields!(@finish $mode $field),)*
+                        })
                     }
                 }
-                Ok(Request {
-                    id: id.ok_or_else(|| serde::de::Error::missing_field("id"))?,
-                    method: method.ok_or_else(|| serde::de::Error::missing_field("method"))?,
-                    params,
-                })
+                d.deserialize_map(Visitor)
             }
         }
-        d.deserialize_map(Vis)
+    };
+    (@type required $ty:ty) => { $ty };
+    (@type params $ty:ty) => { $ty };
+    (@type optional $ty:ty) => { Option<$ty> };
+    (@value required $value:expr) => { Some(&$value) };
+    (@value params $value:expr) => { (!$value.is_null()).then_some(&$value) };
+    (@value optional $value:expr) => { $value.as_ref() };
+    (@read required $map:ident) => { Some($map.next_value()?) };
+    (@read params $map:ident) => { Some($map.next_value()?) };
+    (@read optional $map:ident) => { $map.next_value()? };
+    (@finish required $field:ident) => {
+        $field.ok_or_else(|| serde::de::Error::missing_field(stringify!($field)))?
+    };
+    (@finish params $field:ident) => { $field.unwrap_or(serde_json::Value::Null) };
+    (@finish optional $field:ident) => { $field };
+}
+
+message_fields! {
+    Request {
+        required id: RequestId,
+        required method: String,
+        params params: serde_json::Value,
     }
 }
 
-// --- ResponseError ---
-
-#[derive(Debug, Clone)]
-pub struct ResponseError {
-    pub code: i32,
-    pub message: String,
-    pub data: Option<serde_json::Value>,
-}
-
-impl serde::Serialize for ResponseError {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let n = if self.data.is_some() { 3 } else { 2 };
-        let mut m = s.serialize_map(Some(n))?;
-        m.serialize_entry("code", &self.code)?;
-        m.serialize_entry("message", &self.message)?;
-        if let Some(ref d) = self.data {
-            m.serialize_entry("data", d)?;
-        }
-        m.end()
-    }
-}
-impl<'de> serde::Deserialize<'de> for ResponseError {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Vis;
-        impl<'de> serde::de::Visitor<'de> for Vis {
-            type Value = ResponseError;
-            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                write!(f, "struct ResponseError")
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<ResponseError, A::Error> {
-                let mut code: Option<i32> = None;
-                let mut message: Option<String> = None;
-                let mut data: Option<serde_json::Value> = None;
-                while let Some(key) = map.next_key::<String>()? {
-                    match key.as_str() {
-                        "code" => {
-                            code = Some(map.next_value()?);
-                        }
-                        "message" => {
-                            message = Some(map.next_value()?);
-                        }
-                        "data" => {
-                            data = map.next_value()?;
-                        }
-                        _ => {
-                            let _ = map.next_value::<serde_json::Value>()?;
-                        }
-                    }
-                }
-                Ok(ResponseError {
-                    code: code.ok_or_else(|| serde::de::Error::missing_field("code"))?,
-                    message: message.ok_or_else(|| serde::de::Error::missing_field("message"))?,
-                    data,
-                })
-            }
-        }
-        d.deserialize_map(Vis)
+message_fields! {
+    ResponseError {
+        required code: i32,
+        required message: String,
+        optional data: serde_json::Value,
     }
 }
 
-// --- Response ---
-
-#[derive(Debug, Clone)]
-pub struct Response {
-    pub id: RequestId,
-    pub result: Option<serde_json::Value>,
-    pub error: Option<ResponseError>,
-}
-
-impl serde::Serialize for Response {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let mut n = 1;
-        if self.result.is_some() {
-            n += 1;
-        }
-        if self.error.is_some() {
-            n += 1;
-        }
-        let mut m = s.serialize_map(Some(n))?;
-        m.serialize_entry("id", &self.id)?;
-        if let Some(ref r) = self.result {
-            m.serialize_entry("result", r)?;
-        }
-        if let Some(ref e) = self.error {
-            m.serialize_entry("error", e)?;
-        }
-        m.end()
-    }
-}
-impl<'de> serde::Deserialize<'de> for Response {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Vis;
-        impl<'de> serde::de::Visitor<'de> for Vis {
-            type Value = Response;
-            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                write!(f, "struct Response")
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<Response, A::Error> {
-                let mut id: Option<RequestId> = None;
-                let mut result: Option<serde_json::Value> = None;
-                let mut error: Option<ResponseError> = None;
-                while let Some(key) = map.next_key::<String>()? {
-                    match key.as_str() {
-                        "id" => {
-                            id = Some(map.next_value()?);
-                        }
-                        "result" => {
-                            result = map.next_value()?;
-                        }
-                        "error" => {
-                            error = map.next_value()?;
-                        }
-                        _ => {
-                            let _ = map.next_value::<serde_json::Value>()?;
-                        }
-                    }
-                }
-                Ok(Response {
-                    id: id.ok_or_else(|| serde::de::Error::missing_field("id"))?,
-                    result,
-                    error,
-                })
-            }
-        }
-        d.deserialize_map(Vis)
+message_fields! {
+    Response {
+        required id: RequestId,
+        optional result: serde_json::Value,
+        optional error: ResponseError,
     }
 }
 
-// --- Notification ---
-
-#[derive(Debug, Clone)]
-pub struct Notification {
-    pub method: String,
-    pub params: serde_json::Value,
-}
-
-impl serde::Serialize for Notification {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeMap;
-        let n = if self.params.is_null() { 1 } else { 2 };
-        let mut m = s.serialize_map(Some(n))?;
-        m.serialize_entry("method", &self.method)?;
-        if !self.params.is_null() {
-            m.serialize_entry("params", &self.params)?;
-        }
-        m.end()
-    }
-}
-impl<'de> serde::Deserialize<'de> for Notification {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        struct Vis;
-        impl<'de> serde::de::Visitor<'de> for Vis {
-            type Value = Notification;
-            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                write!(f, "struct Notification")
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<Notification, A::Error> {
-                let mut method: Option<String> = None;
-                let mut params = serde_json::Value::Null;
-                while let Some(key) = map.next_key::<String>()? {
-                    match key.as_str() {
-                        "method" => {
-                            method = Some(map.next_value()?);
-                        }
-                        "params" => {
-                            params = map.next_value()?;
-                        }
-                        _ => {
-                            let _ = map.next_value::<serde_json::Value>()?;
-                        }
-                    }
-                }
-                Ok(Notification {
-                    method: method.ok_or_else(|| serde::de::Error::missing_field("method"))?,
-                    params,
-                })
-            }
-        }
-        d.deserialize_map(Vis)
+message_fields! {
+    Notification {
+        required method: String,
+        params params: serde_json::Value,
     }
 }
 
