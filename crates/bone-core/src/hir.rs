@@ -695,25 +695,22 @@ impl Body {
 
     /// Every binding a pattern introduces, in source order.
     pub fn pattern_bindings(&self, p: Idx<Pattern>) -> Vec<Idx<BindingInfo>> {
+        use crate::hir_walk::HirChild;
+
         let mut out = Vec::new();
-
-        fn go(body: &Body, p: Idx<Pattern>, out: &mut Vec<Idx<BindingInfo>>) {
-            match body.pattern_arena[p] {
-                Pattern::Bind(b) => out.push(b),
-                Pattern::Wildcard | Pattern::Literal(_) | Pattern::Range { .. } => {}
-                Pattern::EnumVariant { sub, .. } => sub.into_iter().for_each(|s| go(body, s, out)),
-                Pattern::Newtype { sub, .. } => go(body, sub, out),
-                Pattern::Record { fields, .. } => fields
-                    .into_iter()
-                    .for_each(|f| go(body, body.record_pat_field_arena[f].pat, out)),
-                Pattern::Tuple { elements }
-                | Pattern::Or {
-                    alternatives: elements,
-                } => elements.into_iter().for_each(|s| go(body, s, out)),
+        let mut collect = |node| {
+            let HirChild::Pattern(p) = node else {
+                return false;
+            };
+            if let Pattern::Bind(binding) = self.pattern_arena[p] {
+                out.push(binding);
             }
-        }
+            true
+        };
+        let root = HirChild::Pattern(p);
+        collect(root);
+        self.walk_descendants(root, &mut collect);
 
-        go(self, p, &mut out);
         out
     }
 }
