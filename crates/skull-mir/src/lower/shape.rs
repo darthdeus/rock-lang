@@ -1,12 +1,6 @@
-//! Static analysis of value- and enum-struct REPRESENTATION over a `Workspace`:
-//! leaf shapes and their C layout, column eligibility, the specialization key and
-//! its reified types, return/bound-`next` shapes, and the GC-vs-cdata-vs-leaf-table
-//! tier decisions every emitter consults.
-//!
-//! Nothing here builds MIR. It answers "what does this type look like", which is
-//! why four other crates depend on it: the physical value-storage plan is shared
-//! by the ABI planner, pack sites and backend scaffolding, so the write and read
-//! encodings cannot diverge.
+//! Workspace-level analysis of value and enum representations. It supplies the
+//! shared shapes, storage classifications, and C layouts used by lowering and
+//! backend scaffolding; it does not build MIR.
 
 use super::*;
 
@@ -96,15 +90,8 @@ pub(crate) fn dense_flat_enum_vec_eligible(ws: &Workspace, name: Ustr) -> bool {
         })
 }
 
-/// The column KEYS of `shape`, presence first when the element type is nullable.
-///
-/// This is [`value_leaf_paths`] plus the one key that has no path of its own: a
-/// TOP-LEVEL nullable shape's presence leaf is not addressable as `v.<field>`,
-/// so `value_leaf_paths` deliberately omits it while `leaf_count` counts it.
-/// Column storage is the one consumer that must NAME it -- it needs a table key
-/// per leaf -- and it names it here rather than in `leaf_paths_rec`, whose
-/// result the global/reflection accessors read positionally against that same
-/// omission.
+/// Column keys for `shape`, with nullable presence first. A top-level presence
+/// leaf has no field path, so this adds the key omitted by [`value_leaf_paths`].
 pub(crate) fn column_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
     let paths = value_leaf_paths(shape);
     if !shape.nullable {
@@ -140,13 +127,8 @@ pub fn value_leaf_presence_flags(shape: &ValueShape) -> Vec<bool> {
     out
 }
 
-/// THE leaf traversal: every primitive leaf of `shape` in declaration order,
-/// each named by joining its ancestor field names with `sep` under `prefix`.
-/// `sep = "."` yields the column keys / dotted source paths, `sep = "__"` the
-/// Lua leaf-param names -- one walk so the two encodings can never disagree on
-/// WHICH leaves exist or in what order (`repr_to_leaves`/`leaf_count` are the
-/// third and fourth consumers of that order). A leaf's identity is its position;
-/// only the spelling is per-caller.
+/// Leaf paths in declaration order, joined from ancestor field names with
+/// `sep`. The separator selects dotted storage paths or Lua parameter names.
 pub(crate) fn leaf_names(shape: &ValueShape, prefix: &str, sep: &str) -> Vec<String> {
     let mut out = Vec::new();
     for_each_leaf(shape, &mut prefix.to_owned(), sep, &mut |path, _| {
@@ -173,28 +155,16 @@ fn for_each_leaf(
     sep: &str,
     visit: &mut impl FnMut(&str, bool),
 ) {
-    // A NULLABLE nested shape leads with its presence leaf, matching
-    // `repr_to_leaves` (which pushes presence before the fields) and `leaf_count`
-    // (which counts it). Its key is the field's own name with no child appended
-    // -- injective against its own children under `.` (`a` vs `a.x`), which is
-    // the convention embed storage already uses for a nullable child. Without it
-    // the column set is one short of `leaf_count` and a `[Outer]` literal fails
-    // with a column arity mismatch, and the Lua params drift one short of what
-    // `repr_to_leaves` splats.
-    //
-    // Only the NESTED case: a top-level nullable shape has no field name to key
-    // on, and no column path reaches one today (a column element is
-    // non-nullable), so that case is deliberately left as it was.
+    // Nested nullable presence uses the field's own path, before its children;
+    // this matches the leaf order and remains distinct from child paths (for
+    // example, `a` and `a.x`). A top-level shape has no field path to key.
     if shape.nullable && !path.is_empty() {
         visit(path, true);
     }
     let prefix = path.len();
     for (fname, fs) in &shape.fields {
-        // The field name must JOIN its ancestors. Recursing with the prefix
-        // unchanged made the Lua namer non-injective -- `Rect { tl: V2, br: V2 }`
-        // emitted `f(r__x, r__y, r__x, r__y)`, and Lua binds the later pair over
-        // the earlier, so a hand-written body silently read `br` where it wrote
-        // `tl`.
+        // Join each field to its ancestors so paths and Lua parameter names
+        // stay unique for repeated nested value types.
         if prefix != 0 {
             path.push_str(sep);
         }
@@ -260,17 +230,7 @@ pub struct LeafAddr {
     pub offset: i64,
 }
 
-/// The leaf addressing plan for FFI-clean value struct `elem`: one [`LeafAddr`]
-/// per leaf, in [`value_leaf_paths`] order (the order reprs are flattened in).
-///
-/// The unit conversions are exact by construction: `sizeof(elem)` is a multiple
-/// of `elem`'s alignment, which is the max leaf size, and every leaf size is a
-/// power of two no larger than that; a leaf's own byte offset is a multiple of
-/// its size because C aligns each member. Both divisions are checked anyway --
-/// an inexact one would silently address the wrong element.
-/// The C type a leaf VIEW field carries -- the inverse of [`leaf_view_field`].
-/// The JS emitter needs it to pick the TypedArray and to know a `bool` view
-/// stores 0/1 where the language wants `true`/`false`.
+/// C type represented by a leaf-view buffer field.
 pub fn leaf_view_cty(field: &str) -> Option<&'static str> {
     LEAF_VIEWS
         .iter()
@@ -296,16 +256,8 @@ pub const NB_PRIM_ELEMS: &[(&str, usize)] = &[
     ("int16_t", 2),
 ];
 
-/// One `_G.__ROCK_NB_STORAGE` registration: `__rock_nb_storage(<ctype>, <byte
-/// width>, { <view field> = "<cast type>", ... })`.
-///
-/// THE compiler-owned description of concrete buffer storage. A consumer that
-/// holds a storage cdata asks the registry what its bytes mean -- element ctype,
-/// element width, and the exact leaf views minted over it -- instead of guessing
-/// from a `__ty` string or re-deriving a layout. The element widths and the view
-/// set come from the same oracles the emitter itself uses
-/// ([`NB_PRIM_ELEMS`], the owned `RepPlan` C layout, [`LEAF_VIEWS`]), so a
-/// registry entry cannot describe a layout the emitter does not produce.
+/// One runtime registration describing a buffer element's C type, width, and
+/// leaf views. These facts come from the same layout plans used by the emitter.
 fn nb_storage_call(ctype: &str, size: usize, views: &[&str]) -> String {
     let views: Vec<String> = views
         .iter()
@@ -380,27 +332,10 @@ pub(crate) fn c_prim_size_align(cty: &str) -> Option<(usize, usize)> {
     }
 }
 
-/// The C layout of FFI-clean value struct `name`: every primitive leaf with its
-/// byte offset, plus the struct's own `(size, align)`.
-///
-/// Standard C rules, matching what LuaJIT computes for the emitted typedef: each
-/// member is padded up to its own alignment, the struct's alignment is the max
-/// of its members', and its size is rounded up to that. The agreement is NOT
-/// taken on trust -- `value_leaf_layout_matches_luajit` cross-checks every
-/// offset against `ffi.offsetof` at run time, because a divergence here is
-/// silent memory corruption rather than a failure.
-///
-/// PRIVATE on purpose: the raw walker is the bypass this module exists to
-/// prevent. Its traversal mirrors the planned field tree arm for arm so the leaf
-/// ORDER matches [`value_leaf_paths`], but that is two separate walkers staying
-/// in step, NOT something this function enforces. Leaves are matched to offsets
-/// POSITIONALLY, so if they drift, every runtime `ffi.offsetof` assertion still
-/// passes (each path/offset pair is self-consistent) while repr leaves are
-/// written to the wrong addresses.
-///
-/// `RepArena::nominal_leaf_layout` is the only public way out of this module,
-/// and it rejects on drift. Keep the raw walker private so a future lowering
-/// cannot reach around the representation plan.
+/// C layout of an FFI-clean value struct: primitive leaves with byte offsets,
+/// plus total size and alignment. The runtime `ffi.offsetof` check validates
+/// the offsets. Keep this walker private; its positional leaf order must match
+/// [`value_leaf_paths`], or values can be written to the wrong addresses.
 pub(crate) fn value_leaf_layout(
     ws: &Workspace,
     name: Ustr,
@@ -733,17 +668,8 @@ pub(crate) fn planned_value(ws: &Workspace, name: Ustr) -> Option<Rc<PlannedValu
     )
 }
 
-/// Per-thread memo of the declaration plans ([`planned_value`],
-/// [`EnumPlan::for_name`]) a body's lowering keeps asking for: a large
-/// project's bodies request the same few thousand names hundreds of
-/// thousands of times, and each answer walks the declaration tree afresh.
-///
-/// The memo is valid for one build, identified by the representation
-/// arena's generation (the plans it caches are the ones that arena's own
-/// plans are derived from, so they share its lifetime: a definition edit
-/// rebuilds with a fresh arena). It serves only while a
-/// [`ShapeMemoScope`] is active, so a caller outside lowering computes
-/// directly.
+/// Per-thread memo of declaration plans, scoped to a representation arena
+/// generation. Outside an active [`ShapeMemoScope`], plans are computed directly.
 #[derive(Default)]
 struct ShapeMemo {
     arena_gen: u64,
@@ -937,15 +863,9 @@ pub(crate) fn payload_free_ordinal(ws: &Workspace, name: Ustr, variant: Ustr) ->
         .map(|p| p as i64)
 }
 
-/// Whether a box a pack mints is the ordinary implicit one or the box
-/// `materialize(v)` asked for. The two RENDER identically; only the `nobox`
-/// guarantee distinguishes them, and it does so through the instruction the
-/// ctor lands in. Carried through the whole tree, so the nested boxes an
-/// explicit box has to build to exist are authorized with it.
-///
-/// This is the mint-time half of the authorization; `authorize_nobox_box` is the
-/// after-the-fact half, for a boundary (`@gpu_only`) whose arguments are already
-/// lowered by the time the compiler decides to sanction their box.
+/// Whether packing is implicit or explicitly requested by `materialize(v)`.
+/// The kind tags every nested constructor; `authorize_nobox_box` handles boxes
+/// sanctioned later at boundaries such as `@gpu_only`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BoxKind {
     Implicit,
@@ -1109,17 +1029,9 @@ pub fn gc_free_value_struct_field_order(ws: &Workspace, name: Ustr) -> Option<Ve
         .map(|_| struct_field_names(ws, name))
 }
 
-/// The scalar-ABI shape of a GC-CARRYING value struct:
-/// every declared field is ONE leaf -- a `Prim` for a scalar, generic `T`,
-/// array/arena/map, or string (a single boxed slot), or `Nested` for a nested
-/// value struct / cdata enum field (which threads its own leaves). Uniform
-/// per-field slotting: the field COUNT is fixed by the declaration, so a generic
-/// `T` field is one slot regardless of the instantiation -- one classification,
-/// one slot shape. `None` unless `name` is a GC-carrying value struct.
-///
-/// Materialization uses the table `<Name>_vt` ctor (chosen at the pack site by
-/// tier), never `<Name>_ct`; the leaf threading is repr-agnostic (`pack` builds
-/// an `Inst::MakeValueStruct` that codegen renders per tier).
+/// Scalar-ABI shape for a GC-carrying value struct. Each declared field is one
+/// slot, including generic `T`; nested value structs and cdata enums thread
+/// their leaves. Materialization uses the tier-selected `<Name>_vt` constructor.
 pub(crate) fn value_shape_gc(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
     planned_value(ws, name)?.gc_shape.clone()
 }
@@ -1228,16 +1140,9 @@ pub(crate) fn vertex_expand_arg_msg(fname: Ustr) -> String {
     )
 }
 
-/// [`crate::gpu_layout::uniform_block`] with the two-walker agreement enforced:
-/// the plan's leaf-path sequence must equal [`value_leaf_paths`] over the same
-/// type. The std140 side derives its members from field TYPES (matching `Vec2`
-/// and `Mat4` by nominal name), the value side flattens the struct into leaves,
-/// and the packer binds one to the other BY POSITION -- so a reordered vector or
-/// matrix keeps every count equal while writing each leaf to the wrong offset.
-///
-/// The exact twin of the owned RepPlan C-layout projection for the uniform context, and
-/// `Err` for the same reason: a type that reached a packing site and cannot be
-/// walked consistently is an invariant failure, not a case to skip past.
+/// Build a std140 plan only when its leaf paths match the value shape's order.
+/// A mismatch can write equal-count leaves to the wrong offsets, so it is an
+/// invariant error rather than a reason to skip this plan.
 pub fn uniform_block_checked(
     ws: &Workspace,
     name: Ustr,
@@ -1540,17 +1445,8 @@ pub(crate) fn is_nobox_nominal(ws: &Workspace, name: Ustr) -> bool {
         .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox)
 }
 
-/// Everything the reflection accessor for a `nobox` global decides, answered
-/// from the SAME oracles the emitter uses rather than from the leaf paths'
-/// punctuation.
-///
-/// The two questions used to be read off the path list: "is any path a proper
-/// PREFIX of another" for the presence leaf, and "does any path contain a dot"
-/// for the ctor suffix. Both are proxies, and a `nobox` child with NO data
-/// leaves defeats both -- it contributes exactly one leaf under its own name
-/// with nothing below it, so the sequence is flat and undotted while a presence
-/// tag is right there and the type is leaf-table. That is the same shape
-/// `tests/nobox/zero_leaf_child.rock` pins for the Lua ctor site.
+/// Reflection-accessor facts for a `nobox` global, derived from the shared
+/// storage and presence plans rather than path spelling.
 pub struct NoboxGlobalAccessorShape {
     pub ty_name: Ustr,
     pub paths: Vec<Ustr>,
@@ -1776,27 +1672,15 @@ pub(crate) fn ret_slot_can_fill(actual: &RetSlot, expected: &RetSlot) -> bool {
     }
 }
 
-/// Per-element wire shape of a tuple RETURN under the multi-return ABI.
-///
-/// Only a `nobox` element splats. An unmarked value struct keeps its single
-/// boxed slot: marking a type is the one thing that re-shapes a return, which
-/// is what lets an `@scalar_abi inline(lua)` body hand-write a `(bool, Vec2)`
-/// return without the compiler moving the wire underneath it.
-///
-/// The shape is derived from the return TYPE alone -- no callee identity -- so a
-/// direct call, an indirect call through a fn value and the definition all
-/// agree by construction, exactly as the plain multi-return arity does.
+/// Per-element wire shape for a tuple return. Only `nobox` elements splat;
+/// ordinary values remain boxed. The return type alone determines this shape,
+/// so direct calls, function values, and definitions agree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TupleRetShape {
     pub(crate) slots: Vec<RetSlot>,
-    /// The DECLARED return was `(..)?`: a presence bool leads the wire, then the
-    /// slots (`false, nil, ...` when absent). Same presence-leads convention as
-    /// `ValueShape::nullable` one level down.
-    ///
-    /// Only ever set from a declared return type, never inferred from an
-    /// expression's type: safe-nav manufactures the identical
-    /// `Nullable(Tuple)` with NO presence slot, so keying on nullability there
-    /// would add a phantom slot and corrupt every safe-nav tuple call.
+    /// A declared nullable tuple adds a presence bool before its slots. This is
+    /// set only from the return declaration: safe-nav's `Nullable(Tuple)` has
+    /// no call-wire presence slot.
     pub(crate) nullable: bool,
 }
 
@@ -1813,37 +1697,18 @@ impl TupleRetShape {
     }
 }
 
-/// What a concrete `next` actually returns at a splice site, for the placeholder
-/// `CallBoundMulti` whose arity bound conformance fixes at `(bool, E)`.
-///
-/// `slot_count` is the real returned-value count and `elem` names the element's
-/// value struct plus its leaf FIELDS in ctor order when the element splats. The
-/// splice sizes its dests from the former and repacks the element from the
-/// latter; see `resolve_cloned_bound_calls`.
-///
-/// Read only where the LOWERING could not resolve the element itself: a body
-/// specialized at a value element splits `E` into leaf cells there
-/// (`MirFunc::bound_next_split`) and this only CHECKS the two agree. What is
-/// left is a generic bound to a TUPLE: it reifies and is in the key like any
-/// other type, but its children live in the concrete plan rather than a source
-/// type arena, so the rebuild below owns that shape directly.
-///
-/// The three cases are kept DISTINCT on purpose: "nothing to repack" and "a shape
-/// the flat repack cannot express" must not collapse into one `None`, or an
-/// unsupported element silently takes the do-nothing path and miscompiles.
+/// Concrete `(bool, E)` return shape for a bounded `next` splice. The slot
+/// count sizes the call destinations; the element plan rebuilds `E` when its
+/// shape is available. Keep opaque, rebuildable, and unsupported cases distinct
+/// so an unrepresentable element cannot take the no-op path.
 pub enum BoundNextElem {
     /// Today's ABI -- one opaque slot. Nothing to do.
     Opaque,
     /// The element splats; the plan says how to put it back together.
     Rebuild(ElemRebuild),
-    /// Splats through a shape the repack cannot express (a nullable value, whose
-    /// presence leaf has no field to pair with). The splice REJECTS on this rather
-    /// than guess a leaf-to-field pairing -- a wrong pairing writes one leaf's
-    /// value into another field, silently.
-    ///
-    /// Reached only when the lowering left the element opaque, which for a
-    /// nullable value now means a TUPLE element (`zip`'s pair): its concrete
-    /// tuple shape is carried by the binding plan rather than a source node.
+    /// The element splats, but its shape cannot be represented by the flat
+    /// repack (for example, a nullable value has a presence leaf with no field).
+    /// The splice rejects this instead of guessing a leaf-to-field mapping.
     Unsupported,
 }
 
@@ -1989,17 +1854,10 @@ pub fn bound_next_shape_from_concrete(
     })
 }
 
-/// Cdata enum shape: an enum whose every variant is `Unit` or a positional TUPLE
-/// of scalars (int/float/bool) becomes a `value`-struct-style cdata
-/// `{ int32 __tag; <T0> _0; <T1> _1; ... }` -- reusing the whole value-struct
-/// machinery (C-layout, byte-hashable, value `==`, scalar ABI, SROA, value-struct
-/// field). Slots are SHARED positionally across variants (lean): slot `i` exists
-/// iff some variant has an `i`th payload field, and its type must be IDENTICAL
-/// across every variant that has it (a per-position type conflict -> not eligible,
-/// table+SROA). A variant with fewer fields pads the unused slots. Reflection is
-/// sacrificed (no `{__variant}` table).
-/// Record / ref payloads are NOT yet eligible (cut 2b+). Payload-free enums are
-/// plain ints (increment 1), not this.
+/// Cdata layout for enums with only unit or scalar tuple variants. Payload slots
+/// are shared by position and require identical C types across variants; shorter
+/// variants pad unused slots. Record/ref payloads are ineligible, and payload-
+/// free enums remain plain integers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnumCdataShape {
     pub name: Ustr,
@@ -2190,15 +2048,9 @@ pub(crate) fn value_storage_is_gc_guarded(ws: &Workspace, name: Ustr) -> bool {
     planned_value(ws, name).is_some_and(|plan| plan.storage != ValueStorage::CData)
 }
 
-/// The flatten shape of an enum that boxes today and is eligible to be inlined
-/// into a parent struct's Lua table. Eligible iff
-/// the enum has payload variants (not payload-free -> those are plain ints), is NOT
-/// cdata-eligible (those scalarize via `EnumCdataShape`), and every payload variant
-/// is `Unit` or `Tuple` (record payloads keep boxing for now). Closure / string /
-/// ref payloads are fine -- the slots are dynamically-typed Lua fields. The
-/// discriminant is the variant NAME (a string, mirroring the boxed `__variant`), so
-/// flattened slots are a direct spread of the box's keys; box <-> slot conversion is
-/// a field copy with no name<->ordinal table.
+/// Flattened Lua table layout for a boxed enum with payload variants that is not
+/// cdata-eligible. Unit and tuple payloads are supported; slots use dynamic Lua
+/// values and the variant name remains the discriminant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnumFlatShape {
     pub(crate) name: Ustr,

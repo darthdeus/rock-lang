@@ -1,24 +1,7 @@
-//! **The semantic dispatch a conditionally-synthesized call comes from.**
+//! Shared type-directed routes for interpolation and structural equality.
 //!
-//! Two source constructs lower to a call on SOME of their arms and to no call
-//! at all on the others: an interpolation hole (`"{x}"`) and structural
-//! equality (`a == b`). Which arm is taken is a type decision, and the callee
-//! -- `__rock_format_float`, `inspect`, `__op_eq`, `__op_ne` -- exists only on
-//! that arm.
-//!
-//! A name-keyed trigger table cannot express either one: the source expression
-//! is an `Expr::Interp` or an `Expr::Binary`, and it names no callee. So the
-//! instance walk has to ask the same question lowering asks -- and asking it by
-//! restating lowering's `match` walk-side is the restatement-of-a-pass trap
-//! this repo has already paid for twice. [`DispatchCtx`] is the shared answer:
-//! ONE resolution context and ONE route per construct, built here, CONSUMED by
-//! `Builder` to pick its arm and by `skull::instance_graph` to record the
-//! obligation.
-//!
-//! The context holds exactly what a dispatch decision reads -- the workspace,
-//! one body's inference and expression arena, and the substitution the instance
-//! is lowered under. `Builder` delegates every predicate below to it rather
-//! than keeping a second copy, so there is no second answer to diverge.
+//! Lowering consumes each route to choose an arm; the instance graph consumes
+//! its call obligations. [`DispatchCtx`] supplies the same type context to both.
 
 use bone_core::hir::{BinOp, Body, BuiltinTy, Expr, InterpSpec, TyId, TypeCtor, TypeExpr};
 use bone_core::prelude::Idx;
@@ -29,13 +12,9 @@ use super::{EnumPlan, RepArena, RepGuarantees, RepUse, RepUseFacts, shape::is_pa
 use crate::concrete::{ConcreteBodyPlan, ConcreteTypeTables};
 use crate::monoty::MonoSubst;
 
-/// The resolution context a lowering DISPATCH decision reads.
-///
-/// `values_first_class` is the GLSL representation flag (`ScalarCtx`): under it
-/// nothing is nobox, because a `value` struct IS a first-class `vecN`. The
-/// target-neutral instance walk passes `false`, which is not a target choice it
-/// is making -- GLSL lowers neither interpolation nor structural equality, so
-/// no route below is reachable with the flag set.
+/// Type and representation context for route decisions. The graph walk uses a
+/// target-neutral context and sets `values_first_class` to false; GLSL cannot
+/// reach these routes. Concrete lowering supplies its backend and plans.
 #[derive(Clone, Copy)]
 pub struct DispatchCtx<'a> {
     pub ws: &'a Workspace,
@@ -53,10 +32,7 @@ pub struct DispatchCtx<'a> {
     pub values_first_class: bool,
 }
 
-/// What a `{x}` interpolation hole's default (spec-free) render lowers to.
-///
-/// [`Self::obligations`] is the whole point: it is the ONE answer to "does
-/// this hole synthesize calls, and to what".
+/// Default route for rendering an interpolation hole.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum StringifyRoute {
     /// `tostring(v)` -- int, bool, string, and a literal `null` hole.
@@ -111,14 +87,7 @@ impl StringifyRoute {
     }
 }
 
-/// What `a == b` / `a != b` lowers to.
-///
-/// Deliberately NOT a model of every arm lowering takes. The arms above the
-/// structural decision -- a null-literal side, a nobox pair, a flat enum tag --
-/// differ in REPRESENTATION, not in which callee exists, and each returns
-/// before the decision this enum names. Enumerating them here would put arms in
-/// lowering's `match` that no input can reach, which is exactly the
-/// no-population gate `CLAUDE.md` warns about.
+/// Whether equality uses primitive instructions or the structural helper.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EqRoute {
     /// Primitive `==` / `~=` on already-lowered operands.
@@ -141,27 +110,9 @@ impl EqRoute {
     }
 }
 
-/// The declarations a conditionally-synthesized call to `name` can resolve to.
-///
-/// These calls name a BARE SYMBOL: lowering writes `__op_eq`, not a mangled
-/// spelling, so the declaration it reaches is the one whose EMITTED SYMBOL is
-/// that name. Nothing else distinguishes them -- `__op_eq` has six declarations
-/// in `stdlib/unified.rock`: the `@nomangle` structural helper at :743 and five
-/// `@pure @inline operator(lua) ==` overloads, which MIR turns into typed
-/// primitive ops and never emits as calls.
-///
-/// Selecting by parse order (what `resolve_op_helper` did) reached the right
-/// one only because the structural helper is declared first, and its comment's
-/// claim that the six share one body was false -- three of them take `int`,
-/// `float` and `string`. Selecting by the mangler is the property that makes a
-/// declaration callable by this name at all.
-///
-/// Resolution is TARGET-NEUTRAL. The instance walk resolves this set with
-/// [`dispatched_callee_decl`]; lowering consumes its concrete call plan.
-/// A helper declared only
-/// `inline(lua)` is still the callee a JS body names -- the JS emitter supplies
-/// its own rendering through `js_supply` -- so filtering by the serving backend
-/// here rejects a program the backend can emit.
+/// Declarations callable by the bare emitted symbol `name`. Resolution is
+/// target-neutral: backend selection happens when the concrete call plan is
+/// built, and JS may supply a body for an `inline(lua)` declaration.
 pub fn dispatched_callee_decls(ws: &Workspace, name: &str) -> Vec<crate::mir::FuncRef> {
     let mut resolved = Vec::new();
     for (key, decls) in &ws.functions_by_name {
@@ -200,12 +151,8 @@ pub enum StructuralRender {
     Plain(StringifyRoute),
 }
 
-/// The helper CALLS a `{x:spec}` hole makes, plus the flags that decide them.
-///
-/// Lowering RENDERS this plan and the instance walk reads its
-/// [`Self::obligations`]. Built once, in one place: a second derivation of
-/// "which helper does this spec call" is free to be weaker, and silently would
-/// be -- the printf rendering below it is a dozen interacting flags.
+/// Helper calls and formatting choices for one format spec. Lowering renders
+/// the plan; the instance graph reads [`Self::obligations`].
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct FormatPlan {
     /// The conversion letter implied by the value's type when the spec omits
@@ -230,11 +177,8 @@ pub struct FormatPlan {
 }
 
 impl FormatPlan {
-    /// Every stdlib entry this plan calls, in lowering's emission order.
-    ///
-    /// The structural branch pads UNCONDITIONALLY -- `pad_to_width` with no
-    /// width is a no-op on the string, not a skipped call -- so the pad
-    /// obligation is present there whatever the spec says.
+    /// Stdlib calls in lowering order. Structural rendering always calls pad;
+    /// no width makes padding a runtime no-op, not an omitted call.
     pub fn obligations(&self) -> Vec<(Vec<u32>, &'static str)> {
         let mut out: Vec<(Vec<u32>, &'static str)> = Vec::new();
         match &self.structural {
@@ -432,16 +376,8 @@ impl<'a> DispatchCtx<'a> {
         self.is_nobox_struct(name).then_some(name)
     }
 
-    /// Whether `name` declares a `value` struct (any storage tier -- cdata,
-    /// GC-carrying table, or leaf table). Every tier gets an unconditionally
-    /// emitted per-type `__eq` (`value_struct_metatypes` for cdata,
-    /// `value_struct_gc_defs` for the GC-carrying and leaf-table tiers in
-    /// `skull/src/lib.rs`), so a bare `a == b` on two same-named `value`
-    /// operands already invokes exactly that metamethod -- native `==` is not
-    /// a weaker answer than the structural walk here, it IS the walk's own
-    /// authority for this case (`stdlib/unified.rock`'s `__op_eq` comment:
-    /// "cdata value structs ... hit the primitive `==` fast path", and its
-    /// GC-carrying branch documents the per-type metatable as authoritative).
+    /// Whether `name` is a `value` struct. Lua/C equality reaches its per-type
+    /// `__eq` directly; JS uses the structural equality helper.
     pub fn is_value_struct(&self, name: Ustr) -> bool {
         crate::lower::shape::is_value_struct(self.ws, name)
     }
@@ -882,12 +818,8 @@ impl<'a> DispatchCtx<'a> {
         }
     }
 
-    /// The route `lhs == rhs` / `lhs != rhs` takes.
-    ///
-    /// A null-literal side and a matched nobox pair are answered `Primitive`
-    /// here for the same reason lowering returns early on them: neither can
-    /// reach the structural helper. Stating it means the walk needs no
-    /// knowledge of the order lowering tests them in.
+    /// Whether the equality call site needs the structural helper. Null tests
+    /// and same-type `nobox` comparisons are handled as primitive operations.
     pub fn eq_route(&self, lhs: Idx<Expr>, rhs: Idx<Expr>) -> EqRoute {
         if self.is_null_lit(lhs) || self.is_null_lit(rhs) {
             return EqRoute::Primitive;

@@ -1126,11 +1126,9 @@ impl<'a> Builder<'a> {
             let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Bool(string_keys))));
             return self.value_bundle_for_expr(e, value);
         }
-        // `native_buffer_alloc<T>(n)` intrinsic: allocate a flat ffi array of the
-        // concrete element type and wrap it in a `NativeBuffer`. Resolving the
-        // ctype here (not in a generic inline(lua) body) is the whole point -- it
-        // gives value-struct-typed NativeBuffers a boilerplate-free ctor. Non-value
-        // / GC / opaque-generic elements reject spanned.
+        // Resolve the concrete element C type here so value-struct
+        // NativeBuffers need no handwritten constructor. Unsupported element
+        // types reject at the call span.
         if let Callee::Unresolved { name, .. } = callee {
             if name.as_str() == "native_buffer_alloc" {
                 let [n_arg] = arg_idxs[..] else {
@@ -2417,9 +2415,9 @@ impl<'a> Builder<'a> {
                 };
                 Ok(self.materialize_flat_cells(&shape, cells))
             }
-            // Packing does not inspect presence: nil-sensitive consumers branch
-            // before packing, while ordinary nullable boxes must become nil when
-            // absent. Branching here would also hide the ctor from SROA.
+            // Ordinary nullable boxes preserve absence as nil. `nobox` groups
+            // bypass this path so nil-sensitive consumers handle their presence
+            // explicitly and SROA can still see the constructor.
             ValueRepr::Group {
                 name,
                 parts,
@@ -2511,9 +2509,8 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// Pack a value for a consumer that must observe absence as `nil`. This
-    /// branches only at the escaping slot; general packing leaves presence to
-    /// consumers so SROA can still forward the ctor.
+    /// Preserve absence as `nil` for a boxed consumer. Ordinary nullable boxes
+    /// take this path in `pack`; nullable `nobox` groups require it explicitly.
     pub(crate) fn pack_maybe_absent(&mut self, r: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
         self.pack_maybe_absent_boxed(r, BoxKind::Implicit)
     }

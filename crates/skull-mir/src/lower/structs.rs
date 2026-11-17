@@ -238,20 +238,10 @@ impl<'a> Builder<'a> {
         super::shape::is_value_struct(self.ws, name)
     }
 
-    /// Whether `e` denotes a mutable PLACE -- storage a later write can reach
-    /// through, so a whole-value read out of it must copy. A value local/param is
-    /// NOT one, nor is a value-call result; without that exclusion every
-    /// uniform-struct field read would rebuild its value. A field write on a
-    /// value binding is a borrow of it ([`Self::binding_ref_borrowed`]), which
-    /// keeps its box from being lent.
-    ///
-    /// Sibling, NOT a duplicate: bone's `value_field_write_is_place`
-    /// (`bone-inference/src/fields.rs`) decides whether a write TARGET is legal
-    /// storage. This decides whether a later write can reach a value being READ,
-    /// so it stops at the first container/global (`vlocal.buf[i]` is shared
-    /// storage even though the chain starts at a value binding) where bone walks
-    /// to the root. A reference-returning call can expose shared storage;
-    /// only value-call results are fresh temporaries.
+    /// Whether a later write can reach storage read by `e`, so a whole-value
+    /// read needs a copy. Value locals and value-call results are fresh; chains
+    /// stop at shared containers/globals. This read-side question is separate
+    /// from bone's write-target legality check.
     pub(crate) fn is_mutable_place(&self, e: Idx<Expr>) -> Result<bool, CompilerError> {
         match &self.body.expr_arena[e] {
             Expr::Global(_) | Expr::Index { .. } => Ok(true),
@@ -291,15 +281,8 @@ impl<'a> Builder<'a> {
         None
     }
 
-    /// The value-struct type of a NULLABLE whole-value read out of a mutable place
-    /// -- a field, a global, a container element. The copy is required exactly as
-    /// it is for the non-nullable twin (`value_struct_of(e).filter(|_|
-    /// is_mutable_place(base))`); presence is the only difference, and it is
-    /// supplied by `nullable_boxed_value_copy`.
-    ///
-    /// A `nobox` global is excluded: its leaves ARE the storage, so the read is
-    /// already a snapshot and there is no box to copy out of. So is a read whose
-    /// only consumer is a nil test ([`Builder::presence_only`]).
+    /// Nullable value type read from a mutable place. `nobox` globals are
+    /// already leaf snapshots, and presence-only reads need no value copy.
     pub(crate) fn nullable_place_value_of(
         &self,
         e: Idx<Expr>,
@@ -340,12 +323,8 @@ impl<'a> Builder<'a> {
         None
     }
 
-    /// The value-struct type of `e`, a read of plain binding `b` whose cell holds
-    /// one box: a parameter, a `let` of a value that crossed a call as ONE box
-    /// (wider than the ABI cut, or an opaque fn-value call), or a `let` of a
-    /// ctor that SROA did not scalarize. That box may be shared with the caller,
-    /// callee or closure it came from, so a whole-value use must copy it
-    /// (tests/values/boxed_whole_use_copies.rock, tests/values/alias_escape_paths.rock).
+    /// The value-struct type of a plain binding whose cell holds one box. It may
+    /// be shared with a caller, callee, or closure, so whole-value reads copy it.
     pub(crate) fn boxed_value_local(&self, b: Idx<BindingInfo>, e: Idx<Expr>) -> Option<Ustr> {
         if self.scx.values_first_class
             || !self.binds.contains_key(&raw(b))
@@ -497,15 +476,9 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Whether binding `b`'s bone type is a NON-nullable value struct -- the one
-    /// license for SROA to rematerialize an escaping load of its cell (item 8).
-    /// Only a bare value-struct `App` qualifies; unsolved inference / non-value
-    /// types return false (conservative).
-    ///
-    /// Nullability is asked through [`Self::is_nullable_ty`] and NOT off the
-    /// resolved node. The concrete slot is checked before structural source
-    /// lookup, so a generic bound to `BV2?` cannot be mistaken for a bare `BV2`
-    /// and license SROA to rebuild an absent row as `BV2_ct(nil, nil)`.
+    /// Whether a binding is a non-nullable value struct, which permits SROA to
+    /// rematerialize its cell load. Check concrete nullability before structural
+    /// source lookup so `T = V?` cannot be treated as bare `V`.
     pub(crate) fn binding_is_nonnull_value_struct(&self, b: Idx<BindingInfo>) -> bool {
         let Some(ty) = self.binding_ty(b) else {
             return false;
@@ -573,14 +546,8 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// The declaring struct's generic ARGUMENTS at this injection.
-    ///
-    /// The expression is the site cursor: an injection happens while its own
-    /// literal is current. Deriving from a cursor is only sound because
-    /// [`crate::struct_defaults::args_at`] verifies the answer is an
-    /// application of this very struct -- a route that injects while some other
-    /// expression is current rejects instead of binding the wrong literal's
-    /// arguments.
+    /// The declaring struct's generic arguments at this injection. The current
+    /// expression must be that struct's literal; `args_at` verifies this.
     fn struct_default_args(
         &mut self,
         struct_name: Ustr,
@@ -696,15 +663,9 @@ impl<'a> Builder<'a> {
         );
         self.body = defaults_body;
         self.inf = defaults_inf;
-        // `site_owner` is NOT swapped -- the sites still belong to the enclosing
-        // function INSTANCE -- but their `Idx<Expr>` now indexes THIS arena, so
-        // they are stamped in the struct's own domain. The walk records the same
-        // domain for the same defaults (`instance_graph::struct_default_edges`),
-        // which is what lets them join instead of being deliberately unstamped.
-        //
-        // The ARGUMENTS are part of that key: `Box<int>` and `Box<string>` inject
-        // the same declaration's initializers and resolve different callees, so a
-        // declaration-keyed domain would collapse them onto one obligation.
+        // Keep the enclosing owner, but stamp expressions in the defaults body
+        // domain. Include generic arguments in that domain so `Box<int>` and
+        // `Box<string>` retain distinct call obligations.
         let result = self.in_domain(domain, |s| f(s, def_expr));
         self.body = saved_body;
         self.inf = saved_inf;
@@ -830,19 +791,9 @@ impl<'a> Builder<'a> {
         )))))
     }
 
-    /// The box `materialize(v)` asks for: the ordinary whole-value pack, with
-    /// every ctor it mints marked EXPLICIT so the guarantee's verifier lets it
-    /// through. Routing it through `pack` rather than a second recursion is what
-    /// gives the explicit box the tiers the implicit one already had -- the
-    /// GC-table, leaf-table and flat-enum arms.
-    ///
-    /// An ABSENT value has no leaves to build from -- the ctor would get nil per
-    /// field and fail the cdata conversion -- so a presence-carrying group
-    /// branches: nil when absent, the ctor when present. The branch is legal
-    /// HERE precisely because it is not legal in `repack_bound_next_element`:
-    /// there the present arm would be an implicit materialization the mark
-    /// forbids, while `materialize` IS the authorized box, so building one is
-    /// the request.
+    /// Explicitly pack `materialize(v)` through the ordinary tier-specific
+    /// packer. Presence-carrying values branch to nil when absent; this box is
+    /// authorized, unlike an implicit box in a bound-next repack.
     pub(crate) fn materialize_repr(&mut self, repr: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
         self.pack_maybe_absent_boxed(repr, BoxKind::Explicit)
     }
@@ -993,11 +944,8 @@ impl<'a> Builder<'a> {
         // no longer identifies one, and the value's type is what does.
         let (fv_e, iv_e, u_e) = match arg_idxs {
             [u_e] => {
-                // The 1-arg form is the fingerprint, so it must DECLARE `-> int`.
-                // A 1-arg fn returning unit is a malformed packer, not a
-                // fingerprint, and stays rejected (tests/errors/uniform_expand.rock.err).
-                // Same shape as `@vertex_expand`, which switches on its declared
-                // return type rather than guessing from the call.
+                // The one-argument form returns a fingerprint and must declare
+                // `-> int`, like `@vertex_expand`'s return-type dispatch.
                 let returns_int = self.ws.module(func.module).functions[func.func]
                     .return_ty
                     .map(|rt| {
@@ -1084,16 +1032,9 @@ impl<'a> Builder<'a> {
         Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))))
     }
 
-    /// The leaves of a uniform-block argument, whatever WIRE its expression
-    /// arrived on.
-    ///
-    /// A uniform block's packing is a property of its TYPE, so the leaf shape comes from
-    /// the nominal rather than from the argument's `RepPlan`. It has to: an
-    /// ordinary `value` wider than the ABI cut crosses a Rock-to-Rock call as
-    /// one boxed slot, and that slot's plan is `Opaque` -- it carries no leaf
-    /// list of its own, exactly as a global's boxed cdata does on the path
-    /// just above. Reading the box field by field is what `repr_to_leaves_shape`
-    /// already does for every other boxed source.
+    /// Extract uniform-block leaves from the value's type shape, regardless of
+    /// its wire representation. A boxed slot has no leaf shape in its `RepPlan`,
+    /// so it is field-read through the same projection used by other boxes.
     fn uniform_block_leaves(
         &mut self,
         u_e: Idx<Expr>,
