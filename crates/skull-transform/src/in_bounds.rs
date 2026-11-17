@@ -130,13 +130,14 @@ pub fn elide_bounds_checks_for_target(
 }
 
 fn proven_accesses(ws: Option<&Workspace>, func: &MirFunc, target: FnBackend) -> Vec<Idx<Inst>> {
-    let rpo = reverse_postorder(func, func.entry);
-    let mut has_checked = false;
+    let mut rpo = reverse_postorder(func, func.entry);
+    let mut queries = Vec::new();
     let mut has_make_vec = false;
     let mut has_array_push = false;
     let mut has_make_struct = false;
     let mut has_record_read = false;
     for &b in &rpo {
+        let mut last = None;
         for &i in &func.blocks[b].insts {
             match func.insts[i] {
                 Inst::Lambda { .. } => return Vec::new(),
@@ -147,12 +148,15 @@ fn proven_accesses(ws: Option<&Workspace>, func: &MirFunc, target: FnBackend) ->
                     ..
                 } => has_record_read = true,
                 Inst::ArrayPush { .. } => has_array_push = true,
-                ref inst if needs_bounds_proof(ws, inst) => has_checked = true,
+                ref inst if needs_bounds_proof(ws, inst) => last = Some(i),
                 _ => {}
             }
         }
+        if let Some(last) = last {
+            queries.push((b, last));
+        }
     }
-    if !has_checked {
+    if queries.is_empty() {
         return Vec::new();
     }
     let (preds, _) = predecessors(func, &rpo);
@@ -192,6 +196,24 @@ fn proven_accesses(ws: Option<&Workspace>, func: &MirFunc, target: FnBackend) ->
             })
         }),
     };
+    // A block that cannot reach a proof query cannot affect any proof. Keep
+    // relevance and reexecution based on the full CFG above.
+    const INPUT: u8 = 1;
+    const OUTPUT: u8 = 2;
+    let mut needed = vec![0; func.blocks.len()];
+    let mut pending = Vec::new();
+    for &(b, _) in &queries {
+        needed[raw(b)] = INPUT;
+        pending.push(b);
+    }
+    while let Some(b) = pending.pop() {
+        for &p in preds.get(&b).into_iter().flatten() {
+            if std::mem::replace(&mut needed[raw(p)], OUTPUT) != OUTPUT {
+                pending.push(p);
+            }
+        }
+    }
+    rpo.retain(|&b| needed[raw(b)] != 0);
     let body = Body::new(func);
     let func = &body;
     let n = func.blocks.len();
@@ -232,6 +254,10 @@ fn proven_accesses(ws: Option<&Workspace>, func: &MirFunc, target: FnBackend) ->
                     ins[raw(b)] = merged;
                 }
             }
+            // A final query needs its input, but its output feeds no proof.
+            if needed[raw(b)] == INPUT {
+                continue;
+            }
             let Some(input) = &ins[raw(b)] else {
                 continue;
             };
@@ -250,20 +276,12 @@ fn proven_accesses(ws: Option<&Workspace>, func: &MirFunc, target: FnBackend) ->
         }
     }
     let mut proven = Vec::new();
-    for &b in &rpo {
-        let Some(last) = func.blocks[b]
-            .insts
-            .iter()
-            .rposition(|&id| needs_bounds_proof(ws, &func.insts[id]))
-        else {
-            continue;
-        };
+    for &(b, last) in &queries {
         let Some(mut facts) = ins[raw(b)].take() else {
             continue;
         };
         // Solved inputs are independent: replay only as far as this block's
         // last proof query, then discard its final state.
-        let last = func.blocks[b].insts[last];
         for &id in &func.blocks[b].insts {
             match &func.insts[id] {
                 Inst::Index {
