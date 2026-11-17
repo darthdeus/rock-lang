@@ -134,14 +134,16 @@ mod incremental_output_equality_tests {
         Global(&'static str),
     }
 
-    fn assert_sequence(file: &str, sources: &[String], edited: EditedBody) {
-        let ws = workspace_of(&sources[0], file, true);
-        let mid = module_id(&ws, file);
-        let (_, mut cache) = emit_full(&ws, mid).expect("initial full emit");
+    fn assert_sequence(file: &str, sources: &[String], edited: EditedBody, diagnostic: &str) {
+        let file = format!("/tmp/rock-edit-equality/{file}.rock");
+        let build = FullEmit::program().project_root(Some("/tmp/rock-edit-equality"));
+        let ws = workspace_of(&sources[0], &file, true);
+        let mid = module_id(&ws, &file);
+        let (_, mut cache) = build.run(&ws, mid).expect("initial full emit");
 
         for (step, source) in sources.iter().enumerate().skip(1) {
-            let ws = workspace_of(source, file, true);
-            let mid = module_id(&ws, file);
+            let ws = workspace_of(source, &file, true);
+            let mid = module_id(&ws, &file);
             let owner = match edited {
                 EditedBody::Function(name) => BodyOwner::Function(
                     ws.module(mid)
@@ -160,10 +162,27 @@ mod incremental_output_equality_tests {
                         .0,
                 ),
             };
-            let incremental =
-                emit_incremental(&ws, &mut cache, &[(mid, owner)]).expect("incremental emit");
-            let fresh = emit_full(&ws, mid).expect("fresh full emit").0;
-            assert_eq!(incremental.lua, fresh.lua, "{file}, edit {step}");
+            let output = |result: Result<MirEmit, CompilerError>| {
+                result.map(|emit| emit.lua).map_err(|error| {
+                    (
+                        error.message,
+                        error
+                            .labels
+                            .into_iter()
+                            .map(|label| (label.span, label.message))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+            };
+            let incremental = output(emit_incremental(&ws, &mut cache, &[(mid, owner)]));
+            let fresh = output(build.run(&ws, mid).map(|(emit, _)| emit));
+            match (incremental, fresh) {
+                (Err(a), Err(b)) if !diagnostic.is_empty() => {
+                    assert!(a.0.contains(diagnostic), "{}", a.0);
+                    assert!(b.0.contains(diagnostic), "{}", b.0);
+                }
+                (incremental, fresh) => assert_eq!(incremental, fresh, "{file}, edit {step}"),
+            }
         }
     }
 
@@ -198,6 +217,7 @@ fn main() {{ let _ = choose() }}
                 shader_source("return \"none\""),
             ],
             EditedBody::Function("choose"),
+            "",
         );
 
         let global_source = |target: &str| {
@@ -217,6 +237,7 @@ fn main() {{ let _ = choose() }}
                 global_source("edit_inc"),
             ],
             EditedBody::Global("CALLBACK"),
+            "",
         );
 
         let inspect_source = |inspect: bool| {
@@ -239,6 +260,7 @@ fn main() {{ let _ = choose() }}
                 inspect_source(true),
             ],
             EditedBody::Function("caller"),
+            "",
         );
 
         let generic_source = |call: bool| {
@@ -257,6 +279,81 @@ fn main() {{ let _ = choose() }}
                 generic_source(true),
             ],
             EditedBody::Function("caller"),
+            "",
+        );
+    }
+    #[test]
+    fn pruning_shared_and_cyclic_calls_matches_fresh_output() {
+        for definitions in [
+            "fn branch() -> int { return leaf() } fn leaf() -> int { return 1 }",
+            "fn branch() -> int { return leaf() + shared() } fn leaf() -> int { return 1 }",
+            "fn branch() -> int { return cycle(2) } fn cycle(n:int) -> int { if n == 0 { return shared() } return back(n-1) } fn back(n:int) -> int { return cycle(n) }",
+            "fn branch() -> int { return left() + right() } fn left() -> int { return shared() } fn right() -> int { return shared() }",
+            "fn branch() -> int { return other(2) } fn other(n:int) -> int { if n == 0 { return 0 } return branch() }",
+        ] {
+            for anchored in [false, true] {
+                let source = |called: bool| {
+                    format!(
+                        "{definitions} fn shared() -> int {{ return 7 }} fn entry() -> int {{ return {} }} fn main() {{ print(entry()); {} }}",
+                        if called { "branch()" } else { "0" },
+                        if anchored { "print(shared())" } else { "" },
+                    )
+                };
+                assert_sequence(
+                    "prune",
+                    &[source(true), source(false), source(true)],
+                    EditedBody::Function("entry"),
+                    "",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn generic_emission_failures_remain_located_diagnostics() {
+        for (source, expected) in [
+            (
+                "fn ident<T>(x:T)->T { return x } fn apply(f:fn(int)->int,v:int)->int { return f(v) } fn main() { apply(ident,1) }",
+                "generic",
+            ),
+            (
+                "fn ident<T>(x:T)->T { return x } global F:fn(int)->int = ident fn main() { let y=F(1) }",
+                "generic",
+            ),
+            (
+                "fn make<T>()->[T] { return [] } fn main() { let xs=make(); let n=xs.len() }",
+                "type",
+            ),
+            (
+                "fn pick<T>()->int { let unused:T=1; return 1 } global G:int=pick() fn main() { let x=G }",
+                "type",
+            ),
+        ] {
+            let ws = workspace_of(source, "<generic-diagnostic>", true);
+            let mid = module_id(&ws, "<generic-diagnostic>");
+            let error = emit_full(&ws, mid).err().expect("emission must reject");
+            assert!(error.message.contains(expected), "{}", error.message);
+            assert!(
+                error
+                    .labels
+                    .iter()
+                    .any(|label| !crate::instance_graph::is_spanless(&label.span))
+            );
+        }
+    }
+    #[test]
+    fn diagnostic_edits_recover_to_fresh_output() {
+        let recursive = |bad: bool| {
+            format!(
+                "fn descend<T>(x:T)->int {{ return relay([x]) }} fn relay<T>(x:[T])->int {{ return {} }} fn main() {{ print(descend(1)) }}",
+                if bad { "descend(x)" } else { "0" },
+            )
+        };
+        assert_sequence(
+            "recursion",
+            &[recursive(false), recursive(true), recursive(false)],
+            EditedBody::Function("relay"),
+            "polymorphic recursion",
         );
     }
 }
