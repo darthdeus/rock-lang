@@ -687,7 +687,7 @@ fn field_refs_offer_exactly_the_fields_of_their_value_type() {
             "second overload supplies the slot",
             "struct Player { hp: int, cast_co: int? }\nfn stop(t: int) {}\n\
              fn stop<T>(o: T, f: FieldRef<T, int?>) {}\n\
-             fn r() {\n  let p: Player = Player { hp: 0, cast_co: null }\n  p.stop(.<|>)\n}\n",
+             fn r() {\n  let p: Player = Player { hp: 0, cast_co: null }\n  p.stop(<|>)\n}\n",
             &[".cast_co: int?", "!stop"],
         ),
         (

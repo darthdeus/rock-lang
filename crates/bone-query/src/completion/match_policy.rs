@@ -94,6 +94,7 @@ mod tests {
             (MatchPolicy::Subseq3, false, true),
         ] {
             set_match_policy(policy);
+            assert!(admit(b"close_loot_panel", b""));
             assert_eq!(admit(b"close_loot_panel", b"op"), short);
             assert_eq!(admit(b"close_loot_panel", b"opl"), long);
         }

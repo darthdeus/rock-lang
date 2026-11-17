@@ -302,14 +302,16 @@ fn overloaded_body_edit_reports_the_changed_overload_error() {
 
 #[test]
 fn multi_function_edit_keeps_types_after_a_single_body_edit() {
-    let source = |left, right| {
+    let source = |params, left, right| {
         format!(
-            "struct P {{ x: int }}\nfn f(p: P) -> int {{ return{left}p.x }}\nfn g(p: P) -> int {{ return{right}p.x }}"
+            "struct P {{ x: int }}\nfn f(p: P{params}) -> int {{ return{left}p.x }}\nfn g(p: P) -> int {{ return{right}p.x }}"
         )
     };
-    let mut h = Harness::new(&[("a.rock", &source(" ", " "))]);
-    h.update("a.rock", &source("  ", " "));
-    h.update("a.rock", &source(" ", "  "));
+    let mut h = Harness::new(&[("a.rock", &source("", " ", " "))]);
+    let params = ", extra: int = 1";
+    for (left, right) in [(" ", " "), ("  ", " "), (" ", "  ")] {
+        h.update("a.rock", &source(params, left, right));
+    }
     h.assert_clean();
 }
 
