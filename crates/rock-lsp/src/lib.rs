@@ -488,31 +488,14 @@ impl LspServer {
         not: lsp_server::Notification,
         out: &mut Vec<Message>,
     ) -> Result<()> {
-        // Handle exit notification
-        if not.method == "exit" {
-            // Exit the main loop when we receive the exit notification
-            self.exited = true;
-            return Ok(());
-        }
-
-        // In shutdown mode, ignore all other notifications
-        if self.shutdown_mode {
-            return Ok(());
-        }
-
-        let method = not.method.as_str();
-        if method == "textDocument/didSave" {
-            self.on_save(&not)?;
-        } else if method == "textDocument/didOpen" {
-            self.on_open(&not, out)?;
-        } else if method == "textDocument/didChange" {
-            self.on_change(&not, out)?;
-        } else if method == "textDocument/didClose" {
-            self.on_close(&not, out)?;
-        } else if method == "textDocument/didChangeConfiguration"
-            || method == "workspace/didChangeConfiguration"
-        {
-            // No settings to apply.
+        match not.method.as_str() {
+            "exit" => self.exited = true,
+            _ if self.shutdown_mode => {}
+            "textDocument/didSave" => self.on_save(&not)?,
+            "textDocument/didOpen" => self.on_open(&not, out)?,
+            "textDocument/didChange" => self.on_change(&not, out)?,
+            "textDocument/didClose" => self.on_close(&not, out)?,
+            _ => {}
         }
         Ok(())
     }

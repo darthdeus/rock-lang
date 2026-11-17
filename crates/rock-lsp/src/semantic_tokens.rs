@@ -16,29 +16,23 @@ use crate::LspWorkspace;
 /// whole buffer. Every bone type/modifier exists in the advertised legend, so
 /// each lookup hits; the `unwrap_or(0)` is a defensive floor.
 fn remap_bone_token_types(tokens: &mut lsp_types::SemanticTokens) {
-    let advertised = get_semantic_tokens_legend();
-    let bone_legend = bone_query::semantic_tokens_legend();
-    let type_map: Vec<u32> = bone_legend
-        .iter()
-        .map(|t| {
-            advertised
-                .token_types
-                .iter()
-                .position(|a| a == t)
-                .unwrap_or(0) as u32
-        })
-        .collect();
-    let bone_mods = bone_query::semantic_tokens_modifiers_legend();
-    let mod_map: Vec<u32> = bone_mods
-        .iter()
-        .map(|m| {
-            advertised
-                .token_modifiers
-                .iter()
-                .position(|a| a == m)
-                .unwrap_or(0) as u32
-        })
-        .collect();
+    fn index_map<T: PartialEq>(bone: &[T], advertised: &[T]) -> Vec<u32> {
+        bone.iter()
+            .map(|t| advertised.iter().position(|a| a == t).unwrap_or(0) as u32)
+            .collect()
+    }
+
+    static MAPS: std::sync::LazyLock<(Vec<u32>, Vec<u32>)> = std::sync::LazyLock::new(|| {
+        let legend = get_semantic_tokens_legend();
+        (
+            index_map(&bone_query::semantic_tokens_legend(), &legend.token_types),
+            index_map(
+                &bone_query::semantic_tokens_modifiers_legend(),
+                &legend.token_modifiers,
+            ),
+        )
+    });
+    let (type_map, mod_map) = &*MAPS;
     for tok in &mut tokens.data {
         if let Some(&idx) = type_map.get(tok.token_type as usize) {
             tok.token_type = idx;
@@ -178,20 +172,14 @@ pub(crate) fn full_semantic_tokens(
 ) -> anyhow::Result<Option<SemanticTokens>> {
     let uri = params.text_document.uri.to_string();
     let version = workspace.get_document_version(&uri);
-    let cached = workspace
-        .cached_semantic_tokens(&uri)
-        .map(|c| (c.document_version == version, c.labelled()));
-    if let Some((true, tokens)) = cached {
-        return Ok(Some(tokens));
+    let cached = workspace.cached_semantic_tokens(&uri);
+    if let Some(entry) = cached.filter(|c| c.document_version == version) {
+        return Ok(Some(entry.tokens.clone()));
     }
-    let stale = cached.map(|(_, tokens)| tokens);
+    let stale = cached.map(|entry| entry.tokens.clone());
     match compute_semantic_tokens_workspace(workspace, &params.text_document.uri) {
         Ok(tokens) if !tokens.data.is_empty() || stale.is_none() => {
-            let result_id = workspace.cache_semantic_tokens(&uri, tokens.clone(), version);
-            Ok(Some(SemanticTokens {
-                result_id: Some(result_id),
-                ..tokens
-            }))
+            Ok(Some(workspace.label_semantic_tokens(&uri, tokens, version)))
         }
         Ok(_) => {
             log::warn!(
@@ -213,29 +201,28 @@ pub(crate) fn delta_semantic_tokens(
 ) -> anyhow::Result<Option<SemanticTokensFullDeltaResult>> {
     let uri = params.text_document.uri.to_string();
     let version = workspace.get_document_version(&uri);
-    let prev = workspace.cached_semantic_tokens(&uri).cloned();
     match compute_semantic_tokens_workspace(workspace, &params.text_document.uri) {
         Ok(new) if !new.data.is_empty() => {
-            let result_id = Some(workspace.cache_semantic_tokens(&uri, new.clone(), version));
-            Ok(Some(match prev {
-                Some(old)
-                    if old.result_id == params.previous_result_id
-                        && !old.tokens.data.is_empty() =>
-                {
-                    SemanticTokensFullDeltaResult::TokensDelta(SemanticTokensDelta {
-                        result_id,
-                        edits: semantic_tokens_delta_edits(&old.tokens.data, &new.data),
-                    })
-                }
-                _ => SemanticTokensFullDeltaResult::Tokens(SemanticTokens { result_id, ..new }),
+            let edits = workspace
+                .cached_semantic_tokens(&uri)
+                .filter(|old| old.tokens.result_id.as_deref() == Some(&params.previous_result_id))
+                .map(|old| semantic_tokens_delta_edits(&old.tokens.data, &new.data));
+            let tokens = workspace.label_semantic_tokens(&uri, new, version);
+            Ok(Some(match edits {
+                Some(edits) => SemanticTokensFullDeltaResult::TokensDelta(SemanticTokensDelta {
+                    result_id: tokens.result_id,
+                    edits,
+                }),
+                None => SemanticTokensFullDeltaResult::Tokens(tokens),
             }))
         }
-        // Empty or failed: resend the stale cache rather than wipe highlighting.
         other => {
             if let Err(e) = other {
                 log::warn!("semantic tokens delta compute failed for {uri}: {e:?}");
             }
-            Ok(prev.map(|c| SemanticTokensFullDeltaResult::Tokens(c.labelled())))
+            Ok(workspace
+                .cached_semantic_tokens(&uri)
+                .map(|c| SemanticTokensFullDeltaResult::Tokens(c.tokens.clone())))
         }
     }
 }

@@ -10,22 +10,9 @@ fn generate_result_id() -> String {
     format!("semantic_tokens_{}", id)
 }
 
-/// Semantic token cache entry with version tracking
-#[derive(Clone, Debug)]
 pub(crate) struct SemanticTokenCache {
-    pub result_id: String,
     pub tokens: lsp_types::SemanticTokens,
     pub document_version: Option<i32>,
-}
-
-impl SemanticTokenCache {
-    /// The cached tokens under the id the client knows them by.
-    pub(crate) fn labelled(&self) -> lsp_types::SemanticTokens {
-        lsp_types::SemanticTokens {
-            result_id: Some(self.result_id.clone()),
-            data: self.tokens.data.clone(),
-        }
-    }
 }
 
 /// Workspace managing the bone session plus per-document LSP caches.
@@ -66,23 +53,19 @@ impl LspWorkspace {
         path: &str,
         diagnostics: &[lsp_types::Diagnostic],
     ) -> bool {
-        let prev_empty = self
+        let previous = self
             .published_diagnostics
             .get(path)
-            .map(|v| v.is_empty())
-            .unwrap_or(true);
-        if diagnostics.is_empty() {
-            if prev_empty {
-                return false;
-            }
-            self.published_diagnostics.remove(path);
-            return true;
-        }
-        if self.published_diagnostics.get(path).map(|v| v.as_slice()) == Some(diagnostics) {
+            .map_or(&[][..], Vec::as_slice);
+        if previous == diagnostics {
             return false;
         }
-        self.published_diagnostics
-            .insert(path.to_string(), diagnostics.to_vec());
+        if diagnostics.is_empty() {
+            self.published_diagnostics.remove(path);
+        } else {
+            self.published_diagnostics
+                .insert(path.to_string(), diagnostics.to_vec());
+        }
         true
     }
 
@@ -99,60 +82,31 @@ impl LspWorkspace {
         self.semantic_token_cache.get(uri)
     }
 
-    /// Cache semantic tokens for a document version
-    pub(crate) fn cache_semantic_tokens(
+    pub(crate) fn label_semantic_tokens(
         &mut self,
         uri: &str,
-        tokens: lsp_types::SemanticTokens,
+        mut tokens: lsp_types::SemanticTokens,
         document_version: Option<i32>,
-    ) -> String {
-        // Defense in depth: never cache an empty SemanticTokensResult.
-        //
-        // An empty result in the cache is always worse than no cache:
-        // - If there's an existing non-empty entry, overwriting it with
-        //   empty would wipe the editor's highlighting.
-        // - If there's no existing entry, caching empty makes the next
-        //   `cached_is_current` check return the empty value without
-        //   recomputing, which means a transient compute failure can lock
-        //   in empty tokens until the document version changes or the
-        //   LSP restarts.
-        //
-        // Refusing to cache empty results forces the handler to recompute
-        // on the next request, giving the system a chance to recover.
+    ) -> lsp_types::SemanticTokens {
+        tokens.result_id = Some(generate_result_id());
+        // An empty first result still needs an id, but the next request must recompute.
         if tokens.data.is_empty() {
-            if let Some(existing) = self.semantic_token_cache.get(uri) {
-                log::warn!(
-                    "Rejected empty semantic tokens update for {} (version {:?}); \
-                     preserving existing cache entry (version {:?}).",
-                    uri,
-                    document_version,
-                    existing.document_version
-                );
-                return existing.result_id.clone();
-            }
             log::warn!(
                 "Rejected empty first-write semantic tokens update for {} (version {:?}); \
                  next request will recompute.",
                 uri,
                 document_version
             );
-            // No existing entry and nothing meaningful to store. Return a
-            // fresh result_id for LSP protocol compliance, but do NOT insert
-            // anything into the cache.
-            return generate_result_id();
+        } else {
+            self.semantic_token_cache.insert(
+                uri.to_string(),
+                SemanticTokenCache {
+                    tokens: tokens.clone(),
+                    document_version,
+                },
+            );
         }
-
-        let result_id = generate_result_id();
-
-        let cache_entry = SemanticTokenCache {
-            result_id: result_id.clone(),
-            tokens,
-            document_version,
-        };
-
-        self.semantic_token_cache
-            .insert(uri.to_string(), cache_entry);
-        result_id
+        tokens
     }
 
     /// Get current document version
