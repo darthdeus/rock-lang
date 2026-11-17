@@ -49,9 +49,9 @@ fn ui_parametric_batch_check(batch: RenderBatch, start: int, count: int) {
     for i in 0..count {
         let f = (start + i) as float
         for component in 0..4 {
-            assert_eq(batch.parametric_0.unwrap()[i * 4 + component], f + component as float)
-            assert_eq(batch.parametric_1.unwrap()[i * 4 + component], f + (4 + component) as float)
-            assert_eq(batch.parametric_2.unwrap()[i * 4 + component], f + (8 + component) as float)
+            assert_eq(batch.parametric_columns[0][i * 4 + component], f + component as float)
+            assert_eq(batch.parametric_columns[1][i * 4 + component], f + (4 + component) as float)
+            assert_eq(batch.parametric_columns[2][i * 4 + component], f + (8 + component) as float)
         }
         for vertex in 0..6 {
             assert_eq(batch.verts[i * 6 + vertex].colorize, i as float,

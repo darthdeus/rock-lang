@@ -117,9 +117,9 @@ pub struct RenderBatch {
 
     parametric_count: int = 0,
     parametric_frame: int = -1,
-    parametric_0: NativeBuffer<float>? = null,
-    parametric_1: NativeBuffer<float>? = null,
-    parametric_2: NativeBuffer<float>? = null,
+    parametric_columns: [NativeBuffer<float>] = [],
+    parametric_capacity: int = PARAMETRIC_QUAD_CAP,
+    parametric_layout_frame: int = -1,
 }
 
 const PARAMETRIC_QUAD_CAP: int = 256
@@ -144,16 +144,57 @@ fn apply_batch_uniforms(shader: string, b: RenderBatch) {
     apply_batch_parametric_arrays(shader, b)
 }
 
+fn batch_parametric_configure(b: RenderBatch, columns: int, capacity: int) {
+    if b.parametric_columns.len() == columns && b.parametric_capacity == capacity { return }
+    b.parametric_columns.clear()
+    for _ in 0..columns { b.parametric_columns.push(native_buffer_float(capacity * 4)) }
+    b.parametric_capacity = capacity
+}
+
 fn batch_parametric_begin(b: RenderBatch) {
-    if b.parametric_0 == null {
-        b.parametric_0 = native_buffer_float(PARAMETRIC_QUAD_CAP * 4)
-        b.parametric_1 = native_buffer_float(PARAMETRIC_QUAD_CAP * 4)
-        b.parametric_2 = native_buffer_float(PARAMETRIC_QUAD_CAP * 4)
-    }
     if b.parametric_frame != RENDER_FRAME {
         b.parametric_count = 0
         b.parametric_frame = RENDER_FRAME
     }
+}
+
+// World payloads follow the shader's fragment Vec4 arrays. Validate once per
+// frame so a hot reload can change the layout without retaining old buffers.
+fn batch_parametric_shader_layout(b: RenderBatch, shader: string) {
+    if b.parametric_layout_frame == RENDER_FRAME { return }
+    let block = array_block_find(shader, UNIFORM_BLOCK_BINDING_FRAGMENT_ARRAYS) ?? {
+        error("parametric sprite pipeline `{shader}` declares no fragment array block")
+        return
+    }
+    let capacity = if block.capacities.len() > 0 { block.capacities[0] } else { 0 }
+    if capacity <= 0 { error("parametric sprite pipeline `{shader}` needs nonempty Vec4 arrays"); return }
+    for i in 0..block.members.len() {
+        if block.kinds[i] != WIRE_KIND_F32X4 || block.capacities[i] != capacity {
+            error("parametric sprite pipeline `{shader}` needs equally sized Vec4 arrays")
+            return
+        }
+    }
+    batch_parametric_configure(b, block.members.len(), capacity)
+    b.parametric_layout_frame = RENDER_FRAME
+}
+
+pub fn batch_parametric_reserve(b: RenderBatch) -> int {
+    batch_parametric_begin(b)
+    let idx = b.parametric_count
+    if idx >= b.parametric_capacity {
+        error("parametric sprite batch exceeds its uniform-array capacity")
+    }
+    b.parametric_count = idx + 1
+    return idx
+}
+
+pub fn batch_parametric_write(b: RenderBatch, row: int, column: int, value: Vec4) {
+    let data = b.parametric_columns[column]
+    let base = row * 4
+    data[base] = value.x
+    data[base + 1] = value.y
+    data[base + 2] = value.z
+    data[base + 3] = value.w
 }
 
 fn batch_parametric_push(
@@ -162,28 +203,11 @@ fn batch_parametric_push(
     p1x: float, p1y: float, p1z: float, p1w: float,
     p2x: float, p2y: float, p2z: float, p2w: float,
 ) -> int {
-    batch_parametric_begin(b)
-    let idx = b.parametric_count
-    if idx >= PARAMETRIC_QUAD_CAP {
-        error("parametric quad batch exceeds the 256-entry uniform-block capacity")
-    }
-    let base = idx * 4
-    let a = b.parametric_0.unwrap()
-    let c = b.parametric_1.unwrap()
-    let d = b.parametric_2.unwrap()
-    a[base] = p0x
-    a[base + 1] = p0y
-    a[base + 2] = p0z
-    a[base + 3] = p0w
-    c[base] = p1x
-    c[base + 1] = p1y
-    c[base + 2] = p1z
-    c[base + 3] = p1w
-    d[base] = p2x
-    d[base + 1] = p2y
-    d[base + 2] = p2z
-    d[base + 3] = p2w
-    b.parametric_count = idx + 1
+    batch_parametric_configure(b, 3, PARAMETRIC_QUAD_CAP)
+    let idx = batch_parametric_reserve(b)
+    batch_parametric_write(b, idx, 0, v(p0x, p0y, p0z, p0w))
+    batch_parametric_write(b, idx, 1, v(p1x, p1y, p1z, p1w))
+    batch_parametric_write(b, idx, 2, v(p2x, p2y, p2z, p2w))
     return idx
 }
 
@@ -194,9 +218,9 @@ fn apply_batch_parametric_arrays(shader: string, b: RenderBatch) {
         return
     }
     let cursor = 0
-    array_block_push_vec4(shader, block, cursor, b.parametric_0.unwrap().ptr, b.parametric_count)
-    array_block_push_vec4(shader, block, cursor, b.parametric_1.unwrap().ptr, b.parametric_count)
-    array_block_push_vec4(shader, block, cursor, b.parametric_2.unwrap().ptr, b.parametric_count)
+    for column in b.parametric_columns {
+        array_block_push_vec4(shader, block, cursor, column.ptr, b.parametric_count)
+    }
     if !array_block_upload(shader, block, cursor, "parametric quad batch") {
         error("parametric quad pipeline `{shader}` rejected its array payload")
     }
@@ -337,7 +361,7 @@ fn next_occurrence(base: string) -> int {
 
 fn parametric_batch_has_room(batch: RenderBatch) -> bool {
     return batch.parametric_frame != RENDER_FRAME
-        || batch.parametric_count < PARAMETRIC_QUAD_CAP
+        || batch.parametric_count < batch.parametric_capacity
 }
 
 fn parametric_batch_slot(base: string) -> int {
@@ -1097,6 +1121,7 @@ fn ensure_batch_common(
     surface: SampledTexture? = null,
     shared_pipeline: bool = false,
     text_batch: bool = false,
+    parametric_slot: int? = null,
 ) -> RenderBatch {
     let pool = current_render_pool()
     // Resolved BEFORE the key so the key segment is the effective filter, not
@@ -1109,11 +1134,11 @@ fn ensure_batch_common(
         sampled_texture_default_sampling(normal)
     }
     let fast = custom_draw == null && (pipeline == null || shared_pipeline)
-        && render_batch_pool_same(pool, RENDER_BATCHES)
+        && parametric_slot == null && render_batch_pool_same(pool, RENDER_BATCHES)
     return batch_resolve(pool, WORLD_BATCH_FAST, fast, texture, BatchMatch {
         render: RenderProps { z_layer, blend, pixel_snap, depth, order, pipeline, text_batch },
         sampling: eff, normal_sampling: eff_normal, unlit,
-    }, shared_pipeline, custom_draw: custom_draw, normal: normal, surface: surface)
+    }, shared_pipeline, parametric_slot: parametric_slot, custom_draw: custom_draw, normal: normal, surface: surface)
 }
 
 pub fn ensure_batch_of(
@@ -1131,11 +1156,12 @@ pub fn ensure_batch_of(
     surface: SampledTexture? = null,
     shared_pipeline: bool = false,
     text_batch: bool = false,
+    parametric_slot: int? = null,
 ) -> RenderBatch {
     return ensure_batch_common(
         texture, z_layer, blend, pixel_snap, depth, custom_draw, order,
         normal, pipeline, unlit, sampling,
-        surface: surface, shared_pipeline: shared_pipeline, text_batch: text_batch,
+        surface: surface, shared_pipeline: shared_pipeline, text_batch: text_batch, parametric_slot: parametric_slot,
     )
 }
 
