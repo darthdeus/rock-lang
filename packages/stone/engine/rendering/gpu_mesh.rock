@@ -91,12 +91,12 @@ pub fn gpu_mesh_set_instances(
     count: int,
     stride: int,
     attr_sizes: [int],
-) {
+) -> bool {
     static sizes = native_buffer_int(16)
     __gpu_mesh_sizes(attr_sizes, sizes)
-    if stone_mesh_set_instances(m.handle.0, data, count, stride, sizes.ptr, attr_sizes.len()) != 0 {
-        m.inst_count = count
-    }
+    if stone_mesh_set_instances(m.handle.0, data, count, stride, sizes.ptr, attr_sizes.len()) == 0 { return false }
+    m.inst_count = count
+    return true
 }
 
 // Replace the live prefix, retaining the initialized layout and spare capacity.

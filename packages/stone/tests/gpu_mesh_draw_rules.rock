@@ -52,7 +52,7 @@ fn gpu_mesh_instanced_draw_renders_each_instance_and_counts_once() {
     inst[0] = -0.5; inst[1] = 0.0
     inst[2] = 0.0;  inst[3] = 0.0
     inst[4] = 0.5;  inst[5] = 0.0
-    gpu_mesh_set_instances(mesh, inst.ptr, 3, 2, [2])
+    assert(gpu_mesh_set_instances(mesh, inst.ptr, 3, 2, [2]))
 
     let sid = rock_shader(mesh_probe_vert, mesh_probe_frag)
     let gl_errors = stone_gl_error_count()
