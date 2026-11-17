@@ -321,3 +321,31 @@ fn defer_body_keeps_its_own_control_flow() {
     }
     print("body")
 }
+
+@test(output = "body\n3\n2\n1")
+fn while_let_inside_defer_body() {
+    // `while let` desugars to a loop whose miss breaks; that break belongs to
+    // the loop inside the deferred block, not to anything outside it.
+    let xs = [1, 2, 3]
+    defer {
+        while let v = xs.pop() {
+            print(v)
+        }
+    }
+    print("body")
+}
+
+@test(output = "a\nouter done")
+fn let_else_breaks_its_own_loop_inside_defer() {
+    let m = map_new<string, string>()
+    m.insert("a", "a")
+    defer {
+        for k in ["a", "missing"] {
+            let v = m.get(k) else {
+                break
+            }
+            print(v)
+        }
+        print("outer done")
+    }
+}
