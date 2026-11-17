@@ -235,7 +235,7 @@ fn js_number(f: f64) -> Result<String, CompilerError> {
 /// units where Lua counts bytes, a known cross-backend divergence for
 /// non-ASCII content; rejecting outright bricked whole game builds over an
 /// em-dash in a log message.
-fn js_string_lit(s: &str) -> Result<String, CompilerError> {
+fn js_string_lit(s: &str) -> String {
     let mut o = String::from("\"");
     for c in s.chars() {
         match c {
@@ -253,7 +253,7 @@ fn js_string_lit(s: &str) -> Result<String, CompilerError> {
         }
     }
     o.push('"');
-    Ok(o)
+    o
 }
 
 /// A field name that is not a bare JS identifier -- flattened enum/embed slots
@@ -269,20 +269,20 @@ fn is_js_ident(s: &str) -> bool {
 }
 
 /// `f` as an object-literal key: bare when it is an identifier, quoted otherwise.
-fn js_key(f: &str) -> Result<String, CompilerError> {
+fn js_key(f: &str) -> String {
     if is_js_ident(f) {
-        Ok(f.to_string())
+        f.to_string()
     } else {
         js_string_lit(f)
     }
 }
 
 /// `base.f` / `base["f"]` -- property access that survives a non-identifier key.
-fn js_member(base: &str, f: &str) -> Result<String, CompilerError> {
+fn js_member(base: &str, f: &str) -> String {
     if is_js_ident(f) {
-        Ok(format!("{base}.{f}"))
+        format!("{base}.{f}")
     } else {
-        Ok(format!("{base}[{}]", js_string_lit(f)?))
+        format!("{base}[{}]", js_string_lit(f))
     }
 }
 

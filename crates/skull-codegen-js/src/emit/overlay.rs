@@ -222,8 +222,8 @@ pub fn emit_overlay_with_span_edits(
             {
                 out.push_str(&format!(
                     "delete __rock_globals[{}]; __rock_globals[{}] = false;\n",
-                    js_string_lit(&base.value_slot)?,
-                    js_string_lit(&base.done_slot)?,
+                    js_string_lit(&base.value_slot),
+                    js_string_lit(&base.done_slot),
                 ));
             }
             cache.static_keys.insert(cell.cell, base);
@@ -248,8 +248,8 @@ pub fn emit_overlay_with_span_edits(
     for base in dropped {
         out.push_str(&format!(
             "delete __rock_globals[{}]; delete __rock_globals[{}];\n",
-            js_string_lit(&base.value_slot)?,
-            js_string_lit(&base.done_slot)?,
+            js_string_lit(&base.value_slot),
+            js_string_lit(&base.done_slot),
         ));
     }
 

@@ -125,9 +125,9 @@ impl JsonTypes {
         Ok(())
     }
 
-    pub(super) fn render(&self) -> Result<String, CompilerError> {
+    pub(super) fn render(&self) -> String {
         if !self.used {
-            return Ok(String::new());
+            return String::new();
         }
         let mut types = Vec::new();
         let mut flat = Vec::new();
@@ -138,11 +138,11 @@ impl JsonTypes {
                     let offsets = paths
                         .iter()
                         .enumerate()
-                        .map(|(i, path)| Ok(format!("{}: {i}", js_string_lit(path.as_str())?)))
-                        .collect::<Result<Vec<_>, CompilerError>>()?;
+                        .map(|(i, path)| format!("{}: {i}", js_string_lit(path.as_str())))
+                        .collect::<Vec<_>>();
                     strided.push(format!(
                         "{}: {{{}}}",
-                        js_string_lit(name.as_str())?,
+                        js_string_lit(name.as_str()),
                         offsets.join(", ")
                     ));
                 }
@@ -150,7 +150,7 @@ impl JsonTypes {
                     name, tuple_width, ..
                 } => flat.push(format!(
                     "{}: {{tuple_width: {tuple_width}}}",
-                    js_string_lit(name.as_str())?
+                    js_string_lit(name.as_str())
                 )),
                 Entry::Struct {
                     name,
@@ -158,40 +158,36 @@ impl JsonTypes {
                     fields,
                     vec_columns,
                 } => {
-                    let fields = fields.iter().map(field_js).collect::<Result<Vec<_>, _>>()?;
+                    let fields = fields.iter().map(field_js).collect::<Vec<_>>();
                     let columns = match vec_columns {
-                        Some(paths) => format!(", vec_columns: {}", strings_js(paths)?),
+                        Some(paths) => format!(", vec_columns: {}", strings_js(paths)),
                         None => String::new(),
                     };
                     types.push(format!(
                         "{}: {{kind: \"{kind}\", fields: [{}]{columns}}}",
-                        js_string_lit(name.as_str())?,
+                        js_string_lit(name.as_str()),
                         fields.join(", ")
                     ));
                 }
                 Entry::Newtype { name } => types.push(format!(
                     "{}: {{kind: \"newtype\", fields: []}}",
-                    js_string_lit(name.as_str())?
+                    js_string_lit(name.as_str())
                 )),
                 Entry::EnumTag { name, variants } => types.push(format!(
                     "{}: {{kind: \"enum_tag\", variants: {}}}",
-                    js_string_lit(name.as_str())?,
-                    strings_js(variants)?
+                    js_string_lit(name.as_str()),
+                    strings_js(variants)
                 )),
                 Entry::Enum { name, variants } => {
                     let variants = variants
                         .iter()
                         .map(|(variant, entry)| {
-                            Ok(format!(
-                                "{}: {}",
-                                js_string_lit(variant.as_str())?,
-                                variant_js(entry)?
-                            ))
+                            format!("{}: {}", js_string_lit(variant.as_str()), variant_js(entry))
                         })
-                        .collect::<Result<Vec<_>, CompilerError>>()?;
+                        .collect::<Vec<_>>();
                     types.push(format!(
                         "{}: {{kind: \"enum\", variant_desc: {{{}}}}}",
-                        js_string_lit(name.as_str())?,
+                        js_string_lit(name.as_str()),
                         variants.join(", ")
                     ));
                 }
@@ -207,36 +203,36 @@ impl JsonTypes {
                             let fields = payload
                                 .iter()
                                 .map(|p| {
-                                    Ok(format!(
+                                    format!(
                                         "{{name: {}, slot: {}, type: {}}}",
-                                        js_string_lit(&p.name)?,
-                                        js_string_lit(&p.slot)?,
-                                        js_string_lit(&p.ty)?
-                                    ))
+                                        js_string_lit(&p.name),
+                                        js_string_lit(&p.slot),
+                                        js_string_lit(&p.ty)
+                                    )
                                 })
-                                .collect::<Result<Vec<_>, CompilerError>>()?;
-                            Ok(format!(
+                                .collect::<Vec<_>>();
+                            format!(
                                 "{{name: {}, fields: [{}]}}",
-                                js_string_lit(variant.as_str())?,
+                                js_string_lit(variant.as_str()),
                                 fields.join(", ")
-                            ))
+                            )
                         })
-                        .collect::<Result<Vec<_>, CompilerError>>()?;
+                        .collect::<Vec<_>>();
                     types.push(format!(
                         "{}: {{kind: \"c_enum\", slots: {}, variants: [{}]}}",
-                        js_string_lit(name.as_str())?,
-                        strings_js(&slots)?,
+                        js_string_lit(name.as_str()),
+                        strings_js(&slots),
                         variants.join(", ")
                     ));
                 }
             }
         }
-        Ok(format!(
+        format!(
             "var {TABLE} = {{\ntypes: {{\n{}\n}},\nflat: {{{}}},\nstrided: {{{}}}\n}};\n",
             types.join(",\n"),
             flat.join(", "),
             strided.join(", ")
-        ))
+        )
     }
 }
 
@@ -270,42 +266,39 @@ fn json_factory_refs(ws: &Workspace) -> rustc_hash::FxHashMap<String, FuncRef> {
         .collect()
 }
 
-fn strings_js(items: &[Ustr]) -> Result<String, CompilerError> {
+fn strings_js(items: &[Ustr]) -> String {
     let items = items
         .iter()
         .map(|item| js_string_lit(item.as_str()))
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(format!("[{}]", items.join(", ")))
+        .collect::<Vec<_>>();
+    format!("[{}]", items.join(", "))
 }
 
-fn shape_js(shape: &Shape, extra: &str) -> Result<String, CompilerError> {
-    Ok(match shape {
+fn shape_js(shape: &Shape, extra: &str) -> String {
+    match shape {
         Shape::Prim(name) => format!("{{k: \"{name}\"{extra}}}"),
-        Shape::Opt(inner) => format!("{{k: \"opt\", inner: {}{extra}}}", shape_js(inner, "")?),
+        Shape::Opt(inner) => format!("{{k: \"opt\", inner: {}{extra}}}", shape_js(inner, "")),
         Shape::Tuple(elems) => {
-            let elems = elems
-                .iter()
-                .map(|e| shape_js(e, ""))
-                .collect::<Result<Vec<_>, _>>()?;
+            let elems = elems.iter().map(|e| shape_js(e, "")).collect::<Vec<_>>();
             format!("{{k: \"tuple\", elems: [{}]{extra}}}", elems.join(", "))
         }
-        Shape::Vec(elem) => format!("{{k: \"vec\", elem: {}{extra}}}", shape_js(elem, "")?),
+        Shape::Vec(elem) => format!("{{k: \"vec\", elem: {}{extra}}}", shape_js(elem, "")),
         Shape::Map(key, val) => format!(
             "{{k: \"map\", key: {}, val: {}{extra}}}",
-            shape_js(key, "")?,
-            shape_js(val, "")?
+            shape_js(key, ""),
+            shape_js(val, "")
         ),
         Shape::Field(inner) => {
-            format!("{{k: \"field\", inner: {}{extra}}}", shape_js(inner, "")?)
+            format!("{{k: \"field\", inner: {}{extra}}}", shape_js(inner, ""))
         }
         Shape::Nom(name) => format!(
             "{{k: \"nom\", name: {}{extra}}}",
-            js_string_lit(name.as_str())?
+            js_string_lit(name.as_str())
         ),
-    })
+    }
 }
 
-fn variant_js(entry: &VariantEntry) -> Result<String, CompilerError> {
+fn variant_js(entry: &VariantEntry) -> String {
     match entry {
         VariantEntry::Positional(positions) => {
             let positions = positions
@@ -316,47 +309,43 @@ fn variant_js(entry: &VariantEntry) -> Result<String, CompilerError> {
                         extra.push_str(&format!(", slot: {slot}"));
                     }
                     if let Some(leaves) = &p.leaves {
-                        extra.push_str(&format!(", leaves: {}", strings_js(leaves)?));
+                        extra.push_str(&format!(", leaves: {}", strings_js(leaves)));
                     }
                     shape_js(p.shape.as_ref().unwrap_or(&Shape::Prim("any")), &extra)
                 })
-                .collect::<Result<Vec<_>, CompilerError>>()?;
-            Ok(format!("{{pos: [{}]}}", positions.join(", ")))
+                .collect::<Vec<_>>();
+            format!("{{pos: [{}]}}", positions.join(", "))
         }
         VariantEntry::Named(fields) => {
             let fields = fields
                 .iter()
                 .map(|(name, shape)| {
-                    Ok(format!(
-                        "{}: {}",
-                        js_string_lit(name.as_str())?,
-                        shape_js(shape, "")?
-                    ))
+                    format!("{}: {}", js_string_lit(name.as_str()), shape_js(shape, ""))
                 })
-                .collect::<Result<Vec<_>, CompilerError>>()?;
-            Ok(format!("{{named: {{{}}}}}", fields.join(", ")))
+                .collect::<Vec<_>>();
+            format!("{{named: {{{}}}}}", fields.join(", "))
         }
     }
 }
 
-fn field_js(f: &FieldEntry) -> Result<String, CompilerError> {
+fn field_js(f: &FieldEntry) -> String {
     let mut out = format!(
         "{{name: {}, type: {}, nullable: {}",
-        js_string_lit(f.name.as_str())?,
-        js_string_lit(&f.ty)?,
+        js_string_lit(f.name.as_str()),
+        js_string_lit(&f.ty),
         f.nullable
     );
     if f.embed {
         out.push_str(", embed: true");
     }
     if let Some(keys) = &f.flat {
-        out.push_str(&format!(", flat: {}", strings_js(keys)?));
+        out.push_str(&format!(", flat: {}", strings_js(keys)));
     }
     if let Some(shape) = &f.shape {
-        out.push_str(&format!(", desc: {}", shape_js(shape, "")?));
+        out.push_str(&format!(", desc: {}", shape_js(shape, "")));
     }
     if let Some(name) = f.json_name {
-        out.push_str(&format!(", json_name: {}", js_string_lit(name.as_str())?));
+        out.push_str(&format!(", json_name: {}", js_string_lit(name.as_str())));
     }
     // Factories are emitted functions: `fn() -> any` and `fn(any) -> bool`,
     // one lane each, so the walker calls them directly.
@@ -370,5 +359,5 @@ fn field_js(f: &FieldEntry) -> Result<String, CompilerError> {
         out.push_str(", json_skip: true");
     }
     out.push('}');
-    Ok(out)
+    out
 }

@@ -99,7 +99,7 @@ impl Emitter<'_> {
                         ContainerKind::Map => format!("__map_set({b}, {i}, {v});"),
                         ContainerKind::Record => {
                             if let Inst::Const(Lit::Str(field)) = &self.mf.insts[*index] {
-                                format!("{} = {v};", js_member(&b, field.as_str())?)
+                                format!("{} = {v};", js_member(&b, field.as_str()))
                             } else {
                                 format!("{b}[{i}] = {v};")
                             }
@@ -131,7 +131,7 @@ impl Emitter<'_> {
                 Inst::StoreField { base, field, value } => {
                     let line = format!(
                         "{} = {};",
-                        js_member(&self.render_val(*base)?, field)?,
+                        js_member(&self.render_val(*base)?, field),
                         self.render_val(*value)?
                     );
                     self.push(&line);
@@ -184,7 +184,7 @@ impl Emitter<'_> {
                     };
                     self.globals.uses_storage.set(true);
                     let v = self.render_val(*value)?;
-                    self.push(&format!("__rock_globals[{}] = {v};", js_string_lit(slot)?));
+                    self.push(&format!("__rock_globals[{}] = {v};", js_string_lit(slot)));
                 }
                 // A used, non-inlinable value inst: materialize it at its
                 // program position as `let v<raw> = <expr>` so cell reads capture
@@ -284,7 +284,7 @@ impl Emitter<'_> {
                         Lit::Uint(i) => format!("{d} === {i}"),
                         Lit::Bool(v) => format!("{d} === {v}"),
                         Lit::Float(f) => format!("{d} === {}", js_number(*f)?),
-                        Lit::Str(v) => format!("{d} === {}", js_string_lit(v.as_str())?),
+                        Lit::Str(v) => format!("{d} === {}", js_string_lit(v.as_str())),
                     };
                     s.push_str(&format!(
                         "if ({cmp}) {{ __bb = {}; }} else ",

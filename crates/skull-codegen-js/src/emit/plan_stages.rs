@@ -57,9 +57,9 @@ pub(super) fn code_slot_registration_js(
         writeln!(
             out,
             "__rock_code_slot_stage_one({}, {}, {});",
-            js_string_lit(&slot.key)?,
+            js_string_lit(&slot.key),
             slot.body,
-            js_string_lit(slot.call_abi)?,
+            js_string_lit(slot.call_abi),
         )
         .expect("writing a String cannot fail");
     }
@@ -111,7 +111,7 @@ pub(super) fn definition_plan_stage_js(
                 out,
                 "function {}() {{ return __rock_definition_catalog({}); }}",
                 name,
-                js_string_lit(catalog_plan.catalog.as_str())?,
+                js_string_lit(catalog_plan.catalog.as_str()),
             )
             .unwrap();
         }
@@ -125,8 +125,8 @@ pub(super) fn definition_plan_stage_js(
         writeln!(
             out,
             "{}: {{catalog: {}, len: {}, _data: [",
-            js_string_lit(catalog_plan.catalog.as_str())?,
-            js_string_lit(catalog_plan.catalog.as_str())?,
+            js_string_lit(catalog_plan.catalog.as_str()),
+            js_string_lit(catalog_plan.catalog.as_str()),
             entries.len()
         )
         .unwrap();
@@ -135,11 +135,11 @@ pub(super) fn definition_plan_stage_js(
             writeln!(
                 out,
                 "{{catalog: {}, key: {}, name: {}, ordinal: {}, factory: __rock_code_slot_pending_ref({})}},",
-                js_string_lit(entry.catalog.as_str())?,
-                js_string_lit(entry.key.as_str())?,
-                js_string_lit(entry.diagnostic_name.as_str())?,
+                js_string_lit(entry.catalog.as_str()),
+                js_string_lit(entry.key.as_str()),
+                js_string_lit(entry.diagnostic_name.as_str()),
                 entry.declaration_ordinal,
-                js_string_lit(&key)?,
+                js_string_lit(&key),
             )
             .unwrap();
         }
@@ -150,7 +150,7 @@ pub(super) fn definition_plan_stage_js(
         writeln!(
             out,
             "{}: {},",
-            js_string_lit(&identity.logical_key(ws, scx.interner()))?,
+            js_string_lit(&identity.logical_key(ws, scx.interner())),
             body
         )
         .unwrap();
@@ -176,7 +176,7 @@ pub(super) fn lifecycle_plan_stage_js(
         writeln!(
             out,
             "[{}]: {{len: {}, scene_owned: {}, _data: [",
-            js_string_lit(phase.as_str())?,
+            js_string_lit(phase.as_str()),
             entries.len(),
             scene_owned
         )
@@ -189,24 +189,24 @@ pub(super) fn lifecycle_plan_stage_js(
                     &skull_mir::lifecycle::scene_root_type_key(root).unwrap_or_else(|| {
                         panic!("validated scene lifecycle root reached emission as {root:?}")
                     }),
-                )?,
+                ),
                 None => "null".to_string(),
             };
             write!(out, "{{phase: {}, owner: {}, root_type: {}, key: {}, name: {}, stage: {}, ordinal: {}, qualification: {}, body_fingerprint: {}, dependencies: {{len: {}, _data: [",
-                js_string_lit(entry.phase.as_str())?, js_string_lit(entry.owner.as_str())?,
+                js_string_lit(entry.phase.as_str()), js_string_lit(entry.owner.as_str()),
                 root_type,
-                js_string_lit(&key)?, js_string_lit(entry.diagnostic_name.as_str())?,
+                js_string_lit(&key), js_string_lit(entry.diagnostic_name.as_str()),
                 entry.stage, entry.declaration_ordinal,
-                js_string_lit(entry.qualification.tag())?,
-                js_string_lit(&format!("{:016x}", entry.body_fingerprint))?,
+                js_string_lit(entry.qualification.tag()),
+                js_string_lit(&format!("{:016x}", entry.body_fingerprint)),
                 dependencies.len()).unwrap();
             for dependency in dependencies {
                 let dependency_key = dependency.identity.logical_key(ws, interner);
                 write!(
                     out,
                     "{{key: {}, fingerprint: {}}},",
-                    js_string_lit(&dependency_key)?,
-                    js_string_lit(&format!("{:016x}", dependency.fingerprint))?
+                    js_string_lit(&dependency_key),
+                    js_string_lit(&format!("{:016x}", dependency.fingerprint))
                 )
                 .unwrap();
             }
@@ -216,22 +216,17 @@ pub(super) fn lifecycle_plan_stage_js(
             // the full rationale. A scene thunk resolves the live root for
             // `scene_id` and calls through; it never asks the value its
             // runtime type.
-            let key_lit = js_string_lit(&key)?;
-            let sim_guard = (!entry.sim_wires.is_empty())
-                .then(|| {
-                    entry
-                        .sim_wires
-                        .iter()
-                        .map(|wire| {
-                            Ok(format!(
-                                "__G.__ROCK_ACTIVE_SIM === {}",
-                                js_string_lit(wire.as_str())?
-                            ))
-                        })
-                        .collect::<Result<Vec<_>, CompilerError>>()
-                        .map(|parts| parts.join(" || "))
-                })
-                .transpose()?;
+            let key_lit = js_string_lit(&key);
+            let sim_guard = (!entry.sim_wires.is_empty()).then(|| {
+                entry
+                    .sim_wires
+                    .iter()
+                    .map(|wire| {
+                        format!("__G.__ROCK_ACTIVE_SIM === {}", js_string_lit(wire.as_str()))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" || ")
+            });
             if entry.owner.as_str() == "scene" {
                 out.push_str("]}, func: (function(){var __s = __rock_code_slot_ref(");
                 out.push_str(&key_lit);

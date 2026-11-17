@@ -112,7 +112,7 @@ pub(super) fn emit_tostring_ty(
             "__rock_tostring_ty[{}] = function(v) {{ return {}; }};\n",
             js_string_lit(
                 skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(name.as_str())).as_str()
-            )?,
+            ),
             js_display_expr(&parts)?
         ));
     }
@@ -195,7 +195,7 @@ pub(super) fn emit_inspect_ty(
 /// cdata `__tostring` (`skull::enum_cdata_metatypes`): a unit variant renders
 /// `E::V`, a tuple `E::V { [1] = .. }`, a record `E::V { f = .. }` with its
 /// fields sorted. Name-sorted, emitted from declarations.
-pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> Result<String, CompilerError> {
+pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> String {
     use bone_core::hir::VariantPayload;
 
     let mut names: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
@@ -238,15 +238,15 @@ pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> Result<String, Compile
                 _ => Vec::new(),
             };
             let render = if slots.is_empty() {
-                js_string_lit(&head)?
+                js_string_lit(&head)
             } else {
-                let mut parts = vec![js_string_lit(&format!("{head} {{ "))?];
+                let mut parts = vec![js_string_lit(&format!("{head} {{ "))];
                 for (i, (label, slot)) in slots.iter().enumerate() {
                     let sep = if i == 0 { "" } else { ", " };
-                    parts.push(js_string_lit(&format!("{sep}{label} = "))?);
-                    parts.push(format!("lua_tostring(t[{}])", js_string_lit(slot)?));
+                    parts.push(js_string_lit(&format!("{sep}{label} = ")));
+                    parts.push(format!("lua_tostring(t[{}])", js_string_lit(slot)));
                 }
-                parts.push(js_string_lit(" }")?);
+                parts.push(js_string_lit(" }"));
                 parts.join(" + ")
             };
             body.push_str(&format!("if (g === {tag}) return {render}; "));
@@ -254,20 +254,20 @@ pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> Result<String, Compile
         body.push_str("return \"?\";");
         let key = js_string_lit(
             skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(name.as_str())).as_str(),
-        )?;
+        );
         out.push_str(&format!(
             "__rock_inspect_ty[{key}] = function(t) {{ {body} }};\n\
              __rock_tostring_ty[{key}] = __rock_inspect_ty[{key}];\n"
         ));
     }
-    Ok(out)
+    out
 }
 
 /// Per-type, per-variant descriptors for flat enum tuple payloads whose
 /// scalarized nominal value has a direct record-field walk. They are emitted
 /// from declarations, independently of which enum constructors need singleton
 /// globals, so an inspect reached through a flattened field always has metadata.
-pub(super) fn emit_inspect_enum_payloads(ws: &Workspace) -> Result<String, CompilerError> {
+pub(super) fn emit_inspect_enum_payloads(ws: &Workspace) -> String {
     use bone_core::hir::{TypeCtor, TypeExpr, VariantPayload};
     use bone_core::prelude::TyId;
 
@@ -351,30 +351,33 @@ pub(super) fn emit_inspect_enum_payloads(ws: &Workspace) -> Result<String, Compi
         }
         let enum_name = js_string_lit(
             skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(name.as_str())).as_str(),
-        )?;
+        );
         out.push_str(&format!(
             "__rock_enum_inspect_payloads[{enum_name}] = __rock_enum_inspect_payloads[{enum_name}] || Object.create(null);\n"
         ));
         for (variant_name, positions) in variants {
-            let variant_name = js_string_lit(variant_name.as_str())?;
+            let variant_name = js_string_lit(variant_name.as_str());
             let positions = positions
                 .into_iter()
                 .map(|fields| match fields {
-                    Some(fields) => fields
-                        .iter()
-                        .map(|field| js_string_lit(field.as_str()))
-                        .collect::<Result<Vec<_>, _>>()
-                        .map(|fields| format!("[{}]", fields.join(", "))),
-                    None => Ok("null".to_string()),
+                    Some(fields) => format!(
+                        "[{}]",
+                        fields
+                            .iter()
+                            .map(|field| js_string_lit(field.as_str()))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    None => "null".to_string(),
                 })
-                .collect::<Result<Vec<_>, CompilerError>>()?;
+                .collect::<Vec<_>>();
             out.push_str(&format!(
                 "__rock_enum_inspect_payloads[{enum_name}][{variant_name}] = [{}];\n",
                 positions.join(", ")
             ));
         }
     }
-    Ok(out)
+    out
 }
 
 /// Per-type `__rock_col_mat` registry for every element type the program stores
@@ -439,7 +442,7 @@ fn build_col_mat_defs(
             "__rock_col_mat[{}] = function(v, i) {{ return {body}; }};\n",
             js_string_lit(
                 skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(name.as_str())).as_str()
-            )?
+            )
         ));
     }
     Ok(out)
@@ -457,13 +460,11 @@ fn col_mat_object(
     let (top, groups) = split_leaf_paths(paths.iter().map(|p| (*p, ())));
     let mut parts = vec![format!(
         "__ty: {}",
-        js_string_lit(
-            skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(name.as_str())).as_str()
-        )?
+        js_string_lit(skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(name.as_str())).as_str())
     )];
     for (f, ()) in &top {
-        let col = js_string_lit(&format!("{prefix}{f}"))?;
-        parts.push(format!("{}: v[{col}][i]", js_key(f)?));
+        let col = js_string_lit(&format!("{prefix}{f}"));
+        parts.push(format!("{}: v[{col}][i]", js_key(f)));
     }
     for (head, sub) in &groups {
         let child = nested_field_struct_name(ws, name, head.as_str())?
@@ -479,7 +480,7 @@ fn col_mat_object(
             })?;
         let sub: Vec<ustr::Ustr> = sub.iter().map(|(p, ())| *p).collect();
         let inner = col_mat_object(ws, child, &sub, &format!("{prefix}{head}."))?;
-        parts.push(format!("{}: {inner}", js_key(head)?));
+        parts.push(format!("{}: {inner}", js_key(head)));
     }
     Ok(format!("({{{}}})", parts.join(", ")))
 }
@@ -644,7 +645,7 @@ fn embed_view_expr(
     let s = &ws.module(sid.module).structs[sid.def];
     let mut parts = vec![format!(
         "__ty: {}",
-        js_string_lit(skull_mir::mangle::type_symbol(ws, ty_name).as_str())?
+        js_string_lit(skull_mir::mangle::type_symbol(ws, ty_name).as_str())
     )];
     for f in &s.fields {
         let key = format!("{prefix}.{}", f.name);
@@ -657,14 +658,14 @@ fn embed_view_expr(
         )
         .map_err(|e| err(e.message))?;
         let val =
-            inline_view_expr(ws, &key, &plan)?.unwrap_or(format!("t[{}]", js_string_lit(&key)?));
-        parts.push(format!("{}: {val}", js_string_lit(f.name.as_str())?));
+            inline_view_expr(ws, &key, &plan)?.unwrap_or(format!("t[{}]", js_string_lit(&key)));
+        parts.push(format!("{}: {val}", js_string_lit(f.name.as_str())));
     }
     let built = format!("{{{}}}", parts.join(", "));
     if !nullable {
         return Ok(built);
     }
-    let p = js_string_lit(prefix)?;
+    let p = js_string_lit(prefix);
     Ok(format!(
         "((t[{p}] === null || t[{p}] === undefined) ? null : {built})"
     ))
@@ -684,24 +685,24 @@ fn inline_view_expr(
     else {
         return Ok(None);
     };
-    let tag = format!("t[{}]", js_string_lit(&format!("{prefix}.#"))?);
+    let tag = format!("t[{}]", js_string_lit(&format!("{prefix}.#")));
     let mut payload = Vec::new();
     for i in 0..shape.tuple_width() {
         payload.push(format!(
             "{i}, t[{}]",
-            js_string_lit(&format!("{prefix}.{i}"))?
+            js_string_lit(&format!("{prefix}.{i}"))
         ));
     }
     for field in shape.record_fields() {
         payload.push(format!(
             "{}, t[{}]",
-            js_string_lit(field.as_str())?,
-            js_string_lit(&format!("{prefix}.{field}"))?
+            js_string_lit(field.as_str()),
+            js_string_lit(&format!("{prefix}.{field}"))
         ));
     }
     Ok(Some(format!(
         "({tag} == null ? null : __rock_make_enum({tag}, {}, [{}]))",
-        js_string_lit(skull_mir::mangle::type_symbol(ws, shape.name()).as_str())?,
+        js_string_lit(skull_mir::mangle::type_symbol(ws, shape.name()).as_str()),
         payload.join(", ")
     )))
 }
@@ -733,8 +734,8 @@ fn build_inspect_ty_defs(
         }
         let header = js_string_lit(
             skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(name.as_str())).as_str(),
-        )?;
-        let display_header = js_string_lit(bone_core::modules::display_name(name.as_str()))?;
+        );
+        let display_header = js_string_lit(bone_core::modules::display_name(name.as_str()));
         let value_plan = if skull_mir::lower::has_value_plan(s) {
             let representation = plans.get(name).ok_or_else(|| {
                 err(format!(
@@ -772,7 +773,7 @@ fn build_inspect_ty_defs(
                             f.name
                         )));
                     }
-                    let n = js_string_lit(f.name.as_str())?;
+                    let n = js_string_lit(f.name.as_str());
                     Ok(format!("[{n}, t[{n}]]"))
                 })
                 .collect::<Result<_, CompilerError>>()?;
@@ -786,7 +787,7 @@ fn build_inspect_ty_defs(
         let pairs: Vec<String> = fields
             .iter()
             .map(|f| {
-                let n = js_string_lit(f.name.as_str())?;
+                let n = js_string_lit(f.name.as_str());
                 let plan = skull_mir::lower::struct_field_plan(
                     ws,
                     bone_core::hir::FnBackend::Js,
@@ -836,8 +837,8 @@ pub(super) fn build_vt_eq_defs(
             |key: &str, equality: skull_mir::lower::GcFieldEq| -> Result<String, CompilerError> {
                 let (a, b) = if key.contains('.') {
                     (
-                        format!("a[{}]", js_string_lit(key)?),
-                        format!("b[{}]", js_string_lit(key)?),
+                        format!("a[{}]", js_string_lit(key)),
+                        format!("b[{}]", js_string_lit(key)),
                     )
                 } else {
                     (format!("a.{key}"), format!("b.{key}"))
@@ -875,7 +876,7 @@ pub(super) fn build_vt_eq_defs(
             "__rock_vt_eq[{}] = function(a, b) {{ return {body}; }};\n",
             js_string_lit(
                 skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(name.as_str())).as_str()
-            )?
+            )
         ));
     }
     Ok(out)

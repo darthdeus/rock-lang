@@ -11,7 +11,7 @@ pub(crate) fn annotation_value_js(v: &bone_core::hir::AnnoValue) -> Option<Strin
         A::Int(i) => i.to_string(),
         A::Float(f) => js_number(*f).ok()?,
         A::Bool(b) => b.to_string(),
-        A::String(s) => js_string_lit(s.as_str()).ok()?,
+        A::String(s) => js_string_lit(s.as_str()),
         A::Ident(id) => id.name.as_str().to_string(),
         A::IdentList(_) => return None,
         A::Other => return None,
@@ -62,10 +62,10 @@ pub(super) fn decorator_application_lines_js(
         })?;
         let identity = skull_mir::code_identity::CodeIdentity::Named(instance);
         let key = identity.logical_key(ws, interner);
-        let code_ref = format!("__rock_code_slot_ref({})", js_string_lit(&key)?);
+        let code_ref = format!("__rock_code_slot_ref({})", js_string_lit(&key));
         let descriptor = format!(
             "{{name: {}, params: [], func: {code_ref}}}",
-            js_string_lit(bone_core::modules::display_name(app.function.name.as_str()))?
+            js_string_lit(bone_core::modules::display_name(app.function.name.as_str()))
         );
         let mut call_args = vec![descriptor];
         call_args.extend(decorator_call_args_js(ws, dmid, did, app.annotation)?);
@@ -555,7 +555,7 @@ fn global_init_line(
 ) -> Result<GlobalInitLine, CompilerError> {
     let slot = |name: Ustr, scalar: bool| {
         if g.is_const {
-            return js_member("__G", name.as_str());
+            return Ok(js_member("__G", name.as_str()));
         }
         let key = if scalar { symbol_of_key(name) } else { name };
         let key = state_slots.get(&key).ok_or_else(|| {

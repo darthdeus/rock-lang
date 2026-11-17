@@ -152,15 +152,15 @@ fn emit_js_constructor(
     if !defer_keys.is_empty() {
         let list: Vec<String> = defer_keys
             .iter()
-            .map(|key| Ok(format!("__rock_code_slot_ref({})", js_string_lit(key)?)))
-            .collect::<Result<_, CompilerError>>()?;
+            .map(|key| format!("__rock_code_slot_ref({})", js_string_lit(key)))
+            .collect();
         init.push(format!("__defers: [{}]", list.join(", ")));
     }
     for ((kind, _), key) in lowered.hooks.iter().zip(hook_keys) {
         let field = kind.slot();
         init.push(format!(
             "{field}: __rock_code_slot_ref({})",
-            js_string_lit(key)?
+            js_string_lit(key)
         ));
     }
     let step_call = if lowered.needs_protected_resume {
@@ -172,7 +172,7 @@ fn emit_js_constructor(
         let mut box_fields = format!(
             "{{ __variant: s.{tag}, __ty: {ty}",
             tag = skull_mir::lower::yield_slot(0),
-            ty = js_string_lit(skull_mir::mangle::symbol_of_key(ch.name()).as_str())?,
+            ty = js_string_lit(skull_mir::mangle::symbol_of_key(ch.name()).as_str()),
         );
         // 0-based positional keys: JS `TupleIndex` reads `base[i]` (no +1 like Lua's
         // array keys), so a boxed-enum consumer of a yielded channel value projects
@@ -199,9 +199,9 @@ fn emit_js_constructor(
         let resume = plan.resume();
         let advance_ref = format!(
             "__rock_code_slot_ref({})",
-            js_string_lit(advance_key.expect("advance CodeRef"))?
+            js_string_lit(advance_key.expect("advance CodeRef"))
         );
-        let resume_ref = format!("__rock_code_slot_ref({})", js_string_lit(resume_key)?);
+        let resume_ref = format!("__rock_code_slot_ref({})", js_string_lit(resume_key));
         return Ok(format!(
             "function {advance}(s, arg) {{\n\
              \x20 if (s.__state < 0) return true;\n\
@@ -222,7 +222,7 @@ fn emit_js_constructor(
         ));
     }
     let resume = plan.resume();
-    let resume_ref = format!("__rock_code_slot_ref({})", js_string_lit(resume_key)?);
+    let resume_ref = format!("__rock_code_slot_ref({})", js_string_lit(resume_key));
     Ok(format!(
         "function {resume}(s, arg) {{\n\
          \x20 if (s.__state < 0) return null;\n\

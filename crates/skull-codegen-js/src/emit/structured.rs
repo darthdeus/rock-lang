@@ -169,9 +169,7 @@ impl Emitter<'_> {
                     return false;
                 }
                 for path in paths {
-                    let Ok(key) = js_string_lit(path.as_str()) else {
-                        return false;
-                    };
+                    let key = js_string_lit(path.as_str());
                     out.push(format!("{prefix}[{key}]"));
                 }
                 true

@@ -24,7 +24,7 @@ impl Emitter<'_> {
             Inst::Const(Lit::Bool(b)) => b.to_string(),
             Inst::Const(Lit::Nil) => "null".to_string(),
             Inst::Const(Lit::Omitted) => OMITTED_ARG.to_string(),
-            Inst::Const(Lit::Str(s)) => js_string_lit(s.as_str())?,
+            Inst::Const(Lit::Str(s)) => js_string_lit(s.as_str()),
             Inst::Load(c) => cell_name(self.mf, *c),
             Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => bin(a, "+", b, self)?,
             Inst::IntSub(a, b) | Inst::FloatSub(a, b) => bin(a, "-", b, self)?,
@@ -177,7 +177,7 @@ impl Emitter<'_> {
                     .code_slots
                     .get(identity)
                     .ok_or_else(|| err("JS: Rock function value has no CodeRef slot"))?;
-                format!("__rock_code_slot_ref({})", js_string_lit(key)?)
+                format!("__rock_code_slot_ref({})", js_string_lit(key))
             }
             Inst::Global(name)
                 if self.hoisted.contains(name)
@@ -191,14 +191,14 @@ impl Emitter<'_> {
                 self.globals.fns[name].clone()
             }
             Inst::Global(name) if self.globals.const_globals.contains(name) => {
-                js_member("__G", name.as_str())?
+                js_member("__G", name.as_str())
             }
             // Module-level `let`/`global` state: scoped so no body local can
             // collide with or shadow it.
             Inst::Global(name) => match self.globals.state.get(&symbol_of_key(*name)) {
                 Some(slot) => {
                     self.globals.uses_storage.set(true);
-                    format!("__rock_globals[{}]", js_string_lit(slot)?)
+                    format!("__rock_globals[{}]", js_string_lit(slot))
                 }
                 None if self.globals.enum_globals.contains(name) => name.to_string(),
                 None => {
@@ -220,7 +220,7 @@ impl Emitter<'_> {
                             .ok_or_else(|| err("JS: Rock closure has no CodeRef slot"))?;
                         parts.push(format!(
                             "__slot: __rock_code_slot_ref({})",
-                            js_string_lit(key)?
+                            js_string_lit(key)
                         ));
                     } else {
                         return Err(err(
@@ -256,10 +256,10 @@ impl Emitter<'_> {
                     } else {
                         &name
                     };
-                    parts.push(format!("__ty: {}", js_string_lit(tag)?));
+                    parts.push(format!("__ty: {}", js_string_lit(tag)));
                 }
                 for (f, v) in fields {
-                    parts.push(format!("{}: {}", js_key(f)?, self.render_val(*v)?));
+                    parts.push(format!("{}: {}", js_key(f), self.render_val(*v)?));
                 }
                 format!("({{{}}})", parts.join(", "))
             }
@@ -310,10 +310,10 @@ impl Emitter<'_> {
                 }
                 let mut parts = vec![format!(
                     "__ty: {}",
-                    js_string_lit(skull_mir::mangle::type_symbol(self.ws, *name).as_str())?
+                    js_string_lit(skull_mir::mangle::type_symbol(self.ws, *name).as_str())
                 )];
                 for (f, v) in fields {
-                    parts.push(format!("{}: {}", js_key(f)?, self.render_val(*v)?));
+                    parts.push(format!("{}: {}", js_key(f), self.render_val(*v)?));
                 }
                 format!("({{{}}})", parts.join(", "))
             }
@@ -328,7 +328,7 @@ impl Emitter<'_> {
                 ty,
                 positional,
                 named,
-            } => self.render_make_enum(&js_string_lit(tag.as_str())?, ty, positional, named)?,
+            } => self.render_make_enum(&js_string_lit(tag.as_str()), ty, positional, named)?,
             Inst::MakeEnumDyn {
                 tag,
                 ty,
@@ -413,7 +413,7 @@ impl Emitter<'_> {
                     ),
                     ContainerKind::Record => {
                         if let Inst::Const(Lit::Str(field)) = &self.mf.insts[*index] {
-                            js_member(&b, field.as_str())?
+                            js_member(&b, field.as_str())
                         } else {
                             format!("{b}[{i}]")
                         }
@@ -534,7 +534,7 @@ impl Emitter<'_> {
             // A general field read is JS property access. NativeBuffer `.ptr`/
             // `.len`, a leaf VIEW field and Vec `._data`/`.len` are all the same
             // shape; a read THROUGH a buffer element is decomposed by lowering.
-            Inst::Field { base, field, .. } => js_member(&self.render_val(*base)?, field)?,
+            Inst::Field { base, field, .. } => js_member(&self.render_val(*base)?, field),
             // Presence is a bool on the scalar ABI, so JS truthiness agrees with
             // luajit's `present and value or nil`.
             Inst::MakeNullableValue { present, value } => format!(
@@ -549,7 +549,7 @@ impl Emitter<'_> {
             Inst::Format { value, fmt } => {
                 format!(
                     "__rock_sprintf({}, {})",
-                    js_string_lit(fmt.as_str())?,
+                    js_string_lit(fmt.as_str()),
                     self.render_val(*value)?
                 )
             }
@@ -574,9 +574,9 @@ impl Emitter<'_> {
             } => {
                 let mut s = format!(
                     "{{{}: {{repr: {}, elem: {}, cap: {}}}",
-                    js_string_lit(skull_mir::mir::VEC_COLUMN_HEADER_FIELD)?,
-                    js_string_lit(skull_mir::mir::VEC_COLUMN_REPR)?,
-                    js_string_lit(skull_mir::mangle::type_symbol(self.ws, *elem).as_str())?,
+                    js_string_lit(skull_mir::mir::VEC_COLUMN_HEADER_FIELD),
+                    js_string_lit(skull_mir::mir::VEC_COLUMN_REPR),
+                    js_string_lit(skull_mir::mangle::type_symbol(self.ws, *elem).as_str()),
                     self.render_val(*capacity)?,
                 );
                 for (name, vs) in columns {
@@ -586,7 +586,7 @@ impl Emitter<'_> {
                         .collect::<Result<Vec<_>, _>>()?;
                     s.push_str(&format!(
                         ", {}: [{}]",
-                        js_string_lit(name.as_str())?,
+                        js_string_lit(name.as_str()),
                         vals.join(", ")
                     ));
                 }
@@ -595,8 +595,8 @@ impl Emitter<'_> {
             }
             Inst::MakeVecColumnHeader { elem, capacity, .. } => format!(
                 "{{repr: {}, elem: {}, cap: {}}}",
-                js_string_lit(skull_mir::mir::VEC_COLUMN_REPR)?,
-                js_string_lit(skull_mir::mangle::type_symbol(self.ws, *elem).as_str())?,
+                js_string_lit(skull_mir::mir::VEC_COLUMN_REPR),
+                js_string_lit(skull_mir::mangle::type_symbol(self.ws, *elem).as_str()),
                 self.render_val(*capacity)?,
             ),
             Inst::MakeVecStrided {
@@ -614,9 +614,9 @@ impl Emitter<'_> {
                 format!(
                     "{{_data: [{}], len: {len}, __ty: \"Vec\", {}: {{repr: {}, elem: {}, stride: {stride}, cap: {}}}}}",
                     values.join(", "),
-                    js_string_lit(skull_mir::mir::VEC_COLUMN_HEADER_FIELD)?,
-                    js_string_lit(skull_mir::mir::VEC_STRIDED_REPR)?,
-                    js_string_lit(skull_mir::mangle::type_symbol(self.ws, *elem).as_str())?,
+                    js_string_lit(skull_mir::mir::VEC_COLUMN_HEADER_FIELD),
+                    js_string_lit(skull_mir::mir::VEC_STRIDED_REPR),
+                    js_string_lit(skull_mir::mangle::type_symbol(self.ws, *elem).as_str()),
                     self.render_val(*capacity)?,
                 )
             }
@@ -627,8 +627,8 @@ impl Emitter<'_> {
                 ..
             } => format!(
                 "{{repr: {}, elem: {}, stride: {stride}, cap: {}}}",
-                js_string_lit(skull_mir::mir::VEC_STRIDED_REPR)?,
-                js_string_lit(skull_mir::mangle::type_symbol(self.ws, *elem).as_str())?,
+                js_string_lit(skull_mir::mir::VEC_STRIDED_REPR),
+                js_string_lit(skull_mir::mangle::type_symbol(self.ws, *elem).as_str()),
                 self.render_val(*capacity)?,
             ),
             // The element index is checked ONCE here; each per-leaf access then
@@ -702,7 +702,7 @@ impl Emitter<'_> {
             }
             let mut parts = vec![format!(
                 "__ty: {}",
-                js_string_lit(skull_mir::mangle::type_symbol(self.ws, name).as_str())?
+                js_string_lit(skull_mir::mangle::type_symbol(self.ws, name).as_str())
             )];
             for ((key, value), tag) in fields.iter().zip(presence) {
                 let rendered = self.render_val(*value)?;
@@ -711,7 +711,7 @@ impl Emitter<'_> {
                 } else {
                     rendered
                 };
-                parts.push(format!("{}: {rendered}", js_key(key)?));
+                parts.push(format!("{}: {rendered}", js_key(key)));
             }
             return Ok(format!("({{{}}})", parts.join(", ")));
         }
@@ -720,10 +720,10 @@ impl Emitter<'_> {
         let (top, groups) = split_leaf_paths(fields.iter().copied());
         let mut parts = vec![format!(
             "__ty: {}",
-            js_string_lit(skull_mir::mangle::type_symbol(self.ws, name).as_str())?
+            js_string_lit(skull_mir::mangle::type_symbol(self.ws, name).as_str())
         )];
         for (key, value) in &top {
-            parts.push(format!("{}: {}", js_key(key)?, self.render_val(*value)?));
+            parts.push(format!("{}: {}", js_key(key), self.render_val(*value)?));
         }
         for (head, sub) in &groups {
             let child =
@@ -736,7 +736,7 @@ impl Emitter<'_> {
                 .plan_nominal_value(self.ws, bone_core::hir::FnBackend::Js, child)
                 .map_err(|e| err(e.message))?;
             let inner = self.render_leaf_form_value_struct(child, child_rep, sub)?;
-            parts.push(format!("{}: {inner}", js_key(head)?));
+            parts.push(format!("{}: {inner}", js_key(head)));
         }
         Ok(format!("({{{}}})", parts.join(", ")))
     }
@@ -758,12 +758,12 @@ impl Emitter<'_> {
             kv.push(self.render_val(*id)?);
         }
         for (name, id) in named {
-            kv.push(js_string_lit(name.as_str())?);
+            kv.push(js_string_lit(name.as_str()));
             kv.push(self.render_val(*id)?);
         }
         Ok(format!(
             "__rock_make_enum({tag_expr}, {}, [{}])",
-            js_string_lit(skull_mir::mangle::type_symbol(self.ws, *ty).as_str())?,
+            js_string_lit(skull_mir::mangle::type_symbol(self.ws, *ty).as_str()),
             kv.join(", ")
         ))
     }
@@ -810,7 +810,7 @@ impl Emitter<'_> {
         let value = self.render_val(id)?;
         Ok(format!(
             "__rock_inspect_value({value}, {}, \"root\", null, {prec})",
-            js_string_lit(indent)?
+            js_string_lit(indent)
         ))
     }
 
@@ -829,9 +829,9 @@ impl Emitter<'_> {
         let display_name = bone_core::modules::display_name(name.as_str());
         let multiline = order.len() > 2;
         let mut expr = if multiline {
-            js_string_lit(&format!("{display_name} {{\n"))?
+            js_string_lit(&format!("{display_name} {{\n"))
         } else {
-            js_string_lit(&format!("{display_name} {{ "))?
+            js_string_lit(&format!("{display_name} {{ "))
         };
         let child_indent = if multiline {
             format!("{indent}  ")
@@ -842,7 +842,7 @@ impl Emitter<'_> {
             if i > 0 {
                 expr.push_str(&format!(
                     " + {}",
-                    js_string_lit(if multiline { ",\n" } else { ", " })?
+                    js_string_lit(if multiline { ",\n" } else { ", " })
                 ));
             }
             let label = if multiline {
@@ -850,7 +850,7 @@ impl Emitter<'_> {
             } else {
                 format!("{fname} = ")
             };
-            expr.push_str(&format!(" + {}", js_string_lit(&label)?));
+            expr.push_str(&format!(" + {}", js_string_lit(&label)));
             let rendered = if let Some((_, vid)) = exact.iter().find(|(f, _)| f == fname) {
                 if let Some(child_name) = nested_field_struct_name(self.ws, name, fname)? {
                     self.render_value_struct_inspect(child_name, *vid, cyc, prec, &child_indent)?
@@ -876,7 +876,7 @@ impl Emitter<'_> {
         } else {
             " }".to_string()
         };
-        expr.push_str(&format!(" + {}", js_string_lit(&close)?));
+        expr.push_str(&format!(" + {}", js_string_lit(&close)));
         Ok(format!("({expr})"))
     }
 

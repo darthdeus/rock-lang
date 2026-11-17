@@ -98,7 +98,7 @@ pub(super) fn assemble_program_core(
     }
     out.push_str(&tables);
     stable.push_str(&tables);
-    let json_types = st.json_types.render()?;
+    let json_types = st.json_types.render();
     out.push_str(&json_types);
     stable.push_str(&json_types);
     let ret_slots = ret_slot_decls(
@@ -277,11 +277,11 @@ pub(super) fn check_bodies(
             .map_err(|error| err(error.message))?;
     let registry = registry.as_ref();
     let mut tables = emit_enum_singletons(&st.gctx, &st.enum_defs);
-    tables.push_str(&emit_inspect_enum_payloads(ws)?);
+    tables.push_str(&emit_inspect_enum_payloads(ws));
     tables.push_str(&emit_vt_eq(ws, registry)?);
     tables.push_str(&emit_tostring_ty(ws, registry)?);
     tables.push_str(&emit_inspect_ty(ws, registry)?);
-    tables.push_str(&emit_inspect_cdata_enums(ws)?);
+    tables.push_str(&emit_inspect_cdata_enums(ws));
     tables.push_str(&emit_col_mat(ws, registry)?);
     Ok((hoisted, tables))
 }
@@ -332,7 +332,7 @@ pub(super) fn globals_open_js(
 ) -> Result<String, CompilerError> {
     Ok(format!(
         "__rock_globals_open({});\n{}",
-        js_string_lit(global_layout)?,
+        js_string_lit(global_layout),
         globals_directory_js(ws, scx, state)?
     ))
 }
@@ -353,18 +353,18 @@ fn globals_directory_js(
             .physical
             .iter()
             .map(|leaf| js_string_lit(leaf))
-            .collect::<Result<Vec<_>, _>>()?
+            .collect::<Vec<_>>()
             .join(",");
         let slots = entry
             .slots
             .iter()
             .map(|slot| js_string_lit(slot))
-            .collect::<Result<Vec<_>, _>>()?
+            .collect::<Vec<_>>()
             .join(",");
         out.push_str(&format!(
             "{{name:{},identity:{},physical:[{physical}],slots:[{slots}]}},",
-            js_string_lit(&entry.name)?,
-            js_string_lit(&entry.identity)?,
+            js_string_lit(&entry.name),
+            js_string_lit(&entry.identity),
         ));
     }
     out.push_str("]);\n");
