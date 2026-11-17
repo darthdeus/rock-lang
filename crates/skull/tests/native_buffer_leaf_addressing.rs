@@ -36,10 +36,7 @@ fn main() {
 fn nested_value_store_materializes_no_ctor() {
     let lua = emit_module(NESTED_STORE);
     let body = function_body(&lua, "fill");
-    assert!(
-        !body.contains("V2_ct("),
-        "a nested value field must be stored leaf-wise, not as a whole cdata:\n{body}"
-    );
+    assert!(!body.contains("V2_ct("));
 }
 
 #[test]
@@ -49,10 +46,7 @@ fn nested_value_store_takes_no_slot_reference() {
     // is taken at all.
     let lua = emit_module(NESTED_STORE);
     let body = function_body(&lua, "fill");
-    assert!(
-        !body.contains("__nb_checked_get("),
-        "leaf addressing must not take a struct-slot reference:\n{body}"
-    );
+    assert!(!body.contains("__nb_checked_get("));
 }
 
 const NESTED_READ: &str = r#"
@@ -91,10 +85,7 @@ fn a_whole_element_store_bounds_checks_exactly_once_first() {
     let body = function_body(&lua, "fill");
 
     let checks = body.matches("checked").count();
-    assert_eq!(
-        checks, 1,
-        "one element store must bounds-check once, not once per leaf; found {checks}:\n{body}"
-    );
+    assert_eq!(checks, 1);
 
     // Ordering: the check has to come before the buffer is addressed through a
     // typed view (`r6 = r3.__vf`), which is where every leaf write goes.
@@ -102,10 +93,7 @@ fn a_whole_element_store_bounds_checks_exactly_once_first() {
     let first_view_use = body
         .find(".__v")
         .unwrap_or_else(|| panic!("a typed-view use, so the ordering below is checked:\n{body}"));
-    assert!(
-        check_at < first_view_use,
-        "the bounds check must PRECEDE the leaf writes it guards:\n{body}"
-    );
+    assert!(check_at < first_view_use);
 }
 
 #[test]
@@ -114,10 +102,7 @@ fn nested_value_read_takes_no_slot_reference() {
     // (`r1 = __nb_checked_get(..)`, `r2 = r1.pos`). Both must be gone.
     let lua = emit_module(NESTED_READ);
     let body = function_body(&lua, "total");
-    assert!(
-        !body.contains("__nb_checked_get("),
-        "a leaf read must address the view directly, not take a slot ref:\n{body}"
-    );
+    assert!(!body.contains("__nb_checked_get("));
 }
 
 /// A read of ONE field must load one leaf. `is_dead_value` treats every
@@ -150,22 +135,13 @@ fn a_single_field_leaf_read_loads_only_that_leaf() {
     // Count the view-indexed loads. `Vert` has 6 leaves; only `pos.x` is used.
     let loads = body.matches("[(").count() + body.matches("[__").count();
     let view_reads = body.matches(".__v").count();
-    assert!(
-        view_reads <= 1,
-        "a one-field read must bind at most one typed view, found {view_reads}:\n{body}"
-    );
-    assert!(
-        loads <= 1,
-        "a one-field read must emit one leaf load, found {loads}:\n{body}"
-    );
+    assert!(view_reads <= 1);
+    assert!(loads <= 1);
     // The PRECONDITION for dropping the other loads: the element's bounds check
     // is hoisted, so each leaf read carries no error of its own. If this ever
     // stops being emitted, the DCE exemption is deleting a real check --
     // `leaf_read_still_bounds_checks` in the .rock suite is the runtime half.
-    assert!(
-        body.contains("__nb_checked_index("),
-        "the hoisted bounds check must survive; it is what makes the leaf loads pure:\n{body}"
-    );
+    assert!(body.contains("__nb_checked_index("));
 }
 
 /// An `f32` constructor rounds each leaf it builds. Once inlined into a store
@@ -199,16 +175,7 @@ fn main() {
 fn an_inlined_f32_ctor_store_rounds_only_in_the_float_view() {
     let lua = emit_module(F32_CTOR_STORE);
     let body = function_body(&lua, "fill_f32");
-    assert!(
-        !body.contains("fvert("),
-        "precondition: the constructor call is inlined:\n{body}"
-    );
-    assert!(
-        body.contains(".__vf"),
-        "precondition: the leaves store through the float view:\n{body}"
-    );
-    assert!(
-        !body.contains("__rock_f32("),
-        "a float-view store already rounds; the inlined ctor's rounding is redundant:\n{body}"
-    );
+    assert!(!body.contains("fvert("));
+    assert!(body.contains(".__vf"));
+    assert!(!body.contains("__rock_f32("));
 }

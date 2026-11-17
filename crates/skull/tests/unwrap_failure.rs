@@ -12,8 +12,8 @@ fn unwrap_sites_call_one_failure_helper() {
     let lua = emit_module(SRC);
     for name in ["get", "need"] {
         let body = function_body(&lua, name);
-        assert!(!body.contains("debug.traceback"), "{body}");
-        assert!(!body.contains("error("), "{body}");
+        assert!(!body.contains("debug.traceback"));
+        assert!(!body.contains("error("));
     }
     let driver = format!(
         r#"{lua}

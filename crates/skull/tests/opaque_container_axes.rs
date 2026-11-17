@@ -47,20 +47,14 @@ fn main() {
 #[test]
 fn an_arena_at_a_column_element_rejects() {
     let msg = emit_rejection(ARENA_PARAM);
-    assert!(
-        msg.contains("Arena<G>") && msg.contains("probe"),
-        "must name the container and the callee, got: {msg}"
-    );
+    assert!(msg.contains("Arena<G>") && msg.contains("probe"));
 }
 
 /// Bounds the axis on the ELEMENT. Without it, a change that rejected every
 /// `Arena` param would leave the case above green and read as progress.
 #[test]
 fn an_arena_at_a_boxed_element_is_admitted() {
-    assert!(
-        crate::common::try_emit_module(ARENA_BOXED_ELEM).is_ok(),
-        "a boxed element keeps `data._data`, so the same body stays valid"
-    );
+    assert!(crate::common::try_emit_module(ARENA_BOXED_ELEM).is_ok());
 }
 
 /// The CONSTRUCTOR mirror (2.4): an opaque body whose declared RETURN is a
@@ -116,10 +110,7 @@ fn main() {
 #[test]
 fn an_opaque_body_returning_a_column_vec_rejects() {
     let msg = emit_rejection(CTOR_RETURNS_COLUMN_VEC);
-    assert!(
-        msg.contains("cannot BUILD column-stored `[G]`") && msg.contains("make"),
-        "got: {msg}"
-    );
+    assert!(msg.contains("cannot BUILD column-stored `[G]`") && msg.contains("make"));
 }
 
 #[test]
@@ -130,9 +121,5 @@ fn an_opaque_body_returning_a_boxed_vec_is_admitted() {
 #[test]
 fn the_stdlib_constructors_still_mint_column_storage() {
     let lua = crate::common::try_emit_module(STDLIB_CTORS_STILL_ROUTE).expect("must emit");
-    assert_eq!(
-        crate::common::run_main(&lua),
-        "135",
-        "the three constructors mint COLUMN storage, so each leaf reads back"
-    );
+    assert_eq!(crate::common::run_main(&lua), "135");
 }

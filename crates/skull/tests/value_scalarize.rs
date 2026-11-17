@@ -89,20 +89,14 @@ fn value_struct_with_whole_use_keeps_cdata() {
     let lua = emit_module(VALUE_FIELD_AND_WHOLE_USE);
     let body = function_body(&lua, "coexist");
     // The whole-struct argument escapes, so the cdata must be KEPT (not SROA'd).
-    assert!(
-        body.contains("Color_ct("),
-        "a value struct used as a whole (boxed argument) must keep its cdata:\n{body}"
-    );
+    assert!(body.contains("Color_ct("));
     // The separate field read `c.r` folds to its construction operand (no `.r`
     // projection needed), since the value struct is immutable.
-    assert!(
-        !body.contains(".r"),
-        "the immutable field read should fold to the operand, not project `.r`:\n{body}"
-    );
+    assert!(!body.contains(".r"));
     // Runtime guard against a BAD fold (e.g. an uninitialized-cell read): the value
     // must be exactly 33.
     require_luajit();
-    assert_eq!(run_main(&lua), "33", "coexist must compute correctly");
+    assert_eq!(run_main(&lua), "33");
 }
 
 #[test]
@@ -111,14 +105,8 @@ fn value_struct_field_reads_dont_materialize_cdata() {
     let hot = function_body(&lua, "hot");
     // The inlined value structs are consumed only by field reads, so neither
     // ctor should survive in the hot loop -- SROA splits the cells into scalars.
-    assert!(
-        !hot.contains("FixVec2_ct("),
-        "FixVec2 cdata ctor survived inlining in hot() (should scalarize away):\n{hot}"
-    );
-    assert!(
-        !hot.contains("IVec2_ct("),
-        "IVec2 cdata ctor survived inlining in hot() (should scalarize away):\n{hot}"
-    );
+    assert!(!hot.contains("FixVec2_ct("));
+    assert!(!hot.contains("IVec2_ct("));
 }
 
 /// Storing a value-struct literal into a `NativeBuffer<value>` element writes
@@ -159,25 +147,13 @@ fn native_buffer_value_store_writes_leaves_through_views() {
     let body = function_body(&lua, "fill");
     // Leaf form: the element is bounds-checked ONCE by index, then each leaf is
     // written through its own view -- no slot reference is taken at all.
-    assert!(
-        body.contains("__nb_checked_index("),
-        "NativeBuffer<value> store should bounds-check the index:\n{body}"
-    );
-    assert!(
-        !body.contains("__nb_checked_get("),
-        "leaf addressing must not take a slot reference:\n{body}"
-    );
+    assert!(body.contains("__nb_checked_index("));
+    assert!(!body.contains("__nb_checked_get("));
     // NOT the packed form (build the whole cdata and copy it in).
-    assert!(
-        !body.contains("__nb_checked_set("),
-        "NativeBuffer<value> store should not build+copy a whole cdata:\n{body}"
-    );
+    assert!(!body.contains("__nb_checked_set("));
     // No ctor survives -- neither the element's nor a nested field's.
     for ct in ["Vert_ct(", "V2_ct("] {
-        assert!(
-            !body.contains(ct),
-            "`{ct}` must not survive the store:\n{body}"
-        );
+        assert!(!body.contains(ct));
     }
 }
 
@@ -202,15 +178,9 @@ fn generic_value_struct_rides_scalar_abi() {
     let lua = emit_module(GENERIC_VALUE_SCALARIZE);
     let sum = function_body(&lua, "pair_sum");
     // Scalarized params: two leaf args, not a single boxed table.
-    assert!(
-        !sum.contains("Pair_vt") && !sum.contains("Pair_ct"),
-        "pair_sum must scalarize its generic value param (no materialization):\n{sum}"
-    );
+    assert!(!sum.contains("Pair_vt") && !sum.contains("Pair_ct"));
     let drive = function_body(&lua, "drive");
-    assert!(
-        !drive.contains("Pair_vt") && !drive.contains("Pair_ct"),
-        "a non-escaping generic value chain must not materialize a table:\n{drive}"
-    );
+    assert!(!drive.contains("Pair_vt") && !drive.contains("Pair_ct"));
 }
 
 const NESTED_SCALAR_ABI: &str = r#"
@@ -249,11 +219,7 @@ fn nested_scalar_abi_leaf_params_are_injective() {
     let mut uniq = names.clone();
     uniq.sort_unstable();
     uniq.dedup();
-    assert_eq!(
-        uniq.len(),
-        names.len(),
-        "nested value leaf params must be distinct, got {names:?} in:\n{f}"
-    );
+    assert_eq!(uniq.len(), names.len());
 }
 
 const UNDERSCORE_FIELD_NO_COLLISION: &str = r#"
@@ -332,11 +298,7 @@ fn main() {
 fn unmarked_value_through_fn_value_rejects() {
     let err = crate::common::try_emit_module(UNMARKED_VALUE_VIA_FN_VALUE)
         .expect_err("an unreconcilable fn-value ABI must reject");
-    assert!(
-        err.message.contains("cannot be taken as a fn value") && err.message.contains("probe"),
-        "the rejection must name the fn and the reason, got: {}",
-        err.message
-    );
+    assert!(err.message.contains("cannot be taken as a fn value") && err.message.contains("probe"));
 }
 
 /// The NULLABLE spelling of [`unmarked_value_through_fn_value_rejects`], and the
@@ -350,11 +312,7 @@ fn unmarked_value_through_fn_value_rejects() {
 fn unmarked_value_through_a_nullable_fn_value_still_rejects() {
     let err = crate::common::try_emit_module(UNMARKED_VALUE_VIA_NULLABLE_FN_VALUE)
         .expect_err("a nullable fn-value reference must not launder an unreconcilable ABI");
-    assert!(
-        err.message.contains("cannot be taken as a fn value") && err.message.contains("probe"),
-        "the rejection must name the fn and the reason, got: {}",
-        err.message
-    );
+    assert!(err.message.contains("cannot be taken as a fn value") && err.message.contains("probe"));
 }
 
 /// POSITIVE CONTROL for the `value_leaf_name_collisions` rejection: a `__`-bearing
@@ -370,20 +328,10 @@ fn non_colliding_underscore_field_still_scalarizes() {
     let lua = emit_module(UNDERSCORE_FIELD_NO_COLLISION);
     let f = function_body(&lua, "fine");
     for leaf in ["r__tl__z", "r__tl__x", "r__tl__y"] {
-        assert!(
-            f.contains(leaf),
-            "leaf param `{leaf}` must be emitted:\n{f}"
-        );
+        assert!(f.contains(leaf));
     }
-    assert!(
-        !f.contains("r__tl__z, r__tl__z"),
-        "the non-colliding leaves must stay distinct:\n{f}"
-    );
-    assert_eq!(
-        crate::common::run_main(&lua),
-        "217",
-        "7 + 1*10 + 2*100 -- a wrong leaf order or a duplicate param would shift this"
-    );
+    assert!(!f.contains("r__tl__z, r__tl__z"));
+    assert_eq!(crate::common::run_main(&lua), "217");
 }
 
 // `Mat4` is a leaf-form cdata: its ctor keys are dotted leaf paths
@@ -421,8 +369,7 @@ fn leaf_form_value_copy_in_a_closure_builds_one_box() {
     let body = function_body(&lua, "with_saved_fn_ret_unit__lambda0");
     assert_eq!(
         body.matches("Mat4_lct(").count() + body.matches("Mat4_ct(").count(),
-        1,
-        "restoring the saved Mat4 builds exactly one box:\n{body}"
+        1
     );
     assert_eq!(run_main(&lua), "true 1");
 }
@@ -466,11 +413,7 @@ fn a_value_copy_shares_its_enum_children() {
     let body = function_body(&lua, "set_count");
     // `let item` keeps its join as leaves, so the one `kind` box is the
     // stored item's; the copies of `item` add none.
-    assert_eq!(
-        body.matches("__ty = \"QKind\"").count(),
-        1,
-        "set_count rebuilds a QKind box:\n{body}"
-    );
+    assert_eq!(body.matches("__ty = \"QKind\"").count(), 1);
     assert_eq!(run_main(&lua), "8 8 0 0 gold");
 }
 
@@ -501,15 +444,14 @@ fn main() {
 /// depend on whether the program copies the value or only reads through it.
 #[test]
 fn a_recursive_value_rejects_at_definition_whatever_its_use() {
-    for (use_kind, src) in [
+    for (_use_kind, src) in [
         ("copy", RECURSIVE_VALUE_COPY),
         ("read", RECURSIVE_VALUE_READ),
     ] {
         let errs = crate::common::bone_rejections(src);
         assert_eq!(
             errs,
-            ["recursive value type: Chain -> Chain; use a reference or handle"],
-            "the {use_kind} program must be rejected for the definition alone"
+            ["recursive value type: Chain -> Chain; use a reference or handle"]
         );
     }
 }

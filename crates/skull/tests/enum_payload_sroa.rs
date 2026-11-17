@@ -29,10 +29,7 @@ fn main() { print(select_resource(null)) }
 fn nullable_enum_coalesce_keeps_join_in_leaves() {
     let lua = emit_module(COALESCE_SRC);
     let body = function_body(&lua, "select_resource");
-    assert!(
-        !body.contains("{__variant"),
-        "nullable enum coalesce boxes its join:\n{body}"
-    );
+    assert!(!body.contains("{__variant"));
 }
 
 const COALESCE_SEMANTICS_SRC: &str = r#"
@@ -131,15 +128,9 @@ fn nonescaping_payload_enum_does_not_allocate_table() {
     // The `MakeEnum` table literal must be GONE from the hot body. (`= "Circle"`
     // survives as a scalarized field-cell store; only the `{__variant = ` TABLE
     // construction is the allocation we remove.)
-    assert!(
-        !body.contains("{__variant = "),
-        "non-escaping payload enum must not build a MakeEnum table:\n{body}"
-    );
+    assert!(!body.contains("{__variant = "));
     // The scalarized form keeps the variant tag string as a plain field-cell value.
-    assert!(
-        body.contains("\"Circle\""),
-        "expected the scalarized `__variant` tag const in the body:\n{body}"
-    );
+    assert!(body.contains("\"Circle\""));
 }
 
 // A MIXED enum: payload variants + a unit variant (`Point` -> a singleton global,
@@ -170,16 +161,10 @@ fn mixed_payload_and_unit_enum_does_not_allocate_table() {
     let lua = emit_module(MIXED_SRC);
     assert_eq!(run_fn(&lua, "t"), "1 99 7 4");
     let body = function_body(&lua, "classify");
-    assert!(
-        !body.contains("{__variant = "),
-        "mixed payload+unit enum must not build a MakeEnum table:\n{body}"
-    );
+    assert!(!body.contains("{__variant = "));
     // The unit variant's singleton ref must be scalarized away too (the cell no
     // longer references the global -- its tag is a plain `"Point"` field-cell value).
-    assert!(
-        !body.contains("__rock_enum_Shape_Point"),
-        "the unit-variant singleton ref must be scalarized out of the body:\n{body}"
-    );
+    assert!(!body.contains("__rock_enum_Shape_Point"));
 }
 
 const DYNAMIC_SPREAD_LOOP: &str = r#"
@@ -215,10 +200,7 @@ fn dynamic_enum_spread_immediately_consumed_by_loop_stays_scalar() {
     let lua = emit_module(DYNAMIC_SPREAD_LOOP);
     assert_eq!(run_fn(&lua, "t"), "9");
     let hot = function_body(&lua, "hot");
-    assert!(
-        !hot.contains("{__variant = "),
-        "the iterator must not rebuild a dynamic enum that its loop header immediately spreads:\n{hot}"
-    );
+    assert!(!hot.contains("{__variant = "));
 }
 
 const DYNAMIC_SPREAD_ESCAPE: &str = r#"
@@ -256,10 +238,7 @@ fn dynamic_enum_spread_keeps_box_at_vector_escape() {
     let lua = emit_module(DYNAMIC_SPREAD_ESCAPE);
     assert_eq!(run_fn(&lua, "t"), "2 Mouse");
     let copy = function_body(&lua, "copy");
-    assert!(
-        copy.contains("{__variant = "),
-        "an enum read out of a struct's flat storage and pushed into retained vector storage must still materialize:\n{copy}"
-    );
+    assert!(copy.contains("{__variant = "));
 }
 
 const TUPLE_ENUM_MATCH: &str = r#"
@@ -301,24 +280,15 @@ fn tuple_match_consumes_scalar_enum_params_without_boxes() {
     let lua = emit_module(TUPLE_ENUM_MATCH);
     assert_eq!(run_fn(&lua, "t"), "true false true false 1 Key");
     let same = function_body(&lua, "same");
-    assert!(
-        !same.contains("{__variant = "),
-        "a tuple match must consume scalar enum parameters without rebuilding them:\n{same}"
-    );
-    assert!(
-        !same.contains("({"),
-        "a tuple match over scalar elements must not materialize its tuple:\n{same}"
-    );
+    assert!(!same.contains("{__variant = "));
+    assert!(!same.contains("({"));
 }
 
 #[test]
 fn tuple_match_materializes_a_bound_enum_that_escapes() {
     let lua = emit_module(TUPLE_ENUM_MATCH);
     let retain = function_body(&lua, "retain_first");
-    assert!(
-        retain.contains("{__variant = "),
-        "an enum bound from a tuple and retained in a vector must materialize:\n{retain}"
-    );
+    assert!(retain.contains("{__variant = "));
 }
 
 const NOBOX_NESTED_ENUM_FIELDS: &str = r#"
@@ -371,15 +341,9 @@ fn nested_flat_enums_cross_a_nobox_value_wire_without_boxes() {
     let lua = emit_module(NOBOX_NESTED_ENUM_FIELDS);
     assert_eq!(run_fn(&lua, "t"), "17");
     let make = function_body(&lua, "make_event");
-    assert!(
-        !make.contains("{__variant = "),
-        "nested flat enums must ride the outer nobox return wire as leaves:\n{make}"
-    );
+    assert!(!make.contains("{__variant = "));
     let route = function_body(&lua, "route_event");
-    assert!(
-        !route.contains("{__variant = "),
-        "an immediately forwarded nobox event must not rebuild nested enums:\n{route}"
-    );
+    assert!(!route.contains("{__variant = "));
 }
 
 const NOBOX_NESTED_ENUM_ESCAPE: &str = r#"
@@ -409,10 +373,7 @@ fn nested_flat_enum_still_materializes_at_vector_escape() {
     let lua = emit_module(NOBOX_NESTED_ENUM_ESCAPE);
     assert_eq!(run_fn(&lua, "t"), "8");
     let retain = function_body(&lua, "retain_payload");
-    assert!(
-        retain.contains("{__variant = "),
-        "a nested enum retained in a vector must still materialize:\n{retain}"
-    );
+    assert!(retain.contains("{__variant = "));
 }
 
 const VALUE_NESTED_ENUM_FIELDS: &str = r#"
@@ -464,13 +425,7 @@ fn nested_flat_enums_cross_an_ordinary_value_wire_without_boxes() {
     let lua = emit_module(VALUE_NESTED_ENUM_FIELDS);
     assert_eq!(run_fn(&lua, "t"), "9 9");
     let make = function_body(&lua, "make_row");
-    assert!(
-        !make.contains("{__variant = "),
-        "nested flat enums must ride an ordinary value return wire as leaves:\n{make}"
-    );
+    assert!(!make.contains("{__variant = "));
     let route = function_body(&lua, "route_row");
-    assert!(
-        !route.contains("{__variant = "),
-        "an immediately forwarded ordinary value must not rebuild nested enums:\n{route}"
-    );
+    assert!(!route.contains("{__variant = "));
 }

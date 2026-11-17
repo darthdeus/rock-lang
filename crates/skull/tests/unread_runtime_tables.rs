@@ -15,8 +15,8 @@ fn main() {
 }
 "#,
     );
-    assert!(lua.contains("_names = { [0] = \"Shown::Alpha\""), "{lua}");
-    assert!(!lua.contains("Hidden::Gamma"), "{lua}");
+    assert!(lua.contains("_names = { [0] = \"Shown::Alpha\""));
+    assert!(!lua.contains("Hidden::Gamma"));
     assert_eq!(run_main(&lua), "Shown::Beta\ntrue");
 }
 
@@ -33,9 +33,9 @@ fn main() { print("{G.pos?.x ?? -1.0}") }
     );
     let defined = |sym: &str| lua.contains(&format!("\n{sym}_lct = function("));
     let called = |sym: &str| lua.contains(&format!("{sym}_lct("));
-    assert!(called("Used") && defined("Used"), "{lua}");
-    assert!(!called("Spare") && !defined("Spare"), "{lua}");
-    assert!(!called("Mat4") && !defined("Mat4"), "{lua}");
+    assert!(called("Used") && defined("Used"));
+    assert!(!called("Spare") && !defined("Spare"));
+    assert!(!called("Mat4") && !defined("Mat4"));
     assert_eq!(run_main(&lua), "1");
 }
 
@@ -51,7 +51,7 @@ global HOVERED: Place? = null
 fn main() { print(HOVERED == null) }
 "#,
     );
-    assert!(lua.contains("\nPlace_lct = function("), "{lua}");
+    assert!(lua.contains("\nPlace_lct = function("));
 }
 
 #[test]
@@ -66,7 +66,7 @@ fn main() { print("{G.name}{G.n}") }
     );
     let defined = |sym: &str| lua.contains(&format!("\n{sym}_vt = function("));
     let called = |sym: &str| lua.contains(&format!("{sym}_vt("));
-    assert_eq!(called("Named"), defined("Named"), "{lua}");
-    assert!(!called("Spare") && !defined("Spare"), "{lua}");
+    assert_eq!(called("Named"), defined("Named"));
+    assert!(!called("Spare") && !defined("Spare"));
     assert_eq!(run_main(&lua), "a1");
 }

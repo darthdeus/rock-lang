@@ -6,7 +6,6 @@
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::{self, InstanceGraph};
 use skull_mir::lower::ScalarCtx;
-use skull_mir::mir::MirFunc;
 use ustr::Ustr;
 
 /// The shared process stdlib with `src` parsed as `file` after it.
@@ -29,7 +28,7 @@ fn semantic_pass(
 /// resolutions and turn shape assertions vacuously green.
 fn assert_no_bone_errors(ws: &Workspace) {
     let errs: Vec<_> = recorded_bone_errors(ws).map(|e| &e.message).collect();
-    assert!(errs.is_empty(), "bone recorded errors: {errs:#?}");
+    assert!(errs.is_empty());
 }
 
 fn recorded_bone_errors(ws: &Workspace) -> impl Iterator<Item = &skull_parser::CompilerError> {
@@ -79,20 +78,6 @@ pub fn emit_mir(src: &str) -> skull::mir_emit::MirEmit {
     emit_at(&checked_workspace(src, "<test>"), "<test>").expect("emit")
 }
 
-pub fn emit_mir_with_inputs(
-    src: &str,
-    inputs: bone_semantic::inference::ComptimeInputs,
-) -> skull::mir_emit::MirEmit {
-    try_emit_mir_with_inputs(src, inputs).expect("emit")
-}
-
-pub fn try_emit_mir_with_inputs(
-    src: &str,
-    inputs: bone_semantic::inference::ComptimeInputs,
-) -> Result<skull::mir_emit::MirEmit, skull_parser::CompilerError> {
-    emit_with_inputs(src, "<test>", inputs)
-}
-
 fn emit_with_inputs(
     src: &str,
     file: &str,
@@ -121,13 +106,6 @@ fn emit_at(
 pub fn ws_with_stdlib(src: &str) -> Workspace {
     let mut modules = with_stdlib(src, "<test>");
     semantic_pass(&mut modules).expect("semantic_pass")
-}
-
-/// The stdlib modules as an owned list, for a `Session` to start from.
-pub fn stdlib_asts() -> Vec<skull_parser::Ast> {
-    skull_parser::stdlib::ModuleSet::with_stdlib([])
-        .expect("stdlib parses")
-        .into_vec()
 }
 
 /// A workspace of `files` (`(file id, source)` pairs, in order) over the real
@@ -436,11 +414,7 @@ pub fn bound_callee_names(lua: &str, caller: &str) -> Vec<(String, String)> {
     } else {
         params.split(", ").collect()
     };
-    assert_eq!(
-        params.len(),
-        globals.len(),
-        "callee factory `{caller}` has mismatched parameters and bindings"
-    );
+    assert_eq!(params.len(), globals.len());
     params
         .into_iter()
         .zip(globals)
@@ -515,11 +489,7 @@ pub fn body_of_synthetic<'a>(lua: &'a str, needle: &str) -> &'a str {
         .into_iter()
         .filter(|n| n.contains(needle))
         .collect();
-    assert_eq!(
-        names.len(),
-        1,
-        "expected exactly one fn containing `{needle}`, got {names:?}"
-    );
+    assert_eq!(names.len(), 1);
     function_body(lua, names[0])
 }
 
@@ -659,12 +629,7 @@ pub fn fn_ref(ws: &Workspace, name: &str) -> skull_mir::mir::FuncRef {
             }
         }
     }
-    assert_eq!(
-        found.len(),
-        1,
-        "expected exactly one fn named `{name}`, got {}",
-        found.len()
-    );
+    assert_eq!(found.len(), 1);
     found[0]
 }
 
@@ -707,50 +672,6 @@ pub fn graph_for(ws: &Workspace) -> (InstanceGraph, Vec<skull_mir::mir::FuncRef>
 
 pub fn graph_of(ws: &Workspace) -> InstanceGraph {
     graph_for(ws).0
-}
-
-/// `src` over the real stdlib, and its default-root instance graph.
-pub fn ws_and_graph(src: &str) -> (Workspace, InstanceGraph) {
-    let ws = ws_with_stdlib(src);
-    let g = graph_of(&ws);
-    (ws, g)
-}
-
-/// `name`'s base instance, lowered over `scx` but not yet prepared.
-pub fn lowered_body(
-    ws: &Workspace,
-    bodies: &skull::concrete_body::ConcreteBodies,
-    scx: &ScalarCtx,
-    name: &str,
-) -> MirFunc {
-    let plan = bodies
-        .plans
-        .get(&skull_mir::instance::Instance::base(fn_ref(ws, name)))
-        .expect("concrete plan");
-    skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &bodies.plans).expect("lower")
-}
-
-/// Run emission's transform sequence over `name`'s lowered body.
-pub fn prepare_body(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    bodies: &skull::concrete_body::ConcreteBodies,
-    name: &str,
-    mf: &mut MirFunc,
-) {
-    let fref = fn_ref(ws, name);
-    let mangled = skull_mir::mangle::mangle_fn(ws, &ws.module(fref.module).functions[fref.func]);
-    let mut cache = skull_transform::InlineCache::default();
-    skull::mir_emit::prepare_instance_body_with_plans(
-        ws,
-        scx,
-        fref,
-        &mangled,
-        mf,
-        &mut cache,
-        &bodies.plans,
-    )
-    .expect("prepare");
 }
 
 /// Whether `body` calls `symbol`: the name followed by `(`, not as the tail
@@ -848,11 +769,7 @@ pub fn run_luajit_capturing(prog: &str) -> (bool, String) {
 pub fn run_luajit(prog: &str) -> String {
     let out = luajit_output(prog);
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(
-        out.status.success(),
-        "luajit exited non-zero.\nstdout:\n{stdout}\nstderr:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success());
     stdout.trim().replace("\r\n", "\n")
 }
 
@@ -910,13 +827,4 @@ pub fn has_vec_header(lua: &str, repr: &str, elem: Option<&str>) -> bool {
         ),
     };
     lua.contains(&own) || lua.contains(&shared)
-}
-
-/// A workspace of `files` over the real stdlib, or `None` when the sources do
-/// not parse or bone records an error -- for tests that sweep a corpus which
-/// includes deliberately rejected programs.
-pub fn try_ws_of_files(files: &[(&str, &str)]) -> Option<Workspace> {
-    let ws = semantic_pass(&mut parse_files(files).ok()?).ok()?;
-    let clean = recorded_bone_errors(&ws).next().is_none();
-    clean.then_some(ws)
 }

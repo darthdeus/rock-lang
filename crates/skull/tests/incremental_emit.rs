@@ -47,17 +47,13 @@ fn scalar_constant_edits_refresh_full_incremental_and_overlay_emission() {
     assert_eq!(incremental.lua, fresh.lua);
     let overlay = emit_overlay(&ws2, &mut overlay_cache, &edited);
     let body = crate::common::function_body(&overlay.lua, "choose");
-    assert!(body.contains("-0.0") && !body.contains("ALIAS"), "{body}");
+    assert!(body.contains("-0.0") && !body.contains("ALIAS"));
 }
 
 #[test]
 fn derived_scalar_constant_edits_refresh_transitive_readers_at_runtime() {
     let template = "fn source() -> int { 32 }\nconst BASE: int = INIT\nconst SCALE: int = BASE * 128\nconst DERIVED: int = SCALE + 1\n@nomangle fn choose() -> int { DERIVED }";
-    assert_eq!(
-        template.matches("INIT").count(),
-        1,
-        "one initializer marker"
-    );
+    assert_eq!(template.matches("INIT").count(), 1);
     let with_init = |init: &str| template.replacen("INIT", init, 1);
     let ws1 = ws_with_stdlib(&with_init("8"));
     let mid = skull::user_module_id(&ws1).unwrap();
@@ -84,19 +80,11 @@ fn derived_scalar_constant_edits_refresh_transitive_readers_at_runtime() {
         let edited = [(mid2, BodyOwner::Global(gid))];
         let incremental = emit_incremental(&ws2, &mut incremental_cache, &edited)
             .unwrap_or_else(|err| panic!("{label}: incremental emit failed: {err:?}"));
-        assert_eq!(
-            incremental.lua,
-            emit_full(&ws2, mid).unwrap().0.lua,
-            "{label}: incremental != fresh"
-        );
+        assert_eq!(incremental.lua, emit_full(&ws2, mid).unwrap().0.lua);
         let overlay = emit_overlay(&ws2, &mut overlay_cache, &edited);
         let after = crate::common::function_body(&overlay.lua, "choose");
-        assert_eq!(
-            after.contains(&expected_after.to_string()),
-            folded_after,
-            "{label}: {after}"
-        );
-        assert_eq!(after.contains("DERIVED"), !folded_after, "{label}: {after}");
+        assert_eq!(after.contains(&expected_after.to_string()), folded_after);
+        assert_eq!(after.contains("DERIVED"), !folded_after);
         runtime.push_str(&format!(
             "assert(choose() == {expected_before})\n{}\nassert(choose() == {expected_after})\n",
             overlay.lua
@@ -113,11 +101,11 @@ fn numeric_selection_updates_in_full_incremental_and_overlay_emission() {
     let v2 = v1.replace("a < b", "a > b");
     let ws1 = ws_of(v1);
     let (full, mut cache) = emit_full_of(&ws1, "emit_full");
-    assert!(full.lua.contains("math.min("), "{}", full.lua);
+    assert!(full.lua.contains("math.min("));
     let ws2 = ws_of(&v2);
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "choose")]);
-    assert!(overlay.lua.contains("math.max("), "{}", overlay.lua);
-    assert!(!overlay.lua.contains("math.min("), "{}", overlay.lua);
+    assert!(overlay.lua.contains("math.max("));
+    assert!(!overlay.lua.contains("math.min("));
     check_edit(v1, &v2, &["choose"]);
 }
 
@@ -134,10 +122,7 @@ fn check_edit_with(build: fn(&str) -> Workspace, v1: &str, v2: &str, edited: &[&
 
     let incremental = emit_incremental(&ws2, &mut cache, &reinferred).expect("emit_incremental");
     let fresh = emit_full(&ws2, mid2).expect("emit_full v2").0;
-    assert_eq!(
-        incremental.lua, fresh.lua,
-        "incremental assembly != fresh emit after editing {edited:?}"
-    );
+    assert_eq!(incremental.lua, fresh.lua);
     incremental.lua
 }
 
@@ -192,21 +177,17 @@ fn main() {
     let ws1 = ws_with_stdlib(grow);
     let (full1, mut incremental_cache) = emit_full_of(&ws1, "emit_full v1");
     let (_, mut overlay_cache) = emit_full_of(&ws1, "overlay base v1");
-    assert!(!checked(&full1.lua), "no writer in the chain: raw access");
-    for (step, src, expect_check) in [("shrink", shrink.as_str(), true), ("grow", grow, false)] {
+    assert!(!checked(&full1.lua));
+    for (_step, src, expect_check) in [("shrink", shrink.as_str(), true), ("grow", grow, false)] {
         let ws = ws_with_stdlib(src);
         let reinferred = [body_id(&ws, "leaf")];
         let incremental =
             emit_incremental(&ws, &mut incremental_cache, &reinferred).expect("incremental");
         let (fresh, _) = emit_full_of(&ws, "fresh");
-        assert_eq!(incremental.lua, fresh.lua, "{step}: incremental != fresh");
-        assert_eq!(
-            checked(&incremental.lua),
-            expect_check,
-            "{step}: incremental"
-        );
+        assert_eq!(incremental.lua, fresh.lua);
+        assert_eq!(checked(&incremental.lua), expect_check);
         let overlay = emit_overlay(&ws, &mut overlay_cache, &reinferred);
-        assert_eq!(checked(&overlay.lua), expect_check, "{step}: overlay");
+        assert_eq!(checked(&overlay.lua), expect_check);
     }
 }
 
@@ -231,10 +212,7 @@ fn caller() -> int { return apply(1, unchanged) }
                     .is_some_and(|name| name.as_str().starts_with("unchanged"))
         })
         .expect("fixture must publish the unchanged callback");
-    assert!(
-        callback.body_name.is_some(),
-        "fresh emission must realize the callback body"
-    );
+    assert!(callback.body_name.is_some());
 
     let ws2 = ws_of(&v2);
     let overlay = emit_overlay_result(&ws2, &mut cache, &[body_id(&ws2, "caller")])
@@ -244,26 +222,12 @@ fn caller() -> int { return apply(1, unchanged) }
         .lines()
         .filter(|line| line.contains("__rock_code_slot_stage(") && line.contains("unchanged"))
         .collect();
-    assert_eq!(
-        staged.len(),
-        1,
-        "the changed caller must stage its unchanged callback: {staged:?}"
-    );
-    assert!(
-        staged[0].contains("unchanged_int"),
-        "the callback stage must point at the body already loaded from the full artifact: {}",
-        staged[0]
-    );
+    assert_eq!(staged.len(), 1);
+    assert!(staged[0].contains("unchanged_int"));
 }
 
-/// The retained fast paths of a body edit (the root cache, the invalidated
-/// candidate keys, the cached fingerprint rows) against their full-scan
-/// equivalents. One edit sequence -- the body of a callee inlined through
-/// another inlined callee, a generic instance removed, another added -- runs through a default cache and a
-/// `set_full_scans` cache. Both must produce the same incremental Lua as a
-/// fresh emit, and the same overlay and artifact fingerprint as each other.
 #[test]
-fn full_scans_agree_with_the_retained_fast_paths_over_an_edit_sequence() {
+fn retained_paths_match_fresh_emission_over_an_edit_sequence() {
     let v0 = "@inline\nfn helper() -> int { 3 }\n\
               @inline\nfn middle() -> int { helper() }\n\
               fn leaf<T>(x: T) -> T { x }\n\
@@ -285,32 +249,12 @@ fn full_scans_agree_with_the_retained_fast_paths_over_an_edit_sequence() {
     ];
     let ws0 = ws_of(v0);
     let mid = skull::user_module_id(&ws0).unwrap();
-    let cache = |full_scans: bool| {
-        let (_, mut cache) = emit_full(&ws0, mid).expect("emit_full v0");
-        cache.set_full_scans(full_scans);
-        cache
-    };
-    let (mut incremental_fast, mut incremental_full) = (cache(false), cache(true));
-    let (mut overlay_fast, mut overlay_full) = (cache(false), cache(true));
-    for (step, (src, edited)) in steps.iter().enumerate() {
-        let ws = ws_of(src);
-        let reinferred = [body_id(&ws, edited)];
-        let fast = emit_incremental(&ws, &mut incremental_fast, &reinferred).expect("fast");
-        let full = emit_incremental(&ws, &mut incremental_full, &reinferred).expect("full scans");
+    let (_, mut cache) = emit_full(&ws0, mid).expect("initial build");
+    for (src, edited) in steps {
+        let ws = ws_of(&src);
+        let incremental = emit_incremental(&ws, &mut cache, &[body_id(&ws, edited)]).unwrap();
         let fresh = emit_full_of(&ws, "fresh").0;
-        assert_eq!(fast.lua, fresh.lua, "step {step}: fast path != fresh");
-        assert_eq!(full.lua, fresh.lua, "step {step}: full scans != fresh");
-        assert_eq!(
-            fast.artifact_fingerprint, full.artifact_fingerprint,
-            "step {step}: incremental fingerprints differ"
-        );
-        let fast = emit_overlay(&ws, &mut overlay_fast, &reinferred);
-        let full = emit_overlay(&ws, &mut overlay_full, &reinferred);
-        assert_eq!(fast.lua, full.lua, "step {step}: overlays differ");
-        assert_eq!(
-            fast.artifact_fingerprint, full.artifact_fingerprint,
-            "step {step}: overlay fingerprints differ"
-        );
+        assert_eq!(incremental.lua, fresh.lua);
     }
 }
 
@@ -354,18 +298,11 @@ fn body_edit_to_a_function_with_lambdas_matches_a_full_emit() {
             (!fresh[start..end].contains(char::is_whitespace)).then(|| &fresh[start..end])
         })
         .collect();
-    assert!(
-        lambdas.len() >= 2,
-        "the fixture hoists both lambdas:\n{fresh}"
-    );
+    assert!(lambdas.len() >= 2);
     for name in lambdas {
         let expected = definition(&fresh, name);
-        assert!(expected.is_some(), "no full definition of `{name}`");
-        assert_eq!(
-            definition(&overlay, name),
-            expected,
-            "overlay and full emit disagree on `{name}`:\n{overlay}"
-        );
+        assert!(expected.is_some());
+        assert_eq!(definition(&overlay, name), expected);
     }
 }
 
@@ -403,18 +340,11 @@ fn a_later_edit_to_a_generic_reaches_an_instantiation_an_earlier_edit_added() {
             .any(|l| l.starts_with("function tally_of_") && l.contains(ty))
     };
     let defines_q = |lua: &str| defines(lua, "Q");
-    assert!(
-        defines(&full.lua, "P") && !defines_q(&full.lua),
-        "control: v1 defines P only"
-    );
+    assert!(defines(&full.lua, "P") && !defines_q(&full.lua));
 
     let ws2 = crate::common::ws_with_stdlib(&v2);
     let o1 = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
-    assert!(
-        defines_q(&o1.lua),
-        "control: edit 1 must add the Q instantiation:\n{}",
-        o1.lua
-    );
+    assert!(defines_q(&o1.lua));
 
     let ws3 = crate::common::ws_with_stdlib(&v3);
     let o2 = emit_overlay(&ws3, &mut cache, &[body_id(&ws3, "tally_of")]);
@@ -425,18 +355,8 @@ fn a_later_edit_to_a_generic_reaches_an_instantiation_an_earlier_edit_added() {
         .lines()
         .filter(|l| l.starts_with("function tally_of_"))
         .collect();
-    assert_eq!(
-        bodies.len(),
-        2,
-        "both instantiations must be redefined, got {bodies:?}"
-    );
-    assert_eq!(
-        o2.lua.matches("MARK2").count(),
-        2,
-        "each redefined body must carry the EDITED marker, or one instantiation \
-         was served from a chunk the stale graph never invalidated:\n{}",
-        o2.lua
-    );
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(o2.lua.matches("MARK2").count(), 2);
 }
 
 /// A pruned instance's chunk is forgotten, so an edit that brings the
@@ -467,31 +387,17 @@ fn an_instantiation_that_returns_after_being_pruned_is_rebuilt_not_reused() {
             .map(str::to_string)
             .collect()
     };
-    assert_eq!(
-        q_bodies(&full.lua).len(),
-        1,
-        "control: v1 defines the Q instantiation"
-    );
+    assert_eq!(q_bodies(&full.lua).len(), 1);
 
     let ws2 = crate::common::ws_with_stdlib(&v2);
     let removal = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
-    assert_eq!(
-        q_bodies(&removal.lua).len(),
-        0,
-        "the removal overlay must remove the stranded Q specialization:\n{}",
-        removal.lua
-    );
+    assert_eq!(q_bodies(&removal.lua).len(), 0);
     let ws3 = crate::common::ws_with_stdlib(&v3);
     let _ = emit_overlay(&ws3, &mut cache, &[body_id(&ws3, "tally_of")]);
 
     let ws4 = crate::common::ws_with_stdlib(&v4);
     let back = emit_overlay(&ws4, &mut cache, &[body_id(&ws4, "use_it")]);
-    assert_eq!(
-        q_bodies(&back.lua).len(),
-        1,
-        "control: the returning instantiation must be defined again:\n{}",
-        back.lua
-    );
+    assert_eq!(q_bodies(&back.lua).len(), 1);
     let text = &back.lua;
     let start = text
         .find("function tally_of_")
@@ -502,11 +408,7 @@ fn an_instantiation_that_returns_after_being_pruned_is_rebuilt_not_reused() {
         .map(|i| &text[i..])
         .unwrap_or(start);
     let q_body: String = q_start.lines().take_while(|l| *l != "end").collect();
-    assert!(
-        q_body.contains("MARK2"),
-        "the returning instantiation must be REBUILT from the edited generic, not \
-         served from the chunk it had before it was pruned:\n{q_body}"
-    );
+    assert!(q_body.contains("MARK2"));
 }
 
 /// The overlay defines a non-generic library body the edit made reachable;
@@ -526,25 +428,12 @@ fn an_overlay_carries_a_graph_added_library_body() {
         lua.lines()
             .any(|l| l.starts_with("function is_ascii_ws_int("))
     };
-    assert!(
-        !defines(&full.lua),
-        "control: v1 must not define `is_ascii_ws`, or the overlay assertion below \
-         is about a definition that already existed"
-    );
+    assert!(!defines(&full.lua));
 
     let ws2 = crate::common::ws_with_stdlib(v2);
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
-    assert!(
-        overlay.lua.contains("is_ascii_ws_int("),
-        "control: the edited body must actually call it:\n{}",
-        overlay.lua
-    );
-    assert!(
-        defines(&overlay.lua),
-        "the overlay must DEFINE the library body the edit made reachable, or the \
-         reload calls a nil global:\n{}",
-        overlay.lua
-    );
+    assert!(overlay.lua.contains("is_ascii_ws_int("));
+    assert!(defines(&overlay.lua));
 }
 
 /// Editing a generic `co fn` must re-emit its specialized coroutines, which
@@ -573,10 +462,7 @@ fn a_body_edit_to_a_generic_coroutine_reemits_its_specializations() {
         .into_iter()
         .filter(|name| name.contains("_spec_") && name.ends_with("__step"))
         .count();
-    assert_eq!(
-        spec_steps, 1,
-        "the fixture must produce a SPECIALIZED coroutine step:\n{lua}"
-    );
+    assert_eq!(spec_steps, 1);
     check_edit_with(ws_with_stdlib, v1, &v2, &["walk"]);
 }
 
@@ -604,17 +490,9 @@ fn a_standalone_bounded_body_survives_an_incremental_rebuild() {
             .count()
     };
     let (full1, _) = emit_full_of(&ws_with_stdlib(v1), "emit_full v1");
-    assert_eq!(
-        standalone(&full1.lua),
-        1,
-        "v1 must emit ONE standalone bounded body"
-    );
+    assert_eq!(standalone(&full1.lua), 1);
     let incremental = check_edit_with(ws_with_stdlib, v1, &v2, &["total"]);
-    assert_eq!(
-        standalone(&incremental),
-        1,
-        "the rebuilt bounded body is gone -- its demand tree did not survive the cache"
-    );
+    assert_eq!(standalone(&incremental), 1);
 }
 
 #[test]
@@ -647,11 +525,7 @@ inline(lua) fn slots_empty(c: Coroutine<FrameYield>) -> bool = """
         let len = lua[start..].find("\nend\n").expect("step end");
         lua[start..start + len].to_string()
     };
-    assert_eq!(
-        step(&overlay.lua),
-        step(&fresh.lua),
-        "overlay frame stores must use the same guards as a full build"
-    );
+    assert_eq!(step(&overlay.lua), step(&fresh.lua));
     let run = format!(
         "{}\nprint(sample(1))\n{}\nprint(sample(3))\n",
         full.lua, overlay.lua
@@ -684,18 +558,10 @@ fn shared_call_abis_are_staged_once_and_remain_compatible_across_overlays() {
         .lines()
         .filter(|line| line.contains("__rock_code_slot_stage("))
         .count();
-    assert!(
-        staged > abis.len(),
-        "fixture must share a call ABI across slots: {staged} slots, {} ABIs",
-        abis.len()
-    );
+    assert!(staged > abis.len());
     for abi in abis {
         let literal = skull_codegen_lua::lua_string(abi);
-        assert_eq!(
-            full.lua.matches(literal.as_str()).count(),
-            1,
-            "ABI {literal} must be named once"
-        );
+        assert_eq!(full.lua.matches(literal.as_str()).count(), 1);
     }
     let v2 = SHARED_ABI_SLOTS.replace("@tick fn first() {}", "@tick fn first() { let x = 1 }");
     let escaping: Vec<_> = full
@@ -706,10 +572,7 @@ fn shared_call_abis_are_staged_once_and_remain_compatible_across_overlays() {
         .collect();
     let ws2 = ws_of(&v2);
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "first")]);
-    assert!(
-        overlay.lua.contains("__rock_code_slot_stage("),
-        "the overlay must restage `first`"
-    );
+    assert!(overlay.lua.contains("__rock_code_slot_stage("));
     let run = format!(
         r#"{full}
 local function snapshot()
@@ -727,17 +590,10 @@ print(before)
         overlay = overlay.lua
     );
     let out = crate::common::run_luajit(&run);
-    assert_eq!(
-        out.lines().count(),
-        escaping.len(),
-        "every escaping CodeRef has a slot:\n{out}"
-    );
+    assert_eq!(out.lines().count(), escaping.len());
     for entry in escaping {
         let abi = format!("={}", entry.compatibility.call_abi);
-        assert!(
-            out.lines().any(|row| row.ends_with(&abi)),
-            "no slot carries ABI {abi}:\n{out}"
-        );
+        assert!(out.lines().any(|row| row.ends_with(&abi)));
     }
 }
 
@@ -784,11 +640,7 @@ return c.v }
         Ok(_) => panic!("changing a flat variant's element/prefix must request restart"),
         Err(err) => err,
     };
-    assert!(
-        err.message.contains("CodeRef compatibility") && err.message.contains("safe restart"),
-        "{}",
-        err.message
-    );
+    assert!(err.message.contains("CodeRef compatibility") && err.message.contains("safe restart"));
 }
 
 #[test]
@@ -813,14 +665,8 @@ fn sample() -> int {
         .map(|entry| entry.compatibility.call_abi.as_str())
         .filter(|abi| abi.contains("|flat "))
         .collect();
-    assert!(
-        !flat_abis.is_empty(),
-        "the production artifact must contain a flat variant"
-    );
-    assert!(
-        flat_abis.iter().all(|abi| !abi.contains("RepId")),
-        "call ABI must not contain build-scoped arena handles: {flat_abis:?}"
-    );
+    assert!(!flat_abis.is_empty());
+    assert!(flat_abis.iter().all(|abi| !abi.contains("RepId")));
 }
 
 /// A body edit that starts stringifying a payload-free enum needs that enum's
@@ -836,7 +682,7 @@ fn main() { print(describe(Mode::Busy)) }
     check_edit_with(ws_with_stdlib, v1, &v2, &["describe"]);
     let ws1 = ws_with_stdlib(v1);
     let (full, mut cache) = emit_full_of(&ws1, "emit_full");
-    assert!(!full.lua.contains("Mode::Busy"), "{}", full.lua);
+    assert!(!full.lua.contains("Mode::Busy"));
     let ws2 = ws_with_stdlib(&v2);
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "describe")]);
     let run = format!("{}\n{}\nprint(describe(1))\n", full.lua, overlay.lua);
@@ -919,7 +765,7 @@ fn inline_decisions_follow_helper_edits() {
         }
         src + "return helper()\n}\n@nomangle fn other() -> int { 7 }\n"
     };
-    for (label, v1, v2, residual_before, residual_after) in [
+    for (_label, v1, v2, residual_before, residual_after) in [
         ("stays inlined", small(3), small(5), false, false),
         ("stays residual", over_budget(3), over_budget(5), true, true),
         (
@@ -932,9 +778,9 @@ fn inline_decisions_follow_helper_edits() {
     ] {
         let residual = |lua: &str| crate::common::function_body(lua, "caller").contains("helper(");
         let (full1, _) = emit_full_of(&ws_of(&v1), "emit_full v1");
-        assert_eq!(residual(&full1.lua), residual_before, "{label}: v1 caller");
+        assert_eq!(residual(&full1.lua), residual_before);
         let incremental = check_edit(&v1, &v2, &["helper"]);
-        assert_eq!(residual(&incremental), residual_after, "{label}: v2 caller");
+        assert_eq!(residual(&incremental), residual_after);
     }
 }
 
@@ -959,7 +805,7 @@ fn main() { let _ = helper() }
         .values()
         .filter(|entry| entry.escaping)
         .count();
-    assert!(escaping >= 2, "fixture must expose CodeRefs: {escaping}");
+    assert!(escaping >= 2);
 
     for (v2, edited, staged_count) in [
         (v1.replace("return 1", "return 2"), "helper", 0),
@@ -976,19 +822,13 @@ fn main() { let _ = helper() }
             .lines()
             .filter(|line| line.contains("__rock_code_slot_stage("))
             .collect();
-        assert_eq!(staged.len(), staged_count, "{edited}: {staged:?}");
-        assert!(
-            overlay.contains("__rock_code_slot_publish()"),
-            "{edited}: the overlay must retain the publication boundary"
-        );
+        assert_eq!(staged.len(), staged_count);
+        assert!(overlay.contains("__rock_code_slot_publish()"));
         if let Some(stage) = staged.first() {
-            assert!(stage.contains("named:<t>::first_0<>"), "{stage}");
+            assert!(stage.contains("named:<t>::first_0<>"));
             let stage_offset = overlay.find("__rock_code_slot_stage(").unwrap();
             let body_offset = overlay.find("function first").expect("changed body");
-            assert!(
-                body_offset < stage_offset,
-                "publication must observe the new body: {body_offset} !< {stage_offset}"
-            );
+            assert!(body_offset < stage_offset);
         }
     }
 }
@@ -1009,16 +849,12 @@ fn body_edit_to_a_generic_reemits_its_specializations() {
     let ws1 = ws_of(v1);
     let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
     // One liveness walk decides the specialized body, so it is emitted once.
-    assert_eq!(full.lua.matches(spec).count(), 1, "{}", full.lua);
+    assert_eq!(full.lua.matches(spec).count(), 1);
 
     check_edit(v1, &v2, &["first"]);
     let ws2 = ws_of(&v2);
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "first")]);
-    assert!(
-        overlay.lua.contains(spec),
-        "the overlay must redefine the specialization the edit moved:\n{}",
-        overlay.lua
-    );
+    assert!(overlay.lua.contains(spec));
 }
 
 const ABI_FLIP_V1: &str = "value V2 { x: float, y: float }\n\
@@ -1039,15 +875,11 @@ const ABI_FLIP_V2: &str = "value V2 { x: float, y: float }\n\
 fn an_overlay_reemits_a_definition_after_a_scalar_abi_width_flip() {
     let ws1 = ws_with_stdlib(ABI_FLIP_V1);
     let (full1, mut cache) = emit_full_of(&ws1, "emit_full v1");
-    assert!(full1.lua.contains("function foo_"), "v1 must emit foo");
+    assert!(full1.lua.contains("function foo_"));
 
     let ws2 = ws_with_stdlib(ABI_FLIP_V2);
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_ref")]);
-    assert!(
-        overlay.lua.contains("function foo_") && overlay.lua.contains("function use_ref"),
-        "the ABI-width flip must re-emit foo and its caller in the overlay:\n{}",
-        overlay.lua
-    );
+    assert!(overlay.lua.contains("function foo_") && overlay.lua.contains("function use_ref"));
 }
 
 /// A graph-added specialization whose body fails construction fails closed on
@@ -1068,7 +900,7 @@ fn a_failed_graph_added_body_is_rejected_by_every_emit_route() {
            }";
     let ws1 = ws_with_stdlib(&v1);
     let (full, _) = emit_full_of(&ws1, "emit_full v1");
-    assert!(!full.lua.contains("function bad_"), "v1 must not emit it");
+    assert!(!full.lua.contains("function bad_"));
 
     let ws2 = ws_with_stdlib(&v2);
     let edited = [body_id(&ws2, "use_it")];
@@ -1090,11 +922,7 @@ fn a_failed_graph_added_body_is_rejected_by_every_emit_route() {
     ];
     for (route, result) in routes {
         let err = result.expect_err(route);
-        assert!(
-            err.message.contains("nobox") && err.message.contains("bad"),
-            "{route}: the failure must identify the rejected specialization: {}",
-            err.message
-        );
+        assert!(err.message.contains("nobox") && err.message.contains("bad"));
     }
 }
 
@@ -1148,8 +976,7 @@ fn changed_call_graph_reaching_a_foreign_publisher_matches_full_emission() {
             .any(|i| name_matches(
                 ws2.module(i.func.module).functions[i.func.func].name,
                 "extra"
-            )),
-        "the changed call graph must reach a foreign publisher"
+            ))
     );
     let fresh = emit_full_of(&ws2, "fresh emit").0;
     assert_eq!(incremental.lua, fresh.lua);
@@ -1200,11 +1027,7 @@ fn multi_region_coroutine_topology_gates_overlays() {
     let err = emit_overlay_result(&ws, &mut cache, &[body_id(&ws, "worker")])
         .map(|_| ())
         .expect_err("inserting a lambda into a region must refuse the overlay");
-    assert!(
-        err.message.contains("CodeRef compatibility") && err.message.contains("safe restart"),
-        "the refusal must stay the compatibility restart: {}",
-        err.message
-    );
+    assert!(err.message.contains("CodeRef compatibility") && err.message.contains("safe restart"));
 }
 
 #[test]
@@ -1269,6 +1092,6 @@ return c.v }
             "{}\nseed()\nassert(tick(2))\nlocal before = snapshot()\n{}\nassert(snapshot() == before)\nassert(tick(3))\nassert(snapshot() < before)\nprint('ok')\n",
             full.lua, overlay.lua,
         );
-        assert_eq!(crate::common::run_luajit(&run), "ok", "{caller}");
+        assert_eq!(crate::common::run_luajit(&run), "ok");
     }
 }

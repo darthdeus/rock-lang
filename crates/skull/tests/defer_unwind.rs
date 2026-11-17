@@ -41,22 +41,9 @@ fn only_a_defer_fn_enters_through_the_unwind_trampoline() {
     let lua = emit_module(FIXTURE);
     let name = mangled_name(&lua, "guarded");
     let body = function_body(&lua, "guarded");
-    assert!(
-        body.contains(&format!("return __rock_defer_call({name}, ")),
-        "a fn registering a defer must re-enter itself under the unwind trampoline:\n{body}"
-    );
-    assert!(
-        body.contains("__rock_defer_push") && body.contains("__rock_defer_pop"),
-        "the defer must register its cleanup and pop it at scope exit:\n{body}"
-    );
+    assert!(body.contains(&format!("return __rock_defer_call({name}, ")));
+    assert!(body.contains("__rock_defer_push") && body.contains("__rock_defer_pop"));
     let plain = function_body(&lua, "plain");
-    assert!(
-        !plain.contains("__rock_defer"),
-        "a fn without defer must not pay for the protected call:\n{plain}"
-    );
-    assert_eq!(
-        run_main(&lua),
-        "3 raised g;g;",
-        "defer runs on normal exit and on error"
-    );
+    assert!(!plain.contains("__rock_defer"));
+    assert_eq!(run_main(&lua), "3 raised g;g;");
 }

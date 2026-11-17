@@ -41,12 +41,12 @@ fn main() {
 fn nullable_scalar_projection_emits_one_receiver_and_no_sibling_reads() {
     let lua = emit_module(SOURCE);
     let body = function_body(&lua, "selected_width");
-    assert_eq!(body.matches("next_owner(").count(), 1, "{body}");
+    assert_eq!(body.matches("next_owner(").count(), 1);
     for field in [".text", ".point", ".enabled", ".maybe"] {
-        assert!(!body.contains(field), "unused sibling {field}: {body}");
+        assert!(!body.contains(field));
     }
     let point = function_body(&lua, "selected_x");
-    assert!(!point.contains(".y"), "{point}");
+    assert!(!point.contains(".y"));
     assert_eq!(
         run_main(&lua),
         "-1 -1 1\n11 13 2\nold false -1\n11 99 11 7\n7"
@@ -69,6 +69,6 @@ fn main() {
 "#;
     let lua = emit_module(source);
     let body = function_body(&lua, "embedded_width");
-    assert!(!body.contains("inner.tag"), "{body}");
+    assert!(!body.contains("inner.tag"));
     assert_eq!(run_main(&lua), "-1\n23 5");
 }

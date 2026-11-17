@@ -175,5 +175,5 @@ fn accumulation_within_the_budget_stays_one_expression() {
     let lua = try_emit_module(&accumulation(120)).expect("emits");
     let body = function_body(&lua, "sum");
     let sums = body.lines().filter(|line| line.contains(" + ")).count();
-    assert_eq!(sums, 1, "a 120-term sum was split:\n{body}");
+    assert_eq!(sums, 1);
 }

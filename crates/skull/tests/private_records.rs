@@ -13,7 +13,7 @@ struct Report { offset: int }
 "#,
     );
     let body = function_body(&lua, "fill_report");
-    assert!(!body.contains("__vec_checked_set"), "{body}");
+    assert!(!body.contains("__vec_checked_set"));
     assert_eq!(
         run_luajit(&format!(
             r#"{lua}
@@ -60,10 +60,7 @@ inline(lua) fn arm(report: Report, xs: [int]) = """
 }}
 "#
         ));
-        assert!(
-            function_body(&lua, "published").contains("__vec_checked_set"),
-            "{setup}"
-        );
+        assert!(function_body(&lua, "published").contains("__vec_checked_set"));
         assert_eq!(
             run_luajit(&format!(
                 r#"{lua}
@@ -74,8 +71,7 @@ print('ok')
 "#
             ))
             .trim(),
-            "ok",
-            "{setup}"
+            "ok"
         );
     }
 }

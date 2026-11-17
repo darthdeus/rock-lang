@@ -38,14 +38,8 @@ fn reject(src: &str) -> skull_parser::CompilerError {
 
 fn assert_planner_rejection(error: &skull_parser::CompilerError, element: &str) {
     let msg = &error.message;
-    assert!(
-        msg.contains("requires a valid native-buffer element ctype") && msg.contains(element),
-        "{msg}"
-    );
-    assert!(
-        !error.labels.is_empty(),
-        "native-buffer rejection must be located"
-    );
+    assert!(msg.contains("requires a valid native-buffer element ctype") && msg.contains(element));
+    assert!(!error.labels.is_empty());
 }
 
 #[test]

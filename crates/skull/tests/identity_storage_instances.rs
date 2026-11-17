@@ -21,10 +21,7 @@ fn rejections_in(ws: &Workspace) -> Vec<String> {
     g.rejections()
         .filter(|r| r.kind.name() == IDENTITY_STORAGE)
         .map(|r| {
-            assert!(
-                !instance_graph::is_spanless(&r.span),
-                "spanless rejection: {r:?}"
-            );
+            assert!(!instance_graph::is_spanless(&r.span));
             format!("{}: {}", g.identity(ws, &r.at), r.message)
         })
         .collect()
@@ -45,11 +42,8 @@ fn main() {
 #[test]
 fn substituted_identity_in_a_vec_is_rejected() {
     let r = identity_rejections(STASH);
-    assert_eq!(r.len(), 1, "{r:?}");
-    assert!(
-        r[0].contains("stash") && r[0].contains("`@/<test>::Unit`"),
-        "{r:?}"
-    );
+    assert_eq!(r.len(), 1);
+    assert!(r[0].contains("stash") && r[0].contains("`@/<test>::Unit`"));
 }
 
 #[test]
@@ -68,8 +62,8 @@ fn main() {
 }
 "#,
     );
-    assert_eq!(r.len(), 1, "{r:?}");
-    assert!(r[0].contains("stash"), "{r:?}");
+    assert_eq!(r.len(), 1);
+    assert!(r[0].contains("stash"));
 }
 
 /// Controls: values, handles and scalars are ordinary storage, and an identity
@@ -96,18 +90,14 @@ fn main() {
 }
 "#,
     );
-    assert!(r.is_empty(), "{r:?}");
+    assert!(r.is_empty());
 }
 
 #[test]
 fn substitution_only_identity_storage_is_fatal_for_an_enforced_package() {
     let err =
         try_emit_module_enforcing_identity_storage(STASH).expect_err("stash<Unit> must reject");
-    assert!(
-        err.message.contains("cannot store identity struct `Unit`"),
-        "{}",
-        err.message
-    );
+    assert!(err.message.contains("cannot store identity struct `Unit`"));
 }
 
 #[test]
@@ -129,10 +119,9 @@ fn main() {
 }
 "#,
     );
-    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(r.len(), 1);
     assert!(
-        r[0].contains("erase") && r[0].contains("cannot erase identity struct `@/<test>::Unit`"),
-        "{r:?}"
+        r[0].contains("erase") && r[0].contains("cannot erase identity struct `@/<test>::Unit`")
     );
 }
 
@@ -154,11 +143,10 @@ fn main() {
 "#,
     );
     let r = rejections_in(&ws);
-    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(r.len(), 1);
     assert!(
         r[0].contains("__probe_erase")
-            && r[0].contains("cannot erase identity struct `@/<test>::Unit`"),
-        "{r:?}"
+            && r[0].contains("cannot erase identity struct `@/<test>::Unit`")
     );
 }
 
@@ -201,7 +189,7 @@ fn main() {
 #[test]
 fn arena_rows_and_scene_roots_of_an_identity_are_not_rejected() {
     let r = identity_rejections(ARENA_AND_SCENE_ROWS);
-    assert!(r.is_empty(), "{r:?}");
+    assert!(r.is_empty());
     try_emit_module_enforcing_identity_storage(ARENA_AND_SCENE_ROWS)
         .expect("Arena rows and Scene roots are identity storage");
 }

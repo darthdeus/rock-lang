@@ -72,15 +72,9 @@ fn param_lambda_hoists_as_record_under_frame() {
     let state_field = state_capture_field(step, s);
     // the co-fn lambda hoists to a sibling top-level fn taking (env, <param>).
     let lp = function_params(&lua, &format!("{w}__step__lambda0"));
-    assert_eq!(lp.len(), 2, "the hoisted lambda must take (env, n):\n{lua}");
-    assert!(
-        step.contains("__slot = __rock_code_slot_ref(") && state_field.is_some(),
-        "the step must build a CodeRef env record carrying the frame state param `{s}`: {step}"
-    );
-    assert!(
-        !step.contains("function("),
-        "the step must hold no inline closure once frame lambdas hoist:\n{step}"
-    );
+    assert_eq!(lp.len(), 2);
+    assert!(step.contains("__slot = __rock_code_slot_ref(") && state_field.is_some());
+    assert!(!step.contains("function("));
 }
 
 /// The frame capture collapses to `s`: the hoisted body reaches the captured
@@ -96,10 +90,7 @@ fn frame_capture_composes_env_then_frame() {
     let state_field = state_capture_field(step, s)
         .unwrap_or_else(|| panic!("the step must capture its state param `{s}`:\n{step}"));
     let body = function_body(&lua, &format!("{w}__step__lambda0"));
-    assert!(
-        body.contains(&format!(".{state_field}")) && contains_digit_bridge(body, ".c", ""),
-        "the hoisted body must read the captured state table field `.{state_field}` and then a frame slot:\n{body}"
-    );
+    assert!(body.contains(&format!(".{state_field}")) && contains_digit_bridge(body, ".c", ""));
 }
 
 const CAPTURE_FREE: &str = r#"
@@ -125,14 +116,8 @@ fn capture_free_lambda_hoists_bare_under_frame() {
     let lua = emit_module(CAPTURE_FREE);
     let w = mangled_name(&lua, "worker");
     let step = function_body(&lua, &format!("{w}__step"));
-    assert!(
-        lua.contains(&format!("function {w}__step__lambda0()")),
-        "the capture-free co-fn lambda must hoist to a bare `{w}__step__lambda0()`:\n{lua}"
-    );
-    assert!(
-        step.contains("__rock_code_slot_ref(") && !step.contains("function("),
-        "capture-free: the step references the reusable CodeRef (no inline closure):\n{step}"
-    );
+    assert!(lua.contains(&format!("function {w}__step__lambda0()")));
+    assert!(step.contains("__rock_code_slot_ref(") && !step.contains("function("));
 }
 
 const LOOP_BINDING: &str = r#"
@@ -160,27 +145,14 @@ fn loop_binding_snapshots_by_value_into_record() {
     let lua = emit_module(LOOP_BINDING);
     let lp_name = mangled_name(&lua, "looper");
     let step = function_body(&lua, &format!("{lp_name}__step"));
-    assert!(
-        step.contains("__slot = __rock_code_slot_ref("),
-        "the loop lambda must build a CodeRef env record:\n{step}"
-    );
+    assert!(step.contains("__slot = __rock_code_slot_ref("));
     // The record field value is a frame-field READ (`= c<S>.c<i>`): snapshot,
     // not a shared reference.
-    assert!(
-        contains_digit_bridge(step, "= c", ".c"),
-        "the record must snapshot the loop binding from the frame (`= c<S>.c<N>`):\n{step}"
-    );
+    assert!(contains_digit_bridge(step, "= c", ".c"));
     // The hoisted body reads its by-value snapshot as a single `.c<slot>` field
     // hop off its env, and NEVER through `s` at call time (the final-value bug
     // D4(b) avoids -- a via-`s` capture would need another field hop).
     let body = function_body(&lua, &format!("{lp_name}__step__lambda"));
-    assert!(
-        contains_digit_bridge(body, ".c", ""),
-        "the hoisted body must read a snapshot field `.c<slot>` from its env:\n{body}"
-    );
-    assert_eq!(
-        body.matches(".c").count(),
-        1,
-        "a read-only loop binding must read its snapshot without a second frame-field hop:\n{body}"
-    );
+    assert!(contains_digit_bridge(body, ".c", ""));
+    assert_eq!(body.matches(".c").count(), 1);
 }

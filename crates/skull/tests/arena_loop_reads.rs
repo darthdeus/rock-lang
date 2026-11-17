@@ -88,7 +88,7 @@ fn unused_arena_entities_do_not_read_generations() {
     let lua = emit_module(SOURCE);
     for name in ["unused_entity", "unused_pair_entity", "unused_enum"] {
         let body = function_body(&lua, name);
-        assert!(!body.contains(".generations"), "{body}");
+        assert!(!body.contains(".generations"));
     }
     assert!(function_body(&lua, "used_entity").contains(".generations"));
 }
@@ -98,8 +98,8 @@ fn unused_arena_rows_do_not_read_data() {
     let lua = emit_module(SOURCE);
     for name in ["unused_column", "unused_enum"] {
         let body = function_body(&lua, name);
-        assert!(!body.contains(".data"), "{body}");
-        assert!(body.contains(".occupied"), "{body}");
+        assert!(!body.contains(".data"));
+        assert!(body.contains(".occupied"));
     }
 }
 
@@ -120,13 +120,13 @@ fn unused_bindings_preserve_live_slots_and_removal_during_the_walk() {
 fn vector_leaves_are_already_dead_but_the_element_index_stays() {
     let lua = emit_module(SOURCE);
     let column = function_body(&lua, "column_field");
-    assert!(!column.contains(".y"), "{column}");
-    assert!(column.contains(".x)[(c"), "{column}");
-    assert!(!column.contains("__vec_checked_index"), "{column}");
+    assert!(!column.contains(".y"));
+    assert!(column.contains(".x)[(c"));
+    assert!(!column.contains("__vec_checked_index"));
     let strided = function_body(&lua, "strided_field");
-    assert!(!strided.contains("__vec_checked_index"), "{strided}");
+    assert!(!strided.contains("__vec_checked_index"));
     let unused = function_body(&lua, "unused_vec_element");
-    assert!(unused.contains("__vec_checked_index"), "{unused}");
+    assert!(unused.contains("__vec_checked_index"));
     assert_eq!(
         run_luajit(&format!(
             "{lua}\nlocal ok, err = pcall(unused_vec_element)\nassert(not ok and tostring(err):find('out of bounds'))\nprint('ok')"

@@ -29,10 +29,7 @@ fn main() {
 fn native_buffer_in_value_is_not_rebuilt() {
     let lua = emit_module(HOLDER);
     let body = function_body(&lua, "bump");
-    assert!(
-        !body.contains("NativeBuffer_vt(") && !body.contains("Ptr_vt("),
-        "a NativeBuffer leaf must be the buffer table itself, not a rebuilt descriptor:\n{body}"
-    );
+    assert!(!body.contains("NativeBuffer_vt(") && !body.contains("Ptr_vt("));
 }
 
 const USER_NAMED: &str = r#"
@@ -64,10 +61,7 @@ fn user_value_named_like_a_descriptor_keeps_scalarization() {
         .lines()
         .find(|l| l.starts_with(&format!("function {take}(")))
         .expect("take is emitted");
-    assert!(
-        header.contains(", "),
-        "a user value must scalarize to its leaves: {header}"
-    );
+    assert!(header.contains(", "));
     let probe = mangled_name(&emitted.lua, "probe");
     assert_eq!(
         run_luajit(&format!("{}\nprint({probe}())\n", emitted.lua)),

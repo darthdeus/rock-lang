@@ -53,26 +53,13 @@ fn const_value_struct_ctor_is_hoisted_to_module_scope() {
     let lua = emit_module(TWO_CONST_NESTED);
     // The distinctive ctor is BUILT exactly once, in a module-scope hoist def.
     let builds = count(&lua, "FixVec2_ct(3.0, 7.0)");
-    assert_eq!(
-        builds, 1,
-        "the all-constant FixVec2 {{3,7}} must be built once (one hoist def), found {builds}:\n{lua}"
-    );
+    assert_eq!(builds, 1);
     // The def is a `__skull_kc_*` global assignment, not inside the loop.
-    assert!(
-        lua.contains("__skull_kc_") && lua.contains("= FixVec2_ct(3.0, 7.0)"),
-        "expected a module-scope `__skull_kc_* = FixVec2_ct(3.0, 7.0)` hoist def:\n{lua}"
-    );
+    assert!(lua.contains("__skull_kc_") && lua.contains("= FixVec2_ct(3.0, 7.0)"));
     // The hot function rebuilds nothing -- it references the global instead.
     let body = function_body(&lua, "fill");
-    assert_eq!(
-        count(body, "FixVec2_ct("),
-        0,
-        "fill must reference the hoisted global, not rebuild the ctor:\n{body}"
-    );
-    assert!(
-        body.contains("__skull_kc_"),
-        "fill must reference the hoisted const global:\n{body}"
-    );
+    assert_eq!(count(body, "FixVec2_ct("), 0);
+    assert!(body.contains("__skull_kc_"));
 }
 
 // A package value's DefKey is qualified (`pkg::a::Id`); the hoist def must name
@@ -124,11 +111,7 @@ fn hoisted_package_value_ctor_uses_the_emitted_type_symbol() {
             },
         ],
     );
-    assert!(
-        emitted.lua.contains("__skull_kc_"),
-        "the all-constant package value literal must be hoisted:\n{}",
-        emitted.lua
-    );
+    assert!(emitted.lua.contains("__skull_kc_"));
     let out = run_main(&emitted.lua);
     assert_eq!(out, "3/7 1/1");
 }

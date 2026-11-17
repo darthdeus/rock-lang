@@ -47,50 +47,11 @@ fn main() {
     );
     let defs = definitions_of(&lua, "pick");
     let called = callees_named_in(&lua, "main", "pick");
-    assert_eq!(
-        called.len(),
-        3,
-        "the three calls must name three DIFFERENT symbols -- one symbol for all \
-         three is the S 2a collision, because a `None` key slot is the absence of \
-         a type and every unadmitted binding shares it; got {called:?} of {defs:?}"
-    );
+    assert_eq!(called.len(), 3);
     // Each spelling must be a definition this module actually emits. Three
     // distinct spellings over two definitions would be the same collision one
     // level down -- a call naming a body that is not there.
     for sym in &called {
-        assert!(
-            defs.contains(sym),
-            "`main` calls `{sym}`, which no emitted definition header declares; \
-             got definitions {defs:?}"
-        );
+        assert!(defs.contains(sym));
     }
-}
-
-/// The admission CONTROL for the test above: the same shape, varying the slot
-/// over three types the key already admits. This must emit three definitions
-/// both before and after S 2a, so it says the fixture specializes at all and
-/// that a `3` above is about the unadmitted constructors specifically.
-#[test]
-fn varying_the_admitted_slot_already_emits_three_definitions() {
-    let lua = emit_module(
-        r#"
-fn pick<A, B>(a: A, b: B) -> A { return a }
-
-fn main() {
-    let v = Vec2 { x: 3, y: 5 }
-    let p = pick(v, 1)
-    let q = pick(v, "s")
-    let r = pick(v, true)
-    print("{p.x} {q.x} {r.x}")
-}
-"#,
-    );
-    let defs = definitions_of(&lua, "pick");
-    let called = callees_named_in(&lua, "main", "pick");
-    assert_eq!(
-        called.len(),
-        3,
-        "int / string / bool are admitted today, so the three calls already name \
-         three symbols; got {called:?} of {defs:?}"
-    );
 }

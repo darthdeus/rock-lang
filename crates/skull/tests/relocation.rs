@@ -12,28 +12,18 @@ fn rejected_at(src: &str, at: &str) -> String {
         .iter()
         .filter(|e| e.message.contains("relocat"))
         .collect();
-    assert_eq!(
-        relocations.len(),
-        1,
-        "expected one relocation rejection: {errors:#?}"
-    );
+    assert_eq!(relocations.len(), 1);
     let error = relocations[0];
     let expected = src
         .find(at)
         .unwrap_or_else(|| panic!("`{at}` is not in the source"));
-    assert_eq!(
-        error.location.offset,
-        expected,
-        "the rejection must point at `{at}`, found {:?}: {}",
-        &src[error.location.offset..(error.location.offset + at.len()).min(src.len())],
-        error.message
-    );
+    assert_eq!(error.location.offset, expected);
     error.message.clone()
 }
 
 fn accepted(src: &str) {
     let errors = bone_rejection_errors(src);
-    assert!(errors.is_empty(), "{errors:#?}");
+    assert!(errors.is_empty());
 }
 
 #[test]
@@ -54,7 +44,7 @@ fn main() {
 "#,
         "cells[0], cells)",
     );
-    assert!(message.contains("grow_then_write"), "{message}");
+    assert!(message.contains("grow_then_write"));
 }
 
 #[test]
@@ -118,8 +108,7 @@ fn main() {
     assert!(
         errors
             .iter()
-            .any(|e| e.message.contains("relocatable Vec or Map storage")),
-        "a retained Map-element ref dangles when an insert rehashes: {errors:#?}"
+            .any(|e| e.message.contains("relocatable Vec or Map storage"))
     );
 }
 
@@ -301,7 +290,6 @@ fn fake(values: [int]) {}
     assert!(
         errors
             .iter()
-            .any(|e| e.message.contains("`@relocates` is reserved")),
-        "{errors:#?}"
+            .any(|e| e.message.contains("`@relocates` is reserved"))
     );
 }

@@ -58,7 +58,7 @@ fn wrapper(lua: &str, name: &str) -> String {
         .take_while(|l| *l != "end")
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(!body.is_empty(), "no `{name}` wrapper was emitted:\n{lua}");
+    assert!(!body.is_empty());
     body
 }
 
@@ -78,10 +78,7 @@ extern(ffi, "m") fn ret_bag() -> Wrap<Wrap<Bag>>
 fn main() { print("x") }
 "#,
     );
-    assert!(
-        err.contains("Bag") && err.contains("GC-carrying `value` struct"),
-        "the resolved return layout is a GC-carrying Bag and must be rejected, got:\n{err}"
-    );
+    assert!(err.contains("Bag") && err.contains("GC-carrying `value` struct"));
 
     let ffi_clean = crate::common::try_emit_module(
         r#"
@@ -91,10 +88,7 @@ extern(ffi, "m") fn ret_point() -> Wrap<Wrap<Point>>
 fn main() { print("x") }
 "#,
     );
-    assert!(
-        ffi_clean.is_ok(),
-        "an FFI-clean value layout remains legal through its newtype: {ffi_clean:?}"
-    );
+    assert!(ffi_clean.is_ok());
 }
 
 /// Both sides, which is what makes either one evidence: the declarations whose C
@@ -126,9 +120,7 @@ fn an_int_representation_is_coerced_through_every_alias_shape() {
         let w = wrapper(&lua, name);
         assert!(
             w.contains(&format!("local __rock_ret = tonumber(m.{name}("))
-                && w.contains("return __rock_ret"),
-            "`{name}` bottoms out at an int representation, so its return must be a \
-             Rock number and not whatever the C ABI handed back:\n{w}"
+                && w.contains("return __rock_ret")
         );
     }
 
@@ -138,15 +130,11 @@ fn an_int_representation_is_coerced_through_every_alias_shape() {
     // "substitutes correctly" from "coerces every newtype".
     for name in ["ret_ratio", "ret_boxed_float", "ret_outer_float"] {
         let w = wrapper(&lua, name);
-        assert!(
-            w.contains(&format!("local __rock_ret = m.{name}(")) && !w.contains("tonumber"),
-            "`{name}` bottoms out at a representation LuaJIT already hands back as a \
-             Lua value; it must cross unchanged:\n{w}"
-        );
+        assert!(w.contains(&format!("local __rock_ret = m.{name}(")) && !w.contains("tonumber"));
     }
 
     let w = wrapper(&lua, "ret_void");
-    assert!(!w.contains("return"), "a void extern returns nothing:\n{w}");
+    assert!(!w.contains("return"));
 }
 
 /// A `-> bool` extern's C return is declared `uint8_t`, so the wrapper owes the
@@ -169,15 +157,8 @@ fn a_bool_representation_is_compared_to_the_byte_the_cdef_returns() {
 
     for name in ["ret_bool", "ret_flag"] {
         let w = wrapper(&lua, name);
-        assert!(
-            w.contains(&format!("return m.{name}(")) && w.trim_end().ends_with("~= 0"),
-            "`{name}` bottoms out at a bool representation, so its wrapper must turn \
-             the `uint8_t` the cdef returns into a Lua boolean:\n{w}"
-        );
-        assert!(
-            !w.contains("tonumber"),
-            "`{name}` is a boolean, not a number:\n{w}"
-        );
+        assert!(w.contains(&format!("return m.{name}(")) && w.trim_end().ends_with("~= 0"));
+        assert!(!w.contains("tonumber"));
     }
 }
 
@@ -194,10 +175,7 @@ extern(ffi, "m") fn ret_open<T>() -> Boxed<T>
 fn main() { print("x") }
 "#,
     );
-    assert!(
-        msg.contains("ret_open") && msg.contains("unbound generic parameter"),
-        "an unbound generic must reject however it is wrapped, got:\n{msg}"
-    );
+    assert!(msg.contains("ret_open") && msg.contains("unbound generic parameter"));
 }
 
 /// A newtype cycle wraps itself by value, so it has no finite representation
@@ -216,8 +194,7 @@ fn main() { print("x") }
     );
     assert!(
         errs.iter()
-            .any(|e| e.contains("recursive value type: A -> B -> A")),
-        "a newtype cycle must reject as a cycle, got: {errs:?}"
+            .any(|e| e.contains("recursive value type: A -> B -> A"))
     );
 }
 
@@ -235,8 +212,7 @@ fn main() { print("x") }
     );
     assert!(
         errs.iter()
-            .any(|e| e.contains("recursive value type: X -> Y -> X")),
-        "a generic newtype cycle must reject as a cycle, got: {errs:?}"
+            .any(|e| e.contains("recursive value type: X -> Y -> X"))
     );
 }
 
@@ -268,14 +244,8 @@ fn every_value_returning_wrapper_returns_through_a_local() {
                 || t.starts_with("return tonumber(")
                 || t.starts_with("return ffi.new(")
         });
-        assert!(
-            !tail,
-            "`{name}` still returns through a tail call into C:\n{w}"
-        );
-        assert!(
-            w.contains("return __rock_ret"),
-            "`{name}` must return the bound local:\n{w}"
-        );
+        assert!(!tail);
+        assert!(w.contains("return __rock_ret"));
     }
 }
 
@@ -288,15 +258,9 @@ fn go() -> int { poll(-1) }
 "#,
     );
     let w = wrapper(&lua, "poll");
-    assert!(
-        w.contains("if wait == nil then wait = false end"),
-        "the FFI wrapper must fill an omitted literal default before the C call:\n{w}"
-    );
+    assert!(w.contains("if wait == nil then wait = false end"));
     let go = crate::common::function_body(&lua, "go");
-    assert!(
-        go.contains("poll((-1), (false))"),
-        "a direct omitted call must pass the literal default:\n{go}"
-    );
+    assert!(go.contains("poll((-1), (false))"));
 }
 
 /// A modules-v1 extern is registered under its DefKey, but its wrapper is the

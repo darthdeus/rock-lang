@@ -40,8 +40,8 @@ fn fresh_struct_projection_eliminates_the_unobservable_container() {
     let lua = emit_module(SOURCE);
     for name in ["fresh_scalar", "fresh_call", "fresh_nested"] {
         let body = function_body(&lua, name);
-        assert!(!body.contains("__ty ="), "{body}");
-        assert!(!body.contains("FreshPair_ct("), "{body}");
+        assert!(!body.contains("__ty ="));
+        assert!(!body.contains("FreshPair_ct("));
     }
     assert_eq!(run_main(&lua), "7 2\n7 23\n7 23\n26 2");
 }

@@ -17,10 +17,7 @@ fn begin(delay: float) -> Task {
 fn an_if_joined_v1_enum_stays_in_leaves() {
     let legacy = emit_module(&format!("{SRC}\nfn main() {{ let _ = begin(1.0) }}"));
     let body = function_body(&legacy, &mangled_name(&legacy, "begin"));
-    assert!(
-        !body.contains("{__variant"),
-        "legacy control boxes the join:\n{body}"
-    );
+    assert!(!body.contains("{__variant"));
 
     let v1_src = format!(
         "{}\npub fn probe() -> int {{ return begin(1.0).n }}\nfn main() {{}}",
@@ -34,13 +31,7 @@ fn an_if_joined_v1_enum_stays_in_leaves() {
         }],
     );
     let body = function_body(&emitted.lua, &mangled_name(&emitted.lua, "begin"));
-    assert!(
-        !body.contains("{__variant"),
-        "a v1 enum join boxes its value:\n{body}"
-    );
+    assert!(!body.contains("{__variant"));
     // The scalarized `__ty` leaf is the runtime tag every box of the type carries.
-    assert!(
-        !body.contains("\"v1join::"),
-        "a scalarized leaf spells the DefKey:\n{body}"
-    );
+    assert!(!body.contains("\"v1join::"));
 }

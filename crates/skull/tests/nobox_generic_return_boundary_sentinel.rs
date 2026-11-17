@@ -111,28 +111,19 @@ fn emit_err(src: &str) -> String {
 #[test]
 fn a_field_get_of_a_nobox_field_is_rejected_at_the_return_boundary() {
     let err = emit_err(FIELD_GET_NOBOX);
-    assert!(
-        err.contains("cannot cross the boxed return of `field_get`") && err.contains("Vec2"),
-        "a flattened field must not cross an opaque generic return: {err}"
-    );
+    assert!(err.contains("cannot cross the boxed return of `field_get`") && err.contains("Vec2"));
 }
 
 #[test]
 fn a_generic_nobox_return_is_rejected_at_an_opaque_boundary() {
     let err = emit_err(GENERIC_RETURN_NOBOX);
     assert!(
-        err.contains("cannot cross the boxed return of `unwrap_generic`") && err.contains("Vec2"),
-        "a concrete generic nobox return must not cross an opaque boundary: {err}"
+        err.contains("cannot cross the boxed return of `unwrap_generic`") && err.contains("Vec2")
     );
 }
 
 #[test]
 fn the_write_direction_of_the_same_field_is_rejected() {
     let err = emit_err(FIELD_SET_NOBOX);
-    assert!(
-        err.contains("cannot cross boxed call boundary"),
-        "the arg-position check must keep rejecting `field_set` of a nobox \
-         field; this is the half that works, and the asymmetry against \
-         `field_get` is the finding. got: {err:?}"
-    );
+    assert!(err.contains("cannot cross boxed call boundary"));
 }

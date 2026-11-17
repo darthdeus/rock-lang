@@ -92,17 +92,11 @@ fn optional_value_return_builds_no_box_on_the_presence_path() {
         ("play", "Mix_ct("),
     ] {
         let body = function_body(&lua, name);
-        assert!(!body.contains(ctor), "`{name}` builds `{ctor}..)`:\n{body}");
+        assert!(!body.contains(ctor));
     }
     let body = function_body(&lua, "mk_mix");
-    assert!(
-        body.contains("do return (true), "),
-        "present arm is the presence lane:\n{body}"
-    );
-    assert!(
-        body.contains("do return (false) end"),
-        "absent arm is the presence lane alone; Lua fills the leaves with nil:\n{body}"
-    );
+    assert!(body.contains("do return (true), "));
+    assert!(body.contains("do return (false) end"));
     assert_eq!(
         run_main(&lua),
         "5\n-1\n5\ntrue\ntrue\ntrue\ntrue\n5\n0\n4\n7\n9\ntrue\ntrue\ntrue\n4\nt\nd"

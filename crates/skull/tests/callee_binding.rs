@@ -27,18 +27,15 @@ fn assert_passes(script: &str) {
     let out =
         rock_host::lua_runner::run_lua_code_with_timeout(script, Some(test_utils::HANG_BACKSTOP))
             .expect("load script");
-    assert!(out.success, "{}", out.combined());
-    assert!(out.stdout.contains("PASS"), "{}", out.combined());
+    assert!(out.success);
+    assert!(out.stdout.contains("PASS"));
 }
 
 fn only(lua: &str, needle: &str) -> usize {
     let first = lua
         .find(needle)
         .unwrap_or_else(|| panic!("missing `{needle}`"));
-    assert!(
-        lua[first + needle.len()..].find(needle).is_none(),
-        "`{needle}` occurs more than once"
-    );
+    assert!(lua[first + needle.len()..].find(needle).is_none());
     first
 }
 
@@ -55,8 +52,7 @@ fn every_binding_line_follows_every_definition() {
         .collect();
     assert!(
         factories.iter().any(|n| n.starts_with("top_"))
-            && factories.iter().any(|n| n.starts_with("mid_")),
-        "expected `top` and `mid` bound: {factories:?}"
+            && factories.iter().any(|n| n.starts_with("mid_"))
     );
     let last_definition = lua
         .match_indices("\n__rock_mk_")
@@ -65,10 +61,7 @@ fn every_binding_line_follows_every_definition() {
         .expect("at least one factory");
     for name in &factories {
         let bind = only(&lua, &format!("\n{name} = __rock_mk_{name}("));
-        assert!(
-            bind > last_definition,
-            "`{name}`'s binding line precedes a factory definition"
-        );
+        assert!(bind > last_definition);
     }
 }
 
@@ -85,10 +78,7 @@ fn binding_lines_are_ordered_callees_before_callers() {
     };
     let mid_bind = position("mid_int = __rock_mk_");
     let top_bind = position("top_int = __rock_mk_");
-    assert!(
-        mid_bind < top_bind,
-        "`mid` must bind before `top` captures it"
-    );
+    assert!(mid_bind < top_bind);
 }
 
 /// A mutually recursive pair shares one call-graph component, so neither leg is
@@ -100,19 +90,10 @@ fn a_mutually_recursive_pair_stays_a_global_lookup() {
     let caller = "is_odd";
     let body = function_body(&lua, caller);
     let leaf = bound_callee_name(&lua, caller, "leaf_int");
-    assert_ne!(
-        leaf, "leaf_int",
-        "the off-component callee should be captured as a factory parameter"
-    );
-    assert!(
-        body.contains(&format!("{leaf}(")),
-        "expected the off-component callee call in the body:\n{body}"
-    );
+    assert_ne!(leaf, "leaf_int");
+    assert!(body.contains(&format!("{leaf}(")));
     let recursive = bound_callee_name(&lua, caller, "is_even_int");
-    assert!(
-        recursive == "is_even_int" && body.contains("is_even_int("),
-        "expected the mutually recursive call left as a global lookup:\n{body}"
-    );
+    assert!(recursive == "is_even_int" && body.contains("is_even_int("));
 }
 
 /// `MirEmit::emits_main` is the emitter's own answer to "does this artifact
@@ -126,17 +107,13 @@ fn emits_main_is_reported() {
     let ws = ws_with_stdlib(SRC);
     let mid = skull::user_module_id(&ws).unwrap();
     let emit = emit_full(&ws, mid).expect("emit_full").0;
-    assert!(emit.emits_main, "`main` is defined");
-    assert!(
-        !emit.lua.contains("function main("),
-        "the bound shape does not spell `function main(` -- which is why \
-         searching the text for it is not the oracle"
-    );
+    assert!(emit.emits_main);
+    assert!(!emit.lua.contains("function main("));
 
     let no_main = ws_with_stdlib("fn leaf(a: int) -> int { a + 1 }\n");
     let mid = skull::user_module_id(&no_main).unwrap();
     let emit = emit_full(&no_main, mid).expect("emit_full").0;
-    assert!(!emit.emits_main, "no `main` is defined");
+    assert!(!emit.emits_main);
 }
 
 fn over_budget_inline_caller_fixture(helper_value: i32) -> String {

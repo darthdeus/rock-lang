@@ -47,7 +47,7 @@ fn leaf_walkers_agree_on_path_order() {
                 key(&ws, name),
             )
             .expect("value shape");
-        assert_eq!(want, got, "leaf order disagreement for `{name}`");
+        assert_eq!(want, got);
     }
 }
 
@@ -66,11 +66,7 @@ fn a_type_without_a_c_layout_rejects_by_name() {
             key(&ws, "NotAType"),
         )
         .expect_err("a non-value type must not produce a layout");
-    assert!(
-        err.message.contains("NotAType"),
-        "the rejection must name the type, got: {}",
-        err.message
-    );
+    assert!(err.message.contains("NotAType"));
 }
 
 /// Offsets follow C rules, not declaration index: `Mixed` packs float@0, int@4,
@@ -202,10 +198,10 @@ fn main() {
 fn layout_checks_share_one_failure_path() {
     let lua = crate::common::emit_module(LAYOUT_PROGRAM);
     // The size and leaf messages, both in the shared helper.
-    assert_eq!(lua.matches("skull layout drift").count(), 2, "{lua}");
+    assert_eq!(lua.matches("skull layout drift").count(), 2);
     assert_eq!(crate::common::run_main(&lua), "6");
     let check = layout_check_line(&lua, "Outer");
-    assert!(!check.contains("ffi.offsetof"), "{check}");
+    assert!(!check.contains("ffi.offsetof"));
     for (from, to, message) in [
         (
             " d 24\"",
@@ -224,9 +220,9 @@ fn layout_checks_share_one_failure_path() {
         ),
     ] {
         let edited = check.replace(from, to);
-        assert_ne!(edited, check, "{from} in {check}");
+        assert_ne!(edited, check);
         let (ok, out) = crate::common::run_luajit_capturing(&lua.replace(check, &edited));
-        assert!(!ok && out.contains(message), "{message}: {out}");
+        assert!(!ok && out.contains(message));
     }
 }
 
@@ -241,13 +237,10 @@ fn a_nested_leaf_alias_at_another_offset_fails_the_load() {
     };
     let (a, b) = (alias("inner.a"), alias("inner.b"));
     let flat = format!("double {a}; int {b};");
-    assert!(lua.contains(&flat), "no flattened alias `{flat}`:\n{lua}");
+    assert!(lua.contains(&flat));
     let swapped = lua.replace(&flat, &format!("int {b}; double {a};"));
     let (ok, out) = crate::common::run_luajit_capturing(&swapped);
-    assert!(
-        !ok && out.contains(&format!("skull leaf alias drift: Outer.{a}")),
-        "{out}"
-    );
+    assert!(!ok && out.contains(&format!("skull leaf alias drift: Outer.{a}")));
 }
 
 fn layout_check_line<'a>(lua: &'a str, sym: &str) -> &'a str {
@@ -273,14 +266,11 @@ fn main() {
 fn assert_load_fails(lua: &str, edits: &[(&str, &str)], message: &str) {
     let mut edited = lua.to_string();
     for (from, to) in edits {
-        assert_eq!(edited.matches(from).count(), 1, "`{from}` in:\n{lua}");
+        assert_eq!(edited.matches(from).count(), 1);
         edited = edited.replace(from, to);
     }
     let (ok, out) = crate::common::run_luajit_capturing(&edited);
-    assert!(
-        !ok && out.contains(message),
-        "expected `{message}`, got:\n{out}"
-    );
+    assert!(!ok && out.contains(message));
 }
 
 #[test]

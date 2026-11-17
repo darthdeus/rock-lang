@@ -119,10 +119,7 @@ fn main() {
 #[test]
 fn a_generic_inline_lua_body_over_a_column_vec_rejects() {
     let msg = emit_rejection(GUARDED_GENERIC);
-    assert!(
-        msg.contains("column-stored `[P]`") && msg.contains("probe_len"),
-        "the rejection must name the element and the callee, got: {msg}"
-    );
+    assert!(msg.contains("column-stored `[P]`") && msg.contains("probe_len"));
 }
 
 /// THE discriminant. Its rejecting identically keeps the defect attributed to
@@ -148,8 +145,5 @@ fn an_unguarded_inline_lua_body_over_a_column_vec_rejects() {
 #[test]
 fn a_generic_param_bound_to_a_column_vec_at_the_call_rejects() {
     let msg = emit_rejection(GENERIC_PARAM_BOUND_AT_CALL);
-    assert!(
-        msg.contains("column-stored `[P]`") && msg.contains("opaque_t"),
-        "a param spelled `T` that binds to `[P]` here must reject, got: {msg}"
-    );
+    assert!(msg.contains("column-stored `[P]`") && msg.contains("opaque_t"));
 }

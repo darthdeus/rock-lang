@@ -66,21 +66,17 @@ fn main() {
 #[test]
 fn nullable_entity_field_assignment_and_consumers_round_trip() {
     let lua = try_emit_module(SRC).expect("fixture must emit");
-    assert!(
-        lua.contains(r#"slots = ({_data ="#),
-        "nullable Entity assignment is not boxed:\n{}",
-        lua
-    );
-    assert!(
-        crate::common::has_vec_header(&lua, "columns", Some("ColumnCell")),
-        "column control stopped using columns:\n{}",
-        lua
-    );
-    assert!(
-        !crate::common::has_vec_header(&lua, "columns", Some("Entity")),
-        "nullable Entity assignment selected columns:\n{}",
-        lua
-    );
+    assert!(lua.contains(r#"slots = ({_data ="#));
+    assert!(crate::common::has_vec_header(
+        &lua,
+        "columns",
+        Some("ColumnCell")
+    ));
+    assert!(!crate::common::has_vec_header(
+        &lua,
+        "columns",
+        Some("Entity")
+    ));
     let out = run_main(&lua);
     assert_eq!(out, "41 3 true true 23 2 2 2 14");
 }

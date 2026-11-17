@@ -40,10 +40,7 @@ fn main() { print("{hot(1.0, 2.0, 8)}") }
     // The body entry has no label (only the `for` line enters it), so the
     // in-loop decl must be the first line inside the loop.
     let decl = after_for.lines().nth(1).unwrap_or_default();
-    assert!(
-        decl.trim_start().starts_with("local r"),
-        "no in-loop `local r` decl right after the for:\n{body}"
-    );
+    assert!(decl.trim_start().starts_with("local r"));
 }
 
 /// A temp live across the loop (defined before, used after) must stay in the
@@ -79,10 +76,7 @@ fn main() { print("{hot(1.0, 2.0, 8)}") }
     let tail = &body[loop_end..];
     for tok in tail.split(|c: char| !c.is_alphanumeric()) {
         if tok.starts_with('r') && tok[1..].chars().all(|c| c.is_ascii_digit()) && tok.len() > 1 {
-            assert!(
-                top_decl.contains(tok),
-                "`{tok}` used after the loop but not declared at fn top.\ntop: {top_decl}\ntail: {tail}\nbody:\n{body}"
-            );
+            assert!(top_decl.contains(tok));
         }
     }
 }

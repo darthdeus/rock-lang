@@ -62,10 +62,6 @@ fn map_absent_remove_does_not_store() {
         ("int_map", "int_remove", "m"),
         ("column_map", "column_remove", "m.spine"),
     ] {
-        assert_eq!(
-            absent_key_stores(&lua, build, remove, keyed),
-            "0",
-            "{build}"
-        );
+        assert_eq!(absent_key_stores(&lua, build, remove, keyed), "0");
     }
 }

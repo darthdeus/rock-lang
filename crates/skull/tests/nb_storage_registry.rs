@@ -32,12 +32,7 @@ fn primitive_and_sized_element_types_are_registered() {
         ("uint32_t", 4),
     ] {
         let want = format!("__rock_nb_storage(\"{cty}\", {size}, ");
-        assert!(
-            lua.contains(&want),
-            "expected `{want}...)` in the prelude; a sized buffer whose element is \
-             undescribed cannot be imaged, got prelude:\n{}",
-            &lua[..lua.len().min(4000)]
-        );
+        assert!(lua.contains(&want));
     }
 }
 
@@ -49,16 +44,9 @@ fn a_value_element_registers_its_luajit_width_and_every_leaf_view() {
         .lines()
         .find(|l| l.starts_with("__rock_nb_storage(\"Mix\","))
         .unwrap_or_else(|| panic!("no `Mix` storage registration in:\n{lua}"));
-    assert!(
-        line.contains("\"Mix\", 12,"),
-        "expected `Mix` to be 12 bytes wide, got: {line}"
-    );
+    assert!(line.contains("\"Mix\", 12,"));
     for view in ["__vf = \"float*\"", "__vi = \"int*\"", "__vb = \"bool*\""] {
-        assert!(
-            line.contains(view),
-            "a mixed-leaf element must register every view its access path uses; \
-             missing `{view}` in: {line}"
-        );
+        assert!(line.contains(view));
     }
 }
 
@@ -69,10 +57,7 @@ fn a_value_element_registers_its_luajit_width_and_every_leaf_view() {
 #[test]
 fn the_registry_is_keyed_through_ffi_typeof() {
     let lua = emit_module(VALUE_ELEM);
-    assert!(
-        lua.contains("_G.__ROCK_NB_STORAGE[tostring(ct)]"),
-        "expected the registry keyed by `tostring(ffi.typeof(ctype .. \"[?]\"))`"
-    );
+    assert!(lua.contains("_G.__ROCK_NB_STORAGE[tostring(ct)]"));
 }
 
 /// The declared width is asserted against LuaJIT at load. A drift here is not a
@@ -81,8 +66,5 @@ fn the_registry_is_keyed_through_ffi_typeof() {
 #[test]
 fn a_width_that_disagrees_with_luajit_aborts_at_load() {
     let lua = emit_module(VALUE_ELEM);
-    assert!(
-        lua.contains("skull storage drift: sizeof("),
-        "expected a load-time width cross-check against ffi.sizeof"
-    );
+    assert!(lua.contains("skull storage drift: sizeof("));
 }

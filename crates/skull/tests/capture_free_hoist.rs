@@ -26,10 +26,7 @@ fn main() { let _ = owner_new() }
 "#,
     );
     let body = function_body(&lua, "borrow");
-    assert!(
-        !body.contains("setmetatable("),
-        "defer must reuse its immutable cleanup value:\n{body}"
-    );
+    assert!(!body.contains("setmetatable("));
     let make = mangled_name(&lua, "owner_new");
     let borrow = mangled_name(&lua, "borrow");
     let driver = format!(
@@ -103,22 +100,13 @@ fn main() { let _ = free_loop() let _ = capturing_loop() }
 fn capture_free_lambda_hoists_to_named_toplevel() {
     let lua = emit_module(FIXTURE);
     let lam = format!("{}__lambda0", mangled_name(&lua, "free_loop"));
-    assert!(
-        lua.contains(&format!("function {lam}(")),
-        "the capture-free lambda must hoist to a top-level `{lam}`:\n{lua}"
-    );
+    assert!(lua.contains(&format!("function {lam}(")));
     let body = function_body(&lua, "free_loop");
-    assert!(
-        body.contains("__rock_code_slot_ref("),
-        "the creation site must reference the reusable CodeRef:\n{body}"
-    );
+    assert!(body.contains("__rock_code_slot_ref("));
     // An anonymous inline closure renders `function(` (no space); the enclosing
     // fn header is `function free_loop(` (space + name), so `function(` is the
     // precise marker of a leftover inline closure.
-    assert!(
-        !body.contains("function("),
-        "a hoisted capture-free lambda must leave NO inline closure in the enclosing body:\n{body}"
-    );
+    assert!(!body.contains("function("));
 }
 
 /// RUNTIME (RED until P3): two creations of the SAME capture-free lambda are the
@@ -134,10 +122,7 @@ fn main() { let _ = mk() }
     let mk = mangled_name(&lua, "mk");
     let driver = format!("\nlocal a = {mk}()\nlocal b = {mk}()\nprint(rawequal(a, b))\n");
     let out = run_luajit(&format!("{lua}{driver}"));
-    assert_eq!(
-        out, "true",
-        "two creations of a capture-free lambda must share one hoisted fn value; got: {out}"
-    );
+    assert_eq!(out, "true");
 }
 
 /// TRANSITIVE capture (P2.6): an outer lambda that is locally-capture-free but
@@ -160,15 +145,11 @@ fn main() { let g = transitive(7) print("{g()}") }
     let m = mangled_name(&lua, "transitive");
     assert!(
         lua.contains(&format!("function {m}__lambda0(c"))
-            && lua.contains(&format!("function {m}__lambda1(c")),
-        "both lambdas hoist to env bodies (both capture the root param `x`):\n{lua}"
+            && lua.contains(&format!("function {m}__lambda1(c"))
     );
     // and it still behaves (the inner reads x threaded through both envs).
     let out = run_main(&lua);
-    assert_eq!(
-        out, "7",
-        "transitive capture must still read the enclosing param; got: {out}"
-    );
+    assert_eq!(out, "7");
 }
 
 /// DECLARATION SPLIT: a hoisted body's own cells are declared as `local`s in the
@@ -196,8 +177,5 @@ fn main() { let f = split_probe() print("{f()}") }
         table.sort(leaked)\n\
         print(#leaked == 0 and \"no-leak\" or table.concat(leaked, \",\"))\n";
     let out = run_luajit(&format!("{lua}{driver}"));
-    assert_eq!(
-        out, "3\nno-leak",
-        "the hoisted body must declare its own cells as locals (no c<N> leaked to _G); got:\n{out}"
-    );
+    assert_eq!(out, "3\nno-leak");
 }

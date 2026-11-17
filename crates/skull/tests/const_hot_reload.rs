@@ -28,17 +28,11 @@ fn const_reinits_on_hot_reload_but_session_global_is_preserved() {
 
     // const: no preserve guard -> re-runs init every reload.
     let foo = line("FOO =");
-    assert!(
-        !foo.contains("HOT_RELOAD"),
-        "const FOO must re-init unconditionally on reload (no HOT_RELOAD guard); got: {foo}"
-    );
+    assert!(!foo.contains("HOT_RELOAD"));
     // mutable global: the fresh-storage guard preserves the live value.
     let bar_slot = global_slot(&lua, "bar");
     let bar = line(&format!("[{bar_slot}] = "));
-    assert!(
-        bar.contains("if __rock_globals_fresh then"),
-        "mutable global bar must guard its initializer; got: {bar}"
-    );
+    assert!(bar.contains("if __rock_globals_fresh then"));
 }
 
 /// RUNTIME proof (not just emit shape): simulate a hot reload under luajit.
@@ -68,7 +62,7 @@ fn const_value_edit_takes_effect_on_reload_runtime() {
     );
 
     let out = run_luajit(&script);
-    assert!(out.trim().starts_with("PASS"), "got: {out}");
+    assert!(out.trim().starts_with("PASS"));
 }
 
 /// Every read of a scalar `const` is emitted as its literal, so nothing names
@@ -76,8 +70,8 @@ fn const_value_edit_takes_effect_on_reload_runtime() {
 #[test]
 fn a_const_whose_reads_are_all_literals_emits_no_global() {
     let lua = emit_without_stdlib("const FOO: int = 5\nfn foo() -> int { FOO }\nfn main() {}\n");
-    assert!(!lua.contains("__skull_ginit_FOO"), "{lua}");
-    assert!(!lua.contains("FOO ="), "{lua}");
+    assert!(!lua.contains("__skull_ginit_FOO"));
+    assert!(!lua.contains("FOO ="));
     let foo = crate::common::mangled_name(&lua, "foo");
     let out = run_luajit(&format!("{lua}\nprint({foo}())\n"));
     assert_eq!(out.trim(), "5");
@@ -91,7 +85,7 @@ fn a_const_with_a_computed_initializer_keeps_it() {
         "inline(lua) fn setup() -> int = \"SETUP_RAN = true return 1\"\n\
          const READY: int = setup()\nfn main() {}\n",
     );
-    assert!(lua.contains("READY = __skull_ginit_READY()"), "{lua}");
+    assert!(lua.contains("READY = __skull_ginit_READY()"));
     let out = run_luajit(&format!("{lua}\nprint(SETUP_RAN)\n"));
     assert_eq!(out.trim(), "true");
 }

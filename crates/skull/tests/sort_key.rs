@@ -10,10 +10,7 @@ fn column_sort_key_uses_leaves_without_boxing_or_row_indices() {
              print(xs[0].x)
          }",
     );
-    assert!(
-        !lua.contains("= __sort_rows_int_fn_int_int_ret_bool("),
-        "wide sort must not allocate row indices"
-    );
+    assert!(!lua.contains("= __sort_rows_int_fn_int_int_ret_bool("));
     let bodies: Vec<_> = lua
         .lines()
         .filter(|line| {
@@ -21,7 +18,7 @@ fn column_sort_key_uses_leaves_without_boxing_or_row_indices() {
                 && (line.contains("__lambda") || line.contains("__vec_sort_by_key_leaves"))
         })
         .collect();
-    assert!(bodies.len() >= 2, "fixture must emit the key and leaf sort");
+    assert!(bodies.len() >= 2);
     for line in bodies {
         let name = line
             .strip_prefix("function ")
@@ -30,7 +27,7 @@ fn column_sort_key_uses_leaves_without_boxing_or_row_indices() {
             .next()
             .unwrap();
         let body = function_body(&lua, name);
-        assert!(!body.contains("V2_ct("), "sort must not box a row: {body}");
+        assert!(!body.contains("V2_ct("));
     }
 }
 
@@ -39,7 +36,7 @@ fn rejected_sort_key_labels_the_user_call() {
     for key in ["(x > 1, x)", "(x as int?, x)"] {
         let src = format!("fn main() {{ let xs = [1, 2]\n xs.sort(x => {key}) }}");
         let err = try_emit_module(&src).expect_err("unordered key must be rejected");
-        assert!(err.message.contains("cannot sort by a key"), "{err:?}");
+        assert!(err.message.contains("cannot sort by a key"));
         let span = err.labels.first().expect("sort rejection has a label").span;
         assert_eq!(span.file.as_str(), "<test>");
         assert_eq!(
@@ -66,7 +63,7 @@ fn rejected_sort_key_labels_the_user_call() {
         ),
     ] {
         let err = try_emit_module(src).expect_err("unordered key must be rejected");
-        assert!(err.message.contains("cannot sort by a key"), "{err:?}");
+        assert!(err.message.contains("cannot sort by a key"));
         let span = err.labels.first().expect("sort rejection has a label").span;
         assert_eq!(span.file.as_str(), "<test>");
         assert_eq!(&src[span.offset_range().0..span.offset_range().1], call);

@@ -40,7 +40,7 @@ impl IntrinsicTable for ToyTable {
 fn unbacked_entries_flags_only_the_drifted_key() {
     let declared = [(ustr::Ustr::from("sin"), 1usize)].into_iter().collect();
     let un = unbacked_entries(&ToyTable, &declared);
-    assert_eq!(un.len(), 1, "exactly the unbacked entry, got: {un:?}");
+    assert_eq!(un.len(), 1);
     assert_eq!(un[0].name, "drifted");
     assert_eq!(un[0].arity, 2);
 }
@@ -97,10 +97,7 @@ fn generic_intrinsic_key_is_declared_signature_mangle() {
     let key = mangle_fn(&ws, gid_generic);
     // The declared-signature mangle: generic param encoded as its NAME (`T`),
     // no `int`/`bool` from either call site.
-    assert_eq!(
-        key, "gid_T",
-        "generic intrinsic key must be the declared-signature mangle"
-    );
+    assert_eq!(key, "gid_T");
     assert!(is_intrinsic(gid_generic));
     assert!(!is_native_required(gid_generic));
     assert!(expand_kind(gid_generic).is_none());
@@ -123,16 +120,9 @@ fn struct_expand_is_an_expansion_intrinsic() {
     let ws = ws_of(EXPAND);
     let upairs = find_fn(&ws, "upairs");
     assert_eq!(expand_kind(upairs), Some(ExpandKind::StructPairs));
-    assert!(
-        is_intrinsic(upairs),
-        "an expansion intrinsic is an intrinsic"
-    );
+    assert!(is_intrinsic(upairs));
 
-    assert_eq!(
-        mangle_fn(&ws, upairs),
-        "upairs_T",
-        "always-mangle: the declared-signature mangle (generic param as `T`)"
-    );
+    assert_eq!(mangle_fn(&ws, upairs), "upairs_T");
 
     // It is registered as an intrinsic declaration (name, arity=1).
     let declared = declared_intrinsics(&ws);
@@ -154,8 +144,7 @@ fn stdlib_layer0_proving_set_is_declared_intrinsic() {
         assert!(
             declared
                 .iter()
-                .any(|(name, arity)| name_matches(*name, n) && *arity == a),
-            "`{n}`/{a} not declared @intrinsic"
+                .any(|(name, arity)| name_matches(*name, n) && *arity == a)
         );
     };
     // Math passthroughs (luajit mapping = inline(lua) body).
@@ -208,11 +197,8 @@ fn stdlib_native_required_set_has_luajit_mapping() {
         "__nb_alloc_i8",
     ] {
         let f = stdlib_fn(&ws, n);
-        assert!(is_native_required(f), "`{n}` must be @native_required");
-        assert!(is_intrinsic(f), "`{n}` must be @intrinsic");
-        assert!(
-            f.inline_body.is_some(),
-            "`{n}` (native-required) must have an inline(lua) luajit mapping"
-        );
+        assert!(is_native_required(f));
+        assert!(is_intrinsic(f));
+        assert!(f.inline_body.is_some());
     }
 }

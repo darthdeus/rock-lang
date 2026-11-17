@@ -128,7 +128,7 @@ fn main() { print("{takes_nv(NV { x: 1.0, y: 2.0 })}") }
 /// A REGISTRY rejection: recorded by bone during lowering, before emit.
 fn registry_rejection(src: &str) -> String {
     let msgs = crate::common::bone_rejections(src);
-    assert!(!msgs.is_empty(), "must reject, but bone recorded nothing");
+    assert!(!msgs.is_empty());
     msgs.join(" | ")
 }
 
@@ -144,10 +144,7 @@ fn outcome(src: &str) -> Result<(), String> {
 #[test]
 fn repr_opaque_on_a_rock_body_rejects() {
     let msg = registry_rejection(ON_A_ROCK_BODY);
-    assert!(
-        msg.contains("@repr") && msg.contains("opaque"),
-        "must say the contract needs an opaque boundary, got: {msg}"
-    );
+    assert!(msg.contains("@repr") && msg.contains("opaque"));
 }
 
 #[test]
@@ -168,10 +165,7 @@ fn repr_without_an_argument_rejects() {
 #[test]
 fn repr_with_an_unknown_kind_rejects() {
     let msg = registry_rejection(UNKNOWN_KIND);
-    assert!(
-        msg.contains("boxed") || msg.contains("opaque"),
-        "must name the offending kind, got: {msg}"
-    );
+    assert!(msg.contains("boxed") || msg.contains("opaque"));
 }
 
 #[test]
@@ -189,10 +183,7 @@ fn repr_with_extra_arguments_rejects() {
 #[test]
 fn the_waiver_does_not_reach_the_unannotated_parameter() {
     let msg = emit_rejection(EXEMPTS_ONLY_THAT_PARAM);
-    assert!(
-        msg.contains("column-stored `[P]`") && msg.contains("take"),
-        "the unannotated container parameter must still reject, got: {msg}"
-    );
+    assert!(msg.contains("column-stored `[P]`") && msg.contains("take"));
 }
 
 /// The fixture the annotation exists to change. If this stopped rejecting, the
@@ -206,9 +197,5 @@ fn the_same_payload_without_the_contract_rejects() {
 /// SAME outcome, whichever it is.
 #[test]
 fn repr_opaque_does_not_change_the_nobox_verdict() {
-    assert_eq!(
-        outcome(NOBOX_NOT_BYPASSED),
-        outcome(NOBOX_CONTROL),
-        "the contract waives the column-container rule only"
-    );
+    assert_eq!(outcome(NOBOX_NOT_BYPASSED), outcome(NOBOX_CONTROL));
 }

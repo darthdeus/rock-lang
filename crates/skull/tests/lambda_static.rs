@@ -37,17 +37,13 @@ fn main() { setup() RESULT = call() }
 #[test]
 fn lambda_body_static_folds_into_enclosing_chunk_statics() {
     let lua = emit_module(PROBE);
-    assert!(
-        lua.contains("[\"static:named:<test>::setup"),
-        "the lambda's `static n` must be stored under the enclosing fn `setup`"
-    );
+    assert!(lua.contains("[\"static:named:<test>::setup"));
     // The reset preamble (generated from chunk statics) must guard it, so a reload
     // can nil it on an init-edit.
     assert!(
         lua.lines().any(
             |l| l.contains("static:named:<test>::setup") && l.contains("__rock_static_prepare")
-        ),
-        "the static must appear in the hot-reload reset preamble"
+        )
     );
 }
 

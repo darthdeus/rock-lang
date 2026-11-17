@@ -19,9 +19,6 @@ fn main() { print("{caller(5)}") }
 fn inlined_branch_on_constant_argument_folds() {
     let lua = emit_module(SRC);
     let body = function_body(&lua, "caller");
-    assert!(
-        !body.contains("if "),
-        "the arm a constant `false` never takes must fold away; got:\n{body}"
-    );
+    assert!(!body.contains("if "));
     assert_eq!(run_main(&lua).trim(), "7");
 }

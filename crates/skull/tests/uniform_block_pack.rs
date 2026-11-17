@@ -39,28 +39,16 @@ fn main() {
 #[test]
 fn uniform_values_expands_to_canonical_leaves() {
     let rejects = bone_rejections(CANONICAL_VALUES);
-    assert!(
-        rejects.is_empty(),
-        "uniform_values was rejected: {rejects:#?}"
-    );
+    assert!(rejects.is_empty());
 
     let lua = emit_module(CANONICAL_VALUES);
     let body = function_body(&lua, "main");
-    assert!(
-        !body.contains("uniform_values("),
-        "the compiler-owned call survived:\n{body}"
-    );
+    assert!(!body.contains("uniform_values("));
     for forbidden in ["std140", "offset", "padding", "binding"] {
-        assert!(
-            !body.contains(forbidden),
-            "canonical values leaked {forbidden}:\n{body}"
-        );
+        assert!(!body.contains(forbidden));
     }
     for variant in ["Float", "Bool", "Int", "Uint"] {
-        assert!(
-            body.contains(&format!("__variant = (\"{variant}\")")),
-            "canonical `{variant}` leaf was not built:\n{body}"
-        );
+        assert!(body.contains(&format!("__variant = (\"{variant}\")")));
     }
     let out = run_main(&lua);
     assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["true", "6"]);
@@ -90,13 +78,9 @@ fn bloom_blur_packs_at_its_std140_element_indices() {
     let lua = emit_module(BLOOM);
     let body = function_body(&lua, "main");
     for idx in ["[(0)] = ", "[(2)] = ", "[(3)] = ", "[(4)] = "] {
-        assert!(body.contains(idx), "missing store {idx} in:\n{body}");
+        assert!(body.contains(idx));
     }
-    assert!(
-        !body.contains("[(1)] = "),
-        "index 1 is std140's hole after `radius`; a store there means the C \
-         layout leaked into the pack:\n{body}"
-    );
+    assert!(!body.contains("[(1)] = "));
 }
 
 /// `WireView` must reach the EMITTED code as a choice of base, not just as a
@@ -129,19 +113,10 @@ fn main() {
         .find(|l| l.contains(r#"__rock_nb_alloc("int"#))
         .and_then(|l| l.split_whitespace().next())
         .expect("the int view's local");
-    assert_ne!(
-        fbuf, ibuf,
-        "the fixture's two views must be distinct locals"
-    );
-    assert!(
-        body.contains(&format!("{fbuf}[(0)] = (1.5)")),
-        "the float stores through the float view:\n{body}"
-    );
+    assert_ne!(fbuf, ibuf);
+    assert!(body.contains(&format!("{fbuf}[(0)] = (1.5)")));
     for store in [format!("{ibuf}[(1)] = "), format!("{ibuf}[(2)] = ")] {
-        assert!(
-            body.contains(&store),
-            "missing int-view store `{store}`:\n{body}"
-        );
+        assert!(body.contains(&store));
     }
 }
 
@@ -169,15 +144,8 @@ fn main() {
 fn the_pack_is_stores_not_a_call_and_never_boxes() {
     let lua = emit_module(BLOOM);
     let body = function_body(&lua, "main");
-    assert!(
-        !body.contains("pack_uniform_block"),
-        "a call to the intrinsic survived rather than expanding:\n{body}"
-    );
-    assert!(
-        !body.contains("BloomBlurU_lct") && !body.contains("BloomBlurU_ct"),
-        "the group was boxed before packing -- the leaves must reach the store \
-         unpacked:\n{body}"
-    );
+    assert!(!body.contains("pack_uniform_block"));
+    assert!(!body.contains("BloomBlurU_lct") && !body.contains("BloomBlurU_ct"));
 }
 
 /// A block packed out of a GLOBAL is read one leaf at a time, each leaf loaded
@@ -229,10 +197,7 @@ fn a_global_block_packs_one_leaf_at_a_time() {
         .split(',')
         .filter(|n| n.trim().starts_with('r') || n.trim().starts_with("local r"))
         .count();
-    assert!(
-        registers < 32,
-        "{registers} registers for a 32-leaf block: every leaf is loaded before the first store:\n{body}"
-    );
+    assert!(registers < 32);
     let out = run_main(&lua);
     assert_eq!(
         out.split_whitespace().collect::<Vec<_>>(),

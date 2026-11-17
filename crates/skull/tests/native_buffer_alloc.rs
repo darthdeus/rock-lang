@@ -21,19 +21,10 @@ fn main() { let _ = native_buffer_v2(4) }
 fn value_struct_element_emits_ctype_ffi_new() {
     let lua = emit_module(VALUE_ELEM);
     let body = function_body(&lua, "native_buffer_v2");
-    assert!(
-        body.contains(r#"__rock_nb_alloc("V2","#),
-        "expected `__rock_nb_alloc(\"V2\", ...)` for the value-struct element, got:\n{body}"
-    );
+    assert!(body.contains(r#"__rock_nb_alloc("V2","#));
     // The wrapper builds a NativeBuffer around the ffi array; no per-type ctor.
-    assert!(
-        body.contains(r#"__ty = "NativeBuffer""#),
-        "expected the result wrapped in a NativeBuffer struct, got:\n{body}"
-    );
-    assert!(
-        !body.contains("__nb_alloc_"),
-        "intrinsic must not route through a per-type `__nb_alloc_*` fn, got:\n{body}"
-    );
+    assert!(body.contains(r#"__ty = "NativeBuffer""#));
+    assert!(!body.contains("__nb_alloc_"));
 }
 
 const PRIM_ELEM: &str = r#"
@@ -46,14 +37,8 @@ fn main() { let _ = nbi(2); let _ = nbf(2) }
 #[test]
 fn primitive_elements_are_subsumed() {
     let lua = emit_module(PRIM_ELEM);
-    assert!(
-        function_body(&lua, "nbi").contains(r#"__rock_nb_alloc("int","#),
-        "int element must emit `__rock_nb_alloc(\"int\", ...)`"
-    );
-    assert!(
-        function_body(&lua, "nbf").contains(r#"__rock_nb_alloc("float","#),
-        "float element must emit `__rock_nb_alloc(\"float\", ...)`"
-    );
+    assert!(function_body(&lua, "nbi").contains(r#"__rock_nb_alloc("int","#));
+    assert!(function_body(&lua, "nbf").contains(r#"__rock_nb_alloc("float","#));
 }
 
 const GENERIC_PRIMITIVE_ELEM: &str = r#"
@@ -70,8 +55,5 @@ fn main() {
 #[test]
 fn complete_generic_primitive_instance_owns_native_buffer_ctype() {
     let lua = emit_module(GENERIC_PRIMITIVE_ELEM);
-    assert!(
-        lua.contains(r#"__rock_nb_alloc("int"#),
-        "the concrete primitive instance must publish its own native-buffer ctype, got:\n{lua}"
-    );
+    assert!(lua.contains(r#"__rock_nb_alloc("int"#));
 }

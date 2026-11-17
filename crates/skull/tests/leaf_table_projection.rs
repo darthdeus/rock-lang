@@ -28,9 +28,9 @@ fn main() { check(STATE) }
 fn leaf_table_ref_field_emits_only_the_selected_read() {
     let lua = emit_module(SOURCE);
     let body = function_body(&lua, "flag");
-    assert!(body.contains(".armed"), "{body}");
+    assert!(body.contains(".armed"));
     for sibling in ["point", "anchor", "age"] {
-        assert!(!body.contains(sibling), "unread sibling {sibling}: {body}");
+        assert!(!body.contains(sibling));
     }
     assert_eq!(run_main(&lua), "false 7 9 11 13\ntrue 17 19 -1");
 }

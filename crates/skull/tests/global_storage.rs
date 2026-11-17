@@ -16,16 +16,10 @@ fn main() {
 #[test]
 fn lua_global_slots_are_dense_numeric_realizations() {
     let emitted = emit_mir(FIXTURE);
-    assert!(
-        emitted.lua.contains(
-            "{name=\"COUNTER\",identity=\"global:<test>::COUNTER\",physical={\"COUNTER\"},slots={5}}"
-        ),
-        "the global directory must map the logical identity to the same numeric Lua slot"
-    );
-    assert!(
-        !emitted.lua.contains("[\"global:<test>::COUNTER::value\"]"),
-        "logical global identities must not remain hot Lua table keys"
-    );
+    assert!(emitted.lua.contains(
+        "{name=\"COUNTER\",identity=\"global:<test>::COUNTER\",physical={\"COUNTER\"},slots={5}}"
+    ));
+    assert!(!emitted.lua.contains("[\"global:<test>::COUNTER::value\"]"));
 }
 
 #[test]
@@ -42,13 +36,9 @@ fn lua_global_slot_order_is_declaration_independent() {
     );
     for emitted in [&first.lua, &second.lua] {
         assert!(
-            emitted.contains("identity=\"global:<test>::ALPHA\",physical={\"ALPHA\"},slots={5}"),
-            "ALPHA must keep the first user-global Lua slot"
+            emitted.contains("identity=\"global:<test>::ALPHA\",physical={\"ALPHA\"},slots={5}")
         );
-        assert!(
-            emitted.contains("identity=\"global:<test>::ZED\",physical={\"ZED\"},slots={6}"),
-            "ZED must keep the second user-global Lua slot"
-        );
+        assert!(emitted.contains("identity=\"global:<test>::ZED\",physical={\"ZED\"},slots={6}"));
     }
 }
 
@@ -63,10 +53,7 @@ fn global_name_lookup_keeps_index_construction_out_of_the_hot_function() {
         .split("_G.__rock_global_decorate")
         .next()
         .expect("global-name lookup body");
-    assert!(
-        !hot.contains("local function"),
-        "the traced global-name lookup must not carry the cold index-builder closure"
-    );
+    assert!(!hot.contains("local function"));
 }
 
 #[test]
@@ -100,19 +87,9 @@ print(first ~= second and second ~= third
 #[test]
 fn emission_reads_globals_through_the_storage_cell() {
     let lua = emit_module(FIXTURE);
-    assert!(
-        lua.contains("\nlocal __rock_state_cell\n"),
-        "the prelude must declare the cell as a chunk-level local:\n{}",
-        &lua[..lua.len().min(4000)]
-    );
-    assert!(
-        lua.contains("__rock_state_cell[5]"),
-        "reads and writes go through the storage cell"
-    );
-    assert!(
-        !lua.contains("__rock_globals[5]"),
-        "no access may keep the `_G` lookup"
-    );
+    assert!(lua.contains("\nlocal __rock_state_cell\n"));
+    assert!(lua.contains("__rock_state_cell[5]"));
+    assert!(!lua.contains("__rock_globals[5]"));
 }
 
 // --- The storage table sized at creation --
@@ -142,27 +119,18 @@ fn the_program_opens_sized_storage_before_initializing() {
         .take(2)
         .map(|n| n.parse().expect("capacity number"))
         .collect();
-    assert_eq!(nums[1], 9, "array fixpoint of slot 5 is 8 + 1: {open}");
+    assert_eq!(nums[1], 9);
     // The hash size counts the stdlib's own statics too, so pin its shape, not
     // its value: a power of two no smaller than the 16-node floor.
-    assert!(
-        nums[0] >= 16 && nums[0].is_power_of_two(),
-        "hash capacity shape: {open}"
-    );
+    assert!(nums[0] >= 16 && nums[0].is_power_of_two());
     let open_at = lua
         .find("\n__rock_state_cell = __rock_globals_open(")
         .expect("open line");
     let init = lua
         .find("\n__rock_state_initialize()\n")
         .expect("initialize call");
-    assert!(
-        open_at < init,
-        "the storage opens before any initializer runs"
-    );
-    assert!(
-        lua.contains("__rock_table_new(narr, nhash)"),
-        "the storage must be built with table.new, not `{{}}`"
-    );
+    assert!(open_at < init);
+    assert!(lua.contains("__rock_table_new(narr, nhash)"));
 }
 
 /// A program loaded again over its own live storage, as a reload does, keeps
@@ -195,10 +163,7 @@ fn a_program_with_a_different_global_layout_refuses_live_storage() {
         "global COUNTER: int = 0\nglobal EXTRA: int = 0",
     ))
     .lua;
-    assert!(
-        !after.contains("]======]"),
-        "the program must fit in the long string"
-    );
+    assert!(!after.contains("]======]"));
     let program = format!(
         "{before}
 local chunk = assert(loadstring([======[{after}]======]))
@@ -220,6 +185,6 @@ fn a_checked_global_read_without_stdlib_still_raises_at_runtime() {
     let result = run_luajit(&format!(
         "{lua}\nlocal ok, err = pcall(read); assert(not ok); print(err)"
     ));
-    assert!(result.contains("uninitialized global `LATE`"), "{result}");
-    assert!(result.contains("<t>:2:30"), "{result}");
+    assert!(result.contains("uninitialized global `LATE`"));
+    assert!(result.contains("<t>:2:30"));
 }

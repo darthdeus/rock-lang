@@ -35,14 +35,14 @@ fn main() {
 fn read_only_parameters_take_the_callers_local() {
     let lua = emit_module(SRC);
     let body = function_body(&lua, "run");
-    assert!(!body.contains("local b = "), "{body}");
-    assert!(!body.contains("local by = "), "{body}");
-    assert!(body.contains("c0.n = c0.n + c1"), "{body}");
-    assert!(body.contains("local x = "), "{body}");
-    assert!(body.contains("'x' .. tostring(c1) -- x"), "{body}");
-    assert!(!body.contains("local v = "), "{body}");
-    assert!(body.contains("(c1 + (1)) * 2"), "{body}");
-    assert!(body.contains("local x = (c0.n)"), "{body}");
+    assert!(!body.contains("local b = "));
+    assert!(!body.contains("local by = "));
+    assert!(body.contains("c0.n = c0.n + c1"));
+    assert!(body.contains("local x = "));
+    assert!(body.contains("'x' .. tostring(c1) -- x"));
+    assert!(!body.contains("local v = "));
+    assert!(body.contains("(c1 + (1)) * 2"));
+    assert!(body.contains("local x = (c0.n)"));
     assert_eq!(run_main(&lua), "66 5 4 12 4 x4 10");
 }
 
@@ -70,13 +70,13 @@ fn main() {
 fn a_splice_preserves_read_order_without_empty_blocks() {
     let lua = emit_module(ORDER_SRC);
     let body = function_body(&lua, "run");
-    assert!(!body.contains("local v = "), "{body}");
-    assert!(!body.contains(" do\n end"), "{body}");
+    assert!(!body.contains("local v = "));
+    assert!(!body.contains(" do\n end"));
     // A discarded call result needs no local to bind it.
-    assert!(body.contains("tostring("), "{body}");
-    assert!(!body.contains("local _"), "{body}");
-    assert!(body.contains("local b = (c0.b)"), "{body}");
-    assert!(!body.contains(".b).n + 1"), "{body}");
+    assert!(body.contains("tostring("));
+    assert!(!body.contains("local _"));
+    assert!(body.contains("local b = (c0.b)"));
+    assert!(!body.contains(".b).n + 1"));
     assert_eq!(run_main(&lua), "16 3 2");
 }
 

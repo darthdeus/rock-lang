@@ -83,10 +83,7 @@ fn package() -> skull::mir_emit::MirEmit {
 fn v1_module_globals_have_independent_storage() {
     let emitted = package();
     let out = run_main(&emitted.lua);
-    assert_eq!(
-        out, "a=2 b=1 limit=7",
-        "each module's `COUNT` must have its own storage, and a const global must be readable"
-    );
+    assert_eq!(out, "a=2 b=1 limit=7");
 }
 
 #[test]
@@ -95,19 +92,14 @@ fn v1_global_state_identity_is_its_def_key() {
     assert!(
         emitted
             .lua
-            .contains("identity=\"global:v1state::a::COUNT\""),
-        "a v1 global's storage identity is its DefKey"
+            .contains("identity=\"global:v1state::a::COUNT\"")
     );
     assert!(
         emitted
             .lua
-            .contains("identity=\"global:v1state::b::COUNT\""),
-        "two modules' same-named globals keep distinct identities"
+            .contains("identity=\"global:v1state::b::COUNT\"")
     );
-    assert!(
-        !emitted.lua.contains("global:a.rock::"),
-        "the owning FRAGMENT must not be part of a v1 global's identity"
-    );
+    assert!(!emitted.lua.contains("global:a.rock::"));
 }
 
 /// The same logical module split across two fragments, with the global moved
@@ -176,14 +168,8 @@ fn main() {
     let before = emit(front, back);
     let after = emit(moved_front, moved_back);
     let identity = "identity=\"global:v1state::a::COUNT\"";
-    assert!(
-        before.lua.contains(identity),
-        "the global's identity is its DefKey while it lives in the first fragment"
-    );
-    assert!(
-        after.lua.contains(identity),
-        "moving the global to a sibling fragment of the SAME module must not change its identity"
-    );
+    assert!(before.lua.contains(identity));
+    assert!(after.lua.contains(identity));
 }
 
 /// A v1 function's code key uses its module scope and signature: moving the
@@ -227,14 +213,10 @@ fn v1_code_identity_uses_module_scope_and_signature() {
                 })
         })
         .expect("a::bump");
-    assert!(
-        emitted.code_artifact.entries.contains_key(&bump),
-        "a::bump has no code identity"
-    );
+    assert!(emitted.code_artifact.entries.contains_key(&bump));
     assert_eq!(
         bump.logical_key(&ws, &interner),
-        "named:v1state::a::bump_1c91355d_0<>",
-        "a v1 function's logical code identity uses its module scope, not its fragment"
+        "named:v1state::a::bump_1c91355d_0<>"
     );
 }
 
@@ -258,14 +240,10 @@ fn v1_static_identity_is_keyed_on_its_owner_code_key() {
     assert!(
         emitted
             .lua
-            .contains("static:named:v1state::a::tick_1c91355d_0<>::n#0"),
-        "a v1 static is keyed on its owner's code key, not on the owner's file"
+            .contains("static:named:v1state::a::tick_1c91355d_0<>::n#0")
     );
     let out = run_main(&emitted.lua);
-    assert_eq!(
-        out, "t=12",
-        "the static must initialize once and keep its value"
-    );
+    assert_eq!(out, "t=12");
 }
 
 const LOCALS_MAIN: &str = r#"

@@ -71,11 +71,7 @@ double s19_floating_pair(FloatingPair v) { return v.pair.x + v.pair.y; }
         .arg(&source)
         .output()
         .expect("compile independent ABI fixture");
-    assert!(
-        built.status.success(),
-        "C ABI fixture: {}",
-        String::from_utf8_lossy(&built.stderr)
-    );
+    assert!(built.status.success());
     let library = library.to_str().expect("UTF-8 fixture path");
     let program = format!(
         r#"{lua}
@@ -119,8 +115,7 @@ fn main() { let owner = Owner { point: Point { x: 3, y: 5 } };
     assert!(
         error
             .message
-            .contains("cannot borrow an inline value field"),
-        "{error:?}"
+            .contains("cannot borrow an inline value field")
     );
 }
 

@@ -16,9 +16,9 @@ fn main() { print(check(3)) }
 "#,
     );
     let body = function_body(&lua, "check");
-    assert!(body.contains("error("), "{body}");
-    assert!(!body.contains("after"), "{body}");
-    assert!(!body.contains("unreachable block"), "{body}");
+    assert!(body.contains("error("));
+    assert!(!body.contains("after"));
+    assert!(!body.contains("unreachable block"));
     assert_eq!(run_main(&lua), "6");
 }
 
@@ -43,8 +43,7 @@ fn main() { print(get(4)) }
         lines[raise + 1..]
             .iter()
             .take_while(|l| !l.trim_start().starts_with("end"))
-            .all(|l| l.trim().is_empty()),
-        "{body}"
+            .all(|l| l.trim().is_empty())
     );
     assert_eq!(run_main(&lua), "5");
 }
@@ -74,6 +73,6 @@ fn main() { print(check(1, 2, 1, W { n: 1 })) }
         .iter()
         .position(|l| l.contains("__unwrap_failed"))
         .unwrap_or_else(|| panic!("{body}"));
-    assert!(!lines[raise - 1].contains("= nil"), "{body}");
+    assert!(!lines[raise - 1].contains("= nil"));
     assert_eq!(run_main(&lua), "true");
 }

@@ -28,10 +28,7 @@ fn main() { RESULT = probe() }
 fn static_initializer_hash_is_reproducible_across_two_emits() {
     let a = emit_without_stdlib(STRING_STATIC);
     let b = emit_without_stdlib(STRING_STATIC);
-    assert_eq!(
-        a, b,
-        "two in-process emits of the same static inits must be byte-identical"
-    );
+    assert_eq!(a, b);
 }
 
 /// `probe()` reads a static `n` (init 42); when the DO_SET global is set it
@@ -70,7 +67,7 @@ fn result_after_reload(before: &str, after: &str) -> String {
 #[test]
 fn static_reload_preserves_unless_the_initializer_changed() {
     let before = emit_without_stdlib(PROBE);
-    for (case, after, expected) in [
+    for (_case, after, expected) in [
         ("identical reload", PROBE.to_string(), "99"),
         (
             "unrelated body edit",
@@ -84,7 +81,7 @@ fn static_reload_preserves_unless_the_initializer_changed() {
         ),
     ] {
         let after = emit_without_stdlib(&after);
-        assert_eq!(result_after_reload(&before, &after), expected, "{case}");
+        assert_eq!(result_after_reload(&before, &after), expected);
     }
 }
 

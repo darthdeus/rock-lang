@@ -35,6 +35,6 @@ fn unused_field_reads_before_a_read_of_the_same_base_are_dropped() {
     let lua = emit_module(SOURCE);
     let body = function_body(&lua, "name_total");
     for field in ["volume", "speed", "offset"] {
-        assert!(!body.contains(&format!(".{field}")), "{body}");
+        assert!(!body.contains(&format!(".{field}")));
     }
 }

@@ -48,22 +48,12 @@ fn every_rejection_is_reported_not_just_the_first() {
     let err = try_emit_module(THREE_SINKS).expect_err("three nobox sinks must reject");
 
     let all = messages(&err);
-    assert_eq!(
-        all.len(),
-        3,
-        "expected one rejection per sink function, got {}:\n{}",
-        all.len(),
-        all.join("\n")
-    );
+    assert_eq!(all.len(), 3);
 
     // Each names its own function: the point of reporting all of them is to get
     // a SITE TABLE, so three copies of one message would be no better than one.
     for want in ["sink_one", "sink_two", "sink_three"] {
-        assert!(
-            all.iter().any(|m| m.contains(want)),
-            "no rejection names `{want}`:\n{}",
-            all.join("\n")
-        );
+        assert!(all.iter().any(|m| m.contains(want)));
     }
 }
 
@@ -117,11 +107,7 @@ fn every_failing_specialization_is_reported_not_just_the_first() {
     // stays a rejection, and the property under test (BOTH specializations get
     // reported, not just the first) keeps its two sites.
     for want in ["specialized `tuple_in_coll", "specialized `nullable_pair"] {
-        assert!(
-            all.iter().any(|m| m.contains(want)),
-            "no rejection names `{want}`:\n{}",
-            all.join("\n")
-        );
+        assert!(all.iter().any(|m| m.contains(want)));
     }
 }
 
@@ -153,11 +139,7 @@ fn main() { sink_fn() print(G) }
     let err = try_emit_module(BOTH).expect_err("both definitions must reject");
     let all = messages(&err);
     for want in ["__skull_ginit_G", "sink_fn"] {
-        assert!(
-            all.iter().any(|m| m.contains(want)),
-            "no rejection names `{want}`:\n{}",
-            all.join("\n")
-        );
+        assert!(all.iter().any(|m| m.contains(want)));
     }
 }
 
@@ -172,11 +154,7 @@ fn sink_one() { let t = (XS[0], 1.0) print("{t}") }
 fn main() { sink_one() }
 "#;
     let err = try_emit_module(ONE_SINK).expect_err("the nobox sink must reject");
-    assert!(
-        err.siblings.is_empty(),
-        "a lone rejection carries no siblings, got {}",
-        err.siblings.len()
-    );
+    assert!(err.siblings.is_empty());
 }
 
 #[test]
@@ -190,10 +168,6 @@ fn bump<T>(x: T) -> T {
 fn main() { print(bump("a")) }
 "#;
     let err = try_emit_module(src).expect_err("a string has no `++`");
-    assert!(err.message.contains("inc/dec"), "{}", err.message);
-    assert_eq!(
-        err.location.offset,
-        src.find("x++").expect("fixture line"),
-        "rejection did not anchor on the operand's expression: {err:?}"
-    );
+    assert!(err.message.contains("inc/dec"));
+    assert_eq!(err.location.offset, src.find("x++").expect("fixture line"));
 }

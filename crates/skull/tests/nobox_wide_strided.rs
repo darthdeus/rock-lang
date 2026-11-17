@@ -103,24 +103,14 @@ fn wide_nobox_vec_stores_each_leaf_in_strided_rows() {
     let lua =
         try_emit_module(&program(PUSH_MAIN)).expect("a wide nobox element must stay flat in a Vec");
     let main = function_body(&lua, "main");
-    assert!(
-        crate::common::has_vec_header(main, "strided", None),
-        "a wide nobox Vec must use the row-major strided backing; source:\n{}\nemitted body:\n{main}",
-        program(PUSH_MAIN)
-    );
-    assert!(
-        !main.contains(r#"["pay.__tag"] = {}"#),
-        "a wide nobox Vec must not build one table per leaf; source:\n{}\nemitted body:\n{main}",
-        program(PUSH_MAIN)
-    );
+    assert!(crate::common::has_vec_header(main, "strided", None));
+    assert!(!main.contains(r#"["pay.__tag"] = {}"#));
     assert_eq!(
         run_main(&lua),
         "1:o1,2,7,false:bob:hit:true:0:f4:s3:9|\
          2:d5:-::false:0:nf:ns:0.5|\
          3:thi:-::false:0:nf:ns:0.5|\
-         4:n:-::false:0:nf:ns:0.5|",
-        "wide nobox leaves did not round trip; source:\n{}",
-        program(PUSH_MAIN)
+         4:n:-::false:0:nf:ns:0.5|"
     );
 }
 
@@ -143,22 +133,19 @@ fn main() {{ let xs: [Row] = []; emit(xs, Row {{ {values} }}) }}
     );
     let lua = try_emit_module(&src).expect("emits");
     let push = function_body(&lua, "emit");
-    assert_eq!(push.matches("._data").count(), 1, "{push}");
-    assert_eq!(push.matches(".len").count(), 2, "{push}");
-    assert_eq!(push.matches(" * ").count(), 1, "{push}");
+    assert_eq!(push.matches("._data").count(), 1);
+    assert_eq!(push.matches(".len").count(), 2);
+    assert_eq!(push.matches(" * ").count(), 1);
     let slot_stores: Vec<_> = push.lines().filter(|line| line.contains("] = ")).collect();
-    assert!(
-        slot_stores.len() > 8,
-        "fixture must exercise a wide row: {push}"
-    );
+    assert!(slot_stores.len() > 8);
     let mut shared_base = None;
     for (offset, line) in slot_stores.iter().enumerate() {
         let (slot, _) = line.trim().split_once("] = ").expect("slot store");
         let (base, physical) = slot.split_once(" + ").unwrap_or_else(|| {
             panic!("each slot must add its offset directly to the shared base: {push}")
         });
-        assert_eq!(*shared_base.get_or_insert(base), base, "{push}");
-        assert_eq!(physical, format!("({}))", offset + 1), "{push}");
+        assert_eq!(*shared_base.get_or_insert(base), base);
+        assert_eq!(physical, format!("({}))", offset + 1));
     }
 }
 
@@ -295,10 +282,7 @@ fn main() {
 #[test]
 fn wide_nobox_strided_vec_keeps_the_mutating_surface() {
     let lua = try_emit_module(&program(SURFACE_MAIN)).expect("emits");
-    assert!(
-        crate::common::has_vec_header(&lua, "strided", None),
-        "fixture must exercise strided storage"
-    );
+    assert!(crate::common::has_vec_header(&lua, "strided", None));
     assert_eq!(
         run_main(&lua),
         "5:o3,4,1,true:-::false:0:nf:ns:0.5|\
@@ -345,10 +329,7 @@ fn main() {
 #[test]
 fn wide_nobox_strided_vec_releases_removed_references() {
     let lua = try_emit_module(RELEASE_MAIN).expect("emits");
-    assert!(
-        crate::common::has_vec_header(&lua, "strided", None),
-        "fixture must exercise strided storage"
-    );
+    assert!(crate::common::has_vec_header(&lua, "strided", None));
     assert_eq!(run_main(&lua), "true,true,true");
 }
 
@@ -363,10 +344,7 @@ fn main() {
 "#,
     );
     let err = try_emit_module(&src).expect_err("inspect would materialize every element");
-    assert!(
-        err.to_string().contains("nobox"),
-        "the rejection must name the nobox guarantee: {err}"
-    );
+    assert!(err.to_string().contains("nobox"));
 }
 
 const NARROW: &str = r#"
@@ -453,10 +431,7 @@ fn wide_generic_rows_clone_owned_leaves_and_release_removed_references() {
         .replace("value Holder { items: [int]?", "value Holder<T> { items: T")
         .replace("[Holder]", "[Holder<[int]?>]");
     let lua = try_emit_module(&release).expect("generic reference cleanup emits");
-    assert!(
-        crate::common::has_vec_header(&lua, "strided", None),
-        "fixture must exercise strided storage"
-    );
+    assert!(crate::common::has_vec_header(&lua, "strided", None));
     assert_eq!(run_main(&lua), "true,true,true",);
 }
 
@@ -466,8 +441,7 @@ fn a_nobox_element_at_the_threshold_keeps_columns() {
     let main = function_body(&lua, "main");
     assert!(
         crate::common::has_vec_header(main, "columns", None)
-            && !crate::common::has_vec_header(main, "strided", None),
-        "a four-leaf nobox element stays in columns:\n{main}"
+            && !crate::common::has_vec_header(main, "strided", None)
     );
     assert_eq!(run_main(&lua), "4");
 }
@@ -502,8 +476,7 @@ fn a_nested_leaf_of_a_flat_stored_element_is_one_slot_write() {
     let lua = try_emit_module(NESTED_WRITE).expect("emits");
     assert!(
         crate::common::has_vec_header(&lua, "strided", None)
-            && crate::common::has_vec_header(&lua, "columns", None),
-        "fixture must exercise both flat tiers"
+            && crate::common::has_vec_header(&lua, "columns", None)
     );
     assert_eq!(run_main(&lua), "1,1,2.5,3|6,70,8,11|1,20|50");
 }
@@ -541,10 +514,7 @@ fn main() {
 #[test]
 fn an_emptied_strided_vec_answers_like_a_boxed_one() {
     let lua = try_emit_module(&program(EMPTY_EDGES_MAIN)).expect("emits");
-    assert!(
-        crate::common::has_vec_header(&lua, "strided", None),
-        "fixture must exercise strided storage"
-    );
+    assert!(crate::common::has_vec_header(&lua, "strided", None));
     assert_eq!(
         run_main(&lua),
         "true,1,true,true,true,1,2|true,1,true,true,true,1,2"
@@ -589,7 +559,7 @@ fn main() {{
 "#
         );
         let lua = try_emit_module(&src).expect("row push emits");
-        assert_eq!(run_main(&lua), "ok", "row width {width}");
+        assert_eq!(run_main(&lua), "ok");
     }
 }
 
@@ -613,18 +583,12 @@ fn main() {{ let xs: [Row] = []; append(xs, 1) }}
         );
         let lua = try_emit_module(&src).expect("row push emits");
         let push = function_body(&lua, "append");
-        assert_eq!(push.matches(".len").count(), 2, "{push}");
+        assert_eq!(push.matches(".len").count(), 2);
         if width == 12 {
-            assert!(
-                push.contains(" + (12)"),
-                "compact offsets below the cutoff: {push}"
-            );
+            assert!(push.contains(" + (12)"));
         } else {
             for offset in 2..=width {
-                assert!(
-                    !push.contains(&format!(" + ({offset})")),
-                    "wide rows must reuse the one running-index constant: {push}"
-                );
+                assert!(!push.contains(&format!(" + ({offset})")));
             }
         }
     }

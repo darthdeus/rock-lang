@@ -28,10 +28,7 @@ fn use_it(a: int) -> int { return a + r }
 fn main() { print("{use_it(1)}") }
 "#,
     );
-    assert!(
-        lua.contains("r = (1)") || lua.contains("r ="),
-        "the user global is emitted:\n{lua}"
-    );
+    assert!(lua.contains("r = (1)") || lua.contains("r ="));
 }
 
 /// POSITIVE CONTROL: `rx1` -- a digit not immediately after the prefix letter.
@@ -44,7 +41,7 @@ fn use_it(a: int) -> int { return a + rx1 }
 fn main() { print("{use_it(1)}") }
 "#,
     );
-    assert!(lua.contains("rx1"), "the user global is emitted:\n{lua}");
+    assert!(lua.contains("rx1"));
 }
 
 /// POSITIVE CONTROL: `r1x` -- trailing non-digit, so not `^r[0-9]+$`.
@@ -57,7 +54,7 @@ fn use_it(a: int) -> int { return a + r1x }
 fn main() { print("{use_it(1)}") }
 "#,
     );
-    assert!(lua.contains("r1x"), "the user global is emitted:\n{lua}");
+    assert!(lua.contains("r1x"));
 }
 
 /// POSITIVE CONTROL: an ordinary name starting with the reserved prefix letter.
@@ -69,7 +66,7 @@ fn radius(a: int) -> int { return a * 2 }
 fn main() { print("{radius(3)}") }
 "#,
     );
-    assert!(lua.contains("radius"), "the user fn is emitted:\n{lua}");
+    assert!(lua.contains("radius"));
 }
 
 /// POSITIVE CONTROL: a user `__rock_*` global that is NOT `__rock_env` names no
@@ -85,10 +82,7 @@ fn use_it(a: int) -> int { return a + __rock_foo }
 fn main() { print("{use_it(1)}") }
 "#,
     );
-    assert!(
-        lua.contains("__rock_foo"),
-        "the user global is emitted:\n{lua}"
-    );
+    assert!(lua.contains("__rock_foo"));
 }
 
 /// The stdlib defines `@nomangle __rock_*` fns and is loaded into every emit
@@ -96,9 +90,5 @@ fn main() { print("{use_it(1)}") }
 #[test]
 fn stdlib_rock_prefixed_defs_compile() {
     let lua = emit_module(r#"fn main() { print("ok") }"#);
-    assert!(
-        !crate::common::definitions_matching(&lua, "main").is_empty(),
-        "stdlib compiles:\n{}",
-        &lua[..lua.len().min(200)]
-    );
+    assert!(!crate::common::definitions_matching(&lua, "main").is_empty());
 }

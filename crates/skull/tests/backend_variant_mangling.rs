@@ -15,15 +15,9 @@ fn parameter_pair(g: fn(int) -> string) -> string { return g(1) }
 "#,
     );
     let defs = crate::common::definitions_matching(&lua, "parameter_pair");
-    assert_eq!(defs.len(), 2, "{defs:?}");
-    assert!(
-        defs.iter().any(|name| name.contains("fn_int_ret_int")),
-        "{defs:?}"
-    );
-    assert!(
-        defs.iter().any(|name| name.contains("fn_int_ret_string")),
-        "{defs:?}"
-    );
+    assert_eq!(defs.len(), 2);
+    assert!(defs.iter().any(|name| name.contains("fn_int_ret_int")));
+    assert!(defs.iter().any(|name| name.contains("fn_int_ret_string")));
 }
 
 #[test]
@@ -63,7 +57,7 @@ fn use_it() -> int { return dbl(21) }
 /// dbl(`), because every non-exempt fn mangles by signature.
 #[test]
 fn dbl_int_name_is_decl_set_independent() {
-    for (label, src) in [
+    for (_label, src) in [
         ("alone", DBL_ALONE),
         ("js sibling", DBL_WITH_JS_SIBLING),
         ("overload elsewhere", DBL_WITH_OVERLOAD),
@@ -74,21 +68,12 @@ fn dbl_int_name_is_decl_set_independent() {
         // function(`, so a raw `function dbl` scan would report no bare `dbl`
         // for the wrong reason.
         let defs = crate::common::definitions_matching(&lua, "dbl");
-        assert!(
-            defs.contains(&"dbl_int"),
-            "[{label}] dbl(int) must emit as `dbl_int`, got {defs:?}:\n{lua}"
-        );
-        assert!(
-            !defs.contains(&"dbl") && !lua.contains("dbl__int"),
-            "[{label}] no bare `dbl` and no `__` in the mangled name, got {defs:?}:\n{lua}"
-        );
+        assert!(defs.contains(&"dbl_int"));
+        assert!(!defs.contains(&"dbl") && !lua.contains("dbl__int"));
         // The call site agrees with the definition (same name): the mangled
         // name appears at least twice (the `function` header + the call in
         // `use_it`).
-        assert!(
-            lua.matches("dbl_int").count() >= 2,
-            "[{label}] the call site must target the same mangled name as the definition:\n{lua}"
-        );
+        assert!(lua.matches("dbl_int").count() >= 2);
     }
 }
 
@@ -104,12 +89,6 @@ fn pick(x: float) -> float { return x }
 fn use_both() -> float { return float(pick(1)) + pick(2.0) }
 "#,
     );
-    assert!(
-        lua.contains("pick_int") && lua.contains("pick_float"),
-        "both overload arms must mangle:\n{lua}"
-    );
-    assert!(
-        !lua.contains("pick__int") && !lua.contains("pick__float"),
-        "the mangled names must contain no `__`:\n{lua}"
-    );
+    assert!(lua.contains("pick_int") && lua.contains("pick_float"));
+    assert!(!lua.contains("pick__int") && !lua.contains("pick__float"));
 }

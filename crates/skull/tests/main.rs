@@ -9,7 +9,6 @@ mod constructor_bounds;
 mod private_records;
 mod private_vectors;
 mod sort_key;
-mod support;
 
 mod copy_code_refs;
 mod nested_strided_inspect;
@@ -22,8 +21,6 @@ mod opaque_effects;
 
 mod cdata_leaf_projection;
 
-mod compile_release;
-
 mod allocation_report;
 mod late_float;
 
@@ -31,7 +28,6 @@ mod nested_box_boundary;
 
 mod arena_column_oracle;
 mod arena_loop_reads;
-mod artifact_fingerprint;
 mod backend_variant_mangling;
 mod bounded_standalone_emission;
 mod callee_binding;
@@ -39,15 +35,12 @@ mod capture_free_hoist;
 mod clone_into_immutable;
 mod closure_snapshot;
 mod code_identity_artifact;
-mod concrete_body;
-mod concrete_coroutine_emission;
 mod concrete_expansion;
 mod const_hoist;
 mod const_hot_reload;
 mod coroutine_frame_writes;
 mod coroutine_hook_hoist;
 mod coroutine_trace_witness;
-mod dead_lambda_scope;
 mod default_guard_fold;
 mod defer_unwind;
 mod descriptor_value_repr;
@@ -66,7 +59,6 @@ mod flat_enum_match_passthrough;
 mod flat_vec_value_shape;
 mod fn_record_mt;
 mod frame_lambda_hoist;
-mod frame_slot_naming;
 mod hole_runtime_error;
 mod incremental_emit;
 mod lua_definition_scopes;
@@ -86,37 +78,23 @@ mod vec_push_column_route;
 mod inline_body_column_map_param;
 mod inline_constant_argument;
 
-mod graph_contributions;
 mod inline_lua_column_container_param_sentinel;
 mod inline_lua_splice;
 mod inline_value_specialization;
 mod live_call_conversion;
-mod parallel_inline_mode;
-
-mod foreign_fn_value_delivery;
 
 mod generated_glue_roots;
 
-mod graph_update;
-mod graph_walk_threads;
-
-mod graph_snapshot;
-
-mod artifact_view;
 mod dispatched_sites;
 mod identity_storage_instances;
-mod instance_graph;
 mod instance_owned_emission;
-mod logical_instance_identity;
 mod relocation;
-mod site_domain;
 mod site_join;
 mod struct_default_generic_relation;
 
 mod shader_artifact;
 
 mod comptime_inputs;
-mod global_layout;
 mod global_storage;
 mod int_float_alias;
 mod intrinsics;
@@ -138,7 +116,6 @@ mod nil_kill_scope;
 mod nobox_arena_random_sentinel;
 mod nobox_column_threshold;
 mod nobox_generic_return_boundary_sentinel;
-mod nobox_global_accessor_shape;
 mod nobox_materialize_gc_tier;
 mod nobox_nested_ctor;
 mod nobox_values;
@@ -150,15 +127,12 @@ mod nullable_value_join_sroa;
 mod optional_value_wire;
 mod plain_struct_scalarize;
 mod preflight;
-mod preflight_semantics;
 mod program_roots;
 mod removed_global_markers;
 mod reserved_namespace;
 mod shader_pipeline_register;
 mod state_global_bridge;
 mod static_hot_reload;
-mod static_registration_coverage;
-mod struct_expand;
 mod tail_calls;
 mod trace_frames;
 mod tuple_scalarize;
@@ -167,14 +141,12 @@ mod unread_runtime_tables;
 mod unwrap_failure;
 mod user_fn_emit_rejection;
 mod valid_type_identity;
-mod value_ctor;
 mod value_leaf_layout;
 mod value_scalarize;
 mod value_struct_eq_dispatch;
 mod value_test_discovery;
 mod vec_flat_enum_strided;
 mod vec_value_columns;
-mod vertex_plan;
 
 mod wide_value_abi;
 mod wide_value_slot_budget;

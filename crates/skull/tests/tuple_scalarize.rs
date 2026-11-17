@@ -40,10 +40,7 @@ fn main() {
 fn pair_iter_tuple_scalarizes() {
     let lua = emit_module(PAIR_ITER_LOOP);
     let hot = function_body(&lua, "hot");
-    assert!(
-        !hot.contains("{"),
-        "per-iteration pair tuple survived as a table ctor (any `{{` in this body is a tuple) in hot():\n{hot}"
-    );
+    assert!(!hot.contains("{"));
 }
 
 // Skip-shape pair iterator (the ArenaPairIter shape): the done paths store
@@ -83,10 +80,7 @@ fn main() {
 fn skip_pair_iter_tuple_scalarizes() {
     let lua = emit_module(SKIP_PAIR_ITER_LOOP);
     let hot = function_body(&lua, "hot");
-    assert!(
-        !hot.contains("{"),
-        "skip-shape pair tuple survived as a table ctor in hot():\n{hot}"
-    );
+    assert!(!hot.contains("{"));
 }
 
 // A tuple used as a WHOLE (passed by value to a non-inlined fn) escapes; the
@@ -110,10 +104,7 @@ fn main() {
 fn tuple_whole_use_keeps_table() {
     let lua = emit_module(TUPLE_WHOLE_USE);
     let body = function_body(&lua, "use_it");
-    assert!(
-        body.contains("{"),
-        "a tuple passed by value must keep its table:\n{body}"
-    );
+    assert!(body.contains("{"));
 }
 
 // The option-B gate: bare
@@ -143,11 +134,7 @@ fn main() {
 fn arena_bare_loop_unused_entity_allocates_nothing() {
     let lua = emit_module(ARENA_BARE_LOOP_UNUSED_ENTITY);
     let hot = function_body(&lua, "hot");
-    assert!(
-        !hot.contains("{"),
-        "bare arena loop with unused entity must not allocate per iteration \
-         (no pair tuple, no Entity table):\n{hot}"
-    );
+    assert!(!hot.contains("{"));
 }
 
 /// The arena as a loop's head walks its slots in a counted `for` that skips
@@ -157,10 +144,7 @@ fn arena_bare_loop_is_a_counted_for() {
     for src in [ARENA_BARE_LOOP_UNUSED_ENTITY, ARENA_BARE_LOOP_USED_ENTITY] {
         let lua = emit_module(src);
         let hot = function_body(&lua, "hot");
-        assert!(
-            hot.contains("for ") && !hot.contains("goto") && !hot.contains("next"),
-            "{hot}"
-        );
+        assert!(hot.contains("for ") && !hot.contains("goto") && !hot.contains("next"));
     }
 }
 
@@ -194,18 +178,14 @@ fn arena_bare_loop_used_entity_scalarizes_into_call() {
     let hot = function_body(&lua, "hot");
     // The entity threads to `get` as scalar leaves (arena, index, generation) --
     // no `Entity_vt` materialization, no table, no surviving pair tuple.
-    assert!(
-        !hot.contains("Entity_vt") && !hot.contains("{"),
-        "used entity passed to a scalar-ABI callee must scalarize (no table):\n{hot}"
-    );
+    assert!(!hot.contains("Entity_vt") && !hot.contains("{"));
     assert!(
         crate::common::definitions_of(&lua, "get_Entity")
             .iter()
             .any(|global| {
                 let callee = crate::common::bound_callee_name(&lua, "hot", global);
                 hot.contains(&format!("{callee}("))
-            }),
-        "entity should thread into the scalarized get() call:\n{hot}"
+            })
     );
 }
 
@@ -244,21 +224,11 @@ fn main() {
 fn arena_scan_returning_entity_keeps_leaves_until_a_boxed_sink() {
     let lua = emit_module(ARENA_SCAN_RETURN_ENTITY);
     let find = function_body(&lua, "scan_return_hit");
-    assert!(
-        !find.contains("Entity_vt(") && !find.contains("Entity_ct(") && !find.contains('{'),
-        "the nullable entity return and scan must not allocate a box:\n{find}"
-    );
+    assert!(!find.contains("Entity_vt(") && !find.contains("Entity_ct(") && !find.contains('{'));
     // No un-tagged raw Entity table leaked (the lower_for_arena MakeStruct bug).
-    assert!(
-        !find.contains("_arena ="),
-        "no raw metatable-less Entity table may be built in the scan:\n{find}"
-    );
+    assert!(!find.contains("_arena ="));
     let main = function_body(&lua, "main");
-    assert_eq!(
-        main.matches("Entity_vt(").count(),
-        1,
-        "only the Found field sink may materialize a tagged Entity box:\n{main}"
-    );
+    assert_eq!(main.matches("Entity_vt(").count(), 1);
     assert_eq!(run_main(&lua), "true 2 true true true");
 }
 
@@ -296,10 +266,7 @@ fn main() {
 fn arena_entity_threads_through_enum_payload_without_boxing() {
     let lua = emit_module(ARENA_ENTITY_IN_ENUM);
     let hot = function_body(&lua, "hot");
-    assert!(
-        !hot.contains("Entity_vt("),
-        "an entity carried through a local enum payload must stay in scalar lanes:\n{hot}"
-    );
+    assert!(!hot.contains("Entity_vt("));
 }
 
 // GC-tier nullable bindings and returns carry presence and leaves.
@@ -325,28 +292,10 @@ fn main() {
 fn nullable_value_binding_return_keeps_presence_and_leaves() {
     let lua = emit_module(NULLABLE_VALUE_RETURN);
     let pick = function_body(&lua, "pick");
-    assert_eq!(
-        pick.matches("Bag_vt(").count(),
-        0,
-        "a nullable value binding and its return must not rebuild a Bag box:\n{pick}"
-    );
-    assert!(
-        !pick.contains("Bag_ct("),
-        "nullable Bag uses the wrong storage tier:\n{pick}"
-    );
-    assert_eq!(
-        pick.matches("__ty = \"Vec\"").count(),
-        1,
-        "only the payload Vec may be allocated:\n{pick}"
-    );
-    assert_eq!(
-        pick.matches('{').count(),
-        2,
-        "only the Vec wrapper and its data table may be allocated:\n{pick}"
-    );
-    assert!(
-        !pick.contains("__ty = \"Bag\""),
-        "nullable return builds a raw Bag box:\n{pick}"
-    );
+    assert_eq!(pick.matches("Bag_vt(").count(), 0);
+    assert!(!pick.contains("Bag_ct("));
+    assert_eq!(pick.matches("__ty = \"Vec\"").count(), 1);
+    assert_eq!(pick.matches('{').count(), 2);
+    assert!(!pick.contains("__ty = \"Bag\""));
     assert_eq!(run_main(&lua), "1 1 true");
 }

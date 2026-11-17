@@ -39,18 +39,9 @@ fn main() {
 fn on_killed_hook_hoisted_to_shared_toplevel_fn() {
     let lua = emit_module(ON_KILLED);
     let hook = format!("{}__on_killed", mangled_name(&lua, "worker"));
-    assert!(
-        lua.contains(&format!("function {hook}(")),
-        "on_killed must hoist to a top-level `{hook}`:\n{lua}"
-    );
-    assert!(
-        lua.contains("__on_killed = __rock_code_slot_ref("),
-        "the ctor must store the hoisted hook through a CodeRef slot:\n{lua}"
-    );
-    assert!(
-        !lua.contains("__on_killed = function"),
-        "the ctor must NOT build a per-construction closure (`__on_killed = function`):\n{lua}"
-    );
+    assert!(lua.contains(&format!("function {hook}(")));
+    assert!(lua.contains("__on_killed = __rock_code_slot_ref("));
+    assert!(!lua.contains("__on_killed = function"));
 }
 
 /// SNAPSHOT-SHAPE: EVERY function-typed field on a handle is shared between two
@@ -80,9 +71,5 @@ fn hook_fn_shared_across_constructions_and_still_fires() {
         print(__rock_globals[log_key])\n"
     );
     let out = run_luajit(&format!("{lua}{driver}"));
-    assert_eq!(
-        out, "shared\n105",
-        "every fn-typed handle field must be shared across constructions and \
-         firing must still read the frame (105); got:\n{out}"
-    );
+    assert_eq!(out, "shared\n105");
 }

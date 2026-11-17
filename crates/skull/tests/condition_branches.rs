@@ -56,7 +56,7 @@ print('ok')
             .into_iter()
             .filter(|symbol| symbol.starts_with(&prefix) && !symbol.contains("__"))
             .collect();
-        assert_eq!(symbols.len(), 1, "one callable for {name}: {symbols:?}");
+        assert_eq!(symbols.len(), 1);
         checks = checks.replace(&format!("{name}("), &format!("{}(", symbols[0]));
     }
     assert_eq!(run_luajit(&format!("{}\n{checks}", emitted.lua)), "ok");

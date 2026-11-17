@@ -184,20 +184,9 @@ fn every_nil_kill_names_a_declared_local() {
     // must say so rather than pass vacuously.
     // Both callees are bound, so the shape is one alias called on another.
     let forwarded = nested_alias_calls(&lua);
-    assert!(
-        forwarded >= 4,
-        "fixture no longer emits the forwarded `noise(v(..))` shape ({forwarded} sites); \
-         the nil-kill scope defect cannot arise and this test proves nothing"
-    );
+    assert!(forwarded >= 4);
     let bad = undeclared_kills(&lua);
-    assert!(
-        bad.is_empty(),
-        "these `= nil` kills name no local of their definition, so they assign a global:\n{}",
-        bad.iter()
-            .map(|(f, l, n)| format!("  {n} at line {l} in `{f}`"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
+    assert!(bad.is_empty());
 }
 
 /// Occurrences of `b<N>(b<M>(`: a bound callee whose first argument is the

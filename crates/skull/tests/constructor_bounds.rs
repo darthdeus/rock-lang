@@ -12,7 +12,7 @@ fn freshly_allocated_buffer_fill_uses_constructor_length() {
 "#,
     );
     let body = function_body(&lua, "fill_buffer");
-    assert!(!body.contains("__nb_checked"), "{body}");
+    assert!(!body.contains("__nb_checked"));
     assert_eq!(
         run_luajit(&format!(
             "{lua}\nassert(fill_buffer(0) == 0)\nassert(fill_buffer(17) == 17)\nprint('ok')"
@@ -34,7 +34,7 @@ fn fresh_byte_buffer_fill_uses_constructor_length() {
 "#,
     );
     let body = function_body(&lua, "fill_bytes");
-    assert!(!body.contains("__nb_checked"), "{body}");
+    assert!(!body.contains("__nb_checked"));
 }
 
 #[test]
@@ -71,10 +71,7 @@ inline(lua) fn shrink(buf: NativeBuffer<int>) = "buf.len = 0"
 }}
 "#
         ));
-        assert!(
-            function_body(&lua, "changed").contains("__nb_checked"),
-            "{setup}"
-        );
+        assert!(function_body(&lua, "changed").contains("__nb_checked"));
         assert_eq!(
             run_luajit(&format!(
                 r#"{lua}
@@ -84,8 +81,7 @@ print('ok')
 "#
             ))
             .trim(),
-            "ok",
-            "{setup}"
+            "ok"
         );
     }
 }
@@ -159,7 +155,7 @@ fn repeated_product_uses_unchanged_operand_snapshots() {
 "#,
     );
     let body = function_body(&lua, "fill_product");
-    assert!(!body.contains("__nb_checked"), "{body}");
+    assert!(!body.contains("__nb_checked"));
     assert_eq!(
         run_luajit(&format!(
             r#"{lua}
@@ -189,10 +185,7 @@ fn repeated_products_do_not_follow_changed_operands() {
 }}
 "#
         ));
-        assert!(
-            function_body(&lua, "changed_product").contains("__nb_checked"),
-            "{setup}"
-        );
+        assert!(function_body(&lua, "changed_product").contains("__nb_checked"));
         assert_eq!(
             run_luajit(&format!(
                 r#"{lua}
@@ -310,7 +303,7 @@ fn reused_or_allocated_buffer_retains_capacity_at_join() {
 "#,
     );
     let body = function_body(&lua, "reuse_buffer");
-    assert!(!body.contains("__nb_checked"), "{body}");
+    assert!(!body.contains("__nb_checked"));
     assert_eq!(
         run_luajit(&format!(
             r#"{lua}
@@ -345,10 +338,7 @@ fn capacity_equality_handles_operand_order_and_negative_spelling() {
 }}
 "#
         ));
-        assert!(
-            !function_body(&lua, "reuse").contains("__nb_checked"),
-            "{selection}"
-        );
+        assert!(!function_body(&lua, "reuse").contains("__nb_checked"));
     }
 }
 
@@ -383,10 +373,7 @@ inline(lua) fn shrink(buf: NativeBuffer<int>) = "buf.len = 0"
 }}
 "#
         ));
-        assert!(
-            function_body(&lua, "changed_reuse").contains("__nb_checked"),
-            "{selection}; {after}"
-        );
+        assert!(function_body(&lua, "changed_reuse").contains("__nb_checked"));
         assert_eq!(
             run_luajit(&format!(
                 r#"{lua}
@@ -424,7 +411,7 @@ fn record_fetch() { reuse_fetches += 1 }
 "#,
     );
     let body = function_body(&lua, "reuse_rows");
-    assert!(!body.contains("__nb_checked"), "{body}");
+    assert!(!body.contains("__nb_checked"));
     assert_eq!(
         run_luajit(&format!(
             r#"{lua}

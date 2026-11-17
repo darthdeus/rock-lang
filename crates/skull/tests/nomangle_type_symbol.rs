@@ -59,5 +59,5 @@ fn main() {}
         Ok(_) => panic!("a @nomangle `Vec2` must not share the stdlib Vec2's symbol"),
         Err(e) => e.message,
     };
-    assert!(err.contains("would both emit as `Vec2`"), "{err}");
+    assert!(err.contains("would both emit as `Vec2`"));
 }

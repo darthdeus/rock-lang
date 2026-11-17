@@ -63,10 +63,7 @@ fn reaches_boxed_body(lua: &str) -> bool {
 #[test]
 fn a_column_receiver_never_reaches_the_boxed_body() {
     let lua = emit_module(COLUMN_RECEIVER);
-    assert!(
-        !reaches_boxed_body(&lua),
-        "a column push must emit per-leaf stores and never the `_data` splice"
-    );
+    assert!(!reaches_boxed_body(&lua));
     assert_eq!(run_main(&lua), "7");
 }
 
@@ -74,29 +71,18 @@ fn a_column_receiver_never_reaches_the_boxed_body() {
 #[test]
 fn a_boxed_receiver_does_reach_the_boxed_body() {
     let lua = emit_module(BOXED_RECEIVER);
-    assert!(
-        reaches_boxed_body(&lua),
-        "a boxed push is exactly the case the boxed body serves"
-    );
+    assert!(reaches_boxed_body(&lua));
     let defs: Vec<&str> = lua
         .match_indices("function vec_push")
         .filter_map(|(i, _)| lua[i..].lines().next())
         .collect();
-    assert_eq!(
-        defs.len(),
-        1,
-        "an opaque boundary has one definition, so exactly one `vec_push` definition \
-         may exist: {defs:?}"
-    );
+    assert_eq!(defs.len(), 1);
     assert_eq!(run_main(&lua), "7");
 }
 
 #[test]
 fn a_column_payload_reaches_the_boxed_body_and_is_correct() {
     let lua = emit_module(COLUMN_PAYLOAD);
-    assert!(
-        reaches_boxed_body(&lua),
-        "the OUTER vec is boxed, so its push is the ordinary `_data` splice"
-    );
+    assert!(reaches_boxed_body(&lua));
     assert_eq!(run_main(&lua), "1");
 }

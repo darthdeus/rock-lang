@@ -40,26 +40,13 @@ fn main() { t() }
 #[test]
 fn cdata_enum_emits_ctype_and_no_table() {
     let lua = emit_module(SRC);
-    assert!(
-        lua.contains("} Shape;") && lua.contains("Shape_ct = ffi.typeof"),
-        "expected a Shape cdef + ctor:\n{}",
-        lua.split("\nfunction ").next().unwrap_or(&lua)
-    );
+    assert!(lua.contains("} Shape;") && lua.contains("Shape_ct = ffi.typeof"));
     // No `{__variant}` table anywhere for a cdata enum (reflection sacrificed).
-    assert!(
-        !lua.contains("__variant = \"Circle\""),
-        "cdata enum must not build a table:\n{lua}"
-    );
+    assert!(!lua.contains("__variant = \"Circle\""));
     // The value `__eq` metatype is attached (escaping equality).
-    assert!(
-        lua.contains("ffi.metatype, \"Shape\""),
-        "expected an ffi.metatype for the Shape enum cdata:\n{lua}"
-    );
+    assert!(lua.contains("ffi.metatype, \"Shape\""));
     // Match int-compares the tag (`.__tag`), not a `.__variant` string.
-    assert!(
-        lua.contains(".__tag"),
-        "expected a `.__tag` int-tag match:\n{lua}"
-    );
+    assert!(lua.contains(".__tag"));
     // (The non-escaping construct+match SROAs to scalars on the full CLI pipeline --
     // the alloc-zero is gated by benchmarks/value-scalarize/enum_payload_scalarize.rock,
     // not asserted here, since `emit_module` runs a lighter pass set than `rock compile`.)
@@ -95,11 +82,7 @@ fn cdata_enum_as_value_struct_field() {
     let lua = emit_module(FIELD_SRC);
     // The host `Cmd` cdef must exist (it was SKIPPED before -- a payload-enum field
     // disqualified the value layout). The enum field nests `Blend` inline.
-    assert!(
-        lua.contains("} Cmd;") && lua.contains("Blend blend;"),
-        "expected a Cmd cdef nesting the Blend enum field:\n{}",
-        lua.split("\nfunction ").next().unwrap_or(&lua)
-    );
+    assert!(lua.contains("} Cmd;") && lua.contains("Blend blend;"));
     require_luajit();
     let prog = lua;
     assert_eq!(run_fn(&prog, "t"), "15 30");
@@ -129,11 +112,7 @@ fn main() { t() }
 #[test]
 fn cdata_enum_multi_field_tuple() {
     let lua = emit_module(MULTI_SRC);
-    assert!(
-        lua.contains("int _0; int _1; } Shape;"),
-        "expected a 2-slot Shape cdef:\n{}",
-        lua.split("\nfunction ").next().unwrap_or(&lua)
-    );
+    assert!(lua.contains("int _0; int _1; } Shape;"));
     require_luajit();
     let prog = lua;
     assert_eq!(run_fn(&prog, "t"), "15 12 0");
@@ -166,11 +145,7 @@ fn main() { t() }
 fn cdata_enum_record_payload() {
     let lua = emit_module(RECORD_SRC);
     // Mixed tuple `_0` (Circle) + record `_w`/`_h` (Box) slots in one cdef.
-    assert!(
-        lua.contains("int _0; int _w; int _h; } Shape;"),
-        "expected a mixed tuple+record Shape cdef:\n{}",
-        lua.split("\nfunction ").next().unwrap_or(&lua)
-    );
+    assert!(lua.contains("int _0; int _w; int _h; } Shape;"));
     require_luajit();
     let prog = lua;
     // Record fields sorted alphabetically (h before w) -- matches rock's inspect.
@@ -204,10 +179,7 @@ fn main() { t() }
 fn matched_scalar_abi_enum_param_does_not_repack() {
     let lua = emit_module(PARAM_MATCH_SRC);
     let body = crate::common::function_body(&lua, "route");
-    assert!(
-        !body.contains("Target_ct("),
-        "a matched scalar-ABI enum param must not repack to a cdata:\n{body}"
-    );
+    assert!(!body.contains("Target_ct("));
 }
 
 #[test]

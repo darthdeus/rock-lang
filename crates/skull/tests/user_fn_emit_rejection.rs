@@ -53,17 +53,8 @@ fn main() {
 fn user_fn_emit_failure_is_a_hard_error() {
     let err = try_emit_module(POLYMORPHIC_RECURSION)
         .expect_err("an unemittable user fn must reject, not silently skip");
-    assert!(
-        err.message.contains("rec"),
-        "error should name the offending call chain: {}",
-        err.message
-    );
-    assert!(
-        err.message.contains("polymorphic recursion"),
-        "the rejection must name the CAUSE, so it is distinguishable from any \
-         other emit failure that happens to mention `rec`: {}",
-        err.message
-    );
+    assert!(err.message.contains("rec"));
+    assert!(err.message.contains("polymorphic recursion"));
 }
 
 /// Same-instance recursion still emits. This is the half that makes the

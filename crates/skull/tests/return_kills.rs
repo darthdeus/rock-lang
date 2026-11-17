@@ -34,12 +34,12 @@ fn main() {
 fn a_kill_before_a_call_free_return_is_dropped() {
     let lua = emit_module(SRC);
     let body = function_body(&lua, "plain");
-    assert!(!body.contains(" = nil"), "{body}");
+    assert!(!body.contains(" = nil"));
     let body = function_body(&lua, "calls");
-    assert!(body.contains(" = nil"), "{body}");
+    assert!(body.contains(" = nil"));
     // An arm's kills after its last call, with the join only returning.
     let body = function_body(&lua, "joined");
-    assert!(!body.contains(" = nil\n else"), "{body}");
-    assert!(!body.contains(" = nil\n end"), "{body}");
+    assert!(!body.contains(" = nil\n else"));
+    assert!(!body.contains(" = nil\n end"));
     assert_eq!(run_main(&lua), "8 12 2 3");
 }

@@ -79,19 +79,13 @@ fn main() {
 #[test]
 fn a_generic_return_inferred_as_a_column_vec_rejects() {
     let msg = emit_rejection(GENERIC_RETURN);
-    assert!(
-        msg.contains("cannot BUILD column-stored `[G]`") && msg.contains("make"),
-        "got: {msg}"
-    );
+    assert!(msg.contains("cannot BUILD column-stored `[G]`") && msg.contains("make"));
 }
 
 #[test]
 fn a_named_out_of_order_column_argument_rejects() {
     let msg = emit_rejection(NAMED_OUT_OF_ORDER);
-    assert!(
-        msg.contains("column-stored `[G]`") && msg.contains("probe"),
-        "got: {msg}"
-    );
+    assert!(msg.contains("column-stored `[G]`") && msg.contains("probe"));
 }
 
 /// The reach control: the same call written positionally already rejected.
@@ -103,7 +97,7 @@ fn the_positional_form_rejects_too() {
 #[test]
 fn a_defaulted_slot_is_reached() {
     let msg = emit_rejection(DEFAULTED_SLOT);
-    assert!(msg.contains("column-stored `[G]`"), "got: {msg}");
+    assert!(msg.contains("column-stored `[G]`"));
 }
 
 /// An IRRELEVANT generic the call never pins. `U` appears in no slot, so
@@ -126,11 +120,7 @@ fn main() {
 #[test]
 fn an_irrelevant_unbound_generic_does_not_disarm_the_rule() {
     let msg = emit_rejection(IRRELEVANT_UNBOUND_GENERIC);
-    assert!(
-        msg.contains("column-stored `[G]`") && msg.contains("probe"),
-        "the checked slot is determined; an unrelated generic is not its business, \
-         got: {msg}"
-    );
+    assert!(msg.contains("column-stored `[G]`") && msg.contains("probe"));
 }
 
 /// A NULLABLE slot. `[T]?` names the same boxed representation once the value
@@ -167,17 +157,11 @@ fn main() {
 #[test]
 fn a_nullable_slot_is_reached() {
     let msg = emit_rejection(NULLABLE_SLOT);
-    assert!(
-        msg.contains("column-stored `[G]`") && msg.contains("probe"),
-        "got: {msg}"
-    );
+    assert!(msg.contains("column-stored `[G]`") && msg.contains("probe"));
 }
 
 #[test]
 fn a_tuple_slot_is_reached() {
     let msg = emit_rejection(TUPLE_SLOT);
-    assert!(
-        msg.contains("column-stored `[G]`") && msg.contains("probe"),
-        "got: {msg}"
-    );
+    assert!(msg.contains("column-stored `[G]`") && msg.contains("probe"));
 }

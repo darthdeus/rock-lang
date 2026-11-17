@@ -51,12 +51,7 @@ fn run_pinned_luajit(lua: &str, tag: &str) -> Output {
 #[test]
 fn staged_field_len_control_runs() {
     let output = run_pinned_luajit(&emit_module(STAGED_FIELD_LEN_CONTROL), "staged_field_len");
-    assert!(
-        output.status.success(),
-        "the staged field length control must run:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "0");
 }
 
@@ -65,12 +60,7 @@ fn field_derived_len_is_evaluated_once_through_conversion() {
     let lua = emit_module(FIELD_LEN_IN_CLAMP);
     let body = function_body(&lua, "apply_direct_field");
     let output = run_pinned_luajit(&lua, "field_len_in_clamp");
-    assert!(
-        output.status.success(),
-        "generated Lua must not feed a conversion's repeated producer back into vec_len:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout)
             .trim()
@@ -80,9 +70,5 @@ fn field_derived_len_is_evaluated_once_through_conversion() {
     // This suffix covers both the Vec.len wrapper and its vec_len helper.
     let length_calls = body.matches("len_arr_T_spec_p_int(").count();
     let length_reads = body.matches(".len").count();
-    assert_eq!(
-        length_calls + length_reads,
-        1,
-        "the direct field expression must evaluate the length exactly once:\n{body}"
-    );
+    assert_eq!(length_calls + length_reads, 1);
 }

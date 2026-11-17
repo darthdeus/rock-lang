@@ -35,26 +35,14 @@ fn generic_inline_at_value_type_splices_zero_box() {
     let body = function_body(&lua, "use_buf");
 
     // The value never boxes: the specialized splice threads it as scalar leaves.
-    assert!(
-        !body.contains("V2_ct("),
-        "specialized splice must not box the value (`V2_ct(..)`); got:\n{body}"
-    );
+    assert!(!body.contains("V2_ct("));
     // The boxed whole-value store is gone -- the store scalarizes to field writes.
-    assert!(
-        !body.contains("__nb_checked_set"),
-        "specialized store must be field-wise, not the boxed `__nb_checked_set`; got:\n{body}"
-    );
+    assert!(!body.contains("__nb_checked_set"));
     // Positive: the element is bounds-checked once by INDEX and its leaves are
     // written through typed views -- no slot reference is fetched, so the
     // specialized store allocates nothing on any path, not just on trace.
-    assert!(
-        body.contains("__nb_checked_index"),
-        "specialized store must bounds-check the element access; got:\n{body}"
-    );
-    assert!(
-        !body.contains("__nb_checked_get"),
-        "specialized store should take no slot reference; got:\n{body}"
-    );
+    assert!(body.contains("__nb_checked_index"));
+    assert!(!body.contains("__nb_checked_get"));
 }
 
 // A generic `@inline` fn calling `native_buffer_alloc<T>` -- the intrinsic the
@@ -81,15 +69,9 @@ fn generic_inline_intrinsic_resolves_ctype_at_value_instantiation() {
     // The specialized `native_buffer_alloc<T>` names the concrete element ctype --
     // the whole point of P2 for the alloc intrinsic (P1 could only do it at a
     // concrete, non-generic call site).
-    assert!(
-        body.contains(r#"__rock_nb_alloc("V2","#),
-        "specialized intrinsic must emit `__rock_nb_alloc(\"V2\", ..)`; got:\n{body}"
-    );
+    assert!(body.contains(r#"__rock_nb_alloc("V2","#));
     // No dangling call to the shared generic `flat_vec_new` survives.
-    assert!(
-        !body.contains("flat_vec_new"),
-        "the specialized `flat_vec_new` must be spliced, not left as a call; got:\n{body}"
-    );
+    assert!(!body.contains("flat_vec_new"));
 }
 
 const TRANSITIVE_CONCRETE_INTRINSIC: &str = r#"
@@ -108,8 +90,5 @@ fn main() {
 #[test]
 fn non_inline_generic_chain_uses_concrete_native_buffer_instance() {
     let lua = emit_module(TRANSITIVE_CONCRETE_INTRINSIC);
-    assert!(
-        lua.contains(r#"__rock_nb_alloc("TV2"#),
-        "the transitive concrete instance must own the native-buffer ctype, got:\n{lua}"
-    );
+    assert!(lua.contains(r#"__rock_nb_alloc("TV2"#));
 }

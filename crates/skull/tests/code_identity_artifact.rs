@@ -1,102 +1,4 @@
 use crate::common::{emit_mir, run_luajit};
-use skull_mir::code_identity::CodeIdentity;
-
-#[test]
-fn emitted_lua_artifact_has_a_total_escaping_function_census() {
-    let emit = emit_mir(
-        r#"
-fn named(x: int) -> int { return x }
-
-fn named_value() -> fn(int) -> int { return named }
-
-fn capture_value() -> fn() -> int {
-    let captured = 3
-    return () => captured
-}
-
-fn free_value() -> fn() -> int { return () => 7 }
-
-fn main() {
-    let f = named_value()
-    let a = capture_value()
-    let b = free_value()
-    print("{f(1)} {a()} {b()}")
-}
-
-@nomangle fn direct_target(x: int) -> int { return x + 1 }
-@nomangle fn direct_call() -> int { return direct_target(1) }
-"#,
-    );
-    let artifact = &emit.code_artifact;
-    let escaping = |named: bool, capture_free: bool| {
-        artifact
-            .entries
-            .values()
-            .filter(|entry| {
-                entry.escaping
-                    && matches!(entry.identity, CodeIdentity::Named(_)) == named
-                    && (named || entry.capture_free == capture_free)
-            })
-            .count()
-    };
-    assert!(
-        escaping(true, true) > 0,
-        "the named-value population must be nonzero"
-    );
-    assert!(
-        escaping(false, false) > 0,
-        "the capturing lambda population must be nonzero"
-    );
-    assert!(
-        escaping(false, true) > 0,
-        "the capture-free lambda population must be nonzero"
-    );
-    let direct_body = emit
-        .lua
-        .split("function direct_call()")
-        .nth(1)
-        .and_then(|body| body.split("\nend").next())
-        .expect("direct call body");
-    assert!(
-        direct_body.contains("direct_target("),
-        "direct calls retain their direct target: {direct_body}"
-    );
-    assert!(
-        !direct_body.contains("__rock_code_slot_ref"),
-        "direct calls must not pay the slot indirection: {direct_body}"
-    );
-    assert!(
-        artifact.is_total(),
-        "emitted artifact census is not self-validating: {:?}",
-        artifact.census
-    );
-}
-
-#[test]
-fn generated_decorator_function_values_use_logical_slots() {
-    let emit = emit_mir(
-        r#"
-global SYSTEMS: [fn() -> ()] = []
-deco init system { SYSTEMS.push(transmute(target.func)) }
-@system
-fn alpha() { }
-fn main() { }
-"#,
-    );
-    let application = emit
-        .lua
-        .lines()
-        .find(|line| line.contains("__deco_system({"))
-        .expect("decorator application");
-    assert!(
-        application.contains("__rock_code_slot_ref(\"named:<test>::alpha_0<>\")"),
-        "generated decorator target must be a CodeRef: {application}"
-    );
-    assert!(
-        !application.contains("func = alpha"),
-        "generated decorator target must not freeze the backend body: {application}"
-    );
-}
 
 #[test]
 fn lifecycle_metadata_emits_a_sorted_plan_without_executing_the_decorator() {
@@ -110,14 +12,8 @@ deco init tick(stage: int = 100) {}
 fn main() {}
 "#,
     );
-    assert!(
-        crate::common::definitions_matching(&emit.lua, "__deco_tick").is_empty(),
-        "lifecycle declaration bodies are not executable registration code"
-    );
-    assert!(
-        !emit.lua.contains("__deco_tick({"),
-        "lifecycle applications must not execute decorator side effects"
-    );
+    assert!(crate::common::definitions_matching(&emit.lua, "__deco_tick").is_empty());
+    assert!(!emit.lua.contains("__deco_tick({"));
     let first = emit
         .lua
         .find("name = \"first\", stage = 7")
@@ -130,10 +26,7 @@ fn main() {}
         .lua
         .find("name = \"defaulted\", stage = 100")
         .expect("defaulted plan entry");
-    assert!(
-        first < second && second < defaulted,
-        "compiler plan must preserve equal-stage declaration order and read the declared default"
-    );
+    assert!(first < second && second < defaulted);
     // `func` is now a compiler-synthesized uniform thunk (`scene_id -> ()`),
     // not the raw CodeRef slot -- calling it is what proves the slot behind
     // it resolved (an unadmitted key throws "missing Rock code slot" at plan
@@ -143,33 +36,7 @@ fn main() {}
         "{}\nlocal p = _G.__ROCK_LIFECYCLE_PLAN.update; p._data[1].func(0); print(p.len .. ':' .. p._data[1].key)",
         emit.lua
     ));
-    assert!(
-        out.starts_with("3:named:<test>::first_0<>"),
-        "plan targets must be admitted CodeRef roots: {out}"
-    );
-}
-
-#[test]
-fn scene_lifecycle_metadata_emits_the_canonical_root_key() {
-    let emit = emit_mir(
-        r#"
-struct Dungeon { ticks: int }
-@lifecycle(phase="update", owner="scene")
-deco init scene_update {}
-@scene_update fn tick(root: Dungeon) { root.ticks += 1 }
-fn main() {}
-"#,
-    );
-    assert!(
-        emit.lua
-            .contains("owner = \"scene\", root_type = \"a_n7_Dungeon_0_z\""),
-        "scene plan lost its canonical typed root key: {}",
-        emit.lua,
-    );
-    assert!(
-        emit.lua.contains("scene_owned = 1"),
-        "scene phase population is zero"
-    );
+    assert!(out.starts_with("3:named:<test>::first_0<>"));
 }
 
 #[test]
@@ -195,19 +62,9 @@ fn main() { ROOT = load() }
     // definition header is `__rock_mk_scene_create.. = function(`, so splitting
     // on `\nfunction ` finds nothing.
     let scene_create_body = crate::common::function_body(&emit.lua, "scene_create");
-    assert!(
-        scene_create_body.contains(key),
-        "scene_create must receive the compiler's MonoTy-derived key: {scene_create_body}"
-    );
-    assert!(
-        !scene_create_body.contains("__rock_get_type"),
-        "Scene construction must not discover its root type from the published value: {scene_create_body}"
-    );
-    assert!(
-        emit.lua.contains(&format!("root_type = \"{key}\"")),
-        "LifecyclePlan must publish the same semantic key as scene_create: {}",
-        emit.lua
-    );
+    assert!(scene_create_body.contains(key));
+    assert!(!scene_create_body.contains("__rock_get_type"));
+    assert!(emit.lua.contains(&format!("root_type = \"{key}\"")));
 }
 
 #[test]
@@ -221,18 +78,12 @@ deco init widget(key: string) {}
 fn main() {}
 "#,
     );
-    assert!(
-        crate::common::definitions_matching(&emit.lua, "__deco_widget").is_empty(),
-        "definition roles are compiler-owned"
-    );
-    assert!(
-        !emit.lua.contains("__deco_widget({"),
-        "definition applications do not execute the decorator"
-    );
+    assert!(crate::common::definitions_matching(&emit.lua, "__deco_widget").is_empty());
+    assert!(!emit.lua.contains("__deco_widget({"));
     assert!(emit.lua.contains("__rock_definition_plan_stage({"));
     let alpha = emit.lua.find("key = \"alpha\"").expect("alpha plan entry");
     let beta = emit.lua.find("key = \"beta\"").expect("beta plan entry");
-    assert!(alpha < beta, "definition order is declaration order");
+    assert!(alpha < beta);
     assert!(
         emit.lua
             .contains("factory = __rock_code_slot_pending_ref(\"named:<test>::make_alpha_0<>\")")

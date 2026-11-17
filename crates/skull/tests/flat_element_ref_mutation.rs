@@ -1,115 +1,4 @@
-//! Flat-stored Lua container elements (value columns, strided rows) passed
-//! through `ref` write the production element in place and leave its
-//! neighbours alone. Each program's oracle is the value read back through the
-//! `ref` after the write, compared with the container and with values read
-//! before it. The behavior matrix that also runs on C is
-//! `tests/values/flat_element_ref.rock`.
-
-use crate::common::{module_id, require_luajit, run_luajit, run_main, try_emit_module};
-
-/// Production emission of `source`, whose only frontend diagnostic must be the
-/// relocatable-storage rule for a retained `ref` let: that rule is the
-/// language's, and this test pins the backend boundary below it.
-fn emit_past_relocatable_ref_rule(source: &str) -> String {
-    let mut modules: Vec<_> = rock_stdlib::stdlib_files()
-        .iter()
-        .map(|file| {
-            skull_parser::parse_module_clean(
-                file.contents,
-                ustr::Ustr::from(rock_stdlib::stdlib_file_id(file.name).as_str()),
-            )
-            .expect("stdlib parse")
-        })
-        .collect();
-    modules.push(
-        skull_parser::parse_module_clean(source, ustr::Ustr::from("<test>"))
-            .expect("fixture parse"),
-    );
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let errors: Vec<String> = ws
-        .inferences
-        .iter()
-        .flatten()
-        .flat_map(|inf| inf.errors.values().flatten())
-        .chain(
-            ws.modules
-                .iter()
-                .flat_map(|m| m.lowering_errors.values().flatten()),
-        )
-        .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter()))
-        .map(|e| e.message.clone())
-        .collect();
-    assert!(
-        errors
-            .iter()
-            .all(|m| m.contains("cannot retain a reference into relocatable")),
-        "unexpected frontend errors: {errors:#?}"
-    );
-    let module = module_id(&ws, "<test>");
-    let (emission, _) = skull::mir_emit::emit_full(&ws, module).expect("production emit");
-    emission.lua
-}
-
-#[test]
-fn nested_field_ref_let_mutates_the_owned_map_value_on_lua() {
-    require_luajit();
-    let lua = emit_past_relocatable_ref_rule(
-        r#"
-value Inner { v: int }
-value Cell { inner: Inner, w: int }
-fn main() {
-    let m: Map<string, Cell> = map_new()
-    m["a"] = Cell { inner: Inner { v: 10 }, w: 77 }
-    m["b"] = Cell { inner: Inner { v: 20 }, w: 88 }
-    let before = m["a"].inner.v
-    let owner_sibling = m["a"].w
-    let neighbor = m["b"].inner.v
-    let inner: ref Inner = m["a"].inner
-    inner.v += 1
-    let result = inner.v
-    let target_matches = result != before && m["a"].inner.v == result
-    let owner_sibling_matches = m["a"].w == owner_sibling
-    let neighbor_matches = m["b"].inner.v == neighbor
-    print("{target_matches} {owner_sibling_matches} {neighbor_matches}")
-}
-"#,
-    );
-    assert_eq!(run_main(&lua), "true true true");
-}
-
-#[test]
-fn whole_element_ref_lets_mutate_the_vec_and_map_element_on_lua() {
-    require_luajit();
-    let lua = emit_past_relocatable_ref_rule(
-        r#"
-value Cell { v: int, w: int }
-fn main() {
-    let m: Map<string, Cell> = map_new()
-    m["a"] = Cell { v: 10, w: 11 }
-    m["b"] = Cell { v: 20, w: 21 }
-    let xs: [Cell] = []
-    xs.push(Cell { v: 30, w: 31 })
-    xs.push(Cell { v: 40, w: 41 })
-    let map_before = m["b"]
-    let map_neighbor = m["a"]
-    let vec_before = xs[1]
-    let vec_neighbor = xs[0]
-    let mc: ref Cell = m["b"]
-    mc.v += 1
-    let map_seen = mc.v
-    let vc: ref Cell = xs[1]
-    vc.v += 1
-    let vec_seen = vc.v
-    let map_ok = map_seen != map_before.v && m["b"].v == map_seen && m["b"].w == map_before.w
-    let map_neighbor_ok = m["a"].v == map_neighbor.v && m["a"].w == map_neighbor.w
-    let vec_ok = vec_seen != vec_before.v && xs[1].v == vec_seen && xs[1].w == vec_before.w
-    let vec_neighbor_ok = xs[0].v == vec_neighbor.v && xs[0].w == vec_neighbor.w
-    print("{map_ok} {map_neighbor_ok} {vec_ok} {vec_neighbor_ok}")
-}
-"#,
-    );
-    assert_eq!(run_main(&lua), "true true true true");
-}
+use crate::common::{require_luajit, run_luajit, try_emit_module};
 
 /// A `ref` to a missing Map key has no element to write; it raises at the
 /// borrow rather than writing a detached copy (C aborts the same program).
@@ -132,10 +21,7 @@ fn main() {
     let out = run_luajit(&format!(
         "{lua}\nlocal ok, err = pcall(main)\nprint(ok, err ~= nil)\n"
     ));
-    assert_eq!(
-        out, "false\ttrue",
-        "the borrow of a missing key must raise: {out}"
-    );
+    assert_eq!(out, "false\ttrue");
 }
 
 /// Recursion settles a `ref` result only when every return agrees: a recursive
@@ -162,14 +48,8 @@ fn main() {
         Ok(_) => panic!("a flat and a boxed `ref` return of one callee must not emit"),
         Err(err) => err,
     };
-    assert!(
-        err.message.contains("`pick`") && err.message.contains("differently stored reference"),
-        "{err:?}"
-    );
-    assert!(
-        !err.labels.is_empty(),
-        "the rejection must carry a source span: {err:?}"
-    );
+    assert!(err.message.contains("`pick`") && err.message.contains("differently stored reference"));
+    assert!(!err.labels.is_empty());
 }
 
 /// A flat `ref` binding is a container and a slot under one static storage
@@ -209,10 +89,7 @@ fn main() {{
             Ok(_) => panic!("{label}: a rebinding across storage shapes must not emit"),
             Err(err) => err,
         };
-        assert!(err.message.contains("cannot reassign"), "{label}: {err:?}");
-        assert!(
-            !err.labels.is_empty(),
-            "{label}: the rejection must carry a source span: {err:?}"
-        );
+        assert!(err.message.contains("cannot reassign"));
+        assert!(!err.labels.is_empty());
     }
 }

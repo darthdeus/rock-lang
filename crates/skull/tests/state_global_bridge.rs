@@ -39,23 +39,11 @@ fn metamethod_body<'a>(lua: &'a str, name: &str) -> &'a str {
 #[test]
 fn the_bridge_miss_path_is_not_a_tail_call() {
     let lua = emit_without_stdlib(SRC);
-    assert!(
-        !lua.contains("old_read") && !lua.contains("old_write"),
-        "the per-miss fallback helpers are still emitted; the installer is supposed to \
-         resolve the fallback shape once instead"
-    );
+    assert!(!lua.contains("old_read") && !lua.contains("old_write"));
     let read = metamethod_body(&lua, "__index");
-    assert!(
-        read.trim_end().ends_with("return nil"),
-        "`mt.__index` must fall off to a plain `return nil` when `_G` had no previous \
-         metatable; got:\n{read}"
-    );
+    assert!(read.trim_end().ends_with("return nil"));
     let write = metamethod_body(&lua, "__newindex");
-    assert!(
-        write.trim_end().ends_with("rawset(t, key, value)"),
-        "`mt.__newindex` must fall off to a plain `rawset` when `_G` had no previous \
-         metatable; got:\n{write}"
-    );
+    assert!(write.trim_end().ends_with("rawset(t, key, value)"));
 }
 
 /// All four paths through the installed metamethods, driven under a real LuaJIT:
@@ -118,12 +106,8 @@ check("state write past a bare reinstall", _G.bar, 17)
 "#,
     );
     let out = run_luajit(&prog);
-    assert!(!out.contains("FAIL"), "bridge behaviour changed:\n{out}");
-    assert_eq!(
-        out.lines().filter(|l| l.starts_with("ok ")).count(),
-        17,
-        "not every case reported; the program stopped early:\n{out}"
-    );
+    assert!(!out.contains("FAIL"));
+    assert_eq!(out.lines().filter(|l| l.starts_with("ok ")).count(), 17);
 }
 
 /// A host attaches its own directory fields right after the bridge install,

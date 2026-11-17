@@ -4,7 +4,7 @@ use crate::common::{emit_module, function_body, run_luajit};
 fn bounded_affine_native_buffer_loops_keep_boundary_behavior() {
     let lua = emit_module(include_str!("../../../benchmarks/guard_proofs.rock"));
     let body = function_body(&lua, "guard_stride_proven");
-    assert!(!body.contains("__nb_checked_get"), "{body}");
+    assert!(!body.contains("__nb_checked_get"));
     assert!(function_body(&lua, "guard_stride").contains("__nb_checked_get"));
     let output = run_luajit(&format!(
         r#"{lua}

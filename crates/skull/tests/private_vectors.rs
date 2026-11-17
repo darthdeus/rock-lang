@@ -15,7 +15,7 @@ const COLLECT: &str = r#"
 fn a_private_output_push_preserves_input_bounds() {
     let lua = emit_module(COLLECT);
     let body = function_body(&lua, "collect_private");
-    assert!(!body.contains("__vec_checked_set"), "{body}");
+    assert!(!body.contains("__vec_checked_set"));
     let output = run_luajit(&format!(
         r#"{lua}
 local xs = {{_data = {{}}, len = 21}}
@@ -76,10 +76,7 @@ inline(lua) fn arm(out: [int], xs: [int]) = """
 "#
         );
         let lua = emit_module(&source);
-        assert!(
-            function_body(&lua, "exposed").contains("__vec_checked_set"),
-            "{setup}"
-        );
+        assert!(function_body(&lua, "exposed").contains("__vec_checked_set"));
         let output = run_luajit(&format!(
             r#"{lua}
 local xs = {{len = 3, _data = {{0, 0, 0}}}}
@@ -89,7 +86,7 @@ assert(__private_vec_hits == 1)
 print('ok')
 "#
         ));
-        assert_eq!(output.trim(), "ok", "{setup}");
+        assert_eq!(output.trim(), "ok");
     }
 }
 

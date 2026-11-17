@@ -38,7 +38,7 @@ fn a_program_does_not_define_own_functions_nothing_calls() {
             .lua_view()
             .retains(&Instance::base(fn_ref(&ws, "own_unused")))
     );
-    assert!(!defines(&emit.lua, "own_unused"), "{}", emit.lua);
+    assert!(!defines(&emit.lua, "own_unused"));
     common::require_luajit();
     assert_eq!(common::run_main(&emit.lua), "9");
 }
@@ -48,8 +48,8 @@ fn a_program_keeps_tests_sims_and_nomangle_functions() {
     let (emit, _, _) = program(
         "@test fn own_test() { }\n@nomangle fn own_host_entry() -> int { return 2 }\nfn main() { print(1) }",
     );
-    assert!(defines(&emit.lua, "own_test"), "{}", emit.lua);
-    assert!(defines(&emit.lua, "own_host_entry"), "{}", emit.lua);
+    assert!(defines(&emit.lua, "own_test"));
+    assert!(defines(&emit.lua, "own_host_entry"));
 }
 
 #[test]
@@ -69,11 +69,7 @@ fn an_edit_that_starts_calling_an_own_function_defines_it() {
         )],
     )
     .expect("incremental");
-    assert!(
-        defines(&incremental.lua, "own_later"),
-        "{}",
-        incremental.lua
-    );
+    assert!(defines(&incremental.lua, "own_later"));
     common::require_luajit();
     assert_eq!(common::run_main(&incremental.lua), "5");
 }
@@ -86,5 +82,5 @@ fn a_library_target_keeps_every_own_function() {
         .project_root(Some(ROOT))
         .run(&ws, m)
         .expect("emit");
-    assert!(defines(&emit.lua, "own_export"), "{}", emit.lua);
+    assert!(defines(&emit.lua, "own_export"));
 }

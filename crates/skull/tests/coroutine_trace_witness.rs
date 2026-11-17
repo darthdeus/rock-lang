@@ -18,9 +18,7 @@ fn each_resume_calls_its_step_directly() {
         let step = resume.replace("__resume", "__step");
         assert!(
             function_body(&lua, resume).contains(&format!("{step}(s, arg)"))
-                && !function_body(&lua, resume).contains("pcall("),
-            "`{resume}` must call `{step}` directly without pcall:\n{}",
-            function_body(&lua, resume)
+                && !function_body(&lua, resume).contains("pcall(")
         );
     }
 }

@@ -50,10 +50,7 @@ fn main() {
 fn plain_struct_field_reads_dont_materialize_table() {
     let lua = emit_module(PLAIN_FIELD_LOOP);
     let hot = function_body(&lua, "hot");
-    assert!(
-        !hot.contains("__ty = \"Props\""),
-        "Props table survived inlining in hot() (should scalarize away):\n{hot}"
-    );
+    assert!(!hot.contains("__ty = \"Props\""));
 }
 
 // Plain structs are mutable: a local struct whose fields are WRITTEN and then
@@ -81,10 +78,7 @@ fn main() {
 fn plain_struct_field_writes_scalarize() {
     let lua = emit_module(PLAIN_MUTATE_LOOP);
     let hot = function_body(&lua, "hot");
-    assert!(
-        !hot.contains("__ty = \"Acc\""),
-        "Acc table survived (mutated plain struct should scalarize):\n{hot}"
-    );
+    assert!(!hot.contains("__ty = \"Acc\""));
 }
 
 // A plain struct used as a WHOLE (passed by value to a function) must keep its
@@ -111,12 +105,6 @@ fn main() {
 fn plain_struct_whole_use_keeps_table() {
     let lua = emit_module(PLAIN_WHOLE_USE);
     let body = function_body(&lua, "use_it");
-    assert!(
-        body.contains("__ty = \"Box\""),
-        "a plain struct passed by value must keep its table:\n{body}"
-    );
-    assert!(
-        body.contains(".w"),
-        "the field read of a non-splittable plain struct must project off it:\n{body}"
-    );
+    assert!(body.contains("__ty = \"Box\""));
+    assert!(body.contains(".w"));
 }

@@ -46,10 +46,6 @@ fn main() {
         .nth(1)
         .expect("the specialized `thru` must be emitted");
     let body = body.split("\nend").next().unwrap();
-    assert!(
-        !body.contains("BV2_ct"),
-        "a non-nullable value through a generic `let` must stay scalarized, not \
-         rebuild a cdata -- the SROA license this fix narrowed:\n{body}"
-    );
+    assert!(!body.contains("BV2_ct"));
     assert_eq!(crate::common::run_main(&lua), "3");
 }

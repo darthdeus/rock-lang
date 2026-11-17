@@ -19,6 +19,6 @@ fn main() {
 fn optional_receiver_fallback_does_not_emit_a_discarded_call() {
     let lua = emit_module(SOURCE);
     let body = function_body(&lua, "read_once");
-    assert_eq!(body.matches("next_row(").count(), 1, "{body}");
+    assert_eq!(body.matches("next_row(").count(), 1);
     assert_eq!(run_main(&lua), "7 1");
 }

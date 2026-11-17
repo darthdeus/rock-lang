@@ -42,15 +42,8 @@ fn main() {
 fn arena_random_at_a_nobox_element_works() {
     let lua = crate::common::try_emit_module(MARKED).expect("marked column element must emit");
     let (ok, out) = run_luajit_capturing(&format!("{lua}\nmain()\n"));
-    assert!(
-        ok,
-        "`Arena<NP>.random()` must work for a marked element:\n{out}"
-    );
-    assert_eq!(
-        out.trim(),
-        "true",
-        "expected a live entry to be selected:\n{out}"
-    );
+    assert!(ok);
+    assert_eq!(out.trim(), "true");
 }
 
 /// The call must reach the SPECIALIZED copy: reading the columns is the whole
@@ -59,11 +52,7 @@ fn arena_random_at_a_nobox_element_works() {
 #[test]
 fn arena_random_at_a_nobox_element_targets_the_specialized_copy() {
     let lua = crate::common::try_emit_module(MARKED).expect("marked column element must emit");
-    assert!(
-        lua.contains("random_Arena_T_spec_"),
-        "the tuple-returning `random` call must carry its instantiation key and \
-         target the specialized copy:\n{lua}"
-    );
+    assert!(lua.contains("random_Arena_T_spec_"));
 }
 
 /// Bounds the sentinel above: without this, a fix that broke `random` for EVERY
@@ -72,13 +61,6 @@ fn arena_random_at_a_nobox_element_targets_the_specialized_copy() {
 fn arena_random_at_an_unmarked_column_element_works() {
     let lua = crate::common::try_emit_module(UNMARKED).expect("unmarked column element must emit");
     let (ok, out) = run_luajit_capturing(&format!("{lua}\nmain()\n"));
-    assert!(
-        ok,
-        "`Arena<CV>.random()` must work for a column-stored element:\n{out}"
-    );
-    assert_eq!(
-        out.trim(),
-        "true",
-        "expected a live entry to be selected:\n{out}"
-    );
+    assert!(ok);
+    assert_eq!(out.trim(), "true");
 }

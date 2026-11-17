@@ -7,7 +7,7 @@ fn assert_before(body: &str, earlier: &str, later: &str) {
     let b = body
         .find(later)
         .unwrap_or_else(|| panic!("missing {later}:\n{body}"));
-    assert!(a < b, "{earlier} must precede {later}:\n{body}");
+    assert!(a < b);
 }
 
 #[test]
@@ -16,10 +16,7 @@ fn wide_float_results_are_computed_after_an_independent_call() {
     let body = function_body(&lua, "membership");
     let call = body.find("b1(c1, (c2 % (8)))").expect("membership call");
     let first_wide_leaf = body.find("(1.125)").expect("first wide float leaf");
-    assert!(
-        call < first_wide_leaf,
-        "wide result stayed live across the call:\n{body}"
-    );
+    assert!(call < first_wide_leaf);
 }
 
 const READ_ORDER: &str = r#"

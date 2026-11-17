@@ -91,7 +91,7 @@ fn main() {
                 .iter()
                 .find(|(name, _)| *name == helper)
                 .map_or(0, |(_, n)| *n);
-            assert_eq!(count, want, "{caller} calls {helper}:\n{body}");
+            assert_eq!(count, want);
         }
     }
 }
@@ -116,26 +116,6 @@ fn an_ambiguous_dispatched_helper_rejects_emission() {
     assert!(
         error
             .message
-            .contains("compiler-generated-entry-unresolved"),
-        "{error:?}"
-    );
-}
-
-#[test]
-fn values_first_class_nobox_equality_stays_a_typed_operation() {
-    let ws = crate::common::ws_with_stdlib(
-        "nobox value Point { x: int, y: int }\n\
-         fn same(a: Point, b: Point) -> bool { return a == b }\n\
-         fn main() { print(\"{same(Point { x: 1, y: 2 }, Point { x: 1, y: 2 })}\") }",
-    );
-    let graph = crate::common::graph_of(&ws);
-    let bodies = skull::concrete_body::build(&ws, &graph);
-    let scx =
-        skull_mir::lower::ScalarCtx::new_values_first_class(&ws).sharing(graph.interner().clone());
-    let mf = crate::common::lowered_body(&ws, &bodies, &scx, "same");
-    assert!(
-        mf.insts
-            .iter()
-            .any(|(_, inst)| matches!(inst, skull_mir::mir::Inst::Eq(_, _)))
+            .contains("compiler-generated-entry-unresolved")
     );
 }

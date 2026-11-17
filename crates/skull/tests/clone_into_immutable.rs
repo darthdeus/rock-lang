@@ -89,17 +89,11 @@ fn clone_into_is_the_argument_for_values_without_mutable_storage() {
     let lua = emit_module(SRC);
     for name in ["clone_string", "clone_int", "clone_maybe", "clone_tag"] {
         let body = function_body(&lua, name);
-        assert!(
-            !body.contains("clone_into") && !body.contains("__rock_deepcopy_value"),
-            "`{name}` still copies an immutable value:\n{body}"
-        );
+        assert!(!body.contains("clone_into") && !body.contains("__rock_deepcopy_value"));
     }
     for name in ["clone_list", "clone_bag"] {
         let body = function_body(&lua, name);
-        assert!(
-            body.contains("clone_into"),
-            "`{name}` must keep the deep copy of mutable storage:\n{body}"
-        );
+        assert!(body.contains("clone_into"));
     }
 }
 

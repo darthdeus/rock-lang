@@ -28,10 +28,7 @@ fn main() {
 "#,
     );
     let probe = crate::common::function_body(&lua, "nullable_probe");
-    assert!(
-        !probe.contains(".spare"),
-        "nullable projection expanded siblings: {probe}"
-    );
+    assert!(!probe.contains(".spare"));
     assert_eq!(run_main(&lua), "true\ntrue\nfalse\n3\ntrue");
 }
 
@@ -58,10 +55,7 @@ fn main() {{ print(probe(Owner {{ config: Config {{ chosen: 7, choice: Choice::E
         .split("\nend")
         .next()
         .unwrap();
-    assert!(
-        !probe.contains(".unused_sibling"),
-        "an immediate projection must not expand its siblings: {probe}"
-    );
+    assert!(!probe.contains(".unused_sibling"));
     assert_eq!(
         run_luajit(&format!(
             "{lua}\nmain(); local a = pcall(probe, nil); local b = pcall(probe, {{config=nil}}); print(a, b)\n"
@@ -108,15 +102,9 @@ fn main() {{
         .split("\nend")
         .next()
         .unwrap();
-    assert!(
-        !probe.contains(".unused_sibling") && !probe.contains(".label"),
-        "an indexed immediate projection must not expand siblings: {probe}"
-    );
+    assert!(!probe.contains(".unused_sibling") && !probe.contains(".label"));
     let whole = crate::common::function_body(&lua, "whole_probe");
-    assert!(
-        !whole.contains(".unused_sibling"),
-        "unused copy reads: {whole}"
-    );
+    assert!(!whole.contains(".unused_sibling"));
     assert_eq!(run_main(&lua), "7\n1\n2\n2\n5\n5\n99");
 }
 
@@ -145,10 +133,7 @@ fn main() {
         .split("\nend")
         .next()
         .unwrap();
-    assert!(
-        !body.contains(".unused_sibling"),
-        "selected enum must not read siblings: {body}"
-    );
+    assert!(!body.contains(".unused_sibling"));
     assert_eq!(
         run_luajit(&format!(
             "{lua}\nmain(); local a = pcall(selected, nil); local b = pcall(selected, {{config=nil}}); print(a, b)\n"
@@ -234,17 +219,13 @@ fn main() { print(selected([Row { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6 }], 0)) }
             )
         })
         .count();
-    assert_eq!(
-        reads, 1,
-        "scalar field projection expanded sibling lanes before cleanup"
-    );
+    assert_eq!(reads, 1);
     assert_eq!(
         mir.insts
             .iter()
             .filter(|(_, inst)| matches!(inst, Inst::VecCheckedIndex { .. }))
             .count(),
-        1,
-        "projection must retain exactly one element bounds check"
+        1
     );
 }
 

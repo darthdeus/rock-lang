@@ -60,7 +60,7 @@ fn lua_long_string(s: &str) -> String {
 #[test]
 fn every_backward_jump_carries_a_loop_instruction() {
     let lua = emit_module(FIXTURE);
-    assert_eq!(uncovered_backward_jumps(&lua), "", "in:\n{lua}");
+    assert_eq!(uncovered_backward_jumps(&lua), "");
 }
 
 #[test]
@@ -79,7 +79,7 @@ fn a_step_loop_that_does_not_cross_a_yield_prints_structured() {
         .find(|n| n.starts_with("sum_then_yield") && n.ends_with("__step"))
         .expect("step of `sum_then_yield`");
     let step = function_body(&lua, name);
-    assert!(!step.contains("::bb"), "flat step:\n{step}");
+    assert!(!step.contains("::bb"));
 }
 
 #[test]

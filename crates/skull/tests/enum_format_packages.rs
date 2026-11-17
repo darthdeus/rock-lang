@@ -101,11 +101,8 @@ fn packaged_types_print_their_paths() {
         id.to_string(),
         "pkgenum::status::StatusEffect::Paralyzed { remaining: 1.5, duration: 2 }".to_string(),
     ].iter().enumerate() {
-        assert_eq!(out[line], expected, "line {line}");
+        assert_eq!(out[line], expected);
     }
     let text = out[6];
-    assert!(
-        text.starts_with("Entity<pkgenum::"),
-        "handle target is package-qualified: {text}"
-    );
+    assert!(text.starts_with("Entity<pkgenum::"));
 }

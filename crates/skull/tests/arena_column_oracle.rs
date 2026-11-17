@@ -60,10 +60,7 @@ fn the_container_plan_admits_and_rejects_on_the_vec_rule() {
     )
     .expect("an all-scalar value struct is column-eligible");
     assert_eq!(admitted.name, key(&ws, "ColPoint"));
-    assert!(
-        !admitted.nullable,
-        "an arena element never carries a presence column"
-    );
+    assert!(!admitted.nullable);
 
     assert!(
         column_elem(
@@ -72,13 +69,9 @@ fn the_container_plan_admits_and_rejects_on_the_vec_rule() {
             ContainerFamily::Arena,
             &arena_of(&ws, nominal(&ws, "NotAValue"))
         )
-        .is_none(),
-        "a non-value struct has no leaf shape to columnize"
+        .is_none()
     );
-    assert!(
-        column_elem(&ws, t, ContainerFamily::Arena, &arena_of(&ws, MonoTy::Int)).is_none(),
-        "a primitive element is not a value struct"
-    );
+    assert!(column_elem(&ws, t, ContainerFamily::Arena, &arena_of(&ws, MonoTy::Int)).is_none());
     // The `for`-over-arena walk reads occupied/generations for liveness and has
     // no presence concept, so a nullable element must stay boxed.
     assert!(
@@ -88,8 +81,7 @@ fn the_container_plan_admits_and_rejects_on_the_vec_rule() {
             ContainerFamily::Arena,
             &arena_of(&ws, MonoTy::Nullable(Box::new(nominal(&ws, "ColPoint"))))
         )
-        .is_none(),
-        "a nullable element would need a presence column its only reader cannot address"
+        .is_none()
     );
     // A plan is target/family-specific; asking the Arena planner about a Vec is
     // an invalid boundary rather than a boxed storage answer.
@@ -101,8 +93,7 @@ fn the_container_plan_admits_and_rejects_on_the_vec_rule() {
             ContainerFamily::Arena,
             &vec_of(nominal(&ws, "ColPoint")),
         )
-        .is_err(),
-        "a Vec must not be accepted by the Arena planner"
+        .is_err()
     );
 }
 
@@ -132,13 +123,7 @@ fn the_arena_and_vec_plans_cannot_disagree() {
                 &arena_of(&ws, elem.clone()),
             );
             let v = column_elem(&ws, target, ContainerFamily::Vec, &vec_of(elem.clone()));
-            assert_eq!(
-                a,
-                v,
-                "Arena and Vec disagreed on `{}` for {target:?}: an arena's data \
-                 IS a `[E]`, so a second eligibility rule is the bug",
-                elem.render()
-            );
+            assert_eq!(a, v);
             if a.is_some() {
                 admitted += 1;
             } else {
@@ -147,12 +132,6 @@ fn the_arena_and_vec_plans_cannot_disagree() {
         }
     }
 
-    assert!(
-        admitted > 0,
-        "nothing was admitted, so agreement proves nothing"
-    );
-    assert!(
-        rejected > 0,
-        "nothing was rejected, so agreement proves nothing"
-    );
+    assert!(admitted > 0);
+    assert!(rejected > 0);
 }

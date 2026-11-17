@@ -43,24 +43,11 @@ fn main() {
 #[test]
 fn an_extern_value_return_does_not_hand_back_a_reference_into_its_out_param() {
     let lua = emit_module(EXTERN_VALUE_RETURN);
-    assert!(
-        !crate::common::definitions_matching(&lua, "host_probe_stats").is_empty(),
-        "no `host_probe_stats` wrapper was emitted:\n{lua}"
-    );
+    assert!(!crate::common::definitions_matching(&lua, "host_probe_stats").is_empty());
     let wrapper = crate::common::function_body(&lua, "host_probe_stats");
-    assert!(
-        wrapper.contains("ffi.new(\"Stats[1]\")"),
-        "the out-param shape changed; this test pins the wrapper:\n{wrapper}"
-    );
-    assert!(
-        !wrapper.contains("return __out[0]"),
-        "the wrapper returns a NON-OWNING reference into `__out`, which LuaJIT is \
-         free to collect immediately -- every later read is a use-after-free:\n{wrapper}"
-    );
-    assert!(
-        wrapper.contains("ffi.new(\"Stats\", __out[0])"),
-        "the wrapper must return an OWNING copy of the out-param:\n{wrapper}"
-    );
+    assert!(wrapper.contains("ffi.new(\"Stats[1]\")"));
+    assert!(!wrapper.contains("return __out[0]"));
+    assert!(wrapper.contains("ffi.new(\"Stats\", __out[0])"));
 }
 
 /// The language-level fact the fix rests on, pinned so nobody has to re-derive it:
@@ -93,10 +80,5 @@ collectgarbage("collect")
 collectgarbage("collect")
 io.write(tostring(freed_while_referenced), " ", tostring(ref ~= nil), " ", tostring(owning_copy().a))
 "#;
-    assert_eq!(
-        crate::common::run_luajit(probe),
-        "true true 7",
-        "LuaJIT no longer collects a referenced parent -- if this flipped, re-read \
-         whether the owning copy is still required"
-    );
+    assert_eq!(crate::common::run_luajit(probe), "true true 7");
 }

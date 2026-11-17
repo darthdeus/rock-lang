@@ -26,10 +26,7 @@ fn make_wide(seed: int) -> Wide {{ Wide {{ f0: seed }} }}
 "#
     ));
     let body = crate::common::function_body(&lua, "read_only");
-    assert!(
-        !body.contains("Wide_ct("),
-        "an owner that cannot be written does not need a child copy: {body}"
-    );
+    assert!(!body.contains("Wide_ct("));
     assert_eq!(run_luajit(&format!("{lua}\nprint(read_only(7))")), "14");
 }
 
@@ -112,7 +109,7 @@ print(bytes)
     ));
     let bytes: f64 = out.parse().expect("bytes per slot update");
     eprintln!("coroutine slot bytes/update: {bytes}");
-    assert!(bytes < 1.0, "slot update allocates {bytes} bytes");
+    assert!(bytes < 1.0);
 }
 
 const SOURCE: &str = r#"

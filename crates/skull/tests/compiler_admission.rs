@@ -61,12 +61,12 @@ fn rejected(src: &str, expected: &str, reached: &[&str]) {
             Err(failure) => failure,
             Ok(_) => panic!("invalid source compiled: {src}"),
         };
-    assert_eq!(failure.stage, Stage::Check, "{failure:?}");
-    assert_eq!(failure.errors.len(), 1, "{failure:?}");
+    assert_eq!(failure.stage, Stage::Check);
+    assert_eq!(failure.errors.len(), 1);
     let error = &failure.errors[0];
-    assert!(error.message.contains(expected), "{failure:?}");
+    assert!(error.message.contains(expected));
     assert_eq!(error.location.file, Ustr::from("admission.rock"));
-    assert_eq!(host.reached, reached, "source: {src}");
+    assert_eq!(host.reached, reached);
 }
 
 #[test]
@@ -74,12 +74,12 @@ fn recovered_statement_preserves_the_tree_but_stops_before_aliases() {
     let src = "fn main() {\n let broken =\n let kept = 7\n print(kept)\n}\n";
     let ast = skull_parser::parse_module(src, Ustr::from("admission.rock"))
         .expect("recoverable syntax returns a tree");
-    assert_eq!(ast.recovery_errors.len(), 1, "{:?}", ast.recovery_errors);
+    assert_eq!(ast.recovery_errors.len(), 1);
     let ItemKind::Function(function) = &ast.items[0].kind else {
         panic!("main survives statement recovery");
     };
     let body = &ast.blocks[function.body.rock_block().unwrap()];
-    assert_eq!(body.statements.len(), 2, "{body:?}");
+    assert_eq!(body.statements.len(), 2);
     let StatementKind::Let(binding) = &ast.stmts[body.statements[0]].kind else {
         panic!("the valid binding survives recovery");
     };
@@ -109,7 +109,7 @@ fn assembled_modules_report_all_recovered_errors_in_module_order() {
     assert_eq!(failure.stage, Stage::Check);
     let files: Vec<_> = failure.errors.iter().map(|e| e.location.file).collect();
     assert_eq!(files, [Ustr::from("first.rock"), Ustr::from("second.rock")]);
-    assert!(host.reached.is_empty(), "{:?}", host.reached);
+    assert!(host.reached.is_empty());
 }
 
 #[test]
@@ -191,7 +191,7 @@ fn tokenizer_failure_stops_before_any_host_phase() {
     };
     assert_eq!(failure.stage, Stage::Parse);
     assert_eq!(failure.errors.len(), 1);
-    assert!(host.reached.is_empty(), "{:?}", host.reached);
+    assert!(host.reached.is_empty());
 }
 
 #[test]

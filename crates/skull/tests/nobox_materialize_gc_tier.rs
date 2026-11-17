@@ -91,10 +91,7 @@ fn main() {
 #[test]
 fn a_string_field_boxes_through_the_value_table() {
     let lua = emit_module(STRING_FIELD);
-    assert!(
-        function_body(&lua, "main").contains("SRow_vt("),
-        "the explicit box did not take the value-table ctor:\n{lua}"
-    );
+    assert!(function_body(&lua, "main").contains("SRow_vt("));
     assert_eq!(run_main(&lua), "1a");
 }
 
@@ -114,32 +111,21 @@ fn the_marked_and_unmarked_boxes_are_the_same_shape() {
             .expect("a constructor name")
             .to_string()
     };
-    assert_eq!(
-        ctor(&marked),
-        ctor(&plain),
-        "the explicit box selected a different constructor than the unmarked \
-         struct's:\nmarked:\n{marked}\nplain:\n{plain}"
-    );
+    assert_eq!(ctor(&marked), ctor(&plain));
     assert_eq!(run_main(&plain), run_main(&marked),);
 }
 
 #[test]
 fn an_array_field_boxes_through_the_value_table() {
     let lua = emit_module(ARRAY_FIELD);
-    assert!(
-        function_body(&lua, "main").contains("ARow_vt("),
-        "the explicit box did not take the value-table ctor:\n{lua}"
-    );
+    assert!(function_body(&lua, "main").contains("ARow_vt("));
     assert_eq!(run_main(&lua), "1:3:20");
 }
 
 #[test]
 fn a_leaf_table_value_boxes_through_its_dotted_key_constructor() {
     let lua = emit_module(LEAF_TABLE_TIER);
-    assert!(
-        function_body(&lua, "main").contains("Opt_lct("),
-        "the explicit box did not take the leaf-table ctor:\n{lua}"
-    );
+    assert!(function_body(&lua, "main").contains("Opt_lct("));
     assert_eq!(run_main(&lua), "true:1:2:3");
 }
 
@@ -147,14 +133,8 @@ fn a_leaf_table_value_boxes_through_its_dotted_key_constructor() {
 fn a_nested_cdata_value_boxes_as_one_leaf_constructor() {
     let lua = emit_module(NESTED_CDATA_TIER);
     let main = function_body(&lua, "main");
-    assert!(
-        main.contains("Box2_lct("),
-        "the explicit box did not flatten to the leaf ctor:\n{lua}"
-    );
-    assert!(
-        !main.contains("NV2_ct("),
-        "the explicit box built an intermediate cdata per nested field:\n{lua}"
-    );
+    assert!(main.contains("Box2_lct("));
+    assert!(!main.contains("NV2_ct("));
     assert_eq!(run_main(&lua), "1 4");
 }
 
@@ -162,14 +142,8 @@ fn a_nested_cdata_value_boxes_as_one_leaf_constructor() {
 fn an_implicit_box_of_a_gc_tier_value_is_still_rejected() {
     let err = try_emit_module(IMPLICIT_BOX)
         .expect_err("an implicit box of a GC-tier nobox value must still be rejected");
-    assert!(
-        err.message.contains("cannot cross boxed call boundary"),
-        "the implicit box was rejected for an unrelated reason: {err:?}"
-    );
-    assert!(
-        err.location.line > 0,
-        "the rejection lost its span: {err:?}"
-    );
+    assert!(err.message.contains("cannot cross boxed call boundary"));
+    assert!(err.location.line > 0);
 }
 
 // The live-body tests need a box that is still real: a tuple holding a `nobox`
@@ -191,17 +165,10 @@ fn main() {
     let err = try_emit_module(source).expect_err("live closure boxes must still reject");
     assert!(
         err.message
-            .contains("survived lowering as an implicit materialization"),
-        "{err:?}"
+            .contains("survived lowering as an implicit materialization")
     );
-    assert!(
-        err.message.contains("lambda"),
-        "the rejection must name the live body: {err:?}"
-    );
-    assert!(
-        err.location.line > 0,
-        "the rejection lost its span: {err:?}"
-    );
+    assert!(err.message.contains("lambda"));
+    assert!(err.location.line > 0);
 }
 
 #[test]
@@ -224,11 +191,7 @@ fn main() {
     let err = try_emit_module(source).expect_err("live coroutine hook boxes must still reject");
     assert!(
         err.message
-            .contains("survived lowering as an implicit materialization"),
-        "{err:?}"
+            .contains("survived lowering as an implicit materialization")
     );
-    assert!(
-        err.location.line > 0,
-        "the rejection lost its span: {err:?}"
-    );
+    assert!(err.location.line > 0);
 }

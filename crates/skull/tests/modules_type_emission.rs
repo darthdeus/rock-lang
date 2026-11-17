@@ -100,15 +100,9 @@ fn v1_nominal_types_mint_identifiers() {
         "__rock_enum_v1ty::a::Color",
         "v1ty::a::V2_ct(",
     ] {
-        assert!(
-            !emitted.lua.contains(spelled),
-            "a v1 DefKey must not reach an identifier or C-type position: `{spelled}`"
-        );
+        assert!(!emitted.lua.contains(spelled));
     }
-    assert!(
-        emitted.lua.contains("\"v1ty::a::Color::Blue\""),
-        "display text is the package-qualified path"
-    );
+    assert!(emitted.lua.contains("\"v1ty::a::Color::Blue\""));
 }
 
 /// The type table is a keyed registry the stdlib reads back, and one of its
@@ -122,14 +116,12 @@ fn v1_type_table_key_matches_the_emitted_constructor() {
     assert!(
         emitted
             .lua
-            .contains(&format!("_G.__ROCK_TYPE_TABLE[\"{key}\"]")),
-        "the type table is keyed on the emitted symbol"
+            .contains(&format!("_G.__ROCK_TYPE_TABLE[\"{key}\"]"))
     );
     assert!(
         emitted
             .lua
-            .contains(&format!("{key}_ct = ffi.typeof(\"{key}\")")),
-        "`_G[<key> .. \"_ct\"]` must resolve to the constructor the cdef declared"
+            .contains(&format!("{key}_ct = ffi.typeof(\"{key}\")"))
     );
 }
 
@@ -251,21 +243,11 @@ fn a_generic_specialized_at_a_v1_nominal_emits_runnable_lua() {
     let digest = skull_mir::mangle::prefix_digest("v1spec::a");
     let nominal = format!("Step_{digest}");
     let encoded = format!("spec_a_n{}_{}_0_z", nominal.len(), nominal);
-    assert!(
-        !emitted.lua.contains("spec_a_n15_v1spec::a::Step_0_z"),
-        "a specialized body's SYMBOL must not carry a DefKey"
-    );
+    assert!(!emitted.lua.contains("spec_a_n15_v1spec::a::Step_0_z"));
     assert!(
         emitted
             .lua
-            .contains(&format!("function is_empty_arr_T_{encoded}(")),
-        "the specialized definition takes the nominal's identifier form:\n{}",
-        emitted
-            .lua
-            .lines()
-            .filter(|l| l.contains(&encoded))
-            .collect::<Vec<_>>()
-            .join("\n")
+            .contains(&format!("function is_empty_arr_T_{encoded}("))
     );
     let out = run_main(&emitted.lua);
     assert_eq!(out, "total=9");

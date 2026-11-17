@@ -54,13 +54,9 @@ fn prelude_defines_shared_fn_metatable() {
     assert!(
         lua.contains("if not _G.__rock_fn_mt then")
             && lua.contains("invalid Rock CodeRef environment")
-            && lua.contains("e.__slot.current_body(e, ...)"),
-        "the prelude must define the shared CodeRef-aware __rock_fn_mt metatable:\n(searched the prelude)"
+            && lua.contains("e.__slot.current_body(e, ...)")
     );
-    assert!(
-        lua.contains("if not _G.__rock_fn_mt then"),
-        "__rock_fn_mt must use the reload-preservation guard"
-    );
+    assert!(lua.contains("if not _G.__rock_fn_mt then"));
 }
 
 /// A hand-built CodeRef record routes a plain `f(args)` call through `__call`
@@ -75,10 +71,7 @@ fn record_is_callable_via_call_metamethod() {
         local rec = setmetatable({ __slot = __rock_code_slot_ref(\"record\"), x = 100 }, _G.__rock_fn_mt)\n\
         print(rec(5))\n";
     let out = run_luajit(&format!("{lua}{driver}"));
-    assert_eq!(
-        out, "105",
-        "f(5) must route through the CodeRef slot reading rec.x; got: {out}"
-    );
+    assert_eq!(out, "105");
 }
 
 /// Metatable identity is preserved across a reload: a record built before the
@@ -102,10 +95,7 @@ fn metatable_identity_preserved_across_reload() {
          else print(\"FAIL\") end\n"
     );
     let out = run_luajit(&script);
-    assert_eq!(
-        out, "PASS",
-        "records built across a reload must share metatable identity; got: {out}"
-    );
+    assert_eq!(out, "PASS");
 }
 
 #[test]
@@ -125,10 +115,7 @@ local after = __rock_code_slot_ref("probe")
 if not ok and before == after and after() == 1 then print("PASS") else print("FAIL") end
 "#;
     let out = run_luajit(&format!("{lua}{driver}"));
-    assert_eq!(
-        out, "PASS",
-        "a failed compatibility stage must not publish or replace its slot: {out}"
-    );
+    assert_eq!(out, "PASS");
 }
 
 #[test]
@@ -152,10 +139,7 @@ if not ok and _G.__rock_lifecycle_plan_pending == nil
    and __rock_code_slot_ref("probe")() == 1 then print("PASS") else print("FAIL") end
 "#;
     let out = run_luajit(&format!("{lua}{driver}"));
-    assert_eq!(
-        out, "PASS",
-        "failed staging must retain both old plan membership and old bodies: {out}"
-    );
+    assert_eq!(out, "PASS");
 }
 
 #[test]
@@ -180,10 +164,7 @@ if not ok and _G.__rock_definition_plan_pending == nil
    and __rock_code_slot_ref("probe")() == 1 then print("PASS") else print("FAIL") end
 "#;
     let out = run_luajit(&format!("{lua}{driver}"));
-    assert_eq!(
-        out, "PASS",
-        "failed staging must retain the old definition plan and clear pending state: {out}"
-    );
+    assert_eq!(out, "PASS");
 }
 
 /// `__rock_c_struct_of` (stdlib) memoizes the `ffi.istype` scan over
@@ -201,9 +182,6 @@ fn c_struct_registry_rows_reset_the_ctype_memo_after_themselves() {
     let reset = lua
         .find("_G.__ROCK_C_STRUCT_BY_CTYPE = {}\n")
         .expect("the registry emitter resets the ctype memo");
-    assert!(
-        reset > last_row,
-        "the memo reset must follow the last registry row"
-    );
+    assert!(reset > last_row);
     assert_eq!(lua.matches("_G.__ROCK_C_STRUCT_BY_CTYPE = {}\n").count(), 1);
 }

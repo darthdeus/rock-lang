@@ -26,21 +26,15 @@ fn entity_matches(xs: [Entity<EqTag>], target: Entity<EqTag>) -> int {
 fn vector_handle_equality_does_not_materialize_carriers() {
     let lua = emit_module(HANDLE_EQUALITY_FIXTURE);
     let body = function_body(&lua, "entity_matches");
-    assert!(
-        body.contains("==") && (body.contains("~=") || body.contains("not")),
-        "missing comparisons:\n{body}"
-    );
-    assert!(
-        !body.contains("Entity_vt("),
-        "vector handle comparisons must read identity leaves:\n{body}"
-    );
+    assert!(body.contains("==") && (body.contains("~=") || body.contains("not")));
+    assert!(!body.contains("Entity_vt("));
 }
 
 /// Every `value` struct, nullable or GC-carrying, has a per-type native `==`;
 /// a plain struct (no metatable) and a Vec have none and keep the walk.
 #[test]
 fn only_types_without_a_native_eq_take_the_structural_walk() {
-    for (src, name, walks) in [
+    for (src, _name, walks) in [
         (
             "value Wrap { tag: int, name: string }\n\
              fn f(a: Wrap, b: Wrap) -> bool { return a == b }\n",
@@ -67,7 +61,7 @@ fn only_types_without_a_native_eq_take_the_structural_walk() {
     ] {
         let lua = emit_module(src);
         let body = function_body(&lua, "f");
-        assert_eq!(body.contains("__op_eq"), walks, "{name}:\n{body}");
+        assert_eq!(body.contains("__op_eq"), walks);
     }
 }
 
@@ -98,9 +92,6 @@ fn scalar_value_equality_compares_leaves_without_materializing() {
     let lua = emit_module(SCALAR_LEAF_EQUALITY);
     for name in ["eq_v2", "ne_v2", "eq_handle", "ne_handle", "stored_matches"] {
         let body = function_body(&lua, name);
-        assert!(
-            !body.contains("_vt(") && !body.contains("__op_eq") && !body.contains("__op_ne"),
-            "`{name}` materialized its operands to compare them:\n{body}"
-        );
+        assert!(!body.contains("_vt(") && !body.contains("__op_eq") && !body.contains("__op_ne"));
     }
 }

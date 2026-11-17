@@ -37,14 +37,8 @@ fn flat_enum_equality_compares_threaded_cells_without_boxes() {
     let mut lua = emit_module(SRC);
     for name in ["equal_tag", "not_equal_tag", "equal_targets", "equal_maybe"] {
         let body = function_body(&lua, name);
-        assert!(
-            !body.contains("{__variant = "),
-            "`{name}` materialized an enum:\n{body}"
-        );
-        assert!(
-            !body.contains("__op_eq") && !body.contains("__op_ne"),
-            "`{name}` called structural equality:\n{body}"
-        );
+        assert!(!body.contains("{__variant = "));
+        assert!(!body.contains("__op_eq") && !body.contains("__op_ne"));
     }
     lua.push_str("\nprint(equal_tag(1, 3, 4), equal_tag(1, 3, 5), equal_tag(0, 3, 4), equal_tag(2, 3, 4), not_equal_tag(1, 3, 4), not_equal_tag(1, 3, 5), equal_targets(1, 3, 4, 1, 3, 4), equal_targets(1, 3, 4, 1, 3, 5), equal_targets(0, 0, 0, 0, 9, 9), equal_targets(0, 0, 0, 2, 0, 0), equal_maybe(-1, -1), equal_maybe(-1, 1), equal_maybe(1, 1))\n");
     assert_eq!(

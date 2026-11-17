@@ -64,11 +64,7 @@ fn check_reload(use_overlay: bool) {
     let overlay =
         emit_overlay(&after, &mut cache, &edits).expect("compatible callback body overlay");
     let fresh = emit_full(&after, mid).unwrap().0;
-    let (mode, reload) = if use_overlay {
-        ("overlay", overlay.lua)
-    } else {
-        ("full", fresh.lua)
-    };
+    let reload = if use_overlay { overlay.lua } else { fresh.lua };
     let program = format!(
         "{}\ninitialize()\nprint(report())\nHOT_RELOAD = true\n{}\n\
          HOT_RELOAD = false\nprint(report())\nbump_copies()\nprint(report())\n",
@@ -76,8 +72,7 @@ fn check_reload(use_overlay: bool) {
     );
     assert_eq!(
         run_luajit(&program),
-        "1 1 1 111 110 110\n2 2 2 211 210 210\n2 2 2 211 211 212",
-        "{mode}: slots follow the edited bodies; copied getter/bumper pairs own separate captures",
+        "1 1 1 111 110 110\n2 2 2 211 210 210\n2 2 2 211 211 212"
     );
 }
 

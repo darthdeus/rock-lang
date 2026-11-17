@@ -59,8 +59,7 @@ fn overload_add_orphans_running_global_sentinel() {
         assert!(
             lua.contains("\nfoo_int = function(")
                 || lua.contains("\nfunction foo_int(")
-                || lua.contains("__rock_mk_foo_int"),
-            "foo(int) must emit as `foo_int` with or without the overload:\n{lua}"
+                || lua.contains("__rock_mk_foo_int")
         );
     }
     let script = format!(
@@ -78,18 +77,9 @@ fn overload_add_orphans_running_global_sentinel() {
         .find(|l| l.starts_with("bare_foo_present="))
         .unwrap();
 
-    assert_eq!(
-        fresh, "fresh=52",
-        "the reloaded caller must reach the edited foo(int); got: {out}"
-    );
+    assert_eq!(fresh, "fresh=52");
     // The reloaded chunk's authoritative int fn carries the edit, at the SAME name.
-    assert_eq!(
-        canon, "canonical=52",
-        "foo_int must carry the edit; got: {out}"
-    );
+    assert_eq!(canon, "canonical=52");
     // No bare `foo` global exists under always-mangle -- there is nothing to orphan.
-    assert_eq!(
-        bare, "bare_foo_present=false",
-        "no bare foo global should be emitted; got: {out}"
-    );
+    assert_eq!(bare, "bare_foo_present=false");
 }

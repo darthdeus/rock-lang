@@ -42,10 +42,8 @@ fn demand_leaf(v: DemandRecord) -> int { return v.y }
                 "23\t47"
             );
         }
-        Err(error) => assert!(
-            error.message.contains("compatibility") && error.message.contains("restart"),
-            "{}",
-            error.message
-        ),
+        Err(error) => {
+            assert!(error.message.contains("compatibility") && error.message.contains("restart"))
+        }
     }
 }

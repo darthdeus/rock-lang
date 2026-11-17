@@ -84,11 +84,7 @@ fn demand_read(v: Sample) -> int { return forward(v.y) }
             assert_eq!(run_luajit(&program), "34\t34");
         }
         Err(error) => {
-            assert!(
-                error.message.contains("compatibility") && error.message.contains("restart"),
-                "{}",
-                error.message
-            );
+            assert!(error.message.contains("compatibility") && error.message.contains("restart"));
             assert_eq!(
                 run_luajit(&format!(
                     "{}\nlocal saved = save_caller(); print(saved())",
@@ -156,11 +152,9 @@ fn demand_match_read(event: MatchEvent) -> int {
             );
             assert_eq!(run_luajit(&program), "5\t5");
         }
-        Err(error) => assert!(
-            error.message.contains("compatibility") && error.message.contains("restart"),
-            "{}",
-            error.message
-        ),
+        Err(error) => {
+            assert!(error.message.contains("compatibility") && error.message.contains("restart"))
+        }
     }
 }
 
@@ -296,11 +290,9 @@ fn pick(a: int, b: int) -> int { return a }
             );
             assert_eq!(run_luajit(&program), "7\t7");
         }
-        Err(error) => assert!(
-            error.message.contains("compatibility") && error.message.contains("restart"),
-            "{}",
-            error.message
-        ),
+        Err(error) => {
+            assert!(error.message.contains("compatibility") && error.message.contains("restart"))
+        }
     }
 }
 

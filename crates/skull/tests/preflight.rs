@@ -32,7 +32,7 @@ fn preflight_precedes_safe_float_argument_construction() {
         .find("b0(c0)")
         .unwrap_or_else(|| panic!("preflight call missing:\n{body}"));
     let arithmetic = body.find("1.25").expect("float arithmetic");
-    assert!(preflight < arithmetic, "{body}");
+    assert!(preflight < arithmetic);
     assert_eq!(run_main(&lua), "2.5 1 1");
 }
 
@@ -42,8 +42,7 @@ fn malformed_annotation_and_helper_are_rejected() {
     assert!(
         malformed
             .iter()
-            .any(|message| message.contains("requires prepare and tail function name strings")),
-        "{malformed:?}"
+            .any(|message| message.contains("requires prepare and tail function name strings"))
     );
 
     let missing = try_emit_module(
@@ -54,10 +53,7 @@ fn main() { let b = Buffer { capacity: 0 }; append(b, 1) }
 "#,
     )
     .unwrap_err();
-    assert!(
-        missing.message.contains("must name one function"),
-        "{missing:?}"
-    );
+    assert!(missing.message.contains("must name one function"));
 
     let no_receiver = try_emit_module(
         r#"
@@ -70,8 +66,7 @@ fn main() { append() }
     assert!(
         no_receiver
             .message
-            .contains("requires a receiver parameter"),
-        "{no_receiver:?}"
+            .contains("requires a receiver parameter")
     );
 
     let ref_receiver = try_emit_module(
@@ -84,10 +79,7 @@ fn main() { let b = Buffer { capacity: 0 }; append(b, 1) }
 "#,
     )
     .unwrap_err();
-    assert!(
-        ref_receiver.message.contains("same receiver type"),
-        "{ref_receiver:?}"
-    );
+    assert!(ref_receiver.message.contains("same receiver type"));
 }
 
 #[test]
@@ -116,6 +108,6 @@ fn main() {
     let body = function_body(&lua, "call");
     let preflight = body.find("= b1(c0)").unwrap_or_else(|| panic!("{body}"));
     let conditional = body.find("if c2 then").unwrap_or_else(|| panic!("{body}"));
-    assert!(preflight < conditional, "{body}");
+    assert!(preflight < conditional);
     assert_eq!(run_main(&lua), "2 1 1");
 }

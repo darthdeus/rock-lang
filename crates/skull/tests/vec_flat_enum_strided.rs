@@ -41,14 +41,8 @@ fn main() { print("{exercise()}") }
 fn wide_numeric_flat_enum_vec_uses_dense_strided_storage_without_element_boxes() {
     let lua = emit_module(SRC);
     let body = function_body(&lua, "exercise");
-    assert!(
-        crate::common::has_vec_header(body, "strided", None),
-        "the five-leaf flat enum Vec must declare dense strided storage:\n{body}"
-    );
-    assert!(
-        !body.contains("{__variant = "),
-        "pushing a strided flat-enum element must not build an enum table:\n{body}"
-    );
+    assert!(crate::common::has_vec_header(body, "strided", None));
+    assert!(!body.contains("{__variant = "));
     assert_eq!(run_main(&lua), "92");
 }
 
@@ -64,7 +58,6 @@ fn false_capable_payload_keeps_the_existing_boxed_representation() {
     let lua = emit_module(BOOL_PAYLOAD);
     let body = function_body(&lua, "make");
     assert!(
-        !crate::common::has_vec_header(body, "strided", None) && body.contains("{__variant = "),
-        "a bool payload cannot use false as the inactive-lane sentinel:\n{body}"
+        !crate::common::has_vec_header(body, "strided", None) && body.contains("{__variant = ")
     );
 }

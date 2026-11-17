@@ -121,10 +121,7 @@ fn a_wide_multi_return_lands_in_the_locals_that_hold_the_value() {
         .position(|line| line.contains(&format!("= {callee}(")))
         .unwrap_or_else(|| panic!("no receive of mk in:\n{run}"));
     let next = run.lines().nth(receive + 1).unwrap_or("");
-    assert!(
-        !(next.trim_start().starts_with('r') && next.contains("= c")),
-        "the receive is copied leaf by leaf into a second set of locals:\n{run}"
-    );
+    assert!(!(next.trim_start().starts_with('r') && next.contains("= c")));
 }
 
 /// Four live 50-leaf `nobox` values plus a call is the shape that does not
@@ -136,45 +133,19 @@ fn four_live_fifty_leaf_values_are_a_spanned_compile_error() {
     let err = try_emit_module(&fixture(50, 4))
         .expect_err("four live 50-leaf values must not emit: LuaJIT cannot load the result");
     let message = &err.message;
-    assert!(
-        message.contains("`@/<test>::run`"),
-        "no Rock function named:\n{message}"
-    );
-    assert!(
-        message.contains("LuaJIT"),
-        "no mention of the limit's owner:\n{message}"
-    );
-    assert!(
-        message.contains("LJ_MAX_LOCVAR") || message.contains("LJ_MAX_SLOTS"),
-        "no LuaJIT limit named:\n{message}"
-    );
-    assert!(
-        message.contains("nobox"),
-        "no nobox contributor:\n{message}"
-    );
-    assert!(
-        message.contains("cannot be boxed"),
-        "the remedy does not say a nobox value cannot be boxed:\n{message}"
-    );
+    assert!(message.contains("`@/<test>::run`"));
+    assert!(message.contains("LuaJIT"));
+    assert!(message.contains("LJ_MAX_LOCVAR") || message.contains("LJ_MAX_SLOTS"));
+    assert!(message.contains("nobox"));
+    assert!(message.contains("cannot be boxed"));
     let label = err.labels.first().expect("a spanned label");
-    assert_eq!(
-        label.span.file.as_str(),
-        "<test>",
-        "the rejection has no source location: {err:?}"
-    );
-    assert_eq!(
-        err.location.file.as_str(),
-        "<test>",
-        "the rejection's primary location is not in the source: {err:?}"
-    );
+    assert_eq!(label.span.file.as_str(), "<test>");
+    assert_eq!(err.location.file.as_str(), "<test>");
     // And the Lua it would have emitted really is unloadable, so the rejection
     // is not the compiler being timid.
     let lua = emit_module_without_frame_limits(&fixture(50, 4));
     let load = luajit_loads(&lua).expect_err("must not load");
-    assert!(
-        load.contains("more than 200 local variables") || load.contains("too complex"),
-        "unexpected LuaJIT parse error: {load}"
-    );
+    assert!(load.contains("more than 200 local variables") || load.contains("too complex"));
 }
 
 // --- boundary agreement ----------------------------------------------------
@@ -216,24 +187,15 @@ fn walk(name: &str, lo: usize, hi: usize, mk: impl Fn(usize) -> String) {
     let verdicts: Vec<bool> = (lo..=hi)
         .map(|w| verdicts_agree(&format!("{name}_{w}"), &mk(w)))
         .collect();
-    assert!(
-        verdicts.iter().any(|ok| *ok),
-        "{name}: every member of {lo}..={hi} was rejected -- the window is past the boundary"
-    );
-    assert!(
-        verdicts.iter().any(|ok| !*ok),
-        "{name}: every member of {lo}..={hi} was accepted -- the window is below the boundary"
-    );
+    assert!(verdicts.iter().any(|ok| *ok));
+    assert!(verdicts.iter().any(|ok| !*ok));
     // Monotone by construction: once the frame is too wide, widening it further
     // cannot make it load again.
     let flip = verdicts
         .iter()
         .position(|ok| !*ok)
         .expect("a rejected member");
-    assert!(
-        verdicts[flip..].iter().all(|ok| !*ok),
-        "{name}: verdicts are not monotone across {lo}..={hi}: {verdicts:?}"
-    );
+    assert!(verdicts[flip..].iter().all(|ok| !*ok));
 }
 
 /// The declarations of a `leaves`-wide `nobox` value and the helpers that
@@ -395,9 +357,5 @@ fn the_frame_limit_rejection_reaches_the_incremental_path() {
     let err = skull::mir_emit::emit_incremental(&ws2, &mut cache, &[run])
         .err()
         .expect("the widened body must fail the incremental re-emit");
-    assert!(
-        err.message.contains("too wide for LuaJIT"),
-        "the incremental path reported something else: {}",
-        err.message
-    );
+    assert!(err.message.contains("too wide for LuaJIT"));
 }

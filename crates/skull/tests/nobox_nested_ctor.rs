@@ -124,57 +124,35 @@ fn main() {
 #[test]
 fn a_nested_nobox_field_does_not_box_when_the_outer_materializes() {
     let lua = emit_module(GLOBAL_OUTER);
-    assert!(
-        !function_body(&lua, "setup").contains("NV2_ct("),
-        "the nested nobox field materialized a cdata:
-{lua}"
-    );
+    assert!(!function_body(&lua, "setup").contains("NV2_ct("));
     assert_eq!(run_main(&lua).trim(), "1 2 3 4 5");
 }
 
 #[test]
 fn a_two_level_nesting_flattens_through_the_intermediate() {
     let lua = emit_module(TWO_LEVEL);
-    assert!(
-        !function_body(&lua, "setup").contains("NV2_ct("),
-        "the nested nobox field materialized a cdata:
-{lua}"
-    );
+    assert!(!function_body(&lua, "setup").contains("NV2_ct("));
     // Flattening happens at the OUTERMOST materialization: a bottom-up rewrite
     // would allocate an intermediate Box2 per construction.
-    assert!(
-        !function_body(&lua, "setup").contains("Box2_ct("),
-        "an intermediate cdata was allocated instead of flattening at the outermost ctor:
-{lua}"
-    );
+    assert!(!function_body(&lua, "setup").contains("Box2_ct("));
     assert_eq!(run_main(&lua).trim(), "1 2 3 4 5 6");
 }
 
 #[test]
 fn an_opaque_nested_operand_is_decomposed_not_rejected() {
     let lua = emit_module(MIXED_LITERAL_AND_OPAQUE);
-    assert!(
-        !function_body(&lua, "setup").contains("NV2_ct("),
-        "the nested nobox field materialized a cdata:
-{lua}"
-    );
+    assert!(!function_body(&lua, "setup").contains("NV2_ct("));
     assert_eq!(run_main(&lua).trim(), "6 7 1 2 8");
 }
 
 #[test]
 fn a_nullable_nobox_field_in_a_gc_tier_outer_carries_presence() {
     let lua = emit_module(NULLABLE_FIELD);
-    assert!(
-        !function_body(&lua, "__rock_state_initialize").contains("NV2_ct("),
-        "the nullable nobox field materialized a cdata:
-{lua}"
-    );
+    assert!(!function_body(&lua, "__rock_state_initialize").contains("NV2_ct("));
     // The presence tag leads the leaves, so an absent payload is representable
     // without a box to be nil.
     assert!(
-        function_body(&lua, "__rock_state_initialize").contains("Opt_lct((true), (1.0), (2.0))"),
-        "the GC-tier outer did not take the presence-carrying leaf ctor:
-{lua}"
+        function_body(&lua, "__rock_state_initialize").contains("Opt_lct((true), (1.0), (2.0))")
     );
     assert_eq!(run_main(&lua).trim(), "1");
 }
@@ -182,11 +160,7 @@ fn a_nullable_nobox_field_in_a_gc_tier_outer_carries_presence() {
 #[test]
 fn an_sroa_split_local_reassembled_into_an_escape_does_not_box_its_nested_field() {
     let lua = emit_module(SROA_SPLIT_REASSEMBLY);
-    assert!(
-        !function_body(&lua, "main").contains("NV2_ct("),
-        "the split local's nested nobox field materialized a cdata:
-{lua}"
-    );
+    assert!(!function_body(&lua, "main").contains("NV2_ct("));
     assert_eq!(run_main(&lua).trim(), "boundary\n11");
 }
 
@@ -194,9 +168,6 @@ fn an_sroa_split_local_reassembled_into_an_escape_does_not_box_its_nested_field(
 fn a_coroutine_frame_carries_a_value_with_a_nested_nobox_field() {
     let lua = emit_module(NESTED_NOBOX_ACROSS_COROUTINE_FRAME);
     let build = mangled_name(&lua, "build");
-    assert!(
-        !function_body(&lua, &format!("{build}__step")).contains("NV2_ct("),
-        "the coroutine frame materialized its nested nobox field:\n{lua}"
-    );
+    assert!(!function_body(&lua, &format!("{build}__step")).contains("NV2_ct("));
     assert_eq!(run_main(&lua).trim(), "0\nboundary\n11");
 }

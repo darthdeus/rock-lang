@@ -51,39 +51,25 @@ fn direct_admission_error(src: &str) -> skull_parser::CompilerError {
 #[test]
 fn mixed_invalid_uses_category_priority_over_lexical_order() {
     let err = try_emit_module(MIXED_INVALID).expect_err("mixed expansion fixture must reject");
-    assert!(
-        err.message.contains("`@struct_expand`"),
-        "struct expansion category must win over the lexically-first vertex error:\n{}",
-        err.message
-    );
-    assert!(
-        !err.message.contains("`@vertex_expand`"),
-        "the lower-priority lexical error became primary:\n{}",
-        err.message
-    );
+    assert!(err.message.contains("`@struct_expand`"));
+    assert!(!err.message.contains("`@vertex_expand`"));
 }
 
 #[test]
 fn direct_admission_covers_struct_and_vertex_kinds() {
     let mixed = direct_admission_error(MIXED_INVALID);
-    assert!(mixed.message.contains("`@struct_expand`"), "{mixed:?}");
+    assert!(mixed.message.contains("`@struct_expand`"));
 
     let vertex = direct_admission_error(VERTEX_INVALID);
-    assert!(vertex.message.contains("`@vertex_expand`"), "{vertex:?}");
+    assert!(vertex.message.contains("`@vertex_expand`"));
 }
 
 #[test]
 fn struct_priority_beats_invalid_shader_pipeline() {
     let err = direct_admission_error(SHADER_AND_STRUCT_INVALID);
-    assert!(
-        err.message.contains("`@struct_expand`"),
-        "struct expansion must retain the historical priority over shader expansion:\n{}",
-        err.message
-    );
+    assert!(err.message.contains("`@struct_expand`"));
     assert!(
         !err.message
-            .contains("`rock_shader` takes either one argument"),
-        "shader expansion incorrectly won over the higher-priority struct rejection:\n{}",
-        err.message
+            .contains("`rock_shader` takes either one argument")
     );
 }

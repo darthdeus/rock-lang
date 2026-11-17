@@ -30,8 +30,8 @@ fn channel_tag() -> string {
     let inputs = inputs_with_var("CHANNEL", "steam-test-value");
     let lua = try_emit_module_with(src, inputs).expect("declared var expands");
     let body = function_body(&lua, "channel_tag");
-    assert!(body.contains("steam-test-value"), "value inlined:\n{body}");
-    assert!(!body.contains("build_var"), "call fully replaced:\n{body}");
+    assert!(body.contains("steam-test-value"));
+    assert!(!body.contains("build_var"));
 }
 
 #[test]
@@ -44,10 +44,7 @@ fn broken() -> string {
     let err = try_emit_module_with(src, ComptimeInputs::default())
         .expect_err("undeclared build var must reject");
     let msg = err.message.clone();
-    assert!(
-        msg.contains("NOPE") && msg.contains("build.vars"),
-        "error names var and section: {msg}"
-    );
+    assert!(msg.contains("NOPE") && msg.contains("build.vars"));
 }
 
 #[test]
@@ -59,11 +56,7 @@ fn broken(name: string) -> string {
 "#;
     let err = try_emit_module_with(src, inputs_with_var("CHANNEL", "x"))
         .expect_err("non-literal build_var arg must reject");
-    assert!(
-        err.message.contains("literal"),
-        "error names the literal requirement: {}",
-        err.message
-    );
+    assert!(err.message.contains("literal"));
 }
 
 #[test]
@@ -77,11 +70,7 @@ fn dead_generic<T>(x: T) -> string {
 "#;
     let err = try_emit_module_with(src, ComptimeInputs::default())
         .expect_err("misuse in an uninstantiated generic must still reject");
-    assert!(
-        err.message.contains("NOPE"),
-        "error names the var: {}",
-        err.message
-    );
+    assert!(err.message.contains("NOPE"));
 }
 
 #[test]
@@ -99,10 +88,7 @@ fn greeting() -> string {
     };
     let lua = try_emit_module_with(src, inputs).expect("embed expands");
     let body = function_body(&lua, "greeting");
-    assert!(
-        body.contains("hello-from-embed"),
-        "file content inlined:\n{body}"
-    );
+    assert!(body.contains("hello-from-embed"));
 }
 
 #[test]
@@ -118,11 +104,7 @@ fn broken() -> string {
         ..ComptimeInputs::default()
     };
     let err = try_emit_module_with(src, inputs).expect_err("missing embed file must reject");
-    assert!(
-        err.message.contains("absent.txt"),
-        "error names the path: {}",
-        err.message
-    );
+    assert!(err.message.contains("absent.txt"));
 }
 
 #[test]
@@ -140,11 +122,7 @@ fn broken() -> string {
         ..ComptimeInputs::default()
     };
     let err = try_emit_module_with(src, inputs).expect_err("path escaping the root must reject");
-    assert!(
-        err.message.contains("project root") || err.message.contains("escapes"),
-        "error names the escape: {}",
-        err.message
-    );
+    assert!(err.message.contains("project root") || err.message.contains("escapes"));
 }
 
 #[test]
@@ -175,10 +153,7 @@ fn payload() -> string {
     };
     let lua = crate::common::try_emit_module_with_file(src, lib_file.to_str().unwrap(), inputs)
         .expect("package-relative embed resolves");
-    assert!(
-        lua.contains("from-the-library-package"),
-        "embed must resolve against the calling file's package root"
-    );
+    assert!(lua.contains("from-the-library-package"));
 }
 
 fn memory_inputs(files: &[(&str, &str)]) -> ComptimeInputs {
@@ -206,10 +181,7 @@ fn greeting() -> string {
     let inputs = memory_inputs(&[("data/greeting.txt", "hello-from-memory")]);
     let lua = try_emit_module_with(src, inputs).expect("supplied embed expands");
     let body = function_body(&lua, "greeting");
-    assert!(
-        body.contains("hello-from-memory"),
-        "supplied content inlined:\n{body}"
-    );
+    assert!(body.contains("hello-from-memory"));
 }
 
 #[test]
@@ -221,11 +193,7 @@ fn broken() -> string {
 "#;
     let err = try_emit_module_with(src, memory_inputs(&[]))
         .expect_err("an embed the host did not supply must reject");
-    assert!(
-        err.message.contains("absent.txt") && err.message.contains("host supplied no file"),
-        "error names the file and the host: {}",
-        err.message
-    );
+    assert!(err.message.contains("absent.txt") && err.message.contains("host supplied no file"));
 }
 
 // --- incremental invalidation: a comptime input change is a body edit ---
@@ -289,23 +257,11 @@ fn assert_input_change_reaches_every_consumer(
     let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap())
         .expect("fresh")
         .0;
-    assert_eq!(
-        incremental.lua, fresh.lua,
-        "incremental != fresh after an input change"
-    );
+    assert_eq!(incremental.lua, fresh.lua);
 
     let overlay = emit_overlay(&ws2, &mut overlay_cache, &edit).expect("emit_overlay");
-    assert_eq!(
-        overlay.lua.matches(after.1).count(),
-        consumers,
-        "the overlay must redefine every reader of the changed input:\n{}",
-        overlay.lua
-    );
-    assert!(
-        overlay.lua.contains("TAG = "),
-        "the overlay must re-run the const's init line:\n{}",
-        overlay.lua
-    );
+    assert_eq!(overlay.lua.matches(after.1).count(), consumers);
+    assert!(overlay.lua.contains("TAG = "));
 }
 
 #[test]
@@ -394,10 +350,7 @@ fn main() {
     let ws = ws_with_inputs(src, inputs);
     let mid = skull::user_module_id(&ws).unwrap();
     let (full, cache) = emit_full(&ws, mid).expect("emit_full");
-    assert!(
-        full.lua.contains("global-embed-payload"),
-        "control: the embed landed"
-    );
+    assert!(full.lua.contains("global-embed-payload"));
 
     let canonical = payload.canonicalize().unwrap();
     let files: Vec<_> = cache
@@ -408,8 +361,7 @@ fn main() {
     assert!(
         files
             .iter()
-            .any(|f| std::path::Path::new(f.as_str()) == canonical),
-        "a global initializer's embed must join the watch set, got {files:?}"
+            .any(|f| std::path::Path::new(f.as_str()) == canonical)
     );
 }
 
@@ -442,11 +394,7 @@ fn main() {
     let ws2 = ws_with_inputs(&v2, inputs.clone());
     let first = emit_overlay(&ws2, &mut cache, &[global_reinferred_of(&ws2, "TAG")])
         .expect("global body edit overlay");
-    assert!(
-        first.lua.contains("second-v1"),
-        "the first overlay must carry the new input: {}",
-        first.lua
-    );
+    assert!(first.lua.contains("second-v1"));
     let first_canonical = first_path.canonicalize().unwrap();
     let second_canonical = second_path.canonicalize().unwrap();
     let files: Vec<_> = cache
@@ -460,19 +408,14 @@ fn main() {
             .any(|file| std::path::Path::new(file.as_str()) == second_canonical)
             && !files
                 .iter()
-                .any(|file| std::path::Path::new(file.as_str()) == first_canonical),
-        "the overlay must publish the replacement global read set: {files:?}"
+                .any(|file| std::path::Path::new(file.as_str()) == first_canonical)
     );
 
     std::fs::write(&second_path, "second-v2").unwrap();
     let ws3 = ws_with_inputs(&v2, inputs);
     let second =
         emit_overlay(&ws3, &mut cache, &[body_id(&ws3, "other")]).expect("new input overlay");
-    assert!(
-        second.lua.contains("second-v2"),
-        "a later change to the newly recorded input must reach the global initializer: {}",
-        second.lua
-    );
+    assert!(second.lua.contains("second-v2"));
 }
 
 #[test]
@@ -484,9 +427,5 @@ fn broken() -> string {
 "#;
     let err = try_emit_module_with(src, ComptimeInputs::default())
         .expect_err("embed with no project root must reject");
-    assert!(
-        err.message.contains("project root"),
-        "error names the missing root: {}",
-        err.message
-    );
+    assert!(err.message.contains("project root"));
 }

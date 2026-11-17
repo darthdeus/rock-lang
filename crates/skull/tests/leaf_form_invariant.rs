@@ -29,28 +29,15 @@ fn a_non_canonical_leaf_sequence_rejects() {
         .expect("E5 has a representation plan");
     let plan = arena.get(plan_id);
     let canonical = plan.leaf_paths().expect("E5 has a leaf layout");
-    assert!(
-        canonical.len() > 2,
-        "need a multi-leaf type to reorder: {canonical:?}"
-    );
+    assert!(canonical.len() > 2);
 
-    assert!(
-        skull_codegen_lua::leaf_form_violation(plan, &canonical).is_none(),
-        "the canonical sequence itself must pass"
-    );
+    assert!(skull_codegen_lua::leaf_form_violation(plan, &canonical).is_none());
 
     let err = skull_codegen_lua::leaf_form_violation(plan, &canonical[..canonical.len() - 1])
         .expect("a truncated flattening must reject");
-    assert!(
-        err.message.contains("canonical leaf"),
-        "the rejection must say what is wrong:\n{}",
-        err.message
-    );
+    assert!(err.message.contains("canonical leaf"));
 
     let mut swapped = canonical.clone();
     swapped.swap(0, 1);
-    assert!(
-        skull_codegen_lua::leaf_form_violation(plan, &swapped).is_some(),
-        "a reordered flattening must reject -- `_lct` is positional"
-    );
+    assert!(skull_codegen_lua::leaf_form_violation(plan, &swapped).is_some());
 }

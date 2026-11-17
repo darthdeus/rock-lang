@@ -33,10 +33,7 @@ fn constant_arguments_decide_inlined_default_tests() {
     let lua = emit_module(SHAPES);
     for name in ["alphas_float", "seeds"] {
         let body = function_body(&lua, name);
-        assert!(
-            !body.contains("== (nil)") && !body.contains("__rock_omitted"),
-            "`{name}` kept a decided default test:\n{body}"
-        );
+        assert!(!body.contains("== (nil)") && !body.contains("__rock_omitted"));
     }
     assert_eq!(run_main(&lua), "6.65 6.15 4269");
 }

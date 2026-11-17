@@ -40,19 +40,14 @@ fn main() {
         assert!(
             function_body(&lua, name)
                 .lines()
-                .any(|line| { line.trim_start().starts_with("do return ") && line.contains('(') }),
-            "{name} retains an unnecessary caller frame:\n{}",
-            function_body(&lua, name)
+                .any(|line| { line.trim_start().starts_with("do return ") && line.contains('(') })
         );
     }
     for name in ["discard_scalar", "work_after_call", "inspect_result"] {
-        assert!(
-            !function_body(&lua, name).lines().any(|line| {
-                line.trim_start().starts_with("do return ")
-                    && (line.contains("write_") || line.contains("value_"))
-            }),
-            "{name} changed return arity or skipped subsequent work"
-        );
+        assert!(!function_body(&lua, name).lines().any(|line| {
+            line.trim_start().starts_with("do return ")
+                && (line.contains("write_") || line.contains("value_"))
+        }));
     }
     let discard = mangled_name(&lua, "discard_scalar");
     let foreign_scalar = mangled_name(&lua, "foreign_scalar");
@@ -102,8 +97,5 @@ end
 "#
     );
     assert_eq!(run_luajit(&format!("{lua}\n{driver}")), "32000:0");
-    assert!(
-        !lua.contains("function __weak_cache_read("),
-        "the single-use forwarding helper must be removed"
-    );
+    assert!(!lua.contains("function __weak_cache_read("));
 }

@@ -33,8 +33,7 @@ fn main() { print(read()) }
         skull_mir::lower::EnumPlan::for_name(&ws, key(&ws, "Choice"))
             .unwrap()
             .flat()
-            .is_some(),
-        "the fixture must use Choice's widened flat-enum representation"
+            .is_some()
     );
     let enum_id = ws.enums_by_name[&key(&ws, "Choice")];
     let choice = &ws.modules[enum_id.module.index()].enums[enum_id.def];
@@ -46,16 +45,10 @@ fn main() { print(read()) }
     let VariantPayload::Record(fields) = &variant.payload else {
         panic!("Choice::A declaration must be a record variant");
     };
-    assert!(
-        fields.iter().all(|field| field.name != Ustr::from("ghost")),
-        "the independent Choice::A declaration oracle unexpectedly contains ghost"
-    );
+    assert!(fields.iter().all(|field| field.name != Ustr::from("ghost")));
 
     let emitted = try_emit_module(SRC);
-    assert!(
-        emitted.is_err(),
-        "lowering accepted Other::A::ghost against the widened Choice union; it must reject a field absent from Choice::A"
-    );
+    assert!(emitted.is_err());
 }
 
 const SRC: &str = r#"
@@ -85,35 +78,16 @@ fn main() { t() }
 fn value_struct_with_enum_field_has_cdef_int_not_table() {
     let lua = emit_module(SRC);
     // Cmd must get a real cdef ctor (scalarized), with `blend` an int field.
-    assert!(
-        lua.contains("Cmd_ct") && lua.contains("} Cmd;"),
-        "Cmd must be a C-layout cdata (a `Cmd_ct` ctor + cdef), not a table:\n{}",
-        lua.split("\nfunction ").next().unwrap_or(&lua)
-    );
+    assert!(lua.contains("Cmd_ct") && lua.contains("} Cmd;"));
     // The construction must NOT build a `{__ty = "Cmd", ...}` table.
-    assert!(
-        !lua.contains("__ty = \"Cmd\""),
-        "Cmd must not be emitted as a Lua table:\n{lua}"
-    );
+    assert!(!lua.contains("__ty = \"Cmd\""));
     // A payload-free enum is an `int` globally: NO singleton tables, NO `__tag`,
     // NO `by_tag` (the dual-rep is gone). Its names table exists only for interp
     // stringify, which this program never does; `blend` stores a plain int.
-    assert!(
-        !lua.contains("__rock_enum_BlendMode_names = {"),
-        "nothing stringifies the enum, so it needs no names table:\n{lua}"
-    );
-    assert!(
-        !lua.contains("__rock_enum_BlendMode_Additive ="),
-        "payload-free enum must NOT emit singleton tables:\n{lua}"
-    );
-    assert!(
-        !lua.contains("__ty = \"BlendMode\""),
-        "payload-free enum must not construct tagged tables:\n{lua}"
-    );
-    assert!(
-        !lua.contains("_by_tag"),
-        "the dead `by_tag` array must be gone:\n{lua}"
-    ); // Construct, `match c.blend`, and a by-value pass across the scalar ABI.
+    assert!(!lua.contains("__rock_enum_BlendMode_names = {"));
+    assert!(!lua.contains("__rock_enum_BlendMode_Additive ="));
+    assert!(!lua.contains("__ty = \"BlendMode\""));
+    assert!(!lua.contains("_by_tag")); // Construct, `match c.blend`, and a by-value pass across the scalar ABI.
     assert_eq!(run_fn(&lua, "t"), "5 Add 5");
 }
 
@@ -145,11 +119,5 @@ fn t() {
 fn main() { t() }
 "#;
     let stdout = run_skull_test(SRC, "t");
-    assert_eq!(
-        stdout.trim(),
-        "1",
-        "SENTINEL: `inspect(payload_free_enum)` currently leaks the ordinal int. \
-         When box-on-escape-into-`any` (increment 4) lands this becomes \
-         \"BlendMode::Additive\" -- flip the expected value then. got={stdout:?}"
-    );
+    assert_eq!(stdout.trim(), "1");
 }

@@ -23,15 +23,8 @@ fn single_use_reads_and_calls_render_in_their_consumer() {
     // Two host property reads must retain their order; the first is staged.
     assert!(function_body(&lua, "sum").contains(" local r"));
     let body = function_body(&lua, "scaled");
-    assert!(
-        !body.contains(" local r"),
-        "`scaled` gave a single-use read or call a register:\n{body}"
-    );
-    assert!(
-        function_body(&lua, "scaled").contains("(c0.x)"),
-        "{}",
-        function_body(&lua, "scaled")
-    );
+    assert!(!body.contains(" local r"));
+    assert!(function_body(&lua, "scaled").contains("(c0.x)"));
     assert_eq!(run_main(&lua), "7 7");
 }
 
@@ -53,11 +46,8 @@ fn main() {
 "#;
     let lua = emit_module(src);
     let body = function_body(&lua, "run");
-    assert!(
-        !body.contains(" local r") && !body.contains(" r0"),
-        "an unused call result took a register:\n{body}"
-    );
-    assert!(body.contains("local _ = "), "{body}");
+    assert!(!body.contains(" local r") && !body.contains(" r0"));
+    assert!(body.contains("local _ = "));
     assert_eq!(run_main(&lua), "2");
 }
 
@@ -138,9 +128,9 @@ fn main() {
 "#;
     let lua = emit_module(src);
     let pick = function_body(&lua, "pick");
-    assert!(!pick.contains("local r"), "{pick}");
+    assert!(!pick.contains("local r"));
     let stepper = function_body(&lua, "stepper");
-    assert!(stepper.contains("r0 = c0"), "{stepper}");
+    assert!(stepper.contains("r0 = c0"));
     assert_eq!(run_main(&lua), "20 12 8 66");
 }
 
@@ -185,7 +175,7 @@ fn main() {
 "#;
     let lua = emit_module(src);
     let pick = function_body(&lua, "pick");
-    assert!(!pick.contains("local r"), "{pick}");
+    assert!(!pick.contains("local r"));
     assert!(function_body(&lua, "clampish").contains("local r0"));
     assert_eq!(run_main(&lua), "4 24 7 24 303");
 }
@@ -223,7 +213,7 @@ fn main() {
             (Some(a), Some(b), None) if a.starts_with('c') && b.starts_with('c')
                 && !b.contains(' ') && !b.contains('('))
     });
-    assert_eq!(copies.count(), 0, "{body}");
+    assert_eq!(copies.count(), 0);
     assert_eq!(run_main(&lua), "18");
 }
 
@@ -244,7 +234,7 @@ fn main() {
 "#;
     let lua = emit_module(src);
     let body = function_body(&lua, "h");
-    assert!(!body.contains(" = nil"), "{body}");
+    assert!(!body.contains(" = nil"));
     assert_eq!(run_main(&lua), "f3\nf6");
 }
 
@@ -269,6 +259,6 @@ fn main() {
 "#;
     let lua = emit_module(src);
     let body = function_body(&lua, "h");
-    assert!(!body.contains(" = nil"), "{body}");
+    assert!(!body.contains(" = nil"));
     assert_eq!(run_main(&lua), "t1\nt2");
 }

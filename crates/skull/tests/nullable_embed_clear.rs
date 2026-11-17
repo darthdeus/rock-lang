@@ -61,15 +61,9 @@ fn nullable_embed_clear_writes_record_slots_without_materializing() {
         } else {
             "resolution"
         };
-        assert!(
-            body.contains(&format!("[\"{prefix}.target.__tag\"] = ")),
-            "{body}"
-        );
+        assert!(body.contains(&format!("[\"{prefix}.target.__tag\"] = ")));
         for ctor in ["({", "_ct(", "_lct(", "_vt("] {
-            assert!(
-                !body.contains(ctor),
-                "{name} materializes `{ctor}`:\n{body}"
-            );
+            assert!(!body.contains(ctor));
         }
     }
     assert_eq!(run_main(&lua), "10\n-1 true\n4\n-1 true");

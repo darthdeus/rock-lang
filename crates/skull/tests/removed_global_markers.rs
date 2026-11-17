@@ -16,8 +16,7 @@ fn removed_global_markers_are_unknown_item_annotations() {
         assert!(
             errors
                 .iter()
-                .any(|error| error.contains(&format!("unknown annotation `@{name}`"))),
-            "@{name} must reach annotation validation: {errors:?}"
+                .any(|error| error.contains(&format!("unknown annotation `@{name}`")))
         );
     }
 }

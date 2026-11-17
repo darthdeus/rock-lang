@@ -33,14 +33,8 @@ fn wide_nobox_vec_stays_flat_past_the_implicit_threshold() {
     let lua = try_emit_module(WIDE_NOBOX_OVERWRITE)
         .expect("an explicit nobox guarantee must not fall back to boxed Vec elements");
     let body = function_body(&lua, "main");
-    assert!(
-        !body.contains("Wide_lct("),
-        "wide nobox Vec materialized an element:\n{body}"
-    );
-    assert!(
-        crate::common::has_vec_header(body, "strided", None),
-        "wide nobox Vec left flat row storage:\n{body}"
-    );
+    assert!(!body.contains("Wide_lct("));
+    assert!(crate::common::has_vec_header(body, "strided", None));
     assert_eq!(run_main(&lua), "6 10");
 }
 
@@ -117,19 +111,13 @@ fn every_leaf_count_round_trips_and_the_storage_tier_flips_at_the_threshold() {
             .collect();
         let got = run_main(&lua);
         let got: Vec<&str> = got.trim().lines().collect();
-        assert_eq!(
-            got,
-            vec![want_present.as_str(), "-1 false"],
-            "{} fields / {leaves} leaves read back wrong",
-            extra + 1
-        );
+        assert_eq!(got, vec![want_present.as_str(), "-1 false"]);
         rows.push((leaves, is_column_stored(&lua)));
     }
     // The flip itself: at or below 4 leaves the element is columns, above it a
     // box. Asserted as the whole sweep so a moved constant reads as one diff.
     assert_eq!(
         rows,
-        vec![(3, true), (4, true), (5, false), (6, false), (7, false)],
-        "the column/boxed storage flip moved off MAX_COLUMN_LEAVES = 4"
+        vec![(3, true), (4, true), (5, false), (6, false), (7, false)]
     );
 }

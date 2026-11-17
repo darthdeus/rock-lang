@@ -77,14 +77,14 @@ nobox value Column { x: int, y: int }
 fn map_loops_use_lua_generic_for() {
     let lua = emit_module(SOURCE);
     let body = function_body(&lua, "scalar_sum");
-    assert!(body.contains(" in next, "), "{body}");
+    assert!(body.contains(" in next, "));
 }
 
 #[test]
 fn key_only_column_loop_does_not_read_values() {
     let lua = emit_module(SOURCE);
     let body = function_body(&lua, "column_count");
-    assert!(!body.contains(".data"), "{body}");
+    assert!(!body.contains(".data"));
 }
 
 #[test]

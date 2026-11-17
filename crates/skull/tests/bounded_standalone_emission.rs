@@ -99,12 +99,12 @@ fn body_of<'a>(lua: &'a str, symbol: &str) -> Vec<&'a str> {
 
 /// The one emitted specialization whose name starts with `prefix` and carries a
 /// `_spec_` instance suffix.
-fn specialization<'a>(lua: &'a str, prefix: &str, what: &str) -> &'a str {
+fn specialization<'a>(lua: &'a str, prefix: &str) -> &'a str {
     let found: Vec<&str> = definitions_matching(lua, "_spec_")
         .into_iter()
         .filter(|name| name.starts_with(prefix))
         .collect();
-    assert_eq!(found.len(), 1, "expected one standalone {what} in:\n{lua}");
+    assert_eq!(found.len(), 1);
     found[0]
 }
 
@@ -120,7 +120,7 @@ fn specialization<'a>(lua: &'a str, prefix: &str, what: &str) -> &'a str {
 fn a_bounded_body_emits_standalone_with_inlining_disabled() {
     let _inline = InlineOffGuard::on();
     let lua = emit(BOUNDED).expect("a bounded body must emit standalone under its demand");
-    let symbol = specialization(&lua, "total_", "specialized definition of `total`");
+    let symbol = specialization(&lua, "total_");
     let body = body_of(&lua, symbol);
     let resolved_next = definitions_matching(&lua, "next_")
         .into_iter()
@@ -128,17 +128,10 @@ fn a_bounded_body_emits_standalone_with_inlining_disabled() {
             let callee = bound_callee_name(&lua, symbol, target);
             body.iter().any(|line| body_calls(line, &callee))
         });
-    assert!(
-        resolved_next,
-        "the standalone `total` calls no concrete `next`, so its placeholder bound-call \
-         was not resolved: {body:?}"
-    );
+    assert!(resolved_next);
     let main = function_body(&lua, "main");
     let caller_name = bound_callee_name(&lua, "main", symbol);
-    assert!(
-        body_calls(main, &caller_name),
-        "`{symbol}` is emitted but the actual `main` body does not call it:\n{main}"
-    );
+    assert!(body_calls(main, &caller_name));
 }
 
 /// A resolved witness that is itself bounded resolves too, one level down.
@@ -157,7 +150,7 @@ fn a_bounded_body_emits_standalone_with_inlining_disabled() {
 fn a_witness_that_is_itself_bounded_resolves_from_the_leafs_sub_tree() {
     let _inline = InlineOffGuard::on();
     let lua = emit(NESTED).expect("a bounded witness of a bounded body must emit standalone");
-    let symbol = specialization(&lua, "next_MapIter_", "`MapIter.next` specialization");
+    let symbol = specialization(&lua, "next_MapIter_");
     let body = body_of(&lua, symbol);
     let resolved_next = definitions_matching(&lua, "next_VecIter")
         .into_iter()
@@ -165,11 +158,7 @@ fn a_witness_that_is_itself_bounded_resolves_from_the_leafs_sub_tree() {
             let callee = bound_callee_name(&lua, symbol, target);
             body.iter().any(|line| body_calls(line, &callee))
         });
-    assert!(
-        resolved_next,
-        "`MapIter.next` emitted without resolving its own placeholder to the inner \
-         `VecIter.next`: {body:?}"
-    );
+    assert!(resolved_next);
 }
 
 /// The admission control for the sentinel. Not inverted: this asserts the
@@ -181,12 +170,7 @@ fn a_witness_that_is_itself_bounded_resolves_from_the_leafs_sub_tree() {
 fn an_unbounded_body_emits_with_inlining_disabled() {
     let _inline = InlineOffGuard::on();
     let err = emit_err(CONCRETE);
-    assert!(
-        err.is_none(),
-        "the same program without a bounded generic must still emit with \
-         inlining disabled, or the sentinel cannot attribute its rejection to \
-         the bound; got {err:?}"
-    );
+    assert!(err.is_none());
 }
 
 fn first_call_multi_arity(mf: &MirFunc) -> usize {
@@ -249,11 +233,7 @@ fn main() {
         &bodies.plans,
     )
     .expect("intact bounded body did not resolve");
-    assert_eq!(
-        first_call_multi_arity(&intact),
-        2,
-        "the control lost (ok, int)"
-    );
+    assert_eq!(first_call_multi_arity(&intact), 2);
 
     let mut poisoned_plans = (*bodies.plans).clone();
     let pair = MonoTy::App {
@@ -287,9 +267,5 @@ fn main() {
         &poisoned_plans,
     )
     .expect("poisoned bounded body did not resolve");
-    assert_eq!(
-        first_call_multi_arity(&poisoned),
-        3,
-        "bound rewriting ignored the selected concrete result plan"
-    );
+    assert_eq!(first_call_multi_arity(&poisoned), 3);
 }

@@ -134,10 +134,7 @@ fn spilled_int_to_float_alias_reads_a_valid_slot_after_resume() {
         Some(&frame),
         None,
     );
-    assert!(
-        lowered.frame_plan.spill_values().contains(&conv),
-        "the conversion must cross the yield through the value spill: {lua}"
-    );
+    assert!(lowered.frame_plan.spill_values().contains(&conv));
     let n_slot = lowered
         .frame_plan
         .slots()
@@ -176,14 +173,8 @@ fn main() {}
     let probe = common::mangled_name(&emitted.lua, "probe");
     let out = common::run_luajit(&format!("{}\nprint({probe}())\n", emitted.lua));
     let (resumed, built) = out.split_once(' ').expect("two tags");
-    assert_eq!(
-        resumed, built,
-        "the erased resume box and a constructed value disagree on the tag"
-    );
-    assert!(
-        !resumed.contains("::"),
-        "a runtime tag is the minted symbol, not the DefKey: {resumed}"
-    );
+    assert_eq!(resumed, built);
+    assert!(!resumed.contains("::"));
 }
 
 #[test]
@@ -228,7 +219,6 @@ fn coroutine_step_colors_sequential_locals_below_luajit_limit() {
     );
     assert_eq!(
         common::run_luajit(&format!("{lua}\nprint(wide_step({{}}))\n")),
-        "7",
-        "sequential step locals must not overwrite the implicit frame-state parameter"
+        "7"
     );
 }

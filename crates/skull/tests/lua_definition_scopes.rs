@@ -13,10 +13,6 @@ fn full_emit_partitions_a_large_project_definition_population() {
     // The callee binding pass is partitioned into the same kind of scope.
     // This fixture has exactly one bound body -- `main` is the only fn that
     // calls another emitted fn -- so it adds exactly one more.
-    assert_eq!(
-        lua.matches("do\n(function()\n").count(),
-        3,
-        "the full emitter did not partition the definition population"
-    );
+    assert_eq!(lua.matches("do\n(function()\n").count(), 3);
     assert_eq!(run_main(&lua), "4096");
 }

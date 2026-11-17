@@ -182,7 +182,7 @@ assert(dynamic <= control + 1, "dynamic payload reserves union slots")
 print("ok")
 "#
     ));
-    assert!(out.ends_with("ok"), "{out}");
+    assert!(out.ends_with("ok"));
 }
 
 #[test]
@@ -260,11 +260,7 @@ struct BoxHolder { packet: Packet? }
         .split("\nend")
         .next()
         .expect("box_input end");
-    assert_eq!(
-        body.matches("__variant =").count(),
-        1,
-        "identical payload layouts need one allocation site: {body}"
-    );
+    assert_eq!(body.matches("__variant =").count(), 1);
     let out = run_luajit(&format!(
         r#"{lua}
 for kind, tag in ipairs({{"A", "B", "C", "D", "E", "F"}}) do

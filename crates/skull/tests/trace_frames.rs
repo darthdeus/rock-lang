@@ -36,38 +36,23 @@ fn final_report_is_opt_in_and_observes_mir_inlining() {
             command.env("ROCK_LUA_TRACE_FRAMES", "1");
         }
         let output = command.output().expect("child test");
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert!(output.status.success());
         if !enabled {
-            assert!(!report_path.exists(), "diagnostic must be opt-in");
+            assert!(!report_path.exists());
         }
     }
     assert_eq!(
         std::fs::read(baseline).unwrap(),
-        std::fs::read(diagnostic).unwrap(),
-        "diagnostic changed emitted Lua"
+        std::fs::read(diagnostic).unwrap()
     );
     let report = std::fs::read_to_string(report_path).expect("opt-in report");
-    assert!(
-        report.contains("type `@/<test>::Wide`"),
-        "wide type missing from report: {report}"
-    );
+    assert!(report.contains("type `@/<test>::Wide`"));
     let start = report.find("function run_").expect("emitted run frame");
     let end = report[start + 1..]
         .find("\nfunction ")
         .map_or(report.len(), |at| start + 1 + at);
     let run = &report[start..end];
-    assert!(run.contains("-> leaf_"), "{run}");
-    assert!(
-        !run.contains("-> bridge_"),
-        "MIR-inlined bridge remains in call chain: {run}"
-    );
-    assert!(
-        run.contains("5 scalar lanes") && run.contains("nobox"),
-        "{run}"
-    );
+    assert!(run.contains("-> leaf_"));
+    assert!(!run.contains("-> bridge_"));
+    assert!(run.contains("5 scalar lanes") && run.contains("nobox"));
 }
