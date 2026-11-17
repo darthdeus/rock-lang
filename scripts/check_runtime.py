@@ -154,7 +154,8 @@ def check(archive, output):
 
         run('glsl', ['test', '--backend', 'glsl', test], expected='1/1 value tests passed (0 failed)', display=True)
         run('stone-core', ['test', install / 'packages/stone-core'])
-        run('stone', ['test', install / 'packages/stone'], display=True)
+        run('stone', ['test', install / 'packages/stone'], display=True,
+            extra_env={'ROCK_MIR_CHECKS': '1'})
         screenshot = output / 'testbed.png'
         # Keep a longer diagnostic capture to distinguish startup from persistent rendering defects.
         run('frame', ['frame', install / 'demos/testbed', '--frames', '60',
