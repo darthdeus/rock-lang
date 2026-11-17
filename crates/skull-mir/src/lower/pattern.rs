@@ -71,12 +71,32 @@ impl<'a> Builder<'a> {
         let scrut_s = self.lower_scrut(scrut)?;
         let join = self.f.new_block();
 
+        // Over a NULLABLE scrutinee, an arm that tests structure cannot match
+        // nil and must not read through it (a tuple index or range compare on
+        // nil is a runtime error): miss to the next arm first, and rebuild a
+        // splatting tuple's flat box on the non-nil side. Once an UNGUARDED
+        // null-matching arm has run, nil cannot reach a later arm.
+        let mut nil_possible = self.expr_is_nullable(scrut);
         for aidx in arms {
             let arm = self.body.match_arm_arena[aidx];
             let next = self.f.new_block();
+            let matches_null = self.pattern_matches_null(arm.pattern, &variants);
+            let mut arm_scrut = scrut_s.clone();
+            if nil_possible && !matches_null {
+                let val_v = self.scrut_value(&arm_scrut);
+                let cont = self.f.new_block();
+                self.branch_on_nil(val_v, next, cont);
+                self.cur = cont;
+                if let Some(rebuilt) = self.splat_tuple_scrut(scrut, val_v)? {
+                    arm_scrut = rebuilt;
+                }
+            }
+            if matches_null && arm.guard.is_none() {
+                nil_possible = false;
+            }
             // Emit this arm's pattern tests (failures jump to `next`); on success
             // `self.cur` is the block where the bindings are in scope.
-            self.match_pattern(&scrut_s, arm.pattern, next, &variants, true, scrut_enum)?;
+            self.match_pattern(&arm_scrut, arm.pattern, next, &variants, true, scrut_enum)?;
             if let Some(g) = arm.guard {
                 let kept = self.f.new_block();
                 self.lower_branch(g, kept, next, false)?;
@@ -976,15 +996,72 @@ impl<'a> Builder<'a> {
         scrut: &Scrut,
         miss: Idx<Block>,
     ) -> Result<(), CompilerError> {
+        let variants = self.scrut_variants(value);
+        let scrut_enum = self.scrut_enum_name(value);
         if self.expr_is_nullable(value) {
             let val_v = self.scrut_value(scrut);
             let cont = self.f.new_block();
             self.branch_on_nil(val_v, miss, cont);
             self.cur = cont;
+            if let Some(rebuilt) = self.splat_tuple_scrut(value, val_v)? {
+                return self.match_pattern(&rebuilt, pattern, miss, &variants, true, scrut_enum);
+            }
         }
-        let variants = self.scrut_variants(value);
-        let scrut_enum = self.scrut_enum_name(value);
         self.match_pattern(scrut, pattern, miss, &variants, true, scrut_enum)
+    }
+
+    /// A SPLATTING tuple's stored box is the wire put in a table
+    /// (`tuple_box_shape`): leaves flat, no per-element boxes. The per-element
+    /// reads in the tuple pattern arm would misread it (a map/vec `get` hands
+    /// the stored box straight through), so rebuild the parts from the flat
+    /// slots -- callers rule out nil first. `None` for every other scrutinee.
+    fn splat_tuple_scrut(
+        &mut self,
+        value: Idx<Expr>,
+        val_v: Idx<Inst>,
+    ) -> Result<Option<Scrut>, CompilerError> {
+        let Some(shape) = self
+            .peeled_tuple_shape(value)?
+            .filter(TupleRetShape::splats)
+        else {
+            return Ok(None);
+        };
+        let shape = TupleRetShape {
+            nullable: false,
+            ..shape
+        };
+        let slots: Vec<Idx<Inst>> = (0..shape.slot_count())
+            .map(|i| {
+                self.emit_cur(Inst::TupleIndex {
+                    base: val_v,
+                    index: i,
+                })
+            })
+            .collect();
+        let mut idx = 0;
+        let ValueRepr::Tuple { parts, .. } = self.tuple_from_slots(&shape, &slots, &mut idx) else {
+            return Err(gap("a splatting tuple shape rebuilt to a non-tuple repr"));
+        };
+        let parts = parts
+            .into_iter()
+            .map(|p| self.scrut_from_repr(p))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(Scrut::Tuple(parts)))
+    }
+
+    /// Whether `pat` can match a NULL scrutinee: a hole, a plain binding, the
+    /// `null` literal, or an or-pattern with such an alternative. Every other
+    /// top-level pattern tests structure, which a nil cannot carry.
+    fn pattern_matches_null(&self, pat: Idx<Pattern>, variants: &HashSet<Ustr>) -> bool {
+        match self.body.pattern_arena[pat] {
+            Pattern::Wildcard => true,
+            Pattern::Bind(b) => !variants.contains(&self.body.binding_arena[b].name),
+            Pattern::Literal(e) => matches!(self.body.expr_arena[e], Expr::Null),
+            Pattern::Or { alternatives } => alternatives
+                .into_iter()
+                .any(|a| self.pattern_matches_null(a, variants)),
+            _ => false,
+        }
     }
 
     /// The presence and bound leaves of a presence-carrying scrutinee.

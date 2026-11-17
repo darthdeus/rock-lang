@@ -3626,10 +3626,10 @@ impl<'a> Builder<'a> {
     /// of the nullable arms in [`Self::repr_to_leaves`]: a literal `null` folds to
     /// `false, nil, ...` and a tuple value leads with `true`.
     ///
-    /// A tuple-or-nil arriving as an already-packed SCALAR (a variable, an if-join)
-    /// would need a runtime `~= nil` test and a per-slot branch. That is a real
-    /// shape, just not one any in-tree caller writes, so it gaps rather than
-    /// silently boxing the nobox element the wire exists to keep unboxed.
+    /// A tuple-or-nil arriving as an already-packed SCALAR (a container read:
+    /// the stdlib `get`/`pop` instances return `_data[i]` whole) is tested at
+    /// runtime and unpacked per arm -- the stored box becomes the wire's
+    /// slots, so the nobox element still travels unboxed from here on.
     fn nullable_tuple_return_slots(
         &mut self,
         e: Idx<Expr>,
@@ -3641,10 +3641,36 @@ impl<'a> Builder<'a> {
         }
         if let ValueRepr::Scalar(v) = &r {
             if !matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
-                return Err(gap(
-                    "returning an already-packed nullable tuple through the splatting ABI \
-                     (return the tuple literal or `null` directly)",
-                ));
+                let v = *v;
+                let probe = self.absent_tuple_slots(shape);
+                let cells = self.fresh_cells(probe.len());
+                let present_bb = self.f.new_block();
+                let absent_bb = self.f.new_block();
+                let join = self.f.new_block();
+                self.branch_on_nil(v, absent_bb, present_bb);
+
+                self.cur = present_bb;
+                // The box IS the wire put in a table (`tuple_box_shape`), so
+                // the present arm reads the slots back flat: presence, then
+                // one TupleIndex per wire slot.
+                let mut vals = Vec::with_capacity(probe.len());
+                vals.push(self.emit_cur(Inst::Const(Lit::Bool(true))));
+                for i in 0..probe.len().saturating_sub(1) {
+                    vals.push(self.emit_cur(Inst::TupleIndex { base: v, index: i }));
+                }
+                for (cell, val) in cells.iter().copied().zip(vals) {
+                    self.store_cell(cell, val);
+                }
+                self.f.set_term(self.cur, Term::Goto(join));
+
+                self.cur = absent_bb;
+                for (cell, val) in cells.iter().copied().zip(probe) {
+                    self.store_cell(cell, val);
+                }
+                self.f.set_term(self.cur, Term::Goto(join));
+
+                self.cur = join;
+                return Ok(self.load_cells(&cells));
             }
             return Ok(self.absent_tuple_slots(shape));
         }

@@ -471,3 +471,115 @@ fn an_unmarked_nullable_tuple_param_still_works() {
     assert_eq(u_describe(u_maybe(true)), 13.0)
     assert_eq(u_describe(u_maybe(false)), -1.0)
 }
+
+// ======== Stored in a CONTAINER ========
+//
+// A container element that is a splatting tuple stores the WIRE in a table
+// (`tuple_box_shape`): leaves flat, no per-element boxes. Reading it back out
+// crosses two paths that must agree with that layout: the stdlib `get`/`pop`
+// instances return the stored box through the splatting return ABI (tested
+// and unpacked at runtime), and a direct map/arena read hands the box to the
+// pattern machinery, which rebuilds the parts from the flat slots.
+
+nobox value CNV { x: float, y: float }
+
+@test(output = "1 2 10\nmissing")
+fn vec_get_splatting_element() {
+    let xs: [(CNV, float)] = [(CNV { x: 1.0, y: 2.0 }, 10.0)]
+    if let (v, f) = xs.get(0) {
+        print("{v.x as int} {v.y as int} {f as int}")
+    } else {
+        print("present")
+    }
+    if let (v, f) = xs.get(5) {
+        print("{v.x as int} {f as int}")
+    } else {
+        print("missing")
+    }
+}
+
+@test(output = "3 4 20")
+fn vec_get_splatting_element_second() {
+    let xs: [(float, CNV)] = [(20.0, CNV { x: 3.0, y: 4.0 })]
+    let (f, v) = xs.get(0) else {
+        print("missing")
+        return
+    }
+    print("{v.x as int} {v.y as int} {f as int}")
+}
+
+@test(output = "1 10\n3 30")
+fn vec_pop_splatting_element() {
+    let xs: [(CNV, float)] = [(CNV { x: 3.0, y: 0.0 }, 30.0), (CNV { x: 1.0, y: 0.0 }, 10.0)]
+    while let (v, f) = xs.pop() {
+        print("{v.x as int} {f as int}")
+    }
+}
+
+@test(output = "false\ntrue")
+fn vec_get_splatting_null_compare() {
+    let xs: [(CNV, float)] = [(CNV { x: 1.0, y: 2.0 }, 10.0)]
+    print(xs.get(0) == null)
+    print(xs.get(5) == null)
+}
+
+@test(output = "1 2 10\nmissing\n1 10")
+fn map_get_and_remove_splatting_value() {
+    let m = map_new<string, (CNV, float)>()
+    m.insert("a", (CNV { x: 1.0, y: 2.0 }, 10.0))
+    let (v, f) = m.get("a") else {
+        print("missing")
+        return
+    }
+    print("{v.x as int} {v.y as int} {f as int}")
+    if let (v2, _) = m.get("zzz") {
+        print("{v2.x as int}")
+    } else {
+        print("missing")
+    }
+    let (r, g) = m.remove("a") else {
+        print("gone")
+        return
+    }
+    print("{r.x as int} {g as int}")
+}
+
+@test(output = "9 90")
+fn arena_get_splatting_element() {
+    let a: Arena<(CNV, float)> = arena_new()
+    let e = a.insert((CNV { x: 9.0, y: 1.0 }, 90.0))
+    let (v, f) = a.get(e) else {
+        print("missing")
+        return
+    }
+    print("{v.x as int} {f as int}")
+}
+
+@test(output = "5 50\n7 70\n2 1 20\n40")
+fn splatting_element_round_trips() {
+    let xs: [(CNV, float)] = [(CNV { x: 1.0, y: 2.0 }, 10.0)]
+    xs.set(0, (CNV { x: 5.0, y: 6.0 }, 50.0))
+    let (v, f) = xs.get(0) else { return }
+    print("{v.x as int} {f as int}")
+
+    let ys: [(CNV, float)] = []
+    ys.push((CNV { x: 7.0, y: 8.0 }, 70.0))
+    let (w, g) = ys.pop() else { return }
+    print("{w.x as int} {g as int}")
+
+    let zs: [((int, CNV), float)] = [((2, CNV { x: 1.0, y: 0.0 }), 20.0)]
+    let ((n, u), h) = zs.get(0) else { return }
+    print("{n} {u.x as int} {h as int}")
+
+    let empty: [(CNV, float)] = []
+    let (_, fallback) = empty.get(0) ?? (CNV { x: 4.0, y: 0.0 }, 40.0)
+    print("{fallback as int}")
+}
+
+@test(output = "1 10\n3 30")
+fn iterating_splatting_elements() {
+    let xs: [(CNV, float)] = [(CNV { x: 1.0, y: 2.0 }, 10.0), (CNV { x: 3.0, y: 4.0 }, 30.0)]
+    for (v, f) in xs {
+        print("{v.x as int} {f as int}")
+    }
+}

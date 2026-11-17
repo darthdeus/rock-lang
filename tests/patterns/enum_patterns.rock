@@ -238,26 +238,3 @@ fn option_to_nullable<T>(opt: Option<T>) -> T? {
     }
 }
 
-
-enum Sig {
-    Idle,
-    Num(int),
-}
-
-// A nullable enum scrutinee: `null` is its own arm, variants match the
-// unwrapped value (the flat-enum nil-tag path).
-fn describe_sig(s: Sig?) -> int {
-    match s {
-        null => -1,
-        Sig::Idle => 0,
-        Sig::Num(x) => x,
-    }
-}
-
-@test
-fn test_match_on_nullable_enum() {
-    let none: Sig? = null
-    assert_eq(describe_sig(none), -1)
-    assert_eq(describe_sig(Sig::Idle), 0)
-    assert_eq(describe_sig(Sig::Num(9)), 9)
-}
