@@ -1019,10 +1019,11 @@ fn line_directive_project() -> tempfile::TempDir {
 #[test]
 fn plain_compile_numbers_lua_with_rock_lines_under_lua_line_directives() {
     let root = line_directive_project();
-    let out = invoke(
-        root.path(),
-        &["compile", ".", "numbered.lua", "--lua-line-directives"],
-    );
+    let out = rock(root.path())
+        .args(["compile", ".", "numbered.lua"])
+        .env("ROCK_SKULL_LINE_DIRECTIVES", "1")
+        .output()
+        .unwrap();
     assert!(out.status.success(), "{}", text(&out));
     let numbered = std::fs::read_to_string(root.path().join("numbered.lua")).unwrap();
     assert!(
@@ -1040,17 +1041,11 @@ fn plain_compile_numbers_lua_with_rock_lines_under_lua_line_directives() {
 #[test]
 fn plain_lua_line_directives_reject_a_release_channel() {
     let root = line_directive_project();
-    let out = invoke(
-        root.path(),
-        &[
-            "compile",
-            ".",
-            "out.lua",
-            "--lua-line-directives",
-            "--channel",
-            "steam",
-        ],
-    );
+    let out = rock(root.path())
+        .args(["compile", ".", "out.lua", "--channel", "steam"])
+        .env("ROCK_SKULL_LINE_DIRECTIVES", "1")
+        .output()
+        .unwrap();
     assert!(!out.status.success(), "{}", text(&out));
     assert_mentions(&out, "Lua line directives are a development option");
 }

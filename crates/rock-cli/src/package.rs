@@ -195,7 +195,7 @@ pub fn run_package(project: &str, output: &Path) -> Result<()> {
     // directives; a release build never carries them.
     if skull::line_directives_mode() {
         anyhow::bail!(
-            "package: Lua line directives are a development option; drop --lua-line-directives and ROCK_SKULL_LINE_DIRECTIVES"
+            "package: Lua line directives are a development option; unset ROCK_SKULL_LINE_DIRECTIVES"
         );
     }
     let context = package_context(project)?;

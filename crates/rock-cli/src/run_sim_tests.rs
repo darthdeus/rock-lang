@@ -7,15 +7,15 @@ fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// `(request, update_snapshots, force, cap, expected lanes)`.
-type JobsCase = (Option<usize>, bool, bool, Option<&'static str>, usize);
+/// `(request, update_snapshots, cap, expected lanes)`.
+type JobsCase = (Option<usize>, bool, Option<&'static str>, usize);
 
 fn assert_jobs(cores: usize, budget: JobBudget, cases: &[JobsCase]) {
-    for &(request, update, force, cap, expected) in cases {
+    for &(request, update, cap, expected) in cases {
         assert_eq!(
-            resolve_jobs_with(request, update, cores, budget, force, cap).unwrap(),
+            resolve_jobs_with(request, update, cores, budget, cap).unwrap(),
             expected,
-            "request {request:?}, update {update}, force {force}, cap {cap:?}"
+            "request {request:?}, update {update}, cap {cap:?}"
         );
     }
 }
@@ -604,8 +604,8 @@ fn the_classed_pool_with_no_cap_is_the_plain_pool() {
 fn sim_environment_cap_reaches_default_lane_resolution() {
     const CHILD: &str = "ROCK_SIM_CAP_PROBE";
     if std::env::var_os(CHILD).is_some() {
-        assert_eq!(resolve_jobs(None, None, false, false).unwrap(), 1);
-        assert_eq!(resolve_pool_jobs(None, None, false, false).unwrap(), 1);
+        assert_eq!(resolve_jobs(None, None, false).unwrap(), 1);
+        assert_eq!(resolve_pool_jobs(None, None, false).unwrap(), 1);
         return;
     }
     let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -627,26 +627,25 @@ fn sim_environment_cap_reaches_default_lane_resolution() {
 }
 
 #[test]
-fn sim_environment_caps_defaults_but_explicit_flags_win() {
+fn sim_environment_caps_defaults_but_explicit_jobs_ignore_the_cap() {
     let budget = JobBudget { ram: 10, gpu: 8 };
     let lanes = budget.lanes();
     assert_jobs(
         32,
         budget,
         &[
-            (None, false, false, Some("2"), 2),
-            (Some(6), false, false, Some("2"), 6),
-            (Some(12), false, true, Some("2"), 12),
-            (Some(6), true, true, Some("2"), 1),
-            (None, false, false, Some("99"), lanes),
-            (None, false, false, None, lanes),
-            (None, false, false, Some("0"), lanes),
-            (None, false, false, Some("invalid"), lanes),
-            (None, false, false, Some("-1"), lanes),
-            (None, false, false, Some("184467440737095516160"), lanes),
+            (None, false, Some("2"), 2),
+            (Some(6), false, Some("2"), 6),
+            (Some(6), true, Some("2"), 1),
+            (None, false, Some("99"), lanes),
+            (None, false, None, lanes),
+            (None, false, Some("0"), lanes),
+            (None, false, Some("invalid"), lanes),
+            (None, false, Some("-1"), lanes),
+            (None, false, Some("184467440737095516160"), lanes),
         ],
     );
-    assert!(resolve_jobs_with(Some(12), false, 32, budget, false, Some("2")).is_err());
+    assert!(resolve_jobs_with(Some(12), false, 32, budget, Some("2")).is_err());
 }
 
 /// The job count is a safety bound, not a preference: it must never exceed
@@ -661,23 +660,18 @@ fn resolve_jobs_is_bounded_and_serial_for_snapshot_updates() {
         budget,
         &[
             // No request takes the memory budget.
-            (None, false, false, None, 4),
-            (Some(1), false, false, None, 1),
-            (Some(4), false, false, None, 4),
-            (Some(8), true, false, None, 1),
-            // A forced request may exceed the budget, never the cores.
-            (Some(10), false, true, None, 10),
-            (Some(usize::MAX), false, true, None, cores),
+            (None, false, None, 4),
+            (Some(1), false, None, 1),
+            (Some(4), false, None, 4),
             // 0 is meaningless; clamp up rather than deadlock on an empty pool.
-            (Some(0), false, false, None, 1),
+            (Some(0), false, None, 1),
             // --update-snapshots wins over ANY explicit request.
-            (None, true, true, None, 1),
-            (Some(8), true, true, None, 1),
+            (None, true, None, 1),
+            (Some(8), true, None, 1),
         ],
     );
-    let error = resolve_jobs_with(Some(10), false, cores, budget, false, None).unwrap_err();
+    let error = resolve_jobs_with(Some(10), false, cores, budget, None).unwrap_err();
     assert!(error.to_string().contains("RAM budget of 4"));
-    assert!(error.to_string().contains("--jobs-force"));
 }
 
 #[test]
@@ -687,14 +681,12 @@ fn a_request_above_only_the_free_gpu_budget_runs_at_that_budget() {
         cores,
         budget,
         &[
-            (Some(8), false, false, None, 2),
-            (Some(10), false, false, None, 2),
-            // Force still takes the request as asked.
-            (Some(8), false, true, None, 8),
-            (None, false, false, None, 2),
+            (Some(8), false, None, 2),
+            (Some(10), false, None, 2),
+            (None, false, None, 2),
         ],
     );
-    let error = resolve_jobs_with(Some(11), false, cores, budget, false, None).unwrap_err();
+    let error = resolve_jobs_with(Some(11), false, cores, budget, None).unwrap_err();
     assert!(
         error
             .to_string()
@@ -713,7 +705,6 @@ fn a_request_above_the_known_lanes_is_narrowed_before_the_budget() {
             false,
             cores,
             budget,
-            false,
             None
         )
         .unwrap(),
@@ -725,7 +716,6 @@ fn a_request_above_the_known_lanes_is_narrowed_before_the_budget() {
         false,
         cores,
         budget,
-        false,
         None,
     )
     .unwrap_err();
@@ -762,11 +752,7 @@ fn default_jobs_fit_ram_and_gpu_budgets() {
     assert_jobs(
         14,
         studio,
-        &[
-            (None, false, false, None, 10),
-            (Some(14), false, true, None, 14),
-            (Some(14), true, true, None, 1),
-        ],
+        &[(None, false, None, 10), (Some(14), true, None, 1)],
     );
     assert_eq!(memory_budgets(32, Some(62 * 1024), Some(17851)).lanes(), 5);
     assert_eq!(memory_budgets(32, Some(62 * 1024), None).lanes(), 17);

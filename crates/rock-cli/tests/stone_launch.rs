@@ -1126,13 +1126,6 @@ co fn portable_sim() -> Coroutine<Wait> {
         String::from_utf8_lossy(&list.stdout).contains("portable_sim"),
         "{text}"
     );
-    let (plan, text) = invoke(
-        &["sim", project, "portable_sim", "--plan", "--jobs", "1"],
-        false,
-    );
-    assert!(plan.status.success(), "{text}");
-    let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
-    assert_eq!(plan["entries"].as_array().unwrap().len(), 1);
     for phase in ["startup", "shutdown", "tail", "finalizer"] {
         let late = std::process::Command::new(&rock)
             .args(["sim", project, "portable_sim", "--jobs", "1"])

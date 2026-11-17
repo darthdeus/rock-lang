@@ -119,8 +119,6 @@ pub struct Args {
     pub allocation_sites: Option<String>,
     /// GLSL profile for `rock shader`; only `330core` is supported.
     pub profile: Option<String>,
-    pub no_stdlib: bool,
-    pub stdout: bool,
     pub check: bool,
     pub iters: usize,
     pub warmup: usize,
@@ -132,9 +130,7 @@ pub struct Args {
     pub gc_window_start: usize,
     pub gc_window_mode: String,
     pub perf_format: String,
-    pub top: usize,
     pub sim_log_dir: Option<String>,
-    pub sim_entry: Option<String>,
     pub test_threads: Option<usize>,
     /// `--channel`: release channel for `[build.vars]` resolution.
     /// None = the project's default_channel.
@@ -146,17 +142,13 @@ pub struct Args {
     pub build_var_overrides: Vec<String>,
     pub update_snapshots: bool,
     pub jobs: Option<usize>,
-    pub jobs_force: bool,
     pub full_asset_jobs: Option<usize>,
 
     pub list: bool,
-    pub sim_plan: bool,
 
     pub app_args: Vec<String>,
 
     pub jv: bool,
-    /// `--lua-line-directives`: sugar for `ROCK_SKULL_LINE_DIRECTIVES=1`.
-    pub lua_line_directives: bool,
 
     /// Resolved compiler backend for this invocation (default `skull`; see
     /// `from_matches`). Override with `--backend` or `ROCK_BACKEND`.
@@ -214,13 +206,9 @@ impl Args {
                 .help("For `rock test`: run @tests whose function name or source path contains a comma-separated substring."))
             .arg(Arg::new("skip-gpu").long("skip-gpu").action(ArgAction::SetTrue)
                 .help("For GLSL tests and shader-validate: skip profiles with no display or GL driver; available profiles still run."))
-            .arg(Arg::new("output").long("output").alias("out")
+            .arg(Arg::new("output").long("output")
                 .help("Output path; package requires an explicit output directory."))
             .arg(Arg::new("profile").long("profile"))
-            .arg(Arg::new("no-stdlib").long("no-stdlib").action(ArgAction::SetTrue)
-                .help("Check, compile, run and test with no standard-library modules: stdlib declarations, including operators such as `+`, are undefined."))
-            .arg(Arg::new("stdout").long("stdout").action(ArgAction::SetTrue)
-                .help("Print formatted output to stdout instead of updating files - for fmt command"))
             .arg(Arg::new("check").long("check").action(ArgAction::SetTrue)
                 .help("For `rock fmt`: check if files are already formatted (exit 1 if not)."))
             .arg(Arg::new("iters").long("iters").default_value("1")
@@ -246,8 +234,6 @@ impl Args {
                 .help("Override a declared [build.vars] entry for this invocation (repeatable)"))
             .arg(Arg::new("target-os").long("target-os").value_name("OS")
                 .help("Artifact target for the `platform` builtin (linux, osx, windows). Cross-builds package on one OS for another; defaults to the host."))
-            .arg(Arg::new("lua-line-directives").long("lua-line-directives").action(ArgAction::SetTrue)
-                .help("Number emitted Lua with Rock file:line through LuaJIT line directives, so errors, tracebacks and jit.util report Rock source. Needs a LuaJIT 2.1 from commit c41d727d (2026-10-20) or later. A development option: rejected with a --channel other than dev. Same as ROCK_SKULL_LINE_DIRECTIVES=1."))
             .arg(Arg::new("no-lints").long("no-lints").action(ArgAction::SetTrue)
                 .help("Drop lint warnings/advice from build output. Error-severity lints still run and still fail the build."))
             .arg(Arg::new("lint-summary").long("lint-summary").action(ArgAction::SetTrue)
@@ -293,8 +279,6 @@ impl Args {
             allocation_census: Default::default(),
             allocation_sites: Default::default(),
             profile: m.get_one::<String>("profile").cloned(),
-            no_stdlib: m.get_flag("no-stdlib"),
-            stdout: m.get_flag("stdout"),
             check: m.get_flag("check"),
             iters: *m.get_one::<usize>("iters").unwrap(),
             warmup: *m.get_one::<usize>("warmup").unwrap(),
@@ -309,9 +293,7 @@ impl Args {
                 .get_one::<String>("perf-format")
                 .cloned()
                 .unwrap_or_else(|| "pretty".to_string()),
-            top: Default::default(),
             sim_log_dir: Default::default(),
-            sim_entry: Default::default(),
             test_threads: m.get_one::<usize>("test-threads").copied(),
             channel: m.get_one::<String>("channel").cloned(),
             target_os: m.get_one::<String>("target-os").cloned(),
@@ -321,13 +303,10 @@ impl Args {
                 .unwrap_or_default(),
             update_snapshots: Default::default(),
             jobs: Default::default(),
-            jobs_force: Default::default(),
             full_asset_jobs: Default::default(),
             list: Default::default(),
-            sim_plan: Default::default(),
             app_args: many_str("app_args"),
             jv: Default::default(),
-            lua_line_directives: m.get_flag("lua-line-directives"),
             no_lints: m.get_flag("no-lints"),
             lint_summary: m.get_flag("lint-summary"),
             lints: m.get_one::<String>("lints").cloned(),
@@ -422,5 +401,36 @@ mod completion_tests {
             .expect("the script completes --format");
         let values = format_arm.lines().nth(1).unwrap_or_default();
         assert!(values.contains("pretty json"), "{values}");
+    }
+}
+
+#[cfg(test)]
+mod removed_option_tests {
+    #[test]
+    fn unused_cli_options_are_unavailable() {
+        for option in ["--out", "--sim-entry", "--top"] {
+            assert!(
+                crate::Args::command()
+                    .try_get_matches_from(["rock", "compile", "input.rock", option, "20"])
+                    .is_err(),
+                "{option} is still accepted"
+            );
+        }
+    }
+    #[test]
+    fn unused_modes_are_unavailable() {
+        for option in ["--stdout", "--no-stdlib", "--lua-line-directives", "--plan"] {
+            assert!(
+                crate::Args::command()
+                    .try_get_matches_from(["rock", "compile", "input.rock", option])
+                    .is_err(),
+                "{option} is still accepted"
+            );
+        }
+        assert!(
+            crate::Args::command()
+                .try_get_matches_from(["rock", "sim", "input", "--jobs", "2", "--jobs-force"])
+                .is_err()
+        );
     }
 }

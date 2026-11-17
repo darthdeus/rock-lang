@@ -122,7 +122,7 @@ impl SimRunRecorder {
                 warning_emitted: false,
                 timings: timing::Timings::new(
                     root,
-                    timing::TimingPolicy::from_env(),
+                    timing::TimingPolicy::default(),
                     timing_host.clone(),
                 ),
             })),

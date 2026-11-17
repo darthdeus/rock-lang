@@ -14,7 +14,6 @@ mod js_test_backends;
 mod js_test_exit_status;
 mod lsp_code_action;
 mod native_commands;
-mod no_stdlib;
 mod package_cli;
 mod package_relative_output;
 mod package_test_program_shape;

@@ -16,10 +16,11 @@ fn main() { check_identity() }
 "#,
     )
     .unwrap();
-    let output = crate::support::invoke(
-        dir.path(),
-        &["compile", ".", "main.lua", "--lua-line-directives"],
-    );
+    let output = crate::support::rock(dir.path())
+        .args(["compile", ".", "main.lua"])
+        .env("ROCK_SKULL_LINE_DIRECTIVES", "1")
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "{}",

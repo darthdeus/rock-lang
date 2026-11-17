@@ -3939,7 +3939,6 @@ mod incremental_lint_snapshot_tests {
         let v1 = "fn helper() -> int { 3 }\nfn main() { let unused = helper() }\n";
         let v2 = "fn helper() -> int { 5 }\nfn main() { let unused = helper() }\n";
         let mut fx = ProjectFixture::boot(v1);
-        fx.project.enable_route_profile();
         let initial_fingerprint = fx.project.artifact_fingerprint().to_string();
         let reload = fx
             .project
@@ -3949,26 +3948,6 @@ mod incremental_lint_snapshot_tests {
             matches!(reload, SkullReload::Incremental { .. }),
             "reload: {reload:?}"
         );
-        let profile = fx.project.take_last_route_profile().expect("route profile");
-        assert!(profile.session_snapshot_ns > 0);
-        assert!(profile.source_lookup_feed_ns > 0);
-        assert!(profile.session_update_ns > 0);
-        assert!(profile.diagnostics_ns > 0);
-        assert!(profile.local_lint_derivation_ns > 0);
-        assert!(profile.global_lint_dependency_ns > 0);
-        assert!(profile.suppression_filter_calls > 0);
-        assert!(profile.report_prepare_ns > 0);
-        assert!(profile.render_ns > 0);
-        assert!(profile.finding_aggregation_ns > 0);
-        assert!(profile.affected_chunk_selection_ns > 0);
-        assert!(profile.emit_overlay_ns > 0);
-        assert!(profile.publication_shape_checks_ns > 0);
-        assert!(profile.transaction_checkpoint_ns > 0);
-        assert_eq!(profile.body_transactions_started, 1);
-        assert!(profile.transaction_commit_ns > 0);
-        assert!(profile.atomic_output_write_ns > 0);
-        assert!(profile.total_ns > 0);
-        assert!(profile.unaccounted_ns < profile.total_ns);
         let incremental_fingerprint = fx.project.artifact_fingerprint().to_string();
         assert_ne!(incremental_fingerprint, initial_fingerprint);
         let route_overlay = fx.overlay_text();
@@ -3994,14 +3973,6 @@ mod incremental_lint_snapshot_tests {
             fresh.artifact_fingerprint(),
             "incremental fingerprint must equal the canonical fresh identity"
         );
-        if let Some(capture) = std::env::var_os("ROCK_INCREMENTAL_OVERLAY_CAPTURE_DIR") {
-            let capture = std::path::Path::new(&capture);
-            std::fs::create_dir_all(capture).expect("capture dir");
-            std::fs::write(capture.join("route-overlay.lua"), route_overlay.as_bytes())
-                .expect("capture route");
-            std::fs::write(capture.join("direct-overlay.lua"), direct.as_bytes())
-                .expect("capture direct");
-        }
     }
 
     #[test]

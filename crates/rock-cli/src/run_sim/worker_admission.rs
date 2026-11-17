@@ -241,13 +241,12 @@ pub(super) enum Admission {
 pub(super) fn try_acquire(
     root: &Path,
     slots: usize,
-    forced: bool,
     probe: impl FnOnce() -> Probe,
 ) -> Result<Admission> {
     std::fs::create_dir_all(root)?;
     // Telemetry and its cache mutex must not block host reservations or PID
     // publication. Leases admitted after this snapshot reserve their full estimate.
-    let reading = if forced { Ok(None) } else { probe() };
+    let reading = probe();
     // Serialize the read-and-reserve operation across processes. Slot leases
     // remain kernel locks, so crashes release capacity without stale cleanup.
     let admission = open(&root.join("admission.lock"))?;
@@ -370,9 +369,8 @@ mod tests {
     #[test]
     fn waiting_admission_recovers_and_does_not_double_spend_or_double_count() {
         let root = tempfile::tempdir().unwrap();
-        let attempt = |free, processes: &[(u32, u64)]| {
-            try_acquire(root.path(), 4, false, || gpu(free, processes))
-        };
+        let attempt =
+            |free, processes: &[(u32, u64)]| try_acquire(root.path(), 4, || gpu(free, processes));
         let mut first = acquired(|| attempt(6144, &[]));
         denied("gpu_headroom", || attempt(6144, &[]));
         // Space freed by an unrelated workload lets a second worker start.
@@ -400,15 +398,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut concurrent = None;
         denied("gpu_headroom", || {
-            try_acquire(root.path(), 2, false, || {
+            try_acquire(root.path(), 2, || {
                 if concurrent.is_none() {
                     let lock = open(&root.path().join("admission.lock")).unwrap();
                     lock.try_lock()
                         .expect("GPU telemetry must not hold the host admission lock");
                     drop(lock);
-                    let mut slot =
-                        granted(try_acquire(root.path(), 2, true, || panic!("forced probe")))
-                            .unwrap();
+                    let mut slot = granted(try_acquire(root.path(), 2, || gpu(8192, &[]))).unwrap();
                     publish_pid(root.path(), &mut slot, 42).unwrap();
                     concurrent = Some(slot);
                 }
@@ -417,18 +413,17 @@ mod tests {
             })
         });
         drop(concurrent);
-        acquired(|| try_acquire(root.path(), 2, false, || gpu(8192, &[])));
+        acquired(|| try_acquire(root.path(), 2, || gpu(8192, &[])));
     }
     #[test]
     fn failures_and_missing_tooling_preserve_admission_contracts() {
         let root = tempfile::tempdir().unwrap();
-        let failed = || try_acquire(root.path(), 2, false, || Err("probe failed".into()));
-        let forced = || try_acquire(root.path(), 2, true, || panic!("forced probe"));
-        let missing = || try_acquire(root.path(), 2, false, || Ok(None));
+        let failed = || try_acquire(root.path(), 2, || Err("probe failed".into()));
+        let missing = || try_acquire(root.path(), 2, || Ok(None));
         let first = acquired(failed);
         denied("gpu_probe_failed", failed);
-        let second = acquired(forced);
-        denied("worker_slots", forced);
+        let second = acquired(missing);
+        denied("worker_slots", missing);
         drop(first);
         drop(second);
         let _first = acquired(missing);

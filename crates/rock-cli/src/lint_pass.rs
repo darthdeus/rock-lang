@@ -7,25 +7,11 @@
 //! build. `Error`-severity findings FAIL the build; `Warning`/`Advice` report
 //! only.
 
-use bone_core::prelude::Instant;
 use bone_core::prelude::{FxHashMap, FxHashSet, ModuleId, Ustr};
 use bone_semantic::inference::Workspace;
 use rock_core::{CompilerError, SourceFiles};
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
-
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct LintRouteTiming {
-    pub local_lint_derivation_ns: u128,
-    pub global_lint_dependency_ns: u128,
-    pub global_lint_derivation_ns: u128,
-    pub suppression_filtering_ns: u128,
-    pub suppression_filter_calls: usize,
-    pub report_prepare_ns: u128,
-    pub summary_sort_ns: u128,
-    pub render_ns: u128,
-    pub finding_aggregation_ns: u128,
-}
 
 /// How a build reports lint findings. Applies to `Warning`/`Advice` only --
 /// `Error` findings always render in full and always fail the build, which is
@@ -112,7 +98,25 @@ pub(crate) fn run_build_lints_cached(
     scope: Scope,
     change: &bone_lints::LintCacheUpdate,
 ) -> Vec<CompilerError> {
-    run_build_lints_cached_inner(cache, ws, sources, root, scope, change, None)
+    let (found, _stats) = with_source_texts(sources, |texts| {
+        let warm = skull::pipeline::warm_module_ids(ws, texts);
+        let is_bin = scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
+        let owned = owned_files(texts, root);
+        let owned_sources: FxHashMap<Ustr, &str> = texts
+            .iter()
+            .filter(|(file, _)| owned.contains(*file))
+            .map(|(&file, &text)| (file, text))
+            .collect();
+        cache.update(
+            ws,
+            &warm,
+            is_bin,
+            &owned_sources,
+            &bone_lints::LintOptions::default(),
+            change,
+        )
+    });
+    report(found, sources, root, policy())
 }
 
 pub(crate) fn rollback_build_lints_cached(
@@ -142,68 +146,6 @@ pub(crate) fn rollback_build_lints_cached(
     })
 }
 
-pub(crate) fn run_build_lints_cached_timed(
-    cache: &mut bone_lints::IncrementalLintCache,
-    ws: &Workspace,
-    sources: &SourceFiles,
-    root: &Path,
-    scope: Scope,
-    change: &bone_lints::LintCacheUpdate,
-    timing: &mut LintRouteTiming,
-) -> Vec<CompilerError> {
-    run_build_lints_cached_inner(cache, ws, sources, root, scope, change, Some(timing))
-}
-
-fn run_build_lints_cached_inner(
-    cache: &mut bone_lints::IncrementalLintCache,
-    ws: &Workspace,
-    sources: &SourceFiles,
-    root: &Path,
-    scope: Scope,
-    change: &bone_lints::LintCacheUpdate,
-    mut timing: Option<&mut LintRouteTiming>,
-) -> Vec<CompilerError> {
-    let (found, stats) = with_source_texts(sources, |texts| {
-        let warm = skull::pipeline::warm_module_ids(ws, texts);
-        let is_bin = scope == Scope::WholeProject && rock_host::stick::StickConfig::is_bin_at(root);
-        let owned = owned_files(texts, root);
-        let owned_sources: FxHashMap<Ustr, &str> = texts
-            .iter()
-            .filter(|(file, _)| owned.contains(*file))
-            .map(|(&file, &text)| (file, text))
-            .collect();
-        let timed = timing.is_some();
-        let (found, stats) = if timed {
-            cache.update_timed(
-                ws,
-                &warm,
-                is_bin,
-                &owned_sources,
-                &bone_lints::LintOptions::default(),
-                change,
-            )
-        } else {
-            cache.update(
-                ws,
-                &warm,
-                is_bin,
-                &owned_sources,
-                &bone_lints::LintOptions::default(),
-                change,
-            )
-        };
-        (found, stats)
-    });
-    if let Some(timing) = timing.as_deref_mut() {
-        timing.local_lint_derivation_ns += stats.local_lint_derivation_ns;
-        timing.global_lint_dependency_ns += stats.global_lint_dependency_ns;
-        timing.global_lint_derivation_ns += stats.global_lint_derivation_ns;
-        timing.suppression_filtering_ns += stats.suppression_filtering_ns;
-        timing.suppression_filter_calls += stats.suppression_filter_calls;
-    }
-    report_timed(found, sources, root, policy(), timing)
-}
-
 /// Split findings by severity, emit the soft tiers per `mode`, and hand back the
 /// `Error`s. Pure apart from the printing, so the build gate is unit-testable
 /// without a workspace. `transmute_of_nullable` is the catalog's `Error` today;
@@ -215,22 +157,11 @@ fn report(
     root: &Path,
     mode: LintReport,
 ) -> Vec<CompilerError> {
-    report_timed(found, sources, root, mode, None)
-}
-
-fn report_timed(
-    found: Vec<bone_lints::Finding>,
-    sources: &SourceFiles,
-    root: &Path,
-    mode: LintReport,
-    timing: Option<&mut LintRouteTiming>,
-) -> Vec<CompilerError> {
     if found.is_empty() {
         return Vec::new();
     }
-    let report_started = Instant::now();
     let (errors, soft) = skull::pipeline::split_findings(found);
-    present_soft(&soft, sources, root, mode, report_started, timing);
+    present_soft(&soft, sources, root, mode);
     errors
 }
 
@@ -240,7 +171,7 @@ pub(crate) fn report_soft(soft: &[bone_lints::Finding], sources: &SourceFiles, r
     if soft.is_empty() {
         return;
     }
-    present_soft(soft, sources, root, policy(), Instant::now(), None);
+    present_soft(soft, sources, root, policy());
 }
 
 fn present_soft(
@@ -248,35 +179,20 @@ fn present_soft(
     sources: &SourceFiles,
     root: &Path,
     mode: LintReport,
-    report_started: Instant,
-    timing: Option<&mut LintRouteTiming>,
 ) {
-    let report_prepare_ns = report_started.elapsed().as_nanos();
-    let mut summary_sort_ns = 0;
-    let mut render_ns = 0;
     match mode {
         LintReport::Off => {}
         LintReport::Full => {
             // One batch render: the ariadne source cache copies every file in
             // the project, so a per-finding render is ~1.6ms EACH on a game.
             let errs: Vec<CompilerError> = soft.iter().map(|f| f.error.clone()).collect();
-            let started = Instant::now();
             eprintln!("{}", rock_core::errors::render_all(&errs, sources));
-            render_ns = started.elapsed().as_nanos();
         }
         LintReport::Summary => {
             if !soft.is_empty() {
-                let started = Instant::now();
                 eprintln!("{}", summary_line(soft, root));
-                summary_sort_ns = started.elapsed().as_nanos();
             }
         }
-    }
-    if let Some(timing) = timing {
-        timing.report_prepare_ns += report_prepare_ns;
-        timing.summary_sort_ns += summary_sort_ns;
-        timing.render_ns += render_ns;
-        timing.finding_aggregation_ns += report_started.elapsed().as_nanos();
     }
 }
 

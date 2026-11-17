@@ -45,7 +45,7 @@ pub(crate) fn collect_rock_files(paths: &[String]) -> Result<Vec<String>> {
     Ok(collected)
 }
 
-pub(crate) fn do_fmt(paths: &[String], in_place: bool, check: bool) -> Result<()> {
+pub(crate) fn do_fmt(paths: &[String], check: bool) -> Result<()> {
     use fs_err as fs;
 
     let files_to_format = collect_rock_files(paths)?;
@@ -67,16 +67,7 @@ pub(crate) fn do_fmt(paths: &[String], in_place: bool, check: bool) -> Result<()
                         println!("File '{}' is not formatted", file_path);
                         needs_formatting = true;
                     }
-                } else if !in_place {
-                    // Print to stdout
-                    if files_to_format.len() == 1 {
-                        print!("{}", formatted);
-                    } else {
-                        println!("=== {} ===", file_path);
-                        print!("{}", formatted);
-                    }
                 } else {
-                    // Default: format in-place
                     let original = fs::read_to_string(file_path)?;
                     if original != formatted {
                         fs::write(file_path, &formatted)?;
@@ -96,7 +87,7 @@ pub(crate) fn do_fmt(paths: &[String], in_place: bool, check: bool) -> Result<()
         crate::invocation_log::exit(1);
     }
 
-    if in_place && !check && formatted_count > 0 {
+    if !check && formatted_count > 0 {
         println!(
             "Formatted {} file{}",
             formatted_count,

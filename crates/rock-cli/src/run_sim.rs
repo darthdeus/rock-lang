@@ -398,96 +398,6 @@ fn sim_output_dir() -> Result<TempDir> {
     Ok(dir)
 }
 
-/// Optional parent-side preparation timing for the serial worker/differential
-/// lane. The value is a JSONL path; each phase is one self-contained record so
-/// an interrupted nextest process still leaves the completed phases behind.
-/// This is deliberately separate from the child lifecycle log: it measures
-/// work owned by `rock`, not the fresh game process, and is silent by default.
-fn record_sim_compile_phase(
-    operation: &str,
-    phase: &str,
-    project: &Path,
-    output: Option<&Path>,
-    started: rock_core::clock::Instant,
-    success: bool,
-) {
-    let Some(path) = std::env::var_os("ROCK_SIM_COMPILE_TIMING")
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-    else {
-        return;
-    };
-    let record = serde_json::json!({
-        "schema_version": 1,
-        "event": "sim_compile_timing",
-        "operation": operation,
-        "phase": phase,
-        "project": project.to_string_lossy(),
-        "output": output.map(|path| path.to_string_lossy().into_owned()),
-        "duration_ms": started.elapsed().as_secs_f64() * 1000.0,
-        "success": success,
-        "pid": std::process::id(),
-    });
-    let mut bytes = match serde_json::to_vec(&record) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            log::warn!(target: "SIM", "cannot serialize compile timing: {error}");
-            return;
-        }
-    };
-    bytes.push(b'\n');
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        if let Err(error) = std::fs::create_dir_all(parent) {
-            log::warn!(target: "SIM", "cannot create compile timing directory {}: {error}", parent.display());
-            return;
-        }
-    }
-    let result = append_sim_trace(&path, &bytes);
-    if let Err(error) = result {
-        log::warn!(target: "SIM", "cannot write compile timing {}: {error}", path.display());
-    }
-}
-
-fn append_sim_trace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let write_result = std::io::Write::write_all(&mut file, bytes);
-        let unlock_result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
-        write_result?;
-        if unlock_result != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    std::io::Write::write_all(&mut file, bytes)
-}
-
-fn timed_sim_compile_phase<T>(
-    operation: &str,
-    phase: &str,
-    project: &Path,
-    output: Option<&Path>,
-    action: impl FnOnce() -> Result<T>,
-) -> Result<T> {
-    let started = rock_core::clock::Instant::now();
-    let result = action();
-    record_sim_compile_phase(operation, phase, project, output, started, result.is_ok());
-    result
-}
-
 /// Compile `project` into `output_path` and walk the `@sim` registry
 /// once, returning registry-ordered wire names, source paths and each sim's
 /// `@sim_env` pairs. Single source of suite discovery for the list, single-run,
@@ -1010,24 +920,16 @@ fn prepare_sims(project_path: PathBuf, output_path: PathBuf) -> Result<PreparedS
         selection
     };
     drop(stone);
-    timed_sim_compile_phase(
-        "compile_sims",
-        "receipt_publish",
+    publish_sim_receipt(
+        &root,
+        &receipt_dir,
         &project_path,
-        Some(&output_path),
-        || {
-            publish_sim_receipt(
-                &root,
-                &receipt_dir,
-                &project_path,
-                &output_path,
-                &wire_names,
-                &env_by_wire,
-                &source_files,
-                &inputs,
-                &receipt_selection,
-            )
-        },
+        &output_path,
+        &wire_names,
+        &env_by_wire,
+        &source_files,
+        &inputs,
+        &receipt_selection,
     )?;
     Ok(PreparedSims {
         wire_names,
@@ -1042,20 +944,9 @@ fn consume_sim_receipt(
     project_path: &Path,
     output_path: &Path,
 ) -> Result<PreparedSims> {
-    timed_sim_compile_phase(
-        "compile_sims",
-        "sound_bank",
-        project_path,
-        Some(output_path),
-        || crate::package::prepare_sound_bank(&project_path.to_string_lossy()).map(|_| ()),
-    )?;
-    let (wire_names, env_by_wire, source_files) = timed_sim_compile_phase(
-        "compile_sims",
-        "receipt_materialize",
-        project_path,
-        Some(output_path),
-        || load_sim_receipt(receipt_dir, project_path, output_path),
-    )?;
+    crate::package::prepare_sound_bank(&project_path.to_string_lossy())?;
+    let (wire_names, env_by_wire, source_files) =
+        load_sim_receipt(receipt_dir, project_path, output_path)?;
     Ok(PreparedSims {
         wire_names,
         env_by_wire,
@@ -1528,27 +1419,13 @@ fn compile_sims_with_allocation(
     // main.lua with its `@sim` registry, and collect the wire/env list from the
     // same build. Source paths are captured from the same HIR declarations, and
     // the returned IncrementalProject serves mid-sim `reload_edit` ops.
-    timed_sim_compile_phase(
-        "compile_sims",
-        "sound_bank",
-        &project_path,
-        Some(&output_path),
-        || crate::package::prepare_sound_bank(&project_path.to_string_lossy()).map(|_| ()),
-    )?;
+    crate::package::prepare_sound_bank(&project_path.to_string_lossy())?;
     let main_path = output_path.join(rock_host::project::MAIN_LUA_FILENAME);
-    timed_sim_compile_phase(
-        "compile_sims",
-        "skull_compile_emit",
-        &project_path,
-        Some(&output_path),
-        || {
-            skull_compile_game_and_collect_sims_with_allocation(
-                &project_path.to_string_lossy(),
-                &main_path,
-                allocation_manifest,
-                selection,
-            )
-        },
+    skull_compile_game_and_collect_sims_with_allocation(
+        &project_path.to_string_lossy(),
+        &main_path,
+        allocation_manifest,
+        selection,
     )
 }
 
@@ -1617,48 +1494,6 @@ pub(crate) fn do_list_sims(project: &str) -> Result<()> {
         // callers/CI, not a diagnostic.
         println!("{}", name);
     }
-    Ok(())
-}
-
-/// Compile/discover and report the run plan without building engines
-/// or spawning children. Explicit names retain their occurrence semantics.
-pub(crate) fn do_plan_sims(
-    project: &str,
-    names: &[String],
-    jobs: Option<usize>,
-    jobs_force: bool,
-) -> Result<()> {
-    let project_path = rock_engine_host::project::resolve_project_dir(project)?;
-    let out_dir = sim_output_dir()?;
-    let prepared = prepare_sims(project_path.clone(), out_dir.path().to_path_buf())?;
-    let mut manual_excluded = 0;
-    let specs = if names.is_empty() {
-        let mut routine = Vec::new();
-        for name in &prepared.wire_names {
-            if manual_sim(prepared.env_by_wire.get(name).map_or(&[][..], |v| v))? {
-                manual_excluded += 1;
-            } else {
-                routine.push(name.clone());
-            }
-        }
-        routine
-    } else {
-        resolve_sim_specs(&prepared.wire_names, names)?
-    };
-    // Explicit requests narrow to their entries (see `resolve_jobs`); a sweep
-    // takes --jobs literally and an over-budget sweep still needs --jobs-force.
-    let lanes = if names.is_empty() {
-        None
-    } else {
-        Some(specs.len())
-    };
-    let plan = serde_json::json!({
-        "jobs": resolve_jobs(jobs, lanes, false, jobs_force)?,
-        "max_jobs": resolve_pool_jobs(jobs, lanes, false, jobs_force)?,
-        "entries": specs,
-        "manual_excluded": manual_excluded,
-    });
-    println!("{}", serde_json::to_string_pretty(&plan)?);
     Ok(())
 }
 
@@ -1949,13 +1784,12 @@ pub(crate) fn do_run_sims(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
-    jobs_force: bool,
     full_asset_jobs: Option<usize>,
 ) -> Result<()> {
     // One name: there is nothing to overlap, so `--jobs` does not apply.
     if names.len() == 1 {
         if jobs.is_some_and(|j| j > 1) {
-            resolve_jobs(jobs, Some(1), update_snapshots, jobs_force)?;
+            resolve_jobs(jobs, Some(1), update_snapshots)?;
         }
         return do_run_sim_opts_with_request(project, &names[0], quiet, update_snapshots, jobs);
     }
@@ -1972,7 +1806,6 @@ pub(crate) fn do_run_sims(
         quiet,
         update_snapshots,
         jobs,
-        jobs_force,
         full_asset_jobs,
         &recorder,
     );
@@ -1987,7 +1820,6 @@ fn do_run_sims_recorded(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
-    jobs_force: bool,
     full_asset_jobs: Option<usize>,
     recorder: &SimRunRecorder,
 ) -> Result<()> {
@@ -2038,7 +1870,7 @@ fn do_run_sims_recorded(
 
     // Explicit requests narrow to their entries (see `resolve_jobs`).
     let lanes = (!suite).then_some(specs.len());
-    let effective_jobs = resolve_pool_jobs(jobs, lanes, update_snapshots, jobs_force)?;
+    let effective_jobs = resolve_pool_jobs(jobs, lanes, update_snapshots)?;
     let requested_full_asset_jobs = full_asset_jobs;
     let full_asset_jobs = resolve_full_asset_jobs(full_asset_jobs, effective_jobs);
     recorder.configure(
@@ -2669,7 +2501,6 @@ pub(crate) fn do_run_allocation_census(
     names: &[String],
     output_path: &str,
     jobs: Option<usize>,
-    jobs_force: bool,
 ) -> Result<()> {
     let path = PathBuf::from(output_path);
     if path.exists() {
@@ -2697,7 +2528,7 @@ pub(crate) fn do_run_allocation_census(
     }
     let (reload_idx, ordinary_idx): (Vec<usize>, Vec<usize>) =
         (0..selected.len()).partition(|&i| entry_is_reload_lane(&selected[i], &env_by_wire));
-    let jobs = resolve_pool_jobs(jobs, None, false, jobs_force)?;
+    let jobs = resolve_pool_jobs(jobs, None, false)?;
     // Reload entries own the Session and an isolated copy of the boot chunk.
     let mut reload_lane = reload_lane_session(
         &project_path,
@@ -2910,7 +2741,6 @@ pub(crate) fn do_run_allocation_sites(
     names: &[String],
     output_dir: &str,
     jobs: Option<usize>,
-    jobs_force: bool,
 ) -> Result<()> {
     let artifact_dir = PathBuf::from(output_dir);
     if artifact_dir.exists() {
@@ -2971,7 +2801,7 @@ pub(crate) fn do_run_allocation_sites(
         }
     }
 
-    let jobs = resolve_pool_jobs(jobs, None, false, jobs_force)?;
+    let jobs = resolve_pool_jobs(jobs, None, false)?;
     let run_at = |index: usize| -> Result<(String, SimSummary)> {
         let name = &selected[index];
         let stem = allocation_site_artifact_stem(index, name);
@@ -3418,14 +3248,11 @@ const DEFAULT_FULL_ASSET_JOBS: usize = 2;
 ///
 /// `lanes` is the number of entries for an explicit (named) request: a
 /// request above it asks for lanes that will never run, so it is narrowed
-/// before the budget check rather than rejected for them. Sweeps (no names)
-/// pass `None` and take the request literally: an over-budget sweep still
-/// requires `--jobs-force`.
+/// before the budget check rather than rejected for them.
 pub(crate) fn resolve_jobs(
     requested: Option<usize>,
     lanes: Option<usize>,
     update_snapshots: bool,
-    force: bool,
 ) -> Result<usize> {
     let requested = narrow_to_lanes(requested, lanes);
     let budget = sim_job_budget();
@@ -3435,20 +3262,11 @@ pub(crate) fn resolve_jobs(
         update_snapshots,
         sim_cpu_count(),
         budget,
-        force,
         env_cap.as_deref(),
     )?;
     if let Some(asked) = requested.filter(|_| !update_snapshots) {
         static WARNED: std::sync::Once = std::sync::Once::new();
-        if force {
-            FORCED_SIM_JOBS.fetch_max(jobs, std::sync::atomic::Ordering::Relaxed);
-        }
-        if force && jobs > budget.lanes() {
-            WARNED.call_once(|| {
-                log::warn!(target: "SIM",
-                "--jobs {jobs} exceeds the default budget of {} lanes", budget.lanes())
-            });
-        } else if !force && jobs < asked.min(sim_cpu_count()) {
+        if jobs < asked.min(sim_cpu_count()) {
             WARNED.call_once(|| log::warn!(target: "SIM",
                 "--jobs {asked} exceeds the free-GPU budget of {} lanes; initial capacity {jobs}, expandable as VRAM frees", budget.gpu));
         }
@@ -3462,9 +3280,8 @@ fn resolve_pool_jobs(
     requested: Option<usize>,
     lanes: Option<usize>,
     update_snapshots: bool,
-    force: bool,
 ) -> Result<usize> {
-    resolve_jobs(requested, lanes, update_snapshots, force)?;
+    resolve_jobs(requested, lanes, update_snapshots)?;
     let budget = JobBudget {
         ram: sim_job_budget().ram,
         gpu: sim_cpu_count(),
@@ -3475,14 +3292,9 @@ fn resolve_pool_jobs(
         update_snapshots,
         sim_cpu_count(),
         budget,
-        force,
         env_cap.as_deref(),
     )
 }
-
-/// Explicit forced pool width; physical admission honors the same override.
-/// Zero when not forced.
-static FORCED_SIM_JOBS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn narrow_to_lanes(requested: Option<usize>, lanes: Option<usize>) -> Option<usize> {
     requested.map(|jobs| lanes.map_or(jobs, |lanes| jobs.min(lanes.max(1))))
@@ -3503,7 +3315,6 @@ impl JobBudget {
     }
 }
 
-/// An explicit request above the RAM budget fails without `--jobs-force`.
 /// One above only the free-GPU budget runs at that budget instead
 /// (GPU_JOBS_CLAMP): free VRAM measures what else
 /// is running, and load costs lanes, not the run.
@@ -3512,7 +3323,6 @@ fn resolve_jobs_with(
     update_snapshots: bool,
     cores: usize,
     budget: JobBudget,
-    force: bool,
     env_cap: Option<&str>,
 ) -> Result<usize> {
     if update_snapshots {
@@ -3524,10 +3334,9 @@ fn resolve_jobs_with(
     }
     let jobs = match requested {
         None => budget.lanes().min(default_sim_jobs(cores, env_cap)),
-        Some(jobs) if force => jobs,
         Some(jobs) if jobs > budget.ram => {
             anyhow::bail!(
-                "--jobs {jobs} exceeds the RAM budget of {} lanes; use --jobs-force to override",
+                "--jobs {jobs} exceeds the RAM budget of {} lanes",
                 budget.ram
             );
         }
@@ -3600,7 +3409,7 @@ fn sim_job_budget() -> JobBudget {
         let free_vram = probe.as_ref().ok().copied().flatten();
         let mut budget = memory_budgets(cores, total_ram, free_vram);
         if let Err(reason) = probe {
-            log::warn!(target: "SIM", "GPU memory probe failed: {reason}; limiting to one lane unless --jobs-force is set");
+            log::warn!(target: "SIM", "GPU memory probe failed: {reason}; limiting to one lane");
             budget.gpu = 1;
         }
         let env_cap = std::env::var("ROCK_SIM_JOBS").ok();
@@ -4095,33 +3904,16 @@ fn envelope_name_matches(rest: &serde_json::Value, expected: &str, line: &str) -
 }
 
 /// Admission namespace used by the physical worker spawn.
-pub(crate) fn sim_worker_slot_directory() -> Result<PathBuf> {
-    let root = match std::env::var_os("ROCK_SIM_WORKER_SLOT_DIR") {
-        Some(path) if !path.is_empty() => PathBuf::from(path),
-        Some(_) => anyhow::bail!("ROCK_SIM_WORKER_SLOT_DIR must not be empty"),
-        None => {
-            #[cfg(unix)]
-            {
-                PathBuf::from(format!("/tmp/rock-sim-worker-slots-{}", unsafe {
-                    libc::geteuid()
-                }))
-            }
-            #[cfg(not(unix))]
-            {
-                std::env::temp_dir().join("rock-sim-worker-slots")
-            }
-        }
-    };
-    Ok(root)
-}
-
-fn record_worker_wait(label: &str) {
-    let Some(path) = std::env::var_os("ROCK_SIM_WORKER_WAIT_LOG") else {
-        return;
-    };
-    let bytes = format!("wait\t{label}\n");
-    if let Err(error) = append_sim_trace(Path::new(&path), bytes.as_bytes()) {
-        log::warn!(target: "SIM", "cannot write worker wait trace: {error}");
+fn sim_worker_slot_directory() -> PathBuf {
+    #[cfg(unix)]
+    {
+        PathBuf::from(format!("/tmp/rock-sim-worker-slots-{}", unsafe {
+            libc::geteuid()
+        }))
+    }
+    #[cfg(not(unix))]
+    {
+        std::env::temp_dir().join("rock-sim-worker-slots")
     }
 }
 
@@ -4129,27 +3921,15 @@ fn record_worker_wait(label: &str) {
 fn acquire_worker_slot(
     label: &str,
 ) -> Result<(std::fs::File, u64, u64, BTreeMap<&'static str, u64>)> {
-    let forced = FORCED_SIM_JOBS.load(std::sync::atomic::Ordering::Relaxed);
-    let budget = sim_job_budget().ram.max(forced);
-    let slots = match std::env::var("ROCK_SIM_WORKER_SLOTS") {
-        Ok(raw) => raw
-            .parse::<usize>()
-            .ok()
-            .filter(|n| *n > 0)
-            .ok_or_else(|| anyhow!("ROCK_SIM_WORKER_SLOTS={raw:?} must be a positive integer"))?
-            .min(budget),
-        Err(std::env::VarError::NotPresent) => budget,
-        Err(error) => return Err(anyhow!("ROCK_SIM_WORKER_SLOTS: {error}")),
-    };
-    let root = sim_worker_slot_directory()?;
+    let slots = sim_job_budget().ram;
+    let root = sim_worker_slot_directory();
     let started = rock_core::clock::Instant::now();
     let mut checks = Duration::ZERO;
     let mut waits: BTreeMap<&'static str, Duration> = BTreeMap::new();
     let mut waiting = false;
     loop {
         let checking = rock_core::clock::Instant::now();
-        let result =
-            worker_admission::try_acquire(&root, slots, forced > 0, worker_admission::gpu_memory)?;
+        let result = worker_admission::try_acquire(&root, slots, worker_admission::gpu_memory)?;
         checks += checking.elapsed();
         let reason = match result {
             worker_admission::Admission::Granted(slot) => {
@@ -4169,7 +3949,6 @@ fn acquire_worker_slot(
             worker_admission::Admission::Denied(reason) => reason,
         };
         if !waiting {
-            record_worker_wait(label);
             log::info!(target: "SIM", "waiting for host sim capacity (at most {slots} workers, {reason}): {label}");
             waiting = true;
         }
@@ -4336,7 +4115,7 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
     };
     // Until the PID is published the admission lease reserves the full estimate.
     // Keep the child bound if publishing fails, so it is reaped before the lease drops.
-    worker_admission::publish_pid(&sim_worker_slot_directory()?, &mut worker_slot, child.id())?;
+    worker_admission::publish_pid(&sim_worker_slot_directory(), &mut worker_slot, child.id())?;
     let mut child = AdmittedWorker {
         child,
         _slot: worker_slot,

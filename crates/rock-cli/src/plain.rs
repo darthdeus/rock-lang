@@ -71,14 +71,12 @@ pub static COMMANDS: &[&CliCommand] = &[
             if cx.args.files.len() > 1 {
                 anyhow::bail!(
                     "usage: rock sim-report [<run-id>] [--sim-log-dir <root>] \
-                 [--sim-entry <name>] [--top N] [--format pretty|json]"
+                 [--format pretty|json]"
                 );
             }
             crate::sim_report::run(
                 cx.args.sim_log_dir.as_deref(),
                 cx.args.files.first().map(String::as_str),
-                cx.args.sim_entry.as_deref(),
-                cx.args.top,
                 &cx.args.perf_format,
             )
         }),
@@ -153,7 +151,7 @@ pub static COMMANDS: &[&CliCommand] = &[
         name: "fmt",
         route: Route::Direct(|cx| {
             let paths = cx.get_paths_or_current()?;
-            match do_fmt(&paths, !cx.args.stdout, cx.args.check) {
+            match do_fmt(&paths, cx.args.check) {
                 Ok(_) => Ok(()),
                 Err(e) => {
                     log::error!(target: "FMT", "{}", e);

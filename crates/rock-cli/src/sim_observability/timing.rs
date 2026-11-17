@@ -127,42 +127,14 @@ impl TimingIdentity {
     }
 }
 
-impl TimingPolicy {
-    pub(super) fn from_env() -> Self {
-        Self::from_settings(|name| std::env::var(name).ok())
-    }
-
-    fn from_settings(setting: impl Fn(&str) -> Option<String>) -> Self {
-        let number = |name: &str, minimum: f64, default: f64| -> Option<f64> {
-            let Some(value) = setting(name) else {
-                return Some(default);
-            };
-            match value.parse::<f64>() {
-                Ok(n) if n.is_finite() && n >= minimum && n < u64::MAX as f64 / 1000.0 => Some(n),
-                _ => {
-                    log::warn!(target: "SIM", "invalid {name}={value:?}; timing warning setting disabled");
-                    None
-                }
-            }
-        };
-        let policy = Self {
-            absolute_ms: number("ROCK_SIM_WARN_SECS", 0.001, 10.0).map(|n| (n * 1000.0) as u64),
-            regression_factor: number("ROCK_SIM_WARN_FACTOR", 1.0, 2.0),
-            regression_delta_ms: number("ROCK_SIM_WARN_DELTA_SECS", 0.001, 1.0).map(|n| (n * 1000.0) as u64),
-            minimum_samples: number("ROCK_SIM_WARN_SAMPLES", 1.0, 5.0).and_then(|n| {
-                if n.fract() == 0.0 && n <= usize::MAX as f64 { Some(n as usize) }
-                else { log::warn!(target: "SIM", "ROCK_SIM_WARN_SAMPLES must be an integer; historical warnings disabled"); None }
-            }),
-        };
-        let configured = [
-            policy.regression_factor.is_some(),
-            policy.regression_delta_ms.is_some(),
-            policy.minimum_samples.is_some(),
-        ];
-        if configured.iter().any(|v| *v) && !configured.iter().all(|v| *v) {
-            log::warn!(target: "SIM", "historical warnings require ROCK_SIM_WARN_FACTOR, ROCK_SIM_WARN_DELTA_SECS and ROCK_SIM_WARN_SAMPLES");
+impl Default for TimingPolicy {
+    fn default() -> Self {
+        Self {
+            absolute_ms: Some(10_000),
+            regression_factor: Some(2.0),
+            regression_delta_ms: Some(1_000),
+            minimum_samples: Some(5),
         }
-        policy
     }
 }
 
@@ -633,20 +605,6 @@ mod tests {
         enter(&mut next, true, 1280);
         assert_eq!(next.latest_duration_ms("sim"), Some(3_000));
         assert_eq!(next.latest_duration_ms("never_ran"), None);
-    }
-
-    #[test]
-    fn warning_defaults_and_independent_overrides() {
-        assert_eq!(TimingPolicy::from_settings(|_| None), policy());
-        let overridden =
-            TimingPolicy::from_settings(|name| (name == "ROCK_SIM_WARN_SECS").then(|| "5".into()));
-        assert_eq!(
-            overridden,
-            TimingPolicy {
-                absolute_ms: Some(5_000),
-                ..policy()
-            }
-        );
     }
 
     fn warns(name: &str, duration: u64, baseline: &[u64], kind: TimingWarningKind) -> bool {

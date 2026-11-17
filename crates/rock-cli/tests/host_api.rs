@@ -49,7 +49,6 @@ fn host_api_items_stay_public() {
     let _ = std::any::type_name::<rock_cli::skull_backend::SimDescriptor>();
     let _ = rock_cli::skull_backend::IncrementalProject::init_with_tests;
     let _ = rock_cli::skull_backend::IncrementalProject::init_with_tests_and_allocation_report;
-    let _ = rock_cli::skull_backend::IncrementalProject::take_last_route_profile;
     let _ = init_for_sim_selection;
 
     // Host paths.

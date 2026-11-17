@@ -1,8 +1,7 @@
 //! Dispatch the sim command.
 use anyhow::Result;
 
-/// `rock sim`: list, plan, the allocation diagnostics, or a run. Only skull
-/// serves sims.
+/// `rock sim`: list, allocation diagnostics, or a run. Only skull serves sims.
 pub(crate) fn handle_sim(cx: &crate::CommandContext) -> Result<()> {
     if cx.args.allocation_census.is_some() && cx.args.allocation_sites.is_some() {
         anyhow::bail!("--allocation-census and --allocation-sites are separate diagnostic arms");
@@ -10,28 +9,16 @@ pub(crate) fn handle_sim(cx: &crate::CommandContext) -> Result<()> {
     // Validate before compiling, including paths with only one sim and no pool.
     if cx.args.jobs.is_some_and(|j| j > 1) {
         let updates = cx.args.update_snapshots
-            && !cx.args.sim_plan
             && cx.args.allocation_census.is_none()
             && cx.args.allocation_sites.is_none();
-        // A named request (run or plan) has one lane per name; the other
-        // arms learn theirs only after compiling.
+        // A named run has one lane per name; the other arms learn theirs only
+        // after compiling.
         let named_request = cx.args.files.len() > 1
             && !cx.args.list
             && cx.args.allocation_census.is_none()
             && cx.args.allocation_sites.is_none();
         let lanes = named_request.then(|| cx.args.files.len() - 1);
-        crate::run_sim::resolve_jobs(cx.args.jobs, lanes, updates, cx.args.jobs_force)?;
-    }
-    if cx.args.sim_plan {
-        if cx.args.files.is_empty() {
-            anyhow::bail!("sim --plan needs a project: rock sim --plan <project> [names]");
-        }
-        return crate::run_sim::do_plan_sims(
-            &cx.args.files[0],
-            &cx.args.files[1..],
-            cx.args.jobs,
-            cx.args.jobs_force,
-        );
+        crate::run_sim::resolve_jobs(cx.args.jobs, lanes, updates)?;
     }
     if let Some(path) = cx.args.allocation_sites.as_deref() {
         if cx.args.list {
@@ -47,7 +34,6 @@ pub(crate) fn handle_sim(cx: &crate::CommandContext) -> Result<()> {
             &cx.args.files[1..],
             path,
             cx.args.jobs,
-            cx.args.jobs_force,
         )
     } else if let Some(path) = cx.args.allocation_census.as_deref() {
         if cx.args.list {
@@ -63,7 +49,6 @@ pub(crate) fn handle_sim(cx: &crate::CommandContext) -> Result<()> {
             &cx.args.files[1..],
             path,
             cx.args.jobs,
-            cx.args.jobs_force,
         )
     } else if cx.args.list {
         if cx.args.files.is_empty() {
@@ -82,7 +67,6 @@ pub(crate) fn handle_sim(cx: &crate::CommandContext) -> Result<()> {
             cx.args.quiet,
             cx.args.update_snapshots,
             cx.args.jobs,
-            cx.args.jobs_force,
             cx.args.full_asset_jobs,
         )
     }

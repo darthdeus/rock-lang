@@ -188,18 +188,6 @@ pub fn stdlib_files() -> &'static [StdlibFile] {
     })
 }
 
-/// Serve no stdlib files for the rest of this process (`rock --no-stdlib`).
-/// Every compile path reads its stdlib modules through [`stdlib_files`], so
-/// this one switch removes them from check, compile, run and test alike.
-/// Errors if the stdlib was already loaded.
-pub fn exclude_stdlib() -> Result<(), &'static str> {
-    if FILES.set(Vec::new()).is_ok() || FILES.get().is_some_and(Vec::is_empty) {
-        Ok(())
-    } else {
-        Err("the stdlib was loaded before it could be excluded")
-    }
-}
-
 /// Stdlib source identity: the loaders key every stdlib file by
 /// [`stdlib_file_id`], and bone reads the compiler-owned `std` package and the
 /// std-only primitives back through [`is_stdlib_module_file`]. Defined in

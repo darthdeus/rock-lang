@@ -88,21 +88,9 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
         crate::allocator::keep_freed_pages_for_reuse();
     }
 
-    if args.no_stdlib {
-        if let Err(error) = rock_stdlib::exclude_stdlib() {
-            eprintln!("Error: --no-stdlib: {error}");
-            std::process::exit(1);
-        }
-    }
-
     let metadata = (registrations.command_metadata)(args.command);
     if let Some(command) = metadata.build_command {
         unsafe { std::env::set_var("ROCK_BUILD_COMMAND", command) };
-    }
-    // The emitter reads the switch from the environment once per process, and
-    // a child `rock` inherits it.
-    if args.lua_line_directives {
-        unsafe { std::env::set_var("ROCK_SKULL_LINE_DIRECTIVES", "1") };
     }
     // Line directives need a LuaJIT that reads them, which a release channel
     // does not promise; a release build keeps them off.

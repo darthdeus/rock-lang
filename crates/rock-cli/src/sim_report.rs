@@ -1,10 +1,6 @@
-//! `rock sim-report` -- the aggregate reader over the persistent `rock sim`
-//! history that `sim_observability::SimRunRecorder` writes to
+//! `rock sim-report` -- a read-only report over one retained `rock sim` run
+//! written by `sim_observability::SimRunRecorder` to
 //! `.sim-runs/<run-id>/` (`ROCK_SIM_LOG_DIR` overrides the root).
-//!
-//! Every speed pass on this branch has re-derived the same rankings by hand
-//! from records that were already on disk. This reads them in aggregate so the
-//! next pass diffs two runs instead of rewriting the analysis.
 //!
 //! Interpretation rules:
 //!
@@ -27,6 +23,7 @@ use std::path::{Path, PathBuf};
 
 /// The only schema this reader knows how to interpret.
 const SCHEMA_VERSION: i64 = 1;
+const DEFAULT_TOP: usize = 20;
 
 // ---------------------------------------------------------------------------
 // Locating runs
@@ -557,7 +554,6 @@ pub(crate) struct SimRunAnalysis {
     run_id: String,
     dir: PathBuf,
     skipped_records: usize,
-    top: usize,
 
     // Header.
     status: String,
@@ -618,7 +614,7 @@ struct TimingsView {
     missing_from_events: usize,
 }
 
-pub(crate) fn analyze(record: &RunRecord, top: usize) -> SimRunAnalysis {
+pub(crate) fn analyze(record: &RunRecord) -> SimRunAnalysis {
     let observed_span_ms = record.events.iter().map(ms).max().unwrap_or(0);
 
     // Header ---------------------------------------------------------------
@@ -881,7 +877,6 @@ pub(crate) fn analyze(record: &RunRecord, top: usize) -> SimRunAnalysis {
         run_id: record.run_id.clone(),
         dir: record.dir.clone(),
         skipped_records: record.skipped_records,
-        top,
         status,
         complete,
         run_end_present: run_end.is_some(),
@@ -936,7 +931,7 @@ impl SimRunAnalysis {
                 .cmp(&left.duration_ms())
                 .then_with(|| left.name.cmp(&right.name))
         });
-        ranked.truncate(self.top);
+        ranked.truncate(DEFAULT_TOP);
         ranked
     }
 
@@ -959,7 +954,7 @@ impl SimRunAnalysis {
                 .then_with(|| right.0.startup_ms.cmp(&left.0.startup_ms))
                 .then_with(|| left.0.attempt.cmp(&right.0.attempt))
         });
-        ranked.truncate(self.top);
+        ranked.truncate(DEFAULT_TOP);
         ranked
     }
 
@@ -1400,7 +1395,7 @@ impl SimRunAnalysis {
         push(&mut out, String::new());
         push(
             &mut out,
-            format!("slowest entry envelopes (top {})", self.top),
+            format!("slowest entry envelopes (top {DEFAULT_TOP})"),
         );
         for envelope in self.slowest() {
             push(
@@ -1552,200 +1547,17 @@ impl SimRunAnalysis {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-run comparison
-// ---------------------------------------------------------------------------
-
-/// Cheap event-name peek so the cross-run scan does not deserialize every line
-/// of every retained record. The recorder writes compact JSON with sorted
-/// keys; a line this cannot read falls back to a full parse.
-fn peek_event(line: &str) -> Option<&str> {
-    let start = line.find("\"event\":\"")? + "\"event\":\"".len();
-    let rest = &line[start..];
-    let end = rest.find('"')?;
-    Some(&rest[..end])
-}
-
-const CROSS_RUN_EVENTS: [&str; 4] = ["run_start", "entry_start", "entry_end", "entry_result"];
-
-/// One named entry's validated envelope in one retained run -- the same join
-/// retained run records provide, without a shell pipeline.
-fn cross_run_rows(root: &Path, name: &str) -> Result<(Vec<Value>, usize, usize)> {
-    let runs = list_runs(root)?;
-    let scanned = runs.len();
-    let mut unreadable = 0usize;
-    let mut rows = Vec::new();
-    for (run_id, dir) in runs {
-        let Ok(text_body) = std::fs::read_to_string(dir.join("events.jsonl")) else {
-            unreadable += 1;
-            continue;
-        };
-        let mut revision: Option<String> = None;
-        let mut starts: Vec<Value> = Vec::new();
-        let mut ends: HashMap<(i64, i64), i64> = HashMap::new();
-        let mut results: HashMap<(i64, i64), String> = HashMap::new();
-        for line in text_body.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            if let Some(event) = peek_event(line) {
-                if !CROSS_RUN_EVENTS.contains(&event) {
-                    continue;
-                }
-            }
-            let Ok(value) = serde_json::from_str::<Value>(line) else {
-                continue;
-            };
-            if value.get("schema_version").and_then(Value::as_i64) != Some(SCHEMA_VERSION) {
-                continue;
-            }
-            match value.get("event").and_then(Value::as_str) {
-                Some("run_start") => {
-                    let source = value.get("source");
-                    if source.and_then(|s| text(s, "status")) == Some("available") {
-                        revision = source.and_then(|s| text(s, "revision")).map(str::to_string);
-                    }
-                }
-                Some("entry_start") if text(&value, "name") == Some(name) => starts.push(value),
-                Some("entry_end") if text(&value, "name") == Some(name) => {
-                    ends.insert(
-                        (
-                            int(&value, "occurrence_id").unwrap_or(-1),
-                            int(&value, "worker_attempt").unwrap_or(-1),
-                        ),
-                        ms(&value),
-                    );
-                }
-                Some("entry_result") => {
-                    if let (Some(occurrence), Some(attempt), Some(verdict)) = (
-                        int(&value, "occurrence_id"),
-                        int(&value, "worker_attempt"),
-                        text(&value, "verdict"),
-                    ) {
-                        results.insert((occurrence, attempt), verdict.to_string());
-                    }
-                }
-                _ => {}
-            }
-        }
-        for start in starts {
-            let occurrence = int(&start, "occurrence_id").unwrap_or(-1);
-            let attempt = int(&start, "worker_attempt").unwrap_or(-1);
-            let end = ends.get(&(occurrence, attempt)).copied();
-            let verdict = results.get(&(occurrence, attempt)).cloned();
-            rows.push(json!({
-                "run_id": run_id,
-                "source_revision": revision,
-                "name": name,
-                "occurrence_id": occurrence,
-                "worker_attempt": attempt,
-                "verdict": verdict,
-                "status": if end.is_some() && verdict.is_some() { "FINAL" } else { "INCOMPLETE" },
-                "entry_elapsed_ms": end.map(|at| at - ms(&start)),
-            }));
-        }
-    }
-    Ok((rows, scanned, unreadable))
-}
-
-fn render_cross_run(
-    name: &str,
-    rows: &[Value],
-    scanned: usize,
-    unreadable: usize,
-    format: &str,
-) -> Result<String> {
-    let mut measured: Vec<i64> = rows
-        .iter()
-        .filter_map(|row| row["entry_elapsed_ms"].as_i64())
-        .collect();
-    measured.sort_unstable();
-    let summary = json!({
-        "runs_scanned": scanned,
-        "runs_unreadable": unreadable,
-        "rows": rows.len(),
-        "measured": measured.len(),
-        "min_ms": measured.first(),
-        "median_ms": upper_median(&measured),
-        "max_ms": measured.last(),
-    });
-    if format == "json" {
-        return Ok(serde_json::to_string_pretty(&json!({
-            "mode": "cross_run",
-            "name": name,
-            "summary": summary,
-            "rows": rows,
-        }))?);
-    }
-    let mut out = String::new();
-    out.push_str(&format!(
-        "`{name}` across {scanned} retained run(s): {} envelope(s), {} measured\n",
-        rows.len(),
-        measured.len()
-    ));
-    if unreadable > 0 {
-        out.push_str(&format!("  {unreadable} run(s) could not be read\n"));
-    }
-    out.push('\n');
-    for row in rows {
-        out.push_str(&format!(
-            "  {:<26}  {:<10}  occ {:<5} attempt {:<3}  {:<10}  {:<10}  {}\n",
-            row["run_id"].as_str().unwrap_or("?"),
-            row["source_revision"]
-                .as_str()
-                .map(|r| r.chars().take(10).collect::<String>())
-                .unwrap_or_else(|| "unavailable".into()),
-            row["occurrence_id"],
-            row["worker_attempt"],
-            row["verdict"].as_str().unwrap_or("-"),
-            row["status"].as_str().unwrap_or("-"),
-            row["entry_elapsed_ms"]
-                .as_i64()
-                .map(|v| format!("{v} ms"))
-                .unwrap_or_else(|| "-".into()),
-        ));
-    }
-    if !measured.is_empty() {
-        out.push_str(&format!(
-            "\n  min {} ms / median {} ms / max {} ms\n",
-            measured[0],
-            upper_median(&measured).unwrap_or(0),
-            measured[measured.len() - 1]
-        ));
-    }
-    Ok(out)
-}
-
-// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
-pub(crate) fn run(
-    log_dir: Option<&str>,
-    run_id: Option<&str>,
-    entry_name: Option<&str>,
-    top: usize,
-    format: &str,
-) -> Result<()> {
-    if top == 0 {
-        bail!("--top must be greater than zero")
-    }
+pub(crate) fn run(log_dir: Option<&str>, run_id: Option<&str>, format: &str) -> Result<()> {
     if !matches!(format, "pretty" | "json") {
         bail!("sim-report format must be `pretty` or `json`, got `{format}`")
     }
     let root = crate::sim_observability::history_root(log_dir);
-
-    if let Some(name) = entry_name {
-        let (rows, scanned, unreadable) = cross_run_rows(&root, name)?;
-        print!(
-            "{}",
-            render_cross_run(name, &rows, scanned, unreadable, format)?
-        );
-        return Ok(());
-    }
-
     let (id, dir) = resolve_run(&root, run_id)?;
     let record = RunRecord::load(&id, &dir)?;
-    let analysis = analyze(&record, top);
+    let analysis = analyze(&record);
     match format {
         "json" => println!("{}", analysis.render_json()?),
         _ => print!("{}", analysis.render_text()),
@@ -1772,13 +1584,6 @@ mod tests {
             ids,
             vec!["999999999-1-0", "1700000000000-2-0", "1700000000000-10-0"]
         );
-    }
-
-    #[test]
-    fn the_event_peek_matches_a_full_parse() {
-        let line = r#"{"elapsed_ms":170,"event":"run_start","run_id":"x","schema_version":1}"#;
-        assert_eq!(peek_event(line), Some("run_start"));
-        assert_eq!(peek_event("not json"), None);
     }
 
     #[test]
@@ -1829,7 +1634,7 @@ mod tests {
             ],
         };
         let rendered: Value =
-            serde_json::from_str(&analyze(&record, 5).render_json().unwrap()).unwrap();
+            serde_json::from_str(&analyze(&record).render_json().unwrap()).unwrap();
         assert_eq!(rendered["time"]["frame_timing"]["known_entries"], 1);
         assert_eq!(rendered["time"]["frame_timing"]["frames"], 3);
         assert_eq!(rendered["time"]["frame_timing"]["draw_frames"], 2);
@@ -1862,7 +1667,7 @@ mod tests {
             ],
         };
         let rendered: Value =
-            serde_json::from_str(&analyze(&record, 5).render_json().unwrap()).unwrap();
+            serde_json::from_str(&analyze(&record).render_json().unwrap()).unwrap();
         assert_eq!(rendered["time"]["frame_timing"]["known_entries"], 0);
         assert_eq!(rendered["time"]["frame_timing"]["missing_entries"], 1);
         assert_eq!(rendered["time"]["frame_timing"]["invalid_entries"], 0);
