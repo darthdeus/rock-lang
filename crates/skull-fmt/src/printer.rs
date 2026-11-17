@@ -496,7 +496,8 @@ impl<'a> Printer<'a> {
             .trivia
             .has_own_line_comment_between(open_line, close_line)
         {
-            let body = self.comma_block(Vec::new(), Some((open_line, close_line)), "{", "}");
+            let body =
+                self.comma_block(std::iter::empty(), Some((open_line, close_line)), "{", "}");
             return Doc::concat([head, body]);
         }
         Doc::concat([head, Doc::text("{}")])
@@ -519,19 +520,20 @@ impl<'a> Printer<'a> {
         if s.fields.is_empty() {
             return self.empty_body(head, s.span);
         }
-        // Preserve the author's layout: a definition on one source line stays
-        // inline (`struct Pt { x: int, y: int }`); multi-line expands.
-        if s.span.line_range().0 == s.span.line_range().1 {
-            let inner = Doc::join(Doc::text(", "), s.fields.iter().map(|f| self.field(f)));
-            return Doc::concat([head, Doc::text("{ "), inner, Doc::text(" }")]);
+        let body = self.record_body(s.span, s.fields.iter().map(|f| (self.field(f), f.span)));
+        Doc::concat([head, body])
+    }
+
+    fn record_body(&self, span: Span, entries: impl Iterator<Item = (Doc, Span)>) -> Doc {
+        let (open, close) = span.line_range();
+        if open == close {
+            return Doc::concat([
+                Doc::text("{ "),
+                Doc::join(Doc::text(", "), entries.map(|(doc, _)| doc)),
+                Doc::text(" }"),
+            ]);
         }
-        let fields = s
-            .fields
-            .iter()
-            .map(|field| (self.field(field), field.span.line_range().0, field.span))
-            .collect();
-        let span = (s.span.line_range().0, s.span.line_range().1);
-        Doc::concat([head, self.comma_block(fields, Some(span), "{", "}")])
+        self.comma_block(entries, Some((open, close)), "{", "}")
     }
 
     fn field(&self, field: &Field) -> Doc {
@@ -566,17 +568,8 @@ impl<'a> Printer<'a> {
         if e.variants.is_empty() {
             return self.empty_body(head, e.span);
         }
-        if e.span.line_range().0 == e.span.line_range().1 {
-            let inner = Doc::join(Doc::text(", "), e.variants.iter().map(|v| self.variant(v)));
-            return Doc::concat([head, Doc::text("{ "), inner, Doc::text(" }")]);
-        }
-        let variants = e
-            .variants
-            .iter()
-            .map(|v| (self.variant(v), v.span.line_range().0, v.span))
-            .collect();
-        let span = (e.span.line_range().0, e.span.line_range().1);
-        Doc::concat([head, self.comma_block(variants, Some(span), "{", "}")])
+        let body = self.record_body(e.span, e.variants.iter().map(|v| (self.variant(v), v.span)));
+        Doc::concat([head, body])
     }
 
     fn variant(&self, v: &EnumVariant) -> Doc {
@@ -594,23 +587,8 @@ impl<'a> Printer<'a> {
                 Doc::concat([name, Doc::text("("), inner, Doc::text(")")])
             }
             EnumVariantKind::Record(fields) => {
-                // A record variant the author wrote on one source line stays
-                // inline (`Bandage { duration: float, heal_amount: float }`);
-                // multi-line expands. Same preserve rule as struct defs.
-                if v.span.line_range().0 == v.span.line_range().1 {
-                    let inner = Doc::join(Doc::text(", "), fields.iter().map(|f| self.field(f)));
-                    return Doc::concat([name, Doc::text(" { "), inner, Doc::text(" }")]);
-                }
-                let fs = fields
-                    .iter()
-                    .map(|f| (self.field(f), f.span.line_range().0, f.span))
-                    .collect();
-                let span = (v.span.line_range().0, v.span.line_range().1);
-                Doc::concat([
-                    name,
-                    Doc::text(" "),
-                    self.comma_block(fs, Some(span), "{", "}"),
-                ])
+                let body = self.record_body(v.span, fields.iter().map(|f| (self.field(f), f.span)));
+                Doc::concat([name, Doc::text(" "), body])
             }
         }
     }
@@ -775,14 +753,7 @@ impl<'a> Printer<'a> {
             let entries = params
                 .iter()
                 .enumerate()
-                .map(|(i, p)| {
-                    (
-                        param_doc(p, bare_first && i == 0),
-                        p.span.line_range().0,
-                        p.span,
-                    )
-                })
-                .collect();
+                .map(|(i, p)| (param_doc(p, bare_first && i == 0), p.span));
             let open = open_comment.map_or_else(|| "(".to_string(), |text| format!("( //{text}"));
             return self.comma_block(entries, Some((open_line, close_line)), &open, ")");
         }
@@ -840,12 +811,7 @@ impl<'a> Printer<'a> {
                 Doc::text("}"),
             ]));
         }
-        Doc::concat([
-            Doc::text("{"),
-            Doc::indent(Doc::concat([hardline(), self.stmt_seq(stmts)])),
-            hardline(),
-            Doc::text("}"),
-        ])
+        self.expanded_block(stmts)
     }
 
     /// Control-flow bodies (for / while / loop / while-let) and match arms.
@@ -867,6 +833,10 @@ impl<'a> Printer<'a> {
                 Doc::concat([Doc::text("{"), hardline(), Doc::text("}")])
             };
         }
+        self.expanded_block(stmts)
+    }
+
+    fn expanded_block(&self, stmts: &[Idx<StatementData>]) -> Doc {
         Doc::concat([
             Doc::text("{"),
             Doc::indent(Doc::concat([hardline(), self.stmt_seq(stmts)])),
@@ -1027,7 +997,7 @@ impl<'a> Printer<'a> {
     /// for callers that know the body holds none.
     fn comma_block(
         &self,
-        entries: Vec<(Doc, usize, Span)>,
+        entries: impl IntoIterator<Item = (Doc, Span)>,
         body_span: Option<(usize, usize)>,
         open: &str,
         close: &str,
@@ -1039,7 +1009,7 @@ impl<'a> Printer<'a> {
     /// start before byte offset `comment_limit`.
     fn comma_block_before(
         &self,
-        entries: Vec<(Doc, usize, Span)>,
+        entries: impl IntoIterator<Item = (Doc, Span)>,
         body_span: Option<(usize, usize)>,
         open: &str,
         close: &str,
@@ -1048,29 +1018,12 @@ impl<'a> Printer<'a> {
         let mut body = vec![hardline()];
         let mut prev_end: Option<usize> = None;
         let mut last_off: Option<usize> = None;
-        for (doc, start, espan) in entries.into_iter() {
-            let end = espan.line_range().1;
+        for (doc, espan) in entries {
+            let (start, end) = espan.line_range();
             last_off = Some(espan.offset_range().1);
-            let gap_lo = prev_end.or(body_span.map(|(open, _)| open));
-            // Standalone comments authored before this entry, in source-line
-            // order: `//` own-line comments AND own-line `/* */` block comments
-            // (rendered verbatim so the block form survives).
-            let comments: Vec<(usize, Doc)> = match (body_span, gap_lo) {
-                (Some(_), Some(lo)) => {
-                    let mut v: Vec<(usize, Doc)> = self
-                        .trivia
-                        .standalone_comments_between(lo, start)
-                        .into_iter()
-                        .map(|(l, t)| (l, self.comment_line(t)))
-                        .collect();
-                    for (s, e, l) in self.trivia.own_line_block_comments_between(lo, start) {
-                        v.push((l, Doc::text(self.slice_range(s, e).to_string())));
-                    }
-                    v.sort_by_key(|(l, _)| *l);
-                    v
-                }
-                _ => Vec::new(),
-            };
+            let comments = body_span.map_or_else(Vec::new, |(open, _)| {
+                self.standalone_comments(prev_end.unwrap_or(open), start)
+            });
             if prev_end.is_some() {
                 body.push(hardline());
             }
@@ -1125,16 +1078,7 @@ impl<'a> Printer<'a> {
         // `//` own-line and own-line `/* */`, in source-line order.
         if let Some((open_line, close)) = body_span {
             let prev = prev_end.unwrap_or(open_line);
-            let mut tail: Vec<(usize, Doc)> = self
-                .trivia
-                .standalone_comments_between(prev, close)
-                .into_iter()
-                .map(|(l, t)| (l, self.comment_line(t)))
-                .collect();
-            for (s, e, l) in self.trivia.own_line_block_comments_between(prev, close) {
-                tail.push((l, Doc::text(self.slice_range(s, e).to_string())));
-            }
-            tail.sort_by_key(|(l, _)| *l);
+            let tail = self.standalone_comments(prev, close);
             for (i, (_, d)) in tail.into_iter().enumerate() {
                 // The body already opened with a line break.
                 if i > 0 || prev_end.is_some() {
@@ -1151,6 +1095,25 @@ impl<'a> Printer<'a> {
         ])
     }
 
+    fn standalone_comments(&self, from: usize, to: usize) -> Vec<(usize, Doc)> {
+        let mut docs: Vec<_> = self
+            .trivia
+            .standalone_comments_between(from, to)
+            .into_iter()
+            .map(|(line, text)| (line, self.comment_line(text)))
+            .collect();
+        docs.extend(
+            self.trivia
+                .own_line_block_comments_between(from, to)
+                .into_iter()
+                .map(|(start, end, line)| {
+                    (line, Doc::text(self.slice_range(start, end).to_string()))
+                }),
+        );
+        docs.sort_by_key(|&(line, _)| line);
+        docs
+    }
+
     /// A multi-line bracketed construct rendered by SOURCE LINE rather than
     /// one-element-per-line: elements that shared a source line are sliced
     /// VERBATIM together, preserving the author's intra-row column alignment and
@@ -1162,18 +1125,12 @@ impl<'a> Printer<'a> {
     /// route comment-bearing constructs through `comma_block` instead.
     fn verbatim_rows(&self, rows: Vec<(Span, Doc)>, open: &str, close: &str) -> Doc {
         let last_span = rows.last().map(|(s, _)| *s);
-        // Partition into groups of consecutive elements sharing a start line.
-        let mut groups: Vec<Vec<(Span, Doc)>> = Vec::new();
-        for (sp, doc) in rows {
-            match groups.last_mut() {
-                Some(g) if g[0].0.line_range().0 == sp.line_range().0 => g.push((sp, doc)),
-                _ => groups.push(vec![(sp, doc)]),
-            }
-        }
-        let g_count = groups.len();
+        let mut groups = rows
+            .chunk_by(|(a, _), (b, _)| a.line_range().0 == b.line_range().0)
+            .peekable();
         let mut body = vec![hardline()];
         let mut prev_end: Option<usize> = None;
-        for (gi, group) in groups.into_iter().enumerate() {
+        while let Some(group) = groups.next() {
             if let Some(prev) = prev_end {
                 body.push(hardline());
                 for _ in 0..self
@@ -1201,8 +1158,7 @@ impl<'a> Printer<'a> {
                 let hi = group.last().unwrap().0.offset_range().1;
                 body.push(Doc::text(self.slice_range(lo, hi).trim_end().to_string()));
             }
-            let is_last = gi + 1 == g_count;
-            if !is_last || last_span.is_some_and(|s| self.source_trailing_comma(s)) {
+            if groups.peek().is_some() || last_span.is_some_and(|s| self.source_trailing_comma(s)) {
                 body.push(Doc::text(","));
             }
             prev_end = Some(group.last().unwrap().0.line_range().1);
@@ -1896,11 +1852,7 @@ impl<'a> Printer<'a> {
         // Entry span is the FULL arm (pattern .. body), so comma_block's
         // leading-block prepend checks the arm start, not the body -- an interior
         // block comment already lives in the verbatim doc and must not double.
-        let entries = docs
-            .into_iter()
-            .zip(&arm_spans)
-            .map(|(d, s)| (d, s.line_range().0, *s))
-            .collect();
+        let entries = docs.into_iter().zip(arm_spans);
         Doc::concat([
             Doc::text("match "),
             self.expr(scrutinee),
@@ -2172,14 +2124,7 @@ impl<'a> Printer<'a> {
             }
         }
         if has_comments || source_multiline {
-            let entries = args
-                .iter()
-                .zip(docs)
-                .map(|(a, d)| {
-                    let s = arg_span(a);
-                    (d, s.line_range().0, s)
-                })
-                .collect();
+            let entries = docs.into_iter().zip(args.iter().map(arg_span));
             let body = if has_comments {
                 Some((span.line_range().0, span.line_range().1))
             } else {
@@ -2382,25 +2327,17 @@ impl<'a> Printer<'a> {
             Some((start_line, v.line_range().1, start_off, v.offset_range().1))
         };
         let infos = args.iter().map(info).collect::<Option<Vec<_>>>()?;
-        // Group consecutive args sharing a start line.
-        let mut groups: Vec<Vec<(usize, usize, usize, usize)>> = Vec::new();
-        for i in infos {
-            match groups.last_mut() {
-                Some(g) if g[0].0 == i.0 => g.push(i),
-                _ => groups.push(vec![i]),
-            }
-        }
-        let hanging_open = groups[0][0].0 == span.line_range().0;
-        let hanging_close = groups.last().unwrap().last().unwrap().1 == span.line_range().1;
-        let trailing = self.source_trailing_comma(self.ast.e(&args.last().unwrap().value).span);
-        let g_count = groups.len();
+        let hanging_open = infos.first()?.0 == span.line_range().0;
+        let hanging_close = infos.last()?.1 == span.line_range().1;
+        let trailing = self.source_trailing_comma(self.ast.e(&args.last()?.value).span);
+        let mut groups = infos.chunk_by(|a, b| a.0 == b.0).enumerate().peekable();
         let mut head: Vec<Doc> = vec![Doc::text("(")];
         let mut body: Vec<Doc> = Vec::new();
-        for (gi, group) in groups.iter().enumerate() {
+        while let Some((gi, group)) = groups.next() {
             let lo = group.first().unwrap().2;
             let hi = group.last().unwrap().3;
             let slice = Doc::text(self.slice_range(lo, hi).trim_end().to_string());
-            let comma = if gi + 1 < g_count || trailing {
+            let comma = if groups.peek().is_some() || trailing {
                 Doc::text(",")
             } else {
                 nil()
@@ -2469,14 +2406,9 @@ impl<'a> Printer<'a> {
             }
             // An element that renders across lines makes the array multi-line
             // on the next pass: expand one element per line now.
-            let entries = items
-                .iter()
-                .zip(docs)
-                .map(|(e, d)| {
-                    let s = self.ast.e(e).span;
-                    (d, s.line_range().0, s)
-                })
-                .collect();
+            let entries = docs
+                .into_iter()
+                .zip(items.iter().map(|e| self.ast.e(e).span));
             return self.comma_block(entries, None, open, close);
         }
         // Comment-bearing arrays route through comma_block (it preserves the
@@ -2502,18 +2434,15 @@ impl<'a> Printer<'a> {
         // single-line element is sliced VERBATIM (not re-rendered structurally),
         // so a hand-aligned data table that happens to carry a `//` comment keeps
         // its column alignment (mobs.rock MOB_KINDS).
-        let entries = items
-            .iter()
-            .map(|e| {
-                let s = self.ast.e(e).span;
-                let doc = if s.line_range().0 == s.line_range().1 {
-                    Doc::text(self.slice(s).trim_end().to_string())
-                } else {
-                    self.expr(*e)
-                };
-                (doc, s.line_range().0, s)
-            })
-            .collect();
+        let entries = items.iter().map(|e| {
+            let s = self.ast.e(e).span;
+            let doc = if s.line_range().0 == s.line_range().1 {
+                Doc::text(self.slice(s).trim_end().to_string())
+            } else {
+                self.expr(*e)
+            };
+            (doc, s)
+        });
         self.comma_block(
             entries,
             Some((span.line_range().0, span.line_range().1)),
@@ -2551,8 +2480,6 @@ impl<'a> Printer<'a> {
             );
             Doc::concat([key, Doc::text(": "), self.expr(*value)])
         };
-        let field_line =
-            |names: &[Ident]| names.first().map(|n| n.span.line_range().0).unwrap_or(0);
         // A field with a trailing comment, or a standalone comment in the body,
         // forces the comment-preserving multi-line layout (a `// ...` can't sit
         // inside an inline `{ a, b }`). A field claims a trailing comment only if
@@ -2616,20 +2543,15 @@ impl<'a> Printer<'a> {
                     self.verbatim_rows(rows, "{", "}"),
                 ]);
             }
-            let entries = fields
-                .iter()
-                .zip(docs)
-                .map(|((names, value), doc)| {
-                    let v = self.ast.e(value).span;
-                    // Full field span (name start -> value end) so a leading
-                    // inline block comment (`/* y field */ y: 2`) is in the
-                    // entry's leading gap; the end is unchanged, so trailing
-                    // comma/comment detection is unaffected.
-                    let full =
-                        v.with_offset_range((names[0].span.offset_range().0, v.offset_range().1));
-                    (doc, field_line(names), full)
-                })
-                .collect();
+            let entries = fields.iter().zip(docs).map(|((names, value), doc)| {
+                let v = self.ast.e(value).span;
+                let key = names[0].span;
+                // A leading block comment belongs before the whole field.
+                let span = v
+                    .with_line_range((key.line_range().0, v.line_range().1))
+                    .with_offset_range((key.offset_range().0, v.offset_range().1));
+                (doc, span)
+            });
             return Doc::concat([
                 Doc::text(format!("{name} ")),
                 self.comma_block(
