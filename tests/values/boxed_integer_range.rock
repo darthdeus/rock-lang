@@ -1,0 +1,12 @@
+value WideInteger { x: int }
+struct IntegerCell { v: WideInteger }
+
+fn show_integer_cell(c: IntegerCell) { print(c.v.x) }
+
+// https://github.com/darthdeus/rock-lang/issues/399
+// Lua's boxed C int field narrows a value that scalar storage preserves.
+@ignore
+@test(output = "4294967295")
+fn boxed_integer_preserves_range() {
+    show_integer_cell(IntegerCell { v: WideInteger { x: 4294967295 } })
+}
