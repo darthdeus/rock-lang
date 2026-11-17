@@ -15,18 +15,11 @@ use std::hash::Hash;
 mod call_lints;
 pub use call_lints::{DEPRECATED, STDLIB_UFCS};
 
-/// An `unused-var` finding: a local binding that is never read.
-#[derive(Clone, Debug)]
-pub(crate) struct UnusedVar {
-    pub name: Ustr,
-    pub span: Span,
-}
-
 fn unused_vars_in_body_with_metadata(
     body: &Body,
     variants: &FxHashSet<Ustr>,
     metadata_used: &FxHashSet<Idx<BindingInfo>>,
-) -> Vec<UnusedVar> {
+) -> Vec<Finding> {
     let mut read = read_bindings(body);
     read.extend(metadata_used);
     candidate_bindings(body, variants)
@@ -34,9 +27,12 @@ fn unused_vars_in_body_with_metadata(
         .filter(|idx| !read.contains(idx))
         .map(|idx| &body.binding_arena[idx])
         .filter(|b| !b.name.as_str().starts_with('_'))
-        .map(|b| UnusedVar {
-            name: b.name,
-            span: b.span,
+        .map(|b| {
+            Finding::warning(
+                UNUSED_VAR,
+                b.span,
+                format!("unused variable `{}` (prefix with `_` to silence)", b.name),
+            )
         })
         .collect()
 }
@@ -283,13 +279,20 @@ pub struct Finding {
 }
 
 impl Finding {
-    fn of<F: LintFinding>(f: &F) -> Self {
-        let span = f.span();
-        Finding {
-            lint: F::LINT,
-            error: CompilerError::new_with_label(span, f.message()).with_level(F::LEVEL),
+    fn new(lint: &'static str, level: CompilerErrorLevel, span: Span, message: String) -> Self {
+        Self {
+            lint,
+            error: CompilerError::new_with_label(span, message).with_level(level),
             line: span.line_range().0,
         }
+    }
+
+    fn warning(lint: &'static str, span: Span, message: String) -> Self {
+        Self::new(lint, CompilerErrorLevel::Warning, span, message)
+    }
+
+    fn advice(lint: &'static str, span: Span, message: String) -> Self {
+        Self::new(lint, CompilerErrorLevel::Advice, span, message)
     }
 
     pub fn level(&self) -> CompilerErrorLevel {
@@ -1424,11 +1427,7 @@ impl IncrementalLintCache {
                 && !self.dependency.reachable.contains(&(mid, fid))
                 && !function.is_synthetic
             {
-                let raw = Finding::of(&UnusedFn {
-                    name: function.name,
-                    span: function.name_span,
-                });
-                dead.push((module.file, raw));
+                dead.push((module.file, unused_fn(function)));
             }
         }
         locations.retain(|(file, _)| sources.contains_key(file));
@@ -1493,11 +1492,10 @@ impl IncrementalLintCache {
         if invalidation.is_some()
             && self.dependency.action_declarations.is_empty()
             && let Some(policy) = self.dependency.action_policy.as_deref()
-            && let Some(gap) = empty_action_population(ws, warm, policy)
-            && sources.contains_key(&gap.file)
+            && let Some((file, finding)) = empty_action_population(ws, warm, policy)
+            && sources.contains_key(&file)
         {
-            let file = gap.file;
-            self.push_global(file, Finding::of(&gap));
+            self.push_global(file, finding);
             self.action_population_file = Some(file);
         }
 
@@ -1516,13 +1514,7 @@ impl IncrementalLintCache {
             if sources.contains_key(&file)
                 && let Some(policy) = self.dependency.action_policy.as_deref()
             {
-                let raw = Finding::of(&ActionCallerGap {
-                    action,
-                    file,
-                    span,
-                    population_empty: false,
-                    policy,
-                });
+                let raw = missing_action_caller(policy, action, span);
                 self.push_global(file, raw);
             }
         }
@@ -1540,8 +1532,7 @@ impl IncrementalLintCache {
             let Some(decls) = ws.functions_by_name.get(&name) else {
                 continue;
             };
-            for (finding, file) in sibling_set_mismatches(ws, decls) {
-                let raw = Finding::of(&finding);
+            for (raw, file) in sibling_set_mismatches(ws, decls) {
                 if !sources.contains_key(&file) {
                     continue;
                 }
@@ -2416,10 +2407,10 @@ fn flat_body_findings(
     if sel.enabled(UNUSED_VAR) {
         let metadata_used = decorator_metadata_used_bindings(module, owner, body);
         let found = unused_vars_in_body_with_metadata(body, variants, &metadata_used);
-        out.extend(found.iter().map(Finding::of));
+        out.extend(found);
     }
     if sel.enabled(UNUSED_PURE_EXPR) {
-        out.extend(unused_pure_exprs_in_body(body).iter().map(Finding::of));
+        out.extend(unused_pure_exprs_in_body(body));
     }
     out
 }
@@ -2435,15 +2426,18 @@ fn inference_body_findings(
     let mut out = Vec::new();
     if sel.enabled(TRANSMUTE_OF_NULLABLE) {
         let found = transmute_of_nullable_in_body(ws, bi, body);
-        out.extend(found.iter().map(Finding::of));
+        out.extend(found);
     }
     if sel.enabled(TASK_NULL_ABANDON) {
         let found = task_null_abandon_in_body(ws, bi, body);
-        out.extend(found.iter().map(Finding::of));
+        out.extend(found);
     }
     if sel.enabled(ROW_ESCAPE) {
-        let found = row_escapes_in_body(ws, bi, body, tail_sink(module, &owner));
-        out.extend(found.iter().map(Finding::of));
+        out.extend(
+            row_escapes_in_body(ws, bi, body, tail_sink(module, &owner))
+                .into_iter()
+                .map(RowEscape::finding),
+        );
     }
     if sel.enabled(STDLIB_UFCS) || sel.enabled(DEPRECATED) {
         out.extend(call_lints::findings(ws, bi, body, sel));
@@ -2471,19 +2465,27 @@ fn flat_findings_with(
         .collect();
     if sel.enabled(METHOD_SYNTAX) {
         let found = method_syntax_in_module(ws, module, types, src);
-        out.extend(found.iter().map(Finding::of));
+        out.extend(found);
     }
     if sel.enabled(RAW_INPUT_MIGRATION)
         && let Some(policy) = sel.action_policy.as_deref()
     {
-        let found = raw_input_sites_in_module(module, policy);
-        out.extend(found.iter().map(Finding::of));
+        out.extend(raw_input_sites_in_module(module, policy).into_iter().map(|site| {
+            Finding::advice(
+                RAW_INPUT_MIGRATION,
+                site.span,
+                format!(
+                    "raw input query `{}` needs an action, editor/tool, text-input, or deliberate-remainder classification",
+                    site.name
+                ),
+            )
+        }));
     }
     if sel.enabled(RAW_INPUT_CLASSIFICATION)
         && let Some(policy) = sel.action_policy.as_deref()
     {
         let found = unclassified_raw_input_sites_in_module(module, src, policy);
-        out.extend(found.iter().map(Finding::of));
+        out.extend(found);
     }
     out
 }
@@ -2531,9 +2533,7 @@ fn workspace_findings_by_file(
             None => unused_fns_by_file(ws, warm),
         };
         for (file, findings) in findings {
-            out.entry(file)
-                .or_default()
-                .extend(findings.iter().map(Finding::of));
+            out.entry(file).or_default().extend(findings);
         }
     }
     if sel.enabled(BACKEND_SIBLING_MISMATCH) {
@@ -2544,18 +2544,14 @@ fn workspace_findings_by_file(
             if warm_files.contains(&file) {
                 continue;
             }
-            out.entry(file)
-                .or_default()
-                .extend(findings.iter().map(Finding::of));
+            out.entry(file).or_default().extend(findings);
         }
     }
     if sel.enabled(ACTION_CALLERS)
         && let Some(policy) = sel.action_policy.as_deref()
     {
-        for finding in action_caller_gaps(ws, warm, policy) {
-            out.entry(finding.file)
-                .or_default()
-                .push(Finding::of(&finding));
+        for (file, finding) in action_caller_gaps(ws, warm, policy) {
+            out.entry(file).or_default().push(finding);
         }
     }
     out
@@ -2715,69 +2711,6 @@ fn filter_suppressed_findings_with_entries(
         .collect()
 }
 
-/// A finding that carries its lint name and source line, so one suppression
-/// pass serves every lint. `LINT` is the name matched inside
-/// `// rock: allow(<LINT>)`.
-trait LintFinding {
-    const LINT: &'static str;
-    const LEVEL: CompilerErrorLevel;
-    fn span(&self) -> Span;
-    fn message(&self) -> String;
-}
-
-impl LintFinding for UnusedVar {
-    const LINT: &'static str = UNUSED_VAR;
-    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Warning;
-    fn span(&self) -> Span {
-        self.span
-    }
-    fn message(&self) -> String {
-        format!(
-            "unused variable `{}` (prefix with `_` to silence)",
-            self.name
-        )
-    }
-}
-
-impl LintFinding for UnusedFn {
-    const LINT: &'static str = UNUSED_FN;
-    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Warning;
-    fn span(&self) -> Span {
-        self.span
-    }
-    fn message(&self) -> String {
-        format!("unused function `{}`", declared_name(self.name.as_str()))
-    }
-}
-
-impl LintFinding for BackendSiblingMismatch {
-    const LINT: &'static str = BACKEND_SIBLING_MISMATCH;
-    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Warning;
-    fn span(&self) -> Span {
-        self.span
-    }
-    fn message(&self) -> String {
-        let detail = match &self.issue {
-            BackendSiblingIssue::MissingOn { backend } => format!(
-                "declared for `{}` but no `{backend}` declaration has this signature -- \
-                 a `{backend}` build cannot emit a call to it",
-                self.backend
-            ),
-            BackendSiblingIssue::ReturnDiffers {
-                other_backend,
-                other_ret,
-            } => format!(
-                "returns a different type than its `{other_backend}` sibling (`{other_ret}`) -- \
-                 overloads key on params, so these are one overload with two answers"
-            ),
-        };
-        format!(
-            "backend sibling mismatch: `{}{}` {detail}",
-            self.name, self.signature
-        )
-    }
-}
-
 /// Byte offset of the first `//` in `s`. A plain byte scan: lines are short,
 /// and a substring searcher's setup cost dominated this per-line call.
 fn find_comment_start(s: &str) -> Option<usize> {
@@ -2803,35 +2736,6 @@ fn allow_args_name(args: &str, lint_name: &str) -> bool {
         rest.chars().next(),
         None | Some(' ') | Some('\t') | Some(',') | Some(')')
     )
-}
-
-/// What is wrong with one decl of a backend-sibling set.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum BackendSiblingIssue {
-    /// No decl of this signature targets `backend` -- neither a native decl
-    /// there nor a portable (`Any`) body that every backend emits.
-    MissingOn { backend: &'static str },
-    /// Same signature, disagreeing return types. Overload resolution keys on
-    /// params only, so these two decls are ONE overload with two answers: the
-    /// typechecker records the collapsed representative's return type and the
-    /// other backend emits a body returning something else.
-    ReturnDiffers {
-        other_backend: &'static str,
-        other_ret: String,
-    },
-}
-
-/// A `backend-sibling-mismatch` finding: one decl of a name that is declared on
-/// more than one concrete backend, where the set of declarations does not line
-/// up across those backends.
-#[derive(Clone, Debug)]
-pub(crate) struct BackendSiblingMismatch {
-    pub name: Ustr,
-    /// Rendered param list, `(int, bool)` -- the overload key.
-    pub signature: String,
-    pub backend: &'static str,
-    pub issue: BackendSiblingIssue,
-    pub span: Span,
 }
 
 /// Canonical lint name for suppression: `// rock: allow(backend_sibling_mismatch)`.
@@ -2903,10 +2807,8 @@ fn backend_name(b: FnBackend) -> Option<&'static str> {
 ///
 /// Grouped by the source file of the decl each finding sits on; a file with no
 /// findings is absent.
-pub(crate) fn backend_sibling_mismatches_by_file(
-    ws: &Workspace,
-) -> FxHashMap<Ustr, Vec<BackendSiblingMismatch>> {
-    let mut out: FxHashMap<Ustr, Vec<BackendSiblingMismatch>> = FxHashMap::default();
+pub(crate) fn backend_sibling_mismatches_by_file(ws: &Workspace) -> FxHashMap<Ustr, Vec<Finding>> {
+    let mut out: FxHashMap<Ustr, Vec<Finding>> = FxHashMap::default();
     for decls in ws.functions_by_name.values() {
         for finding in sibling_set_mismatches(ws, decls) {
             let file = finding.1;
@@ -2942,7 +2844,7 @@ fn spans_two_backends(ws: &Workspace, decls: &[(ModuleId, Idx<Function>)]) -> bo
 fn sibling_set_mismatches(
     ws: &Workspace,
     decls: &[(ModuleId, Idx<Function>)],
-) -> Vec<(BackendSiblingMismatch, Ustr)> {
+) -> Vec<(Finding, Ustr)> {
     if decls.len() < 2 {
         return Vec::new();
     }
@@ -2982,13 +2884,15 @@ fn sibling_set_mismatches(
             });
             if !served {
                 out.push((
-                    BackendSiblingMismatch {
-                        name: d.name,
-                        signature: d.signature.clone(),
-                        backend: here,
-                        issue: BackendSiblingIssue::MissingOn { backend: other },
-                        span: d.span,
-                    },
+                    Finding::warning(
+                        BACKEND_SIBLING_MISMATCH,
+                        d.span,
+                        format!(
+                            "backend sibling mismatch: `{}{}` declared for `{here}` but no `{other}` declaration has this signature -- \
+                             a `{other}` build cannot emit a call to it",
+                            d.name, d.signature
+                        ),
+                    ),
                     d.file,
                 ));
             }
@@ -2998,16 +2902,15 @@ fn sibling_set_mismatches(
             .find(|o| o.signature == d.signature && o.ret != d.ret && o.backend != d.backend)
         {
             out.push((
-                BackendSiblingMismatch {
-                    name: d.name,
-                    signature: d.signature.clone(),
-                    backend: here,
-                    issue: BackendSiblingIssue::ReturnDiffers {
-                        other_backend: backend_name(o.backend).unwrap_or("portable"),
-                        other_ret: o.ret.clone(),
-                    },
-                    span: d.span,
-                },
+                Finding::warning(
+                    BACKEND_SIBLING_MISMATCH,
+                    d.span,
+                    format!(
+                        "backend sibling mismatch: `{}{}` returns a different type than its `{}` sibling (`{}`) -- \
+                         overloads key on params, so these are one overload with two answers",
+                        d.name, d.signature, backend_name(o.backend).unwrap_or("portable"), o.ret
+                    ),
+                ),
                 d.file,
             ));
         }
@@ -3015,15 +2918,19 @@ fn sibling_set_mismatches(
     out
 }
 
-/// An `unused-fn` finding: a top-level user function unreachable from any root.
-#[derive(Clone, Debug)]
-pub(crate) struct UnusedFn {
-    pub name: Ustr,
-    pub span: Span,
-}
-
 /// Canonical lint name for suppression: `// rock: allow(unused_fn)`.
 pub const UNUSED_FN: &str = "unused_fn";
+
+fn unused_fn(function: &Function) -> Finding {
+    Finding::warning(
+        UNUSED_FN,
+        function.name_span,
+        format!(
+            "unused function `{}`",
+            declared_name(function.name.as_str())
+        ),
+    )
+}
 
 /// Top-level user functions unreachable from any root. A whole-workspace
 /// reachability closure: seed the roots, follow call/reference edges, report
@@ -3043,7 +2950,7 @@ pub const UNUSED_FN: &str = "unused_fn";
 pub(crate) fn unused_fns_by_file(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,
-) -> FxHashMap<Ustr, Vec<UnusedFn>> {
+) -> FxHashMap<Ustr, Vec<Finding>> {
     let name_map = user_fn_names(ws, warm);
     unused_fns_walk(ws, warm, &name_map, |_, _| None)
 }
@@ -3059,7 +2966,7 @@ fn unused_fns_from_edges(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,
     edges: &UserBodyEdges,
-) -> FxHashMap<Ustr, Vec<UnusedFn>> {
+) -> FxHashMap<Ustr, Vec<Finding>> {
     let name_map = user_fn_names(ws, warm);
     unused_fns_walk(ws, warm, &name_map, |mid, owner| {
         edges
@@ -3073,7 +2980,7 @@ fn unused_fns_walk(
     warm: &FxHashSet<ModuleId>,
     name_map: &FxHashMap<Ustr, Vec<(ModuleId, Idx<Function>)>>,
     known: impl Fn(ModuleId, BodyOwner) -> Option<Vec<FunctionKey>>,
-) -> FxHashMap<Ustr, Vec<UnusedFn>> {
+) -> FxHashMap<Ustr, Vec<Finding>> {
     let edges_of = |mid: ModuleId, owner: BodyOwner, body: &Body| {
         known(mid, owner).unwrap_or_else(|| body_edges(ws, mid, owner, body, name_map))
     };
@@ -3112,16 +3019,13 @@ fn unused_fns_walk(
         }
     }
 
-    let mut out: FxHashMap<Ustr, Vec<UnusedFn>> = FxHashMap::default();
+    let mut out: FxHashMap<Ustr, Vec<Finding>> = FxHashMap::default();
     for module in ws.user_modules(warm) {
         for (fid, f) in module.functions.iter() {
             // A derived newtype operator is not user surface: there is no
             // declaration to delete and its span points at the `newtype` line.
             if !reachable.contains(&(module.id, fid)) && !f.is_synthetic {
-                out.entry(module.file).or_default().push(UnusedFn {
-                    name: f.name,
-                    span: f.name_span,
-                });
+                out.entry(module.file).or_default().push(unused_fn(f));
             }
         }
     }
@@ -3249,32 +3153,8 @@ fn user_fn_names(
     map
 }
 
-/// An `unused-pure-expr` finding: a statement-position expression whose result
-/// is discarded and whose evaluation is side-effect-free. `is_comparison`
-/// tailors the message toward the canonical `==`-for-`=` typo.
-#[derive(Clone, Debug)]
-pub(crate) struct UnusedPureExpr {
-    pub span: Span,
-    pub is_comparison: bool,
-}
-
 /// Canonical lint name for suppression: `// rock: allow(unused_pure_expr)`.
 pub(crate) const UNUSED_PURE_EXPR: &str = "unused_pure_expr";
-
-impl LintFinding for UnusedPureExpr {
-    const LINT: &'static str = UNUSED_PURE_EXPR;
-    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Warning;
-    fn span(&self) -> Span {
-        self.span
-    }
-    fn message(&self) -> String {
-        if self.is_comparison {
-            "result of this comparison is unused -- did you mean `=`?".to_string()
-        } else {
-            "result of pure expression is unused".to_string()
-        }
-    }
-}
 
 /// Statement-position expressions whose result is discarded but whose
 /// evaluation is side-effect-free. A flat HIR walk with no inference: only
@@ -3283,7 +3163,7 @@ impl LintFinding for UnusedPureExpr {
 /// never a statement, so tails and expression-position blocks are never
 /// touched. `is_pure` gates on the whole subtree, so a comparison with a call
 /// operand (`g() == x`) is not flagged.
-pub(crate) fn unused_pure_exprs_in_body(body: &Body) -> Vec<UnusedPureExpr> {
+pub(crate) fn unused_pure_exprs_in_body(body: &Body) -> Vec<Finding> {
     let mut out = Vec::new();
     for (_, stmt) in body.statement_arena.iter() {
         let Statement::Expr(e) = stmt else { continue };
@@ -3291,10 +3171,16 @@ pub(crate) fn unused_pure_exprs_in_body(body: &Body) -> Vec<UnusedPureExpr> {
             continue;
         };
         if is_pure(body, *e) {
-            out.push(UnusedPureExpr {
-                span: body.expr_spans[*e],
-                is_comparison,
-            });
+            let message = if is_comparison {
+                "result of this comparison is unused -- did you mean `=`?"
+            } else {
+                "result of pure expression is unused"
+            };
+            out.push(Finding::warning(
+                UNUSED_PURE_EXPR,
+                body.expr_spans[*e],
+                message.into(),
+            ));
         }
     }
     out
@@ -3377,40 +3263,8 @@ fn variant_args_pure(body: &Body, args: &bone_core::hir::VariantArgs) -> bool {
     }
 }
 
-/// A `transmute_of_nullable` finding: a `cast`/`transmute` call that strips a
-/// nullable argument to a non-nullable result -- laundering a real
-/// null-on-failure (e.g. `host_load_image` -> `int?`) into an apparently-valid
-/// handle. `inner_type` is the argument's rendered type (`int?`, `Mob?`); the
-/// diagnostic names it so the fix (`?? default` / a null check) is obvious.
-#[derive(Clone, Debug)]
-pub(crate) struct TransmuteOfNullable {
-    pub fn_name: Ustr,
-    pub inner_type: String,
-    pub span: Span,
-}
-
 /// Canonical lint name for suppression: `// rock: allow(transmute_of_nullable)`.
 pub const TRANSMUTE_OF_NULLABLE: &str = "transmute_of_nullable";
-
-impl LintFinding for TransmuteOfNullable {
-    const LINT: &'static str = TRANSMUTE_OF_NULLABLE;
-    // The catalog's only `Error`: a laundered null-on-failure is a
-    // correctness hole, not a smell. Irreducible instances do exist (a
-    // generic `R` has no `?? default` to fall back to -- see
-    // `take_result` in a host library), so unlike `entity_across_yield` the allow
-    // comment stays legal.
-    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Error;
-    fn span(&self) -> Span {
-        self.span
-    }
-    fn message(&self) -> String {
-        format!(
-            "`{}` strips nullability from a `{}` -- a null-on-failure silently \
-                 becomes a valid value; use `?? default` or an explicit null check instead",
-            self.fn_name, self.inner_type
-        )
-    }
-}
 
 /// `cast`/`transmute` calls in one body whose argument is nullable and whose
 /// result is non-nullable. Both are the stdlib nullability-erasers; a call
@@ -3426,7 +3280,7 @@ pub(crate) fn transmute_of_nullable_in_body(
     ws: &Workspace,
     bi: Option<&BodyInference>,
     body: &Body,
-) -> Vec<TransmuteOfNullable> {
+) -> Vec<Finding> {
     let Some(bi) = bi else { return Vec::new() };
 
     let mut out = Vec::new();
@@ -3452,11 +3306,16 @@ pub(crate) fn transmute_of_nullable_in_body(
         if !is_nullable(ws, bi, arg_ty) || is_nullable(ws, bi, result_ty) {
             continue;
         }
-        out.push(TransmuteOfNullable {
-            fn_name: *name,
-            inner_type: ws.render(Some(bi), arg_ty),
-            span: body.expr_spans[idx],
-        });
+        out.push(Finding::new(
+            TRANSMUTE_OF_NULLABLE,
+            CompilerErrorLevel::Error,
+            body.expr_spans[idx],
+            format!(
+                "`{name}` strips nullability from a `{}` -- a null-on-failure silently \
+                 becomes a valid value; use `?? default` or an explicit null check instead",
+                ws.render(Some(bi), arg_ty)
+            ),
+        ));
     }
     out
 }
@@ -3495,35 +3354,8 @@ fn head_ty(ws: &Workspace, bi: &BodyInference, ty: TyId) -> (TyId, TypeExpr) {
     }
 }
 
-/// A `method_syntax` finding: a free function whose first parameter is a user
-/// type, declared in prefix form (`fn damage(m: Mob, n: int)`) where the
-/// receiver form (`fn Mob.damage(m, n: int)`) says the same thing.
-#[derive(Clone, Debug)]
-pub(crate) struct MethodSyntax {
-    pub name: Ustr,
-    /// The nominal type of param 0 -- the receiver path of the rewrite.
-    pub receiver: Ustr,
-    /// The rewritten parameter list, param 0 stripped of its type annotation.
-    pub params: String,
-    pub span: Span,
-}
-
 /// Canonical lint name for suppression: `// rock: allow(method_syntax)`.
 pub(crate) const METHOD_SYNTAX: &str = "method_syntax";
-
-impl LintFinding for MethodSyntax {
-    const LINT: &'static str = METHOD_SYNTAX;
-    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Advice;
-    fn span(&self) -> Span {
-        self.span
-    }
-    fn message(&self) -> String {
-        format!(
-            "`{}` takes `{}` as its first parameter -- declare it as `fn {}.{}({})`",
-            self.name, self.receiver, self.receiver, self.name, self.params
-        )
-    }
-}
 
 /// One direct call to an input observation primitive in a cold module. This
 /// is an opt-in migration census: the checked HIR has already resolved scopes
@@ -3574,20 +3406,6 @@ pub(crate) fn raw_input_sites_in_module(
     out
 }
 
-impl LintFinding for RawInputSite {
-    const LINT: &'static str = RAW_INPUT_MIGRATION;
-    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Advice;
-    fn span(&self) -> Span {
-        self.span
-    }
-    fn message(&self) -> String {
-        format!(
-            "raw input query `{}` needs an action, editor/tool, text-input, or deliberate-remainder classification",
-            self.name
-        )
-    }
-}
-
 fn raw_input_class_marker<'a>(
     source: &'a str,
     line: usize,
@@ -3605,19 +3423,11 @@ fn raw_input_class_marker<'a>(
         .then_some(class)
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct RawInputClassificationGap<'a> {
-    pub name: Ustr,
-    pub span: Span,
-    pub line_population: usize,
-    pub classes: &'a [String],
-}
-
-pub(crate) fn unclassified_raw_input_sites_in_module<'a>(
+fn unclassified_raw_input_sites_in_module(
     module: &Module,
     source: &str,
-    policy: &'a ActionLayerPolicy,
-) -> Vec<RawInputClassificationGap<'a>> {
+    policy: &ActionLayerPolicy,
+) -> Vec<Finding> {
     let sites = raw_input_sites_in_module(module, policy);
     let mut sites_per_line: FxHashMap<usize, usize> = FxHashMap::default();
     for site in &sites {
@@ -3626,49 +3436,22 @@ pub(crate) fn unclassified_raw_input_sites_in_module<'a>(
     sites
         .into_iter()
         .filter_map(|site| {
-            let line_population = sites_per_line[&site.span.line_range().0];
-            (line_population != 1
-                || raw_input_class_marker(source, site.span.line_range().0, policy).is_none())
-            .then_some(RawInputClassificationGap {
-                name: site.name,
-                span: site.span,
-                line_population,
-                classes: &policy.raw_input_classes,
-            })
+            let line = site.span.line_range().0;
+            let count = sites_per_line[&line];
+            let message = if count != 1 {
+                format!("raw input classification requires exactly one query per source line (found {count})")
+            } else if raw_input_class_marker(source, line, policy).is_none() {
+                format!(
+                    "raw input query `{}` needs an adjacent `// action-layer:` marker: {}",
+                    site.name,
+                    policy.raw_input_classes.join(", ")
+                )
+            } else {
+                return None;
+            };
+            Some(Finding::advice(RAW_INPUT_CLASSIFICATION, site.span, message))
         })
         .collect()
-}
-
-impl LintFinding for RawInputClassificationGap<'_> {
-    const LINT: &'static str = RAW_INPUT_CLASSIFICATION;
-    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Advice;
-    fn span(&self) -> Span {
-        self.span
-    }
-    fn message(&self) -> String {
-        if self.line_population != 1 {
-            return format!(
-                "raw input classification requires exactly one query per source line (found {})",
-                self.line_population
-            );
-        }
-        format!(
-            "raw input query `{}` needs an adjacent `// action-layer:` marker: {}",
-            self.name,
-            self.classes.join(", ")
-        )
-    }
-}
-
-/// A production project action declaration with no production caller. The source
-/// span is the declaration itself so a missing consumer is named exactly.
-#[derive(Clone, Debug)]
-pub(crate) struct ActionCallerGap<'a> {
-    pub action: Ustr,
-    pub file: Ustr,
-    pub span: Span,
-    pub population_empty: bool,
-    pub policy: &'a ActionLayerPolicy,
 }
 
 pub const ACTION_CALLERS: &str = "action_layer_action_callers";
@@ -3700,54 +3483,37 @@ fn has_annotation(f: &Function, name: &str) -> bool {
         .any(|annotation| annotation.name.name.as_str() == name)
 }
 
-impl LintFinding for ActionCallerGap<'_> {
-    const LINT: &'static str = ACTION_CALLERS;
-    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Advice;
-    fn span(&self) -> Span {
-        self.span
-    }
-    fn message(&self) -> String {
-        if self.population_empty {
-            format!(
-                "no production {} {}* declarations found",
-                self.policy.production_label, self.policy.action_prefix
-            )
-        } else {
-            format!(
-                "production {} action `{}` has no production caller",
-                self.policy.production_label, self.action
-            )
-        }
-    }
-}
-
 /// HIR-backed caller census for production project actions. Global declaration
 /// initializers and `@wire` refresh bodies are registration, not callers.
 /// The single finding that a policy names no action: on the first function
 /// of the first production module.
-fn empty_action_population<'a>(
+fn empty_action_population(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,
-    policy: &'a ActionLayerPolicy,
-) -> Option<ActionCallerGap<'a>> {
+    policy: &ActionLayerPolicy,
+) -> Option<(Ustr, Finding)> {
     let module = ws
         .user_modules(warm)
         .find(|module| is_production_action_module(module.file, Some(policy)))?;
     let function = module.functions.values().next()?;
-    Some(ActionCallerGap {
-        action: Ustr::from("<none>"),
-        file: module.file,
-        span: function.span,
-        population_empty: true,
-        policy,
-    })
+    Some((
+        module.file,
+        Finding::advice(
+            ACTION_CALLERS,
+            function.span,
+            format!(
+                "no production {} {}* declarations found",
+                policy.production_label, policy.action_prefix
+            ),
+        ),
+    ))
 }
 
-pub(crate) fn action_caller_gaps<'a>(
+fn action_caller_gaps(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,
-    policy: &'a ActionLayerPolicy,
-) -> Vec<ActionCallerGap<'a>> {
+    policy: &ActionLayerPolicy,
+) -> Vec<(Ustr, Finding)> {
     let declarations: Vec<(Ustr, Ustr, Span)> =
         action_declarations_in(ws.user_modules(warm), Some(policy)).collect();
 
@@ -3777,14 +3543,19 @@ pub(crate) fn action_caller_gaps<'a>(
     declarations
         .into_iter()
         .filter(|(name, _, _)| !callers.contains(name))
-        .map(|(action, file, span)| ActionCallerGap {
-            action,
-            file,
-            span,
-            population_empty: false,
-            policy,
-        })
+        .map(|(action, file, span)| (file, missing_action_caller(policy, action, span)))
         .collect()
+}
+
+fn missing_action_caller(policy: &ActionLayerPolicy, action: Ustr, span: Span) -> Finding {
+    Finding::advice(
+        ACTION_CALLERS,
+        span,
+        format!(
+            "production {} action `{action}` has no production caller",
+            policy.production_label
+        ),
+    )
 }
 
 /// Prefix-form declarations in one module that the receiver form
@@ -3805,7 +3576,7 @@ pub(crate) fn method_syntax_in_module(
     module: &Module,
     types: &FxHashSet<Ustr>,
     src: &str,
-) -> Vec<MethodSyntax> {
+) -> Vec<Finding> {
     let mut out = Vec::new();
     for (_, f) in module.functions.iter() {
         if f.is_extern
@@ -3827,12 +3598,13 @@ pub(crate) fn method_syntax_in_module(
         {
             continue;
         }
-        out.push(MethodSyntax {
-            name: f.name,
-            receiver,
-            params: rewritten_params(ws, f),
-            span: f.name_span,
-        });
+        let name = f.name;
+        let params = rewritten_params(ws, f);
+        out.push(Finding::advice(
+            METHOD_SYNTAX,
+            f.name_span,
+            format!("`{name}` takes `{receiver}` as its first parameter -- declare it as `fn {receiver}.{name}({params})`"),
+        ));
     }
     out
 }
@@ -4012,15 +3784,10 @@ pub(crate) struct RowEscape {
 /// Canonical lint name for suppression: `// rock: allow(row_escape)`.
 pub const ROW_ESCAPE: &str = "row_escape";
 
-impl LintFinding for RowEscape {
-    const LINT: &'static str = ROW_ESCAPE;
-    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Advice;
-    fn span(&self) -> Span {
-        self.span
-    }
-    fn message(&self) -> String {
+impl RowEscape {
+    fn finding(self) -> Finding {
         let (ty, kind) = (&self.row_type, self.kind.as_str());
-        match self.kind.class() {
+        let message = match self.kind.class() {
             EscapeClass::Hazard => format!(
                 "row of `{ty}` is held past an invalidation point here ({kind}) -- \
                  the slot can be removed or the Scene unloaded before the next read; \
@@ -4035,7 +3802,8 @@ impl LintFinding for RowEscape {
                  nothing. The row becomes the CALLER's to account for, and this check \
                  does not cross the boundary, so audit the callers"
             ),
-        }
+        };
+        Finding::advice(ROW_ESCAPE, self.span, message)
     }
 }
 
@@ -4066,40 +3834,8 @@ pub(crate) fn nominal_type_names(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> 
     out
 }
 
-/// A `task_null_abandon` finding: a plain `= null` over a `Task?` place.
-/// `place` is the rendered target (`m.co`), which the diagnostic names so the
-/// fix (`stop(m, .co)`) is spellable from the message alone.
-#[derive(Clone, Debug)]
-pub(crate) struct TaskNullAbandon {
-    pub place: Option<String>,
-    pub span: Span,
-}
-
 /// Canonical lint name for suppression: `// rock: allow(task_null_abandon)`.
 pub(crate) const TASK_NULL_ABANDON: &str = "task_null_abandon";
-
-impl LintFinding for TaskNullAbandon {
-    const LINT: &'static str = TASK_NULL_ABANDON;
-    // `Warning`, not `Error`: nulling a slot just observed terminal, and
-    // cleanup inside the task's own terminal defer, are both legal and
-    // indistinguishable without liveness -- so the allow comment must stay
-    // reachable.
-    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Warning;
-    fn span(&self) -> Span {
-        self.span
-    }
-    fn message(&self) -> String {
-        let what = match &self.place {
-            Some(p) => format!("`{p} = null`"),
-            None => "assigning `null` to a `Task?` slot".to_string(),
-        };
-        format!(
-            "{what} abandons the coroutine mid-stack -- it is dropped where it stands, \
-                 so its terminal `defer`s never run; use `stop` to cancel it (or `replace` \
-                 to swap one in), which kill the coroutine first"
-        )
-    }
-}
 
 /// `task_null_abandon` for one body. A flat scan, not a walk: v1 asks only
 /// "does a `= null` land on a `Task?` place", and every such assignment is
@@ -4116,7 +3852,7 @@ pub(crate) fn task_null_abandon_in_body(
     ws: &Workspace,
     bi: Option<&BodyInference>,
     body: &Body,
-) -> Vec<TaskNullAbandon> {
+) -> Vec<Finding> {
     let Some(bi) = bi else { return Vec::new() };
     let mut out = Vec::new();
     for (_, expr) in body.expr_arena.iter() {
@@ -4132,10 +3868,19 @@ pub(crate) fn task_null_abandon_in_body(
         if !is_task_slot(ws, bi, ty) {
             continue;
         }
-        out.push(TaskNullAbandon {
-            place: render_place(body, target),
-            span: body.expr_spans[target],
-        });
+        let what = match render_place(body, target) {
+            Some(p) => format!("`{p} = null`"),
+            None => "assigning `null` to a `Task?` slot".to_string(),
+        };
+        out.push(Finding::warning(
+            TASK_NULL_ABANDON,
+            body.expr_spans[target],
+            format!(
+                "{what} abandons the coroutine mid-stack -- it is dropped where it stands, \
+                 so its terminal `defer`s never run; use `stop` to cancel it (or `replace` \
+                 to swap one in), which kill the coroutine first"
+            ),
+        ));
     }
     out
 }

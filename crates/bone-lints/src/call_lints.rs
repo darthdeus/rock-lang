@@ -3,51 +3,6 @@ use super::*;
 pub const STDLIB_UFCS: &str = "stdlib_ufcs";
 pub const DEPRECATED: &str = "deprecated";
 
-struct StdlibUfcs {
-    name: Ustr,
-    method: Ustr,
-    span: Span,
-}
-
-impl LintFinding for StdlibUfcs {
-    const LINT: &'static str = STDLIB_UFCS;
-    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Advice;
-
-    fn span(&self) -> Span {
-        self.span
-    }
-
-    fn message(&self) -> String {
-        format!(
-            "prefer receiver syntax `receiver.{}(...)` over `{}(receiver, ...)`",
-            self.method, self.name
-        )
-    }
-}
-
-struct Deprecated {
-    name: Ustr,
-    replacement: Option<Ustr>,
-    span: Span,
-}
-
-impl LintFinding for Deprecated {
-    const LINT: &'static str = DEPRECATED;
-    const LEVEL: CompilerErrorLevel = CompilerErrorLevel::Warning;
-
-    fn span(&self) -> Span {
-        self.span
-    }
-
-    fn message(&self) -> String {
-        let name = declared_name(self.name.as_str());
-        match self.replacement {
-            Some(message) => format!("`{name}` is deprecated: {message}"),
-            None => format!("`{name}` is deprecated"),
-        }
-    }
-}
-
 pub(super) fn findings(
     ws: &Workspace,
     bi: Option<&BodyInference>,
@@ -76,11 +31,12 @@ pub(super) fn findings(
                 AnnoValue::String(message) => Some(message),
                 _ => None,
             });
-            out.push(Finding::of(&Deprecated {
-                name: function.name,
-                replacement,
-                span,
-            }));
+            let name = declared_name(function.name.as_str());
+            let message = match replacement {
+                Some(message) => format!("`{name}` is deprecated: {message}"),
+                None => format!("`{name}` is deprecated"),
+            };
+            out.push(Finding::warning(DEPRECATED, span, message));
         }
         if !sel.enabled(STDLIB_UFCS)
             || !bone_core::modules::is_stdlib_module_file(module.file.as_str())
@@ -115,11 +71,11 @@ pub(super) fn findings(
             }
             _ => continue,
         };
-        out.push(Finding::of(&StdlibUfcs {
-            name: function.name,
-            method: Ustr::from(method),
+        out.push(Finding::advice(
+            STDLIB_UFCS,
             span,
-        }));
+            format!("prefer receiver syntax `receiver.{method}(...)` over `{name}(receiver, ...)`"),
+        ));
     }
     out
 }
