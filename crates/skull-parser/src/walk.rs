@@ -209,7 +209,8 @@ macro_rules! walkers {
 
         pub(crate) fn $pattern(v: &mut (impl $visit + ?Sized), pattern: & $($mut)* Pattern) {
             match pattern {
-                Pattern::Wildcard | Pattern::Ident(_) => {}
+                Pattern::Wildcard => {},
+                Pattern::Ident(id) => v.ident(id),
                 Pattern::Literal(e) => v.expr(e),
                 Pattern::Tuple(ps) | Pattern::Or(ps) => {
                     for p in ps { v.pattern(p); }
@@ -269,18 +270,11 @@ pub(crate) fn statement_edges(ast: &Ast, s: Idx<StatementData>) -> Edges {
 }
 
 pub(crate) fn bindings(p: &Pattern, f: &mut impl FnMut(&Ident)) {
-    match p {
-        Pattern::Ident(id) => f(id),
-        Pattern::Tuple(ps) | Pattern::Or(ps) | Pattern::PathVariant { args: Some(ps), .. } => {
-            for p in ps {
-                bindings(p, f);
-            }
+    struct Bindings<'a, F>(&'a mut F);
+    impl<F: FnMut(&Ident)> Visit for Bindings<'_, F> {
+        fn ident(&mut self, id: &Ident) {
+            self.0(id);
         }
-        Pattern::PathRecord { fields, .. } => {
-            for (_, p) in fields {
-                bindings(p, f);
-            }
-        }
-        _ => {}
     }
+    pattern(&mut Bindings(f), p);
 }
