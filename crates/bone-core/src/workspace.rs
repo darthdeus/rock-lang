@@ -465,11 +465,6 @@ impl Workspace {
         self.modules.iter().filter(|m| !m.id.is_builtin())
     }
 
-    /// The number of modules compiled from source.
-    pub fn source_module_count(&self) -> usize {
-        self.source_modules().count()
-    }
-
     /// The source modules outside `warm` (a session's warm stdlib set; an
     /// empty set selects every source module). The user code an editor
     /// session owns, re-lowers and lints. Warm modules carry real paths, so

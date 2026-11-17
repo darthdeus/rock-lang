@@ -54,7 +54,7 @@ fn assert_builtins_valid(session: &Session, stage: &str) {
 
 fn assert_counts(session: &Session, stage: &str) {
     let ws = &session.ws;
-    assert_eq!(ws.source_module_count(), ws.modules.len() - 1, "{stage}");
+    assert_eq!(ws.source_modules().count(), ws.modules.len() - 1, "{stage}");
     assert!(ws.source_modules().all(|m| !m.id.is_builtin()), "{stage}");
     assert_eq!(user_files(session), ["a.rock", "b.rock"], "{stage}");
     for mid in &session.warm_mids {
@@ -72,7 +72,7 @@ fn builtin_module_survives_the_session_lifecycle() {
     assert_builtins_valid(&s, "new");
     assert_counts(&s, "new");
     // Warm stdlib plus two user files, never the builtin module.
-    assert_eq!(s.ws.source_module_count(), 3);
+    assert_eq!(s.ws.source_modules().count(), 3);
 
     for (stage, text) in [
         ("body edit", "struct S { v: int }\nfn f() -> int { 2 }\n"),
