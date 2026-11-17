@@ -47,8 +47,9 @@ pub struct BodyUpdate {
 ///   then the interface cascade runs (scope epochs)
 /// - FullUser: a full recompile of every user file
 ///
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum UpdateTier {
+    #[default]
     NoChange,
     BodyOnly,
     Interface,
@@ -58,23 +59,12 @@ pub enum UpdateTier {
 
 /// Result of a session update. Stores the type of update, and all the bodies
 /// that were reinferred.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct UpdateResult {
     pub tier: UpdateTier,
     pub reinferred: Vec<BodyId>,
     pub relowered: Vec<BodyId>,
     pub body_update: BodyUpdate,
-}
-
-impl Default for UpdateResult {
-    fn default() -> Self {
-        Self {
-            tier: UpdateTier::NoChange,
-            reinferred: Vec::new(),
-            relowered: Vec::new(),
-            body_update: BodyUpdate::default(),
-        }
-    }
 }
 
 /// The namespace facts one edit changed, in the terms a lowering records
@@ -432,9 +422,7 @@ pub struct ItemPrint {
     body_range: Option<(usize, usize)>,
 }
 
-#[derive(Clone, Debug)]
-pub enum FileDiff {
-    LayoutOnly,
+enum FileDiff {
     BodiesOnly(Vec<usize>),
     Interface,
 }
@@ -687,7 +675,7 @@ pub fn item_prints(a: &Ast, text: &str) -> Vec<ItemPrint> {
     prints
 }
 
-pub fn classify(old: &[ItemPrint], new: &[ItemPrint]) -> FileDiff {
+fn classify(old: &[ItemPrint], new: &[ItemPrint]) -> FileDiff {
     if old.len() != new.len() {
         return FileDiff::Interface;
     }
@@ -704,14 +692,10 @@ pub fn classify(old: &[ItemPrint], new: &[ItemPrint]) -> FileDiff {
         }
     }
 
-    if changed.is_empty() {
-        FileDiff::LayoutOnly
-    } else {
-        FileDiff::BodiesOnly(changed)
-    }
+    FileDiff::BodiesOnly(changed)
 }
 
-pub fn name_shapes(prints: &[ItemPrint]) -> FxHashMap<Ustr, u64> {
+fn name_shapes(prints: &[ItemPrint]) -> FxHashMap<Ustr, u64> {
     let mut by_name: FxHashMap<Ustr, Vec<u64>> = FxHashMap::default();
 
     for p in prints {
@@ -728,14 +712,6 @@ pub fn name_shapes(prints: &[ItemPrint]) -> FxHashMap<Ustr, u64> {
             hs.sort();
             (n, hash_u64s(&hs))
         })
-        .collect()
-}
-
-pub fn changed_names(old: &FxHashMap<Ustr, u64>, new: &FxHashMap<Ustr, u64>) -> FxHashSet<Ustr> {
-    old.keys()
-        .chain(new.keys())
-        .filter(|n| old.get(*n) != new.get(*n))
-        .copied()
         .collect()
 }
 
@@ -1001,19 +977,14 @@ impl Session {
         variant: &str,
         f: impl FnOnce(&Workspace) -> R,
     ) -> Result<R, CompilerError> {
-        let Some(original) = self.files.get(path).map(|uf| uf.text.clone()) else {
-            self.update_file(path, variant)?;
-            let out = f(&self.ws);
+        let original = self.files.get(path).map(|uf| uf.text.clone());
+        let result = self.update_file(path, variant).map(|_| f(&self.ws));
+        if let Some(text) = original {
+            self.update_file(path, &text)?;
+        } else if result.is_ok() {
             self.remove_file(path)?;
-            return Ok(out);
-        };
-        if let Err(e) = self.update_file(path, variant) {
-            self.update_file(path, &original)?;
-            return Err(e);
         }
-        let out = f(&self.ws);
-        self.update_file(path, &original)?;
-        Ok(out)
+        result
     }
 
     pub fn update_file(&mut self, path: &str, text: &str) -> Result<UpdateResult, CompilerError> {
@@ -1042,16 +1013,10 @@ impl Session {
             .relowered_body_count
             .store(0, std::sync::atomic::Ordering::Relaxed);
         let hash = text_hash(text);
-        let previous_text = self.files.get(path).map(|file| file.text.clone());
 
         if let Some(existing) = self.files.get(path) {
             if existing.text_hash == hash {
-                return Ok(UpdateResult {
-                    tier: UpdateTier::NoChange,
-                    reinferred: Vec::new(),
-                    relowered: Vec::new(),
-                    ..UpdateResult::default()
-                });
+                return Ok(UpdateResult::default());
             }
         }
 
@@ -1073,12 +1038,7 @@ impl Session {
             // copy. No-op rather than adding a duplicate that would self-collide
             // on every stdlib type. Queries on this path resolve to the warm
             // module; its real diagnostics (if any) come from the warm build.
-            return Ok(UpdateResult {
-                tier: UpdateTier::NoChange,
-                reinferred: Vec::new(),
-                relowered: Vec::new(),
-                ..UpdateResult::default()
-            });
+            return Ok(UpdateResult::default());
         }
 
         let new_prints = item_prints(&module, text);
@@ -1088,7 +1048,15 @@ impl Session {
             tracked && only_functions_changed(&self.files[path].item_prints, &new_prints);
 
         let changed: FxHashSet<Ustr> = match self.files.get(path) {
-            Some(old) => changed_names(&name_shapes(&old.item_prints), &name_shapes(&new_prints)),
+            Some(old) => {
+                let old = name_shapes(&old.item_prints);
+                let new = name_shapes(&new_prints);
+                old.keys()
+                    .chain(new.keys())
+                    .filter(|name| old.get(*name) != new.get(*name))
+                    .copied()
+                    .collect()
+            }
             None => FxHashSet::default(),
         };
         let touches_macros = tracked
@@ -1137,93 +1105,48 @@ impl Session {
             self.paths.push(path.to_string());
         }
 
-        let restore = move |s: &mut Self| match previous {
+        let span_only = matches!(&diff, Some(FileDiff::BodiesOnly(items)) if items.is_empty());
+        let scope_path = tracked && scope_changed && !module.items.is_empty() && !touches_macros;
+        let result = match diff {
+            Some(FileDiff::BodiesOnly(changed)) => match changed.as_slice() {
+                [idx] => self.rebuild_body_incremental(path, module, *idx),
+                _ => self.rebuild_module(path, module, &changed),
+            },
+            Some(FileDiff::Interface) if !touches_macros => self.rebuild_interface(
+                module,
+                &changed,
+                ScopeDelta::default(),
+                UpdateTier::Interface,
+                only_functions,
+            ),
+            _ if scope_path => self.rebuild_scope(module, &changed),
+            _ => self.rebuild_users(),
+        };
+        let result = result.map(|mut result| {
+            if result.tier == UpdateTier::BodyOnly && result.body_update.edit.is_none() {
+                result.body_update = BodyUpdate {
+                    edit: previous
+                        .as_ref()
+                        .map(|file| text_edit_delta(path, &file.text, text)),
+                    semantic_bodies: if span_only {
+                        Vec::new()
+                    } else {
+                        result.reinferred.clone()
+                    },
+                    span_only,
+                };
+            }
+            result
+        });
+        self.finish_rebuild(result, "update", path, move |s| match previous {
             Some(prev) => {
                 s.files.insert(path.to_string(), prev);
             }
-
             None => {
                 s.files.remove(path);
                 s.paths.retain(|p| p != path);
             }
-        };
-
-        // The freshly parsed `module` is threaded into the chosen rebuild path
-        // rather than stored: the AST is transient, so the rebuilder cooks+lowers
-        // this owned copy directly (no clone-from-storage, no persisted AST).
-        let span_only = matches!(&diff, Some(FileDiff::LayoutOnly));
-        let scope_path = tracked && scope_changed && !module.items.is_empty() && !touches_macros;
-        let mut result = match diff {
-            Some(FileDiff::BodiesOnly(changed)) => {
-                if changed.len() == 1 {
-                    let idx = changed[0];
-
-                    self.rebuild_or_revert(
-                        "update",
-                        path,
-                        move |s| s.rebuild_body_incremental(path, module, idx),
-                        restore,
-                    )
-                } else {
-                    self.rebuild_or_revert(
-                        "update",
-                        path,
-                        move |s| s.rebuild_module(path, module, &changed),
-                        restore,
-                    )
-                }
-            }
-
-            Some(FileDiff::LayoutOnly) => self.rebuild_or_revert(
-                "update",
-                path,
-                move |s| s.rebuild_module(path, module, &[]),
-                restore,
-            ),
-
-            Some(FileDiff::Interface) if !touches_macros => self.rebuild_or_revert(
-                "update",
-                path,
-                move |s| {
-                    s.rebuild_interface(
-                        module,
-                        &changed,
-                        ScopeDelta::default(),
-                        UpdateTier::Interface,
-                        only_functions,
-                    )
-                },
-                restore,
-            ),
-
-            _ if scope_path => self.rebuild_or_revert(
-                "update",
-                path,
-                move |s| s.rebuild_scope(module, &changed),
-                restore,
-            ),
-
-            // Everything else rebuilds every user file, on purpose: a file the
-            // session did not hold (it is a new fragment, so every lookup
-            // anywhere may now reach it, and nothing recorded a probe on it),
-            // a file with no items left, and a macro-touching edit (its users
-            // must re-expand).
-            _ => self.rebuild_or_revert("update", path, |s| s.rebuild_users(), restore),
-        }?;
-        if result.tier == UpdateTier::BodyOnly && result.body_update.edit.is_none() {
-            result.body_update = BodyUpdate {
-                edit: previous_text
-                    .as_deref()
-                    .map(|old| text_edit_delta(path, old, text)),
-                semantic_bodies: if !span_only {
-                    result.reinferred.clone()
-                } else {
-                    Default::default()
-                },
-                span_only,
-            };
-        }
-        Ok(result)
+        })
     }
 
     /// Whether `module` defines a top-level function under a name some macro
@@ -1487,17 +1410,7 @@ impl Session {
             &self.ws.fragment_scopes[&file],
             &module,
         );
-        let changed_types: Vec<Ustr> = old_types
-            .iter()
-            .filter(|(key, facts)| new_types.get(*key) != Some(*facts))
-            .map(|(key, _)| *key)
-            .chain(
-                new_types
-                    .keys()
-                    .filter(|key| !old_types.contains_key(*key))
-                    .copied(),
-            )
-            .collect();
+        let changed_types = changed_keys(&old_types, &new_types);
 
         let mut to_relower: FxHashSet<ModuleId> = FxHashSet::default();
         for key in &changed_types {
@@ -1688,12 +1601,7 @@ impl Session {
 
     pub fn remove_file(&mut self, path: &str) -> Result<UpdateResult, CompilerError> {
         let Some(previous) = self.files.remove(path) else {
-            return Ok(UpdateResult {
-                tier: UpdateTier::NoChange,
-                reinferred: Vec::new(),
-                relowered: Vec::new(),
-                ..UpdateResult::default()
-            });
+            return Ok(UpdateResult::default());
         };
 
         let pos = self
@@ -1709,7 +1617,8 @@ impl Session {
             s.paths.insert(pos, path.to_string());
         };
 
-        self.rebuild_or_revert("removal", path, |s| s.rebuild_users(), restore)
+        let result = self.rebuild_users();
+        self.finish_rebuild(result, "removal", path, restore)
     }
 
     pub fn diagnostics(&self) -> Vec<CompilerError> {
@@ -2037,86 +1946,35 @@ impl Session {
         new_text: &str,
         new_hash: u64,
     ) -> Result<Option<UpdateResult>, CompilerError> {
-        // The fast path carries the file's syntax errors forward UNCHANGED (it
-        // re-parses only one clean body). That's wrong when the old state had a
-        // recovery error -- this very edit may be FIXING it, so the stale error
-        // would survive (a `... as in` -> `... as int` keystroke left a phantom
-        // "unsupported type" diagnostic until LSP restart). Whenever the file
-        // currently has syntax errors, take the full path, which recomputes them.
-        if self
-            .files
-            .get(path)
-            .is_some_and(|f| !f.syntax_errors.is_empty())
-        {
+        let Some(old) = self.files.get(path) else {
+            return Ok(None);
+        };
+        // A partial reparse cannot tell whether an old recovery error was fixed.
+        if !old.syntax_errors.is_empty() {
             return Ok(None);
         }
-        // --- locate (non-mutating; releases the files borrow before any change) ---
-        let (
-            es,
-            oe,
-            delta,
-            idx,
-            so,
-            eo,
-            line,
-            col,
-            old_iface,
-            old_name,
-            old_text,
-            old_prints,
-            old_macros,
-            old_syntax_errors,
-            old_package,
-            old_global_policy,
-            old_scope_hash,
-            old_contribution,
-        ) = {
-            let Some(old) = self.files.get(path) else {
-                return Ok(None);
-            };
-            let (es, oe, delta) = byte_diff(&old.text, new_text);
-            let Some(idx) = locate_body_edit(&old.item_prints, es, oe) else {
-                return Ok(None);
-            };
-            let p = &old.item_prints[idx];
-            (
-                es,
-                oe,
-                delta,
-                idx,
-                p.item_span.offset_range().0,
-                p.item_span.offset_range().1,
-                p.item_span.line_range().0,
-                p.item_span.col_range().0,
-                p.iface_hash,
-                p.name,
-                old.text.clone(),
-                old.item_prints.clone(),
-                old.macros.clone(),
-                old.syntax_errors.clone(),
-                old.package.clone(),
-                old.global_policy,
-                old.scope_hash,
-                old.contribution.clone(),
-            )
+        let (start, end, byte_delta) = byte_diff(&old.text, new_text);
+        let Some(idx) = locate_body_edit(&old.item_prints, start, end) else {
+            return Ok(None);
         };
-        let _ = (es, oe);
-
-        // Re-parse just this item with absolute spans (transient mini-Ast).
-        let new_end = (eo as isize + delta) as usize;
+        let print = &old.item_prints[idx];
+        let span = print.item_span;
+        let (so, eo) = span.offset_range();
+        let new_end = (eo as isize + byte_delta) as usize;
         if new_end > new_text.len() || so > new_end {
             return Ok(None);
         }
-        let sub = &new_text[so..new_end];
-        let Ok(mut mini) = skull_parser::parse_one_item(sub, ustr(path), so, line, col) else {
-            return Ok(None); // a hard tokenizer error -> let the full path surface it
+        let Ok(mut mini) = skull_parser::parse_one_item(
+            &new_text[so..new_end],
+            ustr(path),
+            so,
+            span.line_range().0,
+            span.col_range().0,
+        ) else {
+            return Ok(None);
         };
-        // The mini-Ast lowers with the same unit facts as a full reparse would.
-        // This path bails unless the item is exactly one function, so no global
-        // is re-lowered here -- but a mini-Ast that silently claimed `game`
-        // would be a trap the day that changes.
-        mini.package = old_package.clone();
-        mini.global_policy = old_global_policy;
+        mini.package = old.package.clone();
+        mini.global_policy = old.global_policy;
         // The parse is total now; a recovered (partial) item must NOT be installed
         // in place. Bail to the full reparse, which keeps the best-effort tree and
         // records the recovery error as a diagnostic.
@@ -2133,7 +1991,8 @@ impl Session {
             return Ok(None);
         }
         let np = mini_prints.pop().unwrap();
-        if np.kind != ItemKindTag::Fn || np.name != old_name || np.iface_hash != old_iface {
+        if np.kind != ItemKindTag::Fn || np.name != print.name || np.iface_hash != print.iface_hash
+        {
             return Ok(None);
         }
         // The item parse stops at the end of the function; text left after it
@@ -2153,63 +2012,42 @@ impl Session {
             return Ok(None);
         };
         let old_fn_span = self.ws.module(mid).functions[fid].span;
-        let new_fn_span = match &mini.items[0].kind {
-            ItemKind::Function(f) => f.span,
-            _ => return Ok(None),
+        let item = &mini.items[0];
+        let ItemKind::Function(f) = &item.kind else {
+            return Ok(None);
         };
-        let at = old_fn_span.offset_range().1;
-        let byte_delta =
-            new_fn_span.offset_range().1 as isize - old_fn_span.offset_range().1 as isize;
-        let line_delta = new_fn_span.line_range().1 as isize - old_fn_span.line_range().1 as isize;
-
-        // --- commit: install the new prints, then relower under rebuild_or_revert
-        // (on failure it restores the old file + full-rebuilds from text). ---
         let item_shift = TextEditDelta {
             file: ustr(path),
             at: eo,
-            byte_delta: delta,
-            line_delta,
+            byte_delta,
+            line_delta: f.span.line_range().1 as isize - old_fn_span.line_range().1 as isize,
         };
-        let new_prints = build_shifted_prints(old_prints, idx, np, &item_shift);
-        // Keep macro def-lines accurate: shift those declared AFTER the edited
-        // item by the same delta the prints got (the edited item is a non-macro
-        // fn, so a macro is wholly before or wholly after its `eo` end offset).
-        let mut new_macros = old_macros;
-        for md in new_macros.iter_mut() {
+        let edit = text_edit_delta(path, &old.text, new_text);
+        let mut macros = old.macros.clone();
+        for md in &mut macros {
             item_shift.shift_span(&mut md.span);
         }
-        let previous = self.files.insert(
-            path.to_string(),
-            UserFile {
-                text_hash: new_hash,
-                item_prints: new_prints,
-                text: new_text.to_string(),
-                macros: new_macros,
-                package: old_package,
-                global_policy: old_global_policy,
-                // The fast path only re-parses ONE clean body (it bails to the
-                // full path on any recovery error), so the file's syntax errors
-                // are unchanged by this localized edit.
-                syntax_errors: old_syntax_errors,
-                scope_hash: old_scope_hash,
-                // The edit is inside one function body, which contributes
-                // nothing to the namespace tree.
-                contribution: old_contribution,
-            },
-        );
-        let restore = move |s: &mut Self| {
+        let next = UserFile {
+            text_hash: new_hash,
+            item_prints: build_shifted_prints(old.item_prints.clone(), idx, np, &item_shift),
+            text: new_text.to_string(),
+            macros,
+            package: old.package.clone(),
+            global_policy: old.global_policy,
+            syntax_errors: Vec::new(),
+            scope_hash: old.scope_hash,
+            contribution: old.contribution.clone(),
+        };
+        let previous = self.files.insert(path.to_string(), next);
+        let result =
+            self.commit_body_relower(mid, fid, &mini, f, &item.annotations, old_fn_span, f.span);
+        let mut result = self.finish_rebuild(result, "update", path, move |s| {
             if let Some(prev) = previous {
                 s.files.insert(path.to_string(), prev);
             }
-        };
-        let mut result = self.rebuild_or_revert(
-            "update",
-            path,
-            move |s| s.commit_body_relower(mid, fid, &mini, 0, at, byte_delta, line_delta),
-            restore,
-        )?;
+        })?;
         result.body_update = BodyUpdate {
-            edit: Some(text_edit_delta(path, &old_text, new_text)),
+            edit: Some(edit),
             semantic_bodies: result.reinferred.clone(),
             span_only: false,
         };
@@ -2224,10 +2062,10 @@ impl Session {
         mid: ModuleId,
         fid: Idx<Function>,
         ast: &Ast,
-        item: usize,
-        at: usize,
-        byte_delta: isize,
-        line_delta: isize,
+        f: &skull_parser::FunctionDef,
+        annotations: &[skull_parser::Annotation],
+        old_fn_span: Span,
+        new_fn_span: Span,
     ) -> Result<UpdateResult, CompilerError> {
         let owner = BodyOwner::Function(fid);
         let old_gen = self
@@ -2238,14 +2076,9 @@ impl Session {
             .map(|b| b.generation)
             .unwrap_or(0);
 
-        let item = &ast.items[item];
-        let ItemKind::Function(f) = &item.kind else {
-            comp_error!(
-                Span::unknown(),
-                "skull incremental: edited item is not a function"
-            );
-        };
-        let annotations = item.annotations.as_slice();
+        let at = old_fn_span.offset_range().1;
+        let byte_delta = new_fn_span.offset_range().1 as isize - at as isize;
+        let line_delta = new_fn_span.line_range().1 as isize - old_fn_span.line_range().1 as isize;
 
         let old_inf = self
             .ws
@@ -2354,21 +2187,23 @@ impl Session {
         // so re-parse the stored text for a fresh un-cooked module to hand to the
         // whole-module path. Effectively unreachable for a classify-confirmed
         // body edit.
-        let item = edited.items.iter().position(|it| {
-            it.span.offset_range().0 == new_start && matches!(it.kind, ItemKind::Function(_))
+        let item = edited.items.iter().find_map(|it| match &it.kind {
+            ItemKind::Function(f) if it.span.offset_range().0 == new_start => Some((it, f)),
+            _ => None,
         });
-        let Some(item) = item else {
+        let Some((item, f)) = item else {
             let m = self.parse_stored(ustr(path))?;
             return self.rebuild_module(path, m, &[changed_idx]);
         };
-
-        let at = old_fn_span.offset_range().1;
-        let byte_delta =
-            new_fn_span.offset_range().1 as isize - old_fn_span.offset_range().1 as isize;
-        let line_delta = new_fn_span.line_range().1 as isize - old_fn_span.line_range().1 as isize;
-
-        let result =
-            self.commit_body_relower(mid, fid, &edited, item, at, byte_delta, line_delta)?;
+        let result = self.commit_body_relower(
+            mid,
+            fid,
+            &edited,
+            f,
+            &item.annotations,
+            old_fn_span,
+            new_fn_span,
+        )?;
         self.ws.phase_timings.push(("cook one", cook_dur));
         Ok(result)
     }
@@ -2386,14 +2221,14 @@ impl Session {
         })
     }
 
-    fn rebuild_or_revert(
+    fn finish_rebuild(
         &mut self,
+        result: Result<UpdateResult, CompilerError>,
         action: &str,
         path: &str,
-        rebuild: impl FnOnce(&mut Self) -> Result<UpdateResult, CompilerError>,
         restore: impl FnOnce(&mut Self),
     ) -> Result<UpdateResult, CompilerError> {
-        match rebuild(self) {
+        match result {
             Ok(result) => Ok(result),
             Err(e) => {
                 restore(self);
