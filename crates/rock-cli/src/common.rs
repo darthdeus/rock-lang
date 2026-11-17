@@ -650,7 +650,31 @@ fn child_process_cpu_time(pid: u32) -> Option<Duration> {
     Some(Duration::from_nanos(u64::try_from(nanos).ok()?))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+fn child_process_cpu_time(pid: u32) -> Option<Duration> {
+    use winapi::shared::minwindef::FILETIME;
+    use winapi::um::handleapi::CloseHandle;
+    use winapi::um::processthreadsapi::{GetProcessTimes, OpenProcess};
+    use winapi::um::winnt::PROCESS_QUERY_LIMITED_INFORMATION;
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+    let mut times = [unsafe { std::mem::zeroed::<FILETIME>() }; 4];
+    let [created, exited, kernel, user] = &mut times;
+    let read = unsafe { GetProcessTimes(handle, created, exited, kernel, user) };
+    unsafe { CloseHandle(handle) };
+    if read == 0 {
+        return None;
+    }
+    let ticks =
+        |time: &FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+    let nanos = ticks(kernel).checked_add(ticks(user))?.checked_mul(100)?;
+    Some(Duration::from_nanos(nanos))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn child_process_cpu_time(_pid: u32) -> Option<Duration> {
     // Platforms without a live child-CPU query use the wall-clock backstop.
     None
