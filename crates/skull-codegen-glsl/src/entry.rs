@@ -89,14 +89,7 @@ pub struct ShaderEmission {
     pub ir: ShaderIR,
 }
 
-/// **One stage's validated plan**: its lowered body, the emittable helpers it
-/// reaches in emission order, and the prelude flags those bodies imply.
-///
-/// Built from the supplied graph/view population, which performs every
-/// rejection the stage's own code can produce -- lowering, the tier-0 body
-/// profile, recursion, a foreign body with no GLSL mapping, a helper outside
-/// tier 0 and the stage-specific builtin validation. Rendering reads it and
-/// cannot reach a different verdict, because there is nothing left to decide.
+/// Lowered entry and helpers, ready to render with the retained concrete plans.
 pub(crate) struct StagePlan {
     /// The stage's concrete bodies -- target-neutral, and the only part of this
     /// plan a non-GLSL backend would want.
@@ -292,20 +285,7 @@ pub(crate) fn reject_population_cycles(
     Ok(())
 }
 
-/// **The one validated plan for a single-entry (A1) shader program.**
-///
-/// Everything emission decides before it writes GLSL, in emission's own order:
-/// the stage classification of the entry's signature, its lowering and tier-0
-/// body pass over the graph/view population, the stage-builtin validation, the
-/// `@uniform` block's std140 layout and the program's `@textures` slot
-/// assignment.
-///
-/// [`plan_shader_with_view`] builds this and [`render_shader_plan`] renders
-/// it. There is no second sequence, so the mono shader
-/// artifact view structurally cannot admit a program emission refuses -- which
-/// is not what a summary of these checks could promise, and did not deliver: it
-/// accepted a standalone `@shader(vertex)` entry and never reached the
-/// layout/slot planning at all.
+/// The fullscreen fragment entry and its resolved interface.
 pub(crate) struct EntryPlan {
     fref: FuncRef,
     shape: EntryShape,
@@ -364,10 +344,7 @@ pub(crate) fn plan_shader_entry_program(
             ));
         }
     }
-    // The entry's signature is validated by its STAGE classification, never by
-    // the fn-library tier-0 leaf check: an `@uniform` block param is legal here
-    // and is not a tier-0 leaf (asking the library check of an entry rejected
-    // 1,539 real shaders).
+    // The stage classification admits interface params such as uniform structs.
     let class = classify_entry(ws, f)?;
     let stage = plan_stage_from_view(ws, scx, stage_view, IrStage::Fragment, &view.concrete_plans)?;
     let interface = ShaderInterfacePlan {
@@ -417,9 +394,7 @@ pub(crate) fn render_shader_entry(
     let f = &ws.module(plan.fref.module).functions[plan.fref.func];
     let shape = &plan.shape;
 
-    // A1 goes through the SAME resolver A2 does. Rendering every ABI block
-    // directly would emit one the interface never claimed, which is exactly
-    // what the program-wide validation exists to refuse.
+    // Resolve the fragment ABI before writing its declarations.
     let program = ProgramAbi::of(
         &plan.interface,
         &plan.abi,

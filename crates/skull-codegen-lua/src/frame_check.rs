@@ -2,14 +2,8 @@
 
 use super::*;
 
-/// Reject a body whose emitted Lua function would break one of LuaJIT's
-/// parse-time frame caps, with a Rock span in place of LuaJIT's load-time
-/// error. See [`frame_limits`] for the model and the direction it errs in.
-///
-/// Everything it reads is the emitter's own final answer: `top_locals` is the
-/// `local` line just written, `color_scope` and `loops` are what the body-scoped
-/// declarations and `for` lines come from, and the forward tables are what
-/// decides which calls keep their results and which return statements survive.
+/// Diagnose LuaJIT frame overflow at the Rock source using the final
+/// declarations, folds and forwarded calls.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_frame_limits(
     ws: &Workspace,

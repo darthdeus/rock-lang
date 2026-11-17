@@ -2,10 +2,7 @@
 
 use super::*;
 
-/// The shared worklists driving [`emit_with_closure`] and [`emit_program`]:
-/// a fn queue (roots + transitively discovered plain-Rock callees) and a global-
-/// init queue (module globals the emitted bodies read), plus the accumulated
-/// `gctx`/`names` a body needs to render its `Inst::Global` reads.
+/// An opaque inline body selected by the artifact view.
 pub(super) struct JsInlineBody {
     pub(super) instance: Instance,
     pub(super) decl: FuncRef,

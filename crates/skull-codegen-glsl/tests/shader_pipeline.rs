@@ -1178,13 +1178,7 @@ fn texture_group_emits_and_reports_slots_in_order() {
 
 // --- @engine: the engine-owned block at binding 0 ----------------------------
 
-/// `@engine` is a distinct ROLE, not a second `@uniform`: the engine produces
-/// it, its lifetime is the pass rather than the draw, and it binds at index 0 so
-/// BOTH stages of a program name the same block.
-///
-/// Shaped like the sprite batch after the port: engine-owned camera/pass state
-/// in `EngineU`, and the shader's own vertex data (`uYBounds` is engine-owned so
-/// it moves in; grass keeps `entity_count` in its own group) beside it.
+/// Both stages use the same pass-lifetime @engine block at binding 0.
 const ENGINE_SRC: &str = r#"
     value QuadVert { aPos: Vec2, aTexCoord: Vec2, aColor: Vec4 }
     value EngineU  { uProjection: Mat4, uView: Mat4, uYBounds: Vec2, uTime: float }

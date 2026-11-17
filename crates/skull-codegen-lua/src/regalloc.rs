@@ -1,17 +1,4 @@
-//! Liveness-based register allocation for value locals — collapses the per-value
-//! `v<raw>` locals down to the few simultaneously live, so a function stays under
-//! luajit's 200-locals-per-function PARSE cap (a hard error that, since the whole
-//! program is one chunk, would kill the entire load).
-//!
-//! Each value (`Idx<Inst>` that produces a value) is defined exactly once (the
-//! IR is SSA-like for values; mutation rides on cells), so liveness is a standard
-//! backward dataflow fixpoint over the CFG; non-interfering values then share a
-//! color via greedy graph coloring. Each color is one Lua local `r<color>`.
-//!
-//! Cells are NOT colored here (they are mutable, comparatively few); they keep
-//! their `c<raw>` locals. Correctness-first and simple — not the old backend's
-//! perf-tuned two-pool scheme; this runs once per emit and the corpus functions
-//! are small.
+//! Liveness-based coloring of emitted value and cell locals.
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
@@ -523,13 +510,8 @@ impl<'a> TrackedLiveness<'a> {
     }
 }
 
-/// What each emitted statement and terminator of one body reads where it is
-/// printed, in operand order: an unfolded value, or the cell of a folded load,
-/// seeing through every other folded operand. A statement's own cell reads
-/// come first. Seeing through folded operands is the expensive part of every
-/// liveness pass after folding, so it is flattened once; the later passes
-/// fold more (never less), and [`Reads::values`] and [`Reads::cells`] expand
-/// a leaf value they fold where it is read.
+/// Flatten each statement's folded operands once. Later passes can fold more
+/// values, so consumers expand any newly folded leaf at its use.
 pub(crate) struct Reads {
     /// By raw instruction, then by raw block for terminators: a range of
     /// `leaves`.
@@ -951,26 +933,8 @@ fn emitted_cell_defs(
     }
 }
 
-/// The registers and cells of one body in one dense bit space -- registers
-/// first, cells from the next word boundary -- with what each statement and
-/// terminator defines and reads there, the bits live into each block, and
-/// the interference within each kind. Registers and cells are colored apart,
-/// but their liveness is one problem over one walk of the body.
-///
-/// A register is a value-producing instruction in `scope` (the reachable
-/// blocks of one function or closure body) that the emitter gives a local:
-/// one `inline` does not tree-fold into its use, `alias` does not compute in a
-/// cell, and whose result something reads. A use of a folded value is seen
-/// THROUGH to the registers and cells its expression reads (via [`Reads`]),
-/// so those stay live up to the using statement.
-///
-/// Cells are mutable variables (Lua locals): `Store`/`CallMulti` dest/
-/// `MapNext` write = a def, `Load`/`MapNext` cursor = a use, a param is
-/// defined at entry. This is the classic live-variable interference (multiple
-/// defs, unlike SSA values), so two cells whose live ranges are disjoint share
-/// one `c<color>`. Without this each cell is its own local and a big function
-/// blows luajit's 200-local parse cap (a large update function can need 193
-/// cells).
+/// Allocate registers and cells in separate color spaces over shared liveness.
+/// Expand folded operands into the reads they perform when emitted.
 pub(crate) struct Locals<'a> {
     func: &'a MirFunc,
     scope: &'a [Idx<Block>],
@@ -1227,17 +1191,8 @@ impl<'a> Locals<'a> {
         &self.bits[self.marks[e].1 as usize..self.marks[e + 1].0 as usize]
     }
 
-    /// Color every register: values that never interfere share a color, and
-    /// the emitter renders a colored value as `r<color>`. Coloring is per
-    /// scope, so a closure's values are independent of the enclosing
-    /// function's (only cells cross the boundary).
-    ///
-    /// `loops` partitions the coloring: a value whose defs and effective uses
-    /// all sit inside one counted loop's body (and which is not live across
-    /// the back edge) is colored from that loop's own palette, and the color
-    /// is reported in [`ValueAlloc::color_scope`] so the emitter declares it
-    /// inside the `for` block. Palettes are disjoint, so a loop-scoped local
-    /// never shares a name with (or shadows) a function-top local.
+    /// Assign register colors from the innermost loop that contains their live range.
+    /// Separate palettes keep loop locals from shadowing outer locals.
     pub(crate) fn color_values(&self, loops: &[LoopScope]) -> ValueAlloc {
         let (func, blocks) = (self.func, self.scope);
         let n = blocks.len();
@@ -1336,13 +1291,7 @@ impl<'a> Locals<'a> {
             }
         }
 
-        // Greedy coloring in arena order for deterministic output. `used` is a dense
-        // bool scratch (colors are small ints), reused across values so each one pays
-        // no per-value HashSet alloc/hash. The result is a dense `raw(inst) -> color`
-        // table (`u32::MAX` = no register: inlined or non-value), so the emitter reads
-        // a value's color by array index instead of hashing per operand reference.
-        // A value only takes a color its partition owns (`color_part`), so top-level
-        // and loop-scoped values never share a Lua local.
+        // Color in emit-ID order. Every color belongs to exactly one partition.
         let mut colors: Vec<u32> = vec![u32::MAX; func.insts.len()];
         let mut color_of: Vec<u32> = vec![u32::MAX; v_count];
         let mut color_part: Vec<u32> = Vec::new();
@@ -1400,13 +1349,8 @@ impl<'a> Locals<'a> {
     /// to a unique color and are never emitted with their enclosing body.
     pub(crate) fn color_cells(&self) -> Vec<u32> {
         let (func, ci, force) = (self.func, &self.ci, &self.force);
-        // A force-unique cell conflicts with EVERY cell (a closure captures the local
-        // by identity, so it must never be reused). Rather than materialize O(F x C)
-        // interference edges, give each force-unique cell its own color 0..F-1 and
-        // start every other cell's search at F — equivalent, but avoids the edge
-        // explosion that once dominated this pass on inlined functions.
-        // Dense `raw(cell) -> color` (`u32::MAX` = uncolored), so the emitter reads a
-        // cell's color by array index instead of hashing per `Load`/`Store`.
+        // Pinned cells own their colors because closures capture them by identity.
+        // Reserve those colors up front to avoid materializing their interference.
         let mut colors: Vec<u32> = vec![u32::MAX; func.cells.len()];
         let mut color_of: Vec<u32> = vec![u32::MAX; self.cells.len()];
         let mut next_unique = 0u32;
@@ -1421,12 +1365,7 @@ impl<'a> Locals<'a> {
         }
         let base = next_unique;
 
-        // Greedy-color the rest from `base` up, over their real (non-force-unique)
-        // interference. Edges to force-unique cells are irrelevant — those colors are
-        // all below `base`. Arena order for deterministic output. `used` is a dense
-        // bool scratch reused across cells (no per-cell HashSet alloc).
-        // A copy between two cells that share a color prints nothing, so a cell
-        // takes the color of a copy partner when no neighbor holds it.
+        // Prefer a copy partner when it does not interfere, so the copy can disappear.
         let mut partners: Vec<(u32, u32)> = Vec::new();
         for &b in self.scope {
             for &id in &func.blocks[b].insts {
@@ -1534,18 +1473,8 @@ pub(crate) fn pinned_cells(func: &MirFunc, flow: &Flow) -> Vec<bool> {
     pinned
 }
 
-// --- nil-kill: where each emitted local dies ------------------------------
-//
-// LuaJIT assembles a side trace only if every non-constant slot in the parent
-// trace's exit snapshot fits a register at the side-trace head (13 GPR / 16 FPR
-// on x64, `asm_head_side`), and snapshot pruning covers only the innermost
-// frame up to its first jump. A local assigned `nil` after its last use is a
-// snapshot constant from then on, in every frame of the inlined chain
-// (`benchmarks/luajit/trace-aborts/calleekill.lua`). This pass computes, over
-// the locals the emitter actually declares (value colors `r<k>`, cell colors
-// `c<k>`), the point at which each one dies; the emitter writes `<local> = nil`
-// there. Kills are placed only where the local is dead on every path, so a
-// missed kill costs pressure and a misplaced one would be a miscompile.
+// Nil kills make dead locals constants in LuaJIT exit snapshots, reducing
+// the parent-frame slots side traces need to inherit.
 
 /// One emitted Lua local: a value register `r<color>` or a cell local `c<color>`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1934,13 +1863,8 @@ pub(crate) fn nil_kills<'a>(
         return_tail: Vec::new(),
     };
 
-    // Backward walk per block: a slot read or written by a statement and not
-    // live after it dies there -- unless a later statement of the block
-    // redefines it before any statement that can call. No exit can then
-    // observe the stale value: an exit at one of those pure statements
-    // re-executes from it, and LuaJIT's own snapshot pruning drops a slot the
-    // straight-line continuation defines. Such a kill would only cost the
-    // interpreter a `KPRI`.
+    // Skip a kill if a later straight-line statement overwrites the slot before
+    // a call. LuaJIT prunes that slot when the continuation redefines it.
     let mut live = BitSet::new(s_count);
     let mut dead: Vec<usize> = Vec::new();
     let mut next_pure_defs: Vec<usize> = Vec::new();

@@ -247,13 +247,7 @@ pub(crate) struct ArrayParam {
     pub(crate) decl: ArrayMemberDecl,
 }
 
-/// Classify param `i` as an array member, or `None` when it is not one.
-///
-/// The `@size` ANNOTATION's span travels on the decl and is what every layout
-/// rejection is reported at. `ParamDecl` carries no span of its own (that is
-/// bone's, and off limits), and the annotation is both present on every array
-/// param by construction and the exact thing an author edits to fix a capacity
-/// or budget rejection.
+/// Report layout errors at the @size annotation the author can change.
 fn classify_array_param(
     ws: &Workspace,
     pd: &bone_core::hir::ParamDecl,
@@ -291,15 +285,7 @@ fn classify_array_param(
     }))
 }
 
-/// The `layout(std140) uniform <Blk> { T name[N]; .. };` declaration for an
-/// array block.
-///
-/// Every line comes from the PLAN -- element kind through [`wire_glsl`], the
-/// same function the scalar declaration uses, and capacity from the member the
-/// offsets were computed for. The emitter deliberately holds no `GlslTy` for an
-/// array element: a second classification of the same param is exactly how a
-/// declaration and a layout drift into disagreeing, and "one layout authority"
-/// would stop being true the moment it existed.
+/// Use the layout plan's element kinds and capacities for the declaration.
 pub(crate) fn uniform_array_block_decl(plan: &UniformArrayBlockPlan) -> String {
     let mut s = format!("layout(std140) uniform {} {{\n", plan.block_name);
     for m in &plan.members {
@@ -437,10 +423,7 @@ fn texture_group_samplers(
         .collect())
 }
 
-/// Every param role, so a check that means "all the others" cannot go stale by
-/// listing them. `reject_conflicting_texture_role` enumerated the three that
-/// existed when it was written, and adding `@engine` silently widened what it
-/// let through.
+/// Other roles excluded by a texture-group annotation.
 const PARAM_ROLES: [&str; 4] = ["attr", "instance", "uniform", "engine"];
 
 /// `@textures` is exclusive with the other param roles -- a group is a binding

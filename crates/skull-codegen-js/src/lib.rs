@@ -1,21 +1,4 @@
-//! The JS backend: intrinsic table, emitter and runtime prelude. The THIRD
-//! [`IntrinsicTable`] shape after luajit (in-source `inline(lua)` bodies) and
-//! GLSL. Covers the eight scalar fallback+mapping intrinsics of the conformance
-//! differential (`tests/intrinsics/scalar_reference.rock`), the base math
-//! set, and the `@native_required` NativeBuffer four-fn surface
-//! (TypedArrays as `Ptr<T>`,
-//! cross-backend-verified by `tests/nb_differential.rs`). The [`emit`] module
-//! lowers Rock bodies in the supported subset to JS; the node execution
-//! harness runs both differentials.
-//!
-//! **Mappings are algorithmically distinct from the Rock fallbacks** where a
-//! second implementation exists (`min`/`max` -> `Math.min`/`max` vs the
-//! fallback's comparisons; `clamp` -> nested min/max; `lerp` -> `a(1-t)+bt` vs
-//! the fallback's `a+(b-a)t`; `sign` -> `Math.sign` vs the comparison chain), so
-//! the differential compares two implementations, not a thing to itself. `round`
-//! (floor(x+0.5)) and `fract` (x-floor(x)) coincide with their fallback math --
-//! the diff there only proves both emit paths produce runnable JS (logged in
-//! optional backend risk).
+//! JavaScript emission, intrinsic mappings and runtime support.
 
 use bone_core::hir::Function;
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
@@ -92,13 +75,8 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     // their portable Rock bodies -- no JS row.
     template("isnan", 1, "Number.isNaN($1)"),
     template("isinf", 1, "(!Number.isFinite($1) && !Number.isNaN($1))"),
-    // NativeBuffer four-fn surface:
-    // `Ptr<T>` IS the TypedArray on JS, so `.ptr` indexes with brackets exactly
-    // like the luajit cdata. TypedArray store conversion wraps mod 2^n, matching
-    // LuaJIT's native truncation (differentially verified by tests/nb_differential.rs).
-    // `int`/`float` allocs no longer route through a named intrinsic -- they lower
-    // to the `FfiNewArray` MIR node (`native_buffer_alloc<T>`), rendered in
-    // `emit.rs`; only the phantom-width variants keep a per-type template here.
+    // Phantom-width buffers use TypedArray allocation templates. Generic
+    // native_buffer_alloc is lowered to FfiNewArray.
     template("__nb_alloc_u8", 1, "new Uint8Array($1)"),
     template("__nb_alloc_i8", 1, "new Int8Array($1)"),
     template("__nb_alloc_u16", 1, "new Uint16Array($1)"),
@@ -298,12 +276,7 @@ function __nb_checked_set(buf, i, v) {
 }
 ";
 
-/// JS shims for the checked Vec indexing helpers codegen emits
-/// (`__vec_checked_get`/`__vec_checked_set`): `_data` is a 0-based dense array
-/// (`_data[i]`), bounds-erroring on miss. The error message shape follows the
-/// luajit stdlib (`f5efe7604`); it is not compared in-scope (an OOB index
-/// throws -> the harness reports FAIL, matching luajit -- `try_call` catching is
-/// out of scope).
+/// Checked Vec access into the 0-based JS backing array.
 pub const JS_VEC_CHECK_SHIMS: &str = "\
 function __vec_checked_get(vec, i) {
   if (i < 0 || i >= vec.len) { throw new Error(\"Vec index out of bounds: index \" + i + \" is outside [0, \" + vec.len + \")\"); }
@@ -756,26 +729,9 @@ function __rock_make_enum(variant, ty, kv) {
 }
 "#;
 
-/// `inspect` / `inspect_formatted`: a faithful port of `__rock_inspect_value`
-/// (stdlib/unified.rock). Adapts to the JS shapes: a struct/enum `{__ty, ...}`
-/// object (keys sorted by `lua_tostring`, `__ty`/`__variant` skipped), a Vec
-/// `{_data (0-based), len, __ty:"Vec"}`, a JS `Map` (raw-table
-/// analog), a JS array (Lua array-table analog), and scalars. A capturing-lambda
-/// CodeRef env record (`__slot`) is an opaque callable LEAF (`String(fn)`), matching the
-/// luajit `__rock_fn_mt` rule; a `visited` Map detects cycles. NOTE: most inspect
-/// tests are VACUOUS -- a `@test(output=..)` whose expected contains `{` is an
-/// interpolated string, so its expectation is dropped (`out=nil`) and the test
-/// only checks that inspect RUNS; the byte-checked cases are the brace-free
-/// scalars (`"str"`, numbers, bools). Compact/multiline threshold + key sort
-/// reproduce the Lua renderer for the cross-backend `inspect(x) == "..."` pins.
-///
-/// A struct renders through `__rock_inspect_ty[<__ty>]`, a per-type function
-/// `build_inspect_ty_defs` emits for every realized struct and declared child: it
-/// supplies the DECLARED fields, because a null field is an absent key and a key walk alone
-/// therefore under-reports the shape, and an `embed` field is stored as flat
-/// `<name>.<leaf>` slots that carry no declared name at all. That is luajit's
-/// `_G.__ROCK_TYPE_TABLE` lookup replaced by compile-time-emitted dispatch
-/// -- no universal type table on JS.
+/// Match the stdlib inspect renderer for formatting, key order and cycle handling.
+/// Per-type renderers retain declared null fields and rebuild embedded fields
+/// from flat leaf keys.
 pub const JS_INSPECT_RUNTIME: &str = r#"
 var __rock_inspect_ty = {};
 var __rock_col_mat = {};
@@ -1858,14 +1814,7 @@ impl IntrinsicTable for JsIntrinsics<'_> {
     }
 }
 
-/// The JS backend's realization oracle, as the artifact seam.
-///
-/// A zero-sized handle over [`emit::js_supply`] -- the SAME function
-/// `render_call` and `discover_callees` branch on. `skull::artifact` cannot
-/// depend on this crate (the backend is driven from `rock-cli`), so the view
-/// takes the oracle through
-/// [`skull_mir::intrinsics::BackendRealization`]; what it carries is the
-/// behavior, not a description of it.
+/// Artifact discovery and call rendering use the same JS supply lookup.
 pub struct JsBackendRealization;
 
 impl skull_mir::intrinsics::BackendRealization for JsBackendRealization {

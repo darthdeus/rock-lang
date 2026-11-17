@@ -1,21 +1,5 @@
-//! skull-codegen-glsl -- GLSL function-library emission.
-//!
-//! A second codegen backend over the shared `skull-mir` substrate (sibling of
-//! `skull-codegen-lua`). Given a typechecked [`Workspace`] and a set of root fn
-//! names, [`emit_shader_library`] emits GLSL function definitions for the roots
-//! plus their reachable callees, topologically ordered (callees before callers).
-//!
-//! Two things make this a RESTRICTED profile, not a general backend:
-//!   - Value structs stay first-class `vecN` (the `ScalarCtx` values-first-class
-//!     flag), never the luajit scalar-leaf ABI.
-//!   - A strict profile pass rejects everything above tier 0 (recursion, strings,
-//!     `Vec`/`Map`/`Arena`, optionals, closures, `NativeBuffer`, coroutines, and
-//!     any call with neither a mapping-table entry nor an emittable body). Never
-//!     skip-and-continue; never emit a guess.
-//!
-//! The tier-0 intrinsic mapping table ([`intrinsic_template`]) is the hand-written
-//! spec, keyed by the callee's mangled signature (name +
-//! GLSL param types) -- the future `@intrinsic` GLSL column.
+//! Emit GLSL libraries and shader programs from concrete MIR.
+//! Shader values remain first-class instead of using Lua's scalar-leaf ABI.
 
 pub use skull_mir::shader_ir::GlslProfile;
 

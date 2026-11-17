@@ -1,9 +1,4 @@
-//! Emitted-Lua contracts for the dumb printer. Each lowers a snippet to MIR and
-//! asserts its Lua. Naming is raw-arena-index based (`v<raw>`/`c<raw>`/`bb<raw>`),
-//! so value numbers skip the indices consumed by effect instructions (`Store`).
-//!
-//! Whole programs run under luajit in `skull/tests/lua_driver_execution.rs`,
-//! through the shipped pipeline; these pin the textual shape of one body.
+//! Exercise textual and runtime contracts for individual emitted Lua bodies.
 
 mod common;
 
@@ -1043,11 +1038,6 @@ fn uint_checks_bind_shared_helpers_as_upvalues() {
 
 #[test]
 fn emits_interpolation_as_flat_concat() {
-    // Interpolation must emit ONE flat `..` run (`a .. b .. c .. d .. e`), not
-    // left-nested binary concats (`((((a .. b) .. c) .. d) .. e)`). LuaJIT's
-    // BC_CAT folds a flat run into a SINGLE string allocation; nesting allocates
-    // an intermediate per step (~2x -- the dominant skull-vs-rock HUD/text alloc
-    // gap). Pin the codegen shape: a 5-part interpolation must not deeply nest.
     let body = emit(
         "fn label(a: int, b: int) -> string { \"x={a}/{b} done\" }",
         "label",
@@ -1055,14 +1045,6 @@ fn emits_interpolation_as_flat_concat() {
     assert!(!body.contains("((("), "{body}");
     assert!(body.matches(" .. ").count() >= 4, "{body}");
 }
-
-// Enum match execution is covered end-to-end where the program-level enum
-// scaffolding (`<Enum>_ct` ctors, `ffi.cdef` typedefs) is emitted: the `skull`
-// umbrella crate (`enum_cdata`/`enum_scalarize`/`enum_payload_sroa`) and the
-// Rock suite (`tests/patterns/enums.rock`). The per-function `run` harness here
-// can't emit that scaffolding (it would need a dep on `skull`), so it can't
-// execute a scalarized-enum match; per-function match shape is pinned by
-// skull-mir's `match_enum_*` lowering tests.
 
 // --- Multi-return ABI for tuple-returning fns ---
 
@@ -1429,13 +1411,7 @@ fn a_self_recursive_tail_call_is_forwarded() {
     assert!(lua.contains("do return down_int_int("), "{lua}");
 }
 
-// --- Callee binding as immutable upvalues ------------------
-//
-// Callee binding defines a function as a factory whose parameters hold its
-// callees, so every bound call reads an immutable upvalue (2 constant-pool
-// slots on GC64) instead of a global (5, plus a guard). The assembler emits
-// the matching `<name> = __rock_mk_<name>(<callees>)` line after every
-// definition.
+// Callee binding
 
 /// [`emit_clean`] with its callee binding plan, the call-graph components
 /// populated from this harness's own instance graph exactly as

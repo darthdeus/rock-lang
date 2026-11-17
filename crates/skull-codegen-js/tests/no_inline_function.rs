@@ -1,28 +1,5 @@
-//! Emitter discipline pin: the JS backend hoists every fn to top-level, lowers
-//! closures via the shared `convert_closures` MIR pass (each `Inst::Lambda`
-//! becomes an env record + a hoisted sibling `function <name>(...)`), and lowers
-//! coroutine bodies to a NAMED block trampoline
-//! (`function <name>__step(..) { for (;;) switch (__bb) {..} }`). So a lambda /
-//! nested-fn / coroutine-body emission never introduces an inline ANONYMOUS
-//! `function (...)` expression -- every emitted fn carries a name, and captures
-//! ride lexical `c<N>` cells, not an inline closure.
-//!
-//! `discipline_shapes_emit_no_inline_function` is the pin. The anonymous-
-//! `function(` detector (`anon_function_hits`) also finds the TWO non-closure
-//! glue paths that DO emit `function(` (pinned separately in
-//! `glue_paths_use_anonymous_function` so a regression in either is noticed) --
-//! these are fixed generated glue, NOT closure/body emission, hence out of scope
-//! for the discipline pin:
-//!   - `build_vt_eq_defs` (emit.rs): `__rock_vt_eq["N"] = function(a, b) {..}`,
-//!     the type-aware eq registry for GC-carrying value structs.
-//!   - coroutine-op intrinsic templates (emit.rs:2530): `resume`/`result`/
-//!     `status` render as `(function(c){..})(x)`
-//!     IIFEs at the CONSUMER call site.
-//!
-//! The fixed runtime preamble in `lib.rs` (`JS_CALL_HELPER`, `JS_STRUCTURAL_EQ`,
-//! `JS_CORO_RUNTIME`, ...) also holds `function(` helpers; it is prepended by the
-//! driver, never returned by `emit_with_closure`, so it is naturally out of
-//! scope here.
+//! Rock closures and coroutine bodies emit named functions. The separate
+//! glue test covers generated equality functions and coroutine IIFEs.
 
 use crate::common::ws_with;
 

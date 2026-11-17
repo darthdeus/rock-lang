@@ -309,19 +309,8 @@ console.log(missingPlan && missingCatalog);
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "true");
 }
 
-/// A concrete operation whose ONLY caller is a decorator body is still served.
-///
-/// A `deco` body is a third body kind beside plain fns and global initializers,
-/// and it went through a hand-written subset of the shared discovery step --
-/// callees and globals, but not the body's `spec_bindings`. So a specialization
-/// no other body demanded was never queued while the deco body's call site still
-/// spelled its specialized name, and emission rejected with `JS subset: no
-/// specialized body emitted`.
-///
-/// `main` deliberately does NOT push or set, so the demand has exactly one
-/// origin. The normal lane may inline the specialized call; a no-inline lane
-/// must retain the standalone specialized `set` and its concrete store. `push`
-/// is the backend's own append in both lanes.
+/// A specialization reached only through a decorator body must also emit
+/// when inlining is disabled.
 #[test]
 fn a_specialization_demanded_only_by_a_decorator_body_is_emitted() {
     let ws = ws_with(

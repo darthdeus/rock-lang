@@ -82,16 +82,8 @@ pub(super) fn max_multi_wire(bodies: &[&MirFunc]) -> Result<usize, CompilerError
         .map(|widths| widths.into_iter().max().unwrap_or(0))
 }
 
-/// The widest wire any reachable `inline(js)` body PUBLISHES, from the concrete
-/// result ABI of each artifact-selected declaration -- never from the body text.
-///
-/// The bank has two writers: MIR ([`max_multi_wire`]) and the opaque bodies.
-/// The opaque half used to be a substring scan for `__rock_retN`, which made
-/// the transport whatever the string happened to say: a body could publish past
-/// its own declared wire, or name a slot in a comment and widen the bank.
-/// `BackendFnAbiPlan::result_lanes` is the same ABI policy every
-/// definition and call site reads, so a publisher and the caller capturing it
-/// cannot disagree.
+/// Size opaque publishers from their concrete result ABI. Sloppy-mode JS
+/// would otherwise turn a write past the bank into an implicit global.
 pub(super) fn max_published_lanes(
     view: &ArtifactView,
     inline_js: &[JsInlineBody],

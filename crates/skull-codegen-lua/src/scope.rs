@@ -67,11 +67,7 @@ pub(crate) fn render_scope(
         param_cells[raw(c) as usize] = true;
     }
     let is_frame = |c: &Idx<Cell>| frame.is_some_and(|f| f.fields.contains(c));
-    // THE one answer to "does this cell render as a bare `c<..>` local here" --
-    // read by the nil-kill exclusion just below and by the declaration loop that
-    // emits those locals. A kill of a cell with no local assigns a GLOBAL of that
-    // name instead: a store the pass never intended, which under the `_G` state
-    // bridge costs a `__newindex` metamethod dispatch on every execution.
+    // Killing an undeclared cell would assign to a global.
     let cell_has_local = |cid: Idx<Cell>| -> bool {
         param_cells[raw(cid) as usize] || (!is_frame(&cid) && referenced[raw(cid) as usize])
     };
@@ -187,12 +183,7 @@ pub(crate) fn render_scope(
         }
     }
 
-    // Declare registers in sorted color order (the dense table holds `u32::MAX`
-    // for uncolored slots — inlined / non-value insts — which we skip), then the
-    // cell locals. All written directly into a single `  local ...` line; we
-    // stamp the keyword up front and `truncate` it back if nothing is declared.
-    // Loop-owned colors are declared inside their `for` block (expand_for), not
-    // here.
+    // Declare function-scope colors before the cell locals.
     let decl_start = out.len();
     out.push_str(" local ");
     let mut any = false;

@@ -50,39 +50,11 @@ impl CalleeBindingPlan {
     }
 }
 
-/// The binding plan for `func`, emitted under `name` for declaration
-/// `self_ref`, or `None` when nothing is bound (every call in the body is then
-/// a global lookup).
+/// Bind final, compiler-owned callees as immutable upvalues. On GC64 they
+/// cost two trace constant slots instead of five plus a global-value guard.
 ///
-/// A global lookup (`GGET`) costs a trace 5 constant-pool slots per distinct
-/// callee on GC64 -- the name string (a GC constant, 2 slots), its `KSLOT`
-/// hash slot, and the resolved function object (2 more) -- plus the guard that
-/// the global still holds that function. LuaJIT's `maxirconst` limit is 500
-/// SLOTS, and "trace too long" (the limit being hit) can dominate trace
-/// aborts. An IMMUTABLE upvalue costs 2: only the function object, folded into
-/// the trace with no lookup and no guard.
-///
-/// A callee is bound only when the emitter can PROVE it is an ordinary emitted
-/// Lua function whose global is final by the time this body's binding line
-/// runs. Everything else stays a global lookup:
-///
-/// - a callee in the caller's own strongly connected component (including
-///   direct self-recursion): binding it would need its final closure before it
-///   exists, and the condensation rank cannot separate them;
-/// - a callee, or a caller, absent from the call graph the context was given:
-///   with no component number there is no proof of either fact;
-/// - an EXEMPT declaration (`extern`, `@nomangle`, `@test`, `main`, `test_*`):
-///   its bare global is a published name anything may rebind, and hot reload
-///   and the engine both look those up by name;
-/// - an `inline(lua)` body: the definition is hand-written text, and a splice
-///   may remove the call entirely;
-/// - an unspecialized generic or an `Iterator`-bounded declaration: neither has
-///   a standalone definition of its own.
-///
-/// A call THROUGH a function value (`CallValue`) has no statically known callee
-/// and is never bound.
-/// Runtime uint validators are initialized by the prelude and can be bound
-/// even when the caller has no edges in the call graph.
+/// Recursive, unknown, rebindable and non-emitted callees stay global.
+/// Runtime uint validators are already available when binding begins.
 pub fn callee_binding_plan(
     ws: &Workspace,
     ctx: &CodegenCtx,

@@ -1,19 +1,5 @@
-//! The scratch-slot bank must cover every writer, including the ones MIR cannot
-//! see.
-//!
-//! `max_multi_wire` sizes `var __rock_ret1..N` from MIR. An `inline(js)` body is
-//! an opaque STRING copied out verbatim, and a multi-lane one publishes lanes of
-//! its own, so the bank is sized over those too -- from the body's concrete
-//! result ABI (`max_published_lanes`), never from the body text.
-//!
-//! The miss it prevents is silent by construction: the emitted program is
-//! sloppy-mode, so an undeclared write becomes an implicit global and everything
-//! keeps working -- until the same program is evaluated as strict/module code,
-//! where that write is a ReferenceError.
-//!
-//! `typeof` cannot express this assertion (a declared-but-unassigned `var` also
-//! reads "undefined"), which is why the shape check below looks for the
-//! declaration itself.
+//! Pin bank declarations for MIR results and opaque inline publishers.
+//! Sloppy-mode JS can write an undeclared slot without raising an error.
 
 use crate::common::ws_with;
 

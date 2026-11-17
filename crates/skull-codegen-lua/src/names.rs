@@ -65,18 +65,6 @@ pub(crate) fn cell_is_uint(ws: &Workspace, ty: Option<bone_core::prelude::TyId>)
     )
 }
 
-// --- relooper: counted-`for` recovery (structured control flow) ------------
-//
-// A `for i in lo..hi` / `for x in xs` / `enumerate(..)` lowers to a canonical
-// 4-block counted-loop CFG: a preheader storing the counter, a header testing
-// `i < hi` (or `<=`), a body, and a pure-increment latch jumping back. LuaJIT
-// specializes a real numeric `for` (FORL induction) but UNROLLS a goto-loop ->
-// mcode blowup -> blacklist -> interpreter spiral (docs/skull-throughput-
-// investigation.md). So we pattern-match that exact shape and emit a Lua `for`,
-// leaving every other terminator as goto. Recognition runs at EMIT time, on the
-// post-transform CFG, so it is robust to the coroutine transform / inlining
-// renumbering blocks (the design's Phase-8 "reloop over the same MIR").
-
 /// Any source span inside `func`, for a rejection with no single offending
 /// instruction. The declarations that overflow have no instruction of their
 /// own; the body's first spanned instruction still points inside the Rock

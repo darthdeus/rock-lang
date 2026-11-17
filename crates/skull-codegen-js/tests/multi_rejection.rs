@@ -51,14 +51,8 @@ fn rejection_discovery_reports_multiple_failures() {
 /// which is exactly the misreading the accumulation exists to prevent.
 #[test]
 fn a_nobox_rejection_names_the_body_it_was_emitting() {
-    // Interpolating a WHOLE tuple carrying the value is the sink: it asks for one
-    // runtime-typed value, so the element materializes and reports through the
-    // residue channel, which is the one that carries a body name.
-    //
-    // A `[(NV2, int)]` element used to stand here (case-matrix row 13) and stopped
-    // materializing when the tuple box learned to carry the leaves. Neither plain
-    // container works either: `[NV2]` column-stores, and so does a `Map<_, NV2>`
-    // VALUE as well.
+    // Tuple interpolation materializes the value and attributes the rejection
+    // to its body.
     const TWO_SINK_FNS: &str = "\
 nobox value NV2 { x: float, y: float }
 fn a(k: float) -> int { let t = (NV2{x:k,y:0.0}, 1); print(\"{t}\"); 0 }

@@ -2,34 +2,8 @@
 
 use super::*;
 
-/// A program's uniform blocks -- scalar AND array -- flattened into the
-/// PARALLEL LISTS the registration call carries.
-///
-/// One entry per block in `names`/`bindings`/`sizes`/`fingerprints`/`counts`,
-/// with the members of every block concatenated into the `member_*` lists and
-/// `counts[i]` saying how many belong to block `i`. A hand-written driver never
-/// has to nest, which is why the shape is this and not a table.
-///
-/// **Built once, read by both hosts.** The Lua and JS registration lines are
-/// written by different emitters, and a second flattener is how the two would
-/// come to disagree about member order -- the offsets the host packs against
-/// are positional, so a divergence there is silent wrong bytes rather than an
-/// error.
-///
-/// Array blocks are appended AFTER the scalar ones. They travel the same wire
-/// deliberately: a block is a block to the driver -- bind, verify against the
-/// plan, allocate scratch, upload whole -- and giving arrays their own
-/// registration call would split a registration that has to be transactional.
-/// The three per-member lists are what tells them apart:
-///
-/// - `member_kinds` is the [`WireKind::code`] of every member, array or not;
-/// - `member_capacities` is `0` for a scalar member and `N` for a `@size(N)`
-///   array -- so "how many elements may be written here" answers "is this an
-///   array" without a separate flag;
-/// - `member_strides` is `0` for a scalar member and the std140 array stride
-///   otherwise. Sent rather than re-derived host-side: it is 16 for every kind
-///   an array may hold today, and a host that recomputed it would be a second
-///   layout authority the moment that stops being true.
+/// Flatten the scalar blocks then the array blocks for Lua and JS registration.
+/// Counts group the members by block. Scalar members have zero capacity and stride.
 #[derive(Debug, Default)]
 pub struct BlockWire<'a> {
     pub names: Vec<&'a str>,
@@ -170,15 +144,8 @@ pub(crate) fn wire_glsl(k: WireKind) -> GlslTy {
     }
 }
 
-/// **The whole GLSL ABI plan checked against the interface it claims to
-/// answer**, before any stage looks at it.
-///
-/// Presence at a binding is not identity: a block of the right shape at the
-/// right index emits the wrong declarations if it is a DIFFERENT group's, and
-/// every per-binding presence check passes while it does. So this compares the
-/// block's own name and its complete member list. It runs over the PROGRAM
-/// rather than per stage, because an unknown binding belongs to no stage and
-/// would otherwise be nobody's to reject.
+/// Check the ABI against the complete interface before projecting stages.
+/// Binding, block name and member list must agree.
 pub(crate) fn validate_abi(
     iface: &ShaderInterfacePlan,
     abi: &ShaderAbiPlan,
@@ -373,14 +340,7 @@ pub(crate) fn validate_abi(
     Ok(())
 }
 
-/// **One stage's resolved ABI**: every physical entry the interface says this
-/// stage has, and nothing else.
-///
-/// Projected by [`project_stage_abi`] from a plan [`validate_abi`] has already
-/// checked. An `Option` here means the INTERFACE declares no such group; it
-/// never means one was declared and not found, because that rejects. A shader
-/// referencing what it never declared is a driver compile error with no
-/// compiler diagnostic at all.
+/// The validated ABI declarations used by one stage.
 pub(crate) struct StageAbi<'a> {
     pub(crate) uniform_block: Option<&'a GlslUniformBlock>,
     pub(crate) engine_block: Option<&'a GlslUniformBlock>,
@@ -416,13 +376,7 @@ impl StageAbi<'_> {
     }
 }
 
-/// The samplers ONE STAGE declares, in unit order, then its bare ones.
-///
-/// [`ShaderInterfacePlan::stage_samplers`] is the source; this adds the target's
-/// unit ORDER and validates the join. The check is a real BIJECTION, not length
-/// plus membership: `[a, a]` against an interface of `[a, b]` has the right
-/// length and every element is a member, and it emits `a` twice while dropping
-/// `b` entirely.
+/// Project grouped samplers in ABI order, then append bare samplers.
 fn stage_samplers_in_unit_order(
     iface: &ShaderInterfacePlan,
     abi: &ShaderAbiPlan,
@@ -441,12 +395,7 @@ fn stage_samplers_in_unit_order(
     out
 }
 
-/// **A GLSL ABI plan checked against its interface, with each stage's slice
-/// already projected.**
-///
-/// Validation is a PROGRAM property -- an unknown binding belongs to no stage,
-/// and re-running the whole check per stage says nothing the first run did not.
-/// Built once by [`ProgramAbi::of`]; the emitters receive projections.
+/// Validated per-program ABI with its per-stage projections.
 pub(crate) struct ProgramAbi<'a> {
     stages: Vec<(IrStage, StageAbi<'a>)>,
     /// Anchors a projection failure, so a lookup miss is a spanned rejection
@@ -649,39 +598,13 @@ pub(crate) fn logical_textures(
     }))
 }
 
-/// **The GLSL ABI of one program's interface.**
-///
-/// The physical answer to [`ShaderInterfacePlan`]'s logical question, and the
-/// ONLY object that holds one: block binding indices, std140 byte offsets and
-/// sizes, block fingerprints, array-block names and capacities, sampler units,
-/// and attribute locations. Nothing upstream of here knows any of it, and the
-/// engine reads this rather than parsing emitted GLSL or re-deriving a layout.
-///
-/// Built by [`Self::glsl`] from the interface plan alone. A second target
-/// derives its own from the SAME interface and is free to answer differently --
-/// which is what `hostile_target.rs` proves, and what would be vacuous if the
-/// interface plan were a GLSL plan under another name.
+/// Physical layout and binding assignments for the logical shader interface.
+/// The engine consumes these assignments directly.
 #[derive(Clone, Debug, Default)]
 pub struct ShaderAbiPlan {
-    /// Each std140 block with its BINDING INDEX, in binding order.
-    ///
-    /// The index comes from the group's ROLE, not from position: `@engine` is
-    /// 0, the vertex `@uniform` group 1, the fragment group 2. Position was the
-    /// index until the engine block landed, which made 0 mean "engine block"
-    /// only for programs that happened to have one -- reserving the slot is
-    /// what makes "binding 0 is the engine's" enforceable.
-    ///
-    /// The single authority for each block's bytes: the GLSL declaration, the
-    /// CPU packer and the link-time driver assertion all read it.
+    /// Scalar blocks in binding order. Bindings are fixed by role.
     pub uniform_blocks: Vec<(u32, GlslUniformBlock)>,
-    /// `UniformArray<T>` blocks with their bindings -- one per stage that
-    /// declares `@size(N)` params.
-    ///
-    /// A SEPARATE block from the stage's scalar group, for a LIFETIME reason
-    /// rather than a typing one: a fragment uniform changes per DRAW while
-    /// light arrays change per ACTIVATION, so one combined block would force
-    /// either a large copy into every batch or partial-update state. Two blocks
-    /// keep whole-block uploads and independent fingerprints.
+    /// Array blocks have their own bindings and upload lifetime.
     pub uniform_array_blocks: Vec<(u32, UniformArrayBlockPlan)>,
     /// Sampler names in UNIT order -- unit N is index N. GLSL 3.30 has no
     /// `layout(binding=)`, so the engine needs each name once to point the

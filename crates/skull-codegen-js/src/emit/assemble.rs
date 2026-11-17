@@ -28,14 +28,7 @@ pub(super) fn assemble_program_core(
     let lifecycle_skeleton = skull_mir::lifecycle::collect(ws)?;
     queue_lifecycle_dependency_initializers(ws, &mut st, &lifecycle_skeleton)?;
 
-    // Decorator DEFINITION bodies (`deco <kind> <name> { .. }` -> `__deco_<name>`),
-    // for the APPLIED decorators only (D1 reachability: an unapplied `deco` -- e.g.
-    // stdlib `on_reload` -- contributes no application line and must not force its
-    // possibly-unsupported body into the program). Lowered via `BodyOwner::
-    // Decorator`, then the SAME per-body pipeline a normal fn runs (incl. inlining,
-    // so `@inline` no-ops like `transmute` splice away -- the luajit path leaves
-    // them as top-level calls it emits whole-stdlib, which JS cannot). Their
-    // callees/globals feed the shared worklists BEFORE the drain.
+    // Only applied decorators contribute bodies and seed the worklists.
     let mut deco_bodies: Vec<(String, MirFunc)> = Vec::new();
     for (mid, did) in decorators.applied_definitions(ws, bone_core::hir::FnBackend::Js) {
         let d = &ws.module(mid).decorators[did];
@@ -76,12 +69,7 @@ pub(super) fn assemble_program_core(
             st.reject(&deco_name, e);
             continue;
         }
-        // THE shared discovery step, not a restatement of the parts of it a
-        // decorator was thought to need. Enumerating callees and globals by
-        // hand here left out the third thing `discover` does -- filing this
-        // body's `spec_bindings` as demands -- so a specialization a deco
-        // body was the only caller of was never queued, and the call site
-        // spelled a name nothing emitted.
+        // Decorators can be the only callers of a specialization.
         let findings = JsDelivery {
             ws,
             scx,

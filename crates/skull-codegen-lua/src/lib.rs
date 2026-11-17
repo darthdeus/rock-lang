@@ -1,19 +1,4 @@
-//! skull-codegen-lua — the dumb Lua printer over skull-mir's typed cell-model CFG.
-//!
-//! luajit has real `goto`, so the CFG maps directly: each [`Block`] is a `::bbN::`
-//! label, its instructions in order, then a terminator that `goto`s its
-//! successors. Two luajit rules drive the shape:
-//!   1. `goto` may not jump into the scope of a local — so EVERY value local and
-//!      cell local is declared at the function top, before any label.
-//!   2. `return` must be the last statement of its block — so every `return` is
-//!      wrapped `do return v end`, which is legal as a final statement too.
-//!
-//! The printer NEVER dispatches on an operand's type: the IR is already typed
-//! (`IntAdd` vs `FloatAdd` vs `StringConcat`), so `bone` is consulted ONLY to
-//! resolve a `Call`'s [`FuncRef`] to its mangled name (D8/P3).
-//!
-//! Naming: register allocation colors values as `r<N>` (uncolored ones fall
-//! back to `v<raw>`), cells as `c<N>`, and blocks print as `bb<raw>` labels.
+//! Emit LuaJIT functions from typed MIR.
 
 mod binding;
 mod block;
@@ -376,20 +361,7 @@ impl Clone for CodegenCtx {
     }
 }
 
-/// True if `name` is an identifier skull emits as a bare LOCAL inside function
-/// bodies -- a value temp (`r<N>`, or the uncolored `v<N>` fallback), a cell
-/// local (`c<N>`), or the closure env param ([`ENV_PARAM`]). `Inst::Global`
-/// reads/writes a user global by its bare name, so a top-level def with one of
-/// these names is shadowed by the local inside any body that uses one (the
-/// env-param-`e` miscompile `5c378c810`; `global r1` crashing at runtime with
-/// "arithmetic on local 'r1' (a nil value)").
-///
-/// This is the reserved *local* namespace only. The `__rock_*` prefix at large
-/// is a shared reserved namespace the stdlib and host runtimes legitimately
-/// extend with top-level `@nomangle` fns (`__rock_create_struct`,
-/// `__rock_install_serialize_value`, ...) -- those are top-level globals, never
-/// body locals, so they don't collide and must not be rejected. Only the exact
-/// emitted param name (`__rock_env`) is a body local.
+/// Reserve lexical names that could shadow a user global inside a body.
 fn is_reserved_lexical(name: &str) -> bool {
     if name == ENV_PARAM {
         return true;
@@ -740,16 +712,7 @@ impl CodegenCtx {
         self.call_sccs.get(&func).copied()
     }
 
-    /// Mint a compiler-reserved synthetic top-level Lua name: a hoisted lambda
-    /// (`<fn>__lambda<k>`) or coroutine machinery (`<co>__step`/`__resume`/
-    /// `__advance`/`__defer<k>`/`__on_killed`/`__on_resume`/`__on_hot_reload`).
-    /// Returns `name` unchanged. If it collides with a REAL top-level name (a
-    /// user fn's Lua name or a global), records a spanned rejection pointing at
-    /// that user definition -- drained after emit by [`take_rejection`]. This is
-    /// reject-not-panic: a collision is illegal user code, not a compiler bug, so
-    /// it surfaces as a diagnostic and keeps interactive compiler hosts alive.
-    /// THE single choke point for every synthetic top-level name across skull.
-    /// [`mangle_fn`] of the declaration `fref`, derived once per build.
+    /// [`mangle_fn`] of the declaration `fref`, cached for this build.
     pub fn mangled_name(&self, ws: &Workspace, fref: FuncRef) -> ustr::Ustr {
         if let Some(name) = self.mangled.read().expect("mangled name cache").get(&fref) {
             return *name;
@@ -789,6 +752,7 @@ impl CodegenCtx {
         })
     }
 
+    /// Record a spanned rejection if this synthetic name collides with a user definition.
     pub fn mint_synthetic(&self, name: String) -> String {
         if let Some(&span) = self.reserved.get(&name) {
             let msg = format!(

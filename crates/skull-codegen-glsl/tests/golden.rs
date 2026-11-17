@@ -418,12 +418,8 @@ fn nested_counted_loops() {
     );
 }
 
-/// A counted loop over a RUNTIME invariant bound folds the bound expression into
-/// the `for` header instead of a hoisted temp (`t = r + 1; for (; y < t; ..)`).
-/// The temp form miscompiles on a GL driver for the outline_detect kernel
-/// (an outline classification shader) even though it is valid GLSL; the inlined bound
-/// is correct, and `r + 1` is loop-invariant (`r` is single-store), so re-reading
-/// it in the condition is sound. Mirrors the outline_detect neighbor-scan shape.
+/// Pin a runtime invariant bound in the for header, which avoids a driver
+/// miscompile of the hoisted form.
 #[test]
 fn counted_loop_invariant_bound_folds() {
     let src = r#"

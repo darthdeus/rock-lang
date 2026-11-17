@@ -307,17 +307,8 @@ impl FnEmit<'_> {
             self.folded_block.insert(b, rcell);
         }
 
-        // Bound temps (item 3): a counted loop's bound `t = <expr>; for (; i < t;
-        // ..)` folds to `for (; i < <expr>; ..)`, dropping the single-use temp.
-        // The bound temp is a range-for's `hi`, evaluated once in the preheader
-        // (match_counted_loop only matches range-fors), so inlining is sound when
-        // `<expr>` is loop-invariant -- a const, or pure int arithmetic over cells
-        // that are stored exactly once (their store dominates the preheader, so
-        // re-reading in the folded condition yields the same value). Folding it
-        // is not just a cleanup: a GL driver miscompiles `t = radius + 1; for
-        // (; y < t; ..)` for a nested runtime-bounded kernel (the outline_detect
-        // classify loop found no neighbors), while the inlined `y < (radius + 1)`
-        // is correct; the counted-loop regression covers the emitted bound.
+        // Fold a single-use bound only when it is loop-invariant. Keeping it in
+        // the loop header also avoids a driver miscompile of the hoisted temp.
         let bounds: Vec<Idx<Inst>> = self.counted.values().map(|li| li.bound).collect();
         for bound in bounds {
             let Inst::Load(bcell) = self.f.insts[bound] else {

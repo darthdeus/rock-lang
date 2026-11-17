@@ -49,19 +49,8 @@ impl FnEmit<'_> {
     }
 }
 
-/// **The one resolver of a call site's callee instance, and it FAILS CLOSED.**
-///
-/// `MirFunc::callee_instances` holds the instantiation lowering recorded at each
-/// call. Reading an absent entry as "no instantiation" is only correct for a
-/// callee that HAS no generics; for a generic one it silently substitutes the
-/// declaration's shape, which on GLSL means emitting or typing a body no
-/// instance has. So an absent or PARTIAL key for an emitted generic callee is
-/// a rejection with the caller's span, never a fallback.
-///
-/// A callee that renders inline is exempt and is the reason the rule is not
-/// simply "generic implies key": `min<T>`, `max<T>`, `clamp` and `v(..)` are
-/// generic declarations that GLSL spells as native builtins at the call site,
-/// so they are never emitted as definitions and their key is never consulted.
+/// A generic call needs one recorded type argument per declared parameter.
+/// Inline calls can render without a standalone concrete body.
 pub(crate) fn callee_inst_at(
     ws: &Workspace,
     mf: &MirFunc,

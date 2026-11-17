@@ -1,25 +1,8 @@
-//! Structured printing of one body: `if`/`elseif`/`else` and counted `for`
-//! loops in place of a label per block and a `goto` per edge.
+//! Print structured MIR with forward labels for out-of-line followers.
 //!
-//! The walk follows [`skull_mir::cfg::structure::place`]: each block is
-//! printed inline at its one forward edge, or as a follower after the
-//! construct of its placement parent. An edge to a follower is a
-//! fallthrough when the follower is the next code, a `break` when it is the
-//! exit of the innermost `for`, and otherwise a forward `goto` to a label at
-//! the follower. Every local but a `for` loop's is declared at the top of the
-//! body, so no such jump enters the scope of one.
-//!
-//! Any other loop stays a label at its header and one backward `goto` ending
-//! its body: LuaJIT starts recording at the instruction a backward `goto`
-//! compiles to, and a `while true do` header instead records from the top,
-//! which aborts several times more traces while they warm up. LuaJIT emits
-//! that LOOP instruction only for a `goto` in the label's own block, so a
-//! back edge from deeper than the body's last statement is a `goto` to a
-//! label ending the body, as it is for a `for` loop.
-//!
-//! One pass prints the body: every `goto` to a follower or to the end of a
-//! loop body is forward, so whether its label is needed is known by the
-//! time the label would be printed.
+//! Recognized counted loops use Lua numeric or generic for. Other loops
+//! keep a backward goto so LuaJIT records from the backedge. The backedge
+//! needs to share its label's scope for LuaJIT to emit LOOP.
 
 use super::*;
 use skull_mir::cfg::structure::{Placement, place};

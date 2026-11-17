@@ -275,18 +275,7 @@ fn check_block_name_collisions<'a>(
     Ok(())
 }
 
-/// **The one validated plan for an A2 `(vertex, fragment)` program.**
-///
-/// Everything emission decides before it writes GLSL, in emission's own order:
-/// both stage annotations, the vertex shape and its varyings, the fragment
-/// classified AGAINST those varyings (not as a standalone entry, where a
-/// varyings param has no meaning), the cross-stage collisions, the per-stage
-/// `@uniform` and program `@engine` std140 layouts, each stage's own lowering +
-/// tier-0 + graph/view population + stage-builtin pass, and the program's
-/// `@textures` slot assignment.
-///
-/// [`plan_shader_with_view`] builds this and [`render_shader_plan`] renders
-/// it.
+/// The retained vertex and fragment plans and their shared interface.
 pub(crate) struct PipelinePlan {
     vshape: VertexShape,
     fshape: FragShape,
@@ -332,15 +321,7 @@ pub(crate) fn plan_shader_pipeline_from_view(
     let varyings = classify_varyings(ws, vshape.varyings_ty, vf.name_span)?;
     let fshape = classify_pipeline_fragment(ws, ff, vshape.varyings_ty)?;
 
-    // One std140 block per STAGE, each at its own binding index. The stages
-    // declare different `@uniform` types and cannot be made to share one: a
-    // vertex entry is reused across several fragment entries (`ui_vert`
-    // serves three), so a merged per-program type would need that one fn to
-    // declare a different struct per program.
-    //
-    // A stage group holds only what that shader OWNS: the engine-authored
-    // camera/time/screen band lives in `@engine` instead, which is what lets
-    // instanced grass keep a shader-owned `entity_count` beside them.
+    // A shared vertex entry can pair with fragments that use different uniform types.
     let vert_group = vshape
         .res
         .uniform_group
@@ -352,17 +333,7 @@ pub(crate) fn plan_shader_pipeline_from_view(
         .map(|g| logical_uniform_group(ws, UniformRole::Stage(IrStage::Fragment), g, ff.name_span))
         .transpose()?;
 
-    // `@engine` is ONE block per program, so unlike `@uniform` the stages must
-    // agree: it is engine-owned and fixed, and both stages naming the same block
-    // at index 0 is what lets the engine fill it once per pass rather than once
-    // per stage.
-    //
-    // What this does NOT check is that the type IS the engine's own `EngineU` --
-    // deliberately. A compiler that knows an engine type by name has engine
-    // policy inside the language. The fingerprint the plan ships is what the
-    // ENGINE compares at registration, which is the layer that owns the answer;
-    // a game marking its own struct `@engine` gets a block nothing fills, and
-    // that check belongs there rather than here.
+    // Both stages agree on one engine block. The host checks its layout fingerprint.
     let engine_group = match (vshape.res.engine_group, fshape.res.engine_group) {
         (Some(v), Some(f)) if v != f => {
             return Err(err(

@@ -10,21 +10,10 @@ pub(crate) type LineMark = (usize, Span);
 /// resolves it ([`resolve_line_directive_resets`]).
 pub const LINE_DIRECTIVE_RESET: &str = "# 0 \"=[generated]\"";
 
-/// Number the lines of one emitted definition with Rock source lines.
-///
-/// LuaJIT 2.1 (since commit c41d727d) reads `# <line> ["<file>"]` at column 0
-/// as "the next line is `<line>` of `<file>`". A prototype keeps only the last
-/// file it saw, so the definition is numbered against ONE file, the one most of
-/// its marks come from; instructions inlined from other files keep the line of
-/// the statement before them. Every line from the header on carries the line
-/// of the latest mark at or before it, so the nil kills, jumps and loop heads
-/// that follow a statement report that statement. Label lines produce no
-/// bytecode and get no directive. Text before the header (hoisted constants)
-/// belongs to the enclosing chunk and is left alone, and the definition ends
-/// with [`LINE_DIRECTIVE_RESET`] so code after it is not numbered as Rock.
-///
-/// Returns the new text and each insertion as (offset in `lua`, bytes), in
-/// ascending order, or `None` when no mark names a source file.
+/// Number a definition using the source file that supplies most of its marks.
+/// LuaJIT remembers only the last file in a prototype. Leave hoisted code
+/// outside the header unnumbered and reset the chunk source after the body.
+/// Report insertions as offsets in the original Lua and their byte lengths.
 pub(crate) fn write_line_directives(
     lua: &str,
     header_offset: usize,

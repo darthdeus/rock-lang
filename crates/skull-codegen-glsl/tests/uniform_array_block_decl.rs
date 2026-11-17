@@ -1,16 +1,5 @@
-//! **A stage's `@size(N)` params become ONE std140 array block** at a reserved
-//! binding, instead of loose `uniform T name[N];` declarations.
-//!
-//! Loose is the out-of-spec arrangement, which is the whole argument for the
-//! port: loose uniforms live in the DEFAULT block, whose ES 3.0 guarantee is 224
-//! vec4, while a named block gets 16 KB. `outline_detect`'s three arrays are 768
-//! vec4 loose -- 3.4x over -- and 75% of a budget they fit inside a block.
-//!
-//! The declaration reads `ArrayMember.elem` out of the PLAN. It deliberately
-//! does not spell the type from the emitter's own `GlslTy` classification of the
-//! same param: two classifiers for one question is how the layout and the
-//! declaration drift into disagreeing about what an array holds, and "one layout
-//! authority" would be false the moment the second one exists.
+//! Uniform arrays use a per-stage std140 block, with declarations and layout
+//! derived from the same plan.
 
 use crate::support::{assert_has, assert_lacks, pipeline_emission};
 use skull_codegen_glsl::ShaderEmission;

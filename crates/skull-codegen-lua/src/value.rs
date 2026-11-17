@@ -77,12 +77,7 @@ impl Emitter<'_> {
                 out.push_str(" or nil)");
             }
             Inst::StringConcat(a, b) => {
-                // Emit the whole inlinable concat tree as ONE flat `..` run
-                // (`x .. y .. z`) rather than left-nested binary concats
-                // (`((x .. y) .. z)`). LuaJIT's BC_CAT folds a flat run into a
-                // SINGLE string allocation; nested binary `..` allocates an
-                // intermediate per step (interpolation is ~2x the allocations
-                // otherwise -- the dominant skull-vs-rock HUD/text alloc gap).
+                // A flat concat run lets LuaJIT allocate the result once with BC_CAT.
                 let mut parts = Vec::new();
                 self.collect_concat(&mut parts, *a);
                 self.collect_concat(&mut parts, *b);
@@ -457,15 +452,8 @@ impl Emitter<'_> {
                 unreachable!("placeholder bound-call must be substituted before emit")
             }
 
-            // The shared closure-conversion pass (`skull_transform::convert_closures`)
-            // materializes a capturing lambda as an env record and a shared mutable
-            // capture as a box, both as `MakeEnv`. `fn_ref = Some(name)` is a
-            // callable record `setmetatable({ __slot = ..., c<raw> = .., .. },
-            // __rock_fn_mt)` (invoked via `__call`); `fn_ref = None` is a box `{}`
-            // / `{ v = <seed> }`. Field access (`e.c<raw>`, `.v`) already flows
-            // through `Inst::Field`/`Inst::StoreField`. EVERY servable path (ordinary
-            // fns AND the coroutine step, S2+S3) now routes through the pass, so
-            // `MakeEnv` is the only capturing closure shape codegen sees.
+            // Closure environments hold a CodeRef. Shared mutable capture boxes hold
+            // only the capture fields.
             Inst::MakeEnv { fn_ref, fields } => match fn_ref {
                 Some(_name) => {
                     out.push_str("setmetatable({ ");

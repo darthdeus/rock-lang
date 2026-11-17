@@ -2,28 +2,8 @@
 
 use super::*;
 
-/// The whole workspace as ONE JS program:
-/// module-driven assembly mirroring skull's Lua `assemble`, but reachability-
-/// driven (roots = `main` + every DECORATED fn + every `deco` body; the whole
-/// stdlib is NOT emitted, only what those roots reach). Emission order:
-/// singletons -> `__deco_<name>` def fns -> fn defs -> `__ginit_<name>` def fns
-/// -> load-time init lines (dep-ordered) -> decorator APPLICATION lines (after
-/// the inits so a deco body can push into a ginit-initialized registry). The
-/// driver prepends the runtime preludes + `var __G = {}` + a direct
-/// `print`/`put`, and appends `<main>();` when `main_js_name` is `Some`.
-///
-/// Unlike [`emit_with_closure`], a decorator-populated global read does NOT
-/// reject here -- the applications ARE emitted, so the registry is populated at
-/// module load exactly as on luajit.
-/// **THE JS lowering context, and there is one construction of it per session.**
-///
-/// Non-cached emission creates a context and session through this module.
-/// Cached full emission stores both in `JsEmitCache`, and overlay reuses them;
-/// an `Instance` is an identity only relative to its arena, so every graph,
-/// view, name, and delivery structure in one session reads the same interner.
-///
-/// The luajit driver already owns its own (`skull::mir_emit::FullEmit`);
-/// this is that same rule for JS.
+/// One lowering context supplies the interner for the graph, view and emitter.
+/// Live reload keeps that interner so retained instances stay valid.
 pub(super) fn js_scx(ws: &Workspace) -> skull_mir::lower::ScalarCtx {
     skull_mir::lower::ScalarCtx::new(ws).with_target(bone_core::hir::FnBackend::Js)
 }
@@ -226,6 +206,7 @@ pub(super) fn update_js_session(
     }
 }
 
+/// Emit the entry module and its reachable bodies, including module-load effects.
 pub fn emit_program(
     ws: &Workspace,
     user_mid: bone_core::prelude::ModuleId,

@@ -27,11 +27,7 @@ pub fn emit_overlay_with_span_edits(
         return Ok(JsReload::FullRequired);
     }
 
-    // **The session's own arena, not a fresh one** -- see `JsEmitCache::scx`.
-    // MAINTAINED first: the value-reference scan behind scalar-ABI eligibility
-    // is per body, so a reused context that skipped this would plan the ABI the
-    // source had at the full build. Same maintenance `skull::mir_emit`'s
-    // `update_chunk_cache` performs for luajit.
+    // Refresh per-body ABI facts on the interner retained by this session.
     for &(mid, owner) in reinferred {
         cache.scx.update_body(ws, mid, owner);
     }

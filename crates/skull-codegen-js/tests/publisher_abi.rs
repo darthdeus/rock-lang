@@ -1,17 +1,5 @@
-//! The multi-lane `inline(js)` PUBLISHER.
-//!
-//! A JS multi-lane result travels as leaf 0 on the ordinary `return` plus
-//! lanes 1..N in the module-scope scratch bank. An opaque `inline(js)` body used
-//! to write those lanes BY HAND, and the bank was sized by scanning the body
-//! text for `__rock_retN` -- which means the transport shape was whatever the
-//! string happened to say, and a body that published the wrong number of lanes
-//! was a silent miscompile in sloppy mode.
-//!
-//! The signed contract replaces both: exactly one final top-level
-//! `return __rock_publish(...)`, its arity taken from the concrete result ABI
-//! (`skull_mir::lower::BackendFnAbiPlan::result_lanes`), direct bank access rejected. These
-//! tests are the two halves -- the ABI is the sizing oracle, and the lexical
-//! validator refuses every disagreeing shape.
+//! Inline JS publishers must match the concrete result ABI and may access
+//! secondary lanes only through the publisher contract.
 
 use skull_mir::lower::ScalarCtx;
 

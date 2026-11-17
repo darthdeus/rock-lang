@@ -1,66 +1,12 @@
-//! LuaJIT's two PARSE-time frame limits, modelled over the emitter's own final
-//! local and slot assignment.
+//! Check LuaJIT parse-time limits against the emitted body.
 //!
-//! Valid Rock can emit a Lua function LuaJIT refuses to LOAD. Both caps live in
-//! `lj_parse.c` and fire before a single byte of the program runs, so without
-//! this check the user sees a Lua chunk position and no Rock location:
+//! The model is a lower bound. LuaJIT starts each statement with its active
+//! locals reserved, and even a nested call needs slots for the callee,
+//! frame link and fixed arguments. Count only the widths that can be proven
+//! from emission, so a chunk LuaJIT can load remains admissible.
 //!
-//! | cap | constant | check | message |
-//! |---|---|---|---|
-//! | frame registers | `LJ_MAX_SLOTS` 250 | `bcreg_bump`: `freereg + n >= 250` | `function or expression too complex near '<r>'` |
-//! | active locals | `LJ_MAX_LOCVAR` 200 | `var_new`: `nactvar + n >= 200` | `function at line N has more than 200 local variables` |
-//!
-//! The third parse cap, `LJ_MAX_UPVAL` (60), is NOT reachable from valid Rock:
-//! the only upvalues an emitted body has are its bound callees plus the global
-//! storage cell, and [`crate::MAX_BOUND_CALLEES`] already truncates that list
-//! to 60 (59 when the storage cell is captured) by construction, leaving the
-//! rest as global lookups.
-//!
-//! # What this models, and in which direction it errs
-//!
-//! Exactness in ONE direction is mandatory: every program LuaJIT loads today
-//! must still compile. This is therefore a proven LOWER BOUND of LuaJIT's own
-//! count -- it can MISS an overflow (which keeps today's load-time error) and
-//! can never invent one.
-//!
-//! The bound rests on two facts about LuaJIT's parser:
-//!
-//! 1. At the start of a statement `freereg == nactvar`, the number of locals in
-//!    scope there. Every register a sub-expression takes is reserved ABOVE
-//!    that, so a statement's frame high-water mark is at least
-//!    `nactvar + <what the statement reserves>`.
-//! 2. A call `f(a1..an)` reserves, in order, one register for the callee
-//!    (`expr_primary` -> `expr_tonextreg`), one `LJ_FR2` frame-link register on
-//!    a 64-bit build, and one per argument (`expr_list` -> `expr_tonextreg`).
-//!    A call nested inside an expression only starts higher, so
-//!    `nactvar + 2 + n` is a lower bound for ANY call with `n` fixed arguments.
-//!
-//! So the statement forms counted here are the ones whose width SCALES with a
-//! wide value: a call's argument list, a multi-return receive (`assign_adjust`
-//! reserves `nvars - 1` above the call base, peaking at `nactvar + nvars`), and
-//! a multi-value `return`. Every other emitted form contributes nothing; that
-//! only loses precision.
-//!
-//! `nactvar` itself comes from the emitter's own declaration decisions -- the
-//! parameter list and the single function-top `local` line it just wrote, plus,
-//! per block, the four locals a numeric `for` adds (three hidden control
-//! variables and the visible one) and that loop's body-scoped `local r<N>`
-//! line. Nothing else this printer emits opens a scope or declares a local, so
-//! this is `nactvar` itself rather than a second estimate of it.
-//!
-//! Two further parse caps scale with the LENGTH of a body rather than its
-//! width. The printer records its control lines and jumps ([`ControlLines`]);
-//! [`measure_body`] combines them with the emitted assignment lines:
-//!
-//! | cap | constant | message |
-//! |---|---|---|
-//! | names per function | `LJ_MAX_VSTACK` 65476 | `chunk has more than 65476 local variables` |
-//! | jump distance | `BCBIAS_J` 32768 | `control structure too long` |
-//!
-//! The model is validated against the bundled LuaJIT rather than argued:
-//! `crates/skull/tests/wide_value_slot_budget.rs` walks families of real
-//! emitted shapes across each boundary and asserts the compiler's verdict
-//! equals `loadfile`'s on every member.
+//! Length checks use emitted assignments and recorded control lines.
+//! The boundary tests in skull compare the model against LuaJIT loadfile.
 
 use crate::control::{ControlLines, Target};
 use crate::lua_line_starts_in_code;

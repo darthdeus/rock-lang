@@ -18,11 +18,7 @@ pub(crate) fn annotation_value_js(v: &bone_core::hir::AnnoValue) -> Option<Strin
     })
 }
 
-/// The JS argument list for one `@deco` application (the JS sibling of skull's
-/// `decorator_call_args`): the SELECTION (named arg / defaulted `null` / missing-
-/// required error) is the shared `skull_mir::decorator::select_decorator_args`;
-/// only literal rendering (`annotation_value_js`) and the `null` default token
-/// are JS-specific.
+/// Render the shared decorator argument plan for JavaScript.
 fn decorator_call_args_js(
     ws: &Workspace,
     module: bone_core::prelude::ModuleId,
@@ -47,13 +43,7 @@ fn decorator_call_args_js(
     Ok(args)
 }
 
-/// Decorator APPLICATION lines for every decorated fn workspace-wide (the JS
-/// sibling of skull's Lua `decorator_application_lines`): one
-/// `__deco_<name>({name: "..", params: [], func: <js name>}, <args>);` per
-/// `@<deco>` annotation, in module then fn source order. The descriptor mirrors
-/// luajit's bare `{ name, params, func }` table (no `__ty`: reads render as plain
-/// `.name`/`.func`, and no deco body eq-compares `target`); `params` is an inert
-/// `[]` placeholder (never read by a deco body, same as luajit's `{}`).
+/// Emit decorator applications in source order with published code references.
 pub(super) fn decorator_application_lines_js(
     ws: &Workspace,
     decorators: &DecoratorTable,
@@ -118,12 +108,8 @@ pub(super) fn global_init_js_name(name: ustr::Ustr) -> String {
     format!("__ginit_{}", ident_of_key(name.as_str()))
 }
 
-/// Global names referenced by any `deco` body. A decorator runs at MODULE LOAD
-/// for each `@<deco>` application and typically mutates a registry global (e.g.
-/// `@system` -> `UPDATE_SYSTEMS.push(...)`); the per-test JS emission does NOT
-/// emit decorator applications, so a test reading such a global would see the
-/// un-populated init value -- an emit-and-hope divergence. Reads of these reject
-/// (SKIP) rather than silently diverge.
+/// Per-test emission lacks decorator applications, so reject reads that
+/// depend on their module-load effects.
 pub(super) fn decorator_populated_globals(ws: &Workspace) -> HashSet<ustr::Ustr> {
     use bone_core::hir::{BodyOwner, Expr};
     let mut set = HashSet::new();
@@ -177,15 +163,7 @@ pub(super) fn build_const_global_names(
     names
 }
 
-/// `__nbg_<base>_<i>` -> `<base>`, for every global whose STORAGE is leaves.
-/// A `nobox` global is not one name holding a box; lowering reads and writes the
-/// leaves directly, and those names are synthesized, so they never appear in
-/// `global_by_name`. They are state all the same.
-///
-/// Kept separate from [`build_state_index`] because the two answer different
-/// questions: a leaf is state (a write to it is legal) but owns no INITIALIZER --
-/// the base global's ginit assigns every leaf, so keying a ginit on a leaf would
-/// emit that initializer once per leaf.
+/// Map synthetic storage leaves to the global that initializes them.
 pub(super) fn build_nobox_leaf_globals(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,

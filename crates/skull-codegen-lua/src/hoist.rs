@@ -194,22 +194,9 @@ pub(crate) fn record_representation_violations(ctx: &CodegenCtx, func: &MirFunc)
     }
 }
 
-/// Group every all-constant `MakeValueStruct` (every field operand a `Const`) by
-/// (struct name, field literals). Returns `(inst -> group, group -> global name,
-/// def lines)`: each group becomes one function-owned global
-/// `__skull_kc_<fn>_<g> = <Name>_ct(<lits>)`. A module-scope global is built once
-/// at chunk load, so it is never worse than a per-use ctor (which it equals on a
-/// trace via SINK and beats in the interpreter), unlike a per-CALL function-entry
-/// local which defeats SINK.
-///
-/// Hoisting is NOT unconditional: it is sound only while the shared instance
-/// cannot be mutated. The place model legalized leaf writes through mutable
-/// storage, so a constant that reaches a mutable
-/// place must be materialized FRESH per construction -- otherwise `a.p.x = 5`
-/// through one holder rewrites every other holder of that literal, including an
-/// unrelated global (`tests/values/const_hoist.rock`). Candidates whose
-/// uses are not provably read-only emit their ctor inline, exactly as before the
-/// hoist existed.
+/// Share one module-scope constructor per identical constant value.
+/// Only provably read-only uses may share it. A constructor that can reach
+/// a mutable place must produce a fresh value.
 pub(crate) fn collect_const_hoists(
     ws: &Workspace,
     ctx: &CodegenCtx,

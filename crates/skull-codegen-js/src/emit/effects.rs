@@ -140,11 +140,7 @@ impl Emitter<'_> {
                     let line = format!("{};", self.render_inst_expr(iid)?);
                     self.push(&line);
                 }
-                // A multi-value call (scalarized value-struct / tuple return):
-                // `[d0, d1, ...] = callee(args);` destructures the array the
-                // multi-return callee packs. Dest cells are hoist-declared at the
-                // fn top, so this is an assignment, not a `let`. The leaves are
-                // read back via `Load` of each dest.
+                // Capture the result bank into the predeclared destination cells.
                 Inst::CallMulti { dests, func, args } => {
                     let call = self.render_call(iid, *func, args)?;
                     // An intrinsic is ONE JS expression: when its result type has
@@ -236,17 +232,8 @@ impl Emitter<'_> {
                 let s = self.render_val(*v)?;
                 self.push(&format!("return {s};"));
             }
-            // The scalar ABI returns a scalarized value struct / tuple as N leaf
-            // values. JS has no multi-return, so leaf 0 rides the ordinary return
-            // value and leaves 1..N ride module-scope scratch slots -- emulated
-            // secondary return registers. An array would allocate, which a
-            // `nobox` value forbids outright and every other value pays for
-            // nothing (measured).
-            //
-            // Publishing before the `return` reorders the leaves' evaluation,
-            // which is sound ONLY because a leaf is a temp or an
-            // `always_inlinable` pure expression -- that set excludes every Call,
-            // so no leaf can run user code or clobber the bank.
+            // Publish secondary lanes first. Each operand is a temp or a folded
+            // expression that cannot call and overwrite the bank.
             _ => self.emit_multi_return(vs)?,
         }
         Ok(())

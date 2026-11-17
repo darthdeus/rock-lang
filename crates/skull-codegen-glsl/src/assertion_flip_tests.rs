@@ -358,13 +358,7 @@ fn overlapping_attribute_locations_reject() {
     assert!(msg.contains("both occupy location"), "{msg}");
 }
 
-/// **A stage the interface does not declare is a REJECTION, not a lookup
-/// miss.**
-///
-/// `ProgramAbi::of` takes the stages the renderer will emit as a census.
-/// Trusting `iface.stages` instead would push the disagreement to the
-/// projection lookup, where the only options are a panic or a silent
-/// fallback -- and both are the shape this arc removes.
+/// A request for a missing stage must fail before projection.
 #[test]
 fn a_stage_the_interface_does_not_declare_rejects() {
     let mut iface = abi_fixture();

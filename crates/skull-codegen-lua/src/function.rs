@@ -31,16 +31,8 @@ pub fn emit_named(
     emit_lua_definition(ws, ctx, interner, name, func, None, &[], bound, None).lua
 }
 
-/// The coroutine state-table context: a `co fn`'s `__step` reads/writes its
-/// frame cells as fields of the state table `s` (the first param cell). A frame
-/// cell renders `<s>.c<slot>` instead of a bare local and is NOT declared. The
-/// slot is a DENSE per-frame ordinal (`slots`), NOT the raw cell-arena id:
-/// lambda-cell allocation bumps raw ids but never reorders the frame cells, so
-/// a slot -- and the layout stamp keyed on it -- is invariant under
-/// lambda-internal cell-count edits (the P2 finding).
-/// Lambdas are converted before emission;
-/// detached hook/defer regions are ordinary `MirFunc`s by the time they reach
-/// this printer.
+/// Map coroutine cells onto a state table. Dense slots stay stable when
+/// editing a detached lambda changes the cell arena.
 pub struct FrameCtx {
     pub s_cell: Idx<Cell>,
     pub fields: HashSet<Idx<Cell>>,
@@ -391,21 +383,13 @@ fn emit_body(
     );
     let cell_colors = locals.color_cells();
     REGALLOC_TIME.with(|c| c.set(c.get() + t_locals.elapsed()));
-    // Module-scope const hoisting: an all-constant `value` ctor is built ONCE as a
-    // function-owned top-level global and referenced everywhere, instead of rebuilt
-    // at each use. On a trace the per-use ctor sinks anyway, but in the interpreter
-    // (uncompiled text-rendering loops) it allocates every time -- the nested
-    // `outline_color: Vec2 { 0.0, 0.0 }` per glyph vertex was the entire skull-vs
-    // -rock interpreter-path text gap. rock does the same (`__rock_const_*`). The
-    // def is emitted in THIS function's chunk (not shared scaffolding), so an
-    // incremental body-edit overlay carries it; value structs are immutable, so
-    // re-running the def on reload is a harmless no-op (no preservation guard).
     let static_slots = static_slots_for(ws, interner, func, inherited_statics, name, ctx);
     // An unnamed definition is an expression its caller embeds mid-line, where
     // a directive (which must start a line) cannot go.
     let line_marks = (ctx.line_directives() && !name.is_empty()).then(|| RefCell::new(Vec::new()));
     let estimated_body_bytes = func.insts.len() * 24;
     let mut out = String::with_capacity(hoist_defs.len() + name.len() + 64 + estimated_body_bytes);
+    // Keep hoisted constants in the owning chunk so live reload carries them.
     out.push_str(&hoist_defs);
     // The factory captures final callee globals under private parameter names.
     // The same plan names its parameters and every bound use in the body.
