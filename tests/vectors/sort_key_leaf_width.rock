@@ -14,6 +14,27 @@ value Outer { a: int, inner: Inner }
 struct Nested { id: int, key: Outer }
 struct Named { id: int, rank: int, name: string }
 
+fn key_is_wide<T, K>(key_fn: fn(T) -> K) -> bool {
+    let wide = __sort_key_wide(key_fn)
+    return wide
+}
+
+@test
+fn key_width_expands_as_a_value() {
+    assert(!key_is_wide((x: int) => x))
+    assert(!key_is_wide((x: int) => tostring(x)))
+    assert(key_is_wide((x: int) => (x, x)))
+    assert(key_is_wide((x: int) => v(x as float, 0.0)))
+    assert(key_is_wide((x: int) => Outer { a: x, inner: Inner { b: x, c: 0.0 } }))
+    let calls = 0
+    let wide = key_is_wide((x: int) => {
+        calls += 1
+        return (x, x)
+    })
+    assert(wide)
+    assert(calls == 0)
+}
+
 fn ids(xs: [Item]) -> string {
     let parts: [string] = []
     for x in xs { parts.push(tostring(x.id)) }
