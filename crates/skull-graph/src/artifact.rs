@@ -733,7 +733,7 @@ fn publication_candidates(ws: &Workspace, req: &ArtifactRequest<'_>) -> BTreeMap
                     f.backend,
                     target.execution.backend.unwrap_or(FnBackend::Any),
                 ))
-            .then(|| (Instance::base(*r), f.name.to_string()))
+            .then(|| (Instance::base(*r), skull_mir::mangle::mangle_fn(ws, f)))
         })
         .collect()
 }
@@ -1451,7 +1451,7 @@ impl ArtifactView {
                 continue;
             }
             let instance = Instance::base(decl.0);
-            let symbol = f.name.to_string();
+            let symbol = skull_mir::mangle::mangle_fn(ws, f);
             if self
                 .index
                 .publication_candidates

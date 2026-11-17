@@ -240,6 +240,7 @@ impl LintOptions {
 
     /// Whether `method_syntax` may report over receiver type `name`.
     pub(crate) fn covers_type(&self, name: Ustr) -> bool {
+        let name = Ustr::from(bone_core::modules::display_name(name.as_str()));
         self.only_types
             .as_ref()
             .is_none_or(|only| only.contains(&name))
@@ -3465,6 +3466,7 @@ fn is_pure(body: &Body, e: Idx<Expr>) -> bool {
     match &body.expr_arena[e] {
         Expr::Unit
         | Expr::Null
+        | Expr::Error
         | Expr::Hole(_)
         | Expr::Int(_)
         | Expr::Float(_)
@@ -3558,8 +3560,6 @@ pub(crate) fn transmute_of_nullable_in_body(
     body: &Body,
 ) -> Vec<TransmuteOfNullable> {
     let Some(bi) = bi else { return Vec::new() };
-    let cast = Ustr::from("cast");
-    let transmute = Ustr::from("transmute");
 
     let mut out = Vec::new();
     for (idx, expr) in body.expr_arena.iter() {
@@ -3571,7 +3571,7 @@ pub(crate) fn transmute_of_nullable_in_body(
         else {
             continue;
         };
-        if (*name != cast && *name != transmute) || args.len() != 1 {
+        if !matches!(declared_name(name.as_str()), "cast" | "transmute") || args.len() != 1 {
             continue;
         }
         let arg = (*args).into_iter().next().expect("len == 1");
@@ -3694,7 +3694,7 @@ pub(crate) fn raw_input_sites_in_module(
             if policy
                 .raw_input_names
                 .iter()
-                .any(|item| item == name.as_str())
+                .any(|item| item == declared_name(name.as_str()))
             {
                 out.push(RawInputSite {
                     name: *name,
@@ -4024,7 +4024,7 @@ fn spelled_at(src: &str, name: Ustr, name_span: Span) -> bool {
     if b > src.len() || a > b || !src.is_char_boundary(a) || !src.is_char_boundary(b) {
         return false;
     }
-    &src[a..b] == name.as_str()
+    &src[a..b] == declared_name(name.as_str())
 }
 
 /// Whether the decl was WRITTEN in receiver form. Both forms lower to the same
@@ -4051,7 +4051,10 @@ fn written_as_method(src: &str, fn_span: Span, name_span: Span) -> bool {
 /// fails OPEN -- a misspelled entry filters nothing and the type keeps showing
 /// up, which reads as the flag not working -- so the caller names them.
 pub fn unknown_type_names(ws: &Workspace, warm: &FxHashSet<ModuleId>, names: &[Ustr]) -> Vec<Ustr> {
-    let known = nominal_type_names(ws, warm);
+    let known: FxHashSet<_> = nominal_type_names(ws, warm)
+        .into_iter()
+        .map(|name| Ustr::from(bone_core::modules::display_name(name.as_str())))
+        .collect();
     names
         .iter()
         .copied()

@@ -8,10 +8,10 @@
 use bone_incremental::session::{Session, SessionFile, UpdateTier};
 use bone_semantic::prelude::*;
 
+use crate::common;
+
 fn files(list: &[(&str, &str)]) -> Vec<SessionFile> {
-    list.iter()
-        .map(|(p, t)| SessionFile::legacy(*p, *t))
-        .collect()
+    list.iter().map(|(p, t)| common::v1(p, t)).collect()
 }
 
 fn fixture() -> Vec<SessionFile> {
@@ -29,9 +29,11 @@ fn fixture() -> Vec<SessionFile> {
 
 fn has_fn(ws: &Workspace, name: &str) -> bool {
     let n = Ustr::from(name);
-    ws.modules
-        .iter()
-        .any(|m| m.functions_by_name.contains_key(&n))
+    ws.modules.iter().any(|m| {
+        m.functions_by_name
+            .keys()
+            .any(|key| key == &n || key.as_str().rsplit("::").next() == Some(name))
+    })
 }
 
 #[test]

@@ -54,7 +54,7 @@ fn Mob.Sub.foo(m) -> int {
 fn main() {}
 
 //=== TEST CASE: unknown_receiver_type_Unknown ===
-//! expect: Unknown type name Ghost
+//! expect: `Ghost` did not resolve to any definition
 // Not a parse error -- desugars, then bone rejects the unknown param type.
 fn Ghost.haunt(g) -> int {
     return 0

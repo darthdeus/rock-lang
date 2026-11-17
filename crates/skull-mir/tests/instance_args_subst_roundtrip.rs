@@ -15,12 +15,11 @@
 //! `instance_identity.rs` is the other half: that going through the ARENA loses
 //! nothing either.
 
-use crate::common::{decl, ws_of};
+use crate::common::{decl, key, ws_of};
 use skull_mir::instance::Instance;
 use skull_mir::lower::{spec_key_from_subst, spec_subst_from_key};
 use skull_mir::monoty::MonoInterner;
 use skull_mir::monoty::{MonoCtor, MonoTy};
-use ustr::Ustr;
 
 const SRC: &str = r#"
 value V2 { x: float, y: float }
@@ -37,9 +36,9 @@ fn main() {
 /// directions could plausibly disagree on: a tuple (the stale reason `abi.rs`
 /// gave), a nullable, a nested application, and a MULTI-generic declaration
 /// where positional order is the only thing a substitution does not carry.
-fn key_shapes() -> Vec<(&'static str, Vec<MonoTy>)> {
+fn key_shapes(ws: &bone_core::workspace::Workspace) -> Vec<(&'static str, Vec<MonoTy>)> {
     let v2 = MonoTy::App {
-        ctor: MonoCtor::Nominal(Ustr::from("V2")),
+        ctor: MonoCtor::Nominal(key(ws, "V2")),
         params: vec![],
     };
     vec![
@@ -73,7 +72,7 @@ fn key_shapes() -> Vec<(&'static str, Vec<MonoTy>)> {
 fn a_complete_key_survives_the_round_trip_through_its_substitution() {
     let ws = ws_of(SRC);
     let ident = decl(&ws, "ident");
-    let shapes = key_shapes();
+    let shapes = key_shapes(&ws);
     assert_eq!(
         shapes.len(),
         8,

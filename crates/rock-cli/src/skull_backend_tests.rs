@@ -160,7 +160,7 @@ fn main() {}
     module.package = Some(rock_core::source_code::PackageTag {
         id: 1,
         self_name: "example_space".to_string(),
-        identity_storage: Default::default(),
+        identity_storage: skull_parser::IdentityStorage::Exempt,
         root: String::new(),
     });
     let mut aliases = bone_core::modules::NsAliases::default();
@@ -265,11 +265,23 @@ impl ProjectFixture {
     }
 }
 
+fn session_file(path: &str, text: &str) -> bone_incremental::session::SessionFile {
+    bone_incremental::session::SessionFile {
+        path: path.to_string(),
+        text: text.to_string(),
+        dialect: skull_parser::Dialect::V1,
+        package: Some(skull_parser::PackageTag {
+            id: 1,
+            self_name: "$standalone$<backend-test>".to_string(),
+            identity_storage: skull_parser::IdentityStorage::Exempt,
+            root: String::new(),
+        }),
+        global_policy: skull_parser::GlobalPolicy::Any,
+    }
+}
+
 fn files(src: &str) -> Vec<bone_incremental::session::SessionFile> {
-    vec![bone_incremental::session::SessionFile::legacy(
-        "main.rock",
-        src,
-    )]
+    vec![session_file("main.rock", src)]
 }
 
 /// Random call graphs shared by the incremental and overlay fuzzers: every fn is
@@ -347,10 +359,10 @@ mod incremental_watch_tests {
     //! can differ from a fresh build. Mirrors `skull/tests/incremental_emit.rs`
     //! through the actual Session edit path, covering whether `reinferred` is enough.
 
-    use super::files;
+    use super::{files, session_file};
     use crate::bone_backend::bone_session;
 
-    /// Boot a session from `initial` legacy files, then apply each body-only
+    /// Boot a session from `initial` package files, then apply each body-only
     /// `(file, text)` edit: its incremental emit must equal a full emit of a
     /// fresh session over the same sources.
     fn assert_edits_match_fresh(initial: &[(&str, &str)], edits: &[(&str, &str)]) {
@@ -358,9 +370,7 @@ mod incremental_watch_tests {
             bone_session(
                 sources
                     .iter()
-                    .map(|(path, text)| {
-                        bone_incremental::session::SessionFile::legacy(path.as_str(), text.as_str())
-                    })
+                    .map(|(path, text)| session_file(path, text))
                     .collect(),
             )
             .expect("session")
@@ -527,7 +537,9 @@ mod incremental_watch_tests {
                     .modules
                     .iter()
                     .flat_map(|module| module.functions.iter())
-                    .find(|(_, function)| function.name.as_str() == name)
+                    .find(|(_, function)| {
+                        skull_mir::mangle::declared_name(function.name.as_str()) == name
+                    })
                     .expect("fuzz function");
                 skull_mir::mangle::mangle_fn(session.workspace(), function)
             })
@@ -663,7 +675,9 @@ mod incremental_watch_tests {
                 .modules
                 .iter()
                 .flat_map(|module| module.functions.iter())
-                .find(|(_, function)| function.name.as_str() == name)
+                .find(|(_, function)| {
+                    skull_mir::mangle::declared_name(function.name.as_str()) == name
+                })
                 .expect("rank fixture function");
             skull_mir::mangle::mangle_fn(session.workspace(), function)
         };
@@ -1906,8 +1920,9 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         assert!(
             overlay.contains("function gen_0__advance(")
                 && overlay
-                    .contains("__rock_code_slot_ref(\"generated:main.rock::gen<>::advance\")")
-                && overlay.contains("__rock_code_slot_ref(\"generated:main.rock::gen<>::resume\")"),
+                    .contains("__rock_code_slot_ref(\"generated:<backend-test>::gen<>::advance\")")
+                && overlay
+                    .contains("__rock_code_slot_ref(\"generated:<backend-test>::gen<>::resume\")"),
             "overlay must re-emit the per-co-fn __advance/__resume fns + CodeRefs in the ctor:\n{}",
             overlay
         );
@@ -3046,8 +3061,12 @@ fn main() { print(choose_a()); print(choose_b()) }
             ws.module(fref.module).functions[fref.func].name.to_string()
         };
         match program.vert {
-            Some(vert) => format!("{}+{}", name(vert), name(program.frag)),
-            None => name(program.frag),
+            Some(vert) => format!(
+                "{}+{}",
+                bone_core::modules::display_name(&name(vert)),
+                bone_core::modules::display_name(&name(program.frag))
+            ),
+            None => bone_core::modules::artifact_name(&name(program.frag)).to_string(),
         }
     }
 
@@ -4470,19 +4489,31 @@ fn test_limit_reruns_the_tests_after_a_stopped_one() {
     let fails = failures_after(result, 2);
     assert_eq!(fails.len(), 3, "{fails:?}");
     assert!(
-        fails[0].starts_with("hung_test: ")
+        fails[0]
+            .rsplit("::")
+            .next()
+            .unwrap()
+            .starts_with("hung_test: ")
             && fails[0].contains("first.rock")
             && fails[0].contains("CPU-time budget")
             && fails[0].contains("while it ran"),
         "{fails:?}"
     );
     assert!(
-        fails[1].starts_with("crashing_test: ")
+        fails[1]
+            .rsplit("::")
+            .next()
+            .unwrap()
+            .starts_with("crashing_test: ")
             && fails[1].contains("child process stopped while it ran"),
         "{fails:?}"
     );
     assert!(
-        fails[2].starts_with("exiting_test: ")
+        fails[2]
+            .rsplit("::")
+            .next()
+            .unwrap()
+            .starts_with("exiting_test: ")
             && fails[2].contains("process exited 0 before all tests reported while it ran"),
         "{fails:?}"
     );
@@ -4530,7 +4561,8 @@ fn test_limit_bounds_the_reruns_of_a_shard() {
             assert!(
                 fails
                     .iter()
-                    .any(|f| f.starts_with(&last) && f.contains("stopped before it ran")),
+                    .any(|f| f.rsplit("::").next().unwrap_or(f).starts_with(&last)
+                        && f.contains("stopped before it ran")),
                 "{fails:?}"
             );
         }

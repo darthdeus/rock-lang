@@ -80,7 +80,7 @@ pub fn is_exempt(f: &Function) -> bool {
         || name.starts_with("test_")
 }
 
-/// The declared (last) segment of a DefKey. A legacy key IS the declared name.
+/// The declared (last) segment of a DefKey. A bare key IS the declared name.
 /// Classifiers use this spelling; emitted identifiers use [`ident_of_key`]
 /// instead.
 pub fn declared_name(key: &str) -> &str {
@@ -101,9 +101,8 @@ fn last_path_separator(key: &str) -> Option<usize> {
         .map(|i| i - 1)
 }
 
-/// The identifier form of a DefKey. A legacy key is a bare name and
-/// passes through byte-identical, so legacy emission cannot move. A v1 key
-/// `<package>::<module path>::<name>` becomes `<name>_<digest>`: `::` is not in
+/// The identifier form of a DefKey. A bare key passes through unchanged.
+/// A qualified key `<package>::<module path>::<name>` becomes `<name>_<digest>`: `::` is not in
 /// any identifier grammar, and the prefix is never flattened textually, so
 /// module `a::b` and a module literally named `a_b` cannot converge.
 ///
@@ -144,7 +143,7 @@ pub(crate) fn ident_of_name(name: ustr::Ustr) -> ustr::Ustr {
             return *ident;
         }
         let ident = match ident_of_key(name.as_str()) {
-            std::borrow::Cow::Borrowed(_) => name,
+            std::borrow::Cow::Borrowed(ident) => ustr::Ustr::from(ident),
             std::borrow::Cow::Owned(owned) => ustr::Ustr::from(&owned),
         };
         cache.borrow_mut().insert(name, ident);
@@ -219,7 +218,13 @@ pub fn mangle_fn(ws: &Workspace, f: &Function) -> String {
     // on the per-call-site codegen path; the old collect+join allocated N+2
     // strings + a vec per reference).
     let mut out = String::with_capacity(f.name.len() + 16);
-    out.push_str(ident_of_name(f.name).as_str());
+    // Synthetic operators already carry package identity in their parameter types.
+    let name = if f.is_synthetic && declared_name(f.name.as_str()).starts_with("__op_") {
+        declared_name(f.name.as_str())
+    } else {
+        ident_of_name(f.name).as_str()
+    };
+    out.push_str(name);
     for pd in &f.param_decls {
         out.push_str(SEP);
         encode_into(ws, pd.ty, &mut out);
@@ -529,7 +534,7 @@ pub fn collision_errors_of<'a>(
 
     // Two nominal types with one emitted symbol would share a typedef, a
     // constructor and a runtime tag. Only a `@nomangle` struct can reach
-    // another type's symbol: its declared name against a legacy type or
+    // another type's symbol: its declared name against a bare type or
     // another package's `@nomangle` struct of that name.
     let mut type_keys: Vec<(ustr::Ustr, Span)> = Vec::new();
     for m in ws.modules.iter() {
@@ -581,6 +586,75 @@ pub fn collision_errors_of<'a>(
 
 #[cfg(test)]
 mod tests {
+    fn named_package_workspace(src: &str) -> bone_core::workspace::Workspace {
+        let mut ast = skull_parser::parse_module_clean_with_dialect(
+            src,
+            ustr::Ustr::from("operators.rock"),
+            skull_parser::Dialect::V1,
+        )
+        .expect("parse");
+        ast.package = Some(skull_parser::PackageTag {
+            id: 1,
+            self_name: "image_package".to_string(),
+            identity_storage: Default::default(),
+            root: String::new(),
+        });
+        bone_semantic::semantic_passes::semantic_pass(&mut [ast]).expect("semantic pass")
+    }
+
+    #[test]
+    fn synthetic_newtype_operator_keeps_its_bare_base_symbol_in_a_named_package() {
+        let ws = named_package_workspace("newtype Image(int)");
+        let add = ws
+            .modules
+            .iter()
+            .flat_map(|module| module.functions.iter().map(|(_, function)| function))
+            .find(|function| {
+                function.is_synthetic && super::declared_name(function.name.as_str()) == "__op_add"
+            })
+            .expect("synthesized Image addition operator");
+        let image = ws
+            .defs
+            .iter()
+            .find_map(|(key, meta)| (meta.name.as_str() == "Image").then_some(*key))
+            .expect("Image definition");
+        let image_symbol = super::ident_of_key(image.as_str());
+
+        assert_eq!(
+            super::mangle_fn(&ws, add),
+            format!("__op_add_{image_symbol}_{image_symbol}")
+        );
+    }
+
+    #[test]
+    fn user_defined_primitive_operator_keeps_its_package_qualified_base_symbol() {
+        let ws = named_package_workspace("operator +(a: int, b: int) -> int { return a }");
+        let add = ws
+            .modules
+            .iter()
+            .flat_map(|module| module.functions.iter().map(|(_, function)| function))
+            .find(|function| {
+                !function.is_synthetic && super::declared_name(function.name.as_str()) == "__op_add"
+            })
+            .expect("user-defined integer addition operator");
+        let qualified_base = super::ident_of_name(add.name).to_string();
+
+        assert_eq!(
+            super::mangle_fn(&ws, add),
+            format!("{qualified_base}_int_int")
+        );
+    }
+
+    #[test]
+    fn standalone_type_identity_and_artifact_spelling_have_distinct_roles() {
+        let a = nominal("$standalone$a.rock::P", vec![]);
+        let b = nominal("$standalone$b.rock::P", vec![]);
+        assert_ne!(a.canonical(), b.canonical());
+        assert_eq!(a.artifact_key(), nominal("P", vec![]).canonical());
+        let child = nominal("$standalone$a.rock::child::P", vec![]);
+        assert_eq!(child.artifact_key(), child.canonical());
+    }
+
     #[test]
     fn standalone_root_symbols_keep_the_declared_spelling() {
         assert_eq!(

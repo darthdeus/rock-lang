@@ -14,7 +14,7 @@ fn lint_dialect(
 ) -> Vec<Finding> {
     let mut module = skull_parser::parse_module_clean_with_dialect(src, Ustr::from(file), dialect)
         .expect("parse");
-    if dialect == skull_parser::Dialect::V1 {
+    {
         module.package = Some(skull_parser::PackageTag {
             id: 0,
             self_name: "lintv1".to_string(),
@@ -55,10 +55,10 @@ fn v1_main_is_a_reachability_root() {
     );
 }
 
-fn action_gaps(src: &str, dialect: skull_parser::Dialect) -> Vec<String> {
+fn action_gaps(src: &str) -> Vec<String> {
     let options =
         LintOptions::only([ACTION_CALLERS.to_owned()]).with_action_policy(Some(&support::POLICY));
-    lint_dialect(src, "app/actions.rock", dialect, &options)
+    lint_dialect(src, "app/actions.rock", skull_parser::Dialect::V1, &options)
         .iter()
         .map(|finding| finding.error.message.clone())
         .collect()
@@ -85,17 +85,6 @@ fn assert_registration_is_not_a_caller(gaps: Vec<String>) {
 }
 
 #[test]
-fn legacy_action_registration_reads_are_not_callers() {
-    assert_registration_is_not_a_caller(action_gaps(
-        ACTION_REGISTRATION,
-        skull_parser::Dialect::Legacy,
-    ));
-}
-
-#[test]
 fn v1_action_registration_reads_are_not_callers() {
-    assert_registration_is_not_a_caller(action_gaps(
-        ACTION_REGISTRATION,
-        skull_parser::Dialect::V1,
-    ));
+    assert_registration_is_not_a_caller(action_gaps(ACTION_REGISTRATION));
 }

@@ -133,7 +133,7 @@ impl CodeIdentity {
             let args = instance
                 .arg_types(interner)
                 .iter()
-                .map(|ty| ty.canonical())
+                .map(|ty| ty.artifact_key())
                 .collect::<Vec<_>>()
                 .join(",");
             format!(
@@ -899,7 +899,8 @@ impl BodyHasher {
     }
 
     fn string(&mut self, value: &str) {
-        self.hash.write_str(value);
+        self.hash
+            .write_str(bone_core::modules::artifact_name(value));
     }
 
     fn boolean(&mut self, value: bool) {

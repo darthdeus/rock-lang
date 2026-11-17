@@ -1,0 +1,32 @@
+//! Packages use the same module rules, including sources with no directive.
+
+//- private_package_items_are_not_exported @fail=not accessible from this module
+//-- xlib.rock @pkg=x_lib,1
+fn f(n: int) -> int { n }
+//-- app.rock @pkg=app,2
+fn g() -> int { x_lib::f(1) }
+
+//- package_exports_need_an_import @fail=`answer` did not resolve
+//-- lib.rock @pkg=library,1
+pub fn answer() -> int { 42 }
+//-- game.rock @pkg=game,2
+fn g() -> int { answer() }
+
+//- package_exports_can_be_imported_without_a_directive
+//-- lib.rock @pkg=library,1
+pub fn answer() -> int { 42 }
+//-- game.rock @pkg=game,2
+use library::answer;
+fn g() -> int {
+    let x = answer()
+          //^ int
+    x
+}
+
+//- standalone_files_reach_std
+//-- standalone.rock
+fn quarter(x: float) -> float {
+    let y = lerp(0.0, x, 0.25)
+            //^ float
+    y
+}

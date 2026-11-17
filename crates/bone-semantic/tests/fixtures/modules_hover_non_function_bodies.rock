@@ -3,12 +3,13 @@
 //! item interval index). Before B7 these markers resolve to no type at all.
 
 //- hover_inside_global_init
+//-- hover_inside_global_init.rock
 global GREETING: string = "hello"
                         //^ string
 fn f() -> string { GREETING }
 
 //- hover_inside_decorator_body
-struct __DecoTarget { name: string, params: [string], func: any }
+//-- hover_inside_decorator_body.rock
 deco init d {
     let n = target.name
       //^ string
@@ -16,11 +17,13 @@ deco init d {
 fn f() -> int { 3 }
 
 //- hover_inside_struct_default
+//-- hover_inside_struct_default.rock
 struct Cfg { greeting: string = "hi" }
                               //^ string
 fn f() -> string { Cfg {}.greeting }
 
 //- hover_valueless_global_annotation
+//-- hover_valueless_global_annotation.rock
 struct Image { w: int }
 global CURRENT: Image
               //^ Image

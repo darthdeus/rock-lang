@@ -1,14 +1,9 @@
-//! A legacy definition's key is its bare name, and so is a standard-library
-//! one, so every legacy overload of a std-named function or operator shares
-//! the std key. A v1 fragment still reaches only what its tiers bring in:
-//! tier 5 is the compiler-owned std view, which holds
-//! the standard library's own members and no legacy file's. Legacy callers
-//! keep the whole bare family.
-//!
-//! Sections hold embedded files: `//-- <file> @pkg=<self_name>,<id> [@v1]`;
-//! a file without `@v1` is legacy.
+//! Module lookup keeps package definitions separate from the stdlib.
 
-//- a_legacy_overload_of_a_std_function_is_not_in_the_std_tier @fail=No overload for `lerp` with argument types (string, string, float)
+//-- <file> @pkg=<self_name>,<id> [@v1]`;
+//! a file without `@v1` is package.
+
+//- a_package_overload_of_a_std_function_is_not_in_the_std_tier @fail=No overload for `lerp` with argument types (string, string, float)
 //-- game.rock @pkg=game,3
 fn lerp(a: string, b: string, t: float) -> string {
     a
@@ -19,7 +14,7 @@ fn g() -> string {
     lerp("a", "b", 0.5)
 }
 
-//- the_std_tier_keeps_the_std_members_beside_a_legacy_overload
+//- the_std_tier_keeps_the_std_members_beside_a_package_overload
 //-- game.rock @pkg=game,3
 fn lerp(a: string, b: string, t: float) -> string {
     a
@@ -45,7 +40,7 @@ fn g() -> string {
     std::lerp("a", "b", 0.5)
 }
 
-//- a_legacy_operator_overload_is_not_in_the_std_operator_family @fail=No overload for `__op_mod` with argument types (Vec2, Vec2)
+//- a_package_operator_overload_is_not_in_the_std_operator_family @fail=No overload for `__op_mod` with argument types (Vec2, Vec2)
 //-- game.rock @pkg=game,3
 operator %(a: Vec2, b: Vec2) -> Vec2 {
     a
@@ -56,7 +51,7 @@ fn g(a: Vec2, b: Vec2) -> Vec2 {
     a % b
 }
 
-//- legacy_callers_keep_the_whole_bare_family
+//- package_callers_keep_the_whole_bare_family
 //-- game.rock @pkg=game,3
 fn lerp(a: string, b: string, t: float) -> string {
     a
@@ -82,7 +77,7 @@ fn g() -> float {
     lerp(1.0, 2.0, 0.5)
 }
 
-//- a_std_function_value_is_not_overloaded_by_a_legacy_file
+//- a_std_function_value_is_not_overloaded_by_a_package_file
 //-- game.rock @pkg=game,3
 fn smoothstep(a: string, b: string, t: float) -> string {
     a

@@ -420,6 +420,20 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
         }
     }
 
+    fn path(&self, path: &Path) -> Path {
+        Path {
+            from_root: path.from_root,
+            segments: path.segments.iter().map(|id| self.ctor(id)).collect(),
+        }
+    }
+
+    fn type_path(&self, path: &Path) -> Path {
+        Path {
+            from_root: path.from_root,
+            segments: path.segments.iter().map(|id| self.decl(id)).collect(),
+        }
+    }
+
     fn call_args(&mut self, args: &[FunctionCallArg]) -> Vec<FunctionCallArg> {
         let src = self.src;
         let mut out = Vec::with_capacity(args.len());
@@ -450,8 +464,6 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
         match kind {
             ExprKind::Null
             | ExprKind::Unit
-            | ExprKind::Path { .. }
-            | ExprKind::PathStructLiteral { .. }
             | ExprKind::Int(_, _)
             | ExprKind::Float(_)
             | ExprKind::String(_)
@@ -471,6 +483,22 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
                 base: self.ctor(base),
                 member: member.clone(),
             },
+            ExprKind::Path { path, generic_args } => ExprKind::Path {
+                path: self.path(path),
+                generic_args: generic_args.iter().map(|t| self.ty(*t)).collect(),
+            },
+            ExprKind::PathStructLiteral {
+                path,
+                bases,
+                fields,
+            } => ExprKind::PathStructLiteral {
+                path: self.path(path),
+                bases: bases.iter().map(|b| self.expr(*b)).collect(),
+                fields: fields
+                    .iter()
+                    .map(|(ns, v)| (ns.clone(), self.expr(*v)))
+                    .collect(),
+            },
             ExprKind::InterpolatedString(parts) => ExprKind::InterpolatedString(
                 parts
                     .iter()
@@ -486,7 +514,6 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
             ExprKind::Paren(x) => ExprKind::Paren(self.expr(*x)),
             ExprKind::As(x, t) => ExprKind::As(self.expr(*x), self.ty(*t)),
             ExprKind::Bitcast(x, t) => ExprKind::Bitcast(self.expr(*x), self.ty(*t)),
-            ExprKind::TypeAscription(x, t) => ExprKind::TypeAscription(self.expr(*x), self.ty(*t)),
             ExprKind::ParenAscription(x, t) => {
                 ExprKind::ParenAscription(self.expr(*x), self.ty(*t))
             }
@@ -674,13 +701,13 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
                     .map(|ps| ps.iter().map(|p| self.pattern(p)).collect()),
             },
             Pattern::PathVariant { path, args } => Pattern::PathVariant {
-                path: path.clone(),
+                path: self.path(path),
                 args: args
                     .as_ref()
                     .map(|ps| ps.iter().map(|p| self.pattern(p)).collect()),
             },
             Pattern::PathRecord { path, fields, rest } => Pattern::PathRecord {
-                path: path.clone(),
+                path: self.path(path),
                 fields: fields
                     .iter()
                     .map(|(id, p)| (id.clone(), self.pattern(p)))
@@ -742,12 +769,12 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
             | TypeExprKind::F32
             | TypeExprKind::Bool
             | TypeExprKind::Hole(_, _)
-            | TypeExprKind::Ident(_)
-            | TypeExprKind::Path(_) => kind.clone(),
+            | TypeExprKind::Ident(_) => kind.clone(),
+            TypeExprKind::Path(path) => TypeExprKind::Path(self.type_path(path)),
             TypeExprKind::Ref(t) => TypeExprKind::Ref(self.ty(*t)),
             TypeExprKind::Array(t) => TypeExprKind::Array(self.ty(*t)),
             TypeExprKind::AppPath { ctor, args } => TypeExprKind::AppPath {
-                ctor: ctor.clone(),
+                ctor: self.type_path(ctor),
                 args: args.iter().map(|t| self.ty(*t)).collect(),
             },
             TypeExprKind::App { ctor, args } => TypeExprKind::App {

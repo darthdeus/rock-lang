@@ -9,7 +9,7 @@ use bone_semantic::prelude::*;
 const FILE: &str = "<method_syntax>";
 
 fn parse(src: &str) -> skull_parser::Ast {
-    skull_parser::parse_module_clean(src, Ustr::from(FILE)).expect("parse")
+    crate::support::parse(FILE, src)
 }
 
 fn findings_with(src: &str, sel: &LintOptions) -> Vec<Finding> {
@@ -152,8 +152,8 @@ fn a_receiver_declared_in_a_warm_module_is_not_the_authors_to_convert() {
     let lib = "struct Sprite { id: int }\n";
     let game = "fn draw(s: Sprite, n: int) -> int { n }\nfn main() { }\n";
     let mut asts = [
-        skull_parser::parse_module_clean(lib, Ustr::from("<lib>")).expect("parse"),
-        skull_parser::parse_module_clean(game, Ustr::from(FILE)).expect("parse"),
+        crate::support::parse("<lib>", lib),
+        crate::support::parse(FILE, game),
     ];
     let ws = semantic_pass(&mut asts).expect("typechecks");
     let mut sources = FxHashMap::default();

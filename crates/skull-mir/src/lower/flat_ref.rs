@@ -833,7 +833,7 @@ impl<'a> Builder<'a> {
                 None => "boxed".to_string(),
                 Some(key) => format!(
                     "elem={};nullable={};nobox={};storage={:?};prefix={};{}",
-                    key.elem.name,
+                    bone_core::modules::artifact_name(key.elem.name.as_str()),
                     key.elem.nullable,
                     key.elem.is_nobox(),
                     key.storage,

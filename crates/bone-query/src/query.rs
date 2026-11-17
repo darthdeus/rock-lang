@@ -1,3 +1,4 @@
+use bone_core::modules::{UsePathRef, display_name};
 use bone_core::type_equiv::TyRef;
 use bone_semantic::hir::{BindingKind, Function};
 use bone_semantic::inference;
@@ -5,6 +6,10 @@ use bone_semantic::{hir::NodeRef, prelude::*};
 use skull_parser::Ast;
 
 use crate::types;
+
+fn source_ident(name: Ustr) -> &'static str {
+    name.as_str().rsplit("::").next().unwrap_or(name.as_str())
+}
 
 pub fn definition_at(
     ws: &Workspace,
@@ -22,12 +27,13 @@ pub fn definition_at(
         return Some(s);
     }
 
-    // Smallest node covering the cursor, preferring one with an INFORMATIVE
-    // type (see `hover_at`): keeps goto-definition on the identifier if a small
-    // uninformative overlay ever shares its offset.
+    // Prefer a node whose name span covers the cursor. A typed wrapper can
+    // overlap a nested identifier, but goto-definition should follow that
+    // identifier before considering the wrapper's type.
     let def_bi = inf.per_fn.get(&owner);
     let iv = body.node_index().find(offset, offset + 1).min_by_key(|x| {
         (
+            !definition_node_name_contains(body, x.val, offset),
             def_bi.map_or(0, |bi| node_ty_uninformative(ws, bi, x.val)),
             x.stop - x.start,
         )
@@ -132,6 +138,35 @@ pub fn definition_at(
             type_def_target(ws, &bi.ty_arena[idx])
         }
         NodeRef::Statement(..) => None,
+    }
+}
+
+fn definition_node_name_contains(body: &hir::Body, node: NodeRef, offset: usize) -> bool {
+    match node {
+        NodeRef::Binding(binding) => span_contains(&body.binding_arena[binding].span, offset),
+        NodeRef::Expr(expr) => {
+            let expr_node = &body.expr_arena[expr];
+            match expr_node {
+                hir::Expr::Var(_) | hir::Expr::Global(_) | hir::Expr::SiblingRef(_) => body
+                    .expr_spans
+                    .get(expr)
+                    .is_some_and(|span| span_contains(span, offset)),
+                hir::Expr::Call {
+                    callee: hir::Callee::Unresolved { name_span, .. },
+                    ..
+                } => span_contains(&body.name_spans[*name_span], offset),
+                hir::Expr::EnumVariant {
+                    enum_name_span,
+                    variant_span,
+                    ..
+                } => {
+                    span_contains(&body.name_spans[*enum_name_span], offset)
+                        || span_contains(&body.name_spans[*variant_span], offset)
+                }
+                _ => false,
+            }
+        }
+        _ => false,
     }
 }
 
@@ -518,7 +553,7 @@ pub fn hover_at(
         // Skip compiler-generated ops (e.g. a newtype's `__op_add`): their
         // name_span is the newtype/decl name, so they'd shadow the real
         // declaration's hover. Users never hover these.
-        if f.name.as_str().starts_with("__") {
+        if source_ident(f.name).starts_with("__") {
             continue;
         }
         let (s, e) = f.name_span.offset_range();
@@ -534,7 +569,7 @@ pub fn hover_at(
         }
         // A field declaration name (`struct S { field: T }` -> hover `field`).
         for fld in &s.fields {
-            if in_leading_name(offset, &fld.span, fld.name.as_str().len()) {
+            if in_leading_name(offset, &fld.span, source_ident(fld.name).len()) {
                 if let Some(t) = render_field_of(ws, s.name, fld.name) {
                     return Some((t, fld.span));
                 }
@@ -560,7 +595,7 @@ pub fn hover_at(
             return Some((
                 fenced(&format!(
                     "newtype {}({})",
-                    nt.name,
+                    display_name(nt.name.as_str()),
                     render_hover_type(ws, None, nt.wrapped)
                 )),
                 nt.name_span,
@@ -680,7 +715,7 @@ pub(crate) fn fn_signature_hover(
 ) -> Option<(String, Span)> {
     let module = ws.modules.get(mid.index())?;
     for (fid, f) in module.functions.iter() {
-        if f.name.as_str().starts_with("__") {
+        if source_ident(f.name).starts_with("__") {
             continue;
         }
         let (s, e) = f.span.offset_range();
@@ -705,7 +740,7 @@ pub(crate) fn fn_signature_hover(
 /// fenced. None if `name` isn't an enum.
 fn render_enum_def(ws: &Workspace, name: Ustr) -> Option<String> {
     let edef = enum_def_by_name(ws, name)?;
-    let mut out = format!("enum {} {{\n", name);
+    let mut out = format!("enum {} {{\n", display_name(name.as_str()));
     for v in &edef.variants {
         out.push_str(&format!("  {},\n", render_variant_payload(ws, v)));
     }
@@ -739,7 +774,7 @@ fn render_variant(ws: &Workspace, enum_name: Option<Ustr>, variant: Ustr) -> Opt
     let v = edef.variants.iter().find(|v| v.name == variant)?;
     Some(fenced(&format!(
         "{}::{}",
-        edef.name,
+        display_name(edef.name.as_str()),
         render_variant_payload(ws, v)
     )))
 }
@@ -809,14 +844,14 @@ fn render_hover_type(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> St
             .iter()
             .any(|m| m.struct_by_name.contains_key(&name))
         {
-            return format!("struct {}", name);
+            return format!("struct {}", display_name(name.as_str()));
         }
         if ws
             .modules
             .iter()
             .any(|m| m.enums_by_name.contains_key(&name))
         {
-            return format!("enum {}", name);
+            return format!("enum {}", display_name(name.as_str()));
         }
     }
     ws.render(bi, ty)
@@ -846,7 +881,10 @@ fn hover_record_pat(ws: &Workspace, body: &Body, offset: usize) -> Option<(Strin
             let (s, e) = nspan.offset_range();
             if s <= offset && offset < e {
                 if let Some(edef) = enum_def_for_variant(ws, *enum_name, *var) {
-                    return Some((format!("Type: enum {}", edef.name), *nspan));
+                    return Some((
+                        format!("Type: enum {}", display_name(edef.name.as_str())),
+                        *nspan,
+                    ));
                 }
                 if let Some(def) = render_struct_def(ws, *var) {
                     return Some((def, *nspan));
@@ -879,7 +917,7 @@ fn render_record_field(
         "{}: {} (field of {}::{})",
         field,
         ws.render(None, ty),
-        edef.name,
+        display_name(edef.name.as_str()),
         name
     ))
 }
@@ -893,7 +931,7 @@ fn render_field_of(ws: &Workspace, struct_name: Ustr, field: Ustr) -> Option<Str
         "{}: {} (field of {})",
         field,
         ws.render(None, f.ty),
-        struct_name
+        display_name(struct_name.as_str())
     ))
 }
 
@@ -901,7 +939,7 @@ fn render_field_of(ws: &Workspace, struct_name: Ustr, field: Ustr) -> Option<Str
 /// hover), or `None` if `name` isn't a known struct.
 fn render_struct_def(ws: &Workspace, name: Ustr) -> Option<String> {
     let sdef = struct_def_by_name(ws, name)?;
-    let mut out = format!("struct {} {{\n", name);
+    let mut out = format!("struct {} {{\n", display_name(name.as_str()));
     for f in &sdef.fields {
         out.push_str(&format!("  {}: {},\n", f.name, ws.render(None, f.ty)));
     }
@@ -962,20 +1000,36 @@ pub(crate) fn segments_naming(
     out
 }
 
+fn is_source_definition(ws: &Workspace, key: Ustr) -> bool {
+    ws.functions_by_name.get(&key).is_none_or(|functions| {
+        functions
+            .iter()
+            .any(|(mid, fid)| !ws.module(*mid).functions[*fid].is_synthetic)
+    })
+}
+
 /// The modules-v1 definition whose declaration [`segment_target_def`]
 /// reports as `decl`: the definition a navigation landed on.
 pub(crate) fn v1_def_declared_at(ws: &Workspace, decl: &Span) -> Option<Ustr> {
-    ws.defs.keys().copied().find(|key| {
-        segment_target_def(ws, hir::SegmentTarget::Def(*key)).is_some_and(|d| d == *decl)
-    })
+    ws.defs
+        .keys()
+        .copied()
+        .filter(|key| is_source_definition(ws, *key))
+        .find(|key| {
+            segment_target_def(ws, hir::SegmentTarget::Def(*key)).is_some_and(|d| d == *decl)
+        })
 }
 
 /// The modules-v1 definition whose declared name covers `offset` of `file`.
 pub(crate) fn v1_def_named_at(ws: &Workspace, file: Ustr, offset: usize) -> Option<Ustr> {
-    ws.defs.keys().copied().find(|key| {
-        segment_target_def(ws, hir::SegmentTarget::Def(*key))
-            .is_some_and(|d| d.file == file && span_contains(&d, offset))
-    })
+    ws.defs
+        .keys()
+        .copied()
+        .filter(|key| is_source_definition(ws, *key))
+        .find(|key| {
+            segment_target_def(ws, hir::SegmentTarget::Def(*key))
+                .is_some_and(|d| d.file == file && span_contains(&d, offset))
+        })
 }
 
 fn def_of_name(ws: &Workspace, name: Ustr) -> Option<Span> {
@@ -997,7 +1051,7 @@ fn def_of_name(ws: &Workspace, name: Ustr) -> Option<Span> {
         }
 
         if let Some(nt) = m.newtypes_by_name.get(&name) {
-            return Some(m.newtypes[*nt].span);
+            return Some(m.newtypes[*nt].name_span);
         }
     }
 
@@ -1254,7 +1308,7 @@ fn newtype_decl_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Ustr>
 /// so annotation sites are text-verified before pushing -- a clipped span
 /// that isn't literally the name is dropped (no edit beats a wrong edit).
 fn newtype_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>) -> Vec<Span> {
-    let len = name.as_str().len();
+    let len = source_ident(name).len();
     let mut out: Vec<Span> = Vec::new();
 
     for m in ws.modules.iter() {
@@ -1266,7 +1320,8 @@ fn newtype_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>) -
             for_each_nominal_annotation(ws, m.file, body, name, &mut |sp| {
                 let clipped = leading_name_span(sp, len);
                 let verified = text.is_none_or(|t| {
-                    t.get(clipped.offset_range().0..clipped.offset_range().1) == Some(name.as_str())
+                    t.get(clipped.offset_range().0..clipped.offset_range().1)
+                        == Some(source_ident(name))
                 });
                 if verified {
                     out.push(clipped);
@@ -1552,7 +1607,7 @@ fn global_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Ustr> {
 /// `_G.name` and `&name` forms rename the identifier only (a plain ident is
 /// its own trailing token).
 fn global_references(ws: &Workspace, name: Ustr) -> Vec<Span> {
-    let len = name.as_str().len();
+    let len = source_ident(name).len();
     let mut out: Vec<Span> = Vec::new();
 
     for m in ws.modules.iter() {
@@ -1603,7 +1658,7 @@ fn struct_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Ustr> {
 
     // Declaration name (item-level).
     for s in module.structs.values() {
-        if in_leading_name(offset, &s.name_span, s.name.as_str().len()) {
+        if in_leading_name(offset, &s.name_span, source_ident(s.name).len()) {
             return Some(s.name);
         }
     }
@@ -1625,7 +1680,7 @@ fn struct_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Ustr> {
         NodeRef::Expr(e) => {
             if let hir::Expr::StructLiteral { name, .. } = &body.expr_arena[e] {
                 let sp = body.expr_spans.get(e)?;
-                if in_leading_name(offset, sp, name.as_str().len()) {
+                if in_leading_name(offset, sp, source_ident(*name).len()) {
                     return Some(*name);
                 }
             }
@@ -1642,7 +1697,7 @@ fn ctor_name_if_on(te: &hir::TypeExpr, span: Option<&Span>, offset: usize) -> Op
         ..
     } = te
     {
-        if in_leading_name(offset, span?, name.as_str().len()) {
+        if in_leading_name(offset, span?, source_ident(*name).len()) {
             return Some(*name);
         }
     }
@@ -1832,7 +1887,7 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
 /// `let` annotations in `lowered_tys`), and every struct-literal head. Each site
 /// is clipped to just the name token so rename replaces the identifier only.
 fn struct_references(ws: &Workspace, name: Ustr) -> Vec<Span> {
-    let len = name.as_str().len();
+    let len = source_ident(name).len();
     let mut out: Vec<Span> = Vec::new();
     let mut push = |sp: &Span| out.push(leading_name_span(sp, len));
 
@@ -2030,7 +2085,7 @@ fn enum_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Ustr> {
     let module = ws.modules.get(mid.index())?;
 
     for en in module.enums.values() {
-        if in_leading_name(offset, &en.name_span, en.name.as_str().len()) {
+        if in_leading_name(offset, &en.name_span, source_ident(en.name).len()) {
             return Some(en.name);
         }
     }
@@ -2072,7 +2127,7 @@ fn enum_qualifiers(body: &Body) -> impl Iterator<Item = (Ustr, &Span)> {
 /// every `Nominal` type-annotation ctor, and every `name::Variant` qualifier
 /// in expressions and patterns. Each site is clipped to the name token.
 fn enum_references(ws: &Workspace, name: Ustr) -> Vec<Span> {
-    let len = name.as_str().len();
+    let len = source_ident(name).len();
     let mut out: Vec<Span> = Vec::new();
     let mut push = |sp: &Span| out.push(leading_name_span(sp, len));
 
@@ -2175,7 +2230,7 @@ fn generic_param_references(ws: &Workspace, gmid: ModuleId, gidx: Idx<hir::TypeE
     let hir::TypeExpr::Generic(var, gname) = m.ty_arena[gidx] else {
         return Vec::new();
     };
-    let len = gname.as_str().len();
+    let len = source_ident(gname).len();
     let is_param = |idx: Idx<hir::TypeExpr>| matches!(m.ty_arena[idx], hir::TypeExpr::Generic(v, _) if v == var);
 
     let mut out: Vec<Span> = Vec::new();
@@ -2219,7 +2274,7 @@ fn local_references(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Vec<
     }
 
     let name = body.binding_arena[b].name;
-    let name_len = name.as_str().len();
+    let name_len = source_ident(name).len();
 
     // A shorthand token (`S { x }` literal, `S { x } =>` pattern) doubles as
     // the field name: a binding rename must expand it, keeping the field.
@@ -2559,7 +2614,7 @@ fn function_target(
         // decl would resolve here and `function_references_by_name("__op_add")`
         // would rewrite every `__op_add` across the warm stdlib -- a destructive
         // rename. Newtype decls are handled by their own resolution.
-        if f.name.as_str().starts_with("__") {
+        if source_ident(f.name).starts_with("__") {
             continue;
         }
         let (s, e) = f.name_span.offset_range();
@@ -2647,7 +2702,7 @@ fn function_references_by_name<'t>(
                                 text,
                                 rsp.offset_range().1,
                                 sp.offset_range().1,
-                                name.as_str(),
+                                source_ident(name),
                                 sp,
                             ) {
                                 out.push(span);
@@ -3123,7 +3178,14 @@ fn binding_or_global_ty<'a>(
         Some(TyRef::new(bi, ty))
     });
     local.or_else(|| {
-        let ty = *ws.globals_by_name.get(&Ustr::from(head))?;
+        let key = crate::modules_scope::fragment(ws, module.file)
+            .and_then(|frag| {
+                bone_semantic::lower::resolve::resolve_bare(ws, frag, Ustr::from(head))
+                    .ok()
+                    .map(|resolved| resolved.key)
+            })
+            .unwrap_or_else(|| Ustr::from(head));
+        let ty = *ws.globals_by_name.get(&key)?;
         Some(TyRef::of_static(ty))
     })
 }
@@ -3258,19 +3320,21 @@ fn find_binding_by_name(body: &Body, head: &str, offset: usize) -> Option<Idx<hi
 /// enum qualifier (incl. the `::`) renders the full enum body.
 pub(crate) fn enum_variant_pattern_hover(
     ws: &Workspace,
+    mid: ModuleId,
     ast: &skull_parser::Ast,
     offset: usize,
 ) -> Option<(String, Span)> {
-    match variant_head_at(ast, offset)? {
+    match variant_head_at(ws, mid, ast, offset)? {
         VariantHead::Variant { enum_name, variant } => {
             render_variant(ws, enum_name, variant.name).map(|s| (s, variant.span))
         }
         VariantHead::Qualifier {
-            enum_ident,
+            enum_name,
             variant,
+            span,
         } => {
-            let edef = enum_def_for_variant(ws, Some(enum_ident.name), variant)?;
-            render_enum_def(ws, edef.name).map(|s| (s, enum_ident.span))
+            let edef = enum_def_for_variant(ws, Some(enum_name), variant)?;
+            render_enum_def(ws, edef.name).map(|s| (s, span))
         }
     }
 }
@@ -3280,17 +3344,17 @@ pub(crate) fn enum_variant_pattern_hover(
 /// [`enum_variant_pattern_hover`].
 pub(crate) fn enum_variant_pattern_def(
     ws: &Workspace,
+    mid: ModuleId,
     ast: &skull_parser::Ast,
     offset: usize,
 ) -> Option<Span> {
-    match variant_head_at(ast, offset)? {
+    match variant_head_at(ws, mid, ast, offset)? {
         VariantHead::Variant { enum_name, variant } => {
             variant_def_span(ws, enum_name, variant.name)
         }
         VariantHead::Qualifier {
-            enum_ident,
-            variant,
-        } => enum_def_for_variant(ws, Some(enum_ident.name), variant).map(|e| e.name_span),
+            enum_name, variant, ..
+        } => enum_def_for_variant(ws, Some(enum_name), variant).map(|e| e.name_span),
     }
 }
 
@@ -3302,8 +3366,9 @@ enum VariantHead<'a> {
     },
     /// The enum qualifier plus the `::` up to the variant name.
     Qualifier {
-        enum_ident: &'a skull_parser::Ident,
+        enum_name: Ustr,
         variant: Ustr,
+        span: Span,
     },
 }
 
@@ -3311,27 +3376,158 @@ enum VariantHead<'a> {
 /// variant-pattern head under `offset`. A bare struct head (`Point { .. }`)
 /// is reported too; resolving it as a variant fails and the caller falls
 /// through to the struct-def hover in `hover_record_pat`.
-fn variant_head_at(ast: &skull_parser::Ast, offset: usize) -> Option<VariantHead<'_>> {
-    fn in_pattern(pat: &skull_parser::Pattern, offset: usize) -> Option<VariantHead<'_>> {
+fn variant_head_at<'a>(
+    ws: &Workspace,
+    mid: ModuleId,
+    ast: &'a skull_parser::Ast,
+    offset: usize,
+) -> Option<VariantHead<'a>> {
+    fn type_key(ws: &Workspace, mid: ModuleId, name: Ustr) -> Option<Ustr> {
+        let file = ws.module(mid).file;
+        match crate::modules_scope::fragment(ws, file) {
+            Some(frag) => crate::modules_scope::resolve_type_key(ws, Some(frag), name.as_str()),
+            None => Some(name),
+        }
+    }
+
+    fn path_variant(
+        ws: &Workspace,
+        mid: ModuleId,
+        path: &skull_parser::Path,
+    ) -> Option<(Ustr, Ustr)> {
+        let (variant, enum_path) = path.segments.split_last()?;
+        if enum_path.is_empty() {
+            return None;
+        }
+        let file = ws.module(mid).file;
+        let frag = crate::modules_scope::fragment(ws, file)?;
+        let resolved = bone_semantic::lower::resolve::resolve_path(
+            ws,
+            frag,
+            &UsePathRef {
+                from_root: path.from_root,
+                segments: enum_path.iter().map(|segment| segment.name).collect(),
+            },
+        )
+        .ok()?;
+        let enum_def = enum_def_by_name(ws, resolved.key)?;
+        enum_def
+            .variants
+            .iter()
+            .any(|candidate| candidate.name == variant.name)
+            .then_some((enum_def.name, variant.name))
+    }
+
+    fn enum_path_names(
+        path: &skull_parser::Path,
+    ) -> Option<(&skull_parser::Ident, &skull_parser::Ident)> {
+        let (variant, enum_path) = path.segments.split_last()?;
+        Some((enum_path.last()?, variant))
+    }
+
+    fn in_pattern<'a>(
+        ws: &Workspace,
+        mid: ModuleId,
+        pat: &'a skull_parser::Pattern,
+        offset: usize,
+    ) -> Option<VariantHead<'a>> {
         use skull_parser::Pattern;
-        let (enum_name, variant_name, subs): (_, _, Vec<&Pattern>) = match pat {
+        let (enum_name, enum_ident, variant_name, subs): (
+            Option<Ustr>,
+            Option<&skull_parser::Ident>,
+            &skull_parser::Ident,
+            Vec<&Pattern>,
+        ) = match pat {
             Pattern::EnumVariant {
                 enum_name,
                 variant_name,
                 args,
-            } => (enum_name, variant_name, args.iter().flatten().collect()),
+            } => {
+                let key = match enum_name {
+                    Some(name) => Some(type_key(ws, mid, name.name)?),
+                    None => None,
+                };
+                (
+                    key,
+                    enum_name.as_ref(),
+                    variant_name,
+                    args.iter().flatten().collect(),
+                )
+            }
             Pattern::Record {
                 enum_name,
                 name: Some(variant_name),
                 fields,
                 ..
-            } => (
-                enum_name,
-                variant_name,
-                fields.iter().map(|(_, p)| p).collect(),
-            ),
+            } => {
+                let key = match enum_name {
+                    Some(name) => Some(type_key(ws, mid, name.name)?),
+                    None => None,
+                };
+                (
+                    key,
+                    enum_name.as_ref(),
+                    variant_name,
+                    fields.iter().map(|(_, p)| p).collect(),
+                )
+            }
+            Pattern::PathVariant { path, args } => {
+                let (enum_key, variant) = path_variant(ws, mid, path)?;
+                let (enum_ident, variant_ident) = enum_path_names(path)?;
+                let (vs, _) = variant_ident.span.offset_range();
+                let on = |sp: Span| {
+                    let (s, e) = sp.offset_range();
+                    s <= offset && offset < e
+                };
+                if on(variant_ident.span) {
+                    return Some(VariantHead::Variant {
+                        enum_name: Some(enum_key),
+                        variant: variant_ident,
+                    });
+                }
+                let (es, _) = enum_ident.span.offset_range();
+                let span = enum_ident.span.with_offset_range((es, vs));
+                if on(span) {
+                    return Some(VariantHead::Qualifier {
+                        enum_name: enum_key,
+                        variant,
+                        span,
+                    });
+                }
+                return args
+                    .iter()
+                    .flatten()
+                    .find_map(|sub| in_pattern(ws, mid, sub, offset));
+            }
+            Pattern::PathRecord { path, fields, .. } => {
+                let (enum_key, variant) = path_variant(ws, mid, path)?;
+                let (enum_ident, variant_ident) = enum_path_names(path)?;
+                let (vs, _) = variant_ident.span.offset_range();
+                let on = |sp: Span| {
+                    let (s, e) = sp.offset_range();
+                    s <= offset && offset < e
+                };
+                if on(variant_ident.span) {
+                    return Some(VariantHead::Variant {
+                        enum_name: Some(enum_key),
+                        variant: variant_ident,
+                    });
+                }
+                let (es, _) = enum_ident.span.offset_range();
+                let span = enum_ident.span.with_offset_range((es, vs));
+                if on(span) {
+                    return Some(VariantHead::Qualifier {
+                        enum_name: enum_key,
+                        variant,
+                        span,
+                    });
+                }
+                return fields
+                    .iter()
+                    .find_map(|(_, sub)| in_pattern(ws, mid, sub, offset));
+            }
             Pattern::Tuple(ps) | Pattern::Or(ps) => {
-                return ps.iter().find_map(|sub| in_pattern(sub, offset));
+                return ps.iter().find_map(|sub| in_pattern(ws, mid, sub, offset));
             }
             _ => return None,
         };
@@ -3341,27 +3537,29 @@ fn variant_head_at(ast: &skull_parser::Ast, offset: usize) -> Option<VariantHead
         };
         if on(variant_name.span) {
             return Some(VariantHead::Variant {
-                enum_name: enum_name.as_ref().map(|i| i.name),
+                enum_name,
                 variant: variant_name,
             });
         }
-        if let Some(en) = enum_name {
+        if let (Some(en), Some(key)) = (enum_ident, enum_name) {
             let qual = en
                 .span
                 .with_offset_range((en.span.offset_range().0, variant_name.span.offset_range().0));
             if on(qual) {
                 return Some(VariantHead::Qualifier {
-                    enum_ident: en,
+                    enum_name: key,
                     variant: variant_name.name,
+                    span: qual,
                 });
             }
         }
-        subs.into_iter().find_map(|sub| in_pattern(sub, offset))
+        subs.into_iter()
+            .find_map(|sub| in_pattern(ws, mid, sub, offset))
     }
     ast.exprs.values().find_map(|ed| match &ed.kind {
-        skull_parser::ExprKind::Match { arms, .. } => {
-            arms.iter().find_map(|arm| in_pattern(&arm.pattern, offset))
-        }
+        skull_parser::ExprKind::Match { arms, .. } => arms
+            .iter()
+            .find_map(|arm| in_pattern(ws, mid, &arm.pattern, offset)),
         _ => None,
     })
 }
@@ -3474,8 +3672,8 @@ pub(crate) fn ufcs_methods(
     ufcs_methods_in_scope(ws, name, recv_elem, false, None)
 }
 
-/// Scope-aware UFCS method enumeration. The unscoped wrapper remains for
-/// legacy callers; v1 completion passes its fragment so private overload
+/// Scope-aware UFCS method enumeration. Synthetic module queries keep the
+/// unscoped behavior; user completion passes its fragment so private overload
 /// members cannot leak into method candidates.
 pub(crate) fn ufcs_methods_in_scope(
     ws: &Workspace,
@@ -3489,13 +3687,16 @@ pub(crate) fn ufcs_methods_in_scope(
     // the duplicate is popup noise), first-wins to match the general path's
     // per-name fn dedup.
     let mut seen: std::collections::HashSet<Ustr> = std::collections::HashSet::new();
+    let callable_names = frag.map(|frag| {
+        crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Callable)
+    });
     // Iterator receivers (`recv_is_iter`) additionally get the generic
     // `Iterator`-bounded combinators (`enumerate`/`map`/`filter`/`collect`/...)
     // whose first param is `it: I` with `<I: Iterator<..>>` -- not a nominal
     // match, but UFCS-legal (`it.enumerate()`).
     for m in ws.modules.iter() {
         for (fid, f) in m.functions.iter() {
-            if f.name.as_str().starts_with("__") {
+            if source_ident(f.name).starts_with("__") {
                 continue;
             }
             if frag.is_some_and(|frag| {
@@ -3514,10 +3715,25 @@ pub(crate) fn ufcs_methods_in_scope(
                 } else if !(recv_is_iter && fn_first_param_is_iter_bound(ws, f)) {
                     continue;
                 }
-                if seen.insert(f.name) {
+                let display_name = callable_names
+                    .as_ref()
+                    .and_then(|names| names.get(&f.name))
+                    .and_then(|names| names.first())
+                    .copied()
+                    .or_else(|| ws.defs.get(&f.name).map(|meta| meta.name))
+                    .unwrap_or_else(|| {
+                        Ustr::from(
+                            f.name
+                                .as_str()
+                                .rsplit("::")
+                                .next()
+                                .unwrap_or(f.name.as_str()),
+                        )
+                    });
+                if seen.insert(display_name) {
                     out.push(UfcsMethod {
-                        name: f.name.to_string(),
-                        signature: render_fn_signature(ws, f.name, f),
+                        name: display_name.to_string(),
+                        signature: render_fn_signature(ws, display_name, f),
                         // the receiver consumes p0; args remain iff there's a p1+
                         takes_args: f.param_decls.len() > 1,
                         returns: f.return_ty.map(|t| ws.render(None, t)),
@@ -4082,6 +4298,7 @@ fn init_needs_parens(e: &hir::Expr) -> bool {
         e,
         hir::Expr::Unit
             | hir::Expr::Null
+            | hir::Expr::Error
             | hir::Expr::Hole(_)
             | hir::Expr::Int(_)
             | hir::Expr::Float(_)
@@ -4370,6 +4587,8 @@ pub(crate) struct CompletionEntry {
     /// Canonical function key used to resolve a signature. This differs from
     /// `name` for an imported alias in a modules-v1 scope.
     pub signature_key: Option<ustr::Ustr>,
+    /// Canonical enum key for matching variants to a pattern/expected type.
+    pub variant_enum_key: Option<ustr::Ustr>,
     /// The candidate's type when one is knowable: locals/params carry their
     /// inferred/declared TyId (Locals index the cursor body's inference --
     /// only resolvable against a Gamma seeded from that body), globals their
@@ -4663,6 +4882,7 @@ fn emit_visible_binding_entries(
         kind,
         detail: None,
         signature_key: None,
+        variant_enum_key: None,
         ty: None,
         takes_params: false,
         variant_shape: None,
@@ -4697,6 +4917,7 @@ fn emit_visible_binding_entries(
                         out.push(CompletionEntry {
                             name: variant.qualified,
                             detail: Some(binding.name.to_string()),
+                            variant_enum_key: Some(binding.key),
                             variant_shape: Some(variant.shape),
                             ..entry(variant.qualified, SymCat::Variant)
                         });
@@ -4725,7 +4946,7 @@ fn emit_visible_binding_entries(
 }
 
 /// The completion entries for a definition `key`, optionally filtered at a
-/// modules-v1 access site. `None` preserves the legacy/global query behavior.
+/// modules-v1 access site. `None` preserves the synthetic-module query behavior.
 pub(crate) fn key_entries_in_scope(
     ws: &Workspace,
     frag: Option<&bone_core::modules::FragmentScope>,
@@ -4824,6 +5045,7 @@ pub(crate) fn completion_with_visible_bindings(
                     },
                     detail: (!ty.is_empty()).then_some(ty),
                     signature_key: None,
+                    variant_enum_key: None,
                     ty: ty_id,
                     takes_params: false,
                     variant_shape: None,
@@ -4881,6 +5103,7 @@ pub(crate) fn completion_with_visible_bindings(
                 // not rendered or cloned for every workspace function here.
                 detail: None,
                 signature_key: Some(*name),
+                variant_enum_key: None,
                 ty: None,
                 takes_params: first.is_some_and(|f| !f.param_decls.is_empty()),
                 variant_shape: None,
@@ -4896,6 +5119,7 @@ pub(crate) fn completion_with_visible_bindings(
                     kind: SymCat::Struct,
                     detail: None,
                     signature_key: None,
+                    variant_enum_key: None,
                     ty: None,
                     takes_params: false,
                     variant_shape: None,
@@ -4934,6 +5158,7 @@ pub(crate) fn completion_with_visible_bindings(
                             kind: SymCat::Variant,
                             detail: Some(name.to_string()),
                             signature_key: None,
+                            variant_enum_key: Some(*name),
                             ty: None,
                             takes_params: false,
                             variant_shape: Some(VariantShape::of(&v.payload)),
@@ -4949,6 +5174,7 @@ pub(crate) fn completion_with_visible_bindings(
                     kind: SymCat::Enum,
                     detail: None,
                     signature_key: None,
+                    variant_enum_key: None,
                     ty: None,
                     takes_params: false,
                     variant_shape: None,
@@ -4965,6 +5191,7 @@ pub(crate) fn completion_with_visible_bindings(
                     kind: SymCat::Newtype,
                     detail: None,
                     signature_key: None,
+                    variant_enum_key: None,
                     ty: None,
                     takes_params: false,
                     variant_shape: None,
@@ -4988,6 +5215,7 @@ pub(crate) fn completion_with_visible_bindings(
                     kind: SymCat::Global,
                     detail: (!ty.is_empty()).then_some(ty),
                     signature_key: None,
+                    variant_enum_key: None,
                     ty: Some(m.globals[*gidx].ty),
                     takes_params: false,
                     variant_shape: None,
@@ -5013,6 +5241,7 @@ pub(crate) fn completion_with_visible_bindings(
                     kind: SymCat::Struct,
                     detail: None,
                     signature_key: None,
+                    variant_enum_key: None,
                     ty: None,
                     takes_params: false,
                     variant_shape: None,
@@ -5035,6 +5264,7 @@ pub(crate) fn completion_with_visible_bindings(
                     kind: SymCat::Keyword,
                     detail: None,
                     signature_key: None,
+                    variant_enum_key: None,
                     ty: None,
                     takes_params: false,
                     variant_shape: None,
@@ -5110,7 +5340,12 @@ pub(crate) fn render_fn_signature(
         .map(|t| format!(" -> {}", ws.render(None, t)))
         // No declared return type means no return annotation in the signature.
         .unwrap_or_default();
-    format!("fn {}({}){}", name, params.join(", "), ret)
+    format!(
+        "fn {}({}){}",
+        display_name(name.as_str()),
+        params.join(", "),
+        ret
+    )
 }
 
 /// Resolve the current first overload admitted at `fragment_file`, then render
@@ -5175,7 +5410,12 @@ pub(crate) fn render_fn_signature_with_defaults(
         .map(|t| format!(" -> {}", ws.render(None, t)))
         // No declared return type means no return annotation in the signature.
         .unwrap_or_default();
-    format!("fn {}({}){}", f.name, params.join(", "), ret)
+    format!(
+        "fn {}({}){}",
+        display_name(f.name.as_str()),
+        params.join(", "),
+        ret
+    )
 }
 
 /// Source text of param `param_idx`'s default expression, sliced from the
@@ -5240,7 +5480,7 @@ pub fn document_symbols(ws: &Workspace, mid: ModuleId) -> Vec<SymbolEntry> {
     let mut out = Vec::new();
     let mut push = |name: ustr::Ustr, kind: SymCat, span: Span, is_const: bool| {
         out.push(SymbolEntry {
-            name: name.to_string(),
+            name: display_name(name.as_str()).to_string(),
             kind,
             span,
             is_const,
@@ -5405,7 +5645,11 @@ fn struct_ctor_sig(ws: &Workspace, name: Ustr) -> Option<SignatureEntry> {
         .iter()
         .map(|f| format!("{}: {}", f.name, ws.render(None, f.ty)))
         .collect();
-    let label = format!("{} {{ {} }}", name, params.join(", "));
+    let label = format!(
+        "{} {{ {} }}",
+        display_name(name.as_str()),
+        params.join(", ")
+    );
     Some(SignatureEntry { label, params })
 }
 

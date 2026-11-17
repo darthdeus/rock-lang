@@ -4,7 +4,7 @@
 //! fragments' headers, inline mod blocks, and use declarations. Definition
 //! identity uses canonical DefKeys (`<package>::<module path>::<name>`): the
 //! workspace `*_by_name` maps keep their types, but v1 items register under
-//! their DefKey while legacy items keep today's bare names. The tree itself is
+//! their DefKey while compiler-owned items keep bare names. The tree itself is
 //! only the SCOPE map — resolution lives in `bone-lower/src/resolve.rs`.
 
 use crate::prelude::*;
@@ -18,9 +18,7 @@ pub type PackageId = u32;
 pub const STD_PACKAGE_ID: PackageId = u32::MAX;
 pub const STD_PACKAGE_NAME: &str = "std";
 
-/// Compiler-owned package identity for a standalone source. This prefix is
-/// outside the identifier grammar, so a manifest name cannot claim it.
-pub const STANDALONE_PACKAGE_PREFIX: &str = "$standalone$";
+pub use rock_core::source_code::{STANDALONE_PACKAGE_PREFIX, artifact_name, display_name};
 
 /// How a compiler-known type former is admitted and resolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,7 +34,7 @@ pub enum IntrinsicType {
 
 /// The one inventory of compiler-known type formers that have no source
 /// declaration of their own. Their canonical keys are the bare spellings,
-/// just like legacy definitions, so a package type with the same tail
+/// so a package type with the same tail
 /// (`geo::Map`) is never one of them.
 pub(crate) const STD_INTRINSIC_TYPES: &[(&str, IntrinsicType)] = &[
     ("FieldRef", IntrinsicType::FieldRef),
@@ -137,7 +135,7 @@ pub fn is_intrinsic_key_in(key: Ustr, spellings: &[&str]) -> bool {
 pub(crate) type ModulePath = Vec<Ustr>;
 
 /// The source site performing an access check.
-/// None package indicates legacy callers.
+/// None package indicates compiler-owned callers.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct AccessSite<'a> {
     pub package: Option<PackageId>,
@@ -476,6 +474,9 @@ fn from_path_is_ancestor_or_self(ancestor: &[Ustr], from: &[Ustr]) -> bool {
 /// self name, the `::`-joined module path, then the item name. Encoding is
 /// injective because `::` cannot occur inside an identifier.
 pub fn def_key(pkg_self_name: &str, module_path: &[Ustr], name: &str) -> Ustr {
+    if pkg_self_name == STD_PACKAGE_NAME {
+        return Ustr::from(name);
+    }
     let mut key = String::from(pkg_self_name);
     for seg in module_path {
         key.push_str("::");

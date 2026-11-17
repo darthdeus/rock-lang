@@ -225,7 +225,7 @@ fn pipeline_scaffold_and_abi() {
         .abi
         .uniform_blocks
         .iter()
-        .map(|(b, p)| (*b, p.plan.struct_name.as_str()))
+        .map(|(b, p)| (*b, p.name.as_str()))
         .collect();
     assert_eq!(
         bound,
@@ -1233,7 +1233,7 @@ fn engine_block_coexists_and_binds_at_zero() {
         .abi
         .uniform_blocks
         .iter()
-        .map(|(b, p)| (*b, p.plan.struct_name.as_str()))
+        .map(|(b, p)| (*b, p.name.as_str()))
         .collect();
     assert_eq!(
         bound,
@@ -1415,7 +1415,7 @@ fn a_program_without_an_engine_group_leaves_slot_zero_empty() {
         .abi
         .uniform_blocks
         .iter()
-        .map(|(b, p)| (*b, p.plan.struct_name.as_str()))
+        .map(|(b, p)| (*b, p.name.as_str()))
         .collect();
     assert_eq!(
         bound,

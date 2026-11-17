@@ -989,13 +989,17 @@ mod watch_reload_tests {
             };
             std::fs::write(root.join("stick.toml"), manifest).unwrap();
             let caller = "global SCORE: int = 0\n@nomangle fn bump() { SCORE = leaf(SCORE) }\n";
-            let leaf = "fn leaf(a: int) -> int { a + 1 }\n";
+            let leaf = "pub fn leaf(a: int) -> int { a + 1 }\n";
             let edited = if sibling {
                 let helper = root.parent().unwrap().join("helper");
                 std::fs::create_dir_all(&helper).unwrap();
                 std::fs::write(helper.join("stick.toml"), "[package]\nname = \"helper\"\n")
                     .unwrap();
-                std::fs::write(root.join("main.rock"), caller).unwrap();
+                std::fs::write(
+                    root.join("main.rock"),
+                    format!("use helper::leaf;\n{caller}"),
+                )
+                .unwrap();
                 helper.join("lib.rock")
             } else {
                 root.join("main.rock")

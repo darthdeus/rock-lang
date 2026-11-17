@@ -23,7 +23,7 @@ fn lower(src: &str, fn_name: &str) -> MirFunc {
         .module(mid)
         .functions
         .iter()
-        .find(|(_, f)| f.name.as_str() == fn_name)
+        .find(|(_, f)| skull_mir::mangle::declared_name(f.name.as_str()) == fn_name)
         .expect("function by name");
     let root = skull_mir::mir::FuncRef {
         module: mid,

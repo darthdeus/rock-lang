@@ -145,7 +145,7 @@ pub(super) fn decorator_application_lines(
         let key = identity.logical_key(ws, scx.interner());
         let target = format!(
             "{{ name = {:?}, params = {{}}, func = __rock_code_slot_ref({:?}) }}",
-            app.function.name.as_str(),
+            bone_core::modules::display_name(app.function.name.as_str()),
             key
         );
         let mut call_args = vec![target];

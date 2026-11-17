@@ -7,7 +7,12 @@ fn native_view_reads_without_a_canonical_check_retain_their_error() {
         "@nomangle inline(lua) fn __nb_checked_index(buf: any, i: int) -> int = \"return i\"";
     let ast = skull_parser::parse_module_clean(source, Ustr::from("<test>")).unwrap();
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut [ast]).unwrap();
-    let &(module, func) = &ws.functions_by_name[&Ustr::from("__nb_checked_index")][0];
+    let key = ws
+        .functions_by_name
+        .keys()
+        .find(|key| skull_mir::mangle::declared_name(key.as_str()) == "__nb_checked_index")
+        .expect("checked index declaration");
+    let &(module, func) = &ws.functions_by_name[key][0];
     for with_user_check in [false, true] {
         let mut body = MirFunc::new(Ustr::from("view_read"));
         let block = body.entry;

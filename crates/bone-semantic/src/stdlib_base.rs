@@ -66,31 +66,26 @@ pub fn warm_names<'a>(
 }
 
 /// Whether the user file `ast` can reach no warm module ([`warm_names`]): it
-/// defines nothing under a warm name (a legacy file's items, a v1 file's
-/// bare-keyed operator functions, any file's macros; a v1 file's other
-/// definitions are keyed by DefKey and cannot collide), and no macro a warm
-/// expansion could look up.
+/// defines no bare-keyed operator or macro under a warm name, and no macro a
+/// warm expansion could look up. Ordinary definitions have package keys.
 pub fn apart_from(warm: &WarmNames, ast: &Ast, contribution: &FragmentContribution) -> bool {
-    fn apart(items: &[ScopeItem], legacy: bool, warm: &FxHashSet<Ustr>) -> bool {
+    fn apart(items: &[ScopeItem], warm: &FxHashSet<Ustr>) -> bool {
         items.iter().all(|item| match item {
             ScopeItem::Def { name, kind, .. } => {
-                let bare = legacy || (*kind == "callable" && name.as_str().starts_with("__op_"));
+                let bare = *kind == "callable" && name.as_str().starts_with("__op_");
                 !(bare && warm.contains(name))
             }
-            ScopeItem::Module { items, .. } => apart(items, legacy, warm),
+            ScopeItem::Module { items, .. } => apart(items, warm),
             ScopeItem::Use(_) => true,
         })
     }
-    apart(
-        &contribution.items,
-        ast.dialect == skull_parser::Dialect::Legacy,
-        &warm.defs,
-    ) && macro_names(ast).all(|name| {
-        warm.admits_macros
-            && !warm.defs.contains(&name)
-            && !warm.macro_reach.contains(&name)
-            && !is_hygiene_name(name.as_str())
-    })
+    apart(&contribution.items, &warm.defs)
+        && macro_names(ast).all(|name| {
+            warm.admits_macros
+                && !warm.defs.contains(&name)
+                && !warm.macro_reach.contains(&name)
+                && !is_hygiene_name(name.as_str())
+        })
 }
 
 /// The names of the macros `ast` defines (the items the registry collects).
@@ -167,6 +162,7 @@ fn build() -> Option<StdlibBase> {
         return None;
     }
     let mut ws = Workspace::default();
+    crate::semantic_passes::build_namespaces(&mut ws, &cooked, &Default::default()).ok()?;
     crate::semantic_passes::lower_and_infer(&mut ws, &cooked).ok()?;
     if has_errors(&ws) {
         return None;
@@ -258,9 +254,6 @@ pub(crate) fn semantic_pass(
     ws.phase_timings.push(("stdlib base", base_time));
     ws.log_time("clone base", clone_timer);
     Some((|| {
-        let timer = Instant::now();
-        crate::semantic_passes::build_namespaces(&mut ws, modules.iter(), aliases)?;
-        ws.log_time("namespaces", timer);
         let users = modules.rest_mut();
         let timer = Instant::now();
         users
@@ -270,6 +263,9 @@ pub(crate) fn semantic_pass(
             .into_iter()
             .collect::<Result<(), _>>()?;
         ws.log_time("macro_expand", timer);
+        let timer = Instant::now();
+        crate::semantic_passes::build_namespaces(&mut ws, users.iter(), aliases)?;
+        ws.log_time("namespaces", timer);
         crate::semantic_passes::lower_and_infer(&mut ws, users)?;
         Ok(ws)
     })())

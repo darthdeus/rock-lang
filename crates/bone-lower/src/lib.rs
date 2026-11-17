@@ -131,6 +131,25 @@ fn use_path_ref(path: &skull_parser::Path) -> bone_core::modules::UsePathRef {
     }
 }
 
+fn variant_path_spans(path: &skull_parser::Path) -> (Span, Span) {
+    let enum_segment = path
+        .segments
+        .get(
+            path.segments
+                .len()
+                .checked_sub(2)
+                .expect("variant path has a qualifier"),
+        )
+        .expect("variant path has an enum segment")
+        .span;
+    let variant_segment = path
+        .segments
+        .last()
+        .expect("variant path has a variant segment")
+        .span;
+    (enum_segment, variant_segment)
+}
+
 #[derive(Debug)]
 pub struct LowerCtx<'w, 'm> {
     pub workspace: &'w Workspace,
@@ -234,7 +253,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         }
     }
 
-    /// This file's modules-v1 fragment scope (None for legacy files and
+    /// This file's modules-v1 fragment scope (None for compiler-owned
     /// synthetic modules). Resolution tiering applies only when present.
     pub fn v1_scope(&self) -> Option<&bone_core::modules::FragmentScope> {
         self.workspace.fragment_scopes.get(&self.module.file)
@@ -431,7 +450,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
     /// The DefKey of a v1 path that is CALLED BY NAME -- a callable family, or a
     /// newtype, whose constructor is a call on the type's own name and which the
     /// bare-name route already resolves this way -- with the view owning a
-    /// legacy family's key. `None` for a legacy fragment, a path that does not
+    /// callable family's key. `None` for a synthetic module, a path that does not
     /// resolve, or one that names a struct, enum, global or enum variant --
     /// those keep the general call route.
     fn v1_path_callable(
@@ -464,7 +483,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
     }
 
     /// The `(enum DefKey, variant)` of a v1 path that names an enum VARIANT.
-    /// `None` for a legacy fragment or a path that names anything else.
+    /// `None` for a synthetic module or a path that names anything else.
     fn v1_path_variant(&self, path: &skull_parser::Path) -> Option<(Ustr, Ustr)> {
         let frag = self.v1_scope()?;
         let use_path = use_path_ref(path);
@@ -479,7 +498,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
     fn resolve_bare(&self, name: Ustr, span: Span) -> Result<resolve::Resolved, CompilerError> {
         match self.v1_scope() {
             Some(frag) => self.probed_cached(&self.resolutions.bare, name, || {
-                resolve::resolve_bare(self.workspace, Some(frag), name)
+                resolve::resolve_bare(self.workspace, frag, name)
             }),
             None => Ok(resolve::plain(name)),
         }
@@ -487,8 +506,8 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
     }
 
     /// A bare name in callee position: the spelling the callee carries and
-    /// its overload family. v1 goes through the tiers; a legacy
-    /// name goes through the one legacy lookup. A family spanning
+    /// its overload family. User modules go through the namespace tiers;
+    /// synthetic modules keep the source spelling. A family spanning
     /// several definitions keeps the bare name as its spelling -- which is
     /// also what lets scalar operands of a merged operator lower natively --
     /// and records its member keys on the module for inference.
@@ -584,7 +603,12 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         let file = self.module.file;
         match resolved {
             resolve::CalleeFamily::Single(r) if self.v1_scope().is_some() => {
-                (r.key, hir::CallFamily::resolved(r.key, r.owner))
+                let spelling = if name.as_str().starts_with("__op_") {
+                    name
+                } else {
+                    r.key
+                };
+                (spelling, hir::CallFamily::resolved(r.key, r.owner))
             }
             resolve::CalleeFamily::Single(r) => (r.key, hir::CallFamily::from_name(r.key)),
             resolve::CalleeFamily::Merged { members } => {
@@ -868,7 +892,7 @@ fn lower_type_application(
         .map(|x| lower_type_expr_helper(ctx, a, body, pos, a.te(x)))
         .try_vec()?;
 
-    // Exact intrinsic keys keep their own rules, even when a legacy user type
+    // Exact intrinsic keys keep their own rules, even when a user type
     // has the same spelling in the workspace-wide generic map.
     let is_map = args.is_some() && bone_core::modules::is_intrinsic_key(key, "Map");
     if is_map && lowered.len() != 2 {
@@ -998,7 +1022,7 @@ pub(crate) fn lower_type_expr_in(
                 return Err(CompilerError::new_with_label(
                     te.span,
                     format!(
-                        "qualified type path `{}` is modules-v1 grammar; this file is legacy",
+                        "qualified type paths require a modules-v1 package fragment: `{}`",
                         path.segments
                             .iter()
                             .map(|s| s.name.as_str())
@@ -1147,13 +1171,13 @@ pub(crate) fn lookup_in_scope(
     if let Some(binding) = lookup_local(body, start_scope, name.name) {
         return Ok(Expr::Var(binding));
     }
-    // Tier 1 misses: a v1 fragment resolves through the namespace tiers to a
-    // canonical key; legacy files keep the bare name.
+    // Tier 1 misses: a user fragment resolves through the namespace tiers to a
+    // canonical key; synthetic modules keep the bare name.
     match ctx.resolve_bare_key(name.name, name.span) {
         Ok(key) => Ok(Expr::Global(key)),
         Err(e) => {
             ctx.recover_name(e)?;
-            Ok(Expr::Hole(None))
+            Ok(Expr::Error)
         }
     }
 }
@@ -1638,7 +1662,7 @@ pub(crate) fn lower_expr_value(
                 }
 
                 // `p::E::V(..)` in a v1 fragment: a TUPLE-payload variant
-                // constructor, which the legacy grammar spells `E::V(..)` and lowers
+                // constructor, which the two-segment form spells `E::V(..)` and lowers
                 // through the `QualifiedIdent` arm below. Without this the callee
                 // takes the value-position path route, where EVERY variant lowers
                 // with `VariantArgs::Unit` -- right for `p::E::V`, but here it drops
@@ -1649,6 +1673,7 @@ pub(crate) fn lower_expr_value(
                     generic_args: path_generics,
                 } if path_generics.is_empty() && ctx.v1_path_variant(path).is_some() => {
                     let (enum_key, variant) = ctx.v1_path_variant(path).expect("guard resolved it");
+                    let (enum_span, variant_span) = variant_path_spans(path);
                     ctx.record_path(
                         body,
                         TyPos::Body,
@@ -1665,9 +1690,9 @@ pub(crate) fn lower_expr_value(
                         lower_exprs(ctx, a, body, scope, args.iter().map(|x| &x.value))?;
                     Expr::EnumVariant {
                         enum_name: enum_key,
-                        enum_name_span: body.name_spans.alloc(e.span),
+                        enum_name_span: body.name_spans.alloc(enum_span),
                         variant,
-                        variant_span: body.name_spans.alloc(e.span),
+                        variant_span: body.name_spans.alloc(variant_span),
                         args: VariantArgs::Tuple(args_range),
                     }
                 }
@@ -1947,13 +1972,21 @@ pub(crate) fn lower_expr_value(
                 },
                 Err(e) => {
                     ctx.recover_name(e)?;
-                    Expr::Hole(None)
+                    Expr::Error
                 }
             }
         }
 
         ExprKind::FieldAccess(expr, field) => match &a.e(expr).kind {
-            ExprKind::Ident(base) if base.name.as_str() == "_G" => Expr::Global(field.name),
+            ExprKind::Ident(base) if base.name.as_str() == "_G" => {
+                match ctx.resolve_bare_key(field.name, field.span) {
+                    Ok(key) => Expr::Global(key),
+                    Err(e) => {
+                        ctx.recover_name(e)?;
+                        Expr::Error
+                    }
+                }
+            }
             _ => {
                 let base = lower_expr(ctx, a, body, scope, a.e(expr))?;
 
@@ -1981,7 +2014,7 @@ pub(crate) fn lower_expr_value(
             let Some(frag) = ctx.v1_scope() else {
                 return Err(CompilerError::new_with_label(
                     e.span,
-                    "qualified paths are modules-v1 grammar; this file is legacy".to_string(),
+                    "qualified paths require a modules-v1 package fragment".to_string(),
                 ));
             };
             let use_path = use_path_ref(path);
@@ -1995,17 +2028,20 @@ pub(crate) fn lower_expr_value(
                     resolve::MemberTarget::Global(key)
                     | resolve::MemberTarget::Callable { key, .. },
                 ) => Expr::Global(key),
-                Ok(resolve::MemberTarget::EnumVariant { enum_key, variant }) => Expr::EnumVariant {
-                    enum_name: enum_key,
-                    enum_name_span: body.name_spans.alloc(e.span),
-                    variant,
-                    variant_span: body.name_spans.alloc(e.span),
-                    args: hir::VariantArgs::Unit,
-                },
+                Ok(resolve::MemberTarget::EnumVariant { enum_key, variant }) => {
+                    let (enum_span, variant_span) = variant_path_spans(path);
+                    Expr::EnumVariant {
+                        enum_name: enum_key,
+                        enum_name_span: body.name_spans.alloc(enum_span),
+                        variant,
+                        variant_span: body.name_spans.alloc(variant_span),
+                        args: hir::VariantArgs::Unit,
+                    }
+                }
                 Ok(resolve::MemberTarget::Type(key)) => Expr::Global(key),
                 Err(msg) => {
                     ctx.recover_name(CompilerError::new_with_label(e.span, msg))?;
-                    Expr::Hole(None)
+                    Expr::Error
                 }
             }
         }
@@ -2019,8 +2055,7 @@ pub(crate) fn lower_expr_value(
             let Some(frag) = ctx.v1_scope() else {
                 return Err(CompilerError::new_with_label(
                     e.span,
-                    "qualified record literals are modules-v1 grammar; this file is legacy"
-                        .to_string(),
+                    "qualified record literals require a modules-v1 package fragment".to_string(),
                 ));
             };
             let use_path = use_path_ref(path);
@@ -2033,7 +2068,7 @@ pub(crate) fn lower_expr_value(
                         for (_, value) in fields.iter() {
                             lower_expr(ctx, a, body, scope, a.e(value))?;
                         }
-                        return Ok(Expr::Hole(None));
+                        return Ok(Expr::Error);
                     }
                 };
             ctx.record_path(body, TyPos::Body, path, member_segment_target(&target));
@@ -2062,13 +2097,16 @@ pub(crate) fn lower_expr_value(
                     fields: fields_range,
                     bases: lower_exprs(ctx, a, body, scope, std::iter::empty())?,
                 },
-                resolve::MemberTarget::EnumVariant { enum_key, variant } => Expr::EnumVariant {
-                    enum_name: enum_key,
-                    enum_name_span: body.name_spans.alloc(e.span),
-                    variant,
-                    variant_span: body.name_spans.alloc(e.span),
-                    args: hir::VariantArgs::Record(fields_range),
-                },
+                resolve::MemberTarget::EnumVariant { enum_key, variant } => {
+                    let (enum_span, variant_span) = variant_path_spans(path);
+                    Expr::EnumVariant {
+                        enum_name: enum_key,
+                        enum_name_span: body.name_spans.alloc(enum_span),
+                        variant,
+                        variant_span: body.name_spans.alloc(variant_span),
+                        args: hir::VariantArgs::Record(fields_range),
+                    }
+                }
                 resolve::MemberTarget::Global(key)
                 | resolve::MemberTarget::Callable { key, .. } => {
                     return Err(CompilerError::new_with_label(
@@ -2086,7 +2124,7 @@ pub(crate) fn lower_expr_value(
                 Ok(key) => key,
                 Err(e) => {
                     ctx.recover_name(e)?;
-                    return Ok(Expr::Hole(None));
+                    return Ok(Expr::Error);
                 }
             };
             if let Some(enum_key) = enum_key {
@@ -2129,7 +2167,7 @@ pub(crate) fn lower_expr_value(
                 Ok(key) => key.unwrap_or(enum_name.name),
                 Err(e) => {
                     ctx.recover_name(e)?;
-                    return Ok(Expr::Hole(None));
+                    return Ok(Expr::Error);
                 }
             };
             Expr::EnumVariant {
@@ -2323,7 +2361,7 @@ pub(crate) fn lower_expr_value(
             }
         }
 
-        ExprKind::TypeAscription(inner, ty) | ExprKind::ParenAscription(inner, ty) => Expr::As {
+        ExprKind::ParenAscription(inner, ty) => Expr::As {
             value: lower_expr(ctx, a, body, scope, a.e(inner))?,
             target: lower_type_expr_local(ctx, a, body, a.te(ty))?,
             kind: AsKind::Ascribe,
@@ -2365,7 +2403,7 @@ pub(crate) fn lower_expr_value(
             Ok(key) => Expr::Global(key),
             Err(e) => {
                 ctx.recover_name(e)?;
-                Expr::Hole(None)
+                Expr::Error
             }
         },
 
@@ -2424,7 +2462,7 @@ fn alloc_value(
     idx
 }
 
-/// The view owning a legacy callable a v1 value expression names
+/// The view owning a callable a v1 value expression names
 /// (`Body::value_owners`): the lookup that lowered `e` to
 /// `Expr::Global(key)`, asked again for its owner. Only a definition with no
 /// `DefMeta` can have one, so a v1 definition is not looked up twice.
@@ -2441,7 +2479,7 @@ fn value_owner(
     match &e.kind {
         ExprKind::Paren(inner) => value_owner(ctx, a, a.e(inner), key),
         ExprKind::Ident(name) | ExprKind::FunctionRef(name) | ExprKind::AnaphoricIdent(name) => {
-            ctx.probed(|| resolve::resolve_bare(ctx.workspace, Some(frag), name.name))
+            ctx.probed(|| resolve::resolve_bare(ctx.workspace, frag, name.name))
                 .ok()?
                 .owner
         }
@@ -2858,7 +2896,6 @@ fn lower_fn_body_into(
     });
     let default_names = ctx.name_errors.replace(outer).unwrap_or_default();
     lowered?;
-    let defaults_failed = !default_names.is_empty();
     errors.extend(default_names);
 
     let range = match (params.first(), params.last()) {
@@ -2867,7 +2904,7 @@ fn lower_fn_body_into(
     };
 
     let root_scope = body.alloc_root_scope_with_bindings(bindings);
-    let mut body_failed = defaults_failed;
+    let mut body_failed = false;
 
     // `(inline_body, is_extern, ffi_lib, backend)`. `backend` is the codegen
     // discriminator: a Rock body is `Any` (portable); `extern`/`extern(lua)`/ffi
@@ -2880,10 +2917,9 @@ fn lower_fn_body_into(
             let outer = ctx.name_errors.replace(Some(Vec::new()));
             let lowered = lower_block(ctx, a, body, root_scope, block);
             let names = ctx.name_errors.replace(outer).unwrap_or_default();
-            let failed = !names.is_empty() || lowered.is_err();
             errors.extend(names);
             match lowered {
-                Ok(lowered) if !failed => (
+                Ok(lowered) => (
                     Some(ctx.alloc_block_expr(body, lowered, b)),
                     None,
                     false,
@@ -2891,8 +2927,8 @@ fn lower_fn_body_into(
                     hir::FnBackend::Any,
                 ),
 
-                lowered => {
-                    errors.extend(lowered.err());
+                Err(error) => {
+                    errors.push(error);
                     body_failed = true;
 
                     (None, None, false, None, hir::FnBackend::Any)
@@ -3154,33 +3190,24 @@ fn lower_struct_fields(
             );
         }
 
-        let (read_vis, write_vis) = if a.dialect == skull_parser::Dialect::V1 {
-            let read_vis = match &field.vis {
-                Some(v) => bone_core::modules::NsVisibility::from_parser(v),
-                None => bone_core::modules::NsVisibility::Pub,
-            };
-            let write_vis = if field.set_private {
-                bone_core::modules::NsVisibility::Private
-            } else {
-                read_vis.clone()
-            };
-            if field.set_private
-                && !bone_core::modules::is_setter_audience_within_getter(&write_vis, &read_vis)
-            {
-                comp_error!(
-                    field.name.span,
-                    "write audience must be within read audience: field `{}` has `private(set)` but getter is already private",
-                    field.name.name
-                );
-            }
-            (read_vis, write_vis)
-        } else {
-            (
-                bone_core::modules::NsVisibility::Pub,
-                bone_core::modules::NsVisibility::Pub,
-            )
+        let read_vis = match &field.vis {
+            Some(v) => bone_core::modules::NsVisibility::from_parser(v),
+            None => bone_core::modules::NsVisibility::Pub,
         };
-
+        let write_vis = if field.set_private {
+            bone_core::modules::NsVisibility::Private
+        } else {
+            read_vis.clone()
+        };
+        if field.set_private
+            && !bone_core::modules::is_setter_audience_within_getter(&write_vis, &read_vis)
+        {
+            comp_error!(
+                field.name.span,
+                "write audience must be within read audience: field `{}` has `private(set)` but getter is already private",
+                field.name.name
+            );
+        }
         let field_annotations = lower_annotations_with_ctx(ctx, a, &field.annotations)?;
         validate_annotations(
             AnnoPos::StructField,
@@ -3588,7 +3615,7 @@ fn resolve_pattern_path<'p>(
     let Some(frag) = ctx.v1_scope() else {
         return Err(CompilerError::new_with_label(
             path.span(),
-            "qualified patterns are modules-v1 grammar; this file is legacy".to_string(),
+            "qualified patterns require a modules-v1 package fragment".to_string(),
         ));
     };
     let use_path = use_path_ref(path);
@@ -3620,13 +3647,14 @@ fn lower_pattern_value(
     pat: &skull_parser::Pattern,
 ) -> Result<Pattern, CompilerError> {
     // Modules-v1 qualified variant patterns resolve to the enum's DefKey and
-    // lower exactly like the legacy two-segment forms.
+    // lower exactly like the two-segment forms.
     if let skull_parser::Pattern::PathVariant { path, args } = pat {
         let subpats = args.iter().flatten();
         let Some((enum_key, variant)) = resolve_pattern_path(ctx, a, body, scope, path, subpats)?
         else {
             return Ok(Pattern::Wildcard);
         };
+        let (enum_span, variant_span) = variant_path_spans(path);
         let sub = match args {
             None => IdxRange::new_empty(),
             Some(pats) => {
@@ -3639,9 +3667,9 @@ fn lower_pattern_value(
         };
         return Ok(Pattern::EnumVariant {
             enum_name: Some(enum_key),
-            enum_name_span: Some(path.span()),
+            enum_name_span: Some(enum_span),
             variant,
-            variant_span: path.span(),
+            variant_span,
             sub,
         });
     }
@@ -3651,6 +3679,7 @@ fn lower_pattern_value(
         else {
             return Ok(Pattern::Wildcard);
         };
+        let (enum_span, variant_span) = variant_path_spans(path);
         let mut entries = Vec::with_capacity(fields.len());
         for (fname, subpat) in fields.iter() {
             let p = lower_pattern_value(ctx, a, body, scope, subpat)?;
@@ -3664,9 +3693,9 @@ fn lower_pattern_value(
         let fields_range = alloc_contiguous(&mut body.record_pat_field_arena, entries);
         return Ok(Pattern::Record {
             enum_name: Some(enum_key),
-            enum_name_span: Some(path.span()),
+            enum_name_span: Some(enum_span),
             name: Some(variant),
-            name_span: Some(path.span()),
+            name_span: Some(variant_span),
             fields: fields_range,
             rest: *rest,
         });
@@ -3786,7 +3815,16 @@ fn lower_pattern_value(
             Pattern::Record {
                 enum_name: enum_key,
                 enum_name_span: enum_name.as_ref().map(|e| e.span),
-                name: name.as_ref().map(|n| n.name),
+                name: name.as_ref().map(|n| {
+                    if enum_key.is_none() {
+                        ctx.resolve_bare_key(n.name, n.span)
+                            .ok()
+                            .filter(|key| ctx.workspace.struct_by_name.contains_key(key))
+                            .unwrap_or(n.name)
+                    } else {
+                        n.name
+                    }
+                }),
                 name_span: name.as_ref().map(|n| n.span),
                 fields,
                 rest: *rest,
@@ -4246,7 +4284,7 @@ fn lower_named_call(
             Ok(resolved) => resolved,
             Err(e) => {
                 ctx.recover_name(e)?;
-                return Ok(Expr::Hole(None));
+                return Ok(Expr::Error);
             }
         }
     } else if ctx.v1_scope().is_some() {
@@ -4441,7 +4479,6 @@ fn pl_chain(a: &Ast, e: &Idx<ExprData>) -> bool {
         | ExprKind::PostDecrement(i)
         | ExprKind::As(i, _)
         | ExprKind::Bitcast(i, _)
-        | ExprKind::TypeAscription(i, _)
         | ExprKind::ParenAscription(i, _) => pl_chain(a, i),
 
         ExprKind::BinOp { left, right, .. } => pl_chain(a, left) || pl_chain(a, right),
@@ -4473,7 +4510,6 @@ fn is_placeholder_lambda(a: &Ast, e: &ExprData) -> bool {
         | ExprKind::BitNot(i)
         | ExprKind::QuestionMark(i)
         | ExprKind::As(i, _)
-        | ExprKind::TypeAscription(i, _)
         | ExprKind::ParenAscription(i, _) => pl_chain(a, i),
 
         ExprKind::If { branches, .. } => branches.iter().any(|(c, _)| pl_is_us(a, c)),

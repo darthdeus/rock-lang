@@ -71,7 +71,8 @@ pub(super) fn emit_tostring_ty(
         let Some(storage) = plan.value_storage() else {
             continue;
         };
-        let open = format!("{name} {{ ");
+        let display_name = bone_core::modules::display_name(name.as_str());
+        let open = format!("{display_name} {{ ");
         let fields: Vec<(String, Vec<LuaDisplayPart>)> = match storage {
             ValueStorage::CData => {
                 let sid = ws.struct_by_name.get(&name).ok_or_else(|| {
@@ -100,7 +101,7 @@ pub(super) fn emit_tostring_ty(
             }
         };
         let parts = if fields.is_empty() {
-            vec![LuaDisplayPart::literal(&format!("{name} {{ }}"))]
+            vec![LuaDisplayPart::literal(&format!("{display_name} {{ }}"))]
         } else {
             display_record(&open, fields, " }")
         };
@@ -109,7 +110,9 @@ pub(super) fn emit_tostring_ty(
         }
         out.push_str(&format!(
             "__rock_tostring_ty[{}] = function(v) {{ return {}; }};\n",
-            js_string_lit(name.as_str())?,
+            js_string_lit(
+                skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(name.as_str())).as_str()
+            )?,
             js_display_expr(&parts)?
         ));
     }
@@ -196,7 +199,10 @@ pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> Result<String, Compile
     use bone_core::hir::VariantPayload;
 
     let mut names: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
-    names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    names.sort_by(|a, b| {
+        bone_core::modules::display_name(a.as_str())
+            .cmp(bone_core::modules::display_name(b.as_str()))
+    });
     let mut out = String::new();
     for name in names {
         if skull_mir::lower::EnumPlan::for_name(ws, name)
@@ -215,7 +221,8 @@ pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> Result<String, Compile
         }
         let mut body = String::from("var g = t.__tag; ");
         for (tag, variant) in ed.variants.iter().enumerate() {
-            let head = format!("{name}::{}", variant.name);
+            let display_name = bone_core::modules::display_name(name.as_str());
+            let head = format!("{display_name}::{}", variant.name);
             let slots: Vec<(String, String)> = match &variant.payload {
                 VariantPayload::Tuple(types) => (0..types.len())
                     .map(|j| (format!("[{}]", j + 1), format!("_{j}")))
@@ -245,7 +252,9 @@ pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> Result<String, Compile
             body.push_str(&format!("if (g === {tag}) return {render}; "));
         }
         body.push_str("return \"?\";");
-        let key = js_string_lit(name.as_str())?;
+        let key = js_string_lit(
+            skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(name.as_str())).as_str(),
+        )?;
         out.push_str(&format!(
             "__rock_inspect_ty[{key}] = function(t) {{ {body} }};\n\
              __rock_tostring_ty[{key}] = __rock_inspect_ty[{key}];\n"
@@ -340,7 +349,9 @@ pub(super) fn emit_inspect_enum_payloads(ws: &Workspace) -> Result<String, Compi
                 "var __rock_enum_inspect_payloads = __rock_enum_inspect_payloads || Object.create(null);\n",
             );
         }
-        let enum_name = js_string_lit(name.as_str())?;
+        let enum_name = js_string_lit(
+            skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(name.as_str())).as_str(),
+        )?;
         out.push_str(&format!(
             "__rock_enum_inspect_payloads[{enum_name}] = __rock_enum_inspect_payloads[{enum_name}] || Object.create(null);\n"
         ));
@@ -426,7 +437,9 @@ fn build_col_mat_defs(
         let body = col_mat_object(ws, *name, &paths, "")?;
         out.push_str(&format!(
             "__rock_col_mat[{}] = function(v, i) {{ return {body}; }};\n",
-            js_string_lit(name.as_str())?
+            js_string_lit(
+                skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(name.as_str())).as_str()
+            )?
         ));
     }
     Ok(out)
@@ -442,7 +455,12 @@ fn col_mat_object(
     prefix: &str,
 ) -> Result<String, CompilerError> {
     let (top, groups) = split_leaf_paths(paths.iter().map(|p| (*p, ())));
-    let mut parts = vec![format!("__ty: {}", js_string_lit(name.as_str())?)];
+    let mut parts = vec![format!(
+        "__ty: {}",
+        js_string_lit(
+            skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(name.as_str())).as_str()
+        )?
+    )];
     for (f, ()) in &top {
         let col = js_string_lit(&format!("{prefix}{f}"))?;
         parts.push(format!("{}: v[{col}][i]", js_key(f)?));
@@ -578,11 +596,12 @@ pub(super) fn build_enum_global_defs(ws: &Workspace) -> HashMap<ustr::Ustr, Stri
                     .all(|v| matches!(v.payload, VariantPayload::Unit));
             if all_unit {
                 let name = skull_mir::mangle::enum_names_global(ws, e.name);
+                let display_name = bone_core::modules::display_name(e.name.as_str());
                 let items: Vec<String> = e
                     .variants
                     .iter()
                     .enumerate()
-                    .map(|(ord, v)| format!("[{ord}, \"{e}::{v}\"]", e = e.name, v = v.name))
+                    .map(|(ord, v)| format!("[{ord}, \"{display_name}::{}\"]", v.name))
                     .collect();
                 out.insert(
                     name,
@@ -597,7 +616,7 @@ pub(super) fn build_enum_global_defs(ws: &Workspace) -> HashMap<ustr::Ustr, Stri
                             format!(
                                 "var {name} = {{ __variant: \"{var}\", __ty: \"{ty}\" }};\n",
                                 var = v.name,
-                                ty = e.name,
+                                ty = skull_mir::mangle::type_symbol(ws, e.name),
                             ),
                         );
                     }
@@ -623,7 +642,10 @@ fn embed_view_expr(
         .get(&ty_name)
         .ok_or_else(|| err(format!("embed view `{ty_name}` has no declared struct")))?;
     let s = &ws.module(sid.module).structs[sid.def];
-    let mut parts = vec![format!("__ty: {}", js_string_lit(ty_name.as_str())?)];
+    let mut parts = vec![format!(
+        "__ty: {}",
+        js_string_lit(skull_mir::mangle::type_symbol(ws, ty_name).as_str())?
+    )];
     for f in &s.fields {
         let key = format!("{prefix}.{}", f.name);
         let plan = skull_mir::lower::struct_field_plan(
@@ -714,7 +736,10 @@ fn build_inspect_ty_defs(
         if out.is_empty() {
             out.push_str("var __rock_inspect_ty = __rock_inspect_ty || {};\n");
         }
-        let header = js_string_lit(name.as_str())?;
+        let header = js_string_lit(
+            skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(name.as_str())).as_str(),
+        )?;
+        let display_header = js_string_lit(bone_core::modules::display_name(name.as_str()))?;
         let value_plan = if skull_mir::lower::has_value_plan(s) {
             let representation = plans.get(name).ok_or_else(|| {
                 err(format!(
@@ -757,7 +782,7 @@ fn build_inspect_ty_defs(
                 .collect::<Result<_, CompilerError>>()?;
             out.push_str(&format!(
                 "__rock_inspect_ty[{header}] = function(t, indent, path, visited, precision) {{ \
-                 return __rock_inspect_value_struct({header}, [{}]); }};\n",
+                 return __rock_inspect_value_struct({display_header}, [{}]); }};\n",
                 pairs.join(", ")
             ));
             continue;
@@ -788,7 +813,7 @@ fn build_inspect_ty_defs(
             .collect::<Result<_, CompilerError>>()?;
         out.push_str(&format!(
             "__rock_inspect_ty[{header}] = function(t, indent, path, visited, precision) {{ \
-             return __rock_inspect_struct({header}, t, [{}], indent, path, visited, precision); }};\n",
+             return __rock_inspect_struct({display_header}, t, [{}], indent, path, visited, precision); }};\n",
             pairs.join(", ")
         ));
     }
@@ -854,7 +879,9 @@ pub(super) fn build_vt_eq_defs(
         };
         out.push_str(&format!(
             "__rock_vt_eq[{}] = function(a, b) {{ return {body}; }};\n",
-            js_string_lit(name.as_str())?
+            js_string_lit(
+                skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(name.as_str())).as_str()
+            )?
         ));
     }
     Ok(out)

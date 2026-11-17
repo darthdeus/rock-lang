@@ -60,21 +60,21 @@ fn main() {
 }
 
 //=== TEST CASE: struct_and_enum_same_name_DuplicateSymbol ===
-//! expect: duplicate type definition: `Shape`
+//! expect: duplicate definition `Shape` in module `<root>`
 struct Shape { x: int }
 enum Shape { Circle }
 
 fn main() {}
 
 //=== TEST CASE: enum_and_newtype_same_name_DuplicateSymbol ===
-//! expect: duplicate type definition: `Id`
+//! expect: duplicate definition `Id` in module `<root>`
 enum Id { A }
 newtype Id(int)
 
 fn main() {}
 
 //=== TEST CASE: struct_and_newtype_across_files_DuplicateSymbol ===
-//! expect: duplicate newtype `Meters` across modules
+//! expect: duplicate definition `Meters` in module `error_test`
 //--- FILE: a.rock ---
 struct Meters { v: float }
 //--- FILE: b.rock ---

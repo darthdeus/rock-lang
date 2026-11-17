@@ -279,9 +279,10 @@ pub(crate) fn materialize_cand(
     let sort_text = Some(cand.key.encode(cand.name.as_str()));
     match cand.shape {
         CandShape::Entry(c) => {
+            let name = bone_core::modules::display_name(c.name.as_str());
             // Function/global detail is materialized HERE for survivors only.
-            // V1 requests resolve the exact accessible overload; legacy
-            // requests use the cached signature. Other kinds carry detail already.
+            // User requests resolve the exact accessible overload; synthetic
+            // module queries use the cached signature. Other kinds carry detail already.
             let detail = match c.kind {
                 // `name` is presentation spelling and may be an imported
                 // alias. Every function candidate carries its canonical HIR
@@ -323,26 +324,24 @@ pub(crate) fn materialize_cand(
                 // lifecycle-hook keywords with a statement BLOCK form
                 // (`on_killed { .. }`) -- complete to the block, not a call.
                 SymCat::Function if is_lifecycle_hook(c.name.as_str()) => (
-                    Some(format!("{} {{ $0 }}", c.name)),
+                    Some(format!("{name} {{ $0 }}")),
                     Some(InsertTextFormat::SNIPPET),
                 ),
-                SymCat::Function | SymCat::Macro if strip_call => (Some(c.name.to_string()), None),
-                SymCat::Function | SymCat::Macro if c.takes_params => (
-                    Some(format!("{}($0)", c.name)),
-                    Some(InsertTextFormat::SNIPPET),
-                ),
-                SymCat::Function | SymCat::Macro => (Some(format!("{}()", c.name)), None),
+                SymCat::Function | SymCat::Macro if strip_call => (Some(name.to_string()), None),
+                SymCat::Function | SymCat::Macro if c.takes_params => {
+                    (Some(format!("{name}($0)")), Some(InsertTextFormat::SNIPPET))
+                }
+                SymCat::Function | SymCat::Macro => (Some(format!("{name}()")), None),
                 SymCat::Variant if pattern => (None, None),
                 SymCat::Variant => match c.variant_shape {
                     Some(crate::query::VariantShape::Tuple) if strip_call => {
-                        (Some(c.name.to_string()), None)
+                        (Some(name.to_string()), None)
                     }
-                    Some(crate::query::VariantShape::Tuple) => (
-                        Some(format!("{}($0)", c.name)),
-                        Some(InsertTextFormat::SNIPPET),
-                    ),
+                    Some(crate::query::VariantShape::Tuple) => {
+                        (Some(format!("{name}($0)")), Some(InsertTextFormat::SNIPPET))
+                    }
                     Some(crate::query::VariantShape::Record) => (
-                        Some(format!("{} {{ $0 }}", c.name)),
+                        Some(format!("{name} {{ $0 }}")),
                         Some(InsertTextFormat::SNIPPET),
                     ),
                     _ => (None, None),
@@ -350,7 +349,7 @@ pub(crate) fn materialize_cand(
                 _ => (None, None),
             };
             CompletionItem {
-                label: c.name.to_string(),
+                label: name.to_string(),
                 kind: Some(completion_kind(c.kind)),
                 label_details,
                 detail,

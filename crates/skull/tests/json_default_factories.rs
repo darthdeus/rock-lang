@@ -1,4 +1,4 @@
-use crate::common::{V1Fragment, emit_v1_package, run_luajit, ws_of};
+use crate::common::{V1Fragment, emit_v1_package, name_matches, run_luajit, ws_of};
 use bone_semantic::hir::BodyOwner;
 use skull::mir_emit::{emit_full, emit_incremental, emit_overlay};
 
@@ -15,7 +15,7 @@ fn json_default_factory_updates_with_its_called_function() {
         .module(mid)
         .functions
         .iter()
-        .find(|(_, f)| f.name.as_str() == "initial")
+        .find(|(_, f)| name_matches(f.name, "initial"))
         .unwrap()
         .0;
     let edited = [(mid, BodyOwner::Function(id))];
@@ -58,7 +58,7 @@ fn json_default_expression_edit_rebuilds_the_interface_and_factory() {
     let source = "struct Row { @json_default value: int = 7 }";
     let mut session = Session::new(
         skull_parser::stdlib::cached().as_ref().unwrap().clone(),
-        vec![SessionFile::legacy("json-defaults.rock", source)],
+        vec![SessionFile::standalone("json-defaults.rock", source)],
         &Default::default(),
     )
     .unwrap();

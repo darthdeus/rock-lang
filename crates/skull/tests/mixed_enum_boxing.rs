@@ -1,4 +1,4 @@
-use crate::common::{emit_module, run_luajit};
+use crate::common::{emit_module, name_matches, run_luajit};
 
 const SRC: &str = r#"
 nobox value Wide { a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int, i: int, j: int, k: int, l: int, m: int, n: int, o: int }
@@ -110,7 +110,9 @@ fn mixed_units_keep_identity_through_body_overlay_and_full_reload() {
     let reinferred: Vec<_> = ws2.modules[mid.index()]
         .functions
         .iter()
-        .filter(|(_, f)| !matches!(f.name.as_str(), "constant_unit" | "other_unit"))
+        .filter(|(_, f)| {
+            !name_matches(f.name, "constant_unit") && !name_matches(f.name, "other_unit")
+        })
         .map(|(fid, _)| (mid, BodyOwner::Function(fid)))
         .collect();
     let overlay = skull::mir_emit::emit_overlay(&ws2, &mut cache, &reinferred).expect("overlay");

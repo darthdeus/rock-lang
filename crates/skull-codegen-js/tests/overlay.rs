@@ -13,7 +13,7 @@ fn global(
         .module(mid)
         .globals
         .iter()
-        .find(|(_, global)| global.name.as_str() == name)
+        .find(|(_, global)| skull_mir::mangle::declared_name(global.name.as_str()) == name)
         .expect("global");
     (mid, gid)
 }

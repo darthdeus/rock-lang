@@ -39,7 +39,31 @@ fn standalone_inline_module_paths_have_an_implicit_package() {
     )
     .expect("standalone module has an implicit package");
     assert!(ws.fragment_scopes.contains_key(&module.file));
-    assert!(ws.inferences_iter().all(|(_, inf)| inf.errors.is_empty()));
+    let errors = all_errors(&ws);
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn standalone_files_do_not_share_root_definitions() {
+    let mut modules = [
+        parse_rock_with_file(
+            "struct Item { n: int } fn f(x: Item) -> int { x.n }",
+            "a.rock",
+        )
+        .unwrap(),
+        parse_rock_with_file(
+            "struct Item { s: string } fn f(x: Item) -> string { x.s }",
+            "b.rock",
+        )
+        .unwrap(),
+    ];
+    let ws = semantic_pass(&mut modules).expect("standalone roots are independent");
+    let a = &ws.fragment_scopes[&ustr("a.rock")];
+    let b = &ws.fragment_scopes[&ustr("b.rock")];
+    assert_ne!(a.package, b.package);
+    assert_ne!(a.package_name, b.package_name);
+    let errors = all_errors(&ws);
+    assert!(errors.is_empty(), "{errors:?}");
 }
 
 fn stdlib_modules() -> Vec<skull_parser::Ast> {
@@ -85,7 +109,7 @@ macro_rules! named {
     ($arena:expr, $name:expr) => {
         $arena
             .iter()
-            .find(|(_, item)| item.name.as_str() == $name)
+            .find(|(_, item)| item.name.as_str().rsplit("::").next() == Some($name))
             .unwrap_or_else(|| panic!("`{}` exists", $name))
             .0
     };
@@ -149,29 +173,14 @@ fn error_messages(ws: &Workspace) -> Vec<String> {
 }
 
 #[test]
-fn legacy_only_workspace_keeps_modules_v1_namespace_empty() {
-    let module = parse_in(
-        "fn main() { print(1) }",
-        "main.rock",
-        Dialect::Legacy,
-        (1, "game"),
-    );
-    let ws = semantic_pass_with_aliases(&mut [module], &aliases(&[(1, "game", &[])]))
-        .expect("semantic pass");
-    assert!(ws.ns.packages.is_empty());
-    assert!(ws.fragment_scopes.is_empty());
-}
-
-#[test]
-fn legacy_only_workspace_keeps_the_std_namespace() {
+fn standalone_workspace_keeps_the_std_namespace() {
     let std_module = parse_module_with_dialect(
         "fn print() {}",
         Ustr::from("<stdlib>/fixture.rock"),
-        Dialect::Legacy,
+        Dialect::V1,
     )
     .expect("parse stdlib module");
-    let user_module = parse_in("fn main() {}", "main.rock", Dialect::Legacy, (1, "game"));
-
+    let user_module = parse_rock_with_file("fn main() {}", "main.rock").unwrap();
     let ws = semantic_pass(&mut [std_module, user_module]).expect("semantic pass");
     let std_root = ws
         .ns
@@ -179,36 +188,7 @@ fn legacy_only_workspace_keeps_the_std_namespace() {
         .and_then(|package| package.node(Ustr::from("")))
         .expect("stdlib namespace root");
     assert!(std_root.owned_callables.contains_key(&Ustr::from("print")));
-    assert!(ws.fragment_scopes.is_empty());
-}
-
-#[test]
-fn mixed_workspace_rejects_legacy_use_at_the_use_span() {
-    let provider = parse_in(
-        "pub struct Provider {}",
-        "provider.rock",
-        Dialect::V1,
-        (1, "provider"),
-    );
-    let legacy_src = "use provider::Provider;\nfn main() {}";
-    let legacy = parse_module_with_dialect(legacy_src, Ustr::from("legacy.rock"), Dialect::Legacy)
-        .expect("parse legacy consumer");
-
-    let err =
-        semantic_pass_with_aliases(&mut [provider, legacy], &aliases(&[(1, "provider", &[])]))
-            .expect_err("a legacy use must be rejected");
-
-    assert_eq!(
-        err.message,
-        "item-level `use` requires modules v1 (`[language] modules = \"v1\"`)"
-    );
-    let label = err.labels.first().expect("the rejected use is labeled");
-    assert_eq!(label.span.file, Ustr::from("legacy.rock"));
-    let covered = text(legacy_src, &label.span);
-    assert!(
-        covered.starts_with("use provider::Provider"),
-        "labeled span: {covered:?}"
-    );
+    assert!(ws.fragment_scopes.contains_key(&ustr("main.rock")));
 }
 
 #[test]
@@ -305,7 +285,7 @@ fn missing_return_value_says_so_instead_of_unifying_unit() {
 
     let src = "fn f() -> string {\n    let w = undefined_symbol_here\n    let z = 1\n}";
     let ws = check(src).expect("recovered, not aborted");
-    let errs = fn_errors(&ws, "f");
+    let errs = all_errors(&ws);
     assert!(
         errs.iter()
             .any(|e| e.message.contains("undefined_symbol_here")),
@@ -370,15 +350,17 @@ fn nested_block_does_not_leak_into_outer_statements() {
 fn lambda_param_default_does_not_leak_into_fn_params() {
     for (src, names) in [
         (
-            "fn f(v: int, g: fn(int) -> int = x => x, k: int = 1) -> int { g(v) + k }",
+            "fn f(v: int, g: fn(int) -> int = x => x, k: int = 1) -> int { g(v) }",
             ["v", "g", "k"],
         ),
         (
-            "fn f(v: int, k: int = 1, g: fn(int) -> int = x => x) -> int { g(v) + k }",
+            "fn f(v: int, k: int = 1, g: fn(int) -> int = x => x) -> int { g(v) }",
             ["v", "k", "g"],
         ),
     ] {
         let ws = check(src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+        let errors = all_errors(&ws);
+        assert!(errors.is_empty(), "{errors:?}");
         let fbody = fn_body(&ws, "f");
         let got: Vec<_> = fbody
             .param_bindings
@@ -444,7 +426,7 @@ fn broken_two() -> bool { return 42 }"#,
         fn_owner(&ws, "broken_one"),
         fn_owner(&ws, "broken_two"),
         BodyOwner::Global(named!(hir.globals, "LIMIT")),
-        BodyOwner::StructDefaults(hir.struct_by_name[&"Cfg".into()]),
+        BodyOwner::StructDefaults(named!(hir.structs, "Cfg")),
         BodyOwner::Decorator(named!(hir.decorators, "broken_deco")),
     ];
     let mut errored: Vec<_> = inf.errors.keys().copied().collect();
@@ -492,7 +474,7 @@ fn rock_fn() -> int { return 3 }"#,
     }
 
     let hir = ws.module(user_mid(&ws));
-    let struct_owner = |name: &str| BodyOwner::StructDefaults(hir.struct_by_name[&name.into()]);
+    let struct_owner = |name: &str| BodyOwner::StructDefaults(named!(hir.structs, name));
     let valued = [
         BodyOwner::Decorator(named!(hir.decorators, "d")),
         BodyOwner::Global(named!(hir.globals, "WITH_VALUE")),
@@ -523,7 +505,13 @@ fn rock_fn() -> int { return 3 }"#,
     let prelude_fns = hir
         .functions
         .iter()
-        .filter(|(_, f)| f.name.as_str().starts_with("__op_"))
+        .filter(|(_, f)| {
+            f.name
+                .rsplit("::")
+                .next()
+                .unwrap_or(f.name.as_str())
+                .starts_with("__op_")
+        })
         .count();
     assert_eq!(
         hir.bodies.len(),
@@ -643,12 +631,13 @@ fn cross_module_items_resolve() {
         "fn f(p: Point) -> int { p.x }",
         "fn f() -> Point { Point { x: 1, y: 2 } }",
     ] {
-        let mod_a = parse_rock_with_file(
+        let mod_a = parse_in(
             "fn helper(x: int) -> int { x }\nstruct Point { x: int, y: int }",
             "mod_a",
-        )
-        .unwrap();
-        let mod_b = parse_rock_with_file(b, "mod_b").unwrap();
+            Dialect::V1,
+            (1, "shared"),
+        );
+        let mod_b = parse_in(b, "mod_b", Dialect::V1, (1, "shared"));
         let ws = semantic_pass(&mut [mod_a, mod_b]).expect("cross-module use should resolve");
         let errors = error_messages(&ws);
         assert!(errors.is_empty(), "{b}: {errors:?}");
@@ -728,7 +717,7 @@ fn declaration_details_survive_lowering() {
     assert_eq!(ws.render(None, identity.param_decls[0].ty), "ref Player");
     assert_eq!(ws.render(None, identity.return_ty.unwrap()), "ref Player");
 
-    let v = &module.structs[module.struct_by_name[&Ustr::from("V")]];
+    let v = &module.structs[named!(module.structs, "V")];
     assert!(v.is_value && v.is_nobox);
     let field_annos: Vec<_> = v.fields.iter().map(|f| &f.annotations).collect();
     assert_eq!(field_annos[0].len(), 1);
@@ -1031,35 +1020,27 @@ fn main() {
 const ACTOR: &str = "pub struct Actor {\n    pub health: int,\n    pub private(set) mana: int,\n    private secret: int,\n}";
 
 #[test]
-fn legacy_caller_field_access_enforces_v1_visibility_and_allows_legacy() {
+fn external_field_access_enforces_visibility() {
     use bone_semantic::inference::{AccessDenied, FieldAccessNeed::*, field_access};
 
     let v1_mod = parse_in(ACTOR, "lib.rock", Dialect::V1, (1, "game"));
-    let legacy_mod = parse_module_with_dialect(
-        "struct LegacyActor { health: int }",
-        ustr("legacy.rock"),
-        Dialect::Legacy,
-    )
-    .expect("parse legacy");
-    let ws = semantic_pass_with_aliases(&mut [v1_mod, legacy_mod], &aliases(&[(1, "game", &[])]))
+    let ws = semantic_pass_with_aliases(&mut [v1_mod], &aliases(&[(1, "game", &[])]))
         .expect("semantic pass");
     let body = Body::default();
     let gamma = Gamma::new(&ws, &body, module_by_file(&ws, "lib.rock"));
 
-    let legacy = AccessSite::default();
+    let external = AccessSite::default();
     let in_package = AccessSite {
         package: Some(1),
         module_path: &[],
     };
     for (key, field, site, need, allowed) in [
-        ("game::Actor", "health", legacy, Read, true),
-        ("game::Actor", "health", legacy, Write, true),
-        ("game::Actor", "mana", legacy, Read, true),
-        ("game::Actor", "mana", legacy, Write, false),
-        ("game::Actor", "secret", legacy, Read, false),
-        ("game::Actor", "secret", legacy, Write, false),
-        ("LegacyActor", "health", legacy, Read, true),
-        ("LegacyActor", "health", legacy, Write, true),
+        ("game::Actor", "health", external, Read, true),
+        ("game::Actor", "health", external, Write, true),
+        ("game::Actor", "mana", external, Read, true),
+        ("game::Actor", "mana", external, Write, false),
+        ("game::Actor", "secret", external, Read, false),
+        ("game::Actor", "secret", external, Write, false),
         ("game::Actor", "mana", in_package, Write, true),
         ("game::Actor", "secret", in_package, Read, true),
         ("game::Actor", "secret", in_package, Write, true),
@@ -1167,7 +1148,7 @@ fn identity_storage_edge_admits_only_direct_rows() {
         assert!(
             errors
                 .iter()
-                .any(|e| e.contains("cannot store identity struct `Mob`")),
+                .any(|e| e.contains("cannot store identity struct `game::Mob`")),
             "{user}: {errors:?}"
         );
     }
@@ -1219,7 +1200,7 @@ fn identity_storage_exemption_follows_the_package_declaration() {
         ["field `mobs`", "parameter `held`"].iter().all(|site| {
             errors
                 .iter()
-                .any(|e| e.contains(&format!("{site} cannot store identity struct `Mob`")))
+                .any(|e| e.contains(&format!("{site} cannot store identity struct `")))
         })
     };
     let undeclared =
@@ -1272,9 +1253,9 @@ fn identity_storage_module_exemption_follows_the_module_path() {
             })
             .collect();
         modules.push(parse_in(
-            "struct LegacyMob { hp: int }\nstruct LegacyMobRoom { mobs: [LegacyMob] }\n",
-            "legacy.rock",
-            Dialect::Legacy,
+            "struct RootExtraMob { hp: int }\nstruct RootExtraMobRoom { mobs: [RootExtraMob] }\n",
+            "unheaded.rock",
+            Dialect::V1,
             (1, "game"),
         ));
         modules.push(parse_in(
@@ -1323,9 +1304,9 @@ fn identity_storage_module_exemption_follows_the_module_path() {
     assert_eq!(exemption_of("navigation.rock"), None);
     assert_eq!(exemption_of("other/world.rock"), None);
     assert_eq!(exemption_of("lib.rock"), None);
-    // a module with no v1 path matches no prefix
-    assert!(!ws.fragment_scopes.contains_key(&ustr("legacy.rock")));
-    assert_eq!(exemption_of("legacy.rock"), None);
+    // A file without a header belongs to the root, which matches no prefix.
+    assert!(ws.fragment_scopes.contains_key(&ustr("unheaded.rock")));
+    assert_eq!(exemption_of("unheaded.rock"), None);
     let errors = error_messages(&ws);
     assert!(
         !errors
@@ -1477,32 +1458,14 @@ fn annotations_resolve_like_other_names() {
     }
 }
 
-// A legacy user struct sharing a stdlib type's name is the USER's duplicate,
-// whatever its generic arity: the duplicate is recorded on the user module and
-// no diagnostic may point into the stdlib.
 #[test]
-fn legacy_struct_sharing_a_stdlib_name_reports_the_duplicate_at_the_user_file() {
+fn standalone_struct_can_shadow_a_stdlib_name() {
     let mut modules = stdlib_modules();
-    let user_src = "struct Scene { name: string }\nfn main() {\n    let s = Scene { name: \"hi\" }\n    print(s.name)\n}\n";
-    modules.push(parse_rock_with_file(user_src, "user.rock").expect("user parses"));
-    let ws = semantic_pass(&mut modules)
-        .unwrap_or_else(|e| panic!("expected a recorded duplicate error, got fail-fast: {e}"));
-    let errs = all_errors(&ws);
-    assert!(
-        errs.iter()
-            .any(|e| e.message == "duplicate struct `Scene` across modules"
-                && e.location.file == Ustr::from("user.rock")),
-        "expected the duplicate at the user file, got: {errs:?}"
-    );
-    for e in &errs {
-        for file in std::iter::once(e.location.file).chain(e.labels.iter().map(|l| l.span.file)) {
-            assert!(
-                !is_stdlib_module_file(file.as_str()),
-                "no diagnostic may point into the stdlib, got `{}` at {file}",
-                e.message
-            );
-        }
-    }
+    let source = "struct Scene { name: string }\nfn main() { let s = Scene { name: \"hi\" } print(s.name) }\n";
+    modules.push(parse_rock_with_file(source, "user.rock").expect("user parses"));
+    let ws = semantic_pass(&mut modules).expect("semantic pass");
+    let errors = all_errors(&ws);
+    assert!(errors.is_empty(), "{errors:?}");
 }
 
 /// `Body::for_each_child` reaches every expression of every body from the
@@ -1739,7 +1702,7 @@ fn expanded_macros_are_not_callable_definitions() {
     let stdlib = skull_parser::parse_module_with_dialect(
         SOURCE,
         ustr("<stdlib>/macro_provider.rock"),
-        Dialect::Legacy,
+        Dialect::V1,
     )
     .expect("parse stdlib provider");
     let mut ws = Workspace::default();

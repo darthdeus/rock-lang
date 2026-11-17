@@ -577,6 +577,7 @@ impl<'a> Builder<'a> {
                 });
                 Ok(self.emit_cur(Inst::Const(Lit::Nil)))
             }
+            Expr::Error => Err(gap("lowering error reached MIR")),
 
             // Unary `!`/`~`/`-`: a struct operand is an operator overload (bone
             // records the target on `e`); a scalar uses the native op.

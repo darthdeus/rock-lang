@@ -11,14 +11,13 @@
 //! an obligation for every hole.
 
 use crate::common::{
-    census_of, fn_ref, graph_of, prepared_body, unjoined, ws_of_files, ws_with_stdlib,
+    census_of, fn_ref, graph_of, key, prepared_body, unjoined, ws_of_files, ws_with_stdlib,
 };
 use crate::support::site_join::{SiteJoinCensus, Unjoined};
 use bone_semantic::inference::Workspace;
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::{Inst, MirFunc};
 use skull_mir::site::SiteOp;
-use ustr::Ustr;
 
 fn check_with_dependency(src: &str, dependency: &str) -> Workspace {
     ws_of_files(&[("games/impostor.rock", dependency), ("<test>", src)])
@@ -567,7 +566,7 @@ fn the_structural_helper_is_the_declaration_that_emits_its_bare_name() {
     let ws = ws_with_stdlib("fn main() { print(\"x\") }");
     let all = ws
         .functions_by_name
-        .get(&Ustr::from("__op_eq"))
+        .get(&key(&ws, "__op_eq"))
         .expect("`__op_eq` is declared")
         .len();
     assert!(

@@ -1,0 +1,46 @@
+//! Module lookup keeps package definitions separate from the stdlib.
+
+//-- <file> @pkg=<self_name>,<id> [@v1]`;
+//! a file without `@v1` is package.
+
+//- a_package_unary_operator_declarations
+//-- package.rock
+struct P {
+    x: int,
+}
+
+operator -(a: P) -> P {
+    P { x: 0 - a.x }
+}
+
+operator !(a: P) -> bool {
+    a.x == 7
+}
+
+fn use_it(p: P) -> bool {
+    let neg = -p
+            //^ P
+    let flag = !p
+             //^ bool
+    flag
+}
+
+//- a_package_one_parameter_binary_only_operator_is_rejected @fail=operator `+` takes two parameters; only `-` and `!` have a prefix (unary) form
+//-- package.rock
+struct P {
+    x: int,
+}
+
+operator +(a: P) -> P {
+    a
+}
+
+//- a_package_unimported_unary_operator_is_not_reached @fail=operator `-` is not defined for `P`
+//-- package.rock
+struct P {
+    x: int,
+}
+
+fn neg() -> P {
+    -P { x: 1 }
+}

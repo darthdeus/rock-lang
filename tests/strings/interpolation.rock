@@ -166,17 +166,17 @@ fn test_path_inside_call_arg() {
     assert_eq("{shade(Col::Green):>8}", "   green")
 }
 
-// The legacy `expr :: T` ascription is a `::` too: spaced or not, it stays
-// in the expression and only the following single `:` starts the spec.
+// The contextual ascription's colon stays inside its parentheses, leaving a
+// following single `:` to start the interpolation spec.
 @test
 fn test_ascription_in_hole() {
     let n = 5
-    assert_eq("{n :: int}", "5")
-    assert_eq("{n::int}", "5")
-    assert_eq("{n :: int:>4}", "   5")
-    assert_eq("{n::int:03}", "005")
-    assert_eq("{1.5 :: float:.2f}", "1.50")
-    assert_eq("{Col::Green :: Col}", "Col::Green")
+    assert_eq("{(n:int)}", "5")
+    assert_eq("{(n : int)}", "5")
+    assert_eq("{(n : int):>4}", "   5")
+    assert_eq("{(n : int):03}", "005")
+    assert_eq("{(1.5 : float):.2f}", "1.50")
+    assert_eq("{(Col::Green : Col)}", "Col::Green")
 }
 
 // A struct literal's braces nest inside the hole, so its field `:` is not a

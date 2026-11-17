@@ -1,10 +1,11 @@
 //! Stage 0d properties for the shadow instance graph
 //!.
 
-use crate::common::{body_id, emit_full_of, fn_name, fn_ref, ws_and_graph, ws_of, ws_with_stdlib};
+use crate::common::{
+    body_id, emit_full_of, fn_name, fn_ref, key, name_matches, ws_and_graph, ws_of, ws_with_stdlib,
+};
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::{self, Instance, Site, SiteOp, SiteOutcome};
-use ustr::Ustr;
 
 fn resolved_sites(
     graph: &instance_graph::InstanceGraph,
@@ -112,9 +113,14 @@ fn main() {
         let found: Vec<&String> = lines.iter().filter(|s| s.contains(name)).collect();
         assert_eq!(found.len(), args.len(), "{label}: {found:?}");
         for arg in args {
+            let bare = arg
+                .strip_prefix('<')
+                .and_then(|name| name.strip_suffix('>'))
+                .unwrap_or(arg);
+            let expected = format!("<{}>", crate::common::key(&ws, bare));
             assert!(
-                found.iter().any(|s| s.ends_with(arg)),
-                "{label}: `{name}` was not instantiated at {arg}: {found:?}"
+                found.iter().any(|s| s.ends_with(&expected)),
+                "{label}: `{name}` was not instantiated at {expected}: {found:?}"
             );
         }
     }
@@ -323,7 +329,7 @@ fn main() {}
 "#,
     );
     let decls: Vec<skull_mir::mir::FuncRef> = ws.functions_by_name
-        [&Ustr::from("__canonical_duplicate_probe")]
+        [&key(&ws, "__canonical_duplicate_probe")]
         .iter()
         .map(|&(module, func)| skull_mir::mir::FuncRef { module, func })
         .collect();
@@ -382,10 +388,10 @@ fn main() { host_tick(3) }
             .excluded
             .iter()
             .find(|e| {
-                ws.module(e.instance.func.module).functions[e.instance.func.func]
-                    .name
-                    .as_str()
-                    == name
+                name_matches(
+                    ws.module(e.instance.func.module).functions[e.instance.func.func].name,
+                    name,
+                )
             })
             .map(|e| e.cause)
     };

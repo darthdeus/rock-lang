@@ -1940,7 +1940,7 @@ impl IntrinsicTable for JsIntrinsics<'_> {
         if !skull_mir::intrinsics::is_intrinsic(f) {
             return None;
         }
-        let n = f.name.as_str();
+        let n = skull_mir::mangle::declared_name(f.name.as_str());
         let arity = f.param_decls.len();
         let signature = std::cell::OnceCell::new();
         JS_INTRINSICS

@@ -5,7 +5,7 @@
 //! the methods-with-args terminal-only rule. See
 //! `crates/bone-query/src/reachability.rs`.
 
-use bone_query::reachability::ReachabilityIndex;
+use bone_query::reachability::{ReachResult, ReachabilityIndex};
 use bone_semantic::prelude::*;
 use bone_semantic::semantic_passes::semantic_pass;
 
@@ -13,6 +13,25 @@ fn index_of(src: &str) -> ReachabilityIndex {
     let module = skull_parser::parse_module_clean(src, Ustr::from("<reach-test>")).expect("parse");
     let ws = semantic_pass(&mut [module]).expect("semantic_pass");
     ReachabilityIndex::build(&ws)
+}
+
+fn fixture_paths(
+    index: &ReachabilityIndex,
+    root: &str,
+    expected: &[String],
+    cap: usize,
+) -> ReachResult {
+    const PREFIX: &str = "$standalone$<reach-test>::";
+    let root = format!("{PREFIX}{root}");
+    let expected: Vec<_> = expected
+        .iter()
+        .map(|name| format!("{PREFIX}{name}"))
+        .collect();
+    let mut result = index.paths_to(&root, &expected, cap, None);
+    for path in &mut result.paths {
+        path.suffix = path.suffix.replace(PREFIX, "");
+    }
+    result
 }
 
 #[test]
@@ -53,12 +72,12 @@ fn path_search_cases() {
         ),
     ];
     for (case, src, root, target, expected) in cases {
-        let mut got: Vec<(String, bool, bool)> = index_of(src)
-            .paths_to(root, &[target.to_string()], 64, None)
-            .paths
-            .into_iter()
-            .map(|p| (p.suffix, p.is_method, p.takes_args))
-            .collect();
+        let mut got: Vec<(String, bool, bool)> =
+            fixture_paths(&index_of(src), root, &[target.to_string()], 64)
+                .paths
+                .into_iter()
+                .map(|p| (p.suffix, p.is_method, p.takes_args))
+                .collect();
         got.sort();
         let expected: Vec<(String, bool, bool)> = expected
             .iter()
@@ -92,7 +111,7 @@ fn capped_paths_preserve_distance_spelling_and_terminal_metadata() {
     ] {
         let expected: Vec<&str> = expected.split(' ').collect();
         for cap in 0..=expected.len() + 1 {
-            let result = index.paths_to("Root?", &wanted, cap, None);
+            let result = fixture_paths(&index, "Root?", &wanted, cap);
             assert_eq!(
                 result
                     .paths
@@ -130,7 +149,7 @@ fn field_and_method_with_same_name_rank_by_complete_suffix() {
 ",
     );
     for cap in 0..=3 {
-        let result = index.paths_to("Root", &["Goal".to_string()], cap, None);
+        let result = fixture_paths(&index, "Root", &["Goal".to_string()], cap);
         let expected = ["a().goal", "a.goal"];
         assert_eq!(
             result

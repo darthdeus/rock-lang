@@ -235,17 +235,11 @@ const MAX_KEPT_ARENA_GROWTH: usize = 16;
 
 /// Whether the warm modules can be lowered and inferred once, alone, and
 /// reused by every build. Warm ASTs are immutable for the session's lifetime
-/// and a stdlib file consults no user SCOPE (it has no fragment scope). But warm and legacy user files share
-/// the bare-name maps a lowering and an inference read -- types and their
-/// generic arity, globals, overload families, decorators, macros -- so a
-/// user definition under a warm name changes a fresh build (a user
-/// `struct Box` is a cross-module duplicate of the warm `Box<T>`; a user
-/// overload joins its family), and a warm body that names something only a
-/// user file defines resolves only in a combined build. A build reuses the
-/// warm-alone state only when
-/// neither can happen: no user definition takes a warm name, no user macro
-/// takes a name a warm expansion can look up (`Session::apart_from_warm`),
-/// and the warm-alone build is clean.
+/// and a stdlib file consults no user SCOPE (it has no fragment scope).
+/// Standalone user definitions have package-qualified keys, so only bare
+/// operator names and macros can affect the warm modules. A build reuses the
+/// warm-alone state only when no user macro takes a name a warm expansion can
+/// look up (`Session::apart_from_warm`) and the warm-alone build is clean.
 /// Otherwise it lowers warm and user files together, as a fresh build does.
 #[derive(Clone, Debug)]
 enum WarmBase {
@@ -315,10 +309,9 @@ pub struct Session {
 /// A session RE-PARSES from stored text on every edit, so it has to keep the
 /// dialect and the owning package rather than take them stamped once from the
 /// caller: dialect and package facts reach the parser and bone through the
-/// host, on the incremental route too. A standalone source with no
-/// manifest is legacy and unowned, which is what [`SessionFile::legacy`]
-/// spells (the loader supplies an explicit dialect, or a synthetic
-/// package, for a standalone source).
+/// host, on the incremental route too. A standalone source has no explicit
+/// package; semantic assembly assigns it a deterministic implicit package on
+/// each build.
 #[derive(Clone, Debug)]
 pub struct SessionFile {
     pub path: String,
@@ -341,12 +334,12 @@ impl SessionFile {
         }
     }
 
-    /// A source with no owning manifest: legacy dialect, no package.
-    pub fn legacy(path: impl Into<String>, text: impl Into<String>) -> Self {
+    /// A source with no owning manifest: v1 dialect, no explicit package.
+    pub fn standalone(path: impl Into<String>, text: impl Into<String>) -> Self {
         Self {
             path: path.into(),
             text: text.into(),
-            dialect: Dialect::Legacy,
+            dialect: Dialect::V1,
             package: None,
             global_policy: GlobalPolicy::Any,
         }
@@ -463,57 +456,95 @@ fn reject_macro_name_collisions(modules: &ModuleSet) -> Result<(), CompilerError
 }
 
 /// See [`UserFile::scope_hash`].
-pub(crate) fn scope_hash(a: &Ast, text: &str) -> u64 {
+pub(crate) fn scope_hash(contribution: &FragmentContribution) -> u64 {
     use std::hash::{Hash, Hasher};
 
     let mut h = rustc_hash::FxHasher::default();
-    if let Some(header) = &a.module_header {
-        let (s, e) = header.span.offset_range();
-        text[s..e].hash(&mut h);
+    if let Some(header) = &contribution.header {
+        header
+            .path
+            .iter()
+            .map(|ident| ident.name.as_str())
+            .collect::<Vec<_>>()
+            .hash(&mut h);
+        hash_visibility(header.vis.as_ref(), &mut h);
     }
-    scope_items(&a.items, text, a.dialect == Dialect::V1, 0, &mut h);
+    scope_items(&contribution.items, 0, &mut h);
     h.finish()
 }
 
-/// What `build_namespaces` reads from items: every `use`, and in a v1 file
-/// each definition's name, kind and declared visibility and each inline `mod`
-/// block's name and visibility. A legacy file's definitions are not in the
-/// tree. Signatures, fields and bodies are left out -- an edit to them keeps
-/// every DefKey and stays on the interface path.
+/// What namespace assembly reads from a cooked contribution. Signatures,
+/// fields and bodies are left out -- an edit to them keeps every DefKey and
+/// stays on the interface path.
 fn scope_items(
-    items: &[skull_parser::Item],
-    text: &str,
-    v1: bool,
+    items: &[bone_semantic::semantic_passes::ScopeItem],
     depth: usize,
     h: &mut rustc_hash::FxHasher,
 ) {
-    use skull_parser::ItemKind;
+    use bone_semantic::semantic_passes::ScopeItem;
     use std::hash::Hash;
 
     for item in items {
-        let name = match &item.kind {
-            ItemKind::Use(_) => {
-                let (s, e) = item.span.offset_range();
-                text[s..e].hash(h);
-                continue;
+        match item {
+            ScopeItem::Module {
+                name, vis, items, ..
+            } => {
+                (depth, "mod", name.as_str()).hash(h);
+                hash_visibility(vis.as_ref(), h);
+                scope_items(items, depth + 1, h);
             }
-            _ if !v1 => continue,
-            ItemKind::Module(block) => {
-                (depth, "mod", block.name.name.as_str()).hash(h);
-                hash_visibility(block.vis.as_ref(), h);
-                scope_items(&block.items, text, v1, depth + 1, h);
-                continue;
+            ScopeItem::Use(decl) => {
+                (depth, "use").hash(h);
+                hash_visibility(decl.vis.as_ref(), h);
+                hash_use_tree(&decl.tree, h);
             }
-            ItemKind::Struct(s) => (s.name.name, "type"),
-            ItemKind::Enum(e) => (e.name.name, "type"),
-            ItemKind::Newtype(n) => (n.name.name, "type"),
-            ItemKind::Global(g) => (g.name.name, "global"),
-            ItemKind::Function(f) => (f.name.name, "callable"),
-            ItemKind::Decorator(d) => (d.name.name, "decorator"),
-            _ => continue,
-        };
-        (depth, name.1, name.0.as_str()).hash(h);
-        hash_visibility(item.vis.as_ref(), h);
+            ScopeItem::Def {
+                name, kind, vis, ..
+            } => {
+                (depth, *kind, name.as_str()).hash(h);
+                hash_visibility(vis.as_ref(), h);
+            }
+        }
+    }
+}
+
+fn hash_use_tree(tree: &skull_parser::UseTree, h: &mut rustc_hash::FxHasher) {
+    use skull_parser::{UseSuffix, UseTree};
+    use std::hash::Hash;
+
+    match tree {
+        UseTree::Path {
+            from_root,
+            segments,
+            kind,
+        } => {
+            from_root.hash(h);
+            segments
+                .iter()
+                .map(|ident| ident.name.as_str())
+                .collect::<Vec<_>>()
+                .hash(h);
+            match kind {
+                UseSuffix::Bind => 0u8.hash(h),
+                UseSuffix::BindAs(alias) => {
+                    1u8.hash(h);
+                    alias.name.as_str().hash(h);
+                }
+                UseSuffix::Glob => 2u8.hash(h),
+                UseSuffix::Operator { op, alias } => {
+                    3u8.hash(h);
+                    op.name.as_str().hash(h);
+                    alias.as_ref().map(|ident| ident.name.as_str()).hash(h);
+                }
+                UseSuffix::Nested(children) => {
+                    4u8.hash(h);
+                    children.len().hash(h);
+                    for child in children {
+                        hash_use_tree(child, h);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -716,8 +747,8 @@ pub fn changed_names(old: &FxHashMap<Ustr, u64>, new: &FxHashMap<Ustr, u64>) -> 
 /// Parse `text` in its file's dialect and tag the module with its owning
 /// package. Every session parse goes through here (or [`Session::parse_stored`],
 /// which reads the facts back off the file): a re-parse that forgot them would
-/// read a v1 file as legacy source, which is a parse error on `pub`/`mod` and
-/// an unresolved name on everything that still parsed.
+/// parse a stored file without the dialect and package the source loader
+/// supplied.
 fn parse_with_facts(
     text: &str,
     file: Ustr,
@@ -729,6 +760,19 @@ fn parse_with_facts(
     module.package = package;
     module.global_policy = global_policy;
     Ok(module)
+}
+
+fn cook_and_contribute(
+    modules: &mut [Ast],
+    registry: &MacroRegistry,
+) -> Result<Vec<FragmentContribution>, CompilerError> {
+    modules
+        .par_iter_mut()
+        .map(|ast| cook_one(ast, registry))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect::<Result<(), _>>()?;
+    Ok(modules.iter().map(contribute).collect())
 }
 
 impl Session {
@@ -745,8 +789,8 @@ impl Session {
     }
 
     /// `aliases` are the host package graph's dependency-alias tables, the same
-    /// input `semantic_pass_with_aliases` takes. A legacy-only session passes
-    /// the default (empty) table.
+    /// input `semantic_pass_with_aliases` takes. A standalone-only session
+    /// passes the default (empty) table.
     pub fn new(
         warm: impl Into<Arc<[Ast]>>,
         files: Vec<SessionFile>,
@@ -781,7 +825,10 @@ impl Session {
             warm_contributions: Vec::new(),
             declared_facts: FxHashMap::default(),
         };
-        session.warm_contributions = session.warm.iter().map(contribute).collect();
+        let mut cooked_warm = session.warm.to_vec();
+        let warm_registry = collect_registry(cooked_warm.iter());
+        session.warm_contributions = cook_and_contribute(&mut cooked_warm, &warm_registry)
+            .unwrap_or_else(|_| session.warm.iter().map(contribute).collect());
         session.warm_names =
             bone_semantic::stdlib_base::warm_names(&session.warm, &session.warm_contributions);
 
@@ -830,7 +877,8 @@ impl Session {
 
             let prints = item_prints(&module, &text);
             let macros = macro_defs(&module);
-            let scope = scope_hash(&module, &text);
+            let contribution = contribute(&module);
+            let scope = scope_hash(&contribution);
 
             session.files.insert(
                 path.clone(),
@@ -844,7 +892,7 @@ impl Session {
                     global_policy,
                     syntax_errors: module.recovery_errors.clone(),
                     scope_hash: scope,
-                    contribution: contribute(&module),
+                    contribution,
                 },
             );
 
@@ -857,8 +905,10 @@ impl Session {
         reject_macro_name_collisions(&unexpanded)?;
 
         let registry = session.registry.clone();
-        let (ws, _) = session.build(unexpanded, &registry)?;
+        let (ws, _, user_contributions, warm_contributions) =
+            session.build(unexpanded, &registry)?;
         session.ws = ws;
+        session.set_cooked_contributions(user_contributions, warm_contributions);
         session.rebuild_dependents();
 
         Ok(session)
@@ -880,14 +930,14 @@ impl Session {
 
     /// The dialect and owning package recorded for `path`: a held file's own,
     /// else what the host declared for it. A path nobody declared is a
-    /// standalone source: legacy, unowned. A caller that knows better supplies
+    /// standalone source: v1, unowned. A caller that knows better supplies
     /// the facts up front, through [`SessionFile`] or
     /// [`Session::declare_file_facts`].
     fn facts_of(&self, path: &str) -> (Dialect, Option<PackageTag>, GlobalPolicy) {
         match self.files.get(path) {
             Some(f) => (f.dialect, f.package.clone(), f.global_policy),
             None => self.declared_facts.get(path).cloned().unwrap_or((
-                Dialect::Legacy,
+                Dialect::V1,
                 None,
                 GlobalPolicy::Any,
             )),
@@ -896,8 +946,8 @@ impl Session {
 
     /// Parse `text` as a buffer of `path`, with the dialect and package a
     /// stored copy of it carries. A recovery reparse of an editor buffer goes
-    /// through here: parsed as legacy, a v1 file loses its module header and
-    /// `use` items.
+    /// through here: parsed with the same v1 dialect and package facts as the
+    /// stored file.
     pub fn parse_buffer(&self, path: &str, text: &str) -> Result<Ast, CompilerError> {
         let (dialect, package, global_policy) = self.facts_of(path);
         parse_with_facts(text, ustr(path), dialect, package, global_policy)
@@ -907,7 +957,7 @@ impl Session {
     /// session after [`Session::new`] -- the editor opening a file the batch
     /// load did not see. Its manifest decides both, exactly as for a file of
     /// the initial set; without a declaration it would read as a standalone
-    /// legacy source. A held file's facts cannot change: its package's
+    /// standalone source. A held file's facts cannot change: its package's
     /// manifest changed, which needs a new session.
     pub fn declare_file_facts(
         &mut self,
@@ -917,9 +967,7 @@ impl Session {
         global_policy: GlobalPolicy,
     ) -> Result<(), CompilerError> {
         if let Some(held) = self.files.get(path)
-            && (held.dialect != dialect
-                || held.package != package
-                || held.global_policy != global_policy)
+            && (held.package != package || held.global_policy != global_policy)
         {
             comp_error!(
                 Span::unknown(),
@@ -1057,11 +1105,25 @@ impl Session {
 
         let new_prints = item_prints(&module, text);
         let new_macros = macro_defs(&module);
-        let new_scope = scope_hash(&module, text);
-        let new_contribution = contribute(&module);
         let tracked = self.files.contains_key(path);
         let only_functions =
             tracked && only_functions_changed(&self.files[path].item_prints, &new_prints);
+
+        let changed: FxHashSet<Ustr> = match self.files.get(path) {
+            Some(old) => changed_names(&name_shapes(&old.item_prints), &name_shapes(&new_prints)),
+            None => FxHashSet::default(),
+        };
+        let touches_macros = tracked
+            && (touches_macro(&self.files[path].macros, &new_macros, &changed)
+                || self.defines_a_function_named_like_a_macro(&module));
+        let new_contribution = if tracked && !touches_macros {
+            let mut cooked = module.clone();
+            cook_one(&mut cooked, &self.registry)?;
+            contribute(&cooked)
+        } else {
+            contribute(&module)
+        };
+        let new_scope = scope_hash(&new_contribution);
 
         // An edit that changes what the namespace tree or the fragment scopes
         // are built from (`UserFile::scope_hash`) takes the scope path.
@@ -1073,18 +1135,10 @@ impl Session {
         let diff = (tracked && !module.items.is_empty() && !scope_changed)
             .then(|| classify(&self.files[path].item_prints, &new_prints));
 
-        let changed: FxHashSet<Ustr> = match self.files.get(path) {
-            Some(old) => changed_names(&name_shapes(&old.item_prints), &name_shapes(&new_prints)),
-            None => FxHashSet::default(),
-        };
         // A macro change rewrites its users' EXPANSION, so they must be
         // re-lowered (re-expanded), which only the full rebuild does; so does
         // a function whose name a macro also has, which the whole-program
         // collision check must refuse.
-        let touches_macros = tracked
-            && (touches_macro(&self.files[path].macros, &new_macros, &changed)
-                || self.defines_a_function_named_like_a_macro(&module));
-
         let previous = self.files.insert(
             path.to_string(),
             UserFile {
@@ -1223,13 +1277,24 @@ impl Session {
         &mut self,
         unexpanded: ModuleSet,
         registry: &MacroRegistry,
-    ) -> Result<(Workspace, Vec<ModuleId>), CompilerError> {
+    ) -> Result<
+        (
+            Workspace,
+            Vec<ModuleId>,
+            Vec<FragmentContribution>,
+            Vec<FragmentContribution>,
+        ),
+        CompilerError,
+    > {
         debug_assert!(Arc::ptr_eq(unexpanded.shared(), &self.warm));
         let warm_len = self.warm.len();
         // Read from the ASTs being built, not the stored `UserFile`s, so the
         // build is a function of the texts alone.
         let users = unexpanded.rest();
-        let user_contributions: Vec<FragmentContribution> = users.iter().map(contribute).collect();
+        let mut cooked_warm = self.warm.to_vec();
+        let warm_contributions = cook_and_contribute(&mut cooked_warm, registry)?;
+        let mut cooked_users = users.to_vec();
+        let user_contributions = cook_and_contribute(&mut cooked_users, registry)?;
         let independent = users
             .iter()
             .zip(&user_contributions)
@@ -1239,26 +1304,33 @@ impl Session {
         } else {
             None
         };
-        let (mut ws, mut lowered, first_user) = match base {
-            Some(base) => (base, unexpanded.into_parts().1, 0),
-            None => (Workspace::default(), unexpanded.into_vec(), warm_len),
+        let (mut ws, lowered, first_user, include_warm, warm_contributions) = match base {
+            Some(base) => (base, cooked_users, 0, false, warm_contributions),
+            None => {
+                let mut lowered = cooked_warm;
+                lowered.extend(cooked_users);
+                (
+                    Workspace::default(),
+                    lowered,
+                    warm_len,
+                    true,
+                    warm_contributions,
+                )
+            }
         };
-        let contributions: Vec<&FragmentContribution> = self
-            .warm_contributions
-            .iter()
-            .chain(&user_contributions)
-            .collect();
+        let contributions: Vec<&FragmentContribution> = if include_warm {
+            warm_contributions
+                .iter()
+                .chain(&user_contributions)
+                .collect()
+        } else {
+            user_contributions.iter().collect()
+        };
         bone_semantic::semantic_passes::assemble_namespaces(
             &mut ws,
             &contributions,
             &self.aliases,
         )?;
-        lowered
-            .par_iter_mut()
-            .map(|ast| cook_one(ast, registry))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .collect::<Result<(), _>>()?;
         let mids = lower_and_infer(&mut ws, &lowered)?;
         // The same whole-program gate the batch path runs, so an export whose
         // type closure is not public fails in a session too rather than only
@@ -1266,7 +1338,12 @@ impl Session {
         // package.
         bone_semantic::semantic_passes::pass_validate_api_closure(&ws)?;
         ws.phase_timings.clear();
-        Ok((ws, mids[first_user..].to_vec()))
+        Ok((
+            ws,
+            mids[first_user..].to_vec(),
+            user_contributions,
+            warm_contributions,
+        ))
     }
 
     /// The warm-alone workspace, built on first need; `None` when the warm
@@ -1280,19 +1357,21 @@ impl Session {
             self.warm_base = WarmBase::Clean(Box::new(ws));
         }
         if matches!(self.warm_base, WarmBase::Unbuilt) {
-            let mut ws = Workspace::default();
             let mut cooked = self.warm.to_vec();
-            let cooked_ok = cooked
-                .par_iter_mut()
-                .map(|ast| cook_one(ast, registry))
-                .collect::<Vec<_>>()
-                .into_iter()
-                .all(|r| r.is_ok());
+            let contributions = cook_and_contribute(&mut cooked, registry);
+            let mut ws = Workspace::default();
             // A refusal here is not the build's verdict: the warm modules may
             // name a user definition, and the combined build decides.
-            let built = cooked_ok
-                && lower_and_infer(&mut ws, &cooked).is_ok()
-                && body_errors(&ws).is_empty();
+            let built = contributions.is_ok_and(|contributions| {
+                bone_semantic::semantic_passes::assemble_namespaces(
+                    &mut ws,
+                    &contributions.iter().collect::<Vec<_>>(),
+                    &self.aliases,
+                )
+                .is_ok()
+                    && lower_and_infer(&mut ws, &cooked).is_ok()
+                    && body_errors(&ws).is_empty()
+            });
             ws.phase_timings.clear();
             self.warm_base = if built {
                 WarmBase::Clean(Box::new(ws))
@@ -1324,6 +1403,29 @@ impl Session {
                     .map(|p| &self.files[p.as_str()].contribution),
             )
             .collect()
+    }
+
+    fn set_cooked_contributions(
+        &mut self,
+        user_contributions: Vec<FragmentContribution>,
+        warm_contributions: Vec<FragmentContribution>,
+    ) {
+        let mut by_file: FxHashMap<Ustr, FragmentContribution> = user_contributions
+            .into_iter()
+            .map(|contribution| (contribution.file, contribution))
+            .collect();
+        for path in &self.paths {
+            let file = ustr(path);
+            if let Some(contribution) = by_file.remove(&file)
+                && let Some(user_file) = self.files.get_mut(path)
+            {
+                user_file.scope_hash = scope_hash(&contribution);
+                user_file.contribution = contribution;
+            }
+        }
+        self.warm_contributions = warm_contributions;
+        self.warm_names =
+            bone_semantic::stdlib_base::warm_names(&self.warm, &self.warm_contributions);
     }
 
     /// The namespace facts `file`'s last lowering read, or `None`
@@ -1402,7 +1504,7 @@ impl Session {
         // removes a name, so the re-lower set is one level deep.
         //
         // Both sides are keyed the way the workspace maps key a type: the
-        // DefKey in a v1 fragment, the bare name in a legacy file. The old
+        // DefKey in a user fragment, the bare name in a warm module. The old
         // facts are the maps' (still pre-edit here; `lower_modules` below
         // repopulates them), the new ones the fresh AST's.
         let old_types: FxHashMap<Ustr, bone_semantic::semantic_passes::NominalFacts> = {
@@ -1747,7 +1849,8 @@ impl Session {
         let unexpanded = self.combined_unexpanded()?;
         let registry = collect_registry(unexpanded.iter());
         reject_macro_name_collisions(&unexpanded)?;
-        let (mut ws, user_mids) = self.build(unexpanded, &registry)?;
+        let (mut ws, user_mids, user_contributions, warm_contributions) =
+            self.build(unexpanded, &registry)?;
         // Host-resolved build variables, set once on the workspace when the
         // session was made; nothing in this rebuild derives them again.
         ws.comptime_inputs = self.ws.comptime_inputs.clone();
@@ -1757,6 +1860,7 @@ impl Session {
         self.ws = ws;
         self.module_iface_dep_names.clear();
         self.registry = registry;
+        self.set_cooked_contributions(user_contributions, warm_contributions);
 
         let reinferred = self.collect_reinferred(&user_mids);
         let relowered = reinferred.clone();

@@ -3,9 +3,9 @@
 
 //=== TEST CASE: type_casting_with_division ===
 fn test() {
-    let t = j :: float / arc_steps :: float
-    let ratio = width :: int / height :: int
-    let normalized = (value :: float) / (max_value :: float)
+    let t = (j : float) / (arc_steps : float)
+    let ratio = (width : int) / (height : int)
+    let normalized = (value : float) / (max_value : float)
 }
 
 //=== NO CHANGE ===

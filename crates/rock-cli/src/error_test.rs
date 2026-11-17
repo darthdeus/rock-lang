@@ -192,7 +192,7 @@ fn bone_check_case(
 ) -> Result<bone_semantic::inference::Workspace, String> {
     let mut user = Vec::with_capacity(files.len());
     for (name, code) in files {
-        // A case may declare `//! modules: v1` to exercise the v1 grammar.
+        // Reject obsolete or unknown module directives before parsing.
         let dialect = match rock_host::source_files::parse_modules_directive(code) {
             Ok(d) => d,
             // anyhow error: an unknown `//! modules:` value is a load error.
@@ -203,7 +203,17 @@ fn bone_check_case(
             ustr::Ustr::from(name.as_str()),
             dialect,
         ) {
-            Ok(m) => user.push(m),
+            Ok(mut m) => {
+                if files.len() > 1 {
+                    m.package = Some(skull_parser::PackageTag {
+                        id: 1,
+                        self_name: "error_test".to_string(),
+                        identity_storage: Default::default(),
+                        root: String::new(),
+                    });
+                }
+                user.push(m);
+            }
             Err(e) => return Err(error_text(&[e])), // hard tokenizer failure
         }
     }

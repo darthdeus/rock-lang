@@ -17,7 +17,7 @@
 //! Every expected number here is a LITERAL read off the std140 rules, never
 //! computed from the function under test.
 
-use crate::common::ws_of;
+use crate::common::{key, ws_of};
 use skull_mir::gpu_layout::{ArrayMemberDecl, WireKind, uniform_array_block, uniform_block};
 use ustr::Ustr;
 
@@ -262,9 +262,9 @@ fn the_fingerprint_separates_same_size_layouts() {
 #[test]
 fn an_array_block_fingerprint_differs_from_a_scalar_blocks() {
     let ws = ws_of("value Shared { m0: Vec4 }");
-    let scalar = uniform_block(&ws, Ustr::from("Shared")).expect("scalar plan");
+    let scalar = uniform_block(&ws, key(&ws, "Shared")).expect("scalar plan");
     let arrays =
-        uniform_array_block(Ustr::from("Shared"), &[decl("m0", WireKind::F32x4, 1)]).unwrap();
+        uniform_array_block(key(&ws, "Shared"), &[decl("m0", WireKind::F32x4, 1)]).unwrap();
 
     // The premise: everything a fingerprint could key on agrees.
     assert_eq!(scalar.size, arrays.size, "both 16 bytes");

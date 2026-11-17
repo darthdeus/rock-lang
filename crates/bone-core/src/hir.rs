@@ -212,7 +212,7 @@ pub struct Body {
     pub spread_args: FxHashSet<Idx<Expr>>,
     /// In a v1 fragment, an `Expr::Global` naming a std callable taken as a
     /// value: the std package (`FamilyMember::owner`), since the bare key is
-    /// shared with every legacy file defining the name.
+    /// shared by compiler-owned definitions.
     pub value_owners: FxHashMap<Idx<Expr>, crate::modules::PackageId>,
 
     // Owner's body expression:
@@ -643,7 +643,7 @@ pub struct Annotation {
     pub name: Ident,
     pub args: Vec<AnnoArg>,
     /// Canonical v1 decorator identity when this name resolved through the
-    /// module namespace. `None` preserves legacy and compiler-owned names.
+    /// module namespace. `None` preserves compiler-owned names.
     pub resolved_name: Option<Ustr>,
     /// Canonical v1 identities for the identifiers in a builtin structured
     /// argument such as `@wire(onchange=[CONST])`.
@@ -748,6 +748,9 @@ const _: () = assert!(std::mem::size_of::<Expr>() <= 56);
 pub enum Expr {
     Unit,
     Null,
+    /// A name that failed lowering. It carries the error type for editor
+    /// queries while ensuring invalid source can never reach code generation.
+    Error,
     Hole(Option<Ustr>),
 
     Int(i64),
@@ -854,7 +857,7 @@ pub enum Expr {
         /// Explicit type arguments from `f<A, B>(...)`; empty when generic
         /// inference supplies the callee's instance.
         generic_args: IdxRange<TypeExpr>,
-        /// Resolver family. Legacy calls use `CallFamily::Legacy`;
+        /// Resolver family. Compiler-owned calls use an unowned family;
         /// v1 calls carry the DefKey plus the shadowed losing-tier origin.
         /// `family.key()` is the same key as `Callee::Unresolved.name`, which
         /// the MIR backend still reads.
@@ -928,8 +931,7 @@ pub enum Callee {
 }
 
 /// One member of a v1 call family: the overloads registered under `key`.
-/// A standard-library definition's key is its bare name, shared with every
-/// legacy file that defines the name, so a member a v1 fragment reached
+/// A standard-library definition's key is its bare name. A member reached
 /// through the std view names the std package in `owner`, and only the
 /// stdlib's overloads belong to the member. `None` for a v1 DefKey, which
 /// only its definition carries.
@@ -956,8 +958,6 @@ pub enum FamilyTier {
 /// `resolve_callee` consumes this rather than a spelled last segment.
 #[derive(Copy, Clone, Debug)]
 pub enum CallFamily {
-    /// Legacy compilation unit: workspace-map lookup by bare name.
-    Legacy(Ustr),
     /// v1: the one definition the tiers bind, by canonical DefKey. `owner`
     /// is as for [`FamilyMember`].
     Resolved {
@@ -978,14 +978,16 @@ impl CallFamily {
     /// family.
     pub fn key(&self) -> Ustr {
         match self {
-            CallFamily::Legacy(n) => *n,
             CallFamily::Resolved { key, .. } => *key,
             CallFamily::Merged { name, .. } => *name,
         }
     }
 
     pub fn from_name(name: Ustr) -> Self {
-        CallFamily::Legacy(name)
+        CallFamily::Resolved {
+            key: name,
+            owner: None,
+        }
     }
 
     pub fn resolved(key: Ustr, owner: Option<crate::modules::PackageId>) -> Self {
@@ -1156,7 +1158,7 @@ pub enum Statement {
 pub struct DecoratorDef {
     pub name: Ustr,
     /// Canonical v1 identity used by registries and generated wrappers. Bare
-    /// legacy decorators keep their source name here.
+    /// compiler-owned decorators keep their source name here.
     pub def_key: Ustr,
     pub span: Span,
     pub param_decls: Vec<ParamDecl>,

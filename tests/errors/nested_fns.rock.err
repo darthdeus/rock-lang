@@ -43,7 +43,7 @@ fn outer() -> int {
 fn main() { let _ = outer() }
 
 //=== TEST CASE: nested_fn_forward_reference_Generic ===
-//! expect: Function `later` doesn't exist
+//! expect: `later` did not resolve to any definition
 // v1 decl-before-use: calling a nested fn before its declaration does not
 // resolve (there is no like-named top-level fn).
 fn outer() -> int {
@@ -54,7 +54,7 @@ fn outer() -> int {
 fn main() { let _ = outer() }
 
 //=== TEST CASE: nested_fn_out_of_scope_Generic ===
-//! expect: Function `helper` doesn't exist
+//! expect: `helper` did not resolve to any definition
 // A nested fn is block-scoped (privacy is a property): calling it outside the
 // block it is declared in does not resolve.
 fn outer() -> int {
@@ -67,7 +67,7 @@ fn outer() -> int {
 fn main() { let _ = outer() }
 
 //=== TEST CASE: nested_fn_mutual_recursion_Generic ===
-//! expect: Function `is_odd` doesn't exist
+//! expect: `is_odd` did not resolve to any definition
 // v1 decl-before-use forbids mutual recursion: `is_even` calls `is_odd` before
 // it is declared.
 fn parity(n: int) -> bool {

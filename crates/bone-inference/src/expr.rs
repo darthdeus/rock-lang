@@ -372,6 +372,7 @@ pub(crate) fn infer_expr_used(
         Expr::String(_) => gamma.workspace.builtins.string(),
         Expr::Unit => gamma.workspace.builtins.unit(),
 
+        Expr::Error => gamma.workspace.builtins.error(),
         Expr::Hole(_) => gamma.fresh_callsite_var(*HOLE, expr_span),
 
         Expr::InterpolatedString(parts) => {

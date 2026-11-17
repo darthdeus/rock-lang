@@ -1,5 +1,5 @@
-//! Comparator pieces shared by the legacy oracle (`incremental.rs`) and the
-//! modules-v1 differential harness (`v1_differential.rs`). Both compare an
+//! Comparator pieces shared by the incremental oracle and the modules-v1
+//! differential harness (`v1_differential.rs`). Both compare an
 //! incrementally updated workspace with a fresh one over the same texts, so
 //! the text-anchored reading lives here once.
 

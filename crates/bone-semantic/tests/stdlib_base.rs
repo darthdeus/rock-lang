@@ -86,7 +86,16 @@ fn assert_same_as_combined(user: &str) -> bool {
 
 #[test]
 fn a_user_module_apart_from_the_stdlib_reuses_it() {
-    let mut modules = with_stdlib("fn main() -> int { 1 + 2 }\n");
+    let programs = [
+        "fn main() -> int { 1 + 2 }\n",
+        "fn print(x: int) {}\nfn main() { print(1) }\n",
+        "struct Vec2 { x: int }\nfn main() {}\n",
+    ];
+    for program in programs {
+        assert!(assert_same_as_combined(program), "not reused:\n{program}");
+    }
+
+    let mut modules = with_stdlib(programs[0]);
     let ws = semantic_pass_without_closure_gate(&mut modules, &Default::default()).unwrap();
     assert_eq!(ws.relowered_body_count.load(Ordering::Relaxed), 1);
 }
@@ -123,9 +132,6 @@ fn a_user_macro_the_stdlib_never_names_reuses_it() {
 #[test]
 fn a_user_module_that_can_reach_the_stdlib_lowers_with_it() {
     let programs = [
-        // A user definition under a stdlib name joins or collides with it.
-        "fn print(x: int) {}\nfn main() { print(1) }\n",
-        "struct Vec2 { x: int }\nfn main() {}\n",
         // A user macro under a name a stdlib body calls could rewrite it.
         "macro key(x: int) -> int { x + x }\nfn main() -> int { key(2) }\n",
         // A user overload of a stdlib macro joins its overloads.

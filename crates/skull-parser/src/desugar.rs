@@ -211,7 +211,6 @@ pub(crate) fn child_exprs(ast: &Ast, e: Idx<ExprData>) -> ExprEdges {
         ExprKind::Paren(x)
         | ExprKind::As(x, _)
         | ExprKind::Bitcast(x, _)
-        | ExprKind::TypeAscription(x, _)
         | ExprKind::ParenAscription(x, _)
         | ExprKind::Not(x)
         | ExprKind::BitNot(x)

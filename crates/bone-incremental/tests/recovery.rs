@@ -25,7 +25,8 @@ fn check(src: &str) -> (Workspace, ModuleId) {
 fn has_fn(ws: &Workspace, mid: ModuleId, name: &str) -> bool {
     ws.module(mid)
         .functions_by_name
-        .contains_key(&Ustr::from(name))
+        .keys()
+        .any(|key| key.as_str().rsplit("::").next() == Some(name))
 }
 
 /// Rendered type at byte `offset`, read through the `type_at` path hover and

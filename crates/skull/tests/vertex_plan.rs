@@ -14,29 +14,28 @@
 //! it passes against a hardcoded table and is kept only to pin the numbers the
 //! application call site uses.
 
-use crate::common::ws_of;
+use crate::common::{key, ws_with_stdlib};
 use skull_mir::gpu_layout::AttrKind;
 use skull_mir::lower::RepArena;
 use skull_mir::vertex_plan::{AttrSlot, VertexPlan, vertex_plan};
 use ustr::Ustr;
 
-// `ws_of` is a bare single-module workspace (no stdlib), and `attr_kind`
-// recognizes vectors by nominal NAME -- so the fixture declares its own, the
-// same way `value_leaf_layout.rs` declares its shapes.
+// Vertex vector attributes must use the stdlib's canonical vector definitions.
 const SHAPES: &str = r#"
-value Vec2 { x: f32, y: f32 }
-value Vec3 { x: f32, y: f32, z: f32 }
-value Vec4 { x: f32, y: f32, z: f32, w: f32 }
-value Grass { pos: Vec2, rot: f32, scale: f32, height: f32 }
-value GrassReordered { rot: f32, pos: Vec2, scale: f32, height: f32 }
-value GrassPlusOne { pos: Vec2, rot: f32, scale: f32, height: f32, tint: f32 }
-value WithInt { pos: Vec2, id: int }
-value Wide { a: Vec4, b: Vec3, c: f32 }
+value Grass { pos: Vec2f, rot: f32, scale: f32, height: f32 }
+value GrassReordered { rot: f32, pos: Vec2f, scale: f32, height: f32 }
+value GrassPlusOne { pos: Vec2f, rot: f32, scale: f32, height: f32, tint: f32 }
+value WithInt { pos: Vec2f, id: int }
+value Wide { a: Vec4f, b: Vec3f, c: f32 }
 fn main() { }
 "#;
 
+fn ws() -> bone_semantic::inference::Workspace {
+    ws_with_stdlib(SHAPES)
+}
+
 fn plan(ws: &bone_semantic::inference::Workspace, name: &str) -> Vec<(String, u32, usize)> {
-    vertex_plan(ws, &RepArena::default(), Ustr::from(name))
+    vertex_plan(ws, &RepArena::default(), key(ws, name))
         .unwrap_or_else(|e| panic!("{name}: {e:?}"))
         .slots
         .iter()
@@ -45,7 +44,7 @@ fn plan(ws: &bone_semantic::inference::Workspace, name: &str) -> Vec<(String, u3
 }
 
 fn stride(ws: &bone_semantic::inference::Workspace, name: &str) -> usize {
-    vertex_plan(ws, &RepArena::default(), Ustr::from(name))
+    vertex_plan(ws, &RepArena::default(), key(ws, name))
         .unwrap_or_else(|e| panic!("{name}: {e:?}"))
         .byte_stride
 }
@@ -57,7 +56,7 @@ fn stride(ws: &bone_semantic::inference::Workspace, name: &str) -> usize {
 /// not demonstrate they were derived -- the differential tests below do that.
 #[test]
 fn grass_instance_shape_pins_the_known_values() {
-    let ws = ws_of(SHAPES);
+    let ws = ws();
     assert_eq!(
         plan(&ws, "Grass"),
         vec![
@@ -75,7 +74,7 @@ fn grass_instance_shape_pins_the_known_values() {
 /// reorder while every attribute silently rebinds to a neighbour's bytes.
 #[test]
 fn reordering_fields_moves_the_offsets() {
-    let ws = ws_of(SHAPES);
+    let ws = ws();
     assert_eq!(
         plan(&ws, "GrassReordered"),
         vec![
@@ -93,7 +92,7 @@ fn reordering_fields_moves_the_offsets() {
 /// Adding a field grows the stride and appends a location.
 #[test]
 fn adding_a_field_grows_the_stride() {
-    let ws = ws_of(SHAPES);
+    let ws = ws();
     assert_eq!(stride(&ws, "GrassPlusOne"), 24);
     let got = plan(&ws, "GrassPlusOne");
     assert_eq!(got.len(), 5);
@@ -104,7 +103,7 @@ fn adding_a_field_grows_the_stride() {
 /// struct: the last attribute's offset plus its own size is the stride.
 #[test]
 fn wide_vectors_pack_by_c_rules() {
-    let ws = ws_of(SHAPES);
+    let ws = ws();
     assert_eq!(
         plan(&ws, "Wide"),
         vec![
@@ -123,8 +122,8 @@ fn wide_vectors_pack_by_c_rules() {
 /// reinterpretation of its bits: a silent wrong-value class, not an error.
 #[test]
 fn an_integer_attribute_rejects_the_float_unit_form() {
-    let ws = ws_of(SHAPES);
-    let p = vertex_plan(&ws, &RepArena::default(), Ustr::from("WithInt"))
+    let ws = ws();
+    let p = vertex_plan(&ws, &RepArena::default(), key(&ws, "WithInt"))
         .expect("int is a valid attribute kind");
     assert_eq!(p.slots[1].kind, AttrKind::I32);
 
@@ -138,7 +137,7 @@ fn an_integer_attribute_rejects_the_float_unit_form() {
 
     // The all-float sibling still passes, so the rejection is about the int and
     // not about the form itself.
-    let g = vertex_plan(&ws, &RepArena::default(), Ustr::from("Grass")).expect("Grass");
+    let g = vertex_plan(&ws, &RepArena::default(), key(&ws, "Grass")).expect("Grass");
     assert_eq!(g.float_unit_sizes().expect("all-float"), vec![2, 1, 1, 1]);
     assert_eq!(g.float_unit_stride().expect("all-float"), 5);
 }
@@ -196,8 +195,8 @@ fn a_slot_off_its_cumulative_position_rejects_the_float_unit_view() {
 
     // Positive control: the real derivation satisfies the invariant, so the
     // check is not simply rejecting everything.
-    let ws = ws_of(SHAPES);
-    let real = vertex_plan(&ws, &RepArena::default(), Ustr::from("Grass")).expect("Grass");
+    let ws = ws();
+    let real = vertex_plan(&ws, &RepArena::default(), key(&ws, "Grass")).expect("Grass");
     assert!(real.float_unit_sizes().is_ok());
     assert!(real.float_unit_stride().is_ok());
 }
@@ -238,9 +237,9 @@ fn trailing_padding_rejects_the_float_unit_view() {
     );
 
     // Positive control: a plan whose attributes exactly span its stride.
-    let ws = ws_of(SHAPES);
+    let ws = ws();
     assert!(
-        vertex_plan(&ws, &RepArena::default(), Ustr::from("Grass"))
+        vertex_plan(&ws, &RepArena::default(), key(&ws, "Grass"))
             .expect("Grass")
             .float_unit_sizes()
             .is_ok()

@@ -6,7 +6,7 @@
 //! undeclared var, missing file, path escape -- never a silent default.
 use bone_semantic::inference::{ComptimeInputs, ComptimeVarValue};
 
-use crate::common::{body_id, emit_full_of, function_body, try_emit_module_with};
+use crate::common::{body_id, emit_full_of, function_body, name_matches, try_emit_module_with};
 
 fn inputs_with_var(name: &str, value: &str) -> ComptimeInputs {
     let mut inputs = ComptimeInputs::default();
@@ -253,7 +253,7 @@ fn global_reinferred_of(
 ) {
     for module in ws.modules.iter() {
         for (gid, global) in module.globals.iter() {
-            if global.name.as_str() == name {
+            if name_matches(global.name, name) {
                 return (module.id, bone_semantic::hir::BodyOwner::Global(gid));
             }
         }

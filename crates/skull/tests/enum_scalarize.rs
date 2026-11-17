@@ -7,7 +7,7 @@
 //! A `value` struct holding the enum field therefore scalarizes into a C-layout
 //! cdata with an int field (NOT a Lua table) and works across the scalar ABI
 //! (by-value pass).
-use crate::common::{emit_mir, emit_module, require_luajit, run_fn};
+use crate::common::{emit_mir, emit_module, key, require_luajit, run_fn};
 
 #[test]
 fn widened_enum_record_match_rejects_a_field_missing_from_its_variant() {
@@ -30,13 +30,13 @@ fn main() { print(read()) }
 
     let ws = ws_with_stdlib(SRC);
     assert!(
-        skull_mir::lower::EnumPlan::for_name(&ws, Ustr::from("Choice"))
+        skull_mir::lower::EnumPlan::for_name(&ws, key(&ws, "Choice"))
             .unwrap()
             .flat()
             .is_some(),
         "the fixture must use Choice's widened flat-enum representation"
     );
-    let enum_id = ws.enums_by_name[&Ustr::from("Choice")];
+    let enum_id = ws.enums_by_name[&key(&ws, "Choice")];
     let choice = &ws.modules[enum_id.module.index()].enums[enum_id.def];
     let variant = choice
         .variants

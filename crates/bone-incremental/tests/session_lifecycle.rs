@@ -5,8 +5,10 @@
 //! iteration must leave it out. A failed full rebuild keeps the last-good
 //! workspace.
 
-use bone_incremental::session::{Session, SessionFile, UpdateTier};
+use bone_incremental::session::{Session, UpdateTier};
 use bone_semantic::prelude::*;
+
+use crate::common;
 
 const WARM: &str = "
 fn __op_add(a: int, b: int) -> int { 0 }
@@ -16,8 +18,8 @@ fn session() -> Session {
     let warm =
         vec![skull_parser::parse_module_clean(WARM, Ustr::from("<warm>")).expect("warm parses")];
     let files = vec![
-        SessionFile::legacy("a.rock", "struct S { v: int }\nfn f() -> int { 1 }\n"),
-        SessionFile::legacy("b.rock", "fn use_s(s: S) -> int { s.v }\n"),
+        common::v1("a.rock", "struct S { v: int }\nfn f() -> int { 1 }\n"),
+        common::v1("b.rock", "fn use_s(s: S) -> int { s.v }\n"),
     ];
     Session::new(warm, files, &bone_core::modules::NsAliases::default()).expect("session builds")
 }

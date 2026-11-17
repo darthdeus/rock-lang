@@ -1,4 +1,10 @@
-use crate::common::{AllocationActivationGuard, AllocationReportGuard, InlineOffGuard, emit_mir};
+use crate::common::{
+    AllocationActivationGuard, AllocationReportGuard, InlineOffGuard, emit_mir, key, ws_with_stdlib,
+};
+
+fn source_key(src: &str, name: &str) -> String {
+    key(&ws_with_stdlib(src), name).to_string()
+}
 
 #[test]
 fn allocation_report_is_off_for_an_ordinary_compile() {
@@ -41,8 +47,7 @@ fn render(a: int) -> string {
 fn allocation_report_traces_final_mir_sites_from_a_named_root() {
     let _inline = InlineOffGuard::on();
     let _report = AllocationReportGuard::on();
-    let emit = emit_mir(
-        r#"
+    let src = r#"
 fn alloc_leaf() -> [int] {
     return [1, 2, 3]
 }
@@ -50,12 +55,13 @@ fn alloc_leaf() -> [int] {
 fn update_root() -> int {
     return alloc_leaf().get(1) ?? 0
 }
-"#,
-    );
+"#;
+    let root = source_key(src, "update_root");
+    let emit = emit_mir(src);
 
     let route = emit
         .allocation_report
-        .trace_from_diagnostic_names("manual.update", &["update_root"]);
+        .trace_from_diagnostic_names("manual.update", &[&root]);
 
     assert_eq!(
         route.roots.len(),
@@ -98,8 +104,7 @@ fn update_root() -> int {
 fn allocation_report_retains_every_reachable_direct_caller() {
     let _inline = InlineOffGuard::on();
     let _report = AllocationReportGuard::on();
-    let emit = emit_mir(
-        r#"
+    let src = r#"
 fn alloc_leaf() -> [int] {
     return [1, 2, 3]
 }
@@ -115,12 +120,13 @@ fn right() -> int {
 fn update_root() -> int {
     return left() + right()
 }
-"#,
-    );
+"#;
+    let root = source_key(src, "update_root");
+    let emit = emit_mir(src);
 
     let route = emit
         .allocation_report
-        .trace_from_diagnostic_names("manual.update", &["update_root"]);
+        .trace_from_diagnostic_names("manual.update", &[&root]);
     let finding = route
         .findings
         .iter()
@@ -150,8 +156,7 @@ fn update_root() -> int {
 fn allocation_report_accumulates_local_and_call_edge_loop_depth() {
     let _inline = InlineOffGuard::on();
     let _report = AllocationReportGuard::on();
-    let emit = emit_mir(
-        r#"
+    let src = r#"
 fn direct_leaf() -> [int] {
     return [1]
 }
@@ -171,12 +176,13 @@ fn update_root() -> int {
     }
     return total
 }
-"#,
-    );
+"#;
+    let root = source_key(src, "update_root");
+    let emit = emit_mir(src);
 
     let route = emit
         .allocation_report
-        .trace_from_diagnostic_names("manual.update", &["update_root"]);
+        .trace_from_diagnostic_names("manual.update", &[&root]);
     let depth_for = |line: &str| {
         route
             .findings
@@ -207,16 +213,16 @@ fn update_root() -> int {
 #[test]
 fn allocation_report_counts_the_flat_emitted_concat_not_its_folded_mir_children() {
     let _report = AllocationReportGuard::on();
-    let emit = emit_mir(
-        r#"
+    let src = r#"
 fn render(a: int, b: int) -> string {
     return "left={a}, right={b}"
 }
-"#,
-    );
+"#;
+    let root = source_key(src, "render");
+    let emit = emit_mir(src);
     let route = emit
         .allocation_report
-        .trace_from_diagnostic_names("manual.draw", &["render"]);
+        .trace_from_diagnostic_names("manual.draw", &[&root]);
 
     assert_eq!(
         route
@@ -232,8 +238,7 @@ fn render(a: int, b: int) -> string {
 #[test]
 fn allocation_report_classifies_aggregate_result_uses_without_calling_them_safe() {
     let _report = AllocationReportGuard::on();
-    let emit = emit_mir(
-        r#"
+    let src = r#"
 struct Carrier { value: int }
 
 global RETAINED: Carrier? = null
@@ -257,15 +262,27 @@ fn returned() -> Carrier {
 fn retained() {
     RETAINED = Carrier { value: 4 }
 }
-"#,
-    );
+"#;
+    let direct = source_key(src, "direct");
+    let projected_name = source_key(src, "projected");
+    let returned_name = source_key(src, "returned");
+    let retained_name = source_key(src, "retained");
+    let emit = emit_mir(src);
 
     let disposition = |name: &str| {
         let body = emit
             .allocation_report
             .bodies
             .values()
-            .find(|body| body.diagnostic_name == name)
+            .find(|body| {
+                body.diagnostic_name
+                    == match name {
+                        "direct" => direct.as_str(),
+                        "returned" => returned_name.as_str(),
+                        "retained" => retained_name.as_str(),
+                        _ => name,
+                    }
+            })
             .unwrap_or_else(|| panic!("missing body {name}"));
         let sites = body
             .direct_sites
@@ -278,7 +295,10 @@ fn retained() {
             "{name} must own exactly one struct site: {sites:#?}"
         );
         let site = sites[0];
-        assert_eq!(site.aggregate_type.as_deref(), Some("Carrier"));
+        assert_eq!(
+            site.aggregate_type.as_deref(),
+            Some(source_key(src, "Carrier").as_str())
+        );
         assert_eq!(site.aggregate_fields, 1);
         assert_eq!(site.result_uses, 1);
         site.result_use.as_str()
@@ -289,7 +309,7 @@ fn retained() {
         .allocation_report
         .bodies
         .values()
-        .find(|body| body.diagnostic_name == "projected")
+        .find(|body| body.diagnostic_name == projected_name)
         .expect("projected body");
     assert!(
         projected.direct_sites.is_empty(),
@@ -299,10 +319,11 @@ fn retained() {
     assert_eq!(disposition("retained"), "global-store");
 
     let manifest = emit.allocation_report.render_text();
+    let carrier = source_key(src, "Carrier");
     assert!(
         manifest.lines().any(|line| {
             line.contains("\tstruct-construction\t")
-                && line.contains("\tdirect-call\t1\tCarrier\t1")
+                && line.contains(&format!("\tdirect-call\t1\t{carrier}\t1"))
         }),
         "the serialized manifest must retain the direct-use and aggregate-shape facts: {manifest}",
     );
@@ -313,16 +334,16 @@ fn allocation_activation_wraps_the_same_manifest_site_and_installs_its_runtime()
     let _activation = AllocationActivationGuard::on();
     // The concat is an operand of the spliced inline(lua) `vec_push`, which
     // renders its operands before placing them in the body.
-    let emit = emit_mir(
-        r#"
+    let src = r#"
 fn render(items: [string], a: int) {
     items.push("value={a}")
 }
-"#,
-    );
+"#;
+    let root = source_key(src, "render");
+    let emit = emit_mir(src);
     let route = emit
         .allocation_report
-        .trace_from_diagnostic_names("manual.draw", &["render"]);
+        .trace_from_diagnostic_names("manual.draw", &[&root]);
     let concat = route
         .findings
         .iter()
@@ -437,8 +458,7 @@ global FRAME_VALUE: int = 0
 #[test]
 fn allocation_report_registers_and_instruments_transformed_coroutine_bodies() {
     let _activation = AllocationActivationGuard::on();
-    let emit = emit_mir(
-        r#"
+    let src = r#"
 enum Event { Text(string) }
 global SINK: string = ""
 
@@ -455,8 +475,9 @@ co fn worker(seed: int) -> Coroutine<Event> {
 fn make_worker() -> Coroutine<Event> {
     return worker(7)
 }
-"#,
-    );
+"#;
+    let root = source_key(src, "make_worker");
+    let emit = emit_mir(src);
 
     let coroutine_bodies = emit
         .allocation_report
@@ -520,7 +541,7 @@ fn make_worker() -> Coroutine<Event> {
 
     let route = emit
         .allocation_report
-        .trace_from_diagnostic_names("manual.make", &["make_worker"]);
+        .trace_from_diagnostic_names("manual.make", &[&root]);
     assert!(
         route.opaque_boundaries.iter().any(|finding| finding
             .site

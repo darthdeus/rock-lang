@@ -77,7 +77,7 @@ fn write_all_ctags_regenerates_every_open_root() {
         res.as_ref()
             .unwrap_or_else(|e| panic!("write failed for {}: {e}", root.display()));
     }
-    for (dir, name) in [("alpha", "alpha_fn"), ("beta", "beta_fn")] {
+    for (dir, name) in [("alpha", "alpha::alpha_fn"), ("beta", "beta::beta_fn")] {
         let tags = tags_in(&project, dir);
         assert!(has_tag(&tags, name), "{dir} not refreshed:\n{tags}");
         assert!(!tags.contains("STALE"), "{dir} still stale:\n{tags}");
@@ -117,8 +117,8 @@ fn write_ctags_covers_whole_project_and_stdlib() {
     bone.write_ctags(&project.path("a.rock"))
         .expect("write_ctags");
     let tags = tags_in(&project, "");
-    assert!(has_tag(&tags, "alpha"), "opened file");
-    assert!(has_tag(&tags, "beta"), "unopened sibling");
+    assert!(has_tag(&tags, "proj::alpha"), "opened file");
+    assert!(has_tag(&tags, "proj::beta"), "unopened sibling");
     let push = tags
         .lines()
         .find(|l| l.starts_with("vec_push\t"))

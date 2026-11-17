@@ -3,13 +3,13 @@
 //! (fields name/params/func) and the decorator params in scope. `@deco`
 //! annotations on functions are accepted; the function type-checks normally.
 //!
-//! These sections run standalone (no stdlib), so each defines `__DecoTarget`
-//! locally and the bodies avoid stdlib calls.
+//! These sections use the stdlib prelude, which defines the compiler-provided
+//! `__DecoTarget` type used by decorator bodies.
 
 // The decorator body type-checks: `target.name` is string, `target.func` is
 // any, and the module type-checks clean.
 //- deco_body_checks
-struct __DecoTarget { name: string, params: [string], func: any }
+//-- deco_body_checks.rock
 deco init reg {
     let n: string = target.name
     let fp = target.func
@@ -22,7 +22,7 @@ fn f(x: int) -> int {
 // Decorator params are in scope in the body and carry their declared type
 // (the body would not type-check if `stage` were unbound or not int).
 //- deco_param_typed
-struct __DecoTarget { name: string, params: [string], func: any }
+//-- deco_param_typed.rock
 deco init staged(stage: int = 100) {
     let s: int = stage
 }
@@ -33,7 +33,7 @@ fn h(y: int) -> int {
 
 // A `@deco`-annotated function still type-checks normally.
 //- decorated_fn_checks
-struct __DecoTarget { name: string, params: [string], func: any }
+//-- decorated_fn_checks.rock
 deco init reg {
     let n: string = target.name
 }

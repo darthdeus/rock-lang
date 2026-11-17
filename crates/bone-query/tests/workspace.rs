@@ -364,7 +364,7 @@ fn project_lints() {
             ],
             "m.rock",
             "m.rock",
-            Some(("unused function `dead`", DiagnosticSeverity::WARNING)),
+            Some(("unused function `g::dead`", DiagnosticSeverity::WARNING)),
             &[],
         ),
         // External consumers the project cannot see call a lib's API.

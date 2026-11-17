@@ -1,4 +1,4 @@
-use crate::common::{emit_module, function_body, run_luajit, run_main};
+use crate::common::{emit_module, function_body, name_matches, run_luajit, run_main};
 
 const SOURCE: &str = r#"
 value FreshPair { x: int, y: int }
@@ -60,7 +60,7 @@ fn fresh_default_constant_updates_through_incremental_and_overlay_emission() {
         .module(mid)
         .globals
         .iter()
-        .find(|(_, g)| g.name.as_str() == "FRESH_DEFAULT")
+        .find(|(_, g)| name_matches(g.name, "FRESH_DEFAULT"))
         .unwrap()
         .0;
     let edited = [(mid, BodyOwner::Global(id))];

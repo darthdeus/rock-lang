@@ -137,7 +137,11 @@ pub fn stdlib_asts() -> Vec<skull_parser::Ast> {
 pub fn ws_of_files(files: &[(&str, &str)]) -> Workspace {
     let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([]).expect("stdlib parses");
     for (file, src) in files {
-        modules.push(skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse"));
+        let mut ast = skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse");
+        if files.len() > 1 {
+            ast.package = Some(shared_test_package());
+        }
+        modules.push(ast);
     }
     semantic_pass(&mut modules).expect("semantic_pass")
 }
@@ -179,6 +183,18 @@ pub fn ws_v1_package(package: &str, fragments: &[V1Fragment]) -> Workspace {
     let ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     ws
+}
+
+fn shared_test_package() -> skull_parser::PackageTag {
+    skull_parser::PackageTag {
+        id: 0,
+        self_name: format!(
+            "{}<shared-test>",
+            bone_core::modules::STANDALONE_PACKAGE_PREFIX
+        ),
+        identity_storage: Default::default(),
+        root: String::new(),
+    }
 }
 
 /// Full MIR emit for a v1 package, rooted at its first fragment.
@@ -580,17 +596,18 @@ pub fn ws_with_stdlib_module(lib: &str, src: &str) -> Workspace {
 
 pub fn ws_with_dependency_module(lib: &str, src: &str) -> Workspace {
     let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([]).expect("stdlib parses");
-    modules.push(
-        skull_parser::parse_module_clean(
-            lib,
-            Ustr::from("/tmp/rock-mono-project-library/engine.rock"),
-        )
-        .expect("parse lib"),
-    );
-    modules.push(
+    let mut library = skull_parser::parse_module_clean(
+        lib,
+        Ustr::from("/tmp/rock-mono-project-library/engine.rock"),
+    )
+    .expect("parse lib");
+    library.package = Some(shared_test_package());
+    modules.push(library);
+    let mut main =
         skull_parser::parse_module_clean(src, Ustr::from("/tmp/rock-mono-project/main.rock"))
-            .expect("parse"),
-    );
+            .expect("parse");
+    main.package = Some(shared_test_package());
+    modules.push(main);
     let ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     ws
@@ -601,14 +618,69 @@ pub fn module_id(ws: &Workspace, file: &str) -> bone_semantic::prelude::ModuleId
     *ws.module_ids.get(&Ustr::from(file)).expect("module id")
 }
 
+/// The workspace key of a definition named `name`. A bare spelling resolves
+/// to the unique standalone declaration when present; named package keys are
+/// accepted verbatim. Legacy names with no namespace metadata stay bare.
+pub fn key(ws: &Workspace, name: &str) -> Ustr {
+    let mut keys: Vec<Ustr> = ws
+        .defs
+        .keys()
+        .chain(ws.functions_by_name.keys())
+        .chain(ws.struct_by_name.keys())
+        .chain(ws.enums_by_name.keys())
+        .chain(ws.newtypes_by_name.keys())
+        .chain(ws.globals_by_name.keys())
+        .chain(ws.type_generics.keys())
+        .copied()
+        .collect();
+    keys.sort();
+    keys.dedup();
+    let raw = Ustr::from(name);
+    if keys.contains(&raw) {
+        return raw;
+    }
+    let matches = |key: &&Ustr| {
+        bone_core::modules::display_name(key.as_str()) == name
+            || ws
+                .defs
+                .get(*key)
+                .is_some_and(|meta| meta.name.as_str() == name)
+    };
+    let standalone: Vec<Ustr> = keys
+        .iter()
+        .filter(|key| {
+            key.as_str()
+                .starts_with(bone_core::modules::STANDALONE_PACKAGE_PREFIX)
+                && matches(key)
+        })
+        .copied()
+        .collect();
+    let candidates = if standalone.is_empty() {
+        keys.iter().filter(matches).copied().collect::<Vec<_>>()
+    } else {
+        standalone
+    };
+    match candidates.as_slice() {
+        [found] => *found,
+        [] => raw,
+        _ => panic!("expected an unambiguous key for `{name}`, got {candidates:?}"),
+    }
+}
+
+/// Whether an HIR definition key names the source spelling `name`.
+pub fn name_matches(actual: Ustr, name: &str) -> bool {
+    actual.as_str() == name || bone_core::modules::display_name(actual.as_str()) == name
+}
+
 /// The `FuncRef` of the single workspace fn named `name`. Panics unless there is
 /// exactly one -- an ambiguous match would silently assert about another
 /// declaration.
 pub fn fn_ref(ws: &Workspace, name: &str) -> skull_mir::mir::FuncRef {
+    let key = key(ws, name);
     let mut found = Vec::new();
     for m in ws.modules.iter() {
         for (fid, f) in m.functions.iter() {
-            if f.name.as_str() == name {
+            if f.name == key {
                 found.push(skull_mir::mir::FuncRef {
                     module: m.id,
                     func: fid,
@@ -639,7 +711,7 @@ pub fn body_id(
 
 /// The source name of the workspace fn `f`.
 pub fn fn_name(ws: &Workspace, f: skull_mir::mir::FuncRef) -> &str {
-    ws.module(f.module).functions[f.func].name.as_str()
+    bone_core::modules::display_name(ws.module(f.module).functions[f.func].name.as_str())
 }
 
 /// A scalar context sharing `g`'s type interner.
@@ -849,7 +921,8 @@ pub fn run_main(lua: &str) -> String {
 
 /// Run the emitted chunk `lua`, then its function `name`.
 pub fn run_fn(lua: &str, name: &str) -> String {
-    run_luajit(&format!("{lua}\n{name}()\n"))
+    let resolved = resolve_definition(lua, name);
+    run_luajit(&format!("{lua}\n{resolved}()\n"))
 }
 
 /// Emit `src` and run its `main`, returning trimmed stdout.
@@ -903,7 +976,11 @@ pub fn has_vec_header(lua: &str, repr: &str, elem: Option<&str>) -> bool {
 pub fn try_ws_of_files(files: &[(&str, &str)]) -> Option<Workspace> {
     let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([]).expect("stdlib parses");
     for (file, src) in files {
-        modules.push(skull_parser::parse_module_clean(src, Ustr::from(file)).ok()?);
+        let mut ast = skull_parser::parse_module_clean(src, Ustr::from(file)).ok()?;
+        if files.len() > 1 {
+            ast.package = Some(shared_test_package());
+        }
+        modules.push(ast);
     }
     let ws = semantic_pass(&mut modules).ok()?;
     let clean = ws

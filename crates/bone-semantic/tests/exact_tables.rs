@@ -11,9 +11,14 @@ fn stored_bodies_and_inferences_hold_no_spare_capacity() {
             "fn f{i}(xs: [int], y: float) -> float {{\n    let total: float = id(y)\n    let seen: [int] = []\n    for x in xs {{\n        total = total + float(x) * {i}.0\n    }}\n    total\n}}\n"
         ));
     }
-    let mut modules =
+    let modules =
         [skull_parser::parse_module_clean(&src, Ustr::from("exact.rock")).expect("parse")];
-    let ws = semantic_pass(&mut modules).expect("semantic");
+    let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib(modules).expect("stdlib");
+    let ws = bone_semantic::semantic_passes::semantic_pass_without_closure_gate(
+        &mut modules,
+        &Default::default(),
+    )
+    .expect("semantic");
     let mid = ws.module_ids[&Ustr::from("exact.rock")];
     let module = ws.module(mid);
     assert!(!module.bodies.is_empty());

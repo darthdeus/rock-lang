@@ -42,7 +42,7 @@ fn main() {
 }
 
 //=== TEST CASE: unknown_name_default_Generic ===
-//! expect: Unknown type name Nope
+//! expect: `Nope` did not resolve to any definition
 struct S<T, U = Nope> {
     a: T,
     b: U,

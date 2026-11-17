@@ -101,7 +101,7 @@ fn layout_changing_edit_requires_a_full_js_publication() {
         .module(after_mid)
         .globals
         .iter()
-        .find(|(_, global)| global.name.as_str() == "OTHER")
+        .find(|(_, global)| skull_mir::mangle::declared_name(global.name.as_str()) == "OTHER")
         .map(|(gid, _)| gid)
         .expect("OTHER global");
     let old_layout = cache.global_layout().to_string();

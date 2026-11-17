@@ -12,7 +12,7 @@ fn converted(src: &str, edit: impl FnOnce(&mut MirFunc)) -> (MirFunc, String) {
         .module(mid)
         .functions
         .iter()
-        .find(|(_, f)| f.name.as_str() == "f")
+        .find(|(_, f)| skull_mir::mangle::declared_name(f.name.as_str()) == "f")
         .expect("function");
     let root = skull_mir::mir::FuncRef {
         module: mid,

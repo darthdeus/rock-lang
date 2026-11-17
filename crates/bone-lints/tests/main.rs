@@ -7,7 +7,7 @@ mod support;
 fn lint(files: &[(&str, &str)], options: &LintOptions, is_bin: bool) -> Vec<Finding> {
     let mut asts: Vec<skull_parser::Ast> = files
         .iter()
-        .map(|(name, src)| skull_parser::parse_module_clean(src, Ustr::from(name)).expect("parse"))
+        .map(|(name, src)| support::parse(name, src))
         .collect();
     lint_asts(&mut asts, files, options, is_bin)
 }
@@ -18,12 +18,12 @@ fn lint_asts(
     options: &LintOptions,
     is_bin: bool,
 ) -> Vec<Finding> {
-    let ws = semantic_pass(asts).expect("clean program typechecks");
+    let ws = support::workspace(asts.to_vec());
     let sources: FxHashMap<Ustr, &str> = files
         .iter()
         .map(|(name, src)| (Ustr::from(name), *src))
         .collect();
-    lint_workspace(&ws, &FxHashSet::default(), is_bin, &sources, options)
+    lint_workspace(&ws, &support::warm(&ws), is_bin, &sources, options)
 }
 
 mod action_layer_boundaries;

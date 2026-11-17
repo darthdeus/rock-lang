@@ -162,6 +162,7 @@ pub fn global_layout_id(ws: &Workspace, scx: &ScalarCtx) -> Result<String, Strin
             .map(|leaf| format!("{}:{}:{}", leaf.path, leaf.cty, leaf.byte_off))
             .collect::<Vec<_>>()
             .join(",");
+        let name = bone_core::modules::display_name(name.as_str());
         rows.push(format!(
             "value:{name};size={size};align={align};leaves=[{leaves}]"
         ));

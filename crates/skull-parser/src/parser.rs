@@ -35,10 +35,6 @@ pub(crate) struct Parser<'a> {
     last_was_operator: bool,
     /// Shared counter for expression and type holes.
     hole_counter: u32,
-    /// Source-language dialect. Legacy is today's grammar;
-    /// V1 enables `(expr : Type)` ascription, `::` paths, and the module-item
-    /// forms, and rejects infix `expr :: Type`.
-    pub dialect: Dialect,
     /// Depth of paren groups whose head is currently parsing. While > 0 the
     /// Pratt loop breaks at `:` so the paren arm owns the `(expr : Type)`
     /// ascription form instead of `:` binding as a binop.
@@ -173,15 +169,10 @@ impl<'a> Parser<'a> {
     /// offset of its first byte. Interpolated strings are re-scanned from it, so
     /// a caller that passes the wrong text gets spanned errors, not silent
     /// drift.
-    pub(crate) fn new_with_dialect(
-        tokens: Vec<Token>,
-        source: &'a str,
-        base: usize,
-        dialect: Dialect,
-    ) -> Self {
+    pub(crate) fn new(tokens: Vec<Token>, source: &'a str, base: usize) -> Self {
         let eof_span = tokens.last().map(|t| t.span).unwrap_or_else(Span::unknown);
         let mut ast = Ast::with_capacity(tokens.len());
-        ast.dialect = dialect;
+        ast.dialect = Dialect::V1;
         Self {
             frames: vec![Frame::File { text: source, base }],
             tokens,
@@ -195,7 +186,6 @@ impl<'a> Parser<'a> {
             arrow_lambda_blocked: false,
             last_was_operator: false,
             hole_counter: 0,
-            dialect,
             paren_head: 0,
             nesting: 0,
             nested_height: 0,
@@ -249,12 +239,12 @@ impl<'a> Parser<'a> {
                     "`@memory` was removed; delete it: files have no memory class".to_string(),
                 ));
             }
-            // The `mod a::b;` file header: v1-only, first non-comment item,
+            // The `mod a::b;` file header: first non-comment item,
             // `;`-terminated. A later one is a misplaced header, not a
             // Rust-style load request. A visibility prefix
             // (`pub mod combat;`) is part of the header; on a false lead the
             // position rewinds and parse_item handles the item.
-            if self.dialect == Dialect::V1 && !seen_item {
+            if !seen_item {
                 let save = self.pos;
                 let start = self.span();
                 let mods = self.parse_vis_mods()?;
@@ -481,14 +471,6 @@ impl<'a> Parser<'a> {
             .get(self.pos + 1)
             .map(|t| t.kind)
             .unwrap_or(TokenKind::EOF)
-    }
-
-    /// Is the token after the current one an identifier whose first char is
-    /// ASCII-uppercase? Distinguishes `Color::Red` (qualified) from
-    /// `value :: int` (ascription).
-    fn peek_is_uppercase_ident(&self) -> bool {
-        matches!(self.peek_kind(), TokenKind::Ident(n)
-            if n.as_str().chars().next().is_some_and(|c| c.is_ascii_uppercase()))
     }
 
     /// Newlines that followed the *previous* token (the tokenizer folds
@@ -885,19 +867,14 @@ impl<'a> Parser<'a> {
     fn parse_item(&mut self) -> PResult<Item> {
         // The item span includes its leading annotations.
         let item_start = self.span();
-        // v1 visibility modifiers lead the item (`pub fn`, `private(set)` is
+        // Visibility modifiers lead the item (`pub fn`, `private(set)` is
         // field-only and rejected below). Contextual: parse_vis_mods commits
         // only when a modifier is followed by an item-like token.
-        let mods = if self.dialect == Dialect::V1 {
-            self.parse_vis_mods()?
-        } else {
-            VisMods::default()
-        };
+        let mods = self.parse_vis_mods()?;
         if mods.set_private {
             return Err(self.err("`private(set)` applies to stored struct fields, not to items"));
         }
-        // `use ...;` — item-level import (v1 scoping; parses additively in
-        // legacy, where it was previously an unsupported item start).
+        // `use ...;` - item-level import.
         if self.at_use_decl() {
             let decl = self.parse_use_decl(item_start, mods.vis.clone())?;
             return Ok(Item {
@@ -907,9 +884,9 @@ impl<'a> Parser<'a> {
                 kind: ItemKind::Use(decl),
             });
         }
-        // `mod name { .. }` — inline module block (v1 only). A `mod path;`
+        // `mod name { .. }` - inline module block. A `mod path;`
         // here is a misplaced header (headers lead the file only).
-        if self.dialect == Dialect::V1 && self.at_mod_decl() {
+        if self.at_mod_decl() {
             self.advance(); // `mod`
             let name = self.expect_ident()?;
             if matches!(self.kind(), TokenKind::Semicolon | TokenKind::DoubleColon) {
@@ -1451,12 +1428,10 @@ impl<'a> Parser<'a> {
         let mut receiver_surface: Option<(Ident, usize)> = None;
         let mut receiver_ty: Option<Idx<TypeExprData>> = None;
 
-        // v1 qualified receiver: `fn lib::Actor<..>.method<..>(..)`. Extend
+        // Qualified receiver: `fn lib::Actor<..>.method<..>(..)`. Extend
         // the leading ident into a path, then reuse the single-ident D-form
         // flow with the method name/generics and a Path receiver type.
-        if self.dialect == Dialect::V1
-            && self.kind() == TokenKind::DoubleColon
-            && matches!(self.peek_kind(), TokenKind::Ident(_))
+        if self.kind() == TokenKind::DoubleColon && matches!(self.peek_kind(), TokenKind::Ident(_))
         {
             if is_macro {
                 return Err(self.err("the method form `Type.name` is for functions, not macros"));
@@ -2231,8 +2206,8 @@ impl<'a> Parser<'a> {
                 self.expect(TokenKind::CloseSquare)?;
                 TypeExprKind::Array(inner)
             }
-            // `::root::T` (v1) — unambiguously root-anchored.
-            TokenKind::DoubleColon if self.dialect == Dialect::V1 => {
+            // `::root::T` is unambiguously root-anchored.
+            TokenKind::DoubleColon => {
                 let path = self.parse_root_path()?;
                 self.finish_type_path(path)?
             }
@@ -2308,8 +2283,8 @@ impl<'a> Parser<'a> {
                             span: ident_span,
                             name,
                         };
-                        // `a::b::T` / `a::b::T<A, B>` (v1 paths).
-                        if self.dialect == Dialect::V1 && self.kind() == TokenKind::DoubleColon {
+                        // `a::b::T` / `a::b::T<A, B>` paths.
+                        if self.kind() == TokenKind::DoubleColon {
                             let path = self.parse_path_tail(ctor)?;
                             self.finish_type_path(path)?
                         }
@@ -2823,24 +2798,12 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            // Type ascription `expr :: Type` is intercepted before the
-            // precedence checks (as rock does), so it binds tighter than any
-            // operator: `j :: float / k :: float` is `(j::float) / (k::float)`.
-            // Qualified idents (`Color::Red`) were already consumed in primary.
+            // `::` after a non-path expression is a legacy ascription. Paths
+            // following identifiers have already been consumed in primary.
             if op == TokenKind::DoubleColon {
-                if self.dialect == Dialect::V1 {
-                    // In v1 `::` is exclusively the path separator; an infix
-                    // `::` after a non-path expression can only be an
-                    // ascription, so name the replacement form.
-                    return Err(self.err(
-                        "infix `expr :: Type` ascription is not available in modules-v1; write `(expr : Type)`",
-                    ));
-                }
-                self.advance();
-                let ty = self.parse_type()?;
-                let span = self.node_span(left, self.prev_span());
-                left = self.ast.expr(span, ExprKind::TypeAscription(left, ty));
-                continue;
+                return Err(self.err(
+                    "legacy infix `expr :: Type` ascription has been removed; write `(expr : Type)`",
+                ));
             }
 
             // Sigil macro call `name!(args)` — `!` before `(` enables extended
@@ -3396,8 +3359,8 @@ impl<'a> Parser<'a> {
             return self.finish_lambda(params, start);
         }
 
-        // `::root::path` (v1) — a root-anchored path in value position.
-        if self.dialect == Dialect::V1 && self.kind() == TokenKind::DoubleColon {
+        // `::root::path` is a root-anchored path in value position.
+        if self.kind() == TokenKind::DoubleColon {
             let start = self.span();
             let path = self.parse_root_path()?;
             let span = self.span_from(start);
@@ -3559,10 +3522,10 @@ impl<'a> Parser<'a> {
                         start,
                     );
                 }
-                // v1: `::` after an ident is ALWAYS a path — the resolver
+                // `::` after an ident is ALWAYS a path - the resolver
                 // decides whether the head names a module, type, or enum
                 // (no case heuristic).
-                if self.dialect == Dialect::V1 && self.kind() == TokenKind::DoubleColon {
+                if self.kind() == TokenKind::DoubleColon {
                     let path = self.parse_path_tail(base)?;
                     // `p::Type { .. }` / `p::E::V { .. }` record literal.
                     if self.struct_literal_follows() {
@@ -3585,43 +3548,15 @@ impl<'a> Parser<'a> {
                     // the postfix machinery; a bare path (or `p::Type<T>` as a
                     // value) lands here.
                     let span = self.span_from(start);
-                    Ok(self.ast.expr(
+                    return Ok(self.ast.expr(
                         span,
                         ExprKind::Path {
                             path,
                             generic_args: Vec::new(),
                         },
-                    ))
+                    ));
                 }
-                // `Base::Member` is a qualified ident ONLY when the member
-                // starts uppercase (enum-variant convention). A lowercase
-                // member (`value :: int`) is type ascription, handled by the
-                // infix `::` branch — so fall through to a plain ident here.
-                else if self.kind() == TokenKind::DoubleColon && self.peek_is_uppercase_ident() {
-                    self.advance(); // `::`
-                    let member = self.expect_ident()?;
-                    if self.struct_literal_follows() {
-                        let (bases, fields) = self.parse_struct_fields()?;
-                        if !bases.is_empty() {
-                            return Err(self.err(
-                                "functional-update `..base` is not supported on enum variants",
-                            ));
-                        }
-                        let span = self.span_from(start);
-                        return Ok(self.ast.expr(
-                            span,
-                            ExprKind::EnumVariantRecord {
-                                enum_name: base,
-                                variant_name: member,
-                                fields,
-                            },
-                        ));
-                    }
-                    let span = self.span_from(start);
-                    Ok(self
-                        .ast
-                        .expr(span, ExprKind::QualifiedIdent { base, member }))
-                } else if self.struct_literal_follows() {
+                if self.struct_literal_follows() {
                     let (bases, fields) = self.parse_struct_fields()?;
                     let span = self.span_from(start);
                     Ok(self.ast.expr(
@@ -3645,9 +3580,7 @@ impl<'a> Parser<'a> {
                     // Span the whole `()`, not just the open paren.
                     return Ok(self.ast.expr(self.span_from(start), ExprKind::Unit));
                 }
-                // `(expr : Type)` — the modules-v1 contextual-ascription form,
-                // accepted additively in legacy (there it previously reached
-                // inference as a `:` binop and was rejected there). While the
+                // `(expr : Type)` - the contextual-ascription form. While the
                 // paren group's head and elements parse, the Pratt loop BREAKS
                 // at `:` so this arm owns the colon: one expression, one
                 // colon, one complete type, then `)`. `(a : T, ..)` is NOT a
@@ -4299,8 +4232,8 @@ impl<'a> Parser<'a> {
                     span: ident_span,
                     name,
                 };
-                // v1: a pattern path `p::E::V` resolves like any path.
-                if self.dialect == Dialect::V1 && self.kind() == TokenKind::DoubleColon {
+                // A pattern path `p::E::V` resolves like any path.
+                if self.kind() == TokenKind::DoubleColon {
                     let path = self.parse_path_tail(ident)?;
                     if self.kind() == TokenKind::OpenParen {
                         self.advance();
@@ -4323,15 +4256,7 @@ impl<'a> Parser<'a> {
                     }
                     return Ok(Pattern::PathVariant { path, args: None });
                 }
-                // Qualified `Enum::Variant`.
-                let (enum_name, variant) = if self.kind() == TokenKind::DoubleColon
-                    && matches!(self.peek_kind(), TokenKind::Ident(_))
-                {
-                    self.advance();
-                    (Some(ident), self.expect_ident()?)
-                } else {
-                    (None, ident)
-                };
+                let variant = ident;
                 if self.kind() == TokenKind::OpenParen {
                     self.advance();
                     let mut args = Vec::new();
@@ -4343,23 +4268,17 @@ impl<'a> Parser<'a> {
                     }
                     self.expect(TokenKind::CloseParen)?;
                     Ok(Pattern::EnumVariant {
-                        enum_name,
+                        enum_name: None,
                         variant_name: variant,
                         args: Some(args),
                     })
                 } else if self.kind() == TokenKind::OpenCurly {
                     let (fields, rest) = self.parse_pattern_record_fields()?;
                     Ok(Pattern::Record {
-                        enum_name,
+                        enum_name: None,
                         name: Some(variant),
                         fields,
                         rest,
-                    })
-                } else if enum_name.is_some() {
-                    Ok(Pattern::EnumVariant {
-                        enum_name,
-                        variant_name: variant,
-                        args: None,
                     })
                 } else {
                     Ok(Pattern::Ident(variant))

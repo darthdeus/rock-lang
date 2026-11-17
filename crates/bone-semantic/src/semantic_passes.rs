@@ -61,7 +61,7 @@ fn trailing_generic_defaults(
 
 /// The key the workspace maps use for a definition named `name` in module
 /// `path`: in a v1 fragment the canonical DefKey, so two same-named types in
-/// different logical modules stay distinct; in a legacy file the bare name.
+/// different logical modules stay distinct; stdlib items retain bare names.
 fn map_key(scope: Option<&FragmentScope>, path: &[ustr::Ustr], name: ustr::Ustr) -> ustr::Ustr {
     match scope {
         Some(sc) => bone_core::modules::def_key(sc.package_name.as_ref(), path, name.as_str()),
@@ -127,7 +127,7 @@ pub struct NominalFacts {
 }
 
 /// The nominal types `rock_mod` defines, keyed as the workspace maps key
-/// them (`scope` is the file's fragment scope, `None` for a legacy file),
+/// them (`scope` is the file's fragment scope, `None` for the stdlib),
 /// collected from the supplied AST with the same visitor as `lower_modules`.
 pub fn nominal_type_facts(
     scope: Option<&FragmentScope>,
@@ -217,7 +217,20 @@ pub fn lower_modules_seeded(
         .collect::<Vec<_>>();
     for (module, facts) in modules.iter().zip(facts) {
         let mid = module.id;
-        for (key, facts) in facts.types {
+        for (key, mut facts) in facts.types {
+            if let Some(scope) = ws.fragment_scopes.get(&module.file) {
+                let mut scope = scope.clone();
+                if let Some(meta) = ws.defs.get(&key) {
+                    scope.module_path = meta.module.clone();
+                }
+                for default in &mut facts.defaults {
+                    if let bone_core::hir::GenericDefault::Named(name) = default {
+                        if let Ok(resolved) = bone_lower::resolve::resolve_bare(ws, &scope, *name) {
+                            *name = resolved.key;
+                        }
+                    }
+                }
+            }
             // Whether this module may write `key`'s facts: a vacant slot, or one
             // this same module owns (its own re-lower refreshing them).
             if ws
@@ -287,7 +300,7 @@ pub fn lower_modules_seeded(
                 ItemKind::CompilerDirective(_)
                 | ItemKind::Comment(_)
                 | ItemKind::MacroInvocation { .. } => continue,
-                // Legacy use/mod are rejected in build_namespaces; v1 Module
+                // Module definitions are registered in build_namespaces; Module
                 // blocks are walked via for_each_def_item, not as annotated items.
                 ItemKind::Use(_) | ItemKind::Module(_) => continue,
             };
@@ -466,7 +479,7 @@ pub fn lower_modules_seeded(
                 }
                 // Bare-name lookup prefers the function, which would leave the
                 // global unreachable. Registration keys are module-qualified
-                // under modules v1, so only legacy flat names collide here.
+                // under modules v1, so an item collision is diagnosed during namespace assembly.
                 if ws.functions_by_name.contains_key(&g.name) {
                     dup_errs.push(CompilerError::new_with_label(
                         g.span,
@@ -1151,7 +1164,7 @@ pub fn semantic_pass(rock_modules: &mut [Ast]) -> Result<Workspace, CompilerErro
 
 /// [`semantic_pass`] with the host graph's dependency-alias tables, so a v1
 /// package resolves its dependencies under the names its manifest declared.
-/// Legacy-only workspaces pass the default (empty) input. Every module is
+/// Standalone workspaces pass the default (empty) input. Every module is
 /// lowered; a set that begins with the shared process stdlib goes through
 /// [`semantic_pass_without_closure_gate`] instead.
 pub fn semantic_pass_with_aliases(
@@ -1259,87 +1272,24 @@ fn semantic_pass_into_after_gate(
     let _span = tracing::info_span!("bone_semantic_pass").entered();
 
     let timer = Instant::now();
-    let namespaces = NamespaceInput::read(&*rock_modules);
-    // Building the namespace tree is mostly serial and reads only what
-    // `read` took from the trees, so the gate, macro expansion and
-    // desugaring run beside it.
-    let ((built, namespaces_time), gate_errors) = par_join(
-        || {
-            let built = namespaces.build(&mut ws, aliases);
-            (built, timer.elapsed())
-        },
-        || {
-            let gate_errors = gate(&rock_modules.iter().collect_vec());
-            if gate_errors.is_empty() {
-                expand_and_desugar_trees(rock_modules);
-            }
-            gate_errors
-        },
-    );
+    let gate_errors = gate(&rock_modules.iter().collect_vec());
     if !gate_errors.is_empty() {
         return Err(PassFailure::Gate(gate_errors));
     }
-    built.map_err(PassFailure::Pass)?;
-    // Expansion overlaps the namespace build; only what outlasts it adds wall.
-    ws.phase_timings.push(("namespaces", namespaces_time));
-    ws.phase_timings.push((
-        "macro_expand",
-        timer.elapsed().saturating_sub(namespaces_time),
-    ));
+    expand_and_desugar_trees(rock_modules);
+    ws.log_time("macro_expand", timer);
+    let timer = Instant::now();
+    NamespaceInput::read(&*rock_modules)
+        .build(&mut ws, aliases)
+        .map_err(PassFailure::Pass)?;
+    ws.log_time("namespaces", timer);
     lower_and_infer(&mut ws, rock_modules).map_err(PassFailure::Pass)?;
 
     Ok(ws)
 }
 
-/// Legacy compilation units keep their flat grammar: module headers, inline
-/// `mod` blocks and item-level `use` are modules-v1 grammar. Both the
-/// legacy-only fast path and the mixed-workspace contribution path feed this
-/// one rule set so they cannot drift in either rejection or span selection.
-fn reject_legacy_unscoped_items(
-    header_span: Option<Span>,
-    inline_module_span: Option<Span>,
-    use_span: Option<Span>,
-) -> Result<(), CompilerError> {
-    if let Some(span) = header_span {
-        return Err(CompilerError::new_with_label(
-            span,
-            "module file headers require module resolution (not yet implemented)".to_string(),
-        ));
-    }
-    if let Some(span) = inline_module_span {
-        return Err(CompilerError::new_with_label(
-            span,
-            "inline `mod` blocks require module resolution (not yet implemented)".to_string(),
-        ));
-    }
-    if let Some(span) = use_span {
-        return Err(CompilerError::new_with_label(
-            span,
-            "item-level `use` requires modules v1 (`[language] modules = \"v1\"`)".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn reject_legacy_unscoped_ast_items(rock_module: &Ast) -> Result<(), CompilerError> {
-    let inline_module_span = rock_module.items.iter().find_map(|item| match &item.kind {
-        ItemKind::Module(module) => Some(module.span),
-        _ => None,
-    });
-    let use_span = rock_module.items.iter().find_map(|item| match &item.kind {
-        ItemKind::Use(decl) => Some(decl.span),
-        _ => None,
-    });
-    reject_legacy_unscoped_items(
-        rock_module.module_header.as_ref().map(|header| header.span),
-        inline_module_span,
-        use_span,
-    )
-}
-
 /// Walk every definition-bearing item, descending into inline mod blocks.
-/// `path` is the logical module path within the file's package; `in_v1`
-/// reports whether the containing file is a modules-v1 fragment.
+/// `path` is the logical module path within the file's package.
 fn for_each_def_item<'a>(
     items: &'a [Item],
     path: &[ustr::Ustr],
@@ -1359,7 +1309,7 @@ fn for_each_def_item<'a>(
 }
 
 /// What one source file contributes to the namespace tree, read from its
-/// un-expanded AST: its dialect and owning package, its `mod` header, and
+/// un-expanded AST: its owning package, its `mod` header, and
 /// every item the tree is built from -- each `use`, each inline `mod` block
 /// with its own items, and each definition's name, kind, declared visibility
 /// and span. Signatures, fields and bodies are not part of it, so an edit to
@@ -1369,7 +1319,6 @@ fn for_each_def_item<'a>(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FragmentContribution {
     pub file: ustr::Ustr,
-    pub dialect: skull_parser::Dialect,
     pub package: Option<skull_parser::PackageTag>,
     pub header: Option<skull_parser::ModuleHeader>,
     pub items: Vec<ScopeItem>,
@@ -1402,7 +1351,6 @@ pub enum ScopeItem {
 pub fn contribute(rock_mod: &Ast) -> FragmentContribution {
     FragmentContribution {
         file: rock_mod.file,
-        dialect: rock_mod.dialect,
         package: rock_mod.package.clone(),
         header: rock_mod.module_header.clone(),
         items: scope_items(&rock_mod.items),
@@ -1435,8 +1383,7 @@ fn scope_items(items: &[Item]) -> Vec<ScopeItem> {
 /// it turns the v1 fragments' headers, inline mod blocks, and use
 /// declarations into the workspace's namespace tree, registers every v1
 /// definition under its canonical DefKey, and records per-fragment import
-/// scopes for the resolver. Legacy files contribute nothing here and keep
-/// today's bare-name keys and diagnostics.
+/// scopes for the resolver. Standalone files receive one implicit package each.
 pub fn build_namespaces<'a>(
     ws: &mut Workspace,
     rock_modules: impl IntoIterator<Item = &'a Ast> + Clone,
@@ -1447,41 +1394,12 @@ pub fn build_namespaces<'a>(
 
 /// What [`build_namespaces`] reads from the parse trees, taken before it
 /// writes the workspace so the trees are free for macro expansion meanwhile.
-enum NamespaceInput {
-    /// Legacy workspaces do not consult the modules-v1 namespace: only the
-    /// stdlib registers, and legacy files must not use v1 syntax.
-    LegacyOnly {
-        stdlib: Vec<FragmentContribution>,
-        rejected: Option<CompilerError>,
-    },
-    Fragments(Vec<FragmentContribution>),
-}
+struct NamespaceInput(Vec<FragmentContribution>);
 
 impl NamespaceInput {
     fn read<'a>(rock_modules: impl IntoIterator<Item = &'a Ast> + Clone) -> Self {
-        // Avoid cloning every legacy item into FragmentContribution just to
-        // skip it again.
-        if !rock_modules.clone().into_iter().any(|module| {
-            module.dialect == skull_parser::Dialect::V1
-                && !is_stdlib_module_file(module.file.as_str())
-        }) {
-            let stdlib = rock_modules
-                .clone()
-                .into_iter()
-                .filter(|module| is_stdlib_module_file(module.file.as_str()))
-                .map(contribute)
-                .collect();
-            let rejected = rock_modules
-                .into_iter()
-                .filter(|module| {
-                    module.dialect == skull_parser::Dialect::Legacy
-                        && !is_stdlib_module_file(module.file.as_str())
-                })
-                .find_map(|module| reject_legacy_unscoped_ast_items(module).err());
-            return Self::LegacyOnly { stdlib, rejected };
-        }
         let modules = rock_modules.into_iter().collect_vec();
-        Self::Fragments(
+        Self(
             modules
                 .par_iter()
                 .map(|module| contribute(module))
@@ -1494,21 +1412,9 @@ impl NamespaceInput {
         ws: &mut Workspace,
         aliases: &bone_core::modules::NsAliases,
     ) -> Result<(), CompilerError> {
-        match self {
-            Self::LegacyOnly { stdlib, rejected } => {
-                for contribution in &stdlib {
-                    register_stdlib_items(ws, contribution)?;
-                }
-                rejected.map_or(Ok(()), Err)
-            }
-            Self::Fragments(contributions) => {
-                let built = assemble_namespaces(ws, &contributions.iter().collect_vec(), aliases);
-                // The tree owns what it kept; the rest is not this thread's
-                // work while expansion waits on the join.
-                drop_in_background(contributions);
-                built
-            }
-        }
+        let built = assemble_namespaces(ws, &self.0.iter().collect_vec(), aliases);
+        drop_in_background(self.0);
+        built
     }
 }
 
@@ -1555,24 +1461,9 @@ pub fn assemble_namespaces(
         .map_or(0, |id| id + 1);
     for contribution in contributions.iter() {
         if is_stdlib_module_file(contribution.file.as_str()) {
-            register_stdlib_items(ws, contribution)?;
-            continue;
-        }
-        let is_v1 = contribution.dialect == skull_parser::Dialect::V1;
-        if !is_v1 {
-            let inline_module_span = contribution.items.iter().find_map(|item| match item {
-                ScopeItem::Module { block_span, .. } => Some(*block_span),
-                _ => None,
-            });
-            let use_span = contribution.items.iter().find_map(|item| match item {
-                ScopeItem::Use(decl) => Some(decl.span),
-                _ => None,
-            });
-            reject_legacy_unscoped_items(
-                contribution.header.as_ref().map(|header| header.span),
-                inline_module_span,
-                use_span,
-            )?;
+            if !ws.fragment_scopes.contains_key(&contribution.file) {
+                register_stdlib_items(ws, contribution)?;
+            }
             continue;
         }
         let header_span = contribution
@@ -1694,9 +1585,7 @@ fn validate_v1_use_targets(
     // Read-only per fragment; the first failing fragment in module order
     // reports, as a sequential walk would.
     let first_error = contributions.par_iter().find_map_first(|contribution| {
-        if contribution.dialect != skull_parser::Dialect::V1
-            || is_stdlib_module_file(contribution.file.as_str())
-        {
+        if is_stdlib_module_file(contribution.file.as_str()) {
             return None;
         }
         let frag = ws.fragment_scopes.get(&contribution.file)?;
@@ -1765,7 +1654,7 @@ fn validate_use_items(
 }
 
 /// Build the compiler-owned `std` root from the trusted stdlib inputs. These
-/// definitions stay legacy in the lowering maps, so their namespace keys are
+/// definitions retain bare names in the lowering maps, so their namespace keys are
 /// their original bare names and no second implementation is introduced.
 fn register_stdlib_items(
     ws: &mut Workspace,
@@ -1815,6 +1704,14 @@ fn register_stdlib_items(
             .entry(ustr(name))
             .or_insert_with(|| ustr(name));
     }
+    ws.fragment_scopes.insert(
+        contribution.file,
+        FragmentScope {
+            package: STD_PACKAGE_ID,
+            package_name: ustr(STD_PACKAGE_NAME),
+            ..Default::default()
+        },
+    );
     Ok(())
 }
 
@@ -1898,6 +1795,21 @@ fn collect_use_leaves(
 /// recursing into inline mod blocks. `scope` collects the fragment's own
 /// imports; shared (`pub`/`private`-prefixed) use declarations become node
 /// exports.
+fn source_module_name(scope: &FragmentScope, path: &[ustr::Ustr]) -> String {
+    if path.is_empty() {
+        if scope
+            .package_name
+            .starts_with(bone_core::modules::STANDALONE_PACKAGE_PREFIX)
+        {
+            "<root>".to_string()
+        } else {
+            scope.package_name.to_string()
+        }
+    } else {
+        path.iter().map(|segment| segment.as_str()).join("::")
+    }
+}
+
 fn register_items(
     ws: &mut Workspace,
     pkg_id: u32,
@@ -1978,14 +1890,7 @@ fn register_items(
                             format!(
                                 "duplicate definition `{}` in module `{}`",
                                 block_name,
-                                if path.is_empty() {
-                                    scope.package_name.to_string()
-                                } else {
-                                    path.iter()
-                                        .map(|s| s.as_str())
-                                        .collect::<Vec<_>>()
-                                        .join("::")
-                                }
+                                source_module_name(scope, path)
                             ),
                         ));
                     } else {
@@ -2064,14 +1969,7 @@ fn register_items(
                         *item_span,
                         format!(
                             "duplicate definition `{bare}` in module `{}`",
-                            if path.is_empty() {
-                                scope.package_name.to_string()
-                            } else {
-                                path.iter()
-                                    .map(|s| s.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join("::")
-                            }
+                            source_module_name(scope, path)
                         ),
                     ));
                     continue;
@@ -2537,16 +2435,7 @@ pub(crate) fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), Co
                     }
                 }
 
-                // Compiler/stdlib operator families (synthetic desugar and
-                // primitive overloads) keep a bare `__op_*` key so the existing
-                // intrinsic pipeline still finds them. User-declared operators
-                // in v1 register under their DefKey and are selected through
-                // imports / `operator(+)` -- not global discovery.
-                let key = if fn_name.starts_with("__op_") && (f.is_synthetic || over_primitives) {
-                    f.name.name
-                } else {
-                    reg_key(&f.name.name, path)
-                };
+                let key = reg_key(&f.name.name, path);
                 ctx.workspace
                     .relowered_body_count
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2577,7 +2466,7 @@ pub(crate) fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), Co
             | ItemKind::Enum(_)
             | ItemKind::Newtype(_) => {}
 
-            // v1: registered in build_namespaces. Legacy: rejected there.
+            // Registered in build_namespaces.
             // Module items are walked by for_each_def_item, not passed here.
             ItemKind::Use(_) | ItemKind::Module(_) => {}
 

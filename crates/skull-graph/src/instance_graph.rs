@@ -5875,6 +5875,23 @@ pub fn opaque_boundary_roots_for_decls(
     // Each declaration's group is scanned independently, and few members
     // have an opaque JS body at all.
     let decls: Vec<FuncRef> = decls.into_iter().collect();
+    let mut nomangle_roots: FxHashMap<ustr::Ustr, Vec<FuncRef>> = FxHashMap::default();
+    for module in &ws.modules {
+        for (func, function) in module.functions.iter() {
+            if function
+                .annotations
+                .iter()
+                .any(|annotation| annotation.is_builtin("nomangle"))
+            {
+                let name =
+                    ustr::Ustr::from(skull_mir::mangle::declared_name(function.name.as_str()));
+                nomangle_roots.entry(name).or_default().push(FuncRef {
+                    module: module.id,
+                    func,
+                });
+            }
+        }
+    }
     let found: Vec<(DeclKey, FxHashSet<FuncRef>)> = {
         use bone_core::prelude::*;
         decls
@@ -5883,7 +5900,8 @@ pub fn opaque_boundary_roots_for_decls(
                 skull_mir::lower::backend_variant_group(ws, *decl)
                     .into_iter()
                     .filter_map(|member| {
-                        opaque_js_nomangle_targets(ws, member).map(|t| (DeclKey(member), t))
+                        opaque_js_nomangle_targets(ws, member, &nomangle_roots)
+                            .map(|t| (DeclKey(member), t))
                     })
                     .collect::<Vec<_>>()
             })
@@ -5901,27 +5919,19 @@ pub fn opaque_boundary_roots_for_decls(
 
 /// The `@nomangle` declarations an opaque JS body names, or `None` when the
 /// declaration has no such body. A reader takes an absent record as empty.
-fn opaque_js_nomangle_targets(ws: &Workspace, member: FuncRef) -> Option<FxHashSet<FuncRef>> {
+fn opaque_js_nomangle_targets(
+    ws: &Workspace,
+    member: FuncRef,
+    nomangle_roots: &FxHashMap<ustr::Ustr, Vec<FuncRef>>,
+) -> Option<FxHashSet<FuncRef>> {
     let f = &ws.module(member.module).functions[member.func];
     let Some((bone_core::hir::FnBackend::Js, body)) = f.inline_body else {
         return None;
     };
     let mut targets = FxHashSet::default();
     for name in crate::inline_js::bare_names(body.as_str()) {
-        if let Some(candidates) = ws.functions_by_name.get(&ustr::Ustr::from(name)) {
-            for &(target_module, target_func) in candidates {
-                let target = &ws.module(target_module).functions[target_func];
-                if target
-                    .annotations
-                    .iter()
-                    .any(|annotation| annotation.name.name.as_str() == "nomangle")
-                {
-                    targets.insert(FuncRef {
-                        module: target_module,
-                        func: target_func,
-                    });
-                }
-            }
+        if let Some(candidates) = nomangle_roots.get(&ustr::Ustr::from(name)) {
+            targets.extend(candidates.iter().copied());
         }
     }
     Some(targets)

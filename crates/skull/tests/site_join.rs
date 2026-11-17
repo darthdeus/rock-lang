@@ -5,7 +5,7 @@
 //! of the identity is load-bearing.
 
 use crate::common::{
-    census_of, census_of_graph, fn_name, fn_ref, graph_of as graph_of_ws, lowered_body,
+    census_of, census_of_graph, fn_name, fn_ref, graph_of as graph_of_ws, key, lowered_body,
     prepare_body, prepared_body, scalar_ctx, unjoined, ws_and_graph, ws_with_stdlib,
 };
 use crate::support::site_join::{self, CalleeCheck, SiteJoinCensus, Unjoined, check_callee};
@@ -17,7 +17,6 @@ use skull_mir::mir::{FuncRef, Inst, MirFunc};
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use skull_mir::site::{Site, SiteDomain, SiteOp};
 use std::collections::BTreeMap;
-use ustr::Ustr;
 
 /// The backend the census lowers for; `check_callee` asks the emitter's own
 /// declaration selection, so the comparison needs to know which target.
@@ -825,7 +824,7 @@ fn main() { print("{top()}") }
         scx.interner(),
         mf.callee_instances[&call].func,
         vec![MonoTy::App {
-            ctor: MonoCtor::Nominal(Ustr::from("Pair")),
+            ctor: MonoCtor::Nominal(key(&ws, "Pair")),
             params: Vec::new(),
         }],
     );

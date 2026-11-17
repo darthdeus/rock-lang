@@ -27,7 +27,7 @@ fn no_stdlib_rejects_a_stdlib_declaration_in_check_and_run() {
             text(&without)
         );
         assert!(
-            text(&without).contains("Function `print` doesn't exist"),
+            text(&without).contains("`print` did not resolve to any definition"),
             "{command} --no-stdlib:\n{}",
             text(&without)
         );

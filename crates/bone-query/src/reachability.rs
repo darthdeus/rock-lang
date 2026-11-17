@@ -102,8 +102,8 @@ impl ReachabilityIndex {
         // Keyed by the struct's bare name, which is exactly how a value of that
         // struct type renders (so it matches a root variable's rendered type).
         for m in ws.modules.iter() {
-            for s in m.structs.values() {
-                let src = s.name;
+            for (&src, &sid) in &m.struct_by_name {
+                let s = &m.structs[sid];
                 for f in s.fields.iter() {
                     edges.entry(src).or_default().push(Edge {
                         label: f.name.to_string(),
@@ -125,22 +125,26 @@ impl ReachabilityIndex {
         // `ufcs_methods` scan.
         for m in ws.modules.iter() {
             for (fid, f) in m.functions.iter() {
-                if f.name.as_str().starts_with("__") {
+                if bone_core::modules::display_name(f.name.as_str()).starts_with("__") {
                     continue;
                 }
                 let Some(p0) = f.param_decls.first() else {
                     continue;
                 };
-                let Some(recv) = crate::types::nominal_name(ws, None, p0.ty) else {
+                // Keep the original graph limited to direct nominal receiver
+                // types. Arrays and other builtin constructors use separate
+                // completion paths and would flood the generic reach graph.
+                if crate::types::nominal_name(ws, None, p0.ty).is_none() {
                     continue;
-                };
+                }
+                let recv = type_key(ws, p0.ty);
                 let Some(ret) = f.return_ty else { continue };
                 let rendered = ws.render(None, ret);
                 if rendered == "()" || rendered.is_empty() {
                     continue;
                 }
                 edges.entry(recv).or_default().push(Edge {
-                    label: f.name.to_string(),
+                    label: bone_core::modules::display_name(f.name.as_str()).to_string(),
                     kind: EdgeKind::Method {
                         takes_args: f.param_decls.len() > 1,
                     },
@@ -557,9 +561,12 @@ pub(crate) fn fields_admitted(ws: &Workspace, frag: &FragmentScope, fields: &[Fi
 /// nominal type (struct/enum, peeling any nullable `?`), else the rendered form
 /// (scalars like `int`). Canonicalizing is what lets traversal follow a `next:
 /// Node?` or `movable: Movable` field edge to the struct keyed by its bare name.
-fn type_key(ws: &Workspace, ty: TyId) -> Ustr {
-    crate::types::nominal_name(ws, None, ty)
-        .unwrap_or_else(|| Ustr::from(ws.render(None, ty).as_str()))
+pub(crate) fn type_key(ws: &Workspace, ty: TyId) -> Ustr {
+    type_key_in_body(ws, None, ty)
+}
+
+pub(crate) fn type_key_in_body(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Ustr {
+    crate::types::nominal_name(ws, bi, ty).unwrap_or_else(|| Ustr::from(ws.render(bi, ty).as_str()))
 }
 
 #[cfg(test)]
@@ -577,10 +584,17 @@ mod search_tests {
             };
             source.push_str(&format!("struct N{level} {{ a: {next}, b: {next} }}\n"));
         }
-        let module = skull_parser::parse_module_clean(&source, Ustr::from("<reach-test>")).unwrap();
+        let mut module =
+            skull_parser::parse_module_clean(&source, Ustr::from("<reach-test>")).unwrap();
+        module.package = Some(skull_parser::PackageTag {
+            id: 1,
+            self_name: "reach_test".to_string(),
+            identity_storage: Default::default(),
+            root: String::new(),
+        });
         let ws = bone_semantic::semantic_passes::semantic_pass(&mut [module]).unwrap();
         let index = ReachabilityIndex::build(&ws);
-        let result = index.paths_to("N0", &["Goal".to_string()], 1, None);
+        let result = index.paths_to("reach_test::N0", &["reach_test::Goal".to_string()], 1, None);
         assert_eq!(
             result
                 .paths

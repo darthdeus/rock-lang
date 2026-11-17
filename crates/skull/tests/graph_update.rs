@@ -14,7 +14,7 @@
 //! is `UpdateResult::reinferred` rather than a hand-written guess at what an
 //! edit touches.
 
-use crate::common::{body_id, stdlib_asts, ws_of_files};
+use crate::common::{body_id, key, stdlib_asts, ws_of_files};
 use std::collections::BTreeSet;
 
 use crate::support::graph_snapshot::{canonical, instance_key};
@@ -36,7 +36,26 @@ const LIB: &str = "lib/helpers.rock";
 /// An instance key without its declaration indices, so an expected set can be
 /// written down and still name the declaration exactly.
 fn short(key: &str) -> String {
-    key.split('#').next().unwrap_or(key).to_string()
+    let key = key.split('#').next().unwrap_or(key);
+    if let Some((prefix, index)) = key.rsplit_once('_') {
+        if let Some((name, digest)) = prefix.rsplit_once('_') {
+            if digest.len() == 8 && digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return format!("{name}_{index}");
+            }
+        }
+    }
+    key.to_string()
+}
+
+fn root_hole_name(ws: &Workspace, name: &str) -> String {
+    let funcs = ws
+        .functions_by_name
+        .get(&key(ws, name))
+        .unwrap_or_else(|| panic!("no declaration named `{name}`"));
+    let declaration = funcs
+        .first()
+        .unwrap_or_else(|| panic!("no function named `{name}`"));
+    skull_mir::mangle::mangle_fn(ws, &ws.module(declaration.0).functions[declaration.1])
 }
 
 fn graph_of(ws: &Workspace) -> InstanceGraph {
@@ -46,13 +65,25 @@ fn graph_of(ws: &Workspace) -> InstanceGraph {
 fn session(main: &str, lib: &str) -> Session {
     Session::new(
         stdlib_asts(),
-        vec![
-            SessionFile::legacy(MAIN, main),
-            SessionFile::legacy(LIB, lib),
-        ],
+        vec![session_file(MAIN, main), session_file(LIB, lib)],
         &NsAliases::default(),
     )
     .expect("session")
+}
+
+fn session_file(path: &str, text: &str) -> SessionFile {
+    SessionFile {
+        path: path.to_string(),
+        text: text.to_string(),
+        dialect: skull_parser::Dialect::V1,
+        package: Some(skull_parser::PackageTag {
+            id: 1,
+            self_name: "graph_update".to_string(),
+            identity_storage: Default::default(),
+            root: String::new(),
+        }),
+        global_policy: skull_parser::GlobalPolicy::Any,
+    }
 }
 
 #[track_caller]
@@ -1224,18 +1255,18 @@ fn other_id<T>(x: T) -> T { return x }
 "#;
     let mut case = Case::new(main, lib);
     assert_eq!(
-        case.ws().functions_by_name[&ustr::Ustr::from("gen_id")].len(),
+        case.ws().functions_by_name[&key(case.ws(), "gen_id")].len(),
         2,
         "the fixture must contain two backend siblings"
     );
     let check = |case: &Case, failures: usize, label: &str| {
-        let gen_hole = &case.graph.uninstantiated_roots["gen_id"];
+        let gen_hole = &case.graph.uninstantiated_roots[&root_hole_name(case.ws(), "gen_id")];
         assert_eq!(gen_hole.always_emitted_sites.len(), failures, "{label}");
         assert!(gen_hole.generic_root, "{label}");
         assert_eq!(gen_hole.instances, 1, "{label}");
         assert_eq!(case.graph.uninstantiated_roots.len(), 4, "{label}");
         assert_eq!(
-            case.graph.uninstantiated_roots["other_id_T"]
+            case.graph.uninstantiated_roots[&root_hole_name(case.ws(), "other_id")]
                 .always_emitted_sites
                 .len(),
             1,
@@ -1287,7 +1318,9 @@ fn root_hole_spans_follow_insertions_and_deletions() {
         ("delete lines", multiline.as_str(), original),
     ] {
         let other_span = |case: &Case| {
-            case.graph.uninstantiated_roots["other_id_T"].always_emitted_sites[0].span
+            case.graph.uninstantiated_roots[&root_hole_name(case.ws(), "other_id")]
+                .always_emitted_sites[0]
+                .span
         };
         let old_other_span = other_span(&case);
         let later_owners: Vec<_> = case
@@ -1337,17 +1370,15 @@ fn mangled_root_holes_count_concrete_instances() {
     let main = "const C: int = takes(gen_id)\nfn zz_start() { let n = gen_id(7) }\n";
     let lib = format!("{FNVALUE_LIB}\ninline(js) fn gen_id<T>(x: T) -> T = \"return x;\"\n");
     let mut case = Case::new(main, &lib);
-    assert_eq!(case.graph.uninstantiated_roots["gen_id_T"].instances, 1);
+    let gen_id = root_hole_name(case.ws(), "gen_id");
+    assert_eq!(case.graph.uninstantiated_roots[&gen_id].instances, 1);
     let two_instances = main.replace(
         "let n = gen_id(7)",
         "let n = gen_id(7)\nlet s = gen_id(\"s\")",
     );
     for (source, expected) in [(two_instances.as_str(), 2), (main, 1)] {
         case.edit_keeping_roots(MAIN, source);
-        assert_eq!(
-            case.graph.uninstantiated_roots["gen_id_T"].instances,
-            expected
-        );
+        assert_eq!(case.graph.uninstantiated_roots[&gen_id].instances, expected);
         case.assert_matches_fresh("mangled root-hole instance count changed");
     }
 }

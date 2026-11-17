@@ -239,9 +239,9 @@ fn vec_global_any_and_nullable_elements() {
     print("{vec_len(items)} {items[1]}")
 
     let mixed: [any] = []
-    vec_push(mixed, 1 :: any)
-    vec_push(mixed, "two" :: any)
-    vec_push(mixed, true :: any)
+    vec_push(mixed, (1 : any))
+    vec_push(mixed, ("two" : any))
+    vec_push(mixed, (true : any))
     print(vec_len(mixed))
 
     let nullable_ints: [int?] = []

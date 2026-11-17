@@ -19,7 +19,6 @@ pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> Callees {
 
     let ws = gamma.workspace;
     match *family {
-        CallFamily::Legacy(_) => member_overloads(gamma, name, None),
         CallFamily::Resolved { key, owner } => member_overloads(gamma, key, owner),
         // A merged family: every member's overloads, as lowering recorded
         // them for the module the call was lowered in.
@@ -53,9 +52,8 @@ pub(crate) fn fn_value_family(c: BodyCtx, e: Idx<Expr>, name: Ustr) -> CallFamil
 }
 
 /// The overloads registered under a member's key, narrowed to the files of
-/// the view that owns it (`FamilyMember::owner`): a legacy key is shared by
-/// every legacy file defining the name, and a v1 fragment reaches only the
-/// std view's or one provider's. The key is a dependency either way, so an
+/// the view that owns it (`FamilyMember::owner`). A fragment reaches only
+/// the std view's or one provider's overloads. The key is a dependency either way, so an
 /// overload added under it re-infers this caller.
 fn member_overloads(gamma: &Gamma, key: Ustr, owner: Option<PackageId>) -> Callees {
     gamma.dep_acc.borrow_mut().insert(key);
@@ -284,7 +282,12 @@ fn render_candidate_sig(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> Str
         .return_ty
         .map(|t| format!(" -> {}", gamma.workspace.render(None, t)))
         .unwrap_or_default();
-    format!("{}({}){}", f.name, params, ret)
+    format!(
+        "{}({}){}",
+        bone_core::modules::display_name(f.name.as_str()),
+        params,
+        ret
+    )
 }
 
 /// Backend-selection rank: a lower rank is the preferred representative when a
@@ -301,13 +304,16 @@ fn backend_rank(b: skull_parser::FnBackend) -> u8 {
 }
 
 /// Where a tied candidate comes from, when a tie spans unrelated definitions
-/// (a merged legacy family): the v1 DefKey, or the legacy defining file.
+/// (a merged family): the DefKey, or the compiler-owned defining file.
 fn candidate_origin(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> String {
     let f = &gamma.workspace.module(mid).functions[fid];
     if gamma.workspace.defs.contains_key(&f.name) {
         format!("v1 definition {}", f.name)
     } else {
-        format!("legacy definition in {}", gamma.workspace.module(mid).file)
+        format!(
+            "compiler-owned definition in {}",
+            gamma.workspace.module(mid).file
+        )
     }
 }
 
@@ -469,7 +475,12 @@ pub(crate) fn select_overload_with_generics(
         }
     }
 
-    if best_set.len() > 1 {
+    if best_set.len() > 1
+        && !args
+            .iter()
+            .any(|arg| ty_has_generic_hole(gamma, arg_ty[arg]))
+        && recv_ty.is_none_or(|ty| !ty_has_generic_hole(gamma, ty))
+    {
         keep_nearest_tier(gamma, family, &mut best_set);
     }
 
@@ -519,7 +530,9 @@ pub(crate) fn select_overload_with_generics(
                 )
             });
             if !hidden_fit && bound_fail.is_none() && recv_ty.is_none() && generic_args.is_empty() {
-                if let Some((symbol, true)) = bone_core::hir::operator_entry(name.as_str()) {
+                if let Some((symbol, true)) = bone_core::hir::operator_entry(
+                    name.rsplit("::").next().unwrap_or(name.as_str()),
+                ) {
                     let actuals: SmallVec<[TyId; 2]> = args
                         .iter()
                         .map(|arg| resolve(gamma, arg_ty[arg], span))
@@ -584,6 +597,7 @@ pub(crate) fn select_overload_with_generics(
                 .iter()
                 .map(|&(mid, fid)| format!("  {}", render_candidate_sig(gamma, mid, fid)))
                 .join("\n");
+            let name = bone_core::modules::display_name(name.as_str());
             Err(SelectError::NoFit(CompilerError::new_with_label(
                 span,
                 if hidden_fit {
@@ -1506,7 +1520,7 @@ pub(crate) fn resolve_named_call_inner(
             return Err(unary_operator_error(gamma, name, operand, span));
         }
 
-        // A v1 DefKey renders as its declared name; legacy keys
+        // A v1 DefKey renders as its declared name; bare keys
         // ARE the name. A v1 name whose nearest binding is a value shadows
         // every callable of that name in a lower tier, so say
         // what it binds to.
@@ -1631,7 +1645,12 @@ pub(crate) fn resolve_named_call_inner(
                     }
                 }
 
-                if name.as_str().starts_with("__op_") {
+                if name
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(name.as_str())
+                    .starts_with("__op_")
+                {
                     if let Some(&first) = arg_tys.first() {
                         if arg_tys.iter().all(|&t| {
                             matches!(*gamma.get(t), TypeExpr::Generic(..) | TypeExpr::Infer(..))
@@ -1954,6 +1973,10 @@ pub(crate) fn call_fn_value(
     span: Span,
 ) -> Result<TyId, CompilerError> {
     let fn_ty = resolve(gamma, fn_ty, span);
+
+    if matches!(gamma.get(fn_ty), TypeExpr::Builtin(BuiltinTy::Error)) {
+        return Ok(fn_ty);
+    }
 
     let (params, ret) = match *gamma.get(fn_ty) {
         TypeExpr::Function { params, ret } => (params, ret),

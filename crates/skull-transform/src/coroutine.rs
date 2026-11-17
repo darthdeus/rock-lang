@@ -785,7 +785,8 @@ pub fn transform_coroutine(
         }
         match channel {
             Some(ch) => {
-                let _ = write!(canon, "ch:{}:{}", ch.name(), ch.tuple_width());
+                let name = bone_core::modules::artifact_name(ch.name().as_str());
+                let _ = write!(canon, "ch:{}:{}", name, ch.tuple_width());
                 for rf in ch.record_fields() {
                     let _ = write!(canon, ":{rf}");
                 }
@@ -859,7 +860,7 @@ pub fn transform_coroutine(
             Inst::Const(Lit::Str(ustr::Ustr::from(
                 format!(
                     "coroutine killed: frame layout changed by hot reload ({})",
-                    func.name
+                    bone_core::modules::display_name(func.name.as_str())
                 )
                 .as_str(),
             ))),

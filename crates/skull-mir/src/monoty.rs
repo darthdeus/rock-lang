@@ -98,9 +98,10 @@ pub enum MonoTy {
 pub(crate) enum NominalSpelling {
     /// The DefKey, for a stable identity.
     Key,
+    /// Serialized artifact identity, preserving standalone root spellings.
+    Artifact,
     /// The DefKey's identifier form (`<Name>_<digest>`), for an emitted symbol.
-    /// A legacy key has no prefix and passes through unchanged, so legacy
-    /// symbols are byte-identical under either spelling.
+    /// Bare compiler-owned keys pass through unchanged.
     Symbol,
 }
 
@@ -212,11 +213,18 @@ impl MonoTy {
     /// This is also the encoding a specialized body's emitted symbol is built
     /// from ([`crate::mangle::spec_fn_name`]), so identity and symbol cannot
     /// drift apart -- one traversal, with [`NominalSpelling`] the only thing
-    /// the two roles disagree about.
+    /// these roles disagree about.
     pub fn canonical(&self) -> String {
         let mut s = String::new();
         self.write_canonical(&mut s);
         s
+    }
+
+    /// Serialized type spelling, retaining standalone root compatibility.
+    pub fn artifact_key(&self) -> String {
+        let mut key = String::new();
+        self.write_canonical_as(&mut key, NominalSpelling::Artifact);
+        key
     }
 
     pub(crate) fn write_canonical(&self, out: &mut String) {
@@ -268,6 +276,9 @@ impl MonoTy {
                         // self-delimiting under either spelling.
                         let spelled = match spelling {
                             NominalSpelling::Key => std::borrow::Cow::Borrowed(name.as_str()),
+                            NominalSpelling::Artifact => std::borrow::Cow::Borrowed(
+                                bone_core::modules::artifact_name(name.as_str()),
+                            ),
                             NominalSpelling::Symbol => crate::mangle::ident_of_key(name.as_str()),
                         };
                         out.push('n');

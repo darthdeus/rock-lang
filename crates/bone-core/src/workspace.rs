@@ -37,7 +37,7 @@ pub struct Workspace {
     pub enums_by_name: FxHashMap<Ustr, EnumId>,
     pub newtypes_by_name: FxHashMap<Ustr, NewtypeId>,
     /// Generic parameters collected before cross-module type lowering.
-    /// Keys are canonical DefKeys in v1 fragments and bare names in legacy files.
+    /// Keys are canonical DefKeys for user items and bare names for compiler-owned items.
     /// The first defining module owns an entry; re-lowering refreshes its own.
     pub type_generics: FxHashMap<Ustr, TypeGenerics>,
     pub interface_names: FxHashSet<Ustr>,
@@ -84,15 +84,13 @@ pub struct Workspace {
     /// body that re-lowers into a lowering error is only visible here.
     pub relowered_body_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 
-    /// Modules-v1 namespace scope. Empty for legacy-only
-    /// workspaces — every legacy path behaves exactly as before when `ns`
-    /// has no packages and `fragment_scopes` is empty.
+    /// Package namespace scope, including implicit standalone packages.
     pub ns: crate::modules::NsTree,
     /// Per-file v1 scope facts: package, logical module path, and the
     /// fragment's own imports. Keyed by file id (`Module.file`).
     pub fragment_scopes: FxHashMap<Ustr, crate::modules::FragmentScope>,
-    /// Canonical definition metadata keyed by DefKey. Legacy
-    /// definitions keep their bare-name keys and gain no entry.
+    /// Canonical definition metadata keyed by DefKey. Compiler-owned
+    /// definitions can keep bare-name keys without metadata.
     pub defs: FxHashMap<Ustr, crate::modules::DefMeta>,
 
     /// Resolved compile-time inputs, set by the host before emission. Declared
@@ -134,7 +132,7 @@ pub struct ComptimeInputs {
     /// Effective declared build channel for package metadata. Empty means a
     /// synthetic/type-only workspace did not come through CLI resolution.
     pub channel: String,
-    /// Source-language mode of the root package ("legacy" or "v1").
+    /// Source-language mode of the root package ("v1").
     /// Part of the Artifact fingerprint: the same sources under different
     /// language modes are different builds.
     pub modules_mode: String,
@@ -256,7 +254,7 @@ impl Workspace {
     }
 
     /// The per-declaration visibility records for a v1 callable family.
-    /// Legacy and compiler-owned callable keys have no namespace member table
+    /// Compiler-owned callable keys have no namespace member table
     /// and return `None`, which means their existing visibility remains public.
     pub fn callable_family_members(&self, key: Ustr) -> Option<&[crate::modules::CallableMember]> {
         self.callable_members_of(self.defs.get(&key)?)
@@ -298,7 +296,7 @@ impl Workspace {
     }
 
     /// Whether a lowered callable member is admitted at an access site.
-    /// Callable keys without v1 member metadata are legacy or compiler-owned
+    /// Callable keys without v1 member metadata are compiler-owned
     /// families and retain their existing public behavior.
     pub fn callable_member_admits(
         &self,
@@ -477,7 +475,7 @@ impl Workspace {
     /// (the family key) and its declared parameter types. Declarations with
     /// equal keys and distinct backends are one logical function. Return type
     /// is excluded because overload resolution keys on parameters. The name
-    /// matters for a merged legacy family, whose members are unrelated
+    /// matters for a merged compiler-owned family, whose members are unrelated
     /// definitions: identical signatures there are not backend siblings
     /// but a tie.
     pub fn backend_variant_key(&self, mid: ModuleId, fid: Idx<Function>) -> (Ustr, Ustr) {
@@ -657,6 +655,7 @@ impl Workspace {
                     }
 
                     hir::TypeCtor::Nominal(name) => {
+                        let name = crate::modules::display_name(name.as_str());
                         if params.is_empty() {
                             name.to_string()
                         } else {

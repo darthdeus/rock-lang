@@ -23,7 +23,7 @@ fn stale_body_generation_panics_at_type_at() {
         .module(mid)
         .functions
         .iter()
-        .find(|(_, f)| f.name.as_str() == "f")
+        .find(|(_, f)| f.name.as_str().rsplit("::").next() == Some("f"))
         .expect("fn f exists");
 
     // the offset of `a` in the body (the let initializer's variable use)

@@ -96,9 +96,8 @@ pub fn production_only(
     Ok(sources.retaining(&keep))
 }
 
-/// Scan a file's leading `//!` directives for `modules: v1`. Standalone
-/// test/script sources declare their dialect explicitly; package files take
-/// theirs from the manifest via the package graph. Only the first
+/// Scan a file's leading `//!` directives for `modules: v1`. Package files
+/// take their dialect from the manifest via the package graph. Only the first
 /// ten lines count, mirroring `parse_lib_directive`.
 pub fn parse_modules_directive(contents: &str) -> Result<rock_core::source_code::Dialect> {
     for line in contents.lines().take(10) {
@@ -110,14 +109,17 @@ pub fn parse_modules_directive(contents: &str) -> Result<rock_core::source_code:
         if let Some(value) = rest.strip_prefix("modules:") {
             return match value.trim() {
                 "v1" => Ok(rock_core::source_code::Dialect::V1),
-                "legacy" | "" => Ok(rock_core::source_code::Dialect::Legacy),
+                "legacy" => bail!(
+                    "`//! modules: legacy` has been removed; migrate this source to modules v1 and remove the directive"
+                ),
+                "" => Ok(rock_core::source_code::Dialect::V1),
                 other => {
-                    bail!("unknown `//! modules:` directive value `{other}` (known: legacy, v1)")
+                    bail!("unknown `//! modules:` directive value `{other}` (known: v1)")
                 }
             };
         }
     }
-    Ok(rock_core::source_code::Dialect::Legacy)
+    Ok(rock_core::source_code::Dialect::V1)
 }
 
 // The preprocessor always runs (to extract is_script/is_test/used_packages
@@ -133,8 +135,7 @@ fn preprocess_content(contents: &str, apply: bool) -> Result<PreprocessedSource>
 }
 
 fn create_source_file(file: FileContents, source: PreprocessedSource) -> Result<SourceFile> {
-    // A `//! modules: v1` directive opts a standalone source into v1. Package
-    // loaders overwrite this with the manifest/graph fact afterwards.
+    // Package loaders overwrite the standalone default with the graph fact.
     let dialect = parse_modules_directive(&source.content)?;
     Ok(SourceFile {
         file,
@@ -287,5 +288,29 @@ mod tests {
         fs_err::write(&path, "fn main() {}\n").unwrap();
         let err = super::source_file_new(&path).expect_err("non-UTF-8 path must be rejected");
         assert!(format!("{err:#}").contains("not valid UTF-8"), "{err:#}");
+    }
+}
+
+#[cfg(test)]
+mod modules_directive_tests {
+    use super::parse_modules_directive;
+    use rock_core::source_code::Dialect;
+
+    #[test]
+    fn module_directive_defaults_to_v1_and_rejects_legacy() {
+        assert_eq!(
+            parse_modules_directive("fn main() {}\n").unwrap(),
+            Dialect::V1
+        );
+        assert_eq!(
+            parse_modules_directive("//! modules: v1\nfn main() {}\n").unwrap(),
+            Dialect::V1
+        );
+        let error = parse_modules_directive("//! modules: legacy\nfn main() {}\n")
+            .expect_err("the removed legacy dialect must be rejected");
+        assert!(
+            format!("{error:#}").contains("migrate"),
+            "the error must explain the migration: {error:#}"
+        );
     }
 }

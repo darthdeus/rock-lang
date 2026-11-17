@@ -23,15 +23,14 @@
 //! live in-tree structs (BloomBlurU, HeatShimmerU, SpriteFragU) disagree with
 //! their C layout, so each has a case below carrying both numbers.
 
-use crate::common::checked_ws_of;
-use ustr::Ustr;
+use crate::common::{checked_ws_of, key};
 
 use skull_mir::gpu_layout::{LeafStore, UniformBlockPlan, WireKind, WireView, uniform_block};
 use skull_mir::lower::RepArena;
 
 fn plan_of(src: &str, struct_name: &str) -> UniformBlockPlan {
     let ws = checked_ws_of(src);
-    uniform_block(&ws, Ustr::from(struct_name)).expect("block layout must compute")
+    uniform_block(&ws, key(&ws, struct_name)).expect("block layout must compute")
 }
 
 /// `(name, offset)` per member, the shape most cases assert.
@@ -194,14 +193,14 @@ fn ui_sdf_bar_coincides_with_its_c_layout_in_offsets_but_not_size() {
 #[test]
 fn a_plain_struct_is_not_a_binding_group() {
     let ws = checked_ws_of("struct NotValue { a: float }");
-    let e = uniform_block(&ws, Ustr::from("NotValue")).expect_err("must reject");
+    let e = uniform_block(&ws, key(&ws, "NotValue")).expect_err("must reject");
     assert!(e.message.contains("value"), "got {}", e.message);
 }
 
 #[test]
 fn an_empty_group_binds_nothing() {
     let ws = checked_ws_of("value Empty {}");
-    let e = uniform_block(&ws, Ustr::from("Empty")).expect_err("must reject");
+    let e = uniform_block(&ws, key(&ws, "Empty")).expect_err("must reject");
     // Not a bare is_err(): a lookup failure would satisfy that too, and this
     // case is about the struct being FOUND and having nothing in it.
     assert!(e.message.contains("no fields"), "got {}", e.message);
@@ -214,7 +213,7 @@ fn an_empty_group_binds_nothing() {
 #[test]
 fn a_nested_user_struct_is_rejected_until_a_consumer_needs_it() {
     let ws = checked_ws_of("value Inner { a: float }\nvalue Outer { i: Inner, b: float }");
-    let e = uniform_block(&ws, Ustr::from("Outer")).expect_err("must reject");
+    let e = uniform_block(&ws, key(&ws, "Outer")).expect_err("must reject");
     assert!(
         e.message.contains("Inner"),
         "the message must name the field's type: {}",
@@ -271,7 +270,7 @@ fn the_wire_and_value_walkers_agree_on_every_shape() {
         ("value D { flag: bool, count: int, scale: float }", "D"),
     ] {
         let ws = checked_ws_of(src);
-        let n = Ustr::from(name);
+        let n = key(&ws, name);
         let plan = skull_mir::lower::uniform_block_checked(&ws, n)
             .unwrap_or_else(|e| panic!("`{name}` must pass the agreement check: {e}"));
         assert_eq!(
@@ -484,7 +483,7 @@ fn a_block_at_the_portable_limit_is_accepted() {
 #[test]
 fn a_block_over_the_portable_limit_is_rejected() {
     let ws = checked_ws_of(&mat4_block_src(257));
-    let e = uniform_block(&ws, Ustr::from("BigU"))
+    let e = uniform_block(&ws, key(&ws, "BigU"))
         .expect_err("16448 bytes exceeds the OpenGL guarantee of 16384 and must reject");
     let m = e.message.clone();
     assert!(
@@ -502,7 +501,7 @@ fn a_block_over_the_portable_limit_is_rejected() {
 #[test]
 fn a_sampler_in_a_uniform_group_names_the_fix() {
     let ws = checked_ws_of("value BadU { tint: Vec4, tex: Sampler2D }\nfn main() {}");
-    let msg = skull_mir::gpu_layout::uniform_group_members(&ws, ustr::Ustr::from("BadU"))
+    let msg = skull_mir::gpu_layout::uniform_group_members(&ws, key(&ws, "BadU"))
         .expect_err("a sampler field must reject")
         .message;
     assert!(
@@ -514,7 +513,7 @@ fn a_sampler_in_a_uniform_group_names_the_fix() {
     // above is about the field and not about the group being unreadable.
     let ok = checked_ws_of("value GoodU { tint: Vec4 }\nfn main() {}");
     assert_eq!(
-        skull_mir::gpu_layout::uniform_group_members(&ok, ustr::Ustr::from("GoodU"))
+        skull_mir::gpu_layout::uniform_group_members(&ok, key(&ok, "GoodU"))
             .expect("a scalar group classifies")
             .len(),
         1

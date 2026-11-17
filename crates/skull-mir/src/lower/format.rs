@@ -12,6 +12,10 @@ use bone_core::hir::VariantPayload;
 /// How an absent nullable payload prints: Rock's spelling, not the backend's.
 const NULL_TEXT: &str = "null";
 
+fn source_name(name: Ustr) -> String {
+    bone_core::modules::display_name(name.as_str()).to_string()
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum FmtNode {
     /// A scalar, a string or a payload-free enum, with its logical type.
@@ -151,13 +155,13 @@ fn type_label(ty: &MonoTy) -> String {
         MonoTy::App {
             ctor: MonoCtor::Nominal(n),
             params,
-        } if params.is_empty() => n.to_string(),
+        } if params.is_empty() => source_name(*n),
         MonoTy::App {
             ctor: MonoCtor::Nominal(n),
             params,
         } => format!(
             "{}<{}>",
-            n,
+            source_name(*n),
             params.iter().map(type_label).collect::<Vec<_>>().join(", ")
         ),
         other => other.render(),
@@ -223,7 +227,7 @@ fn format_tree_in(
                 });
             }
             if visiting.contains(&name) {
-                return Err(format!("`{name}` is recursive"));
+                return Err(format!("`{}` is recursive", source_name(name)));
             }
             visiting.push(name);
             let node = nominal_tree(ws, name, params, visiting);
@@ -261,13 +265,13 @@ fn nominal_tree(
 ) -> Result<FmtNode, String> {
     let field_tree = |ty: TyId, subst: &MonoSubst, visiting: &mut Vec<Ustr>| {
         let ty = convert_decl(ws, ty, subst)
-            .map_err(|r| format!("a field of `{name}` has no type ({r:?})"))?;
+            .map_err(|r| format!("a field of `{}` has no type ({r:?})", source_name(name)))?;
         format_tree_in(ws, &ty, visiting)
     };
     if let Some(nid) = ws.newtypes_by_name.get(&name) {
         let def = &ws.module(nid.module).newtypes[nid.def];
-        let subst =
-            nominal_subst(ws, &def.generics, params).ok_or_else(|| format!("`{name}` arity"))?;
+        let subst = nominal_subst(ws, &def.generics, params)
+            .ok_or_else(|| format!("`{}` arity", source_name(name)))?;
         return Ok(FmtNode::Newtype {
             name,
             inner: Box::new(field_tree(def.wrapped, &subst, visiting)?),
@@ -285,8 +289,8 @@ fn nominal_tree(
             });
         }
         let def = &ws.module(eid.module).enums[eid.def];
-        let subst =
-            nominal_subst(ws, &def.generics, params).ok_or_else(|| format!("`{name}` arity"))?;
+        let subst = nominal_subst(ws, &def.generics, params)
+            .ok_or_else(|| format!("`{}` arity", source_name(name)))?;
         let mut variants = Vec::with_capacity(def.variants.len());
         for v in &def.variants {
             let payload = match &v.payload {
@@ -313,10 +317,10 @@ fn nominal_tree(
     if let Some(sid) = ws.struct_by_name.get(&name) {
         let def = &ws.module(sid.module).structs[sid.def];
         if !def.is_value {
-            return Err(format!("`{name}` is an identity struct"));
+            return Err(format!("`{}` is an identity struct", source_name(name)));
         }
-        let subst =
-            nominal_subst(ws, &def.generics, params).ok_or_else(|| format!("`{name}` arity"))?;
+        let subst = nominal_subst(ws, &def.generics, params)
+            .ok_or_else(|| format!("`{}` arity", source_name(name)))?;
         let fields = def
             .fields
             .iter()
@@ -324,7 +328,10 @@ fn nominal_tree(
             .collect::<Result<_, String>>()?;
         return Ok(FmtNode::Record { name, fields });
     }
-    Err(format!("`{name}` has no structural rendering"))
+    Err(format!(
+        "`{}` has no structural rendering",
+        source_name(name)
+    ))
 }
 
 impl<'a> Builder<'a> {
@@ -369,6 +376,7 @@ impl<'a> Builder<'a> {
                 self.render_enum(node, *name, path, &scrut)
             }
             FmtNode::Record { name, fields } => {
+                let display_name = source_name(*name);
                 let parts = self.record_parts(*name, fields.iter().map(|(f, _)| *f), repr)?;
                 let mut pieces = Vec::with_capacity(fields.len());
                 for (i, ((field, child), part)) in fields.iter().zip(parts).enumerate() {
@@ -379,10 +387,10 @@ impl<'a> Builder<'a> {
                 }
                 if pieces.is_empty() {
                     return Ok(self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(
-                        format!("{name} {{}}").as_str(),
+                        format!("{display_name} {{}}").as_str(),
                     )))));
                 }
-                Ok(self.join_pieces(&format!("{name} {{ "), pieces, " }"))
+                Ok(self.join_pieces(&format!("{display_name} {{ "), pieces, " }"))
             }
             FmtNode::Handle {
                 name,
@@ -400,10 +408,15 @@ impl<'a> Builder<'a> {
                 Ok(self.join_pieces(&format!("{label}("), pieces, ")"))
             }
             FmtNode::Newtype { name, inner } => {
+                let display_name = source_name(*name);
                 let mut child_path = path;
                 child_path.push(0);
                 let rendered = self.render_fmt(inner, child_path, repr)?;
-                Ok(self.join_pieces(&format!("{name}("), vec![(String::new(), rendered)], ")"))
+                Ok(self.join_pieces(
+                    &format!("{display_name}("),
+                    vec![(String::new(), rendered)],
+                    ")",
+                ))
             }
         }
     }
@@ -480,11 +493,12 @@ impl<'a> Builder<'a> {
         wanted: impl Iterator<Item = Ustr>,
         repr: ValueRepr,
     ) -> Result<Vec<ValueRepr>, CompilerError> {
-        let sid = *self
-            .ws
-            .struct_by_name
-            .get(&name)
-            .ok_or_else(|| gap(format!("formatted record `{name}` has no definition")))?;
+        let sid = *self.ws.struct_by_name.get(&name).ok_or_else(|| {
+            gap(format!(
+                "formatted record `{}` has no definition",
+                source_name(name)
+            ))
+        })?;
         let declared: Vec<Ustr> = self.ws.module(sid.module).structs[sid.def]
             .fields
             .iter()
@@ -509,7 +523,8 @@ impl<'a> Builder<'a> {
             } => {
                 if parts.len() != declared.len() {
                     return Err(gap(format!(
-                        "formatted record `{name}` has a mismatched group"
+                        "formatted record `{}` has a mismatched group",
+                        source_name(name)
                     )));
                 }
                 wanted
@@ -518,7 +533,9 @@ impl<'a> Builder<'a> {
                             .iter()
                             .position(|d| *d == w)
                             .map(|i| parts[i].clone())
-                            .ok_or_else(|| gap(format!("`{name}` has no field `{w}`")))
+                            .ok_or_else(|| {
+                                gap(format!("`{}` has no field `{w}`", source_name(name)))
+                            })
                     })
                     .collect()
             }
@@ -543,8 +560,12 @@ impl<'a> Builder<'a> {
         let FmtNode::Enum { variants, .. } = node else {
             return Err(gap("render_enum on a non-enum format node"));
         };
-        let plan = EnumPlan::for_name(self.ws, name)
-            .ok_or_else(|| gap(format!("formatted enum `{name}` has no plan")))?;
+        let plan = EnumPlan::for_name(self.ws, name).ok_or_else(|| {
+            gap(format!(
+                "formatted enum `{}` has no plan",
+                source_name(name)
+            ))
+        })?;
         let cdata = plan.cdata().is_some();
         let flat_shape = plan.flat().cloned();
         // A value constructed in place has a constant tag. Only its arm is
@@ -565,7 +586,7 @@ impl<'a> Builder<'a> {
             }
             let fail = self.f.new_block();
             self.test_tag(scrut, variant.name, Some(name), fail);
-            let head = format!("{name}::{}", variant.name);
+            let head = format!("{}::{}", source_name(name), variant.name);
             let rendered = match &variant.payload {
                 FmtPayload::Unit => {
                     self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(head.as_str()))))

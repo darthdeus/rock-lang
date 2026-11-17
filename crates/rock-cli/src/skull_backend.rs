@@ -1807,9 +1807,13 @@ pub(crate) fn skull_shader(
     let roots: Vec<String> = roots
         .iter()
         .map(|name| {
-            bone_semantic::lower::resolve::resolve_bare(&ws, fragment, ustr::Ustr::from(name))
-                .map(|resolved| resolved.key.to_string())
-                .map_err(|error| anyhow::anyhow!("rock shader: root `{name}`: {error}"))
+            bone_semantic::lower::resolve::resolve_bare(
+                &ws,
+                fragment.expect("standalone fragment scope"),
+                ustr::Ustr::from(name),
+            )
+            .map(|resolved| resolved.key.to_string())
+            .map_err(|error| anyhow::anyhow!("rock shader: root `{name}`: {error}"))
         })
         .collect::<Result<_>>()?;
 
@@ -3726,7 +3730,12 @@ impl IncrementalProject {
             let drifted = skull::shape_diff(&self.shape_hashes, &new_shapes);
             if !drifted.is_empty() {
                 self.shape_hashes = new_shapes;
-                return Ok(SkullReload::ShapeChanged { types: drifted });
+                return Ok(SkullReload::ShapeChanged {
+                    types: drifted
+                        .into_iter()
+                        .map(|name| bone_core::modules::display_name(&name).to_string())
+                        .collect(),
+                });
             }
             let lua = {
                 let ws = self.project.workspace();

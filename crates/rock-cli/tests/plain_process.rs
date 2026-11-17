@@ -741,7 +741,7 @@ fn lint_union_reports_consumer_discovery_failures() {
     write(
         root.path(),
         "library/lib.rock",
-        "fn answer() -> int { 42 }\n",
+        "pub fn answer() -> int { 42 }\n",
     );
     write(
         root.path(),
@@ -751,7 +751,7 @@ fn lint_union_reports_consumer_discovery_failures() {
     write(
         root.path(),
         "app/main.rock",
-        "fn main() { print(answer()) }\n",
+        "use library::answer; fn main() { print(answer()) }\n",
     );
     let args = ["lint", "--union", "library", "--consumers", "."];
     let valid = invoke(root.path(), &args);
@@ -1187,7 +1187,11 @@ registration_functions = []
         assert!(output.status.success(), "{}", text(&output));
         assert_mentions(
             &output,
-            "production Sample action `DO_MOVE` has no production caller",
+            if path == "game" {
+                "production Sample action `sample::DO_MOVE` has no production caller"
+            } else {
+                "production Sample action `DO_MOVE` has no production caller"
+            },
         );
     }
     let default = invoke(root.path(), &["lint", "game"]);

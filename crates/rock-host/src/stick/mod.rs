@@ -6,10 +6,8 @@ use std::sync::{Mutex, OnceLock};
 pub mod build_vars;
 pub mod graph;
 
-/// The `[language]` manifest table. Absent, or `modules = "legacy"`, keeps
-/// today's flat compilation behavior; `modules = "v1"` opts the package into
-/// the modules-v1 grammar and scoping rules. Any other value is a load error
-/// rather than a silent legacy fallback.
+/// The `[language]` manifest table. Packages use modules v1; the `modules`
+/// key accepts only the explicit value `"v1"`. Legacy manifests must migrate.
 ///
 /// `globals` declares whether the package may own mutable global storage.
 /// Absent = `"any"`; `"none"` is the simulation-package boundary from R5.
@@ -28,7 +26,7 @@ pub struct LanguageConfig {
 impl Default for LanguageConfig {
     fn default() -> Self {
         Self {
-            modules: rock_core::source_code::Dialect::Legacy,
+            modules: rock_core::source_code::Dialect::V1,
             globals: rock_core::source_code::GlobalPolicy::Any,
             identity_storage: rock_core::source_code::IdentityStorage::Enforced,
         }
@@ -110,7 +108,7 @@ impl<'de> serde::Deserialize<'de> for LanguageConfig {
                 self,
                 mut map: A,
             ) -> Result<LanguageConfig, A::Error> {
-                let mut modules = rock_core::source_code::Dialect::Legacy;
+                let mut modules = rock_core::source_code::Dialect::V1;
                 let mut globals = rock_core::source_code::GlobalPolicy::Any;
                 let mut identity_storage = rock_core::source_code::IdentityStorage::Enforced;
                 while let Some(key) = map.next_key::<String>()? {
@@ -118,11 +116,15 @@ impl<'de> serde::Deserialize<'de> for LanguageConfig {
                         "modules" => {
                             let value = map.next_value::<String>()?;
                             modules = match value.as_str() {
-                                "legacy" => rock_core::source_code::Dialect::Legacy,
                                 "v1" => rock_core::source_code::Dialect::V1,
+                                "legacy" => {
+                                    return Err(serde::de::Error::custom(
+                                        "`[language] modules = \"legacy\"` has been removed; migrate this package to modules v1",
+                                    ));
+                                }
                                 other => {
                                     return Err(serde::de::Error::custom(format!(
-                                        "unknown `[language] modules` value `{other}`; known values: \"legacy\", \"v1\""
+                                        "unknown `[language] modules` value `{other}`; known values: \"v1\""
                                     )));
                                 }
                             };
@@ -181,7 +183,7 @@ pub struct StickConfig {
     /// Project-owned ambient inputs included in sim timing identities.
     pub sim: Option<SimConfig>,
     pub lint: Option<LintConfig>,
-    /// Source-language selection for this package. `None` = legacy.
+    /// Source-language selection for this package. `None` = modules v1.
     pub language: Option<LanguageConfig>,
     pub dependencies: HashMap<String, Dependency>,
     /// Optional implementation directories that retain this package's owner.
@@ -284,12 +286,12 @@ impl StickConfig {
             .unwrap_or_default()
     }
 
-    /// This package's source dialect. Missing `[language]` is legacy.
+    /// This package's source dialect. Missing `[language]` is modules v1.
     pub fn dialect(&self) -> rock_core::source_code::Dialect {
         self.language
             .as_ref()
             .map(|l| l.modules)
-            .unwrap_or(rock_core::source_code::Dialect::Legacy)
+            .unwrap_or(rock_core::source_code::Dialect::V1)
     }
 }
 
@@ -1271,6 +1273,10 @@ mod tests {
                 ["unknown `[language] modules` value", "`v2`"],
             ),
             (
+                "[language]\nmodules = \"legacy\"\n",
+                ["has been removed", "migrate"],
+            ),
+            (
                 "[dependencies]\nlib = { path = \"../lib\", allow_legacy = true }\n",
                 ["unknown key `allow_legacy`", "in dependency"],
             ),
@@ -1324,17 +1330,8 @@ mod tests {
 
     #[test]
     fn language_modules_select_the_dialect() {
-        for (body, dialect) in [
-            ("", rock_core::source_code::Dialect::Legacy),
-            (
-                "[language]\nmodules = \"legacy\"\n",
-                rock_core::source_code::Dialect::Legacy,
-            ),
-            (
-                "[language]\nmodules = \"v1\"\n",
-                rock_core::source_code::Dialect::V1,
-            ),
-        ] {
+        for body in ["", "[language]\nmodules = \"v1\"\n"] {
+            let dialect = rock_core::source_code::Dialect::V1;
             assert_eq!(manifest(body).unwrap().dialect(), dialect, "{body}");
         }
     }

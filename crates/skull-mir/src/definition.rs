@@ -430,7 +430,9 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
                         module: module.id,
                         func: fid,
                     })),
-                    diagnostic_name: function.name,
+                    diagnostic_name: Ustr::from(bone_core::modules::display_name(
+                        function.name.as_str(),
+                    )),
                     declaration_ordinal: ordinal,
                 });
                 ordinal += 1;
@@ -449,12 +451,19 @@ mod tests {
     use bone_semantic::semantic_passes::semantic_pass;
 
     fn workspace(sources: &[(&str, &str)]) -> Workspace {
-        let mut modules = sources
+        let mut modules = rock_stdlib::stdlib_files()
             .iter()
-            .map(|(file, src)| {
-                skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse")
+            .map(|file| {
+                skull_parser::parse_module_clean(
+                    file.contents,
+                    Ustr::from(rock_stdlib::stdlib_file_id(file.name).as_str()),
+                )
+                .expect("stdlib parse")
             })
             .collect::<Vec<_>>();
+        modules.extend(sources.iter().map(|(file, src)| {
+            skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse")
+        }));
         semantic_pass(&mut modules).expect("semantic")
     }
 
@@ -480,7 +489,10 @@ mod tests {
             vec![("widgets", "alpha"), ("widgets", "beta")]
         );
         assert_ne!(plan.entries[0].identity, plan.entries[1].identity);
-        assert!(plan.entries[0].diagnostic_name == Ustr::from("make_alpha"));
+        assert_eq!(
+            crate::mangle::declared_name(plan.entries[0].diagnostic_name.as_str()),
+            "make_alpha"
+        );
     }
 
     #[test]
@@ -507,13 +519,6 @@ mod tests {
     }
 
     const TYPED_PREFIX: &str = r#"
-        struct ArtifactDefinition<T> {
-            catalog: string,
-            key: string,
-            name: string,
-            ordinal: int,
-            definition: T,
-        }
         struct WidgetDef { value: int }
     "#;
 

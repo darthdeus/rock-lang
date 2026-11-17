@@ -1,4 +1,33 @@
 use bone_lints::{ActionLayerPolicy, Finding, LintOptions};
+use bone_semantic::prelude::*;
+
+pub fn parse(file: &str, source: &str) -> skull_parser::Ast {
+    let mut module = skull_parser::parse_module_clean(source, Ustr::from(file)).expect("parse");
+    module.package = Some(skull_parser::PackageTag {
+        id: 1,
+        self_name: "$standalone$<lint>".to_string(),
+        identity_storage: skull_parser::IdentityStorage::Exempt,
+        root: String::new(),
+    });
+    module
+}
+
+pub fn workspace(modules: Vec<skull_parser::Ast>) -> Workspace {
+    let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib(modules).expect("stdlib");
+    bone_semantic::semantic_passes::semantic_pass_without_closure_gate(
+        &mut modules,
+        &Default::default(),
+    )
+    .expect("semantic pass")
+}
+
+pub fn warm(ws: &Workspace) -> FxHashSet<ModuleId> {
+    ws.modules
+        .iter()
+        .filter(|module| bone_core::modules::is_stdlib_module_file(module.file.as_str()))
+        .map(|module| module.id)
+        .collect()
+}
 
 /// Lint `files` as a bin package with no warm module, selecting only `lint`.
 pub fn lint_only(files: &[(&str, &str)], lint: &str) -> Vec<Finding> {

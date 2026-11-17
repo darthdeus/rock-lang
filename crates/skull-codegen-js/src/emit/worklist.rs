@@ -67,7 +67,14 @@ fn opaque_js_global_names(ws: &Workspace, body: &JsInlineBody) -> Vec<ustr::Ustr
             .find(|(_, ch)| !ch.is_ascii_alphanumeric() && *ch != '_')
             .map_or(after.len(), |(index, _)| index);
         if end > 0 {
-            names.push(ustr::Ustr::from(&after[..end]));
+            let symbol = &after[..end];
+            if let Some(name) = ws
+                .globals_by_name
+                .keys()
+                .find(|name| skull_mir::mangle::symbol_of_key(**name).as_str() == symbol)
+            {
+                names.push(*name);
+            }
         }
         rest = &after[end..];
     }

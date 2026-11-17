@@ -31,6 +31,7 @@
 //! is what kept this lead untested (the registry block is appended only by the
 //! game emit paths).
 
+use crate::common::name_matches;
 use bone_semantic::inference::Workspace;
 use skull_mir::lower::{NoboxGlobalAccessorShape, ScalarCtx, nobox_global_accessor_shape};
 
@@ -65,7 +66,7 @@ fn accessor_of(src: &str, global: &str) -> (Workspace, NoboxGlobalAccessorShape)
         .modules
         .iter()
         .flat_map(|m| m.globals.iter())
-        .find(|(_, g)| g.name.as_str() == global)
+        .find(|(_, g)| name_matches(g.name, global))
         .unwrap_or_else(|| panic!("global `{global}` is missing"));
     let shape = nobox_global_accessor_shape(&ws, &scx, gdecl.ty)
         .expect("global accessor planning must not fail")

@@ -1,23 +1,23 @@
-//! Error: `::` is a checked contextual ascription -- the ascribed type is the
+//! Error: contextual ascription is checked -- the ascribed type is the
 //!        operand's expected type, so only ordinary assignment compatibility
 //!        is accepted. Explicit narrowing belongs to `as`.
 //! Tags: ascription, types, mono
 
 //=== TEST CASE: ascribe_int_to_string_MismatchedType ===
 fn main() {
-    let value = 42 :: string
+    let value = (42 : string)
     print(value)
 }
 
 //=== TEST CASE: ascribe_float_to_int_MismatchedType ===
 fn main() {
-    let value = 3.14 :: int
+    let value = (3.14 : int)
     print(value)
 }
 
 //=== TEST CASE: ascribe_string_to_int_MismatchedType ===
 fn main() {
-    let value = "42" :: int
+    let value = ("42" : int)
     print(value)
 }
 
@@ -25,6 +25,6 @@ fn main() {
 fn identity<T>(x: T) -> T { x }
 
 fn main() {
-    let f = identity :: fn(int) -> int
+    let f = (identity : fn(int) -> int)
     print(f(1))
 }

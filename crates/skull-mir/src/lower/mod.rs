@@ -949,7 +949,7 @@ fn static_owner_tag(
     use std::hash::{Hash, Hasher};
     let func = &ws.module(inst.func.module).functions[inst.func.func];
     let name = if inst.args.is_empty() {
-        func.name
+        Ustr::from(bone_core::modules::artifact_name(func.name.as_str()))
     } else {
         crate::names::ustr(&inst.symbol(ws, scx.interner()))
     };
@@ -982,6 +982,7 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
     match body.expr_arena[e] {
         Expr::Unit => tag!(0),
         Expr::Null => tag!(1),
+        Expr::Error => tag!(12),
         Expr::Hole(n) => {
             tag!(2);
             n.hash(h);
@@ -1008,7 +1009,7 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
         }
         Expr::Global(n) => {
             tag!(8);
-            n.hash(h);
+            Ustr::from(bone_core::modules::artifact_name(n.as_str())).hash(h);
         }
         Expr::SiblingRef(n) => {
             tag!(9);
@@ -1179,7 +1180,7 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
             match callee {
                 Callee::Unresolved { name, .. } => {
                     tag!(380);
-                    name.hash(h);
+                    Ustr::from(bone_core::modules::artifact_name(name.as_str())).hash(h);
                 }
                 Callee::Local(b) => {
                     tag!(381);
@@ -1220,7 +1221,7 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
             bases,
         } => {
             tag!(41);
-            name.hash(h);
+            Ustr::from(bone_core::modules::artifact_name(name.as_str())).hash(h);
             for b in bases {
                 go!(b);
             }
@@ -1237,7 +1238,7 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
             ..
         } => {
             tag!(42);
-            enum_name.hash(h);
+            Ustr::from(bone_core::modules::artifact_name(enum_name.as_str())).hash(h);
             variant.hash(h);
             match args {
                 VariantArgs::Unit => tag!(420),
@@ -1373,7 +1374,11 @@ fn hash_init_pattern(
             ..
         } => {
             54u16.hash(h);
-            (enum_name, variant).hash(h);
+            (
+                enum_name.map(|name| Ustr::from(bone_core::modules::artifact_name(name.as_str()))),
+                variant,
+            )
+                .hash(h);
             for s in sub {
                 hash_init_pattern(body, s, h);
             }
@@ -1386,7 +1391,12 @@ fn hash_init_pattern(
             ..
         } => {
             55u16.hash(h);
-            (enum_name, name, rest).hash(h);
+            (
+                enum_name.map(|name| Ustr::from(bone_core::modules::artifact_name(name.as_str()))),
+                name.map(|name| Ustr::from(bone_core::modules::artifact_name(name.as_str()))),
+                rest,
+            )
+                .hash(h);
             for f in fields {
                 let f = body.record_pat_field_arena[f];
                 f.name.hash(h);
@@ -4220,7 +4230,7 @@ pub(crate) fn resolve_shader_pair(
             let fname = ws.module(frag.module).functions[frag.func].name;
             // Bare frag name -- no '+', so it can never collide with a pair key.
             Ok(ShaderPair {
-                key: fname.to_string(),
+                key: bone_core::modules::artifact_name(fname.as_str()).to_string(),
                 vert: None,
                 frag,
             })
@@ -4231,7 +4241,11 @@ pub(crate) fn resolve_shader_pair(
             let vname = ws.module(vert.module).functions[vert.func].name;
             let fname = ws.module(frag.module).functions[frag.func].name;
             Ok(ShaderPair {
-                key: format!("{vname}+{fname}"),
+                key: format!(
+                    "{}+{}",
+                    bone_core::modules::artifact_name(vname.as_str()),
+                    bone_core::modules::artifact_name(fname.as_str())
+                ),
                 vert: Some(vert),
                 frag,
             })

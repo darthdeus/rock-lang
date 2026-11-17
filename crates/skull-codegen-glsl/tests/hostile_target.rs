@@ -142,7 +142,7 @@ fn a_second_target_derives_a_different_physical_layout_from_the_same_interface()
     let glsl_engine = glsl
         .uniform_blocks
         .iter()
-        .find(|(_, p)| p.plan.struct_name.as_str() == "EngineU")
+        .find(|(_, p)| p.name.as_str() == "EngineU")
         .map(|(b, _)| *b)
         .expect("the engine block");
     let hostile_engine = hostile
@@ -204,9 +204,11 @@ fn a_second_target_derives_a_different_physical_layout_from_the_same_interface()
         .stages
         .iter()
         .map(|s| {
-            ws.module(s.entry.fref().module).functions[s.entry.fref().func]
-                .name
-                .as_str()
+            skull_mir::mangle::declared_name(
+                ws.module(s.entry.fref().module).functions[s.entry.fref().func]
+                    .name
+                    .as_str(),
+            )
         })
         .collect();
     assert_eq!(
@@ -330,7 +332,7 @@ fn perturbing_an_interface_member_moves_the_derived_layout() {
     let engine_of = |p: &skull_codegen_glsl::ShaderAbiPlan| {
         p.uniform_blocks
             .iter()
-            .find(|(_, b)| b.plan.struct_name.as_str() == "EngineU")
+            .find(|(_, b)| b.name.as_str() == "EngineU")
             .map(|(_, b)| {
                 (
                     b.plan.size,
@@ -360,7 +362,7 @@ fn perturbing_an_interface_member_moves_the_derived_layout() {
     let g = perturbed
         .uniform_groups
         .iter_mut()
-        .find(|g| g.struct_name.key.as_str() == "EngineU")
+        .find(|g| g.struct_name.symbol.as_str() == "EngineU")
         .expect("the engine group");
     assert_eq!(
         g.members[0].1,

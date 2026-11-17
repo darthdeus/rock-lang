@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::common::key;
 use comfy_la_arena::Idx;
 use skull_graph::instance_graph;
 use skull_mir::instance::Instance;
@@ -163,7 +164,7 @@ fn value_constructor(mir: &MirFunc, name: &str) -> Idx<Inst> {
         .find_map(|(id, inst)| match inst {
             Inst::MakeValueStruct { name: found, .. }
             | Inst::MaterializeValueStruct { name: found, .. }
-                if found.as_str() == name =>
+                if found.as_str().rsplit("::").next() == Some(name) =>
             {
                 Some(id)
             }
@@ -184,15 +185,23 @@ fn lower_dump(mut modules: Vec<skull_parser::Ast>, fn_name: &str) -> String {
     let (fid, _) = m
         .functions
         .iter()
-        .find(|(_, f)| f.name.as_str() == fn_name)
+        .find(|(_, f)| f.name.as_str().rsplit("::").next() == Some(fn_name))
         .expect("function by name");
     let dump = lower_test_root(&ws, mid, fid)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message))
         .to_string();
-    dump.lines()
+    let mut dump = dump
+        .lines()
         .map(|line| line.strip_prefix("    ").unwrap_or(line))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    for key in ws.defs.keys() {
+        let display = bone_core::modules::display_name(key.as_str());
+        if display != key.as_str() {
+            dump = dump.replace(key.as_str(), display);
+        }
+    }
+    dump
 }
 
 #[test]
@@ -233,7 +242,7 @@ fn value_constructors_carry_the_owned_representation() {
         .module(mid)
         .functions
         .iter()
-        .find(|(_, f)| f.name.as_str() == "make")
+        .find(|(_, f)| f.name.as_str().rsplit("::").next() == Some("make"))
         .map(|(fid, _)| fid)
         .expect("make function");
     let mut mir = lower_test_root(&ws, mid, fid).expect("lower");
@@ -290,11 +299,7 @@ fn value_constructors_carry_the_owned_representation() {
 
     let foreign_arena = RepArena::new(Arc::new(MonoInterner::new()));
     let foreign_representation = foreign_arena
-        .plan_nominal_value(
-            &ws,
-            bone_core::hir::FnBackend::Lua,
-            ustr::Ustr::from("Outer"),
-        )
+        .plan_nominal_value(&ws, bone_core::hir::FnBackend::Lua, key(&ws, "Outer"))
         .expect("foreign Outer plan");
     let abi = mir.abi_plan.as_ref().expect("function ABI plan");
     let parameter_representation = abi.representation().params()[0];
@@ -584,7 +589,7 @@ fn diverging_if_join_does_not_declare_never_storage() {
         .module(mid)
         .functions
         .iter()
-        .find(|(_, function)| function.name.as_str() == "f")
+        .find(|(_, function)| function.name.as_str().rsplit("::").next() == Some("f"))
         .expect("function");
     let mir = lower_test_root(&ws, mid, fid).expect("lower");
     assert!(
@@ -610,7 +615,7 @@ fn nullable_aggregate_if_join_does_not_declare_payload_storage() {
         .module(mid)
         .functions
         .iter()
-        .find(|(_, function)| function.name.as_str() == "f")
+        .find(|(_, function)| function.name.as_str().rsplit("::").next() == Some("f"))
         .expect("function");
     let mir = lower_test_root(&ws, mid, fid).expect("lower");
     let typed_temporaries: Vec<_> = mir
@@ -679,7 +684,7 @@ fn match_payload_bindings_retain_their_semantic_types() {
         .module(mid)
         .functions
         .iter()
-        .find(|(_, function)| function.name.as_str() == "f")
+        .find(|(_, function)| function.name.as_str().rsplit("::").next() == Some("f"))
         .expect("function");
     let mir = lower_test_root(&ws, mid, fid).expect("lower");
 
@@ -983,7 +988,7 @@ return v2
 
         // NativeBuffer: the builtin counted template. (`[T]` routes through
         // the stdlib VecIter protocol instead and never reaches this path.)
-        for_over_native_buffer_indexes_each_element(mir, "fn f(xs: NativeBuffer<int>) { for x in xs { } }", "f", "\
+        for_over_native_buffer_indexes_each_element(mir_std, "fn f(xs: NativeBuffer<int>) { for x in xs { } }", "f", "\
 fn f(c0) {
   bb0:
 v0 = load c0
@@ -1244,7 +1249,7 @@ fn unsupported_interpolation_hole_error_is_located_at_the_hole() {
         .module(mid)
         .functions
         .iter()
-        .find(|(_, f)| f.name.as_str() == "f")
+        .find(|(_, f)| f.name.as_str().rsplit("::").next() == Some("f"))
         .expect("function by name");
     let err = lower_test_root(&ws, mid, fid).expect_err("an `any` hole has no rendering");
     assert!(

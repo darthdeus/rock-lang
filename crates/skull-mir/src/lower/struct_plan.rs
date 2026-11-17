@@ -410,6 +410,7 @@ fn leaf_eq(ws: &Workspace, shape: &ValueShape, nested: bool, out: &mut Vec<GcFie
 }
 
 fn lua_display_inline(shape: &ValueShape, prefix: &str) -> Vec<LuaDisplayPart> {
+    let name = bone_core::modules::display_name(shape.name.as_str());
     let fields: Vec<(String, Vec<LuaDisplayPart>)> = shape
         .fields
         .iter()
@@ -425,9 +426,9 @@ fn lua_display_inline(shape: &ValueShape, prefix: &str) -> Vec<LuaDisplayPart> {
         })
         .collect();
     let body = if fields.is_empty() {
-        vec![LuaDisplayPart::literal(&format!("{} {{ }}", shape.name))]
+        vec![LuaDisplayPart::literal(&format!("{} {{ }}", name))]
     } else {
-        display_record(&format!("{} {{ ", shape.name), fields, " }")
+        display_record(&format!("{} {{ ", name), fields, " }")
     };
     if shape.nullable {
         vec![LuaDisplayPart::UnlessNil {

@@ -15,7 +15,7 @@ fn main() {}
 #[test]
 fn an_all_float_element_plans_exactly_the_flat_slot_scheme() {
     let ws = ws_with(SRC);
-    let name = ustr::Ustr::from("Vertex");
+    let name = crate::common::key(&ws, "Vertex");
     let k = 10;
     let plan = RepArena::default()
         .nominal_leaf_addresses(&ws, bone_core::hir::FnBackend::Js, name)
@@ -38,7 +38,7 @@ fn an_all_float_element_plans_exactly_the_flat_slot_scheme() {
 #[test]
 fn double_fields_keep_the_float64_leaf_layout() {
     let ws = ws_with(SRC);
-    let name = ustr::Ustr::from("Wide");
+    let name = crate::common::key(&ws, "Wide");
     let arena = RepArena::default();
     let (leaves, size, align) = arena
         .nominal_leaf_layout(&ws, bone_core::hir::FnBackend::Js, name)
@@ -78,7 +78,7 @@ fn a_mixed_width_element_strides_each_view_in_its_own_units() {
         .nominal_leaf_addresses(
             &ws,
             bone_core::hir::FnBackend::Js,
-            ustr::Ustr::from("Flags"),
+            crate::common::key(&ws, "Flags"),
         )
         .expect("Flags has a leaf plan");
     let fields: Vec<&str> = plan.iter().map(|a| a.view_field.as_str()).collect();

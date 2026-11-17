@@ -64,7 +64,7 @@ fn f() -> int {
 fn main() { let _ = f() }
 
 //=== TEST CASE: static_mangled_cell_name_unresolvable_from_source_Generic ===
-//! expect: Undefined global `__static_f_n`
+//! expect: `__static_f_n` did not resolve to any definition
 // This generated-looking name is absent from source scope. It is not the
 // current emitted cell spelling, so this alone does not prove cell privacy.
 fn f() -> int {

@@ -2,7 +2,7 @@
 //! key check catches a backend-table key that no `@intrinsic` declaration backs,
 //! and the generic-key pin fixes what a generic intrinsic's stable registry key
 //! is (the declared-signature mangle, NOT a monomorphization -- there is none).
-use crate::common::{ws_of, ws_with_stdlib};
+use crate::common::{name_matches, ws_of, ws_with_stdlib};
 
 use skull_codegen_lua::mangle_fn;
 use skull_mir::intrinsics::{
@@ -61,7 +61,7 @@ fn find_fn<'a>(
     ws.modules
         .iter()
         .flat_map(|m| m.functions.iter().map(|(_, f)| f))
-        .find(|f| f.name.as_str() == name)
+        .find(|f| name_matches(f.name, name))
         .unwrap_or_else(|| panic!("no fn `{name}`"))
 }
 
@@ -91,7 +91,7 @@ fn generic_intrinsic_key_is_declared_signature_mangle() {
         .modules
         .iter()
         .flat_map(|m| m.functions.iter().map(|(_, f)| f))
-        .find(|f| f.name.as_str() == "gid" && !f.generics.is_empty())
+        .find(|f| name_matches(f.name, "gid") && !f.generics.is_empty())
         .expect("generic gid");
 
     let key = mangle_fn(&ws, gid_generic);
@@ -136,7 +136,11 @@ fn struct_expand_is_an_expansion_intrinsic() {
 
     // It is registered as an intrinsic declaration (name, arity=1).
     let declared = declared_intrinsics(&ws);
-    assert!(declared.contains(&(ustr::Ustr::from("upairs"), 1)));
+    assert!(
+        declared
+            .iter()
+            .any(|(name, arity)| name_matches(*name, "upairs") && *arity == 1)
+    );
 }
 
 // The Layer-0 proving set is annotated `@intrinsic` in the stdlib, so
@@ -148,7 +152,9 @@ fn stdlib_layer0_proving_set_is_declared_intrinsic() {
     let declared = declared_intrinsics(&ws);
     let has = |n: &str, a: usize| {
         assert!(
-            declared.contains(&(ustr::Ustr::from(n), a)),
+            declared
+                .iter()
+                .any(|(name, arity)| name_matches(*name, n) && *arity == a),
             "`{n}`/{a} not declared @intrinsic"
         );
     };
@@ -183,7 +189,7 @@ fn stdlib_fn<'a>(
     ws.modules
         .iter()
         .flat_map(|m| m.functions.iter().map(|(_, f)| f))
-        .find(|f| f.name.as_str() == name)
+        .find(|f| name_matches(f.name, name))
         .unwrap_or_else(|| panic!("no stdlib fn `{name}`"))
 }
 

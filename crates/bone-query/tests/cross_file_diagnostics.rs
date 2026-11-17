@@ -6,14 +6,21 @@ use crate::fixture::{Project, diagnostics_in};
 use bone_query::BoneWorkspace;
 use lsp_types::{Diagnostic, DiagnosticSeverity};
 
-const MANIFEST: (&str, &str) = ("stick.toml", "[package]\nname = \"xp\"\n");
+const MANIFEST: (&str, &str) = (
+    "stick.toml",
+    "[package]\nname = \"xp\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n",
+);
 
 /// `a.rock` defines `Foo`, `b.rock` uses it.
 fn two_file_project() -> Project {
     Project::new(&[
         MANIFEST,
-        ("a.rock", "struct Foo { x: int }\n"),
-        ("b.rock", "fn use_it() {\n  let f = Foo { x: 1 }\n}\n"),
+        ("main.rock", "fn main() -> int { 0 }\n"),
+        ("a.rock", "pub mod a;\npub struct Foo { x: int }\n"),
+        (
+            "b.rock",
+            "pub mod b;\nuse super::a::Foo;\nfn use_it() {\n  let f = Foo { x: 1 }\n}\n",
+        ),
     ])
 }
 
@@ -120,59 +127,76 @@ fn multi_label_hint_publishes_a_diagnostic_per_line() {
     );
 }
 
-/// Only the whole-project pass sees a duplicate struct across modules; it was
-/// once logged and dropped while `rock compile` rejected the program.
+/// Only the whole-project pass sees duplicate structs in separate fragments
+/// of one module; it was once logged and dropped while `rock compile` rejected
+/// the program.
 #[test]
-fn duplicate_struct_across_modules_surfaces_in_lsp() {
-    let project = Project::new(&[
-        MANIFEST,
-        ("a.rock", "struct Foo { x: int }\nfn main() -> int { 0 }\n"),
-        (
-            "b.rock",
-            "struct Foo { y: int }\nfn helper() -> int { 1 }\n",
-        ),
-    ]);
-    let (a, b) = (project.path("a.rock"), project.path("b.rock"));
-    let dup = |d: &Diagnostic| d.message.contains("duplicate struct `Foo`");
-    let (mut bone, per_file) = project.open("a.rock");
-    assert!(
-        per_file.iter().flat_map(|(_, d)| d).any(dup),
-        "{per_file:?}"
-    );
-    // The error is symmetric and attaches by module order, so either file
-    // may carry it.
-    let (da, db) = (bone.diagnostics_for(&a), bone.diagnostics_for(&b));
-    assert!(
-        da.iter().chain(&db).any(dup),
-        "diagnostics_for: a={da:?} b={db:?}"
-    );
+fn duplicate_struct_across_fragments_surfaces_in_lsp() {
+    for repaired in ["a.rock", "b.rock"] {
+        let project = Project::new(&[
+            MANIFEST,
+            ("main.rock", "fn main() -> int { 0 }\n"),
+            ("a.rock", "pub mod shared;\npub struct Foo { x: int }\n"),
+            (
+                "b.rock",
+                "pub mod shared;\npub struct Foo { y: int }\nfn helper() -> int { 1 }\n",
+            ),
+        ]);
+        let (a, b) = (project.path("a.rock"), project.path("b.rock"));
+        let dup = |d: &Diagnostic| {
+            d.message
+                .contains("duplicate definition `Foo` in module `shared`")
+        };
+        let (mut bone, per_file) = project.open("a.rock");
+        assert!(
+            per_file.iter().flat_map(|(_, d)| d).any(dup),
+            "{per_file:?}"
+        );
+        // The error is symmetric and attaches by module order, so either file
+        // may carry it.
+        let (da, db) = (bone.diagnostics_for(&a), bone.diagnostics_for(&b));
+        assert!(
+            da.iter().chain(&db).any(dup),
+            "diagnostics_for: a={da:?} b={db:?}"
+        );
 
-    let per_file = bone.update(
-        &b,
-        "struct Bar { y: int }\nfn helper() -> int { 1 }\n".into(),
-    );
-    assert!(
-        !per_file.iter().flat_map(|(_, d)| d).any(dup),
-        "{per_file:?}"
-    );
-    assert!(
-        !bone
-            .diagnostics_for(&a)
-            .iter()
-            .any(|d| d.message.contains("duplicate struct")),
-        "diagnostics_for after the fix"
-    );
+        let per_file = bone.update(
+            &project.path(repaired),
+            "pub mod shared;\npub struct Bar { y: int }\n".into(),
+        );
+        assert!(
+            !per_file.iter().flat_map(|(_, d)| d).any(dup),
+            "{per_file:?}"
+        );
+        assert!(
+            !bone
+                .diagnostics_for(&a)
+                .iter()
+                .any(|d| d.message.contains("duplicate definition `Foo`")),
+            "diagnostics_for after the fix"
+        );
+        for file in [&a, &b] {
+            assert!(
+                bone.hover(file, lsp_types::Position::new(1, 12)).is_some(),
+                "{repaired}: {file}"
+            );
+        }
+    }
 }
 
 #[test]
 fn duplicate_function_across_files_surfaces_once_in_lsp() {
     let project = Project::new(&[
         MANIFEST,
+        ("main.rock", "fn main() -> int { 0 }\n"),
         (
             "a.rock",
-            "fn helper(n: int) -> int { n }\nfn main() -> int { 0 }\n",
+            "pub mod shared;\nfn helper(n: int) -> int { n }\n",
         ),
-        ("b.rock", "fn helper(m: int) -> int { 1 }\n"),
+        (
+            "b.rock",
+            "pub mod shared;\nfn helper(m: int) -> int { 1 }\n",
+        ),
     ]);
     let b = project.path("b.rock");
     let dup = |d: &&Diagnostic| d.message.contains("duplicate definition of `helper(int)`");
@@ -181,7 +205,10 @@ fn duplicate_function_across_files_surfaces_once_in_lsp() {
     assert_eq!(found.len(), 1, "{per_file:?}");
     assert_eq!(bone.diagnostics_for(&b).iter().filter(dup).count(), 1);
 
-    let per_file = bone.update(&b, "fn helper(m: float) -> int { 1 }\n".into());
+    let per_file = bone.update(
+        &b,
+        "pub mod shared;\nfn helper(m: float) -> int { 1 }\n".into(),
+    );
     assert!(
         !per_file.iter().flat_map(|(_, d)| d).any(|d| dup(&d)),
         "{per_file:?}"
@@ -189,14 +216,14 @@ fn duplicate_function_across_files_surfaces_once_in_lsp() {
 }
 
 fn source_load_failure_recovers(broken_manifest: bool) {
-    let manifest = "[package]\nname = \"dep\"\ntype = \"lib\"\n";
-    let dependency = "struct Dependency { value: int }\n";
+    let manifest = "[package]\nname = \"dep\"\ntype = \"lib\"\n\n[language]\nmodules = \"v1\"\n";
+    let dependency = "pub mod types;\npub struct Dependency { value: int }\n";
     let src = "fn main() -> int { sibling() }\n";
-    let sibling = "fn sibling() -> int { let d = Dependency { value: 1 }; d.value }\n";
+    let sibling = "use dep::types::Dependency;\nfn sibling() -> int { let d = Dependency { value: 1 }; d.value }\n";
     let project = Project::new(&[
         (
             "app/stick.toml",
-            "[package]\nname = \"app\"\n[dependencies]\ndep = { path = \"../dep\" }\n",
+            "[package]\nname = \"app\"\ntype = \"bin\"\n\n[dependencies]\ndep = { path = \"../dep\" }\n\n[language]\nmodules = \"v1\"\n",
         ),
         ("dep/stick.toml", manifest),
         ("dep/types.rock", dependency),
@@ -309,7 +336,7 @@ fn missing_first_buffer_loads_project_and_keeps_unsaved_edits() {
     let mut bone = BoneWorkspace::new();
     let per = bone.update(&missing, String::new());
     assert!(all_errors(&per).is_empty(), "{per:?}");
-    let text = "fn draft() -> Foo { Foo { x: 1 } }\n";
+    let text = "pub mod new;\nuse super::a::Foo;\nfn draft() -> Foo { Foo { x: 1 } }\n";
     let per = bone.update(&missing, text.into());
     assert!(all_errors(&per).is_empty(), "{per:?}");
     bone.update(&project.path("b.rock"), project.read("b.rock"));
@@ -322,15 +349,25 @@ fn first_unsaved_source_loads_dependencies_of_empty_project() {
     let project = Project::new(&[
         (
             "app/stick.toml",
-            "[package]\nname = \"app\"\n[dependencies]\ndep = \"../dep\"\n",
+            "[package]\nname = \"app\"\ntype = \"bin\"\n\n[dependencies]\ndep = \"../dep\"\n\n[language]\nmodules = \"v1\"\n",
         ),
-        ("dep/stick.toml", "[package]\nname = \"dep\"\n"),
-        ("dep/types.rock", "struct Foo { x: int }\n"),
+        ("app/main.rock", "fn main() -> int { 0 }\n"),
+        (
+            "dep/stick.toml",
+            "[package]\nname = \"dep\"\ntype = \"lib\"\n\n[language]\nmodules = \"v1\"\n",
+        ),
+        (
+            "dep/types.rock",
+            "pub mod types;\npub struct Foo { x: int }\n",
+        ),
     ]);
     let path = project.dir.path().join("app/new.rock");
     let path = path.to_string_lossy();
     let mut bone = BoneWorkspace::new();
-    let per = bone.update(&path, "fn draft() -> Foo { Foo { x: 1 } }\n".into());
+    let per = bone.update(
+        &path,
+        "pub mod new;\nuse dep::types::Foo;\nfn draft() -> Foo { Foo { x: 1 } }\n".into(),
+    );
     assert!(all_errors(&per).is_empty(), "{per:?}");
-    assert!(bone.hover(&path, lsp_types::Position::new(0, 14)).is_some());
+    assert!(bone.hover(&path, lsp_types::Position::new(2, 14)).is_some());
 }

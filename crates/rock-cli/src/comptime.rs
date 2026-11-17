@@ -273,10 +273,7 @@ pub(crate) fn inputs_for_project_with_config(
         );
     }
     inputs.channel = resolved.channel;
-    inputs.modules_mode = match cfg.dialect() {
-        rock_core::source_code::Dialect::V1 => "v1".to_string(),
-        rock_core::source_code::Dialect::Legacy => "legacy".to_string(),
-    };
+    inputs.modules_mode = "v1".to_string();
     inputs.volatile_vars = resolved
         .volatile_vars
         .into_iter()
@@ -361,13 +358,46 @@ fn resolve_source_fingerprints(
         for root in &roots {
             field(&mut hash, root.as_str());
         }
-        let owners =
-            bone_core::type_sources::declaration_sources(ws, &roots).map_err(anyhow::Error::msg)?;
+        let scope = ws
+            .ns
+            .package(0)
+            .map(|package| bone_core::modules::FragmentScope {
+                package: package.id,
+                package_name: package.self_name,
+                ..Default::default()
+            });
+        let resolved_roots = roots
+            .iter()
+            .map(|root| {
+                if ws.type_generics.contains_key(root) {
+                    return Ok(*root);
+                }
+                let Some(scope) = &scope else {
+                    return Ok(*root);
+                };
+                let path = bone_core::modules::UsePathRef {
+                    from_root: root.starts_with("::"),
+                    segments: root
+                        .trim_start_matches("::")
+                        .split("::")
+                        .map(ustr::Ustr::from)
+                        .collect(),
+                };
+                bone_semantic::lower::resolve::resolve_path(ws, scope, &path)
+                    .map(|resolved| resolved.key)
+            })
+            .collect::<Result<Vec<_>, String>>()
+            .map_err(anyhow::Error::msg)?;
+        let owners = bone_core::type_sources::declaration_sources(ws, &resolved_roots)
+            .map_err(anyhow::Error::msg)?;
         hash.update((owners.len() as u64).to_le_bytes());
         for owner in owners {
             // Canonical declaration identity is stable across worktree roots.
             // Hash all defining bytes, including defaults and helper bodies.
-            field(&mut hash, owner.name.as_str());
+            field(
+                &mut hash,
+                bone_core::modules::display_name(owner.name.as_str()),
+            );
             let identity = identities.entry(owner.file).or_insert_with(|| {
                 source_file_identity(owner.file.as_str(), inputs.embed_root.as_deref())
             });
@@ -953,7 +983,16 @@ mod source_fingerprint_tests {
             ("other.rock", "struct Other { count: int }"),
         ]
         .iter()
-        .map(|(file, text)| skull_parser::parse_module(text, Ustr::from(file)).unwrap())
+        .map(|(file, text)| {
+            let mut module = skull_parser::parse_module(text, Ustr::from(file)).unwrap();
+            module.package = Some(skull_parser::PackageTag {
+                id: 0,
+                self_name: "$standalone$<fingerprint>".into(),
+                identity_storage: skull_parser::IdentityStorage::Exempt,
+                root: String::new(),
+            });
+            module
+        })
         .collect::<Vec<_>>();
         let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).unwrap();
         let mut inputs = ComptimeInputs::default();

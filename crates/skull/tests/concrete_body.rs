@@ -15,7 +15,7 @@ use skull::concrete_body::{self, ConcreteBodies, Slot};
 use skull::instance_graph::{self, Instance, InstanceGraph, Site, SiteOp, SiteOutcome};
 use skull_mir::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcretePlans};
 use skull_mir::mir::{Inst, MirFunc, Term};
-use skull_mir::monoty::{MonoTy, MonoTyReason};
+use skull_mir::monoty::{MonoSubst, MonoTy, MonoTyReason};
 use skull_parser::CompilerError;
 use std::sync::Arc;
 use ustr::Ustr;
@@ -1148,20 +1148,20 @@ fn fresh_publication_publishes_the_authoritative_candidate_index() {
 #[test]
 fn local_owner_plan_failures_retract_with_the_last_live_edge() {
     let source_v1 = r#"
-fn bad() -> int { return 1 }
+fn bad<T>(value: T) -> T { return value }
 fn stable() -> int {
     let unresolved = null
     return 2
 }
-global failed_call: int = bad()
+global failed_call: int = bad(1)
 fn main() {
-    let a = bad()
+    let a = bad(1)
     let b = stable()
     print("{a}{b}{failed_call}")
 }
 "#;
     let source_v2 = r#"
-fn bad() -> int { return 1 }
+fn bad<T>(value: T) -> T { return value }
 fn stable() -> int {
     let unresolved = null
     return 2
@@ -1180,10 +1180,13 @@ fn main() {
         .find(|instance| fn_name(&ws1, instance.func) == "bad")
         .cloned()
         .expect("bad instance");
-    assert!(
-        graph.index.subst.remove(&bad).is_some(),
-        "fixture did not expose bad's substitution"
-    );
+    let subst = graph
+        .index
+        .subst
+        .get_mut(&bad)
+        .expect("fixture did not expose bad's substitution");
+    assert!(!subst.value.is_empty(), "bad must have a type substitution");
+    subst.value = MonoSubst::default();
     let mut local = concrete_body::build(&ws1, &graph);
     assert!(local.first_plan_failure().is_some());
     assert!(!local.plans.contains_key(&bad));

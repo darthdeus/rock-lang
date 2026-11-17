@@ -1,12 +1,10 @@
 //! `Arena<E>` and `[E]` project the same target-specific container plan.
 
-use crate::common::ws_with_stdlib;
+use crate::common::{key, ws_with_stdlib};
 use bone_semantic::inference::Workspace;
 use skull_mir::lower::{ContainerFamily, ContainerPlan, RepArena};
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use skull_parser::ast::FnBackend;
-use ustr::ustr;
-
 const SRC: &str = r#"
 value ColPoint { x: int, y: int }
 struct NotAValue { x: int }
@@ -14,16 +12,16 @@ struct NotAValue { x: int }
 fn use_them(p: ColPoint, n: NotAValue) -> int { return p.x + n.x }
 "#;
 
-fn nominal(name: &str) -> MonoTy {
+fn nominal(ws: &Workspace, name: &str) -> MonoTy {
     MonoTy::App {
-        ctor: MonoCtor::Nominal(ustr(name)),
+        ctor: MonoCtor::Nominal(key(ws, name)),
         params: Vec::new(),
     }
 }
 
-fn arena_of(elem: MonoTy) -> MonoTy {
+fn arena_of(ws: &Workspace, elem: MonoTy) -> MonoTy {
     MonoTy::App {
-        ctor: MonoCtor::Nominal(ustr("Arena")),
+        ctor: MonoCtor::Nominal(key(ws, "Arena")),
         params: vec![elem],
     }
 }
@@ -58,10 +56,10 @@ fn the_container_plan_admits_and_rejects_on_the_vec_rule() {
         &ws,
         t,
         ContainerFamily::Arena,
-        &arena_of(nominal("ColPoint")),
+        &arena_of(&ws, nominal(&ws, "ColPoint")),
     )
     .expect("an all-scalar value struct is column-eligible");
-    assert_eq!(admitted.name.as_str(), "ColPoint");
+    assert_eq!(admitted.name, key(&ws, "ColPoint"));
     assert!(
         !admitted.nullable,
         "an arena element never carries a presence column"
@@ -72,13 +70,13 @@ fn the_container_plan_admits_and_rejects_on_the_vec_rule() {
             &ws,
             t,
             ContainerFamily::Arena,
-            &arena_of(nominal("NotAValue"))
+            &arena_of(&ws, nominal(&ws, "NotAValue"))
         )
         .is_none(),
         "a non-value struct has no leaf shape to columnize"
     );
     assert!(
-        column_elem(&ws, t, ContainerFamily::Arena, &arena_of(MonoTy::Int)).is_none(),
+        column_elem(&ws, t, ContainerFamily::Arena, &arena_of(&ws, MonoTy::Int)).is_none(),
         "a primitive element is not a value struct"
     );
     // The `for`-over-arena walk reads occupied/generations for liveness and has
@@ -88,7 +86,7 @@ fn the_container_plan_admits_and_rejects_on_the_vec_rule() {
             &ws,
             t,
             ContainerFamily::Arena,
-            &arena_of(MonoTy::Nullable(Box::new(nominal("ColPoint"))))
+            &arena_of(&ws, MonoTy::Nullable(Box::new(nominal(&ws, "ColPoint"))))
         )
         .is_none(),
         "a nullable element would need a presence column its only reader cannot address"
@@ -101,7 +99,7 @@ fn the_container_plan_admits_and_rejects_on_the_vec_rule() {
             t,
             &RepArena::default(),
             ContainerFamily::Arena,
-            &vec_of(nominal("ColPoint")),
+            &vec_of(nominal(&ws, "ColPoint")),
         )
         .is_err(),
         "a Vec must not be accepted by the Arena planner"
@@ -122,12 +120,17 @@ fn the_arena_and_vec_plans_cannot_disagree() {
     // Arena would only ever show up on the target it was written for.
     for target in [FnBackend::Any, FnBackend::Lua, FnBackend::Js] {
         for elem in [
-            nominal("ColPoint"),
-            nominal("NotAValue"),
+            nominal(&ws, "ColPoint"),
+            nominal(&ws, "NotAValue"),
             MonoTy::Int,
             MonoTy::String,
         ] {
-            let a = column_elem(&ws, target, ContainerFamily::Arena, &arena_of(elem.clone()));
+            let a = column_elem(
+                &ws,
+                target,
+                ContainerFamily::Arena,
+                &arena_of(&ws, elem.clone()),
+            );
             let v = column_elem(&ws, target, ContainerFamily::Vec, &vec_of(elem.clone()));
             assert_eq!(
                 a,

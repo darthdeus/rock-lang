@@ -218,6 +218,10 @@ pub fn declared_intrinsics(ws: &Workspace) -> HashSet<(Ustr, usize)> {
             if is_intrinsic(f) {
                 out.insert((f.name, f.param_decls.len()));
                 out.insert((
+                    Ustr::from(crate::mangle::declared_name(f.name.as_str())),
+                    f.param_decls.len(),
+                ));
+                out.insert((
                     Ustr::from(&crate::mangle::mangle_fn(ws, f)),
                     f.param_decls.len(),
                 ));

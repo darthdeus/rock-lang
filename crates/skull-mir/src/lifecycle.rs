@@ -158,7 +158,7 @@ pub fn sim_wire_name(function: &bone_core::hir::Function) -> Option<Ustr> {
     Some(
         match annotation.args.first().map(|argument| &argument.value) {
             Some(AnnoValue::String(name)) => *name,
-            _ => function.name,
+            _ => Ustr::from(bone_core::modules::display_name(function.name.as_str())),
         },
     )
 }
@@ -188,7 +188,7 @@ pub fn scene_root_type_key(root_type: &MonoTy) -> Option<String> {
         MonoTy::App {
             ctor: MonoCtor::Nominal(_),
             params,
-        } if params.is_empty() => Some(root_type.canonical()),
+        } if params.is_empty() => Some(root_type.artifact_key()),
         _ => None,
     }
 }
@@ -742,7 +742,7 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                     owner,
                     root_type,
                     identity,
-                    diagnostic_name: f.name,
+                    diagnostic_name: Ustr::from(bone_core::modules::display_name(f.name.as_str())),
                     stage,
                     declaration_ordinal: ordinal,
                     qualification,
@@ -788,6 +788,37 @@ mod tests {
         semantic_pass(&mut modules).expect("semantic")
     }
 
+    fn workspace_in_package(sources: &[(&str, &str)]) -> Workspace {
+        let mut modules = sources
+            .iter()
+            .map(|(file, src)| {
+                skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse")
+            })
+            .collect::<Vec<_>>();
+        for module in &mut modules {
+            module.package = Some(skull_parser::PackageTag {
+                id: 1,
+                self_name: "lifecycle_test".to_string(),
+                identity_storage: Default::default(),
+                root: String::new(),
+            });
+        }
+        semantic_pass(&mut modules).expect("semantic")
+    }
+
+    fn key(ws: &Workspace, name: &str) -> Ustr {
+        let mut matches = ws
+            .defs
+            .iter()
+            .filter(|(_, meta)| meta.name.as_str() == name)
+            .map(|(key, _)| *key);
+        let key = matches
+            .next()
+            .unwrap_or_else(|| panic!("no definition `{name}`"));
+        assert!(matches.next().is_none(), "ambiguous definition `{name}`");
+        key
+    }
+
     #[test]
     fn lifecycle_owner_rejects_retired_session_spelling() {
         let ws = workspace(&[(
@@ -820,7 +851,10 @@ mod tests {
         assert_eq!(
             plan.entries
                 .iter()
-                .map(|e| (e.diagnostic_name.as_str(), e.stage))
+                .map(|e| (
+                    crate::mangle::declared_name(e.diagnostic_name.as_str()),
+                    e.stage
+                ))
                 .collect::<Vec<_>>(),
             vec![
                 ("first", 10),
@@ -850,17 +884,17 @@ mod tests {
         let entry = plan
             .entries
             .iter()
-            .find(|entry| entry.diagnostic_name.as_str() == "apply_game_config")
+            .find(|entry| {
+                crate::mangle::declared_name(entry.diagnostic_name.as_str()) == "apply_game_config"
+            })
             .expect("qualified wire entry");
         assert!(entry.qualification.is_gated());
         assert_eq!(entry.qualification.dependencies().len(), 2);
     }
 
     fn wire_error(annotation: &str) -> String {
-        let ws = workspace(&[(
-            "wire.rock",
-            &format!(
-                r#"
+        let source = format!(
+            r#"
                 @lifecycle(phase="wire", owner="process")
                 deco init wire {{}}
                 const IMMUTABLE: int = 1
@@ -869,11 +903,18 @@ mod tests {
                 @wire(onchange={annotation})
                 fn apply_game_config() {{}}
                 "#
-            ),
-        )]);
-        collect(&ws)
-            .expect_err("unsupported dependency must reject")
-            .message
+        );
+        let mut modules = vec![
+            skull_parser::parse_module_clean(&source, Ustr::from("wire.rock")).expect("parse"),
+        ];
+        match semantic_pass(&mut modules) {
+            Ok(ws) => {
+                collect(&ws)
+                    .expect_err("unsupported dependency must reject")
+                    .message
+            }
+            Err(error) => error.message,
+        }
     }
 
     #[test]
@@ -883,7 +924,7 @@ mod tests {
             ("[]", "requires a non-empty dependency list"),
             ("[MUTABLE]", "mutable"),
             ("[callable]", "names a function"),
-            ("[UNKNOWN]", "is unknown"),
+            ("[UNKNOWN]", "did not resolve to any definition"),
             ("[IMMUTABLE.value]", "structured identifier list"),
             ("[1]", "structured identifier list"),
         ];
@@ -924,13 +965,13 @@ mod tests {
 
     #[test]
     fn same_named_cross_module_targets_keep_distinct_logical_identities() {
-        let ws = workspace(&[
+        let ws = workspace_in_package(&[
             (
                 "role.rock",
                 "@lifecycle(phase=\"draw\", owner=\"process\") deco init paint {}",
             ),
-            ("a.rock", "@paint fn render() {}"),
-            ("b.rock", "@paint fn render() {}"),
+            ("a.rock", "mod a;\nuse super::paint;\n@paint fn render() {}"),
+            ("b.rock", "mod b;\nuse super::paint;\n@paint fn render() {}"),
         ]);
         let plan = collect(&ws).expect("plan");
         assert_eq!(plan.entries.len(), 2);
@@ -939,7 +980,7 @@ mod tests {
 
     #[test]
     fn frame_hooks_in_sim_modules_are_scoped_to_that_modules_wire_names() {
-        let ws = workspace(&[
+        let ws = workspace_in_package(&[
             (
                 "roles.rock",
                 "@lifecycle(phase=\"update\", owner=\"process\") deco init tick {}",
@@ -964,16 +1005,20 @@ mod tests {
         let owned = plan
             .entries
             .iter()
-            .find(|entry| entry.diagnostic_name.as_str() == "owned_tick")
+            .find(|entry| {
+                crate::mangle::declared_name(entry.diagnostic_name.as_str()) == "owned_tick"
+            })
             .expect("sim-owned lifecycle entry");
         assert_eq!(
             owned.sim_wires.iter().map(Ustr::as_str).collect::<Vec<_>>(),
-            vec!["first-wire", "second_sim"]
+            vec!["first-wire", "lifecycle_test::second_sim"]
         );
         let production = plan
             .entries
             .iter()
-            .find(|entry| entry.diagnostic_name.as_str() == "production_tick")
+            .find(|entry| {
+                crate::mangle::declared_name(entry.diagnostic_name.as_str()) == "production_tick"
+            })
             .expect("production lifecycle entry");
         assert!(production.sim_wires.is_empty());
 
@@ -981,7 +1026,9 @@ mod tests {
         changed
             .entries
             .iter_mut()
-            .find(|entry| entry.diagnostic_name.as_str() == "owned_tick")
+            .find(|entry| {
+                crate::mangle::declared_name(entry.diagnostic_name.as_str()) == "owned_tick"
+            })
             .expect("sim-owned lifecycle entry")
             .sim_wires
             .pop();
@@ -1015,11 +1062,14 @@ mod tests {
         let plan = collect(&ws).expect("typed scene lifecycle target");
         assert_eq!(plan.entries.len(), 1);
         assert_eq!(plan.entries[0].owner.as_str(), "scene");
-        assert_eq!(plan.entries[0].diagnostic_name.as_str(), "tick_dungeon");
+        assert_eq!(
+            crate::mangle::declared_name(plan.entries[0].diagnostic_name.as_str()),
+            "tick_dungeon"
+        );
         assert_eq!(
             plan.entries[0].root_type,
             Some(MonoTy::App {
-                ctor: MonoCtor::Nominal(Ustr::from("Dungeon")),
+                ctor: MonoCtor::Nominal(key(&ws, "Dungeon")),
                 params: Vec::new(),
             })
         );
@@ -1091,7 +1141,10 @@ mod tests {
         assert_eq!(
             plan.entries
                 .iter()
-                .map(|entry| (entry.diagnostic_name.as_str(), entry.owner.as_str()))
+                .map(|entry| (
+                    crate::mangle::declared_name(entry.diagnostic_name.as_str()),
+                    entry.owner.as_str()
+                ))
                 .collect::<Vec<_>>(),
             vec![
                 ("scene_first", "scene"),
@@ -1127,7 +1180,7 @@ mod tests {
                 .iter()
                 .map(|entry| (
                     entry.phase.as_str(),
-                    entry.diagnostic_name.as_str(),
+                    crate::mangle::declared_name(entry.diagnostic_name.as_str()),
                     entry.stage
                 ))
                 .collect::<Vec<_>>(),

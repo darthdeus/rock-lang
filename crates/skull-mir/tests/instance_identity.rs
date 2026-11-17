@@ -10,10 +10,9 @@
 //! Every arm here asserts its own population. A bridge that answered nothing,
 //! or a shape table that was empty, would otherwise read as a pass.
 
-use crate::common::{decl, ws_of};
+use crate::common::{decl, key, ws_of};
 use skull_mir::instance::Instance;
 use skull_mir::monoty::{MonoCtor, MonoInterner, MonoTy};
-use ustr::Ustr;
 
 const SRC: &str = r#"
 value V2 { x: float, y: float }
@@ -27,9 +26,9 @@ fn main() {
 }
 "#;
 
-fn v2() -> MonoTy {
+fn v2(ws: &bone_core::workspace::Workspace) -> MonoTy {
     MonoTy::App {
-        ctor: MonoCtor::Nominal(Ustr::from("V2")),
+        ctor: MonoCtor::Nominal(key(ws, "V2")),
         params: vec![],
     }
 }
@@ -37,11 +36,11 @@ fn v2() -> MonoTy {
 /// The same shape table `spec_key_subst_roundtrip.rs` uses, so the two halves of
 /// the bridge are measured over one population rather than over whichever shapes
 /// each file happened to think of.
-fn arg_shapes() -> Vec<(&'static str, MonoTy)> {
+fn arg_shapes(ws: &bone_core::workspace::Workspace) -> Vec<(&'static str, MonoTy)> {
     vec![
         ("scalar", MonoTy::Int),
         ("unsigned scalar", MonoTy::Uint),
-        ("value struct", v2()),
+        ("value struct", v2(ws)),
         ("tuple", MonoTy::Tuple(vec![MonoTy::Int, MonoTy::Float])),
         ("nullable", MonoTy::Nullable(Box::new(MonoTy::Int))),
         ("unit", MonoTy::Unit),
@@ -53,7 +52,7 @@ fn arg_shapes() -> Vec<(&'static str, MonoTy)> {
                 ret: Box::new(MonoTy::Bool),
             },
         ),
-        ("nested app", MonoTy::Nullable(Box::new(v2()))),
+        ("nested app", MonoTy::Nullable(Box::new(v2(ws)))),
     ]
 }
 
@@ -69,7 +68,7 @@ fn interning_an_argument_list_round_trips_and_shares_ids_by_type() {
     let ws = ws_of(SRC);
     let ident = decl(&ws, "ident");
     let interner = MonoInterner::new();
-    let shapes = arg_shapes();
+    let shapes = arg_shapes(&ws);
     assert_eq!(
         shapes.len(),
         9,
@@ -192,7 +191,7 @@ fn an_instance_substitution_binds_each_declared_generic_to_its_own_argument() {
     let ws = ws_of(SRC);
     let pair = decl(&ws, "pair");
     let interner = MonoInterner::new();
-    let inst = Instance::intern(&interner, pair, vec![MonoTy::Int, v2()]);
+    let inst = Instance::intern(&interner, pair, vec![MonoTy::Int, v2(ws)]);
 
     let subst = inst.subst(&ws, &interner);
     assert_eq!(subst.len(), 2, "one binding per declared generic");
@@ -218,5 +217,5 @@ fn an_instance_substitution_binds_each_declared_generic_to_its_own_argument() {
         Some(&MonoTy::Int),
         "`A` takes the first argument"
     );
-    assert_eq!(subst.get(&vars[1]), Some(&v2()), "`B` takes the second");
+    assert_eq!(subst.get(&vars[1]), Some(&v2(ws)), "`B` takes the second");
 }

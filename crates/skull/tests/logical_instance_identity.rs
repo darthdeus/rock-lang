@@ -14,11 +14,10 @@
 //! that answered `any` for everything would satisfy "it converted" and lose the
 //! property the identity exists for.
 
-use crate::common::{census_of, graph_of, module_id, unjoined, ws_with_stdlib};
+use crate::common::{census_of, graph_of, key, module_id, name_matches, unjoined, ws_with_stdlib};
 use crate::support::site_join::{SiteJoinCensus, Unjoined};
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::InstanceGraph;
-use ustr::Ustr;
 
 /// The rendered instantiations of every instance of `<test>`'s fn `name`.
 fn instantiations_of(ws: &Workspace, g: &InstanceGraph, name: &str) -> Vec<String> {
@@ -27,7 +26,7 @@ fn instantiations_of(ws: &Workspace, g: &InstanceGraph, name: &str) -> Vec<Strin
         .instances
         .iter()
         .filter(|i| {
-            i.func.module == mid && ws.module(mid).functions[i.func.func].name.as_str() == name
+            i.func.module == mid && name_matches(ws.module(mid).functions[i.func.func].name, name)
         })
         .map(|i| {
             i.args
@@ -229,7 +228,7 @@ fn main() { print("x") }
         .module(mid)
         .functions
         .iter()
-        .filter(|(_, f)| f.name.as_str() == "twice")
+        .filter(|(_, f)| name_matches(f.name, "twice"))
         .map(|(fid, _)| skull_mir::mir::FuncRef {
             module: mid,
             func: fid,
@@ -279,7 +278,7 @@ fn a_repeated_backend_pair_is_not_one_declaration() {
     let ws = ws_with_stdlib("fn main() { print(\"x\") }");
     let all = ws
         .functions_by_name
-        .get(&Ustr::from("__op_eq"))
+        .get(&key(&ws, "__op_eq"))
         .expect("declared");
     assert!(
         all.len() > 2,

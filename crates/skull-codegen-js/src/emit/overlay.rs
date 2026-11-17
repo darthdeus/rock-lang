@@ -315,14 +315,18 @@ pub(super) fn collect_statics(function: &MirFunc) -> Vec<skull_mir::mir::StaticC
 }
 
 fn find_plain_function(ws: &Workspace, name: &str) -> Option<FuncRef> {
-    ws.functions_by_name
-        .get(&ustr::Ustr::from(name))?
-        .iter()
-        .find_map(|(module, function)| {
-            let function_ref = &ws.module(*module).functions[*function];
-            (function_ref.inline_body.is_none() && !function_ref.is_extern).then_some(FuncRef {
-                module: *module,
-                func: *function,
+    ws.modules.iter().find_map(|module| {
+        module
+            .functions
+            .iter()
+            .find_map(|(function, function_ref)| {
+                (skull_mir::mangle::declared_name(function_ref.name.as_str()) == name
+                    && function_ref.inline_body.is_none()
+                    && !function_ref.is_extern)
+                    .then_some(FuncRef {
+                        module: module.module_id(),
+                        func: function,
+                    })
             })
-        })
+    })
 }

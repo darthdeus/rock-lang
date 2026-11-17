@@ -791,7 +791,7 @@ impl<'a> Builder<'a> {
                 format!("`@scene_type_key` fn `{fname}` must have exactly one type argument"),
             ));
         };
-        let key = ty.canonical();
+        let key = ty.artifact_key();
         Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Str(
             crate::names::ustr(key.as_str()),
         )))))

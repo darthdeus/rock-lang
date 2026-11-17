@@ -210,7 +210,7 @@ fn lua_and_js_publish_identical_dependency_gated_lifecycle_plans() {
         .map(|dependency| match &dependency.identity {
             skull_mir::code_identity::CodeIdentity::Artifact(
                 skull_mir::code_identity::CodeOwner::Artifact { name, .. },
-            ) => name.as_str(),
+            ) => bone_core::modules::display_name(name.as_str()),
             identity => panic!("dependency is not a logical global identity: {identity:?}"),
         })
         .collect::<Vec<_>>();
@@ -222,7 +222,7 @@ fn lua_and_js_reject_the_same_unsupported_wire_dependencies() {
     let cases = [
         ("[MUTABLE]", "mutable"),
         ("[callable]", "names a function"),
-        ("[UNKNOWN]", "is unknown"),
+        ("[UNKNOWN]", "`UNKNOWN` did not resolve to any definition"),
         ("[]", "requires a non-empty dependency list"),
         ("[GOOD.value]", "structured identifier list"),
     ];
@@ -237,7 +237,13 @@ fn lua_and_js_reject_the_same_unsupported_wire_dependencies() {
             fn main() {{}}
             "#
         );
-        let ws = ws_with(&source);
+        let ws = match crate::common::try_ws_with_named("<test>", &source) {
+            Ok(ws) => ws,
+            Err(error) => {
+                assert!(error.message.contains(expected), "{annotation}: {error}");
+                continue;
+            }
+        };
         let mid = crate::common::test_mid(&ws);
         let lua_error = match skull::mir_emit::emit_full(&ws, mid) {
             Ok(_) => panic!("Lua accepted unsupported dependency {annotation}"),

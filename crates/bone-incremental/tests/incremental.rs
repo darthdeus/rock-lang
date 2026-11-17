@@ -22,6 +22,12 @@ fn parse_rock_with_file(src: &str, file: &str) -> Result<skull_parser::Ast, Comp
     skull_parser::parse_module_clean(src, Ustr::from(file))
 }
 
+fn warm_prelude() -> skull_parser::Ast {
+    let mut warm = parse_rock_with_file(WARM_PRELUDE, WARM_PRELUDE_PATH).expect("warm parses");
+    warm.package = Some(common::package_tag(1, common::PACKAGE));
+    warm
+}
+
 // ---------------------------------------------------------------------------
 // Harness: parse + batch check
 // ---------------------------------------------------------------------------
@@ -29,9 +35,7 @@ fn parse_rock_with_file(src: &str, file: &str) -> Result<skull_parser::Ast, Comp
 type Files = Vec<bone_incremental::session::SessionFile>;
 
 fn files(list: &[(&str, &str)]) -> Files {
-    list.iter()
-        .map(|(p, t)| bone_incremental::session::SessionFile::legacy(*p, *t))
-        .collect()
+    list.iter().map(|(p, t)| common::v1(p, t)).collect()
 }
 
 /// True if `mid` is a warm stdlib module. With an opaque id, stdlib-ness is
@@ -49,8 +53,7 @@ fn parse_files(files: &Files) -> Result<Vec<skull_parser::Ast>, CompilerError> {
         let mut module =
             skull_parser::parse_module_with_dialect(text, Ustr::from(path.as_str()), f.dialect)?;
         // The oracle must see what the session sees: `Session::new` stamps
-        // these same facts on every parse. A no-op for legacy fixtures
-        // (Legacy/None/Game/Any are the parser defaults).
+        // these same facts on every parse.
         module.package = f.package.clone();
         module.global_policy = f.global_policy;
         assert!(
@@ -66,7 +69,7 @@ fn parse_files(files: &Files) -> Result<Vec<skull_parser::Ast>, CompilerError> {
 /// Fresh whole-workspace check of warm ++ `files` — the oracle's ground
 /// truth. `warm` are the same parsed modules the session under test was
 /// built with, in the same (first) position. `aliases` is the host graph's
-/// table for real-project sets, default (empty) for legacy fixtures.
+/// table for real-project sets, default (empty) for single-package fixtures.
 fn batch_check(
     warm: &[skull_parser::Ast],
     files: &Files,
@@ -162,6 +165,10 @@ fn batch(files: &Files) -> Workspace {
     batch_check(&[], files, &bone_core::modules::NsAliases::default()).expect("batch check")
 }
 
+fn name_is_tail(actual: &Ustr, expected: &str) -> bool {
+    actual.as_str().rsplit("::").next() == Some(expected)
+}
+
 #[test]
 fn comparator_sees_equal_and_divergent_programs() {
     let fs = files(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
@@ -211,7 +218,7 @@ struct Harness {
     texts: Files,
     /// Offset stride for the per-offset type comparison.
     stride: usize,
-    /// The host graph's alias tables (default/empty for legacy fixtures).
+    /// The host graph's alias tables (default/empty for this single package).
     aliases: bone_core::modules::NsAliases,
     /// The language server's lint cache, fed the change each update implies;
     /// it must agree with a fresh lint pass after every step.
@@ -220,8 +227,7 @@ struct Harness {
 
 impl Harness {
     fn new(initial: &[(&str, &str)]) -> Harness {
-        let warm =
-            parse_rock_with_file(WARM_PRELUDE, WARM_PRELUDE_PATH).expect("warm prelude parses");
+        let warm = warm_prelude();
         Harness::with_warm(vec![warm], files(initial), 1)
     }
 
@@ -257,15 +263,23 @@ impl Harness {
     }
 
     fn update(&mut self, path: &str, text: &str) -> UpdateResult {
+        if !self.session.is_tracked(path) {
+            self.session
+                .declare_file_facts(
+                    path,
+                    skull_parser::Dialect::V1,
+                    Some(common::package_tag(1, common::PACKAGE)),
+                    skull_parser::GlobalPolicy::Any,
+                )
+                .expect("new fixture files use the shared v1 package");
+        }
         let result = self
             .session
             .update_file(path, text)
             .unwrap_or_else(|e| panic!("update_file({path}) failed: {}", e.message));
         match self.texts.iter_mut().find(|f| f.path == path) {
             Some(f) => f.text = text.to_string(),
-            None => self
-                .texts
-                .push(bone_incremental::session::SessionFile::legacy(path, text)),
+            None => self.texts.push(common::v1(path, text)),
         }
         self.assert_matches_batch();
         let change = bone_query::lint_cache_update(self.session.workspace(), path, &result);
@@ -330,9 +344,15 @@ impl Harness {
         let mut names: Vec<String> = ids
             .iter()
             .filter_map(|(mid, owner)| match owner {
-                bone_semantic::hir::BodyOwner::Function(fid) => {
-                    Some(ws.module(*mid).functions[*fid].name.to_string())
-                }
+                bone_semantic::hir::BodyOwner::Function(fid) => Some(
+                    ws.module(*mid).functions[*fid]
+                        .name
+                        .as_str()
+                        .rsplit("::")
+                        .next()
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
                 _ => None,
             })
             .collect();
@@ -433,7 +453,13 @@ fn coroutine_body_edit_stays_a_coroutine_and_is_reported() {
     assert_eq!(h.function_names(&result.reinferred), ["counter"]);
     h.assert_clean();
     let ws = h.session.workspace();
-    let (fmid, fid) = ws.module(h.mid("c.rock")).functions_by_name[&Ustr::from("counter")][0];
+    let (fmid, fid) = ws
+        .module(h.mid("c.rock"))
+        .functions_by_name
+        .iter()
+        .find(|(name, _)| name.as_str().rsplit("::").next() == Some("counter"))
+        .expect("counter function")
+        .1[0];
     assert!(ws.module(fmid).functions[fid].is_coroutine);
 }
 
@@ -473,7 +499,7 @@ fn body_edit_bumps_only_changed_body_generation() {
         let fid = module
             .functions
             .iter()
-            .find(|(_, f)| f.name.as_str() == name)
+            .find(|(_, f)| f.name.as_str().rsplit("::").next() == Some(name))
             .map(|(fid, _)| fid)
             .expect("fn exists");
         module.bodies[&bone_semantic::hir::BodyOwner::Function(fid)].generation
@@ -635,7 +661,7 @@ fn origin_doubled() -> int {
 /// hole and its self-call drives resolution through the misaligned id.
 #[test]
 fn itemless_file_before_others_keeps_module_ids_aligned() {
-    let warm = parse_rock_with_file(WARM_PRELUDE, WARM_PRELUDE_PATH).expect("warm parses");
+    let warm = warm_prelude();
     let session = Session::new(
         vec![warm],
         files(&[
@@ -826,7 +852,7 @@ fn oracle_transitive_interface_cascade() {
     // a -> b (re-lower: Wrap.inner T->Error) -> c (re-infer: the body type it
     // reads shifts). The oracle (asserted at every step) is the judge -- the
     // expression types must match a fresh batch build across all three files.
-    let a = "struct T { v: int }";
+    let a = "value T { v: int }";
     let b = "struct Wrap { inner: T }\nfn unwrap(w: Wrap) -> int { w.inner.v }";
     let c = "fn use_wrap(w: Wrap) -> int { unwrap(w) }";
     let mut h = Harness::new(&[("a.rock", a), ("b.rock", b), ("c.rock", c)]);
@@ -1346,7 +1372,7 @@ fn shift_module_after_edit_moves_only_later_item_spans() {
     let fid = |m: &bone_semantic::hir::Module, name: &str| {
         m.functions
             .iter()
-            .find(|(_, f)| f.name.as_str() == name)
+            .find(|(_, f)| name_is_tail(&f.name, name))
             .map(|(i, _)| i)
             .expect("fn exists")
     };
@@ -1455,7 +1481,7 @@ fn relower_function_in_place_matches_fresh_lower() {
         .module(mid)
         .functions
         .iter()
-        .find(|(_, fnc)| fnc.name.as_str() == "target")
+        .find(|(_, fnc)| name_is_tail(&fnc.name, "target"))
         .map(|(i, _)| i)
         .expect("target fid");
 
@@ -1597,18 +1623,18 @@ fn dep_index_records_cross_module_names() {
 
     let b = h.session.module_deps(h.mid("b.rock"));
     assert!(
-        b.contains(&Ustr::from("Point")),
+        b.iter().any(|name| name_is_tail(name, "Point")),
         "field access p.x must record Point; got {b:?}"
     );
     assert!(
-        b.contains(&Ustr::from("make_point")),
+        b.iter().any(|name| name_is_tail(name, "make_point")),
         "call must record make_point; got {b:?}"
     );
 
     // a.rock defines Point/make_point; it must not depend on b.rock's names.
     let a = h.session.module_deps(h.mid("a.rock"));
     assert!(
-        !a.contains(&Ustr::from("double_x")),
+        !a.iter().any(|name| name_is_tail(name, "double_x")),
         "a.rock must not depend on b.rock's double_x; got {a:?}"
     );
 }
@@ -1625,8 +1651,8 @@ fn body_edit_incrementally_updates_dep_index() {
     let has = |h: &Harness, name: &str| {
         h.session
             .dependents
-            .get(&Ustr::from(name))
-            .is_some_and(|s| s.contains(&b_mid))
+            .iter()
+            .any(|(key, modules)| name_is_tail(key, name) && modules.contains(&b_mid))
     };
 
     assert!(has(&h, "make_point"), "precondition: b calls make_point");
@@ -1823,7 +1849,7 @@ fn signature_edit_that_adds_a_function_reinfers_callers_of_the_later_ones() {
     ]);
 
     let result = h.update("a.rock", with);
-    assert_eq!(result.tier, UpdateTier::Interface);
+    assert_eq!(result.tier, UpdateTier::Scope);
     assert!(Harness::reinferred_mids(&result).contains(&h.mid("b.rock")));
     h.assert_matches_batch();
 }
@@ -2127,11 +2153,9 @@ fn run_fuzz_session(seed: u64, steps: usize) {
             .collect(),
     };
 
-    let warm = parse_rock_with_file(WARM_PRELUDE, WARM_PRELUDE_PATH).expect("warm prelude parses");
+    let warm = warm_prelude();
     let initial: Files = (0..model.files.len())
-        .map(|i| {
-            bone_incremental::session::SessionFile::legacy(FuzzModel::path(i), model.render(i))
-        })
+        .map(|i| common::v1(&FuzzModel::path(i), &model.render(i)))
         .collect();
     let mut h = Harness::with_warm(vec![warm], initial, 1);
 

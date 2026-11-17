@@ -198,6 +198,7 @@ pub(crate) fn check_pattern(
                         )
                     })?;
 
+                    let vname = Ustr::from(vname.rsplit("::").next().unwrap_or(vname.as_str()));
                     let vdef = def
                         .variants
                         .iter()

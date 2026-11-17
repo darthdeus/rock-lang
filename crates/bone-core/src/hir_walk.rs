@@ -64,6 +64,7 @@ impl Body {
         match self.expr_arena[e] {
             Expr::Unit
             | Expr::Null
+            | Expr::Error
             | Expr::Hole(_)
             | Expr::Int(_)
             | Expr::Float(_)

@@ -12,7 +12,7 @@ fn use_f() -> int {
 // Params are NOT in scope inside defaults (rock: "defaults are injected at
 // the call site and other params are not in scope"), so a default referencing
 // a sibling param is rejected...
-//! expect: Undefined global `a`
+//! expect: `a` did not resolve to any definition
 fn f2(a: int = 1, b: int = a) -> int {
     let r = b
     return r

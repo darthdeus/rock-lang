@@ -184,11 +184,7 @@ pub enum ExprKind {
     As(Idx<ExprData>, Idx<TypeExprData>),
     /// bitcast<Type>(expr) preserves the low 32 bits between int and uint.
     Bitcast(Idx<ExprData>, Idx<TypeExprData>),
-    /// `expr :: Type` type ascription
-    TypeAscription(Idx<ExprData>, Idx<TypeExprData>),
-    /// `(expr : Type)` — the modules-v1 contextual-ascription form. Same
-    /// lowering as [`ExprKind::TypeAscription`]; a separate node because the
-    /// spellings format differently (v1 rejects the infix form).
+    /// `(expr : Type)` - contextual ascription supplies an expected type.
     ParenAscription(Idx<ExprData>, Idx<TypeExprData>),
 
     Not(Idx<ExprData>),
@@ -846,7 +842,7 @@ pub enum ItemKind {
     /// `pub mod x { .. }` — an inline module block (v1). Reopening a module
     /// adds fragments; the namespace tree coalesces them.
     Module(ModBlock),
-    /// `use ...;` at item level (v1 scoping; parses in legacy too, additive).
+    /// `use ...;` at item level.
     Use(UseDecl),
     /// A top-level macro invocation `name(args)` / `name!(args)` (sigil enables
     /// type-shaped args). Expansion replaces it with the macro's spliced items
@@ -875,11 +871,11 @@ pub struct Ast {
     /// for the whole module -- independent of item spans (which macro expansion
     /// can retag) and defined even for an item-less module.
     pub file: Ustr,
-    /// The source dialect this file was parsed under (set by the parser).
+    /// The source dialect field is retained for compatibility; parsing uses
+    /// modules-v1 grammar.
     pub dialect: Dialect,
     /// The owning package (set by the loader from the package graph; `None`
-    /// for standalone/editor sources). Package loaders overwrite the
-    /// directive-derived dialect with the graph fact at the same time.
+    /// for standalone/editor sources). Package loaders stamp graph facts here.
     pub package: Option<rock_core::source_code::PackageTag>,
     /// The file's `mod a::b;` header (v1), if the first non-comment item was
     /// one. Selects the logical module this file's items contribute to.

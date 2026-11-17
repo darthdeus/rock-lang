@@ -7,18 +7,15 @@ fn write(root: &Path, path: &str, text: &str) {
     write_files(root, &[(path, text)]);
 }
 
-/// An `app` using a `lib`, both in modules v1 or both legacy (file-keyed
-/// definitions), under `base`.
+/// An `app` using a `lib`, with explicit or default modules v1, under `base`.
 fn compile_under(base: &Path, v1: bool) -> String {
-    let (language, export, import) = if v1 {
-        (
-            "\n[language]\nmodules = \"v1\"\n",
-            "pub ",
-            "use lib::{lib_offset, lib_site};\n",
-        )
+    let language = if v1 {
+        "\n[language]\nmodules = \"v1\"\n"
     } else {
-        ("", "", "")
+        ""
     };
+    let export = "pub ";
+    let import = "use lib::{lib_offset, lib_site};\n";
     write(
         base,
         "lib/stick.toml",

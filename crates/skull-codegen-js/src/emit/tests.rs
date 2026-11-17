@@ -21,7 +21,7 @@ fn test_fn(ws: &Workspace, name: &str) -> FuncRef {
         .module(module)
         .functions
         .iter()
-        .find(|(_, f)| f.name.as_str() == name)
+        .find(|(_, f)| f.name.rsplit("::").next() == Some(name))
         .map(|(func, _)| func)
         .expect("test function");
     FuncRef { module, func }
@@ -98,8 +98,9 @@ fn main() {
         .find(|instance| {
             ws.module(instance.func.module).functions[instance.func.func]
                 .name
-                .as_str()
-                == "wired_pair"
+                .rsplit("::")
+                .next()
+                == Some("wired_pair")
         })
         .expect("publisher instance")
         .clone();

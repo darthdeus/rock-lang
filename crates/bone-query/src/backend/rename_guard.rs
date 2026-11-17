@@ -79,9 +79,6 @@ pub(super) fn check_unpinned<'t>(
         fns.iter()
             .any(|(m, _)| is_read_only_source(ws.module(*m).file.as_str()))
     });
-    if !shared_with_stdlib {
-        return Ok(());
-    }
     for (m, inf) in ws.inferences_iter() {
         let module = ws.module(m);
         if is_read_only_source(module.file.as_str()) {
@@ -90,15 +87,42 @@ pub(super) fn check_unpinned<'t>(
         for (owner, body) in module.bodies.iter() {
             let bi = inf.per_fn.get(owner);
             for (e, expr) in body.expr_arena.iter() {
-                let names_it = match expr {
-                    hir::Expr::Global(n) => *n == name,
-                    hir::Expr::Call {
-                        callee: hir::Callee::Unresolved { name: n, .. },
-                        ..
-                    } => *n == name,
-                    hir::Expr::SafeNavCall { method, .. } => *method == name,
-                    _ => false,
+                let family = match expr {
+                    hir::Expr::Call { family, .. } | hir::Expr::SafeNavCall { family, .. } => {
+                        Some(family)
+                    }
+                    _ => None,
                 };
+                let merged_with_stdlib = family.is_some_and(|family| {
+                    let hir::CallFamily::Merged {
+                        name: family_name,
+                        file,
+                    } = family
+                    else {
+                        return false;
+                    };
+                    let Some(mid) = ws.module_ids.get(file) else {
+                        return false;
+                    };
+                    let Some(members) = ws.module(*mid).call_families.get(family_name) else {
+                        return false;
+                    };
+                    members.iter().any(|member| member.key == name)
+                        && members
+                            .iter()
+                            .any(|member| member.owner == Some(bone_core::modules::STD_PACKAGE_ID))
+                });
+                let names_it = merged_with_stdlib
+                    || (shared_with_stdlib
+                        && match expr {
+                            hir::Expr::Global(n) => *n == name,
+                            hir::Expr::Call {
+                                callee: hir::Callee::Unresolved { name: n, .. },
+                                ..
+                            } => *n == name,
+                            hir::Expr::SafeNavCall { method, .. } => *method == name,
+                            _ => false,
+                        });
                 let pinned = bi.is_some_and(|bi| {
                     bi.resolved_overload_calls.contains_key(&e)
                         || bi.fn_field_calls.contains_key(&e)
@@ -214,7 +238,7 @@ pub(super) fn check_opaque<'t>(
             return Err(RenameRefusal(format!(
                 "cannot rename `{old}`: the opaque inline({lang}) body of `{}` ({}) \
                  names it, and rename cannot rewrite inline code",
-                f.name,
+                bone_core::modules::display_name(f.name.as_str()),
                 label(&f.name_span)
             )));
         }

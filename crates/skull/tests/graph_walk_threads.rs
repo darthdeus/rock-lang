@@ -132,8 +132,8 @@ fn an_incremental_update_walks_the_same_on_any_pool() {
     let mut session = Session::new(
         stdlib_asts(),
         vec![
-            SessionFile::legacy("proj/main.rock", MAIN_V1),
-            SessionFile::legacy("lib/helpers.rock", LIB),
+            session_file("proj/main.rock", MAIN_V1),
+            session_file("lib/helpers.rock", LIB),
         ],
         &NsAliases::default(),
     )
@@ -159,4 +159,19 @@ fn an_incremental_update_walks_the_same_on_any_pool() {
         (sb.affected, sb.expanded, sb.pruned)
     );
     assert_same("after the edit", ws, &a, &b);
+}
+
+fn session_file(path: &str, text: &str) -> SessionFile {
+    SessionFile {
+        path: path.to_string(),
+        text: text.to_string(),
+        dialect: skull_parser::Dialect::V1,
+        package: Some(skull_parser::PackageTag {
+            id: 1,
+            self_name: "graph_walk".to_string(),
+            identity_storage: Default::default(),
+            root: String::new(),
+        }),
+        global_policy: skull_parser::GlobalPolicy::Any,
+    }
 }

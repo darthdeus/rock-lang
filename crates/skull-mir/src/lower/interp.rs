@@ -237,6 +237,7 @@ impl<'a> Builder<'a> {
             // A transparent newtype renders `Name(<inner>)`; its runtime value IS
             // the raw inner, so `tostring` it directly.
             StringifyRoute::Newtype(name) => {
+                let name = bone_core::modules::display_name(name.as_str());
                 let open = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(
                     format!("{name}(").as_str(),
                 ))));

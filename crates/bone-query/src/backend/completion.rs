@@ -176,9 +176,9 @@ fn contextual_completions(
         }
     }
     // `a::b::|` in a modules-v1 fragment: what the path names, as the
-    // resolver walks it -- a module's accessible members and child
-    // modules, or an enum's variants. Served from the live workspace:
-    // the half-typed path is in the buffer, not in the namespace tree.
+    // resolver walks it -- a module's accessible members and child modules.
+    // This source declines when the prefix names an enum, leaving its closed
+    // set and payload templates to the enum source below.
     if let Some(items) = v1_path_completions(
         session.workspace(),
         rq.path,
@@ -411,12 +411,18 @@ fn general_completions(
     // per-candidate detail rendering -- so typing narrows the work, not just
     // the result.
     let t_cands = bone_core::prelude::Instant::now();
-    let mut cands = scope_candidates(&g, caches.visible_bindings, rq, cx.expr_position);
+    let mut cands = scope_candidates(
+        &g,
+        caches.visible_bindings,
+        rq,
+        cx.expr_position || pattern_pos,
+    );
     // Macros are an expression, never a type.
     if cx.expr_position {
         push_macro_candidates(session, rq, &mut cands);
     }
-    let import_edits = push_import_candidates(&g, session, rq, cx.expr_position, &mut cands);
+    let import_edits =
+        push_import_candidates(&g, session, rq, cx.expr_position || pattern_pos, &mut cands);
     let cands_ms = t_cands.elapsed().as_secs_f64() * 1000.0;
     let n_cands = cands.len();
 
@@ -611,8 +617,8 @@ fn push_macro_candidates(
     rq: &Request,
     cands: &mut Vec<crate::query::CompletionEntry>,
 ) {
-    let show_private = rq.prefix.starts_with('_');
     let pfx = rq.prefix.as_bytes();
+    let show_private = rq.prefix.starts_with('_');
     let mut already: std::collections::HashSet<Ustr> = cands.iter().map(|c| c.name).collect();
     for (def_file, md) in session.all_macro_defs() {
         let name = md.name;
@@ -637,6 +643,7 @@ fn push_macro_candidates(
             kind: SymCat::Macro,
             detail: Some(format!("macro {name}({}){ret}", params.join(", "))),
             signature_key: None,
+            variant_enum_key: None,
             ty: None,
             takes_params: !md.params.is_empty(),
             variant_shape: None,
@@ -869,6 +876,7 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
         // tail too (the user types `Combat`, not `MobAiState::Combat`),
         // mirroring the score's vname handling.
         let (exact, band) = match_band_exact(name, q, q_raw);
+        let freq_name = c.signature_key.unwrap_or(c.name);
         let key = RankKey {
             exact,
             type_rank,
@@ -882,7 +890,7 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
             freq: match c.kind {
                 // Locals ride the recency rung instead.
                 SymCat::Local | SymCat::Param => 0,
-                _ => freq_bucket(self.freq.get(&c.name).copied().unwrap_or(0)),
+                _ => freq_bucket(self.freq.get(&freq_name).copied().unwrap_or(0)),
             },
             rec: c.rec,
             len: RankKey::len_key(score, name.len()),
@@ -897,10 +905,10 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
         if let Some(pe) = self.pattern_enum {
             // Pattern slot: only a variant of the scrutinee's enum IS a
             // pattern of the expected type (locals/fns don't pattern-match;
-            // they stay offered but below, fail-open). The variant's enum
-            // name rides its `detail`, same fact the typed-slot rung reads.
+            // they stay offered but below, fail-open). The variant carries
+            // its canonical enum key separately from its display detail.
             return match c.kind {
-                SymCat::Variant if c.detail.as_deref() == Some(pe) => 0,
+                SymCat::Variant if c.variant_enum_key.is_some_and(|key| key.as_str() == pe) => 0,
                 _ => 2,
             };
         }
@@ -918,8 +926,12 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
                     0
                 }
                 SymCat::Function
-                    if fn_unique_return_ty_in_scope(ws, c.name.as_str(), self.module_frag)
-                        .is_some_and(|t| oracle.iterable(t)) =>
+                    if fn_unique_return_ty_in_scope(
+                        ws,
+                        c.signature_key.unwrap_or(c.name).as_str(),
+                        self.module_frag,
+                    )
+                    .is_some_and(|t| oracle.iterable(t)) =>
                 {
                     1
                 }
@@ -930,6 +942,7 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
             // No expected type: the kind ladder is the whole bucket.
             return 0;
         };
+        let def_key = c.signature_key.unwrap_or(c.name);
         match c.kind {
             // A local/param/global whose type COERCES into the expected slot
             // (bone's real relation: generics instantiate, `int` fits
@@ -942,10 +955,15 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
             {
                 0
             }
-            SymCat::Variant if c.detail.as_deref().is_some_and(|e| exp.expects_nominal(e)) => 0,
+            SymCat::Variant
+                if c.variant_enum_key
+                    .is_some_and(|key| exp.expects_nominal(key.as_str())) =>
+            {
+                0
+            }
             SymCat::Function
-                if self.g.enclosing_fn.as_deref() != Some(c.name.as_str())
-                    && exp.accepts_fn_returning(ws, c.name.as_str()) =>
+                if self.g.enclosing_fn.as_deref() != Some(def_key.as_str())
+                    && exp.accepts_fn_returning(ws, def_key.as_str()) =>
             {
                 1
             }
@@ -979,7 +997,7 @@ fn push_entity_synth(g: &GeneralCx, rq: &Request, cx: &CompletionCx, sink: &mut 
     if !is_entity_param_name(pn) {
         return;
     }
-    let payload = fn_prefix_struct(g.ws, fn_name);
+    let payload = fn_prefix_struct(g.ws, g.frag, fn_name);
     let label = match payload {
         Some(p) => format!("Entity<{p}>"),
         None => "Entity<>".to_string(),
@@ -1048,7 +1066,7 @@ fn push_named_args(g: &GeneralCx, rq: &Request, cx: &CompletionCx, sink: &mut Si
 /// existing (the host's `Wait` is an enum); otherwise the generic
 /// `Coroutine<$0>` snippet stands in.
 fn push_coroutine_synths(g: &GeneralCx, rq: &Request, cx: &CompletionCx, sink: &mut Sink) {
-    let has_wait = nominal_exists(g.ws, "Wait");
+    let has_wait = nominal_exists(g.ws, g.frag, "Wait");
     let q = rq.prefix.as_bytes();
     if cx.coroutine_generic {
         // (a) first generic arg of `Coroutine<..>` -> `Wait` ranks #0,
@@ -1138,6 +1156,7 @@ fn push_reach_paths(
         }
     };
     let pfx = rq.prefix.as_bytes();
+    let show_private = rq.prefix.starts_with('_');
     let callable_spellings = frag.map(|frag| {
         crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Callable)
     });
@@ -1151,21 +1170,36 @@ fn push_reach_paths(
     // with locals (a method on a local yielding the type is a top-tier
     // candidate), a global-rooted path with globals -- so a deep chain off
     // some global can't outrank a direct right-type global.
+    let body_owner = ws.module(g.mid).body_at(rq.offset);
+    let body_inference = body_owner.and_then(|owner| g.inf.per_fn.get(&owner));
     let mut roots: Vec<(String, String, u8)> =
         crate::query::locals_in_scope(ws, g.mid, g.inf, rq.offset)
             .into_iter()
-            .map(|(n, _k, ty, _ty_id, _decl)| (n.to_string(), ty, 0))
+            .map(|(n, _k, ty, ty_id, _decl)| {
+                let ty = ty_id.map_or(ty, |ty_id| {
+                    crate::reachability::type_key_in_body(ws, body_inference, ty_id).to_string()
+                });
+                (n.to_string(), ty, 0)
+            })
             .collect();
     if let Some(frag) = frag {
         roots.extend(
             crate::modules_scope::visible_globals(ws, frag)
                 .into_iter()
-                .map(|global| (global.name.to_string(), global.ty, 1)),
+                .filter(|global| show_private || !global.name.as_str().starts_with('_'))
+                .map(|global| (global.name.to_string(), global.node_ty, 1)),
         );
     } else {
         for m in ws.modules.iter() {
             for (gname, gidx) in m.global_by_name.iter() {
-                roots.push((gname.to_string(), ws.render(None, m.globals[*gidx].ty), 1));
+                if !show_private && gname.as_str().starts_with('_') {
+                    continue;
+                }
+                roots.push((
+                    gname.to_string(),
+                    crate::reachability::type_key(ws, m.globals[*gidx].ty).to_string(),
+                    1,
+                ));
             }
         }
     }

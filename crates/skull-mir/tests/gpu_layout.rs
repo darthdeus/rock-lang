@@ -9,16 +9,14 @@
 //! An instanced mesh may pass attribute sizes `[2, 1, 1, 1]` by hand,
 //! derived from its fields. These tests exercise that layout contract.
 
-use crate::common::checked_ws_of;
-use ustr::Ustr;
-
+use crate::common::{checked_ws_of, key};
 use skull_mir::gpu_layout::{
     AttrKind, SamplerKind, TextureSlots, VertexAttrs, texture_slots, vertex_attrs,
 };
 
 fn attrs_of(src: &str, struct_name: &str) -> VertexAttrs {
     let ws = checked_ws_of(src);
-    vertex_attrs(&ws, Ustr::from(struct_name)).expect("attributes must compute")
+    vertex_attrs(&ws, key(&ws, struct_name)).expect("attributes must compute")
 }
 
 /// An instanced mesh with one position and three scalar fields.
@@ -84,7 +82,7 @@ fn vec3_has_three_components() {
 #[test]
 fn non_numeric_field_rejects() {
     let ws = checked_ws_of("value Bad { pos: Vec2, name: string }");
-    let e = vertex_attrs(&ws, Ustr::from("Bad")).expect_err("a string field must reject");
+    let e = vertex_attrs(&ws, key(&ws, "Bad")).expect_err("a string field must reject");
     let msg = format!("{e:?}");
     assert!(
         msg.contains("name"),
@@ -97,7 +95,7 @@ fn non_numeric_field_rejects() {
 #[test]
 fn non_value_struct_rejects() {
     let ws = checked_ws_of("struct Boxed { pos: Vec2 }");
-    let e = vertex_attrs(&ws, Ustr::from("Boxed")).expect_err("a boxed struct must reject");
+    let e = vertex_attrs(&ws, key(&ws, "Boxed")).expect_err("a boxed struct must reject");
     assert!(format!("{e:?}").contains("value"));
 }
 
@@ -108,7 +106,7 @@ fn non_value_struct_rejects() {
 
 fn slots_of(src: &str, struct_name: &str) -> TextureSlots {
     let ws = checked_ws_of(src);
-    texture_slots(&ws, Ustr::from(struct_name)).expect("slots must compute")
+    texture_slots(&ws, key(&ws, struct_name)).expect("slots must compute")
 }
 
 /// Texture bindings in declaration order.
@@ -144,7 +142,7 @@ fn int_samplers_are_a_distinct_kind() {
 #[test]
 fn non_sampler_field_rejects() {
     let ws = checked_ws_of("struct Bad { tex: Sampler2D, scale: float }");
-    let e = texture_slots(&ws, Ustr::from("Bad")).expect_err("a float field must reject");
+    let e = texture_slots(&ws, key(&ws, "Bad")).expect_err("a float field must reject");
     let msg = format!("{e:?}");
     assert!(
         msg.contains("scale"),
@@ -157,7 +155,7 @@ fn non_sampler_field_rejects() {
 #[test]
 fn value_struct_rejects() {
     let ws = checked_ws_of("value Bad { tex: Sampler2D }");
-    let e = texture_slots(&ws, Ustr::from("Bad")).expect_err("a value struct must reject");
+    let e = texture_slots(&ws, key(&ws, "Bad")).expect_err("a value struct must reject");
     assert!(format!("{e:?}").contains("value"));
 }
 
@@ -166,5 +164,5 @@ fn value_struct_rejects() {
 #[test]
 fn empty_group_rejects() {
     let ws = checked_ws_of("struct Empty { }");
-    assert!(texture_slots(&ws, Ustr::from("Empty")).is_err());
+    assert!(texture_slots(&ws, key(&ws, "Empty")).is_err());
 }

@@ -53,7 +53,7 @@ fn final_report_is_opt_in_and_observes_mir_inlining() {
     );
     let report = std::fs::read_to_string(report_path).expect("opt-in report");
     assert!(
-        report.contains("type `Wide`"),
+        report.contains("type `$standalone$<test>::Wide`"),
         "wide type missing from report: {report}"
     );
     let start = report.find("function run_").expect("emitted run frame");

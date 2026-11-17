@@ -32,21 +32,53 @@ use ustr::Ustr;
 /// (completion, hover, rename, inlay) works on broken code and the recovery
 /// errors surface as diagnostics.
 pub fn parse_module(source: &str, file: Ustr) -> Result<Ast, CompilerError> {
-    parse_module_with_dialect(source, file, Dialect::Legacy)
+    parse_module_with_dialect(source, file, Dialect::V1)
 }
 
-/// [`parse_module`] with the source dialect selected. V1 files enable the
-/// modules-v1 grammar (`(expr : Type)` ascription, `::` paths, module
-/// items) and reject the legacy infix `expr :: Type` ascription.
+/// [`parse_module`] with a compatibility dialect argument. The parser uses
+/// the modules-v1 grammar for every source.
 pub fn parse_module_with_dialect(
     source: &str,
     file: Ustr,
-    dialect: Dialect,
+    _dialect: Dialect,
 ) -> Result<Ast, CompilerError> {
+    if let Some(span) = removed_legacy_directive_span(source, file) {
+        return Err(CompilerError::new_with_label(
+            span,
+            "the `//! modules: legacy` directive has been removed; delete it".to_string(),
+        ));
+    }
     let tokens = Tokenizer::new(source, file).tokenize()?;
-    let mut ast = Parser::new_with_dialect(tokens, source, 0, dialect).parse_module()?;
+    let mut ast = Parser::new(tokens, source, 0).parse_module()?;
     ast.file = file;
     Ok(ast)
+}
+
+fn removed_legacy_directive_span(source: &str, file: Ustr) -> Option<Span> {
+    let mut offset = 0;
+    for (line_number, line) in source.split_inclusive('\n').take(10).enumerate() {
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        let content = content.strip_suffix('\r').unwrap_or(content);
+        let trimmed = content.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("//!") {
+            let rest = rest.trim();
+            if rest
+                .strip_prefix("modules:")
+                .is_some_and(|value| value.trim() == "legacy")
+            {
+                let leading_bytes = content.len() - trimmed.len();
+                let leading_chars = content[..leading_bytes].chars().count();
+                return Some(Span::new(
+                    file,
+                    (line_number, line_number),
+                    (leading_chars, content.chars().count()),
+                    (offset + leading_bytes, offset + content.len()),
+                ));
+            }
+        }
+        offset += line.len();
+    }
+    None
 }
 
 /// [`parse_module`] for a caller that has NO recovery story: a recovered syntax
@@ -59,10 +91,11 @@ pub fn parse_module_with_dialect(
 /// `""" .. """` inline body missing its `=` sat in the JS emitter fixtures:
 /// accepted, dropped, and the rejection under test came from a different path.
 pub fn parse_module_clean(source: &str, file: Ustr) -> Result<Ast, CompilerError> {
-    parse_module_clean_with_dialect(source, file, Dialect::Legacy)
+    parse_module_clean_with_dialect(source, file, Dialect::V1)
 }
 
-/// [`parse_module_clean`] with the source dialect selected.
+/// [`parse_module_clean`] with a compatibility dialect argument. The parser
+/// uses the modules-v1 grammar for every source.
 pub fn parse_module_clean_with_dialect(
     source: &str,
     file: Ustr,
@@ -81,18 +114,17 @@ pub fn parse_module_clean_with_dialect(
 /// just an edited item instead of the whole file: extract the item's text by its
 /// stored span, parse it here, and the resulting AST's spans line up with the
 /// rest of the file. `line`/`column` are 0-based (rock-core `Span` convention).
-/// `dialect` is the owning file's, so re-parsing one item of a v1 file does not
-/// quietly read it as legacy.
+/// `dialect` is retained for compatibility; the parser always uses modules-v1.
 pub fn parse_one_item(
     source: &str,
     file: Ustr,
     offset: usize,
     line: usize,
     column: usize,
-    dialect: Dialect,
+    _dialect: Dialect,
 ) -> Result<Ast, CompilerError> {
     let tokens = Tokenizer::new_with_offset(source, file, offset, line, column).tokenize()?;
-    let mut ast = Parser::new_with_dialect(tokens, source, offset, dialect).parse_single_item()?;
+    let mut ast = Parser::new(tokens, source, offset).parse_single_item()?;
     ast.file = file;
     // Total, like `parse_module`. The incremental fast path inspects
     // `recovery_errors` itself: a body-level recovery (e.g. a stray `)` inside the

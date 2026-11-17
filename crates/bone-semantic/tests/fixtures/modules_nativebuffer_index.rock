@@ -5,6 +5,7 @@
 //! value-ness is a separate monomorphization concern, not a type-of-index one.
 
 //- nb_float_index
+//-- nb_float_index.rock
 fn f(buf: NativeBuffer<float>) -> int {
     let x = buf[0]
       //^ float
@@ -12,6 +13,7 @@ fn f(buf: NativeBuffer<float>) -> int {
 }
 
 //- nb_struct_index
+//-- nb_struct_index.rock
 struct V2 { x: float, y: float }
 fn f(buf: NativeBuffer<V2>) -> int {
     let p = buf[0]

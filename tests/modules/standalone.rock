@@ -1,0 +1,8 @@
+mod helpers {
+    pub fn answer() -> int { 42 }
+}
+
+@test(output = "42")
+fn standalone_module_path() {
+    print(helpers::answer())
+}

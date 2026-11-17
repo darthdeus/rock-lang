@@ -12,14 +12,12 @@
 //! demand path carries it -- and that is the plan's standing gate for E1, which
 //! runs with inlining off by construction.
 
-use skull_mir::mir::{Inst, MirFunc};
-use skull_mir::monoty::{MonoCtor, MonoTy};
-use ustr::Ustr;
-
 use crate::common::{
     InlineOffGuard, body_calls, bound_callee_name, definitions_matching, fn_name, function_body,
-    scalar_ctx, ws_with_stdlib,
+    key, scalar_ctx, ws_with_stdlib,
 };
+use skull_mir::mir::{Inst, MirFunc};
+use skull_mir::monoty::{MonoCtor, MonoTy};
 
 /// A user fn taking an `Iterator`-bounded generic, called at one concrete
 /// chain. `total`'s body holds the placeholder; `main` is the concrete root.
@@ -259,7 +257,7 @@ fn main() {
 
     let mut poisoned_plans = (*bodies.plans).clone();
     let pair = MonoTy::App {
-        ctor: MonoCtor::Nominal(Ustr::from("Pair")),
+        ctor: MonoCtor::Nominal(key(&ws, "Pair")),
         params: Vec::new(),
     };
     let wrong_result = graph

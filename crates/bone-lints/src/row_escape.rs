@@ -515,7 +515,7 @@ fn handle_generic(ws: &Workspace, ty: TyId) -> Option<VarId> {
     else {
         return None;
     };
-    if !HANDLES.contains(&name.as_str()) || params.len() != 1 {
+    if !HANDLES.contains(&bone_core::modules::display_name(name.as_str())) || params.len() != 1 {
         return None;
     }
     let p = params.into_iter().next()?;
@@ -579,7 +579,7 @@ fn static_te(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
 fn is_handle(ws: &Workspace, bi: &BodyInference, ty: Option<TyId>) -> bool {
     matches!(
         ty.map(|t| head_type(ws, bi, t)),
-        Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) if HANDLES.contains(&n.as_str())
+        Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) if HANDLES.contains(&bone_core::modules::display_name(n.as_str()))
     )
 }
 
@@ -608,7 +608,7 @@ fn iterates_an_arena(ws: &Workspace, bi: &BodyInference, body: &Body, iter: Idx<
     let is_arena = |e: Idx<Expr>| {
         matches!(
             bi.expr_types.get(e).copied().map(|t| head_type(ws, bi, t)),
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) if n.as_str() == "Arena"
+            Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) if bone_core::modules::display_name(n.as_str()) == "Arena"
         )
     };
     if is_arena(iter) {

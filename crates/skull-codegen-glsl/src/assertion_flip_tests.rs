@@ -566,7 +566,13 @@ fn production_shader_body_consumes_the_concrete_result_plan() {
     let passthrough = view
         .order
         .iter()
-        .find(|inst| ws.module(inst.func.module).functions[inst.func.func].name == "passthrough")
+        .find(|inst| {
+            declared_name(
+                ws.module(inst.func.module).functions[inst.func.func]
+                    .name
+                    .as_str(),
+            ) == "passthrough"
+        })
         .cloned()
         .expect("generic helper is retained");
     let plan = Arc::make_mut(&mut view.concrete_plans)

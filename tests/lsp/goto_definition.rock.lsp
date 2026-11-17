@@ -253,7 +253,7 @@ enum Shape {
 }
 
 fn main() {
-    let s = «cursor»Circle { radius: 5.0 }
+    let s = Shape::«cursor»Circle { radius: 5.0 }
 }
 ---
 OPERATION: goto_definition
@@ -352,15 +352,15 @@ enum Color {
 }
 
 fn main() {
-    let c = «cursor»Red
+    let c = Color::«cursor»Red
 }
 ---
 OPERATION: goto_definition
 ---
 EXPECTED:
 file: main.rock
-line: 0
-character: 5
+line: 1
+character: 4
 ===
 
 TEST: goto_def_enum_qualified_variant

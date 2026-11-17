@@ -66,6 +66,12 @@ fn renames_stay_in_the_user_file() {
             &[("fn twice_it", 3)],
             &[(0, 3), (2, 10), (3, 15)],
         ),
+        (
+            "a function value binds the user definition by canonical identity",
+            format!("{BOX_FN}  let f = get\n  print(f(Box {{ v: 1 }}))\n}}\n"),
+            &[("fn get", 3), ("= get", 2)],
+            &[(1, 3), (3, 10)],
+        ),
     ];
     for (case, src, cursors, sites) in cases {
         let bone = workspace(src);
@@ -94,12 +100,6 @@ fn renames_that_would_touch_or_guess_at_the_stdlib_are_refused() {
             "fn f(a: Arena<int>) -> int {\n  a.len()\n}\n".to_string(),
             &[("Arena", 1)],
             &["standard library"],
-        ),
-        (
-            "a function value that could name either side",
-            format!("{BOX_FN}  let f = get\n  print(f(Box {{ v: 1 }}))\n}}\n"),
-            &[("fn get", 3), ("= get", 2)],
-            &["cannot rename `get`", "standard library"],
         ),
         (
             "an unresolved call that could name either side",

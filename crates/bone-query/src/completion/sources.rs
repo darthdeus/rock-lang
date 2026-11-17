@@ -221,25 +221,14 @@ pub(crate) fn field_ref_arg_completions(
     let recv_offset = usize::from(recv_end.is_some());
 
     // First overload whose `arg_idx` slot resolves to a FieldRef with >=1 field.
-    let (t_name, v) = ws.modules.iter().find_map(|m| {
-        m.functions_by_name
-            .get(&name)?
-            .iter()
-            .find_map(|(fmid, fid)| {
-                if frag.is_some_and(|frag| {
-                    !crate::modules_scope::callable_member_admitted(ws, frag, name, *fmid, *fid)
-                }) {
-                    return None;
-                }
-                let f = &ws.modules[fmid.index()].functions[*fid];
-                let (recv_var, recv_owner) = receiver_owner_binding(ws, f, recv_struct, recv_elem);
-                let (owner, v) =
-                    fieldref_slot_owner(ws, f, arg_idx, recv_var, recv_owner, |gname| {
-                        sibling_owner_bind(ws, path, src, offset, arg_idx, recv_offset, f, gname)
-                    })?;
-                (!fields_of_type(ws, owner, v).is_empty()).then_some((owner, v))
-            })
-    })?;
+    let (t_name, v) =
+        crate::modules_scope::admitted_overloads(ws, frag, name).find_map(|(_fmid, _fid, f)| {
+            let (recv_var, recv_owner) = receiver_owner_binding(ws, f, recv_struct, recv_elem);
+            let (owner, v) = fieldref_slot_owner(ws, f, arg_idx, recv_var, recv_owner, |gname| {
+                sibling_owner_bind(ws, path, src, offset, arg_idx, recv_offset, f, gname)
+            })?;
+            (!fields_of_type(ws, owner, v).is_empty()).then_some((owner, v))
+        })?;
 
     let pfx = prefix.as_bytes();
     let mut out = Vec::new();
@@ -326,10 +315,9 @@ pub(crate) fn arg_matches_residual(q: &[u8], k: usize, arg: &str) -> bool {
     qi == q.len()
 }
 
-/// One call-through-eligible function: its canonical key (also its legacy
-/// spelling), the first-param type (rendered), and whether it has more than
-/// one param. A v1 request builds scoped spellings and their lowercase forms
-/// at read time.
+/// One call-through-eligible function: its canonical key, the first-param type
+/// (rendered), and whether it has more than one param. A scoped request builds
+/// display spellings and their lowercase forms at read time.
 pub(crate) struct CtFn {
     pub(crate) key: ustr::Ustr,
     pub(crate) mid: ModuleId,
@@ -433,7 +421,7 @@ pub(crate) fn build_call_through(
                 key: f.name,
                 mid: m.id,
                 fid,
-                first_param_ty: ws.render(None, p0.ty),
+                first_param_ty: crate::reachability::type_key(ws, p0.ty).to_string(),
                 multiparam: f.param_decls.len() > 1,
             });
         }
@@ -445,7 +433,7 @@ pub(crate) fn build_call_through(
             groots.push((
                 *gname,
                 gname.to_string(),
-                ws.render(None, m.globals[*gidx].ty),
+                crate::reachability::type_key(ws, m.globals[*gidx].ty).to_string(),
             ));
         }
     }
@@ -682,9 +670,19 @@ pub(crate) fn call_through_param_completions(
     }
     // In-scope LOCAL roots only -- the position-dependent part. Globals + their
     // reach expansion are precomputed in `index` (the slow part, now cached).
-    let locals: Vec<(String, String)> = crate::query::locals_in_scope(ws, mid, inf, offset)
+    let owner = ws.module(mid).body_at(offset);
+    let body_inference = owner.and_then(|owner| inf.per_fn.get(&owner));
+    let locals: Vec<(String, String, String)> = crate::query::locals_in_scope(ws, mid, inf, offset)
         .into_iter()
-        .map(|(n, _k, ty, _ty_id, _decl)| (n.to_string(), ty))
+        .map(|(n, _k, ty, ty_id, _decl)| {
+            let node_ty = ty_id.map_or_else(
+                || ty.clone(),
+                |ty_id| {
+                    crate::reachability::type_key_in_body(ws, body_inference, ty_id).to_string()
+                },
+            );
+            (n.to_string(), ty, node_ty)
+        })
         .collect();
 
     // Call-through is a synthesized, bottom-ranked (bucket 4) convenience; the
@@ -716,14 +714,14 @@ pub(crate) fn call_through_param_completions(
     // path's `final_ty` is a temporary. Immutable after -- the per-`(type, k)`
     // match memo borrows from it.
     let mut local_args: HashMap<String, Vec<CtArg>> = HashMap::new();
-    for (ln, lt) in &locals {
+    for (ln, _lt, node_ty) in &locals {
         local_args
-            .entry(lt.clone())
+            .entry(node_ty.clone())
             .or_default()
             .push(CtArg::direct(None, ln.clone(), ArgPayload::None));
         let paths = frag
-            .map(|frag| reach.arg_paths_in_scope(ws, frag, lt))
-            .unwrap_or_else(|| reach.arg_paths_from(lt).iter().collect());
+            .map(|frag| reach.arg_paths_in_scope(ws, frag, node_ty))
+            .unwrap_or_else(|| reach.arg_paths_from(node_ty).iter().collect());
         for p in paths {
             if p.is_method && p.takes_args {
                 continue;
@@ -1063,17 +1061,27 @@ fn arg_admitted(
 /// Whether a nominal type (struct OR enum) named `name` is defined anywhere in
 /// the workspace. The host's `Wait` yield type is an enum, so the coroutine
 /// ergonomics probe both.
-pub(crate) fn nominal_exists(ws: &Workspace, name: &str) -> bool {
-    let u = Ustr::from(name);
+pub(crate) fn nominal_exists(
+    ws: &Workspace,
+    frag: Option<&bone_core::modules::FragmentScope>,
+    name: &str,
+) -> bool {
+    let Some(key) = crate::modules_scope::resolve_type_key(ws, frag, name) else {
+        return false;
+    };
     ws.modules
         .iter()
-        .any(|m| m.struct_by_name.contains_key(&u) || m.enums_by_name.contains_key(&u))
+        .any(|m| m.struct_by_name.contains_key(&key) || m.enums_by_name.contains_key(&key))
 }
 
 /// The struct named by a fn-name's first `_`-segment, capitalized (`mob_attack_co`
 /// -> `Mob`), if such a struct exists -- the payload `T` for a synthesized
 /// `Entity<T>`. None when the segment doesn't name a struct.
-pub(crate) fn fn_prefix_struct(ws: &Workspace, fn_name: &str) -> Option<Ustr> {
+pub(crate) fn fn_prefix_struct(
+    ws: &Workspace,
+    frag: Option<&bone_core::modules::FragmentScope>,
+    fn_name: &str,
+) -> Option<Ustr> {
     // Try each `_`-segment leading-first: `<type>_<verb>` (`mob_attack_co`) and
     // `<verb>_<type>` (`spawn_mob`) both name `Mob`. Leading match wins when
     // more than one segment is a struct (the UFCS convention).
@@ -1083,11 +1091,11 @@ pub(crate) fn fn_prefix_struct(ws: &Workspace, fn_name: &str) -> Option<Ustr> {
         .find_map(|seg| {
             let mut chars = seg.chars();
             let cap: String = chars.next()?.to_ascii_uppercase().to_string() + chars.as_str();
-            let u = Ustr::from(&cap);
+            let key = crate::modules_scope::resolve_type_key(ws, frag, &cap)?;
             ws.modules
                 .iter()
-                .any(|m| m.struct_by_name.contains_key(&u))
-                .then_some(u)
+                .any(|m| m.struct_by_name.contains_key(&key))
+                .then(|| Ustr::from(&cap))
         })
 }
 
@@ -1144,7 +1152,14 @@ pub(crate) fn enum_record_field_completions(
 ) -> Option<Vec<CompletionItem>> {
     for munged in completion_munges(src, offset) {
         let Some(fields) = analyze_variant(session, path, &munged, |ws| {
-            crate::query::variant_record_fields(ws, enum_name, variant)
+            let Some(mid) = user_module_for_path(ws, path) else {
+                return Vec::new();
+            };
+            let frag = crate::modules_scope::fragment(ws, ws.module(mid).file);
+            let Some(enum_key) = crate::modules_scope::resolve_type_key(ws, frag, enum_name) else {
+                return Vec::new();
+            };
+            crate::query::variant_record_fields(ws, enum_key.as_str(), variant)
         }) else {
             continue;
         };
@@ -1190,7 +1205,14 @@ pub(crate) fn struct_literal_field_completions(
         .into_iter()
         .find_map(|munged| {
             let f = analyze_variant(session, path, &munged, |ws| {
-                crate::query::struct_fields_by_name(ws, name)
+                let Some(mid) = user_module_for_path(ws, path) else {
+                    return Vec::new();
+                };
+                let frag = crate::modules_scope::fragment(ws, ws.module(mid).file);
+                let Some(name) = crate::modules_scope::resolve_type_key(ws, frag, name) else {
+                    return Vec::new();
+                };
+                crate::query::struct_fields_by_name(ws, name.as_str())
             })?;
             (!f.is_empty()).then_some(f)
         })?;
@@ -1254,7 +1276,14 @@ pub(crate) fn enum_qualified_completions(
     let mut all = Vec::new();
     for munged in completion_munges(src, offset) {
         let attempt = analyze_variant(session, path, &munged, |ws| {
-            crate::query::enum_variants_with_shape(ws, enum_name)
+            let Some(mid) = user_module_for_path(ws, path) else {
+                return Vec::new();
+            };
+            let frag = crate::modules_scope::fragment(ws, ws.module(mid).file);
+            let Some(enum_key) = crate::modules_scope::resolve_type_key(ws, frag, enum_name) else {
+                return Vec::new();
+            };
+            crate::query::enum_variants_with_shape(ws, enum_key.as_str())
         });
         if let Some(v) = attempt {
             if !v.is_empty() {
@@ -1595,6 +1624,12 @@ fn build_member_items(
         let methods = recv_struct
             .map(|name| crate::query::ufcs_methods_in_scope(ws, name, vec_elem, recv_is_iter, frag))
             .unwrap_or_default();
+        let type_spellings = frag.map(|frag| {
+            crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Type)
+        });
+        let callable_spellings = frag.map(|frag| {
+            crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Callable)
+        });
         if fields.is_empty() && methods.is_empty() {
             return Vec::new();
         }
@@ -1705,8 +1740,19 @@ fn build_member_items(
         let field_ref_matches = recv_struct
             .map(|rs| field_ref_methods(ws, rs, recv_elem, frag))
             .unwrap_or_default();
-        let field_ref_names: std::collections::HashSet<Ustr> =
-            field_ref_matches.iter().map(|(f, _, _)| f.name).collect();
+        let mut field_ref_names = std::collections::HashSet::new();
+        for (f, _, _) in &field_ref_matches {
+            if let Some(names) = callable_spellings
+                .as_ref()
+                .and_then(|names| names.get(&f.name))
+            {
+                field_ref_names.extend(names.iter().copied());
+            } else {
+                field_ref_names.insert(Ustr::from(bone_core::modules::display_name(
+                    f.name.as_str(),
+                )));
+            }
+        }
         let method_items = methods
             .into_iter()
             .zip(method_match)
@@ -1767,7 +1813,8 @@ fn build_member_items(
         // this is its sole (pre-filled) item. Gated on a matching field existing.
         {
             for (fdef, arg_idx, fields) in field_ref_matches {
-                let name = fdef.name;
+                let key = fdef.name;
+                let name = bone_core::modules::display_name(key.as_str());
                 if !(prefix.is_empty() || admit(name.as_bytes(), pfx)) {
                     continue;
                 }
@@ -1775,13 +1822,12 @@ fn build_member_items(
                     (Some(name.to_string()), None)
                 } else {
                     (
-                        Some(field_ref_insert(name.as_str(), fdef, arg_idx, &fields)),
+                        Some(field_ref_insert(name, fdef, arg_idx, &fields)),
                         Some(InsertTextFormat::SNIPPET),
                     )
                 };
-                let sort_text =
-                    arg_sort_text(type_rank(false, false), 0, name.as_str(), pfx, 1, 0, 0);
-                let signature = crate::query::render_fn_signature(ws, name, fdef);
+                let sort_text = arg_sort_text(type_rank(false, false), 0, name, pfx, 1, 0, 0);
+                let signature = crate::query::render_fn_signature(ws, key, fdef);
                 items.push(CompletionItem {
                     sort_text: Some(sort_text),
                     label: name.to_string(),
@@ -1850,46 +1896,66 @@ fn build_member_items(
                 let pfx = prefix.as_bytes();
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 for p in res.paths {
-                    if !p.suffix.contains('.') {
+                    if p.dist <= 1 {
                         continue; // 1-hop field/method, already offered above
                     }
-                    if !pfx.is_empty() && !clean_match(p.suffix.as_bytes(), pfx) {
+                    let suffix = frag.map_or_else(
+                        || Some(p.suffix.clone()),
+                        |_frag| {
+                            crate::modules_scope::display_method_suffix_with_names(
+                                &p.suffix,
+                                p.is_method,
+                                &p.method_members,
+                                callable_spellings.as_ref().unwrap(),
+                            )
+                        },
+                    );
+                    let Some(suffix) = suffix else {
+                        continue;
+                    };
+                    if !pfx.is_empty() && !clean_match(suffix.as_bytes(), pfx) {
                         continue;
                     }
-                    if !seen.insert(p.suffix.clone()) {
+                    if !seen.insert(suffix.clone()) {
                         continue;
                     }
+                    let final_ty = type_spellings.as_ref().map_or_else(
+                        || p.final_ty.clone(),
+                        |names| {
+                            crate::modules_scope::display_type_with_names(ws, &p.final_ty, names)
+                        },
+                    );
                     let (label, kind, insert_text, insert_text_format) = if p.is_method {
-                        let call = format!("{}()", p.suffix);
+                        let call = format!("{}()", suffix);
                         let (insert, fmt) = if paren_follows {
-                            (p.suffix.clone(), None)
+                            (suffix.clone(), None)
                         } else if p.takes_args {
-                            (format!("{}($0)", p.suffix), Some(InsertTextFormat::SNIPPET))
+                            (format!("{}($0)", suffix), Some(InsertTextFormat::SNIPPET))
                         } else {
                             (call.clone(), None)
                         };
                         (
-                            format!("{call} -> {}", p.final_ty),
+                            format!("{call} -> {final_ty}"),
                             CompletionItemKind::METHOD,
                             insert,
                             fmt,
                         )
                     } else {
                         (
-                            format!("{}: {}", p.suffix, p.final_ty),
+                            format!("{suffix}: {final_ty}"),
                             CompletionItemKind::FIELD,
-                            p.suffix.clone(),
+                            suffix.clone(),
                             None,
                         )
                     };
                     // Reach paths are type-matches by construction (paths TO the
                     // expected type) -- prio 0, same format as the direct items.
                     let sort_text =
-                        arg_sort_text(0, 0, &p.suffix, pfx, p.dist, u8::from(p.is_method), 0);
+                        arg_sort_text(0, 0, &suffix, pfx, p.dist, u8::from(p.is_method), 0);
                     items.push(CompletionItem {
                         label,
                         kind: Some(kind),
-                        detail: Some(p.final_ty),
+                        detail: Some(final_ty),
                         insert_text: Some(insert_text),
                         insert_text_format,
                         sort_text: Some(sort_text),

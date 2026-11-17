@@ -12,7 +12,7 @@
 
 //=== TEST CASE: macro_arity_mismatch_Generic ===
 // Calling a macro with no matching arity must fail.
-//! expect: Function `one` doesn't exist
+//! expect: `one` did not resolve to any definition
 macro one(a: expr) {
     a > 0
 }

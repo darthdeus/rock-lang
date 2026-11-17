@@ -256,6 +256,11 @@ impl<'a> Builder<'a> {
                 fields,
                 ..
             } => {
+                let name = if enum_name.or(scrut_enum).is_some() {
+                    name.map(|name| Ustr::from(crate::mangle::declared_name(name.as_str())))
+                } else {
+                    name
+                };
                 // Emit the discriminant tag test for an enum-variant record
                 // pattern: qualified (`enum_name` set) OR an unqualified variant
                 // name belonging to the scrutinee enum (`top`, like the Bind case).

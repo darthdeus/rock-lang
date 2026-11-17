@@ -11,7 +11,7 @@
 use rock_tokenizer::TokenKind;
 use skull_parser::Idx;
 use skull_parser::ast::{
-    Binding, BlockData, CallSyntax, ExprData, ExprKind, IfLetClause, ItemKind, Pattern,
+    Binding, BlockData, CallSyntax, ExprData, ExprKind, IfLetClause, ItemKind, Path, Pattern,
     StatementKind,
 };
 use ustr::Ustr;
@@ -99,12 +99,22 @@ enum RecordHead {
     Struct(String, usize),
     /// (enum, variant, variant-ident end offset)
     EnumVariant(String, String, usize),
+    /// A qualified record literal. The resolver decides whether the final
+    /// two path segments are an enum variant or the full path names a struct.
+    Path(Vec<String>, usize),
+}
+
+fn enum_path_names(path: &Path) -> Option<(&skull_parser::ast::Ident, &skull_parser::ast::Ident)> {
+    let len = path.segments.len();
+    (len >= 2).then(|| (&path.segments[len - 2], &path.segments[len - 1]))
 }
 
 impl RecordHead {
     fn end(&self) -> usize {
         match self {
-            RecordHead::Struct(_, e) | RecordHead::EnumVariant(_, _, e) => *e,
+            RecordHead::Struct(_, e)
+            | RecordHead::EnumVariant(_, _, e)
+            | RecordHead::Path(_, e) => *e,
         }
     }
 }
@@ -267,11 +277,9 @@ impl CursorAst {
     }
 
     /// `Enum::<cursor>` -- the qualified base when the cursor sits in the
-    /// member slot. Three surface forms produce it:
-    /// - `QualifiedIdent` (when the parser resolves `E::x` as one),
-    /// - `TypeAscription` -- `E::<sentinel>` parses as `E :: <Type>` (the
-    ///   `::` ascription ambiguity), cursor inside the ascribed type,
-    /// - EnumVariant/Record PATTERNS (match arms, if/while-let), which live
+    /// member slot. Qualified identifiers and enum patterns produce it:
+    /// - `QualifiedIdent` in value expressions,
+    /// - EnumVariant/Record patterns (match arms, if/while-let), which live
     ///   outside the exprs arena.
     pub(crate) fn qualified_base(&self) -> Option<String> {
         if let Some(node) = self.expr_chain().first().copied() {
@@ -279,14 +287,6 @@ impl CursorAst {
                 ExprKind::QualifiedIdent { base, member } => {
                     if member.span.offset_range().0 <= self.probe {
                         return Some(base.name.to_string());
-                    }
-                }
-                ExprKind::TypeAscription(lhs, ty) => {
-                    let (s, e) = self.ast.types[*ty].span.offset_range();
-                    if s <= self.probe && self.probe < e {
-                        if let ExprKind::Ident(base) = &self.expr(*lhs).kind {
-                            return Some(base.name.to_string());
-                        }
                     }
                 }
                 // Cursor mid-variant-ident: the munge glues the sentinel into
@@ -300,6 +300,17 @@ impl CursorAst {
                     let (s, e) = variant_name.span.offset_range();
                     if s <= self.probe && self.probe < e {
                         return Some(enum_name.name.to_string());
+                    }
+                }
+                ExprKind::Path { path, .. } | ExprKind::PathStructLiteral { path, .. } => {
+                    if let Some((base, variant)) = enum_path_names(path)
+                        && path.segments.len() == 2
+                        && !path.from_root
+                    {
+                        let (s, e) = variant.span.offset_range();
+                        if s <= self.probe && self.probe < e {
+                            return Some(base.name.to_string());
+                        }
                     }
                 }
                 _ => {}
@@ -326,7 +337,19 @@ impl CursorAst {
                         walk(sub, f);
                     }
                 }
+                Pattern::PathVariant {
+                    args: Some(args), ..
+                } => {
+                    for sub in args {
+                        walk(sub, f);
+                    }
+                }
                 Pattern::Record { fields, .. } => {
+                    for (_, sub) in fields {
+                        walk(sub, f);
+                    }
+                }
+                Pattern::PathRecord { fields, .. } => {
                     for (_, sub) in fields {
                         walk(sub, f);
                     }
@@ -374,6 +397,16 @@ impl CursorAst {
                     name: Some(vname),
                     ..
                 } => (base, vname),
+                Pattern::PathVariant { path, .. } | Pattern::PathRecord { path, .. } => {
+                    let Some((base, variant)) = enum_path_names(path) else {
+                        return;
+                    };
+                    let (s, e) = variant.span.offset_range();
+                    if s <= off && off < e {
+                        found = Some(base.name.to_string());
+                    }
+                    return;
+                }
                 _ => return,
             };
             let (s, e) = vname.span.offset_range();
@@ -395,6 +428,22 @@ impl CursorAst {
                 ..
             } = p
             else {
+                let Pattern::PathRecord { path, .. } = p else {
+                    return;
+                };
+                let Some((base, variant)) = enum_path_names(path) else {
+                    return;
+                };
+                let ve = variant.span.offset_range().1;
+                let Some(brace) = self.text[ve..].find('{').map(|i| ve + i) else {
+                    return;
+                };
+                let Some(close) = matching_brace(self.text.as_bytes(), brace) else {
+                    return;
+                };
+                if brace < self.probe && self.probe <= close {
+                    found = Some((base.name.to_string(), variant.name.to_string()));
+                }
                 return;
             };
             let ve = vname.span.offset_range().1;
@@ -466,6 +515,16 @@ impl CursorAst {
                     ),
                     fields,
                 ),
+                ExprKind::PathStructLiteral { path, fields, .. } => (
+                    RecordHead::Path(
+                        path.segments
+                            .iter()
+                            .map(|segment| segment.name.to_string())
+                            .collect(),
+                        path.segments.last()?.span.offset_range().1,
+                    ),
+                    fields,
+                ),
                 _ => continue,
             };
             let head_end = head.end();
@@ -507,7 +566,7 @@ impl CursorAst {
         }
         match c.head {
             RecordHead::Struct(name, _) => Some((name, c.brace)),
-            RecordHead::EnumVariant(..) => None,
+            RecordHead::EnumVariant(..) | RecordHead::Path(..) => None,
         }
     }
 
@@ -518,7 +577,10 @@ impl CursorAst {
     pub(crate) fn enum_record(&self) -> Option<(String, String)> {
         match self.record_ctx().map(|c| c.head) {
             Some(RecordHead::EnumVariant(e, v, _)) => Some((e, v)),
-            Some(RecordHead::Struct(..)) => None,
+            Some(RecordHead::Path(path, _)) if path.len() >= 2 => {
+                Some((path[path.len() - 2].clone(), path[path.len() - 1].clone()))
+            }
+            Some(RecordHead::Struct(..) | RecordHead::Path(..)) => None,
             None => self.pattern_record(),
         }
     }
@@ -532,7 +594,7 @@ impl CursorAst {
                 let (field, is_lambda) = c.value_field?;
                 match c.head {
                     RecordHead::Struct(name, _) => Some((name, field, is_lambda)),
-                    RecordHead::EnumVariant(..) => None,
+                    RecordHead::EnumVariant(..) | RecordHead::Path(..) => None,
                 }
             }
             // A struct DECL field's default expr type-directs the same way.
@@ -1139,8 +1201,7 @@ mod gaps {
     fn qualified_base_mid_variant_ident_in_record_literal() {
         // Cursor MID-ident glues the sentinel into one identifier
         // (`B__rock_completion__andaging`), which parses CLEAN as an
-        // EnumVariantRecord expr -- unlike the `::|B` boundary case, which
-        // lands on TypeAscription. Needs its own arm.
+        // EnumVariantRecord expression. Needs its own arm.
         let (_, _, cx) = cx(
             "enum E { B { d: int, h: int } }\nfn t(h: int) {\n  let v = E::B$0andaging { d: 1, h }\n}\n",
         );

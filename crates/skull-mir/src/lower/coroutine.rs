@@ -134,8 +134,13 @@ mod tests {
         .expect("parse");
         let ws = bone_semantic::semantic_passes::semantic_pass(&mut [ast]).expect("semantic");
         let interner = MonoInterner::new();
+        let event_name = ws
+            .defs
+            .iter()
+            .find_map(|(key, meta)| (meta.name.as_str() == "Event").then_some(*key))
+            .expect("Event definition");
         let event = interner.intern(MonoTy::App {
-            ctor: MonoCtor::Nominal(Ustr::from("Event")),
+            ctor: MonoCtor::Nominal(event_name),
             params: Vec::new(),
         });
         let result = interner.intern(MonoTy::App {

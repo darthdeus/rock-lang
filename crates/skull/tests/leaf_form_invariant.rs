@@ -8,8 +8,7 @@
 //! and no diagnostic. Nothing in the emit path can return a `Result`, so the
 //! rejection goes through `CodegenCtx`'s sink and surfaces at the emit boundary.
 
-use crate::common::ws_with_stdlib;
-use ustr::Ustr;
+use crate::common::{key, ws_with_stdlib};
 
 const NESTED_NOBOX: &str = r#"
 nobox value NV2 { x: float, y: float }
@@ -23,7 +22,7 @@ fn main() {
 #[test]
 fn a_non_canonical_leaf_sequence_rejects() {
     let ws = ws_with_stdlib(NESTED_NOBOX);
-    let name = Ustr::from("E5");
+    let name = key(&ws, "E5");
     let arena = skull_mir::lower::RepArena::default();
     let plan_id = arena
         .plan_nominal_value(&ws, bone_semantic::hir::FnBackend::Lua, name)

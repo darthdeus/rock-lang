@@ -40,19 +40,18 @@ pub fn format_code(input: &str) -> String {
 
 /// Format with an explicit config, surfacing parse errors.
 pub fn try_format(input: &str, cfg: &FormatConfig) -> Result<String, String> {
-    try_format_with_dialect(input, cfg, Dialect::Legacy)
+    try_format_with_dialect(input, cfg, Dialect::V1)
 }
 
-/// [`try_format`] with the source dialect selected: modules-v1 sources must
-/// format under v1 rules so the parenthesized ascription round-trips.
+/// [`try_format`] with a compatibility dialect argument. Parsing always uses
+/// the modules-v1 grammar.
 pub fn try_format_with_dialect(
     input: &str,
     cfg: &FormatConfig,
-    dialect: Dialect,
+    _dialect: Dialect,
 ) -> Result<String, String> {
     let file: Ustr = "<fmt>".into();
-    let ast = skull_parser::parse_module_with_dialect(input, file, dialect)
-        .map_err(|e| format!("{e:?}"))?;
+    let ast = skull_parser::parse_module(input, file).map_err(|e| format!("{e:?}"))?;
     if !ast.recovery_errors.is_empty() {
         return Err(format!("parse recovery errors: {:?}", ast.recovery_errors));
     }

@@ -3,7 +3,7 @@
 //! carries the `_0` arity marker, so Lua's `_G[name]` cannot reach it by its
 //! declared name. Exempt surface names stay bare.
 
-use crate::common::ws_of;
+use crate::common::{has_name_tail, ws_of};
 use skull_mir::mangle::{collision_errors, mangle_fn};
 use ustr::Ustr;
 
@@ -13,7 +13,7 @@ fn mangled(ws: &bone_core::workspace::Workspace, name: &str) -> Vec<String> {
         .module(mid)
         .functions
         .iter()
-        .filter(|(_, f)| f.name.as_str() == name)
+        .filter(|(_, f)| has_name_tail(f.name, name))
         .map(|(_, f)| mangle_fn(ws, f))
         .collect();
     assert!(!found.is_empty(), "no fn `{name}`");
@@ -28,7 +28,7 @@ fn zero_parameter_symbol_does_not_collide_with_restore_lookup_name() {
         .module(mid)
         .functions
         .iter()
-        .find(|(_, f)| f.name.as_str() == "hidden_callback")
+        .find(|(_, f)| has_name_tail(f.name, "hidden_callback"))
         .expect("restore callback declaration");
     assert_ne!(mangle_fn(&ws, callback), callback.name.as_str());
 }

@@ -57,7 +57,7 @@ fn main() {
     print(value.len())
 }
 
-// A bare `null` carries only a fresh variable. `(null :: int?)` is the ascription
+// A bare `null` carries only a fresh variable. `(null : int?)` is the ascription
 // that legitimately binds it.
 //=== TEST CASE: cast_bare_null_unresolved_MismatchedType ===
 //! expect: cannot convert `null?` to `int?` with `as`: the operand is not fully inferred on its own
@@ -67,7 +67,7 @@ fn main() {
 }
 
 // The lambda infers as `fn(?a) -> ?a`; taking `int` from the cast target is the
-// contextual behaviour that belongs to `::`, not `as`.
+// contextual behaviour that belongs to ascription, not `as`.
 //=== TEST CASE: cast_deferred_lambda_param_MismatchedType ===
 //! expect: cannot convert `fn(?R) -> ?R` to `fn(int) -> int` with `as`: the operand is not fully inferred on its own
 fn main() {

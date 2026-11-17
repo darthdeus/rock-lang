@@ -6,7 +6,7 @@
 //! bounded depth here so a missing arm is found by the test rather than by a
 //! miscompile.
 
-use crate::common::STDLIB;
+use crate::common::{STDLIB, key};
 use std::collections::BTreeSet;
 
 use bone_core::hir::BodyOwner;
@@ -94,23 +94,23 @@ fn main() {
         !ok.is_empty(),
         "nothing was converted -- the walk found no types"
     );
-    let unique: BTreeSet<&str> = ok.iter().map(String::as_str).collect();
-    let expected: BTreeSet<&str> = [
-        "(int, string)",
-        "Holder",
-        "Map<string, int>",
-        "Vec<int>",
-        "any",
-        "bool",
-        "float",
-        "fn(int) -> int",
-        "fn(fn(int) -> int) -> int",
-        "int",
-        "int?",
-        "never",
-        "string",
-        "uint",
-        "unit",
+    let unique: BTreeSet<String> = ok.iter().cloned().collect();
+    let expected: BTreeSet<String> = [
+        "(int, string)".to_string(),
+        key(&ws, "Holder").to_string(),
+        "Map<string, int>".to_string(),
+        "Vec<int>".to_string(),
+        "any".to_string(),
+        "bool".to_string(),
+        "float".to_string(),
+        "fn(int) -> int".to_string(),
+        "fn(fn(int) -> int) -> int".to_string(),
+        "int".to_string(),
+        "int?".to_string(),
+        "never".to_string(),
+        "string".to_string(),
+        "uint".to_string(),
+        "unit".to_string(),
     ]
     .into_iter()
     .collect();
@@ -118,14 +118,17 @@ fn main() {
         unique, expected,
         "valid-type denominator or membership changed"
     );
-    for want in [
-        "int", "float", "bool", "string", "any", "int?", "Vec<int>", "Holder",
-    ] {
+    for want in ["int", "float", "bool", "string", "any", "int?", "Vec<int>"] {
         assert!(
             ok.iter().any(|r| r == want),
             "missing `{want}` among {ok:?}"
         );
     }
+    assert!(
+        ok.iter()
+            .any(|rendered| rendered == &key(&ws, "Holder").to_string()),
+        "missing the scoped `Holder` among {ok:?}"
+    );
     assert!(
         ok.iter().any(|r| r.starts_with("fn(")),
         "no function type converted -- the `Function` arm is what the partial tree lacked"
@@ -172,7 +175,7 @@ fn unbound_generic_is_a_distinct_reason() {
         .module(mid)
         .functions
         .iter()
-        .find(|(_, f)| f.name.as_str() == "id")
+        .find(|(_, f)| f.name.as_str().rsplit("::").next() == Some("id"))
         .expect("id");
     let inf = ir
         .per_fn
@@ -197,7 +200,7 @@ fn a_bound_generic_converts_to_its_binding() {
         .module(mid)
         .functions
         .iter()
-        .find(|(_, f)| f.name.as_str() == "id")
+        .find(|(_, f)| f.name.as_str().rsplit("::").next() == Some("id"))
         .expect("id");
     let inf = ir
         .per_fn
@@ -485,22 +488,23 @@ fn generated_composition_to_depth_three_is_total() {
 
 // -- what the corpus census found ------------------------------------------
 
-/// A bare `null` under a `::` ascription is bound to the ascribed type, so the
+/// A bare `null` under a `:` ascription is bound to the ascribed type, so the
 /// literal converts like any other expression. This is the whole
 /// `unresolved-infer` bucket the closed-world census once reported; plan Stage 1
 /// ("resolve every `Infer` before conversion; reject any unresolved variable")
 /// therefore rejects no valid program on this construct.
 #[test]
 fn null_in_a_cast_binds_to_the_ascribed_type() {
-    let (ws, mid) = check("struct Prefab { n: int }\nfn main() { let e = (null :: Prefab?) }");
+    let (ws, mid) = check("struct Prefab { n: int }\nfn main() { let e = (null : Prefab?) }");
     let mut arena = MonoArena::new();
     let (ok, bad) = convert_module(&ws, mid, &mut arena);
     assert!(
         bad.is_empty(),
         "expected total conversion, got failures: {bad:?}"
     );
+    let prefab = format!("{}?", key(&ws, "Prefab"));
     assert!(
-        ok.iter().any(|r| r == "Prefab?"),
-        "expected the null literal to convert as `Prefab?`, got {ok:?}"
+        ok.iter().any(|r| r == &prefab),
+        "expected the null literal to convert as `{prefab}`, got {ok:?}"
     );
 }

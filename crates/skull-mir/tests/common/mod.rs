@@ -44,13 +44,59 @@ pub fn decl(ws: &bone_core::workspace::Workspace, name: &str) -> FuncRef {
         .module(mid)
         .functions
         .iter()
-        .find(|(_, f)| f.name.as_str() == name)
+        .find(|(_, f)| f.name.as_str().rsplit("::").next() == Some(name))
         .map(|(fid, _)| fid)
         .unwrap_or_else(|| panic!("no fn `{name}`"));
     FuncRef {
         module: mid,
         func: fid,
     }
+}
+
+/// Find the unique scoped definition whose declared name is `name`.
+/// Standalone fixtures get a package key that includes their source file, so
+/// tests must resolve that key instead of using the bare declaration spelling.
+pub fn key(ws: &bone_core::workspace::Workspace, name: &str) -> Ustr {
+    let name = Ustr::from(name);
+    let all = ws
+        .defs
+        .iter()
+        .filter(|(_, meta)| meta.name == name)
+        .map(|(key, _)| *key)
+        .collect::<Vec<_>>();
+    let source = all
+        .iter()
+        .copied()
+        .filter(|key| {
+            let meta = &ws.defs[key];
+            ws.ns
+                .packages
+                .get(&meta.package)
+                .is_some_and(|package| package.self_name.as_str() != "std")
+        })
+        .collect::<Vec<_>>();
+    if source.is_empty() {
+        let bare = Ustr::from(name.as_str());
+        if ws.struct_by_name.contains_key(&bare)
+            || ws.enums_by_name.contains_key(&bare)
+            || ws.newtypes_by_name.contains_key(&bare)
+            || ws.globals_by_name.contains_key(&bare)
+            || ws.functions_by_name.contains_key(&bare)
+        {
+            return bare;
+        }
+    }
+    let matches = if source.is_empty() { &all } else { &source };
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected one definition named `{name}`, found {matches:?}"
+    );
+    matches[0]
+}
+
+pub fn has_name_tail(name: Ustr, declared: &str) -> bool {
+    name.as_str().rsplit("::").next() == Some(declared)
 }
 
 pub fn lower(source: &str, name: &str) -> MirFunc {

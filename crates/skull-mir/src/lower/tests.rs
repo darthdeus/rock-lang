@@ -47,7 +47,7 @@ fn spec_fn(ws: &Workspace, mid: ModuleId, name: &str) -> FuncRef {
         .module(mid)
         .functions
         .iter()
-        .find(|(_, f)| f.name.as_str() == name)
+        .find(|(_, f)| f.name.as_str().rsplit("::").next() == Some(name))
         .expect("function by name");
     FuncRef { module: mid, func }
 }

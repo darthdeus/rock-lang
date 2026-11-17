@@ -17,7 +17,7 @@ fn main() {
 }
 
 //=== TEST CASE: unknown_bound_name_rejects_Generic ===
-//! expect: unknown bound on `I`: the only supported bound is `Iterator<T>`
+//! expect: `Frobnicator` did not resolve to any definition
 fn take_foo<I: Frobnicator<T>, T>(x: I) -> int {
     return 0
 }

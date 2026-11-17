@@ -2,7 +2,6 @@
 //! comments differ from the input's, so a source that parses but does not
 //! format is a comment the printer lost.
 
-use rock_core::source_code::Dialect;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -20,27 +19,22 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The formatted source, or the error from the dialect that parses it;
-/// `None` when it parses in neither.
-fn format_any_dialect(src: &str) -> Option<Result<String, String>> {
+/// The formatted source, or `None` when the source does not parse cleanly.
+fn format_v1(src: &str) -> Option<Result<String, String>> {
     let cfg = skull_fmt::FormatConfig::default();
-    [Dialect::Legacy, Dialect::V1]
-        .into_iter()
-        .find_map(|dialect| {
-            skull_parser::parse_module_clean_with_dialect(src, "<src>".into(), dialect)
-                .ok()
-                .map(|_| skull_fmt::try_format_with_dialect(src, &cfg, dialect))
-        })
+    skull_parser::parse_module_clean(src, "<src>".into())
+        .ok()
+        .map(|_| skull_fmt::try_format(src, &cfg))
 }
 
 #[track_caller]
 fn assert_keeps_comments(src: &str) {
-    let formatted = match format_any_dialect(src) {
+    let formatted = match format_v1(src) {
         Some(Ok(formatted)) => formatted,
         other => panic!("must format: {other:?}\n{src}"),
     };
     assert_eq!(
-        format_any_dialect(&formatted),
+        format_v1(&formatted),
         Some(Ok(formatted.clone())),
         "not a fixed point"
     );
@@ -94,7 +88,7 @@ fn repository_sources_keep_every_comment() {
     for file in &files {
         let src = fs::read_to_string(file).expect("read a Rock source");
         // Negative fixtures do not parse; the formatter leaves those alone.
-        match format_any_dialect(&src) {
+        match format_v1(&src) {
             None => continue,
             Some(Ok(_)) => {}
             Some(Err(e)) => failures.push(format!("{}: {e}", file.display())),

@@ -216,11 +216,18 @@ fn token_classification() {
 #[test]
 fn cross_file_struct_name_colors_as_struct() {
     let project = Project::new(&[
-        ("stick.toml", "[package]\nname = \"xp\"\n"),
-        ("a.rock", "struct Mob { hp: int }\n"),
-        ("b.rock", "fn make() -> Mob {\n  Mob { hp: 1 }\n}\n"),
+        (
+            "stick.toml",
+            "[package]\nname = \"xp\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n",
+        ),
+        ("main.rock", "fn main() -> int { 0 }\n"),
+        ("a.rock", "pub mod a;\npub struct Mob { pub hp: int }\n"),
+        (
+            "b.rock",
+            "pub mod b;\nuse super::a::Mob;\nfn make() -> Mob {\n  Mob { hp: 1 }\n}\n",
+        ),
     ]);
     let (bone, _) = project.open("b.rock");
     let toks = rendered(&bone, &project.path("b.rock"));
-    assert_tokens("cross-file struct", &toks, &[(0, 13, "struct")]);
+    assert_tokens("cross-file struct", &toks, &[(2, 13, "struct")]);
 }

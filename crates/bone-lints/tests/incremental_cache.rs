@@ -9,11 +9,11 @@ const FILE: &str = "<incremental-cache>";
 const ACTION_FILE: &str = "app/player.rock";
 
 fn workspace_many(srcs: &[(&str, &str)]) -> Workspace {
-    let mut asts = srcs
+    let asts = srcs
         .iter()
-        .map(|(file, src)| skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse"))
+        .map(|(file, src)| support::parse(file, src))
         .collect::<Vec<_>>();
-    semantic_pass(&mut asts).expect("semantic pass")
+    support::workspace(asts)
 }
 
 fn sources_many<'a>(srcs: &'a [(&'a str, &'a str)]) -> FxHashMap<Ustr, &'a str> {
@@ -29,7 +29,7 @@ fn run_update(
     options: &LintOptions,
     change: &LintCacheUpdate,
 ) -> (Vec<Finding>, LintCacheStats) {
-    cache.update(ws, &FxHashSet::default(), true, sources, options, change)
+    cache.update(ws, &support::warm(ws), true, sources, options, change)
 }
 
 fn lint_fresh(
@@ -37,7 +37,7 @@ fn lint_fresh(
     sources: &FxHashMap<Ustr, &str>,
     options: &LintOptions,
 ) -> Vec<Finding> {
-    lint_workspace(ws, &FxHashSet::default(), true, sources, options)
+    lint_workspace(ws, &support::warm(ws), true, sources, options)
 }
 
 fn assert_matches_fresh(
@@ -60,7 +60,7 @@ fn function_owner(ws: &Workspace, name: &str) -> (ModuleId, BodyOwner) {
             module
                 .functions
                 .iter()
-                .find(|(_, function)| function.name.as_str() == name)
+                .find(|(_, function)| function.name.rsplit("::").next() == Some(name))
                 .map(|(fid, _)| (module.id, BodyOwner::Function(fid)))
         })
         .expect("function")

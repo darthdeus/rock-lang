@@ -3,9 +3,9 @@
 //! path must do the same so a `Vec { ... }` literal unifies with a `[T]` slot.
 
 //- vec_literal_is_array
-struct Vec<T> { data: any, len: int }
+//-- vec_literal_is_array.rock
 fn make<T>() -> [T] {
-    return Vec { data: 0, len: 0 }
+    return Vec { _data: 0, len: 0 }
 }
 fn f() -> int {
     let xs: [int] = make()

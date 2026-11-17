@@ -205,8 +205,7 @@ pub fn load_sources_for_project(project_dir: &Path) -> Result<SourceFiles> {
 /// The package that owns the file at the canonical `path` in `graph`: its
 /// node stamps the file's facts, at load or when the file enters an
 /// incremental session after its load (the editor opening a new file).
-/// `None` when no package owns the path: a standalone source, legacy and
-/// unowned.
+/// `None` when no package owns the path: a standalone, unowned source.
 pub fn source_package<'g>(
     graph: &'g crate::stick::graph::PackageGraph,
     path: &Path,

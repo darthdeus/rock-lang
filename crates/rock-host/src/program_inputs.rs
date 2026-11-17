@@ -34,10 +34,9 @@ pub fn ns_aliases(graph: Option<&PackageGraph>) -> NsAliases {
 }
 
 /// The alias table for a program given each source's `(file, dialect,
-/// package)` facts, as the package graph stamped them. A set with no v1
-/// package file uses the empty table (synthetic and legacy-only programs);
-/// otherwise the table comes from the root package's (graph id 0) manifest,
-/// which is the same graph that selected the files.
+/// package)` facts, as the package graph stamped them. Sources without a real
+/// root package use the empty table; otherwise the table comes from the root
+/// package's (graph id 0) manifest, which selected the files.
 pub fn ns_aliases_for_sources<'a>(
     sources: impl IntoIterator<Item = (&'a str, Dialect, Option<&'a PackageTag>)>,
 ) -> Result<NsAliases, CompilerError> {
@@ -51,22 +50,15 @@ pub fn ns_aliases_for_selected_sources<'a>(
     sources: impl IntoIterator<Item = (&'a str, Dialect, Option<&'a PackageTag>)>,
     selecting_graph: Option<&NsAliases>,
 ) -> Result<NsAliases, CompilerError> {
-    let mut has_v1 = false;
     let mut root = None;
-    for (file, dialect, package) in sources {
+    for (file, _, package) in sources {
         let Some(package) = package else { continue };
-        has_v1 |= dialect == Dialect::V1;
         if package.id == 0 && root.is_none() {
             root = Some(file);
         }
     }
-    if !has_v1 {
-        return Ok(NsAliases::default());
-    }
     let Some(root) = root else {
-        return Err(CompilerError::new_no_location(
-            "modules-v1 sources have no root package file from which to load dependency aliases",
-        ));
+        return Ok(selecting_graph.cloned().unwrap_or_default());
     };
     match selecting_graph {
         Some(aliases) => Ok(aliases.clone()),
@@ -115,6 +107,26 @@ mod tests {
         assert!(error.message.contains("package graph"), "{}", error.message);
         let file = dir.path().join("src").join("main.rock");
         assert!(ns_aliases_for_root_file(&file).is_err());
+    }
+
+    #[test]
+    fn standalone_modules_use_empty_aliases() {
+        let aliases = ns_aliases_for_sources([("scratch.rock", Dialect::V1, None)]).unwrap();
+        assert_eq!(aliases, NsAliases::default());
+    }
+
+    #[test]
+    fn package_sources_without_a_root_file_use_empty_aliases() {
+        let package = PackageTag {
+            id: 1,
+            self_name: "dependency".to_string(),
+            identity_storage: Default::default(),
+            root: "/dependency".to_string(),
+        };
+        let aliases =
+            ns_aliases_for_sources([("/dependency/lib.rock", Dialect::V1, Some(&package))])
+                .unwrap();
+        assert_eq!(aliases, NsAliases::default());
     }
 
     #[test]

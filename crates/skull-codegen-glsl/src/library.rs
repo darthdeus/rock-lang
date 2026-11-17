@@ -9,6 +9,12 @@ pub fn resolve_root(
     name: &str,
 ) -> Result<FuncRef, CompilerError> {
     let key = Ustr::from(name);
+    let key = ws
+        .module(user_mid)
+        .functions
+        .iter()
+        .find(|(_, function)| declared_name(function.name.as_str()) == name)
+        .map_or(key, |(_, function)| function.name);
     let Some(list): Option<&FnList> = ws.functions_by_name.get(&key) else {
         return Err(CompilerError::new_no_location(format!(
             "shader root `{name}` not found"

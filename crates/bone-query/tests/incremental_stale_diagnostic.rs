@@ -64,22 +64,31 @@ fn edits_through_broken_states_end_clean() {
 /// that writes the global and clear its diagnostic.
 #[test]
 fn const_to_global_clears_assign_error_cross_file() {
+    let manifest = (
+        "stick.toml",
+        "[package]\nname = \"stale_diagnostic\"\ntype = \"lib\"\n\n[language]\nmodules = \"v1\"\n",
+    );
+    let decl_src = "pub mod decl;\npub const X: float = 0.0\n";
+    let user_src = "pub mod user;\nuse super::decl::X;\nfn w() {\n    X = 1.0\n}\n";
     let project = Project::new(&[
-        ("decl.rock", "const X: float = 0.0\n"),
-        ("user.rock", "fn w() {\n    X = 1.0\n}\n"),
+        manifest,
+        ("main.rock", "fn main() -> int { 0 }\n"),
+        ("decl.rock", decl_src),
+        ("user.rock", user_src),
     ]);
     let (decl, user) = (project.path("decl.rock"), project.path("user.rock"));
     let mut bone = BoneWorkspace::new();
-    bone.update(&decl, project.read("decl.rock"));
-    bone.update(&user, project.read("user.rock"));
+    bone.update(&decl, decl_src.to_string());
+    bone.update(&user, user_src.to_string());
     let before = messages(&bone, &user);
     assert!(
         before.iter().any(|m| m.contains("cannot assign to const")),
         "{before:?}"
     );
 
-    std::fs::write(&decl, "global X: float = 0.0\n").unwrap();
-    bone.update(&decl, "global X: float = 0.0\n".to_string());
+    let global_src = "pub mod decl;\npub global X: float = 0.0\n";
+    std::fs::write(&decl, global_src).unwrap();
+    bone.update(&decl, global_src.to_string());
     assert!(
         messages(&bone, &user).is_empty(),
         "{:?}",

@@ -9,7 +9,7 @@ use bone_semantic::lower::resolve::{self, CalleeFamily, ResolvedKind};
 use bone_semantic::prelude::*;
 use bone_semantic::semantic_passes::{FragmentContribution, ScopeItem};
 
-/// The fragment scope of the v1 file `file`, `None` for a legacy file.
+/// The fragment scope of the v1 file `file`, `None` for a synthetic module.
 pub fn fragment(ws: &Workspace, file: Ustr) -> Option<&FragmentScope> {
     ws.fragment_scopes.get(&file)
 }
@@ -32,8 +32,8 @@ pub(crate) fn callable_member_admitted(
     )
 }
 
-/// Every overload of `name` listed in each module's index, in module order,
-/// that `frag` admits (all of them for a legacy file).
+/// Every overload of the callable spelling `name`, in module order, that
+/// `frag` admits (all indexed overloads for a synthetic module).
 pub(crate) fn admitted_overloads<'w>(
     ws: &'w Workspace,
     frag: Option<&'w FragmentScope>,
@@ -45,15 +45,88 @@ pub(crate) fn admitted_overloads<'w>(
         &'w bone_semantic::hir::Function,
     ),
 > + 'w {
-    ws.modules
-        .iter()
-        .filter_map(move |m| m.functions_by_name.get(&name))
-        .flatten()
-        .copied()
-        .filter(move |&(mid, fid)| {
-            frag.is_none_or(|frag| callable_member_admitted(ws, frag, name, mid, fid))
-        })
-        .map(|(mid, fid)| (mid, fid, &ws.modules[mid.index()].functions[fid]))
+    let keys: Vec<Ustr> = match frag {
+        Some(_)
+            if {
+                ws.functions_by_name.contains_key(&name)
+                    && ws
+                        .defs
+                        .get(&name)
+                        .is_some_and(|meta| meta.kind == DefKind::Callable)
+            } =>
+        {
+            vec![name]
+        }
+        Some(frag) => match resolve::resolve_v1_callee(ws, frag, name) {
+            Ok(CalleeFamily::Single(resolved)) if resolved.kind == ResolvedKind::Callable => {
+                vec![resolved.key]
+            }
+            Ok(CalleeFamily::Merged { members }) => {
+                members.into_iter().map(|member| member.key).collect()
+            }
+            _ => Vec::new(),
+        },
+        None => vec![name],
+    };
+    let mut out = Vec::new();
+    for m in ws.modules.iter() {
+        for &key in &keys {
+            let Some(overloads) = m.functions_by_name.get(&key) else {
+                continue;
+            };
+            for &(mid, fid) in overloads {
+                if frag.is_none_or(|frag| callable_member_admitted(ws, frag, key, mid, fid)) {
+                    out.push((mid, fid, &ws.modules[mid.index()].functions[fid]));
+                }
+            }
+        }
+    }
+    out.into_iter()
+}
+
+/// Resolve a type spelling from a query source to the key stored in workspace
+/// registries. Query syntax carries source spellings while those registries
+/// use canonical definition keys.
+pub(crate) fn resolve_type_key(
+    ws: &Workspace,
+    frag: Option<&FragmentScope>,
+    name: &str,
+) -> Option<Ustr> {
+    let resolved = if let Some(frag) = frag {
+        let path = name.strip_prefix("::").unwrap_or(name);
+        if path.contains("::") || name.starts_with("::") {
+            resolve::resolve_path(
+                ws,
+                frag,
+                &UsePathRef {
+                    from_root: name.starts_with("::"),
+                    segments: path.split("::").map(Ustr::from).collect(),
+                },
+            )
+        } else {
+            resolve::resolve_bare(ws, frag, Ustr::from(name))
+        }
+        .ok()?
+    } else {
+        let key = Ustr::from(name);
+        if ws
+            .defs
+            .get(&key)
+            .is_some_and(|meta| meta.kind == DefKind::Type)
+        {
+            return Some(key);
+        }
+        return ws.defs.iter().find_map(|(&key, meta)| {
+            (meta.kind == DefKind::Type && meta.name.as_str() == name).then_some(key)
+        });
+    };
+    let is_type = resolved.kind == ResolvedKind::Type
+        || (resolved.kind == ResolvedKind::Binding
+            && ws
+                .defs
+                .get(&resolved.key)
+                .is_some_and(|meta| meta.kind == DefKind::Type));
+    is_type.then_some(resolved.key)
 }
 
 /// Every name some tier of `frag` offers, bound cleanly or not:
@@ -116,7 +189,7 @@ pub(crate) fn spellings_by_key(
             continue;
         }
         // Ambiguous or broken bindings cannot supply a usable spelling.
-        let Ok(resolved) = resolve::resolve_bare(ws, Some(frag), name) else {
+        let Ok(resolved) = resolve::resolve_bare(ws, frag, name) else {
             continue;
         };
         let matches = matches!(
@@ -147,7 +220,7 @@ pub(crate) fn spellings_by_key(
 pub(crate) struct GlobalBinding {
     pub name: Ustr,
     pub key: Ustr,
-    pub ty: String,
+    pub node_ty: String,
 }
 
 /// Enumerate globals that the fragment can actually bind. This is used for
@@ -168,7 +241,7 @@ pub(crate) fn visible_globals(ws: &Workspace, frag: &FragmentScope) -> Vec<Globa
             out.push(GlobalBinding {
                 name,
                 key,
-                ty: ws.render(None, global.ty),
+                node_ty: crate::reachability::type_key(ws, global.ty).to_string(),
             });
         }
     }
@@ -191,12 +264,24 @@ pub(crate) fn display_type_with_names(
     let bytes = rendered.as_bytes();
     let mut start = 0;
     while start < bytes.len() {
-        if !(bytes[start].is_ascii_alphabetic() || bytes[start] == b'_') {
+        let identifier_start = if let Some(rest) =
+            rendered[start..].strip_prefix(bone_core::modules::STANDALONE_PACKAGE_PREFIX)
+        {
+            rest.find("::").map(|offset| {
+                start + bone_core::modules::STANDALONE_PACKAGE_PREFIX.len() + offset + 2
+            })
+        } else {
+            None
+        }
+        .unwrap_or(start);
+        if identifier_start >= bytes.len()
+            || !(bytes[identifier_start].is_ascii_alphabetic() || bytes[identifier_start] == b'_')
+        {
             out.push(bytes[start] as char);
             start += 1;
             continue;
         }
-        let mut end = start + 1;
+        let mut end = identifier_start + 1;
         while end < bytes.len()
             && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_' || bytes[end] == b':')
         {
@@ -218,32 +303,22 @@ pub(crate) fn display_type_with_names(
 
 pub(crate) fn display_method_suffix_with_names(
     suffix: &str,
-    final_method: bool,
+    _final_method: bool,
     methods: &[crate::reachability::MethodRef],
     callable_names: &std::collections::HashMap<Ustr, Vec<Ustr>>,
 ) -> Option<String> {
-    let segments: Vec<&str> = suffix.split('.').collect();
-    let mut methods = methods.iter();
-    let mut rendered = Vec::with_capacity(segments.len());
-    for (i, segment) in segments.iter().enumerate() {
-        let is_method = segment.ends_with("()") || (final_method && i + 1 == segments.len());
-        if !is_method {
-            rendered.push((*segment).to_string());
-            continue;
-        }
-        let method = methods.next()?;
+    let mut rendered = suffix.to_string();
+    let mut search_from = 0;
+    for method in methods {
+        let key = method.0;
+        let label = bone_core::modules::display_name(key.as_str());
+        let start = rendered.get(search_from..)?.find(label)? + search_from;
+        let end = start + label.len();
         let name = callable_names.get(&method.0)?.first()?;
-        let final_hop = final_method && i + 1 == segments.len();
-        rendered.push(if final_hop {
-            name.to_string()
-        } else {
-            format!("{name}()")
-        });
+        rendered.replace_range(start..end, name.as_str());
+        search_from = start + name.as_str().len();
     }
-    if methods.next().is_some() {
-        return None;
-    }
-    Some(rendered.join("."))
+    Some(rendered)
 }
 
 /// Every bare name the fragment's tiers bind that `admit` accepts, with the
@@ -264,7 +339,7 @@ pub(crate) fn bound_names(
 
 /// The definition the bare `name` binds in `frag`, if a tier binds it to one.
 fn bound_key(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Option<Ustr> {
-    match resolve::resolve_bare(ws, Some(frag), name) {
+    match resolve::resolve_bare(ws, frag, name) {
         Ok(r) if r.kind != ResolvedKind::Module => Some(r.key),
         Ok(_) => None,
         // A callable family can be composed even when bare-value resolution rejects it.
@@ -338,9 +413,7 @@ pub(crate) fn path_members(
     // a bare name, a longer one a path.
     let enum_key = match segments {
         // An unresolved bare prefix offers neither enum variants nor module members.
-        [only] if !from_root => resolve::resolve_bare(ws, Some(frag), *only)
-            .ok()
-            .map(|r| r.key),
+        [only] if !from_root => resolve::resolve_bare(ws, frag, *only).ok().map(|r| r.key),
         // An unresolved qualified prefix is an ordinary completion non-match.
         _ => resolve::resolve_path(ws, frag, &prefix).ok().map(|r| r.key),
     }?;
@@ -499,4 +572,20 @@ fn import_path(ws: &Workspace, frag: &FragmentScope, meta: &DefMeta) -> Option<(
     segments.extend(meta.module.iter().copied());
     segments.push(meta.name);
     Some((from_root, segments))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn displayed_types_resolve_standalone_keys_with_file_punctuation() {
+        let key = Ustr::from("$standalone$fixture-dir/types.rock::Kind");
+        let spellings = std::collections::HashMap::from([(key, vec![Ustr::from("Alias")])]);
+        let ws = Workspace::new();
+        assert_eq!(
+            display_type_with_names(&ws, &format!("Vec<{key}?>"), &spellings),
+            "Vec<Alias?>"
+        );
+    }
 }

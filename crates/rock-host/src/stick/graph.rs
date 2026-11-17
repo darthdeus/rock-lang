@@ -3,8 +3,7 @@
 //! Resolves a project's stick.toml dependency tree recursively and
 //! manifest-relative (each dependency's own manifest resolves its deps
 //! relative to its own directory), dedupes packages by canonicalized root
-//! path, rejects edges between v1 and legacy packages, and validates alias
-//! normalization (`-` to `_`) and file-ownership overlaps. Every consumer
+//! path, validates alias normalization (`-` to `_`) and file ownership. Every consumer
 //! that used to resolve dependencies on its own (CLI source discovery, the
 //! compilation-unit loader, watch, global directory metadata) reads facts from
 //! here instead of re-walking manifests.
@@ -247,7 +246,7 @@ impl Builder {
             });
         }
         dependencies.sort_by(|a, b| a.declared_key.cmp(&b.declared_key));
-        self.validate_edges(&root, config, dialect, &dependencies)?;
+        self.validate_dependency_aliases(config, &dependencies)?;
 
         self.stack.pop();
         self.load_order.push(id);
@@ -265,11 +264,9 @@ impl Builder {
         Ok(id)
     }
 
-    fn validate_edges(
+    fn validate_dependency_aliases(
         &self,
-        root: &Path,
         config: &StickConfig,
-        dialect: Dialect,
         dependencies: &[PackageEdge],
     ) -> Result<()> {
         // Normalized aliases must be unique within one package's dependency
@@ -300,54 +297,11 @@ impl Builder {
             seen.insert(edge.alias.as_str(), edge.declared_key.as_str());
         }
 
-        let _ = root;
-
-        // Neither module system can name the other's definitions, so an edge
-        // across them would only fail later as unresolved names.
-        for edge in dependencies {
-            let target = self.node(edge.target);
-            if target.dialect != dialect {
-                return Err(anyhow!(
-                    "{} package `{}` depends on {} package `{}` (dependency `{}`); \
-                     a package can only depend on packages with the same `[language] modules` setting",
-                    dialect_name(dialect),
-                    config.package.name,
-                    dialect_name(target.dialect),
-                    target.manifest_name,
-                    edge.declared_key,
-                ));
-            }
-        }
         Ok(())
     }
 
-    /// Postorder the visited packages and check the file-ownership overlaps
-    /// that a mixed graph would introduce.
+    /// Postorder the visited packages.
     fn finish(self) -> Result<PackageGraph> {
-        // A legacy package's discovery includes every file under its root,
-        // including any nested package's sources. A nested v1 package also
-        // owns those files, so the graph would compile one physical source
-        // as two owners with different rule sets. Pure-legacy
-        // nesting keeps today's silent inclusion.
-        for outer in self.packages.iter().flatten() {
-            if outer.dialect != Dialect::Legacy {
-                continue;
-            }
-            for inner in self.packages.iter().flatten() {
-                if inner.id != outer.id
-                    && inner.dialect == Dialect::V1
-                    && inner.root.starts_with(&outer.root)
-                {
-                    return Err(anyhow!(
-                        "file ownership overlap: legacy package `{}` contains v1 package `{}` ({}); \
-                         a mixed graph must not compile the same source under two rule sets",
-                        outer.manifest_name,
-                        inner.manifest_name,
-                        inner.root.display(),
-                    ));
-                }
-            }
-        }
         Ok(PackageGraph {
             packages: self
                 .packages
@@ -483,10 +437,8 @@ impl PackageGraph {
         best.map(|(id, _)| id)
     }
 
-    /// Whether `owner` contributes `path` to the compile set. V1 packages own
-    /// exactly the files under their root that no nested package owns; legacy
-    /// packages keep today's inclusion (everything under the root, including
-    /// nested package directories).
+    /// Whether `owner` contributes `path` to the compile set. A nested package
+    /// owns its files instead of its enclosing package.
     pub fn owns_file(&self, owner: PackageId, path: &Path) -> bool {
         self.owns(owner, path, |path| self.package_of_file(path))
     }
@@ -501,11 +453,7 @@ impl PackageGraph {
         if !path.starts_with(&node.root) {
             return false;
         }
-        if node.dialect == Dialect::V1 {
-            package_of(path) == Some(owner)
-        } else {
-            true
-        }
+        package_of(path) == Some(owner)
     }
 
     /// Selected source membership. Inactive groups vanish before parsing and
@@ -580,13 +528,6 @@ impl PackageGraph {
             }
         }
         Ok(selected)
-    }
-}
-
-fn dialect_name(dialect: Dialect) -> &'static str {
-    match dialect {
-        Dialect::Legacy => "legacy",
-        Dialect::V1 => "v1",
     }
 }
 
@@ -689,39 +630,25 @@ mod tests {
         );
     }
 
-    fn mixed_edge_error(consumer: &str, provider: &str) -> String {
+    #[test]
+    fn package_dependency_without_modules_setting_uses_v1() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("app");
         let lib = tmp.path().join("lib");
-        write_manifest(&lib, "lib-pkg", provider);
+        write_manifest(&lib, "lib-pkg", "");
         write_manifest(
             &root,
             "app",
-            &format!("{consumer}\n[dependencies]\nlib = {{ path = \"../lib\" }}\n"),
+            "\n[language]\nmodules = \"v1\"\n\n[dependencies]\nlib = { path = \"../lib\" }\n",
         );
-        PackageGraph::build(&root)
-            .expect_err("a dependency across module systems must reject")
-            .to_string()
-    }
-
-    #[test]
-    fn dependencies_across_module_systems_are_rejected() {
-        let v1 = "\n[language]\nmodules = \"v1\"\n";
-        for (consumer, provider, want) in [
-            (
-                v1,
-                "",
-                "v1 package `app` depends on legacy package `lib-pkg`",
-            ),
-            (
-                "",
-                v1,
-                "legacy package `app` depends on v1 package `lib-pkg`",
-            ),
-        ] {
-            let msg = mixed_edge_error(consumer, provider);
-            assert!(msg.contains(want), "{msg}");
-        }
+        let graph = PackageGraph::build(&root).expect("dependency graph builds");
+        assert_eq!(graph.packages().len(), 2);
+        let provider = graph
+            .packages()
+            .iter()
+            .find(|node| node.manifest_name == "lib-pkg")
+            .expect("provider package");
+        assert_eq!(provider.dialect, Dialect::V1);
     }
 
     /// Channel scoping survives a transitive hop, or a dev-only package
@@ -876,7 +803,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_three_package_load_order_is_sorted_postorder_root_last() {
+    fn three_package_load_order_is_sorted_postorder_root_last() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("app");
         let b_child = tmp.path().join("b-child");
@@ -900,22 +827,32 @@ mod tests {
     }
 
     #[test]
-    fn nested_v1_package_inside_legacy_root_is_overlap_error() {
+    fn nested_package_owns_its_sources_once() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("app");
         let inner = root.join("inner");
-        write_manifest(&inner, "inner-v1", "\n[language]\nmodules = \"v1\"\n");
+        write_manifest(&inner, "inner-lib", "");
         write_manifest(
             &root,
             "app",
             "\n[dependencies]\ninner = { path = \"inner\" }\n",
         );
 
-        let err = PackageGraph::build(&root).expect_err("mixed ownership overlap must reject");
-        assert!(
-            err.to_string().contains("inner-v1"),
-            "error names the nested package: {err}"
-        );
+        fs::write(inner.join("inner.rock"), "fn inner() {}\n").expect("nested source");
+        fs::write(root.join("root.rock"), "fn root() {}\n").expect("root source");
+        let graph = PackageGraph::build(&root).expect("nested ownership builds");
+        let root_id = graph.root();
+        let inner_id = graph
+            .packages()
+            .iter()
+            .find(|node| node.manifest_name == "inner-lib")
+            .expect("nested package")
+            .id;
+        let root_file = fs::canonicalize(root.join("root.rock")).unwrap();
+        let inner_file = fs::canonicalize(inner.join("inner.rock")).unwrap();
+        assert!(graph.owns_file(root_id, &root_file));
+        assert!(!graph.owns_file(root_id, &inner_file));
+        assert!(graph.owns_file(inner_id, &inner_file));
     }
 
     #[test]

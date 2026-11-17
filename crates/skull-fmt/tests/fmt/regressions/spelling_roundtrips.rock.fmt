@@ -483,17 +483,17 @@ fn probe() {
 }
 //=== NO CHANGE ===
 
-//=== TEST CASE: legacy_ascription_keeps_its_spacing ===
+//=== TEST CASE: contextual_ascription_normalizes_spacing ===
 fn ratio(value: int) {
-    let wide = value  ::  float
-    let tight = value::float
-    let sum = (value + 1) :: float
+    let wide = (value  :  float)
+    let tight = (value:float)
+    let sum = ((value + 1) : float)
 }
 //=== EXPECTED ===
 fn ratio(value: int) {
-    let wide = value :: float
-    let tight = value::float
-    let sum = (value + 1) :: float
+    let wide = (value : float)
+    let tight = (value : float)
+    let sum = ((value + 1) : float)
 }
 
 //=== TEST CASE: path_qualified_return_literal ===

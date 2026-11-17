@@ -3,7 +3,7 @@
 //! Tags: globals, types
 
 //=== TEST CASE: undefined_name_UndefinedGlobal ===
-//! expect: Undefined global `undefined_variable`
+//! expect: `undefined_variable` did not resolve to any definition
 global bad_global: int = undefined_variable
 
 fn main() {

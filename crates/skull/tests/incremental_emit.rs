@@ -5,7 +5,7 @@
 //! body, so they must re-emit too (the inline codegen-dep), even though a body edit
 //! never re-infers the callers.
 
-use crate::common::{body_id, emit_full_of, ws_of, ws_with_stdlib};
+use crate::common::{body_id, emit_full_of, name_matches, ws_of, ws_with_stdlib};
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
@@ -38,7 +38,7 @@ fn scalar_constant_edits_refresh_full_incremental_and_overlay_emission() {
         .module(mid)
         .globals
         .iter()
-        .find(|(_, g)| g.name.as_str() == "BASE")
+        .find(|(_, g)| name_matches(g.name, "BASE"))
         .unwrap()
         .0;
     let edited = [(mid, BodyOwner::Global(gid))];
@@ -77,7 +77,7 @@ fn derived_scalar_constant_edits_refresh_transitive_readers_at_runtime() {
             .find_map(|m| {
                 m.globals
                     .iter()
-                    .find(|(_, g)| g.name.as_str() == "BASE")
+                    .find(|(_, g)| name_matches(g.name, "BASE"))
                     .map(|(id, _)| (m.id, id))
             })
             .unwrap();
@@ -552,8 +552,7 @@ fn an_overlay_carries_a_graph_added_library_body() {
 /// element is what makes the call specialize.
 #[test]
 fn a_body_edit_to_a_generic_coroutine_reemits_its_specializations() {
-    let v1 = "struct Vec<T> { _data: any, len: int }\n\
-              nobox value P { x: float, y: float }\n\
+    let v1 = "nobox value P { x: float, y: float }\n\
               co fn walk<T>(v: [T]) -> Coroutine<int, int, ()> {\n\
               \x20   let n = v.len\n\
               \x20   yield n\n\
@@ -567,7 +566,7 @@ fn a_body_edit_to_a_generic_coroutine_reemits_its_specializations() {
     // The population, asserted in the same test: without a specialized
     // coroutine in v1 there is nothing for the edit to invalidate and the
     // comparison would pass over an empty set.
-    let ws = crate::common::ws_of(v1);
+    let ws = ws_with_stdlib(v1);
     let mid = skull::user_module_id(&ws).unwrap();
     let lua = emit_full(&ws, mid).expect("emit_full v1").0.lua;
     let spec_steps = lua
@@ -585,7 +584,7 @@ fn a_body_edit_to_a_generic_coroutine_reemits_its_specializations() {
         spec_steps, 1,
         "the fixture must produce a SPECIALIZED coroutine step:\n{lua}"
     );
-    check_edit(v1, &v2, &["walk"]);
+    check_edit_with(ws_with_stdlib, v1, &v2, &["walk"]);
 }
 
 /// A standalone `Iterator`-bounded body survives an incremental rebuild. Its
@@ -1153,10 +1152,10 @@ fn changed_call_graph_reaching_a_foreign_publisher_matches_full_emission() {
             .lua_view()
             .publisher_lanes
             .keys()
-            .any(|i| ws2.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "extra"),
+            .any(|i| name_matches(
+                ws2.module(i.func.module).functions[i.func.func].name,
+                "extra"
+            )),
         "the changed call graph must reach a foreign publisher"
     );
     let fresh = emit_full_of(&ws2, "fresh emit").0;

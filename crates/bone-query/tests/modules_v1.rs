@@ -204,7 +204,7 @@ fn errors_in(diags: &[(String, Vec<lsp_types::Diagnostic>)], path: &str) -> Vec<
 /// Opening a file the batch load did not see (created after the project was
 /// indexed) must read it as its package's dialect, with its package, exactly
 /// as the batch load reads its siblings. It used to enter through
-/// `Session::update_file` with no facts and parse as legacy and unowned.
+/// `Session::update_file` with no facts and parse as standalone v1.
 #[test]
 fn a_file_created_after_the_load_is_read_as_its_package_reads_it() {
     let project = V1Project::new();
@@ -1245,7 +1245,7 @@ fn inlay_labels(bone: &BoneWorkspace, path: &str) -> Vec<String> {
 
 /// A v1 file that enters the session with a hard tokenizer error has no live
 /// module, so inlay hints come from the recovery reparse of the buffer. That
-/// reparse must read the file as its package does: read as legacy it lost its
+/// reparse must read the file as its package does: read as standalone it lost its
 /// `pub mod` header and `use` items, and `area` typed as `<error>`. The
 /// control breaks the same file recoverably, so the session itself answers.
 #[test]

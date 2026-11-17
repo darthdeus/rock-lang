@@ -9,7 +9,7 @@
 //! fail-closed but not a contract emission could consume.
 
 use crate::common::{
-    census_of, fn_name, graph_of, module_id, prepared_body, unjoined, ws_with_stdlib,
+    census_of, fn_name, graph_of, module_id, name_matches, prepared_body, unjoined, ws_with_stdlib,
 };
 use crate::support::site_join::Unjoined;
 use bone_semantic::inference::Workspace;
@@ -125,7 +125,7 @@ fn main() {
     let main = g
         .call_sites()
         .find(|(i, _)| {
-            i.func.module == mid && ws.module(mid).functions[i.func.func].name.as_str() == "main"
+            i.func.module == mid && name_matches(ws.module(mid).functions[i.func.func].name, "main")
         })
         .map(|(_, sites)| sites)
         .expect("main has graph sites");

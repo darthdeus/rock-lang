@@ -4012,7 +4012,7 @@ fn top() -> int { return sum_all(Counter { n: 0 }) }
             .module(mid)
             .functions
             .iter()
-            .find(|(_, f)| f.name.as_str() == "top")
+            .find(|(_, f)| skull_mir::mangle::declared_name(f.name.as_str()) == "top")
             .expect("top");
         let top = FuncRef {
             module: mid,
@@ -4050,7 +4050,12 @@ fn top() -> int { return sum_all(Counter { n: 0 }) }
             }
         }
         let pair = skull_mir::monoty::MonoTy::App {
-            ctor: skull_mir::monoty::MonoCtor::Nominal(Ustr::from("Pair")),
+            ctor: skull_mir::monoty::MonoCtor::Nominal(
+                *ws.struct_by_name
+                    .keys()
+                    .find(|name| skull_mir::mangle::declared_name(name.as_str()) == "Pair")
+                    .expect("Pair definition"),
+            ),
             params: Vec::new(),
         };
         let wrong_result = interner.intern(skull_mir::monoty::MonoTy::Tuple(vec![
@@ -4225,7 +4230,7 @@ fn outer(x: int) -> int {
             .module(mid)
             .functions
             .iter()
-            .find(|(_, f)| f.name.as_str() == "outer")
+            .find(|(_, f)| skull_mir::mangle::declared_name(f.name.as_str()) == "outer")
             .expect("outer");
         let root = FuncRef {
             module: mid,

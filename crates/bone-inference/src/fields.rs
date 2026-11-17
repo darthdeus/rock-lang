@@ -573,8 +573,7 @@ pub fn field_access(
         return Ok(());
     };
     let Some(meta) = gamma.workspace.defs.get(&struct_key) else {
-        // Legacy-owned definitions keep their bare names as keys and have no entry
-        // in `workspace.defs`. Legacy fields are public read/write.
+        // Compiler-owned definitions without metadata expose public fields.
         return Ok(());
     };
 
@@ -600,7 +599,7 @@ pub fn field_access(
             site.module_path,
         ),
         None => {
-            // Legacy callers targeting v1 definitions get the same checks.
+            // Compiler-owned callers have no package visibility grants.
             matches!(vis, NsVisibility::Pub)
         }
     };

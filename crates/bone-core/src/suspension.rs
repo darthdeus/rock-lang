@@ -454,6 +454,7 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
             Expr::Continue => self.exit(Exit::Continue, flow),
             Expr::Unit
             | Expr::Null
+            | Expr::Error
             | Expr::Hole(_)
             | Expr::Int(_)
             | Expr::Float(_)

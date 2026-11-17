@@ -11,15 +11,43 @@ pub(crate) const UNKNOWN_FILE_NAME: &str = "<unknown>";
 /// interner on each call.
 static UNKNOWN_FILE: LazyLock<ustr::Ustr> = LazyLock::new(|| ustr::ustr(UNKNOWN_FILE_NAME));
 
-/// Source dialect of one file. Legacy is today's grammar and flat lookup;
-/// `V1` opts a package into the modules-v1 grammar (`::` paths, `mod`/`use`,
-/// visibility). Selected per package by its stick.toml
-/// (`[language] modules = "v1"`), never per file.
+/// Source dialect of one file. V1 uses scoped lookup (`::` paths, `mod`/`use`,
+/// visibility). Selected by the package manifest or a standalone source's
+/// `//! modules: v1` directive.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Dialect {
     #[default]
-    Legacy,
     V1,
+}
+
+/// Compiler-owned package identity for a standalone source. This prefix is
+/// outside the identifier grammar, so a manifest name cannot claim it.
+pub const STANDALONE_PACKAGE_PREFIX: &str = "$standalone$";
+
+/// Source-facing spelling without the standalone package's file identity.
+pub fn display_name(key: &str) -> &str {
+    key.strip_prefix(STANDALONE_PACKAGE_PREFIX)
+        .and_then(|rest| rest.split_once("::"))
+        .map_or(key, |(_, name)| name)
+}
+
+/// Preserve the source identity of a standalone root in emitted artifacts.
+/// Nested modules and named packages retain their full definition keys.
+pub fn artifact_name(key: &str) -> &str {
+    key.strip_prefix(STANDALONE_PACKAGE_PREFIX)
+        .and_then(|rest| rest.split_once("::"))
+        .filter(|(_, name)| !name.contains("::"))
+        .map_or(key, |(_, name)| name)
+}
+
+pub(crate) fn display_diagnostic_names(mut message: String) -> String {
+    while let Some(start) = message.find(STANDALONE_PACKAGE_PREFIX) {
+        let Some(end) = message[start..].find("::") else {
+            break;
+        };
+        message.replace_range(start..start + end + 2, "");
+    }
+    message
 }
 
 /// Whether a package may declare mutable global storage. The default keeps
@@ -108,7 +136,7 @@ pub struct SourceFile {
     pub is_test_util: bool,
     pub used_packages: Vec<String>,
     /// Owning package and source dialect, stamped by the loader that resolved
-    /// the package graph. `None`/`Legacy` for files loaded outside a package
+    /// the package graph. `None`/`V1` for files loaded outside a package
     /// (standalone scripts, editor synthetic sources).
     pub package: Option<PackageTag>,
     pub dialect: Dialect,
@@ -133,7 +161,7 @@ pub fn source_file_from_path_and_contents(
         is_test_util: false,
         used_packages: vec![],
         package: None,
-        dialect: Dialect::Legacy,
+        dialect: Dialect::V1,
         global_policy: GlobalPolicy::Any,
     }
 }
@@ -505,7 +533,7 @@ mod tests {
         assert!(!file.is_test);
         assert!(!file.is_test_util);
         assert!(file.used_packages.is_empty());
-        assert_eq!(file.dialect, Dialect::Legacy);
+        assert_eq!(file.dialect, Dialect::V1);
         assert_eq!(file.global_policy, GlobalPolicy::Any);
     }
 }

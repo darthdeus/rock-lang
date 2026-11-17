@@ -348,6 +348,7 @@ impl Checker<'_, '_, '_> {
                 },
                 Shape::Enum { variants, .. },
             ) => {
+                let vname = Ustr::from(vname.rsplit("::").next().unwrap_or(vname.as_str()));
                 let Some(i) = variants.iter().position(|v| v.name == vname) else {
                     return Pat::Ctor(Ctor::Unknown, Vec::new());
                 };

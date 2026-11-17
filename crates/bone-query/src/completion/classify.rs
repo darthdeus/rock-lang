@@ -613,11 +613,19 @@ impl CompletionCx {
             // `Name { field: <cursor> }`: the field's declared type. Inside a
             // lambda body assigned to a function-typed field
             // (`is_open: () => x|`), the body returns the field's RETURN type.
+            // The parser keeps the source spelling, while workspace type
+            // indexes use canonical keys for standalone files.
+            let sname = crate::modules_scope::resolve_type_key(
+                ws,
+                crate::modules_scope::fragment(ws, ws.module(mid).file),
+                sname,
+            )
+            .unwrap_or_else(|| ustr::Ustr::from(sname));
             let slot = if *is_lambda {
-                crate::query::struct_field_fn_return_ty(ws, sname, fname)
-                    .or_else(|| crate::query::struct_field_ty(ws, sname, fname))
+                crate::query::struct_field_fn_return_ty(ws, sname.as_str(), fname)
+                    .or_else(|| crate::query::struct_field_ty(ws, sname.as_str(), fname))
             } else {
-                crate::query::struct_field_ty(ws, sname, fname)
+                crate::query::struct_field_ty(ws, sname.as_str(), fname)
             }?;
             return ExpectedArg::for_slot(ws, mid, inf, offset, slot);
         }

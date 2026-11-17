@@ -507,8 +507,9 @@ impl<'a> Verifier<'a> {
         };
         if shape.name != name {
             report(format!(
-                "value constructor representation is for `{}`, not `{name}`",
-                shape.name
+                "value constructor representation is for `{}`, not `{}`",
+                bone_core::modules::display_name(shape.name.as_str()),
+                bone_core::modules::display_name(name.as_str())
             ));
         }
 

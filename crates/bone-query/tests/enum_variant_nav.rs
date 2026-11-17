@@ -168,7 +168,7 @@ enum Shape {
 }
 struct Point { radius: float }
 fn f() {
-    let bare = Circle { radius: 1.0 }
+    let first = Shape::Circle { radius: 1.0 }
     let qualified = Shape::Circle { radius: 2.0 }
     let point = Point { radius: 3.0 }
 }

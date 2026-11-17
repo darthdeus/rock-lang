@@ -2,7 +2,7 @@
 //! Expected physical layouts stay explicit so internally consistent but
 //! incorrect representation choices still fail.
 
-use crate::common::{checked_ws_of, signature_plan};
+use crate::common::{checked_ws_of, key, signature_plan};
 use std::sync::Arc;
 
 use skull_mir::concrete::ConcreteSignature;
@@ -20,7 +20,7 @@ use ustr::Ustr;
 fn func_ref(ws: &bone_core::workspace::Workspace, name: &str) -> FuncRef {
     let overloads = ws
         .functions_by_name
-        .get(&Ustr::from(name))
+        .get(&key(ws, name))
         .expect("declared");
     assert_eq!(
         overloads.len(),
@@ -31,9 +31,9 @@ fn func_ref(ws: &bone_core::workspace::Workspace, name: &str) -> FuncRef {
     FuncRef { module, func }
 }
 
-fn nominal(name: &str) -> MonoTy {
+fn nominal(ws: &bone_core::workspace::Workspace, name: &str) -> MonoTy {
     MonoTy::App {
-        ctor: MonoCtor::Nominal(Ustr::from(name)),
+        ctor: MonoCtor::Nominal(key(ws, name)),
         params: Vec::new(),
     }
 }
@@ -153,7 +153,7 @@ fn main() {
     );
     let scx = ScalarCtx::new(&ws);
     let sink = func_ref(&ws, "sink");
-    let v2 = scx.interner().intern(nominal("V2"));
+    let v2 = scx.interner().intern(nominal(&ws, "V2"));
     let plan = signature_plan(
         Instance::base(sink),
         ConcreteSignature {
@@ -183,7 +183,7 @@ fn main() { print("{generic_tuple_take((V2 { x: 1.0, y: 2.0 }, 3.0)).0.x}") }
     );
     let scx = ScalarCtx::new(&ws);
     let take = func_ref(&ws, "generic_tuple_take");
-    let v2_ty = nominal("V2");
+    let v2_ty = nominal(&ws, "V2");
     let tuple = scx
         .interner()
         .intern(MonoTy::Tuple(vec![v2_ty, MonoTy::Float]));
@@ -191,7 +191,7 @@ fn main() { print("{generic_tuple_take((V2 { x: 1.0, y: 2.0 }, 3.0)).0.x}") }
         scx.interner(),
         take,
         vec![MonoTy::Tuple(vec![MonoTy::App {
-            ctor: MonoCtor::Nominal(Ustr::from("V2")),
+            ctor: MonoCtor::Nominal(key(&ws, "V2")),
             params: Vec::new(),
         }])],
     );
@@ -326,7 +326,7 @@ fn main() {
         .get(&nested_instance)
         .expect("nested concrete plan");
     let nested = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, nested_plan);
-    let leaf = nominal("Leaf");
+    let leaf = nominal(&ws, "Leaf");
     let fn_value = BackendFnAbiPlan::for_function_value(
         &ws,
         &scx,
@@ -441,7 +441,7 @@ fn a_representation_id_cannot_cross_build_arenas() {
 fn container_storage_uses_the_element_representation_plan() {
     let ws = checked_ws_of("nobox value V2 { x: float, y: float }");
     let arena = RepArena::default();
-    let element = nominal("V2");
+    let element = nominal(&ws, "V2");
     let ty = MonoTy::App {
         ctor: MonoCtor::Array,
         params: vec![element],
@@ -459,7 +459,7 @@ fn container_storage_uses_the_element_representation_plan() {
         "the Vec storage decision must be owned by the container plan"
     );
     let elem = plan.column_elem(&arena).expect("column element");
-    assert_eq!(elem.name, Ustr::from("V2"));
+    assert_eq!(elem.name, key(&ws, "V2"));
     assert!(!elem.nullable);
     assert_eq!(elem.representation(), plan.element_rep());
 }
@@ -471,7 +471,7 @@ fn container_columns_carry_owned_element_identity() {
     let arena = RepArena::default();
     let ty = MonoTy::App {
         ctor: MonoCtor::Array,
-        params: vec![nominal("V2")],
+        params: vec![nominal(&ws, "V2")],
     };
     let plan = ContainerPlan::for_type(&ws, scx.target(), &arena, ContainerFamily::Vec, &ty)
         .expect("value vector must have a container plan");
@@ -491,7 +491,7 @@ fn element_rep_plan_owns_ffi_column_admission() {
     let arena = RepArena::default();
     let vec_ty = MonoTy::App {
         ctor: MonoCtor::Array,
-        params: vec![nominal("V2")],
+        params: vec![nominal(&ws, "V2")],
     };
     let vec = ContainerPlan::for_type(
         &ws,
@@ -510,7 +510,7 @@ fn element_rep_plan_owns_ffi_column_admission() {
         .plan(
             &ws,
             bone_core::hir::FnBackend::Lua,
-            &nominal("E"),
+            &nominal(&ws, "E"),
             RepUse::Boundary,
             &RepUseFacts::default(),
             RepGuarantees::default(),
@@ -531,11 +531,11 @@ fn column_element_plan_carries_the_nobox_guarantee() {
     let arena = RepArena::default();
     let marked = MonoTy::App {
         ctor: MonoCtor::Array,
-        params: vec![nominal("N")],
+        params: vec![nominal(&ws, "N")],
     };
     let unmarked = MonoTy::App {
         ctor: MonoCtor::Array,
-        params: vec![nominal("B")],
+        params: vec![nominal(&ws, "B")],
     };
     let marked = ContainerPlan::for_type(
         &ws,
@@ -585,8 +585,8 @@ fn leaf_places_carry_the_container_element_representation() {
     let ws = checked_ws_of("nobox value V2 { x: float, y: float }");
     let arena = RepArena::default();
     let ty = MonoTy::App {
-        ctor: MonoCtor::Nominal(Ustr::from("NativeBuffer")),
-        params: vec![nominal("V2")],
+        ctor: MonoCtor::Nominal(key(&ws, "NativeBuffer")),
+        params: vec![nominal(&ws, "V2")],
     };
     let plan = ContainerPlan::for_type(
         &ws,
@@ -598,7 +598,7 @@ fn leaf_places_carry_the_container_element_representation() {
     .expect("a NativeBuffer value must have a concrete container plan");
     assert!(plan.is_leaf_addressed());
     let address = arena
-        .nominal_leaf_addresses(&ws, bone_core::hir::FnBackend::Lua, Ustr::from("V2"))
+        .nominal_leaf_addresses(&ws, bone_core::hir::FnBackend::Lua, key(&ws, "V2"))
         .expect("V2 has a leaf address plan")
         .into_iter()
         .next()
@@ -612,19 +612,19 @@ fn leaf_places_carry_the_container_element_representation() {
 #[test]
 fn enum_layout_is_selected_by_one_owned_plan() {
     let cdata_ws = checked_ws_of("enum E { A(int), B(int), None }");
-    let cdata = EnumPlan::for_name(&cdata_ws, Ustr::from("E")).expect("enum plan");
+    let cdata = EnumPlan::for_name(&cdata_ws, key(&cdata_ws, "E")).expect("enum plan");
     assert!(matches!(cdata.layout(), EnumLayout::Cdata(_)));
     assert!(cdata.cdata().is_some());
     assert!(cdata.flat().is_none());
 
     let flat_ws = checked_ws_of("nobox value P { x: int, y: int }\nenum E { Has(P), Nope }");
-    let flat = EnumPlan::for_name(&flat_ws, Ustr::from("E")).expect("enum plan");
+    let flat = EnumPlan::for_name(&flat_ws, key(&flat_ws, "E")).expect("enum plan");
     assert!(matches!(flat.layout(), EnumLayout::Flat(_)));
     assert!(flat.flat().is_some());
     assert!(flat.cdata().is_none());
 
     let unit_ws = checked_ws_of("enum E { A, B }");
-    let unit = EnumPlan::for_name(&unit_ws, Ustr::from("E")).expect("enum plan");
+    let unit = EnumPlan::for_name(&unit_ws, key(&unit_ws, "E")).expect("enum plan");
     assert!(unit.is_payload_free());
     assert!(matches!(unit.layout(), EnumLayout::PayloadFree));
 }
@@ -691,7 +691,7 @@ fn concrete_rep_planner_is_total_over_the_logical_type_vocabulary() {
             params: vec![MonoTy::Int],
             ret: Box::new(MonoTy::Bool),
         },
-        nominal("V2"),
+        nominal(&ws, "V2"),
     ];
     assert_eq!(
         valid.len(),
@@ -733,7 +733,7 @@ fn concrete_rep_planner_is_total_over_the_logical_type_vocabulary() {
         .plan(
             &ws,
             bone_core::hir::FnBackend::Lua,
-            &nominal("Gc"),
+            &nominal(&ws, "Gc"),
             RepUse::Parameter,
             &facts,
             RepGuarantees {
@@ -778,8 +778,8 @@ fn function_value_plan_mode_is_part_of_the_owned_signature() {
     let ws = checked_ws_of("value V2 { x: float, y: float }\nfn main() { print(\"ok\") }\n");
     let scx = ScalarCtx::new(&ws);
     let ty = MonoTy::Function {
-        params: vec![nominal("V2")],
-        ret: Box::new(nominal("V2")),
+        params: vec![nominal(&ws, "V2")],
+        ret: Box::new(nominal(&ws, "V2")),
     };
     let direct = BackendFnAbiPlan::for_function_value_with_mode(&ws, &scx, &ty, false)
         .expect("direct nested function mode must plan");
@@ -816,7 +816,7 @@ fn main() { print("main") }
         &ws,
         &scx,
         &MonoTy::Function {
-            params: vec![nominal("Leaf")],
+            params: vec![nominal(&ws, "Leaf")],
             ret: Box::new(MonoTy::Unit),
         },
     )
@@ -837,7 +837,7 @@ fn aggregate_value_projection_has_an_owned_value_context() {
         .plan(
             &ws,
             bone_core::hir::FnBackend::Lua,
-            &nominal("V2"),
+            &nominal(&ws, "V2"),
             RepUse::Value,
             &RepUseFacts::default(),
             RepGuarantees {
@@ -866,7 +866,7 @@ fn global_storage_uses_an_owned_value_plan() {
         .module_ids
         .get(&Ustr::from("<test>"))
         .expect("test module");
-    let gid = ws.module(mid).global_by_name[&Ustr::from("state")];
+    let gid = ws.module(mid).global_by_name[&key(&ws, "state")];
     let scx = ScalarCtx::new(&ws);
     let plan = GlobalPlan::for_declared_type(&ws, &scx, ws.module(mid).globals[gid].ty)
         .expect("a declared global must have a physical storage plan");
@@ -898,8 +898,8 @@ fn main() {
     let mir = lower_test_root(&ws, &scx, &bodies, main);
     let mut plans = std::collections::BTreeMap::new();
     skull_mir::mir::column_elem_rep_plans(&mir, &mut plans);
-    assert_eq!(plans.get(&Ustr::from("V2")).map(|p| p.0), Some(false));
-    assert_eq!(plans.get(&Ustr::from("NV2")).map(|p| p.0), Some(true));
+    assert_eq!(plans.get(&key(&ws, "V2")).map(|p| p.0), Some(false));
+    assert_eq!(plans.get(&key(&ws, "NV2")).map(|p| p.0), Some(true));
     assert!(
         plans.len() >= 2,
         "the column plan population must be nonzero"
@@ -911,7 +911,7 @@ fn nominal_value_storage_is_owned_by_the_rep_plan() {
     let ws = checked_ws_of("value Boxed { text: string, tag: int }\n");
     let arena = RepArena::default();
     let id = arena
-        .plan_nominal_value(&ws, bone_core::hir::FnBackend::Lua, Ustr::from("Boxed"))
+        .plan_nominal_value(&ws, bone_core::hir::FnBackend::Lua, key(&ws, "Boxed"))
         .expect("a GC-carrying value must have an explicit physical plan");
     let plan = arena.get(id);
     assert_eq!(plan.value_storage(), Some(ValueStorage::GcTable));
@@ -921,7 +921,7 @@ fn nominal_value_storage_is_owned_by_the_rep_plan() {
             .nominal_value_storage_required(
                 &ws,
                 bone_core::hir::FnBackend::Lua,
-                Ustr::from("Boxed")
+                key(&ws, "Boxed")
             )
             .expect("the required storage plan must exist"),
         ValueStorage::GcTable
@@ -938,7 +938,7 @@ fn nominal_value_leaf_paths_are_owned_by_the_rep_plan() {
             .nominal_value_leaf_paths_required(
                 &ws,
                 bone_core::hir::FnBackend::Lua,
-                Ustr::from("Boxed"),
+                key(&ws, "Boxed"),
             )
             .expect("the required leaf-path plan must exist"),
         vec![
@@ -960,7 +960,7 @@ fn nominal_value_presence_flags_are_owned_by_the_rep_plan() {
             .nominal_value_leaf_presence_flags_required(
                 &ws,
                 bone_core::hir::FnBackend::Lua,
-                Ustr::from("Boxed"),
+                key(&ws, "Boxed"),
             )
             .expect("the required presence plan must exist"),
         vec![true, false, false, false]
@@ -972,7 +972,7 @@ fn nominal_leaf_addresses_are_owned_by_the_rep_plan() {
     let ws = checked_ws_of("value V2 { x: float, y: float }\nvalue Boxed { pos: V2, tag: int }\n");
     let arena = RepArena::default();
     let addresses = arena
-        .nominal_leaf_addresses(&ws, bone_core::hir::FnBackend::Lua, Ustr::from("Boxed"))
+        .nominal_leaf_addresses(&ws, bone_core::hir::FnBackend::Lua, key(&ws, "Boxed"))
         .expect("the concrete value plan must own nonzero leaf addresses");
     assert_eq!(
         addresses
@@ -989,7 +989,7 @@ fn nominal_c_layout_is_owned_by_the_rep_plan() {
     let ws = checked_ws_of("value Mixed { on: bool, count: int, scale: f32 }");
     let arena = RepArena::default();
     let (leaves, size, align) = arena
-        .nominal_leaf_layout(&ws, bone_core::hir::FnBackend::Lua, Ustr::from("Mixed"))
+        .nominal_leaf_layout(&ws, bone_core::hir::FnBackend::Lua, key(&ws, "Mixed"))
         .expect("the concrete value plan must own the validated C layout");
     assert_eq!(
         leaves.iter().map(|leaf| leaf.path).collect::<Vec<_>>(),
@@ -1014,7 +1014,7 @@ fn nominal_c_layout_aligns_nested_fields_before_recurse() {
         .nominal_leaf_layout(
             &ws,
             bone_core::hir::FnBackend::Lua,
-            Ustr::from("SpriteFragU"),
+            key(&ws, "SpriteFragU"),
         )
         .expect("the nested C layout must be representable");
     assert_eq!(
@@ -1049,12 +1049,12 @@ fn shared_struct_field_plan_is_required_and_fail_closed() {
          nobox value N { x: int }\n\
          struct Holder { embed child: Child?, n: N, direct: int, coroutine: Coroutine<int, int, int> }",
     );
-    let holder = Ustr::from("Holder");
+    let holder = key(&ws, "Holder");
     let child = Ustr::from("child");
     let direct = Ustr::from("direct");
     let plan = struct_field_plan(&ws, bone_core::hir::FnBackend::Lua, holder, child, false)
         .expect("known struct field must have a plan");
-    assert_eq!(plan.inline_child(), Some(Ustr::from("Child")));
+    assert_eq!(plan.inline_child(), Some(key(&ws, "Child")));
     assert!(
         plan.nullable(),
         "the shared plan must retain field presence"
@@ -1069,7 +1069,7 @@ fn shared_struct_field_plan_is_required_and_fail_closed() {
         )
         .expect("known nobox field must have a plan")
         .inline_child(),
-        Some(Ustr::from("N"))
+        Some(key(&ws, "N"))
     );
     let direct_plan = struct_field_plan(&ws, bone_core::hir::FnBackend::Lua, holder, direct, false)
         .expect("known primitive field must have a plan");
@@ -1078,13 +1078,13 @@ fn shared_struct_field_plan_is_required_and_fail_closed() {
     let nested_plan = struct_field_plan(
         &ws,
         bone_core::hir::FnBackend::Lua,
-        Ustr::from("Outer"),
+        key(&ws, "Outer"),
         Ustr::from("inner"),
         false,
     )
     .expect("known direct child must have a plan");
     assert!(nested_plan.is_direct());
-    assert_eq!(nested_plan.direct_child(), Some(Ustr::from("Inner")));
+    assert_eq!(nested_plan.direct_child(), Some(key(&ws, "Inner")));
     assert_eq!(
         struct_field_plan(
             &ws,
@@ -1403,7 +1403,7 @@ fn consume(value: Many) -> int {{ let whole = value; return whole.child0?.a ?? -
 #[test]
 fn a_nullable_over_a_nullable_value_plans_as_the_single_nullable() {
     let ws = checked_ws_of("nobox value V2 { x: float, y: float }");
-    let once = MonoTy::nullable(nominal("V2"));
+    let once = MonoTy::nullable(nominal(&ws, "V2"));
     assert_eq!(MonoTy::nullable(once.clone()), once);
     let arena = RepArena::default();
     let id = arena

@@ -162,14 +162,19 @@ impl EqRoute {
 /// its own rendering through `js_supply` -- so filtering by the serving backend
 /// here rejects a program the backend can emit.
 pub fn dispatched_callee_decls(ws: &Workspace, name: &str) -> Vec<crate::mir::FuncRef> {
-    let Some(decls) = ws.functions_by_name.get(&crate::names::ustr(name)) else {
-        return Vec::new();
-    };
-    decls
-        .iter()
-        .map(|&(module, func)| crate::mir::FuncRef { module, func })
-        .filter(|r| crate::mangle::mangle_fn(ws, &ws.module(r.module).functions[r.func]) == name)
-        .collect()
+    let mut resolved = Vec::new();
+    for (key, decls) in &ws.functions_by_name {
+        if crate::mangle::declared_name(key.as_str()) != name {
+            continue;
+        }
+        resolved.extend(decls.iter().filter_map(|&(module, func)| {
+            (crate::mangle::mangle_fn(ws, &ws.module(module).functions[func]) == name)
+                .then_some(crate::mir::FuncRef { module, func })
+        }));
+    }
+    resolved.sort_by_key(|r| (r.module.index(), r.func.into_raw()));
+    resolved.dedup();
+    resolved
 }
 
 /// THE declaration a conditionally-synthesized call to `name` resolves to.

@@ -2,8 +2,8 @@
 //! the deterministic gates for scope epochs.
 //!
 //! A sibling of `incremental.rs` rather than an extension of it: that oracle
-//! parses every file legacy through `parse_module_clean` and compares body
-//! diagnostics and types. A v1 case needs each file parsed in its own dialect
+//! compares body diagnostics and types for v1 packages. A v1 case needs each
+//! file parsed with its package tag
 //! with its package tag, the fresh reference built through the aliased entry,
 //! lowering and interface diagnostics as well as body ones, the RESOLVED KEYS
 //! of every reference (a resolution can move to another definition of the same
@@ -31,10 +31,6 @@ use skull_parser::{Ast, Dialect};
 // Fixtures
 // ---------------------------------------------------------------------------
 
-fn legacy(path: &str, text: &str) -> SessionFile {
-    SessionFile::legacy(path, text)
-}
-
 /// A two-function stand-in for the stdlib. It carries a stdlib file id, so it
 /// is the `std` package and its names are the v1 prelude (tier 5). Every gate
 /// builds with it so a count would show a rebuild that re-inferred the warm
@@ -49,7 +45,7 @@ fn warm() -> Vec<Ast> {
         skull_parser::parse_module_with_dialect(
             WARM,
             Ustr::from(warm_path().as_str()),
-            Dialect::Legacy,
+            Dialect::V1,
         )
         .expect("warm parses"),
     ]
@@ -729,10 +725,9 @@ fn gate_d_private_helper_added_in_an_unrelated_module() {
 /// fragment that named `super::b::depth` by path loses it.
 ///
 /// b (its keys moved, 1 body) and c (its path walked node `b`; it must
-/// re-lower to report the miss) re-lower -- 2 lowered, 1 re-inferred, since
-/// c's `pick` now fails to LOWER and so is in neither the re-inferred count
-/// nor the `relowered` list; d and the warm stdlib 0. Renaming it back
-/// restores the path.
+/// re-lower to report the miss) re-lower and re-infer -- 2 bodies each. The
+/// successfully lowered partial body remains queryable with an Error node;
+/// d and the warm stdlib stay untouched. Renaming it back restores the path.
 #[test]
 fn gate_e_module_header_changed_and_restored() {
     let b0 = "mod b;\n\npub fn depth() -> int {\n    1\n}\n";
@@ -745,7 +740,12 @@ fn gate_e_module_header_changed_and_restored() {
     ]);
     assert_eq!(h.call_keys("c.rock"), vec![(key("b::depth"), None)]);
 
-    h.edit_reads("b.rock", b1, UpdateTier::Scope, (1, 2, &[("b.rock", 1)]));
+    h.edit_reads(
+        "b.rock",
+        b1,
+        UpdateTier::Scope,
+        (2, 2, &[("b.rock", 1), ("c.rock", 1)]),
+    );
     h.assert_diagnostic("did not resolve");
 
     let r = h.edit("b.rock", b0).expect("accepted");
@@ -824,9 +824,9 @@ fn a_glob_reexport_of_a_named_reexport_resolves() {
 /// must re-LOWER; re-inference alone would keep the stale verdict.
 ///
 /// a (edited, 1 body) and c (its path resolved `a::bump`; it must re-lower)
-/// re-lower -- 2 lowered, 1 re-inferred, since c's `pick` now fails to LOWER
-/// with the access error; d and the warm stdlib 0. Widening it back
-/// re-lowers the user clean.
+/// re-lower and re-infer -- 2 bodies each. c's successfully lowered partial
+/// body keeps its Error node after the access error; d and the warm stdlib
+/// stay untouched. Widening it back re-lowers the user clean.
 #[test]
 fn gate_g_visibility_narrowed_and_widened_on_a_path_used_item() {
     let a1 = "mod a;\n\nfn bump(n: int) -> int {\n    n\n}\n";
@@ -838,7 +838,12 @@ fn gate_g_visibility_narrowed_and_widened_on_a_path_used_item() {
     ]);
     h.assert_no_diagnostics();
 
-    h.edit_reads("a.rock", a1, UpdateTier::Scope, (1, 2, &[("a.rock", 1)]));
+    h.edit_reads(
+        "a.rock",
+        a1,
+        UpdateTier::Scope,
+        (2, 2, &[("a.rock", 1), ("c.rock", 1)]),
+    );
     h.assert_diagnostic("`bump` is not accessible from this module");
 
     let r = h.edit("a.rock", A_BUMP).expect("accepted");
@@ -862,34 +867,6 @@ fn warm_one_family() -> Option<String> {
         key("b::warm_one"),
         bone_core::modules::STD_PACKAGE_ID
     ))
-}
-
-/// A legacy file that starts defining a std-named function does not join the
-/// std family a v1 call reaches through tier 5: the call keeps
-/// selecting the std definition rather than tying with the legacy one, in
-/// the incremental session as in a fresh build. The legacy definition itself
-/// duplicates the legacy std one, which every legacy call would tie on.
-#[test]
-fn a_legacy_definition_of_a_std_name_added_leaves_the_v1_call_on_std() {
-    let without = "fn other() -> int {\n    2\n}\n";
-    let with = "fn other() -> int {\n    2\n}\n\nfn warm_one() -> int {\n    5\n}\n";
-    let c = "mod c;\n\nfn pick() -> int {\n    warm_one()\n}\n";
-    let mut h = V1Harness::new(vec![v1("c.rock", c), legacy("legacy_def.rock", without)]);
-    assert_eq!(h.call_keys("c.rock"), vec![("warm_one".to_string(), None)]);
-
-    h.edit("legacy_def.rock", with).expect("accepted");
-    h.assert_diagnostic("duplicate definition of `warm_one()`");
-    assert_eq!(h.call_keys("c.rock"), vec![("warm_one".to_string(), None)]);
-    let selected: Vec<String> = snapshot(h.session.workspace(), &h.files)
-        .references
-        .into_iter()
-        .filter(|r| r.0 == "c.rock" && r.3 == "selects")
-        .map(|r| r.4)
-        .collect();
-    assert!(
-        selected.iter().all(|s| s.starts_with(&warm_path())),
-        "{selected:?}"
-    );
 }
 
 /// A private member added to a globbed module never opens through the glob,
@@ -964,7 +941,7 @@ fn a_signature_edit_regroups_backend_variants() {
     let a = "fn now(n: int) -> int {\n    n\n}\n\nfn pick() -> int {\n    now(1)\n}\n";
     let apart = "extern(js) fn now(n: float) -> int\n";
     let paired = "extern(js) fn now(n: int) -> int\n";
-    let mut h = V1Harness::new(vec![legacy("a.rock", a), legacy("b.rock", apart)]);
+    let mut h = V1Harness::new(vec![v1("a.rock", a), v1("b.rock", apart)]);
     h.assert_no_diagnostics();
 
     for text in [paired, apart] {
@@ -985,7 +962,7 @@ fn an_added_backend_sibling_joins_the_group() {
     let a = "fn now(n: int) -> int {\n    n\n}\n\nfn pick() -> int {\n    now(1)\n}\n";
     let without = "fn other() -> int {\n    2\n}\n";
     let with = "fn other() -> int {\n    2\n}\n\nextern(js) fn now(n: int) -> int\n";
-    let mut h = V1Harness::new(vec![legacy("a.rock", a), legacy("b.rock", without)]);
+    let mut h = V1Harness::new(vec![v1("a.rock", a), v1("b.rock", without)]);
 
     for text in [with, without] {
         h.edit("b.rock", text).expect("accepted");
@@ -1227,7 +1204,7 @@ fn a_function_named_like_a_macro_is_refused_like_a_fresh_build() {
     let macros = "macro twice(e: expr) -> int {\n    e * 2\n}\n";
     let user0 = "fn f() -> int {\n    1\n}\n";
     let user1 = "fn f() -> int {\n    1\n}\n\nfn twice(n: int) -> int {\n    n\n}\n";
-    let files = |user: &str| vec![legacy("macros.rock", macros), legacy("user.rock", user)];
+    let files = |user: &str| vec![v1("macros.rock", macros), v1("user.rock", user)];
     let expected = "macro `twice` collides with a function named `twice`";
 
     let fresh = Session::new(warm(), files(user1), &NsAliases::default())
@@ -1266,14 +1243,7 @@ fn a_bad_macro_argument_label_is_refused_like_a_fresh_build_on_every_path() {
         ),
     ];
     for (tier, user1) in edits {
-        let files = |user: &str, dialect: fn(&str, &str) -> SessionFile| {
-            vec![legacy("macros.rock", macros), dialect("user.rock", user)]
-        };
-        let dialect: fn(&str, &str) -> SessionFile = if tier == UpdateTier::Scope {
-            v1
-        } else {
-            legacy
-        };
+        let files = |user: &str| vec![v1("macros.rock", macros), v1("user.rock", user)];
         let user0 = if tier == UpdateTier::Scope {
             format!("mod user;\n\n{user0}")
         } else {
@@ -1285,7 +1255,7 @@ fn a_bad_macro_argument_label_is_refused_like_a_fresh_build_on_every_path() {
             user1.to_string()
         };
 
-        let fresh = Session::new(warm(), files(&user1, dialect), &NsAliases::default())
+        let fresh = Session::new(warm(), files(&user1), &NsAliases::default())
             .err()
             .unwrap_or_else(|| panic!("{tier:?}: a fresh session refuses it"));
         assert!(
@@ -1295,92 +1265,21 @@ fn a_bad_macro_argument_label_is_refused_like_a_fresh_build_on_every_path() {
         );
 
         // The same edit with a good label pins which path it takes.
-        let mut control = Session::new(warm(), files(&user0, dialect), &NsAliases::default())
-            .expect("baseline builds");
+        let mut control =
+            Session::new(warm(), files(&user0), &NsAliases::default()).expect("baseline builds");
         let good = control
             .update_file("user.rock", &user1.replace("x:", "e:"))
             .expect("a good label is accepted");
         assert_eq!(good.tier, tier);
 
-        let mut session = Session::new(warm(), files(&user0, dialect), &NsAliases::default())
-            .expect("baseline builds");
+        let mut session =
+            Session::new(warm(), files(&user0), &NsAliases::default()).expect("baseline builds");
         let err = session
             .update_file("user.rock", &user1)
             .map(|r| r.tier)
             .expect_err(&format!("{tier:?}: the session refuses the edit too"));
         assert!(err.message.contains(expected), "{tier:?}: {}", err.message);
     }
-}
-
-/// Warm and user files share the legacy bare-name maps, so a user type named
-/// like a warm generic type is a cross-module duplicate: the batch pass, a
-/// first session build and a rebuilt one all report `duplicate struct` on the
-/// user file and nothing on the warm one. A session that lowered the warm
-/// modules alone would not see that; with such a collision the session lowers
-/// warm and user files together.
-#[test]
-fn a_user_type_named_like_a_warm_type_builds_like_a_fresh_build() {
-    let warm_text = "struct Box<T> {\n    v: T,\n}\n\nfn unbox<T>(b: Box<T>) -> T {\n    b.v\n}\n";
-    let warm = || {
-        vec![
-            skull_parser::parse_module_with_dialect(
-                warm_text,
-                Ustr::from(rock_stdlib::stdlib_file_id("collide_warm").as_str()),
-                Dialect::Legacy,
-            )
-            .expect("warm parses"),
-        ]
-    };
-    let apart = "struct Crate {\n    x: int,\n}\n\nfn f(b: Crate) -> int {\n    b.x\n}\n";
-    let collide = "struct Box {\n    x: int,\n}\n\nfn f(b: Box) -> int {\n    b.x\n}\n";
-    let files = vec![legacy("user.rock", collide)];
-
-    let mut modules = warm();
-    modules.extend(parse(&files).expect("parses"));
-    let batch = semantic_pass_with_aliases(&mut modules, &NsAliases::default())
-        .expect("the batch pass builds it");
-    let reference = snapshot(&batch, &files);
-    assert!(
-        reference
-            .diagnostics
-            .iter()
-            .any(|(file, _, message)| file == "user.rock"
-                && message == "duplicate struct `Box` across modules"),
-        "the batch pass reports the duplicate at the user file: {:?}",
-        reference.diagnostics
-    );
-    assert!(
-        reference
-            .diagnostics
-            .iter()
-            .all(|(file, _, _)| !is_stdlib_module_file(file)),
-        "no diagnostic may point at the warm modules: {:?}",
-        reference.diagnostics
-    );
-
-    let first = Session::new(warm(), files.clone(), &NsAliases::default())
-        .expect("Session::new builds it too");
-    assert_eq!(
-        snapshot(first.workspace(), &files),
-        reference,
-        "Session::new"
-    );
-
-    let mut session = Session::new(
-        warm(),
-        vec![legacy("user.rock", apart)],
-        &NsAliases::default(),
-    )
-    .expect("builds");
-    session.files.get_mut("user.rock").unwrap().text = collide.to_string();
-    session
-        .rebuild_users()
-        .expect("rebuild_users builds it too");
-    assert_eq!(
-        snapshot(session.workspace(), &files),
-        reference,
-        "rebuild_users"
-    );
 }
 
 // ---------------------------------------------------------------------------

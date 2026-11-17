@@ -386,12 +386,11 @@ mod executable_tests {
 pub struct EmbeddedFile<'a> {
     pub file: &'a str,
     pub package: Option<(&'a str, u32)>,
-    pub modules_v1: bool,
     pub src: &'a str,
 }
 
-/// An open embedded file: name, package, modules-v1 flag, marker line index.
-type OpenFile<'a> = (&'a str, Option<(&'a str, u32)>, bool, usize);
+/// An open embedded file: name, package, marker line index.
+type OpenFile<'a> = (&'a str, Option<(&'a str, u32)>, usize);
 
 /// Split a fixture section body into embedded files. Lines `//-- <name>
 /// [@pkg=<self_name>,<id>] [@v1]` start a file; everything until the next
@@ -404,21 +403,19 @@ pub fn parse_embedded_files(body: &str) -> Vec<EmbeddedFile<'_>> {
             if let Some(prev) = current.take() {
                 let src = body
                     .lines()
-                    .skip(prev.3 + 1)
-                    .take(idx - prev.3 - 1)
+                    .skip(prev.2 + 1)
+                    .take(idx - prev.2 - 1)
                     .collect::<Vec<_>>()
                     .join("\n");
                 files.push(EmbeddedFile {
                     file: prev.0,
                     package: prev.1,
-                    modules_v1: prev.2,
                     src: Box::leak(src.into_boxed_str()),
                 });
             }
             let mut it = rest.split_whitespace();
             let file = it.next().unwrap_or("file.rock");
             let mut package = None;
-            let mut dialect = false;
             for token in it {
                 if let Some(spec) = token.strip_prefix("@pkg=") {
                     let mut parts = spec.split(',');
@@ -429,20 +426,17 @@ pub fn parse_embedded_files(body: &str) -> Vec<EmbeddedFile<'_>> {
                         .unwrap_or(0);
                     let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
                     package = Some((leaked, id));
-                } else if token == "@v1" {
-                    dialect = true;
                 }
             }
             let leaked_file: &'static str = Box::leak(file.to_string().into_boxed_str());
-            current = Some((leaked_file, package, dialect, idx));
+            current = Some((leaked_file, package, idx));
         }
     }
     if let Some(prev) = current.take() {
-        let src = body.lines().skip(prev.3 + 1).collect::<Vec<_>>().join("\n");
+        let src = body.lines().skip(prev.2 + 1).collect::<Vec<_>>().join("\n");
         files.push(EmbeddedFile {
             file: prev.0,
             package: prev.1,
-            modules_v1: prev.2,
             src: Box::leak(src.into_boxed_str()),
         });
     }

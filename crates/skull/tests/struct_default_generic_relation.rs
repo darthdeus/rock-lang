@@ -21,7 +21,7 @@
 //! instances -- is asserted end-to-end by
 //! `site_domain::a_generic_structs_field_default_names_its_own_instance`.
 
-use crate::common::{module_id, ws_with_stdlib};
+use crate::common::{module_id, name_matches, ws_with_stdlib};
 use bone_semantic::hir::{BodyOwner, TyId, TypeExpr};
 use bone_semantic::inference::{BodyInference, Workspace};
 use ustr::Ustr;
@@ -89,7 +89,7 @@ fn defaults_inference(ws: &Workspace) -> (bone_semantic::prelude::ModuleId, &Bod
         .module(mid)
         .structs
         .iter()
-        .find(|(_, s)| s.name.as_str() == "Box")
+        .find(|(_, s)| name_matches(s.name, "Box"))
         .expect("Box");
     let inf = ws
         .inference(mid)
@@ -117,7 +117,7 @@ fn a_generic_field_default_and_its_declared_type_share_one_inference_class() {
         .module(mid)
         .structs
         .iter()
-        .find(|(_, s)| s.name.as_str() == "Box")
+        .find(|(_, s)| name_matches(s.name, "Box"))
         .map(|(i, _)| i)
         .expect("Box");
     let body = &ws.module(mid).bodies[&BodyOwner::StructDefaults(sidx)];
@@ -181,7 +181,7 @@ fn the_defaults_body_publishes_its_declared_generic_slots() {
         .module(mid)
         .structs
         .iter()
-        .find(|(_, s)| s.name.as_str() == "Box")
+        .find(|(_, s)| name_matches(s.name, "Box"))
         .map(|(i, _)| i)
         .expect("Box");
     let def = &ws.module(mid).structs[sidx];
@@ -238,7 +238,7 @@ fn main() {
         .module(mid)
         .structs
         .iter()
-        .find(|(_, s)| s.name.as_str() == "Pair")
+        .find(|(_, s)| name_matches(s.name, "Pair"))
         .map(|(i, _)| i)
         .expect("Pair");
     let inf = ws
@@ -296,7 +296,7 @@ fn main() {
         .module(mid)
         .structs
         .iter()
-        .find(|(_, s)| s.name.as_str() == "Plain")
+        .find(|(_, s)| name_matches(s.name, "Plain"))
         .map(|(i, _)| i)
         .expect("Plain");
     let inf = ws

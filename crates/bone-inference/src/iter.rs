@@ -38,6 +38,8 @@ pub(crate) fn for_elem_ty(
         return Ok(resolve(gamma, elem, span));
     }
     Ok(match *gamma.get(iter_ty) {
+        TypeExpr::Builtin(BuiltinTy::Error) => gamma.workspace.builtins.error(),
+
         // [T]
         TypeExpr::App {
             ctor: TypeCtor::Array,

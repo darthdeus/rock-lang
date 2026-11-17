@@ -15,6 +15,21 @@ fn ws_of(src: &str) -> (Workspace, ModuleId) {
     (ws, mid)
 }
 
+fn ws_with_stdlib(src: &str) -> (Workspace, ModuleId) {
+    let mut modules: Vec<_> = rock_stdlib::stdlib_files()
+        .iter()
+        .map(|file| {
+            let id = Ustr::from(rock_stdlib::stdlib_file_id(file.name).as_str());
+            skull_parser::parse_module_clean(file.contents, id).expect("stdlib parse")
+        })
+        .collect();
+    let file = Ustr::from("<query-test>");
+    modules.push(skull_parser::parse_module_clean(src, file).expect("parse"));
+    let ws = semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = ws.module_ids[&file];
+    (ws, mid)
+}
+
 /// Byte offset of the `occurrence`-th (1-based) appearance of `needle` in `src`.
 fn nth_offset(src: &str, needle: &str, occurrence: usize) -> usize {
     src.match_indices(needle)
@@ -88,7 +103,11 @@ fn definition_cases() {
         ),
     ];
     for (case, src, use_needle, use_into, decl_needle, decl_into) in cases {
-        let (ws, mid) = ws_of(src);
+        let (ws, mid) = if case == "field ref" {
+            ws_with_stdlib(src)
+        } else {
+            ws_of(src)
+        };
         let inf = ws.inference(mid).expect("user module inferred");
         let use_off = nth_offset(src, use_needle, 1) + use_into;
         let decl_off = nth_offset(src, decl_needle, 1) + decl_into;

@@ -2,13 +2,13 @@
 //! module lowers first: the declaring one or the using one.
 
 //- decl_module_first
-//-- decl.rock
+//-- decl.rock @pkg=shared,1
 struct Pair<T, U = int> { a: T, b: U }
 struct Holder<T = uint> { value: T }
 enum Choice<T = f64> { Value(T), Empty }
 newtype Wrapped<T = uint>(T)
 
-//-- use.rock
+//-- use.rock @pkg=shared,1
 fn second(p: Pair<string>) -> int {
     let b = p.b
       //^ int
@@ -25,7 +25,7 @@ fn read_choice(c: Choice) -> float {
 fn read_wrapped(w: Wrapped) -> uint { w.0 }
 
 //- use_module_first
-//-- use.rock
+//-- use.rock @pkg=shared,1
 fn second(p: Pair<string>) -> int {
     let b = p.b
       //^ int
@@ -41,7 +41,7 @@ fn read_choice(c: Choice) -> float {
 }
 fn read_wrapped(w: Wrapped) -> uint { w.0 }
 
-//-- decl.rock
+//-- decl.rock @pkg=shared,1
 struct Pair<T, U = int> { a: T, b: U }
 struct Holder<T = uint> { value: T }
 enum Choice<T = f64> { Value(T), Empty }

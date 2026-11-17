@@ -1,7 +1,8 @@
 //! Modules-v1 name resolution.
 //!
 //! The one lookup authority over the namespace tree in `Workspace.ns`.
-//! Legacy files have no fragment scope: a bare name is its own key.
+//! Compiler-owned synthetic modules have no fragment scope: a bare name is
+//! already its key.
 //!
 //! Tier policy for a BARE name in a v1 fragment:
 //!   1. lexical locals — handled by `lookup_in_scope` before this runs;
@@ -122,9 +123,8 @@ pub enum ResolvedKind {
 
 /// A resolution result, or one definition a lookup found: the canonical key
 /// every workspace map is keyed by, its kind, and for a callable of the std
-/// view, the std package ([`FamilyMember::owner`]). A std key is a bare name
-/// that a legacy file of the unit may also define, so the key alone does not
-/// say whose overloads a v1 fragment reached.
+/// view, the std package ([`FamilyMember::owner`]). A std key is a bare name,
+/// so the owner says whose overloads a v1 fragment reached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Resolved {
     pub key: Ustr,
@@ -176,9 +176,8 @@ enum Landing {
 }
 
 /// A bare name in callee position (direct call, UFCS, safe-nav call or an
-/// operator), in either dialect: a single definition, or one overload family
-/// spanning several definitions, among which overload resolution picks by
-/// argument types: in v1 a family spans the lookup tiers.
+/// operator): a single definition, or one overload family spanning several
+/// definitions, among which overload resolution picks by argument types.
 #[derive(Debug, Clone)]
 pub enum CalleeFamily {
     Single(Resolved),
@@ -198,17 +197,12 @@ fn resolved_kind(kind: bone_core::modules::DefKind) -> ResolvedKind {
     }
 }
 
-/// Resolve a bare name in a v1 fragment through the tier policy. Legacy
-/// files (no fragment scope) return the bare name unchanged.
+/// Resolve a bare name in a v1 fragment through the tier policy.
 /// The first tier that binds the name decides; a bound-but-broken target
 /// is a diagnostic, never a fallthrough. Several explicit imports
 /// (or glob candidates) of one name are one family only in callee position
 /// (`resolve_v1_callee`); anywhere else they are a diagnostic.
-pub fn resolve_bare(
-    ws: &Workspace,
-    frag: Option<&FragmentScope>,
-    name: Ustr,
-) -> Result<Resolved, String> {
+pub fn resolve_bare(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Result<Resolved, String> {
     bare_binding(ws, frag, name)?.ok_or_else(|| unbound(name))
 }
 
@@ -216,12 +210,9 @@ pub fn resolve_bare(
 // a diagnostic that the path lookup must retain if no module binds it.
 pub(crate) fn bare_binding(
     ws: &Workspace,
-    frag: Option<&FragmentScope>,
+    frag: &FragmentScope,
     name: Ustr,
 ) -> Result<Option<Resolved>, String> {
-    let Some(frag) = frag else {
-        return Ok(Some(plain(name)));
-    };
     match bind_tiers(ws, frag, name, false)?.first {
         Bound::One(resolved, _) => Ok(Some(resolved)),
         Bound::Several(hits, via, _) => Err(several(ws, name, &hits, via)),
@@ -408,8 +399,7 @@ fn bind_tiers(
         }
     }
 
-    // Tier 5: the compiler-owned std export view. There is no legacy
-    // workspace-map fall-through for v1 names.
+    // Tier 5: the compiler-owned std export view.
     if tiers.wants_more(callee) {
         if let Some(std) = std_definition(ws, name) {
             tiers.bind(vec![std], FamilyTier::Std, Via::Imports);
@@ -551,9 +541,9 @@ fn several(ws: &Workspace, name: Ustr, hits: &[Resolved], via: Via) -> String {
     }
 }
 
-/// A member of the std view. A std callable's key is the bare name legacy
-/// files share, so it is owned by the std view: only the standard library's
-/// own overloads belong to it.
+/// A member of the std view. A std callable's key is its bare source name, so
+/// it is owned by the std view: only the standard library's own overloads
+/// belong to it.
 fn std_definition(ws: &Workspace, name: Ustr) -> Option<Resolved> {
     // The std exports among the intrinsics (the FieldRef family) live in the
     // std view below; the other formers resolve bare even with no stdlib.
@@ -1056,7 +1046,7 @@ fn check_module_access(
 }
 
 /// Resolve an explicit path (a use target or a qualified reference) in a v1
-/// fragment. Legacy callers never reach this.
+/// fragment.
 pub fn resolve_path(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -1247,7 +1237,7 @@ pub(crate) fn resolve_member_path(
     let mut first_unbound = false;
     if !path.from_root && segments.len() == 2 {
         let first = segments[0];
-        match bare_binding(ws, Some(frag), first) {
+        match bare_binding(ws, frag, first) {
             Ok(Some(resolved)) => {
                 if resolved.kind == ResolvedKind::Type {
                     let key = resolved.key;
@@ -1347,7 +1337,7 @@ pub(crate) fn resolve_member_path(
 }
 
 /// The diagnostic for a value path nothing binds. A v1 `x::T` whose last
-/// segment names a type is most likely a legacy infix ascription, which v1
+/// segment names a type may have been intended as a type ascription, which v1
 /// spells `(x : T)`; name the replacement then, and only then. Otherwise an
 /// `unbound_head` first segment is the name reported.
 fn unresolved_value_path(
@@ -1361,7 +1351,7 @@ fn unresolved_value_path(
         return message;
     };
     let names_a_type = BUILTIN_TYPE_NAMES.contains(&ty.as_str())
-        || resolve_bare(ws, Some(frag), *ty).is_ok_and(|r| r.kind == ResolvedKind::Type);
+        || resolve_bare(ws, frag, *ty).is_ok_and(|r| r.kind == ResolvedKind::Type);
     if prefix.is_empty() || !names_a_type {
         return unbound_head.map_or(message, unbound);
     }

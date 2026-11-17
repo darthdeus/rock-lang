@@ -217,7 +217,7 @@ fn dump_at(
 /// One embedded source file in a multi-package fixture.
 pub struct PackageFixture<'a> {
     pub file: &'a str,
-    /// `None` = legacy standalone; `Some((self_name, package_id))` stamps a
+    /// `None` creates a standalone package; `Some((self_name, package_id))` stamps a
     /// v1 package owner.
     pub package: Option<(&'a str, u32)>,
     pub dialect: skull_parser::Dialect,
@@ -228,7 +228,7 @@ pub struct PackageFixture<'a> {
 /// each file parses under its dialect, v1 files join the namespace tree, and
 /// every `//^ ty` marker in every file must resolve. Cross-package alias
 /// tables default to "every package is reachable under its own self name".
-/// Trusted legacy stdlib sources are prepended without treating their
+/// Trusted stdlib sources are prepended without treating their
 /// internal `//^` comments as fixture assertions.
 pub fn check_types_packages_with_stdlib(
     files: &[PackageFixture<'_>],
@@ -252,7 +252,7 @@ fn check_types_packages_with_cached_stdlib(
     all.extend(stdlib_sources.iter().map(|(file, src)| PackageFixture {
         file,
         package: None,
-        dialect: skull_parser::Dialect::Legacy,
+        dialect: skull_parser::Dialect::V1,
         src,
     }));
     all.extend(files.iter().map(|file| PackageFixture {
@@ -382,11 +382,7 @@ pub fn check_types_embedded_with_cached_stdlib(
         .map(|f| PackageFixture {
             file: f.file,
             package: f.package,
-            dialect: if f.modules_v1 {
-                skull_parser::Dialect::V1
-            } else {
-                skull_parser::Dialect::Legacy
-            },
+            dialect: skull_parser::Dialect::V1,
             src: f.src,
         })
         .collect();

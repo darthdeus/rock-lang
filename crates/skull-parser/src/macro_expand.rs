@@ -979,15 +979,15 @@ fn try_expand(
 
     // Reduce the body to its yielded value (rock's `extract_body_expr`): a lone
     // statement collapses to its bare trailing expr, a multi-statement body stays
-    // a block. A declared return type then ascribes the result — `(:: <body>
-    // <ret>)` — giving bone the same expected-type signal rock's expansion does
+    // a block. A declared return type then ascribes the result, giving bone the
+    // same expected-type signal rock's expansion does
     // (e.g. nullable-branch unification in a `-> int?` macro). Unconditional when
     // a return type is present (rock parity, `8bb1ea55e`).
     let value = extract_body_value(ast, body);
     ast.exprs[e].kind = match tmpl.return_ty {
         Some(rt) => {
             let rt = Graft::new(&tmpl.tmpl, ast, Plain).ty(rt);
-            ExprKind::TypeAscription(value, rt)
+            ExprKind::ParenAscription(value, rt)
         }
         None => ast.exprs[value].kind.clone(),
     };
@@ -1059,6 +1059,17 @@ fn expr_to_type_expr(ast: &mut Ast, e: Idx<ExprData>) -> Option<Idx<TypeExprData
                 _ => TypeExprKind::Ident(id),
             };
             Some(ast.ty(span, k, false))
+        }
+        ExprKind::Path { path, generic_args } => {
+            let kind = if generic_args.is_empty() {
+                TypeExprKind::Path(path)
+            } else {
+                TypeExprKind::AppPath {
+                    ctor: path,
+                    args: generic_args,
+                }
+            };
+            Some(ast.ty(span, kind, false))
         }
         ExprKind::ArrayLiteral(elems) if elems.len() == 1 => {
             let inner = expr_to_type_expr(ast, elems[0])?;
@@ -1442,8 +1453,15 @@ fn refs_in_item(ast: &Ast, item: &Item, names: &UstrSet, occ: &mut Vec<(Ustr, Sp
 fn refs_in_type(ast: &Ast, t: Idx<TypeExprData>, names: &UstrSet, occ: &mut Vec<(Ustr, Span)>) {
     match &ast.types[t].kind {
         TypeExprKind::Ident(id) => note(id, names, occ),
+        TypeExprKind::Path(path) => refs_in_path(path, names, occ),
         TypeExprKind::Ref(inner) => refs_in_type(ast, *inner, names, occ),
         TypeExprKind::Array(inner) => refs_in_type(ast, *inner, names, occ),
+        TypeExprKind::AppPath { ctor, args } => {
+            refs_in_path(ctor, names, occ);
+            for a in args {
+                refs_in_type(ast, *a, names, occ);
+            }
+        }
         TypeExprKind::App { ctor, args } => {
             note(ctor, names, occ);
             for a in args {
@@ -1462,6 +1480,12 @@ fn refs_in_type(ast: &Ast, t: Idx<TypeExprData>, names: &UstrSet, occ: &mut Vec<
             refs_in_type(ast, *ret, names, occ);
         }
         _ => {}
+    }
+}
+
+fn refs_in_path(path: &Path, names: &UstrSet, occ: &mut Vec<(Ustr, Span)>) {
+    for segment in &path.segments {
+        note(segment, names, occ);
     }
 }
 
@@ -1484,6 +1508,21 @@ fn refs_in_block(ast: &Ast, b: Idx<BlockData>, names: &UstrSet, occ: &mut Vec<(U
 fn refs_in_expr(ast: &Ast, e: Idx<ExprData>, names: &UstrSet, occ: &mut Vec<(Ustr, Span)>) {
     match &ast.exprs[e].kind {
         ExprKind::Ident(id) | ExprKind::StructLiteral { name: id, .. } => note(id, names, occ),
+        ExprKind::Path { path, .. } | ExprKind::PathStructLiteral { path, .. } => {
+            refs_in_path(path, names, occ)
+        }
+        ExprKind::Match { arms, .. } => {
+            for arm in arms {
+                refs_in_pattern(&arm.pattern, names, occ);
+            }
+        }
+        ExprKind::IfLetChain { clauses, .. } => {
+            for clause in clauses {
+                if let IfLetClause::Binding { pattern, .. } = clause {
+                    refs_in_pattern(pattern, names, occ);
+                }
+            }
+        }
         _ => {}
     }
     for child in child_exprs(ast, e) {
@@ -1491,6 +1530,53 @@ fn refs_in_expr(ast: &Ast, e: Idx<ExprData>, names: &UstrSet, occ: &mut Vec<(Ust
     }
     for b in child_blocks(ast, e) {
         refs_in_block(ast, b, names, occ);
+    }
+}
+
+fn refs_in_pattern(p: &Pattern, names: &UstrSet, occ: &mut Vec<(Ustr, Span)>) {
+    match p {
+        Pattern::PathVariant { path, args } => {
+            refs_in_path(path, names, occ);
+            if let Some(args) = args {
+                args.iter().for_each(|p| refs_in_pattern(p, names, occ));
+            }
+        }
+        Pattern::PathRecord { path, fields, .. } => {
+            refs_in_path(path, names, occ);
+            fields
+                .iter()
+                .for_each(|(_, p)| refs_in_pattern(p, names, occ));
+        }
+        Pattern::Tuple(ps) | Pattern::Or(ps) => {
+            ps.iter().for_each(|p| refs_in_pattern(p, names, occ));
+        }
+        Pattern::EnumVariant {
+            enum_name, args, ..
+        } => {
+            if let Some(name) = enum_name {
+                note(name, names, occ);
+            }
+            if let Some(args) = args {
+                args.iter().for_each(|p| refs_in_pattern(p, names, occ));
+            }
+        }
+        Pattern::Record {
+            enum_name,
+            name,
+            fields,
+            ..
+        } => {
+            if let Some(name) = enum_name {
+                note(name, names, occ);
+            }
+            if let Some(name) = name {
+                note(name, names, occ);
+            }
+            fields
+                .iter()
+                .for_each(|(_, p)| refs_in_pattern(p, names, occ));
+        }
+        Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard | Pattern::Ident(_) => {}
     }
 }
 
@@ -1552,6 +1638,82 @@ mod tests {
         assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(errors[0].contains("no parameter named `wrong`"));
         assert!(errors[1].contains("no parameter named `other`"));
+    }
+
+    #[test]
+    fn item_macro_substitutes_ident_arguments_in_v1_paths() {
+        let mut ast = parse(
+            "macro declare(Name: ident) {\
+                enum Name { Green }\
+                fn make() -> Name { Name::Green }\
+                fn is_green(value: Name) -> bool { match value { Name::Green => true, _ => false } }\
+                fn accepts_path(value: Name::Payload) -> Name::Payload { value }\
+            }\
+            declare(Color)\
+            macro declare_typed(Elem: ty) { fn typed(value: Elem) -> Elem { value } }\
+            declare_typed(pkg::Thing)",
+            "paths.rock",
+        );
+        let registry = collect_registry([&ast]);
+        expand_one(&mut ast, &registry);
+
+        let expr_paths: Vec<_> = ast
+            .exprs
+            .values()
+            .filter_map(|expr| match &expr.kind {
+                ExprKind::Path { path, .. } => Some(path),
+                _ => None,
+            })
+            .collect();
+        assert!(expr_paths.iter().any(|path| {
+            path.segments
+                .iter()
+                .map(|segment| segment.name.as_str())
+                .eq(["Color", "Green"])
+        }));
+
+        let pattern_paths: Vec<_> = ast
+            .exprs
+            .values()
+            .flat_map(|expr| match &expr.kind {
+                ExprKind::Match { arms, .. } => arms
+                    .iter()
+                    .filter_map(|arm| match &arm.pattern {
+                        Pattern::PathVariant { path, .. } => Some(path),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert!(pattern_paths.iter().any(|path| {
+            path.segments
+                .iter()
+                .map(|segment| segment.name.as_str())
+                .eq(["Color", "Green"])
+        }));
+
+        let type_paths: Vec<_> = ast
+            .types
+            .values()
+            .filter_map(|ty| match &ty.kind {
+                TypeExprKind::Path(path) => Some(path),
+                TypeExprKind::AppPath { ctor, .. } => Some(ctor),
+                _ => None,
+            })
+            .collect();
+        assert!(type_paths.iter().any(|path| {
+            path.segments
+                .iter()
+                .map(|segment| segment.name.as_str())
+                .eq(["Color", "Payload"])
+        }));
+        assert!(type_paths.iter().any(|path| {
+            path.segments
+                .iter()
+                .map(|segment| segment.name.as_str())
+                .eq(["pkg", "Thing"])
+        }));
     }
 
     #[test]

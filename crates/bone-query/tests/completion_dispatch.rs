@@ -223,11 +223,11 @@ fn every_dispatch_context_renders_its_pinned_head() {
              height: | 100000009999000000height | height: \n\
              title: | 100000009999000000title | title: \n\
              wide | 100000009999000000wide | -\n\
-             __ARENA_REGISTRY.live_count: int | 100101009999000000__arena_registry.live_count | __ARENA_REGISTRY.live_count\n\
-             __ARENA_REGISTRY.next_id: int | 100101009999000000__arena_registry.next_id | __ARENA_REGISTRY.next_id\n\
-             __ARENA_REGISTRY.process_root: int | 100101009999000000__arena_registry.process_root | __ARENA_REGISTRY.process_root\n\
-             __ARENA_REGISTRY.retired_since_compact: int | 100101009999000000__arena_registry.retired_since_compact | __ARENA_REGISTRY.retired_since_compact\n\
-             __SCENE_REGISTRY.next_id: int | 100101009999000000__scene_registry.next_id | __SCENE_REGISTRY.next_id\n\
+             get | 110200109999300000get | get($0)\n\
+             len | 110200109999300000len | len($0)\n\
+             parse_skip_ws_inline_at | 110200109999300000parse_skip_ws_inline_at | parse_skip_ws_inline_at($0)\n\
+             phantom | 110200109999300000phantom | phantom()\n\
+             unit_at | 110200109999300000unit_at | unit_at($0)\n\
              more\n",
         ),
         (

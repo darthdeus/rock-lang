@@ -173,7 +173,7 @@ fn emit_js_constructor(
         let mut box_fields = format!(
             "{{ __variant: s.{tag}, __ty: {ty}",
             tag = skull_mir::lower::yield_slot(0),
-            ty = js_string_lit(ch.name().as_str())?,
+            ty = js_string_lit(skull_mir::mangle::symbol_of_key(ch.name()).as_str())?,
         );
         // 0-based positional keys: JS `TupleIndex` reads `base[i]` (no +1 like Lua's
         // array keys), so a boxed-enum consumer of a yielded channel value projects

@@ -137,7 +137,7 @@ fn four_live_fifty_leaf_values_are_a_spanned_compile_error() {
         .expect_err("four live 50-leaf values must not emit: LuaJIT cannot load the result");
     let message = &err.message;
     assert!(
-        message.contains("`run`"),
+        message.contains("`$standalone$<test>::run`"),
         "no Rock function named:\n{message}"
     );
     assert!(

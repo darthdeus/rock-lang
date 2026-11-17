@@ -398,7 +398,10 @@ impl UniformBlockPlan {
     /// rather than at the emission site is what keeps bind, upload and the
     /// tests reading ONE number instead of three that have to agree.
     pub fn fingerprint(&self) -> u64 {
-        let mut h = fnv1a(0xcbf2_9ce4_8422_2325, self.struct_name.as_bytes());
+        let mut h = fnv1a(
+            0xcbf2_9ce4_8422_2325,
+            bone_core::modules::artifact_name(self.struct_name.as_str()).as_bytes(),
+        );
         for m in &self.members {
             h = fnv1a(h, m.name.as_bytes());
             h = fnv1a(h, &[m.kind as u8]);
@@ -677,7 +680,10 @@ impl UniformArrayBlockPlan {
     /// separately, and a bind that compared the wrong one would accept a
     /// mismatched buffer.
     pub fn fingerprint(&self) -> u64 {
-        let mut h = fnv1a(0xa5a5_5a5a_c3c3_3c3c, self.block_name.as_bytes());
+        let mut h = fnv1a(
+            0xa5a5_5a5a_c3c3_3c3c,
+            bone_core::modules::artifact_name(self.block_name.as_str()).as_bytes(),
+        );
         for m in &self.members {
             h = fnv1a(h, m.name.as_bytes());
             h = fnv1a(h, &[m.elem as u8]);

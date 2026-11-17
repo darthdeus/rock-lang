@@ -9,13 +9,13 @@
 //!
 //!
 
-use crate::common::ws_of;
+use crate::common::{key, ws_of};
 use skull_mir::lower::{LeafSlot, RepArena};
 use ustr::Ustr;
 
 fn layout(ws: &bone_semantic::inference::Workspace, name: &str) -> Vec<LeafSlot> {
     RepArena::default()
-        .nominal_leaf_layout(ws, bone_semantic::hir::FnBackend::Any, Ustr::from(name))
+        .nominal_leaf_layout(ws, bone_semantic::hir::FnBackend::Any, key(ws, name))
         .unwrap_or_else(|e| panic!("{name}: {}", e.message))
         .0
 }
@@ -44,7 +44,7 @@ fn leaf_walkers_agree_on_path_order() {
             .nominal_value_leaf_paths_required(
                 &ws,
                 bone_semantic::hir::FnBackend::Any,
-                Ustr::from(name),
+                key(&ws, name),
             )
             .expect("value shape");
         assert_eq!(want, got, "leaf order disagreement for `{name}`");
@@ -63,7 +63,7 @@ fn a_type_without_a_c_layout_rejects_by_name() {
         .nominal_leaf_layout(
             &ws,
             bone_semantic::hir::FnBackend::Any,
-            Ustr::from("NotAType"),
+            key(&ws, "NotAType"),
         )
         .expect_err("a non-value type must not produce a layout");
     assert!(
@@ -159,11 +159,7 @@ fn float_width_follows_the_declared_type() {
     );
     let arena = RepArena::default();
     let (narrow, size, _) = arena
-        .nominal_leaf_layout(
-            &ws,
-            bone_semantic::hir::FnBackend::Any,
-            Ustr::from("Narrow"),
-        )
+        .nominal_leaf_layout(&ws, bone_semantic::hir::FnBackend::Any, key(&ws, "Narrow"))
         .expect("Narrow layout");
     let leaves: Vec<(&str, &str, usize)> = narrow
         .iter()
@@ -176,7 +172,7 @@ fn float_width_follows_the_declared_type() {
     assert_eq!(size, 12);
 
     let (wide, size, align) = arena
-        .nominal_leaf_layout(&ws, bone_semantic::hir::FnBackend::Any, Ustr::from("Wide"))
+        .nominal_leaf_layout(&ws, bone_semantic::hir::FnBackend::Any, key(&ws, "Wide"))
         .expect("Wide layout");
     let leaves: Vec<(&str, &str, usize)> = wide
         .iter()
@@ -186,11 +182,7 @@ fn float_width_follows_the_declared_type() {
     assert_eq!((size, align), (16, 8));
 
     let (spelled, _, _) = arena
-        .nominal_leaf_layout(
-            &ws,
-            bone_semantic::hir::FnBackend::Any,
-            Ustr::from("Spelled"),
-        )
+        .nominal_leaf_layout(&ws, bone_semantic::hir::FnBackend::Any, key(&ws, "Spelled"))
         .expect("Spelled layout");
     assert_eq!(spelled[0].cty, "double");
 }

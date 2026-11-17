@@ -23,8 +23,9 @@ fn run(src: &str, driver: &str) -> String {
     let mut aliases = String::new();
     for (_, f) in functions.iter() {
         let mangled = skull_mir::mangle::mangle_fn(&ws, f);
-        if counts[&f.name] == 1 && mangled != f.name.as_str() {
-            aliases.push_str(&format!("_G[\"{}\"] = {mangled}\n", f.name));
+        let source_name = bone_core::modules::display_name(f.name.as_str());
+        if counts[&f.name] == 1 && mangled != source_name {
+            aliases.push_str(&format!("_G[\"{source_name}\"] = {mangled}\n"));
         }
     }
     common::run_luajit(&format!("{lua}\n{aliases}print({driver})\n"))

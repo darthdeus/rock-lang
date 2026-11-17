@@ -163,21 +163,6 @@ fn a_private_definition_added_to_a_globbed_module_changes_no_globber() {
     assert!(diags.is_empty(), "{diags:?}");
 }
 
-/// A legacy file contributes no definitions to the namespace tree, so adding
-/// one stays on the interface path it always took.
-#[test]
-fn a_legacy_added_definition_stays_on_the_interface_path() {
-    let files = vec![
-        SessionFile::legacy("a.rock", "fn bump(n: int) -> int {\n    n\n}\n"),
-        SessionFile::legacy("b.rock", "fn f() -> int {\n    bump(1)\n}\n"),
-    ];
-    let edit = "fn bump(n: int) -> int {\n    n\n}\n\nfn twice(n: int) -> int {\n    n\n}\n";
-    assert_eq!(
-        edit_matches_fresh(files, "a.rock", edit),
-        UpdateTier::Interface
-    );
-}
-
 const PICK_INT: &str = "pub fn pick(n: int) -> int {\n    n\n}\n";
 const PICK_STRING: &str = "pub fn pick(s: string) -> string {\n    s\n}\n";
 const PICK_USE: &str = "fn use_it() -> int {\n    let s = pick(\"v1\")\n    pick(1)\n}\n";
@@ -406,7 +391,7 @@ fn a_unary_operator_added_to_a_globbed_module_relowers_the_caller() {
 
 /// A file that enters after `Session::new` reads with the facts its host
 /// declared for it, and reaches the verdict a fresh session over the same
-/// files reaches. Undeclared, it would parse as a standalone legacy source.
+/// files reaches. Undeclared, it parses as a standalone v1 source.
 #[test]
 fn a_file_entering_after_new_reads_with_its_declared_facts() {
     let extra = "mod extra;\n\npub fn more() -> int {\n    super::a::bump(2)\n}\n";
@@ -438,7 +423,7 @@ fn a_held_file_refuses_different_facts() {
         Session::new(vec![], package(), &NsAliases::default()).expect("baseline builds");
     assert!(
         session
-            .declare_file_facts("a.rock", Dialect::Legacy, None, GlobalPolicy::Any)
+            .declare_file_facts("a.rock", Dialect::V1, None, GlobalPolicy::Any)
             .is_err()
     );
     assert!(
@@ -558,22 +543,4 @@ fn a_dependency_module_alias_added_or_removed_takes_the_scope_path() {
         diags.iter().any(|d| d.contains("did not resolve")),
         "{diags:?}"
     );
-}
-
-/// A legacy package's definer edits keep the legacy routing.
-#[test]
-fn a_legacy_definition_added_in_a_legacy_package_stays_on_the_interface_path() {
-    let without = "fn other() -> int {\n    1\n}\n";
-    let with = "fn other() -> int {\n    1\n}\n\nfn pick(n: int) -> int {\n    n\n}\n";
-    let user = "fn use_it() -> int {\n    other()\n}\n";
-    let files = |lib: &str| {
-        vec![
-            in_package(Dialect::Legacy, 1, "x_lib", "xlib.rock", lib),
-            in_package(Dialect::Legacy, 2, "app", "use.rock", user),
-        ]
-    };
-    let aliases = aliases_of(&files(without));
-    let (tier, diags) = edit_with_aliases(files(without), "xlib.rock", with, &aliases);
-    assert_eq!(tier, UpdateTier::Interface);
-    assert!(diags.is_empty(), "{diags:?}");
 }

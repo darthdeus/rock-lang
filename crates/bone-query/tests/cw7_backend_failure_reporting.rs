@@ -241,17 +241,14 @@ fn batch_fallback_reports_failed_per_file_update() {
     let path = bone_query::canonicalize_lenient(&path.to_string_lossy());
     let broken = "struct Clash {}\nstruct Clash {}\n";
     std::fs::write(&path, broken).unwrap();
-    let ast = skull_parser::parse_module_clean(broken, ustr::Ustr::from(path.as_str())).unwrap();
-    let cause = bone_semantic::semantic_passes::semantic_pass(&mut [ast])
-        .expect_err("semantic failure fixture")
-        .message;
+    let cause = "duplicate definition `Clash` in module `cw7`";
     let mut bone = BoneWorkspace::new();
     bone.load_project(&path);
     let records = capture.take();
     assert!(
         records.iter().any(|record| record.contains("load_project")
             && record.contains(&path)
-            && record.contains(&cause)),
+            && record.contains(cause)),
         "per-file indexing diagnostics must not be discarded: {records:?}"
     );
 

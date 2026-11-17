@@ -89,6 +89,7 @@ pub struct CompilerError {
 
 impl CompilerError {
     fn at(location: LineCol, message: String) -> Self {
+        let message = crate::source_code::display_diagnostic_names(message);
         let code = CompilerErrorCode::Unknown;
         let level = CompilerErrorLevel::Error;
         CompilerError {
@@ -158,6 +159,7 @@ impl CompilerError {
     }
 
     pub fn with_label(mut self, span: Span, message: String) -> Self {
+        let message = crate::source_code::display_diagnostic_names(message);
         self.labels.push(CompilerLabel { span, message });
         self
     }
@@ -332,6 +334,15 @@ mod tests {
     /// the joined text ends in a newline.
     fn joined(lines: &[String]) -> String {
         lines.join("\n")
+    }
+
+    #[test]
+    fn diagnostic_names_hide_standalone_package_identities() {
+        let error = CompilerError::new_no_location(
+            "expected `$standalone$a.rock::Point`, found `$standalone$b.rock::child::Point`",
+        );
+        assert_eq!(error.message, "expected `Point`, found `child::Point`");
+        assert_eq!(error.labels[0].message, error.message);
     }
 
     #[test]

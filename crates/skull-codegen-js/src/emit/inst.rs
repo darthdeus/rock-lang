@@ -257,7 +257,9 @@ impl Emitter<'_> {
             }
             // NativeBuffer variants share the equality runtime's buffer tag.
             Inst::MakeStruct { ty, fields } => {
-                let name = ty.map(|t| t.to_string()).unwrap_or_default();
+                let name = ty
+                    .map(|t| skull_mir::mangle::type_symbol(self.ws, t).to_string())
+                    .unwrap_or_default();
                 let mut parts: Vec<String> = Vec::new();
                 if !name.is_empty() {
                     let tag = if is_native_buffer(&name) {
@@ -317,7 +319,10 @@ impl Emitter<'_> {
                     }
                     return self.render_leaf_form_value_struct(*name, *representation, fields);
                 }
-                let mut parts = vec![format!("__ty: {}", js_string_lit(name.as_ref())?)];
+                let mut parts = vec![format!(
+                    "__ty: {}",
+                    js_string_lit(skull_mir::mangle::type_symbol(self.ws, *name).as_str())?
+                )];
                 for (f, v) in fields {
                     parts.push(format!("{}: {}", js_key(f)?, self.render_val(*v)?));
                 }
@@ -582,7 +587,7 @@ impl Emitter<'_> {
                     "{{{}: {{repr: {}, elem: {}, cap: {}}}",
                     js_string_lit(skull_mir::mir::VEC_COLUMN_HEADER_FIELD)?,
                     js_string_lit(skull_mir::mir::VEC_COLUMN_REPR)?,
-                    js_string_lit(elem.as_str())?,
+                    js_string_lit(skull_mir::mangle::type_symbol(self.ws, *elem).as_str())?,
                     self.render_val(*capacity)?,
                 );
                 for (name, vs) in columns {
@@ -602,7 +607,7 @@ impl Emitter<'_> {
             Inst::MakeVecColumnHeader { elem, capacity, .. } => format!(
                 "{{repr: {}, elem: {}, cap: {}}}",
                 js_string_lit(skull_mir::mir::VEC_COLUMN_REPR)?,
-                js_string_lit(elem.as_str())?,
+                js_string_lit(skull_mir::mangle::type_symbol(self.ws, *elem).as_str())?,
                 self.render_val(*capacity)?,
             ),
             Inst::MakeVecStrided {
@@ -622,7 +627,7 @@ impl Emitter<'_> {
                     values.join(", "),
                     js_string_lit(skull_mir::mir::VEC_COLUMN_HEADER_FIELD)?,
                     js_string_lit(skull_mir::mir::VEC_STRIDED_REPR)?,
-                    js_string_lit(elem.as_str())?,
+                    js_string_lit(skull_mir::mangle::type_symbol(self.ws, *elem).as_str())?,
                     self.render_val(*capacity)?,
                 )
             }
@@ -634,7 +639,7 @@ impl Emitter<'_> {
             } => format!(
                 "{{repr: {}, elem: {}, stride: {stride}, cap: {}}}",
                 js_string_lit(skull_mir::mir::VEC_STRIDED_REPR)?,
-                js_string_lit(elem.as_str())?,
+                js_string_lit(skull_mir::mangle::type_symbol(self.ws, *elem).as_str())?,
                 self.render_val(*capacity)?,
             ),
             // The element index is checked ONCE here; each per-leaf access then
@@ -706,7 +711,10 @@ impl Emitter<'_> {
                     presence.len()
                 )));
             }
-            let mut parts = vec![format!("__ty: {}", js_string_lit(name.as_ref())?)];
+            let mut parts = vec![format!(
+                "__ty: {}",
+                js_string_lit(skull_mir::mangle::type_symbol(self.ws, name).as_str())?
+            )];
             for ((key, value), tag) in fields.iter().zip(presence) {
                 let rendered = self.render_val(*value)?;
                 let rendered = if tag {
@@ -721,7 +729,10 @@ impl Emitter<'_> {
         // Nested groups in first-seen order, so the emitted object matches the
         // declared field order the non-leaf path produces.
         let (top, groups) = split_leaf_paths(fields.iter().copied());
-        let mut parts = vec![format!("__ty: {}", js_string_lit(name.as_ref())?)];
+        let mut parts = vec![format!(
+            "__ty: {}",
+            js_string_lit(skull_mir::mangle::type_symbol(self.ws, name).as_str())?
+        )];
         for (key, value) in &top {
             parts.push(format!("{}: {}", js_key(key)?, self.render_val(*value)?));
         }
@@ -763,7 +774,7 @@ impl Emitter<'_> {
         }
         Ok(format!(
             "__rock_make_enum({tag_expr}, {}, [{}])",
-            js_string_lit(ty.as_str())?,
+            js_string_lit(skull_mir::mangle::type_symbol(self.ws, *ty).as_str())?,
             kv.join(", ")
         ))
     }
@@ -817,7 +828,8 @@ impl Emitter<'_> {
         let order = skull_mir::lower::gc_free_value_struct_field_order(self.ws, name)
             .ok_or_else(|| err(format!("`{name}` is not a GC-free value struct")))?;
         let (exact, groups) = split_leaf_paths(fields.iter().copied());
-        let mut expr = js_string_lit(&format!("{name} {{ "))?;
+        let display_name = bone_core::modules::display_name(name.as_str());
+        let mut expr = js_string_lit(&format!("{display_name} {{ "))?;
         for (i, fname) in order.iter().enumerate() {
             if i > 0 {
                 expr.push_str(&format!(" + {}", js_string_lit(", ")?));

@@ -6,7 +6,7 @@
 
 //=== TEST CASE: unknown_type_still_errors_Generic ===
 // a genuinely unknown type name is still rejected.
-//! expect: Unknown type name Nope
+//! expect: `Nope` did not resolve to any definition
 fn f(p: Nope) -> int {
     5
 }

@@ -1,4 +1,4 @@
-use crate::common::ws_with_stdlib;
+use crate::common::{name_matches, ws_with_stdlib};
 use skull::mir_emit::{emit_full, emit_incremental, emit_workspace_mir};
 
 const SOURCE: &str =
@@ -30,7 +30,7 @@ fn live_build_keeps_cache_for_reassembly_after_a_body_edit() {
     let (fid, _) = module
         .functions
         .iter()
-        .find(|(_, f)| f.name.as_str() == "leaf")
+        .find(|(_, f)| name_matches(f.name, "leaf"))
         .unwrap();
     let emit = emit_incremental(
         &edited,

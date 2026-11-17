@@ -10,7 +10,7 @@
 //! Each realization test checks its shared-graph preconditions before the
 //! artifact outcome, so dropping everything cannot satisfy the assertions.
 
-use crate::common::{fn_name, graph_for, module_id, ws_with_stdlib};
+use crate::common::{fn_name, graph_for, key, module_id, name_matches, ws_with_stdlib};
 use bone_semantic::hir::{BodyOwner, FnBackend};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
@@ -22,7 +22,6 @@ use skull::target_projection::{
 };
 use skull_mir::intrinsics::BackendRealization;
 use skull_mir::mir::FuncRef;
-use ustr::Ustr;
 
 /// A planner that spells everything with a target prefix. It exists so
 /// "both artifacts spell this instance alike" cannot be mistaken for the
@@ -148,7 +147,8 @@ impl BackendRealization for Supplies {
         "toy"
     }
     fn supplies(&self, _ws: &Workspace, f: &bone_semantic::hir::Function) -> bool {
-        self.0.contains(&f.name.as_str())
+        self.0
+            .contains(&bone_core::modules::display_name(f.name.as_str()))
     }
 }
 
@@ -181,7 +181,7 @@ fn an_artifact_realizes_the_shared_instance_to_the_sibling_that_serves_it() {
     );
     // NON-VACUITY: the group really has two members, so collapsing to one is a
     // decision and not the only thing that could have happened.
-    let group: Vec<FnBackend> = ws.functions_by_name[&Ustr::from("__nb_checked_index")]
+    let group: Vec<FnBackend> = ws.functions_by_name[&key(&ws, "__nb_checked_index")]
         .iter()
         .map(|&(m, f)| ws.module(m).functions[f].backend)
         .collect();
@@ -312,7 +312,7 @@ fn native_required_availability_comes_from_the_artifact_mapping() {
         .instances
         .iter()
         .map(|i| &ws.module(i.func.module).functions[i.func.func])
-        .find(|f| f.name.as_str() == "fast_op")
+        .find(|f| name_matches(f.name, "fast_op"))
         .expect("`fast_op` is not in the graph");
     assert!(
         instance_graph::serves(f.backend, FnBackend::Lua),
@@ -957,7 +957,7 @@ fn main() {
         "the fixture resolved no dependency, so the count below is vacuous"
     );
     for name in instance_graph::ERASED_RUNTIME_ENTRIES {
-        let decls = ws.functions_by_name.get(&Ustr::from(name));
+        let decls = ws.functions_by_name.get(&key(&ws, name));
         for &(module, func) in decls.into_iter().flatten() {
             assert!(
                 ws.module(module).functions[func].generics.is_empty(),
@@ -1793,7 +1793,7 @@ fn a_nomangle_root_publishes_its_own_body_beside_the_calls_sibling_serves() {
         .find_map(|m| {
             m.functions
                 .iter()
-                .find(|(_, f)| f.name.as_str() == "portable" && is_nomangle(f))
+                .find(|(_, f)| name_matches(f.name, "portable") && is_nomangle(f))
                 .map(|(func, _)| FuncRef { module: m.id, func })
         })
         .expect("the @nomangle declaration exists");
@@ -1892,7 +1892,7 @@ fn two_nomangle_roots_sharing_a_bare_name_collide_and_retract_locally() {
         .copied()
         .find(|root| {
             let f = &ws.module(root.module).functions[root.func];
-            f.name.as_str() == "dup" && is_nomangle(f) && f.generics.is_empty()
+            name_matches(f.name, "dup") && is_nomangle(f) && f.generics.is_empty()
         })
         .expect("fixture's @nomangle root");
     let narrowed: Vec<_> = roots
@@ -1950,12 +1950,12 @@ fn user_body(ws: &Workspace, name: &str) -> (ModuleId, BodyOwner) {
     let m = ws.module(module);
     m.functions
         .iter()
-        .find(|(_, f)| f.name.as_str() == name)
+        .find(|(_, f)| name_matches(f.name, name))
         .map(|(fid, _)| BodyOwner::Function(fid))
         .or_else(|| {
             m.globals
                 .iter()
-                .find(|(_, g)| g.name.as_str() == name)
+                .find(|(_, g)| name_matches(g.name, name))
                 .map(|(gid, _)| BodyOwner::Global(gid))
         })
         .map(|owner| (module, owner))
@@ -2034,8 +2034,8 @@ fn local_symbol_collision_retraction_matches_fresh_view() {
         "fn left() -> int { return 1 }\nfn right() -> int { return 2 }\n\
          fn main() { let a = left()\n print(\"{a}\") }",
         "main",
-        Some("/project"),
-        all_roots,
+        None,
+        main_roots,
         Some(&MAIN_RIGHT_COLLISION),
         |_, view| {
             assert_eq!(

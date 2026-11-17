@@ -75,7 +75,7 @@ pub(super) fn decorator_application_lines_js(
         let code_ref = format!("__rock_code_slot_ref({})", js_string_lit(&key)?);
         let descriptor = format!(
             "{{name: {}, params: [], func: {code_ref}}}",
-            js_string_lit(app.function.name.as_str())?
+            js_string_lit(bone_core::modules::display_name(app.function.name.as_str()))?
         );
         let mut call_args = vec![descriptor];
         call_args.extend(decorator_call_args_js(ws, dmid, did, app.annotation)?);
@@ -276,7 +276,7 @@ pub(super) fn schedule_residual_calls(
         let Some(instance) = st.names.instance_for_call(ws, body, iid, requested) else {
             findings.push(err(format!(
                 "JS: call to `{}` has no shared InstanceGraph CallSite resolution",
-                requested_f.name
+                requested_f.name,
             )));
             continue;
         };

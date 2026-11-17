@@ -101,7 +101,7 @@ pub fn emit_program_js(ws: &bone_core::workspace::Workspace) -> Result<String, S
 pub fn test_fn_ref(ws: &bone_core::workspace::Workspace, name: &str) -> FuncRef {
     let mid = test_mid(ws);
     for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == name {
+        if skull_mir::mangle::declared_name(f.name.as_str()) == name {
             return FuncRef {
                 module: mid,
                 func: fid,
@@ -128,6 +128,13 @@ pub fn ws_with(src: &str) -> bone_core::workspace::Workspace {
 }
 
 pub fn ws_with_named(file: &str, src: &str) -> bone_core::workspace::Workspace {
+    try_ws_with_named(file, src).expect("semantic_pass")
+}
+
+pub fn try_ws_with_named(
+    file: &str,
+    src: &str,
+) -> Result<bone_core::workspace::Workspace, skull_parser::CompilerError> {
     let mut modules: Vec<skull_parser::Ast> = rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
@@ -136,7 +143,15 @@ pub fn ws_with_named(file: &str, src: &str) -> bone_core::workspace::Workspace {
         })
         .collect();
     modules.push(skull_parser::parse_module_clean(src, ustr::Ustr::from(file)).expect("parse"));
-    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
+    bone_semantic::semantic_passes::semantic_pass(&mut modules)
+}
+
+pub fn key(ws: &bone_core::workspace::Workspace, name: &str) -> ustr::Ustr {
+    ws.defs
+        .keys()
+        .find(|key| skull_mir::mangle::declared_name(key.as_str()) == name)
+        .copied()
+        .unwrap_or_else(|| ustr::Ustr::from(name))
 }
 
 pub fn replace_once(source: &str, old: &str, new: &str) -> String {

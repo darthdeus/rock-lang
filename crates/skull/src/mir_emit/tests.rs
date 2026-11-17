@@ -21,6 +21,10 @@ fn module_id(ws: &Workspace, file: &str) -> ModuleId {
     *ws.module_ids.get(&Ustr::from(file)).expect("module id")
 }
 
+fn source_name_matches(name: Ustr, expected: &str) -> bool {
+    bone_core::modules::display_name(name.as_str()) == expected
+}
+
 #[cfg(test)]
 mod lua_definition_scope_tests {
     use super::*;
@@ -166,7 +170,6 @@ mod missing_owner_tests {
     use bone_semantic::inference::Workspace;
     use skull_mir::mir::FuncRef;
     use skull_parser::CompilerError;
-    use ustr::Ustr;
 
     const SRC: &str = r#"
 @inline
@@ -334,7 +337,7 @@ fn main() {
             .module(mid)
             .globals
             .iter()
-            .find(|(_, global)| global.name == Ustr::from("G"))
+            .find(|(_, global)| source_name_matches(global.name, "G"))
             .map(|(gid, _)| gid)
             .expect("global");
         let ty = ws.module(mid).globals[gid].ty;
@@ -421,7 +424,7 @@ fn main() {
                 module
                     .functions
                     .iter()
-                    .find(|(_, f)| f.name.as_str() == name)
+                    .find(|(_, f)| source_name_matches(f.name, name))
                     .map(|(func, _)| FuncRef {
                         module: module.id,
                         func,
@@ -718,7 +721,7 @@ fn main() { let result = first() }
                 .module(mid)
                 .functions
                 .iter()
-                .find(|(_, f)| f.name == Ustr::from(name))
+                .find(|(_, f)| source_name_matches(f.name, name))
                 .map(|(id, _)| id)
                 .expect("fixture function"),
         };
@@ -1555,7 +1558,7 @@ fn main() { let r = a() + c() }
             .iter()
             .find(|inst| {
                 let f = &ws.module(inst.func.module).functions[inst.func.func];
-                f.name.as_str() == name
+                source_name_matches(f.name, name)
                     && !inst.args.is_empty()
                     && inst.symbol(ws, cache.scx.interner()).contains(arg)
             })
@@ -1683,7 +1686,7 @@ mod unread_constant_tests {
             .find_map(|m| {
                 m.functions
                     .iter()
-                    .find(|(_, f)| f.name.as_str() == name)
+                    .find(|(_, f)| source_name_matches(f.name, name))
                     .map(|(func, _)| FuncRef { module: m.id, func })
             })
             .expect("function")

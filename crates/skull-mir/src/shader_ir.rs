@@ -227,7 +227,7 @@ pub struct LogicalUniformGroup {
 /// bindings and block size are deliberately absent.
 pub fn semantic_uniform_group_fingerprint(struct_name: Ustr, members: &[(Ustr, WireKind)]) -> u64 {
     let mut hash = 0xa5a5_5a5a_c3c3_3c3cu64;
-    for byte in struct_name.as_bytes() {
+    for byte in bone_core::modules::artifact_name(struct_name.as_str()).as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100000001b3);
     }

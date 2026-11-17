@@ -39,11 +39,7 @@ fn names(
     set: impl IntoIterator<Item = skull::instance_graph::Instance>,
 ) -> Vec<String> {
     set.into_iter()
-        .map(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .to_string()
-        })
+        .map(|i| fn_name(ws, i.func).to_string())
         .collect()
 }
 
@@ -213,12 +209,7 @@ fn main() { let key = rock_shader(rec_frag) }
     // The rejection is filed against the ENTRY -- the GLSL pass runs per entry,
     // exactly as emission does -- and NAMES the recursive helper in the
     // emitter's own message and span.
-    assert_eq!(
-        ws.module(recursions[0].instance.func.module).functions[recursions[0].instance.func.func]
-            .name
-            .as_str(),
-        "rec_frag"
-    );
+    assert_eq!(fn_name(&ws, recursions[0].instance.func), "rec_frag");
     assert!(
         recursions[0].message.contains("rec_helper") && recursions[0].message.contains("recursion"),
         "the rejection lost the emitter's diagnostic: {}",
