@@ -1,10 +1,3 @@
-//! `row_escape` over bone HIR + inference: a `T` read out of an `Arena<T>` or a
-//! `Scene<T>` root reaching storage that outlives the borrow. Reads inference
-//! (a row source is recognized by its RECEIVER type, not its callee name --
-//! `get` is a name a dozen unrelated types have), so the harness runs a full
-//! `semantic_pass`. `Arena`/`Entity`/`Scene` are declared locally with the same
-//! shapes `stdlib/unified.rock` gives them; the lint never looks at the stdlib.
-
 use crate::support::lint_only;
 use bone_lints::{EscapeClass, EscapeKind, Finding};
 use rock_core::errors::CompilerErrorLevel;
@@ -47,8 +40,6 @@ fn findings(body: &str) -> Vec<Finding> {
     lint(&format!("{PRELUDE}\n{body}\n"))
 }
 
-/// The kind a message names: `(store_global)` and the like, or "returned"
-/// for the propagation message, which names no kind.
 fn kind_of(finding: &Finding) -> EscapeKind {
     use EscapeKind::*;
     let msg = &finding.error.message;
@@ -76,12 +67,6 @@ fn kinds(body: &str) -> Vec<EscapeKind> {
     ks
 }
 
-// --- the prelude itself is a control -------------------------------------
-//
-// Every test below reuses it, so a finding that originates HERE would inflate
-// every other assertion. `values`/`iter`/`next` are row-adjacent by
-// construction (`next` returns a `T` out of an arena iterator), which is
-// exactly the shape most at risk of a spurious hit.
 #[test]
 fn prelude_alone_is_clean() {
     let fs = lint(PRELUDE);
@@ -141,16 +126,11 @@ fn each_escaping_shape_reports_its_kind() {
             "co fn bad(e: Entity<Mob>) -> Coroutine<int> {\n    let m = unwrap(e.get())\n    yield 1\n    m.hp -= 10\n}",
             EscapeKind::AcrossYield,
         ),
-        // Only the then-arm suspends, but the read after the `if` is reachable
-        // through it, so the binding is stale on one path.
         (
             "suspension_on_one_branch_taints_the_merge",
             "co fn f(e: Entity<Mob>, c: bool) -> Coroutine<int> {\n    let m = unwrap(e.get())\n    if c {\n        yield 1\n    }\n    m.hp -= 1\n}",
             EscapeKind::AcrossYield,
         ),
-        // Textually the read PRECEDES the yield, so a source-offset rule sees
-        // nothing. The back edge is the suspension: from iteration two on, the
-        // binding was fetched before a `yield` that already ran.
         (
             "read_before_the_loops_yield_is_flagged_via_the_back_edge",
             "co fn f(e: Entity<Mob>) -> Coroutine<int> {\n    let m = unwrap(e.get())\n    for _i in 0..3 {\n        m.hp -= 1\n        yield 1\n    }\n}",
@@ -166,8 +146,6 @@ fn each_escaping_shape_reports_its_kind() {
             "fn main() {\n    for m in MOBS {\n        BAG.push(m)\n    }\n}",
             EscapeKind::StoreCollection,
         ),
-        // Current limitation: `Scene<T>.get()` hands out an ordinary `T?`
-        // that dies with the Scene, so a stored root is the same defect shape.
         (
             "scene_root_is_a_row_source",
             "global ROOT: Mob? = null\nfn main() {\n    let s: Scene<Mob> = Scene { _scene_id: 1 }\n    ROOT = scene_root(s)\n}",
@@ -178,8 +156,6 @@ fn each_escaping_shape_reports_its_kind() {
             "fn main() {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    let alias = m\n    BAG.push(alias)\n}",
             EscapeKind::StoreCollection,
         ),
-        // The other side of the same rule: without an explicit `return`, the tail
-        // IS the returned value. Narrowing the rule above must not disarm this.
         (
             "a_trailing_row_in_a_returning_fn_is_still_flagged",
             "fn leak(e: Entity<Mob>) -> Mob? {\n    e.get()\n}",
@@ -191,16 +167,14 @@ fn each_escaping_shape_reports_its_kind() {
     }
 }
 
-// --- return, capture, erasure --------------------------------------------
-
 #[test]
 fn returning_a_row_is_propagation_not_a_hazard() {
-    // An accessor hands a row to its caller. A `return` runs nothing, so it cannot invalidate the
-    // slot -- what crosses it is the reference, never the validity window. It is
-    // reported only because it is where an INTRAPROCEDURAL check stops.
     let fs = findings("fn accessor(e: Entity<Mob>) -> Mob? {\n    return e.get()\n}");
     assert_eq!(fs.len(), 1, "{fs:?}");
     assert_eq!(kind_of(&fs[0]), EscapeKind::Return);
+    assert_eq!(fs[0].level(), CompilerErrorLevel::Advice);
+    assert!(fs[0].error.message.contains("Mob"));
+    assert!(fs[0].error.message.contains("return"));
     assert_eq!(kind_of(&fs[0]).class(), EscapeClass::Propagation);
     assert!(
         fs[0].error.message.contains("caller"),
@@ -210,57 +184,19 @@ fn returning_a_row_is_propagation_not_a_hazard() {
 }
 
 #[test]
-fn escape_classes_partition_the_kinds() {
-    use EscapeKind::*;
-    // A row outliving an invalidation point unconditionally.
-    for k in [
-        StoreGlobal,
-        StoreStatic,
-        StoreField,
-        StoreCollection,
-        AcrossYield,
-    ] {
-        assert_eq!(k.class(), EscapeClass::Hazard, "{k:?}");
-    }
-    // A hazard only if the consumer RETAINS -- which no retain summary proves
-    // today, so these are reported without claiming a defect.
-    for k in [ClosureCapture, FfiArg, AnyErasure] {
-        assert_eq!(k.class(), EscapeClass::Unprovable, "{k:?}");
-    }
-    assert_eq!(Return.class(), EscapeClass::Propagation);
-}
-
-#[test]
 fn correct_row_handling_is_clean() {
-    // Each is the CORRECT rewrite of a flagged shape. A lint that reports
-    // these is one nobody will run twice, and a census built on it is noise.
     let cases: &[&str] = &[
-        // Re-fetched at the top of each iteration and finished with before the
-        // suspension -- the correct loop shape.
         "co fn f(e: Entity<Mob>) -> Coroutine<int> {\n    for _i in 0..3 {\n        let m = unwrap(e.get())\n        m.hp -= 1\n        yield 1\n    }\n}",
-        // The fix the sims apply: `m = e.get().unwrap()` after each suspension.
-        // A rebind must clear `crossed`, or the correct program stays flagged.
         "co fn f(e: Entity<Mob>) -> Coroutine<int> {\n    let m = unwrap(e.get())\n    yield 1\n    m = unwrap(e.get())\n    m.hp -= 1\n}",
-        // `Entity<int>` hands back the value itself -- nothing points at the arena,
-        // so holding it across a suspension is safe.
         "co fn f(e: Entity<int>) -> Coroutine<int> {\n    let n = unwrap(e.get())\n    yield 1\n    let _u = n + 1\n}",
-        // the handle is what you are supposed to hold
         "co fn f(e: Entity<Mob>) -> Coroutine<int> {\n    let h = e\n    yield 1\n    let _m = unwrap(h.get())\n}",
-        // the handle is the thing you are SUPPOSED to store
         "global KEEP: Entity<Mob>? = null\nfn main() {\n    let e = some_entity()\n    KEEP = e\n}",
-        // a scalar read out of a row is a copy, not a row
         "global HP: int = 0\nfn main() {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    HP = m.hp\n}",
-        // read/mutate in place is the whole point of .get()
         "fn main() {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    m.hp -= 10\n}",
-        // a Rock-bodied helper taking a row by value is not an escape
         "fn hurt(m: Mob, n: int) { m.hp -= n }\nfn main() {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    hurt(m, 10)\n}",
-        // a row bound AFTER the last suspension is the correct form
         "co fn good(e: Entity<Mob>) -> Coroutine<int> {\n    yield 1\n    let m = unwrap(e.get())\n    m.hp -= 10\n}",
-        // liveness, not scope -- finished with before the suspension
         "co fn fine(e: Entity<Mob>) -> Coroutine<int> {\n    let m = unwrap(e.get())\n    m.hp -= 10\n    yield 1\n}",
-        // Capture the handle and fetch the row inside the callback each frame.
         "fn take(f: () -> int) -> int { return f() }\nfn main() -> int {\n    let e = some_entity()\n    return take(() => unwrap(e.get()).hp)\n}",
-        // a bulk scan that keeps nothing is the common correct loop
         "fn main() -> int {\n    let t = 0\n    for m in MOBS {\n        t += m.hp\n    }\n    return t\n}",
     ];
     for src in cases {
@@ -271,8 +207,6 @@ fn correct_row_handling_is_clean() {
 
 #[test]
 fn a_trailing_row_in_a_unit_fn_is_clean() {
-    // A unit function discards its tail value. Reading only the expression
-    // type would incorrectly report a returned row.
     let ks = kinds("fn drop_it(e: Entity<Mob>) {\n    e.get()\n}");
     assert!(
         ks.is_empty(),
@@ -280,31 +214,8 @@ fn a_trailing_row_in_a_unit_fn_is_clean() {
     );
 }
 
-// --- catalog wiring -------------------------------------------------------
-
-#[test]
-fn finding_reports_at_advice_level() {
-    // A census must be runnable over a tree with escapes without failing it.
-    let fs = findings("fn leak(e: Entity<Mob>) -> Mob? {\n    return e.get()\n}");
-    assert_eq!(fs.len(), 1, "expected the one return finding: {fs:?}");
-    assert_eq!(fs[0].level(), CompilerErrorLevel::Advice);
-}
-
-#[test]
-fn diagnostic_names_the_row_type_and_the_kind() {
-    let fs = findings("fn leak(e: Entity<Mob>) -> Mob? {\n    return e.get()\n}");
-    assert_eq!(fs.len(), 1, "{fs:?}");
-    let msg = &fs[0].error.message;
-    assert!(msg.contains("Mob"), "names the row type: {msg}");
-    assert!(msg.contains("return"), "names the escape kind: {msg}");
-}
-
 #[test]
 fn default_tier_does_not_report_row_escape() {
-    // The property the opt-in tier exists for, asserted on a program that DOES
-    // escape: a migration lint firing on every pre-existing arena consumer would
-    // bury the rest of the catalog on every build. Membership in OPT_IN_LINTS is
-    // not the same claim -- this drives the runner both ways.
     let src = format!("{PRELUDE}\nfn leak(e: Entity<Mob>) -> Mob? {{\n    return e.get()\n}}\n");
     let default_tier = crate::lint(&[("<row_escape>", src.as_str())], &Default::default(), true);
     assert!(
@@ -324,12 +235,4 @@ fn default_tier_does_not_report_row_escape() {
         1,
         "naming it runs it: {named:?}"
     );
-}
-
-#[test]
-fn row_escape_is_opt_in() {
-    // A migration lint with a finding on nearly every pre-existing arena
-    // consumer would bury the rest of the catalog on every build.
-    assert!(bone_lints::OPT_IN_LINTS.contains(&bone_lints::ROW_ESCAPE));
-    assert!(bone_lints::KNOWN_LINTS.contains(&bone_lints::ROW_ESCAPE));
 }

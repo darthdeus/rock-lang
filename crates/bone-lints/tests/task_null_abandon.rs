@@ -1,9 +1,3 @@
-//! `task_null_abandon`: a plain `= null` over a `Task?` place drops the
-//! coroutine mid-stack, so its terminal `defer`s never run. `stop` / `replace`
-//! are the cancel verbs that fire them. Reads inference (the TARGET's type is
-//! what identifies the slot). `Task` is declared locally -- the lint keys on
-//! the target type, not on the host library.
-
 use crate::support::lint_only;
 use bone_lints::Finding;
 use rock_core::errors::CompilerErrorLevel;
@@ -40,99 +34,42 @@ fn findings(body: &str) -> Vec<Finding> {
     lint_only(&[("<task_null_abandon>", &src)], "task_null_abandon")
 }
 
-fn names_place(finding: &Finding, place: &str) -> bool {
-    finding
-        .error
-        .message
-        .starts_with(&format!("`{place} = null` abandons"))
-}
-
-fn count(body: &str) -> usize {
-    findings(body).len()
-}
-
 #[test]
-fn prelude_typechecks_and_its_field_defaults_are_clean() {
-    // `co: Task? = null` in PRELUDE's struct decl is a default, lowered as a
-    // StructDefaults body -- it must not read as an assignment either.
-    assert_eq!(count("fn main() -> int { 3 }"), 0);
-}
-
-#[test]
-fn diagnostic_names_the_abandoned_slot() {
-    let cases: &[(&str, &str)] = &[
-        ("fn bad(m: Mob) {\n    m.co = null\n}", "m.co"),
+fn task_assignment_diagnostics() {
+    for (body, places) in [
+        ("fn main() {}", vec![]),
+        ("fn bad(m: Mob) { m.co = null }", vec!["m.co"]),
         (
-            "fn bad(e: Entity<Mob>) {\n    e.get()?.co = null\n}",
-            "e.get()?.co",
+            "fn bad(e: Entity<Mob>) { e.get()?.co = null }",
+            vec!["e.get()?.co"],
         ),
         (
-            "global SLOT: Task? = null\nfn bad() {\n    SLOT = null\n}",
-            "SLOT",
+            "global SLOT: Task? = null\nfn bad() { SLOT = null }",
+            vec!["SLOT"],
         ),
-    ];
-    for (body, place) in cases {
+        ("fn good(m: Mob) { stop(m, .co) }", vec![]),
+        ("fn good() -> Mob { Mob { co: null, name: null } }", vec![]),
+        ("fn fine(m: Mob) { m.name = null }", vec![]),
+        ("fn fine(m: Mob) { m.co = make_task() }", vec![]),
+        (
+            "fn bad() { let t: Task? = make_task()\nt = null }",
+            vec!["t"],
+        ),
+        (
+            "fn bad(m: Mob) { m.co = null\nm.other = null\nm.hp = 0 }",
+            vec!["m.co", "m.other"],
+        ),
+    ] {
         let fs = findings(body);
-        assert_eq!(fs.len(), 1, "expected the one finding: {fs:?}");
-        assert!(names_place(&fs[0], place), "{fs:?}");
+        assert_eq!(fs.len(), places.len(), "{body}: {fs:?}");
+        for (f, place) in fs.iter().zip(places) {
+            assert!(
+                f.error
+                    .message
+                    .starts_with(&format!("`{place} = null` abandons")),
+                "{f:?}"
+            );
+            assert_eq!(f.level(), CompilerErrorLevel::Warning);
+        }
     }
-}
-
-#[test]
-fn null_assignments_to_task_slots_are_counted() {
-    let cases: &[(&str, &str, usize)] = &[
-        // The whole point of the lint: the two verbs that DO run the defers.
-        (
-            "stop_call_is_clean",
-            "fn good(m: Mob) {\n    stop(m, .co)\n}",
-            0,
-        ),
-        // An initializer is not an assignment: there is no live coroutine in the slot to
-        // abandon, so `co: null` in a literal and the field default are both clean.
-        (
-            "struct_literal_initializer_is_clean",
-            "fn good() -> Mob {\n    return Mob { co: null, name: null }\n}",
-            0,
-        ),
-        // only a `Task?` slot has defers to skip
-        (
-            "non_task_nullable_field_is_clean",
-            "fn fine(m: Mob) {\n    m.name = null\n}",
-            0,
-        ),
-        // v1 covers the `= null` shape only. Overwriting a live slot with a NEW task
-        // is the same hazard, but `replace` is the fix and telling a first store from
-        // an overwrite needs liveness -- see the doc comment on the lint.
-        (
-            "non_null_assign_is_clean",
-            "fn fine(m: Mob) {\n    m.co = make_task()\n}",
-            0,
-        ),
-        // a local is a place too -- the task is just as abandoned
-        (
-            "local_task_slot_is_flagged",
-            "fn bad() {\n    let t: Task? = make_task()\n    t = null\n}",
-            1,
-        ),
-        // two Task? slots nulled, the int is not one
-        (
-            "each_slot_is_judged_separately",
-            "fn bad(m: Mob) {\n    m.co = null\n    m.other = null\n    m.hp = 0\n}",
-            2,
-        ),
-    ];
-    for (name, body, expected) in cases {
-        assert_eq!(count(body), *expected, "{name}");
-    }
-}
-
-// `Warning`, not `Error`: two legal null-assign patterns exist (nulling a task
-// just observed terminal, and cleanup inside the task's own terminal defer), and
-// liveness-at-assignment is dataflow v1 does not attempt -- so those sites need
-// a legal escape hatch, unlike `entity_across_yield`.
-#[test]
-fn finding_reports_at_warning_level() {
-    let fs = findings("fn bad(m: Mob) {\n    m.co = null\n}");
-    assert_eq!(fs.len(), 1, "expected the one finding: {fs:?}");
-    assert_eq!(fs[0].level(), CompilerErrorLevel::Warning);
 }
