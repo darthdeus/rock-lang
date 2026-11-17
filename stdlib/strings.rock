@@ -103,7 +103,7 @@ fn string.trim(s) -> string {
 // Code-point iterator over the native units (UTF-8 decode on luajit, UTF-16
 // on JS). Yields code points as ints; the portable way to walk real
 // characters. Costs nothing when unused.
-struct CharsIter {
+@consume struct CharsIter {
     s: string,
     i: int,
     n: int,

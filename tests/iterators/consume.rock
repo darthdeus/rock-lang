@@ -1,0 +1,107 @@
+@consume
+struct Permit {
+    id: int,
+}
+
+fn redeem(p: Permit) -> int {
+    return p.id
+}
+
+fn next(p: Permit) -> (bool, int) {
+    p.id += 1
+    return (true, p.id)
+}
+
+@test
+fn consume_single_use_and_rebinding() {
+    let p = Permit { id: 1 }
+    assert_eq(redeem(p), 1)
+    p = Permit { id: 2 }
+    assert_eq(redeem(p), 2)
+    let p = Permit { id: 3 }
+    let alias = p
+    assert_eq(redeem(alias), 3)
+}
+
+fn exclusive(p: Permit, left: bool) -> int {
+    if left {
+        return redeem(p)
+    } else {
+        return redeem(p)
+    }
+}
+
+@test
+fn consume_exclusive_branches() {
+    assert_eq(exclusive(Permit { id: 4 }, true), 4)
+    assert_eq(exclusive(Permit { id: 5 }, false), 5)
+}
+
+@test
+fn consume_partial_next_and_field_projection() {
+    let p = Permit { id: 6 }
+    let (_, a) = next(p)
+    let (_, b) = p.next()
+    assert_eq(a, 7)
+    assert_eq(b, 8)
+    assert_eq(p.id, 8)
+    assert_eq(redeem(p), 8)
+
+    let it = [1, 2, 3].iter()
+    let (ok, first) = next(it)
+    assert(ok)
+    assert_eq(first, 1)
+    assert_eq(it.sum(), 5)
+}
+
+@test
+fn consume_iteration_local_cursor_and_partial_loop() {
+    let total = 0
+    for n in 1..4 {
+        let it = [n, n].iter()
+        total += it.sum()
+    }
+    assert_eq(total, 12)
+
+    let it = [1, 2, 3].iter()
+    loop {
+        let (ok, x) = next(it)
+        if !ok { break }
+        total += x
+    }
+    assert_eq(total, 18)
+}
+
+co fn permit_after_yield(p: Permit) -> Coroutine<int> {
+    yield 1
+    yield redeem(p)
+}
+
+@test
+fn consume_coroutine_and_lambda_regions() {
+    let co = permit_after_yield(Permit { id: 9 })
+    let total = 0
+    for x in co { total += x }
+    assert_eq(total, 10)
+
+    let p = Permit { id: 10 }
+    let once = () => redeem(p)
+    assert_eq(once(), 10)
+    let local = () => {
+        let p = Permit { id: 11 }
+        redeem(p)
+    }
+    assert_eq(local(), 11)
+    assert_eq(local(), 11)
+}
+
+@test
+fn consume_replayable_collections() {
+    let v = [1, 2, 3]
+    assert_eq(v.sum(), 6)
+    assert_eq(v.sum(), 6)
+    let total = 0
+    for x in v { total += x }
+    for x in v { total += x }
+    assert_eq(total, 12)
+}

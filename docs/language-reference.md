@@ -210,6 +210,23 @@ can also be used directly. A generic function can require this protocol with
 `I: Iterator<T>`. A multi-value `next` can drive a direct `for`, but does
 not satisfy the two-result `(bool, T)` bound.
 
+A struct marked `@consume` has single-use bindings. Standard-library cursor
+structs carry this annotation. A whole-value read consumes the binding: this
+includes a `for` head, passing an argument or method receiver, copying to another
+binding, storing in a field or Vec, returning, and capturing in a lambda. Any
+later read of that binding is an error, with the first consumption also labeled.
+Field projection and `next(cursor)` / `cursor.next()` do not consume a fresh
+binding, so manual advancement can precede a final loop or terminal operation.
+
+Reassignment and shadowing provide fresh bindings. Exclusive branches may each
+consume a cursor, but consumption in either branch makes it unavailable after
+the join. A loop cannot consume a binding declared outside that loop; create a
+fresh cursor inside each iteration or advance it with `next`. Parameters start
+fresh in each body, including `co fn` bodies; retaining a cursor across `yield`
+is allowed. Tracking is per binding, not through fields or across calls.
+Ranges and collections remain reusable; each call to `iter()` creates a fresh
+cursor.
+
 ```rock
 let result = [1, 2, 3, 4].iter()
     .filter(x => x % 2 == 0)

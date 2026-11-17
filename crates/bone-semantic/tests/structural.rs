@@ -696,7 +696,7 @@ fn holey(x: _) -> _ {
 fn declaration_details_survive_lowering() {
     use bone_semantic::hir::AnnoValue;
     let ws = check(
-        "struct Player { hp: int }\n\
+        "@consume struct Player { hp: int }\n\
          fn identity(player: ref Player) -> ref Player { player }\n\
          nobox value V { @flat id: int, pos: float }\n\
          @test(returns = 1.5)\nfn a() -> float { return 1.5 }\n\
@@ -706,6 +706,9 @@ fn declaration_details_survive_lowering() {
     .expect("type checks");
     let module = ws.module(user_mid(&ws));
     let function = |name: &str| &module.functions[named!(module.functions, name)];
+
+    let player = &module.structs[named!(module.structs, "Player")];
+    assert!(player.consume);
 
     let identity = function("identity");
     assert_eq!(ws.render(None, identity.param_decls[0].ty), "ref Player");
@@ -1373,6 +1376,36 @@ fn annotation_resolution_errors(sources: &[(&str, &str)]) -> Vec<String> {
         Err(error) => vec![error.message],
         Ok(ws) => error_messages(&ws),
     }
+}
+
+#[test]
+fn misspelled_struct_annotation_is_rejected() {
+    for source in [
+        "@consuem struct Owned { item: int }",
+        "mod inner { @consuem struct Owned { item: int } }",
+    ] {
+        let errors = annotation_resolution_errors(&[("main.rock", source)]);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("unknown annotation `@consuem`")),
+            "{source}: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn nested_decorator_spelled_consume_is_not_the_builtin() {
+    let errors = annotation_resolution_errors(&[(
+        "main.rock",
+        "mod inner { deco init consume {} @consume struct Owned { item: int } }",
+    )]);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("annotation `@consume` is not allowed on a struct")),
+        "{errors:?}"
+    );
 }
 
 #[test]

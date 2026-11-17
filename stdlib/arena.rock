@@ -482,7 +482,7 @@ fn Arena<T>.random(arena) -> (Entity<T>, T)? {
 // the store's own row column, so it is an `@identity_storage` edge like
 // `ArenaStore.data`.
 
-struct ArenaValIter<T> {
+@consume struct ArenaValIter<T> {
     occupied: [bool],
     @identity_storage
     data: [T],
@@ -508,7 +508,7 @@ fn next<T>(it: ArenaValIter<T>) -> (bool, T) {
     return (true, it.data[i])
 }
 
-struct ArenaPairIter<T> {
+@consume struct ArenaPairIter<T> {
     arena: Arena<T>,
     occupied: [bool],
     generations: [int],
@@ -549,7 +549,7 @@ fn next<T>(it: ArenaPairIter<T>) -> (bool, (Entity<T>, T)) {
     return (true, (e, it.data[i]))
 }
 
-struct ArenaKeyIter<T> {
+@consume struct ArenaKeyIter<T> {
     arena: Arena<T>,
     occupied: [bool],
     generations: [int],

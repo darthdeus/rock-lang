@@ -3867,14 +3867,22 @@ pub fn lower_annotations_with_ctx(
     ast: &Ast,
     anns: &[skull_parser::Annotation],
 ) -> Result<Vec<hir::Annotation>, CompilerError> {
+    lower_annotations_in_scope(ctx, ast, anns, ctx.fragment_scope())
+}
+
+/// Lower annotations using the logical module path of their declaration.
+pub fn lower_annotations_in_scope(
+    ctx: &LowerCtx,
+    ast: &Ast,
+    anns: &[skull_parser::Annotation],
+    scope: &bone_core::modules::FragmentScope,
+) -> Result<Vec<hir::Annotation>, CompilerError> {
     let mut lowered = lower_annotations(ast, anns);
     for anno in &mut lowered {
         // Only a decorator claims an annotation spelling; a same-named fn or
         // global leaves the builtin in force.
         let resolved = ctx
-            .probed(|| {
-                resolve::decorator_binding(ctx.workspace, ctx.fragment_scope(), anno.name.name)
-            })
+            .probed(|| resolve::decorator_binding(ctx.workspace, scope, anno.name.name))
             .map_err(|message| CompilerError::new_with_label(anno.span, message))?
             .map(|resolved| resolved.key);
         if let Some(key) = resolved {

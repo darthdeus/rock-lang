@@ -1,12 +1,10 @@
-//! TODO: `@consume` affine usage check not implemented yet
-//!. Each case double-consumes a single-shot
-//! cursor binding and must become a two-label compile error ("already
-//! consumed here / used again here"). Today they compile and the second
-//! consumption silently yields nothing. Flip these to live cases when the
-//! check lands (requires the stdlib cursor structs to carry `@consume`).
+//! `@consume` values cannot be reused after ownership transfer, including
+//! through branches, containers, calls, closures, and returns. Iterator `next`
+//! borrows the cursor, so a partial read before one terminal consume is valid.
 //! Tags: iterators, consume, affine
 
 //=== TEST CASE: double_for_over_cursor_Generic ===
+//! expect: use of consumed binding
 fn main() {
     let v = [1, 2, 3]
     let it = v.iter()
@@ -18,9 +16,10 @@ fn main() {
 }
 
 //=== TEST CASE: for_then_terminal_Generic ===
+//! expect: use of consumed binding
 fn main() {
     let v = [1, 2, 3]
-    let it = v.map(x => x * 2)
+    let it = v.iter().map(x => x * 2)
     let a = 0
     for x in it { a += x }
     let r = it.collect()
@@ -28,6 +27,7 @@ fn main() {
 }
 
 //=== TEST CASE: wrap_then_use_Generic ===
+//! expect: use of consumed binding
 fn main() {
     let v = [1, 2, 3]
     let it = v.iter()
@@ -40,6 +40,7 @@ fn main() {
 }
 
 //=== TEST CASE: copy_then_use_Generic ===
+//! expect: use of consumed binding
 fn main() {
     let v = [1, 2, 3]
     let it = v.iter()
@@ -52,6 +53,7 @@ fn main() {
 }
 
 //=== TEST CASE: loop_reuse_of_outer_cursor_Generic ===
+//! expect: cannot consume
 fn main() {
     let v = [1, 2, 3]
     let it = v.iter()
@@ -62,7 +64,102 @@ fn main() {
     print("{total}")
 }
 
+//=== TEST CASE: both_branch_join_then_use_Generic ===
+//! expect: use of consumed binding
+fn check_both_branches(flag: bool) {
+    let it = [1, 2, 3].iter()
+    if flag {
+        let _ = it.collect()
+    } else {
+        let _ = it.collect()
+    }
+    let _ = it.collect()
+}
+fn main() { check_both_branches(true) }
+
+//=== TEST CASE: one_branch_join_then_use_Generic ===
+//! expect: use of consumed binding
+fn check_one_branch(flag: bool) {
+    let it = [1, 2, 3].iter()
+    if flag {
+        let _ = it.collect()
+    }
+    let _ = it.collect()
+}
+fn main() { check_one_branch(true) }
+
+//=== TEST CASE: partial_next_then_one_consume_then_reuse_Generic ===
+//! expect: use of consumed binding
+fn main() {
+    let it = [1, 2, 3].iter()
+    let (more, first) = it.next()
+    let _ = more
+    let _ = first
+    let rest = it.collect()
+    let again = it.collect()
+    print("{rest.len} {again.len}")
+}
+
+//=== TEST CASE: passing_to_consuming_function_then_reuse_Generic ===
+//! expect: use of consumed binding
+fn drain<I: Iterator<int>>(it: I) -> int {
+    return it.count()
+}
+
+fn main() {
+    let it = [1, 2, 3].iter()
+    let n = drain(it)
+    let again = drain(it)
+    print("{n} {again}")
+}
+
+//=== TEST CASE: captured_cursor_then_consume_Generic ===
+//! expect: use of consumed binding
+fn main() {
+    let it = [1, 2, 3].iter()
+    let read = () => it.count()
+    let n = it.count()
+    print("{n}")
+}
+
+//=== TEST CASE: cursor_binding_stored_in_field_then_reused_Generic ===
+//! expect: use of consumed binding
+struct Holder<I> {
+    cursor: I,
+}
+
+fn main() {
+    let it = [1, 2, 3].iter()
+    let holder = Holder { cursor: it }
+    let n = it.count()
+    print("{n}")
+}
+
+//=== TEST CASE: cursor_pushed_then_reused_Generic ===
+//! expect: use of consumed binding
+fn main() {
+    let cursors: [VecIter<int>] = []
+    let it = [1, 2, 3].iter()
+    cursors.push(it)
+    let n = it.count()
+    print("{n}")
+}
+
+//=== TEST CASE: cursor_returned_then_reused_Generic ===
+//! expect: use of consumed binding
+fn return_cursor(it: VecIter<int>) -> VecIter<int> {
+    return it
+}
+
+fn main() {
+    let it = [1, 2, 3].iter()
+    let returned = return_cursor(it)
+    let n = it.count()
+    print("{n} {returned.count()}")
+}
+
 //=== TEST CASE: user_consume_struct_double_use_Generic ===
+//! expect: use of consumed binding
 @consume
 struct Ticket {
     id: int,
@@ -77,4 +174,16 @@ fn main() {
     let a = punch(t)
     let b = punch(t)
     print("{a} {b}")
+}
+
+//=== TEST CASE: consume_annotation_typo_UnknownAnnotation ===
+//! expect: unknown annotation `@consum`
+@consum
+struct Ticket {
+    id: int,
+}
+
+fn main() {
+    let t = Ticket { id: 7 }
+    let _ = t.id
 }

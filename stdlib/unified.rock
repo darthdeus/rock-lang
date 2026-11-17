@@ -3382,7 +3382,7 @@ struct Vec<T> {
 // (skull inlines both, SROA peels the cursor, and the FORL-recovery pass
 // re-emits a native numeric `for`; parity with the old builtin template is
 // pinned by `for_real_vec_loop_is_forl_zero_alloc` in skull-codegen-lua).
-struct VecIter<T> {
+@consume struct VecIter<T> {
     vec: [T],
     i: int,
 }
@@ -3414,7 +3414,7 @@ fn VecIter<T>.next(it) -> (bool, T) {
 // cliff) does NOT apply here: bounded combinators are always fully inlined
 // (residual bound calls are compile errors), so no callable `next()` exists.
 
-struct MapIter<I, T, U> {
+@consume struct MapIter<I, T, U> {
     __inner: I,
     __f: fn(T) -> U,
 }
@@ -3431,7 +3431,7 @@ fn MapIter<I: Iterator<T>, T, U>.next(it) -> (bool, U) {
     return (true, (it.__f)(x))
 }
 
-struct FilterIter<I, T> {
+@consume struct FilterIter<I, T> {
     __inner: I,
     __pred: fn(T) -> bool,
 }
@@ -3451,7 +3451,7 @@ fn FilterIter<I: Iterator<T>, T>.next(it) -> (bool, T) {
     return (false, phantom())
 }
 
-struct EnumIter<I, T> {
+@consume struct EnumIter<I, T> {
     __inner: I,
     __i: int,
 }
@@ -3469,7 +3469,7 @@ fn EnumIter<I: Iterator<T>, T>.next(it) -> (bool, (int, T)) {
     return (true, (it.__i, x))
 }
 
-struct ZipIter<I1, I2, A, B> {
+@consume struct ZipIter<I1, I2, A, B> {
     __a: I1,
     __b: I2,
 }
@@ -3488,7 +3488,7 @@ fn ZipIter<I1: Iterator<A>, I2: Iterator<B>, A, B>.next(it) -> (bool, (A, B)) {
     return (true, (x, y))
 }
 
-struct TakeWhileIter<I, T> {
+@consume struct TakeWhileIter<I, T> {
     __inner: I,
     __pred: fn(T) -> bool,
     __done: bool,
@@ -3514,7 +3514,7 @@ fn TakeWhileIter<I: Iterator<T>, T>.next(it) -> (bool, T) {
     return (true, x)
 }
 
-struct SkipIter<I, T> {
+@consume struct SkipIter<I, T> {
     __inner: I,
     __n: int,
 }
@@ -3538,7 +3538,7 @@ fn SkipIter<I: Iterator<T>, T>.next(it) -> (bool, T) {
     return (false, phantom())
 }
 
-struct StepByIter<I, T> {
+@consume struct StepByIter<I, T> {
     __inner: I,
     __n: int,
     __skip: int,
@@ -3568,7 +3568,7 @@ fn StepByIter<I: Iterator<T>, T>.next(it) -> (bool, T) {
     return (false, phantom())
 }
 
-struct TakeIter<I, T> {
+@consume struct TakeIter<I, T> {
     __inner: I,
     __n: int,
 }
@@ -3588,7 +3588,7 @@ fn TakeIter<I: Iterator<T>, T>.next(it) -> (bool, T) {
     return (true, x)
 }
 
-struct ChainIter<I1, I2, T> {
+@consume struct ChainIter<I1, I2, T> {
     __a: I1,
     __b: I2,
     __first: bool,
@@ -3613,7 +3613,7 @@ fn ChainIter<I1: Iterator<T>, I2: Iterator<T>, T>.next(it) -> (bool, T) {
 // The current inner iterator is a real field (not II?) so `next(it.__cur)`
 // advances its stored cursor -- a nullable would mutate a throwaway copy.
 // __has gates the phantom initial before the first outer pull.
-struct FlattenIter<IO, II, T> {
+@consume struct FlattenIter<IO, II, T> {
     __outer: IO,
     __cur: II,
     __has: bool,
@@ -3791,7 +3791,7 @@ fn RingBuffer<T>.clear(rb) {
 
 // Holds the shared `data` descriptor and the oldest slot rather than the
 // buffer, which is a mutable identity and cannot be stored in a field.
-struct RingIter<T> {
+@consume struct RingIter<T> {
     data: [T],
     oldest: int,
     cap: int,

@@ -6,7 +6,7 @@ use skull_parser::stdlib::ModuleSet;
 use skull_parser::{Ast, Item, ItemKind};
 
 use bone_core::annotations::{AnnoPos, validate_annotations};
-use bone_lower::{LowerCtx, lower_annotations_with_ctx};
+use bone_lower::{LowerCtx, lower_annotations_in_scope};
 
 use crate::hir::{BuiltinTy, TypeCtor, TypeExpr, VariantPayload};
 use crate::{hir::Module, prelude::*};
@@ -281,28 +281,47 @@ pub fn lower_modules_seeded(
     // `@value`) fire first.
     for lower_item in items.iter_mut() {
         let mut ctx = LowerCtx::new(ws, lower_item.module, 0);
-        for ast_item in lower_item.rock_module.items.iter() {
-            if ast_item.annotations.is_empty() {
-                continue;
-            }
-            let pos = match &ast_item.kind {
-                ItemKind::Function(_) => continue,
-                ItemKind::Struct(_) => AnnoPos::StructItem,
-                ItemKind::Enum(_) => AnnoPos::EnumItem,
-                ItemKind::Newtype(_) => AnnoPos::NewtypeItem,
-                ItemKind::Global(_) => AnnoPos::GlobalItem,
-                ItemKind::Decorator(_) => AnnoPos::DecoItem,
-                ItemKind::CompilerDirective(_)
-                | ItemKind::Comment(_)
-                | ItemKind::MacroInvocation { .. } => continue,
-                // Module definitions are registered in build_namespaces; Module
-                // blocks are walked via for_each_def_item, not as annotated items.
-                ItemKind::Use(_) | ItemKind::Module(_) => continue,
-            };
-            let lowered =
-                lower_annotations_with_ctx(&ctx, lower_item.rock_module, &ast_item.annotations)?;
-            validate_annotations(pos, &lowered, &ws.decorator_names)?;
-        }
+        let fragment_scope = lower_item.fragment_scope.clone();
+        let start = fragment_scope.module_path.clone();
+        for_each_def_item(
+            lower_item.rock_module.items.as_slice(),
+            &start,
+            &mut |ast_item, path| {
+                if ast_item.annotations.is_empty() {
+                    return Ok(());
+                }
+                let pos = match &ast_item.kind {
+                    ItemKind::Function(_) => return Ok(()),
+                    ItemKind::Struct(_) => AnnoPos::StructItem,
+                    ItemKind::Enum(_) => AnnoPos::EnumItem,
+                    ItemKind::Newtype(_) => AnnoPos::NewtypeItem,
+                    ItemKind::Global(_) => AnnoPos::GlobalItem,
+                    ItemKind::Decorator(_) => AnnoPos::DecoItem,
+                    ItemKind::CompilerDirective(_)
+                    | ItemKind::Comment(_)
+                    | ItemKind::MacroInvocation { .. } => return Ok(()),
+                    // Module definitions are registered in build_namespaces; Module
+                    // blocks are walked via for_each_def_item, not as annotated items.
+                    ItemKind::Use(_) | ItemKind::Module(_) => return Ok(()),
+                };
+                let mut item_scope = fragment_scope.clone();
+                item_scope.module_path = path.to_vec();
+                let lowered = lower_annotations_in_scope(
+                    &ctx,
+                    lower_item.rock_module,
+                    &ast_item.annotations,
+                    &item_scope,
+                )?;
+                validate_annotations(pos, &lowered, &ws.decorator_names)?;
+                if let ItemKind::Struct(def) = &ast_item.kind {
+                    let name = map_key(&fragment_scope, path, def.name.name);
+                    let index = ctx.module.struct_by_name[&name];
+                    ctx.module.structs[index].consume =
+                        lowered.iter().any(|anno| anno.is_builtin("consume"));
+                }
+                Ok(())
+            },
+        )?;
         ctx.flush_scope_probes();
     }
 
@@ -2092,7 +2111,7 @@ pub fn check_module_incremental(
                 (owner, inference, errs)
             })
         });
-        fold_inference(&mut result, owner, checked);
+        fold_inference(ws, module, &mut result, owner, checked);
     }
 
     for (d_id, d) in module.decorators.iter() {
@@ -2101,6 +2120,8 @@ pub fn check_module_incremental(
             continue;
         }
         fold_inference(
+            ws,
+            module,
             &mut result,
             BodyOwner::Decorator(d_id),
             check_decorator(ws, module, mid, d_id, d),
@@ -2109,6 +2130,8 @@ pub fn check_module_incremental(
 
     for (g_id, g) in module.globals.iter() {
         fold_inference(
+            ws,
+            module,
             &mut result,
             BodyOwner::Global(g_id),
             check_global(ws, module, mid, g_id, g),
@@ -2121,6 +2144,8 @@ pub fn check_module_incremental(
             continue;
         }
         fold_inference(
+            ws,
+            module,
             &mut result,
             key,
             check_struct_defaults(ws, module, mid, s_id),
@@ -2141,12 +2166,15 @@ pub fn check_module(
 }
 
 fn fold_inference(
+    ws: &Workspace,
+    module: &Module,
     result: &mut InferenceResult,
     owner: BodyOwner,
     checked: Result<Option<(BodyOwner, BodyInference, Vec<CompilerError>)>, CompilerError>,
 ) {
     match checked {
-        Ok(Some((o, mut inf, errs))) => {
+        Ok(Some((o, mut inf, mut errs))) => {
+            errs.extend(crate::consume::check(ws, &module.bodies[&o], &inf));
             inf.shrink_to_fit();
             result.per_fn.insert(o, inf);
 
@@ -2216,14 +2244,14 @@ pub(crate) fn pass_register_forward_decls(
                 );
             }
             let reg_name = def_key(&s.name.name);
+            let annotations = bone_lower::lower_annotations(rock_module, &item.annotations);
             let idx = module.structs.alloc(hir::StructDef {
                 name: reg_name,
                 name_span: s.name.span,
                 is_value: s.is_value,
                 is_nobox: s.is_nobox,
-                nomangle: bone_lower::lower_annotations(rock_module, &item.annotations)
-                    .iter()
-                    .any(|anno| anno.is_builtin("nomangle")),
+                consume: false,
+                nomangle: annotations.iter().any(|anno| anno.is_builtin("nomangle")),
                 span: item.span,
                 generics: Vec::new(),
                 fields: Vec::new(),

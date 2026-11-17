@@ -1763,6 +1763,28 @@ fn interface_edit_reinfers_only_dependents() {
     }
 }
 
+#[test]
+fn consume_annotation_edit_rechecks_dependent_bodies() {
+    let without_consume = "struct Token { id: int }\nfn spend(t: Token) -> int { t.id }\n";
+    let with_consume = "@consume struct Token { id: int }\nfn spend(t: Token) -> int { t.id }\n";
+    let consumer = "fn twice() {\n    let token = Token { id: 1 }\n    let _ = spend(token)\n    let _ = spend(token)\n}\n";
+    let mut h = Harness::new(&[("a.rock", without_consume), ("b.rock", consumer)]);
+    h.assert_clean();
+
+    let result = h.update("a.rock", with_consume);
+    assert_eq!(result.tier, UpdateTier::Interface);
+    assert!(
+        result
+            .reinferred
+            .iter()
+            .any(|(mid, owner)| *mid == h.mid("b.rock")
+                && matches!(owner, bone_semantic::hir::BodyOwner::Function(_))),
+        "the Token consumer body must be re-inferred: {:?}",
+        result.reinferred
+    );
+    h.assert_diagnostic("consum");
+}
+
 // A parameter added to `shifted` moves every later entry of the module's type
 // arena, and `b.rock` holds inferred types that point into it. Those callers
 // must stay cached (they read nothing the edit changed) and still read valid

@@ -95,6 +95,9 @@ iterator types require a `(bool, E)` result; multi-value iterators can drive a
 direct `for` but cannot satisfy that bound. Collection iteration captures its
 length at entry; mutating the collection during iteration is undefined. A
 hand-written `while` must retain its own semantics and re-read the length.
+Mutable iterator structs can use `@consume` to mark their cursor values as
+affine: operations that consume a cursor make the previous binding unusable,
+while the source collection or range remains reusable.
 
 ## Compile-time inputs
 

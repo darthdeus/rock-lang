@@ -823,7 +823,7 @@ value JsonReaderArray {
     first: int = -1,
 }
 
-struct JsonReaderArrayIter {
+@consume struct JsonReaderArrayIter {
     array: JsonReaderArray,
     pos: int,
     index: int = 0,
@@ -1229,7 +1229,7 @@ fn JsonReaderArray.get_at(array, index: int) -> JsonReader {
     return json_reader_null()
 }
 
-struct JsonReaderFieldIter {
+@consume struct JsonReaderFieldIter {
     reader: JsonReader,
     pos: int,
     keys: [string]? = null,
