@@ -476,6 +476,14 @@ fn ref_type_is_a_prefix_type_former() {
 }
 
 #[test]
+fn type_surface_preserves_path_roots_and_arguments() {
+    for ty in ["::a::B", "a::B", "::a::B<int>", "a::B<int>"] {
+        let ast = parse(&format!("fn f(value: {ty}) {{}}"));
+        assert_eq!(ast.type_surface(first_fn(&ast).params[0].ty), ty);
+    }
+}
+
+#[test]
 fn sibling_field_ref_in_default() {
     let ast = parse("struct HealthBar { max: int, current: int = .max }");
     let def = first_struct(&ast).fields[1]

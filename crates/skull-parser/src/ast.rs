@@ -126,6 +126,15 @@ pub struct Path {
 }
 
 impl Path {
+    fn surface(&self) -> String {
+        self.from_root
+            .then_some("")
+            .into_iter()
+            .chain(self.segments.iter().map(|s| s.name.as_str()))
+            .collect::<Vec<_>>()
+            .join("::")
+    }
+
     pub fn span(&self) -> Span {
         let first = self.segments.first().expect("path has segments").span;
         let last = self.segments.last().expect("path has segments").span;
@@ -970,34 +979,16 @@ impl Ast {
             TypeExprKind::Ref(inner) => format!("ref {}", self.type_surface(*inner)),
             TypeExprKind::Hole(..) => "?".to_string(),
             TypeExprKind::Ident(id) => id.name.to_string(),
-            TypeExprKind::Path(path) => {
-                let root = if path.from_root { "::" } else { "" };
-                format!(
-                    "{root}{}",
-                    path.segments
-                        .iter()
-                        .map(|s| s.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join("::")
-                )
-            }
+            TypeExprKind::Path(path) => path.surface(),
             TypeExprKind::Array(inner) => format!("[{}]", self.type_surface(*inner)),
-            TypeExprKind::AppPath { ctor, args } => {
-                let root = if ctor.from_root { "::" } else { "" };
-                format!(
-                    "{}{}<{}>",
-                    root,
-                    ctor.segments
-                        .iter()
-                        .map(|s| s.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join("::"),
-                    args.iter()
-                        .map(|&a| self.type_surface(a))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            }
+            TypeExprKind::AppPath { ctor, args } => format!(
+                "{}<{}>",
+                ctor.surface(),
+                args.iter()
+                    .map(|&a| self.type_surface(a))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             TypeExprKind::Tuple(ts) => format!(
                 "({})",
                 ts.iter()

@@ -5,9 +5,7 @@
 //! resolves to which callee, and what it spells each retained instance.
 //!
 //! **It may DROP and it may REJECT; it may never DISCOVER.** [`realize`] takes
-//! `&InstanceGraph`, so it cannot rebuild or extend what it measures -- plan
-//! S 20g.1 asks whether logical identity survives realization differing, and a
-//! view that invented an instance would be answering its own question.
+//! `&InstanceGraph`, so it cannot rebuild or extend what it measures.
 //!
 //! **It is a REACHABLE view, not a declaration filter.** Retention is a walk
 //! from the artifact's own roots over the graph's recorded call sites, so a
@@ -21,11 +19,10 @@
 //! serves a target happens here, in [`realize_decl`], and nowhere else. One
 //! shared [`Instance`] therefore realizes to a DIFFERENT declaration -- and a
 //! different [`BoundaryId`] -- on two artifacts while remaining one logical
-//! identity, which is plan S 20a's separation stated as a mechanism rather than
-//! as a claim about two graphs that happened to agree.
+//! identity.
 //!
 //! **Identity across artifacts is the shared [`Instance`], NOT the spelling.**
-//! Plan S 0h: `InstanceId` is target-neutral and the ARTIFACT owns the emitted
+//! `InstanceId` is target-neutral and the artifact owns the emitted
 //! spelling, one symbol per `(artifact, instance)`. Two artifacts may legally
 //! spell one instance differently, so this module asserts totality and
 //! injectivity INSIDE each artifact and leaves cross-artifact comparison to the
@@ -118,10 +115,8 @@ impl<'a> ArtifactMappings<'a> {
 
 /// What an artifact SPELLS an instance.
 ///
-/// A seam, not indirection for its own sake: plan S 0h puts the emitted
-/// spelling under the artifact, so "every artifact spells this instance alike"
-/// is a property of the default planner and not of the model. A test planner
-/// that renames deliberately is what keeps the two apart.
+/// Each artifact owns its emitted spelling. The default planner is
+/// target-neutral; a renaming test planner checks that this is optional.
 pub trait SymbolPlanner: Sync {
     fn symbol(&self, ws: &Workspace, g: &InstanceGraph, i: &Instance, realized: Realized)
         -> String;
@@ -183,8 +178,7 @@ pub struct ArtifactRequest<'a> {
     /// carried and reported but cannot reach admission.
     pub spec: TargetSpec,
     pub mappings: ArtifactMappings<'a>,
-    /// The artifact's emission roots. Plan S 11: "the target may change roots",
-    /// so they are an INPUT, never re-derived here from the graph's contents.
+    /// The artifact's emission roots, never re-derived from the graph's contents.
     pub roots: &'a [FuncRef],
     pub symbols: &'a dyn SymbolPlanner,
     scalar_context: Option<&'a skull_mir::lower::ScalarCtx>,
@@ -249,8 +243,7 @@ impl<'a> ArtifactRequest<'a> {
     }
 }
 
-/// How this artifact actually supplies a retained declaration. Plan S 10's
-/// body-kind taxonomy, resolved rather than declared: the same `@intrinsic`
+/// How this artifact supplies a retained declaration: the same `@intrinsic`
 /// declaration is [`Self::NativeMapping`] on one artifact and
 /// [`Self::PortableFallback`] on another.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -319,7 +312,7 @@ pub struct Realized {
 }
 
 /// Why a declaration in the shared graph is not realizable on this artifact.
-/// Each is plan S 10's `Invalid boundary` outcome with its cause kept, because
+/// Each keeps its cause, because
 /// "unavailable" collapses three different diagnostics into one word.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Unrealizable {
@@ -479,8 +472,7 @@ pub struct ArtifactCensus {
     pub inline_deps_unresolved: usize,
     pub inline_deps_boundary: usize,
     /// Foreign bodies the artifact emits, and how many of them publish more
-    /// than one result lane -- the population plan S 13b's publisher contract
-    /// governs, and the widest wire the artifact's scratch bank must cover.
+    /// than one result lane, and the widest wire the scratch bank must cover.
     pub foreign_bodies: usize,
     pub multi_lane_publishers: usize,
     pub widest_result_lanes: usize,
@@ -527,9 +519,8 @@ pub struct ArtifactView {
     /// Retained ROCK instances: reachable from `roots`, realizable here, and
     /// lowered from a Rock body. A SUBSET of `g.instances`.
     ///
-    /// Plan S 9's `ArtifactGraph` separates `instances` from `boundaries`, and
-    /// so does this: a boundary has no body the artifact lowers, so enqueueing
-    /// it as an instance would ask for callees it does not have.
+    /// A boundary has no body the artifact lowers, so enqueueing it as an
+    /// instance would ask for callees it does not have.
     pub instances: BTreeSet<Instance>,
     /// Retained BOUNDARIES: the identity a call must name, PER INSTANCE.
     /// Reached, never traversed.
@@ -555,8 +546,8 @@ pub struct ArtifactView {
     /// edges; JS adds the targets to its next graph/view construction.
     pub opaque_boundary_roots: BTreeMap<DeclKey, FxHashSet<FuncRef>>,
     /// The physical RESULT LANES of every retained instance the artifact emits
-    /// as a foreign body: how many values its result wire carries. Plan S 13b's
-    /// JS publisher takes its arity from exactly this, so an artifact that
+    /// as a foreign body: how many values its result wire carries. The
+    /// JS publisher takes its arity from this, so an artifact that
     /// retains a multi-lane `inline(js)` body states the lane count here rather
     /// than leaving emission to read it out of the body text.
     ///
@@ -1974,7 +1965,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     let mut sites_walked = 0usize;
 
     // Admitting one reached instance. EVERY reached callee goes through here --
-    // roots and call sites alike -- so plan S 9's `Rock` / `Boundary` split is
+    // roots and call sites alike -- so the `Rock` / `Boundary` split is
     // made once. Only a Rock body is ENQUEUED: a boundary has no body the
     // artifact lowers, which is the same rule the graph walk follows when it
     // stops at a boundary rather than enumerating its callees.

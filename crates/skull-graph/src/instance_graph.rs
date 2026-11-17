@@ -4,11 +4,8 @@
 //!
 //! An [`Instance`] is `(FuncRef, Vec<MonoTyId>)` -- a function plus the total
 //! logical types of its generic arguments, keyed on
-//! [`MonoTy`](skull_mir::monoty::MonoTy) from Stage 0c rather than on an
-//! emission-private key. That is the whole point of the probe: such a key was
-//! partial (plan S 2a), so
-//! `f<Vec2, unit>` and `f<Vec2, any>` share its identity while they get distinct
-//! `InstanceId`s here.
+//! [`MonoTy`](skull_mir::monoty::MonoTy), so `f<Vec2, unit>` and
+//! `f<Vec2, any>` get distinct `InstanceId`s.
 //!
 //! **Roots come from production.** [`super::mir_emit::is_emission_root`] is the
 //! same predicate `reachable_fns` seeds its walk with; re-deriving it would make
@@ -20,8 +17,7 @@
 //!
 //! **Two outcomes are not the same.** [`Unresolved`] is a construction the walk
 //! could not complete -- data. [`Rejection`] is one the concrete-program model
-//! REFUSES (plan S 0h), carrying a span and a message for the compile error
-//! Stage 3's cutover attaches it to. Nothing here is fatal yet.
+//! refuses. The graph records its span and message; emission reports the error.
 //!
 //! **Where the graph is still incomplete**, stated so a reader does not mistake
 //! the histogram for the whole graph: a call lowering synthesizes to a named
@@ -47,10 +43,7 @@ use skull_mir::mangle::mangle_fn;
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoInterner, MonoSubst, MonoTyId, MonoTyReason};
 
-/// The identity vocabulary now lives in `skull-mir` ([`skull_mir::instance`]),
-/// low enough that emission can key its bodies on it. This module remains the
-/// AUTHORITY that builds instances and owns the [`MonoArena`] their `args`
-/// index into; only the type's placement moved.
+/// The graph builds instances and shares their type arena with emission.
 pub use skull_mir::instance::{DeclKey, Instance};
 
 /// The boundary classifier lives below the graph, so artifact projection and
@@ -63,10 +56,8 @@ pub use skull_mir::lower::BoundaryClass;
 /// mangled otherwise -- the rule `skull_mir::mangle` applies, read from it
 /// rather than restated.
 ///
-/// Whether a target can SERVE it is deliberately absent. That is plan S 10's
-/// `Invalid boundary`, and it is a property of an artifact, which is where it
-/// is answered (`artifact::Unrealizable::ForeignToArtifact`, reported per CALL
-/// as a `Severed` rather than per declaration).
+/// Target support is an artifact property, reported per call as a `Severed`
+/// (`artifact::Unrealizable::ForeignToArtifact`).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Boundary {
     pub class: BoundaryClass,
@@ -76,12 +67,8 @@ pub struct Boundary {
 /// A helper symbol a coroutine instance OWNS. Not an [`Edge`]: the target is
 /// not another instance.
 ///
-/// Stage 3's requirement is visible in `symbol_today`. `emit_coroutine` derives
-/// every helper from `mangled(ws, self_ref)` (`coroutine_emit.rs:21`) -- the
-/// SOURCE FuncRef -- so two instances of one generic `co fn` claim the same
-/// helper names. The edge Stage 3 needs must therefore carry the OWNING
-/// INSTANCE, so the base becomes [`InstanceGraph::symbol`] instead of the
-/// source mangling.
+/// Helper names carry the owning instance to distinguish instantiations of
+/// one generic coroutine.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct CoroutineHelper {
     pub owner_identity: String,
@@ -184,16 +171,16 @@ impl BoundRoot {
 /// A construction the concrete-program model REFUSES, as opposed to one it
 /// merely could not complete yet ([`Unresolved`]).
 ///
-/// Three variants reject author programs. `ConcreteTypeUnavailable` records a
-/// compiler invariant instead. They become fatal at Stage 3's emission cutover.
+/// `ConcreteTypeUnavailable` records a compiler invariant; other variants
+/// reject author programs.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum RejectionKind {
     /// A function that recurs at a DIFFERENT instantiation than it was reached
-    /// at. Demand-driven instantiation does not terminate on it (plan S 7).
+    /// at. Demand-driven instantiation does not terminate on it.
     ChangingInstanceRecursion,
     /// A generic function taken as a VALUE. There is no call site to key an
     /// instantiation on, and inferring one from the instances reachable
-    /// elsewhere is explicitly not the rule (plan S 0h).
+    /// elsewhere is explicitly not the rule.
     GenericFnValue,
     /// A COMPILER INVARIANT, not a language decision: a type that should have
     /// been concrete here is recovery poison, names no node, or resolves
@@ -235,7 +222,7 @@ pub struct Rejection {
 
 /// A call the walk could not turn into an instance. Data, not an error: an
 /// unbound generic here means the caller is itself an uninstantiated shared
-/// body, which is exactly the surface Stage 2 must supply.
+/// body.
 #[derive(Clone, Debug)]
 pub struct Unresolved {
     pub from: Instance,
@@ -404,17 +391,9 @@ fn elapsed_ns(start: Option<Instant>) -> u64 {
     start.map_or(0, |start| start.elapsed().as_nanos() as u64)
 }
 
-fn percentile_usize(values: &mut [usize], percentile: usize) -> usize {
+fn percentile<T: Copy + Default + Ord>(values: &mut [T], percentile: usize) -> T {
     if values.is_empty() {
-        return 0;
-    }
-    values.sort_unstable();
-    values[(values.len() - 1) * percentile / 100]
-}
-
-fn percentile_u64(values: &mut [u64], percentile: usize) -> u64 {
-    if values.is_empty() {
-        return 0;
+        return T::default();
     }
     values.sort_unstable();
     values[(values.len() - 1) * percentile / 100]
@@ -739,8 +718,8 @@ pub struct InstanceGraph {
     /// A retained graph and the emission that consumes it both mint and read
     /// [`Instance`]s, so neither can own the arena outright: moving it into
     /// `ScalarCtx` would leave this graph's `MonoTyId`s dangling, and keeping a
-    /// copy here would be the second identity this stage exists to remove. The
-    /// handle is the durable owner; both sides hold a clone of it.
+    /// copy here would give instances a second identity. Both sides hold a
+    /// clone of the durable arena handle.
     interner: std::sync::Arc<MonoInterner>,
     /// The primary records. Every flat field below is derived from these plus
     /// [`Self::root_instances`]; nothing writes a flat field directly.
@@ -987,23 +966,13 @@ impl InstanceGraph {
 
     /// The instance's LOGICAL symbol.
     ///
-    /// DELEGATES to [`Instance::symbol`] -- it does not restate it. The two
-    /// stood side by side, each reaching `spec_fn_name` with its own
-    /// declaration lookup and its own non-generic special case, which is two
-    /// derivations of one encoder and exactly the shape that drifts. Emission
-    /// spells a definition with `Instance::symbol`; a graph view that answered
-    /// differently would be describing a body nothing emits.
-    ///
-    /// **This is not the final emitted spelling.** Plan S 0h puts that under the
-    /// ARTIFACT's ABI/boundary plan -- one symbol per `(artifact, instance)` --
-    /// so a target may legally spell this instance differently. What is shared
-    /// here is the ENCODER, and per-artifact injectivity stays a property of
-    /// each artifact view.
+    /// Shares [`Instance::symbol`]'s encoder with emission. The artifact's ABI
+    /// owns the final spelling and checks injectivity within its view.
     pub fn logical_symbol(&self, ws: &Workspace, i: &Instance) -> String {
         i.symbol(ws, &self.interner)
     }
 
-    /// Plan S 2's Stage-2 gate, as data: what is NOT closed about this graph.
+    /// What is not closed about this graph.
     ///
     /// Closure is not "every edge target is an instance" -- `record` inserts the
     /// target, so that holds by construction and would assert nothing. The
@@ -1091,7 +1060,7 @@ pub struct Closure {
     pub uninstantiated_roots: BTreeSet<String>,
     /// LOGICAL symbol -> the distinct instance identities encoding to it. Any
     /// entry means the encoder is not injective. The FINAL emitted spelling is
-    /// an artifact-ABI-plan property (plan S 0h), asserted per artifact view.
+    /// an artifact ABI property, asserted per artifact view.
     ///
     /// **The corpus zero here is weak evidence and must not be read as strong.**
     /// Replacing the encoder with the AMBIGUOUS display rendering leaves the
@@ -1118,9 +1087,7 @@ impl Closure {
 ///
 /// The distinction is the classification itself, not a label: an
 /// [`Unresolved`] is data the walk could not complete, a [`Rejection`] is a
-/// construction the model refuses (plan S 0h) and becomes a compile error at
-/// the Stage-3 cutover. Storing only a reason string forced Stage 3 to
-/// reconstruct which one it was by parsing that string.
+/// construction the model refuses and reports as a compile error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlwaysEmittedOutcome {
     Unresolved(&'static str),
@@ -1141,7 +1108,7 @@ impl AlwaysEmittedOutcome {
 
 /// One call site in an always-emitted body whose instantiation failed. Carries
 /// what a [`Rejection`] or an [`Unresolved`] at the same failure would: the
-/// classification, and the span the Stage-3 diagnostic points at.
+/// classification, and the span the diagnostic points at.
 #[derive(Debug, Clone)]
 pub struct AlwaysEmittedFailure {
     pub outcome: AlwaysEmittedOutcome,
@@ -1159,8 +1126,7 @@ pub struct AlwaysEmittedHole {
 
 /// Why one name has no concrete instance covering its obligation.
 ///
-/// The two causes are genuinely different obligations and were previously one
-/// unlabelled set of names:
+/// The two causes are different obligations:
 ///
 /// - a generic EMISSION ROOT is a body production emits regardless of any call
 ///   (`@nomangle`, `extern`, `@test`/`@sim`, a decorator root), so its
@@ -1171,11 +1137,9 @@ pub struct AlwaysEmittedHole {
 ///   merely has no `from` instance to be filed against. Its reason is the same
 ///   `Fail::reason` an instantiated body's call would carry.
 ///
-/// `instances` is the finding the note asked for: a root can be listed here and
-/// still have concrete instances from OTHER call sites. That does not close the
-/// hole -- the bare-name obligation survives -- but it separates "no concrete
-/// body of this function exists at all" from "the Rock calls are covered and
-/// only the opaque-caller entry is not".
+/// A root can be listed here and have concrete instances from other call sites.
+/// The bare-name obligation survives, distinguishing "no concrete body exists"
+/// from "Rock calls are covered but the opaque-caller entry is not".
 #[derive(Debug, Default, Clone)]
 pub struct RootHole {
     /// A generic function that is an emission root: production emits its body
@@ -1219,7 +1183,7 @@ pub fn is_spanless(span: &Span) -> bool {
 ///
 /// `roots` is supplied by the caller so this shares production's root
 /// discovery instead of re-deriving it. `perturb` reverses the seeding order;
-/// the manifest must be identical either way (plan S 20g.4).
+/// the manifest must be identical either way.
 pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGraph {
     build_in(ws, roots, perturb, std::sync::Arc::new(MonoInterner::new()))
 }
@@ -1358,7 +1322,7 @@ pub fn build_in(
 
 /// Production's roots as the graph keys them: bone's collapsed representative,
 /// deduplicated and ordered. `perturb` reverses the seeding order; the graph
-/// must mean the same thing either way (plan S 20g.4).
+/// must mean the same thing either way.
 fn canonical_roots(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> Vec<FuncRef> {
     let mut roots: Vec<FuncRef> = roots
         .into_iter()
@@ -1842,13 +1806,13 @@ impl InstanceGraph {
         stats.mono_write_acqs = mono_after.write_acqs.saturating_sub(mono_before.write_acqs);
         if timing_enabled {
             stats.frontier_count = frontier_sizes.len();
-            stats.frontier_owner_p50 = percentile_usize(&mut frontier_sizes, 50);
-            stats.frontier_owner_p95 = percentile_usize(&mut frontier_sizes, 95);
+            stats.frontier_owner_p50 = percentile(&mut frontier_sizes, 50);
+            stats.frontier_owner_p95 = percentile(&mut frontier_sizes, 95);
             stats.frontier_owner_max = frontier_sizes.iter().copied().max().unwrap_or(0);
             stats.singleton_frontiers = frontier_sizes.iter().filter(|n| **n == 1).count();
             stats.expansion_ns_total = expansion_times.iter().sum();
-            stats.expansion_ns_p50 = percentile_u64(&mut expansion_times, 50);
-            stats.expansion_ns_p95 = percentile_u64(&mut expansion_times, 95);
+            stats.expansion_ns_p50 = percentile(&mut expansion_times, 50);
+            stats.expansion_ns_p95 = percentile(&mut expansion_times, 95);
             stats.expansion_ns_max = expansion_times.iter().copied().max().unwrap_or(0);
             stats.index_subst_unique = self.index.subst.len();
             stats.index_trees_unique = self.index.trees.len();
@@ -2165,16 +2129,8 @@ fn expand_sites(
                 &SiteDomain::Own,
                 None,
             );
-            // An always-emitted body's struct literals omit fields too --
-            // `global POLLER: CoroutinePoller = CoroutinePoller {}` reaches
-            // `coroutines: Arena<CoState> = arena_new()` exactly as an
-            // ordinary instance's literal would. `walk_struct_default_edges`
-            // was instance-only, so a struct default reached ONLY from a
-            // global initializer or a decorator body was invisible to the
-            // graph while emission (which lowers the same literal) still
-            // built and emitted it -- found by the Phase-2 population audit,
-            // identically on every corpus project (`arena_new<CoState>` and
-            // its own `__arena_new_owned<int>` call).
+            // Global initializers and decorator bodies can reach struct field
+            // defaults without an enclosing instance.
             if let Some(body) = body {
                 walk_struct_default_edges(
                     &mut w,
@@ -4670,7 +4626,7 @@ fn record_call(
     Some(to)
 }
 
-/// Plan S 7's rejection: a recursive edge must preserve its instance arguments.
+/// A recursive edge must preserve its instance arguments.
 ///
 /// Polymorphic recursion does NOT appear as a cycle over instances: every
 /// instance on the chain is distinct, which is exactly why it diverges. It
@@ -5439,7 +5395,7 @@ fn generic_parameter_is_observable(
 /// the coerced-argument `iter` (`IterWitness::generics`) all take this route.
 ///
 /// Such a call has no call expr, so it can never appear in
-/// `call_generic_bindings` (plan S 12: resolve the witness at instantiation).
+/// `call_generic_bindings`; resolve the witness at instantiation instead.
 /// Reading the callee's DECLARED generics and looking each up here is the same
 /// route `spec_key_from_next_generics` takes -- a shape comes from a
 /// declaration, never from the body's own inference.
@@ -5736,12 +5692,6 @@ pub fn serves(decl: bone_core::hir::FnBackend, target: bone_core::hir::FnBackend
     decl == FnBackend::Any || target == FnBackend::Any || decl == target
 }
 
-/// Classify every reached callee that is a BOUNDARY.
-///
-/// An instance is kept for a boundary as well as a Rock body -- Stage 2 splits
-/// them (plan S 9: one `InstanceId` OR one `BoundaryId`), and keeping both here
-/// makes the split's cost countable instead of changing the round-1 numbers
-/// underneath it.
 /// The boundary class of one declaration, or `None` if it has a Rock body the
 /// walk enters. The ONE classifier: [`classify_boundaries`] and
 /// [`InstanceGraph::closure`] both ask it, so "is this a boundary" cannot be
