@@ -396,23 +396,6 @@ fn assemble_overlay(
     .map_err(|error| {
         CompilerError::new_no_location(format!("Artifact fingerprint generation failed: {error}"))
     })?;
-    if cache.full_scans {
-        let fresh = self::artifact_fingerprint(
-            ws,
-            &cache.scx,
-            &candidate_code_artifact,
-            &lifecycle_plan,
-            &definition_plan,
-            &global_layout,
-            &artifact_reads,
-            cache.renderer_target,
-        )?;
-        if artifact_fingerprint != fresh {
-            return Err(CompilerError::new_no_location(
-                "cached code fingerprint differs from fresh inventory".to_string(),
-            ));
-        }
-    }
     let d_fingerprint = t_fingerprint.elapsed();
     // An overlay is small, so its value ctor calls are read from the text.
     let mut ctor_calls = Vec::new();

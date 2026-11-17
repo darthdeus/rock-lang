@@ -173,8 +173,8 @@ pub(super) fn sim_glue_roots(ws: &Workspace) -> Vec<FuncRef> {
 /// It lives in the DRIVER, not in `skull_graph`: which declarations a build
 /// roots from is a production decision (project layout, decorators, `@sim`,
 /// `@test`), and the graph takes roots as an INPUT precisely so it cannot make
-/// that decision itself. See [`all_roots`], which adds the generated-glue
-/// obligations on top.
+/// that decision itself. The full build adds generated-glue obligations
+/// separately and retains the resulting root sources for body edits.
 pub fn emission_roots(ws: &Workspace, project_root: Option<&str>) -> Vec<FuncRef> {
     let decorators = DecoratorTable::collect(ws);
     let program = is_program_target(ws, project_root);
@@ -299,37 +299,9 @@ fn is_program_target(ws: &Workspace, project_root: Option<&str>) -> bool {
         })
 }
 
-/// The roots one Lua build is taken over: the declared emission roots plus the
-/// obligations GENERATED GLUE TEXT carries.
-///
-/// `sim_registration_lines` writes `register_sim("<wire>", <mangled>)` and
-/// `shader_registration_lines` writes a program whose stage entries and GLSL
-/// helpers are named by its graph-owned view. Neither is a Rock call site, so
-/// no amount of ordinary graph reachability can find them -- they are an
-/// artifact ROOT (plan S 11: "the target may change roots"), which is what
-/// `ArtifactRequest::roots` is for. Emitting the generated call while the
-/// definition is pruned is a nil call at load, which is exactly what happened.
-///
-/// The shader collection is therefore built BEFORE the graph, not beside the
-/// assembly that renders it.
-pub(super) fn all_roots(
-    ws: &Workspace,
-    project_root: Option<&str>,
-    shader_roots: &[FuncRef],
-) -> Vec<FuncRef> {
-    let mut roots = emission_roots(ws, project_root);
-    let mut seen: FxHashSet<FuncRef> = roots.iter().copied().collect();
-    let mut glue: Vec<FuncRef> = sim_glue_roots(ws);
-    glue.extend(shader_roots.iter().copied());
-    // Deterministic: `dependencies` is a hash set, so its iteration order is not.
-    glue.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
-    roots.extend(glue.into_iter().filter(|f| seen.insert(*f)));
-    roots
-}
-
 /// Compose the retained root set from facts cached by full construction and
-/// explicit body-local shader deltas. Unlike [`all_roots`], this never asks the
-/// workspace for its declarations or sim functions.
+/// explicit body-local shader deltas. This never asks the workspace for its
+/// declarations or sim functions.
 pub(super) fn cached_roots(
     interface_roots: &[FuncRef],
     sim_roots: &[FuncRef],

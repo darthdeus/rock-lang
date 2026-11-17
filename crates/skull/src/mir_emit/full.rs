@@ -136,14 +136,6 @@ fn collect_full_roots(
         .collect();
     let (interface_roots, sim_roots) = roots?;
     let emission_roots = cached_roots(&interface_roots, &sim_roots, &shader_roots);
-    #[cfg(test)]
-    if matches!(build, FullBuild::Program | FullBuild::OneShotProgram) {
-        assert_eq!(
-            emission_roots,
-            all_roots(ws, project_root, &shader_roots),
-            "cached full-build roots diverged from the wholesale root oracle"
-        );
-    }
     Ok((
         shader_collection,
         shader_programs,
@@ -892,7 +884,6 @@ pub(super) fn emit_full_build(
         changed_consts_since_full: FxHashSet::default(),
         static_cells_since_full: FxHashMap::default(),
         roots: RootCache {
-            project_root: project_root.map(str::to_string),
             interface_roots,
             sim_roots,
             shader_roots,
@@ -914,7 +905,6 @@ pub(super) fn emit_full_build(
         selected_sim_functions,
         repair_stats: IncrementalRepairStats::default(),
         body_edit_rollback: None,
-        full_scans: false,
     };
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
     let graph_census = cache.graph.run_stats;

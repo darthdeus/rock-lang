@@ -64,63 +64,32 @@ impl<'a> ArtifactMappings<'a> {
     }
 }
 
-/// What an artifact SPELLS an instance.
-///
-/// Each artifact owns its emitted spelling. The default planner is
-/// target-neutral; a renaming test planner checks that this is optional.
-pub trait SymbolPlanner: Sync {
-    fn symbol(&self, ws: &Workspace, g: &InstanceGraph, i: &Instance, realized: Realized)
-        -> String;
-    fn describe(&self) -> &'static str;
+#[derive(Clone, Copy)]
+pub enum SymbolPlanner {
+    Logical,
+    Realized,
 }
 
-/// The default: today's logical encoder (`spec_fn_name`), which is
-/// target-neutral. Injective over the instances it is given, which is exactly
-/// what it CANNOT answer for an artifact holding two declarations that encode
-/// alike -- hence the per-artifact collision check.
-pub(crate) struct LogicalSymbols;
-
-impl SymbolPlanner for LogicalSymbols {
+impl SymbolPlanner {
     fn symbol(
         &self,
         ws: &Workspace,
-        g: &InstanceGraph,
-        i: &Instance,
-        _realized: Realized,
-    ) -> String {
-        g.logical_symbol(ws, i)
-    }
-    fn describe(&self) -> &'static str {
-        "logical"
-    }
-}
-
-/// Spell an instance through the declaration this artifact selected. This is
-/// the production choice for backends whose sibling declarations own different
-/// publication conventions (`@nomangle` is the visible case).
-pub struct RealizedSymbols;
-
-impl SymbolPlanner for RealizedSymbols {
-    fn symbol(
-        &self,
-        ws: &Workspace,
-        g: &InstanceGraph,
-        i: &Instance,
+        graph: &InstanceGraph,
+        instance: &Instance,
         realized: Realized,
     ) -> String {
-        Instance {
-            func: realized.decl,
-            args: i.args.clone(),
+        match self {
+            Self::Logical => graph.logical_symbol(ws, instance),
+            Self::Realized => Instance {
+                func: realized.decl,
+                args: instance.args.clone(),
+            }
+            .symbol(ws, graph.interner()),
         }
-        .symbol(ws, g.interner())
-    }
-
-    fn describe(&self) -> &'static str {
-        "realized-declaration"
     }
 }
 
-pub static REALIZED_SYMBOLS: RealizedSymbols = RealizedSymbols;
+pub static REALIZED_SYMBOLS: SymbolPlanner = SymbolPlanner::Realized;
 
 /// Everything one artifact view is taken through.
 pub struct ArtifactRequest<'a> {
@@ -131,7 +100,7 @@ pub struct ArtifactRequest<'a> {
     pub mappings: ArtifactMappings<'a>,
     /// The artifact's emission roots, never re-derived from the graph's contents.
     pub roots: &'a [FuncRef],
-    pub symbols: &'a dyn SymbolPlanner,
+    pub symbols: &'a SymbolPlanner,
     scalar_context: Option<&'a skull_mir::lower::ScalarCtx>,
 }
 
@@ -146,7 +115,7 @@ impl<'a> ArtifactRequest<'a> {
             },
             spec,
             roots,
-            symbols: &LogicalSymbols,
+            symbols: &SymbolPlanner::Logical,
             scalar_context: None,
         }
     }
@@ -188,7 +157,7 @@ impl<'a> ArtifactRequest<'a> {
         self
     }
 
-    pub fn with_symbols(mut self, p: &'a dyn SymbolPlanner) -> Self {
+    pub fn with_symbols(mut self, p: &'a SymbolPlanner) -> Self {
         self.symbols = p;
         self
     }
@@ -1362,31 +1331,6 @@ impl ArtifactView {
                 .unwrap_or_else(|position| position);
             self.symbol_collisions.insert(position, row);
         }
-    }
-
-    /// Compare every realized output except the target description itself.
-    pub fn same_cpu_decisions(&self, other: &Self) -> bool {
-        self.roots == other.roots
-            && self.declared_roots == other.declared_roots
-            && self.fn_value_targets == other.fn_value_targets
-            && self.instances == other.instances
-            && self.boundaries == other.boundaries
-            && self.realization == other.realization
-            && self.excluded == other.excluded
-            && self.severed == other.severed
-            && self.sites_walked == other.sites_walked
-            && self.symbols == other.symbols
-            && self.symbol_collisions == other.symbol_collisions
-            && self.inline_deps == other.inline_deps
-            && self.unresolved_inline_deps == other.unresolved_inline_deps
-            && self.opaque_boundary_roots == other.opaque_boundary_roots
-            && self.publisher_lanes == other.publisher_lanes
-            && self.missing_substitutions == other.missing_substitutions
-            && self.shared_instances == other.shared_instances
-            && self.deferred == other.deferred
-            && self.publications == other.publications
-            && self.unrepresented_publications == other.unrepresented_publications
-            && self.publication_collisions == other.publication_collisions
     }
 
     /// Every retained instance -- Rock bodies AND boundaries. The positive side

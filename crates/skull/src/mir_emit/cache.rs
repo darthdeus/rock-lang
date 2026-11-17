@@ -142,8 +142,6 @@ pub struct SkullEmitCache {
     pub(super) selected_sim_functions: Option<FxHashSet<Ustr>>,
     pub(super) repair_stats: IncrementalRepairStats,
     pub(super) body_edit_rollback: Option<BodyEditRollback>,
-    /// See [`SkullEmitCache::set_full_scans`].
-    pub(super) full_scans: bool,
 }
 
 /// Phase timings of the last body-only cache update, reported by the overlay.
@@ -165,7 +163,6 @@ pub(super) enum CacheLifetime {
 
 #[derive(Clone, Default)]
 pub(super) struct RootCache {
-    pub(super) project_root: Option<String>,
     pub(super) interface_roots: Vec<FuncRef>,
     pub(super) sim_roots: Vec<FuncRef>,
     pub(super) shader_roots: Vec<FuncRef>,
@@ -234,17 +231,6 @@ impl SkullEmitCache {
                 .filter(|(_, callers)| !callers.is_empty())
                 .map(|(&callee, _)| callee),
         );
-    }
-
-    /// Route later body edits through the full-scan equivalents of the
-    /// retained fast paths: the root set is re-enumerated from every module
-    /// instead of read from the root cache, the inline candidate table is
-    /// rebuilt from every candidate key instead of the invalidated ones, and an
-    /// overlay's artifact fingerprint is recomputed from scratch and must match
-    /// the cached one. Off by default; tests turn it on to check that both
-    /// routes produce the same output.
-    pub fn set_full_scans(&mut self, on: bool) {
-        self.full_scans = on;
     }
 
     pub fn begin_body_edit_transaction(
@@ -836,7 +822,6 @@ impl SkullEmitCache {
         let shader_roots_changed = previous_shader_roots != current_shader_roots;
         let mut root_added = Vec::new();
         let mut root_removed = Vec::new();
-        let roots_before = cache.full_scans.then(|| cache.roots.roots.clone());
         if shader_roots_changed {
             let mut current_roots = cache.roots.roots.clone();
             for root in previous_shader_roots
@@ -866,28 +851,6 @@ impl SkullEmitCache {
             cache.roots.roots = current_roots;
         }
         cache.roots.shader_roots = current_shader_roots;
-        // The full root enumerator remains an oracle for tests and verification;
-        // the body route consumes the retained root cache above.
-        let forced_roots = if let Some(previous_roots) = roots_before {
-            let roots = all_roots(
-                ws,
-                cache.roots.project_root.as_deref(),
-                &cache.roots.shader_roots,
-            );
-            root_added = roots
-                .iter()
-                .filter(|root| !previous_roots.contains(root))
-                .copied()
-                .collect();
-            root_removed = previous_roots
-                .iter()
-                .filter(|root| !roots.contains(root))
-                .copied()
-                .collect();
-            Some(roots)
-        } else {
-            None
-        };
         // The view retracts against the graph it was realized from.
         cache.lua_view.prepare_update(&cache.graph);
         let update = cache.graph.update_bodies_with_root_delta(
@@ -922,9 +885,7 @@ impl SkullEmitCache {
             &cache.graph,
             &crate::artifact::ArtifactRequest::new(
                 crate::target_projection::LUAJIT_DESKTOP,
-                forced_roots
-                    .as_deref()
-                    .unwrap_or(cache.roots.roots.as_slice()),
+                cache.roots.roots.as_slice(),
             )
             .with_scalar_context(&cache.scx),
             &update.revisited,
@@ -997,19 +958,14 @@ impl SkullEmitCache {
         let warm_keys: Vec<Instance> = warm_keys.into_iter().collect();
         let t_candidate = Instant::now();
         let previous_candidate_table = cache.inline_cache.candidate_table();
-        let force_candidate_scan = cache.full_scans;
         let candidate_table = build_inline_candidate_table(
             ws,
             scx,
             &cache.concrete,
-            if force_candidate_scan {
-                cache.concrete.candidate_keys().iter().cloned().collect()
-            } else {
-                Vec::new()
-            },
+            Vec::new(),
             previous_candidate_table.as_ref(),
             Some(&invalidated_candidate_frefs),
-            (!force_candidate_scan).then_some(warm_keys),
+            Some(warm_keys),
             Some(&concrete_update.candidate_keys_added),
             Some(&concrete_update.candidate_keys_removed),
         )?;

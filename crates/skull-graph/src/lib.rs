@@ -27,4 +27,3 @@ mod inline_js;
 pub mod instance_graph;
 pub mod shader;
 pub mod target_projection;
-mod wave;
