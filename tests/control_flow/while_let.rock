@@ -44,15 +44,15 @@ enum E { A(int, int), B }
 
 @test(output = "5 6\n10")
 fn test_while_let_multi_arg() {
-    let e: E = E::A(5, 6);
+    let e: E = E::A(5, 6)
     while let A(x, y) = e {
-        print("{x} {y}");
-        e = E::B;
+        print("{x} {y}")
+        e = E::B
     }
-    let w: E = E::A(10, 20);
+    let w: E = E::A(10, 20)
     while let A(x, _) = w {
-        print("{x}");
-        w = E::B;
+        print("{x}")
+        w = E::B
     }
 }
 
@@ -129,4 +129,14 @@ fn test_while_let_break_inside() {
         if v == 2 { break }
     }
     print("stopped at {last}")
+}
+
+newtype Id(int)
+
+@test(output = "4")
+fn while_let_newtype_pattern() {
+    let xs = [Id(4)]
+    while let Id(n) = xs.pop() {
+        print(n)
+    }
 }

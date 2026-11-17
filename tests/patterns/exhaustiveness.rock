@@ -2,117 +2,45 @@
 // arms with and without a wildcard, then enum and generic enum matches
 // without one.
 
-@test
-fn test_simple_range_pattern() {
-    // A wildcard makes any integer match exhaustive.
-    let small = 5
-    let big = 42
-    assert_eq(match small { 1..=10 => "small", _ => "other" }, "small")
-    assert_eq(match big { 1..=10 => "small", _ => "other" }, "other")
-}
 
 @test
 fn test_exhaustive_age_ranges() {
     let age = 25
-    
+
     let category = match age {
         0..=17 => "minor"
         18..=64 => "adult"
         65.. => "senior"
         _ => "invalid"
     }
-    
+
     assert_eq(category, "adult")
 }
 
 @test
-fn test_mixed_literal_and_range() {
-    let number = 5
-    
-    let description = match number {
-        0 => "zero"
-        1..=10 => "small"
-        11..=100 => "medium"
-        _ => "other"
+fn test_literal_and_range_coverage() {
+    // One exhaustive mix of literals, inclusive, exclusive and open ranges,
+    // with every arm exercised (the old suite proved each shape compiled and
+    // then checked a single input apiece).
+    fn describe(x: int) -> string {
+        match x {
+            ..=-10 => "very_negative",
+            -9..=-1 => "negative",
+            0 => "zero",
+            1..5 => "very_small",
+            5..=10 => "medium",
+            11..=100 => "large",
+            101.. => "huge",
+        }
     }
-    
-    assert_eq(description, "small")
-}
-
-@test
-fn test_literal_and_range_mix() {
-    let x = 0
-    
-    // Mix of literals and ranges should work
-    let result = match x {
-        ..=-1 => "negative",
-        0 => "zero",
-        1..=5 => "small",
-        6.. => "large"  
-    }
-    
-    assert_eq(result, "zero")
-}
-
-@test
-fn test_adjacent_ranges() {
-    let score = 85
-    
-    // Adjacent ranges with no gaps
-    let grade = match score {
-        ..=-1 => "Invalid_negative",
-        0..=59 => "F",
-        60..=69 => "D", 
-        70..=79 => "C",
-        80..=89 => "B",
-        90..=100 => "A",
-        101.. => "Invalid_high"
-    }
-    
-    assert_eq(grade, "B")
-}
-
-@test
-fn test_inclusive_vs_exclusive() {
-    let num = 10
-    
-    // Test both inclusive and exclusive ranges
-    let category = match num {
-        ..=-1 => "negative",
-        0..5 => "very_small",
-        5..=10 => "medium",
-        11.. => "large"
-    }
-    
-    assert_eq(category, "medium")
-}
-
-@test 
-fn test_exhaustive_integer_coverage() {
-    let x = 5
-    
-    // This should be exhaustive - covers all integers
-    let result = match x {
-        ..=0 => "negative_or_zero",
-        1..=10 => "small_positive", 
-        11.. => "large_positive"
-    }
-    
-    assert_eq(result, "small_positive")
-}
-
-@test
-fn test_negative_ranges_exhaustive() {
-    let x = -5
-
-    let result = match x {
-        ..=-10 => "very_negative",
-        -9..=-1 => "negative",
-        0 => "zero",
-        1.. => "positive"
-    }
-
-    assert_eq(result, "negative")
+    assert_eq(describe(-10), "very_negative")
+    assert_eq(describe(-5), "negative")
+    assert_eq(describe(0), "zero")
+    assert_eq(describe(4), "very_small")
+    assert_eq(describe(5), "medium")
+    assert_eq(describe(10), "medium")
+    assert_eq(describe(85), "large")
+    assert_eq(describe(101), "huge")
 }
 
 @test
@@ -152,11 +80,11 @@ fn test_guarded_arm_with_binding_catch_all() {
     assert_eq(result, "big")
 }
 
-enum Status { 
-    Pending, 
-    Running, 
-    Complete, 
-    Failed 
+enum Status {
+    Pending,
+    Running,
+    Complete,
+    Failed
 }
 
 enum Option<T> {
@@ -167,27 +95,27 @@ enum Option<T> {
 @test
 fn test_exhaustive_enum_matching() {
     let status = Status::Pending
-    
+
     // This should compile without wildcards
     let message = match status {
         Status::Pending => "waiting",
-        Status::Running => "in progress", 
+        Status::Running => "in progress",
         Status::Complete => "done",
         Status::Failed => "error"
     }
-    
+
     assert_eq(message, "waiting")
 }
 
-@test  
+@test
 fn test_exhaustive_generic_enum() {
     let result: Option<int> = Option::Some(42)
-    
+
     // This should compile without wildcards for generic enums too
     let value = match result {
         Option::None => 0,
         Option::Some(n) => n
     }
-    
+
     assert_eq(value, 42)
 }

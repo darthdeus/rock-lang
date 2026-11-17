@@ -50,11 +50,6 @@ fn let_newtype_in_tuple() {
     print(a + b)
 }
 
-@test(output = "5")
-fn let_tuple_with_wildcard() {
-    let (a, _) = (5, 99)
-    print(a)
-}
 
 @test(output = "11")
 fn let_struct_in_tuple() {
@@ -91,26 +86,47 @@ fn for_wildcard() {
     print(n)
 }
 
-@test(output = "9")
-fn match_newtype_pattern() {
-    let v = Id(9)
-    let n = match v {
-        Id(n) => n,
-    }
-    print(n)
-}
-
-@test(output = "4")
-fn while_let_newtype_pattern() {
-    let xs = [Id(4)]
-    while let Id(n) = xs.pop() {
-        print(n)
-    }
-}
 
 @test(output = "3")
 fn annotated_tuple_let() {
     // The annotation describes the whole value and is checked against it.
     let (a, b): (int, int) = (1, 2)
     print(a + b)
+}
+
+enum Single {
+    Only(int),
+}
+
+@test(output = "7")
+fn single_variant_enum_is_irrefutable() {
+    // One variant covers the whole enum, so no `else` is needed.
+    let Single::Only(n) = Single::Only(7)
+    print(n)
+}
+
+@test(output = "0 3")
+fn for_enumerate_with_struct_pattern() {
+    let ps = [Point { x: 1, y: 2 }]
+    for (i, Point { x, y }) in enumerate(ps) {
+        print("{i} {x + y}")
+    }
+}
+
+@test(output = "a 3")
+fn for_map_with_struct_value_pattern() {
+    let m = map_new<string, Point>()
+    m.insert("a", Point { x: 1, y: 2 })
+    for (k, Point { x, y }) in m {
+        print("{k} {x + y}")
+    }
+}
+
+@test(output = "3")
+fn for_arena_pair_with_struct_pattern() {
+    let m: Arena<Point> = arena_new()
+    m.insert(Point { x: 1, y: 2 })
+    for (e, Point { x, y }) in m {
+        print(x + y)
+    }
 }

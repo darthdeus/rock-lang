@@ -2,6 +2,7 @@
 //! Tags: arena, tuples, type_mismatches
 
 //=== TEST CASE: tuple_first_on_non_tuple_Generic ===
+//! expect: Mob
 struct Mob {
     health: int
 }

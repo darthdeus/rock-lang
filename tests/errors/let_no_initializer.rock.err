@@ -2,6 +2,7 @@
 //! Tags: let, bindings
 
 //=== TEST CASE: let_no_init_simple_Generic ===
+//! expect: let without value is not supported
 // Uninitialized `let x: T` is disallowed — declare and assign in one
 // step (`let x = <value>`). Previously allowed (pre-declare a slot,
 // assign later); removed.
@@ -13,6 +14,7 @@ fn test() -> int {
 fn main() { let _ = test() }
 
 //=== TEST CASE: let_no_init_tuple_Generic ===
+//! expect: let without value is not supported
 fn test() {
     let (x, y): (int, int)   // ERROR: `let` binding requires an initializer
     x = 1
@@ -22,6 +24,7 @@ fn test() {
 fn main() { test() }
 
 //=== TEST CASE: let_no_init_value_struct_Generic ===
+//! expect: let without value is not supported
 value V2i { x: int, y: int }
 
 fn test() {

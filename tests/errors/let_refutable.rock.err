@@ -42,3 +42,40 @@ fn main() {
     let (a, b): (int, string) = (1, 2)
     print(a)
 }
+
+//=== TEST CASE: struct_field_literal_Refutable ===
+//! expect: can fail
+struct Point { x: int, y: int }
+fn main() {
+    let p = Point { x: 0, y: 1 }
+    let Point { x: 0, y } = p
+    print(y)
+}
+
+//=== TEST CASE: newtype_literal_Refutable ===
+//! expect: can fail
+newtype Id(int)
+fn main() {
+    let Id(0) = Id(1)
+}
+
+//=== TEST CASE: or_pattern_in_let_Parse ===
+//! expect: unexpected token
+enum Opt { None, Some(int) }
+fn main() {
+    let v = Opt::Some(1)
+    let Opt::Some(x) | Opt::None = v else {
+        return
+    }
+}
+
+//=== TEST CASE: guard_in_let_Parse ===
+//! expect: expected
+enum Opt { None, Some(int) }
+fn main() {
+    let v = Opt::Some(1)
+    let Opt::Some(x) if x > 0 = v else {
+        return
+    }
+    print(x)
+}

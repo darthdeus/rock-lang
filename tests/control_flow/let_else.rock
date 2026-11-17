@@ -191,3 +191,93 @@ fn bare_variant_tag_let_else() {
     print(go_only(Signal::Go))
     print(go_only(Signal::Stop))
 }
+
+fn circle_of(s: Shape?) -> int {
+    // Nullable scrutinee AND a refutable inner pattern: null and a wrong
+    // variant both take the else path.
+    let Shape::Circle(r) = s else {
+        return -1
+    }
+    r
+}
+
+@test(output = "5\n-1\n-1")
+fn nullable_enum_variant_pattern() {
+    print(circle_of(Shape::Circle(5)))
+    print(circle_of(Shape::Square(1, 2)))
+    let none: Shape? = null
+    print(circle_of(none))
+}
+
+@test(output = "1\nstopped")
+fn break_in_else() {
+    let xs = [Shape::Circle(1), Shape::Square(2, 2), Shape::Circle(3)]
+    for s in xs {
+        let Shape::Circle(r) = s else {
+            break
+        }
+        print(r)
+    }
+    print("stopped")
+}
+
+enum Msg {
+    Quit,
+    Move { x: int, y: int, label: string },
+}
+
+fn x_of_move(m: Msg) -> int {
+    // Record-variant pattern with a rest in let-else.
+    let Msg::Move { x, .. } = m else {
+        return -1
+    }
+    x
+}
+
+@test(output = "4\n-1")
+fn record_rest_pattern() {
+    print(x_of_move(Msg::Move { x: 4, y: 5, label: "m" }))
+    print(x_of_move(Msg::Quit))
+}
+
+fn exactly_five(n: int) -> int {
+    let 5 = n else {
+        return 0
+    }
+    1
+}
+
+fn small(n: int) -> int {
+    let 1..=9 = n else {
+        return 0
+    }
+    1
+}
+
+@test(output = "1\n0\n1\n0")
+fn literal_and_range_patterns() {
+    print(exactly_five(5))
+    print(exactly_five(6))
+    print(small(3))
+    print(small(10))
+}
+
+co fn square_sides(s: Shape) -> Coroutine<int> {
+    // Bindings from a let-else stay live across several yields.
+    let Shape::Square(w, h) = s else {
+        return
+    }
+    yield w
+    yield h
+    yield w + h
+}
+
+@test(output = "2\n3\n5\n-1")
+fn let_else_bindings_across_yields() {
+    let c = square_sides(Shape::Square(2, 3))
+    while let v = c.resume() {
+        print(v)
+    }
+    let d = square_sides(Shape::Circle(1))
+    print(d.resume() ?? -1)
+}

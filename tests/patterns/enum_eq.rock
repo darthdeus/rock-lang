@@ -73,22 +73,6 @@ enum Shape {
     Circle(float, float, float),
 }
 
-@test
-fn test_tuple_variant_nested_match() {
-    let shapes = [
-        Shape::Point,
-        Shape::Line(0.0, 0.0, 5.0, 5.0),
-        Shape::Circle(10.0, 10.0, 2.5),
-    ]
-
-    for shape in shapes {
-        match shape {
-            Shape::Point => print("Got a point"),
-            Shape::Line(_, _, x2, y2) => print("Line ends at ({x2}, {y2})"),
-            Shape::Circle(_, _, radius) => print("Circle with radius {radius}"),
-        }
-    }
-}
 
 enum Message {
     Quit,

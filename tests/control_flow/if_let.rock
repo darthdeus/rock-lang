@@ -374,3 +374,26 @@ fn test_if_let_value_is_block_expr() {
         assert(false, "block-expr value should have bound")
     }
 }
+
+enum Shape {
+    Circle(int),
+    Square(int, int),
+}
+
+@test(output = "20\nmiss\nmiss\nmiss")
+fn chain_mixes_enum_pattern_condition_and_nullable() {
+    // One chain: an enum-variant pattern, a boolean guard on its binding,
+    // and a nullable binding -- every clause must hold.
+    fn probe(s: Shape, m: Map<int, int>) -> string {
+        if let Shape::Circle(r) = s && r > 0 && let v = m.get(r) {
+            return "{v}"
+        }
+        return "miss"
+    }
+    let m = map_new<int, int>()
+    m.insert(5, 20)
+    print(probe(Shape::Circle(5), m))
+    print(probe(Shape::Circle(1), m))
+    print(probe(Shape::Circle(-5), m))
+    print(probe(Shape::Square(1, 2), m))
+}

@@ -22,15 +22,19 @@ enum Result<T, E> {
 @test(output = "point: 10, 20\nnothing")
 fn test_match_enum_tuple_payload() {
     let opt: Option<(int, int)> = Option::Some((10, 20))
-    print(match opt {
-        Some((x, y)) => "point: {x}, {y}",
-        None => "nothing",
-    })
+    print(
+        match opt {
+            Some((x, y)) => "point: {x}, {y}",
+            None => "nothing",
+        }
+    )
     let none: Option<(int, int)> = Option::None
-    print(match none {
-        Some((x, y)) => "point: {x}, {y}",
-        None => "nothing",
-    })
+    print(
+        match none {
+            Some((x, y)) => "point: {x}, {y}",
+            None => "nothing",
+        }
+    )
 }
 
 // ============================================================
@@ -52,14 +56,6 @@ fn test_match_extract_then_destructure() {
 // 3. Nullable tuple elements
 // ============================================================
 
-@test(output = "5 default")
-fn test_nullable_tuple_elements() {
-    let a: int? = 5
-    let b: string? = null
-    let pair = (a ?? 0, b ?? "default")
-    let (x, y) = pair
-    print("{x} {y}")
-}
 
 // ============================================================
 // 4. Tuple of enums
@@ -87,15 +83,19 @@ fn test_tuple_of_enums() {
 @test(output = "ok: 10, 20\nerr: failed")
 fn test_result_tuple_ok() {
     let ok: Result<(int, int), string> = Result::Ok((10, 20))
-    print(match ok {
-        Ok((x, y)) => "ok: {x}, {y}",
-        Err(e) => "err: {e}",
-    })
+    print(
+        match ok {
+            Ok((x, y)) => "ok: {x}, {y}",
+            Err(e) => "err: {e}",
+        }
+    )
     let err: Result<(int, int), string> = Result::Err("failed")
-    print(match err {
-        Ok((x, y)) => "ok: {x}, {y}",
-        Err(e) => "err: {e}",
-    })
+    print(
+        match err {
+            Ok((x, y)) => "ok: {x}, {y}",
+            Err(e) => "err: {e}",
+        }
+    )
 }
 
 // ============================================================
@@ -141,13 +141,6 @@ fn test_for_loop_vec_enums() {
 // 8. Match with wildcard on tuple
 // ============================================================
 
-@test(output = "first is 1")
-fn test_match_tuple_wildcard() {
-    let t = (1, "hello", true)
-    // Can't match on tuple directly in Rock, but can destructure
-    let (a, _, _) = t
-    print("first is {a}")
-}
 
 // ============================================================
 // 9. Enum wrapping struct

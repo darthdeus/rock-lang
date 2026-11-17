@@ -92,8 +92,7 @@ fn test_nested_newtype() {
     let inner = w.0
     print(inner.0)
     print(w.0.0)
-    let Wrapper(unwrapped) = w
-    let UserId(id) = unwrapped
+    let Wrapper(UserId(id)) = w
     print(id)
 }
 

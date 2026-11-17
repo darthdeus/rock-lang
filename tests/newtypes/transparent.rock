@@ -27,12 +27,39 @@ fn test_newtype_construct_and_unwrap_are_identity() {
     print(host_raw_eq(id.0, 7))
 }
 
-// Pattern unwrap still binds the inner value.
-@test(output = "42")
-fn test_newtype_pattern_unwrap() {
-    let id = Uid(42)
-    let Uid(v) = id
-    print(v)
+// Newtype patterns work in match position too, binding the inner value.
+@test(output = "9")
+fn match_newtype_pattern() {
+    let v = Uid(9)
+    let n = match v {
+        Uid(n) => n,
+    }
+    print(n)
+}
+
+value TCell { hp: int }
+newtype BoxedCell(TCell)
+
+fn bump(c: ref TCell) {
+    c.hp += 1
+}
+
+// Unwrapping a newtype over a value struct binds a COPY: mutating the
+// unwrapped value, directly or through a `ref` borrow, never writes back
+// into the wrapper.
+@test(output = "1
+1")
+fn newtype_unwrap_keeps_value_semantics() {
+    let w = BoxedCell(TCell { hp: 1 })
+    let BoxedCell(inner) = w
+    inner.hp = 99
+    let BoxedCell(a) = w
+    print(a.hp)
+
+    let BoxedCell(borrow_me) = w
+    bump(borrow_me)
+    let BoxedCell(b) = w
+    print(b.hp)
 }
 
 // --- Newtype ABI: one plain value through calls, returns and `.0` unwraps ---
