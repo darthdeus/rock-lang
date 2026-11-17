@@ -117,15 +117,13 @@ impl<'a> Builder<'a> {
                     .iter()
                     .any(|path| path.as_str() == relative || path.as_str().starts_with(&prefix))
                 {
-                    let mut projected = shape;
-                    for part in parts.iter().rev() {
-                        projected = projected.and_then(|shape| {
-                            match shape.fields.into_iter().find(|(name, _)| name == part)?.1 {
-                                FieldShape::Nested(sub) => Some(sub),
-                                FieldShape::Prim => None,
-                            }
-                        });
-                    }
+                    let path: Vec<_> = parts.iter().rev().copied().collect();
+                    let projected = shape.and_then(|shape| {
+                        match self.value_projection_range(&shape, &path)?.1 {
+                            FieldShape::Nested(sub) => Some(sub),
+                            FieldShape::Prim => None,
+                        }
+                    });
                     physical = (
                         owner,
                         crate::names::ustr(&format!("{child_field}.{relative}")),

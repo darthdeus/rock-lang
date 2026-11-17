@@ -507,38 +507,27 @@ impl<'a> Builder<'a> {
         base: Idx<Expr>,
         field: Ustr,
     ) -> Result<Option<(Idx<Inst>, Idx<Inst>, Ustr, String)>, CompilerError> {
-        // Walk down through nested field accesses to the `buf[i]` root.
-        let mut segs = vec![field];
-        let mut cur = base;
-        loop {
-            match self.body.expr_arena[cur] {
-                Expr::FieldAccess { base: b, field: f } => {
-                    segs.push(f);
-                    cur = b;
-                }
-                Expr::Index { base: ib, index } => {
-                    let ContainerKind::NativeBufferValue(elem) = self.nb_kind(ib)? else {
-                        return Ok(None);
-                    };
-                    if !self.is_leaf_addressed(elem)? {
-                        return Ok(None);
-                    }
-                    let (b, _) = self.lower_index_base(ib)?;
-                    let i = self.lower_expr(index)?;
-                    // `cur` is the `Expr::Index` node this bounds check belongs
-                    // to -- not the outer field access the assignment targets.
-                    let checked = self.with_site_expr(cur, |s| s.nb_checked_index(b, i))?;
-                    segs.reverse();
-                    let path = segs
-                        .iter()
-                        .map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .join(".");
-                    return Ok(Some((b, checked, elem, path)));
-                }
-                _ => return Ok(None),
-            }
+        let (cur, mut segs) = self.field_chain(base, field);
+        let Expr::Index { base: ib, index } = self.body.expr_arena[cur] else {
+            return Ok(None);
+        };
+        let ContainerKind::NativeBufferValue(elem) = self.nb_kind(ib)? else {
+            return Ok(None);
+        };
+        if !self.is_leaf_addressed(elem)? {
+            return Ok(None);
         }
+        let (b, _) = self.lower_index_base(ib)?;
+        let i = self.lower_expr(index)?;
+        // The bounds check belongs to the index, not the outer field access.
+        let checked = self.with_site_expr(cur, |s| s.nb_checked_index(b, i))?;
+        segs.reverse();
+        let path = segs
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(".");
+        Ok(Some((b, checked, elem, path)))
     }
 
     /// Write `buf[i].<path> = value` leaf-wise. `path` names either one
@@ -1341,6 +1330,15 @@ impl<'a> Builder<'a> {
             .and_then(|(root, path, nested)| nested.is_none().then_some((root, path))))
     }
 
+    fn field_chain(&self, mut root: Idx<Expr>, field: Ustr) -> (Idx<Expr>, Vec<Ustr>) {
+        let mut fields = vec![field];
+        while let Expr::FieldAccess { base, field } = self.body.expr_arena[root] {
+            fields.push(field);
+            root = base;
+        }
+        (root, fields)
+    }
+
     /// [`Self::flat_leaf_path`], also admitting a chain that ends at a whole
     /// nested value field (`xs[i].at`), whose shape is returned. Resolved by
     /// walking the shape rather than matching a leaf key: a nullable nested
@@ -1351,12 +1349,7 @@ impl<'a> Builder<'a> {
         base: Idx<Expr>,
         field: Ustr,
     ) -> Result<Option<(Idx<Expr>, Ustr, Option<ValueShape>)>, CompilerError> {
-        let mut segs = vec![field];
-        let mut cur = base;
-        while let Expr::FieldAccess { base: b, field: f } = self.body.expr_arena[cur] {
-            segs.push(f);
-            cur = b;
-        }
+        let (cur, mut segs) = self.field_chain(base, field);
         let elem = if let Expr::Index {
             base: container, ..
         } = self.body.expr_arena[cur]
@@ -1389,22 +1382,16 @@ impl<'a> Builder<'a> {
                 .collect::<Vec<_>>()
                 .join("."),
         );
-        let mut shape = self.column_shape(elem)?;
-        for (i, seg) in segs.iter().enumerate() {
-            match shape
-                .fields
-                .iter()
-                .find(|(name, _)| name == seg)
-                .map(|(_, fs)| fs)
-            {
-                Some(FieldShape::Prim) if i + 1 == segs.len() => {
-                    return Ok(Some((cur, path, None)));
-                }
-                Some(FieldShape::Nested(sub)) => shape = sub.clone(),
-                _ => return Ok(None),
-            }
-        }
-        Ok(Some((cur, path, Some(shape))))
+        let shape = self.column_shape(elem)?;
+        Ok(self
+            .value_projection_range(&shape, &segs)
+            .map(|(_, selected)| {
+                let nested = match selected {
+                    FieldShape::Prim => None,
+                    FieldShape::Nested(shape) => Some(shape),
+                };
+                (cur, path, nested)
+            }))
     }
 
     /// `Some((vec, slot, elem))` iff `e` is `xs[i]` over a
