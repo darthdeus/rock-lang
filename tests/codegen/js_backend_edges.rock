@@ -2,6 +2,9 @@
 
 nobox value Pair { x: int, y: int }
 
+@scalar_abi inline(lua) fn publish_probe<T>(value: T) -> (bool, int) =
+    "return true, 7"
+
 @scalar_abi inline(js) fn publish_probe<T>(value: T) -> (bool, int) =
     "return __rock_publish(true, 7);"
 
@@ -18,6 +21,8 @@ fn generic_inline_publishers_run_at_each_instance() -> int {
 
 @nomangle fn opaque_root_probe(x: int) -> int { x + 7 }
 
+inline(lua) fn opaque_call_probe(x: int) -> int = "return opaque_root_probe(x)"
+
 inline(js) fn opaque_call_probe(x: int) -> int = """
     return opaque_root_probe(x);
 """
@@ -27,8 +32,12 @@ fn opaque_js_calls_keep_their_rock_callee() -> int {
     opaque_call_probe(5)
 }
 
+@nomangle inline(lua) fn opaque_sibling_probe(x: int) -> int = "return x * 5"
+
 @nomangle inline(js) fn opaque_sibling_probe(x: int) -> int =
     "return x * 5;"
+
+inline(lua) fn opaque_sibling_call_probe(x: int) -> int = "return opaque_sibling_probe(x)"
 
 inline(js) fn opaque_sibling_call_probe(x: int) -> int = """
     return opaque_sibling_probe(x);
