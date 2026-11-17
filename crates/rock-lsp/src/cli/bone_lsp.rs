@@ -573,32 +573,6 @@ pub fn references(file_path: &str, line: u32, column: u32) -> Result<()> {
     Ok(())
 }
 
-/// `rock lsp prepare-rename <file:line:col>`.
-pub fn prepare_rename(file_path: &str, line: u32, column: u32) -> Result<()> {
-    let (file_path, bone) = open_file(file_path)?;
-
-    let pos = Position::new(line - 1, column - 1);
-    let prepared = bone.prepare_rename(&file_path, pos);
-    let refusal = prepared.as_ref().err().map(|r| r.to_string());
-    let range = prepared.ok().flatten().map(|r| {
-        json!({
-            "start": { "line": r.start.line, "character": r.start.character },
-            "end":   { "line": r.end.line,   "character": r.end.character },
-        })
-    });
-
-    let mut output = json!({
-        "file": file_path,
-        "backend": "bone",
-        "range": range.unwrap_or(serde_json::Value::Null),
-    });
-    if let Some(refusal) = refusal {
-        output["error"] = json!(refusal);
-    }
-    print_json(&output)?;
-    Ok(())
-}
-
 /// `rock lsp rename <file:line:col> <new_name>`.
 pub fn rename(file_path: &str, line: u32, column: u32, new_name: &str) -> Result<()> {
     // Load the whole project so rename rewrites cross-file references too.
@@ -668,25 +642,6 @@ pub fn document_symbols(file_path: &str) -> Result<()> {
     });
     print_json(&output)?;
     Ok(())
-}
-
-/// `rock lsp hole-info <file:line:col>`. Type holes only for now
-/// (bone rejects expression holes at lowering); prints nothing and exits 1 when
-/// the cursor is outside a hole.
-pub fn hole_info(file_path: &str, line: u32, column: u32) -> Result<()> {
-    let (file_path, bone) = open_file(file_path)?;
-
-    let pos = Position::new(line - 1, column - 1);
-    match bone.hole_info(&file_path, pos) {
-        Some(report) => {
-            print!("{report}");
-            Ok(())
-        }
-        None => {
-            eprintln!("No hole at {file_path}:{line}:{column}");
-            std::process::exit(1);
-        }
-    }
 }
 
 /// `rock lsp workspace-symbols <file> <query>`.
