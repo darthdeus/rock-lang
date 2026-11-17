@@ -170,17 +170,18 @@ impl<'a> Builder<'a> {
         self.cur_expr = outer_expr;
         let v = v?;
         self.mark_record_base(e, v);
-        // A transparent newtype constructor returns its argument's MIR value.
-        // Keep the argument constructor's logical type on that shared value.
-        let is_newtype_constructor = matches!(
-            &self.body.expr_arena[e],
-            Expr::Call {
-                callee: Callee::Unresolved { name, .. },
-                args,
-                ..
-            } if args.len() == 1 && self.ws.newtypes_by_name.contains_key(name)
-        );
-        if !is_newtype_constructor
+        // Ascriptions and transparent newtype constructors reuse their operand.
+        // Keep the operand constructor's logical type on that shared value.
+        let reuses_operand = matches!(self.body.expr_arena[e], Expr::As { .. })
+            || matches!(
+                &self.body.expr_arena[e],
+                Expr::Call {
+                    callee: Callee::Unresolved { name, .. },
+                    args,
+                    ..
+                } if args.len() == 1 && self.ws.newtypes_by_name.contains_key(name)
+            );
+        if !reuses_operand
             && matches!(
                 self.f.insts[v],
                 Inst::MakeValueStruct { .. }
