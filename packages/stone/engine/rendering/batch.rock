@@ -923,9 +923,13 @@ pub fn queue_custom_draw_into(
 
 // Rows share the custom-draw sequence so paired geometry stays adjacent.
 fn queue_ordered_geometry_row(pool: RenderBatchPool, z_layer: int, blend: BlendMode,
-    depth: DepthMode, order: int, pipeline: Pipeline?) -> RenderBatch {
+    depth: DepthMode, order: int, pipeline: Pipeline?, sort_key: string? = null) -> RenderBatch {
     CUSTOM_DRAW_COUNTER = CUSTOM_DRAW_COUNTER + 1
-    let key = "{batch_key_prefix(z_layer, order)}|custom_{draw_counter_key(CUSTOM_DRAW_COUNTER)}|{batch_key_state(depth, blend, false)}"
+    let key = if sort_key != null {
+        "{sort_key}|geometry_{draw_counter_key(CUSTOM_DRAW_COUNTER)}"
+    } else {
+        "{batch_key_prefix(z_layer, order)}|custom_{draw_counter_key(CUSTOM_DRAW_COUNTER)}|{batch_key_state(depth, blend, false)}"
+    }
     let reused = pool.rows.reuse_retained_entity()
     let handle = if reused != null { reused } else {
         pool.rows.insert(RenderBatch {
@@ -948,10 +952,11 @@ fn queue_ordered_geometry_row(pool: RenderBatchPool, z_layer: int, blend: BlendM
 
 // Borrows the mesh, bindings and packed blocks until the world flush. Mesh
 // updates before flush affect every queued use. Slot 0 is white;
-// the shader must declare ID, material and normal outputs.
+// the shader must declare ID, material and normal outputs. An optional sort_key
+// borrows existing batch ordering; it does not change GL state or phase admission.
 pub fn queue_world_surface_geometry(mesh: GpuMesh, pipeline: Pipeline, bindings: [GpuBinding],
     vertex: OwnedUniformBlock?, fragment: OwnedUniformBlock?, outputs: WorldSurfaceOutputs,
-    z_layer: int, blend: BlendMode, depth: DepthMode, order: int = 0) {
+    z_layer: int, blend: BlendMode, depth: DepthMode, order: int = 0, sort_key: string? = null) {
     assert(mesh.handle.0 != 0 && mesh.vert_count > 0, "world surface geometry requires a live nonempty mesh")
     assert(!CURRENT_RENDER_POOL.active() && !pipeline.after_scene,
         "GPU geometry requires the main world pool")
@@ -969,7 +974,7 @@ pub fn queue_world_surface_geometry(mesh: GpuMesh, pipeline: Pipeline, bindings:
         assert(binding.slot == i + 1 && !binding.wrap_repeat && sampled_texture_is_live(binding.resource),
             "GPU geometry has an invalid texture binding")
     }
-    let batch = queue_ordered_geometry_row(RENDER_BATCHES, z_layer, blend, depth, order, pipeline)
+    let batch = queue_ordered_geometry_row(RENDER_BATCHES, z_layer, blend, depth, order, pipeline, sort_key)
     batch.retained_mesh = mesh.handle
     batch.count = mesh.vert_count
     batch.geometry_bindings = bindings

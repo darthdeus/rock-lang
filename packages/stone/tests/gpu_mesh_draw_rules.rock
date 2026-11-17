@@ -138,6 +138,7 @@ fn world_surface_mesh_order_interleaves_with_custom_rows_without_custom_uniforms
     let saved_white = WHITE_PIXEL
     let saved_scope = CURRENT_RENDER_POOL
     let saved_counter = CUSTOM_DRAW_COUNTER
+    let saved_fast = WORLD_BATCH_FAST
     let pool = render_batch_pool_new()
     let white = gpu_mesh_draw_white()
     let verts = native_buffer_float(6)
@@ -149,6 +150,7 @@ fn world_surface_mesh_order_interleaves_with_custom_rows_without_custom_uniforms
         WHITE_PIXEL = saved_white
         CURRENT_RENDER_POOL = saved_scope
         CUSTOM_DRAW_COUNTER = saved_counter
+        WORLD_BATCH_FAST = saved_fast
         gpu_mesh_free(first)
         gpu_mesh_free(last)
         release_owned_image(white)
@@ -156,6 +158,7 @@ fn world_surface_mesh_order_interleaves_with_custom_rows_without_custom_uniforms
     RENDER_BATCHES = pool
     WHITE_PIXEL = white
     CURRENT_RENDER_POOL = RenderBatchScope {}
+    WORLD_BATCH_FAST = map_new()
     let pipe = pipeline(rock_shader(mesh_probe_vert, mesh_surface_probe_frag))
     queue_world_surface_geometry(last, pipe, [], null, null, WorldSurfaceOutputs::Automatic,
         0, BlendMode::Alpha, DepthMode::TestWrite, order: 4)
@@ -168,4 +171,23 @@ fn world_surface_mesh_order_interleaves_with_custom_rows_without_custom_uniforms
     assert_eq(pool.get(keys[0]).unwrap().retained_mesh, first.handle)
     assert(pool.get(keys[1]).unwrap().custom_draw != null)
     assert_eq(pool.get(keys[2]).unwrap().retained_mesh, last.handle)
+
+    pool.clear()
+    let image = sampled_image(white)
+    let sprite = ensure_world_sprite_batch(image, 0, BlendMode::Alpha, false, DepthMode::TestWrite)
+    let later = ensure_world_sprite_batch(image, 0, BlendMode::Alpha, false, DepthMode::TestWrite, unlit: true)
+    let sprite_key = batch_key_of(image, 0, BlendMode::Alpha, false, DepthMode::TestWrite)
+    // Two occurrences share the old sprite ordering without replacing its row.
+    for mesh in [first, last] {
+        queue_world_surface_geometry(mesh, pipe, [], null, null, WorldSurfaceOutputs::Automatic,
+            0, BlendMode::Alpha, DepthMode::TestWrite, sort_key: sprite_key)
+    }
+    pool.sorted_keys_into(keys)
+    assert_eq(keys.len(), 4)
+    assert_eq(pool.get(keys[0]).unwrap(), sprite)
+    assert_eq(pool.get(keys[1]).unwrap().retained_mesh, first.handle)
+    assert_eq(pool.get(keys[2]).unwrap().retained_mesh, last.handle)
+    assert_eq(pool.get(keys[3]).unwrap(), later)
+    assert_eq(pool.get(keys[1]).unwrap().pipeline, pipe,
+        "a borrowed sort key does not replace the geometry pipeline")
 }
