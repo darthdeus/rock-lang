@@ -97,21 +97,6 @@ impl std::fmt::Debug for SiteOp {
     }
 }
 
-impl SiteOp {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::DirectCall => "direct-call",
-            Self::FnValue => "fn-value",
-            Self::ForIter => "for-iter",
-            Self::ForNext(_) => "for-next",
-            Self::ImplicitIter => "implicit-iter",
-            Self::BoundNext(_) => "bound-next",
-            Self::Synthesized(_) => "synthesized",
-            Self::Dispatched(_) => "dispatched",
-        }
-    }
-}
-
 /// WHICH expression arena a [`Site`]'s index is meaningful against.
 ///
 /// An `Idx<Expr>` names a slot in one body's arena and nothing else. Most sites

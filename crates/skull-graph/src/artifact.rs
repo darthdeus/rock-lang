@@ -269,17 +269,6 @@ pub enum Realization {
 }
 
 impl Realization {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::RockBody => "rock-body",
-            Self::ForeignBody(c) => c.name(),
-            Self::NativeMapping => "native-mapping",
-            Self::HostBinding => "host-binding",
-            Self::PortableFallback => "portable-fallback",
-            Self::CompileTimeExpansion => "compile-time-expansion",
-        }
-    }
-
     /// The boundary class this realization is, when it is one. A `Rock`
     /// callee has none; a foreign or erased one does, and its class is part of
     /// the [`BoundaryId`] a dependency must terminate in.
@@ -329,16 +318,6 @@ pub enum Unrealizable {
     NativeMappingMissing,
 }
 
-impl Unrealizable {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::ForeignToArtifact => "foreign-to-artifact",
-            Self::ClassUnsupported(_) => "class-unsupported",
-            Self::NativeMappingMissing => "native-mapping-missing",
-        }
-    }
-}
-
 /// Why an instance the shared graph holds is not in this artifact. The two are
 /// different findings: an unrealizable declaration is a REJECTION the artifact
 /// would have to report if anything called it, while an unreachable one is
@@ -348,15 +327,6 @@ pub enum Exclusion {
     Unrealizable(Unrealizable),
     /// Realizable here, but no root of this artifact reaches it.
     Unreachable,
-}
-
-impl Exclusion {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Unrealizable(u) => u.label(),
-            Self::Unreachable => "unreachable",
-        }
-    }
 }
 
 /// An instance the shared graph holds and this artifact does not.
@@ -376,27 +346,6 @@ pub struct Severed {
     pub site: Site,
     pub callee: Instance,
     pub cause: Unrealizable,
-}
-
-/// Severed calls sharing one callee DECLARATION and one cause -- the
-/// artifact's obligations, as opposed to the per-site cost of not meeting them.
-///
-/// Both numbers are kept because either alone reads as the other: 76,972
-/// severed JS sites is a worklist of that size only if every site is its own
-/// missing declaration, and the declaration count alone hides that one missing
-/// body can cost thousands of calls.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct SeveredGroup {
-    /// The shared graph's representative declaration for the callee. Not a
-    /// realized one: nothing here realized, which is the point.
-    pub callee: FuncRef,
-    pub cause: Unrealizable,
-    /// Call sites -- the per-site population this group covers.
-    pub sites: usize,
-    /// The distinct callee INSTANCES: one declaration can be severed at several
-    /// instantiations, and supplying a body discharges all of them.
-    pub instances: BTreeSet<Instance>,
-    pub callers: BTreeSet<Instance>,
 }
 
 /// A call target with its backend-specific boundary identity.
@@ -445,45 +394,6 @@ pub struct SymbolCollision {
 pub struct PublicationCollision {
     pub symbol: String,
     pub instances: Vec<Instance>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct ArtifactCensus {
-    /// Instances retained, the roots they were reached from, and the shared
-    /// population they were taken from.
-    /// Rock instances the artifact lowers, and boundaries it names. Reported
-    /// apart because they are different obligations; `retained` is their sum.
-    pub instances: usize,
-    pub boundaries: usize,
-    pub retained: usize,
-    pub roots: usize,
-    pub shared_instances: usize,
-    pub excluded: usize,
-    pub excluded_by_cause: BTreeMap<&'static str, usize>,
-    /// Call sites traversed by the reachability walk -- the denominator for
-    /// `severed`. Zero sites walked and zero severed calls are the same number.
-    pub sites_walked: usize,
-    pub severed: usize,
-    pub severed_by_cause: BTreeMap<&'static str, usize>,
-    pub symbols: usize,
-    pub symbol_collisions: usize,
-    /// Dependencies examined, and how many named no single callee here.
-    pub inline_deps_examined: usize,
-    pub inline_deps_unresolved: usize,
-    pub inline_deps_boundary: usize,
-    /// Foreign bodies the artifact emits, and how many of them publish more
-    /// than one result lane, and the widest wire the scratch bank must cover.
-    pub foreign_bodies: usize,
-    pub multi_lane_publishers: usize,
-    pub widest_result_lanes: usize,
-    /// Retained instances with no substitution record in the shared graph. An
-    /// invariant finding; 0 is the only acceptable value.
-    pub missing_substitutions: usize,
-    pub publications: usize,
-    pub unrepresented_publications: usize,
-    pub publication_collisions: usize,
-    /// Deferred obligations, carried from the target spec.
-    pub deferred: Vec<&'static str>,
 }
 
 /// One target's realization of a graph it did not build.
@@ -1622,113 +1532,6 @@ impl ArtifactView {
     /// Whether this artifact retains `i`, however it is supplied.
     pub fn retains(&self, i: &Instance) -> bool {
         self.realization.contains_key(i)
-    }
-
-    pub fn census(&self) -> ArtifactCensus {
-        let mut c = ArtifactCensus {
-            instances: self.instances.len(),
-            boundaries: self.boundaries.len(),
-            retained: self.realization.len(),
-            roots: self.roots.len(),
-            shared_instances: self.shared_instances,
-            excluded: self.excluded.len(),
-            sites_walked: self.sites_walked,
-            severed: self.severed.len(),
-            symbols: self.symbols.len(),
-            symbol_collisions: self.symbol_collisions.len(),
-            inline_deps_examined: self.inline_deps.len() + self.unresolved_inline_deps.len(),
-            inline_deps_unresolved: self.unresolved_inline_deps.len(),
-            inline_deps_boundary: self
-                .inline_deps
-                .iter()
-                .filter(|d| matches!(d.callee, RealizedCallee::Boundary(_)))
-                .count(),
-            foreign_bodies: self.publisher_lanes.len(),
-            multi_lane_publishers: self.publisher_lanes.values().filter(|n| **n > 1).count(),
-            widest_result_lanes: self.publisher_lanes.values().copied().max().unwrap_or(0),
-            missing_substitutions: self.missing_substitutions.len(),
-            publications: self.publications.len(),
-            unrepresented_publications: self.unrepresented_publications.len(),
-            publication_collisions: self.publication_collisions.len(),
-            deferred: self.deferred.clone(),
-            ..Default::default()
-        };
-        for e in &self.excluded {
-            *c.excluded_by_cause.entry(e.cause.label()).or_insert(0) += 1;
-        }
-        for s in &self.severed {
-            *c.severed_by_cause.entry(s.cause.label()).or_insert(0) += 1;
-        }
-        c
-    }
-
-    /// The severed population grouped by `(callee declaration, cause)`, widest
-    /// first. A PARTITION of `severed`: `sites` sums to it.
-    pub fn severed_groups(&self) -> Vec<SeveredGroup> {
-        let mut by: BTreeMap<(DeclKey, Unrealizable), SeveredGroup> = BTreeMap::new();
-        for s in &self.severed {
-            let e = by
-                .entry((DeclKey(s.callee.func), s.cause))
-                .or_insert_with(|| SeveredGroup {
-                    callee: s.callee.func,
-                    cause: s.cause,
-                    sites: 0,
-                    instances: BTreeSet::new(),
-                    callers: BTreeSet::new(),
-                });
-            e.sites += 1;
-            e.instances.insert(s.callee.clone());
-            e.callers.insert(s.caller.clone());
-        }
-        let mut groups: Vec<SeveredGroup> = by.into_values().collect();
-        groups.sort_by(|a, b| {
-            b.sites
-                .cmp(&a.sites)
-                .then(DeclKey(a.callee).cmp(&DeclKey(b.callee)))
-        });
-        groups
-    }
-
-    pub fn render_symbol_collisions(&self, ws: &Workspace) -> Vec<String> {
-        self.symbol_collisions
-            .iter()
-            .map(|c| {
-                let names: Vec<String> = c
-                    .instances
-                    .iter()
-                    .map(|i| {
-                        let f = &ws.module(i.func.module).functions[i.func.func];
-                        format!("{} [{:?}]", f.name, f.backend)
-                    })
-                    .collect();
-                format!("`{}` <- {}", c.symbol, names.join(", "))
-            })
-            .collect()
-    }
-
-    pub fn render_unresolved_inline_deps(&self, ws: &Workspace) -> Vec<String> {
-        self.unresolved_inline_deps
-            .iter()
-            .map(|d| {
-                let f = &ws.module(d.owner.module).functions[d.owner.func];
-                format!("`{}` names `{}`: {}", f.name, d.entry, d.reason)
-            })
-            .collect()
-    }
-
-    pub fn render_severed(&self, ws: &Workspace, g: &InstanceGraph) -> Vec<String> {
-        self.severed
-            .iter()
-            .map(|s| {
-                format!(
-                    "{} {} -> {} ({})",
-                    g.identity(ws, &s.caller),
-                    s.site.op.name(),
-                    g.identity(ws, &s.callee),
-                    s.cause.label()
-                )
-            })
-            .collect()
     }
 }
 

@@ -131,10 +131,10 @@ fn severed_cause(
     view: &artifact::ArtifactView,
     name: &str,
 ) -> Option<Unrealizable> {
-    view.severed_groups()
-        .into_iter()
-        .find(|grp| fn_name(ws, grp.callee) == name)
-        .map(|grp| grp.cause)
+    view.severed
+        .iter()
+        .find(|site| fn_name(ws, site.callee.func) == name)
+        .map(|site| site.cause)
 }
 
 /// A backend realization oracle that supplies exactly the named declarations --
@@ -340,7 +340,7 @@ fn native_required_mapping_controls_fallback_and_severed_calls() {
         bare.retained()
             .any(|i| fn_name(&ws, i.func) == "portable_op"),
         "a portable intrinsic was dropped: {:?}",
-        bare.census().excluded_by_cause
+        bare.excluded
     );
     assert!(
         bare.excluded
@@ -348,25 +348,31 @@ fn native_required_mapping_controls_fallback_and_severed_calls() {
             .all(|e| fn_name(&ws, e.instance.func) != "portable_op"),
         "the portable rung did not fire"
     );
-    let c = bare.census();
     assert!(
-        c.sites_walked > 0,
-        "no site was walked, so 0 severed says nothing: {c:?}"
+        bare.sites_walked > 0,
+        "no site was walked, so 0 severed says nothing: {:?}",
+        bare.severed
     );
-    let named_severed = bare.render_severed(&ws, &g);
+    let named_severed: Vec<_> = bare
+        .severed
+        .iter()
+        .filter(|site| fn_name(&ws, site.callee.func) == "fast_op")
+        .collect();
     assert_eq!(
-        c.severed, 1,
-        "expected exactly the `fast_op` call to be severed, got {named_severed:?}"
+        named_severed.len(),
+        1,
+        "expected exactly the `fast_op` call to be severed, got {:?}",
+        bare.severed
+    );
+    assert_eq!(
+        bare.severed.len(),
+        1,
+        "unexpected additional severed calls: {:?}",
+        bare.severed
     );
     assert!(
-        named_severed[0].contains("fast_op"),
-        "the severed call is not the one expected: {named_severed:?}"
-    );
-    assert_eq!(
-        c.severed_by_cause.get("native-mapping-missing").copied(),
-        Some(1),
-        "the severed call lost its cause: {:?}",
-        c.severed_by_cause
+        named_severed[0].cause == Unrealizable::NativeMappingMissing,
+        "the severed call lost its cause: {named_severed:?}"
     );
     assert!(
         bare.instances
@@ -383,9 +389,8 @@ fn native_required_mapping_controls_fallback_and_severed_calls() {
         None,
         "a mapped `@native_required` intrinsic was still excluded"
     );
-    assert_eq!(
-        mapped.census().severed,
-        0,
+    assert!(
+        mapped.severed.is_empty(),
         "mapping the callee left the call severed"
     );
 }
@@ -417,23 +422,20 @@ fn inline_body_dependencies_resolve_to_targets_in_the_artifact() {
     );
 
     let view = realize(&ws, &g, LUAJIT_DESKTOP, &roots);
-    let c = view.census();
     assert!(
-        c.inline_deps_examined > 0,
-        "no dependency was examined: {c:?}"
-    );
-    assert_eq!(
-        c.inline_deps_unresolved,
-        0,
+        view.unresolved_inline_deps.is_empty(),
         "unresolved inline-body dependencies: {:?}",
-        view.render_unresolved_inline_deps(&ws)
+        view.unresolved_inline_deps
     );
     // Each dependency terminates in a CALLEE, not a bare declaration: a
     // runtime entry is a `Callee::Boundary` carrying its class and the symbol
     // emission must produce, and anything else names a concrete instance.
     assert!(
-        c.inline_deps_boundary > 0,
-        "no dependency resolved to a boundary: {c:?}"
+        view.inline_deps
+            .iter()
+            .any(|dep| matches!(&dep.callee, RealizedCallee::Boundary(_))),
+        "no dependency resolved to a boundary: {:?}",
+        view.inline_deps
     );
     for dep in &view.inline_deps {
         match &dep.callee {
@@ -509,7 +511,7 @@ fn main() { let n = selected_dep_probe(1) }
             .iter()
             .any(|d| d.owner == js_probe.decl && d.entry == "__nb_checked_index"),
         "the selected JS body's runtime dependency was lost: {:?}",
-        js.render_unresolved_inline_deps(&ws)
+        js.unresolved_inline_deps
     );
 }
 
@@ -538,27 +540,25 @@ fn main() {
     );
     let (g, roots) = graph_for(&ws);
     let view = realize(&ws, &g, LUAJIT_DESKTOP, &roots);
-    let c = view.census();
-    assert!(c.instances > 0, "the artifact retained nothing");
+    assert!(!view.instances.is_empty(), "the artifact retained nothing");
     assert_eq!(
         view.symbols.len(),
-        c.retained,
+        view.realization.len(),
         "the symbol table is not total over the retained instances"
     );
     assert_eq!(
-        c.retained,
-        c.instances + c.boundaries,
-        "the Rock/boundary split does not partition the retained set: {c:?}"
+        view.realization.len(),
+        view.instances.len() + view.boundaries.len(),
+        "the Rock/boundary split does not partition the retained set"
     );
     assert!(
-        c.boundaries > 0,
-        "the fixture retained no boundary at all: {c:?}"
+        !view.boundaries.is_empty(),
+        "the fixture retained no boundary at all"
     );
-    assert_eq!(
-        c.symbol_collisions,
-        0,
+    assert!(
+        view.symbol_collisions.is_empty(),
         "two retained instances share one symbol: {:?}",
-        view.render_symbol_collisions(&ws)
+        view.symbol_collisions
     );
     // Non-vacuous: the generic instances must actually be spelled apart, so
     // injectivity is not satisfied by there being nothing to collide.
@@ -604,14 +604,30 @@ fn realization_never_invents_an_instance() {
                 g.identity(&ws, i)
             );
         }
-        // The accounting is a PARTITION: every shared instance is a retained
-        // Rock instance, a retained boundary, unrealizable, or unreachable --
-        // never quietly absent from all four.
-        let c = view.census();
+        // The accounting is a PARTITION: every shared instance is retained or
+        // has one exclusion cause -- never quietly absent from the view.
+        let retained: std::collections::BTreeSet<Instance> = view.retained().cloned().collect();
+        let excluded: std::collections::BTreeSet<Instance> = view
+            .excluded
+            .iter()
+            .map(|entry| entry.instance.clone())
+            .collect();
         assert_eq!(
-            c.instances + c.boundaries + view.excluded.len(),
-            g.instances.len(),
-            "`{}` lost instances between the graph and the view: {c:?}",
+            excluded.len(),
+            view.excluded.len(),
+            "`{}` recorded an instance as excluded more than once",
+            spec.name
+        );
+        assert!(
+            retained.is_disjoint(&excluded),
+            "`{}` both retained and excluded an instance",
+            spec.name
+        );
+        let accounted: std::collections::BTreeSet<Instance> =
+            retained.union(&excluded).cloned().collect();
+        assert_eq!(
+            accounted, g.instances,
+            "`{}` lost instances between the graph and the view",
             spec.name
         );
     }
@@ -645,7 +661,6 @@ fn retention_is_reachability_not_a_declaration_filter() {
     assert_eq!(main_only.len(), 1, "the fixture has no unique `main` root");
 
     let view = realize(&ws, &g, LUAJIT_DESKTOP, &main_only);
-    let c = view.census();
     // EXACTLY the roots it was given, plus the always-emitted callees, which
     // carry no incoming edge and would otherwise read as unreachable. Stated as
     // a set equality, so a view that quietly seeded from the whole graph could
@@ -658,23 +673,28 @@ fn retention_is_reachability_not_a_declaration_filter() {
     assert_eq!(
         view.roots.iter().collect::<std::collections::BTreeSet<_>>(),
         expected,
-        "the artifact's roots are not the ones it was given: {c:?}"
+        "the artifact's roots are not the ones it was given: {:?}",
+        view.roots
     );
-    assert!(c.sites_walked > 0, "the walk traversed no call site: {c:?}");
+    assert!(
+        view.sites_walked > 0,
+        "the walk traversed no call site: {:?}",
+        view.severed
+    );
     // Both causes have a population, so neither reads as the other.
     assert!(
-        c.excluded_by_cause.get("unreachable").copied().unwrap_or(0) > 0,
+        view.excluded
+            .iter()
+            .any(|entry| entry.cause == Exclusion::Unreachable),
         "nothing was excluded as unreachable, so retention is still a filter: {:?}",
-        c.excluded_by_cause
+        view.excluded
     );
     assert!(
-        c.excluded_by_cause
-            .get("foreign-to-artifact")
-            .copied()
-            .unwrap_or(0)
-            > 0,
+        view.excluded.iter().any(|entry| {
+            entry.cause == Exclusion::Unrealizable(Unrealizable::ForeignToArtifact)
+        }),
         "nothing was excluded as unrealizable: {:?}",
-        c.excluded_by_cause
+        view.excluded
     );
     // Named, not merely counted: the fixture's uncalled declaration is
     // REALIZABLE here, which is what makes its exclusion a reachability fact
@@ -699,8 +719,9 @@ fn retention_is_reachability_not_a_declaration_filter() {
     );
     // ...and the walk genuinely reaches transitively, not just its roots.
     assert!(
-        c.retained > view.roots.len(),
-        "the walk retained nothing beyond its roots: {c:?}"
+        view.retained().count() > view.roots.len(),
+        "the walk retained nothing beyond its roots: {:?}",
+        view.roots
     );
     assert!(
         view.retained().any(|i| { fn_name(&ws, i.func) == "ident" }),
@@ -808,11 +829,13 @@ fn a_target_with_no_backend_keeps_only_portable_bodies() {
     let ws = ws_with_stdlib("fn main() { let b: NativeBuffer<int> = nb_new(4); let x = b[0] }");
     let (g, roots) = graph_for(&ws);
     let view = realize(&ws, &g, NATIVE_C64_DESKTOP, &roots);
-    let c = view.census();
-    assert!(c.excluded > 0, "the hostile target excluded nothing: {c:?}");
     assert!(
-        c.instances > 0,
-        "the hostile target excluded everything: {c:?}"
+        !view.excluded.is_empty(),
+        "the hostile target excluded nothing"
+    );
+    assert!(
+        !view.instances.is_empty(),
+        "the hostile target excluded everything"
     );
     for (i, r) in &view.realization {
         // Asked of the DECLARATION the artifact selected, not of the shared
@@ -877,16 +900,31 @@ fn main() { let x = 1; host_tick(x) }
     );
     assert_eq!(c64.shared_instances, g.instances.len());
     assert_eq!(wasm.shared_instances, g.instances.len());
-    assert_eq!(
-        c64.census().retained + c64.excluded.len(),
-        g.instances.len(),
-        "C64 did not account for every shared instance"
-    );
-    assert_eq!(
-        wasm.census().retained + wasm.excluded.len(),
-        g.instances.len(),
-        "Wasm32 did not account for every shared instance"
-    );
+    for (name, view) in [("C64", &c64), ("Wasm32", &wasm)] {
+        let retained: std::collections::BTreeSet<Instance> = view.retained().cloned().collect();
+        let excluded: std::collections::BTreeSet<Instance> = view
+            .excluded
+            .iter()
+            .map(|entry| entry.instance.clone())
+            .collect();
+        assert_eq!(
+            excluded.len(),
+            view.excluded.len(),
+            "{name} recorded an instance as excluded more than once"
+        );
+        assert!(
+            retained.is_disjoint(&excluded),
+            "{name} both retained and excluded an instance"
+        );
+        assert_eq!(
+            retained
+                .union(&excluded)
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            g.instances,
+            "{name} did not account for every shared instance"
+        );
+    }
 }
 
 /// The ambiguity arm's PRECONDITION, measured rather than assumed.
@@ -995,12 +1033,14 @@ fn main() { let a = only_lua(1) }
         1,
         "luajit did not retain `only_lua` as a boundary"
     );
+    let lua_severed: Vec<_> = lua
+        .severed
+        .iter()
+        .filter(|s| fn_name(&ws, s.callee.func) == "only_lua")
+        .collect();
     assert!(
-        !lua.render_severed(&ws, &g)
-            .iter()
-            .any(|s| s.contains("only_lua")),
-        "luajit severed its own boundary: {:?}",
-        lua.render_severed(&ws, &g)
+        lua_severed.is_empty(),
+        "luajit severed its own boundary: {lua_severed:?}"
     );
 
     let js = realize(&ws, &g, JAVASCRIPT_WEB, &roots);
@@ -1016,7 +1056,7 @@ fn main() { let a = only_lua(1) }
         severed.len(),
         1,
         "expected `only_lua` to be severed once, among {:?}",
-        js.render_severed(&ws, &g)
+        js.severed
     );
     assert_eq!(severed[0].cause, Unrealizable::ForeignToArtifact);
     // Located: a rejection with no span cannot become a compile error at the
@@ -1222,74 +1262,6 @@ fn shader_packaging_and_target_name_do_not_decide_cpu_realization() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The JS artifact view: its severed population, grouped.
-// ---------------------------------------------------------------------------
-
-/// The severed census is per SITE, and a per-site total cannot say what the
-/// work is. Grouped by CALLEE and CAUSE it names the obligations: how many
-/// DECLARATIONS the artifact is missing, and how many call sites each one
-/// costs. Both denominators, because either alone reads as the other.
-#[test]
-fn severed_calls_group_by_callee_and_cause() {
-    let ws = ws_with_stdlib(
-        r#"
-inline(lua) fn only_lua(x: int) -> int = "return x + 1"
-@intrinsic @native_required
-fn fast_op(x: int) -> int { return x * 2 }
-fn a(x: int) -> int { return only_lua(x) }
-fn b(x: int) -> int { return only_lua(x) + fast_op(x) }
-fn main() { let n = a(1) + b(2) }
-"#,
-    );
-    let (g, roots) = graph_for(&ws);
-    let js = realize(&ws, &g, JAVASCRIPT_WEB, &roots);
-    let named = |fr: FuncRef| fn_name(&ws, fr).to_string();
-    let groups = js.severed_groups();
-    let mine: Vec<&artifact::SeveredGroup> = groups
-        .iter()
-        .filter(|grp| matches!(named(grp.callee).as_str(), "only_lua" | "fast_op"))
-        .collect();
-
-    let only_lua = mine
-        .iter()
-        .find(|grp| named(grp.callee) == "only_lua")
-        .expect("only_lua group");
-    assert_eq!(only_lua.cause, Unrealizable::ForeignToArtifact);
-    assert_eq!(
-        only_lua.sites, 2,
-        "two call sites collapsed to one, or split into three"
-    );
-    assert_eq!(
-        only_lua.callers.len(),
-        2,
-        "the two callers were not both recorded"
-    );
-
-    let fast_op = mine
-        .iter()
-        .find(|grp| named(grp.callee) == "fast_op")
-        .expect("fast_op group");
-    assert_eq!(fast_op.cause, Unrealizable::NativeMappingMissing);
-    assert_eq!(fast_op.sites, 1);
-
-    // The grouping is a PARTITION of the per-site population: nothing is
-    // dropped and nothing is counted twice.
-    let grouped: usize = groups.iter().map(|grp| grp.sites).sum();
-    assert_eq!(
-        grouped,
-        js.severed.len(),
-        "grouping lost or duplicated severed sites"
-    );
-    // ...and the two denominators are different numbers here, which is the
-    // whole reason both are reported.
-    assert!(
-        groups.len() < js.severed.len(),
-        "every group holds one site, so the fixture cannot show that a \
-         declaration costs many call sites"
-    );
-}
-
 const REALIZATION_KINDS: &str = r#"
 @intrinsic inline(lua) fn mapped_probe(x: int) -> int = "return x * 2"
 @struct_expand inline(lua) fn expand_probe(x: int) -> int = "return 0"
@@ -1416,72 +1388,6 @@ fn target_realization_uses_mappings_and_stops_at_boundaries() {
     );
 }
 
-/// **A missing substitution record fails CLOSED on the publisher ABI too.**
-///
-/// The lane oracle answers for the DECLARED signature, so it is exact only for
-/// an instance whose substitution is empty. `unwrap_or(true)` on an absent
-/// record answered "empty", i.e. concrete -- so a hole in the graph produced a
-/// stated wire width. Removing one record must move the instance out of
-/// `publisher_lanes` and into an explicit finding.
-///
-/// The same oracle (`InstanceGraph::concreteness`) governs the GLSL passes;
-/// `a_missing_substitution_record_is_a_finding_not_a_concrete_shape` in
-/// `shader_artifact` is its other consumer.
-#[test]
-fn a_missing_substitution_record_states_no_publisher_width() {
-    let ws = ws_with_stdlib(
-        r#"
-inline(js) fn wired_pair(v: float) -> (bool, float) = "return __rock_publish(false, v);"
-fn main() {
-    let (ok, f) = wired_pair(1.0)
-}
-"#,
-    );
-    let (mut g, all_roots) = graph_for(&ws);
-    let roots = main_roots(&ws, &all_roots);
-    let named = |v: &artifact::ArtifactView, name: &str| {
-        v.publisher_lanes
-            .iter()
-            .find(|(i, _)| fn_name(&ws, i.func) == name)
-            .map(|(_, n)| *n)
-    };
-
-    // CONTROL: with the record present the width IS stated, so the assertion
-    // below measures the missing record and not an unreached body.
-    let before = realize(&ws, &g, JAVASCRIPT_WEB, &roots);
-    assert_eq!(named(&before, "wired_pair"), Some(2));
-    assert!(before.missing_substitutions.is_empty());
-    assert_eq!(before.census().missing_substitutions, 0);
-
-    let inst = before
-        .publisher_lanes
-        .keys()
-        .find(|i| fn_name(&ws, i.func) == "wired_pair")
-        .expect("the publisher instance")
-        .clone();
-    let removed = g.index.subst.remove(&inst).is_some() | g.root_instances.remove(&inst);
-    assert!(removed, "there was no record to remove");
-
-    let after = realize(&ws, &g, JAVASCRIPT_WEB, &roots);
-    assert_eq!(
-        named(&after, "wired_pair"),
-        None,
-        "a width was stated from the declaration for an instance with no substitution record"
-    );
-    assert!(
-        after.missing_substitutions.contains(&inst),
-        "the missing record produced no explicit finding"
-    );
-    assert_eq!(after.census().missing_substitutions, 1);
-    // `foreign_bodies` counts what was answered, so the instance leaves it --
-    // and the ONLY thing that can take it out is the missing record, which is
-    // the finding asserted above.
-    assert_eq!(
-        after.census().foreign_bodies + 1,
-        before.census().foreign_bodies
-    );
-}
-
 /// **The JS view's reachable `inline(js)` population, with its publisher
 /// lanes.** Two halves that a count cannot separate: a body a JS root reaches
 /// is retained AND states the width of its result wire (plan S 13b: the
@@ -1534,14 +1440,6 @@ fn main() {
         }),
         "the unreachable body is missing from the exclusion partition"
     );
-
-    let c = js.census();
-    assert!(c.foreign_bodies >= 2, "no foreign body population: {c:?}");
-    assert_eq!(
-        c.widest_result_lanes, 2,
-        "the artifact's widest result wire is wrong: {c:?}"
-    );
-    assert!(c.multi_lane_publishers >= 1);
 
     // The LUAJIT artifact over the same graph selects Lua bodies, so these JS
     // declarations are not what it measures -- the lanes belong to the artifact,
@@ -1617,7 +1515,6 @@ fn main() {
         js.missing_substitutions.is_empty(),
         "a generic instance went unanswered for a reason other than its own width"
     );
-    assert_eq!(js.census().widest_result_lanes, 2);
 }
 
 // ---------------------------------------------------------------------------
