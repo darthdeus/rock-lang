@@ -4139,10 +4139,6 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
         let recorder = recorder.cloned();
         let (occurrence_id, name) = (part.occurrence_id, part.name.clone());
         let mut deadline_guard = DeadlineGuard::new(&part.name);
-        // The open entry's own lines, for its live checkpoint verdict: the
-        // same `from_stderr` parse the post-run summary uses, so the two
-        // verdicts cannot drift apart in what they count.
-        let mut checkpoint_lines: Vec<String> = Vec::new();
         // Buffered runs must not write anything from this thread: several
         // children are live, so a direct write here interleaves into the middle
         // of another sim's locked record. The lines are retained and handed
@@ -4171,16 +4167,6 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
                     match boundary {
                         Some(EnvelopeStep::Started) => {
                             recorder.worker_first_entry(worker_attempt, occurrence_id, &name);
-                            if let Some(context) = marker
-                                .as_ref()
-                                .and_then(|event| event.get("runtime").cloned())
-                            {
-                                recorder.entry_runtime_context(
-                                    worker_attempt,
-                                    occurrence_id,
-                                    context,
-                                );
-                            }
                             recorder.entry_start(worker_attempt, occurrence_id, &name);
                         }
                         Some(EnvelopeStep::Ended(frame_count, frame_timing)) => {
@@ -4191,15 +4177,7 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
                                 frame_count,
                                 frame_timing.map(EntryFrameTiming::value),
                             );
-                            let checkpoint = SimSummary::from_stderr(&checkpoint_lines.join("\n"));
-                            recorder.entry_checkpoint(
-                                worker_attempt,
-                                occurrence_id,
-                                &name,
-                                verdict_word(&checkpoint),
-                            );
                         }
-                        Some(EnvelopeStep::Op) => checkpoint_lines.push(line.clone()),
                         _ => {}
                     }
                 }

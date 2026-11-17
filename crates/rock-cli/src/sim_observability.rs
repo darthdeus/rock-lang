@@ -310,14 +310,6 @@ impl SimRunRecorder {
         );
     }
 
-    pub(crate) fn entry_runtime_context(&self, worker_id: u64, occurrence_id: u64, context: Value) {
-        self.event(
-            "entry_runtime_context",
-            json!({ "worker_attempt": worker_id,
-            "occurrence_id": occurrence_id, "context": context }),
-        );
-    }
-
     pub(crate) fn entry_start(&self, worker_id: u64, occurrence_id: u64, name: &str) {
         self.event(
             "entry_start",
@@ -345,30 +337,6 @@ impl SimRunRecorder {
                 "name": name,
                 "frame_count": frame_count,
                 "frame_timing": frame_timing,
-            }),
-        );
-    }
-
-    /// The live verdict of one entry at envelope close, from the child's own
-    /// ops so far. Unlike `entry_result` this is written while the worker
-    /// still runs, so a killed run keeps every completed entry's verdict.
-    /// Provisional: runner-side post-checks (snapshot compare, artifact
-    /// checks) run after the worker exits and can still fail the final
-    /// result. Never marks the entry complete; only `entry_result` does.
-    pub(crate) fn entry_checkpoint(
-        &self,
-        worker_id: u64,
-        occurrence_id: u64,
-        name: &str,
-        verdict: &str,
-    ) {
-        self.event(
-            "entry_checkpoint",
-            json!({
-                "worker_attempt": worker_id,
-                "occurrence_id": occurrence_id,
-                "name": name,
-                "verdict": verdict,
             }),
         );
     }
@@ -501,32 +469,24 @@ impl SimRunRecorder {
             Ok(mut state) => {
                 let elapsed_ms = state.started.elapsed().as_millis() as u64;
                 let timing_warnings = state.timings.observe(name, &fields, elapsed_ms);
-                let mut records = vec![(name, fields.clone())];
                 for timing in timing_warnings {
                     timing_messages.push(state.timings.message(&timing));
-                    records.push((
-                        "timing_warning",
-                        json!({ "name": timing.label,
-                        "kind": "absolute", "duration_ms": timing.duration_ms }),
-                    ));
                 }
-                for (name, fields) in records {
-                    let mut object = fields.as_object().cloned().unwrap_or_default();
-                    object.insert("schema_version".into(), Value::from(SCHEMA_VERSION));
-                    object.insert("event".into(), Value::from(name));
-                    object.insert("run_id".into(), Value::from(state.run_id.clone()));
-                    object.insert("elapsed_ms".into(), Value::from(elapsed_ms));
-                    if let Some(writer) = state.writer.as_mut() {
-                        if let Err(e) = serde_json::to_writer(&mut *writer, &Value::Object(object))
-                            .map_err(std::io::Error::other)
-                            .and_then(|_| writer.write_all(b"\n"))
-                            .and_then(|_| writer.flush())
-                        {
-                            state.writer = None;
-                            if !state.warning_emitted {
-                                state.warning_emitted = true;
-                                warning = Some(format!("sim history write failed: {e:#}"));
-                            }
+                let mut object = fields.as_object().cloned().unwrap_or_default();
+                object.insert("schema_version".into(), Value::from(SCHEMA_VERSION));
+                object.insert("event".into(), Value::from(name));
+                object.insert("run_id".into(), Value::from(state.run_id.clone()));
+                object.insert("elapsed_ms".into(), Value::from(elapsed_ms));
+                if let Some(writer) = state.writer.as_mut() {
+                    if let Err(e) = serde_json::to_writer(&mut *writer, &Value::Object(object))
+                        .map_err(std::io::Error::other)
+                        .and_then(|_| writer.write_all(b"\n"))
+                        .and_then(|_| writer.flush())
+                    {
+                        state.writer = None;
+                        if !state.warning_emitted {
+                            state.warning_emitted = true;
+                            warning = Some(format!("sim history write failed: {e:#}"));
                         }
                     }
                 }
@@ -650,33 +610,42 @@ mod tests {
     }
 
     #[test]
-    fn entry_checkpoint_records_a_live_verdict_without_completing() {
-        let root = tempfile::tempdir().expect("history root");
+    fn entry_and_admission_records_keep_the_fields_budget_readers_use() {
+        let root = tempfile::tempdir().unwrap();
         let recorder = SimRunRecorder::begin_at(root.path(), "p", "a", false, None);
-        let ids = recorder.plan_entries(&["a".to_string()]);
-        recorder.entry_checkpoint(1, ids[0], "a", "PASS");
-        recorder.finish(true, None);
-        let events: Vec<Value> = std::fs::read_to_string(recorder.events_path().unwrap())
+        let occurrence = recorder.plan_entries(&["a".into()])[0];
+        let worker = recorder.worker_spawn(occurrence, "a", &[]);
+        recorder.worker_admission(
+            worker,
+            "a",
+            30,
+            5,
+            &std::collections::BTreeMap::from([("gpu_headroom", 25)]),
+        );
+        recorder.entry_start(worker, occurrence, "a");
+        recorder.entry_end(worker, occurrence, "a", Some(3), None);
+        let events: Vec<Value> = fs::read_to_string(recorder.events_path().unwrap())
             .unwrap()
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        let checkpoint = events
-            .iter()
-            .find(|event| event["event"] == "entry_checkpoint")
-            .expect("checkpoint event");
-        assert_eq!(checkpoint["schema_version"].as_u64(), Some(1));
-        assert_eq!(checkpoint["name"].as_str(), Some("a"));
-        assert_eq!(checkpoint["verdict"].as_str(), Some("PASS"));
-        assert_eq!(checkpoint["occurrence_id"].as_u64(), Some(ids[0]));
-        let end = events
-            .iter()
-            .find(|event| event["event"] == "run_end")
-            .expect("run end");
-        assert_eq!(
-            end["finalized_entries"].as_u64(),
-            Some(0),
-            "a checkpoint is not a result"
-        );
+        let find = |name| events.iter().find(|event| event["event"] == name).unwrap();
+        let start = find("entry_start");
+        let end = find("entry_end");
+        for event in [start, end] {
+            assert_eq!(event["schema_version"], 1);
+            assert!(event["run_id"].as_str().is_some_and(|id| !id.is_empty()));
+            assert_eq!(event["worker_attempt"], worker);
+            assert_eq!(event["occurrence_id"], occurrence);
+            assert_eq!(event["name"], "a");
+        }
+        assert_eq!(start["run_id"], end["run_id"]);
+        assert!(start["elapsed_ms"].as_u64().unwrap() <= end["elapsed_ms"].as_u64().unwrap());
+        assert_eq!(end["frame_count"], 3);
+        let admission = find("worker_admission");
+        assert_eq!(admission["name"], "a");
+        assert_eq!(admission["admission_ms"], 30);
+        assert_eq!(admission["checks_ms"], 5);
+        assert_eq!(admission["wait_ms_by_reason"]["gpu_headroom"], 25);
     }
 }
