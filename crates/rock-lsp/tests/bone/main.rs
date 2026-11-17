@@ -5,7 +5,6 @@ mod bone_completion_record;
 mod bone_diagnostics_dir;
 mod bone_generate_function_action;
 mod bone_inline_local_action;
-mod bone_inline_lua_census;
 mod bone_lsp_server_loop;
 mod bone_match_arms_action;
 mod bone_semantic_tokens;
