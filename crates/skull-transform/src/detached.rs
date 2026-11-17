@@ -35,7 +35,7 @@ pub(crate) fn lower_detached_region(
     source: &MirFunc,
     entry: Idx<Block>,
     name: &str,
-    frame: &FrameInfo,
+    frame: &FrameInfo<'_>,
 ) -> MirFunc {
     let region = detached_region_blocks(source, entry);
     let mut aux = source.clone();
@@ -54,18 +54,13 @@ pub(crate) fn lower_detached_region(
             },
         );
     aux.code_abi_fingerprint = Some(format!("detached:{name}"));
-    let slots = {
-        let mut slots: Vec<u32> = frame.slots.values().copied().collect();
-        slots.sort_unstable();
-        slots
-    };
     aux.code_compatibility =
         aux.code_identity
             .as_ref()
             .map(|_| skull_mir::code_identity::CodeCompatibility {
                 call_abi: format!("detached:{name}"),
                 capture: skull_mir::code_identity::CaptureSchema::empty(),
-                frame: Some(skull_mir::code_identity::FrameSchema { slots }),
+                frame: Some(frame.schema()),
                 lambda_topology: Default::default(),
             });
     aux.params = vec![frame.s_cell];
@@ -95,7 +90,7 @@ pub(crate) fn lower_detached_region(
 
     convert_closures_framed(&mut aux, name, Some(frame), None);
     let aux_entry = aux.entry;
-    materialize_frame_cells(&mut aux, aux_entry, frame.s_cell, &frame.slots);
+    materialize_frame_cells(&mut aux, aux_entry, frame.s_cell, frame.slots);
     assert!(
         !aux.insts
             .iter()
@@ -129,17 +124,9 @@ pub(crate) fn erase_detached_lambdas(
     for entry in entries {
         detached.extend(detached_region_blocks(func, entry));
     }
-    let detached_values: Vec<_> = func
-        .code_value_identities
-        .keys()
-        .copied()
-        .filter(|inst| {
-            matches!(func.insts[*inst], Inst::Lambda { entry, .. } if detached.contains(&entry))
-        })
-        .collect();
-    for inst in detached_values {
-        func.code_value_identities.remove(&inst);
-    }
+    func.code_value_identities.retain(|inst, _| {
+        !matches!(func.insts[*inst], Inst::Lambda { entry, .. } if detached.contains(&entry))
+    });
     for (_, inst) in func.insts.iter_mut() {
         if let Inst::Lambda { entry, .. } = inst
             && detached.contains(entry)

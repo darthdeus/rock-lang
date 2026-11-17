@@ -120,65 +120,39 @@ impl ScopeTree {
                 }
             }
         }
-        let mut pending: Vec<(Idx<Inst>, Idx<Block>)> = func
-            .insts
-            .iter()
-            .filter_map(|(lid, inst)| match inst {
-                Inst::Lambda { .. } => lambda_block.get(&lid).map(|&b| (lid, b)),
-                _ => None,
-            })
-            .collect();
-        // A lambda is LIVE only if its creation site is REACHABLE -- its creating
-        // block is owned by an already-live scope (root, or a live lambda).
-        // fold_const_branches can drop the block holding an OUTER lambda's
-        // creation while the outer's body blocks -- which create an INNER lambda
-        // -- linger in the arena; the inner is then transitively dead (its parent
-        // scope never exists). A fixpoint over the pending set adds a lambda once
-        // its creating block enters `block_scope`, so a lambda whose parent chain
-        // never becomes live is simply never added (no scope, no panic).
-        let mut creating_block: Vec<Idx<Block>> = vec![func.entry()]; // root placeholder
-        let mut grew = true;
-        while grew {
-            grew = false;
-            let mut i = 0;
-            while i < pending.len() {
-                let (lid, cblock) = pending[i];
-                if block_scope.contains_key(&cblock) {
-                    let Inst::Lambda { params, entry } = &func.insts[lid] else {
-                        unreachable!()
-                    };
-                    let sid = scopes.len();
-                    let region: HashSet<Idx<Block>> =
-                        reachable_blocks_from(func, *entry).into_iter().collect();
-                    for &b in &region {
-                        let prev = block_scope.insert(b, sid);
-                        debug_assert!(
-                            prev.is_none(),
-                            "scope regions must be pairwise disjoint (block in two scopes)"
-                        );
-                    }
-                    scopes.push(Scope {
-                        entry: *entry,
-                        region,
-                        parent: None, // filled below
-                        lambda: Some(lid),
-                        params: params.clone(),
-                    });
-                    creating_block.push(cblock);
-                    pending.remove(i);
-                    grew = true;
-                } else {
-                    i += 1;
+        let mut pending: Vec<_> = lambda_block.into_iter().collect();
+        pending.sort_unstable_by_key(|&(id, _)| crate::visit::raw(id));
+        // A nested lambda becomes live only after its creator's scope is live.
+        loop {
+            let before = pending.len();
+            pending.retain(|&(lid, block)| {
+                let Some(&parent) = block_scope.get(&block) else {
+                    return true;
+                };
+                let Inst::Lambda { params, entry } = &func.insts[lid] else {
+                    unreachable!()
+                };
+                let sid = scopes.len();
+                let region: HashSet<_> = reachable_blocks_from(func, *entry).into_iter().collect();
+                for &b in &region {
+                    let prev = block_scope.insert(b, sid);
+                    debug_assert!(
+                        prev.is_none(),
+                        "scope regions must be pairwise disjoint (block in two scopes)"
+                    );
                 }
+                scopes.push(Scope {
+                    entry: *entry,
+                    region,
+                    parent: Some(parent),
+                    lambda: Some(lid),
+                    params: params.clone(),
+                });
+                false
+            });
+            if pending.is_empty() || pending.len() == before {
+                break;
             }
-        }
-        // parent = the scope holding the block that creates this lambda. A live
-        // scope's creating block entered `block_scope` before the scope was added,
-        // so this indexing never fails (a lookup miss would be a hard error, not a
-        // silent fallback -- the whole point of the reachability fixpoint above).
-        for sid in 1..scopes.len() {
-            let b = creating_block[sid];
-            scopes[sid].parent = Some(block_scope[&b]);
         }
         ScopeTree {
             scopes,
@@ -260,25 +234,12 @@ impl ScopeTree {
                 };
             for &b in &s.region {
                 for (pos, &iid) in func.blocks[b].insts.iter().enumerate() {
-                    match &func.insts[iid] {
-                        Inst::Load(c) => {
-                            acc.entry(*c).or_default().insert(sid);
-                        }
-                        Inst::Store { cell, .. } => write(*cell, 1, b, pos, &mut acc),
-                        Inst::MapNext {
-                            key_cell, val_cell, ..
-                        } => {
-                            write(*key_cell, 2, b, pos, &mut acc);
-                            write(*val_cell, 2, b, pos, &mut acc);
-                        }
-                        Inst::CallMulti { dests, .. }
-                        | Inst::CallValueMulti { dests, .. }
-                        | Inst::CallBoundMulti { dests, .. } => {
-                            for &d in dests {
-                                write(d, 1, b, pos, &mut acc);
-                            }
-                        }
-                        _ => {}
+                    let inst = &func.insts[iid];
+                    if let Inst::Load(cell) = inst {
+                        acc.entry(*cell).or_default().insert(sid);
+                    } else {
+                        let n = 1 + u32::from(matches!(inst, Inst::MapNext { .. }));
+                        inst.cell_writes_each(&mut |c| write(c, n, b, pos, &mut acc));
                     }
                 }
             }
@@ -425,7 +386,7 @@ pub(crate) fn non_dominating_by_value_captures(
     tree: &ScopeTree,
     own: &Ownership,
     boxed: &HashSet<Idx<Cell>>,
-    frame_fields: Option<&HashSet<Idx<Cell>>>,
+    frame_slots: Option<&HashMap<Idx<Cell>, u32>>,
 ) -> HashSet<Idx<Cell>> {
     let mut extra: HashSet<Idx<Cell>> = HashSet::default();
     // block -> the `Inst::Lambda` creating a scope (its creation block).
@@ -444,7 +405,7 @@ pub(crate) fn non_dominating_by_value_captures(
     // so the classic fixpoint is never needed for them -- computing it up front
     // per parent was pure waste.
     let mut idoms: HashMap<Idx<Block>, skull_mir::cfg::Dominators> = HashMap::default();
-    for s in &tree.scopes {
+    for (scope_id, s) in tree.scopes.iter().enumerate() {
         let Some(lid) = s.lambda else { continue };
         let parent = s.parent.expect("a lambda scope has a parent");
         let Some(&cblock) = create_block.get(&lid) else {
@@ -458,16 +419,13 @@ pub(crate) fn non_dominating_by_value_captures(
         );
         let parent_entry = tree.scopes[parent].entry;
         // captures of THIS scope owned by the parent: read directly at cblock.
-        let scope_id = (0..tree.scopes.len())
-            .find(|&i| tree.scopes[i].lambda == Some(lid))
-            .unwrap();
         for &c in &own.captures[scope_id] {
             if boxed.contains(&c) || own.loop_bindings.contains(&c) || extra.contains(&c) {
                 continue;
             }
             // Frame cells are table-mediated (via `s` or a loop-binding
             // snapshot of a frame field) -- never box candidates.
-            if frame_fields.is_some_and(|f| f.contains(&c)) {
+            if frame_slots.is_some_and(|f| f.contains_key(&c)) {
                 continue;
             }
             if func.cells[c].default_param {

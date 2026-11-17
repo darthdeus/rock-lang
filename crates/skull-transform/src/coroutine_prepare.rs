@@ -9,7 +9,7 @@ use bone_core::prelude::CompilerError;
 use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::code_identity::{
-    CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity, FrameSchema, LambdaSiteId,
+    CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity, LambdaSiteId,
 };
 use skull_mir::lower::CoroutinePlan;
 use skull_mir::mir::*;
@@ -71,7 +71,10 @@ pub fn prepare_coroutine(
     reserve(&step_name);
     // Detached regions become ordinary MirFuncs, so their own lambda
     // parameters and locals cannot be rendered as coroutine frame fields.
-    let frame_info = lowered.root_frame_info();
+    let frame_info = crate::closure::FrameInfo {
+        s_cell: lowered.s_cell,
+        slots: lowered.frame_plan.slots(),
+    };
     let defer_entries: Vec<Idx<Block>> = lowered
         .step
         .coro_defers
@@ -116,9 +119,7 @@ pub fn prepare_coroutine(
             aux.code_compatibility = Some(CodeCompatibility {
                 call_abi: format!("detached:{}", aux.name),
                 capture: CaptureSchema::empty(),
-                frame: Some(FrameSchema {
-                    slots: sorted_slots(&lowered),
-                }),
+                frame: Some(frame_info.schema()),
                 lambda_topology: Default::default(),
             });
         }
@@ -176,9 +177,7 @@ pub fn prepare_coroutine(
     if let Some(identity) = &lowered.step.code_identity {
         if let Some(entry) = code_artifact.entries.get_mut(identity) {
             entry.body_name = Some(Ustr::from(plan.base()));
-            let mut slots = sorted_slots(&lowered);
-            slots.dedup();
-            entry.compatibility.frame = Some(FrameSchema { slots });
+            entry.compatibility.frame = Some(frame_info.schema());
         }
     }
     for aux in defers.iter().chain(hooks.iter().map(|(_, aux)| aux)) {
@@ -222,12 +221,6 @@ pub fn convert_named_nested_closures(nested: &mut [MirFunc], reserve: &dyn Fn(&s
         }
         convert_named_nested_closures(&mut nf.nested_fns[..named], reserve);
     }
-}
-
-fn sorted_slots(lowered: &CoroLowered) -> Vec<u32> {
-    let mut slots: Vec<u32> = lowered.frame_plan.slots().values().copied().collect();
-    slots.sort_unstable();
-    slots
 }
 
 fn collect_nested_code_identities(mf: &MirFunc, out: &mut HashSet<CodeIdentity>) {

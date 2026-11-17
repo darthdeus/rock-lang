@@ -1,4 +1,6 @@
-use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use rustc_hash::FxHashMap as HashMap;
+
+use crate::closure::frame_field;
 
 use crate::visit::{raw, top_level_blocks_from};
 use comfy_la_arena::Idx;
@@ -40,9 +42,7 @@ fn materialize_frame_inner(
     slots: &HashMap<Idx<Cell>, u32>,
     strict: bool,
 ) {
-    let field_of = |slot: u32| ustr::Ustr::from(format!("c{slot}").as_str());
     let region = top_level_blocks_from(mf, entry);
-    let mut minted: HashSet<Idx<Cell>> = HashSet::default();
     for &bid in &region {
         let old: Vec<Idx<Inst>> = std::mem::take(&mut mf.blocks[bid].insts);
         let mut new: Vec<Idx<Inst>> = Vec::with_capacity(old.len());
@@ -54,7 +54,7 @@ fn materialize_frame_inner(
                     mf.insts[id] = Inst::Field {
                         nonthrowing: false,
                         base: sv,
-                        field: field_of(slots[&c]),
+                        field: frame_field(slots[&c]),
                     };
                     new.push(id);
                 }
@@ -63,7 +63,7 @@ fn materialize_frame_inner(
                     new.push(sv);
                     mf.insts[id] = Inst::StoreField {
                         base: sv,
-                        field: field_of(slots[&cell]),
+                        field: frame_field(slots[&cell]),
                         value,
                     };
                     new.push(id);
@@ -79,7 +79,6 @@ fn materialize_frame_inner(
                         .filter(|(_, c)| slots.contains_key(c))
                         .map(|(i, &c)| {
                             let temp = mf.new_cell(None);
-                            minted.insert(temp);
                             (i, c, temp)
                         })
                         .collect();
@@ -92,15 +91,8 @@ fn materialize_frame_inner(
                         }
                     }
                     new.push(id);
-                    for &(_, frame_cell, temp) in &redirects {
-                        let lt = mf.alloc_inst(Inst::Load(temp));
-                        let sv = mf.alloc_inst(Inst::Load(s_cell));
-                        let sf = mf.alloc_inst(Inst::StoreField {
-                            base: sv,
-                            field: field_of(slots[&frame_cell]),
-                            value: lt,
-                        });
-                        new.extend([lt, sv, sf]);
+                    for (_, frame_cell, temp) in redirects {
+                        store_back(mf, &mut new, s_cell, slots[&frame_cell], temp);
                     }
                 }
                 // `key, val = next(t, key)` with a framed cursor/value cell:
@@ -116,12 +108,11 @@ fn materialize_frame_inner(
                 } if slots.contains_key(&key_cell) || slots.contains_key(&val_cell) => {
                     let k_use = if slots.contains_key(&key_cell) {
                         let t = mf.new_cell(None);
-                        minted.insert(t);
                         let sv = mf.alloc_inst(Inst::Load(s_cell));
                         let fld = mf.alloc_inst(Inst::Field {
                             nonthrowing: false,
                             base: sv,
-                            field: field_of(slots[&key_cell]),
+                            field: frame_field(slots[&key_cell]),
                         });
                         let st = mf.alloc_inst(Inst::Store {
                             cell: t,
@@ -133,9 +124,7 @@ fn materialize_frame_inner(
                         key_cell
                     };
                     let v_use = if slots.contains_key(&val_cell) {
-                        let t = mf.new_cell(None);
-                        minted.insert(t);
-                        t
+                        mf.new_cell(None)
                     } else {
                         val_cell
                     };
@@ -149,14 +138,7 @@ fn materialize_frame_inner(
                         .into_iter()
                         .filter(|(c, _)| slots.contains_key(c))
                     {
-                        let lt = mf.alloc_inst(Inst::Load(temp));
-                        let sv = mf.alloc_inst(Inst::Load(s_cell));
-                        let sf = mf.alloc_inst(Inst::StoreField {
-                            base: sv,
-                            field: field_of(slots[&frame_cell]),
-                            value: lt,
-                        });
-                        new.extend([lt, sv, sf]);
+                        store_back(mf, &mut new, s_cell, slots[&frame_cell], temp);
                     }
                 }
                 _ => new.push(id),
@@ -190,4 +172,21 @@ fn materialize_frame_inner(
             }
         }
     }
+}
+
+fn store_back(
+    func: &mut MirFunc,
+    insts: &mut Vec<Idx<Inst>>,
+    state: Idx<Cell>,
+    slot: u32,
+    temp: Idx<Cell>,
+) {
+    let value = func.alloc_inst(Inst::Load(temp));
+    let base = func.alloc_inst(Inst::Load(state));
+    let store = func.alloc_inst(Inst::StoreField {
+        base,
+        field: frame_field(slot),
+        value,
+    });
+    insts.extend([value, base, store]);
 }

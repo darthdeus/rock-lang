@@ -87,8 +87,8 @@ fn forwarded_defer_capture(
 /// keyed on the DENSE slot, NOT the raw id (the P2-finding fix). Must match
 /// `FrameCtx`'s `write_cellname` (`s.c<slot>` in the step) and the constructor's
 /// seeded field names.
-fn frame_field(slot: u32) -> Ustr {
-    Ustr::from(format!("c{slot}").as_str())
+pub(crate) fn frame_field(slot: u32) -> Ustr {
+    skull_mir::names::indexed("c", "", slot as usize)
 }
 
 /// What the shared pass needs of a coroutine step's frame (a subset of codegen's
@@ -97,10 +97,17 @@ fn frame_field(slot: u32) -> Ustr {
 /// (`emit_coroutine`); `None` for ordinary fns and the JS path (no coroutines).
 /// A captured frame cell collapses to a capture of `s` (D2), and a frame-cell
 /// access inside a hoisted lambda body materializes `e.c<S>.c<slot>` (D3).
-pub struct FrameInfo {
+pub(crate) struct FrameInfo<'a> {
     pub s_cell: Idx<Cell>,
-    pub fields: HashSet<Idx<Cell>>,
-    pub slots: HashMap<Idx<Cell>, u32>,
+    pub slots: &'a HashMap<Idx<Cell>, u32>,
+}
+
+impl FrameInfo<'_> {
+    pub fn schema(&self) -> FrameSchema {
+        let mut slots: Vec<u32> = self.slots.values().copied().collect();
+        slots.sort_unstable();
+        FrameSchema { slots }
+    }
 }
 
 /// Convert every closure in `mf` to a defunctionalized record + a hoisted sibling
@@ -139,7 +146,7 @@ pub fn convert_closures(mf: &mut MirFunc, name_base: &str) {
 pub fn convert_closures_framed(
     mf: &mut MirFunc,
     name_base: &str,
-    frame: Option<&FrameInfo>,
+    frame: Option<&FrameInfo<'_>>,
     precomputed: Option<(&ScopeTree, &Ownership)>,
 ) {
     if !mf
@@ -168,14 +175,14 @@ pub fn convert_closures_framed(
     // Frame cells are table-mediated (via `s` or a by-value loop-binding snapshot
     // of a frame field), never boxed -- matches codegen's `b.retain(!frame)`.
     if let Some(f) = frame {
-        boxed.retain(|c| !f.fields.contains(c));
+        boxed.retain(|c| !f.slots.contains_key(c));
     }
     boxed.extend(non_dominating_by_value_captures(
         mf,
         tree,
         own,
         &boxed,
-        frame.map(|f| &f.fields),
+        frame.map(|f| f.slots),
     ));
 
     // lambda inst -> its scope.
@@ -239,7 +246,7 @@ pub fn convert_closures_framed(
         if let Some(f) = frame {
             let mut via_s = false;
             caps.retain(|c| {
-                if !f.fields.contains(c) {
+                if !f.slots.contains_key(c) {
                     return true;
                 }
                 let lambda_written = own
@@ -257,7 +264,7 @@ pub fn convert_closures_framed(
             // scope tree therefore makes a frame field used solely by a nested
             // lambda look lambda-owned; the coroutine transform remains the
             // authority for that cell's ownership.
-            via_s |= f.fields.iter().any(|c| own.owner.get(c) == Some(&sid));
+            via_s |= f.slots.keys().any(|c| own.owner.get(c) == Some(&sid));
             if via_s {
                 caps.push(f.s_cell);
             }
@@ -303,74 +310,18 @@ pub fn convert_closures_framed(
         let Some(s) = tree.scope_of_block(b) else {
             continue;
         }; // dead-lambda block
-        let orig = mf.blocks[b].insts.clone();
+        let orig = std::mem::take(&mut mf.blocks[b].insts);
         let mut new: Vec<Idx<Inst>> = Vec::with_capacity(orig.len());
         for id in orig {
             match mf.insts[id].clone() {
-                Inst::Load(c) => {
-                    let captured = env_plans.get(&s).is_some_and(|plan| plan.captures_cell(c));
-                    let boxed_c = boxed.contains(&c);
-                    // A frame cell accessed in a LAMBDA scope but NOT captured
-                    // directly (collapsed to `s`): reach it as `e.c<S>.c<slot>`.
-                    // Root-scope frame cells stay bare (`FrameCtx` renders them);
-                    // a loop-binding snapshot IS captured, so it takes the env path.
-                    let frame_via_s = !captured
-                        && s != crate::scope::ROOT
-                        && frame.is_some_and(|f| f.fields.contains(&c));
-                    if !captured && !boxed_c && !frame_via_s {
-                        new.push(id); // local by-value: read the cell as-is
-                        continue;
-                    }
-                    // Splice the helper insts (env load, field projection) then
-                    // REPURPOSE `id` as the final read so every reference to it
-                    // resolves to the projected value.
-                    if frame_via_s {
-                        let f = frame.unwrap();
-                        let sbase = env_frame_base(mf, &env_plans[&s], f.s_cell, &mut new);
-                        mf.insts[id] = Inst::Field {
-                            nonthrowing: false,
-                            base: sbase,
-                            field: frame_field(f.slots[&c]),
-                        };
-                    } else if captured {
-                        // A boxed cell reads `.v` on its box table; a by-value
-                        // capture is the env field directly.
-                        let env = env_plans[&s].env_cell().expect("capture has an env plan");
-                        let il = mf.alloc_inst(Inst::Load(env));
-                        new.push(il);
-                        if boxed_c {
-                            let f = mf.alloc_inst(Inst::Field {
-                                nonthrowing: false,
-                                base: il,
-                                field: field_of(&env_plans[&s], c),
-                            });
-                            new.push(f);
-                            mf.insts[id] = Inst::Field {
-                                nonthrowing: false,
-                                base: f,
-                                field: Ustr::from("v"),
-                            };
-                        } else {
-                            mf.insts[id] = Inst::Field {
-                                nonthrowing: false,
-                                base: il,
-                                field: field_of(&env_plans[&s], c),
-                            };
-                        }
-                    } else {
-                        // Local boxed: `.v` on a load of the box table.
-                        let l = mf.alloc_inst(Inst::Load(c));
-                        new.push(l);
-                        mf.insts[id] = Inst::Field {
-                            nonthrowing: false,
-                            base: l,
-                            field: Ustr::from("v"),
-                        };
-                    }
-                    new.push(id);
-                }
-                Inst::Store { cell: c, value } => {
-                    if seeded_boxes.get(&c) == Some(&id) {
+                Inst::Load(c) | Inst::Store { cell: c, .. } => {
+                    let value = match mf.insts[id] {
+                        Inst::Store { value, .. } => Some(value),
+                        _ => None,
+                    };
+                    if let Some(value) = value
+                        && seeded_boxes.get(&c) == Some(&id)
+                    {
                         let seed = mf.alloc_inst(Inst::MakeEnv {
                             fn_ref: None,
                             fields: vec![(Ustr::from("v"), value)],
@@ -383,39 +334,45 @@ pub fn convert_closures_framed(
                         new.push(id);
                         continue;
                     }
-                    let boxed_c = boxed.contains(&c);
-                    let captured = env_plans.get(&s).is_some_and(|plan| plan.captures_cell(c));
-                    // A lambda WRITING a frame cell collapses to `s` (D4(b)): the
-                    // write steers the shared frame field `e.c<S>.c<slot> = ..`.
-                    let frame_via_s = !boxed_c
-                        && !captured
-                        && s != crate::scope::ROOT
-                        && frame.is_some_and(|f| f.fields.contains(&c));
-                    if !boxed_c && !frame_via_s {
-                        new.push(id); // local plain store (root frame store -> FrameCtx)
-                        continue;
-                    }
-                    let (base, field) = if frame_via_s {
-                        let f = frame.unwrap();
-                        let sbase = env_frame_base(mf, &env_plans[&s], f.s_cell, &mut new);
-                        (sbase, frame_field(f.slots[&c]))
-                    } else if captured {
-                        let env = env_plans[&s].env_cell().expect("capture has an env plan");
-                        let il = mf.alloc_inst(Inst::Load(env));
-                        new.push(il);
-                        let f = mf.alloc_inst(Inst::Field {
-                            nonthrowing: false,
-                            base: il,
-                            field: field_of(&env_plans[&s], c),
-                        });
-                        new.push(f);
-                        (f, Ustr::from("v"))
+
+                    let plan = env_plans.get(&s).filter(|plan| plan.captures_cell(c));
+                    let boxed = boxed.contains(&c);
+                    let place = if let Some(plan) = plan {
+                        if boxed {
+                            let base = read_capture(mf, plan, c, &mut new);
+                            Some((base, Ustr::from("v")))
+                        } else if value.is_none() {
+                            let base = mf.alloc_inst(Inst::Load(
+                                plan.env_cell().expect("capture has an env plan"),
+                            ));
+                            new.push(base);
+                            Some((base, field_of(plan, c)))
+                        } else {
+                            None
+                        }
+                    } else if s != crate::scope::ROOT
+                        && let Some(frame) = frame
+                        && let Some(&slot) = frame.slots.get(&c)
+                    {
+                        let base = read_capture(mf, &env_plans[&s], frame.s_cell, &mut new);
+                        Some((base, frame_field(slot)))
+                    } else if boxed {
+                        let base = mf.alloc_inst(Inst::Load(c));
+                        new.push(base);
+                        Some((base, Ustr::from("v")))
                     } else {
-                        let l = mf.alloc_inst(Inst::Load(c));
-                        new.push(l);
-                        (l, Ustr::from("v"))
+                        None
                     };
-                    mf.insts[id] = Inst::StoreField { base, field, value };
+                    if let Some((base, field)) = place {
+                        mf.insts[id] = match value {
+                            Some(value) => Inst::StoreField { base, field, value },
+                            None => Inst::Field {
+                                nonthrowing: false,
+                                base,
+                                field,
+                            },
+                        };
+                    }
                     new.push(id);
                 }
                 Inst::Lambda { .. } => {
@@ -559,7 +516,7 @@ pub fn convert_closures_framed(
                 .cloned()
                 .unwrap_or_else(|| "missing-lambda-abi".to_string()),
             capture,
-            frame: frame_schema(frame),
+            frame: frame.map(FrameInfo::schema),
             lambda_topology: topology,
         });
         if let Some(identity) = code_identity.clone() {
@@ -684,17 +641,9 @@ fn scope_entry(mf: &MirFunc, tree: &ScopeTree, scope: ScopeId) -> Idx<Block> {
     }
 }
 
-fn frame_schema(frame: Option<&FrameInfo>) -> Option<FrameSchema> {
-    frame.map(|frame| {
-        let mut slots: Vec<u32> = frame.slots.values().copied().collect();
-        slots.sort_unstable();
-        FrameSchema { slots }
-    })
-}
-
 fn refresh_owner_compatibility(
     mf: &mut MirFunc,
-    frame: Option<&FrameInfo>,
+    frame: Option<&FrameInfo<'_>>,
     topology: LambdaTopologyFingerprint,
 ) {
     if mf.code_identity.is_none() {
@@ -706,7 +655,7 @@ fn refresh_owner_compatibility(
             .clone()
             .unwrap_or_else(|| "missing-code-abi".to_string()),
         capture: CaptureSchema::empty(),
-        frame: frame_schema(frame),
+        frame: frame.map(FrameInfo::schema),
         lambda_topology: topology,
     });
 }
@@ -715,7 +664,7 @@ fn capture_schema(
     mf: &MirFunc,
     captures: &[Idx<Cell>],
     boxed: &HashSet<Idx<Cell>>,
-    frame: Option<&FrameInfo>,
+    frame: Option<&FrameInfo<'_>>,
 ) -> CaptureSchema {
     let mut complete = true;
     let mut seen = HashSet::default();
@@ -729,7 +678,7 @@ fn capture_schema(
             {
                 complete = false;
             }
-            let mode = if frame.is_some_and(|f| f.s_cell == *cell || f.fields.contains(cell)) {
+            let mode = if frame.is_some_and(|f| f.s_cell == *cell || f.slots.contains_key(cell)) {
                 CaptureMode::Frame
             } else if boxed.contains(cell) {
                 CaptureMode::Shared
@@ -747,22 +696,19 @@ fn capture_schema(
     CaptureSchema { fields, complete }
 }
 
-/// Materialize `e.c<S>` -- a load of the env record `env` then its `s`-cell field
-/// -- the base a frame-cell access composes `.c<slot>` onto inside a hoisted body
-/// (D3). Helper insts are appended to `new`; returns the `Field` inst.
-fn env_frame_base(
+fn read_capture(
     mf: &mut MirFunc,
     plan: &ClosureEnvPlan,
-    s_cell: Idx<Cell>,
+    cell: Idx<Cell>,
     new: &mut Vec<Idx<Inst>>,
 ) -> Idx<Inst> {
-    let env = plan.env_cell().expect("frame capture has an env plan");
+    let env = plan.env_cell().expect("capture has an env plan");
     let il = mf.alloc_inst(Inst::Load(env));
     new.push(il);
     let f = mf.alloc_inst(Inst::Field {
         nonthrowing: false,
         base: il,
-        field: field_of(plan, s_cell),
+        field: field_of(plan, cell),
     });
     new.push(f);
     f
@@ -794,18 +740,6 @@ fn slot_in_scope(
         new.push(l);
         l
     } else {
-        // Transitive capture: threads through THIS scope's env.
-        let env = env_plans[&s]
-            .env_cell()
-            .expect("transitive capture has an env plan");
-        let il = mf.alloc_inst(Inst::Load(env));
-        new.push(il);
-        let f = mf.alloc_inst(Inst::Field {
-            nonthrowing: false,
-            base: il,
-            field: field_of(&env_plans[&s], cc),
-        });
-        new.push(f);
-        f
+        read_capture(mf, &env_plans[&s], cc, new)
     }
 }

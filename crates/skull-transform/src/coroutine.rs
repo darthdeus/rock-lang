@@ -25,7 +25,6 @@
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::closure::FrameInfo;
 use crate::detached::detached_region_blocks;
 use crate::visit::{raw, term_value, top_level_blocks};
 use comfy_la_arena::Idx;
@@ -86,7 +85,6 @@ pub struct CoroLowered {
     pub frame_plan: CoroutineFramePlan,
     /// Declared param cells (constructor seeds a state-table field for each).
     pub params: Vec<Idx<Cell>>,
-    pub num_states: usize,
     /// Whether the step needs a terminal-cleanup error boundary.
     pub needs_protected_resume: bool,
     /// `on_killed`/`on_resume`/`on_hot_reload` hooks peeled to the constructor:
@@ -116,6 +114,50 @@ fn emit(f: &mut MirFunc, bid: Idx<Block>, inst: Inst) -> Idx<Inst> {
     let id = f.alloc_inst(inst);
     f.blocks[bid].insts.push(id);
     id
+}
+
+fn state_store(
+    step: &mut MirFunc,
+    block: Idx<Block>,
+    state: Idx<Cell>,
+    field: ustr::Ustr,
+    value: Idx<Inst>,
+) {
+    let base = emit(step, block, Inst::Load(state));
+    emit(step, block, Inst::StoreField { base, field, value });
+}
+
+fn stamp_state(
+    step: &mut MirFunc,
+    block: Idx<Block>,
+    state: Idx<Cell>,
+    next: i64,
+    values: Vec<Idx<Inst>>,
+) -> Idx<Block> {
+    // A coroutine that killed itself must stay killed at yield or return.
+    let base = emit(step, block, Inst::Load(state));
+    let current = emit(
+        step,
+        block,
+        Inst::Field {
+            nonthrowing: false,
+            base,
+            field: ustr::Ustr::from(STATE),
+        },
+    );
+    let killed = emit(step, block, Inst::Const(Lit::Int(-1)));
+    let already_terminal = emit(step, block, Inst::Eq(current, killed));
+    let killed_bb = step.new_block();
+    let stamp_bb = step.new_block();
+    step.blocks[block].term = Term::Branch {
+        cond: already_terminal,
+        then_bb: killed_bb,
+        else_bb: stamp_bb,
+    };
+    let next = emit(step, stamp_bb, Inst::Const(Lit::Int(next)));
+    state_store(step, stamp_bb, state, ustr::Ustr::from(STATE), next);
+    step.blocks[stamp_bb].term = Term::Return(values);
+    killed_bb
 }
 
 fn vfield(v: Idx<Inst>) -> ustr::Ustr {
@@ -258,31 +300,15 @@ fn cells_live_at_yield_resumes(func: &MirFunc, blocks: &[Idx<Block>]) -> HashSet
         let mut uses = HashSet::default();
         let mut defs = HashSet::default();
         for &id in &func.blocks[block].insts {
-            match &func.insts[id] {
-                Inst::Load(cell) => {
-                    if !defs.contains(cell) {
-                        uses.insert(*cell);
-                    }
-                }
-                Inst::Store { cell, .. } => {
-                    defs.insert(*cell);
-                }
-                Inst::CallMulti { dests, .. }
-                | Inst::CallValueMulti { dests, .. }
-                | Inst::CallBoundMulti { dests, .. } => {
-                    defs.extend(dests.iter().copied());
-                }
-                Inst::MapNext {
-                    key_cell, val_cell, ..
-                } => {
-                    if !defs.contains(key_cell) {
-                        uses.insert(*key_cell);
-                    }
-                    defs.insert(*key_cell);
-                    defs.insert(*val_cell);
-                }
-                _ => {}
+            let inst = &func.insts[id];
+            if let Inst::Load(cell) | Inst::MapNext { key_cell: cell, .. } = inst
+                && !defs.contains(cell)
+            {
+                uses.insert(*cell);
             }
+            inst.cell_writes_each(&mut |cell| {
+                defs.insert(cell);
+            });
         }
         block_use.insert(block, uses);
         block_def.insert(block, defs);
@@ -312,11 +338,6 @@ fn live_in<K: Copy + Eq + std::hash::Hash>(
         .copied()
         .map(|block| (block, HashSet::default()))
         .collect();
-    let mut live_out: HashMap<Idx<Block>, HashSet<K>> = blocks
-        .iter()
-        .copied()
-        .map(|block| (block, HashSet::default()))
-        .collect();
     loop {
         let mut changed = false;
         for &block in blocks.iter().rev() {
@@ -328,16 +349,9 @@ fn live_in<K: Copy + Eq + std::hash::Hash>(
             });
             let mut input = block_use[&block].clone();
             input.extend(out.difference(&block_def[&block]).copied());
-            if live_out
-                .insert(block, out.clone())
-                .is_some_and(|old| old != out)
-            {
-                changed = true;
-            }
-            if live_in
-                .insert(block, input.clone())
-                .is_some_and(|old| old != input)
-            {
+            let previous = live_in.get_mut(&block).unwrap();
+            if *previous != input {
+                *previous = input;
                 changed = true;
             }
         }
@@ -348,52 +362,31 @@ fn live_in<K: Copy + Eq + std::hash::Hash>(
     live_in
 }
 
-/// Cells used by detached defer/hook regions must remain in the shared frame;
-/// those regions run independently of the current step segment.
-fn cells_referenced_by_detached_regions(
+/// A defer's scope-exit splice shares closure bodies with the detached copy.
+/// Its locals must therefore use the same capture representation.
+fn detached_uses(
     func: &MirFunc,
     entries: impl IntoIterator<Item = Idx<Block>>,
-) -> HashSet<Idx<Cell>> {
+) -> (HashSet<Idx<Cell>>, HashSet<LambdaSiteId>) {
     let mut cells = HashSet::default();
-    for entry in entries {
-        for block in detached_region_blocks(func, entry) {
-            for &id in &func.blocks[block].insts {
-                func.insts[id].cells_each(&mut |cell| {
-                    cells.insert(cell);
-                });
-            }
-        }
-    }
-    cells
-}
-
-/// Source sites of the lambdas inside detached defer/hook regions.
-///
-/// A defer's scope-exit splice in the step is a second lowering of the same
-/// body, so its lambdas share their sites, and thus their code identities and
-/// hoisted bodies, with the detached copy. The detached copy keeps the
-/// defer's own locals off the frame (boxed when a lambda writes them), so the
-/// splice must capture those locals the same way: pinning them to the frame
-/// for an escaping lambda would hand the shared body the frame where it
-/// expects a box or a value. A defer body cannot yield, so its locals never
-/// need the frame to survive a suspension.
-fn detached_lambda_sites(
-    func: &MirFunc,
-    entries: impl IntoIterator<Item = Idx<Block>>,
-) -> HashSet<LambdaSiteId> {
     let mut sites = HashSet::default();
-    for entry in entries {
-        for block in detached_region_blocks(func, entry) {
-            for &id in &func.blocks[block].insts {
-                if matches!(func.insts[id], Inst::Lambda { .. })
-                    && let Some(site) = lambda_site(func, id)
-                {
-                    sites.insert(site);
-                }
+    for block in entries
+        .into_iter()
+        .flat_map(|entry| detached_region_blocks(func, entry))
+    {
+        for &id in &func.blocks[block].insts {
+            let inst = &func.insts[id];
+            inst.cells_each(&mut |cell| {
+                cells.insert(cell);
+            });
+            if matches!(inst, Inst::Lambda { .. })
+                && let Some(site) = lambda_site(func, id)
+            {
+                sites.insert(site);
             }
         }
     }
-    sites
+    (cells, sites)
 }
 
 fn lambda_site(func: &MirFunc, lambda: Idx<Inst>) -> Option<LambdaSiteId> {
@@ -524,7 +517,7 @@ pub fn transform_coroutine(
     let frame_cells: HashSet<Idx<Cell>> = {
         let root = crate::scope::ROOT;
         let root_owned = |cell: &Idx<Cell>| own.owner.get(cell).is_some_and(|&owner| owner == root);
-        let detached_sites = detached_lambda_sites(
+        let (detached_cells, detached_sites) = detached_uses(
             &step,
             step.coro_defers
                 .iter()
@@ -544,21 +537,8 @@ pub fn transform_coroutine(
             .collect::<HashSet<_>>();
         let mut fields = cells_live_at_yield_resumes(&step, &orig_blocks);
         fields.extend(params.iter().copied());
-        fields.extend(
-            captured_by_escaping_lambda
-                .into_iter()
-                .filter(|cell| root_owned(cell)),
-        );
-        let detached_entries = step
-            .coro_defers
-            .iter()
-            .map(|(_, entry)| *entry)
-            .chain(hooks.iter().map(|(_, entry)| *entry));
-        fields.extend(
-            cells_referenced_by_detached_regions(&step, detached_entries)
-                .into_iter()
-                .filter(|cell| root_owned(cell)),
-        );
+        fields.extend(captured_by_escaping_lambda);
+        fields.extend(detached_cells);
         fields.retain(|cell| *cell != s_cell && *cell != resume_arg && root_owned(cell));
         fields
     };
@@ -629,139 +609,38 @@ pub fn transform_coroutine(
             // multi-return directly (scalar / bare yield -- no box to remove).
             if frame_slot_channel {
                 for (i, &v) in values.iter().enumerate() {
-                    let sv = emit(&mut step, bid, Inst::Load(s_cell));
-                    emit(
-                        &mut step,
-                        bid,
-                        Inst::StoreField {
-                            base: sv,
-                            field: skull_mir::lower::yield_slot(i),
-                            value: v,
-                        },
-                    );
+                    state_store(&mut step, bid, s_cell, skull_mir::lower::yield_slot(i), v);
                 }
             }
-            // The stamp is guarded on `state != -1` (mirror the completion
-            // stamp): a body that killed its own handle mid-run must stay
-            // killed, not resurrect via a positive resume state. The killed
-            // arm returns nothing -- a dead coroutine's resume yields nil.
-            let sv = emit(&mut step, bid, Inst::Load(s_cell));
-            let st = emit(
-                &mut step,
-                bid,
-                Inst::Field {
-                    nonthrowing: false,
-                    base: sv,
-                    field: ustr::Ustr::from(STATE),
-                },
-            );
-            let killed = emit(&mut step, bid, Inst::Const(Lit::Int(-1)));
-            let already_terminal = emit(&mut step, bid, Inst::Eq(st, killed));
-            let killed_bb = step.new_block();
-            let stamp_bb = step.new_block();
-            step.blocks[bid].term = Term::Branch {
-                cond: already_terminal,
-                then_bb: killed_bb,
-                else_bb: stamp_bb,
-            };
-
-            let kc = emit(&mut step, stamp_bb, Inst::Const(Lit::Int(k)));
-            let sv2 = emit(&mut step, stamp_bb, Inst::Load(s_cell));
-            emit(
-                &mut step,
-                stamp_bb,
-                Inst::StoreField {
-                    base: sv2,
-                    field: ustr::Ustr::from(STATE),
-                    value: kc,
-                },
-            );
-            step.blocks[stamp_bb].term = if frame_slot_channel {
-                Term::Return(Vec::new())
+            let returned = if frame_slot_channel {
+                Vec::new()
             } else {
-                Term::Return(values)
+                values
             };
+            let killed_bb = stamp_state(&mut step, bid, s_cell, k, returned);
             step.blocks[killed_bb].term = Term::Return(Vec::new());
         }
     }
     let num_states = resume_of_state.len();
 
-    // 3. Normal returns -> stash `s.__return`, mark completed (-3), bare
-    // return. The stamp is guarded on `state != -1`: a body that killed its own
-    // handle mid-run (state already -1) must STAY killed -- neither clobber
-    // the terminal to -3 (completed() would lie) nor keep a stashed result a
-    // kill promised not to have.
     for &bid in &orig_blocks {
         if yield_blocks.contains(&bid) {
             continue;
         }
-        let ret_val = match (&step.blocks[bid].term, has_return_value) {
-            // A co fn's completion value is single (never scalarized); take it.
-            (Term::Return(vs), true) => Some(vs.first().copied()),
-            (Term::Return(_), false) => Some(None),
-            _ => None,
+        let Term::Return(values) = &step.blocks[bid].term else {
+            continue;
         };
-        if let Some(v0) = ret_val {
-            if let Some(v) = v0 {
-                let sv = emit(&mut step, bid, Inst::Load(s_cell));
-                emit(
-                    &mut step,
-                    bid,
-                    Inst::StoreField {
-                        base: sv,
-                        field: ustr::Ustr::from("__return"),
-                        value: v,
-                    },
-                );
-            }
-            let sv = emit(&mut step, bid, Inst::Load(s_cell));
-            let st = emit(
-                &mut step,
-                bid,
-                Inst::Field {
-                    nonthrowing: false,
-                    base: sv,
-                    field: ustr::Ustr::from(STATE),
-                },
-            );
-            let killed = emit(&mut step, bid, Inst::Const(Lit::Int(-1)));
-            let already_terminal = emit(&mut step, bid, Inst::Eq(st, killed));
-            let killed_bb = step.new_block();
-            let stamp_bb = step.new_block();
-            step.blocks[bid].term = Term::Branch {
-                cond: already_terminal,
-                then_bb: killed_bb,
-                else_bb: stamp_bb,
-            };
-
-            let dc = emit(&mut step, stamp_bb, Inst::Const(Lit::Int(-3)));
-            let sv2 = emit(&mut step, stamp_bb, Inst::Load(s_cell));
-            emit(
-                &mut step,
-                stamp_bb,
-                Inst::StoreField {
-                    base: sv2,
-                    field: ustr::Ustr::from(STATE),
-                    value: dc,
-                },
-            );
-            step.blocks[stamp_bb].term = Term::Return(Vec::new());
-
-            if v0.is_some() {
-                let nil = emit(&mut step, killed_bb, Inst::Const(Lit::Nil));
-                let sv3 = emit(&mut step, killed_bb, Inst::Load(s_cell));
-                emit(
-                    &mut step,
-                    killed_bb,
-                    Inst::StoreField {
-                        base: sv3,
-                        field: ustr::Ustr::from("__return"),
-                        value: nil,
-                    },
-                );
-            }
-            step.blocks[killed_bb].term = Term::Return(Vec::new());
+        let result = has_return_value.then(|| values.first().copied()).flatten();
+        let field = ustr::Ustr::from("__return");
+        if let Some(value) = result {
+            state_store(&mut step, bid, s_cell, field, value);
         }
+        let killed_bb = stamp_state(&mut step, bid, s_cell, -3, Vec::new());
+        if result.is_some() {
+            let nil = emit(&mut step, killed_bb, Inst::Const(Lit::Nil));
+            state_store(&mut step, killed_bb, s_cell, field, nil);
+        }
+        step.blocks[killed_bb].term = Term::Return(Vec::new());
     }
 
     // 3b. Spill cross-block values (loop-carried collections/bounds, multi-yield
@@ -966,7 +845,6 @@ pub fn transform_coroutine(
         s_cell,
         frame_plan: CoroutineFramePlan::new(frame_cells, frame_slots, spill_values, layout_hash),
         params,
-        num_states,
         needs_protected_resume,
         hooks,
         step_tree: tree,
@@ -982,40 +860,6 @@ fn dense_slots(cells: impl Iterator<Item = Idx<Cell>>) -> HashMap<Idx<Cell>, u32
         .enumerate()
         .map(|(i, c)| (c, i as u32))
         .collect()
-}
-
-impl CoroLowered {
-    /// Frame cells owned by the coroutine's root and therefore shared with a
-    /// detached hook/defer body. Cells introduced only by that detached body
-    /// remain ordinary locals in its own `MirFunc`.
-    pub(crate) fn root_frame_info(&self) -> FrameInfo {
-        let fields: HashSet<Idx<Cell>> = self
-            .frame_plan
-            .fields()
-            .iter()
-            .copied()
-            .filter(|c| {
-                self.params.contains(c)
-                    || self
-                        .step_own
-                        .owner
-                        .get(c)
-                        .is_some_and(|owner| *owner == crate::scope::ROOT)
-            })
-            .collect();
-        let slots = self
-            .frame_plan
-            .slots()
-            .iter()
-            .filter(|(cell, _)| fields.contains(cell))
-            .map(|(&cell, &slot)| (cell, slot))
-            .collect();
-        FrameInfo {
-            s_cell: self.s_cell,
-            fields,
-            slots,
-        }
-    }
 }
 
 #[cfg(test)]
