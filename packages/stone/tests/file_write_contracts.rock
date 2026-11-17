@@ -1,0 +1,41 @@
+@test
+fn file_write_wrappers_preserve_binary_slices_and_append() {
+    let root = env_var("ROCK_TEST_TMP").unwrap()
+    let first = root + "/write-contract-a.bin"
+    let second = root + "/write-contract-b.bin"
+    let bytes = "prefixA\u{0}Zsuffix".substring(6, 9)
+    let single = file_write_async(first, bytes)
+    assert(single > 0)
+    assert_eq(stone_file_write_poll(single, true), 1)
+    assert_eq(stone_file_read(first).unwrap(), "A\u{0}Z")
+    let append = file_write_async(first, "!", true)
+    assert(append > 0)
+    assert_eq(stone_file_write_poll(append, true), 1)
+    assert_eq(stone_file_read(first).unwrap(), "A\u{0}Z!")
+    let pair = file_write_pair_async(first, bytes, second, "preB\u{0}Qpost".substring(3, 6))
+    assert(pair > 0)
+    assert_eq(stone_file_write_poll(pair, true), 1)
+    assert_eq(stone_file_read(first).unwrap(), "A\u{0}Z")
+    assert_eq(stone_file_read(second).unwrap(), "B\u{0}Q")
+}
+
+@test
+fn file_transaction_wrappers_stage_payload_before_publication() {
+    let root = env_var("ROCK_TEST_TMP").unwrap()
+    let data = root + "/transaction-data.bin"
+    let manifest = root + "/transaction-manifest.bin"
+    assert(stone_file_write(data, "old data"))
+    assert(stone_file_write(manifest, "old manifest"))
+    let transaction = stone_file_transaction_begin()
+    assert(transaction > 0)
+    assert(file_transaction_write(transaction, data, "preA\u{0}Zpost".substring(3, 6)))
+    assert(file_transaction_write(transaction, data, "!", true))
+    assert(file_transaction_publish(transaction, manifest, "preM\u{0}Zpost".substring(3, 6)))
+    assert_eq(stone_file_read(data).unwrap(), "old data")
+    assert_eq(stone_file_read(manifest).unwrap(), "old manifest")
+    let job = stone_file_transaction_commit(transaction)
+    assert(job > 0)
+    assert_eq(stone_file_transaction_poll(job, true), 1)
+    assert_eq(stone_file_read(data).unwrap(), "A\u{0}Z!")
+    assert_eq(stone_file_read(manifest).unwrap(), "M\u{0}Z")
+}
