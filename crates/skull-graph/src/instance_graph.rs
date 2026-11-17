@@ -159,18 +159,6 @@ pub enum RejectionKind {
     IdentityInOrdinaryStorage,
 }
 
-impl RejectionKind {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::ChangingInstanceRecursion => "changing-instance-recursion",
-            Self::GenericFnValue => "generic-fn-value",
-            Self::UnconstrainedTypeVar => "unconstrained-type-var",
-            Self::ConcreteTypeUnavailable => "concrete-type-unavailable",
-            Self::IdentityInOrdinaryStorage => "identity-in-ordinary-storage",
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct Rejection {
     pub kind: RejectionKind,
@@ -265,8 +253,7 @@ pub struct Contribution {
     pub unresolved: Vec<Unresolved>,
     pub rejections: Vec<Rejection>,
     pub always_emitted_targets: BTreeSet<Instance>,
-    /// Always-emitted call sites that could not instantiate, by callee name.
-    pub always_emitted_holes: Vec<AlwaysEmittedHole>,
+    always_emitted_failures: usize,
     /// Every instance this walk reached, with the substitution it reached it
     /// UNDER. [`InstanceGraph::substitutions`] is derived from these, so an
     /// instance whose only caller is gone loses its substitution with it.
@@ -443,20 +430,9 @@ impl Walk<'_> {
         }
     }
 
-    /// Keep each failed site separately so diagnostics retain their individual spans.
-    fn record_always_emitted_hole(
-        &mut self,
-        name: String,
-        callee: FuncRef,
-        outcome: AlwaysEmittedOutcome,
-        span: Span,
-    ) {
+    fn record_always_emitted_failure(&mut self, span: Span) {
         self.saw(span);
-        self.out.always_emitted_holes.push(AlwaysEmittedHole {
-            name,
-            callee,
-            failure: AlwaysEmittedFailure { outcome, span },
-        });
+        self.out.always_emitted_failures += 1;
     }
 }
 
@@ -624,18 +600,6 @@ pub struct InstanceGraph {
     recursion_by_decl: BTreeMap<DeclKey, BTreeSet<Instance>>,
     recursion_positions: BTreeMap<Instance, usize>,
     coroutine_positions: BTreeMap<Instance, usize>,
-    /// Names with no concrete instance covering the obligation that put them
-    /// here, BY CAUSE. See [`RootHole`]: one set carrying several different
-    /// facts could only ever be read as the weakest of them.
-    pub uninstantiated_roots: BTreeMap<String, RootHole>,
-    /// Row indices into each owner's authoritative `always_emitted_holes`.
-    root_hole_sites: BTreeMap<String, BTreeMap<Owner, Vec<usize>>>,
-    root_hole_dirty_names: BTreeSet<String>,
-    /// Generic emission roots the narrowing in [`generic_root_obligation`] ruled
-    /// out, keyed by the reason. Recorded, not dropped: the population a check
-    /// EXCLUDED is the only way to tell a narrowed gate from a dead one, and a
-    /// filter whose rejects are invisible reads as "there were none".
-    pub excused_generic_roots: BTreeMap<&'static str, BTreeSet<String>>,
     /// Every reached boundary, classified by its calling contract.
     pub boundaries: BTreeMap<String, Boundary>,
     /// Helper symbols owned by coroutine instances.
@@ -692,50 +656,6 @@ pub const ERASED_RUNTIME_ENTRIES: &[&str] = &[
 /// in every program.
 pub fn is_erased_runtime_entry(f: &Function) -> bool {
     ERASED_RUNTIME_ENTRIES.contains(&f.name.as_str())
-}
-
-/// Why a generic emission root carries no uncovered bare-name obligation, or
-/// `None` when it does.
-///
-/// The obligation is "exist under a BARE name that opaque target text can call", so it is a
-/// property of the EMITTED
-/// SYMBOL, not of genericity. Two things discharge it, and both are enforced
-/// rather than promised:
-///
-/// - **mangled**: under ALWAYS-MANGLE the emitted symbol is
-///   `name_param_ret_result`, which no opaque body can spell -- a Lua string
-///   naming it would have to restate a mangling the compiler owns, and a
-///   mangling change would break it silently. The obligation exists only for the
-///   [`skull_mir::mangle::is_exempt`] set, which is exactly the set of
-///   declarations whose emitted symbol IS their source name.
-/// - **stdlib-funcref**: the [`ERASED_RUNTIME_ENTRIES`] catalogue is reached
-///   through `Builder::stdlib_funcref`, which REJECTS at compile time when the
-///   stdlib has no body serving the active target. Existence-per-target is the
-///   contract, and it is checked, not asserted (1.4).
-///
-/// The catalogue is a set of NAMES, and a name is not a declaration. Membership
-/// alone is a PROXY for "this is the entry the compiler resolves to", and a
-/// weaker question than the one being asked: a user `@nomangle` generic sharing
-/// a catalogue name is not that entry, and excusing it would falsely close a
-/// program. So the excusal asks the same resolver `stdlib_funcref` does
-/// ([`stdlib_entry_representative`]) and excuses only the declaration it
-/// selects. When that resolver is ambiguous -- exactly what `stdlib_funcref`
-/// itself rejects on -- nothing is excused and the obligation stands.
-///
-/// Deliberately NOT a discharge: having concrete instances from Rock call
-/// sites. Those cover the call sites and not the bare-name entry, which is the
-/// falsely-green reading [`RootHole`] exists to prevent.
-fn generic_root_obligation(ws: &Workspace, r: FuncRef, f: &Function) -> Option<&'static str> {
-    if !skull_mir::mangle::is_exempt(f) {
-        return Some("mangled");
-    }
-    // `r` is already canonicalized by `build`, so this compares like for like.
-    if ERASED_RUNTIME_ENTRIES.contains(&f.name.as_str())
-        && stdlib_entry_representative(ws, f.name.as_str()) == Some(r)
-    {
-        return Some("stdlib-funcref");
-    }
-    None
 }
 
 /// Re-exported from [`skull_mir::monoty`], which owns the decision so the graph
@@ -812,59 +732,6 @@ impl InstanceGraph {
     pub fn logical_symbol(&self, ws: &Workspace, i: &Instance) -> String {
         i.symbol(ws, &self.interner)
     }
-}
-
-/// The failure classification before locating it in an always-emitted body.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AlwaysEmittedOutcome {
-    Unresolved(&'static str),
-    Rejection(RejectionKind),
-}
-
-impl AlwaysEmittedOutcome {
-    /// Census key. Reason bucket for the unresolved case, kind name for the
-    /// rejection case -- the two never collide because the kind names are the
-    /// `RejectionKind` catalogue.
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Unresolved(r) => r,
-            Self::Rejection(k) => k.name(),
-        }
-    }
-}
-
-/// One call site in an always-emitted body whose instantiation failed. Carries
-/// what a [`Rejection`] or an [`Unresolved`] at the same failure would: the
-/// classification, and the span the diagnostic points at.
-#[derive(Debug, Clone)]
-pub struct AlwaysEmittedFailure {
-    pub outcome: AlwaysEmittedOutcome,
-    pub span: Span,
-}
-
-/// The resolved callee stays beside its emitted name because a mangled name
-/// cannot be looked up in the workspace's source-name index.
-#[derive(Debug, Clone)]
-pub struct AlwaysEmittedHole {
-    pub name: String,
-    pub callee: FuncRef,
-    pub failure: AlwaysEmittedFailure,
-}
-
-/// Unfulfilled generic root and always-emitted call obligations for a symbol.
-#[derive(Debug, Default, Clone)]
-pub struct RootHole {
-    /// A generic function that is an emission root: production emits its body
-    /// regardless of any call, so its obligation is to exist under a BARE name.
-    /// Concrete instances do not discharge that, which is why this coexists
-    /// with a non-zero [`Self::instances`].
-    pub generic_root: bool,
-    /// Every SITE at which a call from an always-emitted body could not
-    /// instantiate it, with the span the diagnostic points at. Empty when
-    /// [`Self::generic_root`] is the only cause.
-    pub always_emitted_sites: Vec<AlwaysEmittedFailure>,
-    /// Instances of this same function the walk created from other call sites.
-    pub instances: usize,
 }
 
 /// A span the walk could not fill in. `Span::unknown` is the only way one is
@@ -1100,10 +967,6 @@ impl InstanceGraph {
             recursion_by_decl: BTreeMap::new(),
             recursion_positions: BTreeMap::new(),
             coroutine_positions: BTreeMap::new(),
-            uninstantiated_roots: BTreeMap::new(),
-            root_hole_sites: BTreeMap::new(),
-            root_hole_dirty_names: BTreeSet::new(),
-            excused_generic_roots: BTreeMap::new(),
             boundaries: BTreeMap::new(),
             coroutine_helpers: BTreeSet::new(),
             coroutine_helpers_by_owner: BTreeMap::new(),
@@ -1112,38 +975,11 @@ impl InstanceGraph {
     }
 
     fn seed_roots(&mut self, ws: &Workspace, roots: Vec<FuncRef>) {
-        self.root_instances.clear();
-        self.uninstantiated_roots.clear();
-        self.root_hole_dirty_names.clear();
-        self.excused_generic_roots.clear();
-        // A root that is generic has no instantiation of its own; it is a
-        // shared body until a call supplies one. Recorded rather than invented.
-        for r in roots {
-            let f = &ws.module(r.module).functions[r.func];
-            if !f.generics.is_empty() {
-                match generic_root_obligation(ws, r, f) {
-                    Some(reason) => {
-                        self.excused_generic_roots
-                            .entry(reason)
-                            .or_default()
-                            .insert(mangle_fn(ws, f));
-                    }
-                    None => {
-                        let name = mangle_fn(ws, f);
-                        self.root_hole_dirty_names.insert(name.clone());
-                        self.uninstantiated_roots
-                            .entry(name)
-                            .or_default()
-                            .generic_root = true;
-                    }
-                }
-                continue;
-            }
-            self.root_instances.insert(Instance {
-                func: r,
-                args: Vec::new(),
-            });
-        }
+        self.root_instances = roots
+            .into_iter()
+            .filter(|r| ws.module(r.module).functions[r.func].generics.is_empty())
+            .map(Instance::base)
+            .collect();
     }
 
     /// Globals and decorators have no `Instance` origin, so their bodies are
@@ -1351,7 +1187,7 @@ impl InstanceGraph {
                         stats.contribution_struct_default_domains += c.struct_default_domains.len();
                         stats.contribution_rejections += c.rejections.len();
                         stats.contribution_failures +=
-                            c.rejections.len() + c.unresolved.len() + c.always_emitted_holes.len();
+                            c.rejections.len() + c.unresolved.len() + c.always_emitted_failures;
                         stats.contribution_always_emitted_targets += c.always_emitted_targets.len();
                     }
                     let (demanded, install_timing) =
@@ -1578,7 +1414,6 @@ impl InstanceGraph {
                 for &at in &share.owned {
                     let (owner, c) = &share.installed[at];
                     self.index_owned_rows(owner, c, false, &mut index);
-                    self.record_root_holes(owner, c);
                 }
                 walked_with.extend(share.walked_with);
                 installed.append(&mut share.installed);
@@ -1652,10 +1487,7 @@ impl InstanceGraph {
                 }
                 share.reached_rows += c.reached.len();
                 share.counts.add_counters(&c);
-                if !(c.bound_trees.is_empty()
-                    && c.always_emitted_targets.is_empty()
-                    && c.always_emitted_holes.is_empty())
-                {
+                if !(c.bound_trees.is_empty() && c.always_emitted_targets.is_empty()) {
                     share.owned.push(share.installed.len());
                 }
                 if let (Owner::Instance(i), Some(tree)) = (&owner, inputs.tree) {
@@ -2011,7 +1843,6 @@ impl InstanceGraph {
         for to in &c.always_emitted_targets {
             self.lost.remove(to);
         }
-        self.record_root_holes(&owner, &c);
         // `expand` folded repeated callees and ordered the rows by instance.
         // The owner itself is not demanded: `install` uninstalled it first,
         // so a body that reaches ITSELF -- any recursive function -- would
@@ -2082,18 +1913,6 @@ impl InstanceGraph {
         index.always_emitted_ns = elapsed_ns(lane_start);
     }
 
-    fn record_root_holes(&mut self, owner: &Owner, c: &Contribution) {
-        for (row, hole) in c.always_emitted_holes.iter().enumerate() {
-            self.root_hole_dirty_names.insert(hole.name.clone());
-            self.root_hole_sites
-                .entry(hole.name.clone())
-                .or_default()
-                .entry(owner.clone())
-                .or_default()
-                .push(row);
-        }
-    }
-
     /// Remove a contribution and everything the indices held on its behalf.
     ///
     /// An index entry disappears when its last owner does, never when a count
@@ -2109,15 +1928,6 @@ impl InstanceGraph {
             .contributions
             .remove(owner)
             .expect("presence was checked above");
-        for hole in &old.always_emitted_holes {
-            self.root_hole_dirty_names.insert(hole.name.clone());
-            if let Some(owners) = self.root_hole_sites.get_mut(&hole.name) {
-                owners.remove(owner);
-                if owners.is_empty() {
-                    self.root_hole_sites.remove(&hole.name);
-                }
-            }
-        }
         if let Some(instance) = owner.instance() {
             if self.instances.remove(instance) {
                 if !self.delta_added.remove(instance) {
@@ -2351,62 +2161,28 @@ impl InstanceGraph {
         let added = canonical_roots(ws, root_added.to_vec());
         let removed = canonical_roots(ws, root_removed.to_vec());
         for root in removed {
-            if added.contains(&root) {
+            if added.contains(&root)
+                || !ws.module(root.module).functions[root.func]
+                    .generics
+                    .is_empty()
+            {
                 continue;
             }
-            let f = &ws.module(root.module).functions[root.func];
-            if f.generics.is_empty() {
-                let instance = Instance {
-                    func: root,
-                    args: Vec::new(),
-                };
-                self.root_instances.remove(&instance);
-                if self
-                    .contributions
-                    .contains_key(&Owner::Instance(instance.clone()))
-                {
-                    self.lost.insert(instance);
-                }
-            } else {
-                let name = mangle_fn(ws, f);
-                self.root_hole_dirty_names.insert(name.clone());
-                if let Some(hole) = self.uninstantiated_roots.get_mut(&name) {
-                    hole.generic_root = false;
-                }
-                for roots in self.excused_generic_roots.values_mut() {
-                    roots.remove(&name);
-                }
-                self.excused_generic_roots
-                    .retain(|_, roots| !roots.is_empty());
+            let instance = Instance::base(root);
+            self.root_instances.remove(&instance);
+            if self
+                .contributions
+                .contains_key(&Owner::Instance(instance.clone()))
+            {
+                self.lost.insert(instance);
             }
         }
-        for root in added {
-            let f = &ws.module(root.module).functions[root.func];
-            if f.generics.is_empty() {
-                self.root_instances.insert(Instance {
-                    func: root,
-                    args: Vec::new(),
-                });
-            } else if let Some(reason) = generic_root_obligation(ws, root, f) {
-                self.excused_generic_roots
-                    .entry(reason)
-                    .or_default()
-                    .insert(mangle_fn(ws, f));
-            } else {
-                let name = mangle_fn(ws, f);
-                self.root_hole_dirty_names.insert(name.clone());
-                self.uninstantiated_roots
-                    .entry(name)
-                    .or_default()
-                    .generic_root = true;
-            }
-        }
-    }
-
-    fn refresh_root_hole_sites(&mut self) {
-        let mut names: BTreeSet<String> = self.uninstantiated_roots.keys().cloned().collect();
-        names.extend(self.root_hole_sites.keys().cloned());
-        self.refresh_root_hole_sites_for_names(&names)
+        self.root_instances.extend(
+            added
+                .into_iter()
+                .filter(|r| ws.module(r.module).functions[r.func].generics.is_empty())
+                .map(Instance::base),
+        );
     }
 
     /// Compute fresh-build postpasses. Every walked instance is already reachable.
@@ -2430,9 +2206,6 @@ impl InstanceGraph {
             .cloned()
             .collect();
         self.clear_graph_postpass_rejections();
-        self.refresh_root_hole_sites();
-        self.refresh_root_hole_instances(ws);
-        self.root_hole_dirty_names.clear();
 
         self.run_stats.derive_ns = derive_start.elapsed().as_nanos() as u64;
         let post_pass_start = Instant::now();
@@ -2501,18 +2274,12 @@ impl InstanceGraph {
                 let f = &ws.module(member.0.module).functions[member.0.func];
                 let name = mangle_fn(ws, f);
                 self.boundaries.remove(&name);
-                if self.uninstantiated_roots.contains_key(&name) {
-                    self.root_hole_dirty_names.insert(name);
-                }
             }
         }
         let active_decl_vec: Vec<DeclKey> = active_decls.iter().cloned().collect();
         record_inline_body_nomangle_roots(self, ws, active_decl_vec.iter().map(|decl| decl.0));
         classify_boundaries(self, ws, &active_decl_vec);
         self.refresh_coroutine_rejections(ws, touched_instances.iter().cloned());
-        let dirty_root_hole_names = std::mem::take(&mut self.root_hole_dirty_names);
-        self.refresh_root_hole_sites_for_names(&dirty_root_hole_names);
-        self.refresh_root_hole_instances_local(ws, &dirty_root_hole_names);
 
         let mut previous_recursion_starts =
             self.retract_recursion_findings(&touched_instances, &touched_decls);
@@ -2574,60 +2341,6 @@ impl InstanceGraph {
             seeds: prune.seeds,
             boundary_predecessor_edges_examined: prune.boundary_predecessor_edges_examined,
         }
-    }
-
-    fn refresh_root_hole_sites_for_names(&mut self, names: &BTreeSet<String>) {
-        for name in names {
-            let failures: Vec<AlwaysEmittedFailure> = self
-                .root_hole_sites
-                .get(name)
-                .into_iter()
-                .flat_map(|owners| owners.iter())
-                .flat_map(|(owner, rows)| {
-                    let contribution = &self.contributions[owner];
-                    rows.iter()
-                        .map(|&row| contribution.always_emitted_holes[row].failure.clone())
-                })
-                .collect();
-            let generic_root = self
-                .uninstantiated_roots
-                .get(name)
-                .is_some_and(|hole| hole.generic_root);
-            if !generic_root && failures.is_empty() {
-                self.uninstantiated_roots.remove(name);
-            } else {
-                self.uninstantiated_roots
-                    .entry(name.clone())
-                    .or_default()
-                    .always_emitted_sites = failures;
-            }
-        }
-    }
-
-    fn refresh_root_hole_instances_local(&mut self, ws: &Workspace, names: &BTreeSet<String>) {
-        for name in names {
-            let Some(hole) = self.uninstantiated_roots.get_mut(name) else {
-                continue;
-            };
-            hole.instances = Self::root_hole_instance_count(ws, &self.index, name);
-        }
-    }
-
-    fn refresh_root_hole_instances(&mut self, ws: &Workspace) {
-        for (name, hole) in &mut self.uninstantiated_roots {
-            hole.instances = Self::root_hole_instance_count(ws, &self.index, name);
-        }
-    }
-
-    fn root_hole_instance_count(ws: &Workspace, index: &Indices, name: &str) -> usize {
-        index
-            .decls
-            .iter()
-            .filter_map(|(func, instances)| {
-                (mangle_fn(ws, &ws.module(func.module).functions[func.func]) == name)
-                    .then_some(*instances)
-            })
-            .sum()
     }
 
     fn recursion_seed_closure(&self, seeds: BTreeSet<Instance>) -> BTreeSet<Instance> {
@@ -2814,11 +2527,6 @@ impl InstanceGraph {
                 }
                 for rejection in &mut contribution.rejections {
                     edit.shift_span(&mut rejection.span);
-                }
-                for hole in &mut contribution.always_emitted_holes {
-                    if edit.shift_span(&mut hole.failure.span) {
-                        self.root_hole_dirty_names.insert(hole.name.clone());
-                    }
                 }
             }
         }
@@ -3734,12 +3442,7 @@ fn walk_body_edges(
                     ),
                 });
             } else {
-                w.record_always_emitted_hole(
-                    mangle_fn(ws, cf),
-                    callee,
-                    AlwaysEmittedOutcome::Rejection(RejectionKind::GenericFnValue),
-                    span,
-                );
+                w.record_always_emitted_failure(span);
             }
         }
 
@@ -3961,15 +3664,7 @@ fn record_instantiation(
             let reason = fail.reason();
             let name = || mangle_fn(ws, &ws.module(callee.module).functions[callee.func]);
             match (from, fail) {
-                (None, fail) => {
-                    let outcome = match fail {
-                        Fail::Unconstrained => {
-                            AlwaysEmittedOutcome::Rejection(RejectionKind::UnconstrainedTypeVar)
-                        }
-                        Fail::Unresolved(reason) => AlwaysEmittedOutcome::Unresolved(reason),
-                    };
-                    w.record_always_emitted_hole(name(), callee, outcome, span);
-                }
+                (None, _) => w.record_always_emitted_failure(span),
                 (Some(from), Fail::Unconstrained) => w.push_rejection(Rejection {
                     kind: RejectionKind::UnconstrainedTypeVar,
                     at: from.clone(),
