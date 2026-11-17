@@ -2705,13 +2705,11 @@ impl<'a> Printer<'a> {
     }
 }
 
-/// Surface spelling of a non-overloadable binary operator. `&&`/`||` tokenize as
-/// `And`/`Or` whose `to_code()` is the keyword form, so special-case them.
-fn binop_str(op: &TokenKind) -> String {
+fn binop_str(op: &TokenKind) -> &'static str {
     match op {
-        TokenKind::And => "&&".to_string(),
-        TokenKind::Or => "||".to_string(),
-        other => other.to_code(),
+        TokenKind::And => "&&",
+        TokenKind::Or => "||",
+        other => other.operator_spelling(),
     }
 }
 

@@ -177,7 +177,11 @@ fn scan(path: &str, source: &str) -> Result<Scan> {
                 tokens.get(i + 1),
                 Some(TokenKind::OpenParen | TokenKind::Operator)
             ) {
-                anyhow::bail!("{path}: cannot enumerate declaration after `{token}`");
+                let name = match token {
+                    TokenKind::Ident(name) => name.as_str(),
+                    _ => token.as_keyword_identifier().expect("declaration keyword"),
+                };
+                anyhow::bail!("{path}: cannot enumerate declaration after `{name}`");
             }
         }
         if *token == TokenKind::At {

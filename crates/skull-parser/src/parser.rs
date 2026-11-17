@@ -1344,7 +1344,8 @@ impl<'a> Parser<'a> {
                         return Err(CompilerError::new_with_label(
                             sym_span,
                             format!(
-                                "operator `{symbol}` takes two parameters; only `-` and `!` have a prefix (unary) form"
+                                "operator `{}` takes two parameters; only `-` and `!` have a prefix (unary) form",
+                                symbol.operator_spelling()
                             ),
                         ));
                     }

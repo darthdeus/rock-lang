@@ -186,12 +186,6 @@ rock_keywords! {
     False = "false",
 }
 
-impl std::fmt::Display for TokenKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_code())
-    }
-}
-
 impl TokenKind {
     pub fn is_op(&self) -> bool {
         use TokenKind::*;
@@ -339,73 +333,42 @@ impl TokenKind {
         })
     }
 
-    pub fn to_code(&self) -> String {
+    pub fn operator_spelling(&self) -> &'static str {
+        use TokenKind::*;
         match self {
-            Self::Comment(body) => format!("//{body}"),
-            Self::Ident(name) => name.to_string(),
-            Self::Float(val) => val.to_string(),
-            Self::Int(_, kept) => kept.to_string(),
-            Self::String(body) | Self::RawString(body) => body.to_string(),
-            _ => self.fixed_spelling().unwrap_or("").to_owned(),
+            And => "and",
+            Or => "or",
+            Equals => "==",
+            NotEquals => "!=",
+            LessThan => "<",
+            LessThanEqual => "<=",
+            GreaterThan => ">",
+            GreaterThanEqual => ">=",
+            LeftShift => "<<",
+            RightShift => ">>",
+            BitAnd => "&",
+            BitOr => "|",
+            BitXor => "^",
+            Plus => "+",
+            Minus => "-",
+            Mul => "*",
+            Div => "/",
+            IntDiv => "./",
+            Mod => "%",
+            AddAssign => "+=",
+            SubAssign => "-=",
+            MulAssign => "*=",
+            DivAssign => "/=",
+            DoubleDot => "..",
+            DoubleQuestionMark => "??",
+            DoubleColon => "::",
+            As => "as",
+            Dot => ".",
+            Colon => ":",
+            Bang => "!",
+            BitNot => "~",
+            OpenSquare => "[",
+            _ => unreachable!("operator token"),
         }
-    }
-
-    fn fixed_spelling(&self) -> Option<&'static str> {
-        Some(match self {
-            Self::Dollar => "$",
-            Self::At => "@",
-            Self::Bang => "!",
-            Self::QuestionMark => "?",
-            Self::QuestionDot => "?.",
-            Self::DoubleQuestionMark => "??",
-            Self::TripleQuestionMark => "???",
-            Self::Dot => ".",
-            Self::DoubleDot => "..",
-            Self::TripleDot => "...",
-            Self::Colon => ":",
-            Self::DoubleColon => "::",
-            Self::Semicolon => ";",
-            Self::Comma => ",",
-            Self::OpenCurly => "{",
-            Self::CloseCurly => "}",
-            Self::OpenSquare => "[",
-            Self::CloseSquare => "]",
-            Self::OpenParen => "(",
-            Self::CloseParen => ")",
-            Self::LessThan => "<",
-            Self::LessThanEqual => "<=",
-            Self::LeftShift => "<<",
-            Self::GreaterThan => ">",
-            Self::GreaterThanEqual => ">=",
-            Self::RightShift => ">>",
-            Self::Equals => "==",
-            Self::NotEquals => "!=",
-            Self::Assign => "=",
-            Self::FatArrow => "=>",
-            Self::Arrow => "->",
-            Self::AddAssign => "+=",
-            Self::SubAssign => "-=",
-            Self::MulAssign => "*=",
-            Self::DivAssign => "/=",
-            Self::Plus => "+",
-            Self::PlusPlus => "++",
-            Self::Minus => "-",
-            Self::MinusMinus => "--",
-            Self::Mul => "*",
-            Self::Div => "/",
-            Self::IntDiv => "./",
-            Self::Mod => "%",
-            Self::BitAnd => "&",
-            Self::BitOr => "|",
-            Self::BitXor => "^",
-            Self::BitNot => "~",
-            Self::DirectiveIf => "#if",
-            Self::DirectiveElseIf => "#elseif",
-            Self::DirectiveElse => "#else",
-            Self::DirectiveEnd => "#end",
-            Self::Newline => "\n",
-            Self::EOF => "EOF",
-            _ => return self.as_keyword_identifier(),
-        })
     }
 }
