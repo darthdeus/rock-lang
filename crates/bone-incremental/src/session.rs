@@ -224,15 +224,15 @@ pub struct Session {
     /// Forward dep index: module -> the names its bodies reference. The inverse
     /// of `dependents`, kept so a body edit can update just the edited module's
     /// entry in O(its deps) instead of rescanning the whole workspace.
-    pub module_dep_names: FxHashMap<ModuleId, FxHashSet<Ustr>>,
+    module_dep_names: FxHashMap<ModuleId, FxHashSet<Ustr>>,
     /// Reverse dependencies from type names to interfaces that mention them.
-    pub dependents_iface: FxHashMap<Ustr, FxHashSet<ModuleId>>,
+    dependents_iface: FxHashMap<Ustr, FxHashSet<ModuleId>>,
     /// Independent of inference: even a module with body errors has interface
     /// deps. Invalidated when its lowered interface is replaced or purged.
     module_iface_dep_names: FxHashMap<ModuleId, FxHashSet<Ustr>>,
     pub registry: MacroRegistry,
     /// Warm macro signatures, captured before expansion removes their definitions.
-    pub warm_macros: Vec<(Ustr, MacroDef)>,
+    warm_macros: Vec<(Ustr, MacroDef)>,
     /// The package graph's alias tables, kept because every O(workspace)
     /// rebuild runs `build_namespaces` again and needs them.
     pub aliases: bone_core::modules::NsAliases,
@@ -284,20 +284,20 @@ impl SessionFile {
 
 #[derive(Clone, Debug)]
 pub struct UserFile {
-    pub text_hash: u64,
-    pub item_prints: Vec<ItemPrint>,
+    text_hash: u64,
+    item_prints: Vec<ItemPrint>,
     pub text: String,
     /// Keep macro signatures for editor queries after expansion.
     pub macros: Vec<MacroDef>,
     /// The package that owns this file, from the package graph.
-    pub package: Option<PackageTag>,
+    package: Option<PackageTag>,
     /// Retained across full and single-item reparses.
-    pub global_policy: GlobalPolicy,
+    global_policy: GlobalPolicy,
     /// Recovery keeps the partial tree queryable while diagnostics retain its syntax errors.
-    pub syntax_errors: Vec<CompilerError>,
+    syntax_errors: Vec<CompilerError>,
     /// Hash of what this file contributes to the namespace tree: the `mod` header, every `use`,
     /// and each definition's name, kind and visibility (see [`scope_hash`]).
-    pub scope_hash: u64,
+    scope_hash: u64,
     /// What this file contributes to the namespace tree, kept so a scope
     /// edit re-assembles the tree without re-parsing any other file.
     pub contribution: FragmentContribution,
@@ -325,22 +325,20 @@ pub struct MacroDef {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum ItemKindTag {
+enum ItemKindTag {
     Fn,
     Struct,
     Enum,
     Newtype,
-    Global,
-    Decorator,
     Other,
 }
 
 #[derive(Clone, Debug)]
-pub struct ItemPrint {
-    pub kind: ItemKindTag,
-    pub name: Ustr,
-    pub iface_hash: u64,
-    pub body_hash: Option<u64>,
+struct ItemPrint {
+    kind: ItemKindTag,
+    name: Ustr,
+    iface_hash: u64,
+    body_hash: Option<u64>,
     offset: usize,
     /// Full item span (covers leading annotations) -- the incremental body-edit fast path
     /// slices `text[item_span]` to re-parse just this item, and reads its line/col as the
@@ -359,17 +357,14 @@ enum FileDiff {
 
 /// Reject declaration collisions before expansion removes macro definitions.
 fn reject_macro_name_collisions(modules: &ModuleSet) -> Result<(), CompilerError> {
-    match check_macro_name_uniqueness(modules.iter())
+    check_macro_name_uniqueness(modules.iter())
         .into_iter()
         .next()
-    {
-        Some(e) => Err(e),
-        None => Ok(()),
-    }
+        .map_or(Ok(()), Err)
 }
 
 /// See [`UserFile::scope_hash`].
-pub(crate) fn scope_hash(contribution: &FragmentContribution) -> u64 {
+fn scope_hash(contribution: &FragmentContribution) -> u64 {
     use std::hash::{Hash, Hasher};
 
     let mut h = rustc_hash::FxHasher::default();
@@ -480,7 +475,7 @@ fn hash_visibility(vis: Option<&skull_parser::Visibility>, h: &mut rustc_hash::F
     }
 }
 
-pub fn item_prints(a: &Ast, text: &str) -> Vec<ItemPrint> {
+fn item_prints(a: &Ast, text: &str) -> Vec<ItemPrint> {
     use std::hash::{Hash, Hasher};
 
     a.items
@@ -962,35 +957,27 @@ impl Session {
         let warm_len = self.warm.len();
         // Read from the ASTs being built, not the stored `UserFile`s, so the
         // build is a function of the texts alone.
-        let independent = unexpanded
-            .rest()
-            .iter()
-            .all(|ast| self.apart_from_warm(ast, &contribute(ast)));
+        let independent = unexpanded.rest().iter().all(|ast| {
+            bone_semantic::stdlib_base::apart_from(&self.warm_names, ast, &contribute(ast))
+        });
         let mut cooked_warm = self.warm.to_vec();
         let warm_contributions = cook_and_contribute(&mut cooked_warm, registry)?;
         let mut cooked_users = unexpanded.into_parts().1;
         let user_contributions = cook_and_contribute(&mut cooked_users, registry)?;
-        let base = if independent {
-            self.warm_alone(registry).cloned()
-        } else {
-            None
-        };
-        let (mut ws, lowered, first_user, include_warm) = match base {
-            Some(base) => (base, cooked_users, 0, false),
+        let base = independent
+            .then(|| self.warm_alone(&cooked_warm, &warm_contributions).cloned())
+            .flatten();
+        let (mut ws, lowered, first_user) = match base {
+            Some(base) => (base, cooked_users, 0),
             None => {
-                let mut lowered = cooked_warm;
-                lowered.extend(cooked_users);
-                (Workspace::default(), lowered, warm_len, true)
+                cooked_warm.extend(cooked_users);
+                (Workspace::default(), cooked_warm, warm_len)
             }
         };
-        let contributions: Vec<&FragmentContribution> = if include_warm {
-            warm_contributions
-                .iter()
-                .chain(&user_contributions)
-                .collect()
-        } else {
-            user_contributions.iter().collect()
-        };
+        let contributions: Vec<_> = warm_contributions[..first_user]
+            .iter()
+            .chain(&user_contributions)
+            .collect();
         bone_semantic::semantic_passes::assemble_namespaces(
             &mut ws,
             &contributions,
@@ -1007,47 +994,31 @@ impl Session {
 
     /// The warm-alone workspace, built on first need; `None` when the warm
     /// modules alone are refused or report a diagnostic (see [`WarmBase`]).
-    fn warm_alone(&mut self, registry: &MacroRegistry) -> Option<&Workspace> {
-        if matches!(self.warm_base, WarmBase::Unbuilt)
-            && let Some(ws) = bone_semantic::stdlib_base::checked_alone(&self.warm)
-        {
-            // The process stdlib, checked once per process: a build reaches
-            // here only when no user macro changes its expansion.
-            self.warm_base = WarmBase::Clean(Box::new(ws));
-        }
+    fn warm_alone(
+        &mut self,
+        cooked: &[Ast],
+        contributions: &[FragmentContribution],
+    ) -> Option<&Workspace> {
         if matches!(self.warm_base, WarmBase::Unbuilt) {
-            let mut cooked = self.warm.to_vec();
-            let contributions = cook_and_contribute(&mut cooked, registry);
-            let mut ws = Workspace::default();
-            // A refusal here is not the build's verdict: the warm modules may
-            // name a user definition, and the combined build decides.
-            let built = contributions.is_ok_and(|contributions| {
+            let base = bone_semantic::stdlib_base::checked_alone(&self.warm).or_else(|| {
+                let mut ws = Workspace::default();
+                // The combined build decides whether a warm-only refusal is fatal.
                 bone_semantic::semantic_passes::assemble_namespaces(
                     &mut ws,
                     &contributions.iter().collect::<Vec<_>>(),
                     &self.aliases,
                 )
-                .is_ok()
-                    && lower_and_infer(&mut ws, &cooked).is_ok()
-                    && body_errors(&ws).is_empty()
+                .ok()?;
+                lower_and_infer(&mut ws, cooked).ok()?;
+                ws.phase_timings.clear();
+                body_errors(&ws).is_empty().then_some(ws)
             });
-            ws.phase_timings.clear();
-            self.warm_base = if built {
-                WarmBase::Clean(Box::new(ws))
-            } else {
-                WarmBase::Unusable
-            };
+            self.warm_base = base.map_or(WarmBase::Unusable, |ws| WarmBase::Clean(Box::new(ws)));
         }
         match &self.warm_base {
             WarmBase::Clean(ws) => Some(ws),
-            WarmBase::Unbuilt | WarmBase::Unusable => None,
+            _ => None,
         }
-    }
-
-    /// Whether the user file `ast` can reach no warm lowering
-    /// ([`bone_semantic::stdlib_base::apart_from`]).
-    fn apart_from_warm(&self, ast: &Ast, contribution: &FragmentContribution) -> bool {
-        bone_semantic::stdlib_base::apart_from(&self.warm_names, ast, contribution)
     }
 
     /// Every file's namespace contribution in module order: the warm modules,
@@ -1432,22 +1403,17 @@ impl Session {
     /// Full O(workspace) rebuild of both dep indices. For the full-rebuild paths
     /// (`Session::new`, `rebuild_users`, `rebuild_module`, `rebuild_interface`);
     /// a single-body edit uses `update_dependents_for` instead.
-    pub fn rebuild_dependents(&mut self) {
+    fn rebuild_dependents(&mut self) {
         self.dependents.clear();
         self.module_dep_names.clear();
         self.dependents_iface.clear();
 
-        for (mid, inf) in self.ws.inferences_iter() {
+        for (mid, _) in self.ws.inferences_iter() {
             if !Workspace::is_user_module(mid, &self.warm_mids) {
                 continue;
             }
 
-            let names: FxHashSet<Ustr> = inf
-                .per_fn
-                .values()
-                .flat_map(|b| b.deps.iter().copied())
-                .collect();
-
+            let names = self.module_deps(mid);
             for name in &names {
                 self.dependents.entry(*name).or_default().insert(mid);
             }
@@ -1468,7 +1434,7 @@ impl Session {
     }
 
     /// A body edit changes only the edited module's outgoing dependencies.
-    pub(crate) fn update_dependents_for(&mut self, mid: ModuleId) {
+    fn update_dependents_for(&mut self, mid: ModuleId) {
         if !Workspace::is_user_module(mid, &self.warm_mids) {
             return;
         }
@@ -1491,7 +1457,7 @@ impl Session {
         self.module_dep_names.insert(mid, new);
     }
 
-    pub fn module_deps(&self, mid: ModuleId) -> FxHashSet<Ustr> {
+    fn module_deps(&self, mid: ModuleId) -> FxHashSet<Ustr> {
         self.ws
             .inference(mid)
             .into_iter()
@@ -1500,7 +1466,7 @@ impl Session {
             .collect()
     }
 
-    pub(crate) fn rebuild_module(
+    fn rebuild_module(
         &mut self,
         path: &str,
         ast: Ast,
@@ -1510,10 +1476,8 @@ impl Session {
         let mid = self.ws.module_ids[&file];
 
         #[cfg(debug_assertions)]
-        let old_iface = Some(interface_snapshot(&self.ws, mid));
+        let old_iface = interface_snapshot(&self.ws, mid);
 
-        // TODO: maybe we can come up with an overload sig id that's derived from name + types and
-        // not Idx<Function> for persistent ids, but maybe not needed for now
         let old_gens: FxHashMap<Idx<Function>, u64> = {
             let m = self.ws.module(mid);
             m.functions
@@ -1556,32 +1520,18 @@ impl Session {
         cook_one(&mut edited, &self.registry)?;
         lower_modules_seeded(&mut self.ws, &[edited], seeds)?;
 
-        let changed_owners: FxHashSet<BodyOwner> = {
-            let prints = &self.files[path].item_prints;
-            let module = self.ws.module(mid);
-
-            changed
-                .iter()
-                .filter_map(|&i| prints.get(i).and_then(|p| module.body_at(p.offset)))
-                .collect()
-        };
-
-        {
-            let module = self.ws.module_mut(mid);
-
-            let fids: Vec<Idx<Function>> = module.functions.iter().map(|(fid, _)| fid).collect();
-
-            for fid in fids {
-                let owner = BodyOwner::Function(fid);
-
-                if let Some(body) = module.bodies.get_mut(&owner) {
-                    let old = old_gens.get(&fid).copied().unwrap_or(0);
-                    body.generation = if changed_owners.contains(&owner) {
-                        old + 1
-                    } else {
-                        old
-                    };
-                }
+        let module = self.ws.module_mut(mid);
+        let prints = &self.files[path].item_prints;
+        let reinferred: Vec<_> = changed
+            .iter()
+            .filter_map(|&i| Some((mid, module.body_at(prints.get(i)?.offset)?)))
+            .collect();
+        let changed_owners: FxHashSet<_> = reinferred.iter().map(|&(_, owner)| owner).collect();
+        for (fid, _) in module.functions.iter() {
+            let owner = BodyOwner::Function(fid);
+            if let Some(body) = module.bodies.get_mut(&owner) {
+                let old = old_gens.get(&fid).copied().unwrap_or(0);
+                body.generation = old + u64::from(changed_owners.contains(&owner));
             }
         }
 
@@ -1596,29 +1546,13 @@ impl Session {
         self.ws.log_time("infer functions", timer);
 
         #[cfg(debug_assertions)]
-        if let Some(old) = old_iface {
-            debug_assert_eq!(
-                old,
-                interface_snapshot(&self.ws, mid),
-                "relower of `{path}` changed the module interface, classify mis-tiered an interface edit"
-            )
-        }
+        debug_assert_eq!(
+            old_iface,
+            interface_snapshot(&self.ws, mid),
+            "relower of `{path}` changed the module interface, classify mis-tiered an interface edit"
+        );
 
         self.rebuild_dependents();
-
-        let prints = &self.files[path].item_prints;
-        let module = self.ws.module(mid);
-
-        let reinferred: Vec<BodyId> = changed
-            .iter()
-            .filter_map(|&i| {
-                prints
-                    .get(i)
-                    .and_then(|p| module.body_at(p.offset))
-                    .map(|owner| (mid, owner))
-            })
-            .collect();
-
         let relowered = self.collect_reinferred(&[mid]);
 
         Ok(UpdateResult {
@@ -1950,7 +1884,7 @@ impl Session {
         }
     }
 
-    pub(crate) fn collect_reinferred(&self, mids: &[ModuleId]) -> Vec<BodyId> {
+    fn collect_reinferred(&self, mids: &[ModuleId]) -> Vec<BodyId> {
         let mut reinferred = Vec::new();
 
         for mid in mids {
