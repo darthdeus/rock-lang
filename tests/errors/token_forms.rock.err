@@ -23,6 +23,10 @@ fn main() {
     use missing
 }
 
+//=== TEST CASE: symbolic_or_member_on_integer ===
+//! expect: cannot access field `or` on non-struct type int
+fn main() { 1.|| }
+
 //=== TEST CASE: hash_comments_keep_the_member_diagnostic ===
 //! expect: cannot access field `__rock_or` on non-struct type int
 #
