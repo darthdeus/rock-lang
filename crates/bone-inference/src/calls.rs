@@ -841,21 +841,14 @@ fn fit_candidate(
     span: Span,
 ) -> Option<Result<usize, CompilerError>> {
     let f = &gamma.workspace.module(mid).functions[fid];
-
-    let mut declared: SmallVec<[TyId; 8]> = SmallVec::with_capacity(c.body.param_bindings.len());
-    let mut pnames: SmallVec<[Ustr; 8]> = SmallVec::with_capacity(c.body.param_bindings.len());
-
-    for p in f.param_decls.iter() {
-        declared.push(p.ty);
-        pnames.push(p.name);
-    }
+    let param_decls = &f.param_decls;
 
     let bounded_vars = bounded_generic_vars(gamma, f);
 
-    let (subs, _) = instantiate_call_generics(gamma, f, generic_args, span).ok()?;
+    let subs = instantiate_call_generics(gamma, f, generic_args, span).ok()?;
 
     let offset = if recv_ty.is_some() { 1 } else { 0 };
-    if offset > declared.len() {
+    if offset > param_decls.len() {
         return None;
     }
 
@@ -864,12 +857,12 @@ fn fit_candidate(
     // Receiver (fills slot 0) - named args never name it
     if let Some(r) = recv_ty {
         let pty = if subs.is_empty() {
-            declared[0]
+            param_decls[0].ty
         } else {
-            substitute(gamma, declared[0], &subs, span).ok()?
+            substitute(gamma, param_decls[0].ty, &subs, span).ok()?
         };
 
-        let db = declared_is_bounded_generic(gamma, declared[0], &bounded_vars);
+        let db = declared_is_bounded_generic(gamma, param_decls[0].ty, &bounded_vars);
         total += fit_cost_with_iter_coercion(c, gamma, r, pty, db, span)?;
     }
 
@@ -879,7 +872,7 @@ fn fit_candidate(
         c,
         gamma,
         args,
-        &pnames[offset..],
+        &param_decls[offset..],
         f.num_required.saturating_sub(offset),
         false,
         span,
@@ -888,9 +881,9 @@ fn fit_candidate(
 
     for (i, slot) in slots.iter().enumerate() {
         let pty = if subs.is_empty() {
-            declared[offset + i]
+            param_decls[offset + i].ty
         } else {
-            substitute(gamma, declared[offset + i], &subs, span).ok()?
+            substitute(gamma, param_decls[offset + i].ty, &subs, span).ok()?
         };
 
         match slot {
@@ -900,7 +893,8 @@ fn fit_candidate(
                     SlotFill::SpreadField(_, fty) => *fty,
                 };
 
-                let db = declared_is_bounded_generic(gamma, declared[offset + i], &bounded_vars);
+                let db =
+                    declared_is_bounded_generic(gamma, param_decls[offset + i].ty, &bounded_vars);
                 let pty_r = resolve(gamma, pty, span);
                 if matches!(fill, SlotFill::SpreadField(..))
                     && frame_ref_target(gamma, pty_r).is_some()
@@ -926,7 +920,6 @@ fn fit_candidate(
     // instantiation: a bare `it: I` unifies with ANY arg (`[int]`, Arena, ..),
     // so without this check a bounded combinator would tie with -- or shadow --
     // the concrete overloads (`map([T], f)`, `map(Arena<T>, f)`).
-    let f = &gamma.workspace.module(mid).functions[fid];
     if f.has_iterator_bounds() {
         let mut tree = BoundTree::default();
         if let Err(error) =
@@ -946,9 +939,11 @@ fn instantiate_call_generics(
     function: &Function,
     generic_args: IdxRange<TypeExpr>,
     span: Span,
-) -> Result<(FxHashMap<VarId, TyId>, Vec<TyId>), CompilerError> {
+) -> Result<FxHashMap<VarId, TyId>, CompilerError> {
     if generic_args.is_empty() {
-        return gamma.instantiate_generics(&function.generics, span);
+        return gamma
+            .instantiate_generics(&function.generics, span)
+            .map(|(subs, _)| subs);
     }
     if generic_args.len() != function.generics.len() {
         return Err(CompilerError::new_with_label(
@@ -962,7 +957,6 @@ fn instantiate_call_generics(
         ));
     }
     let mut subs = FxHashMap::default();
-    let mut args = Vec::with_capacity(generic_args.len());
     for (&generic, explicit) in function.generics.iter().zip(generic_args) {
         let TypeExpr::Generic(var_id, _) = *gamma.get(generic) else {
             return Err(CompilerError::new_with_label(
@@ -975,9 +969,8 @@ fn instantiate_call_generics(
         };
         let ty = TyId::Local(explicit);
         subs.insert(var_id, ty);
-        args.push(ty);
     }
-    Ok((subs, args))
+    Ok(subs)
 }
 
 pub(crate) fn check_args(
@@ -1018,6 +1011,27 @@ pub(crate) enum SlotFill {
     SpreadField(Idx<Expr>, TyId),
 }
 
+fn map_nominal_spread_fields<T>(
+    gamma: &mut Gamma,
+    ty: TyId,
+    name: Ustr,
+    params: IdxRange<TypeExpr>,
+    span: Span,
+    missing_struct: impl FnOnce(Ustr) -> CompilerError,
+    mut map_field: impl FnMut(Ustr, TyId) -> T,
+) -> Result<Vec<T>, CompilerError> {
+    let sid = resolve_struct(gamma, name).ok_or_else(|| missing_struct(name))?;
+    let def = &gamma.workspace.module(sid.module).structs[sid.def];
+    let subs = generic_arg_subs(gamma, &def.generics, ty, params);
+    def.fields
+        .iter()
+        .map(|field| {
+            let ty = substitute(gamma, field.ty, &subs, span)?;
+            Ok(map_field(field.name, ty))
+        })
+        .collect()
+}
+
 /// The (name, type) of every field of a call-site spread operand. The operand
 /// must be a nominal struct with statically known fields (rule: not tuple, not
 /// array, not Map/any).
@@ -1032,21 +1046,20 @@ pub(crate) fn spread_struct_fields(
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             params,
-        } => {
-            let sid = resolve_struct(gamma, name).ok_or_else(|| {
+        } => map_nominal_spread_fields(
+            gamma,
+            r,
+            name,
+            params,
+            span,
+            |name| {
                 CompilerError::new_with_label(
                     span,
                     format!("cannot spread `{}`: not a struct", name),
                 )
-            })?;
-
-            let def = &gamma.workspace.module(sid.module).structs[sid.def];
-            let subs = generic_arg_subs(gamma, &def.generics, r, params);
-            def.fields
-                .iter()
-                .map(|f| Ok((f.name, substitute(gamma, f.ty, &subs, span)?)))
-                .collect()
-        }
+            },
+            |name, ty| (name, ty),
+        ),
 
         _ => comp_error!(
             span,
@@ -1073,12 +1086,12 @@ pub(crate) fn reorder_call_args(
     c: BodyCtx,
     gamma: &mut Gamma,
     args: &[Idx<Expr>],
-    param_names: &[Ustr],
+    param_decls: &[bone_core::hir::ParamDecl],
     num_required: usize,
     report: bool,
     span: Span,
 ) -> Result<Vec<Option<SlotFill>>, CompilerError> {
-    let mut slots: Vec<Option<SlotFill>> = vec![None; param_names.len()];
+    let mut slots: Vec<Option<SlotFill>> = vec![None; param_decls.len()];
     let mut pos = 0usize;
 
     for &arg in args {
@@ -1088,7 +1101,7 @@ pub(crate) fn reorder_call_args(
             let op_ty = infer_expr(c, gamma, arg)?;
             let aspan = c.body.expr_spans[arg];
             for (fname, fty) in spread_struct_fields(gamma, op_ty, aspan)? {
-                let Some(pi) = param_names.iter().position(|p| *p == fname) else {
+                let Some(pi) = param_decls.iter().position(|p| p.name == fname) else {
                     slot_fail!(
                         report,
                         span,
@@ -1122,12 +1135,12 @@ pub(crate) fn reorder_call_args(
         match c.body.arg_names.get(&arg) {
             // positional
             None => {
-                if pos >= param_names.len() {
+                if pos >= param_decls.len() {
                     slot_fail!(
                         report,
                         span,
                         "Too many positional arguments, expected at most {}",
-                        param_names.len()
+                        param_decls.len()
                     );
                 }
 
@@ -1136,7 +1149,7 @@ pub(crate) fn reorder_call_args(
                         report,
                         span,
                         "Multiple values provided for parameter `{}`",
-                        param_names[pos]
+                        param_decls[pos].name
                     );
                 }
                 slots[pos] = Some(SlotFill::Direct(arg));
@@ -1144,7 +1157,7 @@ pub(crate) fn reorder_call_args(
             }
 
             Some(nm) => {
-                let Some(pi) = param_names.iter().position(|p| p == nm) else {
+                let Some(pi) = param_decls.iter().position(|p| p.name == *nm) else {
                     slot_fail!(report, span, "unknown parameter `{}`", nm)
                 };
 
@@ -1172,7 +1185,7 @@ pub(crate) fn reorder_call_args(
                 report,
                 span,
                 "Missing required argument for parameter `{}`",
-                param_names[i]
+                param_decls[i].name
             );
         }
     }
@@ -1206,19 +1219,15 @@ pub(crate) fn spread_constituents(
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
             params,
-        } => {
-            let sid = resolve_struct(gamma, name).ok_or_else(|| {
-                CompilerError::new_with_label(span, format!("cannot spread `{}`", name))
-            })?;
-
-            let def = &gamma.workspace.module(sid.module).structs[sid.def];
-            // mirror struct_field_ty; empty for generics
-            let subs = generic_arg_subs(gamma, &def.generics, r, params);
-            def.fields
-                .iter()
-                .map(|f| substitute(gamma, f.ty, &subs, span))
-                .collect()
-        }
+        } => map_nominal_spread_fields(
+            gamma,
+            r,
+            name,
+            params,
+            span,
+            |name| CompilerError::new_with_label(span, format!("cannot spread `{}`", name)),
+            |_, ty| ty,
+        ),
 
         _ => comp_error!(
             span,
@@ -1700,11 +1709,7 @@ pub(crate) fn commit_selected_call(
 
     let ws = gamma.workspace;
     let function = &ws.module(callee_mid).functions[callee_fn];
-    let (subs, _arg_tys) = instantiate_call_generics(gamma, function, generic_args, span)?;
-
-    // Caller, for arg exprs
-    let callee_module = &ws.module(callee_mid);
-    let function = &callee_module.functions[callee_fn];
+    let subs = instantiate_call_generics(gamma, function, generic_args, span)?;
 
     // `Iterator`-bounded callee: conformance is (re)tried after every arg
     // unification -- resolving `next(C)` is also what binds the bound's elem
@@ -1712,20 +1717,14 @@ pub(crate) fn commit_selected_call(
     let has_bounds = function.has_iterator_bounds();
     let mut bound_tree = BoundTree::default();
 
-    let mut param_tys = Vec::with_capacity(c.body.param_bindings.len());
-    let mut param_names = Vec::with_capacity(c.body.param_bindings.len());
-
-    for param in function.param_decls.iter() {
-        param_tys.push(param.ty);
-        param_names.push(param.name);
-    }
+    let param_decls = &function.param_decls;
 
     let offset = if let Some(r) = recv_override {
-        if param_tys.is_empty() {
+        if param_decls.is_empty() {
             comp_error!(span, "method `{}` has no receiver parameter", name);
         }
 
-        let pty = substitute(gamma, param_tys[0], &subs, span)?;
+        let pty = substitute(gamma, param_decls[0].ty, &subs, span)?;
         coerce(gamma, r, pty, span)?;
         reject_redundant_unwrap(gamma, function, name, 0, r, span)?;
 
@@ -1735,7 +1734,7 @@ pub(crate) fn commit_selected_call(
     };
 
     let pairs: Vec<(SlotFill, usize)> = if function.is_variadic {
-        let nfixed = (param_tys.len() - 1).saturating_sub(offset);
+        let nfixed = (param_decls.len() - 1).saturating_sub(offset);
 
         if arg_list.len() < nfixed {
             comp_error!(
@@ -1756,7 +1755,7 @@ pub(crate) fn commit_selected_call(
                     if i < nfixed {
                         offset + i
                     } else {
-                        param_tys.len() - 1
+                        param_decls.len() - 1
                     },
                 )
             })
@@ -1766,7 +1765,7 @@ pub(crate) fn commit_selected_call(
             c,
             gamma,
             arg_list,
-            &param_names[offset..],
+            &param_decls[offset..],
             function.num_required.saturating_sub(offset),
             true,
             span,
@@ -1787,7 +1786,7 @@ pub(crate) fn commit_selected_call(
 
     let mut ref_call_args = Vec::new();
     for (fill, param_index) in pairs {
-        let pty_decl = param_tys[param_index];
+        let pty_decl = param_decls[param_index].ty;
         if has_bounds {
             check_iterator_bounds(c, gamma, function, &subs, &mut bound_tree, false, 0, span)?;
         }

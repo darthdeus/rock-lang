@@ -472,23 +472,53 @@ fn is_literal_default(body: &bone_core::hir::Body, e: Idx<Expr>) -> bool {
     }
 }
 
-pub fn check_function(
+pub fn check_body(
     ws: &Workspace,
-    module: &Module,
+    c: BodyCtx,
     module_id: ModuleId,
-    f_id: Idx<Function>,
-    f: &Function,
-) -> Result<Option<(BodyOwner, BodyInference, Vec<CompilerError>)>, CompilerError> {
-    let _span = tracing::info_span!("check_function", name = %f.name).entered();
-    let body = &module.bodies[&BodyOwner::Function(f_id)];
-    let mut gamma = Gamma::new(ws, body, module_id);
-    let c = BodyCtx { module, body };
+    owner: BodyOwner,
+) -> Option<Result<(BodyInference, Vec<CompilerError>), CompilerError>> {
+    let root = c.body.root;
+    if matches!(owner, BodyOwner::Global(_)) && root.is_none() {
+        return None;
+    }
+
+    let _span = match owner {
+        BodyOwner::Function(id) => {
+            let f = &c.module.functions[id];
+            Some(tracing::info_span!("check_function", name = %f.name).entered())
+        }
+        _ => None,
+    };
+    let mut gamma = Gamma::new(ws, c.body, module_id);
+    let result = match owner {
+        BodyOwner::Function(id) => check_function(c, &mut gamma, &c.module.functions[id]),
+        BodyOwner::Decorator(id) => check_decorator(c, &mut gamma, &c.module.decorators[id]),
+        BodyOwner::Global(id) => {
+            check_global(c, &mut gamma, &c.module.globals[id], root.unwrap());
+            Ok(())
+        }
+        BodyOwner::StructDefaults(id) => {
+            check_struct_defaults(c, &mut gamma, &c.module.structs[id])
+        }
+        BodyOwner::Enum(_) | BodyOwner::Newtype(_) => return None,
+    };
+    Some(result.map(|()| {
+        if root.is_some() || !matches!(owner, BodyOwner::Function(_)) {
+            report_unpinned_lambda_params(&mut gamma);
+        }
+        (gamma.out, gamma.body_errors)
+    }))
+}
+
+fn check_function(c: BodyCtx, gamma: &mut Gamma, f: &Function) -> Result<(), CompilerError> {
+    let body = c.body;
     let frame_ref_source = f
         .annotations
         .iter()
         .find(|annotation| annotation.is_builtin("frame_ref_source"));
     let is_arena_stdlib =
-        bone_core::modules::stdlib_file_name(module.file.as_str()) == Some("arena.rock");
+        bone_core::modules::stdlib_file_name(c.module.file.as_str()) == Some("arena.rock");
     if let Some(annotation) = frame_ref_source
         && !is_arena_stdlib
     {
@@ -509,7 +539,7 @@ pub fn check_function(
 
     if f.is_coroutine {
         if let Some(ret) = f.return_ty {
-            let (_y, r, _n) = coroutine_yrn(&mut gamma, ret, f.span)?;
+            let (_y, r, _n) = coroutine_yrn(gamma, ret, f.span)?;
             gamma.coroutine_ret = Some(ret);
             gamma.declared_ret_ty = Some(r);
         }
@@ -531,7 +561,7 @@ pub fn check_function(
         match (&binding.kind, binding.declared_ty) {
             (BindingKind::Param, Some(ty)) => {
                 gamma.assign_named_type(param_binding, ty)?;
-                if contains_frame_ref(&gamma, ty) {
+                if contains_frame_ref(gamma, ty) {
                     gamma
                         .ref_binding_provenance
                         .insert(param_binding, RefProvenance::Stable);
@@ -571,17 +601,16 @@ pub fn check_function(
                     ),
                 ));
             }
-            let dty = infer_expr(c, &mut gamma, *dexpr)?;
+            let dty = infer_expr(c, gamma, *dexpr)?;
 
             if let Some(declared) = c.body.binding_arena[pb].declared_ty {
-                coerce(&mut gamma, dty, declared, f.span)?;
+                coerce(gamma, dty, declared, f.span)?;
             }
         }
     }
 
     let Some(body) = body.root else {
-        let errors = std::mem::take(&mut gamma.body_errors);
-        return Ok(Some((BodyOwner::Function(f_id), gamma.out, errors)));
+        return Ok(());
     };
 
     if let (Some(ret_ty), false) = (f.return_ty, f.is_coroutine) {
@@ -599,15 +628,15 @@ pub fn check_function(
             // and merely coerced, so it records its own narrower type and the
             // fn-value ABI disagrees at the two ends. The coerce still happens --
             // it moved down to the tail, keeping this span.
-            if let Err(e) = check_expr(c, &mut gamma, body, ret_ty, c.body.expr_spans[tail]) {
+            if let Err(e) = check_expr(c, gamma, body, ret_ty, c.body.expr_spans[tail]) {
                 gamma.body_errors.push(e);
-            } else if let Err(e) = validate_frame_ref_return(c, &mut gamma, body, ret_ty) {
+            } else if let Err(e) = validate_frame_ref_return(c, gamma, body, ret_ty) {
                 gamma.body_errors.push(e);
             }
         } else {
-            let body_ty = infer_expr(c, &mut gamma, body)?;
-            let body_ty = resolve(&mut gamma, body_ty, f.span);
-            if coerce(&mut gamma, body_ty, ret_ty, f.span).is_err() {
+            let body_ty = infer_expr(c, gamma, body)?;
+            let body_ty = resolve(gamma, body_ty, f.span);
+            if coerce(gamma, body_ty, ret_ty, f.span).is_err() {
                 let ret_render = gamma.render(ret_ty);
                 gamma.body_errors.push(CompilerError::new_with_label(
                     f.name_span,
@@ -620,7 +649,7 @@ pub fn check_function(
         }
     } else {
         // no declared return (or coroutine): the body tail is discarded
-        infer_expr_used(c, &mut gamma, body, Use::Discard)?;
+        infer_expr_used(c, gamma, body, Use::Discard)?;
     }
 
     gamma.out.deps = gamma.dep_acc.take();
@@ -648,10 +677,10 @@ pub fn check_function(
         gamma.body_errors.append(&mut purity_errors);
     }
 
-    embed::verify_embed_projection(c, &mut gamma);
+    embed::verify_embed_projection(c, gamma);
 
     for (binding, ty) in gamma.out.binding_types.iter() {
-        if persistent_type_contains_frame_ref(&gamma, *ty) {
+        if persistent_type_contains_frame_ref(gamma, *ty) {
             gamma.body_errors.push(CompilerError::new_with_label(
                 c.body.binding_spans[binding],
                 format!(
@@ -663,7 +692,7 @@ pub fn check_function(
     }
 
     if f.is_coroutine {
-        let policy = RefSuspensionPolicy { gamma: &gamma };
+        let policy = RefSuspensionPolicy { gamma };
         for at in uses_after_suspension(c.body, &policy) {
             gamma.body_errors.push(CompilerError::new_with_label(
                 c.body.expr_spans[at],
@@ -673,24 +702,11 @@ pub fn check_function(
         }
     }
 
-    report_unpinned_lambda_params(&mut gamma);
-
-    let errors = std::mem::take(&mut gamma.body_errors);
-
-    Ok(Some((BodyOwner::Function(f_id), gamma.out, errors)))
+    Ok(())
 }
 
-pub fn check_decorator(
-    ws: &Workspace,
-    module: &Module,
-    module_id: ModuleId,
-    d_id: Idx<DecoratorDef>,
-    d: &DecoratorDef,
-) -> Result<Option<(BodyOwner, BodyInference, Vec<CompilerError>)>, CompilerError> {
-    let body = &module.bodies[&BodyOwner::Decorator(d_id)];
-    let mut gamma = Gamma::new(ws, body, module_id);
-    let c = BodyCtx { module, body };
-
+fn check_decorator(c: BodyCtx, gamma: &mut Gamma, d: &DecoratorDef) -> Result<(), CompilerError> {
+    let body = c.body;
     let mut seed = |b: Idx<BindingInfo>| -> Result<(), CompilerError> {
         let binding = &c.body.binding_arena[b];
 
@@ -714,71 +730,28 @@ pub fn check_decorator(
         comp_error!(d.span, "decorator has no body");
     };
 
-    if let Err(e) = infer_expr_used(c, &mut gamma, root, Use::Discard) {
+    if let Err(e) = infer_expr_used(c, gamma, root, Use::Discard) {
         gamma.body_errors.push(e);
     }
 
-    embed::verify_embed_projection(c, &mut gamma);
-
-    report_unpinned_lambda_params(&mut gamma);
-
-    let errors = std::mem::take(&mut gamma.body_errors);
-
-    Ok(Some((BodyOwner::Decorator(d_id), gamma.out, errors)))
+    embed::verify_embed_projection(c, gamma);
+    Ok(())
 }
 
-pub fn check_global(
-    ws: &Workspace,
-    module: &Module,
-    module_id: ModuleId,
-    g_id: Idx<GlobalDef>,
-    g: &GlobalDef,
-) -> Result<Option<(BodyOwner, BodyInference, Vec<CompilerError>)>, CompilerError> {
-    let body = &module.bodies[&BodyOwner::Global(g_id)];
-
-    let Some(value) = body.root else {
-        return Ok(None);
-    };
-
-    let c = BodyCtx { module, body };
-
-    let mut gamma = Gamma::new(ws, body, module_id);
-
-    if let Err(e) = (|| -> Result<(), CompilerError> {
-        let vty = infer_expr(c, &mut gamma, value)?;
-        coerce(&mut gamma, vty, g.ty, g.span)?;
-        Ok(())
-    })() {
-        gamma.body_errors.push(e);
+fn check_global(c: BodyCtx, gamma: &mut Gamma, g: &GlobalDef, value: Idx<Expr>) {
+    if let Err(error) = infer_expr(c, gamma, value).and_then(|ty| coerce(gamma, ty, g.ty, g.span)) {
+        gamma.body_errors.push(error);
     }
-
-    embed::verify_embed_projection(c, &mut gamma);
-
-    report_unpinned_lambda_params(&mut gamma);
-
-    let errors = std::mem::take(&mut gamma.body_errors);
-
-    // Capture the names this initializer references (same as `check_function`),
-    // so a global's `deps` are tracked -- the const overlay reads them to find a
-    // changed const's dependents, and the cascade gets consistent global deps.
+    embed::verify_embed_projection(c, gamma);
     gamma.out.deps = gamma.dep_acc.take();
-
-    Ok(Some((BodyOwner::Global(g_id), gamma.out, errors)))
 }
 
-pub fn check_struct_defaults(
-    ws: &Workspace,
-    module: &Module,
-    mid: ModuleId,
-    sidx: Idx<StructDef>,
-) -> Result<Option<(BodyOwner, BodyInference, Vec<CompilerError>)>, CompilerError> {
-    let def = &module.structs[sidx];
-    let body = &module.bodies[&BodyOwner::StructDefaults(sidx)];
-
-    let c = BodyCtx { module, body };
-
-    let mut gamma = Gamma::new(ws, body, mid);
-
+fn check_struct_defaults(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    def: &StructDef,
+) -> Result<(), CompilerError> {
+    let body = c.body;
     let (subs, arg_tys) = gamma.instantiate_generics(&def.generics, def.span)?;
 
     // Published so a consumer holding `Box<int>` can bind the defaults body's
@@ -787,7 +760,7 @@ pub fn check_struct_defaults(
 
     let mut sib = FxHashMap::default();
     for f in def.fields.iter() {
-        sib.insert(f.name, substitute(&mut gamma, f.ty, &subs, f.span)?);
+        sib.insert(f.name, substitute(gamma, f.ty, &subs, f.span)?);
     }
 
     gamma.sibling_fields.push(sib);
@@ -795,11 +768,11 @@ pub fn check_struct_defaults(
     for f in def.fields.iter() {
         if let Some(dexpr) = body.field_defaults.get(&f.name) {
             if let Err(e) = (|| -> Result<(), CompilerError> {
-                let dty = infer_expr(c, &mut gamma, *dexpr)?;
-                let fty = substitute(&mut gamma, f.ty, &subs, f.span)?;
-                coerce(&mut gamma, dty, fty, f.span)?;
+                let dty = infer_expr(c, gamma, *dexpr)?;
+                let fty = substitute(gamma, f.ty, &subs, f.span)?;
+                coerce(gamma, dty, fty, f.span)?;
                 if def.is_value {
-                    check_value_int_field_literal(c, &mut gamma, *dexpr, fty)?;
+                    check_value_int_field_literal(c, gamma, *dexpr, fty)?;
                 }
 
                 Ok(())
@@ -811,11 +784,7 @@ pub fn check_struct_defaults(
 
     gamma.sibling_fields.pop();
 
-    embed::verify_embed_projection(c, &mut gamma);
+    embed::verify_embed_projection(c, gamma);
 
-    report_unpinned_lambda_params(&mut gamma);
-
-    let errors = std::mem::take(&mut gamma.body_errors);
-
-    Ok(Some((BodyOwner::StructDefaults(sidx), gamma.out, errors)))
+    Ok(())
 }

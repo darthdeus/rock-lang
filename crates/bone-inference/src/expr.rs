@@ -174,13 +174,7 @@ pub(crate) fn infer_statement(
 
                 // A single annotated binding (`let x: T = v else ..`) checks
                 // the unwrapped value against its annotation.
-                let mut expected = scrut_ty;
-                if let Some(b) = c.body.pattern_single_bind(pattern)
-                    && let Some(ann) = c.body.binding_arena[b].declared_ty
-                {
-                    coerce(gamma, scrut_ty, ann, span)?;
-                    expected = ann;
-                }
+                let expected = annotated_pattern_type(c, gamma, pattern, scrut_ty, span)?;
 
                 // A bare uppercase name against an enum scrutinee is a variant
                 // tag test, exactly as in a match arm (and a typo'd one is an
@@ -358,13 +352,7 @@ pub(crate) fn infer_statement(
                 Err(e) => (gamma.workspace.builtins.error(), Some(e)),
             };
 
-            let mut expected = elem_ty;
-            if let Some(b) = c.body.pattern_single_bind(pattern)
-                && let Some(ann) = c.body.binding_arena[b].declared_ty
-            {
-                coerce(gamma, elem_ty, ann, span)?;
-                expected = ann;
-            }
+            let expected = annotated_pattern_type(c, gamma, pattern, elem_ty, span)?;
             let tag = unqualified_arm_variant(c, gamma, pattern, elem_ty, span)?;
             check_pattern(c, gamma, pattern, expected, span)?;
             require_irrefutable(
@@ -411,6 +399,22 @@ pub(crate) fn infer_statement(
     drain_ready_pendings(gamma)?;
 
     Ok(())
+}
+
+fn annotated_pattern_type(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    pattern: Idx<Pattern>,
+    ty: TyId,
+    span: Span,
+) -> Result<TyId, CompilerError> {
+    if let Some(binding) = c.body.pattern_single_bind(pattern)
+        && let Some(annotation) = c.body.binding_arena[binding].declared_ty
+    {
+        coerce(gamma, ty, annotation, span)?;
+        return Ok(annotation);
+    }
+    Ok(ty)
 }
 
 /// The refinements that may be applied when entering `branch`. A branch
@@ -1098,44 +1102,17 @@ pub(crate) fn infer_expr_used(
             unify(gamma, cond_ty, gamma.workspace.builtins.bool(), expr_span)?;
 
             let (narrow_then, narrow_else) = detect_null_narrow(gamma, c, *cond);
-            pin_shared_else(c, gamma, *else_branch, used)?;
-
-            match used {
-                Use::Discard => {
-                    infer_branch(
-                        c,
-                        gamma,
-                        *then_branch,
-                        &narrow_then,
-                        expr_span,
-                        Use::Discard,
-                    )?;
-
-                    if let Some(else_branch) = else_branch {
-                        let narrow_else = branch_narrows(c, *else_branch, &narrow_else);
-                        infer_branch(c, gamma, *else_branch, narrow_else, expr_span, Use::Discard)?;
-                    }
-
-                    gamma.workspace.builtins.unit()
-                }
-
-                Use::Value => {
-                    let then_ty =
-                        infer_branch(c, gamma, *then_branch, &narrow_then, expr_span, Use::Value)?;
-
-                    let Some(else_branch) = else_branch else {
-                        comp_error!(
-                            expr_span,
-                            "`if` without a final `else` cannot be used as a value"
-                        );
-                    };
-
-                    let narrow_else = branch_narrows(c, *else_branch, &narrow_else);
-                    let else_ty =
-                        infer_branch(c, gamma, *else_branch, narrow_else, expr_span, Use::Value)?;
-                    join(gamma, then_ty, else_ty, expr_span)?
-                }
-            }
+            infer_if_arms(
+                c,
+                gamma,
+                *then_branch,
+                *else_branch,
+                &narrow_then,
+                &narrow_else,
+                used,
+                expr_span,
+                "`if` without a final `else` cannot be used as a value",
+            )?
         }
 
         Expr::TupleIndex { tuple, index } => {
@@ -1641,33 +1618,17 @@ pub(crate) fn infer_expr_used(
 
             unqualified_arm_variant(c, gamma, *pattern, unwrapped, expr_span)?;
             check_pattern(c, gamma, *pattern, unwrapped, expr_span)?;
-            pin_shared_else(c, gamma, *else_branch, used)?;
-
-            let result = match used {
-                Use::Discard => {
-                    infer_expr_used(c, gamma, *then_branch, Use::Discard)?;
-
-                    if let Some(e) = else_branch {
-                        infer_expr_used(c, gamma, *e, Use::Discard)?;
-                    }
-
-                    gamma.workspace.builtins.unit()
-                }
-
-                Use::Value => {
-                    let then_ty = infer_expr(c, gamma, *then_branch)?;
-
-                    let Some(e) = else_branch else {
-                        comp_error!(
-                            expr_span,
-                            "`if let` without an `else` cannot be used as a value"
-                        );
-                    };
-
-                    let else_ty = infer_expr(c, gamma, *e)?;
-                    join(gamma, then_ty, else_ty, expr_span)?
-                }
-            };
+            let result = infer_if_arms(
+                c,
+                gamma,
+                *then_branch,
+                *else_branch,
+                &[],
+                &[],
+                used,
+                expr_span,
+                "`if let` without an `else` cannot be used as a value",
+            )?;
 
             if let Some(err) = deferred {
                 return Err(err);
@@ -1762,6 +1723,37 @@ pub(crate) fn infer_expr_used(
 
 /// Infers and resolves both operands of a binary operator. An integer literal
 /// facing a `uint` operand is checked as `uint` rather than left an `int`.
+fn infer_if_arms(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    then_branch: Idx<Expr>,
+    else_branch: Option<Idx<Expr>>,
+    then_narrows: &[Narrow],
+    else_narrows: &[Narrow],
+    used: Use,
+    span: Span,
+    missing_else: &str,
+) -> Result<TyId, CompilerError> {
+    pin_shared_else(c, gamma, else_branch, used)?;
+    let then_ty = infer_branch(c, gamma, then_branch, then_narrows, span, used)?;
+    let else_ty = match else_branch {
+        Some(branch) => Some(infer_branch(
+            c,
+            gamma,
+            branch,
+            branch_narrows(c, branch, else_narrows),
+            span,
+            used,
+        )?),
+        None => None,
+    };
+    match (used, else_ty) {
+        (Use::Discard, _) => Ok(gamma.workspace.builtins.unit()),
+        (Use::Value, Some(else_ty)) => join(gamma, then_ty, else_ty, span),
+        (Use::Value, None) => comp_error!(span, "{missing_else}"),
+    }
+}
+
 fn infer_uint_aware_operands(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -2270,77 +2262,41 @@ pub(crate) fn check_expr(
         } = *gamma.get(exp_r)
         {
             if bone_core::modules::is_field_ref_former(former) {
-                let is_field_ref = bone_core::modules::is_intrinsic_key(former, "FieldRef");
-                let is_read_field_ref =
-                    bone_core::modules::is_intrinsic_key(former, "ReadFieldRef");
-                let is_write_field_ref =
-                    bone_core::modules::is_intrinsic_key(former, "WriteFieldRef");
+                let writable = !bone_core::modules::is_intrinsic_key(former, "ReadFieldRef");
+                let readable = !bone_core::modules::is_intrinsic_key(former, "WriteFieldRef");
                 let mut it = params.into_iter();
                 let t = exp_r.with_idx(it.next().unwrap());
                 let v = exp_r.with_idx(it.next().unwrap());
-
                 let t_r = resolve(gamma, t, span);
-                // `FieldRef` and `WriteFieldRef` carry the WRITE capability
-                // (`field_set`, `poll_co_field`), so neither can resolve against a
-                // `value` struct: the callee receives a copy, never the caller's
-                // place, so the write would be lost. `ReadFieldRef` (read-only,
-                // `field_get`) allows it -- reading a value-struct field is fine.
-                if is_field_ref || is_write_field_ref {
-                    if let TypeExpr::App {
-                        ctor: TypeCtor::Nominal(tn),
-                        ..
-                    } = *gamma.get(t_r)
-                    {
-                        let is_value = resolve_struct(gamma, tn).is_some_and(|sid| {
-                            gamma.workspace.module(sid.module).structs[sid.def].is_value
-                        });
-                        if is_value {
+                if let TypeExpr::App {
+                    ctor: TypeCtor::Nominal(name),
+                    ..
+                } = *gamma.get(t_r)
+                {
+                    if let Some(sid) = resolve_struct(gamma, name) {
+                        let def = &gamma.workspace.module(sid.module).structs[sid.def];
+                        if writable && def.is_value {
                             comp_error!(
                                 span,
-                                "cannot form a writable field reference `.{}` into `value` struct `{}`: a value argument is a copy, so a write through the reference (`field_set`) would be lost; assign the field directly",
-                                field,
-                                tn
+                                "cannot form a writable field reference `.{field}` into `value` struct `{name}`: a value argument is a copy, so a write through the reference (`field_set`) would be lost; assign the field directly"
+                            );
+                        }
+                        if readable && def.fields.iter().any(|f| f.name == field && f.is_embed) {
+                            comp_error!(
+                                span,
+                                "`{field}` is an `embed` field of `{name}`, so it admits only the write-only `WriteFieldRef<{name}, _>`; a readable selector would hand out the whole value"
                             );
                         }
                     }
-                }
-                // ADMISSION: every field ref satisfies `WriteFieldRef`; only a
-                // NON-embed field also satisfies the readable formers. An
-                // embedded field has no whole value to hand out, and `FieldRef`
-                // coerces onward to `ReadFieldRef`, so it re-opens the same
-                // extraction.
-                if is_field_ref || is_read_field_ref {
-                    if let TypeExpr::App {
-                        ctor: TypeCtor::Nominal(tn),
-                        ..
-                    } = *gamma.get(t_r)
-                    {
-                        let is_embed = resolve_struct(gamma, tn).is_some_and(|sid| {
-                            gamma.workspace.module(sid.module).structs[sid.def]
-                                .fields
-                                .iter()
-                                .any(|f| f.name == field && f.is_embed)
-                        });
-                        if is_embed {
-                            comp_error!(
-                                span,
-                                "`{}` is an `embed` field of `{}`, so it admits only the write-only `WriteFieldRef<{}, _>`; a readable selector would hand out the whole value",
-                                field,
-                                tn,
-                                tn
-                            );
-                        }
-                    }
-                }
-                if is_field_ref || is_write_field_ref {
-                    if let TypeExpr::App {
-                        ctor: TypeCtor::Nominal(tn),
-                        ..
-                    } = *gamma.get(t_r)
-                    {
-                        let site = gamma.access_site();
-                        field_access(gamma, tn, field, site, FieldAccessNeed::Write)
-                            .map_err(|e| e.to_compiler_error(span))?;
+                    if writable {
+                        field_access(
+                            gamma,
+                            name,
+                            field,
+                            gamma.access_site(),
+                            FieldAccessNeed::Write,
+                        )
+                        .map_err(|e| e.to_compiler_error(span))?;
                     }
                 }
 
@@ -2352,7 +2308,7 @@ pub(crate) fn check_expr(
                 // out a `FieldRef<T, int?>` that `field_set(o, f, null)` writes
                 // nil through. A read-only `ReadFieldRef` keeps the widening --
                 // reading an `int` as `int?` is sound.
-                if is_field_ref || is_write_field_ref {
+                if writable {
                     let (fty_r, v_r) = (resolve(gamma, fty, span), resolve(gamma, v, span));
                     let unbound_v =
                         matches!(gamma.get(v_r), TypeExpr::Infer(..) | TypeExpr::Generic(..));

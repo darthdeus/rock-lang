@@ -2018,73 +2018,64 @@ pub fn check_module_incremental(
     let mut result = InferenceResult::default();
     let enforce_identity_storage = !crate::identity_storage::identity_storage_exempt(ws, module);
 
-    for (f_id, f) in module.functions.iter() {
-        let owner = BodyOwner::Function(f_id);
-
-        // Didn't lower
-        let Some(body) = module.bodies.get(&owner) else {
-            continue;
+    let owners = module
+        .functions
+        .iter()
+        .map(|(id, _)| BodyOwner::Function(id))
+        .chain(
+            module
+                .decorators
+                .iter()
+                .map(|(id, _)| BodyOwner::Decorator(id)),
+        )
+        .chain(module.globals.iter().map(|(id, _)| BodyOwner::Global(id)))
+        .chain(
+            module
+                .structs
+                .iter()
+                .map(|(id, _)| BodyOwner::StructDefaults(id)),
+        );
+    for owner in owners {
+        let body = match owner {
+            BodyOwner::Global(_) => &module.bodies[&owner],
+            _ => match module.bodies.get(&owner) {
+                Some(body) => body,
+                None => continue,
+            },
         };
-
-        if reuse_body(&mut prev, &mut result, owner, body) {
-            continue;
-        }
-
-        // A real re-inference (not a reuse): bump the workspace counter so the
-        // incremental Session can report exactly how many bodies re-inferred.
-        ws.reinferred_body_count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let checked = check_function(ws, module, mid, f_id, f).map(|checked| {
-            checked.map(|(owner, inference, mut errs)| {
-                if enforce_identity_storage {
-                    errs.extend(
-                        crate::identity_storage::identity_body_sites(ws, f, body, &inference)
-                            .into_iter()
-                            .map(|site| CompilerError::new_with_label(site.span, site.message)),
+        let function = if let BodyOwner::Function(fid) = owner {
+            if reuse_body(&mut prev, &mut result, owner, body) {
+                continue;
+            }
+            ws.reinferred_body_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some(&module.functions[fid])
+        } else {
+            None
+        };
+        match check_body(ws, BodyCtx { module, body }, mid, owner) {
+            Some(Ok((mut inference, mut errors))) => {
+                if enforce_identity_storage && let Some(function) = function {
+                    errors.extend(
+                        crate::identity_storage::identity_body_sites(
+                            ws, function, body, &inference,
+                        )
+                        .into_iter()
+                        .map(|site| CompilerError::new_with_label(site.span, site.message)),
                     );
                 }
-                (owner, inference, errs)
-            })
-        });
-        fold_inference(ws, module, &mut result, owner, checked);
-    }
-
-    for (d_id, d) in module.decorators.iter() {
-        // Didn't lower
-        if !module.bodies.contains_key(&BodyOwner::Decorator(d_id)) {
-            continue;
+                errors.extend(crate::consume::check(ws, body, &inference, function));
+                inference.shrink_to_fit();
+                result.per_fn.insert(owner, inference);
+                if !errors.is_empty() {
+                    result.errors.insert(owner, errors);
+                }
+            }
+            Some(Err(error)) => {
+                result.errors.insert(owner, vec![error]);
+            }
+            None => {}
         }
-        fold_inference(
-            ws,
-            module,
-            &mut result,
-            BodyOwner::Decorator(d_id),
-            check_decorator(ws, module, mid, d_id, d),
-        );
-    }
-
-    for (g_id, g) in module.globals.iter() {
-        fold_inference(
-            ws,
-            module,
-            &mut result,
-            BodyOwner::Global(g_id),
-            check_global(ws, module, mid, g_id, g),
-        );
-    }
-
-    for (s_id, _) in module.structs.iter() {
-        let key = BodyOwner::StructDefaults(s_id);
-        if !module.bodies.contains_key(&key) {
-            continue;
-        }
-        fold_inference(
-            ws,
-            module,
-            &mut result,
-            key,
-            check_struct_defaults(ws, module, mid, s_id),
-        );
     }
 
     // The table holds each body's inference inline, and lives to the end.
@@ -2098,41 +2089,6 @@ pub fn check_module(
     module: &Module,
 ) -> Result<InferenceResult, CompilerError> {
     check_module_incremental(ws, mid, module, InferenceResult::default())
-}
-
-fn fold_inference(
-    ws: &Workspace,
-    module: &Module,
-    result: &mut InferenceResult,
-    owner: BodyOwner,
-    checked: Result<Option<(BodyOwner, BodyInference, Vec<CompilerError>)>, CompilerError>,
-) {
-    match checked {
-        Ok(Some((o, mut inf, mut errs))) => {
-            let function = match o {
-                BodyOwner::Function(id) => Some(&module.functions[id]),
-                _ => None,
-            };
-            errs.extend(crate::consume::check(
-                ws,
-                &module.bodies[&o],
-                &inf,
-                function,
-            ));
-            inf.shrink_to_fit();
-            result.per_fn.insert(o, inf);
-
-            if !errs.is_empty() {
-                result.errors.insert(o, errs);
-            }
-        }
-
-        Ok(None) => {}
-
-        Err(err) => {
-            result.errors.insert(owner, vec![err]);
-        }
-    }
 }
 
 fn reuse_body(
