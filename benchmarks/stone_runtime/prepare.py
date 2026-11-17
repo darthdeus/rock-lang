@@ -16,6 +16,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("outdir", type=Path)
 parser.add_argument("--compiler", type=Path, default=root / "target/release/rock")
 parser.add_argument("--source-revision", default="HEAD", help="git commit or ref for packages and stdlib")
+parser.add_argument("--target-os", default="linux", choices=("linux", "osx", "windows"))
 args = parser.parse_args()
 compiler = args.compiler.resolve()
 outdir = args.outdir.resolve()
@@ -53,7 +54,7 @@ with tempfile.TemporaryDirectory(prefix="rock-runtime-audit-") as directory:
 '''
     for arm in ("retained", "fresh"):
         source.write_text(original if arm == "retained" else original[:start] + fresh + original[end:])
-        subprocess.run([str(compiler), "compile", str(package), "--target-os", "linux",
+        subprocess.run([str(compiler), "compile", str(package), "--target-os", args.target_os,
                         "--output", str(outdir / f"{arm}.lua")], cwd=tree, env=env, check=True)
 metadata = dict(revision=revision, benchmark_sources=benchmark_sources, compiler_sha256=hashlib.sha256(compiler.read_bytes()).hexdigest(),
                 outputs={arm: hashlib.sha256((outdir / f"{arm}.lua").read_bytes()).hexdigest()

@@ -125,21 +125,6 @@ fn sampled_texture_composite_pass(
     }
 }
 
-pub fn composite_sampled_texture(
-    source: SampledTexture,
-    target: Canvas,
-    extent: IVec2,
-    sampling: TextureFilter,
-    tint: Color,
-    offset: Vec2,
-    strength: float,
-    blend: BlendMode = BlendMode::Replace
-) -> bool {
-    let pass = sampled_texture_composite_pass(
-        source, target, extent, sampling, tint, offset, strength, blend) ?? return false
-    return run_pass(pass)
-}
-
 // Presentation bracket around the world composite. Between begin and end,
 // every bind of the default framebuffer (including the unset-to-FBO0 the
 // fullscreen passes below do) lands the view's scene_output_viewport, so the

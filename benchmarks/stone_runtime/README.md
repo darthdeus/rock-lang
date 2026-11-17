@@ -104,6 +104,13 @@ Parametric: 320 calls to `UiRect.parametric_sprite` with one state key, includin
 the first 256-quad batch and a 64-quad overflow batch. The oracle checks batch and vertex counts plus untimed parameter values. These cases measure bookkeeping and
 queue construction, not GPU submission or complete application frames.
 
+Bake: 120 retained UiBake lookups per iteration, with unchanged inputs and a
+live source canvas. The oracle checks that hits preserve the canvas and skip
+paint, changed inputs repaint the same target, reload invalidates the cache,
+and a destroyed bake can be reused. Pixel checks run outside timing. Select it
+with `--case bake --arm retained`; paired runs use the same alternating fresh
+processes as the other workloads.
+
 ## Current evidence
 
 Scene measured 2026-11-15 at engine/compiler `8213867e`, Linux x86_64,

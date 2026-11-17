@@ -87,7 +87,8 @@ fn scene_audit() {
 fn main() {
     setup_stone()
     stone_lua_counter_install()
-    if os_getenv("AUDIT_CASE") == "shader" { shader_bookkeeping_audit() }
+    if os_getenv("AUDIT_CASE") == "bake" { bake_audit() }
+    else if os_getenv("AUDIT_CASE") == "shader" { shader_bookkeeping_audit() }
     else if os_getenv("AUDIT_CASE") == "parametric" { parametric_audit() }
     else if os_getenv("AUDIT_CASE") == "bookkeeping" { bookkeeping_audit() }
     else if os_getenv("AUDIT_CASE") == "mesh" { mesh_audit() }

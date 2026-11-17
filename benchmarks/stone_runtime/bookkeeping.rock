@@ -96,3 +96,41 @@ fn shader_bookkeeping_audit() {
         print("SHADER_OK")
     })
 }
+
+// The retained source cache used by TextArt: hits must not repaint or allocate
+// another canvas. The pixel and invalidation checks run outside timing.
+fn bake_audit() {
+    assert(stone_gpu_host_ensure())
+    let view = resolve_frame_view(v(320, 180), iv(320, 180),
+        Camera2D { visible_world_width: 20.0 }, RenderConfig {}).unwrap()
+    with_scene_render_scope(view, () => {
+        let bake = ui_bake_new<int>("audit/bake")
+        defer { ui_bake_destroy(bake) }
+        let paints = 0
+        let paint = (dl: DrawList, input: int) => {
+            paints += 1
+            dl.rect(v(0, 0), v(8, 8), color(input as float / 4.0, 0.0, 0.0, 1.0))
+        }
+        let first = ui_bake_ensure(bake, iv(8, 8), 1, paint)
+        assert(paints == 1)
+        let red = read_canvas_pixel(first, 4, 4)
+        assert(red > 0.2 && red < 0.3)
+        audit_measure("bake", get_env_int("AUDIT_FRAMES", 120), (_frame) => {
+            for _i in 0..120 {
+                let canvas = ui_bake_ensure(bake, iv(8, 8), 1, paint)
+                assert(canvas.handle == first.handle && bake.cache_hit && paints == 1)
+            }
+        })
+        let changed = ui_bake_ensure(bake, iv(8, 8), 2, paint)
+        assert(changed.handle == first.handle && paints == 2 && !bake.cache_hit)
+        assert(read_canvas_pixel(changed, 4, 4) > red + 0.2)
+        ui_bake_invalidate_all()
+        let reloaded = ui_bake_ensure(bake, iv(8, 8), 2, paint)
+        assert(reloaded.handle == first.handle && paints == 3)
+        ui_bake_destroy(bake)
+        assert(ui_bake_canvas(bake) == null)
+        let recreated = ui_bake_ensure(bake, iv(8, 8), 2, paint)
+        assert(canvas_is_live(recreated) && paints == 4)
+        print("BAKE_OK")
+    })
+}

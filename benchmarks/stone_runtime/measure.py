@@ -14,7 +14,7 @@ parser.add_argument("--compare", type=Path, help="candidate artifacts; alternate
 parser.add_argument("--arm", choices=("fresh", "retained", "growth", "early", "reserved"))
 parser.add_argument("--runtime", type=Path, required=True, help="gamelibs platform directory")
 parser.add_argument("--stone-lib", type=Path, required=True)
-parser.add_argument("--case", choices=("scene", "mesh", "segment", "bookkeeping", "parametric", "shader"), default="scene")
+parser.add_argument("--case", choices=("scene", "mesh", "segment", "bookkeeping", "parametric", "shader", "bake"), default="scene")
 parser.add_argument("--corners", action="store_true", help="mesh optional corner-lane stress")
 parser.add_argument("--independent-corners", action="store_true", help="mesh distinct per-corner values")
 parser.add_argument("--require-no-coalescing", action="store_true",
@@ -38,7 +38,7 @@ env.update(ROCK_STONE_LIB=str(args.stone_lib.resolve()), STONE_HEADLESS="1",
            AUDIT_WARMUP=str(args.warmup or (600 if args.case == "scene" else 30)))
 env["LD_LIBRARY_PATH"] = ":".join(filter(None, [str(args.stone_lib.resolve().parent),
     str(runtime / "lib"), env.get("LD_LIBRARY_PATH"), env.get("NIX_LD_LIBRARY_PATH")]))
-arms = ("fresh", "retained") if args.case == "scene" else ("retained",) if args.case in ("bookkeeping", "parametric", "shader") else ("growth", "early", "reserved")
+arms = ("fresh", "retained") if args.case == "scene" else ("retained",) if args.case in ("bookkeeping", "parametric", "shader", "bake") else ("growth", "early", "reserved")
 if args.arm:
     if args.arm not in arms:
         parser.error("--arm is incompatible with --case")
