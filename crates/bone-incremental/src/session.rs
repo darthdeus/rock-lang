@@ -146,50 +146,33 @@ impl ScopeDelta {
             }
         }
 
-        let def_keys: FxHashSet<Ustr> = old.defs.keys().chain(new.defs.keys()).copied().collect();
-        for key in def_keys {
-            let (o, n) = (old.defs.get(&key), new.defs.get(&key));
-            let same = match (o, n) {
-                (Some(o), Some(n)) => {
-                    o.package == n.package
-                        && o.module == n.module
-                        && o.kind == n.kind
-                        && o.name == n.name
-                        && o.vis == n.vis
-                }
-                _ => false,
-            };
-            if !same {
-                for meta in o.into_iter().chain(n) {
-                    delta.members.insert((meta.package, meta.node, meta.name));
-                }
+        for key in changed_keys_by(&old.defs, &new.defs, |o, n| {
+            (o.package, &o.module, o.kind, o.name, &o.vis)
+                == (n.package, &n.module, n.kind, n.name, &n.vis)
+        }) {
+            for meta in old.defs.get(&key).into_iter().chain(new.defs.get(&key)) {
+                delta.members.insert((meta.package, meta.node, meta.name));
             }
         }
-
-        let scoped: FxHashSet<Ustr> = old
-            .fragment_scopes
-            .keys()
-            .chain(new.fragment_scopes.keys())
-            .copied()
-            .collect();
-        for file in scoped {
-            let same = match (
-                old.fragment_scopes.get(&file),
-                new.fragment_scopes.get(&file),
-            ) {
-                (Some(o), Some(n)) => {
-                    o.package == n.package
-                        && o.package_name == n.package_name
-                        && o.module_path == n.module_path
-                        && o.named == n.named
-                        && o.globs == n.globs
-                }
-                _ => false,
-            };
-            if !same {
-                delta.fragments.insert(file);
-            }
-        }
+        delta.fragments.extend(changed_keys_by(
+            &old.fragment_scopes,
+            &new.fragment_scopes,
+            |o, n| {
+                (
+                    o.package,
+                    &o.package_name,
+                    &o.module_path,
+                    &o.named,
+                    &o.globs,
+                ) == (
+                    n.package,
+                    &n.package_name,
+                    &n.module_path,
+                    &n.named,
+                    &n.globs,
+                )
+            },
+        ));
 
         delta
     }
@@ -197,8 +180,16 @@ impl ScopeDelta {
 
 /// The keys whose entries differ between two maps, a missing entry included.
 fn changed_keys<V: PartialEq>(old: &FxHashMap<Ustr, V>, new: &FxHashMap<Ustr, V>) -> Vec<Ustr> {
+    changed_keys_by(old, new, PartialEq::eq)
+}
+
+fn changed_keys_by<V>(
+    old: &FxHashMap<Ustr, V>,
+    new: &FxHashMap<Ustr, V>,
+    same: impl Fn(&V, &V) -> bool,
+) -> Vec<Ustr> {
     old.iter()
-        .filter(|(k, v)| new.get(*k) != Some(*v))
+        .filter(|(k, value)| !new.get(*k).is_some_and(|next| same(value, next)))
         .map(|(k, _)| *k)
         .chain(new.keys().filter(|k| !old.contains_key(*k)).copied())
         .collect()
@@ -260,12 +251,6 @@ pub struct Session {
 }
 
 /// A file entering a session, carrying the facts its package supplies.
-///
-/// A session RE-PARSES from stored text on every edit, so it has to keep the
-/// owning package rather than take it stamped once from the caller. Package
-/// facts reach bone through the host on the incremental route too. A standalone
-/// source has no explicit package; semantic assembly assigns it a deterministic
-/// implicit package on each build.
 #[derive(Clone, Debug)]
 pub struct SessionFile {
     pub path: String,
@@ -304,22 +289,14 @@ pub struct UserFile {
     pub text: String,
     /// Keep macro signatures for editor queries after expansion.
     pub macros: Vec<MacroDef>,
-    /// The package that owns this file, from the package graph. Kept here
-    /// because every re-parse -- a full file reparse, a one-item fast edit, an
-    /// O(workspace) rebuild -- needs it again, and re-deriving it would mean
-    /// re-reading manifests on the edit path.
+    /// The package that owns this file, from the package graph.
     pub package: Option<PackageTag>,
-    /// The owning package's mutable-global policy, kept for the same reason.
+    /// Retained across full and single-item reparses.
     pub global_policy: GlobalPolicy,
-    /// Recovered syntax errors from this file's last parse. The parse is total
-    /// (best-effort tree + recovery errors), so these are kept here and surfaced
-    /// via `diagnostics()` -- a broken file still type-checks its valid parts AND
-    /// shows the parse error as a diagnostic (the compile path rejects on them).
+    /// Recovery keeps the partial tree queryable while diagnostics retain its syntax errors.
     pub syntax_errors: Vec<CompilerError>,
-    /// Hash of what this file contributes to the namespace tree: the `mod`
-    /// header, every `use`, and each definition's name, kind and visibility
-    /// (see [`scope_hash`]). The header is not an item, so `item_prints` alone
-    /// cannot see it change.
+    /// Hash of what this file contributes to the namespace tree: the `mod` header, every `use`,
+    /// and each definition's name, kind and visibility (see [`scope_hash`]).
     pub scope_hash: u64,
     /// What this file contributes to the namespace tree, kept so a scope
     /// edit re-assembles the tree without re-parsing any other file.
@@ -365,10 +342,9 @@ pub struct ItemPrint {
     pub iface_hash: u64,
     pub body_hash: Option<u64>,
     offset: usize,
-    /// Full item span (covers leading annotations) -- the incremental body-edit
-    /// fast path slices `text[item_span]` to re-parse just this item, and reads
-    /// its line/col as the `parse_one_item` base. Maintained across fast edits
-    /// (the changed item replaced; following items shifted by the byte delta).
+    /// Full item span (covers leading annotations) -- the incremental body-edit fast path
+    /// slices `text[item_span]` to re-parse just this item, and reads its line/col as the
+    /// `parse_one_item` base.
     item_span: Span,
     /// Byte range of the function's body BLOCK (Rock-bodied fns only) -- an edit
     /// strictly inside it is a pure body edit. `None` for non-fn / lua / extern /
@@ -505,128 +481,76 @@ fn hash_visibility(vis: Option<&skull_parser::Visibility>, h: &mut rustc_hash::F
 }
 
 pub fn item_prints(a: &Ast, text: &str) -> Vec<ItemPrint> {
-    use skull_parser::ItemKind;
     use std::hash::{Hash, Hasher};
 
-    let mut prints = Vec::new();
-
-    for item in a.items.iter() {
-        let (start, stop) = item.span.offset_range();
-        debug_assert!(stop <= text.len(), "item span out of bounds");
-
-        let mut h = rustc_hash::FxHasher::default();
-
-        for ann in item.annotations.iter() {
-            let (a, b) = ann.span.offset_range();
-            text[a..b].hash(&mut h);
-        }
-
-        let (kind, name, body_hash, body_range) = match &item.kind {
-            ItemKind::Function(f) => {
-                let mut body_range = None;
-                let body_hash = if let FunctionBody::Rock(b) = f.body
-                    && !f.is_macro
-                {
-                    let (bs, be) = a.b(&b).span.offset_range();
-
-                    debug_assert!(start <= bs && be <= stop, "block escapes item span");
-
-                    text[start..bs].hash(&mut h);
-                    text[be..stop].hash(&mut h);
-
-                    body_range = Some((bs, be));
-                    Some(text_hash(&text[bs..be]))
-                } else {
-                    // lua/extern/macro, whole body is interface
-                    text[start..stop].hash(&mut h);
-                    None
-                };
-
-                (ItemKindTag::Fn, f.name.name, body_hash, body_range)
+    a.items
+        .iter()
+        .filter_map(|item| {
+            let (start, stop) = item.span.offset_range();
+            debug_assert!(stop <= text.len(), "item span out of bounds");
+            let mut h = rustc_hash::FxHasher::default();
+            for ann in &item.annotations {
+                let (a, b) = ann.span.offset_range();
+                text[a..b].hash(&mut h);
             }
-
-            ItemKind::Struct(s) => {
-                text[start..stop].hash(&mut h);
-                (ItemKindTag::Struct, s.name.name, None, None)
-            }
-
-            ItemKind::Enum(e) => {
-                text[start..stop].hash(&mut h);
-                (ItemKindTag::Enum, e.name.name, None, None)
-            }
-
-            ItemKind::Newtype(n) => {
-                text[start..stop].hash(&mut h);
-                (ItemKindTag::Newtype, n.name.name, None, None)
-            }
-
-            ItemKind::Decorator(d) => {
-                text[start..stop].hash(&mut h);
-                (ItemKindTag::Newtype, d.name.name, None, None)
-            }
-
-            ItemKind::Global(g) => {
-                // A `const`'s init VALUE is its body; the `const` keyword, name, and
-                // type annotation are interface. So a const value-only edit (same
-                // type) is a BodyOnly edit -> it hot-reloads through the cheap
-                // overlay. A type or keyword change moves the prefix text into the
-                // iface_hash -> Interface (full rebuild).
-                //
-                // A mutable `global` keeps WHOLE-item interface: the hot-reload guard
-                // preserves its live value across the re-dofile, so a value edit has
-                // no live effect and the overlay deliberately never re-emits it.
-                // Whole-item iface keeps such an edit on the full-rebuild path.
-                if g.is_const
-                    && let Some(value) = g.value
-                {
-                    let (vs, ve) = a.e(&value).span.offset_range();
-                    debug_assert!(start <= vs && ve <= stop, "const init escapes item span");
-                    text[start..vs].hash(&mut h);
-                    text[ve..stop].hash(&mut h);
-                    (
-                        ItemKindTag::Other,
-                        g.name.name,
-                        Some(text_hash(&text[vs..ve])),
-                        Some((vs, ve)),
-                    )
-                } else {
-                    text[start..stop].hash(&mut h);
-                    (ItemKindTag::Other, g.name.name, None, None)
+            let (kind, name, body_range) = match &item.kind {
+                ItemKind::Function(f) => (
+                    ItemKindTag::Fn,
+                    f.name.name,
+                    match f.body {
+                        FunctionBody::Rock(body) if !f.is_macro => {
+                            Some(a.b(&body).span.offset_range())
+                        }
+                        _ => None,
+                    },
+                ),
+                ItemKind::Struct(s) => (ItemKindTag::Struct, s.name.name, None),
+                ItemKind::Enum(e) => (ItemKindTag::Enum, e.name.name, None),
+                ItemKind::Newtype(n) => (ItemKindTag::Newtype, n.name.name, None),
+                ItemKind::Decorator(d) => (ItemKindTag::Newtype, d.name.name, None),
+                // Const values participate in hot reload; mutable globals keep their
+                // live value, so their entire declaration remains interface input.
+                ItemKind::Global(g) => (
+                    ItemKindTag::Other,
+                    g.name.name,
+                    g.value
+                        .filter(|_| g.is_const)
+                        .map(|value| a.e(&value).span.offset_range()),
+                ),
+                ItemKind::MacroInvocation { name, .. } => (ItemKindTag::Other, name.name, None),
+                ItemKind::CompilerDirective(_) | ItemKind::Use(_) | ItemKind::Module(_) => {
+                    (ItemKindTag::Other, Ustr::from(""), None)
                 }
-            }
-
-            ItemKind::CompilerDirective(_) => {
+                ItemKind::Comment(_) => return None,
+            };
+            let body_hash = if let Some((bs, be)) = body_range {
+                debug_assert!(
+                    start <= bs && be <= stop,
+                    "{}",
+                    if kind == ItemKindTag::Fn {
+                        "block escapes item span"
+                    } else {
+                        "const init escapes item span"
+                    }
+                );
+                text[start..bs].hash(&mut h);
+                text[be..stop].hash(&mut h);
+                Some(fingerprint(&text[bs..be]))
+            } else {
                 text[start..stop].hash(&mut h);
-                (ItemKindTag::Other, Ustr::from(""), None, None)
-            }
-
-            ItemKind::MacroInvocation { name, .. } => {
-                text[start..stop].hash(&mut h);
-                (ItemKindTag::Other, name.name, None, None)
-            }
-
-            // Modules-v1 forms: whole-item interface, no body to isolate.
-            // `scope_hash` is what routes their edits to a namespace rebuild.
-            ItemKind::Use(_) | ItemKind::Module(_) => {
-                text[start..stop].hash(&mut h);
-                (ItemKindTag::Other, Ustr::from(""), None, None)
-            }
-
-            ItemKind::Comment(_) => continue,
-        };
-
-        prints.push(ItemPrint {
-            kind,
-            name,
-            iface_hash: h.finish(),
-            body_hash,
-            offset: start,
-            item_span: item.span,
-            body_range,
-        });
-    }
-
-    prints
+                None
+            };
+            Some(ItemPrint {
+                kind,
+                name,
+                iface_hash: h.finish(),
+                body_hash,
+                offset: start,
+                item_span: item.span,
+                body_range,
+            })
+        })
+        .collect()
 }
 
 fn classify(old: &[ItemPrint], new: &[ItemPrint]) -> FileDiff {
@@ -664,7 +588,7 @@ fn name_shapes(prints: &[ItemPrint]) -> FxHashMap<Ustr, u64> {
         .into_iter()
         .map(|(n, mut hs)| {
             hs.sort();
-            (n, hash_u64s(&hs))
+            (n, fingerprint(&hs))
         })
         .collect()
 }
@@ -698,11 +622,7 @@ fn cook_and_contribute(
 }
 
 impl Session {
-    /// Every macro visible in this session, user files AND stdlib, paired with
-    /// its defining file. Macros are erased by expansion before bone lowering,
-    /// so the workspace HIR has no record of them -- this is the only source.
-    /// Consumers (completion, ctags, semantic tokens) must read it rather than
-    /// `files` alone, or stdlib macros silently go missing.
+    /// Expansion erases macro declarations; editor queries read user and warm signatures here.
     pub fn all_macro_defs(&self) -> impl Iterator<Item = (Ustr, &MacroDef)> {
         self.files
             .iter()
@@ -799,7 +719,7 @@ impl Session {
             session.files.insert(
                 path.clone(),
                 UserFile {
-                    text_hash: text_hash(&text),
+                    text_hash: fingerprint(&text),
                     item_prints: prints,
                     text,
                     macros,
@@ -827,11 +747,9 @@ impl Session {
         Ok(session)
     }
 
-    /// Re-parse every user file from its stored text and prepend the (immutable,
-    /// pre-parsed) warm modules -- the un-expanded module set the full-rebuild
-    /// path (`rebuild_users`) feeds to `expand_and_desugar`. The AST is transient
-    /// (not persisted), so this re-parses; it runs only on the O(workspace)
-    /// fallback, where a parse per file is in line with the from-scratch cost.
+    /// Re-parse every user file from its stored text and prepend the (immutable, pre-parsed)
+    /// warm modules -- the un-expanded module set the full-rebuild path (`rebuild_users`) feeds
+    /// to `expand_and_desugar`.
     pub fn combined_unexpanded(&self) -> Result<ModuleSet, CompilerError> {
         let users = self
             .paths
@@ -841,11 +759,8 @@ impl Session {
         Ok(ModuleSet::new(self.warm.clone(), users))
     }
 
-    /// The package facts recorded for `path`: a held file's own, else what the
-    /// host declared for it. A path nobody declared is a standalone source: a
-    /// caller that knows better supplies
-    /// the facts up front, through [`SessionFile`] or
-    /// [`Session::declare_file_facts`].
+    /// The package facts recorded for `path`: a held file's own, else what the host declared
+    /// for it.
     fn facts_of(&self, path: &str) -> (Option<PackageTag>, GlobalPolicy) {
         match self.files.get(path) {
             Some(f) => (f.package.clone(), f.global_policy),
@@ -865,12 +780,8 @@ impl Session {
         parse_with_facts(text, ustr(path), package, global_policy)
     }
 
-    /// Declare the owning package of a file that enters the
-    /// session after [`Session::new`] -- the editor opening a file the batch
-    /// load did not see. Its manifest decides its owner, exactly as for a file of
-    /// the initial set; without a declaration it would read as a standalone
-    /// source. A held file's facts cannot change: its package's
-    /// manifest changed, which needs a new session.
+    /// Declare the owning package of a file that enters the session after [`Session::new`] --
+    /// the editor opening a file the batch load did not see.
     pub fn declare_file_facts(
         &mut self,
         path: &str,
@@ -927,21 +838,6 @@ impl Session {
     }
 
     pub fn update_file(&mut self, path: &str, text: &str) -> Result<UpdateResult, CompilerError> {
-        let result = self.update_file_bodies(path, text)?;
-        if result.tier != UpdateTier::NoChange {
-            // Whole-program: an edited callee can change an unchanged caller's
-            // verdict.
-            bone_semantic::relocation::check_relocation(&mut self.ws);
-            bone_semantic::fn_identity::check_generic_fn_eq(&mut self.ws);
-        }
-        Ok(result)
-    }
-
-    fn update_file_bodies(
-        &mut self,
-        path: &str,
-        text: &str,
-    ) -> Result<UpdateResult, CompilerError> {
         // Reset the work counters so callers can read EXACTLY how many bodies
         // this update re-inferred (check_module_incremental bumps it) and
         // re-lowered (the lowering passes bump it).
@@ -951,7 +847,7 @@ impl Session {
         self.ws
             .relowered_body_count
             .store(0, std::sync::atomic::Ordering::Relaxed);
-        let hash = text_hash(text);
+        let hash = fingerprint(text);
 
         if let Some(existing) = self.files.get(path) {
             if existing.text_hash == hash {
@@ -965,13 +861,9 @@ impl Session {
 
         let (package, global_policy) = self.facts_of(path);
         let module = parse_with_facts(text, ustr(path), package.clone(), global_policy)?;
-        let syntax_errors = module.recovery_errors.clone();
         let mid = self.ws.intern_module(module.file);
         if self.warm_mids.contains(&mid) {
-            // Opening a warm (stdlib) file: it IS the warm module, not a second
-            // copy. No-op rather than adding a duplicate that would self-collide
-            // on every stdlib type. Queries on this path resolve to the warm
-            // module; its real diagnostics (if any) come from the warm build.
+            // Opening a warm (stdlib) file: it IS the warm module, not a second copy.
             return Ok(UpdateResult::default());
         }
 
@@ -1003,6 +895,7 @@ impl Session {
         } else {
             contribute(&module)
         };
+
         let new_scope = scope_hash(&new_contribution);
 
         // An edit that changes what the namespace tree or the fragment scopes
@@ -1015,71 +908,33 @@ impl Session {
         let diff = (tracked && !module.items.is_empty() && !scope_changed)
             .then(|| classify(&self.files[path].item_prints, &new_prints));
 
-        // A macro change rewrites its users' EXPANSION, so they must be
-        // re-lowered (re-expanded), which only the full rebuild does; so does
-        // a function whose name a macro also has, which the whole-program
-        // collision check must refuse.
-        let previous = self.files.insert(
-            path.to_string(),
-            UserFile {
-                text_hash: hash,
-                item_prints: new_prints,
-                text: text.to_string(),
-                macros: new_macros,
-                // An edit never changes which package owns a file.
-                package,
-                global_policy,
-                syntax_errors,
-                scope_hash: new_scope,
-                contribution: new_contribution,
-            },
-        );
-
-        if previous.is_none() {
-            self.paths.push(path.to_string());
-        }
-
+        let next = UserFile {
+            text_hash: hash,
+            item_prints: new_prints,
+            text: text.to_string(),
+            macros: new_macros,
+            package,
+            global_policy,
+            syntax_errors: module.recovery_errors.clone(),
+            scope_hash: new_scope,
+            contribution: new_contribution,
+        };
         let span_only = matches!(&diff, Some(FileDiff::BodiesOnly(items)) if items.is_empty());
         let scope_path = tracked && scope_changed && !module.items.is_empty() && !touches_macros;
-        let result = match diff {
+        self.apply_file(path, Some(next), span_only, |s| match diff {
             Some(FileDiff::BodiesOnly(changed)) => match changed.as_slice() {
-                [idx] => self.rebuild_body_incremental(path, module, *idx),
-                _ => self.rebuild_module(path, module, &changed),
+                [idx] => s.rebuild_body_incremental(path, module, *idx, false),
+                _ => s.rebuild_module(path, module, &changed),
             },
-            Some(FileDiff::Interface) if !touches_macros => self.rebuild_interface(
+            Some(FileDiff::Interface) if !touches_macros => s.rebuild_interface(
                 module,
                 &changed,
                 ScopeDelta::default(),
                 UpdateTier::Interface,
                 only_functions,
             ),
-            _ if scope_path => self.rebuild_scope(module, &changed),
-            _ => self.rebuild_users(),
-        };
-        let result = result.map(|mut result| {
-            if result.tier == UpdateTier::BodyOnly && result.body_update.edit.is_none() {
-                result.body_update = BodyUpdate {
-                    edit: previous
-                        .as_ref()
-                        .map(|file| text_edit_delta(path, &file.text, text)),
-                    semantic_bodies: if span_only {
-                        Vec::new()
-                    } else {
-                        result.reinferred.clone()
-                    },
-                    span_only,
-                };
-            }
-            result
-        });
-        self.finish_rebuild(result, "update", path, move |s| match previous {
-            Some(prev) => {
-                s.files.insert(path.to_string(), prev);
-            }
-            None => {
-                s.files.remove(path);
-                s.paths.retain(|p| p != path);
-            }
+            _ if scope_path => s.rebuild_scope(module, &changed),
+            _ => s.rebuild_users(),
         })
     }
 
@@ -1142,10 +997,8 @@ impl Session {
             &self.aliases,
         )?;
         let mids = lower_and_infer(&mut ws, &lowered)?;
-        // The same whole-program gate the batch path runs, so an export whose
-        // type closure is not public fails in a session too rather than only
-        // under `rock compile`. It is a no-op for a workspace with no v1
-        // package.
+        // The same whole-program gate the batch path runs, so an export whose type closure is
+        // not public fails in a session too rather than only under `rock compile`.
         bone_semantic::semantic_passes::pass_validate_api_closure(&ws)?;
         ws.phase_timings.clear();
         self.set_cooked_contributions(user_contributions, warm_contributions);
@@ -1276,52 +1129,38 @@ impl Session {
         let file = module.file;
         let mid = self.ws.module_ids[&file];
 
-        // --- Interface-dependent closure to RE-LOWER ---
-        // A module needs RE-LOWERING (re-resolving its signatures) only when a
-        // type it references in INTERFACE position stops resolving the same
-        // way: a type this edit removed or renamed, or one whose generic arity
-        // or trailing defaults changed (checked at LOWER time, in
-        // `lower_type_expr`), or whose flavor changed. A type whose *shape*
-        // changed (field add/retype) keeps all of that, so dependents'
-        // signatures still resolve it; those need only re-inference, handled
-        // below. Since a dependent's TEXT is unchanged, re-lowering it never
-        // removes a name, so the re-lower set is one level deep.
-        //
-        // Both sides are keyed the way the workspace maps key a type: the
-        // DefKey in a user fragment, the bare name in a warm module. The old
-        // facts are the maps' (still pre-edit here; `lower_modules` below
-        // repopulates them), the new ones the fresh AST's.
-        let old_types: FxHashMap<Ustr, bone_semantic::semantic_passes::NominalFacts> = {
+        // Shape changes need inference; resolution, flavor, arity and defaults
+        // can change how dependent signatures lower.
+        let old_types = {
             use bone_semantic::semantic_passes::{NominalFacts, NominalFlavor};
-            let facts = |key: &Ustr, flavor| {
-                let generics = self.ws.type_generics.get(key);
-                NominalFacts {
-                    flavor,
-                    arity: generics.map_or(0, |entry| entry.arity),
-                    defaults: generics
-                        .map(|entry| entry.defaults.clone())
-                        .unwrap_or_default(),
-                }
-            };
             self.ws
                 .struct_by_name
                 .iter()
-                .filter(|(_, id)| id.module == mid)
-                .map(|(n, _)| (*n, facts(n, NominalFlavor::Struct)))
+                .map(|(name, id)| (name, id.module, NominalFlavor::Struct))
                 .chain(
                     self.ws
                         .enums_by_name
                         .iter()
-                        .filter(|(_, id)| id.module == mid)
-                        .map(|(n, _)| (*n, facts(n, NominalFlavor::Enum))),
+                        .map(|(name, id)| (name, id.module, NominalFlavor::Enum)),
                 )
                 .chain(
                     self.ws
                         .newtypes_by_name
                         .iter()
-                        .filter(|(_, id)| id.module == mid)
-                        .map(|(n, _)| (*n, facts(n, NominalFlavor::Newtype))),
+                        .map(|(name, id)| (name, id.module, NominalFlavor::Newtype)),
                 )
+                .filter(|(_, owner, _)| *owner == mid)
+                .map(|(name, _, flavor)| {
+                    let generics = self.ws.type_generics.get(name);
+                    (
+                        *name,
+                        NominalFacts {
+                            flavor,
+                            arity: generics.map_or(0, |g| g.arity),
+                            defaults: generics.map(|g| g.defaults.clone()).unwrap_or_default(),
+                        },
+                    )
+                })
                 .collect()
         };
         let new_types = bone_semantic::semantic_passes::nominal_type_facts(
@@ -1343,10 +1182,8 @@ impl Session {
             }
         }
         to_relower.extend(self.modules_reading(&delta, mid));
-        // Plus every module currently carrying an interface error, so a type that
-        // (re)appears with this edit re-lowers its previously-dangling users and
-        // clears them. User modules only: warm/builtin are never keyed in
-        // `self.files`, so a warm module reaching the re-parse loop would panic.
+        // Plus every module currently carrying an interface error, so a type that (re)appears
+        // with this edit re-lowers its previously-dangling users and clears them.
         for m in self.ws.user_modules(&self.warm_mids) {
             if m.id != mid && !m.interface_errors.is_empty() {
                 to_relower.insert(m.id);
@@ -1408,10 +1245,10 @@ impl Session {
             reinfer_names.extend(module.global_by_name.keys().copied());
         }
 
-        // Re-infer: body-dependents of `reinfer_names` (their TEXT is unchanged, so
-        // body-granular reuse applies), every module with a stale inference error,
-        // AND every re-lowered module (its arena shifted, so its cached inference --
-        // already cleared by `retain_modules` -- can't be reused).
+        // Re-infer: body-dependents of `reinfer_names` (their TEXT is unchanged, so body-
+        // granular reuse applies), every module with a stale inference error, AND every re-
+        // lowered module (its arena shifted, so its cached inference -- already cleared by
+        // `retain_modules` -- can't be reused).
         let mut to_reinfer: FxHashSet<ModuleId> = reinfer_names
             .iter()
             .flat_map(|n| self.dependents.get(n).into_iter().flatten().copied())
@@ -1483,10 +1320,8 @@ impl Session {
 
         self.rebuild_dependents();
 
-        // `ids` already contains `f_mids`, so it covers `reinferred`, minus the
-        // bodies reused above. `relowered` is precisely the re-LOWERED modules
-        // (`f_mids`) -- re-inferred-only dependents kept their arenas, so listing
-        // them as relowered would be wrong.
+        // `ids` already contains `f_mids`, so it covers `reinferred`, minus the bodies reused
+        // above.
         let mut reinferred = self.collect_reinferred(&ids);
         reinferred.retain(|body| !reused.contains(body));
         let relowered = self.collect_reinferred(&f_mids);
@@ -1500,25 +1335,7 @@ impl Session {
     }
 
     pub fn remove_file(&mut self, path: &str) -> Result<UpdateResult, CompilerError> {
-        let Some(previous) = self.files.remove(path) else {
-            return Ok(UpdateResult::default());
-        };
-
-        let pos = self
-            .paths
-            .iter()
-            .position(|p| p == path)
-            .expect("tracked file must be in path order");
-
-        self.paths.remove(pos);
-
-        let restore = move |s: &mut Self| {
-            s.files.insert(path.to_string(), previous);
-            s.paths.insert(pos, path.to_string());
-        };
-
-        let result = self.rebuild_users();
-        self.finish_rebuild(result, "removal", path, restore)
+        self.apply_file(path, None, false, Self::rebuild_users)
     }
 
     pub fn diagnostics(&self) -> Vec<CompilerError> {
@@ -1895,7 +1712,6 @@ impl Session {
             byte_delta,
             line_delta: f.span.line_range().1 as isize - old_fn_span.line_range().1 as isize,
         };
-        let edit = text_edit_delta(path, &old.text, new_text);
         let mut macros = old.macros.clone();
         for md in &mut macros {
             item_shift.shift_span(&mut md.span);
@@ -1911,100 +1727,10 @@ impl Session {
             scope_hash: old.scope_hash,
             contribution: old.contribution.clone(),
         };
-        let previous = self.files.insert(path.to_string(), next);
-        let result =
-            self.commit_body_relower(mid, fid, &mini, f, &item.annotations, old_fn_span, f.span);
-        let mut result = self.finish_rebuild(result, "update", path, move |s| {
-            if let Some(prev) = previous {
-                s.files.insert(path.to_string(), prev);
-            }
-        })?;
-        result.body_update = BodyUpdate {
-            edit: Some(edit),
-            semantic_bodies: result.reinferred.clone(),
-            span_only: false,
-        };
-        Ok(Some(result))
-    }
-
-    /// The mutating half of a single-body edit: span-shift the kept bodies,
-    /// relower the edited function from `ast.items[item]` (cooked), re-infer,
-    /// patch deps.
-    fn commit_body_relower(
-        &mut self,
-        mid: ModuleId,
-        fid: Idx<Function>,
-        ast: &Ast,
-        f: &skull_parser::FunctionDef,
-        annotations: &[skull_parser::Annotation],
-        old_fn_span: Span,
-        new_fn_span: Span,
-    ) -> Result<UpdateResult, CompilerError> {
-        let owner = BodyOwner::Function(fid);
-        let old_gen = self
-            .ws
-            .module(mid)
-            .bodies
-            .get(&owner)
-            .map(|b| b.generation)
-            .unwrap_or(0);
-
-        let at = old_fn_span.offset_range().1;
-        let byte_delta = new_fn_span.offset_range().1 as isize - at as isize;
-        let line_delta = new_fn_span.line_range().1 as isize - old_fn_span.line_range().1 as isize;
-
-        let old_inf = self
-            .ws
-            .inferences
-            .get_mut(mid.index())
-            .and_then(|s| s.take());
-        self.ws.phase_timings.clear();
-
-        let mut module = std::mem::take(self.ws.module_mut(mid));
-
-        let shift_timer = Instant::now();
-        span_shift::shift_module_after_edit(&mut module, owner, at, byte_delta, line_delta);
-        self.ws.log_time("shift spans", shift_timer);
-
-        let lower_timer = Instant::now();
-        let installed = bone_semantic::lower::relower_function_in_place(
-            &self.ws,
-            &mut module,
-            ast,
-            f,
-            annotations,
-            fid,
-        )?;
-        if installed {
-            if let Some(b) = module.bodies.get_mut(&owner) {
-                b.generation = old_gen + 1;
-            }
-        }
-        *self.ws.module_mut(mid) = module;
-        self.ws.index_param_signature(mid, fid);
-        self.ws.log_time("lower functions", lower_timer);
-
-        let infer_timer = Instant::now();
-        let result = check_module_incremental(
-            &self.ws,
-            mid,
-            self.ws.module(mid),
-            old_inf.unwrap_or_default(),
-        )?;
-        self.ws.set_inference(mid, result);
-        self.ws.log_time("infer functions", infer_timer);
-
-        let deps_timer = Instant::now();
-        self.update_dependents_for(mid);
-        self.ws.log_time("rebuild dependents", deps_timer);
-
-        let body = vec![(mid, owner)];
-        Ok(UpdateResult {
-            tier: UpdateTier::BodyOnly,
-            reinferred: body.clone(),
-            relowered: body,
-            ..UpdateResult::default()
+        self.apply_file(path, Some(next), false, |s| {
+            s.rebuild_body_incremental(path, mini, idx, true)
         })
+        .map(Some)
     }
 
     fn rebuild_body_incremental(
@@ -2012,6 +1738,7 @@ impl Session {
         path: &str,
         ast: Ast,
         changed_idx: usize,
+        cooked: bool,
     ) -> Result<UpdateResult, CompilerError> {
         let file = ast.file;
         let mid = self.ws.module_ids[&file];
@@ -2052,7 +1779,9 @@ impl Session {
         // place.
         let mut edited = ast;
         let t_cook = Instant::now();
-        cook_one(&mut edited, &self.registry)?;
+        if !cooked {
+            cook_one(&mut edited, &self.registry)?;
+        }
         let cook_dur = t_cook.elapsed();
 
         // The fallback needs a fresh AST because cooking twice would repeat desugaring.
@@ -2064,17 +1793,74 @@ impl Session {
             let m = self.parse_stored(ustr(path))?;
             return self.rebuild_module(path, m, &[changed_idx]);
         };
-        let result = self.commit_body_relower(
-            mid,
-            fid,
+        let owner = BodyOwner::Function(fid);
+        let old_gen = self
+            .ws
+            .module(mid)
+            .bodies
+            .get(&owner)
+            .map(|b| b.generation)
+            .unwrap_or(0);
+
+        let at = old_fn_span.offset_range().1;
+        let byte_delta = new_fn_span.offset_range().1 as isize - at as isize;
+        let line_delta = new_fn_span.line_range().1 as isize - old_fn_span.line_range().1 as isize;
+
+        let old_inf = self
+            .ws
+            .inferences
+            .get_mut(mid.index())
+            .and_then(|s| s.take());
+        self.ws.phase_timings.clear();
+
+        let mut module = std::mem::take(self.ws.module_mut(mid));
+
+        let shift_timer = Instant::now();
+        span_shift::shift_module_after_edit(&mut module, owner, at, byte_delta, line_delta);
+        self.ws.log_time("shift spans", shift_timer);
+
+        let lower_timer = Instant::now();
+        let installed = bone_semantic::lower::relower_function_in_place(
+            &self.ws,
+            &mut module,
             &edited,
             f,
             &item.annotations,
-            old_fn_span,
-            new_fn_span,
+            fid,
         )?;
-        self.ws.phase_timings.push(("cook one", cook_dur));
-        Ok(result)
+        if installed {
+            if let Some(b) = module.bodies.get_mut(&owner) {
+                b.generation = old_gen + 1;
+            }
+        }
+        *self.ws.module_mut(mid) = module;
+        self.ws.index_param_signature(mid, fid);
+        self.ws.log_time("lower functions", lower_timer);
+
+        let infer_timer = Instant::now();
+        let result = check_module_incremental(
+            &self.ws,
+            mid,
+            self.ws.module(mid),
+            old_inf.unwrap_or_default(),
+        )?;
+        self.ws.set_inference(mid, result);
+        self.ws.log_time("infer functions", infer_timer);
+
+        let deps_timer = Instant::now();
+        self.update_dependents_for(mid);
+        self.ws.log_time("rebuild dependents", deps_timer);
+
+        if !cooked {
+            self.ws.phase_timings.push(("cook one", cook_dur));
+        }
+        let body = vec![(mid, owner)];
+        Ok(UpdateResult {
+            tier: UpdateTier::BodyOnly,
+            reinferred: body.clone(),
+            relowered: body,
+            ..UpdateResult::default()
+        })
     }
 
     /// The module's whole type arena as a seed for its next lowering, or `None`
@@ -2090,26 +1876,76 @@ impl Session {
         })
     }
 
-    fn finish_rebuild(
+    /// Install one file change. Every mutating update tier and removal shares
+    /// this rollback, including failures after in-place lowering took HIR away.
+    fn apply_file(
         &mut self,
-        result: Result<UpdateResult, CompilerError>,
-        action: &str,
         path: &str,
-        restore: impl FnOnce(&mut Self),
+        next: Option<UserFile>,
+        span_only: bool,
+        rebuild: impl FnOnce(&mut Self) -> Result<UpdateResult, CompilerError>,
     ) -> Result<UpdateResult, CompilerError> {
-        match result {
-            Ok(result) => Ok(result),
-            Err(e) => {
-                restore(self);
-
-                if let Err(revert_err) = self.rebuild_users() {
+        let removing = next.is_none();
+        let previous = match next {
+            Some(file) => self.files.insert(path.to_string(), file),
+            None => self.files.remove(path),
+        };
+        let position = if removing {
+            if previous.is_none() {
+                return Ok(UpdateResult::default());
+            }
+            let pos = self
+                .paths
+                .iter()
+                .position(|p| p == path)
+                .expect("tracked file must be in path order");
+            self.paths.remove(pos);
+            Some(pos)
+        } else {
+            if previous.is_none() {
+                self.paths.push(path.to_string());
+            }
+            None
+        };
+        match rebuild(self) {
+            Ok(mut result) => {
+                if result.tier == UpdateTier::BodyOnly && result.body_update.edit.is_none() {
+                    result.body_update = BodyUpdate {
+                        edit: previous
+                            .as_ref()
+                            .map(|file| text_edit_delta(path, &file.text, &self.files[path].text)),
+                        semantic_bodies: if span_only {
+                            Vec::new()
+                        } else {
+                            result.reinferred.clone()
+                        },
+                        span_only,
+                    };
+                }
+                if !removing && result.tier != UpdateTier::NoChange {
+                    bone_semantic::relocation::check_relocation(&mut self.ws);
+                    bone_semantic::fn_identity::check_generic_fn_eq(&mut self.ws);
+                }
+                Ok(result)
+            }
+            Err(error) => {
+                if let Some(file) = previous {
+                    self.files.insert(path.to_string(), file);
+                    if let Some(pos) = position {
+                        self.paths.insert(pos, path.to_string());
+                    }
+                } else {
+                    self.files.remove(path);
+                    self.paths.retain(|p| p != path);
+                }
+                let action = if removing { "removal" } else { "update" };
+                if let Err(revert_error) = self.rebuild_users() {
                     return Err(CompilerError::new_no_location(format!(
                         "bone session: rebuild of previous good state failed after a failed {action} of `{path}` - session is inconsistent: {} (original {action} error: {})",
-                        revert_err.message, e.message
+                        revert_error.message, error.message
                     )));
                 }
-
-                Err(e)
+                Err(error)
             }
         }
     }
@@ -2161,11 +1997,7 @@ fn macro_defs(module: &Ast) -> Vec<MacroDef> {
         .collect()
 }
 
-/// Does any macro defined by the old or new version appear in the changed-name
-/// set? (Both versions: a removed macro is gone from `new` but its users still
-/// need re-expansion; an added one isn't in `old`.) Takes the OLD names from the
-/// stored `UserFile.macros` (no retained AST) and the NEW names from the freshly
-/// parsed module.
+/// Does any macro defined by the old or new version appear in the changed-name set?
 fn touches_macro(
     old_macros: &[MacroDef],
     new_macros: &[MacroDef],
@@ -2177,11 +2009,7 @@ fn touches_macro(
         .any(|m| changed.contains(&m.name))
 }
 
-/// Minimal changed byte span between two texts: the longest common prefix `p`
-/// and suffix, capped so they don't overlap. Returns `(p, old_end, delta)` where
-/// the OLD text's changed region is `[p, old_end)` and `delta = new.len() -
-/// old.len()`. Byte-level (UTF-8 split mid-char is harmless -- the region is only
-/// used to find the containing item, and item boundaries are char-aligned).
+/// A byte diff may split UTF-8; callers compare offsets or slice byte arrays.
 fn byte_diff(old: &str, new: &str) -> (usize, usize, isize) {
     let o = old.as_bytes();
     let n = new.as_bytes();
@@ -2270,44 +2098,25 @@ fn build_shifted_prints(
     np: ItemPrint,
     shift: &TextEditDelta,
 ) -> Vec<ItemPrint> {
-    for (i, p) in prints.iter_mut().enumerate() {
-        if i > idx {
-            p.offset = shift.shift_offset(p.offset);
-            shift.shift_span(&mut p.item_span);
-            if let Some((a, b)) = p.body_range {
-                p.body_range = Some((shift.shift_offset(a), shift.shift_offset(b)));
-            }
+    for p in prints.iter_mut().skip(idx + 1) {
+        p.offset = shift.shift_offset(p.offset);
+        shift.shift_span(&mut p.item_span);
+        if let Some((a, b)) = p.body_range {
+            p.body_range = Some((shift.shift_offset(a), shift.shift_offset(b)));
         }
     }
     prints[idx] = np;
     prints
 }
 
-fn text_hash(text: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
+fn fingerprint(value: impl std::hash::Hash) -> u64 {
+    use std::hash::Hasher;
     let mut h = rustc_hash::FxHasher::default();
-    text.hash(&mut h);
+    value.hash(&mut h);
     h.finish()
 }
 
-fn hash_u64s(xs: &[u64]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = rustc_hash::FxHasher::default();
-    xs.hash(&mut h);
-    h.finish()
-}
-
-/// The nominal type names a module's INTERFACE references. The interface arena
-/// (`module.ty_arena`, `TyPos::Iface`) holds exactly the signature / global /
-/// field / payload types -- body-local types live in `body.lowered_tys` -- so
-/// every `App { Nominal(name) }` node in it is an interface-position reference.
-/// An unresolved reference is `Error` (no name); the cascade's "re-lower every
-/// module with an interface error" rule covers that case, so name erasure here
-/// is safe.
-/// The nominal TYPE names a module defines (struct / enum / newtype). These are
-/// the names a cross-module signature resolves, so they drive the re-lower
-/// cascade. Functions / globals are referenced from bodies (not type position),
-/// so the re-infer set adds those separately.
+/// Nominal definitions whose users must see a re-lowered interface.
 fn exported_type_names(module: &Module) -> impl Iterator<Item = Ustr> + '_ {
     module
         .struct_by_name
@@ -2356,27 +2165,8 @@ fn body_errors(ws: &Workspace) -> Vec<CompilerError> {
 }
 
 #[cfg(debug_assertions)]
-/// A module's public interface, rendered so it is INVARIANT under the
-/// `ty_arena` index drift that a body-only relower legitimately introduces.
-///
-/// Used only by the `rebuild_module` debug self-check: a body-only edit must
-/// not change the module interface (else `classify` mis-tiered it). The naive
-/// `format!("{:?}", &m.ty_arena ...)` is wrong here because the body-edit fast
-/// path (`relower_function_in_place`) re-lowers the edited fn's SIGNATURE,
-/// appending fresh `ty_arena` entries and orphaning the old ones -- so the
-/// arena grows and a re-lowered fn's param/return `Idx<TypeExpr>` shifts even
-/// though the signature is textually identical. Comparing raw indices + the
-/// whole arena false-positives on that benign drift (it's exactly why the
-/// `incremental.rs` oracle compares via `type_at`, not Debug). So we resolve
-/// every interface `TyId` to its structural SHAPE and drop the arena. `VarId`s
-/// are elided for the same reason: the fast path continues the var counter, so
-/// a re-lowered fn's `Infer`/`Generic` carry different ids for the same type.
-///
-/// Functions and globals are resolved structurally (functions are the fast
-/// path's only target today; globals are its planned next one -- see
-/// `rebuild_body_incremental`). Structs/enums/newtypes/decorators are never
-/// fast-path-relowered, so their arena indices are assigned in stable
-/// traversal order and Debug-compare cleanly.
+/// A module's public interface, rendered so it is INVARIANT under the `ty_arena` index drift
+/// that a body-only relower legitimately introduces.
 fn interface_snapshot(ws: &Workspace, mid: ModuleId) -> String {
     use std::fmt::Write;
 

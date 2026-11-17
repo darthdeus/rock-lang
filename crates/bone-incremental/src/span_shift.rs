@@ -1,9 +1,6 @@
-//! Patch absolute spans/indices after an in-place body edit.
-//!
-//! Per-body re-lowering keeps the unchanged bodies' HIR but the text under them
-//! moved, so every stored byte offset / line number / interval index is stale.
-//! `shift_module_after_edit` is the one place that corrects them, so `type_at`,
-//! diagnostics, and navigation stay right without re-lowering the kept bodies.
+//! Patch absolute spans/indices after an in-place body edit. Per-body re-lowering keeps the
+//! unchanged bodies' HIR but the text under them moved, so every stored byte offset / line
+//! number / interval index is stale.
 
 use bone_core::text_edit::TextEditDelta;
 use bone_semantic::{
@@ -31,12 +28,9 @@ impl Shift {
     }
 }
 
-/// After a body edit re-lowered `edited` in place, every OTHER body keeps its
-/// reused HIR but its absolute offsets are stale -- the text under it moved by
-/// `byte_delta` bytes / `line_delta` lines starting at byte `at`. Patch every
-/// offset carrier in the module so `type_at` / diagnostics / navigation stay
-/// correct without re-lowering the unchanged bodies. Spans from other files
-/// (spliced in by a macro defined elsewhere) did not move and are kept.
+/// After a body edit re-lowered `edited` in place, every OTHER body keeps its reused HIR but
+/// its absolute offsets are stale -- the text under it moved by `byte_delta` bytes /
+/// `line_delta` lines starting at byte `at`.
 pub fn shift_module_after_edit(
     module: &mut Module,
     edited: BodyOwner,
@@ -73,11 +67,8 @@ pub fn shift_module_after_edit(
         for (_, b) in body.binding_arena.iter_mut() {
             sh.span(&mut b.span);
         }
-        // `Expr` holds no spans: the names written inside expressions keep
-        // theirs in `name_spans`. Patterns still hold them inline, and the
-        // match below has no catch-all arm, so a new span-carrying variant
-        // fails to compile until someone shifts it. The behavioral net is the
-        // reference oracle in bone-query/tests/stale_spans_after_body_edit.rs.
+        // `Expr` holds no spans: the names written inside expressions keep theirs in
+        // `name_spans`.
         for s in body.name_spans.values_mut() {
             sh.span(s);
         }
