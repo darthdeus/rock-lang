@@ -159,6 +159,14 @@ struct FontEntry {
     coverage_released: bool,
 }
 
+impl FontEntry {
+    fn line_height(&self) -> f32 {
+        let metrics = self.unit_metrics;
+        (metrics.ascender - metrics.descender + metrics.line_gap) / metrics.units_per_em
+            * self.font_pixel_size as f32
+    }
+}
+
 #[derive(Clone)]
 struct AtlasInstance {
     texture: glow::Texture,
@@ -1409,9 +1417,7 @@ fn draw_text_lines(shader: u64, font_id: u32, text: &str, x: f32, y: f32, sx: f3
         return;
     }
 
-    let line_height = with_font(font_id, 20.0, |_, entry| {
-        entry.font_pixel_size as f32 * sy.abs() * 1.2
-    });
+    let line_height = with_font(font_id, 20.0, |_, entry| entry.line_height() * sy.abs());
     let mut current_y = y;
     for line in text.split('\n') {
         if !line.is_empty() {
@@ -1469,7 +1475,7 @@ pub extern "C" fn stone_measure_text(
     };
 
     let result = with_font_entry(font_id, (0.0f32, 0.0f32), |entry| {
-        let line_height = entry.font_pixel_size as f32 * scale * 1.2;
+        let line_height = entry.line_height() * scale;
         let mut max_line_width = 0.0f32;
         let mut max_glyph_height = 0.0f32;
         let mut line_count = 0;
@@ -3245,6 +3251,57 @@ mod charset_tests {
 mod metrics_only_font_tests {
     use super::*;
     use std::ffi::CString;
+
+    #[test]
+    fn multiline_measurement_uses_font_vertical_metrics() {
+        let fonts: [(&str, &[u8]); 2] = [
+            ("DroidSans", FALLBACK_FONT),
+            (
+                "pixel",
+                include_bytes!("../../packages/stone/tests/fixtures/pixel.ttf"),
+            ),
+        ];
+        for (name, bytes) in fonts {
+            for size in [8, 16, 32, 48] {
+                let entry = rasterize_font(
+                    Rc::new(bytes.to_vec()),
+                    size,
+                    FaceSet::default(),
+                    Charset::default(),
+                    name,
+                    AtlasResidency::Metrics,
+                )
+                .expect("metrics font");
+                let font = FONTS.with(|fonts| {
+                    let mut fonts = fonts.borrow_mut();
+                    fonts.push(Some(entry));
+                    fonts.len() as c_uint
+                });
+                let raster = RasterFont::new(bytes, size as f32).unwrap();
+                let (ascent, descent, gap) = raster.vertical_metrics();
+                let line_height = ascent - descent + gap;
+                for scale in [0.5, 1.0, 2.0] {
+                    let measure = |text: &CStr| {
+                        let (mut width, mut height) = (0.0, 0.0);
+                        stone_measure_text(font, text.as_ptr(), scale, &mut width, &mut height);
+                        (width, height)
+                    };
+                    let single = measure(c"A");
+                    for (text, gaps) in [(c"A\nA", 1), (c"A\n\nA", 2), (c"A\n", 1)] {
+                        let multiline = measure(text);
+                        assert_eq!(multiline.0, single.0);
+                        let expected = single.1 + gaps as f32 * line_height * scale;
+                        assert!(
+                            (multiline.1 - expected).abs() < 0.0001,
+                            "{name} at {size}px, scale {scale}: got {}, expected {expected}",
+                            multiline.1
+                        );
+                    }
+                }
+                FONTS.with(|fonts| fonts.borrow_mut().pop());
+            }
+        }
+    }
 
     // `stone_load_font` resolves through the asset registry and falls back to the
     // embedded DroidSans for a path it cannot read, which is what an unset

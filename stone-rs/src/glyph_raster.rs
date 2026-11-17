@@ -254,12 +254,7 @@ impl<'a> RasterFont<'a> {
         })
     }
 
-    /// Ascent, descent and line gap in pixels at this size. Backend-owned:
-    /// callers must not re-derive vertical metrics from glyph boxes. Nothing
-    /// reads these yet -- synthesis leaves a face's vertical metrics alone, so
-    /// mixed faces already share a baseline; the consumer is the multiline
-    /// layout arc, which owes a real line height in place of the em * 1.2 that
-    /// `stone_measure_text` fabricates today.
+    /// Ascent, descent and line gap in pixels at this size.
     #[cfg(test)]
     pub fn vertical_metrics(&self) -> (f32, f32, f32) {
         (
