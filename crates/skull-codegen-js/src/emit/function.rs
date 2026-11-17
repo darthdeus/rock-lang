@@ -198,7 +198,8 @@ fn defer_unwind_wrap(unwind: bool, body: &str) -> String {
 /// The runtime entry points the shared lowering calls as globals; the JS
 /// runtime defines them (`JS_DEFER_RUNTIME`, the coroutine runtime).
 pub(super) fn is_runtime_global(name: &str) -> bool {
-    name == skull_mir::mir::DEFER_PUSH
+    name == skull_mir::mir::VALUE_INTEGER_CHECK
+        || name == skull_mir::mir::DEFER_PUSH
         || name == skull_mir::mir::DEFER_POP
         || name == skull_mir::mir::CORO_KILL
         || name == skull_mir::mir::CORO_HOT_RELOAD

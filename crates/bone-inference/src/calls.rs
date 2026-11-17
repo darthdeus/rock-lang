@@ -761,7 +761,13 @@ pub(crate) fn check_named_fields(
         seen.push(*fname);
 
         let fty = substitute(gamma, fdef.ty, subs, vspan)?;
-        check_expr(c, gamma, *fvalue, fty, vspan)?
+        check_expr(c, gamma, *fvalue, fty, vspan)?;
+        if struct_key
+            .and_then(|name| resolve_struct(gamma, name))
+            .is_some_and(|sid| gamma.workspace.module(sid.module).structs[sid.def].is_value)
+        {
+            check_value_int_field_literal(c, gamma, *fvalue, fty)?;
+        }
     }
 
     if base_covers_all {

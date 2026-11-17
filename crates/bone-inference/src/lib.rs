@@ -798,6 +798,9 @@ pub fn check_struct_defaults(
                 let dty = infer_expr(c, &mut gamma, *dexpr)?;
                 let fty = substitute(&mut gamma, f.ty, &subs, f.span)?;
                 coerce(&mut gamma, dty, fty, f.span)?;
+                if def.is_value {
+                    check_value_int_field_literal(c, &mut gamma, *dexpr, fty)?;
+                }
 
                 Ok(())
             })() {

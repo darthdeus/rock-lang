@@ -4,9 +4,20 @@ struct IntegerCell { v: WideInteger }
 fn show_integer_cell(c: IntegerCell) { print(c.v.x) }
 
 // https://github.com/darthdeus/rock-lang/issues/399
-// Lua's boxed C int field narrows a value that scalar storage preserves.
-@ignore
-@test(output = "4294967295")
-fn boxed_integer_preserves_range() {
-    show_integer_cell(IntegerCell { v: WideInteger { x: 4294967295 } })
+@test(output = "2147483647\n-2147483648")
+fn boxed_integer_signed_32_bit_boundaries() {
+    show_integer_cell(IntegerCell { v: WideInteger { x: 2147483647 } })
+    let local = WideInteger { x: 0 }
+    local.x = -2147483648
+    show_integer_cell(IntegerCell { v: local })
+}
+
+@test
+fn scalar_integer_signed_32_bit_boundaries() {
+    let local = WideInteger { x: -2147483648 }
+    assert(local.x == -2147483648)
+    local.x = 2147483647
+    assert(local.x == 2147483647)
+    // Ordinary int arithmetic retains its wider range.
+    assert(local.x + 1 == 2147483648)
 }

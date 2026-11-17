@@ -1507,6 +1507,20 @@ pub(crate) fn infer_expr_used(
             };
 
             check_expr(c, gamma, value, target_ty, c.body.expr_spans[value])?;
+            if value_int_field_literal(c, value).is_some()
+                && let Expr::FieldAccess { base, .. } | Expr::SafeNav { base, .. } =
+                    c.body.expr_arena[target]
+            {
+                let base_ty = infer_expr(c, gamma, base)?;
+                let base_ty = resolve(gamma, base_ty, c.body.expr_spans[base]);
+                if struct_fields_of(gamma, base_ty, expr_span).is_some_and(|(name, _)| {
+                    resolve_struct(gamma, name).is_some_and(|sid| {
+                        gamma.workspace.module(sid.module).structs[sid.def].is_value
+                    })
+                }) {
+                    check_value_int_field_literal(c, gamma, value, target_ty)?;
+                }
+            }
             let value_ty = infer_expr(c, gamma, value)?;
 
             let vr = resolve(gamma, value_ty, expr_span);
@@ -2584,6 +2598,40 @@ fn check_numeric_literal_cast(
         }
     }
     Ok(())
+}
+
+pub(crate) fn check_value_int_field_literal(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    value: Idx<Expr>,
+    ty: TyId,
+) -> Result<(), CompilerError> {
+    let span = c.body.expr_spans[value];
+    let ty = peel_nullable(gamma, ty, span);
+    if matches!(gamma.get(ty), TypeExpr::Builtin(BuiltinTy::Int))
+        && let Some(number) = value_int_field_literal(c, value)
+        && !(i32::MIN as f64..=i32::MAX as f64).contains(&number)
+    {
+        comp_error!(
+            span,
+            "value struct `int` field must be in the range -2147483648..=2147483647, found {}",
+            number
+        );
+    }
+    Ok(())
+}
+
+fn value_int_field_literal(c: BodyCtx, value: Idx<Expr>) -> Option<f64> {
+    match c.body.expr_arena[value] {
+        Expr::As {
+            value,
+            kind: hir::AsKind::Cast | hir::AsKind::Ascribe,
+            ..
+        } => integer_literal_value(c, value)
+            .map(|n| n as f64)
+            .or_else(|| float_literal_value(c, value).map(f64::floor)),
+        _ => integer_literal_value(c, value).map(|n| n as f64),
+    }
 }
 
 fn integer_literal_value(c: BodyCtx, e: Idx<Expr>) -> Option<i64> {

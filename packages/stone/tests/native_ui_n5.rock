@@ -185,3 +185,13 @@ fn text_art_glyph_input_ownership_case(
     assert_eq(input.origin, moved_origin)
     assert_eq(shadow.origin, moved_shadow_origin)
 }
+
+@test
+fn text_art_instance_preserves_a_wide_native_handle() {
+    let instances = [TextArtAtlasInstance {
+        instance_id: 4294967297, bucket: 0, pixel_size: 0,
+        atlas_width: 0, atlas_height: 0, byte_cost: 0,
+        glyph_population: 0, generation_count: 0, source_cap_height: 0.0,
+    }]
+    assert_eq(instances[0].instance_id as int, 4294967297)
+}

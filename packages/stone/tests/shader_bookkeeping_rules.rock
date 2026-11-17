@@ -153,3 +153,15 @@ fn shader_registration_restores_artifact_metadata_after_registry_upgrade() {
 fn native_shader_publication_restores_artifact_metadata_after_registry_upgrade() {
     bookkeeping_registration_upgrade(true)
 }
+
+@test
+fn shader_metadata_preserves_53_bit_fingerprints() {
+    let fingerprint = 9007199254740991
+    let semantic = bookkeeping_test_interface(fingerprint)
+    assert_eq(semantic.fingerprint as int, fingerprint)
+    let keys = [ShaderRegistrationKey {
+        src_hash: 1, block_fingerprint: 2, fullscreen_vertex: true,
+        semantic_fingerprint: fingerprint,
+    }]
+    assert_eq(keys[0].semantic_fingerprint as int, fingerprint)
+}

@@ -543,6 +543,11 @@ impl<'a> Builder<'a> {
                         None => s,
                     },
                 };
+                let s = if self.is_value_struct(struct_name) {
+                    self.check_integer_field(s, expected.and_then(Self::integer_field_unsigned))
+                } else {
+                    s
+                };
                 Ok(ValueRepr::Scalar(self.round_f32_field(
                     struct_name,
                     field,

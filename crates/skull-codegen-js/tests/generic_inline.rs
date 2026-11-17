@@ -40,6 +40,7 @@ fn definition_headers(js: &str) -> Vec<(String, usize)> {
 }
 
 const RUNTIME: &[&str] = &[
+    skull_codegen_js::JS_VALUE_INTEGER_CHECK,
     skull_codegen_js::JS_NB_CHECK_SHIMS,
     skull_codegen_js::JS_VEC_CHECK_SHIMS,
     skull_codegen_js::JS_TABLE_PRIM,

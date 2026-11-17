@@ -241,6 +241,15 @@ impl<'a> Builder<'a> {
             }
             _ => bundle,
         });
+        let out = out.map(|bundle| match bundle.value() {
+            ValueRepr::Scalar(value) if self.integer_field_checks.contains_key(&e) => {
+                let representation = bundle.representation();
+                let value =
+                    self.check_integer_field(*value, self.integer_field_checks.get(&e).copied());
+                ValueBundle::new(representation, ValueRepr::Scalar(value))
+            }
+            _ => bundle,
+        });
         let out = out.map_err(|e| self.located(e));
         if let Ok(bundle) = &out
             && let ValueRepr::Scalar(value) = bundle.value()

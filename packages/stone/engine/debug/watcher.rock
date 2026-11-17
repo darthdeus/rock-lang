@@ -32,7 +32,7 @@ value ShaderRegistrationKey {
     src_hash: int,
     block_fingerprint: int,
     fullscreen_vertex: bool,
-    semantic_fingerprint: int,
+    semantic_fingerprint: float,
 }
 global REGISTERED_SHADER_HASHES: Map<string, ShaderRegistrationKey> = map_new()
 // Cold-start deferral: a top-level registration runs BEFORE the window/GL exists
@@ -59,10 +59,11 @@ pub value SemanticShaderMember {
     capacity: int,
 }
 
+// Fingerprints carry 53 exact bits, wider than a value struct's int field.
 pub value SemanticShaderBlock {
     role: string,
     name: string,
-    fingerprint: int,
+    fingerprint: float,
     members: [SemanticShaderMember],
 }
 
@@ -84,7 +85,7 @@ pub value SemanticShaderVertexInput {
 }
 
 pub value SemanticShaderInterface {
-    fingerprint: int,
+    fingerprint: float,
     fullscreen: bool,
     vertex_inputs: [SemanticShaderVertexInput],
     texture_slots: [string],
@@ -353,7 +354,7 @@ fn publish_gl_shader_semantic(key: string, interface: SemanticShaderInterface) {
     let generation = next_semantic_shader_generation()
     GL_SHADER_SEMANTICS.insert(key, SemanticShaderGeneration { interface: interface, generation: generation })
     GL_SHADER_ARTIFACTS.insert(key, ShaderArtifactGeneration {
-        generation: generation, fingerprint: interface.fingerprint,
+        generation: generation, fingerprint: interface.fingerprint as int,
     })
 }
 
@@ -383,7 +384,7 @@ value UniformBlockDecl {
     // without one leaves it empty instead of sliding its own group into it.
     binding: int,
     size: int,
-    fingerprint: int,
+    fingerprint: float,
     members: [string],
     offsets: [int],
     // Per member, parallel to `members`. `kinds` is the compiler's wire-kind
@@ -431,7 +432,7 @@ fn __unflatten_block_decls(names: [string], bindings: [int], sizes: [int], finge
 fn __blocks_fingerprint(blocks: [UniformBlockDecl]) -> int {
     let h = 0
     for b in blocks {
-        h = (h * 31 + b.fingerprint + b.binding) % 2147483647
+        h = (h * 31 + (b.fingerprint as int) + b.binding) % 2147483647
     }
     return h
 }

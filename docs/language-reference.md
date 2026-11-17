@@ -35,6 +35,15 @@ modulo 2^32 and a shift count uses its low 5 bits. `>>` is a logical shift.
 An `int` bitwise operand of magnitude 2^51 or more gives a backend-specific
 result. This 32-bit behavior does not describe ordinary `int` arithmetic.
 
+An `int` field of a value struct is a signed 32-bit integer, in
+`-2147483648..=2147483647`; a `uint` field is unsigned 32-bit, in
+`0..=4294967295`. This rule also applies to unboxed and scalarized values.
+Out-of-range literals stored into these fields are compile errors. With
+`ROCK_MIR_CHECKS=1`, stores also reject runtime numbers outside the field's
+range or with a fractional part (including infinities and NaN). Unchecked
+builds require the program to keep stores within these limits. Value structs
+keep their C `int` / `uint32_t` field layout for FFI and shaders.
+
 For `uint`, `+`, `-`, `*` and bitwise results wrap as unsigned 32-bit values.
 Shifts require a count in `0..=31`: invalid literal counts are rejected during
 checking, and invalid dynamic counts fail at runtime. The counts do not wrap.

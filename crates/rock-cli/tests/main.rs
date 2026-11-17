@@ -26,3 +26,4 @@ mod stone_test_debounce;
 mod stone_test_decorator_cleanup;
 mod stone_test_endtoend;
 mod support;
+mod value_integer_fields;

@@ -95,6 +95,7 @@ fn map_get_key_is_checked_independently_of_native_buffer_get() {
 
 fn run_root(src: &str, runtime: &str, check: &str) {
     let ws = ws_with(src);
+    let runtime = format!("{}\n{runtime}", skull_codegen_js::JS_VALUE_INTEGER_CHECK);
     let js = crate::common::emit_closure(&ws, "root").unwrap();
     let out = crate::common::node()
         .arg("-e")

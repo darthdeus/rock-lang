@@ -785,6 +785,19 @@ fn scaffold_prelude_lua(
     scx: &skull_mir::lower::ScalarCtx,
 ) -> Result<(String, crate::ValueCtors), CompilerError> {
     let mut out = String::from(crate::runtime_prelude());
+    if skull_mir::verify::checks_enabled() {
+        out.push_str(
+            r#"
+function __rock_value_integer_check(value, unsigned)
+  if value == nil then return value end
+  local word = bit.tobit(value)
+  if unsigned and word < 0 then word = word + 4294967296 end
+  if value == word then return value end
+  error("value struct integer field out of range")
+end
+"#,
+        );
+    }
     if crate::allocation_report::activation_enabled() {
         out.push_str(skull_codegen_lua::ALLOCATION_ACTIVATION_PRELUDE);
     }

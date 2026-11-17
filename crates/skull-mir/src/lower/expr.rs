@@ -9,7 +9,7 @@ impl<'a> Builder<'a> {
         &mut self,
         e: Idx<Expr>,
     ) -> Option<Result<(), CompilerError>> {
-        if self.f32_round_exprs.contains(&e) {
+        if self.f32_round_exprs.contains(&e) || self.integer_field_checks.contains_key(&e) {
             return None;
         }
         match self.body.expr_arena[e] {
@@ -166,6 +166,7 @@ impl<'a> Builder<'a> {
             Ok(v) if self.f32_round_exprs.contains(&e) => Ok(self.emit_cur(Inst::FloatToF32(v))),
             other => other,
         };
+        let v = v.map(|v| self.check_integer_field(v, self.integer_field_checks.get(&e).copied()));
         let v = v.map_err(|e| self.located(e));
         self.cur_span = outer;
         self.cur_expr = outer_expr;
@@ -1492,6 +1493,9 @@ impl<'a> Builder<'a> {
         if self.assign_target_is_f32(target) {
             self.f32_round_exprs.insert(value);
         }
+        if let Some(unsigned) = self.assign_integer_field_unsigned(target) {
+            self.integer_field_checks.insert(value, unsigned);
+        }
         let nobox_global_place = self.nobox_global_place(target)?;
         match self.body.expr_arena[target] {
             // A threaded (group_binds) var -- a scalarized flat-enum local or value
@@ -1841,6 +1845,58 @@ impl<'a> Builder<'a> {
         self.field_is_f32(sname, field)
     }
 
+    fn assign_integer_field_unsigned(&self, target: Idx<Expr>) -> Option<bool> {
+        if !crate::verify::checks_enabled() {
+            return None;
+        }
+        let (Expr::FieldAccess { base, .. } | Expr::SafeNav { base, .. }) =
+            self.body.expr_arena[target]
+        else {
+            return None;
+        };
+        let mut ty = self.concrete_expr_ty(base)?.peel_nullable().0;
+        if let MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Ref,
+            params,
+        } = ty
+        {
+            ty = params.first()?.peel_nullable().0;
+        }
+        if !self.is_value_struct(ty.nominal()?) {
+            return None;
+        }
+        Self::integer_field_unsigned(self.concrete_expr_ty(target)?)
+    }
+
+    pub(crate) fn integer_field_unsigned(ty: &MonoTy) -> Option<bool> {
+        match ty.peel_nullable().0 {
+            MonoTy::Int => Some(false),
+            MonoTy::Uint => Some(true),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn check_integer_field(
+        &mut self,
+        value: Idx<Inst>,
+        unsigned: Option<bool>,
+    ) -> Idx<Inst> {
+        // Shader lowering uses Any and already has native integer storage.
+        let Some(unsigned) = unsigned.filter(|_| {
+            crate::verify::checks_enabled() && self.scx.target != bone_core::hir::FnBackend::Any
+        }) else {
+            return value;
+        };
+        let callee = self.emit_cur(Inst::Global(crate::names::ustr(
+            crate::mir::VALUE_INTEGER_CHECK,
+        )));
+        let unsigned = self.emit_cur(Inst::Const(Lit::Bool(unsigned)));
+        self.emit_cur(Inst::CallValue {
+            callee,
+            args: vec![value, unsigned],
+        })
+    }
+
     pub(crate) fn lower_compound_assign_effect(
         &mut self,
         e: Idx<Expr>,
@@ -1872,8 +1928,9 @@ impl<'a> Builder<'a> {
         } else {
             None
         };
-        let combine = |s: &mut Self, cur| {
-            s.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)
+        let combine = |s: &mut Self, cur| -> Result<Idx<Inst>, CompilerError> {
+            let new = s.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
+            Ok(s.check_integer_field(new, s.assign_integer_field_unsigned(target)))
         };
         let Expr::SafeNav { base, field } = self.body.expr_arena[target] else {
             unreachable!("compound assignment without a top-level safe navigation")
@@ -1999,6 +2056,10 @@ impl<'a> Builder<'a> {
         postfix: bool,
         update: impl FnOnce(&mut Self, Idx<Inst>) -> Result<Idx<Inst>, CompilerError>,
     ) -> Result<Idx<Inst>, CompilerError> {
+        let update = |s: &mut Self, old| -> Result<Idx<Inst>, CompilerError> {
+            let new = update(s, old)?;
+            Ok(s.check_integer_field(new, s.assign_integer_field_unsigned(target)))
+        };
         let pick = |old, new| if postfix { old } else { new };
         match self.body.expr_arena[target] {
             Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {

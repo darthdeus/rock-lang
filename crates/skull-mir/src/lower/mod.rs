@@ -1676,6 +1676,7 @@ fn lower_body(
         shallow_pack: false,
         lending_pack: false,
         f32_round_exprs: HashSet::default(),
+        integer_field_checks: HashMap::default(),
         tuple_binds: HashMap::default(),
         static_cells: HashMap::default(),
         // Lazy: only pay the param-type render/hash when the body has a static or
@@ -2306,6 +2307,8 @@ struct Builder<'a> {
     /// path lowers its value through one of the expression entries, which
     /// round these, so no store path needs its own rounding.
     f32_round_exprs: HashSet<Idx<Expr>>,
+    /// Check assignment RHS values before representation-specific stores.
+    integer_field_checks: HashMap<Idx<Expr>, bool>,
     /// The tuple twin of [`Self::group_binds`]: a NAME bound to a splatting
     /// tuple holds its slot cells, so `if let t = <nullable tuple call>` can
     /// rebuild the unboxed repr on each read of `t` instead of packing it.
@@ -2414,6 +2417,7 @@ impl<'a> Builder<'a> {
             shallow_pack: false,
             lending_pack: false,
             f32_round_exprs: HashSet::default(),
+            integer_field_checks: HashMap::default(),
             tuple_binds: HashMap::default(),
             static_cells: HashMap::default(),
             static_owner,

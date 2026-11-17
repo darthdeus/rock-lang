@@ -59,8 +59,8 @@ Programs repeat their probes with the JIT enabled to exercise hot code too.
 Map lookups use a fixed order. Numeric traces normalize signed zero, which differs
 between LuaJIT platforms; signed bitwise inputs stay below the documented
 platform-dependent conversion range. Integer leaves stay within signed 32 bits
-to avoid the known boxed-field narrowing in [#399](https://github.com/darthdeus/rock-lang/issues/399);
-uint covers its full range.
+so generated stores obey the value-struct `int` field range;
+uint covers its full unsigned 32-bit range.
 
 ```sh
 cargo test --locked -p rock-cli --test rock_cli_tests differential::smoke

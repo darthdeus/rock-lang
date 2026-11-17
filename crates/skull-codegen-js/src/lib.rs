@@ -1888,6 +1888,16 @@ function __rock_env_var(n) { var v = __rock_host.env_var(n); return v === undefi
 })();
 "#;
 
+/// Checked stores into the 32-bit integer fields of value structs.
+pub const JS_VALUE_INTEGER_CHECK: &str = r#"
+function __rock_value_integer_check(value, unsigned) {
+  if (value == null) return value;
+  const word = unsigned ? value >>> 0 : value | 0;
+  if (value === word) return value;
+  throw new Error("value struct integer field out of range");
+}
+"#;
+
 /// The runtime prelude an emitted program runs after; append the program text
 /// and its entry call (`main_js_name`) to the result.
 ///
@@ -1916,6 +1926,9 @@ pub fn assemble_prelude(
         p.push_str(JS_CALL_HELPER);
     } else if emitted.contains("__rock_call(") || emitted.contains("__try_call(") {
         p.push_str(JS_FOREIGN_CALL_HELPER);
+    }
+    if skull_mir::verify::checks_enabled() {
+        p.push_str(JS_VALUE_INTEGER_CHECK);
     }
     p.push_str(JS_GLOBALS_RUNTIME);
     p.push_str(JS_CORO_RUNTIME);

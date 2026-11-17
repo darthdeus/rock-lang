@@ -200,7 +200,8 @@ pub value TextArtRasterDemand {
 }
 
 pub value TextArtAtlasInstance {
-    instance_id: int,
+    // Native handles include a generation above the low 32 bits.
+    instance_id: float,
     bucket: int,
     pixel_size: int,
     atlas_width: int,
@@ -467,7 +468,7 @@ pub fn text_art_glyph_raster_bounds(input: TextArtGlyphInput) -> Rect {
     let font = input.layout.font ?? return rect(0.0, 0.0, 0.0, 0.0)
     let demand = text_layout_raster_demand(input.layout, poses)
     let instance = text_art_atlas_instance_for(font, demand, input.consumer_key)
-    let instance_id = instance.instance_id
+    let instance_id = instance.instance_id as int
     let source_pixel_size = instance.pixel_size as float
     let bounds = rect(0.0, 0.0, 0.0, 0.0)
     for i in 0..input.layout.glyphs.len {

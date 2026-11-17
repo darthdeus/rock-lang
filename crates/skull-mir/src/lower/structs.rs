@@ -564,7 +564,12 @@ impl<'a> Builder<'a> {
             .cur_expr
             .and_then(|literal| self.concrete_struct_field_ty(literal, field));
         self.with_struct_default(struct_name, field, |s, def| {
-            s.lower_expr_with_expected(def, expected)
+            let value = s.lower_expr_with_expected(def, expected)?;
+            Ok(if s.is_value_struct(struct_name) {
+                s.check_integer_field(value, expected.and_then(Self::integer_field_unsigned))
+            } else {
+                value
+            })
         })
     }
 
@@ -683,6 +688,7 @@ impl<'a> Builder<'a> {
             std::mem::take(&mut self.flat_ref_cells),
             std::mem::take(&mut self.flat_scan_lets),
             std::mem::take(&mut self.f32_round_exprs),
+            std::mem::take(&mut self.integer_field_checks),
             std::mem::take(&mut self.presence_only),
             std::mem::take(&mut self.flat_arg_captures),
             std::mem::take(&mut self.value_binds),
@@ -714,6 +720,7 @@ impl<'a> Builder<'a> {
             self.flat_ref_cells,
             self.flat_scan_lets,
             self.f32_round_exprs,
+            self.integer_field_checks,
             self.presence_only,
             self.flat_arg_captures,
             self.value_binds,

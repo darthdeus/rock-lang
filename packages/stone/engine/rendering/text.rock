@@ -690,7 +690,7 @@ pub fn text_layout_emit(
         profile_begin("text.art.atlas_lookup")
         let instance = text_art_atlas_instance_for(font, demand, consumer_key)
         profile_end("text.art.atlas_lookup")
-        instance_id = instance.instance_id
+        instance_id = (instance.instance_id as int)
         image = stone_get_font_instance_image_ffi(instance_id)
         if cache_instance {
             layout.instance_cached_id = instance_id
@@ -798,8 +798,8 @@ fn text_layout_emit_world(
     profile_begin("text.art.atlas_lookup")
     let instance = text_art_atlas_instance_for(data, demand)
     profile_end("text.art.atlas_lookup")
-    let image = stone_get_font_instance_image_ffi(instance.instance_id)
-    if image == 0 { error("world text atlas instance {instance.instance_id} has no GL image") }
+    let image = stone_get_font_instance_image_ffi((instance.instance_id as int))
+    if image == 0 { error("world text atlas instance {(instance.instance_id as int)} has no GL image") }
     profile_begin("text.batch.lookup")
     let batch = ensure_world_sprite_batch(
         sampled_image(Image(image)), z_layer, BlendMode::Alpha, false,
@@ -808,7 +808,7 @@ fn text_layout_emit_world(
     reserve_vertices(batch, layout.glyphs.len * 6)
     profile_begin("text.emit.glyphs")
     let emitted = text_layout_emit_world_instance(
-        batch, layout, baseline, color, instance.instance_id, poses)
+        batch, layout, baseline, color, (instance.instance_id as int), poses)
     profile_end("text.emit.glyphs")
     return emitted
 }
@@ -3066,16 +3066,16 @@ fn emit_target_layout_in_render_pool(
     }
     let demand = text_layout_raster_demand(layout, null)
     let instance = text_art_atlas_instance_for(font, demand)
-    let image = stone_get_font_instance_image_ffi(instance.instance_id)
+    let image = stone_get_font_instance_image_ffi((instance.instance_id as int))
     if image == 0 {
-        error("target canvas text atlas instance {instance.instance_id} has no GL image")
+        error("target canvas text atlas instance {(instance.instance_id as int)} has no GL image")
     }
     let batch = ensure_world_sprite_batch(
         sampled_image(Image(image)), z_layer, BlendMode::Alpha, false,
         DepthMode::Off, unlit: true, sampling: fd.sampling)
     reserve_vertices(batch, layout.glyphs.len * 6)
     return text_layout_emit_instance(batch, layout, origin, color,
-        instance.instance_id, null)
+        (instance.instance_id as int), null)
 }
 
 // Target-space extent of a span sequence, measured with the SAME walk the

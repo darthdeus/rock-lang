@@ -30,6 +30,8 @@ use comfy_la_arena::{Arena, Idx};
 use std::sync::Arc;
 use ustr::Ustr;
 
+pub const VALUE_INTEGER_CHECK: &str = "__rock_value_integer_check";
+
 pub const VEC_COLUMN_HEADER_FIELD: &str = "@vec";
 
 /// Physical constructor spelling selected by lowering.  This is part of the

@@ -251,7 +251,7 @@ fn native_uniform_blocks(decls: [UniformBlockDecl]) -> [ShaderUniformBlock] {
             block: d.name,
             binding: d.binding,
             size: d.size,
-            fingerprint: d.fingerprint,
+            fingerprint: d.fingerprint as int,
             members: d.members,
             offsets: d.offsets,
             kinds: d.kinds,
@@ -336,11 +336,11 @@ fn build_uniform_blocks(key: string, sid: ShaderId, decls: [UniformBlockDecl]) -
         // At registration and not at the draw-time unfilled-block gate: that
         // gate only fires AFTER a program draws, and never at all for a program
         // that registers and is never drawn.
-        if engine_binding_is_foreign(d.binding, d.fingerprint) {
+        if engine_binding_is_foreign(d.binding, d.fingerprint as int) {
             log_error("SHADER", "uniform block: `{key}` declares `{d.name}` at the engine binding, but its layout is not the engine's `EngineU` -- @engine is fixed and engine-owned, so nothing would ever fill it")
             return null
         }
-        if !stone_shader_bind_uniform_block(transmute(sid.0), key, d.name, d.binding, d.size, d.fingerprint) {
+        if !stone_shader_bind_uniform_block(transmute(sid.0), key, d.name, d.binding, d.size, d.fingerprint as int) {
             log_error("SHADER", "uniform block: `{key}` failed to bind block `{d.name}`")
             return null
         }
@@ -353,7 +353,7 @@ fn build_uniform_blocks(key: string, sid: ShaderId, decls: [UniformBlockDecl]) -
             block: d.name,
             binding: d.binding,
             size: d.size,
-            fingerprint: d.fingerprint,
+            fingerprint: d.fingerprint as int,
             members: d.members,
             offsets: d.offsets,
             kinds: d.kinds,

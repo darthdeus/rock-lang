@@ -65,7 +65,8 @@ pub(crate) fn run(tool: &str, program: &str) -> String {
 
 fn js_runtime() -> String {
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\nvar __G = {{}};\n",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\nvar __G = {{}};\n",
+        skull_codegen_js::JS_VALUE_INTEGER_CHECK,
         skull_codegen_js::JS_GLOBALS_RUNTIME,
         skull_codegen_js::JS_CALL_HELPER,
         skull_codegen_js::JS_VEC_CHECK_SHIMS,

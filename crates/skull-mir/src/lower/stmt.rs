@@ -374,6 +374,7 @@ impl<'a> Builder<'a> {
             shallow_pack: false,
             lending_pack: false,
             f32_round_exprs: HashSet::default(),
+            integer_field_checks: HashMap::default(),
             tuple_binds: HashMap::default(),
             // In-scope statics + sibling nested fns are module-level, so the
             // hoisted body may reference them; enclosing params/locals are NOT

@@ -217,7 +217,7 @@ impl Generator {
                     let index = self.pick(&(0..fields.len()).collect::<Vec<_>>());
                     fields[index].clone()
                 } else {
-                    // Keep fields within C int storage until issue #399 is resolved.
+                    // Value-struct int fields are signed 32-bit by definition.
                     self.pick(&["0", "1", "-1", "31", "2147483647", "-2147483648"])
                         .into()
                 }
