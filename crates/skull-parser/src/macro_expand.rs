@@ -1028,17 +1028,7 @@ impl Rewrite for Instantiation {
     }
 
     fn bind_pattern(&mut self, p: &mut Pattern) {
-        match p {
-            Pattern::Wildcard | Pattern::Literal(_) | Pattern::Range { .. } => {}
-            Pattern::Ident(id) => self.bind(&mut id.name),
-            Pattern::Tuple(ps) | Pattern::Or(ps) | Pattern::PathVariant { args: Some(ps), .. } => {
-                ps.iter_mut().for_each(|p| self.bind_pattern(p))
-            }
-            Pattern::PathVariant { args: None, .. } => {}
-            Pattern::PathRecord { fields, .. } => {
-                fields.iter_mut().for_each(|(_, p)| self.bind_pattern(p))
-            }
-        }
+        walk::pattern_mut(self, p);
     }
 
     fn resolve(&self, name: Ustr) -> Ustr {
@@ -1057,6 +1047,12 @@ impl Rewrite for Instantiation {
             Some(_) => None,
             None => self.variadic.get(&name).map(Vec::as_slice),
         }
+    }
+}
+
+impl walk::VisitMut for Instantiation {
+    fn ident(&mut self, id: &mut Ident) {
+        Rewrite::bind(self, &mut id.name);
     }
 }
 
