@@ -1,5 +1,98 @@
 use std::path::Path;
 
+fn package_test_command(project: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_rock"));
+    command
+        .arg("test")
+        .arg(project)
+        .current_dir(project)
+        .env(
+            "ROCK_DIR",
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+        )
+        .env("ROCK_TEST_SHARDS", "1")
+        .env("STONE_HEADLESS", "1")
+        .env_remove("ROCK_PREBUILT_GAME")
+        .env_remove("ROCK_ENGINE_BUILD_RECEIPT");
+    command
+}
+
+fn output_text(output: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+#[cfg(unix)]
+fn write_game_project(
+    root: &Path,
+    directory: &str,
+    package: &str,
+    entry: &str,
+    source: impl AsRef<[u8]>,
+) -> std::path::PathBuf {
+    let project = root.join(directory);
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(
+        project.join("stick.toml"),
+        format!("[package]\nname = \"{package}\"\n"),
+    )
+    .unwrap();
+    std::fs::write(project.join(entry), source).unwrap();
+    project
+}
+
+#[cfg(unix)]
+struct Watch(std::process::Child);
+
+#[cfg(unix)]
+impl Drop for Watch {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_watch(
+    child: &mut std::process::Child,
+    condition: &dyn Fn() -> bool,
+    diagnostic: impl Fn() -> String,
+) {
+    let start = bone_core::prelude::Instant::now();
+    while !condition() {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "watch exited: {}",
+            diagnostic()
+        );
+        assert!(
+            start.elapsed() < test_utils::HANG_BACKSTOP,
+            "watch stalled: {}",
+            diagnostic()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[cfg(unix)]
+struct Runs(Vec<std::process::Child>, Option<std::path::PathBuf>);
+
+#[cfg(unix)]
+impl Drop for Runs {
+    fn drop(&mut self) {
+        if let Some(release) = &self.1 {
+            let _ = std::fs::write(release, "");
+        }
+        for child in &mut self.0 {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 #[test]
 fn package_tests_observe_native_errors_and_scoped_mixed_records() {
     for dependency in ["stone", "stone-native"] {
@@ -87,26 +180,11 @@ fn native_overflow_failure() {
             format!("use {}::*;\n{source}", dependency.replace('-', "_")),
         )
         .unwrap();
-        let output = std::process::Command::new(env!("CARGO_BIN_EXE_rock"))
-            .arg("test")
-            .arg(fixture.path())
-            .current_dir(fixture.path())
-            .env(
-                "ROCK_DIR",
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
-            )
-            .env("ROCK_TEST_SHARDS", "1")
-            .env("STONE_HEADLESS", "1")
+        let output = package_test_command(fixture.path())
             .env_remove("ROCK_TEST_VERBOSE")
-            .env_remove("ROCK_PREBUILT_GAME")
-            .env_remove("ROCK_ENGINE_BUILD_RECEIPT")
             .output()
             .unwrap();
-        let text = test_utils::strip_ansi_sgr(&format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ));
+        let text = test_utils::strip_ansi_sgr(&output_text(&output));
         assert!(!output.status.success(), "native errors passed: {text}");
         for expected in [
             "native_errors::native_failure: error:",
@@ -183,30 +261,15 @@ fn checked_body() {
                     .replace("@test\n", "");
                 std::fs::write(path, source).unwrap();
             }
-            let output = std::process::Command::new(env!("CARGO_BIN_EXE_rock"))
-                .arg("test")
-                .arg(fixture.path())
-                .current_dir(fixture.path())
-                .env(
-                    "ROCK_DIR",
-                    Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
-                )
-                .env("ROCK_TEST_SHARDS", "1")
+            let output = package_test_command(fixture.path())
                 .env("ROCK_TEST_GC_COLLECT_MB", "0.000001")
                 .env(
                     "PROBE_PHASE",
                     if phase == "load-only" { "init" } else { phase },
                 )
-                .env("STONE_HEADLESS", "1")
-                .env_remove("ROCK_PREBUILT_GAME")
-                .env_remove("ROCK_ENGINE_BUILD_RECEIPT")
                 .output()
                 .unwrap();
-            let text = format!(
-                "{}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+            let text = output_text(&output);
             assert_eq!(
                 output.status.success(),
                 phase == "clean",
@@ -312,14 +375,7 @@ fn main() {{ print(probe()) }}
 #[cfg(unix)]
 #[test]
 fn stone_restarts_after_native_edits_and_keeps_running_after_a_failed_build() {
-    use std::process::{Child, Stdio};
-    struct Watch(Child);
-    impl Drop for Watch {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
+    use std::process::Stdio;
     let fixture = tempfile::tempdir().unwrap();
     let game = fixture.path().join("game");
     let native = fixture.path().join("native");
@@ -381,20 +437,7 @@ fn main() {{ run_probe() }}
     );
     let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
     let mut wait = |condition: &dyn Fn() -> bool| {
-        let start = bone_core::prelude::Instant::now();
-        while !condition() {
-            assert!(
-                watch.0.try_wait().unwrap().is_none(),
-                "watch exited: {}",
-                read(&log)
-            );
-            assert!(
-                start.elapsed() < test_utils::HANG_BACKSTOP,
-                "watch stalled: {}",
-                read(&log)
-            );
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        wait_for_watch(&mut watch.0, condition, || read(&log));
     };
     wait(&|| read(&heartbeat).contains(":17\n") && read(&log).contains("Watching for changes"));
     let before = read(&heartbeat).lines().last().unwrap().to_owned();
@@ -444,14 +487,7 @@ fn main() {{ run_probe() }}
 #[cfg(unix)]
 #[test]
 fn a_stone_launch_preserves_process_and_state_on_the_first_body_edit() {
-    use std::process::{Child, Command, Stdio};
-    struct Watch(Child);
-    impl Drop for Watch {
-        fn drop(&mut self) {
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
+    use std::process::{Command, Stdio};
     let fixture = tempfile::tempdir().unwrap();
     let game = fixture.path().join("game");
     std::fs::create_dir(&game).unwrap();
@@ -512,20 +548,7 @@ fn main() {
     );
     let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
     let mut wait = |condition: &dyn Fn() -> bool| {
-        let start = bone_core::prelude::Instant::now();
-        while !condition() {
-            assert!(
-                watch.0.try_wait().unwrap().is_none(),
-                "watch exited: {}",
-                read(&log)
-            );
-            assert!(
-                start.elapsed() < test_utils::HANG_BACKSTOP,
-                "watch stalled: {}",
-                read(&log)
-            );
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        wait_for_watch(&mut watch.0, condition, || read(&log));
     };
     wait(&|| read(&heartbeat).contains(":17\n") && read(&log).contains("Watching for changes"));
     let before = read(&heartbeat).lines().last().unwrap().to_owned();
@@ -621,31 +644,18 @@ fn a_stone_launch_builds_the_engine_library_it_stages() {
 #[cfg(unix)]
 #[test]
 fn concurrent_game_runs_keep_their_own_output() {
-    use std::process::{Child, Command, Stdio};
-    struct Runs(Vec<Child>);
-    impl Drop for Runs {
-        fn drop(&mut self) {
-            for child in &mut self.0 {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
-    }
+    use std::process::{Command, Stdio};
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("tmp")).unwrap();
     let shared = root.path().join("tmp/main.lua");
     std::fs::write(&shared, "unrelated output").unwrap();
-    let mut runs = Runs(Vec::new());
+    let mut runs = Runs(Vec::new(), None);
     for name in ["first", "second"] {
-        let project = root.path().join(name);
-        std::fs::create_dir(&project).unwrap();
-        std::fs::write(
-            project.join("stick.toml"),
-            format!("[package]\nname = \"{name}\"\n"),
-        )
-        .unwrap();
-        std::fs::write(
-            project.join("main_stone.rock"),
+        let project = write_game_project(
+            root.path(),
+            name,
+            name,
+            "main_stone.rock",
             format!(
                 r#"
 inline(lua) fn wait_for_release() = """
@@ -663,8 +673,7 @@ inline(lua) fn wait_for_release() = """
 fn main() {{ wait_for_release() }}
 "#
             ),
-        )
-        .unwrap();
+        );
         let log = std::fs::File::create(root.path().join(format!("{name}.log"))).unwrap();
         runs.0.push(
             Command::new(env!("CARGO_BIN_EXE_rock"))
@@ -771,11 +780,7 @@ fn main() {
             cmd.args(["--warmup-frames", "0", "--format", "json"]);
         }
         let result = cmd.output().unwrap();
-        let diagnostic = format!(
-            "{}{}",
-            String::from_utf8_lossy(&result.stdout),
-            String::from_utf8_lossy(&result.stderr)
-        );
+        let diagnostic = output_text(&result);
         assert_eq!(result.status.success(), !fail, "{command}: {diagnostic}");
         assert!(
             std::fs::read_dir(&output).unwrap().all(|entry| {
@@ -820,17 +825,7 @@ fn main() {
 #[test]
 fn overlapping_frames_execute_their_own_compiled_program() {
     use std::os::unix::fs::PermissionsExt;
-    use std::process::{Child, Command, Stdio};
-    struct Runs(Vec<Child>, std::path::PathBuf);
-    impl Drop for Runs {
-        fn drop(&mut self) {
-            let _ = std::fs::write(&self.1, "");
-            for child in &mut self.0 {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
-    }
+    use std::process::{Command, Stdio};
     let root = tempfile::tempdir().unwrap();
     let wrapper = root.path().join("held-luajit");
     std::fs::write(
@@ -853,20 +848,15 @@ exit 97
     std::fs::create_dir(&output).unwrap();
     std::fs::write(output.join("main.lua"), "unrelated output").unwrap();
     let release = root.path().join("release");
-    let mut runs = Runs(Vec::new(), release.clone());
+    let mut runs = Runs(Vec::new(), Some(release.clone()));
     for name in ["first", "second"] {
-        let project = root.path().join(name);
-        std::fs::create_dir(&project).unwrap();
-        std::fs::write(
-            project.join("stick.toml"),
-            format!("[package]\nname = \"{name}\"\n"),
-        )
-        .unwrap();
-        std::fs::write(
-            project.join("main.rock"),
+        let project = write_game_project(
+            root.path(),
+            name,
+            name,
+            "main.rock",
             format!("fn main() {{ print(\"PROGRAM_{name}\") }}\n"),
-        )
-        .unwrap();
+        );
         std::fs::write(output.join("incremental.lua"), "stale overlay").unwrap();
         let log = std::fs::File::create(root.path().join(format!("{name}.log"))).unwrap();
         runs.0.push(
@@ -968,10 +958,7 @@ fn bounded_runs_do_not_outlive_a_killed_rock() {
     )
     .unwrap();
     std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let project = root.path().join("game");
-    std::fs::create_dir(&project).unwrap();
-    std::fs::write(project.join("stick.toml"), "[package]\nname = \"parked\"\n").unwrap();
-    std::fs::write(project.join("main.rock"), "fn main() {}\n").unwrap();
+    let project = write_game_project(root.path(), "game", "parked", "main.rock", "fn main() {}\n");
     for command in ["frame", "perf"] {
         let pid_path = root.path().join(format!("{command}.pid"));
         let mut rock = Command::new(env!("CARGO_BIN_EXE_rock"))
@@ -1090,14 +1077,20 @@ co fn portable_sim() -> Coroutine<Wait> {
         ),
     )
     .unwrap();
-    let invoke = |args: &[&str], fail: bool| {
-        let output = std::process::Command::new(&rock)
-            .args(args)
+    let command = || {
+        let mut command = std::process::Command::new(&rock);
+        command
             .current_dir(fixture.path())
             .env(
                 "ROCK_DIR",
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
             )
+            .env_remove("STONE_HOT_RELOAD");
+        command
+    };
+    let invoke = |args: &[&str], fail: bool| {
+        let output = command()
+            .args(args)
             .env(
                 "ROCK_SIM_LOG_DIR",
                 fixture.path().join(if fail { "failed" } else { "passed" }),
@@ -1109,14 +1102,9 @@ co fn portable_sim() -> Coroutine<Wait> {
                 "ROCK_SIM_TIMEOUT_SECS",
                 test_utils::HANG_BACKSTOP.as_secs().to_string(),
             )
-            .env_remove("STONE_HOT_RELOAD")
             .output()
             .unwrap();
-        let diagnostic = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let diagnostic = output_text(&output);
         (output, diagnostic)
     };
     let project = game.to_str().unwrap();
@@ -1126,32 +1114,19 @@ co fn portable_sim() -> Coroutine<Wait> {
         String::from_utf8_lossy(&list.stdout).contains("portable_sim"),
         "{text}"
     );
-    for phase in ["startup", "shutdown", "tail", "finalizer"] {
-        let late = std::process::Command::new(&rock)
+    for (phase, variable) in [
+        ("startup", "SIM_PROBE_EARLY"),
+        ("shutdown", "SIM_PROBE_LATE"),
+        ("tail", "SIM_PROBE_TAIL"),
+        ("finalizer", "SIM_PROBE_FINALIZER"),
+    ] {
+        let late = command()
             .args(["sim", project, "portable_sim", "--jobs", "1"])
-            .current_dir(fixture.path())
-            .env(
-                "ROCK_DIR",
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
-            )
             .env("ROCK_SIM_LOG_DIR", fixture.path().join(phase))
-            .env(
-                match phase {
-                    "startup" => "SIM_PROBE_EARLY",
-                    "shutdown" => "SIM_PROBE_LATE",
-                    "tail" => "SIM_PROBE_TAIL",
-                    _ => "SIM_PROBE_FINALIZER",
-                },
-                "1",
-            )
-            .env_remove("STONE_HOT_RELOAD")
+            .env(variable, "1")
             .output()
             .unwrap();
-        let late_text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&late.stdout),
-            String::from_utf8_lossy(&late.stderr)
-        );
+        let late_text = output_text(&late);
         assert!(!late.status.success(), "{phase} errors passed: {late_text}");
         assert!(
             late_text.contains(&format!("{phase} failure")),
@@ -1213,15 +1188,13 @@ co fn portable_sim() -> Coroutine<Wait> {
 
 #[cfg(unix)]
 fn game_run_fixture(root: &Path) -> std::path::PathBuf {
-    let project = root.join("game");
-    std::fs::create_dir(&project).unwrap();
-    std::fs::write(
-        project.join("stick.toml"),
-        "[package]\nname = \"launch-probe\"\n",
+    write_game_project(
+        root,
+        "game",
+        "launch-probe",
+        "main_stone.rock",
+        "fn main() {}\n",
     )
-    .unwrap();
-    std::fs::write(project.join("main_stone.rock"), "fn main() {}\n").unwrap();
-    project
 }
 
 #[cfg(unix)]
