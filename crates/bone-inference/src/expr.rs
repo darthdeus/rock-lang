@@ -2495,10 +2495,24 @@ pub(crate) fn check_cast(
     ))
 }
 
-/// A function or unit value has no text; without this a hole naming a global fn
-/// (meant as a local) passes and fails only in lowering, with no location.
+/// Functions and unit values have no text, and dynamic `any` needs an explicit
+/// render path; reject them here so no unsupported hole reaches lowering.
 fn check_interpolated_value(gamma: &mut Gamma, ty: TyId, span: Span) -> Result<(), CompilerError> {
     let resolved = resolve(gamma, ty, span);
+    let mut base = resolved;
+    while let TypeExpr::Nullable(inner) = *gamma.get(base) {
+        base = base.with_idx(inner);
+    }
+    if matches!(gamma.get(base), TypeExpr::Builtin(BuiltinTy::Any)) {
+        let rendered = gamma.render(resolved);
+        return Err(CompilerError::new_with_label(
+            span,
+            format!(
+                "cannot interpolate a value of type `{rendered}` into a string; \
+                 convert it explicitly with `inspect(value)`"
+            ),
+        ));
+    }
     let what = match gamma.get(resolved) {
         TypeExpr::Function { .. } => "a function",
         TypeExpr::Builtin(BuiltinTy::Unit) => "a value of type `()`",

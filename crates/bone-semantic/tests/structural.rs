@@ -263,6 +263,28 @@ fn diagnostics_label_the_offending_expression() {
     }
 }
 
+#[test]
+fn any_interpolation_errors_name_explicit_inspection() {
+    for src in [
+        "fn f(value: any) -> string { return \"{value}\" }",
+        "fn f(value: any) -> string { return \"{value:.2f}\" }",
+        "fn f(value: any?) -> string { return \"{value}\" }",
+    ] {
+        let ws = check(src).expect("semantic pass recovers with a body error");
+        let err = fn_errors(&ws, "f")
+            .iter()
+            .find(|e| e.message.contains("cannot interpolate"))
+            .unwrap_or_else(|| panic!("{src}: no interpolation error"));
+        assert!(
+            err.message.contains("inspect(value)"),
+            "expected the diagnostic to name explicit inspection: {}",
+            err.message
+        );
+        let label = err.labels.first().expect("the hole is labeled");
+        assert_eq!(text(src, &label.span), "value", "{src}");
+    }
+}
+
 // A statement-tailed body reports the missing value instead of leaking the
 // internal `()` type, and never masks a genuine error in the body.
 #[test]

@@ -1,0 +1,15 @@
+//! An `any` value has no static interpolation renderer. It must be converted
+//!        explicitly with `inspect(value)` before it is interpolated.
+//! Tags: string-interpolation, any, checker
+
+//=== TEST CASE: any_hole_requires_explicit_inspection_Generic ===
+//! expect: cannot interpolate a value of type `any` into a string
+//! expect: inspect(value)
+fn render_any(value: any) -> string { return "{value}" }
+fn main() { print(render_any(42)) }
+
+//=== TEST CASE: nullable_any_with_format_spec_requires_explicit_inspection_Generic ===
+//! expect: cannot interpolate a value of type `any?` into a string
+//! expect: inspect(value)
+fn render_nullable_any(value: any?) -> string { return "{value:.2f}" }
+fn main() { print(render_nullable_any(null)) }

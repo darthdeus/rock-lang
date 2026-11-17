@@ -19,6 +19,16 @@ fn wrap(s: string) -> string {
     return "[{s}]"
 }
 
+fn inspect_any(value: any) -> string {
+    return "{inspect(value)}"
+}
+
+@test
+fn test_any_is_explicitly_inspected_before_interpolation() {
+    let value: any = "dynamic"
+    assert_eq(inspect_any(value), "\"dynamic\"")
+}
+
 @test
 fn test_if_branch_formatted() {
     let x = 11.19
