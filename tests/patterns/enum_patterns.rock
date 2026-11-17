@@ -237,4 +237,3 @@ fn option_to_nullable<T>(opt: Option<T>) -> T? {
         None => null,
     }
 }
-
