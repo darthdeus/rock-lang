@@ -157,6 +157,12 @@ fn type_mismatch_labels_the_expected_type_origin() {
 fn diagnostics_label_the_offending_expression() {
     for (src, fn_name, message, labeled) in [
         (
+            "enum E { V { n: int } }\nfn impure() -> int { 1 }\n@pure fn f() -> E { E::V { n: impure() } }",
+            "f",
+            "not provably pure",
+            "impure()",
+        ),
+        (
             "@pure @inline operator(lua) /(a: float, b: float) -> float = \"return a / b\"\n\
              @pure @inline operator(lua) *(a: float, b: float) -> float = \"return a * b\"\n\
              fn main() { let x: int = 2.0 * (3 / 4) }",
