@@ -1,34 +1,6 @@
-//! `bone_query::query::definition_at` and `references` over a checked
-//! single-module workspace, by byte offset.
+//! Definition and reference ranges through the LSP workspace facade.
 
-use bone_query::query::{FnRefScope, definition_at, references};
-use bone_semantic::prelude::*;
-use bone_semantic::semantic_passes::semantic_pass;
-
-/// Build a checked workspace from a single source string and return it plus the
-/// (sole) user module id.
-fn ws_of(src: &str) -> (Workspace, ModuleId) {
-    let module =
-        skull_parser::parse_module_clean(src, Ustr::from("<query-test>")).expect("parse_rock");
-    let ws = semantic_pass(&mut [module]).expect("semantic_pass");
-    let mid = ws.source_modules().next().expect("one user module").id;
-    (ws, mid)
-}
-
-fn ws_with_stdlib(src: &str) -> (Workspace, ModuleId) {
-    let mut modules: Vec<_> = rock_stdlib::stdlib_files()
-        .iter()
-        .map(|file| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(file.name).as_str());
-            skull_parser::parse_module_clean(file.contents, id).expect("stdlib parse")
-        })
-        .collect();
-    let file = Ustr::from("<query-test>");
-    modules.push(skull_parser::parse_module_clean(src, file).expect("parse"));
-    let ws = semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = ws.module_ids[&file];
-    (ws, mid)
-}
+use crate::fixture::{PATH, offset_of, workspace};
 
 /// Byte offset of the `occurrence`-th (1-based) appearance of `needle` in `src`.
 fn nth_offset(src: &str, needle: &str, occurrence: usize) -> usize {
@@ -103,17 +75,21 @@ fn definition_cases() {
         ),
     ];
     for (case, src, use_needle, use_into, decl_needle, decl_into) in cases {
-        let (ws, mid) = if case == "field ref" {
-            ws_with_stdlib(src)
-        } else {
-            ws_of(src)
-        };
-        let inf = ws.inference(mid).expect("user module inferred");
-        let use_off = nth_offset(src, use_needle, 1) + use_into;
+        let at = crate::fixture::pos(src, use_needle, use_into);
         let decl_off = nth_offset(src, decl_needle, 1) + decl_into;
-        let def = definition_at(&ws, mid, inf, use_off)
-            .unwrap_or_else(|| panic!("{case}: no definition at {use_off}"));
-        let (s, e) = def.offset_range();
+        let def = workspace(src)
+            .definition(PATH, at)
+            .unwrap_or_else(|| panic!("{case}: no definition at {at:?}"));
+        assert_eq!(def.uri.to_file_path().unwrap(), PATH);
+        assert_eq!(
+            def.range.start.line,
+            crate::fixture::position_of_offset(src, decl_off).line,
+            "{case}"
+        );
+        let (s, e) = (
+            offset_of(src, def.range.start),
+            offset_of(src, def.range.end),
+        );
         assert!(
             s <= decl_off && decl_off < e,
             "{case}: {s}..{e} misses {decl_off}"
@@ -122,6 +98,25 @@ fn definition_cases() {
             assert_eq!(e - s, "helper".len(), "{case}: the bare name, not the item");
         }
     }
+}
+
+#[test]
+fn direct_enum_path_definition() {
+    use bone_semantic::prelude::*;
+
+    let src = "enum Color { Red, Green }\nfn f() -> Color { Color::Red }";
+    let ast = skull_parser::parse_module_clean(src, Ustr::from(PATH)).unwrap();
+    let ws = semantic_pass(&mut [ast]).unwrap();
+    let mid = ws.source_modules().next().unwrap().id;
+    let span = bone_query::query::definition_at(
+        &ws,
+        mid,
+        ws.inference(mid).unwrap(),
+        src.find("Color::Red").unwrap(),
+    )
+    .expect("enum qualifier resolves through its recorded path segment");
+    let (start, end) = span.offset_range();
+    assert!(start <= 5 && 5 < end, "enum declaration: {start}..{end}");
 }
 
 /// References include the declaration, so find-references and rename share
@@ -144,8 +139,6 @@ fn reference_cases() {
             2,
             &[1, 2, 3],
         ),
-        // Plain calls: an operator lowers to `__op_add`, which does not
-        // resolve without the stdlib and would drop `b` from inference.
         (
             "function from a call",
             "fn helper() -> int { 1 }\nfn a() -> int { helper() }\nfn b() -> int {\n    let x = helper()\n    helper()\n}",
@@ -178,20 +171,18 @@ fn reference_cases() {
         ),
     ];
     for (case, src, name, cursor, occurrences) in cases {
-        let (ws, mid) = ws_of(src);
-        let inf = ws.inference(mid).expect("user module inferred");
-        let cursor = nth_offset(src, name, *cursor);
-        let mut got: Vec<(usize, usize)> = references(
-            &ws,
-            mid,
-            inf,
-            cursor,
-            &|_| Some(src),
-            FnRefScope::AllOverloads,
-        )
-        .iter()
-        .map(|s| s.span.offset_range())
-        .collect();
+        let cursor = crate::fixture::position_of_offset(src, nth_offset(src, name, *cursor));
+        let mut got: Vec<(usize, usize)> = workspace(src)
+            .references(PATH, cursor)
+            .iter()
+            .map(|loc| {
+                assert_eq!(loc.uri.to_file_path().unwrap(), PATH);
+                (
+                    offset_of(src, loc.range.start),
+                    offset_of(src, loc.range.end),
+                )
+            })
+            .collect();
         got.sort();
         let want: Vec<(usize, usize)> = occurrences
             .iter()

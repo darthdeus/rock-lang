@@ -618,31 +618,6 @@ fn completion_cases() {
     }
 }
 
-#[test]
-fn definition_cases() {
-    // (case, source, cursor, declaration line)
-    let cases = [
-        (
-            "user function call",
-            "fn helper() -> int {\n  42\n}\nfn main() {\n  let x = helper()\n}\n",
-            Position::new(4, 12),
-            0,
-        ),
-        (
-            "local binding",
-            "fn f() -> int {\n  let count = 1\n  return count\n}\n",
-            Position::new(2, 10),
-            1,
-        ),
-    ];
-    for (case, src, pos, line) in cases {
-        let loc = workspace(src)
-            .definition(PATH, pos)
-            .unwrap_or_else(|| panic!("{case}: unresolved"));
-        assert_eq!(loc.range.start.line, line, "{case}: {:?}", loc.range);
-    }
-}
-
 // The URI once was `file://unified.rock` (host `unified.rock`, empty path),
 // and nvim crashed applying a stdlib line number to an empty buffer.
 #[test]
@@ -743,16 +718,6 @@ fn reference_starts(bone: &BoneWorkspace, pos: Position) -> Vec<(u32, u32)> {
         .collect();
     starts.sort();
     starts
-}
-
-#[test]
-fn references_finds_local_decl_and_uses() {
-    let bone =
-        workspace("fn f() -> int {\n  let count = 1\n  let total = count + count\n  total\n}\n");
-    assert_eq!(
-        reference_starts(&bone, Position::new(2, 14)),
-        [(1, 6), (2, 14), (2, 22)]
-    );
 }
 
 // Find-references is specific to the overload under the cursor; rename stays

@@ -245,15 +245,6 @@ fn definition_in_main(
 }
 
 #[test]
-fn definition_of_a_qualified_path_lands_on_the_function() {
-    let project = V1Project::new();
-    let bone = project.open();
-    let (file, covered) = definition_in_main(&bone, &project, "depth()", 0, 1);
-    assert_eq!(file, "shapes_inner.rock");
-    assert_eq!(covered, "depth");
-}
-
-#[test]
 fn references_of_a_qualified_call_cover_only_the_callable_segment() {
     let project = V1Project::new();
     let bone = project.open();
@@ -275,33 +266,43 @@ fn references_of_a_qualified_call_cover_only_the_callable_segment() {
 }
 
 #[test]
-fn definition_of_an_imported_name_lands_on_its_item() {
-    let cases: &[(&str, usize, usize, &str, &str)] = &[
+fn definition_cases() {
+    let project = V1Project::new();
+    let bone = project.open();
+
+    let (file, covered) = definition_in_main(&bone, &project, "depth()", 0, 1);
+    assert_eq!(file, "shapes_inner.rock");
+    assert_eq!(covered, "depth");
+
+    let items: &[(&str, usize, usize, &str, &str)] = &[
         ("surface(2)", 0, 2, "shapes.rock", "area"),
         ("perimeter(3)", 0, 2, "shapes.rock", "perimeter"),
         ("Box, c", 0, 1, "shapes.rock", "Box"),
         ("Crate)", 0, 1, "shapes.rock", "Box"),
         ("LIMIT", 0, 1, "shapes.rock", "LIMIT"),
+        ("depth()", 1, 1, "shapes_inner.rock", "depth"),
+        ("area as surface", 0, 1, "shapes.rock", "area"),
     ];
-    for (needle, nth, into, expected_file, item) in cases {
-        let project = V1Project::new();
-        let bone = project.open();
+    for (needle, nth, into, expected_file, item) in items {
         let (file, covered) = definition_in_main(&bone, &project, needle, *nth, *into);
         assert_eq!(file, *expected_file, "{needle}");
         assert!(covered.contains(item), "{needle} landed on {covered:?}");
     }
-}
 
-#[test]
-fn definition_of_a_re_exported_name_lands_on_the_defining_function() {
-    let project = V1Project::new();
-    let bone = project.open();
-    let (file, covered) = definition_in_main(&bone, &project, "depth()", 1, 1);
-    assert_eq!(
-        file, "shapes_inner.rock",
-        "a `pub use` is not the definition"
-    );
-    assert!(covered.contains("depth"), "landed on {covered:?}");
+    let main = project.path("main.rock");
+    let segments = [
+        ("shapes::inner::depth", "shapes.rock", 0),
+        ("inner::depth", "shapes_inner.rock", 0),
+        ("facade::depth", "facade.rock", 0),
+        ("shapes::area as", "shapes.rock", 0),
+    ];
+    for (needle, expected_file, expected_line) in segments {
+        assert_eq!(
+            definition_line(&bone, &main, MAIN, needle, 0, 1),
+            (expected_file.into(), expected_line),
+            "{needle}"
+        );
+    }
 }
 
 // -- the std prelude ----------------------------------------------------------
@@ -337,45 +338,6 @@ fn definition_line(
         .unwrap_or_else(|| panic!("no definition for `{needle}` #{nth}"));
     let (file, _) = located_text(&loc);
     (file_name(&file).to_string(), loc.range.start.line)
-}
-
-#[test]
-fn a_module_segment_lands_on_the_module_header() {
-    let project = V1Project::new();
-    let bone = project.open();
-    let main = project.path("main.rock");
-    assert_eq!(
-        definition_line(&bone, &main, MAIN, "shapes::inner::depth", 0, 1),
-        ("shapes.rock".into(), 0)
-    );
-    assert_eq!(
-        definition_line(&bone, &main, MAIN, "inner::depth", 0, 1),
-        ("shapes_inner.rock".into(), 0)
-    );
-    assert_eq!(
-        definition_line(&bone, &main, MAIN, "facade::depth", 0, 1),
-        ("facade.rock".into(), 0)
-    );
-}
-
-#[test]
-fn a_use_item_segment_lands_on_what_it_names() {
-    let project = V1Project::new();
-    let bone = project.open();
-    let (file, covered) = definition_in_main(&bone, &project, "area as surface", 0, 1);
-    assert_eq!(file, "shapes.rock");
-    assert!(covered.contains("area"), "landed on {covered:?}");
-    assert_eq!(
-        definition_line(
-            &bone,
-            &project.path("main.rock"),
-            MAIN,
-            "shapes::area as",
-            0,
-            1
-        ),
-        ("shapes.rock".into(), 0)
-    );
 }
 
 #[test]
@@ -992,54 +954,57 @@ fn rename_edits(
 }
 
 #[test]
-fn renaming_a_declaration_renames_its_paths_and_use_items_but_not_an_alias() {
+fn renaming_declarations_updates_all_references() {
     let project = V1Project::new();
     let bone = project.open();
-    let shapes = project.path("shapes.rock");
-    let edits = rename_edits(&bone, &shapes, pos_of(SHAPES, "area", 0, 1), "size");
-    let want: Vec<(String, u32, String, String)> = vec![
-        ("main.rock".into(), 0, "area".into(), "size".into()),
-        ("shapes.rock".into(), 2, "area".into(), "size".into()),
-    ];
-    assert_eq!(edits, want, "`surface` is the alias's own name and stays");
-}
-
-#[test]
-fn renaming_a_declaration_renames_qualified_paths_and_re_exports() {
-    let project = V1Project::new();
-    let bone = project.open();
-    let inner = project.path("shapes_inner.rock");
-    let edits = rename_edits(&bone, &inner, pos_of(INNER, "depth", 0, 1), "level");
-    let want: Vec<(String, u32, String, String)> = vec![
-        ("facade.rock".into(), 2, "depth".into(), "level".into()),
-        ("main.rock".into(), 5, "depth".into(), "level".into()),
-        ("main.rock".into(), 8, "depth".into(), "level".into()),
+    let cases: &[(&str, &str, &str, &str, &str, &[(&str, u32)])] = &[
         (
-            "shapes_inner.rock".into(),
-            2,
-            "depth".into(),
-            "level".into(),
+            "`surface` remains an alias",
+            "shapes.rock",
+            SHAPES,
+            "area",
+            "size",
+            &[("main.rock", 0), ("shapes.rock", 2)],
+        ),
+        (
+            "qualified paths and re-exports",
+            "shapes_inner.rock",
+            INNER,
+            "depth",
+            "level",
+            &[
+                ("facade.rock", 2),
+                ("main.rock", 5),
+                ("main.rock", 8),
+                ("shapes_inner.rock", 2),
+            ],
+        ),
+        (
+            "glob-imported bare uses",
+            "shapes.rock",
+            SHAPES,
+            "perimeter",
+            "outline",
+            &[("main.rock", 7), ("shapes.rock", 6)],
         ),
     ];
-    assert_eq!(edits, want);
-}
 
-#[test]
-fn renaming_a_glob_imported_declaration_renames_its_bare_uses() {
-    let project = V1Project::new();
-    let bone = project.open();
-    let shapes = project.path("shapes.rock");
-    let edits = rename_edits(&bone, &shapes, pos_of(SHAPES, "perimeter", 0, 1), "outline");
-    let want: Vec<(String, u32, String, String)> = vec![
-        ("main.rock".into(), 7, "perimeter".into(), "outline".into()),
-        (
-            "shapes.rock".into(),
-            6,
-            "perimeter".into(),
-            "outline".into(),
-        ),
-    ];
-    assert_eq!(edits, want);
+    for (case, source_file, source, needle, new_name, expected) in cases {
+        let path = project.path(source_file);
+        let edits = rename_edits(&bone, &path, pos_of(source, needle, 0, 1), new_name);
+        let want: Vec<_> = expected
+            .iter()
+            .map(|(file, line)| {
+                (
+                    file.to_string(),
+                    *line,
+                    needle.to_string(),
+                    new_name.to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(edits, want, "{case}");
+    }
 }
 
 #[test]
