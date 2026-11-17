@@ -27,8 +27,6 @@ fn pin_fixed_kinds_print_and_lex_as_their_text() {
     let unlexed = [
         K::And,
         K::Or,
-        K::SingleQuote,
-        K::DoubleQuote,
         K::Newline,
         K::EOF,
     ];
@@ -111,8 +109,6 @@ fn pin_fixed_kinds_print_and_lex_as_their_text() {
         (K::BitNot, "~"),
         (K::LeftShift, "<<"),
         (K::RightShift, ">>"),
-        (K::SingleQuote, "'"),
-        (K::DoubleQuote, "\""),
         (K::QuestionMark, "?"),
         (K::QuestionDot, "?."),
         (K::DoubleQuestionMark, "??"),

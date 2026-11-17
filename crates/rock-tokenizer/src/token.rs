@@ -112,9 +112,6 @@ pub enum TokenKind {
     LeftShift,
     RightShift,
 
-    SingleQuote,
-    DoubleQuote,
-
     QuestionMark,
     QuestionDot,
     DoubleQuestionMark,
@@ -362,8 +359,6 @@ impl TokenKind {
             Self::QuestionDot => "?.",
             Self::DoubleQuestionMark => "??",
             Self::TripleQuestionMark => "???",
-            Self::SingleQuote => "'",
-            Self::DoubleQuote => "\"",
             Self::Dot => ".",
             Self::DoubleDot => "..",
             Self::TripleDot => "...",
