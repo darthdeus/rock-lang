@@ -102,12 +102,7 @@ fn build_cli() -> Command {
         .subcommand(position_subcmd("definition", "Go to definition at a specific position"))
         .subcommand(position_subcmd("type-definition", "Go to the declaration of the type of the value at a specific position"))
         .subcommand(position_subcmd("references", "Find references at a specific position"))
-        .subcommand(position_subcmd(
-            "hole-info",
-            "Print typed-hole context (expected type + in-scope bindings) for the hole under the cursor.",
-        ))
         .subcommand(file_subcmd("inlay-hints", "Get inlay hints for a Rock file"))
-        .subcommand(position_subcmd("prepare-rename", "Prepare rename at a specific position"))
         .subcommand(
             Command::new("rename")
                 .about("Rename symbol at a specific position")
@@ -255,15 +250,7 @@ pub fn run_cli(args: Vec<String>) -> Result<()> {
             let (file, line, col) = bone_position(m)?;
             cli::bone_lsp::references(&file, line, col)
         }
-        Some(("hole-info", m)) => {
-            let (file, line, col) = bone_position(m)?;
-            cli::bone_lsp::hole_info(&file, line, col)
-        }
         Some(("inlay-hints", m)) => cli::bone_lsp::inlay_hints(arg_str(m, "file")),
-        Some(("prepare-rename", m)) => {
-            let (file, line, col) = bone_position(m)?;
-            cli::bone_lsp::prepare_rename(&file, line, col)
-        }
         Some(("rename", m)) => {
             let (file, line, col) = bone_position(m)?;
             cli::bone_lsp::rename(&file, line, col, arg_str(m, "new_name"))

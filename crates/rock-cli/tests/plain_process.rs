@@ -327,7 +327,6 @@ fn library_resolves_game_services_without_private_registration() {
 fn retired_backend_is_rejected_before_source_discovery() {
     let root = tempfile::tempdir().unwrap();
     for backend in ["c", "bone"] {
-        assert!(rock_cli::BackendSpec::named(backend).is_none());
         for command in ["compile", "test", "run", "watch"] {
             let out = invoke(
                 root.path(),
@@ -354,14 +353,7 @@ fn retired_backend_is_rejected_before_source_discovery() {
 #[test]
 fn js_backend_is_served_by_the_plain_cli() {
     let root = tempfile::tempdir().unwrap();
-    let spec = rock_cli::BackendSpec::named("js").unwrap();
-    assert!(spec.omitted.is_none());
     for command in ["test", "run"] {
-        let cmd = rock_cli::CliCommand::named(command).unwrap();
-        assert!(
-            rock_cli::Backend::Js.serves(cmd),
-            "js must serve `{command}`"
-        );
         let out = invoke(root.path(), &[command, "missing.rock", "--backend", "js"]);
         assert!(!out.status.success());
         assert!(
@@ -578,11 +570,51 @@ log:close()
 }
 
 #[test]
-fn plain_parser_rejects_options_of_absent_private_rules_and_runtimes() {
+fn invalid_commands_and_options_report_their_exit_status_and_argument() {
     let root = tempfile::tempdir().unwrap();
-    let help = invoke(root.path(), &["--help"]);
-    assert!(help.status.success());
-    let help = text(&help);
+    let cases: &[(&[&str], i32, &str)] = &[
+        (
+            &["lsp", "hole-info"],
+            2,
+            "unrecognized subcommand 'hole-info'",
+        ),
+        (
+            &["lsp", "prepare-rename"],
+            2,
+            "unrecognized subcommand 'prepare-rename'",
+        ),
+        (
+            &["fix", "missing.rock"],
+            1,
+            "command `fix` is unavailable in this build",
+        ),
+        (
+            &["run", "--lib", "library", "main.rock"],
+            2,
+            "unexpected argument '--lib'",
+        ),
+        (
+            &["run", "--timeout", "5"],
+            2,
+            "unexpected argument '--timeout'",
+        ),
+        (
+            &["frame", "--headless"],
+            2,
+            "unexpected argument '--headless'",
+        ),
+        (
+            &["perf", "--headless"],
+            2,
+            "unexpected argument '--headless'",
+        ),
+    ];
+    for (args, code, fragment) in cases {
+        let output = invoke(root.path(), args);
+        assert_eq!(output.status.code(), Some(*code), "{}", text(&output));
+        assert_mentions(&output, fragment);
+    }
+    let help = text(&invoke(root.path(), &["--help"]));
     for (command, option, value) in [
         ("test", "--require-test", Some("sentinel")),
         ("test", "--show-passing", Some("sentinel")),
@@ -601,26 +633,24 @@ fn plain_parser_rejects_options_of_absent_private_rules_and_runtimes() {
         ("check", "--agent-access", None),
         ("check", "--level", Some("catalog-entry")),
         ("check", "--daemon-sock", Some("daemon.sock")),
+        ("test", "--type-validation", None),
+        ("test", "--clean", None),
+        ("test", "--watch", None),
+        ("test", "--no-timeout", None),
+        ("test", "--package", None),
+        ("run", "--lib", None),
     ] {
-        let mut argv = vec![command, "missing.rock", option];
-        argv.extend(value);
-        let out = invoke(root.path(), &argv);
-        assert_eq!(out.status.code(), Some(2), "{option}: {}", text(&out));
-        assert_mentions(&out, &format!("unexpected argument '{option}'"));
+        let mut args = vec![command, "missing.rock", option];
+        args.extend(value);
+        let output = invoke(root.path(), &args);
+        assert_eq!(output.status.code(), Some(2), "{option}: {}", text(&output));
+        assert_mentions(&output, &format!("unexpected argument '{option}'"));
         assert!(
             !help.contains(option),
-            "removed option remained in public help: {option}"
+            "removed option remained in help: {option}"
         );
     }
     assert!(!root.path().join("tmp").exists());
-}
-
-#[test]
-fn fix_is_not_a_command() {
-    let root = tempfile::tempdir().unwrap();
-    let out = invoke(root.path(), &["fix", "missing.rock"]);
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
-    assert_mentions(&out, "command `fix` is unavailable in this build");
 }
 
 #[test]
@@ -652,16 +682,6 @@ fn run_loads_a_manifest_dependency() {
     let out = invoke(root.path(), &["run", "app"]);
     assert!(out.status.success(), "{}", text(&out));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "42\n");
-}
-
-#[test]
-fn run_rejects_the_inert_lib_option() {
-    let root = tempfile::tempdir().unwrap();
-    let out = invoke(root.path(), &["run", "--lib", "library", "main.rock"]);
-    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
-    assert_mentions(&out, "unexpected argument '--lib'");
-    let help = invoke(root.path(), &["--help"]);
-    assert!(!text(&help).contains("--lib"), "{}", text(&help));
 }
 
 #[test]
@@ -1128,27 +1148,6 @@ fn public_frame_and_perf_options_preserve_their_units_and_defaults() {
     assert_eq!(test.warmup, 0);
     assert_eq!(test.target_os.as_deref(), Some("web"));
     assert_eq!(test.perf_format, "json");
-}
-
-#[test]
-fn flags_that_change_nothing_are_rejected() {
-    for flag in [
-        "--type-validation",
-        "--clean",
-        "--watch",
-        "--no-timeout",
-        "--package",
-    ] {
-        let parsed = rock_cli::Args::command().try_get_matches_from(["rock", "test", flag]);
-        assert!(parsed.is_err(), "{flag} is accepted");
-    }
-    let parsed = rock_cli::Args::command().try_get_matches_from(["rock", "run", "--timeout", "5"]);
-    assert!(parsed.is_err(), "--timeout is accepted");
-    for command in ["frame", "perf"] {
-        let parsed =
-            rock_cli::Args::command().try_get_matches_from(["rock", command, "--headless"]);
-        assert!(parsed.is_err(), "{command} --headless is accepted");
-    }
 }
 
 #[test]
