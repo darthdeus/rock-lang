@@ -59,25 +59,21 @@ pub(crate) fn do_fmt(paths: &[String], check: bool) -> Result<()> {
     let mut formatted_count = 0;
 
     for file_path in &files_to_format {
-        match format_rock_file(file_path) {
-            Ok(formatted) => {
-                if check {
-                    let original = fs::read_to_string(file_path)?;
-                    if original.trim() != formatted.trim() {
-                        println!("File '{}' is not formatted", file_path);
-                        needs_formatting = true;
-                    }
-                } else {
-                    let original = fs::read_to_string(file_path)?;
-                    if original != formatted {
-                        fs::write(file_path, &formatted)?;
-                        println!("Formatted '{}'", file_path);
-                        formatted_count += 1;
-                    }
-                }
+        // A format error already names the file; the caller prints it once.
+        let formatted = format_rock_file(file_path)?;
+        if check {
+            let original = fs::read_to_string(file_path)?;
+            if original.trim() != formatted.trim() {
+                println!("File '{}' is not formatted", file_path);
+                needs_formatting = true;
             }
-            // The error already names the file; the caller prints it once.
-            Err(e) => return Err(e),
+        } else {
+            let original = fs::read_to_string(file_path)?;
+            if original != formatted {
+                fs::write(file_path, &formatted)?;
+                println!("Formatted '{}'", file_path);
+                formatted_count += 1;
+            }
         }
     }
 
