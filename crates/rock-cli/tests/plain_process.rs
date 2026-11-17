@@ -487,22 +487,46 @@ fn plain_watch_resolves_project_outside_workspace() {
             .unwrap();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let stop = StopOnDrop(&mut child);
-            let deadline = Instant::now() + test_utils::HANG_BACKSTOP;
-            loop {
-                let logs = std::fs::read_to_string(&log).unwrap();
-                if output.is_file() && logs.contains("watching . for changes") {
-                    break;
+            let mut until = |ready: &dyn Fn(&str) -> bool| {
+                let deadline = Instant::now() + test_utils::HANG_BACKSTOP;
+                loop {
+                    let logs = std::fs::read_to_string(&log).unwrap();
+                    if ready(&logs) {
+                        break;
+                    }
+                    assert!(
+                        stop.0.try_wait().unwrap().is_none(),
+                        "watch exited before compiling: {logs}"
+                    );
+                    assert!(Instant::now() < deadline, "watch did not compile: {logs}");
+                    std::thread::sleep(Duration::from_millis(20));
                 }
-                assert!(
-                    stop.0.try_wait().unwrap().is_none(),
-                    "watch exited before compiling: {logs}"
-                );
-                assert!(Instant::now() < deadline, "watch did not compile: {logs}");
-                std::thread::sleep(Duration::from_millis(20));
-            }
+            };
+            until(&|logs| output.is_file() && logs.contains("watching . for changes"));
             assert!(!std::fs::read(&output).unwrap().is_empty());
             if fail {
                 panic!("intentional watcher cleanup check");
+            }
+            for value in [43, 0, 44] {
+                let previous = std::fs::read_to_string(&output).unwrap();
+                let source = if value == 0 {
+                    "fn main() { print(missing_value) }\n".to_string()
+                } else {
+                    format!("fn main() {{ print({value}) }}\n")
+                };
+                write(root.path(), "main.rock", &source);
+                if value == 0 {
+                    until(&|logs| {
+                        logs.contains("missing_value") && logs.contains("serving last good output")
+                    });
+                    assert_eq!(std::fs::read_to_string(&output).unwrap(), previous);
+                } else {
+                    until(&|_| std::fs::read_to_string(&output).is_ok_and(|s| s != previous));
+                    let lua = std::fs::read_to_string(&output).unwrap() + "\nmain()\n";
+                    let run = rock_host::lua_runner::run_lua_code_with_timeout(&lua, None).unwrap();
+                    assert!(run.success, "{}", run.combined());
+                    assert_eq!(run.stdout.trim(), value.to_string());
+                }
             }
         }));
         if fail {
