@@ -70,20 +70,6 @@ pub fn normalize_stdout(s: &str) -> String {
     out
 }
 
-/// First line where `lhs` and `rhs` differ, for divergence reporting.
-pub fn first_diff_line(lhs: &str, rhs: &str) -> String {
-    for (i, (a, b)) in lhs.lines().zip(rhs.lines()).enumerate() {
-        if a != b {
-            return format!("line {}: {:?} != {:?}", i + 1, a, b);
-        }
-    }
-    format!(
-        "line count: {} != {}",
-        lhs.lines().count(),
-        rhs.lines().count()
-    )
-}
-
 /// Standalone `@test`/synthetic programs have no engine. Stub the full-reload
 /// registry reset only when a fixture emits one; body overlays refresh the
 /// CodeRefs already stored in registries.
@@ -103,39 +89,4 @@ pub fn stub_for(full_lua: &str) -> &'static str {
 /// overlay so the overlay's fresh `main` wins over the stale baseline's.
 pub fn run_parts(parts: &[&str]) -> ExecOutcome {
     exec_lua(&parts.join("\n"))
-}
-
-pub(crate) fn direct_overlay(root: &str, target_suffix: &str, edited: &str) -> String {
-    let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(root));
-    let sources = crate::unified_compile::discover_sources(&spec).expect("discover");
-    let files = crate::bone_backend::session_files(&sources);
-    let target = files
-        .iter()
-        .find(|f| f.path.ends_with(target_suffix))
-        .map(|f| f.path.clone())
-        .expect("main source");
-    let mut session =
-        crate::bone_backend::bone_session_for_emission(files, std::path::Path::new(root))
-            .expect("session");
-    let renderer = skull::mir_emit::RendererTarget::Gl;
-    let mid = skull::user_module_id(session.workspace()).expect("user module");
-    let (_, mut cache) = skull::mir_emit::FullEmit::program()
-        .project_root(Some(root))
-        .renderer(renderer)
-        .run(session.workspace(), mid)
-        .expect("fresh emit");
-    let update = session.update_file(&target, edited).expect("edit");
-    assert!(matches!(
-        update.tier,
-        bone_incremental::session::UpdateTier::BodyOnly
-    ));
-    let edits = update.body_update.edit.iter().copied().collect::<Vec<_>>();
-    skull::mir_emit::emit_overlay_with_span_edits(
-        session.workspace(),
-        &mut cache,
-        &update.reinferred,
-        &edits,
-    )
-    .expect("overlay")
-    .lua
 }

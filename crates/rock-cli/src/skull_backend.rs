@@ -1808,32 +1808,39 @@ pub(crate) fn skull_compile_single(path: &str, output: Option<String>) -> Result
     if std::path::Path::new(path).is_dir() {
         return skull_compile_project(path, output);
     }
-    let src = match fs_err::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            log::error!(target: "SKULL", "cannot read {}: {}", path, e);
+    let src = skull_read_single(path);
+    let budget = crate::compile_budget::Scope::begin(path);
+    let (lua, _) = skull_emit_single(path, &src);
+    match output {
+        Some(out) => {
+            rock_host::project::write_atomic(&out, &lua)?;
+            log::info!(target: "SKULL", "{} -> {}", path, out);
+        }
+        None => {
+            // Result output (the compiled Lua), not logging — pipeable.
+            print!("{}", lua);
+        }
+    }
+    crate::compile_budget::phase("write");
+    budget.success();
+    Ok(())
+}
+
+fn skull_read_single(path: &str) -> String {
+    match fs_err::read_to_string(path) {
+        Ok(src) => src,
+        Err(error) => {
+            log::error!(target: "SKULL", "cannot read {}: {}", path, error);
             crate::invocation_log::exit(1);
         }
-    };
-    let budget = crate::compile_budget::Scope::begin(path);
-    match skull_emit(path, &src) {
-        Ok((lua, _emits_main)) => {
-            match output {
-                Some(out) => {
-                    rock_host::project::write_atomic(&out, &lua)?;
-                    log::info!(target: "SKULL", "{} -> {}", path, out);
-                }
-                None => {
-                    // Result output (the compiled Lua), not logging — pipeable.
-                    print!("{}", lua);
-                }
-            }
-            crate::compile_budget::phase("write");
-            budget.success();
-            Ok(())
-        }
-        Err(errs) => {
-            eprintln!("{}", render_file_errs(path, &src, &errs));
+    }
+}
+
+fn skull_emit_single(path: &str, src: &str) -> (String, bool) {
+    match skull_emit(path, src) {
+        Ok(emitted) => emitted,
+        Err(errors) => {
+            eprintln!("{}", render_file_errs(path, src, &errors));
             crate::invocation_log::exit(1);
         }
     }
@@ -2015,20 +2022,8 @@ pub(crate) fn skull_run(path: &str, app_args: &[String]) -> Result<()> {
     if std::path::Path::new(path).is_dir() {
         return skull_run_project(path, app_args);
     }
-    let src = match fs_err::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            log::error!(target: "SKULL", "cannot read {}: {}", path, e);
-            crate::invocation_log::exit(1);
-        }
-    };
-    let (lua, emits_main) = match skull_emit(path, &src) {
-        Ok(l) => l,
-        Err(errs) => {
-            eprintln!("{}", render_file_errs(path, &src, &errs));
-            crate::invocation_log::exit(1);
-        }
-    };
+    let src = skull_read_single(path);
+    let (lua, emits_main) = skull_emit_single(path, &src);
     let program = if emits_main {
         format!("{lua}\nmain()\n")
     } else {

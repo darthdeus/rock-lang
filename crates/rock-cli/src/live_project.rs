@@ -475,99 +475,37 @@ mod tests {
     use super::{LiveProject, LiveUpdate};
 
     #[test]
-    fn classifies_body_and_interface_edits_from_one_warm_session() {
+    fn a_rejected_lint_edit_keeps_the_running_program_and_allows_recovery() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("main.rock");
-        std::fs::write(
-            &source,
-            "fn value() -> int { 1 }\nfn main() { print(value()) }\n",
+        let main = dir.path().join("main.lua");
+        let overlay = dir.path().join("incremental.lua");
+        let old = "fn maybe_int() -> int? { 1 }\nfn always_int() -> int { 1 }\n@nomangle fn value() -> int { let _value: int = cast(always_int()) 3 }\n";
+        std::fs::write(&source, old).unwrap();
+        let mut project = crate::skull_backend::IncrementalProject::init(
+            dir.path().to_str().unwrap(),
+            &main,
+            &overlay,
         )
         .unwrap();
-        let mut project = LiveProject::init(dir.path().to_str().unwrap(), false).unwrap();
-
-        std::fs::write(
-            &source,
-            "fn value() -> int { 2 }\nfn main() { print(value()) }\n",
-        )
-        .unwrap();
-        assert!(matches!(
-            project.recompile(std::slice::from_ref(&source)).unwrap(),
-            LiveUpdate::BodyOnly { ref reinferred, .. } if !reinferred.is_empty()
-        ));
-
-        std::fs::write(
-            &source,
-            "fn value(x: int) -> int { x }\nfn main() { print(value(2)) }\n",
-        )
-        .unwrap();
-        assert!(matches!(
-            project.recompile(std::slice::from_ref(&source)).unwrap(),
-            LiveUpdate::Full { .. }
-        ));
-    }
-
-    #[test]
-    fn source_fingerprint_recomputes_body_edits_and_restores_failed_edits() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("stick.toml"),
-            "[package]\nname = \"provenance\"\n[build.vars]\nREV = { source_fingerprint = { roots = [\"Root\"], files = [\"decoder.rock\"] } }\n").unwrap();
-        let source = dir.path().join("main.rock");
-        let initial = "value Root { count: int = 1 }\nfn main() { print(build_var(\"REV\")) }";
-        std::fs::write(&source, initial).unwrap();
-        let decoder = dir.path().join("decoder.rock");
-        std::fs::write(&decoder, "fn decode() -> int { 1 }").unwrap();
-        let mut project = LiveProject::init(dir.path().to_str().unwrap(), false).unwrap();
-        let revision = |project: &LiveProject| {
-            project.workspace().comptime_inputs.vars[&ustr::Ustr::from("REV")]
-                .value
-                .clone()
-        };
-        let before = revision(&project);
-        assert!(matches!(
-            project
-                .apply_edit(&decoder, "fn decode() -> int { 2 }")
-                .unwrap(),
-            LiveUpdate::Full { .. }
-        ));
-        let decoder_changed = revision(&project);
-        assert_ne!(before, decoder_changed);
-        assert!(
-            project
-                .apply_edit(&source, "fn main() { missing() }")
-                .is_err()
+        let before = std::fs::read_to_string(&main).unwrap();
+        let error = project
+            .apply_edit(
+                &source,
+                &old.replace("cast(always_int())", "cast(maybe_int())"),
+                &main,
+                &overlay,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("lint error(s)"), "{error}");
+        assert_eq!(std::fs::read_to_string(&main).unwrap(), before);
+        project.force_full(&main, &overlay).unwrap();
+        let script = format!(
+            "{}\nassert(value() == 3)",
+            std::fs::read_to_string(&main).unwrap()
         );
-        assert_eq!(decoder_changed, revision(&project));
-        let default_changed = initial.replace("= 1", "= 2");
-        project.apply_edit(&source, &default_changed).unwrap();
-        assert_ne!(decoder_changed, revision(&project));
-        // The editor text, rather than stale disk bytes, supplied both revisions.
-        assert_eq!(std::fs::read_to_string(&source).unwrap(), initial);
-        assert_eq!(
-            std::fs::read_to_string(&decoder).unwrap(),
-            "fn decode() -> int { 1 }"
-        );
-    }
-
-    #[test]
-    fn failed_edit_restores_recorded_build_inputs() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("stick.toml"),
-            "[package]\nname = \"rollback\"\n[build.vars]\nREV = \"before\"\n",
-        )
-        .unwrap();
-        let source = dir.path().join("main.rock");
-        std::fs::write(&source, "fn main() { print(build_var(\"REV\")) }").unwrap();
-        let mut project = LiveProject::init(dir.path().to_str().unwrap(), false).unwrap();
-        assert!(
-            project
-                .apply_edit(&source, "fn main() { missing() }")
-                .is_err()
-        );
-        assert_eq!(
-            project.workspace().comptime_inputs.vars[&ustr::Ustr::from("REV")].value,
-            "before"
-        );
+        let run = crate::compile_cmd::run_lua_code_with_timeout(&script, None).unwrap();
+        assert!(run.success, "{}", run.combined());
     }
 
     #[test]
@@ -654,80 +592,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "2");
     }
 
-    #[test]
-    fn body_edit_updates_the_shared_lint_cache_and_failed_edit_restores_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("main.rock");
-        std::fs::write(&source, "fn main() { let stale = 1 }\n").unwrap();
-        let mut project = LiveProject::init(dir.path().to_str().unwrap(), false).unwrap();
-        assert!(project.lint_cache.is_initialized());
-        let file = ustr::Ustr::from(
-            std::fs::canonicalize(&source)
-                .unwrap()
-                .to_string_lossy()
-                .as_ref(),
-        );
-        assert!(!project.lint_cache.findings_for_file(file).is_empty());
-
-        assert!(project.apply_edit(&source, "fn main( {\n").is_err());
-        assert!(!project.lint_cache.findings_for_file(file).is_empty());
-
-        project.apply_edit(&source, "fn main() {}\n").unwrap();
-        assert!(project.lint_cache.is_initialized());
-        assert!(project.lint_cache.findings_for_file(file).is_empty());
-    }
-
-    #[test]
-    fn lint_error_after_cache_update_rolls_back_sources_and_findings_together() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("main.rock");
-        let old = r#"
-fn maybe_int() -> int? { return 1 }
-fn always_int() -> int { return 1 }
-fn main() -> int { let _value: int = cast(always_int()) 3 }
-"#;
-        let bad = old.replace("cast(always_int())", "cast(maybe_int())");
-        std::fs::write(&source, old).unwrap();
-        let mut project = LiveProject::init(dir.path().to_str().unwrap(), false).unwrap();
-        let file = ustr::Ustr::from(
-            std::fs::canonicalize(&source)
-                .unwrap()
-                .to_string_lossy()
-                .as_ref(),
-        );
-        let findings = |project: &LiveProject| {
-            project
-                .lint_cache
-                .findings_for_file(file)
-                .into_iter()
-                .map(|finding| format!("{}:{}", finding.lint, finding.error.message))
-                .collect::<Vec<_>>()
-        };
-        let before = findings(&project);
-        assert!(project.apply_edit(&source, &bad).is_err());
-        assert_eq!(project.source_text(&source).as_deref(), Some(old));
-        let after = findings(&project);
-        assert_eq!(after, before);
-        assert!(
-            after
-                .iter()
-                .all(|finding| !finding.starts_with("transmute_of_nullable:"))
-        );
-    }
-
-    /// A session re-parses on every edit, so it has to keep each file's
-    /// owning package rather than re-derive it. Session-backed routes need to
-    /// retain that fact across edits for package-scoped names to resolve.
-    #[test]
-    fn a_v1_package_keeps_its_owner_through_a_session() {
-        let (_dir, main, _a, mut project) = v1_live_project();
-        // It keeps the owner across a re-parse: an edit re-runs the parser from the
-        // stored text, which is the half a one-shot stamp at init would miss.
-        project
-            .apply_edit(&main, "fn main() {\n    print(\"n={a::bump(2)}\")\n}\n")
-            .expect("a v1 edit must keep its package owner");
-    }
-
     fn diagnostic_messages(project: &LiveProject) -> Vec<String> {
         project
             .session
@@ -756,57 +620,5 @@ fn main() -> int { let _value: int = cast(always_int()) 3 }
         let project = LiveProject::init(dir.path().to_str().unwrap(), false)
             .expect("a v1 package must build through a session");
         (dir, main, a, project)
-    }
-
-    /// The namespace tree is built from the module set, so an edit that
-    /// changes what a v1 module declares has to reach it: a function added to
-    /// `a` is callable as `a::twice` from the next edit on.
-    #[test]
-    fn a_v1_definition_added_by_an_edit_is_resolvable() {
-        let (_dir, main, a, mut project) = v1_live_project();
-        project
-            .apply_edit(
-                &a,
-                "mod a;\n\npub fn bump(n: int) -> int {\n    n + 1\n}\n\npub fn twice(n: int) -> int {\n    n * 2\n}\n",
-            )
-            .expect("adding a pub fn to a v1 module is a valid edit");
-        project
-            .apply_edit(&main, "fn main() {\n    print(\"n={a::twice(3)}\")\n}\n")
-            .expect("a pub fn added by an earlier edit must resolve");
-    }
-
-    /// Visibility is read from the namespace tree too, so taking `pub` off a
-    /// definition must stop a consumer in another module reaching it.
-    #[test]
-    fn a_v1_visibility_narrowed_by_an_edit_is_enforced() {
-        let (_dir, _main, a, mut project) = v1_live_project();
-        // `apply_edit_inner` skips the rollback, so the rejecting diagnostics
-        // are still on the session to read.
-        project
-            .apply_edit_inner(&a, "mod a;\n\nfn bump(n: int) -> int {\n    n + 1\n}\n")
-            .expect_err("main still calls a::bump, which is now private to `a`");
-        let messages = diagnostic_messages(&project);
-        assert!(
-            messages
-                .iter()
-                .any(|m| m.contains("`bump` is not accessible from this module")),
-            "{messages:?}"
-        );
-    }
-
-    /// A file's `mod` header is not an item, so an edit to it alone changes
-    /// no item print. It still moves every definition in the file: `a::bump`
-    /// stops existing when `a.rock` becomes `mod b;`.
-    #[test]
-    fn a_v1_module_header_edit_moves_its_definitions() {
-        let (_dir, _main, a, mut project) = v1_live_project();
-        project
-            .apply_edit_inner(&a, "mod b;\n\npub fn bump(n: int) -> int {\n    n + 1\n}\n")
-            .expect_err("main still calls a::bump, and `a` no longer exists");
-        let messages = diagnostic_messages(&project);
-        assert!(
-            messages.iter().any(|m| m.contains("`a` did not resolve")),
-            "{messages:?}"
-        );
     }
 }

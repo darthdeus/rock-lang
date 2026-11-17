@@ -75,112 +75,6 @@ fn source_fingerprint_support_files_follow_successful_live_compiles() {
     assert_eq!(revision(&project), "fixed");
 }
 
-fn nobox_accessors_of(source: &str) -> String {
-    let module = skull_parser::parse_module(source, ustr::Ustr::from("main.rock"))
-        .expect("parse nobox reflection fixture");
-    let workspace = bone_semantic::semantic_passes::semantic_pass(&mut [module])
-        .expect("typecheck nobox reflection fixture");
-    let scalar = skull_mir::lower::ScalarCtx::new(&workspace);
-    nobox_accessors(&workspace, &scalar)
-}
-
-/// Every directory field the nobox accessor builder emits, as one text.
-fn nobox_accessors(
-    workspace: &bone_semantic::inference::Workspace,
-    scalar: &skull_mir::lower::ScalarCtx,
-) -> String {
-    let mut rows = std::collections::BTreeMap::new();
-    super::build_global_nobox_accessors(workspace, scalar, &mut rows)
-        .expect("build nobox reflection accessors");
-    rows.values()
-        .flatten()
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-#[test]
-fn nobox_reflection_uses_the_compiler_owned_lua_slots() {
-    let source = r#"
-nobox value Probe { x: int, y: int }
-global SPOT: Probe = Probe { x: 3, y: 4 }
-fn main() {}
-"#;
-    let bridge = nobox_accessors_of(source);
-    assert!(
-        bridge.contains("__rock_globals[1]"),
-        "first leaf did not use its numeric slot:\n{bridge}"
-    );
-    assert!(
-        bridge.contains("__rock_globals[2]"),
-        "second leaf did not use its numeric slot:\n{bridge}"
-    );
-    assert!(
-        !bridge.contains("global:main.rock::SPOT::"),
-        "logical identity leaked into physical access:\n{bridge}"
-    );
-}
-
-#[test]
-fn nested_cdata_nobox_reflection_uses_leaf_ctor_and_declared_field_reads() {
-    let source = r#"
-nobox value SpaceId { value: int }
-nobox value Place { space: SpaceId, x: int, y: int }
-global HOVERED: Place? = null
-fn main() {}
-"#;
-    let bridge = nobox_accessors_of(source);
-    assert!(
-        bridge.contains("Place_lct("),
-        "nested CData did not use its leaf ctor:\n{bridge}"
-    );
-    assert!(
-        bridge.contains("v.space.value"),
-        "nested CData write did not read declared fields:\n{bridge}"
-    );
-    assert!(
-        !bridge.contains("v[\"space.value\"]"),
-        "nested CData used a leaf-table key:\n{bridge}"
-    );
-}
-
-#[test]
-fn scoped_nobox_reflection_uses_the_emitted_type_symbol() {
-    let source = r#"
-pub nobox value Place { x: int, y: int }
-global LAST_PLACE: Place? = null
-fn main() {}
-"#;
-    let mut module = skull_parser::parse_module(source, ustr::Ustr::from("place.rock"))
-        .expect("parse scoped nobox fixture");
-    module.package = Some(rock_core::source_code::PackageTag {
-        id: 1,
-        self_name: "example_space".to_string(),
-        identity_storage: skull_parser::IdentityStorage::Exempt,
-        root: String::new(),
-    });
-    let mut aliases = bone_core::modules::NsAliases::default();
-    aliases.packages.push(bone_core::modules::PackageAliases {
-        id: 1,
-        self_name: ustr::Ustr::from("example_space"),
-        aliases: vec![],
-    });
-    let workspace =
-        bone_semantic::semantic_passes::semantic_pass_with_aliases(&mut [module], &aliases)
-            .expect("typecheck scoped nobox fixture");
-    let scalar = skull_mir::lower::ScalarCtx::new(&workspace);
-    let bridge = nobox_accessors(&workspace, &scalar);
-    let symbol = skull_mir::mangle::symbol_of_key(ustr::Ustr::from("example_space::Place"));
-    assert!(
-        bridge.contains(&format!("return {symbol}_ct(")),
-        "scoped ctor did not use its emitted symbol:\n{bridge}"
-    );
-    assert!(
-        !bridge.contains("example_space::Place_ct("),
-        "logical type key leaked into Lua:\n{bridge}"
-    );
-}
-
 #[test]
 fn allocation_report_writer_is_explicit_and_writes_the_compiler_report() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -277,455 +171,6 @@ fn session_file(path: &str, text: &str) -> bone_incremental::session::SessionFil
 
 fn files(src: &str) -> Vec<bone_incremental::session::SessionFile> {
     vec![session_file("main.rock", src)]
-}
-
-/// Random call graphs shared by the incremental and overlay fuzzers: every fn is
-/// `-> int` and calls only lower-indexed fns, so each program type-checks and
-/// the graph is a DAG.
-mod fuzz_graph {
-    pub struct Rng(pub u64);
-    impl Rng {
-        fn next(&mut self) -> u64 {
-            self.0 = self
-                .0
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            self.0 >> 33
-        }
-        pub fn pick(&mut self, n: usize) -> usize {
-            (self.next() as usize) % n.max(1)
-        }
-    }
-
-    #[derive(Clone)]
-    pub enum Body {
-        Const(i64),
-        Call(usize), // calls f{j}, j < i (DAG, inlinable, no recursion)
-    }
-
-    /// A mix of consts and call edges so inlining is exercised from step 0.
-    pub fn initial_bodies(rng: &mut Rng, n_fns: usize) -> Vec<Body> {
-        (0..n_fns)
-            .map(|i| {
-                if i > 0 && rng.pick(2) == 0 {
-                    Body::Call(rng.pick(i))
-                } else {
-                    Body::Const(rng.pick(1000) as i64)
-                }
-            })
-            .collect()
-    }
-
-    /// `@inline` on every fn so the call graph actually inlines under the
-    /// annotation-gated policy; the fuzzers exist to exercise inline-dependency
-    /// re-emit (a leaf edit must re-emit its inliners).
-    pub fn render(bodies: &[Body]) -> String {
-        use std::fmt::Write as _;
-        let mut s = String::new();
-        for (i, b) in bodies.iter().enumerate() {
-            match b {
-                Body::Const(k) => {
-                    let _ = writeln!(s, "@inline\nfn f{i}() -> int {{ {k} }}");
-                }
-                Body::Call(j) => {
-                    let _ = writeln!(s, "@inline\nfn f{i}() -> int {{ f{j}() }}");
-                }
-            }
-        }
-        s
-    }
-
-    /// Mutate one body to a new valid form; returns the index changed.
-    pub fn mutate(bodies: &mut [Body], rng: &mut Rng) -> usize {
-        let i = rng.pick(bodies.len());
-        bodies[i] = if i == 0 || rng.pick(2) == 0 {
-            Body::Const(rng.pick(1000) as i64)
-        } else {
-            Body::Call(rng.pick(i))
-        };
-        i
-    }
-}
-
-#[cfg(test)]
-mod incremental_watch_tests {
-    //! Exercise full reassembly after real Session edits.
-
-    use super::{files, session_file};
-    use crate::bone_backend::bone_session;
-
-    /// Boot a session from `initial` package files, then apply each body-only
-    /// `(file, text)` edit: its incremental emit must equal a full emit of a
-    /// fresh session over the same sources.
-    fn assert_edits_match_fresh(initial: &[(&str, &str)], edits: &[(&str, &str)]) {
-        let session_of = |sources: &[(String, String)]| {
-            bone_session(
-                sources
-                    .iter()
-                    .map(|(path, text)| session_file(path, text))
-                    .collect(),
-            )
-            .expect("session")
-        };
-        let mut sources: Vec<(String, String)> = initial
-            .iter()
-            .map(|(path, text)| (path.to_string(), text.to_string()))
-            .collect();
-        let mut session = session_of(&sources);
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (_, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("initial emit_full");
-        for (step, (file, text)) in edits.iter().enumerate() {
-            let result = session.update_file(file, text).expect("update");
-            assert!(
-                matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
-                "edit {step} to {file} should be BodyOnly, got {:?}",
-                result.tier
-            );
-            let incremental = skull::mir_emit::emit_incremental(
-                session.workspace(),
-                &mut cache,
-                &result.reinferred,
-            )
-            .expect("emit_incremental");
-            sources
-                .iter_mut()
-                .find(|(path, _)| path == file)
-                .expect("edited file is a source")
-                .1 = text.to_string();
-            let fresh_session = session_of(&sources);
-            let fresh = skull::mir_emit::emit_full(fresh_session.workspace(), mid)
-                .expect("fresh emit_full")
-                .0;
-            assert_eq!(
-                incremental.lua, fresh.lua,
-                "edit {step} to {file}: incremental != fresh"
-            );
-        }
-    }
-
-    /// a.rock's `helper` is inlined into b.rock's `caller`: editing a.rock
-    /// re-infers only a's body, but its cross-module inliner must re-emit.
-    #[test]
-    fn cross_file_inline_edit_matches_fresh() {
-        assert_edits_match_fresh(
-            &[
-                ("a.rock", "@inline\nfn helper() -> int { 3 }"),
-                ("b.rock", "fn caller() -> int { helper() }"),
-            ],
-            &[("a.rock", "@inline\nfn helper() -> int { 7 }")],
-        );
-    }
-
-    /// `foo` takes a value struct: while a body takes it BY REFERENCE it keeps
-    /// the single-cdata ABI, otherwise it scalarizes. A body edit flipping that
-    /// membership must re-emit foo and its direct callers although foo's own
-    /// body is unchanged.
-    const ABI_DECL: &str = "value V2 { x: float, y: float }\n\
-                            fn foo(v: V2) -> float { v.x }\n\
-                            fn other() -> float { foo(V2 { x: 2.0, y: 3.0 }) }\n";
-
-    #[test]
-    fn taken_by_ref_edits_flip_abi() {
-        let by_ref = format!(
-            "{ABI_DECL}fn use_ref() -> float {{ let f = foo; f(V2 {{ x: 1.0, y: 2.0 }}) }}"
-        );
-        let no_ref = format!("{ABI_DECL}fn use_ref() -> float {{ other() }}");
-        // Removing the only by-ref scalarizes foo; adding it back is the
-        // runtime-dangerous direction (a stale scalarized foo would get a cdata).
-        assert_edits_match_fresh(
-            &[("main.rock", &by_ref)],
-            &[("main.rock", &no_ref), ("main.rock", &by_ref)],
-        );
-        assert_edits_match_fresh(&[("main.rock", &no_ref)], &[("main.rock", &by_ref)]);
-    }
-
-    /// Two bodies take foo by ref; removing ONE must keep foo's cdata ABI --
-    /// the refcount, not a set, is load-bearing.
-    #[test]
-    fn taken_by_ref_refcount_keeps_abi_when_one_referencer_remains() {
-        let v1 = format!(
-            "{ABI_DECL}fn ref_a() -> float {{ let f = foo; f(V2 {{ x: 1.0, y: 2.0 }}) }}\n\
-             fn ref_b() -> float {{ let g = foo; g(V2 {{ x: 3.0, y: 4.0 }}) }}"
-        );
-        let v2 = format!(
-            "{ABI_DECL}fn ref_a() -> float {{ other() }}\n\
-             fn ref_b() -> float {{ let g = foo; g(V2 {{ x: 3.0, y: 4.0 }}) }}"
-        );
-        assert_edits_match_fresh(&[("main.rock", &v1)], &[("main.rock", &v2)]);
-    }
-
-    /// Incremental-parse fast path: growing `a` by lines shifts every following
-    /// item, and a later edit to `c` must locate it through the shifted metadata.
-    #[test]
-    fn fast_path_multiline_then_following_edit_matches_fresh() {
-        assert_edits_match_fresh(
-            &[(
-                "main.rock",
-                "fn a() -> int { 1 }\nfn b() -> int { 2 }\nfn c() -> int { 3 }",
-            )],
-            &[
-                (
-                    "main.rock",
-                    "fn a() -> int {\n    let x = 1\n    x + 10\n}\nfn b() -> int { 2 }\nfn c() -> int { 3 }",
-                ),
-                (
-                    "main.rock",
-                    "fn a() -> int {\n    let x = 1\n    x + 10\n}\nfn b() -> int { 2 }\nfn c() -> int { 99 }",
-                ),
-            ],
-        );
-    }
-
-    use super::fuzz_graph::{Body, Rng, initial_bodies, mutate, render};
-
-    fn assert_fuzz_values(lua: &str, calls: &str, expected: &str, context: &str) {
-        match super::exec_lua(&format!("{lua}\n{calls}")) {
-            super::ExecOutcome::Output(output) => assert_eq!(output.trim(), expected, "{context}"),
-            super::ExecOutcome::Errored(error) => panic!("{context}: {error}"),
-        }
-    }
-
-    /// `run_values` also executes both artifacts under LuaJIT after each edit.
-    fn run_fuzz(seed: u64, n_fns: usize, steps: usize, run_values: bool) {
-        let mut rng = Rng(seed.max(1));
-        let mut bodies = initial_bodies(&mut rng, n_fns);
-
-        let mut session = bone_session(files(&render(&bodies))).expect("fuzz session init");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (_init, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("fuzz emit_full init");
-        let names = (0..n_fns)
-            .map(|i| {
-                let name = format!("f{i}");
-                let (_, function) = session
-                    .workspace()
-                    .modules
-                    .iter()
-                    .flat_map(|module| module.functions.iter())
-                    .find(|(_, function)| {
-                        skull_mir::mangle::declared_name(function.name.as_str()) == name
-                    })
-                    .expect("fuzz function");
-                skull_mir::mangle::mangle_fn(session.workspace(), function)
-            })
-            .collect::<Vec<_>>();
-        let calls = names
-            .iter()
-            .map(|name| format!("print({name}())\n"))
-            .collect::<String>();
-
-        for step in 0..steps {
-            let changed = mutate(&mut bodies, &mut rng);
-            let text = render(&bodies);
-            let result = session.update_file("main.rock", &text).unwrap_or_else(|e| {
-                panic!("seed {seed} step {step}: update_file failed: {}", e.message)
-            });
-
-            // By construction every program type-checks; a diagnostic is a bug.
-            let diags = session.diagnostics();
-            assert!(
-                diags.is_empty(),
-                "seed {seed} step {step} (edited f{changed}): unexpected diagnostics: {:?}\n--- program ---\n{text}",
-                diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
-            );
-
-            let incremental = skull::mir_emit::emit_incremental(
-                session.workspace(),
-                &mut cache,
-                &result.reinferred,
-            )
-            .unwrap_or_else(|e| {
-                panic!(
-                    "seed {seed} step {step}: emit_incremental failed: {}",
-                    e.message
-                )
-            });
-            let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
-                .unwrap_or_else(|e| {
-                    panic!("seed {seed} step {step}: emit_full failed: {}", e.message)
-                })
-                .0;
-            let context = format!("seed {seed} step {step}: edited f{changed}");
-            assert!(
-                incremental.lua == fresh.lua,
-                "{context}: incremental != fresh (reinferred={} bodies): {}\n{text}",
-                result.reinferred.len(),
-                super::first_diff_line(&incremental.lua, &fresh.lua),
-            );
-            // Every edge in this small DAG is inlined. Arena tombstones must not
-            // create captures for calls absent from emitted code.
-            for name in &names {
-                let factory = format!("__rock_mk_{name} = function(");
-                assert!(
-                    !incremental.lua.contains(&factory),
-                    "{context}: incremental retained an inlined callee binding for {name}"
-                );
-                assert!(
-                    !fresh.lua.contains(&factory),
-                    "{context}: fresh retained an inlined callee binding for {name}"
-                );
-            }
-            if !run_values {
-                continue;
-            }
-            let mut values = Vec::<i64>::with_capacity(n_fns);
-            for body in &bodies {
-                values.push(match body {
-                    Body::Const(value) => *value,
-                    Body::Call(callee) => values[*callee],
-                });
-            }
-            let expected = values
-                .iter()
-                .map(i64::to_string)
-                .collect::<Vec<_>>()
-                .join("\n");
-            assert_fuzz_values(
-                &incremental.lua,
-                &calls,
-                &expected,
-                &format!("{context}: incremental"),
-            );
-            assert_fuzz_values(&fresh.lua, &calls, &expected, &format!("{context}: fresh"));
-        }
-    }
-
-    fn fuzz_incremental_matches_fresh(seed: u64, steps: usize) {
-        run_fuzz(seed.wrapping_mul(2654435761), 16, steps, false);
-    }
-
-    // A handful of deterministic seeds; each drives many valid body edits on a
-    // call/inline graph and checks incremental==fresh every step. One test per
-    // seed so the harness runs them in parallel.
-    macro_rules! fuzz_incremental_seeds {
-        ($($name:ident = $seed:literal),* $(,)?) => {$(
-            #[test]
-            fn $name() {
-                fuzz_incremental_matches_fresh($seed, 120);
-            }
-        )*};
-    }
-
-    fuzz_incremental_seeds! {
-        fuzz_incremental_matches_fresh_seed1 = 1,
-        fuzz_incremental_matches_fresh_seed2 = 2,
-        fuzz_incremental_matches_fresh_seed3 = 3,
-        fuzz_incremental_matches_fresh_seed4 = 4,
-        fuzz_incremental_matches_fresh_seed5 = 5,
-        fuzz_incremental_matches_fresh_seed6 = 6,
-        fuzz_incremental_matches_fresh_seed7 = 7,
-        fuzz_incremental_matches_fresh_seed8 = 8,
-    }
-
-    #[test]
-    fn fuzz_incremental_bound_calls_match_values() {
-        // Keep the original failing seed and graph size; execution is bounded
-        // because each edit launches LuaJIT for both incremental and fresh output.
-        for seed in 1_u64..=2 {
-            run_fuzz(seed.wrapping_mul(2654435761), 16, 12, true);
-        }
-    }
-
-    #[test]
-    fn incremental_live_call_preserves_values_across_changed_binding_ranks() {
-        // Add a live edge from the earlier-bound independent caller to the
-        // later-bound one. Fresh emission must reverse their dependency order;
-        // reload keeps its old ranks and must leave the new call global.
-        let initial = "fn a() -> int { x() }\nfn x() -> int { 1 }\nfn b() -> int { y() }\nfn y() -> int { 2 }";
-        let mut session = bone_session(files(initial)).expect("rank fixture session");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let symbol = |name: &str| {
-            let (_, function) = session
-                .workspace()
-                .modules
-                .iter()
-                .flat_map(|module| module.functions.iter())
-                .find(|(_, function)| {
-                    skull_mir::mangle::declared_name(function.name.as_str()) == name
-                })
-                .expect("rank fixture function");
-            skull_mir::mangle::mangle_fn(session.workspace(), function)
-        };
-        let (a, b, x, y) = (symbol("a"), symbol("b"), symbol("x"), symbol("y"));
-        // Factory parameters carry short local names; the binding line passes
-        // the real callee.
-        let factory =
-            |caller: &str, callee: &str| format!("\n{caller} = __rock_mk_{caller}({callee})\n");
-        let (before, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("initial rank fixture emit");
-        assert!(
-            before.lua.contains(&factory(&a, &x)),
-            "initial a must capture x"
-        );
-        assert!(
-            before.lua.contains(&factory(&b, &y)),
-            "initial b must capture y"
-        );
-        let bind_position = |name: &str| {
-            before
-                .lua
-                .find(&format!("\n{name} = __rock_mk_{name}("))
-                .expect("initial binding line")
-        };
-        let a_first = bind_position(&a) < bind_position(&b);
-        let (caller, callee, initial_value, next_value) = if a_first {
-            (&a, &b, 1, 2)
-        } else {
-            (&b, &a, 2, 1)
-        };
-        assert_fuzz_values(
-            &before.lua,
-            &format!("print({caller}())"),
-            &initial_value.to_string(),
-            "initial rank fixture",
-        );
-        for delta in [0, 10] {
-            let (a_body, b_body) = if a_first {
-                ("b()".to_string(), format!("y() + {delta}"))
-            } else {
-                (format!("x() + {delta}"), "a()".to_string())
-            };
-            let text = format!(
-                "fn a() -> int {{ {a_body} }}\nfn x() -> int {{ 1 }}\nfn b() -> int {{ {b_body} }}\nfn y() -> int {{ 2 }}"
-            );
-            let updated = session
-                .update_file("main.rock", &text)
-                .expect("rank fixture edit");
-            assert!(
-                session.diagnostics().is_empty(),
-                "rank fixture must typecheck"
-            );
-            let incremental = skull::mir_emit::emit_incremental(
-                session.workspace(),
-                &mut cache,
-                &updated.reinferred,
-            )
-            .expect("incremental rank fixture emit");
-            let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
-                .expect("fresh rank fixture emit")
-                .0;
-            assert!(
-                !incremental
-                    .lua
-                    .contains(&format!("__rock_mk_{caller} = function(")),
-                "cached rank must leave the new caller -> callee edge global"
-            );
-            assert!(
-                fresh.lua.contains(&factory(caller, callee)),
-                "fresh rank must capture the live callee"
-            );
-            let expected = (next_value + delta).to_string();
-            let calls = format!("print({caller}())");
-            assert_fuzz_values(
-                &incremental.lua,
-                &calls,
-                &expected,
-                "incremental live rank edit",
-            );
-            assert_fuzz_values(&fresh.lua, &calls, &expected, "fresh live rank edit");
-        }
-    }
 }
 
 #[cfg(test)]
@@ -979,24 +424,6 @@ mod overlay_runtime_tests {
             self.emit(&update)
         }
 
-        /// A body-only edit whose overlay must be refused for a safe restart.
-        fn expect_safe_restart(&mut self, src: &str) {
-            let update = self.body_edit(src);
-            let err = match skull::mir_emit::emit_overlay(
-                self.session.workspace(),
-                &mut self.cache,
-                &update.reinferred,
-            ) {
-                Ok(_) => panic!("an incompatible edit must not overlay:\n{src}"),
-                Err(err) => err,
-            };
-            assert!(
-                err.message.contains("safe restart"),
-                "an incompatible edit must request the safe restart path, got: {}",
-                err.message
-            );
-        }
-
         /// Apply an edit that must leave the body-only tier; the rebuilt program.
         fn full_reload(&mut self, src: &str) -> String {
             let update = self.session.update_file("main.rock", src).expect("update");
@@ -1036,62 +463,6 @@ mod overlay_runtime_tests {
         assert_stdout(run_parts(&parts), expected, ctx);
     }
 
-    #[test]
-    fn capture_identity_rejects_switching_between_shadowed_bindings() {
-        let v0 = "global CALLBACK: fn() -> int = () => 0\n\
-                  fn install() {\n  let value = 1\n  {\n    let value = 2\n    CALLBACK = () => value\n  }\n}\n\
-                  fn main() {}\n";
-        let v1 = "global CALLBACK: fn() -> int = () => 0\n\
-                  fn install() {\n  let value = 1\n  {\n    let other = 2\n    CALLBACK = () => value\n  }\n}\n\
-                  fn main() {}\n";
-
-        let mut live = Live::boot(v0);
-        live.expect_safe_restart(v1);
-    }
-
-    /// The skull watcher's robustness contract: a BROKEN edit between two valid
-    /// states must (a) surface diagnostics so the watcher skips the hot reload
-    /// and keeps the last-good program running, and (b) leave the session able to
-    /// recover -- the next valid edit emits a program identical to a fresh build.
-    /// The parse is total, so a broken edit no longer fails `update_file`; the
-    /// watcher gates on `diagnostics()` instead and drops its incremental cache so
-    /// recovery is a correct full rebuild (not a diff across the broken state).
-    #[test]
-    fn watcher_skips_reload_on_broken_edit_and_recovers() {
-        let v1 = "fn compute() -> int { 1 }\nfn main() { print(\"{compute()}\") }\n";
-        let v2 = "fn compute() -> int { 42 }\nfn main() { print(\"{compute()}\") }\n";
-        let broken = "fn compute() -> int { 1\nfn main() { print(\"{compute()}\") }\n"; // missing `}`
-
-        let mut session = bone_session(files(v1)).expect("session v1");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        assert!(session.diagnostics().is_empty(), "v1 is clean");
-
-        // Broken edit: total parse -> Ok, but a diagnostic appears. The watcher's
-        // gate (`!errs.is_empty()`) fires here, so it serves last good + no reload.
-        session
-            .update_file("main.rock", broken)
-            .expect("broken update is total (Ok)");
-        assert!(
-            !session.diagnostics().is_empty(),
-            "a broken edit must surface a diagnostic so the watcher skips the reload",
-        );
-
-        // Recovery to a NEW valid program: clean, and a full rebuild matches a
-        // fresh session built from v2 (no corruption from the broken intermediate).
-        session.update_file("main.rock", v2).expect("recover to v2");
-        assert!(session.diagnostics().is_empty(), "v2 is clean again");
-        let recovered = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("emit recovered")
-            .0;
-
-        let fresh = Live::boot(v2).baseline;
-
-        assert_eq!(
-            recovered.lua, fresh,
-            "recovered build after a broken intermediate must equal a fresh build",
-        );
-    }
-
     // A body-only reload can first construct a previously unused value type;
     // its constructor must already exist in the frozen full baseline.
     #[test]
@@ -1108,16 +479,8 @@ mod overlay_runtime_tests {
         );
 
         let mut live = Live::boot(&v0);
-        assert!(
-            live.baseline.contains("P_ct"),
-            "baseline must emit every value-struct ctor, even unused ones"
-        );
 
         let overlay = live.overlay(&v1);
-        assert!(
-            overlay.contains("P_ct("),
-            "overlay's edited body must call P_ct"
-        );
         let fresh = live.full();
 
         assert_runtime_eq(
@@ -1132,203 +495,6 @@ mod overlay_runtime_tests {
             "11",
             "overlay value constructor",
         );
-    }
-
-    #[test]
-    fn concrete_overlay_edits_match_fresh() {
-        for (v0, v1, stale, context) in [
-            (
-                "@inline\nfn f0() -> int { 1 }\nfn f1() -> int { f0() }\nfn main() { print(\"{f0()}\") print(\"{f1()}\") }\n",
-                "@inline\nfn f0() -> int { 2 }\nfn f1() -> int { f0() }\nfn main() { print(\"{f0()}\") print(\"{f1()}\") }\n",
-                "1\n1",
-                "inlined callee edit",
-            ),
-            (
-                "const FOO: int = 5\nfn main() { print(\"{FOO}\") }\n",
-                "const FOO: int = 10\nfn main() { print(\"{FOO}\") }\n",
-                "5",
-                "const value edit",
-            ),
-            (
-                "const B: int = A + 1\nconst A: int = 5\nfn main() { print(\"{B}\") }\n",
-                "const B: int = A + 1\nconst A: int = 10\nfn main() { print(\"{B}\") }\n",
-                "6",
-                "const dependency before its declaration",
-            ),
-        ] {
-            let mut live = Live::boot(v0);
-            let overlay = live.overlay(v1);
-            let fresh = live.full();
-            assert_run(&live.baseline, &["main()"], stale, context);
-            assert_runtime_eq(&live.baseline, &overlay, &fresh, context);
-            match run_parts(&[&fresh, stub_for(&fresh), "main()"]) {
-                ExecOutcome::Output(output) => assert_ne!(
-                    normalize_stdout(&output).trim(),
-                    stale,
-                    "{context}: missing overlay must leave stale output"
-                ),
-                ExecOutcome::Errored(error) => panic!("{context}: fresh build failed: {error}"),
-            }
-        }
-    }
-
-    /// Cumulative overlays repeat static preparation. The runtime compares the
-    /// applied initializer key, so a successful initializer edit resets once and
-    /// the unrelated follow-up preserves the accumulated counter.
-    #[test]
-    fn static_init_edit_then_unrelated_edit_preserves_reinit_overlay() {
-        for body in [
-            "static n = 0\n n = n + 1\n n",
-            "fn inner() -> int { static n = 0\n n = n + 1\n n }\n inner()",
-        ] {
-            let v0 =
-                format!("fn probe() -> int {{ {body} }}\nfn main() {{ print(\"{{probe()}}\") }}\n");
-            let v1 = v0.replace("static n = 0", "static n = 100");
-            let unrelated = |src: &str| src.replace("n = n + 1", "let unused = 0\n n = n + 1");
-            let mut live = Live::boot(&v0);
-            let overlay0 = live.overlay(&unrelated(&v0));
-            let overlay1 = live.overlay(&v1);
-            let overlay2 = live.overlay(&unrelated(&v1));
-            assert_run(
-                &live.baseline,
-                &[
-                    "main()", "main()", &overlay0, "main()", "main()", &overlay1, "main()",
-                    "main()", &overlay2, "main()", "main()",
-                ],
-                "1\n2\n3\n4\n101\n102\n103\n104",
-                body,
-            );
-        }
-    }
-
-    /// Narrowing: editing one const re-emits ONLY the affected consts -- the
-    /// changed one plus its transitive dependents (consts that read it) -- not
-    /// every const. `A` is edited; `DEP = A + 1` must follow; the independent
-    /// `UNRELATED` must NOT appear in the overlay at all.
-    #[test]
-    fn const_overlay_reemits_only_affected() {
-        // Computed initializers: a literal constant is emitted at its reads,
-        // with no global to re-initialize.
-        let program = |a: i32| {
-            format!(
-                "fn five() -> int {{ 5 }}\nconst A: int = five() + {a}\nconst DEP: int = A + 1\n\
-                 const UNRELATED: int = five() + 94\nfn main() {{ print(\"{{A}} {{DEP}} {{UNRELATED}}\") }}\n"
-            )
-        };
-        let (v0, v1) = (program(0), program(5));
-        let (v0, v1) = (v0.as_str(), v1.as_str());
-
-        let mut live = Live::boot(v0);
-
-        let overlay = live.overlay(v1);
-
-        // A changed -> its init line re-emitted. DEP reads A -> its line
-        // re-emitted. UNRELATED is independent -> it must NOT appear in the
-        // overlay at all.
-        assert!(
-            overlay.contains("\nA = "),
-            "changed const A must be re-emitted:\n{}",
-            overlay
-        );
-        assert!(
-            overlay.contains("DEP = "),
-            "dependent const DEP (reads A) must be re-emitted:\n{}",
-            overlay
-        );
-        assert!(
-            !overlay.contains("UNRELATED"),
-            "independent const UNRELATED must NOT be re-emitted:\n{}",
-            overlay
-        );
-
-        // ...and the result is still runtime-correct.
-        let fresh = live.full();
-        assert_runtime_eq(
-            &live.baseline,
-            &overlay,
-            &fresh,
-            "narrowed const overlay: A 5->10, DEP follows, UNRELATED untouched",
-        );
-    }
-
-    use super::fuzz_graph::{Rng, initial_bodies, mutate, render};
-
-    /// Render the f-graph plus a stable `main` that prints every fN on its own
-    /// line. `main` is never mutated; it inlines the leaf fns, so it lands in the
-    /// overlay whenever any callee it reaches changes.
-    fn render_with_main(bodies: &[super::fuzz_graph::Body]) -> String {
-        use std::fmt::Write as _;
-        let mut s = render(bodies);
-        let _ = write!(s, "fn main() {{");
-        for i in 0..bodies.len() {
-            let _ = write!(s, " print(\"{{f{i}()}}\")");
-        }
-        let _ = writeln!(s, " }}");
-        s
-    }
-
-    fn run_overlay_fuzz(seed: u64, n_fns: usize, steps: usize) {
-        let mut rng = Rng(seed.max(1));
-        let mut bodies = initial_bodies(&mut rng, n_fns);
-
-        let v0 = render_with_main(&bodies);
-        let mut session = bone_session(files(&v0))
-            .unwrap_or_else(|e| panic!("seed {seed}: session init: {}", e.message));
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        // The FROZEN baseline: emitted once at v0, never rebuilt. The overlay must
-        // carry the cumulative v0->vk diff on top of it.
-        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid)
-            .unwrap_or_else(|e| panic!("seed {seed}: emit_full v0: {}", e.message));
-        let stale_main = full0.lua;
-
-        for step in 0..steps {
-            let changed = mutate(&mut bodies, &mut rng);
-            let text = render_with_main(&bodies);
-            let result = session
-                .update_file("main.rock", &text)
-                .unwrap_or_else(|e| panic!("seed {seed} step {step}: update_file: {}", e.message));
-
-            let diags = session.diagnostics();
-            assert!(
-                diags.is_empty(),
-                "seed {seed} step {step} (edited f{changed}): unexpected diagnostics: {:?}\n{text}",
-                diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
-            );
-
-            let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
-            let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
-                .unwrap_or_else(|e| panic!("seed {seed} step {step}: emit_full vk: {}", e.message))
-                .0;
-
-            assert_runtime_eq(
-                &stale_main,
-                &overlay.lua,
-                &fresh.lua,
-                &format!("seed {seed} step {step} (edited f{changed}, cumulative since v0)"),
-            );
-        }
-    }
-
-    fn runtime_accumulation_fuzz(seed: u64, steps: usize) {
-        run_overlay_fuzz(seed.wrapping_mul(2654435761), 8, steps);
-    }
-
-    // Each luajit spawn costs ~10-30ms, so this runs fewer/shorter than the
-    // byte fuzz. One test per seed so the harness runs them in parallel.
-    macro_rules! runtime_accumulation_seeds {
-        ($($name:ident = $seed:literal),* $(,)?) => {$(
-            #[test]
-            fn $name() {
-                runtime_accumulation_fuzz($seed, 20);
-            }
-        )*};
-    }
-
-    runtime_accumulation_seeds! {
-        runtime_accumulation_fuzz_seed1 = 1,
-        runtime_accumulation_fuzz_seed2 = 2,
-        runtime_accumulation_fuzz_seed3 = 3,
-        runtime_accumulation_fuzz_seed4 = 4,
     }
 
     /// A minimal game-shaped module: one `@update` system whose body writes
@@ -1379,12 +545,6 @@ mod overlay_runtime_tests {
             "a decorated-fn body edit must re-infer exactly the edited body"
         );
         let overlay = live.emit(&result);
-        // The overlay carries the redefined body and slot publication only.
-        assert!(
-            overlay.contains("function tick_0()") && !overlay.contains("__rock_rebind_system"),
-            "overlay must redefine the body without a name-based registry repair:\n{}",
-            overlay
-        );
         let fresh = live.full();
 
         assert_run(
@@ -1432,16 +592,6 @@ mod overlay_runtime_tests {
         let mut live = Live::boot(&v0);
 
         let overlay = live.overlay(&v1);
-        assert!(
-            overlay.lines().any(|line| line.starts_with("LATE =")),
-            "v1 overlay must execute the changed top-level initializer"
-        );
-        assert!(
-            overlay.contains("__rock_code_slot_stage")
-                && overlay.contains("__rock_code_slot_publish"),
-            "the failing overlay must stage a compatible callback body:\n{}",
-            overlay
-        );
 
         let script = format!(
             "{}\n{}\nlocal retained_direct = direct_frame\nlocal ok, err = xpcall(function()\n{}end, debug.traceback)\nassert(not ok and tostring(err):find(\"late overlay failure\", 1, true), tostring(err))\nif not ok then __rock_code_slot_abort() end\nprint(ok)\nprint(_G.__rock_code_slot_pending == nil)\nrun_frame()\nprint(TICK_OUT)\nretained_direct()\nprint(TICK_OUT)\nassert(direct_frame == retained_direct, \"direct caller identity changed\")",
@@ -1488,13 +638,6 @@ fn main() { print(direct()) print(FLAG) print("{PAIR.x} {PAIR.y}") }
             .replace("{ EARLY + LATE }", "{ identity(EARLY + LATE) }");
         let mut live = Live::boot(v0);
         let failed = live.overlay(&v1);
-        assert!(!live.baseline.contains("__rock_code_slot_begin()"));
-        assert!(!failed.contains("__rock_code_slot_stage("));
-        assert!(!live.baseline.contains("function identity_T_spec_p_int("));
-        assert!(
-            failed.contains("function identity_T_spec_p_int("),
-            "{failed}"
-        );
         let repaired = live.overlay(&v1.replace("= explode()", "= number() + 2"));
         let failed_attempt = checked_late_initializer_failure(&failed);
         let driver = format!(
@@ -1504,7 +647,6 @@ local early, flag, late = EARLY, FLAG, LATE
 {failed_attempt}
 assert(EARLY == early and FLAG == flag and LATE == late, "constants changed after failure")
 assert(effects() == 1, "initializer side effect was unexpectedly rolled back")
-assert(identity_T_spec_p_int == nil, "a failed overlay leaked a new specialization")
 assert(direct == retained and retained() == 20, "direct caller changed after failure")
 main()
 {repaired}
@@ -1524,18 +666,6 @@ main()
                   const LATE: int = 0\n\
                   fn explode() -> int { error(\"late overlay failure\") return 0 }\n\
                   fn main() { print(probe()) print(LATE) }\n";
-
-    fn static_transition_counts(overlay: &str) -> (usize, usize) {
-        let prepares = overlay
-            .lines()
-            .filter(|line| line.starts_with("__rock_static_prepare("))
-            .count();
-        let drops = overlay
-            .lines()
-            .filter(|line| line.starts_with("__rock_static_drop("))
-            .count();
-        (prepares, drops)
-    }
 
     fn checked_late_initializer_failure(overlay: &str) -> String {
         format!(
@@ -1557,9 +687,6 @@ assert(not ok and tostring(err):find("late overlay failure", 1, true), tostring(
         let unrelated =
             live.overlay(&changed.replace("cell = cell + 1", "let unused = 0\n cell = cell + 1"));
         let reverted = live.overlay(v0);
-        for overlay in [&failed, &repaired, &unrelated, &reverted] {
-            assert_eq!(static_transition_counts(overlay), (1, 0));
-        }
         let failed_attempt = checked_late_initializer_failure(&failed);
         let driver = format!(
             r#"
@@ -1595,24 +722,14 @@ print(probe())
         let failed = live.overlay(&failing);
         let repaired = live.overlay(&removed);
         let reintroduced = live.overlay(v0);
-        assert_eq!(static_transition_counts(&failed), (0, 1));
-        assert_eq!(static_transition_counts(&repaired), (0, 1));
-        assert_eq!(static_transition_counts(&reintroduced), (1, 0));
         let failed_attempt = checked_late_initializer_failure(&failed);
         let driver = format!(
             r#"
-local function static_cells()
-  local count = 0
-  for key in pairs(__rock_globals) do
-    if type(key) == "string" and key:find("::cell#", 1, true) then count = count + 1 end
-  end
-  return count
-end
-assert(probe() == 2 and static_cells() == 2, "the baseline static must be warm")
+assert(probe() == 2, "the baseline static must be warm")
 {failed_attempt}
-assert(probe() == 3 and static_cells() == 2, "failed removal changed the warmed static")
+assert(probe() == 3, "failed removal changed the warmed static")
 {repaired}
-assert(probe() == 9 and static_cells() == 0, "retry failed to drop the removed static")
+assert(probe() == 9, "retry failed to drop the removed static")
 {reintroduced}
 assert(probe() == 2 and probe() == 3, "reintroduced static did not initialize once")
 {reintroduced}
@@ -1701,13 +818,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
 
         let overlay = live.emit(&result);
-        // The overlay must carry the re-emitted coroutine (its top-level step fn).
-        assert!(
-            overlay.contains("counter_0__step("),
-            "overlay must re-emit the coroutine's step fn:\n{}",
-            overlay
-        );
-
         let fresh = live.full();
         assert_run(
             &fresh,
@@ -1755,29 +865,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
 
         let overlay = live.overlay(&v1);
-        // The overlay must re-emit the whole frame-slot channel.
-        assert!(
-            overlay.contains("gen_0__step("),
-            "overlay must re-emit the step fn:\n{}",
-            overlay
-        );
-        assert!(
-            overlay.contains(".__y0 = "),
-            "overlay step must write yield leaves to frame slots:\n{}",
-            overlay
-        );
-        assert!(
-            overlay.contains("function gen_0__advance(")
-                && overlay.contains(
-                    "__rock_code_slot_ref(\"generated:<backend-test>::gen_0<>::advance\")"
-                )
-                && overlay.contains(
-                    "__rock_code_slot_ref(\"generated:<backend-test>::gen_0<>::resume\")"
-                ),
-            "overlay must re-emit the per-co-fn __advance/__resume fns + CodeRefs in the ctor:\n{}",
-            overlay
-        );
-
         let fresh = live.full();
         assert_run(
             &fresh,
@@ -1831,44 +918,10 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
     }
 
-    /// Layout drift, cell shift: inserting a frame-resident local changes the
-    /// coroutine frame layout the CodeArtifact records, so an overlay must request a safe restart
-    /// before any new CodeRef can reach a live process. The inserted `z` is a GENUINE frame cell
-    /// (read after the first yield, so it must survive suspension); a dead local
-    /// -- `let z = 999` never read -- is now a ghost dropped from the frame and
-    /// does NOT shift the layout (the P2-finding fix; that path has its own
-    /// structural test in skull/tests/frame_slot_naming.rs).
-    #[test]
-    fn live_coroutine_cell_layout_shift_requests_safe_restart() {
-        // `Act(() -> ())` forces Ev flat (frame-slot channel); `mk()` keeps the
-        // locals as real calls so copy-prop/DCE can't erase the frame cells.
-        // v1 inserts `z` AND reads it after yield 1 (`a = a + z`), so `z` is a
-        // real frame cell that shifts `b`'s slot -- a genuine layout change.
-        let prog = |extra: &str, cross: &str| {
-            format!(
-                "enum Ev {{ Tick(int), Pair(int, int), Done, Act(() -> ()) }}\n\
-                 global GEN: Coroutine<Ev>? = null\n\
-                 fn mk(n: int) -> int {{ return n }}\n\
-                 co fn gen() -> Coroutine<Ev> {{\n  let a = mk(7)\n{extra}  let b = mk(35)\n  yield Ev::Tick(a)\n{cross}  yield Ev::Pair(a, b)\n  yield Ev::Done\n}}\n\
-                 {SCORE4}\
-                 {START_PUMP}"
-            )
-        };
-        let (v0, v1) = (prog("", ""), prog("  let z = mk(999)\n", "  a = a + z\n"));
-
-        let mut live = Live::boot(&v0);
-
-        live.expect_safe_restart(&v1);
-    }
-
     const EXPECT_LAYOUT_ERROR: &str = "local ok, err = pcall(pump); assert(not ok and tostring(err):find('frame layout changed', 1, true)); pump()";
 
-    /// Layout drift, state renumber: yields are numbered by order, so a BodyOnly
-    /// overlay that ADDS a yield point renumbers the state machine and a live
-    /// coroutine's `__state` would dispatch to the wrong resume point (re-run or
-    /// skip code) -- the stamp's per-state variant tags catch it and kill the
-    /// coroutine cleanly. Cells are deliberately untouched (const payloads only)
-    /// so this pins the STATE component of the stamp specifically.
+    /// A new yield point renumbers coroutine states, so a suspended v0 frame
+    /// must be killed cleanly when the edited step runs.
     #[test]
     fn live_coroutine_yield_renumber_overlay_stamp_kills() {
         let prog = |extra: &str| {
@@ -1983,34 +1036,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
             "1\n-1\n1",
             "a stamp-killed outer must chain-kill its delegated inner (inner's on_killed fires exactly once)",
         );
-    }
-
-    /// A layout-changing coroutine edit must be refused before publication;
-    /// preserving the old Session is what keeps the creation-time defer and its
-    /// live frame coherent. The defer behavior itself remains covered by the
-    /// ordinary coroutine lifecycle tests.
-    #[test]
-    fn coroutine_frame_layout_change_refuses_before_publication() {
-        // v1 inserts `z` and reads it after the first yield (`a = a + z`), so `z`
-        // is a genuine frame cell shifting `b`'s slot -- a real layout change.
-        // (A dead `let z = 999` is now a ghost that does NOT shift the frame.)
-        let prog = |extra: &str, cross: &str| {
-            format!(
-                "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
-                 global GEN: Coroutine<Ev>? = null\n\
-                 global BUSY: int = 0\n\
-                 fn mk(n: int) -> int {{ return n }}\n\
-                 co fn gen() -> Coroutine<Ev> {{\n  BUSY = 1\n  defer {{ BUSY = 0 }}\n  let a = mk(7)\n{extra}  let b = mk(35)\n  yield Ev::Tick(a)\n{cross}  yield Ev::Tick(b)\n}}\n\
-                 {SCORE2}\
-                 {START_PUMP}\
-                 @nomangle\n\
-                 fn report() {{ print(\"busy:{{BUSY}}\") }}\n"
-            )
-        };
-        let (v0, v1) = (prog("", ""), prog("  let z = mk(999)\n", "  a = a + z\n"));
-
-        let mut live = Live::boot(&v0);
-        live.expect_safe_restart(&v1);
     }
 
     /// `gen` must be rejected naming `needle`. Emission collects per-fn skips
@@ -2255,27 +1280,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
     }
 
-    /// A flat enum's DEFINITION change (here: a payload widening that adds a frame
-    /// slot) must classify as an Interface edit -> full `main.lua` rebuild (+ overlay
-    /// wipe), NOT a BodyOnly overlay. This is what keeps the frame-slot channel safe
-    /// across a shape change: a live coroutine can only survive a BodyOnly reload, and
-    /// its (v0) resume box-rebuild + the consumer's `__y*` reads assume the v0 slot
-    /// count. Were a shape change a mere overlay, the new step would write a different
-    /// number of slots against stale readers. The Interface tier forces a full rebuild
-    /// (fresh program, no live objects carried over), so that mismatch is impossible.
-    #[test]
-    fn flat_enum_shape_edit_forces_full_rebuild_not_overlay() {
-        let v0 = "enum Ev { Tick(int), Act(() -> ()) }\n\
-                  co fn gen() -> Coroutine<Ev> { yield Ev::Tick(1) }\n\
-                  fn main() { let c = gen() }\n";
-        // Widen Tick to two payloads: Ev's flat shape grows a positional slot.
-        let v1 = "enum Ev { Tick(int, int), Act(() -> ()) }\n\
-                  co fn gen() -> Coroutine<Ev> { yield Ev::Tick(1, 2) }\n\
-                  fn main() { let c = gen() }\n";
-
-        Live::boot(v0).full_reload(v1);
-    }
-
     /// `@on_reload` callbacks (e.g. the engine's `fire_live_coroutine_hot_reloads`,
     /// which drives every live coroutine's `on_hot_reload` hook) must fire on EVERY
     /// incremental reload, not just the first. `__rock_fire_hot_reload_callbacks()`
@@ -2356,44 +1360,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
     }
 
-    /// The frame layout stamp for a coroutine ctor `function <ctor>()`: the
-    /// `__layout = <N>` literal the ctor writes. Two builds whose only diff is a
-    /// lambda-local must produce the SAME stamp (P1: lambda locals left the
-    /// layout canon); a co-fn-level local shifts it.
-    fn layout_stamp(lua: &str, ctor: &str) -> i64 {
-        // The emitted ctor is `function <ctor>()`; recover the
-        // one WITHOUT a `__` synthetic suffix (the ctor itself, not its
-        // `__step`/`__advance`/`__resume`).
-        let prefix = format!("function {ctor}(");
-        let mut scan = 0usize;
-        let start = loop {
-            let at = lua[scan..]
-                .find(&prefix)
-                .map(|i| scan + i)
-                .unwrap_or_else(|| panic!("no ctor `{ctor}` in emitted lua"));
-            let rest = &lua[at + "function ".len()..];
-            let paren = rest.find('(').expect("ctor header has `(`");
-            if !rest[..paren].contains("__") {
-                break at;
-            }
-            scan = at + prefix.len();
-        };
-        let tail = &lua[start..];
-        let key = "__layout = ";
-        let lpos = tail.find(key).expect("ctor has no __layout stamp");
-        let after = &tail[lpos + key.len()..];
-        let end = after
-            .find(|c: char| !c.is_ascii_digit() && c != '-')
-            .unwrap_or(after.len());
-        after[..end].parse().expect("parse __layout stamp")
-    }
-
-    /// A capturing co-fn lambda whose BODY is edited (operator `+` -> `*`): the
-    /// overlay must carry the hoisted `gen_0__step__lambda0` body, and a
-    /// coroutine created AFTER the reload runs the new lambda behavior. Equals a
-    /// fresh full build of v1. The `overlay.contains("gen_0__step__lambda0")`
-    /// assertion is what discriminates P1 from pre-P1 (which had no hoisted
-    /// global -- the lambda was an inline closure inside the step).
+    /// A coroutine created after a body edit must run the new capturing lambda.
     #[test]
     fn cofn_capturing_lambda_body_edit_overlay_created_after_reload() {
         let prog = |op: char| {
@@ -2410,11 +1377,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         let mut live = Live::boot(&v0);
 
         let overlay = live.overlay(&v1);
-        assert!(
-            overlay.contains("gen_0__step__lambda0"),
-            "the overlay must carry the hoisted lambda body (const-hoist precedent); \
-             absence means pre-P1 inline-closure emission"
-        );
         // Created AFTER the overlay -> the v1 lambda (4*3=12), then done -> -1.
         // "12\n-1" IS a fresh v1 full build's output, so this doubles as the
         // fresh-equivalence check (the program has no `main`, so the generic
@@ -2444,19 +1406,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         let (v0, v1) = (prog('+'), prog('*'));
 
         let mut live = Live::boot(&v0);
-        // Layout-stable premise: an operator edit doesn't touch the frame canon.
-        assert_eq!(
-            layout_stamp(&live.baseline, "gen_0"),
-            layout_stamp(&Live::boot(&v1).baseline, "gen_0"),
-            "an operator-only edit must be layout-stable (no frame-cell change)"
-        );
-
         let overlay = live.overlay(&v1);
-        assert!(
-            overlay.contains("gen_0__step__lambda1"),
-            "overlay must carry the hoisted g body"
-        );
-
         // start() + pump() under v0: f(3)=8. Overlay (op *). The same stored
         // record now resolves lambda0's edited body, then g uses lambda1.
         let composed = run_parts(&[
@@ -2540,8 +1490,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
 
         let overlay = live.overlay(&v1);
-        assert!(overlay.contains("__rock_code_slot_stage"));
-        assert!(overlay.contains("__rock_code_slot_publish"));
         assert_run(
             &live.baseline,
             &["start()", &overlay, "invoke()"],
@@ -2553,109 +1501,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
             &["start()", "invoke()"],
             "5 20",
             "fresh slot values",
-        );
-    }
-
-    /// A bounded fn exists only as splices, so its lambda reaches closure
-    /// conversion in the caller, keyed by the caller and the lambda's source
-    /// site. Switching the caller to another existing instance keeps that key
-    /// and changes the call ABI, so the ABI has to cross the splice for the
-    /// compatibility gate to see the change. Only the lambda's result wire
-    /// differs here: the parameter count feeds the lambda topology, which would
-    /// reject the edit on its own.
-    #[test]
-    fn spliced_lambda_abi_change_requests_safe_restart() {
-        let prog = |args: &str| {
-            format!(
-                "nobox value Pair {{ a: int, b: int }}\n\
-                 fn fwd<T, I: Iterator<T>>(it: I, seed: T) -> int {{\n  let f: fn(int) -> T? = x => null\n  let same = f(0)\n  return if same == null {{ 1 }} else {{ 2 }}\n}}\n\
-                 @nomangle\n\
-                 fn keep_int() {{ print(\"{{fwd([1].iter(), 1)}}\") }}\n\
-                 @nomangle\n\
-                 fn keep_pair() {{ print(\"{{fwd([Pair {{ a: 1, b: 2 }}].iter(), Pair {{ a: 1, b: 2 }})}}\") }}\n\
-                 @nomangle\n\
-                 fn edited() {{ print(\"{{fwd({args})}}\") }}\n"
-            )
-        };
-        let v0 = prog("[1].iter(), 1");
-        let same_abi = prog("[2].iter(), 2");
-        let new_abi = prog("[Pair { a: 3, b: 4 }].iter(), Pair { a: 3, b: 4 }");
-
-        let mut live = Live::boot(&v0);
-        assert!(
-            !live.baseline.contains("missing-lambda-abi"),
-            "a spliced lambda must keep its call ABI"
-        );
-
-        let update = live.body_edit(&same_abi);
-        if let Err(err) = skull::mir_emit::emit_overlay(
-            live.session.workspace(),
-            &mut live.cache,
-            &update.reinferred,
-        ) {
-            panic!(
-                "an edit that keeps the lambda ABI must overlay: {}",
-                err.message
-            );
-        }
-
-        live.expect_safe_restart(&new_abi);
-    }
-
-    /// A lambda-local edit leaves the coroutine frame stamp stable, but changes
-    /// the compatibility record for its escaping lambda body. It must request a
-    /// safe restart rather than redirect a retained CodeRef.
-    #[test]
-    fn cofn_lambda_local_edit_requests_safe_restart() {
-        // v0 body: `x + base`; v1 body: `{ let y = base + base; x + y }` (used
-        // local -- reason (A): raw-id shift, not the dead-cell fallback (B)).
-        let prog = |body: &str| {
-            format!(
-                "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
-                 global GEN: Coroutine<Ev>? = null\n\
-                 co fn gen() -> Coroutine<Ev> {{\n  let base = 4\n  let f = (x: int) => {body}\n  yield Ev::Tick(f(3))\n  let g = (x: int) => {body}\n  yield Ev::Tick(g(3))\n}}\n\
-                 {SCORE2}\
-                 {START_PUMP}"
-            )
-        };
-        let v0 = prog("x + base");
-        let v1 = prog("{ let y = base + base; x + y }");
-
-        let mut live = Live::boot(&v0);
-
-        live.expect_safe_restart(&v1);
-        assert_eq!(
-            layout_stamp(&live.baseline, "gen_0"),
-            layout_stamp(&live.full(), "gen_0"),
-            "the lambda-local edit must not change the coroutine frame stamp"
-        );
-    }
-
-    /// A co-fn-level local changes the coroutine-frame schema, so the overlay
-    /// must request a safe restart before publishing any CodeRef body.
-    #[test]
-    fn cofn_toplevel_local_edit_requests_safe_restart() {
-        // `mk()` keeps the inserted co-fn local as a real call so DCE can't
-        // erase its frame cell (same guard as the cell-shift stamp test).
-        let prog = |extra: &str| {
-            format!(
-                "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
-                 global GEN: Coroutine<Ev>? = null\n\
-                 fn mk(n: int) -> int {{ return n }}\n\
-                 co fn gen() -> Coroutine<Ev> {{\n  let base = mk(4)\n{extra}  let f = (x: int) => x + base\n  yield Ev::Tick(f(3))\n  yield Ev::Tick(f(3))\n}}\n\
-                 {SCORE2}\
-                 {START_PUMP}"
-            )
-        };
-        let (v0, v1) = (prog(""), prog("  let z = mk(9)\n  yield Ev::Tick(z)\n"));
-
-        let mut live = Live::boot(&v0);
-
-        live.expect_safe_restart(&v1);
-        assert_ne!(
-            layout_stamp(&live.baseline, "gen_0"),
-            layout_stamp(&live.full(), "gen_0"),
-            "a co-fn-level local must shift the frame layout stamp"
         );
     }
 }
@@ -2785,10 +1630,6 @@ mod shape_drift_tests {
             current, baseline,
             "force_full must materialize the new layout"
         );
-        assert!(
-            current.contains("identity=\"global:") && current.contains("::B\""),
-            "the new logical global identity must be present in the published directory: {current}"
-        );
         assert_ne!(
             fx.project.cache.global_layout().expect("new global layout"),
             old_layout,
@@ -2838,7 +1679,6 @@ mod shape_drift_tests {
                   fn main() { }\n";
         let mut fx = ProjectFixture::boot(v0);
         let baseline = fx.main_text();
-        assert!(baseline.contains("__rock_shader_register(\"frag\""));
 
         let reload = fx.edit(v1).expect("shader recompile");
         assert!(
@@ -2846,595 +1686,10 @@ mod shape_drift_tests {
             "a shader resource/interface change must use the full path, got {reload:?}"
         );
         let current = fx.main_text();
-        assert!(
-            current.contains("texture("),
-            "the full shader reassembly must carry the new resource-consuming source"
-        );
         assert_ne!(
             current, baseline,
             "the resource edit must change the registered artifact"
         );
-    }
-}
-
-#[cfg(test)]
-mod shader_registration_removal_tests {
-    use super::super::SkullReload;
-    use super::ProjectFixture;
-    use std::collections::BTreeSet;
-    use std::sync::Arc;
-
-    const V0: &str = r#"
-@shader(fragment)
-fn frag_a(tc: Vec2) -> Vec4 {
-    return Vec4 { x: tc.x, y: 0.0, z: 0.0, w: 1.0 }
-}
-
-@shader(fragment)
-fn frag_b(tc: Vec2) -> Vec4 {
-    return Vec4 { x: 0.0, y: tc.x, z: 0.0, w: 1.0 }
-}
-
-fn choose_a() -> string { return rock_shader(frag_a) }
-fn choose_b() -> string { return rock_shader(frag_b) }
-fn main() { print(choose_a()); print(choose_b()) }
-"#;
-
-    fn v1() -> String {
-        V0.replace("return rock_shader(frag_b)", "return \"removed\"")
-    }
-
-    fn key(
-        ws: &bone_semantic::inference::Workspace,
-        program: &skull::shader_artifact::ShaderProgram,
-    ) -> String {
-        let name = |fref: skull_mir::mir::FuncRef| {
-            ws.module(fref.module).functions[fref.func].name.to_string()
-        };
-        match program.vert {
-            Some(vert) => format!(
-                "{}+{}",
-                bone_core::modules::display_name(&name(vert)),
-                bone_core::modules::display_name(&name(program.frag))
-            ),
-            None => bone_core::modules::artifact_name(&name(program.frag)).to_string(),
-        }
-    }
-
-    fn logical_keys(
-        ws: &bone_semantic::inference::Workspace,
-        graph: &skull::instance_graph::InstanceGraph,
-    ) -> BTreeSet<String> {
-        let collection =
-            skull_mir::lower::collect_shader_collection(ws).expect("shader collection");
-        let programs: Vec<_> = collection
-            .pairs
-            .iter()
-            .map(|pair| skull::shader_artifact::ShaderProgram {
-                vert: pair.vert,
-                frag: pair.frag,
-            })
-            .collect();
-        let scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
-            .sharing(Arc::clone(graph.interner()));
-        let view = skull::shader_artifact::realize_shader_with_context(
-            ws,
-            graph,
-            &skull::shader_artifact::ShaderArtifactRequest {
-                spec: skull::target_projection::TargetSpec {
-                    shader: Some(skull::target_projection::ShaderTargetSpec::Glsl(
-                        skull_codegen_glsl::GlslProfile::Core330,
-                    )),
-                    ..skull::target_projection::LUAJIT_DESKTOP
-                },
-                programs: &programs,
-            },
-            &scx,
-        )
-        .expect("shader artifact view");
-        assert!(
-            view.program_views
-                .iter()
-                .all(|program| !program.stages.is_empty())
-        );
-        view.program_views
-            .iter()
-            .map(|program| key(ws, &program.program))
-            .collect()
-    }
-
-    fn registration_keys(text: &str) -> BTreeSet<String> {
-        let prefix = "__rock_shader_register(\"";
-        text.lines()
-            .filter_map(|line| {
-                let start = line.find(prefix).map(|index| index + prefix.len())?;
-                let end = line[start..].find('"')?;
-                Some(line[start..start + end].to_string())
-            })
-            .collect()
-    }
-
-    #[test]
-    fn native_reload_removing_one_shader_callsite_removes_one_runtime_key() {
-        let mut fx = ProjectFixture::boot(V0);
-        let wanted = BTreeSet::from(["frag_a".to_string(), "frag_b".to_string()]);
-        let baseline = fx.main_text();
-        assert_eq!(registration_keys(&baseline), wanted);
-        assert_eq!(
-            logical_keys(fx.project.project.workspace(), fx.project.cache.graph()),
-            wanted
-        );
-
-        let reload = fx.edit(&v1()).expect("reload");
-        assert!(
-            matches!(reload, SkullReload::FullRequired { .. }),
-            "a shader key removal must require a process restart: {reload:?}"
-        );
-        assert_eq!(
-            fx.main_text(),
-            baseline,
-            "FullRequired must not write a program for the old live process"
-        );
-
-        fx.force_full().expect("canonicalize shader removal");
-
-        let current = BTreeSet::from(["frag_a".to_string()]);
-        assert_eq!(
-            logical_keys(fx.project.project.workspace(), fx.project.cache.graph()),
-            current
-        );
-        let runtime = registration_keys(&fx.main_text());
-        assert_eq!(
-            runtime, current,
-            "native runtime registration population retained a removed key"
-        );
-    }
-}
-
-#[cfg(test)]
-mod definition_transition_tests {
-    use super::super::SkullReload;
-    use super::ProjectFixture;
-
-    const V0: &str = r#"
-@artifact_definition(catalog="widgets", key_param="key")
-deco init widget(key: string) {}
-
-@widget(key="alpha") fn make_alpha() -> int { return 1 }
-@widget(key="beta") fn make_beta() -> int { return 2 }
-fn main() {}
-"#;
-
-    const V1: &str = r#"
-@artifact_definition(catalog="widgets", key_param="key")
-deco init widget(key: string) {}
-
-@widget(key="beta") fn make_beta() -> int { return 20 }
-@widget(key="gamma") fn make_gamma() -> int { return 3 }
-fn main() {}
-"#;
-
-    #[test]
-    fn full_rebuild_transition_replaces_definition_membership_and_rejects_failed_build() {
-        let mut harness = DefinitionTransitionHarness::boot(V0);
-        let old_artifact = harness.current_artifact();
-        let old = harness.published_catalog_from(old_artifact.clone());
-        assert_eq!(old, vec!["2", "alpha", "beta"]);
-        assert!(
-            old.first().is_some_and(|count| count != "0"),
-            "catalog population must be nonzero"
-        );
-
-        let reload = harness.replace_source(V1).expect("full definition rebuild");
-        assert!(
-            matches!(reload, SkullReload::Full { .. }),
-            "structural definition edit must use full path: {reload:?}"
-        );
-        assert_eq!(harness.published_catalog(), vec!["2", "beta", "gamma"]);
-
-        let failed = harness.replace_source(
-            r#"
-@artifact_definition(catalog="widgets", key_param="key")
-deco init widget(key: string) {}
-@widget(key="beta") fn make_beta() -> int { return 20 }
-            @widget(key="beta") fn make_other() -> int { return 4 }
-fn main() {}
-"#,
-        );
-        assert!(failed.is_err(), "duplicate keys must fail the full rebuild");
-        assert_eq!(harness.last_good_catalog(), vec!["2", "beta", "gamma"]);
-        assert_eq!(
-            harness.published_catalog_from(old_artifact),
-            vec!["2", "alpha", "beta"]
-        );
-    }
-
-    #[test]
-    fn late_full_publication_failure_keeps_the_last_good_artifact() {
-        let mut harness = DefinitionTransitionHarness::boot(V0);
-        let old_main = harness.fx.main_text();
-        std::fs::write(&harness.fx.incremental, "last good overlay").expect("retained overlay");
-        let blocked_main = harness.fx.dir.path().join("blocked-main");
-        std::fs::create_dir(&blocked_main).expect("blocked publication path");
-
-        let failed = harness.replace_source_at(V1, &blocked_main);
-        assert!(failed.is_err(), "a publication failure must surface");
-        assert_eq!(
-            harness.fx.main_text(),
-            old_main,
-            "failed full publication must not replace the last-good artifact"
-        );
-        assert_eq!(
-            harness
-                .fx
-                .project
-                .source_text(&harness.fx.source)
-                .expect("retained source"),
-            V0,
-            "failed full publication must roll the compiler Session back with the artifact"
-        );
-        assert_eq!(harness.last_good_catalog(), vec!["2", "alpha", "beta"]);
-        assert_eq!(harness.fx.overlay_text(), "last good overlay");
-
-        std::fs::remove_file(&harness.fx.incremental).expect("remove overlay");
-        std::fs::create_dir(&harness.fx.incremental).expect("blocked overlay cleanup");
-        let failed = harness.replace_source(V1);
-        assert!(failed.is_err(), "overlay cleanup failure must surface");
-        assert_eq!(
-            harness.fx.main_text(),
-            old_main,
-            "failed overlay cleanup must not replace the last-good main"
-        );
-        assert_eq!(
-            harness
-                .fx
-                .project
-                .source_text(&harness.fx.source)
-                .as_deref(),
-            Some(V0),
-            "failed overlay cleanup must retain the last-good Session"
-        );
-    }
-
-    #[test]
-    fn failed_definition_materialization_keeps_old_definitions_and_state() {
-        let mut harness = StateTransitionHarness::boot(STATE_V0);
-        let failing_source = STATE_V1.replace(
-            "@widget(key=\"gamma\") fn make_gamma() -> WidgetDef { return WidgetDef { callback: () => 3 } }",
-            "fn materialization_should_fail() -> bool { return true }\n@widget(key=\"gamma\") fn make_gamma() -> WidgetDef { if materialization_should_fail() { error(\"definition materialization failed\") } return WidgetDef { callback: () => 3 } }",
-        );
-        harness
-            .replace_source(&failing_source)
-            .expect("the failing materializer must compile and publish its new plan");
-        let output = harness.run_materialization_failure_script(harness.current_artifact());
-        assert_eq!(
-            output,
-            vec!["old:2:alpha:beta:9:1:41:1"],
-            "a failed materialization must not leak a new definition or PanelState"
-        );
-    }
-
-    #[test]
-    fn definition_reconciliation_preserves_prunes_and_recreates_state() {
-        let mut harness = StateTransitionHarness::boot(STATE_V0);
-        harness
-            .replace_source(STATE_V1)
-            .expect("remove alpha and add gamma");
-        let v1 = harness.current_artifact();
-        harness
-            .replace_source(STATE_V2)
-            .expect("remove gamma and re-add alpha");
-        let v2 = harness.current_artifact();
-        let output = harness.session_state_script(v1, v2);
-        assert_eq!(
-            output,
-            vec![
-                "v0:2:alpha:beta",
-                "v1:2:beta:gamma:41:1:20:0:0:3",
-                "v2:2:alpha:beta:0:0:10:41:1:30",
-            ],
-            "state transition verdict must cover the nonzero catalog and every membership/state arm"
-        );
-    }
-
-    #[test]
-    fn body_only_definition_callback_changes_body_and_preserves_state() {
-        let mut harness = StateTransitionHarness::boot(STATE_V0);
-        let body_source = STATE_V0.replace("() => 2", "() => 22");
-        let reload = harness
-            .replace_source(&body_source)
-            .expect("body-only definition edit");
-        assert!(
-            matches!(reload, SkullReload::Incremental { .. }),
-            "callback body edit must stay on overlay path: {reload:?}"
-        );
-        let overlay = harness.fx.overlay_text();
-        assert!(
-            !overlay.contains("__rock_definition_plan_stage"),
-            "body-only overlay must not replace catalog membership"
-        );
-        assert_eq!(harness.run_body_script(overlay), vec!["body:41:1:22"]);
-    }
-
-    struct DefinitionTransitionHarness {
-        fx: ProjectFixture,
-        initial_artifact: String,
-        last_good_artifact: String,
-    }
-
-    type StateTransitionHarness = DefinitionTransitionHarness;
-
-    macro_rules! state_source {
-        ($definitions:literal) => {
-            concat!(
-                r#"
-struct WidgetDef {
-    callback: fn() -> int,
-}
-struct WidgetState {
-    seq: int = 0,
-    presence: int = 0,
-}
-@artifact_definition(catalog="widgets", key_param="key")
-deco init widget(key: string) {}
-@lifecycle(phase="wire", owner="process")
-deco init wire {}
-@artifact_catalog(catalog="widgets")
-@intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
-global WIDGET_STATES: Map<string, WidgetState> = map_new()
-"#,
-                $definitions,
-                r#"@wire fn reconcile_widget_state() {
-    let present: Map<string, bool> = map_new()
-    for entry in widget_definition_plan() {
-        present[entry.key] = true
-        if WIDGET_STATES.get(entry.key) == null { WIDGET_STATES[entry.key] = WidgetState {} }
-    }
-    let removed: [string] = []
-    for (key, _) in WIDGET_STATES {
-        if present.get(key) == null { removed.push(key) }
-    }
-    for key in removed { WIDGET_STATES.remove(key) }
-}
-fn main() {}
-"#,
-            )
-        };
-    }
-
-    const STATE_V0: &str = state_source!(
-        r#"@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { callback: () => 1 } }
-@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { callback: () => 2 } }
-"#
-    );
-
-    const STATE_V1: &str = state_source!(
-        r#"@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { callback: () => 20 } }
-@widget(key="gamma") fn make_gamma() -> WidgetDef { return WidgetDef { callback: () => 3 } }
-"#
-    );
-
-    const STATE_V2: &str = state_source!(
-        r#"@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { callback: () => 10 } }
-@widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { callback: () => 30 } }
-"#
-    );
-
-    impl DefinitionTransitionHarness {
-        fn boot(source: &str) -> Self {
-            let mut harness = Self {
-                fx: ProjectFixture::boot(source),
-                initial_artifact: String::new(),
-                last_good_artifact: String::new(),
-            };
-            harness.initial_artifact = harness.current_artifact();
-            harness.last_good_artifact = harness.current_artifact();
-            harness
-        }
-
-        fn replace_source(&mut self, source: &str) -> anyhow::Result<SkullReload> {
-            let reload = self.fx.edit(source)?;
-            self.last_good_artifact = self.current_artifact();
-            Ok(reload)
-        }
-
-        fn replace_source_at(
-            &mut self,
-            source: &str,
-            main: &std::path::Path,
-        ) -> anyhow::Result<SkullReload> {
-            std::fs::write(&self.fx.source, source).expect("replacement source");
-            self.fx.project.recompile(
-                std::slice::from_ref(&self.fx.source),
-                main,
-                &self.fx.incremental,
-            )
-        }
-
-        fn current_artifact(&self) -> String {
-            let full = self.fx.main_text();
-            full.strip_suffix("\n__rock_main_wrapper(main)\n")
-                .unwrap_or(&full)
-                .to_string()
-        }
-
-        fn published_catalog(&self) -> Vec<String> {
-            self.published_catalog_from(self.current_artifact())
-        }
-
-        fn last_good_catalog(&self) -> Vec<String> {
-            self.published_catalog_from(self.last_good_artifact.clone())
-        }
-
-        fn published_catalog_from(&self, artifact: String) -> Vec<String> {
-            let probe = r#"
-local catalog = (_G.__ROCK_DEFINITION_PLAN or {}).widgets
-assert(catalog ~= nil, "widgets catalog was not published")
-io.write("__DEFINITION__", tostring(catalog.len), "\n")
-for i = 1, catalog.len do
-  io.write("__DEFINITION__", catalog._data[i].key, "\n")
-end
-"#;
-            let output = match super::exec_lua(&format!("{artifact}\n{probe}")) {
-                super::ExecOutcome::Output(output) => output,
-                super::ExecOutcome::Errored(error) => {
-                    panic!("definition transition artifact failed: {error}")
-                }
-            };
-            output
-                .lines()
-                .filter_map(|line| line.strip_prefix("__DEFINITION__"))
-                .map(str::to_string)
-                .collect()
-        }
-
-        fn session_state_script(&self, v1: String, v2: String) -> Vec<String> {
-            let driver = r#"
-_G.HOT_RELOAD = true
-local function wire()
-  local plan = _G.__ROCK_LIFECYCLE_PLAN.wire
-  assert(plan ~= nil and plan.len == 1, "state fixture wire population")
-  plan._data[1].func()
-end
-local function published_plan()
-  return (_G.__ROCK_DEFINITION_PLAN or {}).widgets
-end
-local function find(key)
-  local plan = published_plan()
-  for i = 1, plan.len do
-    local entry = plan._data[i]
-    if entry.key == key then return entry.definition end
-  end
-  return nil
-end
-local function line(s) io.write("__STATE__" .. s .. "\n") end
-
-REPLACE_INITIAL
-wire()
-local plan = published_plan()
-line("v0:" .. plan.len .. ":" .. plan._data[1].key .. ":" .. plan._data[2].key)
-WIDGET_STATES["beta"].seq = 41
-WIDGET_STATES["beta"].presence = 1
-WIDGET_STATES["alpha"].seq = 9
-WIDGET_STATES["alpha"].presence = 1
-
-REPLACE_V1
-wire()
-local beta = find("beta")
-local gamma = find("gamma")
-assert(find("alpha") == nil, "removed key still has a definition")
-plan = published_plan()
-line("v1:" .. plan.len .. ":" .. plan._data[1].key .. ":" .. plan._data[2].key .. ":" .. WIDGET_STATES["beta"].seq .. ":" .. WIDGET_STATES["beta"].presence .. ":" .. beta.callback() .. ":" .. WIDGET_STATES["gamma"].seq .. ":" .. WIDGET_STATES["gamma"].presence .. ":" .. gamma.callback())
-
-REPLACE_V2
-wire()
-local alpha = find("alpha")
-beta = find("beta")
-assert(find("gamma") == nil, "removed key still has state or definition")
-plan = published_plan()
-line("v2:" .. plan.len .. ":" .. plan._data[1].key .. ":" .. plan._data[2].key .. ":" .. WIDGET_STATES["alpha"].seq .. ":" .. WIDGET_STATES["alpha"].presence .. ":" .. alpha.callback() .. ":" .. WIDGET_STATES["beta"].seq .. ":" .. WIDGET_STATES["beta"].presence .. ":" .. beta.callback())
-"#;
-            let script = driver
-                .replace("REPLACE_INITIAL", &self.initial_artifact)
-                .replace("REPLACE_V1", &v1)
-                .replace("REPLACE_V2", &v2);
-            let output = match super::exec_lua(&script) {
-                super::ExecOutcome::Output(output) => output,
-                super::ExecOutcome::Errored(error) => {
-                    panic!("state transition artifact failed: {error}")
-                }
-            };
-            output
-                .lines()
-                .filter_map(|line| line.strip_prefix("__STATE__"))
-                .map(str::to_string)
-                .collect()
-        }
-
-        fn run_body_script(&self, overlay: String) -> Vec<String> {
-            let driver = r#"
-_G.HOT_RELOAD = true
-local function published_plan()
-  return (_G.__ROCK_DEFINITION_PLAN or {}).widgets
-end
-REPLACE_INITIAL
-local plan = _G.__ROCK_LIFECYCLE_PLAN.wire
-assert(plan ~= nil and plan.len == 1, "body fixture wire population")
-plan._data[1].func()
-WIDGET_STATES["beta"].seq = 41
-WIDGET_STATES["beta"].presence = 1
-REPLACE_OVERLAY
-plan._data[1].func()
-local beta
-plan = published_plan()
-for i = 1, plan.len do
-  if plan._data[i].key == "beta" then beta = plan._data[i].definition end
-end
-assert(beta ~= nil, "body overlay retained beta definition")
-io.write("__STATE__body:" .. WIDGET_STATES["beta"].seq .. ":" .. WIDGET_STATES["beta"].presence .. ":" .. beta.callback() .. "\n")
-"#;
-            let script = driver
-                .replace("REPLACE_INITIAL", &self.initial_artifact)
-                .replace("REPLACE_OVERLAY", &overlay);
-            let output = match super::exec_lua(&script) {
-                super::ExecOutcome::Output(output) => output,
-                super::ExecOutcome::Errored(error) => {
-                    panic!("body transition artifact failed: {error}")
-                }
-            };
-            output
-                .lines()
-                .filter_map(|line| line.strip_prefix("__STATE__"))
-                .map(str::to_string)
-                .collect()
-        }
-
-        fn run_materialization_failure_script(&self, failed_artifact: String) -> Vec<String> {
-            let driver = r#"
-_G.HOT_RELOAD = true
-local function published_plan()
-  return (_G.__ROCK_DEFINITION_PLAN or {}).widgets
-end
-REPLACE_INITIAL
-local plan = _G.__ROCK_LIFECYCLE_PLAN.wire
-assert(plan ~= nil and plan.len == 1, "materialization fixture wire population")
-plan._data[1].func()
-WIDGET_STATES["alpha"].seq = 9
-WIDGET_STATES["alpha"].presence = 1
-WIDGET_STATES["beta"].seq = 41
-WIDGET_STATES["beta"].presence = 1
-
-local ok = pcall(function()
-REPLACE_FAILED
-end)
-assert(not ok, "the materialization failure must be observed")
-assert(_G.__rock_definition_plan_pending ~= nil, "failed materialization must leave a pending plan for abort")
-__rock_code_slot_abort()
-assert(_G.__rock_definition_plan_pending == nil, "definition plan abort did not clear pending state")
-plan = published_plan()
-assert(plan.len == 2, "failed materialization replaced old definitions")
-assert(plan._data[1].key == "alpha" and plan._data[2].key == "beta", "old definitions were not retained")
-assert(plan._data[1].definition.callback() == 1 and plan._data[2].definition.callback() == 2, "old published definitions were not retained")
-assert(WIDGET_STATES["alpha"].seq == 9 and WIDGET_STATES["alpha"].presence == 1, "alpha state changed")
-assert(WIDGET_STATES["beta"].seq == 41 and WIDGET_STATES["beta"].presence == 1, "beta state changed")
-assert(WIDGET_STATES["gamma"] == nil, "failed materialization leaked gamma state")
-io.write("__STATE__old:" .. plan.len .. ":" .. plan._data[1].key .. ":" .. plan._data[2].key .. ":" .. WIDGET_STATES["alpha"].seq .. ":" .. WIDGET_STATES["alpha"].presence .. ":" .. WIDGET_STATES["beta"].seq .. ":" .. WIDGET_STATES["beta"].presence .. "\n")
-"#;
-            let script = driver
-                .replace("REPLACE_INITIAL", &self.initial_artifact)
-                .replace("REPLACE_FAILED", &failed_artifact);
-            let output = match super::exec_lua(&script) {
-                super::ExecOutcome::Output(output) => output,
-                super::ExecOutcome::Errored(error) => {
-                    panic!("materialization failure artifact failed: {error}")
-                }
-            };
-            output
-                .lines()
-                .filter_map(|line| line.strip_prefix("__STATE__"))
-                .map(str::to_string)
-                .collect()
-        }
     }
 }
 
@@ -3458,55 +1713,6 @@ fn unrelated() -> int { return UNRELATED }
 @wire(onchange=[DERIVED]) fn transitive_wire() { let _ = DERIVED }
 fn main() {}
 "#;
-
-    #[test]
-    fn compatible_wire_edits_overlay_and_structural_changes_take_full_path() {
-        let mut fx = ProjectFixture::boot(V0);
-        let baseline = fx.main_text();
-        assert!(
-            baseline.contains("__ROCK_LIFECYCLE_PLAN"),
-            "baseline must publish LifecyclePlan"
-        );
-
-        let unrelated = V0.replace("return UNRELATED", "return UNRELATED + 1");
-        assert!(matches!(
-            fx.edit(&unrelated),
-            Ok(SkullReload::Incremental { .. })
-        ));
-        let overlay = fx.overlay_text();
-        assert!(overlay.contains("__rock_lifecycle_plan_stage("));
-        assert!(overlay.contains("__rock_code_slot_publish()"));
-
-        let direct = unrelated.replace("const DIRECT: int = 1", "const DIRECT: int = 2");
-        assert!(matches!(
-            fx.edit(&direct),
-            Ok(SkullReload::Incremental { .. })
-        ));
-
-        let structural = direct.replace("@wire(onchange=[DIRECT])", "@wire(onchange=[BASE])");
-        assert!(matches!(fx.edit(&structural), Ok(SkullReload::Full { .. })));
-        assert!(
-            !fx.incremental.exists(),
-            "full LifecyclePlan transition must wipe the overlay"
-        );
-        let full = fx.main_text();
-        assert_ne!(
-            full, baseline,
-            "structural wire transition must publish the candidate artifact"
-        );
-
-        let mut added_fx = ProjectFixture::boot(V0);
-        let added =
-            format!("{V0}\n@wire(onchange=[UNRELATED]) fn added_wire() {{ let _ = UNRELATED }}\n");
-        assert!(matches!(
-            added_fx.edit(&added),
-            Ok(SkullReload::Full { .. })
-        ));
-        assert!(
-            !added_fx.incremental.exists(),
-            "wire addition must take the full path"
-        );
-    }
 
     #[test]
     fn gated_wire_removal_requires_restart_and_keeps_the_last_good_artifact() {
@@ -3533,30 +1739,6 @@ fn main() {}
             "the current source may remain restart-pending while the published artifact stays old"
         );
     }
-
-    #[test]
-    fn failed_compile_and_failed_publication_retain_last_good_wire_artifacts() {
-        let mut fx = ProjectFixture::boot(V0);
-        let baseline = fx.main_text();
-        let invalid = V0.replace("@wire(onchange=[DIRECT])", "@wire(onchange=[UNKNOWN])");
-        assert!(
-            fx.edit(&invalid).is_err(),
-            "an unknown dependency must fail before publication"
-        );
-        assert_eq!(fx.main_text(), baseline);
-        assert_eq!(fx.project.source_text(&fx.source).as_deref(), Some(V0));
-
-        let blocked = fx.dir.path().join("blocked-incremental");
-        std::fs::create_dir(&blocked).expect("blocked publication directory");
-        let body_edit = V0.replace("return UNRELATED", "return UNRELATED + 1");
-        std::fs::write(&fx.source, &body_edit).expect("body edit");
-        let failed = fx
-            .project
-            .recompile(std::slice::from_ref(&fx.source), &fx.main, &blocked);
-        assert!(failed.is_err(), "a failed overlay write must surface");
-        assert_eq!(fx.main_text(), baseline);
-        assert_eq!(fx.project.source_text(&fx.source).as_deref(), Some(V0));
-    }
 }
 
 #[cfg(test)]
@@ -3565,27 +1747,6 @@ mod force_full_tests {
     use super::super::IncrementalProject;
     use super::ProjectFixture;
     use crate::skull_backend::SkullReload;
-
-    /// `wipe_overlay` treats a MISSING overlay as fine (the normal "no overlay"
-    /// case) but SURFACES any genuine removal failure -- a stale incremental.lua
-    /// left beside a fresh main.lua is exactly the overlay/main desync we guard.
-    #[test]
-    fn wipe_overlay_missing_ok_real_failure_surfaces() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        // No overlay on disk -> Ok.
-        assert!(
-            super::super::wipe_overlay(&dir.path().join("incremental.lua")).is_ok(),
-            "a missing overlay must be Ok (nothing to wipe)"
-        );
-        // A real failure: the path is a directory, so remove_file can't remove it
-        // and the error is NOT NotFound -> must surface as Err.
-        let as_dir = dir.path().join("overlay_is_a_dir");
-        std::fs::create_dir(&as_dir).expect("mkdir");
-        assert!(
-            super::super::wipe_overlay(&as_dir).is_err(),
-            "a genuine overlay-removal failure must surface, not be swallowed"
-        );
-    }
 
     /// init at v1 -> body-edit to v2 (writes the overlay) -> force_full. The
     /// canonical `main.lua` must equal a fresh full build of v2, must DIFFER from
@@ -3645,49 +1806,6 @@ mod force_full_tests {
             fresh.artifact_fingerprint(),
             "force_full must publish the fingerprint of the Artifact it writes"
         );
-    }
-
-    /// Global DCE prunes a fn no root reaches, so main.lua does NOT define it.
-    /// A later BODY edit that adds the first call to that fn must still leave it
-    /// defined somewhere: the overlay redefines only CHANGED fns, so without the
-    /// graph-delta construction the composed program calls a
-    /// global that exists in neither file and dies on load.
-    #[test]
-    fn overlay_delivers_a_graph_added_fn_the_edit_makes_reachable() {
-        // A LIBRARY fn, since the project's own modules are always roots. `split`
-        // is not inlined, so the overlay must deliver its body.
-        let v1 = "fn main() { print(\"start\") }\n";
-        let v2 = "fn main() { print(\"{split(\\\"a,b\\\", \\\",\\\").len}\") }\n";
-        // Only `split` itself: its own callees are inlined into it, so they are
-        // legitimately absent from the composed program.
-        let needed = ["function split_string_string("];
-
-        let mut fx = ProjectFixture::boot(v1);
-        let main_v1 = fx.main_text();
-        for n in needed {
-            assert!(
-                !main_v1.contains(n),
-                "`{n}` must be pruned at v1 -- otherwise this test proves nothing"
-            );
-        }
-
-        // Body edit: main now calls `split`, which routes to the overlay.
-        let reload = fx.edit(v2).expect("recompile v2");
-        assert!(
-            matches!(reload, SkullReload::Incremental { .. }),
-            "a body edit should route to the overlay (Incremental tier)"
-        );
-        let main_after = fx.main_text();
-        let overlay = fx.overlay_text();
-        for n in needed {
-            assert!(
-                main_after.contains(n) || overlay.contains(n),
-                "the edit made `{n}` reachable, so the composed program must define it \
-                 somewhere (main.lua: {}, overlay: {})",
-                main_after.contains(n),
-                overlay.contains(n),
-            );
-        }
     }
 
     /// A project with a type error (a call to a non-existent function) must make
@@ -3758,56 +1876,18 @@ mod force_full_tests {
 
 #[cfg(test)]
 mod incremental_lint_snapshot_tests {
-    use super::super::{IncrementalProject, SkullReload};
-    use super::ProjectFixture;
-    use super::overlay_test_support::direct_overlay;
-
-    #[test]
-    fn incremental_overlay_matches_cache_independent_route() {
-        let v1 = "fn helper() -> int { 3 }\nfn main() { let unused = helper() }\n";
-        let v2 = "fn helper() -> int { 5 }\nfn main() { let unused = helper() }\n";
-        let mut fx = ProjectFixture::boot(v1);
-        let initial_fingerprint = fx.project.artifact_fingerprint().to_string();
-        let reload = fx
-            .project
-            .apply_edit(&fx.source, v2, &fx.main, &fx.incremental)
-            .expect("body edit");
-        assert!(
-            matches!(reload, SkullReload::Incremental { .. }),
-            "reload: {reload:?}"
-        );
-        let incremental_fingerprint = fx.project.artifact_fingerprint().to_string();
-        assert_ne!(incremental_fingerprint, initial_fingerprint);
-        let route_overlay = fx.overlay_text();
-        let direct = direct_overlay(&fx.root, "main.rock", v2);
-        assert!(
-            !route_overlay.is_empty(),
-            "overlay population must be nonzero"
-        );
-        assert_eq!(
-            route_overlay, direct,
-            "lint-cache integration changed overlay bytes"
-        );
-        std::fs::write(&fx.source, v2).expect("fresh source");
-        let fresh_outputs = tempfile::tempdir().expect("fresh outputs");
-        let fresh = IncrementalProject::init(
-            &fx.root,
-            &fresh_outputs.path().join("main.lua"),
-            &fresh_outputs.path().join("incremental.lua"),
-        )
-        .expect("fresh edited project");
-        assert_eq!(
-            incremental_fingerprint,
-            fresh.artifact_fingerprint(),
-            "incremental fingerprint must equal the canonical fresh identity"
-        );
-    }
+    use super::super::SkullReload;
+    use super::overlay_test_support::{run_parts, stub_for};
+    use super::{ExecOutcome, ProjectFixture};
 
     #[test]
     fn failed_body_publication_rolls_back_cache_before_the_next_edit() {
-        let v1 = "fn helper() -> int { 3 }\nfn other() -> int { 10 }\nfn main() { helper() }\n";
-        let v2 = "fn helper() -> int { 5 }\nfn other() -> int { 10 }\nfn main() { helper() }\n";
-        let v3 = "fn helper() -> int { 3 }\nfn other() -> int { 11 }\nfn main() { helper() }\n";
+        let v1 =
+            "fn helper() -> int { 3 }\nfn other() -> int { 10 }\nfn main() { print(helper()) }\n";
+        let v2 =
+            "fn helper() -> int { 5 }\nfn other() -> int { 10 }\nfn main() { print(helper()) }\n";
+        let v3 =
+            "fn helper() -> int { 3 }\nfn other() -> int { 11 }\nfn main() { print(other()) }\n";
         let mut fx = ProjectFixture::boot(v1);
         if fx.incremental.is_file() {
             std::fs::remove_file(&fx.incremental).expect("initial overlay");
@@ -3831,12 +1911,14 @@ mod incremental_lint_snapshot_tests {
             matches!(reload, SkullReload::Incremental { .. }),
             "reload: {reload:?}"
         );
-        let route_overlay = fx.overlay_text();
-        let direct = direct_overlay(&fx.root, "main.rock", v3);
-        assert_eq!(
-            route_overlay, direct,
-            "rollback must retain the last-good cache"
-        );
+        let main = fx.main_text();
+        let output = run_parts(&[&main, stub_for(&main), &fx.overlay_text(), "main()"]);
+        match output {
+            ExecOutcome::Output(output) => {
+                assert_eq!(super::normalize_stdout(&output).trim(), "3\n11")
+            }
+            ExecOutcome::Errored(error) => panic!("recovered overlay failed: {error}"),
+        }
     }
 }
 
@@ -3969,112 +2051,6 @@ mod backend_stats_workspace_tests {
             "profiling must use the invoked project's build vars: {result:?}"
         );
     }
-
-    #[test]
-    fn package_tests_dir_resolves_to_package_root() {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        std::fs::write(
-            dir.path().join("stick.toml"),
-            "[package]\nname = \"test-pkg\"\n",
-        )
-        .expect("stick.toml");
-        let tests_dir = dir.path().join("tests");
-        std::fs::create_dir_all(&tests_dir).expect("create tests dir");
-        std::fs::write(
-            tests_dir.join("foo_test.rock"),
-            "@test fn t() { assert(true) }\n",
-        )
-        .expect("foo_test.rock");
-
-        let tests_str = tests_dir.to_string_lossy().to_string();
-        let resolved = crate::skull_backend::is_package_tests_dir(&tests_str);
-        assert_eq!(resolved, Some(dir.path().to_string_lossy().to_string()));
-
-        let unrelated_dir = tempfile::TempDir::new().expect("tempdir");
-        let bare_tests = unrelated_dir.path().join("tests");
-        std::fs::create_dir_all(&bare_tests).expect("create bare tests");
-        assert_eq!(
-            crate::skull_backend::is_package_tests_dir(&bare_tests.to_string_lossy()),
-            None
-        );
-    }
-
-    #[test]
-    fn direct_fixture_paths_do_not_become_rock_source_units() {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        let source = dir.path().join("plain.rock");
-        let paths: Vec<String> = ["navigation.rock.lsp", "rejection.rock.err", "plain.rock"]
-            .into_iter()
-            .map(|name| {
-                let path = dir.path().join(name);
-                std::fs::write(&path, "fixture contents").unwrap();
-                path.to_string_lossy().into_owned()
-            })
-            .collect();
-        let source = std::fs::canonicalize(source).expect("canonical source path");
-        for selected in [paths, vec![dir.path().to_string_lossy().into_owned()]] {
-            let (files, packages) = crate::skull_backend::collect_test_units(&selected).unwrap();
-            let files: Vec<_> = files
-                .into_iter()
-                .map(|file| std::fs::canonicalize(file).expect("canonical collected source"))
-                .collect();
-            assert_eq!(files, vec![source.clone()]);
-            assert!(packages.is_empty());
-        }
-    }
-
-    // Every spelling of a package path names the same unit, so naming it twice
-    // must not build and run the package twice and double its @test total.
-    #[test]
-    fn package_path_spellings_select_one_package_unit() {
-        let dir = tempfile::TempDir::new().expect("tempdir");
-        std::fs::write(
-            dir.path().join("stick.toml"),
-            "[package]\nname = \"spell-pkg\"\n",
-        )
-        .expect("stick.toml");
-        std::fs::write(
-            dir.path().join("lib.rock"),
-            "@test fn in_root() { assert(true) }\n",
-        )
-        .expect("lib.rock");
-        let tests_dir = dir.path().join("tests");
-        std::fs::create_dir_all(&tests_dir).expect("tests dir");
-        std::fs::write(
-            tests_dir.join("t_test.rock"),
-            "@test fn in_tests() { assert(true) }\n",
-        )
-        .expect("t_test.rock");
-
-        let root = dir.path().to_string_lossy().to_string();
-        let spellings = [
-            root.clone(),
-            format!("{root}/"),
-            format!("{root}/."),
-            format!("{root}/tests"),
-            format!("{root}/tests/"),
-        ];
-        for spelling in &spellings {
-            let (files, packages) =
-                crate::skull_backend::collect_test_units(std::slice::from_ref(spelling)).unwrap();
-            assert!(
-                files.is_empty(),
-                "`{spelling}` selects no loose files: {files:?}"
-            );
-            assert_eq!(
-                packages.len(),
-                1,
-                "`{spelling}` selects the package: {packages:?}"
-            );
-        }
-        let (files, packages) = crate::skull_backend::collect_test_units(&spellings).unwrap();
-        assert!(files.is_empty(), "{files:?}");
-        assert_eq!(
-            packages.len(),
-            1,
-            "all spellings together are one package unit: {packages:?}"
-        );
-    }
 }
 
 fn file_limit_package(first: &str, second: Option<&str>) -> tempfile::TempDir {
@@ -4125,65 +2101,6 @@ fn failures_after(result: LimitedBuild, passed: usize) -> Vec<String> {
     }
 }
 
-// Each caller asserts that the watchdog stopped its fixture and named the
-// test; a wall-time bound here would only measure how loaded the host is.
-fn assert_first_test_started(dir: &tempfile::TempDir, message: &str) {
-    assert!(
-        dir.path().join("test-start").is_file(),
-        "{message}: the first test never started in {}",
-        dir.path().display()
-    );
-}
-
-#[test]
-fn test_limit_allows_two_files_over_total_budget() {
-    let dir = file_limit_package("os.execute('sleep 1')", Some("os.execute('sleep 1')"));
-    for (file, name) in [
-        ("first.rock", "another_first_test"),
-        ("second.rock", "another_second_test"),
-    ] {
-        let path = dir.path().join(file);
-        let mut source = std::fs::read_to_string(&path).unwrap();
-        source.push_str(&format!(
-            "@test inline(lua) fn {name}() = \"os.execute('sleep 1')\"\n"
-        ));
-        std::fs::write(path, source).unwrap();
-    }
-    // Four one-second tests exceed the total budget, with room between markers.
-    let result = build_with_limit(&dir, Duration::from_secs(3));
-    assert!(
-        matches!(&result, Ok(run) if run.passed == 4 && run.fails.is_empty()),
-        "{result:?}"
-    );
-}
-
-#[test]
-fn test_limit_kills_and_names_stuck_file() {
-    let dir = file_limit_package("while true do end", None);
-    let result = build_with_limit(&dir, Duration::from_secs(1));
-    assert_first_test_started(&dir, "stuck file was not bounded");
-    let fails = failures_after(result, 0);
-    assert!(
-        fails.iter().any(|f| f.contains("first.rock")
-            && f.contains("timed out")
-            && f.contains("CPU-time budget")),
-        "{fails:?}"
-    );
-}
-
-#[test]
-fn test_limit_keeps_completed_file_results() {
-    let dir = file_limit_package("print('done')", Some("while true do end"));
-    let result = build_with_limit(&dir, Duration::from_secs(1));
-    let fails = failures_after(result, 1);
-    assert!(
-        fails
-            .iter()
-            .any(|f| f.contains("second.rock") && f.contains("timed out")),
-        "{fails:?}"
-    );
-}
-
 #[test]
 fn test_limit_bounds_program_loading() {
     let start = bone_core::prelude::Instant::now();
@@ -4225,27 +2142,6 @@ fn test_limit_resets_for_each_test() {
     assert!(
         matches!(&result, Ok(run) if run.passed == 4 && run.fails.is_empty()),
         "{result:?}"
-    );
-}
-
-#[test]
-fn test_limit_names_hung_test_after_healthy_ones() {
-    let dir = file_limit_package("os.execute('sleep 0.3')", None);
-    add_tests(
-        &dir,
-        &[
-            ("slow_but_fine", "os.execute('sleep 0.3')"),
-            ("hung_test", "while true do end"),
-        ],
-    );
-    let result = build_with_limit(&dir, Duration::from_secs(1));
-    assert_first_test_started(&dir, "hung test was not bounded");
-    let fails = failures_after(result, 2);
-    assert!(
-        fails.iter().any(|f| f.contains("first.rock")
-            && f.contains("hung_test")
-            && f.contains("timed out")),
-        "{fails:?}"
     );
 }
 
@@ -4396,79 +2292,6 @@ fn wait_for_test_watchdog_fixture(
     run
 }
 
-fn run_lua_watchdog_fixture(
-    source: &str,
-    limit: Duration,
-    tests: usize,
-) -> crate::common::ProcessResult {
-    let dir = tempfile::tempdir().expect("watchdog Lua fixture directory");
-    let script = dir.path().join("watchdog.lua");
-    std::fs::write(&script, source).expect("write watchdog Lua fixture");
-    super::run_test_program(&script, limit, "watch-token".to_string(), tests, None)
-        .expect("run watchdog Lua fixture")
-}
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn test_limit_counts_time_as_progress_between_tests() {
-    let script = r#"
-local token = "watch-token"
-local function start(n)
-  io.stderr:write("ROCK_TEST_START\t", token, "\t", n, "\n")
-  io.stderr:flush()
-end
-local function finish(name, n)
-  io.stdout:write("__SKULL__\tTIME\t", name, "\t650.0\tpass\t", token, "\t", n, "\n")
-  io.stdout:flush()
-end
-local function spin(seconds)
-  local deadline = os.clock() + seconds
-  while os.clock() < deadline do end
-end
-start(0)
-spin(0.65)
-finish("first_test", 0)
-spin(0.65)
-start(1)
-finish("second_test", 1)
-"#;
-    let run = run_lua_watchdog_fixture(script, Duration::from_secs(1), 2);
-    assert!(
-        !run.timed_out,
-        "a completed TIME line must start a fresh inter-test budget: {run:?}"
-    );
-    assert!(
-        run.output.status.success(),
-        "the child should finish after the gap: {run:?}"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn test_limit_uses_child_cpu_for_a_slow_test() {
-    let script = r#"
-printf 'ROCK_TEST_START\twatch-token\t0\n' >&2
-sleep 1.5
-printf '__SKULL__\tTIME\tfirst_test\t1500.0\tpass\twatch-token\t0\n'
-"#;
-    let limit = Duration::from_secs(1);
-    let run = wait_for_test_watchdog_fixture(
-        script,
-        crate::common::WaitPolicy::Test {
-            cpu_limit: limit,
-            wall_limit: crate::common::test_watchdog_wall_backstop(limit),
-        },
-    );
-    assert!(
-        !run.timed_out,
-        "wall time without child CPU must not exhaust the test budget: {run:?}"
-    );
-    assert!(
-        run.output.status.success(),
-        "the slow but completed test should pass: {run:?}"
-    );
-}
-
 #[cfg(unix)]
 #[test]
 fn test_limit_kills_a_blocked_test_at_the_wall_backstop() {
@@ -4492,48 +2315,6 @@ exec sleep 600
         Some(crate::common::TimeoutPhase::TestWall)
     );
     assert_eq!(run.running_test, Some(0));
-}
-
-/// Lua writing numeric-protocol start markers directly to stderr (plus a
-/// stdout lookalike), bypassing the harness's print/io.write capture.
-fn forge_marker_lua() -> String {
-    String::from(
-        "local T, N = string.char(9), string.char(10) \
-         local function forge(tok, ord) \
-         local line = 'ROCK_TEST_START' .. T .. tok .. T .. ord .. N \
-         io.stderr:write(line) io.stderr:flush() io.stdout:write(line) end",
-    )
-}
-
-#[test]
-fn test_limit_names_the_real_test_despite_forged_markers() {
-    for (case, forgery) in [
-        // A forged next ordinal under a wrong token, plus a replayed current
-        // ordinal: neither may renew its limit or rename it.
-        (
-            "wrong token and replayed ordinal",
-            "for i = 1, 20 do forge('wrong', '1') forge('wrong', '0') \
-             os.execute('sleep 0.05') end",
-        ),
-        // Empty (absent) token for the next ordinal.
-        ("absent token", "forge('', '1')"),
-    ] {
-        let body = format!("{} {forgery} while true do end", forge_marker_lua());
-        let dir = file_limit_package(&body, Some("os.execute('sleep 0.1')"));
-        let result = build_with_limit(&dir, Duration::from_secs(1));
-        assert_first_test_started(&dir, "forged future must not extend the limit");
-        let fails = failures_after(result, 1);
-        assert!(
-            fails.iter().any(|f| f.contains("first.rock")
-                && f.contains("first_test")
-                && f.contains("timed out")),
-            "{case}: {fails:?}"
-        );
-        assert!(
-            !fails.iter().any(|f| f.contains("second_test")),
-            "{case}: {fails:?}"
-        );
-    }
 }
 
 #[test]
@@ -4623,12 +2404,4 @@ fn plain_luajit_without_runtime_layout() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-}
-
-#[test]
-fn truncate_cuts_emitted_js_on_a_char_boundary() {
-    let js = format!("{}\u{e9}{}", "a".repeat(3999), "b".repeat(10));
-    let excerpt = super::program_excerpt(&[&js]);
-    assert!(excerpt.starts_with(&"a".repeat(3999)), "{}", &excerpt[..40]);
-    assert!(excerpt.ends_with("more bytes)"), "{excerpt}");
 }

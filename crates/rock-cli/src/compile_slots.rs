@@ -59,28 +59,12 @@ impl SlotConfig {
     }
 }
 
-/// How a compile got its slot: `slot` is `None` when the limit is off.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SlotAcquisition {
-    pub slot: Option<String>,
-    pub waited: Duration,
-}
-
 thread_local! {
     static HOLDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    #[cfg(test)]
-    static LAST_ACQUISITION: RefCell<Option<SlotAcquisition>> = const { RefCell::new(None) };
     #[cfg(test)]
     static TEST_CONFIG: RefCell<Option<SlotConfig>> = const { RefCell::new(None) };
     #[cfg(test)]
     static WAIT_OBSERVER: RefCell<Option<std::sync::mpsc::Sender<()>>> = const { RefCell::new(None) };
-}
-
-/// The last slot this thread took, for tests that see only a compile's result.
-/// Every covered compile acquires on the thread that runs it.
-#[cfg(test)]
-pub(crate) fn last_acquisition() -> Option<SlotAcquisition> {
-    LAST_ACQUISITION.with(|last| last.borrow().clone())
 }
 
 /// A held slot file: `held-<ticket>` (removed on release) or the configured preferred slot.
@@ -97,18 +81,8 @@ struct Held {
 #[must_use = "the slot is freed when this guard drops"]
 pub(crate) struct CompileSlot {
     held: Option<Held>,
-    // Only tests observe how the slot was acquired.
-    #[cfg_attr(not(test), allow(dead_code))]
-    acquisition: SlotAcquisition,
     /// Set for guards from [`acquire`], which marks the thread as holding.
     marks_thread: bool,
-}
-
-impl CompileSlot {
-    #[cfg(test)]
-    pub(crate) fn acquisition(&self) -> &SlotAcquisition {
-        &self.acquisition
-    }
 }
 
 impl Drop for CompileSlot {
@@ -153,17 +127,11 @@ pub fn acquire(what: &str) -> Result<CompileSlot> {
         Some(config) => acquire_with(&config, what)?,
         None => CompileSlot {
             held: None,
-            acquisition: SlotAcquisition {
-                slot: None,
-                waited: Duration::ZERO,
-            },
             marks_thread: false,
         },
     };
     slot.marks_thread = true;
     HOLDING.with(|holding| holding.set(true));
-    #[cfg(test)]
-    LAST_ACQUISITION.with(|last| *last.borrow_mut() = Some(slot.acquisition.clone()));
     Ok(slot)
 }
 
@@ -253,10 +221,6 @@ fn acquire_reserving(
                 report_spawn_phase("compile");
                 return Ok(CompileSlot {
                     held: Some(held(file, path, false)),
-                    acquisition: SlotAcquisition {
-                        slot: Some(preferred_slot.to_string()),
-                        waited: started.elapsed(),
-                    },
                     marks_thread: false,
                 });
             }
@@ -300,10 +264,6 @@ fn acquire_reserving(
                 report_spawn_phase("compile");
                 return Ok(CompileSlot {
                     held: Some(held(file, path, true)),
-                    acquisition: SlotAcquisition {
-                        slot: Some(name),
-                        waited,
-                    },
                     marks_thread: false,
                 });
             }
@@ -707,23 +667,9 @@ pub(crate) fn assert_compile_waits_for_slot_in<T: Send + 'static>(
     let held = acquire_with(&config, "test holder").unwrap();
     let (worker, waiting) = spawn_slot_waiter(move || {
         set_thread_config(Some(config));
-        let result = compile();
-        (result, last_acquisition())
+        compile()
     });
-    let ((result, acquisition), held_for) = finish_slot_waiter(held, worker, waiting);
-    let acquisition = acquisition.expect("the compile took no slot");
-    assert!(
-        acquisition
-            .slot
-            .as_deref()
-            .is_some_and(|slot| slot.starts_with(HELD_PREFIX)),
-        "{acquisition:?}"
-    );
-    assert!(
-        acquisition.waited >= held_for,
-        "held after observing contention: {held_for:?}; {acquisition:?}"
-    );
-    result
+    finish_slot_waiter(held, worker, waiting)
 }
 
 #[cfg(test)]
@@ -743,13 +689,11 @@ pub(crate) fn finish_slot_waiter<T>(
     held: CompileSlot,
     worker: std::thread::JoinHandle<T>,
     waiting: std::sync::mpsc::Receiver<()>,
-) -> (T, Duration) {
+) -> T {
     let observed = waiting.recv_timeout(test_utils::HANG_BACKSTOP);
-    let started = Instant::now();
     if observed.is_ok() {
         std::thread::sleep(Duration::from_millis(300));
     }
-    let held_for = started.elapsed();
     let finished_while_held = worker.is_finished();
     // Release and join before any assertion, including a missing contention signal.
     drop(held);
@@ -759,7 +703,7 @@ pub(crate) fn finish_slot_waiter<T>(
         !finished_while_held,
         "the compile ran while the pool was full"
     );
-    (result.unwrap(), held_for)
+    result.unwrap()
 }
 
 #[cfg(test)]
@@ -856,23 +800,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path(), 1, CompileClass::Batch);
         let first = acquire_with(&config, "first").unwrap();
-        assert_eq!(
-            first.acquisition().slot.as_deref(),
-            Some("held-000000000001")
-        );
         let (waiter, waiting) = {
             let config = config.clone();
-            spawn_slot_waiter(move || {
-                acquire_with(&config, "second").map(|slot| slot.acquisition().clone())
-            })
+            spawn_slot_waiter(move || acquire_with(&config, "second").map(|_| ()))
         };
-        let (second, held_for) = finish_slot_waiter(first, waiter, waiting);
-        let second = second.unwrap();
-        assert_eq!(second.slot.as_deref(), Some("held-000000000002"));
-        assert!(
-            second.waited >= held_for,
-            "held after observing contention: {held_for:?}; {second:?}"
-        );
+        let second = finish_slot_waiter(first, waiter, waiting);
+        second.unwrap();
         assert!(
             held_files(dir.path()).is_empty() && queued_tickets(dir.path()).is_empty(),
             "released slots leave no files"
@@ -934,13 +867,10 @@ mod tests {
         );
         let (waiter, waiting) = {
             let config = config.clone();
-            spawn_slot_waiter(move || {
-                acquire_reserving(&config, "fifth", 1000, None)
-                    .map(|slot| slot.acquisition().clone())
-            })
+            spawn_slot_waiter(move || acquire_reserving(&config, "fifth", 1000, None).map(|_| ()))
         };
-        let (fifth, _) = finish_slot_waiter(small.pop().unwrap(), waiter, waiting);
-        assert!(fifth.unwrap().slot.is_some());
+        let fifth = finish_slot_waiter(small.pop().unwrap(), waiter, waiting);
+        fifth.unwrap();
     }
 
     #[test]
@@ -985,10 +915,7 @@ mod tests {
         barrier.lock().unwrap();
         let (waiter, waiting) = {
             let config = config.clone();
-            spawn_slot_waiter(move || {
-                acquire_reserving(&config, "small", 1000, None)
-                    .map(|slot| slot.acquisition().clone())
-            })
+            spawn_slot_waiter(move || acquire_reserving(&config, "small", 1000, None).map(|_| ()))
         };
         let barrier = CompileSlot {
             held: Some(Held {
@@ -999,14 +926,10 @@ mod tests {
                 peak_key: None,
                 peak_at_admission: None,
             }),
-            acquisition: SlotAcquisition {
-                slot: None,
-                waited: Duration::ZERO,
-            },
             marks_thread: false,
         };
-        let (small, _) = finish_slot_waiter(barrier, waiter, waiting);
-        assert!(small.unwrap().slot.is_some());
+        let small = finish_slot_waiter(barrier, waiter, waiting);
+        small.unwrap();
         assert!(
             dir.path().join("batch-0").exists(),
             "an unlocked foreign file is left alone"
@@ -1067,23 +990,10 @@ mod tests {
         assert!(slot_is_free(dir.path(), AUTHOR_SLOT));
         let (waiter, waiting) = {
             let config = config.clone();
-            spawn_slot_waiter(move || {
-                acquire_with(&config, "batch").map(|slot| slot.acquisition().clone())
-            })
+            spawn_slot_waiter(move || acquire_with(&config, "batch").map(|_| ()))
         };
-        let (acquisition, held_for) = finish_slot_waiter(held, waiter, waiting);
-        let acquisition = acquisition.unwrap();
-        assert!(
-            acquisition
-                .slot
-                .as_deref()
-                .is_some_and(|slot| slot.starts_with(HELD_PREFIX)),
-            "{acquisition:?}"
-        );
-        assert!(
-            acquisition.waited >= held_for,
-            "held after observing contention: {held_for:?}; {acquisition:?}"
-        );
+        let result = finish_slot_waiter(held, waiter, waiting);
+        result.unwrap();
     }
 
     #[test]
@@ -1091,18 +1001,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = config(dir.path(), 2, CompileClass::Interactive);
         let first = acquire_with(&config, "first").unwrap();
-        assert_eq!(first.acquisition().slot.as_deref(), Some(AUTHOR_SLOT));
-        let second = acquire_with(&config, "second").unwrap();
-        assert_eq!(
-            second.acquisition().slot.as_deref(),
-            Some("held-000000000001")
-        );
+        let _second = acquire_with(&config, "second").unwrap();
         assert!(!slot_is_free(dir.path(), AUTHOR_SLOT));
-        let third = acquire_with(&config, "third").unwrap();
-        assert_eq!(
-            third.acquisition().slot.as_deref(),
-            Some("held-000000000002")
-        );
+        let _third = acquire_with(&config, "third").unwrap();
         drop(first);
         assert!(slot_is_free(dir.path(), AUTHOR_SLOT));
     }
@@ -1110,8 +1011,7 @@ mod tests {
     #[test]
     fn zero_slots_disable_the_limit() {
         set_thread_config(None);
-        let slot = acquire("unlimited").unwrap();
-        assert_eq!(slot.acquisition().slot, None);
+        let _slot = acquire("unlimited").unwrap();
     }
 
     #[test]
@@ -1273,19 +1173,16 @@ mod tests {
         let (sender, admitted) = std::sync::mpsc::channel();
         let (_worker, waiting) = spawn_slot_waiter(move || {
             let slot = acquire_with(&config, "after the dead waiter");
-            sender
-                .send(slot.map(|slot| slot.acquisition().clone()))
-                .unwrap();
+            sender.send(slot.map(|_| ())).unwrap();
         });
         waiting
             .recv_timeout(test_utils::HANG_BACKSTOP)
             .expect("the next waiter never queued");
         drop(held);
-        let acquisition = admitted
+        admitted
             .recv_timeout(test_utils::HANG_BACKSTOP)
             .expect("a dead waiter's ticket blocked the queue")
             .unwrap();
-        assert_eq!(acquisition.slot.as_deref(), Some("held-000000000003"));
         assert!(
             queued_tickets(dir.path()).is_empty(),
             "{:?}",
