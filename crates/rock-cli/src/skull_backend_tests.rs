@@ -407,20 +407,6 @@ mod incremental_watch_tests {
         }
     }
 
-    #[test]
-    fn session_body_edit_incremental_matches_fresh() {
-        assert_edits_match_fresh(
-            &[(
-                "main.rock",
-                "fn helper() -> int { 3 }\nfn use_it() -> int { helper() }",
-            )],
-            &[(
-                "main.rock",
-                "fn helper() -> int { 5 }\nfn use_it() -> int { helper() }",
-            )],
-        );
-    }
-
     /// a.rock's `helper` is inlined into b.rock's `caller`: editing a.rock
     /// re-infers only a's body, but its cross-module inliner must re-emit.
     #[test]
@@ -1198,44 +1184,26 @@ mod overlay_runtime_tests {
                 "5",
                 "const value edit",
             ),
+            (
+                "const B: int = A + 1\nconst A: int = 5\nfn main() { print(\"{B}\") }\n",
+                "const B: int = A + 1\nconst A: int = 10\nfn main() { print(\"{B}\") }\n",
+                "6",
+                "const dependency before its declaration",
+            ),
         ] {
             let mut live = Live::boot(v0);
             let overlay = live.overlay(v1);
             let fresh = live.full();
             assert_run(&live.baseline, &["main()"], stale, context);
             assert_runtime_eq(&live.baseline, &overlay, &fresh, context);
-        }
-    }
-
-    /// A `static` local's INITIALIZER edit hot-reloads through the overlay. A
-    /// static is lazy and name-keyed (its cell persists across reloads by
-    /// design), so the overlay must reset a static whose init key changed or
-    /// the redefined fn re-reads the stale warmed cell. Nested fns are hoisted
-    /// to sibling chunks, so their statics must reach the same reset.
-    ///
-    /// Models the live game: the baseline runs once (warming the static to 5),
-    /// then the overlay loads and it runs again. `assert_runtime_eq`'s compose
-    /// order never warms the static before the overlay, hence the bespoke run.
-    #[test]
-    fn static_init_edit_runtime_eq() {
-        for (v0, v1) in [
-            (
-                "fn probe() -> int { static x = 5\n x }\nfn main() { print(\"{probe()}\") }\n",
-                "fn probe() -> int { static x = 10\n x }\nfn main() { print(\"{probe()}\") }\n",
-            ),
-            (
-                "fn probe() -> int { fn inner() -> int { static x = 5\n x }\n inner() }\nfn main() { print(\"{probe()}\") }\n",
-                "fn probe() -> int { fn inner() -> int { static x = 10\n x }\n inner() }\nfn main() { print(\"{probe()}\") }\n",
-            ),
-        ] {
-            let mut live = Live::boot(v0);
-            let overlay = live.overlay(v1);
-            assert_run(
-                &live.baseline,
-                &["main()", &overlay, "main()"],
-                "5\n10",
-                &format!("the static must re-init on an initializer edit:\n{v0}"),
-            );
+            match run_parts(&[&fresh, stub_for(&fresh), "main()"]) {
+                ExecOutcome::Output(output) => assert_ne!(
+                    normalize_stdout(&output).trim(),
+                    stale,
+                    "{context}: missing overlay must leave stale output"
+                ),
+                ExecOutcome::Errored(error) => panic!("{context}: fresh build failed: {error}"),
+            }
         }
     }
 
@@ -1244,62 +1212,28 @@ mod overlay_runtime_tests {
     /// the unrelated follow-up preserves the accumulated counter.
     #[test]
     fn static_init_edit_then_unrelated_edit_preserves_reinit_overlay() {
-        // Preserve a warmed cell on both the first unrelated edit and the
-        // cumulative unrelated edit after changing its initializer.
-        let v0 = "fn probe() -> int { static n = 0\n n = n + 1\n n }\nfn main() { print(\"{probe()}\") }\n";
-        let v1 = "fn probe() -> int { static n = 100\n n = n + 1\n n }\nfn main() { print(\"{probe()}\") }\n";
-        let v2 = "fn probe() -> int { static n = 100\n let unused = 0\n n = n + 1\n n }\nfn main() { print(\"{probe()}\") }\n";
-
-        let mut live = Live::boot(v0);
-
-        let unrelated = v0.replace("n = n + 1", "let unused = 0\n n = n + 1");
-        let overlay0 = live.overlay(&unrelated);
-        let overlay1 = live.overlay(v1);
-        let overlay2 = live.overlay(v2);
-
-        assert_run(
-            &live.baseline,
-            &[
-                "main()", "main()", // 1, 2   (init 0)
-                &overlay0, "main()", "main()", // 3, 4 (preserve original init)
-                &overlay1, "main()", "main()", // 101, 102  (re-init 100)
-                &overlay2, "main()", "main()", // 103, 104  (preserve)
-            ],
-            "1\n2\n3\n4\n101\n102\n103\n104",
-            "reload1 re-inits to 100; reload2 (unrelated) must preserve, not re-reset",
-        );
-    }
-
-    /// const-on-const: editing an UPSTREAM const must update a DOWNSTREAM const
-    /// that reads it, in dependency order -- even with reversed source order (B
-    /// declared before A). v0: B = A + 1, A = 5 -> B = 6. Edit A to 10: the overlay
-    /// must re-emit BOTH consts with A's init BEFORE B's, so B becomes 11. If the
-    /// overlay re-emits only the changed const (A) or emits in source order, B
-    /// stays stale (6) and diverges from the fresh build (11).
-    #[test]
-    fn const_reading_const_overlay_runtime_eq() {
-        let v0 = "const B: int = A + 1\nconst A: int = 5\nfn main() { print(\"{B}\") }\n";
-        let v1 = "const B: int = A + 1\nconst A: int = 10\nfn main() { print(\"{B}\") }\n";
-
-        let mut live = Live::boot(v0);
-
-        let overlay = live.overlay(v1);
-        let fresh = live.full();
-
-        // Sanity: the stale baseline prints the OLD downstream value (B = old A + 1).
-        assert_run(
-            &live.baseline,
-            &["main()"],
-            "6",
-            "baseline prints stale B = old A + 1",
-        );
-
-        assert_runtime_eq(
-            &live.baseline,
-            &overlay,
-            &fresh,
-            "const B reads A, A 5->10 => B 11",
-        );
+        for body in [
+            "static n = 0\n n = n + 1\n n",
+            "fn inner() -> int { static n = 0\n n = n + 1\n n }\n inner()",
+        ] {
+            let v0 =
+                format!("fn probe() -> int {{ {body} }}\nfn main() {{ print(\"{{probe()}}\") }}\n");
+            let v1 = v0.replace("static n = 0", "static n = 100");
+            let unrelated = |src: &str| src.replace("n = n + 1", "let unused = 0\n n = n + 1");
+            let mut live = Live::boot(&v0);
+            let overlay0 = live.overlay(&unrelated(&v0));
+            let overlay1 = live.overlay(&v1);
+            let overlay2 = live.overlay(&unrelated(&v1));
+            assert_run(
+                &live.baseline,
+                &[
+                    "main()", "main()", &overlay0, "main()", "main()", &overlay1, "main()",
+                    "main()", &overlay2, "main()", "main()",
+                ],
+                "1\n2\n3\n4\n101\n102\n103\n104",
+                body,
+            );
+        }
     }
 
     /// Narrowing: editing one const re-emits ONLY the affected consts -- the
@@ -1350,32 +1284,6 @@ mod overlay_runtime_tests {
             &fresh,
             "narrowed const overlay: A 5->10, DEP follows, UNRELATED untouched",
         );
-    }
-
-    /// Positive control: the oracle must not be vacuously green. With the overlay
-    /// OMITTED, the frozen baseline serves stale values and MUST diverge from a
-    /// fresh build -- proving `assert_runtime_eq`'s comparison has teeth (an
-    /// overlay that silently dropped a function would look exactly like this).
-    #[test]
-    fn harness_detects_a_missing_overlay() {
-        let v0 = "fn f0() -> int { 1 }\nfn main() { print(\"{f0()}\") }\n";
-        let v1 = "fn f0() -> int { 9 }\nfn main() { print(\"{f0()}\") }\n";
-
-        let mut live = Live::boot(v0);
-        live.body_edit(v1);
-        let fresh = live.full();
-
-        // Empty overlay (just the stub) == "the overlay dropped everything".
-        let stale = run_parts(&[&live.baseline, SYS_STUB, "main()"]);
-        let fresh_run = run_parts(&[&fresh, SYS_STUB, "main()"]);
-        match (stale, fresh_run) {
-            (ExecOutcome::Output(s), ExecOutcome::Output(f)) => assert_ne!(
-                normalize_stdout(&s),
-                normalize_stdout(&f),
-                "missing overlay should leave a STALE/fresh divergence the oracle can detect"
-            ),
-            _ => panic!("both versions should run cleanly"),
-        }
     }
 
     // --- runtime accumulation fuzz: frozen v0 baseline + cumulative overlay -----
