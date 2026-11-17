@@ -1812,12 +1812,11 @@ impl BoneWorkspace {
 
     // workspace symbols
 
-    /// Match the bare name unless the query uses qualification. Put tests after other symbols.
+    /// Match the bare name unless the query uses qualification.
     pub fn workspace_symbols(&self, query: &str) -> Vec<SymbolInformation> {
         let needle = query.to_lowercase();
         let qualified = needle.contains("::");
         let mut out = Vec::new();
-        let mut tests = Vec::new();
         for proj in self.projects.values() {
             let ws = proj.session.workspace();
             for (file, src) in proj.texts.iter() {
@@ -1841,12 +1840,6 @@ impl BoneWorkspace {
                 // skips most files, so don't index a file with no hit. Without it
                 // every matched symbol re-scanned from the file start (O(offset)).
                 let mut line_index: Option<LineIndex> = None;
-                let test_spans: FxHashSet<_> = ws.modules[mid.index()]
-                    .functions
-                    .iter()
-                    .filter(|(_, f)| f.annotations.iter().any(|a| a.is_builtin("test")))
-                    .map(|(_, f)| f.span.offset_range())
-                    .collect();
                 for s in crate::query::document_symbols(ws, mid) {
                     let name = if qualified {
                         s.name.as_str()
@@ -1860,26 +1853,25 @@ impl BoneWorkspace {
                     }
                     let li = line_index.get_or_insert_with(|| LineIndex::new(src));
                     let range = li.range(src, s.span.offset_range().0, s.span.offset_range().1);
-                    let target = if matches!(s.kind, SymCat::Function)
-                        && test_spans.contains(&s.span.offset_range())
-                    {
-                        &mut tests
-                    } else {
-                        &mut out
-                    };
-                    target.push(SymbolInformation {
-                        name: s.name,
-                        kind: entry_symbol_kind(s.kind, s.is_const),
-                        location: Location {
-                            uri: uri.clone(),
-                            range,
+                    out.push((
+                        editor_path(file),
+                        s.span.offset_range(),
+                        SymbolInformation {
+                            name: s.name,
+                            kind: entry_symbol_kind(s.kind, s.is_const),
+                            location: Location {
+                                uri: uri.clone(),
+                                range,
+                            },
                         },
-                    });
+                    ));
                 }
             }
         }
-        out.extend(tests);
-        out
+        out.sort_by(|(file_a, pos_a, a), (file_b, pos_b, b)| {
+            (&a.name, file_a, pos_a).cmp(&(&b.name, file_b, pos_b))
+        });
+        out.into_iter().map(|(_, _, symbol)| symbol).collect()
     }
 
     // ctags emission (project `.rock.tags`)

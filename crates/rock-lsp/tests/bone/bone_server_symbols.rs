@@ -16,6 +16,51 @@ fn workspace_names(ws: &mut rock_lsp::LspWorkspace, query: &str) -> Vec<String> 
         .collect()
 }
 
+#[test]
+fn workspace_symbols_order_by_name_file_and_position() {
+    let files = [
+        ("z/main.rock", "fn series_same() {}\nfn series_z() {}"),
+        (
+            "a/main.rock",
+            "fn series_same() {}\nfn series_same(n: int) {}\nfn series_a() {}",
+        ),
+    ];
+    let project = Project::new(&files);
+    let mut ws = rock_lsp::LspWorkspace::new();
+    for (file, text) in files {
+        assert_no_errors(&ws.bone.update(&project.path(file), text.into()));
+    }
+    let hits = do_workspace_symbols_workspace(
+        &mut ws,
+        &WorkspaceSymbolParams {
+            query: "series_".into(),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let keys: Vec<_> = hits
+        .iter()
+        .map(|hit| {
+            let file = if hit.location.uri.as_str().ends_with("/a/main.rock") {
+                'a'
+            } else {
+                'z'
+            };
+            (hit.name.as_str(), file, hit.location.range.start.line)
+        })
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            ("series_a", 'a', 2),
+            ("series_same", 'a', 0),
+            ("series_same", 'a', 1),
+            ("series_same", 'z', 0),
+            ("series_z", 'z', 1),
+        ]
+    );
+}
+
 fn package_workspace() -> (Project, rock_lsp::LspWorkspace) {
     let app_src = "use util::heal_first;\n\nfn main() {\n    heal_first()\n}\n";
     let project = Project::new(&[
@@ -52,7 +97,7 @@ fn package_workspace() -> (Project, rock_lsp::LspWorkspace) {
 }
 
 #[test]
-fn workspace_symbols_match_qualified_names_and_rank_tests_last() {
+fn workspace_symbols_match_bare_and_qualified_names() {
     let (_dir, mut ws) = package_workspace();
     let all = workspace_names(&mut ws, "");
 
@@ -92,10 +137,10 @@ fn workspace_symbols_match_qualified_names_and_rank_tests_last() {
     assert_eq!(
         matches,
         vec![
-            "util::heal_first".to_string(),
-            "util::heal_second".to_string(),
             "util::heal_case_one".to_string(),
             "util::heal_case_two".to_string(),
+            "util::heal_first".to_string(),
+            "util::heal_second".to_string(),
         ]
     );
 
@@ -105,11 +150,4 @@ fn workspace_symbols_match_qualified_names_and_rank_tests_last() {
         .cloned()
         .collect();
     assert_eq!(matches, heal_names);
-    assert_eq!(
-        &all[all.len() - 2..],
-        &[
-            "util::heal_case_one".to_string(),
-            "util::heal_case_two".to_string(),
-        ]
-    );
 }
