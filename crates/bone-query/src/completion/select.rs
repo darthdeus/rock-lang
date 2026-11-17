@@ -62,22 +62,7 @@ pub(crate) fn reconcile_suffix(items: &mut [CompletionItem], tail: &str) {
 // the ladder itself (rank_key.rs).
 
 /// Cap general results because incomplete lists are re-requested per keystroke.
-pub(crate) const DEFAULT_MAX_COMPLETION_ITEMS: usize = 200;
-
-pub(crate) fn max_completion_items() -> usize {
-    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    // An unset or non-Unicode optional tuning override selects the documented default.
-    *N.get_or_init(|| {
-        parse_max_completions(std::env::var("ROCK_LSP_MAX_COMPLETIONS").ok().as_deref())
-    })
-}
-
-fn parse_max_completions(v: Option<&str>) -> usize {
-    // Invalid optional tuning values select the documented default cap.
-    v.and_then(|s| s.trim().parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(DEFAULT_MAX_COMPLETION_ITEMS)
-}
+pub(crate) const MAX_COMPLETION_ITEMS: usize = 200;
 
 /// Max reach paths expanded per ROOT toward the expected type -- a principled
 /// "k shortest ways" (ranked by distance), not a depth limit. Shared by the
@@ -608,35 +593,5 @@ pub(crate) fn completion_kind(k: SymCat) -> CompletionItemKind {
         SymCat::Global => CompletionItemKind::VARIABLE,
         SymCat::Local | SymCat::Param => CompletionItemKind::VARIABLE,
         SymCat::Keyword => CompletionItemKind::KEYWORD,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{DEFAULT_MAX_COMPLETION_ITEMS, parse_max_completions};
-
-    #[test]
-    fn max_completions_override_policy() {
-        // A positive integer overrides.
-        assert_eq!(parse_max_completions(Some("25")), 25);
-        assert_eq!(parse_max_completions(Some("  10 ")), 10);
-        // Everything else falls back to the default.
-        assert_eq!(parse_max_completions(None), DEFAULT_MAX_COMPLETION_ITEMS);
-        assert_eq!(
-            parse_max_completions(Some("")),
-            DEFAULT_MAX_COMPLETION_ITEMS
-        );
-        assert_eq!(
-            parse_max_completions(Some("lots")),
-            DEFAULT_MAX_COMPLETION_ITEMS
-        );
-        assert_eq!(
-            parse_max_completions(Some("0")),
-            DEFAULT_MAX_COMPLETION_ITEMS
-        );
-        assert_eq!(
-            parse_max_completions(Some("-5")),
-            DEFAULT_MAX_COMPLETION_ITEMS
-        );
     }
 }

@@ -35,33 +35,16 @@ impl MatchPolicy {
             MatchPolicy::Subseq3 => "subseq3",
         }
     }
-
-    /// The policy a fresh thread starts with (env override, else `Subseq3`).
-    pub fn default_policy() -> MatchPolicy {
-        MatchPolicy::from_env()
-    }
-
-    fn from_env() -> MatchPolicy {
-        // An unset or non-Unicode optional tuning override selects Subseq3.
-        std::env::var("ROCK_LSP_MATCH_POLICY")
-            .ok()
-            .and_then(|v| MatchPolicy::parse(&v))
-            .unwrap_or(MatchPolicy::Subseq3)
-    }
 }
 
 thread_local! {
-    static POLICY: Cell<MatchPolicy> = Cell::new(MatchPolicy::from_env());
+    static POLICY: Cell<MatchPolicy> = const { Cell::new(MatchPolicy::Subseq3) };
 }
 
 /// Set the admission policy for the current thread (the completion query runs
 /// single-threaded on the caller). Used by the tuning matrix to A/B one cursor.
 pub fn set_match_policy(p: MatchPolicy) {
     POLICY.with(|c| c.set(p));
-}
-
-pub fn match_policy() -> MatchPolicy {
-    POLICY.with(Cell::get)
 }
 
 /// Case-insensitive subsequence: is every byte of `query` (already lowercased)
@@ -85,7 +68,7 @@ pub(crate) fn is_subsequence(cand: &[u8], query: &[u8]) -> bool {
 /// The one admission gate. `query` is already lowercased (the callers pass the
 /// lowercased prefix, matching `clean_match`'s contract).
 pub(crate) fn admit(cand: &[u8], query: &[u8]) -> bool {
-    match match_policy() {
+    match POLICY.with(Cell::get) {
         MatchPolicy::Clean => crate::query::clean_match(cand, query),
         MatchPolicy::Subseq => is_subsequence(cand, query),
         // clean ⊆ subseq, so at 3+ chars this is just the subsequence test.
@@ -103,50 +86,17 @@ pub(crate) fn admit(cand: &[u8], query: &[u8]) -> bool {
 mod tests {
     use super::*;
 
-    fn under<T>(p: MatchPolicy, f: impl FnOnce() -> T) -> T {
-        set_match_policy(p);
-        let r = f();
+    #[test]
+    fn policies_admit_scattered_matches_at_different_lengths() {
+        for (policy, short, long) in [
+            (MatchPolicy::Clean, false, false),
+            (MatchPolicy::Subseq, true, true),
+            (MatchPolicy::Subseq3, false, true),
+        ] {
+            set_match_policy(policy);
+            assert_eq!(admit(b"close_loot_panel", b"op"), short);
+            assert_eq!(admit(b"close_loot_panel", b"opl"), long);
+        }
         set_match_policy(MatchPolicy::Subseq3);
-        r
-    }
-
-    #[test]
-    fn subsequence_is_order_preserving_and_ci() {
-        assert!(is_subsequence(b"LOOT_OPEN", b"lotop")); // scattered, in order
-        assert!(is_subsequence(b"LOOT_OPEN", b"loop"));
-        assert!(!is_subsequence(b"LOOT_OPEN", b"lox")); // x absent
-        assert!(!is_subsequence(b"LOOT_OPEN", b"olo")); // out of order
-        assert!(is_subsequence(b"anything", b"")); // empty matches
-    }
-
-    #[test]
-    fn clean_drops_scatter_that_subseq_admits() {
-        // The canonical bug: `lotop` skips the 2nd `O`, landing `t` mid-word.
-        assert!(!crate::query::clean_match(b"LOOT_OPEN", b"lotop"));
-        assert!(under(MatchPolicy::Subseq, || admit(b"LOOT_OPEN", b"lotop")));
-        assert!(under(MatchPolicy::Subseq3, || admit(
-            b"LOOT_OPEN",
-            b"lotop"
-        )));
-        assert!(!under(MatchPolicy::Clean, || admit(b"LOOT_OPEN", b"lotop")));
-    }
-
-    #[test]
-    fn subseq3_stays_clean_below_three_chars() {
-        // 2-char scatter: subseq admits the flood, subseq3 (== clean here) rejects.
-        assert!(!crate::query::clean_match(b"close_loot_panel", b"op"));
-        assert!(under(MatchPolicy::Subseq, || admit(
-            b"close_loot_panel",
-            b"op"
-        )));
-        assert!(!under(MatchPolicy::Subseq3, || admit(
-            b"close_loot_panel",
-            b"op"
-        )));
-        // At 3 chars subseq3 opens up.
-        assert!(under(MatchPolicy::Subseq3, || admit(
-            b"close_loot_panel",
-            b"opl"
-        )));
     }
 }

@@ -511,7 +511,7 @@ impl MatrixProbe {
                     .collect()
             })
             .collect();
-        bone_query::set_match_policy(bone_query::MatchPolicy::default_policy());
+        bone_query::set_match_policy(bone_query::MatchPolicy::Subseq3);
 
         let width = 46usize;
         let mut lines = vec![format!(

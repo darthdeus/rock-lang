@@ -430,7 +430,6 @@ fn general_completions(
     let mut expected = cx.expected(ws, mid, inf, rq.offset);
     let t_build = bone_core::prelude::Instant::now();
     let has_expected = expected.is_some();
-    let max_items = max_completion_items();
     let mut general: Vec<Cand> = {
         let mut ranker = GeneralRanker::new(
             &g,
@@ -443,9 +442,9 @@ fn general_completions(
         cands.into_iter().map(|c| ranker.rank(c)).collect()
     };
     // Partition by the same comparator that orders the final response.
-    if general.len() > max_items {
-        general.select_nth_unstable_by(max_items, cand_cmp);
-        general.truncate(max_items);
+    if general.len() > MAX_COMPLETION_ITEMS {
+        general.select_nth_unstable_by(MAX_COMPLETION_ITEMS, cand_cmp);
+        general.truncate(MAX_COMPLETION_ITEMS);
     }
     let mut sink = Sink::new();
     sink.cands = general;
@@ -472,7 +471,7 @@ fn general_completions(
     let mut ct_counts = CtCounts::default();
     // When the cap is already met, skip call-through even though a local-seeded
     // call may outrank some entries. Narrowing the prefix can surface it.
-    if cx.expr_position && !pattern_pos && sink.len() < max_items {
+    if cx.expr_position && !pattern_pos && sink.len() < MAX_COMPLETION_ITEMS {
         ct_counts = push_call_through(
             &g,
             &mut caches,
@@ -496,7 +495,7 @@ fn general_completions(
             ct_survivors: ct_counts.survivors,
         })
     });
-    finish(&g, sink, rq, max_items, &import_edits)
+    finish(&g, sink, rq, &import_edits)
 }
 
 /// Recovery workspace for a buffer whose live parse dropped the user module.
@@ -1159,13 +1158,12 @@ fn finish(
     g: &GeneralCx,
     mut sink: Sink,
     rq: &Request,
-    max_items: usize,
     import_edits: &HashMap<String, TextEdit>,
 ) -> Vec<CompletionItem> {
     let ws = g.ws;
     let fragment_file = ws.module(g.mid).file;
     sink.cands.sort_by(cand_cmp);
-    sink.cands.truncate(max_items);
+    sink.cands.truncate(MAX_COMPLETION_ITEMS);
     let mut items: Vec<CompletionItem> = sink
         .cands
         .into_iter()
