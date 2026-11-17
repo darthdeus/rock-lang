@@ -381,6 +381,18 @@ impl<T> Arena<T> {
         self.data.len()
     }
 
+    /// The dense range appended since the arena had `start` values.
+    ///
+    /// Panics if `start` is greater than the current length.
+    pub fn allocated_since(&self, start: usize) -> IdxRange<T> {
+        assert!(start <= self.len());
+        if start == self.len() {
+            IdxRange::new_empty()
+        } else {
+            IdxRange::new_exclusive(Idx::from_raw((start as u32).into())..self.next_idx())
+        }
+    }
+
     /// Returns the allocated backing capacity.
     pub fn capacity(&self) -> usize {
         self.data.capacity()

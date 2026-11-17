@@ -63,20 +63,11 @@ pub fn alloc_contiguous<T>(
     arena: &mut Arena<T>,
     nodes: impl IntoIterator<Item = T>,
 ) -> IdxRange<T> {
-    let mut iter = nodes.into_iter();
-
-    if let Some(first) = iter.next() {
-        let first = arena.alloc(first);
-
-        let mut last = first;
-        for n in iter {
-            last = arena.alloc(n);
-        }
-
-        IdxRange::new_inclusive(first..=last)
-    } else {
-        IdxRange::new_empty()
+    let start = arena.len();
+    for node in nodes {
+        arena.alloc(node);
     }
+    arena.allocated_since(start)
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]

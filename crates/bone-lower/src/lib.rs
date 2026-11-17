@@ -633,6 +633,25 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         idx
     }
 
+    fn alloc_parameter(
+        &mut self,
+        body: &mut Body,
+        name: &skull_parser::Ident,
+        declared_ty: Option<TyId>,
+        span: Span,
+    ) -> Idx<BindingInfo> {
+        self.alloc_binding(
+            body,
+            BindingInfo {
+                name: name.name,
+                kind: BindingKind::Param,
+                declared_ty,
+                span: name.span,
+            },
+            span,
+        )
+    }
+
     pub(crate) fn alloc_expr(&mut self, body: &mut Body, expr: Expr, span: Span) -> Idx<Expr> {
         let is_block = matches!(expr, Expr::Block { .. });
         let idx = body.expr_arena.alloc(expr);
@@ -1120,24 +1139,23 @@ pub(crate) fn lower_block(
     body: &mut Body,
     parent: Idx<Scope>,
     block: &Idx<BlockData>,
-) -> Result<Expr, CompilerError> {
-    lower_block_with_prelude(ctx, a, body, parent, block, None)
+) -> Result<Idx<Expr>, CompilerError> {
+    let block = a.b(block);
+    let value = lower_block_value(ctx, a, body, parent, block, None)?;
+    Ok(ctx.alloc_block_expr(body, value, block))
 }
 
-/// [`lower_block`], with an already-lowered statement spliced in ahead of the
-/// block's own (the `for`-pattern destructure).
-pub(crate) fn lower_block_with_prelude(
+fn lower_block_value(
     ctx: &mut LowerCtx,
     a: &Ast,
     body: &mut Body,
     parent: Idx<Scope>,
-    block: &Idx<BlockData>,
+    block: &BlockData,
     prelude: Option<(Statement, Span)>,
 ) -> Result<Expr, CompilerError> {
     let scope = body.alloc_child_scope(parent);
 
-    let (statements, tail) =
-        lower_statements(ctx, a, body, scope, &a.b(block).statements, prelude)?;
+    let (statements, tail) = lower_statements(ctx, a, body, scope, &block.statements, prelude)?;
 
     Ok(Expr::Block { statements, tail })
 }
@@ -1201,13 +1219,11 @@ pub(crate) fn lower_statement_value(
 
             // The else block runs on a pattern miss, so it must not see the
             // pattern's bindings: lower it before the pattern binds `scope`.
-            let else_block = match &l.else_block {
-                Some(b) => {
-                    let e = lower_block(ctx, a, body, scope, b)?;
-                    Some(ctx.alloc_block_expr(body, e, a.b(b)))
-                }
-                None => None,
-            };
+            let else_block = l
+                .else_block
+                .as_ref()
+                .map(|b| lower_block(ctx, a, body, scope, b))
+                .transpose()?;
 
             let pat = lower_pattern_value(ctx, a, body, scope, &l.pattern)?;
             let pattern = body.pattern_arena.alloc(pat);
@@ -1290,26 +1306,13 @@ pub(crate) fn lower_statement_value(
             // so an enclosing param/local reference still resolves (then gets
             // rejected as a capture in inference), while the params shadow.
             let fn_scope = body.alloc_child_scope(scope);
-            let mut binding_idxs = Vec::with_capacity(f.params.len());
+            let first_param = body.binding_arena.len();
             for p in &f.params {
-                let declared_ty = Some(lower_type_expr_local(ctx, a, body, a.te(&p.ty))?);
-                let b = ctx.alloc_binding(
-                    body,
-                    BindingInfo {
-                        name: p.name.name,
-                        kind: BindingKind::Param,
-                        declared_ty,
-                        span: p.name.span,
-                    },
-                    p.span,
-                );
+                let ty = lower_type_expr_local(ctx, a, body, a.te(&p.ty))?;
+                let b = ctx.alloc_parameter(body, &p.name, Some(ty), p.span);
                 body.scope_arena[fn_scope].bindings.insert(p.name.name, b);
-                binding_idxs.push(b);
             }
-            let params = match (binding_idxs.first(), binding_idxs.last()) {
-                (Some(lo), Some(hi)) => IdxRange::new_inclusive(*lo..=*hi),
-                _ => IdxRange::new_empty(),
-            };
+            let params = body.binding_arena.allocated_since(first_param);
 
             let ret_ty = match &f.return_ty {
                 Some(te) => Some(lower_type_expr_local(ctx, a, body, a.te(te))?),
@@ -1318,9 +1321,8 @@ pub(crate) fn lower_statement_value(
 
             let saved = ctx.placeholder_forbidden;
             ctx.placeholder_forbidden = true;
-            let body_expr = lower_block(ctx, a, body, fn_scope, &f.body)?;
+            let body_idx = lower_block(ctx, a, body, fn_scope, &f.body)?;
             ctx.placeholder_forbidden = saved;
-            let body_idx = ctx.alloc_block_expr(body, body_expr, a.b(&f.body));
 
             Statement::Fn {
                 name: name_binding,
@@ -1351,14 +1353,8 @@ pub(crate) fn lower_statement_value(
                 }
             }
 
-            if pattern_is_names_only(body, pattern) {
-                let body_expr = lower_block(ctx, a, body, loop_scope, &f.body)?;
-                let body = ctx.alloc_block_expr(body, body_expr, a.b(&f.body));
-                Statement::For {
-                    pattern,
-                    iter,
-                    body,
-                }
+            let (pattern, prelude) = if pattern_is_names_only(body, pattern) {
+                (pattern, None)
             } else {
                 // Loop codegen wants a plain element binding; anything richer
                 // destructures through a `let` at the body's head.
@@ -1379,26 +1375,19 @@ pub(crate) fn lower_statement_value(
                     value: elem_var,
                     else_block: None,
                 };
-                let body_expr = lower_block_with_prelude(
-                    ctx,
-                    a,
-                    body,
-                    loop_scope,
-                    &f.body,
-                    Some((destructure, f.span)),
-                )?;
-                let body = ctx.alloc_block_expr(body, body_expr, a.b(&f.body));
-                Statement::For {
-                    pattern: elem_pat,
-                    iter,
-                    body,
-                }
+                (elem_pat, Some((destructure, f.span)))
+            };
+            let block = a.b(&f.body);
+            let value = lower_block_value(ctx, a, body, loop_scope, block, prelude)?;
+            Statement::For {
+                pattern,
+                iter,
+                body: ctx.alloc_block_expr(body, value, block),
             }
         }
 
         StatementKind::While(w) => {
-            let body_e = lower_block(ctx, a, body, scope, &w.body)?;
-            let body_i = ctx.alloc_block_expr(body, body_e, a.b(&w.body));
+            let body_i = lower_block(ctx, a, body, scope, &w.body)?;
 
             Statement::While {
                 cond: lower_expr(ctx, a, body, scope, a.e(&w.condition))?,
@@ -1433,9 +1422,10 @@ pub(crate) fn lower_statement_value(
                 else_block: Some(else_block),
             };
 
+            let block = a.b(&w.body);
             let body_expr =
-                lower_block_with_prelude(ctx, a, body, body_scope, &w.body, Some((test, w.span)))?;
-            let body_i = ctx.alloc_block_expr(body, body_expr, a.b(&w.body));
+                lower_block_value(ctx, a, body, body_scope, block, Some((test, w.span)))?;
+            let body_i = ctx.alloc_block_expr(body, body_expr, block);
             let cond = ctx.alloc_expr(body, Expr::Bool(true), w.span);
 
             Statement::While { cond, body: body_i }
@@ -1443,10 +1433,7 @@ pub(crate) fn lower_statement_value(
 
         StatementKind::Defer(dk) => {
             let body = match dk {
-                DeferKind::Block(b) => {
-                    let e = lower_block(ctx, a, body, scope, b)?;
-                    ctx.alloc_block_expr(body, e, a.b(b))
-                }
+                DeferKind::Block(b) => lower_block(ctx, a, body, scope, b)?,
 
                 DeferKind::Expression(e) => lower_expr(ctx, a, body, scope, a.e(e))?,
             };
@@ -1464,8 +1451,7 @@ pub(crate) fn lower_statement_value(
 
             if name == "on_killed" || name == "on_resume" || name == "on_hot_reload" {
                 let hook_scope = body.alloc_child_scope(scope);
-                let body_expr = lower_block(ctx, a, body, hook_scope, hook_body)?;
-                let body_idx = ctx.alloc_block_expr(body, body_expr, block);
+                let body_idx = lower_block(ctx, a, body, hook_scope, hook_body)?;
 
                 let lambda = ctx.alloc_expr(
                     body,
@@ -1494,7 +1480,7 @@ pub(crate) fn lower_statement_value(
 
                 Statement::Expr(call)
             } else {
-                let e = lower_block(ctx, a, body, scope, hook_body)?;
+                let e = lower_block_value(ctx, a, body, scope, block, None)?;
                 Statement::Expr(ctx.alloc_expr(body, e, block.span))
             }
         }
@@ -1569,7 +1555,7 @@ pub(crate) fn lower_expr_value(
             let saved = ctx.placeholder_forbidden;
 
             ctx.placeholder_forbidden = true;
-            let r = lower_block(ctx, a, body, scope, block);
+            let r = lower_block_value(ctx, a, body, scope, a.b(block), None);
             ctx.placeholder_forbidden = saved;
 
             return r;
@@ -1754,19 +1740,14 @@ pub(crate) fn lower_expr_value(
             branches,
             else_branch,
         } => {
-            let mut acc: Option<Idx<Expr>> = match else_branch {
-                Some(blk) => {
-                    let blk_expr = lower_block(ctx, a, body, scope, blk)?;
-                    Some(ctx.alloc_block_expr(body, blk_expr, a.b(blk)))
-                }
-
-                None => None,
-            };
+            let mut acc = else_branch
+                .as_ref()
+                .map(|b| lower_block(ctx, a, body, scope, b))
+                .transpose()?;
 
             for (cond, block) in branches[1..].iter().rev() {
                 let cond = lower_expr(ctx, a, body, scope, a.e(cond))?;
-                let then_expr = lower_block(ctx, a, body, scope, block)?;
-                let then = ctx.alloc_block_expr(body, then_expr, a.b(block));
+                let then = lower_block(ctx, a, body, scope, block)?;
 
                 let idx = ctx.alloc_expr(
                     body,
@@ -1783,8 +1764,7 @@ pub(crate) fn lower_expr_value(
 
             let (cond, block) = &branches[0];
             let cond = lower_expr(ctx, a, body, scope, a.e(cond))?;
-            let block_expr = lower_block(ctx, a, body, scope, block)?;
-            let then = ctx.alloc_block_expr(body, block_expr, a.b(block));
+            let then = lower_block(ctx, a, body, scope, block)?;
 
             Expr::If {
                 cond,
@@ -2070,8 +2050,7 @@ pub(crate) fn lower_expr_value(
                 let pat = lower_pattern_value(ctx, a, body, arm_scope, &arm.pattern)?;
                 let pattern = body.pattern_arena.alloc(pat);
 
-                let body_block = lower_block(ctx, a, body, arm_scope, &arm.body)?;
-                let body_i = ctx.alloc_block_expr(body, body_block, a.b(&arm.body));
+                let body_i = lower_block(ctx, a, body, arm_scope, &arm.body)?;
 
                 let guard = match &arm.guard {
                     Some(g) => Some(lower_expr(ctx, a, body, arm_scope, a.e(g))?),
@@ -2125,43 +2104,22 @@ pub(crate) fn lower_expr_value(
         } => {
             let lambda_scope = body.alloc_child_scope(scope);
 
-            let mut binding_idxs = Vec::with_capacity(params.len());
-
+            let first_param = body.binding_arena.len();
             for p in params {
-                let declared_ty = match &p.ty {
-                    Some(te) => Some(lower_type_expr_local(ctx, a, body, a.te(te))?),
-                    None => None,
-                };
-
-                let b = ctx.alloc_binding(
-                    body,
-                    BindingInfo {
-                        name: p.name.name,
-                        kind: hir::BindingKind::Param,
-                        declared_ty,
-                        span: p.name.span,
-                    },
-                    p.span,
-                );
-
+                let declared_ty =
+                    p.ty.map(|te| lower_type_expr_local(ctx, a, body, a.te(&te)))
+                        .transpose()?;
+                let b = ctx.alloc_parameter(body, &p.name, declared_ty, p.span);
                 body.scope_arena[lambda_scope]
                     .bindings
                     .insert(p.name.name, b);
-
-                binding_idxs.push(b);
             }
-
-            let params_range = match (binding_idxs.first(), binding_idxs.last()) {
-                (Some(a), Some(b)) => IdxRange::new_inclusive(*a..=*b),
-                _ => IdxRange::new_empty(),
-            };
+            let params_range = body.binding_arena.allocated_since(first_param);
 
             let saved = ctx.placeholder_forbidden;
             ctx.placeholder_forbidden = true;
-            let body_expr = lower_block(ctx, a, body, lambda_scope, body_e)?;
+            let body_idx = lower_block(ctx, a, body, lambda_scope, body_e)?;
             ctx.placeholder_forbidden = saved;
-
-            let body_idx = ctx.alloc_block_expr(body, body_expr, a.b(body_e));
 
             Expr::Lambda {
                 params: params_range,
@@ -2222,8 +2180,7 @@ pub(crate) fn lower_expr_value(
                 .bindings
                 .insert(binding.name, b);
 
-            let body_expr = lower_block(ctx, a, body, body_scope, block)?;
-            let body = ctx.alloc_block_expr(body, body_expr, a.b(block));
+            let body = lower_block(ctx, a, body, body_scope, block)?;
 
             Expr::SafeNavLet {
                 receiver,
@@ -2307,7 +2264,7 @@ pub(crate) fn lower_expr(
         let r = lower_block(ctx, a, body, scope, b);
         ctx.placeholder_forbidden = saved;
 
-        return Ok(ctx.alloc_block_expr(body, r?, a.b(b)));
+        return r;
     }
 
     let hir_e = lower_expr_value(ctx, a, body, scope, e)?;
@@ -2549,8 +2506,15 @@ pub(crate) fn build_function(
     let annotations = lower_annotations_with_ctx(ctx, a, annotations)?;
     let anno_errors = fn_annotation_errors(ctx, &annotations, &param_decls);
 
-    let (body_failed, inline_body, is_extern, ffi_lib, backend, mut errors) =
-        lower_fn_body_into(ctx, a, f, &mut body, &param_tys)?;
+    let (body_failed, mut errors) = lower_fn_body_into(ctx, a, f, &mut body, &param_tys)?;
+    use skull_parser::FunctionBody;
+    let (inline_body, is_extern, ffi_lib, backend) = match f.body {
+        FunctionBody::Rock(_) => (None, false, None, hir::FnBackend::Any),
+        FunctionBody::Inline(backend, source) => (Some((backend, source)), false, None, backend),
+        FunctionBody::ExternLua => (None, true, None, hir::FnBackend::Lua),
+        FunctionBody::ExternJs => (None, true, None, hir::FnBackend::Js),
+        FunctionBody::Ffi(lib) => (None, true, Some(lib), hir::FnBackend::Lua),
+    };
     errors.extend(anno_errors);
     // Needs the body kind, which only exists after the lower above.
     if let Err(e) = bone_core::annotations::validate_param_repr_against_body(
@@ -2650,26 +2614,13 @@ fn install_relowered_body(
 /// entries to `module.ty_arena` and orphans the old ones, leaking one slot per
 /// edit (pinned by the `bone-incremental` `body_edit_does_not_grow_module_ty_arena`).
 ///
-/// Returns the body-kind flags (`body_failed`, `inline_body`, `is_extern`,
-/// `ffi_lib`, `backend`); the caller owns assembling / keeping the `Function`
-/// signature.
 fn lower_fn_body_into(
     ctx: &mut LowerCtx,
     a: &Ast,
     f: &FunctionDef,
     body: &mut Body,
     param_tys: &[TyId],
-) -> Result<
-    (
-        bool,
-        Option<(hir::FnBackend, Ustr)>,
-        bool,
-        Option<Ustr>,
-        hir::FnBackend,
-        Vec<CompilerError>,
-    ),
-    CompilerError,
-> {
+) -> Result<(bool, Vec<CompilerError>), CompilerError> {
     debug_assert_eq!(
         f.params.len(),
         param_tys.len(),
@@ -2680,26 +2631,15 @@ fn lower_fn_body_into(
     // a body re-lower must REPLACE its errors, not append. See `Module::lowering_errors`.
     let mut errors = Vec::new();
     let mut bindings = FxHashMap::default();
-    let mut params = Vec::with_capacity(f.params.len());
     let mut param_defaults = Vec::with_capacity(f.params.len());
-
     let default_scope = body.alloc_root_scope();
 
-    for (p, &ty_ref) in f.params.iter().zip(param_tys) {
-        let b_idx = ctx.alloc_binding(
-            body,
-            BindingInfo {
-                name: p.name.name,
-                kind: hir::BindingKind::Param,
-                declared_ty: Some(ty_ref),
-                span: p.name.span,
-            },
-            p.span,
-        );
-
-        bindings.insert(p.name.name, b_idx);
-        params.push(b_idx);
+    let first_param = body.binding_arena.len();
+    for (p, &ty) in f.params.iter().zip(param_tys) {
+        let binding = ctx.alloc_parameter(body, &p.name, Some(ty), p.span);
+        bindings.insert(p.name.name, binding);
     }
+    let range = body.binding_arena.allocated_since(first_param);
 
     // Defaults are lowered after every param binding exists: a lambda default
     // allocates its own param bindings, which would otherwise land inside the
@@ -2718,78 +2658,25 @@ fn lower_fn_body_into(
     lowered?;
     errors.extend(default_names);
 
-    let range = match (params.first(), params.last()) {
-        (Some(first), Some(last)) => IdxRange::new_inclusive(*first..=*last),
-        _ => IdxRange::new_empty(),
-    };
-
     let root_scope = body.alloc_root_scope_with_bindings(bindings);
     let mut body_failed = false;
-
-    // `(inline_body, is_extern, ffi_lib, backend)`. `backend` is the codegen
-    // discriminator: a Rock body is `Any` (portable); `extern`/`extern(lua)`/ffi
-    // are luajit-native (`Lua`); `extern(js)` is `Js`; an inline body carries its
-    // own backend.
-    let (body_e, inline_body, is_extern, ffi_lib, backend) = match &f.body {
-        skull_parser::FunctionBody::Rock(block) => {
-            let b = a.b(block);
-
-            let outer = ctx.name_errors.replace(Some(Vec::new()));
-            let lowered = lower_block(ctx, a, body, root_scope, block);
-            let names = ctx.name_errors.replace(outer).unwrap_or_default();
-            errors.extend(names);
-            match lowered {
-                Ok(lowered) => (
-                    Some(ctx.alloc_block_expr(body, lowered, b)),
-                    None,
-                    false,
-                    None,
-                    hir::FnBackend::Any,
-                ),
-
-                Err(error) => {
-                    errors.push(error);
-                    body_failed = true;
-
-                    (None, None, false, None, hir::FnBackend::Any)
-                }
+    if let skull_parser::FunctionBody::Rock(block) = &f.body {
+        let outer = ctx.name_errors.replace(Some(Vec::new()));
+        let lowered = lower_block(ctx, a, body, root_scope, block);
+        errors.extend(ctx.name_errors.replace(outer).unwrap_or_default());
+        match lowered {
+            Ok(root) => body.root = Some(root),
+            Err(error) => {
+                errors.push(error);
+                body_failed = true;
             }
         }
-
-        skull_parser::FunctionBody::Inline(be, src) => (
-            None,
-            Some((*be, Ustr::from(src.as_str()))),
-            false,
-            None,
-            *be,
-        ),
-
-        skull_parser::FunctionBody::ExternLua => (None, None, true, None, hir::FnBackend::Lua),
-
-        skull_parser::FunctionBody::ExternJs => (None, None, true, None, hir::FnBackend::Js),
-
-        skull_parser::FunctionBody::Ffi(lib) => (
-            None,
-            None,
-            true,
-            Some(Ustr::from(lib.as_str())),
-            hir::FnBackend::Lua,
-        ),
-    };
-
-    body.root = body_e;
+    }
     body.root_scope = Some(root_scope);
     body.param_bindings = range;
     body.param_defaults = param_defaults;
 
-    Ok((
-        body_failed,
-        inline_body,
-        is_extern,
-        ffi_lib,
-        backend,
-        errors,
-    ))
+    Ok((body_failed, errors))
 }
 
 pub fn lower_function_def(
@@ -2897,8 +2784,7 @@ pub fn relower_function_in_place(
         lower_type_expr_local(&mut ctx, a, &mut body, a.te(&p.ty))?;
     }
 
-    let (body_failed, _inline_body, _is_extern, _ffi_lib, _backend, mut errors) =
-        lower_fn_body_into(&mut ctx, a, f, &mut body, &param_tys)?;
+    let (body_failed, mut errors) = lower_fn_body_into(&mut ctx, a, f, &mut body, &param_tys)?;
     ctx.module.lower_var_high_water = ctx._next_var_id;
 
     // Re-validate annotations on the body-only path too: the REPLACE below
@@ -3221,23 +3107,11 @@ fn lower_exprs<'a>(
         lowered_args.push((lower_expr_value(ctx, a, body, scope, e)?, e));
     }
 
-    // TODO: lets also figure out this min/max thing as an abstraction maybe?
-    let mut min = None;
-    let mut max = None;
-
-    for (v, e) in lowered_args {
-        let id = ctx.alloc_expr(body, v, e.span);
-        min = min.or(Some(id));
-        max = Some(id);
+    let start = body.expr_arena.len();
+    for (value, expr) in lowered_args {
+        ctx.alloc_expr(body, value, expr.span);
     }
-
-    let args_range = if let (Some(min), Some(max)) = (min, max) {
-        IdxRange::new_inclusive(min..=max)
-    } else {
-        IdxRange::new_empty()
-    };
-
-    Ok(args_range)
+    Ok(body.expr_arena.allocated_since(start))
 }
 
 fn lower_statements(
@@ -3278,29 +3152,12 @@ fn lower_statements(
         }
     }
 
-    // TODO: lets also figure out this min/max thing as an abstraction maybe?
-    let mut min = None;
-    let mut max = None;
-
-    let tail = if let Some((t, e)) = tail {
-        Some(ctx.alloc_expr(body, t, e.span))
-    } else {
-        None
-    };
-
-    for (s, span) in lowered {
-        let id = body.alloc_statement(s, span);
-        min = min.or(Some(id));
-        max = Some(id);
+    let tail = tail.map(|(expr, data)| ctx.alloc_expr(body, expr, data.span));
+    let start = body.statement_arena.len();
+    for (statement, span) in lowered {
+        body.alloc_statement(statement, span);
     }
-
-    let args_range = if let (Some(min), Some(max)) = (min, max) {
-        IdxRange::new_inclusive(min..=max)
-    } else {
-        IdxRange::new_empty()
-    };
-
-    Ok((args_range, tail))
+    Ok((body.statement_arena.allocated_since(start), tail))
 }
 
 pub fn lower_global(
@@ -3702,7 +3559,6 @@ fn lower_if_let_clauses(
     let else_branch = match else_block {
         Some(blk) => {
             let e = lower_block(ctx, a, body, scope, blk)?;
-            let e = ctx.alloc_block_expr(body, e, a.b(blk));
             // Every clause's miss arm lands here, so no clause's branch-local
             // narrowing may be applied to it.
             if clauses.len() > 1 {
@@ -3725,8 +3581,7 @@ fn lower_if_let_clauses_with(
     else_branch: Option<Idx<Expr>>,
 ) -> Result<Idx<Expr>, CompilerError> {
     let Some((clause, rest)) = clauses.split_first() else {
-        let e = lower_block(ctx, a, body, scope, then_block)?;
-        return Ok(ctx.alloc_block_expr(body, e, a.b(then_block)));
+        return lower_block(ctx, a, body, scope, then_block);
     };
 
     let node = match clause {
@@ -3834,15 +3689,7 @@ fn lower_interp_parts(
         lowered.push(hir);
     }
 
-    let ids: Vec<_> = lowered
-        .into_iter()
-        .map(|hir| body.interp_part_arena.alloc(hir))
-        .collect();
-
-    Ok(match (ids.first(), ids.last()) {
-        (Some(min), Some(max)) => IdxRange::new_inclusive(*min..=*max),
-        _ => IdxRange::new_empty(),
-    })
+    Ok(alloc_contiguous(&mut body.interp_part_arena, lowered))
 }
 
 pub fn lower_decorator_def(
@@ -3855,26 +3702,14 @@ pub fn lower_decorator_def(
     ctx.generics_in_scope.clear();
     let mut body = Body::default();
 
-    let mut params = Vec::new();
+    let first_param = body.binding_arena.len();
     let mut param_decls = Vec::new();
     let mut bindings = FxHashMap::default();
 
-    for p in d.params.iter() {
+    for p in &d.params {
         let ty_ref = lower_type_expr(ctx, a, &mut body, a.te(&p.ty))?;
-
-        let b_idx = ctx.alloc_binding(
-            &mut body,
-            BindingInfo {
-                name: p.name.name,
-                kind: BindingKind::Param,
-                declared_ty: Some(ty_ref),
-                span: p.name.span,
-            },
-            p.span,
-        );
-
-        bindings.insert(p.name.name, b_idx);
-        params.push(b_idx);
+        let binding = ctx.alloc_parameter(&mut body, &p.name, Some(ty_ref), p.span);
+        bindings.insert(p.name.name, binding);
         let deco_param_annotations = lower_annotations_with_ctx(ctx, a, &p.annotations)?;
         validate_annotations(
             AnnoPos::DecoParam,
@@ -3889,6 +3724,7 @@ pub fn lower_decorator_def(
         });
     }
 
+    let params_range = body.binding_arena.allocated_since(first_param);
     let target_ty = {
         let idx = ctx.module.ty_arena.alloc(TypeExpr::App {
             ctor: TypeCtor::Nominal(ustr("__DecoTarget")),
@@ -3911,11 +3747,6 @@ pub fn lower_decorator_def(
 
     bindings.insert(ustr("target"), target);
 
-    let params_range = match (params.first(), params.last()) {
-        (Some(a), Some(b)) => IdxRange::new_inclusive(*a..=*b),
-        _ => IdxRange::new_empty(),
-    };
-
     let root_scope = body.alloc_root_scope_with_bindings(bindings);
 
     // Like a function body, the defaults and body report every name they
@@ -3935,8 +3766,7 @@ pub fn lower_decorator_def(
         })
         .and_then(|()| lower_block(ctx, a, &mut body, root_scope, &d.body));
     let names = ctx.name_errors.replace(outer).unwrap_or_default();
-    let lowered_body = lowered?;
-    let body_e = ctx.alloc_block_expr(&mut body, lowered_body, a.b(&d.body));
+    let body_e = lowered?;
 
     let num_required = d
         .params
