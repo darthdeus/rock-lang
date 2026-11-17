@@ -183,7 +183,11 @@ pub(crate) fn infer_statement(
                         let vt = resolve(gamma, value_ty, span);
                         let peeled = resolve(gamma, scrut_ty, span);
                         let nullable = !types_equal(gamma, vt, peeled);
+                        // A poisoned scrutinee already carries its diagnostic;
+                        // a "never runs" on top is a cascade.
+                        let poisoned = matches!(gamma.get(vt), TypeExpr::Builtin(BuiltinTy::Error));
                         if !nullable
+                            && !poisoned
                             && pattern_is_irrefutable(c, gamma, pattern, scrut_ty, tag, span)
                         {
                             comp_error!(
