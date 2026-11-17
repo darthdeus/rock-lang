@@ -35,15 +35,9 @@ fn main() { t() }
 fn cdata_enum_emits_ctype_and_no_table() {
     let lua = emit_module(SRC);
     assert!(lua.contains("} Shape;") && lua.contains("Shape_ct = ffi.typeof"));
-    // No `{__variant}` table anywhere for a cdata enum (reflection sacrificed).
     assert!(!lua.contains("__variant = \"Circle\""));
-    // The value `__eq` metatype is attached (escaping equality).
     assert!(lua.contains("ffi.metatype, \"Shape\""));
-    // Match int-compares the tag (`.__tag`), not a `.__variant` string.
     assert!(lua.contains(".__tag"));
-    // (The non-escaping construct+match SROAs to scalars on the full CLI pipeline --
-    // the alloc-zero is gated by benchmarks/value-scalarize/enum_payload_scalarize.rock,
-    // not asserted here, since `emit_module` runs a lighter pass set than `rock compile`.)
 }
 
 const FIELD_SRC: &str = r#"
@@ -71,8 +65,6 @@ fn main() { t() }
 #[test]
 fn cdata_enum_as_value_struct_field() {
     let lua = emit_module(FIELD_SRC);
-    // The host `Cmd` cdef must exist (it was SKIPPED before -- a payload-enum field
-    // disqualified the value layout). The enum field nests `Blend` inline.
     assert!(lua.contains("} Cmd;") && lua.contains("Blend blend;"));
 
     let prog = lua;

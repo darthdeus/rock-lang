@@ -524,7 +524,6 @@ impl<T: Clone + PartialEq> Agreed<T> {
         }
     }
 
-    /// Count one assertion without its owner. False means it disagreed.
     fn assert_unowned(&mut self, value: &T) -> bool {
         *value == self.value
     }
@@ -2883,9 +2882,6 @@ impl InstanceGraph {
 
     /// One instance's primary record, or `None` if the graph does not hold it.
     ///
-    /// Not public: the two owner-local questions consumers actually ask are
-    /// [`Self::sites_of`] and [`Self::is_expanded`], and publishing the whole
-    /// record would invite a consumer to answer a third one its own way.
     fn contribution(&self, i: &Instance) -> Option<&Contribution> {
         self.contributions
             .get(&Owner::Instance(i.clone()))

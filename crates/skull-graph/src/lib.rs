@@ -16,7 +16,7 @@
 //!
 //! **Roots are an INPUT, not something derived here.** Which declarations a
 //! build roots from is a driver decision (`skull::mir_emit::emission_roots`,
-//! plus the generated-glue obligations `all_roots` adds), which is why `build`
+//! plus generated-glue obligations), which is why `build`
 //! and `ArtifactRequest` take them.
 
 pub mod artifact;
