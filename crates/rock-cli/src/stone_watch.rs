@@ -315,43 +315,26 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
     });
     let mut watched: std::collections::HashSet<PathBuf> = sound_paths.clone();
 
-    let report_initial_failure = |error: &dyn std::fmt::Display| {
-        let error_message = format!("Initial compilation failed: {}", error);
-        log::error!(target: "STONE", "{}", error_message);
-        log::info!(target: "STONE", "watching for changes; game will start when compilation succeeds");
-    };
     // Build the rock compiler and engine cdylibs (stone-rs + optional extras
     // per game's [engine] needs) beside the initial compile, which does not
     // read them.
     let initial_build = crate::frame_runtime::beside(
         || build_all_for_game(path),
         || {
-            Ok(
-                match (crate::registry::RuntimeServices::registered().prepare_sound_bank)(path) {
-                    Err(e) => {
-                        report_initial_failure(&e);
-                        None
-                    }
-                    Ok(_) => match compiler
-                        .compile(&std::collections::HashSet::new(), false)
-                        .and_then(|_| compiler.artifact_fingerprint())
-                    {
-                        Ok(build_id) => {
-                            reseed_comptime_watch(
-                                &compiler,
-                                &sound_paths,
-                                &mut watched,
-                                &comptime_watch,
-                            );
-                            Some(build_id)
-                        }
-                        Err(e) => {
-                            report_initial_failure(&e);
-                            None
-                        }
-                    },
-                },
-            )
+            let result = (crate::registry::RuntimeServices::registered().prepare_sound_bank)(path)
+                .and_then(|_| compiler.compile(&std::collections::HashSet::new(), false))
+                .and_then(|_| compiler.artifact_fingerprint());
+            Ok(match result {
+                Ok(build_id) => {
+                    reseed_comptime_watch(&compiler, &sound_paths, &mut watched, &comptime_watch);
+                    Some(build_id)
+                }
+                Err(error) => {
+                    log::error!(target: "STONE", "Initial compilation failed: {error}");
+                    log::info!(target: "STONE", "watching for changes; game will start when compilation succeeds");
+                    None
+                }
+            })
         },
     )?;
     let initial_compilation_success = initial_build.is_some();
@@ -402,8 +385,6 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
     info!("Watching for changes...");
 
     // Track what needs rebuilding
-    let mut needs_libstone_rebuild = false;
-    let mut needs_compiler_rebuild = false;
     let mut sound_dirty = false;
     let mut force_game_compile = !initial_compilation_success;
 
@@ -418,10 +399,8 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
         wait_for_reload_resume(&reload_control)?;
         let _keep_native_watch = &native_watcher;
         // Check for manual restart trigger first
-        let mut manual_restart_requested = false;
         if event.is_restart_trigger {
             info!("Manual restart triggered (tmp/restart.txt detected)");
-            manual_restart_requested = true;
         }
 
         let mut changes = categorize_stone_changes(
@@ -437,8 +416,6 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
             compiler.package_roots(),
             &watched,
         );
-        needs_libstone_rebuild |= changes.needs_libstone_rebuild;
-        needs_compiler_rebuild |= changes.needs_compiler_rebuild;
         sound_dirty |= changes.sound_dirty;
         changed_paths.extend(changes.changed_paths);
         let changed_libstone = changes.changed_libstone;
@@ -468,7 +445,7 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
         // `should_restart` only accumulates from rebuilds that actually
         // succeeded (plus manual restart) — we don't restart the game
         // process to load a dylib that didn't get produced.
-        let mut should_restart = manual_restart_requested;
+        let mut should_restart = event.is_restart_trigger;
         let mut compiler_rebuilt = false;
 
         if changes.needs_native_rebuild {
@@ -490,7 +467,7 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
             }
         }
 
-        if needs_libstone_rebuild {
+        if changes.needs_libstone_rebuild {
             info!("Rebuilding stone-rs...");
             match rock_engine_host::engine_build::build_engine_libs(path) {
                 Ok(_) => {
@@ -504,10 +481,9 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
                     );
                 }
             }
-            needs_libstone_rebuild = false;
         }
 
-        if needs_compiler_rebuild {
+        if changes.needs_compiler_rebuild {
             info!("Rebuilding compiler...");
             match crate::compiler_watch::build_compiler() {
                 Ok(_) => {
@@ -524,7 +500,6 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
                     );
                 }
             }
-            needs_compiler_rebuild = false;
         }
 
         if sound_dirty {
