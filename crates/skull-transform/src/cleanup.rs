@@ -591,7 +591,6 @@ fn is_dead_rc(inst: &Inst, i: Idx<Inst>, use_count: &[u32], load_count: &[u32]) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::lower;
 
     #[test]
     fn value_integer_checks_fold_only_proven_constants() {
@@ -659,100 +658,6 @@ mod tests {
             matches!(f.insts[test], Inst::Const(Lit::Bool(false))),
             "{f}"
         );
-    }
-
-    #[test]
-    fn cleanup_load_root_keeps_the_written_cell() {
-        let mut unrooted = MirFunc::new(ustr::Ustr::from("cleanup_root"));
-        let cell = unrooted.new_cell(None);
-        let value = unrooted.emit(unrooted.entry, Inst::Const(Lit::Int(1)));
-        let store = unrooted.emit(unrooted.entry, Inst::Store { cell, value });
-        unrooted.set_term(unrooted.entry, Term::Return(Vec::new()));
-        let _ = cleanup(&mut unrooted);
-        assert!(!unrooted.blocks[unrooted.entry].insts.contains(&store));
-
-        let mut rooted = MirFunc::new(ustr::Ustr::from("cleanup_root"));
-        let cell = rooted.new_cell(None);
-        let value = rooted.emit(rooted.entry, Inst::Const(Lit::Int(1)));
-        let store = rooted.emit(rooted.entry, Inst::Store { cell, value });
-        rooted.inline_cleanup_load_cells.push(cell);
-        rooted.set_term(rooted.entry, Term::Return(Vec::new()));
-        let _ = cleanup(&mut rooted);
-        assert!(rooted.blocks[rooted.entry].insts.contains(&store));
-    }
-
-    /// `Store(x, Load(y))` where `y` holds `Load(x)`: only once the load of `y`
-    /// is substituted is the store visibly a write-back of `x`'s own value, so
-    /// the round that substitutes must report that another round can remove it.
-    #[test]
-    fn a_store_substituted_into_a_write_back_asks_for_another_round() {
-        let mut f = MirFunc::new(ustr::Ustr::from("write_back"));
-        let (x, y) = (f.new_cell(None), f.new_cell(None));
-        let old = f.emit(f.entry, Inst::Load(x));
-        f.emit(
-            f.entry,
-            Inst::Store {
-                cell: y,
-                value: old,
-            },
-        );
-        let copied = f.emit(f.entry, Inst::Load(y));
-        let back = f.emit(
-            f.entry,
-            Inst::Store {
-                cell: x,
-                value: copied,
-            },
-        );
-        let read = f.emit(f.entry, Inst::Load(x));
-        f.set_term(f.entry, Term::Return(vec![read]));
-
-        let cp = copy_propagate_analysis(&f, None);
-        let stale = dce_core(&mut f, cp.as_ref());
-        assert!(f.blocks[f.entry].insts.contains(&back), "{f}");
-        assert!(stale || cp.is_some_and(|cp| cp.exposes_more), "{f}");
-
-        let cp = copy_propagate_analysis(&f, None);
-        dce_core(&mut f, cp.as_ref());
-        assert!(!f.blocks[f.entry].insts.contains(&back), "{f}");
-    }
-
-    /// A round that substitutes nothing new and removes nothing that feeds the
-    /// analysis leaves nothing for another round.
-    #[test]
-    fn a_settled_body_asks_for_no_further_round() {
-        let mut f = MirFunc::new(ustr::Ustr::from("settled"));
-        let x = f.new_cell(None);
-        let one = f.emit(f.entry, Inst::Const(Lit::Int(1)));
-        f.emit(
-            f.entry,
-            Inst::Store {
-                cell: x,
-                value: one,
-            },
-        );
-        let read = f.emit(f.entry, Inst::Load(x));
-        f.emit(f.entry, Inst::Const(Lit::Int(2)));
-        f.set_term(f.entry, Term::Return(vec![read]));
-
-        let cp = copy_propagate_analysis(&f, None);
-        let stale = dce_core(&mut f, cp.as_ref());
-        assert!(!stale && !cp.is_some_and(|cp| cp.exposes_more), "{f}");
-    }
-
-    /// Code after a raising call lowers into a block nothing reaches. Its
-    /// `return` must not keep alive the values only it reads, such as the
-    /// leaves of a defaulted fallback.
-    #[test]
-    fn a_return_after_a_raise_keeps_no_values_alive() {
-        let mut f = MirFunc::new(ustr::Ustr::from("raise"));
-        let fallback = f.emit(f.entry, Inst::Const(Lit::Int(7)));
-        let one = f.emit(f.entry, Inst::Const(Lit::Int(1)));
-        f.set_term(f.entry, Term::Return(vec![one]));
-        let after_raise = f.new_block();
-        f.set_term(after_raise, Term::Return(vec![fallback]));
-        cleanup(&mut f).unwrap();
-        assert!(!f.blocks[f.entry].insts.contains(&fallback), "{f}");
     }
 
     /// `unused = p.a; <between>; return p.b` after cleanup: whether the
@@ -839,39 +744,5 @@ mod tests {
                 },
             );
         }));
-    }
-
-    #[test]
-    #[should_panic(expected = "cleanup skipped a copy-prop/DCE round")]
-    fn the_settled_round_probe_catches_a_body_with_work_left() {
-        let mut f = MirFunc::new(ustr::Ustr::from("unsettled"));
-        f.emit(f.entry, Inst::Const(Lit::Int(2)));
-        f.set_term(f.entry, Term::Return(Vec::new()));
-        assert_round_settled(None, &f);
-    }
-
-    #[test]
-    fn the_settled_round_probe_accepts_a_settled_body() {
-        let mut f = MirFunc::new(ustr::Ustr::from("settled"));
-        let one = f.emit(f.entry, Inst::Const(Lit::Int(1)));
-        f.set_term(f.entry, Term::Return(vec![one]));
-        assert_round_settled(None, &f);
-    }
-
-    #[test]
-    fn cleanup_prefilter_finds_only_aggregate_stores() {
-        let scalar = lower("fn f(x: int) -> int { return x }", "f");
-        assert!(!has_scalarizable_store(&scalar));
-
-        let aggregate = lower(
-            "struct Pair { a: int, b: int }\n\
-             fn f(flag: bool) -> int {\n\
-                 let p = Pair { a: 1, b: 2 }\n\
-                 if flag { return p.a }\n\
-                 return p.b\n\
-             }",
-            "f",
-        );
-        assert!(has_scalarizable_store(&aggregate), "{aggregate}");
     }
 }

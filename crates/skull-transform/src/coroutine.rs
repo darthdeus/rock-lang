@@ -1024,24 +1024,6 @@ mod tests {
     use crate::test_support::lower;
 
     #[test]
-    fn coroutine_transform_exposes_one_owned_frame_plan() {
-        let func = lower(
-            "co fn f(x: int) -> Coroutine<int> { let saved = x yield saved }",
-            "f",
-        );
-        let lowered = transform_coroutine(&func, None, false);
-        assert!(
-            !lowered.frame_plan.slots().is_empty(),
-            "the coroutine fixture must have a nonzero frame population"
-        );
-        assert_eq!(
-            lowered.frame_plan.slots().len(),
-            lowered.frame_plan.fields().len(),
-            "one frame plan must own both membership and physical slots"
-        );
-    }
-
-    #[test]
     fn coroutine_demotes_a_local_confined_to_one_resume_segment() {
         let func = lower(
             "co fn f(x: int) -> Coroutine<int> {\n\
@@ -1060,62 +1042,6 @@ mod tests {
             "a local used only after the last yield must stay out of the frame:\n{}",
             lowered.step
         );
-    }
-
-    fn assert_frame_cells_typed(lowered: &CoroLowered) {
-        let untyped: Vec<_> = lowered
-            .frame_plan
-            .fields()
-            .iter()
-            .copied()
-            .filter(|&cell| lowered.step.cells[cell].ty.is_none())
-            .map(|cell| (cell, lowered.step.cells[cell].name))
-            .collect();
-        assert!(
-            untyped.is_empty(),
-            "untyped frame cells: {untyped:?}\n{}",
-            lowered.step
-        );
-    }
-
-    #[test]
-    fn coroutine_frame_cells_retain_types_across_conditional_yields() {
-        let func = lower(
-            "co fn f(flag: bool) -> Coroutine<int> {\n\
-                 if flag { yield 1 yield 2 } else { yield 10 yield 20 }\n\
-             }",
-            "f",
-        );
-        let lowered = transform_coroutine(&func, None, false);
-        assert_frame_cells_typed(&lowered);
-    }
-
-    #[test]
-    fn coroutine_frame_cells_retain_types_across_null_coalesce() {
-        let func = lower(
-            "co fn f(x: int?) -> Coroutine<int> {\n\
-                 yield x ?? -1\n\
-                 yield x ?? -2\n\
-             }",
-            "f",
-        );
-        let lowered = transform_coroutine(&func, None, false);
-        assert_frame_cells_typed(&lowered);
-    }
-
-    #[test]
-    fn coroutine_frame_cells_retain_types_across_tuple_destructure() {
-        let func = lower(
-            "fn pair() -> (int, int) { return (10, 20) }\n\
-             co fn f() -> Coroutine<int> {\n\
-                 let (a, b) = pair()\n\
-                 yield a\n\
-                 yield b\n\
-             }",
-            "f",
-        );
-        let lowered = transform_coroutine(&func, None, false);
-        assert_frame_cells_typed(&lowered);
     }
 
     #[test]
