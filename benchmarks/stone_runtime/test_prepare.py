@@ -37,9 +37,10 @@ class PrepareTest(unittest.TestCase):
             compiler.write_text('#!/bin/sh\nprintf "%s" "$(cat "$ROCK_STDLIB_DIR/marker")" > "$6"\n')
             compiler.chmod(0o755)
             out = root / "out"
-            subprocess.run(["python3", str(benchmark / "prepare.py"), str(out), "--compiler", str(compiler), "--source-revision", revision], cwd=root, check=True)
+            subprocess.run(["python3", str(benchmark / "prepare.py"), str(out), "--compiler", str(compiler), "--source-revision", revision, "--target-os", "osx"], cwd=root, check=True)
             metadata = json.loads((out / "build.json").read_text())
             self.assertEqual(metadata["revision"], revision)
+            self.assertEqual(metadata["target_os"], "osx")
             self.assertEqual((out / "retained.lua").read_text(), "first")
             self.assertEqual(metadata["benchmark_sources"]["main.rock"], hashlib.sha256(b"benchmark source\n").hexdigest())
 

@@ -40,7 +40,8 @@ commit supplied with `--source-revision`), copies this benchmark, then compiles
 two isolated arms with the specified compiler. The fresh arm changes only
 `scene_return_pass` back to constructing a Pass. `build.json` records the
 resolved source commit, hashes of the copied benchmark inputs, compiler and
-outputs. Uncommitted engine edits are excluded. The compiler hash does not
+outputs and target OS. Pass `--target-os osx` for a macOS run (the default
+is `linux`). Uncommitted engine edits are excluded. The compiler hash does not
 establish its source provenance; record that separately.
 
 To compare committed engine candidates in alternating processes, prepare each

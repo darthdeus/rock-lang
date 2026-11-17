@@ -56,7 +56,7 @@ with tempfile.TemporaryDirectory(prefix="rock-runtime-audit-") as directory:
         source.write_text(original if arm == "retained" else original[:start] + fresh + original[end:])
         subprocess.run([str(compiler), "compile", str(package), "--target-os", args.target_os,
                         "--output", str(outdir / f"{arm}.lua")], cwd=tree, env=env, check=True)
-metadata = dict(revision=revision, benchmark_sources=benchmark_sources, compiler_sha256=hashlib.sha256(compiler.read_bytes()).hexdigest(),
+metadata = dict(revision=revision, target_os=args.target_os, benchmark_sources=benchmark_sources, compiler_sha256=hashlib.sha256(compiler.read_bytes()).hexdigest(),
                 outputs={arm: hashlib.sha256((outdir / f"{arm}.lua").read_bytes()).hexdigest()
                          for arm in ("retained", "fresh")})
 (outdir / "build.json").write_text(json.dumps(metadata, indent=2) + "\n")
