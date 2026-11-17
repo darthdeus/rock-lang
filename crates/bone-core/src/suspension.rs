@@ -1,4 +1,5 @@
-use crate::hir::{BinOp, BindingInfo, Callee, Expr, InterpPart, Pattern, Statement, VariantArgs};
+use crate::hir::{BinOp, BindingInfo, Callee, Expr, InterpPart, Pattern, Statement};
+use crate::hir_walk::HirChild;
 use crate::prelude::*;
 
 pub trait SuspensionPolicy {
@@ -17,10 +18,6 @@ pub trait SuspensionPolicy {
 }
 
 pub fn uses_after_suspension(body: &Body, policy: &impl SuspensionPolicy) -> Vec<Idx<Expr>> {
-    suspension_crossings(body, policy)
-}
-
-fn suspension_crossings(body: &Body, policy: &impl SuspensionPolicy) -> Vec<Idx<Expr>> {
     let Some(root) = body.root else {
         return Vec::new();
     };
@@ -150,8 +147,7 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
         );
     }
 
-    fn branch(&mut self, expr: Option<Idx<Expr>>, entry: &Flow, out: &mut Flow) {
-        let Some(expr) = expr else { return };
+    fn branch(&mut self, expr: Idx<Expr>, entry: &Flow, out: &mut Flow) {
         let mut branch = entry.clone();
         self.expr(expr, &mut branch);
         out.merge(branch);
@@ -163,7 +159,7 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
     fn loop_body(
         &mut self,
         cond: Option<Idx<Expr>>,
-        vars: &[(Idx<BindingInfo>, Option<Idx<Expr>>)],
+        vars: &[Idx<BindingInfo>],
         body: Idx<Expr>,
         flow: &mut Flow,
     ) {
@@ -175,8 +171,8 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                 self.expr(cond, &mut pass);
             }
             exit.merge(pass.clone());
-            for &(binding, value) in vars {
-                self.bind(binding, value, &mut pass);
+            for &binding in vars {
+                self.bind(binding, None, &mut pass);
             }
             self.loops.push(LoopExits::default());
             self.expr(body, &mut pass);
@@ -257,12 +253,7 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                 body,
             } => {
                 self.expr(*iter, flow);
-                let vars: Vec<_> = self
-                    .body
-                    .pattern_bindings(*pattern)
-                    .into_iter()
-                    .map(|binding| (binding, None))
-                    .collect();
+                let vars = self.body.pattern_bindings(*pattern);
                 self.loop_body(None, &vars, *body, flow);
             }
             Statement::While { cond, body } => self.loop_body(Some(*cond), &[], *body, flow),
@@ -275,14 +266,6 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
     fn expr(&mut self, expr: Idx<Expr>, flow: &mut Flow) {
         match self.body.expr_arena[expr] {
             Expr::Var(binding) => self.report(expr, binding, flow),
-            Expr::Yield(value) => {
-                if let Some(value) = value {
-                    self.expr(value, flow);
-                }
-            }
-            Expr::YieldDelegate(value) => {
-                self.expr(value, flow);
-            }
             Expr::Lambda { .. } => {}
             Expr::Block { statements, tail } => {
                 let outer = std::mem::take(&mut self.unwound);
@@ -303,9 +286,9 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                 self.expr(cond, flow);
                 let entry = flow.clone();
                 let mut out = Flow::default();
-                self.branch(Some(then_branch), &entry, &mut out);
+                self.branch(then_branch, &entry, &mut out);
                 match else_branch {
-                    Some(_) => self.branch(else_branch, &entry, &mut out),
+                    Some(branch) => self.branch(branch, &entry, &mut out),
                     None => out.merge(entry),
                 }
                 *flow = out;
@@ -320,9 +303,9 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                 let mut entry = flow.clone();
                 self.bind_pattern_flow(pattern, value, &mut entry);
                 let mut out = Flow::default();
-                self.branch(Some(then_branch), &entry, &mut out);
+                self.branch(then_branch, &entry, &mut out);
                 match else_branch {
-                    Some(_) => self.branch(else_branch, flow, &mut out),
+                    Some(branch) => self.branch(branch, flow, &mut out),
                     None => out.merge(flow.clone()),
                 }
                 *flow = out;
@@ -354,23 +337,6 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                 self.expr(value, flow);
                 self.expr(target, flow);
             }
-            Expr::Call { callee, args, .. } => {
-                if let Callee::Value(value) = callee {
-                    self.expr(value, flow);
-                }
-                if let Callee::Local(binding) = callee {
-                    self.report(expr, binding, flow);
-                }
-                for arg in args {
-                    self.expr(arg, flow);
-                }
-            }
-            Expr::SafeNavCall { receiver, args, .. } => {
-                self.expr(receiver, flow);
-                for arg in args {
-                    self.expr(arg, flow);
-                }
-            }
             Expr::SafeNavLet {
                 receiver,
                 binding,
@@ -388,57 +354,10 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
                 self.expr(lhs, flow);
                 let entry = flow.clone();
                 let mut out = Flow::default();
-                self.branch(Some(rhs), &entry, &mut out);
+                self.branch(rhs, &entry, &mut out);
                 out.merge(entry);
                 *flow = out;
             }
-            Expr::BinOp { lhs, rhs, .. }
-            | Expr::Range {
-                low: lhs,
-                high: rhs,
-            } => {
-                self.expr(lhs, flow);
-                self.expr(rhs, flow);
-            }
-            Expr::Not(value, _)
-            | Expr::BitNot(value)
-            | Expr::UnaryMinus(value, _)
-            | Expr::Spread(value)
-            | Expr::As { value, .. }
-            | Expr::FieldAccess { base: value, .. }
-            | Expr::SafeNav { base: value, .. }
-            | Expr::TupleIndex { tuple: value, .. }
-            | Expr::IncDec { target: value, .. } => self.expr(value, flow),
-            Expr::Index { base, index } => {
-                self.expr(base, flow);
-                self.expr(index, flow);
-            }
-            Expr::Tuple(values) | Expr::Array(values) => {
-                for value in values {
-                    self.expr(value, flow);
-                }
-            }
-            Expr::StructLiteral { fields, bases, .. } => {
-                for base in bases {
-                    self.expr(base, flow);
-                }
-                for field in fields {
-                    self.expr(self.body.struct_lit_field_arena[field].value, flow);
-                }
-            }
-            Expr::EnumVariant { args, .. } => match args {
-                VariantArgs::Unit => {}
-                VariantArgs::Tuple(values) => {
-                    for value in values {
-                        self.expr(value, flow);
-                    }
-                }
-                VariantArgs::Record(fields) => {
-                    for field in fields {
-                        self.expr(self.body.struct_lit_field_arena[field].value, flow);
-                    }
-                }
-            },
             Expr::InterpolatedString(parts) => {
                 for part in parts {
                     if let InterpPart::Value { expr, spec } = self.body.interp_part_arena[part] {
@@ -457,16 +376,20 @@ impl<P: SuspensionPolicy> Walk<'_, P> {
             }
             Expr::Break => self.exit(Exit::Break, flow),
             Expr::Continue => self.exit(Exit::Continue, flow),
-            Expr::Unit
-            | Expr::Null
-            | Expr::Error
-            | Expr::Hole(_)
-            | Expr::Int(_)
-            | Expr::Float(_)
-            | Expr::Bool(_)
-            | Expr::String(_)
-            | Expr::Global(_)
-            | Expr::SiblingRef(_) => {}
+            other => {
+                if let Expr::Call {
+                    callee: Callee::Local(binding),
+                    ..
+                } = other
+                {
+                    self.report(expr, binding, flow);
+                }
+                self.body.for_each_child(HirChild::Expr(expr), |child| {
+                    if let HirChild::Expr(child) = child {
+                        self.expr(child, flow);
+                    }
+                });
+            }
         }
         if self.policy.is_barrier(self.body, expr) {
             flow.suspend(expr, |binding| self.policy.crosses_binding(binding, expr));
