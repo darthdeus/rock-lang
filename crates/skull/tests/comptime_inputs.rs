@@ -1,6 +1,8 @@
 use bone_semantic::inference::{ComptimeInputs, ComptimeVarValue};
 
-use crate::common::{body_id, emit_full_of, function_body, name_matches, try_emit_module_with};
+use crate::common::{
+    body_id, emit_full_of, function_body, name_matches, run_fn, try_emit_module_with,
+};
 
 fn inputs_with_var(name: &str, value: &str) -> ComptimeInputs {
     let mut inputs = ComptimeInputs::default();
@@ -16,25 +18,31 @@ fn inputs_with_var(name: &str, value: &str) -> ComptimeInputs {
 
 #[test]
 fn build_var_inlines_the_resolved_value() {
-    let src = r#"
-fn channel_tag() -> string {
-    return build_var("CHANNEL")
-}
-"#;
-    let inputs = inputs_with_var("CHANNEL", "steam-test-value");
-    let lua = try_emit_module_with(src, inputs).expect("declared var expands");
-    let body = function_body(&lua, "channel_tag");
-    assert!(body.contains("steam-test-value"));
-    assert!(!body.contains("build_var"));
+    let src = "fn channel_tag() { print(build_var(\"CHANNEL\")) }";
+    for volatile in [false, true] {
+        let mut inputs = inputs_with_var("CHANNEL", "steam-test-value");
+        if volatile {
+            inputs.volatile_vars.insert("CHANNEL".into());
+        }
+        let lua = try_emit_module_with(src, inputs).expect("declared var expands");
+        let body = function_body(&lua, "channel_tag");
+        assert!(body.contains("steam-test-value"));
+        assert!(!body.contains("build_var"));
+        assert_eq!(run_fn(&lua, "channel_tag"), "steam-test-value");
+    }
+    let mut inputs = inputs_with_var("CHANNEL", "steam-test-value");
+    inputs.volatile_vars.insert("MISSING".into());
+    let error = try_emit_module_with(src, inputs).expect_err("unknown volatile input");
+    assert!(
+        error
+            .message
+            .contains("volatile metadata declaration `MISSING`")
+    );
 }
 
 #[test]
 fn build_var_undeclared_rejects_with_the_name() {
-    let src = r#"
-fn broken() -> string {
-    return build_var("NOPE")
-}
-"#;
+    let src = "fn broken() -> string { return build_var(\"NOPE\") }";
     let err = try_emit_module_with(src, ComptimeInputs::default())
         .expect_err("undeclared build var must reject");
     let msg = err.message.clone();
@@ -43,11 +51,7 @@ fn broken() -> string {
 
 #[test]
 fn build_var_non_literal_arg_rejects() {
-    let src = r#"
-fn broken(name: string) -> string {
-    return build_var(name)
-}
-"#;
+    let src = "fn broken(name: string) -> string { return build_var(name) }";
     let err = try_emit_module_with(src, inputs_with_var("CHANNEL", "x"))
         .expect_err("non-literal build_var arg must reject");
     assert!(err.message.contains("literal"));
