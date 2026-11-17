@@ -3,6 +3,36 @@ use crate::common::{
     try_emit_module,
 };
 
+#[test]
+fn a_read_only_snapshot_does_not_rebox_its_nullable_child() {
+    let _inline = crate::common::InlineOffGuard::on();
+    let fields = (0..50)
+        .map(|i| format!("f{i}: int = 0"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let lua = emit_module(&format!(
+        r#"
+value Wide {{ {fields} }}
+value Row {{ child: Wide?, refs: [int] }}
+struct Owner {{ row: Row }}
+fn make_wide(seed: int) -> Wide {{ Wide {{ f0: seed }} }}
+@nomangle fn read_only(seed: int) -> int {{
+    let owner = Owner {{ row: Row {{ child: make_wide(seed), refs: [] }} }}
+    let saved = owner.row
+    let first = if saved.child != null {{ saved.child.f0 }} else {{ -1 }}
+    let second = saved.child?.f0 ?? -1
+    return first + second
+}}
+"#
+    ));
+    let body = crate::common::function_body(&lua, "read_only");
+    assert!(
+        !body.contains("Wide_ct("),
+        "an owner that cannot be written does not need a child copy: {body}"
+    );
+    assert_eq!(run_luajit(&format!("{lua}\nprint(read_only(7))")), "14");
+}
+
 fn remove_handle(method: &str) {
     let source = format!(
         r#"

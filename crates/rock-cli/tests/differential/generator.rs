@@ -744,6 +744,14 @@ pub(super) fn program(seed: u64) -> String {
         let index = g.pick(&(0..types.len()).collect::<Vec<_>>());
         g.bind(&mut body, &mut env, types.remove(index));
     }
+    let initial_bias = seed % 29 + 1;
+    let replacement_bias = seed % 37 + 200;
+    let null_period = seed % 3 + 2;
+    writeln!(
+        body,
+        "let snapshot_point: SnapshotPoint? = if input % {null_period} == 0 {{ null }} else {{ SnapshotPoint {{ x: (input % 10000) + {initial_bias}, y: 2 }} }}\nlet snapshot_owner = SnapshotOwner {{ record: SnapshotRecord {{ child: snapshot_point, refs: [input] }} }}\ncheck_nullable_child_snapshot(snapshot_owner, (input % 10000) + {replacement_bias})"
+    )
+    .unwrap();
     g.body(&mut body, &mut env, &mut 28, 0, false, false);
     for v in &env {
         g.trace_variable(&mut body, v);
@@ -762,6 +770,15 @@ value V { x: int, y: int }
 nobox value N { x: int, y: int }
 struct Cell { v: V, n: N }
 value Nested { v: V, n: N }
+value SnapshotPoint { x: int, y: int }
+value SnapshotRecord { child: SnapshotPoint?, refs: [int] }
+struct SnapshotOwner { record: SnapshotRecord }
+fn check_nullable_child_snapshot(owner: SnapshotOwner, replacement: int) {
+    let expected = owner.record.child?.x ?? -1
+    let saved = owner.record
+    if owner.record.child != null { owner.record.child.x = replacement }
+    assert((saved.child?.x ?? -1) == expected, "nullable child snapshot changed")
+}
 @inline fn V.adjust(self, x: int, step: int? = 3) -> int {
     if x < 0 { return self.x }
     return (self.y % 10000) + (x % 10000) + (step ?? -1)

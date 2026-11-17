@@ -3725,8 +3725,8 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Retaining a scalar in cells loses its borrowed-box provenance. Snapshot
-    /// it before a later expression can mutate the source it came from.
+    /// Retaining a value in cells loses its borrowed-box provenance. Snapshot
+    /// its children before a later expression can mutate their source.
     pub(crate) fn snapshot_opaque_value(
         &mut self,
         r: ValueRepr,
@@ -3753,13 +3753,36 @@ impl<'a> Builder<'a> {
                 s.owned_value_children(r)
             })
         } else {
-            Ok(r)
+            match r {
+                ValueRepr::Group {
+                    name,
+                    parts,
+                    present,
+                } => {
+                    let parts = parts
+                        .into_iter()
+                        .map(|part| self.snapshot_opaque_value(part))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(ValueRepr::Group {
+                        name,
+                        parts,
+                        present,
+                    })
+                }
+                ValueRepr::Tuple { parts, present } => {
+                    let parts = parts
+                        .into_iter()
+                        .map(|part| self.snapshot_opaque_value(part))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(ValueRepr::Tuple { parts, present })
+                }
+                r => Ok(r),
+            }
         }
     }
 
-    /// [`Self::pack`] for a `let` binding's own cell: its value children stay
-    /// borrowed, since only the binding holds the box and each whole use of
-    /// it copies ([`Self::boxed_value_local`]).
+    /// [`Self::pack`] for a `let` binding whose children have already been
+    /// snapshotted. Shareable children can stay borrowed.
     pub(crate) fn pack_lent(&mut self, r: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
         let outer = std::mem::replace(&mut self.shallow_pack, true);
         let packed = self.pack(r);

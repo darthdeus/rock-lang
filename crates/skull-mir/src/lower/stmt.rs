@@ -535,6 +535,7 @@ impl<'a> Builder<'a> {
                             let expected =
                                 self.binding_ty(name).and_then(|ty| self.concrete_ty_id(ty));
                             let mut shareable = true;
+                            let mut snapshot_leaves = None;
                             let v = match opaque_repr {
                                 Some(r) => self.pack_bundle(&r)?,
                                 None if self.binding_is_ref(name) => {
@@ -558,7 +559,31 @@ impl<'a> Builder<'a> {
                                                 s.lower_expr_repr(value)
                                             })?
                                             .into_value();
+                                        let needs_snapshot = !s.value_repr_is_shareable(&r);
                                         let r = s.snapshot_opaque_value(r)?;
+                                        if needs_snapshot
+                                            && s.binding_stays_unwritten(name)
+                                            && let Some(nominal) = s.value_struct_of(value)
+                                            && expected
+                                                .is_some_and(|ty| ty.nominal() == Some(nominal))
+                                            && let Some(shape) =
+                                                super::shape::value_shape_of_nominal(s.ws, nominal)
+                                        {
+                                            let expanded =
+                                                super::abi::expanded_nullable_parameter_shape(
+                                                    s.ws, &shape,
+                                                );
+                                            if expanded != shape
+                                                && expanded.leaf_count()
+                                                    <= WIDE_VALUE_PAYLOAD_LEAF_CUT
+                                            {
+                                                // Keep nullable snapshots in leaves: packing and
+                                                // rereading them would retain descriptor reads.
+                                                let leaves =
+                                                    s.repr_to_leaves_shape(&r, &expanded)?;
+                                                snapshot_leaves = Some((expanded, leaves));
+                                            }
+                                        }
                                         shareable = s.value_repr_is_shareable(&r);
                                         if lend { s.pack_lent(r) } else { s.pack(r) }
                                     })?
@@ -567,6 +592,13 @@ impl<'a> Builder<'a> {
                                     s.lower_expr_with_expected(value, expected)
                                 })?,
                             };
+                            if let Some((shape, leaves)) = snapshot_leaves {
+                                self.f.value_lets += leaves.len();
+                                self.f.value_leaves += leaves.len();
+                                let leaves = leaves.into_iter().map(GroupLeaf::Value).collect();
+                                self.group_binds.insert(raw(name), (leaves, shape));
+                                continue;
+                            }
                             let v = self.coerced_to_binding(v, value, name);
                             if self.bind_let_value(name, v) {
                                 continue;
