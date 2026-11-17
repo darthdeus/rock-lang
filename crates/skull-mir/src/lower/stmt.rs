@@ -169,9 +169,7 @@ impl<'a> Builder<'a> {
     }
 
     /// The owner segment of a private global this body mints (a `static`
-    /// cell, a hoisted nested fn). A v1 owner is a DefKey, which is not an
-    /// identifier, so it takes the key's symbol form; a legacy owner is its
-    /// own symbol.
+    /// cell, a hoisted nested fn). Definition keys use their symbol form.
     fn static_owner_symbol(&self) -> Ustr {
         crate::mangle::symbol_of_key(self.static_owner)
     }

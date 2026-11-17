@@ -1,7 +1,6 @@
 //! A value-producing `if` whose arms construct a flat enum joins its leaves in
 //! registers: the join never boxes the value into a `{__variant ...}` table
-//! only to unpack it again. That holds for a modules-v1 enum exactly as for a
-//! legacy one (host engine's `start` builds its first `Wait` this way).
+//! only to unpack it again, in both standalone inputs and named packages.
 
 use crate::common::{V1Fragment, emit_module, emit_v1_package, function_body, mangled_name};
 

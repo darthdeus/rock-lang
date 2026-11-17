@@ -2,4 +2,3 @@
 name = "greeter"
 
 [language]
-modules = "v1"

@@ -3,9 +3,6 @@ name = "match3-core"
 version = "0.1.0"
 type = "lib"
 
-[language]
-modules = "v1"
-
 [build]
 channels = ["dev", "direct"]
 default_channel = "dev"

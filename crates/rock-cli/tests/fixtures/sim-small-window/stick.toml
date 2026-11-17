@@ -3,9 +3,6 @@ name = "sim-small-window"
 version = "0.1.0"
 type = "bin"
 
-[language]
-modules = "v1"
-
 [dependencies]
 stone = {package = "stone"}
 stone-core = {package = "stone-core"}

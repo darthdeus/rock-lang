@@ -11,7 +11,6 @@ type = "lib"
 # names with no manifest change of its own.
 
 [language]
-modules = "v1"
 identity_storage = "exempt"
 
 [build]

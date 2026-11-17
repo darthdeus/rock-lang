@@ -13,7 +13,6 @@ stone-core = { package = "stone-core" }
 stone-native = { package = "stone-native" }
 
 [language]
-modules = "v1"
 identity_storage = "exempt"
 
 [build]
