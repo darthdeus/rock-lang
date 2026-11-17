@@ -251,6 +251,23 @@ fn reject_pipeline(src: &str, vert: &str, frag: &str, needle: &str) {
     }
 }
 
+fn reject_fragment_builtin_in_vertex(name: &str) {
+    let src = format!(
+        r#"
+        value QV {{ aPos: Vec2 }}
+        value Vary {{ position: Vec4 }}
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary {{
+            let w = {name}(a.aPos.x)
+            return Vary {{ position: Vec4 {{ x: w, y: 0.0, z: 0.0, w: 1.0 }} }}
+        }}
+        @shader(fragment)
+        fn fr(vary: Vary) -> Vec4 {{ return vary.position }}
+    "#
+    );
+    reject_pipeline(&src, "vt", "fr", "fragment");
+}
+
 cases! { reject_pipeline:
     /// The varyings struct MUST carry a `position: Vec4` field (-> gl_Position).
     reject_varyings_missing_position(r#"
@@ -743,22 +760,6 @@ fn reject_vertex_id_in_a1_entry() {
             "rejection should mention `vertex-stage builtin`, got: {msg}"
         ),
     }
-}
-
-#[test]
-fn reject_fwidth_in_vertex() {
-    let src = r#"
-        value QV { aPos: Vec2 }
-        value Vary { position: Vec4 }
-        @shader(vertex)
-        fn vt(@attr a: QV) -> Vary {
-            let w = fwidth(a.aPos.x)
-            return Vary { position: Vec4 { x: w, y: 0.0, z: 0.0, w: 1.0 } }
-        }
-        @shader(fragment)
-        fn fr(vary: Vary) -> Vec4 { return vary.position }
-    "#;
-    reject_pipeline(src, "vt", "fr", "fragment");
 }
 
 // --- bool-vector tier -----------------------------------
@@ -1428,30 +1429,10 @@ fn a_program_without_an_engine_group_leaves_slot_zero_empty() {
     );
 }
 
-cases! { reject_pipeline:
-    reject_dfdx_in_vertex(r#"
-        value QV { aPos: Vec2 }
-        value Vary { position: Vec4 }
-        @shader(vertex)
-        fn vt(@attr a: QV) -> Vary {
-            let w = dfdx(a.aPos.x)
-            return Vary { position: Vec4 { x: w, y: 0.0, z: 0.0, w: 1.0 } }
-        }
-        @shader(fragment)
-        fn fr(vary: Vary) -> Vec4 { return vary.position }
-    "#, "vt", "fr", "fragment");
-
-    reject_dfdy_in_vertex(r#"
-        value QV { aPos: Vec2 }
-        value Vary { position: Vec4 }
-        @shader(vertex)
-        fn vt(@attr a: QV) -> Vary {
-            let w = dfdy(a.aPos.x)
-            return Vary { position: Vec4 { x: w, y: 0.0, z: 0.0, w: 1.0 } }
-        }
-        @shader(fragment)
-        fn fr(vary: Vary) -> Vec4 { return vary.position }
-    "#, "vt", "fr", "fragment");
+cases! { reject_fragment_builtin_in_vertex:
+    reject_dfdx_in_vertex("dfdx");
+    reject_dfdy_in_vertex("dfdy");
+    reject_fwidth_in_vertex("fwidth");
 }
 
 #[test]

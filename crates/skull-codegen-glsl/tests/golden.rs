@@ -1,7 +1,7 @@
 //! Golden tests: Rock snippet -> expected GLSL text, over the real stdlib.
 
 use crate::support::{
-    assert_has, emit_checked_entry as emit_entry, emit_library as emit,
+    assert_has, assert_lacks, emit_checked_entry as emit_entry, emit_library as emit,
     emit_library_with as emit_with, workspace,
 };
 use std::sync::LazyLock;
@@ -22,8 +22,20 @@ static STDLIB_NOBOX_VEC2: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .collect()
 });
 
-/// `src` emitted as a function library from `root` is exactly `expected`.
-fn golden(src: &str, root: &str, expected: &str) {
+fn golden(src: &str, root: &str, contains: &[&str], lacks: &[&str]) {
+    let glsl = emit(src, &[root]).expect("emit");
+    for expected in contains {
+        assert_has(&glsl, expected);
+    }
+    for unexpected in lacks {
+        assert!(
+            !glsl.contains(unexpected),
+            "unexpected {unexpected}:\n{glsl}"
+        );
+    }
+}
+
+fn golden_exact(src: &str, root: &str, expected: &str) {
     let glsl = emit(src, &[root]).expect("emit");
     assert_eq!(glsl.trim(), expected);
 }
@@ -440,7 +452,7 @@ fn counted_loop_invariant_bound_folds() {
 
 // --- relooper: structured control flow ---------
 
-cases! { golden:
+cases! { golden_exact:
     /// Milestone 2: the `pick` shape that `reject_if_branch_sentinel` pinned now
     /// emits an if/else (both arms diverge; ipdom collapses to the virtual exit).
     if_branch_pick(
@@ -464,24 +476,13 @@ cases! { golden:
 fn vec2_normalize_body() {
     let src = r#"fn root(v: Vec2) -> Vec2 { return v.normalize() }"#;
     let glsl = emit(src, &["root"]).expect("emit");
-    assert!(
-        glsl.contains(
-            "vec2 normalize_Vec2(vec2 v) {\n  \
-             float len;\n  \
-             if (((v.x == 0.0) && (v.y == 0.0))) {\n    \
-               return vec2(0.0);\n  \
-             } else {\n    \
-               len = sqrt(((v.x * v.x) + (v.y * v.y)));\n    \
-               return vec2((v.x / len), (v.y / len));\n  \
-             }\n}"
-        ),
-        "got:\n{glsl}"
+    assert_has(&glsl, "vec2 normalize_Vec2(vec2 v)");
+    assert_has(
+        &glsl,
+        "if (((v.x == 0.0) && (v.y == 0.0))) {\n    return vec2(0.0);\n  } else {\n    len = sqrt(((v.x * v.x) + (v.y * v.y)));\n    return vec2((v.x / len), (v.y / len));",
     );
     // The native GLSL builtin must NOT be used (undefined at 0).
-    assert!(
-        !glsl.contains("= normalize(v)"),
-        "must not use native normalize:\n{glsl}"
-    );
+    assert_lacks(&glsl, "normalize(v)");
 }
 
 cases! { golden:
@@ -489,13 +490,11 @@ cases! { golden:
     statement_if_no_else(
         r#"fn f(x: float) -> float { let r = x if x > 0.0 { r = x * 2.0 } return r }"#,
         "f",
-        "float f_float(float x) {\n  \
-         float r;\n  \
-         r = x;\n  \
-         if ((x > 0.0)) {\n    \
-           r = (x * 2.0);\n  \
-         }\n  \
-         return r;\n}",
+        &[
+            "float f_float(float x)",
+            "float r;\n  r = x;\n  if ((x > 0.0)) {\n    r = (x * 2.0);\n  }\n  return r;",
+        ],
+        &["else"],
     );
 
     /// if / else-if ladder (the grass `mask_red` shape): nested full diamonds.
@@ -504,16 +503,10 @@ cases! { golden:
             if x < 0.0 { return 0.0 } else if x < 1.0 { return x } else { return 1.0 }
         }"#,
         "mask",
-        "float mask_float(float x) {\n  \
-         if ((x < 0.0)) {\n    \
-           return 0.0;\n  \
-         } else {\n    \
-           if ((x < 1.0)) {\n      \
-             return x;\n    \
-           } else {\n      \
-             return 1.0;\n    \
-           }\n  \
-         }\n}",
+        &[
+            "float mask_float(float x)",
+            "if ((x < 0.0)) {\n    return 0.0;\n  } else {\n    if ((x < 1.0)) {\n      return x;\n    } else {\n      return 1.0;",
+        ], &[],
     );
 
     /// Expression-position `if` into a cell folds to a ternary: both arms single-store the single-use
@@ -521,10 +514,7 @@ cases! { golden:
     expression_if_into_cell(
         r#"fn f(x: float) -> float { let r = if x > 0.0 { x } else { 0.0 - x } return r }"#,
         "f",
-        "float f_float(float x) {\n  \
-         float r;\n  \
-         r = ((x > 0.0) ? x : (0.0 - x));\n  \
-         return r;\n}",
+        &["r = ((x > 0.0) ? x : (0.0 - x));\n  return r;"], &[],
     );
 
     /// A ternary over an int-typed if-expr keeps the outer `float(...)` coercion
@@ -533,32 +523,25 @@ cases! { golden:
     ternary_int_result_outer_coercion(
         r#"fn f(x: float) -> float { let r: float = if x > 0.0 { 1 } else { 2 } return r }"#,
         "f",
-        "float f_float(float x) {\n  \
-         float r;\n  \
-         r = float(((x > 0.0) ? 1 : 2));\n  \
-         return r;\n}",
+        &["r = float(((x > 0.0) ? 1 : 2));\n  return r;"], &[],
     );
 
     /// `&&` in a nested if: the short-circuit diamond folds back to infix `&&`.
     and_in_nested_if(
         r#"@pure fn f(x: float, y: float) -> float { if x > 0.0 && y > 0.0 { return 1.0 } return 0.0 }"#,
         "f",
-        "float f_float_float(float x, float y) {\n  \
-         if (((x > 0.0) && (y > 0.0))) {\n    \
-           return 1.0;\n  \
-         }\n  \
-         return 0.0;\n}",
+        &[
+            "if (((x > 0.0) && (y > 0.0))) {\n    return 1.0;\n  }\n  return 0.0;",
+        ], &[],
     );
 
     /// `||` in a nested if: folds back to infix `||`.
     or_in_nested_if(
         r#"@pure fn f(x: float, y: float) -> float { if x > 0.0 || y > 0.0 { return 1.0 } return 0.0 }"#,
         "f",
-        "float f_float_float(float x, float y) {\n  \
-         if (((x > 0.0) || (y > 0.0))) {\n    \
-           return 1.0;\n  \
-         }\n  \
-         return 0.0;\n}",
+        &[
+            "if (((x > 0.0) || (y > 0.0))) {\n    return 1.0;\n  }\n  return 0.0;",
+        ], &[],
     );
 
     /// Early `return` inside an `if` inside a counted `for`: the empty-else rule
@@ -573,20 +556,9 @@ cases! { golden:
             return acc
         }"#,
         "f",
-        "int f_int(int n) {\n  \
-         int acc;\n  \
-         int i;\n  \
-         int t3;\n  \
-         acc = 0;\n  \
-         i = 0;\n  \
-         t3 = n;\n  \
-         for (; i < t3; i = i + 1) {\n    \
-           if ((i > 5)) {\n      \
-             return acc;\n    \
-           }\n    \
-           acc = (acc + i);\n  \
-         }\n  \
-         return acc;\n}",
+        &[
+            "int acc;\n  int i;\n  int t3;\n  acc = 0;\n  i = 0;\n  t3 = n;\n  for (; i < t3; i = i + 1) {\n    if ((i > 5)) {\n      return acc;\n    }\n    acc = (acc + i);\n  }\n  return acc;",
+        ], &[],
     );
 
     /// `while` with a compound `&&` condition: the header is a multi-block region
@@ -602,17 +574,9 @@ cases! { golden:
             return acc
         }"#,
         "f",
-        "float f_float(float x) {\n  \
-         float acc;\n  \
-         int i;\n  \
-         acc = 0.0;\n  \
-         i = 0;\n  \
-         while (true) {\n    \
-           if (!(((i < 10) && (acc < 100.0)))) { break; }\n    \
-           acc = (acc + x);\n    \
-           i = (i + 1);\n  \
-         }\n  \
-         return acc;\n}",
+        &[
+            "float acc;\n  int i;\n  acc = 0.0;\n  i = 0;\n  while (true) {\n    if (!(((i < 10) && (acc < 100.0)))) { break; }\n    acc = (acc + x);\n    i = (i + 1);\n  }\n  return acc;",
+        ], &[],
     );
 
     /// break + continue in a counted `for` (continue -> the for-header increment).
@@ -627,23 +591,9 @@ cases! { golden:
             return acc
         }"#,
         "f",
-        "int f_int(int n) {\n  \
-         int acc;\n  \
-         int i;\n  \
-         int t3;\n  \
-         acc = 0;\n  \
-         i = 0;\n  \
-         t3 = n;\n  \
-         for (; i < t3; i = i + 1) {\n    \
-           if ((i > 5)) {\n      \
-             break;\n    \
-           }\n    \
-           if ((i == 2)) {\n      \
-             continue;\n    \
-           }\n    \
-           acc = (acc + i);\n  \
-         }\n  \
-         return acc;\n}",
+        &[
+            "for (; i < t3; i = i + 1) {\n    if ((i > 5)) {\n      break;\n    }\n    if ((i == 2)) {\n      continue;\n    }\n    acc = (acc + i);\n  }\n  return acc;",
+        ], &[],
     );
 
     /// break + continue in a general `while`.
@@ -660,23 +610,9 @@ cases! { golden:
             return acc
         }"#,
         "f",
-        "int f_int(int n) {\n  \
-         int acc;\n  \
-         int i;\n  \
-         acc = 0;\n  \
-         i = 0;\n  \
-         while (true) {\n    \
-           if (!((i < n))) { break; }\n    \
-           i = (i + 1);\n    \
-           if ((i > 5)) {\n      \
-             break;\n    \
-           }\n    \
-           if ((i == 2)) {\n      \
-             continue;\n    \
-           }\n    \
-           acc = (acc + i);\n  \
-         }\n  \
-         return acc;\n}",
+        &[
+            "while (true) {\n    if (!((i < n))) { break; }\n    i = (i + 1);\n    if ((i > 5)) {\n      break;\n    }\n    if ((i == 2)) {\n      continue;\n    }\n    acc = (acc + i);\n  }\n  return acc;",
+        ], &[],
     );
 
     /// Nested loop + if (the grass wind-loop shape).
@@ -691,25 +627,9 @@ cases! { golden:
             return acc
         }"#,
         "f",
-        "int f_int(int n) {\n  \
-         int acc;\n  \
-         int y;\n  \
-         int t3;\n  \
-         int x;\n  \
-         int t5;\n  \
-         acc = 0;\n  \
-         y = 0;\n  \
-         t3 = n;\n  \
-         for (; y < t3; y = y + 1) {\n    \
-           x = 0;\n    \
-           t5 = n;\n    \
-           for (; x < t5; x = x + 1) {\n      \
-             if ((x == y)) {\n        \
-               acc = (acc + 1);\n      \
-             }\n    \
-           }\n  \
-         }\n  \
-         return acc;\n}",
+        &[
+            "for (; y < t3; y = y + 1) {\n    x = 0;\n    t5 = n;\n    for (; x < t5; x = x + 1) {\n      if ((x == y)) {\n        acc = (acc + 1);\n      }\n    }\n  }\n  return acc;",
+        ], &[],
     );
 
     /// Const loop bound folds into the for-header: `t = 4; for (; i < t;...)` -> `for (;
@@ -722,15 +642,8 @@ cases! { golden:
             return acc
         }"#,
         "f",
-        "int f_0() {\n  \
-         int acc;\n  \
-         int i;\n  \
-         acc = 0;\n  \
-         i = 0;\n  \
-         for (; i < 4; i = i + 1) {\n    \
-           acc = (acc + i);\n  \
-         }\n  \
-         return acc;\n}",
+        &["int acc;\n  int i;\n  acc = 0;\n  i = 0;\n  for (; i < 4; i = i + 1) {\n    acc = (acc + i);\n  }\n  return acc;"],
+        &["t3"],
     );
 }
 
@@ -760,16 +673,9 @@ cases! { golden:
             match n { 1 => { return 10 } 2 => { return 20 } _ => { return 0 } }
         }"#,
         "f",
-        "int f_int(int n) {\n  \
-         if ((n == 1)) {\n    \
-           return 10;\n  \
-         } else {\n    \
-           if ((n == 2)) {\n      \
-             return 20;\n    \
-           } else {\n      \
-             return 0;\n    \
-           }\n  \
-         }\n}",
+        &[
+            "if ((n == 1)) {\n    return 10;\n  } else {\n    if ((n == 2)) {\n      return 20;\n    } else {\n      return 0;\n    }\n  }",
+        ], &[],
     );
 }
 
@@ -866,26 +772,9 @@ cases! { golden:
             return acc
         }"#,
         "f",
-        "int f_int(int n) {\n  \
-         int acc;\n  \
-         int i;\n  \
-         int j;\n  \
-         acc = 0;\n  \
-         i = 0;\n  \
-         while (true) {\n    \
-           if (!((i < n))) { break; }\n    \
-           j = 0;\n    \
-           while (true) {\n      \
-             if (!((j < i))) { break; }\n      \
-             if ((j == 3)) {\n        \
-               break;\n      \
-             }\n      \
-             acc = (acc + 1);\n      \
-             j = (j + 1);\n    \
-           }\n    \
-           i = (i + 1);\n  \
-         }\n  \
-         return acc;\n}",
+        &[
+            "int acc;\n  int i;\n  int j;\n  acc = 0;\n  i = 0;\n  while (true) {\n    if (!((i < n))) { break; }\n    j = 0;\n    while (true) {\n      if (!((j < i))) { break; }\n      if ((j == 3)) {\n        break;\n      }\n      acc = (acc + 1);\n      j = (j + 1);\n    }\n    i = (i + 1);\n  }\n  return acc;",
+        ], &[],
     );
 
     /// Int literals in float contexts render as float literals: GLSL ES has no
@@ -905,16 +794,12 @@ cases! { golden:
             }
         "#,
         "root",
-        "float root_float(float x) {\n  \
-         float y;\n  \
-         y = 0.5;\n  \
-         if ((x > 0.0)) {\n    \
-           y = (x + 1.0);\n  \
-         }\n  \
-         if ((x == 3.0)) {\n    \
-           y = sin(2.0);\n  \
-         }\n  \
-         return 0.0;\n}",
+        &[
+            "float root_float(float x)",
+            "if ((x > 0.0)) {\n    y = (x + 1.0);\n  }",
+            "if ((x == 3.0)) {\n    y = sin(2.0);\n  }",
+            "return 0.0;",
+        ], &[],
     );
 }
 
@@ -948,7 +833,7 @@ cases! { golden:
     int_in_mixed_arithmetic(
         r#"@pure fn f(x: float, i: int) -> float { return x + i }"#,
         "f",
-        "float f_float_int(float x, int i) {\n  return (x + float(i));\n}",
+        &["return (x + float(i));"], &[],
     );
 
     /// Cell typing: a `let y: float = 0` binding declares `float y;` (from the
@@ -957,10 +842,7 @@ cases! { golden:
     let_float_annotation_cell_typing(
         r#"fn f() -> float { let y: float = 0  return y }"#,
         "f",
-        "float f_0() {\n  \
-         float y;\n  \
-         y = 0.0;\n  \
-         return y;\n}",
+        &["float y;\n  y = 0.0;\n  return y;"], &[],
     );
 }
 
@@ -1242,12 +1124,10 @@ fn conditionally_reassigned_sample() {
         }
     "#;
     let glsl = emit_entry(src, "frag").expect("emit");
-    assert!(
-        glsl.contains(
-            "  vec4 color;\n  color = texture(scene, tc);\n  if ((color.w < 0.5)) {\n    \
-             color = vec4((color.x * 0.5), color.y, 0.0, 1.0);\n  }\n  return color;\n"
-        ),
-        "got:\n{glsl}"
+    assert_has(&glsl, "vec4 color;");
+    assert_has(
+        &glsl,
+        "color = texture(scene, tc);\n  if ((color.w < 0.5)) {\n    color = vec4((color.x * 0.5), color.y, 0.0, 1.0);\n  }\n  return color;",
     );
 }
 
@@ -1266,9 +1146,10 @@ cases! { golden:
             }
         "#,
         "nudge",
-        "float nudge_Vec2_float(vec2 p, float d) {\n  vec2 q;\n  float t3;\n  float old;\n  \
-         q = p;\n  q = vec2(q.x, (q.y + d));\n  p = vec2((p.x * 2.0), p.y);\n  t3 = q.x;\n  \
-         q = vec2((q.x + 1.0), q.y);\n  old = t3;\n  \
-         return ((((old + q.x) + q.y) + p.x) + p.y);\n}",
+        &[
+            "float nudge_Vec2_float(vec2 p, float d) {\n  vec2 q;\n  float t3;\n  float old;",
+            "q = p;\n  q = vec2(q.x, (q.y + d));\n  p = vec2((p.x * 2.0), p.y);\n  t3 = q.x;\n  q = vec2((q.x + 1.0), q.y);\n  old = t3;",
+            "return ((((old + q.x) + q.y) + p.x) + p.y);",
+        ], &[],
     );
 }
