@@ -56,3 +56,15 @@ does not by itself establish a whole-application improvement.
 reports trace starts, compilations, aborts and flushes for an allocation window.
 When adding a LuaJIT trace hook, chain existing `jit.attach` handlers: LuaJIT
 keeps one handler per event and an application can install its own.
+
+## Nullable tuple returns
+
+A `-> (T, U)?` whose elements are all scalars returns one boxed table per
+present value (the unboxed presence-lane wire is reserved for tuples
+carrying a `nobox` element, whose round-trip identity depends on it).
+Measured under LuaJIT this costs nothing in the shape that matters: a hot
+loop over a `(int, int)?` call (20M iterations) runs at the same speed
+boxed as a hand-written multi-return version -- the allocation sits inside
+the trace and sinking elides it. Revisit only with a measurement showing a
+trace where the box survives (an escape, or a trace boundary through the
+call).
