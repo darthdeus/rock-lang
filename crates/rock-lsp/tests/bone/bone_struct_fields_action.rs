@@ -11,150 +11,66 @@
 use crate::common::*;
 use lsp_types::*;
 
+const POINT: &str = "struct Point { x: int, y: int }";
+const BAR: &str = "struct Bar { a: int, b: int = 5 }";
+
 /// The single action whose title mentions struct fields, or None.
 fn fill_action(actions: &[CodeAction]) -> Option<&CodeAction> {
     actions.iter().find(|a| a.title.contains("struct field"))
 }
 
-#[test]
-fn fills_all_fields_of_an_empty_literal() {
-    let src = "\
-struct Point { x: int, y: int }
-
-fn main() {
-    let p = Point {}
-}
-";
-    // cursor inside `Point {}` (line 3)
-    let actions = run(src, 3, 16);
-    let action = fill_action(&actions).expect("expected a fill-struct-fields action");
-    let out = apply(src, action);
-    assert!(
-        out.contains("Point { x: ?, y: ? }"),
-        "both fields filled inline: {out:?}"
-    );
+fn source(decl: &str, literal: &str) -> String {
+    format!("{decl}\n\nfn main() {{\n    let p = {literal}\n}}\n")
 }
 
 #[test]
-fn fills_only_the_missing_field_of_a_partial_literal() {
-    let src = "\
-struct Point { x: int, y: int }
-
-fn main() {
-    let p = Point { x: 1 }
-}
-";
-    let actions = run(src, 3, 20);
-    let action = fill_action(&actions).expect("expected a fill action");
-    let out = apply(src, action);
-    assert!(
-        out.contains("Point { x: 1, y: ? }"),
-        "only y added, comma inserted: {out:?}"
-    );
-    assert!(
-        !out.contains("x: ?"),
-        "must not re-add the present x: {out:?}"
-    );
-}
-
-#[test]
-fn respects_a_trailing_comma() {
-    let src = "\
-struct Point { x: int, y: int }
-
-fn main() {
-    let p = Point { x: 1, }
-}
-";
-    let actions = run(src, 3, 20);
-    let action = fill_action(&actions).expect("expected a fill action");
-    let out = apply(src, action);
-    assert!(
-        out.contains("Point { x: 1, y: ? }"),
-        "trailing comma not duplicated: {out:?}"
-    );
-}
-
-#[test]
-fn does_not_add_fields_that_have_a_default() {
-    // `b` has a default, so `Bar { a: 1 }` is already complete -> no action.
-    let src = "\
-struct Bar { a: int, b: int = 5 }
-
-fn main() {
-    let v = Bar { a: 1 }
-}
-";
-    let actions = run(src, 3, 18);
-    assert!(
-        fill_action(&actions).is_none(),
-        "defaulted field missing is legal -> no fill action: {actions:?}"
-    );
-}
-
-#[test]
-fn fills_only_required_fields_in_empty_literal_with_a_default() {
-    // `Bar {}` is missing required `a` (fill) and defaulted `b` (skip).
-    let src = "\
-struct Bar { a: int, b: int = 5 }
-
-fn main() {
-    let v = Bar {}
-}
-";
-    let actions = run(src, 3, 17);
-    let action = fill_action(&actions).expect("expected a fill action for required `a`");
-    let out = apply(src, action);
-    assert!(out.contains("Bar { a: ? }"), "only required a: {out:?}");
-    assert!(!out.contains("b: ?"), "defaulted b not added: {out:?}");
-}
-
-#[test]
-fn no_action_when_all_fields_present() {
-    let src = "\
-struct Point { x: int, y: int }
-
-fn main() {
-    let p = Point { x: 1, y: 2 }
-}
-";
-    assert!(
-        fill_action(&run(src, 3, 20)).is_none(),
-        "complete literal offers no fill action"
-    );
-}
-
-#[test]
-fn no_action_when_cursor_not_in_a_struct_literal() {
-    let src = "\
-struct Point { x: int, y: int }
-
-fn main() {
-    let p = Point { x: 1, y: 2 }
-}
-";
-    // cursor on the `struct` decl line (line 0)
-    assert!(fill_action(&run(src, 0, 8)).is_none());
-}
-
-#[test]
-fn fills_a_multiline_literal_with_matching_indent() {
-    let src = "\
-struct Point { x: int, y: int }
-
-fn main() {
-    let p = Point {
-        x: 1
+fn struct_field_fill_cases() {
+    for (decl, literal, (line, character), inserted, absent) in [
+        (POINT, "Point {}", (3, 16), Some("Point { x: ?, y: ? }"), ""),
+        (
+            POINT,
+            "Point { x: 1 }",
+            (3, 20),
+            Some("Point { x: 1, y: ? }"),
+            "x: ?",
+        ),
+        (
+            POINT,
+            "Point { x: 1, }",
+            (3, 20),
+            Some("Point { x: 1, y: ? }"),
+            "",
+        ),
+        (BAR, "Bar { a: 1 }", (3, 18), None, ""),
+        (BAR, "Bar {}", (3, 17), Some("Bar { a: ? }"), "b: ?"),
+        (POINT, "Point { x: 1, y: 2 }", (3, 20), None, ""),
+        (POINT, "Point { x: 1, y: 2 }", (0, 8), None, ""),
+        (
+            POINT,
+            "Point {\n        x: 1\n    }",
+            (4, 8),
+            Some("        x: 1,\n        y: ?,\n"),
+            "",
+        ),
+    ] {
+        let src = source(decl, literal);
+        let actions = run(&src, line, character);
+        match (inserted, fill_action(&actions)) {
+            (Some(expected), Some(action)) => {
+                let out = apply(&src, action);
+                assert!(
+                    out.contains(expected),
+                    "{literal} at {line}:{character}: {out:?}"
+                );
+                assert!(
+                    absent.is_empty() || !out.contains(absent),
+                    "{literal} at {line}:{character}: {out:?}"
+                );
+            }
+            (None, None) => {}
+            (expected, action) => {
+                panic!("{literal} at {line}:{character}: expected {expected:?}, got {action:?}")
+            }
+        }
     }
-}
-";
-    // cursor on the `x: 1` line (line 4)
-    let actions = run(src, 4, 8);
-    let action = fill_action(&actions).expect("expected a fill action");
-    let out = apply(src, action);
-    // y goes on its own line, indented like x, with a comma closing x.
-    assert!(
-        out.contains("        x: 1,\n        y: ?,\n"),
-        "multiline fill keeps indentation: {out:?}"
-    );
 }
