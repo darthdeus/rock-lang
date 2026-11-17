@@ -722,12 +722,39 @@ impl<'a> Builder<'a> {
         }
     }
 
+    fn global_flag_for_place(
+        &self,
+        mut expr: Idx<Expr>,
+    ) -> Option<crate::global_storage::GlobalReadCheck> {
+        loop {
+            match self.body.expr_arena[expr] {
+                Expr::FieldAccess { base, .. } => expr = base,
+                Expr::Global(name) => {
+                    return self
+                        .scx
+                        .global_read_checks(self.ws)
+                        .get(&crate::mangle::symbol_of_key(name))
+                        .copied()
+                        .filter(|check| check.flag_key.is_some());
+                }
+                _ => return None,
+            }
+        }
+    }
+
     /// Read a `nobox` global place back as an unboxed repr.
     pub(crate) fn nobox_global_load(
         &mut self,
+        expr: Idx<Expr>,
         leaves: &[Ustr],
         shape: Option<ValueShape>,
     ) -> ValueRepr {
+        if leaves.is_empty()
+            && crate::verify::checks_enabled()
+            && let Some(check) = self.global_flag_for_place(expr)
+        {
+            self.emit_cur(Inst::Global(check.probe));
+        }
         let vals: Vec<Idx<Inst>> = leaves
             .iter()
             .map(|g| self.emit_cur(Inst::Global(*g)))
@@ -744,10 +771,12 @@ impl<'a> Builder<'a> {
     /// Write `value` into a `nobox` global place, leaf by leaf.
     pub(crate) fn nobox_global_store(
         &mut self,
+        target: Idx<Expr>,
         leaves: &[Ustr],
         shape: Option<ValueShape>,
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
+        let whole = shape.is_some();
         let vals = match shape {
             Some(shape) => {
                 let r = self.lower_expr_repr(value)?;
@@ -757,6 +786,18 @@ impl<'a> Builder<'a> {
         };
         for (g, v) in leaves.iter().zip(vals) {
             self.emit_cur(Inst::StoreGlobal { name: *g, value: v });
+        }
+        if whole
+            && crate::verify::checks_enabled()
+            && let Some(check) = self.global_flag_for_place(target)
+            && leaves.len() == check.leaf_count
+            && (check.leaf_count > 0 || matches!(self.body.expr_arena[target], Expr::Global(_)))
+        {
+            let initialized = self.emit_cur(Inst::Const(Lit::Bool(true)));
+            self.emit_cur(Inst::StoreGlobal {
+                name: check.probe,
+                value: initialized,
+            });
         }
         Ok(())
     }

@@ -1,0 +1,76 @@
+inline(lua) fn read_error(f: fn()) -> string = """
+    local ok, err = pcall(f)
+    return ok and "" or tostring(err)
+"""
+inline(js) fn read_error(f: fn()) -> string = """
+    try { __rock_call(f); return ""; }
+    catch (e) { return e.message; }
+"""
+
+global EARLY: int
+global ASSIGNED: bool
+global OPTIONAL: int?
+global CALLBACK_STATE: int
+nobox value NullableFields { a: int?, b: bool? }
+global FLAT: NullableFields
+
+@test fn pre_assignment_global_read_names_the_global_and_location() {
+    let message = read_error(() => { let unused = EARLY })
+    assert(message.contains("uninitialized global `EARLY`"))
+    assert(message.contains("uninitialized_globals.rock:18:51"))
+}
+
+@test fn assigned_false_and_optional_null_are_valid_global_values() {
+    ASSIGNED = false
+    assert(!ASSIGNED)
+    assert(OPTIONAL == null)
+}
+
+@test fn flattened_global_can_be_assigned_all_null_fields() {
+    let message = read_error(() => { let unused = FLAT })
+    assert(message.contains("uninitialized global `FLAT`"))
+    FLAT = NullableFields { a: null, b: null }
+    assert(FLAT.a == null)
+    assert(FLAT.b == null)
+}
+
+co fn lifecycle_reader() -> Coroutine<int> {
+    on_resume { let unused = CALLBACK_STATE }
+    yield 1
+}
+
+@test fn lifecycle_callback_checks_the_read_when_it_runs() {
+    let reader = lifecycle_reader()
+    let message = read_error(() => { let unused = reader.resume() })
+    assert(message.contains("uninitialized global `CALLBACK_STATE`"))
+}
+
+nobox value Empty {}
+global EMPTY: Empty
+
+@test fn empty_flattened_global_still_requires_assignment() {
+    let message = read_error(() => { let unused = EMPTY })
+    assert(message.contains("uninitialized global `EMPTY`"))
+    EMPTY = Empty {}
+    let unused = EMPTY
+}
+
+nobox value WithEmpty { tag: Empty, number: int }
+global ZERO_CHILD: WithEmpty
+
+@test fn zero_leaf_projection_checks_its_global() {
+    let message = read_error(() => { let unused = ZERO_CHILD.tag })
+    assert(message.contains("uninitialized global `ZERO_CHILD`"))
+    ZERO_CHILD = WithEmpty { tag: Empty {}, number: 1 }
+    let unused = ZERO_CHILD.tag
+}
+
+global COLLISION: NullableFields
+global __rock_global_initialized_COLLISION: int = 7
+
+@test fn initialization_flags_cannot_alias_user_globals() {
+    let message = read_error(() => { let unused = COLLISION })
+    assert(message.contains("uninitialized global `COLLISION`"))
+    COLLISION = NullableFields { a: null, b: null }
+    assert_eq(__rock_global_initialized_COLLISION, 7)
+}

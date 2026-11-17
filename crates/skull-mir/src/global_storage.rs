@@ -68,6 +68,13 @@ pub fn global_storage_keys(
             }
         }
     }
+    if crate::verify::checks_enabled() && matches!(scx.target(), FnBackend::Lua | FnBackend::Js) {
+        for check in scx.global_read_checks(ws).values() {
+            if let Some(key) = check.flag_key {
+                keys.insert(check.probe, key.to_string());
+            }
+        }
+    }
     Ok(keys)
 }
 
@@ -145,6 +152,17 @@ pub fn global_layout_id(ws: &Workspace, scx: &ScalarCtx) -> Result<String, Strin
                 plan.logical_fingerprint()
             ));
         }
+    }
+    if crate::verify::checks_enabled() && matches!(scx.target(), FnBackend::Lua | FnBackend::Js) {
+        let mut flags = scx
+            .global_read_checks(ws)
+            .values()
+            .filter(|c| c.flag_key.is_some())
+            .map(|c| c.probe.to_string())
+            .collect::<Vec<_>>();
+        flags.sort();
+        flags.dedup();
+        rows.extend(flags);
     }
     let arena = scx.rep_arena();
     for name in ws.struct_by_name.keys() {
@@ -249,4 +267,78 @@ pub fn static_storage_slots<'a>(
         }
     }
     Ok(slots)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct GlobalReadCheck {
+    pub flag_key: Option<Ustr>,
+    pub leaf_count: usize,
+    pub probe: Ustr,
+    pub name: Ustr,
+}
+
+pub(crate) fn global_read_checks(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+) -> rustc_hash::FxHashMap<Ustr, GlobalReadCheck> {
+    let mut checks = rustc_hash::FxHashMap::default();
+    for module in ws.source_modules() {
+        for (gid, global) in module.globals.iter() {
+            if global.is_const
+                || module.bodies[&bone_core::hir::BodyOwner::Global(gid)]
+                    .root
+                    .is_some()
+            {
+                continue;
+            }
+            let Ok(ty) =
+                crate::monoty::convert_decl(ws, global.ty, &crate::lower::SpecSubst::default())
+            else {
+                continue;
+            };
+            if ty.peel_nullable().1 {
+                continue;
+            }
+            let Ok(plan) = GlobalPlan::for_declared_type(ws, scx, global.ty) else {
+                continue;
+            };
+            let physical = physical_leaf_names(&plan, global.name);
+            // Optional fields can leave every flattened value leaf null.
+            let flag = plan
+                .leaf_names(symbol_of_key(global.name))
+                .map(|_| initialization_flag(global.name));
+            let leaf_count = physical.len();
+            let flag_key = flag.map(|_| {
+                crate::names::ustr(&storage_key(
+                    &global_identity(module.logical_file, global.name),
+                    "initialized",
+                ))
+            });
+            let check = GlobalReadCheck {
+                flag_key,
+                leaf_count,
+                probe: flag.unwrap_or(symbol_of_key(global.name)),
+                name: crate::names::ustr(crate::mangle::declared_name(global.name.as_str())),
+            };
+            if let Some(flag) = flag {
+                checks.insert(flag, check);
+                checks.insert(symbol_of_key(global.name), check);
+            }
+            for leaf in physical {
+                checks.insert(
+                    leaf,
+                    GlobalReadCheck {
+                        probe: flag.unwrap_or(leaf),
+                        ..check
+                    },
+                );
+            }
+        }
+    }
+    checks
+}
+
+fn initialization_flag(name: Ustr) -> Ustr {
+    // This name only addresses storage; Rock identifiers cannot contain `$`.
+    crate::names::ustr(&format!("$global_initialized_{}", symbol_of_key(name)))
 }

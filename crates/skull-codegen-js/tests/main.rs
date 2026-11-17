@@ -13,6 +13,7 @@ mod enum_boxes;
 mod format_specs;
 mod generic_inline;
 mod global_layout;
+mod global_read;
 mod global_storage;
 mod host;
 mod host_supply_keys;

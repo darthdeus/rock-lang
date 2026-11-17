@@ -336,6 +336,7 @@ struct ValueReferences {
 /// type-derived fn-value ABI at their definitions and direct calls, so all three
 /// call forms agree without callee-identity analysis.
 pub struct ScalarCtx {
+    global_read_checks: OnceLock<HashMap<Ustr, crate::global_storage::GlobalReadCheck>>,
     value_references: std::sync::Arc<ValueReferences>,
     /// When set, the scalarized value ABI is disabled workspace-wide: every fn
     /// keeps value structs as first-class single values (params/returns/args),
@@ -385,6 +386,7 @@ pub struct ScalarCtx {
 impl Clone for ScalarCtx {
     fn clone(&self) -> Self {
         Self {
+            global_read_checks: OnceLock::new(),
             value_references: std::sync::Arc::clone(&self.value_references),
             values_first_class: self.values_first_class,
             native_flat_enums: self.native_flat_enums,
@@ -451,6 +453,7 @@ impl ScalarCtx {
         // full + incremental paths build a `ScalarCtx::new`. The JS driver and the
         // GLSL backend override via `with_target`.
         Self {
+            global_read_checks: OnceLock::new(),
             value_references: std::sync::Arc::new(value_references),
             values_first_class,
             native_flat_enums: false,
@@ -464,6 +467,14 @@ impl ScalarCtx {
             interner,
             abi_plans: abi::AbiPlanCache::default(),
         }
+    }
+
+    pub(crate) fn global_read_checks(
+        &self,
+        ws: &Workspace,
+    ) -> &HashMap<Ustr, crate::global_storage::GlobalReadCheck> {
+        self.global_read_checks
+            .get_or_init(|| crate::global_storage::global_read_checks(ws, self))
     }
 
     /// **The build's one type arena**, through which every [`Instance`] is
@@ -567,6 +578,7 @@ impl ScalarCtx {
         // read it -- drop them all rather than tracking which flips reach which
         // plan. Cheaper than one stale plan is worth.
         self.abi_plans.clear();
+        self.global_read_checks.take();
         if self.values_first_class {
             return Vec::new();
         }
@@ -2785,7 +2797,79 @@ impl<'a> Builder<'a> {
         {
             self.cur = self.f.new_block();
         }
+        if let Inst::Global(name) = self.f.insts[id]
+            && crate::verify::checks_enabled()
+            && matches!(
+                self.scx.target,
+                bone_core::hir::FnBackend::Lua | bone_core::hir::FnBackend::Js
+            )
+            && let Some(check) = self
+                .scx
+                .global_read_checks(self.ws)
+                .get(&crate::mangle::symbol_of_key(name))
+                .copied()
+        {
+            self.check_global_read(id, &check);
+        }
         id
+    }
+
+    fn check_global_read(
+        &mut self,
+        value: Idx<Inst>,
+        check: &crate::global_storage::GlobalReadCheck,
+    ) {
+        // A typed assignment in this block already established a non-null value.
+        if self.f.blocks[self.cur].insts.iter().any(|i| {
+            matches!(self.f.insts[*i], Inst::StoreGlobal { name, .. } if crate::mangle::symbol_of_key(name) == check.probe)
+        }) {
+            return;
+        }
+        let error = crate::names::ustr("error");
+        let error_function = self
+            .ws
+            .functions_by_name
+            .get(&error)
+            .and_then(|defs| defs.first())
+            .copied();
+        let probe = if matches!(self.f.insts[value], Inst::Global(name) if crate::mangle::symbol_of_key(name) == check.probe)
+        {
+            value
+        } else {
+            self.f.emit(self.cur, Inst::Global(check.probe))
+        };
+        let nil = self.f.emit(self.cur, Inst::Const(Lit::Nil));
+        let missing = self.f.emit(self.cur, Inst::Eq(probe, nil));
+        let fail = self.f.new_block();
+        let next = self.f.new_block();
+        self.branch_to(missing, fail, next);
+        let span = self.cur_span.unwrap_or_default();
+        let message = format!(
+            "uninitialized global `{}` at {}:{}:{}",
+            check.name,
+            span.file,
+            span.line_range().0 + 1,
+            span.col_range().0 + 1
+        );
+        let message = self
+            .f
+            .emit(fail, Inst::Const(Lit::Str(crate::names::ustr(&message))));
+        let call = match error_function {
+            Some((module, func)) => Inst::Call {
+                func: FuncRef { module, func },
+                args: vec![message],
+            },
+            None => {
+                let callee = self.f.emit(fail, Inst::Global(error));
+                Inst::CallValue {
+                    callee,
+                    args: vec![message],
+                }
+            }
+        };
+        let call = self.f.emit(fail, call);
+        self.f.inst_spans.insert(call, span);
+        self.cur = next;
     }
 
     /// The shared type/dispatch context this builder resolves through. Every

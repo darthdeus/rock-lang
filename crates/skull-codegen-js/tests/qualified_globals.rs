@@ -39,7 +39,7 @@ fn root(ws: &Workspace) -> FuncRef {
     }
 }
 
-fn run(tool: &str, program: &str) -> String {
+pub(crate) fn run(tool: &str, program: &str) -> String {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(

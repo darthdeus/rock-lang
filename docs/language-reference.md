@@ -83,6 +83,23 @@ an existing Lua global, `extern(js) fn` to a JS global, and
 `extern(ffi, "lib") fn` to a C symbol reached through LuaJIT FFI. A bare
 `extern` or `extern(c)` is rejected; both meant `extern(lua)`.
 
+A global may omit its initializer:
+
+```rock
+global current_scene: Scene
+global selection: Entity?
+```
+
+In checked builds (`ROCK_MIR_CHECKS=1`), reading a non-optional global
+without an initializer before its first assignment raises a runtime error
+naming the global and the read's source file, line and column. This applies
+across modules and inside callbacks when they run. Assign the global before
+any consumer reads it. Compatible hot reload preserves assigned globals.
+An explicitly optional global (`T?`) starts as `null` and may be read before
+assignment. Globals with initializers use their initialized values.
+Unchecked builds (`ROCK_MIR_CHECKS=0`) keep the existing storage behavior
+without these read checks. No declaration syntax changes are needed.
+
 A `static` local persists across calls and initializes the first time control
 reaches its declaration:
 

@@ -1601,7 +1601,7 @@ impl<'a> Builder<'a> {
             // the leaf global itself.
             Expr::FieldAccess { .. } if nobox_global_place.is_some() => {
                 let (leaves, shape) = nobox_global_place.clone().expect("guard matched");
-                self.nobox_global_store(&leaves, shape, value)?;
+                self.nobox_global_store(target, &leaves, shape, value)?;
             }
             Expr::FieldAccess { base, field }
                 if !self.scx.values_first_class
@@ -1781,7 +1781,7 @@ impl<'a> Builder<'a> {
             })?,
             Expr::Global(_) if nobox_global_place.is_some() => {
                 let (leaves, shape) = nobox_global_place.clone().expect("guard matched");
-                self.nobox_global_store(&leaves, shape, value)?;
+                self.nobox_global_store(target, &leaves, shape, value)?;
             }
             Expr::Global(name) => {
                 let v = self.lower_expr(value)?;

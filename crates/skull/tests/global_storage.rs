@@ -211,3 +211,15 @@ print(ok, err)
         "false\tRock global layout changed; restart required"
     );
 }
+
+#[test]
+fn a_checked_global_read_without_stdlib_still_raises_at_runtime() {
+    let lua = crate::common::emit_without_stdlib(
+        "global LATE: int\n@nomangle fn read() -> int { LATE }\nfn main() { read() }\n",
+    );
+    let result = run_luajit(&format!(
+        "{lua}\nlocal ok, err = pcall(read); assert(not ok); print(err)"
+    ));
+    assert!(result.contains("uninitialized global `LATE`"), "{result}");
+    assert!(result.contains("<t>:2:30"), "{result}");
+}

@@ -913,7 +913,7 @@ impl<'a> Builder<'a> {
             // snapshot -- no box to copy out of.
             Expr::Global(_) if nobox_global_place.is_some() => {
                 let (leaves, shape) = nobox_global_place.expect("guard matched");
-                Ok(self.nobox_global_load(&leaves, shape))
+                Ok(self.nobox_global_load(e, &leaves, shape))
             }
             // A global holding a value struct is a mutable place: a whole-value read
             // copies (the leaves are snapshotted at the read point).
