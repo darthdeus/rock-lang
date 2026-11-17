@@ -75,35 +75,35 @@ pub fn source_fits_spans(file: Ustr, start_offset: usize, len: usize) -> Result<
     }
 }
 
+macro_rules! lua_keywords {
+    ($($word:literal),* $(,)?) => {
+        fn escape_lua_keyword(name: &str) -> &str {
+            match name {
+                $($word => concat!("__rock_", $word),)*
+                _ => name,
+            }
+        }
+
+        fn unescape_lua_keyword(name: &str) -> &str {
+            match name {
+                $(concat!("__rock_", $word) => $word,)*
+                _ => name,
+            }
+        }
+    };
+}
+
+lua_keywords!(
+    "and", "do", "elseif", "end", "function", "goto", "local", "nil", "not", "or", "repeat",
+    "then", "until"
+);
+
 impl<'a> Tokenizer<'a> {
     pub fn new(input: &'a str, source_file: Ustr) -> Self {
-        let current = decode_at(input.as_bytes(), 0).map(|(c, _)| c);
-
-        Self {
-            source_file,
-            input,
-            current,
-
-            byte_offset: 0,
-            line: 0,
-            column: 0,
-            byte_index: 0,
-            last_token_kind: None,
-            just_skipped_whitespace: false,
-        }
+        Self::new_with_offset(input, source_file, 0, 0, 0)
     }
 
-    /// Build a tokenizer that emits spans pointing into a *parent* source.
-    /// Used by the interpolated-string and format-specifier parsers to
-    /// re-parse a slice of an outer string literal while preserving the
-    /// outer file/line/column so diagnostics, hover, and goto-def land in
-    /// the right place.
-    ///
-    /// `offset`, `line`, `column` describe the position of `input[0]`
-    /// within the outer source (byte offset, 0-based line, 0-based column).
-    /// The three are **independently sourced** — there is no cross-check
-    /// at construction. Get them all from the same span and you're fine;
-    /// mix-and-match at your peril.
+    /// Tokenize a fragment whose first byte is at this position in its source file.
     pub fn new_with_offset(
         input: &'a str,
         source_file: Ustr,
@@ -127,20 +127,7 @@ impl<'a> Tokenizer<'a> {
     }
 
     pub fn from_code(id_path: &str, input: &'a str) -> Self {
-        let source_file: Ustr = id_path.into();
-        let current = decode_at(input.as_bytes(), 0).map(|(c, _)| c);
-
-        Self {
-            source_file,
-            input,
-            current,
-            byte_offset: 0,
-            line: 0,
-            column: 0,
-            byte_index: 0,
-            last_token_kind: None,
-            just_skipped_whitespace: false,
-        }
+        Self::new(input, id_path.into())
     }
 
     pub fn advance(&mut self) {
@@ -425,96 +412,19 @@ impl<'a> Tokenizer<'a> {
 
         let ident = self.read_ident();
 
-        match ident {
-            "fn" => Ok(TokenKind::Fn),
-            "operator" => Ok(TokenKind::Operator),
-            "table" => Ok(TokenKind::Table),
-            "type" => Ok(TokenKind::Type),
-            "as" => Ok(TokenKind::As),
-
-            "yield" => Ok(TokenKind::Yield),
-            "await" => Ok(TokenKind::Await),
-
-            "if" => Ok(TokenKind::If),
-
-            "let" => Ok(TokenKind::Let),
-            "return" => Ok(TokenKind::Return),
-            "defer" => Ok(TokenKind::Defer),
-
-            "struct" => Ok(TokenKind::Struct),
-            "newtype" => Ok(TokenKind::Newtype),
-
-            "else" => Ok(TokenKind::Else),
-            "for" => Ok(TokenKind::For),
-            "in" => Ok(TokenKind::In),
-            "while" => Ok(TokenKind::While),
-            "loop" => Ok(TokenKind::Loop),
-            "break" => Ok(TokenKind::Break),
-            "continue" => Ok(TokenKind::Continue),
-            "null" => Ok(TokenKind::Null),
-            "enum" => Ok(TokenKind::Enum),
-            "match" => Ok(TokenKind::Match),
-            "extern" => Ok(TokenKind::Extern),
-            "global" => Ok(TokenKind::Global),
-            "const" => Ok(TokenKind::Const),
-
-            "deco" => Ok(TokenKind::Deco),
-            // Note: "wrap" and "init" are NOT keywords - they are contextual
-            // and only recognized in the context of decorator definitions
-            "macro" => Ok(TokenKind::Macro),
-
-            "true" => Ok(TokenKind::True),
-            "false" => Ok(TokenKind::False),
-
-            "mut" => Err(CompilerError::new_with_label(
+        if ident == "mut" {
+            return Err(CompilerError::new_with_label(
                 self.empty_span(),
                 "`let mut` is not supported, all bindings are mut, use just `let`".to_string(),
-            )),
-
-            _ => {
-                // Escape Lua keywords that are valid Rock identifiers
-                // This prevents conflicts when generating Lua code
-                let escaped_ident: &str = match ident {
-                    // Lua keywords that are NOT Rock keywords
-                    "and" => "__rock_and",
-                    "do" => "__rock_do",
-                    "elseif" => "__rock_elseif",
-                    "end" => "__rock_end",
-                    "function" => "__rock_function",
-                    "goto" => "__rock_goto",
-                    "local" => "__rock_local",
-                    "nil" => "__rock_nil",
-                    "not" => "__rock_not",
-                    "or" => "__rock_or",
-                    "repeat" => "__rock_repeat",
-                    "then" => "__rock_then",
-                    "until" => "__rock_until",
-                    _ => ident,
-                };
-                Ok(TokenKind::Ident(escaped_ident.into()))
-            }
+            ));
         }
+        Ok(TokenKind::keyword(ident)
+            .unwrap_or_else(|| TokenKind::Ident(escape_lua_keyword(ident).into())))
     }
 
-    /// Convert an escaped Lua keyword back to its original form
-    /// This is the inverse of the escaping done during tokenization
+    /// Recover the source spelling of a Lua keyword used as a Rock identifier.
     pub fn unescape_lua_keyword(name: &str) -> &str {
-        match name {
-            "__rock_and" => "and",
-            "__rock_do" => "do",
-            "__rock_elseif" => "elseif",
-            "__rock_end" => "end",
-            "__rock_function" => "function",
-            "__rock_goto" => "goto",
-            "__rock_local" => "local",
-            "__rock_nil" => "nil",
-            "__rock_not" => "not",
-            "__rock_or" => "or",
-            "__rock_repeat" => "repeat",
-            "__rock_then" => "then",
-            "__rock_until" => "until",
-            _ => name,
-        }
+        unescape_lua_keyword(name)
     }
 
     pub(crate) fn lookahead_number(&self) -> bool {
@@ -537,70 +447,25 @@ impl<'a> Tokenizer<'a> {
         false
     }
 
-    /// Determines if a '-' can start a negative number based on the previous token context
     fn minus_can_start_number(&self) -> bool {
-        // If we just skipped whitespace, '-' can start a negative number
-        if self.just_skipped_whitespace {
-            return true;
-        }
-
-        match &self.last_token_kind {
-            // '-' can start a negative number after these tokens
-            None => true, // Start of input
-            Some(TokenKind::OpenParen) => true,
-            Some(TokenKind::OpenSquare) => true,
-            Some(TokenKind::OpenCurly) => true,
-            Some(TokenKind::Comma) => true,
-            Some(TokenKind::Semicolon) => true,
-            Some(TokenKind::Colon) => true,
-            Some(TokenKind::Assign) => true,
-            Some(TokenKind::AddAssign) => true,
-            Some(TokenKind::SubAssign) => true,
-            Some(TokenKind::MulAssign) => true,
-            Some(TokenKind::DivAssign) => true,
-            Some(TokenKind::Equals) => true,
-            Some(TokenKind::NotEquals) => true,
-            Some(TokenKind::LessThan) => true,
-            Some(TokenKind::LessThanEqual) => true,
-            Some(TokenKind::GreaterThan) => true,
-            Some(TokenKind::GreaterThanEqual) => true,
-            Some(TokenKind::And) => true,
-            Some(TokenKind::Or) => true,
-            Some(TokenKind::Plus) => true,
-            Some(TokenKind::Minus) => true,
-            Some(TokenKind::Mul) => true,
-            Some(TokenKind::Div) => true,
-            Some(TokenKind::Mod) => true,
-            Some(TokenKind::Bang) => true,
-            Some(TokenKind::DoubleDot) => true, // Range operator
-            Some(TokenKind::Arrow) => true,
-            Some(TokenKind::FatArrow) => true,
-            Some(TokenKind::If) => true,
-            Some(TokenKind::Else) => true,
-            Some(TokenKind::While) => true,
-            Some(TokenKind::For) => true,
-            Some(TokenKind::In) => true,
-            Some(TokenKind::Return) => true,
-            Some(TokenKind::Let) => true,
-            Some(TokenKind::Newline) => true,
-
-            // '-' should be a binary operator after these tokens (identifiers, literals, closing brackets)
-            // ONLY if there was no whitespace between them
-            Some(TokenKind::Ident(_)) => false,
-            Some(TokenKind::Int(_, _)) => false,
-            Some(TokenKind::Float(_)) => false,
-            Some(TokenKind::String(_)) => false,
-            Some(TokenKind::RawString(_)) => false,
-            Some(TokenKind::True) => false,
-            Some(TokenKind::False) => false,
-            Some(TokenKind::Null) => false,
-            Some(TokenKind::CloseParen) => false,
-            Some(TokenKind::CloseSquare) => false,
-            Some(TokenKind::CloseCurly) => false,
-
-            // For any other tokens, default to allowing negative numbers (conservative approach)
-            _ => true,
-        }
+        use TokenKind::*;
+        self.just_skipped_whitespace
+            || !matches!(
+                self.last_token_kind,
+                Some(
+                    Ident(_)
+                        | Int(_, _)
+                        | Float(_)
+                        | String(_)
+                        | RawString(_)
+                        | True
+                        | False
+                        | Null
+                        | CloseParen
+                        | CloseSquare
+                        | CloseCurly
+                )
+            )
     }
 
     pub(crate) fn read_number(&mut self) -> Result<TokenKind, CompilerError> {
@@ -798,6 +663,56 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
+    fn read_punctuation(&mut self, head: char) -> Option<TokenKind> {
+        use TokenKind::*;
+        let rest = &self.input.as_bytes()[self.byte_index + 1..];
+        let (kind, len) = match (head, rest) {
+            ('-', [b'>', ..]) => (Arrow, 2),
+            ('-', [b'=', ..]) => (SubAssign, 2),
+            ('-', [b'-', ..]) => (MinusMinus, 2),
+            ('-', _) => (Minus, 1),
+            ('+', [b'+', ..]) => (PlusPlus, 2),
+            ('+', [b'=', ..]) => (AddAssign, 2),
+            ('+', _) => (Plus, 1),
+            ('*', [b'=', ..]) => (MulAssign, 2),
+            ('*', _) => (Mul, 1),
+            ('/', [b'=', ..]) => (DivAssign, 2),
+            ('/', [b'/' | b'*', ..]) => return None,
+            ('/', _) => (Div, 1),
+            ('=', [b'=', ..]) => (Equals, 2),
+            ('=', [b'>', ..]) => (FatArrow, 2),
+            ('=', _) => (Assign, 1),
+            ('!', [b'=', ..]) => (NotEquals, 2),
+            ('!', _) => (Bang, 1),
+            ('<', [b'=', ..]) => (LessThanEqual, 2),
+            ('<', [b'<', ..]) => (LeftShift, 2),
+            ('<', _) => (LessThan, 1),
+            ('>', [b'=', ..]) => (GreaterThanEqual, 2),
+            ('>', [b'>', ..]) => (RightShift, 2),
+            ('>', _) => (GreaterThan, 1),
+            (':', [b':', ..]) => (DoubleColon, 2),
+            (':', _) => (Colon, 1),
+            ('.', [b'.', b'.', ..]) => (TripleDot, 3),
+            ('.', [b'.', ..]) => (DoubleDot, 2),
+            ('.', [b'/', ..]) => (IntDiv, 2),
+            ('.', _) => (Dot, 1),
+            ('?', [b'?', b'?', ..]) => (TripleQuestionMark, 3),
+            ('?', [b'?', ..]) => (DoubleQuestionMark, 2),
+            ('?', [b'.', ..]) => (QuestionDot, 2),
+            ('?', _) => (QuestionMark, 1),
+            ('&', [b'&', ..]) => (And, 2),
+            ('&', _) => (BitAnd, 1),
+            ('|', [b'|', ..]) => (Or, 2),
+            ('|', _) => (BitOr, 1),
+            _ => return None,
+        };
+        self.byte_index += len;
+        self.byte_offset += len;
+        self.column += len;
+        self.current = decode_at(self.input.as_bytes(), self.byte_index).map(|(c, _)| c);
+        Some(kind)
+    }
+
     pub fn next_token(&mut self) -> Result<Option<Token>, CompilerError> {
         self.skip_whitespace();
         let origin = self.start_span();
@@ -814,6 +729,9 @@ impl<'a> Tokenizer<'a> {
         }
         if let Some(kind) = single_char_token(head) {
             self.advance();
+            return self.finish_token(origin, kind);
+        }
+        if let Some(kind) = self.read_punctuation(head) {
             return self.finish_token(origin, kind);
         }
         let kind: TokenKind = match self.current {
@@ -839,152 +757,24 @@ impl<'a> Tokenizer<'a> {
                 TokenKind::Newline
             }
 
-            Some('-') => {
-                self.advance();
-                if self.eat('>') {
-                    TokenKind::Arrow
-                } else if self.eat('=') {
-                    TokenKind::SubAssign
-                } else if self.eat('-') {
-                    TokenKind::MinusMinus
-                } else {
-                    TokenKind::Minus
-                }
-            }
-
-            Some('+') => {
-                self.advance();
-                if self.eat('+') {
-                    TokenKind::PlusPlus
-                } else if self.eat('=') {
-                    TokenKind::AddAssign
-                } else {
-                    TokenKind::Plus
-                }
-            }
-
-            Some('*') => {
-                self.advance();
-                if self.eat('=') {
-                    TokenKind::MulAssign
-                } else {
-                    TokenKind::Mul
-                }
-            }
-
             Some('/') => {
                 self.advance();
-                if self.eat('=') {
-                    TokenKind::DivAssign
-                } else if self.eat('/') {
+                let start = self.byte_index + 1;
+                if self.eat('/') {
                     TokenKind::Comment(self.read_line_rest().into())
-                } else if self.eat('*') {
-                    let mut body = String::with_capacity(16);
-                    let mut closed = false;
-                    while let Some(cur) = self.current {
-                        if cur == '*' {
-                            self.advance();
-                            if self.eat('/') {
-                                closed = true;
-                                break;
-                            }
-                            body.push('*');
-                        } else {
-                            body.push(cur);
-                            self.advance();
-                        }
-                    }
-                    // Otherwise the rest of the file silently becomes a comment.
-                    if !closed {
+                } else {
+                    debug_assert!(self.at('*'));
+                    let input = self.input;
+                    let Some(len) = input[start..].find("*/") else {
+                        self.advance_to(input.len());
                         return Err(CompilerError::new_with_label(
                             self.end_span(origin),
                             "unterminated block comment: `/*` has no closing `*/`".to_string(),
                         ));
-                    }
-                    TokenKind::Comment(body.into())
-                } else {
-                    TokenKind::Div
-                }
-            }
-
-            Some('=') => {
-                self.advance();
-                if self.eat('=') {
-                    TokenKind::Equals
-                } else if self.eat('>') {
-                    TokenKind::FatArrow
-                } else {
-                    TokenKind::Assign
-                }
-            }
-
-            Some('!') => {
-                self.advance();
-                if self.eat('=') {
-                    TokenKind::NotEquals
-                } else {
-                    TokenKind::Bang
-                }
-            }
-
-            Some('<') => {
-                self.advance();
-                if self.eat('=') {
-                    TokenKind::LessThanEqual
-                } else if self.eat('<') {
-                    TokenKind::LeftShift
-                } else {
-                    TokenKind::LessThan
-                }
-            }
-
-            Some('>') => {
-                self.advance();
-                if self.eat('=') {
-                    TokenKind::GreaterThanEqual
-                } else if self.eat('>') {
-                    TokenKind::RightShift
-                } else {
-                    TokenKind::GreaterThan
-                }
-            }
-
-            Some(':') => {
-                self.advance();
-                if self.eat(':') {
-                    TokenKind::DoubleColon
-                } else {
-                    TokenKind::Colon
-                }
-            }
-
-            Some('.') => {
-                self.advance();
-                if self.eat('.') {
-                    if self.eat('.') {
-                        TokenKind::TripleDot
-                    } else {
-                        TokenKind::DoubleDot
-                    }
-                } else if self.eat('/') {
-                    TokenKind::IntDiv
-                } else {
-                    TokenKind::Dot
-                }
-            }
-
-            Some('?') => {
-                self.advance();
-                if self.eat('?') {
-                    if self.eat('?') {
-                        TokenKind::TripleQuestionMark
-                    } else {
-                        TokenKind::DoubleQuestionMark
-                    }
-                } else if self.eat('.') {
-                    TokenKind::QuestionDot
-                } else {
-                    TokenKind::QuestionMark
+                    };
+                    let end = start + len;
+                    self.advance_to(end + 2);
+                    TokenKind::Comment(input[start..end].into())
                 }
             }
 
@@ -1000,24 +790,6 @@ impl<'a> Tokenizer<'a> {
                     } else {
                         self.read_string_literal(lit_at)?
                     }
-                }
-            }
-
-            Some('&') => {
-                self.advance();
-                if self.eat('&') {
-                    TokenKind::And
-                } else {
-                    TokenKind::BitAnd
-                }
-            }
-
-            Some('|') => {
-                self.advance();
-                if self.eat('|') {
-                    TokenKind::Or
-                } else {
-                    TokenKind::BitOr
                 }
             }
 

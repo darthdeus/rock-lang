@@ -133,6 +133,62 @@ pub enum TokenKind {
     EOF,
 }
 
+macro_rules! rock_keywords {
+    ($($kind:ident = $text:literal),* $(,)?) => {
+        impl TokenKind {
+            pub(crate) fn keyword(text: &str) -> Option<Self> {
+                Some(match text {
+                    $($text => Self::$kind,)*
+                    _ => return None,
+                })
+            }
+
+            /// The name allowed after a member dot, including logical operators.
+            pub fn as_keyword_identifier(&self) -> Option<&'static str> {
+                Some(match self {
+                    $(Self::$kind => $text,)*
+                    Self::And => "and",
+                    Self::Or => "or",
+                    _ => return None,
+                })
+            }
+        }
+    };
+}
+
+rock_keywords! {
+    Fn = "fn",
+    Operator = "operator",
+    Table = "table",
+    Type = "type",
+    As = "as",
+    Yield = "yield",
+    Await = "await",
+    If = "if",
+    Let = "let",
+    Return = "return",
+    Defer = "defer",
+    Struct = "struct",
+    Newtype = "newtype",
+    Else = "else",
+    For = "for",
+    In = "in",
+    While = "while",
+    Loop = "loop",
+    Break = "break",
+    Continue = "continue",
+    Null = "null",
+    Enum = "enum",
+    Match = "match",
+    Extern = "extern",
+    Global = "global",
+    Const = "const",
+    Deco = "deco",
+    Macro = "macro",
+    True = "true",
+    False = "false",
+}
+
 impl std::fmt::Display for TokenKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_code())
@@ -207,14 +263,7 @@ impl TokenKind {
     pub fn prefix_bp(&self) -> Option<((), u8)> {
         use TokenKind::*;
         let val = match self {
-            Minus => Some(41),
-            PlusPlus | MinusMinus => Some(41),
-            Bang => Some(41),
-            BitNot => Some(41),
-            // `^name` anaphoric ident: prefix `^` is otherwise illegal,
-            // so reusing the BitXor token doesn't conflict with the
-            // existing infix `^` (xor).
-            BitXor => Some(41),
+            Minus | PlusPlus | MinusMinus | Bang | BitNot | BitXor => Some(41),
             _ => None,
         };
 
@@ -293,63 +342,13 @@ impl TokenKind {
         })
     }
 
-    /// If this token kind is a word-shaped keyword (i.e. its `to_code()`
-    /// is a Rock keyword like `match`, `if`, `for`), return that text.
-    /// Used by the parser to accept keyword-named members after `.` —
-    /// `s.match(p)`, `m.in(k)`, etc. don't conflict with statement-start
-    /// keyword parsing because the dot resolves the ambiguity.
-    ///
-    /// Returns `None` for operator-shaped tokens (`+`, `==`, `->`, etc.)
-    /// and for non-keyword tokens.
-    pub fn as_keyword_identifier(&self) -> Option<&'static str> {
-        Some(match self {
-            TokenKind::Fn => "fn",
-            TokenKind::Operator => "operator",
-            TokenKind::Table => "table",
-            TokenKind::Type => "type",
-            TokenKind::As => "as",
-            TokenKind::Yield => "yield",
-            TokenKind::Await => "await",
-            TokenKind::Let => "let",
-            TokenKind::Return => "return",
-            TokenKind::Defer => "defer",
-            TokenKind::Struct => "struct",
-            TokenKind::Newtype => "newtype",
-            TokenKind::If => "if",
-            TokenKind::Else => "else",
-            TokenKind::For => "for",
-            TokenKind::In => "in",
-            TokenKind::Loop => "loop",
-            TokenKind::While => "while",
-            TokenKind::Break => "break",
-            TokenKind::Continue => "continue",
-            TokenKind::Null => "null",
-            TokenKind::Enum => "enum",
-            TokenKind::Match => "match",
-            TokenKind::Extern => "extern",
-            TokenKind::Global => "global",
-            TokenKind::Const => "const",
-            TokenKind::Deco => "deco",
-            TokenKind::Macro => "macro",
-            TokenKind::And => "and",
-            TokenKind::Or => "or",
-            TokenKind::True => "true",
-            TokenKind::False => "false",
-            _ => return None,
-        })
-    }
-
     pub fn to_code(&self) -> String {
-        if let Some(fixed) = self.fixed_spelling() {
-            return fixed.to_owned();
-        }
         match self {
             Self::Comment(body) => format!("//{body}"),
             Self::Ident(name) => name.to_string(),
             Self::Float(val) => val.to_string(),
             Self::Int(_, kept) => kept.to_string(),
-            Self::String(body) => body.to_string(),
-            Self::RawString(body) => body.to_string(),
+            Self::String(body) | Self::RawString(body) => body.to_string(),
             _ => self.fixed_spelling().unwrap_or("").to_owned(),
         }
     }
@@ -402,48 +401,16 @@ impl TokenKind {
             Self::IntDiv => "./",
             Self::Mod => "%",
             Self::BitAnd => "&",
-            Self::And => "and",
             Self::BitOr => "|",
-            Self::Or => "or",
             Self::BitXor => "^",
             Self::BitNot => "~",
-            Self::Fn => "fn",
-            Self::Operator => "operator",
-            Self::Table => "table",
-            Self::Type => "type",
-            Self::As => "as",
-            Self::Yield => "yield",
-            Self::Await => "await",
-            Self::Let => "let",
-            Self::Return => "return",
-            Self::Defer => "defer",
-            Self::Struct => "struct",
-            Self::Newtype => "newtype",
-            Self::If => "if",
-            Self::Else => "else",
-            Self::For => "for",
-            Self::Loop => "loop",
-            Self::In => "in",
-            Self::While => "while",
-            Self::Break => "break",
-            Self::Continue => "continue",
-            Self::Null => "null",
-            Self::Enum => "enum",
-            Self::Match => "match",
-            Self::Extern => "extern",
-            Self::Global => "global",
-            Self::Const => "const",
-            Self::Deco => "deco",
-            Self::Macro => "macro",
-            Self::True => "true",
-            Self::False => "false",
             Self::DirectiveIf => "#if",
             Self::DirectiveElseIf => "#elseif",
             Self::DirectiveElse => "#else",
             Self::DirectiveEnd => "#end",
             Self::Newline => "\n",
             Self::EOF => "EOF",
-            _ => return None,
+            _ => return self.as_keyword_identifier(),
         })
     }
 }
