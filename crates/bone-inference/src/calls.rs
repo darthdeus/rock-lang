@@ -749,17 +749,31 @@ pub(crate) fn score_candidate_with_generics(
 ) -> Option<Result<usize, CompilerError>> {
     // Discard trial types unless spread inference recorded them in the body.
     let snap = gamma.out.checkpoint();
-    let cost = fit_candidate(
-        c,
-        gamma,
-        mid,
-        fid,
-        recv_ty,
-        args,
-        arg_ty,
-        generic_args,
-        span,
-    );
+    let function = &gamma.workspace.module(mid).functions[fid];
+    let cost = (|| {
+        let (cost, subs) = check_call_arguments(
+            c,
+            gamma,
+            function,
+            function.name,
+            recv_ty,
+            args,
+            arg_ty,
+            generic_args,
+            None,
+            span,
+        )
+        .ok()?;
+        if function.has_iterator_bounds() {
+            let mut bounds = BoundTree::default();
+            if let Err(error) = gamma.trial(|g| {
+                check_iterator_bounds(c, g, function, &subs, &mut bounds, false, 0, span)
+            }) {
+                return Some(Err(error));
+            }
+        }
+        Some(Ok(cost))
+    })();
     if args.iter().any(|arg| c.body.spread_args.contains(arg)) {
         gamma.out.rollback_to(snap);
     } else {
@@ -768,101 +782,219 @@ pub(crate) fn score_candidate_with_generics(
     cost
 }
 
-fn fit_candidate(
+fn check_call_arguments(
     c: BodyCtx,
     gamma: &mut Gamma,
-    mid: ModuleId,
-    fid: Idx<Function>,
-    recv_ty: Option<TyId>,
+    function: &Function,
+    name: Ustr,
+    receiver: Option<TyId>,
     args: &[Idx<Expr>],
-    arg_ty: &FxHashMap<Idx<Expr>, TyId>,
+    inferred: &FxHashMap<Idx<Expr>, TyId>,
     generic_args: IdxRange<TypeExpr>,
+    call: Option<Idx<Expr>>,
     span: Span,
-) -> Option<Result<usize, CompilerError>> {
-    let f = &gamma.workspace.module(mid).functions[fid];
-    let param_decls = &f.param_decls;
-
-    let bounded_vars = bounded_generic_vars(gamma, f);
-
-    let subs = instantiate_call_generics(gamma, f, generic_args, span).ok()?;
-
-    let offset = if recv_ty.is_some() { 1 } else { 0 };
-    if offset > param_decls.len() {
-        return None;
+) -> Result<(usize, FxHashMap<VarId, TyId>), CompilerError> {
+    let scoring = call.is_none();
+    let rejected = || CompilerError::silent(span);
+    let has_bounds = function.has_iterator_bounds();
+    let bounded_vars = bounded_generic_vars(gamma, function);
+    let subs = instantiate_call_generics(gamma, function, generic_args, span)?;
+    let mut bounds = BoundTree::default();
+    let mut refs = Vec::new();
+    let mut cost = 0;
+    let params = &function.param_decls;
+    let offset = usize::from(receiver.is_some());
+    if offset > params.len() {
+        return Err(if scoring {
+            rejected()
+        } else {
+            CompilerError::new_with_label(
+                span,
+                format!("method `{}` has no receiver parameter", name),
+            )
+        });
     }
 
-    let mut total = 0usize;
-
-    if let Some(r) = recv_ty {
-        let pty = if subs.is_empty() {
-            param_decls[0].ty
+    if let Some(receiver) = receiver {
+        let declared = params[0].ty;
+        let expected = if scoring && subs.is_empty() {
+            declared
         } else {
-            substitute(gamma, param_decls[0].ty, &subs, span).ok()?
+            substitute(gamma, declared, &subs, span)?
         };
-
-        let db = declared_is_bounded_generic(gamma, param_decls[0].ty, &bounded_vars);
-        total += fit_cost_with_iter_coercion(c, gamma, r, pty, db, span)?;
+        if scoring {
+            cost += fit_cost_with_iter_coercion(
+                c,
+                gamma,
+                receiver,
+                expected,
+                declared_is_bounded_generic(gamma, declared, &bounded_vars),
+                span,
+            )
+            .ok_or_else(rejected)?;
+        } else {
+            coerce(gamma, receiver, expected, span)?;
+            reject_redundant_unwrap(gamma, function, name, 0, receiver, span)?;
+        }
     }
 
-    let slots = reorder_call_args(
-        c,
-        gamma,
-        args,
-        &param_decls[offset..],
-        f.num_required.saturating_sub(offset),
-        false,
-        span,
-    )
-    .ok()?;
+    let slots: Vec<Option<SlotFill>> = if !scoring && function.is_variadic {
+        let fixed = (params.len() - 1).saturating_sub(offset);
+        if args.len() < fixed {
+            return Err(CompilerError::new_with_label(
+                span,
+                format!(
+                    "`{}` expects at least {} argument(s), got {}",
+                    name,
+                    fixed,
+                    args.len()
+                ),
+            ));
+        }
+        args.iter()
+            .map(|&arg| Some(SlotFill::Direct(arg)))
+            .collect()
+    } else {
+        reorder_call_args(
+            c,
+            gamma,
+            args,
+            &params[offset..],
+            function.num_required.saturating_sub(offset),
+            !scoring,
+            span,
+        )?
+    };
 
-    for (i, slot) in slots.iter().enumerate() {
-        let pty = if subs.is_empty() {
-            param_decls[offset + i].ty
+    for (index, fill) in slots.into_iter().enumerate() {
+        let index = (offset + index).min(params.len() - 1);
+        if !scoring && fill.is_none() {
+            continue;
+        }
+        let declared = params[index].ty;
+        if !scoring && has_bounds {
+            check_iterator_bounds(c, gamma, function, &subs, &mut bounds, false, 0, span)?;
+        }
+        let expected = if scoring && subs.is_empty() {
+            declared
         } else {
-            substitute(gamma, param_decls[offset + i].ty, &subs, span).ok()?
+            substitute(gamma, declared, &subs, span)?
         };
-
-        match slot {
-            Some(fill) => {
-                let aty = match fill {
-                    SlotFill::Direct(arg) => *arg_ty.get(arg)?,
-                    SlotFill::SpreadField(_, fty) => *fty,
-                };
-
-                let db =
-                    declared_is_bounded_generic(gamma, param_decls[offset + i].ty, &bounded_vars);
-                let pty_r = resolve(gamma, pty, span);
-                if matches!(fill, SlotFill::SpreadField(..))
-                    && frame_ref_target(gamma, pty_r).is_some()
-                {
-                    return None;
-                }
-                let contextual_uint = matches!(fill, SlotFill::Direct(arg)
-                    if matches!(c.body.expr_arena[*arg], Expr::Int(value)
-                        if (0..=u32::MAX as i64).contains(&value))
-                    && matches!(gamma.get(pty_r), TypeExpr::Builtin(BuiltinTy::Uint)));
-                total += if contextual_uint {
-                    1
-                } else {
-                    fit_cost_with_iter_coercion(c, gamma, aty, pty, db, span)?
-                };
+        let Some(fill) = fill else {
+            cost += 1;
+            continue;
+        };
+        if scoring {
+            let actual = match fill {
+                SlotFill::Direct(arg) => *inferred.get(&arg).ok_or_else(rejected)?,
+                SlotFill::SpreadField(_, ty) => ty,
+            };
+            let resolved = resolve(gamma, expected, span);
+            if matches!(fill, SlotFill::SpreadField(..))
+                && frame_ref_target(gamma, resolved).is_some()
+            {
+                return Err(rejected());
             }
-
-            None => total += 1, // omitted default param
+            let contextual_uint = matches!(fill, SlotFill::Direct(arg)
+                if matches!(c.body.expr_arena[arg], Expr::Int(value)
+                    if (0..=u32::MAX as i64).contains(&value))
+                && matches!(gamma.get(resolved), TypeExpr::Builtin(BuiltinTy::Uint)));
+            cost += if contextual_uint {
+                1
+            } else {
+                fit_cost_with_iter_coercion(
+                    c,
+                    gamma,
+                    actual,
+                    expected,
+                    declared_is_bounded_generic(gamma, declared, &bounded_vars),
+                    span,
+                )
+                .ok_or_else(rejected)?
+            };
+            continue;
         }
-    }
 
-    // An unconstrained argument fit doesn't prove Iterator conformance.
-    if f.has_iterator_bounds() {
-        let mut tree = BoundTree::default();
-        if let Err(error) =
-            gamma.trial(|g| check_iterator_bounds(c, g, f, &subs, &mut tree, false, 0, span))
+        if frame_ref_target(gamma, expected).is_some()
+            && let SlotFill::Direct(arg) = fill
         {
-            return Some(Err(error));
+            refs.push(arg);
+        }
+        match fill {
+            SlotFill::SpreadField(arg, actual) => {
+                if frame_ref_target(gamma, expected).is_some() {
+                    return Err(CompilerError::new_with_label(
+                        c.body.expr_spans[arg],
+                        "a `ref` argument must be passed directly; call spreads supply copied fields".to_string(),
+                    ));
+                }
+                coerce(gamma, actual, expected, c.body.expr_spans[arg])?;
+            }
+            SlotFill::Direct(arg) => {
+                let bounded = declared_is_bounded_generic(gamma, declared, &bounded_vars)
+                    && !matches!(c.body.expr_arena[arg], Expr::Lambda { .. });
+                let iter_result = !bounded
+                    && matches!(*gamma.get(declared), TypeExpr::Function { ret, .. }
+                        if declared_is_bounded_generic(gamma, declared.with_idx(ret), &bounded_vars));
+                if iter_result && let Expr::Lambda { body, .. } = c.body.expr_arena[arg] {
+                    gamma.iter_result_lambda = Some(body);
+                }
+                if bounded {
+                    let actual = match inferred.get(&arg) {
+                        Some(&ty) => ty,
+                        None => {
+                            let ty = infer_expr(c, gamma, arg)?;
+                            resolve(gamma, ty, span)
+                        }
+                    };
+                    let actual = match implicit_iter_target(c, gamma, actual, span) {
+                        Some((witness, ty)) => {
+                            coerce(gamma, ty, expected, c.body.expr_spans[arg])?;
+                            gamma.out.implicit_iter_args.insert(arg, witness);
+                            None
+                        }
+                        None => Some(actual),
+                    };
+                    if let Some(actual) = actual {
+                        coerce(gamma, actual, expected, c.body.expr_spans[arg])?;
+                    }
+                } else {
+                    match inferred.get(&arg) {
+                        Some(&actual) if frame_ref_target(gamma, expected).is_none() => {
+                            coerce(gamma, actual, expected, c.body.expr_spans[arg])?
+                        }
+                        _ => check_expr(c, gamma, arg, expected, c.body.expr_spans[arg])?,
+                    }
+                }
+                gamma.iter_result_lambda = None;
+                if iter_result && !matches!(c.body.expr_arena[arg], Expr::Lambda { .. }) {
+                    reject_iterable_fn_value_result(c, gamma, arg, span)?;
+                }
+                if let Some(&actual) = gamma.out.expr_types.get(arg) {
+                    reject_redundant_unwrap(
+                        gamma,
+                        function,
+                        name,
+                        index,
+                        actual,
+                        c.body.expr_spans[arg],
+                    )?;
+                }
+            }
         }
     }
-
-    Some(Ok(total))
+    if let Some(call) = call
+        && !refs.is_empty()
+    {
+        gamma.out.ref_call_args.insert(call, refs);
+    }
+    if let Some(call) = call
+        && has_bounds
+    {
+        check_iterator_bounds(c, gamma, function, &subs, &mut bounds, true, 0, span)?;
+        gamma.out.bound_call_trees.insert(call, bounds);
+    }
+    Ok((cost, subs))
 }
 
 fn instantiate_call_generics(
@@ -1521,14 +1653,16 @@ pub(crate) fn resolve_named_call_inner(
                             queue_pending(
                                 gamma,
                                 v,
-                                Pending::Call {
-                                    family,
-                                    call_expr,
-                                    recv_override,
-                                    args: arg_list,
-                                    arg_ty,
-                                    arg_tys,
-                                    preinferred,
+                                Pending {
+                                    kind: PendingKind::Call {
+                                        family,
+                                        call_expr,
+                                        recv_override,
+                                        args: arg_list,
+                                        arg_ty,
+                                        arg_tys,
+                                        preinferred,
+                                    },
                                     origin,
                                     span,
                                     result,
@@ -1595,164 +1729,18 @@ pub(crate) fn commit_selected_call(
 
     let ws = gamma.workspace;
     let function = &ws.module(callee_mid).functions[callee_fn];
-    let subs = instantiate_call_generics(gamma, function, generic_args, span)?;
-
-    // Resolve bounds between arguments so later lambdas see the element type.
-    let has_bounds = function.has_iterator_bounds();
-    let mut bound_tree = BoundTree::default();
-
-    let param_decls = &function.param_decls;
-
-    let offset = if let Some(r) = recv_override {
-        if param_decls.is_empty() {
-            comp_error!(span, "method `{}` has no receiver parameter", name);
-        }
-
-        let pty = substitute(gamma, param_decls[0].ty, &subs, span)?;
-        coerce(gamma, r, pty, span)?;
-        reject_redundant_unwrap(gamma, function, name, 0, r, span)?;
-
-        1
-    } else {
-        0
-    };
-
-    let pairs: Vec<(SlotFill, usize)> = if function.is_variadic {
-        let nfixed = (param_decls.len() - 1).saturating_sub(offset);
-
-        if arg_list.len() < nfixed {
-            comp_error!(
-                span,
-                "`{}` expects at least {} argument(s), got {}",
-                name,
-                nfixed,
-                arg_list.len()
-            );
-        }
-
-        arg_list
-            .iter()
-            .enumerate()
-            .map(|(i, &arg)| {
-                (
-                    SlotFill::Direct(arg),
-                    if i < nfixed {
-                        offset + i
-                    } else {
-                        param_decls.len() - 1
-                    },
-                )
-            })
-            .collect()
-    } else {
-        let slots = reorder_call_args(
-            c,
-            gamma,
-            arg_list,
-            &param_decls[offset..],
-            function.num_required.saturating_sub(offset),
-            true,
-            span,
-        )?;
-
-        slots
-            .iter()
-            .enumerate()
-            .filter_map(|(i, slot)| slot.map(|fill| (fill, offset + i)))
-            .collect()
-    };
-
-    let bounded_vars = if has_bounds {
-        bounded_generic_vars(gamma, function)
-    } else {
-        SmallVec::new()
-    };
-
-    let mut ref_call_args = Vec::new();
-    for (fill, param_index) in pairs {
-        let pty_decl = param_decls[param_index].ty;
-        if has_bounds {
-            check_iterator_bounds(c, gamma, function, &subs, &mut bound_tree, false, 0, span)?;
-        }
-        let pty = substitute(gamma, pty_decl, &subs, span)?;
-        if frame_ref_target(gamma, pty).is_some()
-            && let SlotFill::Direct(arg) = fill
-        {
-            ref_call_args.push(arg);
-        }
-        match fill {
-            SlotFill::Direct(arg) => {
-                // Lambdas need an expected function type and can't be iterator arguments.
-                let mut coerced = false;
-                if declared_is_bounded_generic(gamma, pty_decl, &bounded_vars)
-                    && !matches!(c.body.expr_arena[arg], Expr::Lambda { .. })
-                {
-                    let aty = match preinferred.get(&arg) {
-                        Some(&t) => t,
-                        None => {
-                            let t = infer_expr(c, gamma, arg)?;
-                            resolve(gamma, t, span)
-                        }
-                    };
-                    if let Some((witness, it_ty)) = implicit_iter_target(c, gamma, aty, span) {
-                        coerce(gamma, it_ty, pty, c.body.expr_spans[arg])?;
-                        gamma.out.implicit_iter_args.insert(arg, witness);
-                        coerced = true;
-                    } else {
-                        coerce(gamma, aty, pty, c.body.expr_spans[arg])?;
-                        coerced = true;
-                    }
-                }
-                // A lambda's iterable result also coerces to an Iterator-bound result.
-                let iter_result = !coerced
-                    && matches!(*gamma.get(pty_decl), TypeExpr::Function { ret, .. }
-                        if declared_is_bounded_generic(gamma, pty_decl.with_idx(ret), &bounded_vars));
-                if iter_result && let Expr::Lambda { body, .. } = c.body.expr_arena[arg] {
-                    gamma.iter_result_lambda = Some(body);
-                }
-                if !coerced {
-                    match preinferred.get(&arg) {
-                        Some(&aty) if frame_ref_target(gamma, pty).is_none() => {
-                            coerce(gamma, aty, pty, c.body.expr_spans[arg])?
-                        }
-                        _ => check_expr(c, gamma, arg, pty, c.body.expr_spans[arg])?,
-                    }
-                }
-                gamma.iter_result_lambda = None;
-                if iter_result && !matches!(c.body.expr_arena[arg], Expr::Lambda { .. }) {
-                    reject_iterable_fn_value_result(c, gamma, arg, span)?;
-                }
-                if let Some(&aty) = gamma.out.expr_types.get(arg) {
-                    reject_redundant_unwrap(
-                        gamma,
-                        function,
-                        name,
-                        param_index,
-                        aty,
-                        c.body.expr_spans[arg],
-                    )?;
-                }
-            }
-            SlotFill::SpreadField(op, fty) => {
-                if frame_ref_target(gamma, pty).is_some() {
-                    comp_error!(
-                        c.body.expr_spans[op],
-                        "a `ref` argument must be passed directly; call spreads supply copied fields"
-                    );
-                }
-                coerce(gamma, fty, pty, c.body.expr_spans[op])?;
-            }
-        }
-    }
-
-    if !ref_call_args.is_empty() {
-        gamma.out.ref_call_args.insert(call_expr, ref_call_args);
-    }
-
-    if has_bounds {
-        check_iterator_bounds(c, gamma, function, &subs, &mut bound_tree, true, 0, span)?;
-        gamma.out.bound_call_trees.insert(call_expr, bound_tree);
-    }
+    let (_, subs) = check_call_arguments(
+        c,
+        gamma,
+        function,
+        name,
+        recv_override,
+        arg_list,
+        preinferred,
+        generic_args,
+        Some(call_expr),
+        span,
+    )?;
 
     // Record type arguments after checking the actual arguments has pinned them.
     if !function.generics.is_empty() {

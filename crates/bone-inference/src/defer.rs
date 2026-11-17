@@ -10,7 +10,15 @@ pub(crate) struct DeferOrigin {
 }
 
 #[derive(Debug)]
-pub(crate) enum Pending {
+pub(crate) struct Pending {
+    pub(crate) kind: PendingKind,
+    pub(crate) origin: DeferOrigin,
+    pub(crate) span: Span,
+    pub(crate) result: TyId,
+}
+
+#[derive(Debug)]
+pub(crate) enum PendingKind {
     Call {
         family: CallFamily,
         call_expr: Idx<Expr>,
@@ -19,25 +27,11 @@ pub(crate) enum Pending {
         arg_ty: FxHashMap<Idx<Expr>, TyId>,
         arg_tys: Vec<TyId>,
         preinferred: FxHashMap<Idx<Expr>, TyId>,
-        origin: DeferOrigin,
-        span: Span,
-        result: TyId,
     },
     Field {
         base: TyId,
         field: Ustr,
-        origin: DeferOrigin,
-        span: Span,
-        result: TyId,
     },
-}
-
-impl Pending {
-    fn origin(&self) -> DeferOrigin {
-        match self {
-            Pending::Call { origin, .. } | Pending::Field { origin, .. } => *origin,
-        }
-    }
 }
 
 /// First operand that resolves to a deferrable inference variable.
@@ -80,7 +74,7 @@ pub(crate) fn defer_result_var(gamma: &mut Gamma, origin: DeferOrigin, span: Spa
 }
 
 pub(crate) fn queue_pending(gamma: &mut Gamma, v: VarId, p: Pending) {
-    gamma.deferrable_vars.entry(v).or_insert(p.origin());
+    gamma.deferrable_vars.entry(v).or_insert(p.origin);
     let id = gamma.pending.len();
     gamma.pending.push(Some(p));
     gamma.pending_by_var.entry(v).or_default().push(id);
@@ -117,10 +111,11 @@ pub(crate) fn drain_ready_pendings(gamma: &mut Gamma) -> Result<(), CompilerErro
     }
 }
 
-fn retry_pending(gamma: &mut Gamma, p: Pending) -> Result<(), CompilerError> {
+fn retry_pending(gamma: &mut Gamma, pending: Pending) -> Result<(), CompilerError> {
     let c = gamma.body_ctx();
-    match p {
-        Pending::Call {
+    let span = pending.span;
+    let ret = match &pending.kind {
+        PendingKind::Call {
             family,
             call_expr,
             recv_override,
@@ -128,99 +123,57 @@ fn retry_pending(gamma: &mut Gamma, p: Pending) -> Result<(), CompilerError> {
             arg_ty,
             arg_tys,
             preinferred,
-            origin,
-            span,
-            result,
         } => {
-            let name = family.key();
-            // Scoring may queue a duplicate while rolling back substitutions;
-            // ignore it if this call has already committed.
-            if gamma.out.resolved_overload_calls.contains_key(&call_expr) {
+            if gamma.out.resolved_overload_calls.contains_key(call_expr) {
                 return Ok(());
             }
-            let candidates = resolve_callee(gamma, &family);
+            let name = family.key();
+            let candidates = resolve_callee(gamma, family);
             match select_overload(
                 c,
                 gamma,
-                family,
+                *family,
                 &candidates,
-                recv_override,
-                &args,
-                &arg_ty,
-                &arg_tys,
+                *recv_override,
+                args,
+                arg_ty,
+                arg_tys,
                 name,
                 span,
             ) {
-                Ok((mid, fid)) => {
-                    let ret = commit_selected_call(
-                        c,
-                        gamma,
-                        name,
-                        mid,
-                        fid,
-                        recv_override,
-                        &args,
-                        &preinferred,
-                        IdxRange::new_empty(),
-                        call_expr,
-                        span,
-                    )?;
-                    // A use may have pinned the result hole already, so coerce
-                    // instead of unifying it again.
-                    coerce(gamma, ret, result, span)
-                }
-                Err(SelectError::Tied(e)) => match unresolved_operand(gamma, &arg_tys, span) {
-                    Some(v) => {
-                        queue_pending(
-                            gamma,
-                            v,
-                            Pending::Call {
-                                family,
-                                call_expr,
-                                recv_override,
-                                args,
-                                arg_ty,
-                                arg_tys,
-                                preinferred,
-                                origin,
-                                span,
-                                result,
-                            },
-                        );
-                        Ok(())
+                Ok((mid, fid)) => commit_selected_call(
+                    c,
+                    gamma,
+                    name,
+                    mid,
+                    fid,
+                    *recv_override,
+                    args,
+                    preinferred,
+                    IdxRange::new_empty(),
+                    *call_expr,
+                    span,
+                )?,
+                Err(SelectError::Tied(error)) => {
+                    if let Some(var) = unresolved_operand(gamma, arg_tys, span) {
+                        queue_pending(gamma, var, pending);
+                        return Ok(());
                     }
-                    None => Err(e),
-                },
-                Err(SelectError::NoFit(e)) => Err(e),
+                    return Err(error);
+                }
+                Err(SelectError::NoFit(error)) => return Err(error),
             }
         }
-
-        Pending::Field {
-            base,
-            field,
-            origin,
-            span,
-            result,
-        } => {
-            let base_r = resolve(gamma, base, span);
-            if let TypeExpr::Infer(v, _) = *gamma.get(base_r) {
-                queue_pending(
-                    gamma,
-                    v,
-                    Pending::Field {
-                        base,
-                        field,
-                        origin,
-                        span,
-                        result,
-                    },
-                );
+        PendingKind::Field { base, field } => {
+            let base = resolve(gamma, *base, span);
+            if let TypeExpr::Infer(var, _) = *gamma.get(base) {
+                queue_pending(gamma, var, pending);
                 return Ok(());
             }
-            let fty = struct_field_ty(gamma, base_r, field, span)?;
-            coerce(gamma, fty, result, span)
+            struct_field_ty(gamma, base, *field, span)?
         }
-    }
+    };
+    coerce(gamma, ret, pending.result, span)
 }
 
 /// Defer an ambiguous field projection; `struct_field_ty` handles unique
@@ -239,9 +192,11 @@ pub(crate) fn field_ty_or_defer(
                     queue_pending(
                         gamma,
                         v,
-                        Pending::Field {
-                            base: base_ty,
-                            field,
+                        Pending {
+                            kind: PendingKind::Field {
+                                base: base_ty,
+                                field,
+                            },
                             origin,
                             span,
                             result,
@@ -266,7 +221,7 @@ pub(crate) fn report_unpinned_lambda_params(gamma: &mut Gamma) {
     }
     let mut seen: FxHashSet<(Ustr, Span)> = FxHashSet::default();
     for p in gamma.pending.iter().flatten() {
-        let origin = p.origin();
+        let origin = p.origin;
         if seen.insert((origin.name, origin.span)) {
             gamma.body_errors.push(CompilerError::new_with_label(
                 origin.span,
