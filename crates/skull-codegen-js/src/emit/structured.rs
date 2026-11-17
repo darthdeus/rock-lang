@@ -176,7 +176,7 @@ impl Emitter<'_> {
                 }
                 true
             }
-            skull_mir::lower::RepLayout::Opaque | skull_mir::lower::RepLayout::Foreign { .. } => {
+            skull_mir::lower::RepLayout::Opaque => {
                 out.push(prefix);
                 true
             }

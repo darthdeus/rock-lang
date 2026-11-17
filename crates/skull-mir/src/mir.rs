@@ -1612,29 +1612,7 @@ impl MirFunc {
     /// first store). Use [`Self::new_cell_typed`] at a binding site with a
     /// declared/inferred type.
     pub fn new_cell(&mut self, name: Option<Ustr>) -> Idx<Cell> {
-        let capacity = self.cells.capacity();
-        let start = self.lower_timing_enabled.then(Instant::now);
-        let id = self.cells.alloc(Cell {
-            name,
-            capture_identity: None,
-            loop_binding: false,
-            ty: None,
-            nonnull_value_struct: false,
-            default_param: false,
-            never_nil: false,
-            borrowed: false,
-            native_ty: None,
-            native_flat_slot: None,
-            producer: CellProducer::Temp,
-        });
-        self.record_new_cell();
-        if self.cells.capacity() != capacity {
-            self.lower_attribution.mir_cell_reallocations += 1;
-            self.lower_attribution.mir_cell_reallocation_ns += start
-                .map(|start| start.elapsed().as_nanos() as u64)
-                .unwrap_or_default();
-        }
-        id
+        self.new_cell_typed(name, None)
     }
 
     /// Allocate a fresh variable cell carrying bone's type for the binding.

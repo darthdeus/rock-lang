@@ -130,7 +130,6 @@ pub enum RepLayout {
     Opaque,
     Leaves(ValueShape),
     Tuple { slots: Vec<RepId>, nullable: bool },
-    Foreign { reason: Ustr },
 }
 
 /// One concrete physical answer in the target/use context supplied by the
@@ -185,20 +184,20 @@ impl RepPlan {
     pub fn leaf_paths(&self) -> Option<Vec<Ustr>> {
         match self.layout() {
             RepLayout::Leaves(shape) => Some(crate::lower::value_leaf_paths(shape)),
-            RepLayout::Opaque | RepLayout::Tuple { .. } | RepLayout::Foreign { .. } => None,
+            RepLayout::Opaque | RepLayout::Tuple { .. } => None,
         }
     }
 
     pub(crate) fn presence_flags(&self) -> Option<Vec<bool>> {
         match self.layout() {
             RepLayout::Leaves(shape) => Some(crate::lower::value_leaf_presence_flags(shape)),
-            RepLayout::Opaque | RepLayout::Tuple { .. } | RepLayout::Foreign { .. } => None,
+            RepLayout::Opaque | RepLayout::Tuple { .. } => None,
         }
     }
 
     pub fn lanes(&self, arena: &RepArena) -> usize {
         match self.layout() {
-            RepLayout::Opaque | RepLayout::Foreign { .. } => 1,
+            RepLayout::Opaque => 1,
             RepLayout::Leaves(shape) => shape.leaf_count(),
             RepLayout::Tuple { slots, nullable } => {
                 slots
@@ -216,7 +215,7 @@ impl RepPlan {
             RepLayout::Tuple { slots, .. } => {
                 slots.iter().any(|slot| arena.get(*slot).splats(arena))
             }
-            RepLayout::Opaque | RepLayout::Foreign { .. } => false,
+            RepLayout::Opaque => false,
         }
     }
 }
@@ -1059,7 +1058,7 @@ impl RepArena {
             .iter()
             .filter_map(|plan| match plan.layout() {
                 RepLayout::Leaves(shape) => Some((shape.name, plan.id)),
-                RepLayout::Opaque | RepLayout::Tuple { .. } | RepLayout::Foreign { .. } => None,
+                RepLayout::Opaque | RepLayout::Tuple { .. } => None,
             })
             .collect()
     }
@@ -1232,7 +1231,7 @@ impl RepArena {
 
     pub(crate) fn ret_slot(&self, id: RepId) -> RetSlot {
         match self.get(id).layout() {
-            RepLayout::Opaque | RepLayout::Foreign { .. } => RetSlot::Opaque,
+            RepLayout::Opaque => RetSlot::Opaque,
             RepLayout::Leaves(shape) => RetSlot::Leaves(shape.clone()),
             RepLayout::Tuple { slots, nullable } => RetSlot::Nested(TupleRetShape {
                 slots: slots.iter().map(|&slot| self.ret_slot(slot)).collect(),
@@ -1375,56 +1374,28 @@ impl RepArena {
             message,
         };
         let tuple_element_shape = matches!(use_context, RepUse::TupleElement);
+        if let (MonoTy::Tuple(parts), nullable) = ty.peel_nullable() {
+            let slots = parts
+                .iter()
+                .map(|part| self.plan(ws, target, part, RepUse::TupleElement, facts, guarantees))
+                .collect::<Result<Vec<_>, _>>()?;
+            let splats = slots.iter().any(|id| self.get(*id).lanes(self) > 1);
+            let return_slot = matches!(use_context, RepUse::Return);
+            if (return_slot && !nullable)
+                || (splats && (return_slot || tuple_element_shape || facts.tuple_spelled))
+            {
+                return Ok(self.intern(target, use_context, RepLayout::Tuple { slots, nullable }));
+            }
+            if nullable && guarantees.nobox && !guarantees.allow_opaque {
+                return Err(reject(
+                    "nullable tuple cannot cross a nobox boundary without a physical tuple plan"
+                        .into(),
+                ));
+            }
+            return Ok(self.intern(target, use_context, RepLayout::Opaque));
+        }
         match ty {
-            MonoTy::Nullable(inner) if let MonoTy::Tuple(parts) = inner.as_ref() => {
-                let slots = parts
-                    .iter()
-                    .map(|part| {
-                        self.plan(ws, target, part, RepUse::TupleElement, facts, guarantees)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let splats = slots.iter().any(|id| self.get(*id).lanes(self) > 1);
-                if splats
-                    && (matches!(use_context, RepUse::Return | RepUse::TupleElement)
-                        || facts.tuple_spelled)
-                {
-                    return Ok(self.intern(
-                        target,
-                        use_context,
-                        RepLayout::Tuple {
-                            slots,
-                            nullable: true,
-                        },
-                    ));
-                }
-                if guarantees.nobox && !guarantees.allow_opaque {
-                    return Err(reject("nullable tuple cannot cross a nobox boundary without a physical tuple plan".into()));
-                }
-                Ok(self.intern(target, use_context, RepLayout::Opaque))
-            }
-            MonoTy::Tuple(parts) => {
-                let slots = parts
-                    .iter()
-                    .map(|part| {
-                        self.plan(ws, target, part, RepUse::TupleElement, facts, guarantees)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let splats = slots.iter().any(|id| self.get(*id).lanes(self) > 1);
-                if matches!(use_context, RepUse::Return)
-                    || (splats
-                        && (matches!(use_context, RepUse::TupleElement) || facts.tuple_spelled))
-                {
-                    return Ok(self.intern(
-                        target,
-                        use_context,
-                        RepLayout::Tuple {
-                            slots,
-                            nullable: false,
-                        },
-                    ));
-                }
-                Ok(self.intern(target, use_context, RepLayout::Opaque))
-            }
+            MonoTy::Tuple(_) => unreachable!(),
             MonoTy::Nullable(_)
             | MonoTy::App {
                 ctor: MonoCtor::Nominal(_),
@@ -1552,7 +1523,7 @@ impl RepArena {
                 message: "a function-value representation requires a function type".into(),
             });
         };
-        let mut params = fn_params
+        let params = fn_params
             .iter()
             .map(|param| {
                 let tuple_spelled =
@@ -1586,7 +1557,7 @@ impl RepArena {
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let mut result = if matches!(ret.as_ref(), crate::monoty::MonoTy::Unit) {
+        let result = if matches!(ret.as_ref(), crate::monoty::MonoTy::Unit) {
             None
         } else if first_class && !matches!(ret.peel_nullable().0, crate::monoty::MonoTy::Tuple(_)) {
             Some(self.intern(target, RepUse::Return, RepLayout::Opaque))
@@ -1600,18 +1571,28 @@ impl RepArena {
                 nobox_only,
             )?)
         };
+        Ok(self.finish_function_plan(target, params, result, true))
+    }
+
+    fn finish_function_plan(
+        &self,
+        target: FnBackend,
+        mut params: Vec<RepId>,
+        mut result: Option<RepId>,
+        scalar_allowed: bool,
+    ) -> FunctionRepPlan {
         self.apply_lane_budget(target, &mut params, &mut result);
-        let scalar_abi = params
-            .iter()
-            .any(|id| !matches!(self.get(*id).layout(), RepLayout::Opaque))
-            || result.is_some_and(|id| matches!(self.get(id).layout(), RepLayout::Leaves(_)));
-        let return_lanes = result.map_or(0, |id| self.get(id).lanes(self));
-        Ok(FunctionRepPlan {
+        let scalar_abi = scalar_allowed
+            && (params
+                .iter()
+                .any(|id| !matches!(self.get(*id).layout(), RepLayout::Opaque))
+                || result.is_some_and(|id| matches!(self.get(id).layout(), RepLayout::Leaves(_))));
+        FunctionRepPlan {
             params,
             result,
-            return_lanes,
+            return_lanes: result.map_or(0, |id| self.get(id).lanes(self)),
             scalar_abi,
-        })
+        }
     }
 
     /// [`Self::plan`] for one signature position that may fall back to an
@@ -1658,7 +1639,7 @@ impl RepArena {
             params.push(id);
         }
 
-        let mut result = f
+        let result = f
             .return_ty
             .map(|return_ty| {
                 let ty = declared_mono_type(ws, return_ty, subst)?;
@@ -1702,22 +1683,7 @@ impl RepArena {
             })
             .transpose()?
             .flatten();
-        self.apply_lane_budget(target, &mut params, &mut result);
-        let scalar_abi = mode.is_some()
-            && (params.iter().any(|id| {
-                matches!(
-                    self.get(*id).layout(),
-                    RepLayout::Leaves(_) | RepLayout::Tuple { .. }
-                )
-            }) || result
-                .is_some_and(|id| matches!(self.get(id).layout(), RepLayout::Leaves(_))));
-        let return_lanes = result.map_or(0, |id| self.get(id).lanes(self));
-        Ok(FunctionRepPlan {
-            params,
-            result,
-            return_lanes,
-            scalar_abi,
-        })
+        Ok(self.finish_function_plan(target, params, result, mode.is_some()))
     }
 
     pub(crate) fn boxed_function(&self, target: FnBackend, param_count: usize) -> FunctionRepPlan {
@@ -1742,7 +1708,7 @@ impl RepArena {
         param_tuple_spelled: &[bool],
         mode: Option<AbiMode>,
     ) -> FunctionRepPlan {
-        let mut params: Vec<RepId> = params
+        let params: Vec<RepId> = params
             .iter()
             .enumerate()
             .map(|(index, ty)| {
@@ -1757,7 +1723,7 @@ impl RepArena {
                     .expect("concrete ABI planner must accept a validated parameter")
             })
             .collect();
-        let mut result = result_ty.map(|ty| {
+        let result = result_ty.map(|ty| {
             let tuple_spelled = match ty {
                 crate::monoty::MonoTy::Tuple(_) => true,
                 crate::monoty::MonoTy::Nullable(inner) => {
@@ -1779,19 +1745,7 @@ impl RepArena {
                 self.intern(target, RepUse::Return, RepLayout::Opaque)
             }
         });
-        self.apply_lane_budget(target, &mut params, &mut result);
-        let return_lanes = result.map_or(0, |id| self.get(id).lanes(self));
-        let scalar_abi = mode.is_some()
-            && (params
-                .iter()
-                .any(|id| !matches!(self.get(*id).layout(), RepLayout::Opaque))
-                || result.is_some_and(|id| matches!(self.get(id).layout(), RepLayout::Leaves(_))));
-        FunctionRepPlan {
-            params,
-            result,
-            return_lanes,
-            scalar_abi,
-        }
+        self.finish_function_plan(target, params, result, mode.is_some())
     }
 }
 
@@ -2654,7 +2608,6 @@ fn render_rep_logical_fingerprint(arena: &RepArena, id: RepId) -> String {
     let plan = arena.get(id);
     let layout = match plan.layout() {
         RepLayout::Opaque => "opaque".to_string(),
-        RepLayout::Foreign { reason } => format!("foreign:{reason}"),
         RepLayout::Leaves(_) => format!(
             "leaves:{:?}:{:?}",
             plan.leaf_paths().unwrap_or_default(),
@@ -2725,8 +2678,9 @@ mod rep_read_cache_tests {
         let ib = b.intern(
             FnBackend::Lua,
             RepUse::Return,
-            RepLayout::Foreign {
-                reason: Ustr::from("test"),
+            RepLayout::Tuple {
+                slots: vec![],
+                nullable: false,
             },
         );
         assert_eq!(
@@ -2737,7 +2691,7 @@ mod rep_read_cache_tests {
         assert_ne!(ia, ib, "arena ownership must distinguish equal local ids");
         for _ in 0..2 {
             assert!(matches!(a.get(ia).layout(), RepLayout::Opaque));
-            assert!(matches!(b.get(ib).layout(), RepLayout::Foreign { .. }));
+            assert!(matches!(b.get(ib).layout(), RepLayout::Tuple { .. }));
         }
         let ib2 = b.intern(FnBackend::Lua, RepUse::Return, RepLayout::Opaque);
         assert_ne!(

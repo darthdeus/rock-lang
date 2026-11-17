@@ -1741,7 +1741,7 @@ impl ElemRebuild {
 fn elem_rebuild_from_rep(arena: &RepArena, id: RepId) -> Option<ElemRebuild> {
     let plan = arena.try_get(id)?;
     match plan.layout() {
-        RepLayout::Opaque | RepLayout::Foreign { .. } => Some(ElemRebuild::Passthrough),
+        RepLayout::Opaque => Some(ElemRebuild::Passthrough),
         RepLayout::Leaves(shape) if !shape.nullable => {
             let fields: Option<Vec<Ustr>> = shape
                 .fields

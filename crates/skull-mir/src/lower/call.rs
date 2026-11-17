@@ -1191,14 +1191,7 @@ impl<'a> Builder<'a> {
                     }
                 }
             }
-            if let Some(r) = self.strided_data_primitive(e, name.as_str(), &arg_idxs)? {
-                return Ok(r);
-            }
-            // These raw-backing primitives are the representation boundary for
-            // Vec helpers. Resolve the element through the active substitution:
-            // generic snapshots keep boxed storage, while concrete value
-            // instantiations lower to column operations.
-            if let Some(r) = self.column_data_primitive(e, name.as_str(), &arg_idxs)? {
+            if let Some(r) = self.flat_vec_data_primitive(e, name.as_str(), &arg_idxs)? {
                 return Ok(r);
             }
             // `vec_new()` is the fourth boundary primitive, and the odd one out:
@@ -2862,9 +2855,7 @@ impl<'a> Builder<'a> {
                 ))
             })?;
         match plan.layout() {
-            RepLayout::Opaque | RepLayout::Foreign { .. } => {
-                self.opaque_boundary_leaves(bundle, expected, reason)
-            }
+            RepLayout::Opaque => self.opaque_boundary_leaves(bundle, expected, reason),
             RepLayout::Leaves(_) => self.repr_to_leaves_bundle_for_shape(bundle, expected),
             RepLayout::Tuple { .. } => Err(self.gap_here(format!(
                 "tuple representation {:?} cannot fill a value storage shape at {reason}",
@@ -2889,7 +2880,7 @@ impl<'a> Builder<'a> {
                     bundle.representation()
                 ))
             })?;
-        if !matches!(plan.layout(), RepLayout::Opaque | RepLayout::Foreign { .. }) {
+        if !matches!(plan.layout(), RepLayout::Opaque) {
             return Err(self.gap_here(format!(
                 "representation {:?} is not an opaque boundary at {reason}",
                 bundle.representation()
@@ -2927,7 +2918,7 @@ impl<'a> Builder<'a> {
                         }
                         self.repr_to_leaves_bundle_for_shape(bundle, expected)
                     }
-                    RepLayout::Opaque | RepLayout::Foreign { .. } => {
+                    RepLayout::Opaque => {
                         self.opaque_boundary_leaves(bundle, expected, "scalar ABI argument")
                     }
                     RepLayout::Tuple { .. } => Err(self.gap_here(format!(

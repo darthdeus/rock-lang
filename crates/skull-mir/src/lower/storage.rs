@@ -37,6 +37,17 @@ pub const SYNTHESIZED_ENTRIES: &[&str] = &[
     "table_len",
 ];
 
+enum VecDataOp {
+    Get(Idx<Expr>),
+    Set(Idx<Expr>, Idx<Expr>),
+    Unset(Idx<Expr>),
+    Capacity,
+    Insert(Idx<Expr>, Idx<Expr>),
+    Clone,
+    Sort(Idx<Expr>),
+    ToLua,
+}
+
 impl<'a> Builder<'a> {
     pub(crate) fn clone_column_data(
         &mut self,
@@ -303,147 +314,6 @@ impl<'a> Builder<'a> {
             stride,
             capacity,
         })
-    }
-
-    pub(crate) fn strided_data_primitive(
-        &mut self,
-        e: Idx<Expr>,
-        name: &str,
-        arg_idxs: &[Idx<Expr>],
-    ) -> Result<Option<ValueBundle>, CompilerError> {
-        match (name, arg_idxs) {
-            ("__vec_data_get", [recv, index]) => {
-                let Some(elem) = self.vec_strided_elem_of(*recv)? else {
-                    return Ok(None);
-                };
-                let vec = self.lower_expr(*recv)?;
-                let index = self.lower_expr(*index)?;
-                Ok(Some(self.strided_element_repr(vec, index, elem)?))
-            }
-            ("__vec_data_set", [recv, index, value]) => {
-                let Some(elem) = self.vec_strided_elem_of(*recv)? else {
-                    return Ok(None);
-                };
-                let vec = self.lower_expr(*recv)?;
-                let index = self.lower_expr(*index)?;
-                self.strided_element_store(vec, index, *value, elem)?;
-                let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)));
-                Ok(Some(self.value_bundle_for_expr(e, value)?))
-            }
-            ("__vec_data_unset", [recv, index]) => {
-                let Some(elem) = self.vec_strided_elem_of(*recv)? else {
-                    return Ok(None);
-                };
-                let stride = self.column_shape(elem)?.leaf_count();
-                // A raw row only has something to release when it can hold a
-                // reference; stale scalars past `len` are never read.
-                let raw = self.strided_stores_raw(elem);
-                if raw && !self.column_contains_references(elem) {
-                    let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)));
-                    return Ok(Some(self.value_bundle_for_expr(e, value)?));
-                }
-                let vec = self.lower_expr(*recv)?;
-                let index = self.lower_expr(*index)?;
-                let slot = self.checked_column_index(vec, index);
-                let row = self.strided_row_of(slot);
-                let vacated = if raw { Lit::Nil } else { Lit::Bool(false) };
-                let leaves = (0..stride)
-                    .map(|_| self.emit_cur(Inst::Const(vacated.clone())))
-                    .collect();
-                self.strided_store_leaves_at(vec, row, leaves, stride, elem);
-                let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)));
-                Ok(Some(self.value_bundle_for_expr(e, value)?))
-            }
-            ("__vec_data_capacity", [recv]) => {
-                let Some(elem) = self.vec_strided_elem_of(*recv)? else {
-                    return Ok(None);
-                };
-                let stride = self.column_shape(elem)?.leaf_count();
-                let vec = self.lower_expr(*recv)?;
-                let header = self.column_header(vec);
-                let reserved = self.read_field(header, crate::names::ustr("cap"));
-                let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
-                // A raw row may hold nil, so `#_data` is only some border.
-                let physical = if self.strided_stores_raw(elem) {
-                    let len = self.read_field(vec, crate::names::ustr("len"));
-                    self.emit_cur(Inst::IntMul(len, width))
-                } else {
-                    let data = self.read_field(vec, crate::names::ustr("_data"));
-                    self.call_spine("table_len", vec![data])?
-                };
-                let value = ValueRepr::Scalar(
-                    self.call_spine("__rock_stride_capacity", vec![reserved, physical, width])?,
-                );
-                Ok(Some(self.value_bundle_for_expr(e, value)?))
-            }
-            ("__vec_data_insert", [recv, index, value]) => {
-                let Some(elem) = self.vec_strided_elem_of(*recv)? else {
-                    return Ok(None);
-                };
-                let shape = self.column_shape(elem)?;
-                let stride = shape.leaf_count();
-                let vec = self.lower_expr(*recv)?;
-                let index = self.lower_expr(*index)?;
-                let bundle = self.lower_expr_repr(*value)?;
-                let leaves = self.repr_to_storage_leaves(&bundle, &shape, "strided insert")?;
-                let data = self.read_field(vec, crate::names::ustr("_data"));
-                let len = self.read_field(vec, crate::names::ustr("len"));
-                let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
-                self.call_spine("__rock_stride_insert", vec![data, index, len, width])?;
-                // `index` is the Lua-style (1-based) position on both backends.
-                let one = self.emit_cur(Inst::Const(Lit::Int(1)));
-                let row = self.emit_cur(Inst::IntSub(index, one));
-                self.strided_store_leaves_at(vec, row, leaves, stride, elem);
-                let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)));
-                Ok(Some(self.value_bundle_for_expr(e, value)?))
-            }
-            ("__vec_data_clone", [recv]) => {
-                let Some(elem) = self.vec_strided_elem_of(*recv)? else {
-                    return Ok(None);
-                };
-                let vec = self.lower_expr(*recv)?;
-                let value = self.clone_strided_data(vec, elem)?;
-                Ok(Some(self.value_bundle_for_expr(e, value)?))
-            }
-            ("__vec_data_sort", [recv, key_fn]) => {
-                let Some(elem) = self.vec_strided_elem_of(*recv)? else {
-                    return Ok(None);
-                };
-                let stride = self.column_shape(elem)?.leaf_count();
-                let vec = self.lower_expr(*recv)?;
-                let key = self.lower_expr(*key_fn)?;
-                let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
-                // A fn value taking a `nobox` element takes its leaves, which
-                // are the row, so the key applies without an element existing.
-                let helper = if elem.is_nobox() && self.strided_stores_raw(elem) {
-                    "__rock_stride_sort_leaves"
-                } else {
-                    "__rock_stride_sort"
-                };
-                let value = ValueRepr::Scalar(self.call_spine(helper, vec![vec, key, width])?);
-                Ok(Some(self.value_bundle_for_expr(e, value)?))
-            }
-            ("__rock_vec_to_lua_array", [recv]) => {
-                let Some(elem) = self.vec_strided_elem_of(*recv)? else {
-                    return Ok(None);
-                };
-                if elem.is_nobox() && self.strided_stores_raw(elem) {
-                    return Err(CompilerError::new_with_label(
-                        self.body.expr_spans[*recv],
-                        format!(
-                            "cannot convert strided nobox value `{}` to a Lua array: \
-                             the bridge requires implicit element materialization",
-                            elem.name
-                        ),
-                    ));
-                }
-                let vec = self.lower_expr(*recv)?;
-                let value =
-                    ValueRepr::Scalar(self.call_spine("__rock_vec_strided_elements", vec![vec])?);
-                Ok(Some(self.value_bundle_for_expr(e, value)?))
-            }
-            _ => Ok(None),
-        }
     }
 
     pub(crate) fn strided_vec_from_raw_array(
@@ -916,157 +786,206 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Column-aware lowering of `__vec_data_get/_set/_unset` when the receiver's
-    /// element type is concretely column-stored. `Ok(None)` = not one of these, or
-    /// a boxed element, in which case the stdlib `inline(lua)` body stands.
-    pub(crate) fn column_data_primitive(
+    pub(crate) fn flat_vec_data_primitive(
         &mut self,
         e: Idx<Expr>,
         name: &str,
-        arg_idxs: &[Idx<Expr>],
+        args: &[Idx<Expr>],
     ) -> Result<Option<ValueBundle>, CompilerError> {
-        match (name, arg_idxs) {
-            ("__vec_data_get", [recv, index]) => {
-                let Some(elem) = self.vec_column_elem_of(*recv)? else {
-                    return Ok(None);
-                };
-                let vec = self.lower_expr(*recv)?;
-                let i = self.lower_expr(*index)?;
-                Ok(Some(self.column_element_repr(vec, i, elem)?))
-            }
-            ("__vec_data_set", [recv, index, value]) => {
-                let Some(elem) = self.vec_column_elem_of(*recv)? else {
-                    return Ok(None);
-                };
-                let vec = self.lower_expr(*recv)?;
-                let i = self.lower_expr(*index)?;
-                self.column_element_store(vec, i, *value, elem)?;
-                let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)));
-                Ok(Some(self.value_bundle_for_expr(e, value)?))
-            }
-            ("__vec_data_unset", [recv, index]) => {
-                let Some(elem) = self.vec_column_elem_of(*recv)? else {
-                    return Ok(None);
-                };
-                if self.column_contains_references(elem) {
-                    let vec = self.lower_expr(*recv)?;
-                    let index = self.lower_expr(*index)?;
-                    self.column_unset(vec, index, elem)?;
+        let (recv, op) = match (name, args) {
+            ("__vec_data_get", &[recv, index]) => (recv, VecDataOp::Get(index)),
+            ("__vec_data_set", &[recv, index, value]) => (recv, VecDataOp::Set(index, value)),
+            ("__vec_data_unset", &[recv, index]) => (recv, VecDataOp::Unset(index)),
+            ("__vec_data_capacity", &[recv]) => (recv, VecDataOp::Capacity),
+            ("__vec_data_insert", &[recv, index, value]) => (recv, VecDataOp::Insert(index, value)),
+            ("__vec_data_clone", &[recv]) => (recv, VecDataOp::Clone),
+            ("__vec_data_sort", &[recv, key]) => (recv, VecDataOp::Sort(key)),
+            ("__rock_vec_to_lua_array", &[recv]) => (recv, VecDataOp::ToLua),
+            _ => return Ok(None),
+        };
+        let Some(plan) = self.container_plan_for(recv, ContainerFamily::Vec)? else {
+            return Ok(None);
+        };
+        let arena = self.scx.rep_arena();
+        let (elem, storage) = if let Some(elem) = plan.strided_elem(arena) {
+            (elem, FlatStorage::Strided)
+        } else if let Some(elem) = plan.column_elem(arena) {
+            (elem, FlatStorage::Columns)
+        } else {
+            return Ok(None);
+        };
+
+        let value = match op {
+            VecDataOp::Get(index) => {
+                let vec = self.lower_expr(recv)?;
+                let index = self.lower_expr(index)?;
+                return match storage {
+                    FlatStorage::Columns => self.column_element_repr(vec, index, elem),
+                    FlatStorage::Strided => self.strided_element_repr(vec, index, elem),
                 }
-                let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)));
-                Ok(Some(self.value_bundle_for_expr(e, value)?))
+                .map(Some);
             }
-            ("__vec_data_capacity", [recv]) => {
-                let Some(elem) = self.vec_column_elem_of(*recv)? else {
-                    return Ok(None);
-                };
+            VecDataOp::Set(index, value) => {
+                let vec = self.lower_expr(recv)?;
+                let index = self.lower_expr(index)?;
+                match storage {
+                    FlatStorage::Columns => self.column_element_store(vec, index, value, elem)?,
+                    FlatStorage::Strided => self.strided_element_store(vec, index, value, elem)?,
+                }
+                None
+            }
+            VecDataOp::Unset(index) => {
+                match storage {
+                    FlatStorage::Columns => {
+                        if self.column_contains_references(elem) {
+                            let vec = self.lower_expr(recv)?;
+                            let index = self.lower_expr(index)?;
+                            self.column_unset(vec, index, elem)?;
+                        }
+                    }
+                    FlatStorage::Strided => {
+                        let stride = self.column_shape(elem)?.leaf_count();
+                        let raw = self.strided_stores_raw(elem);
+                        // Stale scalar slots beyond len hold nothing to release.
+                        if !raw || self.column_contains_references(elem) {
+                            let vec = self.lower_expr(recv)?;
+                            let index = self.lower_expr(index)?;
+                            let slot = self.checked_column_index(vec, index);
+                            let row = self.strided_row_of(slot);
+                            let vacant = if raw { Lit::Nil } else { Lit::Bool(false) };
+                            let leaves = (0..stride)
+                                .map(|_| self.emit_cur(Inst::Const(vacant.clone())))
+                                .collect();
+                            self.strided_store_leaves_at(vec, row, leaves, stride, elem);
+                        }
+                    }
+                }
+                None
+            }
+            VecDataOp::Capacity => {
                 let shape = self.column_shape(elem)?;
-                let vec = self.lower_expr(*recv)?;
+                let vec = self.lower_expr(recv)?;
                 let header = self.column_header(vec);
                 let reserved = self.read_field(header, crate::names::ustr("cap"));
-                // Reference leaves can be nil even when the element is present.
-                let physical = if self.column_contains_references(elem) {
-                    self.read_field(vec, crate::names::ustr("len"))
-                } else {
-                    match column_leaf_paths(&shape).first() {
-                        Some(path) => {
-                            let col = self.read_field(vec, *path);
-                            self.call_spine("table_len", vec![col])?
-                        }
-                        None => self.read_field(vec, crate::names::ustr("len")),
+                let capacity = match storage {
+                    FlatStorage::Columns => {
+                        // Nil reference leaves make a column's Lua length unreliable.
+                        let physical = if !self.column_contains_references(elem)
+                            && let Some(path) = column_leaf_paths(&shape).first()
+                        {
+                            let column = self.read_field(vec, *path);
+                            self.call_spine("table_len", vec![column])?
+                        } else {
+                            self.read_field(vec, crate::names::ustr("len"))
+                        };
+                        self.call_spine("__rock_col_capacity", vec![reserved, physical])?
+                    }
+                    FlatStorage::Strided => {
+                        let width = self.emit_cur(Inst::Const(Lit::Int(shape.leaf_count() as i64)));
+                        let physical = if self.strided_stores_raw(elem) {
+                            let len = self.read_field(vec, crate::names::ustr("len"));
+                            self.emit_cur(Inst::IntMul(len, width))
+                        } else {
+                            let data = self.read_field(vec, crate::names::ustr("_data"));
+                            self.call_spine("table_len", vec![data])?
+                        };
+                        self.call_spine("__rock_stride_capacity", vec![reserved, physical, width])?
                     }
                 };
-                let value = ValueRepr::Scalar(
-                    self.call_spine("__rock_col_capacity", vec![reserved, physical])?,
-                );
-                Ok(Some(self.value_bundle_for_expr(e, value)?))
+                Some(ValueRepr::Scalar(capacity))
             }
-            // Shift every column at the same slot, so they stay in lockstep. The
-            // element is consumed as LEAVES, so the inserted value never boxes.
-            ("__vec_data_insert", [recv, index, value]) => {
-                let Some(elem) = self.vec_column_elem_of(*recv)? else {
-                    return Ok(None);
-                };
+            VecDataOp::Insert(index, value) => {
                 let shape = self.column_shape(elem)?;
-                let paths = column_leaf_paths(&shape);
-                let vec = self.lower_expr(*recv)?;
-                let i = self.lower_expr(*index)?;
-                let repr = self.lower_expr_repr(*value)?;
-                let leaves = self.repr_to_leaves_bundle(&repr)?;
-                if leaves.len() != paths.len() {
-                    return Err(gap(format!(
-                        "column insert arity mismatch for [{}]",
-                        elem.name
-                    )));
+                let paths = (storage == FlatStorage::Columns).then(|| column_leaf_paths(&shape));
+                let vec = self.lower_expr(recv)?;
+                let index = self.lower_expr(index)?;
+                let bundle = self.lower_expr_repr(value)?;
+                if let Some(paths) = paths {
+                    let leaves = self.repr_to_leaves_bundle(&bundle)?;
+                    if leaves.len() != paths.len() {
+                        return Err(gap(format!(
+                            "column insert arity mismatch for [{}]",
+                            elem.name
+                        )));
+                    }
+                    let len = self.read_field(vec, crate::names::ustr("len"));
+                    for (path, leaf) in paths.into_iter().zip(leaves) {
+                        let col = self.read_field(vec, path);
+                        self.call_spine("__rock_col_insert", vec![col, index, len, leaf])?;
+                    }
+                } else {
+                    let stride = shape.leaf_count();
+                    let leaves = self.repr_to_storage_leaves(&bundle, &shape, "strided insert")?;
+                    let data = self.read_field(vec, crate::names::ustr("_data"));
+                    let len = self.read_field(vec, crate::names::ustr("len"));
+                    let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
+                    self.call_spine("__rock_stride_insert", vec![data, index, len, width])?;
+                    // The position argument is 1-based on both backends.
+                    let one = self.emit_cur(Inst::Const(Lit::Int(1)));
+                    let row = self.emit_cur(Inst::IntSub(index, one));
+                    self.strided_store_leaves_at(vec, row, leaves, stride, elem);
                 }
-                let len = self.read_field(vec, crate::names::ustr("len"));
-                for (path, leaf) in paths.into_iter().zip(leaves) {
-                    let col = self.read_field(vec, path);
-                    self.call_spine("__rock_col_insert", vec![col, i, len, leaf])?;
-                }
-                let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)));
-                Ok(Some(self.value_bundle_for_expr(e, value)?))
+                None
             }
-            // A fresh column table whose columns are copies -- the clone must not
-            // share a column with the original, or a later push would be seen by
-            // both.
-            ("__vec_data_clone", [recv]) => {
-                let Some(elem) = self.vec_column_elem_of(*recv)? else {
-                    return Ok(None);
-                };
-                let vec = self.lower_expr(*recv)?;
-                let value = self.clone_column_data(vec, elem)?;
-                Ok(Some(self.value_bundle_for_expr(e, value)?))
+            VecDataOp::Clone => {
+                let vec = self.lower_expr(recv)?;
+                Some(match storage {
+                    FlatStorage::Columns => self.clone_column_data(vec, elem)?,
+                    FlatStorage::Strided => self.clone_strided_data(vec, elem)?,
+                })
             }
-            // Sorting applies the key to the logical element; `to_lua_array`
-            // explicitly materializes elements for a foreign API. A `nobox`
-            // sort key uses its function-value ABI and reads the columns directly.
-            ("__vec_data_sort", [recv, key_fn]) => {
-                let Some(elem) = self.vec_column_elem_of(*recv)? else {
-                    return Ok(None);
+            VecDataOp::Sort(key) => {
+                let stride = (storage == FlatStorage::Strided)
+                    .then(|| self.column_shape(elem).map(|shape| shape.leaf_count()))
+                    .transpose()?;
+                let vec = self.lower_expr(recv)?;
+                let key = self.lower_expr(key)?;
+                let call = if let Some(stride) = stride {
+                    let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
+                    let helper = if elem.is_nobox() && self.strided_stores_raw(elem) {
+                        "__rock_stride_sort_leaves"
+                    } else {
+                        "__rock_stride_sort"
+                    };
+                    self.call_spine(helper, vec![vec, key, width])?
+                } else if elem.is_nobox() {
+                    // Pass the argument leaves in the key function's ABI order.
+                    let shape = self.column_shape(elem)?;
+                    let paths = column_leaf_paths(&shape)
+                        .into_iter()
+                        .map(|p| self.emit_cur(Inst::Const(Lit::Str(p))))
+                        .collect();
+                    let paths = self.emit_cur(Inst::MakeTuple(paths));
+                    self.call_spine("__rock_col_sort_leaves", vec![vec, key, paths])?
+                } else {
+                    self.call_spine("__rock_col_sort", vec![vec, key])?
                 };
-                let vec = self.lower_expr(*recv)?;
-                let k = self.lower_expr(*key_fn)?;
-                if !elem.is_nobox() {
-                    let value =
-                        ValueRepr::Scalar(self.call_spine("__rock_col_sort", vec![vec, k])?);
-                    return Ok(Some(self.value_bundle_for_expr(e, value)?));
-                }
-                let shape = self.column_shape(elem)?;
-                // The key fn's ABI at a nullable element leads with presence, so
-                // the path list must too -- it is the positional binding the
-                // helper unpacks into the key.
-                let paths: Vec<_> = column_leaf_paths(&shape)
-                    .into_iter()
-                    .map(|p| self.emit_cur(Inst::Const(Lit::Str(p))))
-                    .collect();
-                let paths = self.emit_cur(Inst::MakeTuple(paths));
-                let value = ValueRepr::Scalar(
-                    self.call_spine("__rock_col_sort_leaves", vec![vec, k, paths])?,
-                );
-                Ok(Some(self.value_bundle_for_expr(e, value)?))
+                Some(ValueRepr::Scalar(call))
             }
-            ("__rock_vec_to_lua_array", [recv]) => {
-                let Some(elem) = self.vec_column_elem_of(*recv)? else {
-                    return Ok(None);
+            VecDataOp::ToLua => {
+                let (layout, helper) = match storage {
+                    FlatStorage::Columns => ("column-stored", "__rock_vec_column_elements"),
+                    FlatStorage::Strided => ("strided", "__rock_vec_strided_elements"),
                 };
-                if elem.is_nobox() {
+                if elem.is_nobox()
+                    && (storage == FlatStorage::Columns || self.strided_stores_raw(elem))
+                {
                     return Err(CompilerError::new_with_label(
-                        self.body.expr_spans[*recv],
+                        self.body.expr_spans[recv],
                         format!(
-                            "cannot convert column-stored nobox value `{}` to a Lua array: \
+                            "cannot convert {layout} nobox value `{}` to a Lua array: \
                              the bridge requires implicit element materialization",
                             elem.name
                         ),
                     ));
                 }
-                let vec = self.lower_expr(*recv)?;
-                let value =
-                    ValueRepr::Scalar(self.call_spine("__rock_vec_column_elements", vec![vec])?);
-                Ok(Some(self.value_bundle_for_expr(e, value)?))
+                let vec = self.lower_expr(recv)?;
+                Some(ValueRepr::Scalar(self.call_spine(helper, vec![vec])?))
             }
-            _ => Ok(None),
-        }
+        };
+        let value =
+            value.unwrap_or_else(|| ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
+        self.value_bundle_for_expr(e, value).map(Some)
     }
 
     pub(crate) fn make_column_header(
