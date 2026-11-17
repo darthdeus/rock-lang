@@ -24,14 +24,6 @@ impl CodeActionKind {
     /// Base kind for quickfix actions: 'quickfix'
     pub const QUICKFIX: CodeActionKind = CodeActionKind::new("quickfix");
 
-    /// Base kind for refactoring inline actions: 'refactor.inline'
-    ///
-    /// Example inline actions:
-    ///
-    /// - Inline function
-    /// - Inline variable
-    /// - Inline constant
-    /// - ...
     pub const REFACTOR_INLINE: CodeActionKind = CodeActionKind::new("refactor.inline");
 
     pub const fn new(tag: &'static str) -> Self {

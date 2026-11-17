@@ -175,11 +175,6 @@ impl DiagnosticSeverity {
 
 lsp_struct! {
     out
-    /// Represents a reference to a command. Provides a title which will be used to represent a command in the UI.
-    /// Commands are identified by a string identifier. The recommended way to handle commands is to implement
-    /// their execution on the server side if the client and server provides the corresponding capabilities.
-    /// Alternatively the tool extension code could handle the command.
-    /// The protocol currently doesn’t specify a set of well-known commands.
     #[derive(Debug, PartialEq, Clone, Default)]
     pub struct Command {
         required pub title: String = "title",
@@ -292,14 +287,8 @@ lsp_struct! {
     }
 }
 
-/// Describes the content type that a client supports in various
-/// result literals like `Hover`, `ParameterInfo` or `CompletionItem`.
-///
-/// Please note that `MarkupKinds` must not start with a `$`. This kinds
-/// are reserved for internal usage.
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum MarkupKind {
-    /// Markdown is supported as a content format
     Markdown,
 }
 
@@ -313,29 +302,6 @@ impl serde::Serialize for MarkupKind {
 
 lsp_struct! {
     out
-    /// A `MarkupContent` literal represents a string value which content can be represented in different formats.
-    /// Currently `plaintext` and `markdown` are supported formats. A `MarkupContent` is usually used in
-    /// documentation properties of result literals like `CompletionItem` or `SignatureInformation`.
-    /// If the format is `markdown` the content should follow the [GitHub Flavored Markdown Specification](https://github.github.com/gfm/).
-    ///
-    /// Here is an example how such a string can be constructed using JavaScript / TypeScript:
-    ///
-    /// ```ignore
-    /// let markdown: MarkupContent = {
-    ///     kind: MarkupKind::Markdown,
-    ///     value: [
-    ///         "# Header",
-    ///         "Some text",
-    ///         "```typescript",
-    ///         "someCode();",
-    ///         "```"
-    ///     ]
-    ///     .join("\n"),
-    /// };
-    /// ```
-    ///
-    /// Please *Note* that clients might sanitize the return markdown. A client could decide to
-    /// remove HTML from the markdown to avoid script execution.
     #[derive(Debug, Eq, PartialEq, Clone)]
     pub struct MarkupContent {
         required pub kind: MarkupKind = "kind",
