@@ -1,0 +1,30 @@
+@test
+fn prepared_text_matches_transformed_emission() {
+    assert(stone_gpu_host_ensure())
+    assert(stone_text_init())
+    let font = load_font(project_asset_path("@engine/assets/fonts/DroidSans.ttf"), 24,
+        raster: FontRasterPolicy::Fixed).unwrap()
+    defer { unload_font(font) }
+    let layout = text_layout_build(font, "Ag jW", 20.0, 1.0)
+    let identity = text_layout_identity_poses(layout)
+    let batch = render_batch_growth_tiny(layout.glyphs.len * 12)
+    for scale in [1.0, 1.7, 0.75] {
+        let instance = text_art_atlas_instance_for(font,
+            text_layout_raster_demand(layout, null, scale))
+        batch.count = 0
+        assert(text_layout_emit_instance(batch, layout, v(17.25,23.5), RED,
+            instance.instance_id as int, null, layout_scale: scale))
+        let count = batch.count
+        assert(text_layout_emit_instance(batch, layout, v(17.25,23.5), RED,
+            instance.instance_id as int, identity, layout_scale: scale))
+        assert_eq(batch.count, count * 2)
+        for i in 0..count {
+            let actual = batch.verts[i]
+            let reference = batch.verts[count + i]
+            assert(abs(actual.pos.x - reference.pos.x) < 0.0001)
+            assert(abs(actual.pos.y - reference.pos.y) < 0.0001)
+            assert_eq(actual.uv, reference.uv)
+            assert_eq(actual.color, reference.color)
+        }
+    }
+}

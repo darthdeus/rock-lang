@@ -449,7 +449,7 @@ pub fn text_layout_instance_glyph_data() -> GlyphData {
     }
 }
 
-const TEXT_LAYOUT_INSTANCE_GLYPH_STRIDE: int = 10
+const TEXT_LAYOUT_INSTANCE_GLYPH_STRIDE: int = 14
 
 fn text_layout_instance_glyph_cache_prepare(layout: TextLayout, instance_id: int) {
     let expected = layout.glyphs.len * TEXT_LAYOUT_INSTANCE_GLYPH_STRIDE
@@ -462,6 +462,8 @@ fn text_layout_instance_glyph_cache_prepare(layout: TextLayout, instance_id: int
         && layout.instance_glyph_data.len == expected {
         layout.instance_glyph_data
     } else { native_buffer_float(expected) }
+    let pixels = stone_get_font_instance_pixel_size_ffi(instance_id)
+    let unit_size = text_layout_metric_unit_size(layout, pixels)
     for i in 0..layout.glyphs.len {
         let base = i * TEXT_LAYOUT_INSTANCE_GLYPH_STRIDE
         let glyph = layout.glyphs[i]
@@ -470,6 +472,12 @@ fn text_layout_instance_glyph_cache_prepare(layout: TextLayout, instance_id: int
         if found {
             let raw = TEXT_LAYOUT_INSTANCE_GLYPH_SCRATCH
             for j in 0..9 { cached[base + 1 + j] = raw[j] }
+            let ink = text_layout_raster_rect_at(unit_size, layout, glyph.origin,
+                text_layout_instance_glyph_cached(cached, i), pixels)
+            cached[base + 10] = ink.x
+            cached[base + 11] = ink.y
+            cached[base + 12] = ink.x + ink.w
+            cached[base + 13] = ink.y + ink.h
         }
     }
     layout.instance_glyph_id = instance_id
@@ -505,18 +513,38 @@ fn text_layout_emit_instance(
     let before = batch.count
     let emitted_count = 0
     let emitted_bounds = rect(0.0, 0.0, 0.0, 0.0)
+    text_layout_instance_glyph_cache_prepare(layout, instance_id)
+    let cached_glyphs = layout.instance_glyph_data.unwrap()
+    // Plain text has no per-glyph deformation. Retain local ink corners with
+    // the atlas instance; only placement, whole-run scale and tint change.
+    if poses == null && probe_text == "" && !UI_SUBMISSION_PROBE_ON {
+        for i in 0..layout.glyphs.len {
+            let base = i * TEXT_LAYOUT_INSTANCE_GLYPH_STRIDE
+            if cached_glyphs[base] == 0.0 { continue }
+            let x0 = origin.x + cached_glyphs[base + 10] * layout_scale
+            let y0 = origin.y + cached_glyphs[base + 11] * layout_scale
+            let x1 = origin.x + cached_glyphs[base + 12] * layout_scale
+            let y1 = origin.y + cached_glyphs[base + 13] * layout_scale
+            __queue_text_quad(batch.verts, batch.count,
+                v(x0,y0), v(x1,y0), v(x1,y1), v(x0,y1),
+                cached_glyphs[base + 1], cached_glyphs[base + 2],
+                cached_glyphs[base + 3], cached_glyphs[base + 4],
+                color.r, color.g, color.b, color.a)
+            batch.count += 6
+        }
+        profile_end("text.emit.glyphs")
+        return batch.count > before
+    }
     let source_pixel_size = if layout.instance_cached_id == instance_id
         && layout.instance_cached_pixel_size > 0 {
         layout.instance_cached_pixel_size
     } else { stone_get_font_instance_pixel_size_ffi(instance_id) }
-    text_layout_instance_glyph_cache_prepare(layout, instance_id)
-    let cached_glyphs = layout.instance_glyph_data
     let unit_size = 0.0
     let unit_size_ready = false
     for i in 0..layout.glyphs.len {
         let glyph_origin = layout.glyphs[i].origin
         let glyph_pivot = layout.glyphs[i].pivot
-        let data = cached_glyphs.unwrap()
+        let data = cached_glyphs
         if data[i * TEXT_LAYOUT_INSTANCE_GLYPH_STRIDE] == 0.0 { continue }
         let raw = text_layout_instance_glyph_cached(data, i)
         let pose = text_layout_pose_at(layout, i, poses)
@@ -661,7 +689,8 @@ pub fn text_layout_emit(
     z_layer: int,
     poses: [GlyphPose]? = null,
     consumer_key: string = "",
-    layout_scale: float = 1.0
+    layout_scale: float = 1.0,
+    shadow: bool = false
 ) -> bool {
     TEXT_LAYOUT_EMIT_CALLS += 1
     let font = layout.font ?? return false
@@ -709,7 +738,15 @@ pub fn text_layout_emit(
         text_batch: true,
     })
     profile_end("text.batch.lookup")
-    reserve_vertices(batch, layout.glyphs.len * 6)
+    reserve_vertices(batch, layout.glyphs.len * if shadow { 12 } else { 6 })
+    if shadow {
+        let _ = text_layout_emit_instance(batch, layout, origin + v(1,1), BLACK,
+            instance_id, poses, probe_text: probe_text, probe_consumer_key: consumer_key,
+            probe_admitted_count: probe_admitted_count,
+            probe_layout_glyph_count: probe_layout_glyph_count,
+            probe_layout_ink_bounds: probe_layout_ink_bounds,
+            layout_scale: layout_scale)
+    }
     return text_layout_emit_instance(
         batch, layout, origin, color, instance_id, poses,
         probe_text: probe_text, probe_consumer_key: consumer_key,

@@ -969,10 +969,8 @@ pub fn UiRect.text(
     // r.z + 1: text sits above this rect's shapes; shadow + main share
     // the bucket (same font-atlas batch, push order holds within it).
     let prev = ui_ctx_push(r)
-    if shadow {
-        emit_ui_text_layout(layout, anchor + v(1, 1), BLACK, v(), r.z + 1)
-    }
-    emit_ui_text_layout(layout, anchor, color, v(), r.z + 1)
+    let _ = text_layout_emit(layout, text_layout_aligned_origin(layout, anchor),
+        color, r.z + 1, shadow: shadow)
     ui_ctx_pop(prev)
 
     return r
