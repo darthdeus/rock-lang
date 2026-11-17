@@ -1011,10 +1011,10 @@ impl<'a> Builder<'a> {
         enumerated: bool,
     ) -> Result<(), CompilerError> {
         // Split `(i, xpat)` vs a single binding to the whole `(i, element)` tuple.
-        let split: Option<(Idx<BindingInfo>, BindingPattern)> = match vars {
+        let split = match vars {
             _ if !enumerated => None,
             BindingPattern::Tuple(subs) if subs.len() == 2 => match &subs[0] {
-                BindingPattern::Leaf(i) => Some((*i, subs[1].clone())),
+                BindingPattern::Leaf(i) => Some((*i, &subs[1])),
                 _ => return Err(gap("enumerate binds (index, element)")),
             },
             _ => None,
@@ -1022,20 +1022,62 @@ impl<'a> Builder<'a> {
         if !self.expr_is_flat_vec(coll) && self.coll_kind(coll)? == ContainerKind::Map {
             let (ib, xpat) =
                 split.ok_or_else(|| gap("enumerate over Map with a single binding"))?;
-            return self.lower_for_map(Some(ib), &xpat, coll, body);
+            return self.lower_for_map(Some(ib), xpat, coll, body);
         }
+        self.lower_counted_loop(coll, body, split.map(|(i, _)| i), |s, i_now, repr| {
+            let elem_pat = split.map(|(_, pat)| pat).or((!enumerated).then_some(vars));
+            let ty = match elem_pat {
+                Some(pat) => s.loop_binder_ty(pat, None),
+                None => s.loop_binder_ty(vars, Some(1)),
+            };
+            let repr = s.loop_element_snapshot(ty, repr)?;
+            // A tuple element whose `nobox` parts ride its box as leaves
+            // destructures from the box's slots, not from its plain indices.
+            if let Some(pat) = elem_pat {
+                if let (BindingPattern::Tuple(_), ValueRepr::Scalar(base)) = (pat, &repr)
+                    && let Some(MonoTy::App { params, .. }) = s.concrete_expr_ty(coll)
+                    && let [elem @ MonoTy::Tuple(_)] = params.as_slice()
+                    && let Some(shape) = s
+                        .concrete_rep_tuple(elem, RepUse::Return, true, false)?
+                        .filter(TupleRetShape::splats)
+                {
+                    let base = *base;
+                    let slots: Vec<Idx<Inst>> = (0..shape.slot_count())
+                        .map(|index| s.emit_cur(Inst::TupleIndex { base, index }))
+                        .collect();
+                    let tuple = s.tuple_from_slots(&shape, &slots, &mut 0);
+                    s.bind_tuple_repr(pat, &shape, tuple)?;
+                } else {
+                    s.bind_loop_element_repr(pat, repr)?;
+                }
+            } else {
+                let elem = s.pack(repr)?;
+                let pair = s.emit_cur(Inst::MakeTuple(vec![i_now, elem]));
+                s.bind_for_pattern(vars, pair);
+            }
+            Ok(())
+        })
+    }
+
+    fn lower_counted_loop(
+        &mut self,
+        coll: Idx<Expr>,
+        body: Idx<Expr>,
+        index: Option<Idx<BindingInfo>>,
+        bind: impl FnOnce(&mut Self, Idx<Inst>, ValueRepr) -> Result<(), CompilerError>,
+    ) -> Result<(), CompilerError> {
         let (kind, arr_v, len_v) = self.lower_counted_storage(coll)?;
         // The counter cell is named after the index var in split mode; an internal
         // cell in single-binding mode (the index is folded into the tuple).
-        let i_cell = match &split {
-            Some((ib, _)) => {
+        let i_cell = match index {
+            Some(ib) => {
                 let c = self.new_binding_cell(
-                    *ib,
-                    self.body.binding_arena[*ib].name,
-                    self.binding_ty(*ib),
+                    ib,
+                    self.body.binding_arena[ib].name,
+                    self.binding_ty(ib),
                     crate::names::ustr(""),
                 );
-                self.binds.insert(raw(*ib), c);
+                self.binds.insert(raw(ib), c);
                 c
             }
             None => self.f.new_cell(None),
@@ -1058,56 +1100,7 @@ impl<'a> Builder<'a> {
         self.cur = body_bb;
         let i_now = self.emit_cur(Inst::Load(i_cell));
         let repr = self.loop_element_repr_at(arr_v, i_now, kind)?;
-        let ty = match &split {
-            Some((_, xpat)) => self.loop_binder_ty(xpat, None),
-            None if !enumerated => self.loop_binder_ty(vars, None),
-            None => self.loop_binder_ty(vars, Some(1)),
-        };
-        let repr = self.loop_element_snapshot(ty, repr)?;
-        let elem_pat = match &split {
-            Some((_, xpat)) => Some(xpat),
-            None if !enumerated => Some(vars),
-            None => None,
-        };
-        // A tuple element whose `nobox` parts ride its box as leaves
-        // destructures from the box's slots, not from its plain indices.
-        let box_shape = match (elem_pat, &repr) {
-            (Some(BindingPattern::Tuple(_)), ValueRepr::Scalar(_)) => {
-                match self.concrete_expr_ty(coll) {
-                    Some(MonoTy::App { params, .. }) if params.len() == 1 => {
-                        let elem = params[0].clone();
-                        match elem {
-                            MonoTy::Tuple(_) => self
-                                .concrete_rep_tuple(&elem, RepUse::Return, true, false)?
-                                .filter(TupleRetShape::splats),
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        };
-        if let (Some(pat), Some(shape), ValueRepr::Scalar(base)) = (elem_pat, &box_shape, &repr) {
-            let base = *base;
-            let slots: Vec<Idx<Inst>> = (0..shape.slot_count())
-                .map(|index| self.emit_cur(Inst::TupleIndex { base, index }))
-                .collect();
-            let tuple = self.tuple_from_slots(shape, &slots, &mut 0);
-            self.bind_tuple_repr(pat, shape, tuple)?;
-        } else {
-            match &split {
-                // split: index already bound to i_cell; bind the element pattern.
-                Some((_, xpat)) => self.bind_loop_element_repr(xpat, repr)?,
-                None if !enumerated => self.bind_loop_element_repr(vars, repr)?,
-                // single: bind the whole `(index, element)` tuple.
-                None => {
-                    let elem = self.pack(repr)?;
-                    let pair = self.emit_cur(Inst::MakeTuple(vec![i_now, elem]));
-                    self.bind_for_pattern(vars, pair);
-                }
-            }
-        }
+        bind(self, i_now, repr)?;
         self.push_loop_target(latch, exit, self.defers.len());
         self.lower_stmt_expr(body)?;
         self.loop_targets.pop();
@@ -1150,41 +1143,13 @@ impl<'a> Builder<'a> {
         iter: Idx<Expr>,
         body: Idx<Expr>,
     ) -> Result<(), CompilerError> {
-        let (kind, arr_v, len_v) = self.lower_counted_storage(iter)?;
-        let i_cell = self.f.new_cell(None);
-        self.f.mark_loop_binding(i_cell);
-        let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
-        self.store_cell(i_cell, zero);
-
-        let header = self.f.new_block();
-        let body_bb = self.f.new_block();
-        let latch = self.f.new_block();
-        let exit = self.f.new_block();
-        self.f.set_term(self.cur, Term::Goto(header));
-
-        self.cur = header;
-        let i = self.emit_cur(Inst::Load(i_cell));
-        let cmp = self.emit_cur(Inst::IntLt(i, len_v));
-        self.branch_to(cmp, body_bb, exit);
-
-        self.cur = body_bb;
-        let i_now = self.emit_cur(Inst::Load(i_cell));
-        let repr = self.loop_element_repr_at(arr_v, i_now, kind)?;
-        let ty = self.loop_binder_ty(&vars, None);
-        let repr = self.loop_element_snapshot(ty, repr)?;
-        let elem = self.pack(repr)?;
-        self.bind_for_pattern(&vars, elem);
-        self.push_loop_target(latch, exit, self.defers.len());
-        self.lower_stmt_expr(body)?;
-        self.loop_targets.pop();
-        self.goto_if_open(latch);
-
-        self.cur = latch;
-        self.increment_cell(i_cell);
-        self.f.set_term(self.cur, Term::Goto(header));
-
-        self.cur = exit;
-        Ok(())
+        self.lower_counted_loop(iter, body, None, |s, _, repr| {
+            let ty = s.loop_binder_ty(&vars, None);
+            let repr = s.loop_element_snapshot(ty, repr)?;
+            let elem = s.pack(repr)?;
+            s.bind_for_pattern(&vars, elem);
+            Ok(())
+        })
     }
 
     /// A loop binding reads its element out of the collection (a Vec element,

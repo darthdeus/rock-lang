@@ -509,23 +509,41 @@ impl<'a> Builder<'a> {
         self.lower_branch(cond, then_bb, else_bb, true)?;
 
         self.cur = then_bb;
-        let tv = self.lower_expr_repr(then_branch)?;
-        self.store_bundle_and_join(&results, &shape, &tv, join)?;
+        self.lower_value_arms(
+            &results,
+            &shape,
+            else_bb,
+            join,
+            |s| s.lower_expr_repr(then_branch),
+            else_branch,
+        )
+    }
+
+    pub(super) fn lower_value_arms(
+        &mut self,
+        results: &[Idx<Cell>],
+        shape: &RetSlot,
+        else_bb: Idx<Block>,
+        join: Idx<Block>,
+        then_value: impl FnOnce(&mut Self) -> Result<ValueBundle, CompilerError>,
+        else_branch: Option<Idx<Expr>>,
+    ) -> Result<ValueRepr, CompilerError> {
+        let then_value = then_value(self)?;
+        self.store_bundle_and_join(results, shape, &then_value, join)?;
 
         self.cur = else_bb;
-        let ev = match else_branch {
-            Some(eb) => self.lower_expr_repr(eb)?,
+        let else_value = match else_branch {
+            Some(expr) => self.lower_expr_repr(expr)?,
             None => ValueBundle::new(
-                tv.representation(),
+                then_value.representation(),
                 ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))),
             ),
         };
-        self.store_bundle_and_join(&results, &shape, &ev, join)?;
+        self.store_bundle_and_join(results, shape, &else_value, join)?;
 
         self.cur = join;
-        let slots = self.load_cells(&results);
-        let mut idx = 0;
-        Ok(self.slot_repr(&shape, &slots, &mut idx))
+        let slots = self.load_cells(results);
+        Ok(self.slot_repr(shape, &slots, &mut 0))
     }
 
     /// `if` in STATEMENT position (value discarded): branch + arms-as-statements
@@ -550,6 +568,16 @@ impl<'a> Builder<'a> {
         self.lower_branch(cond, then_bb, else_bb, true)?;
 
         self.cur = then_bb;
+        self.lower_statement_arms(then_branch, else_branch, else_bb, join)
+    }
+
+    pub(super) fn lower_statement_arms(
+        &mut self,
+        then_branch: Idx<Expr>,
+        else_branch: Option<Idx<Expr>>,
+        else_bb: Idx<Block>,
+        join: Idx<Block>,
+    ) -> Result<(), CompilerError> {
         self.lower_stmt_expr(then_branch)?;
         self.goto_if_open(join);
 
@@ -593,19 +621,17 @@ impl<'a> Builder<'a> {
         self.branch_to(is_nil, nil_bb, val_bb);
 
         self.cur = val_bb;
-        let recv_v = self.safe_nav_present_value(recv)?;
-        let v = value_arm(self, recv_v)?;
-        self.store_bundle_and_join(&results, &shape, &v, join)?;
-
-        self.cur = nil_bb;
-        let n = self.emit_cur(Inst::Const(Lit::Nil));
-        let nil = ValueBundle::new(v.representation(), ValueRepr::Scalar(n));
-        self.store_bundle_and_join(&results, &shape, &nil, join)?;
-
-        self.cur = join;
-        let slots = self.load_cells(&results);
-        let mut idx = 0;
-        Ok(self.slot_repr(&shape, &slots, &mut idx))
+        self.lower_value_arms(
+            &results,
+            &shape,
+            nil_bb,
+            join,
+            |s| {
+                let recv_v = s.safe_nav_present_value(recv)?;
+                value_arm(s, recv_v)
+            },
+            None,
+        )
     }
 
     /// Branch on `cond` to nil or `value_arm`, joined through `result`. The

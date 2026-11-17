@@ -94,20 +94,14 @@ pub(crate) fn lower_attribution_timing_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("ROCK_LOG").is_ok_and(|value| value == "debug"))
 }
 
-fn finish_lower_attribution(mut f: MirFunc, mut stats: LowerAttribution) -> MirFunc {
+fn finish_lower_attribution(mut f: MirFunc) -> MirFunc {
+    let stats = &mut f.lower_attribution;
     stats.mir_instruction_allocations += f.insts.len();
     stats.mir_instruction_capacity += f.insts.capacity();
     stats.mir_cell_allocations += f.cells.len();
     stats.mir_cell_capacity += f.cells.capacity();
     stats.mir_block_allocations += f.blocks.len();
     stats.mir_block_capacity += f.blocks.capacity();
-    stats.mir_instruction_reallocations += f.lower_attribution.mir_instruction_reallocations;
-    stats.mir_instruction_reallocation_ns += f.lower_attribution.mir_instruction_reallocation_ns;
-    stats.mir_cell_reallocations += f.lower_attribution.mir_cell_reallocations;
-    stats.mir_cell_reallocation_ns += f.lower_attribution.mir_cell_reallocation_ns;
-    stats.mir_block_reallocations += f.lower_attribution.mir_block_reallocations;
-    stats.mir_block_reallocation_ns += f.lower_attribution.mir_block_reallocation_ns;
-    f.lower_attribution = stats;
     f
 }
 
@@ -1613,95 +1607,37 @@ fn lower_body(
     });
     f.is_coroutine = func.is_coroutine;
     f.resume_arg = resume_arg;
-    let cur = f.entry();
-    // Scalar value ABI: when this fn participates, each value param expands to
-    // leaf cells and a value return becomes a multi-value `Return`. This body's
-    // own ABI is the one Owner-keyed plan the calls that target it read; the
-    // plan in hand rides along because a standalone specialization's plan may
-    // not be in the shared map.
     let abi = owner_abi_plan_for_body(ws, scx, concrete_plans, &subject, concrete_plan)?;
     f.abi_plan = Some(abi.clone());
     f.code_identity = Some(crate::code_identity::CodeIdentity::Named(subject.clone()));
     f.code_abi_fingerprint = Some(abi.logical_fingerprint());
-    let param_rep_count = abi.representation().params().len();
-    let ret_rep = abi.representation().result();
-    let mut b = Builder {
+    let mut b = Builder::new(
         ws,
         scx,
-        call_scx: scx,
+        scx,
         concrete_plan,
         concrete_plans,
-        lower_attribution: RefCell::new(LowerAttribution {
-            abi_param_copy_volume: 0,
-            abi_param_shared_views: usize::from(param_rep_count > 0),
-            ..LowerAttribution::default()
-        }),
-        lower_timing_enabled: lower_attribution_timing_enabled(),
-        generic_bounds: &func.generic_bounds,
         body,
         inf,
         f,
-        cur,
-        binds: HashMap::default(),
-        loop_targets: Vec::new(),
-        used_break_targets: HashSet::default(),
-        defers: Vec::new(),
-        defer_mode: stmt::DeferMode::for_body(func.is_coroutine, scx.target),
-        in_defer_body: false,
-        owned_reload_tail: None,
-        resume_arg,
-        // A coroutine body emits via `emit_coroutine` before `inline_functions`
-        // runs, so it is never spliced -- box value args (see field docs).
-        param_reps: Vec::new(),
-        param_plan: Some(abi.clone()),
-        ret_rep,
-        fn_name_span: Some(func.name_span),
-        cur_span: None,
-        cur_expr: None,
-        cur_domain: crate::site::SiteDomain::Own,
-        cur_op: crate::site::SiteOp::DirectCall,
-        site_owner: Some(subject.clone()),
-        group_binds: HashMap::default(),
-        owned_value_binds: HashSet::default(),
-        ref_borrowed_binds: std::cell::OnceCell::new(),
-        body_facts: std::cell::OnceCell::new(),
-        value_binds: HashMap::default(),
-        preflight_reads: Vec::new(),
-        value_copy_stack: Vec::new(),
-        borrowed_value_children: HashMap::default(),
-        shareable_value_boxes: HashSet::default(),
-        callback_records: HashSet::default(),
-        unshareable_value_cells: HashSet::default(),
-        payload_splat_shapes: rustc_hash::FxHashMap::default(),
-        shallow_pack: false,
-        lending_pack: false,
-        f32_round_exprs: HashSet::default(),
-        integer_field_checks: HashMap::default(),
-        tuple_binds: HashMap::default(),
-        static_cells: HashMap::default(),
-        // Lazy: only pay the param-type render/hash when the body has a static or
-        // a nested fn (both bake the owner into a private global name that must be
-        // distinct per overload). Keeps the tag off every other fn's compile.
-        static_owner: if body
-            .statement_arena
-            .iter()
-            .any(|(_, s)| matches!(s, Statement::Static { .. } | Statement::Fn { .. }))
-        {
-            static_owner_tag(ws, scx, inf, &subject)
-        } else {
-            func.name
-        },
-        static_counters: HashMap::default(),
-        nested_fn_globals: HashMap::default(),
-        nested_fn_counters: HashMap::default(),
-        presence_only: None,
-        flat_ref_binds: HashMap::default(),
-        flat_ref_cells: HashMap::default(),
-        flat_scan_lets: HashMap::default(),
-        flat_ret: None,
-        flat_variants: FlatVariants::for_root(subject.clone()),
-        flat_arg_captures: Vec::new(),
-    };
+        FlatVariants::for_root(subject.clone()),
+    );
+    b.f.lower_attribution.abi_param_shared_views =
+        usize::from(!abi.representation().params().is_empty());
+    b.generic_bounds = &func.generic_bounds;
+    b.defer_mode = stmt::DeferMode::for_body(func.is_coroutine, scx.target);
+    b.ret_rep = abi.representation().result();
+    b.param_plan = Some(abi);
+    b.fn_name_span = Some(func.name_span);
+    b.site_owner = Some(subject.clone());
+    // Only statics and hoisted functions need the overload's owner name.
+    if body
+        .statement_arena
+        .iter()
+        .any(|(_, s)| matches!(s, Statement::Static { .. } | Statement::Fn { .. }))
+    {
+        b.static_owner = static_owner_tag(ws, scx, inf, &subject);
+    }
     b.flat_ret = b.own_flat_return(&subject)?;
     b.lower_params()?;
     b.fill_param_defaults()?;
@@ -1710,8 +1646,7 @@ fn lower_body(
     b.lower_root().map_err(|e| b.located(e))?;
     let variants = b.flat_variants.borrow_mut().take_funcs();
     b.f.nested_fns.extend(variants);
-    let stats = b.lower_attribution.into_inner();
-    Ok(finish_lower_attribution(b.f, stats))
+    Ok(finish_lower_attribution(b.f))
 }
 
 /// Call a catalog factory through its owner ABI and pack its complete result.
@@ -1735,7 +1670,17 @@ pub fn lower_definition_factory(
     let parameter = f.new_cell(Some(crate::names::ustr("factory")));
     f.cells[parameter].producer = crate::mir::CellProducer::Param;
     f.params.push(parameter);
-    let mut b = Builder::generated(ws, scx, scx, concrete_plan, concrete_plans, body, None, f);
+    let mut b = Builder::new(
+        ws,
+        scx,
+        scx,
+        concrete_plan,
+        concrete_plans,
+        body,
+        None,
+        f,
+        FlatVariantsHandle::default(),
+    );
     let callee = b.emit_cur(Inst::Load(parameter));
     let result = b.indirect_call_by_plan(abi.representation().clone(), callee, &[])?;
     let result = b.pack(result.into_value())?;
@@ -1815,7 +1760,7 @@ fn lower_global_inner(
         },
     ));
     f.rep_arena = Some(scx.rep_arena().clone());
-    let mut b = Builder::generated(
+    let mut b = Builder::new(
         ws,
         scx,
         call_scx,
@@ -1824,6 +1769,7 @@ fn lower_global_inner(
         body,
         inf,
         f,
+        FlatVariantsHandle::default(),
     );
     let global_plan = GlobalPlan::for_concrete_result(
         ws,
@@ -1848,8 +1794,7 @@ fn lower_global_inner(
             .representation()
     });
     b.lower_root().map_err(|e| b.located(e))?;
-    let stats = b.lower_attribution.into_inner();
-    Ok(Some(finish_lower_attribution(b.f, stats)))
+    Ok(Some(finish_lower_attribution(b.f)))
 }
 
 /// Lower an always-emitted decorator from its graph-owned concrete plan.
@@ -2137,7 +2082,17 @@ fn lower_decorator_inner(
             .result()
             .expect("boxed decorator result plan")
     });
-    let mut b = Builder::generated(ws, scx, scx, concrete_plan, concrete_plans, body, inf, f);
+    let mut b = Builder::new(
+        ws,
+        scx,
+        scx,
+        concrete_plan,
+        concrete_plans,
+        body,
+        inf,
+        f,
+        FlatVariantsHandle::default(),
+    );
     b.param_reps = param_reps;
     b.ret_rep = ret_rep;
     // `target` is param 0, then the decorator's declared params.
@@ -2155,8 +2110,7 @@ fn lower_decorator_inner(
     let params: Vec<Idx<BindingInfo>> = b.body.param_bindings.into_iter().collect();
     b.copy_ref_borrowed_params(&params)?;
     b.lower_root().map_err(|e| b.located(e))?;
-    let stats = b.lower_attribution.into_inner();
-    Ok(finish_lower_attribution(b.f, stats))
+    Ok(finish_lower_attribution(b.f))
 }
 
 struct Builder<'a> {
@@ -2165,8 +2119,6 @@ struct Builder<'a> {
     call_scx: &'a ScalarCtx,
     concrete_plan: &'a ConcreteBodyPlan,
     concrete_plans: &'a ConcretePlans,
-    lower_attribution: RefCell<LowerAttribution>,
-    lower_timing_enabled: bool,
     /// The enclosing fn's `generic_bounds`, parallel to its `generics`:
     /// `Some(elem)` where a generic is declared `I: Iterator<elem>`. THE declared
     /// source for a placeholder `next`'s element shape -- the call's inferred
@@ -2359,7 +2311,7 @@ struct Builder<'a> {
 }
 
 impl<'a> Builder<'a> {
-    fn generated(
+    fn new(
         ws: &'a Workspace,
         scx: &'a ScalarCtx,
         call_scx: &'a ScalarCtx,
@@ -2368,7 +2320,9 @@ impl<'a> Builder<'a> {
         body: &'a Body,
         inf: Option<&'a BodyInference>,
         f: MirFunc,
+        flat_variants: FlatVariantsHandle,
     ) -> Self {
+        let resume_arg = f.resume_arg;
         let cur = f.entry();
         let static_owner = f.name;
         Self {
@@ -2377,8 +2331,6 @@ impl<'a> Builder<'a> {
             call_scx,
             concrete_plan,
             concrete_plans,
-            lower_attribution: RefCell::new(LowerAttribution::default()),
-            lower_timing_enabled: lower_attribution_timing_enabled(),
             generic_bounds: &[],
             body,
             inf,
@@ -2391,8 +2343,7 @@ impl<'a> Builder<'a> {
             defer_mode: stmt::DeferMode::Inline,
             in_defer_body: false,
             owned_reload_tail: None,
-            resume_arg: None,
-            // Generated/init bodies never run `inline_functions` -- box value args.
+            resume_arg,
             param_reps: Vec::new(),
             param_plan: None,
             ret_rep: None,
@@ -2429,7 +2380,7 @@ impl<'a> Builder<'a> {
             flat_ref_cells: HashMap::default(),
             flat_scan_lets: HashMap::default(),
             flat_ret: None,
-            flat_variants: FlatVariantsHandle::default(),
+            flat_variants,
             flat_arg_captures: Vec::new(),
         }
     }

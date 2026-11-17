@@ -319,79 +319,26 @@ impl<'a> Builder<'a> {
                     name: sname,
                 },
             );
-        let entry = mf.entry();
-        let param_reps = abi.representation.params().to_vec();
-        let mut child = Builder {
-            ws: self.ws,
-            scx: self.scx,
-            call_scx: self.call_scx,
-            concrete_plan: self.concrete_plan,
-            concrete_plans: self.concrete_plans,
-            lower_attribution: std::cell::RefCell::new(LowerAttribution {
-                abi_param_copy_volume: param_reps.len(),
-                ..LowerAttribution::default()
-            }),
-            lower_timing_enabled: self.lower_timing_enabled,
-            generic_bounds: self.generic_bounds,
-            body: self.body,
-            inf: self.inf,
-            f: mf,
-            cur: entry,
-            binds: HashMap::default(),
-            loop_targets: Vec::new(),
-            used_break_targets: HashSet::default(),
-            defers: Vec::new(),
-            defer_mode: DeferMode::for_body(false, self.call_scx.target),
-            in_defer_body: false,
-            owned_reload_tail: None,
-            resume_arg: None,
-            // A hoisted nested fn is emitted via `emit_nested_fns`, which never
-            // runs `inline_functions` -- box value args.
-            param_reps,
-            param_plan: None,
-            ret_rep: abi.representation.result(),
-            // A nested fn is emitted as a sibling top-level Lua fn and is never a
-            // GLSL callee (referenced indirectly), so a return coercion here is
-            // Lua-identity only; leaving it off matches today's emitted text.
-            fn_name_span: None,
-            cur_span: None,
-            cur_expr: None,
-            cur_domain: crate::site::SiteDomain::Own,
-            cur_op: crate::site::SiteOp::DirectCall,
-            site_owner: self.site_owner.clone(),
-            group_binds: HashMap::default(),
-            owned_value_binds: HashSet::default(),
-            ref_borrowed_binds: std::cell::OnceCell::new(),
-            body_facts: std::cell::OnceCell::new(),
-            value_binds: HashMap::default(),
-            preflight_reads: Vec::new(),
-            value_copy_stack: Vec::new(),
-            borrowed_value_children: HashMap::default(),
-            shareable_value_boxes: HashSet::default(),
-            callback_records: HashSet::default(),
-            unshareable_value_cells: HashSet::default(),
-            payload_splat_shapes: rustc_hash::FxHashMap::default(),
-            shallow_pack: false,
-            lending_pack: false,
-            f32_round_exprs: HashSet::default(),
-            integer_field_checks: HashMap::default(),
-            tuple_binds: HashMap::default(),
-            // In-scope statics + sibling nested fns are module-level, so the
-            // hoisted body may reference them; enclosing params/locals are NOT
-            // inherited (bone rejects capturing them).
-            static_cells: self.static_cells.clone(),
-            static_owner: hoisted,
-            static_counters: HashMap::default(),
-            nested_fn_globals: self.nested_fn_globals.clone(),
-            nested_fn_counters: HashMap::default(),
-            presence_only: None,
-            flat_ref_binds: HashMap::default(),
-            flat_ref_cells: HashMap::default(),
-            flat_scan_lets: HashMap::default(),
-            flat_ret: None,
-            flat_variants: self.flat_variants.clone(),
-            flat_arg_captures: Vec::new(),
-        };
+        let mut child = Builder::new(
+            self.ws,
+            self.scx,
+            self.call_scx,
+            self.concrete_plan,
+            self.concrete_plans,
+            self.body,
+            self.inf,
+            mf,
+            self.flat_variants.clone(),
+        );
+        child.f.lower_attribution.abi_param_copy_volume = abi.representation.params().len();
+        child.generic_bounds = self.generic_bounds;
+        child.defer_mode = DeferMode::for_body(false, self.call_scx.target);
+        child.param_reps = abi.representation.params().to_vec();
+        child.ret_rep = abi.representation.result();
+        child.site_owner = self.site_owner.clone();
+        // Hoisted bodies can see sibling definitions and statics.
+        child.static_cells = self.static_cells.clone();
+        child.nested_fn_globals = self.nested_fn_globals.clone();
 
         child.f.abi_representation = Some(abi.representation.clone());
         child.f.abi_logical_type = Some(abi.logical_type.clone());
@@ -434,10 +381,9 @@ impl<'a> Builder<'a> {
         }
         child.defers.pop();
 
-        let child_stats = child.lower_attribution.into_inner();
-        let child_f = super::finish_lower_attribution(child.f, child_stats);
-        self.lower_attribution
-            .borrow_mut()
+        let child_f = super::finish_lower_attribution(child.f);
+        self.f
+            .lower_attribution
             .add_assign(&child_f.lower_attribution);
         self.f.nested_fns.push(child_f);
         Ok(())

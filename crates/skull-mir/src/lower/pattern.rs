@@ -901,49 +901,31 @@ impl<'a> Builder<'a> {
     ) -> Result<Option<ValueRepr>, CompilerError> {
         let use_repr = result_shape.is_some();
         let shape = result_shape.unwrap_or(RetSlot::Opaque);
-        let alloc_results = |s: &mut Self| -> Vec<Idx<Cell>> {
-            if statement {
-                Vec::new()
-            } else if use_repr {
-                s.fresh_cells(shape.slot_count())
-            } else {
-                let ty = s.current_expr_unit_storage_ty_id();
-                vec![s.f.new_cell_typed(None, ty)]
-            }
+        let results = if statement {
+            Vec::new()
+        } else if use_repr {
+            self.fresh_cells(shape.slot_count())
+        } else {
+            let ty = self.current_expr_unit_storage_ty_id();
+            vec![self.f.new_cell_typed(None, ty)]
         };
-        let results = alloc_results(self);
         let else_bb = self.f.new_block();
         let join = self.f.new_block();
         self.lower_let_test(pattern, value, else_bb)?;
 
         if statement {
-            self.lower_stmt_expr(then_branch)?;
-            self.goto_if_open(join);
-            self.cur = else_bb;
-            if let Some(else_branch) = else_branch {
-                self.lower_stmt_expr(else_branch)?;
-            }
-            self.goto_if_open(join);
-            self.cur = join;
+            self.lower_statement_arms(then_branch, else_branch, else_bb, join)?;
             Ok(None)
         } else if use_repr {
-            let tv = self.lower_expr_repr(then_branch)?;
-            self.store_bundle_and_join(&results, &shape, &tv, join)?;
-
-            self.cur = else_bb;
-            let ev = match else_branch {
-                Some(eb) => self.lower_expr_repr(eb)?,
-                None => ValueBundle::new(
-                    tv.representation(),
-                    ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))),
-                ),
-            };
-            self.store_bundle_and_join(&results, &shape, &ev, join)?;
-
-            self.cur = join;
-            let slots = self.load_cells(&results);
-            let mut idx = 0;
-            Ok(Some(self.slot_repr(&shape, &slots, &mut idx)))
+            self.lower_value_arms(
+                &results,
+                &shape,
+                else_bb,
+                join,
+                |s| s.lower_expr_repr(then_branch),
+                else_branch,
+            )
+            .map(Some)
         } else {
             let result = results[0];
             let tv = self.lower_expr(then_branch)?;

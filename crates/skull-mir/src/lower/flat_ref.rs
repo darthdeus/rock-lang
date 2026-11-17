@@ -422,7 +422,7 @@ impl<'a> Builder<'a> {
             .ws
             .inference(inst.func.module)
             .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(inst.func.func)));
-        let mut scan = Builder::generated(
+        let mut scan = Builder::new(
             self.ws,
             self.scx,
             self.call_scx,
@@ -431,10 +431,10 @@ impl<'a> Builder<'a> {
             body,
             inf,
             MirFunc::new(decl.name),
+            self.flat_variants.clone(),
         );
         scan.generic_bounds = &decl.generic_bounds;
         scan.site_owner = Some(inst.clone());
-        scan.flat_variants = self.flat_variants.clone();
         for (i, pb) in body.param_bindings.into_iter().enumerate() {
             if let Some(Some(key)) = sig.get(i) {
                 scan.flat_ref_binds.insert(raw(pb), *key);
@@ -787,6 +787,7 @@ impl<'a> Builder<'a> {
             (name, identity)
         };
         let mf = self.lower_flat_variant(hoisted, &identity, plan, dc)?;
+        self.f.lower_attribution.add_assign(&mf.lower_attribution);
         self.flat_variants.borrow_mut().funcs.push(mf);
         Ok(hoisted)
     }
@@ -857,7 +858,7 @@ impl<'a> Builder<'a> {
             lambda_topology: Default::default(),
         });
         mf.nested_fn_identities = self.f.nested_fn_identities.clone();
-        let mut child = Builder::generated(
+        let mut child = Builder::new(
             self.ws,
             self.scx,
             self.call_scx,
@@ -866,6 +867,7 @@ impl<'a> Builder<'a> {
             body,
             inf,
             mf,
+            self.flat_variants.clone(),
         );
         child.generic_bounds = &decl.generic_bounds;
         child.defer_mode = stmt::DeferMode::for_body(false, self.call_scx.target);
@@ -874,7 +876,6 @@ impl<'a> Builder<'a> {
         child.fn_name_span = Some(decl.name_span);
         child.site_owner = Some(inst.clone());
         child.static_owner = static_owner_tag(self.ws, self.scx, inf, inst);
-        child.flat_variants = self.flat_variants.clone();
         child.flat_ret = plan.ret;
         let params: Vec<Idx<BindingInfo>> = body.param_bindings.into_iter().collect();
         let mut slot_cells = Vec::new();
@@ -923,12 +924,7 @@ impl<'a> Builder<'a> {
         for cell in &mut child.f.statics {
             cell.owner = Some(crate::code_identity::CodeIdentity::Named(inst.clone()));
         }
-        let stats = child.lower_attribution.into_inner();
-        let child_f = finish_lower_attribution(child.f, stats);
-        self.lower_attribution
-            .borrow_mut()
-            .add_assign(&child_f.lower_attribution);
-        Ok(child_f)
+        Ok(finish_lower_attribution(child.f))
     }
 
     /// A flat `ref` argument of the call whose arguments are being lowered:
