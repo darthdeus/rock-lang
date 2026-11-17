@@ -593,6 +593,38 @@ mod tests {
     use super::*;
     use crate::test_support::lower;
 
+    #[test]
+    fn value_integer_checks_fold_only_proven_constants() {
+        for (literal, unsigned, valid) in [
+            (Lit::Int(i32::MIN as i64), false, true),
+            (Lit::Int(i32::MAX as i64), false, true),
+            (Lit::Int(i32::MAX as i64 + 1), false, false),
+            (Lit::Uint(u32::MAX), true, true),
+            (Lit::Int(-1), true, false),
+            (Lit::Float(1.5), false, false),
+            (Lit::Float(f64::NAN), false, false),
+            (Lit::Float(f64::INFINITY), true, false),
+        ] {
+            let mut f = MirFunc::new(ustr::Ustr::from("integer_check"));
+            let value = f.emit(f.entry, Inst::Const(literal));
+            let callee = f.emit(f.entry, Inst::Global(ustr::Ustr::from(VALUE_INTEGER_CHECK)));
+            let flag = f.emit(f.entry, Inst::Const(Lit::Bool(unsigned)));
+            let check = f.emit(
+                f.entry,
+                Inst::CallValue {
+                    callee,
+                    args: vec![value, flag],
+                },
+            );
+            f.set_term(f.entry, Term::Return(vec![check]));
+            cleanup(&mut f).unwrap();
+            assert_eq!(!f.blocks[f.entry].insts.contains(&check), valid, "{f}");
+            if valid {
+                assert_eq!(f.blocks[f.entry].term, Term::Return(vec![value]));
+            }
+        }
+    }
+
     /// `let v: float? = some_int_opt` wraps the nullable value in the
     /// int->float subsumption, which emits its operand unchanged on every
     /// value backend. The wrapped value is nil whenever the source is, so

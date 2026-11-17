@@ -176,6 +176,20 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                     }
                     checked_vecs.insert(key.0);
                 }
+                Inst::CallValue { callee, args }
+                    if args.len() == 2
+                        && matches!(func.insts[resolve_subst(&subst, *callee)], Inst::Global(name) if name.as_str() == VALUE_INTEGER_CHECK) =>
+                {
+                    let value = resolve_subst(&subst, args[0]);
+                    if let Inst::Const(Lit::Bool(unsigned)) =
+                        func.insts[resolve_subst(&subst, args[1])]
+                        && integer_field_constant_fits(&func.insts[value], unsigned)
+                    {
+                        subst[raw(id)] = Some(value);
+                        nonthrowing[raw(id)] = true;
+                        any_subst = true;
+                    }
+                }
                 Inst::Call { func: target, args }
                     if args.len() == 2
                         && ws.is_some_and(|ws| {
@@ -428,4 +442,20 @@ pub(crate) fn resolve_subst(subst: &[Option<Idx<Inst>>], mut x: Idx<Inst>) -> Id
         x = y;
     }
     x
+}
+
+fn integer_field_constant_fits(inst: &Inst, unsigned: bool) -> bool {
+    let value = match inst {
+        Inst::Const(Lit::Int(n)) => *n as f64,
+        Inst::Const(Lit::Uint(n)) => f64::from(*n),
+        Inst::Const(Lit::Float(n)) => *n,
+        Inst::Const(Lit::Nil) => return true,
+        _ => return false,
+    };
+    let (min, max) = if unsigned {
+        (0.0, u32::MAX as f64)
+    } else {
+        (i32::MIN as f64, i32::MAX as f64)
+    };
+    value >= min && value <= max && value == value.floor()
 }
