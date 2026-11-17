@@ -38,43 +38,40 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
     // stays O(stores-in-block), not O(cells).
     // A `ref`-borrowed cell is written through an alias this pass cannot see.
     let mut escaping: Vec<bool> = func.cells.iter().map(|(_, cell)| cell.borrowed).collect();
-    for (bid, b) in func.blocks.iter() {
-        if main[raw(bid)] {
-            continue;
-        }
-        for &i in &b.insts {
-            if let Inst::Store { cell, .. } = &func.insts[i] {
-                escaping[raw(*cell)] = true;
-            }
-        }
-    }
-    // A leaf write THROUGH a value field (`h.p.x = 5`, base `Field(Load(c), p)`)
-    // mutates the cell's contents in place, so its stored value is not stable for
-    // the rest of the block. Forwarding the load would move the write onto the
-    // ctor -- a temporary -- while the `Field`-of-ctor fold below sends later
-    // reads to the ORIGINAL construction operands, disconnecting the two. Keeping
-    // the cell also lets SROA peel it on the next round, where the write becomes a
-    // leaf-cell store. Same exclusion as `escaping`, different reason.
-    //
-    // Only cells holding a VALUE qualify. A direct `obj.f = v` on a cell holding
-    // a `MakeStruct` table targets one runtime object shared by every use, so
-    // forwarding stays sound (the fold below excludes tables with any other
-    // use) -- excluding those keeps the hot `obj.field = v` shape
-    // copy-propagated. SROA peels one level per round, so the base is a `Field`
-    // chain on the first round and a bare `Load` of the peeled value cell after.
     let mut holds_value = vec![false; func.cells.len()];
+    let mut field_written = vec![false; func.cells.len()];
     let mut has_fresh_projection = false;
-    for (_, b) in func.blocks.iter() {
+    let mut preds = vec![0u32; func.blocks.len()];
+    for (bid, b) in func.blocks.iter() {
+        skull_mir::cfg::successors(&b.term, |t| preds[raw(t)] += 1);
         for &i in &b.insts {
-            if let Some((base, _)) = func.field_projection(i) {
-                has_fresh_projection |= matches!(func.insts[base], Inst::MakeStruct { .. });
-            }
-            if let Inst::Store { cell, value } = &func.insts[i] {
-                if matches!(&func.insts[*value], Inst::MakeValueStruct { .. }) {
-                    holds_value[raw(*cell)] = true;
+            match &func.insts[i] {
+                Inst::Store { cell, value } => {
+                    escaping[raw(*cell)] |= !main[raw(bid)];
+                    holds_value[raw(*cell)] |=
+                        matches!(func.insts[*value], Inst::MakeValueStruct { .. });
+                }
+                Inst::StoreField { base, .. } => {
+                    let mut root = *base;
+                    while let Inst::Field { base, .. } = func.insts[root] {
+                        root = base;
+                    }
+                    if let Inst::Load(cell) = func.insts[root] {
+                        field_written[raw(cell)] = true;
+                    }
+                }
+                _ => {
+                    if let Some((base, _)) = func.field_projection(i) {
+                        has_fresh_projection |= matches!(func.insts[base], Inst::MakeStruct { .. });
+                    }
                 }
             }
         }
+    }
+    // A value's field write mutates the cell; forwarding could read the ctor's
+    // original operands instead. Table aliases still refer to the same object.
+    for (c, escapes) in escaping.iter_mut().enumerate() {
+        *escapes |= holds_value[c] && field_written[c];
     }
     // Only direct temporary projections need use counts. An aliased mutable
     // constructor cannot be forwarded using a pre-substitution count.
@@ -90,27 +87,6 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
     } else {
         Vec::new()
     };
-    for (_, b) in func.blocks.iter() {
-        for &i in &b.insts {
-            let Inst::StoreField { base, .. } = &func.insts[i] else {
-                continue;
-            };
-            // `d.o.i.a = 9` nests the reads; the write lands in the root cell.
-            let mut cur = *base;
-            loop {
-                match &func.insts[cur] {
-                    Inst::Load(c) => {
-                        if holds_value[raw(*c)] {
-                            escaping[raw(*c)] = true;
-                        }
-                        break;
-                    }
-                    Inst::Field { base, .. } => cur = *base,
-                    _ => break,
-                }
-            }
-        }
-    }
     let mut subst: Vec<Option<Idx<Inst>>> = vec![None; func.insts.len()];
     let mut self_stores = vec![false; func.insts.len()];
     let mut nonthrowing = vec![false; func.insts.len()];
@@ -122,10 +98,6 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
     // left in its cells: an inlined callee's body starts a block, and its default
     // prologue tests the argument the caller just stored. Literals only, so no
     // value's live range grows across blocks.
-    let mut preds = vec![0u32; func.blocks.len()];
-    for (_, b) in func.blocks.iter() {
-        skull_mir::cfg::successors(&b.term, |t| preds[raw(t)] += 1);
-    }
     let mut entry_literals: Vec<Option<Vec<(usize, Idx<Inst>)>>> = vec![None; func.blocks.len()];
     for (bid, b) in func.blocks.iter() {
         for &t in &touched {
@@ -434,6 +406,16 @@ fn leaf_form_path(
 }
 
 /// Follow a copy-prop substitution chain to its final value (guards self-loops).
+pub(crate) fn substitute_uses(func: &mut MirFunc, subst: &[Option<Idx<Inst>>]) {
+    let remap = |value| resolve_subst(subst, value);
+    for (_, inst) in func.insts.iter_mut() {
+        inst.remap_uses(&remap);
+    }
+    for (_, block) in func.blocks.iter_mut() {
+        block.term.remap_uses(&remap);
+    }
+}
+
 pub(crate) fn resolve_subst(subst: &[Option<Idx<Inst>>], mut x: Idx<Inst>) -> Idx<Inst> {
     while let Some(y) = subst[raw(x)] {
         if y == x {

@@ -45,3 +45,25 @@ pub(crate) fn term_value(term: &Term) -> Option<Idx<Inst>> {
         _ => None,
     }
 }
+
+pub(crate) fn splice_replacements(
+    func: &mut MirFunc,
+    replacements: &rustc_hash::FxHashMap<Idx<Inst>, Vec<Idx<Inst>>>,
+) {
+    if replacements.is_empty() {
+        return;
+    }
+    for (_, block) in func.blocks.iter_mut() {
+        if !block.insts.iter().any(|id| replacements.contains_key(id)) {
+            continue;
+        }
+        let old = std::mem::take(&mut block.insts);
+        block.insts.reserve(old.len());
+        for id in old {
+            match replacements.get(&id) {
+                Some(insts) => block.insts.extend_from_slice(insts),
+                None => block.insts.push(id),
+            }
+        }
+    }
+}

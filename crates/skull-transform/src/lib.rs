@@ -27,7 +27,6 @@ pub use cleanup::cleanup;
 use cleanup::dce;
 pub use closure::convert_closures;
 use closure::convert_closures_framed;
-pub(crate) use copy_prop::resolve_subst;
 pub use coroutine::{CoroLowered, STATE, transform_coroutine};
 use coroutine_prepare::convert_named_nested_closures;
 pub use coroutine_prepare::{PreparedCoroutine, prepare_coroutine};
@@ -43,5 +42,5 @@ pub use inline::{
 };
 pub use load_store_census::LoadStoreCensus;
 use load_store_census::cleanup_with_nobox_census;
-pub use nobox::{cleanup_with_nobox, flatten_nobox_nested_ctors, nobox_materialization_violations};
+pub use nobox::{cleanup_with_nobox, nobox_materialization_violations};
 pub(crate) use visit::top_level_blocks;

@@ -153,10 +153,7 @@ fn leaf_operand(
 /// every pass that runs in between (`convert_closures`, `recover_counted_loops`,
 /// `inline_hoisted_bodies`, the verifier) remaps operands or matches the struct
 /// NAME only -- none interpret field names.
-pub fn flatten_nobox_nested_ctors(
-    ws: &Workspace,
-    func: &mut MirFunc,
-) -> Result<bool, CompilerError> {
+fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) -> Result<bool, CompilerError> {
     // Every target's tree holds a nobox ctor, which is itself a block inst, and
     // almost no body has one: most bodies skip the inner-operand set entirely.
     let any_nobox = func.blocks.iter().any(|(_, b)| {
@@ -332,34 +329,13 @@ pub fn flatten_nobox_nested_ctors(
         .map(|(k, v)| (*k, *v.last().unwrap()))
         .collect();
     let m = |o: Idx<Inst>| remap.get(&o).copied().unwrap_or(o);
-    for i in func.insts.iter_mut().map(|(id, _)| id).collect::<Vec<_>>() {
-        func.insts[i].remap_uses(&m);
+    for (_, inst) in func.insts.iter_mut() {
+        inst.remap_uses(&m);
     }
-    // Terminators too: a `Term` still pointing at the replaced ctor references an
-    // inst that is no longer in any block, which regalloc later reads as an
-    // unassigned value index and panics rather than failing anywhere useful.
-    let block_ids: Vec<Idx<Block>> = func.blocks.iter().map(|(id, _)| id).collect();
-    for bid in &block_ids {
-        func.blocks[*bid].term.remap_uses(&m);
+    for (_, block) in func.blocks.iter_mut() {
+        block.term.remap_uses(&m);
     }
-    for bid in block_ids {
-        if !func.blocks[bid]
-            .insts
-            .iter()
-            .any(|i| replacement.contains_key(i))
-        {
-            continue;
-        }
-        let old = std::mem::take(&mut func.blocks[bid].insts);
-        let mut new = Vec::with_capacity(old.len());
-        for i in old {
-            match replacement.get(&i) {
-                Some(ins) => new.extend_from_slice(ins),
-                None => new.push(i),
-            }
-        }
-        func.blocks[bid].insts = new;
-    }
+    crate::visit::splice_replacements(func, &replacement);
     Ok(true)
 }
 
@@ -394,12 +370,8 @@ fn fold_nobox_projections(ws: &Workspace, func: &mut MirFunc) {
     if subst.is_empty() {
         return;
     }
-    let remap = |value| crate::resolve_subst(&subst, value);
-    for (_, inst) in func.insts.iter_mut() {
-        inst.remap_uses(&remap);
-    }
+    crate::copy_prop::substitute_uses(func, &subst);
     for (_, block) in func.blocks.iter_mut() {
-        block.term.remap_uses(&remap);
         block
             .insts
             .retain(|iid| subst[iid.into_raw().into_u32() as usize].is_none());

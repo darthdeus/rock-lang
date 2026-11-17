@@ -1,7 +1,7 @@
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::scope;
-use crate::visit::{raw, top_level_blocks};
+use crate::visit::{raw, splice_replacements, top_level_blocks};
 use bone_core::prelude::CompilerError;
 use comfy_la_arena::{Idx, RawIdx};
 use skull_mir::mir::*;
@@ -29,6 +29,7 @@ enum StructId {
 /// The source of a scalarized field's value: an existing operand, or a string
 /// CONST to materialize (an enum table bakes `__variant`/`__ty` as literals, not
 /// operands, so splitting it must emit the `Const(Str)` insts).
+#[derive(Clone, Copy)]
 enum FieldSrc {
     Operand(Idx<Inst>),
     ConstStr(ustr::Ustr),
@@ -140,22 +141,6 @@ fn ctor_fields(
     }
 }
 
-fn value_ctor_plan(inst: &Inst) -> Option<(skull_mir::lower::RepId, ValueCtorForm)> {
-    match inst {
-        Inst::MakeValueStruct {
-            representation,
-            form,
-            ..
-        }
-        | Inst::MaterializeValueStruct {
-            representation,
-            form,
-            ..
-        } => Some((*representation, *form)),
-        _ => None,
-    }
-}
-
 /// One SROA round; returns whether it rewrote anything (drives the fixpoint).
 ///
 /// The round runs in two halves. Analysis builds a [`Families`] table over the
@@ -235,7 +220,6 @@ struct Families {
     cand_fields: Vec<Option<HashSet<ustr::Ustr>>>,
     disq: Vec<bool>,
     has_store: Vec<bool>,
-    /// The enum hint per cell, see [`cell_enum_hints`].
     cell_enum: Vec<Option<ustr::Ustr>>,
     // ALIAS stores (`Store(c, Load(o))`): a cell whose every store copies
     // another candidate cell is the SAME object under Rock's by-ref struct
@@ -274,81 +258,37 @@ struct LoadUses {
     chained_roots: HashSet<usize>,
 }
 
-/// Cells that can never split: params (the Lua signature), cells written
-/// through a `ref` alias this pass cannot see (`Cell::borrowed`), the resume
-/// argument, and a cell defined by anything OTHER than a `Store` (a call
-/// multi-return dest, a closure param, a map-iteration variable), which has no
-/// struct ctor to split.
-fn initially_disqualified(func: &MirFunc, nc: usize) -> Vec<bool> {
-    let mut disq = vec![false; nc];
-    for c in &func.params {
-        disq[raw(*c)] = true; // params are the Lua signature; never split
+fn store_inputs(func: &MirFunc) -> (Vec<bool>, Vec<Option<ustr::Ustr>>, Vec<u32>) {
+    let mut disqualified: Vec<_> = func.cells.values().map(|cell| cell.borrowed).collect();
+    for &cell in func.params.iter().chain(func.resume_arg.iter()) {
+        disqualified[raw(cell)] = true;
     }
-    for (c, cell) in func.cells.iter() {
-        if cell.borrowed {
-            disq[raw(c)] = true;
-        }
-    }
-    if let Some(ra) = func.resume_arg {
-        disq[raw(ra)] = true;
-    }
-    for (_, b) in func.blocks.iter() {
-        for &i in &b.insts {
-            match &func.insts[i] {
-                Inst::CallMulti { dests, .. }
-                | Inst::CallValueMulti { dests, .. }
-                | Inst::CallBoundMulti { dests, .. } => {
-                    dests.iter().for_each(|c| disq[raw(*c)] = true)
+    let mut enum_hints = vec![None; func.cells.len()];
+    let mut uses = vec![0u32; func.insts.len()];
+    for (_, block) in func.blocks.iter() {
+        for &i in &block.insts {
+            let inst = &func.insts[i];
+            inst.uses_each(&mut |op| uses[raw(op)] += 1);
+            match inst {
+                Inst::Store { cell, value } => {
+                    // A unit-variant singleton needs the enum name from a payload store.
+                    if let Inst::MakeEnum { ty, .. } | Inst::MakeEnumDyn { ty, .. } =
+                        func.insts[*value]
+                    {
+                        enum_hints[raw(*cell)].get_or_insert(ty);
+                    }
                 }
-                Inst::Lambda { params, .. } => params.iter().for_each(|c| disq[raw(*c)] = true),
-                Inst::MapNext {
-                    key_cell, val_cell, ..
-                } => {
-                    disq[raw(*key_cell)] = true;
-                    disq[raw(*val_cell)] = true;
+                Inst::Lambda { params, .. } => {
+                    for &param in params {
+                        disqualified[raw(param)] = true;
+                    }
                 }
-                _ => {}
+                _ => inst.cell_writes_each(&mut |cell| disqualified[raw(cell)] = true),
             }
         }
+        block.term.uses_each(&mut |op| uses[raw(op)] += 1);
     }
-    disq
-}
-
-/// Per-cell enum name from its `MakeEnum` stores -- the hint that lets a
-/// unit-variant singleton-ref store (`__rock_enum_<E>_<V>`) be recognized as the
-/// same enum's ctor (it carries no `ty` of its own). A cell with no `MakeEnum`
-/// store has `None` and so never matches a singleton (all-singleton cells don't
-/// allocate -- nothing to scalarize). Conflicting enums leave the first; the
-/// `StructId` consistency check then disqualifies the cell.
-fn cell_enum_hints(func: &MirFunc, nc: usize) -> Vec<Option<ustr::Ustr>> {
-    let mut cell_enum: Vec<Option<ustr::Ustr>> = vec![None; nc];
-    for (_, b) in func.blocks.iter() {
-        for &i in &b.insts {
-            if let Inst::Store { cell, value } = &func.insts[i] {
-                if let Inst::MakeEnum { ty, .. } | Inst::MakeEnumDyn { ty, .. } =
-                    &func.insts[*value]
-                {
-                    cell_enum[raw(*cell)].get_or_insert(*ty);
-                }
-            }
-        }
-    }
-    cell_enum
-}
-
-/// Value-use counts: a ctor stored into a candidate cell must have NO use
-/// besides that store. Any other consumer (a `Field` read the interleaved
-/// copy-prop forwarded onto the ctor, a second cell store) still sees the
-/// ORIGINAL table -- splitting the cell would diverge the two.
-fn value_use_counts(func: &MirFunc) -> Vec<u32> {
-    let mut vuse = vec![0u32; func.insts.len()];
-    for (_, b) in func.blocks.iter() {
-        for &i in &b.insts {
-            func.insts[i].uses_each(&mut |op| vuse[raw(op)] += 1);
-        }
-        b.term.uses_each(&mut |op| vuse[raw(op)] += 1);
-    }
-    vuse
+    (disqualified, enum_hints, uses)
 }
 
 impl Families {
@@ -359,14 +299,12 @@ impl Families {
         let mut value_order: HashMap<usize, ValueOrder> = HashMap::default();
         let mut cand: Vec<Option<StructId>> = vec![None; nc];
         let mut cand_fields: Vec<Option<HashSet<ustr::Ustr>>> = vec![None; nc];
-        let mut disq = initially_disqualified(func, nc);
+        let (mut disq, cell_enum, vuse) = store_inputs(func);
         let mut has_store = vec![false; nc];
-        let cell_enum = cell_enum_hints(func, nc);
         // Only the main CFG -- a cell touched inside a closure body is opaque (the
         // closure may run on any call), so leave it whole.
         let mut alias: Vec<Option<Idx<Cell>>> = vec![None; nc];
         let main: HashSet<Idx<Block>> = top_level_blocks(func).into_iter().collect();
-        let vuse = value_use_counts(func);
         for (bid, b) in func.blocks.iter() {
             let in_main = main.contains(&bid);
             for &i in &b.insts {
@@ -402,13 +340,12 @@ impl Families {
                                 disq[ck] = true;
                             } else {
                                 cand[ck] = Some(id);
-                                if matches!(id, StructId::Value(_)) {
-                                    let Some((representation, form)) =
-                                        value_ctor_plan(&func.insts[*value])
-                                    else {
-                                        disq[ck] = true;
-                                        continue;
-                                    };
+                                if let Inst::MakeValueStruct {
+                                    representation,
+                                    form,
+                                    ..
+                                } = func.insts[*value]
+                                {
                                     value_order.entry(ck).or_insert_with(|| {
                                         (
                                             fields.iter().map(|(n, _)| *n).collect(),
@@ -949,76 +886,58 @@ fn rewrite_projections(
     cells: &mut FieldCells,
     load_cell: &HashMap<Idx<Inst>, Idx<Cell>>,
 ) {
-    let field_rewrites: Vec<(Idx<Inst>, Idx<Cell>, ustr::Ustr)> = func
-        .blocks
-        .iter()
-        .flat_map(|(_, b)| b.insts.iter().copied())
-        .filter_map(|i| {
-            let base = match &func.insts[i] {
+    let mut fields = Vec::new();
+    let mut tuples = Vec::new();
+    let mut stores = Vec::new();
+    for (_, block) in func.blocks.iter() {
+        for &i in &block.insts {
+            match func.insts[i] {
                 Inst::Field { base, .. }
                 | Inst::Index {
                     base,
                     kind: ContainerKind::Record,
                     ..
-                } => *base,
-                _ => return None,
-            };
-            let (_, field) = field_read(func, i, base)?;
-            load_cell
-                .get(&base)
-                .copied()
-                .filter(|&c| fam.is_cand(c) && fam.provides(c, &field))
-                .map(|c| (i, c, field))
-        })
-        .collect();
-    for (i, c, field) in field_rewrites {
-        let fc = cells.get(func, fam.to_rep(c), field);
-        func.insts[i] = Inst::Load(fc);
-    }
-    // Same for an enum positional payload read `TupleIndex { base, index }` ->
-    // `Load(field_cell "_<index>")` (the `match`-with-binding payload extract).
-    let tuple_rewrites: Vec<(Idx<Inst>, Idx<Cell>, ustr::Ustr)> = func
-        .blocks
-        .iter()
-        .flat_map(|(_, b)| b.insts.iter().copied())
-        .filter_map(|i| match &func.insts[i] {
-            Inst::TupleIndex { base, index } => load_cell
-                .get(base)
-                .copied()
-                .filter(|&c| fam.is_cand(c))
-                .map(|c| (i, c, skull_mir::names::indexed("_", "", *index))),
-            _ => None,
-        })
-        .collect();
-    for (i, c, field) in tuple_rewrites {
-        let fc = cells.get(func, fam.to_rep(c), field);
-        func.insts[i] = Inst::Load(fc);
-    }
-    let storefield_rewrites: Vec<(Idx<Inst>, Idx<Cell>, ustr::Ustr, Idx<Inst>)> = func
-        .blocks
-        .iter()
-        .flat_map(|(_, b)| b.insts.iter().copied())
-        .filter_map(|i| {
-            let base = match &func.insts[i] {
+                } => {
+                    if let Some(&c) = load_cell.get(&base)
+                        && fam.is_cand(c)
+                        && let Some((_, field)) = field_read(func, i, base)
+                        && fam.provides(c, &field)
+                    {
+                        fields.push((i, c, field));
+                    }
+                }
+                Inst::TupleIndex { base, index } => {
+                    if let Some(&c) = load_cell.get(&base)
+                        && fam.is_cand(c)
+                    {
+                        tuples.push((i, c, skull_mir::names::indexed("_", "", index)));
+                    }
+                }
                 Inst::StoreField { base, .. }
                 | Inst::StoreIndex {
                     base,
                     kind: ContainerKind::Record,
                     ..
-                } => *base,
-                _ => return None,
-            };
-            let (_, field, value) = field_store(func, i, base)?;
-            load_cell
-                .get(&base)
-                .copied()
-                .filter(|&c| fam.is_cand(c))
-                .map(|c| (i, c, field, value))
-        })
-        .collect();
-    for (i, c, field, value) in storefield_rewrites {
-        let fc = cells.get(func, fam.to_rep(c), field);
-        func.insts[i] = Inst::Store { cell: fc, value };
+                } => {
+                    if let Some(&c) = load_cell.get(&base)
+                        && fam.is_cand(c)
+                        && let Some((_, field, value)) = field_store(func, i, base)
+                    {
+                        stores.push((i, c, field, value));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    // Keep field-cell numbering stable across the three projection classes.
+    for (i, c, field) in fields.into_iter().chain(tuples) {
+        let cell = cells.get(func, fam.to_rep(c), field);
+        func.insts[i] = Inst::Load(cell);
+    }
+    for (i, c, field, value) in stores {
+        let cell = cells.get(func, fam.to_rep(c), field);
+        func.insts[i] = Inst::Store { cell, value };
     }
 }
 
@@ -1032,93 +951,66 @@ fn plan_store_expansions(
     func: &MirFunc,
     fam: &Families,
 ) -> Result<Vec<StoreExpansion>, CompilerError> {
-    Ok(func
+    let mut expansions = Vec::new();
+    for i in func
         .blocks
-        .iter()
-        .flat_map(|(_, b)| b.insts.iter().copied())
-        .map(|i| -> Result<Option<StoreExpansion>, CompilerError> {
-            match &func.insts[i] {
-                Inst::Store { cell, value } if fam.is_cand(*cell) => {
-                    // A nil store writes nil to EVERY field cell (sorted for
-                    // deterministic emission), reusing the nil value inst.
-                    if matches!(&func.insts[*value], Inst::Const(Lit::Nil)) {
-                        let mut fs = fam.candidate_fields(*cell)?;
-                        fs.sort_unstable();
-                        return Ok(Some((
-                            i,
-                            *cell,
-                            fs.into_iter()
-                                .map(|f| (f, FieldSrc::Operand(*value)))
-                                .collect(),
-                        )));
-                    }
-                    // A value-struct alias member copies its source's leaves.
-                    if let (Inst::Load(src), Some(_)) =
-                        (&func.insts[*value], fam.copy_alias[raw(*cell)])
-                    {
-                        let src = fam.to_rep(*src);
-                        let mut fs = fam.candidate_fields(*cell)?;
-                        fs.sort_unstable();
-                        return Ok(Some((
-                            i,
-                            *cell,
-                            fs.into_iter()
-                                .map(|f| (f, FieldSrc::CellLoad(src)))
-                                .collect(),
-                        )));
-                    }
-                    let Some((_, mut fields)) =
-                        ctor_fields(&func.insts[*value], fam.cell_enum[raw(*cell)])
-                    else {
-                        return Ok(None);
-                    };
-                    if fam.needs_presence(*cell) {
-                        fields.push((present_field(), FieldSrc::ConstTrue));
-                    }
-                    // An omitted box key reads nil, even after a previous variant
-                    // populated the scalar cell in a loop or coroutine frame.
-                    let mut missing = fam.candidate_fields(*cell)?;
-                    missing.retain(|f| !fields.iter().any(|(name, _)| name == f));
-                    missing.sort_unstable();
-                    fields.extend(missing.into_iter().map(|f| (f, FieldSrc::ConstNil)));
-                    Ok(Some((i, *cell, fields)))
-                }
-                _ => Ok(None),
+        .values()
+        .flat_map(|block| block.insts.iter().copied())
+    {
+        let Inst::Store { cell, value } = func.insts[i] else {
+            continue;
+        };
+        if !fam.is_cand(cell) {
+            continue;
+        }
+        let src = match func.insts[value] {
+            Inst::Const(Lit::Nil) => Some(FieldSrc::Operand(value)),
+            Inst::Load(src) if fam.copy_alias[raw(cell)].is_some() => {
+                Some(FieldSrc::CellLoad(fam.to_rep(src)))
             }
-        })
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .collect())
+            _ => None,
+        };
+        let fields = if let Some(src) = src {
+            let mut names = fam.candidate_fields(cell)?;
+            names.sort_unstable();
+            names.into_iter().map(|field| (field, src)).collect()
+        } else if let Some((_, mut fields)) =
+            ctor_fields(&func.insts[value], fam.cell_enum[raw(cell)])
+        {
+            if fam.needs_presence(cell) {
+                fields.push((present_field(), FieldSrc::ConstTrue));
+            }
+            // A missing key must read nil even when an earlier variant wrote it.
+            let mut missing = fam.candidate_fields(cell)?;
+            missing.retain(|f| !fields.iter().any(|(name, _)| name == f));
+            missing.sort_unstable();
+            fields.extend(missing.into_iter().map(|f| (f, FieldSrc::ConstNil)));
+            fields
+        } else {
+            continue;
+        };
+        expansions.push((i, cell, fields));
+    }
+    Ok(expansions)
 }
 
-/// Accepted alias stores (`Store(member, Load(..))`) DELETE: the member's
-/// accesses were rewritten onto the root's field cells above, so the
-/// whole-cell copy has nothing left to do (and keeping it would resurrect
-/// the aggregate). Returns the replacement map seeded with those deletions:
-/// old store inst -> the insts that replace it (in order).
 fn alias_deletions(func: &MirFunc, fam: &Families) -> HashMap<Idx<Inst>, Vec<Idx<Inst>>> {
-    let alias_deletions: Vec<Idx<Inst>> = func
-        .blocks
-        .iter()
-        .flat_map(|(_, b)| b.insts.iter().copied())
-        .filter(|&i| match &func.insts[i] {
-            Inst::Store { cell, value } => {
-                let ck = raw(*cell);
-                ck < fam.nc
-                    && fam.alias[ck].is_some()
-                    && fam.copy_alias[ck].is_none()
-                    && !fam.disq[ck]
-                    && matches!(&func.insts[*value], Inst::Load(_))
-            }
-            _ => false,
+    func.blocks
+        .values()
+        .flat_map(|block| block.insts.iter().copied())
+        .filter_map(|i| {
+            let Inst::Store { cell, value } = func.insts[i] else {
+                return None;
+            };
+            let c = raw(cell);
+            (c < fam.nc
+                && fam.alias[c].is_some()
+                && fam.copy_alias[c].is_none()
+                && !fam.disq[c]
+                && matches!(func.insts[value], Inst::Load(_)))
+            .then_some((i, Vec::new()))
         })
-        .collect();
-    let mut replacement: HashMap<Idx<Inst>, Vec<Idx<Inst>>> = HashMap::default();
-    for i in alias_deletions {
-        replacement.insert(i, Vec::new());
-    }
-    replacement
+        .collect()
 }
 
 /// Emit the planned per-field stores. An enum's `__variant`/`__ty` are
@@ -1234,31 +1126,5 @@ fn rematerialize_escapes(
         };
         news.push(l);
         replacement.insert(l, news);
-    }
-}
-
-/// Splice each replaced inst's replacement list into its block.
-fn splice_replacements(func: &mut MirFunc, replacement: &HashMap<Idx<Inst>, Vec<Idx<Inst>>>) {
-    if replacement.is_empty() {
-        return;
-    }
-    let block_ids: Vec<Idx<Block>> = func.blocks.iter().map(|(id, _)| id).collect();
-    for bid in block_ids {
-        if !func.blocks[bid]
-            .insts
-            .iter()
-            .any(|i| replacement.contains_key(i))
-        {
-            continue;
-        }
-        let old = std::mem::take(&mut func.blocks[bid].insts);
-        let mut new = Vec::with_capacity(old.len());
-        for i in old {
-            match replacement.get(&i) {
-                Some(news) => new.extend_from_slice(news),
-                None => new.push(i),
-            }
-        }
-        func.blocks[bid].insts = new;
     }
 }
