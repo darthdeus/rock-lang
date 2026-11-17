@@ -367,6 +367,7 @@ fn reload_lane_is_opt_in_via_stone_hot_reload() {
             "a busy sim env does not route",
         ),
         (&[], false, "no env"),
+        (&[("ROCK_TEST_SEED", "42")], false, "an ordinary entry"),
         (
             &[("STONE_HOT_RELOAD", "0")],
             false,
@@ -379,7 +380,11 @@ fn reload_lane_is_opt_in_via_stone_hot_reload() {
         ),
     ];
     for (declared, lane, why) in cases {
-        assert_eq!(is_reload_lane(&env(declared)), *lane, "{why}");
+        let declared = env(declared);
+        assert_eq!(is_reload_lane(&declared), *lane, "{why}");
+        let by_wire = HashMap::from([("probe".to_string(), declared)]);
+        assert_eq!(entry_is_reload_lane("probe", &by_wire), *lane, "{why}");
+        assert!(!entry_is_reload_lane("unknown", &by_wire));
     }
 }
 
@@ -780,21 +785,6 @@ fn nvidia_smi_free_memory_reads_the_first_gpu() {
 }
 
 #[test]
-fn a_hot_reload_sim_is_reload_lane() {
-    let mut env: HashMap<String, Vec<(String, String)>> = HashMap::new();
-    env.insert("plain".into(), vec![("ROCK_TEST_SEED".into(), "42".into())]);
-    env.insert(
-        "reloader".into(),
-        vec![("STONE_HOT_RELOAD".into(), "1".into())],
-    );
-
-    assert!(!entry_is_reload_lane("plain", &env));
-    assert!(entry_is_reload_lane("reloader", &env));
-    // A name with no recorded env is ordinary, not a panic.
-    assert!(!entry_is_reload_lane("unknown", &env));
-}
-
-#[test]
 fn a_declared_frame_count_is_the_entrys_budget() {
     const COUNT: &str = "FRAME_COUNT";
     let cases: &[(&[(&str, &str)], usize)] = &[
@@ -1185,76 +1175,53 @@ fn requested_sim_names_that_are_not_sims_are_all_refused_before_boot() {
 }
 
 #[test]
-fn entry_passed_requires_stop_and_no_failures() {
-    // Shared pass-predicate for both multi-run paths. Default (no
-    // stop_sim observed) is a fail even with zero expects.
-    let mut s = SimSummary::default();
-    assert!(!entry_passed(&s));
-    s.saw_stop = true;
-    s.expects_pass.push(SiteMessage {
+fn entry_verdict_requires_stop_and_checks_without_failures_or_exclusion() {
+    let mut checked = stopped();
+    checked.expects_pass.push(SiteMessage {
         message: "ok".into(),
         site: "f:0".into(),
     });
-    assert!(entry_passed(&s));
-    s.expects_fail.push(SiteMessage {
+    let mut failed = stopped();
+    failed.expects_pass = checked.expects_pass.clone();
+    failed.expects_fail.push(SiteMessage {
         message: "x".into(),
         site: "f:1".into(),
     });
-    assert!(!entry_passed(&s));
-}
-
-#[test]
-fn a_stopped_sim_whose_checks_never_ran_fails() {
-    // A fixture that returns before its checks (`STATE ?? return`) still
-    // reaches stop_sim() and fails nothing; its coverage is gone.
-    let mut empty = stopped();
-    assert!(!entry_passed(&empty));
-    assert_eq!(verdict_word(&empty), "FAIL");
-    assert!(sim_outcome(&empty, "s").is_err());
-
     let mut declared = stopped();
     declared.no_checks = Some("a seed; its probe checks".into());
-    assert!(
-        entry_passed(&declared),
-        "a declared check-free entry passes"
-    );
-
-    empty.image_snapshots.push(ImageSnapshotOp {
+    let mut image = stopped();
+    image.image_snapshots.push(ImageSnapshotOp {
         name: "n".into(),
         path: "frame.png".into(),
         tol: 0.001,
         save_ok: true,
         site: String::new(),
     });
-    assert!(entry_passed(&empty), "an image snapshot is a check");
-}
-
-#[test]
-fn an_aborted_sim_prints_fail_not_pass() {
-    // The imgui docking abort: zero expects ran, none failed, and the sim
-    // never reached stop_sim(). The verdict word must follow the real
-    // outcome, not the expect tally.
-    let mut aborted = SimSummary::default();
-    assert!(
-        !aborted.has_failures(),
-        "an abort fails no expect -- that is the trap"
-    );
-    assert_eq!(verdict_word(&aborted), "FAIL");
-
-    aborted.saw_stop = true;
-    aborted.expects_pass.push(SiteMessage {
-        message: "ok".into(),
-        site: "f:0".into(),
-    });
-    assert_eq!(verdict_word(&aborted), "PASS");
-
     let mut timed_out = stopped();
     timed_out.timed_out = true;
-    assert_eq!(verdict_word(&timed_out), "FAIL");
-
     let mut died = stopped();
     died.process_failure_code = Some(1);
-    assert_eq!(verdict_word(&died), "FAIL");
+    let mut excluded = stopped();
+    excluded.excluded = Some("opt-in fixture".into());
+
+    let aborted = SimSummary::default();
+    assert!(!aborted.has_failures());
+    assert!(sim_outcome(&stopped(), "s").is_err());
+    for (name, summary, verdict) in [
+        ("aborted", aborted, "FAIL"),
+        ("no checks", stopped(), "FAIL"),
+        ("checked", checked, "PASS"),
+        ("failed check", failed, "FAIL"),
+        ("declared check-free", declared, "PASS"),
+        ("image check", image, "PASS"),
+        ("timeout", timed_out, "FAIL"),
+        ("process failure", died, "FAIL"),
+        ("excluded", excluded, "EXCLUDED"),
+    ] {
+        assert_eq!(entry_passed(&summary), verdict == "PASS", "{name}");
+        assert_eq!(entry_excluded(&summary), verdict == "EXCLUDED", "{name}");
+        assert_eq!(verdict_word(&summary), verdict, "{name}");
+    }
 }
 
 #[test]
@@ -1285,18 +1252,6 @@ fn manual_gallery_selection_is_explicit_and_last_wins() {
         .unwrap()
     );
     assert!(manual_sim(&[("SIM_MANUAL".into(), "yes".into())]).is_err());
-}
-
-#[test]
-fn entry_excluded_is_not_passed_and_verdict_word_is_excluded() {
-    let s = SimSummary {
-        excluded: Some("opt-in fixture".to_string()),
-        saw_stop: true,
-        ..Default::default()
-    };
-    assert!(!entry_passed(&s));
-    assert!(entry_excluded(&s));
-    assert_eq!(verdict_word(&s), "EXCLUDED");
 }
 
 #[test]
