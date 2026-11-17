@@ -134,28 +134,3 @@ fn flags_logical_binop() {
         "a logical `&&` root is generic, not a comparison"
     );
 }
-
-#[test]
-fn allow_comment_above_suppresses() {
-    let src = "fn f() -> int {\n    let x = 1\n    // rock: allow(unused_pure_expr)\n    x == 1\n    x\n}";
-    assert_eq!(
-        count(&src.replace("// rock: allow(unused_pure_expr)", "")),
-        1,
-        "the finding exists without the comment"
-    );
-    assert_eq!(count(src), 0, "comment above silences it");
-}
-
-#[test]
-fn trailing_allow_comment_suppresses() {
-    let src =
-        "fn f() -> int {\n    let x = 1\n    x == 1 // rock: allow(unused_pure_expr)\n    x\n}";
-    assert_eq!(count(src), 0, "trailing comment silences it");
-}
-
-#[test]
-fn allow_of_a_different_lint_does_not_suppress() {
-    let src =
-        "fn f() -> int {\n    let x = 1\n    // rock: allow(unused_var)\n    x == 1\n    x\n}";
-    assert_eq!(count(src), 1, "wrong lint name -> still warns");
-}

@@ -108,30 +108,3 @@ deco init update(stage: int = 100) {}
         assert!(names(src).is_empty(), "{src}: {:?}", names(src));
     }
 }
-
-#[test]
-fn allow_comment_above_suppresses() {
-    let src = "fn f() -> int {\n    // rock: allow(unused_var)\n    let x = 5\n    3\n}";
-    assert_eq!(
-        names(&src.replace("// rock: allow(unused_var)", "")),
-        vec!["x".to_string()],
-        "the finding exists without the comment"
-    );
-    assert!(names(src).is_empty(), "comment above silences it");
-}
-
-#[test]
-fn trailing_allow_comment_suppresses() {
-    let src = "fn f() -> int {\n    let x = 5 // rock: allow(unused_var)\n    3\n}";
-    assert!(names(src).is_empty(), "trailing comment silences it");
-}
-
-#[test]
-fn allow_of_a_different_lint_does_not_suppress() {
-    let src = "fn f() -> int {\n    // rock: allow(pure)\n    let x = 5\n    3\n}";
-    assert_eq!(
-        names(src),
-        vec!["x".to_string()],
-        "wrong lint name -> still warns"
-    );
-}

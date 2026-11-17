@@ -101,17 +101,6 @@ fn extern_declarations_are_not_roots() {
 }
 
 #[test]
-fn allow_comment_above_suppresses() {
-    let src = "fn main() {}\n// rock: allow(unused_fn)\nfn dead() {}";
-    assert_eq!(
-        names(&src.replace("// rock: allow(unused_fn)", "")),
-        vec!["dead".to_string()],
-        "the finding exists without the comment"
-    );
-    assert!(names(src).is_empty(), "comment above silences the dead fn");
-}
-
-#[test]
 fn implementation_annotations_are_not_roots() {
     let cases: &[(&str, &str)] = &[
         // `@pure` describes how the fn compiles, not how it is entered. Rooting on

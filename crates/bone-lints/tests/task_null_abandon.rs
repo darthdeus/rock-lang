@@ -136,16 +136,3 @@ fn finding_reports_at_warning_level() {
     assert_eq!(fs.len(), 1, "expected the one finding: {fs:?}");
     assert_eq!(fs[0].level(), CompilerErrorLevel::Warning);
 }
-
-#[test]
-fn allow_comments_suppress() {
-    let above = "fn bad(m: Mob) {\n    // rock: allow(task_null_abandon)\n    m.co = null\n}";
-    assert_eq!(
-        count(&above.replace("// rock: allow(task_null_abandon)", "")),
-        1,
-        "the finding exists without the comment"
-    );
-    assert_eq!(count(above), 0, "allow comment above silences it");
-    let trailing = "fn bad(m: Mob) {\n    m.co = null // rock: allow(task_null_abandon)\n}";
-    assert_eq!(count(trailing), 0, "trailing allow comment silences it");
-}

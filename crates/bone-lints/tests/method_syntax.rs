@@ -59,8 +59,6 @@ fn already_converted_or_exempt_decls_are_not_flagged() {
         // The parser REJECTS a receiver path on an extern decl, so the suggested
         // rewrite would not compile.
         format!("{MOB}extern(lua) fn take(m: Mob)\nfn main() {{ take(Mob {{ hp: 1 }}) }}"),
-        // suppressed by an allow comment
-        format!("{MOB}// rock: allow(method_syntax)\n{DAMAGE}{CALL_MAIN}"),
     ];
     for src in cases {
         assert!(methods(src).is_empty(), "{src}: {:?}", methods(src));

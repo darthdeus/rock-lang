@@ -42,12 +42,6 @@ fn skips_methods_constructors_named_arguments_and_user_overloads() {
 }
 
 #[test]
-fn honors_suppression() {
-    let src = "fn main() {\n    let xs = [1]\n    // rock: allow(stdlib_ufcs)\n    vec_push(xs, 2)\n    let _n = vec_len(xs) // rock: allow(stdlib_ufcs)\n}";
-    assert!(findings(src).is_empty(), "{:?}", findings(src));
-}
-
-#[test]
 fn skips_struct_spreads_that_expand_into_named_arguments() {
     let src = "struct Push { vec: [int], item: int }\nfn main() {\n    let p = Push { vec: [1], item: 2 }\n    vec_push(..p)\n}";
     assert!(findings(src).is_empty());

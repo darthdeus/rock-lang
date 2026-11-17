@@ -82,8 +82,10 @@ fn suppression_applies_to_every_cost_class() {
 fn suppression_is_matched_per_lint_name() {
     // The wrong lint's `allow` must not silence a finding -- a name-agnostic
     // line filter would swallow both.
-    let src = "// rock: allow(unused_var)\nfn dead() -> int { 1 }\nfn main() {}";
-    assert_eq!(lints_of(src), vec!["unused_fn"]);
+    for name in ["unused_var", "pure"] {
+        let src = format!("// rock: allow({name})\nfn dead() -> int {{ 1 }}\nfn main() {{}}");
+        assert_eq!(lints_of(&src), vec!["unused_fn"], "{name}");
+    }
 }
 
 #[test]

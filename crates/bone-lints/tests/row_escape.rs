@@ -300,19 +300,6 @@ fn diagnostic_names_the_row_type_and_the_kind() {
 }
 
 #[test]
-fn allow_comment_above_suppresses() {
-    let body =
-        "fn leak(e: Entity<Mob>) -> Mob? {\n    // rock: allow(row_escape)\n    return e.get()\n}";
-    assert_eq!(
-        kinds(&body.replace("// rock: allow(row_escape)", "")),
-        vec![EscapeKind::Return],
-        "the finding exists without the comment"
-    );
-    let kept = findings(body);
-    assert!(kept.is_empty(), "allow comment above silences it: {kept:?}");
-}
-
-#[test]
 fn default_tier_does_not_report_row_escape() {
     // The property the opt-in tier exists for, asserted on a program that DOES
     // escape: a migration lint firing on every pre-existing arena consumer would
