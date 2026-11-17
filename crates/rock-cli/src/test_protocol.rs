@@ -172,10 +172,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_pass_and_fail_lines_ignoring_other_output() {
+    fn parses_result_lines_ignoring_other_output() {
         let stdout = "hello\n\
                       __SKULL__\tPASS\t\n\
                       noise __SKULL__ not at line start\n\
+                      __SKULL__\tVALUE\tt_a\t42\n\
+                      __SKULL__\tVALUE\tt_c\t-1.5\n\
                       __SKULL__\tFAIL\tt_a: error: boom\n\
                       __SKULL__\tPASS\t\n\
                       __SKULL__\tFAIL\tt_b: output mismatch: expected <1> got <2>\n";
@@ -186,6 +188,13 @@ mod tests {
             vec![
                 "t_a: error: boom".to_string(),
                 "t_b: output mismatch: expected <1> got <2>".to_string()
+            ]
+        );
+        assert_eq!(
+            m.values,
+            vec![
+                ("t_a".to_string(), "42".to_string()),
+                ("t_c".to_string(), "-1.5".to_string())
             ]
         );
     }
@@ -265,24 +274,6 @@ mod tests {
             vec![("y".to_string(), 1), ("z".to_string(), 1)]
         );
         assert!(reason_histogram([]).is_empty());
-    }
-
-    #[test]
-    fn parses_value_lines_alongside_pass_and_fail() {
-        let stdout = "__SKULL__\tPASS\t\n\
-                      __SKULL__\tVALUE\tt_a\t42\n\
-                      __SKULL__\tFAIL\tt_b: error: boom\n\
-                      __SKULL__\tVALUE\tt_c\t-1.5\n";
-        let m = parse_skull_markers(stdout).expect("markers present");
-        assert_eq!(m.passed, 1);
-        assert_eq!(m.fails, vec!["t_b: error: boom".to_string()]);
-        assert_eq!(
-            m.values,
-            vec![
-                ("t_a".to_string(), "42".to_string()),
-                ("t_c".to_string(), "-1.5".to_string())
-            ]
-        );
     }
 
     #[test]
