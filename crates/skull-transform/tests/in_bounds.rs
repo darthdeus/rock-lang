@@ -174,14 +174,6 @@ fn a_counted_loop_store_is_in_bounds() {
 }
 
 #[test]
-fn an_unknown_call_in_the_body_keeps_the_check() {
-    let mut p = Probe::new();
-    let (_, store) = counted_loop(&mut p, |p, b| p.unknown_call(b));
-    p.run();
-    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
-}
-
-#[test]
 fn a_call_after_the_store_still_reaches_it_around_the_back_edge() {
     for self_edge in [false, true] {
         let mut p = Probe::new();
@@ -214,9 +206,15 @@ fn a_fresh_literal_push_in_the_body_preserves_bounds_facts() {
 }
 
 #[test]
-fn a_push_to_an_external_vector_can_run_a_metamethod() {
-    let mut p = Probe::new();
-    let (_, store) = counted_loop(&mut p, |p, b| {
+fn counted_loop_body_barriers_keep_the_check() {
+    let keeps_check = |name: &str, before: fn(&mut Probe, Idx<Block>)| {
+        let mut p = Probe::new();
+        let (_, store) = counted_loop(&mut p, before);
+        p.run();
+        assert_eq!(p.kind(store), ContainerKind::VecNonNull, "{name}");
+    };
+    keeps_check("unknown call", |p, b| p.unknown_call(b));
+    keeps_check("external push", |p, b| {
         let arr = p.load(b, p.ys);
         let value = p.int(b, 7);
         p.emit(
@@ -228,14 +226,7 @@ fn a_push_to_an_external_vector_can_run_a_metamethod() {
             },
         );
     });
-    p.run();
-    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
-}
-
-#[test]
-fn a_length_store_in_the_body_keeps_the_check() {
-    let mut p = Probe::new();
-    let (_, store) = counted_loop(&mut p, |p, b| {
+    keeps_check("length store", |p, b| {
         let base = p.load(b, p.ys);
         let value = p.int(b, 0);
         p.emit(
@@ -247,19 +238,17 @@ fn a_length_store_in_the_body_keeps_the_check() {
             },
         );
     });
-    p.run();
-    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
-}
-
-#[test]
-fn rebinding_the_vector_in_the_body_keeps_the_check() {
-    let mut p = Probe::new();
-    let (_, store) = counted_loop(&mut p, |p, b| {
+    keeps_check("vector rebind", |p, b| {
         let other = p.load(b, p.ys);
         p.store(b, p.xs, other);
     });
-    p.run();
-    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
+    keeps_check("possibly negative counter", |p, _| {
+        let entry = p.f.entry;
+        let len = p.len_of(entry, p.ys);
+        let one = p.int(entry, 1);
+        let init = p.emit(entry, Inst::IntSub(len, one));
+        p.store(entry, p.i, init);
+    });
 }
 
 #[test]
@@ -313,20 +302,6 @@ fn a_second_vector_in_the_body_keeps_its_check() {
     p.run();
     assert_eq!(p.kind(store), ContainerKind::VecNonNullInBounds);
     assert_eq!(p.kind(other), ContainerKind::VecNonNull);
-}
-
-#[test]
-fn a_counter_that_may_start_negative_keeps_the_check() {
-    let mut p = Probe::new();
-    let (_, store) = counted_loop(&mut p, |_, _| {});
-    // Replace the `i = 0` init with `i = ys.len - 1`, which may be -1.
-    let entry = p.f.entry;
-    let len = p.len_of(entry, p.ys);
-    let one = p.int(entry, 1);
-    let init = p.emit(entry, Inst::IntSub(len, one));
-    p.store(entry, p.i, init);
-    p.run();
-    assert_eq!(p.kind(store), ContainerKind::VecNonNull);
 }
 
 /// `if i < 0 { return }; if i >= xs.len { return }; xs[i] = 1`.

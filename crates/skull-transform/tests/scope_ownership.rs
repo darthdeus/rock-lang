@@ -255,69 +255,39 @@ fn rewrite_last_store_to_dest_write(
 /// `Inst::Store`): write counting must see dests or the cell wrongly
 /// classifies single-assignment by-value.
 #[test]
-fn dest_written_capture_boxes() {
-    let mut func = lower(
-        "value V { a: int, b: int }\n\
-         fn g() -> V { return V { a: 1, b: 2 } }\n\
-         fn f() -> fn() -> int { let v = g() let h = () => v.a v = g() return h }",
-        "f",
-    );
-    let tree = ScopeTree::build(&func);
-    let own = tree.analyze(&func);
-    let lam = lambda_scope_ids(&tree)[0];
-    assert_eq!(
-        own.captures[lam].len(),
-        1,
-        "the lambda captures `v.a`'s scalar cell"
-    );
-    let va = *own.captures[lam].iter().next().unwrap();
+fn dest_written_captures_box_from_either_scope() {
+    for (name, source) in [
+        (
+            "after capture",
+            "value V { a: int, b: int }\n\
+             fn g() -> V { return V { a: 1, b: 2 } }\n\
+             fn f() -> fn() -> int { let v = g() let h = () => v.a v = g() return h }",
+        ),
+        (
+            "inside lambda",
+            "value V { a: int, b: int }\n\
+             fn g() -> V { return V { a: 1, b: 2 } }\n\
+             fn f() -> fn() -> int { let v = g() let h = () => { v = g() return v.a } return h }",
+        ),
+    ] {
+        let mut func = lower(source, "f");
+        let tree = ScopeTree::build(&func);
+        let own = tree.analyze(&func);
+        let lam = lambda_scope_ids(&tree)[0];
+        assert_eq!(own.captures[lam].len(), 1, "{name}: one scalar capture");
+        let va = *own.captures[lam]
+            .iter()
+            .next()
+            .expect("captured scalar cell");
+        rewrite_last_store_to_dest_write(&mut func, va);
 
-    rewrite_last_store_to_dest_write(&mut func, va);
-    let tree = ScopeTree::build(&func);
-    let own = tree.analyze(&func);
-    let boxed = tree.boxed_cells(&own);
-    assert!(
-        own.captures[lam].contains(&va),
-        "still captured (the lambda Load is untouched)"
-    );
-    assert!(
-        boxed.contains(&va),
-        "a dest-reassigned captured cell must box; boxed={boxed:?}"
-    );
-}
-
-/// A captured cell dest-written from INSIDE the lambda: the writing scope must
-/// be visible through dests (a non-owner write is the box trigger even at one
-/// effective store).
-#[test]
-fn dest_written_inside_lambda_boxes() {
-    let mut func = lower(
-        "value V { a: int, b: int }\n\
-         fn g() -> V { return V { a: 1, b: 2 } }\n\
-         fn f() -> fn() -> int { let v = g() let h = () => { v = g() return v.a } return h }",
-        "f",
-    );
-    let tree = ScopeTree::build(&func);
-    let own = tree.analyze(&func);
-    let lam = lambda_scope_ids(&tree)[0];
-    let va = *own.captures[lam]
-        .iter()
-        .next()
-        .expect("captured scalar cell");
-
-    // The lambda's `v = g()` is the LAST Store of va in program order (arena
-    // order tracks lowering order); rewriting it moves the write into the
-    // lambda's CallMulti dests.
-    rewrite_last_store_to_dest_write(&mut func, va);
-    let tree = ScopeTree::build(&func);
-    let own = tree.analyze(&func);
-    let boxed = tree.boxed_cells(&own);
-    assert!(
-        own.captures[lam].contains(&va),
-        "still captured (the lambda Load is untouched)"
-    );
-    assert!(
-        boxed.contains(&va),
-        "a cell dest-written from a non-owner scope must box; boxed={boxed:?}"
-    );
+        let tree = ScopeTree::build(&func);
+        let own = tree.analyze(&func);
+        let boxed = tree.boxed_cells(&own);
+        assert!(own.captures[lam].contains(&va), "{name}: capture remains");
+        assert!(
+            boxed.contains(&va),
+            "{name}: dest write must box; {boxed:?}"
+        );
+    }
 }
