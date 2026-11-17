@@ -1401,158 +1401,73 @@ impl<'a> Parser<'a> {
         Ok(item)
     }
 
-    /// Generic params + `(params)` + optional `-> ret` + body, shared by
-    /// `parse_fn` and `parse_operator`. The body is `Rock` for a `{ }` block,
-    /// `Inline(inline_backend, ..)` for an `= "..."` inline body, else
-    /// `extern_body` (a body-less extern decl). `extern_body` is `None` for every
-    /// non-extern caller, and a missing body then REJECTS — a fn with no body is
-    /// not a foreign declaration.
     fn finish_fn_def(
         &mut self,
-        name: Ident,
+        mut name: Ident,
         start: Span,
         is_macro: bool,
-        is_coroutine: bool,
-        extern_body: Option<FunctionBody>,
-        inline_backend: FnBackend,
-    ) -> PResult<Item> {
-        let generics = self.parse_generics()?;
-
-        // D-form probe: `fn Type<gen>.name<gen>(receiver, ..)`. The `.` after the
-        // ident+generics selects it; what we parsed as (name, generics) is then
-        // the RECEIVER PATH. Pure surface sugar -- desugars to a free fn whose
-        // param 0 is the receiver typed by the path. Not for operators (`.` can't
-        // follow an operator symbol), macros, or extern decls (edge-case table).
-        let mut receiver_surface: Option<(Ident, usize)> = None;
-        let mut receiver_ty: Option<Idx<TypeExprData>> = None;
-
-        // Qualified receiver: `fn lib::Actor<..>.method<..>(..)`. Extend
-        // the leading ident into a path, then reuse the single-ident D-form
-        // flow with the method name/generics and a Path receiver type.
-        if self.kind() == TokenKind::DoubleColon && matches!(self.peek_kind(), TokenKind::Ident(_))
-        {
-            if is_macro {
-                return Err(self.err("the method form `Type.name` is for functions, not macros"));
-            }
-            if extern_body.is_some() {
-                return Err(self.err(
-                    "extern functions are foreign symbols and cannot declare a receiver path",
-                ));
-            }
-            let path = self.parse_path_tail(name)?;
-            let last = path.segments.last().expect("path has segments").clone();
-            // Optional generics on the receiver tail: `lib::Actor<T>.heal`.
-            let receiver_generics = if self.kind() == TokenKind::LessThan {
-                self.parse_generics()?
-            } else {
-                Vec::new()
-            };
-            if self.kind() != TokenKind::Dot {
-                return Err(
-                    self.err("a qualified receiver path must end in `.method` (`lib::Actor.heal`)")
-                );
-            }
-            self.advance(); // `.`
-            let method_name = self.expect_ident()?;
-            let method_generics = self.parse_generics()?;
-            for pg in &receiver_generics {
-                if method_generics
-                    .iter()
-                    .any(|mg| mg.name.name == pg.name.name)
-                {
-                    return Err(self.err(format!(
-                        "generic `{}` is declared in both the receiver path and the method generics",
-                        pg.name.name
-                    )));
-                }
-            }
-            receiver_ty = Some(self.ast.ty(path.span(), TypeExprKind::Path(path), false));
-            receiver_surface = Some((last, 0));
-            let mut merged = receiver_generics;
-            merged.extend(method_generics);
-            // Reuse the single-ident D-form continuation with the method as
-            // the function name and the merged generics.
-            return self.continue_fn_def(
-                method_name,
-                start,
-                is_macro,
-                false,
-                extern_body,
-                inline_backend,
-                merged,
-                receiver_surface,
-                receiver_ty,
-            );
-        }
-
-        let (name, generics) = if self.kind() == TokenKind::Dot {
-            if is_macro {
-                return Err(self.err("the method form `Type.name` is for functions, not macros"));
-            }
-            if extern_body.is_some() {
-                return Err(self.err(
-                    "extern functions are foreign symbols and cannot declare a receiver path",
-                ));
-            }
-            self.advance(); // `.`
-            let path_ident = name;
-            let path_generics = generics;
-            let method_name = self.expect_ident()?;
-            let method_generics = self.parse_generics()?;
-            if self.kind() == TokenKind::Dot {
-                return Err(self.err("the receiver path may have only one segment (`Type.name`)"));
-            }
-            for pg in &path_generics {
-                if method_generics
-                    .iter()
-                    .any(|mg| mg.name.name == pg.name.name)
-                {
-                    return Err(self.err(format!(
-                        "generic `{}` is declared in both the receiver path and the method generics",
-                        pg.name.name
-                    )));
-                }
-            }
-            receiver_ty = Some(self.synth_receiver_type(&path_ident, &path_generics));
-            let split = path_generics.len();
-            receiver_surface = Some((path_ident, split));
-            let mut merged = path_generics;
-            merged.extend(method_generics);
-            (method_name, merged)
-        } else {
-            (name, generics)
-        };
-
-        self.continue_fn_def(
-            name,
-            start,
-            is_macro,
-            is_coroutine,
-            extern_body,
-            inline_backend,
-            generics,
-            receiver_surface,
-            receiver_ty,
-        )
-    }
-
-    /// The shared tail of every fn-header parse: params, return type, body,
-    /// and item construction. `finish_fn_def` calls it after resolving the
-    /// receiver/name/generics; the v1 qualified-receiver path calls it
-    /// directly with its own resolution.
-    #[allow(clippy::too_many_arguments)]
-    fn continue_fn_def(
-        &mut self,
-        name: Ident,
-        start: Span,
-        is_macro: bool,
-        is_coroutine: bool,
+        mut is_coroutine: bool,
         extern_body: Option<FunctionBody>,
         backend: FnBackend,
-        generics: Vec<Generic>,
-        receiver_surface: Option<(Ident, usize)>,
-        receiver_ty: Option<Idx<TypeExprData>>,
     ) -> PResult<Item> {
+        let mut generics = self.parse_generics()?;
+        let qualified = self.kind() == TokenKind::DoubleColon
+            && matches!(self.peek_kind(), TokenKind::Ident(_));
+        let receiver = if qualified || self.kind() == TokenKind::Dot {
+            if is_macro {
+                return Err(self.err("the method form `Type.name` is for functions, not macros"));
+            }
+            if extern_body.is_some() {
+                return Err(self.err(
+                    "extern functions are foreign symbols and cannot declare a receiver path",
+                ));
+            }
+            let path = if qualified {
+                let path = self.parse_path_tail(name.clone())?;
+                generics = self.parse_generics()?;
+                if self.kind() != TokenKind::Dot {
+                    return Err(self.err(
+                        "a qualified receiver path must end in `.method` (`lib::Actor.heal`)",
+                    ));
+                }
+                Some(path)
+            } else {
+                None
+            };
+            self.advance(); // `.`
+            let method = self.expect_ident()?;
+            let method_generics = self.parse_generics()?;
+            if !qualified && self.kind() == TokenKind::Dot {
+                return Err(self.err("the receiver path may have only one segment (`Type.name`)"));
+            }
+            for pg in &generics {
+                if method_generics
+                    .iter()
+                    .any(|mg| mg.name.name == pg.name.name)
+                {
+                    return Err(self.err(format!(
+                        "generic `{}` is declared in both the receiver path and the method generics",
+                        pg.name.name
+                    )));
+                }
+            }
+            let receiver = if let Some(path) = path {
+                let last = path.segments.last().expect("path has segments").clone();
+                let ty = self.ast.ty(path.span(), TypeExprKind::Path(path), false);
+                is_coroutine = false;
+                ((last, 0), ty)
+            } else {
+                let ty = self.synth_receiver_type(&name, &generics);
+                ((name, generics.len()), ty)
+            };
+            name = method;
+            generics.extend(method_generics);
+            Some(receiver)
+        } else {
+            None
+        };
+        let (receiver_surface, receiver_ty) = receiver.unzip();
+
         let (params, params_span) = self.parse_params(receiver_ty)?;
         self.skip_comments(); // `f() /* c */ -> T`
         let return_ty = if self.eat(TokenKind::Arrow) {
@@ -1652,35 +1567,9 @@ impl<'a> Parser<'a> {
     /// expression is the expression-position expansion. Mirrors rock's
     /// `parse_macro_body_block`.
     fn parse_macro_body(&mut self) -> PResult<(Idx<BlockData>, Vec<Item>)> {
-        let start = self.expect(TokenKind::OpenCurly)?;
-        self.brace_depth += 1;
-        let mut statements = Vec::new();
         let mut items = Vec::new();
-        loop {
-            while self.eat(TokenKind::Semicolon) {}
-            while let TokenKind::Comment(text) = self.kind() {
-                let span = self.span();
-                statements.push(self.ast.stmt(span, StatementKind::Comment(text)));
-                self.advance();
-            }
-            if self.kind() == TokenKind::CloseCurly || self.at_end() {
-                break;
-            }
-            if self.token_starts_macro_body_item() {
-                items.push(self.parse_item()?);
-                continue;
-            }
-            statements.push(self.parse_statement()?);
-            self.consume_trailing_comments();
-            while self.eat(TokenKind::Semicolon) {}
-        }
-        self.brace_depth -= 1;
-        let close = self.expect(TokenKind::CloseCurly)?;
-        let span = self.span_from(start);
-        Ok((
-            self.ast.block(span, Some((start, close)), statements),
-            items,
-        ))
+        let block = self.parse_braced_block(Some(&mut items))?;
+        Ok((block, items))
     }
 
     /// Does the current token start an item declaration valid inside a macro
@@ -2142,13 +2031,16 @@ impl<'a> Parser<'a> {
 
     /// Consume `::seg(::seg)*` after an already-parsed first segment (v1).
     fn parse_path_tail(&mut self, first: Ident) -> PResult<Path> {
+        self.finish_path(first, false)
+    }
+
+    fn finish_path(&mut self, first: Ident, from_root: bool) -> PResult<Path> {
         let mut segments = vec![first];
-        while self.kind() == TokenKind::DoubleColon {
-            self.advance();
+        while self.eat(TokenKind::DoubleColon) {
             segments.push(self.expect_ident()?);
         }
         Ok(Path {
-            from_root: false,
+            from_root,
             segments,
         })
     }
@@ -2179,15 +2071,8 @@ impl<'a> Parser<'a> {
     /// Consume `::seg(::seg)*` from a leading `::` (root-anchored, v1).
     fn parse_root_path(&mut self) -> PResult<Path> {
         self.advance(); // leading `::`
-        let mut segments = vec![self.expect_ident()?];
-        while self.kind() == TokenKind::DoubleColon {
-            self.advance();
-            segments.push(self.expect_ident()?);
-        }
-        Ok(Path {
-            from_root: true,
-            segments,
-        })
+        let first = self.expect_ident()?;
+        self.finish_path(first, true)
     }
 
     fn parse_type(&mut self) -> PResult<Idx<TypeExprData>> {
@@ -2342,7 +2227,10 @@ impl<'a> Parser<'a> {
     // ---- blocks & statements ---------------------------------------------
 
     fn parse_block(&mut self) -> PResult<Idx<BlockData>> {
-        self.nesting_level(Self::parse_block_level)
+        self.nesting_level(|p| {
+            p.skip_comments();
+            p.parse_braced_block(None)
+        })
     }
 
     /// Parse one expression or block level, rejecting source nested deeper
@@ -2378,10 +2266,10 @@ impl<'a> Parser<'a> {
         )
     }
 
-    fn parse_block_level(&mut self) -> PResult<Idx<BlockData>> {
-        // A comment immediately before the `{` (e.g. `if cond /* c */ {`) is
-        // skipped — it isn't a block statement and would otherwise wall here.
-        self.skip_comments();
+    fn parse_braced_block(
+        &mut self,
+        mut macro_items: Option<&mut Vec<Item>>,
+    ) -> PResult<Idx<BlockData>> {
         let start = self.expect(TokenKind::OpenCurly)?;
         self.brace_depth += 1;
         let mut statements = Vec::new();
@@ -2399,6 +2287,12 @@ impl<'a> Parser<'a> {
             if self.kind() == TokenKind::CloseCurly || self.at_end() {
                 break;
             }
+            if let Some(items) = &mut macro_items
+                && self.token_starts_macro_body_item()
+            {
+                items.push(self.parse_item()?);
+                continue;
+            }
             let before = self.pos;
             match self.parse_statement() {
                 Ok(stmt) => {
@@ -2408,6 +2302,7 @@ impl<'a> Parser<'a> {
                     self.consume_trailing_comments();
                     while self.eat(TokenKind::Semicolon) {}
                 }
+                Err(e) if macro_items.is_some() => return Err(e),
                 Err(e) if self.too_deep => {
                     self.brace_depth -= 1;
                     return Err(e);
@@ -3413,23 +3308,15 @@ impl<'a> Parser<'a> {
             return Ok(self.ast.expr(span, ExprKind::Spread(operand)));
         }
 
-        // `&name` function reference (prefix `&` before an ident).
-        if kind == TokenKind::BitAnd {
+        if matches!(kind, TokenKind::BitAnd | TokenKind::BitXor) {
             self.advance();
             let name = self.expect_ident()?;
-            let span = self.span_from(start);
-            return Ok(self.ast.expr(span, ExprKind::FunctionRef(name)));
-        }
-
-        // `^name` anaphoric ident (prefix `^` before an ident; `^` is otherwise
-        // infix xor, illegal as a prefix).
-        if kind == TokenKind::BitXor {
-            self.advance();
-            let name = self.expect_ident()?;
-            let span = self.span_from(start);
-            // Not a cook desugar site: bone `lower.rs` resolves the raw
-            // `AnaphoricIdent` as a caller-scope ident read directly.
-            return Ok(self.ast.expr(span, ExprKind::AnaphoricIdent(name)));
+            let expr = if kind == TokenKind::BitAnd {
+                ExprKind::FunctionRef(name)
+            } else {
+                ExprKind::AnaphoricIdent(name)
+            };
+            return Ok(self.ast.expr(self.span_from(start), expr));
         }
 
         // `?` / `?name` typed hole in value position. At expression start `?`
@@ -3455,36 +3342,19 @@ impl<'a> Parser<'a> {
         }
 
         match kind {
-            TokenKind::Int(num, text) => {
-                self.advance();
-                Ok(self.ast.expr(start, ExprKind::Int(num, text)))
-            }
-            TokenKind::Float(f) => {
-                self.advance();
-                Ok(self.ast.expr(start, ExprKind::Float(f)))
-            }
             TokenKind::String(_) => {
-                let span = self.span();
                 self.advance();
-                self.parse_interpolated(span)
+                self.parse_interpolated(start)
             }
             TokenKind::RawString(s) => {
-                // Raw strings never interpolate.
                 self.advance();
                 Ok(self.ast.expr(start, ExprKind::String(s)))
             }
-            TokenKind::True => {
-                self.advance();
-                Ok(self.ast.expr(start, ExprKind::Bool(true)))
-            }
-            TokenKind::False => {
-                self.advance();
-                Ok(self.ast.expr(start, ExprKind::Bool(false)))
-            }
-            TokenKind::Null => {
-                self.advance();
-                Ok(self.ast.expr(start, ExprKind::Null))
-            }
+            TokenKind::Int(..)
+            | TokenKind::Float(_)
+            | TokenKind::True
+            | TokenKind::False
+            | TokenKind::Null => Ok(self.plain_literal().expect("literal token")),
             TokenKind::Ident(name) => {
                 self.advance();
                 let base = Ident { span: start, name };
@@ -3571,21 +3441,15 @@ impl<'a> Parser<'a> {
                 // typed-tuple form and rejects.
                 let first =
                     self.with_paren_head(|p| p.with_allow_literals(true, |p| p.parse_expr(0)))?;
-                if self.kind() == TokenKind::Colon {
-                    self.advance();
+                let kind = if self.eat(TokenKind::Colon) {
                     let ty = self.parse_type()?;
                     if self.kind() == TokenKind::Comma {
                         return Err(self.err(
                             "an ascription takes one expression: `(expr : Type)`; to ascribe a tuple write `((a, b) : (A, B))`",
                         ));
                     }
-                    self.delimiter_depth -= 1;
-                    let end = self.expect(TokenKind::CloseParen)?;
-                    let span = self.merge_spans(start, end);
-                    return Ok(self.ast.expr(span, ExprKind::ParenAscription(first, ty)));
-                }
-                // `(a, b, ...)` is a tuple; `(a)` is a parenthesized expr.
-                if self.kind() == TokenKind::Comma {
+                    ExprKind::ParenAscription(first, ty)
+                } else if self.kind() == TokenKind::Comma {
                     let mut items = vec![first];
                     while self.eat(TokenKind::Comma) {
                         self.skip_comments();
@@ -3603,16 +3467,13 @@ impl<'a> Parser<'a> {
                             ));
                         }
                     }
-                    self.delimiter_depth -= 1;
-                    let end = self.expect(TokenKind::CloseParen)?;
-                    let span = self.merge_spans(start, end);
-                    Ok(self.ast.expr(span, ExprKind::Tuple(items)))
+                    ExprKind::Tuple(items)
                 } else {
-                    self.delimiter_depth -= 1;
-                    let end = self.expect(TokenKind::CloseParen)?;
-                    let span = self.merge_spans(start, end);
-                    Ok(self.ast.expr(span, ExprKind::Paren(first)))
-                }
+                    ExprKind::Paren(first)
+                };
+                self.delimiter_depth -= 1;
+                let end = self.expect(TokenKind::CloseParen)?;
+                Ok(self.ast.expr(self.merge_spans(start, end), kind))
             }
             TokenKind::OpenSquare => {
                 self.advance();
@@ -3627,38 +3488,33 @@ impl<'a> Parser<'a> {
                 Ok(self.ast.expr(span, ExprKind::Block(block)))
             }
             TokenKind::If => self.parse_if(),
-            TokenKind::Return => {
+            TokenKind::Break | TokenKind::Continue => {
                 self.advance();
-                let v = if self.expr_terminates() {
-                    None
+                let expr = if kind == TokenKind::Break {
+                    ExprKind::BreakExpr
                 } else {
-                    Some(self.parse_expr(0)?)
+                    ExprKind::ContinueExpr
                 };
-                Ok(self
-                    .ast
-                    .expr(self.span_from(start), ExprKind::ReturnExpr(v)))
+                Ok(self.ast.expr(start, expr))
             }
-            TokenKind::Break => {
+            TokenKind::Return | TokenKind::Yield => {
                 self.advance();
-                Ok(self.ast.expr(start, ExprKind::BreakExpr))
-            }
-            TokenKind::Continue => {
-                self.advance();
-                Ok(self.ast.expr(start, ExprKind::ContinueExpr))
-            }
-            TokenKind::Yield => {
-                self.advance();
-                if self.kind() == TokenKind::Mul {
+                if kind == TokenKind::Yield && self.kind() == TokenKind::Mul {
                     return Err(self.err(
                         "`await` delegation was renamed to `await`: write `await expr`".to_string(),
                     ));
                 }
-                let v = if self.expr_terminates() {
+                let value = if self.expr_terminates() {
                     None
                 } else {
                     Some(self.parse_expr(0)?)
                 };
-                Ok(self.ast.expr(self.span_from(start), ExprKind::Yield(v)))
+                let expr = if kind == TokenKind::Yield {
+                    ExprKind::Yield(value)
+                } else {
+                    ExprKind::ReturnExpr(value)
+                };
+                Ok(self.ast.expr(self.span_from(start), expr))
             }
             TokenKind::Await => {
                 self.advance();
@@ -4182,20 +4038,20 @@ impl<'a> Parser<'a> {
         if matches!(self.kind(), TokenKind::DoubleDot) {
             self.advance();
             let inclusive = self.eat(TokenKind::Assign);
-            let end = self.pattern_literal_expr();
+            let end = self.plain_literal();
             return Ok(Pattern::Range {
                 start: None,
                 end,
                 inclusive,
             });
         }
-        if let Some(lit) = self.pattern_literal_expr() {
+        if let Some(lit) = self.plain_literal() {
             if matches!(self.kind(), TokenKind::DoubleDot) {
                 self.advance();
                 // `..=` (inclusive) lexes as `DoubleDot` + `Assign`. The end is
                 // optional: `N..` (end-less) yields `end: None`.
                 let inclusive = self.eat(TokenKind::Assign);
-                let end = self.pattern_literal_expr();
+                let end = self.plain_literal();
                 return Ok(Pattern::Range {
                     start: Some(lit),
                     end,
@@ -4292,9 +4148,8 @@ impl<'a> Parser<'a> {
         Ok((fields, rest))
     }
 
-    /// Parse a literal expression usable in a pattern (int/float/string/
-    /// bool/null), or `None` if the current token isn't a literal.
-    fn pattern_literal_expr(&mut self) -> Option<Idx<ExprData>> {
+    /// Parse a literal token without scanning string interpolation.
+    fn plain_literal(&mut self) -> Option<Idx<ExprData>> {
         let span = self.span();
         let kind = match self.kind() {
             TokenKind::Int(n, t) => ExprKind::Int(n, t),
