@@ -81,24 +81,6 @@ fn validate_no_whole_element_column_access(mf: &skull_mir::mir::MirFunc) -> Resu
     Ok(())
 }
 
-/// [`validate_emitted_body`] over a hoisted-body tree (named nested `fn`s and the
-/// lambda bodies `convert_closures` appends), each of which emits as its own
-/// top-level Lua function and so needs the checks in its own right.
-fn validate_nested_bodies(
-    ws: &Workspace,
-    ctx: &skull_mir::bound::BoundCtx,
-    nested: &[MirFunc],
-    specs: &mut Vec<skull_mir::bound::SpecDemand>,
-) -> Result<(), BodyRejection> {
-    let mut acc = BodyRejection::default();
-    for nf in nested {
-        if let Err(r) = validate_emitted_body(ws, ctx, nf, specs) {
-            acc.absorb(r.prefixed(&format!("in nested body `{}`", nf.name)));
-        }
-    }
-    acc.into_result()
-}
-
 /// Why an about-to-be-emitted body was rejected: every INDEPENDENT finding in
 /// it, first reported as the primary and the rest as siblings. A body holds
 /// several sinks often enough that reporting one turns any count of remaining
@@ -188,7 +170,6 @@ impl BodyRejection {
 /// call site.
 pub(super) fn validate_emitted_body(
     ws: &Workspace,
-    ctx: &skull_mir::bound::BoundCtx,
     mf: &MirFunc,
     specs: &mut Vec<skull_mir::bound::SpecDemand>,
 ) -> Result<(), BodyRejection> {
@@ -214,8 +195,10 @@ pub(super) fn validate_emitted_body(
                 site,
             }),
     );
-    if let Err(r) = validate_nested_bodies(ws, ctx, &mf.nested_fns, specs) {
-        acc.absorb(r);
+    for nested in &mf.nested_fns {
+        if let Err(rejection) = validate_emitted_body(ws, nested, specs) {
+            acc.absorb(rejection.prefixed(&format!("in nested body `{}`", nested.name)));
+        }
     }
     acc.into_result()
 }
@@ -226,17 +209,13 @@ pub(super) fn validate_emitted_body(
 /// known parity list, a user definition that cannot emit is a hard error.
 pub(super) fn check_unit_spec_bindings(
     ws: &Workspace,
-    ctx: &skull_mir::bound::BoundCtx,
     mid: ModuleId,
     name: &str,
     mf: &MirFunc,
     span: bone_semantic::prelude::Span,
     out_specs: &mut Vec<skull_mir::bound::SpecDemand>,
 ) -> Result<(), CompilerError> {
-    let mut specs = Vec::new();
-    let r = validate_emitted_body(ws, ctx, mf, &mut specs);
-    out_specs.extend(specs);
-    match r {
+    match validate_emitted_body(ws, mf, out_specs) {
         Ok(()) => Ok(()),
         Err(r) if !r.guarantee() && is_stdlib_module_file(ws.module(mid).file.as_str()) => Ok(()),
         Err(r) => Err(r.into_error(span, &format!("cannot emit `{name}`: "))),

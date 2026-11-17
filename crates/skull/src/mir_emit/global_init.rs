@@ -300,23 +300,14 @@ pub(super) fn emit_global_unit(
                 out.hard_error = Some(e);
                 return out;
             }
-            let owner = bone_semantic::hir::BodyOwner::Global(gid);
             let plan = concrete_plan.expect("a lowered global has a concrete plan");
             out.attribution.always_lowered = true;
             out.attribution
                 .always_callee_keys
                 .extend(plan.callees.values().map(|callee| callee.instance.clone()));
-            let ctx = skull_mir::bound::concrete_body_ctx(
-                ws,
-                mid,
-                owner,
-                &plan.bound_tree,
-                scx.interner(),
-            );
             let tv = Instant::now();
             let check = check_unit_spec_bindings(
                 ws,
-                &ctx,
                 mid,
                 g.name.as_str(),
                 &mf,

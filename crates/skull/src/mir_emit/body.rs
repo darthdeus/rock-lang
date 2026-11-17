@@ -67,7 +67,6 @@ fn emit_coroutine_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
-    ctx: &skull_mir::bound::BoundCtx,
     concrete_plan: &skull_mir::concrete::ConcreteBodyPlan,
     f: &bone_semantic::hir::Function,
     name: &str,
@@ -85,7 +84,7 @@ fn emit_coroutine_chunk(
     let tv = Instant::now();
     skull_transform::validate_no_residual_bound_calls(ws, f, mf)?;
     let mut specs = Vec::new();
-    validate_emitted_body(ws, ctx, mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
+    validate_emitted_body(ws, mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
     times.validation += tv.elapsed();
     times.validation_work = true;
     skull_codegen_lua::regalloc_time_reset();
@@ -177,17 +176,9 @@ pub(super) fn emit_body_chunk(
         self_ref,
         inline_cache,
     )?;
-    let owner = BodyOwner::Function(self_ref.func);
-    let ctx = skull_mir::bound::concrete_body_ctx(
-        ws,
-        self_ref.module,
-        owner,
-        &plan.bound_tree,
-        scx.interner(),
-    );
     if f.is_coroutine {
         let name = mangle_fn(ws, f);
-        let mut chunk = emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &name, &mut mf, times)?;
+        let mut chunk = emit_coroutine_chunk(ws, cg, scx, plan, f, &name, &mut mf, times)?;
         attribution.mir_instructions = mf.insts.len();
         attribution.times = chunk.times;
         chunk.attribution = Some(Box::new(attribution));
@@ -237,10 +228,8 @@ pub(super) fn emit_body_chunk(
         self_ref,
         &name,
         LoweredInstanceKind::Ordinary,
-        &ctx,
         mf,
         deps,
-        &mut Vec::new(),
         times,
         attribution,
     )
@@ -300,10 +289,8 @@ fn finish_body_chunk(
     self_ref: FuncRef,
     name: &str,
     kind: LoweredInstanceKind,
-    ctx: &skull_mir::bound::BoundCtx,
     mut mf: MirFunc,
     mut deps: FxHashSet<FuncRef>,
-    specs: &mut Vec<skull_mir::bound::SpecDemand>,
     mut times: PhaseTimes,
     mut attribution: UnitAttribution,
 ) -> Result<Chunk, CompilerError> {
@@ -315,17 +302,13 @@ fn finish_body_chunk(
         skull_mir::verify::Stage::EMIT_READY,
         &"the residual-bound-call gate",
     );
-    // Discovered BEFORE the verdict, and handed back through `specs` even when
-    // the verdict rejects: the inline worklist pushed them into the live queue
-    // first, so a failing build reports over that same closure.
-    let before = specs.len();
+    let mut specs = Vec::new();
     let prefix = if ordinary {
         String::new()
     } else {
         format!("cannot emit specialized `{name}`: ")
     };
-    validate_emitted_body(ws, ctx, &mf, specs).map_err(|r| r.into_error(f.name_span, &prefix))?;
-    let specs = specs[before..].to_vec();
+    validate_emitted_body(ws, &mf, &mut specs).map_err(|r| r.into_error(f.name_span, &prefix))?;
     // A specialization's residual callees count as embedded, so every edit to
     // one rebuilds it.
     let embedded_deps = ordinary.then(|| deps.clone());
@@ -695,7 +678,6 @@ pub(super) fn emit_spec_chunk(
     body: &Instance,
     name: &str,
     inline_cache: &mut skull_transform::InlineCache,
-    specs: &mut Vec<skull_mir::bound::SpecDemand>,
 ) -> Result<Chunk, CompilerError> {
     let fref = body.func;
     let f = &ws.module(fref.module).functions[fref.func];
@@ -732,10 +714,8 @@ pub(super) fn emit_spec_chunk(
     .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
     times.validation += tresolve.elapsed();
     times.validation_work = true;
-    let owner = BodyOwner::Function(fref.func);
-    let ctx = skull_mir::bound::concrete_body_ctx(ws, fref.module, owner, tree, scx.interner());
     if f.is_coroutine {
-        let mut chunk = emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, name, &mut mf, times)?;
+        let mut chunk = emit_coroutine_chunk(ws, cg, scx, plan, f, name, &mut mf, times)?;
         attribution.mir_instructions = mf.insts.len();
         attribution.times = chunk.times;
         chunk.attribution = Some(Box::new(attribution));
@@ -771,10 +751,8 @@ pub(super) fn emit_spec_chunk(
         fref,
         name,
         LoweredInstanceKind::Specialized,
-        &ctx,
         mf,
         deps,
-        specs,
         times,
         attribution,
     )

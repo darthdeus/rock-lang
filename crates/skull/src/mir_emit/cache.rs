@@ -38,8 +38,7 @@ fn rebuild_chunk(
             // there, which is the one place a specialized rejection is ordered
             // against its siblings.
             let name = body.symbol(ws, scx.interner());
-            let mut specs = Vec::new();
-            emit_spec_chunk(ws, cg, scx, concrete, body, &name, inline_cache, &mut specs)
+            emit_spec_chunk(ws, cg, scx, concrete, body, &name, inline_cache)
         }
     }
 }
@@ -743,7 +742,6 @@ impl SkullEmitCache {
                 }
             } else {
                 let name = body.symbol(ws, cache.scx.interner());
-                let mut specs = Vec::new();
                 match emit_spec_chunk(
                     ws,
                     &cache.cg,
@@ -752,7 +750,6 @@ impl SkullEmitCache {
                     &body,
                     &name,
                     &mut cache.inline_cache,
-                    &mut specs,
                 ) {
                     Ok(chunk) => chunk,
                     Err(err) => {
