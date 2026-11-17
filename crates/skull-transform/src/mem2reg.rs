@@ -91,3 +91,51 @@ pub(crate) fn promote_direct_cells(func: &mut MirFunc) {
         super::dce(func);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use skull_mir::mir::{Lit, Term};
+
+    #[test]
+    fn a_load_after_a_bypassed_store_returns_nil() {
+        let (ws, interner, _) =
+            crate::test_support::lower_fixture("fn fixture() {}", "<promotion-test>", "fixture");
+        let mut body = MirFunc::new("join".into());
+        let flag = body.new_cell(Some("flag".into()));
+        body.params.push(flag);
+        let cell = body.new_cell(None);
+        let store = body.new_block();
+        let join = body.new_block();
+        let cond = body.emit(body.entry, Inst::Load(flag));
+        body.set_term(
+            body.entry,
+            Term::Branch {
+                cond,
+                then_bb: store,
+                else_bb: join,
+            },
+        );
+        let value = body.emit(store, Inst::Const(Lit::Int(7)));
+        body.emit(store, Inst::Store { cell, value });
+        body.set_term(store, Term::Goto(join));
+        let load = body.emit(join, Inst::Load(cell));
+        body.set_term(join, Term::Return(vec![load]));
+        promote_direct_cells(&mut body);
+
+        let ctx = skull_codegen_lua::CodegenCtx::new(&ws);
+        let lua = skull_codegen_lua::emit_named(&ws, &ctx, &interner, "join", &body, None);
+        let output = std::process::Command::new("luajit")
+            .args([
+                "-e",
+                &format!("{lua}\nassert(join(false) == nil and join(true) == 7)"),
+            ])
+            .output()
+            .expect("run LuaJIT");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
