@@ -246,71 +246,59 @@ fn parameter_ref_borrow_writes_its_own_copy() {
 }
 
 // A loop or pattern binder reads its value out of storage the body can still
-// write; a captured binder must not see that write.
-@test(output = "1")
-fn single_enumerate_snapshot() {
+// write; a captured binder must not see that write. Each source form gets fresh
+// storage because the body mutates its element.
+@test(output = "1\n1\n1\n1\n1\n1\n1")
+fn container_binders_snapshot_before_writes() {
     let xs = [mkw(1)]
     for pair in xs.enumerate() {
         let read = () => pair.1.f0
         xs[pair.0].f0 = 99
         print(read())
     }
-}
-@test(output = "1")
-fn map_split_snapshot() {
-    let m: Map<int, Wide> = map_new()
-    m[0] = mkw(1)
-    for (key, w) in m {
+
+    let m_split: Map<int, Wide> = map_new()
+    m_split[0] = mkw(1)
+    for (key, w) in m_split {
         let read = () => w.f0
-        m[key].f0 = 99
+        m_split[key].f0 = 99
         print(read())
     }
-}
-@test(output = "1")
-fn map_single_snapshot() {
-    let m: Map<int, Wide> = map_new()
-    m[0] = mkw(1)
-    for entry in m {
+
+    let m_single: Map<int, Wide> = map_new()
+    m_single[0] = mkw(1)
+    for entry in m_single {
         let read = () => entry.1.f0
-        m[entry.0].f0 = 99
+        m_single[entry.0].f0 = 99
         print(read())
     }
-}
-@test(output = "1")
-fn map_enumerate_snapshot() {
-    let m: Map<int, Wide> = map_new()
-    m[0] = mkw(1)
-    for (i, (key, w)) in m.enumerate() {
+
+    let m_enum: Map<int, Wide> = map_new()
+    m_enum[0] = mkw(1)
+    for (i, (key, w)) in m_enum.enumerate() {
         let read = () => w.f0
-        m[key].f0 = 99
+        m_enum[key].f0 = 99
         print(read())
     }
-}
-// A plain Arena loop binds through its iterator's `next`, whose return
-// already copies the element out of its entry; an enumerated one is lowered
-// directly over the entries and snapshots the element itself.
-@test(output = "1")
-fn arena_snapshot() {
-    let a: Arena<Wide> = arena_new()
-    let original = a.insert(mkw(1))
-    for (entity, w) in a {
+
+    // A plain Arena loop binds through its iterator's `next`, which copies the
+    // element; enumerate binds directly over entries and snapshots it.
+    let plain: Arena<Wide> = arena_new()
+    let plain_original = plain.insert(mkw(1))
+    for (entity, w) in plain {
         let read = () => w.f0
         mutate_wide(entity.borrow().unwrap())
         print(read())
     }
-}
-@test(output = "1")
-fn arena_enumerate_snapshot() {
-    let a: Arena<Wide> = arena_new()
-    let original = a.insert(mkw(1))
-    for (i, (entity, w)) in a.enumerate() {
+
+    let enumerated: Arena<Wide> = arena_new()
+    let enum_original = enumerated.insert(mkw(1))
+    for (i, (entity, w)) in enumerated.enumerate() {
         let read = () => w.f0
         mutate_wide(entity.borrow().unwrap())
         print(read())
     }
-}
-@test(output = "1")
-fn record_pattern_snapshot() {
+
     let src = make_hw()
     match src {
         HW { w } => {
@@ -366,67 +354,52 @@ fn nullable_value_child_of_a_leaf_table_copies() {
 // A spread splices each value field or element into its destination as that
 // destination's own copy, and a grouped value field built by one call gives
 // each field its own box.
-@test(output = "1")
-fn struct_array_spread_copies_value_fields() {
-    let src = make_hw()
-    let xs = [...src]
-    xs[0].f0 = 99
-    print(src.w.f0)
-}
-
-@test(output = "1")
-fn tuple_array_spread_copies_value_elements() {
-    let t = (mkw(1), mkw(1))
-    let xs = [...t]
-    xs[0].f0 = 99
-    print(t.0.f0)
-}
-
 value ValuePair { a: Wide, b: Wide, xs: [int] }
 struct HValuePair { p: ValuePair }
-@test(output = "1")
-fn grouped_value_fields_from_one_call_copy() {
-    let h = HValuePair { p: ValuePair { a + b: mkw(1), xs: [] } }
-    h.p.a.f0 = 99
-    print(h.p.b.f0)
-}
-
 struct GenericHolder<T> { w: T }
-@test(output = "1")
-fn generic_struct_array_spread_copies_value_fields() {
-    let src: GenericHolder<Wide> = GenericHolder { w: mkw(1) }
-    let xs = [...src]
-    xs[0].f0 = 99
-    print(src.w.f0)
-}
-
 value GenericPair<T> { a: T, b: T, xs: [int] }
 struct HGenericPair { p: GenericPair<Wide> }
-@test(output = "1")
-fn generic_grouped_value_fields_from_one_call_copy() {
-    let h = HGenericPair { p: GenericPair { a + b: mkw(1), xs: [] } }
-    h.p.a.f0 = 99
-    print(h.p.b.f0)
-}
 
 fn generic_spread_read(w: Wide, src: GenericHolder<Wide>, n: Narrow) -> int {
     src.w.f0 = 99
     return w.f0
-}
-@test(output = "1")
-fn generic_call_spread_copies_value_fields() {
-    let src: GenericHolder<Wide> = GenericHolder { w: mkw(1) }
-    print(generic_spread_read(..src, src: src, n: mkn(0)))
 }
 
 fn spread_read(w: Wide, src: HW, n: Narrow) -> int {
     src.w.f0 = 99
     return w.f0
 }
-@test(output = "1")
-fn call_spread_copies_value_fields() {
-    let src = make_hw()
-    print(spread_read(..src, src: src, n: mkn(0)))
+
+@test(output = "1\n1\n1\n1\n1\n1\n1")
+fn spread_sources_copy_value_fields_and_elements() {
+    let src_struct = make_hw()
+    let struct_spread = [...src_struct]
+    struct_spread[0].f0 = 99
+    print(src_struct.w.f0)
+
+    let tuple = (mkw(1), mkw(1))
+    let tuple_spread = [...tuple]
+    tuple_spread[0].f0 = 99
+    print(tuple.0.f0)
+
+    let grouped = HValuePair { p: ValuePair { a + b: mkw(1), xs: [] } }
+    grouped.p.a.f0 = 99
+    print(grouped.p.b.f0)
+
+    let generic_src: GenericHolder<Wide> = GenericHolder { w: mkw(1) }
+    let generic_spread = [...generic_src]
+    generic_spread[0].f0 = 99
+    print(generic_src.w.f0)
+
+    let generic_grouped = HGenericPair { p: GenericPair { a + b: mkw(1), xs: [] } }
+    generic_grouped.p.a.f0 = 99
+    print(generic_grouped.p.b.f0)
+
+    let generic_call_src: GenericHolder<Wide> = GenericHolder { w: mkw(1) }
+    print(generic_spread_read(..generic_call_src, src: generic_call_src, n: mkn(0)))
+
+    let call_src = make_hw()
+    print(spread_read(..call_src, src: call_src, n: mkn(0)))
 }
 
 // A `V?` child a copy only reads stays the source's box; where the copy
