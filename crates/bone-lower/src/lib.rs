@@ -1310,7 +1310,7 @@ pub(crate) fn lower_statement_value(
 
             let pat = lower_pattern_value(ctx, a, body, loop_scope, &f.pattern)?;
             let pattern = body.pattern_arena.alloc(pat);
-            normalize_binding_wildcards(ctx, body, pattern, f.span);
+            let names_only = normalize_binding_wildcards(ctx, body, pattern, f.span);
 
             // `for x: T in xs` — the element annotation rides the binding.
             if let Some(te) = &f.ty {
@@ -1324,7 +1324,7 @@ pub(crate) fn lower_statement_value(
                 }
             }
 
-            let (pattern, prelude) = if pattern_is_names_only(body, pattern) {
+            let (pattern, prelude) = if names_only {
                 (pattern, None)
             } else {
                 // Loop codegen wants a plain element binding; anything richer
@@ -2226,10 +2226,10 @@ pub(crate) fn lower_expr(
     e: &skull_parser::ExprData,
 ) -> Result<Idx<hir::Expr>, CompilerError> {
     ctx.capture_iterator_families();
-    if let Some(binding) = ctx.place_temp(e) {
-        return Ok(ctx.alloc_expr(body, Expr::Var(binding), e.span));
-    }
     if let ExprKind::Block(b) = &e.kind {
+        if let Some(binding) = ctx.place_temp(e) {
+            return Ok(ctx.alloc_expr(body, Expr::Var(binding), e.span));
+        }
         let saved = ctx.placeholder_forbidden;
         ctx.placeholder_forbidden = true;
         let r = lower_block(ctx, a, body, scope, b);
@@ -3257,21 +3257,20 @@ fn resolve_pattern_path<'p>(
     }
 }
 
-/// Whether a lowered pattern is names and tuples of names only -- the shapes
-/// loop codegen binds directly (anything richer destructures via a `let`).
-fn pattern_is_names_only(body: &Body, p: Idx<Pattern>) -> bool {
-    match body.pattern_arena[p] {
-        Pattern::Bind(_) => true,
-        Pattern::Tuple { elements } => elements.into_iter().all(|e| pattern_is_names_only(body, e)),
-        _ => false,
-    }
-}
-
-/// Rewrite `_` holes in a `let`/`for` pattern into anonymous bindings, the
-/// form the single-binding and tuple fast paths expect. Or-patterns cannot
-/// bind, so their holes stay wildcards.
-fn normalize_binding_wildcards(ctx: &mut LowerCtx, body: &mut Body, p: Idx<Pattern>, span: Span) {
-    match body.pattern_arena[p] {
+/// Normalize `_` holes for let/for binding and report names-only loop shapes.
+/// Or-patterns stay untouched because their holes cannot bind.
+fn normalize_binding_wildcards(
+    ctx: &mut LowerCtx,
+    body: &mut Body,
+    p: Idx<Pattern>,
+    span: Span,
+) -> bool {
+    let pattern = body.pattern_arena[p];
+    let mut names_only = matches!(
+        pattern,
+        Pattern::Wildcard | Pattern::Bind(_) | Pattern::Tuple { .. }
+    );
+    match pattern {
         Pattern::Wildcard => {
             let b = ctx.alloc_binding(
                 body,
@@ -3285,25 +3284,23 @@ fn normalize_binding_wildcards(ctx: &mut LowerCtx, body: &mut Body, p: Idx<Patte
             );
             body.pattern_arena[p] = Pattern::Bind(b);
         }
-        Pattern::Bind(_) | Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Or { .. } => {}
-        Pattern::EnumVariant { sub, .. } => {
-            for s in sub {
-                normalize_binding_wildcards(ctx, body, s, span);
-            }
+        Pattern::Newtype { sub, .. } => {
+            normalize_binding_wildcards(ctx, body, sub, span);
         }
-        Pattern::Newtype { sub, .. } => normalize_binding_wildcards(ctx, body, sub, span),
         Pattern::Record { fields, .. } => {
             for f in fields {
                 let sub = body.record_pat_field_arena[f].pat;
                 normalize_binding_wildcards(ctx, body, sub, span);
             }
         }
-        Pattern::Tuple { elements } => {
-            for e in elements {
-                normalize_binding_wildcards(ctx, body, e, span);
+        Pattern::EnumVariant { sub, .. } | Pattern::Tuple { elements: sub } => {
+            for e in sub {
+                names_only &= normalize_binding_wildcards(ctx, body, e, span);
             }
         }
+        Pattern::Bind(_) | Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Or { .. } => {}
     }
+    names_only
 }
 
 fn lower_pattern_value(
