@@ -346,49 +346,49 @@ fn action_caller_addition_and_removal_are_incremental_when_opted_in() {
 }
 
 #[test]
-fn backend_sibling_signature_change_revisits_only_its_group() {
+fn backend_sibling_signature_change_revisits_only_selected_groups() {
     let old = "inline(lua) fn probe(x: int) -> int = \"return x\"\ninline(js) fn probe(x: int) -> int = \"return x;\"\nfn main() {}\n";
     let new = old.replace(
         "inline(js) fn probe(x: int)",
         "inline(js) fn probe(x: float)",
     );
     let selection = sibling_selection();
-    let mut cache = seeded_cache(&[(FILE, old)], &selection);
-    let (cached, stats) = body_edit(
-        &mut cache,
-        &[(FILE, &new)],
-        &selection,
-        &[FILE],
-        Some("main"),
-        None,
-    );
-    assert!(
-        cached
-            .iter()
-            .any(|finding| finding.lint == bone_lints::BACKEND_SIBLING_MISMATCH)
-    );
-    assert_eq!(stats.full_rebuilds, 0);
-    assert_eq!(stats.global_passes, 0);
-    assert!(stats.sibling_groups_requested > 0);
-    assert!(stats.sibling_groups_revisited > 0);
-}
-
-#[test]
-fn unselected_backend_sibling_change_revisits_no_group() {
-    let old = "inline(lua) fn probe(x: int) -> int = \"return x\"\ninline(js) fn probe(x: int) -> int = \"return x;\"\nfn main() {}\n";
-    let new = old.replace(
-        "inline(js) fn probe(x: int)",
-        "inline(js) fn probe(x: float)",
-    );
-    let mut cache = seed(old);
-    let (cached, stats) = edit(&mut cache, &new, Some("main"), None);
-    assert!(
-        cached
-            .iter()
-            .all(|f| f.lint != bone_lints::BACKEND_SIBLING_MISMATCH)
-    );
-    assert_eq!(stats.global_passes, 0);
-    assert_eq!(stats.sibling_groups_revisited, 0);
+    let default = LintOptions::default();
+    for (name, options, selected) in [
+        ("selected", &selection, true),
+        ("unselected", &default, false),
+    ] {
+        let mut cache = seeded_cache(&[(FILE, old)], options);
+        let (cached, stats) = body_edit(
+            &mut cache,
+            &[(FILE, &new)],
+            options,
+            &[FILE],
+            Some("main"),
+            None,
+        );
+        if selected {
+            assert!(
+                cached
+                    .iter()
+                    .any(|finding| finding.lint == bone_lints::BACKEND_SIBLING_MISMATCH),
+                "{name} selection must report the signature mismatch"
+            );
+            assert_eq!(stats.full_rebuilds, 0, "{name}");
+            assert_eq!(stats.global_passes, 0, "{name}");
+            assert!(stats.sibling_groups_requested > 0, "{name}");
+            assert!(stats.sibling_groups_revisited > 0, "{name}");
+        } else {
+            assert!(
+                cached
+                    .iter()
+                    .all(|finding| finding.lint != bone_lints::BACKEND_SIBLING_MISMATCH),
+                "{name} selection must not report the signature mismatch"
+            );
+            assert_eq!(stats.global_passes, 0, "{name}");
+            assert_eq!(stats.sibling_groups_revisited, 0, "{name}");
+        }
+    }
 }
 
 #[test]
