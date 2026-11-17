@@ -30,12 +30,16 @@ use std::os::unix::process::ExitStatusExt;
 /// body. A sim overrides it with `@sim_env("FRAME_COUNT", "<n>")`.
 const DEFAULT_FRAME_BUDGET: usize = 600;
 
+fn sim_env_value<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    env.iter().rfind(|(k, _)| k == key).map(|(_, v)| v.as_str())
+}
+
 /// The budget one entry runs on: its own `@sim_env("FRAME_COUNT", ...)`, or the
 /// default. Rejects a value that is not a positive integer rather than falling
 /// back -- a sim asking for a bound the runner silently replaces would be
 /// guarded by a number nobody wrote.
 fn frame_budget_for(sim_name: &str, env_pairs: &[(String, String)]) -> Result<usize> {
-    let Some((_, raw)) = env_pairs.iter().rev().find(|(k, _)| k == "FRAME_COUNT") else {
+    let Some(raw) = sim_env_value(env_pairs, "FRAME_COUNT") else {
         return Ok(DEFAULT_FRAME_BUDGET);
     };
     raw.parse::<usize>().ok().filter(|n| *n > 0).ok_or_else(|| {
@@ -48,11 +52,7 @@ fn frame_budget_for(sim_name: &str, env_pairs: &[(String, String)]) -> Result<us
 /// `sim_timeout_secs()`. Rejects a value that is not a positive integer,
 /// like the frame budget -- a silently replaced bound guards nothing.
 fn timeout_for(sim_name: &str, env_pairs: &[(String, String)]) -> Result<Duration> {
-    let Some((_, raw)) = env_pairs
-        .iter()
-        .rev()
-        .find(|(k, _)| k == "ROCK_SIM_TIMEOUT_SECS")
-    else {
+    let Some(raw) = sim_env_value(env_pairs, "ROCK_SIM_TIMEOUT_SECS") else {
         return Ok(Duration::from_secs(sim_timeout_secs()));
     };
     raw.parse::<u64>().ok().filter(|n| *n > 0).map(Duration::from_secs).ok_or_else(|| {
@@ -1894,12 +1894,7 @@ fn run_named_entry(
 }
 
 fn manual_sim(env: &[(String, String)]) -> Result<bool> {
-    match env
-        .iter()
-        .rev()
-        .find(|(key, _)| key == "SIM_MANUAL")
-        .map(|(_, value)| value.as_str())
-    {
+    match sim_env_value(env, "SIM_MANUAL") {
         None | Some("0") => Ok(false),
         Some("1") => Ok(true),
         Some(value) => Err(anyhow!("SIM_MANUAL must be 0 or 1, got `{value}`")),
@@ -3750,9 +3745,7 @@ const RUNNER_BASELINE_ENV: &[(&str, &str)] = &[
 /// is NOT rendering here: its process needs no image pixels and holds no
 /// rendered frame, which is what this oracle decides (the asset stub).
 fn entry_renders(env: &[(String, String)]) -> bool {
-    env.iter()
-        .rfind(|(k, _)| k == "SIM_DRAW")
-        .is_some_and(|(_, v)| matches!(v.as_str(), "on_demand" | "every_frame"))
+    sim_env_value(env, "SIM_DRAW").is_some_and(|v| matches!(v, "on_demand" | "every_frame"))
 }
 
 /// Whether this entry's process holds every image at the file's own size:
@@ -3768,14 +3761,13 @@ fn entry_renders(env: &[(String, String)]) -> bool {
 /// full assets holds them all the same (measured 2.0 GB against 2.4-4.3 GB
 /// for its rendering siblings).
 fn entry_full_assets(env: &[(String, String)], default_stub: &str) -> bool {
-    let last = |key: &str| env.iter().rfind(|(k, _)| k == key).map(|(_, v)| v.as_str());
-    let stub = last("STONE_ASSET_STUB").unwrap_or(default_stub);
+    let stub = sim_env_value(env, "STONE_ASSET_STUB").unwrap_or(default_stub);
     let cap_default = RUNNER_BASELINE_ENV
         .iter()
         .find(|(k, _)| *k == "STONE_IMAGE_MAX_SIDE")
         .map(|(_, v)| *v)
         .expect("the runner baseline declares the image cap");
-    let cap = last("STONE_IMAGE_MAX_SIDE").unwrap_or(cap_default);
+    let cap = sim_env_value(env, "STONE_IMAGE_MAX_SIDE").unwrap_or(cap_default);
     stub == "0" && cap == "0"
 }
 
