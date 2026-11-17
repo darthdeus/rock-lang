@@ -1,5 +1,5 @@
 use crate::common::{
-    body_of_synthetic, compile_and_run, emit_module, function_body, run_main, try_emit_module,
+    body_of_synthetic, emit_module, function_body, run_main, try_emit_module,
     try_emit_with_stdlib_module,
 };
 
@@ -47,16 +47,6 @@ fn main() {
     let _ = sum_pos(Player { pos: NV2 { x: 1.0, y: 2.0 } })
 }
 "#;
-
-#[test]
-fn binding_a_nobox_field_does_not_materialize_it() {
-    let lua = emit_module(NOBOX_FIELD_BIND);
-    let body = function_body(&lua, "sum_pos");
-    assert!(
-        !body.contains("NV2_ct("),
-        "binding a nobox field materialized a cdata value:\n{body}"
-    );
-}
 
 const NOBOX_INLINE_LUA_SINK: &str = r#"
 nobox value NV2 { x: float, y: float }
@@ -125,22 +115,6 @@ fn render(v: NV2) -> string {
 fn main() {}
 "#;
 
-#[test]
-fn nobox_whole_value_operators_do_not_materialize() {
-    let lua = emit_module(NOBOX_WHOLE_VALUE_OPERATORS);
-    for (name, case) in [
-        ("same", "equality"),
-        ("absent", "null check"),
-        ("render", "interpolation"),
-    ] {
-        let body = function_body(&lua, name);
-        assert!(
-            !body.contains("NV2_ct("),
-            "nobox {case} materialized in `{name}`; source:\n{NOBOX_WHOLE_VALUE_OPERATORS}\nemitted body:\n{body}"
-        );
-    }
-}
-
 const NOBOX_NULLABLE_CALL: &str = r#"
 nobox value NV2 { x: float, y: float }
 
@@ -161,19 +135,6 @@ fn main() {
 }
 "#;
 
-#[test]
-fn nullable_nobox_call_threads_presence_and_leaves() {
-    let lua = emit_module(NOBOX_NULLABLE_CALL);
-    for name in ["absent", "relay", "check"] {
-        let body = function_body(&lua, name);
-        assert!(
-            !body.contains("NV2_ct("),
-            "nullable nobox call materialized in `{name}`:\n{body}"
-        );
-    }
-    assert_eq!(run_main(&lua), "true");
-}
-
 const NOBOX_NULLABLE_LOCAL: &str = r#"
 nobox value NV2 { x: float, y: float }
 
@@ -190,17 +151,6 @@ fn main() {
     print(render(true))
 }
 "#;
-
-#[test]
-fn nullable_nobox_local_keeps_presence_in_leaf_cells() {
-    let lua = emit_module(NOBOX_NULLABLE_LOCAL);
-    let body = function_body(&lua, "render");
-    assert!(
-        !body.contains("NV2_ct("),
-        "nullable nobox local materialized:\n{body}"
-    );
-    assert_eq!(run_main(&lua), "nil\nNV2 { x: 1, y: 2 }");
-}
 
 const NOBOX_FIELD_WIDEN: &str = r#"
 nobox value NV2 { x: float, y: float }
@@ -233,19 +183,6 @@ fn main() {
     print(to_local(p))
 }
 "#;
-
-#[test]
-fn a_field_load_widens_to_nullable_without_materializing() {
-    let lua = emit_module(NOBOX_FIELD_WIDEN);
-    for name in ["from_field", "sum_field", "to_local"] {
-        let body = function_body(&lua, name);
-        assert!(
-            !body.contains("NV2_ct("),
-            "a field load widened to `T?` materialized in `{name}`:\n{body}"
-        );
-    }
-    assert_eq!(run_main(&lua), "false\n3\n1");
-}
 
 const NOBOX_NULLABLE_FIELD: &str = r#"
 nobox value NV2 { x: float, y: float }
@@ -371,25 +308,6 @@ fn main() {
     print(from_nested_field(d))
 }
 "#;
-
-/// The two-level twin of [`a_field_load_widens_to_nullable_without_materializing`]:
-/// a `nobox` child holding a `nobox` field OF ITS OWN. The rejection landed on
-/// the CTOR (`Deep { n: n }`) after `from_nested_field` inlines, and was never a
-/// hole in the widening -- the same nest rejected with no widening anywhere,
-/// because the splice walks asked how `Nest` stores `a` instead of what leaves
-/// it contributes.
-#[test]
-fn a_nested_nobox_child_widens_without_materializing() {
-    let lua = emit_module(NOBOX_NESTED_FIELD_WIDEN);
-    for name in ["mk_nest", "nested_absent", "from_nested_field"] {
-        let body = function_body(&lua, name);
-        assert!(
-            !body.contains("NV2_ct("),
-            "a two-level nobox nest materialized in `{name}`:\n{body}"
-        );
-    }
-    assert_eq!(run_main(&lua), "false");
-}
 
 const NOBOX_NESTED_PLAIN_OWNER_FIELD_READ: &str = r#"
 nobox value Id { value: int }
@@ -641,18 +559,6 @@ fn main() {
     let _ = use(NV2 { x: 1.0, y: 2.0 })
 }
 "#;
-
-#[test]
-fn direct_call_and_return_thread_nobox_leaves() {
-    let lua = emit_module(NOBOX_CALL_RETURN);
-    for name in ["bounce", "use"] {
-        let body = function_body(&lua, name);
-        assert!(
-            !body.contains("NV2_ct("),
-            "`{name}` materialized a nobox call or return:\n{body}"
-        );
-    }
-}
 
 const NOBOX_ANY_SINK: &str = r#"
 nobox value NV2 { x: float, y: float }
@@ -1127,21 +1033,6 @@ fn main() {
 }
 "#;
 
-/// `@scalar_abi` is how an `inline(lua)` FFI wrapper takes a nobox value without
-/// materializing it -- the alternative at every call site is `materialize(v)`.
-/// The whole imgui surface (the host UI bindings) rests on this working
-/// in BOTH directions, and on named args reaching the right leaf group.
-#[test]
-fn a_scalar_abi_ffi_wrapper_threads_nobox_leaves_both_ways() {
-    let lua = emit_module(NOBOX_SCALAR_ABI_FFI);
-    let body = function_body(&lua, "main");
-    assert!(
-        !body.contains("NV2_ct("),
-        "a scalar-ABI FFI boundary materialized a nobox value:\n{body}"
-    );
-    assert_eq!(run_main(&lua), "8 8");
-}
-
 const NOBOX_NESTED_FN_BY_VALUE: &str = r#"
 nobox value NV2 { x: float, y: float }
 
@@ -1288,28 +1179,6 @@ fn a_gpu_only_fn_cannot_bypass_the_cpu_restriction_as_a_value() {
     );
 }
 
-/// A `nobox` value crosses an INDIRECT call as leaves, both directions: a nested
-/// fn taken by value receives them, and a lambda returns them through the
-/// multi-return wire.
-///
-/// The ABI is read off the fn TYPE at both ends and nowhere else -- an indirect
-/// call site cannot see its callee, so definition and call site agree only by
-/// reading the same signature. `nested_fn_abi` used to drop a fn to the boxed
-/// ABI the moment it was taken by value, which is precisely when the two ends
-/// have to agree without seeing each other.
-#[test]
-fn a_nobox_value_crosses_a_fn_value_call_as_leaves() {
-    let lua = emit_module(NOBOX_NESTED_FN_BY_VALUE);
-    for name in ["apply", "outer", "arc"] {
-        let body = function_body(&lua, name);
-        assert!(
-            !body.contains("NV2_ct("),
-            "a fn-value boundary materialized in `{name}`:\n{body}"
-        );
-    }
-    assert_eq!(run_main(&lua), "3\n12");
-}
-
 const NOBOX_GLOBAL_PLACES: &str = r#"
 nobox value NV2 { x: float, y: float }
 nobox value Outer { a: NV2, n: float }
@@ -1408,23 +1277,6 @@ fn main() {
     print("{coalesce(NV2 { x: 1.0, y: 2.0 })} {coalesce(null)} {if_let(NV2 { x: 3.0, y: 4.0 })} {if_let(null)}")
 }
 "#;
-
-#[test]
-fn nullable_nobox_bindings_stay_on_leaves() {
-    let lua = emit_module(NOBOX_NULLABLE_BINDINGS);
-    for (name, case) in [("coalesce", "`??`"), ("if_let", "`if let`")] {
-        let body = function_body(&lua, name);
-        assert!(
-            !body.contains("NV2_ct("),
-            "{case} materialized a nobox cdata in `{name}`; source:\n{NOBOX_NULLABLE_BINDINGS}\nemitted body:\n{body}"
-        );
-    }
-    assert_eq!(
-        run_main(&lua),
-        "3 11 7 -1",
-        "nullable coalesce/if-let result; source:\n{NOBOX_NULLABLE_BINDINGS}"
-    );
-}
 
 const NOBOX_REJECTION_SITE: &str = r#"
 nobox value NV2 { x: float, y: float }
@@ -1570,19 +1422,6 @@ fn main() {
 }
 "#;
 
-#[test]
-fn nobox_phi_controls_stay_unboxed() {
-    let lua = emit_module(NOBOX_PHI_CONTROLS);
-    for name in ["pick_two", "pick_flat"] {
-        let body = function_body(&lua, name);
-        assert!(
-            !body.contains("NV2_ct("),
-            "`{name}` materialized its result:\n{body}"
-        );
-    }
-    assert_eq!(run_main(&lua), "3 4 7 8");
-}
-
 const NOBOX_PHI_AGGREGATES: &str = r#"
 nobox value NV2 { x: float, y: float }
 enum Choice { A, B, C }
@@ -1612,19 +1451,6 @@ fn main() {
     print("{p.x} {p.y} {a.x} {a.y} {b.x} {b.y}")
 }
 "#;
-
-#[test]
-fn nobox_phi_joins_keep_aggregate_reprs() {
-    let lua = emit_module(NOBOX_PHI_AGGREGATES);
-    for name in ["pick_nested", "pick_pair"] {
-        let body = function_body(&lua, name);
-        assert!(
-            !body.contains("NV2_ct("),
-            "`{name}` materialized a nobox value:\n{body}"
-        );
-    }
-    assert_eq!(run_main(&lua), "3 4 7 8 9 10");
-}
 
 const NOBOX_OPAQUE_TUPLE_RETURN: &str = r#"
 nobox value NV2 { x: float, y: float }
@@ -1672,17 +1498,9 @@ fn main() {
 }
 "#;
 
-#[test]
-fn a_scalar_abi_inline_lua_tuple_return_carries_leaves() {
-    let lua = emit_module(NOBOX_SCALAR_ABI_TUPLE_RETURN);
-    let body = function_body(&lua, "use_it");
-    assert!(
-        !body.contains("NV2_ct("),
-        "an opted-in inline(lua) tuple return still boxed:\n{body}"
-    );
-    assert_eq!(run_main(&lua), "3");
-}
-
+// A `for` over a Vec goes through the user-iterator protocol, whose `next`
+// returns `(bool, T)` -- so the loop element only stays unboxed if that tuple
+// return carries T's leaves.
 const NOBOX_LOOP_ELEMENT: &str = r#"
 nobox value NV2 { x: float, y: float }
 
@@ -1697,20 +1515,6 @@ fn main() {
     print("{last_x([NV2 { x: 1.0, y: 2.0 }, NV2 { x: 3.0, y: 4.0 }])} {last_x([])}")
 }
 "#;
-
-// A `for` over a Vec goes through the user-iterator protocol, whose `next`
-// returns `(bool, T)` -- so the loop element only stays unboxed if that tuple
-// return carries T's leaves.
-#[test]
-fn a_loop_element_binds_a_nobox_value_by_leaves() {
-    let lua = emit_module(NOBOX_LOOP_ELEMENT);
-    let body = function_body(&lua, "last_x");
-    assert!(
-        !body.contains("NV2_ct("),
-        "the iterator protocol boxed a nobox element:\n{body}"
-    );
-    assert_eq!(run_main(&lua), "3 -1");
-}
 
 // A GC-tier `value` (its array field keeps it off the cdata and leaf-table
 // tiers) holding `nobox` fields: the `ScenarioMap` shape.
@@ -2032,18 +1836,69 @@ fn an_enum_in_a_nobox_field_of_a_boxed_gc_tier_local_reads_by_leaf() {
 }
 
 #[test]
-fn a_user_cast_keeps_its_result_representation_after_a_column_read() {
-    let source = r#"
-nobox value Source { x: int, y: int }
-nobox value Result { total: int }
-
-fn cast(value: Source) -> Result { return Result { total: value.x + value.y } }
-fn consume(value: Result) -> int { return value.total }
-
-fn main() {
-    let values: [Source] = [Source { x: 7, y: 11 }]
-    print(consume(cast(values[0])))
-}
-"#;
-    assert_eq!(compile_and_run(source), "18");
+fn nobox_boundaries_keep_values_in_leaf_cells() {
+    for (source, functions, output) in [
+        (NOBOX_FIELD_BIND, &["sum_pos"] as &[_], None),
+        (
+            NOBOX_WHOLE_VALUE_OPERATORS,
+            &["same", "absent", "render"],
+            None,
+        ),
+        (
+            NOBOX_NULLABLE_CALL,
+            &["absent", "relay", "check"],
+            Some("true"),
+        ),
+        (
+            NOBOX_NULLABLE_LOCAL,
+            &["render"],
+            Some("nil\nNV2 { x: 1, y: 2 }"),
+        ),
+        (
+            NOBOX_FIELD_WIDEN,
+            &["from_field", "sum_field", "to_local"],
+            Some("false\n3\n1"),
+        ),
+        (
+            NOBOX_NESTED_FIELD_WIDEN,
+            &["mk_nest", "nested_absent", "from_nested_field"],
+            Some("false"),
+        ),
+        (NOBOX_CALL_RETURN, &["bounce", "use"], None),
+        (NOBOX_SCALAR_ABI_FFI, &["main"], Some("8 8")),
+        (
+            NOBOX_NESTED_FN_BY_VALUE,
+            &["apply", "outer", "arc"],
+            Some("3\n12"),
+        ),
+        (
+            NOBOX_NULLABLE_BINDINGS,
+            &["coalesce", "if_let"],
+            Some("3 11 7 -1"),
+        ),
+        (
+            NOBOX_PHI_CONTROLS,
+            &["pick_two", "pick_flat"],
+            Some("3 4 7 8"),
+        ),
+        (
+            NOBOX_PHI_AGGREGATES,
+            &["pick_nested", "pick_pair"],
+            Some("3 4 7 8 9 10"),
+        ),
+        (NOBOX_SCALAR_ABI_TUPLE_RETURN, &["use_it"], Some("3")),
+        (NOBOX_LOOP_ELEMENT, &["last_x"], Some("3 -1")),
+    ] {
+        let lua = emit_module(source);
+        for name in functions {
+            let body = function_body(&lua, name);
+            assert!(
+                !body.contains("NV2_ct("),
+                "`{name}` materialized a nobox value:\n{body}\nsource:\n{source}"
+            );
+        }
+        if let Some(expected) = output {
+            assert_eq!(run_main(&lua), expected, "source:\n{source}");
+        }
+    }
 }

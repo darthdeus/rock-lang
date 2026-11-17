@@ -24,3 +24,15 @@ fn stdlib_cast_still_threads_repr() {
     let got = xs.get(0)
     if got != null { print("{got.x}") }
 }
+
+nobox value Source { x: int, y: int }
+nobox value Result { total: int }
+
+fn cast(value: Source) -> Result { return Result { total: value.x + value.y } }
+fn consume(value: Result) -> int { return value.total }
+
+@test(output = "18")
+fn user_cast_after_a_column_read_keeps_its_result_representation() {
+    let values: [Source] = [Source { x: 7, y: 11 }]
+    print(consume(cast(values[0])))
+}
