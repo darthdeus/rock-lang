@@ -96,12 +96,6 @@ pub struct ShaderArtifactView {
 }
 
 impl ShaderArtifactView {
-    /// Every packaged instance: entries plus helpers. Builtins are excluded --
-    /// they have no GLSL definition to package.
-    pub fn packaged(&self) -> impl Iterator<Item = &Instance> {
-        self.roots.iter().chain(self.helpers.iter())
-    }
-
     pub fn render_rejections(&self, ws: &Workspace) -> Vec<String> {
         self.rejections
             .iter()
@@ -152,13 +146,7 @@ pub(crate) fn realize_shader_with_context_and_plans(
     scx: &skull_mir::lower::ScalarCtx,
     plans: Option<Arc<skull_mir::concrete::ConcretePlans>>,
 ) -> Option<ShaderArtifactView> {
-    // The typed axis value. A non-GLSL shader target packages no GLSL artifact
-    // -- and says so by being absent here rather than by defaulting to a
-    // profile it does not have.
-    let profile = match req.spec.shader? {
-        ShaderTargetSpec::Glsl(p) => p,
-        ShaderTargetSpec::SpirV | ShaderTargetSpec::Msl => return None,
-    };
+    let ShaderTargetSpec::Glsl(profile) = req.spec.shader?;
 
     let root_decls: BTreeSet<DeclKey> = req
         .programs

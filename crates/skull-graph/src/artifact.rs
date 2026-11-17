@@ -16,23 +16,18 @@ use crate::target_projection::{supports, CpuTargetSpec, TargetSpec};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Native mappings are supplied by matching inline bodies or by the backend.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct ArtifactMappings<'a> {
     /// The backend whose in-source body slot IS this artifact's mapping.
-    pub inline_backend: Option<FnBackend>,
+    pub inline_backend: FnBackend,
     /// This artifact's backend realization oracle, when it has one.
     pub supply: Option<&'a dyn BackendRealization>,
 }
 
 impl<'a> ArtifactMappings<'a> {
-    /// A target that maps nothing natively.
-    pub fn none() -> Self {
-        Self::default()
-    }
-
     pub fn for_backend(b: FnBackend) -> Self {
         Self {
-            inline_backend: Some(b),
+            inline_backend: b,
             supply: None,
         }
     }
@@ -53,12 +48,10 @@ impl<'a> ArtifactMappings<'a> {
     /// Does this artifact map `f` NATIVELY? A Rock body is not consulted --
     /// that is the portable rung, a different answer to a different question.
     pub fn maps(&self, ws: &Workspace, f: &Function) -> bool {
-        if let Some(b) = self.inline_backend {
-            if f.inline_body
-                .is_some_and(|(be, _)| instance_graph::serves(be, b))
-            {
-                return true;
-            }
+        if f.inline_body
+            .is_some_and(|(be, _)| instance_graph::serves(be, self.inline_backend))
+        {
+            return true;
         }
         self.supplies(ws, f)
     }
@@ -109,10 +102,7 @@ impl<'a> ArtifactRequest<'a> {
     /// the logical spelling.
     pub fn new(spec: TargetSpec, roots: &'a [FuncRef]) -> Self {
         Self {
-            mappings: match spec.execution.backend {
-                Some(b) => ArtifactMappings::for_backend(b),
-                None => ArtifactMappings::none(),
-            },
+            mappings: ArtifactMappings::for_backend(spec.cpu.backend),
             spec,
             roots,
             symbols: &SymbolPlanner::Logical,
@@ -130,8 +120,8 @@ impl<'a> ArtifactRequest<'a> {
         ws: &Workspace,
         g: &InstanceGraph,
         local: &'b std::cell::OnceCell<skull_mir::lower::ScalarCtx>,
-    ) -> Option<&'b skull_mir::lower::ScalarCtx> {
-        let backend = self.spec.execution.backend?;
+    ) -> &'b skull_mir::lower::ScalarCtx {
+        let backend = self.spec.cpu.backend;
         if let Some(context) = self.scalar_context {
             assert_eq!(
                 context.target(),
@@ -142,14 +132,14 @@ impl<'a> ArtifactRequest<'a> {
                 std::ptr::eq(context.interner(), g.interner().as_ref()),
                 "artifact scalar context must share the graph interner"
             );
-            return Some(context);
+            return context;
         }
         // Standalone graph consumers have no emission context to retain.
-        Some(local.get_or_init(|| {
+        local.get_or_init(|| {
             skull_mir::lower::ScalarCtx::new(ws)
                 .with_target(backend)
                 .sharing(g.interner().clone())
-        }))
+        })
     }
 
     pub fn with_mappings(mut self, m: ArtifactMappings<'a>) -> Self {
@@ -350,7 +340,6 @@ pub struct ArtifactView {
     pub missing_substitutions: BTreeSet<Instance>,
     /// The shared population this view was taken over -- the denominator.
     pub shared_instances: usize,
-    pub deferred: Vec<&'static str>,
     /// Required `@nomangle` definitions keyed by the exact declaration. Calls can
     /// still resolve via a sibling in `realization`.
     pub publications: BTreeMap<Instance, String>,
@@ -497,10 +486,7 @@ fn publication_candidate(
     (f.annotations
         .iter()
         .any(|a| a.name.name.as_str() == "nomangle")
-        && instance_graph::serves(
-            f.backend,
-            target.execution.backend.unwrap_or(FnBackend::Any),
-        ))
+        && instance_graph::serves(f.backend, target.backend))
     .then(|| {
         (
             Instance::base(declaration),
@@ -569,43 +555,8 @@ impl ArtifactView {
         }
     }
 
-    /// Apply graph deltas to this target without re-realizing the workspace.
-    /// The retained view owns the indexes needed to retract an old owner and
-    /// install its replacement; unchanged owners keep their immutable output.
-    pub fn update_local(
-        &mut self,
-        ws: &Workspace,
-        g: &InstanceGraph,
-        req: &ArtifactRequest<'_>,
-        revisited: &BTreeSet<Instance>,
-        added: &BTreeSet<Instance>,
-        removed: &BTreeSet<Instance>,
-    ) {
-        let old_roots = self.index.root_decls.clone();
-        let new_roots: BTreeSet<DeclKey> = req
-            .roots
-            .iter()
-            .map(|r| DeclKey(skull_mir::lower::canonical_variant(ws, *r)))
-            .collect();
-        let root_added: BTreeSet<DeclKey> = new_roots.difference(&old_roots).cloned().collect();
-        let root_removed: BTreeSet<DeclKey> = old_roots.difference(&new_roots).cloned().collect();
-
-        self.update_local_with_decl_delta(
-            ws,
-            g,
-            req,
-            revisited,
-            added,
-            removed,
-            &root_added,
-            &root_removed,
-        )
-    }
-
     /// Apply a graph delta and an explicit root delta. Production callers keep
-    /// the requested root set in their own cache and pass only changed roots;
-    /// [`Self::update_local`] remains the full-request oracle for callers that
-    /// do not retain that state.
+    /// the requested root set in their own cache and pass only changed roots.
     pub fn update_local_with_root_delta(
         &mut self,
         ws: &Workspace,
@@ -1027,7 +978,8 @@ impl ArtifactView {
             realized.kind,
             Realization::ForeignBody(BoundaryClass::InlineBody)
         ) {
-            if let Some(scx) = req.scalar_context(ws, g, scalar_context) {
+            {
+                let scx = req.scalar_context(ws, g, scalar_context);
                 if let Ok(signature) =
                     crate::concrete_body::concrete_signature_for_instance(ws, g, i)
                 {
@@ -1333,13 +1285,6 @@ impl ArtifactView {
         }
     }
 
-    /// Every retained instance -- Rock bodies AND boundaries. The positive side
-    /// of the partition, and what `symbols` is total over: a boundary still
-    /// needs a spelling, it just has no body to traverse.
-    pub fn retained(&self) -> impl Iterator<Item = &Instance> {
-        self.realization.keys()
-    }
-
     /// Whether this artifact retains `i`, however it is supplied.
     pub fn retains(&self, i: &Instance) -> bool {
         self.realization.contains_key(i)
@@ -1376,21 +1321,9 @@ fn realize_decl(
         return Ok(Realized { decl: rep, kind });
     }
 
-    let selected: Result<FuncRef, Unrealizable> = match target.execution.backend {
-        Some(b) => {
-            let name = ws.module(rep.module).functions[rep.func].name;
-            skull_mir::lower::backend_variant(ws, name, rep, b)
-                .map_err(|_| Unrealizable::ForeignToArtifact)
-        }
-        // A target without an execution backend can only serve portable declarations.
-        None => {
-            if ws.module(rep.module).functions[rep.func].backend != FnBackend::Any {
-                Err(Unrealizable::ForeignToArtifact)
-            } else {
-                Ok(rep)
-            }
-        }
-    };
+    let name = ws.module(rep.module).functions[rep.func].name;
+    let selected = skull_mir::lower::backend_variant(ws, name, rep, target.backend)
+        .map_err(|_| Unrealizable::ForeignToArtifact);
     selected.and_then(|decl| {
         let f = &ws.module(decl.module).functions[decl.func];
         realize_body(ws, decl, f, target, mappings).map(|kind| Realized { decl, kind })
@@ -1417,7 +1350,7 @@ fn realize_body(
         // `extern(js)` names the browser/runtime surface, not a host C symbol;
         // the JS artifact owns that boundary even though the web platform does
         // not expose the desktop foreign-symbol capability.
-        if f.backend == FnBackend::Js && target.execution.backend == Some(FnBackend::Js) {
+        if f.backend == FnBackend::Js && target.backend == FnBackend::Js {
             return Ok(Realization::ForeignBody(BoundaryClass::Extern));
         }
         return class_or_reject(target, BoundaryClass::Extern);
@@ -1742,7 +1675,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     let scalar_context = std::cell::OnceCell::new();
     let scx = req.scalar_context(ws, g, &scalar_context);
     let mut publisher_lanes: BTreeMap<Instance, usize> = BTreeMap::new();
-    if let Some(scx) = &scx {
+    {
         for (i, r) in &realization {
             if !matches!(r.kind, Realization::ForeignBody(BoundaryClass::InlineBody)) {
                 continue;
@@ -1845,10 +1778,6 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         publications,
         unrepresented_publications,
         publication_collisions,
-        // An execution-axis question too: every obligation it names is about
-        // memory, coroutines, widths or foreign symbols. A shader-derived
-        // deferral would be a separate list on a separate axis.
-        deferred: crate::target_projection::deferred_for(&target.execution),
         spec: req.spec,
         roots,
         declared_roots,
