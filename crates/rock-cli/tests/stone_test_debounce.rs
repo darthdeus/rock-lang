@@ -47,8 +47,7 @@ fn rapid_burst_coalesces() {
     // Deliver the complete burst before the watcher can observe any write.
     h.while_stopped(|| {
         for i in 0..10 {
-            write_file_atomic(
-                &h,
+            h.write_file(
                 "a.rock",
                 &format!("@nomangle fn final_value() -> int {{ {i} }}\n"),
             );
