@@ -3,7 +3,6 @@
 //! single-module workspace (`ws_of`). Each integration harness declares this
 //! module once; its test modules import helpers through `crate::common`.
 
-use crate::support::site_join::{self, SiteJoinCensus, Unjoined};
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::{self, InstanceGraph};
 use skull_mir::lower::ScalarCtx;
@@ -740,24 +739,6 @@ pub fn ws_and_graph(src: &str) -> (Workspace, InstanceGraph) {
     (ws, g)
 }
 
-/// The site-join census of `src`'s whole program.
-pub fn census_of(src: &str) -> SiteJoinCensus {
-    let ws = ws_with_stdlib(src);
-    let g = graph_of(&ws);
-    census_of_graph(&ws, &g)
-}
-
-/// The site-join census of `g`, a graph of `ws`.
-pub fn census_of_graph(ws: &Workspace, g: &InstanceGraph) -> SiteJoinCensus {
-    let bodies = skull::concrete_body::build(ws, g);
-    let scx = scalar_ctx(ws, g);
-    site_join::census(ws, &scx, g, &bodies)
-}
-
-pub fn unjoined(c: &SiteJoinCensus, cause: Unjoined) -> usize {
-    c.unjoined.get(&cause).copied().unwrap_or(0)
-}
-
 /// `name`'s base instance, lowered over `scx` but not yet prepared.
 pub fn lowered_body(
     ws: &Workspace,
@@ -793,16 +774,6 @@ pub fn prepare_body(
         &bodies.plans,
     )
     .expect("prepare");
-}
-
-/// `name`'s base instance, lowered and prepared as emission would.
-pub fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
-    let graph = graph_of(ws);
-    let bodies = skull::concrete_body::build(ws, &graph);
-    let scx = scalar_ctx(ws, &graph);
-    let mut mf = lowered_body(ws, &bodies, &scx, name);
-    prepare_body(ws, &scx, &bodies, name, &mut mf);
-    mf
 }
 
 /// Whether `body` calls `symbol`: the name followed by `(`, not as the tail

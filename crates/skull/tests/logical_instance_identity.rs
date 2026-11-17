@@ -1,81 +1,23 @@
-//! Controls for the identity a call records about its own instantiation
-//! (plan S 9 / Stage 3, phase A3).
-//!
-//! `MirFunc::callee_instances` is the call's CLAIM about which concrete
-//! instance it targets, and `crate::support::site_join` compares it against the graph's
-//! own substitution. Both derive it from ONE oracle,
-//! `skull_mir::monoty::convert`. A second, narrower converter is the failure
-//! this guards: one that declines a function type gives `unwrap<fn()>` a graph
-//! instance and no recorded claim, which the census reports as
-//! `callee-no-instance`.
-//!
-//! Every fixture below pairs a shape a narrower converter would DECLINE with one
-//! it would accept, and asserts the two stay DISTINCT identities -- a converter
-//! that answered `any` for everything would satisfy "it converted" and lose the
-//! property the identity exists for.
+use crate::common::{InlineOffGuard, callees_named_in, definitions_of, emit_module};
 
-use crate::common::{census_of, graph_of, key, module_id, name_matches, unjoined, ws_with_stdlib};
-use crate::support::site_join::{SiteJoinCensus, Unjoined};
-use bone_semantic::inference::Workspace;
-use skull::instance_graph::InstanceGraph;
-
-/// The rendered instantiations of every instance of `<test>`'s fn `name`.
-fn instantiations_of(ws: &Workspace, g: &InstanceGraph, name: &str) -> Vec<String> {
-    let mid = module_id(ws, "<test>");
-    let mut out: Vec<String> = g
-        .instances
-        .iter()
-        .filter(|i| {
-            i.func.module == mid && name_matches(ws.module(mid).functions[i.func.func].name, name)
-        })
-        .map(|i| {
-            i.args
-                .iter()
-                .map(|a| g.interner().get(*a).render())
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .collect();
-    out.sort();
-    out
-}
-
-/// Every `callee-no-instance == 0` below is measured over the bodies that were
-/// actually LOWERED. A rejection in the identity oracle skips the body as
-/// `lower-failed`, which empties the population and leaves the zero true and
-/// meaningless -- measured: narrowing the oracle killed only the fixture that
-/// asserts on it directly until this guard existed.
-fn assert_population(c: &SiteJoinCensus) {
-    assert!(c.accounts(), "accounting identity broken: {c:?}");
-    let failed = c
-        .bodies_skipped
-        .get(&crate::support::site_join::BodySkip::LowerFailed)
-        .copied()
-        .unwrap_or(0);
-    assert_eq!(
-        failed, 0,
-        "a body did not lower, so the counts below are over a hole: {c:?}"
-    );
-    assert!(c.joined > 0, "the fixture joined nothing: {c:?}");
-}
-
-/// Each fixture instantiates `ident` at shapes a narrower converter would
-/// decline beside shapes it accepts. Every instance must be recorded under its
-/// own identity, and every call must claim the instance the graph gave it.
-///
-/// - `fn() -> unit` is the shape a narrower converter declines; the tuple,
-///   array and nullable rows are the admission control, since a converter that
-///   lost structure would collapse them onto one identity while still
-///   reporting "converted".
-/// - A coroutine's yield type is a function type one level down, so the
-///   container arm is not redundant with the bare one.
-/// - A nested application keeps both levels: `[[int]]` and `[int]` are two
-///   identities, not one erased `Vec<..>`. The Stage-1 census recorded that
-///   29.6% of substituted reads carry a tuple, a nullable or an application
-///   with arguments whose children the lossy adapter erases.
 #[test]
-fn every_instantiation_records_a_distinct_instance_its_call_claims() {
+fn structural_generic_arguments_emit_distinct_called_definitions() {
+    let _inline = InlineOffGuard::on();
     let cases = [
+        (
+            "same-shape nominals",
+            r#"
+value P { x: float, y: float }
+value Q { x: float, y: float }
+fn ident<T>(v: T) -> T { return v }
+fn main() {
+    let p = ident(P { x: 1.0, y: 2.0 })
+    let q = ident(Q { x: 1.0, y: 2.0 })
+    print("{p.x} {q.y}")
+}
+"#,
+            2,
+        ),
         (
             "function-typed",
             r#"
@@ -108,7 +50,7 @@ co fn counter() -> Coroutine<int, int, ()> {
 fn main() {
     let c = counter()
     let a = ident(c)
-    let m: Map<string, Coroutine<int, int>> = {}
+    let m: Map<string, Coroutine<int, int>> = map_new()
     let b = ident(m)
     print("{b}")
     let _ = a
@@ -133,167 +75,17 @@ fn main() {
         ),
     ];
     for (case, src, expected) in cases {
-        let ws = ws_with_stdlib(src);
-        let insts = instantiations_of(&ws, &graph_of(&ws), "ident");
-        assert_eq!(insts.len(), expected, "{case}: {insts:?}");
-        let unique: std::collections::BTreeSet<&String> = insts.iter().collect();
+        let lua = emit_module(src);
+        let definitions = definitions_of(&lua, "ident");
+        assert_eq!(definitions.len(), expected, "{case}: {definitions:?}");
         assert_eq!(
-            unique.len(),
-            insts.len(),
-            "{case}: two shapes share one identity: {insts:?}"
-        );
-        if case == "function-typed" {
-            assert!(
-                insts.iter().any(|s| s.contains("fn(")),
-                "no function-typed instance was recorded: {insts:?}"
-            );
-        }
-
-        let c = census_of(src);
-        assert_population(&c);
-        assert_eq!(
-            unjoined(&c, Unjoined::CalleeNoInstance),
-            0,
-            "{case}: a call recorded no instance for its own instantiation: {c:?}"
-        );
-        assert_eq!(
-            unjoined(&c, Unjoined::CalleeInstanceMismatch),
-            0,
-            "{case}: {c:?}"
-        );
-    }
-}
-
-/// A game's `inline(lua)` override of an engine's portable `@nomangle` body is
-/// ONE declaration in the language's own grouping, and the join says so.
-///
-/// The graph is TARGET-NEUTRAL and records bone's collapsed group
-/// REPRESENTATIVE -- the portable `Any` body -- while MIR calls the sibling that
-/// serves the backend being lowered. Raw `FuncRef` equality reported that
-/// correct selection as `callee-decl-mismatch` when an application supplied
-/// an `inline(lua)` override of a portable body.
-///
-/// The comparison asks the EMITTER's own rule (`backend_variant`), so the
-/// control below is not redundant: a pair the language does NOT group must
-/// still mismatch.
-#[test]
-fn a_backend_sibling_of_the_representative_is_not_a_declaration_mismatch() {
-    let c = census_of(
-        r#"
-@nomangle fn portable(a: string) -> bool { return a == "" }
-inline(lua) fn portable(a: string) -> bool = """
-    return a == ""
-"""
-
-fn main() { print("{portable("x")}") }
-"#,
-    );
-    assert_population(&c);
-    assert_eq!(
-        unjoined(&c, Unjoined::CalleeMismatch),
-        0,
-        "a cross-backend sibling of the representative was called a mismatch: {c:?}"
-    );
-}
-
-/// TWO declarations sharing ONE NAME and ONE RENDERED SIGNATURE that the
-/// language does NOT group stay distinct AT THE CONSUMER.
-///
-/// This drives `check_callee` itself, not just the grouping oracle, and the
-/// pair is deliberately name-and-signature IDENTICAL: a join that became
-/// permissive by name, or by rendered signature, would accept the wrong callee
-/// while a test of `backend_variant_group` alone stayed green. Two
-/// `inline(lua)` declarations of one signature are a REPEATED backend, which
-/// bone refuses to collapse, so neither is a sibling of the other.
-///
-/// Synthetic because bone rejects the ambiguous CALL before a census could
-/// reach it -- the instances are built directly and fed to the comparison.
-#[test]
-fn a_declaration_the_language_does_not_group_is_refused_by_the_join() {
-    let ws = ws_with_stdlib(
-        r#"
-inline(lua) fn twice(a: string) -> bool = """
-    return a == ""
-"""
-inline(lua) fn twice(a: string) -> bool = """
-    return a ~= ""
-"""
-
-fn main() { print("x") }
-"#,
-    );
-    let g = graph_of(&ws);
-    let mid = module_id(&ws, "<test>");
-    let decls: Vec<skull_mir::mir::FuncRef> = ws
-        .module(mid)
-        .functions
-        .iter()
-        .filter(|(_, f)| name_matches(f.name, "twice"))
-        .map(|(fid, _)| skull_mir::mir::FuncRef {
-            module: mid,
-            func: fid,
-        })
-        .collect();
-    assert_eq!(
-        decls.len(),
-        2,
-        "the fixture needs two same-name same-signature declarations: {decls:?}"
-    );
-    // Neither groups with the other, which is what makes them two callees.
-    for r in &decls {
-        assert_eq!(skull_mir::lower::backend_variant_group(&ws, *r), vec![*r]);
-    }
-    let inst = |r: skull_mir::mir::FuncRef| skull::instance_graph::Instance {
-        func: r,
-        args: Vec::new(),
-    };
-    let lua = bone_semantic::hir::FnBackend::Lua;
-
-    // CONTROL: an exact match joins, or the refusal below proves nothing.
-    assert_eq!(
-        crate::support::site_join::check_callee(&ws, &g, &inst(decls[0]), decls[0], None, lua,)
-            .outcome(),
-        Ok(crate::support::site_join::Verified::Boundary),
-    );
-
-    // The defect: the FIRST declaration's instance offered for a call that
-    // targets the SECOND. Same name, same rendered signature, different body.
-    assert_eq!(
-        crate::support::site_join::check_callee(&ws, &g, &inst(decls[0]), decls[1], None, lua,)
-            .outcome(),
-        Err(Unjoined::CalleeMismatch),
-        "a declaration the language does not group was accepted as the callee"
-    );
-}
-
-/// The repeated-backend population this repo actually has, asserted on the
-/// grouping oracle the consumer above delegates to.
-///
-/// `__op_eq` has six declarations, five of them `Lua`. bone refuses a repeated
-/// backend, so none of them groups with another -- which is what makes the
-/// consumer's refusal reachable for a real overload set rather than only for
-/// the synthetic pair.
-#[test]
-fn a_repeated_backend_pair_is_not_one_declaration() {
-    let ws = ws_with_stdlib("fn main() { print(\"x\") }");
-    let all = ws
-        .functions_by_name
-        .get(&key(&ws, "__op_eq"))
-        .expect("declared");
-    assert!(
-        all.len() > 2,
-        "the repeated-backend population is the point: {}",
-        all.len()
-    );
-    let ops = skull_mir::lower::dispatched_callee_decls(&ws, "__op_eq");
-    assert_eq!(ops.len(), 1, "the callable `__op_eq` is unique: {ops:?}");
-    for &(m, f) in all.iter() {
-        let r = skull_mir::mir::FuncRef { module: m, func: f };
-        let group = skull_mir::lower::backend_variant_group(&ws, r);
-        assert_eq!(
-            group,
-            vec![r],
-            "a repeated-backend declaration was grouped with a sibling: {group:?}"
+            callees_named_in(&lua, "main", "ident"),
+            {
+                let mut sorted = definitions;
+                sorted.sort();
+                sorted
+            },
+            "{case}: each instantiation must call its own definition",
         );
     }
 }

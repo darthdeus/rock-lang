@@ -1,0 +1,60 @@
+fn seed() -> int { return 7 }
+fn early() -> int { return 1 }
+struct Inner { k: int = seed() }
+struct Outer { i: Inner = Inner {}, m: int }
+
+@test
+fn nested_defaults_and_enclosing_calls_keep_their_callees() {
+    let m = early()
+    let o = Outer { m: m }
+    assert_eq(o.i.k + o.m, 8)
+}
+
+fn empty<T>() -> T? { return null }
+struct Box<T> { value: T? = empty() }
+@test
+fn generic_defaults_keep_each_instantiation() {
+    let a: Box<int> = Box {}
+    let b: Box<string> = Box {}
+    assert(a.value == null)
+    assert(b.value == null)
+    a.value = 3
+    b.value = "ok"
+    assert_eq(a.value, 3)
+    assert_eq(b.value, "ok")
+}
+
+global calls: int = 0
+fn tick() -> int { calls += 1; return 1 }
+struct Plain { n: int = tick() }
+struct Counted<T> { n: int = tick() }
+
+@test
+fn defaults_run_once_and_written_fields_do_not_run_them() {
+    calls = 0
+    let p = Plain {}
+    let a: Counted<int> = Counted {}
+    let b: Counted<string> = Counted {}
+    let written: Counted<int> = Counted { n: 9 }
+    assert_eq(calls, 3)
+    assert_eq(p.n + a.n + b.n + written.n, 12)
+}
+
+struct Expressions {
+    a: int = if seed() > 2 { seed() } else { 0 },
+    b: [int] = [seed(), 1, 2],
+    c: (int, int) = (seed(), 1),
+    d: int = match seed() { 0 => 1, _ => 2 },
+    e: string = "x{seed()}y",
+}
+
+@test
+fn calls_under_default_expression_children_are_reached() {
+    let c = Expressions {}
+    let (first, second) = c.c
+    assert_eq(c.a, 7)
+    assert_eq(c.b[0], 7)
+    assert_eq(first + second, 8)
+    assert_eq(c.d, 2)
+    assert_eq(c.e, "x7y")
+}

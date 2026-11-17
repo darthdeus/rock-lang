@@ -1,0 +1,4 @@
+//=== TEST CASE: tail_less_block_cannot_supply_int_Generic ===
+//! expect: type mismatch: expected `int`, found `()`
+fn run(n: int) -> int { return n }
+fn main() { run({ let x = 1 }) }

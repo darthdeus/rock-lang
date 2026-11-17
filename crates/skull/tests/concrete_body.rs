@@ -991,6 +991,38 @@ fn main() { let a = plain(1) }
     );
 }
 
+#[test]
+fn missing_receiver_types_reject_emission() {
+    let mut ws = ws_with_stdlib(
+        "struct P { x: int }\n\
+         fn field(p: P) -> int { return p.x }\n\
+         fn index(xs: Map<int, int>) -> int { xs[0] = 2; return xs[0] ?? 0 }\n\
+         fn main() { let xs: Map<int, int> = map_new(); print(\"{field(P { x: 1 })} {index(xs)}\") }",
+    );
+    let mid = module_id(&ws, "<test>");
+    skull::mir_emit::emit_full(&ws, mid).expect("typed receivers emit");
+    for name in ["field", "index", "main"] {
+        let (module, owner) = body_id(&ws, name);
+        ws.inferences[module.raw() as usize]
+            .as_mut()
+            .unwrap()
+            .per_fn
+            .get_mut(&owner)
+            .unwrap()
+            .expr_types = Default::default();
+    }
+    ws.vec_effects.take();
+    for name in ["field", "index"] {
+        let f = crate::common::fn_ref(&ws, name);
+        assert!(ws.effects().of(f.module, f.func).is_all());
+    }
+    let error = match skull::mir_emit::emit_full(&ws, mid) {
+        Ok(_) => panic!("missing receiver types emitted successfully"),
+        Err(error) => error,
+    };
+    assert!(error.message.contains("type"), "{error:?}");
+}
+
 /// Perturbing only the CONSUMER's
 /// substitution -- the table builder's, never the walk's -- leaves a generic
 /// body's slots unbound. A symmetric perturbation could not distinguish this
