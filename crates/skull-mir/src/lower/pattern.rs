@@ -248,6 +248,18 @@ impl<'a> Builder<'a> {
 
                     let payload = self.scrut_payload(scrut, slot, cdata);
 
+                    // A payload that is a SPLATTING tuple is stored flat (the
+                    // wire in a table); a tuple sub-pattern must read it that
+                    // way, not per element.
+                    if matches!(self.body.pattern_arena[sp], Pattern::Tuple { .. })
+                        && let Some(pt) = self.variant_payload_ty(en, variant, i)
+                        && let Some(shape) = self.declared_splat_tuple_shape(pt)?
+                    {
+                        let rebuilt = self.rebuild_splat_box(shape, payload)?;
+                        self.match_pattern(&rebuilt, sp, fail, variants, false, sub_enum)?;
+                        continue;
+                    }
+
                     self.match_pattern(&Scrut::Val(payload), sp, fail, variants, false, sub_enum)?;
                 }
                 Ok(())
@@ -1026,6 +1038,52 @@ impl<'a> Builder<'a> {
         else {
             return Ok(None);
         };
+        self.rebuild_splat_box(shape, val_v).map(Some)
+    }
+
+    /// The rep shape of a DECLARED type when it is a splatting tuple -- the
+    /// form whose stored box is the wire in a table. Conservative: a type
+    /// mentioning an unbound generic answers `None` (its box keeps whatever
+    /// shape the instance stored, matched as a whole value).
+    fn declared_splat_tuple_shape(
+        &self,
+        ty: bone_core::prelude::TyId,
+    ) -> Result<Option<TupleRetShape>, CompilerError> {
+        let Ok(mono) = crate::monoty::convert_decl(self.ws, ty, &SpecSubst::default()) else {
+            return Ok(None);
+        };
+        if !matches!(mono, crate::monoty::MonoTy::Tuple(_)) {
+            return Ok(None);
+        }
+        Ok(self
+            .concrete_rep_tuple(&mono, RepUse::Return, true, false)?
+            .filter(TupleRetShape::splats))
+    }
+
+    /// The positional payload type of `(enum, variant, i)`, for the splat
+    /// check above; the same lookup `variant_payload_enum` does.
+    fn variant_payload_ty(
+        &self,
+        enum_name: Option<Ustr>,
+        variant: Ustr,
+        i: usize,
+    ) -> Option<bone_core::prelude::TyId> {
+        use bone_core::hir::VariantPayload;
+        let eid = self.ws.enums_by_name.get(&enum_name?)?;
+        let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
+        let v = ed.variants.iter().find(|v| v.name == variant)?;
+        match &v.payload {
+            VariantPayload::Tuple(tys) => tys.get(i).copied(),
+            _ => None,
+        }
+    }
+
+    /// Read the flat slots of `val_v` back into per-element scruts.
+    fn rebuild_splat_box(
+        &mut self,
+        shape: TupleRetShape,
+        val_v: Idx<Inst>,
+    ) -> Result<Scrut, CompilerError> {
         let shape = TupleRetShape {
             nullable: false,
             ..shape
@@ -1046,7 +1104,7 @@ impl<'a> Builder<'a> {
             .into_iter()
             .map(|p| self.scrut_from_repr(p))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Some(Scrut::Tuple(parts)))
+        Ok(Scrut::Tuple(parts))
     }
 
     /// Whether `pat` can match a NULL scrutinee: a hole, a plain binding, the

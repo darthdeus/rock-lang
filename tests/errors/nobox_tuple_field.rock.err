@@ -1,0 +1,51 @@
+//! Error: a struct field cannot hold a tuple with a nobox element yet
+//! Tags: nobox, tuples, structs
+
+// The stored box of a tuple carrying a `nobox` value is its flat wire, and
+// the struct-field read paths still assume per-element boxes -- a silent
+// wrong-layout read. Fail closed until field storage reads the one oracle.
+
+//=== TEST CASE: struct_field_Generic ===
+//! expect: tuple containing a `nobox` value
+nobox value NV { x: float, y: float }
+struct Carrier {
+    t: (NV, float),
+    n: int,
+}
+fn main() {
+    let c = Carrier { t: (NV { x: 1.0, y: 2.0 }, 10.0), n: 5 }
+    print(c.n)
+}
+
+//=== TEST CASE: nullable_struct_field_Generic ===
+//! expect: tuple containing a `nobox` value
+nobox value NV { x: float, y: float }
+struct Carrier {
+    t: ((int, NV), float)?,
+}
+fn main() {
+    let c = Carrier { t: null }
+    print(1)
+}
+
+//=== TEST CASE: record_variant_field_Generic ===
+//! expect: tuple containing a `nobox` value
+nobox value NV { x: float, y: float }
+enum Rec {
+    None,
+    Node { t: (NV, float), tag: int },
+}
+fn main() {
+    let r = Rec::Node { t: (NV { x: 1.0, y: 2.0 }, 10.0), tag: 7 }
+    print(1)
+}
+
+//=== TEST CASE: newtype_wrapped_Generic ===
+//! expect: tuple containing a `nobox` value
+nobox value NV { x: float, y: float }
+newtype Wrap((NV, float))
+fn main() {
+    let w = Wrap((NV { x: 1.0, y: 2.0 }, 10.0))
+    let Wrap((v, f)) = w
+    print(f as int)
+}

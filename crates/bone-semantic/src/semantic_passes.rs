@@ -526,6 +526,7 @@ pub fn lower_modules_seeded(
     crate::value_recursion::check_value_recursion(ws, &ids);
     ws.log_time("embed+value recursion", gap_timer);
     check_frame_ref_storage(ws, &ids);
+    check_nobox_tuple_fields(ws, &ids);
     crate::identity_storage::check_identity_storage(ws, &ids);
 
     Ok(ids)
@@ -694,6 +695,87 @@ fn check_frame_ref_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
         })
         .collect();
     for (mid, err) in per_module.into_iter().flatten() {
+        ws.module_mut(mid).interface_errors.push(err);
+    }
+}
+
+/// Whether `ty`, peeled of `?`, is (or nests) a tuple with a `nobox` element.
+/// Such a tuple's stored box is its flat wire; the struct-field read paths
+/// still assume per-element boxes, so storing one in a FIELD would read the
+/// wrong slots. Containers, returns, params and positional enum payloads all
+/// read the one oracle and are fine; fields fail closed here until they do.
+fn ty_has_nobox_tuple(ws: &Workspace, ty: TyId) -> bool {
+    fn nobox_nominal(ws: &Workspace, mid: ModuleId, idx: Idx<TypeExpr>) -> bool {
+        let arena = &ws.module(mid).ty_arena;
+        match arena[idx] {
+            TypeExpr::Nullable(inner) => nobox_nominal(ws, mid, inner),
+            TypeExpr::App {
+                ctor: TypeCtor::Nominal(n),
+                ..
+            } => ws
+                .struct_by_name
+                .get(&n)
+                .is_some_and(|sid| ws.module(sid.module).structs[sid.def].is_nobox),
+            _ => false,
+        }
+    }
+    fn tuple_with_nobox(ws: &Workspace, mid: ModuleId, idx: Idx<TypeExpr>) -> bool {
+        let arena = &ws.module(mid).ty_arena;
+        match arena[idx] {
+            TypeExpr::Nullable(inner) => tuple_with_nobox(ws, mid, inner),
+            TypeExpr::Tuple { elements } => elements
+                .into_iter()
+                .any(|e| nobox_nominal(ws, mid, e) || tuple_with_nobox(ws, mid, e)),
+            _ => false,
+        }
+    }
+    let TyId::Static(mid, idx) = ty else {
+        return false;
+    };
+    tuple_with_nobox(ws, mid, idx)
+}
+
+fn check_nobox_tuple_fields(ws: &mut Workspace, fresh: &[ModuleId]) {
+    let mut errs: Vec<(ModuleId, CompilerError)> = Vec::new();
+    for &mid in fresh {
+        let module = ws.module(mid);
+        let mut report = |span: Span, what: &str, name: Ustr| {
+            errs.push((
+                mid,
+                CompilerError::new_with_label(
+                    span,
+                    format!(
+                        "{what} `{name}` cannot hold a tuple containing a `nobox` value yet; \
+                         wrap the elements in a struct"
+                    ),
+                ),
+            ));
+        };
+        for (_, def) in module.structs.iter() {
+            for field in &def.fields {
+                if ty_has_nobox_tuple(ws, field.ty) {
+                    report(field.span, "field", field.name);
+                }
+            }
+        }
+        for (_, def) in module.enums.iter() {
+            for variant in &def.variants {
+                if let VariantPayload::Record(fields) = &variant.payload {
+                    for field in fields {
+                        if ty_has_nobox_tuple(ws, field.ty) {
+                            report(field.span, "enum field", field.name);
+                        }
+                    }
+                }
+            }
+        }
+        for (_, def) in module.newtypes.iter() {
+            if ty_has_nobox_tuple(ws, def.wrapped) {
+                report(def.span, "newtype", def.name);
+            }
+        }
+    }
+    for (mid, err) in errs {
         ws.module_mut(mid).interface_errors.push(err);
     }
 }
