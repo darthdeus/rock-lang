@@ -2174,7 +2174,16 @@ fn fold_inference(
 ) {
     match checked {
         Ok(Some((o, mut inf, mut errs))) => {
-            errs.extend(crate::consume::check(ws, &module.bodies[&o], &inf));
+            let function = match o {
+                BodyOwner::Function(id) => Some(&module.functions[id]),
+                _ => None,
+            };
+            errs.extend(crate::consume::check(
+                ws,
+                &module.bodies[&o],
+                &inf,
+                function,
+            ));
             inf.shrink_to_fit();
             result.per_fn.insert(o, inf);
 

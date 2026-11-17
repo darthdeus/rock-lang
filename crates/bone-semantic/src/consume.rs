@@ -1,15 +1,20 @@
 use bone_core::hir_walk::HirChild;
 
 use crate::hir::{
-    AsKind, BinOp, BindingInfo, Callee, Expr, Pattern, Statement, TypeCtor, TypeExpr,
+    AsKind, BinOp, BindingInfo, Callee, Expr, Function, Pattern, Statement, TypeCtor, TypeExpr,
 };
 use crate::prelude::*;
 
-pub(crate) fn check(ws: &Workspace, body: &Body, inference: &BodyInference) -> Vec<CompilerError> {
+pub(crate) fn check(
+    ws: &Workspace,
+    body: &Body,
+    inference: &BodyInference,
+    function: Option<&Function>,
+) -> Vec<CompilerError> {
     let tracked = inference
         .binding_types
         .iter()
-        .filter_map(|(binding, &ty)| is_consumable(ws, inference, ty).then_some(binding))
+        .filter_map(|(binding, &ty)| is_consumable(ws, inference, function, ty).then_some(binding))
         .collect::<FxHashSet<_>>();
     if tracked.is_empty() {
         return Vec::new();
@@ -41,7 +46,12 @@ pub(crate) fn check(ws: &Workspace, body: &Body, inference: &BodyInference) -> V
     walk.errors
 }
 
-fn is_consumable(ws: &Workspace, inference: &BodyInference, ty: TyId) -> bool {
+fn is_consumable(
+    ws: &Workspace,
+    inference: &BodyInference,
+    function: Option<&Function>,
+    ty: TyId,
+) -> bool {
     match ws.resolve_ty(Some(inference), ty) {
         Some((
             _,
@@ -54,8 +64,18 @@ fn is_consumable(ws: &Workspace, inference: &BodyInference, ty: TyId) -> bool {
             .get(&name)
             .is_some_and(|id| ws.module(id.module).structs[id.def].consume),
         Some((base, TypeExpr::Nullable(inner))) => {
-            is_consumable(ws, inference, base.with_idx(inner))
+            is_consumable(ws, inference, function, base.with_idx(inner))
         }
+        Some((_, TypeExpr::Generic(var, _))) => function.is_some_and(|f| {
+            f.generics
+                .iter()
+                .zip(&f.generic_bounds)
+                .any(|(&ty, bound)| {
+                    bound.is_some()
+                        && matches!(ws.resolve_ty(Some(inference), ty),
+                        Some((_, TypeExpr::Generic(generic, _))) if generic == var)
+                })
+        }),
         _ => false,
     }
 }

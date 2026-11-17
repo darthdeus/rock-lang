@@ -252,7 +252,9 @@ can also be used directly. A generic function can require this protocol with
 not satisfy the two-result `(bool, T)` bound.
 
 A struct marked `@consume` has single-use bindings. Standard-library cursor
-structs carry this annotation. A whole-value read consumes the binding: this
+structs carry this annotation. A generic parameter bounded by `Iterator<T>`
+follows the same rules; unbounded generic parameters remain reusable.
+A whole-value read consumes the binding: this
 includes a `for` head, passing an argument or method receiver, copying to another
 binding, storing in a field or Vec, returning, and capturing in a lambda. Any
 later read of that binding is an error, with the first consumption also labeled.

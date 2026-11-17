@@ -1,0 +1,32 @@
+@inline
+fn partial_then_drain<I: Iterator<int>>(it: I) -> int {
+    let (ok, first) = next(it)
+    assert(ok)
+    let (ok, second) = it.next()
+    assert(ok)
+    let total = first + second
+    for x in it { total += x }
+    return total
+}
+
+@inline
+fn drain_then_replace<I: Iterator<int>>(it: I, fresh: I) -> int {
+    let total = 0
+    for x in it { total += x }
+    it = fresh
+    for x in it { total += x }
+    return total
+}
+
+fn repeat_unbounded<T>(value: T) -> (T, T) {
+    return (value, value)
+}
+
+@test
+fn bounded_generic_next_and_reassignment() {
+    assert_eq(partial_then_drain([1, 2, 3].iter()), 6)
+    assert_eq(drain_then_replace([1, 2].iter(), [3, 4].iter()), 10)
+    let (a, b) = repeat_unbounded([5, 6])
+    assert_eq(a.sum(), 11)
+    assert_eq(b.sum(), 11)
+}
