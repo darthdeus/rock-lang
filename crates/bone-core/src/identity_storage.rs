@@ -512,43 +512,22 @@ pub(crate) const RUST_EMBEDDED_PACKAGES: &[&str] = &[
     "v1spec",
 ];
 
-/// Why a module's sites are counted by the census instead of reported.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum IdentityStorageExemption {
-    /// The compiler-owned stdlib, or a program outside any package.
-    Builtin,
-    /// Its package's manifest declares the whole package exempt.
-    Package,
-    /// Its package's manifest declares this module path prefix exempt.
-    Module(Ustr),
-}
-
-/// The one exemption predicate. Stdlib and unpackaged programs are exempt
-/// by the compiler (unpackaged ones unless the workspace enforces them);
-/// every package answers with its own manifest's declaration, stamped on
-/// the module. A module's path is the `mod` header of its file
-/// (`Workspace.fragment_scopes`); a file without one matches no prefix.
-pub fn identity_storage_exemption(
-    ws: &Workspace,
-    module: &Module,
-) -> Option<IdentityStorageExemption> {
+/// Whether a module's identity storage is exempt from diagnostics.
+pub fn identity_storage_exempt(ws: &Workspace, module: &Module) -> bool {
     match identity_storage_package(module) {
-        STDLIB_PACKAGE => return Some(IdentityStorageExemption::Builtin),
-        UNPACKAGED_PROGRAMS => {
-            return (!ws.identity_storage_enforce_unpackaged)
-                .then_some(IdentityStorageExemption::Builtin);
-        }
+        STDLIB_PACKAGE => return true,
+        UNPACKAGED_PROGRAMS => return !ws.identity_storage_enforce_unpackaged,
         _ => {}
     }
     match &module.identity_storage {
-        IdentityStorage::Enforced => None,
-        IdentityStorage::Exempt => Some(IdentityStorageExemption::Package),
+        IdentityStorage::Enforced => false,
+        IdentityStorage::Exempt => true,
         IdentityStorage::ExemptModules(prefixes) => {
-            let path = &ws.fragment_scopes.get(&module.file)?.module_path;
-            prefixes
-                .iter()
-                .find(|prefix| module_path_under(path, prefix))
-                .map(|prefix| IdentityStorageExemption::Module(Ustr::from(prefix)))
+            ws.fragment_scopes.get(&module.file).is_some_and(|scope| {
+                prefixes
+                    .iter()
+                    .any(|prefix| module_path_under(&scope.module_path, prefix))
+            })
         }
     }
 }

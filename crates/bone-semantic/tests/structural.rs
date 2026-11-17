@@ -647,7 +647,7 @@ fn identity_storage_exemption_follows_the_package_declaration() {
 // path.
 #[test]
 fn identity_storage_module_exemption_follows_the_module_path() {
-    use bone_semantic::identity_storage::{IdentityStorageExemption, identity_storage_exemption};
+    use bone_semantic::identity_storage::identity_storage_exempt;
 
     let files = [
         ("nav.rock", "pub mod nav;", "NavMob"),
@@ -706,19 +706,18 @@ fn identity_storage_module_exemption_follows_the_module_path() {
         "world".to_string(),
     ]));
     let exemption_of =
-        |file: &str| identity_storage_exemption(&ws, ws.module(module_by_file(&ws, file)));
-    let module = |name: &str| Some(IdentityStorageExemption::Module(ustr(name)));
-    assert_eq!(exemption_of("nav.rock"), module("nav"));
-    assert_eq!(exemption_of("nav/graph.rock"), module("nav"));
-    assert_eq!(exemption_of("world.rock"), module("world"));
+        |file: &str| identity_storage_exempt(&ws, ws.module(module_by_file(&ws, file)));
+    assert!(exemption_of("nav.rock"));
+    assert!(exemption_of("nav/graph.rock"));
+    assert!(exemption_of("world.rock"));
     // a prefix matches whole segments; a declaration covers its own package
     // only; the package root is not under `nav`
-    assert_eq!(exemption_of("navigation.rock"), None);
-    assert_eq!(exemption_of("other/world.rock"), None);
-    assert_eq!(exemption_of("lib.rock"), None);
+    assert!(!exemption_of("navigation.rock"));
+    assert!(!exemption_of("other/world.rock"));
+    assert!(!exemption_of("lib.rock"));
     // A file without a header belongs to the root, which matches no prefix.
     assert!(ws.fragment_scopes.contains_key(&ustr("unheaded.rock")));
-    assert_eq!(exemption_of("unheaded.rock"), None);
+    assert!(!exemption_of("unheaded.rock"));
     let errors = diagnostic_messages(&ws);
     assert!(
         !errors

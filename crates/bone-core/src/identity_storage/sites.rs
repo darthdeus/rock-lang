@@ -5,7 +5,7 @@
 use super::{
     IDENTITY_ERASURE_ANNOTATION, IDENTITY_STORAGE_ANNOTATION, IdentityPosition, IdentityStorageVia,
     IdentityStorageViolation, identity_body_violation, identity_root_storage_violation,
-    identity_storage_exemption, identity_storage_field_violation, identity_storage_violation,
+    identity_storage_exempt, identity_storage_field_violation, identity_storage_violation,
     is_identity_storage_edge, is_identity_storage_field,
 };
 use crate::escape::lambda_is_nonescaping;
@@ -48,11 +48,6 @@ pub struct IdentityStorageSite {
     pub identity: Ustr,
     pub span: Span,
     pub message: String,
-}
-
-/// Whether `module`'s sites are counted by the census instead of reported.
-pub fn identity_storage_exempt(ws: &Workspace, module: &Module) -> bool {
-    identity_storage_exemption(ws, module).is_some()
 }
 
 /// Every declaration position in `module` that stores an identity struct.
