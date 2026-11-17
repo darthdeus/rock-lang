@@ -1,4 +1,4 @@
-// Pass + Pipeline: one declarative fullscreen step.
+// Pass + Pipeline: one declarative rendering step.
 //
 //     run_pass(Pass {
 //         pipeline: BLUR_PIPELINE,
@@ -76,6 +76,10 @@ pub struct Pass {
     // payload its shader does not want, or omits one it does, is refused by the
     // writer rather than partially uploaded.
     array_payload: [PassArrayMember] = [],
+    // Borrowed until execution. Only vertices/count are consumed; the pass
+    // owns textures, uniforms and draw state. Positions/UVs are authored for
+    // the pipeline's vertex shader rather than inferred from the target.
+    geometry: SpriteMesh? = null,
     output: Canvas? = null,
     clear: Color? = null,
     // Confine the draw (and the clear) to this rectangle of `output`, in that
@@ -258,18 +262,22 @@ fn run_pass_body(p: Pass, shader_bound: bool, retain_shader: bool) {
     apply_pass_arrays(p.pipeline.shader_name, p.array_payload, __SITE__)
     bind_pass_inputs(p)
 
-    // The active-local UV transform, owned here rather than by each shader:
-    // TexCoord addresses input 0's ACTIVE rectangle in 0..1, so a fragment
-    // body reads it as "the live image" whatever the backing texture is. A
-    // pass sampling a SECOND input at a different active fraction takes an
-    // explicit relative uniform (the tonemap's bloom_uv is the only one).
-    if p.slot_inputs.len() > 0 {
-        let uv = sampled_texture_active_uv(p.slot_inputs[0].0)
-        set_fullscreen_uv_scale(uv.x, uv.y)
-        draw_fullscreen_quad()
-        set_fullscreen_uv_scale(1.0, 1.0)
+    if let mesh = p.geometry {
+        // Pass inputs already fill every declared texture slot. The mesh edge
+        // derives Vertex's layout but leaves the one draw audit to this owner.
+        let _ = __stone_draw_mesh_vertex(mesh.vbo, mesh.count, 0, 0, audit_inputs: false)
     } else {
-        draw_fullscreen_quad()
+        // Fullscreen TexCoord addresses input 0's active rectangle in 0..1.
+        // A second input at a different active fraction needs an explicit
+        // relative uniform; supplied geometry already states its own UVs.
+        if p.slot_inputs.len() > 0 {
+            let uv = sampled_texture_active_uv(p.slot_inputs[0].0)
+            set_fullscreen_uv_scale(uv.x, uv.y)
+            draw_fullscreen_quad()
+            set_fullscreen_uv_scale(1.0, 1.0)
+        } else {
+            draw_fullscreen_quad()
+        }
     }
     // AFTER the draw and before anything else can bind: the marks describe this
     // draw only.
@@ -284,6 +292,10 @@ fn run_pass_body(p: Pass, shader_bound: bool, retain_shader: bool) {
 // `run_pass_body` asks BEFORE clearing, so a rejected pass leaves its output
 // alone instead of wiping it and then declining to redraw.
 pub fn pass_input_rejection(p: Pass) -> string {
+    if let mesh = p.geometry {
+        if mesh.count <= 0 || mesh.count % 3 != 0 { return "geometry needs complete nonempty triangles" }
+        if mesh.count > mesh.vbo.len { return "geometry vertex count exceeds its buffer" }
+    }
     let sh = p.pipeline.shader_name
     let declared = shader_texture_slot_count(sh)
     let aliases_output = false

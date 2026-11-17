@@ -79,7 +79,7 @@ inline(lua) fn __copy_vertex_buffer_prefix(
 // is filled once and reused for the process' lifetime.
 pub @nomangle fn __stone_draw_mesh_vertex(
     buf: NativeBuffer<Vertex>, vertex_count: int, texture_kind: int, texture: int,
-    fan_ranges: NativeBuffer<int>? = null, fan_count: int = 0
+    fan_ranges: NativeBuffer<int>? = null, fan_count: int = 0, audit_inputs: bool = true
 ) -> int {
     static sizes = native_buffer_int(16)
     static attr_count = 0
@@ -93,7 +93,7 @@ pub @nomangle fn __stone_draw_mesh_vertex(
     let result = __stone_draw_mesh_vertex_raw(
         buf.ptr, vertex_count, vertex_stride(buf), sizes.ptr, attr_count,
         texture_kind, texture, fan_ranges, fan_count)
-    if result >= 0 {
+    if audit_inputs && result >= 0 {
         audit_implicit_texture_slot(result != 0)
     }
     return result

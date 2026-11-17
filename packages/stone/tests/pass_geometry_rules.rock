@@ -1,0 +1,69 @@
+use stone::*
+
+value PassGeometryVary { position: Vec4, TexCoord: Vec2, @flat Row: float }
+
+@shader(vertex)
+fn pass_geometry_vert(@attr a: Vertex) -> PassGeometryVary {
+    return PassGeometryVary { position: v(a.pos.to_f64(), 0.0, 1.0),
+        TexCoord: a.uv.to_f64(), Row: a.colorize }
+}
+
+@shader(fragment)
+fn pass_geometry_frag(vary: PassGeometryVary, @textures tex: MainTex,
+    @size(2) values: UniformArray<Vec4>) -> Vec4 {
+    let level = at(values, vary.Row as int).x + vary.TexCoord.x * 0.1 + vary.TexCoord.y * 0.2
+    return v(level, level, level, 1.0) * texture(tex.uTexture, vary.TexCoord)
+}
+
+@shader(fragment)
+fn pass_geometry_fullscreen(tc: Vec2) -> Vec4 { return v(tc.x, tc.y, 0.0, 1.0) }
+
+@test
+fn pass_geometry_keeps_authored_uv_rows_and_lighten_overlap() {
+    pass_rules_fixture(() => {
+        let target = pass_rules_flat_canvas(8, 0.0)
+        defer destroy_canvas(target)
+        let data = new_owned_image_data(1, 1)
+        image_data_set_pixel(data, 0, 0, 1.0, 1.0, 1.0, 1.0)
+        let white = new_owned_image_from_data(data, TextureFilter::Nearest)
+        release_owned_image_data(data)
+        defer release_owned_image(white)
+        let image = sampled_image(white)
+        let mesh = sprite_mesh_new(image, capacity: 2)
+        sprite_mesh_add_quad(mesh, v(-1.0, 0.5), v(0.5, 0.5), v(0.5, -1.0), v(-1.0, -1.0),
+            irect(0, 0, 1, 1), colorize: 0.0,
+            corner_u: v(0.0, 0.75, 0.75, 0.0), corner_v: v(0.75, 0.75, 0.0, 0.0))
+        sprite_mesh_add_quad(mesh, v(-0.5, 1.0), v(1.0, 1.0), v(1.0, -0.5), v(-0.5, -0.5),
+            irect(0, 0, 1, 1), colorize: 1.0,
+            corner_u: v(0.25, 1.0, 1.0, 0.25), corner_v: v(1.0, 1.0, 0.25, 0.25))
+        let values = native_buffer_float(8)
+        values[0] = 0.1
+        values[4] = 0.7
+        let pass = Pass {
+            pipeline: pipeline(rock_shader(pass_geometry_vert, pass_geometry_frag)),
+            slot_inputs: [(image, TextureFilter::Nearest)],
+            array_payload: [pass_array_vec4(values.ptr, 2)],
+            geometry: mesh, output: target, blend: BlendMode::Lighten,
+        }
+        let prior_canvas = CURRENT_CANVAS_HANDLE
+        let prior_blend = CURRENT_BLEND
+        assert(run_pass(pass))
+        assert_eq(CURRENT_CANVAS_HANDLE, prior_canvas)
+        assert_eq(CURRENT_BLEND, prior_blend)
+        let pixels = canvas_read_region(target, 0, 0, 8, 8)
+        assert(abs(canvas_pixel_channel(pixels, 0, 7, 0) - 0.11875) < 0.002,
+            "bottom-left UVs address the first parameter row")
+        assert(abs(canvas_pixel_channel(pixels, 7, 0, 0) - 0.98125) < 0.002,
+            "top-right UVs address the second parameter row")
+        assert(abs(canvas_pixel_channel(pixels, 3, 4, 0) - 0.83125) < 0.002,
+            "overlapping quads retain the larger value through Lighten")
+        assert_eq(canvas_pixel_channel(pixels, 0, 0, 0), 0.0,
+            "geometry covers only the authored rectangles")
+        mesh.count = mesh.vbo.len + 3
+        assert(pass_input_rejection(pass) != "", "invalid geometry refuses before binding or clearing")
+        mesh.count = 12
+        assert(run_pass(Pass { pipeline: pipeline(rock_shader(pass_geometry_fullscreen)), output: target }))
+        assert(abs(read_canvas_pixel(target, 0, 0) - 0.0625) < 0.002,
+            "a pass without geometry keeps fullscreen coordinates")
+    })
+}
