@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use bone_core::hir::{BindingInfo, Body, BodyOwner, Expr, TypeExpr};
+use bone_core::hir::{Body, BodyOwner, Expr, TypeExpr};
 use bone_core::prelude::TyId;
 use bone_core::workspace::{BodyInference, Workspace};
 use comfy_la_arena::{ArenaMap, Idx};
@@ -22,13 +22,6 @@ use crate::instance_graph::{
 };
 use crate::target_projection::CpuTargetSpec;
 
-/// An inferred expression or binding slot.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Slot {
-    Expr(Idx<Expr>),
-    Binding(Idx<BindingInfo>),
-}
-
 /// A callee whose body skull does not lower. The declaration preserves its
 /// contract identity when backend siblings share a symbol; the target and
 /// class make availability part of the identity rather than a later lookup.
@@ -41,13 +34,6 @@ pub struct BoundaryId {
 }
 
 type TypeConversionMemo = FxHashMap<TyId, Result<MonoTyId, MonoTyReason>>;
-
-/// A slot whose inferred type did not convert under the substitution.
-#[derive(Clone, Debug)]
-pub struct FreeType {
-    pub slot: Slot,
-    pub reason: MonoTyReason,
-}
 
 /// Lowering plans, failure indexes, and per-owner build statistics.
 #[derive(Clone, Default)]
@@ -237,31 +223,23 @@ impl ConcreteBodies {
         targets.extend(removed.iter().cloned());
         targets.retain(|instance| g.instances.contains(instance));
         let (results, _) = build_instance_delta(ws, g, &targets);
-        for result in results {
-            match result {
-                InstanceResult::Skipped(gap) => {
-                    self.instance_stats
-                        .insert(gap, ConcreteBuildStats::default());
-                }
-                InstanceResult::Built(built) => {
-                    let instance = built.instance.clone();
-                    let stats = built.stats;
-                    let candidate_refs = built.candidate_refs;
-                    if let Err(reason) = &built.plan {
-                        self.plan_failure_index
-                            .insert(instance.clone(), reason.clone());
-                    }
-                    if let Ok(plan) = built.plan {
-                        candidate_keys_added
-                            .extend(self.install_candidate_refs_owned(&instance, candidate_refs));
-                        Arc::get_mut(&mut self.plans)
-                            .expect("local concrete update lost its unique plan store")
-                            .insert(instance.clone(), Arc::new(plan));
-                    }
-
-                    self.instance_stats.insert(instance, stats);
-                }
+        for built in results.into_iter().flatten() {
+            let instance = built.instance.clone();
+            let stats = built.stats;
+            let candidate_refs = built.candidate_refs;
+            if let Err(reason) = &built.plan {
+                self.plan_failure_index
+                    .insert(instance.clone(), reason.clone());
             }
+            if let Ok(plan) = built.plan {
+                candidate_keys_added
+                    .extend(self.install_candidate_refs_owned(&instance, candidate_refs));
+                Arc::get_mut(&mut self.plans)
+                    .expect("local concrete update lost its unique plan store")
+                    .insert(instance.clone(), Arc::new(plan));
+            }
+
+            self.instance_stats.insert(instance, stats);
         }
         let mut always_subjects = Vec::new();
         for owner in revisited_owners {
@@ -403,25 +381,16 @@ impl ConcreteBodies {
     }
 }
 
-/// One body's tables under one substitution.
 #[derive(Default)]
-pub struct Converted {
-    pub expr_types: ArenaMap<Idx<Expr>, MonoTyId>,
-    pub binding_types: ArenaMap<Idx<BindingInfo>, MonoTyId>,
-    pub failures: Vec<FreeType>,
-    pub expr_examined: usize,
-    pub binding_examined: usize,
-    /// Expressions in the BODY's arena with no `expr_types` entry, and the same
-    /// for bindings. The tables can only be total over what inference recorded,
-    /// so the arena is the denominator that says whether that population is the
-    /// whole body.
-    pub untyped_exprs: Vec<Idx<Expr>>,
-    pub untyped_bindings: Vec<Idx<BindingInfo>>,
-    pub(crate) type_memo: TypeConversionMemo,
+struct Converted {
+    types: ConcreteTypeTables,
+    error: Option<MonoTyReason>,
+    expr_examined: usize,
+    binding_examined: usize,
+    type_memo: TypeConversionMemo,
 }
 
-/// Convert one body's inferred types under `subst`.
-pub fn convert_body(
+fn convert_body(
     arena: &MonoInterner,
     ws: &Workspace,
     inf: &BodyInference,
@@ -430,45 +399,47 @@ pub fn convert_body(
 ) -> Converted {
     let mut c = Converted::default();
     let mut memo: TypeConversionMemo = FxHashMap::default();
-    let mut convert_memo = |ty: TyId| {
+    let mut convert = |ty: TyId| {
         memo.entry(ty)
             .or_insert_with(|| arena.convert(ws, inf, ty, subst))
             .clone()
     };
-    for (e, ty) in inf.expr_types.iter() {
+    for (expr, ty) in inf.expr_types.iter() {
         c.expr_examined += 1;
-        match convert_memo(*ty) {
+        match convert(*ty) {
             Ok(id) => {
-                c.expr_types.insert(e, id);
+                c.types.expr_types.insert(expr, id);
             }
-            Err(reason) => c.failures.push(FreeType {
-                slot: Slot::Expr(e),
-                reason,
-            }),
+            Err(MonoTyReason::UnresolvedInfer(_)) => {
+                c.types.untyped_exprs.insert(expr);
+            }
+            Err(reason) => {
+                c.error.get_or_insert(reason);
+            }
         }
     }
-
-    for (e, _) in body.expr_arena.iter() {
-        if inf.expr_types.get(e).is_none() {
-            c.untyped_exprs.push(e);
+    for (expr, _) in body.expr_arena.iter() {
+        if inf.expr_types.get(expr).is_none() {
+            c.types.untyped_exprs.insert(expr);
         }
     }
-    for (b, _) in body.binding_arena.iter() {
-        if inf.binding_types.get(b).is_none() {
-            c.untyped_bindings.push(b);
+    for (binding, _) in body.binding_arena.iter() {
+        if inf.binding_types.get(binding).is_none() {
+            c.types.untyped_bindings.insert(binding);
         }
     }
-
-    for (b, ty) in inf.binding_types.iter() {
+    for (binding, ty) in inf.binding_types.iter() {
         c.binding_examined += 1;
-        match convert_memo(*ty) {
+        match convert(*ty) {
             Ok(id) => {
-                c.binding_types.insert(b, id);
+                c.types.binding_types.insert(binding, id);
             }
-            Err(reason) => c.failures.push(FreeType {
-                slot: Slot::Binding(b),
-                reason,
-            }),
+            Err(MonoTyReason::UnresolvedInfer(_)) => {
+                c.types.untyped_bindings.insert(binding);
+            }
+            Err(reason) => {
+                c.error.get_or_insert(reason);
+            }
         }
     }
     c.type_memo = memo;
@@ -544,10 +515,8 @@ fn concrete_tables(
     timing_enabled: bool,
 ) -> Result<ConcreteTypeTables, MonoTyReason> {
     let mut converted = convert_body(g.interner(), ws, inf, body, subst);
-    for failure in &converted.failures {
-        if !matches!(failure.reason, MonoTyReason::UnresolvedInfer(_)) {
-            return Err(failure.reason.clone());
-        }
+    if let Some(reason) = converted.error {
+        return Err(reason);
     }
     let ty_types = concrete_ty_types(
         ws,
@@ -560,29 +529,17 @@ fn concrete_tables(
         stats,
         timing_enabled,
     )?;
-    let struct_field_types =
-        concrete_struct_field_types(ws, g, body, &converted.expr_types, stats, timing_enabled)?;
-    let mut untyped_exprs: FxHashSet<_> = converted.untyped_exprs.iter().copied().collect();
-    let mut untyped_bindings: FxHashSet<_> = converted.untyped_bindings.iter().copied().collect();
-    for failure in &converted.failures {
-        match (&failure.slot, &failure.reason) {
-            (Slot::Expr(expr), MonoTyReason::UnresolvedInfer(_)) => {
-                untyped_exprs.insert(*expr);
-            }
-            (Slot::Binding(binding), MonoTyReason::UnresolvedInfer(_)) => {
-                untyped_bindings.insert(*binding);
-            }
-            _ => {}
-        }
-    }
-    Ok(ConcreteTypeTables {
-        expr_types: converted.expr_types,
-        binding_types: converted.binding_types,
-        untyped_exprs,
-        untyped_bindings,
-        ty_types,
-        struct_field_types,
-    })
+    let struct_field_types = concrete_struct_field_types(
+        ws,
+        g,
+        body,
+        &converted.types.expr_types,
+        stats,
+        timing_enabled,
+    )?;
+    converted.types.ty_types = ty_types;
+    converted.types.struct_field_types = struct_field_types;
+    Ok(converted.types)
 }
 
 fn concrete_struct_field_types(
@@ -759,24 +716,6 @@ struct BuiltInstance {
     elapsed: std::time::Duration,
     slot_tyids: usize,
     unique_slot_tyids: usize,
-}
-
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Keep successful results inline rather than adding a per-instance allocation"
-)]
-enum InstanceResult {
-    Skipped(Instance),
-    Built(BuiltInstance),
-}
-
-impl InstanceResult {
-    fn instance(&self) -> &Instance {
-        match self {
-            Self::Skipped(instance) => instance,
-            Self::Built(built) => &built.instance,
-        }
-    }
 }
 
 fn concrete_owner_order(left: &ConcreteOwner, right: &ConcreteOwner) -> std::cmp::Ordering {
@@ -1055,7 +994,7 @@ fn build_instance_delta(
     ws: &Workspace,
     g: &InstanceGraph,
     targets: &BTreeSet<Instance>,
-) -> (Vec<InstanceResult>, ConcreteBuildStats) {
+) -> (Vec<Option<BuiltInstance>>, ConcreteBuildStats) {
     if targets.is_empty() {
         return (Vec::new(), ConcreteBuildStats::default());
     }
@@ -1068,18 +1007,11 @@ fn build_instance_delta(
     let results = targets
         .iter()
         .cloned()
-        .map(
-            |instance| match prepare_instance(ws, g, instance, timing_enabled) {
-                PreparedInstanceResult::Skipped(gap) => InstanceResult::Skipped(gap),
-                PreparedInstanceResult::Ready(prepared) => InstanceResult::Built(produce_instance(
-                    g,
-                    prepared,
-                    &signatures,
-                    &published_domains,
-                    timing_enabled,
-                )),
-            },
-        )
+        .map(|instance| {
+            prepare_instance(ws, g, instance, timing_enabled).map(|prepared| {
+                produce_instance(g, prepared, &signatures, &published_domains, timing_enabled)
+            })
+        })
         .collect();
     (results, publication_stats)
 }
@@ -1166,39 +1098,19 @@ struct PreparedInstance {
     unique_slot_tyids: usize,
 }
 
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Keep successful results inline rather than adding a per-instance allocation"
-)]
-enum PreparedInstanceResult {
-    Skipped(Instance),
-    Ready(PreparedInstance),
-}
-
 fn prepare_instance(
     ws: &Workspace,
     g: &InstanceGraph,
     inst: Instance,
     timing_enabled: bool,
-) -> PreparedInstanceResult {
+) -> Option<PreparedInstance> {
     let t_inst = bone_core::prelude::Instant::now();
     if g.has_bound_tree_disagreement(&inst) {
-        return PreparedInstanceResult::Skipped(inst);
+        return None;
     }
-    let Some(subst) = g.substitution(&inst).cloned() else {
-        return PreparedInstanceResult::Skipped(inst);
-    };
-    let (inf, body) = match function_body(ws, inst.func) {
-        FunctionBody::Ready { inf, body } => (inf, body),
-        FunctionBody::NoInference => {
-            return PreparedInstanceResult::Skipped(inst);
-        }
-        FunctionBody::NoBody => {
-            return PreparedInstanceResult::Skipped(inst);
-        }
-        FunctionBody::StaleInference => {
-            return PreparedInstanceResult::Skipped(inst);
-        }
+    let subst = g.substitution(&inst).cloned()?;
+    let FunctionBody::Ready { inf, body } = function_body(ws, inst.func) else {
+        return None;
     };
 
     let mut stats = ConcreteBuildStats::default();
@@ -1224,26 +1136,7 @@ fn prepare_instance(
     let convert_time = started.elapsed();
     stats.source_expr_slots = converted.expr_examined;
     stats.source_binding_slots = converted.binding_examined;
-    let untyped = converted.untyped_exprs;
-    let failures = converted.failures;
-    let mut types = ConcreteTypeTables {
-        expr_types: converted.expr_types,
-        binding_types: converted.binding_types,
-        untyped_exprs: untyped.iter().copied().collect(),
-        untyped_bindings: converted.untyped_bindings.iter().copied().collect(),
-        ..Default::default()
-    };
-    for failure in failures {
-        match (failure.slot, failure.reason) {
-            (Slot::Expr(expr), MonoTyReason::UnresolvedInfer(_)) => {
-                types.untyped_exprs.insert(expr);
-            }
-            (Slot::Binding(binding), MonoTyReason::UnresolvedInfer(_)) => {
-                types.untyped_bindings.insert(binding);
-            }
-            _ => {}
-        }
-    }
+    let mut types = converted.types;
     let mut memo = converted.type_memo;
     let f = &ws.module(inst.func.module).functions[inst.func.func];
     let declared_types = f
@@ -1279,7 +1172,7 @@ fn prepare_instance(
         },
         Err(reason) => Some(reason),
     };
-    PreparedInstanceResult::Ready(PreparedInstance {
+    Some(PreparedInstance {
         instance: inst,
         types,
         type_error,
@@ -1703,20 +1596,13 @@ where
 /// suggests.
 fn produce_instances(
     g: &InstanceGraph,
-    prepared: Vec<PreparedInstanceResult>,
+    prepared: Vec<Option<PreparedInstance>>,
     signatures: &PublishedSignatures,
     domains: &PublishedDomains,
     timing_enabled: bool,
-) -> Vec<InstanceResult> {
-    concrete_map(prepared, |prepared| match prepared {
-        PreparedInstanceResult::Skipped(gap) => InstanceResult::Skipped(gap),
-        PreparedInstanceResult::Ready(instance) => InstanceResult::Built(produce_instance(
-            g,
-            instance,
-            signatures,
-            domains,
-            timing_enabled,
-        )),
+) -> Vec<Option<BuiltInstance>> {
+    concrete_map(prepared, |prepared| {
+        prepared.map(|instance| produce_instance(g, instance, signatures, domains, timing_enabled))
     })
 }
 
@@ -1790,7 +1676,11 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
         timing_enabled,
     );
     let ordinary_parallel_time = t_ordinary_parallel.elapsed();
-    results.sort_by(|left, right| left.instance().cmp(right.instance()));
+    results.sort_by(|left, right| {
+        left.as_ref()
+            .map(|b| &b.instance)
+            .cmp(&right.as_ref().map(|b| &b.instance))
+    });
 
     let t_ordinary_merge = bone_core::prelude::Instant::now();
     let mut out = ConcreteBodies {
@@ -1801,15 +1691,13 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
     let mut candidate_ref_rows = 0usize;
     let mut owner_candidates: FxHashMap<Instance, FxHashSet<Instance>> = FxHashMap::default();
     owner_candidates.reserve(results.len());
-    for result in &mut results {
-        if let InstanceResult::Built(built) = result {
-            candidate_ref_rows += built.candidate_refs.len();
-            if built.plan.is_ok() {
-                owner_candidates.insert(
-                    built.instance.clone(),
-                    std::mem::take(&mut built.candidate_refs),
-                );
-            }
+    for built in results.iter_mut().flatten() {
+        candidate_ref_rows += built.candidate_refs.len();
+        if built.plan.is_ok() {
+            owner_candidates.insert(
+                built.instance.clone(),
+                std::mem::take(&mut built.candidate_refs),
+            );
         }
     }
     let collect_candidate_keys = || {
@@ -1840,42 +1728,34 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
     // collected beside the rest of the merge.
     let ((candidate_keys, candidate_install_time), ()) =
         bone_core::prelude::join_in_place(collect_candidate_keys, || {
-            for result in results {
-                match result {
-                    InstanceResult::Skipped(gap) => {
-                        out.instance_stats
-                            .insert(gap, ConcreteBuildStats::default());
+            for built in results.into_iter().flatten() {
+                let instance = built.instance.clone();
+                t_convert += built.convert_time;
+                t_callee += built.callee_time;
+                t_plan += built.plan_time;
+                per_inst.push((instance.clone(), built.elapsed));
+                slot_tyids += built.slot_tyids;
+                unique_slot_tyids += built.unique_slot_tyids;
+                let stats = built.stats;
+                let started = timing_enabled.then(bone_core::prelude::Instant::now);
+                if let Err(reason) = &built.plan {
+                    out.plan_failure_index
+                        .insert(instance.clone(), reason.clone());
+                }
+                if let Some(started) = started {
+                    failure_index_time += started.elapsed();
+                }
+                if let Ok(plan) = built.plan {
+                    let started = timing_enabled.then(bone_core::prelude::Instant::now);
+                    plan_rows.push((instance.clone(), Arc::new(plan)));
+                    if let Some(started) = started {
+                        plan_insert_time += started.elapsed();
                     }
-                    InstanceResult::Built(built) => {
-                        let instance = built.instance.clone();
-                        t_convert += built.convert_time;
-                        t_callee += built.callee_time;
-                        t_plan += built.plan_time;
-                        per_inst.push((instance.clone(), built.elapsed));
-                        slot_tyids += built.slot_tyids;
-                        unique_slot_tyids += built.unique_slot_tyids;
-                        let stats = built.stats;
-                        let started = timing_enabled.then(bone_core::prelude::Instant::now);
-                        if let Err(reason) = &built.plan {
-                            out.plan_failure_index
-                                .insert(instance.clone(), reason.clone());
-                        }
-                        if let Some(started) = started {
-                            failure_index_time += started.elapsed();
-                        }
-                        if let Ok(plan) = built.plan {
-                            let started = timing_enabled.then(bone_core::prelude::Instant::now);
-                            plan_rows.push((instance.clone(), Arc::new(plan)));
-                            if let Some(started) = started {
-                                plan_insert_time += started.elapsed();
-                            }
-                        }
-                        let started = timing_enabled.then(bone_core::prelude::Instant::now);
-                        out.instance_stats.insert(instance, stats);
-                        if let Some(started) = started {
-                            owner_stats_insert_time += started.elapsed();
-                        }
-                    }
+                }
+                let started = timing_enabled.then(bone_core::prelude::Instant::now);
+                out.instance_stats.insert(instance, stats);
+                if let Some(started) = started {
+                    owner_stats_insert_time += started.elapsed();
                 }
             }
         });
