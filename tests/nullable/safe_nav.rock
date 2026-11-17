@@ -5,7 +5,11 @@ struct Inner { value: int }
 struct Outer { inner: Inner?, name: string }
 struct Mob { name: string, health: int }
 
-// -- Basic safe navigation --
+fn boss_mobs() -> Arena<Mob> {
+    let mobs: Arena<Mob> = arena_new()
+    mobs.insert(Mob { name: "Boss", health: 500 })
+    return mobs
+}
 
 @test(output = "hello\ntrue")
 fn safenav_field_access() {
@@ -15,8 +19,6 @@ fn safenav_field_access() {
     let f2: Outer? = null
     print(f2?.name == null)
 }
-
-// -- Safe navigation with null coalescing --
 
 @test(output = "default\nhello")
 fn safenav_coalesce() {
@@ -32,8 +34,6 @@ fn safenav_coalesce_nested() {
     print(o?.inner?.value ?? 0)
 }
 
-// -- ?.let syntax --
-
 @test(output = "10\ntrue")
 fn safenav_let() {
     let x: int? = 5
@@ -44,64 +44,32 @@ fn safenav_let() {
     print(y?.let { y * 2 } == null)
 }
 
-// -- ?.0 / ?.1 on nullable tuples --
-
-@test(output = "Boss\ntrue")
-fn safenav_tuple_dot1() {
-    let mobs: Arena<Mob> = arena_new()
-    mobs.insert(Mob { name: "Boss", health: 500 })
-
+@test
+fn safenav_arena_tuple_projections_and_chains() {
+    let mobs = boss_mobs()
     let mob = mobs.pairs().find(_.1.name == "Boss")?.1
-    print(mob.unwrap().name)
-
+    assert_eq(mob.unwrap().name, "Boss")
     let missing = mobs.pairs().find(_.1.name == "Nobody")?.1
-    print(missing == null)
-}
-
-@test(output = "true\ntrue")
-fn safenav_tuple_dot0() {
-    let mobs: Arena<Mob> = arena_new()
-    mobs.insert(Mob { name: "Boss", health: 500 })
-
+    assert(missing == null)
     let entity = mobs.pairs().find(_.1.name == "Boss")?.0
-    print(entity != null)
-
-    let missing = mobs.pairs().find(_.1.name == "Nobody")?.0
-    print(missing == null)
-}
-
-// -- Full chain: find -> ?.1 -> ?.field -> ?? default --
-
-@test(output = "Boss\ndefault")
-fn safenav_full_chain() {
-    let mobs: Arena<Mob> = arena_new()
-    mobs.insert(Mob { name: "Boss", health: 500 })
-
+    assert(entity != null)
+    let missing_entity = mobs.pairs().find(_.1.name == "Nobody")?.0
+    assert(missing_entity == null)
     let name = mobs.pairs().find(_.1.name == "Boss")?.1?.name ?? "default"
-    print(name)
-
+    assert_eq(name, "Boss")
     let name2 = mobs.pairs().find(_.1.name == "Nobody")?.1?.name ?? "default"
-    print(name2)
-}
-
-@test(output = "500\n0")
-fn safenav_full_chain_int() {
-    let mobs: Arena<Mob> = arena_new()
-    mobs.insert(Mob { name: "Boss", health: 500 })
-
+    assert_eq(name2, "default")
     let hp = mobs.pairs().find(_.1.name == "Boss")?.1?.health ?? 0
-    print(hp)
-
+    assert_eq(hp, 500)
     let hp2 = mobs.pairs().find(_.1.name == "Nobody")?.1?.health ?? 0
-    print(hp2)
+    assert_eq(hp2, 0)
+    assert(mobs.pairs().find(_.1.health > 0) != null)
+    assert(!(mobs.pairs().find(_.1.health > 1000) != null))
 }
-
-// -- Practical game patterns --
 
 @test(output = "removed Boss\n0")
 fn safenav_find_and_remove() {
-    let mobs: Arena<Mob> = arena_new()
-    mobs.insert(Mob { name: "Boss", health: 500 })
+    let mobs = boss_mobs()
 
     let boss_entity = mobs.pairs().find(_.1.name == "Boss")?.0
     if boss_entity != null {
@@ -111,17 +79,6 @@ fn safenav_find_and_remove() {
     }
     print(mobs.len())
 }
-
-@test(output = "true\nfalse")
-fn safenav_any_alive() {
-    let mobs: Arena<Mob> = arena_new()
-    mobs.insert(Mob { name: "Boss", health: 500 })
-
-    print(mobs.pairs().find(_.1.health > 0) != null)
-    print(mobs.pairs().find(_.1.health > 1000) != null)
-}
-
-// -- ?.method() UFCS safe navigation --
 
 fn damage(mob: Mob, amount: int) -> int {
     return mob.health - amount
@@ -133,22 +90,16 @@ fn get_name(mob: Mob) -> string {
 
 fn double(x: int) -> int { return x * 2 }
 
-@test(output = "90\ntrue")
-fn safenav_method_struct() {
+@test
+fn safenav_struct_methods_and_coalesce() {
     let mob: Mob? = Mob { name: "Goblin", health: 100 }
-    print(mob?.damage(10))
-
     let mob2: Mob? = null
-    print(mob2?.damage(10) == null)
-}
-
-@test(output = "Goblin\ntrue")
-fn safenav_method_return_type() {
-    let mob: Mob? = Mob { name: "Goblin", health: 100 }
-    print(mob?.get_name())
-
-    let mob2: Mob? = null
-    print(mob2?.get_name() == null)
+    assert_eq(mob?.damage(10), 90)
+    assert(mob2?.damage(10) == null)
+    assert_eq(mob?.get_name(), "Goblin")
+    assert(mob2?.get_name() == null)
+    assert_eq(mob?.damage(10) ?? 0, 90)
+    assert_eq(mob2?.damage(10) ?? 0, 0)
 }
 
 @test(output = "10\ntrue")
@@ -160,18 +111,7 @@ fn safenav_method_primitive() {
     print(y?.double() == null)
 }
 
-@test(output = "90\n0")
-fn safenav_method_with_coalesce() {
-    let mob: Mob? = Mob { name: "Goblin", health: 100 }
-    print(mob?.damage(10) ?? 0)
-
-    let mob2: Mob? = null
-    print(mob2?.damage(10) ?? 0)
-}
-
 struct Chain { value: int = 0, next: Chain? = null }
-
-// -- Safe navigation basics --
 
 @test(output = "42\ntrue\ntrue")
 fn safenav_chain_deep() {
@@ -185,8 +125,6 @@ fn safenav_chain_deep() {
     print(o3?.inner?.value == null)
 }
 
-// -- Arithmetic with safe nav --
-
 @test(output = "15\n5")
 fn safenav_arithmetic() {
     let o: Outer? = Outer { inner: Inner { value: 10 }, name: "x" }
@@ -196,16 +134,12 @@ fn safenav_arithmetic() {
     print((o2?.inner?.value ?? 0) + 5)
 }
 
-// -- ?.let --
-
 @test(output = "50")
 fn safenav_let_with_coalesce() {
     let x: int? = null
     let result = x?.let { x * 10 } ?? 50
     print(result)
 }
-
-// -- Linked list with safe nav --
 
 @test(output = "42\n0")
 fn safenav_linked_list() {
@@ -231,8 +165,6 @@ fn safenav_linked_list_deep() {
     print(c2.next?.next?.value ?? 0)
 }
 
-// -- Nullable struct fields --
-
 @test(output = "42\nnone")
 fn nullable_struct_field() {
     let o1 = Outer { inner: Inner { value: 42 }, name: "has" }
@@ -244,8 +176,6 @@ fn nullable_struct_field() {
         print("none")
     }
 }
-
-// -- if-let with safe nav --
 
 @test(output = "found: 42\nnot found")
 fn safenav_if_let() {
@@ -261,8 +191,6 @@ fn safenav_if_let() {
         print("not found")
     }
 }
-
-// -- Arena game patterns --
 
 @test(output = "2\n0")
 fn safenav_arena_filter_remove() {
@@ -285,8 +213,7 @@ fn safenav_arena_filter_remove() {
 
 @test(output = "Boss hp: 500\nNo boss")
 fn safenav_arena_find_pattern() {
-    let mobs: Arena<Mob> = arena_new()
-    mobs.insert(Mob { name: "Boss", health: 500 })
+    let mobs = boss_mobs()
 
     let boss_hp = mobs.pairs().find(_.1.name == "Boss")?.1?.health
     if boss_hp != null {
@@ -300,8 +227,6 @@ fn safenav_arena_find_pattern() {
         print("No boss")
     }
 }
-
-// -- Safe navigation through function parameters --
 
 struct SmallInner { v: int }
 struct SmallOuter { inner: SmallInner? }

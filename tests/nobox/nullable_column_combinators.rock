@@ -19,29 +19,27 @@ fn py(v: Vec2?) -> float {
 
 fn present(v: Vec2?) -> bool { return v != null }
 
-// --- terminals that never touch an element ---
+// --- shared terminal results ---
 
-@test(returns = 3)
-fn count_over_a_nullable_column() -> int {
+@test
+fn nullable_column_terminal_results() {
     let a: [Vec2?] = [Vec2 { x: 1.0, y: 1.0 }, null, Vec2 { x: 2.0, y: 2.0 }]
-    return a.count()
-}
+    assert_eq(a.count(), 3)
+    assert_eq(a.skip(1).count(), 2)
 
-@test(returns = 2)
-fn skip_over_a_nullable_column() -> int {
-    let a: [Vec2?] = [Vec2 { x: 1.0, y: 1.0 }, null, Vec2 { x: 2.0, y: 2.0 }]
-    return a.skip(1).count()
-}
+    // A hit on the absent row and a miss are both `null` at `T = Vec2?`;
+    // count the absent rows to keep that case observable.
+    assert_eq(a.filter(v => v == null).count(), 1)
+    let some_absent = a.any(v => v == null)
+    let all_present = a.all(present)
+    let presence_result = if some_absent && !all_present { 1 } else { 0 }
+    assert_eq(presence_result, 1)
 
-// --- terminals that CONSUME the element, absent rows included ---
+    assert_eq(a.map(px).sum_f() as int, 3)
+    assert_eq(a.map(px).reduce(0.0, (acc, v) => acc + v) as int, 3)
 
-@test(returns = 1)
-fn find_reaches_the_absent_row() -> int {
-    let a: [Vec2?] = [Vec2 { x: 1.0, y: 1.0 }, null, Vec2 { x: 2.0, y: 2.0 }]
-    // `find` returns `T?` at `T = Vec2?`, so a hit on the ABSENT row and a miss
-    // are the same value -- count the presence pattern instead, which separates
-    // them: exactly one row is absent.
-    return a.filter(v => v == null).count()
+    let b: [int] = [10, 20, 30]
+    assert_eq(a.zip(b).count(), 3)
 }
 
 fn keep_absent_or_first_payload(v: Vec2?) -> bool {
@@ -55,26 +53,6 @@ fn indirect_nullable_argument_preserves_presence_and_payload() -> int {
     let b = a.filter(keep_absent_or_first_payload).collect()
     let second = if b.len > 1 { px(b[1]) } else { 0.0 }
     return b.len * 100 + (px(b[0]) * 10.0 + second) as int
-}
-
-@test(returns = 1)
-fn any_and_all_read_presence() -> int {
-    let a: [Vec2?] = [Vec2 { x: 1.0, y: 1.0 }, null, Vec2 { x: 2.0, y: 2.0 }]
-    let some_absent = a.any(v => v == null)
-    let not_all_present = !a.all(present)
-    return if some_absent && not_all_present { 1 } else { 0 }
-}
-
-@test(returns = 3)
-fn map_projects_through_presence() -> int {
-    let a: [Vec2?] = [Vec2 { x: 1.0, y: 1.0 }, null, Vec2 { x: 2.0, y: 2.0 }]
-    return a.map(px).sum_f() as int
-}
-
-@test(returns = 3)
-fn reduce_over_a_nullable_column() -> int {
-    let a: [Vec2?] = [Vec2 { x: 1.0, y: 1.0 }, null, Vec2 { x: 2.0, y: 2.0 }]
-    return a.map(px).reduce(0.0, (acc, v) => acc + v) as int
 }
 
 // A chain, so the element crosses two wrapper `next`s before the terminal.
@@ -121,13 +99,6 @@ fn element_survives_a_lambda_map_to_itself() -> int {
 }
 
 // --- tuple elements: the pair carries a presence leaf on one side ---
-
-@test(returns = 3)
-fn zip_over_a_nullable_column_counts() -> int {
-    let a: [Vec2?] = [Vec2 { x: 1.0, y: 1.0 }, null, Vec2 { x: 2.0, y: 2.0 }]
-    let b: [int] = [10, 20, 30]
-    return a.zip(b).count()
-}
 
 // A wrapper BEHIND the zip, so the pair element crosses the placeholder splice
 // inside `SkipIter.next` and is then read whole. Each side contributes a
