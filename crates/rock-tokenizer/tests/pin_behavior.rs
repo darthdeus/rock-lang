@@ -302,291 +302,97 @@ fn pin_numbers_malformed_errors() {
 
 #[test]
 fn pin_minus_and_dot_context() {
-    assert_eq!(
-        kinds("x = -5"),
-        vec![
-            TokenKind::Ident("x".into()),
-            TokenKind::Assign,
-            TokenKind::Int(-5, "-5".into()),
-        ]
-    );
-    assert_eq!(
-        kinds("(-10)"),
-        vec![
-            TokenKind::OpenParen,
-            TokenKind::Int(-10, "-10".into()),
-            TokenKind::CloseParen,
-        ]
-    );
-    assert_eq!(
-        kinds("[-1, -2]"),
-        vec![
-            TokenKind::OpenSquare,
-            TokenKind::Int(-1, "-1".into()),
-            TokenKind::Comma,
-            TokenKind::Int(-2, "-2".into()),
-            TokenKind::CloseSquare,
-        ]
-    );
-    assert_eq!(
-        kinds("5-3"),
-        vec![
-            TokenKind::Int(5, "5".into()),
-            TokenKind::Minus,
-            TokenKind::Int(3, "3".into()),
-        ]
-    );
-    assert_eq!(
-        kinds("x-1"),
-        vec![
-            TokenKind::Ident("x".into()),
-            TokenKind::Minus,
-            TokenKind::Int(1, "1".into()),
-        ]
-    );
-    assert_eq!(
-        kinds("true-false"),
-        [TokenKind::True, TokenKind::Minus, TokenKind::False]
-    );
-    assert_eq!(
-        kinds("null-10"),
-        [
-            TokenKind::Null,
-            TokenKind::Minus,
-            TokenKind::Int(10, "10".into())
-        ]
-    );
-    assert_eq!(
-        kinds("--5"),
-        vec![TokenKind::MinusMinus, TokenKind::Int(5, "5".into())]
-    );
-    assert_eq!(
-        kinds("- 5"),
-        vec![TokenKind::Minus, TokenKind::Int(5, "5".into())]
-    );
-    assert_eq!(
-        kinds("restitution: .35"),
-        vec![
-            TokenKind::Ident("restitution".into()),
-            TokenKind::Colon,
-            TokenKind::Float(OrderedFloat(0.35)),
-        ]
-    );
-    assert_eq!(
-        kinds("[.5, .25]"),
-        vec![
-            TokenKind::OpenSquare,
-            TokenKind::Float(OrderedFloat(0.5)),
-            TokenKind::Comma,
-            TokenKind::Float(OrderedFloat(0.25)),
-            TokenKind::CloseSquare,
-        ]
-    );
-    assert_eq!(
-        kinds("2 + .5"),
-        vec![
-            TokenKind::Int(2, "2".into()),
-            TokenKind::Plus,
-            TokenKind::Float(OrderedFloat(0.5)),
-        ]
-    );
-    assert_eq!(
-        kinds("w.0"),
-        vec![
-            TokenKind::Ident("w".into()),
-            TokenKind::Dot,
-            TokenKind::Int(0, "0".into()),
-        ]
-    );
-    assert_eq!(
-        kinds("w.0.0"),
-        vec![
-            TokenKind::Ident("w".into()),
-            TokenKind::Dot,
-            TokenKind::Int(0, "0".into()),
-            TokenKind::Dot,
-            TokenKind::Int(0, "0".into()),
-        ]
-    );
-    assert_eq!(
-        kinds("0..5"),
-        vec![
-            TokenKind::Int(0, "0".into()),
-            TokenKind::DoubleDot,
-            TokenKind::Int(5, "5".into()),
-        ]
-    );
-    assert_eq!(
-        kinds("2..WIDTH-2"),
-        vec![
-            TokenKind::Int(2, "2".into()),
-            TokenKind::DoubleDot,
-            TokenKind::Ident("WIDTH".into()),
-            TokenKind::Minus,
-            TokenKind::Int(2, "2".into()),
-        ]
-    );
-    assert_eq!(
-        kinds("0..SIZE*2-1"),
-        vec![
-            TokenKind::Int(0, "0".into()),
-            TokenKind::DoubleDot,
-            TokenKind::Ident("SIZE".into()),
-            TokenKind::Mul,
-            TokenKind::Int(2, "2".into()),
-            TokenKind::Minus,
-            TokenKind::Int(1, "1".into()),
-        ]
-    );
-    assert_eq!(
-        kinds("2...3"),
-        vec![
-            TokenKind::Int(2, "2".into()),
-            TokenKind::TripleDot,
-            TokenKind::Int(3, "3".into()),
-        ]
-    );
-    assert_eq!(
-        kinds("2....3"),
-        vec![
-            TokenKind::Int(2, "2".into()),
-            TokenKind::TripleDot,
-            TokenKind::Float(OrderedFloat(0.3)),
-        ]
-    );
+    let int = |n: i64| K::Int(n, n.to_string().as_str().into());
+    let ident = |name: &str| K::Ident(name.into());
+    let float = |n| K::Float(OrderedFloat(n));
+    let cases: &[(&str, &[K])] = &[
+        ("x = -5", &[ident("x"), K::Assign, int(-5)]),
+        ("(-10)", &[K::OpenParen, int(-10), K::CloseParen]),
+        (
+            "[-1, -2]",
+            &[K::OpenSquare, int(-1), K::Comma, int(-2), K::CloseSquare],
+        ),
+        ("5-3", &[int(5), K::Minus, int(3)]),
+        ("x-1", &[ident("x"), K::Minus, int(1)]),
+        ("true-false", &[K::True, K::Minus, K::False]),
+        ("null-10", &[K::Null, K::Minus, int(10)]),
+        ("--5", &[K::MinusMinus, int(5)]),
+        ("- 5", &[K::Minus, int(5)]),
+        (
+            "restitution: .35",
+            &[ident("restitution"), K::Colon, float(0.35)],
+        ),
+        (
+            "[.5, .25]",
+            &[
+                K::OpenSquare,
+                float(0.5),
+                K::Comma,
+                float(0.25),
+                K::CloseSquare,
+            ],
+        ),
+        ("2 + .5", &[int(2), K::Plus, float(0.5)]),
+        ("w.0", &[ident("w"), K::Dot, int(0)]),
+        ("w.0.0", &[ident("w"), K::Dot, int(0), K::Dot, int(0)]),
+        ("0..5", &[int(0), K::DoubleDot, int(5)]),
+        (
+            "2..WIDTH-2",
+            &[int(2), K::DoubleDot, ident("WIDTH"), K::Minus, int(2)],
+        ),
+        (
+            "0..SIZE*2-1",
+            &[
+                int(0),
+                K::DoubleDot,
+                ident("SIZE"),
+                K::Mul,
+                int(2),
+                K::Minus,
+                int(1),
+            ],
+        ),
+        ("2...3", &[int(2), K::TripleDot, int(3)]),
+        ("2....3", &[int(2), K::TripleDot, float(0.3)]),
+    ];
+    for &(source, expected) in cases {
+        assert_eq!(kinds(source), expected, "{source:?}");
+    }
 }
 
 #[test]
 fn pin_every_operator_and_multi_char_operator() {
-    let cases: Vec<(&str, Vec<TokenKind>)> = vec![
-        ("....", vec![TokenKind::TripleDot, TokenKind::Dot]),
-        (".....", vec![TokenKind::TripleDot, TokenKind::DoubleDot]),
-        ("......", vec![TokenKind::TripleDot, TokenKind::TripleDot]),
-        (":::", vec![TokenKind::DoubleColon, TokenKind::Colon]),
-        ("::::", vec![TokenKind::DoubleColon, TokenKind::DoubleColon]),
-        ("??.", vec![TokenKind::DoubleQuestionMark, TokenKind::Dot]),
-        ("???.", vec![TokenKind::TripleQuestionMark, TokenKind::Dot]),
-        ("?.?", vec![TokenKind::QuestionDot, TokenKind::QuestionMark]),
-        (
-            "a+b",
-            vec![
-                TokenKind::Ident("a".into()),
-                TokenKind::Plus,
-                TokenKind::Ident("b".into()),
-            ],
-        ),
-        (
-            "a++",
-            vec![TokenKind::Ident("a".into()), TokenKind::PlusPlus],
-        ),
-        (
-            "a--",
-            vec![TokenKind::Ident("a".into()), TokenKind::MinusMinus],
-        ),
-        (
-            "a:b",
-            vec![
-                TokenKind::Ident("a".into()),
-                TokenKind::Colon,
-                TokenKind::Ident("b".into()),
-            ],
-        ),
-        (
-            "a::b",
-            vec![
-                TokenKind::Ident("a".into()),
-                TokenKind::DoubleColon,
-                TokenKind::Ident("b".into()),
-            ],
-        ),
-        (
-            "a;b",
-            vec![
-                TokenKind::Ident("a".into()),
-                TokenKind::Semicolon,
-                TokenKind::Ident("b".into()),
-            ],
-        ),
-        (
-            "a,b",
-            vec![
-                TokenKind::Ident("a".into()),
-                TokenKind::Comma,
-                TokenKind::Ident("b".into()),
-            ],
-        ),
-        (
-            "x?.y",
-            vec![
-                TokenKind::Ident("x".into()),
-                TokenKind::QuestionDot,
-                TokenKind::Ident("y".into()),
-            ],
-        ),
-        (
-            "x??y",
-            vec![
-                TokenKind::Ident("x".into()),
-                TokenKind::DoubleQuestionMark,
-                TokenKind::Ident("y".into()),
-            ],
-        ),
-        (
-            "x???y",
-            vec![
-                TokenKind::Ident("x".into()),
-                TokenKind::TripleQuestionMark,
-                TokenKind::Ident("y".into()),
-            ],
-        ),
-        (
-            "a ./ b",
-            vec![
-                TokenKind::Ident("a".into()),
-                TokenKind::IntDiv,
-                TokenKind::Ident("b".into()),
-            ],
-        ),
-        (
-            "a./b",
-            vec![
-                TokenKind::Ident("a".into()),
-                TokenKind::IntDiv,
-                TokenKind::Ident("b".into()),
-            ],
-        ),
-        ("$x", vec![TokenKind::Dollar, TokenKind::Ident("x".into())]),
-        ("@x", vec![TokenKind::At, TokenKind::Ident("x".into())]),
-        ("!a", vec![TokenKind::Bang, TokenKind::Ident("a".into())]),
-        (
-            "a!=b",
-            vec![
-                TokenKind::Ident("a".into()),
-                TokenKind::NotEquals,
-                TokenKind::Ident("b".into()),
-            ],
-        ),
-        (
-            "a==b",
-            vec![
-                TokenKind::Ident("a".into()),
-                TokenKind::Equals,
-                TokenKind::Ident("b".into()),
-            ],
-        ),
-        (
-            "a?b:c",
-            vec![
-                TokenKind::Ident("a".into()),
-                TokenKind::QuestionMark,
-                TokenKind::Ident("b".into()),
-                TokenKind::Colon,
-                TokenKind::Ident("c".into()),
-            ],
-        ),
+    let [a, b, c, x, y] = ["a", "b", "c", "x", "y"].map(|name| K::Ident(name.into()));
+    let cases: &[(&str, &[K])] = &[
+        ("....", &[K::TripleDot, K::Dot]),
+        (".....", &[K::TripleDot, K::DoubleDot]),
+        ("......", &[K::TripleDot, K::TripleDot]),
+        (":::", &[K::DoubleColon, K::Colon]),
+        ("::::", &[K::DoubleColon, K::DoubleColon]),
+        ("??.", &[K::DoubleQuestionMark, K::Dot]),
+        ("???.", &[K::TripleQuestionMark, K::Dot]),
+        ("?.?", &[K::QuestionDot, K::QuestionMark]),
+        ("a+b", &[a, K::Plus, b]),
+        ("a++", &[a, K::PlusPlus]),
+        ("a--", &[a, K::MinusMinus]),
+        ("a:b", &[a, K::Colon, b]),
+        ("a::b", &[a, K::DoubleColon, b]),
+        ("a;b", &[a, K::Semicolon, b]),
+        ("a,b", &[a, K::Comma, b]),
+        ("x?.y", &[x, K::QuestionDot, y]),
+        ("x??y", &[x, K::DoubleQuestionMark, y]),
+        ("x???y", &[x, K::TripleQuestionMark, y]),
+        ("a ./ b", &[a, K::IntDiv, b]),
+        ("a./b", &[a, K::IntDiv, b]),
+        ("$x", &[K::Dollar, x]),
+        ("@x", &[K::At, x]),
+        ("!a", &[K::Bang, a]),
+        ("a!=b", &[a, K::NotEquals, b]),
+        ("a==b", &[a, K::Equals, b]),
+        ("a?b:c", &[a, K::QuestionMark, b, K::Colon, c]),
     ];
-    for (src, expected) in &cases {
-        assert_eq!(&kinds(src), expected, "operators {:?}", src);
+    for &(source, expected) in cases {
+        assert_eq!(kinds(source), expected, "{source:?}");
     }
     assert_eq!(
         kinds("fn // hello\n if /* world */ (1 + 3)"),
