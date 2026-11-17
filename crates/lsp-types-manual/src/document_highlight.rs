@@ -8,14 +8,5 @@ lsp_struct! {
     #[derive(Debug, Eq, PartialEq, Clone)]
     pub struct DocumentHighlight {
         required pub range: Range = "range",
-        optional pub kind: DocumentHighlightKind = "kind",
     }
-}
-
-/// A document highlight kind.
-#[derive(Debug, Eq, PartialEq, Copy, Clone)]
-pub struct DocumentHighlightKind(i32);
-lsp_enum! {
-impl DocumentHighlightKind {
-}
 }

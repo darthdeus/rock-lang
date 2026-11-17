@@ -1332,7 +1332,6 @@ impl BoneWorkspace {
             .filter(|loc| loc.uri == want)
             .map(|loc| DocumentHighlight {
                 range: loc.range,
-                kind: None,
             })
             .collect()
     }
@@ -1888,11 +1887,9 @@ impl BoneWorkspace {
                 let range = line_index.range(src, s.span.offset_range().0, s.span.offset_range().1);
                 DocumentSymbol {
                     name: s.name,
-                    detail: None,
                     kind: entry_symbol_kind(s.kind, s.is_const),
                     range,
                     selection_range: range,
-                    children: None,
                 }
             })
             .collect()
@@ -1962,7 +1959,6 @@ impl BoneWorkspace {
                             uri: uri.clone(),
                             range,
                         },
-                        container_name: None,
                     });
                 }
             }
@@ -2140,13 +2136,11 @@ impl BoneWorkspace {
                 .into_iter()
                 .map(|sig| SignatureInformation {
                     label: sig.label,
-                    documentation: None,
                     parameters: Some(
                         sig.params
                             .into_iter()
                             .map(|p| ParameterInformation {
                                 label: ParameterLabel::Simple(p),
-                                documentation: None,
                             })
                             .collect(),
                     ),

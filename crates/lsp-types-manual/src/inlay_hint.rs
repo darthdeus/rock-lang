@@ -18,20 +18,9 @@ lsp_struct! {
 #[derive(Debug, Clone)]
 pub enum InlayHintLabel {
     String(String),
-    LabelParts(Vec<InlayHintLabelPart>),
 }
 
-impl_untagged_enum!(InlayHintLabel { LabelParts, String });
-
-lsp_struct! {
-    out
-    /// An inlay hint label part allows for interactive and composite labels
-    /// of inlay hints.
-    #[derive(Debug, Clone, Default)]
-    pub struct InlayHintLabelPart {
-        required pub value: String = "value",
-    }
-}
+impl_untagged_enum!(InlayHintLabel { String });
 
 /// Inlay hint kinds.
 ///

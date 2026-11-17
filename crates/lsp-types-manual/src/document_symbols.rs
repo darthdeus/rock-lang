@@ -9,11 +9,9 @@ lsp_struct! {
     #[derive(Debug, Eq, PartialEq, Clone)]
     pub struct DocumentSymbol {
         required pub name: String = "name",
-        optional pub detail: String = "detail",
         required pub kind: SymbolKind = "kind",
         required pub range: Range = "range",
         required pub selection_range: Range = "selectionRange",
-        optional pub children: Vec<DocumentSymbol> = "children",
     }
 }
 
@@ -26,7 +24,6 @@ lsp_struct! {
         required pub name: String = "name",
         required pub kind: SymbolKind = "kind",
         required pub location: Location = "location",
-        optional pub container_name: String = "containerName",
     }
 }
 

@@ -1201,9 +1201,6 @@ fn inlay_labels(bone: &BoneWorkspace, path: &str) -> Vec<String> {
         .into_iter()
         .map(|h| match h.label {
             lsp_types::InlayHintLabel::String(s) => s,
-            lsp_types::InlayHintLabel::LabelParts(parts) => {
-                parts.into_iter().map(|p| p.value).collect()
-            }
         })
         .collect()
 }

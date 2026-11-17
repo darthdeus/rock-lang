@@ -283,17 +283,6 @@ lsp_struct! {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub enum Documentation {
-    String(String),
-    MarkupContent(MarkupContent),
-}
-
-impl_untagged_enum!(Documentation {
-    MarkupContent,
-    String,
-});
-
 lsp_struct! {
     in
     #[derive(Debug, PartialEq, Clone, Default)]
@@ -310,8 +299,6 @@ lsp_struct! {
 /// are reserved for internal usage.
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum MarkupKind {
-    /// Plain text is supported as a content format
-    PlainText,
     /// Markdown is supported as a content format
     Markdown,
 }
@@ -319,7 +306,6 @@ pub enum MarkupKind {
 impl serde::Serialize for MarkupKind {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(match self {
-            MarkupKind::PlainText => "plaintext",
             MarkupKind::Markdown => "markdown",
         })
     }
