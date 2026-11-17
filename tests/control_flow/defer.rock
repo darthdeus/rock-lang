@@ -301,3 +301,23 @@ fn defer_in_a_block_sees_its_local() {
 @test fn test_defer_per_loop_iteration() { DL = ""; defer_per_loop_iteration(); assert_eq(DL, "b0d0d1d2") }
 @test fn test_defer_after_return_value() { assert_eq(defer_after_return_value(), 1) }
 @test fn test_defer_in_a_block_sees_its_local() { DL = ""; defer_in_a_block_sees_its_local(); assert_eq(DL, "y7x1") }
+
+@test(output = "body\n0\n1\n2\nlambda:7")
+fn defer_body_keeps_its_own_control_flow() {
+    // A `return` inside a `defer` body is rejected (tests/errors/defer.rock.err),
+    // but control flow that stays inside the body is fine: a loop it owns, and
+    // a lambda returning from itself.
+    defer {
+        for i in [0, 1, 2, 9] {
+            if i > 2 {
+                break
+            }
+            print(i)
+        }
+        let f = () => {
+            return 7
+        }
+        print("lambda:{f()}")
+    }
+    print("body")
+}

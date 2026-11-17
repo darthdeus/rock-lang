@@ -10,6 +10,13 @@ fn infer_return(
     e: Option<Idx<Expr>>,
     span: Span,
 ) -> Result<(), CompilerError> {
+    if gamma.in_defer {
+        comp_error!(
+            span,
+            "`return` is not allowed inside a `defer` body: the deferred block \
+             runs while the function is already returning"
+        );
+    }
     if let (Some(e), Some(returns)) = (e, gamma.lambda_returns.as_mut()) {
         returns.push(e);
     }
@@ -95,8 +102,19 @@ pub(crate) fn infer_statement(
     let span = c.body.statement_spans[s];
 
     match &c.body.statement_arena[s] {
-        Statement::Expr(e) | Statement::Defer(e) => {
+        Statement::Expr(e) => {
             infer_expr_used(c, gamma, *e, Use::Discard)?;
+        }
+
+        Statement::Defer(e) => {
+            // A deferred block runs at scope exit, not here: it is outside any
+            // enclosing loop, and it cannot return from the function.
+            let saved_loop = std::mem::replace(&mut gamma.loop_depth, 0);
+            let saved_defer = std::mem::replace(&mut gamma.in_defer, true);
+            let res = infer_expr_used(c, gamma, *e, Use::Discard);
+            gamma.loop_depth = saved_loop;
+            gamma.in_defer = saved_defer;
+            res?;
         }
 
         Statement::Return(e) => infer_return(c, gamma, *e, span)?,

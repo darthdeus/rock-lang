@@ -1,0 +1,22 @@
+
+//=== TEST CASE: return_inside_defer_body_Generic ===
+//! expect: `return` is not allowed inside a `defer`
+// A deferred block runs while the function is already returning, so a
+// `return` in it has nothing to return from (it used to overflow the
+// compiler's stack: each return spliced the same defer again).
+fn t() -> int {
+    defer { return 1 }
+    2
+}
+fn main() { print(t()) }
+
+//=== TEST CASE: let_else_return_inside_defer_body_Generic ===
+//! expect: `return` is not allowed inside a `defer`
+fn t(v: int?) -> int {
+    defer {
+        let x = v else { return 0 }
+        print(x)
+    }
+    2
+}
+fn main() { print(t(1)) }

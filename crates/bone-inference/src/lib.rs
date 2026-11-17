@@ -121,6 +121,9 @@ pub struct Gamma<'a> {
     pub declared_ret_ty: Option<TyId>,
     pub coroutine_ret: Option<TyId>,
     pub loop_depth: u32,
+    /// Inferring a `defer` body: it runs while the function is already
+    /// leaving, so `return` has nothing to return from.
+    pub in_defer: bool,
 
     // TODO: this feels slow?
     // Non-null refinements keyed on `(Root, field-path)` -- locals AND globals
@@ -213,6 +216,7 @@ impl<'a> Gamma<'a> {
             declared_ret_ty: None,
             coroutine_ret: None,
             loop_depth: 0,
+            in_defer: false,
 
             refined_nonnull: Default::default(),
             closure_assigned: narrowing::closure_assigned_locals(body),
