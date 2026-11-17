@@ -175,28 +175,38 @@ fn sim_collect_bound_next(bn: &bone_core::workspace::BoundNext, out: &mut Vec<Fn
 }
 
 /// True when `matches` holds for `key` or any of its transitive callees.
-/// Memoized across sims, so one compile walks the shared call graph once.
+/// Negative results are memoized only after the whole search is exhausted.
 fn sim_reaches(
     ws: &bone_semantic::inference::Workspace,
     key: FnKey,
     matches: &dyn Fn(FnKey) -> bool,
     memo: &mut std::collections::HashMap<FnKey, bool>,
-    visiting: &mut std::collections::HashSet<FnKey>,
+    visited: &mut std::collections::HashSet<FnKey>,
     name_map: &NameMap,
 ) -> bool {
     if let Some(&known) = memo.get(&key) {
         return known;
     }
-    if !visiting.insert(key) {
-        return false;
+    let mut pending = vec![key];
+    while let Some(callee) = pending.pop() {
+        if !visited.insert(callee) {
+            continue;
+        }
+        match memo.get(&callee) {
+            Some(true) => {}
+            Some(false) => continue,
+            None if matches(callee) => {}
+            None => {
+                pending.extend(sim_callee_edges(ws, callee, name_map).into_iter().rev());
+                continue;
+            }
+        }
+        memo.insert(key, true);
+        visited.clear();
+        return true;
     }
-    let reaches = matches(key)
-        || sim_callee_edges(ws, key, name_map)
-            .into_iter()
-            .any(|callee| sim_reaches(ws, callee, matches, memo, visiting, name_map));
-    visiting.remove(&key);
-    memo.insert(key, reaches);
-    reaches
+    memo.extend(visited.drain().map(|key| (key, false)));
+    false
 }
 
 /// True when the function names one of [`SIM_PIXEL_ROOTS`] or a
@@ -247,7 +257,7 @@ pub(crate) fn apply(
     let reads_capacity = |key| references_capacity(ws, key, &name_map);
     let mut pixel_memo = std::collections::HashMap::new();
     let mut capacity_memo = std::collections::HashMap::new();
-    let mut visiting = std::collections::HashSet::new();
+    let mut visited = std::collections::HashSet::new();
     for sim in sims {
         if sim.render {
             sim.env_pairs
@@ -264,7 +274,7 @@ pub(crate) fn apply(
                 key,
                 &reads_pixels,
                 &mut pixel_memo,
-                &mut visiting,
+                &mut visited,
                 &name_map,
             )
             && !sim_reaches(
@@ -272,7 +282,7 @@ pub(crate) fn apply(
                 key,
                 &reads_capacity,
                 &mut capacity_memo,
-                &mut visiting,
+                &mut visited,
                 &name_map,
             )
         {
@@ -334,6 +344,53 @@ mod tests {
             .rev()
             .find(|(k, _)| k == "STONE_WINDOW")
             .map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn reachability_through_a_cycle_is_independent_of_query_order() {
+        let fixture =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sim-reaches");
+        let project = crate::live_project::LiveProject::init(fixture.to_str().unwrap(), false)
+            .expect("the recursive fixture must compile");
+        let ws = project.workspace();
+        let mut name_map = super::NameMap::new();
+        let mut keys = HashMap::new();
+        for module in ws.source_modules() {
+            for (fid, f) in module.functions.iter() {
+                let key = (module.id, fid);
+                name_map.entry(f.name).or_default().push(key);
+                keys.insert(skull_mir::mangle::declared_name(f.name.as_str()), key);
+            }
+        }
+        let outer = keys["outer"];
+        let inner = keys["inner"];
+        let target = keys["take_screenshot"];
+        // Function-valued calls keep the body-scan edges in source order.
+        assert_eq!(
+            super::sim_callee_edges(ws, outer, &name_map),
+            [inner, target]
+        );
+        for reads_pixels in [true, false] {
+            for order in [["outer", "inner"], ["inner", "outer"]] {
+                let mut memo = HashMap::new();
+                let mut visited = std::collections::HashSet::new();
+                for name in order {
+                    assert_eq!(
+                        super::sim_reaches(
+                            ws,
+                            keys[name],
+                            &|key| reads_pixels && super::names_pixel_reader(ws, key),
+                            &mut memo,
+                            &mut visited,
+                            &name_map,
+                        ),
+                        reads_pixels,
+                        "reachability from `{name}` must be independent of query order"
+                    );
+                    assert!(visited.is_empty());
+                }
+            }
+        }
     }
 
     #[test]
