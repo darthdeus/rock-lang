@@ -425,10 +425,13 @@ uint64_t stone_mesh_create(
     int mode,
     const float* verts, int vert_count, int stride_floats,
     const int* attr_sizes, int attr_count);
-void stone_mesh_set_instances(
+// Initializes the instance layout once; 1 on success, 0 on failure.
+int stone_mesh_set_instances(
     uint64_t handle,
     const float* data, int count, int stride_floats,
     const int* attr_sizes, int attr_count);
+// Updates the live prefix without changing the layout; 1 on success, 0 on failure.
+int stone_mesh_update_instances(uint64_t handle, const float* data, int count);
 int stone_mesh_draw(uint64_t handle, uint64_t texture, int count);
 void stone_mesh_free(uint64_t handle);
 

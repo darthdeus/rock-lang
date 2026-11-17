@@ -71,9 +71,101 @@ fn gpu_mesh_instanced_draw_renders_each_instance_and_counts_once() {
     assert(stone_read_canvas_pixel_channel(target.handle.0, size * 3 ./ 8, mid, 0) < 0.5,
         "the gap between instances stays clear")
 
+    // Reuse the same layout and allocation while moving and shrinking the live prefix.
+    let retained_bytes = stone_mesh_bytes(mesh.handle.0)
+    inst[0] = 0.0
+    assert(gpu_mesh_update_instances(mesh, inst.ptr, 1))
+    assert_eq(mesh.inst_count, 1)
+    assert_eq(stone_mesh_bytes(mesh.handle.0), retained_bytes)
+    with_canvas(target, () => {
+        clear_screen(0.0, 0.0, 0.0, 1.0)
+        with_shader(sid, () => { gpu_mesh_draw(mesh, white) })
+    })
+    assert(stone_read_canvas_pixel_channel(target.handle.0, mid, mid, 0) > 0.5)
+    assert(stone_read_canvas_pixel_channel(target.handle.0, size ./ 4, mid, 0) < 0.5)
+    assert(stone_read_canvas_pixel_channel(target.handle.0, size * 3 ./ 4, mid, 0) < 0.5)
+
+    assert(gpu_mesh_update_instances(mesh, inst.ptr, 0))
+    assert_eq(mesh.inst_count, 0)
+    assert_eq(stone_mesh_bytes(mesh.handle.0), retained_bytes)
+    stone_reset_frame_stats()
+    with_canvas(target, () => {
+        clear_screen(0.0, 0.0, 0.0, 1.0)
+        with_shader(sid, () => { gpu_mesh_draw(mesh, white) })
+    })
+    assert_eq(stone_get_graphics_stats().instanced_draws, 0)
+    assert(stone_read_canvas_pixel_channel(target.handle.0, mid, mid, 0) < 0.5)
+
+    // Growth preserves attribute bindings; refilling the prefix then draws all four quads.
+    let grown = native_buffer_float(8)
+    grown[0] = -0.75; grown[1] = 0.0
+    grown[2] = -0.25; grown[3] = 0.0
+    grown[4] = 0.25; grown[5] = 0.0
+    grown[6] = 0.75; grown[7] = 0.0
+    assert(gpu_mesh_update_instances(mesh, grown.ptr, 4))
+    assert_eq(mesh.inst_count, 4)
+    assert(stone_mesh_bytes(mesh.handle.0) > retained_bytes)
+    with_canvas(target, () => {
+        with_shader(sid, () => { gpu_mesh_draw(mesh, white) })
+    })
+    for x in [size ./ 8, size * 3 ./ 8, size * 5 ./ 8, size * 7 ./ 8] {
+        assert(stone_read_canvas_pixel_channel(target.handle.0, x, mid, 0) > 0.5,
+            "a grown instance quad renders at x={x}")
+    }
+
     with_canvas(target, () => {
         with_shader(sid, () => { gpu_mesh_draw(plain, white) })
     })
     assert_eq(stone_get_graphics_stats().instanced_draws, 1, "a plain draw is not counted as instanced")
     assert_eq(stone_gl_error_count(), gl_errors, "the gpu_mesh path raises no GL error")
+}
+
+value MeshSurfaceProbeOut { color: Vec4, id: int, material: Vec4, normal: Vec4 }
+
+@shader(fragment)
+fn mesh_surface_probe_frag(_vary: MeshProbeVary, @textures tex: MainTex) -> MeshSurfaceProbeOut {
+    return MeshSurfaceProbeOut {
+        color: texture(tex.uTexture, v(0.0, 0.0)), id: 1,
+        material: v(0.0, 0.0, 0.0, 0.0), normal: v(0.0, 0.0, 1.0, 1.0),
+    }
+}
+
+@test
+fn world_surface_mesh_order_interleaves_with_custom_rows_without_custom_uniforms() {
+    setup_stone()
+    assert(stone_gpu_host_ensure())
+    let saved_pool = RENDER_BATCHES
+    let saved_white = WHITE_PIXEL
+    let saved_scope = CURRENT_RENDER_POOL
+    let saved_counter = CUSTOM_DRAW_COUNTER
+    let pool = render_batch_pool_new()
+    let white = gpu_mesh_draw_white()
+    let verts = native_buffer_float(6)
+    let first = gpu_mesh_new(verts.ptr, 3, 2, [2], "triangles")
+    let last = gpu_mesh_new(verts.ptr, 3, 2, [2], "triangles")
+    defer {
+        pool.clear()
+        RENDER_BATCHES = saved_pool
+        WHITE_PIXEL = saved_white
+        CURRENT_RENDER_POOL = saved_scope
+        CUSTOM_DRAW_COUNTER = saved_counter
+        gpu_mesh_free(first)
+        gpu_mesh_free(last)
+        release_owned_image(white)
+    }
+    RENDER_BATCHES = pool
+    WHITE_PIXEL = white
+    CURRENT_RENDER_POOL = RenderBatchScope {}
+    let pipe = pipeline(rock_shader(mesh_probe_vert, mesh_surface_probe_frag))
+    queue_world_surface_geometry(last, pipe, [], null, null, WorldSurfaceOutputs::Automatic,
+        0, BlendMode::Alpha, DepthMode::TestWrite, order: 4)
+    queue_custom_draw_into(pool, () => {}, z_layer: 0, order: 0)
+    queue_world_surface_geometry(first, pipe, [], null, null, WorldSurfaceOutputs::Automatic,
+        0, BlendMode::Alpha, DepthMode::TestWrite, order: -4)
+    let keys: [string] = []
+    pool.sorted_keys_into(keys)
+    assert_eq(keys.len(), 3)
+    assert_eq(pool.get(keys[0]).unwrap().retained_mesh, first.handle)
+    assert(pool.get(keys[1]).unwrap().custom_draw != null)
+    assert_eq(pool.get(keys[2]).unwrap().retained_mesh, last.handle)
 }
