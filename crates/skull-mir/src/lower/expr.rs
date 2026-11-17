@@ -137,20 +137,7 @@ impl<'a> Builder<'a> {
         // Keep the span and expression together when switching call sites.
         let outer_expr = self.cur_expr.replace(e);
         let v = match self.body.expr_arena[e] {
-            Expr::Var(binding)
-                if self
-                    .preflight_reads
-                    .iter()
-                    .rev()
-                    .any(|reads| reads.contains_key(&raw(binding))) =>
-            {
-                Ok(*self
-                    .preflight_reads
-                    .iter()
-                    .rev()
-                    .find_map(|reads| reads.get(&raw(binding)))
-                    .unwrap())
-            }
+            Expr::Var(binding) if let Some(value) = self.preflight_value(binding) => Ok(value),
             Expr::Array(elems)
                 if expected
                     .is_some_and(|ty| ContainerPlan::matches_type(ContainerFamily::Vec, ty)) =>
@@ -159,11 +146,7 @@ impl<'a> Builder<'a> {
             }
             _ => self.lower_expr_inner(e, condition),
         };
-        let v = match v {
-            Ok(v) if self.f32_round_exprs.contains(&e) => Ok(self.emit_cur(Inst::FloatToF32(v))),
-            other => other,
-        };
-        let v = v.map(|v| self.check_integer_field(v, self.integer_field_checks.get(&e).copied()));
+        let v = v.map(|value| self.check_field_value(e, value));
         let v = v.map_err(|e| self.located(e));
         self.cur_span = outer;
         self.cur_expr = outer_expr;
@@ -1719,6 +1702,13 @@ impl<'a> Builder<'a> {
             MonoTy::Uint => Some(true),
             _ => None,
         }
+    }
+
+    pub(super) fn check_field_value(&mut self, e: Idx<Expr>, mut value: Idx<Inst>) -> Idx<Inst> {
+        if self.f32_round_exprs.contains(&e) {
+            value = self.emit_cur(Inst::FloatToF32(value));
+        }
+        self.check_integer_field(value, self.integer_field_checks.get(&e).copied())
     }
 
     pub(crate) fn check_integer_field(

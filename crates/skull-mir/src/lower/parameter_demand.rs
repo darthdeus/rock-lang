@@ -5,11 +5,11 @@
 //! into it, capturing it, calling it -- counts as a whole use, so the answer is
 //! conservative. This is
 //! not an effect or alias analysis: argument evaluation stays at the call site.
-use super::{BodyOwner, Workspace};
+use super::{BodyOwner, Workspace, raw};
 use crate::mir::FuncRef;
-use bone_core::hir::{BindingInfo, Body, Callee, Expr};
+use bone_core::hir::{Body, Callee, Expr};
 use bone_core::hir_walk::HirChild;
-use comfy_la_arena::Idx;
+use std::ops::Range;
 use ustr::Ustr;
 
 /// Field lists hold each name once, in first-mention order.
@@ -42,10 +42,9 @@ pub(super) fn key(demand: &Demand) -> u64 {
 }
 
 fn fields(body: &Body) -> Demand {
-    let params: Vec<Idx<BindingInfo>> = body.param_bindings.into_iter().collect();
+    let params = body.param_bindings.make_range();
     let mut demand = vec![Some(Vec::new()); params.len()];
-    /// Marks a whole use. `open` counts the parameters still read by field
-    /// only; at zero no later mention can change the answer and the walk stops.
+    // Once every parameter has a whole use, no later mention can change the answer.
     fn whole(slot: &mut Option<Vec<Ustr>>, open: &mut usize) {
         if slot.take().is_some() {
             *open -= 1;
@@ -54,21 +53,27 @@ fn fields(body: &Body) -> Demand {
     fn visit(
         body: &Body,
         node: HirChild,
-        params: &[Idx<BindingInfo>],
+        params: &Range<u32>,
         demand: &mut [Option<Vec<Ustr>>],
         open: &mut usize,
+        captured: bool,
     ) {
         if *open == 0 {
             return;
         }
-        let param = |binding| params.iter().position(|p| *p == binding);
+        let param = |binding| {
+            let id = raw(binding);
+            params.contains(&id).then(|| (id - params.start) as usize)
+        };
         if let HirChild::Expr(e) = node {
             match body.expr_arena[e] {
                 Expr::FieldAccess { base, field } => {
                     if let Expr::Var(binding) = body.expr_arena[base]
                         && let Some(i) = param(binding)
                     {
-                        if let Some(fields) = &mut demand[i]
+                        if captured {
+                            whole(&mut demand[i], open);
+                        } else if let Some(fields) = &mut demand[i]
                             && !fields.contains(&field)
                         {
                             fields.push(field);
@@ -106,26 +111,15 @@ fn fields(body: &Body) -> Demand {
                 }
                 // A capture holds the whole value.
                 Expr::Lambda { body: inner, .. } => {
-                    let mut captured = vec![Some(Vec::new()); params.len()];
-                    let mut inner_open = params.len();
-                    visit(
-                        body,
-                        HirChild::Expr(inner),
-                        params,
-                        &mut captured,
-                        &mut inner_open,
-                    );
-                    for (slot, seen) in demand.iter_mut().zip(captured) {
-                        if seen.is_none_or(|fields| !fields.is_empty()) {
-                            whole(slot, open);
-                        }
-                    }
+                    visit(body, HirChild::Expr(inner), params, demand, open, true);
                     return;
                 }
                 _ => {}
             }
         }
-        body.for_each_child(node, |child| visit(body, child, params, demand, open));
+        body.for_each_child(node, |child| {
+            visit(body, child, params, demand, open, captured)
+        });
     }
     let mut open = params.len();
     visit(
@@ -134,6 +128,7 @@ fn fields(body: &Body) -> Demand {
         &params,
         &mut demand,
         &mut open,
+        false,
     );
     Some(demand)
 }

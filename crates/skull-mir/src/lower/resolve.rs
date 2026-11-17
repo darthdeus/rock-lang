@@ -27,25 +27,23 @@ pub fn backend_variant(
         .functions_by_name
         .get(&name)
         .is_some_and(|l| l.len() >= 2);
-    if !has_variants {
-        return if serves_target(rep_backend, target) {
-            Ok(rep)
-        } else {
-            Err(NoServingBinding)
-        };
+    let mut exact = None;
+    let mut portable = None;
+    if has_variants
+        && visit_variant_group(ws, rep, |backend, candidate| {
+            if backend == target {
+                exact = Some(candidate);
+            } else if backend == FnBackend::Any && rep_backend != FnBackend::Any {
+                portable = Some(candidate);
+            }
+        })
+        && let Some(sibling) = exact.or(portable)
+    {
+        return Ok(sibling);
     }
-    if let Some(sib) = sibling_variant(ws, rep, target, true) {
-        return Ok(sib);
-    }
-    if rep_backend == FnBackend::Any {
-        return Ok(rep);
-    }
-    // rep is the other concrete backend (e.g. lua while target is js): an
-    // `Any` sibling can still serve as the portable fallback.
-    if let Some(sib) = sibling_variant(ws, rep, target, false) {
-        return Ok(sib);
-    }
-    Err(NoServingBinding)
+    serves_target(rep_backend, target)
+        .then_some(rep)
+        .ok_or(NoServingBinding)
 }
 
 /// The target-selected declaration for one target-neutral concrete instance.
@@ -65,154 +63,97 @@ pub fn backend_variant_instance(
 
 /// Use bone's backend order when recovering a group's representative.
 pub fn canonical_variant(ws: &Workspace, rep: FuncRef) -> FuncRef {
-    // `backend_variant_group` without its two allocations: every lowered call
-    // asks this, and most names have one member.
-    let key = ws.backend_variant_key(rep.module, rep.func);
-    let Some(cands) = ws.functions_by_name.get(&key.0) else {
-        return rep;
-    };
-    let mut seen = 0u8;
-    let mut best: Option<(bone_core::hir::FnBackend, FuncRef)> = None;
-    for &(module, func) in cands {
-        if ws.backend_variant_key(module, func) != key {
-            continue;
-        }
-        let backend = ws.module(module).functions[func].backend;
-        let bit = 1u8 << backend as u8;
-        if seen & bit != 0 {
-            return rep;
-        }
-        seen |= bit;
+    let mut best = None;
+    if visit_variant_group(ws, rep, |backend, candidate| {
         if best.is_none_or(|(least, _)| backend < least) {
-            best = Some((backend, FuncRef { module, func }));
+            best = Some((backend, candidate));
         }
+    }) {
+        best.map_or(rep, |(_, candidate)| candidate)
+    } else {
+        rep
     }
-    best.map_or(rep, |(_, member)| member)
 }
 
-/// A repeated backend is an overload ambiguity, so the member stays alone.
 pub fn backend_variant_group(ws: &Workspace, member: FuncRef) -> Vec<FuncRef> {
-    let key = ws.backend_variant_key(member.module, member.func);
-    let Some(cands) = ws.functions_by_name.get(&key.0) else {
-        return vec![member];
-    };
-    let group: Vec<FuncRef> = cands
-        .iter()
-        .filter(|&&(mid, fid)| ws.backend_variant_key(mid, fid) == key)
-        .map(|&(mid, fid)| FuncRef {
-            module: mid,
-            func: fid,
-        })
-        .collect();
-    let mut backends = std::collections::BTreeSet::new();
-    if group
-        .iter()
-        .all(|r| backends.insert(ws.module(r.module).functions[r.func].backend))
-    {
+    let mut group = Vec::new();
+    if visit_variant_group(ws, member, |_, candidate| group.push(candidate)) {
         group
     } else {
         vec![member]
     }
 }
 
-/// A same-name, same-signature sibling of `rep` whose backend serves `target`.
-pub fn sibling_variant(
+// A repeated backend is an overload ambiguity. Discard the group in that case.
+fn visit_variant_group(
     ws: &Workspace,
-    rep: FuncRef,
-    target: bone_core::hir::FnBackend,
-    exact: bool,
-) -> Option<FuncRef> {
-    use bone_core::hir::FnBackend;
-    for candidate in backend_variant_group(ws, rep) {
-        if candidate == rep {
-            continue;
+    member: FuncRef,
+    mut visit: impl FnMut(bone_core::hir::FnBackend, FuncRef),
+) -> bool {
+    let key = ws.backend_variant_key(member.module, member.func);
+    let Some(candidates) = ws.functions_by_name.get(&key.0) else {
+        return false;
+    };
+    let mut seen = 0u8;
+    for &(module, func) in candidates {
+        if ws.backend_variant_key(module, func) == key {
+            let backend = ws.module(module).functions[func].backend;
+            let bit = 1u8 << backend as u8;
+            if seen & bit != 0 {
+                return false;
+            }
+            seen |= bit;
+            visit(backend, FuncRef { module, func });
         }
-        let f = &ws.module(candidate.module).functions[candidate.func];
-        let ok = if exact {
-            f.backend == target
-        } else {
-            f.backend == FnBackend::Any || f.backend == target
-        };
-        if !ok {
-            continue;
-        }
-        return Some(candidate);
     }
-    None
+    true
 }
 
 impl<'a> Builder<'a> {
     pub(crate) fn lower_expr_repr(&mut self, e: Idx<Expr>) -> Result<ValueBundle, CompilerError> {
-        // Use the expression's own span for errors on the unboxed path.
-        let outer = self.cur_span.replace(self.body.expr_spans[e]);
-        let outer_expr = self.cur_expr.replace(e);
-        let out = match self.flat_ref_read(e) {
-            Ok(Some(read)) => Ok(read),
-            Ok(None) => self.lower_expr_repr_inner(e),
-            Err(err) => Err(err),
-        };
-        let out = out.map_err(|e| self.located(e));
-        self.cur_span = outer;
-        self.cur_expr = outer_expr;
-        out
+        self.lower_expr_repr_at(e, false)
     }
 
     fn lower_expr_repr_inner(&mut self, e: Idx<Expr>) -> Result<ValueBundle, CompilerError> {
+        self.lower_expr_repr_at(e, true)
+    }
+
+    fn lower_expr_repr_at(
+        &mut self,
+        e: Idx<Expr>,
+        check_flat_read: bool,
+    ) -> Result<ValueBundle, CompilerError> {
         let outer = self.cur_span.replace(self.body.expr_spans[e]);
-        let outer_expr = self.cur_expr.replace(e);
-        let lowered = match self.flat_ref_read(e) {
-            Ok(Some(read)) => Ok(read),
-            Ok(None) => match self.body.expr_arena[e] {
-                Expr::Var(binding)
-                    if self
-                        .preflight_reads
-                        .iter()
-                        .rev()
-                        .any(|reads| reads.contains_key(&raw(binding))) =>
-                {
-                    let value = ValueRepr::Scalar(
-                        *self
-                            .preflight_reads
-                            .iter()
-                            .rev()
-                            .find_map(|reads| reads.get(&raw(binding)))
-                            .unwrap(),
-                    );
-                    self.value_bundle_for_expr(e, value)
+        let out = self.with_site_expr(e, |s| {
+            let result = (|| {
+                let bundle = match s.flat_ref_read(e)? {
+                    Some(read) if !check_flat_read => return Ok(read),
+                    Some(read) => read,
+                    None => match s.body.expr_arena[e] {
+                        Expr::Var(binding) if let Some(value) = s.preflight_value(binding) => {
+                            s.value_bundle_for_expr(e, ValueRepr::Scalar(value))?
+                        }
+                        Expr::Call { callee, args, .. } => s.lower_call_repr(e, callee, args)?,
+                        Expr::Index { base, index } => s.lower_index_repr(e, base, index)?,
+                        _ => {
+                            let value = s.lower_expr_repr_unscoped(e)?;
+                            s.value_bundle_for_expr(e, value)?
+                        }
+                    },
+                };
+                if let ValueRepr::Scalar(value) = bundle.value() {
+                    let value = s.check_field_value(e, *value);
+                    s.mark_record_base(e, value);
+                    return Ok(ValueBundle::new(
+                        bundle.representation(),
+                        ValueRepr::Scalar(value),
+                    ));
                 }
-                Expr::Call { callee, args, .. } => self.lower_call_repr(e, callee, args),
-                Expr::Index { base, index } => self.lower_index_repr(e, base, index),
-                _ => self
-                    .lower_expr_repr_unscoped(e)
-                    .and_then(|value| self.value_bundle_for_expr(e, value)),
-            },
-            Err(err) => Err(err),
-        };
-        let out = lowered.map(|bundle| match bundle.value() {
-            ValueRepr::Scalar(v) if self.f32_round_exprs.contains(&e) => {
-                let representation = bundle.representation();
-                let value = self.emit_cur(Inst::FloatToF32(*v));
-                ValueBundle::new(representation, ValueRepr::Scalar(value))
-            }
-            _ => bundle,
+                Ok(bundle)
+            })();
+            result.map_err(|err| s.located(err))
         });
-        let out = out.map(|bundle| match bundle.value() {
-            ValueRepr::Scalar(value) if self.integer_field_checks.contains_key(&e) => {
-                let representation = bundle.representation();
-                let value =
-                    self.check_integer_field(*value, self.integer_field_checks.get(&e).copied());
-                ValueBundle::new(representation, ValueRepr::Scalar(value))
-            }
-            _ => bundle,
-        });
-        let out = out.map_err(|e| self.located(e));
-        if let Ok(bundle) = &out
-            && let ValueRepr::Scalar(value) = bundle.value()
-        {
-            self.mark_record_base(e, *value);
-        }
         self.cur_span = outer;
-        self.cur_expr = outer_expr;
         out
     }
 

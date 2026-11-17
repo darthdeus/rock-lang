@@ -467,6 +467,13 @@ impl<'a> Builder<'a> {
         }))
     }
 
+    pub(super) fn preflight_value(&self, binding: Idx<BindingInfo>) -> Option<Idx<Inst>> {
+        self.preflight_reads
+            .iter()
+            .rev()
+            .find_map(|reads| reads.get(&raw(binding)).copied())
+    }
+
     fn emit_preflight(
         &mut self,
         e: Idx<Expr>,

@@ -365,24 +365,14 @@ impl<'a> Verifier<'a> {
                 continue;
             }
             let inst = &mf.insts[iid];
-            let mut operands = Vec::new();
-            inst.uses_each(&mut |o| operands.push(o));
-            for &o in &operands {
-                self.check_operand(bid, Some(iid), o);
-            }
-            let mut cells = Vec::new();
-            inst.cells_each(&mut |c| cells.push(c));
-            for c in cells {
-                self.check_cell(Some(bid), Some(iid), c, "operand");
-            }
+            inst.uses_each(&mut |operand| self.check_operand(bid, Some(iid), operand));
+            inst.cells_each(&mut |cell| self.check_cell(Some(bid), Some(iid), cell, "operand"));
             self.check_inst(bid, iid, inst);
             self.defined[raw(iid)] = true;
         }
-        let mut operands = Vec::new();
-        block.term.uses_each(&mut |o| operands.push(o));
-        for o in operands {
-            self.check_operand(bid, None, o);
-        }
+        block
+            .term
+            .uses_each(&mut |operand| self.check_operand(bid, None, operand));
         match &block.term {
             Term::Yield { .. } if !mf.is_coroutine => {
                 self.report(
@@ -527,8 +517,7 @@ impl<'a> Verifier<'a> {
                 .collect::<Vec<_>>(),
             crate::mir::ValueCtorForm::Leaves => crate::lower::value_leaf_paths(shape),
         };
-        let actual = fields.iter().map(|(field, _)| *field).collect::<Vec<_>>();
-        if actual != expected {
+        if !fields.iter().map(|(field, _)| *field).eq(expected) {
             report(format!(
                 "value constructor fields do not match its {form:?} representation"
             ));

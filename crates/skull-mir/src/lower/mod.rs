@@ -177,7 +177,7 @@ mod pattern;
 mod resolve;
 pub use resolve::{
     NoServingBinding, backend_variant, backend_variant_group, backend_variant_instance,
-    canonical_variant, sibling_variant,
+    canonical_variant,
 };
 mod stmt;
 mod storage;
