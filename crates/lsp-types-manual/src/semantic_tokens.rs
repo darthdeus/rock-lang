@@ -87,7 +87,8 @@ lsp_struct! {
     pub struct SemanticTokensLegend {
         /// The token types a server uses.
         required pub token_types: Vec<SemanticTokenType> = "tokenTypes",
-        required pub token_modifiers: Vec<SemanticTokenModifier> = "tokenModifiers",}
+        required pub token_modifiers: Vec<SemanticTokenModifier> = "tokenModifiers",
+    }
 }
 
 /// The actual tokens.
@@ -181,7 +182,8 @@ lsp_struct! {
     pub struct SemanticTokensDelta {
         optional pub result_id: String = "resultId",
         /// <https://github.com/microsoft/vscode-extension-samples/blob/5ae1f7787122812dcc84e37427ca90af5ee09f14/semantic-tokens-sample/vscode.proposed.d.ts#L131>
-        required pub edits: Vec<SemanticTokensEdit> = "edits",}
+        required pub edits: Vec<SemanticTokensEdit> = "edits",
+    }
 }
 
 lsp_struct! {
@@ -190,7 +192,8 @@ lsp_struct! {
     pub struct SemanticTokensDeltaParams {
         /// The text document.
         required pub text_document: TextDocumentIdentifier = "textDocument",
-        required pub previous_result_id: String = "previousResultId",}
+        required pub previous_result_id: String = "previousResultId",
+    }
 }
 
 #[cfg(test)]

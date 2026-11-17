@@ -8,7 +8,8 @@ lsp_struct! {
         /// The hover's content
         required pub contents: HoverContents = "contents",
         /// that is used to visualize a hover, e.g. by changing the background color.
-        optional pub range: Range = "range",}
+        optional pub range: Range = "range",
+    }
 }
 
 /// Markdown or plain text shown by a hover.

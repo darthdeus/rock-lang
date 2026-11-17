@@ -11,7 +11,8 @@ lsp_struct! {
         required pub label: InlayHintLabel = "label",
         optional pub kind: InlayHintKind = "kind",
         optional pub padding_left: bool = "paddingLeft",
-        optional pub padding_right: bool = "paddingRight",}
+        optional pub padding_right: bool = "paddingRight",
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -28,7 +29,8 @@ lsp_struct! {
     /// of inlay hints.
     #[derive(Debug, Clone, Default)]
     pub struct InlayHintLabelPart {
-        required pub value: String = "value",}
+        required pub value: String = "value",
+    }
 }
 
 /// Inlay hint kinds.

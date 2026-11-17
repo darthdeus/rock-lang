@@ -9,7 +9,8 @@ lsp_struct! {
     pub struct DocumentHighlight {
         /// The range this highlight applies to.
         required pub range: Range = "range",
-        optional pub kind: DocumentHighlightKind = "kind",}
+        optional pub kind: DocumentHighlightKind = "kind",
+    }
 }
 
 /// A document highlight kind.

@@ -34,7 +34,8 @@ lsp_struct! {
     pub struct CompletionParams {
         required pub text_document: TextDocumentIdentifier = "textDocument",
         required pub position: Position = "position",
-        optional pub context: CompletionContext = "context",}
+        optional pub context: CompletionContext = "context",
+    }
 }
 
 lsp_struct! {
@@ -44,7 +45,8 @@ lsp_struct! {
         /// How the completion was triggered.
         required pub trigger_kind: CompletionTriggerKind = "triggerKind",
         /// Is undefined if `triggerKind !== CompletionTriggerKind.TriggerCharacter`
-        optional pub trigger_character: String = "triggerCharacter",}
+        optional pub trigger_character: String = "triggerCharacter",
+    }
 }
 
 /// How a completion was triggered.
@@ -65,7 +67,8 @@ lsp_struct! {
         /// This list it not complete. Further typing should result in recomputing
         /// this list.
         required pub is_incomplete: bool = "isIncomplete",
-        required pub items: Vec<CompletionItem> = "items",}
+        required pub items: Vec<CompletionItem> = "items",
+    }
 }
 
 lsp_struct! {
@@ -99,7 +102,8 @@ lsp_struct! {
         /// selecting this completion. Edits must not overlap with the main edit
         /// nor with themselves.
         optional pub additional_text_edits: Vec<TextEdit> = "additionalTextEdits",
-        optional pub command: Command = "command",}
+        optional pub command: Command = "command",
+    }
 }
 
 lsp_struct! {
@@ -115,5 +119,6 @@ lsp_struct! {
         optional pub detail: String = "detail",
         /// {@link CompletionItemLabel.detail}. Should be used for fully qualified
         /// names or file path.
-        optional pub description: String = "description",}
+        optional pub description: String = "description",
+    }
 }

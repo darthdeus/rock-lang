@@ -8,7 +8,8 @@ lsp_struct! {
         /// The document in which the command was invoked.
         required pub text_document: TextDocumentIdentifier = "textDocument",
         required pub range: Range = "range",
-        required pub context: CodeActionContext = "context",}
+        required pub context: CodeActionContext = "context",
+    }
 }
 
 #[derive(Debug, Eq, PartialEq, Hash, PartialOrd, Clone)]
@@ -50,7 +51,8 @@ lsp_struct! {
         required pub title: String = "title",
         optional pub kind: CodeActionKind = "kind",
         optional pub diagnostics: Vec<Diagnostic> = "diagnostics",
-        optional pub edit: WorkspaceEdit = "edit",}
+        optional pub edit: WorkspaceEdit = "edit",
+    }
 }
 
 lsp_struct! {
@@ -59,7 +61,8 @@ lsp_struct! {
     /// a code action is run.
     #[derive(Debug, Eq, PartialEq, Clone, Default)]
     pub struct CodeActionContext {
-        required pub diagnostics: Vec<Diagnostic> = "diagnostics",}
+        required pub diagnostics: Vec<Diagnostic> = "diagnostics",
+    }
 }
 
 #[cfg(test)]

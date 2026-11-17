@@ -107,7 +107,8 @@ lsp_struct! {
         ///
         /// If the character value is greater than the line length it defaults back
         /// to the line length.
-        required pub character: u32 = "character",}
+        required pub character: u32 = "character",
+    }
 }
 
 impl Position {
@@ -124,7 +125,8 @@ lsp_struct! {
     pub struct Range {
         /// The range's start position.
         required pub start: Position = "start",
-        required pub end: Position = "end",}
+        required pub end: Position = "end",
+    }
 }
 
 impl Range {
@@ -139,7 +141,8 @@ lsp_struct! {
     #[derive(Debug, Eq, PartialEq, Clone, Hash)]
     pub struct Location {
         required pub uri: Uri = "uri",
-        required pub range: Range = "range",}
+        required pub range: Range = "range",
+    }
 }
 
 lsp_struct! {
@@ -155,7 +158,8 @@ lsp_struct! {
         optional pub code: NumberOrString = "code",
         /// diagnostic, e.g. 'typescript' or 'super lint'.
         optional pub source: String = "source",
-        required pub message: String = "message",}
+        required pub message: String = "message",
+    }
 }
 
 /// The protocol currently supports the following diagnostic severities:
@@ -185,7 +189,8 @@ lsp_struct! {
         required pub title: String = "title",
         required pub command: String = "command",
         /// invoked with.
-        optional pub arguments: Vec<Value> = "arguments",}
+        optional pub arguments: Vec<Value> = "arguments",
+    }
 }
 
 lsp_struct! {
@@ -201,7 +206,8 @@ lsp_struct! {
         /// text into a document create a range where start === end.
         required pub range: Range = "range",
         /// empty string.
-        required pub new_text: String = "newText",}
+        required pub new_text: String = "newText",
+    }
 }
 
 lsp_struct! {
@@ -229,7 +235,8 @@ lsp_struct! {
     #[derive(Debug, Eq, PartialEq, Clone)]
     pub struct TextDocumentIdentifier {
         /// The text document's URI.
-        required pub uri: Uri = "uri",}
+        required pub uri: Uri = "uri",
+    }
 }
 
 lsp_struct! {
@@ -237,7 +244,8 @@ lsp_struct! {
     /// Params of a request about a whole text document.
     #[derive(Debug, Eq, PartialEq, Clone)]
     pub struct TextDocumentParams {
-        required pub text_document: TextDocumentIdentifier = "textDocument",}
+        required pub text_document: TextDocumentIdentifier = "textDocument",
+    }
 }
 
 lsp_struct! {
@@ -246,7 +254,8 @@ lsp_struct! {
     #[derive(Debug, Eq, PartialEq, Clone)]
     pub struct TextDocumentRangeParams {
         required pub text_document: TextDocumentIdentifier = "textDocument",
-        required pub range: Range = "range",}
+        required pub range: Range = "range",
+    }
 }
 
 lsp_struct! {
@@ -256,7 +265,8 @@ lsp_struct! {
     pub struct TextDocumentPositionParams {
         /// The text document.
         required pub text_document: TextDocumentIdentifier = "textDocument",
-        required pub position: Position = "position",}
+        required pub position: Position = "position",
+    }
 }
 
 /// A symbol kind.
@@ -281,7 +291,8 @@ lsp_struct! {
     pub struct PublishDiagnosticsParams {
         /// The URI for which diagnostic information is reported.
         required pub uri: Uri = "uri",
-        required pub diagnostics: Vec<Diagnostic> = "diagnostics",}
+        required pub diagnostics: Vec<Diagnostic> = "diagnostics",
+    }
 }
 
 #[derive(Debug, Eq, PartialEq, Clone)]
@@ -301,7 +312,8 @@ lsp_struct! {
     pub struct ExecuteCommandParams {
         /// The identifier of the actual command handler.
         required pub command: String = "command",
-        required pub arguments: Vec<Value> = "arguments",}
+        required pub arguments: Vec<Value> = "arguments",
+    }
 }
 
 /// Describes the content type that a client supports in various
@@ -354,7 +366,8 @@ lsp_struct! {
     #[derive(Debug, Eq, PartialEq, Clone)]
     pub struct MarkupContent {
         required pub kind: MarkupKind = "kind",
-        required pub value: String = "value",}
+        required pub value: String = "value",
+    }
 }
 
 #[cfg(test)]

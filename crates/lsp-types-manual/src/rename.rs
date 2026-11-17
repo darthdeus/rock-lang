@@ -6,5 +6,6 @@ lsp_struct! {
     pub struct RenameParams {
         required pub text_document: TextDocumentIdentifier = "textDocument",
         required pub position: Position = "position",
-        required pub new_name: String = "newName",}
+        required pub new_name: String = "newName",
+    }
 }

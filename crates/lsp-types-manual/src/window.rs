@@ -12,5 +12,6 @@ lsp_struct! {
     #[derive(Debug, Eq, PartialEq, Clone)]
     pub struct ShowMessageParams {
         required pub typ: MessageType = "type",
-        required pub message: String = "message",}
+        required pub message: String = "message",
+    }
 }

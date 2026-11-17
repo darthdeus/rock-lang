@@ -13,7 +13,8 @@ lsp_struct! {
         required pub kind: SymbolKind = "kind",
         required pub range: Range = "range",
         required pub selection_range: Range = "selectionRange",
-        optional pub children: Vec<DocumentSymbol> = "children",}
+        optional pub children: Vec<DocumentSymbol> = "children",
+    }
 }
 
 lsp_struct! {
@@ -25,7 +26,8 @@ lsp_struct! {
         required pub name: String = "name",
         required pub kind: SymbolKind = "kind",
         required pub location: Location = "location",
-        optional pub container_name: String = "containerName",}
+        optional pub container_name: String = "containerName",
+    }
 }
 
 lsp_struct! {
@@ -34,5 +36,6 @@ lsp_struct! {
     #[derive(Debug, Eq, PartialEq, Clone, Default)]
     pub struct WorkspaceSymbolParams {
         /// A non-empty query string
-        required pub query: String = "query",}
+        required pub query: String = "query",
+    }
 }
