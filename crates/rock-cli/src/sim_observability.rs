@@ -20,6 +20,17 @@ mod timing;
 
 const SCHEMA_VERSION: u64 = 1;
 
+/// The history root: the explicit flag, then `ROCK_SIM_LOG_DIR`, then
+/// `.sim-runs`, shared by the recorder and report reader.
+pub(crate) fn history_root(explicit: Option<&str>) -> PathBuf {
+    if let Some(dir) = explicit {
+        return PathBuf::from(dir);
+    }
+    std::env::var_os("ROCK_SIM_LOG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".sim-runs"))
+}
+
 #[derive(Clone)]
 pub(crate) struct SimRunRecorder {
     inner: Arc<Mutex<State>>,
@@ -53,9 +64,7 @@ impl SimRunRecorder {
         quiet: bool,
         requested_jobs: Option<usize>,
     ) -> Self {
-        let root = std::env::var_os("ROCK_SIM_LOG_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(".sim-runs"));
+        let root = history_root(None);
         Self::begin_at_with_root(&root, project, selection, quiet, requested_jobs)
     }
 

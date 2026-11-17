@@ -32,17 +32,6 @@ const SCHEMA_VERSION: i64 = 1;
 // Locating runs
 // ---------------------------------------------------------------------------
 
-/// The history root: the explicit flag, then `ROCK_SIM_LOG_DIR`, then
-/// `.sim-runs` -- the same order `SimRunRecorder::begin` resolves.
-pub(crate) fn resolve_root(explicit: Option<&str>) -> PathBuf {
-    if let Some(dir) = explicit {
-        return PathBuf::from(dir);
-    }
-    std::env::var_os("ROCK_SIM_LOG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(".sim-runs"))
-}
-
 /// Run ids are `<unix-ms>-<pid>-<counter>`. Sorting on the parsed parts keeps
 /// "most recent" correct when the millisecond field changes width; ids that do
 /// not parse sort last by name so a hand-copied directory still resolves.
@@ -1743,7 +1732,7 @@ pub(crate) fn run(
     if !matches!(format, "pretty" | "json") {
         bail!("sim-report format must be `pretty` or `json`, got `{format}`")
     }
-    let root = resolve_root(log_dir);
+    let root = crate::sim_observability::history_root(log_dir);
 
     if let Some(name) = entry_name {
         let (rows, scanned, unreadable) = cross_run_rows(&root, name)?;
