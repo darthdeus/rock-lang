@@ -107,35 +107,22 @@ fn sprite_batchs_light_arrays_pay_stride_16_for_scalars() {
 // ENTRY adds a Vec4 to each of three arrays.
 
 #[test]
-fn three_vec4_arrays_fit_at_capacity_341() {
-    let p = uniform_array_block(
-        Ustr::from("arrays"),
-        &[
-            decl("a", WireKind::F32x4, 341),
-            decl("b", WireKind::F32x4, 341),
-            decl("c", WireKind::F32x4, 341),
-        ],
-    )
-    .expect("48 * 341 = 16368, inside the 16384 guarantee");
-    assert_eq!(p.size, 16368);
-}
-
-#[test]
-fn three_vec4_arrays_fail_at_capacity_342() {
-    let e = uniform_array_block(
-        Ustr::from("arrays"),
-        &[
-            decl("a", WireKind::F32x4, 342),
-            decl("b", WireKind::F32x4, 342),
-            decl("c", WireKind::F32x4, 342),
-        ],
-    )
-    .expect_err("48 * 342 = 16416, over the guarantee");
-    assert!(
-        e.message.contains("16416") && e.message.contains("16384"),
-        "must name the size and the budget: {}",
-        e.message
-    );
+fn three_vec4_arrays_straddle_the_portable_limit() {
+    for (capacity, expected_size) in [(341, Some(16368)), (342, None)] {
+        let members = ["a", "b", "c"].map(|name| decl(name, WireKind::F32x4, capacity));
+        let result = uniform_array_block(Ustr::from("arrays"), &members);
+        if let Some(size) = expected_size {
+            assert_eq!(result.expect("48 * 341 = 16368 fits").size, size);
+        } else {
+            let message = result
+                .expect_err("48 * 342 = 16416 exceeds the limit")
+                .message;
+            assert!(
+                message.contains("16416") && message.contains("16384"),
+                "must name the size and the budget: {message}"
+            );
+        }
+    }
 }
 
 /// A FOURTH `Vec4[256]` array fits, at exactly the guarantee. The limit is a
@@ -159,64 +146,46 @@ fn a_fourth_vec4_256_array_fits_exactly() {
 // the two cannot drift into disagreeing about what an array may hold.
 
 #[test]
-fn an_empty_array_block_is_rejected() {
-    let e = uniform_array_block(Ustr::from("arrays"), &[])
-        .expect_err("a block with no members binds nothing");
-    assert!(e.message.contains("no members"), "{}", e.message);
-}
-
-#[test]
-fn a_zero_capacity_array_is_rejected() {
-    let e = uniform_array_block(Ustr::from("arrays"), &[decl("a", WireKind::F32x4, 0)])
-        .expect_err("@size(0) declares an array nothing can index");
-    assert!(e.message.contains("capacity"), "{}", e.message);
-}
-
-/// `Vec3` is the std140 trap the emitter already refuses: base alignment 16 but
-/// size 12, so an array of them is neither tightly packed nor stride-12.
-#[test]
-fn a_vec3_array_is_rejected() {
-    let e = uniform_array_block(Ustr::from("arrays"), &[decl("a", WireKind::F32x3, 4)])
-        .expect_err("Vec3 arrays are not admitted");
-    assert!(
-        e.message.contains("Vec3") || e.message.contains("element"),
-        "{}",
-        e.message
-    );
-}
-
-#[test]
-fn a_mat4_array_is_rejected() {
-    let e = uniform_array_block(Ustr::from("arrays"), &[decl("a", WireKind::Mat4, 4)])
-        .expect_err("Mat4 arrays are not admitted");
-    assert!(
-        e.message.contains("Mat4") || e.message.contains("element"),
-        "{}",
-        e.message
-    );
-}
-
-/// `uint` has a std140 form as a scalar block member, but the host array lane
-/// has no push for it: `__array_push` knows float, int, Vec2 and Vec4 only, so a
-/// declared `uint[N]` member could never be filled and the upload gate would
-/// refuse every draw. The layout admits exactly what the host can pack.
-#[test]
-fn a_uint_array_is_rejected() {
-    let e = uniform_array_block(Ustr::from("arrays"), &[decl("a", WireKind::U32, 4)])
-        .expect_err("uint arrays are not admitted");
-    assert!(e.message.contains("`uint`"), "{}", e.message);
-    assert!(
-        e.message.contains("allowed: float, int, Vec2, Vec4"),
-        "{}",
-        e.message
-    );
-}
-
-#[test]
-fn a_bool_array_is_rejected() {
-    let e = uniform_array_block(Ustr::from("arrays"), &[decl("a", WireKind::Bool32, 4)])
-        .expect_err("bool arrays are not admitted");
-    assert!(e.message.contains("`bool`"), "{}", e.message);
+fn array_rejections_keep_the_specific_reason() {
+    let cases = [
+        ("empty", vec![], &["no members"][..]),
+        (
+            "zero capacity",
+            vec![decl("a", WireKind::F32x4, 0)],
+            &["capacity"][..],
+        ),
+        (
+            "Vec3",
+            vec![decl("a", WireKind::F32x3, 4)],
+            &["element type `Vec3`", "allowed: float, int, Vec2, Vec4"][..],
+        ),
+        (
+            "Mat4",
+            vec![decl("a", WireKind::Mat4, 4)],
+            &["element type `Mat4`", "allowed: float, int, Vec2, Vec4"][..],
+        ),
+        (
+            "uint",
+            vec![decl("a", WireKind::U32, 4)],
+            &["element type `uint`", "allowed: float, int, Vec2, Vec4"][..],
+        ),
+        (
+            "bool",
+            vec![decl("a", WireKind::Bool32, 4)],
+            &["element type `bool`", "allowed: float, int, Vec2, Vec4"][..],
+        ),
+    ];
+    for (case, members, fragments) in cases {
+        let message = uniform_array_block(Ustr::from("arrays"), &members)
+            .expect_err(case)
+            .message;
+        for fragment in fragments {
+            assert!(
+                message.contains(fragment),
+                "{case}: missing `{fragment}`: {message}"
+            );
+        }
+    }
 }
 
 /// The fingerprint separates layouts a size comparison cannot. Two blocks with
@@ -296,26 +265,18 @@ fn an_array_block_fingerprint_differs_from_a_scalar_blocks() {
 // function exists to enforce. Both are rejections that must arrive as
 // diagnostics.
 
-/// Exactly the wrap point: 2^28 * 16 == 2^32, which is 0 in u32.
+/// The wrap point and maximum input both exceed the budget after checked math.
 #[test]
-fn a_capacity_at_the_u32_wrap_point_is_rejected() {
-    let e = uniform_array_block(Ustr::from("arrays"), &[decl("a", WireKind::F32x4, 1 << 28)])
-        .expect_err("2^28 * 16 wraps to 0 in u32 and would pass the budget");
-    assert!(
-        e.message.contains("16384"),
-        "must reject against the budget, not wrap past it: {}",
-        e.message
-    );
-}
-
-#[test]
-fn the_largest_possible_capacity_is_rejected() {
-    let e = uniform_array_block(
-        Ustr::from("arrays"),
-        &[decl("a", WireKind::F32x4, u32::MAX)],
-    )
-    .expect_err("u32::MAX elements is not a block");
-    assert!(e.message.contains("16384"), "{}", e.message);
+fn overflowing_member_capacities_are_rejected() {
+    for (case, capacity) in [("u32 wrap point", 1 << 28), ("largest capacity", u32::MAX)] {
+        let message = uniform_array_block(
+            Ustr::from("arrays"),
+            &[decl("a", WireKind::F32x4, capacity)],
+        )
+        .expect_err(case)
+        .message;
+        assert!(message.contains("16384"), "{case}: {message}");
+    }
 }
 
 /// The sum across members can overflow even when each member alone does not.
@@ -331,14 +292,4 @@ fn a_capacity_sum_that_would_overflow_is_rejected() {
     )
     .expect_err("the two together exceed u32 at stride 16");
     assert!(e.message.contains("16384"), "{}", e.message);
-}
-
-/// The largest capacity that DOES fit, so the rejections above are a boundary and
-/// not a blanket refusal of anything large: one Vec4 array at 1024 elements is
-/// exactly 16384.
-#[test]
-fn the_largest_fitting_single_array_is_accepted() {
-    let p = uniform_array_block(Ustr::from("arrays"), &[decl("a", WireKind::F32x4, 1024)])
-        .expect("1024 * 16 = 16384, exactly the guarantee");
-    assert_eq!(p.size, 16384);
 }
