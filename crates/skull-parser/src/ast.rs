@@ -7,7 +7,6 @@
 
 use crate::OrderedFloat;
 pub use comfy_la_arena::{Arena, Idx};
-use rock_core::source_code::Dialect;
 use rock_core::{CompilerError, Span};
 use rock_tokenizer::TokenKind;
 use ustr::Ustr;
@@ -116,9 +115,9 @@ pub enum InterpolatedPart {
     Expr(Idx<ExprData>, Option<FormatSpec>),
 }
 
-/// A `::` path (modules-v1 grammar): `a::b::c`, `self::x`, `super::super::y`,
-/// or the root-anchored `::a::b`. Resolution (owner package, lexical first
-/// segment) is a lowering concern; the parser only records the segments.
+/// A name path (modules-v1 grammar), including one-segment shorthand pattern
+/// names. Resolution (owner package, lexical first segment) is a lowering
+/// concern; the parser only records the segments.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Path {
     /// `::a::b` — anchored at the package root, bypassing local shadowing.
@@ -151,10 +150,6 @@ pub enum ExprKind {
     Hole(u32, Option<Ustr>),
 
     Ident(Ident),
-    QualifiedIdent {
-        base: Ident,
-        member: Ident,
-    },
     /// `p::f`, `E::V`, `p::Type` — a modules-v1 value-position path. The
     /// generic args of `p::Type<T>` (a type used as a value, not followed by
     /// a call's parens) ride here; `p::f<T>(x)` puts them on the FunctionCall
@@ -163,7 +158,7 @@ pub enum ExprKind {
         path: Path,
         generic_args: Vec<Idx<TypeExprData>>,
     },
-    /// `p::Type { f: v }` / `p::E::V { f: v }` — a qualified record literal.
+    /// A record literal; one unrooted segment is an unqualified type name.
     PathStructLiteral {
         path: Path,
         bases: Vec<Idx<ExprData>>,
@@ -232,23 +227,6 @@ pub enum ExprKind {
 
     Tuple(Vec<Idx<ExprData>>),
 
-    /// `Name { f1: v1, f2 + f3: v, f4 }` — each entry is (field names, value);
-    /// shorthand `{ x }` expands to `([x], Ident(x))`, mirroring rock.
-    StructLiteral {
-        name: Ident,
-        /// `..base` operands (functional update), in source order, always
-        /// preceding `fields`. Empty for a plain literal.
-        bases: Vec<Idx<ExprData>>,
-        fields: Vec<(Vec<Ident>, Idx<ExprData>)>,
-    },
-
-    /// `Enum::Variant { fields }` — qualified record-variant construction.
-    EnumVariantRecord {
-        enum_name: Ident,
-        variant_name: Ident,
-        fields: Vec<(Vec<Ident>, Idx<ExprData>)>,
-    },
-
     Match {
         scrutinee: Idx<ExprData>,
         arms: Vec<MatchArm>,
@@ -316,23 +294,12 @@ pub enum Pattern {
     Ident(Ident),
     Literal(Idx<ExprData>),
     Tuple(Vec<Pattern>),
-    EnumVariant {
-        enum_name: Option<Ident>,
-        variant_name: Ident,
-        args: Option<Vec<Pattern>>,
-    },
-    /// `p::E::V(..)` (modules-v1) — a variant pattern behind a path.
+    /// A variant pattern. A one-segment path is a shorthand variant name.
     PathVariant {
         path: Path,
         args: Option<Vec<Pattern>>,
     },
-    Record {
-        enum_name: Option<Ident>,
-        name: Option<Ident>,
-        fields: Vec<(Ident, Pattern)>,
-        rest: bool,
-    },
-    /// `p::Type { f: pat, .. }` (modules-v1) — a record pattern behind a path.
+    /// A record pattern, including enum record variants and one-segment names.
     PathRecord {
         path: Path,
         fields: Vec<(Ident, Pattern)>,
@@ -871,9 +838,6 @@ pub struct Ast {
     /// for the whole module -- independent of item spans (which macro expansion
     /// can retag) and defined even for an item-less module.
     pub file: Ustr,
-    /// The source dialect field is retained for compatibility; parsing uses
-    /// modules-v1 grammar.
-    pub dialect: Dialect,
     /// The owning package (set by the loader from the package graph; `None`
     /// for standalone/editor sources). Package loaders stamp graph facts here.
     pub package: Option<rock_core::source_code::PackageTag>,

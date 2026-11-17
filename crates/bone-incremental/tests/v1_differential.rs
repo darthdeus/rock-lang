@@ -25,7 +25,7 @@ use bone_core::modules::NsAliases;
 use bone_incremental::session::{BodyId, Session, SessionFile, UpdateResult, UpdateTier};
 use bone_semantic::hir::{BodyOwner, CallFamily, Expr, Module, TypeCtor, TypeExpr};
 use bone_semantic::prelude::*;
-use skull_parser::{Ast, Dialect};
+use skull_parser::Ast;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -41,14 +41,7 @@ fn warm_path() -> String {
 const WARM: &str = "fn warm_one() -> int {\n    1\n}\n\nfn warm_two() -> int {\n    2\n}\n";
 
 fn warm() -> Vec<Ast> {
-    vec![
-        skull_parser::parse_module_with_dialect(
-            WARM,
-            Ustr::from(warm_path().as_str()),
-            Dialect::V1,
-        )
-        .expect("warm parses"),
-    ]
+    vec![skull_parser::parse_module(WARM, Ustr::from(warm_path().as_str())).expect("warm parses")]
 }
 
 // ---------------------------------------------------------------------------
@@ -205,7 +198,7 @@ fn expr_reference(module: &Module, expr: &Expr) -> Option<(&'static str, Ustr, O
         CallFamily::Merged { name, .. } => module.call_families.get(name).map(|members| {
             let mut shown: Vec<String> = members
                 .iter()
-                .map(|m| format!("{}/{:?}/{:?}", m.key, m.owner, m.tier))
+                .map(|m| format!("{}/{:?}", m.key, m.tier))
                 .collect();
             shown.sort();
             shown.join(",")
@@ -226,11 +219,7 @@ fn parse(files: &[SessionFile]) -> Result<Vec<Ast>, CompilerError> {
     files
         .iter()
         .map(|f| {
-            let mut ast = skull_parser::parse_module_with_dialect(
-                &f.text,
-                Ustr::from(f.path.as_str()),
-                f.dialect,
-            )?;
+            let mut ast = skull_parser::parse_module(&f.text, Ustr::from(f.path.as_str()))?;
             ast.package = f.package.clone();
             Ok(ast)
         })
@@ -466,7 +455,7 @@ fn family(members: &[(&str, &str)]) -> Option<String> {
     Some(
         members
             .iter()
-            .map(|(key, tier)| format!("{key}/None/{tier}"))
+            .map(|(key, tier)| format!("{key}/{tier}"))
             .collect::<Vec<_>>()
             .join(","),
     )
@@ -862,11 +851,7 @@ fn gate_g_visibility_narrowed_and_widened_on_a_path_used_item() {
 
 /// The glob `warm_one` joined with the std prelude's.
 fn warm_one_family() -> Option<String> {
-    Some(format!(
-        "{}/None/Globs,warm_one/Some({})/Std",
-        key("b::warm_one"),
-        bone_core::modules::STD_PACKAGE_ID
-    ))
+    Some(format!("{}/Globs,warm_one/Std", key("b::warm_one")))
 }
 
 /// A private member added to a globbed module never opens through the glob,

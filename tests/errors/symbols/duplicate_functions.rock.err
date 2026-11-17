@@ -83,14 +83,14 @@ newtype Meters(float)
 fn main() {}
 
 //=== TEST CASE: same_decorator_twice_DuplicateSymbol ===
-//! expect: duplicate definition of decorator `reg`: already defined at test.rock:1
+//! expect: duplicate definition `reg` in module `<root>`
 deco init reg {}
 deco init reg {}
 
 fn main() {}
 
 //=== TEST CASE: same_decorator_across_files_DuplicateSymbol ===
-//! expect: duplicate definition of decorator `reg`: already defined at a.rock:1
+//! expect: duplicate definition `reg` in module `error_test`
 //--- FILE: a.rock ---
 deco init reg {}
 //--- FILE: b.rock ---
@@ -99,7 +99,7 @@ deco init reg {}
 fn main() {}
 
 //=== TEST CASE: decorator_params_do_not_distinguish_DuplicateSymbol ===
-//! expect: duplicate definition of decorator `reg`: already defined at test.rock:1
+//! expect: duplicate definition `reg` in module `<root>`
 deco init reg {}
 deco init reg(x: int) {}
 

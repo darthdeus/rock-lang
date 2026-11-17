@@ -50,8 +50,7 @@ fn parse_files(files: &Files) -> Result<Vec<skull_parser::Ast>, CompilerError> {
     let mut modules = Vec::with_capacity(files.len());
     for f in files {
         let (path, text) = (&f.path, &f.text);
-        let mut module =
-            skull_parser::parse_module_with_dialect(text, Ustr::from(path.as_str()), f.dialect)?;
+        let mut module = skull_parser::parse_module(text, Ustr::from(path.as_str()))?;
         // The oracle must see what the session sees: `Session::new` stamps
         // these same facts on every parse.
         module.package = f.package.clone();
@@ -267,7 +266,6 @@ impl Harness {
             self.session
                 .declare_file_facts(
                     path,
-                    skull_parser::Dialect::V1,
                     Some(common::package_tag(1, common::PACKAGE)),
                     skull_parser::GlobalPolicy::Any,
                 )
@@ -2296,7 +2294,6 @@ fn fuzz_session_fixture_package_graph() {
             let f = bone_incremental::session::SessionFile {
                 path: path.to_string_lossy().to_string(),
                 text,
-                dialect: node.dialect,
                 package: Some(common::package_tag(node.id.0, &node.self_name)),
                 global_policy: node.global_policy,
             };

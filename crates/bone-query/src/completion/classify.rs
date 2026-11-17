@@ -595,11 +595,8 @@ impl CompletionCx {
             let recv_ty = self.ast.as_ref().and_then(|cx| {
                 cx.call_receiver().and_then(|a| match a {
                     crate::cursor_context::ReceiverAnchor::ChainCall(name) => {
-                        fn_unique_return_ty_in_scope(
-                            ws,
-                            &name,
-                            crate::modules_scope::fragment(ws, ws.module(mid).file),
-                        )
+                        let frag = crate::modules_scope::fragment(ws, ws.module(mid).file)?;
+                        fn_unique_return_ty_in_scope(ws, &name, frag)
                     }
                     crate::cursor_context::ReceiverAnchor::End(e) => e
                         .checked_sub(1)
@@ -615,12 +612,8 @@ impl CompletionCx {
             // (`is_open: () => x|`), the body returns the field's RETURN type.
             // The parser keeps the source spelling, while workspace type
             // indexes use canonical keys for standalone files.
-            let sname = crate::modules_scope::resolve_type_key(
-                ws,
-                crate::modules_scope::fragment(ws, ws.module(mid).file),
-                sname,
-            )
-            .unwrap_or_else(|| ustr::Ustr::from(sname));
+            let sname =
+                crate::modules_scope::resolve_type_key_in_file(ws, ws.module(mid).file, sname)?;
             let slot = if *is_lambda {
                 crate::query::struct_field_fn_return_ty(ws, sname.as_str(), fname)
                     .or_else(|| crate::query::struct_field_ty(ws, sname.as_str(), fname))

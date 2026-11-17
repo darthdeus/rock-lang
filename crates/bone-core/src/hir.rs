@@ -210,10 +210,6 @@ pub struct Body {
     /// resolved in bone-inference, codegen'd in skull-mir. Never also in
     /// `arg_names`.
     pub spread_args: FxHashSet<Idx<Expr>>,
-    /// In a v1 fragment, an `Expr::Global` naming a std callable taken as a
-    /// value: the std package (`FamilyMember::owner`), since the bare key is
-    /// shared by compiler-owned definitions.
-    pub value_owners: FxHashMap<Idx<Expr>, crate::modules::PackageId>,
 
     // Owner's body expression:
     // - fn body (none for lua/extern)
@@ -300,7 +296,6 @@ impl Default for Body {
             method_call_recvs: Default::default(),
             method_names: Default::default(),
             spread_args: Default::default(),
-            value_owners: Default::default(),
 
             root: Default::default(),
             root_scope: None,
@@ -342,7 +337,6 @@ impl Body {
         self.method_call_recvs.shrink_to_fit();
         self.method_names.shrink_to_fit();
         self.spread_args.shrink_to_fit();
-        self.value_owners.shrink_to_fit();
         self.field_defaults.shrink_to_fit();
     }
 
@@ -930,15 +924,10 @@ pub enum Callee {
     Value(Idx<Expr>),
 }
 
-/// One member of a v1 call family: the overloads registered under `key`.
-/// A standard-library definition's key is its bare name. A member reached
-/// through the std view names the std package in `owner`, and only the
-/// stdlib's overloads belong to the member. `None` for a v1 DefKey, which
-/// only its definition carries.
+/// One member of a call family: the overloads registered under `key`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FamilyMember {
     pub key: Ustr,
-    pub owner: Option<crate::modules::PackageId>,
     pub tier: FamilyTier,
 }
 
@@ -958,12 +947,8 @@ pub enum FamilyTier {
 /// `resolve_callee` consumes this rather than a spelled last segment.
 #[derive(Copy, Clone, Debug)]
 pub enum CallFamily {
-    /// v1: the one definition the tiers bind, by canonical DefKey. `owner`
-    /// is as for [`FamilyMember`].
-    Resolved {
-        key: Ustr,
-        owner: Option<crate::modules::PackageId>,
-    },
+    /// The definition the tiers bind, by canonical DefKey.
+    Resolved(Ustr),
     /// A bare name whose overload family spans several definitions: a v1
     /// family spanning the lookup tiers. Lowering decides the member keys and
     /// records them under `name` in `Module::call_families` of the module lowered
@@ -978,24 +963,9 @@ impl CallFamily {
     /// family.
     pub fn key(&self) -> Ustr {
         match self {
-            CallFamily::Resolved { key, .. } => *key,
+            CallFamily::Resolved(key) => *key,
             CallFamily::Merged { name, .. } => *name,
         }
-    }
-
-    pub fn from_name(name: Ustr) -> Self {
-        CallFamily::Resolved {
-            key: name,
-            owner: None,
-        }
-    }
-
-    pub fn resolved(key: Ustr, owner: Option<crate::modules::PackageId>) -> Self {
-        CallFamily::Resolved { key, owner }
-    }
-
-    pub fn merged(name: Ustr, file: Ustr) -> Self {
-        CallFamily::Merged { name, file }
     }
 }
 

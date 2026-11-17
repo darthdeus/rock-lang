@@ -753,28 +753,21 @@ fn render_key(
 /// `key` with the callee's `$i$` replaced by the caller's bindings.
 fn substitute(key: &str, generics: &[String]) -> String {
     let mut out = String::new();
-    let bytes = key.as_bytes();
-    let mut copied = 0;
-    let mut cursor = 0;
-    while cursor < bytes.len() {
-        if bytes[cursor] == b'$' {
-            let mut end = cursor + 1;
-            while end < bytes.len() && bytes[end].is_ascii_digit() {
-                end += 1;
-            }
-            if end > cursor + 1 && end < bytes.len() && bytes[end] == b'$' {
-                out.push_str(&key[copied..cursor]);
-                let index = key[cursor + 1..end].parse::<usize>().ok();
-                let binding = index.and_then(|i| generics.get(i));
-                out.push_str(binding.map_or(ANY_KEY, String::as_str));
-                cursor = end + 1;
-                copied = cursor;
-                continue;
-            }
-        }
-        cursor += 1;
+    let mut rest = key;
+    while let Some(start) = rest.find('$') {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start + 1..];
+        let Some(end) = tail.find('$') else {
+            return ANY_KEY.to_string();
+        };
+        let binding = tail[..end]
+            .parse::<usize>()
+            .ok()
+            .and_then(|i| generics.get(i));
+        out.push_str(binding.map_or(ANY_KEY, String::as_str));
+        rest = &tail[end + 1..];
     }
-    out.push_str(&key[copied..]);
+    out.push_str(rest);
     if out.len() > MAX_KEY_LEN {
         ANY_KEY.to_string()
     } else {
@@ -782,50 +775,10 @@ fn substitute(key: &str, generics: &[String]) -> String {
     }
 }
 
-fn has_generic_slot(key: &str) -> bool {
-    let bytes = key.as_bytes();
-    let mut cursor = 0;
-    while cursor < bytes.len() {
-        if bytes[cursor] == b'$' {
-            let mut end = cursor + 1;
-            while end < bytes.len() && bytes[end].is_ascii_digit() {
-                end += 1;
-            }
-            if end > cursor + 1 && end < bytes.len() && bytes[end] == b'$' {
-                return true;
-            }
-        }
-        cursor += 1;
-    }
-    false
-}
-
-fn has_unknown_slot(key: &str) -> bool {
-    if key == ANY_KEY {
-        return true;
-    }
-    let bytes = key.as_bytes();
-    bytes.iter().enumerate().any(|(at, byte)| {
-        if *byte != b'_' {
-            return false;
-        }
-        let left = at == 0
-            || matches!(bytes[at - 1], b'<')
-            || (at > 1 && &bytes[at - 2..at] == b"->")
-            || matches!(bytes[at - 1], b',' | b'(');
-        let right = at + 1 == bytes.len() || matches!(bytes[at + 1], b'>' | b',' | b')' | b'?');
-        left && right
-    })
-}
-
 /// Keys may alias when equal or when either is only partly known (an
 /// unresolved type, or a generic of the caller).
 fn keys_may_alias(a: &str, b: &str) -> bool {
-    a == b
-        || has_unknown_slot(a)
-        || has_unknown_slot(b)
-        || has_generic_slot(a)
-        || has_generic_slot(b)
+    a == b || a.contains(ANY_KEY) || b.contains(ANY_KEY) || a.contains('$') || b.contains('$')
 }
 
 /// The callee's summary as seen from one call.
@@ -903,14 +856,14 @@ struct Relevance {
 
 impl Relevance {
     fn add(&mut self, key: &str) {
-        if has_generic_slot(key) || has_unknown_slot(key) {
+        if key.contains('$') || key.contains(ANY_KEY) {
             self.all = true;
         }
         self.keys.insert(key.to_string());
     }
 
     fn keeps(&self, key: &str) -> bool {
-        self.all || has_generic_slot(key) || has_unknown_slot(key) || self.keys.contains(key)
+        self.all || key.contains('$') || key.contains(ANY_KEY) || self.keys.contains(key)
     }
 
     /// Unknown code subsumes structural effects; retention still propagates.
@@ -1407,31 +1360,19 @@ pub fn check_relocation(ws: &mut Workspace) {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_generic_slot, has_unknown_slot, keys_may_alias, substitute};
+    use super::{keys_may_alias, substitute};
 
     #[test]
-    fn standalone_names_do_not_make_concrete_types_wildcards() {
-        let cell = "Arena<$standalone$borrow_file.rock::Borrow_Cell>";
-        let other = "Arena<$standalone$other_file.rock::Borrow_Cell>";
-
-        assert!(!has_generic_slot(cell));
-        assert!(!has_unknown_slot(cell));
-        assert!(!keys_may_alias(cell, other));
-        assert_eq!(
-            substitute("$standalone$borrow_file.rock::Borrow_Cell", &[]),
-            "$standalone$borrow_file.rock::Borrow_Cell"
-        );
-    }
-
-    #[test]
-    fn generic_and_unknown_type_slots_remain_wildcards() {
-        assert!(has_generic_slot("Arena<$0$>"));
-        assert!(has_unknown_slot("Map<string,_>"));
-        assert!(keys_may_alias("Arena<$0$>", "Arena<Borrow_Cell>"));
-        assert!(keys_may_alias("Arena<_>", "Arena<Borrow_Cell>"));
-        assert_eq!(
-            substitute("Arena<$0$>", &["Borrow_Cell".to_string()]),
-            "Arena<Borrow_Cell>"
-        );
+    fn standalone_file_names_do_not_become_type_slots() {
+        let mut asts = ["borrow_file$.rock", "borrow%5ffile%24.rock"].map(|file| {
+            skull_parser::parse_module_clean("value Cell { n: int }", ustr::ustr(file)).unwrap()
+        });
+        let ws = crate::semantic_passes::semantic_pass(&mut asts).unwrap();
+        let keys: Vec<_> = ws.struct_by_name.keys().map(|key| key.as_str()).collect();
+        assert_eq!(keys.len(), 2);
+        assert!(!keys_may_alias(keys[0], keys[1]));
+        for key in keys {
+            assert_eq!(substitute(key, &[]), key);
+        }
     }
 }

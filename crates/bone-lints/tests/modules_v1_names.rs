@@ -6,14 +6,8 @@ use crate::support;
 use bone_lints::{ACTION_CALLERS, Finding, LintOptions, UNUSED_FN};
 use bone_semantic::prelude::*;
 
-fn lint_dialect(
-    src: &str,
-    file: &str,
-    dialect: skull_parser::Dialect,
-    options: &LintOptions,
-) -> Vec<Finding> {
-    let mut module = skull_parser::parse_module_clean_with_dialect(src, Ustr::from(file), dialect)
-        .expect("parse");
+fn lint(src: &str, file: &str, options: &LintOptions) -> Vec<Finding> {
+    let mut module = skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse");
     {
         module.package = Some(skull_parser::PackageTag {
             id: 0,
@@ -35,7 +29,7 @@ fn main() { SLOT = Task { id: 1 }; abandon() }
 "#;
     let options = LintOptions::only(["task_null_abandon".to_owned()]);
     assert_eq!(
-        lint_dialect(src, "main.rock", skull_parser::Dialect::V1, &options).len(),
+        lint(src, "main.rock", &options).len(),
         1,
         "a v1 `Task?` slot set to null must be flagged"
     );
@@ -45,7 +39,7 @@ fn main() { SLOT = Task { id: 1 }; abandon() }
 fn v1_main_is_a_reachability_root() {
     let src = "fn main() { used() }\nfn used() {}\nfn dead() {}";
     let options = LintOptions::only([UNUSED_FN.to_owned()]);
-    let findings = lint_dialect(src, "main.rock", skull_parser::Dialect::V1, &options);
+    let findings = lint(src, "main.rock", &options);
     let mut names: Vec<String> = findings.iter().map(support::quoted).collect();
     names.sort();
     assert_eq!(
@@ -58,7 +52,7 @@ fn v1_main_is_a_reachability_root() {
 fn action_gaps(src: &str) -> Vec<String> {
     let options =
         LintOptions::only([ACTION_CALLERS.to_owned()]).with_action_policy(Some(&support::POLICY));
-    lint_dialect(src, "app/actions.rock", skull_parser::Dialect::V1, &options)
+    lint(src, "app/actions.rock", &options)
         .iter()
         .map(|finding| finding.error.message.clone())
         .collect()

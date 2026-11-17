@@ -2,7 +2,6 @@
 
 use crate::ast::*;
 use rock_core::nesting::MAX_NESTING_DEPTH;
-use rock_core::source_code::Dialect;
 use rock_core::{CompilerError, Span};
 use rock_tokenizer::{Token, TokenKind, Tokenizer, interp};
 use ustr::Ustr;
@@ -171,8 +170,7 @@ impl<'a> Parser<'a> {
     /// drift.
     pub(crate) fn new(tokens: Vec<Token>, source: &'a str, base: usize) -> Self {
         let eof_span = tokens.last().map(|t| t.span).unwrap_or_else(Span::unknown);
-        let mut ast = Ast::with_capacity(tokens.len());
-        ast.dialect = Dialect::V1;
+        let ast = Ast::with_capacity(tokens.len());
         Self {
             frames: vec![Frame::File { text: source, base }],
             tokens,
@@ -3522,53 +3520,47 @@ impl<'a> Parser<'a> {
                         start,
                     );
                 }
-                // `::` after an ident is ALWAYS a path - the resolver
-                // decides whether the head names a module, type, or enum
-                // (no case heuristic).
-                if self.kind() == TokenKind::DoubleColon {
-                    let path = self.parse_path_tail(base)?;
-                    // `p::Type { .. }` / `p::E::V { .. }` record literal.
-                    if self.struct_literal_follows() {
-                        let (bases, fields) = self.parse_struct_fields()?;
-                        if !bases.is_empty() {
-                            return Err(self
-                                .err("functional-update `..base` is not supported on qualified record literals"));
-                        }
-                        let span = self.span_from(start);
-                        return Ok(self.ast.expr(
-                            span,
-                            ExprKind::PathStructLiteral {
-                                path,
-                                bases,
-                                fields,
-                            },
+                // `::` after an ident is ALWAYS a path - the resolver decides
+                // whether the head names a module, type, or enum (no case heuristic).
+                let qualified = self.kind() == TokenKind::DoubleColon;
+                let path = if qualified {
+                    self.parse_path_tail(base)?
+                } else {
+                    Path {
+                        from_root: false,
+                        segments: vec![base],
+                    }
+                };
+                if self.struct_literal_follows() {
+                    let (bases, fields) = self.parse_struct_fields()?;
+                    if qualified && !bases.is_empty() {
+                        return Err(self.err(
+                            "functional-update `..base` is not supported on qualified record literals",
                         ));
                     }
-                    // `p::f(x)` and `p::f<T>(x)` keep their generics/call in
-                    // the postfix machinery; a bare path (or `p::Type<T>` as a
-                    // value) lands here.
                     let span = self.span_from(start);
                     return Ok(self.ast.expr(
+                        span,
+                        ExprKind::PathStructLiteral {
+                            path,
+                            bases,
+                            fields,
+                        },
+                    ));
+                }
+                if qualified {
+                    let span = self.span_from(start);
+                    Ok(self.ast.expr(
                         span,
                         ExprKind::Path {
                             path,
                             generic_args: Vec::new(),
                         },
-                    ));
-                }
-                if self.struct_literal_follows() {
-                    let (bases, fields) = self.parse_struct_fields()?;
-                    let span = self.span_from(start);
-                    Ok(self.ast.expr(
-                        span,
-                        ExprKind::StructLiteral {
-                            name: base,
-                            bases,
-                            fields,
-                        },
                     ))
                 } else {
-                    Ok(self.ast.expr(start, ExprKind::Ident(base)))
+                    Ok(self
+                        .ast
+                        .expr(start, ExprKind::Ident(path.segments[0].clone())))
                 }
             }
             TokenKind::Match => self.parse_match(),
@@ -4232,31 +4224,14 @@ impl<'a> Parser<'a> {
                     span: ident_span,
                     name,
                 };
-                // A pattern path `p::E::V` resolves like any path.
-                if self.kind() == TokenKind::DoubleColon {
-                    let path = self.parse_path_tail(ident)?;
-                    if self.kind() == TokenKind::OpenParen {
-                        self.advance();
-                        let mut args = Vec::new();
-                        while self.kind() != TokenKind::CloseParen && !self.at_end() {
-                            args.push(self.parse_pattern()?);
-                            if !self.eat(TokenKind::Comma) {
-                                break;
-                            }
-                        }
-                        self.expect(TokenKind::CloseParen)?;
-                        return Ok(Pattern::PathVariant {
-                            path,
-                            args: Some(args),
-                        });
+                let path = if self.kind() == TokenKind::DoubleColon {
+                    self.parse_path_tail(ident)?
+                } else {
+                    Path {
+                        from_root: false,
+                        segments: vec![ident],
                     }
-                    if self.kind() == TokenKind::OpenCurly {
-                        let (fields, rest) = self.parse_pattern_record_fields()?;
-                        return Ok(Pattern::PathRecord { path, fields, rest });
-                    }
-                    return Ok(Pattern::PathVariant { path, args: None });
-                }
-                let variant = ident;
+                };
                 if self.kind() == TokenKind::OpenParen {
                     self.advance();
                     let mut args = Vec::new();
@@ -4267,21 +4242,17 @@ impl<'a> Parser<'a> {
                         }
                     }
                     self.expect(TokenKind::CloseParen)?;
-                    Ok(Pattern::EnumVariant {
-                        enum_name: None,
-                        variant_name: variant,
+                    Ok(Pattern::PathVariant {
+                        path,
                         args: Some(args),
                     })
                 } else if self.kind() == TokenKind::OpenCurly {
                     let (fields, rest) = self.parse_pattern_record_fields()?;
-                    Ok(Pattern::Record {
-                        enum_name: None,
-                        name: Some(variant),
-                        fields,
-                        rest,
-                    })
+                    Ok(Pattern::PathRecord { path, fields, rest })
+                } else if path.from_root || path.segments.len() > 1 {
+                    Ok(Pattern::PathVariant { path, args: None })
                 } else {
-                    Ok(Pattern::Ident(variant))
+                    Ok(Pattern::Ident(path.segments.into_iter().next().unwrap()))
                 }
             }
             other => Err(self.err(format!("unsupported pattern: {:?}", other))),

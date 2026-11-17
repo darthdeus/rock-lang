@@ -8,7 +8,7 @@ fn workspace(files: &[(&str, &str)]) -> bone_semantic::inference::Workspace {
             let mut ast = skull_parser::parse_module(source, Ustr::from(file)).unwrap();
             ast.package = Some(skull_parser::PackageTag {
                 id: 1,
-                self_name: "$standalone$<sources>".into(),
+                self_name: "@/<sources>".into(),
                 identity_storage: Default::default(),
                 root: String::new(),
             });
@@ -33,7 +33,7 @@ fn follows_recursive_generic_fields_and_enum_payloads_without_unrelated_owners()
         ("leaf.rock", "value Leaf { count: int = 4 }"),
         ("unrelated.rock", "struct Other { value: int }"),
     ]);
-    let rows = declaration_sources(&ws, &[Ustr::from("$standalone$<sources>::Root")]).unwrap();
+    let rows = declaration_sources(&ws, &[Ustr::from("@/<sources>::Root")]).unwrap();
     let owners = rows
         .iter()
         .map(|row| {
@@ -58,13 +58,13 @@ fn follows_recursive_generic_fields_and_enum_payloads_without_unrelated_owners()
 fn rejects_unknown_and_uninstantiated_generic_roots() {
     let ws = workspace(&[("box.rock", "struct Box<T> { item: T }")]);
     assert!(declaration_sources(&ws, &[Ustr::from("Missing")]).is_err());
-    assert!(declaration_sources(&ws, &[Ustr::from("$standalone$<sources>::Box")]).is_err());
+    assert!(declaration_sources(&ws, &[Ustr::from("@/<sources>::Box")]).is_err());
 }
 
 #[test]
 fn namespace_identity_excludes_an_unrelated_same_named_type() {
     use bone_core::modules::{NsAliases, PackageAliases};
-    use rock_core::source_code::{Dialect, PackageTag};
+    use rock_core::source_code::PackageTag;
     let files = [
         ("a.rock", "pub mod a;\npub enum Shape { A }"),
         ("b.rock", "pub mod b;\npub enum Shape { B }"),
@@ -72,9 +72,7 @@ fn namespace_identity_excludes_an_unrelated_same_named_type() {
     let mut modules = files
         .iter()
         .map(|(file, source)| {
-            let mut ast =
-                skull_parser::parse_module_with_dialect(source, Ustr::from(file), Dialect::V1)
-                    .unwrap();
+            let mut ast = skull_parser::parse_module(source, Ustr::from(file)).unwrap();
             ast.package = Some(PackageTag {
                 id: 1,
                 self_name: "app".into(),
@@ -106,7 +104,7 @@ fn discovers_a_new_referenced_file_and_newtype_target() {
         ("wrapper.rock", "newtype Wrapped(Added)"),
         ("added.rock", "value Added { count: int = 2 }"),
     ]);
-    let rows = declaration_sources(&ws, &[Ustr::from("$standalone$<sources>::Root")]).unwrap();
+    let rows = declaration_sources(&ws, &[Ustr::from("@/<sources>::Root")]).unwrap();
     assert_eq!(
         rows.iter().map(|row| row.file.as_str()).collect::<Vec<_>>(),
         vec!["added.rock", "root.rock", "wrapper.rock"]

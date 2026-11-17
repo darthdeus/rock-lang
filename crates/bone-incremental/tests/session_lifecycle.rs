@@ -144,8 +144,6 @@ fn failed_rebuild_users_keeps_workspace_consistent() {
 fn rebuild_users_keeps_the_comptime_inputs() {
     let mut s = session();
     s.ws.comptime_inputs.channel = "dev".to_string();
-    s.ws.comptime_inputs.modules_mode = "v1".to_string();
     s.rebuild_users().expect("an unchanged program rebuilds");
     assert_eq!(s.ws.comptime_inputs.channel, "dev");
-    assert_eq!(s.ws.comptime_inputs.modules_mode, "v1");
 }

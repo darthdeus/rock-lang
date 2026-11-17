@@ -39,9 +39,7 @@ pub fn record_use_paths(a: &Ast, ctx: &mut LowerCtx) {
     if ctx.workspace.skip_session_facts {
         return;
     }
-    let Some(root) = ctx.v1_scope().cloned() else {
-        return;
-    };
+    let root = ctx.fragment_scope().clone();
     let mut refs = Vec::new();
     record_use_items(ctx, &a.items, &root.module_path, &root, &mut refs);
     ctx.module.path_segments.extend(refs);
@@ -75,7 +73,7 @@ fn record_use_items(
 fn member_segment_target(target: &resolve::MemberTarget) -> hir::SegmentTarget {
     match *target {
         resolve::MemberTarget::Global(key)
-        | resolve::MemberTarget::Callable { key, .. }
+        | resolve::MemberTarget::Callable(key)
         | resolve::MemberTarget::Type(key) => hir::SegmentTarget::Def(key),
         resolve::MemberTarget::EnumVariant { enum_key, variant } => {
             hir::SegmentTarget::Variant { enum_key, variant }
@@ -253,10 +251,9 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         }
     }
 
-    /// This file's modules-v1 fragment scope (None for compiler-owned
-    /// synthetic modules). Resolution tiering applies only when present.
-    pub fn v1_scope(&self) -> Option<&bone_core::modules::FragmentScope> {
-        self.workspace.fragment_scopes.get(&self.module.file)
+    /// Namespace assembly gives every input file a fragment before lowering.
+    pub fn fragment_scope(&self) -> &bone_core::modules::FragmentScope {
+        &self.workspace.fragment_scopes[&self.module.file]
     }
 
     /// How each segment of the v1 `path` resolved, `last` being what the
@@ -271,9 +268,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         segments: &[skull_parser::Ident],
         last: hir::SegmentTarget,
     ) -> Vec<hir::PathSegmentRef> {
-        let Some(frag) = self.v1_scope() else {
-            return Vec::new();
-        };
+        let frag = self.fragment_scope();
         let names: Vec<Ustr> = segments.iter().map(|i| i.name).collect();
         let n = segments.len();
         let mut out = Vec::with_capacity(n);
@@ -434,40 +429,23 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         Ok(self.resolve_bare(name, span)?.key)
     }
 
-    /// The enum the base of a qualified variant (`E::V`, `E::V(..)`,
-    /// `E::V { .. }`, and their patterns) names, by the key the workspace
-    /// maps use: the base resolves like any bare name. `None` when the
-    /// base names no enum.
-    fn variant_enum_key(&self, base: Ustr, span: Span) -> Result<Option<Ustr>, CompilerError> {
-        let key = self.resolve_bare_key(base, span)?;
-        Ok(self
-            .workspace
-            .enums_by_name
-            .contains_key(&key)
-            .then_some(key))
-    }
-
     /// The DefKey of a v1 path that is CALLED BY NAME -- a callable family, or a
     /// newtype, whose constructor is a call on the type's own name and which the
-    /// bare-name route already resolves this way -- with the view owning a
-    /// callable family's key. `None` for a synthetic module, a path that does not
+    /// bare-name route already resolves this way. `None` for a synthetic module, a path that does not
     /// resolve, or one that names a struct, enum, global or enum variant --
     /// those keep the general call route.
-    fn v1_path_callable(
-        &self,
-        path: &skull_parser::Path,
-    ) -> Option<(Ustr, Option<bone_core::modules::PackageId>)> {
-        let frag = self.v1_scope()?;
+    fn v1_path_callable(&self, path: &skull_parser::Path) -> Option<Ustr> {
+        let frag = self.fragment_scope();
         let use_path = use_path_ref(path);
         match self.probed(|| resolve::resolve_member_path(self.workspace, frag, &use_path)) {
-            Ok(resolve::MemberTarget::Callable { key, owner }) => Some((key, owner)),
+            Ok(resolve::MemberTarget::Callable(key)) => Some(key),
             Ok(resolve::MemberTarget::Global(key))
                 if matches!(
                     self.workspace.defs.get(&key).map(|m| m.kind),
                     Some(bone_core::modules::DefKind::Callable)
                 ) =>
             {
-                Some((key, None))
+                Some(key)
             }
             // `p::NT(x)`. As a VALUE the path is the type, and the call then
             // lowers as a call of a value: inference reports the key as an
@@ -476,7 +454,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
             Ok(resolve::MemberTarget::Type(key))
                 if self.workspace.newtypes_by_name.contains_key(&key) =>
             {
-                Some((key, None))
+                Some(key)
             }
             _ => None,
         }
@@ -485,7 +463,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
     /// The `(enum DefKey, variant)` of a v1 path that names an enum VARIANT.
     /// `None` for a synthetic module or a path that names anything else.
     fn v1_path_variant(&self, path: &skull_parser::Path) -> Option<(Ustr, Ustr)> {
-        let frag = self.v1_scope()?;
+        let frag = self.fragment_scope();
         let use_path = use_path_ref(path);
         match self.probed(|| resolve::resolve_member_path(self.workspace, frag, &use_path)) {
             Ok(resolve::MemberTarget::EnumVariant { enum_key, variant }) => {
@@ -498,8 +476,8 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
     // Stdlib names are already the final compiler-owned keys. Paths still
     // need their fragment scope, while bare names need no scoped lookup.
     fn name_scope(&self) -> Option<&bone_core::modules::FragmentScope> {
-        self.v1_scope()
-            .filter(|frag| frag.package != bone_core::modules::STD_PACKAGE_ID)
+        let frag = self.fragment_scope();
+        (frag.package != bone_core::modules::STD_PACKAGE_ID).then_some(frag)
     }
 
     fn resolve_bare(&self, name: Ustr, span: Span) -> Result<resolve::Resolved, CompilerError> {
@@ -609,18 +587,17 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
     ) -> (Ustr, hir::CallFamily) {
         let file = self.module.file;
         match resolved {
-            resolve::CalleeFamily::Single(r) if self.v1_scope().is_some() => {
+            resolve::CalleeFamily::Single(r) => {
                 let spelling = if name.as_str().starts_with("__op_") {
                     name
                 } else {
                     r.key
                 };
-                (spelling, hir::CallFamily::resolved(r.key, r.owner))
+                (spelling, hir::CallFamily::Resolved(r.key))
             }
-            resolve::CalleeFamily::Single(r) => (r.key, hir::CallFamily::from_name(r.key)),
             resolve::CalleeFamily::Merged { members } => {
                 self.module.call_families.insert(name, members);
-                (name, hir::CallFamily::merged(name, file))
+                (name, hir::CallFamily::Merged { name, file })
             }
         }
     }
@@ -1025,19 +1002,7 @@ pub(crate) fn lower_type_expr_in(
         // Modules-v1 qualified type paths resolve through the namespace tree
         // to a canonical DefKey; everything downstream keys on it.
         TypeExprKind::Path(path) | TypeExprKind::AppPath { ctor: path, .. } => {
-            let Some(frag) = ctx.v1_scope() else {
-                return Err(CompilerError::new_with_label(
-                    te.span,
-                    format!(
-                        "qualified type paths require a modules-v1 package fragment: `{}`",
-                        path.segments
-                            .iter()
-                            .map(|s| s.name.as_str())
-                            .collect::<Vec<_>>()
-                            .join("::")
-                    ),
-                ));
-            };
+            let frag = ctx.fragment_scope();
             let use_path = use_path_ref(path);
             let resolved =
                 match ctx.probed(|| resolve::resolve_path(ctx.workspace, frag, &use_path)) {
@@ -1487,7 +1452,7 @@ pub(crate) fn lower_statement_value(
                         },
                         args,
                         generic_args: IdxRange::new_empty(),
-                        family: hir::CallFamily::from_name(ustr(name)),
+                        family: hir::CallFamily::Resolved(ustr(name)),
                     },
                     s.span,
                 );
@@ -1646,7 +1611,7 @@ pub(crate) fn lower_expr_value(
                     path,
                     generic_args: path_generics,
                 } if path_generics.is_empty() && ctx.v1_path_callable(path).is_some() => {
-                    let (key, owner) = ctx.v1_path_callable(path).expect("guard resolved it");
+                    let key = ctx.v1_path_callable(path).expect("guard resolved it");
                     ctx.record_path(body, TyPos::Body, path, hir::SegmentTarget::Def(key));
                     let args_range =
                         lower_exprs(ctx, a, body, scope, args.iter().map(|x| &x.value))?;
@@ -1664,17 +1629,12 @@ pub(crate) fn lower_expr_value(
                         },
                         args: args_range,
                         generic_args,
-                        family: hir::CallFamily::resolved(key, owner),
+                        family: hir::CallFamily::Resolved(key),
                     }
                 }
 
-                // `p::E::V(..)` in a v1 fragment: a TUPLE-payload variant
-                // constructor, which the two-segment form spells `E::V(..)` and lowers
-                // through the `QualifiedIdent` arm below. Without this the callee
-                // takes the value-position path route, where EVERY variant lowers
-                // with `VariantArgs::Unit` -- right for `p::E::V`, but here it drops
-                // the payload and inference rejects the construction as a
-                // payload/argument mismatch.
+                // A path enum constructor with payload; value-position paths lower
+                // as unit variants and would otherwise drop these arguments.
                 ExprKind::Path {
                     path,
                     generic_args: path_generics,
@@ -1700,32 +1660,6 @@ pub(crate) fn lower_expr_value(
                         enum_name_span: body.name_spans.alloc(enum_span),
                         variant,
                         variant_span: body.name_spans.alloc(variant_span),
-                        args: VariantArgs::Tuple(args_range),
-                    }
-                }
-
-                ExprKind::QualifiedIdent { base, member }
-                    if ctx
-                        .variant_enum_key(base.name, base.span)
-                        .is_ok_and(|key| key.is_some()) =>
-                {
-                    if !generic_args.is_empty() {
-                        comp_error!(
-                            e.span,
-                            "explicit type arguments are not supported on enum constructors"
-                        );
-                    }
-                    let enum_key = ctx
-                        .variant_enum_key(base.name, base.span)?
-                        .expect("the guard found the enum");
-                    let args_range =
-                        lower_exprs(ctx, a, body, scope, args.iter().map(|x| &x.value))?;
-
-                    Expr::EnumVariant {
-                        enum_name: enum_key,
-                        enum_name_span: body.name_spans.alloc(base.span),
-                        variant: member.name,
-                        variant_span: body.name_spans.alloc(member.span),
                         args: VariantArgs::Tuple(args_range),
                     }
                 }
@@ -1770,7 +1704,7 @@ pub(crate) fn lower_expr_value(
                         // The callee is a value, so inference calls its type and
                         // never asks the family for a name; the placeholder key is
                         // not a resolvable spelling.
-                        family: hir::CallFamily::from_name(ustr("<value>")),
+                        family: hir::CallFamily::Resolved(ustr("<value>")),
                     }
                 }
             }
@@ -1947,43 +1881,6 @@ pub(crate) fn lower_expr_value(
             }
         }
 
-        ExprKind::StructLiteral {
-            name,
-            bases,
-            fields,
-        } => {
-            // Functional-update bases evaluate before fields.
-            let base_range = lower_exprs(ctx, a, body, scope, bases.iter())?;
-
-            let mut entries = Vec::new();
-
-            for (names, value) in fields.iter() {
-                let value_idx = lower_expr(ctx, a, body, scope, a.e(value))?;
-
-                for field_name in names {
-                    entries.push(hir::StructLitField {
-                        name: field_name.name,
-                        name_span: field_name.span,
-                        value: value_idx,
-                    });
-                }
-            }
-
-            let fields = alloc_contiguous(&mut body.struct_lit_field_arena, entries);
-
-            match ctx.resolve_bare_key(name.name, name.span) {
-                Ok(key) => Expr::StructLiteral {
-                    name: key,
-                    fields,
-                    bases: base_range,
-                },
-                Err(e) => {
-                    ctx.recover_name(e)?;
-                    Expr::Error
-                }
-            }
-        }
-
         ExprKind::FieldAccess(expr, field) => match &a.e(expr).kind {
             ExprKind::Ident(base) if base.name.as_str() == "_G" => {
                 match ctx.resolve_bare_key(field.name, field.span) {
@@ -2018,12 +1915,7 @@ pub(crate) fn lower_expr_value(
                         .to_string(),
                 ));
             }
-            let Some(frag) = ctx.v1_scope() else {
-                return Err(CompilerError::new_with_label(
-                    e.span,
-                    "qualified paths require a modules-v1 package fragment".to_string(),
-                ));
-            };
+            let frag = ctx.fragment_scope();
             let use_path = use_path_ref(path);
             let target =
                 ctx.probed(|| resolve::resolve_member_path(ctx.workspace, frag, &use_path));
@@ -2031,10 +1923,9 @@ pub(crate) fn lower_expr_value(
                 ctx.record_path(body, TyPos::Body, path, member_segment_target(t));
             }
             match target {
-                Ok(
-                    resolve::MemberTarget::Global(key)
-                    | resolve::MemberTarget::Callable { key, .. },
-                ) => Expr::Global(key),
+                Ok(resolve::MemberTarget::Global(key) | resolve::MemberTarget::Callable(key)) => {
+                    Expr::Global(key)
+                }
                 Ok(resolve::MemberTarget::EnumVariant { enum_key, variant }) => {
                     let (enum_span, variant_span) = variant_path_spans(path);
                     Expr::EnumVariant {
@@ -2059,12 +1950,15 @@ pub(crate) fn lower_expr_value(
             bases,
             fields,
         } => {
-            let Some(frag) = ctx.v1_scope() else {
-                return Err(CompilerError::new_with_label(
-                    e.span,
-                    "qualified record literals require a modules-v1 package fragment".to_string(),
-                ));
+            let unqualified = path.segments.len() == 1 && !path.from_root;
+            // Unqualified literals allow functional updates; qualified ones
+            // retain their existing no-update rule.
+            let base_range = if unqualified {
+                lower_exprs(ctx, a, body, scope, bases.iter())?
+            } else {
+                IdxRange::new_empty()
             };
+            let frag = ctx.fragment_scope();
             let use_path = use_path_ref(path);
             let target =
                 match ctx.probed(|| resolve::resolve_member_path(ctx.workspace, frag, &use_path)) {
@@ -2079,7 +1973,7 @@ pub(crate) fn lower_expr_value(
                     }
                 };
             ctx.record_path(body, TyPos::Body, path, member_segment_target(&target));
-            if !bases.is_empty() {
+            if !unqualified && !bases.is_empty() {
                 return Err(CompilerError::new_with_label(
                     e.span,
                     "functional-update `..base` is not supported on qualified record literals"
@@ -2102,7 +1996,7 @@ pub(crate) fn lower_expr_value(
                 resolve::MemberTarget::Type(key) => Expr::StructLiteral {
                     name: key,
                     fields: fields_range,
-                    bases: lower_exprs(ctx, a, body, scope, std::iter::empty())?,
+                    bases: base_range,
                 },
                 resolve::MemberTarget::EnumVariant { enum_key, variant } => {
                     let (enum_span, variant_span) = variant_path_spans(path);
@@ -2114,8 +2008,7 @@ pub(crate) fn lower_expr_value(
                         args: hir::VariantArgs::Record(fields_range),
                     }
                 }
-                resolve::MemberTarget::Global(key)
-                | resolve::MemberTarget::Callable { key, .. } => {
+                resolve::MemberTarget::Global(key) | resolve::MemberTarget::Callable(key) => {
                     return Err(CompilerError::new_with_label(
                         e.span,
                         format!("`{key}` names a value, not a record"),
@@ -2125,70 +2018,6 @@ pub(crate) fn lower_expr_value(
         }
 
         ExprKind::SiblingFieldRef(ident) => Expr::SiblingRef(ident.name),
-
-        ExprKind::QualifiedIdent { base, member } => {
-            let enum_key = match ctx.variant_enum_key(base.name, base.span) {
-                Ok(key) => key,
-                Err(e) => {
-                    ctx.recover_name(e)?;
-                    return Ok(Expr::Error);
-                }
-            };
-            if let Some(enum_key) = enum_key {
-                Expr::EnumVariant {
-                    enum_name: enum_key,
-                    enum_name_span: body.name_spans.alloc(base.span),
-                    variant: member.name,
-                    variant_span: body.name_spans.alloc(member.span),
-                    args: hir::VariantArgs::Unit,
-                }
-            } else {
-                comp_error!(
-                    base.span,
-                    "Unknown qualified identifier base `{}`",
-                    base.name
-                )
-            }
-        }
-
-        ExprKind::EnumVariantRecord {
-            enum_name,
-            variant_name,
-            fields,
-        } => {
-            let mut entries = Vec::new();
-
-            for (names, value) in fields.iter() {
-                let v = lower_expr(ctx, a, body, scope, a.e(value))?;
-
-                for fname in names {
-                    entries.push(StructLitField {
-                        name: fname.name,
-                        name_span: fname.span,
-                        value: v,
-                    });
-                }
-            }
-
-            let enum_key = match ctx.variant_enum_key(enum_name.name, enum_name.span) {
-                Ok(key) => key.unwrap_or(enum_name.name),
-                Err(e) => {
-                    ctx.recover_name(e)?;
-                    return Ok(Expr::Error);
-                }
-            };
-            Expr::EnumVariant {
-                enum_name: enum_key,
-                enum_name_span: body.name_spans.alloc(enum_name.span),
-                variant: variant_name.name,
-                variant_span: body.name_spans.alloc(variant_name.span),
-
-                args: hir::VariantArgs::Record(alloc_contiguous(
-                    &mut body.struct_lit_field_arena,
-                    entries,
-                )),
-            }
-        }
 
         ExprKind::Assign { target, value } => {
             let target = lower_expr(ctx, a, body, scope, a.e(target))?;
@@ -2447,58 +2276,7 @@ pub(crate) fn lower_expr(
     }
 
     let hir_e = lower_expr_value(ctx, a, body, scope, e)?;
-    Ok(alloc_value(ctx, a, body, e, hir_e))
-}
-
-/// Allocate `hir_e`, lowered from `e`. Every site that allocates a lowered
-/// expression next to its source goes through here, so a v1 function value
-/// records the view that owns it wherever it appears.
-fn alloc_value(
-    ctx: &mut LowerCtx,
-    a: &Ast,
-    body: &mut Body,
-    e: &skull_parser::ExprData,
-    hir_e: Expr,
-) -> Idx<Expr> {
-    let idx = ctx.alloc_expr(body, hir_e, e.span);
-    if let Expr::Global(key) = hir_e
-        && let Some(owner) = value_owner(ctx, a, e, key)
-    {
-        body.value_owners.insert(idx, owner);
-    }
-    idx
-}
-
-/// The view owning a callable a v1 value expression names
-/// (`Body::value_owners`): the lookup that lowered `e` to
-/// `Expr::Global(key)`, asked again for its owner. Only a definition with no
-/// `DefMeta` can have one, so a v1 definition is not looked up twice.
-fn value_owner(
-    ctx: &LowerCtx,
-    a: &Ast,
-    e: &skull_parser::ExprData,
-    key: Ustr,
-) -> Option<bone_core::modules::PackageId> {
-    let frag = ctx.v1_scope()?;
-    if ctx.workspace.defs.contains_key(&key) {
-        return None;
-    }
-    match &e.kind {
-        ExprKind::Paren(inner) => value_owner(ctx, a, a.e(inner), key),
-        ExprKind::Ident(name) | ExprKind::FunctionRef(name) | ExprKind::AnaphoricIdent(name) => {
-            ctx.probed(|| resolve::resolve_bare(ctx.workspace, frag, name.name))
-                .ok()?
-                .owner
-        }
-        ExprKind::Path { path, .. } => {
-            let use_path = use_path_ref(path);
-            match ctx.probed(|| resolve::resolve_member_path(ctx.workspace, frag, &use_path)) {
-                Ok(resolve::MemberTarget::Callable { owner, .. }) => owner,
-                _ => None,
-            }
-        }
-        _ => None,
-    }
+    Ok(ctx.alloc_expr(body, hir_e, e.span))
 }
 
 fn function_footprint_lo(annotations: &[Annotation], f: &FunctionDef) -> usize {
@@ -3413,7 +3191,7 @@ fn lower_exprs<'a>(
     let mut max = None;
 
     for (v, e) in lowered_args {
-        let id = alloc_value(ctx, a, body, e, v);
+        let id = ctx.alloc_expr(body, v, e.span);
         min = min.or(Some(id));
         max = Some(id);
     }
@@ -3466,7 +3244,7 @@ fn lower_statements(
     let mut max = None;
 
     let tail = if let Some((t, e)) = tail {
-        Some(alloc_value(ctx, a, body, e, t))
+        Some(ctx.alloc_expr(body, t, e.span))
     } else {
         None
     };
@@ -3619,12 +3397,7 @@ fn resolve_pattern_path<'p>(
     path: &skull_parser::Path,
     subpats: impl IntoIterator<Item = &'p skull_parser::Pattern>,
 ) -> Result<Option<(Ustr, Ustr)>, CompilerError> {
-    let Some(frag) = ctx.v1_scope() else {
-        return Err(CompilerError::new_with_label(
-            path.span(),
-            "qualified patterns require a modules-v1 package fragment".to_string(),
-        ));
-    };
+    let frag = ctx.fragment_scope();
     let use_path = use_path_ref(path);
     match ctx.probed(|| resolve::resolve_variant_pattern(ctx.workspace, frag, &use_path)) {
         Ok((enum_key, variant)) => {
@@ -3653,68 +3426,8 @@ fn lower_pattern_value(
     scope: Idx<Scope>,
     pat: &skull_parser::Pattern,
 ) -> Result<Pattern, CompilerError> {
-    // Modules-v1 qualified variant patterns resolve to the enum's DefKey and
-    // lower exactly like the two-segment forms.
-    if let skull_parser::Pattern::PathVariant { path, args } = pat {
-        let subpats = args.iter().flatten();
-        let Some((enum_key, variant)) = resolve_pattern_path(ctx, a, body, scope, path, subpats)?
-        else {
-            return Ok(Pattern::Wildcard);
-        };
-        let (enum_span, variant_span) = variant_path_spans(path);
-        let sub = match args {
-            None => IdxRange::new_empty(),
-            Some(pats) => {
-                let vals = pats
-                    .iter()
-                    .map(|p| lower_pattern_value(ctx, a, body, scope, p))
-                    .try_vec()?;
-                alloc_contiguous(&mut body.pattern_arena, vals)
-            }
-        };
-        return Ok(Pattern::EnumVariant {
-            enum_name: Some(enum_key),
-            enum_name_span: Some(enum_span),
-            variant,
-            variant_span,
-            sub,
-        });
-    }
-    if let skull_parser::Pattern::PathRecord { path, fields, rest } = pat {
-        let subpats = fields.iter().map(|(_, p)| p);
-        let Some((enum_key, variant)) = resolve_pattern_path(ctx, a, body, scope, path, subpats)?
-        else {
-            return Ok(Pattern::Wildcard);
-        };
-        let (enum_span, variant_span) = variant_path_spans(path);
-        let mut entries = Vec::with_capacity(fields.len());
-        for (fname, subpat) in fields.iter() {
-            let p = lower_pattern_value(ctx, a, body, scope, subpat)?;
-            let p = body.pattern_arena.alloc(p);
-            entries.push(RecordPatField {
-                name: fname.name,
-                name_span: fname.span,
-                pat: p,
-            });
-        }
-        let fields_range = alloc_contiguous(&mut body.record_pat_field_arena, entries);
-        return Ok(Pattern::Record {
-            enum_name: Some(enum_key),
-            enum_name_span: Some(enum_span),
-            name: Some(variant),
-            name_span: Some(variant_span),
-            fields: fields_range,
-            rest: *rest,
-        });
-    }
-
     Ok(match pat {
         skull_parser::Pattern::Wildcard => Pattern::Wildcard,
-        // Handled by the early returns above; the match stays exhaustive.
-        skull_parser::Pattern::PathVariant { .. } | skull_parser::Pattern::PathRecord { .. } => {
-            unreachable!("qualified patterns returned above")
-        }
-
         skull_parser::Pattern::Ident(id) => {
             let b = ctx.alloc_binding(
                 body,
@@ -3731,26 +3444,25 @@ fn lower_pattern_value(
 
             Pattern::Bind(b)
         }
-
-        skull_parser::Pattern::EnumVariant {
-            enum_name,
-            variant_name,
-            args,
-        } => {
-            let ename = match enum_name {
-                Some(e) => match ctx.variant_enum_key(e.name, e.span) {
-                    Ok(key) => Some(key.unwrap_or(e.name)),
-                    Err(err) => {
-                        ctx.recover_name(err)?;
-                        Some(e.name)
-                    }
-                },
-                None => None,
-            };
-
+        skull_parser::Pattern::PathVariant { path, args } => {
+            // A single unrooted segment preserves shorthand enum inference;
+            // longer paths resolve the enum and variant through the package.
+            let (enum_name, enum_name_span, variant, variant_span) =
+                if path.segments.len() == 1 && !path.from_root {
+                    let segment = &path.segments[0];
+                    (None, None, segment.name, segment.span)
+                } else {
+                    let subpats = args.iter().flatten();
+                    let Some((enum_key, variant)) =
+                        resolve_pattern_path(ctx, a, body, scope, path, subpats)?
+                    else {
+                        return Ok(Pattern::Wildcard);
+                    };
+                    let (enum_span, variant_span) = variant_path_spans(path);
+                    (Some(enum_key), Some(enum_span), variant, variant_span)
+                };
             let sub = match args {
                 None => IdxRange::new_empty(),
-
                 Some(pats) => {
                     let vals = pats
                         .iter()
@@ -3759,16 +3471,61 @@ fn lower_pattern_value(
                     alloc_contiguous(&mut body.pattern_arena, vals)
                 }
             };
-
             Pattern::EnumVariant {
-                enum_name: ename,
-                enum_name_span: enum_name.as_ref().map(|e| e.span),
-                variant: variant_name.name,
-                variant_span: variant_name.span,
+                enum_name,
+                enum_name_span,
+                variant,
+                variant_span,
                 sub,
             }
         }
-
+        skull_parser::Pattern::PathRecord { path, fields, rest } => {
+            // An unqualified record name still resolves as a bare type name,
+            // falling back to the written variant name when it names no struct.
+            let (enum_name, enum_name_span, name, name_span) =
+                if path.segments.len() == 1 && !path.from_root {
+                    let segment = &path.segments[0];
+                    let name = ctx
+                        .resolve_bare_key(segment.name, segment.span)
+                        .ok()
+                        .filter(|key| ctx.workspace.struct_by_name.contains_key(key))
+                        .unwrap_or(segment.name);
+                    (None, None, Some(name), Some(segment.span))
+                } else {
+                    let subpats = fields.iter().map(|(_, p)| p);
+                    let Some((enum_key, variant)) =
+                        resolve_pattern_path(ctx, a, body, scope, path, subpats)?
+                    else {
+                        return Ok(Pattern::Wildcard);
+                    };
+                    let (enum_span, variant_span) = variant_path_spans(path);
+                    (
+                        Some(enum_key),
+                        Some(enum_span),
+                        Some(variant),
+                        Some(variant_span),
+                    )
+                };
+            let mut entries = Vec::with_capacity(fields.len());
+            for (fname, subpat) in fields.iter() {
+                let pat = lower_pattern_value(ctx, a, body, scope, subpat)?;
+                let pat = body.pattern_arena.alloc(pat);
+                entries.push(RecordPatField {
+                    name: fname.name,
+                    name_span: fname.span,
+                    pat,
+                });
+            }
+            let fields = alloc_contiguous(&mut body.record_pat_field_arena, entries);
+            Pattern::Record {
+                enum_name,
+                enum_name_span,
+                name,
+                name_span,
+                fields,
+                rest: *rest,
+            }
+        }
         skull_parser::Pattern::Range {
             start,
             end,
@@ -3794,50 +3551,6 @@ fn lower_pattern_value(
             let e = lower_expr(ctx, a, body, scope, a.e(expr))?;
             Pattern::Literal(e)
         }
-
-        skull_parser::Pattern::Record {
-            enum_name,
-            name,
-            fields,
-            rest,
-        } => {
-            let mut entries = Vec::with_capacity(fields.len());
-
-            for (fname, subpat) in fields.iter() {
-                let pat = lower_pattern_value(ctx, a, body, scope, subpat)?;
-                let pat = body.pattern_arena.alloc(pat);
-                entries.push(RecordPatField {
-                    name: fname.name,
-                    name_span: fname.span,
-                    pat,
-                });
-            }
-
-            let fields = alloc_contiguous(&mut body.record_pat_field_arena, entries);
-
-            let enum_key = match enum_name {
-                Some(e) => Some(ctx.variant_enum_key(e.name, e.span)?.unwrap_or(e.name)),
-                None => None,
-            };
-            Pattern::Record {
-                enum_name: enum_key,
-                enum_name_span: enum_name.as_ref().map(|e| e.span),
-                name: name.as_ref().map(|n| {
-                    if enum_key.is_none() {
-                        ctx.resolve_bare_key(n.name, n.span)
-                            .ok()
-                            .filter(|key| ctx.workspace.struct_by_name.contains_key(key))
-                            .unwrap_or(n.name)
-                    } else {
-                        n.name
-                    }
-                }),
-                name_span: name.as_ref().map(|n| n.span),
-                fields,
-                rest: *rest,
-            }
-        }
-
         skull_parser::Pattern::Tuple(elems) => {
             let vals = elems
                 .iter()
@@ -3939,7 +3652,7 @@ fn lower_interp_parts(
             P::Expr(e, spec) => {
                 let e = a.e(e);
                 let val = lower_expr_value(ctx, a, body, scope, e)?;
-                let expr = alloc_value(ctx, a, body, e, val);
+                let expr = ctx.alloc_expr(body, val, e.span);
 
                 let spec = match spec {
                     Some(s) => {
@@ -3947,7 +3660,7 @@ fn lower_interp_parts(
                             Some(we) => {
                                 let we = a.e(&we);
                                 let v = lower_expr_value(ctx, a, body, scope, we)?;
-                                Some(alloc_value(ctx, a, body, we, v))
+                                Some(ctx.alloc_expr(body, v, we.span))
                             }
 
                             None => None,
@@ -3957,7 +3670,7 @@ fn lower_interp_parts(
                             Some(pe) => {
                                 let pe = a.e(&pe);
                                 let v = lower_expr_value(ctx, a, body, scope, pe)?;
-                                Some(alloc_value(ctx, a, body, pe, v))
+                                Some(ctx.alloc_expr(body, v, pe.span))
                             }
 
                             None => None,
@@ -4158,13 +3871,12 @@ pub fn lower_annotations_with_ctx(
     for anno in &mut lowered {
         // Only a decorator claims an annotation spelling; a same-named fn or
         // global leaves the builtin in force.
-        let resolved = match ctx.v1_scope() {
-            Some(frag) => ctx
-                .probed(|| resolve::decorator_binding(ctx.workspace, frag, anno.name.name))
-                .map_err(|message| CompilerError::new_with_label(anno.span, message))?
-                .map(|resolved| resolved.key),
-            None => None,
-        };
+        let resolved = ctx
+            .probed(|| {
+                resolve::decorator_binding(ctx.workspace, ctx.fragment_scope(), anno.name.name)
+            })
+            .map_err(|message| CompilerError::new_with_label(anno.span, message))?
+            .map(|resolved| resolved.key);
         if let Some(key) = resolved {
             let is_decorator = ctx
                 .workspace
@@ -4182,7 +3894,7 @@ pub fn lower_annotations_with_ctx(
                     .get(&key)
                     .is_some_and(|meta| meta.name.as_str() == "wire")
             });
-        if ctx.v1_scope().is_none() || !is_wire_role {
+        if !is_wire_role {
             continue;
         }
         let Some(names) = anno.args.iter().find_map(|arg| {
@@ -4255,7 +3967,7 @@ fn compound_place_temps(a: &Ast, place: &Idx<ExprData>) -> Vec<Idx<ExprData>> {
                 walk(a, o, false, out);
                 out.push(*i);
             }
-            ExprKind::Ident(_) | ExprKind::QualifiedIdent { .. } | ExprKind::Path { .. } => {}
+            ExprKind::Ident(_) | ExprKind::Path { .. } => {}
             // A non-place root is not assignable; leave it to the ordinary
             // diagnostics rather than assigning to a temporary.
             _ if root => {}
@@ -4294,10 +4006,8 @@ fn lower_named_call(
                 return Ok(Expr::Error);
             }
         }
-    } else if ctx.v1_scope().is_some() {
-        (name.name, hir::CallFamily::resolved(name.name, None))
     } else {
-        (name.name, hir::CallFamily::from_name(name.name))
+        (name.name, hir::CallFamily::Resolved(name.name))
     };
     let callee = match local {
         Some(binding) => hir::Callee::Local(binding),
@@ -4342,7 +4052,7 @@ fn expr_is_pure(a: &Ast, e: &Idx<ExprData>) -> bool {
     use skull_parser::ExprKind;
 
     match &a.e(e).kind {
-        ExprKind::Ident(_) | ExprKind::QualifiedIdent { .. } | ExprKind::Path { .. } => true,
+        ExprKind::Ident(_) | ExprKind::Path { .. } => true,
         _ if expr_is_literal(a, e) => true,
         ExprKind::Paren(o) | ExprKind::FieldAccess(o, _) | ExprKind::BitNot(o) => {
             expr_is_pure(a, o)
@@ -4549,7 +4259,7 @@ fn lower_placeholder_lambda(
     let body_val = lower_expr_value(ctx, a, body, lambda_scope, e);
     ctx.placeholder_param = prev;
 
-    let body_idx = alloc_value(ctx, a, body, e, body_val?);
+    let body_idx = ctx.alloc_expr(body, body_val?, e.span);
 
     Ok(Expr::Lambda {
         params: IdxRange::new_inclusive(param..=param),

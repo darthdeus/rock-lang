@@ -28,7 +28,6 @@ struct Request<'a> {
 /// builds throwaways.
 struct Caches<'a> {
     reach: Option<&'a crate::reachability::ReachabilityIndex>,
-    fn_sigs: Option<&'a HashMap<Ustr, String>>,
     freq: Option<&'a HashMap<Ustr, u32>>,
     call_through: Option<&'a CallThroughIndex>,
     scoped_call_through: &'a mut HashMap<Ustr, ScopedCallThroughIndex>,
@@ -55,7 +54,6 @@ impl BoneWorkspace {
             session,
             texts,
             reach,
-            fn_sigs,
             freq,
             call_through,
             scoped_call_through,
@@ -90,12 +88,10 @@ impl BoneWorkspace {
             return items;
         }
         let ws = session.workspace();
-        let fn_sigs = &*fn_sigs.get_or_insert_with(|| build_fn_sigs(ws));
         let freq = &*freq.get_or_insert_with(|| build_freq_index(ws));
         let call_through = &*call_through.get_or_insert_with(|| build_call_through(ws, reach));
         let caches = Caches {
             reach: Some(reach),
-            fn_sigs: Some(fn_sigs),
             freq: Some(freq),
             call_through: Some(call_through),
             scoped_call_through,
@@ -211,12 +207,17 @@ fn contextual_completions(
             return Some(items);
         }
     }
-    // Decorator position (`@late_dra|`): the candidates are the workspace's
-    // `deco` declarations, not the fn/type namespace. Served from the live
-    // workspace (decorators are declared in the engine, so they're present
-    // even if the edited module dropped out).
+    // Decorator position (`@late_dra|`): the candidates are visible `deco`
+    // declarations, not the fn/type namespace.
     if cx.decorator {
-        return Some(decorator_completions(session.workspace(), &rq.prefix));
+        let ws = session.workspace();
+        let frag = crate::modules_scope::fragment(ws, Ustr::from(rq.path))?;
+        return Some(decorator_completions(
+            ws,
+            frag,
+            Ustr::from(rq.path),
+            &rq.prefix,
+        ));
     }
     None
 }
@@ -311,7 +312,7 @@ fn field_ref_arg(
     let definitely_not_field_ref = matches!(
         callee_slot_is_field_of_in_scope(
             session.workspace(),
-            crate::modules_scope::fragment(session.workspace(), Ustr::from(rq.path)),
+            crate::modules_scope::fragment(session.workspace(), Ustr::from(rq.path))?,
             callee,
             arg_idx,
         ),
@@ -341,7 +342,7 @@ struct GeneralCx<'w> {
     mid: ModuleId,
     inf: &'w InferenceResult,
     /// The request file's fragment scope (modules v1).
-    frag: Option<&'w bone_core::modules::FragmentScope>,
+    frag: &'w bone_core::modules::FragmentScope,
     /// The fn whose body holds the cursor. Inside its own body it must not
     /// be PROMOTED as a way to produce a value -- a call-through autofill, a
     /// reach path, or a fn-returning-the-slot-type -- because that is a
@@ -388,6 +389,9 @@ fn general_completions(
     let Some(mid) = user_module_for_path(ws, rq.path) else {
         return Vec::new();
     };
+    let Some(frag) = crate::modules_scope::fragment(ws, ws.module(mid).file) else {
+        return Vec::new();
+    };
     let Some(inf) = ws.inference(mid) else {
         return Vec::new();
     };
@@ -402,7 +406,7 @@ fn general_completions(
         ws,
         mid,
         inf,
-        frag: crate::modules_scope::fragment(ws, Ustr::from(rq.path)),
+        frag,
         enclosing_fn,
         pattern_pos,
     };
@@ -435,17 +439,6 @@ fn general_completions(
     // rendered-string type compare.
     let mut expected = cx.expected(ws, mid, inf, rq.offset);
     let t_build = bone_core::prelude::Instant::now();
-    // The signature cache (rebuilt only on non-`BodyOnly` edits) supplies fn
-    // `detail` for the survivors. The one-shot CLI path has no cached build,
-    // so render a throwaway one from the same workspace.
-    let local_sigs;
-    let fn_sigs: &HashMap<Ustr, String> = match caches.fn_sigs {
-        Some(c) => c,
-        None => {
-            local_sigs = build_fn_sigs(ws);
-            &local_sigs
-        }
-    };
     let freq_owned;
     let freq: &HashMap<Ustr, u32> = match caches.freq {
         Some(f) => f,
@@ -525,7 +518,7 @@ fn general_completions(
             ct_survivors: ct_counts.survivors,
         })
     });
-    finish(&g, sink, fn_sigs, rq, max_items, &import_edits)
+    finish(&g, sink, rq, max_items, &import_edits)
 }
 
 /// Recovery workspace for a buffer whose live parse dropped the user module.
@@ -566,37 +559,32 @@ fn scope_candidates(
     expr_position: bool,
 ) -> Vec<crate::query::CompletionEntry> {
     let ws = g.ws;
-    let visible = crate::modules_scope::fragment(ws, ws.module(g.mid).file).map(|frag| {
-        let file = ws.module(g.mid).file;
-        visible_bindings
-            .entry(file)
-            .or_insert_with(|| {
-                // Preserve the public query's first-module owner choice, but
-                // carry it with the cached binding so every global candidate
-                // does not rescan all modules to recover its def_file.
-                let mut global_def_files = HashMap::new();
-                for module in &ws.modules {
-                    for key in module.global_by_name.keys() {
-                        global_def_files.entry(*key).or_insert(module.file);
-                    }
+    let file = ws.module(g.mid).file;
+    let visible = visible_bindings
+        .entry(file)
+        .or_insert_with(|| {
+            let mut global_def_files = HashMap::new();
+            for module in &ws.modules {
+                for key in module.global_by_name.keys() {
+                    global_def_files.entry(*key).or_insert(module.file);
                 }
-                let mut test_path_cache: FxHashMap<Ustr, bool> = FxHashMap::default();
-                crate::modules_scope::bound_names(ws, frag, |_| true)
-                    .into_iter()
-                    .filter_map(|(name, key)| {
-                        crate::query::resolve_visible_binding(
-                            ws,
-                            Some(frag),
-                            name,
-                            key,
-                            global_def_files.get(&key).copied(),
-                            &mut test_path_cache,
-                        )
-                    })
-                    .collect()
-            })
-            .as_slice()
-    });
+            }
+            let mut test_path_cache: FxHashMap<Ustr, bool> = FxHashMap::default();
+            crate::modules_scope::bound_names(ws, g.frag, |_| true)
+                .into_iter()
+                .filter_map(|(name, key)| {
+                    crate::query::resolve_visible_binding(
+                        ws,
+                        g.frag,
+                        name,
+                        key,
+                        global_def_files.get(&key).copied(),
+                        &mut test_path_cache,
+                    )
+                })
+                .collect()
+        })
+        .as_slice();
     crate::query::completion_with_visible_bindings(
         ws,
         g.mid,
@@ -604,7 +592,7 @@ fn scope_candidates(
         rq.offset,
         &rq.prefix,
         expr_position,
-        visible,
+        Some(visible),
     )
 }
 
@@ -669,9 +657,7 @@ fn push_import_candidates(
     if rq.prefix.is_empty() {
         return import_edits;
     }
-    let Some(frag) = g.frag else {
-        return import_edits;
-    };
+    let frag = g.frag;
     let ws = g.ws;
     let show_private = rq.prefix.starts_with('_');
     let pfx = rq.prefix.as_bytes();
@@ -687,7 +673,7 @@ fn push_import_candidates(
     for cand in crate::modules_scope::import_candidates(ws, frag, admit_name) {
         crate::query::key_entries_in_scope(
             ws,
-            Some(frag),
+            frag,
             cand.name,
             cand.key,
             expr_position,
@@ -736,8 +722,6 @@ struct GeneralRanker<'a, 'w> {
     /// Inference's `for`-head judgment over the cursor body (Local candidate
     /// TyIds index its BodyInference); `Some` only in a ForIn slot.
     for_in_oracle: Option<ForInOracle<'w>>,
-    /// The module's fragment scope, for fn return-type lookups.
-    module_frag: Option<&'w bone_core::modules::FragmentScope>,
     /// After `yield`/`await`, coroutine-returning fns rank first (the
     /// `await frame(1)` delegation pattern).
     after_yield: bool,
@@ -774,7 +758,6 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
             pattern_enum,
             for_in: cx.for_in,
             for_in_oracle,
-            module_frag: crate::modules_scope::fragment(ws, ws.module(g.mid).file),
             after_yield: cx.after_yield,
             demote_tests: !crate::query::is_test_path(rq.path),
             has_expected: expected.is_some(),
@@ -929,7 +912,7 @@ impl<'a, 'w> GeneralRanker<'a, 'w> {
                     if fn_unique_return_ty_in_scope(
                         ws,
                         c.signature_key.unwrap_or(c.name).as_str(),
-                        self.module_frag,
+                        self.g.frag,
                     )
                     .is_some_and(|t| oracle.iterable(t)) =>
                 {
@@ -1157,12 +1140,10 @@ fn push_reach_paths(
     };
     let pfx = rq.prefix.as_bytes();
     let show_private = rq.prefix.starts_with('_');
-    let callable_spellings = frag.map(|frag| {
-        crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Callable)
-    });
-    let type_spellings = frag.map(|frag| {
-        crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Type)
-    });
+    let callable_spellings =
+        crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Callable);
+    let type_spellings =
+        crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Type);
     // Roots: in-scope locals/params PLUS every global (Rock has one global
     // namespace across files, so `player.movable.grid` works where `player`
     // is a global from another file -- `locals_in_scope` omits globals).
@@ -1182,29 +1163,14 @@ fn push_reach_paths(
                 (n.to_string(), ty, 0)
             })
             .collect();
-    if let Some(frag) = frag {
-        roots.extend(
-            crate::modules_scope::visible_globals(ws, frag)
-                .into_iter()
-                .filter(|global| show_private || !global.name.as_str().starts_with('_'))
-                .map(|global| (global.name.to_string(), global.node_ty, 1)),
-        );
-    } else {
-        for m in ws.modules.iter() {
-            for (gname, gidx) in m.global_by_name.iter() {
-                if !show_private && gname.as_str().starts_with('_') {
-                    continue;
-                }
-                roots.push((
-                    gname.to_string(),
-                    crate::reachability::type_key(ws, m.globals[*gidx].ty).to_string(),
-                    1,
-                ));
-            }
-        }
-    }
+    roots.extend(
+        crate::modules_scope::visible_globals(ws, frag)
+            .into_iter()
+            .filter(|global| show_private || !global.name.as_str().starts_with('_'))
+            .map(|global| (global.name.to_string(), global.node_ty, 1)),
+    );
     for (vname, vty, root_kind) in roots {
-        let res = reach.paths_to(&vty, expected_types, REACH_CAP, frag.map(|frag| (ws, frag)));
+        let res = reach.paths_to(&vty, expected_types, REACH_CAP, Some((ws, frag)));
         for p in res.paths {
             // A path that CALLS the enclosing fn (`k.partition_style()`
             // inside `partition_style`) is a recursive self-reference -- skip
@@ -1216,26 +1182,15 @@ fn push_reach_paths(
             }
             // Dedup / fuzzy-match / sort on the bare access form; the final
             // hop's parens/snippet are rendered from the flags.
-            let suffix = match (frag, callable_spellings.as_ref()) {
-                (Some(_), Some(names)) => {
-                    match crate::modules_scope::display_method_suffix_with_names(
-                        &p.suffix,
-                        p.is_method,
-                        &p.method_members,
-                        names,
-                    ) {
-                        Some(suffix) => suffix,
-                        None => continue,
-                    }
-                }
-                _ => p.suffix.clone(),
+            let Some(suffix) = crate::modules_scope::display_method_suffix_with_names(
+                &p.suffix,
+                &p.method_members,
+                &callable_spellings,
+            ) else {
+                continue;
             };
-            let final_ty = match (frag, type_spellings.as_ref()) {
-                (Some(_), Some(names)) => {
-                    crate::modules_scope::display_type_with_names(ws, &p.final_ty, names)
-                }
-                _ => p.final_ty.clone(),
-            };
+            let final_ty =
+                crate::modules_scope::display_type_with_names(ws, &p.final_ty, &type_spellings);
             let key = format!("{vname}.{suffix}");
             // Require a CLEAN match (word-boundary / run), not a
             // coincidental scatter, so `nog` doesn't drag in
@@ -1298,17 +1253,11 @@ fn push_call_through(
             &ct_owned
         }
     };
-    let scoped_index = match g.frag {
-        Some(frag) => {
-            let file = ws.module(g.mid).file;
-            caches
-                .scoped_call_through
-                .entry(file)
-                .or_insert_with(|| build_scoped_call_through(ws, frag, ct));
-            caches.scoped_call_through.get(&file)
-        }
-        None => None,
-    };
+    let file = ws.module(g.mid).file;
+    let scoped_index = caches
+        .scoped_call_through
+        .entry(file)
+        .or_insert_with(|| build_scoped_call_through(ws, g.frag, ct));
     call_through_param_completions(
         ws,
         g.mid,
@@ -1316,6 +1265,7 @@ fn push_call_through(
         rq.offset,
         &rq.prefix,
         ct,
+        g.frag,
         scoped_index,
         reach,
         score_leads,
@@ -1333,29 +1283,18 @@ fn push_call_through(
 fn finish(
     g: &GeneralCx,
     mut sink: Sink,
-    fn_sigs: &HashMap<Ustr, String>,
     rq: &Request,
     max_items: usize,
     import_edits: &HashMap<String, TextEdit>,
 ) -> Vec<CompletionItem> {
     let ws = g.ws;
-    let fragment_file =
-        crate::modules_scope::fragment(ws, ws.module(g.mid).file).map(|_| ws.module(g.mid).file);
+    let fragment_file = ws.module(g.mid).file;
     sink.cands.sort_by(cand_cmp);
     sink.cands.truncate(max_items);
     let mut items: Vec<CompletionItem> = sink
         .cands
         .into_iter()
-        .map(|c| {
-            materialize_cand(
-                c,
-                ws,
-                fragment_file,
-                fn_sigs,
-                rq.next_is_open_paren,
-                g.pattern_pos,
-            )
-        })
+        .map(|c| materialize_cand(c, ws, fragment_file, rq.next_is_open_paren, g.pattern_pos))
         .collect();
     if !import_edits.is_empty() {
         for item in &mut items {

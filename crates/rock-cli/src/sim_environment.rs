@@ -162,6 +162,8 @@ fn sim_callee_edges(
             }
         }
     }
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|key| seen.insert(*key));
     out
 }
 

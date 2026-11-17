@@ -18,7 +18,6 @@ pub mod graph;
 /// an enforced package.
 #[derive(Debug, Clone)]
 pub struct LanguageConfig {
-    pub modules: rock_core::source_code::Dialect,
     pub globals: rock_core::source_code::GlobalPolicy,
     pub identity_storage: rock_core::source_code::IdentityStorage,
 }
@@ -26,7 +25,6 @@ pub struct LanguageConfig {
 impl Default for LanguageConfig {
     fn default() -> Self {
         Self {
-            modules: rock_core::source_code::Dialect::V1,
             globals: rock_core::source_code::GlobalPolicy::Any,
             identity_storage: rock_core::source_code::IdentityStorage::Enforced,
         }
@@ -108,15 +106,14 @@ impl<'de> serde::Deserialize<'de> for LanguageConfig {
                 self,
                 mut map: A,
             ) -> Result<LanguageConfig, A::Error> {
-                let mut modules = rock_core::source_code::Dialect::V1;
                 let mut globals = rock_core::source_code::GlobalPolicy::Any;
                 let mut identity_storage = rock_core::source_code::IdentityStorage::Enforced;
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "modules" => {
                             let value = map.next_value::<String>()?;
-                            modules = match value.as_str() {
-                                "v1" => rock_core::source_code::Dialect::V1,
+                            match value.as_str() {
+                                "v1" => {}
                                 "legacy" => {
                                     return Err(serde::de::Error::custom(
                                         "`[language] modules = \"legacy\"` has been removed; migrate this package to modules v1",
@@ -127,7 +124,7 @@ impl<'de> serde::Deserialize<'de> for LanguageConfig {
                                         "unknown `[language] modules` value `{other}`; known values: \"v1\""
                                     )));
                                 }
-                            };
+                            }
                         }
                         "memory" => {
                             return Err(serde::de::Error::custom(
@@ -154,7 +151,6 @@ impl<'de> serde::Deserialize<'de> for LanguageConfig {
                     }
                 }
                 Ok(LanguageConfig {
-                    modules,
                     globals,
                     identity_storage,
                 })
@@ -284,14 +280,6 @@ impl StickConfig {
             .as_ref()
             .map(|l| l.identity_storage.clone())
             .unwrap_or_default()
-    }
-
-    /// This package's source dialect. Missing `[language]` is modules v1.
-    pub fn dialect(&self) -> rock_core::source_code::Dialect {
-        self.language
-            .as_ref()
-            .map(|l| l.modules)
-            .unwrap_or(rock_core::source_code::Dialect::V1)
     }
 }
 
@@ -1329,10 +1317,9 @@ mod tests {
     }
 
     #[test]
-    fn language_modules_select_the_dialect() {
+    fn language_modules_value_is_validated() {
         for body in ["", "[language]\nmodules = \"v1\"\n"] {
-            let dialect = rock_core::source_code::Dialect::V1;
-            assert_eq!(manifest(body).unwrap().dialect(), dialect, "{body}");
+            manifest(body).unwrap();
         }
     }
 

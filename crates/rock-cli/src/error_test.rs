@@ -193,16 +193,9 @@ fn bone_check_case(
     let mut user = Vec::with_capacity(files.len());
     for (name, code) in files {
         // Reject obsolete or unknown module directives before parsing.
-        let dialect = match rock_host::source_files::parse_modules_directive(code) {
-            Ok(d) => d,
-            // anyhow error: an unknown `//! modules:` value is a load error.
-            Err(e) => return Err(e.to_string()),
-        };
-        match skull_parser::parse_module_with_dialect(
-            code,
-            ustr::Ustr::from(name.as_str()),
-            dialect,
-        ) {
+        rock_core::source_code::validate_modules_directive(code, ustr::Ustr::from(name.as_str()))
+            .map_err(|e| e.to_string())?;
+        match skull_parser::parse_module(code, ustr::Ustr::from(name.as_str())) {
             Ok(mut m) => {
                 if files.len() > 1 {
                     m.package = Some(skull_parser::PackageTag {

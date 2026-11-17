@@ -3074,58 +3074,24 @@ impl InstanceGraph {
             let Some(hole) = self.uninstantiated_roots.get_mut(name) else {
                 continue;
             };
-            hole.instances = Self::root_hole_instance_count(
-                ws,
-                &self.index,
-                &self.contributions,
-                self.root_hole_sites.get(name),
-                name,
-            );
+            hole.instances = Self::root_hole_instance_count(ws, &self.index, name);
         }
     }
 
     fn refresh_root_hole_instances(&mut self, ws: &Workspace) {
         for (name, hole) in &mut self.uninstantiated_roots {
-            hole.instances = Self::root_hole_instance_count(
-                ws,
-                &self.index,
-                &self.contributions,
-                self.root_hole_sites.get(name),
-                name,
-            );
+            hole.instances = Self::root_hole_instance_count(ws, &self.index, name);
         }
     }
 
-    fn root_hole_instance_count(
-        ws: &Workspace,
-        index: &Indices,
-        contributions: &BTreeMap<Owner, Box<Contribution>>,
-        sites: Option<&BTreeMap<Owner, Vec<usize>>>,
-        name: &str,
-    ) -> usize {
-        let mut decls = BTreeSet::new();
-        if let Some(functions) = ws.functions_by_name.get(&ustr::Ustr::from(name)) {
-            for (module, func) in functions {
-                if mangle_fn(ws, &ws.module(*module).functions[*func]) != name {
-                    continue;
-                }
-                let fref = FuncRef {
-                    module: *module,
-                    func: *func,
-                };
-                decls.insert(DeclKey(skull_mir::lower::canonical_variant(ws, fref)));
-            }
-        }
-        for (owner, rows) in sites.into_iter().flat_map(|owners| owners.iter()) {
-            let contribution = &contributions[owner];
-            for &row in rows {
-                let callee = contribution.always_emitted_holes[row].callee;
-                decls.insert(DeclKey(skull_mir::lower::canonical_variant(ws, callee)));
-            }
-        }
-        decls
+    fn root_hole_instance_count(ws: &Workspace, index: &Indices, name: &str) -> usize {
+        index
+            .decls
             .iter()
-            .filter_map(|decl| index.decls.get(&decl.0))
+            .filter_map(|(func, instances)| {
+                (mangle_fn(ws, &ws.module(func.module).functions[func.func]) == name)
+                    .then_some(*instances)
+            })
             .sum()
     }
 
@@ -4306,7 +4272,10 @@ fn walk_body_edges(
         }
     }
     for (e, (m, f)) in calls {
-        if !reached(e) {
+        if !reached(e)
+            || body
+                .is_some_and(|body| matches!(body.expr_arena[e], bone_core::hir::Expr::Global(_)))
+        {
             continue;
         }
         // bone's collapsed representative, verbatim. Selecting the sibling that
@@ -6096,10 +6065,12 @@ mod recursion_search_tests {
             .iter()
             .find_map(|module| {
                 module.functions.iter().find_map(|(id, f)| {
-                    (f.name.as_str() == "probe").then_some(FuncRef {
-                        module: module.id,
-                        func: id,
-                    })
+                    (bone_core::modules::display_name(f.name.as_str()) == "probe").then_some(
+                        FuncRef {
+                            module: module.id,
+                            func: id,
+                        },
+                    )
                 })
             })
             .expect("probe declaration");
@@ -6167,10 +6138,12 @@ mod fresh_graph_tests {
             .iter()
             .find_map(|module| {
                 module.functions.iter().find_map(|(id, f)| {
-                    (f.name.as_str() == "main").then_some(FuncRef {
-                        module: module.id,
-                        func: id,
-                    })
+                    (bone_core::modules::display_name(f.name.as_str()) == "main").then_some(
+                        FuncRef {
+                            module: module.id,
+                            func: id,
+                        },
+                    )
                 })
             })
             .expect("main declaration");

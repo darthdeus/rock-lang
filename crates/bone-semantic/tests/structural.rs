@@ -6,7 +6,7 @@
 use bone_core::modules::{NsAliases, PackageAliases};
 use bone_semantic::prelude::*;
 use rock_core::source_code::{IdentityStorage, PackageTag};
-use skull_parser::{Dialect, parse_module_with_dialect};
+use skull_parser::parse_module;
 
 fn parse_rock_with_file(src: &str, file: &str) -> Result<skull_parser::Ast, CompilerError> {
     skull_parser::parse_module_clean(src, Ustr::from(file))
@@ -28,14 +28,14 @@ fn check(src: &str) -> Result<Workspace, CompilerError> {
 
 #[test]
 fn standalone_inline_module_paths_have_an_implicit_package() {
-    let mut module = parse_module_with_dialect(
+    let mut module = parse_module(
         "mod helpers { pub fn answer() -> int { 42 } } fn main() -> int { helpers::answer() }",
         Ustr::from("standalone.rock"),
-        Dialect::V1,
     )
     .unwrap();
     let ws = bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(
         std::slice::from_mut(&mut module),
+        &NsAliases::default(),
     )
     .expect("standalone module has an implicit package");
     assert!(ws.fragment_scopes.contains_key(&module.file));
@@ -82,10 +82,9 @@ fn tag(id: u32, self_name: &str, identity_storage: IdentityStorage) -> PackageTa
     }
 }
 
-/// Parse `src` as `file` under `dialect`, owned by package `id`/`name`.
-fn parse_in(src: &str, file: &str, dialect: Dialect, package: (u32, &str)) -> skull_parser::Ast {
-    let mut module = parse_module_with_dialect(src, Ustr::from(file), dialect)
-        .unwrap_or_else(|e| panic!("{file}: {e}"));
+/// Parse `src` as `file` owned by package `id`/`name`.
+fn parse_in(src: &str, file: &str, package: (u32, &str)) -> skull_parser::Ast {
+    let mut module = parse_module(src, Ustr::from(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
     module.package = Some(tag(package.0, package.1, Default::default()));
     module
 }
@@ -174,12 +173,8 @@ fn error_messages(ws: &Workspace) -> Vec<String> {
 
 #[test]
 fn standalone_workspace_keeps_the_std_namespace() {
-    let std_module = parse_module_with_dialect(
-        "fn print() {}",
-        Ustr::from("<stdlib>/fixture.rock"),
-        Dialect::V1,
-    )
-    .expect("parse stdlib module");
+    let std_module = parse_module("fn print() {}", Ustr::from("<stdlib>/fixture.rock"))
+        .expect("parse stdlib module");
     let user_module = parse_rock_with_file("fn main() {}", "main.rock").unwrap();
     let ws = semantic_pass(&mut [std_module, user_module]).expect("semantic pass");
     let std_root = ws
@@ -195,7 +190,7 @@ fn standalone_workspace_keeps_the_std_namespace() {
 fn an_unresolved_v1_variant_pattern_is_labeled_at_its_path() {
     let src =
         "fn f(n: int) -> int {\n    match n {\n        Nope::A => 1,\n        _ => 0,\n    }\n}";
-    let module = parse_in(src, "app.rock", Dialect::V1, (1, "app"));
+    let module = parse_in(src, "app.rock", (1, "app"));
     let ws = semantic_pass_with_aliases(&mut [module], &aliases(&[(1, "app", &[])]))
         .expect("semantic pass");
     let err = ws
@@ -634,10 +629,9 @@ fn cross_module_items_resolve() {
         let mod_a = parse_in(
             "fn helper(x: int) -> int { x }\nstruct Point { x: int, y: int }",
             "mod_a",
-            Dialect::V1,
             (1, "shared"),
         );
-        let mod_b = parse_in(b, "mod_b", Dialect::V1, (1, "shared"));
+        let mod_b = parse_in(b, "mod_b", (1, "shared"));
         let ws = semantic_pass(&mut [mod_a, mod_b]).expect("cross-module use should resolve");
         let errors = error_messages(&ws);
         assert!(errors.is_empty(), "{b}: {errors:?}");
@@ -1023,7 +1017,7 @@ const ACTOR: &str = "pub struct Actor {\n    pub health: int,\n    pub private(s
 fn external_field_access_enforces_visibility() {
     use bone_semantic::inference::{AccessDenied, FieldAccessNeed::*, field_access};
 
-    let v1_mod = parse_in(ACTOR, "lib.rock", Dialect::V1, (1, "game"));
+    let v1_mod = parse_in(ACTOR, "lib.rock", (1, "game"));
     let ws = semantic_pass_with_aliases(&mut [v1_mod], &aliases(&[(1, "game", &[])]))
         .expect("semantic pass");
     let body = Body::default();
@@ -1059,14 +1053,13 @@ fn external_field_access_enforces_visibility() {
 fn structural_interface_conformance_rejects_private_set_field_for_writable_interface() {
     use bone_semantic::inference::coerce_to_interface;
 
-    let lib_mod = parse_in(ACTOR, "lib.rock", Dialect::V1, (1, "game"));
+    let lib_mod = parse_in(ACTOR, "lib.rock", (1, "game"));
     let consumer_mod = parse_in(
         "pub struct WritableMana { pub mana: int }\n\
          pub struct WritableHealth { pub health: int }\n\
          pub struct MissingField { pub missing: int }\n\
          pub struct ReadableSecret { pub secret: int }",
         "consumer.rock",
-        Dialect::V1,
         (2, "consumer"),
     );
     let mut ws = semantic_pass_with_aliases(
@@ -1244,24 +1237,17 @@ fn identity_storage_module_exemption_follows_the_module_path() {
         let mut modules: Vec<_> = files
             .iter()
             .map(|(file, header, name)| {
-                parse_in(
-                    &format!("{header}\n{}", mob(name)),
-                    file,
-                    Dialect::V1,
-                    (1, "game"),
-                )
+                parse_in(&format!("{header}\n{}", mob(name)), file, (1, "game"))
             })
             .collect();
         modules.push(parse_in(
             "struct RootExtraMob { hp: int }\nstruct RootExtraMobRoom { mobs: [RootExtraMob] }\n",
             "unheaded.rock",
-            Dialect::V1,
             (1, "game"),
         ));
         modules.push(parse_in(
             &format!("pub mod world;\n{}", mob("OtherMob")),
             "other/world.rock",
-            Dialect::V1,
             (2, "other"),
         ));
         for module in &mut modules {
@@ -1381,7 +1367,7 @@ fn enumerated_arena_records_the_lazy_iterator_protocol() {
 fn annotation_resolution_errors(sources: &[(&str, &str)]) -> Vec<String> {
     let mut modules: Vec<_> = sources
         .iter()
-        .map(|(file, source)| parse_in(source, file, Dialect::V1, (1, "sample")))
+        .map(|(file, source)| parse_in(source, file, (1, "sample")))
         .collect();
     match semantic_pass_with_aliases(&mut modules, &aliases(&[(1, "sample", &[])])) {
         Err(error) => vec![error.message],
@@ -1655,7 +1641,7 @@ fn expanded_macros_are_not_callable_definitions() {
     use bone_semantic::semantic_passes::build_namespaces;
 
     const SOURCE: &str = include_str!("fixtures/cw7_macro_namespace_kind.rock");
-    let provider = parse_in(SOURCE, "provider.rock", Dialect::V1, (1, "provider"));
+    let provider = parse_in(SOURCE, "provider.rock", (1, "provider"));
     assert!(
         provider.recovery_errors.is_empty(),
         "{:?}",
@@ -1699,12 +1685,8 @@ fn expanded_macros_are_not_callable_definitions() {
     let errors = error_messages(&checked);
     assert!(errors.is_empty(), "{errors:?}");
 
-    let stdlib = skull_parser::parse_module_with_dialect(
-        SOURCE,
-        ustr("<stdlib>/macro_provider.rock"),
-        Dialect::V1,
-    )
-    .expect("parse stdlib provider");
+    let stdlib = skull_parser::parse_module(SOURCE, ustr("<stdlib>/macro_provider.rock"))
+        .expect("parse stdlib provider");
     let mut ws = Workspace::default();
     build_namespaces(&mut ws, &[stdlib], &NsAliases::default()).expect("stdlib namespace");
     let root = ws.ns.std_root().expect("stdlib root");

@@ -8,6 +8,12 @@ pub(super) fn assemble_program_core(
     roots: &[(FuncRef, String)],
     session: &JsSession,
 ) -> Result<ProgramBuild, CompilerError> {
+    if let Some((_, error)) = skull_mir::mangle::collision_errors_of(ws, [])
+        .into_iter()
+        .next()
+    {
+        return Err(error);
+    }
     let decorators = DecoratorTable::collect(ws);
     let mut st = WorklistState::new(
         ws,
@@ -397,8 +403,8 @@ pub(super) fn shader_register_sibling(ws: &Workspace) -> Result<Option<FuncRef>,
     if skull_mir::lower::collect_shader_pairs(ws)?.is_empty() {
         return Ok(None);
     }
-    // The registry uses DefKeys for v1 modules. @nomangle changes the emitted
-    // symbol, not that key, so match the declared segment on both dialects.
+    // The registry uses DefKeys in scoped packages. @nomangle changes the
+    // emitted symbol, not that key, so match the declared segment.
     let cands: Vec<_> = ws
         .functions_by_name
         .iter()

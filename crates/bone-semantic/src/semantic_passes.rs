@@ -14,8 +14,8 @@ use crate::{hir::Module, prelude::*};
 struct LowerItem<'a> {
     module: &'a mut Module,
     rock_module: &'a Ast,
-    /// This file's modules-v1 scope, when it is a v1 fragment.
-    v1_scope: Option<FragmentScope>,
+    /// This file's module scope.
+    fragment_scope: FragmentScope,
 }
 
 /// Best-effort classification of a decl's trailing generic defaults for the
@@ -62,13 +62,8 @@ fn trailing_generic_defaults(
 /// The key the workspace maps use for a definition named `name` in module
 /// `path`: in a v1 fragment the canonical DefKey, so two same-named types in
 /// different logical modules stay distinct; stdlib items retain bare names.
-fn map_key(scope: Option<&FragmentScope>, path: &[ustr::Ustr], name: ustr::Ustr) -> ustr::Ustr {
-    match scope {
-        Some(sc) if sc.package != STD_PACKAGE_ID => {
-            bone_core::modules::def_key(sc.package_name.as_ref(), path, name.as_str())
-        }
-        _ => name,
-    }
+fn map_key(scope: &FragmentScope, path: &[ustr::Ustr], name: ustr::Ustr) -> ustr::Ustr {
+    bone_core::modules::def_key(scope.package_name.as_ref(), path, name.as_str())
 }
 
 /// What one module declares that lowering reads workspace-wide before any
@@ -79,7 +74,7 @@ struct ModuleNominalFacts {
     decorators: Vec<ustr::Ustr>,
 }
 
-fn module_nominal_facts(scope: Option<&FragmentScope>, rock_mod: &Ast) -> ModuleNominalFacts {
+fn module_nominal_facts(scope: &FragmentScope, rock_mod: &Ast) -> ModuleNominalFacts {
     let mut facts = ModuleNominalFacts {
         types: Vec::new(),
         decorators: Vec::new(),
@@ -106,7 +101,7 @@ fn module_nominal_facts(scope: Option<&FragmentScope>, rock_mod: &Ast) -> Module
         ));
         Ok(())
     };
-    let start = scope.map(|s| s.module_path.clone()).unwrap_or_default();
+    let start = scope.module_path.clone();
     for_each_def_item(rock_mod.items.as_slice(), &start, &mut walk)
         .expect("reading nominal facts rejects nothing");
     facts
@@ -129,10 +124,10 @@ pub struct NominalFacts {
 }
 
 /// The nominal types `rock_mod` defines, keyed as the workspace maps key
-/// them (`scope` is the file's fragment scope, `None` for the stdlib),
+/// them (`scope` is the file's fragment scope),
 /// collected from the supplied AST with the same visitor as `lower_modules`.
 pub fn nominal_type_facts(
-    scope: Option<&FragmentScope>,
+    scope: &FragmentScope,
     rock_mod: &Ast,
 ) -> FxHashMap<ustr::Ustr, NominalFacts> {
     module_nominal_facts(scope, rock_mod)
@@ -215,21 +210,19 @@ pub fn lower_modules_seeded(
     // module order, since the first declaration wins.
     let facts = rock_modules
         .par_iter()
-        .map(|rock_mod| module_nominal_facts(ws.fragment_scopes.get(&rock_mod.file), rock_mod))
+        .map(|rock_mod| module_nominal_facts(&ws.fragment_scopes[&rock_mod.file], rock_mod))
         .collect::<Vec<_>>();
     for (module, facts) in modules.iter().zip(facts) {
         let mid = module.id;
         for (key, mut facts) in facts.types {
-            if let Some(scope) = ws.fragment_scopes.get(&module.file) {
-                let mut scope = scope.clone();
-                if let Some(meta) = ws.defs.get(&key) {
-                    scope.module_path = meta.module.clone();
-                }
-                for default in &mut facts.defaults {
-                    if let bone_core::hir::GenericDefault::Named(name) = default {
-                        if let Ok(resolved) = bone_lower::resolve::resolve_bare(ws, &scope, *name) {
-                            *name = resolved.key;
-                        }
+            for default in &mut facts.defaults {
+                if let bone_core::hir::GenericDefault::Named(name) = default {
+                    let mut scope = ws.fragment_scopes[&module.file].clone();
+                    if let Some(meta) = ws.defs.get(&key) {
+                        scope.module_path = meta.module.clone();
+                    }
+                    if let Ok(resolved) = bone_lower::resolve::resolve_bare(ws, &scope, *name) {
+                        *name = resolved.key;
                     }
                 }
             }
@@ -260,7 +253,7 @@ pub fn lower_modules_seeded(
         .map(|(a, b)| LowerItem {
             module: a,
             rock_module: b,
-            v1_scope: ws.fragment_scopes.get(&b.file).cloned(),
+            fragment_scope: ws.fragment_scopes[&b.file].clone(),
         })
         .collect_vec();
 
@@ -272,7 +265,7 @@ pub fn lower_modules_seeded(
         items
             .par_iter_mut()
             .map(|item| {
-                pass_register_forward_decls(item.rock_module, item.module, item.v1_scope.as_ref())
+                pass_register_forward_decls(item.rock_module, item.module, &item.fragment_scope)
             })
             .collect::<Result<Vec<()>, CompilerError>>()?;
 
@@ -1181,11 +1174,8 @@ pub fn semantic_pass_with_aliases(
 /// The semantic pass over `modules` without the public-API closure gate, for
 /// a caller that applies it itself (the compile pipeline).
 ///
-/// When the shared prefix of `modules` is the process stdlib and no user
-/// module can change it, the pass starts from the stdlib checked once per
-/// process ([`crate::stdlib_base`]) and leaves the prefix shared and
-/// unexpanded. Otherwise the whole set is made owned and lowered. No session
-/// retains the result, so lowering records no scope probes.
+/// The shared prefix is made owned and lowered with the user modules. No
+/// session retains the result, so lowering records no editor facts.
 pub fn semantic_pass_without_closure_gate(
     modules: &mut ModuleSet,
     aliases: &bone_core::modules::NsAliases,
@@ -1216,20 +1206,15 @@ impl PassFailure {
 }
 
 /// [`semantic_pass_without_closure_gate`] behind `gate`. The gate reads the
-/// modules before expansion, beside the namespace build.
+/// modules before expansion.
 pub fn semantic_pass_after_gate(
     modules: &mut ModuleSet,
     aliases: &bone_core::modules::NsAliases,
     gate: PreExpansionGate,
 ) -> Result<Workspace, PassFailure> {
-    if crate::stdlib_base::applies(modules) {
-        let errors = gate(&modules.iter().collect_vec());
-        if !errors.is_empty() {
-            return Err(PassFailure::Gate(errors));
-        }
-        if let Some(pass) = crate::stdlib_base::semantic_pass(modules, aliases) {
-            return pass.map_err(PassFailure::Pass);
-        }
+    let errors = gate(&modules.iter().collect_vec());
+    if !errors.is_empty() {
+        return Err(PassFailure::Gate(errors));
     }
     let timer = Instant::now();
     let owned = modules.make_owned();
@@ -1238,7 +1223,7 @@ pub fn semantic_pass_after_gate(
         ..Workspace::default()
     };
     ws.log_time("own stdlib", timer);
-    semantic_pass_into_after_gate(ws, owned, aliases, gate)
+    semantic_pass_into(ws, owned, aliases).map_err(PassFailure::Pass)
 }
 
 /// [`semantic_pass`] enforcing identity storage in unpackaged files: the bone
@@ -1257,35 +1242,19 @@ pub fn semantic_pass_enforcing_identity_storage(
 }
 
 pub fn semantic_pass_into(
-    ws: Workspace,
-    rock_modules: &mut [Ast],
-    aliases: &bone_core::modules::NsAliases,
-) -> Result<Workspace, CompilerError> {
-    semantic_pass_into_after_gate(ws, rock_modules, aliases, &|_| Vec::new())
-        .map_err(PassFailure::ungated)
-}
-
-fn semantic_pass_into_after_gate(
     mut ws: Workspace,
     rock_modules: &mut [Ast],
     aliases: &bone_core::modules::NsAliases,
-    gate: PreExpansionGate,
-) -> Result<Workspace, PassFailure> {
+) -> Result<Workspace, CompilerError> {
     let _span = tracing::info_span!("bone_semantic_pass").entered();
 
     let timer = Instant::now();
-    let gate_errors = gate(&rock_modules.iter().collect_vec());
-    if !gate_errors.is_empty() {
-        return Err(PassFailure::Gate(gate_errors));
-    }
     expand_and_desugar_trees(rock_modules);
     ws.log_time("macro_expand", timer);
     let timer = Instant::now();
-    NamespaceInput::read(&*rock_modules)
-        .build(&mut ws, aliases)
-        .map_err(PassFailure::Pass)?;
+    build_namespaces(&mut ws, &*rock_modules, aliases)?;
     ws.log_time("namespaces", timer);
-    lower_and_infer(&mut ws, rock_modules).map_err(PassFailure::Pass)?;
+    lower_and_infer(&mut ws, rock_modules)?;
 
     Ok(ws)
 }
@@ -1388,36 +1357,17 @@ fn scope_items(items: &[Item]) -> Vec<ScopeItem> {
 /// scopes for the resolver. Standalone files receive one implicit package each.
 pub fn build_namespaces<'a>(
     ws: &mut Workspace,
-    rock_modules: impl IntoIterator<Item = &'a Ast> + Clone,
+    rock_modules: impl IntoIterator<Item = &'a Ast>,
     aliases: &bone_core::modules::NsAliases,
 ) -> Result<(), CompilerError> {
-    NamespaceInput::read(rock_modules).build(ws, aliases)
-}
-
-/// What [`build_namespaces`] reads from the parse trees, taken before it
-/// writes the workspace so the trees are free for macro expansion meanwhile.
-struct NamespaceInput(Vec<FragmentContribution>);
-
-impl NamespaceInput {
-    fn read<'a>(rock_modules: impl IntoIterator<Item = &'a Ast> + Clone) -> Self {
-        let modules = rock_modules.into_iter().collect_vec();
-        Self(
-            modules
-                .par_iter()
-                .map(|module| contribute(module))
-                .collect(),
-        )
-    }
-
-    fn build(
-        self,
-        ws: &mut Workspace,
-        aliases: &bone_core::modules::NsAliases,
-    ) -> Result<(), CompilerError> {
-        let built = assemble_namespaces(ws, &self.0.iter().collect_vec(), aliases);
-        drop_in_background(self.0);
-        built
-    }
+    let modules = rock_modules.into_iter().collect_vec();
+    let contributions: Vec<_> = modules
+        .par_iter()
+        .map(|module| contribute(module))
+        .collect();
+    let built = assemble_namespaces(ws, &contributions.iter().collect_vec(), aliases);
+    drop_in_background(contributions);
+    built
 }
 
 /// [`build_namespaces`] from each file's [`FragmentContribution`], in module
@@ -1481,7 +1431,12 @@ pub fn assemble_namespaces(
                 self_name: format!(
                     "{}{}",
                     bone_core::modules::STANDALONE_PACKAGE_PREFIX,
-                    contribution.file
+                    contribution
+                        .file
+                        .as_str()
+                        .replace('%', "%25")
+                        .replace('$', "%24")
+                        .replace('_', "%5f")
                 ),
                 identity_storage: Default::default(),
                 root: String::new(),
@@ -2236,16 +2191,16 @@ fn reuse_body(
 pub(crate) fn pass_register_forward_decls(
     rock_module: &Ast,
     module: &mut Module,
-    v1_scope: Option<&FragmentScope>,
+    scope: &FragmentScope,
 ) -> Result<(), CompilerError> {
     // pass 1: register structs for forward decls. In a v1 fragment the
     // registration key (and the HIR definition name) is the canonical
     // DefKey, so per-logical-module duplicate checks fall out of the
     // workspace merge while same-named types in different modules stay
     // distinct.
-    let start = v1_scope.map(|s| s.module_path.clone()).unwrap_or_default();
+    let start = scope.module_path.clone();
     for_each_def_item(rock_module.items.as_slice(), &start, &mut |item, path| {
-        let def_key = |name: &ustr::Ustr| map_key(v1_scope, path, *name);
+        let def_key = |name: &ustr::Ustr| map_key(scope, path, *name);
         if let ItemKind::Struct(s) = &item.kind {
             // `@value struct` is a retired form: the annotation set `is_value`
             // without `is_c_repr` (a codegen drift). Only the `value Foo { ... }`
@@ -2328,12 +2283,9 @@ pub(crate) fn pass_register_forward_decls(
 pub(crate) fn pass_lower_fields(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerError> {
     // pass 2: lower fields. v1 fragments register under their DefKeys, so
     // the walk carries each item's logical module path.
-    let scope = ctx.v1_scope().cloned();
-    let reg_key = |name: &ustr::Ustr, path: &[ustr::Ustr]| map_key(scope.as_ref(), path, *name);
-    let start = scope
-        .as_ref()
-        .map(|s| s.module_path.clone())
-        .unwrap_or_default();
+    let scope = ctx.fragment_scope().clone();
+    let reg_key = |name: &ustr::Ustr, path: &[ustr::Ustr]| map_key(&scope, path, *name);
+    let start = scope.module_path.clone();
     for_each_def_item(a.items.as_slice(), &start, &mut |item, path| {
         match &item.kind {
             ItemKind::Struct(s) => lower_struct_def(ctx, a, s, reg_key(&s.name.name, path))?,
@@ -2349,12 +2301,9 @@ pub(crate) fn pass_lower_fields(a: &Ast, ctx: &mut LowerCtx) -> Result<(), Compi
 
 pub(crate) fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerError> {
     // pass 3: lower function defs
-    let scope = ctx.v1_scope().cloned();
-    let reg_key = |name: &ustr::Ustr, path: &[ustr::Ustr]| map_key(scope.as_ref(), path, *name);
-    let start = scope
-        .as_ref()
-        .map(|s| s.module_path.clone())
-        .unwrap_or_default();
+    let scope = ctx.fragment_scope().clone();
+    let reg_key = |name: &ustr::Ustr, path: &[ustr::Ustr]| map_key(&scope, path, *name);
+    let start = scope.module_path.clone();
     for_each_def_item(a.items.as_slice(), &start, &mut |item, path| {
         match &item.kind {
             ItemKind::Function(f) => {

@@ -1,11 +1,8 @@
-//! Round-trip checks the `tests/fmt` corpus cannot express: the v1 dialect
-//! and narrow line widths.
+//! Round-trip checks the `tests/fmt` corpus cannot express and narrow line widths.
 
-use rock_core::source_code::Dialect;
-
-/// Modules-v1 forms format unchanged under the v1 dialect and reparse clean.
-/// A v1 ascription keeps its `(expr : Type)` spelling (an infix re-print
-/// would not reparse in v1), a file header keeps its `;` and one blank line
+/// Modules-v1 forms format unchanged and reparse clean. A v1 ascription keeps
+/// its `(expr : Type)` spelling (an infix re-print would not reparse), a file
+/// header keeps its `;` and one blank line
 /// after it, and a visibility ahead of an item's annotations survives.
 #[test]
 fn modules_v1_forms_format_unchanged() {
@@ -24,10 +21,10 @@ fn modules_v1_forms_format_unchanged() {
         "pub mod a::b;\n\n// lead\nfn f() {\n    g()\n}\n",
         "private mod secret;\n\npub fn f() {\n    g()\n}\n",
     ] {
-        let once = skull_fmt::try_format_with_dialect(src, &cfg, Dialect::V1)
+        let once = skull_fmt::try_format(src, &cfg)
             .unwrap_or_else(|e| panic!("format failed for {src:?}: {e}"));
         assert_eq!(once, src);
-        skull_parser::parse_module_clean_with_dialect(&once, "<v1>".into(), Dialect::V1)
+        skull_parser::parse_module_clean(&once, "<v1>".into())
             .unwrap_or_else(|e| panic!("{src:?} must reparse: {}", e.message));
     }
 }

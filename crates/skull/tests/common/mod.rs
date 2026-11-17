@@ -159,19 +159,14 @@ pub struct V1Fragment<'a> {
     pub src: &'a str,
 }
 
-/// A v1 package's workspace over the real stdlib (which stays legacy, as it is
-/// in a real build). Each fragment parses under the v1 dialect and carries the
+/// A v1 package's workspace over the real stdlib. Each fragment carries the
 /// package tag the host's graph stamps, so its definitions register under their
 /// DefKeys (`<package>::<module path>::<name>`) instead of bare names.
 pub fn ws_v1_package(package: &str, fragments: &[V1Fragment]) -> Workspace {
     let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([]).expect("stdlib parses");
     for fragment in fragments {
-        let mut module = skull_parser::parse_module_clean_with_dialect(
-            fragment.src,
-            Ustr::from(fragment.file),
-            skull_parser::Dialect::V1,
-        )
-        .expect("parse");
+        let mut module = skull_parser::parse_module_clean(fragment.src, Ustr::from(fragment.file))
+            .expect("parse");
         module.package = Some(skull_parser::PackageTag {
             id: 0,
             self_name: package.to_string(),

@@ -98,7 +98,7 @@ pub(crate) fn aliases_for_modules<'a>(
     rock_host::program_inputs::ns_aliases_for_sources(
         modules
             .into_iter()
-            .map(|m| (m.file.as_str(), m.dialect, m.package.as_ref())),
+            .map(|m| (m.file.as_str(), m.package.as_ref())),
     )
 }
 
@@ -139,11 +139,9 @@ pub(crate) fn bone_session(
     // The session parses its own user modules, so the alias tables are derived
     // from the same facts `aliases_for_modules` reads off a parsed set: the
     // root package's manifest, reached through the file that carries graph id 0.
-    // A set with no v1 file uses the empty table, exactly as the batch path does.
+    // A set with no package uses the empty table, exactly as the batch path does.
     let aliases = rock_host::program_inputs::ns_aliases_for_sources(
-        files
-            .iter()
-            .map(|f| (f.path.as_str(), f.dialect, f.package.as_ref())),
+        files.iter().map(|f| (f.path.as_str(), f.package.as_ref())),
     )?;
     let stdlib = skull_parser::stdlib::cached()
         .as_ref()
@@ -152,7 +150,7 @@ pub(crate) fn bone_session(
 }
 
 /// The session files for a discovered project: each file's text plus the
-/// dialect and owning package the package graph stamped on it. A session
+/// owning package the package graph stamped on it. A session
 /// re-parses on every edit, so it needs the facts, not a one-shot stamp.
 pub(crate) fn session_files(sources: &SourceFiles) -> Vec<bone_incremental::session::SessionFile> {
     sources
@@ -233,8 +231,7 @@ pub(crate) fn parse_user_modules(
         |file| {
             let f = file.borrow();
             let id = ustr::Ustr::from(f.file.to_id_path().as_str());
-            let mut module = skull_parser::parse_module_with_dialect(&f.contents, id, f.dialect)
-                .map_err(|e| vec![e])?;
+            let mut module = skull_parser::parse_module(&f.contents, id).map_err(|e| vec![e])?;
             module.package = f.package.clone();
             module.global_policy = f.global_policy;
             Ok((module, id))

@@ -18,10 +18,7 @@ use skull_mir::monoty::{MonoCtor, MonoTy};
 use ustr::Ustr;
 
 fn func_ref(ws: &bone_core::workspace::Workspace, name: &str) -> FuncRef {
-    let overloads = ws
-        .functions_by_name
-        .get(&key(ws, name))
-        .expect("declared");
+    let overloads = ws.functions_by_name.get(&key(ws, name)).expect("declared");
     assert_eq!(
         overloads.len(),
         1,
@@ -918,11 +915,7 @@ fn nominal_value_storage_is_owned_by_the_rep_plan() {
     assert!(matches!(plan.layout(), RepLayout::Leaves(_)));
     assert_eq!(
         arena
-            .nominal_value_storage_required(
-                &ws,
-                bone_core::hir::FnBackend::Lua,
-                key(&ws, "Boxed")
-            )
+            .nominal_value_storage_required(&ws, bone_core::hir::FnBackend::Lua, key(&ws, "Boxed"))
             .expect("the required storage plan must exist"),
         ValueStorage::GcTable
     );
@@ -1011,11 +1004,7 @@ fn nominal_c_layout_aligns_nested_fields_before_recurse() {
     );
     let arena = RepArena::default();
     let (leaves, size, align) = arena
-        .nominal_leaf_layout(
-            &ws,
-            bone_core::hir::FnBackend::Lua,
-            key(&ws, "SpriteFragU"),
-        )
+        .nominal_leaf_layout(&ws, bone_core::hir::FnBackend::Lua, key(&ws, "SpriteFragU"))
         .expect("the nested C layout must be representable");
     assert_eq!(
         leaves

@@ -196,7 +196,6 @@ pub(crate) fn child_exprs(ast: &Ast, e: Idx<ExprData>) -> ExprEdges {
         | ExprKind::Unit
         | ExprKind::Hole(_, _)
         | ExprKind::Ident(_)
-        | ExprKind::QualifiedIdent { .. }
         | ExprKind::Int(_, _)
         | ExprKind::Float(_)
         | ExprKind::String(_)
@@ -243,13 +242,6 @@ pub(crate) fn child_exprs(ast: &Ast, e: Idx<ExprData>) -> ExprEdges {
         }
         ExprKind::ArrayLiteral(xs) | ExprKind::Tuple(xs) => {
             out.extend(xs.iter().copied());
-        }
-        ExprKind::StructLiteral { bases, fields, .. } => {
-            out.extend(bases.iter().copied());
-            out.extend(fields.iter().map(|(_, v)| *v));
-        }
-        ExprKind::EnumVariantRecord { fields, .. } => {
-            out.extend(fields.iter().map(|(_, v)| *v));
         }
         ExprKind::PathStructLiteral { bases, fields, .. } => {
             out.extend(bases.iter().copied());

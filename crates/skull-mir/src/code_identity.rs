@@ -24,14 +24,18 @@ use crate::monoty::MonoInterner;
 /// (`<package>::<module path>::<name>`, the only names carrying `::`), which
 /// already names the logical module, so the owning FRAGMENT is not part of its
 /// identity: moving a definition between two fragments of one module keeps its
-/// state and its code slot. A legacy definition is unique only within its file,
-/// so it keeps today's `<file>::<name>`.
+/// state and its code slot. A standalone definition keeps `<file>::<name>`.
 pub(crate) fn logical_def_key(file: Ustr, name: Ustr) -> String {
     if let Some(key) = name
         .as_str()
         .strip_prefix(bone_core::modules::STANDALONE_PACKAGE_PREFIX)
     {
-        return key.to_string();
+        let (file_key, item) = key.split_once("::").expect("standalone definition key");
+        let file_key = file_key
+            .replace("%5f", "_")
+            .replace("%24", "$")
+            .replace("%25", "%");
+        return format!("{file_key}::{item}");
     }
     match name.as_str().contains("::") {
         true => name.to_string(),
@@ -899,6 +903,10 @@ impl BodyHasher {
     }
 
     fn string(&mut self, value: &str) {
+        self.hash.write_str(value);
+    }
+
+    fn artifact_name(&mut self, value: &str) {
         self.hash
             .write_str(bone_core::modules::artifact_name(value));
     }
@@ -970,11 +978,11 @@ impl BodyHasher {
         self.inst_idx(right);
     }
 
-    fn option_string(&mut self, value: Option<Ustr>) {
+    fn option_artifact_name(&mut self, value: Option<Ustr>) {
         match value {
             Some(value) => {
                 self.boolean(true);
-                self.string(value.as_str());
+                self.artifact_name(value.as_str());
             }
             None => self.boolean(false),
         }
@@ -986,7 +994,7 @@ impl BodyHasher {
             self.string(&format!("__rock_nested_{identity:?}"));
         } else {
             self.tag(0);
-            self.string(name.as_str());
+            self.artifact_name(name.as_str());
         }
     }
 
@@ -1027,7 +1035,7 @@ impl BodyHasher {
     }
 
     fn column_elem(&mut self, elem: ColumnElem) {
-        self.string(elem.name.as_str());
+        self.artifact_name(elem.name.as_str());
         self.boolean(elem.nullable);
         self.rep_id(elem.representation());
         self.boolean(elem.is_nobox());
@@ -1040,7 +1048,7 @@ impl BodyHasher {
             ContainerKind::NativeBuffer => self.tag(1),
             ContainerKind::NativeBufferValue(name) => {
                 self.tag(2);
-                self.string(name.as_str());
+                self.artifact_name(name.as_str());
             }
             ContainerKind::VecValueColumns(elem) => {
                 self.tag(3);
@@ -1210,7 +1218,7 @@ impl BodyHasher {
                 capacity,
             } => {
                 self.tag(66);
-                self.string(elem.as_str());
+                self.artifact_name(elem.as_str());
                 self.rep_id(*representation);
                 self.boolean(*nobox);
                 self.hash.write_usize(columns.len());
@@ -1228,7 +1236,7 @@ impl BodyHasher {
                 capacity,
             } => {
                 self.tag(67);
-                self.string(elem.as_str());
+                self.artifact_name(elem.as_str());
                 self.rep_id(*representation);
                 self.boolean(*nobox);
                 self.inst_idx(*capacity);
@@ -1243,7 +1251,7 @@ impl BodyHasher {
                 capacity,
             } => {
                 self.tag(89);
-                self.string(elem.as_str());
+                self.artifact_name(elem.as_str());
                 self.rep_id(*representation);
                 self.boolean(*nobox);
                 self.hash.write_usize(*stride);
@@ -1259,7 +1267,7 @@ impl BodyHasher {
                 capacity,
             } => {
                 self.tag(90);
-                self.string(elem.as_str());
+                self.artifact_name(elem.as_str());
                 self.rep_id(*representation);
                 self.boolean(*nobox);
                 self.hash.write_usize(*stride);
@@ -1283,7 +1291,7 @@ impl BodyHasher {
             }
             Inst::MakeStruct { ty, fields } => {
                 self.tag(68);
-                self.option_string(*ty);
+                self.option_artifact_name(*ty);
                 self.hash.write_usize(fields.len());
                 for (name, value) in fields {
                     self.string(name.as_str());
@@ -1297,7 +1305,7 @@ impl BodyHasher {
                 fields,
             } => {
                 self.tag(69);
-                self.string(name.as_str());
+                self.artifact_name(name.as_str());
                 self.rep_id(*representation);
                 self.value_ctor_form(*form);
                 self.hash.write_usize(fields.len());
@@ -1313,7 +1321,7 @@ impl BodyHasher {
                 fields,
             } => {
                 self.tag(70);
-                self.string(name.as_str());
+                self.artifact_name(name.as_str());
                 self.rep_id(*representation);
                 self.value_ctor_form(*form);
                 self.hash.write_usize(fields.len());
@@ -1335,7 +1343,7 @@ impl BodyHasher {
             } => {
                 self.tag(71);
                 self.string(tag.as_str());
-                self.string(ty.as_str());
+                self.artifact_name(ty.as_str());
                 self.inst_list(positional);
                 self.hash.write_usize(named.len());
                 for (name, value) in named {
@@ -1351,7 +1359,7 @@ impl BodyHasher {
             } => {
                 self.tag(72);
                 self.inst_idx(*tag);
-                self.string(ty.as_str());
+                self.artifact_name(ty.as_str());
                 self.inst_list(positional);
                 self.hash.write_usize(named.len());
                 for (name, value) in named {
@@ -1380,7 +1388,7 @@ impl BodyHasher {
                 representation,
             } => {
                 self.tag(74);
-                self.string(ctype.as_str());
+                self.artifact_name(ctype.as_str());
                 self.inst_idx(*count);
                 self.option_rep_id(*representation);
             }
@@ -1440,7 +1448,7 @@ impl BodyHasher {
             }
             Inst::StoreGlobal { name, value } => {
                 self.tag(84);
-                self.string(name.as_str());
+                self.artifact_name(name.as_str());
                 self.inst_idx(*value);
             }
             Inst::ArrayPush { arr, value, kind } => {
@@ -1558,17 +1566,6 @@ impl Fnv64 {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn standalone_definition_identity_keeps_the_file_and_name() {
-        assert_eq!(
-            super::logical_def_key(
-                ustr::ustr("script.rock"),
-                ustr::ustr("$standalone$script.rock::counter")
-            ),
-            "script.rock::counter",
-        );
-    }
-
     use super::*;
     use bone_core::prelude::ModuleId;
     use comfy_la_arena::{Idx, RawIdx};
@@ -1582,6 +1579,17 @@ mod tests {
 
     #[test]
     fn mono_arguments_and_enclosing_instances_are_identity_axes() {
+        let standalone_name = format!(
+            "{}script%5ffile.rock::counter",
+            bone_core::modules::STANDALONE_PACKAGE_PREFIX
+        );
+        assert_eq!(
+            logical_def_key(
+                ustr::ustr("script_file.rock"),
+                Ustr::from(standalone_name.as_str())
+            ),
+            "script_file.rock::counter",
+        );
         let interner = crate::monoty::MonoInterner::new();
         let int_instance =
             Instance::intern(&interner, declaration(), vec![crate::monoty::MonoTy::Int]);
@@ -1770,6 +1778,25 @@ mod tests {
         assert_ne!(
             fingerprint(10, 11, 10, false),
             fingerprint(10, 11, 10, true),
+        );
+
+        let string_fingerprint = |value: &str| {
+            let mut hasher = BodyHasher::default();
+            hasher.inst_with_volatile(
+                &Inst::Const(Lit::Str(Ustr::from(value))),
+                &FxHashMap::default(),
+                false,
+            );
+            hasher.finish()
+        };
+        let standalone = format!(
+            "{}fixture.rock::Root",
+            bone_core::modules::STANDALONE_PACKAGE_PREFIX
+        );
+        assert_ne!(
+            string_fingerprint(&standalone),
+            string_fingerprint("Root"),
+            "a user string that looks like a standalone key must stay literal data"
         );
     }
 

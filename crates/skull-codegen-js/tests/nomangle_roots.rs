@@ -149,19 +149,19 @@ fn main() {
 "#,
     );
     let mid = crate::common::test_mid(&ws);
+    let lua_error = skull::mir_emit::emit_full(&ws, mid)
+        .err()
+        .expect("Lua accepts duplicate types");
     assert!(
-        ws.module(mid)
-            .interface_errors
-            .iter()
-            .any(|error| error.message.contains("duplicate enum `Envelope`"))
+        lua_error.message.contains("would both emit as `Envelope`"),
+        "Lua rejected the duplicate for another reason: {lua_error:?}"
     );
+    let js_error = skull_codegen_js::emit::emit_program(&ws, mid)
+        .err()
+        .expect("JS accepts duplicate types");
     assert!(
-        skull::mir_emit::emit_full(&ws, mid).is_err(),
-        "Lua accepts duplicate types"
-    );
-    assert!(
-        skull_codegen_js::emit::emit_program(&ws, mid).is_err(),
-        "JS accepts duplicate types"
+        js_error.message.contains("would both emit as `Envelope`"),
+        "JS rejected the duplicate for another reason: {js_error:?}"
     );
 }
 

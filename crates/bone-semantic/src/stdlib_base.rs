@@ -1,26 +1,13 @@
-//! The process stdlib lowered and inferred once, alone, and reused by every
-//! batch semantic pass whose user modules cannot change it.
-//!
-//! A stdlib file consults no user scope, so its lowering and inference read
-//! user files only through the bare-name maps they share (types and generic
-//! arity, globals, overload families, decorators), and its expansion reads
-//! them only through the macro registry. A user module that defines nothing
-//! under a stdlib name and no macro under a name a stdlib expansion can look
-//! up therefore leaves every stdlib module exactly as a combined pass would
-//! build it, and the pass can start from a copy of the stdlib-alone workspace
-//! and lower only the user modules. The incremental session reuses its warm
-//! modules on the same condition ([`apart_from`]).
+//! The process stdlib checked once and reused by incremental sessions when
+//! their user modules cannot change it. One-shot semantic passes lower the
+//! complete module set.
 
-use std::borrow::Cow;
 use std::sync::OnceLock;
 
-use skull_parser::stdlib::ModuleSet;
-use skull_parser::{
-    Ast, ItemKind, MacroRegistry, collect_registry, cook_one, is_hygiene_name, macro_reach,
-};
+use skull_parser::{Ast, ItemKind, collect_registry, cook_one, is_hygiene_name, macro_reach};
 
 use crate::prelude::*;
-use crate::semantic_passes::{FragmentContribution, ScopeItem, contribute};
+use crate::semantic_passes::{FragmentContribution, ScopeItem};
 
 /// The names through which a user file can reach the warm modules.
 #[derive(Clone, Debug, Default)]
@@ -96,41 +83,13 @@ fn macro_names(ast: &Ast) -> impl Iterator<Item = Ustr> + '_ {
     })
 }
 
-/// What decides whether a user module admits the base: the stdlib's names,
-/// read off the parse trees alone. Much cheaper than the base itself, so a
-/// pass the stdlib rejects (a game overloading an operator the stdlib also
-/// defines) never pays for lowering and inferring the stdlib twice.
-struct StdlibNames {
-    names: WarmNames,
-    files: FxHashSet<Ustr>,
-}
-
 struct StdlibBase {
     /// The stdlib modules expanded, lowered and inferred alone, with no
     /// error anywhere.
     ws: Workspace,
-    /// The stdlib's own macros, which a qualifying pass extends with its
-    /// user modules' macros.
-    registry: MacroRegistry,
 }
 
-static NAMES: OnceLock<Option<StdlibNames>> = OnceLock::new();
 static BASE: OnceLock<Option<StdlibBase>> = OnceLock::new();
-
-/// The stdlib's names, built on first use; `None` when the stdlib does not
-/// parse.
-fn names() -> Option<&'static StdlibNames> {
-    NAMES
-        .get_or_init(|| {
-            let stdlib = skull_parser::stdlib::cached().as_ref().ok()?;
-            let contributions: Vec<FragmentContribution> = stdlib.iter().map(contribute).collect();
-            Some(StdlibNames {
-                names: warm_names(stdlib, &contributions),
-                files: stdlib.iter().map(|ast| ast.file).collect(),
-            })
-        })
-        .as_ref()
-}
 
 /// The shared base, built on first use; `None` when the stdlib alone does not
 /// check cleanly (then a combined pass decides what that means).
@@ -168,7 +127,7 @@ fn build() -> Option<StdlibBase> {
         return None;
     }
     ws.phase_timings.clear();
-    Some(StdlibBase { ws, registry })
+    Some(StdlibBase { ws })
 }
 
 /// The process stdlib expanded, lowered and inferred alone, when `warm` is
@@ -192,14 +151,6 @@ fn has_errors(ws: &Workspace) -> bool {
         })
 }
 
-impl StdlibNames {
-    /// Whether `user` leaves the stdlib modules as a combined pass builds
-    /// them: not a stdlib file itself, and apart from every stdlib name.
-    fn admits(&self, user: &Ast) -> bool {
-        !self.files.contains(&user.file) && apart_from(&self.names, user, &contribute(user))
-    }
-}
-
 impl StdlibBase {
     /// A copy of the base workspace with its own reuse counters (a clone
     /// would share them with every other copy).
@@ -211,62 +162,4 @@ impl StdlibBase {
             ..self.ws.clone()
         }
     }
-}
-
-/// Whether [`semantic_pass`] may start from the shared stdlib: `modules`
-/// begins with it and no user module can change it. `semantic_pass` can
-/// still decline when the stdlib base cannot be built.
-pub(crate) fn applies(modules: &ModuleSet) -> bool {
-    skull_parser::stdlib::is_process_stdlib(modules.shared())
-        && names().is_some_and(|names| modules.rest().iter().all(|user| names.admits(user)))
-}
-
-/// The semantic pass over `modules` from the shared stdlib base, or `None`
-/// when it does not apply: the shared prefix of `modules` must be the process
-/// stdlib itself ([`skull_parser::stdlib::is_process_stdlib`]) and every
-/// other module must be admitted. The result equals a combined pass from a
-/// default workspace. The prefix stays shared and unexpanded; only the user
-/// modules are expanded.
-pub(crate) fn semantic_pass(
-    modules: &mut ModuleSet,
-    aliases: &bone_core::modules::NsAliases,
-) -> Option<Result<Workspace, CompilerError>> {
-    if !applies(modules) {
-        return None;
-    }
-    let base_timer = Instant::now();
-    let base = base()?;
-    let base_time = base_timer.elapsed();
-    // A user macro is under no name the stdlib reaches, so the stdlib
-    // expands against this registry as against its own.
-    let registry = if modules
-        .rest()
-        .iter()
-        .any(|user| macro_names(user).next().is_some())
-    {
-        Cow::Owned(base.registry.extended(modules.rest()))
-    } else {
-        Cow::Borrowed(&base.registry)
-    };
-    let clone_timer = Instant::now();
-    let mut ws = base.workspace();
-    ws.skip_session_facts = true;
-    ws.phase_timings.push(("stdlib base", base_time));
-    ws.log_time("clone base", clone_timer);
-    Some((|| {
-        let users = modules.rest_mut();
-        let timer = Instant::now();
-        users
-            .par_iter_mut()
-            .map(|ast| cook_one(ast, &registry))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .collect::<Result<(), _>>()?;
-        ws.log_time("macro_expand", timer);
-        let timer = Instant::now();
-        crate::semantic_passes::build_namespaces(&mut ws, users.iter(), aliases)?;
-        ws.log_time("namespaces", timer);
-        crate::semantic_passes::lower_and_infer(&mut ws, users)?;
-        Ok(ws)
-    })())
 }

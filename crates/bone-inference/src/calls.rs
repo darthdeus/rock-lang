@@ -19,7 +19,7 @@ pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> Callees {
 
     let ws = gamma.workspace;
     match *family {
-        CallFamily::Resolved { key, owner } => member_overloads(gamma, key, owner),
+        CallFamily::Resolved(key) => member_overloads(gamma, key),
         // A merged family: every member's overloads, as lowering recorded
         // them for the module the call was lowered in.
         CallFamily::Merged { file, .. } => {
@@ -32,7 +32,7 @@ pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> Callees {
                 });
             let mut out = Callees::default();
             for &member in members {
-                let callees = member_overloads(gamma, member.key, member.owner);
+                let callees = member_overloads(gamma, member.key);
                 out.visible.extend(callees.visible);
                 out.hidden.extend(callees.hidden);
             }
@@ -41,21 +41,8 @@ pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> Callees {
     }
 }
 
-/// The family a function taken as a value (`Expr::Global` at `e`) is looked
-/// up in: the view that owns it in a v1 fragment (`Body::value_owners`), the
-/// whole bare family otherwise.
-pub(crate) fn fn_value_family(c: BodyCtx, e: Idx<Expr>, name: Ustr) -> CallFamily {
-    match c.body.value_owners.get(&e) {
-        Some(&owner) => CallFamily::resolved(name, Some(owner)),
-        None => CallFamily::from_name(name),
-    }
-}
-
-/// The overloads registered under a member's key, narrowed to the files of
-/// the view that owns it (`FamilyMember::owner`). A fragment reaches only
-/// the std view's or one provider's overloads. The key is a dependency either way, so an
-/// overload added under it re-infers this caller.
-fn member_overloads(gamma: &Gamma, key: Ustr, owner: Option<PackageId>) -> Callees {
+/// The overloads registered under a canonical member key.
+fn member_overloads(gamma: &Gamma, key: Ustr) -> Callees {
     gamma.dep_acc.borrow_mut().insert(key);
     let ws = gamma.workspace;
     let Some(fns) = ws.functions_by_name.get(&key) else {
@@ -67,9 +54,6 @@ fn member_overloads(gamma: &Gamma, key: Ustr, owner: Option<PackageId>) -> Calle
         hidden: FnList::default(),
     };
     for &(mid, fid) in fns {
-        if !owned_by_view(ws, owner, mid) {
-            continue;
-        }
         if ws.callable_member_admits(key, mid, fid, site) {
             out.visible.push((mid, fid));
         } else {
@@ -77,10 +61,6 @@ fn member_overloads(gamma: &Gamma, key: Ustr, owner: Option<PackageId>) -> Calle
         }
     }
     out
-}
-
-fn owned_by_view(ws: &Workspace, owner: Option<PackageId>, mid: ModuleId) -> bool {
-    owner.is_none_or(|owner| ws.ns.owns_file(owner, ws.module(mid).file))
 }
 
 /// The nearest lookup tier among the members of a merged v1 family that
@@ -103,11 +83,9 @@ fn candidate_tier(
     members
         .iter()
         .filter(|member| {
-            owned_by_view(ws, member.owner, mid)
-                && ws
-                    .functions_by_name
-                    .get(&member.key)
-                    .is_some_and(|fns| fns.contains(&(mid, fid)))
+            ws.functions_by_name
+                .get(&member.key)
+                .is_some_and(|fns| fns.contains(&(mid, fid)))
         })
         .map(|member| member.tier)
         .min()

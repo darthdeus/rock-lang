@@ -21,7 +21,7 @@ fn fixture_paths(
     expected: &[String],
     cap: usize,
 ) -> ReachResult {
-    const PREFIX: &str = "$standalone$<reach-test>::";
+    const PREFIX: &str = "@/<reach-test>::";
     let root = format!("{PREFIX}{root}");
     let expected: Vec<_> = expected
         .iter()

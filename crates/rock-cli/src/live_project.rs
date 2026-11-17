@@ -806,22 +806,17 @@ fn main() -> int { let _value: int = cast(always_int()) 3 }
         );
     }
 
-    /// A session re-parses on every edit, so it has to KEEP each file's
-    /// dialect and owning package rather than re-derive them -- and it was
-    /// given neither. Every Session-backed route (`rock sim`, `rock engine`,
-    /// `rock watch`, the LSP) therefore read a v1 package as legacy source:
-    /// `pub fn` came back as `unsupported item start`, and the definitions it
-    /// could still parse had no package, so nothing resolved. Converting
-    /// `libs/example-core` turned that into 830 type errors in `rock sim
-    /// example` while `rock compile games/example` was clean.
+    /// A session re-parses on every edit, so it has to keep each file's
+    /// owning package rather than re-derive it. Session-backed routes need to
+    /// retain that fact across edits for package-scoped names to resolve.
     #[test]
-    fn a_v1_package_keeps_its_dialect_and_package_through_a_session() {
+    fn a_v1_package_keeps_its_owner_through_a_session() {
         let (_dir, main, _a, mut project) = v1_live_project();
-        // And keeps them across a re-parse: an edit re-runs the parser from the
+        // It keeps the owner across a re-parse: an edit re-runs the parser from the
         // stored text, which is the half a one-shot stamp at init would miss.
         project
             .apply_edit(&main, "fn main() {\n    print(\"n={a::bump(2)}\")\n}\n")
-            .expect("a v1 edit must re-parse in its own dialect");
+            .expect("a v1 edit must keep its package owner");
     }
 
     fn diagnostic_messages(project: &LiveProject) -> Vec<String> {

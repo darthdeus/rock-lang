@@ -776,19 +776,14 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mangle::declared_name as declared;
     use bone_semantic::semantic_passes::semantic_pass;
 
-    fn workspace(sources: &[(&str, &str)]) -> Workspace {
-        let mut modules = sources
-            .iter()
-            .map(|(file, src)| {
-                skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse")
-            })
-            .collect::<Vec<_>>();
-        semantic_pass(&mut modules).expect("semantic")
+    fn entry_name(entry: &LifecycleEntry) -> &str {
+        declared(entry.diagnostic_name.as_str())
     }
 
-    fn workspace_in_package(sources: &[(&str, &str)]) -> Workspace {
+    fn modules(sources: &[(&str, &str)]) -> Vec<skull_parser::Ast> {
         let mut modules = sources
             .iter()
             .map(|(file, src)| {
@@ -803,7 +798,11 @@ mod tests {
                 root: String::new(),
             });
         }
-        semantic_pass(&mut modules).expect("semantic")
+        modules
+    }
+
+    fn workspace(sources: &[(&str, &str)]) -> Workspace {
+        semantic_pass(&mut modules(sources)).expect("semantic")
     }
 
     fn key(ws: &Workspace, name: &str) -> Ustr {
@@ -851,10 +850,7 @@ mod tests {
         assert_eq!(
             plan.entries
                 .iter()
-                .map(|e| (
-                    crate::mangle::declared_name(e.diagnostic_name.as_str()),
-                    e.stage
-                ))
+                .map(|e| (entry_name(e), e.stage))
                 .collect::<Vec<_>>(),
             vec![
                 ("first", 10),
@@ -884,9 +880,7 @@ mod tests {
         let entry = plan
             .entries
             .iter()
-            .find(|entry| {
-                crate::mangle::declared_name(entry.diagnostic_name.as_str()) == "apply_game_config"
-            })
+            .find(|entry| entry_name(entry) == "apply_game_config")
             .expect("qualified wire entry");
         assert!(entry.qualification.is_gated());
         assert_eq!(entry.qualification.dependencies().len(), 2);
@@ -904,10 +898,7 @@ mod tests {
                 fn apply_game_config() {{}}
                 "#
         );
-        let mut modules = vec![
-            skull_parser::parse_module_clean(&source, Ustr::from("wire.rock")).expect("parse"),
-        ];
-        match semantic_pass(&mut modules) {
+        match semantic_pass(&mut modules(&[("wire.rock", &source)])) {
             Ok(ws) => {
                 collect(&ws)
                     .expect_err("unsupported dependency must reject")
@@ -965,7 +956,7 @@ mod tests {
 
     #[test]
     fn same_named_cross_module_targets_keep_distinct_logical_identities() {
-        let ws = workspace_in_package(&[
+        let ws = workspace(&[
             (
                 "role.rock",
                 "@lifecycle(phase=\"draw\", owner=\"process\") deco init paint {}",
@@ -980,13 +971,13 @@ mod tests {
 
     #[test]
     fn frame_hooks_in_sim_modules_are_scoped_to_that_modules_wire_names() {
-        let ws = workspace_in_package(&[
+        let ws = workspace(&[
             (
                 "roles.rock",
                 "@lifecycle(phase=\"update\", owner=\"process\") deco init tick {}",
             ),
             (
-                "/repo/game/tests/sims/owned.rock",
+                "tests/sims/owned.rock",
                 r#"
                 @tick fn owned_tick() {}
                 @sim("first-wire") fn first_sim() {}
@@ -994,7 +985,7 @@ mod tests {
                 "#,
             ),
             (
-                "/repo/game/src/gameplay.rock",
+                "src/gameplay.rock",
                 r#"
                 @tick fn production_tick() {}
                 @sim fn embedded_diagnostic() {}
@@ -1005,9 +996,7 @@ mod tests {
         let owned = plan
             .entries
             .iter()
-            .find(|entry| {
-                crate::mangle::declared_name(entry.diagnostic_name.as_str()) == "owned_tick"
-            })
+            .find(|entry| entry_name(entry) == "owned_tick")
             .expect("sim-owned lifecycle entry");
         assert_eq!(
             owned.sim_wires.iter().map(Ustr::as_str).collect::<Vec<_>>(),
@@ -1016,9 +1005,7 @@ mod tests {
         let production = plan
             .entries
             .iter()
-            .find(|entry| {
-                crate::mangle::declared_name(entry.diagnostic_name.as_str()) == "production_tick"
-            })
+            .find(|entry| entry_name(entry) == "production_tick")
             .expect("production lifecycle entry");
         assert!(production.sim_wires.is_empty());
 
@@ -1026,9 +1013,7 @@ mod tests {
         changed
             .entries
             .iter_mut()
-            .find(|entry| {
-                crate::mangle::declared_name(entry.diagnostic_name.as_str()) == "owned_tick"
-            })
+            .find(|entry| entry_name(entry) == "owned_tick")
             .expect("sim-owned lifecycle entry")
             .sim_wires
             .pop();
@@ -1062,10 +1047,7 @@ mod tests {
         let plan = collect(&ws).expect("typed scene lifecycle target");
         assert_eq!(plan.entries.len(), 1);
         assert_eq!(plan.entries[0].owner.as_str(), "scene");
-        assert_eq!(
-            crate::mangle::declared_name(plan.entries[0].diagnostic_name.as_str()),
-            "tick_dungeon"
-        );
+        assert_eq!(entry_name(&plan.entries[0]), "tick_dungeon");
         assert_eq!(
             plan.entries[0].root_type,
             Some(MonoTy::App {
@@ -1141,10 +1123,7 @@ mod tests {
         assert_eq!(
             plan.entries
                 .iter()
-                .map(|entry| (
-                    crate::mangle::declared_name(entry.diagnostic_name.as_str()),
-                    entry.owner.as_str()
-                ))
+                .map(|entry| (entry_name(entry), entry.owner.as_str()))
                 .collect::<Vec<_>>(),
             vec![
                 ("scene_first", "scene"),
@@ -1178,11 +1157,7 @@ mod tests {
         assert_eq!(
             plan.entries
                 .iter()
-                .map(|entry| (
-                    entry.phase.as_str(),
-                    crate::mangle::declared_name(entry.diagnostic_name.as_str()),
-                    entry.stage
-                ))
+                .map(|entry| (entry.phase.as_str(), entry_name(entry), entry.stage))
                 .collect::<Vec<_>>(),
             vec![
                 ("late_update", "settle", 900),

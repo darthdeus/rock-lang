@@ -1577,7 +1577,6 @@ impl<'a> Printer<'a> {
             | ExprKind::Unit
             | ExprKind::Hole(..)
             | ExprKind::Ident(_)
-            | ExprKind::QualifiedIdent { .. }
             | ExprKind::Float(_)
             | ExprKind::String(_)
             | ExprKind::InterpolatedString(_)
@@ -1585,7 +1584,6 @@ impl<'a> Printer<'a> {
             | ExprKind::SiblingFieldRef(_)
             | ExprKind::FunctionRef(_)
             | ExprKind::Path { .. }
-            | ExprKind::PathStructLiteral { .. }
             | ExprKind::AnaphoricIdent(_) => self.raw(data.span),
 
             ExprKind::Paren(inner) => {
@@ -1718,30 +1716,19 @@ impl<'a> Printer<'a> {
             ExprKind::ArrayLiteral(items) => self.list("[", "]", items, data.span),
             ExprKind::Tuple(items) => self.tuple(items, data.span),
 
-            ExprKind::StructLiteral {
-                name,
+            ExprKind::PathStructLiteral {
+                path,
                 bases,
                 fields,
             } => {
                 // Functional-update literals (`Foo { ..base, x: 1 }`) slice
-                // verbatim -- the structural struct_literal path doesn't carry
-                // bases yet, and passthrough guarantees round-trip.
-                if bases.is_empty() {
-                    self.struct_literal(kw(name.name), fields, data.span)
+                // verbatim. Qualified literals also keep their source spelling.
+                if path.segments.len() == 1 && !path.from_root && bases.is_empty() {
+                    self.struct_literal(kw(path.segments[0].name), fields, data.span)
                 } else {
                     self.raw(data.span)
                 }
             }
-            ExprKind::EnumVariantRecord {
-                enum_name,
-                variant_name,
-                fields,
-            } => self.struct_literal(
-                format!("{}::{}", kw(enum_name.name), kw(variant_name.name)),
-                fields,
-                data.span,
-            ),
-
             ExprKind::Block(b) => self.block(*b),
 
             ExprKind::If {
@@ -2324,10 +2311,11 @@ impl<'a> Printer<'a> {
         }
         matches!(
             &self.ast.e(&e).kind,
-            ExprKind::Block(_)
-                | ExprKind::ArrayLiteral(_)
-                | ExprKind::StructLiteral { .. }
-                | ExprKind::EnumVariantRecord { .. }
+            ExprKind::Block(_) | ExprKind::ArrayLiteral(_)
+        ) || matches!(
+            &self.ast.e(&e).kind,
+            ExprKind::PathStructLiteral { path, .. }
+                if path.segments.len() == 1 && !path.from_root
         )
     }
 
@@ -2862,25 +2850,6 @@ impl<'a> Printer<'a> {
                 Doc::join(Doc::text(", "), ps.iter().map(|p| self.pattern(p))),
                 Doc::text(")"),
             ]),
-            Pattern::EnumVariant {
-                enum_name,
-                variant_name,
-                args,
-            } => {
-                let head = match enum_name {
-                    Some(e) => format!("{}::{}", kw(e.name), kw(variant_name.name)),
-                    None => kw(variant_name.name),
-                };
-                match args {
-                    Some(args) => Doc::concat([
-                        Doc::text(head),
-                        Doc::text("("),
-                        Doc::join(Doc::text(", "), args.iter().map(|p| self.pattern(p))),
-                        Doc::text(")"),
-                    ]),
-                    None => Doc::text(head),
-                }
-            }
             Pattern::PathVariant { path, args } => {
                 let root = if path.from_root { "::" } else { "" };
                 let head = format!(
@@ -2911,38 +2880,6 @@ impl<'a> Printer<'a> {
                         .collect::<Vec<_>>()
                         .join("::")
                 );
-                let mut entries: Vec<Doc> = fields
-                    .iter()
-                    .map(|(n, p)| {
-                        if let Pattern::Ident(id) = p {
-                            if id.name == n.name {
-                                return Doc::text(kw(n.name));
-                            }
-                        }
-                        Doc::concat([Doc::text(format!("{}: ", kw(n.name))), self.pattern(p)])
-                    })
-                    .collect();
-                if *rest {
-                    entries.push(Doc::text(".."));
-                }
-                Doc::concat([
-                    Doc::text(head),
-                    Doc::text("{ "),
-                    Doc::join(Doc::text(", "), entries),
-                    Doc::text(" }"),
-                ])
-            }
-            Pattern::Record {
-                enum_name,
-                name,
-                fields,
-                rest,
-            } => {
-                let head = match (enum_name, name) {
-                    (Some(e), Some(n)) => format!("{}::{} ", kw(e.name), kw(n.name)),
-                    (None, Some(n)) => format!("{} ", kw(n.name)),
-                    _ => String::new(),
-                };
                 let mut entries: Vec<Doc> = fields
                     .iter()
                     .map(|(n, p)| {

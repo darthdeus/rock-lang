@@ -18,7 +18,7 @@ use rename_guard::check_new_name;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use lsp_types::{
     CompletionItem, CompletionItemKind, Diagnostic, DiagnosticSeverity, DocumentHighlight,
@@ -188,16 +188,8 @@ struct BoneProject {
     /// rebuilt only on a non-`BodyOnly` edit and reused across body keystrokes.
     /// `None` until the first build (in `update`).
     reach: Option<crate::reachability::ReachabilityIndex>,
-    /// Rendered function signatures (completion `detail`), keyed by name with
-    /// first-overload-wins to match `crate::query::completion`'s dedup order. Like
-    /// `reach`, a pure function of the type graph (signatures): a `BodyOnly`
-    /// edit cannot change any signature, so this survives body keystrokes and
-    /// is rebuilt only on a non-`BodyOnly` edit. Without it, completion
-    /// re-renders every workspace signature on every keystroke -- the dominant
-    /// per-request cost. `None` until the first build (in `update`).
-    fn_sigs: Option<HashMap<ustr::Ustr, String>>,
     /// Precomputed call-through index (fused-query completion, `rejtanog ->
-    /// reject_target(..)`). Like `reach`/`fn_sigs`, a pure function of the type
+    /// reject_target(..)`). Like `reach`, a pure function of the type
     /// graph (fn names + first-param types, enum variants, reach-from-globals),
     /// so it survives `BodyOnly` keystrokes and is rebuilt only on a
     /// non-`BodyOnly` edit. Without it, `call_through_param_completions` rebuilt
@@ -230,7 +222,7 @@ struct BoneProject {
     module_touched: HashMap<String, bone_core::prelude::Instant>,
     /// The package graph of this root's manifest, built once when the
     /// project is created. It supplies the resolver's alias tables and the
-    /// dialect and package of a file that enters after the load (see
+    /// package policy of a file that enters after the load (see
     /// `update`). `None` for a root with no manifest, or one whose graph does
     /// not build (logged): every file is then a standalone v1 source,
     /// as in a compile.
@@ -270,7 +262,6 @@ impl BoneProject {
     /// the next completion request rebuilds it.
     fn drop_type_caches(&mut self) {
         self.reach = None;
-        self.fn_sigs = None;
         self.call_through = None;
         self.freq = None;
         self.scoped_call_through.clear();
@@ -282,7 +273,7 @@ impl BoneProject {
     fn reparse_user_file(&self, path: &str, request: &'static str) -> Option<skull_parser::Ast> {
         let uf = self.session.files.get(path)?;
         self.fallbacks.result(
-            skull_parser::parse_module_with_dialect(&uf.text, Ustr::from(path), uf.dialect),
+            skull_parser::parse_module(&uf.text, Ustr::from(path)),
             request,
             path,
             "parse stored source",
@@ -722,7 +713,6 @@ impl BoneWorkspace {
                 hole_cache: HashMap::new(),
                 lint_cache: Default::default(),
                 reach: None,
-                fn_sigs: None,
                 call_through: None,
                 scoped_call_through: HashMap::new(),
                 visible_bindings: HashMap::new(),
@@ -872,7 +862,6 @@ impl BoneWorkspace {
                     hole_cache: HashMap::new(),
                     lint_cache: Default::default(),
                     reach: None,
-                    fn_sigs: None,
                     call_through: None,
                     scoped_call_through: HashMap::new(),
                     visible_bindings: HashMap::new(),
@@ -1029,25 +1018,20 @@ impl BoneWorkspace {
         // completion rebuilds them, so a run of edits with no completion
         // between them pays for none of it.
         let mut drop_type_caches = false;
-        // A file the session does not hold yet (created after the batch load,
-        // or entering one by one after a failed batch) takes its dialect and
-        // package from the manifest, exactly as the batch load's files did.
+        // A file the session does not hold yet takes its package facts from
+        // the manifest, like the batch load's files.
         if !proj.session.is_tracked(path) {
             let node = proj
                 .graph
                 .as_ref()
                 .and_then(|g| rock_host::compilation_units::source_package(g, &graph_path));
-            let (package, dialect, global_policy) = match node {
-                Some(node) => (Some(node.tag()), node.dialect, node.global_policy),
-                None => (
-                    None,
-                    skull_parser::Dialect::V1,
-                    skull_parser::GlobalPolicy::Any,
-                ),
+            let (package, global_policy) = match node {
+                Some(node) => (Some(node.tag()), node.global_policy),
+                None => (None, skull_parser::GlobalPolicy::Any),
             };
             if let Err(e) = proj
                 .session
-                .declare_file_facts(path, dialect, package, global_policy)
+                .declare_file_facts(path, package, global_policy)
             {
                 log::error!("bone LSP: {}", e.message);
             }
@@ -1307,10 +1291,7 @@ impl BoneWorkspace {
             });
         }
 
-        // Enum-variant match patterns (`MobKind::Skeleton`, incl. the `::`) are
-        // resolved from the raw AST FIRST, so a pattern wins over the enclosing
-        // match expr (which now renders its own value for its keyword/braces).
-        // bone's HIR pattern carries no span, hence the raw-AST read.
+        // Resolve enum-pattern path spans before the enclosing match expression.
         let pat_hover = raw_ast
             .as_ref()
             .and_then(|ast| crate::query::enum_variant_pattern_hover(ws, mid, ast, offset));
@@ -2068,12 +2049,10 @@ impl BoneWorkspace {
                 DocumentSymbol {
                     name: s.name,
                     detail: None,
-                    deprecated: None,
                     kind: entry_symbol_kind(s.kind, s.is_const),
                     range,
                     selection_range: range,
                     children: None,
-                    tags: None,
                 }
             })
             .collect()
@@ -2151,8 +2130,6 @@ impl BoneWorkspace {
                             range,
                         },
                         container_name: None,
-                        deprecated: None,
-                        tags: None,
                     });
                 }
             }
@@ -2453,9 +2430,6 @@ impl BoneWorkspace {
                     kind: Some(kind),
                     padding_left: pad_left,
                     padding_right: pad_right,
-                    tooltip: None,
-                    text_edits: None,
-                    data: None,
                 }
             })
             .collect()
@@ -3565,7 +3539,7 @@ fn call_is_ufcs_dot_syntax(src: &str, call_start: usize, paren_start: usize) -> 
 /// as "can't rule it out".
 pub(crate) fn callee_slot_is_field_of_in_scope(
     ws: &Workspace,
-    frag: Option<&bone_core::modules::FragmentScope>,
+    frag: &bone_core::modules::FragmentScope,
     callee: &str,
     arg_index: usize,
 ) -> Option<bool> {
@@ -3600,9 +3574,8 @@ pub(crate) fn callee_slot_is_field_of_in_scope(
 /// KEPT -- the receiver's instantiation is what the arg slot must agree with
 /// (`nums.add_all(|)`: receiver `[int]` binds T, so the slot expects `[int]`).
 pub(crate) struct ExpectedArg<'a> {
-    workspace: &'a Workspace,
-    module: ModuleId,
-    gamma: Option<Gamma<'a>>,
+    frag: &'a bone_core::modules::FragmentScope,
+    gamma: Gamma<'a>,
     span: Span,
     slots: Vec<TyId>,
     /// Canonical node keys for the surviving slots, receiver-filtered by
@@ -3613,6 +3586,9 @@ pub(crate) struct ExpectedArg<'a> {
     memo: HashMap<TyId, bool>,
     ret_memo: HashMap<TyId, bool>,
 }
+
+static EMPTY_BODY: LazyLock<bone_semantic::hir::Body> =
+    LazyLock::new(bone_semantic::hir::Body::default);
 
 /// Throwaway Gamma over the cursor body's cached inference, so a query asks
 /// inference itself and `TyId::Local`s of that body resolve. None when the
@@ -3680,7 +3656,7 @@ impl<'a> ExpectedArg<'a> {
     ) -> Option<ExpectedArg<'a>> {
         let (mut gamma, span) = query_gamma(ws, mid, inf, offset)?;
         let name = Ustr::from(callee);
-        let frag = crate::modules_scope::fragment(ws, ws.module(mid).file);
+        let frag = crate::modules_scope::fragment(ws, ws.module(mid).file)?;
         let mut slots = Vec::new();
         let mut rendered: Vec<String> = Vec::new();
         for (_, _, f) in crate::modules_scope::admitted_overloads(ws, frag, name) {
@@ -3710,9 +3686,8 @@ impl<'a> ExpectedArg<'a> {
             }
         }
         (!slots.is_empty()).then(|| ExpectedArg {
-            workspace: ws,
-            module: mid,
-            gamma: Some(gamma),
+            frag,
+            gamma,
             span,
             slots,
             rendered,
@@ -3730,19 +3705,23 @@ impl<'a> ExpectedArg<'a> {
         offset: usize,
         slot: TyId,
     ) -> Option<ExpectedArg<'a>> {
-        let (gamma, span) = query_gamma(ws, mid, inf, offset)
-            .map(|(gamma, span)| (Some(gamma), span))
-            .unwrap_or_else(|| {
-                let file = ws.module(mid).file;
-                (None, Span::new(file, (0, 0), (0, 0), (0, 0)))
-            });
+        let file = ws.module(mid).file;
+        let frag = crate::modules_scope::fragment(ws, file)?;
+        let (gamma, span) = match query_gamma(ws, mid, inf, offset) {
+            Some(query) => query,
+            None if matches!(slot, TyId::Static(..)) => {
+                let mut gamma = Gamma::new(ws, &EMPTY_BODY, mid);
+                gamma.quiet = true;
+                (gamma, Span::new(file, (0, 0), (0, 0), (0, 0)))
+            }
+            None => return None,
+        };
         let rendered = match slot {
             TyId::Static(..) => vec![crate::reachability::type_key(ws, slot).to_string()],
             TyId::Local(_) => Vec::new(),
         };
         Some(ExpectedArg {
-            workspace: ws,
-            module: mid,
+            frag,
             gamma,
             span,
             slots: vec![slot],
@@ -3761,24 +3740,18 @@ impl<'a> ExpectedArg<'a> {
             return b;
         }
         let span = self.span;
-        let ok = if let Some(gamma) = self.gamma.as_mut() {
-            let mut ok = false;
-            for i in 0..self.slots.len() {
-                let slot = self.slots[i];
-                let cp = gamma.out.checkpoint();
-                let hit = gamma.trial(|g| inference::coerce(g, ty, slot, span).is_ok());
-                gamma.out.rollback_to(cp);
-                if hit {
-                    ok = true;
-                    break;
-                }
+        let mut ok = false;
+        for &slot in &self.slots {
+            let cp = self.gamma.out.checkpoint();
+            let hit = self
+                .gamma
+                .trial(|g| inference::coerce(g, ty, slot, span).is_ok());
+            self.gamma.out.rollback_to(cp);
+            if hit {
+                ok = true;
+                break;
             }
-            ok
-        } else {
-            self.slots
-                .iter()
-                .any(|&slot| static_coerces(self.workspace, ty, slot))
-        };
+        }
         self.memo.insert(ty, ok);
         ok
     }
@@ -3790,8 +3763,7 @@ impl<'a> ExpectedArg<'a> {
         let n = Ustr::from(name);
         let span = self.span;
         let slots = self.slots.clone();
-        let frag = crate::modules_scope::fragment(ws, ws.module(self.module).file);
-        for (_, _, f) in crate::modules_scope::admitted_overloads(ws, frag, n) {
+        for (_, _, f) in crate::modules_scope::admitted_overloads(ws, self.frag, n) {
             let Some(ret) = f.return_ty else { continue };
             if let Some(&b) = self.ret_memo.get(&ret) {
                 if b {
@@ -3799,27 +3771,23 @@ impl<'a> ExpectedArg<'a> {
                 }
                 continue;
             }
-            let hit = if let Some(gamma) = self.gamma.as_mut() {
-                let cp = gamma.out.checkpoint();
-                let inst =
-                    gamma.trial(|g| inference::instantiate_params(g, &f.generics, &[ret], span));
-                let hit = match inst {
-                    Ok(inst) => slots.iter().any(|&slot| {
-                        let cp2 = gamma.out.checkpoint();
-                        let ok = gamma.trial(|g| inference::coerce(g, inst[0], slot, span).is_ok());
-                        gamma.out.rollback_to(cp2);
-                        ok
-                    }),
-                    // A rejected speculative instantiation is a type non-match, not a query failure.
-                    Err(_) => false,
-                };
-                gamma.out.rollback_to(cp);
-                hit
-            } else if f.generics.is_empty() {
-                slots.iter().any(|&slot| static_coerces(ws, ret, slot))
-            } else {
-                false
+            let cp = self.gamma.out.checkpoint();
+            let inst = self
+                .gamma
+                .trial(|g| inference::instantiate_params(g, &f.generics, &[ret], span));
+            let hit = match inst {
+                Ok(inst) => slots.iter().any(|&slot| {
+                    let cp2 = self.gamma.out.checkpoint();
+                    let ok = self
+                        .gamma
+                        .trial(|g| inference::coerce(g, inst[0], slot, span).is_ok());
+                    self.gamma.out.rollback_to(cp2);
+                    ok
+                }),
+                // A rejected speculative instantiation is a type non-match, not a query failure.
+                Err(_) => false,
             };
+            self.gamma.out.rollback_to(cp);
             self.ret_memo.insert(ret, hit);
             if hit {
                 return true;
@@ -3851,41 +3819,10 @@ impl<'a> ExpectedArg<'a> {
     }
 
     fn type_expr(&self, ty: TyId) -> Option<bone_semantic::hir::TypeExpr> {
-        match ty {
-            TyId::Static(..) => self.workspace.resolve_ty(None, ty).map(|(_, te)| te),
-            TyId::Local(_) => self
-                .gamma
-                .as_ref()
-                .and_then(|gamma| gamma.workspace.resolve_ty(Some(&gamma.out), ty))
-                .map(|(_, te)| te),
-        }
-    }
-}
-
-fn static_coerces(ws: &Workspace, from: TyId, to: TyId) -> bool {
-    use bone_semantic::hir::{BuiltinTy, TypeExpr};
-    let (TyId::Static(..), TyId::Static(..)) = (from, to) else {
-        return false;
-    };
-    if ws.types_equivalent(TyRef::of_static(from), TyRef::of_static(to)) {
-        return true;
-    }
-    let Some((from, from_expr)) = ws.resolve_ty(None, from) else {
-        return false;
-    };
-    let Some((to, to_expr)) = ws.resolve_ty(None, to) else {
-        return false;
-    };
-    match (from_expr, to_expr) {
-        (
-            TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint),
-            TypeExpr::Builtin(BuiltinTy::Float),
-        ) => true,
-        (TypeExpr::Builtin(BuiltinTy::Error), _) | (_, TypeExpr::Builtin(BuiltinTy::Error)) => true,
-        (_, TypeExpr::Builtin(BuiltinTy::Any)) => true,
-        (_, TypeExpr::Nullable(inner)) => static_coerces(ws, from, to.with_idx(inner)),
-        (TypeExpr::Nullable(_), _) => false,
-        _ => false,
+        self.gamma
+            .workspace
+            .resolve_ty(Some(&self.gamma.out), ty)
+            .map(|(_, te)| te)
     }
 }
 
@@ -3896,7 +3833,7 @@ fn static_coerces(ws: &Workspace, from: TyId, to: TyId) -> bool {
 pub(crate) fn fn_unique_return_ty_in_scope(
     ws: &Workspace,
     name: &str,
-    frag: Option<&bone_core::modules::FragmentScope>,
+    frag: &bone_core::modules::FragmentScope,
 ) -> Option<TyId> {
     let n = Ustr::from(name);
     let mut ret: Option<TyId> = None;
@@ -5118,11 +5055,13 @@ mod tests {
 
     fn unique_return(files: &[(&str, &str)], name: &str) -> Option<String> {
         let ws = equivalence_ws(files);
+        let file = Ustr::from(files.first()?.0);
+        let frag = crate::modules_scope::fragment(&ws, file)?;
         let key = ws
             .functions_by_name
             .keys()
             .find(|key| key.as_str().rsplit("::").next() == Some(name))?;
-        fn_unique_return_ty_in_scope(&ws, key.as_str(), None).map(|t| ws.render(None, t))
+        fn_unique_return_ty_in_scope(&ws, key.as_str(), frag).map(|t| ws.render(None, t))
     }
 
     fn first_param(ws: &Workspace, name: &str) -> TyId {
@@ -5163,12 +5102,14 @@ mod tests {
             TyRef::of_static(p0.with_idx(params.next().unwrap()))
         };
         let nominal = elem_of("nominal");
+        let frag = crate::modules_scope::fragment(&ws, Ustr::from("a")).unwrap();
         let methods = |elem| {
-            let mut names: Vec<String> = crate::query::ufcs_methods(&ws, Ustr::from("Vec"), elem)
-                .into_iter()
-                .map(|m| m.name)
-                .filter(|n| n.starts_with("on_"))
-                .collect();
+            let mut names: Vec<String> =
+                crate::query::ufcs_methods_in_scope(&ws, Ustr::from("Vec"), elem, false, frag)
+                    .into_iter()
+                    .map(|m| m.name)
+                    .filter(|n| n.starts_with("on_"))
+                    .collect();
             names.sort();
             names
         };

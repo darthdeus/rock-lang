@@ -21,8 +21,7 @@
 
 use bone_core::hir::{FamilyMember, FamilyTier, unary_operator_entry};
 use bone_core::modules::{
-    DefKind, FragmentScope, NsPackage, NsVisibility, PackageId, STD_PACKAGE_ID, ScopeProbe,
-    UsePathRef,
+    DefKind, FragmentScope, NsPackage, NsVisibility, STD_PACKAGE_ID, ScopeProbe, UsePathRef,
 };
 use bone_core::workspace::Workspace;
 use ustr::Ustr;
@@ -121,50 +120,28 @@ pub enum ResolvedKind {
     Binding,
 }
 
-/// A resolution result, or one definition a lookup found: the canonical key
-/// every workspace map is keyed by, its kind, and for a callable of the std
-/// view, the std package ([`FamilyMember::owner`]). A std key is a bare name,
-/// so the owner says whose overloads a v1 fragment reached.
+/// A definition's canonical workspace key and kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Resolved {
     pub key: Ustr,
     pub kind: ResolvedKind,
-    pub owner: Option<PackageId>,
 }
 
 impl Resolved {
     fn member(&self, tier: FamilyTier) -> FamilyMember {
         FamilyMember {
             key: self.key,
-            owner: self.owner,
             tier,
         }
     }
-
-    fn sort_key(&self) -> (String, Option<PackageId>) {
-        (self.key.as_str().to_string(), self.owner)
-    }
 }
 
-/// How a diagnostic names a hit: a view member by its view's package, since
-/// its bare key alone does not say which.
 fn hit_display(ws: &Workspace, hit: &Resolved) -> String {
-    match hit.owner.and_then(|owner| ws.ns.package(owner)) {
-        Some(pkg) => format!("{}::{}", pkg.self_name, hit.key),
-        None if hit.owner == Some(STD_PACKAGE_ID) => format!("std::{}", hit.key),
-        None => hit.key.to_string(),
+    if hit.kind == ResolvedKind::Callable && !ws.defs.contains_key(&hit.key) {
+        format!("std::{}", hit.key)
+    } else {
+        hit.key.to_string()
     }
-}
-
-/// The owner of a callable found in module node `pkg_id`: a definition with
-/// no `DefMeta` there is the std view's, keyed by its bare name.
-fn view_owner(
-    ws: &Workspace,
-    pkg_id: PackageId,
-    key: Ustr,
-    kind: ResolvedKind,
-) -> Option<PackageId> {
-    (kind == ResolvedKind::Callable && !ws.defs.contains_key(&key)).then_some(pkg_id)
 }
 
 /// Where a path walk landed.
@@ -282,8 +259,10 @@ pub(crate) fn resolve_v1_optional_callee(
     members.extend(lower);
     // One definition reached through several tiers is one member, at the
     // nearest of them.
-    members.sort_by_key(|(hit, tier)| (hit.sort_key(), *tier));
-    members.dedup_by_key(|(hit, _)| (hit.key, hit.owner));
+    members.sort_by(|(a, a_tier), (b, b_tier)| {
+        a.key.as_str().cmp(b.key.as_str()).then(a_tier.cmp(b_tier))
+    });
+    members.dedup_by_key(|(hit, _)| hit.key);
     if let [(hit, _)] = members[..] {
         return Ok(Some(CalleeFamily::Single(hit)));
     }
@@ -430,7 +409,7 @@ fn import_tier(
                 None => return Err(format!("`{name}` names a module, not a definition")),
             }
         }
-        hits.sort_by_key(Resolved::sort_key);
+        hits.sort_by(|a, b| a.key.as_str().cmp(b.key.as_str()));
         hits.dedup();
         return Ok((!hits.is_empty()).then_some(hits));
     }
@@ -453,7 +432,7 @@ fn import_tier(
                     hits.push(resolved);
                 }
             }
-            hits.sort_by_key(Resolved::sort_key);
+            hits.sort_by(|a, b| a.key.as_str().cmp(b.key.as_str()));
             hits.dedup();
             if !hits.is_empty() {
                 return Ok(Some(hits));
@@ -553,16 +532,11 @@ fn std_definition(ws: &Workspace, name: Ustr) -> Option<Resolved> {
         return Some(Resolved {
             key: name,
             kind: ResolvedKind::Type,
-            owner: None,
         });
     }
     let (key, kind) = ws.ns.std_definition(name)?;
     let kind = resolved_kind(kind);
-    Some(Resolved {
-        key,
-        kind,
-        owner: view_owner(ws, STD_PACKAGE_ID, key, kind),
-    })
+    Some(Resolved { key, kind })
 }
 
 /// Tier 4 candidates for `name`, deduplicated and sorted by key: what every
@@ -597,7 +571,7 @@ fn glob_candidates(
             hits.extend(members_of(ws, &viewers, pkg_id, &path, name, &mut visiting)?.found);
         }
     }
-    hits.sort_by_key(Resolved::sort_key);
+    hits.sort_by(|a, b| a.key.as_str().cmp(b.key.as_str()));
     hits.dedup();
     Ok(hits)
 }
@@ -687,7 +661,8 @@ impl Members {
     }
 
     fn finish(mut self) -> Self {
-        self.found.sort_by_key(Resolved::sort_key);
+        self.found
+            .sort_by(|a, b| a.key.as_str().cmp(b.key.as_str()));
         self.found.dedup();
         self
     }
@@ -764,11 +739,7 @@ fn explicit_members(
     if let Some((key, kind)) = node.owned(name) {
         let kind = resolved_kind(kind);
         if all_admit_key(ws, viewers, key) {
-            out.found.push(Resolved {
-                key,
-                kind,
-                owner: view_owner(ws, pkg_id, key, kind),
-            });
+            out.found.push(Resolved { key, kind });
         } else {
             out.denied = true;
         }
@@ -1213,11 +1184,8 @@ fn module_display(ws: &Workspace, (package, path): &(u32, Vec<Ustr>)) -> String 
 pub(crate) enum MemberTarget {
     /// A global or constant: the DefKey.
     Global(Ustr),
-    /// A callable family: the key the family is registered under and the
-    /// view that owns a bare key ([`Resolved::owner`]). A std family has no
-    /// `DefMeta`, so the kind has to come from the member lookup rather than
-    /// `ws.defs`.
-    Callable { key: Ustr, owner: Option<PackageId> },
+    /// A callable family, registered under its canonical key.
+    Callable(Ustr),
     /// `path::Type::Variant` — the enum's DefKey and the variant name.
     EnumVariant { enum_key: Ustr, variant: Ustr },
     /// A bare type name (for qualified struct literals).
@@ -1233,6 +1201,19 @@ pub(crate) fn resolve_member_path(
     path: &UsePathRef,
 ) -> Result<MemberTarget, String> {
     let segments = &path.segments;
+    if !path.from_root
+        && let [name] = segments.as_slice()
+    {
+        let resolved = resolve_bare(ws, frag, *name)?;
+        return match resolved.kind {
+            ResolvedKind::Type => Ok(MemberTarget::Type(resolved.key)),
+            ResolvedKind::Callable => Ok(MemberTarget::Callable(resolved.key)),
+            ResolvedKind::Global | ResolvedKind::Binding => Ok(MemberTarget::Global(resolved.key)),
+            ResolvedKind::Module => Err(format!("`{name}` names a module, not a definition")),
+            ResolvedKind::Decorator => Err(format!("`{name}` names a decorator, not a value")),
+        };
+    }
+
     let mut bare_error = None;
     // `E::V` whose `E` binds nothing: the error names `E`, the one name the
     // author has to bring into scope.
@@ -1303,8 +1284,7 @@ pub(crate) fn resolve_member_path(
                 unresolved_value_path(ws, frag, segments, unbound)
             })
         };
-        let Resolved { key, kind, owner } =
-            collapse(ws, members, seg, not_found, "glob re-exports")?;
+        let Resolved { key, kind } = collapse(ws, members, seg, not_found, "glob re-exports")?;
         if kind == ResolvedKind::Type {
             if is_last {
                 return Ok(MemberTarget::Type(key));
@@ -1329,7 +1309,7 @@ pub(crate) fn resolve_member_path(
             return Err(format!("`{}` cannot be traversed", key));
         }
         if kind == ResolvedKind::Callable {
-            return Ok(MemberTarget::Callable { key, owner });
+            return Ok(MemberTarget::Callable(key));
         }
         return Ok(MemberTarget::Global(key));
     }
@@ -1731,7 +1711,7 @@ pub(crate) fn resolve_variant_pattern(
     match resolve_member_path(ws, frag, path)? {
         MemberTarget::EnumVariant { enum_key, variant } => Ok((enum_key, variant)),
         MemberTarget::Type(key) => Err(format!("`{key}` names a type, not an enum variant")),
-        MemberTarget::Global(key) | MemberTarget::Callable { key, .. } => {
+        MemberTarget::Global(key) | MemberTarget::Callable(key) => {
             Err(format!("`{key}` is not an enum variant"))
         }
     }
@@ -1745,6 +1725,5 @@ pub(crate) fn plain(name: Ustr) -> Resolved {
     Resolved {
         key: name,
         kind: ResolvedKind::Binding,
-        owner: None,
     }
 }

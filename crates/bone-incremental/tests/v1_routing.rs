@@ -11,7 +11,7 @@ use crate::v1_differential::V1Harness;
 
 use bone_core::modules::NsAliases;
 use bone_incremental::session::{Session, SessionFile, UpdateTier};
-use skull_parser::{Dialect, GlobalPolicy};
+use skull_parser::GlobalPolicy;
 
 fn diagnostics(session: &Session) -> Vec<String> {
     let mut out: Vec<String> = session
@@ -203,15 +203,9 @@ const IMPORT_BOTH: &str = "use lib_a::pick;\nuse lib_b::pick;\n\n";
 fn a_second_explicit_import_composes_and_removing_it_splits_the_family() {
     let files = |imports: &str| {
         vec![
-            in_package(Dialect::V1, 1, "lib_a", "a.rock", PICK_INT),
-            in_package(Dialect::V1, 2, "lib_b", "b.rock", PICK_STRING),
-            in_package(
-                Dialect::V1,
-                3,
-                "game",
-                "use.rock",
-                &format!("{imports}{PICK_USE}"),
-            ),
+            in_package(1, "lib_a", "a.rock", PICK_INT),
+            in_package(2, "lib_b", "b.rock", PICK_STRING),
+            in_package(3, "game", "use.rock", &format!("{imports}{PICK_USE}")),
         ]
     };
     let aliases = aliases_of(&files(""));
@@ -241,15 +235,9 @@ fn a_member_signature_edit_ties_a_composed_import_family() {
          lib_b::pick(s: string) -> string (v1 definition lib_b::pick)";
     let files = |b: &str| {
         vec![
-            in_package(Dialect::V1, 1, "lib_a", "a.rock", PICK_STRING),
-            in_package(Dialect::V1, 2, "lib_b", "b.rock", b),
-            in_package(
-                Dialect::V1,
-                3,
-                "game",
-                "use.rock",
-                &format!("{IMPORT_BOTH}{PICK_USE}"),
-            ),
+            in_package(1, "lib_a", "a.rock", PICK_STRING),
+            in_package(2, "lib_b", "b.rock", b),
+            in_package(3, "game", "use.rock", &format!("{IMPORT_BOTH}{PICK_USE}")),
         ]
     };
     let aliases = aliases_of(&files(PICK_INT));
@@ -275,15 +263,9 @@ const GLOB_BOTH: &str = "use lib_a::*;\nuse lib_b::*;\n\n";
 fn a_second_glob_composes_and_removing_it_splits_the_family() {
     let files = |imports: &str| {
         vec![
-            in_package(Dialect::V1, 1, "lib_a", "a.rock", PICK_INT),
-            in_package(Dialect::V1, 2, "lib_b", "b.rock", PICK_STRING),
-            in_package(
-                Dialect::V1,
-                3,
-                "game",
-                "use.rock",
-                &format!("{imports}{PICK_USE}"),
-            ),
+            in_package(1, "lib_a", "a.rock", PICK_INT),
+            in_package(2, "lib_b", "b.rock", PICK_STRING),
+            in_package(3, "game", "use.rock", &format!("{imports}{PICK_USE}")),
         ]
     };
     let aliases = aliases_of(&files(""));
@@ -311,15 +293,9 @@ fn a_member_added_to_a_second_globbed_module_relowers_the_globber() {
     let other = "pub fn other() -> int {\n    1\n}\n";
     let files = |b: &str| {
         vec![
-            in_package(Dialect::V1, 1, "lib_a", "a.rock", PICK_INT),
-            in_package(Dialect::V1, 2, "lib_b", "b.rock", b),
-            in_package(
-                Dialect::V1,
-                3,
-                "game",
-                "use.rock",
-                &format!("{GLOB_BOTH}{PICK_USE}"),
-            ),
+            in_package(1, "lib_a", "a.rock", PICK_INT),
+            in_package(2, "lib_b", "b.rock", b),
+            in_package(3, "game", "use.rock", &format!("{GLOB_BOTH}{PICK_USE}")),
         ]
     };
     let aliases = aliases_of(&files(other));
@@ -369,8 +345,8 @@ fn a_unary_operator_added_to_a_globbed_module_relowers_the_caller() {
     let caller = "use geo::*;\n\nfn neg() -> int {\n    let p = -Pt { x: 1 }\n    let negative = -p\n    negative.x\n}\n";
     let files = |geo: &str| {
         vec![
-            in_package(Dialect::V1, 1, "geo", "geo.rock", geo),
-            in_package(Dialect::V1, 2, "app", "app.rock", caller),
+            in_package(1, "geo", "geo.rock", geo),
+            in_package(2, "app", "app.rock", caller),
         ]
     };
     let aliases = aliases_of(&files(without));
@@ -400,7 +376,6 @@ fn a_file_entering_after_new_reads_with_its_declared_facts() {
     session
         .declare_file_facts(
             "extra.rock",
-            Dialect::V1,
             Some(package_tag(1, "livev1")),
             GlobalPolicy::Any,
         )
@@ -423,17 +398,12 @@ fn a_held_file_refuses_different_facts() {
         Session::new(vec![], package(), &NsAliases::default()).expect("baseline builds");
     assert!(
         session
-            .declare_file_facts("a.rock", Dialect::V1, None, GlobalPolicy::Any)
+            .declare_file_facts("a.rock", None, GlobalPolicy::Any)
             .is_err()
     );
     assert!(
         session
-            .declare_file_facts(
-                "a.rock",
-                Dialect::V1,
-                Some(package_tag(1, "livev1")),
-                GlobalPolicy::Any
-            )
+            .declare_file_facts("a.rock", Some(package_tag(1, "livev1")), GlobalPolicy::Any)
             .is_ok()
     );
 }
@@ -526,9 +496,9 @@ fn a_dependency_module_alias_added_or_removed_takes_the_scope_path() {
     let with = "use lib_a::sub as s;\n\nfn use_it() -> int {\n    s::pick(1)\n}\n";
     let files = |user: &str| {
         vec![
-            in_package(Dialect::V1, 1, "lib_a", "lib.rock", lib),
-            in_package(Dialect::V1, 1, "lib_a", "sub.rock", sub),
-            in_package(Dialect::V1, 2, "game", "use.rock", user),
+            in_package(1, "lib_a", "lib.rock", lib),
+            in_package(1, "lib_a", "sub.rock", sub),
+            in_package(2, "game", "use.rock", user),
         ]
     };
     let aliases = aliases_of(&files(without));

@@ -33,10 +33,10 @@ pub(crate) fn callable_member_admitted(
 }
 
 /// Every overload of the callable spelling `name`, in module order, that
-/// `frag` admits (all indexed overloads for a synthetic module).
+/// `frag` admits.
 pub(crate) fn admitted_overloads<'w>(
     ws: &'w Workspace,
-    frag: Option<&'w FragmentScope>,
+    frag: &'w FragmentScope,
     name: Ustr,
 ) -> impl Iterator<
     Item = (
@@ -45,19 +45,15 @@ pub(crate) fn admitted_overloads<'w>(
         &'w bone_semantic::hir::Function,
     ),
 > + 'w {
-    let keys: Vec<Ustr> = match frag {
-        Some(_)
-            if {
-                ws.functions_by_name.contains_key(&name)
-                    && ws
-                        .defs
-                        .get(&name)
-                        .is_some_and(|meta| meta.kind == DefKind::Callable)
-            } =>
-        {
-            vec![name]
-        }
-        Some(frag) => match resolve::resolve_v1_callee(ws, frag, name) {
+    let keys: Vec<Ustr> = if ws.functions_by_name.contains_key(&name)
+        && ws
+            .defs
+            .get(&name)
+            .is_some_and(|meta| meta.kind == DefKind::Callable)
+    {
+        vec![name]
+    } else {
+        match resolve::resolve_v1_callee(ws, frag, name) {
             Ok(CalleeFamily::Single(resolved)) if resolved.kind == ResolvedKind::Callable => {
                 vec![resolved.key]
             }
@@ -65,8 +61,7 @@ pub(crate) fn admitted_overloads<'w>(
                 members.into_iter().map(|member| member.key).collect()
             }
             _ => Vec::new(),
-        },
-        None => vec![name],
+        }
     };
     let mut out = Vec::new();
     for m in ws.modules.iter() {
@@ -75,7 +70,7 @@ pub(crate) fn admitted_overloads<'w>(
                 continue;
             };
             for &(mid, fid) in overloads {
-                if frag.is_none_or(|frag| callable_member_admitted(ws, frag, key, mid, fid)) {
+                if callable_member_admitted(ws, frag, key, mid, fid) {
                     out.push((mid, fid, &ws.modules[mid.index()].functions[fid]));
                 }
             }
@@ -87,39 +82,21 @@ pub(crate) fn admitted_overloads<'w>(
 /// Resolve a type spelling from a query source to the key stored in workspace
 /// registries. Query syntax carries source spellings while those registries
 /// use canonical definition keys.
-pub(crate) fn resolve_type_key(
-    ws: &Workspace,
-    frag: Option<&FragmentScope>,
-    name: &str,
-) -> Option<Ustr> {
-    let resolved = if let Some(frag) = frag {
-        let path = name.strip_prefix("::").unwrap_or(name);
-        if path.contains("::") || name.starts_with("::") {
-            resolve::resolve_path(
-                ws,
-                frag,
-                &UsePathRef {
-                    from_root: name.starts_with("::"),
-                    segments: path.split("::").map(Ustr::from).collect(),
-                },
-            )
-        } else {
-            resolve::resolve_bare(ws, frag, Ustr::from(name))
-        }
-        .ok()?
+pub(crate) fn resolve_type_key(ws: &Workspace, frag: &FragmentScope, name: &str) -> Option<Ustr> {
+    let path = name.strip_prefix("::").unwrap_or(name);
+    let resolved = if path.contains("::") || name.starts_with("::") {
+        resolve::resolve_path(
+            ws,
+            frag,
+            &UsePathRef {
+                from_root: name.starts_with("::"),
+                segments: path.split("::").map(Ustr::from).collect(),
+            },
+        )
     } else {
-        let key = Ustr::from(name);
-        if ws
-            .defs
-            .get(&key)
-            .is_some_and(|meta| meta.kind == DefKind::Type)
-        {
-            return Some(key);
-        }
-        return ws.defs.iter().find_map(|(&key, meta)| {
-            (meta.kind == DefKind::Type && meta.name.as_str() == name).then_some(key)
-        });
-    };
+        resolve::resolve_bare(ws, frag, Ustr::from(name))
+    }
+    .ok()?;
     let is_type = resolved.kind == ResolvedKind::Type
         || (resolved.kind == ResolvedKind::Binding
             && ws
@@ -127,6 +104,10 @@ pub(crate) fn resolve_type_key(
                 .get(&resolved.key)
                 .is_some_and(|meta| meta.kind == DefKind::Type));
     is_type.then_some(resolved.key)
+}
+
+pub(crate) fn resolve_type_key_in_file(ws: &Workspace, file: Ustr, name: &str) -> Option<Ustr> {
+    resolve_type_key(ws, fragment(ws, file)?, name)
 }
 
 /// Every name some tier of `frag` offers, bound cleanly or not:
@@ -303,7 +284,6 @@ pub(crate) fn display_type_with_names(
 
 pub(crate) fn display_method_suffix_with_names(
     suffix: &str,
-    _final_method: bool,
     methods: &[crate::reachability::MethodRef],
     callable_names: &std::collections::HashMap<Ustr, Vec<Ustr>>,
 ) -> Option<String> {
@@ -580,7 +560,13 @@ mod tests {
 
     #[test]
     fn displayed_types_resolve_standalone_keys_with_file_punctuation() {
-        let key = Ustr::from("$standalone$fixture-dir/types.rock::Kind");
+        let key = Ustr::from(
+            format!(
+                "{}fixture-dir/types.rock::Kind",
+                bone_core::modules::STANDALONE_PACKAGE_PREFIX
+            )
+            .as_str(),
+        );
         let spellings = std::collections::HashMap::from([(key, vec![Ustr::from("Alias")])]);
         let ws = Workspace::new();
         assert_eq!(

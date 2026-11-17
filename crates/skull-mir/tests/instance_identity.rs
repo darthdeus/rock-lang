@@ -191,7 +191,7 @@ fn an_instance_substitution_binds_each_declared_generic_to_its_own_argument() {
     let ws = ws_of(SRC);
     let pair = decl(&ws, "pair");
     let interner = MonoInterner::new();
-    let inst = Instance::intern(&interner, pair, vec![MonoTy::Int, v2(ws)]);
+    let inst = Instance::intern(&interner, pair, vec![MonoTy::Int, v2(&ws)]);
 
     let subst = inst.subst(&ws, &interner);
     assert_eq!(subst.len(), 2, "one binding per declared generic");
@@ -217,5 +217,5 @@ fn an_instance_substitution_binds_each_declared_generic_to_its_own_argument() {
         Some(&MonoTy::Int),
         "`A` takes the first argument"
     );
-    assert_eq!(subst.get(&vars[1]), Some(&v2(ws)), "`B` takes the second");
+    assert_eq!(subst.get(&vars[1]), Some(&v2(&ws)), "`B` takes the second");
 }

@@ -659,7 +659,7 @@ pub(crate) fn resolve_unary_by_recv(
     let family = match scoped {
         Some(Ok(family)) => *family,
         Some(Err(message)) => return Err(CompilerError::new_with_label(span, message.clone())),
-        None => CallFamily::from_name(name),
+        None => CallFamily::Resolved(name),
     };
     let candidates = resolve_callee(gamma, &family);
     if candidates.visible.is_empty() {

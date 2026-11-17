@@ -700,15 +700,11 @@ pub(crate) fn infer_expr_used(
             // still reject below.
             None => match &*collapse_backend_variants(
                 gamma,
-                &resolve_callee(gamma, &fn_value_family(c, e, *name)).visible,
+                &resolve_callee(gamma, &CallFamily::Resolved(*name)).visible,
             ) {
                 [(mid, fid)] => {
                     let function = &gamma.workspace.module(*mid).functions[*fid];
-                    // A view-owned value names one definition among the bare
-                    // key's overloads; the backend reads which from here.
-                    if c.body.value_owners.contains_key(&e) {
-                        gamma.out.resolved_overload_calls.insert(e, (*mid, *fid));
-                    }
+                    gamma.out.resolved_overload_calls.insert(e, (*mid, *fid));
 
                     // A bounded fn only exists monomorphized-by-inlining at its
                     // call sites; as a value it would need a runtime identity

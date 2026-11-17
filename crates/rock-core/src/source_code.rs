@@ -11,18 +11,46 @@ pub(crate) const UNKNOWN_FILE_NAME: &str = "<unknown>";
 /// interner on each call.
 static UNKNOWN_FILE: LazyLock<ustr::Ustr> = LazyLock::new(|| ustr::ustr(UNKNOWN_FILE_NAME));
 
-/// Source dialect of one file. V1 uses scoped lookup (`::` paths, `mod`/`use`,
-/// visibility). Selected by the package manifest or a standalone source's
-/// `//! modules: v1` directive.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum Dialect {
-    #[default]
-    V1,
-}
-
 /// Compiler-owned package identity for a standalone source. This prefix is
 /// outside the identifier grammar, so a manifest name cannot claim it.
-pub const STANDALONE_PACKAGE_PREFIX: &str = "$standalone$";
+pub const STANDALONE_PACKAGE_PREFIX: &str = "@/";
+
+/// Validate the removed source-language selection directive. The accepted
+/// spelling is kept for migration compatibility; all source uses modules v1.
+pub fn validate_modules_directive(contents: &str, file: Ustr) -> Result<(), CompilerError> {
+    let mut offset = 0;
+    for (line_number, line) in contents.split_inclusive('\n').take(10).enumerate() {
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        let content = content.strip_suffix('\r').unwrap_or(content);
+        let trimmed = content.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("//!") {
+            let rest = rest.trim();
+            if let Some(value) = rest.strip_prefix("modules:") {
+                let value = value.trim();
+                let message = match value {
+                    "" | "v1" => return Ok(()),
+                    "legacy" => {
+                        "the `//! modules: legacy` directive has been removed; migrate this source to modules v1 and remove the directive".to_string()
+                    }
+                    other => {
+                        format!("unknown `//! modules:` directive value `{other}` (known: v1)")
+                    }
+                };
+                let leading_bytes = content.len() - trimmed.len();
+                let leading_chars = content[..leading_bytes].chars().count();
+                let span = Span::new(
+                    file,
+                    (line_number, line_number),
+                    (leading_chars, content.chars().count()),
+                    (offset + leading_bytes, offset + content.len()),
+                );
+                return Err(CompilerError::new_with_label(span, message));
+            }
+        }
+        offset += line.len();
+    }
+    Ok(())
+}
 
 /// Source-facing spelling without the standalone package's file identity.
 pub fn display_name(key: &str) -> &str {
@@ -135,13 +163,11 @@ pub struct SourceFile {
     pub is_test: bool,
     pub is_test_util: bool,
     pub used_packages: Vec<String>,
-    /// Owning package and source dialect, stamped by the loader that resolved
-    /// the package graph. `None`/`V1` for files loaded outside a package
-    /// (standalone scripts, editor synthetic sources).
+    /// Owning package, stamped by the loader that resolved the package graph.
+    /// `None` for files loaded outside a package (standalone scripts, editor
+    /// synthetic sources).
     pub package: Option<PackageTag>,
-    pub dialect: Dialect,
-    /// The owning package's mutable-global policy, stamped by the same loader
-    /// as `package` and `dialect`.
+    /// The owning package's mutable-global policy, stamped by the loader.
     pub global_policy: GlobalPolicy,
 }
 
@@ -161,7 +187,6 @@ pub fn source_file_from_path_and_contents(
         is_test_util: false,
         used_packages: vec![],
         package: None,
-        dialect: Dialect::V1,
         global_policy: GlobalPolicy::Any,
     }
 }
@@ -533,7 +558,6 @@ mod tests {
         assert!(!file.is_test);
         assert!(!file.is_test_util);
         assert!(file.used_packages.is_empty());
-        assert_eq!(file.dialect, Dialect::V1);
         assert_eq!(file.global_policy, GlobalPolicy::Any);
     }
 }

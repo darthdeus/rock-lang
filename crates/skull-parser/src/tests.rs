@@ -5,18 +5,17 @@ fn file() -> Ustr {
 }
 
 /// Parse `src` with no recovery allowed.
-fn parse(src: &str, dialect: Dialect) -> Ast {
-    parse_module_clean_with_dialect(src, file(), dialect)
-        .unwrap_or_else(|e| panic!("{src:?}: {}", e.message))
+fn parse(src: &str) -> Ast {
+    parse_module_clean(src, file()).unwrap_or_else(|e| panic!("{src:?}: {}", e.message))
 }
 
 fn parse_v1(src: &str) -> Ast {
-    parse(src, Dialect::V1)
+    parse(src)
 }
 
 /// Every diagnostic `src` produces, whether the tokenizer or the parser raised it.
-fn errors(src: &str, dialect: Dialect) -> Vec<CompilerError> {
-    match parse_module_with_dialect(src, file(), dialect) {
+fn errors(src: &str) -> Vec<CompilerError> {
+    match parse_module(src, file()) {
         Ok(ast) => ast.recovery_errors,
         Err(e) => vec![e],
     }
@@ -48,8 +47,8 @@ fn value(ast: &Ast) -> Idx<ExprData> {
     l.value.unwrap()
 }
 
-fn expression(src: &str, dialect: Dialect) -> (Ast, Idx<ExprData>) {
-    let ast = parse(&format!("fn f() {{ let result = {src} }}"), dialect);
+fn expression(src: &str) -> (Ast, Idx<ExprData>) {
+    let ast = parse(&format!("fn f() {{ let result = {src} }}"));
     let id = value(&ast);
     (ast, id)
 }
@@ -85,7 +84,6 @@ fn reparse_item(full: &Ast, src: &str, index: usize) -> Ast {
         s,
         item.span.line_range().0,
         item.span.col_range().0,
-        Dialect::V1,
     )
     .expect("parse_one_item")
 }
@@ -109,78 +107,62 @@ fn ident_spans(ast: &Ast, src: &str) -> Vec<(String, String)> {
 
 #[test]
 fn malformed_source_is_rejected_with_its_diagnostic() {
-    use Dialect::V1;
     // An empty needle accepts any diagnostic; the point is that the source is
     // not silently accepted.
-    for (dialect, src, needle) in [
-        (V1, "nobox struct S { x: int }", "`nobox` requires `value`"),
+    for (src, needle) in [
+        ("nobox struct S { x: int }", "`nobox` requires `value`"),
         (
-            V1,
             "struct P { x: int }\noperator +(a: P) -> P { a }",
             "operator `+` takes two parameters",
         ),
         (
-            V1,
             "inline(wasm) fn add(a: int) -> int = \"\"\"return a\"\"\"",
             "unknown inline backend",
         ),
-        (
-            V1,
-            "extern(wasm) fn now() -> float",
-            "unknown extern backend",
-        ),
-        (V1, "struct Box<T { value: int }\n", ""),
+        ("extern(wasm) fn now() -> float", "unknown extern backend"),
+        ("struct Box<T { value: int }\n", ""),
         // A hole that fails to parse is never emitted as literal brace text.
-        (V1, r#"fn f() { let x = "{add2(2,}" }"#, ""),
+        (r#"fn f() { let x = "{add2(2,}" }"#, ""),
         // Field before base in a functional-update literal.
-        (V1, "fn f() { let x = P { a: 1, ..base } }", ""),
+        ("fn f() { let x = P { a: 1, ..base } }", ""),
         // Functional update on an enum variant is not supported.
-        (V1, "fn f() { let x = E::V { ..base, a: 1 } }", ""),
-        (V1, "fn f(x: int) { let y = g(x) :: int }", "(expr : Type)"),
+        ("fn f() { let x = E::V { ..base, a: 1 } }", ""),
+        ("fn f(x: int) { let y = g(x) :: int }", "(expr : Type)"),
         // `(a : int, b : int)` is not a typed-tuple literal.
+        ("fn f() { let t = (a : int, b : int) }", "one expression"),
         (
-            V1,
-            "fn f() { let t = (a : int, b : int) }",
-            "one expression",
-        ),
-        (
-            V1,
             "fn f(a: int) { let t = (a, b : int) }",
             "parenthesize the ascription",
         ),
-        (V1, "fn f() {}\nmod combat;", "first item"),
-        (V1, "mod a {}\nmod combat;", "first item"),
-        (V1, "fn f() {}\nmod combat::casting;", "first item"),
-        (V1, "fn f() {}\npub mod combat;", "first item"),
-        (V1, "mod a { mod b; }", "first item"),
-        (V1, "mod a { mod b::c; }", "first item"),
+        ("fn f() {}\nmod combat;", "first item"),
+        ("mod a {}\nmod combat;", "first item"),
+        ("fn f() {}\nmod combat::casting;", "first item"),
+        ("fn f() {}\npub mod combat;", "first item"),
+        ("mod a { mod b; }", "first item"),
+        ("mod a { mod b::c; }", "first item"),
         (
-            V1,
             "mod a;\nmod b;\n\nfn f() {}",
             "a file has one `mod path;` header",
         ),
         (
-            V1,
             "mod a;\n// between\npub mod a;\n",
             "a file has one `mod path;` header",
         ),
-        (V1, "use a::b as _;", "as _"),
-        (V1, "use geo::operator(+) as _;", "as _"),
-        (V1, "private(set) fn f() {}", "fields"),
-        (V1, "fn f<T: >() {}", ""),
-        (V1, "fn f<T = >() {}", ""),
+        ("use a::b as _;", "as _"),
+        ("use geo::operator(+) as _;", "as _"),
+        ("private(set) fn f() {}", "fields"),
+        ("fn f<T: >() {}", ""),
+        ("fn f<T = >() {}", ""),
         (
-            V1,
             "fn f() { let v = \"{1:999999999999999999999999999999999999}\" }",
             "overflow",
         ),
         (
-            V1,
             "fn f() { let v = \"{1:.999999999999999999999999999999999999}\" }",
             "overflow",
         ),
     ] {
-        let errors = errors(src, dialect);
+        let errors = errors(src);
         assert!(
             errors.iter().any(|e| e.message.contains(needle)),
             "{src:?} must be rejected with {needle:?}, got {errors:?}"
@@ -202,7 +184,7 @@ fn parse_one_item_matches_in_context() {
                    y * 3\n\
                }\n\
                fn c() -> int { 9 }\n";
-    let full = parse(src, Dialect::V1);
+    let full = parse(src);
     for (index, item) in full.items.iter().enumerate() {
         let mini = reparse_item(&full, src, index);
         assert_eq!(mini.items.len(), 1, "exactly one item parsed");
@@ -310,7 +292,7 @@ fn recovery_preserves_fields_and_following_bindings() {
     )
     .unwrap();
     assert!(!ast.recovery_errors.is_empty());
-    let ExprKind::StructLiteral { fields, .. } = &ast.exprs[value(&ast)].kind else {
+    let ExprKind::PathStructLiteral { fields, .. } = &ast.exprs[value(&ast)].kind else {
         panic!("expected struct")
     };
     assert_eq!(fields.len(), 2);
@@ -325,10 +307,7 @@ fn recovery_preserves_fields_and_following_bindings() {
 
 #[test]
 fn annotations_attach_to_items_params_and_fields() {
-    let ast = parse(
-        "@pure fn f(@size(4) a: int, @instance @size(2) b: float, c: int) {}",
-        Dialect::V1,
-    );
+    let ast = parse("@pure fn f(@size(4) a: int, @instance @size(2) b: float, c: int) {}");
     assert_eq!(ast.items[0].annotations.len(), 1);
     assert_eq!(ast.items[0].annotations[0].name.name, "pure");
     let params = &first_fn(&ast).params;
@@ -355,16 +334,13 @@ fn annotations_attach_to_items_params_and_fields() {
     );
     assert!(params[2].annotations.is_empty());
 
-    let ast = parse(
-        "struct S { @flat a: int, @w(3) b: float, c: bool }",
-        Dialect::V1,
-    );
+    let ast = parse("struct S { @flat a: int, @w(3) b: float, c: bool }");
     let fields = &first_struct(&ast).fields;
     assert_eq!(names(&fields[0].annotations), [("flat".into(), 0)]);
     assert_eq!(names(&fields[1].annotations), [("w".into(), 1)]);
     assert!(fields[2].annotations.is_empty());
 
-    let ast = parse("nobox value V { @flat @w c: int }", Dialect::V1);
+    let ast = parse("nobox value V { @flat @w c: int }");
     let s = first_struct(&ast);
     assert!(s.is_value && s.is_nobox);
     assert_eq!(
@@ -376,7 +352,7 @@ fn annotations_attach_to_items_params_and_fields() {
 #[test]
 fn interpolation_format_specs_keep_static_and_dynamic_parts() {
     let spec_of = |src: &str| {
-        let (ast, id) = expression(src, Dialect::V1);
+        let (ast, id) = expression(src);
         let ExprKind::InterpolatedString(parts) = &ast.exprs[id].kind else {
             panic!("expected interpolated string, got {:?}", ast.exprs[id].kind);
         };
@@ -411,7 +387,7 @@ fn interpolation_nested_colons_and_strings_stay_in_the_expression() {
         r#""{join("a[b]c".split("["), "|")}""#,
         r#""{greet("a:b")}""#,
     ] {
-        let (ast, id) = expression(source, Dialect::V1);
+        let (ast, id) = expression(source);
         let ExprKind::InterpolatedString(parts) = &ast.exprs[id].kind else {
             panic!("expected interpolation")
         };
@@ -420,7 +396,7 @@ fn interpolation_nested_colons_and_strings_stay_in_the_expression() {
         };
         assert!(matches!(
             ast.exprs[*e].kind,
-            ExprKind::FunctionCall { .. } | ExprKind::StructLiteral { .. }
+            ExprKind::FunctionCall { .. } | ExprKind::PathStructLiteral { .. }
         ));
     }
 }
@@ -449,11 +425,11 @@ fn interpolation_nested_hole_spans_are_file_offsets() {
 
 #[test]
 fn holes_keep_their_names_in_expr_and_type_position() {
-    let (ast, v) = expression("?", Dialect::V1);
+    let (ast, v) = expression("?");
     assert!(matches!(ast.exprs[v].kind, ExprKind::Hole(_, None)));
-    let (ast, v) = expression("?foo", Dialect::V1);
+    let (ast, v) = expression("?foo");
     assert!(matches!(&ast.exprs[v].kind, ExprKind::Hole(_, Some(n)) if n == "foo"));
-    let ast = parse("fn f() { let x: ?foo = 1 }", Dialect::V1);
+    let ast = parse("fn f() { let x: ?foo = 1 }");
     let StatementKind::Let(l) = &ast.stmts[body(&ast).statements[0]].kind else {
         panic!("expected let")
     };
@@ -463,10 +439,7 @@ fn holes_keep_their_names_in_expr_and_type_position() {
 
 #[test]
 fn keyword_spans_and_dropped_fields_are_captured() {
-    let ast = parse(
-        "global G: int = 0\nfn f() {\nfor x: int in xs {\nreturn x\n}\n}",
-        Dialect::V1,
-    );
+    let ast = parse("global G: int = 0\nfn f() {\nfor x: int in xs {\nreturn x\n}\n}");
     let ItemKind::Global(g) = &ast.items[0].kind else {
         panic!("expected global")
     };
@@ -491,10 +464,8 @@ fn keyword_spans_and_dropped_fields_are_captured() {
 
 #[test]
 fn ref_type_is_a_prefix_type_former() {
-    let ast = parse(
-        "fn use_player(player: ref Player, maybe: (ref Player)?) -> ref Player { player }",
-        Dialect::V1,
-    );
+    let ast =
+        parse("fn use_player(player: ref Player, maybe: (ref Player)?) -> ref Player { player }");
     let f = first_fn(&ast);
     assert_eq!(ast.type_surface(f.params[0].ty), "ref Player");
     assert_eq!(ast.type_surface(f.params[1].ty), "(ref Player)?");
@@ -506,10 +477,7 @@ fn ref_type_is_a_prefix_type_former() {
 
 #[test]
 fn sibling_field_ref_in_default() {
-    let ast = parse(
-        "struct HealthBar { max: int, current: int = .max }",
-        Dialect::V1,
-    );
+    let ast = parse("struct HealthBar { max: int, current: int = .max }");
     let def = first_struct(&ast).fields[1]
         .default
         .expect("current has a default");
@@ -533,7 +501,7 @@ fn fn_bodies_record_backend_and_source() {
         ),
         ("extern(js) fn now() -> float", FunctionBody::ExternJs),
     ] {
-        assert_eq!(first_fn(&parse(src, Dialect::V1)).body, want, "{src}");
+        assert_eq!(first_fn(&parse(src)).body, want, "{src}");
     }
 }
 
@@ -558,7 +526,7 @@ fn block_braces_recorded_only_for_real_braces() {
                \x20       E::B => { 6 }\n\
                \x20   }\n\
                }";
-    let ast = parse(src, Dialect::V1);
+    let ast = parse(src);
     let mut braceless = 0;
     for (_, b) in ast.blocks.iter() {
         match b.braces {
@@ -581,7 +549,7 @@ fn macro_expanded_blocks_lose_brace_spans() {
     // Span retag stamps the call-site span on expanded template blocks; the
     // template's braces don't exist at the call site, so they must be
     // dropped rather than left pointing at template offsets.
-    let mut ast = parse("macro m() { { 1 } }\nfn f() { m() }", Dialect::V1);
+    let mut ast = parse("macro m() { { 1 } }\nfn f() { m() }");
     macro_expand::expand_macros(std::slice::from_mut(&mut ast));
     desugar::desugar(&mut ast);
     let f = ast
@@ -610,7 +578,6 @@ fn macro_expanded_blocks_lose_brace_spans() {
 fn item_macros_splice_and_substitute_type_fragments() {
     let mut ast = parse(
         "macro mk(N: ident, E: ty) { struct N { v: E } }\nmk!(WrapBox, Box<int>)\nmk!(WrapArr, [int])",
-        Dialect::V1,
     );
     macro_expand::expand_macros(std::slice::from_mut(&mut ast));
     desugar::desugar(&mut ast);
@@ -637,7 +604,7 @@ fn item_macros_splice_and_substitute_type_fragments() {
 
 #[test]
 fn operators_preserve_precedence_and_left_associativity() {
-    let (ast, id) = expression("1 + 2 * 3 - 4", Dialect::V1);
+    let (ast, id) = expression("1 + 2 * 3 - 4");
     let (left, right) = binary(&ast, id, TokenKind::Minus);
     assert!(matches!(ast.exprs[right].kind, ExprKind::Int(4, _)));
     let (_, product) = binary(&ast, left, TokenKind::Plus);
@@ -651,12 +618,12 @@ fn operators_preserve_precedence_and_left_associativity() {
             );
         }
     }
-    let (ast, id) = expression("a < b && c > d", Dialect::V1);
+    let (ast, id) = expression("a < b && c > d");
     let (left, right) = binary(&ast, id, TokenKind::And);
     binary(&ast, left, TokenKind::LessThan);
     binary(&ast, right, TokenKind::GreaterThan);
     // A leading operator continues the expression across a newline.
-    let (ast, id) = expression("10\n - 1\n - 2", Dialect::V1);
+    let (ast, id) = expression("10\n - 1\n - 2");
     let (left, _) = binary(&ast, id, TokenKind::Minus);
     binary(&ast, left, TokenKind::Minus);
 }
@@ -664,10 +631,9 @@ fn operators_preserve_precedence_and_left_associativity() {
 #[test]
 fn guarded_match_keeps_all_arms_and_struct_bodies() {
     for guard in ["x", "(x)", "x && x"] {
-        let (ast, id) = expression(
-            &format!("match e {{ E::A if {guard} => S {{ x: 1 }} E::B => S {{ x: 2 }} }}"),
-            Dialect::V1,
-        );
+        let (ast, id) = expression(&format!(
+            "match e {{ E::A if {guard} => S {{ x: 1 }} E::B => S {{ x: 2 }} }}"
+        ));
         let ExprKind::Match { arms, .. } = &ast.exprs[id].kind else {
             panic!("expected match")
         };
@@ -679,22 +645,25 @@ fn guarded_match_keeps_all_arms_and_struct_bodies() {
             else {
                 panic!("expected expression")
             };
-            assert!(matches!(ast.exprs[e].kind, ExprKind::StructLiteral { .. }));
+            assert!(matches!(
+                ast.exprs[e].kind,
+                ExprKind::PathStructLiteral { .. }
+            ));
         }
     }
 }
 
 #[test]
 fn ascription_and_lambda_disambiguation() {
-    let (ast, id) = expression("(5 : int)", Dialect::V1);
+    let (ast, id) = expression("(5 : int)");
     let ExprKind::ParenAscription(e, ty) = ast.exprs[id].kind else {
         panic!("expected ascription")
     };
     assert!(matches!(ast.exprs[e].kind, ExprKind::Int(5, _)));
     assert!(matches!(ast.types[ty].kind, TypeExprKind::Int));
-    let (ast, id) = expression("(x : int) => x", Dialect::V1);
+    let (ast, id) = expression("(x : int) => x");
     assert!(matches!(ast.exprs[id].kind, ExprKind::Lambda { .. }));
-    let (ast, id) = expression("(j : float) / (k : float)", Dialect::V1);
+    let (ast, id) = expression("(j : float) / (k : float)");
     let (left, right) = binary(&ast, id, TokenKind::Div);
     assert!(matches!(
         ast.exprs[left].kind,
@@ -709,29 +678,31 @@ fn ascription_and_lambda_disambiguation() {
 #[test]
 fn legacy_infix_ascription_is_rejected() {
     let src = "fn f(x: int) { let y = g(x) :: int }";
-    let error = parse_module_clean_with_dialect(src, file(), Dialect::V1)
-        .expect_err("infix ascription must be rejected");
+    let error = parse_module_clean(src, file()).expect_err("infix ascription must be rejected");
     assert!(error.message.contains("write `(expr : Type)`"), "{error:?}");
-    let error = parse_module_clean(src, file()).expect_err("default parser is v1");
-    assert!(error.message.contains("write `(expr : Type)`"), "{error:?}");
-
-    let ast =
-        parse_module_clean_with_dialect("fn f(x: int) { let y = (x : int) }", file(), Dialect::V1)
-            .expect("the compatibility API accepts v1 syntax");
-    assert_eq!(ast.dialect, Dialect::V1);
+    parse_module_clean("fn f(x: int) { let y = (x : int) }", file())
+        .expect("parenthesized ascription parses");
 }
 
 #[test]
 fn removed_legacy_module_directive_is_rejected_with_its_span() {
     let src = "  //! modules: legacy\nfn f() {}\n";
-    let error = parse_module_with_dialect(src, file(), Dialect::V1)
-        .expect_err("removed directive must be rejected");
+    let error = parse_module(src, file()).expect_err("removed directive must be rejected");
     assert!(
         error.message.contains("directive has been removed"),
         "{error:?}"
     );
     assert_eq!(error.labels[0].span.offset_range(), (2, 21));
     assert_eq!(error.labels[0].span.line_range(), (0, 0));
+
+    let error = parse_module("//! modules: v2\nfn f() {}\n", file())
+        .expect_err("unknown directive values must be rejected");
+    assert!(
+        error
+            .message
+            .contains("unknown `//! modules:` directive value `v2`"),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -745,7 +716,7 @@ fn paths_keep_segments_root_and_generic_arguments() {
         // path in v1; whether it names anything is the resolver's call.
         ("x :: float", false, vec!["x", "float"]),
     ] {
-        let (ast, id) = expression(source, Dialect::V1);
+        let (ast, id) = expression(source);
         let ExprKind::Path { path, .. } = &ast.exprs[id].kind else {
             panic!("expected path")
         };
@@ -768,7 +739,7 @@ fn paths_keep_segments_root_and_generic_arguments() {
     assert_eq!(ctor.segments.len(), 3);
     assert_eq!(args.len(), 1);
     assert!(matches!(ast.types[args[0]].kind, TypeExprKind::Int));
-    let (ast, id) = expression("match msg { msg_kind::Ping => 1, other => 0 }", Dialect::V1);
+    let (ast, id) = expression("match msg { msg_kind::Ping => 1, other => 0 }");
     let ExprKind::Match { arms, .. } = &ast.exprs[id].kind else {
         panic!("expected match")
     };
@@ -779,19 +750,19 @@ fn paths_keep_segments_root_and_generic_arguments() {
 
 #[test]
 fn qualified_paths_head_calls_and_struct_literals() {
-    let (ast, id) = expression("sample::combat::heal(actor, 5)", Dialect::V1);
+    let (ast, id) = expression("sample::combat::heal(actor, 5)");
     let ExprKind::FunctionCall { func, .. } = &ast.exprs[id].kind else {
         panic!("expected call, got {:?}", ast.exprs[id].kind);
     };
     assert!(matches!(ast.exprs[*func].kind, ExprKind::Path { .. }));
 
-    let (ast, id) = expression("p::make<int>(3)", Dialect::V1);
+    let (ast, id) = expression("p::make<int>(3)");
     let ExprKind::FunctionCall { generic_args, .. } = &ast.exprs[id].kind else {
         panic!("expected call, got {:?}", ast.exprs[id].kind);
     };
     assert_eq!(generic_args.len(), 1, "explicit type argument survived");
 
-    let (ast, id) = expression("lib::Actor { hp: 100 }", Dialect::V1);
+    let (ast, id) = expression("lib::Actor { hp: 100 }");
     let ExprKind::PathStructLiteral { path, fields, .. } = &ast.exprs[id].kind else {
         panic!("expected path struct literal, got {:?}", ast.exprs[id].kind);
     };
@@ -799,7 +770,7 @@ fn qualified_paths_head_calls_and_struct_literals() {
     assert_eq!(fields.len(), 1);
 
     // Every qualified value is a path; capitalization does not change its AST.
-    let (ast, id) = expression("Color::Red", Dialect::V1);
+    let (ast, id) = expression("Color::Red");
     assert!(matches!(ast.exprs[id].kind, ExprKind::Path { .. }));
 
     let ast = parse_v1("fn lib::Actor.heal(a, amount: int) { a.hp = a.hp + amount }");
@@ -814,7 +785,7 @@ fn single_and_multiple_if_let_bindings_use_chains() {
         ("if let x = foo() { x } else { 0 }", 1),
         ("if let x = foo() && let y = bar() { y }", 2),
     ] {
-        let (ast, id) = expression(source, Dialect::V1);
+        let (ast, id) = expression(source);
         let ExprKind::IfLetChain { clauses, .. } = &ast.exprs[id].kind else {
             panic!("expected binding chain")
         };
@@ -1012,7 +983,6 @@ fn field_visibility_and_contextual_words_in_v1() {
 fn local_declarations_preserve_storage_types_and_nested_functions() {
     let ast = parse(
         "fn f() { static count = 0\nstatic scratch: [int] = []\nfn inner(x: int) -> int { x }\nlet m: Map<int, Vec<int>> = a }",
-        Dialect::V1,
     );
     let stmts = &body(&ast).statements;
     assert_eq!(stmts.len(), 4);
@@ -1052,7 +1022,6 @@ fn local_declarations_preserve_storage_types_and_nested_functions() {
 fn call_spreads_and_struct_bases_keep_source_order() {
     let ast = parse(
         "fn f() { draw(img, ..props, color: c)\nlet p = P { ..a, ..b, c: 1 }\nworkgroup_array<uint>(64) }",
-        Dialect::V1,
     );
     let stmts = &body(&ast).statements;
     let StatementKind::Expression(call) = ast.stmts[stmts[0]].kind else {
@@ -1068,7 +1037,8 @@ fn call_spreads_and_struct_bases_keep_source_order() {
     let StatementKind::Let(l) = &ast.stmts[stmts[1]].kind else {
         panic!("expected let")
     };
-    let ExprKind::StructLiteral { bases, fields, .. } = &ast.exprs[l.value.unwrap()].kind else {
+    let ExprKind::PathStructLiteral { bases, fields, .. } = &ast.exprs[l.value.unwrap()].kind
+    else {
         panic!("expected struct")
     };
     assert_eq!(bases.len(), 2);
@@ -1100,7 +1070,7 @@ fn a_comment_may_close_a_delimited_list() {
         "enum E {\n    A(\n        int,\n        // c\n    ),\n}\n",
         "fn f() {\n    let l = (\n        // c\n        a: int,\n        // c\n    ) => a\n}\n",
     ] {
-        parse(src, Dialect::V1);
+        parse(src);
     }
 }
 
@@ -1114,6 +1084,6 @@ fn a_comment_may_sit_before_any_list_comma() {
         "fn f(m: Map<int /* c */, int>) {}\n",
         "fn f(m: Map<\n    // c\n    int,\n>) {}\n",
     ] {
-        parse(src, Dialect::V1);
+        parse(src);
     }
 }

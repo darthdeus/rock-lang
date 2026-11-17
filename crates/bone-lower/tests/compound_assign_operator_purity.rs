@@ -19,7 +19,14 @@ fn overloaded_operators_in_a_place_are_lowered_once() {
     };
 
     let mut module = hir::Module::default();
-    let workspace = Workspace::new();
+    let mut workspace = Workspace::new();
+    workspace.fragment_scopes.insert(
+        module.file,
+        bone_core::modules::FragmentScope {
+            package: bone_core::modules::STD_PACKAGE_ID,
+            ..Default::default()
+        },
+    );
     let function_idx = {
         let mut ctx = LowerCtx::new(&workspace, &mut module, 0);
         lower_function_def(

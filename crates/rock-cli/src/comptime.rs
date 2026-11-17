@@ -273,7 +273,6 @@ pub(crate) fn inputs_for_project_with_config(
         );
     }
     inputs.channel = resolved.channel;
-    inputs.modules_mode = "v1".to_string();
     inputs.volatile_vars = resolved
         .volatile_vars
         .into_iter()
@@ -987,7 +986,7 @@ mod source_fingerprint_tests {
             let mut module = skull_parser::parse_module(text, Ustr::from(file)).unwrap();
             module.package = Some(skull_parser::PackageTag {
                 id: 0,
-                self_name: "$standalone$<fingerprint>".into(),
+                self_name: "@/<fingerprint>".into(),
                 identity_storage: skull_parser::IdentityStorage::Exempt,
                 root: String::new(),
             });

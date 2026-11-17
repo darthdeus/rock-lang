@@ -151,12 +151,8 @@ pub nobox value Place { x: int, y: int }
 global LAST_PLACE: Place? = null
 fn main() {}
 "#;
-    let mut module = skull_parser::parse_module_with_dialect(
-        source,
-        ustr::Ustr::from("place.rock"),
-        skull_parser::Dialect::V1,
-    )
-    .expect("parse scoped nobox fixture");
+    let mut module = skull_parser::parse_module(source, ustr::Ustr::from("place.rock"))
+        .expect("parse scoped nobox fixture");
     module.package = Some(rock_core::source_code::PackageTag {
         id: 1,
         self_name: "example_space".to_string(),
@@ -269,10 +265,9 @@ fn session_file(path: &str, text: &str) -> bone_incremental::session::SessionFil
     bone_incremental::session::SessionFile {
         path: path.to_string(),
         text: text.to_string(),
-        dialect: skull_parser::Dialect::V1,
         package: Some(skull_parser::PackageTag {
             id: 1,
-            self_name: "$standalone$<backend-test>".to_string(),
+            self_name: "@/<backend-test>".to_string(),
             identity_storage: skull_parser::IdentityStorage::Exempt,
             root: String::new(),
         }),

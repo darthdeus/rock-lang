@@ -13,7 +13,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use rock_core::package_aliases::{NsAliases, PackageAliases};
-use rock_core::source_code::Dialect;
 
 use super::{StickConfig, dependency_matches_channel};
 
@@ -43,7 +42,6 @@ pub struct PackageNode {
     /// Manifest name with `-` normalized to `_`, case preserved:
     /// `name = "Demo"` yields `Demo`, never an invented `demo`.
     pub self_name: String,
-    pub dialect: Dialect,
     /// The package's mutable-global policy (`[language] globals`).
     pub global_policy: rock_core::source_code::GlobalPolicy,
     /// The package's identity-storage migration state
@@ -69,7 +67,6 @@ impl PackageNode {
     /// Stamp this package's facts onto one of its source files.
     pub fn stamp(&self, source: &mut rock_core::source_code::SourceFile) {
         source.package = Some(self.tag());
-        source.dialect = self.dialect;
         source.global_policy = self.global_policy;
     }
 }
@@ -146,7 +143,6 @@ impl Builder {
         self.by_root.insert(root.clone(), id);
         self.stack.push((root.clone(), config.package.name.clone()));
 
-        let dialect = config.dialect();
         let mut source_groups = Vec::new();
         let mut declared_groups: Vec<_> = config.source_groups.iter().collect();
         declared_groups.sort_by_key(|(name, _)| *name);
@@ -255,7 +251,6 @@ impl Builder {
             root,
             manifest_name: config.package.name.clone(),
             self_name: config.package.name.replace('-', "_"),
-            dialect,
             global_policy: config.global_policy(),
             identity_storage: config.identity_storage(),
             dependencies,
@@ -631,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn package_dependency_without_modules_setting_uses_v1() {
+    fn package_dependency_builds_with_modules_v1_setting() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("app");
         let lib = tmp.path().join("lib");
@@ -643,12 +638,6 @@ mod tests {
         );
         let graph = PackageGraph::build(&root).expect("dependency graph builds");
         assert_eq!(graph.packages().len(), 2);
-        let provider = graph
-            .packages()
-            .iter()
-            .find(|node| node.manifest_name == "lib-pkg")
-            .expect("provider package");
-        assert_eq!(provider.dialect, Dialect::V1);
     }
 
     /// Channel scoping survives a transitive hop, or a dev-only package

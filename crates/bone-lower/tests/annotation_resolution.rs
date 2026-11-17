@@ -4,9 +4,7 @@ use bone_core::modules::{
 };
 use bone_core::workspace::Workspace;
 use bone_lower::{LowerCtx, lower_annotations_with_ctx};
-use skull_parser::{
-    CompilerError, Dialect, ItemKind, UseSuffix, UseTree, parse_module_clean_with_dialect,
-};
+use skull_parser::{CompilerError, ItemKind, UseSuffix, UseTree, parse_module_clean};
 use ustr::Ustr;
 
 fn lower_field_annotation(left: &str, right: &str) -> Result<Vec<Annotation>, CompilerError> {
@@ -23,7 +21,7 @@ fn lower_annotation(
     source: &str,
 ) -> Result<Vec<Annotation>, CompilerError> {
     let file = Ustr::from("annotation.rock");
-    let ast = parse_module_clean_with_dialect(source, file, Dialect::V1).unwrap();
+    let ast = parse_module_clean(source, file).unwrap();
     let mut ws = Workspace::new();
     let mut pkg = NsPackage {
         id: 1,
@@ -38,7 +36,7 @@ fn lower_annotation(
     };
     for (module, source) in [("left", left), ("right", right)] {
         let name = Ustr::from(module);
-        let parsed = parse_module_clean_with_dialect(source, name, Dialect::V1).unwrap();
+        let parsed = parse_module_clean(source, name).unwrap();
         let item = &parsed.items[0];
         let kind = match &item.kind {
             ItemKind::Function(_) => DefKind::Callable,

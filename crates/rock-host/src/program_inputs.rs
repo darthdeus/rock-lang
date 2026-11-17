@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use rock_core::CompilerError;
 use rock_core::package_aliases::NsAliases;
-use rock_core::source_code::{Dialect, PackageTag};
+use rock_core::source_code::PackageTag;
 
 use crate::stick::graph::PackageGraph;
 
@@ -33,12 +33,12 @@ pub fn ns_aliases(graph: Option<&PackageGraph>) -> NsAliases {
     graph.map(PackageGraph::ns_aliases).unwrap_or_default()
 }
 
-/// The alias table for a program given each source's `(file, dialect,
-/// package)` facts, as the package graph stamped them. Sources without a real
+/// The alias table for a program given each source's `(file, package)` facts,
+/// as the package graph stamped them. Sources without a real
 /// root package use the empty table; otherwise the table comes from the root
 /// package's (graph id 0) manifest, which selected the files.
 pub fn ns_aliases_for_sources<'a>(
-    sources: impl IntoIterator<Item = (&'a str, Dialect, Option<&'a PackageTag>)>,
+    sources: impl IntoIterator<Item = (&'a str, Option<&'a PackageTag>)>,
 ) -> Result<NsAliases, CompilerError> {
     ns_aliases_for_selected_sources(sources, None)
 }
@@ -47,11 +47,11 @@ pub fn ns_aliases_for_sources<'a>(
 /// selected the files, when the caller kept it, instead of building that
 /// graph again from the root file's manifest.
 pub fn ns_aliases_for_selected_sources<'a>(
-    sources: impl IntoIterator<Item = (&'a str, Dialect, Option<&'a PackageTag>)>,
+    sources: impl IntoIterator<Item = (&'a str, Option<&'a PackageTag>)>,
     selecting_graph: Option<&NsAliases>,
 ) -> Result<NsAliases, CompilerError> {
     let mut root = None;
-    for (file, _, package) in sources {
+    for (file, package) in sources {
         let Some(package) = package else { continue };
         if package.id == 0 && root.is_none() {
             root = Some(file);
@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn standalone_modules_use_empty_aliases() {
-        let aliases = ns_aliases_for_sources([("scratch.rock", Dialect::V1, None)]).unwrap();
+        let aliases = ns_aliases_for_sources([("scratch.rock", None)]).unwrap();
         assert_eq!(aliases, NsAliases::default());
     }
 
@@ -123,9 +123,7 @@ mod tests {
             identity_storage: Default::default(),
             root: "/dependency".to_string(),
         };
-        let aliases =
-            ns_aliases_for_sources([("/dependency/lib.rock", Dialect::V1, Some(&package))])
-                .unwrap();
+        let aliases = ns_aliases_for_sources([("/dependency/lib.rock", Some(&package))]).unwrap();
         assert_eq!(aliases, NsAliases::default());
     }
 

@@ -479,10 +479,6 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
                 span: id.span,
                 name: self.rw.resolve(id.name),
             }),
-            ExprKind::QualifiedIdent { base, member } => ExprKind::QualifiedIdent {
-                base: self.ctor(base),
-                member: member.clone(),
-            },
             ExprKind::Path { path, generic_args } => ExprKind::Path {
                 path: self.path(path),
                 generic_args: generic_args.iter().map(|t| self.ty(*t)).collect(),
@@ -576,30 +572,6 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
                 ExprKind::ArrayLiteral(xs.iter().map(|x| self.expr(*x)).collect())
             }
             ExprKind::Tuple(xs) => ExprKind::Tuple(xs.iter().map(|x| self.expr(*x)).collect()),
-            ExprKind::StructLiteral {
-                name,
-                bases,
-                fields,
-            } => ExprKind::StructLiteral {
-                name: self.ctor(name),
-                bases: bases.iter().map(|b| self.expr(*b)).collect(),
-                fields: fields
-                    .iter()
-                    .map(|(ns, v)| (ns.clone(), self.expr(*v)))
-                    .collect(),
-            },
-            ExprKind::EnumVariantRecord {
-                enum_name,
-                variant_name,
-                fields,
-            } => ExprKind::EnumVariantRecord {
-                enum_name: self.ctor(enum_name),
-                variant_name: variant_name.clone(),
-                fields: fields
-                    .iter()
-                    .map(|(ns, v)| (ns.clone(), self.expr(*v)))
-                    .collect(),
-            },
             ExprKind::Block(b) => ExprKind::Block(self.block(*b)),
             ExprKind::Lambda {
                 params,
@@ -689,39 +661,22 @@ impl<S: Source, R: Rewrite> Graft<'_, S, R> {
             Pattern::Ident(id) => Pattern::Ident(id.clone()),
             Pattern::Literal(e) => Pattern::Literal(self.expr(*e)),
             Pattern::Tuple(ps) => Pattern::Tuple(ps.iter().map(|p| self.pattern(p)).collect()),
-            Pattern::EnumVariant {
-                enum_name,
-                variant_name,
-                args,
-            } => Pattern::EnumVariant {
-                enum_name: enum_name.clone(),
-                variant_name: variant_name.clone(),
-                args: args
-                    .as_ref()
-                    .map(|ps| ps.iter().map(|p| self.pattern(p)).collect()),
-            },
             Pattern::PathVariant { path, args } => Pattern::PathVariant {
-                path: self.path(path),
+                path: if path.segments.len() == 1 {
+                    path.clone()
+                } else {
+                    self.path(path)
+                },
                 args: args
                     .as_ref()
                     .map(|ps| ps.iter().map(|p| self.pattern(p)).collect()),
             },
             Pattern::PathRecord { path, fields, rest } => Pattern::PathRecord {
-                path: self.path(path),
-                fields: fields
-                    .iter()
-                    .map(|(id, p)| (id.clone(), self.pattern(p)))
-                    .collect(),
-                rest: *rest,
-            },
-            Pattern::Record {
-                enum_name,
-                name,
-                fields,
-                rest,
-            } => Pattern::Record {
-                enum_name: enum_name.clone(),
-                name: name.clone(),
+                path: if path.segments.len() == 1 {
+                    path.clone()
+                } else {
+                    self.path(path)
+                },
                 fields: fields
                     .iter()
                     .map(|(id, p)| (id.clone(), self.pattern(p)))

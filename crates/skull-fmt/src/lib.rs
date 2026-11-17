@@ -13,7 +13,6 @@ mod doc;
 mod printer;
 mod trivia;
 
-use rock_core::source_code::Dialect;
 use ustr::Ustr;
 
 #[derive(Clone, Debug)]
@@ -40,16 +39,6 @@ pub fn format_code(input: &str) -> String {
 
 /// Format with an explicit config, surfacing parse errors.
 pub fn try_format(input: &str, cfg: &FormatConfig) -> Result<String, String> {
-    try_format_with_dialect(input, cfg, Dialect::V1)
-}
-
-/// [`try_format`] with a compatibility dialect argument. Parsing always uses
-/// the modules-v1 grammar.
-pub fn try_format_with_dialect(
-    input: &str,
-    cfg: &FormatConfig,
-    _dialect: Dialect,
-) -> Result<String, String> {
     let file: Ustr = "<fmt>".into();
     let ast = skull_parser::parse_module(input, file).map_err(|e| format!("{e:?}"))?;
     if !ast.recovery_errors.is_empty() {

@@ -165,7 +165,6 @@ fn session_file(path: &str, text: &str) -> SessionFile {
     SessionFile {
         path: path.to_string(),
         text: text.to_string(),
-        dialect: skull_parser::Dialect::V1,
         package: Some(skull_parser::PackageTag {
             id: 1,
             self_name: "graph_walk".to_string(),

@@ -1298,11 +1298,11 @@ fn run_lsp_test(test: &LspTest, server: LspServerCmd) -> Result<bool> {
 /// Write the fixture's files into a fresh project directory under
 /// `.lsp-test-tmp/` and return the primary file and that directory.
 fn write_fixture_project(test: &LspTest) -> Result<(PathBuf, PathBuf)> {
-    let (safe_name, proj) = new_fixture_project(&test.name)?;
+    let (safe_name, proj) = new_fixture_project(&test.name, !test.files.is_empty())?;
 
-    // Multi-file tests get their own subdirectory containing `stick.toml` plus
-    // every `FILE:` entry. The primary file (the one with the cursor marker)
-    // is the path passed to the rock-lsp CLI.
+    // Multi-file tests get a named package manifest and every `FILE:` entry.
+    // The primary file (the one with the cursor marker) is the path passed to
+    // the rock-lsp CLI.
     if !test.files.is_empty() {
         for (name, content) in &test.files {
             // The harness writes its own manifest below.
@@ -1321,21 +1321,21 @@ fn write_fixture_project(test: &LspTest) -> Result<(PathBuf, PathBuf)> {
         };
         Ok((proj.join(&primary), proj))
     } else {
-        // Each single-file test gets its OWN subdirectory (with a stick.toml),
+        // Each single-file test gets its OWN subdirectory without a manifest,
         // not a shared file in `.lsp-test-tmp/`. Operations that scan the whole
         // project (`references`, `workspace-symbols` -> `load_project`) would
         // otherwise pick up sibling fixtures' symbols and race against their
         // parallel create/delete. Isolating per test makes the project bound
-        // to exactly this file.
+        // to exactly this standalone file.
         let tf = proj.join(format!("{}.rock", safe_name));
         fs_err::write(&tf, &test.code)?;
         Ok((tf, proj))
     }
 }
 
-/// Create a unique temporary project for one fixture. Both one-shot and
-/// edit-sequence tests need a manifest so project-wide queries stay scoped.
-fn new_fixture_project(name: &str) -> Result<(String, PathBuf)> {
+/// Create an isolated temporary directory for one fixture, optionally as a
+/// named package for multi-file tests.
+fn new_fixture_project(name: &str, with_manifest: bool) -> Result<(String, PathBuf)> {
     let test_dir = PathBuf::from(".lsp-test-tmp");
     fs_err::create_dir_all(&test_dir)?;
 
@@ -1347,10 +1347,12 @@ fn new_fixture_project(name: &str) -> Result<(String, PathBuf)> {
     let n = NEXT_PROJECT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let project_dir = test_dir.join(format!("{safe_name}-{}-{n}", std::process::id()));
     fs_err::create_dir_all(&project_dir)?;
-    fs_err::write(
-        project_dir.join("stick.toml"),
-        "[package]\nname = \"lsp_test\"\nversion = \"0.1.0\"\n",
-    )?;
+    if with_manifest {
+        fs_err::write(
+            project_dir.join("stick.toml"),
+            "[package]\nname = \"lsp_test\"\nversion = \"0.1.0\"\n",
+        )?;
+    }
     Ok((safe_name, project_dir))
 }
 
@@ -2423,7 +2425,7 @@ fn run_edit_sequence_test(test: &EditSequenceTest, server: LspServerCmd) -> Resu
             "First step in edit_sequence must be a full document (STEP N:), not a typing/delete step"
         ));
     };
-    let (safe_name, project_dir) = new_fixture_project(&test.name)?;
+    let (safe_name, project_dir) = new_fixture_project(&test.name, false)?;
     let test_file = project_dir.join(format!("{safe_name}.rock"));
     std::fs::write(&test_file, initial_code)?;
     let test_uri = file_uri(&std::fs::canonicalize(&test_file)?)?;
@@ -3402,6 +3404,8 @@ min_tokens: 5\n\
         let test = parse_one(HOVER_FIXTURE);
         let (file_a, proj_a) = write_fixture_project(&test).unwrap();
         let (file_b, proj_b) = write_fixture_project(&test).unwrap();
+        assert!(!proj_a.join("stick.toml").exists());
+        assert!(!proj_b.join("stick.toml").exists());
         let _ = std::fs::remove_dir_all(&proj_a);
         let _ = std::fs::remove_dir_all(&proj_b);
         assert_ne!(proj_a, proj_b);

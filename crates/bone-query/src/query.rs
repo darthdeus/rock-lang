@@ -369,7 +369,7 @@ pub fn hover_at(
     sources: Option<&SourceMap>,
 ) -> Option<(String, Span)> {
     let module = ws.modules.get(mid.index())?;
-    let frag = ws.fragment_scopes.get(&module.file);
+    let frag = crate::modules_scope::fragment(ws, module.file)?;
 
     // Body-level nodes: values, calls, struct-literal heads.
     if let Some(owner) = module.body_at(offset) {
@@ -643,7 +643,7 @@ fn render_call_overloads_hover(
     ws: &Workspace,
     name: Ustr,
     selected: Option<(ModuleId, Idx<Function>)>,
-    frag: Option<&bone_core::modules::FragmentScope>,
+    frag: &bone_core::modules::FragmentScope,
     sources: Option<&SourceMap>,
 ) -> Option<String> {
     let all: Vec<(ModuleId, Idx<Function>)> =
@@ -3178,13 +3178,10 @@ fn binding_or_global_ty<'a>(
         Some(TyRef::new(bi, ty))
     });
     local.or_else(|| {
-        let key = crate::modules_scope::fragment(ws, module.file)
-            .and_then(|frag| {
-                bone_semantic::lower::resolve::resolve_bare(ws, frag, Ustr::from(head))
-                    .ok()
-                    .map(|resolved| resolved.key)
-            })
-            .unwrap_or_else(|| Ustr::from(head));
+        let frag = crate::modules_scope::fragment(ws, module.file)?;
+        let key = bone_semantic::lower::resolve::resolve_bare(ws, frag, Ustr::from(head))
+            .ok()?
+            .key;
         let ty = *ws.globals_by_name.get(&key)?;
         Some(TyRef::of_static(ty))
     })
@@ -3312,12 +3309,8 @@ fn find_binding_by_name(body: &Body, head: &str, offset: usize) -> Option<Idx<hi
     best.map(|(_, idx)| idx)
 }
 
-/// Hover for an enum-variant pattern (`MobKind::Skeleton`) read from the raw
-/// parser AST. bone's HIR `Pattern::EnumVariant` carries no span, but the parser
-/// keeps the variant- and enum-name `Ident` spans -- so the facade resolves the
-/// pattern here when `hover_at` declines (the match expr is no longer a catch-all
-/// for arm patterns). The variant name renders the variant with its payload, the
-/// enum qualifier (incl. the `::`) renders the full enum body.
+/// Hover for an enum-variant pattern, using parser path spans to distinguish
+/// the variant token from its enum qualifier.
 pub(crate) fn enum_variant_pattern_hover(
     ws: &Workspace,
     mid: ModuleId,
@@ -3372,24 +3365,14 @@ enum VariantHead<'a> {
     },
 }
 
-/// Walks match-arm patterns (recursing tuple/or/variant sub-patterns) for the
-/// variant-pattern head under `offset`. A bare struct head (`Point { .. }`)
-/// is reported too; resolving it as a variant fails and the caller falls
-/// through to the struct-def hover in `hover_record_pat`.
+/// Walks match-arm patterns for the variant head under `offset`. One-segment
+/// record paths stay with HIR, which can distinguish a struct from a variant.
 fn variant_head_at<'a>(
     ws: &Workspace,
     mid: ModuleId,
     ast: &'a skull_parser::Ast,
     offset: usize,
 ) -> Option<VariantHead<'a>> {
-    fn type_key(ws: &Workspace, mid: ModuleId, name: Ustr) -> Option<Ustr> {
-        let file = ws.module(mid).file;
-        match crate::modules_scope::fragment(ws, file) {
-            Some(frag) => crate::modules_scope::resolve_type_key(ws, Some(frag), name.as_str()),
-            None => Some(name),
-        }
-    }
-
     fn path_variant(
         ws: &Workspace,
         mid: ModuleId,
@@ -3425,6 +3408,45 @@ fn variant_head_at<'a>(
         Some((enum_path.last()?, variant))
     }
 
+    fn pattern_enum_name(ws: &Workspace, mid: ModuleId, name_span: Span) -> Option<Option<Ustr>> {
+        let module = ws.modules.get(mid.index())?;
+        let owner = module.body_at(name_span.offset_range().0)?;
+        let body = module.bodies.get(&owner)?;
+        body.pattern_arena
+            .values()
+            .find_map(|pattern| match pattern {
+                hir::Pattern::EnumVariant {
+                    enum_name,
+                    variant_span,
+                    ..
+                } if *variant_span == name_span => Some(*enum_name),
+                hir::Pattern::Record {
+                    enum_name,
+                    name_span: Some(span),
+                    ..
+                } if *span == name_span => Some(*enum_name),
+                _ => None,
+            })
+    }
+
+    fn record_pattern_is_type(ws: &Workspace, mid: ModuleId, name_span: Span) -> Option<bool> {
+        let module = ws.modules.get(mid.index())?;
+        let owner = module.body_at(name_span.offset_range().0)?;
+        let body = module.bodies.get(&owner)?;
+        body.pattern_arena
+            .values()
+            .find_map(|pattern| match pattern {
+                hir::Pattern::Record {
+                    name,
+                    name_span: Some(span),
+                    ..
+                } if *span == name_span => {
+                    Some(name.is_some_and(|name| ws.struct_by_name.contains_key(&name)))
+                }
+                _ => None,
+            })
+    }
+
     fn in_pattern<'a>(
         ws: &Workspace,
         mid: ModuleId,
@@ -3432,100 +3454,15 @@ fn variant_head_at<'a>(
         offset: usize,
     ) -> Option<VariantHead<'a>> {
         use skull_parser::Pattern;
-        let (enum_name, enum_ident, variant_name, subs): (
-            Option<Ustr>,
-            Option<&skull_parser::Ident>,
-            &skull_parser::Ident,
-            Vec<&Pattern>,
-        ) = match pat {
-            Pattern::EnumVariant {
-                enum_name,
-                variant_name,
-                args,
-            } => {
-                let key = match enum_name {
-                    Some(name) => Some(type_key(ws, mid, name.name)?),
-                    None => None,
-                };
-                (
-                    key,
-                    enum_name.as_ref(),
-                    variant_name,
-                    args.iter().flatten().collect(),
-                )
-            }
-            Pattern::Record {
-                enum_name,
-                name: Some(variant_name),
-                fields,
-                ..
-            } => {
-                let key = match enum_name {
-                    Some(name) => Some(type_key(ws, mid, name.name)?),
-                    None => None,
-                };
-                (
-                    key,
-                    enum_name.as_ref(),
-                    variant_name,
-                    fields.iter().map(|(_, p)| p).collect(),
-                )
-            }
+        let (path, subs, record) = match pat {
             Pattern::PathVariant { path, args } => {
-                let (enum_key, variant) = path_variant(ws, mid, path)?;
-                let (enum_ident, variant_ident) = enum_path_names(path)?;
-                let (vs, _) = variant_ident.span.offset_range();
-                let on = |sp: Span| {
-                    let (s, e) = sp.offset_range();
-                    s <= offset && offset < e
-                };
-                if on(variant_ident.span) {
-                    return Some(VariantHead::Variant {
-                        enum_name: Some(enum_key),
-                        variant: variant_ident,
-                    });
-                }
-                let (es, _) = enum_ident.span.offset_range();
-                let span = enum_ident.span.with_offset_range((es, vs));
-                if on(span) {
-                    return Some(VariantHead::Qualifier {
-                        enum_name: enum_key,
-                        variant,
-                        span,
-                    });
-                }
-                return args
-                    .iter()
-                    .flatten()
-                    .find_map(|sub| in_pattern(ws, mid, sub, offset));
+                (path, args.iter().flatten().collect::<Vec<_>>(), false)
             }
-            Pattern::PathRecord { path, fields, .. } => {
-                let (enum_key, variant) = path_variant(ws, mid, path)?;
-                let (enum_ident, variant_ident) = enum_path_names(path)?;
-                let (vs, _) = variant_ident.span.offset_range();
-                let on = |sp: Span| {
-                    let (s, e) = sp.offset_range();
-                    s <= offset && offset < e
-                };
-                if on(variant_ident.span) {
-                    return Some(VariantHead::Variant {
-                        enum_name: Some(enum_key),
-                        variant: variant_ident,
-                    });
-                }
-                let (es, _) = enum_ident.span.offset_range();
-                let span = enum_ident.span.with_offset_range((es, vs));
-                if on(span) {
-                    return Some(VariantHead::Qualifier {
-                        enum_name: enum_key,
-                        variant,
-                        span,
-                    });
-                }
-                return fields
-                    .iter()
-                    .find_map(|(_, sub)| in_pattern(ws, mid, sub, offset));
-            }
+            Pattern::PathRecord { path, fields, .. } => (
+                path,
+                fields.iter().map(|(_, sub)| sub).collect::<Vec<_>>(),
+                true,
+            ),
             Pattern::Tuple(ps) | Pattern::Or(ps) => {
                 return ps.iter().find_map(|sub| in_pattern(ws, mid, sub, offset));
             }
@@ -3535,23 +3472,49 @@ fn variant_head_at<'a>(
             let (s, e) = sp.offset_range();
             s <= offset && offset < e
         };
-        if on(variant_name.span) {
+
+        if path.segments.len() == 1 {
+            let variant = path.segments.first()?;
+            if on(variant.span) {
+                if record && record_pattern_is_type(ws, mid, variant.span).unwrap_or(false) {
+                    return None;
+                }
+                let enum_name = pattern_enum_name(ws, mid, variant.span).flatten();
+                return if record {
+                    enum_name.map(|enum_name| VariantHead::Variant {
+                        enum_name: Some(enum_name),
+                        variant,
+                    })
+                } else {
+                    Some(VariantHead::Variant { enum_name, variant })
+                };
+            }
+            return subs
+                .into_iter()
+                .find_map(|sub| in_pattern(ws, mid, sub, offset));
+        }
+
+        let Some((enum_key, variant)) = path_variant(ws, mid, path) else {
+            return subs
+                .into_iter()
+                .find_map(|sub| in_pattern(ws, mid, sub, offset));
+        };
+        let (enum_ident, variant_ident) = enum_path_names(path)?;
+        if on(variant_ident.span) {
             return Some(VariantHead::Variant {
-                enum_name,
-                variant: variant_name,
+                enum_name: Some(enum_key),
+                variant: variant_ident,
             });
         }
-        if let (Some(en), Some(key)) = (enum_ident, enum_name) {
-            let qual = en
-                .span
-                .with_offset_range((en.span.offset_range().0, variant_name.span.offset_range().0));
-            if on(qual) {
-                return Some(VariantHead::Qualifier {
-                    enum_name: key,
-                    variant: variant_name.name,
-                    span: qual,
-                });
-            }
+        let (es, _) = enum_ident.span.offset_range();
+        let (vs, _) = variant_ident.span.offset_range();
+        let span = enum_ident.span.with_offset_range((es, vs));
+        if on(span) {
+            return Some(VariantHead::Qualifier {
+                enum_name: enum_key,
+                variant,
+                span,
+            });
         }
         subs.into_iter()
             .find_map(|sub| in_pattern(ws, mid, sub, offset))
@@ -3661,35 +3624,21 @@ pub(crate) struct UfcsMethod {
     pub return_ty: Option<TyId>,
 }
 
-/// UFCS methods callable as `recv.method(...)` on a value of struct `name`,
-/// in any scope; see `ufcs_methods_in_scope`.
-#[cfg(test)]
-pub(crate) fn ufcs_methods(
-    ws: &Workspace,
-    name: Ustr,
-    recv_elem: Option<TyRef<'_>>,
-) -> Vec<UfcsMethod> {
-    ufcs_methods_in_scope(ws, name, recv_elem, false, None)
-}
-
-/// Scope-aware UFCS method enumeration. Synthetic module queries keep the
-/// unscoped behavior; user completion passes its fragment so private overload
-/// members cannot leak into method candidates.
+/// Scope-aware UFCS method enumeration.
 pub(crate) fn ufcs_methods_in_scope(
     ws: &Workspace,
     name: Ustr,
     recv_elem: Option<TyRef<'_>>,
     recv_is_iter: bool,
-    frag: Option<&bone_core::modules::FragmentScope>,
+    frag: &bone_core::modules::FragmentScope,
 ) -> Vec<UfcsMethod> {
     let mut out = Vec::new();
     // Overloads collapse to one method item (identical label + insert --
     // the duplicate is popup noise), first-wins to match the general path's
     // per-name fn dedup.
     let mut seen: std::collections::HashSet<Ustr> = std::collections::HashSet::new();
-    let callable_names = frag.map(|frag| {
-        crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Callable)
-    });
+    let callable_names =
+        crate::modules_scope::spellings_by_key(ws, frag, bone_core::modules::DefKind::Callable);
     // Iterator receivers (`recv_is_iter`) additionally get the generic
     // `Iterator`-bounded combinators (`enumerate`/`map`/`filter`/`collect`/...)
     // whose first param is `it: I` with `<I: Iterator<..>>` -- not a nominal
@@ -3699,9 +3648,7 @@ pub(crate) fn ufcs_methods_in_scope(
             if source_ident(f.name).starts_with("__") {
                 continue;
             }
-            if frag.is_some_and(|frag| {
-                !crate::modules_scope::callable_member_admitted(ws, frag, f.name, m.id, fid)
-            }) {
+            if !crate::modules_scope::callable_member_admitted(ws, frag, f.name, m.id, fid) {
                 continue;
             }
             if let Some(p0) = f.param_decls.first() {
@@ -3715,21 +3662,13 @@ pub(crate) fn ufcs_methods_in_scope(
                 } else if !(recv_is_iter && fn_first_param_is_iter_bound(ws, f)) {
                     continue;
                 }
-                let display_name = callable_names
-                    .as_ref()
-                    .and_then(|names| names.get(&f.name))
+                let Some(display_name) = callable_names
+                    .get(&f.name)
                     .and_then(|names| names.first())
                     .copied()
-                    .or_else(|| ws.defs.get(&f.name).map(|meta| meta.name))
-                    .unwrap_or_else(|| {
-                        Ustr::from(
-                            f.name
-                                .as_str()
-                                .rsplit("::")
-                                .next()
-                                .unwrap_or(f.name.as_str()),
-                        )
-                    });
+                else {
+                    continue;
+                };
                 if seen.insert(display_name) {
                     out.push(UfcsMethod {
                         name: display_name.to_string(),
@@ -4731,7 +4670,7 @@ fn v1_scope_entries(
             emit_visible_binding_entries(
                 ws,
                 binding,
-                Some(frag),
+                frag,
                 expr_position,
                 pfx,
                 show_private,
@@ -4753,7 +4692,7 @@ fn v1_scope_entries(
     } else {
         for (name, key) in crate::modules_scope::bound_names(ws, frag, admit) {
             if let Some(binding) =
-                resolve_visible_binding(ws, Some(frag), name, key, None, &mut test_path_cache)
+                resolve_visible_binding(ws, frag, name, key, None, &mut test_path_cache)
             {
                 emit_binding(&binding, &mut test_path_cache);
             }
@@ -4764,14 +4703,12 @@ fn v1_scope_entries(
 /// Find the current first overload admitted at this access site.
 fn first_callable_in_scope(
     ws: &Workspace,
-    frag: Option<&bone_core::modules::FragmentScope>,
+    frag: &bone_core::modules::FragmentScope,
     key: Ustr,
 ) -> Option<(ModuleId, Idx<Function>)> {
     ws.functions_by_name.get(&key).and_then(|functions| {
         functions.iter().copied().find(|&(mid, fid)| {
-            frag.is_none_or(|frag| {
-                crate::modules_scope::callable_member_admitted(ws, frag, key, mid, fid)
-            })
+            crate::modules_scope::callable_member_admitted(ws, frag, key, mid, fid)
         })
     })
 }
@@ -4780,7 +4717,7 @@ fn first_callable_in_scope(
 /// only stable declaration facts in the per-fragment cache.
 pub(crate) fn resolve_visible_binding(
     ws: &Workspace,
-    frag: Option<&bone_core::modules::FragmentScope>,
+    frag: &bone_core::modules::FragmentScope,
     name: ustr::Ustr,
     key: ustr::Ustr,
     global_def_file: Option<Ustr>,
@@ -4845,7 +4782,7 @@ pub(crate) fn resolve_visible_binding(
 fn emit_visible_binding_entries(
     ws: &Workspace,
     binding: &VisibleBinding,
-    frag: Option<&bone_core::modules::FragmentScope>,
+    frag: &bone_core::modules::FragmentScope,
     expr_position: bool,
     pfx: &[u8],
     show_private: bool,
@@ -4945,11 +4882,11 @@ fn emit_visible_binding_entries(
     }
 }
 
-/// The completion entries for a definition `key`, optionally filtered at a
-/// modules-v1 access site. `None` preserves the synthetic-module query behavior.
+/// The completion entries for a definition `key`, filtered at a modules-v1
+/// access site.
 pub(crate) fn key_entries_in_scope(
     ws: &Workspace,
-    frag: Option<&bone_core::modules::FragmentScope>,
+    frag: &bone_core::modules::FragmentScope,
     name: ustr::Ustr,
     key: ustr::Ustr,
     expr_position: bool,
@@ -5021,6 +4958,9 @@ pub(crate) fn completion_with_visible_bindings(
         .modules
         .get(mid.index())
         .map_or_else(ustr::Ustr::default, |m| m.file);
+    let Some(frag) = crate::modules_scope::fragment(ws, req_file) else {
+        return Vec::new();
+    };
     if expr_position {
         let locals = locals_in_scope(ws, mid, inf, offset);
         // Scope recency: rank by declaration position DESC (closest above
@@ -5057,176 +4997,21 @@ pub(crate) fn completion_with_visible_bindings(
         }
     }
 
-    // A modules-v1 fragment offers what its tiers bind, spelled by the name
-    // they bind it under -- not every definition of the workspace by key.
-    let v1 = crate::modules_scope::fragment(ws, req_file);
-    if let Some(frag) = v1 {
-        let capacity_hint = seen
-            .len()
-            .saturating_add(visible_bindings.map_or(0, |bindings| bindings.len()));
-        seen.reserve(capacity_hint.saturating_sub(seen.len()));
-        out.reserve(capacity_hint.saturating_sub(out.len()));
-        v1_scope_entries(
-            ws,
-            frag,
-            visible_bindings,
-            expr_position,
-            pfx,
-            show_private,
-            &mut seen,
-            &mut out,
-        );
-    }
-    for m in ws.modules.iter().filter(|_| v1.is_none()) {
-        // Test-scoped iff defined under a `tests/` path segment or
-        // `test_`-named -- the facade demotes these outside test files.
-        let m_test = is_test_path(m.file.as_str());
-        let scoped = |n: &str| m_test || n.starts_with("test_");
-        for (name, fns) in m.functions_by_name.iter() {
-            if !expr_position {
-                break;
-            }
-            if !matches(name.as_str()) {
-                continue;
-            }
-            if !seen.insert(*name) {
-                continue;
-            }
-            let first = fns
-                .first()
-                .map(|(fmid, fid)| &ws.modules[fmid.index()].functions[*fid]);
-            out.push(CompletionEntry {
-                name: *name,
-                kind: SymCat::Function,
-                // Signature `detail` is deferred to the caller and materialized
-                // (from `BoneProject::fn_sigs`) only for the post-cap survivors,
-                // not rendered or cloned for every workspace function here.
-                detail: None,
-                signature_key: Some(*name),
-                variant_enum_key: None,
-                ty: None,
-                takes_params: first.is_some_and(|f| !f.param_decls.is_empty()),
-                variant_shape: None,
-                test_scoped: scoped(name.as_str()),
-                def_file: m.file,
-                rec: 0,
-            });
-        }
-        for name in m.struct_by_name.keys() {
-            if matches(name.as_str()) && seen.insert(*name) {
-                out.push(CompletionEntry {
-                    name: *name,
-                    kind: SymCat::Struct,
-                    detail: None,
-                    signature_key: None,
-                    variant_enum_key: None,
-                    ty: None,
-                    takes_params: false,
-                    variant_shape: None,
-                    test_scoped: scoped(name.as_str()),
-                    def_file: m.file,
-                    rec: 0,
-                });
-            }
-        }
-        // A user enum in an expression slot is offered as its qualified
-        // `Enum::Variant` values (matched by a fuzzy subsequence so typing the
-        // variant name -- not the enum -- still surfaces it), and the bare enum
-        // is suppressed. In a type slot (or for a stdlib/builtin enum, whose `<..>`
-        // file id starts with `<`), the bare `Enum` name is offered as before.
-        let user_module = !m.file.as_str().starts_with('<');
-        for (name, idx) in m.enums_by_name.iter() {
-            if expr_position && user_module {
-                for v in m.enums[*idx].variants.iter() {
-                    let qualified = format!("{name}::{}", v.name);
-                    let qn = ustr::Ustr::from(qualified.as_str());
-                    // Clean-match the VARIANT NAME (what the user types, `nog` ->
-                    // NotGround -- camelCase-aware) or the qualified form (a
-                    // `tarnog` Enum+variant query), dropping mid-word scatter.
-                    let vname = v.name.as_str();
-                    // Same soft-private gate as `matches`, against the
-                    // enum AND variant names.
-                    if (name.as_str().starts_with('_') || vname.starts_with('_')) && !show_private {
-                        continue;
-                    }
-                    let hit = pfx.is_empty()
-                        || crate::completion::match_policy::admit(vname.as_bytes(), pfx)
-                        || crate::completion::match_policy::admit(qualified.as_bytes(), pfx);
-                    if hit && seen.insert(qn) {
-                        out.push(CompletionEntry {
-                            name: qn,
-                            kind: SymCat::Variant,
-                            detail: Some(name.to_string()),
-                            signature_key: None,
-                            variant_enum_key: Some(*name),
-                            ty: None,
-                            takes_params: false,
-                            variant_shape: Some(VariantShape::of(&v.payload)),
-                            test_scoped: scoped(name.as_str()),
-                            def_file: m.file,
-                            rec: 0,
-                        });
-                    }
-                }
-            } else if matches(name.as_str()) && seen.insert(*name) {
-                out.push(CompletionEntry {
-                    name: *name,
-                    kind: SymCat::Enum,
-                    detail: None,
-                    signature_key: None,
-                    variant_enum_key: None,
-                    ty: None,
-                    takes_params: false,
-                    variant_shape: None,
-                    test_scoped: scoped(name.as_str()),
-                    def_file: m.file,
-                    rec: 0,
-                });
-            }
-        }
-        for name in m.newtypes_by_name.keys() {
-            if matches(name.as_str()) && seen.insert(*name) {
-                out.push(CompletionEntry {
-                    name: *name,
-                    kind: SymCat::Newtype,
-                    detail: None,
-                    signature_key: None,
-                    variant_enum_key: None,
-                    ty: None,
-                    takes_params: false,
-                    variant_shape: None,
-                    test_scoped: scoped(name.as_str()),
-                    def_file: m.file,
-                    rec: 0,
-                });
-            }
-        }
-        for (name, gidx) in m.global_by_name.iter() {
-            if !expr_position {
-                break;
-            }
-            if matches(name.as_str()) && seen.insert(*name) {
-                // Carry the rendered type in `detail` -- both for the inline
-                // `: type` hint and so arg-position ranking can recognise a
-                // global of the expected type (bucket 0).
-                let ty = ws.render(None, m.globals[*gidx].ty);
-                out.push(CompletionEntry {
-                    name: *name,
-                    kind: SymCat::Global,
-                    detail: (!ty.is_empty()).then_some(ty),
-                    signature_key: None,
-                    variant_enum_key: None,
-                    ty: Some(m.globals[*gidx].ty),
-                    takes_params: false,
-                    variant_shape: None,
-                    test_scoped: scoped(name.as_str()),
-                    def_file: m.file,
-                    rec: 0,
-                });
-            }
-        }
-    }
-
+    let capacity_hint = seen
+        .len()
+        .saturating_add(visible_bindings.map_or(0, |bindings| bindings.len()));
+    seen.reserve(capacity_hint.saturating_sub(seen.len()));
+    out.reserve(capacity_hint.saturating_sub(out.len()));
+    v1_scope_entries(
+        ws,
+        frag,
+        visible_bindings,
+        expr_position,
+        pfx,
+        show_private,
+        &mut seen,
+        &mut out,
+    );
     // Builtin type names, in a TYPE slot only. `Coroutine`/`Map` are compiler
     // builtins with no entry in the workspace name-index, and the scalar
     // primitives aren't nominal types at all -- neither flows through the loops
@@ -5353,14 +5138,11 @@ pub(crate) fn render_fn_signature(
 /// canonical key; workspace-local IDs are looked up after selection.
 pub(crate) fn render_deferred_signature(
     ws: &Workspace,
-    fragment_file: Option<Ustr>,
+    fragment_file: Ustr,
     key: Ustr,
     display_name: Ustr,
 ) -> Option<String> {
-    let frag = match fragment_file {
-        Some(file) => Some(crate::modules_scope::fragment(ws, file)?),
-        None => None,
-    };
+    let frag = crate::modules_scope::fragment(ws, fragment_file)?;
     let (mid, fid) = first_callable_in_scope(ws, frag, key)?;
     Some(render_fn_signature(
         ws,
@@ -5532,7 +5314,7 @@ pub fn signature_help(
     sources: Option<&SourceMap>,
 ) -> Option<(Vec<SignatureEntry>, Span)> {
     let module = ws.modules.get(mid.index())?;
-    let frag = ws.fragment_scopes.get(&module.file);
+    let frag = crate::modules_scope::fragment(ws, module.file)?;
     let owner = module.body_at(offset)?;
     let body = module.bodies.get(&owner)?;
 
@@ -5613,7 +5395,7 @@ fn functions_named(
     name: Ustr,
     sources: Option<&SourceMap>,
     recv_nominal: Option<Ustr>,
-    frag: Option<&bone_core::modules::FragmentScope>,
+    frag: &bone_core::modules::FragmentScope,
 ) -> Vec<SignatureEntry> {
     let mut all = Vec::new();
     let mut matched = Vec::new();

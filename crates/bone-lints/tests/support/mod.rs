@@ -5,7 +5,7 @@ pub fn parse(file: &str, source: &str) -> skull_parser::Ast {
     let mut module = skull_parser::parse_module_clean(source, Ustr::from(file)).expect("parse");
     module.package = Some(skull_parser::PackageTag {
         id: 1,
-        self_name: "$standalone$<lint>".to_string(),
+        self_name: "@/<lint>".to_string(),
         identity_storage: skull_parser::IdentityStorage::Exempt,
         root: String::new(),
     });

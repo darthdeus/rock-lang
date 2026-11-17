@@ -3,8 +3,6 @@
 //! `materialize_cand` -- the only place display strings are built. Tuning
 //! constants live here with the pipeline they cap.
 
-use std::collections::HashMap;
-
 use bone_semantic::prelude::Workspace;
 
 use lsp_types::{CompletionItem, CompletionItemKind, CompletionItemLabelDetails, InsertTextFormat};
@@ -271,8 +269,7 @@ pub(crate) fn cand_cmp(a: &Cand, b: &Cand) -> std::cmp::Ordering {
 pub(crate) fn materialize_cand(
     cand: Cand,
     ws: &Workspace,
-    fragment_file: Option<ustr::Ustr>,
-    fn_sigs: &HashMap<ustr::Ustr, String>,
+    fragment_file: ustr::Ustr,
     strip_call: bool,
     pattern: bool,
 ) -> CompletionItem {
@@ -281,22 +278,15 @@ pub(crate) fn materialize_cand(
         CandShape::Entry(c) => {
             let name = bone_core::modules::display_name(c.name.as_str());
             // Function/global detail is materialized HERE for survivors only.
-            // User requests resolve the exact accessible overload; synthetic
-            // module queries use the cached signature. Other kinds carry detail already.
+            // Resolve the exact accessible overload under the request's scope.
             let detail = match c.kind {
                 // `name` is presentation spelling and may be an imported
                 // alias. Every function candidate carries its canonical HIR
                 // key, so falling back to the spelling could show an
                 // unrelated same-named function if the cache ever drifted.
                 SymCat::Function => c.detail.or_else(|| {
-                    c.signature_key.and_then(|key| match fragment_file {
-                        Some(fragment_file) => crate::query::render_deferred_signature(
-                            ws,
-                            Some(fragment_file),
-                            key,
-                            c.name,
-                        ),
-                        None => fn_sigs.get(&key).cloned(),
+                    c.signature_key.and_then(|key| {
+                        crate::query::render_deferred_signature(ws, fragment_file, key, c.name)
                     })
                 }),
                 SymCat::Global => c.detail.or_else(|| {

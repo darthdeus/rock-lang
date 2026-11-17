@@ -104,7 +104,7 @@ fn reparse(file: ustr::Ustr, sources: &SourceFiles) -> Result<Ast, CompilerError
             CompilerError::new_no_location(format!("type_holes: no source loaded for {file}"))
         })?;
     let source = source.borrow();
-    skull_parser::parse_module_with_dialect(&source.contents, file, source.dialect)
+    skull_parser::parse_module(&source.contents, file)
 }
 
 fn check_items(

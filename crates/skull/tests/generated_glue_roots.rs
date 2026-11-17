@@ -16,6 +16,7 @@ use crate::common::{
     self, V1Fragment, definition_symbols, emit_v1_package, fn_ref, module_id, ws_v1_package,
     ws_with_dependency_module, ws_with_stdlib_module,
 };
+use skull::instance_graph::{SiteOp, SiteOutcome};
 use skull::mir_emit::emit_full;
 use skull_mir::instance::Instance;
 use ustr::Ustr;
@@ -277,6 +278,15 @@ fn shader_glue_dependencies_are_retained_through_the_view() {
     for d in deps {
         let i = Instance::base(d);
         let name = ws.module(d.module).functions[d.func].name.as_str();
+        assert!(
+            !cache.graph().call_sites().any(|(_, sites)| {
+                sites.iter().any(|(site, record)| {
+                    matches!(&site.op, SiteOp::DirectCall)
+                        && matches!(&record.outcome, SiteOutcome::Resolved(target) if target == &i)
+                })
+            }),
+            "passing shader entry {name:?} as a shader argument must not make it a host call"
+        );
         assert!(
             !view.retains(&i),
             "no CPU code calls stage entry {name:?}, so Lua must not define it"

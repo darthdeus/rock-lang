@@ -337,9 +337,8 @@ fn load_project_sources(files: &[PathBuf], project_dir: Option<&Path>) -> Result
 
     let mut sources = load_sources_from_paths(&all_files)?;
 
-    // Stamp package and dialect facts from the graph onto every file
-    // it owns, so downstream consumers (parser dialect selection,
-    // module scoping) never infer ownership from inclusion order.
+    // Stamp package facts from the graph onto every file it owns, so
+    // downstream consumers never infer ownership from inclusion order.
     if let Some(graph) = graph.as_ref() {
         sources.set_package_roots(
             graph

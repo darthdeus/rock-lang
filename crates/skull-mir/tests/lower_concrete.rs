@@ -25,7 +25,7 @@ fn coroutine_flat_refs_keep_a_defensive_lowering_diagnostic() {
             .module(mid)
             .functions
             .iter()
-            .find(|(_, f)| f.name == "main")
+            .find(|(_, f)| f.name == key(&ws, "main"))
             .unwrap();
         for backend in [
             bone_core::hir::FnBackend::Lua,
@@ -70,7 +70,7 @@ fn checked_compound_assignments_only_keep_safe_navigation_targets() {
     let (fid, _) = module
         .functions
         .iter()
-        .find(|(_, f)| f.name == "update")
+        .find(|(_, f)| f.name == key(&ws, "update"))
         .unwrap();
     let body = &module.bodies[&bone_core::hir::BodyOwner::Function(fid)];
     let targets: Vec<_> = body
@@ -144,7 +144,7 @@ fn nested_first_class_field_updates_rebuild_every_parent() {
         .module(mid)
         .functions
         .iter()
-        .find(|(_, f)| f.name == "update")
+        .find(|(_, f)| f.name == key(&ws, "update"))
         .unwrap();
     let mir = lower_test_root_with_context(&ws, mid, fid, ScalarCtx::new_values_first_class(&ws))
         .expect("nested first-class update lowers before the shader profile gate");

@@ -47,7 +47,7 @@ fn substituted_identity_in_a_vec_is_rejected() {
     let r = identity_rejections(STASH);
     assert_eq!(r.len(), 1, "{r:?}");
     assert!(
-        r[0].contains("stash") && r[0].contains("`$standalone$<test>::Unit`"),
+        r[0].contains("stash") && r[0].contains("`@/<test>::Unit`"),
         "{r:?}"
     );
 }
@@ -131,8 +131,7 @@ fn main() {
     );
     assert_eq!(r.len(), 1, "{r:?}");
     assert!(
-        r[0].contains("erase")
-            && r[0].contains("cannot erase identity struct `$standalone$<test>::Unit`"),
+        r[0].contains("erase") && r[0].contains("cannot erase identity struct `@/<test>::Unit`"),
         "{r:?}"
     );
 }
@@ -158,7 +157,7 @@ fn main() {
     assert_eq!(r.len(), 1, "{r:?}");
     assert!(
         r[0].contains("__probe_erase")
-            && r[0].contains("cannot erase identity struct `$standalone$<test>::Unit`"),
+            && r[0].contains("cannot erase identity struct `@/<test>::Unit`"),
         "{r:?}"
     );
 }

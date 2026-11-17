@@ -13,12 +13,8 @@ fn workspace(source: &str) -> Workspace {
             .expect("stdlib parse")
         })
         .collect();
-    let mut module = skull_parser::parse_module_clean_with_dialect(
-        source,
-        ustr::Ustr::from("<test>"),
-        skull_parser::Dialect::V1,
-    )
-    .expect("fixture parse");
+    let mut module = skull_parser::parse_module_clean(source, ustr::Ustr::from("<test>"))
+        .expect("fixture parse");
     module.package = Some(skull_parser::PackageTag {
         id: 0,
         self_name: "app".to_string(),

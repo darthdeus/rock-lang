@@ -111,12 +111,9 @@ fn last_path_separator(key: &str) -> Option<usize> {
 /// shared mangler must also satisfy.
 /// [`collision_errors`] rejects a residual collision either way.
 pub fn ident_of_key(key: &str) -> std::borrow::Cow<'_, str> {
-    if let Some(standalone) = key.strip_prefix(bone_core::modules::STANDALONE_PACKAGE_PREFIX) {
-        if let Some((_, name)) = standalone.split_once("::") {
-            if !name.contains("::") {
-                return std::borrow::Cow::Borrowed(name);
-            }
-        }
+    let artifact = bone_core::modules::artifact_name(key);
+    if artifact != key {
+        return std::borrow::Cow::Borrowed(artifact);
     }
     match last_path_separator(key) {
         None => std::borrow::Cow::Borrowed(key),
@@ -587,12 +584,8 @@ pub fn collision_errors_of<'a>(
 #[cfg(test)]
 mod tests {
     fn named_package_workspace(src: &str) -> bone_core::workspace::Workspace {
-        let mut ast = skull_parser::parse_module_clean_with_dialect(
-            src,
-            ustr::Ustr::from("operators.rock"),
-            skull_parser::Dialect::V1,
-        )
-        .expect("parse");
+        let mut ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("operators.rock"))
+            .expect("parse");
         ast.package = Some(skull_parser::PackageTag {
             id: 1,
             self_name: "image_package".to_string(),
@@ -603,68 +596,48 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_newtype_operator_keeps_its_bare_base_symbol_in_a_named_package() {
-        let ws = named_package_workspace("newtype Image(int)");
-        let add = ws
-            .modules
-            .iter()
-            .flat_map(|module| module.functions.iter().map(|(_, function)| function))
-            .find(|function| {
-                function.is_synthetic && super::declared_name(function.name.as_str()) == "__op_add"
-            })
-            .expect("synthesized Image addition operator");
-        let image = ws
-            .defs
-            .iter()
-            .find_map(|(key, meta)| (meta.name.as_str() == "Image").then_some(*key))
-            .expect("Image definition");
-        let image_symbol = super::ident_of_key(image.as_str());
-
-        assert_eq!(
-            super::mangle_fn(&ws, add),
-            format!("__op_add_{image_symbol}_{image_symbol}")
+    fn operator_base_symbols_keep_their_declared_identity() {
+        let ws = named_package_workspace(
+            "newtype Image(int)\noperator +(a: int, b: int) -> int { return a }",
         );
+        let functions = &ws.functions_by_name[&ustr::ustr("image_package::__op_add")];
+        let add = functions
+            .iter()
+            .map(|&(module, id)| &ws.module(module).functions[id])
+            .collect::<Vec<_>>();
+        let synthetic = add
+            .iter()
+            .find(|f| f.is_synthetic)
+            .expect("newtype operator");
+        let user = add.iter().find(|f| !f.is_synthetic).expect("user operator");
+
+        let image = super::ident_of_key("image_package::Image");
+        let synthetic_symbol = super::mangle_fn(&ws, synthetic);
+        let user_symbol = super::mangle_fn(&ws, user);
+        assert_eq!(synthetic_symbol, format!("__op_add_{image}_{image}"));
+        assert_eq!(
+            user_symbol,
+            format!("{}_int_int", super::ident_of_name(user.name))
+        );
+        assert_ne!(synthetic_symbol, user_symbol);
     }
 
     #[test]
-    fn user_defined_primitive_operator_keeps_its_package_qualified_base_symbol() {
-        let ws = named_package_workspace("operator +(a: int, b: int) -> int { return a }");
-        let add = ws
-            .modules
-            .iter()
-            .flat_map(|module| module.functions.iter().map(|(_, function)| function))
-            .find(|function| {
-                !function.is_synthetic && super::declared_name(function.name.as_str()) == "__op_add"
-            })
-            .expect("user-defined integer addition operator");
-        let qualified_base = super::ident_of_name(add.name).to_string();
-
-        assert_eq!(
-            super::mangle_fn(&ws, add),
-            format!("{qualified_base}_int_int")
-        );
-    }
-
-    #[test]
-    fn standalone_type_identity_and_artifact_spelling_have_distinct_roles() {
-        let a = nominal("$standalone$a.rock::P", vec![]);
-        let b = nominal("$standalone$b.rock::P", vec![]);
+    fn standalone_types_and_root_symbols_keep_their_file_identity() {
+        let prefix = bone_core::modules::STANDALONE_PACKAGE_PREFIX;
+        let a_name = format!("{prefix}a.rock::P");
+        let b_name = format!("{prefix}b.rock::P");
+        let a = nominal(&a_name, vec![]);
+        let b = nominal(&b_name, vec![]);
         assert_ne!(a.canonical(), b.canonical());
         assert_eq!(a.artifact_key(), nominal("P", vec![]).canonical());
-        let child = nominal("$standalone$a.rock::child::P", vec![]);
+        let child_name = format!("{prefix}a.rock::child::P");
+        let child = nominal(&child_name, vec![]);
         assert_eq!(child.artifact_key(), child.canonical());
-    }
-
-    #[test]
-    fn standalone_root_symbols_keep_the_declared_spelling() {
-        assert_eq!(
-            super::ident_of_key("$standalone$script.rock::helper"),
-            "helper"
-        );
-        assert_ne!(
-            super::ident_of_key("$standalone$script.rock::child::helper"),
-            "helper"
-        );
+        let root_name = format!("{prefix}script.rock::helper");
+        assert_eq!(super::ident_of_key(&root_name), "helper");
+        let nested_name = format!("{prefix}script.rock::child::helper");
+        assert_ne!(super::ident_of_key(&nested_name), "helper");
     }
 
     use super::encode_mono_type;

@@ -97,8 +97,6 @@ pub(crate) struct NamedArgSlot {
 enum RecordHead {
     /// (name, name-ident end offset)
     Struct(String, usize),
-    /// (enum, variant, variant-ident end offset)
-    EnumVariant(String, String, usize),
     /// A qualified record literal. The resolver decides whether the final
     /// two path segments are an enum variant or the full path names a struct.
     Path(Vec<String>, usize),
@@ -112,9 +110,7 @@ fn enum_path_names(path: &Path) -> Option<(&skull_parser::ast::Ident, &skull_par
 impl RecordHead {
     fn end(&self) -> usize {
         match self {
-            RecordHead::Struct(_, e)
-            | RecordHead::EnumVariant(_, _, e)
-            | RecordHead::Path(_, e) => *e,
+            RecordHead::Struct(_, e) | RecordHead::Path(_, e) => *e,
         }
     }
 }
@@ -277,31 +273,10 @@ impl CursorAst {
     }
 
     /// `Enum::<cursor>` -- the qualified base when the cursor sits in the
-    /// member slot. Qualified identifiers and enum patterns produce it:
-    /// - `QualifiedIdent` in value expressions,
-    /// - EnumVariant/Record patterns (match arms, if/while-let), which live
-    ///   outside the exprs arena.
+    /// member slot. Qualified paths and enum patterns produce it.
     pub(crate) fn qualified_base(&self) -> Option<String> {
         if let Some(node) = self.expr_chain().first().copied() {
             match &self.expr(node).kind {
-                ExprKind::QualifiedIdent { base, member } => {
-                    if member.span.offset_range().0 <= self.probe {
-                        return Some(base.name.to_string());
-                    }
-                }
-                // Cursor mid-variant-ident: the munge glues the sentinel into
-                // one identifier, so the record literal parses whole and the
-                // record node itself is the innermost expr at the cursor.
-                ExprKind::EnumVariantRecord {
-                    enum_name,
-                    variant_name,
-                    ..
-                } => {
-                    let (s, e) = variant_name.span.offset_range();
-                    if s <= self.probe && self.probe < e {
-                        return Some(enum_name.name.to_string());
-                    }
-                }
                 ExprKind::Path { path, .. } | ExprKind::PathStructLiteral { path, .. } => {
                     if let Some((base, variant)) = enum_path_names(path)
                         && path.segments.len() == 2
@@ -330,22 +305,10 @@ impl CursorAst {
                         walk(sub, f);
                     }
                 }
-                Pattern::EnumVariant {
-                    args: Some(args), ..
-                } => {
-                    for sub in args {
-                        walk(sub, f);
-                    }
-                }
                 Pattern::PathVariant {
                     args: Some(args), ..
                 } => {
                     for sub in args {
-                        walk(sub, f);
-                    }
-                }
-                Pattern::Record { fields, .. } => {
-                    for (_, sub) in fields {
                         walk(sub, f);
                     }
                 }
@@ -386,30 +349,14 @@ impl CursorAst {
         let off = self.probe;
         let mut found = None;
         self.walk_patterns(&mut |p| {
-            let (base, vname) = match p {
-                Pattern::EnumVariant {
-                    enum_name: Some(base),
-                    variant_name,
-                    ..
-                } => (base, variant_name),
-                Pattern::Record {
-                    enum_name: Some(base),
-                    name: Some(vname),
-                    ..
-                } => (base, vname),
-                Pattern::PathVariant { path, .. } | Pattern::PathRecord { path, .. } => {
-                    let Some((base, variant)) = enum_path_names(path) else {
-                        return;
-                    };
-                    let (s, e) = variant.span.offset_range();
-                    if s <= off && off < e {
-                        found = Some(base.name.to_string());
-                    }
-                    return;
-                }
+            let path = match p {
+                Pattern::PathVariant { path, .. } | Pattern::PathRecord { path, .. } => path,
                 _ => return,
             };
-            let (s, e) = vname.span.offset_range();
+            let Some((base, variant)) = enum_path_names(path) else {
+                return;
+            };
+            let (s, e) = variant.span.offset_range();
             if s <= off && off < e {
                 found = Some(base.name.to_string());
             }
@@ -422,31 +369,13 @@ impl CursorAst {
     fn pattern_record(&self) -> Option<(String, String)> {
         let mut found = None;
         self.walk_patterns(&mut |p| {
-            let Pattern::Record {
-                enum_name: Some(base),
-                name: Some(vname),
-                ..
-            } = p
-            else {
-                let Pattern::PathRecord { path, .. } = p else {
-                    return;
-                };
-                let Some((base, variant)) = enum_path_names(path) else {
-                    return;
-                };
-                let ve = variant.span.offset_range().1;
-                let Some(brace) = self.text[ve..].find('{').map(|i| ve + i) else {
-                    return;
-                };
-                let Some(close) = matching_brace(self.text.as_bytes(), brace) else {
-                    return;
-                };
-                if brace < self.probe && self.probe <= close {
-                    found = Some((base.name.to_string(), variant.name.to_string()));
-                }
+            let Pattern::PathRecord { path, .. } = p else {
                 return;
             };
-            let ve = vname.span.offset_range().1;
+            let Some((base, variant)) = enum_path_names(path) else {
+                return;
+            };
+            let ve = variant.span.offset_range().1;
             let Some(brace) = self.text[ve..].find('{').map(|i| ve + i) else {
                 return;
             };
@@ -454,7 +383,7 @@ impl CursorAst {
                 return;
             };
             if brace < self.probe && self.probe <= close {
-                found = Some((base.name.to_string(), vname.name.to_string()));
+                found = Some((base.name.to_string(), variant.name.to_string()));
             }
         });
         found
@@ -492,39 +421,28 @@ impl CursorAst {
         })
     }
 
-    /// Enclosing record literal (struct literal or `Enum::Variant { .. }`)
-    /// with the cursor inside its BRACES, innermost first. `value_field` is
+    /// Enclosing record literal with the cursor inside its BRACES, innermost
+    /// first. `value_field` is
     /// set when the cursor sits in a field's VALUE expr (not a pun -- a pun's
     /// "value" is the written field name itself, i.e. a NAME slot).
     fn record_ctx(&self) -> Option<RecordCtx> {
         for &node in self.expr_chain().iter() {
             let (head, fields) = match &self.expr(node).kind {
-                ExprKind::StructLiteral { name, fields, .. } => (
-                    RecordHead::Struct(name.name.to_string(), name.span.offset_range().1),
-                    fields,
-                ),
-                ExprKind::EnumVariantRecord {
-                    enum_name,
-                    variant_name,
-                    fields,
-                } => (
-                    RecordHead::EnumVariant(
-                        enum_name.name.to_string(),
-                        variant_name.name.to_string(),
-                        variant_name.span.offset_range().1,
-                    ),
-                    fields,
-                ),
-                ExprKind::PathStructLiteral { path, fields, .. } => (
-                    RecordHead::Path(
-                        path.segments
-                            .iter()
-                            .map(|segment| segment.name.to_string())
-                            .collect(),
-                        path.segments.last()?.span.offset_range().1,
-                    ),
-                    fields,
-                ),
+                ExprKind::PathStructLiteral { path, fields, .. } => {
+                    let end = path.segments.last()?.span.offset_range().1;
+                    let head = if path.segments.len() == 1 && !path.from_root {
+                        RecordHead::Struct(path.segments[0].name.to_string(), end)
+                    } else {
+                        RecordHead::Path(
+                            path.segments
+                                .iter()
+                                .map(|segment| segment.name.to_string())
+                                .collect(),
+                            end,
+                        )
+                    };
+                    (head, fields)
+                }
                 _ => continue,
             };
             let head_end = head.end();
@@ -566,7 +484,7 @@ impl CursorAst {
         }
         match c.head {
             RecordHead::Struct(name, _) => Some((name, c.brace)),
-            RecordHead::EnumVariant(..) | RecordHead::Path(..) => None,
+            RecordHead::Path(..) => None,
         }
     }
 
@@ -576,7 +494,6 @@ impl CursorAst {
     /// field names are just as completable.
     pub(crate) fn enum_record(&self) -> Option<(String, String)> {
         match self.record_ctx().map(|c| c.head) {
-            Some(RecordHead::EnumVariant(e, v, _)) => Some((e, v)),
             Some(RecordHead::Path(path, _)) if path.len() >= 2 => {
                 Some((path[path.len() - 2].clone(), path[path.len() - 1].clone()))
             }
@@ -594,7 +511,7 @@ impl CursorAst {
                 let (field, is_lambda) = c.value_field?;
                 match c.head {
                     RecordHead::Struct(name, _) => Some((name, field, is_lambda)),
-                    RecordHead::EnumVariant(..) | RecordHead::Path(..) => None,
+                    RecordHead::Path(..) => None,
                 }
             }
             // A struct DECL field's default expr type-directs the same way.
@@ -785,8 +702,8 @@ impl CursorAst {
         };
         match &self.expr(*func).kind {
             ExprKind::Ident(id) => Some((id.name.to_string(), pos as u32, None)),
-            ExprKind::QualifiedIdent { member, .. } => {
-                Some((member.name.to_string(), pos as u32, None))
+            ExprKind::Path { path, .. } => {
+                Some((path.segments.last()?.name.to_string(), pos as u32, None))
             }
             ExprKind::FieldAccess(recv, method) | ExprKind::SafeNavigation(recv, method) => {
                 let recv_end = self.expr(*recv).span.offset_range().1;
@@ -873,7 +790,7 @@ impl CursorAst {
         };
         let callee = match &self.expr(*func).kind {
             ExprKind::Ident(id) => id.name.to_string(),
-            ExprKind::QualifiedIdent { member, .. } => member.name.to_string(),
+            ExprKind::Path { path, .. } => path.segments.last()?.name.to_string(),
             _ => return None,
         };
         let mut positional = 0usize;
@@ -1148,9 +1065,8 @@ mod gaps {
     }
 
     #[test]
-    fn qualified_base_in_a_record_variant_literal() {
-        // `Effect::|Bandage { .. }` parses as an EnumVariantRecord EXPR --
-        // needs its own arm (neither QualifiedIdent nor a pattern).
+    fn qualified_base_in_a_path_record_literal() {
+        // `Effect::|Bandage { .. }` is a path expression, not a pattern.
         let (_, _, cx) = cx("enum E { B { d: int } }\nfn t() {\n  let v = E::$0B { d: 1 }\n}\n");
         assert_eq!(cx.qualified_base(), Some("E".to_string()));
     }
@@ -1200,8 +1116,8 @@ mod gaps {
     #[test]
     fn qualified_base_mid_variant_ident_in_record_literal() {
         // Cursor MID-ident glues the sentinel into one identifier
-        // (`B__rock_completion__andaging`), which parses CLEAN as an
-        // EnumVariantRecord expression. Needs its own arm.
+        // (`B__rock_completion__andaging`), which parses CLEAN as a path
+        // record expression.
         let (_, _, cx) = cx(
             "enum E { B { d: int, h: int } }\nfn t(h: int) {\n  let v = E::B$0andaging { d: 1, h }\n}\n",
         );

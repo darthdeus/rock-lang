@@ -15,7 +15,7 @@ fn check_and_lint_report_a_duplicate_decorator_once() {
         assert_eq!(
             output
                 .lines()
-                .filter(|line| line.contains("Error: duplicate definition of decorator `reg`"))
+                .filter(|line| line.contains("Error: duplicate definition `reg` in module `<root>`"))
                 .count(),
             1,
             "{command}: {output}"

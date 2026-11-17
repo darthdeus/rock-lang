@@ -86,7 +86,7 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
         rock_host::program_inputs::ns_aliases_for_selected_sources(
             modules
                 .iter()
-                .map(|m| (m.file.as_str(), m.dialect, m.package.as_ref())),
+                .map(|m| (m.file.as_str(), m.package.as_ref())),
             self.sources.ns_aliases.as_ref(),
         )
     }
@@ -1435,9 +1435,8 @@ fn is_rock_test_source(path: &std::path::Path) -> bool {
 /// compiled through its own manifest, and the walk does not descend into it.
 ///
 /// Building a package's sources as loose files drops the manifest that supplies
-/// their dialect and their dependencies, so a v1 source is parsed in the legacy
-/// dialect and fails with `unsupported item start` -- an emit failure that says
-/// nothing about the package it came from. The ownership rule: a nested
+/// their ownership and dependencies, so package-scoped names fail to resolve --
+/// an emit failure that says nothing about the package they came from. The ownership rule: a nested
 /// manifest starts a different package and is not absorbed as
 /// source of the tree above it.
 ///
@@ -1780,11 +1779,7 @@ pub(crate) fn skull_shader(
         }
     };
     let src = source.contents;
-    let mut user = match skull_parser::parse_module_with_dialect(
-        &src,
-        ustr::Ustr::from(path.as_str()),
-        source.dialect,
-    ) {
+    let mut user = match skull_parser::parse_module(&src, ustr::Ustr::from(path.as_str())) {
         Ok(u) => u,
         Err(e) => {
             eprintln!("{}", render_file_errs(path, &src, &[e]));

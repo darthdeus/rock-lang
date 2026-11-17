@@ -421,13 +421,6 @@ impl NsTree {
         self.package(STD_PACKAGE_ID)?.node(root_key())
     }
 
-    /// Whether a function lowered from `file` belongs to a family member
-    /// owned by `owner` ([`crate::hir::FamilyMember`]): only the std view
-    /// owns bare-keyed members, and it owns the stdlib files.
-    pub fn owns_file(&self, owner: PackageId, file: Ustr) -> bool {
-        owner == STD_PACKAGE_ID && is_stdlib_module_file(file.as_str())
-    }
-
     /// Look up one member of the compiler-owned default export view.
     pub fn std_definition(&self, name: Ustr) -> Option<(Ustr, DefKind)> {
         self.std_root()?.owned(name)

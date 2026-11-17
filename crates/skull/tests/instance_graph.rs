@@ -2,7 +2,7 @@
 //!.
 
 use crate::common::{
-    body_id, emit_full_of, fn_name, fn_ref, key, name_matches, ws_and_graph, ws_of, ws_with_stdlib,
+    body_id, emit_full_of, fn_name, fn_ref, key, name_matches, ws_and_graph, ws_with_stdlib,
 };
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::{self, Instance, Site, SiteOp, SiteOutcome};
@@ -1426,16 +1426,24 @@ fn main() {{ let a = keep(1) }}
 /// `@nomangle` generic sharing a catalogue name is not that entry when another
 /// declaration shares the name too.
 ///
-/// The stdlib's own runtime entries are all non-generic, so the fixture builds
-/// without the stdlib and declares the generic entry itself. A/B on exactly
-/// that, one fixture differing only by a shadowing overload: alone, the entry
-/// is what the resolver selects and is excused; with the overload the resolver
-/// is ambiguous -- what `stdlib_funcref` itself rejects on -- so nothing is
-/// excused and the obligation stands.
+/// The stdlib's own runtime entries are all non-generic, so the fixture loads
+/// no stdlib declarations and marks its one synthetic source as compiler-owned.
+/// A/B on exactly that, one fixture differing only by a shadowing overload:
+/// alone, the entry is what the resolver selects and is excused; with the
+/// overload the resolver is ambiguous -- what `stdlib_funcref` itself rejects
+/// on -- so nothing is excused and the obligation stands.
 #[test]
 fn the_funcref_excusal_follows_the_declaration_not_the_name() {
     let entry = "@nomangle fn __rock_col_sort<T>(x: T) -> int { return 1 }\nfn main() { }\n";
-    let plain = crate::common::graph_of(&ws_of(entry));
+    let graph = |src: &str| {
+        let file = rock_stdlib::stdlib_file_id("funcref-test");
+        let module = skull_parser::parse_module_clean(src, ustr::Ustr::from(file.as_str()))
+            .expect("parse compiler-owned fixture");
+        let ws =
+            bone_semantic::semantic_passes::semantic_pass(&mut [module]).expect("semantic pass");
+        crate::common::graph_of(&ws)
+    };
+    let plain = graph(entry);
     assert!(
         plain
             .excused_generic_roots
@@ -1451,9 +1459,9 @@ fn the_funcref_excusal_follows_the_declaration_not_the_name() {
         plain.uninstantiated_roots.keys()
     );
 
-    let shadowed = crate::common::graph_of(&ws_of(&format!(
+    let shadowed = graph(&format!(
         "{entry}@nomangle fn __rock_col_sort<T>(x: T, y: T) -> int {{ return 2 }}\n"
-    )));
+    ));
     assert!(
         shadowed
             .uninstantiated_roots

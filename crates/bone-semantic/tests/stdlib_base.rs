@@ -1,7 +1,5 @@
-//! The batch semantic pass reuses the stdlib checked once per process when no
-//! user module can change it, and that reuse is invisible in the result.
-
-use std::sync::atomic::Ordering;
+//! The incremental stdlib base matches a combined pass, while the one-shot
+//! semantic pass leaves the cached parse trees unchanged.
 
 use bone_semantic::prelude::*;
 use bone_semantic::semantic_passes::{semantic_pass_into, semantic_pass_without_closure_gate};
@@ -13,11 +11,6 @@ fn user_module(user: &str) -> skull_parser::Ast {
 
 fn with_stdlib(user: &str) -> ModuleSet {
     ModuleSet::with_stdlib([user_module(user)]).expect("stdlib parses")
-}
-
-fn reused(ws: &Workspace) -> bool {
-    // A pass from the base lowers only the user module's bodies.
-    ws.relowered_body_count.load(Ordering::Relaxed) < 50
 }
 
 /// What lowering and inference recorded, rendered per module. Session facts
@@ -62,15 +55,14 @@ fn sorted(items: impl Iterator<Item = String>) -> Vec<String> {
     items
 }
 
-/// Check `user` both ways; return whether the base served it.
-fn assert_same_as_combined(user: &str) -> bool {
+/// Check `user` through the ModuleSet and combined-pass entry points.
+fn assert_same_as_combined(user: &str) {
     let mut combined = with_stdlib(user).into_vec();
     let expected = semantic_pass_into(Workspace::default(), &mut combined, &Default::default())
         .map(|ws| render(&ws))
         .map_err(|e| e.message);
     let mut modules = with_stdlib(user);
     let pass = semantic_pass_without_closure_gate(&mut modules, &Default::default());
-    let was_reused = pass.as_ref().is_ok_and(reused);
     let actual = pass.map(|ws| render(&ws)).map_err(|e| e.message);
     match (&expected, &actual) {
         (Ok(e), Ok(a)) => {
@@ -81,27 +73,10 @@ fn assert_same_as_combined(user: &str) -> bool {
         }
         _ => assert_eq!(expected, actual, "for user module:\n{user}"),
     }
-    was_reused
 }
 
 #[test]
-fn a_user_module_apart_from_the_stdlib_reuses_it() {
-    let programs = [
-        "fn main() -> int { 1 + 2 }\n",
-        "fn print(x: int) {}\nfn main() { print(1) }\n",
-        "struct Vec2 { x: int }\nfn main() {}\n",
-    ];
-    for program in programs {
-        assert!(assert_same_as_combined(program), "not reused:\n{program}");
-    }
-
-    let mut modules = with_stdlib(programs[0]);
-    let ws = semantic_pass_without_closure_gate(&mut modules, &Default::default()).unwrap();
-    assert_eq!(ws.relowered_body_count.load(Ordering::Relaxed), 1);
-}
-
-#[test]
-fn reuse_matches_a_combined_pass() {
+fn module_set_pass_matches_a_combined_pass() {
     let programs = [
         "fn main() -> int { 1 + 2 }\n",
         "fn main() { let v = vec2(1.0, 2.0); let w = v + v; print(w.x) }\n",
@@ -111,77 +86,44 @@ fn reuse_matches_a_combined_pass() {
         "fn apply<T>(x: T, f: fn(T) -> T) -> T { f(x) }\nfn main() -> int { apply(1, |x| x + 1) }\n",
     ];
     for program in programs {
-        assert!(assert_same_as_combined(program), "not reused:\n{program}");
+        assert_same_as_combined(program);
     }
 }
 
 #[test]
-fn a_user_macro_the_stdlib_never_names_reuses_it() {
-    let programs = [
-        "macro twice(x: int) -> int { x + x }\nfn main() -> int { twice(2) }\n",
-        // Beside a stdlib macro call, and called through UFCS.
-        "macro twice(x: int) -> int { x + x }\nfn main() -> int { log_once(\"c\", \"m\")\n 3.twice() }\n",
-        // An expansion that fails reports the same way.
-        "macro twice(x: int) -> int { x + x }\nfn main() -> int { twice(\"s\") }\n",
-    ];
-    for program in programs {
-        assert!(assert_same_as_combined(program), "not reused:\n{program}");
-    }
-}
-
-#[test]
-fn a_user_module_that_can_reach_the_stdlib_lowers_with_it() {
-    let programs = [
-        // A user macro under a name a stdlib body calls could rewrite it.
-        "macro key(x: int) -> int { x + x }\nfn main() -> int { key(2) }\n",
-        // A user overload of a stdlib macro joins its overloads.
-        "macro log_once(msg: expr) { print(msg) }\nfn main() { log_once(\"m\") }\n",
-        // A user macro under a name expansion gives a renamed local.
-        "macro __inline_local_0_0_x(x: int) -> int { x }\nfn main() -> int { __inline_local_0_0_x(1) }\n",
-    ];
-    for program in programs {
-        assert!(!assert_same_as_combined(program), "reused:\n{program}");
-    }
-}
-
-#[test]
-fn only_the_shared_process_stdlib_is_reused() {
-    let program = "fn main() -> int { 1 + 2 }\n";
+fn the_retained_stdlib_base_matches_a_combined_pass() {
     let stdlib = skull_parser::stdlib::cached()
         .as_ref()
         .expect("stdlib parses");
-    // A copy equal to the process stdlib is not it: the base is recognized by
-    // identity, never by comparing trees.
-    let copy: std::sync::Arc<[skull_parser::Ast]> = stdlib.to_vec().into();
-    let mut modules = ModuleSet::new(copy, vec![user_module(program)]);
-    let ws = semantic_pass_without_closure_gate(&mut modules, &Default::default()).unwrap();
-    assert!(!reused(&ws));
-    // An owned stdlib prefix is lowered with the user module.
-    let mut modules = with_stdlib(program);
-    modules.make_owned();
-    let ws = semantic_pass_without_closure_gate(&mut modules, &Default::default()).unwrap();
-    assert!(!reused(&ws));
-    // The shared prefix itself is reused and left shared and untouched.
-    let mut modules = with_stdlib(program);
-    let ws = semantic_pass_without_closure_gate(&mut modules, &Default::default()).unwrap();
-    assert!(reused(&ws));
-    assert!(std::sync::Arc::ptr_eq(modules.shared(), stdlib));
+    let retained =
+        bone_semantic::stdlib_base::checked_alone(stdlib).expect("the process stdlib checks alone");
+    let mut batch_modules = stdlib.to_vec();
+    let batch = semantic_pass_into(
+        Workspace::default(),
+        &mut batch_modules,
+        &Default::default(),
+    )
+    .expect("combined stdlib pass");
+    assert_eq!(render(&retained), render(&batch));
 }
 
 #[test]
-fn a_fallback_pass_leaves_the_shared_stdlib_unexpanded() {
-    // A user macro the stdlib names forces the combined pass, which expands
-    // every module: the shared stdlib must be copied first, not edited in
-    // place.
+fn a_one_shot_pass_leaves_the_shared_stdlib_unexpanded() {
     let stdlib = skull_parser::stdlib::cached()
         .as_ref()
         .expect("stdlib parses");
-    let before = stdlib.iter().map(|ast| ast.items.len()).collect::<Vec<_>>();
+    let before = stdlib
+        .iter()
+        .map(|ast| ast.items.clone())
+        .collect::<Vec<_>>();
     let mut modules =
         with_stdlib("macro key(x: int) -> int { x + x }\nfn main() -> int { key(2) }\n");
     semantic_pass_without_closure_gate(&mut modules, &Default::default()).unwrap();
     assert!(modules.shared().is_empty());
-    let after = stdlib.iter().map(|ast| ast.items.len()).collect::<Vec<_>>();
+    let after = stdlib
+        .iter()
+        .map(|ast| ast.items.clone())
+        .collect::<Vec<_>>();
     assert_eq!(before, after);
 }
 
@@ -191,26 +133,29 @@ fn a_one_shot_pass_records_no_session_facts() {
     // node intervals for editor queries; a pass whose workspace no session
     // retains must not spend time recording them.
     let program = "fn helper(x: int) -> int { x }\nfn main() -> int { helper(1) }\n";
-    let user_probes = |ws: &Workspace| {
-        let module = ws
-            .modules
+    let session_facts = |ws: &Workspace| {
+        ws.modules
             .iter()
-            .find(|m| m.file.as_str() == "<test>")
-            .expect("user module");
-        let intervals: usize = module.bodies.values().map(|b| b.node_intervals.len()).sum();
-        module.scope_probes.len() + intervals
+            .map(|module| {
+                module.scope_probes.len()
+                    + module
+                        .bodies
+                        .values()
+                        .map(|body| body.node_intervals.len() + body.path_segments.len())
+                        .sum::<usize>()
+            })
+            .sum::<usize>()
     };
     let mut combined = with_stdlib(program).into_vec();
     let retained = semantic_pass_into(Workspace::default(), &mut combined, &Default::default());
-    assert!(user_probes(&retained.unwrap()) > 0);
-    // Both the reusing pass and the combined fallback.
+    assert!(session_facts(&retained.unwrap()) > 0);
+    // Both a shared and an already-owned input.
     for owned in [false, true] {
         let mut modules = with_stdlib(program);
         if owned {
             modules.make_owned();
         }
         let ws = semantic_pass_without_closure_gate(&mut modules, &Default::default()).unwrap();
-        assert_eq!(reused(&ws), !owned);
-        assert_eq!(user_probes(&ws), 0);
+        assert_eq!(session_facts(&ws), 0);
     }
 }

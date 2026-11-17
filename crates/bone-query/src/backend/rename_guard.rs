@@ -110,7 +110,7 @@ pub(super) fn check_unpinned<'t>(
                     members.iter().any(|member| member.key == name)
                         && members
                             .iter()
-                            .any(|member| member.owner == Some(bone_core::modules::STD_PACKAGE_ID))
+                            .any(|member| ws.ns.std_definition(member.key).is_some())
                 });
                 let names_it = merged_with_stdlib
                     || (shared_with_stdlib

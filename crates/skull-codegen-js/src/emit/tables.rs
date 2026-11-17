@@ -701,7 +701,7 @@ fn inline_view_expr(
     }
     Ok(Some(format!(
         "({tag} == null ? null : __rock_make_enum({tag}, {}, [{}]))",
-        js_string_lit(shape.name().as_str())?,
+        js_string_lit(skull_mir::mangle::type_symbol(ws, shape.name()).as_str())?,
         payload.join(", ")
     )))
 }

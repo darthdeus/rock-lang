@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use atomic_refcell::AtomicRefCell;
 use rock_core::{FileContents, SourceFile, SourceFiles};
 
@@ -96,32 +96,6 @@ pub fn production_only(
     Ok(sources.retaining(&keep))
 }
 
-/// Scan a file's leading `//!` directives for `modules: v1`. Package files
-/// take their dialect from the manifest via the package graph. Only the first
-/// ten lines count, mirroring `parse_lib_directive`.
-pub fn parse_modules_directive(contents: &str) -> Result<rock_core::source_code::Dialect> {
-    for line in contents.lines().take(10) {
-        let trimmed = line.trim_start();
-        let Some(rest) = trimmed.strip_prefix("//!") else {
-            continue;
-        };
-        let rest = rest.trim();
-        if let Some(value) = rest.strip_prefix("modules:") {
-            return match value.trim() {
-                "v1" => Ok(rock_core::source_code::Dialect::V1),
-                "legacy" => bail!(
-                    "`//! modules: legacy` has been removed; migrate this source to modules v1 and remove the directive"
-                ),
-                "" => Ok(rock_core::source_code::Dialect::V1),
-                other => {
-                    bail!("unknown `//! modules:` directive value `{other}` (known: v1)")
-                }
-            };
-        }
-    }
-    Ok(rock_core::source_code::Dialect::V1)
-}
-
 // The preprocessor always runs (to extract is_script/is_test/used_packages
 // flags), but `apply` controls whether its output replaces the raw contents.
 // Callers that format or display source pass `apply: false`; callers that
@@ -136,7 +110,9 @@ fn preprocess_content(contents: &str, apply: bool) -> Result<PreprocessedSource>
 
 fn create_source_file(file: FileContents, source: PreprocessedSource) -> Result<SourceFile> {
     // Package loaders overwrite the standalone default with the graph fact.
-    let dialect = parse_modules_directive(&source.content)?;
+    let file_id = file.to_id_path();
+    rock_core::source_code::validate_modules_directive(&source.content, ustr::Ustr::from(&file_id))
+        .map_err(anyhow::Error::msg)?;
     Ok(SourceFile {
         file,
         contents: source.content,
@@ -145,7 +121,6 @@ fn create_source_file(file: FileContents, source: PreprocessedSource) -> Result<
         is_test_util: source.is_test_util,
         used_packages: source.used_packages,
         package: None,
-        dialect,
         global_policy: rock_core::source_code::GlobalPolicy::Any,
     })
 }
@@ -288,29 +263,5 @@ mod tests {
         fs_err::write(&path, "fn main() {}\n").unwrap();
         let err = super::source_file_new(&path).expect_err("non-UTF-8 path must be rejected");
         assert!(format!("{err:#}").contains("not valid UTF-8"), "{err:#}");
-    }
-}
-
-#[cfg(test)]
-mod modules_directive_tests {
-    use super::parse_modules_directive;
-    use rock_core::source_code::Dialect;
-
-    #[test]
-    fn module_directive_defaults_to_v1_and_rejects_legacy() {
-        assert_eq!(
-            parse_modules_directive("fn main() {}\n").unwrap(),
-            Dialect::V1
-        );
-        assert_eq!(
-            parse_modules_directive("//! modules: v1\nfn main() {}\n").unwrap(),
-            Dialect::V1
-        );
-        let error = parse_modules_directive("//! modules: legacy\nfn main() {}\n")
-            .expect_err("the removed legacy dialect must be rejected");
-        assert!(
-            format!("{error:#}").contains("migrate"),
-            "the error must explain the migration: {error:#}"
-        );
     }
 }

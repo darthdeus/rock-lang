@@ -6,7 +6,7 @@
 // Both test harnesses include this module and each uses part of it.
 #![allow(dead_code)]
 
-use skull_parser::{parse_module, parse_module_with_dialect};
+use skull_parser::parse_module;
 
 use bone_semantic::prelude::*;
 
@@ -220,13 +220,12 @@ pub struct PackageFixture<'a> {
     /// `None` creates a standalone package; `Some((self_name, package_id))` stamps a
     /// v1 package owner.
     pub package: Option<(&'a str, u32)>,
-    pub dialect: skull_parser::Dialect,
     pub src: &'a str,
 }
 
 /// Like [`check_types`] but over several files in possibly several packages:
-/// each file parses under its dialect, v1 files join the namespace tree, and
-/// every `//^ ty` marker in every file must resolve. Cross-package alias
+/// each file joins the namespace tree, and every `//^ ty` marker in every file
+/// must resolve. Cross-package alias
 /// tables default to "every package is reachable under its own self name".
 /// Trusted stdlib sources are prepended without treating their
 /// internal `//^` comments as fixture assertions.
@@ -252,13 +251,11 @@ fn check_types_packages_with_cached_stdlib(
     all.extend(stdlib_sources.iter().map(|(file, src)| PackageFixture {
         file,
         package: None,
-        dialect: skull_parser::Dialect::V1,
         src,
     }));
     all.extend(files.iter().map(|file| PackageFixture {
         file: file.file,
         package: file.package,
-        dialect: file.dialect,
         src: file.src,
     }));
     check_types_packages_inner(&all, files, cached_stdlib)
@@ -276,8 +273,7 @@ fn check_types_packages_inner(
         let mut module = if let Some(module) = cached_stdlib.get(i) {
             module.clone()
         } else {
-            parse_module_with_dialect(f.src, ustr(f.file), f.dialect)
-                .map_err(|e| render_err(&srcs, &e))?
+            parse_module(f.src, ustr(f.file)).map_err(|e| render_err(&srcs, &e))?
         };
         if let Some(e) = module.recovery_errors.first() {
             return Err(render_err(&srcs, &e.clone()));
@@ -382,7 +378,6 @@ pub fn check_types_embedded_with_cached_stdlib(
         .map(|f| PackageFixture {
             file: f.file,
             package: f.package,
-            dialect: skull_parser::Dialect::V1,
             src: f.src,
         })
         .collect();

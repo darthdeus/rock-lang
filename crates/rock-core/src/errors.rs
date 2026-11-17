@@ -339,7 +339,7 @@ mod tests {
     #[test]
     fn diagnostic_names_hide_standalone_package_identities() {
         let error = CompilerError::new_no_location(
-            "expected `$standalone$a.rock::Point`, found `$standalone$b.rock::child::Point`",
+            "expected `@/a.rock::Point`, found `@/b.rock::child::Point`",
         );
         assert_eq!(error.message, "expected `Point`, found `child::Point`");
         assert_eq!(error.labels[0].message, error.message);

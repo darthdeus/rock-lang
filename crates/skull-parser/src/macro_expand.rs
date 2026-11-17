@@ -77,16 +77,6 @@ impl MacroRegistry {
         self.0.is_empty()
     }
 
-    /// This registry with the macros `modules` define added after its own:
-    /// [`collect_registry`] over this registry's modules, then `modules`.
-    pub fn extended<'a>(&self, modules: impl IntoIterator<Item = &'a Ast>) -> MacroRegistry {
-        let mut reg = self.0.clone();
-        for (name, overloads) in build_registry(modules) {
-            reg.entry(name).or_default().extend(overloads);
-        }
-        MacroRegistry(reg)
-    }
-
     /// The definition name-span of the macro overload that `name(<argc args>)`
     /// expands to, selected by the SAME arity rule as expansion
     /// (`select_overload`), or None if no macro overload matches this arity --
@@ -635,18 +625,6 @@ fn shadow_pattern(p: &Pattern, scope: &mut ShadowScope) {
         Pattern::Tuple(ps) | Pattern::Or(ps) => {
             for p in ps {
                 shadow_pattern(p, scope);
-            }
-        }
-        Pattern::EnumVariant { args, .. } => {
-            if let Some(ps) = args {
-                for p in ps {
-                    shadow_pattern(p, scope);
-                }
-            }
-        }
-        Pattern::Record { fields, .. } => {
-            for (_, sub) in fields {
-                shadow_pattern(sub, scope);
             }
         }
         Pattern::PathVariant { args, .. } => {
@@ -1292,14 +1270,11 @@ impl Rewrite for Instantiation {
         match p {
             Pattern::Wildcard | Pattern::Literal(_) | Pattern::Range { .. } => {}
             Pattern::Ident(id) => self.bind(&mut id.name),
-            Pattern::Tuple(ps)
-            | Pattern::Or(ps)
-            | Pattern::EnumVariant { args: Some(ps), .. }
-            | Pattern::PathVariant { args: Some(ps), .. } => {
+            Pattern::Tuple(ps) | Pattern::Or(ps) | Pattern::PathVariant { args: Some(ps), .. } => {
                 ps.iter_mut().for_each(|p| self.bind_pattern(p))
             }
-            Pattern::EnumVariant { args: None, .. } | Pattern::PathVariant { args: None, .. } => {}
-            Pattern::Record { fields, .. } | Pattern::PathRecord { fields, .. } => {
+            Pattern::PathVariant { args: None, .. } => {}
+            Pattern::PathRecord { fields, .. } => {
                 fields.iter_mut().for_each(|(_, p)| self.bind_pattern(p))
             }
         }
@@ -1507,7 +1482,7 @@ fn refs_in_block(ast: &Ast, b: Idx<BlockData>, names: &UstrSet, occ: &mut Vec<(U
 
 fn refs_in_expr(ast: &Ast, e: Idx<ExprData>, names: &UstrSet, occ: &mut Vec<(Ustr, Span)>) {
     match &ast.exprs[e].kind {
-        ExprKind::Ident(id) | ExprKind::StructLiteral { name: id, .. } => note(id, names, occ),
+        ExprKind::Ident(id) => note(id, names, occ),
         ExprKind::Path { path, .. } | ExprKind::PathStructLiteral { path, .. } => {
             refs_in_path(path, names, occ)
         }
@@ -1536,7 +1511,9 @@ fn refs_in_expr(ast: &Ast, e: Idx<ExprData>, names: &UstrSet, occ: &mut Vec<(Ust
 fn refs_in_pattern(p: &Pattern, names: &UstrSet, occ: &mut Vec<(Ustr, Span)>) {
     match p {
         Pattern::PathVariant { path, args } => {
-            refs_in_path(path, names, occ);
+            if path.segments.len() > 1 || path.from_root {
+                refs_in_path(path, names, occ);
+            }
             if let Some(args) = args {
                 args.iter().for_each(|p| refs_in_pattern(p, names, occ));
             }
@@ -1549,32 +1526,6 @@ fn refs_in_pattern(p: &Pattern, names: &UstrSet, occ: &mut Vec<(Ustr, Span)>) {
         }
         Pattern::Tuple(ps) | Pattern::Or(ps) => {
             ps.iter().for_each(|p| refs_in_pattern(p, names, occ));
-        }
-        Pattern::EnumVariant {
-            enum_name, args, ..
-        } => {
-            if let Some(name) = enum_name {
-                note(name, names, occ);
-            }
-            if let Some(args) = args {
-                args.iter().for_each(|p| refs_in_pattern(p, names, occ));
-            }
-        }
-        Pattern::Record {
-            enum_name,
-            name,
-            fields,
-            ..
-        } => {
-            if let Some(name) = enum_name {
-                note(name, names, occ);
-            }
-            if let Some(name) = name {
-                note(name, names, occ);
-            }
-            fields
-                .iter()
-                .for_each(|(_, p)| refs_in_pattern(p, names, occ));
         }
         Pattern::Literal(_) | Pattern::Range { .. } | Pattern::Wildcard | Pattern::Ident(_) => {}
     }
@@ -1657,63 +1608,27 @@ mod tests {
         let registry = collect_registry([&ast]);
         expand_one(&mut ast, &registry);
 
-        let expr_paths: Vec<_> = ast
-            .exprs
-            .values()
-            .filter_map(|expr| match &expr.kind {
-                ExprKind::Path { path, .. } => Some(path),
-                _ => None,
-            })
-            .collect();
-        assert!(expr_paths.iter().any(|path| {
+        let is = |path: &Path, names: &[&str]| {
             path.segments
                 .iter()
                 .map(|segment| segment.name.as_str())
-                .eq(["Color", "Green"])
+                .eq(names.iter().copied())
+        };
+        assert!(ast.exprs.values().any(|expr| matches!(
+            &expr.kind, ExprKind::Path { path, .. } if is(path, &["Color", "Green"])
+        )));
+        assert!(ast.exprs.values().any(|expr| match &expr.kind {
+            ExprKind::Match { arms, .. } => arms.iter().any(|arm| matches!(
+                &arm.pattern, Pattern::PathVariant { path, .. } if is(path, &["Color", "Green"])
+            )),
+            _ => false,
         }));
-
-        let pattern_paths: Vec<_> = ast
-            .exprs
-            .values()
-            .flat_map(|expr| match &expr.kind {
-                ExprKind::Match { arms, .. } => arms
-                    .iter()
-                    .filter_map(|arm| match &arm.pattern {
-                        Pattern::PathVariant { path, .. } => Some(path),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>(),
-                _ => Vec::new(),
-            })
-            .collect();
-        assert!(pattern_paths.iter().any(|path| {
-            path.segments
-                .iter()
-                .map(|segment| segment.name.as_str())
-                .eq(["Color", "Green"])
-        }));
-
-        let type_paths: Vec<_> = ast
-            .types
-            .values()
-            .filter_map(|ty| match &ty.kind {
-                TypeExprKind::Path(path) => Some(path),
-                TypeExprKind::AppPath { ctor, .. } => Some(ctor),
-                _ => None,
-            })
-            .collect();
-        assert!(type_paths.iter().any(|path| {
-            path.segments
-                .iter()
-                .map(|segment| segment.name.as_str())
-                .eq(["Color", "Payload"])
-        }));
-        assert!(type_paths.iter().any(|path| {
-            path.segments
-                .iter()
-                .map(|segment| segment.name.as_str())
-                .eq(["pkg", "Thing"])
-        }));
+        for names in [["Color", "Payload"], ["pkg", "Thing"]] {
+            assert!(ast.types.values().any(|ty| matches!(
+                &ty.kind, TypeExprKind::Path(path) | TypeExprKind::AppPath { ctor: path, .. }
+                    if is(path, &names)
+            )));
+        }
     }
 
     #[test]
@@ -1849,21 +1764,6 @@ mod tests {
             assert!(reach.contains(&Ustr::from(name)), "missing {name}");
         }
         assert!(!reach.contains(&Ustr::from("g")));
-    }
-
-    #[test]
-    fn an_extended_registry_matches_one_collected_over_both() {
-        let lib = parse("macro twice(x: expr) -> int { x + x }", "lib.rock");
-        let user = parse("macro thrice(x: expr) -> int { x + x + x }", "user.rock");
-        let caller = "fn f() -> int { twice(1) + thrice(2) }";
-        let expand = |registry: &MacroRegistry| {
-            let mut ast = parse(caller, "c.rock");
-            expand_one(&mut ast, registry);
-            ast
-        };
-        let both = collect_registry([&lib, &user]);
-        let extended = collect_registry([&lib]).extended([&user]);
-        assert_same_ast(&expand(&both), &expand(&extended));
     }
 
     fn body_nodes(ast: &Ast) -> (Vec<Idx<ExprData>>, Vec<Idx<BlockData>>) {

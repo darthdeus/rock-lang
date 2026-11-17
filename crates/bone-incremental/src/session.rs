@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use skull_parser::stdlib::ModuleSet;
 use skull_parser::{
-    Ast, Dialect, FunctionBody, GlobalPolicy, ItemKind, MacroRegistry, PackageTag,
+    Ast, FunctionBody, GlobalPolicy, ItemKind, MacroRegistry, PackageTag,
     check_macro_name_uniqueness, collect_registry, cook_one,
 };
 
@@ -235,7 +235,7 @@ const MAX_KEPT_ARENA_GROWTH: usize = 16;
 
 /// Whether the warm modules can be lowered and inferred once, alone, and
 /// reused by every build. Warm ASTs are immutable for the session's lifetime
-/// and a stdlib file consults no user SCOPE (it has no fragment scope).
+/// and a stdlib file consults no user scope.
 /// Standalone user definitions have package-qualified keys, so only bare
 /// operator names and macros can affect the warm modules. A build reuses the
 /// warm-alone state only when no user macro takes a name a warm expansion can
@@ -296,50 +296,46 @@ pub struct Session {
     /// The warm modules' namespace contributions (the `std` root), computed
     /// once: warm ASTs are immutable. User files keep theirs on `UserFile`.
     warm_contributions: Vec<FragmentContribution>,
-    /// The dialect and owning package a host declared for a file that was
+    /// The package facts a host declared for a file that was
     /// not in the initial set ([`Session::declare_file_facts`]). A held file
     /// keeps its facts on its `UserFile`; these are read when the file enters
     /// through `update_file` or `with_file_variant`, and survive a refused
     /// entry, so the next attempt parses the same way.
-    declared_facts: FxHashMap<String, (Dialect, Option<PackageTag>, GlobalPolicy)>,
+    declared_facts: FxHashMap<String, (Option<PackageTag>, GlobalPolicy)>,
 }
 
 /// A file entering a session, carrying the facts its package supplies.
 ///
 /// A session RE-PARSES from stored text on every edit, so it has to keep the
-/// dialect and the owning package rather than take them stamped once from the
-/// caller: dialect and package facts reach the parser and bone through the
-/// host, on the incremental route too. A standalone source has no explicit
-/// package; semantic assembly assigns it a deterministic implicit package on
-/// each build.
+/// owning package rather than take it stamped once from the caller. Package
+/// facts reach bone through the host on the incremental route too. A standalone
+/// source has no explicit package; semantic assembly assigns it a deterministic
+/// implicit package on each build.
 #[derive(Clone, Debug)]
 pub struct SessionFile {
     pub path: String,
     pub text: String,
-    pub dialect: Dialect,
     pub package: Option<PackageTag>,
     /// The owning package's mutable-global policy, which every re-parse keeps.
     pub global_policy: GlobalPolicy,
 }
 
 impl SessionFile {
-    /// Retain the source loader's parse and package facts across reparses.
+    /// Retain the source loader's package facts across reparses.
     pub fn from_source(source: &rock_core::SourceFile) -> Self {
         Self {
             path: source.file.to_id_path(),
             text: source.contents.clone(),
-            dialect: source.dialect,
             package: source.package.clone(),
             global_policy: source.global_policy,
         }
     }
 
-    /// A source with no owning manifest: v1 dialect, no explicit package.
+    /// A source with no owning manifest and no explicit package.
     pub fn standalone(path: impl Into<String>, text: impl Into<String>) -> Self {
         Self {
             path: path.into(),
             text: text.into(),
-            dialect: Dialect::V1,
             package: None,
             global_policy: GlobalPolicy::Any,
         }
@@ -364,11 +360,10 @@ pub struct UserFile {
     /// Each def's `span` is shifted on the fast body-edit path, so its line stays
     /// accurate without a reparse.
     pub macros: Vec<MacroDef>,
-    /// The dialect this file parses in and the package that owns it, from the
-    /// package graph. Kept here because every re-parse -- a full file reparse,
-    /// a one-item fast edit, an O(workspace) rebuild -- needs them again, and
-    /// re-deriving them would mean re-reading manifests on the edit path.
-    pub dialect: Dialect,
+    /// The package that owns this file, from the package graph. Kept here
+    /// because every re-parse -- a full file reparse, a one-item fast edit, an
+    /// O(workspace) rebuild -- needs it again, and re-deriving it would mean
+    /// re-reading manifests on the edit path.
     pub package: Option<PackageTag>,
     /// The owning package's mutable-global policy, kept for the same reason.
     pub global_policy: GlobalPolicy,
@@ -744,19 +739,16 @@ pub fn changed_names(old: &FxHashMap<Ustr, u64>, new: &FxHashMap<Ustr, u64>) -> 
         .collect()
 }
 
-/// Parse `text` in its file's dialect and tag the module with its owning
-/// package. Every session parse goes through here (or [`Session::parse_stored`],
-/// which reads the facts back off the file): a re-parse that forgot them would
-/// parse a stored file without the dialect and package the source loader
-/// supplied.
+/// Parse `text` and tag the module with its owning package. Every session parse
+/// goes through here (or [`Session::parse_stored`], which reads the facts back
+/// off the file).
 fn parse_with_facts(
     text: &str,
     file: Ustr,
-    dialect: Dialect,
     package: Option<PackageTag>,
     global_policy: GlobalPolicy,
 ) -> Result<Ast, CompilerError> {
-    let mut module = skull_parser::parse_module_with_dialect(text, file, dialect)?;
+    let mut module = skull_parser::parse_module(text, file)?;
     module.package = package;
     module.global_policy = global_policy;
     Ok(module)
@@ -839,7 +831,6 @@ impl Session {
         for SessionFile {
             path,
             text,
-            dialect,
             package,
             global_policy,
         } in files
@@ -852,13 +843,8 @@ impl Session {
                 );
             }
 
-            let module = parse_with_facts(
-                &text,
-                ustr(path.as_str()),
-                dialect,
-                package.clone(),
-                global_policy,
-            )?;
+            let module =
+                parse_with_facts(&text, ustr(path.as_str()), package.clone(), global_policy)?;
 
             // Looked up, not interned: user modules take their ids when they
             // lower, after the warm modules, so a warm-alone build
@@ -887,7 +873,6 @@ impl Session {
                     item_prints: prints,
                     text,
                     macros,
-                    dialect,
                     package,
                     global_policy,
                     syntax_errors: module.recovery_errors.clone(),
@@ -905,10 +890,8 @@ impl Session {
         reject_macro_name_collisions(&unexpanded)?;
 
         let registry = session.registry.clone();
-        let (ws, _, user_contributions, warm_contributions) =
-            session.build(unexpanded, &registry)?;
+        let (ws, _) = session.build(unexpanded, &registry)?;
         session.ws = ws;
-        session.set_cooked_contributions(user_contributions, warm_contributions);
         session.rebuild_dependents();
 
         Ok(session)
@@ -928,41 +911,39 @@ impl Session {
         Ok(ModuleSet::new(self.warm.clone(), users))
     }
 
-    /// The dialect and owning package recorded for `path`: a held file's own,
-    /// else what the host declared for it. A path nobody declared is a
-    /// standalone source: v1, unowned. A caller that knows better supplies
+    /// The package facts recorded for `path`: a held file's own, else what the
+    /// host declared for it. A path nobody declared is a standalone source: a
+    /// caller that knows better supplies
     /// the facts up front, through [`SessionFile`] or
     /// [`Session::declare_file_facts`].
-    fn facts_of(&self, path: &str) -> (Dialect, Option<PackageTag>, GlobalPolicy) {
+    fn facts_of(&self, path: &str) -> (Option<PackageTag>, GlobalPolicy) {
         match self.files.get(path) {
-            Some(f) => (f.dialect, f.package.clone(), f.global_policy),
-            None => self.declared_facts.get(path).cloned().unwrap_or((
-                Dialect::V1,
-                None,
-                GlobalPolicy::Any,
-            )),
+            Some(f) => (f.package.clone(), f.global_policy),
+            None => self
+                .declared_facts
+                .get(path)
+                .cloned()
+                .unwrap_or((None, GlobalPolicy::Any)),
         }
     }
 
-    /// Parse `text` as a buffer of `path`, with the dialect and package a
+    /// Parse `text` as a buffer of `path`, with the package facts a
     /// stored copy of it carries. A recovery reparse of an editor buffer goes
-    /// through here: parsed with the same v1 dialect and package facts as the
-    /// stored file.
+    /// through here: parsed with the same package facts as the stored file.
     pub fn parse_buffer(&self, path: &str, text: &str) -> Result<Ast, CompilerError> {
-        let (dialect, package, global_policy) = self.facts_of(path);
-        parse_with_facts(text, ustr(path), dialect, package, global_policy)
+        let (package, global_policy) = self.facts_of(path);
+        parse_with_facts(text, ustr(path), package, global_policy)
     }
 
-    /// Declare the dialect and owning package of a file that enters the
+    /// Declare the owning package of a file that enters the
     /// session after [`Session::new`] -- the editor opening a file the batch
-    /// load did not see. Its manifest decides both, exactly as for a file of
+    /// load did not see. Its manifest decides its owner, exactly as for a file of
     /// the initial set; without a declaration it would read as a standalone
-    /// standalone source. A held file's facts cannot change: its package's
+    /// source. A held file's facts cannot change: its package's
     /// manifest changed, which needs a new session.
     pub fn declare_file_facts(
         &mut self,
         path: &str,
-        dialect: Dialect,
         package: Option<PackageTag>,
         global_policy: GlobalPolicy,
     ) -> Result<(), CompilerError> {
@@ -971,26 +952,23 @@ impl Session {
         {
             comp_error!(
                 Span::unknown(),
-                "bone session: `{}` is held as {:?} of {:?}; it cannot become {:?} of {:?} without a new session",
+                "bone session: `{}` is held as {:?}; it cannot become {:?} without a new session",
                 path,
-                held.dialect,
                 held.package,
-                dialect,
                 package
             );
         }
         self.declared_facts
-            .insert(path.to_string(), (dialect, package, global_policy));
+            .insert(path.to_string(), (package, global_policy));
         Ok(())
     }
 
     /// Re-parse `path` from its stored text with its own facts.
     fn parse_stored(&self, path: Ustr) -> Result<Ast, CompilerError> {
-        let (dialect, package, global_policy) = self.facts_of(path.as_str());
+        let (package, global_policy) = self.facts_of(path.as_str());
         parse_with_facts(
             &self.files[path.as_str()].text,
             path,
-            dialect,
             package,
             global_policy,
         )
@@ -1086,8 +1064,8 @@ impl Session {
             return Ok(result);
         }
 
-        let (dialect, package, global_policy) = self.facts_of(path);
-        let module = parse_with_facts(text, ustr(path), dialect, package.clone(), global_policy)?;
+        let (package, global_policy) = self.facts_of(path);
+        let module = parse_with_facts(text, ustr(path), package.clone(), global_policy)?;
         let syntax_errors = module.recovery_errors.clone();
         let mid = self.ws.intern_module(module.file);
         if self.warm_mids.contains(&mid) {
@@ -1146,9 +1124,7 @@ impl Session {
                 item_prints: new_prints,
                 text: text.to_string(),
                 macros: new_macros,
-                // An edit never changes which package owns a file or which
-                // dialect it is written in; both come from its manifest.
-                dialect,
+                // An edit never changes which package owns a file.
                 package,
                 global_policy,
                 syntax_errors,
@@ -1277,45 +1253,30 @@ impl Session {
         &mut self,
         unexpanded: ModuleSet,
         registry: &MacroRegistry,
-    ) -> Result<
-        (
-            Workspace,
-            Vec<ModuleId>,
-            Vec<FragmentContribution>,
-            Vec<FragmentContribution>,
-        ),
-        CompilerError,
-    > {
+    ) -> Result<(Workspace, Vec<ModuleId>), CompilerError> {
         debug_assert!(Arc::ptr_eq(unexpanded.shared(), &self.warm));
         let warm_len = self.warm.len();
         // Read from the ASTs being built, not the stored `UserFile`s, so the
         // build is a function of the texts alone.
-        let users = unexpanded.rest();
+        let independent = unexpanded
+            .rest()
+            .iter()
+            .all(|ast| self.apart_from_warm(ast, &contribute(ast)));
         let mut cooked_warm = self.warm.to_vec();
         let warm_contributions = cook_and_contribute(&mut cooked_warm, registry)?;
-        let mut cooked_users = users.to_vec();
+        let mut cooked_users = unexpanded.into_parts().1;
         let user_contributions = cook_and_contribute(&mut cooked_users, registry)?;
-        let independent = users
-            .iter()
-            .zip(&user_contributions)
-            .all(|(ast, contribution)| self.apart_from_warm(ast, contribution));
         let base = if independent {
             self.warm_alone(registry).cloned()
         } else {
             None
         };
-        let (mut ws, lowered, first_user, include_warm, warm_contributions) = match base {
-            Some(base) => (base, cooked_users, 0, false, warm_contributions),
+        let (mut ws, lowered, first_user, include_warm) = match base {
+            Some(base) => (base, cooked_users, 0, false),
             None => {
                 let mut lowered = cooked_warm;
                 lowered.extend(cooked_users);
-                (
-                    Workspace::default(),
-                    lowered,
-                    warm_len,
-                    true,
-                    warm_contributions,
-                )
+                (Workspace::default(), lowered, warm_len, true)
             }
         };
         let contributions: Vec<&FragmentContribution> = if include_warm {
@@ -1338,12 +1299,8 @@ impl Session {
         // package.
         bone_semantic::semantic_passes::pass_validate_api_closure(&ws)?;
         ws.phase_timings.clear();
-        Ok((
-            ws,
-            mids[first_user..].to_vec(),
-            user_contributions,
-            warm_contributions,
-        ))
+        self.set_cooked_contributions(user_contributions, warm_contributions);
+        Ok((ws, mids[first_user..].to_vec()))
     }
 
     /// The warm-alone workspace, built on first need; `None` when the warm
@@ -1410,15 +1367,8 @@ impl Session {
         user_contributions: Vec<FragmentContribution>,
         warm_contributions: Vec<FragmentContribution>,
     ) {
-        let mut by_file: FxHashMap<Ustr, FragmentContribution> = user_contributions
-            .into_iter()
-            .map(|contribution| (contribution.file, contribution))
-            .collect();
-        for path in &self.paths {
-            let file = ustr(path);
-            if let Some(contribution) = by_file.remove(&file)
-                && let Some(user_file) = self.files.get_mut(path)
-            {
+        for contribution in user_contributions {
+            if let Some(user_file) = self.files.get_mut(contribution.file.as_str()) {
                 user_file.scope_hash = scope_hash(&contribution);
                 user_file.contribution = contribution;
             }
@@ -1541,7 +1491,7 @@ impl Session {
                 .collect()
         };
         let new_types = bone_semantic::semantic_passes::nominal_type_facts(
-            self.ws.fragment_scopes.get(&file),
+            &self.ws.fragment_scopes[&file],
             &module,
         );
         let changed_types: Vec<Ustr> = old_types
@@ -1849,8 +1799,7 @@ impl Session {
         let unexpanded = self.combined_unexpanded()?;
         let registry = collect_registry(unexpanded.iter());
         reject_macro_name_collisions(&unexpanded)?;
-        let (mut ws, user_mids, user_contributions, warm_contributions) =
-            self.build(unexpanded, &registry)?;
+        let (mut ws, user_mids) = self.build(unexpanded, &registry)?;
         // Host-resolved build variables, set once on the workspace when the
         // session was made; nothing in this rebuild derives them again.
         ws.comptime_inputs = self.ws.comptime_inputs.clone();
@@ -1860,7 +1809,6 @@ impl Session {
         self.ws = ws;
         self.module_iface_dep_names.clear();
         self.registry = registry;
-        self.set_cooked_contributions(user_contributions, warm_contributions);
 
         let reinferred = self.collect_reinferred(&user_mids);
         let relowered = reinferred.clone();
@@ -2125,7 +2073,6 @@ impl Session {
             old_prints,
             old_macros,
             old_syntax_errors,
-            old_dialect,
             old_package,
             old_global_policy,
             old_scope_hash,
@@ -2154,7 +2101,6 @@ impl Session {
                 old.item_prints.clone(),
                 old.macros.clone(),
                 old.syntax_errors.clone(),
-                old.dialect,
                 old.package.clone(),
                 old.global_policy,
                 old.scope_hash,
@@ -2169,9 +2115,7 @@ impl Session {
             return Ok(None);
         }
         let sub = &new_text[so..new_end];
-        let Ok(mut mini) =
-            skull_parser::parse_one_item(sub, ustr(path), so, line, col, self.facts_of(path).0)
-        else {
+        let Ok(mut mini) = skull_parser::parse_one_item(sub, ustr(path), so, line, col) else {
             return Ok(None); // a hard tokenizer error -> let the full path surface it
         };
         // The mini-Ast lowers with the same unit facts as a full reparse would.
@@ -2248,7 +2192,6 @@ impl Session {
                 item_prints: new_prints,
                 text: new_text.to_string(),
                 macros: new_macros,
-                dialect: old_dialect,
                 package: old_package,
                 global_policy: old_global_policy,
                 // The fast path only re-parses ONE clean body (it bails to the
@@ -2536,14 +2479,6 @@ fn touches_macro(
         .chain(new_macros)
         .any(|m| changed.contains(&m.name))
 }
-
-// fn module_id_of(module: &Ast, path: &str) -> ModuleId {
-//     module
-//         .items
-//         .first()
-//         .map(|i| ModuleId(i.span.file))
-//         .unwrap_or_else(|| ModuleId(Ustr::from(path)))
-// }
 
 /// Minimal changed byte span between two texts: the longest common prefix `p`
 /// and suffix, capped so they don't overlap. Returns `(p, old_end, delta)` where

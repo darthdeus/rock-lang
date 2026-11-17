@@ -68,7 +68,7 @@ fn relocatable_refs_cannot_reach_coroutine_frames() {
         let fid = module
             .functions
             .iter()
-            .find(|(_, f)| f.name == "main")
+            .find(|(_, f)| f.name.as_str().rsplit("::").next() == Some("main"))
             .unwrap()
             .0;
         let errors = &ws.inference(module.id).unwrap().errors;

@@ -100,10 +100,9 @@ fn qualified_register_workspace(registrations: &[&str]) -> bone_core::workspace:
             .expect("shader source"),
     ];
     for (index, registration) in registrations.iter().enumerate() {
-        let mut module = skull_parser::parse_module_clean_with_dialect(
+        let mut module = skull_parser::parse_module_clean(
             &format!("mod registry{index};\n{registration}"),
             ustr::Ustr::from(&format!("<registry{index}>")),
-            skull_parser::Dialect::V1,
         )
         .expect("v1 registration source");
         module.package = Some(skull_parser::PackageTag {

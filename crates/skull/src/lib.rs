@@ -24,6 +24,7 @@ pub use skull_graph::{
 pub mod artifact_fingerprint;
 pub mod pipeline;
 
+use bone_core::modules::display_name;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 use skull_mir::lua_nesting::{LuaDisplayPart, display_expr, display_record, display_return};
@@ -369,7 +370,7 @@ pub fn module_tests_with_ids(
         out.push((
             fid,
             SkullTest {
-                name: bone_core::modules::display_name(f.name.as_str()).to_string(),
+                name: display_name(f.name.as_str()).to_string(),
                 // The one emitted-name oracle, so the harness cannot drift from
                 // the definition the artifact actually writes.
                 symbol: skull_mir::mangle::mangle_fn(ws, f),
@@ -932,10 +933,7 @@ fn canonical_value_structs(ws: &Workspace) -> Vec<bone_semantic::hir::StructDef>
             skull_mir::lower::has_value_plan(s).then(|| s.clone())
         })
         .collect();
-    v.sort_by(|a, b| {
-        bone_core::modules::display_name(a.name.as_str())
-            .cmp(bone_core::modules::display_name(b.name.as_str()))
-    });
+    v.sort_by(|a, b| display_name(a.name.as_str()).cmp(display_name(b.name.as_str())));
     v
 }
 
@@ -1219,10 +1217,7 @@ fn value_leaf_layout_checks(
 ) -> Result<(String, String), CompilerError> {
     use std::fmt::Write as _;
     let mut names: Vec<ustr::Ustr> = emitted.iter().copied().collect();
-    names.sort_by(|a, b| {
-        bone_core::modules::display_name(a.as_str())
-            .cmp(bone_core::modules::display_name(b.as_str()))
-    });
+    names.sort_by(|a, b| display_name(a.as_str()).cmp(display_name(b.as_str())));
     let mut out = String::new();
     let mut storage = String::new();
     for name in names {
@@ -1300,7 +1295,7 @@ fn value_struct_gc_defs(
         // `n` stays the readable path for DISPLAY text; every name the chunk
         // defines or tags with is the type's symbol.
         let sym = skull_mir::mangle::type_symbol(ws, n);
-        let shown = bone_core::modules::display_name(n.as_str());
+        let shown = display_name(n.as_str());
         let mt = skull_codegen_lua::value_struct_metatable_name(sym.as_str());
         out.push_str(&format!("{mt} = {mt} or {{}}\n"));
         // A leaf-table struct has no declared-field keys to compare or print, so
@@ -1490,10 +1485,7 @@ fn lua_key_read(table: &str, key: &str) -> String {
 /// `{__variant}` table.
 fn enum_cdata_defs(ws: &Workspace) -> String {
     let mut names: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
-    names.sort_by(|a, b| {
-        bone_core::modules::display_name(a.as_str())
-            .cmp(bone_core::modules::display_name(b.as_str()))
-    });
+    names.sort_by(|a, b| display_name(a.as_str()).cmp(display_name(b.as_str())));
     let mut typedefs = String::new();
     let mut ctors = String::new();
     for name in names {
@@ -1527,10 +1519,7 @@ fn enum_cdata_defs(ws: &Workspace) -> String {
 /// ESCAPING enum (stored in `[Enum]`, a Map, ...) mis-compares. Name-sorted.
 fn enum_cdata_metatypes(ws: &Workspace) -> String {
     let mut names: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
-    names.sort_by(|a, b| {
-        bone_core::modules::display_name(a.as_str())
-            .cmp(bone_core::modules::display_name(b.as_str()))
-    });
+    names.sort_by(|a, b| display_name(a.as_str()).cmp(display_name(b.as_str())));
     let mut out = String::new();
     let mut any = false;
     for name in names {
@@ -1566,7 +1555,7 @@ fn enum_cdata_metatypes(ws: &Workspace) -> String {
             let ed = &ws.modules[eid.module.index()].enums[eid.def];
             for (i, var) in ed.variants.iter().enumerate() {
                 let vn = var.name;
-                let shown = bone_core::modules::display_name(name.as_str());
+                let shown = display_name(name.as_str());
                 let open = format!("{shown}::{vn} {{ ");
                 let parts = match &var.payload {
                     VariantPayload::Tuple(tys) if !tys.is_empty() => display_record(
@@ -1581,10 +1570,7 @@ fn enum_cdata_metatypes(ws: &Workspace) -> String {
                     ),
                     VariantPayload::Record(fields) if !fields.is_empty() => {
                         let mut fns: Vec<ustr::Ustr> = fields.iter().map(|f| f.name).collect();
-                        fns.sort_by(|a, b| {
-                            bone_core::modules::display_name(a.as_str())
-                                .cmp(bone_core::modules::display_name(b.as_str()))
-                        });
+                        fns.sort_by(|a, b| a.as_str().cmp(b.as_str()));
                         display_record(
                             &open,
                             fns.iter().map(|f| {
@@ -1643,7 +1629,7 @@ fn value_struct_metatypes(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::
             }
             let n = s.name;
             let sym = skull_mir::mangle::type_symbol(ws, n);
-            let shown = bone_core::modules::display_name(n.as_str());
+            let shown = display_name(n.as_str());
             out.push_str(&format!("_G.__ROCK_C_METATYPE[\"{sym}\"] = {{\n"));
             out.push_str("  __eq = function(a, b)\n");
             out.push_str(
@@ -1787,7 +1773,7 @@ pub(crate) fn enum_names_defs(ws: &Workspace, read: &rustc_hash::FxHashSet<ustr:
                 .map(|(ord, v)| {
                     format!(
                         "[{ord}] = \"{e}::{v}\"",
-                        e = bone_core::modules::display_name(e.name.as_str()),
+                        e = display_name(e.name.as_str()),
                         v = v.name
                     )
                 })
@@ -1874,10 +1860,7 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
     let mut out = String::new();
     {
         let mut enums: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
-        enums.sort_by(|a, b| {
-            bone_core::modules::display_name(a.as_str())
-                .cmp(bone_core::modules::display_name(b.as_str()))
-        });
+        enums.sort_by(|a, b| display_name(a.as_str()).cmp(display_name(b.as_str())));
         for name in enums {
             let Some(shape) = skull_mir::lower::EnumPlan::for_name(ws, name)
                 .and_then(|plan| plan.cdata().cloned())
@@ -1902,7 +1885,7 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
             }
             let n = s.name;
             let sym = skull_mir::mangle::type_symbol(ws, n);
-            let n = bone_core::modules::display_name(n.as_str());
+            let n = display_name(n.as_str());
             out.push_str(&format!(
                 "_G.__ROCK_C_STRUCT[\"{sym}\"] = {{ inspect = function(v)\n"
             ));
@@ -2319,12 +2302,7 @@ mod tests {
             super::type_shape_hashes(&ws)
                 .expect("shape planning must succeed")
                 .into_iter()
-                .map(|(name, hash)| {
-                    (
-                        ustr::Ustr::from(bone_core::modules::display_name(name.as_str())),
-                        hash,
-                    )
-                })
+                .map(|(name, hash)| (ustr::Ustr::from(super::display_name(name.as_str())), hash))
                 .collect::<super::ShapeHashes>()
         };
         let base = "struct Mob { hp: int }\n\
@@ -2388,12 +2366,7 @@ mod tests {
             super::type_shape_hashes(&ws)
                 .expect("shape planning must succeed")
                 .into_iter()
-                .map(|(name, hash)| {
-                    (
-                        ustr::Ustr::from(bone_core::modules::display_name(name.as_str())),
-                        hash,
-                    )
-                })
+                .map(|(name, hash)| (ustr::Ustr::from(super::display_name(name.as_str())), hash))
                 .collect::<super::ShapeHashes>()
         };
 
