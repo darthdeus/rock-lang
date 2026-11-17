@@ -4370,7 +4370,7 @@ pub fn generate_function(
 fn arg_param_name(body: &Body, arg: Idx<hir::Expr>, i: usize) -> String {
     match &body.expr_arena[arg] {
         hir::Expr::Var(b) => body.binding_arena[*b].name.to_string(),
-        hir::Expr::Global(n) | hir::Expr::SiblingRef(n) => n.to_string(),
+        hir::Expr::Global(n) | hir::Expr::SiblingRef(n) => source_ident(*n).to_string(),
         _ => format!("arg{i}"),
     }
 }

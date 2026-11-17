@@ -1369,6 +1369,7 @@ pub(crate) fn resolve_named_call_inner(
         visible: all_candidates,
         hidden,
     } = resolve_callee(gamma, &family);
+    // Empty merged families are scoped misses, not workspace-wide lookup requests.
     let candidates: FnList = if generic_args.is_empty() {
         all_candidates
     } else {
@@ -1448,7 +1449,16 @@ pub(crate) fn resolve_named_call_inner(
     }
 
     if candidates.is_empty() {
-        if recv_override.is_none() {
+        let unbound_scoped_family = match family {
+            CallFamily::Merged { file, name } => gamma
+                .workspace
+                .module_ids
+                .get(&file)
+                .and_then(|mid| gamma.workspace.module(*mid).call_families.get(&name))
+                .is_some_and(Vec::is_empty),
+            CallFamily::Resolved(_) => false,
+        };
+        if recv_override.is_none() && !unbound_scoped_family {
             if let Some(gty) = resolve_global(gamma, name) {
                 let gty = resolve(gamma, gty, span);
 
@@ -1458,7 +1468,7 @@ pub(crate) fn resolve_named_call_inner(
             }
         }
 
-        if recv_override.is_none() {
+        if recv_override.is_none() && !unbound_scoped_family {
             if let Some(NewtypeId { module: ntm, def }) = resolve_newtype(gamma, name) {
                 let nt = &gamma.workspace.module(ntm).newtypes[def];
                 let (subs, fresh) = gamma.instantiate_generics(&nt.generics, span)?;
@@ -1497,6 +1507,15 @@ pub(crate) fn resolve_named_call_inner(
                 .map(|a| infer_expr(c, gamma, a))
                 .transpose()?;
             return Err(unary_operator_error(gamma, name, operand, span));
+        }
+
+        let method_call = recv_override.is_some()
+            || (!args.is_empty() && c.body.method_call_recvs.contains(&args.start()));
+        if unbound_scoped_family && !method_call {
+            return Err(CompilerError::new_with_label(
+                span,
+                format!("`{name}` did not resolve to any definition"),
+            ));
         }
 
         // A v1 DefKey renders as its declared name; bare keys

@@ -78,6 +78,34 @@ fn main() {
 }
 
 #[test]
+fn generates_after_an_earlier_ambiguous_call() {
+    let src = "\
+mod a { pub fn hit() {} }
+mod b { pub global hit: int = 0 }
+use a::*;
+use b::*;
+fn main() {
+    hit()
+    want(3)
+}
+";
+    let actions = run(src, 6, 6);
+    let action = gen_action(&actions).expect("expected a generate-function action");
+    assert!(action.title.contains("want"), "title: {}", action.title);
+
+    let out = apply(src, action);
+    assert!(
+        out.contains("fn want(arg0: int)"),
+        "param from literal: {out:?}"
+    );
+    let errors = bone_errors(&out);
+    assert!(
+        errors.iter().any(|d| d.message.contains("hit")),
+        "the earlier ambiguous call remains an error: {errors:?}"
+    );
+}
+
+#[test]
 fn reuses_a_named_argument_as_the_param_name() {
     let src = "\
 fn main() {
@@ -96,6 +124,28 @@ fn main() {
         bone_errors(&out).is_empty(),
         "should type-check: {:?}",
         bone_diags(&out)
+    );
+}
+
+#[test]
+fn reuses_a_global_argument_name_without_its_canonical_key() {
+    let src = "\
+global count: int = 1
+fn main() {
+    want(count)
+}
+";
+    let actions = run(src, 2, 6);
+    let action = gen_action(&actions).expect("expected a generate-function action");
+    let out = apply(src, action);
+    assert!(
+        out.contains("fn want(count: any)"),
+        "global argument name must use its source spelling: {out:?}"
+    );
+    assert!(
+        bone_errors(&out).is_empty(),
+        "generated stub should type-check: {:?}\n--- src ---\n{out}",
+        bone_errors(&out)
     );
 }
 

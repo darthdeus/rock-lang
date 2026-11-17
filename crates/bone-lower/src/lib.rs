@@ -3999,7 +3999,9 @@ fn lower_named_call(
     // its family for a name, so a local resolves nothing further.
     let local = lookup_local(body, scope, name.name);
     let (callee_key, family) = if local.is_none() && name.name.as_str() != "_" {
-        match ctx.resolve_callee_family(name.name, name.span) {
+        // Keep an unbound call in HIR so inference can report the missing
+        // function and editor actions can offer a stub.
+        match ctx.resolve_optional_family(name.name, name.span) {
             Ok(resolved) => resolved,
             Err(e) => {
                 ctx.recover_name(e)?;
