@@ -103,7 +103,7 @@ impl SimRunRecorder {
             ),
         };
         let timing_host = timing::host_context(project).unwrap_or_else(|error| {
-            log::warn!(target: "SIM", "timing context unavailable: {error:#}; historical comparisons disabled");
+            log::warn!(target: "SIM", "timing context unavailable: {error:#}");
             Value::Null
         });
         crate::invocation_log::note("filtered", json!(selection != "<all>"));
@@ -120,11 +120,7 @@ impl SimRunRecorder {
                 passed: BTreeSet::new(),
                 finished: false,
                 warning_emitted: false,
-                timings: timing::Timings::new(
-                    root,
-                    timing::TimingPolicy::default(),
-                    timing_host.clone(),
-                ),
+                timings: timing::Timings::new(root, timing_host.clone()),
             })),
         };
         if let Some(message) = initial_warning {
@@ -511,11 +507,7 @@ impl SimRunRecorder {
                     records.push((
                         "timing_warning",
                         json!({ "name": timing.label,
-                        "kind": match timing.kind {
-                            timing::TimingWarningKind::Absolute => "absolute",
-                            timing::TimingWarningKind::Historical => "historical",
-                        },
-                        "duration_ms": timing.duration_ms, "baseline_ms": timing.baseline_ms }),
+                        "kind": "absolute", "duration_ms": timing.duration_ms }),
                     ));
                 }
                 for (name, fields) in records {

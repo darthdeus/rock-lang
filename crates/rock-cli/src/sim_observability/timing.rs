@@ -1,159 +1,38 @@
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
 
-#[derive(Clone, Debug, PartialEq)]
-pub(super) struct TimingPolicy {
-    pub(super) absolute_ms: Option<u64>,
-    pub(super) regression_factor: Option<f64>,
-    pub(super) regression_delta_ms: Option<u64>,
-    pub(super) minimum_samples: Option<usize>,
-}
+const SLOW_MS: u64 = 10_000;
 
-/// What has to match before two samples of one sim describe the same cost.
-///
-/// Every field answers the same question: does it change what the sim costs,
-/// or only where the scheduler happened to put it? Only the first belongs here.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(super) struct TimingIdentity {
-    pub(super) project: Option<String>,
-    pub(super) workload: Option<String>,
-    pub(super) runtime: Option<String>,
-    pub(super) machine: Option<String>,
-    pub(super) backend: Option<String>,
-    pub(super) renderer: Option<String>,
-    pub(super) jobs: Option<usize>,
-    /// The child's effective sim environment (`worker_spawn`), which the run
-    /// config and runtime context do not carry: `@sim_env` values such as
-    /// `SIM_DRAW` or `STONE_ASSET_STUB` change the workload.
-    pub(super) env: Option<String>,
-}
-
-impl TimingIdentity {
-    fn comparable(&self) -> bool {
-        self.workload.is_some()
-            && self.runtime.is_some()
-            && self.project.is_some()
-            && self.machine.is_some()
-            && self.backend.is_some()
-            && self.renderer.is_some()
-            && self.jobs.is_some()
-            && self.env.is_some()
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum TimingWarningKind {
-    Absolute,
-    Historical,
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub(super) struct TimingWarning {
-    pub(super) kind: TimingWarningKind,
     pub(super) label: String,
     pub(super) duration_ms: u64,
-    pub(super) baseline_ms: Option<f64>,
 }
 
-#[derive(Clone, Debug, Default)]
-pub(super) struct HistoricalTimings {
-    samples: HashMap<(String, String), Vec<u64>>,
-}
-
-impl HistoricalTimings {
-    #[cfg(test)]
-    fn insert(&mut self, label: &str, identity: TimingIdentity, duration_ms: u64) {
-        self.samples
-            .entry((label.to_string(), identity.key()))
-            .or_default()
-            .push(duration_ms);
-    }
-
-    fn samples(&self, label: &str, identity: &TimingIdentity) -> &[u64] {
-        self.samples
-            .get(&(label.to_string(), identity.key()))
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-    }
-}
-
-fn evaluate_entry(
-    label: &str,
-    duration_ms: u64,
-    policy: &TimingPolicy,
-    baseline: &[u64],
-) -> Vec<TimingWarning> {
-    let mut warnings = Vec::new();
-    if policy.absolute_ms.is_some_and(|limit| duration_ms >= limit) {
-        warnings.push(TimingWarning {
-            kind: TimingWarningKind::Absolute,
+fn slow_warning(label: &str, duration_ms: u64) -> Vec<TimingWarning> {
+    if duration_ms >= SLOW_MS {
+        vec![TimingWarning {
             label: label.into(),
             duration_ms,
-            baseline_ms: None,
-        });
-    }
-    if let (Some(factor), Some(delta), Some(count)) = (
-        policy.regression_factor,
-        policy.regression_delta_ms,
-        policy.minimum_samples,
-    ) {
-        if count > 0 && baseline.len() >= count {
-            // The first accepted population stays fixed as later revisions slow down.
-            let mut values = baseline[..count].to_vec();
-            values.sort_unstable();
-            let median = if count % 2 == 0 {
-                (values[count / 2 - 1] as f64 + values[count / 2] as f64) / 2.0
-            } else {
-                values[count / 2] as f64
-            };
-            if duration_ms as f64 > median * factor && duration_ms as f64 - median >= delta as f64 {
-                warnings.push(TimingWarning {
-                    kind: TimingWarningKind::Historical,
-                    label: label.into(),
-                    duration_ms,
-                    baseline_ms: Some(median),
-                });
-            }
-        }
-    }
-    warnings
-}
-
-impl TimingIdentity {
-    fn key(&self) -> String {
-        format!("{:x}", Sha256::digest(format!("{self:?}")))
+        }]
+    } else {
+        Vec::new()
     }
 }
 
-impl Default for TimingPolicy {
-    fn default() -> Self {
-        Self {
-            absolute_ms: Some(10_000),
-            regression_factor: Some(2.0),
-            regression_delta_ms: Some(1_000),
-            minimum_samples: Some(5),
-        }
-    }
-}
-
-/// The environment settings that describe what a sim costs. Settings that only
-/// steer where the recorder writes are excluded, because the whole host block
-/// is hashed into every timing identity.
+/// Workload settings retained with the run, excluding recording destinations
+/// and the per-invocation log clock.
 fn ambient_settings(
     vars: impl Iterator<Item = (String, String)>,
     prefixes: &[String],
 ) -> std::collections::BTreeMap<String, String> {
     vars.filter(|(key, _)| {
-        (["STONE_", "SIM_", "ROCK_", "SDL_"].iter().any(|prefix| key.starts_with(prefix))
+        (["STONE_", "SIM_", "ROCK_", "SDL_"]
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
             || prefixes.iter().any(|prefix| key.starts_with(prefix)))
-            && key != "ROCK_SIM_LOG_DIR" && !key.starts_with("ROCK_SIM_WARN_")
-            // `rock-log` stamps a fresh wall-clock origin here at process
-            // entry so a driver and its respawned children share one log
-            // clock. It is different on every invocation and says nothing
-            // about cost; recorded, it would make every identity unique.
-            // `run_start` already carries `started_at_unix_ms`.
+            && key != "ROCK_SIM_LOG_DIR"
+            && !key.starts_with("ROCK_SIM_WARN_")
             && key != "ROCK_LOG_EPOCH_MS"
     })
     .collect()
@@ -180,27 +59,21 @@ pub(super) fn host_context(project: &str) -> anyhow::Result<Value> {
 type EntryKey = (u64, u64);
 
 pub(super) struct Timings {
-    policy: TimingPolicy,
-    history: HistoricalTimings,
     /// The most recent finished duration of each (project, entry name),
     /// on this host, under any workload or verdict. Scheduling input, never a baseline.
     latest: HashMap<(String, String), u64>,
     host: Value,
-    config: Value,
+    project: Option<String>,
     source_files: HashMap<String, String>,
     source_clean: bool,
-    quiet: Value,
-    runtime: HashMap<EntryKey, Value>,
-    env: HashMap<u64, Value>,
-    active: HashMap<EntryKey, (u64, String, Option<TimingIdentity>)>,
+    active: HashMap<EntryKey, (u64, String)>,
     phases: HashMap<String, u64>,
     results: HashMap<u64, bool>,
     rows: Vec<Value>,
 }
 
 impl Timings {
-    pub(super) fn new(root: &Path, policy: TimingPolicy, host: Value) -> Self {
-        let mut history = HistoricalTimings::default();
+    pub(super) fn new(root: &Path, host: Value) -> Self {
         let mut latest = HashMap::new();
         match std::fs::read_dir(root) {
             Ok(dirs) => {
@@ -250,53 +123,17 @@ impl Timings {
                             }
                         }
                     }
-                    let Some(count) = policy.minimum_samples else {
-                        continue;
-                    };
-                    // Records written before per-entry acceptance have no
-                    // `baseline_eligible`; for them the old run-level
-                    // `accepted` is the only answer available, and it is
-                    // exactly the set they already contributed.
-                    if !value["baseline_eligible"]
-                        .as_bool()
-                        .unwrap_or_else(|| value["accepted"] == true)
-                    {
-                        continue;
-                    }
-                    for row in value["entries"].as_array().into_iter().flatten() {
-                        if row["passed"] != true || row["completed"] != true {
-                            continue;
-                        }
-                        if let (Some(name), Some(key), Some(ms)) = (
-                            row["name"].as_str(),
-                            row["identity"].as_str(),
-                            row["duration_ms"].as_u64(),
-                        ) {
-                            let samples = history
-                                .samples
-                                .entry((name.into(), key.into()))
-                                .or_default();
-                            if samples.len() < count {
-                                samples.push(ms);
-                            }
-                        }
-                    }
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => log::warn!(target: "SIM", "cannot inspect timing history: {e}"),
         }
         Self {
-            policy,
-            history,
             latest,
             host,
-            config: Value::Null,
+            project: None,
             source_files: HashMap::new(),
             source_clean: false,
-            quiet: Value::Null,
-            runtime: HashMap::new(),
-            env: HashMap::new(),
             active: HashMap::new(),
             phases: HashMap::new(),
             results: HashMap::new(),
@@ -308,32 +145,6 @@ impl Timings {
         self.source_files.clone_from(source_files);
     }
 
-    fn identity(&self, key: EntryKey) -> Option<TimingIdentity> {
-        let runtime = self.runtime.get(&key)?;
-        if runtime["width"].as_u64()? == 0
-            || runtime["height"].as_u64()? == 0
-            || runtime["jit"].as_str()?.is_empty()
-        {
-            return None;
-        }
-        self.host["machine"].as_str()?;
-        let id = TimingIdentity {
-            project: self.config["project_path"].as_str().map(str::to_owned),
-            workload: Some(json!({ "config": self.config, "quiet": self.quiet }).to_string()),
-            runtime: Some(json!({ "context": runtime }).to_string()),
-            machine: Some(self.host.to_string()),
-            backend: Some("skull".into()),
-            renderer: Some("gl".into()),
-            jobs: self.config["effective_jobs"].as_u64().map(|n| n as usize),
-            env: self
-                .env
-                .get(&key.0)
-                .filter(|env| env.is_array())
-                .map(Value::to_string),
-        };
-        id.comparable().then_some(id)
-    }
-
     fn complete(
         &mut self,
         key: EntryKey,
@@ -342,7 +153,7 @@ impl Timings {
         frame_count: Option<Value>,
         frame_timing: Option<Value>,
     ) -> Vec<TimingWarning> {
-        let Some((start, name, identity)) = self.active.remove(&key) else {
+        let Some((start, name)) = self.active.remove(&key) else {
             return Vec::new();
         };
         let ms = now.saturating_sub(start);
@@ -350,16 +161,11 @@ impl Timings {
             .source_files
             .get(&name)
             .map_or(Value::Null, |path| json!(path));
-        let baseline = identity
-            .as_ref()
-            .map(|id| self.history.samples(&name, id))
-            .unwrap_or(&[]);
-        let warnings = evaluate_entry(&name, ms, &self.policy, baseline);
+        let warnings = slow_warning(&name, ms);
         self.rows.push(json!({ "name": name, "occurrence_id": key.1,
             "source_file": source_file, "duration_ms": ms, "completed": completed,
             "frame_count": frame_count.unwrap_or(Value::Null),
-            "frame_timing": frame_timing.unwrap_or(Value::Null),
-            "identity": identity.map(|id| id.key()) }));
+            "frame_timing": frame_timing.unwrap_or(Value::Null) }));
         warnings
     }
 
@@ -371,24 +177,12 @@ impl Timings {
         match name {
             "run_start" => {
                 self.source_clean = fields["source"]["dirty"] == false;
-                self.quiet = fields["quiet"].clone();
             }
-            "run_config" => self.config = fields.clone(),
-            "worker_spawn" => {
-                self.env.insert(key.0, fields["env"].clone());
-            }
-            "entry_runtime_context" => {
-                self.runtime.insert(key, fields["context"].clone());
-            }
+            "run_config" => self.project = fields["project_path"].as_str().map(str::to_owned),
             "entry_start" => {
-                let identity = self.identity(key);
                 self.active.insert(
                     key,
-                    (
-                        now,
-                        fields["name"].as_str().unwrap_or("unknown").into(),
-                        identity,
-                    ),
+                    (now, fields["name"].as_str().unwrap_or("unknown").into()),
                 );
             }
             "entry_end" => {
@@ -424,41 +218,13 @@ impl Timings {
             "phase_end" => {
                 if let Some(phase) = fields["phase"].as_str() {
                     if let Some(start) = self.phases.remove(phase) {
-                        return evaluate_entry(
-                            &format!("phase {phase}"),
-                            now.saturating_sub(start),
-                            &self.policy,
-                            &[],
-                        );
+                        return slow_warning(&format!("phase {phase}"), now.saturating_sub(start));
                     }
                 }
             }
             _ => {}
         }
         Vec::new()
-    }
-
-    /// Whether this run's passing, completed rows may become baseline samples.
-    ///
-    /// AUTHOR DECISION: SIM TIMING BASELINE ACCEPTANCE, resolved per entry. The
-    /// unit being measured is the entry, so the run's PASS/FAIL verdict - a
-    /// fact about the *other* entries - does not veto it. The two conditions
-    /// kept are not statements about siblings:
-    ///
-    /// * `source_clean`: a dirty tree may hold modified production code, so its
-    ///   durations belong to no commit and cannot be compared against one.
-    /// * `complete`: this is `planned == finalized`, so an incomplete run is one
-    ///   the driver never accounted for - a global deadline, a kill, an
-    ///   interrupt. Those causes press on the whole process, biasing every entry
-    ///   in the run the same way, and a median cannot average out a bias its
-    ///   samples share.
-    ///
-    /// `accepted` is left alone rather than expressed as `baseline_eligible &&
-    /// PASS`, which it happens to equal today: `rock sim-report` prints it and
-    /// 750 records already carry it, so a later change to baseline eligibility
-    /// must not silently move what those records meant.
-    fn baseline_eligible(&self, finished: &Value) -> bool {
-        self.source_clean && finished["complete"] == true
     }
 
     pub(super) fn save(&self, path: &Path, finished: &Value) -> std::io::Result<()> {
@@ -476,13 +242,8 @@ impl Timings {
             })
             .collect::<Vec<_>>();
         let summary = json!({ "schema_version": 1, "host": self.host,
-            "project": self.config["project_path"],
-            "warning_policy": { "absolute_ms": self.policy.absolute_ms,
-                "regression_factor": self.policy.regression_factor,
-                "regression_delta_ms": self.policy.regression_delta_ms,
-                "minimum_samples": self.policy.minimum_samples },
+            "project": self.project,
             "accepted": self.source_clean && finished["complete"] == true && finished["status"] == "PASS",
-            "baseline_eligible": self.baseline_eligible(finished),
             "entries": entries });
         let pending = path.with_extension("json.pending");
         std::fs::write(&pending, serde_json::to_vec(&summary)?)?;
@@ -490,31 +251,19 @@ impl Timings {
     }
 
     pub(super) fn latest_duration_ms(&self, name: &str) -> Option<u64> {
-        let project = self.config["project_path"].as_str()?;
+        let project = self.project.as_ref()?;
         self.latest
-            .get(&(project.to_string(), name.to_string()))
+            .get(&(project.clone(), name.to_string()))
             .copied()
     }
 
     pub(super) fn message(&self, warning: &TimingWarning) -> String {
-        if let Some(baseline) = warning.baseline_ms {
-            format!(
-                "sim timing regression: {} took {:.3}s; baseline median {:.3}s from {} accepted samples (>{:.2}x and +{:.3}s)",
-                warning.label,
-                warning.duration_ms as f64 / 1000.0,
-                baseline / 1000.0,
-                self.policy.minimum_samples.unwrap_or(0),
-                self.policy.regression_factor.unwrap_or(0.0),
-                self.policy.regression_delta_ms.unwrap_or(0) as f64 / 1000.0
-            )
-        } else {
-            format!(
-                "slow sim: {} took {:.3}s (warning budget {:.3}s)",
-                warning.label,
-                warning.duration_ms as f64 / 1000.0,
-                self.policy.absolute_ms.unwrap_or(0) as f64 / 1000.0
-            )
-        }
+        format!(
+            "slow sim: {} took {:.3}s (warning budget {:.3}s)",
+            warning.label,
+            warning.duration_ms as f64 / 1000.0,
+            SLOW_MS as f64 / 1000.0
+        )
     }
 }
 
@@ -523,10 +272,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn absolute_warning_uses_the_fixed_threshold() {
+        assert!(slow_warning("sim", 9_999).is_empty());
+        let warnings = slow_warning("sim", 10_000);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].label, "sim");
+        assert_eq!(warnings[0].duration_ms, 10_000);
+    }
+
+    #[test]
+    fn timing_artifact_keeps_completed_and_interrupted_entries_for_consumers() {
+        let root = tempfile::tempdir().unwrap();
+        let mut timing = recorder(root.path());
+        timing.set_source_files(&HashMap::from([(
+            "sim".into(),
+            "tests/sims/example.rock".into(),
+        )]));
+        enter(&mut timing, false);
+        end(&mut timing, 1234, false);
+        timing.observe(
+            "entry_start",
+            &json!({ "worker_attempt": 2, "occurrence_id": 2, "name": "interrupted" }),
+            1500,
+        );
+        timing.observe(
+            "entry_result",
+            &json!({ "worker_attempt": 2, "occurrence_id": 2,
+                "verdict": "FAIL", "timed_out": true }),
+            2000,
+        );
+        let path = root.path().join("timings.json");
+        timing
+            .save(&path, &json!({ "complete": true, "status": "FAIL" }))
+            .unwrap();
+        let value: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["project"], "game");
+        let rows = value["entries"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["name"], "sim");
+        assert_eq!(rows[0]["source_file"], "tests/sims/example.rock");
+        assert_eq!(rows[0]["duration_ms"], 1234);
+        assert_eq!(rows[0]["completed"], true);
+        assert_eq!(rows[1]["name"], "interrupted");
+        assert_eq!(rows[1]["source_file"], Value::Null);
+        assert_eq!(rows[1]["duration_ms"], 500);
+        assert_eq!(rows[1]["completed"], false);
+    }
+
+    #[test]
     fn scheduling_history_ignores_foreign_hosts_stale_schemas_and_unfinished_rows() {
         let root = tempfile::tempdir().unwrap();
         let mut previous = recorder(root.path());
-        enter(&mut previous, true, 1280);
+        enter(&mut previous, true);
         end(&mut previous, 7_321, true);
         retain(
             root.path(),
@@ -538,8 +336,8 @@ mod tests {
         let original: Value =
             serde_json::from_slice(&std::fs::read(retained.join("timings.json")).unwrap()).unwrap();
         let lookup = |host: Value| {
-            let mut next = Timings::new(root.path(), policy(), host);
-            enter(&mut next, true, 1280);
+            let mut next = Timings::new(root.path(), host);
+            enter(&mut next, true);
             next.latest_duration_ms("sim")
         };
         let host = original["host"].clone();
@@ -566,15 +364,12 @@ mod tests {
         assert_eq!(lookup(host), None);
     }
 
-    /// Dispatch order reads what an entry cost most recently in this project,
-    /// whatever the tree or verdict was: a failing or dirty run still spent
-    /// that long. Only an entry that never finished has no cost to report.
     #[test]
     fn the_latest_finished_duration_per_project_is_kept_for_dispatch() {
         let root = tempfile::tempdir().unwrap();
         let record = |dir: &str, project: &str, duration: u64, finished: bool| {
             let mut timing = recorder(root.path());
-            enter(&mut timing, false, 1280);
+            enter(&mut timing, false);
             timing.observe(
                 "run_config",
                 &json!({ "project_path": project, "effective_jobs": 4 }),
@@ -602,107 +397,26 @@ mod tests {
         record("03", "sample", 9_000, true);
         record("04", "game", 60_000, false);
         let mut next = recorder(root.path());
-        enter(&mut next, true, 1280);
+        enter(&mut next, true);
         assert_eq!(next.latest_duration_ms("sim"), Some(3_000));
         assert_eq!(next.latest_duration_ms("never_ran"), None);
     }
 
-    fn warns(name: &str, duration: u64, baseline: &[u64], kind: TimingWarningKind) -> bool {
-        evaluate_entry(name, duration, &policy(), baseline)
-            .iter()
-            .any(|warning| warning.kind == kind)
-    }
-
-    fn baseline_of(warnings: &[TimingWarning]) -> Option<f64> {
-        warnings.iter().find_map(|warning| warning.baseline_ms)
-    }
-
-    /// Save `timing` as the retained run `name` under `root`.
     fn retain(root: &Path, name: &str, timing: &Timings, finished: &Value) {
         let dir = root.join(name);
         std::fs::create_dir(&dir).unwrap();
         timing.save(&dir.join("timings.json"), finished).unwrap();
     }
 
-    fn policy() -> TimingPolicy {
-        TimingPolicy {
-            absolute_ms: Some(10_000),
-            regression_factor: Some(2.0),
-            regression_delta_ms: Some(1_000),
-            minimum_samples: Some(5),
-        }
-    }
-
-    fn identity(machine: &str, backend: &str) -> TimingIdentity {
-        TimingIdentity {
-            project: Some("game".into()),
-            workload: Some("routine".into()),
-            runtime: Some("1280x720 GL JIT on".into()),
-            machine: Some(machine.into()),
-            backend: Some(backend.into()),
-            renderer: Some("gl".into()),
-            jobs: Some(4),
-            env: Some("[]".into()),
-        }
-    }
-
-    #[test]
-    fn absolute_warning_uses_explicit_threshold() {
-        assert!(warns("slow", 10_000, &[], TimingWarningKind::Absolute));
-        assert!(!warns("fast", 9_999, &[], TimingWarningKind::Absolute));
-    }
-
-    #[test]
-    fn historical_warning_requires_all_regression_guards() {
-        let baseline = [1_000; 5];
-        let kind = TimingWarningKind::Historical;
-        assert!(warns("slow", 3_000, &baseline, kind));
-        assert!(!warns("factor_boundary", 2_000, &baseline, kind));
-        assert!(!warns("delta_boundary", 1_999, &baseline, kind));
-        assert!(!warns("too_few", 3_000, &[1_000; 4], kind));
-    }
-
-    #[test]
-    fn historical_samples_require_exact_context_identity() {
-        let mut history = HistoricalTimings::default();
-        let expected = identity("studio-a", "skull");
-        history.insert("sim", expected.clone(), 1_000);
-        assert_eq!(history.samples("sim", &expected), &[1_000]);
-
-        for unlike in [identity("studio-b", "skull"), identity("studio-a", "bone")] {
-            assert!(history.samples("sim", &unlike).is_empty());
-        }
-
-        let mut unknown = expected;
-        unknown.jobs = None;
-        assert!(!unknown.comparable());
-        assert!(history.samples("sim", &unknown).is_empty());
-    }
     fn recorder(root: &Path) -> Timings {
-        Timings::new(
-            root,
-            policy(),
-            json!({ "machine": "fixture", "logical_cpus": 4 }),
-        )
+        Timings::new(root, json!({ "machine": "fixture", "logical_cpus": 4 }))
     }
 
-    fn enter(timings: &mut Timings, clean: bool, width: u64) {
+    fn enter(timings: &mut Timings, clean: bool) {
         timings.observe("run_start", &json!({ "source": { "dirty": !clean } }), 0);
         timings.observe(
             "run_config",
             &json!({ "project_path": "game", "effective_jobs": 4 }),
-            0,
-        );
-        timings.observe(
-            "worker_spawn",
-            &json!({ "worker_attempt": 1, "occurrence_id": 1, "name": "sim",
-            "env": [] }),
-            0,
-        );
-        timings.observe(
-            "entry_runtime_context",
-            &json!({ "worker_attempt": 1, "occurrence_id": 1,
-            "context": { "width": width, "height": 720, "jit": "on" } }),
             0,
         );
         timings.observe(
@@ -753,170 +467,6 @@ mod tests {
         assert_eq!(timing.rows[0]["source_file"], "tests/sims/example.rock");
     }
 
-    /// Runs 0-2 are each excluded for a different reason - a dirty tree, an
-    /// entry that failed, a run that was never fully accounted for - and each
-    /// is slow enough to be obvious in the median if it leaked in. The run's
-    /// PASS/FAIL verdict is deliberately not among them: per-entry acceptance
-    /// no longer vetoes on it, and the tests above cover it instead.
-    #[test]
-    fn persisted_baselines_exclude_bad_runs_and_never_follow_a_regression_upward() {
-        let root = tempfile::tempdir().unwrap();
-        for index in 0..8 {
-            let mut timing = recorder(root.path());
-            enter(&mut timing, index != 0, 1280);
-            end(
-                &mut timing,
-                if index < 3 { 100_000 } else { 1_000 },
-                index != 1,
-            );
-            retain(
-                root.path(),
-                &format!("{index:02}"),
-                &timing,
-                &json!({ "complete": index != 2, "status": "PASS" }),
-            );
-        }
-        let mut candidate = recorder(root.path());
-        enter(&mut candidate, true, 1280);
-        let warnings = end(&mut candidate, 3_000, true);
-        assert_eq!(baseline_of(&warnings), Some(1_000.0));
-        retain(
-            root.path(),
-            "99",
-            &candidate,
-            &json!({ "complete": true, "status": "PASS" }),
-        );
-        let mut next = recorder(root.path());
-        enter(&mut next, true, 1280);
-        assert_eq!(baseline_of(&end(&mut next, 3_000, true)), Some(1_000.0));
-        let mut different = recorder(root.path());
-        enter(&mut different, true, 2560);
-        assert!(end(&mut different, 3_000, true).is_empty());
-    }
-
-    /// One invocation of the same suite. `epoch` moves between two ordinary
-    /// `rock sim` runs of the identical selection: `rock-log` stamps a fresh
-    /// shared epoch into the environment.
-    #[derive(Clone)]
-    struct Invocation {
-        epoch: u64,
-        jobs: u64,
-        machine: &'static str,
-        dirty: bool,
-        env: Vec<(&'static str, &'static str)>,
-    }
-
-    impl Default for Invocation {
-        fn default() -> Self {
-            Self {
-                epoch: 1_788_000_000_000,
-                jobs: 8,
-                machine: "Darwin Mac 25.5.0 arm64\n",
-                dirty: false,
-                env: vec![("SIM_DRAW", "none")],
-            }
-        }
-    }
-
-    /// The host block a real invocation records, built through the same
-    /// projection production uses rather than a hand-written constant.
-    fn invocation_host(run: &Invocation) -> Value {
-        let ambient = ambient_settings(
-            [
-                ("ROCK_BUILD_COMMAND".to_string(), "sim".to_string()),
-                ("ROCK_LOG_EPOCH_MS".to_string(), run.epoch.to_string()),
-                ("ROCK_SIM_LOG_DIR".to_string(), "/tmp/history".to_string()),
-            ]
-            .into_iter(),
-            &[],
-        );
-        json!({ "machine": run.machine, "arch": "aarch64", "logical_cpus": 14,
-            "ambient": ambient })
-    }
-
-    /// Drive one accepted invocation to completion and return the recorder
-    /// together with the warnings raised for the sim under observation.
-    fn invoke(root: &Path, run: &Invocation, duration: u64) -> (Timings, Vec<TimingWarning>) {
-        let mut timing = Timings::new(root, policy(), invocation_host(run));
-        timing.observe(
-            "run_start",
-            &json!({ "source": { "dirty": run.dirty }, "quiet": false }),
-            0,
-        );
-        timing.observe(
-            "run_config",
-            &json!({ "project_path": "game", "resolved_entries": ["sim"],
-            "effective_jobs": run.jobs }),
-            0,
-        );
-        timing.observe(
-            "worker_spawn",
-            &json!({ "worker_attempt": 1, "occurrence_id": 1,
-            "name": "sim", "env": run.env }),
-            0,
-        );
-        timing.observe(
-            "entry_runtime_context",
-            &json!({ "worker_attempt": 1, "occurrence_id": 1,
-            "context": { "width": 1280, "height": 720, "jit": "on" } }),
-            0,
-        );
-        timing.observe(
-            "entry_start",
-            &json!({ "worker_attempt": 1, "occurrence_id": 1,
-            "name": "sim" }),
-            0,
-        );
-        let warnings = timing.observe(
-            "entry_end",
-            &json!({ "worker_attempt": 1, "occurrence_id": 1 }),
-            duration,
-        );
-        timing.observe(
-            "entry_result",
-            &json!({ "worker_attempt": 1, "occurrence_id": 1,
-            "verdict": "PASS", "timed_out": false }),
-            duration,
-        );
-        (timing, warnings)
-    }
-
-    /// Five runs of one sim, differing only in the churn a repeat invocation
-    /// always produces, each saved as history under the given terminal record.
-    fn history_of(root: &Path, template: &Invocation, finished: &Value) {
-        history_with(root, template, |_| (1_000, finished.clone()));
-    }
-
-    /// `shape` gives each of the five runs its duration and terminal record.
-    fn history_with(root: &Path, template: &Invocation, shape: impl Fn(u64) -> (u64, Value)) {
-        for index in 0..5u64 {
-            let run = Invocation {
-                epoch: template.epoch + index * 263_772,
-                ..template.clone()
-            };
-            let (duration, finished) = shape(index);
-            let (timing, _) = invoke(root, &run, duration);
-            retain(root, &format!("{index:02}"), &timing, &finished);
-        }
-    }
-
-    /// The same five runs under a terminal record that passes outright.
-    fn accepted_history(root: &Path) {
-        history_of(
-            root,
-            &Invocation::default(),
-            &json!({ "complete": true, "status": "PASS" }),
-        );
-    }
-
-    /// A candidate run of the same sim, distinct from every history entry.
-    fn candidate(template: &Invocation) -> Invocation {
-        Invocation {
-            epoch: 1_788_009_999_999,
-            ..template.clone()
-        }
-    }
-
     #[test]
     fn the_recorded_host_keeps_cost_settings_and_drops_per_invocation_ones() {
         let environment = |epoch: &str| {
@@ -960,177 +510,10 @@ mod tests {
     }
 
     #[test]
-    fn repeated_runs_of_one_sim_accumulate_a_baseline() {
-        let root = tempfile::tempdir().unwrap();
-        accepted_history(root.path());
-        let (_, warnings) = invoke(root.path(), &candidate(&Invocation::default()), 3_000);
-        assert_eq!(
-            baseline_of(&warnings),
-            Some(1_000.0),
-            "five accepted runs of the same sim must form a baseline; identity churn \
-             that has nothing to do with cost keeps the historical detector dead"
-        );
-    }
-
-    /// AUTHOR DECISION: SIM TIMING BASELINE ACCEPTANCE - per-entry acceptance.
-    /// The game suite carries known failures, so its run status is permanently
-    /// `FAIL`. Under run-level acceptance that suite can never form a baseline,
-    /// which leaves the historical detector dead for exactly the long sims that
-    /// most need a regression guard.
-    #[test]
-    fn a_sim_that_passed_inside_a_failing_run_still_forms_a_baseline() {
-        let root = tempfile::tempdir().unwrap();
-        history_of(
-            root.path(),
-            &Invocation::default(),
-            &json!({ "complete": true, "status": "FAIL" }),
-        );
-        let (_, warnings) = invoke(root.path(), &candidate(&Invocation::default()), 3_000);
-        assert_eq!(
-            baseline_of(&warnings),
-            Some(1_000.0),
-            "a sim that passed contributes its own cost even when a sibling \
-             failed; the run verdict is a fact about the other entries"
-        );
-    }
-
-    /// The risk per-entry acceptance knowingly takes on: a run can fail because
-    /// the machine was disturbed, and the sims that passed in it may have been
-    /// slowed by the same disturbance. The median of at least five samples is
-    /// the mitigation the author relied on; this pins that it holds.
-    #[test]
-    fn one_inflated_sample_from_a_failing_run_does_not_move_the_median() {
-        let root = tempfile::tempdir().unwrap();
-        let template = Invocation::default();
-        // The first run failed on a loaded machine, and the sim that passed
-        // inside it took forty times its quiet-machine cost.
-        history_with(root.path(), &template, |index| {
-            let first = index == 0;
-            (
-                if first { 40_000 } else { 1_000 },
-                json!({ "complete": true, "status": if first { "FAIL" } else { "PASS" } }),
-            )
-        });
-        let (_, warnings) = invoke(root.path(), &candidate(&template), 3_000);
-        assert_eq!(
-            baseline_of(&warnings),
-            Some(1_000.0),
-            "one sample inflated by a disturbed machine must not lift the \
-             baseline and mute the regressions it exists to catch"
-        );
-    }
-
-    /// The two run-level vetoes per-entry acceptance keeps. Neither is a
-    /// statement about sibling entries, so neither is what the decision drops.
-    #[test]
-    fn a_baseline_still_refuses_entries_from_a_dirty_or_unaccounted_run() {
-        for (reason, template, finished) in [
-            (
-                "a working tree that may hold modified production code",
-                Invocation {
-                    dirty: true,
-                    ..Invocation::default()
-                },
-                json!({ "complete": true, "status": "FAIL" }),
-            ),
-            (
-                "a run whose planned entries were never all accounted for",
-                Invocation::default(),
-                json!({ "complete": false, "status": "FAIL" }),
-            ),
-        ] {
-            let root = tempfile::tempdir().unwrap();
-            history_of(root.path(), &template, &finished);
-            let (_, warnings) = invoke(root.path(), &candidate(&template), 3_000);
-            assert!(
-                warnings
-                    .iter()
-                    .all(|warning| warning.kind != TimingWarningKind::Historical),
-                "per-entry acceptance must not admit samples from {reason}"
-            );
-        }
-    }
-
-    /// The 750 records written before this field existed carry no
-    /// `baseline_eligible`. They stay readable and contribute exactly the set
-    /// they always did - the ones the old run-level gate marked `accepted`.
-    #[test]
-    fn records_predating_the_new_field_fall_back_to_accepted() {
-        for (accepted, expected) in [(true, Some(1_000.0)), (false, None)] {
-            let root = tempfile::tempdir().unwrap();
-            accepted_history(root.path());
-            for index in 0..5u64 {
-                let path = root.path().join(format!("{index:02}")).join("timings.json");
-                let mut value: Value =
-                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-                let object = value.as_object_mut().unwrap();
-                object.remove("baseline_eligible");
-                object.insert("accepted".into(), json!(accepted));
-                std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-            }
-            let (_, warnings) = invoke(root.path(), &candidate(&Invocation::default()), 3_000);
-            assert_eq!(
-                baseline_of(&warnings),
-                expected,
-                "a record from before per-entry acceptance contributes exactly \
-                 when the old gate accepted it"
-            );
-        }
-    }
-
-    /// Run over both populations a baseline can now be built from: a suite that
-    /// passed outright, and one that failed while the sim under observation
-    /// passed. Per-entry acceptance widens what reaches the history, so the
-    /// identity has to keep refusing unlike contexts out of the wider set too.
-    #[test]
-    fn a_baseline_still_refuses_samples_from_an_unlike_context() {
-        for status in ["PASS", "FAIL"] {
-            let root = tempfile::tempdir().unwrap();
-            history_of(
-                root.path(),
-                &Invocation::default(),
-                &json!({ "complete": true, "status": status }),
-            );
-            for (reason, unlike) in [
-                (
-                    "another machine",
-                    Invocation {
-                        machine: "Darwin other-host 25.5.0 arm64\n",
-                        ..Invocation::default()
-                    },
-                ),
-                (
-                    "another parallelism",
-                    Invocation {
-                        jobs: 1,
-                        ..Invocation::default()
-                    },
-                ),
-                (
-                    "another sim environment",
-                    Invocation {
-                        env: vec![("SIM_DRAW", "on_demand")],
-                        ..Invocation::default()
-                    },
-                ),
-            ] {
-                let (_, warnings) = invoke(root.path(), &unlike, 3_000);
-                assert!(
-                    warnings
-                        .iter()
-                        .all(|warning| warning.kind != TimingWarningKind::Historical),
-                    "a sample from {reason} is not comparable and must not be judged against \
-                     a baseline built from {status} runs"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn failed_open_entries_and_cleanup_phases_still_warn() {
         let root = tempfile::tempdir().unwrap();
         let mut timing = recorder(root.path());
-        enter(&mut timing, false, 1280);
+        enter(&mut timing, false);
         let warnings = timing.observe(
             "entry_result",
             &json!({ "worker_attempt": 1,
