@@ -139,7 +139,7 @@ impl FnEmit<'_> {
         if let Inst::Call { func, .. } = self.f.insts[iid] {
             let cf = &self.ws.module(func.module).functions[func.func];
             let name = declared_name(cf.name.as_str());
-            let constructor = matches!(name, "v" | "bvec3") && GlslIntrinsics.lookup(cf).is_some();
+            let constructor = matches!(name, "v" | "bvec3") && intrinsic_template(cf).is_some();
             if !constructor && vec_op_symbol(name).is_none() {
                 memo.insert(iid, false);
                 return false;

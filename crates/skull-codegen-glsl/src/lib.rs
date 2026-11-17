@@ -20,7 +20,6 @@ use skull_mir::gpu_layout::{
     texture_slots, uniform_array_block, vertex_attrs,
 };
 use skull_mir::instance::Instance;
-use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 use skull_mir::lower::{ScalarCtx, SpecSubst};
 use skull_mir::mangle::{declared_name, mangle_fn, symbol_of_key};
 use skull_mir::mir::*;

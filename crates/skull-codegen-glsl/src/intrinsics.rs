@@ -2,13 +2,8 @@
 
 use super::*;
 
-/// The GLSL tier-0 intrinsic table: one row per
-/// (name, arity) -> `$1..$n` expression template. Single source for both
-/// [`GlslIntrinsics::lookup`] (call-site rendering) and
-/// [`GlslIntrinsics::entries`] (the fail-closed key surface), so the two can
-/// never drift. Keyed by base name + arity over stdlib declarations only (see
-/// [`intrinsic_template`]). Vector operators (`__op_*` reaching codegen are non-scalar, so
-/// Vec) are handled at the call site, not here.
+/// Stdlib name and arity to GLSL expression template. Vector operators render
+/// at the call site. User functions with matching spellings keep their bodies.
 const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     ("sin", 1, "sin($1)"),
     ("cos", 1, "cos($1)"),
@@ -85,7 +80,7 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
 ];
 
 /// The GLSL intrinsic template for a callee, or `None` if it must be emitted as
-/// a GLSL fn definition. Backs [`GlslIntrinsics::lookup`]. Only the stdlib's
+/// a GLSL fn definition. Only the stdlib's
 /// declarations are keyed (the Vec methods and constructors are plain stdlib
 /// fns): a user fn that shares a name and arity is its own function.
 pub(crate) fn intrinsic_template(f: &Function) -> Option<&'static str> {
@@ -100,38 +95,6 @@ pub(crate) fn intrinsic_template(f: &Function) -> Option<&'static str> {
         .iter()
         .find(|(name, ar, _)| *name == n && *ar == arity)
         .map(|(_, _, tmpl)| *tmpl)
-}
-
-/// The GLSL backend's [`IntrinsicTable`] -- the registry surface over
-/// [`GLSL_INTRINSICS`]. `lookup` is the tier-0 template; `entries` is the
-/// fail-closed key set (`unbacked_entries` checks each against the stdlib's
-/// `@intrinsic` declarations).
-pub struct GlslIntrinsics;
-
-impl IntrinsicTable for GlslIntrinsics {
-    fn backend(&self) -> &'static str {
-        "glsl"
-    }
-    fn lookup(&self, f: &Function) -> Option<Emission> {
-        intrinsic_template(f).map(Emission::Template)
-    }
-    fn entries(&self) -> Vec<IntrinsicEntry> {
-        GLSL_INTRINSICS
-            .iter()
-            .map(|(name, arity, _)| IntrinsicEntry {
-                name,
-                arity: *arity,
-            })
-            .collect()
-    }
-}
-
-/// Whether a callee that survived MIR lowering is rendered inline at call sites
-/// rather than emitted as a GLSL fn definition. Scalar operators do not reach
-/// this predicate: lowering turns them into native MIR instructions.
-pub(crate) fn renders_inline(f: &Function) -> bool {
-    GlslIntrinsics.lookup(f).is_some()
-        || (vec_op_symbol(declared_name(f.name.as_str())).is_some() && f.param_decls.len() == 2)
 }
 
 // Union of lexical and future-use keywords in GLSL ES 3.00 section 3.8 and
@@ -212,7 +175,7 @@ pub fn renders_inline_instance(
     inst: &Instance,
     interner: &MonoInterner,
 ) -> bool {
-    if GlslIntrinsics.lookup(f).is_some() {
+    if intrinsic_template(f).is_some() {
         return true;
     }
     if vec_op_symbol(declared_name(f.name.as_str())).is_none() || f.param_decls.len() != 2 {

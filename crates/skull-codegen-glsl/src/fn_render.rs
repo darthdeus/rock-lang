@@ -405,7 +405,7 @@ impl FnEmit<'_> {
                 .collect();
             return Ok(format!("{ctor}({})", rargs?.join(", ")));
         }
-        if let Some(Emission::Template(tmpl)) = GlslIntrinsics.lookup(cf) {
+        if let Some(tmpl) = intrinsic_template(cf) {
             let mut s = tmpl.to_string();
             let vector_bound_ty = if matches!(name, "min" | "max" | "clamp") {
                 param_types

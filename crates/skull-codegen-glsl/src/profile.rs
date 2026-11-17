@@ -55,8 +55,7 @@ pub(crate) fn lower_profiled_body(
     for (iid, inst) in body.insts.iter() {
         let construct = match inst {
             Inst::Call { func, .. } => {
-                let interner = stage_globals.is_some().then(|| scx.interner());
-                callees.push(callee_inst_at(ws, &body, iid, *func, span, interner)?);
+                callees.push(callee_inst_at(&body, iid, *func));
                 continue;
             }
             Inst::Global(name) => {

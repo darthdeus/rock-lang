@@ -119,14 +119,8 @@ fn emit_fragment_stage(
     let mut out = varying_decls(iface, "in");
     match &mrt_outputs {
         None => {
-            // `None` here means the interface declares no colour output while a
-            // FRAGMENT stage is being emitted -- an inconsistent plan, not a
-            // shape to guess a `vec4` for.
             let FragmentOutput::Single(k) = iface.fragment_output else {
-                return Err(err(
-                    entry_f.name_span,
-                    "internal: the interface declares no fragment output, but a fragment stage is being emitted",
-                ));
+                unreachable!("a planned fragment stage has an output")
             };
             out.push_str(&format!("out {} FragColor;\n\n", wire_glsl(k).name()))
         }

@@ -5,10 +5,7 @@ use super::*;
 impl FnEmit<'_> {
     /// The instantiation the call at `iid` reaches its callee at.
     ///
-    /// A LOOKUP, not a second derivation: [`callee_inst_at`] resolved and
-    /// validated every call site before this body could reach emission, and
-    /// `emit_fn_def_with` recorded the answers. A miss is compiler state --
-    /// the map is built from the same `mf.insts` walk this renders from.
+    /// The map and the renderer walk the same instructions.
     pub(crate) fn callee_inst(&self, iid: Idx<Inst>) -> &ShaderInstance {
         self.callee_insts
             .get(&iid)
@@ -49,52 +46,15 @@ impl FnEmit<'_> {
     }
 }
 
-/// A generic call needs one recorded type argument per declared parameter.
-/// Inline calls can render without a standalone concrete body.
-pub(crate) fn callee_inst_at(
-    ws: &Workspace,
-    mf: &MirFunc,
-    iid: Idx<Inst>,
-    func: FuncRef,
-    span: Span,
-    stage_interner: Option<&MonoInterner>,
-) -> Result<ShaderInstance, CompilerError> {
-    let cf = &ws.module(func.module).functions[func.func];
-    let instance = mf
-        .callee_instances
-        .get(&iid)
-        .cloned()
-        .unwrap_or_else(|| Instance::base(func));
-    let inline = match stage_interner {
-        Some(interner) => renders_inline_instance(ws, cf, &instance, interner),
-        None => renders_inline(cf),
-    };
-    let count = instance.args.len();
-    let expected = cf.generics.len();
-    if inline || expected == 0 || count == expected {
-        return Ok(ShaderInstance::new(instance));
-    }
-    let name = cf.name;
-    let message = match (stage_interner.is_some(), count) {
-        (true, 0) => format!(
-            "shader profile: the call to generic `{name}` has no recorded instantiation, so GLSL has no concrete shape to emit"
-        ),
-        (false, 0) => format!(
-            "shader profile: the call to generic `{name}` has no recorded instantiation -- either \
-             none was recorded, or a type parameter was left uninstantiated -- so GLSL has no \
-             concrete shape to emit it at. A GPU has no boxed representation for an unreified \
-             generic, so this cannot fall back to the declaration"
-        ),
-        (true, _) => format!(
-            "shader profile: the call to generic `{name}` recorded {count} type argument(s) for {expected} declared generic(s)"
-        ),
-        (false, _) => format!(
-            "shader profile: the call to generic `{name}` recorded {count} type argument(s) for {expected} \
-             declared generic(s) -- the instantiation is positional, so a key of another \
-             length is not this callee's"
-        ),
-    };
-    Err(err(span, message))
+/// Lowering records concrete callees; unrecorded synthesized runtime calls
+/// are non-generic.
+pub(crate) fn callee_inst_at(mf: &MirFunc, iid: Idx<Inst>, func: FuncRef) -> ShaderInstance {
+    ShaderInstance::new(
+        mf.callee_instances
+            .get(&iid)
+            .cloned()
+            .unwrap_or_else(|| Instance::base(func)),
+    )
 }
 
 /// A `void main()` entry that destructures its terminal `return <struct
@@ -148,12 +108,11 @@ pub(crate) fn emit_fn_def_with(
     };
     let ret = ret_ty.map_or("void", |t| t.name());
 
-    // Resolve and VALIDATE every call site before anything renders, so the
-    // emitter reads one answer rather than re-deriving it per use.
+    // Share the recorded owner between type queries and rendering.
     let mut callee_insts: HashMap<Idx<Inst>, ShaderInstance> = HashMap::default();
     for (iid, inst) in mf.insts.iter() {
         if let Inst::Call { func, .. } = inst {
-            callee_insts.insert(iid, callee_inst_at(ws, mf, iid, *func, f.name_span, None)?);
+            callee_insts.insert(iid, callee_inst_at(mf, iid, *func));
         }
     }
 
