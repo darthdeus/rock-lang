@@ -1,0 +1,57 @@
+@test
+fn ui_submission_consumes_batches_in_z_order() {
+    let pool = render_batch_pool_new()
+    defer render_batch_pool_destroy(pool)
+    let previous_pool = CURRENT_UI_POOL
+    let previous_group = UI_DRAW_GROUP
+    let previous_base = UI_DRAW_GROUP_BASE_Z
+    defer {
+        CURRENT_UI_POOL = previous_pool
+        UI_DRAW_GROUP = previous_group
+        UI_DRAW_GROUP_BASE_Z = previous_base
+    }
+    UI_DRAW_GROUP = 0
+    UI_DRAW_GROUP_BASE_Z = 0
+    with_ui_pool(pool, () => {
+        for z in [20001, 7, -3] {
+            let batch = ensure_ui_batch(SampledTexture::Image(Image(0)), RenderProps {
+                z_layer: z, depth: DepthMode::Off, pixel_snap: false,
+                sampling: TextureFilter::Nearest,
+            })
+            for i in 0..3 { batch.verts[i] = vert(z as float + i, 2, 0, 0, 1, 1, 1, 1) }
+            batch.count = 3
+        }
+    })
+    ui_submission_probe_begin(true)
+    defer ui_submission_probe_stop()
+    ui_submission_probe_context("ui", "submission-order", "output", "target")
+    render_ui_batches(pool)
+    assert_eq(stone_ui_probe_accepted(), 3)
+    assert_eq(stone_ui_probe_consumed(), 3)
+    assert(stone_ui_probe_check(3))
+    assert_eq(stone_ui_probe_z(0), -3)
+    assert_eq(stone_ui_probe_z(1), 7)
+    assert_eq(stone_ui_probe_z(2), 20001)
+}
+
+@test
+fn ui_submission_scissor_applies_after_target_bind() {
+    assert(stone_gpu_host_ensure())
+    assert(stone_sprite_init())
+    gpu_programs_drain()
+    let target = new_canvas(32, 24, "rgba8")
+    defer destroy_canvas(target)
+    let red = new_canvas(32, 24, "rgba8")
+    defer destroy_canvas(red)
+    with_canvas(red, () => { clear_screen(1.0, 0.0, 0.0, 1.0) })
+    ui_bake_clear_canvas(target)
+    let pass = Pass { pipeline: BLIT_PIPELINE, slot_inputs: [(sampled_canvas(red), TextureFilter::Nearest)],
+        output: target, scissor: IRect { x: 4, y: 5, w: 8, h: 6 }, blend: BlendMode::Replace }
+    assert(run_pass(pass))
+    let pixels = canvas_read_pixels(target)
+    // Readback is top-left; the scissor is GL bottom-left.
+    assert(canvas_pixel_channel(pixels, 5, 14, 0) > 0.9)
+    assert_eq(canvas_pixel_channel(pixels, 3, 14, 0), 0.0)
+    assert_eq(canvas_pixel_channel(pixels, 5, 20, 0), 0.0)
+    assert_eq(CURRENT_CANVAS_HANDLE, 0)
+}

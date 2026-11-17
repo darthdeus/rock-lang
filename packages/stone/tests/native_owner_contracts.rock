@@ -1,0 +1,47 @@
+use stone_native::{native_flow_handle, native_flow_handle_set, native_flow_handles_reset,
+    stone_flow_submit, stone_flow_poll, stone_flow_wait, stone_flow_cancel};
+
+struct FlowContractOwner {}
+
+fn flow_contract_job() -> int {
+    let walk = native_buffer_u8(25)
+    for index in 0..25 { nb_set(walk, index, 1) }
+    let handle = stone_flow_submit(3, 3, 1, 1, 2, walk.ptr, walk.len)
+    assert(handle > 0)
+    assert_eq(stone_flow_wait(handle), 1)
+    return handle
+}
+
+@test
+fn native_flow_reset_cancels_only_its_owners_job() {
+    let a = FlowContractOwner {}
+    let b = FlowContractOwner {}
+    defer { native_flow_handles_reset(a); native_flow_handles_reset(b) }
+    let first = flow_contract_job()
+    defer { stone_flow_cancel(first) }
+    let second = flow_contract_job()
+    defer { stone_flow_cancel(second) }
+    native_flow_handle_set(a, 7, first)
+    native_flow_handle_set(b, 7, second)
+    native_flow_handles_reset(a)
+    assert_eq(native_flow_handle(a, 7), 0)
+    assert_eq(stone_flow_poll(first), -1)
+    assert_eq(native_flow_handle(b, 7), second)
+    assert_eq(stone_flow_poll(second), 1)
+}
+
+@test
+fn native_image_data_release_retires_its_handle() {
+    let data = new_owned_image_data(2, 3)
+    defer {
+        if stone_native_handle_state("image_data", data.0) == 1 {
+            release_owned_image_data(data)
+        }
+    }
+    assert_eq(stone_native_handle_state("image_data", data.0), 1)
+    image_data_set_pixel(data, 0, 0, 1.0, 0.0, 0.0, 1.0)
+    let (r, _, _, _) = image_data_get_pixel(data, 0, 0)
+    assert_eq(r, 1.0)
+    release_owned_image_data(data)
+    assert_eq(stone_native_handle_state("image_data", data.0), 0)
+}
