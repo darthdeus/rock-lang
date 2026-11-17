@@ -1,0 +1,69 @@
+value Detail { kept: int, spare: int }
+value Snapshot {
+    used: int,
+    unused0: int = 0, unused1: int = 0, unused2: int = 0, unused3: int = 0,
+    unused4: int = 0, unused5: int = 0, unused6: int = 0, unused7: int = 0,
+    child: Detail?, ignored: Detail? = null, notes: [int],
+}
+struct Holder { snapshot: Snapshot, reads: int = 0, mutations: int = 0 }
+
+fn holder(present: bool) -> Holder {
+    return Holder { snapshot: Snapshot { used: 7,
+        child: if present { Detail { kept: 11, spare: 13 } } else { null },
+        notes: [] } }
+}
+
+fn mutate(h: Holder) {
+    h.mutations += 1
+    h.snapshot.used = 70
+    if h.snapshot.child != null { h.snapshot.child.kept = 110 }
+}
+
+fn consume(h: Holder) -> int {
+    let saved = h.snapshot
+    // A local value write requires owning the nullable children.
+    saved.used += 1
+    mutate(h)
+    return saved.used + (saved.child?.kept ?? 0)
+}
+
+@nomangle inline(lua) fn observe_unused(h: Holder, fail: bool) = """
+    local value = h.snapshot
+    value.ignored = setmetatable({ spare = 31 }, { __index = function(_, key)
+        if key == 'kept' then
+            h.reads = h.reads + 1
+            if fail then error('unused leaf marker') end
+            return 71
+        end
+    end })
+"""
+
+@nomangle inline(lua) fn raises_marker(f: fn()) -> bool = """
+    local ok, err = pcall(f)
+    return not ok and string.find(tostring(err), 'unused leaf marker', 1, true) ~= nil
+"""
+
+@test(output = "19 8 180")
+fn selected_leaves_keep_the_original_snapshot() {
+    let present = holder(true)
+    let absent = holder(false)
+    let saved_present = consume(present)
+    let saved_absent = consume(absent)
+    print("{saved_present} {saved_absent} {present.snapshot.used + (present.snapshot.child?.kept ?? 0)}")
+}
+
+@test(output = "19 1 1", backends = "lua")
+fn an_unused_leaf_read_is_observable() {
+    let h = holder(true)
+    observe_unused(h, false)
+    let result = consume(h)
+    print("{result} {h.reads} {h.mutations}")
+}
+
+@test(output = "true 1 0", backends = "lua")
+fn an_unused_leaf_error_precedes_later_mutation() {
+    let h = holder(true)
+    observe_unused(h, true)
+    let failed = raises_marker(() => { let _ = consume(h) })
+    print("{failed} {h.reads} {h.mutations}")
+}

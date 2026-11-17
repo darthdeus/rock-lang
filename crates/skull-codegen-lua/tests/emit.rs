@@ -1981,6 +1981,22 @@ fn absent_pair(present: bool, x: int) -> bool { return pair(present, x) == null 
 }
 
 #[test]
+fn whole_gc_snapshot_retains_an_unused_child_error_probe() {
+    let src = include_str!("../../../tests/values/demanded_value_copy.rock");
+    let lua = emit_clean(src, "consume");
+    let read = lua
+        .find(".ignored")
+        .expect("unused child must still be checked");
+    let mutation = lua.find("mutate_Holder(").expect("later source mutation");
+    assert!(read < mutation, "{lua}");
+    assert!(lua[read..mutation].contains(".kept"), "{lua}");
+    assert!(
+        !lua.contains("Snapshot_vt("),
+        "root snapshot need not be repacked:\n{lua}"
+    );
+}
+
+#[test]
 fn ordinary_nullable_cdata_enum_return_keeps_boxed_transport() {
     let src = r#"
 enum PackedResult { Number(int), Empty }
