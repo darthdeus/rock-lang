@@ -1,0 +1,90 @@
+@inline
+fn snapshot_lambda(x: int) -> fn() -> int { return () => x + 1 }
+
+@inline
+fn forwarded_lambda(x: int) -> fn() -> int { return snapshot_lambda(x) }
+
+@nomangle
+fn transitive_fallback(x: int) -> fn() -> int { return forwarded_lambda(x) }
+
+@inline
+fn mutable_lambda(x: int) -> fn() -> int {
+    let n = x
+    let read = () => { n += 1; return n }
+    n += 10
+    return read
+}
+
+@inline
+fn loop_lambdas() -> [fn() -> int] {
+    let readers: [fn() -> int] = []
+    for i in 0..3 { readers.push(() => i) }
+    return readers
+}
+
+@nomangle
+fn snapshot_pair(a: int, b: int) -> [fn() -> int] {
+    return [snapshot_lambda(a), snapshot_lambda(b)]
+}
+
+@nomangle
+fn snapshot_iterations() -> [fn() -> int] {
+    let readers: [fn() -> int] = []
+    let x = 10
+    for i in 0..3 {
+        readers.push(snapshot_lambda(x))
+        x += 10
+    }
+    return readers
+}
+
+@nomangle
+fn mutable_fallback(x: int) -> fn() -> int { return mutable_lambda(x) }
+
+@nomangle
+fn loop_fallback() -> [fn() -> int] { return loop_lambdas() }
+
+@nomangle
+fn snapshot_hot_loop(iterations: int) -> int {
+    let total = 0
+    for i in 0..iterations {
+        let read = snapshot_lambda(i)
+        total += read()
+    }
+    return total
+}
+
+@test(output = "5050")
+fn test_hot_snapshot_lambda() { print("{snapshot_hot_loop(100)}") }
+
+@test(output = "4 8")
+fn test_transitive_lambda_fallback() {
+    let first = transitive_fallback(3)
+    let second = transitive_fallback(7)
+    print("{first()} {second()}")
+}
+
+@test(output = "4 8 4 8")
+fn test_repeated_lambda_splices() {
+    let pair = snapshot_pair(3, 7)
+    print("{pair[0]()} {pair[1]()} {pair[0]()} {pair[1]()}")
+}
+
+@test(output = "11 21 31")
+fn test_lambda_argument_snapshots_across_iterations() {
+    let readers = snapshot_iterations()
+    print("{readers[0]()} {readers[1]()} {readers[2]()}")
+}
+
+@test(output = "14 15 31 16")
+fn test_mutable_capture_fallback() {
+    let first = mutable_fallback(3)
+    let second = mutable_fallback(20)
+    print("{first()} {first()} {second()} {first()}")
+}
+
+@test(output = "0 1 2")
+fn test_loop_capture_fallback() {
+    let readers = loop_fallback()
+    print("{readers[0]()} {readers[1]()} {readers[2]()}")
+}
