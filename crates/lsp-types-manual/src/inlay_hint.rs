@@ -2,8 +2,6 @@ use crate::Position;
 
 lsp_struct! {
     out
-    /// Inlay hint information.
-    ///
     /// @since 3.17.0
     #[derive(Debug, Clone)]
     pub struct InlayHint {
@@ -22,17 +20,15 @@ pub enum InlayHintLabel {
 
 impl_untagged_enum!(InlayHintLabel { String });
 
-/// Inlay hint kinds.
-///
 /// @since 3.17.0
 #[derive(Debug, Eq, PartialEq, Copy, Clone)]
 pub struct InlayHintKind(i32);
 lsp_enum! {
 impl InlayHintKind {
-    /// An inlay hint that for a type annotation.
+    /// Type annotation hint.
     pub const TYPE: InlayHintKind = InlayHintKind(1);
 
-    /// An inlay hint that is for a parameter.
+    /// Parameter hint.
     pub const PARAMETER: InlayHintKind = InlayHintKind(2);
 }
 }

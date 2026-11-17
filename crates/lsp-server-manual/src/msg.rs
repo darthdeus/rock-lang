@@ -26,8 +26,6 @@ impl From<Notification> for Message {
     }
 }
 
-// --- RequestId / IdRepr ---
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RequestId(IdRepr);
 
@@ -204,7 +202,6 @@ message_fields! {
     }
 }
 
-// --- Message (untagged enum) ---
 // Dispatch by key presence: id+method -> Request, id only -> Response, method only -> Notification
 
 impl serde::Serialize for Message {
@@ -241,8 +238,6 @@ impl<'de> serde::Deserialize<'de> for Message {
     }
 }
 
-// --- ErrorCode ---
-
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub enum ErrorCode {
@@ -253,8 +248,6 @@ pub enum ErrorCode {
     ServerNotInitialized = -32002,
     RequestFailed = -32803,
 }
-
-// --- I/O helpers ---
 
 fn invalid_data(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)

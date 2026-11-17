@@ -3,8 +3,6 @@
 //! control the message dispatch loop yourself.
 //!
 //! Run with `RUST_LOG=lsp_server=debug` to see all the messages.
-//!
-//! Fork of lsp-server 0.7.9 with hand-rolled serde impls (no serde_derive dependency).
 
 #![warn(unused_lifetimes)]
 #![allow(clippy::print_stdout, clippy::disallowed_types)]

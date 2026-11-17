@@ -46,9 +46,8 @@ impl SemanticTokenType {
     }
 }
 
-/// A set of predefined token modifiers. This set is not fixed
-/// and clients can specify additional token types via the
-/// corresponding client capabilities.
+/// Predefined token modifiers. Clients can specify additional modifiers via
+/// their capabilities.
 ///
 /// @since 3.16.0
 #[derive(Debug, Eq, PartialEq, Hash, PartialOrd, Clone)]
@@ -90,7 +89,6 @@ lsp_struct! {
     }
 }
 
-/// The actual tokens.
 #[derive(Debug, Eq, PartialEq, Copy, Clone, Default)]
 pub struct SemanticToken {
     pub delta_line: u32,
@@ -103,13 +101,9 @@ pub struct SemanticToken {
 /// @since 3.16.0
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
 pub struct SemanticTokens {
-    /// An optional result id. If provided and clients support delta updating
-    /// the client will include the result id in the next semantic token request.
-    /// A server can then instead of computing all semantic tokens again simply
-    /// send a delta.
+    /// Identifies this result for a subsequent delta request.
     pub result_id: Option<String>,
 
-    /// The actual tokens.
     pub data: Vec<SemanticToken>,
 }
 

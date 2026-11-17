@@ -1168,9 +1168,8 @@ impl ResolvedPosition<'_> {
         if let Some((mid, idx)) = self.generic() {
             return Some(RefTarget::GenericParam(mid, idx));
         }
-        // Lower ranks reproduce the previous category order, then declaration,
-        // expression and pattern order within a category. Equal ranks keep the
-        // first occurrence, including ambiguous unqualified variant names.
+        // Rank by category, then declaration, expression and pattern order.
+        // Equal ranks keep the first occurrence, including ambiguous variants.
         let mut found = None;
         let mut offer = |rank, target| {
             if found.as_ref().is_none_or(|(best, _)| rank < *best) {
@@ -1827,9 +1826,7 @@ fn decorator_declared(ws: &Workspace, name: Ustr) -> bool {
         .any(|m| m.decorators.values().any(|d| d.def_key == name))
 }
 
-/// Whether `path` sits under a `tests/` directory segment -- the test-file
-/// rule shared by the demotion's "is the symbol test-scoped" and "am I in a
-/// test file" sides.
+/// Whether `path` sits under a `tests/` directory segment.
 pub(crate) fn is_test_path(path: &str) -> bool {
     path.split(['/', '\\']).any(|seg| seg == "tests")
 }
@@ -4084,13 +4081,6 @@ fn format_variant_arm(enum_name: Ustr, v: &hir::EnumVariantDef) -> String {
     };
     format!("{pat} => {{}}")
 }
-
-// ---------------------------------------------------------------------------
-// Feature queries graduated from `backend::gaps` -- completion, symbols,
-// signature help, typed holes -- plus the `clean_match`/`fz_boundary`
-// matching primitives they and the facade ranking share. Bone-native
-// inputs/outputs only; the lsp_types conversion stays in `backend`.
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SymCat {

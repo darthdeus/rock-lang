@@ -9,7 +9,6 @@ impl InsertTextFormat {
 }
 }
 
-/// The kind of a completion entry.
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub struct CompletionItemKind(i32);
 lsp_enum! {
@@ -47,7 +46,6 @@ lsp_struct! {
     }
 }
 
-/// How a completion was triggered.
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub struct CompletionTriggerKind(i32);
 lsp_enum! {
@@ -58,11 +56,9 @@ impl CompletionTriggerKind {
 
 lsp_struct! {
     out
-    /// Represents a collection of [completion items](#CompletionItem) to be presented
-    /// in the editor.
     #[derive(Debug, PartialEq, Clone, Default)]
     pub struct CompletionList {
-        /// The editor should request a new list as the prefix changes.
+        /// Whether the list should be refreshed as the user types.
         required pub is_incomplete: bool = "isIncomplete",
         required pub items: Vec<CompletionItem> = "items",
     }
@@ -95,8 +91,6 @@ lsp_struct! {
 
 lsp_struct! {
     out
-    /// Additional details for a completion item label.
-    ///
     /// @since 3.17.0
     #[derive(Debug, PartialEq, Default, Clone)]
     pub struct CompletionItemLabelDetails {

@@ -119,10 +119,8 @@ impl ReachabilityIndex {
             }
         }
 
-        // Method edges: `recv -.m()-> render(return)` for every UFCS function
-        // (first param a struct) returning a usable (non-unit) value. ONE pass
-        // over all functions -- this replaces the per-root-per-keystroke
-        // `ufcs_methods` scan.
+        // Index each UFCS function with a struct receiver and non-unit result
+        // once, for reuse across roots and queries.
         for m in ws.modules.iter() {
             for (fid, f) in m.functions.iter() {
                 if bone_core::modules::display_name(f.name.as_str()).starts_with("__") {

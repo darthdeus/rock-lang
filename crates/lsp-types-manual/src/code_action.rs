@@ -2,7 +2,6 @@ use crate::{Diagnostic, Range, TextDocumentIdentifier, WorkspaceEdit};
 
 lsp_struct! {
     in
-    /// Params for the CodeActionRequest
     #[derive(Debug, Eq, PartialEq, Clone)]
     pub struct CodeActionParams {
         required pub text_document: TextDocumentIdentifier = "textDocument",
@@ -48,8 +47,7 @@ lsp_struct! {
 
 lsp_struct! {
     in
-    /// Contains additional diagnostic information about the context in which
-    /// a code action is run.
+    /// Diagnostics relevant to the requested code action.
     #[derive(Debug, Eq, PartialEq, Clone, Default)]
     pub struct CodeActionContext {
         required pub diagnostics: Vec<Diagnostic> = "diagnostics",

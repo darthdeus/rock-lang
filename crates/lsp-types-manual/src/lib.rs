@@ -97,8 +97,8 @@ impl<'de> serde::Deserialize<'de> for NumberOrString {
 
 lsp_struct! {
     both
-    /// Position in a text document expressed as zero-based line and character offset.
-    /// A position is between two characters like an 'insert' cursor in a editor.
+    /// Zero-based line and character offset in a text document.
+    /// A position is between characters, like an editor's insertion cursor.
     #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Copy, Clone, Default, Hash)]
     pub struct Position {
         required pub line: u32 = "line",
@@ -116,8 +116,7 @@ impl Position {
 
 lsp_struct! {
     both
-    /// A range in a text document expressed as (zero-based) start and end positions.
-    /// A range is comparable to a selection in an editor. Therefore the end position is exclusive.
+    /// Zero-based start and end positions in a text document. The end is exclusive.
     #[derive(Debug, Eq, PartialEq, Copy, Clone, Default, Hash)]
     pub struct Range {
         required pub start: Position = "start",
@@ -135,7 +134,6 @@ impl Range {
 
 lsp_struct! {
     out
-    /// Represents a location inside a resource, such as a line inside a text file.
     #[derive(Debug, Eq, PartialEq, Clone, Hash)]
     pub struct Location {
         required pub uri: Uri = "uri",
@@ -145,8 +143,7 @@ lsp_struct! {
 
 lsp_struct! {
     both
-    /// Represents a diagnostic, such as a compiler error or warning.
-    /// Diagnostic objects are only valid in the scope of a resource.
+    /// A diagnostic scoped to one resource.
     #[derive(Debug, Eq, PartialEq, Clone, Default)]
     pub struct Diagnostic {
         required pub range: Range = "range",
@@ -159,7 +156,7 @@ lsp_struct! {
     }
 }
 
-/// The protocol currently supports the following diagnostic severities:
+/// Supported diagnostic severity values.
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone, Copy)]
 pub struct DiagnosticSeverity(i32);
 lsp_enum! {
@@ -185,11 +182,8 @@ lsp_struct! {
 
 lsp_struct! {
     out
-    /// A textual edit applicable to a text document.
-    ///
-    /// If n `TextEdit`s are applied to a text document all text edits describe changes to the initial document version.
-    /// Execution wise text edits should applied from the bottom to the top of the text document. Overlapping text edits
-    /// are not supported.
+    /// All edits in a set apply to the initial document version. Apply them from
+    /// bottom to top; overlapping edits are not supported.
     #[derive(Debug, Eq, PartialEq, Clone, Default)]
     pub struct TextEdit {
         required pub range: Range = "range",
@@ -199,7 +193,6 @@ lsp_struct! {
 
 lsp_struct! {
     out
-    /// A workspace edit represents changes to many resources managed in the workspace.
     #[derive(Debug, Eq, PartialEq, Clone, Default)]
     pub struct WorkspaceEdit {
         optional pub changes: HashMap<Uri, Vec<TextEdit>> = "changes",
@@ -217,7 +210,6 @@ impl WorkspaceEdit {
 
 lsp_struct! {
     in
-    /// Text documents are identified using a URI. On the protocol level, URIs are passed as strings.
     #[derive(Debug, Eq, PartialEq, Clone)]
     pub struct TextDocumentIdentifier {
         required pub uri: Uri = "uri",
@@ -226,7 +218,6 @@ lsp_struct! {
 
 lsp_struct! {
     in
-    /// Params of a request about a whole text document.
     #[derive(Debug, Eq, PartialEq, Clone)]
     pub struct TextDocumentParams {
         required pub text_document: TextDocumentIdentifier = "textDocument",
@@ -235,7 +226,6 @@ lsp_struct! {
 
 lsp_struct! {
     in
-    /// Params of a request about a range of a text document.
     #[derive(Debug, Eq, PartialEq, Clone)]
     pub struct TextDocumentRangeParams {
         required pub text_document: TextDocumentIdentifier = "textDocument",
@@ -245,7 +235,6 @@ lsp_struct! {
 
 lsp_struct! {
     in
-    /// A parameter literal used in requests to pass a text document and a position inside that document.
     #[derive(Debug, Eq, PartialEq, Clone)]
     pub struct TextDocumentPositionParams {
         required pub text_document: TextDocumentIdentifier = "textDocument",
@@ -253,7 +242,6 @@ lsp_struct! {
     }
 }
 
-/// A symbol kind.
 #[derive(Debug, Eq, PartialEq, Copy, Clone)]
 pub struct SymbolKind(i32);
 lsp_enum! {

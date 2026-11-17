@@ -2,7 +2,6 @@
 pub struct MessageType(i32);
 lsp_enum! {
 impl MessageType {
-    /// A warning message.
     pub const WARNING: MessageType = MessageType(2);
 }
 }

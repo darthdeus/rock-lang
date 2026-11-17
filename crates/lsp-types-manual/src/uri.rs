@@ -2,7 +2,7 @@ use std::{hash::Hash, ops::Deref, str::FromStr};
 
 use serde::{de::Error, Deserialize, Serialize};
 
-/// Newtype struct around `fluent_uri::Uri<String>` with serialization implementations that use `as_str()` and 'from_str()' respectively.
+/// LSP URI backed by `fluent_uri::Uri<String>`.
 #[derive(Debug, Clone)]
 pub struct Uri(fluent_uri::Uri<String>);
 
@@ -31,11 +31,6 @@ impl FromStr for Uri {
     type Err = fluent_uri::ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // TOUCH-UP:
-        // Use upstream `FromStr` implementation if and when
-        // https://github.com/yescallop/fluent-uri-rs/pull/10
-        // gets merged.
-        // fluent_uri::Uri::from_str(s).map(Self)
         fluent_uri::Uri::parse(s).map(|uri| Self(uri.to_owned()))
     }
 }
@@ -48,11 +43,6 @@ impl Deref for Uri {
     }
 }
 
-/*
-    TOUCH-UP: `PartialEq`, `Eq` and `Hash` could all be derived
-    if and when the respective implementations get merged upstream:
-    https://github.com/yescallop/fluent-uri-rs/pull/9
-*/
 // Parsed URI metadata may use interior cells, but map-key identity depends only
 // on the immutable owned text. Keep equality and hashing independent of metadata.
 impl PartialEq for Uri {
