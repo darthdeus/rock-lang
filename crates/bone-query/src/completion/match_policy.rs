@@ -1,17 +1,5 @@
-//! The completion ADMISSION knob. Every "does this candidate's name match the
-//! typed query well enough to appear at all" gate routes through `admit`, whose
-//! policy is a process/thread-wide switch -- so the whole completion surface
-//! flips between matchers at once for A/B tuning (`rock lsp completion-matrix`).
-//!
-//! Admission is deliberately SEPARATE from ranking: `match_band_exact`
-//! (`rank.rs`) still classifies every survivor into a coarse band (0 exact
-//! prefix .. 3 scattered) and `fuzzy_score` still rewards runs/boundaries. A
-//! run/boundary is a rank BOOST; a scatter is a rank DEMOTION; only "not a
-//! subsequence at all" is a rejection under the permissive policies. The strict
-//! `Clean` policy additionally rejects scatter at the gate (the historical
-//! behavior). Default is `Subseq3`: `Clean` under 3 chars (no short-query
-//! flood), full subsequence at 3+ (so `lotop` reaches `LOOT_OPEN`), scatter
-//! always demoted to band 3 below the prefix/clean matches.
+//! Completion admission controls which names enter ranking. Compare policies
+//! with `rock lsp completion <position> <prefixes>... --policies <list>`.
 
 use std::cell::Cell;
 

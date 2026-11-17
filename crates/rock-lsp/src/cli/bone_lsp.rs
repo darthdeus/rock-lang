@@ -1,9 +1,4 @@
-//! Bone-backed LSP CLI handlers, a thin one-shot shim over
-//! the same facade the persistent server uses (`bone_query`).
-//!
-//! There is exactly one bone-consumption path: this builds a `BoneWorkspace`,
-//! feeds it the single file, and calls the same query methods the server does,
-//! so CLI and server use the same queries.
+//! One-shot CLI queries over the same workspace used by the LSP server.
 
 use anyhow::Result;
 use bone_query::BoneWorkspace;
@@ -253,14 +248,7 @@ pub fn completion(file_path: &str, line: u32, column: u32, explain: bool) -> Res
     Ok(())
 }
 
-/// `rock lsp completion-matrix <file:line:col> --prefixes a,b,c
-/// [--policies clean,subseq,subseq3] [--top N]`.
-///
-/// Tuning harness: at ONE cursor, splice each test prefix in place of the
-/// identifier run ending there, run completion under each admission policy, and
-/// print a side-by-side matrix (rank x policy, cells `label [bBAND]`). Lets you
-/// eyeball what each policy admits/orders before picking a default. The real
-/// project is loaded so cross-file symbols resolve like the live server.
+/// Compare completion rankings for positional prefixes given to `rock lsp completion`.
 pub(crate) fn completion_matrix(
     file_path: &str,
     line: u32,
@@ -655,7 +643,6 @@ pub fn signature_help(file_path: &str, line: u32, column: u32) -> Result<()> {
 
     let pos = Position::new(line - 1, column - 1);
     match bone.signature_help(&file_path, pos) {
-        // Match the lua handler: serialize the SignatureHelp directly.
         Some(sh) => println!("{}", serde_json::to_string_pretty(&sh)?),
         None => println!(
             "{}",
@@ -685,7 +672,7 @@ pub fn document_symbols(file_path: &str) -> Result<()> {
 
 /// `rock lsp hole-info <file:line:col>`. Type holes only for now
 /// (bone rejects expression holes at lowering); prints nothing and exits 1 when
-/// the cursor isn't on a hole, matching the lua handler.
+/// the cursor is outside a hole.
 pub fn hole_info(file_path: &str, line: u32, column: u32) -> Result<()> {
     let (file_path, bone) = open_file(file_path)?;
 
