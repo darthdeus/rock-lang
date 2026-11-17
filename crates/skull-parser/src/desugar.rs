@@ -14,15 +14,7 @@
 
 use crate::ast::*;
 use rock_core::Span;
-use smallvec::SmallVec;
 use ustr::Ustr;
-
-/// Direct child-edge lists are transient (collected, iterated, dropped) and
-/// almost always 0-2 elements, so an inline `SmallVec` keeps the common case
-/// off the heap. The collect-into-a-buffer step is load-bearing: it releases
-/// the `&Ast` borrow so the caller can recurse with `&mut Ast`.
-pub(crate) type ExprEdges = SmallVec<[Idx<ExprData>; 4]>;
-pub(crate) type BlockEdges = SmallVec<[Idx<BlockData>; 2]>;
 
 /// Synthesize compiler-owned items. Every expression desugar (placeholder
 /// `_.f` [D1], compound-assign [D2], `^name` anaphoric, `.type_info` [D4]) is now
@@ -181,132 +173,6 @@ fn synth_newtype_operators(ast: &mut Ast) {
             });
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Structural child enumeration (shared by cook driver + rename)
-// ---------------------------------------------------------------------------
-
-/// Direct child `Expr` edges of `e` (not descending through blocks — those are
-/// returned by `child_blocks`).
-pub(crate) fn child_exprs(ast: &Ast, e: Idx<ExprData>) -> ExprEdges {
-    let mut out = ExprEdges::new();
-    match &ast.exprs[e].kind {
-        ExprKind::Null
-        | ExprKind::Unit
-        | ExprKind::Hole(_, _)
-        | ExprKind::Ident(_)
-        | ExprKind::Int(_, _)
-        | ExprKind::Float(_)
-        | ExprKind::String(_)
-        | ExprKind::Bool(_)
-        | ExprKind::BreakExpr
-        | ExprKind::ContinueExpr
-        | ExprKind::SiblingFieldRef(_)
-        | ExprKind::FunctionRef(_)
-        | ExprKind::AnaphoricIdent(_)
-        | ExprKind::Path { .. } => {}
-
-        ExprKind::Paren(x)
-        | ExprKind::As(x, _)
-        | ExprKind::Bitcast(x, _)
-        | ExprKind::ParenAscription(x, _)
-        | ExprKind::Not(x)
-        | ExprKind::BitNot(x)
-        | ExprKind::UnaryMinus(x)
-        | ExprKind::FieldAccess(x, _)
-        | ExprKind::SafeNavigation(x, _)
-        | ExprKind::QuestionMark(x)
-        | ExprKind::PreIncrement(x)
-        | ExprKind::PostIncrement(x)
-        | ExprKind::PreDecrement(x)
-        | ExprKind::PostDecrement(x)
-        | ExprKind::Spread(x)
-        | ExprKind::YieldDelegate(x) => out.push(*x),
-
-        ExprKind::Index(a, b) => {
-            out.push(*a);
-            out.push(*b);
-        }
-        ExprKind::BinOp { left, right, .. } => {
-            out.push(*left);
-            out.push(*right);
-        }
-        ExprKind::Assign { target, value, .. } => {
-            out.push(*target);
-            out.push(*value);
-        }
-        ExprKind::FunctionCall { func, args, .. } => {
-            out.push(*func);
-            out.extend(args.iter().map(|a| a.value));
-        }
-        ExprKind::ArrayLiteral(xs) | ExprKind::Tuple(xs) => {
-            out.extend(xs.iter().copied());
-        }
-        ExprKind::PathStructLiteral { bases, fields, .. } => {
-            out.extend(bases.iter().copied());
-            out.extend(fields.iter().map(|(_, v)| *v));
-        }
-        ExprKind::ReturnExpr(o) | ExprKind::Yield(o) => out.extend(o.iter().copied()),
-        ExprKind::SafeNavigationLet { receiver, .. } => out.push(*receiver),
-        ExprKind::Match { scrutinee, arms } => {
-            out.push(*scrutinee);
-            out.extend(arms.iter().filter_map(|a| a.guard));
-        }
-        ExprKind::If { branches, .. } => out.extend(branches.iter().map(|(c, _)| *c)),
-        ExprKind::IfLetChain { clauses, .. } => {
-            for c in clauses {
-                match c {
-                    IfLetClause::Binding { value, .. } => out.push(*value),
-                    IfLetClause::Condition(c) => out.push(*c),
-                }
-            }
-        }
-        // Block-bearing nodes: their inner exprs are reached via `child_blocks`.
-        ExprKind::Block(_) | ExprKind::Lambda { .. } => {}
-        ExprKind::InterpolatedString(parts) => {
-            for p in parts {
-                if let InterpolatedPart::Expr(x, spec) = p {
-                    out.push(*x);
-                    // Dynamic `{w}`/`{p}` sub-exprs are real children — they must
-                    // be cooked / renamed / substituted like any other.
-                    if let Some(s) = spec {
-                        out.extend(s.width_expr);
-                        out.extend(s.precision_expr);
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Direct child `Block` edges of `e`.
-pub(crate) fn child_blocks(ast: &Ast, e: Idx<ExprData>) -> BlockEdges {
-    let mut out = BlockEdges::new();
-    match &ast.exprs[e].kind {
-        ExprKind::Block(b) => out.push(*b),
-        ExprKind::Lambda { body, .. } => out.push(*body),
-        ExprKind::If {
-            branches,
-            else_branch,
-        } => {
-            out.extend(branches.iter().map(|(_, b)| *b));
-            out.extend(else_branch.iter().copied());
-        }
-        ExprKind::IfLetChain {
-            then_block,
-            else_block,
-            ..
-        } => {
-            out.push(*then_block);
-            out.extend(else_block.iter().copied());
-        }
-        ExprKind::Match { arms, .. } => out.extend(arms.iter().map(|a| a.body)),
-        ExprKind::SafeNavigationLet { body, .. } => out.push(*body),
-        _ => {}
-    }
-    out
 }
 
 /// Generate ordinary typed functions so default expressions and predicates use

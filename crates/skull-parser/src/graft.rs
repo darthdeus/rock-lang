@@ -12,6 +12,7 @@
 //! the same walk.
 
 use crate::ast::*;
+use crate::walk;
 use rock_core::Span;
 use ustr::Ustr;
 
@@ -197,50 +198,12 @@ impl<'s, 'd, R: Rewrite> Graft<'s, 'd, R> {
 
     fn stmt(&mut self, s: Idx<StatementData>) -> Idx<StatementData> {
         let mut data = self.source().stmts[s].clone();
-        match &mut data.kind {
-            StatementKind::Expression(e) | StatementKind::Defer(DeferKind::Expression(e)) => {
-                *e = self.expr(*e);
-            }
-            StatementKind::Let(l) => {
-                l.ty = l.ty.map(|t| self.ty(t));
-                l.value = l.value.map(|e| self.expr(e));
-                self.pattern(&mut l.pattern);
-                // The else block cannot see the pattern's bindings.
-                l.else_block = l.else_block.map(|b| self.block(b));
-                self.rw.bind_pattern(&mut l.pattern);
-            }
-            StatementKind::Static(st) => {
-                st.ty = st.ty.map(|t| self.ty(t));
-                st.value = self.expr(st.value);
-                self.rw.bind(&mut st.name.name);
-            }
-            StatementKind::NestedFn(f) => {
-                self.params(&mut f.params);
-                f.return_ty = f.return_ty.map(|t| self.ty(t));
-                f.body = self.block(f.body);
-            }
-            StatementKind::Return { value, .. } => *value = value.map(|e| self.expr(e)),
-            StatementKind::For(f) => {
-                f.ty = f.ty.map(|t| self.ty(t));
-                f.iter = self.expr(f.iter);
-                self.pattern(&mut f.pattern);
-                f.body = self.scoped(f.body, |rw| rw.bind_pattern(&mut f.pattern));
-            }
-            StatementKind::While(w) => {
-                w.condition = self.expr(w.condition);
-                w.body = self.block(w.body);
-            }
-            StatementKind::WhileLet(w) => {
-                self.pattern(&mut w.pattern);
-                w.value = self.expr(w.value);
-                w.body = self.scoped(w.body, |rw| rw.bind_pattern(&mut w.pattern));
-            }
-            StatementKind::Defer(DeferKind::Block(b))
-            | StatementKind::LifecycleHook { body: b, .. } => *b = self.block(*b),
-            StatementKind::Use(_)
-            | StatementKind::Break { .. }
-            | StatementKind::Continue { .. }
-            | StatementKind::Comment(_) => {}
+        if let StatementKind::NestedFn(f) = &mut data.kind {
+            self.params(&mut f.params);
+            f.return_ty = f.return_ty.map(|t| self.ty(t));
+            f.body = self.block(f.body);
+        } else {
+            walk::statement_mut(self, &mut data.kind);
         }
         data.span = self.rw.stamp().unwrap_or(data.span);
         self.dst.stmts.alloc(data)
@@ -252,14 +215,6 @@ impl<'s, 'd, R: Rewrite> Graft<'s, 'd, R> {
         {
             *id = arg.clone();
         }
-    }
-
-    fn scoped(&mut self, body: Idx<BlockData>, bind: impl FnOnce(&mut R)) -> Idx<BlockData> {
-        self.rw.enter();
-        bind(&mut self.rw);
-        let body = self.block(body);
-        self.rw.exit();
-        body
     }
 
     fn ctor(&self, id: &mut Ident) {
@@ -315,18 +270,6 @@ impl<'s, 'd, R: Rewrite> Graft<'s, 'd, R> {
 
     fn expr_kind(&mut self, kind: &mut ExprKind) {
         match kind {
-            ExprKind::Null
-            | ExprKind::Unit
-            | ExprKind::Int(_, _)
-            | ExprKind::Float(_)
-            | ExprKind::String(_)
-            | ExprKind::Bool(_)
-            | ExprKind::Hole(_, _)
-            | ExprKind::BreakExpr
-            | ExprKind::ContinueExpr
-            | ExprKind::SiblingFieldRef(_)
-            | ExprKind::FunctionRef(_)
-            | ExprKind::AnaphoricIdent(_) => {}
             ExprKind::Ident(id) => id.name = self.rw.resolve(id.name),
             ExprKind::Path { path, generic_args } => {
                 self.path(path);
@@ -338,59 +281,13 @@ impl<'s, 'd, R: Rewrite> Graft<'s, 'd, R> {
                 fields,
             } => {
                 self.path(path);
-                for b in bases {
-                    *b = self.expr(*b);
+                for e in bases {
+                    *e = self.expr(*e);
                 }
-                for (_, v) in fields {
-                    *v = self.expr(*v);
-                }
-            }
-            ExprKind::InterpolatedString(parts) => {
-                for p in parts {
-                    if let InterpolatedPart::Expr(e, spec) = p {
-                        *e = self.expr(*e);
-                        if let Some(s) = spec {
-                            s.width_expr = s.width_expr.map(|e| self.expr(e));
-                            s.precision_expr = s.precision_expr.map(|e| self.expr(e));
-                        }
-                    }
+                for (_, e) in fields {
+                    *e = self.expr(*e);
                 }
             }
-            ExprKind::Paren(x)
-            | ExprKind::Not(x)
-            | ExprKind::BitNot(x)
-            | ExprKind::UnaryMinus(x)
-            | ExprKind::FieldAccess(x, _)
-            | ExprKind::SafeNavigation(x, _)
-            | ExprKind::QuestionMark(x)
-            | ExprKind::PreIncrement(x)
-            | ExprKind::PostIncrement(x)
-            | ExprKind::PreDecrement(x)
-            | ExprKind::PostDecrement(x)
-            | ExprKind::Spread(x)
-            | ExprKind::YieldDelegate(x) => *x = self.expr(*x),
-            ExprKind::As(x, t) | ExprKind::Bitcast(x, t) | ExprKind::ParenAscription(x, t) => {
-                *x = self.expr(*x);
-                *t = self.ty(*t);
-            }
-            ExprKind::SafeNavigationLet {
-                receiver,
-                binding,
-                body,
-            } => {
-                *receiver = self.expr(*receiver);
-                *body = self.scoped(*body, |rw| rw.bind(&mut binding.name));
-            }
-            ExprKind::Index(left, right)
-            | ExprKind::BinOp { left, right, .. }
-            | ExprKind::Assign {
-                target: left,
-                value: right,
-            } => {
-                *left = self.expr(*left);
-                *right = self.expr(*right);
-            }
-            ExprKind::ReturnExpr(o) | ExprKind::Yield(o) => *o = o.map(|e| self.expr(e)),
             ExprKind::FunctionCall {
                 func,
                 generic_args,
@@ -401,119 +298,13 @@ impl<'s, 'd, R: Rewrite> Graft<'s, 'd, R> {
                 self.types(generic_args);
                 self.call_args(args);
             }
-            ExprKind::ArrayLiteral(xs) | ExprKind::Tuple(xs) => {
-                for x in xs {
-                    *x = self.expr(*x);
-                }
-            }
-            ExprKind::Block(b) => *b = self.block(*b),
-            ExprKind::Lambda {
-                params,
-                return_ty,
-                body,
-            } => {
-                for p in &mut *params {
-                    p.ty = p.ty.map(|t| self.ty(t));
-                }
-                *return_ty = return_ty.map(|t| self.ty(t));
-                *body = self.scoped(*body, |rw| {
-                    for p in params {
-                        rw.bind(&mut p.name.name);
-                    }
-                });
-            }
-            ExprKind::Match { scrutinee, arms } => {
-                *scrutinee = self.expr(*scrutinee);
-                for a in arms {
-                    self.pattern(&mut a.pattern);
-                    self.rw.enter();
-                    self.rw.bind_pattern(&mut a.pattern);
-                    a.guard = a.guard.map(|g| self.expr(g));
-                    a.body = self.block(a.body);
-                    self.rw.exit();
-                }
-            }
-            ExprKind::If {
-                branches,
-                else_branch,
-            } => {
-                for (c, b) in branches {
-                    *c = self.expr(*c);
-                    *b = self.block(*b);
-                }
-                *else_branch = else_branch.map(|b| self.block(b));
-            }
-            ExprKind::IfLetChain {
-                clauses,
-                then_block,
-                else_block,
-            } => {
-                // Each clause sees the bindings of the preceding clauses.
-                self.rw.enter();
-                for c in clauses {
-                    match c {
-                        IfLetClause::Binding { pattern, value } => {
-                            self.pattern(pattern);
-                            *value = self.expr(*value);
-                            self.rw.bind_pattern(pattern);
-                        }
-                        IfLetClause::Condition(c) => *c = self.expr(*c),
-                    }
-                }
-                *then_block = self.block(*then_block);
-                self.rw.exit();
-                *else_block = else_block.map(|b| self.block(b));
-            }
-        }
-    }
-
-    fn pattern(&mut self, p: &mut Pattern) {
-        match p {
-            Pattern::Wildcard | Pattern::Ident(_) => {}
-            Pattern::Literal(e) => *e = self.expr(*e),
-            Pattern::Tuple(ps) | Pattern::Or(ps) => {
-                for p in ps {
-                    self.pattern(p);
-                }
-            }
-            Pattern::PathVariant { path, args } => {
-                if path.segments.len() != 1 {
-                    self.path(path);
-                }
-                for p in args.iter_mut().flatten() {
-                    self.pattern(p);
-                }
-            }
-            Pattern::PathRecord { path, fields, .. } => {
-                if path.segments.len() != 1 {
-                    self.path(path);
-                }
-                for (_, p) in fields {
-                    self.pattern(p);
-                }
-            }
-            Pattern::Range { start, end, .. } => {
-                *start = start.map(|e| self.expr(e));
-                *end = end.map(|e| self.expr(e));
-            }
+            kind => walk::expr_mut(self, kind),
         }
     }
 
     fn ty_kind(&mut self, kind: &mut TypeExprKind) {
         match kind {
-            TypeExprKind::Any
-            | TypeExprKind::Unit
-            | TypeExprKind::String
-            | TypeExprKind::Int
-            | TypeExprKind::Uint
-            | TypeExprKind::Float
-            | TypeExprKind::F64
-            | TypeExprKind::F32
-            | TypeExprKind::Bool
-            | TypeExprKind::Hole(_, _)
-            | TypeExprKind::Ident(_) => {}
             TypeExprKind::Path(path) => self.type_path(path),
-            TypeExprKind::Ref(t) | TypeExprKind::Array(t) => *t = self.ty(*t),
             TypeExprKind::AppPath { ctor, args } => {
                 self.type_path(ctor);
                 self.types(args);
@@ -522,11 +313,36 @@ impl<'s, 'd, R: Rewrite> Graft<'s, 'd, R> {
                 self.decl(ctor);
                 self.types(args);
             }
-            TypeExprKind::Tuple(ts) => self.types(ts),
-            TypeExprKind::Function { params, ret } => {
-                self.types(params);
-                *ret = self.ty(*ret);
-            }
+            kind => walk::ty_mut(self, kind),
+        }
+    }
+}
+
+impl<R: Rewrite> walk::VisitMut for Graft<'_, '_, R> {
+    fn enter(&mut self) {
+        self.rw.enter();
+    }
+    fn exit(&mut self) {
+        self.rw.exit();
+    }
+    fn bind(&mut self, id: &mut Ident) {
+        self.rw.bind(&mut id.name);
+    }
+    fn bind_pattern(&mut self, p: &mut Pattern) {
+        self.rw.bind_pattern(p);
+    }
+    fn expr(&mut self, e: &mut Idx<ExprData>) {
+        *e = Graft::expr(self, *e);
+    }
+    fn block(&mut self, b: &mut Idx<BlockData>) {
+        *b = Graft::block(self, *b);
+    }
+    fn ty(&mut self, t: &mut Idx<TypeExprData>) {
+        *t = Graft::ty(self, *t);
+    }
+    fn path(&mut self, path: &mut Path) {
+        if path.segments.len() != 1 {
+            Graft::path(self, path);
         }
     }
 }

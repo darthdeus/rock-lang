@@ -2,10 +2,9 @@
 //! into the caller; top-level invocations splice items into the module.
 
 use crate::ast::*;
-use crate::desugar::{BlockEdges, ExprEdges, child_blocks, child_exprs};
 use crate::graft::{Graft, Plain, Rewrite};
+use crate::walk::{self, expr_edges, statement_edges};
 use rock_core::{CompilerError, Span};
-use smallvec::smallvec;
 use ustr::{Ustr, UstrMap, UstrSet};
 
 const MAX_MACRO_DEPTH: usize = 64;
@@ -541,28 +540,56 @@ fn is_shadowed(stack: &[ShadowScope], name: Ustr) -> bool {
     stack.iter().any(|s| s.contains(&name))
 }
 
-/// Collect the names a match/if-let/while-let pattern binds.
-fn shadow_pattern(p: &Pattern, scope: &mut ShadowScope) {
-    match p {
-        Pattern::Wildcard | Pattern::Literal(_) | Pattern::Range { .. } => {}
-        Pattern::Ident(id) => {
-            scope.insert(id.name);
-        }
-        Pattern::Tuple(ps) | Pattern::Or(ps) => {
-            for p in ps {
-                shadow_pattern(p, scope);
+enum Step {
+    Expr(Idx<ExprData>),
+    Block(Idx<BlockData>),
+    Enter,
+    Exit,
+    Bind(Ustr),
+}
+
+#[derive(Default)]
+struct Steps(smallvec::SmallVec<[Step; 8]>);
+
+impl walk::Visit for Steps {
+    fn expr(&mut self, e: &Idx<ExprData>) {
+        self.0.push(Step::Expr(*e));
+    }
+    fn block(&mut self, b: &Idx<BlockData>) {
+        self.0.push(Step::Block(*b));
+    }
+    fn enter(&mut self) {
+        self.0.push(Step::Enter);
+    }
+    fn exit(&mut self) {
+        self.0.push(Step::Exit);
+    }
+    fn bind(&mut self, id: &Ident) {
+        self.0.push(Step::Bind(id.name));
+    }
+    fn pattern(&mut self, _: &Pattern) {}
+    fn bind_pattern(&mut self, p: &Pattern) {
+        walk::bindings(p, &mut |id| self.0.push(Step::Bind(id.name)));
+    }
+}
+
+fn expand_steps(
+    ast: &mut Ast,
+    steps: Steps,
+    reg: &Registry,
+    depth: usize,
+    stack: &mut Vec<ShadowScope>,
+) {
+    for step in steps.0 {
+        match step {
+            Step::Expr(e) => expand_expr(ast, e, reg, depth, stack),
+            Step::Block(b) => expand_block(ast, b, reg, depth, stack),
+            Step::Enter => stack.push(ShadowScope::default()),
+            Step::Exit => {
+                stack.pop();
             }
-        }
-        Pattern::PathVariant { args, .. } => {
-            if let Some(ps) = args {
-                for p in ps {
-                    shadow_pattern(p, scope);
-                }
-            }
-        }
-        Pattern::PathRecord { fields, .. } => {
-            for (_, sub) in fields {
-                shadow_pattern(sub, scope);
+            Step::Bind(name) => {
+                stack.last_mut().expect("expansion scope").insert(name);
             }
         }
     }
@@ -597,74 +624,25 @@ fn expand_stmt(
     depth: usize,
     stack: &mut Vec<ShadowScope>,
 ) {
-    match &ast.stmts[s].kind {
-        StatementKind::Let(l) => {
-            // RHS sees the outer scope; the binding shadows for the rest of the
-            // current block (the top scope frame).
-            let (value, else_block, pattern) = (l.value, l.else_block, l.pattern.clone());
-            if let Some(v) = value {
-                expand_expr(ast, v, reg, depth, stack);
-            }
-            if let Some(b) = else_block {
-                stack.push(ShadowScope::default());
-                expand_block(ast, b, reg, depth, stack);
-                stack.pop();
-            }
-            let top = stack.last_mut().expect("expand_stmt: block scope present");
-            shadow_pattern(&pattern, top);
-        }
-        StatementKind::Static(st) => {
-            let (value, name) = (st.value, st.name.name);
-            expand_expr(ast, value, reg, depth, stack);
-            let top = stack.last_mut().expect("expand_stmt: block scope present");
-            top.insert(name);
-        }
-        StatementKind::For(f) => {
-            let (iter, body, pattern) = (f.iter, f.body, f.pattern.clone());
-            expand_expr(ast, iter, reg, depth, stack);
-            let mut scope = ShadowScope::default();
-            shadow_pattern(&pattern, &mut scope);
-            stack.push(scope);
-            expand_block(ast, body, reg, depth, stack);
-            stack.pop();
-        }
-        StatementKind::WhileLet(w) => {
-            let (value, body, pattern) = (w.value, w.body, w.pattern.clone());
-            expand_expr(ast, value, reg, depth, stack);
-            let mut scope = ShadowScope::default();
-            shadow_pattern(&pattern, &mut scope);
-            stack.push(scope);
-            expand_block(ast, body, reg, depth, stack);
-            stack.pop();
-        }
-        StatementKind::NestedFn(f) => {
-            // The fn NAME is already bound at block entry (hoisted); its params
-            // scope only the body. Param defaults see the outer scope.
-            let params: ShadowScope = f.params.iter().map(|p| p.name.name).collect();
-            let defaults: Vec<Idx<ExprData>> = f.params.iter().filter_map(|p| p.default).collect();
-            let body = f.body;
-            for d in defaults {
-                expand_expr(ast, d, reg, depth, stack);
-            }
-            stack.push(params);
-            expand_block(ast, body, reg, depth, stack);
-            stack.pop();
-        }
-        _ => {
-            for e in stmt_exprs(ast, s) {
-                expand_expr(ast, e, reg, depth, stack);
-            }
-            for bl in stmt_blocks(ast, s) {
-                expand_block(ast, bl, reg, depth, stack);
+    let mut steps = Steps::default();
+    if let StatementKind::NestedFn(f) = &ast.stmts[s].kind {
+        for p in &f.params {
+            if let Some(e) = p.default {
+                steps.0.push(Step::Expr(e));
             }
         }
+        steps.0.push(Step::Enter);
+        steps
+            .0
+            .extend(f.params.iter().map(|p| Step::Bind(p.name.name)));
+        steps.0.push(Step::Block(f.body));
+        steps.0.push(Step::Exit);
+    } else {
+        walk::statement(&mut steps, &ast.stmts[s].kind);
     }
+    expand_steps(ast, steps, reg, depth, stack);
 }
 
-/// Post-order (bone parity): expand inner calls before the enclosing one, so a
-/// macro argument that is itself a macro call is expanded first.
-/// A pattern or param list scopes only the body; the scrutinee/value is walked
-/// in the outer scope.
 fn expand_expr(
     ast: &mut Ast,
     e: Idx<ExprData>,
@@ -672,94 +650,17 @@ fn expand_expr(
     depth: usize,
     stack: &mut Vec<ShadowScope>,
 ) {
-    match &ast.exprs[e].kind {
-        ExprKind::Lambda { params, body, .. } => {
-            let body = *body;
-            stack.push(params.iter().map(|p| p.name.name).collect());
-            expand_block(ast, body, reg, depth, stack);
-            stack.pop();
-            return;
-        }
-        ExprKind::IfLetChain {
-            clauses,
-            then_block,
-            else_block,
-        } => {
-            let (n_clauses, then_b, else_b) = (clauses.len(), *then_block, *else_block);
-            // Bindings accumulate left-to-right: a later clause's value sees the
-            // earlier clauses' bindings.
-            stack.push(ShadowScope::default());
-            for i in 0..n_clauses {
-                let (value, pat_scope) = match &ast.exprs[e].kind {
-                    ExprKind::IfLetChain { clauses, .. } => match &clauses[i] {
-                        IfLetClause::Binding { value, pattern } => {
-                            let mut scope = ShadowScope::default();
-                            shadow_pattern(pattern, &mut scope);
-                            (*value, Some(scope))
-                        }
-                        IfLetClause::Condition(c) => (*c, None),
-                    },
-                    _ => unreachable!(),
-                };
-                expand_expr(ast, value, reg, depth, stack);
-                if let Some(scope) = pat_scope {
-                    let top = stack.last_mut().expect("expand_expr: chain scope present");
-                    top.extend(scope);
-                }
-            }
-            expand_block(ast, then_b, reg, depth, stack);
-            stack.pop();
-            if let Some(eb) = else_b {
-                expand_block(ast, eb, reg, depth, stack);
-            }
-            return;
-        }
-        ExprKind::Match { scrutinee, arms } => {
-            let (scrutinee, n_arms) = (*scrutinee, arms.len());
-            expand_expr(ast, scrutinee, reg, depth, stack);
-            for i in 0..n_arms {
-                let (guard, body, scope) = match &ast.exprs[e].kind {
-                    ExprKind::Match { arms, .. } => {
-                        let mut scope = ShadowScope::default();
-                        shadow_pattern(&arms[i].pattern, &mut scope);
-                        (arms[i].guard, arms[i].body, scope)
-                    }
-                    _ => unreachable!(),
-                };
-                stack.push(scope);
-                if let Some(g) = guard {
-                    expand_expr(ast, g, reg, depth, stack);
-                }
-                expand_block(ast, body, reg, depth, stack);
-                stack.pop();
-            }
-            return;
-        }
-        ExprKind::SafeNavigationLet {
-            receiver,
-            body,
-            binding,
-        } => {
-            let (receiver, body, name) = (*receiver, *body, binding.name);
-            expand_expr(ast, receiver, reg, depth, stack);
-            stack.push(ShadowScope::from_iter([name]));
-            expand_block(ast, body, reg, depth, stack);
-            stack.pop();
-            return;
-        }
-        _ => {}
+    let mut steps = Steps::default();
+    walk::expr(&mut steps, &ast.exprs[e].kind);
+    // Ordinary expressions visit their expression children before blocks.
+    // Scoped forms retain the binding order in their step sequence.
+    if !steps.0.iter().any(|s| matches!(s, Step::Enter)) {
+        steps.0.sort_by_key(|s| matches!(s, Step::Block(_)));
     }
-    for child in child_exprs(ast, e) {
-        expand_expr(ast, child, reg, depth, stack);
-    }
-    for blk in child_blocks(ast, e) {
-        expand_block(ast, blk, reg, depth, stack);
-    }
+    expand_steps(ast, steps, reg, depth, stack);
     try_expand(ast, e, reg, depth, stack);
 }
 
-/// If `e` is a `name(args)` call where `name` is a registered macro, splice the
-/// substituted body in as a `Block`.
 fn try_expand(
     ast: &mut Ast,
     e: Idx<ExprData>,
@@ -1159,38 +1060,6 @@ impl Rewrite for Instantiation {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Statement child enumeration (full coverage, for the expand + substitute walks)
-// ---------------------------------------------------------------------------
-
-fn stmt_exprs(ast: &Ast, s: Idx<StatementData>) -> ExprEdges {
-    match &ast.stmts[s].kind {
-        StatementKind::Expression(e)
-        | StatementKind::Return { value: Some(e), .. }
-        | StatementKind::Defer(DeferKind::Expression(e)) => smallvec![*e],
-        StatementKind::Let(l) => l.value.into_iter().collect(),
-        StatementKind::Static(st) => smallvec![st.value],
-        StatementKind::NestedFn(f) => f.params.iter().filter_map(|p| p.default).collect(),
-        StatementKind::For(f) => smallvec![f.iter],
-        StatementKind::While(w) => smallvec![w.condition],
-        StatementKind::WhileLet(w) => smallvec![w.value],
-        _ => ExprEdges::new(),
-    }
-}
-
-fn stmt_blocks(ast: &Ast, s: Idx<StatementData>) -> BlockEdges {
-    match &ast.stmts[s].kind {
-        StatementKind::Let(l) => l.else_block.into_iter().collect(),
-        StatementKind::For(f) => smallvec![f.body],
-        StatementKind::While(w) => smallvec![w.body],
-        StatementKind::WhileLet(w) => smallvec![w.body],
-        StatementKind::Defer(DeferKind::Block(b)) => smallvec![*b],
-        StatementKind::LifecycleHook { body, .. } => smallvec![*body],
-        StatementKind::NestedFn(f) => smallvec![f.body],
-        _ => BlockEdges::new(),
-    }
-}
-
 /// Per parameter, its declaration span + every use span in the macro template.
 pub(crate) fn index_macro_param_refs(
     ast: &Ast,
@@ -1287,36 +1156,23 @@ fn refs_in_item(ast: &Ast, item: &Item, names: &UstrSet, occ: &mut Vec<(Ustr, Sp
 }
 
 fn refs_in_type(ast: &Ast, t: Idx<TypeExprData>, names: &UstrSet, occ: &mut Vec<(Ustr, Span)>) {
-    match &ast.types[t].kind {
-        TypeExprKind::Ident(id) => note(id, names, occ),
-        TypeExprKind::Path(path) => refs_in_path(path, names, occ),
-        TypeExprKind::Ref(inner) => refs_in_type(ast, *inner, names, occ),
-        TypeExprKind::Array(inner) => refs_in_type(ast, *inner, names, occ),
-        TypeExprKind::AppPath { ctor, args } => {
-            refs_in_path(ctor, names, occ);
-            for a in args {
-                refs_in_type(ast, *a, names, occ);
-            }
-        }
-        TypeExprKind::App { ctor, args } => {
-            note(ctor, names, occ);
-            for a in args {
-                refs_in_type(ast, *a, names, occ);
-            }
-        }
-        TypeExprKind::Tuple(ts) => {
-            for a in ts {
-                refs_in_type(ast, *a, names, occ);
-            }
-        }
-        TypeExprKind::Function { params, ret } => {
-            for a in params {
-                refs_in_type(ast, *a, names, occ);
-            }
-            refs_in_type(ast, *ret, names, occ);
-        }
-        _ => {}
+    struct Refs<'a> {
+        ast: &'a Ast,
+        names: &'a UstrSet,
+        occ: &'a mut Vec<(Ustr, Span)>,
     }
+    impl walk::Visit for Refs<'_> {
+        fn ident(&mut self, id: &Ident) {
+            note(id, self.names, self.occ);
+        }
+        fn path(&mut self, path: &Path) {
+            refs_in_path(path, self.names, self.occ);
+        }
+        fn ty(&mut self, t: &Idx<TypeExprData>) {
+            walk::ty(self, &self.ast.types[*t].kind);
+        }
+    }
+    walk::ty(&mut Refs { ast, names, occ }, &ast.types[t].kind);
 }
 
 fn refs_in_path(path: &Path, names: &UstrSet, occ: &mut Vec<(Ustr, Span)>) {
@@ -1332,10 +1188,11 @@ fn refs_in_block(ast: &Ast, b: Idx<BlockData>, names: &UstrSet, occ: &mut Vec<(U
                 refs_in_type(ast, t, names, occ);
             }
         }
-        for e in stmt_exprs(ast, st) {
+        let edges = statement_edges(ast, st);
+        for e in edges.exprs {
             refs_in_expr(ast, e, names, occ);
         }
-        for b in stmt_blocks(ast, st) {
+        for b in edges.blocks {
             refs_in_block(ast, b, names, occ);
         }
     }
@@ -1361,10 +1218,11 @@ fn refs_in_expr(ast: &Ast, e: Idx<ExprData>, names: &UstrSet, occ: &mut Vec<(Ust
         }
         _ => {}
     }
-    for child in child_exprs(ast, e) {
+    let edges = expr_edges(ast, e);
+    for child in edges.exprs {
         refs_in_expr(ast, child, names, occ);
     }
-    for b in child_blocks(ast, e) {
+    for b in edges.blocks {
         refs_in_block(ast, b, names, occ);
     }
 }
@@ -1636,10 +1494,10 @@ mod tests {
         ) {
             bs.push(b);
             for &s in &ast.blocks[b].statements {
-                for e in stmt_exprs(ast, s) {
+                for e in statement_edges(ast, s).exprs {
                     walk_expr(ast, e, es, bs);
                 }
-                for bl in stmt_blocks(ast, s) {
+                for bl in statement_edges(ast, s).blocks {
                     walk_block(ast, bl, es, bs);
                 }
             }
@@ -1651,10 +1509,10 @@ mod tests {
             bs: &mut Vec<Idx<BlockData>>,
         ) {
             es.push(e);
-            for c in child_exprs(ast, e) {
+            for c in expr_edges(ast, e).exprs {
                 walk_expr(ast, c, es, bs);
             }
-            for bl in child_blocks(ast, e) {
+            for bl in expr_edges(ast, e).blocks {
                 walk_block(ast, bl, es, bs);
             }
         }

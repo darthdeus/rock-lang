@@ -7,6 +7,7 @@ pub(crate) mod graft;
 pub mod macro_expand;
 pub mod parser;
 pub mod stdlib;
+pub(crate) mod walk;
 
 pub use ast::*;
 pub(crate) use parser::Parser;

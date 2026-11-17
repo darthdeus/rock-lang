@@ -91,3 +91,14 @@ fn test_call_before_let_still_expands() {
 fn test_macro_still_expands() {
     assert(key(41) + 1 == 42, "macro must still expand unshadowed")
 }
+
+fn key_from_optional(callback: (fn(int) -> int)?) -> int {
+    let key = callback else { return key(7) }
+    key(3)
+}
+
+@test
+fn test_let_else_binds_after_its_else_block() {
+    assert(key_from_optional(null) == 7)
+    assert(key_from_optional(v => v * 2) == 6)
+}
