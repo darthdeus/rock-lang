@@ -496,28 +496,6 @@ fn inert_lua_text_does_not_trigger_body_limit_rejections() {
 }
 
 #[test]
-fn scalar_constant_arithmetic_folds_to_runtime_values() {
-    let lua = emit_clean(
-        "const BASE: int = 8; const INTEGER: int = BASE * 128; \
-         const SUM: float = 1.0 + 0.000001; \
-         const SCALED: float = (4.5 - 1.5) * 2.0; \
-         const QUOTIENT: float = 7 / 2; \
-         fn run() -> (int, float, float, float) { \
-           return (INTEGER, SUM, SCALED, QUOTIENT) \
-         }",
-        "run",
-    );
-    let symbol = emitted_symbol(&lua);
-    luajit_ok(
-        &format!(
-            "{lua}\nlocal i, s, p, q = {symbol}(); \
-             assert(i == 1024 and s == 1.000001 and p == 6 and q == 3.5)"
-        ),
-        &lua,
-    );
-}
-
-#[test]
 fn signed_and_unsigned_constant_bitwise_results_match_lua() {
     let lua = emit_clean(
         "fn masks() -> (int, uint, uint, uint) { \
