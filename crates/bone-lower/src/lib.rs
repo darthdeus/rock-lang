@@ -495,8 +495,15 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         }
     }
 
+    // Stdlib names are already the final compiler-owned keys. Paths still
+    // need their fragment scope, while bare names need no scoped lookup.
+    fn name_scope(&self) -> Option<&bone_core::modules::FragmentScope> {
+        self.v1_scope()
+            .filter(|frag| frag.package != bone_core::modules::STD_PACKAGE_ID)
+    }
+
     fn resolve_bare(&self, name: Ustr, span: Span) -> Result<resolve::Resolved, CompilerError> {
-        match self.v1_scope() {
+        match self.name_scope() {
             Some(frag) => self.probed_cached(&self.resolutions.bare, name, || {
                 resolve::resolve_bare(self.workspace, frag, name)
             }),
@@ -516,7 +523,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         name: Ustr,
         span: Span,
     ) -> Result<(Ustr, hir::CallFamily), CompilerError> {
-        let resolved = match self.v1_scope() {
+        let resolved = match self.name_scope() {
             Some(frag) => self.probed_cached(&self.resolutions.callee, name, || {
                 resolve::resolve_v1_callee(self.workspace, frag, name)
             }),
@@ -555,7 +562,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         name: Ustr,
         span: Span,
     ) -> Result<(Ustr, hir::CallFamily), CompilerError> {
-        let resolved = match self.v1_scope() {
+        let resolved = match self.name_scope() {
             Some(frag) => self.probed_cached(&self.resolutions.optional, name, || {
                 resolve::resolve_v1_optional_callee(self.workspace, frag, name)
             }),
@@ -574,7 +581,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         }
         let families = ["iter", "next"].map(|name| {
             let name = Ustr::from(name);
-            let resolved = match self.v1_scope() {
+            let resolved = match self.name_scope() {
                 Some(frag) => self.probed_cached(&self.resolutions.optional, name, || {
                     resolve::resolve_v1_optional_callee(self.workspace, frag, name)
                 }),

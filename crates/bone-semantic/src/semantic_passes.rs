@@ -64,8 +64,10 @@ fn trailing_generic_defaults(
 /// different logical modules stay distinct; stdlib items retain bare names.
 fn map_key(scope: Option<&FragmentScope>, path: &[ustr::Ustr], name: ustr::Ustr) -> ustr::Ustr {
     match scope {
-        Some(sc) => bone_core::modules::def_key(sc.package_name.as_ref(), path, name.as_str()),
-        None => name,
+        Some(sc) if sc.package != STD_PACKAGE_ID => {
+            bone_core::modules::def_key(sc.package_name.as_ref(), path, name.as_str())
+        }
+        _ => name,
     }
 }
 
@@ -2243,14 +2245,7 @@ pub(crate) fn pass_register_forward_decls(
     // distinct.
     let start = v1_scope.map(|s| s.module_path.clone()).unwrap_or_default();
     for_each_def_item(rock_module.items.as_slice(), &start, &mut |item, path| {
-        let def_key = |name: &ustr::Ustr| -> ustr::Ustr {
-            match v1_scope {
-                Some(sc) => {
-                    bone_core::modules::def_key(sc.package_name.as_ref(), path, name.as_str())
-                }
-                None => *name,
-            }
-        };
+        let def_key = |name: &ustr::Ustr| map_key(v1_scope, path, *name);
         if let ItemKind::Struct(s) = &item.kind {
             // `@value struct` is a retired form: the annotation set `is_value`
             // without `is_c_repr` (a codegen drift). Only the `value Foo { ... }`
@@ -2334,12 +2329,7 @@ pub(crate) fn pass_lower_fields(a: &Ast, ctx: &mut LowerCtx) -> Result<(), Compi
     // pass 2: lower fields. v1 fragments register under their DefKeys, so
     // the walk carries each item's logical module path.
     let scope = ctx.v1_scope().cloned();
-    let reg_key = |name: &ustr::Ustr, path: &[ustr::Ustr]| -> ustr::Ustr {
-        match &scope {
-            Some(sc) => bone_core::modules::def_key(sc.package_name.as_ref(), path, name.as_str()),
-            None => *name,
-        }
-    };
+    let reg_key = |name: &ustr::Ustr, path: &[ustr::Ustr]| map_key(scope.as_ref(), path, *name);
     let start = scope
         .as_ref()
         .map(|s| s.module_path.clone())
@@ -2360,12 +2350,7 @@ pub(crate) fn pass_lower_fields(a: &Ast, ctx: &mut LowerCtx) -> Result<(), Compi
 pub(crate) fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerError> {
     // pass 3: lower function defs
     let scope = ctx.v1_scope().cloned();
-    let reg_key = |name: &ustr::Ustr, path: &[ustr::Ustr]| -> ustr::Ustr {
-        match &scope {
-            Some(sc) => bone_core::modules::def_key(sc.package_name.as_ref(), path, name.as_str()),
-            None => *name,
-        }
-    };
+    let reg_key = |name: &ustr::Ustr, path: &[ustr::Ustr]| map_key(scope.as_ref(), path, *name);
     let start = scope
         .as_ref()
         .map(|s| s.module_path.clone())

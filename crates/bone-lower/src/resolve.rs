@@ -268,7 +268,7 @@ pub(crate) fn resolve_v1_optional_callee(
     let Tiers { first, lower } = bind_tiers(ws, frag, name, true)?;
     let mut members: Vec<(Resolved, FamilyTier)> = match first {
         Bound::Unbound => return Ok(None),
-        Bound::One(resolved, _) if resolved.kind != ResolvedKind::Callable => {
+        Bound::One(resolved, _) if resolved.kind != ResolvedKind::Callable || lower.is_empty() => {
             return Ok(Some(CalleeFamily::Single(resolved)));
         }
         Bound::One(resolved, tier) => vec![(resolved, tier)],
@@ -355,9 +355,11 @@ fn bind_tiers(
         first: Bound::Unbound,
         lower: Vec::new(),
     };
-    if ws.ns.package(frag.package).is_none() {
+    // Trusted stdlib fragments share the compiler-owned root and have no
+    // imports; looking through both the own and std tiers repeats one lookup.
+    if frag.package == STD_PACKAGE_ID || ws.ns.package(frag.package).is_none() {
         if let Some(std) = std_definition(ws, name) {
-            tiers.bind(vec![std], FamilyTier::Std, Via::Imports);
+            tiers.first = Bound::One(std, FamilyTier::Std);
         }
         return Ok(tiers);
     }

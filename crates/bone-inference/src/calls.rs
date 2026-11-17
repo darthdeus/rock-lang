@@ -476,6 +476,7 @@ pub(crate) fn select_overload_with_generics(
     }
 
     if best_set.len() > 1
+        && matches!(family, CallFamily::Merged { .. })
         && !args
             .iter()
             .any(|arg| ty_has_generic_hole(gamma, arg_ty[arg]))
