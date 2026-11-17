@@ -4,44 +4,19 @@ use skull_transform::scope::ScopeTree;
 use ustr::Ustr;
 
 fn converted(src: &str, edit: impl FnOnce(&mut MirFunc)) -> (MirFunc, String) {
-    let ast =
-        skull_parser::parse_module_clean(src, Ustr::from("<captured-cell-seed>")).expect("parse");
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut [ast]).expect("semantic");
-    let mid = ws.module_ids[&Ustr::from("<captured-cell-seed>")];
-    let (fid, _) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| skull_mir::mangle::declared_name(f.name.as_str()) == "f")
-        .expect("function");
-    let root = skull_mir::mir::FuncRef {
-        module: mid,
-        func: fid,
-    };
-    let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
-    let graph = skull_graph::instance_graph::build_in(&ws, vec![root], false, interner.clone());
-    let concrete = skull_graph::concrete_body::build(&ws, &graph);
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(interner);
-    let plan = &concrete.plans[&skull_mir::instance::Instance::base(root)];
-    let mut mf = skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &concrete.plans)
-        .expect("lower");
+    let (ws, interner, mut mf) = crate::support::lower_fixture(src, "<captured-cell-seed>", "f");
     edit(&mut mf);
     skull_transform::convert_closures(&mut mf, "f");
     let ctx = skull_codegen_lua::CodegenCtx::new(&ws);
     let mut lua = skull_codegen_lua::FN_MT_PRELUDE.to_string();
     lua.push_str(&skull_codegen_lua::emit_named(
-        &ws,
-        &ctx,
-        scx.interner(),
-        "f",
-        &mf,
-        None,
+        &ws, &ctx, &interner, "f", &mf, None,
     ));
     for nested in &mf.nested_fns {
         lua.push_str(&skull_codegen_lua::emit_named(
             &ws,
             &ctx,
-            scx.interner(),
+            &interner,
             nested.name.as_str(),
             nested,
             None,
@@ -53,7 +28,7 @@ fn converted(src: &str, edit: impl FnOnce(&mut MirFunc)) -> (MirFunc, String) {
     for entry in artifact.entries.values().filter(|e| e.escaping) {
         lua.push_str(&format!(
             "__rock_code_slot_stage({}, {}, {})\n",
-            skull_codegen_lua::lua_string(&entry.identity.logical_key(&ws, scx.interner())),
+            skull_codegen_lua::lua_string(&entry.identity.logical_key(&ws, &interner)),
             entry.body_name.expect("body"),
             skull_codegen_lua::lua_string(&entry.compatibility.call_abi)
         ));

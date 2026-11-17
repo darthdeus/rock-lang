@@ -151,10 +151,9 @@ fn ctor_fields(
 /// stores and escaping loads onto them, splicing new insts into their blocks
 /// last.
 pub(crate) fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError> {
-    let captured_cells = captured_cells(func);
     let mut fam = Families::collect(func);
     fam.resolve_aliases();
-    fam.split_copy_aliases(&captured_cells);
+    fam.split_copy_aliases(func);
     let uses = fam.scan_load_uses(func);
     fam.settle_disqualification(&uses.escape_loads, &uses.chained_roots);
     fam.add_presence_leaves(&uses.value_nil_tests);
@@ -219,7 +218,6 @@ struct Families {
     cand: Vec<Option<StructId>>,
     cand_fields: Vec<Option<HashSet<ustr::Ustr>>>,
     disq: Vec<bool>,
-    has_store: Vec<bool>,
     cell_enum: Vec<Option<ustr::Ustr>>,
     // ALIAS stores (`Store(c, Load(o))`): a cell whose every store copies
     // another candidate cell is the SAME object under Rock's by-ref struct
@@ -300,7 +298,6 @@ impl Families {
         let mut cand: Vec<Option<StructId>> = vec![None; nc];
         let mut cand_fields: Vec<Option<HashSet<ustr::Ustr>>> = vec![None; nc];
         let (mut disq, cell_enum, vuse) = store_inputs(func);
-        let mut has_store = vec![false; nc];
         // Only the main CFG -- a cell touched inside a closure body is opaque (the
         // closure may run on any call), so leave it whole.
         let mut alias: Vec<Option<Idx<Cell>>> = vec![None; nc];
@@ -310,7 +307,6 @@ impl Families {
             for &i in &b.insts {
                 if let Inst::Store { cell, value } = &func.insts[i] {
                     let ck = raw(*cell);
-                    has_store[ck] = true;
                     if !in_main {
                         disq[ck] = true;
                         continue;
@@ -369,7 +365,6 @@ impl Families {
             cand,
             cand_fields,
             disq,
-            has_store,
             cell_enum,
             alias,
             value_order,
@@ -441,7 +436,8 @@ impl Families {
     /// leaf cells and its alias store expands to leaf-wise copies. Reference
     /// structs still unify: there `let q = p` aliases and by-ref mutation must
     /// land in shared cells.
-    fn split_copy_aliases(&mut self, captured_cells: &HashSet<Idx<Cell>>) {
+    fn split_copy_aliases(&mut self, func: &MirFunc) {
+        let captured = std::cell::OnceCell::new();
         let Families {
             nc,
             cand,
@@ -453,11 +449,16 @@ impl Families {
             ..
         } = self;
         for k in 0..*nc {
+            if rep[k] == k || disq[k] {
+                continue;
+            }
             let cell = Idx::from_raw(RawIdx::from_u32(k as u32));
             let copies_binding = matches!(cand[rep[k]], Some(StructId::Value(_)))
                 || (matches!(cand[rep[k]], Some(StructId::Enum(_)))
-                    && captured_cells.contains(&cell));
-            if rep[k] == k || disq[k] || !copies_binding {
+                    && captured
+                        .get_or_init(|| captured_cells(func))
+                        .contains(&cell));
+            if !copies_binding {
                 continue;
             }
             copy_alias[k] = Some(Idx::from_raw(RawIdx::from_u32(rep[k] as u32)));
@@ -692,11 +693,11 @@ impl Families {
     // this round, and indexing the round's `nc`-sized arrays with them would panic.
     fn is_cand(&self, c: Idx<Cell>) -> bool {
         let k = raw(c);
-        k < self.nc && self.cand[k].is_some() && !self.disq[k] && self.has_store[k]
+        k < self.nc && self.cand[k].is_some() && !self.disq[k]
     }
 
     fn any_candidate(&self) -> bool {
-        (0..self.nc).any(|k| self.cand[k].is_some() && !self.disq[k] && self.has_store[k])
+        (0..self.nc).any(|k| self.cand[k].is_some() && !self.disq[k])
     }
 
     // Alias members resolve through `rep` FIRST, so a family shares one set of

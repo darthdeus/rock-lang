@@ -161,40 +161,12 @@ fn proven_accesses(ws: Option<&Workspace>, func: &MirFunc, target: FnBackend) ->
     }
     let (preds, _) = predecessors(func, &rpo);
     let reexecuting = reexecuting_blocks(func, &rpo);
-    let pushes: HashSet<_> = if target == FnBackend::Lua && has_make_vec {
-        rpo.iter()
-            .flat_map(|&b| func.blocks[b].insts.iter().copied())
-            .filter(|&id| match &func.insts[id] {
-                Inst::Call { func: fref, args } => args.len() == 2 && is_boxed_vec_push(ws, *fref),
-                _ => false,
-            })
-            .collect()
-    } else {
-        HashSet::default()
-    };
+    let ctx = Ctx::new(ws, func, &rpo, target == FnBackend::Lua && has_make_vec);
     let ctx = Ctx {
-        ws,
         track_private: target == FnBackend::Lua
-            && ((has_make_vec && (has_array_push || !pushes.is_empty()))
+            && ((has_make_vec && (has_array_push || !ctx.pushes.is_empty()))
                 || (has_make_struct && has_record_read)),
-        relevant: relevant_values(func, &rpo),
-        pushes,
-        affine: rpo.iter().any(|&b| {
-            func.blocks[b].insts.iter().any(|&id| {
-                let index = match &func.insts[id] {
-                    Inst::Index { index, .. }
-                    | Inst::StoreIndex { index, .. }
-                    | Inst::VecCheckedIndex { index, .. } => Some(*index),
-                    Inst::Call { func: fref, args }
-                        if args.len() == 2 && is_stdlib_fn(ws, *fref, "__nb_checked_index") =>
-                    {
-                        Some(args[1])
-                    }
-                    _ => None,
-                };
-                index.is_some_and(|i| affine_shape(func, i).is_some())
-            })
-        }),
+        ..ctx
     };
     // A block that cannot reach a proof query cannot affect any proof. Keep
     // relevance and reexecution based on the full CFG above.
@@ -433,73 +405,97 @@ struct Ctx<'a> {
     track_private: bool,
 }
 
-fn relevant_values(func: &MirFunc, rpo: &[Idx<Block>]) -> Vec<bool> {
-    let mut relevant = vec![false; func.insts.len()];
-    let mark = |ids: &[Idx<Inst>], relevant: &mut Vec<bool>| {
-        for &id in ids {
-            relevant[raw(id)] = true;
-        }
-    };
-    for &b in rpo {
-        for &id in &func.blocks[b].insts {
-            match &func.insts[id] {
-                Inst::Index { base, index, .. }
-                | Inst::StoreIndex { base, index, .. }
-                | Inst::VecCheckedIndex { vec: base, index } => {
-                    mark(&[*base, *index], &mut relevant);
-                }
-                // A call's arguments and result may carry the facts its
-                // callee declares, and the NativeBuffer index check is one.
-                Inst::Call { args, .. } => {
-                    mark(&[id], &mut relevant);
-                    mark(args, &mut relevant);
-                }
-                // A length read is tied to its place so a later use of the
-                // value (a modulo, a `len - 1`) can name the vector.
-                Inst::Len { base, .. } => mark(&[id, *base], &mut relevant),
-                Inst::Field { base, field, .. } if field.as_str() == LEN => {
-                    mark(&[id, *base], &mut relevant);
-                }
-                Inst::Store { value, .. } => mark(&[*value], &mut relevant),
-                Inst::MakeStruct { fields, .. } => {
-                    for (field, value) in fields {
-                        if field.as_str() == LEN {
-                            mark(&[*value], &mut relevant);
+impl<'a> Ctx<'a> {
+    fn new(
+        ws: Option<&'a Workspace>,
+        func: &MirFunc,
+        rpo: &[Idx<Block>],
+        track_pushes: bool,
+    ) -> Self {
+        let mut affine = false;
+        let mut pushes = HashSet::default();
+        let mut relevant = vec![false; func.insts.len()];
+        let mark = |ids: &[Idx<Inst>], relevant: &mut Vec<bool>| {
+            for &id in ids {
+                relevant[raw(id)] = true;
+            }
+        };
+        for &b in rpo {
+            for &id in &func.blocks[b].insts {
+                match &func.insts[id] {
+                    Inst::Index { base, index, .. }
+                    | Inst::StoreIndex { base, index, .. }
+                    | Inst::VecCheckedIndex { vec: base, index } => {
+                        mark(&[*base, *index], &mut relevant);
+                        affine |= !affine && affine_shape(func, *index).is_some();
+                    }
+                    // A call's arguments and result may carry the facts its
+                    // callee declares, and the NativeBuffer index check is one.
+                    Inst::Call { func: callee, args } => {
+                        relevant[raw(id)] = true;
+                        mark(args, &mut relevant);
+                        if let [_, index] = args.as_slice() {
+                            if !affine && is_stdlib_fn(ws, *callee, "__nb_checked_index") {
+                                affine = affine_shape(func, *index).is_some();
+                            }
+                            if track_pushes && is_boxed_vec_push(ws, *callee) {
+                                pushes.insert(id);
+                            }
                         }
                     }
+                    // A length read is tied to its place so a later use of the
+                    // value (a modulo, a `len - 1`) can name the vector.
+                    Inst::Len { base, .. } => mark(&[id, *base], &mut relevant),
+                    Inst::Field { base, field, .. } if field.as_str() == LEN => {
+                        mark(&[id, *base], &mut relevant);
+                    }
+                    Inst::Store { value, .. } => mark(&[*value], &mut relevant),
+                    Inst::MakeStruct { fields, .. } => {
+                        for (field, value) in fields {
+                            if field.as_str() == LEN {
+                                mark(&[*value], &mut relevant);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
+            }
+            if let Term::Branch { cond, .. } = func.blocks[b].term {
+                relevant[raw(cond)] = true;
             }
         }
-        if let Term::Branch { cond, .. } = func.blocks[b].term {
-            relevant[raw(cond)] = true;
+        // Arithmetic and compares pass relevance to their operands; in reverse
+        // postorder a use follows its definition, so one pass over the blocks in
+        // reverse reaches every operand.
+        for &b in rpo.iter().rev() {
+            for &id in func.blocks[b].insts.iter().rev() {
+                if !relevant[raw(id)] {
+                    continue;
+                }
+                match &func.insts[id] {
+                    Inst::IntAdd(a, b)
+                    | Inst::IntSub(a, b)
+                    | Inst::IntMul(a, b)
+                    | Inst::IntMod(a, b)
+                    | Inst::IntLt(a, b)
+                    | Inst::IntLeq(a, b)
+                    | Inst::IntGt(a, b)
+                    | Inst::IntGeq(a, b)
+                    | Inst::Eq(a, b)
+                    | Inst::NotEq(a, b) => mark(&[*a, *b], &mut relevant),
+                    Inst::Not(a) => mark(&[*a], &mut relevant),
+                    _ => {}
+                }
+            }
+        }
+        Self {
+            ws,
+            relevant,
+            affine,
+            pushes,
+            track_private: false,
         }
     }
-    // Arithmetic and compares pass relevance to their operands; in reverse
-    // postorder a use follows its definition, so one pass over the blocks in
-    // reverse reaches every operand.
-    for &b in rpo.iter().rev() {
-        for &id in func.blocks[b].insts.iter().rev() {
-            if !relevant[raw(id)] {
-                continue;
-            }
-            match &func.insts[id] {
-                Inst::IntAdd(a, b)
-                | Inst::IntSub(a, b)
-                | Inst::IntMul(a, b)
-                | Inst::IntMod(a, b)
-                | Inst::IntLt(a, b)
-                | Inst::IntLeq(a, b)
-                | Inst::IntGt(a, b)
-                | Inst::IntGeq(a, b)
-                | Inst::Eq(a, b)
-                | Inst::NotEq(a, b) => mark(&[*a, *b], &mut relevant),
-                Inst::Not(a) => mark(&[*a], &mut relevant),
-                _ => {}
-            }
-        }
-    }
-    relevant
 }
 
 /// The facts flowing along the edge `from -> to`: the block's out-state

@@ -1,42 +1,7 @@
 use skull_mir::mir::{Inst, MirFunc};
 use skull_transform::scope::ScopeTree;
 
-/// Lower `fn_name` from `src` to raw MIR (no stdlib -- avoid arithmetic, which
-/// routes through a stdlib op fn). Captures are about cell access shape, not
-/// operations, so `() => x` / `n = 5` suffice.
-fn lower(src: &str, fn_name: &str) -> MirFunc {
-    let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut [ast]).expect("semantic_pass");
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("module id");
-    let (fid, _) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| skull_mir::mangle::declared_name(f.name.as_str()) == fn_name)
-        .expect("function by name");
-    let root = skull_mir::mir::FuncRef {
-        module: mid,
-        func: fid,
-    };
-    let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
-    let graph = skull_graph::instance_graph::build_in(
-        &ws,
-        vec![root],
-        false,
-        std::sync::Arc::clone(&interner),
-    );
-    let concrete = skull_graph::concrete_body::build(&ws, &graph);
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(interner);
-    let plan = concrete
-        .plans
-        .get(&skull_mir::instance::Instance::base(root))
-        .expect("concrete test plan");
-    skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &concrete.plans)
-        .unwrap_or_else(|e| panic!("lower failed: {}", e.message))
-}
+use crate::support::lower;
 
 fn rewrite_last_store_to_dest_write(
     func: &mut MirFunc,

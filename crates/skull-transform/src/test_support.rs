@@ -1,9 +1,22 @@
-use skull_mir::mir::MirFunc;
+use std::sync::Arc;
+
+use bone_core::workspace::Workspace;
+use skull_mir::{mir::MirFunc, monoty::MonoInterner};
+use ustr::Ustr;
 
 pub(crate) fn lower(src: &str, fn_name: &str) -> MirFunc {
-    let ast = skull_parser::parse_module(src, ustr::Ustr::from("<test>")).expect("parse");
+    lower_fixture(src, "<test>", fn_name).2
+}
+
+pub(crate) fn lower_fixture(
+    src: &str,
+    file: &str,
+    fn_name: &str,
+) -> (Workspace, Arc<MonoInterner>, MirFunc) {
+    let file = Ustr::from(file);
+    let ast = skull_parser::parse_module_clean(src, file).expect("parse");
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut [ast]).expect("semantic_pass");
-    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
+    let mid = ws.module_ids[&file];
     let (fid, _) = ws
         .module(mid)
         .functions
@@ -14,18 +27,16 @@ pub(crate) fn lower(src: &str, fn_name: &str) -> MirFunc {
         module: mid,
         func: fid,
     };
-    let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
-    let graph = skull_graph::instance_graph::build_in(
-        &ws,
-        vec![root],
-        false,
-        std::sync::Arc::clone(&interner),
-    );
+    let interner = Arc::new(MonoInterner::new());
+    let graph =
+        skull_graph::instance_graph::build_in(&ws, vec![root], false, Arc::clone(&interner));
     let concrete = skull_graph::concrete_body::build(&ws, &graph);
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(interner);
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(Arc::clone(&interner));
     let plan = concrete
         .plans
         .get(&skull_mir::instance::Instance::base(root))
         .expect("test fixture concrete plan");
-    skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &concrete.plans).expect("lower")
+    let body = skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &concrete.plans)
+        .expect("lower");
+    (ws, interner, body)
 }

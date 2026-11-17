@@ -5,3 +5,5 @@ mod checked_index_reuse;
 mod in_bounds;
 mod projection_effects;
 mod scope_ownership;
+#[path = "../src/test_support.rs"]
+mod support;

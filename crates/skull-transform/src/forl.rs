@@ -84,14 +84,6 @@ pub fn recover_counted_loops(ws: &Workspace, func: &mut MirFunc) {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Cmp {
-    Lt,
-    Leq,
-    Gt,
-    Geq,
-}
-
 struct LoopMatch {
     /// Test block: holds the compare + branch (== the head when it has insts).
     t: Idx<Block>,
@@ -249,11 +241,11 @@ fn try_match(
     };
 
     // The compare, with the slot on either side.
-    let (cmp, a, b) = match &func.insts[cond] {
-        Inst::IntLt(a, b) => (Cmp::Lt, *a, *b),
-        Inst::IntLeq(a, b) => (Cmp::Leq, *a, *b),
-        Inst::IntGt(a, b) => (Cmp::Gt, *a, *b),
-        Inst::IntGeq(a, b) => (Cmp::Geq, *a, *b),
+    let (less, equal, a, b) = match func.insts[cond] {
+        Inst::IntLt(a, b) => (true, false, a, b),
+        Inst::IntLeq(a, b) => (true, true, a, b),
+        Inst::IntGt(a, b) => (false, false, a, b),
+        Inst::IntGeq(a, b) => (false, true, a, b),
         _ => return None,
     };
 
@@ -295,32 +287,11 @@ fn try_match(
         return None;
     }
 
-    // Normalize to an up-counting continue-comparison with the slot on the LHS.
-    let slot_lhs_cmp = if slot_is_lhs {
-        cmp
-    } else {
-        match cmp {
-            Cmp::Lt => Cmp::Gt,
-            Cmp::Leq => Cmp::Geq,
-            Cmp::Gt => Cmp::Lt,
-            Cmp::Geq => Cmp::Leq,
-        }
-    };
-    let cont = if yield_is_then {
-        slot_lhs_cmp
-    } else {
-        match slot_lhs_cmp {
-            Cmp::Lt => Cmp::Geq,
-            Cmp::Leq => Cmp::Gt,
-            Cmp::Gt => Cmp::Leq,
-            Cmp::Geq => Cmp::Lt,
-        }
-    };
-    let inclusive = match cont {
-        Cmp::Lt => false,
-        Cmp::Leq => true,
-        _ => return None, // downward loop -- the detector only prints up-counting `for`
-    };
+    // Swapping operands or taking the false arm reverses the comparison.
+    if less != (slot_is_lhs == yield_is_then) {
+        return None;
+    }
+    let inclusive = equal == yield_is_then;
 
     // Both paths must converge on the flag-join block J.
     let Term::Goto(jy) = func.blocks[y].term else {
@@ -351,6 +322,12 @@ fn try_match(
                 }
                 _ => false,
             })
+    };
+    let stores_false = |block: Idx<Block>| {
+        func.blocks[block].insts.iter().any(|&id| {
+            matches!(func.insts[id], Inst::Store { value, .. }
+                if matches!(func.insts[value], Inst::Const(Lit::Bool(false))))
+        })
     };
     // Flag is stored as literal `want` in `blk`, exactly once.
     let flag_const = |blk: Idx<Block>, flag: Idx<Cell>, want: bool| -> bool {
@@ -506,12 +483,8 @@ fn try_match(
         // level; anything else is the real EXIT.
         let mut done_arm_chain = Vec::new();
         let dn = chase(func, done_arm, &mut done_arm_chain);
-        let deeper = d_droppable(dn)
-            && matches!(func.blocks[dn].term, Term::Goto(_))
-            && func.blocks[dn].insts.iter().any(|&i| {
-                matches!(&func.insts[i], Inst::Store { value, .. }
-                    if matches!(&func.insts[*value], Inst::Const(Lit::Bool(false))))
-            });
+        let deeper =
+            d_droppable(dn) && matches!(func.blocks[dn].term, Term::Goto(_)) && stores_false(dn);
         if !deeper {
             break (cont_arm, done_arm);
         }
@@ -540,13 +513,7 @@ fn try_match(
                 }
                 if let Term::Goto(g) = func.blocks[x].term {
                     let mut h2 = Vec::new();
-                    if chase(func, g, &mut h2) == next_j
-                        && d_droppable(x)
-                        && func.blocks[x].insts.iter().any(|&i| {
-                            matches!(&func.insts[i], Inst::Store { value, .. }
-                            if matches!(&func.insts[*value], Inst::Const(Lit::Bool(false))))
-                        })
-                    {
+                    if chase(func, g, &mut h2) == next_j && d_droppable(x) && stores_false(x) {
                         chains.extend(hops);
                         chains.push(x);
                         chains.extend(h2);
@@ -817,39 +784,27 @@ fn try_match(
         .chain(live_hops.iter().copied())
         .chain([t, y, y_arm])
         .collect();
-    for jn in &joins {
-        for (bid, blk) in func.blocks.iter() {
-            for &i in &blk.insts {
-                if matches!(&func.insts[i], Inst::Load(c) if *c == jn.flag)
-                    && !live_set.contains(&bid)
-                    && !guards.iter().any(|g| g.gload == i)
-                {
-                    return None;
-                }
-            }
-        }
-    }
-    // Done-value hygiene, per level: cells a done/stop/guard-done block
-    // stores are never read outside the loop (an outside reader would
-    // observe the dropped write).
     let join_set: HashSet<Idx<Block>> = joins.iter().map(|jn| jn.j).collect();
-    for &dk in done_blocks
+    let flags: HashSet<Idx<Cell>> = joins.iter().map(|jn| jn.flag).collect();
+    let done_writes: HashSet<Idx<Cell>> = g_store_blocks
         .iter()
-        .chain(stop_dones.iter())
-        .chain(guard_clear.iter())
-    {
-        for &i in &func.blocks[dk].insts {
-            if let Inst::Store { cell, .. } = &func.insts[i] {
-                for (bid, blk) in func.blocks.iter() {
-                    if in_loop.contains(&bid) || join_set.contains(&bid) {
-                        continue;
-                    }
-                    for &k in &blk.insts {
-                        if matches!(&func.insts[k], Inst::Load(c) if c == cell) {
-                            return None;
-                        }
-                    }
-                }
+        .flat_map(|&block| &func.blocks[block].insts)
+        .filter_map(|&id| match func.insts[id] {
+            Inst::Store { cell, .. } => Some(cell),
+            _ => None,
+        })
+        .collect();
+    for (bid, block) in func.blocks.iter() {
+        let outside = !in_loop.contains(&bid) && !join_set.contains(&bid);
+        let on_yield_path = live_set.contains(&bid);
+        for &id in &block.insts {
+            if let Inst::Load(cell) = func.insts[id]
+                && ((outside && done_writes.contains(&cell))
+                    || (!on_yield_path
+                        && flags.contains(&cell)
+                        && !guards.iter().any(|g| g.gload == id)))
+            {
+                return None;
             }
         }
     }
