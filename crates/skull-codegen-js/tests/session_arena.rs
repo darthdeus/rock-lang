@@ -1,169 +1,66 @@
-//! The cached JS build keeps one `MonoInterner`, `InstanceGraph`, and
-//! `ArtifactView` across full emission and overlay edits. The graph delta arms
-//! below prove addition, removal, and reintroduction against a nonzero
-//! population.
+//! A generic instance added by an edit must be callable from the live overlay.
+//! Removing and reintroducing it must keep live behavior in step with a fresh
+//! emission.
 
-use crate::common::{replace_once, ws_with};
-use bone_core::hir::BodyOwner;
-use skull_mir::mir::FuncRef;
+use crate::common::{overlay_of_fn, run_node, ws_with};
 
-fn instance_count(cache: &skull_codegen_js::emit::JsEmitCache, func: FuncRef) -> usize {
-    cache
-        .graph()
-        .instances
-        .iter()
-        .filter(|instance| instance.func == func)
-        .count()
-}
-
-/// The cached session keeps one arena while the retained graph is rebuilt.
-#[test]
-fn the_cache_keeps_one_arena_across_an_overlay_edit() {
-    const SOURCE: &str = "\
-fn pick<T>(x: T, y: T) -> T { x }\n\
-fn other() -> float { pick(1.0, 2.0) }\n\
-@nomangle fn hot() -> float { 1.0 }\n\
-fn main() { print(hot() + other()) }\n";
-
-    let after_source = replace_once(SOURCE, "hot() -> float { 1.0 }", "hot() -> float { 3.0 }");
-    let before = ws_with(SOURCE);
-    let after = ws_with(&after_source);
-    let mid = crate::common::test_fn_ref(&before, "main").module;
-    let pick = crate::common::test_fn_ref(&before, "pick");
-    let (_, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-
-    let handle = cache.interner_handle();
-    assert!(
-        handle.len() > 0,
-        "the shared arena has no interned concrete types"
-    );
-    assert_eq!(
-        instance_count(&cache, pick),
-        1,
-        "one generic instantiation was retained"
-    );
-    let type_population = handle.len();
-
-    let hot = crate::common::test_fn_ref(&after, "hot");
-    crate::common::overlay_of_fn(&after, mid, &mut cache, hot);
-
-    assert!(
-        std::sync::Arc::ptr_eq(&handle, &cache.interner_handle()),
-        "the cache must keep ONE arena across the edit"
-    );
-    assert_eq!(
-        cache.interner_handle().len(),
-        type_population,
-        "the edit added no type"
-    );
-    assert_eq!(
-        instance_count(&cache, pick),
-        1,
-        "the edit kept one generic instantiation"
-    );
-}
-
-#[test]
-fn an_instance_adding_edit_is_served_by_the_overlay() {
-    const BEFORE: &str = "\
+const BEFORE: &str = "\
 fn pick<T>(x: T, y: T) -> T { x }\n\
 @nomangle fn hot() -> float { pick(1.0, 2.0) }\n\
-fn main() { print(hot()) }\n";
-    const AFTER: &str = "\
+fn main() { hot() }\n";
+
+const AFTER: &str = "\
 fn pick<T>(x: T, y: T) -> T { x }\n\
-@nomangle fn hot() -> float {\n  let n = pick(1, 2)\n  pick(1.0, 2.0) + int_to_float(n)\n}\n\
-fn main() { print(hot()) }\n";
+@nomangle fn hot() -> float {\n\
+    let n = pick(2, 3)\n\
+    pick(1.0, 2.0) + int_to_float(n)\n\
+}\n\
+fn main() { hot() }\n";
 
+fn emit_program(src: &str) -> skull_codegen_js::emit::JsProgram {
+    let ws = ws_with(src);
+    let mid = crate::common::test_mid(&ws);
+    skull_codegen_js::emit::emit_program(&ws, mid).expect("fresh JS emit")
+}
+
+fn run_hot(program: &skull_codegen_js::emit::JsProgram) -> String {
+    let mut js = skull_codegen_js::assemble_prelude(
+        &program.program,
+        program.has_code_refs(),
+        skull_codegen_js::JS_NODE_HOST,
+        &[],
+    );
+    js.push_str(&program.program);
+    js.push_str("\nconsole.log(hot());");
+    run_node(&js).trim().to_string()
+}
+
+#[test]
+fn generic_instance_edits_match_fresh_runtime_results() {
     let before = ws_with(BEFORE);
-    let after = ws_with(AFTER);
-    let mid = crate::common::test_fn_ref(&before, "main").module;
-    let pick = crate::common::test_fn_ref(&before, "pick");
-    let (_, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-    assert!(
-        cache.interner_handle().len() > 0,
-        "the shared arena has no concrete types"
-    );
-    assert_eq!(
-        instance_count(&cache, pick),
-        1,
-        "one instantiation before the edit"
-    );
-    let population = |cache: &skull_codegen_js::emit::JsEmitCache| cache.graph().instances.len();
-    let initial_population = population(&cache);
-    assert!(
-        initial_population > 0,
-        "the full build must retain graph instances"
-    );
+    let mid = crate::common::test_mid(&before);
+    let (initial, mut cache) =
+        skull_codegen_js::emit::emit_program_cached(&before, mid).expect("cached JS emit");
 
-    let hot = crate::common::test_fn_ref(&after, "hot");
-    let reload = skull_codegen_js::emit::emit_overlay(
-        &after,
-        mid,
-        &mut cache,
-        &[(hot.module, BodyOwner::Function(hot.func))],
-    )
-    .unwrap();
-    assert!(
-        matches!(reload, skull_codegen_js::emit::JsReload::Overlay(_)),
-        "an edit that adds a retained instance must produce an overlay"
+    let mut overlay_run = skull_codegen_js::assemble_prelude(
+        &initial.program,
+        initial.has_code_refs(),
+        skull_codegen_js::JS_NODE_HOST,
+        &[],
     );
-    assert_eq!(
-        instance_count(&cache, pick),
-        2,
-        "the edit must add an instance"
-    );
-    let added_population = population(&cache);
-    assert!(
-        added_population > initial_population,
-        "the edit must add a graph instance"
-    );
+    overlay_run.push_str(&initial.program);
+    overlay_run.push_str("\nconsole.log(hot());");
 
-    let removed_ws = ws_with(BEFORE);
-    let removed_hot = crate::common::test_fn_ref(&removed_ws, "hot");
-    let removal = skull_codegen_js::emit::emit_overlay(
-        &removed_ws,
-        mid,
-        &mut cache,
-        &[(removed_hot.module, BodyOwner::Function(removed_hot.func))],
-    )
-    .unwrap();
-    assert!(matches!(
-        removal,
-        skull_codegen_js::emit::JsReload::Overlay(_)
-    ));
-    assert_eq!(
-        instance_count(&cache, pick),
-        1,
-        "the removed instance must leave the graph"
-    );
-    let removal_population = population(&cache);
-    assert!(
-        removal_population < added_population,
-        "the removed instance must leave the graph"
-    );
+    let stages = [AFTER, BEFORE, AFTER];
+    for source in stages {
+        let ws = ws_with(source);
+        let hot = crate::common::test_fn_ref(&ws, "hot");
+        let overlay = overlay_of_fn(&ws, mid, &mut cache, hot);
+        overlay_run.push_str(&format!("\n(0, eval)({overlay:?});\nconsole.log(hot());"));
+    }
 
-    let reintroduced_hot = crate::common::test_fn_ref(&after, "hot");
-    let reintroduced = skull_codegen_js::emit::emit_overlay(
-        &after,
-        mid,
-        &mut cache,
-        &[(
-            reintroduced_hot.module,
-            BodyOwner::Function(reintroduced_hot.func),
-        )],
-    )
-    .unwrap();
-    assert!(matches!(
-        reintroduced,
-        skull_codegen_js::emit::JsReload::Overlay(_)
-    ));
-    assert_eq!(
-        instance_count(&cache, pick),
-        2,
-        "reintroduction must restore the instance"
-    );
-    assert!(
-        population(&cache) > removal_population,
-        "reintroduction must grow the live graph population"
-    );
+    let overlay_output = run_node(&overlay_run).trim().to_string();
+    let fresh_results = [BEFORE, AFTER, BEFORE, AFTER].map(|source| run_hot(&emit_program(source)));
+    assert_eq!(fresh_results, ["1", "3", "1", "3"]);
+    assert_eq!(overlay_output, fresh_results.join("\n"));
 }

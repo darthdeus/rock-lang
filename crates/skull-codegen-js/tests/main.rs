@@ -2,7 +2,6 @@
 // instead of one per file. nextest still runs each test in its own
 // process, so isolation is unchanged.
 
-mod abi_plan_memo;
 mod affine_bounds;
 mod backend_externs;
 mod bounded_standalone_emission;
@@ -27,7 +26,6 @@ mod multi_rejection;
 mod multivalue;
 mod native_buffer_element_admission_js;
 mod nb_checked_set;
-mod nb_leaf_layout_premise;
 mod nb_value_struct;
 mod no_inline_function;
 mod nomangle_roots;

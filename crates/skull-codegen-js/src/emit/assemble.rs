@@ -506,32 +506,6 @@ pub struct JsEmitCache {
     pub(super) session: JsSession,
 }
 
-impl JsEmitCache {
-    /// The session arena. Handed out so a caller can prove two runs share one;
-    /// `Arc::ptr_eq` on it is the identity, `len()` the population.
-    pub fn interner_handle(&self) -> std::sync::Arc<skull_mir::monoty::MonoInterner> {
-        self.scx.interner_handle()
-    }
-
-    pub fn graph(&self) -> &InstanceGraph {
-        &self.session.graph
-    }
-
-    pub fn global_layout(&self) -> &str {
-        &self.build.global_layout
-    }
-
-    pub fn lifecycle_plan(&self) -> &skull_mir::lifecycle::LifecyclePlan {
-        &self.build.lifecycle_plan
-    }
-
-    /// The session context's ABI-plan memo counters (parity with the Lua
-    /// path's `MirEmit::abi_plan_stats`).
-    pub fn abi_plan_stats(&self) -> skull_mir::lower::AbiPlanMemoStats {
-        self.scx.abi_plan_stats()
-    }
-}
-
 pub enum JsReload {
     Overlay(String),
     FullRequired,
