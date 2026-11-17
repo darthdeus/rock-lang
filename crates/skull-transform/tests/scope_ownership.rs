@@ -54,7 +54,8 @@ fn lambda_scope_ids(tree: &ScopeTree) -> Vec<usize> {
 }
 
 /// A capturing lambda over a fn param: `x` is owned by root, captured by the one
-/// lambda scope; the lambda's parent is root.
+/// lambda scope; the lambda's parent is root. The single-assignment capture
+/// stays by value so per-iteration captures keep distinct values.
 #[test]
 fn simple_capture_of_fn_param() {
     let func = lower("fn f(x: int) -> fn() -> int { return () => x }", "f");
@@ -76,6 +77,11 @@ fn simple_capture_of_fn_param() {
         "the lambda must capture `x`"
     );
     assert!(own.captures[ROOT].is_empty(), "root captures nothing");
+    let boxed = tree.boxed_cells(&own);
+    assert!(
+        !boxed.contains(&x),
+        "a single-assignment (0-store) param capture must not box"
+    );
 }
 
 /// A lambda that only reads/writes its OWN local captures nothing.
@@ -313,21 +319,5 @@ fn dest_written_inside_lambda_boxes() {
     assert!(
         boxed.contains(&va),
         "a cell dest-written from a non-owner scope must box; boxed={boxed:?}"
-    );
-}
-
-/// A single-assignment captured cell (bound once, never mutated) stays BY-VALUE
-/// -- it must NOT box, else a per-iteration capture would collapse to the final
-/// value.
-#[test]
-fn single_assignment_capture_does_not_box() {
-    let func = lower("fn f(x: int) -> fn() -> int { return () => x }", "f");
-    let tree = ScopeTree::build(&func);
-    let own = tree.analyze(&func);
-    let boxed = tree.boxed_cells(&own);
-    let x = func.params[0]; // a 0-store param -> effective 1 store -> by value
-    assert!(
-        !boxed.contains(&x),
-        "a single-assignment (0-store) param capture must not box"
     );
 }

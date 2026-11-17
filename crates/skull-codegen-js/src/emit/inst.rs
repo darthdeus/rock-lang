@@ -46,19 +46,14 @@ impl Emitter<'_> {
             ),
             // Both operands are already in uint range, so only a zero divisor
             // can leave it, and LuaJIT yields inf/nan there rather than wrapping.
-            Inst::UintDiv(a, b) => format!(
+            // Rock int `/` floors toward -inf (Lua); JS `/` is real division.
+            Inst::UintDiv(a, b) | Inst::IntDiv(a, b) => format!(
                 "Math.floor({} / {})",
                 self.render_val(*a)?,
                 self.render_val(*b)?
             ),
             Inst::UintMod(a, b) => bin(a, "%", b, self)?,
             Inst::FloatDiv(a, b) => bin(a, "/", b, self)?,
-            // Rock int `/` floors toward -inf (Lua); JS `/` is real division.
-            Inst::IntDiv(a, b) => format!(
-                "Math.floor({} / {})",
-                self.render_val(*a)?,
-                self.render_val(*b)?
-            ),
             Inst::IntLt(a, b) | Inst::FloatLt(a, b) => bin(a, "<", b, self)?,
             Inst::IntLeq(a, b) | Inst::FloatLeq(a, b) => bin(a, "<=", b, self)?,
             Inst::IntGt(a, b) | Inst::FloatGt(a, b) => bin(a, ">", b, self)?,

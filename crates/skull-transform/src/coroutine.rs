@@ -989,15 +989,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn coroutine_frame_cells_retain_types_across_conditional_yields() {
-        let func = lower(
-            "co fn f(flag: bool) -> Coroutine<int> {\n\
-                 if flag { yield 1 yield 2 } else { yield 10 yield 20 }\n\
-             }",
-            "f",
-        );
-        let lowered = transform_coroutine(&func, None, false);
+    fn assert_frame_cells_typed(lowered: &CoroLowered) {
         let untyped: Vec<_> = lowered
             .frame_plan
             .fields()
@@ -1014,6 +1006,18 @@ mod tests {
     }
 
     #[test]
+    fn coroutine_frame_cells_retain_types_across_conditional_yields() {
+        let func = lower(
+            "co fn f(flag: bool) -> Coroutine<int> {\n\
+                 if flag { yield 1 yield 2 } else { yield 10 yield 20 }\n\
+             }",
+            "f",
+        );
+        let lowered = transform_coroutine(&func, None, false);
+        assert_frame_cells_typed(&lowered);
+    }
+
+    #[test]
     fn coroutine_frame_cells_retain_types_across_null_coalesce() {
         let func = lower(
             "co fn f(x: int?) -> Coroutine<int> {\n\
@@ -1023,19 +1027,7 @@ mod tests {
             "f",
         );
         let lowered = transform_coroutine(&func, None, false);
-        let untyped: Vec<_> = lowered
-            .frame_plan
-            .fields()
-            .iter()
-            .copied()
-            .filter(|&cell| lowered.step.cells[cell].ty.is_none())
-            .map(|cell| (cell, lowered.step.cells[cell].name))
-            .collect();
-        assert!(
-            untyped.is_empty(),
-            "untyped frame cells: {untyped:?}\n{}",
-            lowered.step
-        );
+        assert_frame_cells_typed(&lowered);
     }
 
     #[test]
@@ -1050,19 +1042,7 @@ mod tests {
             "f",
         );
         let lowered = transform_coroutine(&func, None, false);
-        let untyped: Vec<_> = lowered
-            .frame_plan
-            .fields()
-            .iter()
-            .copied()
-            .filter(|&cell| lowered.step.cells[cell].ty.is_none())
-            .map(|cell| (cell, lowered.step.cells[cell].name))
-            .collect();
-        assert!(
-            untyped.is_empty(),
-            "untyped frame cells: {untyped:?}\n{}",
-            lowered.step
-        );
+        assert_frame_cells_typed(&lowered);
     }
 
     #[test]
