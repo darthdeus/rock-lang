@@ -1,4 +1,3 @@
-
 use bone_semantic::prelude::Workspace;
 
 use lsp_types::{CompletionItem, CompletionItemKind, CompletionItemLabelDetails, InsertTextFormat};
