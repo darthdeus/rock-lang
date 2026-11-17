@@ -34,6 +34,38 @@ impl<'a> Builder<'a> {
         shape: RetSlot,
     ) -> Result<ValueRepr, CompilerError> {
         let results = self.fresh_cells(shape.slot_count());
+        self.lower_match_arms(scrut, arms, |s, body, join| {
+            let bv = s.lower_expr_repr(body)?;
+            s.store_bundle_and_join(&results, &shape, &bv, join)
+        })?;
+        let slots = self.load_cells(&results);
+        let mut idx = 0;
+        Ok(self.slot_repr(&shape, &slots, &mut idx))
+    }
+
+    /// `match` in STATEMENT position (value discarded): same arm walk, each
+    /// body lowered as a statement with NO result cell / store / load.
+    pub(crate) fn lower_match_stmt(
+        &mut self,
+        scrut: Idx<Expr>,
+        arms: comfy_la_arena::IdxRange<MatchArm>,
+    ) -> Result<(), CompilerError> {
+        self.lower_match_arms(scrut, arms, |s, body, join| {
+            s.lower_stmt_expr(body)?;
+            s.goto_if_open(join);
+            Ok(())
+        })
+    }
+
+    /// The arm walk shared by every `match` position: per arm, a test block
+    /// (failures jump to the next arm) and a guard check, then `sink` consumes
+    /// the arm body and routes to `join`. Leaves `self.cur` at `join`.
+    fn lower_match_arms(
+        &mut self,
+        scrut: Idx<Expr>,
+        arms: comfy_la_arena::IdxRange<MatchArm>,
+        mut sink: impl FnMut(&mut Self, Idx<Expr>, Idx<Block>) -> Result<(), CompilerError>,
+    ) -> Result<(), CompilerError> {
         let variants = self.scrut_variants(scrut);
         let scrut_enum = self.scrut_enum_name(scrut);
         let scrut_s = self.lower_scrut(scrut)?;
@@ -50,44 +82,10 @@ impl<'a> Builder<'a> {
                 self.lower_branch(g, kept, next, false)?;
                 self.cur = kept;
             }
-            let bv = self.lower_expr_repr(arm.body)?;
-            self.store_bundle_and_join(&results, &shape, &bv, join)?;
-
+            sink(self, arm.body, join)?;
             self.cur = next;
         }
         // No arm matched: bone checks exhaustiveness, so this is unreachable.
-        self.f.set_term(self.cur, Term::Unreachable);
-
-        self.cur = join;
-        let slots = self.load_cells(&results);
-        let mut idx = 0;
-        Ok(self.slot_repr(&shape, &slots, &mut idx))
-    }
-
-    /// `match` in STATEMENT position (value discarded): mirrors [`Self::lower_match`]
-    /// but lowers each arm body as a statement with NO result cell / store / load.
-    pub(crate) fn lower_match_stmt(
-        &mut self,
-        scrut: Idx<Expr>,
-        arms: comfy_la_arena::IdxRange<MatchArm>,
-    ) -> Result<(), CompilerError> {
-        let variants = self.scrut_variants(scrut);
-        let scrut_enum = self.scrut_enum_name(scrut);
-        let scrut_s = self.lower_scrut(scrut)?;
-        let join = self.f.new_block();
-        for aidx in arms {
-            let arm = self.body.match_arm_arena[aidx];
-            let next = self.f.new_block();
-            self.match_pattern(&scrut_s, arm.pattern, next, &variants, true, scrut_enum)?;
-            if let Some(g) = arm.guard {
-                let kept = self.f.new_block();
-                self.lower_branch(g, kept, next, false)?;
-                self.cur = kept;
-            }
-            self.lower_stmt_expr(arm.body)?;
-            self.goto_if_open(join);
-            self.cur = next;
-        }
         self.f.set_term(self.cur, Term::Unreachable);
         self.cur = join;
         Ok(())
@@ -832,31 +830,10 @@ impl<'a> Builder<'a> {
                 vec![s.f.new_cell_typed(None, ty)]
             }
         };
-        let kind = self.let_scrutinee(pattern, value)?;
-        let (results, else_bb, join) = if let LetScrutinee::Generic = kind {
-            let results = alloc_results(self);
-            let scrut = self.lower_scrut(value)?;
-            let else_bb = self.f.new_block();
-            let join = self.f.new_block();
-            self.match_let(pattern, value, &scrut, else_bb)?;
-            (results, else_bb, join)
-        } else {
-            // Kept apart from the generic arm only to preserve the order cells
-            // and blocks are numbered in.
-            let (results, (present, values)) = if let LetScrutinee::Nobox { .. } = kind {
-                let lowered = self.lower_present_let(value, &kind)?;
-                (alloc_results(self), lowered)
-            } else {
-                let results = alloc_results(self);
-                (results, self.lower_present_let(value, &kind)?)
-            };
-            let then_bb = self.f.new_block();
-            let else_bb = self.f.new_block();
-            let join = self.f.new_block();
-            self.branch_present_let(present, then_bb, else_bb);
-            self.bind_present_let(pattern, kind, &values)?;
-            (results, else_bb, join)
-        };
+        let results = alloc_results(self);
+        let else_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.lower_let_test(pattern, value, else_bb)?;
 
         if statement {
             self.lower_stmt_expr(then_branch)?;
@@ -952,8 +929,6 @@ impl<'a> Builder<'a> {
         self.bind_present_let(pattern, kind, &values)
     }
 
-    /// A nullable scrutinee misses on nil before its pattern is matched;
-    /// otherwise a plain binding would always match and bind nil.
     /// `let <pattern> = value` with a pattern beyond names and tuples: run the
     /// general match machinery with an unreachable miss block (bone proved the
     /// pattern irrefutable).
@@ -962,13 +937,9 @@ impl<'a> Builder<'a> {
         pattern: Idx<Pattern>,
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
-        let variants = self.scrut_variants(value);
-        let scrut_enum = self.scrut_enum_name(value);
-        let scrut = self.lower_scrut(value)?;
-        let miss = self.f.new_block();
-        self.match_pattern(&scrut, pattern, miss, &variants, true, scrut_enum)?;
         // `miss` keeps its default Unreachable terminator: no value escapes it.
-        Ok(())
+        let miss = self.f.new_block();
+        self.lower_let_test(pattern, value, miss)
     }
 
     /// `let <pattern> = value else { .. }`: test and bind exactly like
@@ -980,20 +951,8 @@ impl<'a> Builder<'a> {
         value: Idx<Expr>,
         else_block: Idx<Expr>,
     ) -> Result<(), CompilerError> {
-        let kind = self.let_scrutinee(pattern, value)?;
-        let else_bb = if let LetScrutinee::Generic = kind {
-            let scrut = self.lower_scrut(value)?;
-            let else_bb = self.f.new_block();
-            self.match_let(pattern, value, &scrut, else_bb)?;
-            else_bb
-        } else {
-            let (present, values) = self.lower_present_let(value, &kind)?;
-            let then_bb = self.f.new_block();
-            let else_bb = self.f.new_block();
-            self.branch_present_let(present, then_bb, else_bb);
-            self.bind_present_let(pattern, kind, &values)?;
-            else_bb
-        };
+        let else_bb = self.f.new_block();
+        self.lower_let_test(pattern, value, else_bb)?;
         let cont = self.cur;
         self.cur = else_bb;
         self.lower_stmt_expr(else_block)?;
@@ -1003,6 +962,8 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// A nullable scrutinee misses on nil before its pattern is matched;
+    /// otherwise a plain binding would always match and bind nil.
     fn match_let(
         &mut self,
         pattern: Idx<Pattern>,

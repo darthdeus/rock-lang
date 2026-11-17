@@ -1432,9 +1432,6 @@ fn hash_init_pattern(
     }
 }
 
-/// Lower one concrete body plan while resolving every concrete callee ABI from
-/// the same graph-owned plan set. A missing selected callee is an error rather
-/// than a fallback to declaration-shaped ABI facts.
 /// Names-and-tuples view of an irrefutable `let`/`for` pattern -- the shapes
 /// loop and tuple codegen bind directly, with no match tests. A newtype is
 /// transparent at runtime, so its pattern views as its inner. `None` means the
@@ -1474,6 +1471,9 @@ pub(crate) fn binding_view(body: &Body, p: Idx<Pattern>) -> Option<BindingPatter
     }
 }
 
+/// Lower one concrete body plan while resolving every concrete callee ABI from
+/// the same graph-owned plan set. A missing selected callee is an error rather
+/// than a fallback to declaration-shaped ABI facts.
 pub fn lower_instance_with_plans(
     ws: &Workspace,
     scx: &ScalarCtx,
