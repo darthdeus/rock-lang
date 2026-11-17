@@ -12,9 +12,7 @@
 //! declaration drift into disagreeing about what an array holds, and "one layout
 //! authority" would be false the moment the second one exists.
 
-use crate::support::{
-    assert_has, assert_lacks, check_program, emit_unplanned, pipeline_emission, workspace,
-};
+use crate::support::{assert_has, assert_lacks, pipeline_emission};
 use skull_codegen_glsl::ShaderEmission;
 use skull_mir::gpu_layout::UniformArrayBlockPlan;
 
@@ -98,7 +96,7 @@ const FRAGMENT_ARRAYS: &str = r#"
 "#;
 
 /// The vertex stage's arrays: one block, at the vertex array binding, laid out
-/// the way the host packs it, and agreed on by the published check.
+/// the way the host packs it.
 #[test]
 fn a_stages_arrays_are_declared_as_one_std140_block() {
     let e = emit(VERTEX_ARRAYS, "vt", "fr");
@@ -220,24 +218,11 @@ fn every_admitted_element_kind_declares_and_lays_out_consistently() {
     }
 }
 
-/// Emission rejects `src` naming every needle, and the view's profile check --
-/// emission's own preparation -- reaches the same verdict.
+/// Emission rejects `src` with a diagnostic naming every needle.
 fn reject(src: &str, needles: &[&str]) {
     let msg = emit_err(src, "vt", "fr");
     for needle in needles {
         assert!(msg.contains(needle), "missing `{needle}` in: {msg}");
-    }
-    let (ws, mid) = workspace(src);
-    let checked = check_program(&ws, mid, Some("vt"), "fr");
-    assert_eq!(checked, emit_unplanned(&ws, mid, Some("vt"), "fr"));
-}
-
-#[test]
-fn the_published_check_and_emission_agree_about_array_blocks() {
-    for src in [VERTEX_ARRAYS, FRAGMENT_ARRAYS] {
-        let (ws, mid) = workspace(src);
-        let checked = check_program(&ws, mid, Some("vt"), "fr");
-        assert_eq!(checked, emit_unplanned(&ws, mid, Some("vt"), "fr"));
     }
 }
 

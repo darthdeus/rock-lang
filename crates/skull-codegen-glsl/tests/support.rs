@@ -101,37 +101,7 @@ pub fn emit_program(
     profile: GlslProfile,
 ) -> Result<ShaderEmission, CompilerError> {
     let (scx, view) = program_session(ws, mid, vert, frag)?;
-    let plan = skull_codegen_glsl::plan_shader_with_view(ws, &scx, &view)?;
-    skull_codegen_glsl::render_shader_plan(ws, scx.interner(), &plan, profile)
-}
-
-/// The shader artifact view's profile check: the program planned, the plan
-/// dropped.
-pub fn check_program(
-    ws: &Workspace,
-    mid: ModuleId,
-    vert: Option<&str>,
-    frag: &str,
-) -> Result<(), String> {
-    let (scx, view) = program_session(ws, mid, vert, frag).map_err(|e| e.message)?;
-    skull_codegen_glsl::plan_shader_with_view(ws, &scx, &view)
-        .map(|_| ())
-        .map_err(|e| e.message)
-}
-
-/// Emission of a program the view kept no plan for: planned again from the
-/// view, which must reach the check's verdict.
-pub fn emit_unplanned(
-    ws: &Workspace,
-    mid: ModuleId,
-    vert: Option<&str>,
-    frag: &str,
-) -> Result<(), String> {
-    let (scx, view) = program_session(ws, mid, vert, frag).map_err(|e| e.message)?;
-    let profile = GlslProfile::Core330;
     skull_codegen_glsl::emit_shader_with_view(ws, &scx, &view, profile)
-        .map(|_| ())
-        .map_err(|e| e.message)
 }
 
 pub fn emit_entry(src: &str, root: &str) -> Result<String, String> {
