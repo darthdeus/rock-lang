@@ -12,7 +12,7 @@ use std::{
 };
 
 mod map;
-pub use map::{ArenaMap, Entry, OccupiedEntry, VacantEntry};
+pub use map::ArenaMap;
 
 /// The raw index of a value in an arena.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
