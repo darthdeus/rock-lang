@@ -1,25 +1,10 @@
 TEST: document_symbols_basic
 TYPE: document_symbols
 ---
-struct Point {
-    x: float,
-    y: float,
-}
-
-enum Status {
-    Pending,
-    InProgress,
-    Completed,
-}
-
-fn calculate(a: int, b: int) -> int {
-    return a + b
-}
-
-fn main() {
-    let p = Point { x: 0.0, y: 0.0 }
-    let s = Status::Pending
-}
+struct Point { x: float, y: float }
+enum Status { Pending, InProgress, Completed }
+fn calculate(a: int, b: int) -> int { a + b }
+fn main() { let p = Point { x: 0.0, y: 0.0 }; let s = Status::Pending }
 ---
 EXPECTED:
 Point: Struct
@@ -28,25 +13,13 @@ calculate: Function
 main: Function
 ===
 
-TEST: document_symbols_with_impl
+TEST: document_symbols_associated_functions
 TYPE: document_symbols
 ---
-struct Rectangle {
-    width: float,
-    height: float,
-}
-
-fn area(rect: Rectangle) -> float {
-    return rect.width * rect.height
-}
-
-fn perimeter(rect: Rectangle) -> float {
-    return 2.0 * (rect.width + rect.height)
-}
-
-fn create_square(size: float) -> Rectangle {
-    return Rectangle { width: size, height: size }
-}
+struct Rectangle { width: float, height: float }
+fn area(rect: Rectangle) -> float { rect.width * rect.height }
+fn perimeter(rect: Rectangle) -> float { 2.0 * (rect.width + rect.height) }
+fn create_square(size: float) -> Rectangle { Rectangle { width: size, height: size } }
 ---
 EXPECTED:
 Rectangle: Struct
@@ -58,26 +31,10 @@ create_square: Function
 TEST: document_symbols_enum_payload_types
 TYPE: document_symbols
 ---
-struct Color {
-    r: int,
-    g: int,
-    b: int,
-}
-
-enum Shape {
-    Circle(float),
-    Rectangle(float, float),
-    Triangle(Point, Point, Point),
-}
-
-struct Point {
-    x: float,
-    y: float,
-}
-
-fn draw_shape(shape: Shape) {
-    // Draw implementation
-}
+struct Color { r: int, g: int, b: int }
+enum Shape { Circle(float), Rectangle(float, float), Triangle(Point, Point, Point) }
+struct Point { x: float, y: float }
+fn draw_shape(shape: Shape) {}
 ---
 EXPECTED:
 Color: Struct
@@ -89,25 +46,11 @@ draw_shape: Function
 TEST: document_symbols_generics
 TYPE: document_symbols
 ---
-struct Container<T> {
-    items: [T],
-}
-
-fn new_container<T>() -> Container<T> {
-    return Container { items: [] }
-}
-
-fn push_item<T>(container: Container<T>, item: T) {
-    container.items.push(item)
-}
-
-fn pop_item<T>(container: Container<T>) -> T? {
-    return container.items.pop()
-}
-
-fn process<T, U>(input: T, mapper: fn(T) -> U) -> U {
-    return mapper(input)
-}
+struct Container<T> { items: [T] }
+fn new_container<T>() -> Container<T> { Container { items: [] } }
+fn push_item<T>(container: Container<T>, item: T) { container.items.push(item) }
+fn pop_item<T>(container: Container<T>) -> T? { container.items.pop() }
+fn process<T, U>(input: T, mapper: fn(T) -> U) -> U { mapper(input) }
 ---
 EXPECTED:
 Container: Struct
@@ -117,39 +60,15 @@ pop_item: Function
 process: Function
 ===
 
-TEST: document_symbols_traits
+TEST: document_symbols_receiver_parameters
 TYPE: document_symbols
 ---
-struct Point {
-    x: float,
-    y: float,
-}
-
-struct Rectangle {
-    x: float,
-    y: float,
-    width: float,
-    height: float,
-}
-
-struct Circle {
-    center: Point,
-    radius: float,
-}
-
-// Rock doesn't support explicit trait implementations
-// Methods are defined directly in the struct
-fn draw(self: Circle) {
-    // Drawing logic
-}
-
+struct Point { x: float, y: float }
+struct Rectangle { x: float, y: float, width: float, height: float }
+struct Circle { center: Point, radius: float }
+fn draw(self: Circle) {}
 fn bounds(self: Circle) -> Rectangle {
-    return Rectangle {
-        x: self.center.x - self.radius,
-        y: self.center.y - self.radius,
-        width: self.radius * 2.0,
-        height: self.radius * 2.0,
-    }
+    Rectangle { x: self.center.x - self.radius, y: self.center.y - self.radius, width: self.radius * 2.0, height: self.radius * 2.0 }
 }
 ---
 EXPECTED:
@@ -166,14 +85,8 @@ TYPE: document_symbols
 const MAX_SIZE: int = 100
 const DEFAULT_NAME: string = "Unknown"
 const PI: float = 3.14159
-
-fn calculate_area(radius: float) -> float {
-    return PI * radius * radius
-}
-
-fn get_default_counter() -> int {
-    return 0
-}
+fn calculate_area(radius: float) -> float { PI * radius * radius }
+fn get_default_counter() -> int { 0 }
 ---
 EXPECTED:
 MAX_SIZE: Constant

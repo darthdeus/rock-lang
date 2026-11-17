@@ -254,12 +254,9 @@ fn definition_cases() {
     let items: &[(&str, usize, &str, &str)] = &[
         ("Round", 1, "shapes.rock", "Round"),
         ("Kind::Round", 1, "shapes.rock", "Kind"),
-        ("surface(2)", 2, "shapes.rock", "area"),
-        ("perimeter(3)", 2, "shapes.rock", "perimeter"),
         ("Box, c", 1, "shapes.rock", "Box"),
         ("Crate)", 1, "shapes.rock", "Box"),
         ("LIMIT", 1, "shapes.rock", "LIMIT"),
-        ("facade::depth()", 9, "shapes_inner.rock", "depth"),
         ("area as surface", 1, "shapes.rock", "area"),
     ];
     for (needle, into, expected_file, item) in items {

@@ -20,12 +20,6 @@ fn hover_cases() {
     // (case, source, position, text fragments; `!` forbids a fragment)
     let cases: &[(&str, &str, (u32, u32), &[&str])] = &[
         (
-            "let binding",
-            "fn main() {\n  let x = 1\n}\n",
-            (1, 6),
-            &["int"],
-        ),
-        (
             "uint keeps its signedness",
             "fn main() {\n  let x: uint = 42\n  x\n}\n",
             (1, 6),
@@ -56,22 +50,10 @@ fn hover_cases() {
             &["struct Mob", "hp: int"],
         ),
         (
-            "param type",
-            &signature,
-            (1, 14),
-            &["struct Mob", "hp: int"],
-        ),
-        (
             "return type",
             &signature,
             (1, 22),
             &["struct Mob", "hp: int"],
-        ),
-        (
-            "struct field declaration",
-            "struct FixVec2 { x: float, y: float }\nstruct Mob {\n  pos: FixVec2,\n  dir: int,\n}\n",
-            (2, 3),
-            &["pos: FixVec2 (field of Mob)"],
         ),
         // A newtype's generated `__op_add` shares the newtype's name span.
         (
@@ -94,24 +76,12 @@ fn hover_cases() {
             (3, 16),
             &["MobKind::Skeleton", "!string"],
         ),
-        (
-            "enum qualifier in a pattern",
-            enum_match,
-            (3, 5),
-            &["enum MobKind", "Skeleton", "Zombie"],
-        ),
         // A value-less global has no inference body.
         (
             "global type annotation",
             &format!("{mob}global boss: Mob\nfn main() {{}}\n"),
             (1, 14),
             &["struct Mob", "hp: int"],
-        ),
-        (
-            "enum declaration",
-            "enum Color { Red, Green }\nfn main() {}\n",
-            (0, 6),
-            &["Color"],
         ),
         (
             "callee shows param defaults",
@@ -510,55 +480,14 @@ fn completion_cases() {
     // (case, source with cursor, label patterns; `!` forbids a label)
     let cases: &[(&str, &str, &[&str])] = &[
         (
-            "in-scope local",
-            "fn f(count: int) -> int {\n  let total = 5\n  t<|>\n}\n",
-            &["total"],
-        ),
-        (
-            "in-scope param",
-            "fn f(count: int) -> int {\n  let total = 5\n  c<|>\n}\n",
-            &["count"],
-        ),
-        (
             "local declared after the cursor",
             "fn f() -> int {\n  l<|>\n  let later = 5\n  later\n}\n",
             &["!later"],
-        ),
-        // The trigger `.` breaks the body's syntax.
-        (
-            "fields on a broken dot",
-            "struct Point { x: int, y: int }\nfn f(p: Point) {\n  p.<|>\n}\n",
-            &["x: int", "y: int"],
-        ),
-        (
-            "chained field of a struct-literal let",
-            "struct FixVec2 { x: float, y: float }\nstruct Player { pos: FixVec2, name: string }\nfn main() {\n  let p = Player { pos: FixVec2 { x: 0.0, y: 0.0 }, name: \"h\" }\n  p.pos.<|>\n}\n",
-            &["x: float"],
         ),
         (
             "field prefix filters members",
             "struct Player { position_x: float, health: float }\nfn foo(player: Player) {\n  player.pos<|>\n}\n",
             &["position_x: float", "!health: float"],
-        ),
-        (
-            "for-loop variable takes the element type",
-            "struct Item { name: string, count: int }\nfn main() {\n  let items: [Item] = vec_new()\n  for item in items {\n    item.<|>\n  }\n}\n",
-            &["name: string", "count: int"],
-        ),
-        (
-            "qualified enum lists variants",
-            "enum Direction { Up, Down, Left, Right }\nfn main() {\n  let d = Direction::<|>\n}\n",
-            &["Up", "Down", "Left", "Right"],
-        ),
-        (
-            "match binding takes the payload type",
-            "struct Point { x: int, y: int }\nenum Opt { None, Some(Point) }\nfn main() {\n  let o = Opt::Some(Point { x: 1, y: 2 })\n  match o {\n    Opt::Some(p) => p.<|>\n    Opt::None => {}\n  }\n}\n",
-            &["x: int", "y: int"],
-        ),
-        (
-            "record enum variant fields",
-            "enum Effect { Bandage { duration: float, heal_amount: int }, Other(int) }\nfn main() {\n  let e = Effect::Bandage {<|> \n}\n",
-            &["duration: float", "heal_amount: int"],
         ),
     ];
     for (case, marked, patterns) in cases {

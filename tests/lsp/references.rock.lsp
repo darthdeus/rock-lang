@@ -187,6 +187,48 @@ file: main.rock
 line: 5
 character: 27
 ===
+TEST: find_references_ufcs_method
+TYPE: references
+---
+fn inc(x: int) -> int { x + 1 }
+fn main() {
+    let a = inc(5)
+    let b = 5.inc()
+}
+---
+POSITION: line=3, character=14
+EXPECTED:
+file: main.rock
+line: 0
+character: 3
+file: main.rock
+line: 2
+character: 12
+file: main.rock
+line: 3
+character: 14
+===
+
+TEST: find_references_fn_typed_parameter_call
+TYPE: references
+---
+fn apply(g: fn() -> int) -> int {
+    g() + g()
+}
+---
+POSITION: line=1, character=10
+EXPECTED:
+file: main.rock
+line: 0
+character: 9
+file: main.rock
+line: 1
+character: 4
+file: main.rock
+line: 1
+character: 10
+===
+
 TEST: find_references_macro_param_ident_fragment
 TYPE: references
 ---

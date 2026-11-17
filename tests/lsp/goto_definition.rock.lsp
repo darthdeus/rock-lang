@@ -334,6 +334,21 @@ line: 2
 character: 4
 ===
 
+TEST: goto_def_enum_qualifier_path_segment
+TYPE: goto_definition
+---
+enum Color { Red, Green }
+fn f() -> Color {
+    Color::Red
+}
+---
+POSITION: line=2, character=4
+EXPECTED:
+file: main.rock
+line: 0
+character: 5
+===
+
 TEST: goto_def_global_variable_assignment
 TYPE: goto_definition
 ---
@@ -365,6 +380,22 @@ EXPECTED:
 file: main.rock
 line: 1
 character: 4
+===
+
+TEST: goto_def_field_ref_key
+TYPE: goto_definition
+---
+struct Mob { health: int, attack_co: int? }
+fn kill_co<T>(o: T, f: FieldRef<T, int?>) {}
+fn r(mob: Mob) {
+    kill_co(mob, .attack_co)
+}
+---
+POSITION: line=3, character=19
+EXPECTED:
+file: main.rock
+line: 0
+character: 26
 ===
 
 TEST: goto_def_builtin_coroutine_jumps_to_stdlib_resume_landmark

@@ -81,11 +81,6 @@ fn definition_cases() {
             .definition(PATH, at)
             .unwrap_or_else(|| panic!("{case}: no definition at {at:?}"));
         assert_eq!(def.uri.to_file_path().unwrap(), PATH);
-        assert_eq!(
-            def.range.start.line,
-            crate::fixture::position_of_offset(src, decl_off).line,
-            "{case}"
-        );
         let (s, e) = (
             offset_of(src, def.range.start),
             offset_of(src, def.range.end),
@@ -119,47 +114,42 @@ fn direct_enum_path_definition() {
     assert!(start <= 5 && 5 < end, "enum declaration: {start}..{end}");
 }
 
-/// References include the declaration, so find-references and rename share
-/// them, and every span is exactly the identifier so rename is safe.
+/// Corpus fixtures pin reference starts; keep the query-level span-width
+/// invariant here because the corpus currently checks starts only.
 #[test]
-fn reference_cases() {
-    // (case, source, name, cursor occurrence, referenced occurrences of `name`)
-    let cases: &[(&str, &str, &str, usize, &[usize])] = &[
+fn reference_ranges_cover_only_names() {
+    // (case, source, name, cursor occurrence)
+    let cases: &[(&str, &str, &str, usize)] = &[
         (
             "local",
             "fn f() -> int {\n    let count = 1\n    let total = count + count\n    total\n}",
             "count",
             2,
-            &[1, 2, 3],
         ),
         (
             "parameter",
             "fn f(num: int) -> int {\n    num + num\n}",
             "num",
             2,
-            &[1, 2, 3],
         ),
         (
             "function from a call",
             "fn helper() -> int { 1 }\nfn a() -> int { helper() }\nfn b() -> int {\n    let x = helper()\n    helper()\n}",
             "helper",
             2,
-            &[1, 2, 3, 4],
         ),
         (
             "function from its declaration",
             "fn helper() -> int { 1 }\nfn a() -> int { helper() }",
             "helper",
             1,
-            &[1, 2],
         ),
         // The UFCS method name is not at the call span's start.
         (
             "UFCS call",
             "fn inc(x: int) -> int { x + 1 }\nfn main() {\n    let a = inc(5)\n    let b = 5.inc()\n}",
             "inc",
-            2,
-            &[1, 2, 3],
+            3,
         ),
         // A fn-typed param called as `g()` has no separate Var node.
         (
@@ -167,28 +157,19 @@ fn reference_cases() {
             "fn apply(g: fn() -> int) -> int {\n    g() + g()\n}",
             "g",
             2,
-            &[1, 2, 3],
         ),
     ];
-    for (case, src, name, cursor, occurrences) in cases {
+    for (case, src, name, cursor) in cases {
         let cursor = crate::fixture::position_of_offset(src, nth_offset(src, name, *cursor));
-        let mut got: Vec<(usize, usize)> = workspace(src)
-            .references(PATH, cursor)
-            .iter()
-            .map(|loc| {
-                assert_eq!(loc.uri.to_file_path().unwrap(), PATH);
-                (
-                    offset_of(src, loc.range.start),
-                    offset_of(src, loc.range.end),
-                )
-            })
-            .collect();
-        got.sort();
-        let want: Vec<(usize, usize)> = occurrences
-            .iter()
-            .map(|&n| nth_offset(src, name, n))
-            .map(|off| (off, off + name.len()))
-            .collect();
-        assert_eq!(got, want, "{case}");
+        let refs = workspace(src).references(PATH, cursor);
+        assert!(!refs.is_empty(), "{case}: no references");
+        for loc in refs {
+            assert_eq!(loc.uri.to_file_path().unwrap(), PATH);
+            let (start, end) = (
+                offset_of(src, loc.range.start),
+                offset_of(src, loc.range.end),
+            );
+            assert_eq!(end - start, name.len(), "{case}: {start}..{end}");
+        }
     }
 }

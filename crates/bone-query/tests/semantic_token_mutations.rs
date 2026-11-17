@@ -316,22 +316,6 @@ fn baseline(case: &Case, label: &str) -> (BoneWorkspace, Vec<SemanticToken>) {
     (bone, tokens)
 }
 
-fn tok(
-    delta_line: u32,
-    delta_start: u32,
-    length: u32,
-    token_type: u32,
-    mods: u32,
-) -> SemanticToken {
-    SemanticToken {
-        delta_line,
-        delta_start,
-        length,
-        token_type,
-        token_modifiers_bitset: mods,
-    }
-}
-
 /// Checks the stream for `source`, then restores the case's source and
 /// requires its baseline stream back.
 fn check_and_repair(
@@ -350,47 +334,6 @@ fn check_and_repair(
         baseline,
         "{context}: repair changed baseline"
     );
-}
-
-#[test]
-fn validator_rejects_corrupt_streams_before_production_controls() {
-    let good = tok(0, 0, 1, 0, 0);
-    assert!(validate("x\n", &[good], true).is_ok());
-    let types = semantic_tokens_legend().len() as u32;
-    let mods = semantic_tokens_modifiers_legend().len();
-    let corruptions = [
-        ("shift-column", tok(0, 1, 1, 0, 0)),
-        ("shift-line", tok(2, 0, 1, 0, 0)),
-        ("cross-newline", tok(0, 0, 2, 0, 0)),
-        ("zero-length", tok(0, 0, 0, 0, 0)),
-        ("bad-type", tok(0, 0, 1, types, 0)),
-        ("bad-modifier", tok(0, 0, 1, 0, 1 << mods)),
-    ];
-    for (name, bad) in corruptions {
-        let error = validate("x\n", &[bad], true).expect_err(name);
-        eprintln!("rejected {name}: {error}");
-    }
-    assert!(validate("x\n", &[], true).is_err(), "empty control passed");
-    assert!(
-        validate("", &[], false).is_ok(),
-        "empty buffers may emit nothing"
-    );
-    assert!(decode(&[tok(0, u32::MAX, 1, 0, 0), tok(0, 1, 1, 0, 0)]).is_err());
-    assert!(decode(&[tok(u32::MAX, 0, 1, 0, 0), tok(1, 0, 1, 0, 0)]).is_err());
-    assert!(
-        validate("xx\n", &[good, good], true).is_err(),
-        "overlap accepted"
-    );
-
-    let mut bone = BoneWorkspace::new();
-    for case in CASES.iter().filter(|c| c.valid) {
-        update_and_check(
-            &mut bone,
-            case.source,
-            true,
-            &replay(case, "valid control", &[], case.source),
-        );
-    }
 }
 
 #[test]

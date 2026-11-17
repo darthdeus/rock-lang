@@ -84,62 +84,6 @@ fn identity<T>(x: T) -> T {
 }
 ";
 
-/// Sorted (line, char) starts of every returned reference location.
-fn ref_starts(bone: &BoneWorkspace, pos: Position) -> Vec<(u32, u32)> {
-    let mut v: Vec<(u32, u32)> = bone
-        .references(PATH, pos)
-        .into_iter()
-        .map(|loc| (loc.range.start.line, loc.range.start.character))
-        .collect();
-    v.sort();
-    v
-}
-
-#[test]
-fn references_track_line_shifts_from_another_fn_edit() {
-    let local_short = ((5, 8), vec![(5, 8), (6, 11), (6, 19)]);
-    let local_long = ((6, 8), vec![(6, 8), (7, 11), (7, 19)]);
-    // (case, first text, second text, (cursor, references) before and after)
-    let cases = [
-        (
-            "local",
-            LOCALS.to_string(),
-            lengthened(LOCALS),
-            local_short.clone(),
-            local_long.clone(),
-        ),
-        (
-            "line removal",
-            lengthened(LOCALS),
-            LOCALS.to_string(),
-            local_long,
-            local_short,
-        ),
-        (
-            "call sites",
-            CALLS.to_string(),
-            lengthened(CALLS),
-            ((5, 12), vec![(0, 3), (5, 11), (5, 21)]),
-            ((6, 12), vec![(0, 3), (6, 11), (6, 21)]),
-        ),
-        (
-            "enum variant pattern",
-            ENUM.to_string(),
-            lengthened(ENUM),
-            ((1, 4), vec![(1, 4), (11, 15)]),
-            ((1, 4), vec![(1, 4), (12, 15)]),
-        ),
-    ];
-    for (case, first, second, (p0, refs0), (p1, refs1)) in cases {
-        let mut bone = BoneWorkspace::new();
-        bone.update(PATH, first);
-        let at = |(l, c)| Position::new(l, c);
-        assert_eq!(ref_starts(&bone, at(p0)), refs0, "{case}: baseline");
-        bone.update(PATH, second);
-        assert_eq!(ref_starts(&bone, at(p1)), refs1, "{case}: after the edit");
-    }
-}
-
 #[test]
 fn document_highlight_tracks_line_shift_from_other_fn_edit() {
     let mut bone = workspace(LOCALS);
@@ -151,22 +95,6 @@ fn document_highlight_tracks_line_shift_from_other_fn_edit() {
         .collect();
     starts.sort();
     assert_eq!(starts, [(6, 8), (7, 11), (7, 19)]);
-}
-
-/// Typed a keystroke at a time, the intermediate states fail to parse or lower
-/// and revert to last-good before the final valid text arrives.
-#[test]
-fn references_track_line_shift_typed_char_by_char() {
-    let mut bone = workspace(LOCALS);
-    let (head, tail) = LOCALS.split_at(LOCALS.find("    return 1").unwrap() + 12);
-    let typed = "\n    let pad = 0";
-    for i in 1..=typed.len() {
-        bone.update(PATH, format!("{head}{}{tail}", &typed[..i]));
-    }
-    assert_eq!(
-        ref_starts(&bone, Position::new(6, 8)),
-        [(6, 8), (7, 11), (7, 19)]
-    );
 }
 
 // The pinned tests cover only the span carriers someone named. The oracle

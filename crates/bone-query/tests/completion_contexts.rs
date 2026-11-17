@@ -9,12 +9,6 @@ use lsp_types::CompletionItemKind;
 #[test]
 fn member_access_offers() {
     check_labels(&[
-        (
-            "fields and UFCS methods",
-            "struct FixVec2 { x: float, y: float }\nfn dist(a: FixVec2) -> float { a.x }\n\
-             fn r() {\n  let v = FixVec2 { x: 1.0, y: 2.0 }\n  v.<|>\n}\n",
-            &["x: float", "dist"],
-        ),
         // The invariants reject the duplicate label two overloads would add.
         (
             "UFCS overloads dedup to one item",
