@@ -9,7 +9,6 @@ use std::fs::File;
 use std::io::{Read, Seek, Write};
 use std::path::Path;
 use std::time::Duration;
-use wait_timeout::ChildExt;
 
 #[derive(Clone, Debug)]
 pub(super) struct GpuMemory {
@@ -125,30 +124,20 @@ fn probe_command(command: &mut std::process::Command) -> Probe {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.to_string()),
     };
-    std::thread::scope(|scope| {
-        // Drain while waiting: process lists can exceed the OS pipe buffer.
-        let mut stdout = child.stdout.take().expect("piped GPU telemetry");
-        let reader = scope.spawn(move || {
-            let mut bytes = Vec::new();
-            stdout.read_to_end(&mut bytes).map(|_| bytes)
-        });
-        let status = match child.wait_timeout(Duration::from_secs(3)) {
-            Ok(Some(status)) => status,
-            result => {
+    let result =
+        crate::common::ProcessManager::wait_with_timeout(&mut child, Duration::from_secs(3))
+            .map_err(|error| {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("nvidia-smi did not complete: {result:?}"));
-            }
-        };
-        let bytes = reader
-            .join()
-            .expect("GPU telemetry reader")
-            .map_err(|error| error.to_string())?;
-        if !status.success() {
-            return Err(format!("nvidia-smi exited with {status}"));
-        }
-        parse(&String::from_utf8_lossy(&bytes)).map(Some)
-    })
+                error.to_string()
+            })?;
+    if result.timed_out {
+        return Err("nvidia-smi did not complete within 3s".into());
+    }
+    if !result.output.status.success() {
+        return Err(format!("nvidia-smi exited with {}", result.output.status));
+    }
+    parse(&String::from_utf8_lossy(&result.output.stdout)).map(Some)
 }
 
 // Scope to the first GPU, matching the planner and default GL device.

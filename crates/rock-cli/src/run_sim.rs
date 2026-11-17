@@ -1497,6 +1497,29 @@ pub(crate) fn do_list_sims(project: &str) -> Result<()> {
     Ok(())
 }
 
+fn prepare_run(
+    project: &str,
+    names: &[String],
+    recorder: &SimRunRecorder,
+) -> Result<(PathBuf, TempDir, PreparedSims)> {
+    let project_path = recorder.phase("resolve_project", || {
+        rock_engine_host::project::resolve_project_dir(project)
+    })?;
+    recorder.phase("build_engine", || {
+        rock_engine_host::engine_build::build_engine_libs(&project_path.to_string_lossy())
+    })?;
+    let out_dir = sim_output_dir()?;
+    let prepared = recorder.phase("compile_and_discover", || {
+        prepare_sims_out_of_process(
+            project_path.clone(),
+            out_dir.path().to_path_buf(),
+            &rock_host::process_management::current_executable_image()?,
+            names,
+        )
+    })?;
+    Ok((project_path, out_dir, prepared))
+}
+
 fn do_run_sim_opts_with_request(
     project: &str,
     sim_name: &str,
@@ -1526,33 +1549,10 @@ fn do_run_sim_opts_recorded(
     requested_jobs: Option<usize>,
     recorder: &SimRunRecorder,
 ) -> Result<()> {
-    let project_path = recorder.phase("resolve_project", || {
-        rock_engine_host::project::resolve_project_dir(project)
-    })?;
-    // Thread the RESOLVED path everywhere the raw arg used to flow (engine libs,
-    // sim-source lookup for image baselines) so a bare name behaves exactly
-    // like its expanded path.
-    let project = project_path.to_string_lossy().into_owned();
-    recorder.phase("build_engine", || {
-        rock_engine_host::engine_build::build_engine_libs(&project)
-    })?;
-
-    let out_dir = sim_output_dir()?;
+    let (project_path, out_dir, mut prepared) =
+        prepare_run(project, &[sim_name.to_string()], recorder)?;
     let output = out_dir.path().to_string_lossy().into_owned();
     let output_path = out_dir.path().to_path_buf();
-
-    // Compile once and collect `@sim_env("K", "V")` env pairs by wire name.
-    // The runner applies them via `Command::env` before luajit spawns --
-    // the in-process runtime `set_env()` runs after `@init`, so it can't
-    // influence env-var-driven game config like `MATCH3_PRESET`.
-    let mut prepared = recorder.phase("compile_and_discover", || {
-        prepare_sims_out_of_process(
-            project_path.clone(),
-            output_path.clone(),
-            &rock_host::process_management::current_executable_image()?,
-            &[sim_name.to_string()],
-        )
-    })?;
     let sim_name = resolve_sim_specs(&prepared.wire_names, &[sim_name.to_string()])?.remove(0);
     let sim_name = sim_name.as_str();
     // Receipt consumers do not retain the compiler session. A reload entry is
@@ -1824,24 +1824,9 @@ fn do_run_sims_recorded(
     recorder: &SimRunRecorder,
 ) -> Result<()> {
     let suite = names.is_empty();
-    let project_path = recorder.phase("resolve_project", || {
-        rock_engine_host::project::resolve_project_dir(project)
-    })?;
+    let (project_path, out_dir, prepared) = prepare_run(project, names, recorder)?;
     let project = project_path.to_string_lossy().into_owned();
-    recorder.phase("build_engine", || {
-        rock_engine_host::engine_build::build_engine_libs(&project)
-    })?;
-
-    let out_dir = sim_output_dir()?;
     let output = out_dir.path().to_string_lossy().into_owned();
-    let prepared = recorder.phase("compile_and_discover", || {
-        prepare_sims_out_of_process(
-            project_path.clone(),
-            PathBuf::from(&output),
-            &rock_host::process_management::current_executable_image()?,
-            names,
-        )
-    })?;
     let wire_names = prepared.wire_names;
     let env_by_wire = prepared.env_by_wire;
     let source_files = prepared.source_files;
