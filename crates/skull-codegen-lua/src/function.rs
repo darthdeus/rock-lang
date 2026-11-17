@@ -297,7 +297,7 @@ fn emit_body(
     REGALLOC_TIME.with(|c| c.set(c.get() + t_cells.elapsed()));
     let (mut inlinable, repeatable, uses) = compute_inlinable(func, &rpo, params, &pinned);
     for tail in tail_forwards.iter().flatten() {
-        for &id in &tail.suppressed[1..] {
+        for &id in &tail[1..] {
             inlinable[raw(id) as usize] = true;
         }
     }
@@ -353,7 +353,7 @@ fn emit_body(
     let alias = if frame.is_none() {
         let mut movable = vec![true; func.insts.len()];
         for tail in tail_forwards.iter().flatten() {
-            for &id in &tail.suppressed {
+            for &id in *tail {
                 movable[raw(id) as usize] = false;
             }
         }

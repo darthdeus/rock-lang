@@ -21,7 +21,7 @@ pub(crate) fn check_frame_limits(
     loops: &HashMap<Idx<Block>, ForLoop>,
     color_scope: &[Option<Idx<Block>>],
     hoist: &HashMap<Idx<Inst>, u32>,
-    tail_forwards: &[Option<TailForward>],
+    tail_forwards: &[Option<&[Idx<Inst>]>],
     call_arg_forwards: &CallArgForwards,
     inlinable: &[bool],
 ) {
@@ -70,9 +70,7 @@ pub(crate) fn check_frame_limits(
     for (b, forward) in tail_forwards.iter().enumerate() {
         let Some(tail) = forward else { continue };
         return_replaced[b] = true;
-        if let Some(&call) = tail.suppressed.first() {
-            results_unassigned[raw(call) as usize] = true;
-        }
+        results_unassigned[raw(tail[0]) as usize] = true;
     }
     let mut fixed_arity_override = vec![None; func.insts.len()];
     for forward in call_arg_forwards.iter() {

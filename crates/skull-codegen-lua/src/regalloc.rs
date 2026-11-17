@@ -24,7 +24,6 @@ use skull_mir::mir::{Block, Cell, Inst, MirFunc, Term};
 /// where set union/diff and "interfere with the whole live set" are word-parallel
 /// (`O(n/64)`) instead of the per-element hashing a `HashSet` pays. The cell
 /// coloring pass is the skull compile hot spot on inlined functions.
-#[derive(Clone)]
 struct BitSet {
     words: Vec<u64>,
 }
@@ -48,21 +47,11 @@ impl BitSet {
     fn clear(&mut self) {
         self.words.iter_mut().for_each(|w| *w = 0);
     }
-    /// `self |= o`; returns whether any bit was newly set.
-    fn or_with(&mut self, o: &[u64]) -> bool {
-        let mut changed = false;
-        for (a, b) in self.words.iter_mut().zip(o.iter()) {
-            let merged = *a | *b;
-            changed |= merged != *a;
-            *a = merged;
-        }
-        changed
-    }
 }
 
 /// `rows` bit sets of one width in one allocation: the per-block liveness
 /// tables. A `Vec<BitSet>` paid an allocation per block per table.
-#[derive(Clone)]
+#[derive(Default)]
 struct BitRows {
     width: usize,
     words: Vec<u64>,
@@ -247,7 +236,9 @@ impl Flow {
     fn live_out(&self, live_in: &BitRows, bi: usize, out: &mut BitSet) {
         out.clear();
         for &s in self.succs(bi) {
-            out.or_with(live_in.row(s as usize));
+            for (word, &next) in out.words.iter_mut().zip(live_in.row(s as usize)) {
+                *word |= next;
+            }
         }
     }
 }
@@ -1563,6 +1554,7 @@ pub(crate) enum KillLocal {
     Cell(u32),
 }
 
+#[derive(Default)]
 pub(crate) struct NilKills<'a> {
     /// Dense `raw(inst) -> range of after_locals`: the locals dead right after
     /// that instruction's statement. One list for the body instead of a vector
@@ -1593,25 +1585,6 @@ pub(crate) struct NilKills<'a> {
 }
 
 impl NilKills<'_> {
-    /// No kills anywhere (coroutine `__step` bodies, or the pass disabled).
-    pub(crate) fn none() -> Self {
-        NilKills {
-            after_range: Vec::new(),
-            after_locals: Vec::new(),
-            entry_range: Vec::new(),
-            entry_locals: Vec::new(),
-            live_in: BitRows::new(0, 0),
-            end_live: BitRows::new(0, 0),
-            flow: None,
-            first_pure_range: Vec::new(),
-            first_pure_slots: Vec::new(),
-            value_count: 0,
-            value_scope: Vec::new(),
-            loop_blocks: Vec::new(),
-            return_tail: Vec::new(),
-        }
-    }
-
     /// Mark the blocks that reach a `return` without running a statement
     /// (`quiet` says which instructions print none) and drop their entry
     /// kills: a return drops every slot itself, and nothing between can exit.

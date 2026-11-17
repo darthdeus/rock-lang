@@ -9,16 +9,14 @@ use super::*;
 pub(crate) fn referenced_cells_in_region(
     func: &MirFunc,
     scope: &[Idx<Block>],
-    tail_forwards: &[Option<TailForward>],
+    tail_forwards: &[Option<&[Idx<Inst>]>],
     suppressed: &[bool],
 ) -> Vec<bool> {
     let mut cells = vec![false; func.cells.len()];
     for &b in scope {
-        let tail = tail_forwards[raw(b) as usize].as_ref();
-        for (position, &iid) in func.blocks[b].insts.iter().enumerate() {
-            if tail.is_some_and(|tail| position >= tail.first_suppressed) {
-                continue;
-            }
+        let insts = &func.blocks[b].insts;
+        let tail_len = tail_forwards[raw(b) as usize].map_or(0, <[_]>::len);
+        for &iid in &insts[..insts.len() - tail_len] {
             if suppressed[raw(iid) as usize] || matches!(func.insts[iid], Inst::Lambda { .. }) {
                 continue;
             }
@@ -26,13 +24,6 @@ pub(crate) fn referenced_cells_in_region(
         }
     }
     cells
-}
-
-#[derive(Clone)]
-pub(crate) struct TailForward {
-    pub(crate) first_suppressed: usize,
-    pub(crate) suppressed: Vec<Idx<Inst>>,
-    pub(crate) call: Idx<Inst>,
 }
 
 #[derive(Clone)]
@@ -95,11 +86,11 @@ fn instruction_reference_counts(func: &MirFunc) -> Vec<u32> {
     counts
 }
 
-pub(crate) fn tail_forwards(
+pub(crate) fn tail_forwards<'a>(
     ws: &Workspace,
-    func: &MirFunc,
+    func: &'a MirFunc,
     direct: bool,
-) -> Vec<Option<TailForward>> {
+) -> Vec<Option<&'a [Idx<Inst>]>> {
     let mut forwards = vec![None; func.blocks.len()];
     // Counted for the first multi-return candidate; most bodies have none.
     let cell_references = std::cell::OnceCell::new();
@@ -128,11 +119,7 @@ pub(crate) fn tail_forwards(
                 && !callee.is_extern
                 && !callee.is_coroutine
             {
-                forwards[raw(block_id) as usize] = Some(TailForward {
-                    first_suppressed: block.insts.len() - 1,
-                    suppressed: vec![call_id],
-                    call: call_id,
-                });
+                forwards[raw(block_id) as usize] = Some(&block.insts[block.insts.len() - 1..]);
                 continue;
             }
         }
@@ -160,11 +147,7 @@ pub(crate) fn tail_forwards(
         if !exact_wire {
             continue;
         }
-        forwards[raw(block_id) as usize] = Some(TailForward {
-            first_suppressed: first,
-            suppressed: block.insts[first..].to_vec(),
-            call: call_id,
-        });
+        forwards[raw(block_id) as usize] = Some(&block.insts[first..]);
     }
     forwards
 }

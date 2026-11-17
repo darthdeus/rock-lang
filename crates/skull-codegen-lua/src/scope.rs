@@ -27,7 +27,7 @@ pub(crate) fn render_scope(
     hoist: &HashMap<Idx<Inst>, u32>,
     hoist_names: &[String],
     allocation: Option<AllocationEmission<'_>>,
-    tail_forwards: &[Option<TailForward>],
+    tail_forwards: &[Option<&[Idx<Inst>]>],
     call_arg_forwards: &CallArgForwards,
     suppressed: &[bool],
     line_marks: Option<&RefCell<Vec<LineMark>>>,
@@ -79,7 +79,7 @@ pub(crate) fn render_scope(
     // dead slots out of LuaJIT exit snapshots (see `regalloc::nil_kills`). A
     // coroutine `__step` keeps raw cell names and frame fields; it gets none.
     let kills = if frame.is_some() {
-        regalloc::NilKills::none()
+        regalloc::NilKills::default()
     } else {
         // The folded values, plus what else emits no statement: only then is
         // a second table needed.
@@ -193,45 +193,39 @@ pub(crate) fn render_scope(
     // stamp the keyword up front and `truncate` it back if nothing is declared.
     // Loop-owned colors are declared inside their `for` block (expand_for), not
     // here.
-    let mut distinct: Vec<u32> = colors
-        .iter()
-        .copied()
-        .filter(|&c| c != u32::MAX && color_scope[c as usize].is_none())
-        .collect();
-    distinct.sort_unstable();
-    distinct.dedup();
     let decl_start = out.len();
     out.push_str(" local ");
     let mut any = false;
     // Counted as the names are written, so the frame-limit model reads THIS
     // declaration rather than a second derivation of it.
     let mut top_locals = 0usize;
-    for &c in &distinct {
+    for (color, scope) in color_scope.iter().enumerate() {
+        if scope.is_some() {
+            continue;
+        }
         if any {
             out.push_str(", ");
         }
         any = true;
         top_locals += 1;
         out.push('r');
-        push_uint(out, c);
+        push_uint(out, color as u32);
     }
     // Declare each cell LOCAL exactly once. Colored cells collapse onto their
     // shared `c<color>` (deduped, and excluding any color already named by a
     // param); any remaining uncolored cells declare per raw id.
-    let param_colors: HashSet<u32> = params
+    let mut declared_colors: HashSet<u32> = params
         .iter()
         .map(|c| cell_colors[raw(*c) as usize])
         .filter(|&col| col != u32::MAX)
         .collect();
-    let mut seen_color: HashSet<u32> = HashSet::default();
     for (cid, _) in func.cells.iter() {
         if param_cells[raw(cid) as usize] || !cell_has_local(cid) {
             continue;
         }
         let (decl, col) = match cell_colors[raw(cid) as usize] {
             u32::MAX => (true, None), // uncolored -> c<raw>
-            col if !param_colors.contains(&col) => (seen_color.insert(col), Some(col)),
-            _ => (false, None), // color already a param's
+            col => (declared_colors.insert(col), Some(col)),
         };
         if !decl {
             continue;

@@ -199,8 +199,8 @@ impl Emitter<'_> {
     /// forward already ended the block with its `return`.
     pub(crate) fn emit_block_statements(&mut self, out: &mut String, bb: Idx<Block>) -> bool {
         let insts: &[Idx<Inst>] = &self.func.blocks[bb].insts;
-        let tail = self.tail_forwards[raw(bb) as usize].as_ref();
-        let emitted_len = tail.map_or(insts.len(), |tail| tail.first_suppressed);
+        let tail = self.tail_forwards[raw(bb) as usize];
+        let emitted_len = insts.len() - tail.map_or(0, <[_]>::len);
         // Kills are written before the next statement, so the ones after the
         // last statement of a returning block are dropped: `return` (and a
         // tail call, which replaces the frame) drops every slot itself.
@@ -247,21 +247,21 @@ impl Emitter<'_> {
             self.write_pending_kills(out, bb, first, pending);
         }
         if let Some(tail) = tail {
-            self.emit_tail_forward(out, tail);
+            self.emit_tail_forward(out, tail[0]);
             return true;
         }
         false
     }
 
-    fn emit_tail_forward(&self, out: &mut String, tail: &TailForward) {
+    fn emit_tail_forward(&self, out: &mut String, call: Idx<Inst>) {
         if matches!(
-            self.func.insts[tail.call],
+            self.func.insts[call],
             Inst::Call { .. } | Inst::CallMulti { .. }
         ) {
-            self.mark_line(out, tail.call);
+            self.mark_line(out, call);
         }
         out.push_str(" do return ");
-        self.write_call(out, tail.call);
+        self.write_call(out, call);
         out.push_str(" end\n");
     }
 
@@ -307,22 +307,18 @@ impl Emitter<'_> {
         // loop exits (else they pin their values into every side trace and
         // `asm_head_side` aborts past ~16 inherited FP values -- the
         // "NYI: register coalescing too complex" blacklist class).
-        let mut own: Vec<u32> = self
+        let mut regs = self
             .color_scope
             .iter()
             .enumerate()
-            .filter(|(_, s)| **s == Some(header))
-            .map(|(c, _)| c as u32)
-            .collect();
-        if !own.is_empty() {
-            own.sort_unstable();
-            out.push_str(" local ");
-            for (i, &c) in own.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                out.push('r');
-                push_uint(out, c);
+            .filter(|(_, scope)| **scope == Some(header))
+            .map(|(color, _)| color as u32);
+        if let Some(first) = regs.next() {
+            out.push_str(" local r");
+            push_uint(out, first);
+            for color in regs {
+                out.push_str(", r");
+                push_uint(out, color);
             }
             out.push('\n');
         }

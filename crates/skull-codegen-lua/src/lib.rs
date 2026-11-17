@@ -1035,7 +1035,7 @@ struct Emitter<'a> {
     state_slots: &'a HashMap<ustr::Ustr, u32>,
     static_slots: &'a HashMap<ustr::Ustr, String>,
     allocation: Option<AllocationEmission<'a>>,
-    tail_forwards: &'a [Option<TailForward>],
+    tail_forwards: &'a [Option<&'a [Idx<Inst>]>],
     call_arg_forwards: &'a CallArgForwards,
     suppressed: &'a [bool],
     /// Death point of every declared local, written as `<local> = nil`.
