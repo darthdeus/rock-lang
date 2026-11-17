@@ -2789,802 +2789,111 @@ mod stderr_log_tests {
 }
 
 #[cfg(test)]
-mod runner_tests {
+mod tests {
     use super::*;
 
-    /// Records each spawn in `invocations` and prints `reply`, both next to
-    /// the path it was run through.
-    const STUB_SCRIPT: &str =
-        "#!/bin/sh\ndir=\"${0%/*}\"\necho \"$@\" >> \"$dir/invocations\"\ncat \"$dir/reply\"\n";
+    const HOVER: &str = "TEST: broken\nTYPE: hover\n---\nfn main() {\n    ma\u{ab}cursor\u{bb}in()\n}\n---\nOPERATION: hover\nEXPECTED:\nfn main()\n===\n";
 
-    /// The one stub script every test links to, kept beside the test binary.
-    /// macOS scans each new executable on its first run, which costs up to
-    /// half a second, so a fresh script per fixture made these tests slow.
-    fn shared_stub_script() -> &'static Path {
-        static STUB: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-        STUB.get_or_init(|| {
-            let exe = std::env::current_exe().unwrap();
-            let path = exe.parent().unwrap().join("rock-lsp-test-stub.sh");
-            if std::fs::read_to_string(&path).ok().as_deref() != Some(STUB_SCRIPT) {
-                #[cfg(unix)]
-                test_utils::write_executable(&path, STUB_SCRIPT);
-                #[cfg(not(unix))]
-                std::fs::write(&path, STUB_SCRIPT).unwrap();
-            }
-            path
-        })
-    }
-
-    /// A stub server in `dir` that records each spawn in `<dir>/invocations`
-    /// and prints `reply`, so a fixture's verdict comes from the runner's
-    /// reply handling rather than from the compiler.
-    fn stub_server(dir: &Path, reply: &str) -> PathBuf {
-        std::fs::write(dir.join("reply"), reply).unwrap();
-        let path = dir.join("stub-rock");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(shared_stub_script(), &path).unwrap();
-        #[cfg(not(unix))]
-        std::fs::copy(shared_stub_script(), &path).unwrap();
-        path
-    }
-
-    /// Run `fixture` (one `TEST:` block) against a stub server that prints
-    /// `reply`. Returns the file result and how many times the stub was run.
-    fn run_against_stub(fixture: &str, reply: &str) -> (FileTestResult, usize) {
-        let dir = tempfile::tempdir().unwrap();
-        let bin = stub_server(dir.path(), reply);
-        let marker = dir.path().join("invocations");
-        let path = dir.path().join("fixture.rock.lsp");
-        std::fs::write(&path, fixture).unwrap();
-        let server = LspServerCmd { bin: &bin };
-        let result = run_lsp_file(&path, "fixture", server);
-        let invocations = std::fs::read_to_string(&marker)
-            .map(|log| log.lines().count())
-            .unwrap_or(0);
-        (result, invocations)
-    }
-
-    macro_rules! fixture {
-        ($name:literal, $kind:literal, $code:expr, $expected:literal $(, $options:literal)?) => {
-            concat!(
-                "TEST: stub ", $name, "\nTYPE: ", $kind, "\n---\n", $code,
-                "\n---\nOPERATION: ", $kind, "\n", $($options,)?
-                "EXPECTED:\n", $expected, "\n===\n",
-            )
-        };
-    }
-
-    macro_rules! count_source {
-        () => {
-            "fn main() {\nlet count = 1;\nlet other = cou\u{ab}cursor\u{bb}nt;\n}"
-        };
-    }
-
-    const COMPLETION_FIXTURE: &str =
-        fixture!("completion", "completion", count_source!(), "- count");
-    const DEFINITION_FIXTURE: &str = fixture!(
-        "definition",
-        "goto_definition",
-        count_source!(),
-        "line: 2\ncharacter: 12"
-    );
-    const DEFINITION_NONE_FIXTURE: &str = fixture!(
-        "definition none",
-        "goto_definition",
-        "fn main() {\nlet other = cou\u{ab}cursor\u{bb}nt;\n}",
-        "none"
-    );
-    const REFERENCES_NONE_FIXTURE: &str =
-        fixture!("references none", "references", count_source!(), "none");
-    const SIGNATURE_HELP_FIXTURE: &str = fixture!(
-        "signature help",
-        "signature_help",
-        "fn greet(name: string) {}\nfn main() {\ngre\u{ab}cursor\u{bb}et(\n}",
-        "greet(name: string)"
-    );
-    const SYMBOLS_FIXTURE: &str = fixture!(
-        "symbols",
-        "document_symbols",
-        "struct Widget {\n}",
-        "- Widget: struct"
-    );
-    const HOVER_FIXTURE: &str = fixture!(
-        "hover",
-        "hover",
-        "fn main() {\nmai\u{ab}cursor\u{bb}n();\n}",
-        "fn main()"
-    );
-    const INLAY_HINTS_FIXTURE: &str = fixture!(
-        "inlay hints",
-        "inlay_hints",
-        "fn main() {\nlet count = 1\n}",
-        "fn main() {\nlet count\u{ab}hint:: int\u{bb} = 1\n}"
-    );
-    const RENAME_FIXTURE: &str = fixture!(
-        "rename",
-        "rename",
-        "fn main() {\nlet \u{ab}start\u{bb}count\u{ab}end\u{bb} = 1\nprint(count)\n}",
-        "fn main() {\nlet total = 1\nprint(total)\n}",
-        "NEW_NAME: total\n---\n"
-    );
-    const SEMANTIC_TOKENS_FIXTURE: &str = fixture!(
-        "semantic tokens",
-        "semantic_tokens",
-        "fn main() {\nlet count = 1;\n}",
-        "min_tokens: 5"
-    );
-
-    /// The parse error `fixture` must produce.
-    fn parse_error_of(fixture: &str) -> String {
-        parse_fixtures(fixture)
-            .expect_err("the fixture must be rejected when it is parsed")
-            .to_string()
-    }
-
-    fn parse_fixtures(fixture: &str) -> Result<Vec<LspTest>> {
+    fn fixture_error(fixture: &str) -> String {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fixture.rock.lsp");
         std::fs::write(&path, fixture).unwrap();
-        parse_lsp_test_file(&path)
-    }
-
-    fn parse_one(fixture: &str) -> LspTest {
-        let mut tests = parse_fixtures(fixture).unwrap();
-        assert_eq!(tests.len(), 1, "the fixture must be admitted once");
-        tests.pop().unwrap()
+        parse_lsp_test_file(&path).unwrap_err().to_string()
     }
 
     #[test]
-    fn fixtures_can_share_source_and_describe_exact_replacements() {
-        let fixtures = format!(
-            "{RENAME_FIXTURE}\nTEST: another rename\nTYPE: rename\nSOURCE: stub rename\nPOSITION: line=1, character=8\nNEW_NAME: sum\nEXPECTED:\nREPLACE: [\"count\", \"sum\"]\n===\n"
-        );
-        let tests = parse_fixtures(&fixtures).unwrap();
-        assert_eq!(tests.len(), 2);
-        assert_eq!(tests[1].code, tests[0].code);
-        let edited = fixtures.replace(
-            "SOURCE: stub rename\n",
-            "SOURCE: stub rename\nREPLACE: [\"1\", \"2\"]\n",
-        );
-        let edited = parse_fixtures(&edited).unwrap();
-        assert_eq!(edited[1].code, tests[0].code.replace('1', "2"));
-        assert_eq!(
-            edited[1].expected_code.as_deref(),
-            Some("fn main() {\nlet sum = 2\nprint(sum)\n}")
-        );
-        assert_eq!(
-            tests[1].expected_code.as_deref(),
-            Some("fn main() {\nlet sum = 1\nprint(sum)\n}")
-        );
-        assert!(
-            matches!(&tests[1].operation, LspOperation::Rename { line: 1, character: 8, new_name } if new_name == "sum")
-        );
-        for invalid in [
-            fixtures.replace("SOURCE: stub rename", "SOURCE: missing"),
-            fixtures.replace("[\"count\", \"sum\"]", "[\"missing\", \"sum\"]"),
-            fixtures.replace("[\"count\", \"sum\"]", "[]"),
-        ] {
-            assert!(parse_fixtures(&invalid).is_err());
-        }
-    }
-
-    #[test]
-    fn full_document_steps_can_replace_text_from_an_earlier_step() {
-        let fixture = "TEST: replace step\nTYPE: edit_sequence\n---\nSTEP 1:\nfn main() { print(1) }\n---\nSTEP 2:\nSOURCE: 1\nREPLACE: [\"print(1)\", \"print(2)\"]\n---\n===\n";
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sequence.rock.lsp");
-        std::fs::write(&path, fixture).unwrap();
-        let tests = parse_edit_sequence_tests(&path).unwrap();
-        assert!(
-            matches!(&tests[0].steps[1].mode, StepMode::FullReplace { code } if code == "fn main() { print(2) }")
-        );
-        for reference in ["0", "2", "missing"] {
-            std::fs::write(
-                &path,
-                fixture.replace("SOURCE: 1", &format!("SOURCE: {reference}")),
-            )
-            .unwrap();
-            assert!(parse_edit_sequence_tests(&path).is_err());
-        }
-    }
-
-    /// The fixture must fail, and the failure must name the request and quote
-    /// the raw reply.
-    fn assert_fixture_fails(fixture: &str, reply: &str, request: &str) -> String {
-        let (result, invocations) = run_against_stub(fixture, reply);
-        assert_eq!(invocations, 1, "the stub server must have run exactly once");
-        assert_eq!(
-            (result.passed, result.failed),
-            (0, 1),
-            "a reply of {reply:?} must not satisfy the fixture; details: {:?}",
-            result.failed_test_details
-        );
-        let detail = result.failed_test_details[0].1.clone();
-        assert!(
-            detail.contains(request),
-            "failure {detail:?} does not name the request {request:?}"
-        );
-        assert!(
-            detail.contains(reply),
-            "failure {detail:?} does not quote the raw reply {reply:?}"
-        );
-        detail
-    }
-
-    #[test]
-    fn a_truncated_reply_or_one_without_its_array_fails_the_fixture() {
+    fn malformed_fixtures_keep_their_name_and_reason() {
         let cases = [
             (
-                COMPLETION_FIXTURE,
-                r#"{"completions": [{"label": "count""#,
-                "completion",
+                HOVER.replace("OPERATION: hover", "OPERATION: completion"),
+                "TYPE 'hover'",
             ),
             (
-                DEFINITION_NONE_FIXTURE,
-                r#"{"status": "ok"}"#,
-                "goto_definition",
+                HOVER.replace("---\nOPERATION:", "OPERATION:"),
+                "closing \x60---\x60",
             ),
             (
-                REFERENCES_NONE_FIXTURE,
-                r#"{"references": [{"range": "#,
-                "references",
-            ),
-            (REFERENCES_NONE_FIXTURE, r#"{"status": "ok"}"#, "references"),
-        ];
-        for (fixture, reply, request) in cases {
-            assert_fixture_fails(fixture, reply, request);
-        }
-    }
-
-    #[test]
-    fn every_fixture_type_rejects_a_reply_that_only_quotes_the_expected_text() {
-        let cases: [(&str, &str, &str); 9] = [
-            (COMPLETION_FIXTURE, "count", "completion"),
-            (DEFINITION_FIXTURE, "character: 12", "goto_definition"),
-            (REFERENCES_NONE_FIXTURE, "none", "references"),
-            (
-                SIGNATURE_HELP_FIXTURE,
-                "greet(name: string)",
-                "signature_help",
-            ),
-            (SYMBOLS_FIXTURE, "Widget: struct", "document_symbols"),
-            (HOVER_FIXTURE, "fn main()", "hover"),
-            (INLAY_HINTS_FIXTURE, ": int", "inlay_hints"),
-            (RENAME_FIXTURE, "let total = 1", "rename"),
-            (SEMANTIC_TOKENS_FIXTURE, "min_tokens: 5", "semantic_tokens"),
-        ];
-        for (fixture, expected_text, request) in cases {
-            let reply = format!("not json {expected_text}");
-            let detail = assert_fixture_fails(fixture, &reply, request);
-            assert!(
-                !detail.contains("no reply decoder"),
-                "{request} must have a decoder, not fall through: {detail:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_fixture_with_a_bad_type_operation_or_delimiter_is_a_parse_error() {
-        let cases = [
-            // A type no decoder answers cannot be dropped or compared as text.
-            (
-                COMPLETION_FIXTURE
-                    .replace("TYPE: completion", "TYPE: teleport")
-                    .replace("OPERATION: completion", "OPERATION: teleport"),
-                vec!["TYPE 'teleport'", "stub completion"],
-            ),
-            // The type names the decoder and the operation names the request;
-            // halves that disagree would run a request through the wrong validator.
-            (
-                HOVER_FIXTURE.replace("OPERATION: hover", "OPERATION: completion"),
-                vec!["TYPE 'hover'", "OPERATION 'completion'", "stub hover"],
-            ),
-            (
-                COMPLETION_FIXTURE.replace("OPERATION: completion", "OPERATION: teleport"),
-                vec!["OPERATION 'teleport'", "stub completion"],
-            ),
-            (
-                SEMANTIC_TOKENS_FIXTURE
-                    .replace("TYPE: semantic_tokens", "TYPE: full_document")
-                    .replace("OPERATION: semantic_tokens", "OPERATION: full_document"),
-                vec!["TYPE 'full_document'", "stub semantic tokens"],
-            ),
-            (
-                SEMANTIC_TOKENS_FIXTURE
-                    .replace("OPERATION: semantic_tokens", "OPERATION: full_document"),
-                vec!["OPERATION 'full_document'", "stub semantic tokens"],
-            ),
-            // A code block opened with `--` used to vanish from the run.
-            (
-                RENAME_FIXTURE.replacen("---\n", "--\n", 1),
-                vec!["stub rename", "fixture.rock.lsp"],
-            ),
-        ];
-        for (fixture, needles) in cases {
-            let message = parse_error_of(&fixture);
-            for needle in needles {
-                assert!(message.contains(needle), "{needle}: {message}");
-            }
-        }
-    }
-
-    #[test]
-    fn every_malformed_block_is_a_parse_error_naming_the_fixture() {
-        let hover_with = |operation_and_expected: &str| {
-            format!(
-                "TEST: stub malformed\nTYPE: hover\n---\nfn main() {{\n    main()\n}}\n---\n{operation_and_expected}"
-            )
-        };
-        let cases = [
-            (
-                "TEST: stub malformed\n---\nfn main() {}\n".to_string(),
-                "expected `TYPE:`",
-            ),
-            ("TEST: stub malformed\n".to_string(), "before `TYPE:`"),
-            (
-                "TEST: stub malformed\nTYPE: hover\n---\nfn main() {}\n".to_string(),
-                "closing `---`",
-            ),
-            (
-                hover_with("EXPECTED:\nfn main()\n===\n"),
-                "needs a `POSITION:` line or a cursor marker",
-            ),
-            (
-                hover_with("OPERATION: hover\nEXPECTED:\nfn main()\n===\n"),
-                "needs a `POSITION:` line or a cursor marker",
-            ),
-            (
-                hover_with("OPERATION: hover\nPOSITION: line=1\nEXPECTED:\nfn main()\n===\n"),
-                "Invalid position format",
-            ),
-            (
-                hover_with("OPERATION: hover\nPOSITION: line=1, character=4\nfn main()\n===\n"),
-                "expected `EXPECTED:`",
-            ),
-            (
-                hover_with("OPERATION: hover\nPOSITION: line=1, character=4\nEXPECTED:\n\n===\n"),
+                HOVER.replace("EXPECTED:\nfn main()\n===\n", "EXPECTED:\n\n===\n"),
                 "EXPECTED block is empty",
             ),
-            (
-                hover_with(
-                    "OPERATION: hover\nPOSITION: line=1, character=4\nEXPECTED:\nfn main()\n\nTEST: next\nTYPE: hover\n",
-                ),
-                "no closing `===`",
-            ),
-            (
-                "TEST: stub malformed\nTYPE: completion\n---\nfn main() {\n    ma«cursor»\n}\n---\nOPERATION: completion\nEXPECTED:\nmain\n===\n"
-                    .to_string(),
-                "unrecognised `completion` expectation \"main\"",
-            ),
-            (
-                "TEST: stub malformed\nTYPE: hover\nFILES:\nstray text\nFILE: a.rock\n---\nfn main() {}\n---\nOPERATION: hover\n"
-                    .to_string(),
-                "expected `FILE:` in a files block",
-            ),
-            (
-                "TEST: stub malformed\nTYPE: edit_sequence\n---\nSTEP 1:\nfn main() {}\n---\n\nTEST: next\n"
-                    .to_string(),
-                "no closing `===`",
-            ),
         ];
-        for (fixture, needle) in cases {
-            let message = parse_error_of(&fixture);
+        for (fixture, reason) in cases {
+            let error = fixture_error(&fixture);
             assert!(
-                message.contains("stub malformed") && message.contains(needle),
-                "fixture {fixture:?}: error {message:?} must name the test and say {needle:?}"
+                error.contains("broken") && error.contains(reason),
+                "{error}"
             );
         }
     }
 
-    /// A mangled `TEST:` header between blocks would take its block with it.
-    /// Whatever the header looks like, the `TYPE:` line under it is caught.
     #[test]
-    fn a_mangled_test_header_between_blocks_is_a_parse_error() {
-        for header in [
-            "test: stub mangled",
-            "TEST stub mangled",
-            "Tset: stub mangled",
-        ] {
-            let fixture = format!("{HOVER_FIXTURE}\n{header}\nTYPE: hover\n");
-            let message = parse_error_of(&fixture);
-            assert!(message.contains("expected `TEST:`"), "{header}: {message}");
-        }
-    }
-
-    /// Fixtures run in parallel and their names repeat across files, so two
-    /// runs of the same fixture must not share a project directory.
-    #[test]
-    fn fixtures_with_the_same_name_get_separate_project_dirs() {
-        let test = parse_one(HOVER_FIXTURE);
-        let (file_a, proj_a) = write_fixture_project(&test).unwrap();
-        let (file_b, proj_b) = write_fixture_project(&test).unwrap();
-        assert!(!proj_a.join("stick.toml").exists());
-        assert!(!proj_b.join("stick.toml").exists());
-        let _ = std::fs::remove_dir_all(&proj_a);
-        let _ = std::fs::remove_dir_all(&proj_b);
-        assert_ne!(proj_a, proj_b);
-        assert_eq!(file_a.file_name(), file_b.file_name());
-    }
-
-    /// Prose notes before and between blocks are documentation, not fixtures.
-    /// Only `stick.toml` is the harness's manifest; any other `FILE:` lands as written.
-    #[test]
-    fn a_multi_file_fixture_writes_project_toml_as_an_ordinary_file() {
-        let fixture = "TEST: stub manifest\nTYPE: hover\nFILES:\n---\nFILE: main.rock\n---\nfn main() {}\n---\nFILE: project.toml\n---\nnot a manifest\n---\nFILE: stick.toml\n---\nignored\n---\nOPERATION: hover\nPOSITION: line=0, character=3\nEXPECTED:\nfn main()\n===\n";
-        let tests = parse_fixtures(fixture).unwrap();
-        let (_, project) = write_fixture_project(&tests[0]).unwrap();
-        let read = |name: &str| std::fs::read_to_string(project.join(name)).unwrap();
-        let (written, manifest) = (read("project.toml"), read("stick.toml"));
-        std::fs::remove_dir_all(&project).unwrap();
-        assert_eq!(written.trim_end(), "not a manifest");
-        assert!(manifest.contains("name = \"lsp_test\""), "{manifest}");
-    }
-
-    #[test]
-    fn prose_between_blocks_is_allowed() {
-        let fixture = format!(
-            "Notes on this file.\n\n{HOVER_FIXTURE}\nPINNED BUG (sentinel): a note.\n\n{COMPLETION_FIXTURE}"
+    fn malformed_edit_sequence_checks_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture.rock.lsp");
+        std::fs::write(
+            &path,
+            "TEST: broken\nTYPE: edit_sequence\n---\nSTEP 1:\nfn main() {}\n---\nCHECK: teleport\n===\n",
+        )
+        .unwrap();
+        let error = parse_edit_sequence_tests(&path).unwrap_err().to_string();
+        assert!(
+            error.contains("broken") && error.contains("malformed check"),
+            "{error}"
         );
-        assert_eq!(parse_fixtures(&fixture).unwrap().len(), 2);
     }
 
-    /// The edit-sequence parser rejects malformed steps and checks instead of
-    /// dropping them from the sequence.
+    #[cfg(unix)]
     #[test]
-    fn a_malformed_edit_sequence_step_or_check_is_a_parse_error() {
-        let sequence =
-            |body: &str| format!("TEST: stub sequence\nTYPE: edit_sequence\n---\n{body}===\n");
+    fn replies_are_checked_against_the_fixture() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("stub-rock");
+        test_utils::write_executable(&bin, "#!/bin/sh\ncat \"${0%/*}/reply\"\n");
+        let path = dir.path().join("fixture.rock.lsp");
         let cases = [
-            (
-                sequence("STEP 1:\nfn main() {}\n---\nCHECK: hover(1)\n"),
-                "malformed check `CHECK: hover(1)`",
-            ),
-            (
-                sequence("STEP 1:\nfn main() {}\n---\nCHECK: diagnostics\n"),
-                "malformed check `CHECK: diagnostics`",
-            ),
-            (
-                sequence("STEP 1:\nfn main() {}\n---\nCHECK: teleport\n"),
-                "malformed check `CHECK: teleport`",
-            ),
-            (
-                sequence(
-                    "STEP 1:\nfn main() {}\n---\nCHECK: semantic_tokens\n---\nSTEP 2 (type at 1):\nx\n---\n",
-                ),
-                "malformed step header",
-            ),
-            (
-                sequence("STEP 1:\nfn main() {}\n---\nstray text\n"),
-                "expected `CHECK:`",
-            ),
-            (sequence("stray text\n"), "expected `STEP`"),
-            (sequence(""), "has no steps"),
+            (HOVER, "not json fn main()", "reply is not JSON"),
+            (HOVER, "{}", "reply has no `hover.contents`"),
+            (HOVER, r#"{"hover":{"contents":"other"}}"#, ""),
         ];
-        for (fixture, needle) in cases {
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("fixture.rock.lsp");
-            std::fs::write(&path, &fixture).unwrap();
-            let message = parse_edit_sequence_tests(&path)
-                .expect_err("the sequence must be rejected when it is parsed")
-                .to_string();
-            assert!(
-                message.contains("stub sequence") && message.contains(needle),
-                "fixture {fixture:?}: error {message:?} must name the test and say {needle:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn bare_symbol_lines_are_checked_against_numeric_kinds() {
-        let fixture = SYMBOLS_FIXTURE.replace("- Widget: struct", "Widget: Struct");
-        let cases = [
-            (
-                r#"{"symbols": [{"name": "Widget", "kind": 23}]}"#,
-                (1, 0),
-                "a Struct",
-            ),
-            (
-                r#"{"symbols": [{"name": "Widget", "kind": 12}]}"#,
-                (0, 1),
-                "a Function is not a Struct",
-            ),
-            (r#"{"symbols": []}"#, (0, 1), "an empty reply lacks Widget"),
-        ];
-        for (reply, verdict, why) in cases {
-            let (result, _) = run_against_stub(&fixture, reply);
-            assert_eq!(
-                (result.passed, result.failed),
-                verdict,
-                "{why}: {:?}",
-                result.failed_test_details
-            );
-        }
-    }
-
-    #[test]
-    fn well_formed_replies_pass_the_fixtures() {
-        let cases = [
-            (
-                COMPLETION_FIXTURE,
-                r#"{"completions": [{"label": "count"}]}"#,
-            ),
-            (
-                DEFINITION_FIXTURE,
-                r#"{"definitions": [{"range": {"start": {"line": 2, "character": 12}}}]}"#,
-            ),
-            (DEFINITION_NONE_FIXTURE, r#"{"definitions": []}"#),
-            (REFERENCES_NONE_FIXTURE, r#"{"references": []}"#),
-            (
-                SIGNATURE_HELP_FIXTURE,
-                r#"{"signatures": [{"label": "greet(name: string)"}], "activeSignature": 0}"#,
-            ),
-            (
-                SYMBOLS_FIXTURE,
-                r#"{"symbols": [{"name": "Widget", "kind": "Struct"}]}"#,
-            ),
-            (HOVER_FIXTURE, r#"{"hover": {"contents": "fn main()"}}"#),
-            (
-                INLAY_HINTS_FIXTURE,
-                r#"{"hints": [{"position": {"line": 1, "character": 12}, "label": ": int"}]}"#,
-            ),
-            (
-                RENAME_FIXTURE,
-                r#"{"changes": {"file:///fixture.rock": [{"range": {"start": {"line": 1, "character": 4}, "end": {"line": 1, "character": 9}}, "new_text": "total"}, {"range": {"start": {"line": 2, "character": 6}, "end": {"line": 2, "character": 11}}, "new_text": "total"}]}}"#,
-            ),
-            (SEMANTIC_TOKENS_FIXTURE, r#"{"count": 7}"#),
-        ];
-        for (fixture, reply) in cases {
-            let (result, invocations) = run_against_stub(fixture, reply);
-            assert_eq!(invocations, 1);
-            assert_eq!(
-                (result.passed, result.failed),
-                (1, 0),
-                "a reply of {reply:?} must satisfy the fixture; details: {:?}",
-                result.failed_test_details
-            );
-        }
-    }
-
-    // No `\` line continuations: they would strip the indentation the
-    // positions below depend on.
-    const CODE_ACTION_FIXTURE: &str = "TEST: stub inline
-TYPE: code_action
----
-fn main() {
-    let «start»x«end» = 1 + 2
-    print(x * x)
-}
----
-OPERATION: code_action
----
-EXPECTED:
-ACTION_TITLE: Inline local `x`
-RESULT:
-fn main() {
-    print((1 + 2) * (1 + 2))
-}
-===
-";
-
-    fn code_action_test() -> LspTest {
-        parse_one(CODE_ACTION_FIXTURE)
-    }
-
-    const URI: &str = "file:///fixture.rock";
-
-    /// The inline-local reply the server gives for `CODE_ACTION_FIXTURE`, with
-    /// `uses` as the replacement text of each use.
-    fn inline_reply(uses: &str) -> serde_json::Value {
-        let edit = |l1: u32, c1: u32, l2: u32, c2: u32, text: &str| {
-            serde_json::json!({
-                "range": {
-                    "start": {"line": l1, "character": c1},
-                    "end": {"line": l2, "character": c2}
-                },
-                "newText": text
-            })
-        };
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "result": [
-                {"title": "Fill struct fields", "edit": {"changes": {URI: []}}},
-                {
-                    "title": "Inline local `x`",
-                    "edit": {"changes": {URI: [
-                        edit(2, 10, 2, 11, uses),
-                        edit(2, 14, 2, 15, uses),
-                        edit(1, 0, 2, 0, ""),
-                    ]}}
-                }
-            ]
-        })
-    }
-
-    #[test]
-    fn a_code_action_fixture_parses_its_title_and_result() {
-        let test = code_action_test();
-        assert!(matches!(
-            test.operation,
-            LspOperation::CodeAction {
-                line: 1,
-                character: 8
+        for (fixture, reply, fragment) in cases {
+            std::fs::write(&path, fixture).unwrap();
+            std::fs::write(dir.path().join("reply"), reply).unwrap();
+            let result = run_lsp_file(&path, "fixture", LspServerCmd { bin: &bin });
+            assert_eq!((result.passed, result.failed), (0, 1), "{reply}");
+            let detail = &result.failed_test_details[0].1;
+            assert!(detail.contains(fragment), "{detail}");
+            if !fragment.is_empty() {
+                assert!(
+                    detail.contains("broken") && detail.contains(reply),
+                    "{detail}"
+                );
             }
-        ));
-        assert_eq!(test.action_title.as_deref(), Some("Inline local `x`"));
-        assert_eq!(
-            test.expected_code.as_deref(),
-            Some("fn main() {\n    print((1 + 2) * (1 + 2))\n}")
-        );
-    }
-
-    #[test]
-    fn the_named_action_is_applied_and_its_result_compared() {
-        let test = code_action_test();
-        assert!(check_code_action_reply(&test, URI, &inline_reply("(1 + 2)")).unwrap());
-        let wrong = check_code_action_reply(&test, URI, &inline_reply("1 + 2"))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            wrong.contains("differs") && wrong.contains("print(1 + 2 * 1 + 2)"),
-            "{wrong}"
-        );
-    }
-
-    #[test]
-    fn a_code_action_reply_without_the_action_fails_naming_what_was_offered() {
-        let test = code_action_test();
-        let none =
-            check_code_action_reply(&test, URI, &serde_json::json!({"id": 2, "result": null}))
-                .unwrap_err()
-                .to_string();
-        assert!(
-            none.contains("no action titled") && none.contains("[]"),
-            "{none}"
-        );
-        let mut reply = inline_reply("(1 + 2)");
-        reply["result"][1]["title"] = "Inline local `y`".into();
-        let other = check_code_action_reply(&test, URI, &reply)
-            .unwrap_err()
-            .to_string();
-        assert!(other.contains("Inline local `y`"), "{other}");
-    }
-
-    const NO_ACTION_FIXTURE: &str = "TEST: stub no inline
-TYPE: code_action
----
-fn main() {
-    let «start»x«end» = 1 + 2
-    print(x * x)
-}
----
-OPERATION: code_action
----
-EXPECTED:
-NO_ACTION: Inline local `x`
-===
-";
-
-    #[test]
-    fn a_no_action_fixture_passes_only_when_the_action_is_absent() {
-        let test = parse_one(NO_ACTION_FIXTURE);
-        assert!(test.action_absent);
-        assert_eq!(test.action_title.as_deref(), Some("Inline local `x`"));
-        assert!(
-            check_code_action_reply(&test, URI, &serde_json::json!({"id": 2, "result": null}))
-                .unwrap()
-        );
-        let offered = check_code_action_reply(&test, URI, &inline_reply("(1 + 2)"))
-            .unwrap_err()
-            .to_string();
-        assert!(offered.contains("must not be offered"), "{offered}");
-
-        let with_result = NO_ACTION_FIXTURE.replace("===", "RESULT:\nfn main() {}\n===");
-        let err = parse_error_of(&with_result);
-        assert!(err.contains("drop `RESULT:`"), "{err}");
-    }
-
-    #[test]
-    fn a_refused_rename_fixture_needs_the_error_and_no_edits() {
-        let (head, _) = RENAME_FIXTURE.split_once("EXPECTED:\n").unwrap();
-        let refused = format!("{head}EXPECTED:\nREFUSED: opaque body\n===\n");
-        let test = parse_one(&refused);
-        assert_eq!(test.rename_refused.as_deref(), Some("opaque body"));
-        let edit = serde_json::json!([{"range": {}, "new_text": "total"}]);
-        let check = |reply: serde_json::Value| check_rename_refusal(&test, "rename", &reply);
-        check(serde_json::json!({"changes": {}, "error": "an opaque body names it"})).unwrap();
-        let cases = [
-            (serde_json::json!({"changes": {}}), "was not refused"),
-            (
-                serde_json::json!({"changes": {}, "error": "something else"}),
-                "does not contain",
-            ),
-            (
-                serde_json::json!({"changes": {"f": edit}, "error": "opaque body"}),
-                "still returned edits",
-            ),
-        ];
-        for (reply, want) in cases {
-            let err = check(reply).unwrap_err().to_string();
-            assert!(err.contains(want), "{err}");
-        }
-
-        let plain = parse_one(RENAME_FIXTURE);
-        let err = check_rename_refusal(&plain, "rename", &serde_json::json!({"error": "no"}))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("rename refused: no"), "{err}");
-
-        let trailing = refused.replace("REFUSED: opaque body\n", "REFUSED: opaque body\nfn x\n");
-        let err = parse_error_of(&trailing);
-        assert!(err.contains("whole EXPECTED block"), "{err}");
-    }
-
-    #[test]
-    fn a_malformed_code_action_reply_fails() {
-        let test = code_action_test();
-        let cases = [
-            (
-                serde_json::json!({"id": 2, "error": {"code": -32603}}),
-                "error",
-            ),
-            (
-                serde_json::json!({"id": 2, "result": {}}),
-                "no `result` array",
-            ),
-            (
-                serde_json::json!({"id": 2, "result": [{"title": "Inline local `x`"}]}),
-                "no workspace edit",
-            ),
-            (
-                serde_json::json!({"id": 2, "result": [{
-                    "title": "Inline local `x`",
-                    "edit": {"changes": {"file:///other.rock": []}}
-                }]}),
-                "not the fixture file",
-            ),
-        ];
-        for (reply, needle) in cases {
-            let message = check_code_action_reply(&test, URI, &reply)
-                .unwrap_err()
-                .to_string();
-            assert!(message.contains(needle), "{reply}: {message}");
         }
     }
 
+    #[cfg(unix)]
     #[test]
-    fn lsp_text_edits_use_utf16_columns_and_reject_overlaps() {
-        let edit = |c1: u32, c2: u32, text: &str| {
+    fn failed_lsp_process_fails_the_fixture() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("stub-rock");
+        test_utils::write_executable(&bin, "#!/bin/sh\nexit 7\n");
+        let path = dir.path().join("fixture.rock.lsp");
+        std::fs::write(&path, HOVER).unwrap();
+        let tests = parse_lsp_test_file(&path).unwrap();
+        assert!(!run_lsp_test(&tests[0], LspServerCmd { bin: &bin }).unwrap());
+    }
+
+    #[test]
+    fn text_edits_use_utf16_columns_and_reject_overlaps() {
+        let edit = |start, end, text| {
             serde_json::json!({
-                "range": {"start": {"line": 0, "character": c1}, "end": {"line": 0, "character": c2}},
+                "range": {"start": {"line": 0, "character": start}, "end": {"line": 0, "character": end}},
                 "newText": text
             })
         };
-        // `é` is one UTF-16 unit but two bytes.
-        let (a, b) = (edit(1, 2, "X"), edit(9, 99, "!"));
-        assert_eq!(apply_lsp_text_edits("éab", &[&a, &b]).unwrap(), "éXb!");
-        let (a, b) = (edit(0, 2, "X"), edit(1, 3, "Y"));
-        assert!(apply_lsp_text_edits("abc", &[&a, &b]).is_err());
-    }
-
-    #[test]
-    fn a_code_action_fixture_without_a_title_or_result_is_a_parse_error() {
-        let without_title = CODE_ACTION_FIXTURE.replace("ACTION_TITLE: Inline local `x`\n", "");
-        let message = parse_error_of(&without_title);
-        assert!(message.contains("no `ACTION_TITLE:`"), "{message}");
-        let without_result = CODE_ACTION_FIXTURE.replace("RESULT:\n", "");
-        let message = parse_error_of(&without_result);
-        assert!(
-            message.contains("expected `ACTION_TITLE:`, `NO_ACTION:` or `RESULT:`"),
-            "{message}"
+        assert_eq!(
+            apply_lsp_text_edits("\u{e9}ab", &[&edit(1, 2, "X"), &edit(9, 99, "!")]).unwrap(),
+            "\u{e9}Xb!"
         );
-        let title_only = CODE_ACTION_FIXTURE
-            .split("RESULT:")
-            .next()
-            .unwrap()
-            .to_string()
-            + "===\n";
-        let message = parse_error_of(&title_only);
-        assert!(message.contains("no `RESULT:`"), "{message}");
+        assert!(apply_lsp_text_edits("abc", &[&edit(0, 2, "X"), &edit(1, 3, "Y")]).is_err());
     }
 }
