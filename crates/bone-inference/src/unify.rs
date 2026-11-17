@@ -1,4 +1,5 @@
 use super::*;
+use std::convert::Infallible;
 
 pub(crate) fn contains_frame_ref(gamma: &Gamma, ty: TyId) -> bool {
     gamma.workspace.type_contains_ref(Some(&gamma.out), ty)
@@ -70,9 +71,8 @@ pub(crate) fn substitute(
     subs: &FxHashMap<VarId, TyId>,
     span: Span,
 ) -> Result<TyId, CompilerError> {
-    let texp = gamma.get(ty);
-
-    match *texp {
+    let texp = *gamma.get(ty);
+    match texp {
         TypeExpr::Builtin(_) => Ok(ty),
         TypeExpr::Generic(var_id, ustr) => {
             if let Some(sub) = subs.get(&var_id) {
@@ -81,73 +81,67 @@ pub(crate) fn substitute(
                 comp_error!(span, "No sub for generic {ustr} in {:?}", texp);
             }
         }
-
-        TypeExpr::Nullable(child) => {
-            let child_ty = ty.with_idx(child);
-            let sub_child = substitute(gamma, child_ty, subs, span)?;
-
-            if sub_child == child_ty {
-                Ok(ty)
-            } else {
-                Ok(nullable_of(gamma, sub_child, span))
-            }
-        }
-
-        TypeExpr::App { ctor, params } => {
-            if let Some(new_elements) = map_substitute(gamma, subs, span, ty, params)? {
-                let idx = gamma.out.ty_arena.alloc(TypeExpr::App {
-                    ctor,
-                    params: new_elements,
-                });
-                gamma.out.ty_spans.insert(idx, span);
-
-                Ok(TyId::Local(idx))
-            } else {
-                Ok(ty)
-            }
-        }
-
-        TypeExpr::Tuple { elements } => {
-            if let Some(new_elements) = map_substitute(gamma, subs, span, ty, elements)? {
-                let idx = gamma.out.ty_arena.alloc(TypeExpr::Tuple {
-                    elements: new_elements,
-                });
-                gamma.out.ty_spans.insert(idx, span);
-
-                Ok(TyId::Local(idx))
-            } else {
-                Ok(ty)
-            }
-        }
-
-        TypeExpr::Function { params, ret } => {
-            let new_params = map_substitute(gamma, subs, span, ty, params)?;
-            let ret_ty = ty.with_idx(ret);
-            let sub_ret = substitute(gamma, ret_ty, subs, span)?;
-
-            if new_params.is_none() && sub_ret == ret_ty {
-                Ok(ty)
-            } else {
-                let params = match new_params {
-                    Some(p) => p,
-                    None => reify_range(gamma, ty, params, span),
-                };
-
-                let ret_idx = reify(gamma, sub_ret, span);
-
-                let idx = gamma.out.ty_arena.alloc(TypeExpr::Function {
-                    params,
-                    ret: ret_idx,
-                });
-                gamma.out.ty_spans.insert(idx, span);
-
-                Ok(TyId::Local(idx))
-            }
-        }
-
         TypeExpr::Infer(..) => {
             comp_error!(span, "Unsupported type expr {:?}", texp)
         }
+        TypeExpr::Nullable(..)
+        | TypeExpr::App { .. }
+        | TypeExpr::Tuple { .. }
+        | TypeExpr::Function { .. } => map_structural_type(gamma, ty, texp, span, |g, child| {
+            substitute(g, child, subs, span)
+        })
+        .map(|mapped| mapped.unwrap_or(ty)),
+    }
+}
+
+/// Map the children of a structural type and rebuild it only when a child
+/// changes. Child visits, reification, allocation, and span insertion follow
+/// the same order for substitution and resolution.
+fn map_structural_type<E>(
+    gamma: &mut Gamma,
+    ty: TyId,
+    texp: TypeExpr,
+    span: Span,
+    mut map: impl FnMut(&mut Gamma, TyId) -> Result<TyId, E>,
+) -> Result<Option<TyId>, E> {
+    match texp {
+        TypeExpr::Nullable(child) => {
+            let child_ty = ty.with_idx(child);
+            let mapped_child = map(gamma, child_ty)?;
+            Ok((mapped_child != child_ty).then(|| nullable_of(gamma, mapped_child, span)))
+        }
+        TypeExpr::App { ctor, params } => {
+            let Some(params) = map_children(gamma, ty, params, span, &mut map)? else {
+                return Ok(None);
+            };
+            let idx = gamma.out.ty_arena.alloc(TypeExpr::App { ctor, params });
+            gamma.out.ty_spans.insert(idx, span);
+            Ok(Some(TyId::Local(idx)))
+        }
+        TypeExpr::Tuple { elements } => {
+            let Some(elements) = map_children(gamma, ty, elements, span, &mut map)? else {
+                return Ok(None);
+            };
+            let idx = gamma.out.ty_arena.alloc(TypeExpr::Tuple { elements });
+            gamma.out.ty_spans.insert(idx, span);
+            Ok(Some(TyId::Local(idx)))
+        }
+        TypeExpr::Function { params, ret } => {
+            let new_params = map_children(gamma, ty, params, span, &mut map)?;
+            let ret_ty = ty.with_idx(ret);
+            let mapped_ret = map(gamma, ret_ty)?;
+
+            if new_params.is_none() && mapped_ret == ret_ty {
+                Ok(None)
+            } else {
+                let params = new_params.unwrap_or_else(|| reify_range(gamma, ty, params, span));
+                let ret = reify(gamma, mapped_ret, span);
+                let idx = gamma.out.ty_arena.alloc(TypeExpr::Function { params, ret });
+                gamma.out.ty_spans.insert(idx, span);
+                Ok(Some(TyId::Local(idx)))
+            }
+        }
+        _ => unreachable!("map_structural_type called on a leaf type"),
     }
 }
 
@@ -301,7 +295,8 @@ pub fn unify(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<(), Comp
 }
 
 pub(crate) fn resolve(gamma: &mut Gamma, ty: TyId, span: Span) -> TyId {
-    match *gamma.get(ty) {
+    let texp = *gamma.get(ty);
+    match texp {
         TypeExpr::Infer(var_id, _) => match gamma.out.substitutions.get(var_id) {
             Some(next) => {
                 let root = resolve(gamma, next, span);
@@ -314,105 +309,25 @@ pub(crate) fn resolve(gamma: &mut Gamma, ty: TyId, span: Span) -> TyId {
             }
             None => ty,
         },
-
-        TypeExpr::Nullable(inner) => {
-            let inner_ty = ty.with_idx(inner);
-            let resolved = resolve(gamma, inner_ty, span);
-
-            if resolved == inner_ty {
-                ty
-            } else {
-                nullable_of(gamma, resolved, span)
-            }
-        }
-
-        TypeExpr::App { ctor, params } => {
-            if let Some(new_params) = map_resolve(gamma, span, ty, params) {
-                let idx = gamma.out.ty_arena.alloc(TypeExpr::App {
-                    ctor,
-                    params: new_params,
-                });
-
-                gamma.out.ty_spans.insert(idx, span);
-
-                TyId::Local(idx)
-            } else {
-                ty
-            }
-        }
-
-        TypeExpr::Tuple { elements } => {
-            if let Some(new_elements) = map_resolve(gamma, span, ty, elements) {
-                let idx = gamma.out.ty_arena.alloc(TypeExpr::Tuple {
-                    elements: new_elements,
-                });
-
-                gamma.out.ty_spans.insert(idx, span);
-
-                TyId::Local(idx)
-            } else {
-                ty
-            }
-        }
-
-        TypeExpr::Function { params, ret } => {
-            let new_params = map_resolve(gamma, span, ty, params);
-            let ret_ty = ty.with_idx(ret);
-            let resolved_ret = resolve(gamma, ret_ty, span);
-
-            if new_params.is_none() && resolved_ret == ret_ty {
-                ty
-            } else {
-                let params = new_params.unwrap_or_else(|| reify_range(gamma, ty, params, span));
-                let ret_idx = reify(gamma, resolved_ret, span);
-
-                let idx = gamma.out.ty_arena.alloc(TypeExpr::Function {
-                    params,
-                    ret: ret_idx,
-                });
-
-                gamma.out.ty_spans.insert(idx, span);
-
-                TyId::Local(idx)
-            }
-        }
-
+        TypeExpr::Nullable(..)
+        | TypeExpr::App { .. }
+        | TypeExpr::Tuple { .. }
+        | TypeExpr::Function { .. } => map_structural_type(gamma, ty, texp, span, |g, child| {
+            Ok::<_, Infallible>(resolve(g, child, span))
+        })
+        .unwrap_or_else(|never| match never {})
+        .unwrap_or(ty),
         _ => ty,
     }
 }
 
-pub(crate) fn map_resolve(
-    gamma: &mut Gamma,
-    span: Span,
-    root_ty: TyId,
-    elements: IdxRange<TypeExpr>,
-) -> Option<IdxRange<TypeExpr>> {
-    // This case is actually infallible
-    map_children(gamma, root_ty, elements, span, |g, c| {
-        Ok(resolve(g, c, span))
-    })
-    .unwrap()
-}
-
-pub(crate) fn map_substitute(
-    gamma: &mut Gamma,
-    subs: &FxHashMap<VarId, TyId>,
-    span: Span,
-    root_ty: TyId,
-    elements: IdxRange<TypeExpr>,
-) -> Result<Option<IdxRange<TypeExpr>>, CompilerError> {
-    map_children(gamma, root_ty, elements, span, |g, c| {
-        substitute(g, c, subs, span)
-    })
-}
-
-pub(crate) fn map_children(
+fn map_children<E>(
     gamma: &mut Gamma,
     root_ty: TyId,
     elements: IdxRange<TypeExpr>,
     span: Span,
-    mut f: impl FnMut(&mut Gamma, TyId) -> Result<TyId, CompilerError>,
-) -> Result<Option<IdxRange<TypeExpr>>, CompilerError> {
+    mut f: impl FnMut(&mut Gamma, TyId) -> Result<TyId, E>,
+) -> Result<Option<IdxRange<TypeExpr>>, E> {
     let mut out: SmallVec<[TyId; 4]> = SmallVec::with_capacity(elements.len());
     let mut changed = false;
 

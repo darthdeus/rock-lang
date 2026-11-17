@@ -551,12 +551,13 @@ pub(crate) fn infer_expr_used(
             if matches!(gamma.get(resolved), TypeExpr::Builtin(BuiltinTy::Bool)) {
                 gamma.workspace.builtins.bool()
             } else {
-                resolve_named_call(
+                resolve_named_call_with_generics(
                     gamma,
                     c,
                     *family,
                     None,
                     IdxRange::new_inclusive(*inner..=*inner),
+                    IdxRange::new_empty(),
                     e,
                     expr_span,
                 )?
@@ -641,12 +642,13 @@ pub(crate) fn infer_expr_used(
                     ..
                 } if resolve_newtype(gamma, name).is_some() => resolved,
 
-                _ => resolve_named_call(
+                _ => resolve_named_call_with_generics(
                     gamma,
                     c,
                     *family,
                     None,
                     IdxRange::new_inclusive(*inner..=*inner),
+                    IdxRange::new_empty(),
                     e,
                     expr_span,
                 )?,
@@ -1399,7 +1401,16 @@ pub(crate) fn infer_expr_used(
             }
             let inner = peel_nullable(gamma, recv_ty, expr_span);
 
-            let ret = resolve_named_call(gamma, c, family, Some(inner), args, e, expr_span)?;
+            let ret = resolve_named_call_with_generics(
+                gamma,
+                c,
+                family,
+                Some(inner),
+                args,
+                IdxRange::new_empty(),
+                e,
+                expr_span,
+            )?;
 
             nullable_of(gamma, ret, expr_span)
         }

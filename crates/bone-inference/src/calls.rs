@@ -1228,27 +1228,6 @@ pub(crate) fn spread_constituents(
     }
 }
 
-pub(crate) fn resolve_named_call(
-    gamma: &mut Gamma,
-    c: BodyCtx,
-    family: CallFamily,
-    recv_override: Option<TyId>,
-    args: IdxRange<Expr>,
-    call_expr: Idx<Expr>,
-    span: Span,
-) -> Result<TyId, CompilerError> {
-    resolve_named_call_with_generics(
-        gamma,
-        c,
-        family,
-        recv_override,
-        args,
-        IdxRange::new_empty(),
-        call_expr,
-        span,
-    )
-}
-
 pub(crate) fn resolve_named_call_with_generics(
     gamma: &mut Gamma,
     c: BodyCtx,
