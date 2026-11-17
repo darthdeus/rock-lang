@@ -156,8 +156,9 @@ impl EqRoute {
 /// `float` and `string`. Selecting by the mangler is the property that makes a
 /// declaration callable by this name at all.
 ///
-/// Resolution is TARGET-NEUTRAL, and both consumers use
-/// [`dispatched_callee_decl`] over this set. A helper declared only
+/// Resolution is TARGET-NEUTRAL. The instance walk resolves this set with
+/// [`dispatched_callee_decl`]; lowering consumes its concrete call plan.
+/// A helper declared only
 /// `inline(lua)` is still the callee a JS body names -- the JS emitter supplies
 /// its own rendering through `js_supply` -- so filtering by the serving backend
 /// here rejects a program the backend can emit.
@@ -179,14 +180,9 @@ pub fn dispatched_callee_decls(ws: &Workspace, name: &str) -> Vec<crate::mir::Fu
 
 /// THE declaration a conditionally-synthesized call to `name` resolves to.
 ///
-/// Canonicalize every candidate through the one backend-variant grouping oracle
-/// and demand unanimity -- the same rule
-/// `skull::instance_graph::stdlib_entry_representative` applies to the named
-/// runtime entries. Lowering and the instance walk call THIS function, not two
-/// narrowings of the set above: a target-specific pick on one side and a
-/// representative on the other is exactly the disagreement the join exists to
-/// detect, and it would report as a callee mismatch rather than as a resolver
-/// bug.
+/// Canonicalize every candidate through the backend-variant grouping oracle
+/// and demand unanimity. The instance walk records this representative in the
+/// concrete call plan for lowering.
 pub fn dispatched_callee_decl(ws: &Workspace, name: &str) -> Option<crate::mir::FuncRef> {
     let mut reps = dispatched_callee_decls(ws, name)
         .into_iter()
