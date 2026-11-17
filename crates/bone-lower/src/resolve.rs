@@ -9,14 +9,11 @@ use bone_core::workspace::Workspace;
 use ustr::Ustr;
 
 std::thread_local! {
-    /// Record namespace dependencies for the active lookup on this thread.
     static PROBES: std::cell::RefCell<Option<Vec<ScopeProbe>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Run `lookup` and return the namespace facts it read: each
-/// module member asked for, hit or miss, and each module node entered as a
-/// path segment. A tier-5 lookup of the std root is not probed: the stdlib
-/// is immutable for a session's lifetime.
+/// Run a lookup and return the namespace facts it read. The immutable std root
+/// is not recorded.
 pub fn with_probes<R>(lookup: impl FnOnce() -> R) -> (R, Vec<ScopeProbe>) {
     /// Puts the enclosing frame back even if `lookup` unwinds.
     struct Restore(Option<Option<Vec<ScopeProbe>>>);
@@ -85,20 +82,16 @@ fn probe_node(ws: &Workspace, package: u32, path: &[Ustr]) -> Ustr {
     node
 }
 
-/// What a resolved name turned out to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedKind {
     Type,
     Global,
     Callable,
     Decorator,
-    /// A module name (usable in a longer path).
     Module,
-    /// Bound by an import whose target kind the key itself decides.
     Binding,
 }
 
-/// A definition's canonical workspace key and kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Resolved {
     pub key: Ustr,
@@ -122,24 +115,16 @@ fn hit_display(ws: &Workspace, hit: &Resolved) -> String {
     }
 }
 
-/// Where a path walk landed.
 enum Landing {
-    /// A definition (or an unresolved binding that resolved to one).
     Def(Resolved),
-    /// A module node: (package, path).
     Module(u32, Vec<Ustr>),
 }
 
-/// A bare name in callee position (direct call, UFCS, safe-nav call or an
-/// operator): a single definition, or one overload family spanning several
-/// definitions, among which overload resolution picks by argument types.
+/// One callee definition or its merged overload family.
 #[derive(Debug, Clone)]
 pub enum CalleeFamily {
     Single(Resolved),
-    /// Every member, deduplicated, with the tier that contributed it.
-    Merged {
-        members: Vec<FamilyMember>,
-    },
+    Merged { members: Vec<FamilyMember> },
 }
 
 fn resolved_kind(kind: bone_core::modules::DefKind) -> ResolvedKind {
@@ -358,7 +343,6 @@ fn bind_tiers(
     Ok(tiers)
 }
 
-/// Resolve explicit imports, dropping module targets below a callable tier.
 fn import_tier(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -407,9 +391,7 @@ fn import_tier(
     Ok(None)
 }
 
-/// `operator(-)` is recorded under the binary family name because binary
-/// expressions use `__op_sub`. Its sibling prefix family is part of the same
-/// selector, including when the selector has an alias.
+/// Add the prefix family selected by an `operator(-)` import of `__op_sub`.
 fn operator_family_paths(path: &UsePathRef) -> impl Iterator<Item = UsePathRef> {
     let mut paths = vec![path.clone()];
     if path.segments.last().copied() == Some(Ustr::from("__op_sub")) {
@@ -422,8 +404,6 @@ fn operator_family_paths(path: &UsePathRef) -> impl Iterator<Item = UsePathRef> 
     paths.into_iter()
 }
 
-/// What one explicit import of `name` binds: its definitions, or `None` when
-/// the target is a module.
 fn resolve_import_target(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -487,9 +467,7 @@ fn several(ws: &Workspace, name: Ustr, hits: &[Resolved], via: Via) -> String {
     }
 }
 
-/// A member of the std view. A std callable's key is its bare source name, so
-/// it is owned by the std view: only the standard library's own overloads
-/// belong to it.
+/// Resolve a compiler-owned name or a standard-library definition.
 fn std_definition(ws: &Workspace, name: Ustr) -> Option<Resolved> {
     // The std exports among the intrinsics (the FieldRef family) live in the
     // std view below; the other formers resolve bare even with no stdlib.
@@ -504,7 +482,6 @@ fn std_definition(ws: &Workspace, name: Ustr) -> Option<Resolved> {
     Some(Resolved { key, kind })
 }
 
-/// Deduplicated candidates from glob imports.
 fn glob_candidates(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -536,10 +513,7 @@ fn glob_candidates(
     Ok(hits)
 }
 
-/// Whether `frag` may name a definition with visibility `vis` owned by
-/// `owner_path` in `owner_pkg`. A lookup through an export binding is seen by
-/// every fragment along the chain: the path's author and each exporting module
-/// it passed through, so a re-export never widens what it re-exports.
+/// Check visibility for the requesting fragment, including export-chain viewers.
 fn admits(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -551,8 +525,6 @@ fn admits(
         .can_access(vis, owner_pkg, owner_path, frag.package, &frag.module_path)
 }
 
-/// A key with no recorded metadata is the stdlib or an intrinsic: public
-/// to a fragment.
 fn admits_key(ws: &Workspace, frag: &FragmentScope, key: Ustr) -> bool {
     match ws.defs.get(&key) {
         Some(meta) if meta.kind == DefKind::Callable => ws
@@ -885,8 +857,6 @@ fn collect_member_names(
     Ok(())
 }
 
-/// One definition out of a lookup of `name`, or the diagnostic for why there
-/// is none. `not_found` renders the diagnostic for a name nothing binds.
 fn collapse(
     ws: &Workspace,
     members: Members,
@@ -910,8 +880,6 @@ fn collapse(
     }
 }
 
-/// The visibility access predicate for a definition named from `frag`. A key
-/// with no recorded metadata is the stdlib or an intrinsic, which is public.
 fn key_accessible(ws: &Workspace, frag: &FragmentScope, key: Ustr) -> bool {
     admits_key(ws, frag, key)
 }
@@ -924,7 +892,6 @@ fn check_key_access(ws: &Workspace, frag: &FragmentScope, key: Ustr) -> Result<(
     Err(format!("`{name}` is not accessible from this module"))
 }
 
-/// Check visibility of each segment relative to the module that declares it.
 fn check_module_access(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -956,8 +923,6 @@ fn check_module_access(
     }
 }
 
-/// Resolve an explicit path (a use target or a qualified reference) in a v1
-/// fragment.
 pub fn resolve_path(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -969,7 +934,6 @@ pub fn resolve_path(
     }
 }
 
-/// Check the declared target even when no binding is referenced.
 pub fn check_use_target(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -1054,7 +1018,6 @@ fn check_target(
     }
 }
 
-/// Reject reserved roots and imports that would make a module anchor ambiguous.
 pub fn check_use_binding(
     ws: &Workspace,
     site: &FragmentScope,
@@ -1112,15 +1075,10 @@ fn module_display(ws: &Workspace, (package, path): &(u32, Vec<Ustr>)) -> String 
         .join("::")
 }
 
-/// What a member-wise value path (`p::E::V`, `p::f`, `p::Type`) resolved to.
 pub(crate) enum MemberTarget {
-    /// A global or constant: the DefKey.
     Global(Ustr),
-    /// A callable family, registered under its canonical key.
     Callable(Ustr),
-    /// `path::Type::Variant` — the enum's DefKey and the variant name.
     EnumVariant { enum_key: Ustr, variant: Ustr },
-    /// A bare type name (for qualified struct literals).
     Type(Ustr),
 }
 
@@ -1250,10 +1208,7 @@ pub(crate) fn resolve_member_path(
     Err("path names a module, not a definition".to_string())
 }
 
-/// The diagnostic for a value path nothing binds. A v1 `x::T` whose last
-/// segment names a type may have been intended as a type ascription, which v1
-/// spells `(x : T)`; name the replacement then, and only then. Otherwise an
-/// `unbound_head` first segment is the name reported.
+/// Suggest type-ascription syntax when an unresolved path ends in a type name.
 fn unresolved_value_path(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -1275,7 +1230,6 @@ fn unresolved_value_path(
     )
 }
 
-/// Type names the parser reads as builtins rather than as paths.
 const BUILTIN_TYPE_NAMES: &[&str] = &[
     "any", "bool", "f32", "f64", "float", "int", "string", "uint",
 ];
@@ -1288,7 +1242,6 @@ fn joined(segments: &[Ustr]) -> String {
         .join("::")
 }
 
-/// Resolve a path whose FINAL segment is a module (glob targets, `use p;`).
 pub fn resolve_path_to_module(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -1301,13 +1254,10 @@ pub fn resolve_path_to_module(
 }
 
 enum WalkMode {
-    /// The last segment names a definition.
     Definition,
-    /// Every segment names a module; land on the final node.
     Module,
 }
 
-/// Resolve explicit roots and imported module aliases before descending.
 fn resolve_anchor(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -1362,7 +1312,6 @@ fn resolve_anchor(
     Ok(relative)
 }
 
-/// Resolve the module bound by a named import, including a `self` leaf.
 fn imported_module(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -1414,7 +1363,6 @@ fn imported_module(
     }
 }
 
-/// Resolve a child module or a module re-export.
 fn step_module(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -1469,10 +1417,8 @@ fn step_module(
     Ok(Some(target))
 }
 
-/// Walk `path` as written in `frag`: anchor and module segments are
-/// checked from `frag` alone (a consumer checks the facade path it
-/// wrote, not the canonical parent path a second time), and the final
-/// member is seen by `frag` and every `outer` viewer.
+/// Resolve the path as written: the requester checks its path, and all export
+/// viewers check the final member.
 fn walk_path(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -1501,9 +1447,7 @@ fn walk_path(
     }
 }
 
-/// Resolve a definition path while keeping a missing final member distinct
-/// from access and path errors. Operator-family selectors may omit the unary
-/// sibling, but must surface every other failure.
+/// Resolve a definition while distinguishing a missing final member from errors.
 fn walk_optional_definition(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -1540,8 +1484,6 @@ fn walk_optional_definition(
     }
 }
 
-/// What the last segment of `path` names in the module the rest of it
-/// reaches, without collapsing to one definition.
 fn walk_members(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -1557,8 +1499,6 @@ fn walk_members(
     members_of(ws, &viewers, pkg_id, &cur, last_of(segments), visiting)
 }
 
-/// Walk the anchor and then `segments[..stop]` as modules, checking each
-/// module segment's access from `frag`.
 fn walk_modules(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -1569,9 +1509,7 @@ fn walk_modules(
         .ok_or_else(|| format!("no module `{}` in path", path.segments[stop - 1]))
 }
 
-/// [`walk_modules`], answering `Ok(None)` when every segment before the
-/// last walked reaches a module but the last, `segments[stop - 1]`, names
-/// none there (it may name a definition).
+/// Walk a module prefix; `None` means only its final segment is not a module.
 fn walk_module_path(
     ws: &Workspace,
     frag: &FragmentScope,
@@ -1613,10 +1551,7 @@ fn walk_module_path(
     Ok(Some((pkg_id, cur)))
 }
 
-/// Resolve a pattern path `prefix::Variant` where the LAST segment is the
-/// variant and the prefix lands on an enum type. The whole path resolves
-/// exactly like the value `prefix::Variant`, so a bare enum prefix binds
-/// through every scope tier (imports, globs, std), not only own members.
+/// Resolve a variant path with the same tier lookup used for value paths.
 pub(crate) fn resolve_variant_pattern(
     ws: &Workspace,
     frag: &FragmentScope,

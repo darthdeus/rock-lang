@@ -85,21 +85,14 @@ pub enum BuiltinTy {
     Int,
     Uint,
     Float,
-    /// Narrow float STORAGE: only ever a field's `storage_ty`. Expressions,
-    /// and the field's `ty`, see `Float`; layout reads the storage type.
+    /// Field storage only; reads and expressions use `Float`.
     F32,
     Bool,
     String,
     Never,
-    // Inference-recovery poison type. Failed inference (e.g. RHS)
-    // get assigned this, and it absorbs in unify/coerce/join.
+    // Inference-recovery poison type.
     Error,
 }
-
-// #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-// pub enum NamedTy {
-//     Struct { name: Ustr },
-// }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum TypeCtor {
@@ -123,10 +116,8 @@ impl TypeCtor {
     }
 }
 
-/// A default for a trailing generic param (`struct Pair<T, U = int>`).
-/// Deliberately index-free (a builtin or a bare named type) so a use site in
-/// ANY module can synthesize the padded `TypeExpr` into its own arena without
-/// cross-arena copying; richer default shapes are rejected at the decl.
+/// Index-free default for a trailing generic parameter, so each use can
+/// synthesize it in its own type arena without cross-arena copying.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum GenericDefault {
     Builtin(BuiltinTy),
@@ -136,11 +127,10 @@ pub enum GenericDefault {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum TypeExpr {
     Builtin(BuiltinTy),
-    // declared generic param, from <T>
+    // Declared generic parameter.
     Generic(VarId, Ustr),
-    // call-site generic instantiation
+    // Call-site generic instantiation.
     Infer(VarId, Ustr),
-    // Named(NamedTy),
     Nullable(Idx<TypeExpr>),
 
     App {
@@ -189,9 +179,7 @@ pub struct Body {
 
     pub expr_arena: Arena<Expr>,
     pub expr_spans: ArenaMap<Idx<Expr>, Span>,
-    /// The spans of names written inside an expression (a callee, an enum
-    /// and its variant). `Expr` holds an index here instead of the span so a
-    /// node stays a third of the size.
+    /// Name spans kept out of line to keep `Expr` small.
     pub name_spans: Arena<Span>,
 
     pub lowered_tys: Arena<TypeExpr>,
@@ -200,75 +188,55 @@ pub struct Body {
     // TODO: make this IdxMap instead and A/B benchmark?
     pub arg_names: FxHashMap<Idx<Expr>, Ustr>,
     pub method_call_recvs: FxHashSet<Idx<Expr>>,
-    /// Branch targets reachable from MORE THAN ONE point: an `if let` chain's
-    /// else block, shared by every clause's miss arm. A branch-local
-    /// refinement (the narrowing a condition clause's `else` would get) does
-    /// NOT hold on the other arrivals, so narrowing skips these.
+    /// Targets shared by several control-flow edges; branch-local narrowing
+    /// does not hold on every arrival.
     pub shared_branch_targets: FxHashSet<Idx<Expr>>,
-    /// The method name as written at `recv.name(..)` / `recv?.name(..)`,
-    /// keyed by the receiver expr. A fn-typed FIELD of that name wins over the
-    /// callee family, and in v1 the family's key is a DefKey or an
-    /// alias target, not the written name.
+    /// Written method name keyed by receiver; a function-valued field can win
+    /// over the resolved callee family.
     pub method_names: FxHashMap<Idx<Expr>, Ustr>,
-    /// Call args written as a struct spread `..op` (keyed by the operand's expr
-    /// Idx). The operand's fields expand into named args at this position;
-    /// resolved in bone-inference, codegen'd in skull-mir. Never also in
-    /// `arg_names`.
+    /// Struct-spread call operands, keyed by expression. Inference resolves
+    /// their fields as named args at this position.
     pub spread_args: FxHashSet<Idx<Expr>>,
 
-    // Owner's body expression:
-    // - fn body (none for lua/extern)
-    // - deco body
-    // - global initializer
-    // - struct default bodies use field_defaults
     pub root: Option<Idx<Expr>>,
     pub root_scope: Option<Idx<Scope>>,
 
-    // Param bindings in decl order, from ParamDecls at lowering
     pub param_bindings: IdxRange<BindingInfo>,
     pub param_defaults: Vec<Option<Idx<Expr>>>,
 
-    // Decorator only `target` binding
     pub deco_target: Option<Idx<BindingInfo>>,
 
-    // StructDefaults bodies
     pub field_defaults: FxHashMap<Ustr, Idx<Expr>>,
 
     pub node_index_cell: OnceLock<Lapper<usize, NodeRef>>,
 
     pub node_intervals: Vec<Interval<usize, NodeRef>>,
 
-    /// Each segment of every modules-v1 path this body spells, as the
-    /// resolver resolved it at lowering ([`PathSegmentRef`]).
+    /// Resolved modules-v1 path segments spelled in this body.
     pub path_segments: Vec<PathSegmentRef>,
 }
 
-/// One segment of a modules-v1 path as the resolver resolved it at lowering
-/// (resolver outputs are recorded on the HIR; consumers do not
-/// re-resolve). The node the path lowered to carries its final target; this
-/// record adds where each segment is spelled and what the segments before
-/// the last walked through, so an editor can navigate and rename by segment.
+/// One resolved path segment, stored so editor features need not re-resolve it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PathSegmentRef {
     pub span: Span,
     pub target: SegmentTarget,
-    /// The local name an import binds (`use a::f as g;` -- the `g`), not a
-    /// spelling of the target's own name.
+    /// This segment is an import alias.
     pub alias: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SegmentTarget {
-    /// A module the path walked into: its package and node key (`""` for a
-    /// package root).
+    /// A module node, identified by package and node key.
     Module {
         package: crate::modules::PackageId,
         node: Ustr,
     },
-    /// A definition, by DefKey.
     Def(Ustr),
-    /// An enum variant, by its enum's DefKey.
-    Variant { enum_key: Ustr, variant: Ustr },
+    Variant {
+        enum_key: Ustr,
+        variant: Ustr,
+    },
 }
 
 impl Default for Body {
@@ -322,7 +290,6 @@ impl Default for Body {
 }
 
 impl Body {
-    /// Release the spare capacity lowering left in every table.
     pub fn shrink_to_fit(&mut self) {
         self.scope_arena.shrink_to_fit();
         self.binding_arena.shrink_to_fit();
@@ -388,7 +355,6 @@ impl Body {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum NodeRef {
-    // Same as TyId::Static, but more explicit
     StaticTy { mid: ModuleId, idx: Idx<TypeExpr> },
     Expr(Idx<Expr>),
     Statement(Idx<Statement>),
@@ -400,24 +366,17 @@ pub enum NodeRef {
 pub struct Module {
     pub id: ModuleId,
     pub lower_var_high_water: u32,
-    /// `ty_arena` entries below this index are the previous lowering's, kept
-    /// so that inference cached in other modules still reads valid types.
-    /// Nothing in the current lowering refers to them.
+    /// Previous lowering's types retained for cached inference in other modules.
     pub ty_arena_live_start: u32,
-    /// `lower_var_high_water` when this lowering began: lowering the same
-    /// text from here assigns the same `VarId`s.
+    /// Variable ID floor for this lowering, preserving IDs on re-lower.
     pub lower_var_floor: u32,
 
     pub file: Ustr,
-    /// The owning package's manifest name, stamped by the host graph. `None`
-    /// for stdlib files and for programs outside any package.
+    /// Owning package's manifest name, if any.
     pub package: Option<Ustr>,
-    /// `file` relative to its package (`<package>/<path>`), the spelling
-    /// generated code embeds; `file` itself outside any package.
+    /// Package-relative path used in generated code.
     pub logical_file: Ustr,
-    /// The owning package's declared identity-storage migration state,
-    /// stamped with `package`. Enforced for files outside any package; the
-    /// exemption predicate decides those by their census label.
+    /// Package identity-storage migration state.
     pub identity_storage: skull_parser::IdentityStorage,
 
     pub functions: Arena<Function>,
@@ -445,30 +404,18 @@ pub struct Module {
     pub item_index_cell: OnceLock<Lapper<usize, BodyOwner>>,
     pub item_intervals: Vec<Interval<usize, BodyOwner>>,
 
-    /// Body-lowering errors, keyed by the body they came from, so the
-    /// incremental body relower can REPLACE one body's errors instead of
-    /// appending (a flat Vec leaked + went stale: a body-only re-lower mutates
-    /// the module in place, so old errors for the edited body would accumulate
-    /// and survive even after the body is fixed). The full rebuild path rebuilds
-    /// a fresh module, so it is naturally correct either way.
+    /// Body errors keyed so a body-only re-lower replaces that body's errors.
     pub lowering_errors: FxHashMap<BodyOwner, Vec<CompilerError>>,
     pub interface_errors: Vec<CompilerError>,
-    /// Every namespace fact this module's lowering read. A full
-    /// lowering replaces the set; the one-body fast path only adds to it, so
-    /// a superset is kept and an extra re-lower is the worst it costs.
+    /// Namespace facts read by lowering; body-only re-lowers add to the set.
     pub scope_probes: FxHashSet<crate::modules::ScopeProbe>,
 
-    /// The members of every `CallFamily::Merged` this module's bodies call,
-    /// by bare name. A bare name's family is a fact of the file (its imports
-    /// and the namespace tree), so every body that calls it records the same
-    /// members, and a body-only re-lower overwrites them in place.
+    /// Members of merged bare-name call families used by this module.
     pub call_families: FxHashMap<Ustr, Vec<FamilyMember>>,
-    /// Implicit protocol calls use this file's visibility, including import tiers.
+    /// Families used by implicit iterator-protocol calls.
     pub iterator_families: Option<[Result<CallFamily, String>; 2]>,
 
-    /// Path segments spelled outside any body: `use` items and the
-    /// interface positions (signatures, fields, globals) of a v1 fragment
-    /// (see [`PathSegmentRef`]).
+    /// Resolved path segments from imports and interface positions.
     pub path_segments: Vec<PathSegmentRef>,
 }
 
@@ -523,8 +470,6 @@ impl Default for Module {
 }
 
 impl Module {
-    /// The type expressions the current lowering allocated, without the
-    /// entries kept for cached inference (see `ty_arena_live_start`).
     pub fn live_type_exprs(&self) -> impl Iterator<Item = &TypeExpr> {
         self.ty_arena
             .values()
@@ -542,8 +487,7 @@ impl Module {
     }
 
     pub fn insert_body(&mut self, owner: BodyOwner, mut body: Body) {
-        // Lowering grows every arena by doubling, and a body outlives its
-        // lowering by the whole emission.
+        // Bodies survive until emission; discard arena growth slack.
         body.shrink_to_fit();
         self.bodies.insert(owner, body);
     }
@@ -555,7 +499,6 @@ impl Module {
             .map(|x| x.val)
     }
 
-    // TODO: inline this later
     pub fn module_id(&self) -> ModuleId {
         self.id
     }
@@ -574,9 +517,7 @@ pub enum BindingKind {
     Let,
     Param,
     Static,
-    /// A nested `fn` name -- a hoisted local helper. Block-scoped like `Let`,
-    /// but its value is a zero-alloc reference to the hoisted top-level fn, and
-    /// codegen routes calls/value-refs to the `__local_*` name.
+    /// Hoisted local helper; codegen routes references through `__local_*`.
     Fn,
 }
 
@@ -598,34 +539,23 @@ pub struct Function {
     pub is_coroutine: bool,
     pub is_variadic: bool,
     pub generics: Vec<TyId>,
-    /// Parallel to `generics`: `Some(elem)` == the param is declared
-    /// `I: Iterator<elem>` (the only bound the compiler knows). Checked
-    /// structurally at instantiation: `C` satisfies `Iterator<E>` iff
-    /// `next(C) -> (bool, E)` resolves.
+    /// Iterator element type for each generic bound; checked via `next(C)` at
+    /// instantiation.
     pub generic_bounds: Vec<Option<TyId>>,
     pub param_decls: Vec<ParamDecl>,
 
     pub num_required: usize,
 
     pub return_ty: Option<TyId>,
-    /// An `inline(<backend>)` body: its target backend + the verbatim source. The
-    /// backend disambiguates which codegen emits it (`inline(lua)` vs
-    /// `inline(js)`); it is always concrete (`Lua`/`Js`, never `Any`) when set.
+    /// Target backend and verbatim body for `inline(<backend>)` declarations.
     pub inline_body: Option<(FnBackend, Ustr)>,
     pub is_extern: bool,
-    /// Which backend this decl targets, the single source of truth for
-    /// backend-variant selection at codegen. `Any` = a portable Rock body (any
-    /// backend emits it from HIR). `Lua` = luajit-native binding/body
-    /// (`inline(lua)` / `extern(lua)` / `extern(ffi,..)` / plain `extern` C).
-    /// `Js` = `inline(js)` / `extern(js)`. Two same-name same-signature decls that
-    /// differ only in `backend` are collapsed to one overload candidate
-    /// (`select_overload`); each backend then emits its own variant.
+    /// Backend used to select the emitted variant. Same-signature declarations
+    /// for different backends share one overload candidate.
     pub backend: FnBackend,
     pub annotations: Vec<Annotation>,
     pub ffi_lib: Option<Ustr>,
-    /// Parser-derived rather than user-written: the `__op_*` operators
-    /// synthesized for a newtype over a primitive. Lints report on user surface
-    /// only -- an unreached derived operator has no available action.
+    /// Parser-derived operator; user-facing lints skip it.
     pub is_synthetic: bool,
     /// A generated default or omission function for one JSON field.
     pub json_field_for: Option<(Ustr, Ustr, skull_parser::JsonFieldOperation)>,
@@ -684,8 +614,6 @@ pub struct ParamDecl {
 }
 
 impl Body {
-    /// The binding of a plain single-name pattern (`let x = ..`), if that is
-    /// what `p` is.
     pub fn pattern_single_bind(&self, p: Idx<Pattern>) -> Option<Idx<BindingInfo>> {
         match self.pattern_arena[p] {
             Pattern::Bind(b) => Some(b),
@@ -739,9 +667,7 @@ pub struct InterpSpec {
     pub format_type: Option<char>,
 }
 
-/// Which surface form produced an `Expr::As`. `::` checks its operand against
-/// the target as an expected type; `as` converts an independently inferred
-/// source type through the closed conversion relation.
+/// Ascription supplies an expected type; conversion infers its source independently.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum AsKind {
     Ascribe,
@@ -749,8 +675,7 @@ pub enum AsKind {
     Bitcast,
 }
 
-// Bodies hold hundreds of thousands of expressions for a large program, so a
-// wide payload (a span, a second family) belongs in a side table.
+// Keep `Expr` small; spans and other wide payloads live in side tables.
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<Expr>() <= 56);
 
@@ -758,8 +683,7 @@ const _: () = assert!(std::mem::size_of::<Expr>() <= 56);
 pub enum Expr {
     Unit,
     Null,
-    /// A name that failed lowering. It carries the error type for editor
-    /// queries while ensuring invalid source can never reach code generation.
+    /// A failed name lookup retained for editor queries; invalid HIR is not emitted.
     Error,
     Hole(Option<Ustr>),
 
@@ -771,13 +695,11 @@ pub enum Expr {
     Tuple(IdxRange<Expr>),
 
     InterpolatedString(IdxRange<InterpPart>),
-    /// `!x`. The family is `__not`'s, decided at lowering like a binary
-    /// operator's; inference reads it only for a non-bool operand.
+    /// `!x`; inference reads the family only for a non-bool operand.
     Not(Idx<Expr>, CallFamily),
     BitNot(Idx<Expr>),
 
-    /// `-x`. The family is `__unm`'s, decided at lowering; inference reads
-    /// it only for an operand that is not a number or a newtype.
+    /// `-x`; inference reads the family only for a non-number, non-newtype.
     UnaryMinus(Idx<Expr>, CallFamily),
 
     IncDec {
@@ -827,9 +749,7 @@ pub enum Expr {
         receiver: Idx<Expr>,
         method: Ustr,
         args: IdxRange<Expr>,
-        /// Resolver family for `method`, same shape as `Expr::Call` (UFCS
-        /// and the bare call select the same family); `family.key()` is
-        /// `method`.
+        /// Resolved family for the written method name.
         family: CallFamily,
     },
 
@@ -864,13 +784,9 @@ pub enum Expr {
     Call {
         callee: Callee,
         args: IdxRange<Expr>,
-        /// Explicit type arguments from `f<A, B>(...)`; empty when generic
-        /// inference supplies the callee's instance.
+        /// Explicit type arguments; empty when inferred.
         generic_args: IdxRange<TypeExpr>,
-        /// Resolver family. Compiler-owned calls use an unowned family;
-        /// v1 calls carry the DefKey plus the shadowed losing-tier origin.
-        /// `family.key()` is the same key as `Callee::Unresolved.name`, which
-        /// the MIR backend still reads.
+        /// Resolver family; its key matches the unresolved callee name.
         family: CallFamily,
     },
 
@@ -879,9 +795,7 @@ pub enum Expr {
     StructLiteral {
         name: Ustr,
         fields: IdxRange<StructLitField>,
-        /// Functional-update bases (`Ty { ..base, .. }`), evaluated before
-        /// fields. Empty for a plain literal. Each base has the same nominal
-        /// type as the literal; unwritten fields are copied from it.
+        /// Functional-update bases, evaluated before fields; empty for a plain literal.
         bases: IdxRange<Expr>,
     },
 
@@ -911,11 +825,8 @@ pub enum Expr {
         value: Idx<Expr>,
     },
 
-    /// `target op= value` where `target` has no single place to rewrite as
-    /// `target = target op value` (a safe-nav chain). `op_fn` is the
-    /// operator's glyph function, which scalar arithmetic reads; `family` is
-    /// the overload family `target op value` resolves through, decided at
-    /// lowering exactly as for the binary operator.
+    /// Compound assignment for targets that cannot be captured as a place
+    /// (such as safe-navigation chains).
     CompoundAssign {
         target: Idx<Expr>,
         op_fn: Ustr,
@@ -947,10 +858,7 @@ pub struct FamilyMember {
     pub tier: FamilyTier,
 }
 
-/// The lookup tier that contributed a family member (tiers 2-5).
-/// A v1 callee family spans every tier from the first one that binds the
-/// name; fit ranks the whole family and the tier breaks only an exact
-/// best-fit tie, nearer tier first.
+/// Lookup tier contributing a family member; nearer tiers break exact-fit ties.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FamilyTier {
     Own,
@@ -959,24 +867,18 @@ pub enum FamilyTier {
     Std,
 }
 
-/// Overload family selected by the resolver.
-/// `resolve_callee` consumes this rather than a spelled last segment.
+/// Overload family selected during name resolution.
 #[derive(Copy, Clone, Debug)]
 pub enum CallFamily {
     /// The definition the tiers bind, by canonical DefKey.
     Resolved(Ustr),
-    /// A bare name whose overload family spans several definitions: a v1
-    /// family spanning the lookup tiers. Lowering decides the member keys and
-    /// records them under `name` in `Module::call_families` of the module lowered
-    /// from `file`; `Expr` is `Copy`, so the family carries only that address. A
-    /// v1 unary operator no tier binds is a family with no members: a scalar
-    /// operand never reads it, any other has no overload.
+    /// Members are stored by name in the source module; optional lookups may
+    /// produce an empty family.
     Merged { name: Ustr, file: Ustr },
 }
 
 impl CallFamily {
-    /// The family's spelling: its one key, or the bare name of a merged
-    /// family.
+    /// The family's lookup spelling.
     pub fn key(&self) -> Ustr {
         match self {
             CallFamily::Resolved(key) => *key,
@@ -1004,23 +906,8 @@ pub enum BinOp {
     Shr,
 }
 
-/// Every binary/operator declaration name the parser can mint, as
-/// `(fn name, symbol as written, may a user overload it)`. One-parameter `-`
-/// and `!` declarations select the prefix names in `UNARY_OPERATOR_FNS`
-/// instead.
-///
-/// Overloadable means exactly one thing: the operator's USE lowers to a call
-/// resolved by name, so a user fn can be found there. `+ - * / % ./` do.
-/// Everything else becomes a `BinOp` variant, a dedicated `Expr`, or native
-/// codegen and never consults a fn -- so a definition for one could not be
-/// reached however it was written. `pass_lower_functions` rejects those instead
-/// of emitting a fn nothing calls; before it did, `operator ==` silently left
-/// structural equality in place with no diagnostic at any stage.
-///
-/// This table must stay total over the parser's symbol match for binary
-/// declarations (`skull-parser/src/parser.rs`, `parse_operator`). The
-/// `operator_table_matches_the_parser` test spells every symbol with its
-/// binary arity.
+/// Binary declaration names, source symbols, and whether use-site calls can
+/// resolve to user functions. Keep total with the parser's operator spellings.
 pub const OPERATOR_FNS: &[(&str, &str, bool)] = &[
     ("__op_add", "+", true),
     ("__op_sub", "-", true),
@@ -1046,13 +933,9 @@ pub const OPERATOR_FNS: &[(&str, &str, bool)] = &[
     ("__op_index", "[]", false),
 ];
 
-/// The function names selected by the prefix forms of the two glyphs that
-/// have a unary spelling. They are separate from `OPERATOR_FNS`: the latter
-/// remains the table for binary/operator declarations and non-overloadable
-/// reserved symbols, while these names are ordinary callable families too.
+/// Function names selected by the unary forms of `-` and `!`.
 pub const UNARY_OPERATOR_FNS: &[(&str, &str)] = &[("__unm", "-"), ("__not", "!")];
 
-/// `None` for a name that is not an operator fn at all.
 pub fn operator_entry(name: &str) -> Option<(&'static str, bool)> {
     OPERATOR_FNS
         .iter()
@@ -1060,7 +943,6 @@ pub fn operator_entry(name: &str) -> Option<(&'static str, bool)> {
         .map(|(_, symbol, overloadable)| (*symbol, *overloadable))
 }
 
-/// `None` for a name that is not the prefix family of `-` or `!`.
 pub fn unary_operator_entry(name: &str) -> Option<&'static str> {
     UNARY_OPERATOR_FNS
         .iter()
@@ -1068,7 +950,6 @@ pub fn unary_operator_entry(name: &str) -> Option<&'static str> {
         .map(|(_, symbol)| *symbol)
 }
 
-/// The symbols a user may write an `operator` definition for, for diagnostics.
 pub fn overloadable_operator_symbols() -> String {
     OPERATOR_FNS
         .iter()
@@ -1094,10 +975,7 @@ pub enum Statement {
         value: Idx<Expr>,
     },
 
-    /// A nested `fn` -- a hoisted local helper. `name` binds in the enclosing
-    /// scope (kind `Fn`); `params` are its own child-scope bindings; `body` is
-    /// the block, lowered in that child scope. No capture of enclosing
-    /// params/locals (rejected in inference).
+    /// Hoisted helper; params and body use a child scope with no captures.
     Fn {
         name: Idx<BindingInfo>,
         params: IdxRange<BindingInfo>,
@@ -1110,9 +988,7 @@ pub enum Statement {
 
     Defer(Idx<Expr>),
 
-    /// `for pattern in iter { body }`. The pattern must be irrefutable; a
-    /// pattern beyond names and tuples is desugared in bone-lower to a hidden
-    /// element binding plus a destructuring `let` at the body's head.
+    /// Nontrivial patterns lower through a hidden element binding and a `let`.
     For {
         pattern: Idx<Pattern>,
         iter: Idx<Expr>,
@@ -1133,8 +1009,7 @@ pub enum Statement {
 #[derive(Clone, Debug)]
 pub struct DecoratorDef {
     pub name: Ustr,
-    /// Canonical v1 identity used by registries and generated wrappers. Bare
-    /// compiler-owned decorators keep their source name here.
+    /// Canonical v1 identity; compiler-owned decorators keep their source name.
     pub def_key: Ustr,
     pub span: Span,
     pub param_decls: Vec<ParamDecl>,
@@ -1150,8 +1025,7 @@ pub struct StructDef {
     pub is_value: bool,
     pub is_nobox: bool,
     pub consume: bool,
-    /// `@nomangle`: the emitted type symbol (C typedef, `__ty` tag) is the
-    /// declared name even under modules v1, for inline Lua that spells it.
+    /// `@nomangle`: preserve the declared name in emitted type symbols.
     pub nomangle: bool,
     pub span: Span,
     pub generics: Vec<TyId>,
@@ -1162,16 +1036,12 @@ pub struct StructDef {
 pub struct StructFieldDef {
     pub name: Ustr,
     pub ty: TyId,
-    /// The type the field is STORED as: `ty`, except that an `f32` field has
-    /// `ty` = `float` (what reads and writes see) and `storage_ty` = `f32`.
-    /// Layout and serialization read this; inference never does.
+    /// Stored representation; reads and writes use `ty` instead.
     pub storage_ty: TyId,
     pub span: Span,
     pub has_default: bool,
     pub annotations: Vec<Annotation>,
-    /// `embed f: Foo` -- the field's leaves live in the parent, so it has no
-    /// independently storable aggregate: PROJECTION-ONLY at every use site.
-    /// Enum record variants cannot carry it -- always false there.
+    /// Embedded fields project leaves from the parent and are never storable.
     pub is_embed: bool,
     /// Getter visibility. Default is public.
     pub read_vis: NsVisibility,
@@ -1262,8 +1132,7 @@ pub enum Pattern {
         alternatives: IdxRange<Pattern>,
     },
 
-    /// `Name(sub)` where `Name` is a transparent newtype: the runtime value IS
-    /// the wrapped value, so matching binds straight through with no test.
+    /// Transparent newtype pattern; binds through without a runtime test.
     Newtype {
         name: Ustr,
         name_span: Span,

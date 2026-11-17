@@ -28,7 +28,6 @@ pub(crate) enum TyPos {
     Body,
 }
 
-/// Record resolved import segments and aliases for navigation.
 pub fn record_use_paths(a: &Ast, ctx: &mut LowerCtx) {
     if ctx.workspace.skip_session_facts {
         return;
@@ -63,7 +62,6 @@ fn record_use_items(
     }
 }
 
-/// The segment record for what a member-wise path resolved to.
 fn member_segment_target(target: &resolve::MemberTarget) -> hir::SegmentTarget {
     match *target {
         resolve::MemberTarget::Global(key)
@@ -106,9 +104,7 @@ pub(crate) fn alloc_tys_contiguous(
     }
 }
 
-/// Lookup results for one module lowering. The context keeps the workspace
-/// immutable, and its first lookup records dependencies in `scope_probes`.
-/// Re-lowering constructs a fresh context instead of retaining these answers.
+/// Lookup cache for one module lowering; probes are recorded on cache misses.
 #[derive(Debug, Default)]
 pub(crate) struct ResolutionCache {
     bare: std::cell::RefCell<FxHashMap<Ustr, Result<resolve::Resolved, String>>>,
@@ -153,24 +149,16 @@ pub struct LowerCtx<'w, 'm> {
     pub(crate) placeholder_param: Option<Idx<BindingInfo>>,
     pub(crate) placeholder_forbidden: bool,
 
-    /// The namespace facts this lowering's lookups read, moved
-    /// into `Module.scope_probes` when the lowering finishes
-    /// ([`LowerCtx::flush_scope_probes`]). A cell because lookups run from
-    /// `&self` helpers.
+    /// Namespace facts read by this lowering, flushed when it finishes.
     pub(crate) scope_probes: std::cell::RefCell<Vec<bone_core::modules::ScopeProbe>>,
     pub(crate) resolutions: ResolutionCache,
-    /// Place subexpressions of the compound assignment being lowered that were
-    /// already evaluated into a temporary, keyed by the source node's address:
-    /// lowering such a node again yields a read of its temporary, so the place
-    /// can be both read and written without evaluating it twice.
+    /// Already-evaluated place parts, keyed by source address, to avoid running
+    /// them twice for compound assignment.
     pub(crate) place_temps: Vec<(usize, Idx<BindingInfo>)>,
-    /// Collect unresolved names while lowering a recoverable body.
     pub(crate) name_errors: std::cell::RefCell<Option<Vec<CompilerError>>>,
 }
 
 impl<'w, 'm> LowerCtx<'w, 'm> {
-    /// A context lowering into `module`, numbering type variables from
-    /// `first_var`.
     pub fn new(workspace: &'w Workspace, module: &'m mut hir::Module, first_var: u32) -> Self {
         LowerCtx {
             workspace,
@@ -186,7 +174,6 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         }
     }
 
-    /// Run one resolver lookup and record what it read.
     fn probed<R>(&self, lookup: impl FnOnce() -> R) -> R {
         if self.workspace.skip_session_facts {
             return lookup();
@@ -211,8 +198,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         result
     }
 
-    /// Keep lowering past a name that did not resolve when a body is
-    /// collecting them ([`LowerCtx::name_errors`]); otherwise return the error.
+    /// Collect a name error during recoverable body lowering.
     fn recover_name(&self, e: CompilerError) -> Result<(), CompilerError> {
         match self.name_errors.borrow_mut().as_mut() {
             Some(errors) => {
@@ -231,7 +217,6 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         }
     }
 
-    /// Move the recorded probes into the module being lowered.
     pub fn flush_scope_probes(&mut self) {
         let probes = std::mem::take(self.scope_probes.get_mut());
         // Not `extend`: it reserves for every recorded probe, and lookups
@@ -241,12 +226,10 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         }
     }
 
-    /// Namespace assembly gives every input file a fragment before lowering.
     pub fn fragment_scope(&self) -> &bone_core::modules::FragmentScope {
         &self.workspace.fragment_scopes[&self.module.file]
     }
 
-    /// Resolve module prefixes, with the supplied target at the final segment.
     fn path_segment_refs(
         &self,
         from_root: bool,
@@ -277,7 +260,6 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         out
     }
 
-    /// The module a path prefix walks to, as the resolver walks it.
     fn module_segment(
         &self,
         frag: &bone_core::modules::FragmentScope,
@@ -296,8 +278,6 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
             })
     }
 
-    /// Record `path`'s segments in the body (a body position) or the module
-    /// (an interface position).
     fn record_path(
         &mut self,
         body: &mut Body,
@@ -315,7 +295,6 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         }
     }
 
-    /// [`record_use_paths`] for one use tree under `prefix`.
     fn use_tree_refs(
         &self,
         frag: &bone_core::modules::FragmentScope,
@@ -393,7 +372,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         }
     }
 
-    /// What a `use` leaf binds: a definition, else a module (`use p;`).
+    /// Resolve the target of a `use` leaf, falling back to a module path.
     fn use_leaf_target(
         &self,
         frag: &bone_core::modules::FragmentScope,
@@ -414,7 +393,6 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         Ok(self.resolve_bare(name, span)?.key)
     }
 
-    /// Resolve direct calls to callable families and newtype constructors.
     fn v1_path_callable(&self, path: &skull_parser::Path) -> Option<Ustr> {
         let frag = self.fragment_scope();
         let use_path = use_path_ref(path);
@@ -441,8 +419,6 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         }
     }
 
-    /// The `(enum DefKey, variant)` of a v1 path that names an enum VARIANT.
-    /// `None` for a synthetic module or a path that names anything else.
     fn v1_path_variant(&self, path: &skull_parser::Path) -> Option<(Ustr, Ustr)> {
         let frag = self.fragment_scope();
         let use_path = use_path_ref(path);
@@ -471,7 +447,6 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         .map_err(|msg| CompilerError::new_with_label(span, msg))
     }
 
-    /// Resolve a name and its visible overload family.
     fn resolve_callee_family(
         &mut self,
         name: Ustr,
@@ -487,10 +462,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         Ok(self.record_family(name, resolved))
     }
 
-    /// The family of a unary operator's function (`-x` -> `__unm`, `!x` ->
-    /// `__not`), resolved like a binary operator's callee. In v1 a name no
-    /// tier binds is a family with no members rather than an error: the
-    /// operand may be a scalar, which never consults it.
+    /// Resolve an optional unary-operator family; scalar operands may not use it.
     fn resolve_unary_family(
         &mut self,
         name: Ustr,
@@ -499,10 +471,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         Ok(self.resolve_optional_family(name, span)?.1)
     }
 
-    /// The family of `recv.name(..)`. In v1 a name no tier binds is a family
-    /// with no members rather than an error: a fn-typed field `name` on the
-    /// receiver is called first, and
-    /// inference reports the call when there is neither.
+    /// Resolve the method family; a function-valued receiver field may win.
     fn resolve_method_family(
         &mut self,
         name: Ustr,
@@ -554,8 +523,7 @@ impl<'w, 'm> LowerCtx<'w, 'm> {
         self.module.iterator_families = Some(families);
     }
 
-    /// The spelling and `CallFamily` of a resolved callee; a merged family's
-    /// member keys go on the module for inference.
+    /// Record merged members for inference and return the HIR family.
     fn record_family(
         &mut self,
         name: Ustr,
@@ -1072,7 +1040,6 @@ pub(crate) fn lower_type_expr_in(
     Ok(idx)
 }
 
-// TODO: maybe just return &Expr?
 pub(crate) fn lookup_in_scope(
     ctx: &LowerCtx,
     body: &mut Body,
@@ -1093,7 +1060,6 @@ pub(crate) fn lookup_in_scope(
     }
 }
 
-/// The lexical binding `name` names from `start_scope`, if any (tier 1).
 fn lookup_local(body: &Body, start_scope: Idx<Scope>, name: Ustr) -> Option<Idx<BindingInfo>> {
     let mut scope = start_scope;
     loop {
