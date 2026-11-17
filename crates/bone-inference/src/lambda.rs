@@ -113,7 +113,7 @@ pub(crate) fn infer_lambda(
     reject_ref_captures(c, gamma, expr_span)?;
 
     unify(gamma, ret_var, body_ty, expr_span)?;
-    let mut ret_ty = resolve(gamma, ret_var, expr_span);
+    let mut ret_ty = ret_var;
     if iter_result && let Some((witness, it_ty)) = implicit_iter_target(c, gamma, ret_ty, expr_span)
     {
         // Every value the lambda can produce is wrapped in `iter`: the tail and
@@ -139,30 +139,10 @@ pub(crate) fn infer_lambda(
         ret_ty = it_ty;
     }
 
-    let mut texps = Vec::with_capacity(param_tys.len());
-
-    for pt in param_tys.iter() {
-        let r = resolve(gamma, *pt, expr_span);
-        let r = TyId::Local(reify(gamma, r, expr_span));
-        let texp = *gamma.get(r);
-        texps.push(texp);
-    }
-
-    let params_range = alloc_contiguous(&mut gamma.out.ty_arena, texps);
-
-    let ret_idx = reify(gamma, ret_ty, expr_span);
-
-    let idx = gamma.out.ty_arena.alloc(TypeExpr::Function {
-        params: params_range,
-        ret: ret_idx,
-    });
-
-    Ok(TyId::Local(idx))
+    Ok(make_fn_ty(gamma, &param_tys, ret_ty, expr_span))
 }
 
-/// Build a `fn(P..) -> R` TyId from resolved param/ret types, reifying each into
-/// `gamma.out.ty_arena` (the same construction `infer_lambda` uses for a lambda's
-/// type). Used to type a nested `fn` name binding.
+/// Build a `fn(P..) -> R` TyId, reifying each type into `gamma.out.ty_arena`.
 pub(crate) fn make_fn_ty(gamma: &mut Gamma, param_tys: &[TyId], ret: TyId, span: Span) -> TyId {
     let mut texps = Vec::with_capacity(param_tys.len());
     for pt in param_tys {
