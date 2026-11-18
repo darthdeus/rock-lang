@@ -1347,6 +1347,11 @@ fn compact_region(
             template.bound_next_split.insert(new_id);
         }
     }
+    for old_id in &arena.synthetic_projections {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            template.synthetic_projections.insert(new_id);
+        }
+    }
     for (old_id, span) in arena.inst_spans.iter() {
         if let Some(&new_id) = inst_map.get(&old_id) {
             template.inst_spans.insert(new_id, *span);
@@ -2051,6 +2056,11 @@ fn clone_body(
         scratch.inst_map.insert(iid, nid);
         scratch.inst_ids.push(nid);
     }
+    for old_id in &callee.synthetic_projections {
+        if let Some(&new_id) = scratch.inst_map.get(old_id) {
+            caller.synthetic_projections.insert(new_id);
+        }
+    }
     for &nid in &scratch.inst_ids {
         remap_clone(
             &mut caller.insts[nid],
@@ -2561,6 +2571,11 @@ fn import_spec_bindings(
     for (old_id, ty) in &callee.inst_logical_types {
         if let Some(&new_id) = inst_map.get(old_id) {
             func.inst_logical_types.insert(new_id, *ty);
+        }
+    }
+    for old_id in &callee.synthetic_projections {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            func.synthetic_projections.insert(new_id);
         }
     }
     // Intern each callee owner in the caller before remapping its sites.

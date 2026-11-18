@@ -169,7 +169,10 @@ fn drop_repeated_projections(
                 end_run(used, &mut unused, dead, work);
                 (run, used) = (Some(base), false);
             }
-            if use_count[raw(id)] == 0 {
+            if use_count[raw(id)] == 0 && func.synthetic_projections.contains(&id) {
+                dead[raw(id)] = true;
+                work.push(id);
+            } else if use_count[raw(id)] == 0 {
                 unused.push(id);
             } else {
                 used = true;

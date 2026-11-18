@@ -1429,6 +1429,10 @@ pub struct MirFunc {
     /// when lowering could NOT resolve it. So the fact is recorded rather than
     /// re-inferred.
     pub bound_next_split: bone_core::prelude::FxHashSet<Idx<Inst>>,
+    /// Projections the compiler emitted to rebuild a value the source never
+    /// read in parts. Unused, they are dropped without keeping one to raise a
+    /// nil error the source could not have asked for.
+    pub synthetic_projections: bone_core::prelude::FxHashSet<Idx<Inst>>,
     /// Nested `fn`s declared in this fn's body, each lowered to its own MirFunc
     /// with a private `__local_*` name. Emitted as sibling top-level Lua fns by
     /// `mir_emit`; a call/value-ref resolves to the name (zero closure alloc).
@@ -1574,6 +1578,7 @@ impl MirFunc {
             resolved_bound_trees: Default::default(),
             spec_bindings: Default::default(),
             bound_next_split: Default::default(),
+            synthetic_projections: Default::default(),
             nested_fns: Vec::new(),
             inst_spans: Default::default(),
             inst_logical_types: Default::default(),

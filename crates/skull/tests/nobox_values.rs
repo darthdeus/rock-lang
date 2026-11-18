@@ -1019,7 +1019,8 @@ fn main() {
 "#;
 
 /// Copying a stored tuple element shares its immutable box -- directly, through
-/// an unwritten name, or as a loop element -- rather than packing a new table.
+/// an unwritten name, or as a loop element -- rather than packing a new table,
+/// and reads none of its slots.
 #[test]
 fn copying_a_stored_tuple_element_allocates_nothing() {
     let lua = emit_module(NOBOX_TUPLE_COPY);
@@ -1028,6 +1029,10 @@ fn copying_a_stored_tuple_element_allocates_nothing() {
         assert!(
             !body.contains("({") && !body.contains("NV2_ct("),
             "`{name}` packed a copy of a stored tuple:\n{body}"
+        );
+        assert!(
+            !body.contains("[1]"),
+            "`{name}` read a slot of a tuple it only copies:\n{body}"
         );
     }
 }

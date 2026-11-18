@@ -3595,7 +3595,11 @@ impl<'a> Builder<'a> {
     pub(crate) fn flat_box_slots(&mut self, base: Idx<Inst>, width: usize) -> Vec<Idx<Inst>> {
         self.flat_box_widths.insert(base, width);
         (0..width)
-            .map(|index| self.emit_cur(Inst::TupleIndex { base, index }))
+            .map(|index| {
+                let slot = self.emit_cur(Inst::TupleIndex { base, index });
+                self.f.synthetic_projections.insert(slot);
+                slot
+            })
             .collect()
     }
 
