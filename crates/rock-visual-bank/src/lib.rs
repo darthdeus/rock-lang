@@ -5,7 +5,7 @@
 //! `assets/.eat/<dir>/`, whose files have fixed names per kind (`sheet_files`).
 
 mod verify;
-pub use verify::{SheetSpec, check_sheet, sheet_spec};
+pub use verify::{check_sheet, sheet_spec, SheetSpec};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -124,6 +124,8 @@ impl Camera {
 pub struct AnimationLine {
     #[serde(default, skip_serializing_if = "is_false")]
     pub albedo_bc1: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub material_bc5: bool,
     pub character: String,
     pub label: String,
     pub dir: String,
@@ -443,6 +445,9 @@ pub fn sheet_files(line: &Line) -> Vec<String> {
         || matches!(line, Line::Prop(p) if p.albedo_bc1)
     {
         files.push("albedo.dds".into());
+    }
+    if matches!(line,Line::Animation(a) if a.material_bc5) {
+        files.push("material.bc5.dds".into());
     }
     files.sort();
     files
@@ -1059,21 +1064,17 @@ mod tests {
         let spec = sheet_spec(&line).unwrap().unwrap();
         check_sheet(&root, &spec).unwrap();
         std::fs::remove_file(root.join("radiance.png")).unwrap();
-        assert!(
-            check_sheet(&root, &spec)
-                .unwrap_err()
-                .iter()
-                .any(|p| p.contains("radiance.png"))
-        );
+        assert!(check_sheet(&root, &spec)
+            .unwrap_err()
+            .iter()
+            .any(|p| p.contains("radiance.png")));
         image::RgbaImage::new(1, 2)
             .save(root.join("radiance.png"))
             .unwrap();
-        assert!(
-            check_sheet(&root, &spec)
-                .unwrap_err()
-                .iter()
-                .any(|p| p.contains("expected 2x2"))
-        );
+        assert!(check_sheet(&root, &spec)
+            .unwrap_err()
+            .iter()
+            .any(|p| p.contains("expected 2x2")));
         image::RgbaImage::new(2, 2)
             .save(root.join("radiance.png"))
             .unwrap();
@@ -1127,15 +1128,13 @@ mod tests {
         let region = Some([0, 0, 2048, 2048]);
         assert!(validate_floor_texture(Some([2, 2]), region, Some([2, 2]), (2048, 2048)).is_ok());
         // Two sets of four tiles of two cells need a region divisible by sixteen cells.
-        assert!(
-            validate_floor_texture(
-                Some([2, 2]),
-                Some([0, 0, 2040, 2048]),
-                Some([2, 2]),
-                (2048, 2048)
-            )
-            .is_err()
-        );
+        assert!(validate_floor_texture(
+            Some([2, 2]),
+            Some([0, 0, 2040, 2048]),
+            Some([2, 2]),
+            (2048, 2048)
+        )
+        .is_err());
         assert!(validate_floor_texture(Some([2, 2]), region, Some([0, 1]), (2048, 2048)).is_err());
         assert!(validate_floor_texture(None, None, Some([1, 1]), (2048, 2048)).is_err());
         assert!(
@@ -1160,11 +1159,9 @@ mod tests {
             line(json!({"repeat": [2, 2], "region": [0, 0, 2040, 2048], "wang": [2, 2]})).is_err()
         );
         let plain = line(json!({"repeat": [2, 2], "region": [0, 0, 2048, 2048]})).unwrap();
-        assert!(
-            serde_json::to_value(plain).unwrap()["floor"]
-                .get("wang")
-                .is_none()
-        );
+        assert!(serde_json::to_value(plain).unwrap()["floor"]
+            .get("wang")
+            .is_none());
     }
 
     #[test]
@@ -1212,4 +1209,4 @@ mod tests {
     }
 }
 
-pub use stone_texture::bc1_header;
+pub use stone_texture::{bc1_header, bc5_header};

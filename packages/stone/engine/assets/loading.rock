@@ -292,6 +292,7 @@ fn eat_object_key(resolved: string) -> string? {
 }
 
 fn image_file_storage_format(path: string, format: ImageAssetFormat) -> ImageAssetFormat {
+    if path.ends_with(".bc5.dds") && (format == ImageAssetFormat::Rgba8 || format == ImageAssetFormat::MaterialRg8) { return ImageAssetFormat::Bc5 }
     if format == ImageAssetFormat::Rgba8 && path.ends_with(".dds") { return ImageAssetFormat::Bc1 }
     return format
 }
@@ -303,11 +304,13 @@ fn image_format_tag(format: ImageAssetFormat) -> string {
         ImageAssetFormat::R8 => "r8",
         ImageAssetFormat::MaterialRg8 => "material-rg8",
         ImageAssetFormat::Bc1 => "bc1-rgba",
+        ImageAssetFormat::Bc5 => "bc5-rg",
     }
 }
 
 fn image_format_is_intrinsic(resolved: string, format: ImageAssetFormat) -> bool {
-    return format == ImageAssetFormat::Rgba8 || (format == ImageAssetFormat::Bc1 && resolved.ends_with(".dds"))
+    return format == ImageAssetFormat::Rgba8 || (resolved.ends_with(".bc5.dds") && (format == ImageAssetFormat::Bc5 || format == ImageAssetFormat::MaterialRg8))
+        || (format == ImageAssetFormat::Bc1 && resolved.ends_with(".dds"))
 }
 
 fn image_format_path(resolved: string, format: ImageAssetFormat) -> string {
@@ -316,7 +319,7 @@ fn image_format_path(resolved: string, format: ImageAssetFormat) -> string {
 }
 
 fn image_path_from_format_key(path_key: string) -> string {
-    for format in [ImageAssetFormat::DepthRg8, ImageAssetFormat::MaterialRg8, ImageAssetFormat::R8, ImageAssetFormat::Bc1] {
+    for format in [ImageAssetFormat::DepthRg8, ImageAssetFormat::MaterialRg8, ImageAssetFormat::R8, ImageAssetFormat::Bc1, ImageAssetFormat::Bc5] {
         let prefix = "image-format:{image_format_tag(format)}:"
         if path_key.starts_with(prefix) { return path_key.substring(prefix.len(), path_key.len()) }
     }
