@@ -206,6 +206,21 @@ fn q_collect() -> float {
     return ys.len as float
 }
 
+@inline fn p_at_inline(i: int) -> (P, int) { return PX[i] }
+@inline fn p_make_inline(i: int) -> (P, int) { return (P { x: i as float, y: 1.0 }, i) }
+
+fn p_ret_inline() -> float {
+    PY.clear()
+    for i in 0..N { PY.push(p_at_inline(i)) }
+    return PY.len as float
+}
+
+fn p_fresh_inline() -> float {
+    let s = 0.0
+    for i in 0..N { let (v, n) = p_make_inline(i); s += v.x + n as float }
+    return s
+}
+
 fn q_direct() -> float {
     QY.clear()
     for i in 0..N { QY.push(QX[i]) }
@@ -287,6 +302,8 @@ fn main() {
     drive("p_fresh_store", p_fresh_store)
     drive("q_fresh_store", q_fresh_store)
     drive("p_pop", p_pop)
+    drive("p_ret_inline", p_ret_inline)
+    drive("p_fresh_inline", p_fresh_inline)
     drive("p_zip", p_zip)
     drive("q_zip", q_zip)
     drive("p_iter", p_iter)
