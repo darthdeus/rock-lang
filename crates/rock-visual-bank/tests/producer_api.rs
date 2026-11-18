@@ -30,6 +30,7 @@ fn producer_can_share_bank_schema_and_validation() {
     let mut line = Line::Animation(AnimationLine {
         albedo_bc1: false,
         material_bc5: false,
+        normal_bc5: false,
         character: "person".into(),
         label: "idle".into(),
         dir: "0".repeat(64),

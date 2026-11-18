@@ -126,6 +126,8 @@ pub struct AnimationLine {
     pub albedo_bc1: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub material_bc5: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub normal_bc5: bool,
     pub character: String,
     pub label: String,
     pub dir: String,
@@ -448,6 +450,17 @@ pub fn sheet_files(line: &Line) -> Vec<String> {
     }
     if matches!(line,Line::Animation(a) if a.material_bc5) {
         files.push("material.bc5.dds".into());
+    }
+    if let Line::Animation(animation) = line {
+        if animation.normal_bc5 {
+            files.push("normal.bc5.dds".into());
+            if animation.skin_mask {
+                files.push("material-skin.png".into());
+                if animation.material_bc5 {
+                    files.push("material-skin.bc5.dds".into());
+                }
+            }
+        }
     }
     files.sort();
     files
