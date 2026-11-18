@@ -46,7 +46,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 300;
 /// Limit memory independently of the wall clock to contain runaway allocation.
 const DEFAULT_MEMORY_CAP_MB: u64 = 8192;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
 struct AllocationCensus {
     build_sha: String,
     rendering_enabled: bool,
@@ -64,75 +64,6 @@ struct AllocationCensus {
     measured_reallocation_calls: u64,
     stop_sim_reached: bool,
     measurement_complete: bool,
-}
-
-impl AllocationCensus {
-    fn from_value(value: &serde_json::Value) -> Result<Self> {
-        let required_str = |name: &str| {
-            value
-                .get(name)
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .ok_or_else(|| anyhow!("allocation census field `{name}` is not a string"))
-        };
-        let required_bool = |name: &str| {
-            value
-                .get(name)
-                .and_then(serde_json::Value::as_bool)
-                .ok_or_else(|| anyhow!("allocation census field `{name}` is not a bool"))
-        };
-        let required_usize = |name: &str| {
-            value
-                .get(name)
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|n| usize::try_from(n).ok())
-                .ok_or_else(|| {
-                    anyhow!("allocation census field `{name}` is not a nonnegative integer")
-                })
-        };
-        let required_float = |name: &str| {
-            value
-                .get(name)
-                .and_then(serde_json::Value::as_f64)
-                .ok_or_else(|| anyhow!("allocation census field `{name}` is not a number"))
-        };
-
-        Ok(Self {
-            build_sha: required_str("build_sha")?,
-            rendering_enabled: required_bool("rendering_enabled")?,
-            warmup_frames_requested: required_usize("warmup_frames_requested")?,
-            warmup_frames: required_usize("warmup_frames")?,
-            frame_count: required_usize("frame_count")?,
-            measured_frames: required_usize("measured_frames")?,
-            initialization_gross_kb: required_float("initialization_gross_kb")?,
-            outside_frame_gross_kb: required_float("outside_frame_gross_kb")?,
-            warmup_gross_kb: required_float("warmup_gross_kb")?,
-            measured_gross_kb: required_float("measured_gross_kb")?,
-            total_gross_kb: required_float("total_gross_kb")?,
-            measured_allocator_calls: value
-                .get("measured_allocator_calls")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| {
-                    anyhow!("allocation census field `measured_allocator_calls` is not an integer")
-                })?,
-            measured_allocation_calls: value
-                .get("measured_allocation_calls")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| {
-                    anyhow!("allocation census field `measured_allocation_calls` is not an integer")
-                })?,
-            measured_reallocation_calls: value
-                .get("measured_reallocation_calls")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "allocation census field `measured_reallocation_calls` is not an integer"
-                    )
-                })?,
-            stop_sim_reached: required_bool("stop_sim_reached")?,
-            measurement_complete: required_bool("measurement_complete")?,
-        })
-    }
 }
 
 fn sim_timeout_secs() -> u64 {
@@ -356,7 +287,7 @@ fn child_sim_selection() -> Result<Vec<String>> {
 
 mod worker_admission;
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct SimReceiptInput {
     kind: String,
     path: String,
@@ -523,48 +454,36 @@ fn sim_receipt_context(project: &Path) -> Result<serde_json::Value> {
     }))
 }
 
-fn parse_receipt_inputs(value: &serde_json::Value) -> Result<Vec<SimReceiptInput>> {
+fn receipt_rows<T: serde::de::DeserializeOwned>(
+    value: &serde_json::Value,
+    field: &str,
+) -> Result<Vec<T>> {
     let rows = value
         .as_array()
-        .ok_or_else(|| anyhow!("sim compile receipt `inputs` is not an array"))?;
+        .with_context(|| format!("sim compile receipt {field} is not an array"))?;
     rows.iter()
-        .map(|row| {
-            let field = |name| {
-                row.get(name)
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned)
-                    .ok_or_else(|| anyhow!("sim compile receipt input `{name}` is not a string"))
-            };
-            Ok(SimReceiptInput {
-                kind: field("kind")?,
-                path: field("path")?,
-                sha256: field("sha256")?,
-            })
+        .enumerate()
+        .map(|(index, row)| {
+            anyhow::ensure!(
+                row.is_object(),
+                "sim compile receipt {field}[{index}] is not an object"
+            );
+            serde_path_to_error::deserialize(row)
+                .with_context(|| format!("invalid sim compile receipt {field}[{index}]"))
         })
         .collect()
 }
 
 fn parse_registry(value: &serde_json::Value) -> Result<SimRegistry> {
-    use serde::Deserialize;
-    let rows = value
-        .as_array()
-        .context("sim compile receipt registry is not an array")?;
-    let mut registry = Vec::with_capacity(rows.len());
-    for row in rows {
-        anyhow::ensure!(
-            row.is_object(),
-            "sim compile receipt registry entry is not an object"
-        );
-        let entry = RegisteredSim::deserialize(row)
-            .context("invalid sim compile receipt registry entry")?;
+    let entries = receipt_rows::<RegisteredSim>(value, "registry")?;
+    for entry in &entries {
         anyhow::ensure!(
             !entry.source_file.is_empty(),
             "sim compile receipt source file for `{}` is missing or invalid",
             entry.wire_name
         );
-        registry.push(entry);
     }
-    Ok(registry.into())
+    Ok(entries.into())
 }
 
 fn publish_sim_receipt(
@@ -590,7 +509,7 @@ fn publish_sim_receipt(
         "context": sim_receipt_context(project)?,
         "selection": selection,
         "main_sha256": hash_file(&staged_main)?,
-        "inputs": serde_json::to_value(inputs)?,
+        "inputs": inputs,
         "registry": registry,
     });
     let mut manifest_bytes =
@@ -638,10 +557,11 @@ fn load_sim_receipt(receipt_dir: &Path, project: &Path, output: &Path) -> Result
         ));
     }
 
-    let expected_inputs = parse_receipt_inputs(
+    let expected_inputs = receipt_rows::<SimReceiptInput>(
         manifest
             .get("inputs")
             .ok_or_else(|| anyhow!("sim compile receipt has no inputs"))?,
+        "inputs",
     )?;
     for expected in expected_inputs
         .iter()
@@ -3646,8 +3566,7 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
                             // the edit can't apply, which the sim's own wait_for
                             // timeout (or the post-exit drain) surfaces.
                             let _ = reload_tx.send(ReloadEditReq {
-                                request_id: extract_raw_field(rest, "request_id")
-                                    .and_then(|id| id.parse::<u64>().ok()),
+                                request_id: rest["request_id"].as_u64(),
                                 file: extract_str_field(rest, "file").unwrap_or_default(),
                                 find: extract_str_field(rest, "find").unwrap_or_default(),
                                 replace: extract_str_field(rest, "replace").unwrap_or_default(),
@@ -3662,8 +3581,7 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
                             };
                             if let Some(terminal) = terminal {
                                 let _ = reload_completion_tx.send(ReloadCompletion {
-                                    request_id: extract_raw_field(rest, "request_id")
-                                        .and_then(|id| id.parse::<u64>().ok()),
+                                    request_id: rest["request_id"].as_u64(),
                                     terminal,
                                 });
                             }
@@ -4429,7 +4347,7 @@ impl SimSummary {
             "no_checks" => {
                 self.no_checks = Some(extract_str_field(rest, "reason").unwrap_or_default());
             }
-            "allocation_census" => match AllocationCensus::from_value(rest) {
+            "allocation_census" => match serde_path_to_error::deserialize(rest) {
                 Ok(census) if self.allocation_census.is_none() => {
                     self.allocation_census = Some(census)
                 }
@@ -4445,10 +4363,8 @@ impl SimSummary {
             "image_snapshot" => {
                 let name = extract_str_field(rest, "name").unwrap_or_default();
                 let path = extract_str_field(rest, "path").unwrap_or_default();
-                let tol = extract_raw_field(rest, "tol")
-                    .and_then(|t| t.parse::<f64>().ok())
-                    .unwrap_or(0.0);
-                let save_ok = extract_raw_field(rest, "ok").as_deref() == Some("true");
+                let tol = rest["tol"].as_f64().unwrap_or(0.0);
+                let save_ok = rest["ok"].as_bool().unwrap_or(false);
                 self.image_snapshots.push(ImageSnapshotOp {
                     name,
                     path,

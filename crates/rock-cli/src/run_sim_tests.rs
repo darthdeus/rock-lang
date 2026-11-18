@@ -1364,6 +1364,10 @@ fn summary_flags_missing_stop() {
 #[test]
 fn summary_parses_allocation_census_and_preserves_frame_window() {
     let stderr = "__SIM__ {\"op\":\"allocation_census\",\"build_sha\":\"abc123\",\"rendering_enabled\":false,\"warmup_frames_requested\":2,\"warmup_frames\":2,\"frame_count\":6,\"measured_frames\":4,\"initialization_gross_kb\":3.5,\"outside_frame_gross_kb\":1.25,\"warmup_gross_kb\":8.0,\"measured_gross_kb\":24.0,\"total_gross_kb\":36.75,\"measured_allocator_calls\":40,\"measured_allocation_calls\":32,\"measured_reallocation_calls\":8,\"stop_sim_reached\":true,\"measurement_complete\":true}\n__SIM__ {\"op\":\"stop\"}";
+    let invalid =
+        checked_summary(&stderr.replace(r#""measured_frames":4"#, r#""measured_frames":-1"#));
+    assert!(invalid.allocation_census.is_none());
+    assert!(invalid.errors[0].message.contains("measured_frames"));
     let summary = checked_summary(stderr);
     let census = summary.allocation_census.as_ref().expect("census result");
     assert_eq!(census.build_sha, "abc123");
