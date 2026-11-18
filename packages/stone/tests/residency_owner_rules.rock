@@ -38,11 +38,11 @@ fn residency_owner_each_acquire_of_one_path_is_one_owner() {
             "a second acquire of one path shares its handle")
         assert_eq(image_asset_acquire_count(paths[0]), 2)
         assert(release_image_asset(paths[0]))
-        RESIDENCY_BUDGET = 0
+        residency_set_budget(0)
         residency_trim()
         assert_eq(stone_native_handle_state("image", image.0), 1,
             "the remaining owner keeps the image through budget pressure")
-        RESIDENCY_BUDGET = residency_live_bytes(image)
+        residency_set_budget(residency_live_bytes(image))
         assert(release_image_asset(paths[0]))
         assert_eq(acquire_image_asset(paths[0], TextureFilter::Linear, watch: false), image,
             "reacquiring a released image reuses its retained handle")
