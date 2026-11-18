@@ -58,16 +58,6 @@ pub fn policy() -> LintReport {
     }
 }
 
-/// Return error-level findings so callers use the same rendering path as type errors.
-pub(crate) fn run_build_lints(
-    ws: &Workspace,
-    sources: &SourceFiles,
-    root: &Path,
-    scope: Scope,
-) -> Vec<CompilerError> {
-    report(findings(ws, sources, root, scope), sources, root, policy())
-}
-
 /// The live-build adapter for [`bone_lints::IncrementalLintCache`]. The cache
 /// owns derivation and invalidation; this edge owns the same report set,
 /// severity policy, and error return as the canonical full pass.

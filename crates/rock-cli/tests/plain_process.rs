@@ -500,6 +500,12 @@ fn plain_watch_resolves_project_outside_workspace() {
             if fail {
                 panic!("intentional watcher cleanup check");
             }
+            let assert_output = |value: i32| {
+                let lua = std::fs::read_to_string(&output).unwrap() + "\nmain()\n";
+                let run = rock_host::lua_runner::run_lua_code_with_timeout(&lua, None).unwrap();
+                assert!(run.success, "{}", run.combined());
+                assert_eq!(run.stdout.trim(), value.to_string());
+            };
             for value in [43, 0, 44] {
                 let previous = std::fs::read_to_string(&output).unwrap();
                 let source = if value == 0 {
@@ -515,12 +521,25 @@ fn plain_watch_resolves_project_outside_workspace() {
                     assert_eq!(std::fs::read_to_string(&output).unwrap(), previous);
                 } else {
                     until(&|_| std::fs::read_to_string(&output).is_ok_and(|s| s != previous));
-                    let lua = std::fs::read_to_string(&output).unwrap() + "\nmain()\n";
-                    let run = rock_host::lua_runner::run_lua_code_with_timeout(&lua, None).unwrap();
-                    assert!(run.success, "{}", run.combined());
-                    assert_eq!(run.stdout.trim(), value.to_string());
+                    assert_output(value);
                 }
             }
+            let previous = std::fs::read_to_string(&output).unwrap();
+            write(
+                root.path(),
+                "added.rock",
+                "mod added; pub fn answer() -> int { 45 }\n",
+            );
+            write(
+                root.path(),
+                "main.rock",
+                "fn main() { print(added::answer()) }\n",
+            );
+            until(&|logs| {
+                std::fs::read_to_string(&output).is_ok_and(|s| s != previous)
+                    || logs.contains("`added` did not resolve")
+            });
+            assert_output(45);
         }));
         if fail {
             assert_eq!(

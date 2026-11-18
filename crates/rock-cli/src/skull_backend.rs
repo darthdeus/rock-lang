@@ -1889,152 +1889,92 @@ fn skull_emit_single(path: &str, src: &str) -> (String, bool) {
     }
 }
 
-fn log_live_watch_failure(
-    label: &str,
-    check_ms: f64,
-    error: crate::live_project::LiveWatchError,
-    cache: &mut Option<skull::mir_emit::SkullEmitCache>,
-) {
-    use crate::live_project::LiveWatchError;
-    match error {
-        LiveWatchError::Discovery(error) => {
-            log::error!(target: "WATCH", "skull: source discovery failed: {error}");
-        }
-        LiveWatchError::SourceSelection(error) => {
-            log::error!(target: "WATCH", "skull: production source selection failed: {error}");
-        }
-        LiveWatchError::Session(sources, error) => {
-            eprintln!("{}", error.render(&sources));
-            log::error!(target: "WATCH", "skull {label}: session init failed");
-        }
-        LiveWatchError::Update(sources, errors) => {
-            for error in &errors {
-                eprintln!("{}", error.render(&sources));
-            }
-            *cache = None;
-            log::error!(target: "WATCH", "skull {label}: update failed in {check_ms:.1}ms - serving last good output");
-        }
-        LiveWatchError::Diagnostics(sources, errors) => {
-            for error in &errors {
-                eprintln!("{}", error.render(&sources));
-            }
-            *cache = None;
-            log::error!(target: "WATCH", "skull {label}: {} diagnostic(s) in {check_ms:.1}ms - serving last good output", errors.len());
-        }
-        LiveWatchError::Lints(sources, errors) => {
-            for error in &errors {
-                eprintln!("{}", render_project_err(&sources, error));
-            }
-            *cache = None;
-            log::error!(target: "WATCH", "skull {label}: {} lint error(s) - serving last good output", errors.len());
-        }
-    }
-}
-
 pub(crate) fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
+    use crate::live_project::{LiveProject, LiveUpdate};
+
     let out_file = output
         .map(std::path::PathBuf::from)
         .unwrap_or_else(rock_host::project::default_main_lua_path);
     if let Some(parent) = out_file.parent() {
-        if !parent.exists() {
-            fs_err::create_dir_all(parent)?;
-        }
+        fs_err::create_dir_all(parent)?;
     }
 
-    let mut project: Option<crate::live_project::LiveProject> = None;
-    let mut cache: Option<skull::mir_emit::SkullEmitCache> = None;
-    let build = |label: &str,
-                 project: &mut Option<crate::live_project::LiveProject>,
-                 cache: &mut Option<skull::mir_emit::SkullEmitCache>| {
+    let mut project: Option<LiveProject> = None;
+    let mut cache = None;
+    let mut build = |label: &str| {
         let started = Instant::now();
-        let initial = project.is_none();
-        let path_ref = std::path::Path::new(path);
-        let is_game = path_ref.is_dir()
-            && (crate::registry::RuntimeServices::registered().is_game_project)(path_ref)
-                .unwrap_or(false);
-        if initial {
-            match crate::live_project::LiveProject::init_for_watch(path, is_game) {
-                Ok(live) => *project = Some(live),
-                Err(error) => {
-                    log_live_watch_failure(
-                        label,
-                        started.elapsed().as_secs_f64() * 1000.0,
-                        error,
-                        cache,
-                    );
-                    return;
-                }
-            }
-        }
-        let result = if initial {
-            project
-                .as_mut()
-                .unwrap()
-                .watch_verdict()
-                .map(|()| (true, Vec::new()))
-        } else {
-            project.as_mut().unwrap().recompile_for_watch(is_game)
-        };
-        let check_ms = started.elapsed().as_secs_f64() * 1000.0;
-        let (full, reinferred) = match result {
-            Ok(update) => update,
-            Err(error) => {
-                log_live_watch_failure(label, check_ms, error, cache);
-                return;
-            }
-        };
-        let live = project.as_ref().unwrap();
-        let ws = live.workspace();
-        let Ok(mid) = skull::user_module_id(ws) else {
-            log::error!(target: "WATCH", "skull {label}: no user module");
-            return;
-        };
-        let te = Instant::now();
-        let emit = if full || cache.is_none() {
-            match skull::mir_emit::emit_full(ws, mid) {
-                Ok((e, c)) => {
-                    *cache = Some(c);
-                    e
-                }
-                Err(e) => {
-                    eprintln!("{}", render_project_err(live.sources(), &e));
-                    log::error!(target: "WATCH", "skull {label}: emit failed - serving last good output");
-                    return;
-                }
-            }
-        } else {
-            match skull::mir_emit::emit_incremental(ws, cache.as_mut().unwrap(), &reinferred) {
-                Ok(e) => e,
-                Err(e) => {
-                    eprintln!("{}", render_project_err(live.sources(), &e));
-                    log::error!(target: "WATCH", "skull {label}: incremental emit failed - serving last good output");
-                    return;
-                }
-            }
-        };
-        let emit_ms = te.elapsed().as_secs_f64() * 1000.0;
-        let mode = if full || reinferred.is_empty() {
-            "full"
-        } else {
-            "incremental"
-        };
-        match rock_host::project::write_atomic(&out_file, &emit.lua) {
-            Ok(()) => {
-                log::info!(target: "WATCH",
-                "skull {label}: {} files -> {} ({mode}, {} re-inferred; check {check_ms:.1}ms, emit {emit_ms:.1}ms)",
-                live.sources().files.len(), out_file.display(), reinferred.len());
-            }
-            Err(err) => log::error!(target: "WATCH", "skull {label}: write failed: {err}"),
+        let result = (|| -> Result<()> {
+            let root = std::path::Path::new(path);
+            let include_tests = !(root.is_dir()
+                && (RuntimeServices::registered().is_game_project)(root).unwrap_or(false));
+            let edit = if let Some(live) = &mut project {
+                Some(live.refresh_for_publication(include_tests)?)
+            } else {
+                project = Some(LiveProject::init_for_watch(path, include_tests)?);
+                None
+            };
+            let live = project.as_mut().expect("watch project initialized");
+            let reinferred: Option<&[_]> = match edit.as_ref().map(|(update, _)| update) {
+                Some(LiveUpdate::BodyOnly { reinferred, .. }) => Some(reinferred),
+                Some(LiveUpdate::NoChange) => Some(&[]),
+                _ => None,
+            };
+            let full = cache.is_none() || reinferred.is_none();
+            let count = reinferred.map_or(0, <[_]>::len);
+            let checked = Instant::now();
+            let published = write_watch_output(live, &mut cache, reinferred, &out_file);
+            let emit = if let Some((_, snapshot)) = edit {
+                live.finish_publication(snapshot, published, "watch refresh", |_| Ok(()))?
+            } else {
+                published?
+            };
+            let mode = if full { "full" } else { "incremental" };
+            let check_ms = (checked - started).as_secs_f64() * 1000.0;
+            let emit_ms = emit.as_secs_f64() * 1000.0;
+            log::info!(target: "WATCH",
+                "skull {label}: {} files -> {} ({mode}, {count} re-inferred; check {check_ms:.1}ms, emit {emit_ms:.1}ms)",
+                live.sources().files.len(), out_file.display());
+            Ok(())
+        })();
+        if let Err(error) = result {
+            cache = None;
+            log::error!(target: "WATCH", "skull {label} failed - serving last good output: {error:#}");
         }
     };
 
-    build("initial", &mut project, &mut cache);
-
+    build("initial");
     crate::run_compile_watch_loop(
         vec![std::path::PathBuf::from(path)],
         &format!("skull: watching {path} for changes"),
-        |_event| build("rebuild", &mut project, &mut cache),
+        |_| build("rebuild"),
     )
+}
+
+fn write_watch_output(
+    project: &crate::live_project::LiveProject,
+    cache: &mut Option<skull::mir_emit::SkullEmitCache>,
+    reinferred: Option<
+        &[(
+            bone_semantic::prelude::ModuleId,
+            bone_semantic::hir::BodyOwner,
+        )],
+    >,
+    path: &std::path::Path,
+) -> Result<Duration> {
+    let started = Instant::now();
+    let ws = project.workspace();
+    let emit = match (cache.as_mut(), reinferred) {
+        (Some(cache), Some(bodies)) => skull::mir_emit::emit_incremental(ws, cache, bodies),
+        _ => skull::user_module_id(ws).and_then(|mid| {
+            let (emit, next) = skull::mir_emit::emit_full(ws, mid)?;
+            *cache = Some(next);
+            Ok(emit)
+        }),
+    }
+    .map_err(|error| anyhow::anyhow!("{}", render_project_err(project.sources(), &error)))?;
+    let emit_time = started.elapsed();
+    rock_host::project::write_atomic(path, &emit.lua)?;
+    Ok(emit_time)
 }
 
 /// `rock run <file> --backend skull` — emit Lua, append a `main()` call if the
@@ -2968,31 +2908,10 @@ impl IncrementalProject {
     ) -> Result<SkullReload> {
         let (update, snapshot) = change(&mut self.project)?;
         let result = self.route_and_emit(update, main_path, incremental_path);
-        match result {
-            Ok(reload) => {
-                self.project.commit_body_transaction();
-                Ok(reload)
-            }
-            Err(error) => {
-                let restored = self.project.restore(snapshot);
-                let cache_restored = if restored.is_ok() {
-                    self.cache.rollback_body_edit(self.project.workspace())
-                } else {
-                    Ok(())
-                };
-                if let Err(restore) = restored {
-                    return Err(anyhow::anyhow!(
-                        "skull publication rollback failed after {edit}: {restore}; original error: {error}"
-                    ));
-                }
-                if let Err(restore) = cache_restored {
-                    return Err(anyhow::anyhow!(
-                        "skull cache rollback failed after {edit}: {restore}; original error: {error}"
-                    ));
-                }
-                Err(error)
-            }
-        }
+        self.project
+            .finish_publication(snapshot, result, edit, |ws| {
+                self.cache.rollback_body_edit(ws)
+            })
     }
 
     /// The current in-session text of a source (reflects prior `apply_edit`s,

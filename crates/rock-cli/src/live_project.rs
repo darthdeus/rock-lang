@@ -1,3 +1,4 @@
+use crate::lint_pass::Scope;
 use crate::{Result, SourceFiles};
 use bone_core::prelude::Instant;
 use bone_semantic::hir::BodyOwner;
@@ -5,94 +6,6 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 use rock_core::CompilerError;
 use std::path::{Path, PathBuf};
-
-pub(crate) enum LiveWatchError {
-    Discovery(anyhow::Error),
-    SourceSelection(anyhow::Error),
-    Session(SourceFiles, CompilerError),
-    Update(SourceFiles, Vec<CompilerError>),
-    Diagnostics(SourceFiles, Vec<CompilerError>),
-    Lints(SourceFiles, Vec<CompilerError>),
-}
-
-fn watch_sources(dir: &str, is_game: bool) -> std::result::Result<SourceFiles, LiveWatchError> {
-    let discovered = crate::unified_compile::discover_project_sources(Path::new(dir))
-        .map_err(LiveWatchError::Discovery)?;
-    if is_game {
-        rock_host::source_files::production_only(&discovered, Path::new(dir))
-            .map_err(|error| LiveWatchError::SourceSelection(anyhow::anyhow!(error.to_string())))
-    } else {
-        Ok(discovered)
-    }
-}
-
-#[derive(Default)]
-struct SessionChanges {
-    reinferred: Vec<(ModuleId, BodyOwner)>,
-    span_edits: Vec<skull::instance_graph::TextEditDelta>,
-    lint_changed_files: Vec<ustr::Ustr>,
-    full: bool,
-    changed: bool,
-    errors: Vec<CompilerError>,
-}
-
-#[derive(Clone, Copy)]
-enum UpdateErrorPolicy {
-    Stop,
-    Continue,
-}
-
-fn update_session(
-    session: &mut bone_incremental::session::Session,
-    feed: &[(String, String)],
-    removed: &[String],
-    policy: UpdateErrorPolicy,
-) -> SessionChanges {
-    use bone_incremental::session::UpdateTier;
-    let mut changes = SessionChanges::default();
-    for (path, text) in feed {
-        let update = match session.update_file(path, text) {
-            Ok(update) => update,
-            Err(error) => {
-                changes.errors.push(error);
-                if matches!(policy, UpdateErrorPolicy::Stop) {
-                    break;
-                }
-                continue;
-            }
-        };
-        changes.reinferred.extend(update.reinferred.iter().copied());
-        match update.tier {
-            UpdateTier::NoChange => {}
-            UpdateTier::BodyOnly => {
-                changes.changed = true;
-                changes
-                    .lint_changed_files
-                    .push(ustr::Ustr::from(path.as_str()));
-                if let Some(edit) = update.body_update.edit {
-                    changes.span_edits.push(edit);
-                }
-            }
-            UpdateTier::Interface | UpdateTier::Scope | UpdateTier::FullUser => {
-                changes.changed = true;
-                changes.full = true;
-            }
-        }
-    }
-    if changes.errors.is_empty() || matches!(policy, UpdateErrorPolicy::Continue) {
-        for path in removed {
-            changes.changed = true;
-            changes.full = true;
-            if let Err(error) = session.remove_file(path) {
-                changes.errors.push(error);
-                if matches!(policy, UpdateErrorPolicy::Stop) {
-                    break;
-                }
-            }
-        }
-    }
-    changes
-}
 
 #[derive(Debug)]
 pub enum LiveUpdate {
@@ -112,6 +25,7 @@ pub(crate) struct LiveProjectSnapshot {
     aliases: bone_incremental::session::NsAliases,
     sources: SourceFiles,
     entry_path: String,
+    include_tests: bool,
     previous_contents: Vec<(String, String)>,
 }
 
@@ -121,6 +35,7 @@ pub struct LiveProject {
     sources: SourceFiles,
     entry_path: String,
     include_tests: bool,
+    lint_scope: Scope,
     lint_cache: bone_lints::IncrementalLintCache,
 }
 
@@ -145,53 +60,43 @@ impl LiveProject {
         include_tests: bool,
         sources: SourceFiles,
     ) -> Result<Self> {
-        let entry = entry_path(&sources)?;
-        let mut project =
-            Self::create(dir, include_tests, sources, entry).map_err(|(sources, error)| {
-                anyhow::anyhow!(
-                    "{}",
-                    crate::skull_backend::render_project_err(&sources, &error)
-                )
-            })?;
+        let scope = if include_tests {
+            Scope::WholeProject
+        } else {
+            Scope::ProductionOnly
+        };
+        Self::checked(dir, include_tests, sources, scope)
+    }
+
+    pub(crate) fn init_for_watch(dir: &str, include_tests: bool) -> Result<Self> {
+        Self::checked(
+            dir,
+            include_tests,
+            project_sources(dir, include_tests)?,
+            Scope::WholeProject,
+        )
+    }
+
+    fn checked(
+        dir: &str,
+        include_tests: bool,
+        sources: SourceFiles,
+        lint_scope: Scope,
+    ) -> Result<Self> {
+        let mut project = Self {
+            entry_path: entry_path(&sources)?,
+            session: new_session(dir, &sources)?,
+            dir: dir.to_string(),
+            sources,
+            include_tests,
+            lint_scope,
+            lint_cache: Default::default(),
+        };
         project.verdict("in initial build")?;
         Ok(project)
     }
 
-    pub(crate) fn init_for_watch(
-        dir: &str,
-        is_game: bool,
-    ) -> std::result::Result<Self, LiveWatchError> {
-        let sources = watch_sources(dir, is_game)?;
-        let entry = entry_path(&sources).unwrap_or_default();
-        Self::create(dir, !is_game, sources, entry)
-            .map_err(|(sources, error)| LiveWatchError::Session(sources, error))
-    }
-
-    fn create(
-        dir: &str,
-        include_tests: bool,
-        sources: SourceFiles,
-        entry_path: String,
-    ) -> std::result::Result<Self, (SourceFiles, CompilerError)> {
-        // Build-var commands run only when constructing or rebuilding the session.
-        let session = match crate::bone_backend::bone_session_for_emission(
-            crate::bone_backend::session_files(&sources),
-            Path::new(dir),
-        ) {
-            Ok(session) => session,
-            Err(error) => return Err((sources, error)),
-        };
-        Ok(Self {
-            session,
-            dir: dir.to_string(),
-            sources,
-            entry_path,
-            include_tests,
-            lint_cache: Default::default(),
-        })
-    }
-
-    pub(crate) fn snapshot(&mut self, changed: &[PathBuf]) -> LiveProjectSnapshot {
+    fn snapshot(&mut self, changed: &[PathBuf]) -> LiveProjectSnapshot {
         let mut previous_contents = Vec::new();
         for path in changed {
             let Ok(canonical) = std::fs::canonicalize(path) else {
@@ -216,13 +121,15 @@ impl LiveProject {
             aliases: self.session.aliases.clone(),
             sources: self.sources.clone(),
             entry_path: self.entry_path.clone(),
+            include_tests: self.include_tests,
             previous_contents,
         }
     }
 
-    pub(crate) fn restore(&mut self, snapshot: LiveProjectSnapshot) -> Result<()> {
+    fn restore(&mut self, snapshot: LiveProjectSnapshot) -> Result<()> {
         self.sources = snapshot.sources;
         self.entry_path = snapshot.entry_path;
+        self.include_tests = snapshot.include_tests;
         for (id, contents) in snapshot.previous_contents {
             if let Some(source) = self
                 .sources
@@ -252,11 +159,7 @@ impl LiveProject {
             self.session.workspace(),
             &self.sources,
             Path::new(&self.dir),
-            if self.include_tests {
-                crate::lint_pass::Scope::WholeProject
-            } else {
-                crate::lint_pass::Scope::ProductionOnly
-            },
+            self.lint_scope,
         )
         .map_err(|error| anyhow::anyhow!("lint-cache rollback failed: {error}"))?;
         self.verdict_with_change(
@@ -265,8 +168,32 @@ impl LiveProject {
         )
     }
 
-    pub(crate) fn commit_body_transaction(&mut self) {
-        self.lint_cache.commit_body_transaction();
+    pub(crate) fn finish_publication<T>(
+        &mut self,
+        snapshot: LiveProjectSnapshot,
+        result: Result<T>,
+        edit: &str,
+        restore_cache: impl FnOnce(&Workspace) -> std::result::Result<(), CompilerError>,
+    ) -> Result<T> {
+        match result {
+            Ok(output) => {
+                self.lint_cache.commit_body_transaction();
+                Ok(output)
+            }
+            Err(error) => {
+                self.restore(snapshot).map_err(|restore| {
+                    anyhow::anyhow!(
+                        "skull publication rollback failed after {edit}: {restore}; original error: {error}"
+                    )
+                })?;
+                restore_cache(self.workspace()).map_err(|restore| {
+                    anyhow::anyhow!(
+                        "skull cache rollback failed after {edit}: {restore}; original error: {error}"
+                    )
+                })?;
+                Err(error)
+            }
+        }
     }
 
     #[cfg(test)]
@@ -284,46 +211,27 @@ impl LiveProject {
         })
     }
 
-    pub(crate) fn recompile_for_watch(
+    /// A directory watch rescans the sources, including their package facts.
+    pub(crate) fn refresh_for_publication(
         &mut self,
-        is_game: bool,
-    ) -> std::result::Result<(bool, Vec<(ModuleId, BodyOwner)>), LiveWatchError> {
-        self.include_tests = !is_game;
-        self.sources = watch_sources(&self.dir, is_game)?;
-        self.entry_path = entry_path(&self.sources).unwrap_or_default();
-        let files = crate::bone_backend::session_files(&self.sources);
-        let tracked = self.session.tracked_paths();
-        let removed = tracked
-            .into_iter()
-            .filter(|path| !files.iter().any(|file| file.path == *path))
-            .map(|path| path.to_string())
-            .collect::<Vec<_>>();
-        let feed = files
-            .into_iter()
-            .map(|file| (file.path, file.text))
-            .collect::<Vec<_>>();
-        let changes = update_session(
-            &mut self.session,
-            &feed,
-            &removed,
-            UpdateErrorPolicy::Continue,
-        );
-        if !changes.errors.is_empty() {
-            return Err(LiveWatchError::Update(self.sources.clone(), changes.errors));
-        }
-        self.watch_verdict()?;
-        Ok((changes.full, changes.reinferred))
-    }
-
-    pub(crate) fn watch_verdict(&mut self) -> std::result::Result<(), LiveWatchError> {
-        let (lint, errors) = self.build_errors(crate::lint_pass::Scope::WholeProject, None);
-        if errors.is_empty() {
-            Ok(())
-        } else if lint {
-            Err(LiveWatchError::Lints(self.sources.clone(), errors))
+        include_tests: bool,
+    ) -> Result<(LiveUpdate, LiveProjectSnapshot)> {
+        let started = Instant::now();
+        let sources = project_sources(&self.dir, include_tests)?;
+        let feed = if include_tests == self.include_tests {
+            changed_texts(&self.sources, &sources)
         } else {
-            Err(LiveWatchError::Diagnostics(self.sources.clone(), errors))
-        }
+            None
+        };
+        self.transaction(&[], "watch refresh", |project| {
+            project.include_tests = include_tests;
+            if let Some(feed) = feed {
+                project.sources = sources;
+                project.update(&feed, started)
+            } else {
+                project.rebuild(sources, started)
+            }
+        })
     }
 
     /// Run `change` against a snapshot of `touched`, restoring the snapshot
@@ -378,11 +286,8 @@ impl LiveProject {
             }
         }
         if need_full {
-            self.rediscover()?;
-            self.rebuild_session()?;
-            return Ok(LiveUpdate::Full {
-                cook_ms: started.elapsed().as_secs_f64() * 1000.0,
-            });
+            let sources = project_sources(&self.dir, self.include_tests)?;
+            return self.rebuild(sources, started);
         }
         self.update(&feed, started)
     }
@@ -461,93 +366,68 @@ impl LiveProject {
         context: &str,
         change: &bone_lints::LintCacheUpdate,
     ) -> Result<()> {
-        let scope = if self.include_tests {
-            crate::lint_pass::Scope::WholeProject
+        let mut errors = self.session.diagnostics();
+        let kind = if errors.is_empty() {
+            errors = crate::lint_pass::run_build_lints_cached(
+                &mut self.lint_cache,
+                self.session.workspace(),
+                &self.sources,
+                Path::new(&self.dir),
+                self.lint_scope,
+                change,
+            );
+            "lint"
         } else {
-            crate::lint_pass::Scope::ProductionOnly
+            "type"
         };
-        let (lint, errors) = self.build_errors(scope, Some(change));
+        if errors.is_empty() {
+            return Ok(());
+        }
         for error in &errors {
             eprintln!(
                 "{}",
                 crate::skull_backend::render_project_err(&self.sources, error)
             );
         }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            let kind = if lint { "lint" } else { "type" };
-            anyhow::bail!("skull: {} {kind} error(s) {context}", errors.len())
-        }
+        anyhow::bail!("skull: {} {kind} error(s) {context}", errors.len())
     }
 
-    fn build_errors(
-        &mut self,
-        scope: crate::lint_pass::Scope,
-        change: Option<&bone_lints::LintCacheUpdate>,
-    ) -> (bool, Vec<CompilerError>) {
-        let errors = self.session.diagnostics();
-        if !errors.is_empty() {
-            return (false, errors);
-        }
-        let errors = match change {
-            Some(change) => crate::lint_pass::run_build_lints_cached(
-                &mut self.lint_cache,
-                self.session.workspace(),
-                &self.sources,
-                Path::new(&self.dir),
-                scope,
-                change,
-            ),
-            None => crate::lint_pass::run_build_lints(
-                self.session.workspace(),
-                &self.sources,
-                Path::new(&self.dir),
-                scope,
-            ),
-        };
-        (true, errors)
-    }
-
-    fn rediscover(&mut self) -> Result<()> {
-        let sources = project_sources(&self.dir, self.include_tests)?;
-        let entry_path = entry_path(&sources)?;
+    fn rebuild(&mut self, sources: SourceFiles, started: Instant) -> Result<LiveUpdate> {
+        self.entry_path = entry_path(&sources)?;
         self.sources = sources;
-        self.entry_path = entry_path;
-        Ok(())
-    }
-
-    fn rebuild_session(&mut self) -> Result<()> {
         self.lint_cache.clear();
-        self.session = crate::bone_backend::bone_session_for_emission(
-            crate::bone_backend::session_files(&self.sources),
-            Path::new(&self.dir),
-        )
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "{}",
-                crate::skull_backend::render_project_err(&self.sources, &error)
-            )
-        })?;
-        self.verdict("- serving last good output")
+        self.session = new_session(&self.dir, &self.sources)?;
+        self.verdict("during rebuild")?;
+        Ok(LiveUpdate::Full {
+            cook_ms: started.elapsed().as_secs_f64() * 1000.0,
+        })
     }
 
     fn update(&mut self, feed: &[(String, String)], started: Instant) -> Result<LiveUpdate> {
-        let changes = update_session(&mut self.session, feed, &[], UpdateErrorPolicy::Stop);
-        if let Some(error) = changes.errors.first() {
-            return Err(anyhow::anyhow!(
-                "{}",
-                crate::skull_backend::render_project_err(&self.sources, error)
-            ));
+        use bone_incremental::session::UpdateTier;
+        let mut reinferred = Vec::new();
+        let mut span_edits = Vec::new();
+        let mut lint_changed_files = Vec::new();
+        let mut full = false;
+        let mut changed = false;
+        for (path, text) in feed {
+            let update = self.session.update_file(path, text).map_err(|error| {
+                anyhow::anyhow!(
+                    "{}",
+                    crate::skull_backend::render_project_err(&self.sources, &error)
+                )
+            })?;
+            reinferred.extend(update.reinferred.iter().copied());
+            match update.tier {
+                UpdateTier::NoChange => continue,
+                UpdateTier::BodyOnly => {
+                    lint_changed_files.push(ustr::Ustr::from(path.as_str()));
+                    span_edits.extend(update.body_update.edit);
+                }
+                UpdateTier::Interface | UpdateTier::Scope | UpdateTier::FullUser => full = true,
+            }
+            changed = true;
         }
-        let SessionChanges {
-            reinferred,
-            span_edits,
-            lint_changed_files,
-            mut full,
-            changed,
-            ..
-        } = changes;
         if changed
             && !self
                 .session
@@ -592,7 +472,7 @@ impl LiveProject {
         if changed && !full {
             self.lint_cache.begin_body_transaction(&lint_change);
         }
-        self.verdict_with_change("- serving last good output", &lint_change)?;
+        self.verdict_with_change("during rebuild", &lint_change)?;
         if !changed {
             return Ok(LiveUpdate::NoChange);
         }
@@ -607,6 +487,44 @@ impl LiveProject {
             })
         }
     }
+}
+
+fn new_session(dir: &str, sources: &SourceFiles) -> Result<bone_incremental::session::Session> {
+    crate::bone_backend::bone_session_for_emission(
+        crate::bone_backend::session_files(sources),
+        Path::new(dir),
+    )
+    .map_err(|error| {
+        anyhow::anyhow!(
+            "{}",
+            crate::skull_backend::render_project_err(sources, &error)
+        )
+    })
+}
+
+/// A change to file membership or package facts requires a new session.
+fn changed_texts(before: &SourceFiles, after: &SourceFiles) -> Option<Vec<(String, String)>> {
+    if before.package_roots != after.package_roots
+        || before.ns_aliases != after.ns_aliases
+        || before.files.len() != after.files.len()
+    {
+        return None;
+    }
+    let mut feed = Vec::new();
+    for (before, after) in before.files.iter().zip(&after.files) {
+        let before = before.borrow();
+        let after = after.borrow();
+        if before.file != after.file
+            || before.package != after.package
+            || before.global_policy != after.global_policy
+        {
+            return None;
+        }
+        if before.contents != after.contents {
+            feed.push((after.file.to_id_path(), after.contents.clone()));
+        }
+    }
+    Some(feed)
 }
 
 fn entry_path(sources: &SourceFiles) -> Result<String> {
