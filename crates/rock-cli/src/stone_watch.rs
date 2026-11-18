@@ -18,9 +18,7 @@ fn reexec_with_new_binary(game_process: &mut Option<BoundChild>) {
 
 #[derive(Default)]
 struct StoneChanges {
-    needs_libstone_rebuild: bool,
     needs_native_rebuild: bool,
-    needs_compiler_rebuild: bool,
     sound_dirty: bool,
     changed_libstone: Vec<String>,
     changed_compiler: Vec<String>,
@@ -60,10 +58,8 @@ fn categorize_stone_changes(
         }
         let is_engine_crate = path_str.contains("stone-rs/");
         if is_engine_crate {
-            changes.needs_libstone_rebuild = true;
             changes.changed_libstone.push(filename);
         } else if is_compiler_source(path) {
-            changes.needs_compiler_rebuild = true;
             changes.changed_compiler.push(filename);
         } else if path_str.ends_with(".rock") {
             changes.changed_paths.insert(path.clone());
@@ -467,7 +463,7 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
             }
         }
 
-        if changes.needs_libstone_rebuild {
+        if !changed_libstone.is_empty() {
             info!("Rebuilding stone-rs...");
             match rock_engine_host::engine_build::build_engine_libs(path) {
                 Ok(_) => {
@@ -483,7 +479,7 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
             }
         }
 
-        if changes.needs_compiler_rebuild {
+        if !changed_compiler.is_empty() {
             info!("Rebuilding compiler...");
             match crate::compiler_watch::build_compiler() {
                 Ok(_) => {
@@ -570,48 +566,29 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
         // after publication ends, before any child replacement can occur.
         wait_for_reload_resume(&reload_control)?;
 
-        // If game hasn't been started yet and compilation just succeeded, start it now
-        if game_process.is_none() && compilation_succeeded {
-            // A crashed/never-started process loads `main.lua` only -- fold any
-            // overlay / deferred shape write in first, same as a restart.
-            if let Err(e) = compiler.canonicalize_for_restart() {
-                error!(
-                    "fold before start failed: {} (start may load a stale main.lua)",
-                    e
-                );
-            }
-            let artifact_fingerprint = compiler.artifact_fingerprint()?;
-            info!("First successful compilation! Starting game...");
-            let build_id = artifact_fingerprint;
-            game_process = Some(start_game_process(&output_path, app_args, &build_id)?);
-            info!("Game started successfully");
-        }
-        // Restart the game process if a rebuild actually produced new
-        // artifacts (or the user manually triggered) and the game is up.
-        else if should_restart {
-            if let Some(process) = game_process.take() {
-                // Kill FIRST: a shape-changed compile deferred its main.lua
-                // write precisely so the old process never hot-reloads the
-                // new-shape program -- the canonicalize below is what writes
-                // it. (For plain restarts the fold is idempotent; a dead
-                // process cannot race the write either way.) A restart
-                // re-spawns luajit, which loads `main.lua` only -- it does NOT
-                // dual-load any accumulated overlay, so the fold must run
-                // before the new process starts.
+        let restarting = should_restart && game_process.is_some();
+        if restarting || (game_process.is_none() && compilation_succeeded) {
+            if restarting {
+                // The old process must be gone before the fold publishes a
+                // deferred shape change it cannot hot-reload.
                 info!("Restarting game process...");
-                drop(process);
-                if let Err(e) = compiler.canonicalize_for_restart() {
-                    error!(
-                        "fold before restart failed: {} (restart may load a stale main.lua)",
-                        e
-                    );
-                }
-                game_process = Some(start_game_process(
-                    &output_path,
-                    app_args,
-                    &compiler.artifact_fingerprint()?,
-                )?);
+                drop(game_process.take());
+            }
+            // A fresh process loads main.lua only, so fold any overlay or
+            // deferred write into it before launching.
+            if let Err(e) = compiler.canonicalize_for_restart() {
+                let action = if restarting { "restart" } else { "start" };
+                error!("fold before {action} failed: {e} ({action} may load a stale main.lua)");
+            }
+            let build_id = compiler.artifact_fingerprint()?;
+            if !restarting {
+                info!("First successful compilation! Starting game...");
+            }
+            game_process = Some(start_game_process(&output_path, app_args, &build_id)?);
+            if restarting {
                 info!("Game process restarted");
+            } else {
+                info!("Game started successfully");
             }
         } else if has_game_changes && game_process.is_some() {
             debug!("Game will hot reload automatically");
@@ -1017,7 +994,7 @@ mod watch_reload_tests {
                 "Stone dropped source edit: {:?}",
                 event.paths
             );
-            assert!(!changes.needs_compiler_rebuild && !changes.needs_libstone_rebuild);
+            assert!(changes.changed_compiler.is_empty() && changes.changed_libstone.is_empty());
             let outcome = self
                 .compiler
                 .compile(&changes.changed_paths, false)
@@ -1226,7 +1203,7 @@ mod watch_reload_tests {
                 );
                 assert!(changes.sound_dirty);
                 assert!(changes.changed_paths.is_empty());
-                assert!(!changes.needs_compiler_rebuild && !changes.needs_libstone_rebuild);
+                assert!(changes.changed_compiler.is_empty() && changes.changed_libstone.is_empty());
                 break;
             }
         }
