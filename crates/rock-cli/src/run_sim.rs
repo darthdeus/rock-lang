@@ -1,6 +1,6 @@
 //! Run Stone's @sim coroutines in fresh processes and read their __SIM__ stderr events.
 
-use crate::sim_observability::SimRunRecorder;
+use crate::sim_observability::{FrameTiming, SimRunRecorder};
 use crate::skull_backend::{IncrementalProject, collect_sim_descriptors};
 use anyhow::{Context, Result, anyhow};
 use colored::Colorize;
@@ -3187,78 +3187,6 @@ struct WorkerPart {
     source_file: Option<PathBuf>,
 }
 
-/// Keep timing optional so older entry journals remain readable.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct EntryFrameTiming {
-    frames: usize,
-    draw_frames: usize,
-    submitted_frames: usize,
-    logic_us: u64,
-    render_cpu_us: u64,
-    present_us: u64,
-}
-
-impl EntryFrameTiming {
-    fn from_value(
-        value: &serde_json::Value,
-        frame_count: Option<usize>,
-        line: &str,
-    ) -> Result<Self> {
-        let number = |name: &str| -> Result<u64> {
-            value
-                .get(name)
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "entry frame timing field `{name}` is not a nonnegative integer: {line}"
-                    )
-                })
-        };
-        let frames = usize::try_from(number("frames")?)
-            .map_err(|_| anyhow!("entry frame timing frames do not fit usize: {line}"))?;
-        let draw_frames = usize::try_from(number("draw_frames")?)
-            .map_err(|_| anyhow!("entry frame timing draw_frames do not fit usize: {line}"))?;
-        let submitted_frames = usize::try_from(number("submitted_frames")?)
-            .map_err(|_| anyhow!("entry frame timing submitted_frames do not fit usize: {line}"))?;
-        if let Some(frame_count) = frame_count {
-            if frames != frame_count {
-                return Err(anyhow!(
-                    "entry frame timing frames={frames} disagrees with frame_count={frame_count}: {line}"
-                ));
-            }
-        }
-        if draw_frames > frames {
-            return Err(anyhow!(
-                "entry frame timing draw_frames={draw_frames} exceeds frames={frames}: {line}"
-            ));
-        }
-        if submitted_frames > draw_frames {
-            return Err(anyhow!(
-                "entry frame timing submitted_frames={submitted_frames} exceeds draw_frames={draw_frames}: {line}"
-            ));
-        }
-        Ok(Self {
-            frames,
-            draw_frames,
-            submitted_frames,
-            logic_us: number("logic_us")?,
-            render_cpu_us: number("render_cpu_us")?,
-            present_us: number("present_us")?,
-        })
-    }
-
-    fn value(self) -> serde_json::Value {
-        serde_json::json!({
-            "frames": self.frames,
-            "draw_frames": self.draw_frames,
-            "submitted_frames": self.submitted_frames,
-            "logic_us": self.logic_us,
-            "render_cpu_us": self.render_cpu_us,
-            "present_us": self.present_us,
-        })
-    }
-}
-
 /// Interpret stderr as it arrives. A protocol error permanently closes the
 /// boundary channel, while live diagnostics and reload messages still drain.
 struct EntryStream {
@@ -3274,7 +3202,7 @@ struct EntryStream {
 
 enum EntryBoundary {
     Started,
-    Ended(Option<usize>, Option<EntryFrameTiming>),
+    Ended(Option<usize>, Option<FrameTiming>),
 }
 
 struct EntryLine<'a> {
@@ -3432,11 +3360,11 @@ fn envelope_frame_timing(
     rest: &serde_json::Value,
     frame_count: Option<usize>,
     line: &str,
-) -> Result<Option<EntryFrameTiming>> {
+) -> Result<Option<FrameTiming>> {
     let Some(value) = rest.get("frame_timing") else {
         return Ok(None);
     };
-    EntryFrameTiming::from_value(value, frame_count, line).map(Some)
+    FrameTiming::from_child_value(value, frame_count, line).map(Some)
 }
 
 fn envelope_name_matches(rest: &serde_json::Value, expected: &str, line: &str) -> Result<()> {
@@ -3700,7 +3628,7 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
                                     occurrence_id,
                                     &name,
                                     *frame_count,
-                                    frame_timing.map(EntryFrameTiming::value),
+                                    *frame_timing,
                                 );
                             }
                             _ => {}

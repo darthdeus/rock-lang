@@ -901,7 +901,7 @@ fn entry_frame_timing_is_validated_and_retained() {
         stream.observe(&valid, |_| {}).boundary,
         Some(EntryBoundary::Ended(
             Some(3),
-            Some(EntryFrameTiming {
+            Some(FrameTiming {
                 frames: 3,
                 draw_frames: 2,
                 submitted_frames: 1,
@@ -917,6 +917,7 @@ fn entry_frame_timing_is_validated_and_retained() {
         r#"{"frames":3,"draw_frames":4,"submitted_frames":1,"logic_us":10,"render_cpu_us":20,"present_us":30}"#,
         r#"{"frames":2,"draw_frames":2,"submitted_frames":1,"logic_us":10,"render_cpu_us":20,"present_us":30}"#,
         r#"{"frames":3,"draw_frames":2,"submitted_frames":1,"logic_us":-1,"render_cpu_us":20,"present_us":30}"#,
+        r#"[3,2,1,10,20,30]"#,
     ] {
         let stream = entry_stream("a", [start("a"), end_with_frame_timing("a", 3, timing)]);
         assert!(

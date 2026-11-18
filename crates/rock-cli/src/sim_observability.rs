@@ -6,6 +6,7 @@
 //! never change the sim result.
 
 use rock_core::clock::Instant;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
@@ -19,6 +20,89 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod timing;
 
 const SCHEMA_VERSION: u64 = 1;
+
+/// Frame counters and phase times shared by the child marker, retained event,
+/// and report reader. The report accepts only values representable by its
+/// signed totals; the live protocol retains the runner's wider unsigned range.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) struct FrameTiming {
+    pub(crate) frames: u64,
+    pub(crate) draw_frames: u64,
+    pub(crate) submitted_frames: u64,
+    pub(crate) logic_us: u64,
+    pub(crate) render_cpu_us: u64,
+    pub(crate) present_us: u64,
+}
+
+impl FrameTiming {
+    pub(crate) fn validate(&self, frame_count: Option<u64>) -> anyhow::Result<()> {
+        if let Some(frame_count) = frame_count
+            && self.frames != frame_count
+        {
+            anyhow::bail!(
+                "frames={} disagrees with frame_count={frame_count}",
+                self.frames
+            );
+        }
+        if self.draw_frames > self.frames {
+            anyhow::bail!(
+                "draw_frames={} exceeds frames={}",
+                self.draw_frames,
+                self.frames
+            );
+        }
+        if self.submitted_frames > self.draw_frames {
+            anyhow::bail!(
+                "submitted_frames={} exceeds draw_frames={}",
+                self.submitted_frames,
+                self.draw_frames
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn fits_report_totals(&self) -> bool {
+        [
+            self.frames,
+            self.draw_frames,
+            self.submitted_frames,
+            self.logic_us,
+            self.render_cpu_us,
+            self.present_us,
+        ]
+        .iter()
+        .all(|value| *value <= i64::MAX as u64)
+    }
+
+    pub(crate) fn from_child_value(
+        value: &Value,
+        frame_count: Option<usize>,
+        line: &str,
+    ) -> anyhow::Result<Self> {
+        if !value.is_object() {
+            anyhow::bail!("invalid entry frame timing object: {line}");
+        }
+        let timing = Self::deserialize(value)
+            .map_err(|error| anyhow::anyhow!("invalid entry frame timing ({error}): {line}"))?;
+        for (name, value) in [
+            ("frames", timing.frames),
+            ("draw_frames", timing.draw_frames),
+            ("submitted_frames", timing.submitted_frames),
+        ] {
+            usize::try_from(value).map_err(|_| {
+                anyhow::anyhow!("entry frame timing {name} do not fit usize: {line}")
+            })?;
+        }
+        let frame_count = frame_count
+            .map(u64::try_from)
+            .transpose()
+            .map_err(|_| anyhow::anyhow!("entry frame_count does not fit u64: {line}"))?;
+        timing
+            .validate(frame_count)
+            .map_err(|error| anyhow::anyhow!("entry frame timing {error}: {line}"))?;
+        Ok(timing)
+    }
+}
 
 /// The history root: the explicit flag, then `ROCK_SIM_LOG_DIR`, then
 /// `.sim-runs`, shared by the recorder and report reader.
@@ -327,7 +411,7 @@ impl SimRunRecorder {
         occurrence_id: u64,
         name: &str,
         frame_count: Option<usize>,
-        frame_timing: Option<Value>,
+        frame_timing: Option<FrameTiming>,
     ) {
         self.event(
             "entry_end",
