@@ -241,7 +241,7 @@ pub fn store_at_cap(rgba: Vec<u8>, width: u32, height: u32) -> Option<Vec<u8>> {
 /// Format-generic (png/bmp/jpeg) so it cannot drift from what `image` accepts.
 pub fn probe_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     if data.starts_with(b"DDS ") {
-        return stone_texture::bc1_dimensions(data);
+        return stone_texture::dimensions(data);
     }
     image::ImageReader::new(Cursor::new(data))
         .with_guessed_format()
@@ -292,11 +292,11 @@ pub(crate) fn submit(
             }
         };
         let pixels = data.and_then(|mut data| {
-            if format != crate::image_texture::ImageFormat::Bc1 {
+            let Some(block_format) = format.blocks() else {
                 return decode_rgba_bytes(&data, &path);
-            }
-            let Some(((w, h), _)) = stone_texture::bc1_blocks(&data) else {
-                crate::log_once!("IMAGE", "invalid BC1 DDS payload: {}", path);
+            };
+            let Some(((w, h), _)) = block_format.blocks(&data) else {
+                crate::log_once!("IMAGE", "invalid DDS block payload: {}", path);
                 return None;
             };
             data.drain(..stone_texture::HEADER_LEN);
@@ -319,7 +319,7 @@ pub(crate) fn submit(
             // pays a pass over the full-size pixels -- mag's bank is 3.2 GB.
             Some((rgba, width, height)) => {
                 let stored = storage_dims(exact_texels, width, height);
-                let pixels = if format == crate::image_texture::ImageFormat::Bc1 {
+                let pixels = if format.blocks().is_some() {
                     Some(rgba)
                 } else {
                     store_at_storage(exact_texels, rgba, width, height)

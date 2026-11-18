@@ -1,7 +1,7 @@
 use rock_visual_bank::{
-    AnimationLine, BANK_FILE_NAME, Camera, DIRECTION_COUNT, JointTrackSet, Line, RELIGHT_CHANNELS,
-    SHEET_GEOMETRY, SheetGeometry, SurfaceLine, check_line, check_polygon, finite_point,
-    is_sheet_dir, mask_file, validate_floor_texture,
+    check_line, check_polygon, finite_point, is_sheet_dir, mask_file, validate_floor_texture,
+    AnimationLine, Camera, JointTrackSet, Line, SheetGeometry, SurfaceLine, BANK_FILE_NAME,
+    DIRECTION_COUNT, RELIGHT_CHANNELS, SHEET_GEOMETRY,
 };
 
 #[test]
@@ -29,6 +29,7 @@ fn producer_can_share_bank_schema_and_validation() {
 
     let mut line = Line::Animation(AnimationLine {
         albedo_bc1: false,
+        material_bc5: false,
         character: "person".into(),
         label: "idle".into(),
         dir: "0".repeat(64),

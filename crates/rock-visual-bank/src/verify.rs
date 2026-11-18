@@ -1,4 +1,4 @@
-use crate::{DIRECTION_COUNT, Line, SHEET_GEOMETRY, SheetGeometry, sheet_files};
+use crate::{sheet_files, Line, SheetGeometry, DIRECTION_COUNT, SHEET_GEOMETRY};
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -80,10 +80,15 @@ pub fn check_sheet(dir: &Path, spec: &SheetSpec) -> std::result::Result<String, 
                 )),
                 Err(error) => problems.push(format!("decoding {}: {error}", path.display())),
             }
-        } else if name == "albedo.dds" {
-            if stone_texture::bc1_blocks(&bytes).map(|((w, h), _)| [w, h]) != Some(spec.png_size) {
+        } else if name.ends_with(".dds") {
+            let format = if name.ends_with(".bc5.dds") {
+                stone_texture::BlockFormat::Bc5
+            } else {
+                stone_texture::BlockFormat::Bc1
+            };
+            if format.blocks(&bytes).map(|((w, h), _)| [w, h]) != Some(spec.png_size) {
                 problems.push(format!(
-                    "{}: invalid BC1 DDS for {:?}",
+                    "{}: invalid {format:?} DDS for {:?}",
                     path.display(),
                     spec.png_size
                 ));

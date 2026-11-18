@@ -119,12 +119,12 @@ impl DebugGl {
     }
 
     /// # Safety
-    /// Requires the active texture binding, a valid extent and complete BC1 blocks.
-    pub unsafe fn upload_bc1(&self, width: i32, height: i32, blocks: &[u8]) {
+    /// Requires the active texture binding, a valid extent and complete blocks of the selected format.
+    pub unsafe fn upload_compressed(&self, internal: u32, width: i32, height: i32, blocks: &[u8]) {
         self.gl.compressed_tex_image_2d(
             glow::TEXTURE_2D,
             0,
-            glow::COMPRESSED_RGBA_S3TC_DXT1_EXT as i32,
+            internal as i32,
             width,
             height,
             0,

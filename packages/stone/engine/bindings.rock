@@ -248,7 +248,7 @@ pub fn new_image_from_data(data: ImageData, sampling: TextureFilter = TextureFil
 // than sampled as colour, which withholds `STONE_IMAGE_MAX_SIDE` from it.
 // `deferred` lets the frame's flush skip this decode; it publishes through the
 // budgeted pump (`image_load_ready`).
-pub enum ImageAssetFormat { Rgba8, DepthRg8, R8, MaterialRg8, Bc1 }
+pub enum ImageAssetFormat { Rgba8, DepthRg8, R8, MaterialRg8, Bc1, Bc5 }
 
 pub fn load_image_handle(resolved: string, sampling: TextureFilter, exact_texels: bool = false,
     deferred: bool = false, format: ImageAssetFormat = ImageAssetFormat::Rgba8,
@@ -257,6 +257,10 @@ pub fn load_image_handle(resolved: string, sampling: TextureFilter, exact_texels
         + (if deferred { IMAGE_LOAD_DEFERRED } else { 0 })
         + (if format == ImageAssetFormat::DepthRg8 { IMAGE_LOAD_DEPTH_RG8 } else { 0 })
         + (if format == ImageAssetFormat::MaterialRg8 { IMAGE_LOAD_MATERIAL_RG8 } else { 0 })
+    if format == ImageAssetFormat::Bc5 && !resolved.ends_with(".bc5.dds") {
+        log_error("IMAGE", "BC5 storage requires a .bc5.dds asset: {resolved}")
+        return 0
+    }
     if format == ImageAssetFormat::Bc1 && !resolved.ends_with(".dds") {
         log_error("IMAGE", "BC1 storage requires a DDS asset: {resolved}")
         return 0
@@ -532,6 +536,7 @@ pub fn image_storage_format(image: Image) -> ImageAssetFormat {
         2 => ImageAssetFormat::R8,
         3 => ImageAssetFormat::MaterialRg8,
         4 => ImageAssetFormat::Bc1,
+        5 => ImageAssetFormat::Bc5,
         _ => {
             error("image_storage_format: unknown native image handle {image.0}")
             // error raises at runtime; the value only completes the match type.

@@ -410,11 +410,13 @@ pub fn residency_image_bytes(path: string, format: ImageAssetFormat = ImageAsset
     logical_size: IVec2? = null) -> int {
     if let image = image_asset_cached(path, format) { return residency_live_bytes(image) }
     let size = logical_size ?? stone_probe_image_size(asset_path(path)) ?? return 0
-    if image_file_storage_format(path, format) == ImageAssetFormat::Bc1 {
-        return ((size.x + 3) ./ 4) * ((size.y + 3) ./ 4) * 8
+    let stored = image_file_storage_format(path, format)
+    if stored == ImageAssetFormat::Bc1 || stored == ImageAssetFormat::Bc5 {
+        return ((size.x + 3) ./ 4) * ((size.y + 3) ./ 4) * (if stored == ImageAssetFormat::Bc1 { 8 } else { 16 })
     }
     let bpp = match format {
         ImageAssetFormat::Bc1 => 0,
+        ImageAssetFormat::Bc5 => 0,
         ImageAssetFormat::Rgba8 => 4,
         ImageAssetFormat::DepthRg8 => 2,
         ImageAssetFormat::R8 => 1,
