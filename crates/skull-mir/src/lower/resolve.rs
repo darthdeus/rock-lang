@@ -475,9 +475,7 @@ impl<'a> Builder<'a> {
         else {
             return Ok(ValueRepr::Scalar(base));
         };
-        let slots = (0..shape.slot_count(self.scx.rep_arena()))
-            .map(|index| self.emit_cur(Inst::TupleIndex { base, index }))
-            .collect::<Vec<_>>();
+        let slots = self.flat_box_slots(base, shape.slot_count(self.scx.rep_arena()));
         Ok(self.tuple_from_slots(&shape, &slots, &mut 0))
     }
 
@@ -885,9 +883,7 @@ impl<'a> Builder<'a> {
             _ if tuple_box_shape.is_some() => {
                 let shape = tuple_box_shape.expect("guard matched");
                 let base = self.lower_expr(e)?;
-                let slots: Vec<Idx<Inst>> = (0..shape.slot_count(self.scx.rep_arena()))
-                    .map(|i| self.emit_cur(Inst::TupleIndex { base, index: i }))
-                    .collect();
+                let slots = self.flat_box_slots(base, shape.slot_count(self.scx.rep_arena()));
                 let mut idx = 0;
                 Ok(self.tuple_from_slots(&shape, &slots, &mut idx))
             }

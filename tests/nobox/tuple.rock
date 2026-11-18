@@ -427,6 +427,50 @@ fn nested_generic_payloads_rebuild_per_level() {
 
 // ======== Whole-tuple BINDINGS, defaults and sorting ========
 
+// A name bound to a whole boxed tuple holds its slots, whatever produced the
+// box: an index read, a loop element or pair, a coroutine's resume, a payload.
+@test(output = "1 10\n1 10\n0 1\n7 2\n3 30\n4 40")
+fn a_name_binds_a_boxed_tuple() {
+    let xs = [lmake(1.0)]
+    match xs[0] {
+        t => print("{t.0.x as int} {t.1}"),
+    }
+    for t in xs {
+        let show = () => "{t.0.x as int} {t.1}"
+        print(show())
+    }
+    for pair in enumerate(xs) { print("{pair.0} {pair.1.0.x as int}") }
+    let m = map_new<int, (LP, int)>()
+    m.insert(7, lmake(2.0))
+    for entry in m { print("{entry.0} {entry.1.0.x as int}") }
+    let c = lyield(3.0)
+    if let t = c.resume() { print("{t.0.x as int} {t.1}") }
+    match MyOpt::Got(lmake(4.0)) {
+        MyOpt::Got(t) => print("{t.0.x as int} {t.1}"),
+        MyOpt::Nope => print("nope"),
+    }
+}
+
+co fn lyield(k: float) -> Coroutine<(LP, int)> { yield lmake(k) }
+
+// The same holds for a nested tuple, whichever source it comes from.
+@test(output = "1 10 5\n2 20 5\n3 30 5\n4 40")
+fn every_source_binds_a_whole_nested_tuple() {
+    match (lmake(1.0), 5) {
+        w => print("{w.0.0.x as int} {w.0.1} {w.1}"),
+    }
+    let h = LHold { t: (lmake(2.0), 5) }
+    match h.t {
+        w => print("{w.0.0.x as int} {w.0.1} {w.1}"),
+    }
+    let ws = [(lmake(3.0), 5)]
+    match ws[0] {
+        w => print("{w.0.0.x as int} {w.0.1} {w.1}"),
+    }
+    let g = LHold { t: lmake(4.0) }
+    for t in [g.t] { print("{t.0.x as int} {t.1}") }
+}
+
 fn ldefault(t: (LP, int) = (LP { x: 1.0, y: 0.0 }, 10)) -> string {
     return "{t.0.x as int} {t.1}"
 }
@@ -442,4 +486,55 @@ fn sorting_by_a_scalar_key() {
     let xs = [lmake(3.0), lmake(1.0), lmake(2.0)]
     xs.sort(t => t.1)
     for (v, n) in xs { print("{v.x as int} {n}") }
+}
+
+// ======== materialize ========
+//
+// Inside Rock code `materialize` of a tuple is the tuple itself: it is stored,
+// passed and matched like any other. A body the compiler cannot see into is
+// handed the tuple as the user wrote it, one boxed value per element, and an
+// implicit splatting tuple is rejected there (tests/errors/nobox_container_gaps).
+
+fn lid<T>(v: T) -> T { return v }
+
+fn lmaybe(present: bool) -> (LP, int)? {
+    if present { return materialize(lmake(4.0)) }
+    return materialize(null)
+}
+
+@test(output = "1 10\n2 20\n3 30\n4 40\nnull")
+fn materialize_is_the_tuple_itself() {
+    let xs: [(LP, int)] = []
+    xs.push(materialize(lmake(1.0)))
+    let (a, n) = xs[0]
+    print("{a.x as int} {n}")
+    let (b, m) = lid(materialize(lmake(2.0)))
+    print("{b.x as int} {m}")
+    match MyOpt::Got(materialize(lmake(3.0))) {
+        MyOpt::Got(t) => print("{t.0.x as int} {t.1}"),
+        MyOpt::Nope => print("nope"),
+    }
+    if let t = lmaybe(true) { print("{t.0.x as int} {t.1}") }
+    if lmaybe(false) == null { print("null") }
+}
+
+inline(lua) fn opaque_count(v: any) -> int = """ if v == nil then return -1 end return #v """
+inline(js) fn opaque_count(v: any) -> int = """ return v == null ? -1 : v.length """
+inline(lua) fn opaque_first_x(v: any) -> float = """ return v[1].x """
+inline(js) fn opaque_first_x(v: any) -> float = """ return v[0].x """
+
+@test(output = "2\n2\n-1\n6")
+fn an_opaque_body_gets_one_box_per_element() {
+    print(opaque_count(materialize(lmake(1.0))))
+    let xs = [lmake(1.0)]
+    print(opaque_count(materialize(xs[0])))
+    print(opaque_count(materialize(lmaybe(false))))
+    print(opaque_first_x(materialize(lmake(6.0))) as int)
+}
+
+@test
+fn inspect_renders_a_materialized_tuple_as_written() {
+    let t = lmake(2.0)
+    assert_eq("{materialize(t)}", "{(materialize(t.0), t.1)}")
+    assert_eq(inspect(materialize(t)), "{(materialize(t.0), t.1)}")
 }

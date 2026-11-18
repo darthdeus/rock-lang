@@ -698,8 +698,11 @@ impl<'a> Builder<'a> {
                 // demands both components, so no source read sees a placeholder.
                 let entity = entity.unwrap_or_else(|| self.emit_cur(Inst::Const(Lit::Nil)));
                 let data = data.unwrap_or_else(|| self.emit_cur(Inst::Const(Lit::Nil)));
-                let tup = self.emit_cur(Inst::MakeTuple(vec![entity, data]));
-                self.bind_for_pattern(&pat, tup);
+                let pair = ValueRepr::Tuple {
+                    parts: vec![ValueRepr::Scalar(entity), ValueRepr::Scalar(data)],
+                    present: None,
+                };
+                self.bind_loop_element_repr(&pat, pair)?;
             }
             _ => {}
         }
@@ -927,9 +930,11 @@ impl<'a> Builder<'a> {
                         self.pack(r)?
                     }
                 };
-                let pair = self.emit_cur(Inst::MakeTuple(vec![kv, vv]));
-                self.bind_for_pattern(vars, pair);
-                Ok(())
+                let pair = ValueRepr::Tuple {
+                    parts: vec![ValueRepr::Scalar(kv), ValueRepr::Scalar(vv)],
+                    present: None,
+                };
+                self.bind_loop_element_repr(vars, pair)
             }
             _ => Err(gap(
                 "for-over-Map binds one (item) or two (key, value) vars",
@@ -973,21 +978,18 @@ impl<'a> Builder<'a> {
                     && let [elem @ MonoTy::Tuple(_)] = params.as_slice()
                     && let Some(shape) = s
                         .concrete_rep_tuple(elem, RepUse::Return, true, false)?
-                        .filter(|shape| shape.splats(self.scx.rep_arena()))
+                        .filter(|shape| shape.splats(s.scx.rep_arena()))
                 {
-                    let base = *base;
-                    let slots: Vec<Idx<Inst>> = (0..shape.slot_count(self.scx.rep_arena()))
-                        .map(|index| s.emit_cur(Inst::TupleIndex { base, index }))
-                        .collect();
-                    let tuple = s.tuple_from_slots(&shape, &slots, &mut 0);
-                    s.bind_tuple_repr(pat, &shape, tuple)?;
+                    s.bind_tuple_repr(pat, &shape, ValueRepr::Scalar(*base))?;
                 } else {
                     s.bind_loop_element_repr(pat, repr)?;
                 }
             } else {
-                let elem = s.pack(repr)?;
-                let pair = s.emit_cur(Inst::MakeTuple(vec![i_now, elem]));
-                s.bind_for_pattern(vars, pair);
+                let pair = ValueRepr::Tuple {
+                    parts: vec![ValueRepr::Scalar(i_now), repr],
+                    present: None,
+                };
+                s.bind_loop_element_repr(vars, pair)?;
             }
             Ok(())
         })
@@ -1127,6 +1129,13 @@ impl<'a> Builder<'a> {
         vars: &BindingPattern,
         repr: ValueRepr,
     ) -> Result<(), CompilerError> {
+        if let BindingPattern::Leaf(b) = vars
+            && let Some(shape) = self.whole_tuple_binding(*b)?
+        {
+            let slots = self.tuple_repr_to_slots(repr, &shape)?;
+            self.bind_tuple_slots(*b, &slots, shape);
+            return Ok(());
+        }
         if let BindingPattern::Leaf(b) = vars {
             if let Some(shape) = self
                 .binding_ty(*b)
@@ -1357,12 +1366,34 @@ impl<'a> Builder<'a> {
     /// [`Builder::tuple_binds`]. The tuple twin of [`Self::bind_leaves`], and the
     /// same rule -- a read rebuilds the unboxed repr from the cells instead of
     /// the binding ever holding a packed tuple.
+    /// The slot layout a name takes when it binds a whole splatting tuple: it
+    /// holds the slots in cells, never one box.
+    pub(crate) fn whole_tuple_binding(
+        &self,
+        b: Idx<BindingInfo>,
+    ) -> Result<Option<TupleLayout>, CompilerError> {
+        if self.binding_is_ref(b) {
+            return Ok(None);
+        }
+        match self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty)) {
+            Some(ty @ MonoTy::Tuple(_)) => Ok(self
+                .concrete_rep_tuple(ty, RepUse::Return, true, false)?
+                .filter(|shape| shape.splats(self.scx.rep_arena()))),
+            _ => Ok(None),
+        }
+    }
+
     pub(crate) fn bind_tuple_slots(
         &mut self,
         b: Idx<BindingInfo>,
         slots: &[Idx<Inst>],
         shape: TupleLayout,
     ) {
+        if let Some(boxed) = self.flat_box_of_slots(slots)
+            && self.binding_stays_unwritten(b)
+        {
+            self.tuple_bind_boxes.insert(raw(b), boxed);
+        }
         let bname = self.body.binding_arena[b].name;
         let cells: Vec<Idx<Cell>> = slots
             .iter()
@@ -1403,6 +1434,9 @@ impl<'a> Builder<'a> {
                     )?;
                 }
                 self.mark_destructured(vars);
+            }
+            BindingPattern::Leaf(b) if !shape.nullable => {
+                self.bind_tuple_slots(*b, &values, shape.clone());
             }
             _ => {
                 let r = self.tuple_from_slots(shape, &values, &mut idx);

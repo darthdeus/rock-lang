@@ -355,6 +355,22 @@ impl<'a> Builder<'a> {
         if let Some(read) = self.flat_ref_read(e)? {
             return self.pack(read.into_value());
         }
+        // A splatting tuple used as one value is its unpacked form stored flat,
+        // whatever produced it; the repr path asks back here for the box itself.
+        if let Expr::Var(b) = self.body.expr_arena[e]
+            && let Some(&boxed) = self.tuple_bind_boxes.get(&raw(b))
+        {
+            return Ok(boxed);
+        }
+        if !matches!(self.body.expr_arena[e], Expr::Tuple(_))
+            && !self.scalar_tuple_reentry.contains(&e)
+            && self.tuple_box_shape(e)?.is_some()
+        {
+            self.scalar_tuple_reentry.insert(e);
+            let repr = self.lower_expr_repr(e);
+            self.scalar_tuple_reentry.remove(&e);
+            return self.pack_stored(repr?);
+        }
         match self.body.expr_arena[e] {
             Expr::Unit | Expr::Null => Ok(self.emit_cur(Inst::Const(Lit::Nil))),
             Expr::Int(i) => {

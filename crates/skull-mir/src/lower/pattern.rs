@@ -83,7 +83,7 @@ impl<'a> Builder<'a> {
             let arm = self.body.match_arm_arena[aidx];
             let next = self.f.new_block();
             let matches_null = self.pattern_matches_null(arm.pattern, &variants);
-            let mut arm_scrut = scrut_s.clone();
+            let arm_scrut = scrut_s.clone();
             if scrut_nullable && !matches_null {
                 let val_v = self.scrut_value(&arm_scrut);
                 // Skip the nil test once an unguarded null arm has run, but
@@ -93,9 +93,6 @@ impl<'a> Builder<'a> {
                     let cont = self.f.new_block();
                     self.branch_on_nil(val_v, next, cont);
                     self.cur = cont;
-                }
-                if let Some(rebuilt) = self.splat_tuple_scrut(scrut, val_v)? {
-                    arm_scrut = rebuilt;
                 }
             }
             if matches_null && arm.guard.is_none() {
@@ -194,6 +191,18 @@ impl<'a> Builder<'a> {
                         self.bind_leaves(b, &leaves, shape.value_shape())?;
                         return Ok(());
                     }
+                }
+                if let Some(shape) = self.whole_tuple_binding(b)? {
+                    let whole = self.scrut_repr(scrut);
+                    let slots = self.tuple_repr_to_slots(whole, &shape)?;
+                    self.bind_tuple_slots(b, &slots, shape);
+                    return Ok(());
+                }
+                if let Scrut::Repr { repr, .. } = scrut
+                    && !self.binding_is_ref(b)
+                    && !self.binding_ref_borrowed(b)
+                {
+                    return self.bind_loop_element_repr(&BindingPattern::Leaf(b), repr.clone());
                 }
                 let mut val = self.scrut_value(scrut);
                 // The scrutinee's storage still holds the bound box; a binder a
@@ -299,11 +308,9 @@ impl<'a> Builder<'a> {
                 Ok(())
             }
             Pattern::Tuple { elements } => {
-                // A stored splatting tuple is the flat wire in a table. The root
-                // is left to its caller, which also knows an explicit
-                // `materialize` box from a stored one.
+                // A boxed splatting tuple is the flat wire in a table.
                 let stored = match (scrut, ty) {
-                    (Scrut::Val(v), Some(ty)) if !top => self
+                    (Scrut::Val(v), Some(ty)) if !self.is_tuple_aggregate(*v) => self
                         .concrete_rep_tuple(ty, RepUse::Return, true, false)?
                         .filter(|shape| shape.splats(self.scx.rep_arena()))
                         .map(|shape| self.rebuild_splat_box(shape, *v))
@@ -311,11 +318,11 @@ impl<'a> Builder<'a> {
                     _ => None,
                 };
                 let scrut = stored.as_ref().unwrap_or(scrut);
+                let elem_tys = match ty {
+                    Some(MonoTy::Tuple(elems)) => elems.as_slice(),
+                    _ => &[],
+                };
                 if let Scrut::Tuple(parts) = scrut {
-                    let elem_tys = match ty {
-                        Some(MonoTy::Tuple(elems)) => elems.as_slice(),
-                        _ => &[],
-                    };
                     for (i, sp) in elements.into_iter().enumerate() {
                         let elem = parts.get(i).ok_or_else(|| {
                             gap("tuple pattern exceeds its scrutinee representation")
@@ -329,8 +336,6 @@ impl<'a> Builder<'a> {
                             base: val,
                             index: i,
                         });
-                        // A per-element box (`materialize`) keeps user layout
-                        // all the way down, so its elements carry no type.
                         self.match_pattern(
                             &Scrut::Val(elem),
                             sp,
@@ -338,7 +343,7 @@ impl<'a> Builder<'a> {
                             variants,
                             false,
                             None,
-                            None,
+                            elem_tys.get(i),
                         )?;
                     }
                 }
@@ -601,7 +606,24 @@ impl<'a> Builder<'a> {
                 .map(|p| self.scrut_from_repr(p))
                 .collect::<Result<_, _>>()
                 .map(Scrut::Tuple),
+            repr @ ValueRepr::Group { name, .. } if self.is_value_struct(name) => {
+                let boxed = self.pack_maybe_absent(repr.clone())?;
+                Ok(Scrut::Repr { repr, boxed })
+            }
             other => Ok(Scrut::Val(self.pack_maybe_absent(other)?)),
+        }
+    }
+
+    /// The scrutinee as an unpacked value, boxing only what is already a box.
+    fn scrut_repr(&mut self, scrut: &Scrut) -> ValueRepr {
+        match scrut {
+            Scrut::Val(v) => ValueRepr::Scalar(*v),
+            Scrut::Repr { repr, .. } => repr.clone(),
+            Scrut::Tuple(parts) => ValueRepr::Tuple {
+                parts: parts.iter().map(|p| self.scrut_repr(p)).collect(),
+                present: None,
+            },
+            Scrut::Flat { .. } | Scrut::Cells { .. } => ValueRepr::Scalar(self.scrut_value(scrut)),
         }
     }
 
@@ -609,10 +631,10 @@ impl<'a> Builder<'a> {
     /// cells into a boxed enum (only on a path that genuinely needs the whole value).
     pub(crate) fn scrut_value(&mut self, scrut: &Scrut) -> Idx<Inst> {
         match scrut {
-            Scrut::Val(v) => *v,
+            Scrut::Val(v) | Scrut::Repr { boxed: v, .. } => *v,
             Scrut::Tuple(parts) => {
                 let values = parts.iter().map(|p| self.scrut_value(p)).collect();
-                self.emit_cur(Inst::MakeTuple(values))
+                self.element_tuple(values)
             }
             Scrut::Flat {
                 parent,
@@ -716,6 +738,7 @@ impl<'a> Builder<'a> {
     /// One raw positional SLOT of the scrutinee (not a position -- a slot).
     fn scrut_slot(&mut self, scrut: &Scrut, slot: usize) -> Idx<Inst> {
         match scrut {
+            Scrut::Repr { boxed, .. } => self.scrut_slot(&Scrut::Val(*boxed), slot),
             Scrut::Cells { positional, .. } => positional[slot],
             Scrut::Flat { parent, prefix, .. } => {
                 self.read_field(*parent, flat_payload_slot(*prefix, slot))
@@ -739,6 +762,7 @@ impl<'a> Builder<'a> {
     /// `_<i>` C field; a table enum reads the positional `[i+1]` slot.
     pub(crate) fn scrut_payload(&mut self, scrut: &Scrut, i: usize, cdata: bool) -> Idx<Inst> {
         match scrut {
+            Scrut::Repr { boxed, .. } => self.scrut_payload(&Scrut::Val(*boxed), i, cdata),
             Scrut::Cells { positional, .. } => positional[i],
             Scrut::Flat { parent, prefix, .. } => {
                 self.read_field(*parent, flat_payload_slot(*prefix, i))
@@ -765,6 +789,7 @@ impl<'a> Builder<'a> {
         cdata: bool,
     ) -> Result<Idx<Inst>, CompilerError> {
         match scrut {
+            Scrut::Repr { boxed, .. } => self.scrut_named(&Scrut::Val(*boxed), field, cdata),
             Scrut::Cells { named, shape, .. } => named
                 .iter()
                 .find(|(n, _)| *n == field)
@@ -809,7 +834,7 @@ impl<'a> Builder<'a> {
                 Some(self.read_field(*parent, flat_tag_slot(*prefix)))
             }
             Scrut::Cells { tag, .. } => Some(*tag),
-            Scrut::Val(_) | Scrut::Tuple(_) => None,
+            Scrut::Val(_) | Scrut::Tuple(_) | Scrut::Repr { .. } => None,
         };
         if let Some(tag) = flat_tag {
             if let Inst::Const(Lit::Str(actual)) = self.f.insts[tag] {
@@ -1057,37 +1082,8 @@ impl<'a> Builder<'a> {
             let cont = self.f.new_block();
             self.branch_on_nil(val_v, miss, cont);
             self.cur = cont;
-            if let Some(rebuilt) = self.splat_tuple_scrut(value, val_v)? {
-                return self.match_pattern(
-                    &rebuilt, pattern, miss, variants, true, scrut_enum, scrut_ty,
-                );
-            }
         }
         self.match_pattern(scrut, pattern, miss, variants, true, scrut_enum, scrut_ty)
-    }
-
-    /// A SPLATTING tuple's stored box is the wire put in a table
-    /// (`tuple_box_shape`): leaves flat, no per-element boxes. The per-element
-    /// reads in the tuple pattern arm would misread it (a map/vec `get` hands
-    /// the stored box straight through), so rebuild the parts from the flat
-    /// slots -- callers rule out nil first. `None` for every other scrutinee.
-    fn splat_tuple_scrut(
-        &mut self,
-        value: Idx<Expr>,
-        val_v: Idx<Inst>,
-    ) -> Result<Option<Scrut>, CompilerError> {
-        // An explicit `materialize` box keeps per-element user layout; only
-        // stored boxes are the flat wire.
-        if self.is_explicit_materialize_call(value) {
-            return Ok(None);
-        }
-        let Some(shape) = self
-            .peeled_tuple_shape(value)?
-            .filter(|shape| shape.splats(self.scx.rep_arena()))
-        else {
-            return Ok(None);
-        };
-        self.rebuild_splat_box(shape, val_v).map(Some)
     }
 
     /// The concrete type of one member of a value of type `owner_ty`: a
@@ -1121,11 +1117,10 @@ impl<'a> Builder<'a> {
                 return None;
             };
             (&sd.generics, sd.fields.iter().find(|sf| sf.name == f)?.ty)
-        } else if let Some(nid) = self.ws.newtypes_by_name.get(name) {
+        } else {
+            let nid = self.ws.newtypes_by_name.get(name)?;
             let nd = &self.ws.modules[nid.module.index()].newtypes[nid.def];
             (&nd.generics, nd.wrapped)
-        } else {
-            return None;
         };
         let mut subst = SpecSubst::default();
         for (g, p) in generics.iter().zip(params.iter()) {

@@ -829,7 +829,7 @@ impl<'a> Builder<'a> {
     pub(crate) fn pack_stored(&mut self, bundle: ValueBundle) -> Result<Idx<Inst>, CompilerError> {
         let arena = self.scx.rep_arena();
         let splats = matches!(arena.layout(bundle.representation()), RepLayout::Tuple(shape) if shape.splats(arena));
-        if splats {
+        if splats && matches!(bundle.value(), ValueRepr::Tuple { .. }) {
             return self.pack_bundle(&bundle);
         }
         self.pack_maybe_absent(bundle.into_value())
@@ -987,19 +987,17 @@ impl<'a> Builder<'a> {
                             ));
                         }
                     }
-                    // A widened tuple stores one table slot per leaf, while
-                    // `inspect` walks slots at runtime and would report a wider
-                    // tuple. Reject this reader by resolved callee; storage-only
-                    // `any` helpers remain valid. `materialize(v)` keeps the
-                    // tuple in one slot per element.
-                    if let Some(shape) = self.tuple_box_shape(arg)? {
+                    // Inspect expects one slot per logical tuple element.
+                    if self.is_explicit_materialize_call(arg) {
+                        self.boundary_materializes.insert(arg);
+                    } else if let Some(shape) = self.tuple_box_shape(arg)? {
                         return Err(CompilerError::new_with_label(
                             self.body.expr_spans[e],
                             format!(
                                 "cannot inspect a tuple carrying a nobox value: its {} \
                                  leaves ride the box, so it would be read as a wider \
                                  tuple (project the slots, or `materialize` the \
-                                 element deliberately)",
+                                 tuple deliberately)",
                                 shape.slot_count(self.scx.rep_arena())
                             ),
                         ));
@@ -1414,7 +1412,7 @@ impl<'a> Builder<'a> {
                         Some(ExpandKind::StructPairs) => {
                             self.expand_struct_pairs(e, func, &arg_idxs)
                         }
-                        Some(ExpandKind::Materialize) => self.expand_materialize(&arg_idxs),
+                        Some(ExpandKind::Materialize) => self.expand_materialize(e, &arg_idxs),
                         Some(ExpandKind::SortKeyWide) => self.expand_sort_key_wide(&arg_idxs),
                         Some(ExpandKind::SortKeyLt) => self.expand_sort_key_lt(e, &arg_idxs),
                         Some(ExpandKind::ShaderPipeline) => {
@@ -2375,7 +2373,7 @@ impl<'a> Builder<'a> {
                     .into_iter()
                     .map(|p| self.pack_maybe_absent_boxed(p, kind))
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(self.emit_cur(Inst::MakeTuple(vs)))
+                Ok(self.element_tuple(vs))
             }
             // A flat-enum Group `[tag, _0.., <rec>..]` packs to the `{__variant}`
             // box (`MakeEnumDyn`), the enum escape -- not a `<name>_ct` cdata.
@@ -2481,6 +2479,30 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// A flat tuple box of `slots`. Slots read in order straight out of one
+    /// flat box ARE that box: a tuple is immutable, so it is shared, not copied.
+    fn flat_tuple_box(&mut self, slots: Vec<Idx<Inst>>) -> Idx<Inst> {
+        match self.flat_box_of_slots(&slots) {
+            Some(base) => base,
+            None => self.emit_cur(Inst::MakeTuple(slots)),
+        }
+    }
+
+    /// The flat box `slots` were read out of, in order and in full.
+    pub(crate) fn flat_box_of_slots(&self, slots: &[Idx<Inst>]) -> Option<Idx<Inst>> {
+        let Some(&Inst::TupleIndex { base, index: 0 }) = slots.first().map(|&v| &self.f.insts[v])
+        else {
+            return None;
+        };
+        let in_order = slots.iter().enumerate().all(|(i, &v)| {
+            matches!(self.f.insts[v], Inst::TupleIndex { base: b, index } if b == base && index == i)
+        });
+        (in_order
+            && !self.is_tuple_aggregate(base)
+            && self.flat_box_width(base) == Some(slots.len()))
+        .then_some(base)
+    }
+
     pub(crate) fn pack_bundle(&mut self, bundle: &ValueBundle) -> Result<Idx<Inst>, CompilerError> {
         if let ValueRepr::Group {
             name,
@@ -2495,7 +2517,7 @@ impl<'a> Builder<'a> {
         };
         let mut slots = self.tuple_repr_to_slots(bundle.value().clone(), &shape)?;
         if !shape.nullable {
-            return Ok(self.emit_cur(Inst::MakeTuple(slots)));
+            return Ok(self.flat_tuple_box(slots));
         }
         let present = slots.remove(0);
         let result = self.f.new_cell(None);

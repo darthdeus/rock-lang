@@ -139,20 +139,19 @@ hook runs after a compatible publication, rather than observing runtime writes.
 
 ## Splatting tuple boxes
 
-A tuple carrying a `nobox` element has two boxed forms. Every implicit box --
-a literal, a call result or a tuple-bound local reaching a container element,
-a struct/record field, an enum payload or a newtype wrap -- is the STORED box:
+A tuple carrying a `nobox` element is boxed in one layout inside Rock code:
 the multi-return wire put in a table, leaves flat, with `tuple_box_shape` as
-the oracle. An explicit `materialize(..)` box keeps one slot per element, the
-layout inline Lua reads. Readers decide by position: a field or index read
-rebuilds the parts from the flat slots by the read's type, and a pattern walk
-carries each nested position's concrete type (payload, field, wrapped value or
-tuple element, with the owner's generic arguments substituted), so a tuple
-sub-pattern at any depth rebuilds a stored box. Only the root of a pattern
-asks whether its scrutinee is an explicit `materialize` call. The stdlib
-container bodies unpack flat at their generic returns. Escapes that render a
-tuple at runtime (`inspect`, interpolation) reject a stored box, nullable or
-not, because it would read as a wider tuple. Unifying on a single layout
-would require either giving `materialize` a new user contract (flat) or
-boxing stored elements per element (allocating per `nobox` leaf group);
-neither is justified until a measurement or a user need forces it.
+the oracle. Every box of such a tuple -- stored, loaded, returned, joined,
+yielded -- has that layout, so a reader rebuilds the parts from the type
+alone. The one exception is a tuple still being assembled from its parts
+(`element_tuple`), which is read back element by element before it goes
+anywhere; a name that binds a whole splatting tuple holds its slots, never
+such a box. A tuple is immutable, so a box is shared rather than copied: an
+unwritten name bound straight from a stored box hands that box on when it is
+used whole, and repacking slots read in full from one box yields the box. `materialize(t)` of a splatting tuple is therefore `t` itself.
+A body the compiler cannot see into (a user `inline` or `extern` callee,
+`inspect`, interpolation) is handed the tuple as written instead: an
+explicit `materialize(t)` argument there boxes one value per element, and an
+implicit splatting tuple is rejected, because the flat box would read as a
+wider tuple. The stdlib's opaque storage primitives hold the flat box without
+reading it.

@@ -36,7 +36,12 @@ impl<'a> Builder<'a> {
             None if self.dispatch().structural_route(expr).is_some() => {
                 self.stringify_structural(expr)
             }
-            // Display tuples use one slot per logical member, including materialized children.
+            None if self.is_explicit_materialize_call(expr) => {
+                self.boundary_materializes.insert(expr);
+                let v = self.lower_expr(expr)?;
+                self.stringify(expr, v)
+            }
+            // Display tuples use one slot per logical member.
             None if self.tuple_box_shape(expr)?.is_some() => {
                 let r = self.lower_expr_repr(expr)?.into_value();
                 let v = self.pack(r)?;

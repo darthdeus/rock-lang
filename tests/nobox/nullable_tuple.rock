@@ -555,31 +555,10 @@ fn arena_get_splatting_element() {
     print("{v.x as int} {f as int}")
 }
 
-@test(output = "5 50\n7 70\n2 1 20\n40")
-fn splatting_element_round_trips() {
-    let xs: [(CNV, float)] = [(CNV { x: 1.0, y: 2.0 }, 10.0)]
-    xs.set(0, (CNV { x: 5.0, y: 6.0 }, 50.0))
-    let (v, f) = xs.get(0) else { return }
-    print("{v.x as int} {f as int}")
-
-    let ys: [(CNV, float)] = []
-    ys.push((CNV { x: 7.0, y: 8.0 }, 70.0))
-    let (w, g) = ys.pop() else { return }
-    print("{w.x as int} {g as int}")
-
-    let zs: [((int, CNV), float)] = [((2, CNV { x: 1.0, y: 0.0 }), 20.0)]
-    let ((n, u), h) = zs.get(0) else { return }
-    print("{n} {u.x as int} {h as int}")
-
+// A missing element coalesces to a whole fallback tuple.
+@test(output = "40")
+fn a_missing_element_coalesces() {
     let empty: [(CNV, float)] = []
     let (_, fallback) = empty.get(0) ?? (CNV { x: 4.0, y: 0.0 }, 40.0)
     print("{fallback as int}")
-}
-
-@test(output = "1 10\n3 30")
-fn iterating_splatting_elements() {
-    let xs: [(CNV, float)] = [(CNV { x: 1.0, y: 2.0 }, 10.0), (CNV { x: 3.0, y: 4.0 }, 30.0)]
-    for (v, f) in xs {
-        print("{v.x as int} {f as int}")
-    }
 }

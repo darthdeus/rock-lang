@@ -36,7 +36,7 @@ impl<'a> Builder<'a> {
     }
 
     pub(crate) fn reject_nobox_boxed_call_args(
-        &self,
+        &mut self,
         func: FuncRef,
         args: &[Idx<Expr>],
     ) -> Result<(), CompilerError> {
@@ -48,10 +48,33 @@ impl<'a> Builder<'a> {
         if crate::intrinsics::is_gpu_only(callee) {
             return Ok(());
         }
+        // Only a body the compiler cannot see into reads a tuple box by its user
+        // layout. The stdlib's opaque primitives are storage: they hold a
+        // splatting tuple's flat box without reading it.
+        let foreign_body = (callee.inline_body.is_some() || callee.is_extern)
+            && !bone_core::modules::is_stdlib_module_file(
+                self.ws.module(func.module).file.as_str(),
+            );
         for &arg in args {
-            // A flat element `ref` passes its container and slot, never a box.
-            if self.is_explicit_materialize_call(arg) || self.is_flat_ref_call_arg(arg) {
+            if self.is_explicit_materialize_call(arg) {
+                if foreign_body {
+                    self.boundary_materializes.insert(arg);
+                }
                 continue;
+            }
+            // A flat element `ref` passes its container and slot, never a box.
+            if self.is_flat_ref_call_arg(arg) {
+                continue;
+            }
+            if foreign_body && self.tuple_box_shape(arg)?.is_some() {
+                return Err(CompilerError::new_with_label(
+                    self.body.expr_spans[arg],
+                    format!(
+                        "a tuple carrying a nobox value cannot cross boxed call boundary `{}` \
+                         (`materialize` it to pass one boxed value per element)",
+                        self.ws.module(func.module).functions[func.func].name
+                    ),
+                ));
             }
             if let Some(ty) = self.concrete_expr_ty(arg) {
                 let Some(name) = ty.peel_nullable().0.nominal() else {

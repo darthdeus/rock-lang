@@ -80,3 +80,14 @@ fn dnv(k: float) -> DNV { return DNV { x: k, y: 2.0 } }
 fn main() {
     print(inspect((dnv(1.0), 1.0)))   // ERROR: same widened box, reached by call
 }
+
+//=== TEST CASE: implicit_tuple_at_an_inline_body_Generic ===
+// The guarantee firing at a body the compiler cannot see into: it would be
+// handed the flat box and read a wider tuple. `materialize(t)` hands it one
+// boxed value per element (`tests/nobox/tuple.rock`).
+nobox value BNV { x: float, y: float }
+inline(lua) fn count(v: any) -> int = """ return #v """
+fn main() {
+    let t = (BNV { x: 1.0, y: 2.0 }, 3)
+    print(count(t))   // ERROR: a tuple carrying a nobox value cannot cross
+}

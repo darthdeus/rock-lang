@@ -998,3 +998,36 @@ fn an_enum_in_a_nobox_field_of_a_boxed_gc_tier_local_reads_by_leaf() {
         "`look` boxed its local to read a field:\n{body}"
     );
 }
+const NOBOX_TUPLE_COPY: &str = r#"
+nobox value NV2 { x: float, y: float }
+global XS: [(NV2, int)] = []
+global YS: [(NV2, int)] = []
+
+fn copy_direct(i: int) { YS.push(XS[i]) }
+fn copy_through_a_name(i: int) {
+    let t = XS[i]
+    YS.push(t)
+}
+fn copy_each() { for t in XS { YS.push(t) } }
+
+fn main() {
+    XS.push((NV2 { x: 1.0, y: 2.0 }, 3))
+    copy_direct(0)
+    copy_through_a_name(0)
+    copy_each()
+}
+"#;
+
+/// Copying a stored tuple element shares its immutable box -- directly, through
+/// an unwritten name, or as a loop element -- rather than packing a new table.
+#[test]
+fn copying_a_stored_tuple_element_allocates_nothing() {
+    let lua = emit_module(NOBOX_TUPLE_COPY);
+    for name in ["copy_direct", "copy_through_a_name", "copy_each"] {
+        let body = function_body(&lua, name);
+        assert!(
+            !body.contains("({") && !body.contains("NV2_ct("),
+            "`{name}` packed a copy of a stored tuple:\n{body}"
+        );
+    }
+}

@@ -257,6 +257,12 @@ enum Scrut {
     /// representations. Tuple patterns consume these directly; a whole-value
     /// bind materializes the ordinary tuple and any escaping element.
     Tuple(Vec<Scrut>),
+    /// A value still held unpacked, beside the box a pattern reads when it needs
+    /// one value. A name binds the unpacked form, so an unused box is dead.
+    Repr {
+        repr: ValueRepr,
+        boxed: Idx<Inst>,
+    },
     Flat {
         parent: Idx<Inst>,
         prefix: Ustr,
@@ -2113,6 +2119,19 @@ struct Builder<'a> {
     callback_records: HashSet<Idx<Inst>>,
     /// Shallow local snapshots cannot be lent across a call or return.
     unshareable_value_cells: HashSet<Idx<Cell>>,
+    /// `materialize(..)` calls that are an argument of an opaque boundary,
+    /// where a splatting tuple is boxed in its user layout.
+    boundary_materializes: HashSet<Idx<Expr>>,
+    /// Tuple boxes built one value per element (`pack` of an unpacked tuple).
+    /// Every other box of a splatting tuple is the flat wire.
+    element_tuples: HashSet<Idx<Inst>>,
+    /// Flat tuple boxes whose slot count is known from the type they were read at.
+    flat_box_widths: HashMap<Idx<Inst>, usize>,
+    /// Unwritten tuple bindings whose slots were read straight out of one flat
+    /// box: a whole-value use shares that box rather than packing a copy.
+    tuple_bind_boxes: HashMap<u32, Idx<Inst>>,
+    /// Splatting tuple expressions whose scalar lowering is asking their repr.
+    scalar_tuple_reentry: HashSet<Idx<Expr>>,
     /// A local snapshot may defer child copies until its whole-value escape.
     shallow_pack: bool,
     /// Immutable call, return and local uses may share proven immutable boxes.
@@ -2226,6 +2245,11 @@ impl<'a> Builder<'a> {
             shareable_value_boxes: HashSet::default(),
             callback_records: HashSet::default(),
             unshareable_value_cells: HashSet::default(),
+            boundary_materializes: HashSet::default(),
+            element_tuples: HashSet::default(),
+            flat_box_widths: HashMap::default(),
+            tuple_bind_boxes: HashMap::default(),
+            scalar_tuple_reentry: HashSet::default(),
             shallow_pack: false,
             lending_pack: false,
             f32_round_exprs: HashSet::default(),
@@ -3528,14 +3552,8 @@ impl<'a> Builder<'a> {
         if let ValueRepr::Scalar(v) = &r {
             if !matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
                 let v = *v;
-                // Only a STORED box (a container or field read) is known to be
-                // the flat wire in a table; an explicit `materialize` box keeps
-                // per-element user layout and still gaps here, as before.
-                if !self.reads_stored_box(v) && !self.lowering_stdlib_body() {
-                    return Err(gap(
-                        "returning an already-packed nullable tuple through the splatting ABI \
-                         (return the tuple literal or `null` directly)",
-                    ));
+                if self.is_tuple_aggregate(v) {
+                    return self.tuple_repr_to_slots(r, shape);
                 }
                 let probe = self.absent_tuple_slots(shape);
                 let cells = self.fresh_cells(probe.len());
@@ -3569,22 +3587,27 @@ impl<'a> Builder<'a> {
         self.tuple_repr_to_slots(r, shape)
     }
 
-    /// Forward the members of a fresh tuple without building or reading its box.
-    fn reads_stored_box(&self, v: Idx<Inst>) -> bool {
-        matches!(self.f.insts[v], Inst::Index { .. } | Inst::Field { .. })
+    pub(crate) fn is_tuple_aggregate(&self, v: Idx<Inst>) -> bool {
+        self.element_tuples.contains(&v)
     }
 
-    /// Whether the body being lowered is a standard-library one. The stdlib's
-    /// container bodies hand STORED values (flat tuple boxes) through generic
-    /// returns; user code never legitimately returns a packed splatting tuple.
-    fn lowering_stdlib_body(&self) -> bool {
-        match &self.concrete_plan.owner {
-            crate::concrete::ConcreteOwner::Function(inst) => {
-                let m = self.ws.module(inst.func.module);
-                bone_core::modules::is_stdlib_module_file(m.file.as_str())
-            }
-            _ => false,
-        }
+    /// Read the `width` slots of the flat tuple box `base`.
+    pub(crate) fn flat_box_slots(&mut self, base: Idx<Inst>, width: usize) -> Vec<Idx<Inst>> {
+        self.flat_box_widths.insert(base, width);
+        (0..width)
+            .map(|index| self.emit_cur(Inst::TupleIndex { base, index }))
+            .collect()
+    }
+
+    pub(crate) fn flat_box_width(&self, base: Idx<Inst>) -> Option<usize> {
+        self.flat_box_widths.get(&base).copied()
+    }
+
+    /// A tuple box holding one value per element.
+    pub(crate) fn element_tuple(&mut self, values: Vec<Idx<Inst>>) -> Idx<Inst> {
+        let tuple = self.emit_cur(Inst::MakeTuple(values));
+        self.element_tuples.insert(tuple);
+        tuple
     }
 
     fn tuple_return_operands(&mut self, v: Idx<Inst>, n: usize) -> Vec<Idx<Inst>> {
@@ -3624,16 +3647,11 @@ impl<'a> Builder<'a> {
             ValueRepr::Tuple { parts, .. } if parts.len() == shape.slots.len() => parts,
             other => {
                 let base = self.pack(other)?;
-                // A box read out of STORAGE (a field or container read) is the
-                // flat wire in a table; an explicit `materialize` box (a fresh
-                // `MakeTuple`, a loaded local) keeps per-element user layout.
-                if shape.splats(self.scx.rep_arena()) && self.reads_stored_box(base) {
+                if shape.splats(self.scx.rep_arena()) && !self.is_tuple_aggregate(base) {
                     let mut out = Vec::with_capacity(count);
                     out.extend(present);
                     let n = count - shape.nullable as usize;
-                    for index in 0..n {
-                        out.push(self.emit_cur(Inst::TupleIndex { base, index }));
-                    }
+                    out.extend(self.flat_box_slots(base, n));
                     return Ok(out);
                 }
                 (0..shape.slots.len())

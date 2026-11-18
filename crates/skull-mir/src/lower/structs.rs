@@ -750,11 +750,18 @@ impl<'a> Builder<'a> {
 
     pub(crate) fn expand_materialize(
         &mut self,
+        e: Idx<Expr>,
         arg_idxs: &[Idx<Expr>],
     ) -> Result<ValueRepr, CompilerError> {
         let [arg] = arg_idxs else {
             return Err(gap("materialize expects one argument"));
         };
+        // A splatting tuple is stored with its `nobox` parts as leaves, so it
+        // needs no box inside Rock code and passes through as it is. Only an
+        // opaque boundary is handed the user layout: one boxed element per slot.
+        if !self.boundary_materializes.contains(&e) && self.tuple_box_shape(*arg)?.is_some() {
+            return Ok(self.lower_expr_repr(*arg)?.into_value());
+        }
         let repr = self.lower_expr_repr(*arg)?.into_value();
         Ok(ValueRepr::Scalar(self.materialize_repr(repr)?))
     }
