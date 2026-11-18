@@ -598,10 +598,12 @@ pub fn load_image_asset(path: string, sampling: TextureFilter = TextureFilter::N
 // there, and a second load asking for a different filter is a hard error
 // (the skin gallery hit exactly that on a game's Linear splash logos).
 pub fn image_asset_cached(path: string, format: ImageAssetFormat = ImageAssetFormat::Rgba8) -> Image? {
-    let resolved = asset_path(path)
-    let path_key = image_format_path(resolved, format)
-    return IMAGE_CACHE.get(IMAGE_RESOLVED_IDENTITY.get(path_key)
-        ?? RESIDENCY_PATH_IDENTITIES.get(path_key) ?? path_key)
+    return IMAGE_CACHE.get(image_cached_identity(path, format))
+}
+
+fn image_cached_identity(path: string, format: ImageAssetFormat) -> string {
+    let path_key = image_format_path(asset_path(path), format)
+    return IMAGE_RESOLVED_IDENTITY.get(path_key) ?? RESIDENCY_PATH_IDENTITIES.get(path_key) ?? path_key
 }
 
 pub fn acquire_image_asset(

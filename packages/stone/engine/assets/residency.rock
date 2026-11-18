@@ -190,22 +190,29 @@ pub fn residency_trim() {
         if overage > 0 { let _ = evictor.release(overage) }
     }
     if RESIDENCY_CACHE.bytes <= RESIDENCY_BUDGET { return }
-    let identity = RESIDENCY_CACHE.first
     while RESIDENCY_CACHE.bytes > RESIDENCY_BUDGET {
-        let key = identity ?? break
-        let entry = RESIDENCY_CACHE.entries[key]
-        identity = entry.next
-        let cached = IMAGE_CACHE.get(key)
-        if cached == null { residency_cache_remove(key); continue }
-        let image = cached
-        residency_cache_remove(key)
-        let _ = RESIDENCY_CACHE.touches.remove(key)
-        image_asset_evict(key, image.0)
-        RESIDENCY_FRAME_EVICTIONS += 1
-        RESIDENCY_PROFILE_EVICTIONS += 1
-        RESIDENCY_FRAME_EVICTED_BYTES += entry.bytes
-        RESIDENCY_PROFILE_EVICTED_BYTES += entry.bytes
+        let key = RESIDENCY_CACHE.first ?? break
+        residency_evict_cached(key, RESIDENCY_CACHE.entries[key])
     }
+}
+
+// Explicit retirement uses the same ownership test and accounting as budget pressure.
+pub fn residency_evict_unused(path: string, format: ImageAssetFormat = ImageAssetFormat::Rgba8) -> bool {
+    let key = image_cached_identity(path, format)
+    let entry = RESIDENCY_CACHE.entries.get(key) ?? return false
+    return residency_evict_cached(key, entry)
+}
+
+fn residency_evict_cached(key: string, entry: ResidencyCached) -> bool {
+    residency_cache_remove(key)
+    let image = IMAGE_CACHE.get(key) ?? return false
+    let _ = RESIDENCY_CACHE.touches.remove(key)
+    image_asset_evict(key, image.0)
+    RESIDENCY_FRAME_EVICTIONS += 1
+    RESIDENCY_PROFILE_EVICTIONS += 1
+    RESIDENCY_FRAME_EVICTED_BYTES += entry.bytes
+    RESIDENCY_PROFILE_EVICTED_BYTES += entry.bytes
+    return true
 }
 
 // Required loads keep batching until prepare. Only frames waiting for an admit
