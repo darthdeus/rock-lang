@@ -2064,8 +2064,8 @@ mod relight_rg8_gl_tests {
                 read_rg(handle, 5, 3).0,
                 glow::COMPRESSED_RGBA_S3TC_DXT1_EXT as i32
             );
-            for row in read_rgba(handle, 5, 3).chunks_exact(20) {
-                assert!(row[..16].chunks_exact(4).all(|p| p[3] == 0));
+            for row in read_rgba(handle, 5, 3).as_chunks::<20>().0 {
+                assert!(row[..16].as_chunks::<4>().0.iter().all(|p| p[3] == 0));
                 assert_eq!(&row[16..], &[255, 0, 0, 255]);
             }
             images.unload(handle);
@@ -2091,8 +2091,10 @@ mod relight_rg8_gl_tests {
         assert_eq!(stone_get_image_byte_len(handle), 16);
         assert_eq!(read_rg(handle, 3, 2).0, glow::COMPRESSED_RG_RGTC2 as i32);
         assert!(read_rgba(handle, 3, 2)
-            .chunks_exact(4)
-            .all(|p| p == [63, 147, 0, 255]));
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| *p == [63, 147, 0, 255]));
     }
 
     fn run_upload_case() {
