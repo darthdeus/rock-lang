@@ -51,15 +51,14 @@ struct CliCompileHost<'a> {
     lint_scope: crate::lint_pass::Scope,
     comptime: CliComptime<'a>,
     prepare_timings: Vec<(&'static str, std::time::Duration)>,
-    emission: CliEmission<'a>,
+    emission: CliEmission,
 }
 
-enum CliEmission<'a> {
+enum CliEmission {
     Program,
     WithAccessors,
     Accessors(std::result::Result<String, CompilerError>),
     PackageTests {
-        dir: &'a str,
         tests: Vec<(skull_mir::mir::FuncRef, skull::SkullTest)>,
     },
 }
@@ -190,8 +189,9 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
         target: skull::pipeline::EmitTarget,
     ) -> std::result::Result<skull::mir_emit::MirEmit, CompilerError> {
         match &mut self.emission {
-            CliEmission::PackageTests { dir, tests } => {
-                *tests = collect_package_test_fns(ws, dir, self.sources)?;
+            CliEmission::PackageTests { tests } => {
+                *tests =
+                    collect_package_test_fns(ws, self.lint_root.to_str().unwrap(), self.sources)?;
                 let roots = tests.iter().map(|(func, _)| *func).collect::<Vec<_>>();
                 return skull::mir_emit::FullEmit::package_test(&roots)
                     .run(ws, entry)
@@ -219,6 +219,143 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
     }
 }
 
+enum CliBuildMode<'a> {
+    Source {
+        file: &'a str,
+        contents: &'a str,
+    },
+    ProductionProject {
+        dir: &'a str,
+        inputs: crate::comptime::ProjectInputs,
+    },
+    PackageTests {
+        dir: &'a str,
+    },
+}
+
+struct CliBuild {
+    sources: SourceFiles,
+    compiled: skull::pipeline::Compiled,
+    emission_mode: CliEmission,
+    compile: Duration,
+    body_costs: Option<std::path::PathBuf>,
+}
+
+enum CliBuildFailure {
+    Setup {
+        context: Option<&'static str>,
+        error: anyhow::Error,
+    },
+    Compile {
+        stage: Option<skull::pipeline::Stage>,
+        sources: SourceFiles,
+        errors: Vec<CompilerError>,
+    },
+}
+
+fn cli_build(mode: CliBuildMode<'_>) -> std::result::Result<CliBuild, CliBuildFailure> {
+    let path = match &mode {
+        CliBuildMode::Source { file, .. } => *file,
+        CliBuildMode::ProductionProject { dir, .. } | CliBuildMode::PackageTests { dir } => *dir,
+    };
+    let source = match &mode {
+        CliBuildMode::Source { file, contents } => Some((*file, *contents)),
+        _ => None,
+    };
+    let production = matches!(&mode, CliBuildMode::ProductionProject { .. });
+    if production {
+        skull::pipeline::warm_stdlib();
+    }
+    let (sources, lint_root) = if let Some((file, contents)) = source {
+        crate::lint_pass::single_file_scope(file, contents)
+    } else {
+        let spec = crate::unified_compile::SourceSpec::Directory(path.into());
+        let discovered = crate::unified_compile::discover_sources(&spec).map_err(|error| {
+            CliBuildFailure::Setup {
+                context: Some("cannot load project"),
+                error,
+            }
+        })?;
+        let sources = if production {
+            rock_host::source_files::production_only(&discovered, std::path::Path::new(path))
+                .map_err(|error| CliBuildFailure::Setup {
+                    context: None,
+                    error: anyhow::anyhow!(error.to_string()),
+                })?
+        } else {
+            crate::package_test_sources::select(&discovered, std::path::Path::new(path)).map_err(
+                |error| CliBuildFailure::Setup {
+                    context: Some("cannot select package test sources"),
+                    error,
+                },
+            )?
+        };
+        (sources, path.into())
+    };
+    if production {
+        crate::compile_budget::phase("discovery");
+        crate::compile_budget::sources(&sources);
+    }
+    let started = Instant::now();
+    let mut host = CliCompileHost {
+        sources: &sources,
+        lint_root: &lint_root,
+        lint_scope: if production {
+            crate::lint_pass::Scope::ProductionOnly
+        } else {
+            crate::lint_pass::Scope::WholeProject
+        },
+        comptime: match mode {
+            CliBuildMode::ProductionProject { inputs, .. } => CliComptime::Project(Some(inputs)),
+            _ => CliComptime::FromEntry(path),
+        },
+        prepare_timings: Vec::new(),
+        emission: if production {
+            CliEmission::WithAccessors
+        } else if source.is_some() {
+            CliEmission::Program
+        } else {
+            CliEmission::PackageTests { tests: Vec::new() }
+        },
+    };
+    let mut target = skull::pipeline::EmitTarget::SINGLE_SOURCE;
+    target.project_root = production.then_some(path);
+    let body_costs;
+    let compiled = if let Some((file, contents)) = source {
+        body_costs = None;
+        skull::pipeline::compile_source(file, contents, target, &mut host)
+    } else {
+        let (modules, entry) =
+            skull_assemble_project(&sources).map_err(|errors| CliBuildFailure::Compile {
+                stage: None,
+                sources: sources.clone(),
+                errors,
+            })?;
+        skull::pipeline::CompileHost::phase(&mut host, skull::pipeline::Phase::Parsed);
+        body_costs = if production {
+            crate::body_costs::begin()
+        } else {
+            None
+        };
+        target.attribution = body_costs.is_some();
+        skull::pipeline::compile_modules(modules, entry, target, &mut host)
+    }
+    .map_err(|failure| CliBuildFailure::Compile {
+        stage: Some(failure.stage),
+        sources: sources.clone(),
+        errors: failure.errors,
+    })?;
+    let compile = started.elapsed();
+    let emission_mode = host.emission;
+    Ok(CliBuild {
+        sources,
+        compiled,
+        emission_mode,
+        compile,
+        body_costs,
+    })
+}
+
 /// Use the real source path for spans and __SITE__.
 fn skull_emit_full(
     file: &str,
@@ -229,29 +366,18 @@ fn skull_emit_full(
         &SourceFiles,
     ) -> std::result::Result<Vec<skull::SkullTest>, CompilerError>,
 ) -> std::result::Result<(skull::mir_emit::MirEmit, Vec<skull::SkullTest>), EmitFullErr> {
-    let (sources, lint_root) = crate::lint_pass::single_file_scope(file, src);
-    let mut host = CliCompileHost {
-        sources: &sources,
-        lint_root: &lint_root,
-        lint_scope: crate::lint_pass::Scope::WholeProject,
-        comptime: CliComptime::FromEntry(file),
-        prepare_timings: Vec::new(),
-        emission: CliEmission::Program,
-    };
-    let skull::pipeline::Compiled {
-        ws,
-        entry: user_mid,
-        emission: emit,
-    } = skull::pipeline::compile_source(
+    let build = cli_build(CliBuildMode::Source {
         file,
-        src,
-        skull::pipeline::EmitTarget::SINGLE_SOURCE,
-        &mut host,
-    )
-    .map_err(|failure| EmitFullErr::Compile(failure.errors))?;
-    crate::compile_budget::emission(&emit);
-    let tests = discover(&ws, user_mid, &sources).map_err(EmitFullErr::Discovery)?;
-    Ok((emit, tests))
+        contents: src,
+    })
+    .map_err(|failure| match failure {
+        CliBuildFailure::Compile { errors, .. } => EmitFullErr::Compile(errors),
+        CliBuildFailure::Setup { .. } => unreachable!("single-file compile setup"),
+    })?;
+    crate::compile_budget::emission(&build.compiled.emission);
+    let tests = discover(&build.compiled.ws, build.compiled.entry, &build.sources)
+        .map_err(EmitFullErr::Discovery)?;
+    Ok((build.compiled.emission, tests))
 }
 
 /// Per-phase wall-clock for one skull run over a single source. `parse` and
@@ -385,7 +511,7 @@ pub(crate) fn skull_assemble_project(
     sources: &SourceFiles,
 ) -> std::result::Result<(skull_parser::stdlib::ModuleSet, ustr::Ustr), Vec<CompilerError>> {
     let (user_modules, entry_file, _parse) = crate::bone_backend::parse_user_modules(sources)?;
-    let modules = skull::pipeline::with_stdlib(user_modules).map_err(|e| vec![e])?;
+    let modules = skull::pipeline::with_stdlib(user_modules).map_err(|error| vec![error])?;
     Ok((modules, entry_file))
 }
 
@@ -1360,51 +1486,34 @@ fn skull_build_package_with_limit(
         reason: "no compile slot".to_string(),
         rendered: format!("{e:#}"),
     })?;
-    let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
-    let sources = crate::unified_compile::discover_sources(&spec).map_err(|e| SkullFailure {
-        reason: "cannot load project".to_string(),
-        rendered: e.to_string(),
-    })?;
-    let sources = crate::package_test_sources::select(&sources, std::path::Path::new(dir))
-        .map_err(|error| SkullFailure {
-            reason: "cannot select package test sources".to_string(),
+    let build = cli_build(CliBuildMode::PackageTests { dir }).map_err(|failure| match failure {
+        CliBuildFailure::Setup { context, error } => SkullFailure {
+            reason: context.unwrap_or("cannot load project").to_string(),
             rendered: format!("{error:#}"),
-        })?;
-    let (modules, entry_file) = skull_assemble_project(&sources).map_err(|errs| SkullFailure {
-        reason: categorize(&errs[0].message),
-        rendered: render_project_errs(&sources, &errs),
-    })?;
-    let mut host = CliCompileHost {
-        sources: &sources,
-        lint_root: std::path::Path::new(dir),
-        lint_scope: crate::lint_pass::Scope::WholeProject,
-        comptime: CliComptime::FromEntry(dir),
-        prepare_timings: Vec::new(),
-        emission: CliEmission::PackageTests {
-            dir,
-            tests: Vec::new(),
         },
-    };
-    let target = skull::pipeline::EmitTarget {
-        project_root: None,
-        renderer: skull::mir_emit::RendererTarget::Gl,
-        attribution: false,
-    };
+        CliBuildFailure::Compile {
+            sources, errors, ..
+        } => SkullFailure {
+            reason: categorize(&errors[0].message),
+            rendered: render_project_errs(&sources, &errors),
+        },
+    })?;
+    let CliBuild {
+        sources,
+        compiled,
+        emission_mode,
+        ..
+    } = build;
     let skull::pipeline::Compiled {
         ws, emission: emit, ..
-    } = skull::pipeline::compile_modules(modules, entry_file, target, &mut host).map_err(
-        |failure| SkullFailure {
-            reason: categorize(&failure.errors[0].message),
-            rendered: render_project_errs(&sources, &failure.errors),
-        },
-    )?;
-    let (lua, bridge_end) = (emit.lua, emit.globals_bridge_end);
+    } = compiled;
     let CliEmission::PackageTests {
         tests: test_fns, ..
-    } = host.emission
+    } = emission_mode
     else {
-        unreachable!("package test emission mode");
+        unreachable!("package tests build result");
     };
+    let (lua, bridge_end) = (emit.lua, emit.globals_bridge_end);
     let files = test_fns
         .iter()
         .map(|(func, _)| ws.modules[func.module.index()].file.as_str().to_owned())
@@ -1846,6 +1955,48 @@ fn skull_emit_single(path: &str, src: &str) -> (String, bool) {
     }
 }
 
+fn log_live_watch_failure(
+    label: &str,
+    check_ms: f64,
+    error: crate::live_project::LiveWatchError,
+    cache: &mut Option<skull::mir_emit::SkullEmitCache>,
+) {
+    use crate::live_project::LiveWatchError;
+    match error {
+        LiveWatchError::Discovery(error) => {
+            log::error!(target: "WATCH", "skull: source discovery failed: {error}");
+        }
+        LiveWatchError::SourceSelection(error) => {
+            log::error!(target: "WATCH", "skull: production source selection failed: {error}");
+        }
+        LiveWatchError::Session(sources, error) => {
+            eprintln!("{}", error.render(&sources));
+            log::error!(target: "WATCH", "skull {label}: session init failed");
+        }
+        LiveWatchError::Update(sources, errors) => {
+            for error in &errors {
+                eprintln!("{}", error.render(&sources));
+            }
+            *cache = None;
+            log::error!(target: "WATCH", "skull {label}: update failed in {check_ms:.1}ms - serving last good output");
+        }
+        LiveWatchError::Diagnostics(sources, errors) => {
+            for error in &errors {
+                eprintln!("{}", error.render(&sources));
+            }
+            *cache = None;
+            log::error!(target: "WATCH", "skull {label}: {} diagnostic(s) in {check_ms:.1}ms - serving last good output", errors.len());
+        }
+        LiveWatchError::Lints(sources, errors) => {
+            for error in &errors {
+                eprintln!("{}", render_project_err(&sources, error));
+            }
+            *cache = None;
+            log::error!(target: "WATCH", "skull {label}: {} lint error(s) - serving last good output", errors.len());
+        }
+    }
+}
+
 pub(crate) fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
     let out_file = output
         .map(std::path::PathBuf::from)
@@ -1856,114 +2007,50 @@ pub(crate) fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
         }
     }
 
-    // Live recompile backed by bone's incremental `Session` (warm stdlib,
-    // per-body re-inference) + skull's per-body emit cache: a body edit re-emits
-    // only the re-inferred chunks (+ their inline-dependent callers), reusing the
-    // rest. An interface/structural change (signature, add/remove file) shifts
-    // `Idx<Function>`, so the cache is rebuilt with a full emit.
-    let mut session: Option<bone_incremental::session::Session> = None;
+    let mut project: Option<crate::live_project::LiveProject> = None;
     let mut cache: Option<skull::mir_emit::SkullEmitCache> = None;
-
     let build = |label: &str,
-                 session: &mut Option<bone_incremental::session::Session>,
+                 project: &mut Option<crate::live_project::LiveProject>,
                  cache: &mut Option<skull::mir_emit::SkullEmitCache>| {
-        let source_spec = crate::common::path_to_source_spec(path);
-        let sources = match crate::unified_compile::discover_sources(&source_spec) {
-            Ok(s) => s,
-            Err(e) => {
-                log::error!(target: "WATCH", "skull: source discovery failed: {e}");
+        let started = Instant::now();
+        let initial = project.is_none();
+        let path_ref = std::path::Path::new(path);
+        let is_game = path_ref.is_dir()
+            && (crate::registry::RuntimeServices::registered().is_game_project)(path_ref)
+                .unwrap_or(false);
+        if initial {
+            match crate::live_project::LiveProject::init_for_watch(path, is_game) {
+                Ok(live) => *project = Some(live),
+                Err(error) => {
+                    log_live_watch_failure(
+                        label,
+                        started.elapsed().as_secs_f64() * 1000.0,
+                        error,
+                        cache,
+                    );
+                    return;
+                }
+            }
+        }
+        let result = if initial {
+            project
+                .as_mut()
+                .unwrap()
+                .watch_verdict()
+                .map(|()| (true, Vec::new()))
+        } else {
+            project.as_mut().unwrap().recompile_for_watch(is_game)
+        };
+        let check_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let (full, reinferred) = match result {
+            Ok(update) => update,
+            Err(error) => {
+                log_live_watch_failure(label, check_ms, error, cache);
                 return;
             }
         };
-        // Game build: drop test-only files (tests/ dirs) so a broken sim/test
-        // can't break the watched game output -- parity with the rock backend's
-        // is_game gate.
-        let path_ref = std::path::Path::new(path);
-        let sources = if path_ref.is_dir()
-            && (crate::registry::RuntimeServices::registered().is_game_project)(path_ref)
-                .unwrap_or(false)
-        {
-            match rock_host::source_files::production_only(&sources, path_ref) {
-                Ok(sources) => sources,
-                Err(error) => {
-                    log::error!(target: "WATCH", "skull: production source selection failed: {error}");
-                    return;
-                }
-            }
-        } else {
-            sources
-        };
-        let files = crate::bone_backend::session_files(&sources);
-
-        let t = Instant::now();
-        let sync = match session {
-            None => match crate::bone_backend::bone_session_for_emission(
-                files.clone(),
-                std::path::Path::new(path),
-            ) {
-                Ok(s) => {
-                    *session = Some(s);
-                    // First build: populate the cache.
-                    crate::bone_backend::SessionSync {
-                        structural: true,
-                        ..Default::default()
-                    }
-                }
-                Err(e) => {
-                    eprintln!("{}", e.render(&sources));
-                    log::error!(target: "WATCH", "skull {label}: session init failed");
-                    return;
-                }
-            },
-            Some(s) => crate::bone_backend::sync_session(s, &files, &sources),
-        };
-        let crate::bone_backend::SessionSync {
-            reinferred,
-            structural: full,
-            failed: update_failed,
-        } = sync;
-        let check_ms = t.elapsed().as_secs_f64() * 1000.0;
-
-        let Some(s) = session else { return };
-        // A broken edit still COMMITS its partial state to the session (the parse
-        // is total now), so the incremental cache -- which reflects the last good
-        // emit -- can no longer be diffed against it. Drop the cache on any error
-        // so the next clean recompile does a correct full rebuild rather than an
-        // incremental emit across the broken intermediate. The reload itself is
-        // skipped (last good output keeps running) until the code is clean.
-        if update_failed {
-            *cache = None;
-            log::error!(target: "WATCH", "skull {label}: update failed in {check_ms:.1}ms - serving last good output");
-            return;
-        }
-        let errs = s.diagnostics();
-        if !errs.is_empty() {
-            *cache = None;
-            for e in &errs {
-                eprintln!("{}", e.render(&sources));
-            }
-            log::error!(target: "WATCH", "skull {label}: {} diagnostic(s) in {check_ms:.1}ms - serving last good output", errs.len());
-            return;
-        }
-
-        // A recompile is a build, so the lint pass runs here too; an `Error`
-        // finding refuses the reload the same way a type error does.
-        let lint_errs = crate::lint_pass::run_build_lints(
-            s.workspace(),
-            &sources,
-            std::path::Path::new(path),
-            crate::lint_pass::Scope::WholeProject,
-        );
-        if !lint_errs.is_empty() {
-            *cache = None;
-            for e in &lint_errs {
-                eprintln!("{}", render_project_err(&sources, e));
-            }
-            log::error!(target: "WATCH", "skull {label}: {} lint error(s) - serving last good output", lint_errs.len());
-            return;
-        }
-
-        let ws = s.workspace();
+        let live = project.as_ref().unwrap();
+        let ws = live.workspace();
         let Ok(mid) = skull::user_module_id(ws) else {
             log::error!(target: "WATCH", "skull {label}: no user module");
             return;
@@ -1976,7 +2063,7 @@ pub(crate) fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
                     e
                 }
                 Err(e) => {
-                    eprintln!("{}", render_project_err(&sources, &e));
+                    eprintln!("{}", render_project_err(live.sources(), &e));
                     log::error!(target: "WATCH", "skull {label}: emit failed - serving last good output");
                     return;
                 }
@@ -1985,7 +2072,7 @@ pub(crate) fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
             match skull::mir_emit::emit_incremental(ws, cache.as_mut().unwrap(), &reinferred) {
                 Ok(e) => e,
                 Err(e) => {
-                    eprintln!("{}", render_project_err(&sources, &e));
+                    eprintln!("{}", render_project_err(live.sources(), &e));
                     log::error!(target: "WATCH", "skull {label}: incremental emit failed - serving last good output");
                     return;
                 }
@@ -2001,18 +2088,18 @@ pub(crate) fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
             Ok(()) => {
                 log::info!(target: "WATCH",
                 "skull {label}: {} files -> {} ({mode}, {} re-inferred; check {check_ms:.1}ms, emit {emit_ms:.1}ms)",
-                sources.files.len(), out_file.display(), reinferred.len());
+                live.sources().files.len(), out_file.display(), reinferred.len());
             }
             Err(err) => log::error!(target: "WATCH", "skull {label}: write failed: {err}"),
         }
     };
 
-    build("initial", &mut session, &mut cache);
+    build("initial", &mut project, &mut cache);
 
     crate::run_compile_watch_loop(
         vec![std::path::PathBuf::from(path)],
         &format!("skull: watching {path} for changes"),
-        |_event| build("rebuild", &mut session, &mut cache),
+        |_event| build("rebuild", &mut project, &mut cache),
     )
 }
 
@@ -2064,103 +2151,72 @@ fn skull_emit_project_with_inputs(
     dir: &str,
     inputs: crate::comptime::ProjectInputs,
 ) -> Result<(GameProgram, bool)> {
-    use std::path::PathBuf;
     let _slot = crate::compile_slots::acquire(dir)?;
     crate::compile_budget::phase("compile slot");
-    // Discovery reads the project serially; the stdlib parse, the build vars
-    // and the compiler image hash need nothing from it and run alongside.
-    skull::pipeline::warm_stdlib();
-    let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
-    let sources = match crate::unified_compile::discover_sources(&spec) {
-        Ok(s) => s,
-        Err(e) => {
-            log::error!(target: "SKULL", "cannot load project {}: {:#}", dir, e);
-            crate::invocation_log::exit(1);
+    let build = match cli_build(CliBuildMode::ProductionProject { dir, inputs }) {
+        Ok(build) => build,
+        Err(CliBuildFailure::Setup { context, error }) => {
+            if context == Some("cannot load project") {
+                log::error!(target: "SKULL", "cannot load project {}: {:#}", dir, error);
+                crate::invocation_log::exit(1);
+            }
+            return Err(error);
         }
-    };
-    // Game build: drop test-only files (tests/ dirs) so a compile error in a
-    // sim/test can't break the running game.
-    let sources = rock_host::source_files::production_only(&sources, std::path::Path::new(dir))
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    crate::compile_budget::phase("discovery");
-    crate::compile_budget::sources(&sources);
-
-    // Compile core: parse(assemble) + bone check + skull codegen. Excludes
-    // discovery (disk read) and the caller's output write, matching the bone
-    // backend's `compile` figure so loc/sec lines up across backends.
-    let t = Instant::now();
-    let (modules, entry_file) = match skull_assemble_project(&sources) {
-        Ok(v) => v,
-        Err(errs) => {
-            eprintln!("{}", render_project_errs(&sources, &errs));
-            crate::invocation_log::exit(1);
-        }
-    };
-    crate::compile_budget::phase("parse+stdlib");
-
-    // Project build: modules outside `dir` (the `engine` dependency, stdlib)
-    // are libraries and prune to what the project reaches. The game build
-    // dropped `tests/` above, hence ProductionOnly lints.
-    let mut host = CliCompileHost {
-        sources: &sources,
-        lint_root: std::path::Path::new(dir),
-        lint_scope: crate::lint_pass::Scope::ProductionOnly,
-        comptime: CliComptime::Project(Some(inputs)),
-        prepare_timings: Vec::new(),
-        emission: CliEmission::WithAccessors,
-    };
-    let body_costs = crate::body_costs::begin();
-    let target = skull::pipeline::EmitTarget {
-        project_root: Some(dir),
-        renderer: skull::mir_emit::RendererTarget::Gl,
-        attribution: body_costs.is_some(),
-    };
-    let compiled = skull::pipeline::compile_modules(modules, entry_file, target, &mut host);
-    let skull::pipeline::Compiled {
-        ws, emission: emit, ..
-    } = match compiled {
-        Ok(compiled) => {
-            crate::compile_budget::emission(&compiled.emission);
-            compiled
-        }
-        Err(failure) => {
-            use skull::pipeline::Stage;
-            eprintln!("{}", render_project_errs(&sources, &failure.errors));
-            match failure.stage {
-                Stage::Lint => {
-                    log::error!(target: "SKULL", "{} lint error(s) in project {}", failure.errors.len(), dir)
+        Err(CliBuildFailure::Compile {
+            stage,
+            sources,
+            errors,
+        }) => {
+            eprintln!("{}", render_project_errs(&sources, &errors));
+            match stage {
+                Some(skull::pipeline::Stage::Lint) => {
+                    log::error!(target: "SKULL", "{} lint error(s) in project {}", errors.len(), dir)
                 }
-                Stage::Emit => {
+                Some(skull::pipeline::Stage::Emit) => {
                     log::error!(target: "SKULL", "skull emit failed for project {}", dir)
                 }
-                Stage::Parse | Stage::Check | Stage::Comptime => {
+                Some(
+                    skull::pipeline::Stage::Parse
+                    | skull::pipeline::Stage::Check
+                    | skull::pipeline::Stage::Comptime,
+                ) => {
                     log::error!(target: "SKULL", "bone type-check failed for project {}", dir)
                 }
+                None => {}
             }
             crate::invocation_log::exit(1);
         }
     };
+    let CliBuild {
+        sources,
+        compiled,
+        emission_mode,
+        compile,
+        body_costs,
+        ..
+    } = build;
+    let skull::pipeline::Compiled {
+        ws, mut emission, ..
+    } = compiled;
+    let CliEmission::Accessors(metadata) = emission_mode else {
+        unreachable!("production build accessor metadata");
+    };
+    crate::compile_budget::emission(&emission);
     if let Some(path) = body_costs
-        && let Err(e) = crate::body_costs::write(&path, &ws, &emit.attribution)
+        && let Err(e) = crate::body_costs::write(&path, &ws, &emission.attribution)
     {
         log::error!(target: "SKULL", "cannot write body costs to {}: {:#}", path.display(), e);
         crate::invocation_log::exit(1);
     }
-    if let Err(e) = write_allocation_report(None, &emit.allocation_report) {
+    if let Err(e) = write_allocation_report(None, &emission.allocation_report) {
         log::error!(target: "SKULL", "cannot write allocation report for {}: {:#}", dir, e);
         crate::invocation_log::exit(1);
     }
-    let mut emit = emit;
-    let emits_main = emit.emits_main;
-    let lua = std::mem::take(&mut emit.lua);
-    let compile = t.elapsed();
+    let emits_main = emission.emits_main;
+    let lua = std::mem::take(&mut emission.lua);
     crate::bone_backend::log_compile_stats(&sources, &ws, compile, compile, None);
 
-    let metadata = match host.emission {
-        CliEmission::Accessors(metadata) => metadata,
-        _ => global_accessor_metadata(&ws),
-    };
-    let bridge_end = emit.globals_bridge_end;
+    let bridge_end = emission.globals_bridge_end;
     let lua = match metadata.and_then(|metadata| GameProgram::new(lua, bridge_end, metadata, &ws)) {
         Ok(lua) => lua,
         Err(error) => {
@@ -2172,9 +2228,9 @@ fn skull_emit_project_with_inputs(
     crate::compile_budget::phase("global accessors");
     // Overlap workspace destruction with the final output write or runtime launch.
     #[cfg(not(feature = "sequential"))]
-    rayon::spawn(move || drop((ws, emit)));
+    rayon::spawn(move || drop((ws, emission)));
     #[cfg(feature = "sequential")]
-    drop((ws, emit));
+    drop((ws, emission));
     Ok((lua, emits_main))
 }
 

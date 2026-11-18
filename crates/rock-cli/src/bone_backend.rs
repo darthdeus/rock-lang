@@ -531,57 +531,6 @@ pub(crate) fn log_compile_stats(
     }
 }
 
-/// What one watch-loop pass changed in a live session.
-#[derive(Default)]
-pub(crate) struct SessionSync {
-    pub reinferred: Vec<bone_incremental::session::BodyId>,
-    /// An interface or structural change (signature, scope, a removed file)
-    /// that shifts ids, so incremental emission must rebuild.
-    pub structural: bool,
-    pub failed: bool,
-}
-
-/// Bring `session` up to `files`, the freshly discovered sources: update each
-/// file and drop tracked files that disappeared. Errors render as they occur;
-/// the session keeps serving its last good state.
-pub(crate) fn sync_session(
-    session: &mut bone_incremental::session::Session,
-    files: &[bone_incremental::session::SessionFile],
-    sources: &SourceFiles,
-) -> SessionSync {
-    use bone_incremental::session::UpdateTier;
-    let mut sync = SessionSync::default();
-    for f in files {
-        match session.update_file(&f.path, &f.text) {
-            Ok(result) => {
-                sync.structural |= matches!(
-                    result.tier,
-                    UpdateTier::Interface | UpdateTier::Scope | UpdateTier::FullUser
-                );
-                sync.reinferred.extend(result.reinferred);
-            }
-            Err(e) => {
-                sync.failed = true;
-                eprintln!("{}", e.render(sources));
-            }
-        }
-    }
-    let gone: Vec<String> = session
-        .tracked_paths()
-        .into_iter()
-        .filter(|p| !files.iter().any(|f| f.path == *p))
-        .map(|p| p.to_string())
-        .collect();
-    for file_path in gone {
-        sync.structural = true;
-        if let Err(e) = session.remove_file(&file_path) {
-            sync.failed = true;
-            eprintln!("{}", e.render(sources));
-        }
-    }
-    sync
-}
-
 /// Log the mean per-stage timing of `agg`, summed over `iters` runs, on the
 /// `PROFILE` target.
 fn report_phase_timing(label: &str, agg: &BonePhaseTimes, iters: usize) {
