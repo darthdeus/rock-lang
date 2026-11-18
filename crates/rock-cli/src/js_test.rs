@@ -29,7 +29,7 @@ type JsUnitOutcome = std::result::Result<JsUnitRun, UnitFailure>;
 pub fn js_test(paths: &[String]) -> Result<()> {
     let start = Instant::now();
     let (files, package_dirs) = crate::skull_backend::collect_test_units(paths)?;
-    let outcomes = crate::test_unit::build_units(&files, &package_dirs, js_build_unit);
+    let outcomes = crate::test_unit::run_units(&files, &package_dirs, None, js_build_unit);
 
     let mut tests_passed = 0;
     let mut tests_failed = 0;
@@ -149,12 +149,7 @@ fn js_build_unit(unit: &str, is_package: bool) -> JsUnitOutcome {
             rendered: format!("sound bank preparation failed for {unit}: {error:#}"),
         });
     }
-    let checked = if is_package {
-        crate::test_unit::check_package(unit, true)
-    } else {
-        crate::test_unit::check_file(unit, true)
-    };
-    match checked? {
+    match crate::test_unit::check_unit(unit, is_package, true)? {
         UnitCheck::Checked { ws, tests, sources } => js_run_tests(&ws, &tests, &|e| {
             crate::skull_backend::render_project_errs(&sources, std::slice::from_ref(e))
         }),

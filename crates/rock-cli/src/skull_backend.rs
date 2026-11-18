@@ -5,7 +5,7 @@
 //! from bone's HIR and, for `test`/`run`, executes it with LuaJIT.
 
 use crate::Result;
-use crate::bone_backend::{categorize, short_path};
+use crate::bone_backend::categorize;
 use crate::registry::{ProgramKind, RuntimeServices};
 use bone_core::prelude::Instant;
 use colored::Colorize;
@@ -2664,16 +2664,6 @@ pub(crate) fn skull_test(
     let mut details: Vec<(String, String)> = Vec::new();
     let mut timings: Vec<(String, TestTiming)> = Vec::new();
 
-    // bone can panic during inference on some inputs (a bone bug, not ours).
-    // Silence the default panic print during the sweep and catch each unit's
-    // panic so one bad unit doesn't abort the whole measurement — it's reported
-    // as a `bone panic` failure instead.
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-
-    // Run every unit (files first, then packages), collecting labelled outcomes
-    // so both kinds fold through one reporting path.
-    type UnitResult = std::thread::Result<std::result::Result<SkullOutcome, SkullFailure>>;
     // Sampling builds keep one stack for the profiler.
     let threads = if cfg!(feature = "sequential") {
         1
@@ -2682,25 +2672,22 @@ pub(crate) fn skull_test(
             std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
         })
     };
-    let mut outcomes: Vec<(String, UnitResult)> =
-        crate::parallel_runner::map_in_order(&files, threads, |file| {
-            let outcome: UnitResult = match fs_err::read_to_string(file) {
-                Ok(src) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    skull_build(file, &src, filter)
-                })),
-                Err(e) => Ok(Err(SkullFailure {
-                    reason: e.to_string(),
-                    rendered: e.to_string(),
-                })),
-            };
-            (short_path(file).to_string(), outcome)
+    // Files use the configured pool, while package workspaces stay serial.
+    // The common unit runner preserves result order and contains each panic.
+    let outcomes =
+        crate::test_unit::run_units(&files, &package_dirs, Some(threads), |unit, is_package| {
+            if is_package {
+                skull_build_package(unit, shards, filter)
+            } else {
+                match fs_err::read_to_string(unit) {
+                    Ok(src) => skull_build(unit, &src, filter),
+                    Err(e) => Err(SkullFailure {
+                        reason: e.to_string(),
+                        rendered: e.to_string(),
+                    }),
+                }
+            }
         });
-    for dir in &package_dirs {
-        let outcome: UnitResult = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            skull_build_package(dir, shards, filter)
-        }));
-        outcomes.push((short_path(dir).to_string(), outcome));
-    }
 
     for (label, outcome) in outcomes {
         match outcome {
@@ -2759,8 +2746,6 @@ pub(crate) fn skull_test(
             }
         }
     }
-
-    std::panic::set_hook(prev_hook);
 
     if !reason_counts.is_empty() {
         let mut rows: Vec<(String, usize)> = reason_counts.into_iter().collect();
