@@ -34,10 +34,6 @@ pub(super) fn direct_refs(ws: &Workspace, cg: &CodegenCtx, mf: &MirFunc) -> (Vec
                 stack.push(*then_bb);
                 stack.push(*else_bb);
             }
-            Term::Switch { cases, default, .. } => {
-                stack.extend(cases.iter().map(|(_, t)| *t));
-                stack.push(*default);
-            }
             Term::Yield { resume, .. } => stack.push(*resume),
             Term::Return(_) | Term::Unreachable => {}
         }

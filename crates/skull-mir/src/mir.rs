@@ -1112,13 +1112,6 @@ pub enum Term {
         then_bb: Idx<Block>,
         else_bb: Idx<Block>,
     },
-    /// Multi-way branch (match). PROVISIONAL — the case-key representation is
-    /// refined when match lowering lands (today: match a literal discriminant).
-    Switch {
-        discr: Idx<Inst>,
-        cases: Vec<(Lit, Idx<Block>)>,
-        default: Idx<Block>,
-    },
     /// `yield <value>`, resuming at `resume`. `values` is the yield value's leaves
     /// (empty = bare yield, 1 = a scalar, N = a flat enum's tag+payload leaves via
     /// the frame-slot channel). **Pre-rewrite only** — the coroutine transform (in
@@ -1138,7 +1131,6 @@ impl Term {
                 values.iter().for_each(|value| push(*value));
             }
             Term::Branch { cond, .. } => push(*cond),
-            Term::Switch { discr, .. } => push(*discr),
             Term::Unreachable | Term::Goto(_) => {}
         }
     }
@@ -1149,7 +1141,7 @@ impl Term {
             Term::Return(values) | Term::Yield { values, .. } => {
                 values.iter_mut().for_each(|value| *value = map(*value));
             }
-            Term::Branch { cond: value, .. } | Term::Switch { discr: value, .. } => {
+            Term::Branch { cond: value, .. } => {
                 *value = map(*value);
             }
             Term::Unreachable | Term::Goto(_) => {}
@@ -1165,12 +1157,6 @@ impl Term {
             } => {
                 *then_bb = map(*then_bb);
                 *else_bb = map(*else_bb);
-            }
-            Term::Switch { cases, default, .. } => {
-                for (_, target) in cases {
-                    *target = map(*target);
-                }
-                *default = map(*default);
             }
             Term::Return(_) | Term::Unreachable => {}
         }

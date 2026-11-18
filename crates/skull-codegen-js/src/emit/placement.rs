@@ -127,9 +127,6 @@ impl PlacementEmit for JsPlacement<'_, '_> {
 
     fn block(&mut self, block: Idx<Block>) -> Result<BlockFlow, Self::Error> {
         self.em.emit_block_effects(block)?;
-        if matches!(self.em.mf.blocks[block].term, Term::Switch { .. }) {
-            return Err(err("JS subset: `match`/switch not supported"));
-        }
         Ok(BlockFlow::Terminator)
     }
 
@@ -141,7 +138,6 @@ impl PlacementEmit for JsPlacement<'_, '_> {
                 Ok(())
             }
             Term::Yield { .. } => Err(err("JS subset: `yield` not supported")),
-            Term::Switch { .. } => Err(err("JS subset: `match`/switch not supported")),
             Term::Goto(_) | Term::Branch { .. } => unreachable!("walk handles block edges"),
         }
     }
@@ -193,15 +189,6 @@ impl PlacementEmit for JsPlacement<'_, '_> {
         ladder.open = true;
         ladder.conditions += 1;
         Ok(())
-    }
-
-    fn switch_case(
-        &mut self,
-        _ladder: &mut Self::Ladder,
-        _discr: Idx<Inst>,
-        _value: &Lit,
-    ) -> Result<(), Self::Error> {
-        Err(err("JS subset: `match`/switch not supported"))
     }
 
     fn otherwise(&mut self, ladder: &mut Self::Ladder) -> Result<(), Self::Error> {

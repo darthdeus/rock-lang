@@ -394,18 +394,6 @@ fn fmt_term(t: &Term, num: &HashMap<Idx<Inst>, u32>) -> String {
             raw(*then_bb),
             raw(*else_bb)
         ),
-        Term::Switch {
-            discr,
-            cases,
-            default,
-        } => {
-            let cs = cases
-                .iter()
-                .map(|(l, b)| format!("{} -> bb{}", fmt_lit(l), raw(*b)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("switch v{} [{cs}] else bb{}", num[discr], raw(*default))
-        }
         Term::Yield { values, resume } => {
             if values.is_empty() {
                 format!("yield -> bb{}", raw(*resume))

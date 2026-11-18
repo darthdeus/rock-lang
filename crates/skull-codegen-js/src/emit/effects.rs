@@ -252,8 +252,7 @@ impl Emitter<'_> {
     }
 
     /// A trampoline case's terminator: `__bb` reassignment + `continue` for
-    /// in-region edges, `return` for exits. `Switch` is a literal if-chain (the
-    /// discriminant is a temp or a pure inlinable, so re-rendering is safe).
+    /// in-region edges, `return` for exits.
     pub(super) fn emit_trampoline_term(&mut self, b: Idx<Block>) -> Result<(), CompilerError> {
         match self.mf.blocks[b].term.clone() {
             Term::Goto(t) => self.push(&format!("__bb = {}; continue;", self.mf.emit_block_id(t))),
@@ -268,34 +267,6 @@ impl Emitter<'_> {
                     self.mf.emit_block_id(then_bb),
                     self.mf.emit_block_id(else_bb)
                 ));
-            }
-            Term::Switch {
-                discr,
-                cases,
-                default,
-            } => {
-                let d = self.render_val(discr)?;
-                let mut s = String::new();
-                for (lit, bb) in &cases {
-                    let cmp = match lit {
-                        Lit::Nil => format!("{d} == null"),
-                        Lit::Omitted => format!("{d} === {OMITTED_ARG}"),
-                        Lit::Int(i) => format!("{d} === {i}"),
-                        Lit::Uint(i) => format!("{d} === {i}"),
-                        Lit::Bool(v) => format!("{d} === {v}"),
-                        Lit::Float(f) => format!("{d} === {}", js_number(*f)?),
-                        Lit::Str(v) => format!("{d} === {}", js_string_lit(v.as_str())),
-                    };
-                    s.push_str(&format!(
-                        "if ({cmp}) {{ __bb = {}; }} else ",
-                        self.mf.emit_block_id(*bb)
-                    ));
-                }
-                s.push_str(&format!(
-                    "{{ __bb = {}; }} continue;",
-                    self.mf.emit_block_id(default)
-                ));
-                self.push(&s);
             }
             Term::Return(vs) => {
                 if vs.len() > 1 && !self.pack_multi_return {

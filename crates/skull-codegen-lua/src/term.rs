@@ -328,7 +328,6 @@ impl Emitter<'_> {
         match term {
             Term::Return(vals) if !vals.is_empty() => self.mark_inline_operand(out, vals[0]),
             Term::Branch { cond, .. } => self.mark_inline_operand(out, *cond),
-            Term::Switch { discr, .. } => self.mark_inline_operand(out, *discr),
             _ => {}
         }
         match term {
@@ -378,37 +377,6 @@ impl Emitter<'_> {
                 out.push_str(" else goto ");
                 self.write_label_ref(out, Label::Block, *else_bb);
                 out.push_str(" end\n");
-            }
-            Term::Switch {
-                discr,
-                cases,
-                default,
-            } => {
-                // `discr` is compared in every case arm; render it once.
-                let d = self.opnd_str(*discr);
-                let mut first = true;
-                for (l, b) in cases {
-                    let at = self.control.line(out.len(), 1);
-                    self.control
-                        .goto(at, 0, 0, Label::Block, self.func.emit_block_id(*b));
-                    let kw = if first { "if" } else { "elseif" };
-                    first = false;
-                    let _ = write!(out, " {kw} {d} == ");
-                    write_lit(out, l);
-                    out.push_str(" then goto ");
-                    self.write_label_ref(out, Label::Block, *b);
-                    out.push('\n');
-                }
-                if first {
-                    self.write_goto(out, Label::Block, *default);
-                } else {
-                    let at = self.control.line(out.len(), 1);
-                    self.control
-                        .goto(at, 0, 0, Label::Block, self.func.emit_block_id(*default));
-                    out.push_str(" else goto ");
-                    self.write_label_ref(out, Label::Block, *default);
-                    out.push_str(" end\n");
-                }
             }
             Term::Yield { .. } => self.reject_pass_residue("a `yield`", "coroutine transform"),
         }

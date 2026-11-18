@@ -104,10 +104,8 @@ fn probe() {
     assert_eq!(f.to_string(), expected);
 }
 
-/// Exercises the remaining dump arms (typed arith, unary, bitwise, global,
-/// `Switch`, `Yield`) so the oracle is trustworthy before lowering relies on it.
 #[test]
-fn dump_covers_arith_unary_switch_and_yield() {
+fn dump_covers_arith_unary_and_yield() {
     let mut f = MirFunc::new(ustr("probe"));
     let entry = f.entry();
     let s0 = f.new_block();
@@ -119,12 +117,13 @@ fn dump_covers_arith_unary_switch_and_yield() {
     let sum = f.emit(entry, Inst::FloatAdd(a, b));
     let neg = f.emit(entry, Inst::Neg(sum));
     let bits = f.emit(entry, Inst::BitXor(neg, a));
+    let cond = f.emit(entry, Inst::Eq(bits, a));
     f.set_term(
         entry,
-        Term::Switch {
-            discr: bits,
-            cases: vec![(Lit::Int(0), s0), (Lit::Int(1), s1)],
-            default: resume,
+        Term::Branch {
+            cond,
+            then_bb: s0,
+            else_bb: s1,
         },
     );
 
@@ -152,7 +151,8 @@ fn probe() {
     v2 = float.add v0, v1
     v3 = neg v2
     v4 = bit.xor v3, v0
-    switch v4 [0 -> bb1, 1 -> bb2] else bb3
+    v5 = eq v4, v0
+    branch v5 -> bb1, bb2
   bb1:
     yield v4 -> bb3
   bb2:

@@ -1507,20 +1507,6 @@ impl BodyHasher {
                 self.block_idx(*then_bb);
                 self.block_idx(*else_bb);
             }
-            Term::Switch {
-                discr,
-                cases,
-                default,
-            } => {
-                self.tag(4);
-                self.inst_idx(*discr);
-                self.hash.write_usize(cases.len());
-                for (lit, block) in cases {
-                    self.lit(lit, false);
-                    self.block_idx(*block);
-                }
-                self.block_idx(*default);
-            }
             Term::Yield { values, resume } => {
                 self.tag(5);
                 self.inst_list(values);
