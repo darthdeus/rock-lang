@@ -5,6 +5,7 @@
 //! `assets/.eat/<dir>/`, whose files have fixed names per kind (`sheet_files`).
 
 mod verify;
+pub use stone_texture::{bc1_header, bc5_header};
 pub use verify::{SheetSpec, check_sheet, sheet_spec};
 
 use anyhow::Result;
@@ -448,10 +449,10 @@ pub fn sheet_files(line: &Line) -> Vec<String> {
     {
         files.push("albedo.dds".into());
     }
-    if matches!(line,Line::Animation(a) if a.material_bc5) {
-        files.push("material.bc5.dds".into());
-    }
     if let Line::Animation(animation) = line {
+        if animation.material_bc5 {
+            files.push("material.bc5.dds".into());
+        }
         if animation.normal_bc5 {
             files.push("normal.bc5.dds".into());
             if animation.skin_mask {
@@ -1229,5 +1230,3 @@ mod tests {
         );
     }
 }
-
-pub use stone_texture::{bc1_header, bc5_header};
