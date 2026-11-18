@@ -266,32 +266,31 @@ fn cli_build(mode: CliBuildMode<'_>) -> std::result::Result<CliBuild, CliBuildFa
     if production {
         skull::pipeline::warm_stdlib();
     }
-    let (sources, lint_root) = if let Some((file, contents)) = source {
-        crate::lint_pass::single_file_scope(file, contents)
-    } else {
-        let spec = crate::unified_compile::SourceSpec::Directory(path.into());
-        let discovered = crate::unified_compile::discover_sources(&spec).map_err(|error| {
-            CliBuildFailure::Setup {
-                context: Some("cannot load project"),
-                error,
-            }
-        })?;
-        let sources = if production {
-            rock_host::source_files::production_only(&discovered, std::path::Path::new(path))
-                .map_err(|error| CliBuildFailure::Setup {
-                    context: None,
-                    error: anyhow::anyhow!(error.to_string()),
-                })?
+    let (sources, lint_root) =
+        if let Some((file, contents)) = source {
+            crate::lint_pass::single_file_scope(file, contents)
         } else {
-            crate::package_test_sources::select(&discovered, std::path::Path::new(path)).map_err(
-                |error| CliBuildFailure::Setup {
-                    context: Some("cannot select package test sources"),
-                    error,
-                },
-            )?
+            let discovered =
+                crate::unified_compile::discover_project_sources(std::path::Path::new(path))
+                    .map_err(|error| CliBuildFailure::Setup {
+                        context: Some("cannot load project"),
+                        error,
+                    })?;
+            let sources = if production {
+                rock_host::source_files::production_only(&discovered, std::path::Path::new(path))
+                    .map_err(|error| CliBuildFailure::Setup {
+                        context: None,
+                        error: anyhow::anyhow!(error.to_string()),
+                    })?
+            } else {
+                crate::package_test_sources::select(&discovered, std::path::Path::new(path))
+                    .map_err(|error| CliBuildFailure::Setup {
+                        context: Some("cannot select package test sources"),
+                        error,
+                    })?
+            };
+            (sources, path.into())
         };
-        (sources, path.into())
-    };
     if production {
         crate::compile_budget::phase("discovery");
         crate::compile_budget::sources(&sources);

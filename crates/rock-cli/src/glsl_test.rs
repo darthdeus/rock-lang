@@ -481,8 +481,7 @@ pub(crate) fn shader_validate(dirs: &[String], skip_gpu: bool) -> Result<()> {
 /// Build a project directory into ONE type-checked workspace, tests included
 /// (sims may register their own `rock_shader` pairs -- validate those too).
 pub(crate) fn validate_workspace(dir: &str) -> Result<bone_semantic::inference::Workspace> {
-    let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
-    let sources = crate::unified_compile::discover_sources(&spec)
+    let sources = crate::unified_compile::discover_project_sources(std::path::Path::new(dir))
         .map_err(|e| anyhow::anyhow!("{dir}: cannot load project: {e}"))?;
     validate_sources(sources)
 }

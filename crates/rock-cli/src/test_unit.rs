@@ -106,11 +106,11 @@ pub(crate) fn check_file(file: &str, build_vars: bool) -> Result<UnitCheck, Unit
 
 /// Assemble and bone-check a package with its tests as one workspace.
 pub(crate) fn check_package(dir: &str, build_vars: bool) -> Result<UnitCheck, UnitFailure> {
-    let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
-    let sources = crate::unified_compile::discover_sources(&spec).map_err(|e| UnitFailure {
-        reason: "cannot load project".to_string(),
-        rendered: e.to_string(),
-    })?;
+    let sources = crate::unified_compile::discover_project_sources(std::path::Path::new(dir))
+        .map_err(|e| UnitFailure {
+            reason: "cannot load project".to_string(),
+            rendered: e.to_string(),
+        })?;
     let (mut ws, _entry) = crate::skull_backend::check_project(&sources)
         .map_err(|errs| UnitFailure::compile(&sources, &errs))?;
     if build_vars {

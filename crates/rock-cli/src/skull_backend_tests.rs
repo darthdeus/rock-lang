@@ -1856,8 +1856,7 @@ mod value_test_exec {
 #[cfg(test)]
 mod backend_stats_workspace_tests {
     use super::super::skull_workspace_timed;
-    use crate::unified_compile::{SourceSpec, discover_sources};
-    use std::path::PathBuf;
+    use crate::unified_compile::discover_project_sources;
 
     #[test]
     fn timed_emission_prepares_comptime_inputs_and_populates_attribution() {
@@ -1873,8 +1872,7 @@ mod backend_stats_workspace_tests {
         )
         .expect("main.rock");
 
-        let sources = discover_sources(&SourceSpec::Directory(PathBuf::from(dir.path())))
-            .expect("discover timed project");
+        let sources = discover_project_sources(dir.path()).expect("discover timed project");
         let (ok, times) = skull_workspace_timed(&sources, dir.path());
 
         assert!(ok, "timed emission must succeed for a prepared project");
@@ -1914,7 +1912,7 @@ mod backend_stats_workspace_tests {
             "fn main() { print(build_var(\"REQUIRED\")); print(library_value()) }\n",
         )
         .unwrap();
-        let sources = discover_sources(&SourceSpec::Directory(project.clone())).unwrap();
+        let sources = discover_project_sources(&project).unwrap();
         let (_, entry, _) = crate::bone_backend::parse_user_modules(&sources).unwrap();
         assert!(
             std::path::Path::new(entry.as_str()).starts_with(

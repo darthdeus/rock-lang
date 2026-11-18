@@ -16,9 +16,8 @@ pub(crate) enum LiveWatchError {
 }
 
 fn watch_sources(dir: &str, is_game: bool) -> std::result::Result<SourceFiles, LiveWatchError> {
-    let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
-    let discovered =
-        crate::unified_compile::discover_sources(&spec).map_err(LiveWatchError::Discovery)?;
+    let discovered = crate::unified_compile::discover_project_sources(Path::new(dir))
+        .map_err(LiveWatchError::Discovery)?;
     if is_game {
         rock_host::source_files::production_only(&discovered, Path::new(dir))
             .map_err(|error| LiveWatchError::SourceSelection(anyhow::anyhow!(error.to_string())))
@@ -128,8 +127,7 @@ pub struct LiveProject {
 /// The sources a live project of `dir` compiles and accepts edits to: every
 /// discovered file, or without `include_tests` the production build's.
 pub(crate) fn project_sources(dir: &str, include_tests: bool) -> Result<SourceFiles> {
-    let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
-    let discovered = crate::unified_compile::discover_sources(&spec)?;
+    let discovered = crate::unified_compile::discover_project_sources(Path::new(dir))?;
     if include_tests {
         return Ok(discovered);
     }

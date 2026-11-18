@@ -394,8 +394,7 @@ pub(crate) fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool
 
     // Discover the whole compilation unit (project + stick.toml deps) and warm a
     // Session (for stats + tier ground-truth) + a BoneWorkspace (for LSP timing).
-    let spec = crate::unified_compile::SourceSpec::Directory(dir.to_path_buf());
-    let sources = crate::unified_compile::discover_sources(&spec)?;
+    let sources = crate::unified_compile::discover_project_sources(dir)?;
     let files = crate::bone_backend::session_files(&sources);
     let mut session = crate::bone_backend::bone_session(files)
         .map_err(|e| anyhow::anyhow!("bone session warm failed: {}", e.message))?;

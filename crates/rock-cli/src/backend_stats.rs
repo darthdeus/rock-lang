@@ -50,8 +50,7 @@ struct SkullStats {
 pub(crate) fn do_backend_stats(input: &str, iters: usize, warmup: usize, json: bool) -> Result<()> {
     let iters = iters.max(1);
 
-    let source_spec = crate::common::path_to_source_spec(input);
-    let sources = crate::unified_compile::discover_sources(&source_spec)?;
+    let sources = crate::unified_compile::discover_sources(std::path::Path::new(input))?;
     if sources.files.is_empty() {
         anyhow::bail!("no Rock source files found at `{}`", input);
     }

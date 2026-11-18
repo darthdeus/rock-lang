@@ -52,9 +52,7 @@ pub(crate) fn do_lint(
     }
     let p = Path::new(path);
     let (ws, sources, root) = if p.is_dir() {
-        let sources = crate::unified_compile::discover_sources(
-            &crate::unified_compile::SourceSpec::Directory(PathBuf::from(path)),
-        )?;
+        let sources = crate::unified_compile::discover_project_sources(Path::new(path))?;
         let ws = match crate::skull_backend::check_project(&sources) {
             Ok((ws, _entry)) => ws,
             Err(errs) => return Err(reject(&sources, &errs)),
