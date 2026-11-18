@@ -12,6 +12,7 @@ macro_rules! scope {
 use std::str::FromStr;
 
 use anyhow::Result;
+use bone_query::FileUriExt;
 use log::error;
 use lsp_server::{Connection, Message, Request, RequestId, Response};
 use lsp_types::request::{
@@ -360,53 +361,74 @@ impl LspServer {
         let ws = &mut self.workspace;
         match req.method.as_str() {
             GotoDefinition::METHOD => {
-                answer::<GotoDefinition>(req, out, ws, go_to_definition_workspace)
+                answer::<GotoDefinition, _>(req, out, ws, |workspace, params| {
+                    go_to_definition_workspace(workspace, params)
+                        .map(|locations| locations.map(Into::into))
+                })
             }
             GotoTypeDefinition::METHOD => {
-                answer::<GotoTypeDefinition>(req, out, ws, go_to_type_definition_workspace)
+                answer::<GotoTypeDefinition, _>(req, out, ws, |workspace, params| {
+                    go_to_type_definition_workspace(workspace, params)
+                        .map(|locations| locations.map(Into::into))
+                })
             }
-            References::METHOD => answer::<References>(req, out, ws, find_references_workspace),
-            HoverRequest::METHOD => answer::<HoverRequest>(req, out, ws, do_hover_workspace),
+            References::METHOD => answer::<References, _>(req, out, ws, find_references_workspace),
+            HoverRequest::METHOD => answer::<HoverRequest, _>(req, out, ws, do_hover_workspace),
             SignatureHelpRequest::METHOD => {
-                answer::<SignatureHelpRequest>(req, out, ws, do_signature_help_workspace)
+                answer::<SignatureHelpRequest, _>(req, out, ws, do_signature_help_workspace)
             }
             InlayHintRequest::METHOD => {
-                answer::<InlayHintRequest>(req, out, ws, do_inlay_hints_workspace)
+                answer::<InlayHintRequest, _>(req, out, ws, do_inlay_hints_workspace)
             }
-            Completion::METHOD => answer::<Completion>(req, out, ws, do_completion_workspace),
+            Completion::METHOD => answer::<Completion, _>(req, out, ws, |workspace, params| {
+                do_completion_workspace(workspace, params).map(|items| items.map(Into::into))
+            }),
             PrepareRenameRequest::METHOD => {
-                answer::<PrepareRenameRequest>(req, out, ws, prepare_rename_workspace)
+                answer::<PrepareRenameRequest, _>(req, out, ws, |workspace, params| {
+                    prepare_rename_workspace(workspace, params)
+                        .map(|range| range.map(lsp_types::PrepareRenameResponse::Range))
+                })
             }
-            Rename::METHOD => answer::<Rename>(req, out, ws, do_rename_workspace),
+            Rename::METHOD => answer::<Rename, _>(req, out, ws, do_rename_workspace),
             DocumentSymbolRequest::METHOD => {
-                answer::<DocumentSymbolRequest>(req, out, ws, do_document_symbols_workspace)
+                answer::<DocumentSymbolRequest, _>(req, out, ws, |workspace, params| {
+                    do_document_symbols_workspace(workspace, params)
+                        .map(|symbols| symbols.map(Into::into))
+                })
             }
             WorkspaceSymbolRequest::METHOD => {
-                answer::<WorkspaceSymbolRequest>(req, out, ws, do_workspace_symbols_workspace)
+                answer::<WorkspaceSymbolRequest, _>(req, out, ws, |workspace, params| {
+                    do_workspace_symbols_workspace(workspace, params)
+                        .map(|symbols| symbols.map(lsp_types::WorkspaceSymbolResponse::Flat))
+                })
             }
             DocumentHighlightRequest::METHOD => {
-                answer::<DocumentHighlightRequest>(req, out, ws, do_document_highlight_workspace)
+                answer::<DocumentHighlightRequest, _>(req, out, ws, do_document_highlight_workspace)
             }
-            SemanticTokensFullRequest::METHOD => answer::<SemanticTokensFullRequest>(
-                req,
-                out,
-                ws,
-                semantic_tokens::full_semantic_tokens,
-            ),
-            SemanticTokensFullDeltaRequest::METHOD => answer::<SemanticTokensFullDeltaRequest>(
+            SemanticTokensFullRequest::METHOD => {
+                answer::<SemanticTokensFullRequest, _>(req, out, ws, |workspace, params| {
+                    semantic_tokens::full_semantic_tokens(workspace, params)
+                        .map(|tokens| tokens.map(Into::into))
+                })
+            }
+            SemanticTokensFullDeltaRequest::METHOD => answer::<SemanticTokensFullDeltaRequest, _>(
                 req,
                 out,
                 ws,
                 semantic_tokens::delta_semantic_tokens,
             ),
-            SemanticTokensRangeRequest::METHOD => answer::<SemanticTokensRangeRequest>(
-                req,
-                out,
-                ws,
-                semantic_tokens::range_semantic_tokens,
-            ),
+            SemanticTokensRangeRequest::METHOD => {
+                answer::<SemanticTokensRangeRequest, _>(req, out, ws, |workspace, params| {
+                    semantic_tokens::range_semantic_tokens(workspace, params)
+                        .map(|tokens| tokens.map(Into::into))
+                })
+            }
             CodeActionRequest::METHOD => {
-                answer::<CodeActionRequest>(req, out, ws, compute_code_actions_workspace)
+                answer::<CodeActionRequest, _>(req, out, ws, |workspace, params| {
+                    compute_code_actions_workspace(workspace, params).map(|actions| {
+                        actions.map(|actions| actions.into_iter().map(Into::into).collect())
+                    })
+                })
             }
             // Introspection requests for the rock.nvim panel.
             "rock/stats" => {
@@ -619,6 +641,7 @@ fn bone_reload_and_publish(
         let notice = lsp_types::PublishDiagnosticsParams {
             uri: file_uri,
             diagnostics,
+            version: None,
         };
         notify(
             out,
@@ -629,18 +652,18 @@ fn bone_reload_and_publish(
     Ok(())
 }
 
-/// Answer an `R` request with `handler`. The handler's answer must have the
-/// request's declared result type, so it cannot send a shape the protocol
-/// does not allow.
-fn answer<R: lsp_types::request::Request>(
+/// Answer an `R` request with a caller-selected parameter type and the request's
+/// declared result type. Position-only handlers retain compatibility with
+/// clients that omit context added by newer protocol versions.
+fn answer<R: lsp_types::request::Request, P: serde::de::DeserializeOwned>(
     req: Request,
     out: &mut Vec<Message>,
     workspace: &mut LspWorkspace,
-    handler: fn(&mut LspWorkspace, &R::Params) -> Result<R::Result>,
+    handler: fn(&mut LspWorkspace, &P) -> Result<R::Result>,
 ) {
     let _span =
         tracing::info_span!("lsp_request", method = R::METHOD, request_id = %req.id).entered();
-    match serde_json::from_value::<R::Params>(req.params) {
+    match serde_json::from_value::<P>(req.params) {
         Ok(params) => send_response(out, req.id, handler(workspace, &params)),
         Err(error) => {
             let detail = format!("invalid {} params: {error}", R::METHOD);

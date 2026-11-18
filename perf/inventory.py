@@ -11,7 +11,7 @@ import tomllib
 from urllib.parse import quote
 
 EXTENSIONS = {".rs", ".rock", ".py", ".js", ".ts", ".tsx", ".c", ".h", ".lua", ".glsl", ".svelte"}
-UPSTREAM = {"la-arena", "lsp-server-manual", "lsp-types-manual", "test-utils"}
+UPSTREAM = {"la-arena", "test-utils"}
 
 
 def git(root, *args):

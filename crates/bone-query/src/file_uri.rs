@@ -1,63 +1,4 @@
-use std::{hash::Hash, ops::Deref, str::FromStr};
-
-use serde::{de::Error, Deserialize, Serialize};
-
-/// LSP URI backed by `fluent_uri::Uri<String>`.
-#[derive(Debug, Clone)]
-pub struct Uri(fluent_uri::Uri<String>);
-
-impl Serialize for Uri {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.as_str().serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for Uri {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let string = String::deserialize(deserializer)?;
-        fluent_uri::Uri::<String>::parse_from(string)
-            .map(Uri)
-            .map_err(|(_, error)| Error::custom(error.to_string()))
-    }
-}
-
-impl FromStr for Uri {
-    type Err = fluent_uri::ParseError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        fluent_uri::Uri::parse(s).map(|uri| Self(uri.to_owned()))
-    }
-}
-
-impl Deref for Uri {
-    type Target = fluent_uri::Uri<String>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-// Parsed URI metadata may use interior cells, but map-key identity depends only
-// on the immutable owned text. Keep equality and hashing independent of metadata.
-impl PartialEq for Uri {
-    fn eq(&self, other: &Self) -> bool {
-        self.as_str() == other.as_str()
-    }
-}
-
-impl Eq for Uri {}
-
-impl Hash for Uri {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.as_str().hash(state)
-    }
-}
+use lsp_types::Uri;
 
 /// Why a `file:` URI and a filesystem path could not be converted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,63 +12,60 @@ impl std::fmt::Display for FileUriError {
 
 impl std::error::Error for FileUriError {}
 
-impl Uri {
-    /// The absolute filesystem path a `file:` URI names, percent-decoded.
-    /// Any other scheme, a remote host, a query or fragment, or a path that
-    /// does not decode to UTF-8 is an error. On Windows the path must start
-    /// with a drive (`file:///C:/x` or `file:///c%3A/x`) and comes back as
-    /// `C:\x`.
-    pub fn to_file_path(&self) -> Result<String, FileUriError> {
-        self.to_file_path_on(cfg!(windows))
+/// Convert local editor file URIs and absolute native paths, including Windows drives.
+pub trait FileUriExt {
+    fn to_file_path(&self) -> Result<String, FileUriError>;
+    fn from_file_path(path: &str) -> Result<Uri, FileUriError>;
+}
+
+impl FileUriExt for Uri {
+    fn to_file_path(&self) -> Result<String, FileUriError> {
+        to_file_path_on(self, cfg!(windows))
     }
 
-    fn to_file_path_on(&self, windows: bool) -> Result<String, FileUriError> {
-        let err = |why: &str| FileUriError(format!("{why}: {}", self.as_str()));
-        match self.scheme() {
-            Some(scheme) if scheme.eq_lowercase("file") => {}
-            _ => return Err(err("not a file: URI")),
-        }
-        if let Some(auth) = self.authority() {
-            let host = auth.as_str();
-            if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
-                return Err(err("file: URI names a remote host"));
-            }
-        }
-        if self.query().is_some() || self.fragment().is_some() {
-            return Err(err("file: URI has a query or fragment"));
-        }
-        let path = self
-            .path()
-            .as_estr()
-            .decode()
-            .into_string()
-            .map_err(|_| err("file: URI path is not UTF-8 after decoding"))?;
-        uri_path_to_native(&path, windows).ok_or_else(|| err("file: URI path is not absolute"))
+    fn from_file_path(path: &str) -> Result<Uri, FileUriError> {
+        from_file_path_on(path, cfg!(windows))
     }
+}
 
-    /// The `file:` URI for an absolute filesystem path, percent-encoding every
-    /// byte outside the unreserved set and `/`. On Windows the path must start
-    /// with a drive (`C:\x`, `C:/x`, or the verbatim `\\?\C:\x` that
-    /// `std::fs::canonicalize` returns); UNC paths are not supported.
-    pub fn from_file_path(path: &str) -> Result<Uri, FileUriError> {
-        Self::from_file_path_on(path, cfg!(windows))
+fn to_file_path_on(uri: &Uri, windows: bool) -> Result<String, FileUriError> {
+    let err = |why: &str| FileUriError(format!("{why}: {}", uri.as_str()));
+    match uri.scheme() {
+        Some(scheme) if scheme.eq_lowercase("file") => {}
+        _ => return Err(err("not a file: URI")),
     }
-
-    fn from_file_path_on(path: &str, windows: bool) -> Result<Uri, FileUriError> {
-        let uri_path = native_to_uri_path(path, windows)
-            .map_err(|why| FileUriError(format!("{why}: {path}")))?;
-        let mut s = String::with_capacity(uri_path.len() + 7);
-        s.push_str("file://");
-        for &b in uri_path.as_bytes() {
-            if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'.' | b'_' | b'~') {
-                s.push(b as char);
-            } else {
-                s.push_str(&format!("%{b:02X}"));
-            }
+    if let Some(auth) = uri.authority() {
+        let host = auth.as_str();
+        if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
+            return Err(err("file: URI names a remote host"));
         }
-        s.parse()
-            .map_err(|e: fluent_uri::ParseError| FileUriError(format!("{e}: {path}")))
     }
+    if uri.query().is_some() || uri.fragment().is_some() {
+        return Err(err("file: URI has a query or fragment"));
+    }
+    let path = uri
+        .path()
+        .as_estr()
+        .decode()
+        .into_string()
+        .map_err(|_| err("file: URI path is not UTF-8 after decoding"))?;
+    uri_path_to_native(&path, windows).ok_or_else(|| err("file: URI path is not absolute"))
+}
+
+fn from_file_path_on(path: &str, windows: bool) -> Result<Uri, FileUriError> {
+    let uri_path =
+        native_to_uri_path(path, windows).map_err(|why| FileUriError(format!("{why}: {path}")))?;
+    let mut s = String::with_capacity(uri_path.len() + 7);
+    s.push_str("file://");
+    for &b in uri_path.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'.' | b'_' | b'~') {
+            s.push(b as char);
+        } else {
+            s.push_str(&format!("%{b:02X}"));
+        }
+    }
+    s.parse::<Uri>()
+        .map_err(|e| FileUriError(format!("{e}: {path}")))
 }
 
 /// Whether a Windows path starts `X:` followed by the end or a separator in
@@ -189,7 +127,7 @@ fn native_to_uri_path(path: &str, windows: bool) -> Result<String, &'static str>
 
 #[cfg(test)]
 mod tests {
-    use super::{native_to_uri_path, uri_path_to_native, Uri};
+    use super::*;
     use std::str::FromStr;
 
     #[test]
@@ -229,25 +167,19 @@ mod tests {
             "file:///C%3a/x/a.rock",
         ] {
             assert_eq!(
-                Uri::from_str(s).unwrap().to_file_path_on(true).unwrap(),
+                to_file_path_on(&Uri::from_str(s).unwrap(), true).unwrap(),
                 r"C:\x\a.rock",
                 "{s}"
             );
         }
-        let uri = Uri::from_file_path_on(r"C:\my dir\a.rock", true).unwrap();
+        let uri = from_file_path_on(r"C:\my dir\a.rock", true).unwrap();
         assert_eq!(uri.as_str(), "file:///C%3A/my%20dir/a.rock");
-        assert_eq!(uri.to_file_path_on(true).unwrap(), r"C:\my dir\a.rock");
-        assert!(Uri::from_str("file:///x/a.rock")
-            .unwrap()
-            .to_file_path_on(true)
-            .is_err());
-        assert!(Uri::from_file_path_on("/x/a.rock", true).is_err());
+        assert_eq!(to_file_path_on(&uri, true).unwrap(), r"C:\my dir\a.rock");
+        assert!(to_file_path_on(&Uri::from_str("file:///x/a.rock").unwrap(), true).is_err());
+        assert!(from_file_path_on("/x/a.rock", true).is_err());
         // The same drive-shaped URI is an ordinary absolute path elsewhere.
         assert_eq!(
-            Uri::from_str("file:///C%3A/x")
-                .unwrap()
-                .to_file_path_on(false)
-                .unwrap(),
+            to_file_path_on(&Uri::from_str("file:///C%3A/x").unwrap(), false).unwrap(),
             "/C:/x"
         );
     }
@@ -255,19 +187,19 @@ mod tests {
     #[test]
     fn windows_verbatim_drive_paths_convert_like_plain_drive_paths() {
         for path in [r"\\?\C:\proj\a.rock", r"\\?\c:\proj\a.rock"] {
-            let uri = Uri::from_file_path_on(path, true).unwrap();
+            let uri = from_file_path_on(path, true).unwrap();
             assert_eq!(
                 uri,
-                Uri::from_file_path_on(&path[4..], true).unwrap(),
+                from_file_path_on(&path[4..], true).unwrap(),
                 "{}",
                 path
             );
         }
-        let uri = Uri::from_file_path_on(r"\\?\C:\my dir\a.rock", true).unwrap();
+        let uri = from_file_path_on(r"\\?\C:\my dir\a.rock", true).unwrap();
         assert_eq!(uri.as_str(), "file:///C%3A/my%20dir/a.rock");
-        assert_eq!(uri.to_file_path_on(true).unwrap(), r"C:\my dir\a.rock");
+        assert_eq!(to_file_path_on(&uri, true).unwrap(), r"C:\my dir\a.rock");
         // Unix has no verbatim prefix: the same string is a relative path.
-        assert!(Uri::from_file_path_on(r"\\?\C:\proj\a.rock", false).is_err());
+        assert!(from_file_path_on(r"\\?\C:\proj\a.rock", false).is_err());
     }
 
     #[test]
@@ -276,18 +208,18 @@ mod tests {
             r"\\?\UNC\server\share\a.rock",
             r"\\?\unc\server\share\a.rock",
         ] {
-            let e = Uri::from_file_path_on(path, true).unwrap_err().to_string();
+            let e = from_file_path_on(path, true).unwrap_err().to_string();
             assert!(e.contains("verbatim UNC") && e.contains(path), "{}", e);
         }
         let path = r"\\?\Volume{0}\a.rock";
-        let e = Uri::from_file_path_on(path, true).unwrap_err().to_string();
+        let e = from_file_path_on(path, true).unwrap_err().to_string();
         assert!(
             e.contains("verbatim path without a drive") && e.contains(path),
             "{}",
             e
         );
         let path = r"\\server\share\a.rock";
-        let e = Uri::from_file_path_on(path, true).unwrap_err().to_string();
+        let e = from_file_path_on(path, true).unwrap_err().to_string();
         assert!(e.contains("UNC") && e.contains(path), "{}", e);
     }
 

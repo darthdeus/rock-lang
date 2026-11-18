@@ -5,6 +5,7 @@ use crate::completion::{assert_labels, complete_in, labels_of};
 use crate::fixture::{PATH, Project, assert_text, diagnostics_in, hover_markup, workspace};
 use crate::label_asserts::assert_offers;
 use bone_query::BoneWorkspace;
+use bone_query::FileUriExt;
 use lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
 
 #[track_caller]
@@ -790,6 +791,7 @@ fn inlay_labels(src: &str, range: Range) -> Vec<String> {
         .into_iter()
         .map(|h| match h.label {
             lsp_types::InlayHintLabel::String(s) => s,
+            _ => panic!("expected a string inlay label"),
         })
         .collect()
 }

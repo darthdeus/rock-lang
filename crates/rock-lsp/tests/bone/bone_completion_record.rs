@@ -5,6 +5,7 @@
 //! row -- the buffer exactly as the ranker saw it, the full ranked list,
 //! and the accepted item. With recording off, items carry no command.
 
+use bone_query::FileUriExt;
 use lsp_types::*;
 use rock_lsp::completion_record;
 use rock_lsp::{LspWorkspace, do_completion_workspace};
@@ -21,11 +22,15 @@ fn r(player: Player) {
 
 fn completion_items(ws: &mut LspWorkspace, path: &std::path::Path) -> Vec<CompletionItem> {
     let params = CompletionParams {
-        text_document: TextDocumentIdentifier {
-            uri: Uri::from_file_path(path.to_str().unwrap()).unwrap(),
-        },
+        text_document_position: TextDocumentPositionParams::new(
+            TextDocumentIdentifier {
+                uri: Uri::from_file_path(path.to_str().unwrap()).unwrap(),
+            },
+            Position::new(5, 8),
+        ),
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
         // cursor after `pg` inside `sfx(...)`.
-        position: Position::new(5, 8),
         context: None,
     };
     do_completion_workspace(ws, &params)
@@ -102,6 +107,7 @@ fn recording_round_trip_tags_items_and_writes_corpus_row() {
             serde_json::json!(picked),
             serde_json::json!(items[picked].label),
         ],
+        work_done_progress_params: Default::default(),
     };
     let result = completion_record::handle_execute_command(&exec).expect("accept handled");
     assert_eq!(result, serde_json::Value::Null);
@@ -145,6 +151,7 @@ fn recording_round_trip_tags_items_and_writes_corpus_row() {
     let bogus = ExecuteCommandParams {
         command: "rock.nope".to_string(),
         arguments: vec![],
+        work_done_progress_params: Default::default(),
     };
     assert!(completion_record::handle_execute_command(&bogus).is_err());
 }

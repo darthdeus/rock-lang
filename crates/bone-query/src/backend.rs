@@ -1274,7 +1274,10 @@ impl BoneWorkspace {
         self.references(path, pos)
             .into_iter()
             .filter(|loc| loc.uri == want)
-            .map(|loc| DocumentHighlight { range: loc.range })
+            .map(|loc| DocumentHighlight {
+                range: loc.range,
+                kind: None,
+            })
             .collect()
     }
 
@@ -1717,6 +1720,7 @@ impl BoneWorkspace {
         }
         Ok(Some(WorkspaceEdit {
             changes: Some(changes),
+            ..Default::default()
         }))
     }
 
@@ -1786,6 +1790,11 @@ impl BoneWorkspace {
             .map(|s| {
                 let range = line_index.range(src, s.span.offset_range().0, s.span.offset_range().1);
                 DocumentSymbol {
+                    children: None,
+                    detail: None,
+                    #[allow(deprecated)]
+                    deprecated: None,
+                    tags: None,
                     name: s.name,
                     kind: entry_symbol_kind(s.kind, s.is_const),
                     range,
@@ -1837,6 +1846,10 @@ impl BoneWorkspace {
                         editor_path(file),
                         s.span.offset_range(),
                         SymbolInformation {
+                            container_name: None,
+                            #[allow(deprecated)]
+                            deprecated: None,
+                            tags: None,
                             name: s.name,
                             kind: entry_symbol_kind(s.kind, s.is_const),
                             location: Location {
@@ -2022,11 +2035,13 @@ impl BoneWorkspace {
             signatures: sigs
                 .into_iter()
                 .map(|sig| SignatureInformation {
+                    documentation: None,
                     label: sig.label,
                     parameters: Some(
                         sig.params
                             .into_iter()
                             .map(|p| ParameterInformation {
+                                documentation: None,
                                 label: ParameterLabel::Simple(p),
                             })
                             .collect(),
@@ -2111,6 +2126,9 @@ impl BoneWorkspace {
                     (span.offset_range().1, InlayHintKind::TYPE, Some(true), None)
                 };
                 InlayHint {
+                    text_edits: None,
+                    tooltip: None,
+                    data: None,
                     position: line_index.position(src, offset),
                     label: InlayHintLabel::String(label),
                     kind: Some(kind),
@@ -3853,6 +3871,7 @@ fn hole_diagnostics_for(proj: &BoneProject, path: &str) -> Option<Vec<Diagnostic
                     .then(|| lsp_types::NumberOrString::String("unfilled_expression_hole".into())),
                 source: Some("bone".to_string()),
                 message,
+                ..Default::default()
             }
         })
         .collect();
@@ -3925,6 +3944,7 @@ mod failure_log;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::FileUriExt;
 
     fn span_test_workspace(path: &str) -> BoneWorkspace {
         let mut bone = BoneWorkspace::new();

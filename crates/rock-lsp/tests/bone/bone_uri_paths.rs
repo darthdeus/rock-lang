@@ -4,6 +4,7 @@
 //! visible request error, never fed to bone as a path.
 
 use crate::common::bone_ws;
+use bone_query::FileUriExt;
 use lsp_types::*;
 use rock_lsp::semantic_tokens::compute_semantic_tokens_workspace;
 use rock_lsp::{LspWorkspace, do_document_symbols_workspace, do_workspace_symbols_workspace};
@@ -28,9 +29,11 @@ fn spaced_project() -> (tempfile::TempDir, std::path::PathBuf, Uri, LspWorkspace
     (dir, path, uri, ws)
 }
 
-fn symbol_params(uri: Uri) -> TextDocumentParams {
-    TextDocumentParams {
+fn symbol_params(uri: Uri) -> DocumentSymbolParams {
+    DocumentSymbolParams {
         text_document: TextDocumentIdentifier { uri },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
     }
 }
 
@@ -57,6 +60,8 @@ fn returned_locations_encode_the_path() {
     let (dir, path, _uri, mut ws) = spaced_project();
     let params = WorkspaceSymbolParams {
         query: "heal_all".to_string(),
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
     };
     let hits = do_workspace_symbols_workspace(&mut ws, &params)
         .unwrap()

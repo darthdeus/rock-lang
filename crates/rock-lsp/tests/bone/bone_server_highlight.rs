@@ -6,6 +6,7 @@
 //! LspWorkspace, the same way the server does on a request.
 
 use crate::common::bone_ws;
+use bone_query::FileUriExt;
 use lsp_types::*;
 use rock_lsp::{LspWorkspace, do_document_highlight_workspace};
 

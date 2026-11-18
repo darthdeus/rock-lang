@@ -1,3 +1,4 @@
+use bone_query::FileUriExt;
 use lsp_types::{
     CodeAction, CodeActionKind, CodeActionParams, Diagnostic, Position, Range, TextEdit,
     WorkspaceEdit,
@@ -184,5 +185,6 @@ fn bone_multi_edit_action(
         kind: Some(kind),
         diagnostics: None,
         edit: Some(WorkspaceEdit::new(changes)),
+        ..CodeAction::default()
     }
 }

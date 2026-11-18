@@ -1,4 +1,5 @@
 use bone_query::BoneWorkspace;
+use bone_query::FileUriExt;
 use lsp_types::{Position, Range};
 
 #[path = "support/failure_log.rs"]

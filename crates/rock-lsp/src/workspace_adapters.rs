@@ -1,5 +1,6 @@
 use crate::*;
 use anyhow::Result;
+use bone_query::FileUriExt;
 use lsp_types::*;
 
 fn doc_path(doc: &TextDocumentIdentifier) -> Result<String> {
@@ -76,7 +77,7 @@ pub(crate) fn do_signature_help_workspace(
 
 pub fn do_document_symbols_workspace(
     workspace: &mut LspWorkspace,
-    params: &TextDocumentParams,
+    params: &DocumentSymbolParams,
 ) -> Result<Option<Vec<DocumentSymbol>>> {
     crate::scope!("do_document_symbols_workspace");
     let file_path = doc_path(&params.text_document)?;
@@ -93,7 +94,7 @@ pub fn do_workspace_symbols_workspace(
 
 pub(crate) fn do_inlay_hints_workspace(
     workspace: &mut LspWorkspace,
-    params: &TextDocumentRangeParams,
+    params: &InlayHintParams,
 ) -> Result<Option<Vec<InlayHint>>> {
     crate::scope!("do_inlay_hints_workspace");
     let _span = tracing::debug_span!("do_inlay_hints_workspace").entered();
@@ -107,8 +108,8 @@ pub fn do_completion_workspace(
 ) -> Result<Option<CompletionList>> {
     crate::scope!("do_completion_workspace");
     let _span = tracing::debug_span!("do_completion_workspace").entered();
-    let file_path = doc_path(&params.text_document)?;
-    let pos = params.position;
+    let file_path = doc_path(&params.text_document_position.text_document)?;
+    let pos = params.text_document_position.position;
     // Was this auto-fired by the space trigger character? If so, a
     // whitespace-only line prefix is `<CR>` auto-indent, and bone suppresses the
     // popup (so `<CR><CR>` inserts two newlines instead of accepting item 1).
@@ -142,7 +143,7 @@ pub(crate) fn do_rename_workspace(
     workspace: &mut LspWorkspace,
     params: &RenameParams,
 ) -> Result<Option<WorkspaceEdit>> {
-    let file_path = doc_path(&params.text_document)?;
-    let pos = params.position;
+    let file_path = doc_path(&params.text_document_position.text_document)?;
+    let pos = params.text_document_position.position;
     Ok(workspace.bone.rename(&file_path, pos, &params.new_name)?)
 }

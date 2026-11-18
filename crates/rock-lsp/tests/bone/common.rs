@@ -2,6 +2,7 @@
 //! params, and edit application. Pulled in via `mod common;` in main.rs; used by
 //! the code-action and server-capability test modules.
 
+use bone_query::FileUriExt;
 use lsp_types::*;
 use rock_lsp::{LspWorkspace, compute_code_actions_workspace};
 
@@ -25,7 +26,10 @@ pub fn params_at(path: &std::path::Path, line: u32, ch: u32) -> CodeActionParams
         },
         context: CodeActionContext {
             diagnostics: vec![],
+            ..CodeActionContext::default()
         },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
     }
 }
 

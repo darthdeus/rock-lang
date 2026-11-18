@@ -23,3 +23,6 @@ pub use backend::*;
 pub use rank_key::explain_sort_text;
 
 mod ctags;
+
+mod file_uri;
+pub use file_uri::{FileUriError, FileUriExt};

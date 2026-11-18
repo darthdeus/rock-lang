@@ -4,6 +4,7 @@
 
 use crate::fixture::{PATH, assert_no_errors, hover_markup, pos, workspace};
 use bone_query::BoneWorkspace;
+use bone_query::FileUriExt;
 use lsp_types::{HoverContents, Position, Range};
 
 const SRC: &str = "\
@@ -126,7 +127,9 @@ fn main() {
             assert_eq!(location.uri.to_file_path().unwrap(), project.path(file));
             assert_eq!(location.range, expected);
             let h = b.hover(&path, p).expect("variant hover");
-            let HoverContents::Markup(markup) = h.contents;
+            let HoverContents::Markup(markup) = h.contents else {
+                panic!("expected markup hover")
+            };
             assert!(
                 markup.value.contains(&format!("::Circle {{ {payload} }}")),
                 "{markup:?}"
@@ -146,7 +149,9 @@ fn main() {
         assert_eq!(location.uri.to_file_path().unwrap(), project.path(file));
         assert_eq!(location.range.start, pos_of(src, "enum Shape", 0, 5));
         let h = b.hover(&path, p).expect("enum hover");
-        let HoverContents::Markup(markup) = h.contents;
+        let HoverContents::Markup(markup) = h.contents else {
+            panic!("expected markup hover")
+        };
         assert!(markup.value.contains("enum "), "{markup:?}");
     }
 }
@@ -237,7 +242,9 @@ fn f() {
                 let h = b
                     .hover(PATH, p)
                     .unwrap_or_else(|| panic!("no hover at {p:?}"));
-                let HoverContents::Markup(m) = h.contents;
+                let HoverContents::Markup(m) = h.contents else {
+                    panic!("expected markup hover")
+                };
                 assert_eq!(m.value, expected, "{marker}: hover at {p:?}");
                 assert_eq!(h.range, Some(token(marker, into, name)), "{marker}");
             }
