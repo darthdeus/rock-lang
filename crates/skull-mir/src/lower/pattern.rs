@@ -33,14 +33,18 @@ impl<'a> Builder<'a> {
         arms: comfy_la_arena::IdxRange<MatchArm>,
         shape: RepLayout,
     ) -> Result<ValueRepr, CompilerError> {
-        let results = self.fresh_cells(shape.slot_count(self.scx.rep_arena()));
+        let mut values = self.value_join(shape);
+        let mut joined_at = None;
         self.lower_match_arms(scrut, arms, |s, body, join| {
+            joined_at = Some(join);
             let bv = s.lower_expr_repr(body)?;
-            s.store_bundle_and_join(&results, &shape, &bv, join)
+            s.join_arm(&mut values, bv)
         })?;
-        let slots = self.load_cells(&results);
-        let mut idx = 0;
-        Ok(self.slot_repr(&shape, &slots, &mut idx))
+        let join = match joined_at {
+            Some(join) => join,
+            None => self.cur,
+        };
+        self.finish_join(values, join)
     }
 
     /// `match` in STATEMENT position (value discarded): same arm walk, each
@@ -922,16 +926,10 @@ impl<'a> Builder<'a> {
         result_shape: Option<RepLayout>,
         statement: bool,
     ) -> Result<Option<ValueRepr>, CompilerError> {
-        let use_repr = result_shape.is_some();
-        let shape = result_shape.unwrap_or(RepLayout::Opaque);
-        let results = if statement {
-            Vec::new()
-        } else if use_repr {
-            self.fresh_cells(shape.slot_count(self.scx.rep_arena()))
-        } else {
+        let scalar_result = (!statement && result_shape.is_none()).then(|| {
             let ty = self.current_expr_unit_storage_ty_id();
-            vec![self.f.new_cell_typed(None, ty)]
-        };
+            self.f.new_cell_typed(None, ty)
+        });
         let else_bb = self.f.new_block();
         let join = self.f.new_block();
         self.lower_let_test(pattern, value, else_bb)?;
@@ -939,10 +937,10 @@ impl<'a> Builder<'a> {
         if statement {
             self.lower_statement_arms(then_branch, else_branch, else_bb, join)?;
             Ok(None)
-        } else if use_repr {
+        } else if let Some(shape) = result_shape {
+            let values = self.value_join(shape);
             self.lower_value_arms(
-                &results,
-                &shape,
+                values,
                 else_bb,
                 join,
                 |s| s.lower_expr_repr(then_branch),
@@ -950,7 +948,7 @@ impl<'a> Builder<'a> {
             )
             .map(Some)
         } else {
-            let result = results[0];
+            let result = scalar_result.expect("scalar if let has a result cell");
             let tv = self.lower_expr(then_branch)?;
             self.store_and_join(result, tv, join);
 

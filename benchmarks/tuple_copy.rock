@@ -1,0 +1,197 @@
+// Copying and reading tuples whose element is a `nobox` value (`p_*`) against
+// an unmarked twin (`q_*`): run the emitted Lua with LuaJIT, with the JIT
+// enabled. Each case warms up, then reports uncollected heap growth per element
+// over a window with the GC stopped (allocation, not allocator traffic), JIT ns
+// per element and trace aborts.
+//
+//   target/debug/rock compile benchmarks/tuple_copy.rock --output tuple_copy.lua
+//   luajit -e 'dofile("tuple_copy.lua"); main()'
+
+@nomangle inline(lua) fn bench_clock() -> float = "return os.clock()"
+@nomangle inline(lua) fn heap_kb() -> float = "return collectgarbage('count')"
+@nomangle inline(lua) fn gc_stop() = "collectgarbage('collect'); collectgarbage('stop')"
+@nomangle inline(lua) fn gc_restart() = "collectgarbage('restart'); collectgarbage('collect')"
+@nomangle inline(lua) fn bench_reset() = """
+    local jit = require("jit")
+    jit.flush()
+    _G.__aborts = 0
+    jit.attach(function(what) if what == "abort" then _G.__aborts = _G.__aborts + 1 end end, "trace")
+"""
+@nomangle inline(lua) fn bench_aborts() -> int = "return _G.__aborts"
+
+nobox value P { x: float, y: float }
+value Q { x: float, y: float }
+
+global PX: [(P, int)] = []
+global PY: [(P, int)] = []
+global QX: [(Q, int)] = []
+global QY: [(Q, int)] = []
+global N: int = 1000
+
+fn p_direct() -> float {
+    PY.clear()
+    for i in 0..N { PY.push(PX[i]) }
+    return PY.len as float
+}
+
+fn p_name() -> float {
+    PY.clear()
+    for i in 0..N { let t = PX[i]; PY.push(t) }
+    return PY.len as float
+}
+
+fn p_loop() -> float {
+    PY.clear()
+    for t in PX { PY.push(t) }
+    return PY.len as float
+}
+
+fn p_filter() -> float {
+    PY.clear()
+    for t in PX { if t.1 % 2 == 0 { PY.push(t) } }
+    return PY.len as float
+}
+
+fn p_join() -> float {
+    PY.clear()
+    for i in 0..N { let t = if i % 2 == 0 { PX[i] } else { PX[N - 1 - i] }; PY.push(t) }
+    return PY.len as float
+}
+
+fn p_swap() -> float {
+    for i in 0..N ./ 2 { let a = PX[i]; PX.set(i, PX[N - 1 - i]); PX.set(N - 1 - i, a) }
+    return PX[0].0.x
+}
+
+fn p_read() -> float {
+    let s = 0.0
+    for t in PX { s += t.0.x + t.1 as float }
+    return s
+}
+
+fn p_payload() -> float {
+    let s = 0.0
+    for i in 0..N { match pick(i) { Opt::Some(t) => s += t.0.x, Opt::None => {} } }
+    return s
+}
+
+enum Opt<T> { None, Some(T) }
+fn pick(i: int) -> Opt<(P, int)> { return Opt::Some(PX[i]) }
+
+fn p_get() -> float {
+    PY.clear()
+    for i in 0..N { if let t = PX.get(i) { PY.push(t) } }
+    return PY.len as float
+}
+
+fn p_ret() -> float {
+    PY.clear()
+    for i in 0..N { PY.push(p_at(i)) }
+    return PY.len as float
+}
+
+fn p_at(i: int) -> (P, int) { return PX[i] }
+
+fn p_coalesce() -> float {
+    PY.clear()
+    for i in 0..N { PY.push(PX.get(i * 2) ?? PX[i]) }
+    return PY.len as float
+}
+
+fn q_get() -> float {
+    QY.clear()
+    for i in 0..N { if let t = QX.get(i) { QY.push(t) } }
+    return QY.len as float
+}
+
+fn q_ret() -> float {
+    QY.clear()
+    for i in 0..N { QY.push(q_at(i)) }
+    return QY.len as float
+}
+
+fn q_at(i: int) -> (Q, int) { return QX[i] }
+
+fn q_coalesce() -> float {
+    QY.clear()
+    for i in 0..N { QY.push(QX.get(i * 2) ?? QX[i]) }
+    return QY.len as float
+}
+
+fn q_direct() -> float {
+    QY.clear()
+    for i in 0..N { QY.push(QX[i]) }
+    return QY.len as float
+}
+
+fn q_name() -> float {
+    QY.clear()
+    for i in 0..N { let t = QX[i]; QY.push(t) }
+    return QY.len as float
+}
+
+fn q_loop() -> float {
+    QY.clear()
+    for t in QX { QY.push(t) }
+    return QY.len as float
+}
+
+fn q_filter() -> float {
+    QY.clear()
+    for t in QX { if t.1 % 2 == 0 { QY.push(t) } }
+    return QY.len as float
+}
+
+fn q_join() -> float {
+    QY.clear()
+    for i in 0..N { let t = if i % 2 == 0 { QX[i] } else { QX[N - 1 - i] }; QY.push(t) }
+    return QY.len as float
+}
+
+fn q_swap() -> float {
+    for i in 0..N ./ 2 { let a = QX[i]; QX.set(i, QX[N - 1 - i]); QX.set(N - 1 - i, a) }
+    return QX[0].0.x
+}
+
+fn q_read() -> float {
+    let s = 0.0
+    for t in QX { s += t.0.x + t.1 as float }
+    return s
+}
+
+fn drive(name: string, pass: fn() -> float) {
+    bench_reset()
+    let sink = 0.0
+    for r in 0..300 { sink += pass() }
+    let aborts = bench_aborts()
+    gc_stop()
+    let k0 = heap_kb()
+    for r in 0..20 { sink += pass() }
+    let bytes = (heap_kb() - k0) * 1024.0 / (20.0 * N as float)
+    gc_restart()
+    let reps = 3000
+    let t0 = bench_clock()
+    for r in 0..reps { sink += pass() }
+    let ns = (bench_clock() - t0) * 1000000000.0 / (reps as float * N as float)
+    print("{name} bytes_per_elem={bytes} ns_per_elem={ns} aborts={aborts} sink={sink > 0.0}")
+}
+
+fn main() {
+    for i in 0..N {
+        PX.push((P { x: i as float, y: 1.0 }, i))
+        QX.push((Q { x: i as float, y: 1.0 }, i))
+    }
+    // Reserve the destinations once so growth is not counted.
+    for r in 0..2 { p_direct(); q_direct() }
+    drive("p_direct", p_direct); drive("q_direct", q_direct)
+    drive("p_name", p_name); drive("q_name", q_name)
+    drive("p_loop", p_loop); drive("q_loop", q_loop)
+    drive("p_filter", p_filter); drive("q_filter", q_filter)
+    drive("p_join", p_join); drive("q_join", q_join)
+    drive("p_swap", p_swap); drive("q_swap", q_swap)
+    drive("p_read", p_read); drive("q_read", q_read)
+    drive("p_payload", p_payload)
+    drive("p_get", p_get); drive("q_get", q_get)
+    drive("p_ret", p_ret); drive("q_ret", q_ret)
+    drive("p_coalesce", p_coalesce); drive("q_coalesce", q_coalesce)
+}

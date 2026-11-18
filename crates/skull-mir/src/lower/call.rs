@@ -2488,6 +2488,28 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The flat box `value` is, or was read out of in full, found without
+    /// emitting anything.
+    pub(crate) fn flat_box_of_repr(&self, value: &ValueRepr) -> Option<Idx<Inst>> {
+        fn leaves(value: &ValueRepr, out: &mut Vec<Idx<Inst>>) {
+            match value {
+                ValueRepr::Scalar(v) => out.push(*v),
+                ValueRepr::Group { parts, present, .. } | ValueRepr::Tuple { parts, present } => {
+                    out.extend(*present);
+                    parts.iter().for_each(|p| leaves(p, out));
+                }
+            }
+        }
+        if let ValueRepr::Scalar(v) = value {
+            return (!self.is_tuple_aggregate(*v)
+                && !matches!(self.f.insts[*v], Inst::Const(Lit::Nil)))
+            .then_some(*v);
+        }
+        let mut out = Vec::new();
+        leaves(value, &mut out);
+        self.flat_box_of_slots(&out)
+    }
+
     /// The flat box `slots` were read out of, in order and in full.
     pub(crate) fn flat_box_of_slots(&self, slots: &[Idx<Inst>]) -> Option<Idx<Inst>> {
         let Some(&Inst::TupleIndex { base, index: 0 }) = slots.first().map(|&v| &self.f.insts[v])
@@ -2515,6 +2537,13 @@ impl<'a> Builder<'a> {
         let Some(shape) = self.scx.rep_arena().tuple_shape(bundle.representation()) else {
             return self.pack(bundle.value().clone());
         };
+        // A tuple that is already a box is that box: it is immutable, so it is
+        // shared. Only an element-wise box of a splatting tuple changes layout.
+        if let ValueRepr::Scalar(boxed) = bundle.value()
+            && !(shape.splats(self.scx.rep_arena()) && self.is_tuple_aggregate(*boxed))
+        {
+            return Ok(*boxed);
+        }
         let mut slots = self.tuple_repr_to_slots(bundle.value().clone(), &shape)?;
         if !shape.nullable {
             return Ok(self.flat_tuple_box(slots));

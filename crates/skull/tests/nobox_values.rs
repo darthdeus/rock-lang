@@ -1009,22 +1009,43 @@ fn copy_through_a_name(i: int) {
     YS.push(t)
 }
 fn copy_each() { for t in XS { YS.push(t) } }
+fn copy_joined(i: int) {
+    let t = if i > 0 { XS[i - 1] } else { XS[i] }
+    YS.push(t)
+}
+
+value UV2 { x: float, y: float }
+global UX: [(UV2, int)] = []
+global UY: [(UV2, int)] = []
+fn copy_joined_unmarked(i: int) {
+    let t = if i > 0 { UX[i - 1] } else { UX[i] }
+    UY.push(t)
+}
 
 fn main() {
     XS.push((NV2 { x: 1.0, y: 2.0 }, 3))
+    UX.push((UV2 { x: 1.0, y: 2.0 }, 3))
     copy_direct(0)
     copy_through_a_name(0)
     copy_each()
+    copy_joined(0)
+    copy_joined_unmarked(0)
 }
 "#;
 
 /// Copying a stored tuple element shares its immutable box -- directly, through
-/// an unwritten name, or as a loop element -- rather than packing a new table,
-/// and reads none of its slots.
+/// an unwritten name, as a loop element, or out of a join whose arms are all
+/// stored -- rather than packing a new table, and reads none of its slots.
 #[test]
 fn copying_a_stored_tuple_element_allocates_nothing() {
     let lua = emit_module(NOBOX_TUPLE_COPY);
-    for name in ["copy_direct", "copy_through_a_name", "copy_each"] {
+    for name in [
+        "copy_direct",
+        "copy_through_a_name",
+        "copy_each",
+        "copy_joined",
+        "copy_joined_unmarked",
+    ] {
         let body = function_body(&lua, name);
         assert!(
             !body.contains("({") && !body.contains("NV2_ct("),

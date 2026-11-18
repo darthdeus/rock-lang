@@ -930,7 +930,7 @@ impl<'a> Builder<'a> {
             (*first, rest.to_vec())
         };
 
-        let cells = self.fresh_cells(shape.leaf_count());
+        let mut values = self.value_join(RepLayout::Leaves(shape.clone()));
         let lhs_bb = self.f.new_block();
         let rhs_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -938,20 +938,16 @@ impl<'a> Builder<'a> {
 
         self.cur = rhs_bb;
         let rhs_bundle = self.lower_expr_repr(rhs)?;
-        self.store_bundle_and_join(&cells, &RepLayout::Leaves(shape.clone()), &rhs_bundle, join)?;
+        self.join_arm(&mut values, rhs_bundle)?;
 
         self.cur = lhs_bb;
-        let mut lhs_slots = Vec::with_capacity(cells.len());
+        let mut lhs_slots = Vec::with_capacity(shape.leaf_count());
         if shape.nullable {
             lhs_slots.push(self.emit_cur(Inst::Const(Lit::Bool(true))));
         }
         lhs_slots.extend(lhs_values);
-        self.store_slots_and_join(&cells, &lhs_slots, join)?;
-
-        self.cur = join;
-        let loads = self.load_cells(&cells);
-        let mut idx = 0;
-        Ok(Self::rebuild_from_leaves(&shape, &loads, &mut idx))
+        self.join_slots_arm(&mut values, lhs_slots);
+        self.finish_join(values, join)
     }
 
     /// Branch on the tuple's presence slot. Packing first would hide absence.
@@ -977,7 +973,7 @@ impl<'a> Builder<'a> {
             .expect("a nullable wire carries its presence slot first");
         let (present, lhs_values) = (*present, lhs_values.to_vec());
 
-        let cells = self.fresh_cells(lhs_values.len());
+        let mut values = self.value_join(RepLayout::Tuple(shape.clone()));
         let lhs_bb = self.f.new_block();
         let rhs_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -985,17 +981,13 @@ impl<'a> Builder<'a> {
 
         self.cur = rhs_bb;
         let rhs_bundle = self.lower_expr_repr(rhs)?;
-        self.store_bundle_and_join(&cells, &RepLayout::Tuple(shape.clone()), &rhs_bundle, join)?;
+        self.join_arm(&mut values, rhs_bundle)?;
 
         // The lhs slots were read before the branch, so their block dominates this
         // one -- the same reason the value twin can reuse its leaves here.
         self.cur = lhs_bb;
-        self.store_slots_and_join(&cells, &lhs_values, join)?;
-
-        self.cur = join;
-        let loads = self.load_cells(&cells);
-        let mut idx = 0;
-        Ok(self.tuple_from_slots(&shape, &loads, &mut idx))
+        self.join_slots_arm(&mut values, lhs_values);
+        self.finish_join(values, join)
     }
 
     /// A value-struct literal as an unboxed `Group` (declared field order, defaults

@@ -481,13 +481,7 @@ impl<'a> Builder<'a> {
                 .cur_expr
                 .and_then(|e| self.concrete_expr_ty(e))
                 .is_some_and(|ty| crate::nilness::monoty_never_nil(self.ws, ty));
-        let results: Vec<Idx<Cell>> = (0..shape.slot_count(self.scx.rep_arena()))
-            .map(|_| {
-                let cell = self.f.new_cell_typed(None, result_ty);
-                self.f.cells[cell].never_nil = never_nil;
-                cell
-            })
-            .collect();
+        let arms = self.value_join_typed(shape, result_ty, never_nil);
         let then_bb = self.f.new_block();
         let else_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -495,8 +489,7 @@ impl<'a> Builder<'a> {
 
         self.cur = then_bb;
         self.lower_value_arms(
-            &results,
-            &shape,
+            arms,
             else_bb,
             join,
             |s| s.lower_expr_repr(then_branch),
@@ -506,29 +499,119 @@ impl<'a> Builder<'a> {
 
     pub(super) fn lower_value_arms(
         &mut self,
-        results: &[Idx<Cell>],
-        shape: &RepLayout,
+        mut arms: ValueJoin,
         else_bb: Idx<Block>,
         join: Idx<Block>,
         then_value: impl FnOnce(&mut Self) -> Result<ValueBundle, CompilerError>,
         else_branch: Option<Idx<Expr>>,
     ) -> Result<ValueRepr, CompilerError> {
         let then_value = then_value(self)?;
-        self.store_bundle_and_join(results, shape, &then_value, join)?;
-
+        let representation = then_value.representation();
+        self.join_arm(&mut arms, then_value)?;
         self.cur = else_bb;
         let else_value = match else_branch {
             Some(expr) => self.lower_expr_repr(expr)?,
             None => ValueBundle::new(
-                then_value.representation(),
+                representation,
                 ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))),
             ),
         };
-        self.store_bundle_and_join(results, shape, &else_value, join)?;
+        self.join_arm(&mut arms, else_value)?;
+        self.finish_join(arms, join)
+    }
 
+    pub(crate) fn value_join(&mut self, shape: RepLayout) -> ValueJoin {
+        self.value_join_typed(shape, None, false)
+    }
+
+    fn value_join_typed(
+        &mut self,
+        shape: RepLayout,
+        cell_ty: Option<TyId>,
+        never_nil: bool,
+    ) -> ValueJoin {
+        let results = (0..shape.slot_count(self.scx.rep_arena()))
+            .map(|_| {
+                let cell = self.f.new_cell_typed(None, cell_ty);
+                self.f.cells[cell].never_nil = never_nil;
+                cell
+            })
+            .collect();
+        ValueJoin {
+            shape,
+            results,
+            arms: Vec::new(),
+        }
+    }
+
+    /// Record one arm's value; its block stays open until [`Self::finish_join`]
+    /// knows every arm and can pick the form they meet in.
+    pub(crate) fn join_arm(
+        &mut self,
+        join: &mut ValueJoin,
+        value: ValueBundle,
+    ) -> Result<(), CompilerError> {
+        if !self.is_open() {
+            return Ok(());
+        }
+        let owned = self.snapshot_opaque_value(value.value().clone())?;
+        let value = ValueBundle::new(value.representation(), owned);
+        join.arms.push((self.cur, JoinArm::Value(value)));
+        Ok(())
+    }
+
+    /// [`Self::join_arm`] for an arm whose slots are already in hand -- a `??`
+    /// lhs, whose slots were read before the branch.
+    pub(crate) fn join_slots_arm(&mut self, join: &mut ValueJoin, slots: Vec<Idx<Inst>>) {
+        if self.is_open() {
+            join.arms.push((self.cur, JoinArm::Slots(slots)));
+        }
+    }
+
+    /// Close every arm into the join. Arms that are all one flat tuple box meet
+    /// as that box, so a whole-value use shares it; anything else meets as slots.
+    pub(crate) fn finish_join(
+        &mut self,
+        values: ValueJoin,
+        join: Idx<Block>,
+    ) -> Result<ValueRepr, CompilerError> {
+        let ValueJoin {
+            shape,
+            results,
+            arms,
+        } = values;
+        let boxes = match &shape {
+            RepLayout::Tuple(tuple) if !tuple.nullable && !arms.is_empty() => arms
+                .iter()
+                .map(|(_, arm)| match arm {
+                    JoinArm::Value(value) => self.flat_box_of_repr(value.value()),
+                    JoinArm::Slots(slots) => self.flat_box_of_slots(slots),
+                })
+                .collect::<Option<Vec<_>>>(),
+            _ => None,
+        };
+        if let (Some(boxes), RepLayout::Tuple(tuple)) = (boxes, &shape) {
+            let cell = self.f.new_cell(None);
+            for ((block, _), boxed) in arms.into_iter().zip(boxes) {
+                self.cur = block;
+                self.store_slots_and_join(&[cell], &[boxed], join)?;
+            }
+            self.cur = join;
+            let boxed = self.emit_cur(Inst::Load(cell));
+            let slots = self.flat_box_slots(boxed, tuple.slot_count(self.scx.rep_arena()));
+            return Ok(self.tuple_from_slots(tuple, &slots, &mut 0));
+        }
+        for (block, arm) in arms {
+            self.cur = block;
+            let slots = match arm {
+                JoinArm::Value(value) => self.repr_to_slot_values_bundle(&value, &shape)?,
+                JoinArm::Slots(slots) => slots,
+            };
+            self.store_slots_and_join(&results, &slots, join)?;
+        }
         self.cur = join;
-        let slots = self.load_cells(results);
-        Ok(self.slot_repr(shape, &slots, &mut 0))
+        let slots = self.load_cells(&results);
+        Ok(self.slot_repr(&shape, &slots, &mut 0))
     }
 
     /// `if` in STATEMENT position (value discarded): branch + arms-as-statements
@@ -585,7 +668,7 @@ impl<'a> Builder<'a> {
     ) -> Result<ValueRepr, CompilerError> {
         let recv = self.lower_safe_nav_receiver(receiver)?;
         let is_nil = self.safe_nav_absent_cond(&recv);
-        let results = self.fresh_cells(shape.slot_count(self.scx.rep_arena()));
+        let values = self.value_join(shape);
         let nil_bb = self.f.new_block();
         let val_bb = self.f.new_block();
         let join = self.f.new_block();
@@ -593,8 +676,7 @@ impl<'a> Builder<'a> {
 
         self.cur = val_bb;
         self.lower_value_arms(
-            &results,
-            &shape,
+            values,
             nil_bb,
             join,
             |s| {
@@ -644,24 +726,12 @@ impl<'a> Builder<'a> {
         }
     }
 
-    pub(crate) fn store_bundle_and_join(
-        &mut self,
-        results: &[Idx<Cell>],
-        shape: &RepLayout,
-        value: &ValueBundle,
-        join: Idx<Block>,
-    ) -> Result<(), CompilerError> {
-        if !self.is_open() {
-            return Ok(());
-        }
-        let owned = self.snapshot_opaque_value(value.value().clone())?;
-        let value = ValueBundle::new(value.representation(), owned);
-        let slots = self.repr_to_slot_values_bundle(&value, shape)?;
-        self.store_slots_and_join(results, &slots, join)
-    }
-
-    /// A coalesce arm can reuse slots evaluated before branching.
-    pub(crate) fn store_slots_and_join(
+    /// Close one arm of a join by storing its slots. The guard is here and not
+    /// only at the caller: a diverged arm has nothing to store, and every
+    /// hand-rolled copy of this loop so far dropped it. `?? return x` splatted
+    /// leaves off a nil and emitted `(nil).x` in front of the divergence
+    /// (`6132c8c2e`).
+    fn store_slots_and_join(
         &mut self,
         results: &[Idx<Cell>],
         slots: &[Idx<Inst>],
@@ -827,4 +897,17 @@ fn shape_equality_is_leafwise(ws: &Workspace, shape: &ValueShape) -> bool {
         FieldShape::Prim => true,
         FieldShape::Nested(sub) => shape_equality_is_leafwise(ws, sub),
     })
+}
+
+/// The arms of one value-producing join (`if`, `match`, `if let`), collected
+/// before they are closed.
+pub(crate) struct ValueJoin {
+    shape: RepLayout,
+    results: Vec<Idx<Cell>>,
+    arms: Vec<(Idx<Block>, JoinArm)>,
+}
+
+enum JoinArm {
+    Value(ValueBundle),
+    Slots(Vec<Idx<Inst>>),
 }
