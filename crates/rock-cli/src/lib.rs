@@ -179,15 +179,24 @@ impl Args {
 
     pub fn command() -> clap::Command {
         use clap::{Arg, ArgAction};
+        let var = Arg::new("var")
+            .long("var")
+            .value_name("NAME=VALUE")
+            .action(ArgAction::Append)
+            .help("Override a declared [build.vars] entry for this invocation (repeatable)");
         let command = clap::Command::new("rock")
             .version(env!("CARGO_PKG_VERSION"))
+            .propagate_version(true)
             .about("Rock Compiler")
+            .disable_help_subcommand(true)
+            .subcommand_required(true)
+            .arg_required_else_help(true)
             .arg(
-                Arg::new("command")
-                    .required(true)
-                    .value_parser(CliCommand::value_parser()),
+                Arg::new("check-before")
+                    .long("check")
+                    .action(ArgAction::SetTrue)
+                    .hide(true),
             )
-            .arg(Arg::new("files").num_args(0..))
             .arg(Arg::new("filter").long("filter").value_name("PAT")
                 .help("For `rock test`: run @tests whose function name or source path contains a comma-separated substring."))
             .arg(Arg::new("skip-gpu").long("skip-gpu").action(ArgAction::SetTrue)
@@ -195,8 +204,6 @@ impl Args {
             .arg(Arg::new("output").long("output")
                 .help("Output path; package requires an explicit output directory."))
             .arg(Arg::new("profile").long("profile"))
-            .arg(Arg::new("check").long("check").action(ArgAction::SetTrue)
-                .help("For `rock fmt`: check if files are already formatted (exit 1 if not)."))
             .arg(Arg::new("iters").long("iters").default_value("1")
                 .value_parser(clap::value_parser!(usize))
                 .help("Number of iterations for compilation (used for profiling)"))
@@ -215,9 +222,7 @@ impl Args {
                 .help("Number of threads to use for running tests (default: number of CPU cores, use 1 for sequential)"))
             .arg(Arg::new("channel").long("channel").value_name("CHANNEL")
                 .help("Release channel for [build.vars] resolution (must be declared in the project's [build] channels)"))
-            .arg(Arg::new("var").long("var").value_name("NAME=VALUE")
-                .action(ArgAction::Append)
-                .help("Override a declared [build.vars] entry for this invocation (repeatable)"))
+            .arg(var.clone())
             .arg(Arg::new("target-os").long("target-os").value_name("OS")
                 .help("Artifact target for the `platform` builtin (linux, osx, windows). Cross-builds package on one OS for another; defaults to the host."))
             .arg(Arg::new("no-lints").long("no-lints").action(ArgAction::SetTrue)
@@ -237,20 +242,80 @@ impl Args {
             .arg(Arg::new("backend").long("backend")
                 .value_parser(BackendSpec::value_parser())
                 .help(format!("Compiler backend (default: skull). {}. Also settable via ROCK_BACKEND.", registry::BackendSpec::all().iter().map(|spec| format!("{}{}", spec.name, if spec.omitted.is_some() { " (not in this build)" } else { "" })).collect::<Vec<_>>().join(", "))))
-            .arg(Arg::new("app_args").last(true).num_args(0..)
-                .help("Arguments to pass through to the Rock app (everything after --)"));
-        (registry::registered().arguments)(command)
+            // Host argument groups use this root slot as an insertion point.
+            // Actual app arguments are parsed from the selected command.
+            .arg(
+                Arg::new("app_args")
+                    .last(true)
+                    .num_args(0..)
+                    .hide(true),
+            );
+        let mut command = (registry::registered().arguments)(command).mut_args(|arg| {
+            if arg.get_id() == "app_args" || arg.get_id() == "check-before" || arg.get_id() == "var"
+            {
+                arg
+            } else {
+                arg.global(true)
+            }
+        });
+        for cli_command in CliCommand::all() {
+            let mut subcommand = clap::Command::new(cli_command.name)
+                .arg(Arg::new("files").num_args(0..))
+                .arg(
+                    Arg::new("app_args")
+                        .last(true)
+                        .num_args(0..)
+                        .help("Arguments to pass through to the Rock app (everything after --)"),
+                )
+                .arg(var.clone());
+            if cli_command.name == "fmt" {
+                subcommand = subcommand.arg(
+                    Arg::new("check")
+                        .long("check")
+                        .action(ArgAction::SetTrue)
+                        .help("Check if files are already formatted (exit 1 if not)."),
+                );
+            }
+            command = command.subcommand(subcommand);
+        }
+        command
     }
 
     pub fn from_matches(m: clap::ArgMatches) -> Self {
+        let check_before = m.get_flag("check-before");
+        let mut build_var_overrides = m
+            .get_many::<String>("var")
+            .map(|vals| vals.cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let (command_name, m) = m.subcommand().expect("command required");
+        if check_before && command_name != "fmt" {
+            Self::command()
+                .error(
+                    clap::error::ErrorKind::UnknownArgument,
+                    "`--check` is only valid for `rock fmt`",
+                )
+                .exit();
+        }
+        if check_before && m.get_flag("check") {
+            Self::command()
+                .error(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "`--check` may be supplied only once",
+                )
+                .exit();
+        }
+        let command = CliCommand::named(command_name).expect("registered subcommand");
+        build_var_overrides.extend(
+            m.get_many::<String>("var")
+                .map(|vals| vals.cloned())
+                .into_iter()
+                .flatten(),
+        );
         let many_str = |name: &str| -> Vec<String> {
             m.get_many::<String>(name)
                 .map(|vs| vs.cloned().collect())
                 .unwrap_or_default()
         };
-        let command = *m
-            .get_one::<&'static CliCommand>("command")
-            .expect("command required");
         let test_filter = m.get_one::<String>("filter").cloned();
         let mut args = Args {
             command,
@@ -264,7 +329,7 @@ impl Args {
             allocation_census: Default::default(),
             allocation_sites: Default::default(),
             profile: m.get_one::<String>("profile").cloned(),
-            check: m.get_flag("check"),
+            check: check_before || (command_name == "fmt" && m.get_flag("check")),
             iters: *m.get_one::<usize>("iters").unwrap(),
             warmup: *m.get_one::<usize>("warmup").unwrap(),
             verbose: m.get_flag("verbose"),
@@ -282,10 +347,7 @@ impl Args {
             test_threads: m.get_one::<usize>("test-threads").copied(),
             channel: m.get_one::<String>("channel").cloned(),
             target_os: m.get_one::<String>("target-os").cloned(),
-            build_var_overrides: m
-                .get_many::<String>("var")
-                .map(|vals| vals.cloned().collect())
-                .unwrap_or_default(),
+            build_var_overrides,
             update_snapshots: Default::default(),
             jobs: Default::default(),
             full_asset_jobs: Default::default(),
@@ -320,7 +382,7 @@ impl Args {
                 resolve_backend(explicit)
             },
         };
-        (registry::registered().decode_arguments)(&m, &mut args);
+        (registry::registered().decode_arguments)(m, &mut args);
         args
     }
 }
@@ -373,12 +435,46 @@ mod completion_tests {
             &mut out,
         );
         let script = String::from_utf8(out).expect("the completion script is text");
+        assert!(script.contains("fmt"));
+        assert!(script.contains("--check"));
         let format_arm = script
             .split("--format)")
             .nth(1)
             .expect("the script completes --format");
         let values = format_arm.lines().nth(1).unwrap_or_default();
         assert!(values.contains("pretty json"), "{values}");
+    }
+}
+
+#[cfg(test)]
+mod command_tree_tests {
+    #[test]
+    fn fmt_is_a_subcommand_with_local_check() {
+        let command = crate::Args::command();
+        let fmt = command.find_subcommand("fmt").expect("fmt is registered");
+        assert!(fmt.get_arguments().any(|arg| arg.get_id() == "check"));
+        let help = command
+            .clone()
+            .try_get_matches_from(["rock", "fmt", "--help"])
+            .unwrap_err()
+            .to_string();
+        assert!(help.contains("Usage: rock fmt"), "{help}");
+        assert!(help.contains("--check"), "{help}");
+        for (argv, expected) in [
+            (&["rock", "fmt"][..], true),
+            (&["rock", "fmt", "--check", "main.rock"], true),
+            (&["rock", "fmt", "main.rock", "--check"], true),
+            (&["rock", "--check", "fmt", "main.rock"], true),
+            (&["rock", "fmt", "--check", "--check"], false),
+            (&["rock", "compile", "--check"], false),
+            (&["rock", "help", "fmt"], false),
+        ] {
+            assert_eq!(
+                command.clone().try_get_matches_from(argv).is_ok(),
+                expected,
+                "{argv:?}"
+            );
+        }
     }
 }
 

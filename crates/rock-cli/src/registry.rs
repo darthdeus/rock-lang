@@ -190,7 +190,7 @@ pub enum Route {
     Omitted(&'static str),
 }
 
-/// Commands are positional Clap values in registration order.
+/// Commands are Clap subcommands in registration order.
 pub struct CliCommand {
     pub name: &'static str,
     pub route: Route,
@@ -218,19 +218,6 @@ impl CliCommand {
 
     pub fn all() -> &'static [&'static CliCommand] {
         registered().commands
-    }
-
-    pub(crate) fn value_parser() -> impl clap::builder::TypedValueParser<Value = &'static CliCommand>
-    {
-        use clap::builder::TypedValueParser;
-        clap::builder::PossibleValuesParser::new(
-            Self::all()
-                .iter()
-                .map(|c| clap::builder::PossibleValue::new(c.name)),
-        )
-        .map(|name| {
-            Self::named(&name).expect("the possible-values parser admits only registered names")
-        })
     }
 }
 

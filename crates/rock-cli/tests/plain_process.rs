@@ -224,6 +224,22 @@ fn plain_compiler_process_without_private_runtime() {
     assert!(formatted.status.success(), "{}", text(&formatted));
     let checked = invoke(root.path(), &["fmt", "main.rock", "--check"]);
     assert!(checked.status.success(), "{}", text(&checked));
+    let checked_before = invoke(root.path(), &["--check", "fmt", "main.rock"]);
+    assert!(checked_before.status.success(), "{}", text(&checked_before));
+    let wrong_command = invoke(root.path(), &["--check", "compile"]);
+    assert_eq!(
+        wrong_command.status.code(),
+        Some(2),
+        "{}",
+        text(&wrong_command)
+    );
+    let duplicate_check = invoke(root.path(), &["--check", "fmt", "main.rock", "--check"]);
+    assert_eq!(
+        duplicate_check.status.code(),
+        Some(2),
+        "{}",
+        text(&duplicate_check)
+    );
     assert!(!root.path().join("prebuilt").exists());
 }
 
@@ -1151,6 +1167,24 @@ fn public_frame_and_perf_options_preserve_their_units_and_defaults() {
     assert_eq!(test.warmup, 0);
     assert_eq!(test.target_os.as_deref(), Some("web"));
     assert_eq!(test.perf_format, "json");
+
+    let prefixed = parse(&["rock", "--verbose", "--format", "json", "sim", "game"]);
+    assert!(prefixed.verbose);
+    assert_eq!(prefixed.perf_format, "json");
+    let sim = parse(&["rock", "--jobs", "2", "sim", "game"]);
+    assert_eq!(sim.jobs, Some(2));
+    let pass_through = parse(&["rock", "frame", "game", "--", "--seed", "42"]);
+    assert_eq!(pass_through.app_args, ["--seed", "42"]);
+    let vars = parse(&[
+        "rock",
+        "--var",
+        "A=1",
+        "compile",
+        "main.rock",
+        "--var",
+        "B=2",
+    ]);
+    assert_eq!(vars.build_var_overrides, ["A=1", "B=2"]);
 }
 
 #[test]
