@@ -210,11 +210,6 @@ pub struct InlineScanStats {
     pub candidate_worker_derivations: BTreeMap<String, usize>,
     pub rejection_reasons: BTreeMap<String, usize>,
     pub clone: InlineCloneStats,
-    pub substitution_invocations: usize,
-    pub substitution_instructions_inspected: usize,
-    pub substitution_terminators_inspected: usize,
-    pub substitution_replacements: usize,
-    pub substitution_ns: u64,
     pub use_index_build_ns: u64,
     pub use_index_values: usize,
     pub targeted_bindings: usize,
@@ -328,11 +323,6 @@ impl InlineScanStats {
             *self.rejection_reasons.entry(reason).or_default() += count;
         }
         self.clone.add(other.clone);
-        self.substitution_invocations += other.substitution_invocations;
-        self.substitution_instructions_inspected += other.substitution_instructions_inspected;
-        self.substitution_terminators_inspected += other.substitution_terminators_inspected;
-        self.substitution_replacements += other.substitution_replacements;
-        self.substitution_ns += other.substitution_ns;
         self.use_index_build_ns += other.use_index_build_ns;
         self.use_index_values += other.use_index_values;
         self.targeted_bindings += other.targeted_bindings;

@@ -384,14 +384,6 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
             census.clone.static_imports,
         );
         println!(
-            "      substitution: calls {}, instructions {}, terminators {}, replacements {}, {:.3} ms",
-            census.substitution_invocations,
-            census.substitution_instructions_inspected,
-            census.substitution_terminators_inspected,
-            census.substitution_replacements,
-            ms(census.substitution_ns),
-        );
-        println!(
             "      targeted result binding: index {} values/{:.3} ms, bindings {}, users {}, terminators {}, replacements {}, {:.3} ms",
             census.use_index_values,
             ms(census.use_index_build_ns),

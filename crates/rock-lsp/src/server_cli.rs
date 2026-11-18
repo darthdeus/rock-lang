@@ -46,76 +46,92 @@ fn build_cli() -> Command {
                 .about("Start the LSP server (default if no command specified)")
                 .arg(trace_flag()),
         )
-        .subcommand(file_subcmd("diagnostics", "Get diagnostics for a Rock file"))
-        .subcommand(file_subcmd("lint", "Run lints (unused_var, unused_fn) over a Rock file or directory"))
+        .subcommand(file_subcmd(
+            "diagnostics",
+            "Get diagnostics for a Rock file",
+        ))
+        .subcommand(file_subcmd(
+            "lint",
+            "Run lints (unused_var, unused_fn) over a Rock file or directory",
+        ))
         .subcommand(
             Command::new("semantic-tokens")
                 .about("Get semantic tokens for a Rock file")
-                .arg(Arg::new("file").required(true).help("The Rock file to analyze"))
                 .arg(
-                    Arg::new("range")
-                        .long("range")
-                        .help("Line range to display tokens for (e.g., \"10-20\", \"10\", \"10-\")"),
+                    Arg::new("file")
+                        .required(true)
+                        .help("The Rock file to analyze"),
+                )
+                .arg(
+                    Arg::new("range").long("range").help(
+                        "Line range to display tokens for (e.g., \"10-20\", \"10\", \"10-\")",
+                    ),
                 )
                 .arg(trace_flag()),
         )
-        .subcommand(position_subcmd("hover", "Get hover information at a specific position"))
+        .subcommand(position_subcmd(
+            "hover",
+            "Get hover information at a specific position",
+        ))
         .subcommand(
-            position_subcmd("completion", "Get completions at a specific position")
-                .arg(
-                    Arg::new("explain")
-                        .long("explain")
-                        .action(ArgAction::SetTrue)
-                        .help(
-                            "Human-readable ranking breakdown: one line per item with the \
+            position_subcmd("completion", "Get completions at a specific position").arg(
+                Arg::new("explain")
+                    .long("explain")
+                    .action(ArgAction::SetTrue)
+                    .help(
+                        "Human-readable ranking breakdown: one line per item with the \
                              decoded RankKey rungs (exact/type/band/case/kind/dist/score) \
                              instead of JSON",
-                        ),
-                )
-                .arg(
-                    Arg::new("prefixes")
-                        .num_args(0..)
-                        .help(
-                            "Optional 'what if I typed this' prefixes. When given, splice each \
-                             in place of the identifier at the cursor and print a printable \
-                             matrix (rank x match-policy). watch-friendly for matcher tuning.",
-                        ),
-                )
-                .arg(
-                    Arg::new("policies")
-                        .long("policies")
-                        .help("Comma-separated admission policies to compare (clean,subseq,subseq3). Default: all three."),
-                )
-                .arg(
-                    Arg::new("top")
-                        .long("top")
-                        .value_parser(clap::value_parser!(usize))
-                        .help("Rows per policy column (default 10)."),
-                )
-                .arg(
-                    Arg::new("repl")
-                        .long("repl")
-                        .action(ArgAction::SetTrue)
-                        .help("Interactive: load once, then type a prefix per line to reprint the policy matrix (blank/`q` quits)."),
-                ),
+                    ),
+            ),
         )
-        .subcommand(position_subcmd("definition", "Go to definition at a specific position"))
-        .subcommand(position_subcmd("type-definition", "Go to the declaration of the type of the value at a specific position"))
-        .subcommand(position_subcmd("references", "Find references at a specific position"))
-        .subcommand(file_subcmd("inlay-hints", "Get inlay hints for a Rock file"))
+        .subcommand(position_subcmd(
+            "definition",
+            "Go to definition at a specific position",
+        ))
+        .subcommand(position_subcmd(
+            "type-definition",
+            "Go to the declaration of the type of the value at a specific position",
+        ))
+        .subcommand(position_subcmd(
+            "references",
+            "Find references at a specific position",
+        ))
+        .subcommand(file_subcmd(
+            "inlay-hints",
+            "Get inlay hints for a Rock file",
+        ))
         .subcommand(
             Command::new("rename")
                 .about("Rename symbol at a specific position")
-                .arg(Arg::new("position").required(true).help("The position in format file:line:column (1-indexed)"))
-                .arg(Arg::new("new_name").required(true).help("The new name for the symbol"))
+                .arg(
+                    Arg::new("position")
+                        .required(true)
+                        .help("The position in format file:line:column (1-indexed)"),
+                )
+                .arg(
+                    Arg::new("new_name")
+                        .required(true)
+                        .help("The new name for the symbol"),
+                )
                 .arg(trace_flag()),
         )
-        .subcommand(position_subcmd("signature-help", "Get signature help at a specific position"))
-        .subcommand(file_subcmd("document-symbols", "Get document symbols for a Rock file"))
+        .subcommand(position_subcmd(
+            "signature-help",
+            "Get signature help at a specific position",
+        ))
+        .subcommand(file_subcmd(
+            "document-symbols",
+            "Get document symbols for a Rock file",
+        ))
         .subcommand(
             Command::new("workspace-symbols")
                 .about("Search for symbols in the workspace")
-                .arg(Arg::new("file").required(true).help("The Rock file to analyze (acts as workspace root)"))
+                .arg(
+                    Arg::new("file")
+                        .required(true)
+                        .help("The Rock file to analyze (acts as workspace root)"),
+                )
                 .arg(Arg::new("query").required(true).help("The search query"))
                 .arg(trace_flag()),
         )
@@ -136,10 +152,6 @@ fn open_debug_log(log_path: &str) -> Result<fs_err::File> {
         .append(true)
         .open(log_path)
         .map_err(|e| anyhow::anyhow!("ROCK_LSP_DEBUG: cannot open {log_path}: {e}"))
-}
-
-fn top_arg(m: &ArgMatches) -> usize {
-    m.get_one::<usize>("top").copied().unwrap_or(10)
 }
 
 /// Stderr filter at a warn floor, refined by `RUST_LOG` directives
@@ -207,36 +219,7 @@ pub fn run_cli(args: Vec<String>) -> Result<()> {
         }
         Some(("completion", m)) => {
             let (file, line, col) = bone_position(m)?;
-            let prefixes: Vec<String> = m
-                .get_many::<String>("prefixes")
-                .map(|v| v.cloned().collect())
-                .unwrap_or_default();
-            let repl = m.get_flag("repl");
-            if prefixes.is_empty() && !repl {
-                cli::bone_lsp::completion(&file, line, col, m.get_flag("explain"))
-            } else {
-                let policies = match m.get_one::<String>("policies") {
-                    Some(s) => s
-                        .split(',')
-                        .map(|p| {
-                            bone_query::MatchPolicy::parse(p).ok_or_else(|| {
-                                anyhow::anyhow!("unknown policy `{p}` (clean|subseq|subseq3)")
-                            })
-                        })
-                        .collect::<Result<Vec<_>>>()?,
-                    None => vec![
-                        bone_query::MatchPolicy::Clean,
-                        bone_query::MatchPolicy::Subseq,
-                        bone_query::MatchPolicy::Subseq3,
-                    ],
-                };
-                let top = top_arg(m);
-                if repl {
-                    cli::bone_lsp::completion_repl(&file, line, col, &policies, top)
-                } else {
-                    cli::bone_lsp::completion_matrix(&file, line, col, &prefixes, &policies, top)
-                }
-            }
+            cli::bone_lsp::completion(&file, line, col, m.get_flag("explain"))
         }
         Some(("definition", m)) => {
             let (file, line, col) = bone_position(m)?;
@@ -332,14 +315,27 @@ mod tests {
     }
 
     #[test]
-    fn top_must_be_a_number() {
-        fn args(top: &str) -> [&str; 6] {
-            ["rock lsp", "completion", "a.rock:1:1", "x", "--top", top]
+    fn completion_rejects_policy_matrix_arguments() {
+        let args = ["rock lsp", "completion", "a.rock:1:1"];
+        assert!(build_cli().try_get_matches_from(args).is_ok());
+        assert!(
+            build_cli()
+                .try_get_matches_from(args.into_iter().chain(["--explain"]))
+                .is_ok()
+        );
+        for extra in [
+            &["x"][..],
+            &["--policies", "clean"],
+            &["--top", "3"],
+            &["--repl"],
+        ] {
+            assert!(
+                build_cli()
+                    .try_get_matches_from(args.into_iter().chain(extra.iter().copied()))
+                    .is_err(),
+                "unexpected completion argument accepted: {extra:?}"
+            );
         }
-        assert!(build_cli().try_get_matches_from(args("abc")).is_err());
-        let m = build_cli().try_get_matches_from(args("3")).unwrap();
-        let (_, m) = m.subcommand().unwrap();
-        assert_eq!(top_arg(m), 3);
     }
 
     #[test]
