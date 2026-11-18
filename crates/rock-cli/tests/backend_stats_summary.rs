@@ -54,6 +54,9 @@ fn concrete_build_summary_reports_folded_totals_on_every_build() {
     let text = crate::support::text(&out);
     assert!(out.status.success(), "{text}");
 
+    assert!(text.contains("targeted result binding:"), "{text}");
+    assert!(!text.contains("substitution: calls"), "{text}");
+
     let facts = text
         .lines()
         .find(|l| l.contains("concrete plan facts"))

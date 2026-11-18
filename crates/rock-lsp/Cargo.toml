@@ -50,4 +50,3 @@ name = "bone"
 path = "tests/bone/main.rs"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-crossterm = "0.28"

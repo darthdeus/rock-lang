@@ -20,7 +20,6 @@ mod cursor_context;
 mod rank_key;
 mod types;
 pub use backend::*;
-pub use completion::match_policy::{MatchPolicy, set_match_policy};
 pub use rank_key::explain_sort_text;
 
 mod ctags;
