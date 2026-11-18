@@ -110,8 +110,8 @@ LSP fixture files use TOML. Each `[[tests]]` entry has a `name`, a `kind` label,
 source text (or `files` for a multi-file project), a `request`, and generic
 `checks`. Requests select CLI or JSON-RPC transport and state the method or
 arguments. Checks use JSON paths and predicates such as `contains_all`,
-`unordered_equal`, `gte`, `empty`, and `applied_text_equals`; code-action and
-rename edit checks name their source and expected text explicitly.
+`unordered_equal`, `gte`, `empty`, and `applied_text_equals`. Edit checks apply
+the returned changes to the fixture source before comparing the expected text.
 
 Source can be shared from an earlier case with `source = { from_test = "case" }`.
 Add `replace = [["old", "new"]]` pairs to create a variant. Edit sequences use
