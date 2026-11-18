@@ -427,6 +427,16 @@ fn nested_generic_payloads_rebuild_per_level() {
 
 // ======== Whole-tuple BINDINGS, defaults and sorting ========
 
+fn ldefault(t: (LP, int) = (LP { x: 1.0, y: 0.0 }, 10)) -> string {
+    return "{t.0.x as int} {t.1}"
+}
+
+@test(output = "1 10\n5 50")
+fn a_defaulted_tuple_param() {
+    print(ldefault())
+    print(ldefault(lmake(5.0)))
+}
+
 @test(output = "1 10\n2 20\n3 30")
 fn sorting_by_a_scalar_key() {
     let xs = [lmake(3.0), lmake(1.0), lmake(2.0)]

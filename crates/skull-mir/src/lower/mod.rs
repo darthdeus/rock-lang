@@ -3203,6 +3203,34 @@ impl<'a> Builder<'a> {
                 self.cur = join;
                 continue;
             }
+            // A splatting tuple param's omitted arg arrives as nil in EVERY slot;
+            // any one slot can be a legitimately nil element, so all are tested.
+            if let Some((cells, shape)) = self.tuple_binds.get(&raw(pb)).cloned() {
+                for &cell in &cells {
+                    self.f.mark_default_param(cell);
+                }
+                let then_bb = self.f.new_block();
+                let join = self.f.new_block();
+                for &cell in &cells {
+                    let cur = self.emit_cur(Inst::Load(cell));
+                    let is_nil = self.is_nil(cur);
+                    self.f.param_default_guards.insert(is_nil, i);
+                    let next = self.f.new_block();
+                    self.branch_to(is_nil, next, join);
+                    self.cur = next;
+                }
+                self.f.set_term(self.cur, Term::Goto(then_bb));
+                self.cur = then_bb;
+                let r = self.lower_expr_repr(*def)?.into_value();
+                let slots = self.tuple_repr_to_slots(r, &shape)?;
+                self.f.param_default_values.insert(i, slots.clone());
+                for (&c, v) in cells.iter().zip(slots) {
+                    self.store_cell(c, v);
+                }
+                self.goto_if_open(join);
+                self.cur = join;
+                continue;
+            }
             let Some(&cell) = self.binds.get(&raw(pb)) else {
                 continue;
             };
