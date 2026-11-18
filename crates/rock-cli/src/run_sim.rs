@@ -5,7 +5,7 @@ use crate::skull_backend::{IncrementalProject, collect_sim_descriptors};
 use anyhow::{Context, Result, anyhow};
 use colored::Colorize;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
@@ -377,8 +377,34 @@ struct SimRegistry {
     source_files: HashMap<String, String>,
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct RegisteredSim {
+    wire_name: String,
+    env: Vec<(String, String)>,
+    #[serde(default)]
+    source_file: String,
+}
+
+impl From<Vec<RegisteredSim>> for SimRegistry {
+    fn from(entries: Vec<RegisteredSim>) -> Self {
+        let mut wire_names = Vec::with_capacity(entries.len());
+        let mut env_by_wire = HashMap::with_capacity(entries.len());
+        let mut source_files = HashMap::with_capacity(entries.len());
+        for entry in entries {
+            env_by_wire.insert(entry.wire_name.clone(), entry.env);
+            source_files.insert(entry.wire_name.clone(), entry.source_file);
+            wire_names.push(entry.wire_name);
+        }
+        Self {
+            wire_names,
+            env_by_wire,
+            source_files,
+        }
+    }
+}
+
 struct CompiledSims {
-    registry: SimRegistry,
+    registry: Vec<RegisteredSim>,
     stone: crate::skull_backend::IncrementalProject,
     selection_is_full: bool,
 }
@@ -424,90 +450,54 @@ fn nearest_manifest(path: &Path) -> Option<PathBuf> {
     }
 }
 
-fn receipt_source_inputs_from_pairs(
+fn receipt_source_inputs(
     project: &Path,
-    sources: Vec<(String, String)>,
+    sources: &rock_core::SourceFiles,
 ) -> Result<Vec<SimReceiptInput>> {
     let mut inputs = Vec::new();
     let mut manifests = std::collections::BTreeSet::new();
-    if let Some(path) = nearest_manifest(project) {
-        manifests.insert(path);
-    }
-    for (path, contents) in sources {
-        let path = PathBuf::from(path);
-        let canonical = canonical_string(&path)?;
+    manifests.extend(nearest_manifest(project));
+    for source in &sources.files {
+        let source = source.borrow();
+        let path = PathBuf::from(source.file.to_id_path());
         inputs.push(SimReceiptInput {
-            kind: "source".to_string(),
-            path: canonical,
-            sha256: sha256_bytes(contents.as_bytes()),
+            kind: "source".into(),
+            path: canonical_string(&path)?,
+            sha256: sha256_bytes(source.contents.as_bytes()),
         });
-        if let Some(path) = nearest_manifest(&path) {
-            manifests.insert(path);
-        }
+        manifests.extend(nearest_manifest(&path));
     }
     for path in manifests {
-        let canonical = canonical_string(&path)?;
-        let bytes = std::fs::read(&path)
-            .with_context(|| format!("read sim receipt manifest input {}", path.display()))?;
         inputs.push(SimReceiptInput {
-            kind: "manifest".to_string(),
-            path: canonical,
-            sha256: sha256_bytes(&bytes),
+            kind: "manifest".into(),
+            path: canonical_string(&path)?,
+            sha256: hash_file(&path)?,
         });
     }
-    inputs.sort_by(|a, b| (&a.kind, &a.path).cmp(&(&b.kind, &b.path)));
     Ok(inputs)
 }
 
-fn receipt_source_pairs(sources: &rock_core::SourceFiles) -> Vec<(String, String)> {
-    sources
-        .files
-        .iter()
-        .map(|source| {
-            let source = source.borrow();
-            (source.file.to_id_path(), source.contents.clone())
-        })
-        .collect()
-}
-
-fn receipt_embedded_inputs(
-    paths: impl IntoIterator<Item = PathBuf>,
-) -> Result<Vec<SimReceiptInput>> {
-    paths
-        .into_iter()
-        .map(|path| {
-            let canonical = canonical_string(&path)?;
-            let bytes = std::fs::read(&path)
-                .with_context(|| format!("read sim receipt embedded input {}", path.display()))?;
-            Ok(SimReceiptInput {
-                kind: "embedded".to_string(),
-                path: canonical,
-                sha256: sha256_bytes(&bytes),
-            })
-        })
-        .collect()
+fn hash_file(path: &Path) -> Result<String> {
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut fs_err::File::open(path)?, &mut hasher)
+        .with_context(|| format!("hash {}", path.display()))?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn receipt_inputs_from_stone(
     project: &Path,
     stone: &crate::skull_backend::IncrementalProject,
 ) -> Result<Vec<SimReceiptInput>> {
-    let sources = receipt_source_pairs(stone.sources());
-    let mut inputs = receipt_source_inputs_from_pairs(project, sources)?;
-    inputs.extend(receipt_embedded_inputs(
-        stone
-            .comptime_watch_files_with_hashes()
-            .into_iter()
-            .map(|(path, _)| path),
-    )?);
+    let mut inputs = receipt_source_inputs(project, stone.sources())?;
+    for (path, _) in stone.comptime_watch_files_with_hashes() {
+        inputs.push(SimReceiptInput {
+            kind: "embedded".into(),
+            path: canonical_string(&path)?,
+            sha256: hash_file(&path)?,
+        });
+    }
     inputs.sort_by(|a, b| (&a.kind, &a.path).cmp(&(&b.kind, &b.path)));
     Ok(inputs)
-}
-
-fn current_receipt_source_inputs(project: &Path) -> Result<Vec<SimReceiptInput>> {
-    let spec = crate::unified_compile::SourceSpec::Directory(project.to_path_buf());
-    let sources = crate::unified_compile::discover_sources(&spec)?;
-    receipt_source_inputs_from_pairs(project, receipt_source_pairs(&sources))
 }
 
 fn sim_receipt_context(project: &Path) -> Result<serde_json::Value> {
@@ -554,81 +544,27 @@ fn parse_receipt_inputs(value: &serde_json::Value) -> Result<Vec<SimReceiptInput
         .collect()
 }
 
-fn registry_json(registry: &SimRegistry) -> Result<serde_json::Value> {
-    let rows = registry
-        .wire_names
-        .iter()
-        .map(|name| {
-            let source_file = registry
-                .source_files
-                .get(name)
-                .filter(|source_file| !source_file.is_empty())
-                .ok_or_else(|| anyhow!("compiled @sim `{name}` has no recorded source file"))?;
-            let env = registry
-                .env_by_wire
-                .get(name)
-                .map_or(&[][..], Vec::as_slice);
-            Ok(serde_json::json!({
-                "wire_name": name,
-                "env": env.iter().map(|(key, value)| serde_json::json!([key, value])).collect::<Vec<_>>(),
-                "source_file": source_file,
-            }))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(serde_json::Value::Array(rows))
-}
-
 fn parse_registry(value: &serde_json::Value) -> Result<SimRegistry> {
+    use serde::Deserialize;
     let rows = value
         .as_array()
-        .ok_or_else(|| anyhow!("sim compile receipt `registry` is not an array"))?;
-    let mut names = Vec::with_capacity(rows.len());
-    let mut env_by_wire = HashMap::new();
-    let mut source_files = HashMap::new();
+        .context("sim compile receipt registry is not an array")?;
+    let mut registry = Vec::with_capacity(rows.len());
     for row in rows {
-        let name = row
-            .get("wire_name")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| anyhow!("sim compile receipt registry wire name is not a string"))?
-            .to_owned();
-        let env_rows = row
-            .get("env")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| {
-                anyhow!("sim compile receipt registry env for `{name}` is not an array")
-            })?;
-        let mut env = Vec::with_capacity(env_rows.len());
-        for pair in env_rows {
-            let pair = pair
-                .as_array()
-                .filter(|pair| pair.len() == 2)
-                .ok_or_else(|| {
-                    anyhow!("sim compile receipt registry env pair for `{name}` is malformed")
-                })?;
-            let key = pair[0].as_str().ok_or_else(|| {
-                anyhow!("sim compile receipt registry env key for `{name}` is not a string")
-            })?;
-            let value = pair[1].as_str().ok_or_else(|| {
-                anyhow!("sim compile receipt registry env value for `{name}` is not a string")
-            })?;
-            env.push((key.to_owned(), value.to_owned()));
-        }
-        names.push(name.clone());
-        env_by_wire.insert(name.clone(), env);
-        let source_file = row
-            .get("source_file")
-            .and_then(serde_json::Value::as_str)
-            .filter(|source_file| !source_file.is_empty())
-            .ok_or_else(|| {
-                anyhow!("sim compile receipt source file for `{name}` is missing or invalid")
-            })?;
-        source_files.insert(name, source_file.to_owned());
+        anyhow::ensure!(
+            row.is_object(),
+            "sim compile receipt registry entry is not an object"
+        );
+        let entry = RegisteredSim::deserialize(row)
+            .context("invalid sim compile receipt registry entry")?;
+        anyhow::ensure!(
+            !entry.source_file.is_empty(),
+            "sim compile receipt source file for `{}` is missing or invalid",
+            entry.wire_name
+        );
+        registry.push(entry);
     }
-    Ok(SimRegistry {
-        wire_names: names,
-        env_by_wire,
-        source_files,
-    })
+    Ok(registry.into())
 }
 
 fn publish_sim_receipt(
@@ -636,7 +572,7 @@ fn publish_sim_receipt(
     receipt_dir: &Path,
     project: &Path,
     output: &Path,
-    registry: &SimRegistry,
+    registry: &[RegisteredSim],
     inputs: &[SimReceiptInput],
     selection: &[String],
 ) -> Result<()> {
@@ -646,21 +582,16 @@ fn publish_sim_receipt(
         .prefix(".sim-receipt-")
         .tempdir_in(root)
         .with_context(|| format!("stage sim compile receipt under {}", root.display()))?;
-    let main_source = output.join(rock_host::project::MAIN_LUA_FILENAME);
-    let main_bytes = std::fs::read(&main_source)
-        .with_context(|| format!("read compiled sim artifact {}", main_source.display()))?;
-    std::fs::write(
-        staged.path().join(rock_host::project::MAIN_LUA_FILENAME),
-        &main_bytes,
-    )
-    .context("write staged sim compile artifact")?;
+    let artifact = rock_host::project::MAIN_LUA_FILENAME;
+    let staged_main = staged.path().join(artifact);
+    fs_err::copy(output.join(artifact), &staged_main)?;
     let manifest = serde_json::json!({
         "schema_version": SIM_COMPILE_RECEIPT_VERSION,
         "context": sim_receipt_context(project)?,
         "selection": selection,
-        "main_sha256": sha256_bytes(&main_bytes),
+        "main_sha256": hash_file(&staged_main)?,
         "inputs": serde_json::to_value(inputs)?,
-        "registry": registry_json(registry)?,
+        "registry": registry,
     });
     let mut manifest_bytes =
         serde_json::to_vec_pretty(&manifest).context("serialize sim compile receipt")?;
@@ -697,7 +628,9 @@ fn load_sim_receipt(receipt_dir: &Path, project: &Path, output: &Path) -> Result
         .get("context")
         .ok_or_else(|| anyhow!("sim compile receipt has no context"))?;
     let current_context = sim_receipt_context(project)?;
-    let mut current_inputs = current_receipt_source_inputs(project)?;
+    let spec = crate::unified_compile::SourceSpec::Directory(project.to_path_buf());
+    let mut current_inputs =
+        receipt_source_inputs(project, &crate::unified_compile::discover_sources(&spec)?)?;
     if expected_context != &current_context {
         return Err(anyhow!(
             "sim compile receipt context changed; prepare a new receipt for this test lane"
@@ -713,13 +646,10 @@ fn load_sim_receipt(receipt_dir: &Path, project: &Path, output: &Path) -> Result
         .iter()
         .filter(|input| input.kind == "embedded")
     {
-        let bytes = std::fs::read(&expected.path).with_context(|| {
-            format!("read sim compile receipt embedded input {}", expected.path)
-        })?;
         current_inputs.push(SimReceiptInput {
             kind: expected.kind.clone(),
             path: expected.path.clone(),
-            sha256: sha256_bytes(&bytes),
+            sha256: hash_file(Path::new(&expected.path))?,
         });
     }
     current_inputs.sort_by(|a, b| (&a.kind, &a.path).cmp(&(&b.kind, &b.path)));
@@ -734,25 +664,10 @@ fn load_sim_receipt(receipt_dir: &Path, project: &Path, output: &Path) -> Result
         .get("main_sha256")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| anyhow!("sim compile receipt has no main artifact hash"))?;
-    // Copy, then hash the copy that will run: game's chunk is about 160 MB, and
-    // reading it into the runner would keep that much resident beside its sims.
+    // Verify the copy that will run, even if the source changes during staging.
     let materialized = output.join(rock_host::project::MAIN_LUA_FILENAME);
-    std::fs::copy(&main_path, &materialized).with_context(|| {
-        format!(
-            "materialize sim compile receipt {} into {}",
-            main_path.display(),
-            output.display()
-        )
-    })?;
-    let mut hasher = Sha256::new();
-    std::io::copy(
-        &mut std::fs::File::open(&materialized).with_context(|| {
-            format!("open materialized sim artifact {}", materialized.display())
-        })?,
-        &mut hasher,
-    )
-    .with_context(|| format!("hash materialized sim artifact {}", materialized.display()))?;
-    if format!("{:x}", hasher.finalize()) != expected_main_hash {
+    fs_err::copy(main_path, &materialized)?;
+    if hash_file(&materialized)? != expected_main_hash {
         return Err(anyhow!(
             "sim compile receipt main.lua hash does not match its manifest"
         ));
@@ -778,7 +693,7 @@ fn prepare_sims(project_path: PathBuf, output_path: PathBuf) -> Result<PreparedS
     else {
         let compiled = compile_sims_with_allocation(project_path, output_path, None, &selection)?;
         return Ok(PreparedSims {
-            registry: compiled.registry,
+            registry: compiled.registry.into(),
             stone: Some(compiled.stone),
         });
     };
@@ -820,7 +735,7 @@ fn prepare_sims(project_path: PathBuf, output_path: PathBuf) -> Result<PreparedS
         &receipt_selection,
     )?;
     Ok(PreparedSims {
-        registry: compiled.registry,
+        registry: compiled.registry.into(),
         stone: None,
     })
 }
@@ -975,16 +890,6 @@ fn compile_child_invocation_args() -> Vec<String> {
     args
 }
 
-fn collect_skull_sims(
-    ws: &bone_semantic::inference::Workspace,
-) -> Vec<(String, String, Vec<(String, String)>)> {
-    let mut sims = collect_sim_descriptors(ws);
-    crate::sim_environment::apply(ws, &mut sims);
-    sims.into_iter()
-        .map(|sim| (sim.wire_name, sim.source_file, sim.env_pairs))
-        .collect()
-}
-
 fn relative_sim_source_path(
     workspace_root: &std::path::Path,
     project_dir: &std::path::Path,
@@ -1106,30 +1011,33 @@ fn skull_compile_game_and_collect_sims_with_allocation(
         .canonicalize()
         .with_context(|| format!("canonicalize sim project {dir}"))?;
     let workspace_root = source_root_for_sim_project(&project_dir)?;
-    let mut sims = collect_skull_sims(stone.workspace());
+    let mut sims = collect_sim_descriptors(stone.workspace());
+    crate::sim_environment::apply(stone.workspace(), &mut sims);
     if !selection_is_full {
         let selected = stone.registered_sim_names();
-        sims.retain(|(wire, _, _)| selected.contains(wire));
+        sims.retain(|sim| selected.contains(&sim.wire_name));
     }
-    let mut registry = SimRegistry {
-        wire_names: Vec::with_capacity(sims.len()),
-        env_by_wire: HashMap::with_capacity(sims.len()),
-        source_files: HashMap::with_capacity(sims.len()),
-    };
+    let mut registry = Vec::with_capacity(sims.len());
     let mut relative_by_source = HashMap::new();
-    for (wire, source_file, env) in sims {
-        registry.wire_names.push(wire.clone());
-        let relative_source = match relative_by_source.entry(source_file.clone()) {
+    for sim in sims {
+        let wire_name = sim.wire_name;
+        let source_file = match relative_by_source.entry(sim.source_file) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
-            std::collections::hash_map::Entry::Vacant(entry) => entry.insert(
-                relative_sim_source_path(&workspace_root, &project_dir, &source_file)
-                    .with_context(|| format!("record source for @sim `{wire}`"))?,
-            ),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let relative = relative_sim_source_path(&workspace_root, &project_dir, entry.key())
+                    .with_context(|| format!("record source for @sim `{wire_name}`"))?;
+                anyhow::ensure!(
+                    !relative.is_empty(),
+                    "compiled @sim `{wire_name}` has no recorded source file"
+                );
+                entry.insert(relative)
+            }
         };
-        registry
-            .source_files
-            .insert(wire.clone(), relative_source.clone());
-        registry.env_by_wire.insert(wire, env);
+        registry.push(RegisteredSim {
+            wire_name,
+            source_file: source_file.clone(),
+            env: sim.env_pairs,
+        });
     }
     Ok(CompiledSims {
         registry,
@@ -1351,55 +1259,31 @@ fn prepare_run(
     Ok((project_path, out_dir, prepared))
 }
 
-fn do_run_sim_opts_with_request(
-    project: &str,
-    sim_name: &str,
-    quiet: bool,
-    update_snapshots: bool,
-    requested_jobs: Option<usize>,
-) -> Result<()> {
-    let recorder = SimRunRecorder::begin(project, sim_name, quiet, requested_jobs);
-    let result = do_run_sim_opts_recorded(
-        project,
-        sim_name,
-        quiet,
-        update_snapshots,
-        requested_jobs,
-        &recorder,
-    );
-    let error = result.as_ref().err().map(ToString::to_string);
-    recorder.finish(result.is_ok(), error.as_deref());
-    result
-}
-
-fn do_run_sim_opts_recorded(
-    project: &str,
-    sim_name: &str,
+fn run_single_sim(
+    project_path: &Path,
+    output_path: &Path,
+    mut prepared: PreparedSims,
+    specs: &[String],
     quiet: bool,
     update_snapshots: bool,
     requested_jobs: Option<usize>,
     recorder: &SimRunRecorder,
 ) -> Result<()> {
-    let (project_path, out_dir, mut prepared) =
-        prepare_run(project, &[sim_name.to_string()], recorder)?;
-    let output = out_dir.path().to_string_lossy().into_owned();
-    let output_path = out_dir.path().to_path_buf();
-    let sim_name =
-        resolve_sim_specs(&prepared.registry.wire_names, &[sim_name.to_string()])?.remove(0);
-    let sim_name = sim_name.as_str();
+    let sim_name = &specs[0];
+    let output = output_path.to_string_lossy();
     // A reload sim needs the editable compiler session that a receipt omits.
     if prepared.stone.is_none() && entry_is_reload_lane(sim_name, &prepared.registry.env_by_wire) {
         let compiled = recorder.phase("compile_reload_session", || {
-            compile_sims(project_path.clone(), output_path)
+            compile_sims(project_path.to_path_buf(), output_path.to_path_buf())
         })?;
         prepared = PreparedSims {
-            registry: compiled.registry,
+            registry: compiled.registry.into(),
             stone: Some(compiled.stone),
         };
     }
-    let entry_ids = recorder.plan_entries(&[sim_name.to_string()]);
+    let entry_ids = recorder.plan_entries(specs);
     recorder.configure(
-        &project_path,
+        project_path,
         &prepared.registry.wire_names,
         requested_jobs,
         1,
@@ -1408,17 +1292,22 @@ fn do_run_sim_opts_recorded(
         update_snapshots,
         &prepared.registry.source_files,
     );
-    emit_bytecode_image(Path::new(&output));
+    emit_bytecode_image(Path::new(output.as_ref()));
 
-    let sim_sources = resolve_sim_sources(&project_path, &prepared.registry.source_files)?;
+    let sim_sources = resolve_sim_sources(project_path, &prepared.registry.source_files)?;
     let (display_name, summary) = run_named_entry(
         sim_name,
         quiet,
         false,
         update_snapshots,
         &output,
-        &prepared.registry.env_by_wire,
-        &sim_sources,
+        prepared
+            .registry
+            .env_by_wire
+            .get(sim_name)
+            .cloned()
+            .unwrap_or_default(),
+        sim_sources.get(sim_name).cloned(),
         prepared.stone.as_mut(),
         None,
         Some(recorder),
@@ -1483,8 +1372,8 @@ fn run_named_entry(
     buffered: bool,
     update_snapshots: bool,
     output: &str,
-    env_by_wire: &HashMap<String, Vec<(String, String)>>,
-    source_files: &HashMap<String, PathBuf>,
+    env_pairs: Vec<(String, String)>,
+    source_file: Option<PathBuf>,
     stone: Option<&mut crate::skull_backend::IncrementalProject>,
     census_warmup_frames: Option<usize>,
     recorder: Option<&SimRunRecorder>,
@@ -1495,7 +1384,6 @@ fn run_named_entry(
     if name.is_empty() {
         return Err(anyhow!("sim got an empty sim name"));
     }
-    let env_pairs = env_by_wire.get(name).cloned().unwrap_or_default();
     // Only a sim that opted into the reload lane may touch the session.
     let lane = if is_reload_lane(&env_pairs) {
         stone
@@ -1507,7 +1395,7 @@ fn run_named_entry(
         out_dir: out_dir.path().to_path_buf(),
         frame_budget: frame_budget_for(name, &env_pairs)?,
         timeout: timeout_for(name, &env_pairs)?,
-        source_file: source_files.get(name).cloned(),
+        source_file,
         env: env_pairs,
         occurrence_id: occurrence_id.unwrap_or(0),
     };
@@ -1598,17 +1486,13 @@ pub(crate) fn do_run_sims(
     full_asset_jobs: Option<usize>,
 ) -> Result<()> {
     // One name: there is nothing to overlap, so `--jobs` does not apply.
-    if names.len() == 1 {
-        if jobs.is_some_and(|j| j > 1) {
-            resolve_jobs(jobs, Some(1), update_snapshots)?;
-        }
-        return do_run_sim_opts_with_request(project, &names[0], quiet, update_snapshots, jobs);
+    if names.len() == 1 && jobs.is_some_and(|j| j > 1) {
+        resolve_jobs(jobs, Some(1), update_snapshots)?;
     }
-
-    let selection = if names.is_empty() {
-        "<all>".to_string()
-    } else {
-        names.join(" ")
+    let selection = match names {
+        [] => std::borrow::Cow::Borrowed("<all>"),
+        [name] => std::borrow::Cow::Borrowed(name.as_str()),
+        _ => std::borrow::Cow::Owned(names.join(" ")),
     };
     let recorder = SimRunRecorder::begin(project, &selection, quiet, jobs);
     let result = do_run_sims_recorded(
@@ -1634,22 +1518,38 @@ fn do_run_sims_recorded(
     full_asset_jobs: Option<usize>,
     recorder: &SimRunRecorder,
 ) -> Result<()> {
-    let suite = names.is_empty();
     let (project_path, out_dir, prepared) = prepare_run(project, names, recorder)?;
-    let project = project_path.to_string_lossy().into_owned();
-    let output = out_dir.path().to_string_lossy().into_owned();
+    let output_path = out_dir.path();
+    let suite = names.is_empty();
+    let specs = if suite {
+        Ok(prepared.registry.wire_names.clone())
+    } else {
+        resolve_sim_specs(&prepared.registry.wire_names, names)
+    };
+    if names.len() == 1 {
+        return run_single_sim(
+            &project_path,
+            output_path,
+            prepared,
+            &specs?,
+            quiet,
+            update_snapshots,
+            jobs,
+            recorder,
+        );
+    }
+
+    let project = project_path.to_string_lossy();
+    let output = output_path.to_string_lossy();
     let SimRegistry {
         wire_names,
         env_by_wire,
         source_files,
     } = prepared.registry;
     let sim_sources = resolve_sim_sources(&project_path, &source_files)?;
-    let specs = if suite {
-        wire_names.clone()
-    } else {
-        resolve_sim_specs(&wire_names, names)?
-    };
-    emit_bytecode_image(Path::new(&output));
+    // Source discovery takes precedence over selection errors for pooled runs.
+    let specs = specs?;
+    emit_bytecode_image(Path::new(output.as_ref()));
     if specs.is_empty() {
         return Err(anyhow!("no @sim coroutines found in project `{project}`"));
     }
@@ -1703,7 +1603,7 @@ fn do_run_sims_recorded(
     let mut reload_lane = reload_lane_session(
         &project_path,
         any_reload_lane_selected(&routine_specs, &env_by_wire),
-        Path::new(&output),
+        Path::new(output.as_ref()),
         prepared.stone,
         quiet,
     )?;
@@ -1863,8 +1763,8 @@ fn run_fresh_entries(run: FreshRun<'_>) -> Result<Vec<(String, SimSummary)>> {
             !streaming,
             update_snapshots,
             entry_output,
-            env_by_wire,
-            source_files,
+            env_by_wire.get(&specs[i]).cloned().unwrap_or_default(),
+            source_files.get(&specs[i]).cloned(),
             stone,
             None,
             Some(recorder),
@@ -2299,8 +2199,8 @@ pub(crate) fn do_run_allocation_census(
     let (project_path, out_dir, compiled) = compile_sim_diagnostic(project, None)?;
     let project = project_path.to_string_lossy().into_owned();
     let output = out_dir.path().to_string_lossy().into_owned();
-    let sim_sources = resolve_sim_sources(&project_path, &compiled.registry.source_files)?;
-    let registry = compiled.registry;
+    let registry = SimRegistry::from(compiled.registry);
+    let sim_sources = resolve_sim_sources(&project_path, &registry.source_files)?;
     let stone = compiled.stone;
     emit_bytecode_image(Path::new(&output));
 
@@ -2334,8 +2234,12 @@ pub(crate) fn do_run_allocation_census(
             true,
             false,
             entry_output,
-            &registry.env_by_wire,
-            &sim_sources,
+            registry
+                .env_by_wire
+                .get(&selected[i])
+                .cloned()
+                .unwrap_or_default(),
+            sim_sources.get(&selected[i]).cloned(),
             stone,
             Some(DEFAULT_SIM_ALLOCATION_WARMUP_FRAMES),
             None,
@@ -2551,7 +2455,8 @@ pub(crate) fn do_run_allocation_sites(
     let (project_path, out_dir, compiled) = compile_sim_diagnostic(project, Some(&manifest_path))?;
     let project = project_path.to_string_lossy().into_owned();
     let output = out_dir.path().to_string_lossy().into_owned();
-    let sim_sources = resolve_sim_sources(&project_path, &compiled.registry.source_files)?;
+    let registry = SimRegistry::from(compiled.registry);
+    let sim_sources = resolve_sim_sources(&project_path, &registry.source_files)?;
     let artifact_fingerprint = compiled.stone.artifact_fingerprint().to_string();
     drop(compiled.stone);
     let generated_lua_path = artifact_dir.join("main.lua");
@@ -2563,15 +2468,15 @@ pub(crate) fn do_run_allocation_sites(
     let generated_lua = fs_err::read_to_string(&generated_lua_path)?;
 
     let selected = if names.is_empty() {
-        compiled.registry.wire_names.clone()
+        registry.wire_names.clone()
     } else {
-        resolve_sim_specs(&compiled.registry.wire_names, names)?
+        resolve_sim_specs(&registry.wire_names, names)?
     };
     if selected.is_empty() {
         return Err(anyhow!("no @sim coroutines found in project `{project}`"));
     }
     for name in &selected {
-        if entry_is_reload_lane(name, &compiled.registry.env_by_wire) {
+        if entry_is_reload_lane(name, &registry.env_by_wire) {
             return Err(anyhow!(
                 "allocation-site diagnostics do not support reload sim `{name}` because its emitted site IDs can change after the initial manifest"
             ));
@@ -2583,12 +2488,12 @@ pub(crate) fn do_run_allocation_sites(
         let name = &selected[index];
         let stem = allocation_site_artifact_stem(index, name);
         let activation_path = artifact_dir.join(format!("{stem}.activation.tsv"));
-        let mut instrumented_env = compiled.registry.env_by_wire.clone();
-        instrumented_env.entry(name.clone()).or_default().push((
+        let mut instrumented_env = registry.env_by_wire.get(name).cloned().unwrap_or_default();
+        instrumented_env.push((
             "SKULL_ALLOCATION_ACTIVATION".to_string(),
             activation_path.to_string_lossy().into_owned(),
         ));
-        instrumented_env.entry(name.clone()).or_default().extend([
+        instrumented_env.extend([
             ("STONE_TEXT_LAYOUT_SIM_PROBES".to_string(), "0".to_string()),
             ("STONE_IMGUI_SIM_PROBES".to_string(), "0".to_string()),
         ]);
@@ -2598,8 +2503,8 @@ pub(crate) fn do_run_allocation_sites(
             true,
             false,
             &output,
-            &instrumented_env,
-            &sim_sources,
+            instrumented_env,
+            sim_sources.get(name).cloned(),
             None,
             None,
             None,
@@ -2657,8 +2562,7 @@ pub(crate) fn do_run_allocation_sites(
                     None,
                 )?;
                 fs_err::write(&joined_path, joined)?;
-                let env = compiled
-                    .registry
+                let env = registry
                     .env_by_wire
                     .get(name)
                     .map_or(&[][..], Vec::as_slice);
@@ -3354,136 +3258,164 @@ impl EntryFrameTiming {
     }
 }
 
-/// The child's stderr, carved by its `entry_start`/`entry_end` envelope.
-#[derive(Default)]
+/// Interpret stderr as it arrives. A protocol error permanently closes the
+/// boundary channel, while live diagnostics and reload messages still drain.
 struct EntryStream {
-    started: bool,
-    /// Saw the `entry_end`. False for an entry its child died inside.
-    terminated: bool,
-    /// Number of game-loop frames the entry completed, when the child
-    /// reported it on its validated `entry_end`.
-    frame_count: Option<usize>,
-    sim: Vec<String>,
-    /// Every raw line, including the boot and teardown noise outside the
-    /// envelope. This is the debugging stream.
-    raw_all: Vec<String>,
-}
-
-/// Split the child's stderr by its envelope, validating the protocol strictly
-/// (`Envelope::observe`). The one tolerated gap is a started entry with no
-/// `entry_end`: that is what a crashed or timed-out child leaves behind, and
-/// it is recorded as `terminated == false` rather than accepted as a clean
-/// close.
-fn split_child_stream(lines: &[String], name: &str) -> Result<EntryStream> {
-    let mut out = EntryStream::default();
-    let mut envelope = Envelope::new(name);
-    for line in lines {
-        if let Some((prefix, _)) = line
-            .split_once("__SIM__")
-            .filter(|(prefix, _)| !prefix.is_empty())
-        {
-            out.raw_all.push(prefix.to_string());
-        }
-        match envelope.observe(line)? {
-            EnvelopeStep::Raw => out.raw_all.push(line.clone()),
-            EnvelopeStep::Started => out.started = true,
-            EnvelopeStep::Ended(frame_count, _) => {
-                out.terminated = true;
-                out.frame_count = frame_count;
-            }
-            EnvelopeStep::Op => out.sim.push(line.clone()),
-        }
-    }
-    Ok(out)
-}
-
-/// The ONE interpretation of the child's envelope, driven a line at a time.
-/// `split_child_stream` uses it after the child exits, and the live stderr
-/// reader uses it to decide when the wall-clock deadline anchor may reset, so
-/// a line the split would reject can never buy a wedged child more time.
-struct Envelope {
     name: String,
+    buffered: bool,
     started: bool,
-    ended: bool,
-    poisoned: bool,
+    terminated: bool,
+    summary: SimSummary,
+    protocol_error: Option<anyhow::Error>,
+    marker_error: Option<String>,
+    raw_tail: VecDeque<String>,
 }
 
-/// What one observed line meant to the envelope.
-#[derive(Clone, Copy)]
-enum EnvelopeStep {
-    /// The accepted `entry_start` -- the only step the deadline anchor may
-    /// reset on.
+enum EntryBoundary {
     Started,
     Ended(Option<usize>, Option<EntryFrameTiming>),
-    /// A structured operation inside the open entry.
-    Op,
-    /// A non-`__SIM__` line.
-    Raw,
 }
 
-impl Envelope {
-    fn new(name: &str) -> Self {
+struct EntryLine<'a> {
+    diagnostic: Option<&'a str>,
+    event: Option<serde_json::Value>,
+    boundary: Option<EntryBoundary>,
+}
+
+impl EntryStream {
+    fn new(name: String, buffered: bool) -> Self {
         Self {
-            name: name.to_string(),
+            name,
+            buffered,
             started: false,
-            ended: false,
-            poisoned: false,
+            terminated: false,
+            summary: SimSummary::default(),
+            protocol_error: None,
+            marker_error: None,
+            raw_tail: VecDeque::new(),
         }
     }
 
-    fn observe_boundary(&mut self, line: &str) -> Option<EnvelopeStep> {
-        if self.poisoned {
-            return None;
-        }
-        match self.observe(line) {
-            Ok(step) => Some(step),
-            Err(_) => {
-                self.poisoned = true;
-                None
+    fn observe<'line>(
+        &mut self,
+        line: &'line str,
+        report: impl FnOnce(&EntryLine<'line>),
+    ) -> EntryLine<'line> {
+        let (raw, payload) = line
+            .split_once("__SIM__")
+            .map_or((line, None), |(prefix, payload)| (prefix, Some(payload)));
+        let keep_raw = payload.is_none() || !raw.is_empty();
+        let mut observed = EntryLine {
+            diagnostic: keep_raw.then_some(raw),
+            event: None,
+            boundary: None,
+        };
+        let mut protocol_error = None;
+        let mut marker_error = None;
+        if let Some(payload) = payload {
+            match parse_sim_marker(payload, line) {
+                Ok(event) => {
+                    if self.protocol_error.is_none() {
+                        match self.boundary(&event, line) {
+                            Ok(boundary) => observed.boundary = boundary,
+                            Err(error) => protocol_error = Some(error),
+                        }
+                    }
+                    observed.event = Some(event);
+                }
+                Err(error) => {
+                    if self.marker_error.is_none() {
+                        marker_error = Some(error.to_string());
+                    }
+                    protocol_error = Some(error);
+                    observed.diagnostic = Some(line);
+                }
             }
         }
+
+        // Keep the completed prefix if reporting or reading panics.
+        report(&observed);
+        if !self.started && !raw.is_empty() {
+            if self.raw_tail.len() == 8 {
+                self.raw_tail.pop_front();
+            }
+            self.raw_tail.push_back(raw.chars().take(240).collect());
+        }
+        if self.buffered && keep_raw {
+            self.summary.diagnostics.push_str(raw);
+            self.summary.diagnostics.push('\n');
+        }
+        self.marker_error = self.marker_error.take().or(marker_error);
+        self.protocol_error = self.protocol_error.take().or(protocol_error);
+        match observed.boundary {
+            Some(EntryBoundary::Started) => self.started = true,
+            Some(EntryBoundary::Ended(frame_count, _)) => {
+                self.terminated = true;
+                self.summary.frame_count = frame_count;
+            }
+            None if self.protocol_error.is_none() => {
+                if let Some(event) = &observed.event {
+                    self.summary
+                        .record(event, event["op"].as_str().expect("validated marker"));
+                }
+            }
+            None => {}
+        }
+        observed
     }
 
-    /// Strict: a second start, an end with no open entry, a name other than
-    /// this child's sim, or a structured operation outside the envelope is a
-    /// protocol error rather than something to guess at.
-    fn observe(&mut self, line: &str) -> Result<EnvelopeStep> {
-        let Some(event) = parse_sim_marker(line)? else {
-            return Ok(EnvelopeStep::Raw);
-        };
-        let rest = &event;
-        let op = extract_str_field(rest, "op").unwrap_or_default();
-        match op.as_str() {
+    fn read(
+        &mut self,
+        reader: impl BufRead,
+        mut report: impl FnMut(&EntryLine<'_>),
+    ) -> Option<String> {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for line in reader.lines() {
+                self.observe(&line?, &mut report);
+            }
+            Ok::<(), std::io::Error>(())
+        })) {
+            Ok(Ok(())) => self.marker_error.take(),
+            Ok(Err(error)) => Some(format!("error reading game stderr: {error}")),
+            Err(panic) => Some(stderr_panic_message(panic)),
+        }
+    }
+
+    fn boundary(&self, event: &serde_json::Value, line: &str) -> Result<Option<EntryBoundary>> {
+        let op = event["op"].as_str().expect("validated marker");
+        match op {
             "entry_start" => {
                 if self.started {
                     return Err(anyhow!("sim child started its entry twice: {line}"));
                 }
-                envelope_name_matches(rest, &self.name, line)?;
-                self.started = true;
-                Ok(EnvelopeStep::Started)
+                envelope_name_matches(event, &self.name, line)?;
+                Ok(Some(EntryBoundary::Started))
             }
             "entry_end" => {
-                if !self.started || self.ended {
+                if !self.started || self.terminated {
                     return Err(anyhow!(
                         "sim child ended an entry that was not open: {line}"
                     ));
                 }
-                envelope_name_matches(rest, &self.name, line)?;
-                let frame_count = envelope_frame_count(rest, line)?;
-                let frame_timing = envelope_frame_timing(rest, frame_count, line)?;
-                self.ended = true;
-                Ok(EnvelopeStep::Ended(frame_count, frame_timing))
+                envelope_name_matches(event, &self.name, line)?;
+                let frame_count = envelope_frame_count(event, line)?;
+                let frame_timing = envelope_frame_timing(event, frame_count, line)?;
+                Ok(Some(EntryBoundary::Ended(frame_count, frame_timing)))
             }
             _ => {
-                if !self.started || self.ended {
+                if !self.started || self.terminated {
                     return Err(anyhow!(
                         "sim child emitted a `{op}` operation outside its entry envelope: {line}"
                     ));
                 }
-                Ok(EnvelopeStep::Op)
+                Ok(None)
             }
         }
     }
+}
+
+fn stderr_panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
+    format!("stderr reader thread panicked; sim output may be incomplete: {panic:?}")
 }
 
 fn envelope_frame_count(rest: &serde_json::Value, line: &str) -> Result<Option<usize>> {
@@ -3722,13 +3654,6 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
     let stderr_handle = child.stderr.take().expect("piped");
     let stdout_handle = child.stdout.take().expect("piped");
 
-    // Streaming reader: print `__SIM__` ops as colored progress lines as
-    // they arrive, capture all lines into a shared buffer for the
-    // post-run `from_stderr` parse. Non-`__SIM__` lines (game logs)
-    // pass through to the parent stderr verbatim. The old DSL printed
-    // progress live; without streaming, batched output appears only
-    // after the child exits which is useless feedback for a 30s sim.
-    let stderr_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     // What the wall-clock deadline is measured from: the spawn until the entry
     // opens, then its `entry_start`, so boot does not spend the entry's budget.
@@ -3742,104 +3667,85 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
     let (reload_completion_tx, reload_completion_rx) = mpsc::channel::<ReloadCompletion>();
 
     let stderr_thread = {
-        let lines = Arc::clone(&stderr_lines);
         let anchor = Arc::clone(&deadline_anchor);
-        let reload_completion_tx = reload_completion_tx;
         let recorder = recorder.cloned();
         let (occurrence_id, name) = (part.occurrence_id, part.name.clone());
-        let mut deadline_guard = Envelope::new(&part.name);
         // Buffered runs must not write anything from this thread: several
         // children are live, so a direct write here interleaves into the middle
         // of another sim's locked record. The lines are retained and handed
         // back for the caller to emit inside that lock.
         let quiet = quiet || buffered;
-        std::thread::spawn(move || -> Option<String> {
-            let reader = BufReader::new(stderr_handle);
-            let mut parse_error = None;
-            for line in reader.lines() {
-                let line = match line {
-                    Ok(line) => line,
-                    Err(e) => return Some(format!("error reading game stderr: {e}")),
-                };
-                let marker = match parse_sim_marker(&line) {
-                    Ok(marker) => marker,
-                    Err(error) => {
-                        parse_error.get_or_insert_with(|| error.to_string());
-                        None
+        std::thread::spawn(move || {
+            let mut stream = EntryStream::new(name.clone(), buffered);
+            let diagnostic = stream.read(
+                BufReader::new(stderr_handle),
+                |EntryLine {
+                     diagnostic,
+                     event,
+                     boundary,
+                 }| {
+                    if matches!(boundary, Some(EntryBoundary::Started)) {
+                        *anchor.lock().unwrap() = rock_core::clock::Instant::now();
                     }
-                };
-                let boundary = deadline_guard.observe_boundary(&line);
-                if let Some(EnvelopeStep::Started) = boundary {
-                    *anchor.lock().unwrap() = rock_core::clock::Instant::now();
-                }
-                if let Some(recorder) = recorder.as_ref() {
-                    match boundary {
-                        Some(EnvelopeStep::Started) => {
-                            recorder.worker_first_entry(worker_attempt, occurrence_id, &name);
-                            recorder.entry_start(worker_attempt, occurrence_id, &name);
+                    if let Some(recorder) = recorder.as_ref() {
+                        match boundary {
+                            Some(EntryBoundary::Started) => {
+                                recorder.worker_first_entry(worker_attempt, occurrence_id, &name);
+                                recorder.entry_start(worker_attempt, occurrence_id, &name);
+                            }
+                            Some(EntryBoundary::Ended(frame_count, frame_timing)) => {
+                                recorder.entry_end(
+                                    worker_attempt,
+                                    occurrence_id,
+                                    &name,
+                                    *frame_count,
+                                    frame_timing.map(EntryFrameTiming::value),
+                                );
+                            }
+                            _ => {}
                         }
-                        Some(EnvelopeStep::Ended(frame_count, frame_timing)) => {
-                            recorder.entry_end(
-                                worker_attempt,
-                                occurrence_id,
-                                &name,
-                                frame_count,
-                                frame_timing.map(EntryFrameTiming::value),
-                            );
-                        }
-                        _ => {}
                     }
-                }
-                if let Some(event) = marker {
-                    let rest = &event;
                     if !buffered {
-                        if let Some((prefix, _)) = line
-                            .split_once("__SIM__")
-                            .filter(|(prefix, _)| !prefix.is_empty())
-                        {
-                            eprintln!("{prefix}");
+                        if let Some(diagnostic) = diagnostic {
+                            eprintln!("{diagnostic}");
                         }
                     }
-                    let op = extract_str_field(rest, "op");
-                    if op.as_deref() == Some("reload_edit") {
-                        // Send failure = the wait loop already reaped the child;
-                        // the edit can't apply, which the sim's own wait_for
-                        // timeout (or the post-exit drain) surfaces.
-                        let _ = reload_tx.send(ReloadEditReq {
-                            request_id: extract_raw_field(rest, "request_id")
-                                .and_then(|id| id.parse::<u64>().ok()),
-                            file: extract_str_field(rest, "file").unwrap_or_default(),
-                            find: extract_str_field(rest, "find").unwrap_or_default(),
-                            replace: extract_str_field(rest, "replace").unwrap_or_default(),
-                            site: extract_str_field(rest, "site").unwrap_or_default(),
-                        });
-                    }
-                    if op.as_deref() == Some("reload_terminal") {
-                        let terminal = match extract_str_field(rest, "status").as_deref() {
-                            Some("applied") => Some(ReloadTerminal::Applied),
-                            Some("failed") => Some(ReloadTerminal::Failed),
-                            _ => None,
-                        };
-                        if let Some(terminal) = terminal {
-                            let _ = reload_completion_tx.send(ReloadCompletion {
+                    if let Some(rest) = event {
+                        let op = rest["op"].as_str().expect("validated marker");
+                        if op == "reload_edit" {
+                            // Send failure = the wait loop already reaped the child;
+                            // the edit can't apply, which the sim's own wait_for
+                            // timeout (or the post-exit drain) surfaces.
+                            let _ = reload_tx.send(ReloadEditReq {
                                 request_id: extract_raw_field(rest, "request_id")
                                     .and_then(|id| id.parse::<u64>().ok()),
-                                terminal,
+                                file: extract_str_field(rest, "file").unwrap_or_default(),
+                                find: extract_str_field(rest, "find").unwrap_or_default(),
+                                replace: extract_str_field(rest, "replace").unwrap_or_default(),
+                                site: extract_str_field(rest, "site").unwrap_or_default(),
                             });
                         }
+                        if op == "reload_terminal" {
+                            let terminal = match extract_str_field(rest, "status").as_deref() {
+                                Some("applied") => Some(ReloadTerminal::Applied),
+                                Some("failed") => Some(ReloadTerminal::Failed),
+                                _ => None,
+                            };
+                            if let Some(terminal) = terminal {
+                                let _ = reload_completion_tx.send(ReloadCompletion {
+                                    request_id: extract_raw_field(rest, "request_id")
+                                        .and_then(|id| id.parse::<u64>().ok()),
+                                    terminal,
+                                });
+                            }
+                        }
+                        if !quiet {
+                            print_progress(rest, op);
+                        }
                     }
-                    if !quiet {
-                        print_progress(rest);
-                    }
-                } else if !buffered {
-                    // Result output, NOT logging: verbatim passthrough of
-                    // the child game's own stderr (non-`__SIM__` lines) —
-                    // the game's output stream, not run_sim's diagnostics.
-                    eprintln!("{line}");
-                }
-                lines.lock().unwrap().push(line);
-            }
-            parse_error
+                },
+            );
+            (stream, diagnostic)
         })
     };
 
@@ -4037,12 +3943,15 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
     // the user with a "0/0 expects passed" PASS line and no clue why
     // (silent-errors audit, 2026-05-02).
     let mut reader_diagnostics = Vec::new();
-    match stderr_thread.join() {
-        Ok(Some(message)) => reader_diagnostics.push(format!("rock sim `{label}`: {message}")),
-        Ok(None) => {}
-        Err(panic) => reader_diagnostics.push(format!(
-            "rock sim `{label}`: stderr reader thread panicked; sim output may be incomplete: {panic:?}"
-        )),
+    let (stream, diagnostic) = match stderr_thread.join() {
+        Ok(result) => result,
+        Err(panic) => (
+            EntryStream::new(part.name.clone(), buffered),
+            Some(stderr_panic_message(panic)),
+        ),
+    };
+    if let Some(message) = diagnostic {
+        reader_diagnostics.push(format!("rock sim `{label}`: {message}"));
     }
     match stdout_thread.join() {
         Ok(Some(message)) => reader_diagnostics.push(message),
@@ -4077,28 +3986,35 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
         }
     }
 
-    let collected = stderr_lines.lock().unwrap().clone();
     let stdout_buf_locked = stdout_buf.lock().unwrap();
     let stdout_str = String::from_utf8_lossy(&stdout_buf_locked).to_string();
     drop(stdout_buf_locked);
 
-    let stream = split_child_stream(&collected, &part.name)?;
-    let worker_end = describe_worker_end(
-        &status,
-        timed_out,
-        part.timeout,
-        runner_killed,
-        memory_error.as_ref(),
-        &collected,
-    );
+    let EntryStream {
+        started,
+        terminated,
+        mut summary,
+        raw_tail,
+        protocol_error,
+        ..
+    } = stream;
+    if let Some(error) = protocol_error {
+        return Err(error);
+    }
 
-    let mut summary = SimSummary::from_stderr(&stream.sim.join("\n"));
-    summary.frame_count = stream.frame_count;
     summary.process_id = Some(process_id);
     if recorder.is_some() {
         summary.worker_attempt = Some(worker_attempt);
     }
-    if !stream.started {
+    if !started {
+        let worker_end = describe_worker_end(
+            &status,
+            timed_out,
+            part.timeout,
+            runner_killed,
+            memory_error.as_ref(),
+            raw_tail,
+        );
         summary.errors.push(SiteMessage {
             message: format!(
                 "sim `{}` never started: its process ended before the entry opened ({worker_end})",
@@ -4110,7 +4026,7 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
     // A started entry with no `entry_end` is only explicable as one its child
     // died inside. Anywhere else the envelope was lost, and a record built
     // from a half-seen stream must not read as a clean result.
-    if stream.started && !stream.terminated && status.success() && !timed_out {
+    if started && !terminated && status.success() && !timed_out {
         summary.errors.push(SiteMessage {
             message: format!(
                 "sim `{}` never emitted its entry_end although its process exited cleanly",
@@ -4169,26 +4085,18 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
         // caller prints the record: the child's own stderr, plus its stdout
         // when the sim failed. Without this a concurrent run silently loses
         // every game-side diagnostic that a serial run prints.
-        let mut diag = String::new();
-        for line in &stream.raw_all {
-            diag.push_str(line);
-            diag.push('\n');
-        }
+        let failed =
+            summary.has_failures() || summary.timed_out || summary.process_failure_code.is_some();
+        let diag = &mut summary.diagnostics;
         for message in &reader_diagnostics {
             diag.push_str("[SIM] warning: ");
             diag.push_str(message);
             diag.push('\n');
         }
-        if !quiet
-            && (summary.has_failures()
-                || summary.timed_out
-                || summary.process_failure_code.is_some())
-            && !stdout_str.trim().is_empty()
-        {
+        if !quiet && failed && !stdout_str.trim().is_empty() {
             diag.push_str(&format!("--- game stdout for `{}` ---\n", part.name));
             diag.push_str(&stdout_str);
         }
-        summary.diagnostics = diag;
     }
 
     // Restore the session + remove the overlay even when the sim failed --
@@ -4238,9 +4146,8 @@ fn describe_worker_end(
     timeout: Duration,
     runner_killed: bool,
     memory_error: Option<&SiteMessage>,
-    stderr: &[String],
+    mut stderr: VecDeque<String>,
 ) -> String {
-    const TAIL: usize = 8;
     let mut out = format!("worker {status}");
     if timed_out {
         out.push_str(&format!(
@@ -4254,23 +4161,13 @@ fn describe_worker_end(
     } else if let Some(note) = crate::headless_scope::outside_kill_note(status, runner_killed) {
         out.push_str(&format!("; {note}"));
     }
-    let game: Vec<&str> = stderr
-        .iter()
-        .map(|line| {
-            line.split_once("__SIM__")
-                .map_or(line.as_str(), |(prefix, _)| prefix)
-        })
-        .filter(|line| !line.is_empty())
-        .collect();
-    let tail = &game[game.len().saturating_sub(TAIL)..];
-    if tail.is_empty() {
+    if stderr.is_empty() {
         out.push_str("; no game stderr");
     } else {
-        let tail: Vec<String> = tail
-            .iter()
-            .map(|line| line.chars().take(240).collect())
-            .collect();
-        out.push_str(&format!("; last game stderr: {}", tail.join(" | ")));
+        out.push_str(&format!(
+            "; last game stderr: {}",
+            stderr.make_contiguous().join(" | ")
+        ));
     }
     out
 }
@@ -4296,8 +4193,7 @@ fn compress_site(path: &str) -> String {
 /// memory carries over. Unknown ops are silently dropped — this is
 /// progress display, not a parser. Heavy fields (image_snapshot path)
 /// are summarized rather than dumped.
-fn print_progress(rest: &serde_json::Value) {
-    let op = extract_str_field(rest, "op").unwrap_or_default();
+fn print_progress(rest: &serde_json::Value, op: &str) {
     let site_raw = extract_str_field(rest, "site").unwrap_or_default();
     let site = compress_site(&site_raw);
     let prefix = if site.is_empty() {
@@ -4305,7 +4201,7 @@ fn print_progress(rest: &serde_json::Value) {
     } else {
         format!("[{}] ", site).bright_black().to_string()
     };
-    let body = match op.as_str() {
+    let body = match op {
         "start_game" => {
             let n = extract_str_field(rest, "name").unwrap_or_default();
             format!("{} {}", "start".cyan(), n.yellow())
@@ -4578,84 +4474,67 @@ struct ImageSnapshotOp {
 }
 
 impl SimSummary {
-    fn from_stderr(stderr: &str) -> Self {
-        let mut s = Self::default();
-        for line in stderr.lines() {
-            let event = match parse_sim_marker(line) {
-                Ok(Some(event)) => event,
-                Ok(None) => continue,
-                Err(error) => {
-                    s.errors.push(SiteMessage {
-                        message: error.to_string(),
-                        site: String::new(),
-                    });
-                    continue;
-                }
-            };
-            let rest = &event;
-            let op = extract_str_field(rest, "op").unwrap_or_default();
-            let site_raw = extract_str_field(rest, "site").unwrap_or_default();
-            let site = compress_site(&site_raw);
-            match op.as_str() {
-                "expect_ok" => {
-                    let message = extract_str_field(rest, "message").unwrap_or_default();
-                    s.expects_pass.push(SiteMessage { message, site });
-                }
-                "expect_fail" => {
-                    let message = extract_str_field(rest, "message").unwrap_or_default();
-                    s.expects_fail.push(SiteMessage { message, site });
-                }
-                "error" => {
-                    let message = extract_str_field(rest, "message").unwrap_or_default();
-                    s.errors.push(SiteMessage { message, site });
-                }
-                "stop" => s.saw_stop = true,
-                "exclude" => {
-                    let reason = extract_str_field(rest, "reason")
-                        .unwrap_or_else(|| "unspecified".to_string());
-                    s.excluded = Some(reason);
-                    s.saw_stop = true;
-                }
-                "no_checks" => {
-                    s.no_checks = Some(extract_str_field(rest, "reason").unwrap_or_default());
-                }
-                "allocation_census" => match AllocationCensus::from_value(rest) {
-                    Ok(census) if s.allocation_census.is_none() => {
-                        s.allocation_census = Some(census)
-                    }
-                    Ok(_) => s.errors.push(SiteMessage {
-                        message: "duplicate allocation census result".to_string(),
-                        site,
-                    }),
-                    Err(e) => s.errors.push(SiteMessage {
-                        message: format!("invalid allocation census result: {e}"),
-                        site,
-                    }),
-                },
-                "image_snapshot" => {
-                    let name = extract_str_field(rest, "name").unwrap_or_default();
-                    let path = extract_str_field(rest, "path").unwrap_or_default();
-                    let tol = extract_raw_field(rest, "tol")
-                        .and_then(|t| t.parse::<f64>().ok())
-                        .unwrap_or(0.0);
-                    let save_ok = extract_raw_field(rest, "ok").as_deref() == Some("true");
-                    s.image_snapshots.push(ImageSnapshotOp {
-                        name,
-                        path,
-                        tol,
-                        save_ok,
-                        site: site.clone(),
-                    });
-                }
-                "cleanup_path" => {
-                    if let Some(path) = extract_str_field(rest, "path") {
-                        s.cleanup_paths.push(path);
-                    }
-                }
-                _ => {} // set_env / start_game / etc. are informational
+    fn record(&mut self, rest: &serde_json::Value, op: &str) {
+        let site_raw = extract_str_field(rest, "site").unwrap_or_default();
+        let site = compress_site(&site_raw);
+        match op {
+            "expect_ok" => {
+                let message = extract_str_field(rest, "message").unwrap_or_default();
+                self.expects_pass.push(SiteMessage { message, site });
             }
+            "expect_fail" => {
+                let message = extract_str_field(rest, "message").unwrap_or_default();
+                self.expects_fail.push(SiteMessage { message, site });
+            }
+            "error" => {
+                let message = extract_str_field(rest, "message").unwrap_or_default();
+                self.errors.push(SiteMessage { message, site });
+            }
+            "stop" => self.saw_stop = true,
+            "exclude" => {
+                let reason =
+                    extract_str_field(rest, "reason").unwrap_or_else(|| "unspecified".to_string());
+                self.excluded = Some(reason);
+                self.saw_stop = true;
+            }
+            "no_checks" => {
+                self.no_checks = Some(extract_str_field(rest, "reason").unwrap_or_default());
+            }
+            "allocation_census" => match AllocationCensus::from_value(rest) {
+                Ok(census) if self.allocation_census.is_none() => {
+                    self.allocation_census = Some(census)
+                }
+                Ok(_) => self.errors.push(SiteMessage {
+                    message: "duplicate allocation census result".to_string(),
+                    site,
+                }),
+                Err(e) => self.errors.push(SiteMessage {
+                    message: format!("invalid allocation census result: {e}"),
+                    site,
+                }),
+            },
+            "image_snapshot" => {
+                let name = extract_str_field(rest, "name").unwrap_or_default();
+                let path = extract_str_field(rest, "path").unwrap_or_default();
+                let tol = extract_raw_field(rest, "tol")
+                    .and_then(|t| t.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                let save_ok = extract_raw_field(rest, "ok").as_deref() == Some("true");
+                self.image_snapshots.push(ImageSnapshotOp {
+                    name,
+                    path,
+                    tol,
+                    save_ok,
+                    site: site.clone(),
+                });
+            }
+            "cleanup_path" => {
+                if let Some(path) = extract_str_field(rest, "path") {
+                    self.cleanup_paths.push(path);
+                }
+            }
+            _ => {} // set_env / start_game / etc. are informational
         }
-        s
     }
 
     fn has_failures(&self) -> bool {
@@ -4737,10 +4616,7 @@ impl SimSummary {
 
 /// Foreign stderr writers can leave a prefix before a complete marker. All
 /// consumers validate the entire payload before interpreting any operation.
-fn parse_sim_marker(line: &str) -> Result<Option<serde_json::Value>> {
-    let Some((_, payload)) = line.split_once("__SIM__") else {
-        return Ok(None);
-    };
+fn parse_sim_marker(payload: &str, line: &str) -> Result<serde_json::Value> {
     let raw = payload
         .strip_prefix(' ')
         .ok_or_else(|| anyhow!("invalid sim marker: missing payload separator: {line}"))?;
@@ -4756,7 +4632,7 @@ fn parse_sim_marker(line: &str) -> Result<Option<serde_json::Value>> {
             "invalid sim marker: expected an object with a nonempty string op: {line}"
         ));
     }
-    Ok(Some(event))
+    Ok(event)
 }
 
 fn extract_str_field(json: &serde_json::Value, key: &str) -> Option<String> {
