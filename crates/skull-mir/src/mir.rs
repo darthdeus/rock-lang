@@ -1433,6 +1433,9 @@ pub struct MirFunc {
     /// read in parts. Unused, they are dropped without keeping one to raise a
     /// nil error the source could not have asked for.
     pub synthetic_projections: bone_core::prelude::FxHashSet<Idx<Inst>>,
+    /// Flat tuple boxes whose slot count is known from the type they were read
+    /// at: rebuilding one from all of its slots in order is the box itself.
+    pub flat_box_widths: bone_core::prelude::FxHashMap<Idx<Inst>, usize>,
     /// Nested `fn`s declared in this fn's body, each lowered to its own MirFunc
     /// with a private `__local_*` name. Emitted as sibling top-level Lua fns by
     /// `mir_emit`; a call/value-ref resolves to the name (zero closure alloc).
@@ -1579,6 +1582,7 @@ impl MirFunc {
             spec_bindings: Default::default(),
             bound_next_split: Default::default(),
             synthetic_projections: Default::default(),
+            flat_box_widths: Default::default(),
             nested_fns: Vec::new(),
             inst_spans: Default::default(),
             inst_logical_types: Default::default(),

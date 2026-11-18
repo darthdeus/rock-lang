@@ -254,6 +254,26 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                         }
                     }
                 }
+                // The converse: a tuple rebuilt from every slot of one flat box,
+                // in order, is that box. A tuple is immutable, so it is shared.
+                Inst::MakeTuple(vs) if !vs.is_empty() => {
+                    let slot_of = |v: Idx<Inst>| match func.insts[resolve_subst(&subst, v)] {
+                        Inst::TupleIndex { base, index } => {
+                            Some((resolve_subst(&subst, base), index))
+                        }
+                        _ => None,
+                    };
+                    if let Some((base, 0)) = slot_of(vs[0])
+                        && func.flat_box_widths.get(&base) == Some(&vs.len())
+                        && vs
+                            .iter()
+                            .enumerate()
+                            .all(|(i, &v)| slot_of(v) == Some((base, i)))
+                    {
+                        subst[raw(id)] = Some(base);
+                        any_subst = true;
+                    }
+                }
                 // A fresh tuple is immutable.
                 Inst::TupleIndex { base, index } => {
                     let (base, index) = (*base, *index);

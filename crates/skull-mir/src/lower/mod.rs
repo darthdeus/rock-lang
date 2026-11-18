@@ -2125,8 +2125,6 @@ struct Builder<'a> {
     /// Tuple boxes built one value per element (`pack` of an unpacked tuple).
     /// Every other box of a splatting tuple is the flat wire.
     element_tuples: HashSet<Idx<Inst>>,
-    /// Flat tuple boxes whose slot count is known from the type they were read at.
-    flat_box_widths: HashMap<Idx<Inst>, usize>,
     /// Unwritten tuple bindings whose slots were read straight out of one flat
     /// box: a whole-value use shares that box rather than packing a copy.
     tuple_bind_boxes: HashMap<u32, Idx<Inst>>,
@@ -2247,7 +2245,6 @@ impl<'a> Builder<'a> {
             unshareable_value_cells: HashSet::default(),
             boundary_materializes: HashSet::default(),
             element_tuples: HashSet::default(),
-            flat_box_widths: HashMap::default(),
             tuple_bind_boxes: HashMap::default(),
             scalar_tuple_reentry: HashSet::default(),
             shallow_pack: false,
@@ -3552,7 +3549,7 @@ impl<'a> Builder<'a> {
 
     /// Read the `width` slots of the flat tuple box `base`.
     pub(crate) fn flat_box_slots(&mut self, base: Idx<Inst>, width: usize) -> Vec<Idx<Inst>> {
-        self.flat_box_widths.insert(base, width);
+        self.f.flat_box_widths.insert(base, width);
         (0..width)
             .map(|index| {
                 let slot = self.emit_cur(Inst::TupleIndex { base, index });
@@ -3563,7 +3560,7 @@ impl<'a> Builder<'a> {
     }
 
     pub(crate) fn flat_box_width(&self, base: Idx<Inst>) -> Option<usize> {
-        self.flat_box_widths.get(&base).copied()
+        self.f.flat_box_widths.get(&base).copied()
     }
 
     /// A tuple box holding one value per element.

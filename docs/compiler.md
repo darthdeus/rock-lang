@@ -148,8 +148,9 @@ alone. The one exception is a tuple still being assembled from its parts
 anywhere; a name that binds a whole splatting tuple holds its slots, never
 such a box. A tuple is immutable, so a box is shared rather than copied: an
 unwritten name bound straight from a stored box hands that box on when it is
-used whole, repacking slots read in full from one box yields the box, and
-a join whose arms are all boxes meets as one box rather than as slots. `materialize(t)` of a splatting tuple is therefore `t` itself.
+used whole, repacking slots read in full from one box yields the box (also
+after inlining, from the box widths each body records), and a join whose
+arms are all boxes meets as one box rather than as slots. `materialize(t)` of a splatting tuple is therefore `t` itself.
 A body the compiler cannot see into (a user `inline` or `extern` callee,
 `inspect`, interpolation) is handed the tuple as written instead: an
 explicit `materialize(t)` argument there boxes one value per element, and an
