@@ -844,7 +844,7 @@ fn lines(raw: &[&str]) -> Vec<String> {
 fn entry_stream(name: &str, lines: impl IntoIterator<Item = String>) -> EntryStream {
     let mut stream = EntryStream::new(name.to_owned(), true);
     for line in lines {
-        stream.observe(&line, |_| {});
+        stream.observe(&line, |_, _| {});
     }
     stream
 }
@@ -874,14 +874,14 @@ fn the_deadline_guard_resets_only_on_the_accepted_start() {
         let mut stream = EntryStream::new("a".to_string(), false);
         assert_eq!(
             matches!(
-                stream.observe(&first, |_| {}).boundary,
+                stream.observe(&first, |_, _| {}).boundary,
                 Some(EntryBoundary::Started)
             ),
             first == start("a")
         );
         for line in [expect_ok("ordinary op"), "raw log".to_owned(), start("a")] {
             assert!(!matches!(
-                stream.observe(&line, |_| {}).boundary,
+                stream.observe(&line, |_, _| {}).boundary,
                 Some(EntryBoundary::Started)
             ));
         }
@@ -898,7 +898,7 @@ fn entry_frame_timing_is_validated_and_retained() {
         r#"{"frames":3,"draw_frames":2,"submitted_frames":1,"logic_us":10,"render_cpu_us":20,"present_us":30}"#,
     );
     assert!(matches!(
-        stream.observe(&valid, |_| {}).boundary,
+        stream.observe(&valid, |_, _| {}).boundary,
         Some(EntryBoundary::Ended(
             Some(3),
             Some(FrameTiming {
@@ -983,6 +983,38 @@ fn a_killed_child_leaves_its_entry_unterminated() {
 }
 
 #[test]
+fn live_and_buffered_assertions_use_the_same_message_and_site() {
+    let assertion = r#"__SIM__ {"op":"expect_fail","site":"tests/sample.rock:9","message":"count","actual":"3","expected":"4"}"#;
+    for buffered in [false, true] {
+        let mut stream = EntryStream::new("fixture".into(), buffered);
+        stream.observe(&start("fixture"), |_, _| {});
+        stream.observe(assertion, |_, event| {
+            if !buffered {
+                let progress = event.unwrap().progress().unwrap();
+                for fragment in [
+                    "sample:9",
+                    "count",
+                    "FAIL",
+                    "actual:",
+                    "3",
+                    "expected:",
+                    "4",
+                ] {
+                    assert!(progress.contains(fragment), "{progress}");
+                }
+            }
+        });
+        assert_eq!(
+            stream.summary.expects_fail,
+            [SiteMessage {
+                message: "count".into(),
+                site: "sample:9".into()
+            }]
+        );
+    }
+}
+
+#[test]
 fn stderr_reader_preserves_completed_lines_on_read_error_and_panic() {
     for fail_read in [true, false] {
         let mut input =
@@ -994,7 +1026,7 @@ fn stderr_reader_preserves_completed_lines_on_read_error_and_panic() {
         }
         let mut stream = EntryStream::new("a".to_string(), true);
         let warning = stream
-            .read(std::io::Cursor::new(input), |line| {
+            .read(std::io::Cursor::new(input), |line, _| {
                 assert!(
                     !matches!(line.boundary, Some(EntryBoundary::Ended(..))),
                     "reporting failed"
@@ -1252,7 +1284,7 @@ fn foreign_stderr_prefixes_preserve_envelopes_deadlines_and_verdicts() {
     .enumerate()
     {
         let line = format!("foreign stderr: {line}");
-        let observed = stream.observe(&line, |_| {});
+        let observed = stream.observe(&line, |_, _| {});
         assert_eq!(observed.diagnostic, Some("foreign stderr: "));
         assert_eq!(
             matches!(observed.boundary, Some(EntryBoundary::Started)),
