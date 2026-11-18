@@ -374,3 +374,53 @@ fn nullable_nested_splatting_field() {
     let e = NullableCarrier { t: null }
     print(e.t == null)
 }
+
+// ======== Through LOCALS, RETURNS and NESTED generic enums ========
+//
+// A splatting tuple reaches storage from a call result or a tuple-bound local
+// as well as from a literal, and all three store the same flat box. A nested
+// pattern reads each position by its own concrete type, so a generic enum
+// inside a generic enum rebuilds its payload like the outer one does.
+
+nobox value LP { x: float, y: float }
+
+struct LHold<T> { t: T }
+
+fn lmake(k: float) -> (LP, int) { return (LP { x: k, y: 0.0 }, k as int * 10) }
+
+fn lfirst(xs: [(LP, int)]) -> (LP, int) { return xs[0] }
+
+fn lwrap(k: float) -> MyOpt<(LP, int)> { return MyOpt::Got(lmake(k)) }
+
+@test(output = "1 10\n2 20\n3 30\n4 40")
+fn call_results_and_locals_store_flat() {
+    let h = LHold { t: lmake(1.0) }
+    let (a, n) = h.t
+    print("{a.x as int} {n}")
+    let t = lmake(2.0)
+    let xs = [t]
+    let (b, m) = lfirst(xs)
+    print("{b.x as int} {m}")
+    h.t = lmake(3.0)
+    print("{h.t.0.x as int} {h.t.1}")
+    xs.set(0, lmake(4.0))
+    let u = if xs.len > 0 { xs[0] } else { t }
+    print("{u.0.x as int} {u.1}")
+}
+
+@test(output = "5 50\n6 60\n7 70\n8 80")
+fn nested_generic_payloads_rebuild_per_level() {
+    match lwrap(5.0) {
+        MyOpt::Got((v, n)) => print("{v.x as int} {n}"),
+        MyOpt::Nope => print("nope"),
+    }
+    let oo: MyOpt<MyOpt<(LP, int)>> = MyOpt::Got(lwrap(6.0))
+    if let MyOpt::Got(MyOpt::Got((v, n))) = oo { print("{v.x as int} {n}") }
+    let ho: LHold<MyOpt<(LP, int)>> = LHold { t: lwrap(7.0) }
+    match ho.t {
+        MyOpt::Got((v, n)) => print("{v.x as int} {n}"),
+        MyOpt::Nope => print("nope"),
+    }
+    let oh: MyOpt<LHold<(LP, int)>> = MyOpt::Got(LHold { t: lmake(8.0) })
+    if let MyOpt::Got(LHold { t: (v, n) }) = oh { print("{v.x as int} {n}") }
+}

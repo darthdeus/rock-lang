@@ -820,7 +820,19 @@ impl<'a> Builder<'a> {
         args: IdxRange<Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
         let r = self.lower_call_repr(e, callee, args)?;
-        self.pack_maybe_absent(r.into_value())
+        self.pack_stored(r)
+    }
+
+    /// Box `bundle` for a slot that stores it: a splatting tuple becomes the
+    /// flat wire every stored-box reader rebuilds from, so its `nobox` parts
+    /// never box; anything else packs as an ordinary escape.
+    pub(crate) fn pack_stored(&mut self, bundle: ValueBundle) -> Result<Idx<Inst>, CompilerError> {
+        let arena = self.scx.rep_arena();
+        let splats = matches!(arena.layout(bundle.representation()), RepLayout::Tuple(shape) if shape.splats(arena));
+        if splats {
+            return self.pack_bundle(&bundle);
+        }
+        self.pack_maybe_absent(bundle.into_value())
     }
 
     /// Lower a call with its producer-owned representation. A scalar-ABI direct call

@@ -456,23 +456,29 @@ impl<'a> Builder<'a> {
             }
         } else {
             let slot = self.read_index(b, i, kind);
-            match self
-                .expr_tuple_shape(e)?
-                .filter(|shape| shape.splats(self.scx.rep_arena()))
-            {
-                Some(shape) => {
-                    let slots: Vec<Idx<Inst>> = (0..shape.slot_count(self.scx.rep_arena()))
-                        .map(|index| self.emit_cur(Inst::TupleIndex { base: slot, index }))
-                        .collect();
-                    self.tuple_from_slots(&shape, &slots, &mut 0)
-                }
-                None => ValueRepr::Scalar(slot),
-            }
+            self.stored_read_repr(e, slot)?
         };
         match representation {
             Some(representation) => Ok(ValueBundle::new(representation, value)),
             None => self.value_bundle_for_expr(e, value),
         }
+    }
+
+    fn stored_read_repr(
+        &mut self,
+        e: Idx<Expr>,
+        base: Idx<Inst>,
+    ) -> Result<ValueRepr, CompilerError> {
+        let Some(shape) = self
+            .expr_tuple_shape(e)?
+            .filter(|shape| shape.splats(self.scx.rep_arena()))
+        else {
+            return Ok(ValueRepr::Scalar(base));
+        };
+        let slots = (0..shape.slot_count(self.scx.rep_arena()))
+            .map(|index| self.emit_cur(Inst::TupleIndex { base, index }))
+            .collect::<Vec<_>>();
+        Ok(self.tuple_from_slots(&shape, &slots, &mut 0))
     }
 
     fn lower_expr_repr_unscoped(&mut self, e: Idx<Expr>) -> Result<ValueRepr, CompilerError> {
@@ -783,7 +789,7 @@ impl<'a> Builder<'a> {
                         name,
                         self.concrete_expr_ty(e),
                     )?)),
-                    None => Ok(ValueRepr::Scalar(fv)),
+                    None => self.stored_read_repr(e, fv),
                 }
             }
             // A refined nullable global may need a value extraction on load.

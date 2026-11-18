@@ -2113,11 +2113,6 @@ struct Builder<'a> {
     callback_records: HashSet<Idx<Inst>>,
     /// Shallow local snapshots cannot be lent across a call or return.
     unshareable_value_cells: HashSet<Idx<Cell>>,
-    /// Per-match instance payload shapes: `(enum, variant, position)` of the
-    /// CURRENT scrutinee whose payload instantiates to a SPLATTING tuple --
-    /// the generic-enum case the declared-type lookup cannot answer. Set
-    /// around one match walk, from the scrutinee's own concrete type.
-    payload_splat_shapes: rustc_hash::FxHashMap<(Ustr, Ustr, usize), TupleLayout>,
     /// A local snapshot may defer child copies until its whole-value escape.
     shallow_pack: bool,
     /// Immutable call, return and local uses may share proven immutable boxes.
@@ -2231,7 +2226,6 @@ impl<'a> Builder<'a> {
             shareable_value_boxes: HashSet::default(),
             callback_records: HashSet::default(),
             unshareable_value_cells: HashSet::default(),
-            payload_splat_shapes: rustc_hash::FxHashMap::default(),
             shallow_pack: false,
             lending_pack: false,
             f32_round_exprs: HashSet::default(),

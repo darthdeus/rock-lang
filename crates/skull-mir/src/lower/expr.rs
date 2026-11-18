@@ -401,12 +401,9 @@ impl<'a> Builder<'a> {
                 }
                 Ok(id)
             }
-            // A whole-tuple use of a name bound to slot cells: rebuild and pack.
-            // Packing a `nobox` element here is exactly how a whole-tuple escape
-            // still reaches the guarantee's rejection.
             Expr::Var(b) if self.tuple_binds.contains_key(&raw(b)) => {
-                let r = self.lower_expr_repr(e)?.into_value();
-                self.pack_maybe_absent(r)
+                let r = self.lower_expr_repr(e)?;
+                self.pack_stored(r)
             }
             // Snapshot a boxed value local on read.
             Expr::Var(b) if let Some(name) = self.boxed_value_local(b, e) => {

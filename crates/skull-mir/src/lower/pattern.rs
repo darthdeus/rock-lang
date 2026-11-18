@@ -68,8 +68,7 @@ impl<'a> Builder<'a> {
     ) -> Result<(), CompilerError> {
         let variants = self.scrut_variants(scrut);
         let scrut_enum = self.scrut_enum_name(scrut);
-        let instance_splats = self.instance_payload_splats(scrut)?;
-        let saved_splats = std::mem::replace(&mut self.payload_splat_shapes, instance_splats);
+        let scrut_ty = self.concrete_expr_ty(scrut).map(|ty| ty.peel_nullable().0);
         let scrut_s = self.lower_scrut(scrut)?;
         let join = self.f.new_block();
 
@@ -104,7 +103,15 @@ impl<'a> Builder<'a> {
             }
             // Emit this arm's pattern tests (failures jump to `next`); on success
             // `self.cur` is the block where the bindings are in scope.
-            self.match_pattern(&arm_scrut, arm.pattern, next, &variants, true, scrut_enum)?;
+            self.match_pattern(
+                &arm_scrut,
+                arm.pattern,
+                next,
+                &variants,
+                true,
+                scrut_enum,
+                scrut_ty,
+            )?;
             if let Some(g) = arm.guard {
                 let kept = self.f.new_block();
                 self.lower_branch(g, kept, next, false)?;
@@ -116,7 +123,6 @@ impl<'a> Builder<'a> {
         // No arm matched: bone checks exhaustiveness, so this is unreachable.
         self.f.set_term(self.cur, Term::Unreachable);
         self.cur = join;
-        self.payload_splat_shapes = saved_splats;
         Ok(())
     }
 
@@ -138,30 +144,25 @@ impl<'a> Builder<'a> {
         variants: &HashSet<Ustr>,
         top: bool,
         scrut_enum: Option<Ustr>,
+        // The scrutinee's concrete type where it is known. A nested position
+        // (payload, field, wrapped value, tuple element) is always storage, so
+        // this is what tells a tuple sub-pattern its box is the flat wire.
+        ty: Option<&MonoTy>,
     ) -> Result<(), CompilerError> {
         match self.body.pattern_arena[pat] {
             Pattern::Wildcard => Ok(()),
             // A newtype is transparent: its inner pattern tests the same value.
             Pattern::Newtype { name, sub, .. } => {
-                // ... but a wrapped SPLATTING tuple's box is the flat wire, so
-                // a tuple inner pattern reads it by slot.
-                if matches!(self.body.pattern_arena[sub], Pattern::Tuple { .. })
-                    && let Some(nid) = self.ws.newtypes_by_name.get(&name)
-                    && let wrapped = self.ws.modules[nid.module.index()].newtypes[nid.def].wrapped
-                    && let Some(shape) = self.declared_splat_tuple_shape(wrapped)?
-                {
-                    let val = self.scrut_value(scrut);
-                    let rebuilt = self.rebuild_splat_box(shape, val)?;
-                    return self.match_pattern(
-                        &rebuilt,
-                        sub,
-                        fail,
-                        &HashSet::default(),
-                        false,
-                        None,
-                    );
-                }
-                self.match_pattern(scrut, sub, fail, &HashSet::default(), false, None)
+                let wrapped = ty.and_then(|ty| self.member_ty(ty, name, Member::Wrapped));
+                self.match_pattern(
+                    scrut,
+                    sub,
+                    fail,
+                    &HashSet::default(),
+                    false,
+                    None,
+                    wrapped.as_ref(),
+                )
             }
             Pattern::Bind(b) => {
                 let name = self.body.binding_arena[b].name;
@@ -250,6 +251,8 @@ impl<'a> Builder<'a> {
                     // repr -- else an unqualified `J` defaults to the `.__variant`
                     // table path and faults on a cdata inner enum.
                     let sub_enum = en.and_then(|e| self.variant_payload_enum(e, variant, i));
+                    let payload_ty =
+                        ty.and_then(|ty| self.member_ty(ty, variant, Member::Position(i)));
                     // A payload position widened to a `nobox` value's leaves binds
                     // THE LEAVES -- rebuilding a box here to bind one cell is the
                     // materialization the widening exists to avoid.
@@ -268,47 +271,56 @@ impl<'a> Builder<'a> {
                         // position as one value hands it the inner tag string, and
                         // `.__variant` on a string matches no arm.
                         if let Some(inner) = self.nested_flat_enum_scrut(scrut, slot, &vs)? {
-                            self.match_pattern(&inner, sp, fail, variants, false, sub_enum)?;
+                            self.match_pattern(
+                                &inner,
+                                sp,
+                                fail,
+                                variants,
+                                false,
+                                sub_enum,
+                                payload_ty.as_ref(),
+                            )?;
                             continue;
                         }
                     }
 
                     let payload = self.scrut_payload(scrut, slot, cdata);
 
-                    // A payload that is a SPLATTING tuple is stored flat (the
-                    // wire in a table); a tuple sub-pattern must read it that
-                    // way, not per element.
-                    if matches!(self.body.pattern_arena[sp], Pattern::Tuple { .. }) {
-                        let declared = match self.variant_payload_ty(en, variant, i) {
-                            Some(pt) => self.declared_splat_tuple_shape(pt)?,
-                            None => None,
-                        };
-                        let shape = match declared {
-                            Some(shape) => Some(shape),
-                            // The generic case answers from the scrutinee's
-                            // own instance, stashed for this match walk.
-                            None => en.and_then(|e| {
-                                self.payload_splat_shapes.get(&(e, variant, i)).cloned()
-                            }),
-                        };
-                        if let Some(shape) = shape {
-                            let rebuilt = self.rebuild_splat_box(shape, payload)?;
-                            self.match_pattern(&rebuilt, sp, fail, variants, false, sub_enum)?;
-                            continue;
-                        }
-                    }
-
-                    self.match_pattern(&Scrut::Val(payload), sp, fail, variants, false, sub_enum)?;
+                    self.match_pattern(
+                        &Scrut::Val(payload),
+                        sp,
+                        fail,
+                        variants,
+                        false,
+                        sub_enum,
+                        payload_ty.as_ref(),
+                    )?;
                 }
                 Ok(())
             }
             Pattern::Tuple { elements } => {
+                // A stored splatting tuple is the flat wire in a table. The root
+                // is left to its caller, which also knows an explicit
+                // `materialize` box from a stored one.
+                let stored = match (scrut, ty) {
+                    (Scrut::Val(v), Some(ty)) if !top => self
+                        .concrete_rep_tuple(ty, RepUse::Return, true, false)?
+                        .filter(|shape| shape.splats(self.scx.rep_arena()))
+                        .map(|shape| self.rebuild_splat_box(shape, *v))
+                        .transpose()?,
+                    _ => None,
+                };
+                let scrut = stored.as_ref().unwrap_or(scrut);
                 if let Scrut::Tuple(parts) = scrut {
+                    let elem_tys = match ty {
+                        Some(MonoTy::Tuple(elems)) => elems.as_slice(),
+                        _ => &[],
+                    };
                     for (i, sp) in elements.into_iter().enumerate() {
                         let elem = parts.get(i).ok_or_else(|| {
                             gap("tuple pattern exceeds its scrutinee representation")
                         })?;
-                        self.match_pattern(elem, sp, fail, variants, false, None)?;
+                        self.match_pattern(elem, sp, fail, variants, false, None, elem_tys.get(i))?;
                     }
                 } else {
                     let val = self.scrut_value(scrut);
@@ -317,7 +329,17 @@ impl<'a> Builder<'a> {
                             base: val,
                             index: i,
                         });
-                        self.match_pattern(&Scrut::Val(elem), sp, fail, variants, false, None)?;
+                        // A per-element box (`materialize`) keeps user layout
+                        // all the way down, so its elements carry no type.
+                        self.match_pattern(
+                            &Scrut::Val(elem),
+                            sp,
+                            fail,
+                            variants,
+                            false,
+                            None,
+                            None,
+                        )?;
                     }
                 }
                 Ok(())
@@ -390,18 +412,21 @@ impl<'a> Builder<'a> {
                         }
                         _ => fv,
                     };
-                    // A field holding a SPLATTING tuple stores the flat wire
-                    // in a table; a tuple sub-pattern reads it by slot, not by
-                    // element. The field's declared type names the shape.
-                    if matches!(self.body.pattern_arena[rpf.pat], Pattern::Tuple { .. })
-                        && let Some(ft) = self.record_field_ty(name, en, rpf.name)
-                        && let Some(shape) = self.declared_splat_tuple_shape(ft)?
-                    {
-                        let rebuilt = self.rebuild_splat_box(shape, fv)?;
-                        self.match_pattern(&rebuilt, rpf.pat, fail, variants, false, None)?;
-                        continue;
-                    }
-                    self.match_pattern(&Scrut::Val(fv), rpf.pat, fail, variants, false, None)?;
+                    let field_ty = match (ty, name) {
+                        (Some(ty), Some(owner)) => {
+                            self.member_ty(ty, owner, Member::Field(rpf.name))
+                        }
+                        _ => None,
+                    };
+                    self.match_pattern(
+                        &Scrut::Val(fv),
+                        rpf.pat,
+                        fail,
+                        variants,
+                        false,
+                        None,
+                        field_ty.as_ref(),
+                    )?;
                 }
                 Ok(())
             }
@@ -447,7 +472,7 @@ impl<'a> Builder<'a> {
                     // An or-pattern preserves `top`, so a top-level `A | B` on a
                     // payload-free enum keeps the int-compare path -> forward
                     // `scrut_enum` (nested alternatives carry `None` anyway).
-                    self.match_pattern(scrut, alt, next_alt, variants, top, scrut_enum)?;
+                    self.match_pattern(scrut, alt, next_alt, variants, top, scrut_enum, ty)?;
                     // success path of this alternative -> the shared continuation.
                     self.goto_if_open(matched);
                     if !is_last {
@@ -568,6 +593,14 @@ impl<'a> Builder<'a> {
                     shape,
                 })
             }
+            ValueRepr::Tuple {
+                parts,
+                present: None,
+            } => parts
+                .into_iter()
+                .map(|p| self.scrut_from_repr(p))
+                .collect::<Result<_, _>>()
+                .map(Scrut::Tuple),
             other => Ok(Scrut::Val(self.pack_maybe_absent(other)?)),
         }
     }
@@ -1006,11 +1039,7 @@ impl<'a> Builder<'a> {
     ) -> Result<(), CompilerError> {
         let variants = self.scrut_variants(value);
         let scrut_enum = self.scrut_enum_name(value);
-        let instance_splats = self.instance_payload_splats(value)?;
-        let saved_splats = std::mem::replace(&mut self.payload_splat_shapes, instance_splats);
-        let out = self.match_let_inner(pattern, value, scrut, miss, &variants, scrut_enum);
-        self.payload_splat_shapes = saved_splats;
-        out
+        self.match_let_inner(pattern, value, scrut, miss, &variants, scrut_enum)
     }
 
     fn match_let_inner(
@@ -1022,16 +1051,19 @@ impl<'a> Builder<'a> {
         variants: &HashSet<Ustr>,
         scrut_enum: Option<Ustr>,
     ) -> Result<(), CompilerError> {
+        let scrut_ty = self.concrete_expr_ty(value).map(|ty| ty.peel_nullable().0);
         if self.expr_is_nullable(value) {
             let val_v = self.scrut_value(scrut);
             let cont = self.f.new_block();
             self.branch_on_nil(val_v, miss, cont);
             self.cur = cont;
             if let Some(rebuilt) = self.splat_tuple_scrut(value, val_v)? {
-                return self.match_pattern(&rebuilt, pattern, miss, variants, true, scrut_enum);
+                return self.match_pattern(
+                    &rebuilt, pattern, miss, variants, true, scrut_enum, scrut_ty,
+                );
             }
         }
-        self.match_pattern(scrut, pattern, miss, variants, true, scrut_enum)
+        self.match_pattern(scrut, pattern, miss, variants, true, scrut_enum, scrut_ty)
     }
 
     /// A SPLATTING tuple's stored box is the wire put in a table
@@ -1058,123 +1090,50 @@ impl<'a> Builder<'a> {
         self.rebuild_splat_box(shape, val_v).map(Some)
     }
 
-    /// The rep shape of a DECLARED type when it is a splatting tuple -- the
-    /// form whose stored box is the wire in a table. Conservative: a type
-    /// mentioning an unbound generic answers `None` (its box keeps whatever
-    /// shape the instance stored, matched as a whole value).
-    fn declared_splat_tuple_shape(
-        &self,
-        ty: bone_core::prelude::TyId,
-    ) -> Result<Option<TupleLayout>, CompilerError> {
-        let Ok(mono) = crate::monoty::convert_decl(self.ws, ty, &SpecSubst::default()) else {
-            return Ok(None);
-        };
-        if !matches!(mono, crate::monoty::MonoTy::Tuple(_)) {
-            return Ok(None);
-        }
-        Ok(self
-            .concrete_rep_tuple(&mono, RepUse::Return, true, false)?
-            .filter(|shape| shape.splats(self.scx.rep_arena())))
-    }
-
-    /// The declared type of `fname` on a record pattern's owner: a record
-    /// variant of `en` when `name` is one, else a plain struct's field.
-    fn record_field_ty(
-        &self,
-        name: Option<Ustr>,
-        en: Option<Ustr>,
-        fname: Ustr,
-    ) -> Option<bone_core::prelude::TyId> {
+    /// The concrete type of one member of a value of type `owner_ty`: a
+    /// variant's payload position or record field (`owner` names the variant),
+    /// a struct field, or a newtype's wrapped value. `owner_ty`'s own generic
+    /// arguments substitute the declaration, so a nested generic instance
+    /// answers for itself.
+    fn member_ty(&self, owner_ty: &MonoTy, owner: Ustr, member: Member) -> Option<MonoTy> {
         use bone_core::hir::VariantPayload;
-        let name = name?;
-        if let Some(e) = en
-            && let Some(eid) = self.ws.enums_by_name.get(&e)
-        {
-            let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
-            if let Some(v) = ed.variants.iter().find(|v| v.name == name)
-                && let VariantPayload::Record(fields) = &v.payload
-            {
-                return fields.iter().find(|f| f.name == fname).map(|f| f.ty);
-            }
-        }
-        let sid = self.ws.struct_by_name.get(&name)?;
-        let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
-        sd.fields.iter().find(|f| f.name == fname).map(|f| f.ty)
-    }
-
-    /// The `(enum, variant, position)` payload shapes of THIS scrutinee's
-    /// enum instance that are SPLATTING tuples -- the generic case
-    /// (`MyOpt<(NV, float)>`) the declared-type lookup cannot answer. Built
-    /// from the scrutinee's own concrete type, so the substitution never
-    /// crosses a definition boundary.
-    fn instance_payload_splats(
-        &self,
-        scrut: Idx<Expr>,
-    ) -> Result<rustc_hash::FxHashMap<(Ustr, Ustr, usize), TupleLayout>, CompilerError> {
-        use bone_core::hir::VariantPayload;
-        let mut out = rustc_hash::FxHashMap::default();
-        let Some(ty) = self.concrete_expr_ty(scrut) else {
-            return Ok(out);
-        };
-        let (peeled, _) = ty.peel_nullable();
-        let crate::monoty::MonoTy::App {
+        let MonoTy::App {
             ctor: crate::monoty::MonoCtor::Nominal(name),
             params,
-        } = peeled
+        } = owner_ty
         else {
-            return Ok(out);
+            return None;
         };
-        let Some(eid) = self.ws.enums_by_name.get(name) else {
-            return Ok(out);
+        let (generics, decl) = if let Some(eid) = self.ws.enums_by_name.get(name) {
+            let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
+            let v = ed.variants.iter().find(|v| v.name == owner)?;
+            let decl = match (&v.payload, member) {
+                (VariantPayload::Tuple(tys), Member::Position(i)) => *tys.get(i)?,
+                (VariantPayload::Record(fields), Member::Field(f)) => {
+                    fields.iter().find(|rf| rf.name == f)?.ty
+                }
+                _ => return None,
+            };
+            (&ed.generics, decl)
+        } else if let Some(sid) = self.ws.struct_by_name.get(name) {
+            let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
+            let Member::Field(f) = member else {
+                return None;
+            };
+            (&sd.generics, sd.fields.iter().find(|sf| sf.name == f)?.ty)
+        } else if let Some(nid) = self.ws.newtypes_by_name.get(name) {
+            let nd = &self.ws.modules[nid.module.index()].newtypes[nid.def];
+            (&nd.generics, nd.wrapped)
+        } else {
+            return None;
         };
-        let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
-        if ed.generics.is_empty() || params.is_empty() {
-            return Ok(out);
-        }
         let mut subst = SpecSubst::default();
-        for (g, p) in ed.generics.iter().zip(params.iter()) {
+        for (g, p) in generics.iter().zip(params.iter()) {
             if let Some(TypeExpr::Generic(v, _)) = static_ty(self.ws, *g) {
                 subst.insert(v, p.clone());
             }
         }
-        for v in &ed.variants {
-            let VariantPayload::Tuple(tys) = &v.payload else {
-                continue;
-            };
-            for (i, pt) in tys.iter().enumerate() {
-                let Ok(mono) = crate::monoty::convert_decl(self.ws, *pt, &subst) else {
-                    continue;
-                };
-                if !matches!(mono, crate::monoty::MonoTy::Tuple(_)) {
-                    continue;
-                }
-                if let Some(shape) = self
-                    .concrete_rep_tuple(&mono, RepUse::Return, true, false)?
-                    .filter(|shape| shape.splats(self.scx.rep_arena()))
-                {
-                    out.insert((*name, v.name, i), shape);
-                }
-            }
-        }
-        Ok(out)
-    }
-
-    /// The positional payload type of `(enum, variant, i)`, for the splat
-    /// check above; the same lookup `variant_payload_enum` does.
-    fn variant_payload_ty(
-        &self,
-        enum_name: Option<Ustr>,
-        variant: Ustr,
-        i: usize,
-    ) -> Option<bone_core::prelude::TyId> {
-        use bone_core::hir::VariantPayload;
-        let eid = self.ws.enums_by_name.get(&enum_name?)?;
-        let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
-        let v = ed.variants.iter().find(|v| v.name == variant)?;
-        match &v.payload {
-            VariantPayload::Tuple(tys) => tys.get(i).copied(),
-            _ => None,
-        }
+        crate::monoty::convert_decl(self.ws, decl, &subst).ok()
     }
 
     /// Read the flat slots of `val_v` back into per-element scruts.
@@ -1470,4 +1429,11 @@ impl<'a> Builder<'a> {
         self.cur = exit;
         Ok(())
     }
+}
+
+#[derive(Clone, Copy)]
+enum Member {
+    Position(usize),
+    Field(Ustr),
+    Wrapped,
 }

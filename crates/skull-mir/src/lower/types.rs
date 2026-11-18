@@ -676,7 +676,7 @@ impl<'a> Builder<'a> {
         e: Idx<Expr>,
     ) -> Result<Option<TupleLayout>, CompilerError> {
         Ok(self
-            .expr_tuple_shape(e)?
+            .peeled_tuple_shape(e)?
             .filter(|s| s.splats(self.scx.rep_arena())))
     }
 
