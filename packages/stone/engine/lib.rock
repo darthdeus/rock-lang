@@ -2529,6 +2529,7 @@ fn stone_poll_all_events() -> bool {
     // ends after the current frame, then the loop-exit path tears down once.
     if stone_quit_requested() { return false }
     if !stone_is_initialized() { return false }
+    input_update_window_authority()
     let running = true
     let event = stone_event_new()
 
@@ -2536,12 +2537,13 @@ fn stone_poll_all_events() -> bool {
         let event_type = get_stone_event_type(event)
         if event_type == STONE_EVENT_QUIT {
             running = false
+        } else if event_type == STONE_EVENT_PAD_DEVICE_REMOVED {
+            input_physical_pad_device_removed(get_stone_event_pad_instance(event))
+        } else if event_type == STONE_EVENT_PAD_ACTIVE_CHANGED {
+            // The native pad can become active while input is suspended.
+            input_physical_pad_active_changed(get_stone_event_pad_instance(event))
         } else if !SIM_INPUT_SYNTHETIC_ONLY {
-            if event_type == STONE_EVENT_PAD_DEVICE_REMOVED {
-                input_physical_pad_device_removed(get_stone_event_pad_instance(event))
-            } else if event_type == STONE_EVENT_PAD_ACTIVE_CHANGED {
-                input_physical_pad_active_changed(get_stone_event_pad_instance(event))
-            } else if event_type == STONE_EVENT_PAD_BUTTONDOWN {
+            if event_type == STONE_EVENT_PAD_BUTTONDOWN {
                 input_physical_pad_pressed(
                     get_stone_event_pad_instance(event),
                     get_stone_event_pad_button(event),

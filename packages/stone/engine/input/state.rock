@@ -10,11 +10,12 @@ pub global IMGUI_MOUSE_CAPTURE_OVERRIDE: bool? = null
 // so a Ctrl debug shortcut fired on some runs only), and an unmapped
 // headless window takes it too -- SDL's X11 keyboard init calls XQueryKeymap on
 // the display's SERVER-GLOBAL keymap and synthesizes a press for a modifier held
-// in any other application, before the run's first frame. Sims and headless runs
-// are therefore synthetic-only; SIM_INPUT_SYNTHETIC_ONLY=0 is the explicit opt-in
-// to the host lane that the SDL-to-Rock integration gate uses. Window and quit
-// events are still handled either way.
+// in any other application, before the run's first frame. Sims and unmapped
+// headless starts use synthetic input. A non-sim can take host input when its
+// window is shown. The SDL integration gate can force host input with
+// SIM_INPUT_SYNTHETIC_ONLY=0.
 pub global SIM_INPUT_SYNTHETIC_ONLY: bool = false
+global INPUT_FOLLOWS_WINDOW_VISIBILITY: bool = false
 
 pub global mouse_down: Map<int, bool> = map_new()
 pub global mouse_down_last: Map<int, bool> = map_new()
@@ -299,14 +300,33 @@ fn input_copy_live_mouse(dst: Map<int, bool>) {
     }
 }
 
-fn input_headless_run() -> bool {
-    return os_getenv("STONE_HEADLESS") != null
-}
-
-// Latched once for the whole run, before any game code reads an input predicate.
 pub fn input_resolve_authority() {
     let host_opt_in = os_getenv("SIM_INPUT_SYNTHETIC_ONLY") == "0"
-    SIM_INPUT_SYNTHETIC_ONLY = !host_opt_in && (sim_mode_active() || input_headless_run())
+    let sim = sim_mode_active()
+    INPUT_FOLLOWS_WINDOW_VISIBILITY = !host_opt_in && !sim && os_getenv("STONE_HEADLESS") != null
+    SIM_INPUT_SYNTHETIC_ONLY = !host_opt_in && (sim || INPUT_FOLLOWS_WINDOW_VISIBILITY)
+}
+
+fn input_update_window_authority() {
+    if !INPUT_FOLLOWS_WINDOW_VISIBILITY { return }
+    let hidden = stone_is_window_hidden()
+    if hidden == SIM_INPUT_SYNTHETIC_ONLY { return }
+    SIM_INPUT_SYNTHETIC_ONLY = hidden
+
+    // Releases can go to a different window after hide. Forget those holds
+    // and the previous lane's edge history while keeping the active pad ID.
+    physical_keys_down.clear()
+    physical_scancodes_down.clear()
+    physical_scancode_modifiers.clear()
+    physical_mouse_down.clear()
+    physical_mouse_suppressed.clear()
+    physical_pad_down.clear()
+    physical_pad_axes.clear()
+    keys_down_last.clear()
+    scancodes_down_last.clear()
+    mouse_down_last.clear()
+    pad_down_last.clear()
+    pad_axes_last.clear()
 }
 
 // One frame-start projection point for game input. Tool input intentionally
