@@ -118,6 +118,94 @@ fn q_coalesce() -> float {
     return QY.len as float
 }
 
+fn p_maybe(i: int) -> (P, int)? {
+    if i % 4 == 0 { return null }
+    return (P { x: i as float, y: 1.0 }, i)
+}
+
+fn q_maybe(i: int) -> (Q, int)? {
+    if i % 4 == 0 { return null }
+    return (Q { x: i as float, y: 1.0 }, i)
+}
+
+fn p_fresh_read() -> float {
+    let s = 0.0
+    for i in 0..N { if let t = p_maybe(i) { s += t.0.x + t.1 as float } }
+    return s
+}
+
+fn q_fresh_read() -> float {
+    let s = 0.0
+    for i in 0..N { if let t = q_maybe(i) { s += t.0.x + t.1 as float } }
+    return s
+}
+
+fn p_fresh_store() -> float {
+    PY.clear()
+    for i in 0..N { if let t = p_maybe(i) { PY.push(t) } }
+    return PY.len as float
+}
+
+fn q_fresh_store() -> float {
+    QY.clear()
+    for i in 0..N { if let t = q_maybe(i) { QY.push(t) } }
+    return QY.len as float
+}
+
+fn p_pop() -> float {
+    PY.clear()
+    for t in PX { PY.push(t) }
+    let s = 0.0
+    while let t = PY.pop() { s += t.0.x }
+    return s
+}
+
+fn p_zip() -> float {
+    PY.clear()
+    for pr in PX.zip(PX) { PY.push(pr.0) }
+    return PY.len as float
+}
+
+fn q_zip() -> float {
+    QY.clear()
+    for pr in QX.zip(QX) { QY.push(pr.0) }
+    return QY.len as float
+}
+
+fn p_iter_filter() -> float {
+    PY.clear()
+    for t in PX.iter().filter(t => t.1 % 2 == 0) { PY.push(t) }
+    return PY.len as float
+}
+
+fn q_iter_filter() -> float {
+    QY.clear()
+    for t in QX.iter().filter(t => t.1 % 2 == 0) { QY.push(t) }
+    return QY.len as float
+}
+
+fn p_iter() -> float {
+    PY.clear()
+    for t in PX.iter() { PY.push(t) }
+    return PY.len as float
+}
+
+fn q_iter() -> float {
+    QY.clear()
+    for t in QX.iter() { QY.push(t) }
+    return QY.len as float
+}
+
+fn p_collect() -> float {
+    let ys = PX.iter().filter(t => t.1 % 2 == 0).collect()
+    return ys.len as float
+}
+
+fn q_collect() -> float {
+    let ys = QX.iter().filter(t => t.1 % 2 == 0).collect()
+    return ys.len as float
+}
+
 fn q_direct() -> float {
     QY.clear()
     for i in 0..N { QY.push(QX[i]) }
@@ -193,5 +281,18 @@ fn main() {
     drive("p_payload", p_payload)
     drive("p_get", p_get); drive("q_get", q_get)
     drive("p_ret", p_ret); drive("q_ret", q_ret)
-    drive("p_coalesce", p_coalesce); drive("q_coalesce", q_coalesce)
+    drive("p_coalesce", p_coalesce)
+    drive("p_fresh_read", p_fresh_read)
+    drive("q_fresh_read", q_fresh_read)
+    drive("p_fresh_store", p_fresh_store)
+    drive("q_fresh_store", q_fresh_store)
+    drive("p_pop", p_pop)
+    drive("p_zip", p_zip)
+    drive("q_zip", q_zip)
+    drive("p_iter", p_iter)
+    drive("q_iter", q_iter)
+    drive("p_iter_filter", p_iter_filter)
+    drive("q_iter_filter", q_iter_filter)
+    drive("p_collect", p_collect)
+    drive("q_collect", q_collect); drive("q_coalesce", q_coalesce)
 }
