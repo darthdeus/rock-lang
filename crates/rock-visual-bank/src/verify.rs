@@ -1,4 +1,4 @@
-use crate::{sheet_files, Line, SheetGeometry, DIRECTION_COUNT, SHEET_GEOMETRY};
+use crate::{DIRECTION_COUNT, Line, SHEET_GEOMETRY, SheetGeometry, sheet_files};
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::path::Path;
