@@ -1,4 +1,7 @@
-use crate::common::{body_id, definition_names, emit_full_of, name_matches, ws_of, ws_with_stdlib};
+use crate::common::{
+    body_id, definition_names, definitions_matching, emit_full_of, function_body, name_matches,
+    ws_of, ws_with_stdlib,
+};
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
@@ -12,8 +15,21 @@ fn emit_overlay(
     emit_overlay_result(ws, cache, reinferred).expect("emit_overlay")
 }
 
-fn check_edit(v1: &str, v2: &str, edited: &[&str]) -> String {
-    check_edit_with(ws_of, v1, v2, edited)
+fn check_incremental(
+    ws: &Workspace,
+    cache: &mut skull::mir_emit::SkullEmitCache,
+    edited: &[(ModuleId, BodyOwner)],
+) -> MirEmit {
+    let incremental = emit_incremental(ws, cache, edited).expect("incremental emit");
+    let (fresh, _) = emit_full_of(ws, "fresh emit");
+    assert_eq!(incremental.lua, fresh.lua);
+    incremental
+}
+
+fn check_edit(build: fn(&str) -> Workspace, before: &str, after: &str, edited: &str) {
+    let (_, mut cache) = emit_full_of(&build(before), "initial emit");
+    let ws = build(after);
+    check_incremental(&ws, &mut cache, &[body_id(&ws, edited)]);
 }
 
 #[test]
@@ -34,9 +50,7 @@ fn scalar_constant_edits_refresh_full_incremental_and_overlay_emission() {
         .unwrap()
         .0;
     let edited = [(mid, BodyOwner::Global(gid))];
-    let incremental = emit_incremental(&ws2, &mut incremental_cache, &edited).unwrap();
-    let fresh = emit_full(&ws2, mid).unwrap().0;
-    assert_eq!(incremental.lua, fresh.lua);
+    check_incremental(&ws2, &mut incremental_cache, &edited);
     let overlay = emit_overlay(&ws2, &mut overlay_cache, &edited);
     let body = crate::common::function_body(&overlay.lua, "choose");
     assert!(body.contains("-0.0") && !body.contains("ALIAS"));
@@ -70,12 +84,14 @@ fn derived_scalar_constant_edits_refresh_transitive_readers_at_runtime() {
             })
             .unwrap();
         let edited = [(mid2, BodyOwner::Global(gid))];
-        let incremental = emit_incremental(&ws2, &mut incremental_cache, &edited)
-            .unwrap_or_else(|err| panic!("{label}: incremental emit failed: {err:?}"));
-        assert_eq!(incremental.lua, emit_full(&ws2, mid).unwrap().0.lua);
+        check_incremental(&ws2, &mut incremental_cache, &edited);
         let overlay = emit_overlay(&ws2, &mut overlay_cache, &edited);
         let after = crate::common::function_body(&overlay.lua, "choose");
-        assert_eq!(after.contains(&expected_after.to_string()), folded_after);
+        assert_eq!(
+            after.contains(&expected_after.to_string()),
+            folded_after,
+            "{label}"
+        );
         assert_eq!(after.contains("DERIVED"), !folded_after);
         runtime.push_str(&format!(
             "assert(choose() == {expected_before})\n{}\nassert(choose() == {expected_after})\n",
@@ -92,27 +108,15 @@ fn numeric_selection_updates_in_full_incremental_and_overlay_emission() {
         "@nomangle fn choose(a: float, b: float) -> float { return if a < b { a } else { b } }";
     let v2 = v1.replace("a < b", "a > b");
     let ws1 = ws_of(v1);
-    let (full, mut cache) = emit_full_of(&ws1, "emit_full");
+    let (full, mut incremental_cache) = emit_full_of(&ws1, "initial emit");
+    let (_, mut overlay_cache) = emit_full_of(&ws1, "initial overlay base");
     assert!(full.lua.contains("math.min("));
     let ws2 = ws_of(&v2);
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "choose")]);
+    let edited = [body_id(&ws2, "choose")];
+    check_incremental(&ws2, &mut incremental_cache, &edited);
+    let overlay = emit_overlay(&ws2, &mut overlay_cache, &edited);
     assert!(overlay.lua.contains("math.max("));
     assert!(!overlay.lua.contains("math.min("));
-    check_edit(v1, &v2, &["choose"]);
-}
-
-fn check_edit_with(build: fn(&str) -> Workspace, v1: &str, v2: &str, edited: &[&str]) -> String {
-    let ws1 = build(v1);
-    let (_full1, mut cache) = emit_full_of(&ws1, "emit_full v1");
-
-    let ws2 = build(v2);
-    let mid2 = skull::user_module_id(&ws2).unwrap();
-    let reinferred: Vec<_> = edited.iter().map(|n| body_id(&ws2, n)).collect();
-
-    let incremental = emit_incremental(&ws2, &mut cache, &reinferred).expect("emit_incremental");
-    let fresh = emit_full(&ws2, mid2).expect("emit_full v2").0;
-    assert_eq!(incremental.lua, fresh.lua);
-    incremental.lua
 }
 
 fn inline_budget_eligibility_flip_fixture(large_helper: bool) -> String {
@@ -167,10 +171,7 @@ fn main() {
     for (_step, src, expect_check) in [("shrink", shrink.as_str(), true), ("grow", grow, false)] {
         let ws = ws_with_stdlib(src);
         let reinferred = [body_id(&ws, "leaf")];
-        let incremental =
-            emit_incremental(&ws, &mut incremental_cache, &reinferred).expect("incremental");
-        let (fresh, _) = emit_full_of(&ws, "fresh");
-        assert_eq!(incremental.lua, fresh.lua);
+        let incremental = check_incremental(&ws, &mut incremental_cache, &reinferred);
         assert_eq!(checked(&incremental.lua), expect_check);
         let overlay = emit_overlay(&ws, &mut overlay_cache, &reinferred);
         assert_eq!(checked(&overlay.lua), expect_check);
@@ -238,9 +239,7 @@ fn retained_paths_match_fresh_emission_over_an_edit_sequence() {
     let (_, mut cache) = emit_full(&ws0, mid).expect("initial build");
     for (src, edited) in steps {
         let ws = ws_of(&src);
-        let incremental = emit_incremental(&ws, &mut cache, &[body_id(&ws, edited)]).unwrap();
-        let fresh = emit_full_of(&ws, "fresh").0;
-        assert_eq!(incremental.lua, fresh.lua);
+        check_incremental(&ws, &mut cache, &[body_id(&ws, edited)]);
     }
 }
 
@@ -262,33 +261,20 @@ fn body_edit_to_a_function_with_lambdas_matches_a_full_emit() {
         )
     };
     let (v1, v2) = (fixture(1), fixture(4));
-    check_edit_with(ws_with_stdlib, &v1, &v2, &["lambdas"]);
-
-    // The overlay redefines the hoisted lambda bodies exactly as a full emit
-    // of the edited source prints them.
     let ws1 = ws_with_stdlib(&v1);
-    let (_full1, mut cache) = emit_full_of(&ws1, "emit_full v1");
+    let (_, mut incremental_cache) = emit_full_of(&ws1, "initial emit");
+    let (_, mut overlay_cache) = emit_full_of(&ws1, "initial overlay base");
     let ws2 = ws_with_stdlib(&v2);
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "lambdas")]).lua;
-    let fresh = emit_full_of(&ws2, "emit_full v2").0.lua;
-    let definition = |lua: &str, name: &str| -> Option<String> {
-        let start = lua.find(&format!("function {name}("))?;
-        let rest = &lua[start..];
-        Some(rest[..rest.find("\nend\n")? + 4].to_string())
-    };
-    let lambdas: Vec<&str> = fresh
-        .match_indices("__lambda")
-        .filter_map(|(at, _)| {
-            let start = fresh[..at].rfind("function ")? + "function ".len();
-            let end = at + fresh[at..].find('(')?;
-            (!fresh[start..end].contains(char::is_whitespace)).then(|| &fresh[start..end])
-        })
-        .collect();
+    let edited = [body_id(&ws2, "lambdas")];
+    let updated = check_incremental(&ws2, &mut incremental_cache, &edited);
+    let overlay = emit_overlay(&ws2, &mut overlay_cache, &edited);
+    let lambdas = definitions_matching(&updated.lua, "__lambda");
     assert!(lambdas.len() >= 2);
     for name in lambdas {
-        let expected = definition(&fresh, name);
-        assert!(expected.is_some());
-        assert_eq!(definition(&overlay, name), expected);
+        assert_eq!(
+            function_body(&overlay.lua, name),
+            function_body(&updated.lua, name)
+        );
     }
 }
 
@@ -426,14 +412,14 @@ fn a_body_edit_to_a_generic_coroutine_reemits_its_specializations() {
     // coroutine in v1 there is nothing for the edit to invalidate and the
     // comparison would pass over an empty set.
     let ws = ws_with_stdlib(v1);
-    let mid = skull::user_module_id(&ws).unwrap();
-    let lua = emit_full(&ws, mid).expect("emit_full v1").0.lua;
-    let spec_steps = definition_names(&lua)
+    let (full, mut cache) = emit_full_of(&ws, "initial emit");
+    let spec_steps = definition_names(&full.lua)
         .into_iter()
         .filter(|name| name.contains("_spec_") && name.ends_with("__step"))
         .count();
     assert_eq!(spec_steps, 1);
-    check_edit_with(ws_with_stdlib, v1, &v2, &["walk"]);
+    let ws = ws_with_stdlib(&v2);
+    check_incremental(&ws, &mut cache, &[body_id(&ws, "walk")]);
 }
 
 #[test]
@@ -455,10 +441,11 @@ fn a_standalone_bounded_body_survives_an_incremental_rebuild() {
             .filter(|name| name.starts_with("total_"))
             .count()
     };
-    let (full1, _) = emit_full_of(&ws_with_stdlib(v1), "emit_full v1");
-    assert_eq!(standalone(&full1.lua), 1);
-    let incremental = check_edit_with(ws_with_stdlib, v1, &v2, &["total"]);
-    assert_eq!(standalone(&incremental), 1);
+    let (full, mut cache) = emit_full_of(&ws_with_stdlib(v1), "initial emit");
+    assert_eq!(standalone(&full.lua), 1);
+    let ws = ws_with_stdlib(&v2);
+    let incremental = check_incremental(&ws, &mut cache, &[body_id(&ws, "total")]);
+    assert_eq!(standalone(&incremental.lua), 1);
 }
 
 #[test]
@@ -480,18 +467,18 @@ inline(lua) fn slots_empty(c: Coroutine<FrameYield>) -> bool = """
 }
 "#;
     let v2 = v1.replace("Pair(1, 2)", "Pair(3, 2)");
-    check_edit_with(ws_with_stdlib, v1, &v2, &["stream"]);
     let ws1 = ws_with_stdlib(v1);
-    let (full, mut cache) = emit_full_of(&ws1, "emit_full");
+    let (full, mut incremental_cache) = emit_full_of(&ws1, "initial emit");
+    let (_, mut overlay_cache) = emit_full_of(&ws1, "initial overlay base");
     let ws2 = ws_with_stdlib(&v2);
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "stream")]);
-    let (fresh, _) = emit_full_of(&ws2, "emit_full");
-    let step = |lua: &str| {
-        let start = lua.find("function stream_0__step(").expect("step function");
-        let len = lua[start..].find("\nend\n").expect("step end");
-        lua[start..start + len].to_string()
-    };
-    assert_eq!(step(&overlay.lua), step(&fresh.lua));
+    let edited = [body_id(&ws2, "stream")];
+    let updated = check_incremental(&ws2, &mut incremental_cache, &edited);
+    let overlay = emit_overlay(&ws2, &mut overlay_cache, &edited);
+    let step = "stream_0__step";
+    assert_eq!(
+        function_body(&overlay.lua, step),
+        function_body(&updated.lua, step)
+    );
     let run = format!(
         "{}\nprint(sample(1))\n{}\nprint(sample(3))\n",
         full.lua, overlay.lua
@@ -643,12 +630,14 @@ enum Mode { Idle, Busy }
 fn main() { print(describe(Mode::Busy)) }
 "#;
     let v2 = v1.replace("return \"mode\"", "return \"{m}\"");
-    check_edit_with(ws_with_stdlib, v1, &v2, &["describe"]);
     let ws1 = ws_with_stdlib(v1);
-    let (full, mut cache) = emit_full_of(&ws1, "emit_full");
+    let (full, mut incremental_cache) = emit_full_of(&ws1, "initial emit");
+    let (_, mut overlay_cache) = emit_full_of(&ws1, "initial overlay base");
     assert!(!full.lua.contains("Mode::Busy"));
     let ws2 = ws_with_stdlib(&v2);
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "describe")]);
+    let edited = [body_id(&ws2, "describe")];
+    check_incremental(&ws2, &mut incremental_cache, &edited);
+    let overlay = emit_overlay(&ws2, &mut overlay_cache, &edited);
     let run = format!("{}\n{}\nprint(describe(1))\n", full.lua, overlay.lua);
     assert_eq!(crate::common::run_luajit(&run), "Mode::Busy");
 }
@@ -701,7 +690,7 @@ value Config { chosen: int, spare: int, label: string }
         (ws_of, last_edge, last_edge.replace("leaf(3)", "0"), "main"),
     ];
     for (build, v1, v2, edited) in cases {
-        check_edit_with(build, v1, &v2, &[edited]);
+        check_edit(build, v1, &v2, edited);
     }
 }
 
@@ -737,10 +726,11 @@ fn inline_decisions_follow_helper_edits() {
         ),
     ] {
         let residual = |lua: &str| crate::common::function_body(lua, "caller").contains("helper(");
-        let (full1, _) = emit_full_of(&ws_of(&v1), "emit_full v1");
-        assert_eq!(residual(&full1.lua), residual_before);
-        let incremental = check_edit(&v1, &v2, &["helper"]);
-        assert_eq!(residual(&incremental), residual_after);
+        let (full, mut cache) = emit_full_of(&ws_of(&v1), "initial emit");
+        assert_eq!(residual(&full.lua), residual_before);
+        let ws = ws_of(&v2);
+        let updated = check_incremental(&ws, &mut cache, &[body_id(&ws, "helper")]);
+        assert_eq!(residual(&updated.lua), residual_after);
     }
 }
 
@@ -803,9 +793,11 @@ fn body_edit_to_a_generic_reemits_its_specializations() {
     // One liveness walk decides the specialized body, so it is emitted once.
     assert_eq!(full.lua.matches(spec).count(), 1);
 
-    check_edit(v1, &v2, &["first"]);
+    let (_, mut incremental_cache) = emit_full_of(&ws1, "initial emit");
     let ws2 = ws_of(&v2);
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "first")]);
+    let edited = [body_id(&ws2, "first")];
+    check_incremental(&ws2, &mut incremental_cache, &edited);
+    let overlay = emit_overlay(&ws2, &mut cache, &edited);
     assert!(overlay.lua.contains(spec));
 }
 
@@ -898,8 +890,8 @@ fn caller_edits_add_and_prune_specializations_per_instance() {
             .count()
     };
     assert_eq!((specs(&one), specs(&both)), (1, 2));
-    check_edit_with(ws_with_stdlib, &one, &both, &["use_it"]);
-    check_edit_with(ws_with_stdlib, &both, &one, &["use_it"]);
+    check_edit(ws_with_stdlib, &one, &both, "use_it");
+    check_edit(ws_with_stdlib, &both, &one, "use_it");
 }
 
 #[test]
@@ -909,8 +901,7 @@ fn changed_call_graph_reaching_a_foreign_publisher_matches_full_emission() {
     let ws1 = ws_with_stdlib(v1);
     let (_, mut cache) = emit_full_of(&ws1, "initial emit");
     let ws2 = ws_with_stdlib(&v2);
-    let incremental =
-        emit_incremental(&ws2, &mut cache, &[body_id(&ws2, "helper")]).expect("incremental emit");
+    check_incremental(&ws2, &mut cache, &[body_id(&ws2, "helper")]);
     assert!(
         cache
             .lua_view()
@@ -921,8 +912,6 @@ fn changed_call_graph_reaching_a_foreign_publisher_matches_full_emission() {
                 "extra"
             ))
     );
-    let fresh = emit_full_of(&ws2, "fresh emit").0;
-    assert_eq!(incremental.lua, fresh.lua);
 }
 
 const MULTI_REGION_COROUTINE: &str = r#"
