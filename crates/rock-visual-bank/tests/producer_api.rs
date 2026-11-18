@@ -1,7 +1,7 @@
 use rock_visual_bank::{
-    check_line, check_polygon, finite_point, is_sheet_dir, mask_file, validate_floor_texture,
-    AnimationLine, Camera, JointTrackSet, Line, SheetGeometry, SurfaceLine, BANK_FILE_NAME,
-    DIRECTION_COUNT, RELIGHT_CHANNELS, SHEET_GEOMETRY,
+    AnimationLine, BANK_FILE_NAME, Camera, DIRECTION_COUNT, JointTrackSet, Line, RELIGHT_CHANNELS,
+    SHEET_GEOMETRY, SheetGeometry, SurfaceLine, check_line, check_polygon, finite_point,
+    is_sheet_dir, mask_file, validate_floor_texture,
 };
 
 #[test]
