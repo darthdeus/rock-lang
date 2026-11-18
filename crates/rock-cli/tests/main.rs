@@ -17,6 +17,7 @@ mod native_commands;
 mod package_cli;
 mod package_relative_output;
 mod package_test_program_shape;
+mod package_test_sources;
 mod perf_stats_json;
 mod plain_process;
 mod stone_harness;

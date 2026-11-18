@@ -209,30 +209,46 @@ pub(crate) fn parse_user_modules(
     sources: &SourceFiles,
 ) -> std::result::Result<(Vec<skull_parser::Ast>, ustr::Ustr, Duration), Vec<CompilerError>> {
     let t = Instant::now();
-    // Parse every module in parallel — each parse is independent (own arenas; the
-    // only shared state, `Ustr` interning, is concurrent-safe). Results keep file
-    // order, so the dedup/entry scan below sees files in the same order the old
-    // serial loop did. The parser stores the supplied file id on the Ast.
-    let parsed: Vec<skull_parser::Ast> = bone_core::prelude::par_map_largest_first(
+    let parsed: Vec<_> = parse_user_files(sources, |source, file| {
+        skull_parser::parse_module(source, file).map(|module| (module, ()))
+    })?
+    .into_iter()
+    .map(|(module, ())| module)
+    .collect();
+    let entry = project_entry(&parsed)?;
+    Ok((parsed, entry, t.elapsed()))
+}
+
+/// Parse the loaded files in parallel, preserving discovery order.
+pub(crate) fn parse_user_files<T: Send>(
+    sources: &SourceFiles,
+    parse: impl Fn(&str, ustr::Ustr) -> std::result::Result<(skull_parser::Ast, T), CompilerError>
+    + Sync,
+) -> std::result::Result<Vec<(skull_parser::Ast, T)>, Vec<CompilerError>> {
+    bone_core::prelude::par_map_largest_first(
         sources.files.iter().collect(),
         |file| file.borrow().contents.len(),
         |file| {
             let f = file.borrow();
             let id = ustr::Ustr::from(f.file.to_id_path().as_str());
-            let mut module = skull_parser::parse_module(&f.contents, id).map_err(|e| vec![e])?;
+            let (mut module, facts) = parse(&f.contents, id).map_err(|error| vec![error])?;
             module.package = f.package.clone();
             module.global_policy = f.global_policy;
-            Ok(module)
+            Ok((module, facts))
         },
     )
     .into_iter()
-    .collect::<std::result::Result<Vec<_>, Vec<CompilerError>>>()?;
+    .collect()
+}
 
+pub(crate) fn project_entry(
+    parsed: &[skull_parser::Ast],
+) -> std::result::Result<ustr::Ustr, Vec<CompilerError>> {
     // Sequential post-pass: reject duplicate module ids and pick the entry file.
     let mut user_file: Option<ustr::Ustr> = None;
     let mut first_file: Option<ustr::Ustr> = None;
     let mut seen = HashSet::with_capacity(parsed.len());
-    for module in &parsed {
+    for module in parsed {
         // The module's file is the stable identity the workspace's interner maps
         // to a dense ModuleId after semantic_pass. Resolve the id from
         // `ws.module_ids` once the workspace exists (see `entry_module_id`).
@@ -255,17 +271,16 @@ pub(crate) fn parse_user_modules(
     // Compile gate: parsing is total, so a project with any syntax error is
     // refused here (the whole-project bone/skull compile funnel) -- the
     // interactive Session keeps the partial tree instead.
-    let syntax = skull::pipeline::syntax_errors(&parsed);
+    let syntax = skull::pipeline::syntax_errors(parsed);
     if !syntax.is_empty() {
         return Err(syntax);
     }
 
-    let entry = user_file.or(first_file).ok_or_else(|| {
+    user_file.or(first_file).ok_or_else(|| {
         vec![CompilerError::new_no_location(
             "bone: project has no .rock files",
         )]
-    })?;
-    Ok((parsed, entry, t.elapsed()))
+    })
 }
 
 /// Resolve the entry module's `ModuleId` from a checked workspace. The entry is
