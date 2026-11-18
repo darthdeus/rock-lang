@@ -636,11 +636,6 @@ fn allocation_result_uses(func: &MirFunc) -> Vec<AllocationUseFacts> {
                 use_facts.uses += 1;
                 use_facts.record(AllocationResultUse::Other);
             }
-            skull_mir::mir::Term::Switch { discr, .. } => {
-                let use_facts = &mut facts[discr.into_raw().into_u32() as usize];
-                use_facts.uses += 1;
-                use_facts.record(AllocationResultUse::Other);
-            }
             _ => {}
         }
     }

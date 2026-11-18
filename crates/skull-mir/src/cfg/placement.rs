@@ -1,7 +1,7 @@
 //! Printing order and edge classification over a reducible CFG's placement.
 
 use super::structure::{Placement, Succ};
-use crate::mir::{Block, Inst, Lit, MirFunc, Term};
+use crate::mir::{Block, Inst, MirFunc, Term};
 use comfy_la_arena::Idx;
 
 /// Where each block's edges really lead: an edge into a chain of empty
@@ -111,12 +111,6 @@ pub trait PlacementEmit {
         ladder: &mut Self::Ladder,
         cond: Idx<Inst>,
         negate: bool,
-    ) -> Result<(), Self::Error>;
-    fn switch_case(
-        &mut self,
-        ladder: &mut Self::Ladder,
-        discr: Idx<Inst>,
-        value: &Lit,
     ) -> Result<(), Self::Error>;
     fn otherwise(&mut self, ladder: &mut Self::Ladder) -> Result<(), Self::Error>;
     fn end_ladder(&mut self, ladder: Self::Ladder) -> Result<(), Self::Error>;
@@ -272,25 +266,6 @@ impl<E: PlacementEmit> Walk<'_, E> {
                 then_bb,
                 else_bb,
             } => self.emit_if(cond, then_bb, else_bb, follow),
-            Term::Switch {
-                discr,
-                cases,
-                default,
-            } => {
-                if cases.is_empty() {
-                    return self.branch_to(*default, follow);
-                }
-                let mut ladder = self.emit.ladder();
-                for (value, target) in cases {
-                    self.emit.switch_case(&mut ladder, *discr, value)?;
-                    self.branch_to(*target, follow)?;
-                }
-                if !self.falls_to(*default, follow) {
-                    self.emit.otherwise(&mut ladder)?;
-                    self.branch_to(*default, follow)?;
-                }
-                self.emit.end_ladder(ladder)
-            }
             term => self.emit.terminal(block, term),
         }
     }

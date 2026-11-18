@@ -18,12 +18,6 @@ pub fn successors(term: &Term, mut f: impl FnMut(Idx<Block>)) {
             f(*then_bb);
             f(*else_bb);
         }
-        Term::Switch { cases, default, .. } => {
-            for (_, b) in cases {
-                f(*b);
-            }
-            f(*default);
-        }
         Term::Yield { resume, .. } => f(*resume),
     }
 }

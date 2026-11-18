@@ -265,25 +265,6 @@ impl PlacementEmit for Printer<'_, '_> {
         Ok(())
     }
 
-    fn switch_case(
-        &mut self,
-        ladder: &mut Ladder,
-        discr: Idx<Inst>,
-        value: &Lit,
-    ) -> Result<(), Infallible> {
-        let first = ladder.first;
-        if first {
-            self.em.mark_inline_operand(self.out, discr);
-        }
-        self.rung(ladder, discr);
-        self.out.push_str(if first { " if " } else { " elseif " });
-        self.em.write_opnd(self.out, discr);
-        self.out.push_str(" == ");
-        write_lit(self.out, value);
-        self.out.push_str(" then\n");
-        Ok(())
-    }
-
     fn otherwise(&mut self, ladder: &mut Ladder) -> Result<(), Infallible> {
         self.ladder_else(ladder);
         Ok(())

@@ -375,12 +375,6 @@ pub(crate) fn label_ref_counts(
                 refs[raw(*then_bb) as usize] += 1;
                 refs[raw(*else_bb) as usize] += 1;
             }
-            Term::Switch { cases, default, .. } => {
-                for (_, t) in cases {
-                    refs[raw(*t) as usize] += 1;
-                }
-                refs[raw(*default) as usize] += 1;
-            }
             _ => {}
         }
     }

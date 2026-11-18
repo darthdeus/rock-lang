@@ -212,7 +212,7 @@ pub(crate) fn compute_inlinable(
 
 /// Whether `consumer` renders each of its operands exactly once, so a folded
 /// call among them still runs once. Shapes that spell an operand several
-/// times (`UintMul`, a `Switch` ladder, a guarded store) are absent.
+/// times (`UintMul`, a guarded store) are absent.
 fn spells_operands_once(consumer: &Inst) -> bool {
     matches!(
         consumer,

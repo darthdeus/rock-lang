@@ -39,7 +39,6 @@ pub(crate) fn term_value(term: &Term) -> Option<Idx<Inst>> {
         // scalarizes its completion value); the first covers it.
         Term::Return(vs) => vs.first().copied(),
         Term::Branch { cond, .. } => Some(*cond),
-        Term::Switch { discr, .. } => Some(*discr),
         Term::Yield { values, .. } => values.first().copied(),
         _ => None,
     }

@@ -171,7 +171,7 @@ pub trait StructuredEmit {
                         None => return Ok(()),
                     }
                 }
-                term @ (Term::Switch { .. } | Term::Yield { .. }) => {
+                term @ Term::Yield { .. } => {
                     return Err(self.unsupported_term(&term));
                 }
             }

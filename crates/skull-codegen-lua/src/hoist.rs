@@ -92,7 +92,6 @@ fn const_hoist_uses_are_read_only(func: &MirFunc, cand: Idx<Inst>) -> bool {
     !func.blocks.iter().any(|(_, blk)| match &blk.term {
         Term::Return(vs) | Term::Yield { values: vs, .. } => vs.contains(&cand),
         Term::Branch { cond, .. } => *cond == cand,
-        Term::Switch { discr, .. } => *discr == cand,
         _ => false,
     })
 }

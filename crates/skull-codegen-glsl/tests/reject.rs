@@ -120,10 +120,8 @@ cases! { reject:
     "#, &["shader_expression_default"], "null literal");
 }
 
-// `match` lowers to `Term::Branch` chains (NOT `Term::Switch`, which lowering
-// never produces), so a tier-0 int `match` is accepted and structured -- see
-// `golden::match_int_ladder`. A match on a non-tier-0 scrutinee still rejects at
-// the tier-0 gate; the structurizer never silently swallows it.
+// The tier-0 integer match in golden::match_int_ladder lowers to branches.
+// The enum scrutinee here fails the tier-0 check before structuring.
 cases! { reject:
     reject_match_non_tier0(r#"
         enum Dir { North, South }
