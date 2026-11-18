@@ -37,6 +37,7 @@ members = [
     "crates/test-utils",
     "crates/stone-capture",
     "crates/stone-gl",
+    "crates/stone-texture",
     "stone-imgui-abi",
     "stone-rs",
 ]

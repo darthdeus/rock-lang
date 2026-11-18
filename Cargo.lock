@@ -1885,6 +1885,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "stone-texture",
 ]
 
 [[package]]
@@ -2412,6 +2413,7 @@ dependencies = [
  "stone-capture",
  "stone-gl",
  "stone-imgui-abi",
+ "stone-texture",
  "tempfile",
  "toml",
  "ttf-parser",
@@ -2420,6 +2422,10 @@ dependencies = [
  "x11",
  "zeno",
 ]
+
+[[package]]
+name = "stone-texture"
+version = "0.1.0"
 
 [[package]]
 name = "subtle"

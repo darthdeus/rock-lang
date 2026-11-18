@@ -9,6 +9,7 @@ repository.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+stone-texture = { path = "../crates/stone-texture" }
 libc = "0.2"
 fs-err = { workspace = true }
 once_cell = { workspace = true }

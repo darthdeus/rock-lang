@@ -28,6 +28,7 @@ fn producer_can_share_bank_schema_and_validation() {
     assert!(geometry.joints.is_empty());
 
     let mut line = Line::Animation(AnimationLine {
+        albedo_bc1: false,
         character: "person".into(),
         label: "idle".into(),
         dir: "0".repeat(64),
@@ -67,4 +68,14 @@ fn producer_can_share_bank_schema_and_validation() {
         skin_mask: false,
         studio: None,
     };
+}
+
+#[test]
+fn compressed_albedo_is_packaged_alongside_the_original() {
+    let bank = r#"{"kind":"animation","character":"actor","label":"idle","dir":"0000000000000000000000000000000000000000000000000000000000000000","size":[5,3],"cell":[5,3],"pivot":[0.5,0.5],"frames":1,"frame_time":1.0,"skin_mask":false,"albedo_bc1":true}"#;
+    let (rows, errors) = rock_visual_bank::parse_bank(&format!("{bank}\n"));
+    assert!(errors.is_empty(), "{errors:?}");
+    let files = rock_visual_bank::sheet_files(&rows[0]);
+    assert!(files.contains(&"albedo.dds".to_owned()));
+    assert!(files.contains(&"albedo.png".to_owned()));
 }

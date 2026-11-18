@@ -189,6 +189,7 @@ pub(crate) enum ImageFormat {
     Rgba8,
     DepthRg8,
     MaterialRg8,
+    Bc1,
 }
 
 impl ImageFormat {
@@ -198,21 +199,25 @@ impl ImageFormat {
             Self::DepthRg8 => 1,
             Self::R8 => 2,
             Self::MaterialRg8 => 3,
+            Self::Bc1 => 4,
         }
     }
 
-    pub(crate) fn bytes_per_texel(self) -> u32 {
-        match self {
+    pub(crate) fn level_bytes(self, width: u32, height: u32) -> u64 {
+        let bpp = match self {
+            Self::Bc1 => return stone_texture::bc1_bytes(width, height),
             Self::R8 => 1,
             Self::Rgba8 => 4,
             Self::DepthRg8 | Self::MaterialRg8 => 2,
-        }
+        };
+        u64::from(width) * u64::from(height) * bpp
     }
 
     pub(crate) fn gl_internal(self) -> u32 {
         match self {
             Self::R8 => glow::R8,
             Self::Rgba8 => glow::RGBA8,
+            Self::Bc1 => glow::COMPRESSED_RGBA_S3TC_DXT1_EXT,
             Self::DepthRg8 | Self::MaterialRg8 => glow::RG8,
         }
     }
@@ -220,7 +225,7 @@ impl ImageFormat {
     pub(crate) fn gl_external(self) -> u32 {
         match self {
             Self::R8 => glow::RED,
-            Self::Rgba8 => glow::RGBA,
+            Self::Rgba8 | Self::Bc1 => glow::RGBA,
             Self::DepthRg8 | Self::MaterialRg8 => glow::RG,
         }
     }
@@ -231,6 +236,7 @@ impl ImageFormat {
         }
         let pixels = rgba.as_chunks::<4>().0;
         match self {
+            Self::Bc1 => None,
             Self::Rgba8 => Some(Cow::Borrowed(rgba)),
             Self::R8 => Some(Cow::Owned(pixels.iter().map(|p| p[0]).collect())),
             Self::DepthRg8 => Some(Cow::Owned(
@@ -357,6 +363,13 @@ fn upload_decode_placeholder(id: u64) {
         return;
     };
     let (sw, sh) = stored_size(id, (w, h));
+    if format == ImageFormat::Bc1 {
+        // RGB565 magenta and black, selectors forming the same 2x2 checker.
+        let block = [0x19, 0xf8, 0x03, 0x18, 0x50, 0x50, 0x05, 0x05];
+        let blocks = block.repeat((format.level_bytes(sw, sh) / 8) as usize);
+        publish_image_pixels(id, (w, h), (sw, sh), format, &blocks);
+        return;
+    }
     let len = (sw as usize).saturating_mul(sh as usize).saturating_mul(4);
     if len == 0 {
         return;
@@ -420,6 +433,7 @@ fn stub_texel(format: ImageFormat) -> &'static [u8] {
         ImageFormat::Rgba8 => &STUB_RGBA8_TEXEL,
         ImageFormat::DepthRg8 | ImageFormat::MaterialRg8 => &STUB_RG8_TEXEL,
         ImageFormat::R8 => &[255],
+        ImageFormat::Bc1 => &[255, 255, 0, 0, 0, 0, 0, 0],
     }
 }
 
@@ -451,6 +465,12 @@ unsafe fn tex_image_for_format(
     pixels: Option<&[u8]>,
 ) {
     gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+    if format == ImageFormat::Bc1 {
+        if let Some(blocks) = pixels {
+            gl.upload_bc1(width as i32, height as i32, blocks);
+        }
+        return;
+    }
     with_rg_unpack_alignment(gl, format, || {
         gl.tex_image_2d(
             glow::TEXTURE_2D,
@@ -482,12 +502,12 @@ fn load_storage_dims(stubbed: bool, exact_texels: bool, width: u32, height: u32)
 fn stored_texel_bytes(
     mut width: u32,
     mut height: u32,
-    bytes_per_texel: u32,
+    format: ImageFormat,
     mipmapped: bool,
 ) -> u64 {
     let mut bytes = 0u64;
     loop {
-        bytes += u64::from(width) * u64::from(height) * u64::from(bytes_per_texel);
+        bytes += format.level_bytes(width, height);
         if !mipmapped || (width == 1 && height == 1) {
             break;
         }
@@ -500,12 +520,7 @@ fn stored_texel_bytes(
 fn image_byte_len(handle: u64, image: &LoadedImage) -> u64 {
     let stored = stored_size(handle, (image.width, image.height));
     let mipmapped = MIPMAPPED_IMAGES.with(|m| m.borrow().contains(&handle));
-    stored_texel_bytes(
-        stored.0,
-        stored.1,
-        image.format.bytes_per_texel(),
-        mipmapped,
-    )
+    stored_texel_bytes(stored.0, stored.1, image.format, mipmapped)
 }
 
 /// Publish a finished load: the image, its exactness declaration, what GL now
@@ -562,22 +577,22 @@ mod stub_storage_tests {
 
     #[test]
     fn stored_bytes_use_the_uploaded_extent_and_texel_width() {
-        assert_eq!(stored_texel_bytes(3, 2, 4, false), 24);
-        assert_eq!(stored_texel_bytes(3, 2, 2, false), 12);
-        assert_eq!(stored_texel_bytes(3, 2, 1, true), 7);
+        assert_eq!(stored_texel_bytes(3, 2, ImageFormat::Rgba8, false), 24);
+        assert_eq!(stored_texel_bytes(3, 2, ImageFormat::DepthRg8, false), 12);
+        assert_eq!(stored_texel_bytes(3, 2, ImageFormat::R8, true), 7);
     }
 
     #[test]
     fn image_formats_use_sized_gl_storage_and_matching_upload_lanes() {
         assert_eq!(ImageFormat::Rgba8.gl_internal(), glow::RGBA8);
         assert_eq!(ImageFormat::Rgba8.gl_external(), glow::RGBA);
-        assert_eq!(ImageFormat::Rgba8.bytes_per_texel(), 4);
+        assert_eq!(ImageFormat::Rgba8.level_bytes(1, 1), 4);
         assert_eq!(ImageFormat::DepthRg8.gl_internal(), glow::RG8);
         assert_eq!(ImageFormat::DepthRg8.gl_external(), glow::RG);
-        assert_eq!(ImageFormat::DepthRg8.bytes_per_texel(), 2);
+        assert_eq!(ImageFormat::DepthRg8.level_bytes(1, 1), 2);
         assert_eq!(ImageFormat::MaterialRg8.gl_internal(), glow::RG8);
         assert_eq!(ImageFormat::MaterialRg8.gl_external(), glow::RG);
-        assert_eq!(ImageFormat::MaterialRg8.bytes_per_texel(), 2);
+        assert_eq!(ImageFormat::MaterialRg8.level_bytes(1, 1), 2);
     }
 
     /// A headers-only load defines one white texel, so what GL holds is 1x1
@@ -804,6 +819,18 @@ fn load_image(
     }
     let path_str = unsafe { CStr::from_ptr(path).to_str().unwrap_or("") };
 
+    let format = if path_str.ends_with(".dds") {
+        if format != ImageFormat::Rgba8 || !stone_supports_bc1() {
+            log_once!("IMAGE", "unsupported BC1 DDS load for {}", path_str);
+            record_image_load(false, 0, elapsed_us(load_started));
+            return 0;
+        }
+        ImageFormat::Bc1
+    } else {
+        format
+    };
+    let exact_texels = exact_texels || format == ImageFormat::Bc1;
+
     // Collect completed workers into the publication state. The load site
     // publishes no pixels; only a pump or flush can make those images ready.
     let uploads = publish_uploads("load");
@@ -883,6 +910,11 @@ fn load_image(
             probed = image_decode::probe_dimensions(&data);
             read_in_worker = false;
         }
+    }
+    if format == ImageFormat::Bc1 && probed.is_none() {
+        log_once!("IMAGE", "invalid BC1 DDS header: {}", path_str);
+        record_image_load(false, 0, elapsed_us(load_started));
+        return 0;
     }
     let stubbed = image_decode::stub_images() && probed.is_some();
     let deferred = if stubbed { None } else { probed };
@@ -1157,9 +1189,7 @@ fn upload_decoded(decoded: impl IntoIterator<Item = Arc<image_decode::Decoded>>)
         // that disagrees would have `tex_image_2d` read past the buffer, so it
         // is refused rather than uploaded.
         let (sw, sh) = d.stored;
-        let expected = (sw as usize)
-            .saturating_mul(sh as usize)
-            .saturating_mul(format.bytes_per_texel() as usize);
+        let expected = format.level_bytes(sw, sh) as usize;
         if pixels.len() != expected {
             log_once!(
                 "IMAGE",
@@ -1561,6 +1591,28 @@ pub extern "C" fn stone_reload_image(handle: u64, path: *const c_char) -> bool {
     // put the pre-edit pixels back; drain it first.
     stone_flush_image_uploads();
 
+    let Some(format) = with_image(handle, |img| img.format) else {
+        return false;
+    };
+    if format == ImageFormat::Bc1 {
+        let Some(data) = resolve_image_bytes(path_str) else {
+            return false;
+        };
+        let Some((size, blocks)) = stone_texture::bc1_blocks(&data) else {
+            log_once!("IMAGE", "invalid BC1 DDS on reload: {}", path_str);
+            return false;
+        };
+        if !publish_image_pixels(handle, size, size, format, blocks) {
+            return false;
+        }
+        with_image_mut(handle, |img| {
+            img.width = size.0;
+            img.height = size.1;
+            img.stub = false;
+        });
+        FAILED_DECODE.with(|f| f.borrow_mut().remove(&handle));
+        return true;
+    }
     let (data, width, height) = match decode_rgba_image(path_str) {
         Some(t) => t,
         None => return false,
@@ -1569,9 +1621,6 @@ pub extern "C" fn stone_reload_image(handle: u64, path: *const c_char) -> bool {
     // A hot reload is an asset load like any other, so it stores at the cap --
     // and honours the exactness this handle declared when it was first loaded,
     // which is why that declaration outlives the call that made it.
-    let Some(format) = with_image(handle, |img| img.format) else {
-        return false;
-    };
     let exact = exact_texels(handle) || format != ImageFormat::Rgba8;
     let (storage_width, storage_height) = image_decode::storage_dims(exact, width, height);
     let Some(data) = image_decode::store_at_storage(exact, data, width, height)
@@ -1705,7 +1754,7 @@ pub(crate) fn live_image_bytes() -> u64 {
             .iter()
             .map(|(handle, img)| {
                 let (width, height) = stored_size(*handle, (img.width, img.height));
-                u64::from(width) * u64::from(height) * u64::from(img.format.bytes_per_texel())
+                img.format.level_bytes(width, height)
             })
             .sum()
     })
@@ -1731,7 +1780,7 @@ fn mip_chain_bytes(handle: u64, image: &LoadedImage) -> u64 {
     while width > 1 || height > 1 {
         width = (width / 2).max(1);
         height = (height / 2).max(1);
-        bytes += u64::from(width) * u64::from(height) * u64::from(image.format.bytes_per_texel());
+        bytes += image.format.level_bytes(width, height);
     }
     bytes
 }
@@ -1747,6 +1796,11 @@ pub(crate) fn live_texture_bytes() -> u64 {
 #[no_mangle]
 pub extern "C" fn stone_get_image_byte_len(handle: u64) -> u64 {
     with_image(handle, |img| image_byte_len(handle, img)).unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn stone_supports_bc1() -> bool {
+    with_gl(|gl| gl.supports_bc1()).unwrap_or(false)
 }
 
 #[no_mangle]
@@ -1946,6 +2000,42 @@ mod relight_rg8_gl_tests {
             )
         })
         .expect("GL context unavailable while reading pack state")
+    }
+
+    #[test]
+    fn bc1_upload_preserves_cutout_and_counts_partial_blocks() {
+        if std::env::var_os(CHILD_ENV).is_none() {
+            run_isolated("image_texture::relight_rg8_gl_tests::bc1_upload_preserves_cutout_and_counts_partial_blocks");
+            return;
+        }
+        let _session = GlSession::start();
+        assert!(stone_supports_bc1(), "test driver requires S3TC");
+        let mut dds = stone_texture::bc1_header(5, 3).unwrap().to_vec();
+        // Transparent first block, solid red second block.
+        dds.extend([0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+        dds.extend([0x00, 0xf8, 0, 0, 0, 0, 0, 0]);
+        let path = CString::new("test/cutout.dds").unwrap();
+        crate::asset_registry::stone_register_asset(path.as_ptr(), dds.as_ptr(), dds.len());
+        let mut images = ImageScope::default();
+        for flags in [0, LOAD_DEFERRED] {
+            let handle = stone_load_image(path.as_ptr(), 0, flags, 5, 3);
+            assert_ne!(handle, 0);
+            images.0.push(handle);
+            if flags == LOAD_DEFERRED {
+                crate::image_publication::stone_image_require(handle);
+            }
+            stone_flush_image_uploads();
+            assert_eq!(stone_get_image_byte_len(handle), 16);
+            assert_eq!(
+                read_rg(handle, 5, 3).0,
+                glow::COMPRESSED_RGBA_S3TC_DXT1_EXT as i32
+            );
+            for row in read_rgba(handle, 5, 3).chunks_exact(20) {
+                assert!(row[..16].chunks_exact(4).all(|p| p[3] == 0));
+                assert_eq!(&row[16..], &[255, 0, 0, 255]);
+            }
+            images.unload(handle);
+        }
     }
 
     fn run_upload_case() {
@@ -2343,6 +2433,7 @@ mod relight_rg8_gl_tests {
                     ImageFormat::DepthRg8 => [source[0], source[1], 0, 255],
                     ImageFormat::MaterialRg8 => [source[1], source[2], 0, 255],
                     ImageFormat::Rgba8 => source,
+                    ImageFormat::Bc1 => unreachable!(),
                     ImageFormat::R8 => [source[0], 0, 0, 255],
                 };
                 assert_eq!(

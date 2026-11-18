@@ -80,6 +80,14 @@ pub fn check_sheet(dir: &Path, spec: &SheetSpec) -> std::result::Result<String, 
                 )),
                 Err(error) => problems.push(format!("decoding {}: {error}", path.display())),
             }
+        } else if name == "albedo.dds" {
+            if stone_texture::bc1_blocks(&bytes).map(|((w, h), _)| [w, h]) != Some(spec.png_size) {
+                problems.push(format!(
+                    "{}: invalid BC1 DDS for {:?}",
+                    path.display(),
+                    spec.png_size
+                ));
+            }
         } else if name == SHEET_GEOMETRY {
             let geometry = spec
                 .geometry

@@ -240,6 +240,9 @@ pub fn store_at_cap(rgba: Vec<u8>, width: u32, height: u32) -> Option<Vec<u8>> {
 /// Read `width`/`height` from the container header without decoding pixels.
 /// Format-generic (png/bmp/jpeg) so it cannot drift from what `image` accepts.
 pub fn probe_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    if data.starts_with(b"DDS ") {
+        return stone_texture::bc1_dimensions(data);
+    }
     image::ImageReader::new(Cursor::new(data))
         .with_guessed_format()
         .ok()?
@@ -288,7 +291,17 @@ pub(crate) fn submit(
                 (data, Some(dimensions))
             }
         };
-        let pixels = data.and_then(|data| decode_rgba_bytes(&data, &path));
+        let pixels = data.and_then(|mut data| {
+            if format != crate::image_texture::ImageFormat::Bc1 {
+                return decode_rgba_bytes(&data, &path);
+            }
+            let Some(((w, h), _)) = stone_texture::bc1_blocks(&data) else {
+                crate::log_once!("IMAGE", "invalid BC1 DDS payload: {}", path);
+                return None;
+            };
+            data.drain(..stone_texture::HEADER_LEN);
+            Some((data, w, h))
+        });
         let decoded = match pixels {
             Some((_, width, height)) if expected.is_some_and(|size| size != (width, height)) => {
                 crate::log_once!("IMAGE", "prefetched image {} changed dimensions after header admission: expected {:?}, got {}x{}",
@@ -306,8 +319,12 @@ pub(crate) fn submit(
             // pays a pass over the full-size pixels -- mag's bank is 3.2 GB.
             Some((rgba, width, height)) => {
                 let stored = storage_dims(exact_texels, width, height);
-                let pixels = store_at_storage(exact_texels, rgba, width, height)
-                    .and_then(|stored| format.pack_rgba8_owned(stored));
+                let pixels = if format == crate::image_texture::ImageFormat::Bc1 {
+                    Some(rgba)
+                } else {
+                    store_at_storage(exact_texels, rgba, width, height)
+                        .and_then(|stored| format.pack_rgba8_owned(stored))
+                };
                 if pixels.is_none() {
                     crate::log_once!(
                         "IMAGE",
