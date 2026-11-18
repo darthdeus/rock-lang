@@ -1,0 +1,56 @@
+@nomangle
+fn window_input_authority_case(_case: int) {
+    os_setenv("STONE_HEADLESS", "1")
+    os_setenv("SIM_INPUT_SYNTHETIC_ONLY", "1")
+    setup_stone()
+    let _ = stone_init_window("Window input authority", 0, 0, 128, 96, 0, false, 0).unwrap()
+    defer { let _ = stone_teardown() }
+    input_resolve_authority()
+    assert(stone_window_is_hidden(), "the native window starts hidden")
+
+    let pad = stone_test_virtual_pad_attach()
+    assert(pad >= 0, "virtual SDL controller attached")
+    assert(stone_poll_all_events(), "register the attached SDL controller")
+    assert(stone_test_virtual_pad_button(pad, "a", true), "SDL accepts press A")
+    assert(stone_poll_all_events(), "native event poll stays alive")
+    input_select_game_authority()
+    assert(!is_pad_down("a"), "a hidden window discards hardware input")
+    input_end_frame()
+
+    stone_show_window_mode(0)
+    assert(!stone_window_is_hidden(), "the same native window was shown")
+    assert(stone_test_virtual_pad_button(pad, "a", false), "SDL accepts release A")
+    assert(stone_test_virtual_pad_button(pad, "b", true), "SDL accepts press B")
+    assert(stone_poll_all_events(), "native event poll stays alive")
+    input_physical_key_pressed("w", "w", 0, false)
+    input_select_game_authority()
+    assert(!is_pad_down("a"), "show does not replay the hidden press")
+    assert(is_pad_pressed("b"), "a fresh hardware press reaches a revealed window")
+    assert(is_key_pressed("w"), "keyboard input reaches the same revealed window")
+    input_end_frame()
+
+    stone_window_hide()
+    assert(stone_poll_all_events(), "native event poll stays alive")
+    input_select_game_authority()
+    assert(!is_pad_down("b"), "hiding forgets the held button")
+    assert(!is_pad_released("b"), "switching authority does not synthesize a release")
+    assert(!is_key_released("w"), "hiding does not synthesize a key release")
+    input_end_frame()
+
+    stone_show_window_mode(0)
+    assert(stone_poll_all_events(), "native event poll stays alive")
+    input_select_game_authority()
+    assert(!is_pad_down("b"), "reshow does not restore a button held before hide")
+    assert(!is_key_down("w"), "reshow does not restore a key held before hide")
+    input_end_frame()
+
+    assert(stone_test_virtual_pad_button(pad, "a", true), "SDL accepts press A")
+    assert(stone_poll_all_events(), "native event poll stays alive")
+    input_select_game_authority()
+    assert(is_pad_pressed("a"), "a fresh hardware press still works after reshow")
+}
+
+@test
+fn show_and_hide_switch_the_host_input_lane() {
+    profiler_test_process("window_input_authority_case", 0)
+}
