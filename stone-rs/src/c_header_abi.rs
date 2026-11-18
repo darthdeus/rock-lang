@@ -267,6 +267,7 @@ fn c_header_function_signatures_match_rust_exports() {
         _
     );
     abi!(crate::text::stone_get_font_instance_image, _);
+    abi!(crate::image_texture::stone_supports_bc1);
 
     let dir = tempfile::tempdir().expect("temporary C ABI fixture directory");
     let source_path = dir.path().join("rust_abi.c");

@@ -384,6 +384,7 @@ bool stone_image_exists(uint64_t handle);
 int stone_native_handle_state(const char *class_name, uint64_t handle);
 void stone_get_image_size(uint64_t handle, int *width, int *height);
 void stone_image_storage_size(uint64_t handle, int *width, int *height);
+bool stone_supports_bc1(void);
 bool stone_probe_image_size(const char *path, int *width, int *height);
 void stone_flush_image_uploads(void);
 bool stone_image_require(uint64_t handle);

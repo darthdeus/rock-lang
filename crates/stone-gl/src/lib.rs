@@ -112,6 +112,28 @@ impl DebugGl {
         Self { gl }
     }
 
+    pub fn supports_bc1(&self) -> bool {
+        let extensions = self.gl.supported_extensions();
+        extensions.contains("GL_EXT_texture_compression_s3tc")
+            || extensions.contains("GL_EXT_texture_compression_dxt1")
+    }
+
+    /// # Safety
+    /// Requires the active texture binding, a valid extent and complete BC1 blocks.
+    pub unsafe fn upload_bc1(&self, width: i32, height: i32, blocks: &[u8]) {
+        self.gl.compressed_tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::COMPRESSED_RGBA_S3TC_DXT1_EXT as i32,
+            width,
+            height,
+            0,
+            blocks.len() as i32,
+            blocks,
+        );
+        self.check_error("compressed_tex_image_2d");
+    }
+
     /// Returns no limit when anisotropic filtering is unavailable on this context.
     pub fn max_texture_anisotropy(&self) -> Option<f32> {
         let version = self.gl.version();

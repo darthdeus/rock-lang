@@ -291,12 +291,18 @@ fn eat_object_key(resolved: string) -> string? {
     return null
 }
 
+fn image_file_storage_format(path: string, format: ImageAssetFormat) -> ImageAssetFormat {
+    if format == ImageAssetFormat::Rgba8 && path.ends_with(".dds") { return ImageAssetFormat::Bc1 }
+    return format
+}
+
 fn image_format_tag(format: ImageAssetFormat) -> string {
     match format {
         ImageAssetFormat::Rgba8 => "rgba8",
         ImageAssetFormat::DepthRg8 => "depth-rg8",
         ImageAssetFormat::R8 => "r8",
         ImageAssetFormat::MaterialRg8 => "material-rg8",
+        ImageAssetFormat::Bc1 => "bc1-rgba",
     }
 }
 
@@ -306,7 +312,7 @@ fn image_format_path(resolved: string, format: ImageAssetFormat) -> string {
 }
 
 fn image_path_from_format_key(path_key: string) -> string {
-    for format in [ImageAssetFormat::DepthRg8, ImageAssetFormat::MaterialRg8, ImageAssetFormat::R8] {
+    for format in [ImageAssetFormat::DepthRg8, ImageAssetFormat::MaterialRg8, ImageAssetFormat::R8, ImageAssetFormat::Bc1] {
         let prefix = "image-format:{image_format_tag(format)}:"
         if path_key.starts_with(prefix) { return path_key.substring(prefix.len(), path_key.len()) }
     }
@@ -495,7 +501,7 @@ pub fn load_image_cached(
     }
     if cached != null {
         let img = cached
-        if image_storage_format(img) != format {
+        if image_storage_format(img) != image_file_storage_format(resolved, format) {
             error("load_image_asset: {canonical} is cached as {image_storage_format(img)}, requested {format}")
         }
         // One upload per path, so a caller that needs the file's own texels

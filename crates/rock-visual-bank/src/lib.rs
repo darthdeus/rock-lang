@@ -122,6 +122,8 @@ impl Camera {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnimationLine {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub albedo_bc1: bool,
     pub character: String,
     pub label: String,
     pub dir: String,
@@ -149,6 +151,8 @@ pub struct Travel {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PropLine {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub albedo_bc1: bool,
     pub id: String,
     pub dir: String,
     pub frame_size: [u32; 2],
@@ -435,6 +439,11 @@ pub fn sheet_files(line: &Line) -> Vec<String> {
             .chain(set.masks.iter().map(|mask| mask_file(mask)))
             .collect(),
     };
+    if matches!(line, Line::Animation(a) if a.albedo_bc1)
+        || matches!(line, Line::Prop(p) if p.albedo_bc1)
+    {
+        files.push("albedo.dds".into());
+    }
     files.sort();
     files
 }
@@ -1202,3 +1211,5 @@ mod tests {
         );
     }
 }
+
+pub use stone_texture::bc1_header;
