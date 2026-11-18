@@ -2788,6 +2788,41 @@ impl<'a> Builder<'a> {
         self.repr_to_leaves_shape(bundle.value(), shape)
     }
 
+    pub(super) fn repr_to_leaves_for_shape(
+        &mut self,
+        bundle: &ValueBundle,
+        actual: &ValueShape,
+        expected: &ValueShape,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let same_fields = actual.name == expected.name && actual.fields == expected.fields;
+        if !same_fields {
+            return Err(self.gap_here(format!(
+                "representation {:?} shape {:?} does not match destination value shape {:?}",
+                bundle.representation(),
+                actual,
+                expected
+            )));
+        }
+        if actual.nullable
+            && !expected.nullable
+            && !matches!(
+                bundle.value(),
+                ValueRepr::Group {
+                    present: Some(_),
+                    ..
+                }
+            )
+        {
+            // Dropping the presence leaf is valid only after the group proves
+            // the value is present.
+            return Err(self.gap_here(format!(
+                "representation {:?} lost its presence witness before narrowing",
+                bundle.representation()
+            )));
+        }
+        self.repr_to_leaves_shape(bundle.value(), expected)
+    }
+
     pub(crate) fn repr_to_leaves_bundle_for_shape(
         &mut self,
         bundle: &ValueBundle,
@@ -2804,36 +2839,7 @@ impl<'a> Builder<'a> {
                     self.f.name
                 ))
             })?;
-        if actual.name != expected.name || actual.fields != expected.fields {
-            return Err(self.gap_here(format!(
-                "representation {:?} shape {:?} does not match destination value shape {:?}",
-                bundle.representation(),
-                actual,
-                expected
-            )));
-        }
-        if actual.nullable && !expected.nullable {
-            // Narrowing to a non-null shape drops the presence tag, which only
-            // a Group that still carries it can prove was set.
-            if !matches!(
-                bundle.value(),
-                ValueRepr::Group {
-                    present: Some(_),
-                    ..
-                }
-            ) {
-                return Err(self.gap_here(format!(
-                    "representation {:?} lost its presence witness before narrowing",
-                    bundle.representation()
-                )));
-            }
-            return self.repr_to_leaves_shape(bundle.value(), expected);
-        }
-        if actual == expected {
-            self.repr_to_leaves_bundle(bundle)
-        } else {
-            self.repr_to_leaves_shape(bundle.value(), expected)
-        }
+        self.repr_to_leaves_for_shape(bundle, actual, expected)
     }
 
     pub(crate) fn repr_to_storage_leaves(
@@ -2855,38 +2861,13 @@ impl<'a> Builder<'a> {
                 ))
             })?;
         match plan.layout() {
-            RepLayout::Opaque => self.opaque_boundary_leaves(bundle, expected, reason),
-            RepLayout::Leaves(_) => self.repr_to_leaves_bundle_for_shape(bundle, expected),
+            RepLayout::Opaque => self.repr_to_leaves_shape(bundle.value(), expected),
+            RepLayout::Leaves(actual) => self.repr_to_leaves_for_shape(bundle, actual, expected),
             RepLayout::Tuple { .. } => Err(self.gap_here(format!(
                 "tuple representation {:?} cannot fill a value storage shape at {reason}",
                 bundle.representation()
             ))),
         }
-    }
-
-    pub(crate) fn opaque_boundary_leaves(
-        &mut self,
-        bundle: &ValueBundle,
-        expected: &ValueShape,
-        reason: &str,
-    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let plan = self
-            .scx
-            .rep_arena()
-            .try_get(bundle.representation())
-            .ok_or_else(|| {
-                self.gap_here(format!(
-                    "representation {:?} does not belong to this build arena at {reason}",
-                    bundle.representation()
-                ))
-            })?;
-        if !matches!(plan.layout(), RepLayout::Opaque) {
-            return Err(self.gap_here(format!(
-                "representation {:?} is not an opaque boundary at {reason}",
-                bundle.representation()
-            )));
-        }
-        self.repr_to_leaves_shape(bundle.value(), expected)
     }
 
     pub(crate) fn repr_to_slot_values_bundle(
@@ -2914,13 +2895,12 @@ impl<'a> Builder<'a> {
                             && super::abi::expanded_nullable_parameter_shape(self.ws, actual)
                                 == *expected
                         {
-                            return self.repr_to_leaves_shape(bundle.value(), expected);
+                            self.repr_to_leaves_shape(bundle.value(), expected)
+                        } else {
+                            self.repr_to_leaves_for_shape(bundle, actual, expected)
                         }
-                        self.repr_to_leaves_bundle_for_shape(bundle, expected)
                     }
-                    RepLayout::Opaque => {
-                        self.opaque_boundary_leaves(bundle, expected, "scalar ABI argument")
-                    }
+                    RepLayout::Opaque => self.repr_to_leaves_shape(bundle.value(), expected),
                     RepLayout::Tuple { .. } => Err(self.gap_here(format!(
                         "tuple representation {:?} cannot fill a leaves slot",
                         bundle.representation()
