@@ -238,7 +238,8 @@ fn resolve_case(spec: CaseSpec, previous: &[Fixture], path: &Path) -> Result<Fix
                     "source replacements require a single file",
                 ));
             }
-            apply_replacements(&mut code, &reference.replace, path, &name)?;
+            apply_pairs(&mut code, &reference.replace, &name)
+                .map_err(|error| anyhow::anyhow!("{}: {error}", path.display()))?;
             if files.is_empty() {
                 files = shared_files;
             }
@@ -412,56 +413,28 @@ fn validate_check(check: &Check, path: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn apply_replacements(
-    source: &mut String,
-    replacements: &[[String; 2]],
-    path: &Path,
-    name: &str,
-) -> Result<()> {
-    for [old, new] in replacements {
-        if old.is_empty() || !source.contains(old) {
-            return Err(fixture_error(
-                path,
-                name,
-                "REPLACE source is empty or absent",
-            ));
-        }
-        *source = source.replace(old, new);
-    }
-    Ok(())
-}
-fn new_fixture_project(name: &str, with_manifest: bool) -> Result<(String, PathBuf)> {
-    let test_dir = PathBuf::from(".lsp-test-tmp");
-    fs_err::create_dir_all(&test_dir)?;
-    let safe_name: String = name
-        .chars()
-        .map(|character| {
-            if character == ' ' || character == '/' {
-                '_'
-            } else {
-                character
-            }
-        })
-        .collect();
-    static NEXT_PROJECT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let n = NEXT_PROJECT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let project_dir = test_dir.join(format!("{safe_name}-{}-{n}", std::process::id()));
-    fs_err::create_dir_all(&project_dir)?;
+fn new_fixture_project(name: &str, with_manifest: bool) -> Result<(String, tempfile::TempDir)> {
+    let test_dir = Path::new(".lsp-test-tmp");
+    fs_err::create_dir_all(test_dir)?;
+    let safe_name = name.replace([' ', '/'], "_");
+    let project = tempfile::Builder::new()
+        .prefix(&safe_name)
+        .tempdir_in(test_dir)?;
     if with_manifest {
         fs_err::write(
-            project_dir.join("stick.toml"),
+            project.path().join("stick.toml"),
             "[package]\nname = \"lsp_test\"\nversion = \"0.1.0\"\n",
         )?;
     }
-    Ok((safe_name, project_dir))
+    Ok((safe_name, project))
 }
 
-fn write_fixture_project(test: &Fixture) -> Result<(PathBuf, PathBuf)> {
+fn write_fixture_project(test: &Fixture) -> Result<(PathBuf, tempfile::TempDir)> {
     let (safe_name, project_dir) = new_fixture_project(&test.name, !test.files.is_empty())?;
     if !test.files.is_empty() {
         for (name, content) in &test.files {
             if name != "stick.toml" {
-                fs_err::write(project_dir.join(name), content)?;
+                fs_err::write(project_dir.path().join(name), content)?;
             }
         }
         let primary = if test.primary_file.is_empty() {
@@ -472,9 +445,9 @@ fn write_fixture_project(test: &Fixture) -> Result<(PathBuf, PathBuf)> {
         } else {
             test.primary_file.clone()
         };
-        Ok((project_dir.join(primary), project_dir))
+        Ok((project_dir.path().join(primary), project_dir))
     } else {
-        let file = project_dir.join(format!("{safe_name}.rock"));
+        let file = project_dir.path().join(format!("{safe_name}.rock"));
         fs_err::write(&file, &test.code)?;
         Ok((file, project_dir))
     }
@@ -648,35 +621,31 @@ fn run_rpc_request(
 
 fn run_lsp_test(test: &Fixture, server: &Path) -> Result<bool> {
     let (test_file, project_dir) = write_fixture_project(test)?;
-    let result = (|| {
-        let test_file = std::fs::canonicalize(test_file)?;
-        let uri = file_uri(&test_file)?;
-        let request = test
-            .request
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("{}: fixture has no request", request_label(test)))?;
-        let response = match request {
-            Request::Cli { .. } => run_cli_request(test, request, server, &test_file, &uri)?,
-            Request::Rpc { .. } => Some(run_rpc_request(
-                test,
-                request,
-                server,
-                &test_file,
-                &project_dir,
-                &uri,
-            )?),
-        };
-        let Some((response, raw)) = response else {
-            return Ok(false);
-        };
-        let passed = check_assertions(test, &test.checks, &response, &raw, None)?;
-        if std::env::var("ROCK_TEST_VERBOSE").is_ok() && !passed {
-            eprintln!("    Actual output: {raw}");
-        }
-        Ok(passed)
-    })();
-    let _ = fs_err::remove_dir_all(&project_dir);
-    result
+    let test_file = std::fs::canonicalize(test_file)?;
+    let uri = file_uri(&test_file)?;
+    let request = test
+        .request
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("{}: fixture has no request", request_label(test)))?;
+    let response = match request {
+        Request::Cli { .. } => run_cli_request(test, request, server, &test_file, &uri)?,
+        Request::Rpc { .. } => Some(run_rpc_request(
+            test,
+            request,
+            server,
+            &test_file,
+            project_dir.path(),
+            &uri,
+        )?),
+    };
+    let Some((response, raw)) = response else {
+        return Ok(false);
+    };
+    let passed = check_assertions(test, &test.checks, &response, &raw, None)?;
+    if std::env::var("ROCK_TEST_VERBOSE").is_ok() && !passed {
+        eprintln!("    Actual output: {raw}");
+    }
+    Ok(passed)
 }
 
 fn check_assertions(
@@ -1151,7 +1120,7 @@ fn check_applied_text(
             .ok_or_else(|| anyhow::anyhow!("{request}: fixture URI is missing"))?;
         let edits = code_action_edits(action, uri)
             .map_err(|error| anyhow::anyhow!("{request}: {error}; action: {action}"))?;
-        apply_lsp_text_edits(&source_text, &edits)
+        apply_text_edits(&source_text, &edits, "newText")
             .map_err(|error| anyhow::anyhow!("{request}: {error}; action: {action}"))?
     } else {
         let changes = values
@@ -1174,7 +1143,8 @@ fn check_applied_text(
                 .flat_map(|array| array.iter())
                 .collect()
         };
-        apply_cli_text_edits(&source_text, &edits)
+        apply_text_edits(&source_text, &edits, "new_text")
+            .map_err(|error| anyhow::anyhow!("{request}: {error}; raw reply: {raw}"))?
     };
     if let Some(needles) = contains {
         return Ok(needles.iter().all(|needle| actual.contains(needle)));
@@ -1235,58 +1205,6 @@ fn code_action_edits<'a>(action: &'a Value, uri: &str) -> Result<Vec<&'a Value>>
     Ok(edits)
 }
 
-fn apply_cli_text_edits(source: &str, edits: &[&Value]) -> String {
-    let mut edits = edits.to_vec();
-    let position = |edit: &Value, which: &str| -> (u64, u64) {
-        let range = edit.get("range").and_then(|range| range.get(which));
-        let line = range
-            .and_then(|value| value.get("line"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let column = range
-            .and_then(|value| value.get("character"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        (line, column)
-    };
-    edits.sort_by_key(|edit| std::cmp::Reverse(position(edit, "start")));
-    let mut result = source.to_string();
-    for edit in edits {
-        let Some(new_text) = edit.get("new_text").and_then(Value::as_str) else {
-            continue;
-        };
-        let (start_line, start_column) = position(edit, "start");
-        let (end_line, end_column) = position(edit, "end");
-        let (start_line, start_column, end_line, end_column) = (
-            start_line as usize,
-            start_column as usize,
-            end_line as usize,
-            end_column as usize,
-        );
-        let lines: Vec<&str> = result.lines().collect();
-        let mut new_lines = Vec::new();
-        for (index, line) in lines.iter().enumerate() {
-            if index < start_line || index > end_line {
-                new_lines.push(line.to_string());
-            } else if index == start_line && index == end_line {
-                let before = &line[..start_column.min(line.len())];
-                let after = &line[end_column.min(line.len())..];
-                new_lines.push(format!("{before}{new_text}{after}"));
-            } else if index == start_line {
-                let before = &line[..start_column.min(line.len())];
-                new_lines.push(format!("{before}{new_text}"));
-            } else if index == end_line {
-                let after = &line[end_column.min(line.len())..];
-                if let Some(last) = new_lines.last_mut() {
-                    last.push_str(after);
-                }
-            }
-        }
-        result = new_lines.join("\n");
-    }
-    result
-}
-
 fn lsp_offset(source: &str, line: u64, character: u64) -> Option<usize> {
     let mut start = 0;
     for _ in 0..line {
@@ -1303,7 +1221,7 @@ fn lsp_offset(source: &str, line: u64, character: u64) -> Option<usize> {
     Some(start + text.len())
 }
 
-fn apply_lsp_text_edits(source: &str, edits: &[&Value]) -> Result<String> {
+fn apply_text_edits(source: &str, edits: &[&Value], text_field: &str) -> Result<String> {
     let offset_at = |edit: &Value, which: &str| -> Result<usize> {
         let position = edit
             .get("range")
@@ -1323,9 +1241,9 @@ fn apply_lsp_text_edits(source: &str, edits: &[&Value]) -> Result<String> {
     for edit in edits {
         let (start, end) = (offset_at(edit, "start")?, offset_at(edit, "end")?);
         let text = edit
-            .get("newText")
+            .get(text_field)
             .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("edit has no newText: {edit}"))?;
+            .ok_or_else(|| anyhow::anyhow!("edit has no {text_field}: {edit}"))?;
         if end < start {
             return Err(anyhow::anyhow!("edit range ends before it starts: {edit}"));
         }
@@ -1389,10 +1307,9 @@ fn read_response(rx: &std::sync::mpsc::Receiver<Value>, id: i64) -> Result<Value
 }
 
 struct LspServer {
-    child: std::process::Child,
+    waiter: std::thread::JoinHandle<std::io::Result<()>>,
     stdin: std::process::ChildStdin,
     rx: std::sync::mpsc::Receiver<Value>,
-    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
     next_id: i64,
 }
 
@@ -1417,8 +1334,9 @@ impl LspServer {
     fn shutdown(mut self) -> Result<()> {
         let _ = self.request("shutdown", Value::Null);
         self.notify("exit", Value::Null)?;
-        let _ = self.child.wait();
-        self.done.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.waiter
+            .join()
+            .map_err(|_| anyhow::anyhow!("LSP process waiter panicked"))??;
         Ok(())
     }
 }
@@ -1482,34 +1400,29 @@ fn start_lsp_server(command: &Path, root: &Path, name: &str) -> Result<LspServer
         }
     });
 
-    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let watcher_done = done.clone();
-    let pid = child.id();
-    let watcher_name = name.to_string();
-    std::thread::spawn(move || {
-        let start = bone_core::prelude::Instant::now();
-        while start.elapsed() < std::time::Duration::from_secs(60) {
-            if watcher_done.load(std::sync::atomic::Ordering::Relaxed) {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+    let name = name.to_owned();
+    let waiter = std::thread::spawn(move || {
+        use wait_timeout::ChildExt;
+        // Stdin and stdout stay with the client while this thread owns and reaps the child.
+        let wait = child.wait_timeout(std::time::Duration::from_secs(60));
+        if matches!(wait, Ok(Some(_))) {
+            return Ok(());
         }
-        if !watcher_done.load(std::sync::atomic::Ordering::Relaxed) {
+        if wait.is_ok() {
             eprintln!(
-                "[lsp-test watchdog] killing pid {pid} after 60s \u{2014} test '{watcher_name}' wedged"
+                "[lsp-test watchdog] killing pid {} after 60s: test '{name}' wedged",
+                child.id()
             );
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGKILL);
-            }
         }
+        child.kill()?;
+        child.wait()?;
+        wait.map(|_| ())
     });
 
     let mut server = LspServer {
-        child,
+        waiter,
         stdin,
         rx,
-        done,
         next_id: 1,
     };
     server.request("initialize", json!({
@@ -1559,121 +1472,111 @@ fn run_edit_sequence(test: &Fixture, server_cmd: &Path) -> Result<Vec<String>> {
     };
     let initial = resolve_content(source, test, Some(&[]))?;
     let (safe_name, project) = new_fixture_project(&test.name, false)?;
-    let file = project.join(format!("{safe_name}.rock"));
+    let file = project.path().join(format!("{safe_name}.rock"));
     fs_err::write(&file, &initial)?;
     let file = std::fs::canonicalize(file)?;
     let uri = file_uri(&file)?;
-    let result = (|| {
-        let mut server = start_lsp_server(server_cmd, &project, &test.name)?;
-        let mut failures = Vec::new();
-        let run = (|| {
-            let mut version = 1i64;
-            let mut document = initial;
-            let mut history = Vec::new();
-            server.notify(
-                "textDocument/didOpen",
-                json!({"textDocument": {
-                    "uri": uri, "languageId": "rock", "version": version, "text": document
-                }}),
-            )?;
-            for (step_index, step) in test.steps.iter().enumerate() {
-                if step_index > 0 {
-                    match step {
-                        Step::Replace { source, .. } => {
-                            document = resolve_content(source, test, Some(&history))?;
+    let mut server = start_lsp_server(server_cmd, project.path(), &test.name)?;
+    let mut failures = Vec::new();
+    let run = (|| {
+        let mut version = 1i64;
+        let mut document = initial;
+        let mut history = Vec::new();
+        server.notify(
+            "textDocument/didOpen",
+            json!({"textDocument": {
+                "uri": uri, "languageId": "rock", "version": version, "text": document
+            }}),
+        )?;
+        for (step_index, step) in test.steps.iter().enumerate() {
+            if step_index > 0 {
+                match step {
+                    Step::Replace { source, .. } => {
+                        document = resolve_content(source, test, Some(&history))?;
+                        version += 1;
+                        fs_err::write(&file, &document)?;
+                        server.notify("textDocument/didChange", json!({"textDocument":{"uri":uri,"version":version},"contentChanges":[{"text":document}]}))?;
+                    }
+                    Step::TypeAt {
+                        line, col, text, ..
+                    } => {
+                        if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                            eprintln!(
+                                "    Step {}: typing {} chars at {}:{}",
+                                step_index + 1,
+                                text.len(),
+                                line,
+                                col
+                            );
+                        }
+                        let (mut cursor_line, mut cursor_col) = (*line, *col);
+                        for ch in text.chars() {
+                            if ch == '\n' {
+                                let mut lines =
+                                    document.lines().map(str::to_owned).collect::<Vec<_>>();
+                                while lines.len() <= cursor_line {
+                                    lines.push(String::new());
+                                }
+                                let column = cursor_col.min(lines[cursor_line].len());
+                                let rest = lines[cursor_line][column..].to_owned();
+                                lines[cursor_line].truncate(column);
+                                lines.insert(cursor_line + 1, rest);
+                                document = lines.join("\n");
+                                cursor_line += 1;
+                                cursor_col = 0;
+                            } else {
+                                document = insert_char_at(&document, cursor_line, cursor_col, ch);
+                                cursor_col += ch.len_utf8();
+                            }
                             version += 1;
-                            fs_err::write(&file, &document)?;
                             server.notify("textDocument/didChange", json!({"textDocument":{"uri":uri,"version":version},"contentChanges":[{"text":document}]}))?;
                         }
-                        Step::TypeAt {
-                            line, col, text, ..
-                        } => {
-                            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                                eprintln!(
-                                    "    Step {}: typing {} chars at {}:{}",
-                                    step_index + 1,
-                                    text.len(),
-                                    line,
-                                    col
-                                );
-                            }
-                            let (mut cursor_line, mut cursor_col) = (*line, *col);
-                            for ch in text.chars() {
-                                if ch == '\n' {
-                                    let mut lines =
-                                        document.lines().map(str::to_owned).collect::<Vec<_>>();
-                                    while lines.len() <= cursor_line {
-                                        lines.push(String::new());
-                                    }
-                                    let column = cursor_col.min(lines[cursor_line].len());
-                                    let rest = lines[cursor_line][column..].to_owned();
-                                    lines[cursor_line].truncate(column);
-                                    lines.insert(cursor_line + 1, rest);
-                                    document = lines.join("\n");
-                                    cursor_line += 1;
-                                    cursor_col = 0;
-                                } else {
-                                    document =
-                                        insert_char_at(&document, cursor_line, cursor_col, ch);
-                                    cursor_col += ch.len_utf8();
-                                }
-                                version += 1;
-                                server.notify("textDocument/didChange", json!({"textDocument":{"uri":uri,"version":version},"contentChanges":[{"text":document}]}))?;
-                            }
-                            fs_err::write(&file, &document)?;
-                        }
-                        Step::DeleteAt {
-                            line, col, count, ..
-                        } => {
-                            if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                                eprintln!(
-                                    "    Step {}: deleting {} chars at {}:{}",
-                                    step_index + 1,
-                                    count,
-                                    line,
-                                    col
-                                );
-                            }
-                            let (mut cursor_line, mut cursor_col) = (*line, *col);
-                            for _ in 0..*count {
-                                (document, cursor_line, cursor_col) =
-                                    delete_char_at(&document, cursor_line, cursor_col);
-                                version += 1;
-                                server.notify("textDocument/didChange", json!({"textDocument":{"uri":uri,"version":version},"contentChanges":[{"text":document}]}))?;
-                            }
-                            fs_err::write(&file, &document)?;
-                        }
+                        fs_err::write(&file, &document)?;
                     }
-                }
-                history.push(document.clone());
-                let mut current = test.clone();
-                current.code = document.clone();
-                for check in step.checks() {
-                    let response = request_rpc(&mut server, &check.request, &file, &uri, None)?;
-                    let response = normalize_rpc_reply(response);
-                    let raw = serde_json::to_string(&response)?;
-                    if !check_assertions(
-                        &current,
-                        &check.assertions,
-                        &response,
-                        &raw,
-                        Some(&history),
-                    )? {
-                        let label = sequence_check_label(&check.request);
-                        failures.push(format!("step {} {label}", step_index + 1));
+                    Step::DeleteAt {
+                        line, col, count, ..
+                    } => {
                         if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
-                            eprintln!("    Step {}: FAIL - {label}", step_index + 1);
+                            eprintln!(
+                                "    Step {}: deleting {} chars at {}:{}",
+                                step_index + 1,
+                                count,
+                                line,
+                                col
+                            );
                         }
+                        let (mut cursor_line, mut cursor_col) = (*line, *col);
+                        for _ in 0..*count {
+                            (document, cursor_line, cursor_col) =
+                                delete_char_at(&document, cursor_line, cursor_col);
+                            version += 1;
+                            server.notify("textDocument/didChange", json!({"textDocument":{"uri":uri,"version":version},"contentChanges":[{"text":document}]}))?;
+                        }
+                        fs_err::write(&file, &document)?;
                     }
                 }
             }
-            Ok(())
-        })();
-        let stopped = server.shutdown();
-        run.and(stopped).map(|()| failures)
+            history.push(document.clone());
+            let mut current = test.clone();
+            current.code = document.clone();
+            for check in step.checks() {
+                let response = request_rpc(&mut server, &check.request, &file, &uri, None)?;
+                let response = normalize_rpc_reply(response);
+                let raw = serde_json::to_string(&response)?;
+                if !check_assertions(&current, &check.assertions, &response, &raw, Some(&history))?
+                {
+                    let label = sequence_check_label(&check.request);
+                    failures.push(format!("step {} {label}", step_index + 1));
+                    if std::env::var("ROCK_TEST_VERBOSE").is_ok() {
+                        eprintln!("    Step {}: FAIL - {label}", step_index + 1);
+                    }
+                }
+            }
+        }
+        Ok(())
     })();
-    let _ = fs_err::remove_dir_all(&project);
-    result
+    let stopped = server.shutdown();
+    run.and(stopped).map(|()| failures)
 }
 
 fn sequence_check_label(request: &Request) -> String {

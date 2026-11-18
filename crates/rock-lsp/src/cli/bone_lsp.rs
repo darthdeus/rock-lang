@@ -298,10 +298,7 @@ pub fn rename(file_path: &str, line: u32, column: u32, new_name: &str) -> Result
                     .iter()
                     .map(|e| {
                         json!({
-                            "range": {
-                                "start": { "line": e.range.start.line, "character": e.range.start.character },
-                                "end":   { "line": e.range.end.line,   "character": e.range.end.character },
-                            },
+                            "range": e.range,
                             "new_text": e.new_text,
                         })
                     })
