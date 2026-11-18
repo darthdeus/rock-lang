@@ -1,55 +1,51 @@
 use crate::common::{emit_module, function_body, run_luajit};
 
-#[test]
-fn freshly_allocated_buffer_fill_uses_constructor_length() {
-    let lua = emit_module(
-        r#"
-@nomangle fn fill_buffer(count: int) -> int {
-    let buf = native_buffer_int(count)
-    for i in 0..count { buf[i] = i }
-    return buf.len
+fn assert_bounds_check(lua: &str, name: &str, expected: bool) {
+    let body = function_body(lua, name);
+    assert_eq!(body.contains("__nb_checked"), expected, "{name}:\n{body}");
 }
-"#,
+
+fn run_bounds_error(lua: &str, probe: &str) {
+    let program = format!(
+        r#"{lua}
+local function expect_bounds_error(f, ...)
+    local ok, err = pcall(f, ...)
+    assert(not ok and tostring(err):find('out of bounds'))
+end
+{probe}
+print('ok')
+"#
     );
-    let body = function_body(&lua, "fill_buffer");
-    assert!(!body.contains("__nb_checked"));
-    assert_eq!(
-        run_luajit(&format!(
-            "{lua}\nassert(fill_buffer(0) == 0)\nassert(fill_buffer(17) == 17)\nprint('ok')"
-        ))
-        .trim(),
-        "ok"
-    );
+    assert_eq!(run_luajit(&program), "ok");
 }
 
 #[test]
-fn fresh_byte_buffer_fill_uses_constructor_length() {
-    let lua = emit_module(
-        r#"
-@nomangle fn fill_bytes(count: int) -> int {
-    let buf = native_buffer_u8(count)
-    for i in 0..count { buf[i] = i }
-    return buf.len
-}
-"#,
-    );
-    let body = function_body(&lua, "fill_bytes");
-    assert!(!body.contains("__nb_checked"));
-}
-
-#[test]
-fn constructor_bounds_survive_local_aliases() {
-    let lua = emit_module(
-        r#"
-@nomangle fn fill_alias(count: int) -> int {
-    let original = native_buffer_int(count)
-    let buf = original
-    for i in 0..count { buf[i] = i }
-    return original.len
-}
-"#,
-    );
-    assert!(!function_body(&lua, "fill_alias").contains("__nb_checked"));
+fn constructor_lengths_bound_integer_byte_and_aliased_buffer_fills() {
+    for (setup, length) in [
+        ("let buf = native_buffer_int(count)", "buf.len"),
+        ("let buf = native_buffer_u8(count)", "buf.len"),
+        (
+            "let original = native_buffer_int(count); let buf = original",
+            "original.len",
+        ),
+    ] {
+        let lua = emit_module(&format!(
+            r#"
+@nomangle fn fill(count: int) -> int {{
+    {setup}
+    for i in 0..count {{ buf[i] = i }}
+    return {length}
+}}
+"#
+        ));
+        assert_bounds_check(&lua, "fill", false);
+        assert_eq!(
+            run_luajit(&format!(
+                "{lua}\nassert(fill(0) == 0)\nassert(fill(17) == 17)\nprint('ok')"
+            )),
+            "ok"
+        );
+    }
 }
 
 #[test]
@@ -71,18 +67,8 @@ inline(lua) fn shrink(buf: NativeBuffer<int>) = "buf.len = 0"
 }}
 "#
         ));
-        assert!(function_body(&lua, "changed").contains("__nb_checked"));
-        assert_eq!(
-            run_luajit(&format!(
-                r#"{lua}
-local ok, err = pcall(changed, 4)
-assert(not ok and tostring(err):find('out of bounds'))
-print('ok')
-"#
-            ))
-            .trim(),
-            "ok"
-        );
+        assert_bounds_check(&lua, "changed", true);
+        run_bounds_error(&lua, "expect_bounds_error(changed, 4)");
     }
 }
 
@@ -100,18 +86,8 @@ inline(lua) fn grow(size: Size) = "size.width = size.width + 1"
 }
 "#,
     );
-    assert!(function_body(&lua, "changed_size").contains("__nb_checked"));
-    assert_eq!(
-        run_luajit(&format!(
-            r#"{lua}
-local ok, err = pcall(changed_size, {{width=4}})
-assert(not ok and tostring(err):find('out of bounds'))
-print('ok')
-"#
-        ))
-        .trim(),
-        "ok"
-    );
+    assert_bounds_check(&lua, "changed_size", true);
+    run_bounds_error(&lua, "expect_bounds_error(changed_size, {width=4})");
 }
 
 #[test]
@@ -129,18 +105,8 @@ fn reexecuted_constructor_does_not_resize_an_old_alias() {
 }
 "#,
     );
-    assert!(function_body(&lua, "old_buffer").contains("__nb_checked"));
-    assert_eq!(
-        run_luajit(&format!(
-            r#"{lua}
-local ok, err = pcall(old_buffer)
-assert(not ok and tostring(err):find('out of bounds'))
-print('ok')
-"#
-        ))
-        .trim(),
-        "ok"
-    );
+    assert_bounds_check(&lua, "old_buffer", true);
+    run_bounds_error(&lua, "expect_bounds_error(old_buffer)");
 }
 
 #[test]
@@ -154,8 +120,7 @@ fn repeated_product_uses_unchanged_operand_snapshots() {
 }
 "#,
     );
-    let body = function_body(&lua, "fill_product");
-    assert!(!body.contains("__nb_checked"));
+    assert_bounds_check(&lua, "fill_product", false);
     assert_eq!(
         run_luajit(&format!(
             r#"{lua}
@@ -185,18 +150,8 @@ fn repeated_products_do_not_follow_changed_operands() {
 }}
 "#
         ));
-        assert!(function_body(&lua, "changed_product").contains("__nb_checked"));
-        assert_eq!(
-            run_luajit(&format!(
-                r#"{lua}
-local ok, err = pcall(changed_product, 2, 3)
-assert(not ok and tostring(err):find('out of bounds'))
-print('ok')
-"#
-            ))
-            .trim(),
-            "ok"
-        );
+        assert_bounds_check(&lua, "changed_product", true);
+        run_bounds_error(&lua, "expect_bounds_error(changed_product, 2, 3)");
     }
 }
 
@@ -215,18 +170,8 @@ fn repeated_products_do_not_rebind_old_buffers_in_a_loop() {
 }
 "#,
     );
-    assert!(function_body(&lua, "old_product").contains("__nb_checked"));
-    assert_eq!(
-        run_luajit(&format!(
-            r#"{lua}
-local ok, err = pcall(old_product, 3)
-assert(not ok and tostring(err):find('out of bounds'))
-print('ok')
-"#
-        ))
-        .trim(),
-        "ok"
-    );
+    assert_bounds_check(&lua, "old_product", true);
+    run_bounds_error(&lua, "expect_bounds_error(old_product, 3)");
 }
 
 #[test]
@@ -242,18 +187,8 @@ inline(lua) fn shrink(buf: NativeBuffer<int>) = "buf.len = 0"
 }
 "#,
     );
-    assert!(function_body(&lua, "changed_product").contains("__nb_checked"));
-    assert_eq!(
-        run_luajit(&format!(
-            r#"{lua}
-local ok, err = pcall(changed_product, 2, 3)
-assert(not ok and tostring(err):find('out of bounds'))
-print('ok')
-"#
-        ))
-        .trim(),
-        "ok"
-    );
+    assert_bounds_check(&lua, "changed_product", true);
+    run_bounds_error(&lua, "expect_bounds_error(changed_product, 2, 3)");
 }
 
 #[test]
@@ -269,25 +204,20 @@ struct Mask { width: int, pixels: NativeBufferU8 }
 "#,
     );
     assert!(function_body(&lua, "copy_mask").contains("__nb_checked_set"));
-    assert_eq!(
-        run_luajit(&format!(
-            r#"{lua}
+    run_bounds_error(
+        &lua,
+        r#"
 local reads = 0
-local mask = setmetatable({{pixels = {{ptr=ffi.new('uint8_t[24]'), len=24}}}}, {{
+local mask = setmetatable({pixels = {ptr=ffi.new('uint8_t[24]'), len=24}}, {
     __index = function(_, key)
         assert(key == 'width')
         reads = reads + 1
         return reads == 1 and 2 or 3
     end
-}})
-local ok, err = pcall(copy_mask, mask, 3)
-assert(not ok and tostring(err):find('out of bounds'))
+})
+expect_bounds_error(copy_mask, mask, 3)
 assert(reads >= 2)
-print('ok')
-"#
-        ))
-        .trim(),
-        "ok"
+"#,
     );
 }
 
@@ -302,8 +232,7 @@ fn reused_or_allocated_buffer_retains_capacity_at_join() {
 }
 "#,
     );
-    let body = function_body(&lua, "reuse_buffer");
-    assert!(!body.contains("__nb_checked"));
+    assert_bounds_check(&lua, "reuse_buffer", false);
     assert_eq!(
         run_luajit(&format!(
             r#"{lua}
@@ -338,7 +267,7 @@ fn capacity_equality_handles_operand_order_and_negative_spelling() {
 }}
 "#
         ));
-        assert!(!function_body(&lua, "reuse").contains("__nb_checked"));
+        assert_bounds_check(&lua, "reuse", false);
     }
 }
 
@@ -373,18 +302,13 @@ inline(lua) fn shrink(buf: NativeBuffer<int>) = "buf.len = 0"
 }}
 "#
         ));
-        assert!(function_body(&lua, "changed_reuse").contains("__nb_checked"));
-        assert_eq!(
-            run_luajit(&format!(
-                r#"{lua}
-local old = {{ptr=ffi.new('int[16]'), len=3}}
-local ok, err = pcall(changed_reuse, old, 7)
-assert(not ok and tostring(err):find('out of bounds'))
-print('ok')
-"#
-            ))
-            .trim(),
-            "ok"
+        assert_bounds_check(&lua, "changed_reuse", true);
+        run_bounds_error(
+            &lua,
+            r#"
+local old = {ptr=ffi.new('int[16]'), len=3}
+expect_bounds_error(changed_reuse, old, 7)
+"#,
         );
     }
 }
@@ -410,8 +334,7 @@ fn record_fetch() { reuse_fetches += 1 }
 }
 "#,
     );
-    let body = function_body(&lua, "reuse_rows");
-    assert!(!body.contains("__nb_checked"));
+    assert_bounds_check(&lua, "reuse_rows", false);
     assert_eq!(
         run_luajit(&format!(
             r#"{lua}
@@ -447,17 +370,12 @@ inline(lua) fn shrink(buf: NativeBuffer<int>) = "buf.len = 0"
 }
 "#,
     );
-    assert!(function_body(&lua, "stale_reuse").contains("__nb_checked"));
-    assert_eq!(
-        run_luajit(&format!(
-            r#"{lua}
-local old = {{ptr=ffi.new('int[7]'), len=7}}
-local ok, err = pcall(stale_reuse, old, 7)
-assert(not ok and tostring(err):find('out of bounds'))
-print('ok')
-"#
-        ))
-        .trim(),
-        "ok"
+    assert_bounds_check(&lua, "stale_reuse", true);
+    run_bounds_error(
+        &lua,
+        r#"
+local old = {ptr=ffi.new('int[7]'), len=7}
+expect_bounds_error(stale_reuse, old, 7)
+"#,
     );
 }
