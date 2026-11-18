@@ -424,3 +424,12 @@ fn nested_generic_payloads_rebuild_per_level() {
     let oh: MyOpt<LHold<(LP, int)>> = MyOpt::Got(LHold { t: lmake(8.0) })
     if let MyOpt::Got(LHold { t: (v, n) }) = oh { print("{v.x as int} {n}") }
 }
+
+// ======== Whole-tuple BINDINGS, defaults and sorting ========
+
+@test(output = "1 10\n2 20\n3 30")
+fn sorting_by_a_scalar_key() {
+    let xs = [lmake(3.0), lmake(1.0), lmake(2.0)]
+    xs.sort(t => t.1)
+    for (v, n) in xs { print("{v.x as int} {n}") }
+}

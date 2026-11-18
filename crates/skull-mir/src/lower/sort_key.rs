@@ -52,9 +52,7 @@ impl<'a> Builder<'a> {
         let MonoTy::Function { ret, .. } = key_ty.as_ref() else {
             return Err(self.gap_here("sort key function has no concrete function type"));
         };
-        if !matches!(ret.peel_nullable().0, MonoTy::Tuple(_))
-            && mono_value_shape(self.ws, ret).is_none()
-        {
+        if !self.sort_takes_leaf_path(&key_ty)? {
             return Ok(None);
         }
         self.validate_sort_key(e, ret)?;
@@ -223,11 +221,30 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Whether `K` is compared leaf by leaf rather than with one `<`.
+    /// Whether a sort keyed by `fn(T) -> K` takes the compiled leaf sort
+    /// rather than the backend's own sort: a structured `K` compares leaf by
+    /// leaf, and a splatting `T` reaches the key as slots, which a backend sort
+    /// handing it one stored element cannot supply.
+    fn sort_takes_leaf_path(&self, key_fn_ty: &MonoTy) -> Result<bool, CompilerError> {
+        let MonoTy::Function { params, ret } = key_fn_ty else {
+            return Err(self.gap_here("sort key function has no concrete function type"));
+        };
+        let structured_key = matches!(ret.peel_nullable().0, MonoTy::Tuple(_))
+            || mono_value_shape(self.ws, ret).is_some();
+        let splatting_element = match params.first() {
+            Some(element @ MonoTy::Tuple(_)) => self
+                .concrete_rep_tuple(element, RepUse::Return, true, false)?
+                .is_some_and(|shape| shape.splats(self.scx.rep_arena())),
+            _ => false,
+        };
+        Ok(structured_key || splatting_element)
+    }
+
     pub(crate) fn sort_key_is_structured(&self, key_fn: Idx<Expr>) -> Result<bool, CompilerError> {
-        let ty = self.sort_key_ty(key_fn)?;
-        Ok(matches!(ty.peel_nullable().0, MonoTy::Tuple(_))
-            || mono_value_shape(self.ws, &ty).is_some())
+        let ty = self
+            .concrete_expr_ty(key_fn)
+            .ok_or_else(|| self.gap_here("sort key function has no concrete type"))?;
+        self.sort_takes_leaf_path(ty)
     }
 
     /// `if __sort_key_wide(f) { .. } else { .. }`: the arm to lower, decided now.
