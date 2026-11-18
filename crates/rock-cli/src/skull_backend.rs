@@ -422,44 +422,16 @@ pub(crate) fn skull_workspace_timed(
     project_path: &std::path::Path,
 ) -> (bool, SkullPhaseTimes) {
     let mut times = SkullPhaseTimes::default();
-    let (user_modules, entry_file, parse) = match crate::bone_backend::parse_user_modules(sources) {
+    let (frontend, frontend_times) = crate::bone_backend::workspace_frontend_timed(sources);
+    times.parse = frontend_times.parse;
+    times.semantic = frontend_times.semantic;
+    let (mut ws, entry_file) = match frontend {
         Ok(v) => v,
         Err(mut errors) => {
             times.failure = errors.drain(..).next();
             return (false, times);
         }
     };
-    times.parse = parse;
-
-    let t = Instant::now();
-    // Timed path: assemble via the shared helper but keep the `semantic_pass`
-    // call explicit here (the verdict is a bool, not a gate, and the timer must
-    // bracket exactly this call).
-    let mut modules = match skull::pipeline::with_stdlib(user_modules) {
-        Ok(modules) => modules,
-        Err(error) => {
-            times.semantic = t.elapsed();
-            times.failure = Some(error);
-            return (false, times);
-        }
-    };
-    let aliases = match crate::bone_backend::aliases_for_modules(modules.iter()) {
-        Ok(aliases) => aliases,
-        Err(error) => {
-            times.semantic = t.elapsed();
-            times.failure = Some(error);
-            return (false, times);
-        }
-    };
-    let mut ws = match skull::pipeline::semantic_pass(&mut modules, &aliases) {
-        Ok(ws) => ws,
-        Err(error) => {
-            times.semantic = t.elapsed();
-            times.failure = Some(error);
-            return (false, times);
-        }
-    };
-    times.semantic = t.elapsed();
     let body_errors = crate::bone_backend::body_errors(&ws);
     if let Some(error) = body_errors.into_iter().next() {
         times.failure = Some(error);

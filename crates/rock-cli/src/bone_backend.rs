@@ -6,7 +6,7 @@ use bone_core::prelude::Instant;
 use rock_core::CompilerError;
 use rock_core::SourceFiles;
 use rock_core::source_file_from_path_and_contents;
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -30,6 +30,7 @@ pub(crate) struct BonePhaseTimes {
     /// phase timers can't see. `stdlib_assemble + semantic_call ~= semantic`;
     /// `semantic_call == sum(bone phases) + teardown`.
     pub semantic_call: Duration,
+    semantic_pass_called: bool,
 }
 
 impl BonePhaseTimes {
@@ -43,6 +44,7 @@ impl BonePhaseTimes {
         self.semantic += other.semantic;
         self.stdlib_assemble += other.stdlib_assemble;
         self.semantic_call += other.semantic_call;
+        self.semantic_pass_called |= other.semantic_pass_called;
     }
 }
 
@@ -210,8 +212,8 @@ pub(crate) fn parse_user_modules(
     // Parse every module in parallel — each parse is independent (own arenas; the
     // only shared state, `Ustr` interning, is concurrent-safe). Results keep file
     // order, so the dedup/entry scan below sees files in the same order the old
-    // serial loop did. Carry each module's id-path Ustr alongside its Ast.
-    let parsed: Vec<(skull_parser::Ast, ustr::Ustr)> = bone_core::prelude::par_map_largest_first(
+    // serial loop did. The parser stores the supplied file id on the Ast.
+    let parsed: Vec<skull_parser::Ast> = bone_core::prelude::par_map_largest_first(
         sources.files.iter().collect(),
         |file| file.borrow().contents.len(),
         |file| {
@@ -220,42 +222,40 @@ pub(crate) fn parse_user_modules(
             let mut module = skull_parser::parse_module(&f.contents, id).map_err(|e| vec![e])?;
             module.package = f.package.clone();
             module.global_policy = f.global_policy;
-            Ok((module, id))
+            Ok(module)
         },
     )
     .into_iter()
     .collect::<std::result::Result<Vec<_>, Vec<CompilerError>>>()?;
 
     // Sequential post-pass: reject duplicate module ids and pick the entry file.
-    let mut modules = Vec::with_capacity(parsed.len());
     let mut user_file: Option<ustr::Ustr> = None;
     let mut first_file: Option<ustr::Ustr> = None;
-    let mut seen: HashMap<ustr::Ustr, ustr::Ustr> = HashMap::new();
-    for (module, id) in parsed {
+    let mut seen = HashSet::with_capacity(parsed.len());
+    for module in &parsed {
         // The module's file is the stable identity the workspace's interner maps
-        // to a dense ModuleId after semantic_pass. Carry it here, resolve the id
-        // from `ws.module_ids` once the workspace exists (see `entry_module_id`).
+        // to a dense ModuleId after semantic_pass. Resolve the id from
+        // `ws.module_ids` once the workspace exists (see `entry_module_id`).
         let mfile = module.file;
-        if let Some(prev) = seen.insert(mfile, id) {
+        if !seen.insert(mfile) {
             return Err(vec![CompilerError::new_no_location(format!(
                 "bone: duplicate module id `{}` in project assembly (also `{}`)",
-                mfile, prev
+                mfile, mfile
             ))]);
         }
         if first_file.is_none() {
             first_file = Some(mfile);
         }
-        let ids = id.as_str();
+        let ids = mfile.as_str();
         if ids.ends_with("/main.rock") || ids.ends_with("\\main.rock") || ids == "main.rock" {
             user_file = Some(mfile);
         }
-        modules.push(module);
     }
 
     // Compile gate: parsing is total, so a project with any syntax error is
     // refused here (the whole-project bone/skull compile funnel) -- the
     // interactive Session keeps the partial tree instead.
-    let syntax = skull::pipeline::syntax_errors(&modules);
+    let syntax = skull::pipeline::syntax_errors(&parsed);
     if !syntax.is_empty() {
         return Err(syntax);
     }
@@ -265,7 +265,7 @@ pub(crate) fn parse_user_modules(
             "bone: project has no .rock files",
         )]
     })?;
-    Ok((modules, entry, t.elapsed()))
+    Ok((parsed, entry, t.elapsed()))
 }
 
 /// Resolve the entry module's `ModuleId` from a checked workspace. The entry is
@@ -291,36 +291,53 @@ pub(crate) fn bone_workspace_timed(
     std::result::Result<bone_semantic::inference::Workspace, Vec<CompilerError>>,
     BonePhaseTimes,
 ) {
-    let mut times = BonePhaseTimes::default();
-    let (user_modules, _mid, parse) = match parse_user_modules(sources) {
-        Ok(v) => v,
-        Err(e) => return (Err(e), times),
-    };
-    times.parse = parse;
-
-    let t_sem = Instant::now();
-    let t = Instant::now();
-    let mut modules = match skull::pipeline::with_stdlib(user_modules) {
-        Ok(modules) => modules,
-        Err(error) => return (Err(vec![error]), times),
-    };
-    times.stdlib_assemble = t.elapsed();
-    let aliases = match aliases_for_modules(modules.iter()) {
-        Ok(aliases) => aliases,
-        Err(error) => return (Err(vec![error]), times),
-    };
-    // Time the call from out here so bone's teardown (dropping the input ASTs at
-    // fn return) is included — bone's internal phase timers stop before it.
-    let t_call = Instant::now();
-    let res = skull::pipeline::semantic_pass(&mut modules, &aliases);
-    times.semantic_call = t_call.elapsed();
-    times.semantic = t_sem.elapsed();
+    let (res, mut times) = workspace_frontend_timed(sources);
+    // Bone's historical total starts only once semantic_pass runs. Skull's
+    // total includes setup failures before that call; keep that distinction in
+    // skull_workspace_timed while sharing the work itself.
+    if !times.semantic_pass_called {
+        times.semantic = Duration::ZERO;
+    }
     // The checked Workspace carries bone's own per-phase split (`phase_timings`)
     // for backend-stats and the symbol/loc counts for the [COMPILE] stats line.
     // `Ok(ws)` here means "lowered and checked", NOT "no type errors" -- body
     // errors live per-`BodyOwner` on the workspace, so every verdict-shaped
     // consumer must run `body_errors` on `ws`.
-    (res.map_err(|e| vec![e]), times)
+    (res.map(|(workspace, _entry_file)| workspace), times)
+}
+
+/// Shared batch front end for the whole-project timing paths. Callers retain
+/// their own verdict and timing policy after the semantic pass.
+pub(crate) fn workspace_frontend_timed(
+    sources: &SourceFiles,
+) -> (
+    std::result::Result<(bone_semantic::inference::Workspace, ustr::Ustr), Vec<CompilerError>>,
+    BonePhaseTimes,
+) {
+    let mut times = BonePhaseTimes::default();
+    let (user_modules, entry_file, parse) = match parse_user_modules(sources) {
+        Ok(parsed) => parsed,
+        Err(errors) => return (Err(errors), times),
+    };
+    times.parse = parse;
+
+    let t_semantic = Instant::now();
+    let workspace = (|| -> std::result::Result<_, CompilerError> {
+        let t_assemble = Instant::now();
+        let mut modules = skull::pipeline::with_stdlib(user_modules)?;
+        times.stdlib_assemble = t_assemble.elapsed();
+        let aliases = aliases_for_modules(modules.iter())?;
+
+        // Time the call from out here so bone's teardown (dropping the input
+        // ASTs at fn return) is included — bone's internal timers stop before it.
+        let t_call = Instant::now();
+        times.semantic_pass_called = true;
+        let workspace = skull::pipeline::semantic_pass(&mut modules, &aliases);
+        times.semantic_call = t_call.elapsed();
+        workspace.map(|workspace| (workspace, entry_file))
+    })();
+    times.semantic = t_semantic.elapsed();
+    (workspace.map_err(|error| vec![error]), times)
 }
 
 /// Collapse a bone error message into a short, groupable bucket. A 489-file run
