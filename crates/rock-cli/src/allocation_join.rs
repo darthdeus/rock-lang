@@ -722,6 +722,14 @@ sites	1
 bbbbbbbbbbbbbbbb	20	18	3	9	2
 "#;
 
+    fn first_report_row(report: &str) -> std::collections::HashMap<&str, &str> {
+        let mut lines = report.lines().skip(4);
+        let header = lines.next().expect("joined header").split('\t');
+        let row = lines.next().expect("joined row").split('\t');
+        assert_eq!(header.clone().count(), row.clone().count(), "{report}");
+        header.zip(row).collect()
+    }
+
     #[test]
     fn join_preserves_result_use_and_aggregate_shape_classification() {
         let report = render_joined_report(
@@ -731,29 +739,12 @@ bbbbbbbbbbbbbbbb	20	18	3	9	2
             None,
         )
         .expect("joined classified allocation report");
-        let mut lines = report.lines().skip(4);
-        let header = lines
-            .next()
-            .expect("joined header")
-            .split('\t')
-            .collect::<Vec<_>>();
-        let row = lines
-            .next()
-            .expect("joined row")
-            .split('\t')
-            .collect::<Vec<_>>();
-        let value = |name: &str| {
-            let index = header
-                .iter()
-                .position(|column| *column == name)
-                .unwrap_or_else(|| panic!("missing {name} column: {report}"));
-            row[index]
-        };
+        let row = first_report_row(&report);
 
-        assert_eq!(value("result_use"), "direct-call");
-        assert_eq!(value("result_uses"), "1");
-        assert_eq!(value("aggregate_type"), "Carrier");
-        assert_eq!(value("aggregate_fields"), "3");
+        assert_eq!(row["result_use"], "direct-call");
+        assert_eq!(row["result_uses"], "1");
+        assert_eq!(row["aggregate_type"], "Carrier");
+        assert_eq!(row["aggregate_fields"], "3");
     }
 
     #[test]
@@ -787,32 +778,15 @@ bbbbbbbbbbbbbbbb	20	18	3	9	2
     fn join_reports_frame_coverage_multiplicity_and_outside_hits() {
         let report = render_joined_report(MANIFEST, FRAME_ACTIVATION, Some("draw"), None)
             .expect("joined frame-aware activation report");
-        let mut lines = report.lines().skip(4);
-        let header = lines
-            .next()
-            .expect("joined header")
-            .split('\t')
-            .collect::<Vec<_>>();
-        let row = lines
-            .next()
-            .expect("joined row")
-            .split('\t')
-            .collect::<Vec<_>>();
-        let value = |name: &str| {
-            let index = header
-                .iter()
-                .position(|column| *column == name)
-                .unwrap_or_else(|| panic!("missing {name} column: {report}"));
-            row[index]
-        };
+        let row = first_report_row(&report);
 
-        assert_eq!(value("hits/frame"), "4.5000");
-        assert_eq!(value("frame_hits"), "18");
-        assert_eq!(value("active_frames"), "3");
-        assert_eq!(value("frame_coverage"), "0.7500");
-        assert_eq!(value("hits/active_frame"), "6.0000");
-        assert_eq!(value("max_hits/frame"), "9");
-        assert_eq!(value("outside_hits"), "2");
+        assert_eq!(row["hits/frame"], "4.5000");
+        assert_eq!(row["frame_hits"], "18");
+        assert_eq!(row["active_frames"], "3");
+        assert_eq!(row["frame_coverage"], "0.7500");
+        assert_eq!(row["hits/active_frame"], "6.0000");
+        assert_eq!(row["max_hits/frame"], "9");
+        assert_eq!(row["outside_hits"], "2");
     }
 
     #[test]
@@ -823,52 +797,19 @@ bbbbbbbbbbbbbbbb	20	18	3	9	2
         );
         let report = render_joined_report(&manifest, FRAME_ACTIVATION, Some("draw"), None)
             .expect("joined loop-aware allocation report");
-        let mut lines = report.lines().skip(4);
-        let header = lines
-            .next()
-            .expect("joined header")
-            .split('\t')
-            .collect::<Vec<_>>();
-        let row = lines
-            .next()
-            .expect("joined row")
-            .split('\t')
-            .collect::<Vec<_>>();
-        let depth = header
-            .iter()
-            .position(|column| *column == "structural_loop_depth")
-            .expect("structural loop depth column");
+        let row = first_report_row(&report);
 
-        assert_eq!(row[depth], "2", "{report}");
+        assert_eq!(row["structural_loop_depth"], "2", "{report}");
     }
 
     #[test]
     fn join_exposes_every_direct_caller_beside_the_shortest_chain() {
         let report = render_joined_report(MANIFEST, ACTIVATION, Some("draw"), None)
             .expect("joined caller-aware allocation report");
-        let mut lines = report.lines().skip(4);
-        let header = lines
-            .next()
-            .expect("joined header")
-            .split('\t')
-            .collect::<Vec<_>>();
-        let caller_count = header
-            .iter()
-            .position(|column| *column == "direct_caller_count")
-            .expect("direct caller count column");
-        let callers = header
-            .iter()
-            .position(|column| *column == "direct_callers")
-            .expect("direct callers column");
-        let row = lines
-            .next()
-            .expect("joined row")
-            .split('\t')
-            .collect::<Vec<_>>();
+        let row = first_report_row(&report);
 
-        assert_eq!(row.len(), header.len(), "joined row must match its schema");
-        assert_eq!(row[caller_count], "2", "{report}");
-        assert_eq!(row[callers], "draw_left | draw_right");
+        assert_eq!(row["direct_caller_count"], "2", "{report}");
+        assert_eq!(row["direct_callers"], "draw_left | draw_right");
     }
 
     #[test]
