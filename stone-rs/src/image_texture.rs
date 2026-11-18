@@ -1051,9 +1051,15 @@ fn load_image(
             if inline_bytes > 0 {
                 record_image_upload(1, inline_bytes, 0, elapsed_us(texture_started));
             }
-            let decoded_bytes = (width as usize)
-                .saturating_mul(height as usize)
-                .saturating_mul(4);
+            // Raster codecs produce RGBA before channel packing. DDS hands the
+            // publication queue the blocks directly.
+            let decoded_format = if format == ImageFormat::Bc1 {
+                format
+            } else {
+                ImageFormat::Rgba8
+            };
+            let decoded_bytes =
+                usize::try_from(decoded_format.level_bytes(width, height)).unwrap_or(usize::MAX);
             record_image_load(true, decoded_bytes, elapsed_us(load_started));
             id
         }
@@ -2018,6 +2024,7 @@ mod relight_rg8_gl_tests {
         crate::asset_registry::stone_register_asset(path.as_ptr(), dds.as_ptr(), dds.len());
         let mut images = ImageScope::default();
         for flags in [0, LOAD_DEFERRED] {
+            stone_reset_image_profile_stats();
             let handle = stone_load_image(path.as_ptr(), 0, flags, 5, 3);
             assert_ne!(handle, 0);
             images.0.push(handle);
@@ -2026,6 +2033,9 @@ mod relight_rg8_gl_tests {
             }
             stone_flush_image_uploads();
             assert_eq!(stone_get_image_byte_len(handle), 16);
+            let mut stats = ImageLoadStats::default();
+            stone_get_image_profile_stats(&mut stats);
+            assert_eq!((stats.decoded_bytes, stats.upload_bytes), (16, 16));
             assert_eq!(
                 read_rg(handle, 5, 3).0,
                 glow::COMPRESSED_RGBA_S3TC_DXT1_EXT as i32

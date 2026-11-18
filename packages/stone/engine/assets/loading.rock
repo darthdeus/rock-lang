@@ -306,8 +306,12 @@ fn image_format_tag(format: ImageAssetFormat) -> string {
     }
 }
 
+fn image_format_is_intrinsic(resolved: string, format: ImageAssetFormat) -> bool {
+    return format == ImageAssetFormat::Rgba8 || (format == ImageAssetFormat::Bc1 && resolved.ends_with(".dds"))
+}
+
 fn image_format_path(resolved: string, format: ImageAssetFormat) -> string {
-    if format == ImageAssetFormat::Rgba8 { return resolved }
+    if image_format_is_intrinsic(resolved, format) { return resolved }
     return "image-format:{image_format_tag(format)}:{resolved}"
 }
 
@@ -321,7 +325,7 @@ fn image_path_from_format_key(path_key: string) -> string {
 
 pub fn image_identity(resolved: string, sampling: TextureFilter,
     format: ImageAssetFormat = ImageAssetFormat::Rgba8) -> string {
-    let suffix = if format == ImageAssetFormat::Rgba8 { "" } else { "#{image_format_tag(format)}" }
+    let suffix = if image_format_is_intrinsic(resolved, format) { "" } else { "#{image_format_tag(format)}" }
     if let key = eat_object_key(resolved) { return "{key}#{sampling}{suffix}" }
     return image_format_path(resolved, format)
 }
