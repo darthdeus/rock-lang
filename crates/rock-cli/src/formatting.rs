@@ -49,55 +49,41 @@ pub(crate) fn do_fmt(paths: &[String], check: bool) -> Result<()> {
         return Ok(());
     }
 
-    let mut needs_formatting = false;
-    let mut formatted_count = 0;
-
-    for file_path in &files_to_format {
-        // A format error already names the file; the caller prints it once.
-        let formatted = format_rock_file(file_path)?;
+    let mut changed = 0;
+    for path in &files_to_format {
+        let input = rock_host::source_files::source_file_new_with_context(path)?.contents;
+        let formatted = format_rock_file(path, &input)?;
         if check {
-            let original = fs::read_to_string(file_path)?;
-            if original.trim() != formatted.trim() {
-                println!("File '{}' is not formatted", file_path);
-                needs_formatting = true;
+            if input.trim() != formatted.trim() {
+                println!("File '{path}' is not formatted");
+                changed += 1;
             }
-        } else {
-            let original = fs::read_to_string(file_path)?;
-            if original != formatted {
-                fs::write(file_path, &formatted)?;
-                println!("Formatted '{}'", file_path);
-                formatted_count += 1;
-            }
+        } else if input != formatted {
+            fs::write(path, formatted)?;
+            println!("Formatted '{path}'");
+            changed += 1;
         }
     }
 
-    if check && needs_formatting {
-        crate::invocation_log::exit(1);
-    }
-
-    if !check && formatted_count > 0 {
+    if changed > 0 {
+        if check {
+            crate::invocation_log::exit(1);
+        }
         println!(
-            "Formatted {} file{}",
-            formatted_count,
-            if formatted_count == 1 { "" } else { "s" }
+            "Formatted {changed} file{}",
+            if changed == 1 { "" } else { "s" }
         );
     }
 
     Ok(())
 }
 
-fn format_rock_file(file_path: &str) -> Result<String> {
-    let source = rock_host::source_files::source_file_new_with_context(file_path)?;
-    let input = source.contents;
+fn format_rock_file(file_path: &str, input: &str) -> Result<String> {
     let formatted =
-        skull_fmt::try_format_named(&input, &skull_fmt::FormatConfig::default(), file_path)
+        skull_fmt::try_format_named(input, &skull_fmt::FormatConfig::default(), file_path)
             .map_err(|error| anyhow::anyhow!("cannot format '{}':\n{}", file_path, error))?;
 
-    // Defensive reparse: never overwrite a source file with output that no
-    // longer parses. skull-fmt returns the input unchanged on a parse
-    // failure, so a *changed* output that doesn't parse is a formatter bug
-    // -- refuse it rather than corrupt the file (cf. rock-format, which
-    // silently produced unparseable output for engine/engine/lib.rock).
+    // Check changed output before allowing it to replace the source file.
     if formatted != input {
         let file: ustr::Ustr = format!("<reparse:{file_path}>").into();
         let ast = skull_parser::parse_module(&formatted, file).map_err(|e| {
