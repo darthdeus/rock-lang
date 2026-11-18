@@ -110,6 +110,17 @@ mod tests {
             .expect("png pixels");
     }
 
+    fn diff_pixels(w: u32, h: u32, base: &[u8], shifted: &[u8]) -> f64 {
+        let dir = tempfile::tempdir().unwrap();
+        let baseline = dir.path().join("base.png");
+        let actual = dir.path().join("shifted.png");
+        write_rgba_png(&baseline, w, h, base);
+        write_rgba_png(&actual, w, h, shifted);
+        let (_, _, decoded) = decode_png_rgba8(&actual).unwrap();
+        assert_ne!(decoded, base, "the fixture must contain a pixel change");
+        image_diff(&baseline, &actual).unwrap()
+    }
+
     /// Control: per-channel deltas of exactly +1/-1 across full and partial
     /// blocks diff exactly zero. The pair is NOT bit-identical (asserted on
     /// the decoded bytes), so 0.0 means "no above-floor difference".
@@ -118,10 +129,7 @@ mod tests {
         // 40x40 spans full 32px blocks plus partial edge blocks in both
         // dims, so the deadband is pinned on both block shapes at once.
         let (w, h) = (40u32, 40u32);
-        let mut base = vec![0u8; (w * h * 4) as usize];
-        for px in base.as_chunks_mut::<4>().0 {
-            px.copy_from_slice(&[128, 128, 128, 128]);
-        }
+        let base = [128, 128, 128, 128].repeat((w * h) as usize);
         let mut shifted = base.clone();
         for (i, px) in shifted.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let x = i as u32 % w;
@@ -139,17 +147,7 @@ mod tests {
                 _ => px[3] -= 1,
             }
         }
-        let dir = tempfile::Builder::new()
-            .prefix("rock-image-oracle-")
-            .tempdir()
-            .expect("tempdir");
-        let base_path = dir.path().join("base.png");
-        let shifted_path = dir.path().join("shifted.png");
-        write_rgba_png(&base_path, w, h, &base);
-        write_rgba_png(&shifted_path, w, h, &shifted);
-        let (_, _, back) = decode_png_rgba8(&shifted_path).expect("decode shifted");
-        assert_ne!(back, base, "pair must differ, or the zero below is vacuous");
-        let diff = image_diff(&base_path, &shifted_path).expect("diff");
+        let diff = diff_pixels(w, h, &base, &shifted);
         assert_eq!(diff, 0.0, "every channel within +-1 must count as zero");
     }
 
@@ -162,10 +160,7 @@ mod tests {
         // Exactly one full 32px block: magnitude without partial-block
         // interaction (that rule has its own control below).
         let (w, h) = (BLOCK_PX, BLOCK_PX);
-        let mut base = vec![0u8; (w * h * 4) as usize];
-        for px in base.as_chunks_mut::<4>().0 {
-            px.copy_from_slice(&[128, 128, 128, 128]);
-        }
+        let base = [128, 128, 128, 128].repeat((w * h) as usize);
         let mut shifted = base.clone();
         for px in shifted.as_chunks_mut::<4>().0 {
             px[0] += 2;
@@ -173,15 +168,7 @@ mod tests {
             px[2] += 2;
             px[3] -= 2;
         }
-        let dir = tempfile::Builder::new()
-            .prefix("rock-image-oracle-")
-            .tempdir()
-            .expect("tempdir");
-        let base_path = dir.path().join("base.png");
-        let shifted_path = dir.path().join("shifted.png");
-        write_rgba_png(&base_path, w, h, &base);
-        write_rgba_png(&shifted_path, w, h, &shifted);
-        let diff = image_diff(&base_path, &shifted_path).expect("diff");
+        let diff = diff_pixels(w, h, &base, &shifted);
         let expected = 2.0 / 255.0;
         assert!(
             (diff - expected).abs() < 1e-12,
@@ -201,25 +188,14 @@ mod tests {
         // 40x40: blocks are 32+8 per dim, so the far corner is an 8x8
         // partial block in both dims.
         let (w, h) = (40u32, 40u32);
-        let mut base = vec![0u8; (w * h * 4) as usize];
-        for px in base.as_chunks_mut::<4>().0 {
-            px.copy_from_slice(&[0, 0, 0, 255]);
-        }
+        let base = [0, 0, 0, 255].repeat((w * h) as usize);
         let mut shifted = base.clone();
         for y in 32..40 {
             for x in 32..40 {
                 shifted[((y * w + x) * 4) as usize] = 255;
             }
         }
-        let dir = tempfile::Builder::new()
-            .prefix("rock-image-oracle-")
-            .tempdir()
-            .expect("tempdir");
-        let base_path = dir.path().join("base.png");
-        let shifted_path = dir.path().join("shifted.png");
-        write_rgba_png(&base_path, w, h, &base);
-        write_rgba_png(&shifted_path, w, h, &shifted);
-        let diff = image_diff(&base_path, &shifted_path).expect("diff");
+        let diff = diff_pixels(w, h, &base, &shifted);
         assert!(
             (diff - 0.25).abs() < 1e-12,
             "saturated 8x8 partial corner must diff 1/4 over its own pixels, \
@@ -228,21 +204,14 @@ mod tests {
         // Strip case: 48x32 holds a 16x32 partial strip; a mid-gray strip
         // diffs 128/(4*255) = 32/255 over its own pixels.
         let (w2, h2) = (48u32, 32u32);
-        let mut base2 = vec![0u8; (w2 * h2 * 4) as usize];
-        for px in base2.as_chunks_mut::<4>().0 {
-            px.copy_from_slice(&[0, 0, 0, 255]);
-        }
+        let base2 = [0, 0, 0, 255].repeat((w2 * h2) as usize);
         let mut shifted2 = base2.clone();
         for y in 0..32 {
             for x in 32..48 {
                 shifted2[((y * w2 + x) * 4 + 1) as usize] = 128;
             }
         }
-        let base2_path = dir.path().join("base2.png");
-        let shifted2_path = dir.path().join("shifted2.png");
-        write_rgba_png(&base2_path, w2, h2, &base2);
-        write_rgba_png(&shifted2_path, w2, h2, &shifted2);
-        let diff2 = image_diff(&base2_path, &shifted2_path).expect("diff");
+        let diff2 = diff_pixels(w2, h2, &base2, &shifted2);
         let expected2 = 32.0 / 255.0;
         assert!(
             (diff2 - expected2).abs() < 1e-12,
