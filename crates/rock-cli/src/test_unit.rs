@@ -2,7 +2,7 @@
 //! (a single file or a `stick.toml` package built as one workspace) and
 //! discover its `@test` fns. Emission and execution stay per backend.
 
-use crate::bone_backend::categorize;
+use crate::bone_backend::{categorize, short_path};
 use bone_semantic::inference::Workspace;
 use rock_core::{CompilerError, SourceFiles};
 use skull_mir::mir::FuncRef;
@@ -137,27 +137,74 @@ pub(crate) fn print_unit_panic(label: &str, panic: &(dyn std::any::Any + Send)) 
     println!("{:.<60} {}  {}", label, "PANIC".red().bold(), msg.dimmed());
 }
 
-/// Build every unit with `build`, containing a panic to its unit: bone can
-/// panic during inference on some inputs, and one bad unit must not end the
-/// suite. Returns each unit's short label and outcome, files before packages.
-pub(crate) fn build_units<T>(
+/// Check either one file or one package with the backend's build-var policy.
+pub(crate) fn check_unit(
+    unit: &str,
+    is_package: bool,
+    build_vars: bool,
+) -> Result<UnitCheck, UnitFailure> {
+    if is_package {
+        check_package(unit, build_vars)
+    } else {
+        check_file(unit, build_vars)
+    }
+}
+
+/// Run files in input order, optionally on a bounded worker pool, then run
+/// package units serially. Catch panics per unit and return short labels in
+/// files-before-packages order.
+pub(crate) fn run_units<T: Send>(
     files: &[String],
     package_dirs: &[String],
-    build: impl Fn(&str, bool) -> T,
+    file_threads: Option<usize>,
+    build: impl Fn(&str, bool) -> T + Sync,
 ) -> Vec<(String, std::thread::Result<T>)> {
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
-    let units = files
-        .iter()
-        .map(|file| (file, false))
-        .chain(package_dirs.iter().map(|dir| (dir, true)));
-    let outcomes = units
-        .map(|(unit, is_package)| {
-            let outcome =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(unit, is_package)));
-            (crate::bone_backend::short_path(unit), outcome)
-        })
-        .collect();
+    let run = |unit: &str, is_package| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(unit, is_package)))
+    };
+    let mut outcomes = match file_threads {
+        Some(threads) => crate::parallel_runner::map_in_order(files, threads, |file| {
+            (short_path(file), run(file, false))
+        }),
+        None => files
+            .iter()
+            .map(|file| (short_path(file), run(file, false)))
+            .collect(),
+    };
+    outcomes.extend(
+        package_dirs
+            .iter()
+            .map(|dir| (short_path(dir), run(dir, true))),
+    );
     std::panic::set_hook(prev_hook);
     outcomes
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn schedules_preserve_order_and_contain_unit_panics() {
+        let files = vec!["panic-file".to_string(), "file".to_string()];
+        let packages = vec!["package".to_string()];
+        for file_threads in [None, Some(2)] {
+            let outcomes = super::run_units(&files, &packages, file_threads, |unit, package| {
+                if unit == "panic-file" {
+                    panic!("isolated unit panic");
+                }
+                format!("{unit}:{package}")
+            });
+            assert_eq!(
+                outcomes
+                    .iter()
+                    .map(|(label, _)| label.as_str())
+                    .collect::<Vec<_>>(),
+                ["panic-file", "file", "package"]
+            );
+            assert!(outcomes[0].1.is_err());
+            assert_eq!(outcomes[1].1.as_ref().unwrap(), "file:false");
+            assert_eq!(outcomes[2].1.as_ref().unwrap(), "package:true");
+        }
+    }
 }

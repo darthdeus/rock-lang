@@ -30,7 +30,7 @@ pub(crate) fn glsl_test(paths: &[String], skip_gpu: bool) -> Result<()> {
     let mut failed_total: Vec<String> = Vec::new();
     let mut skip_reasons: Vec<String> = Vec::new();
 
-    let outcomes = crate::test_unit::build_units(&files, &package_dirs, |unit, is_package| {
+    let outcomes = crate::test_unit::run_units(&files, &package_dirs, None, |unit, is_package| {
         build_unit(unit, is_package, &runner, gl_available)
     });
     let file_count = outcomes.len();
@@ -157,16 +157,13 @@ fn build_unit(
     } else {
         None
     };
-    let checked = if is_package {
-        crate::test_unit::check_package(unit, false)
-    } else {
-        crate::test_unit::check_file(unit, false)
-    };
-    Ok(match checked? {
-        UnitCheck::Checked { ws, tests, .. } => run_tests(&ws, &tests, runner, gl_available),
-        // Nothing to emit for a file whose rejection every test expected.
-        UnitCheck::ExpectedFailure(_) => UnitRun::default(),
-    })
+    Ok(
+        match crate::test_unit::check_unit(unit, is_package, false)? {
+            UnitCheck::Checked { ws, tests, .. } => run_tests(&ws, &tests, runner, gl_available),
+            // Nothing to emit for a file whose rejection every test expected.
+            UnitCheck::ExpectedFailure(_) => UnitRun::default(),
+        },
+    )
 }
 
 fn run_tests(
