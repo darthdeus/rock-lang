@@ -3240,73 +3240,50 @@ impl EntryStream {
         event: &serde_json::Value,
         line: &str,
     ) -> Result<Option<EntryBoundary>> {
+        let open = self.started && !self.terminated;
         match op {
-            "entry_start" => {
-                if self.started {
-                    return Err(anyhow!("sim child started its entry twice: {line}"));
-                }
-                envelope_name_matches(event, &self.name, line)?;
-                Ok(Some(EntryBoundary::Started))
+            "entry_start" if self.started => {
+                anyhow::bail!("sim child started its entry twice: {line}")
             }
-            "entry_end" => {
-                if !self.started || self.terminated {
-                    return Err(anyhow!(
-                        "sim child ended an entry that was not open: {line}"
-                    ));
-                }
-                envelope_name_matches(event, &self.name, line)?;
-                let frame_count = envelope_frame_count(event, line)?;
-                let frame_timing = envelope_frame_timing(event, frame_count, line)?;
-                Ok(Some(EntryBoundary::Ended(frame_count, frame_timing)))
+            "entry_end" if !open => {
+                anyhow::bail!("sim child ended an entry that was not open: {line}")
             }
-            _ => {
-                if !self.started || self.terminated {
-                    return Err(anyhow!(
-                        "sim child emitted a `{op}` operation outside its entry envelope: {line}"
-                    ));
-                }
-                Ok(None)
-            }
+            "entry_start" | "entry_end" => {}
+            _ if open => return Ok(None),
+            _ => anyhow::bail!(
+                "sim child emitted a `{op}` operation outside its entry envelope: {line}"
+            ),
         }
+        let name = event["name"]
+            .as_str()
+            .ok_or_else(|| anyhow!("sim child sent an entry envelope with no name: {line}"))?;
+        anyhow::ensure!(
+            name == self.name,
+            "sim child envelope names `{name}` where the runner asked for `{}`: {line}",
+            self.name
+        );
+        if op == "entry_start" {
+            return Ok(Some(EntryBoundary::Started));
+        }
+        let frame_count = event
+            .get("frame_count")
+            .map(|value| {
+                value
+                    .as_u64()
+                    .and_then(|n| usize::try_from(n).ok())
+                    .ok_or_else(|| anyhow!("sim child sent an invalid entry frame_count: {line}"))
+            })
+            .transpose()?;
+        let timing = event
+            .get("frame_timing")
+            .map(|value| FrameTiming::from_child_value(value, frame_count, line))
+            .transpose()?;
+        Ok(Some(EntryBoundary::Ended(frame_count, timing)))
     }
 }
 
 fn stderr_panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
     format!("stderr reader thread panicked; sim output may be incomplete: {panic:?}")
-}
-
-fn envelope_frame_count(rest: &serde_json::Value, line: &str) -> Result<Option<usize>> {
-    rest.get("frame_count")
-        .map(|value| {
-            value
-                .as_u64()
-                .and_then(|n| usize::try_from(n).ok())
-                .ok_or_else(|| anyhow!("sim child sent an invalid entry frame_count: {line}"))
-        })
-        .transpose()
-}
-
-fn envelope_frame_timing(
-    rest: &serde_json::Value,
-    frame_count: Option<usize>,
-    line: &str,
-) -> Result<Option<FrameTiming>> {
-    let Some(value) = rest.get("frame_timing") else {
-        return Ok(None);
-    };
-    FrameTiming::from_child_value(value, frame_count, line).map(Some)
-}
-
-fn envelope_name_matches(rest: &serde_json::Value, expected: &str, line: &str) -> Result<()> {
-    match rest["name"].as_str() {
-        Some(name) if name == expected => Ok(()),
-        Some(name) => Err(anyhow!(
-            "sim child envelope names `{name}` where the runner asked for `{expected}`: {line}"
-        )),
-        None => Err(anyhow!(
-            "sim child sent an entry envelope with no name: {line}"
-        )),
-    }
 }
 
 /// Admission namespace used by the physical worker spawn.
@@ -4209,32 +4186,15 @@ impl SimSummary {
         self.expects_pass.len() + self.expects_fail.len() + self.image_snapshots.len()
     }
 
-    /// `streamed` = the live per-op stream already printed sited
-    /// failures/errors (the normal single-run path). When false (concise
-    /// multi-run), nothing was streamed, so sited entries must be reprinted
-    /// here -- with their `[site]` -- or a failing sim would show only a
-    /// count and no clue what broke.
+    /// Buffered runs print all failures here. Live runs already printed sited failures.
     fn print(&self, sim_name: &str, streamed: bool) {
-        // Per-fail lines: when streamed, only re-print failures that DIDN'T
-        // come through the live stream (empty-site, post-run synthesis:
-        // image diff, runner errors) -- reprinting sited
-        // ones would just duplicate the stream. When not streamed, print all.
-        // Carve-out (logging-architecture.md decision 2): the
-        // `[sim] error:` / `[sim] FAIL:` / final PASS|FAIL summary
-        // lines are the command's result, consumed by you/CI — they
-        // stay direct stderr writes, not log records.
-        for e in &self.errors {
-            if e.site.is_empty() {
-                eprintln!("[sim] error: {}", e.message);
-            } else if !streamed {
-                eprintln!("[sim] error [{}]: {}", e.site, e.message);
-            }
-        }
-        for f in &self.expects_fail {
-            if f.site.is_empty() {
-                eprintln!("[sim] FAIL: {}", f.message);
-            } else if !streamed {
-                eprintln!("[sim] FAIL [{}]: {}", f.site, f.message);
+        for (label, messages) in [("error", &self.errors), ("FAIL", &self.expects_fail)] {
+            for m in messages {
+                if m.site.is_empty() {
+                    eprintln!("[sim] {label}: {}", m.message);
+                } else if !streamed {
+                    eprintln!("[sim] {label} [{}]: {}", m.site, m.message);
+                }
             }
         }
         if let Some(ledger) = self.reload_ledger {
@@ -4244,14 +4204,6 @@ impl SimSummary {
             );
         }
         let total = self.expects_pass.len() + self.expects_fail.len();
-        // The PRINTED verdict must come from the same predicate as the real
-        // outcome. Computing it from `has_failures()` alone printed `PASS` for a
-        // sim that had aborted mid-body -- a C++ assert in imgui produced
-        // `PASS (0/0 expects passed)` next to the crash -- because an abort
-        // fails no expect. The exit status was already correct (`entry_passed`
-        // requires `saw_stop`), so only the human-facing line lied, which is
-        // worse than either being wrong alone: a log reader and a shell `&&`
-        // disagreed.
         let status = verdict_word(self);
         if let Some(reason) = &self.excluded {
             eprintln!("[sim] {sim_name}: {status} ({reason})");
