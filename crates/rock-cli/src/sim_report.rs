@@ -1,5 +1,6 @@
 //! Summarize one retained sim run. Entry results and observed timing remain independent when the record is incomplete.
 
+use crate::sim_observability::FrameTiming;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -207,60 +208,53 @@ impl Envelope {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-struct FrameTiming {
-    frames: i64,
-    draw_frames: i64,
-    submitted_frames: i64,
-    logic_us: i64,
-    render_cpu_us: i64,
-    present_us: i64,
-}
-
-impl FrameTiming {
-    fn parse(value: Option<&Value>, frame_count: Option<i64>) -> (Option<Self>, bool) {
-        let object = match value {
-            None | Some(Value::Null) => return (None, false),
-            Some(value @ Value::Object(_)) => value,
-            Some(_) => return (None, true),
-        };
-        let Ok(timing) = Self::deserialize(object) else {
-            return (None, true);
-        };
-        if [
-            timing.frames,
-            timing.draw_frames,
-            timing.submitted_frames,
-            timing.logic_us,
-            timing.render_cpu_us,
-            timing.present_us,
-        ]
-        .iter()
-        .any(|value| *value < 0)
-            || frame_count.is_some_and(|count| count != timing.frames)
-            || timing.draw_frames > timing.frames
-            || timing.submitted_frames > timing.draw_frames
-        {
-            return (None, true);
-        }
-        (Some(timing), false)
+fn parse_frame_timing(
+    value: Option<&Value>,
+    frame_count: Option<i64>,
+) -> (Option<FrameTiming>, bool) {
+    let object = match value {
+        None | Some(Value::Null) => return (None, false),
+        Some(value @ Value::Object(_)) => value,
+        Some(_) => return (None, true),
+    };
+    let Ok(timing) = FrameTiming::deserialize(object) else {
+        return (None, true);
+    };
+    let frame_count = match frame_count {
+        Some(count) if count < 0 => return (None, true),
+        Some(count) => Some(count as u64),
+        None => None,
+    };
+    if timing.validate(frame_count).is_err() || !timing.fits_report_totals() {
+        return (None, true);
     }
+    (Some(timing), false)
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize)]
 struct FrameTimingStats {
+    #[serde(rename = "known_entries")]
     known: usize,
+    #[serde(rename = "missing_entries")]
     missing: usize,
+    #[serde(rename = "invalid_entries")]
     invalid: usize,
-    frames: i64,
-    draw_frames: i64,
-    submitted_frames: i64,
-    logic_us: i64,
-    render_cpu_us: i64,
-    present_us: i64,
+    #[serde(flatten)]
+    totals: FrameTiming,
 }
 
 impl FrameTimingStats {
+    fn add(&mut self, timing: FrameTiming) {
+        let add = |total: u64, value| total.saturating_add(value).min(i64::MAX as u64);
+        let totals = &mut self.totals;
+        totals.frames = add(totals.frames, timing.frames);
+        totals.draw_frames = add(totals.draw_frames, timing.draw_frames);
+        totals.submitted_frames = add(totals.submitted_frames, timing.submitted_frames);
+        totals.logic_us = add(totals.logic_us, timing.logic_us);
+        totals.render_cpu_us = add(totals.render_cpu_us, timing.render_cpu_us);
+        totals.present_us = add(totals.present_us, timing.present_us);
+    }
+
     fn from_envelopes(envelopes: &[Envelope]) -> Self {
         let mut stats = Self::default();
         for envelope in envelopes {
@@ -268,14 +262,7 @@ impl FrameTimingStats {
                 stats.invalid += 1;
             } else if let Some(timing) = &envelope.frame_timing {
                 stats.known += 1;
-                stats.frames = stats.frames.saturating_add(timing.frames);
-                stats.draw_frames = stats.draw_frames.saturating_add(timing.draw_frames);
-                stats.submitted_frames = stats
-                    .submitted_frames
-                    .saturating_add(timing.submitted_frames);
-                stats.logic_us = stats.logic_us.saturating_add(timing.logic_us);
-                stats.render_cpu_us = stats.render_cpu_us.saturating_add(timing.render_cpu_us);
-                stats.present_us = stats.present_us.saturating_add(timing.present_us);
+                stats.add(*timing);
             } else {
                 stats.missing += 1;
             }
@@ -284,8 +271,11 @@ impl FrameTimingStats {
     }
 }
 
+#[derive(Serialize)]
 struct FrameCountStats {
+    #[serde(rename = "known_entries")]
     known: usize,
+    #[serde(rename = "missing_entries")]
     missing: usize,
     total: i64,
     min: Option<i64>,
@@ -442,6 +432,7 @@ pub(crate) struct SimRunAnalysis {
     timings: Option<TimingsView>,
 }
 
+#[derive(Serialize)]
 struct AdmissionTiming {
     name: String,
     admission_ms: u64,
@@ -449,6 +440,7 @@ struct AdmissionTiming {
     wait_ms_by_reason: BTreeMap<String, u64>,
 }
 
+#[derive(Serialize)]
 struct TimingsView {
     entries: usize,
     passed: usize,
@@ -545,7 +537,7 @@ pub(crate) fn analyze(record: &RunRecord) -> SimRunAnalysis {
         }
         let frame_count = int(end, "frame_count");
         let (frame_timing, frame_timing_invalid) =
-            FrameTiming::parse(end.get("frame_timing"), frame_count);
+            parse_frame_timing(end.get("frame_timing"), frame_count);
         envelopes.push(Envelope {
             name: text(end, "name")
                 .or_else(|| text(start, "name"))
@@ -797,68 +789,6 @@ impl SimRunAnalysis {
     }
 
     pub(crate) fn render_json(&self) -> Result<String> {
-        let run = json!({
-            "run_id": self.run_id,
-            "directory": self.dir.to_string_lossy(),
-            "status": self.status,
-            "complete": self.complete,
-            "run_end_present": self.run_end_present,
-            "wall_ms": self.wall_ms,
-            "observed_span_ms": self.observed_span_ms,
-            "planned_entries": self.planned_entries,
-            "finalized_entries": self.finalized_entries,
-            "verdicts": self.verdicts,
-            "error": self.error,
-            "project": self.project,
-            "selection": self.selection,
-            "revision": self.revision,
-            "dirty": self.dirty,
-            "requested_jobs": self.requested_jobs,
-            "effective_jobs": self.effective_jobs,
-            "boots": self.workers.len(),
-            "skipped_records": self.skipped_records,
-        });
-
-        let time = json!({
-            "entries_with_envelope": self.envelopes.len(),
-            "entries_started_without_end": self.entries_started_without_end,
-            "entries_ended_without_start": self.entries_ended_without_start,
-            "envelope_total_ms": self.inside_envelopes_ms,
-            "workers_without_end": self.workers_without_end,
-            "child_lifetime_total_ms": self.child_lifetime_total_ms,
-            "drain_overhang_ms": self.drain_overhang_ms,
-            "worker_span_total_ms": self.worker_span_total_ms,
-            "inside_envelopes_ms": self.inside_envelopes_ms,
-            "inside_envelopes_pct": pct(self.inside_envelopes_ms, self.worker_span_total_ms),
-            "startup_latency_ms": self.startup_latency_ms,
-            "startup_latency_pct": pct(self.startup_latency_ms, self.worker_span_total_ms),
-            "startup_boots": self.startup_boots,
-            "startup_median_ms": self.startup_median_ms,
-            "remainder_ms": self.remainder_ms,
-            "remainder_pct": pct(self.remainder_ms, self.worker_span_total_ms),
-            "wall_ms": self.wall_ms,
-            "ideal_ms_at_effective_jobs": self.ideal_ms_at_effective_jobs(),
-            "frame_counts": {
-                "known_entries": self.frame_counts.known,
-                "missing_entries": self.frame_counts.missing,
-                "total": self.frame_counts.total,
-                "min": self.frame_counts.min,
-                "median": self.frame_counts.median,
-                "max": self.frame_counts.max,
-            },
-            "frame_timing": {
-                "known_entries": self.frame_timing.known,
-                "missing_entries": self.frame_timing.missing,
-                "invalid_entries": self.frame_timing.invalid,
-                "frames": self.frame_timing.frames,
-                "draw_frames": self.frame_timing.draw_frames,
-                "submitted_frames": self.frame_timing.submitted_frames,
-                "logic_us": self.frame_timing.logic_us,
-                "render_cpu_us": self.frame_timing.render_cpu_us,
-                "present_us": self.frame_timing.present_us,
-            },
-        });
-
         let slowest: Vec<Value> = self
             .slowest()
             .into_iter()
@@ -891,11 +821,6 @@ impl SimRunAnalysis {
             })
             .collect();
 
-        let boot = json!({
-            "workers": self.workers.len(),
-            "worst_boot_to_work": worst,
-        });
-
         let histogram: Vec<Value> = self
             .occupancy
             .histogram
@@ -908,49 +833,84 @@ impl SimRunAnalysis {
                 })
             })
             .collect();
-        let occupancy = json!({
-            "wall_ms": self.wall_ms,
-            "base_ms": self.occupancy.base_ms,
-            "mean_live_workers": self.occupancy.mean_live,
-            "histogram": histogram,
-            "ramp_to_full_ms": self.occupancy.ramp_to_full_ms,
-            "under_occupied_tail_ms": self.occupancy.under_occupied_tail_ms,
-            "idle_before_first_worker_ms": self.occupancy.idle_before_first_worker_ms,
-            "idle_after_last_worker_ms": self.occupancy.idle_after_last_worker_ms,
-        });
 
-        let timings = match &self.timings {
-            Some(view) => json!({
-                "present": true,
-                "entries": view.entries,
-                "passed": view.passed,
-                "completed": view.completed,
-                "accepted": view.accepted,
-                "duration_total_ms": view.duration_total_ms,
-                "envelope_mismatches": view.envelope_mismatches,
-                "missing_from_events": view.missing_from_events,
-            }),
-            None => json!({ "present": false }),
+        let timings = if let Some(view) = &self.timings {
+            let mut timings = serde_json::to_value(view)?;
+            timings["present"] = Value::Bool(true);
+            timings
+        } else {
+            json!({ "present": false })
         };
 
-        Ok(serde_json::to_string_pretty(&json!({
+        let report = json!({
             "mode": "run",
-            "run": run,
-            "time": time,
+            "run": {
+                "run_id": self.run_id,
+                "directory": self.dir.to_string_lossy(),
+                "status": self.status,
+                "complete": self.complete,
+                "run_end_present": self.run_end_present,
+                "wall_ms": self.wall_ms,
+                "observed_span_ms": self.observed_span_ms,
+                "planned_entries": self.planned_entries,
+                "finalized_entries": self.finalized_entries,
+                "verdicts": self.verdicts,
+                "error": self.error,
+                "project": self.project,
+                "selection": self.selection,
+                "revision": self.revision,
+                "dirty": self.dirty,
+                "requested_jobs": self.requested_jobs,
+                "effective_jobs": self.effective_jobs,
+                "boots": self.workers.len(),
+                "skipped_records": self.skipped_records,
+            },
+            "time": {
+                "entries_with_envelope": self.envelopes.len(),
+                "entries_started_without_end": self.entries_started_without_end,
+                "entries_ended_without_start": self.entries_ended_without_start,
+                "envelope_total_ms": self.inside_envelopes_ms,
+                "workers_without_end": self.workers_without_end,
+                "child_lifetime_total_ms": self.child_lifetime_total_ms,
+                "drain_overhang_ms": self.drain_overhang_ms,
+                "worker_span_total_ms": self.worker_span_total_ms,
+                "inside_envelopes_ms": self.inside_envelopes_ms,
+                "inside_envelopes_pct": pct(self.inside_envelopes_ms, self.worker_span_total_ms),
+                "startup_latency_ms": self.startup_latency_ms,
+                "startup_latency_pct": pct(self.startup_latency_ms, self.worker_span_total_ms),
+                "startup_boots": self.startup_boots,
+                "startup_median_ms": self.startup_median_ms,
+                "remainder_ms": self.remainder_ms,
+                "remainder_pct": pct(self.remainder_ms, self.worker_span_total_ms),
+                "wall_ms": self.wall_ms,
+                "ideal_ms_at_effective_jobs": self.ideal_ms_at_effective_jobs(),
+                "frame_counts": self.frame_counts,
+                "frame_timing": self.frame_timing,
+            },
             "slowest_entries": slowest,
-            "boot": boot,
+            "boot": {
+                "workers": self.workers.len(),
+                "worst_boot_to_work": worst,
+            },
             "admission": {
                 "observed_workers": self.admissions.len(),
                 "invalid_observations": self.invalid_admissions,
                 "worker_ms": (!self.admissions.is_empty()).then(|| self.admissions.iter().map(|r| r.admission_ms).sum::<u64>()),
-                "observations": self.admissions.iter().map(|row| json!({
-                    "name": row.name, "admission_ms": row.admission_ms,
-                    "checks_ms": row.checks_ms, "wait_ms_by_reason": row.wait_ms_by_reason,
-                })).collect::<Vec<_>>(),
+                "observations": self.admissions,
             },
-            "occupancy": occupancy,
+            "occupancy": {
+                "wall_ms": self.wall_ms,
+                "base_ms": self.occupancy.base_ms,
+                "mean_live_workers": self.occupancy.mean_live,
+                "histogram": histogram,
+                "ramp_to_full_ms": self.occupancy.ramp_to_full_ms,
+                "under_occupied_tail_ms": self.occupancy.under_occupied_tail_ms,
+                "idle_before_first_worker_ms": self.occupancy.idle_before_first_worker_ms,
+                "idle_after_last_worker_ms": self.occupancy.idle_after_last_worker_ms,
+            },
             "timings": timings,
-        }))?)
+        });
+        Ok(serde_json::to_string_pretty(&report)?)
     }
 }
 
@@ -1118,12 +1078,12 @@ impl fmt::Display for SimRunAnalysis {
             "  frame phases    {}/{} known, {} frames, {} draw, {} submitted; logic {:.3}s, render CPU {:.3}s, present {:.3}s",
             self.frame_timing.known,
             frame_timing_entries,
-            self.frame_timing.frames,
-            self.frame_timing.draw_frames,
-            self.frame_timing.submitted_frames,
-            self.frame_timing.logic_us as f64 / 1_000_000.0,
-            self.frame_timing.render_cpu_us as f64 / 1_000_000.0,
-            self.frame_timing.present_us as f64 / 1_000_000.0,
+            self.frame_timing.totals.frames,
+            self.frame_timing.totals.draw_frames,
+            self.frame_timing.totals.submitted_frames,
+            self.frame_timing.totals.logic_us as f64 / 1_000_000.0,
+            self.frame_timing.totals.render_cpu_us as f64 / 1_000_000.0,
+            self.frame_timing.totals.present_us as f64 / 1_000_000.0,
         )?;
         if self.frame_timing.invalid > 0 {
             writeln!(
