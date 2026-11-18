@@ -1,16 +1,5 @@
 use super::compile_cmd;
 
-pub fn emit_overlay_checked(
-    ws: &bone_semantic::inference::Workspace,
-    cache: &mut skull::mir_emit::SkullEmitCache,
-    reinferred: &[(
-        bone_semantic::prelude::ModuleId,
-        bone_semantic::hir::BodyOwner,
-    )],
-) -> skull::mir_emit::MirEmit {
-    skull::mir_emit::emit_overlay(ws, cache, reinferred).expect("emit_overlay")
-}
-
 pub enum ExecOutcome {
     /// Clean run; holds full stdout (module load prints + test prints).
     Output(String),
