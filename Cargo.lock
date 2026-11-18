@@ -2239,6 +2239,7 @@ dependencies = [
  "comfy-la-arena",
  "rock-stdlib",
  "rustc-hash",
+ "serde_json",
  "skull",
  "skull-graph",
  "skull-mir",

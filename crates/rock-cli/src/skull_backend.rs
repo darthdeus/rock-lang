@@ -500,29 +500,13 @@ pub(crate) fn check_project(
 
 /// Run each test under pcall so a thrown error cannot stop its siblings.
 fn build_test_harness(tests: &[&skull::SkullTest], token: &str) -> String {
-    fn lua_str(s: &str) -> String {
-        let mut o = String::from("\"");
-        for c in s.chars() {
-            match c {
-                '"' => o.push_str("\\\""),
-                '\\' => o.push_str("\\\\"),
-                '\n' => o.push_str("\\n"),
-                '\r' => o.push_str("\\r"),
-                '\t' => o.push_str("\\t"),
-                _ => o.push(c),
-            }
-        }
-        o.push('"');
-        o
-    }
-
     let mut h = format!(
         "\nlocal __skull_token = {}\nlocal __skull_T = {{\n",
-        lua_str(token)
+        skull_codegen_lua::lua_string(token)
     );
     for t in tests {
         let out = match &t.output {
-            Some(s) => lua_str(s),
+            Some(s) => skull_codegen_lua::lua_string(s),
             None => "nil".to_string(),
         };
         // `f` is the global test fn by its EMITTED symbol; `out` is the expected
@@ -535,7 +519,7 @@ fn build_test_harness(tests: &[&skull::SkullTest], token: &str) -> String {
             "  {{ f = {}, out = {}, name = {}, val = {} }},\n",
             t.symbol,
             out,
-            lua_str(&t.name),
+            skull_codegen_lua::lua_string(&t.name),
             t.returns.is_some()
         ));
     }
