@@ -1,4 +1,4 @@
-//! Emit each JS-eligible test and its callees, execute the batch under Node, and report emission rejects.
+//! Emit JS test units, run them under Node, and report failures and skips.
 
 use crate::Result;
 use crate::test_protocol::{parse_skull_markers, reason_histogram};
@@ -160,20 +160,28 @@ fn js_build_unit(unit: &str, is_package: bool) -> JsUnitOutcome {
     }
 }
 
-/// Run JS-eligible tests in one Node batch.
-fn js_run_tests(
+fn emit_test_program(
     ws: &bone_semantic::inference::Workspace,
     tests: &[(FuncRef, skull::SkullTest)],
+    skips: &mut Vec<(String, Vec<String>)>,
     render: &dyn Fn(&rock_core::CompilerError) -> String,
-) -> JsUnitOutcome {
-    let (tests, elsewhere): (Vec<_>, Vec<_>) = tests
-        .iter()
-        .cloned()
-        .partition(|(_, t)| t.runs_on(bone_core::annotations::TestBackend::Js));
-    let tests = tests.as_slice();
-    let other_backend = elsewhere.len();
-    let mut fails: Vec<String> = Vec::new();
-    let mut skips: Vec<(String, Vec<String>)> = Vec::new();
+) -> std::result::Result<(String, bool, Vec<usize>), UnitFailure> {
+    let emit_program = |indices: &[usize]| {
+        let roots: Vec<_> = indices
+            .iter()
+            .map(|&i| (tests[i].0, format!("__t{i}")))
+            .collect();
+        skull_codegen_js::emit::emit_program_with_roots_artifact(ws, &roots)
+            .map(|(js, artifact)| (js, artifact.has_escaping()))
+    };
+
+    let all: Vec<_> = (0..tests.len()).collect();
+    let whole = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| emit_program(&all)));
+    let whole_error = match whole {
+        Ok(Ok((js, has_code_refs))) => return Ok((js, has_code_refs, all)),
+        Ok(Err(error)) => Some(error),
+        Err(_) => None,
+    };
 
     // (test index, per-test isolated defs) for tests emittable in ISOLATION.
     let mut supported: Vec<(usize, String)> = Vec::new();
@@ -207,50 +215,51 @@ fn js_run_tests(
         }
     }
 
-    // Assemble the shared defs + the runnable test index list (test order).
-    //
-    // The per-test emission above is the CLASSIFIER -- it decides, one test at a
-    // time, which tests the JS subset can serve, so an unsupported one skips by
-    // itself instead of taking the file down with it. Assembly is a separate
-    // question, and the answer is always ONE program over the surviving roots:
-    // concatenating the per-test closures gives every block its own copy of the
-    // global initializers, so a global derived from shared mutable state is
-    // recomputed per block and comes out wrong. That is the model luajit and
-    // `rock run --backend js` already use, and it is what makes the Session
-    // Arena registry (four arena iteration tests) agree across backends.
-    let mut run_idxs: Vec<usize> = supported.iter().map(|(i, _)| *i).collect();
-    run_idxs.extend(deco_pending.iter().copied());
-    run_idxs.sort_unstable();
-    let (shared_defs, shared_has_code_refs) = if run_idxs.is_empty() {
-        (String::new(), false)
-    } else {
-        let roots: Vec<(FuncRef, String)> = run_idxs
-            .iter()
-            .map(|&i| (tests[i].0, format!("__t{i}")))
-            .collect();
-        match skull_codegen_js::emit::emit_program_with_roots_artifact(ws, &roots) {
-            Ok((blob, artifact)) => {
-                let has_code_refs = artifact.entries.values().any(|entry| entry.escaping);
-                (blob, has_code_refs)
+    let mut selected: Vec<_> = supported.iter().map(|(i, _)| *i).collect();
+    selected.extend(deco_pending.iter().copied());
+    selected.sort_unstable();
+    if selected.is_empty() {
+        return Ok((String::new(), false, selected));
+    }
+
+    let shared = whole_error
+        .filter(|_| selected.len() == all.len())
+        .map_or_else(|| emit_program(&selected), Err);
+    match shared {
+        Ok((js, has_code_refs)) => Ok((js, has_code_refs, selected)),
+        Err(error) => {
+            // A load-time effect can require JS features outside the supported
+            // test bodies. Keep the isolated bodies that compiled successfully.
+            for i in deco_pending {
+                skips.push((tests[i].1.name.clone(), all_reasons(&error)));
             }
-            Err(e) => {
-                // Whole-file emission rejected for something no single test hit
-                // on its own (a deco-dependent test that also reaches an
-                // unsupported construct, or a construct only the shared program
-                // reaches): keep the individually-supported tests by falling back
-                // to the concatenation, and skip the deco-dependent ones.
-                for &i in &deco_pending {
-                    skips.push((tests[i].1.name.clone(), all_reasons(&e)));
-                }
-                run_idxs = supported.iter().map(|(i, _)| *i).collect();
-                let blob = supported
-                    .iter()
-                    .map(|(_, d)| d.as_str())
-                    .collect::<String>();
-                let has_code_refs = blob.contains("__rock_code_slot_ref(");
-                (blob, has_code_refs)
-            }
+            let (selected, bodies): (Vec<_>, Vec<_>) = supported.into_iter().unzip();
+            let js = bodies.concat();
+            let has_code_refs = js.contains("__rock_code_slot_ref(");
+            Ok((js, has_code_refs, selected))
         }
+    }
+}
+
+/// Run JS-eligible tests in one Node batch.
+fn js_run_tests(
+    ws: &bone_semantic::inference::Workspace,
+    tests: &[(FuncRef, skull::SkullTest)],
+    render: &dyn Fn(&rock_core::CompilerError) -> String,
+) -> JsUnitOutcome {
+    let (tests, elsewhere): (Vec<_>, Vec<_>) = tests
+        .iter()
+        .cloned()
+        .partition(|(_, t)| t.runs_on(bone_core::annotations::TestBackend::Js));
+    let tests = tests.as_slice();
+    let other_backend = elsewhere.len();
+    let mut fails: Vec<String> = Vec::new();
+    let mut skips: Vec<(String, Vec<String>)> = Vec::new();
+
+    let (shared_defs, shared_has_code_refs, run_idxs) = if tests.is_empty() {
+        (String::new(), false, Vec::new())
+    } else {
+        emit_test_program(ws, tests, &mut skips, render)?
     };
 
     if run_idxs.is_empty() {
@@ -462,12 +471,8 @@ fn is_decorator_populated_reject(msg: &str) -> bool {
     msg.contains("is populated by decorator application")
 }
 
-/// Assemble the per-file node program: the shipped prelude over a host that
-/// captures writes into `__buf`, the shared emitted defs (per-test isolated
-/// closures concatenated, or one whole-file program when decorator applications
-/// must run at load), then the harness running each test with its buffer reset
-/// and comparing the captured stdout (trimmed) against the `output=` expectation
-/// -- one `__SKULL__` line per test.
+/// Wrap the definitions with the Node test host. Capture stdout per test
+/// for `@test(output = ...)` and write one result marker per invocation.
 fn build_node_program(
     shared_defs: &str,
     tests: &[(String, String, Option<String>, bool)],

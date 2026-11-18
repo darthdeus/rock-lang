@@ -88,7 +88,7 @@ pub fn emit_overlay_with_span_edits(
         return Ok(JsReload::FullRequired);
     }
     let update = update_js_session(ws, &mut cache.session, &root_plan.refs, reinferred, edits);
-    let current = assemble_program_core(ws, &cache.scx, &root_plan.named, &cache.session)?;
+    let current = assemble_program_core(ws, &cache.scx, &root_plan.named, &cache.session, true)?;
     if current.global_layout != cache.build.global_layout {
         return Ok(JsReload::FullRequired);
     }

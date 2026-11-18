@@ -7,30 +7,36 @@ pub(super) fn assemble_program_core(
     scx: &skull_mir::lower::ScalarCtx,
     roots: &[(FuncRef, String)],
     session: &JsSession,
+    program_mode: bool,
 ) -> Result<ProgramBuild, CompilerError> {
-    if let Some((_, error)) = skull_mir::mangle::collision_errors_of(ws, [])
-        .into_iter()
-        .next()
+    if program_mode
+        && let Some((_, error)) = skull_mir::mangle::collision_errors_of(ws, [])
+            .into_iter()
+            .next()
     {
         return Err(error);
     }
-    let decorators = DecoratorTable::collect(ws);
     let mut st = WorklistState::new(
         ws,
         scx,
         roots,
-        true,
+        program_mode,
         &session.graph,
         &session.view,
         session.concrete.plans.as_ref(),
         &session.concrete.always_plans,
     )?;
-    let lifecycle_skeleton = skull_mir::lifecycle::collect(ws)?;
-    queue_lifecycle_dependency_initializers(ws, &mut st, &lifecycle_skeleton)?;
-
-    // Only applied decorators contribute bodies and seed the worklists.
-    let mut deco_bodies: Vec<(String, MirFunc)> = Vec::new();
-    for (mid, did) in decorators.applied_definitions(ws, bone_core::hir::FnBackend::Js) {
+    let effects = if program_mode {
+        let lifecycle = skull_mir::lifecycle::collect(ws)?;
+        queue_lifecycle_dependency_initializers(ws, &mut st, &lifecycle)?;
+        Some((DecoratorTable::collect(ws), lifecycle))
+    } else {
+        None
+    };
+    let mut deco_bodies = Vec::new();
+    for (mid, did) in effects.iter().flat_map(|(decorators, _)| {
+        decorators.applied_definitions(ws, bone_core::hir::FnBackend::Js)
+    }) {
         let d = &ws.module(mid).decorators[did];
         let deco_name = decorator_symbol(d.def_key.as_str());
         let owner = skull_mir::concrete::ConcreteOwner::Decorator {
@@ -98,9 +104,11 @@ pub(super) fn assemble_program_core(
     }
     out.push_str(&tables);
     stable.push_str(&tables);
-    let json_types = st.json_types.render();
-    out.push_str(&json_types);
-    stable.push_str(&json_types);
+    if program_mode {
+        let json_types = st.json_types.render();
+        out.push_str(&json_types);
+        stable.push_str(&json_types);
+    }
     let ret_slots = ret_slot_decls(
         max_multi_wire(&bodies)?.max(max_published_lanes(&session.view, &st.inline_js)?),
     );
@@ -137,7 +145,9 @@ pub(super) fn assemble_program_core(
     let spec_chunks = emit_spec_chunks(ws, scx.interner(), &st, &hoisted, &mut rejections);
     for chunk in ordered_spec_chunks(&spec_chunks, &st.spec_lowered) {
         out.push_str(&chunk.js);
-        code_artifact.merge(chunk.code_artifact.clone());
+        if program_mode {
+            code_artifact.merge(chunk.code_artifact.clone());
+        }
     }
     // 2b. inline(js) fns, emitted verbatim.
     for body in &st.inline_js {
@@ -180,71 +190,91 @@ pub(super) fn assemble_program_core(
     let mut const_order = Vec::new();
     let mut const_init_lines = HashMap::new();
     let init_lines = order_global_inits(&st.ginits, &st.lowered, &st.names, &st.gctx.state)?;
-    out.push_str("function __rock_state_initialize() {\n");
-    stable.push_str("function __rock_state_initialize() {\n");
-    for init in &init_lines {
-        out.push_str(&init.js);
-        if !const_chunks.contains_key(&init.name) {
-            stable.push_str(&init.js);
-        }
-    }
-    // A global initialized from a lambda stores that lambda's CodeRef, so the
-    // initializers run at the CALL below, after the code slots are staged.
-    out.push_str("}\n");
-    stable.push_str("}\n");
-    for init in init_lines {
-        if let Some(chunk) = const_chunks.get_mut(&init.name) {
-            chunk.push_str(&init.js);
-            const_order.push(init.name);
-            const_init_lines.insert(init.name, init.js);
-        }
-    }
-    // Rejected callback bodies have no code entry; report their named errors
-    // before staging would replace them with an incomplete-census error.
+    // Report rejected bodies before staging could raise an incomplete-census error.
     combine_rejections(rejections)?;
-    decorators.mark_generated_code_values(
-        ws,
-        bone_core::hir::FnBackend::Js,
-        SimValues::All,
-        &mut code_artifact,
-    );
-    let definition_plan = skull_mir::definition::collect(ws)?;
-    let lifecycle_plan = skull_mir::lifecycle::attach_artifact(lifecycle_skeleton, &code_artifact)?;
-    let has_definition_plan = !definition_plan.catalogs.is_empty();
-    let code_slot_stage = code_slot_registration_js(ws, scx.interner(), &code_artifact)?;
-    out.push_str(&code_slot_stage);
-    if code_artifact
-        .publication(has_definition_plan, lifecycle_plan.declarations > 0)
-        .explicit_begin
-    {
-        out.push_str("__rock_code_slot_begin();\n");
-    }
-    // Global initializers run once the slots they may reference are staged, and
-    // before the definition plan materializes (a materializer may read them).
-    out.push_str("__rock_state_initialize();\n");
-    let definition_stage = definition_plan_stage_js(ws, scx, st.concrete, &definition_plan)?;
-    out.push_str(&definition_stage);
-    stable.push_str(&definition_stage);
-    out.push_str(&lifecycle_plan_stage_js(
-        ws,
-        scx.interner(),
-        &lifecycle_plan,
-    )?);
-    // 5. decorator applications (AFTER inits: a deco body pushes into a ginit-
-    //    initialized registry).
-    let applications = decorator_application_lines_js(ws, &decorators, scx.interner(), &st.names)?;
-    out.push_str(&applications);
-    stable.push_str(&applications);
-    out.push_str(code_slot_publish_js(
-        &code_artifact,
-        has_definition_plan,
-        lifecycle_plan.declarations > 0,
-    ));
-    let global_layout = skull_mir::global_storage::global_layout_id(ws, scx).map_err(err)?;
-    let program = format!(
-        "{}{out}",
-        globals_open_js(ws, scx, &st.gctx.state, &global_layout)?
-    );
+    let lifecycle_plan = if let Some((decorators, lifecycle_skeleton)) = effects {
+        out.push_str("function __rock_state_initialize() {\n");
+        stable.push_str("function __rock_state_initialize() {\n");
+        for init in &init_lines {
+            out.push_str(&init.js);
+            if !const_chunks.contains_key(&init.name) {
+                stable.push_str(&init.js);
+            }
+        }
+        // A global initialized from a lambda stores that lambda's CodeRef, so the
+        // initializers run at the CALL below, after the code slots are staged.
+        out.push_str("}\n");
+        stable.push_str("}\n");
+        for init in init_lines {
+            if let Some(chunk) = const_chunks.get_mut(&init.name) {
+                chunk.push_str(&init.js);
+                const_order.push(init.name);
+                const_init_lines.insert(init.name, init.js);
+            }
+        }
+        decorators.mark_generated_code_values(
+            ws,
+            bone_core::hir::FnBackend::Js,
+            SimValues::All,
+            &mut code_artifact,
+        );
+        let definition_plan = skull_mir::definition::collect(ws)?;
+        let lifecycle_plan =
+            skull_mir::lifecycle::attach_artifact(lifecycle_skeleton, &code_artifact)?;
+        let has_definition_plan = !definition_plan.catalogs.is_empty();
+        let code_slot_stage = code_slot_registration_js(ws, scx.interner(), &code_artifact)?;
+        out.push_str(&code_slot_stage);
+        if code_artifact
+            .publication(has_definition_plan, lifecycle_plan.declarations > 0)
+            .explicit_begin
+        {
+            out.push_str("__rock_code_slot_begin();\n");
+        }
+        // Global initializers run once the slots they may reference are staged, and
+        // before the definition plan materializes (a materializer may read them).
+        out.push_str("__rock_state_initialize();\n");
+        let definition_stage = definition_plan_stage_js(ws, scx, st.concrete, &definition_plan)?;
+        out.push_str(&definition_stage);
+        stable.push_str(&definition_stage);
+        out.push_str(&lifecycle_plan_stage_js(
+            ws,
+            scx.interner(),
+            &lifecycle_plan,
+        )?);
+        // 5. decorator applications (AFTER inits: a deco body pushes into a ginit-
+        //    initialized registry).
+        let applications =
+            decorator_application_lines_js(ws, &decorators, scx.interner(), &st.names)?;
+        out.push_str(&applications);
+        stable.push_str(&applications);
+        out.push_str(code_slot_publish_js(
+            &code_artifact,
+            has_definition_plan,
+            lifecycle_plan.declarations > 0,
+        ));
+        lifecycle_plan
+    } else {
+        out.push_str(&code_slot_registration_js(
+            ws,
+            scx.interner(),
+            &code_artifact,
+        )?);
+        for init in init_lines {
+            out.push_str(&init.js);
+        }
+        out.push_str(code_slot_publish_js(&code_artifact, false, false));
+        Default::default()
+    };
+    let (program, global_layout) = if program_mode || st.gctx.uses_storage.get() {
+        let layout = skull_mir::global_storage::global_layout_id(ws, scx).map_err(err)?;
+        let program = format!(
+            "{}{out}",
+            globals_open_js(ws, scx, &st.gctx.state, &layout)?
+        );
+        (program, layout)
+    } else {
+        (out, String::new())
+    };
 
     Ok(ProgramBuild {
         program,

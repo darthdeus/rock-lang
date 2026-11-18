@@ -93,3 +93,38 @@ fn unknown_backend_name_is_a_compile_error() {
         "the diagnostic must name the bad backend:\n{text}"
     );
 }
+
+#[test]
+fn js_runner_keeps_supported_tests_when_emission_rejects_other_roots() {
+    let cases = [
+        ("", "assert(lua_only(42) == 42)"),
+        (
+            r#"global initialized: int = 0
+deco init register { initialized = lua_only(42) }
+@register fn hook() {}"#,
+            "assert(initialized == 42)",
+        ),
+    ];
+    for (setup, body) in cases {
+        let source = format!(
+            r#"
+inline(lua) fn lua_only(n: int) -> int = "return n"
+inline(js) fn from_js(n: int) -> int = "return n;"
+global seed: int = from_js(1)
+{setup}
+@test(returns = 1) fn supported() -> int {{ seed }}
+@test fn unsupported() {{ {body} }}
+"#
+        );
+        let (ok, text) = rock_test_source(&source, &["--backend", "js"]);
+        assert!(ok, "{text}");
+        assert!(
+            text.contains("1/2 @tests passed (0 failed, 1 skipped"),
+            "{text}"
+        );
+        assert!(
+            text.contains("SKIP unsupported: JS subset: call to `lua_only`"),
+            "{text}"
+        );
+    }
+}
