@@ -136,17 +136,7 @@ impl CommandContext {
     /// Every path argument, for the commands that act on a list rather than on
     /// one entry point. `get_path_or_current` drops everything after the first.
     pub(crate) fn get_paths_or_current(&self) -> Result<Vec<String>> {
-        let paths = if self.args.files.is_empty() {
-            vec![".".to_string()]
-        } else {
-            self.args.files.clone()
-        };
-
-        for path in &paths {
-            reject_device_path(path)?;
-        }
-
-        Ok(paths)
+        self.paths_or_default(".")
     }
 
     pub fn get_output_or_default(&self, default: &str) -> Result<String> {
@@ -160,8 +150,12 @@ impl CommandContext {
     }
 
     pub(crate) fn get_test_files(&self) -> Result<Vec<String>> {
+        self.paths_or_default("tests")
+    }
+
+    fn paths_or_default(&self, default: &str) -> Result<Vec<String>> {
         let files = if self.args.files.is_empty() {
-            vec!["tests".to_string()]
+            vec![default.to_owned()]
         } else {
             self.args.files.clone()
         };
