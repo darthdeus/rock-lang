@@ -309,8 +309,11 @@ fn image_format_tag(format: ImageAssetFormat) -> string {
 }
 
 fn image_format_is_intrinsic(resolved: string, format: ImageAssetFormat) -> bool {
-    return format == ImageAssetFormat::Rgba8 || (resolved.ends_with(".bc5.dds") && (format == ImageAssetFormat::Bc5 || format == ImageAssetFormat::MaterialRg8))
-        || (format == ImageAssetFormat::Bc1 && resolved.ends_with(".dds"))
+    if format == ImageAssetFormat::Rgba8 { return true }
+    if resolved.ends_with(".bc5.dds") {
+        return format == ImageAssetFormat::Bc5 || format == ImageAssetFormat::MaterialRg8
+    }
+    return format == ImageAssetFormat::Bc1 && resolved.ends_with(".dds")
 }
 
 fn image_format_path(resolved: string, format: ImageAssetFormat) -> string {

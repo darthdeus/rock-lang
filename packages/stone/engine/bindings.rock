@@ -261,8 +261,8 @@ pub fn load_image_handle(resolved: string, sampling: TextureFilter, exact_texels
         log_error("IMAGE", "BC5 storage requires a .bc5.dds asset: {resolved}")
         return 0
     }
-    if format == ImageAssetFormat::Bc1 && !resolved.ends_with(".dds") {
-        log_error("IMAGE", "BC1 storage requires a DDS asset: {resolved}")
+    if format == ImageAssetFormat::Bc1 && (!resolved.ends_with(".dds") || resolved.ends_with(".bc5.dds")) {
+        log_error("IMAGE", "BC1 storage requires a BC1 DDS asset: {resolved}")
         return 0
     }
     if format == ImageAssetFormat::R8 {
