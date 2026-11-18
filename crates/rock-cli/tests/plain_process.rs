@@ -23,12 +23,14 @@ fn assert_mentions(out: &Output, needle: &str) {
 }
 
 #[test]
-fn plain_lsp_serve_answers_initialize_over_stdio() {
+fn plain_lsp_serve_answers_initialize_and_uses_compiler_thp_default() {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::process::Stdio;
     let root = tempfile::tempdir().unwrap();
     let child = rock(root.path())
         .args(["lsp", "serve"])
+        .env_remove("MIMALLOC_ALLOW_THP")
+        .env_remove("mimalloc_allow_thp")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -80,23 +82,15 @@ fn plain_lsp_serve_answers_initialize_over_stdio() {
     assert!(body.contains("\"id\":1"), "{body}");
     assert!(body.contains("\"result\""), "{body}");
     assert!(body.contains("capabilities"), "{body}");
-}
 
-#[test]
-fn plain_named_action_layer_lints_report_no_policy() {
-    let root = tempfile::tempdir().unwrap();
-    write(root.path(), "main.rock", "fn main() {}\n");
-    for lint in [
-        "action_layer_action_callers",
-        "action_layer_raw_input",
-        "action_layer_raw_input_classification",
-    ] {
-        let out = invoke(root.path(), &["lint", "main.rock", "--lints", lint]);
-        assert!(
-            text(&out).contains("no action-layer policy configured"),
-            "{lint}: {}",
-            text(&out)
-        );
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string(format!("/proc/{}/status", child.0.id())).unwrap();
+        let thp = status
+            .lines()
+            .find(|line| line.starts_with("THP_enabled:"))
+            .expect("kernel reports THP_enabled");
+        assert_eq!(thp.split_whitespace().nth(1), Some("0"), "{thp}");
     }
 }
 
@@ -192,17 +186,13 @@ fn logged_errors_fail_tests_without_interrupting_them() {
 #[test]
 fn plain_compiler_process_without_private_runtime() {
     let root = tempfile::tempdir().unwrap();
-    let source =
-        "fn main() { print(6 * 7) }\n\n@test(output = \"42\")\nfn answer() { print(6 * 7) }\n";
+    let source = "fn main() { print(6 * 7) }\n";
     write(root.path(), "main.rock", source);
-    for command in ["check", "test", "run"] {
+    for command in ["check", "run"] {
         let out = invoke(root.path(), &[command, "main.rock"]);
         assert!(out.status.success(), "{command}: {}", text(&out));
         if command == "run" {
             assert_eq!(String::from_utf8_lossy(&out.stdout), "42\n");
-        }
-        if command == "test" {
-            assert_mentions(&out, "1/1 @tests passed");
         }
     }
     write(
@@ -224,19 +214,6 @@ fn plain_compiler_process_without_private_runtime() {
         "check accepted an invalid program"
     );
     std::fs::remove_file(root.path().join("broken.rock")).unwrap();
-    write(
-        root.path(),
-        "fails.rock",
-        "@test inline(lua) fn fails() = \"error('intentional test failure')\"\n",
-    );
-    let failed = invoke(root.path(), &["test", "fails.rock"]);
-    assert!(!failed.status.success(), "test accepted a runtime error");
-    assert_mentions(&failed, "intentional test failure");
-    assert!(
-        !root.path().join("tmp").exists(),
-        "plain test created <cwd>/tmp after failure"
-    );
-    std::fs::remove_file(root.path().join("fails.rock")).unwrap();
     write(root.path(), "main.rock", "fn   main(  ){print(6*7)}\n");
     let unformatted = invoke(root.path(), &["fmt", "main.rock", "--check"]);
     assert!(
@@ -580,6 +557,8 @@ log:close()
         assert_eq!(out.status.success(), !fail, "{}", text(&out));
         if fail {
             assert_mentions(&out, "intentional scratch failure");
+        } else {
+            assert_mentions(&out, "1/1 @tests passed");
         }
         let scratch = std::fs::read_to_string(&log).unwrap();
         assert!(
@@ -1188,9 +1167,16 @@ fn plain_lint_reads_project_action_rules_for_directory_and_file() {
     )
     .unwrap();
     let args = ["lint", "game", "--lints=action_layer_action_callers"];
-    let missing = invoke(root.path(), &args);
-    assert!(missing.status.success(), "{}", text(&missing));
-    assert!(text(&missing).contains("no action-layer policy configured"));
+    for lint in [
+        "action_layer_action_callers",
+        "action_layer_raw_input",
+        "action_layer_raw_input_classification",
+    ] {
+        let option = format!("--lints={lint}");
+        let missing = invoke(root.path(), &["lint", "game", &option]);
+        assert!(missing.status.success(), "{lint}: {}", text(&missing));
+        assert_mentions(&missing, "no action-layer policy configured");
+    }
     let rules = r#"[lint.action_layer]
 production_root = "game"
 production_label = "Sample"
@@ -1334,46 +1320,6 @@ fn explicit_runner_policy_controls_admission_and_log_context() {
         assert_mentions(&output, "ROCK_COMPILE_ADMISSION");
     }
     assert!(run("null").status.success());
-}
-
-/// `rock lsp` typechecks whole projects, so the server process takes the
-/// compiler's THP-off default like `rock compile` does.
-#[cfg(target_os = "linux")]
-#[test]
-fn language_server_takes_the_compiler_thp_default() {
-    use std::io::{Read, Write};
-    use std::process::Stdio;
-
-    let root = tempfile::tempdir().unwrap();
-    let mut server = rock(root.path())
-        .args(["lsp", "serve"])
-        .env_remove("MIMALLOC_ALLOW_THP")
-        .env_remove("mimalloc_allow_thp")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("start language server");
-    // An answered request proves process setup has finished.
-    let request = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}"#;
-    let mut stdin = server.stdin.take().unwrap();
-    write!(stdin, "Content-Length: {}\r\n\r\n{request}", request.len()).unwrap();
-    stdin.flush().unwrap();
-    let mut first = [0u8; 1];
-    server
-        .stdout
-        .as_mut()
-        .unwrap()
-        .read_exact(&mut first)
-        .expect("initialize response");
-    let status = std::fs::read_to_string(format!("/proc/{}/status", server.id())).unwrap();
-    let _ = server.kill();
-    let _ = server.wait();
-    let thp = status
-        .lines()
-        .find(|line| line.starts_with("THP_enabled:"))
-        .expect("kernel reports THP_enabled");
-    assert_eq!(thp.split_whitespace().nth(1), Some("0"), "{thp}");
 }
 
 /// A capture saved by an activated compile and a separate run joins offline,
