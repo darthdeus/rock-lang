@@ -106,13 +106,19 @@ For behavior that depends on prior edits, use an `edit_sequence` fixture such
 as [`edit_sequence.rock.lsp`](../tests/lsp/edit_sequence.rock.lsp). Query and
 protocol tests also live in the `bone-query` and `rock-lsp` crates.
 
-`TYPE:` supplies the operation unless an explicit `OPERATION:` follows the
-source. A case can reuse an earlier case's text with `SOURCE: case_name` and
-choose its cursor with `POSITION:`. Literal `REPLACE: ["old", "new"]` pairs
-after `SOURCE:` describe source variants. The same pairs in a rename's
-`EXPECTED:` or an action's `RESULT:` construct the exact expected whole file.
-Full-document edit steps can use `SOURCE: N` to reuse an earlier step and apply
-literal replacements before sending the complete document.
+LSP fixture files use TOML. Each `[[tests]]` entry has a `name`, a `kind` label,
+source text (or `files` for a multi-file project), a `request`, and generic
+`checks`. Requests select CLI or JSON-RPC transport and state the method or
+arguments. Checks use JSON paths and predicates such as `contains_all`,
+`unordered_equal`, `gte`, `empty`, and `applied_text_equals`; code-action and
+rename edit checks name their source and expected text explicitly.
+
+Source can be shared from an earlier case with `source = { from_test = "case" }`.
+Add `replace = [["old", "new"]]` pairs to create a variant. Edit sequences use
+`[[tests.steps]]` entries with `mode = "replace"`, `"type_at"`, or
+`"delete_at"`; a later full-document replacement can reuse an earlier step
+with `source = { from_step = 1, replace = [["old", "new"]] }`. Checks attached
+to a step run after that edit has been sent to the server.
 
 ## Stone simulations
 
