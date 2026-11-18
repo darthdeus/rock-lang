@@ -984,34 +984,22 @@ fn a_killed_child_leaves_its_entry_unterminated() {
 
 #[test]
 fn live_and_buffered_assertions_use_the_same_message_and_site() {
-    let assertion = r#"__SIM__ {"op":"expect_fail","site":"tests/sample.rock:9","message":"count","actual":"3","expected":"4"}"#;
-    for buffered in [false, true] {
-        let mut stream = EntryStream::new("fixture".into(), buffered);
-        stream.observe(&start("fixture"), |_, _| {});
-        stream.observe(assertion, |_, event| {
-            if !buffered {
-                let progress = event.unwrap().progress().unwrap();
-                for fragment in [
-                    "sample:9",
-                    "count",
-                    "FAIL",
-                    "actual:",
-                    "3",
-                    "expected:",
-                    "4",
-                ] {
-                    assert!(progress.contains(fragment), "{progress}");
-                }
-            }
-        });
-        assert_eq!(
-            stream.summary.expects_fail,
-            [SiteMessage {
-                message: "count".into(),
-                site: "sample:9".into()
-            }]
-        );
-    }
+    let assertion = r#"__SIM__ {"op":"expect_fail","site":"project/tests/sims/sample.rock:9","message":"count","actual":"3","expected":"4"}"#;
+    let buffered = checked_summary(assertion);
+    let failure = &buffered.expects_fail[0];
+    assert_eq!(failure.message, "count");
+    assert_eq!(failure.site, "sample:9");
+    let mut live = EntryStream::new("fixture".into(), false);
+    live.observe(&start("fixture"), |_, _| {});
+    live.observe(assertion, |_, event| {
+        let progress = event.unwrap().progress().unwrap();
+        assert!(progress.contains(&failure.site) && progress.contains(&failure.message));
+        for (line, expected) in progress.lines().zip(["FAIL", "3", "4"]) {
+            assert!(line.contains(expected), "{progress}");
+        }
+        assert_eq!(progress.lines().count(), 3);
+    });
+    assert_eq!(live.summary.expects_fail, buffered.expects_fail);
 }
 
 #[test]
@@ -1465,13 +1453,6 @@ fn census_rankings_use_the_requested_per_frame_metric() {
     ];
     assert_eq!(census_rankings(&rows, true)[0]["sim_name"], "gross");
     assert_eq!(census_rankings(&rows, false)[0]["sim_name"], "calls");
-}
-
-#[test]
-fn summary_compresses_site_to_stem_and_line() {
-    let stderr = r#"__SIM__ {"op":"expect_fail","message":"x","site":"/work/repo/game/tests/sims/bandage.rock:29"}"#;
-    let s = checked_summary(stderr);
-    assert_eq!(s.expects_fail[0].site, "bandage:29");
 }
 
 #[test]
