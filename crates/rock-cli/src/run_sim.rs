@@ -628,9 +628,10 @@ fn load_sim_receipt(receipt_dir: &Path, project: &Path, output: &Path) -> Result
         .get("context")
         .ok_or_else(|| anyhow!("sim compile receipt has no context"))?;
     let current_context = sim_receipt_context(project)?;
-    let spec = crate::unified_compile::SourceSpec::Directory(project.to_path_buf());
-    let mut current_inputs =
-        receipt_source_inputs(project, &crate::unified_compile::discover_sources(&spec)?)?;
+    let mut current_inputs = receipt_source_inputs(
+        project,
+        &crate::unified_compile::discover_project_sources(project)?,
+    )?;
     if expected_context != &current_context {
         return Err(anyhow!(
             "sim compile receipt context changed; prepare a new receipt for this test lane"

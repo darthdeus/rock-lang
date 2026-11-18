@@ -9,19 +9,6 @@ pub fn total_system_memory_mib() -> Option<u64> {
     Some(system.total_memory() / (1024 * 1024)).filter(|&mib| mib > 0)
 }
 
-/// Trivial path -> SourceSpec mapping for callers that don't need
-/// stick.toml walk-up: directory becomes `Directory`, single file
-/// becomes `Files`. `do_run_timeout` keeps its own variant because
-/// it walks up to find the enclosing stick package.
-pub(crate) fn path_to_source_spec(path: &str) -> crate::unified_compile::SourceSpec {
-    let path_buf = std::path::PathBuf::from(path);
-    if path_buf.is_dir() {
-        crate::unified_compile::SourceSpec::Directory(path_buf)
-    } else {
-        crate::unified_compile::SourceSpec::Files(vec![path_buf])
-    }
-}
-
 /// One in-memory source registered under `path`, which must be the file id its
 /// spans carry or every snippet lookup misses.
 pub(crate) fn single_source(path: &str, src: &str) -> SourceFiles {
