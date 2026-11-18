@@ -610,3 +610,15 @@ fn thing() {
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "fancy"] }
 checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["cool", "fancy"]] } }]
+
+[[tests]]
+name = "rename_reference_after_non_bmp_text"
+kind = "rename"
+position = [1, 8]
+source = """
+fn main() {
+    let foo = 42
+    print("\U0001F319") print(foo)
+}"""
+request = { transport = "cli", argv = ["rename", "$target", "bar"] }
+checks = [{ op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["foo", "bar"]] } }]
