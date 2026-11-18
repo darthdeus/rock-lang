@@ -1898,48 +1898,6 @@ pub(crate) fn run_lsp_suite(path: &Path) -> Result<usize> {
 mod tests {
     use super::*;
 
-    fn fixture(kind: &str) -> Fixture {
-        Fixture {
-            name: "case".into(),
-            kind: kind.into(),
-            code: String::new(),
-            files: Vec::new(),
-            primary_file: String::new(),
-            position: None,
-            request: None,
-            checks: Vec::new(),
-            steps: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn empty_changes_accepts_empty_per_file_edits() {
-        let test = fixture("rename");
-        let check = Check::Empty {
-            path: vec![
-                PathPart::Key("result".into()),
-                PathPart::Key("changes".into()),
-                PathPart::Key("*".into()),
-            ],
-            null_is_empty: true,
-            missing_is_empty: true,
-        };
-        let reply = json!({"result":{"changes":{"file:///main.rock":[]}}});
-        assert!(check_response(&test, &check, &reply, "reply", None).unwrap());
-    }
-
-    #[test]
-    fn absent_action_rejects_a_scalar_result() {
-        let test = fixture("code_action");
-        let check = Check::Absent {
-            path: vec![PathPart::Key("result".into())],
-            value: json!({"title":"Inline"}),
-            null_is_empty: true,
-        };
-        let reply = json!({"result":"malformed"});
-        assert!(check_response(&test, &check, &reply, "reply", None).is_err());
-    }
-
     #[test]
     fn each_run_gets_its_own_server_stderr_log() {
         let dir = tempfile::tempdir().unwrap();

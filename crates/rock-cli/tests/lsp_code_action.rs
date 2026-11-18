@@ -99,6 +99,24 @@ fn generic_lsp_fixtures_report_parse_and_reply_failures() {
     );
     let cases = vec![
         (FIXTURE.into(), 0, "1 passed; 0 failed"),
+        (
+            set_checks(
+                &set_request(
+                    FIXTURE,
+                    "request = { transport = \"rpc\", method = \"workspace/symbol\", params = { query = \"no_such_symbol\" } }",
+                ),
+                "[{ op = \"empty\", path = [\"result\"] }]",
+            ),
+            0,
+            "1 passed; 0 failed",
+        ),
+        failed(
+            set_checks(
+                FIXTURE,
+                "[{ op = \"absent\", path = [\"result\", 0, \"title\"], value = \"Inline\" }]",
+            ),
+            "reply field is not an array",
+        ),
         failed(
             FIXTURE.replace("print((1 + 2) * (1 + 2))", "print(3 * 3)"),
             "result after",
