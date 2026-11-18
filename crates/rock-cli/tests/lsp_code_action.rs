@@ -1,26 +1,25 @@
-//! `TYPE: code_action` fixtures run through the real `rock lsp serve`: the
-//! action is requested, its edit applied, and the result compared. The passing
-//! case is tests/lsp/inline_local_variable.rock.lsp in the corpus.
+//! Code action fixtures run through the real `rock lsp serve`: the action is
+//! requested, its edit applied, and the result compared.
 
-const FIXTURE: &str = "\
-TEST: inline_count
-TYPE: code_action
----
+const FIXTURE: &str = r#"
+[[tests]]
+name = "inline_count"
+kind = "code_action"
+position = [1, 8]
+source = '''
 fn main() {
-    let «start»count«end» = 1 + 2
+    let count = 1 + 2
     print(count * count)
-}
----
-OPERATION: code_action
----
-EXPECTED:
-ACTION_TITLE: Inline local `count`
-RESULT:
+}'''
+request = { transport = "rpc", method = "textDocument/codeAction", params = { textDocument = { uri = "$uri" }, range = { start = "$position", end = "$position" }, context = { diagnostics = [] } } }
+checks = [
+  { op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true },
+  { op = "applied_text_equals", path = ["result"], selector = { title = "Inline local `count`" }, file = "$primary", source = "primary", expected = '''
 fn main() {
     print((1 + 2) * (1 + 2))
-}
-===
-";
+}''', encoding = "utf16", trim = "end" },
+]
+"#;
 
 /// Run `rock test` on `fixture` written to a temporary `.rock.lsp` file and
 /// return its combined output.

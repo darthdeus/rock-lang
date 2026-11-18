@@ -1,7 +1,10 @@
-TEST: type_function_call_char_by_char
-TYPE: edit_sequence
----
-STEP 1:
+[[tests]]
+name = "type_function_call_char_by_char"
+kind = "edit_sequence"
+
+[[tests.steps]]
+mode = "replace"
+source = '''
 struct Player {
     health: int,
     name: string,
@@ -10,24 +13,30 @@ struct Player {
 fn main() {
     let p = Player { health: 100, name: "Hero" }
 
-}
----
-CHECK: semantic_tokens
-EXPECTED:
-min_tokens: 5
----
-STEP 2 (type at 7:4):
-print(p.health.to_string())
----
-CHECK: semantic_tokens
-EXPECTED:
-min_tokens: 5
-===
+}'''
 
-TEST: type_new_function_char_by_char
-TYPE: edit_sequence
----
-STEP 1:
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/semanticTokens/full", params = { textDocument = { uri = "$uri" } } }
+assertions = [{ op = "gte", path = ["result", "data"], value = 25 }]
+
+[[tests.steps]]
+mode = "type_at"
+line = 7
+col = 4
+text = '''
+print(p.health.to_string())'''
+
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/semanticTokens/full", params = { textDocument = { uri = "$uri" } } }
+assertions = [{ op = "gte", path = ["result", "data"], value = 25 }]
+
+[[tests]]
+name = "type_new_function_char_by_char"
+kind = "edit_sequence"
+
+[[tests.steps]]
+mode = "replace"
+source = '''
 struct FixVec2 {
     x: float,
     y: float,
@@ -35,58 +44,74 @@ struct FixVec2 {
 
 fn main() {
     let a = FixVec2 { x: 1.0, y: 2.0 }
-}
----
-CHECK: semantic_tokens
-EXPECTED:
-min_tokens: 5
----
-STEP 2 (type at 5:0):
+}'''
+
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/semanticTokens/full", params = { textDocument = { uri = "$uri" } } }
+assertions = [{ op = "gte", path = ["result", "data"], value = 25 }]
+
+[[tests.steps]]
+mode = "type_at"
+line = 5
+col = 0
+text = '''
 fn length(v: FixVec2) -> float {
     return (v.x * v.x + v.y * v.y).sqrt()
 }
+'''
 
----
-CHECK: semantic_tokens
-EXPECTED:
-min_tokens: 8
-===
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/semanticTokens/full", params = { textDocument = { uri = "$uri" } } }
+assertions = [{ op = "gte", path = ["result", "data"], value = 40 }]
 
-TEST: type_struct_field_then_use_it
-TYPE: edit_sequence
----
-STEP 1:
+[[tests]]
+name = "type_struct_field_then_use_it"
+kind = "edit_sequence"
+
+[[tests.steps]]
+mode = "replace"
+source = '''
 struct Enemy {
     health: int,
 }
 
 fn main() {
     let e = Enemy { health: 50 }
-}
----
-CHECK: semantic_tokens
-EXPECTED:
-min_tokens: 5
----
-STEP 2 (type at 2:0):
-    damage: int,
----
-CHECK: semantic_tokens
-EXPECTED:
-min_tokens: 5
----
-STEP 3 (type at 7:0):
-    print(e.damage.to_string())
----
-CHECK: semantic_tokens
-EXPECTED:
-min_tokens: 5
-===
+}'''
 
-TEST: type_and_delete_cycles
-TYPE: edit_sequence
----
-STEP 1:
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/semanticTokens/full", params = { textDocument = { uri = "$uri" } } }
+assertions = [{ op = "gte", path = ["result", "data"], value = 25 }]
+
+[[tests.steps]]
+mode = "type_at"
+line = 2
+col = 0
+text = '''
+    damage: int,'''
+
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/semanticTokens/full", params = { textDocument = { uri = "$uri" } } }
+assertions = [{ op = "gte", path = ["result", "data"], value = 25 }]
+
+[[tests.steps]]
+mode = "type_at"
+line = 7
+col = 0
+text = '''
+    print(e.damage.to_string())'''
+
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/semanticTokens/full", params = { textDocument = { uri = "$uri" } } }
+assertions = [{ op = "gte", path = ["result", "data"], value = 25 }]
+
+[[tests]]
+name = "type_and_delete_cycles"
+kind = "edit_sequence"
+
+[[tests.steps]]
+mode = "replace"
+source = '''
 fn greet(name: string) -> string {
     return "Hello " + name
 }
@@ -94,45 +119,63 @@ fn greet(name: string) -> string {
 fn main() {
     let msg = greet("world")
     print(msg)
-}
----
-CHECK: semantic_tokens
-EXPECTED:
-min_tokens: 5
----
-STEP 2 (type at 4:0):
+}'''
+
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/semanticTokens/full", params = { textDocument = { uri = "$uri" } } }
+assertions = [{ op = "gte", path = ["result", "data"], value = 25 }]
+
+[[tests.steps]]
+mode = "type_at"
+line = 4
+col = 0
+text = '''
 fn farewell(name: string) -> string {
     return "Bye " + name
 }
+'''
 
----
-CHECK: semantic_tokens
-EXPECTED:
-min_tokens: 8
----
-STEP 3 (delete at 7:1, 36):
----
-CHECK: semantic_tokens
-EXPECTED:
-non_zero
----
-STEP 4 (delete at 6:1, 32):
----
-CHECK: semantic_tokens
-EXPECTED:
-non_zero
----
-STEP 5 (delete at 5:0, 1):
----
-CHECK: semantic_tokens
-EXPECTED:
-min_tokens: 5
-===
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/semanticTokens/full", params = { textDocument = { uri = "$uri" } } }
+assertions = [{ op = "gte", path = ["result", "data"], value = 40 }]
 
-TEST: type_match_expression_char_by_char
-TYPE: edit_sequence
----
-STEP 1:
+[[tests.steps]]
+mode = "delete_at"
+line = 7
+col = 1
+count = 36
+
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/semanticTokens/full", params = { textDocument = { uri = "$uri" } } }
+assertions = [{ op = "gte", path = ["result", "data"], value = 5 }]
+
+[[tests.steps]]
+mode = "delete_at"
+line = 6
+col = 1
+count = 32
+
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/semanticTokens/full", params = { textDocument = { uri = "$uri" } } }
+assertions = [{ op = "gte", path = ["result", "data"], value = 5 }]
+
+[[tests.steps]]
+mode = "delete_at"
+line = 5
+col = 0
+count = 1
+
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/semanticTokens/full", params = { textDocument = { uri = "$uri" } } }
+assertions = [{ op = "gte", path = ["result", "data"], value = 25 }]
+
+[[tests]]
+name = "type_match_expression_char_by_char"
+kind = "edit_sequence"
+
+[[tests.steps]]
+mode = "replace"
+source = '''
 enum Direction {
     Up,
     Down,
@@ -143,29 +186,35 @@ enum Direction {
 fn main() {
     let d = Direction::Up
 
-}
----
-CHECK: semantic_tokens
-EXPECTED:
-min_tokens: 5
----
-STEP 2 (type at 9:0):
+}'''
+
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/semanticTokens/full", params = { textDocument = { uri = "$uri" } } }
+assertions = [{ op = "gte", path = ["result", "data"], value = 25 }]
+
+[[tests.steps]]
+mode = "type_at"
+line = 9
+col = 0
+text = '''
     match d {
         Direction::Up => print("up"),
         Direction::Down => print("down"),
         Direction::Left => print("left"),
         Direction::Right => print("right"),
-    }
----
-CHECK: semantic_tokens
-EXPECTED:
-min_tokens: 10
-===
+    }'''
 
-TEST: type_long_expression_with_dots
-TYPE: edit_sequence
----
-STEP 1:
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/semanticTokens/full", params = { textDocument = { uri = "$uri" } } }
+assertions = [{ op = "gte", path = ["result", "data"], value = 50 }]
+
+[[tests]]
+name = "type_long_expression_with_dots"
+kind = "edit_sequence"
+
+[[tests.steps]]
+mode = "replace"
+source = '''
 struct Pos {
     x: float,
     y: float,
@@ -179,24 +228,30 @@ struct Entity {
 fn main() {
     let e = Entity { pos: Pos { x: 1.0, y: 2.0 }, name: "test" }
 
-}
----
-CHECK: semantic_tokens
-EXPECTED:
-min_tokens: 8
----
-STEP 2 (type at 12:4):
-print(e.pos.x.to_string() + ", " + e.pos.y.to_string())
----
-CHECK: semantic_tokens
-EXPECTED:
-min_tokens: 8
-===
+}'''
 
-TEST: type_in_middle_of_existing_code
-TYPE: edit_sequence
----
-STEP 1:
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/semanticTokens/full", params = { textDocument = { uri = "$uri" } } }
+assertions = [{ op = "gte", path = ["result", "data"], value = 40 }]
+
+[[tests.steps]]
+mode = "type_at"
+line = 12
+col = 4
+text = '''
+print(e.pos.x.to_string() + ", " + e.pos.y.to_string())'''
+
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/semanticTokens/full", params = { textDocument = { uri = "$uri" } } }
+assertions = [{ op = "gte", path = ["result", "data"], value = 40 }]
+
+[[tests]]
+name = "type_in_middle_of_existing_code"
+kind = "edit_sequence"
+
+[[tests.steps]]
+mode = "replace"
+source = '''
 fn add(a: int, b: int) -> int {
     return a + b
 }
@@ -204,27 +259,34 @@ fn add(a: int, b: int) -> int {
 fn main() {
     let result = add(1, 2)
     print(result.to_string())
-}
----
-CHECK: semantic_tokens
-EXPECTED:
-min_tokens: 5
----
-STEP 2 (type at 4:0):
+}'''
+
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/semanticTokens/full", params = { textDocument = { uri = "$uri" } } }
+assertions = [{ op = "gte", path = ["result", "data"], value = 25 }]
+
+[[tests.steps]]
+mode = "type_at"
+line = 4
+col = 0
+text = '''
 
 fn multiply(a: int, b: int) -> int {
     return a * b
-}
----
-CHECK: semantic_tokens
-EXPECTED:
-min_tokens: 8
----
-STEP 3 (type at 10:0):
+}'''
+
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/semanticTokens/full", params = { textDocument = { uri = "$uri" } } }
+assertions = [{ op = "gte", path = ["result", "data"], value = 40 }]
+
+[[tests.steps]]
+mode = "type_at"
+line = 10
+col = 0
+text = '''
     let product = multiply(3, 4)
-    print(product.to_string())
----
-CHECK: semantic_tokens
-EXPECTED:
-min_tokens: 10
-===
+    print(product.to_string())'''
+
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/semanticTokens/full", params = { textDocument = { uri = "$uri" } } }
+assertions = [{ op = "gte", path = ["result", "data"], value = 50 }]

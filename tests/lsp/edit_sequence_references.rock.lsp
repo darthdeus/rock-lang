@@ -1,12 +1,10 @@
-References after a body edit that shifts lines: add/remove a line in one fn,
-then query a symbol in ANOTHER fn -- the returned spans must use post-edit
-offsets. Exercises the real JSON-RPC server across didChange, which the
-in-process BoneWorkspace tests cannot (rock-lsp glue, versioning, threading).
+[[tests]]
+name = "references_shift_after_typing_and_removing_line_in_other_fn"
+kind = "edit_sequence"
 
-TEST: references_shift_after_typing_and_removing_line_in_other_fn
-TYPE: edit_sequence
----
-STEP 1:
+[[tests.steps]]
+mode = "replace"
+source = '''
 fn alpha() -> int {
     return 1
 }
@@ -14,37 +12,41 @@ fn alpha() -> int {
 fn beta() -> int {
     let count = 2
     return count + count
-}
----
-CHECK: references(5, 8)
-EXPECTED:
-5:8
-6:11
-6:19
----
-STEP 2 (type at 1:12):
+}'''
 
-    let pad = 0
----
-CHECK: references(6, 8)
-EXPECTED:
-6:8
-7:11
-7:19
----
-STEP 3 (delete at 2:15, 16):
----
-CHECK: references(5, 8)
-EXPECTED:
-5:8
-6:11
-6:19
-===
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/references", params = { textDocument = { uri = "$uri" }, position = { line = 5, character = 8 }, context = { includeDeclaration = true } } }
+assertions = [{ op = "unordered_equal", path = ["result", "*", "range", "start"], value = [{ line = 5, character = 8 }, { line = 6, character = 11 }, { line = 6, character = 19 }] }]
 
-TEST: enum_variant_references_shift_after_body_edit
-TYPE: edit_sequence
----
-STEP 1:
+[[tests.steps]]
+mode = "type_at"
+line = 1
+col = 12
+text = '''
+
+    let pad = 0'''
+
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/references", params = { textDocument = { uri = "$uri" }, position = { line = 6, character = 8 }, context = { includeDeclaration = true } } }
+assertions = [{ op = "unordered_equal", path = ["result", "*", "range", "start"], value = [{ line = 6, character = 8 }, { line = 7, character = 11 }, { line = 7, character = 19 }] }]
+
+[[tests.steps]]
+mode = "delete_at"
+line = 2
+col = 15
+count = 16
+
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/references", params = { textDocument = { uri = "$uri" }, position = { line = 5, character = 8 }, context = { includeDeclaration = true } } }
+assertions = [{ op = "unordered_equal", path = ["result", "*", "range", "start"], value = [{ line = 5, character = 8 }, { line = 6, character = 11 }, { line = 6, character = 19 }] }]
+
+[[tests]]
+name = "enum_variant_references_shift_after_body_edit"
+kind = "edit_sequence"
+
+[[tests.steps]]
+mode = "replace"
+source = '''
 enum Color {
     Red,
     Green,
@@ -59,48 +61,43 @@ fn beta(c: Color) -> int {
         Color::Red => 1,
         Color::Green => 2,
     }
-}
----
-CHECK: references(11, 15)
-EXPECTED:
-1:4
-11:15
----
-STEP 2:
-SOURCE: 1
-REPLACE: ["    return 1\n", "    let pad = 0\n    return 1 + pad\n"]
----
-CHECK: references(12, 15)
-EXPECTED:
-1:4
-12:15
-===
+}'''
 
-TEST: call_site_references_shift_after_edit_in_other_fn
-TYPE: edit_sequence
----
-STEP 1:
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/references", params = { textDocument = { uri = "$uri" }, position = { line = 11, character = 15 }, context = { includeDeclaration = true } } }
+assertions = [{ op = "unordered_equal", path = ["result", "*", "range", "start"], value = [{ line = 1, character = 4 }, { line = 11, character = 15 }] }]
+
+[[tests.steps]]
+mode = "replace"
+source = { from_step = 1, replace = [["    return 1\n", "    let pad = 0\n    return 1 + pad\n"]] }
+
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/references", params = { textDocument = { uri = "$uri" }, position = { line = 12, character = 15 }, context = { includeDeclaration = true } } }
+assertions = [{ op = "unordered_equal", path = ["result", "*", "range", "start"], value = [{ line = 1, character = 4 }, { line = 12, character = 15 }] }]
+
+[[tests]]
+name = "call_site_references_shift_after_edit_in_other_fn"
+kind = "edit_sequence"
+
+[[tests.steps]]
+mode = "replace"
+source = '''
 fn alpha() -> int {
     return 1
 }
 
 fn beta() -> int {
     return alpha() + alpha()
-}
----
-CHECK: references(5, 12)
-EXPECTED:
-0:3
-5:11
-5:21
----
-STEP 2:
-SOURCE: 1
-REPLACE: ["    return 1\n", "    let pad = 0\n    return 1 + pad\n"]
----
-CHECK: references(6, 12)
-EXPECTED:
-0:3
-6:11
-6:21
-===
+}'''
+
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/references", params = { textDocument = { uri = "$uri" }, position = { line = 5, character = 12 }, context = { includeDeclaration = true } } }
+assertions = [{ op = "unordered_equal", path = ["result", "*", "range", "start"], value = [{ line = 0, character = 3 }, { line = 5, character = 11 }, { line = 5, character = 21 }] }]
+
+[[tests.steps]]
+mode = "replace"
+source = { from_step = 1, replace = [["    return 1\n", "    let pad = 0\n    return 1 + pad\n"]] }
+
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/references", params = { textDocument = { uri = "$uri" }, position = { line = 6, character = 12 }, context = { includeDeclaration = true } } }
+assertions = [{ op = "unordered_equal", path = ["result", "*", "range", "start"], value = [{ line = 0, character = 3 }, { line = 6, character = 11 }, { line = 6, character = 21 }] }]

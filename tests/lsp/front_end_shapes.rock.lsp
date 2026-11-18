@@ -1,6 +1,8 @@
-TEST: complete_macro_with_qualified_type_shapes
-TYPE: completion
----
+[[tests]]
+name = "complete_macro_with_qualified_type_shapes"
+kind = "completion"
+position = [7, 10]
+source = '''
 macro typed_signature(
     a: ref ::demo::Item,
     b: demo::Box<int>,
@@ -9,18 +11,15 @@ macro typed_signature(
 ) -> ::demo::Box<int> { 1 }
 fn main() {
     typed_
-}
----
-OPERATION: completion
-POSITION: line=7, character=10
----
-EXPECTED:
-- typed_signature
-===
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["typed_signature"] }]
 
-TEST: references_follow_nested_macro_path_patterns
-TYPE: references
----
+[[tests]]
+name = "references_follow_nested_macro_path_patterns"
+kind = "references"
+position = [0, 13]
+source = '''
 macro choose(Name: ident, value: expr) {
     match value {
         Outer::Wrap(Name::Leaf) => 1,
@@ -28,22 +27,6 @@ macro choose(Name: ident, value: expr) {
         _ => 0
     }
 }
-fn main() {}
----
-OPERATION: references
-POSITION: line=0, character=13
----
-EXPECTED:
-file: main.rock
-line: 0
-character: 13
-file: main.rock
-line: 2
-character: 20
-file: main.rock
-line: 3
-character: 8
-file: main.rock
-line: 3
-character: 30
-===
+fn main() {}'''
+request = { transport = "cli", argv = ["references", "$target"] }
+checks = [{ op = "unordered_equal", path = ["result", "references", "*", "range", "start"], value = [{ line = 0, character = 13 }, { line = 2, character = 20 }, { line = 3, character = 8 }, { line = 3, character = 30 }] }]

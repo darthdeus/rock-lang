@@ -1,38 +1,38 @@
-TEST: rename_local_variable_simple
-TYPE: rename
----
+[[tests]]
+name = "rename_local_variable_simple"
+kind = "rename"
+position = [1, 8]
+source = '''
 fn main() {
-    let «start»foo«end» = 42
+    let foo = 42
     print(foo)
-}
----
-NEW_NAME: bar
-EXPECTED:
-REPLACE: ["foo", "bar"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "bar"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["foo", "bar"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_function_parameter
-TYPE: rename
----
-fn calculate(«start»x«end»: int, y: int) -> int {
+[[tests]]
+name = "rename_function_parameter"
+kind = "rename"
+position = [0, 13]
+source = '''
+fn calculate(x: int, y: int) -> int {
     return x + y * x
 }
 
 fn main() {
     let result = calculate(10, 20)
     print(result)
-}
----
-NEW_NAME: value
-EXPECTED:
-REPLACE: ["x", "value"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "value"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["x", "value"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_struct_field
-TYPE: rename
----
+[[tests]]
+name = "rename_struct_field"
+kind = "rename"
+position = [1, 4]
+source = '''
 struct Point {
-    «start»x«end»: float,
+    x: float,
     y: float,
 }
 
@@ -43,16 +43,15 @@ fn distance(p: Point) -> float {
 fn main() {
     let p = Point { x: 3.0, y: 4.0 }
     print(p.x)
-}
----
-NEW_NAME: x_coord
-EXPECTED:
-REPLACE: ["x", "x_coord"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "x_coord"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["x", "x_coord"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_function_used_as_bare_value
-TYPE: rename
----
+[[tests]]
+name = "rename_function_used_as_bare_value"
+kind = "rename"
+position = [9, 23]
+source = '''
 fn apply(f: fn(int) -> int, x: int) -> int {
     return f(x)
 }
@@ -62,73 +61,68 @@ fn double(x: int) -> int {
 }
 
 fn main() {
-    let result = apply(«start»double«end», 10)
+    let result = apply(double, 10)
     print(result)
-}
----
-NEW_NAME: triple
-EXPECTED:
-REPLACE: ["double", "triple"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "triple"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["double", "triple"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_function_name
-TYPE: rename
----
+[[tests]]
+name = "rename_function_name"
+kind = "rename"
+position = [4, 3]
+source = '''
 struct Circle {
     radius: float,
 }
 
-fn «start»area«end»(c: Circle) -> float {
+fn area(c: Circle) -> float {
     return 3.14159 * c.radius * c.radius
 }
 
 fn main() {
     let c = Circle { radius: 5.0 }
     print(area(c))
-}
----
-NEW_NAME: calculate_area
-EXPECTED:
-REPLACE: ["area", "calculate_area"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "calculate_area"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["area", "calculate_area"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_to_keyword_error
-TYPE: rename
-SOURCE: rename_local_variable_simple
-POSITION: line=1, character=8
-NEW_NAME: fn
-EXPECTED:
-REFUSED: cannot rename to `fn`: not an identifier
-===
+[[tests]]
+name = "rename_to_keyword_error"
+kind = "rename"
+position = [1, 8]
+source = { from_test = "rename_local_variable_simple" }
+request = { transport = "cli", argv = ["rename", "$target", "fn"] }
+checks = [{ op = "contains", path = ["error", "message"], value = "cannot rename to `fn`: not an identifier" }, { op = "empty", path = ["result", "changes", "*"], missing_is_empty = true, null_is_empty = true }]
 
-TEST: rename_to_several_tokens_error
-TYPE: rename
-SOURCE: rename_local_variable_simple
-POSITION: line=1, character=8
-NEW_NAME: 1 bad
-EXPECTED:
-REFUSED: cannot rename to `1 bad`: not an identifier
-===
+[[tests]]
+name = "rename_to_several_tokens_error"
+kind = "rename"
+position = [1, 8]
+source = { from_test = "rename_local_variable_simple" }
+request = { transport = "cli", argv = ["rename", "$target", "1 bad"] }
+checks = [{ op = "contains", path = ["error", "message"], value = "cannot rename to `1 bad`: not an identifier" }, { op = "empty", path = ["result", "changes", "*"], missing_is_empty = true, null_is_empty = true }]
 
-TEST: rename_generic_type_parameter
-TYPE: rename
----
-fn identity<«start»T«end»>(value: T) -> T {
+[[tests]]
+name = "rename_generic_type_parameter"
+kind = "rename"
+position = [0, 12]
+source = '''
+fn identity<T>(value: T) -> T {
     return value
 }
 
 fn map_pair<T, U>(first: T, second: U) -> (T, U) {
     return (first, second)
-}
----
-NEW_NAME: Element
-EXPECTED:
-REPLACE: ["fn identity<T>(value: T) -> T {", "fn identity<Element>(value: Element) -> Element {"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "Element"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["fn identity<T>(value: T) -> T {", "fn identity<Element>(value: Element) -> Element {"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_in_pattern_match
-TYPE: rename
----
+[[tests]]
+name = "rename_in_pattern_match"
+kind = "rename"
+position = [7, 21]
+source = '''
 enum Option<T> {
     Some(T),
     None,
@@ -136,19 +130,18 @@ enum Option<T> {
 
 fn my_unwrap<T>(opt: Option<T>) -> T? {
     match opt {
-        Option::Some(«start»value«end») => value,
+        Option::Some(value) => value,
         Option::None => null,
     }
-}
----
-NEW_NAME: inner
-EXPECTED:
-REPLACE: ["value", "inner"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "inner"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["value", "inner"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_shorthand_var_x
-TYPE: rename
----
+[[tests]]
+name = "rename_shorthand_var_x"
+kind = "rename"
+position = [10, 20]
+source = '''
 struct Point {
     x: int
     y: int
@@ -159,35 +152,27 @@ fn main() {
     let y = 200
 
     // Rename on shorthand variable 'x'
-    let p = Point { «cursor»x, y }
+    let p = Point { x, y }
     print(x)
-}
----
-NEW_NAME: x_coord
-EXPECTED:
-REPLACE: ["    let x = 100", "    let x_coord = 100"]
-REPLACE: ["    let p = Point { x, y }", "    let p = Point { x: x_coord, y }"]
-REPLACE: ["    print(x)", "    print(x_coord)"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "x_coord"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["    let x = 100", "    let x_coord = 100"], ["    let p = Point { x, y }", "    let p = Point { x: x_coord, y }"], ["    print(x)", "    print(x_coord)"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_shorthand_var_y
-TYPE: rename
-SOURCE: rename_shorthand_var_x
-REPLACE: ["    // Rename on shorthand variable 'x'", "    // Rename on shorthand variable 'y'"]
-REPLACE: ["    print(x)", "    print(y)"]
-POSITION: line=10, character=23
-NEW_NAME: y_coord
-EXPECTED:
-REPLACE: ["    let y = 200", "    let y_coord = 200"]
-REPLACE: ["    let p = Point { x, y }", "    let p = Point { x, y: y_coord }"]
-REPLACE: ["    print(y)", "    print(y_coord)"]
-===
+[[tests]]
+name = "rename_shorthand_var_y"
+kind = "rename"
+position = [10, 23]
+source = { from_test = "rename_shorthand_var_x", replace = [["    // Rename on shorthand variable 'x'", "    // Rename on shorthand variable 'y'"], ["    print(x)", "    print(y)"]] }
+request = { transport = "cli", argv = ["rename", "$target", "y_coord"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["    let y = 200", "    let y_coord = 200"], ["    let p = Point { x, y }", "    let p = Point { x, y: y_coord }"], ["    print(y)", "    print(y_coord)"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_enum_variant_from_decl
-TYPE: rename
----
+[[tests]]
+name = "rename_enum_variant_from_decl"
+kind = "rename"
+position = [1, 4]
+source = '''
 enum Color {
-    «start»Red«end»,
+    Red,
     Green,
     Blue,
 }
@@ -203,34 +188,32 @@ fn describe(c: Color) -> int {
 fn main() {
     let c = Color::Red
     print(describe(c))
-}
----
-NEW_NAME: Crimson
-EXPECTED:
-REPLACE: ["Red", "Crimson"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "Crimson"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["Red", "Crimson"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_enum_variant_from_use
-TYPE: rename
----
+[[tests]]
+name = "rename_enum_variant_from_use"
+kind = "rename"
+position = [6, 19]
+source = '''
 enum Color {
     Red,
     Green,
 }
 
 fn main() {
-    let c = Color::«cursor»Red
+    let c = Color::Red
     print(c)
-}
----
-NEW_NAME: Crimson
-EXPECTED:
-REPLACE: ["Red", "Crimson"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "Crimson"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["Red", "Crimson"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_enum_variant_from_pattern
-TYPE: rename
----
+[[tests]]
+name = "rename_enum_variant_from_pattern"
+kind = "rename"
+position = [7, 15]
+source = '''
 enum Color {
     Red,
     Green,
@@ -238,25 +221,24 @@ enum Color {
 
 fn describe(c: Color) -> int {
     match c {
-        Color::«cursor»Red => 1,
+        Color::Red => 1,
         Color::Green => 2,
     }
 }
 
 fn main() {
     print(describe(Color::Red))
-}
----
-NEW_NAME: Crimson
-EXPECTED:
-REPLACE: ["Red", "Crimson"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "Crimson"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["Red", "Crimson"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_enum_tuple_variant
-TYPE: rename
----
+[[tests]]
+name = "rename_enum_tuple_variant"
+kind = "rename"
+position = [1, 4]
+source = '''
 enum Shape {
-    «start»Circle«end»(float),
+    Circle(float),
     Square(float),
 }
 
@@ -270,18 +252,17 @@ fn area(s: Shape) -> float {
 fn main() {
     let s = Shape::Circle(2.0)
     print(area(s))
-}
----
-NEW_NAME: Round
-EXPECTED:
-REPLACE: ["Circle", "Round"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "Round"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["Circle", "Round"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_enum_variant_same_name_other_enum_untouched
-TYPE: rename
----
+[[tests]]
+name = "rename_enum_variant_same_name_other_enum_untouched"
+kind = "rename"
+position = [1, 4]
+source = '''
 enum Color {
-    «start»Red«end»,
+    Red,
     Green,
 }
 
@@ -295,32 +276,16 @@ fn main() {
     let p = Paint::Red
     print(c)
     print(p)
-}
----
-NEW_NAME: Crimson
-EXPECTED:
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "Crimson"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = "enum Color {\n    Crimson,\n    Green,\n}\n\nenum Paint {\n    Red,\n    Blue,\n}\n\nfn main() {\n    let c = Color::Crimson\n    let p = Paint::Red\n    print(c)\n    print(p)\n}", encoding = "cli_bytes", trim = "end" }]
+
+[[tests]]
+name = "rename_enum_name"
+kind = "rename"
+position = [0, 5]
+source = '''
 enum Color {
-    Crimson,
-    Green,
-}
-
-enum Paint {
-    Red,
-    Blue,
-}
-
-fn main() {
-    let c = Color::Crimson
-    let p = Paint::Red
-    print(c)
-    print(p)
-}
-===
-
-TEST: rename_enum_name
-TYPE: rename
----
-enum «start»Color«end» {
     Red,
     Green,
 }
@@ -335,32 +300,30 @@ fn describe(c: Color) -> int {
 fn main() {
     let c = Color::Red
     print(describe(c))
-}
----
-NEW_NAME: Hue
-EXPECTED:
-REPLACE: ["Color", "Hue"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "Hue"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["Color", "Hue"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_generic_type_param_scoped
-TYPE: rename
----
-fn first<«start»T«end»>(x: T, y: T) -> T {
+[[tests]]
+name = "rename_generic_type_param_scoped"
+kind = "rename"
+position = [0, 9]
+source = '''
+fn first<T>(x: T, y: T) -> T {
     return x
 }
 
 fn second<T>(v: T) -> T {
     return v
-}
----
-NEW_NAME: Item
-EXPECTED:
-REPLACE: ["fn first<T>(x: T, y: T) -> T {", "fn first<Item>(x: Item, y: Item) -> Item {"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "Item"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["fn first<T>(x: T, y: T) -> T {", "fn first<Item>(x: Item, y: Item) -> Item {"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_pattern_shorthand_binding
-TYPE: rename
----
+[[tests]]
+name = "rename_pattern_shorthand_binding"
+kind = "rename"
+position = [7, 16]
+source = '''
 struct Point {
     x: int
     y: int
@@ -368,20 +331,19 @@ struct Point {
 
 fn get_sum(p: Point) -> int {
     match p {
-        Point { «start»x«end», y } => x + y,
+        Point { x, y } => x + y,
     }
-}
----
-NEW_NAME: qx
-EXPECTED:
-REPLACE: ["        Point { x, y } => x + y,", "        Point { x: qx, y } => qx + y,"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "qx"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["        Point { x, y } => x + y,", "        Point { x: qx, y } => qx + y,"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_struct_field_with_shorthand_literal
-TYPE: rename
----
+[[tests]]
+name = "rename_struct_field_with_shorthand_literal"
+kind = "rename"
+position = [1, 4]
+source = '''
 struct Point {
-    «start»x«end»: int
+    x: int
     y: int
 }
 
@@ -390,19 +352,16 @@ fn main() {
     let y = 2
     let p = Point { x, y }
     print(p.x)
-}
----
-NEW_NAME: px
-EXPECTED:
-REPLACE: ["    x: int", "    px: int"]
-REPLACE: ["    let p = Point { x, y }", "    let p = Point { px: x, y }"]
-REPLACE: ["    print(p.x)", "    print(p.px)"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "px"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["    x: int", "    px: int"], ["    let p = Point { x, y }", "    let p = Point { px: x, y }"], ["    print(p.x)", "    print(p.px)"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_struct_in_nullable_annotation
-TYPE: rename
----
-struct «start»Mob«end» {
+[[tests]]
+name = "rename_struct_in_nullable_annotation"
+kind = "rename"
+position = [0, 7]
+source = '''
+struct Mob {
     hp: int
 }
 
@@ -415,18 +374,17 @@ fn take(m: Mob?) {
 fn give() -> Mob? {
     let held: Mob? = null
     return held
-}
----
-NEW_NAME: Beast
-EXPECTED:
-REPLACE: ["Mob", "Beast"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "Beast"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["Mob", "Beast"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_field_through_safe_nav
-TYPE: rename
----
+[[tests]]
+name = "rename_field_through_safe_nav"
+kind = "rename"
+position = [1, 4]
+source = '''
 struct Inner {
-    «start»text«end»: string
+    text: string
 }
 
 struct Outer {
@@ -436,56 +394,53 @@ struct Outer {
 fn main() {
     let o = Outer { inner: null }
     print(o.inner?.text ?? "none")
-}
----
-NEW_NAME: label
-EXPECTED:
-REPLACE: ["text", "label"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "label"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["text", "label"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_fn_at_safe_nav_call_site
-TYPE: rename
----
+[[tests]]
+name = "rename_fn_at_safe_nav_call_site"
+kind = "rename"
+position = [4, 3]
+source = '''
 struct Mob {
     hp: int
 }
 
-fn «start»mob_heal«end»(m: Mob) -> int {
+fn mob_heal(m: Mob) -> int {
     return m.hp
 }
 
 fn main() {
     let m: Mob? = Mob { hp: 1 }
     print(m?.mob_heal() ?? 0)
-}
----
-NEW_NAME: mob_restore
-EXPECTED:
-REPLACE: ["mob_heal", "mob_restore"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "mob_restore"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["mob_heal", "mob_restore"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_field_with_sibling_ref_default
-TYPE: rename
----
+[[tests]]
+name = "rename_field_with_sibling_ref_default"
+kind = "rename"
+position = [1, 4]
+source = '''
 struct Spell {
-    «start»power«end»: int,
+    power: int,
     boosted: int = .power,
 }
 
 fn main() {
     let s = Spell { power: 2 }
     print(s.boosted)
-}
----
-NEW_NAME: strength
-EXPECTED:
-REPLACE: ["power", "strength"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "strength"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["power", "strength"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_param_updates_named_arg_call_sites
-TYPE: rename
----
-fn spawn_it(«start»count«end»: int, size: float) {
+[[tests]]
+name = "rename_param_updates_named_arg_call_sites"
+kind = "rename"
+position = [0, 12]
+source = '''
+fn spawn_it(count: int, size: float) {
     print(count)
     print(size)
 }
@@ -493,34 +448,32 @@ fn spawn_it(«start»count«end»: int, size: float) {
 fn main() {
     spawn_it(count: 3, size: 1.0)
     spawn_it(4, size: 2.0)
-}
----
-NEW_NAME: amount
-EXPECTED:
-REPLACE: ["count", "amount"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "amount"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["count", "amount"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_field_at_fieldref_key_path_arg
-TYPE: rename
----
+[[tests]]
+name = "rename_field_at_fieldref_key_path_arg"
+kind = "rename"
+position = [1, 4]
+source = '''
 struct Mob {
-    «start»health«end»: int,
+    health: int,
 }
 
 fn main() {
     let m = Mob { health: 10 }
     print("{field_get(m, .health)}")
-}
----
-NEW_NAME: vitality
-EXPECTED:
-REPLACE: ["health", "vitality"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "vitality"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["health", "vitality"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_global_from_decl
-TYPE: rename
----
-global «start»SCORE«end»: int = 0
+[[tests]]
+name = "rename_global_from_decl"
+kind = "rename"
+position = [0, 7]
+source = '''
+global SCORE: int = 0
 
 fn bump() {
     SCORE = SCORE + 1
@@ -529,34 +482,31 @@ fn bump() {
 fn main() {
     bump()
     print("s {SCORE}")
-}
----
-NEW_NAME: POINTS
-EXPECTED:
-REPLACE: ["SCORE", "POINTS"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "POINTS"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["SCORE", "POINTS"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_global_from_use_site
-TYPE: rename
----
+[[tests]]
+name = "rename_global_from_use_site"
+kind = "rename"
+position = [4, 4]
+source = '''
 global SCORE: int = 0
 global SCOREBOARD: int = 1
 
 fn bump() {
-    «cursor»SCORE = SCORE + 1
+    SCORE = SCORE + 1
     SCOREBOARD = 2
-}
----
-NEW_NAME: POINTS
-EXPECTED:
-REPLACE: ["global SCORE: int = 0", "global POINTS: int = 0"]
-REPLACE: ["    SCORE = SCORE + 1", "    POINTS = POINTS + 1"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "POINTS"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["global SCORE: int = 0", "global POINTS: int = 0"], ["    SCORE = SCORE + 1", "    POINTS = POINTS + 1"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_newtype_from_decl
-TYPE: rename
----
-newtype «start»UserId«end»(int)
+[[tests]]
+name = "rename_newtype_from_decl"
+kind = "rename"
+position = [0, 8]
+source = '''
+newtype UserId(int)
 
 fn greet(id: UserId) {
     print(id)
@@ -565,27 +515,25 @@ fn greet(id: UserId) {
 fn main() {
     let id = UserId(42)
     greet(id)
-}
----
-NEW_NAME: PlayerId
-EXPECTED:
-REPLACE: ["UserId", "PlayerId"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "PlayerId"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["UserId", "PlayerId"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_newtype_from_annotation
-TYPE: rename
-SOURCE: rename_newtype_from_decl
-POSITION: line=2, character=13
-NEW_NAME: PlayerId
-EXPECTED:
-REPLACE: ["UserId", "PlayerId"]
-===
+[[tests]]
+name = "rename_newtype_from_annotation"
+kind = "rename"
+position = [2, 13]
+source = { from_test = "rename_newtype_from_decl" }
+request = { transport = "cli", argv = ["rename", "$target", "PlayerId"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["UserId", "PlayerId"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_record_variant_field_from_decl
-TYPE: rename
----
+[[tests]]
+name = "rename_record_variant_field_from_decl"
+kind = "rename"
+position = [1, 13]
+source = '''
 enum Item {
-    Potion { «start»strength«end»: int },
+    Potion { strength: int },
     Coin,
 }
 
@@ -595,36 +543,46 @@ fn main() {
         Item::Potion { strength } => print(strength),
         Item::Coin => print(0),
     }
-}
----
-NEW_NAME: power
-EXPECTED:
-REPLACE: ["    Potion { strength: int },", "    Potion { power: int },"]
-REPLACE: ["    let i = Item::Potion { strength: 3 }", "    let i = Item::Potion { power: 3 }"]
-REPLACE: ["        Item::Potion { strength } => print(strength),", "        Item::Potion { power: strength } => print(strength),"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "power"] }
 
-TEST: rename_record_variant_field_from_literal
-TYPE: rename
----
+[[tests.checks]]
+op = "empty"
+path = ["error"]
+missing_is_empty = true
+null_is_empty = true
+
+[[tests.checks]]
+op = "applied_text_equals"
+path = ["result", "changes"]
+file = "$primary"
+source = "primary"
+expected = { from_fixture = true, replace = [["    Potion { strength: int },", "    Potion { power: int },"], ["    let i = Item::Potion { strength: 3 }", "    let i = Item::Potion { power: 3 }"], ["        Item::Potion { strength } => print(strength),", "        Item::Potion { power: strength } => print(strength),"]] }
+encoding = "cli_bytes"
+trim = "end"
+
+[[tests]]
+name = "rename_record_variant_field_from_literal"
+kind = "rename"
+position = [5, 27]
+source = '''
 enum Item {
     Potion { strength: int },
 }
 
 fn main() {
-    let i = Item::Potion { «cursor»strength: 3 }
+    let i = Item::Potion { strength: 3 }
     print(i)
-}
----
-NEW_NAME: power
-EXPECTED:
-REPLACE: ["strength", "power"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "power"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["strength", "power"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_decorator_from_decl
-TYPE: rename
----
-deco «start»cool«end» {
+[[tests]]
+name = "rename_decorator_from_decl"
+kind = "rename"
+position = [0, 5]
+source = '''
+deco cool {
     print(1)
 }
 
@@ -636,26 +594,22 @@ fn thing() {
 @cool
 fn other() {
     print(2)
-}
----
-NEW_NAME: fancy
-EXPECTED:
-REPLACE: ["cool", "fancy"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "fancy"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["cool", "fancy"]] }, encoding = "cli_bytes", trim = "end" }]
 
-TEST: rename_decorator_from_application
-TYPE: rename
----
+[[tests]]
+name = "rename_decorator_from_application"
+kind = "rename"
+position = [4, 1]
+source = '''
 deco cool {
     print(1)
 }
 
-@«cursor»cool
+@cool
 fn thing() {
     print(1)
-}
----
-NEW_NAME: fancy
-EXPECTED:
-REPLACE: ["cool", "fancy"]
-===
+}'''
+request = { transport = "cli", argv = ["rename", "$target", "fancy"] }
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["cool", "fancy"]] }, encoding = "cli_bytes", trim = "end" }]

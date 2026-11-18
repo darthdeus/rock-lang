@@ -1,43 +1,31 @@
-TEST: hover_enum_variant_pattern_names_the_variant
-TYPE: hover
----
+[[tests]]
+name = "hover_enum_variant_pattern_names_the_variant"
+kind = "hover"
+position = [4, 17]
+source = '''
 enum MobKind { Skeleton, Zombie }
 
 fn name(k: MobKind) -> string {
     match k {
-        MobKind::«cursor»Skeleton => "s"
+        MobKind::Skeleton => "s"
         MobKind::Zombie => "z"
     }
-}
----
-EXPECTED:
-```rock
-MobKind::Skeleton
-```
-===
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "```rock\nMobKind::Skeleton\n```" }]
 
-TEST: hover_enum_qualifier_in_pattern_shows_the_body
-TYPE: hover
-SOURCE: hover_enum_variant_pattern_names_the_variant
-POSITION: line=4, character=8
-EXPECTED:
-```rock
-enum MobKind {
-  Skeleton,
-  Zombie,
-}
-```
-===
+[[tests]]
+name = "hover_enum_qualifier_in_pattern_shows_the_body"
+kind = "hover"
+position = [4, 8]
+source = { from_test = "hover_enum_variant_pattern_names_the_variant" }
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "```rock\nenum MobKind {\n  Skeleton,\n  Zombie,\n}\n```" }]
 
-TEST: hover_double_colon_in_pattern_shows_the_enum_body
-TYPE: hover
-SOURCE: hover_enum_qualifier_in_pattern_shows_the_body
-POSITION: line=4, character=15
-EXPECTED:
-```rock
-enum MobKind {
-  Skeleton,
-  Zombie,
-}
-```
-===
+[[tests]]
+name = "hover_double_colon_in_pattern_shows_the_enum_body"
+kind = "hover"
+position = [4, 15]
+source = { from_test = "hover_enum_qualifier_in_pattern_shows_the_body" }
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "```rock\nenum MobKind {\n  Skeleton,\n  Zombie,\n}\n```" }]

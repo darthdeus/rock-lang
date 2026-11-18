@@ -1,50 +1,44 @@
-TEST: named_arg_completion_at_call_site
-TYPE: completion
----
+[[tests]]
+name = "named_arg_completion_at_call_site"
+kind = "completion"
+position = [5, 20]
+source = '''
 fn greet(greeting: string, name: string) -> string {
     return greeting
 }
 
 fn main() {
-    let x = greet(gr«cursor»)
-}
----
-EXPECTED:
-- greeting:
-===
+    let x = greet(gr)
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["greeting:"] }]
 
-TEST: named_arg_completion_empty_prefix
-TYPE: completion
----
+[[tests]]
+name = "named_arg_completion_empty_prefix"
+kind = "completion"
+position = [4, 14]
+source = '''
 fn configure(width: int, height: int, title: string) {
 }
 
 fn main() {
-    configure(«cursor»)
-}
----
-EXPECTED:
-- width:
-- height:
-- title:
-===
+    configure()
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["width:", "height:", "title:"] }]
 
-TEST: named_arg_completion_skips_earlier_named
-TYPE: completion
-SOURCE: named_arg_completion_empty_prefix
-REPLACE: ["    configure()", "    configure(width: 10, )"]
-POSITION: line=4, character=25
-EXPECTED:
-- height:
-- title:
-===
+[[tests]]
+name = "named_arg_completion_skips_earlier_named"
+kind = "completion"
+position = [4, 25]
+source = { from_test = "named_arg_completion_empty_prefix", replace = [["    configure()", "    configure(width: 10, )"]] }
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["height:", "title:"] }]
 
-TEST: named_arg_completion_skips_positional
-TYPE: completion
-SOURCE: named_arg_completion_empty_prefix
-REPLACE: ["    configure()", "    configure(10, )"]
-POSITION: line=4, character=18
-EXPECTED:
-- height:
-- title:
-===
+[[tests]]
+name = "named_arg_completion_skips_positional"
+kind = "completion"
+position = [4, 18]
+source = { from_test = "named_arg_completion_empty_prefix", replace = [["    configure()", "    configure(10, )"]] }
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["height:", "title:"] }]

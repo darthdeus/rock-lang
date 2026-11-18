@@ -1,25 +1,29 @@
-TEST: inlay_hints_let_bindings
-TYPE: inlay_hints
----
+[[tests]]
+name = "inlay_hints_let_bindings"
+kind = "inlay_hints"
+source = '''
 fn main() {
     let x = 42
     let y = "hello"
     let z = [1, 2, 3]
     let w = true
-}
----
-EXPECTED:
-fn main() {
-    let x«hint:: int» = 42
-    let y«hint:: string» = "hello"
-    let z«hint:: [int]» = [1, 2, 3]
-    let w«hint:: bool» = true
-}
-===
+}'''
+request = { transport = "cli", argv = ["inlay-hints", "$file"] }
 
-TEST: inlay_hints_complex_types
-TYPE: inlay_hints
----
+[[tests.checks]]
+op = "contains_all"
+path = ["result", "hints"]
+value = [
+  { position = { line = 1 }, label = { text = "int", trim = true, strip_prefix = ":" } },
+  { position = { line = 2 }, label = { text = "string", trim = true, strip_prefix = ":" } },
+  { position = { line = 3 }, label = { text = "[int]", trim = true, strip_prefix = ":" } },
+  { position = { line = 4 }, label = { text = "bool", trim = true, strip_prefix = ":" } },
+]
+
+[[tests]]
+name = "inlay_hints_complex_types"
+kind = "inlay_hints"
+source = '''
 struct Point {
     x: float,
     y: float,
@@ -30,25 +34,14 @@ fn main() {
     let points = [p, Point { x: 3.0, y: 4.0 }]
     let map = map_new()
     map.insert("origin", p)
-}
----
-EXPECTED:
-struct Point {
-    x: float,
-    y: float,
-}
+}'''
+request = { transport = "cli", argv = ["inlay-hints", "$file"] }
+checks = [{ op = "contains_all", path = ["result", "hints"], value = [{ position = { line = 6 }, label = { text = "Point", trim = true, strip_prefix = ":" } }, { position = { line = 7 }, label = { text = "[Point]", trim = true, strip_prefix = ":" } }, { position = { line = 8 }, label = { text = "Map<string, Point>", trim = true, strip_prefix = ":" } }] }]
 
-fn main() {
-    let p«hint:: Point» = Point { x: 1.0, y: 2.0 }
-    let points«hint:: [Point]» = [p, Point { x: 3.0, y: 4.0 }]
-    let map«hint:: Map<string, Point>» = map_new()
-    map.insert("origin", p)
-}
-===
-
-TEST: inlay_hints_function_parameters
-TYPE: inlay_hints
----
+[[tests]]
+name = "inlay_hints_function_parameters"
+kind = "inlay_hints"
+source = '''
 fn calculate(x: int, y: int, operation: string) -> int {
     if operation == "add" {
         return x + y
@@ -59,25 +52,23 @@ fn calculate(x: int, y: int, operation: string) -> int {
 
 fn main() {
     let result = calculate(10, 20, "add")
-}
----
-EXPECTED:
-fn calculate(x: int, y: int, operation: string) -> int {
-    if operation == "add" {
-        return x + y
-    } else {
-        return x - y
-    }
-}
+}'''
+request = { transport = "cli", argv = ["inlay-hints", "$file"] }
 
-fn main() {
-    let result«hint:: int» = calculate(«hint::x:»10, «hint::y:»20, «hint::operation:»"add")
-}
-===
+[[tests.checks]]
+op = "contains_all"
+path = ["result", "hints"]
+value = [
+  { position = { line = 9 }, label = { text = "int", trim = true, strip_prefix = ":" } },
+  { position = { line = 9 }, label = { text = "x:", trim = true, strip_prefix = ":" } },
+  { position = { line = 9 }, label = { text = "y:", trim = true, strip_prefix = ":" } },
+  { position = { line = 9 }, label = { text = "operation:", trim = true, strip_prefix = ":" } },
+]
 
-TEST: inlay_hints_generic_types
-TYPE: inlay_hints
----
+[[tests]]
+name = "inlay_hints_generic_types"
+kind = "inlay_hints"
+source = '''
 fn identity<T>(value: T) -> T {
     return value
 }
@@ -86,23 +77,24 @@ fn main() {
     let num = identity(42)
     let text = identity("hello")
     let list = identity([1, 2, 3])
-}
----
-EXPECTED:
-fn identity<T>(value: T) -> T {
-    return value
-}
+}'''
+request = { transport = "cli", argv = ["inlay-hints", "$file"] }
 
-fn main() {
-    let num«hint:: int» = identity(«hint::value:»42)
-    let text«hint:: string» = identity(«hint::value:»"hello")
-    let list«hint:: [int]» = identity([1, 2, 3])
-}
-===
+[[tests.checks]]
+op = "contains_all"
+path = ["result", "hints"]
+value = [
+  { position = { line = 5 }, label = { text = "int", trim = true, strip_prefix = ":" } },
+  { position = { line = 5 }, label = { text = "value:", trim = true, strip_prefix = ":" } },
+  { position = { line = 6 }, label = { text = "string", trim = true, strip_prefix = ":" } },
+  { position = { line = 6 }, label = { text = "value:", trim = true, strip_prefix = ":" } },
+  { position = { line = 7 }, label = { text = "[int]", trim = true, strip_prefix = ":" } },
+]
 
-TEST: inlay_hints_nullable_types
-TYPE: inlay_hints
----
+[[tests]]
+name = "inlay_hints_nullable_types"
+kind = "inlay_hints"
+source = '''
 fn find_user(id: int) -> string? {
     if id == 1 {
         return "Alice"
@@ -114,42 +106,35 @@ fn find_user(id: int) -> string? {
 fn main() {
     let user = find_user(1)
     let missing = find_user(999)
-}
----
-EXPECTED:
-fn find_user(id: int) -> string? {
-    if id == 1 {
-        return "Alice"
-    } else {
-        return null
-    }
-}
+}'''
+request = { transport = "cli", argv = ["inlay-hints", "$file"] }
 
-fn main() {
-    let user«hint:: string?» = find_user(«hint::id:»1)
-    let missing«hint:: string?» = find_user(«hint::id:»999)
-}
-===
+[[tests.checks]]
+op = "contains_all"
+path = ["result", "hints"]
+value = [
+  { position = { line = 9 }, label = { text = "string?", trim = true, strip_prefix = ":" } },
+  { position = { line = 9 }, label = { text = "id:", trim = true, strip_prefix = ":" } },
+  { position = { line = 10 }, label = { text = "string?", trim = true, strip_prefix = ":" } },
+  { position = { line = 10 }, label = { text = "id:", trim = true, strip_prefix = ":" } },
+]
 
-TEST: inlay_hints_closures
-TYPE: inlay_hints
----
+[[tests]]
+name = "inlay_hints_closures"
+kind = "inlay_hints"
+source = '''
 fn main() {
     let add = (a, b) => a + b
     let multiply = (x: int, y: int) => { return x * y }
     let greet = (name) => print("Hello, " + name)
-}
----
-EXPECTED:
-fn main() {
-    let add = (a, b) => a + b
-    let multiply«hint:: fn(int, int) -> int» = (x: int, y: int) => { return x * y }
-    let greet = (name) => print("Hello, " + name)
-}
-===
-TEST: inlay_hints_for_loop_variable
-TYPE: inlay_hints
----
+}'''
+request = { transport = "cli", argv = ["inlay-hints", "$file"] }
+checks = [{ op = "contains_all", path = ["result", "hints"], value = [{ position = { line = 2 }, label = { text = "fn(int, int) -> int", trim = true, strip_prefix = ":" } }] }]
+
+[[tests]]
+name = "inlay_hints_for_loop_variable"
+kind = "inlay_hints"
+source = '''
 struct Item { name: string }
 
 fn main() {
@@ -157,22 +142,14 @@ fn main() {
     for item in items {
         print(item.name)
     }
-}
----
-EXPECTED:
-struct Item { name: string }
+}'''
+request = { transport = "cli", argv = ["inlay-hints", "$file"] }
+checks = [{ op = "contains_all", path = ["result", "hints"], value = [{ position = { line = 4 }, label = { text = "Item", trim = true, strip_prefix = ":" } }] }]
 
-fn main() {
-    let items: [Item] = vec_new()
-    for item«hint:: Item» in items {
-        print(item.name)
-    }
-}
-===
-
-TEST: inlay_hints_match_arm_enum_variant
-TYPE: inlay_hints
----
+[[tests]]
+name = "inlay_hints_match_arm_enum_variant"
+kind = "inlay_hints"
+source = '''
 struct Point { x: int, y: int }
 
 enum Opt {
@@ -186,28 +163,14 @@ fn main() {
         Opt::Some(p) => print(p.x),
         Opt::None => {},
     }
-}
----
-EXPECTED:
-struct Point { x: int, y: int }
+}'''
+request = { transport = "cli", argv = ["inlay-hints", "$file"] }
+checks = [{ op = "contains_all", path = ["result", "hints"], value = [{ position = { line = 8 }, label = { text = "Opt", trim = true, strip_prefix = ":" } }, { position = { line = 10 }, label = { text = "Point", trim = true, strip_prefix = ":" } }] }]
 
-enum Opt {
-    None,
-    Some(Point),
-}
-
-fn main() {
-    let o«hint:: Opt» = Opt::Some(Point { x: 1, y: 2 })
-    match o {
-        Opt::Some(p«hint:: Point») => print(p.x),
-        Opt::None => {},
-    }
-}
-===
-
-TEST: inlay_hints_dform_receiver
-TYPE: inlay_hints
----
+[[tests]]
+name = "inlay_hints_dform_receiver"
+kind = "inlay_hints"
+source = '''
 struct Mob { health: float }
 
 fn Mob.take_damage(m, amount: float) {
@@ -216,16 +179,6 @@ fn Mob.take_damage(m, amount: float) {
 
 fn Vec<T>.first(v) -> T {
     return v[0]
-}
----
-EXPECTED:
-struct Mob { health: float }
-
-fn Mob.take_damage(m«hint:: Mob», amount: float) {
-    m.health = m.health - amount
-}
-
-fn Vec<T>.first(v«hint:: Vec<T>») -> T {
-    return v[0]
-}
-===
+}'''
+request = { transport = "cli", argv = ["inlay-hints", "$file"] }
+checks = [{ op = "contains_all", path = ["result", "hints"], value = [{ position = { line = 2 }, label = { text = "Mob", trim = true, strip_prefix = ":" } }, { position = { line = 6 }, label = { text = "Vec<T>", trim = true, strip_prefix = ":" } }] }]

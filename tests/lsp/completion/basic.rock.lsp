@@ -1,6 +1,8 @@
-TEST: complete_struct_fields
-TYPE: completion
----
+[[tests]]
+name = "complete_struct_fields"
+kind = "completion"
+position = [7, 6]
+source = '''
 struct Point {
     x: int,
     y: int,
@@ -8,17 +10,16 @@ struct Point {
 
 fn main() {
     let p = Point { x: 10, y: 20 }
-    p.«cursor»
-}
----
-EXPECTED:
-- x: int
-- y: int
-===
+    p.
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["x: int", "y: int"] }]
 
-TEST: complete_method_calls
-TYPE: completion
----
+[[tests]]
+name = "complete_method_calls"
+kind = "completion"
+position = [7, 9]
+source = '''
 struct Rectangle {
     width: float,
     height: float,
@@ -26,46 +27,44 @@ struct Rectangle {
 
 fn main() {
     let rect = Rectangle { width: 10.0, height: 20.0 }
-    rect.«cursor»
-}
----
-EXPECTED:
-- width: float
-- height: float
-===
+    rect.
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["width: float", "height: float"] }]
 
-
-TEST: complete_local_variables
-TYPE: completion
----
+[[tests]]
+name = "complete_local_variables"
+kind = "completion"
+position = [5, 16]
+source = '''
 fn calculate() {
     let first_number = 42
     let second_number = 84
     let result = first_number + second_number
     
-    let sum = fi«cursor»
-}
----
-EXPECTED:
-- first_number
-===
+    let sum = fi
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["first_number"] }]
 
-TEST: complete_function_parameters
-TYPE: completion
----
+[[tests]]
+name = "complete_function_parameters"
+kind = "completion"
+position = [1, 9]
+source = '''
 fn process(input_data: string, max_length: int, verbose: bool) {
-    if ve«cursor» == true {
+    if ve == true {
         print("debug")
     }
-}
----
-EXPECTED:
-- verbose
-===
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["verbose"] }]
 
-TEST: complete_function_names
-TYPE: completion
----
+[[tests]]
+name = "complete_function_names"
+kind = "completion"
+position = [12, 14]
+source = '''
 fn sqrt(x: float) -> float {
     return x * x
 }
@@ -78,16 +77,16 @@ fn abs(x: float) -> float {
 }
 
 fn main() {
-    let x = sq«cursor»
-}
----
-EXPECTED:
-- sqrt
-===
+    let x = sq
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["sqrt"] }]
 
-TEST: complete_struct_fields_in_invalid_if
-TYPE: completion
----
+[[tests]]
+name = "complete_struct_fields_in_invalid_if"
+kind = "completion"
+position = [7, 17]
+source = '''
 struct Player {
     position_x: float,
     position_y: float,
@@ -95,17 +94,16 @@ struct Player {
 }
 
 fn foo(player: Player) {
-    if player.pos«cursor»
-}
----
-EXPECTED:
-- position_x: float
-- position_y: float
-===
+    if player.pos
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["position_x: float", "position_y: float"] }]
 
-TEST: complete_in_incomplete_function_call
-TYPE: completion
----
+[[tests]]
+name = "complete_in_incomplete_function_call"
+kind = "completion"
+position = [7, 12]
+source = '''
 struct Vector3 {
     x: float,
     y: float,
@@ -113,18 +111,16 @@ struct Vector3 {
 }
 
 fn process(v: Vector3) {
-    print(v.«cursor»
-}
----
-EXPECTED:
-- x: float
-- y: float
-- z: float
-===
+    print(v.
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["x: float", "y: float", "z: float"] }]
 
-TEST: complete_with_missing_bracket
-TYPE: completion
----
+[[tests]]
+name = "complete_with_missing_bracket"
+kind = "completion"
+position = [7, 16]
+source = '''
 struct Config {
     debug_mode: bool,
     max_connections: int,
@@ -132,50 +128,49 @@ struct Config {
 
 fn setup() {
     let cfg = Config { debug_mode: true, max_connections: 100 }
-    if cfg.debug«cursor»
+    if cfg.debug
         print("Debug enabled")
     }
-}
----
-EXPECTED:
-- debug_mode: bool
-===
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["debug_mode: bool"] }]
 
-TEST: complete_local_vars_with_syntax_error
-TYPE: completion
----
+[[tests]]
+name = "complete_local_vars_with_syntax_error"
+kind = "completion"
+position = [5, 19]
+source = '''
 fn calculate() {
     let first_value = 10
     let second_value = 20
     let invalid_syntax = 
     
-    let result = fi«cursor»
-}
----
-EXPECTED:
-- first_value
-===
+    let result = fi
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["first_value"] }]
 
-TEST: complete_method_in_broken_expression
-TYPE: completion
----
+[[tests]]
+name = "complete_method_in_broken_expression"
+kind = "completion"
+position = [6, 20]
+source = '''
 struct Database {
     connection_count: int,
     is_connected: bool,
 }
 
 fn check_status(db: Database) {
-    let status = db.«cursor» && some_undefined_var
-}
----
-EXPECTED:
-- connection_count: int
-- is_connected: bool
-===
+    let status = db. && some_undefined_var
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["connection_count: int", "is_connected: bool"] }]
 
-TEST: complete_nested_field_access_incomplete
-TYPE: completion
----
+[[tests]]
+name = "complete_nested_field_access_incomplete"
+kind = "completion"
+position = [11, 24]
+source = '''
 struct Point {
     x: float,
     y: float,
@@ -187,17 +182,16 @@ struct Line {
 }
 
 fn get_distance(line: Line) {
-    let dx = line.start.«cursor»
-    // Missing closing brace and rest of function
----
-EXPECTED:
-- x: float
-- y: float
-===
+    let dx = line.start.
+    // Missing closing brace and rest of function'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["x: float", "y: float"] }]
 
-TEST: complete_in_unclosed_string
-TYPE: completion
----
+[[tests]]
+name = "complete_in_unclosed_string"
+kind = "completion"
+position = [7, 33]
+source = '''
 struct Config {
     host: string,
     port: int,
@@ -205,18 +199,16 @@ struct Config {
 }
 
 fn setup(cfg: Config) {
-    let message = "Host: " + cfg.«cursor»
-    // String concatenation incomplete
----
-EXPECTED:
-- host: string
-- port: int
-- debug: bool
-===
+    let message = "Host: " + cfg.
+    // String concatenation incomplete'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["host: string", "port: int", "debug: bool"] }]
 
-TEST: complete_in_incomplete_array_literal
-TYPE: completion
----
+[[tests]]
+name = "complete_in_incomplete_array_literal"
+kind = "completion"
+position = [7, 22]
+source = '''
 struct Item {
     id: int,
     name: string,
@@ -224,18 +216,16 @@ struct Item {
 }
 
 fn process_items(item: Item) {
-    let items = [item.«cursor»
-    // Array literal not closed
----
-EXPECTED:
-- id: int
-- name: string
-- price: float
-===
+    let items = [item.
+    // Array literal not closed'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["id: int", "name: string", "price: float"] }]
 
-TEST: complete_in_incomplete_return
-TYPE: completion
----
+[[tests]]
+name = "complete_in_incomplete_return"
+kind = "completion"
+position = [8, 15]
+source = '''
 struct Result {
     value: int,
     success: bool,
@@ -244,18 +234,16 @@ struct Result {
 
 fn compute() -> Result {
     let res = Result { value: 42, success: true, error: "" }
-    return res.«cursor»
-    // Function ends abruptly
----
-EXPECTED:
-- value: int
-- success: bool
-- error: string
-===
+    return res.
+    // Function ends abruptly'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["value: int", "success: bool", "error: string"] }]
 
-TEST: complete_in_incomplete_match_arm
-TYPE: completion
----
+[[tests]]
+name = "complete_in_incomplete_match_arm"
+kind = "completion"
+position = [14, 31]
+source = '''
 enum Status {
     Active,
     Inactive,
@@ -270,18 +258,16 @@ struct User {
 
 fn check_user(user: User) {
     match user.status {
-        Status::Active => user.«cursor»
-        // Missing other arms and closing brace
----
-EXPECTED:
-- name: string
-- status: Status
-- age: int
-===
+        Status::Active => user.
+        // Missing other arms and closing brace'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["name: string", "status: Status", "age: int"] }]
 
-TEST: complete_in_incomplete_while_condition
-TYPE: completion
----
+[[tests]]
+name = "complete_in_incomplete_while_condition"
+kind = "completion"
+position = [7, 18]
+source = '''
 struct Counter {
     value: int,
     max: int,
@@ -289,18 +275,16 @@ struct Counter {
 }
 
 fn count(counter: Counter) {
-    while counter.«cursor»
-    // While loop body missing
----
-EXPECTED:
-- value: int
-- max: int
-- step: int
-===
+    while counter.
+    // While loop body missing'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["value: int", "max: int", "step: int"] }]
 
-TEST: complete_in_incomplete_for_loop
-TYPE: completion
----
+[[tests]]
+name = "complete_in_incomplete_for_loop"
+kind = "completion"
+position = [7, 19]
+source = '''
 struct Range {
     start: int,
     stop: int,
@@ -308,18 +292,16 @@ struct Range {
 }
 
 fn iterate(range: Range) {
-    for i in range.«cursor»
-    // For loop body missing
----
-EXPECTED:
-- start: int
-- stop: int
-- items: [int]
-===
+    for i in range.
+    // For loop body missing'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["start: int", "stop: int", "items: [int]"] }]
 
-TEST: complete_after_operator_no_space
-TYPE: completion
----
+[[tests]]
+name = "complete_after_operator_no_space"
+kind = "completion"
+position = [7, 22]
+source = '''
 struct Vector {
     x: float,
     y: float,
@@ -327,19 +309,17 @@ struct Vector {
 }
 
 fn calculate(v1: Vector, v2: Vector) {
-    let sum = v1.x+v2.«cursor»
+    let sum = v1.x+v2.
     // No space after operator
-}
----
-EXPECTED:
-- x: float
-- y: float
-- z: float
-===
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["x: float", "y: float", "z: float"] }]
 
-TEST: complete_in_nested_incomplete_if
-TYPE: completion
----
+[[tests]]
+name = "complete_in_nested_incomplete_if"
+kind = "completion"
+position = [9, 16]
+source = '''
 struct Game {
     player_x: float,
     player_y: float,
@@ -349,19 +329,16 @@ struct Game {
 
 fn update(game: Game) {
     if game.player_x > 100 {
-        if game.«cursor»
-        // Nested if incomplete
----
-EXPECTED:
-- player_x: float
-- player_y: float
-- enemy_x: float
-- enemy_y: float
-===
+        if game.
+        // Nested if incomplete'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["player_x: float", "player_y: float", "enemy_x: float", "enemy_y: float"] }]
 
-TEST: complete_in_incomplete_struct_literal
-TYPE: completion
----
+[[tests]]
+name = "complete_in_incomplete_struct_literal"
+kind = "completion"
+position = [13, 20]
+source = '''
 struct Position {
     x: float,
     y: float,
@@ -375,17 +352,16 @@ struct CompletionEntity {
 
 fn create(entity: CompletionEntity) {
     let new_entity = CompletionEntity {
-        pos: entity.«cursor»
-        // Struct literal incomplete
----
-EXPECTED:
-- health: int
-- name: string
-===
+        pos: entity.
+        // Struct literal incomplete'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["health: int", "name: string"] }]
 
-TEST: complete_after_comma_no_space
-TYPE: completion
----
+[[tests]]
+name = "complete_after_comma_no_space"
+kind = "completion"
+position = [7, 27]
+source = '''
 struct Data {
     first: int,
     second: int,
@@ -393,18 +369,16 @@ struct Data {
 }
 
 fn process(d: Data) {
-    do_something(d.first,d.«cursor»
-    // No space after comma, function call incomplete
----
-EXPECTED:
-- first: int
-- second: int
-- third: int
-===
+    do_something(d.first,d.
+    // No space after comma, function call incomplete'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["first: int", "second: int", "third: int"] }]
 
-TEST: complete_for_loop_var_fields
-TYPE: completion
----
+[[tests]]
+name = "complete_for_loop_var_fields"
+kind = "completion"
+position = [8, 21]
+source = '''
 struct Item {
     name: string
     count: int
@@ -413,18 +387,17 @@ struct Item {
 fn main() {
     let items: [Item] = vec_new()
     for item in items {
-        let x = item.«cursor»
+        let x = item.
     }
-}
----
-EXPECTED:
-- name: string
-- count: int
-===
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["name: string", "count: int"] }]
 
-TEST: complete_lambda_param_fields
-TYPE: completion
----
+[[tests]]
+name = "complete_lambda_param_fields"
+kind = "completion"
+position = [7, 47]
+source = '''
 struct Enemy {
     health: int
     name: string
@@ -432,17 +405,16 @@ struct Enemy {
 
 fn main() {
     let enemies: [Enemy] = vec_new()
-    let alive = enemies.filter((e: Enemy) => e.«cursor»)
-}
----
-EXPECTED:
-- health: int
-- name: string
-===
+    let alive = enemies.filter((e: Enemy) => e.)
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["health: int", "name: string"] }]
 
-TEST: complete_nested_struct_fields
-TYPE: completion
----
+[[tests]]
+name = "complete_nested_struct_fields"
+kind = "completion"
+position = [12, 18]
+source = '''
 struct FixVec2 {
     x: float
     y: float
@@ -455,17 +427,16 @@ struct Player {
 
 fn main() {
     let p = Player { pos: FixVec2 { x: 0.0, y: 0.0 }, name: "Hero" }
-    let x = p.pos.«cursor»
-}
----
-EXPECTED:
-- x: float
-- y: float
-===
+    let x = p.pos.
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["x: float", "y: float"] }]
 
-TEST: complete_global_var_fields
-TYPE: completion
----
+[[tests]]
+name = "complete_global_var_fields"
+kind = "completion"
+position = [8, 18]
+source = '''
 struct GameState {
     score: int
     level: int
@@ -474,17 +445,16 @@ struct GameState {
 global state: GameState = GameState { score: 0, level: 1 }
 
 fn main() {
-    let s = state.«cursor»
-}
----
-EXPECTED:
-- score: int
-- level: int
-===
+    let s = state.
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["score: int", "level: int"] }]
 
-TEST: complete_nullable_safe_nav
-TYPE: completion
----
+[[tests]]
+name = "complete_nullable_safe_nav"
+kind = "completion"
+position = [11, 22]
+source = '''
 struct Inner {
     value: int
     name: string
@@ -496,17 +466,16 @@ struct Outer {
 
 fn main() {
     let o: Outer? = null
-    let x = o?.inner?.«cursor»
-}
----
-EXPECTED:
-- value: int
-- name: string
-===
+    let x = o?.inner?.
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["value: int", "name: string"] }]
 
-TEST: complete_enum_qualified
-TYPE: completion
----
+[[tests]]
+name = "complete_enum_qualified"
+kind = "completion"
+position = [8, 23]
+source = '''
 enum Direction {
     Up,
     Down,
@@ -515,19 +484,16 @@ enum Direction {
 }
 
 fn main() {
-    let d = Direction::«cursor»
-}
----
-EXPECTED:
-- Up
-- Down
-- Left
-- Right
-===
+    let d = Direction::
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["Up", "Down", "Left", "Right"] }]
 
-TEST: complete_enum_qualified_with_prefix
-TYPE: completion
----
+[[tests]]
+name = "complete_enum_qualified_with_prefix"
+kind = "completion"
+position = [7, 24]
+source = '''
 enum AiState {
     Wander,
     Chase,
@@ -535,16 +501,16 @@ enum AiState {
 }
 
 fn main() {
-    let s = AiState::Wan«cursor»
-}
----
-EXPECTED:
-- Wander
-===
+    let s = AiState::Wan
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["Wander"] }]
 
-TEST: complete_generic_struct_fields
-TYPE: completion
----
+[[tests]]
+name = "complete_generic_struct_fields"
+kind = "completion"
+position = [7, 14]
+source = '''
 struct Pair<A, B> {
     first: A,
     second: B,
@@ -552,17 +518,16 @@ struct Pair<A, B> {
 
 fn main() {
     let p = Pair { first: 1, second: "hi" }
-    let x = p.«cursor»
-}
----
-EXPECTED:
-- first: int
-- second: string
-===
+    let x = p.
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["first: int", "second: string"] }]
 
-TEST: complete_in_match_arm_body
-TYPE: completion
----
+[[tests]]
+name = "complete_in_match_arm_body"
+kind = "completion"
+position = [10, 26]
+source = '''
 struct Point { x: int, y: int }
 
 enum Opt {
@@ -573,78 +538,68 @@ enum Opt {
 fn main() {
     let o = Opt::Some(Point { x: 1, y: 2 })
     match o {
-        Opt::Some(p) => p.«cursor»,
+        Opt::Some(p) => p.,
         Opt::None => {},
     }
-}
----
-EXPECTED:
-- x: int
-- y: int
-===
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["x: int", "y: int"] }]
 
-TEST: complete_in_match_arm_braced_body
-TYPE: completion
-SOURCE: complete_in_match_arm_body
-REPLACE: ["        Opt::Some(p) => p.,", "        Opt::Some(p) => { p. },"]
-POSITION: line=10, character=28
-EXPECTED:
-- x: int
-- y: int
-===
+[[tests]]
+name = "complete_in_match_arm_braced_body"
+kind = "completion"
+position = [10, 28]
+source = { from_test = "complete_in_match_arm_body", replace = [["        Opt::Some(p) => p.,", "        Opt::Some(p) => { p. },"]] }
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["x: int", "y: int"] }]
 
-TEST: complete_in_match_arm_without_trailing_comma
-TYPE: completion
-SOURCE: complete_in_match_arm_body
-REPLACE: ["        Opt::Some(p) => p.,", "        Opt::Some(p) => p."]
-POSITION: line=10, character=26
-EXPECTED:
-- x: int
-- y: int
-===
+[[tests]]
+name = "complete_in_match_arm_without_trailing_comma"
+kind = "completion"
+position = [10, 26]
+source = { from_test = "complete_in_match_arm_body", replace = [["        Opt::Some(p) => p.,", "        Opt::Some(p) => p."]] }
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["x: int", "y: int"] }]
 
-TEST: complete_enum_record_variant_fields
-TYPE: completion
----
+[[tests]]
+name = "complete_enum_record_variant_fields"
+kind = "completion"
+position = [6, 30]
+source = '''
 enum Effect {
     Bandage { duration: float, heal_amount: int },
     Other(int),
 }
 
 fn main() {
-    let e = Effect::Bandage { «cursor» }
-}
----
-EXPECTED:
-- duration: float
-- heal_amount: int
-===
+    let e = Effect::Bandage {  }
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["duration: float", "heal_amount: int"] }]
 
-TEST: complete_enum_record_variant_field_with_prefix
-TYPE: completion
-SOURCE: complete_enum_record_variant_fields
-REPLACE: ["    let e = Effect::Bandage {  }", "    let e = Effect::Bandage { dura }"]
-POSITION: line=6, character=34
-EXPECTED:
-- duration: float
-===
+[[tests]]
+name = "complete_enum_record_variant_field_with_prefix"
+kind = "completion"
+position = [6, 34]
+source = { from_test = "complete_enum_record_variant_fields", replace = [["    let e = Effect::Bandage {  }", "    let e = Effect::Bandage { dura }"]] }
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["duration: float"] }]
 
-TEST: complete_variant_in_let_else_pattern
-TYPE: completion
----
+[[tests]]
+name = "complete_variant_in_let_else_pattern"
+kind = "completion"
+position = [6, 15]
+source = '''
 enum Shape {
     Circle(int),
     Square(int, int),
 }
 
 fn f(s: Shape) -> int {
-    let Shape::«cursor» = s else {
+    let Shape:: = s else {
         return 0
     }
     1
-}
----
-EXPECTED:
-- Circle
-- Square
-===
+}'''
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["Circle", "Square"] }]

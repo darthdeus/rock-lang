@@ -1,6 +1,7 @@
-TEST: semantic_tokens_basic
-TYPE: semantic_tokens
----
+[[tests]]
+name = "semantic_tokens_basic"
+kind = "semantic_tokens"
+source = '''
 // Test basic semantic tokens
 struct Point {
     x: float,
@@ -18,15 +19,14 @@ fn main() {
     let point = Point { x: 3.0, y: 4.0 }
     let dist = distance(origin, point)
     print("Distance: " + dist.to_string())
-}
----
-EXPECTED:
-min_tokens: 30
-===
+}'''
+request = { transport = "cli", argv = ["semantic-tokens", "$file"] }
+checks = [{ op = "gte", path = ["result", "count"], value = 30 }]
 
-TEST: semantic_tokens_struct_highlight
-TYPE: semantic_tokens
----
+[[tests]]
+name = "semantic_tokens_struct_highlight"
+kind = "semantic_tokens"
+source = '''
 struct Color {
     red: int,
     green: int,
@@ -37,15 +37,14 @@ struct Rectangle {
     width: float,
     height: float,
     color: Color,
-}
----
-EXPECTED:
-min_tokens: 10
-===
+}'''
+request = { transport = "cli", argv = ["semantic-tokens", "$file"] }
+checks = [{ op = "gte", path = ["result", "count"], value = 10 }]
 
-TEST: semantic_tokens_enum_struct
-TYPE: semantic_tokens
----
+[[tests]]
+name = "semantic_tokens_enum_struct"
+kind = "semantic_tokens"
+source = '''
 struct Shape {
     area: float
 }
@@ -64,15 +63,14 @@ fn process_shape(shape: ShapeKind) {
         ShapeKind::Rectangle(w, h) => print("Rectangle"),
         ShapeKind::Triangle => print("Triangle"),
     }
-}
----
-EXPECTED:
-min_tokens: 5
-===
+}'''
+request = { transport = "cli", argv = ["semantic-tokens", "$file"] }
+checks = [{ op = "gte", path = ["result", "count"], value = 5 }]
 
-TEST: semantic_tokens_nullable_types
-TYPE: semantic_tokens
----
+[[tests]]
+name = "semantic_tokens_nullable_types"
+kind = "semantic_tokens"
+source = '''
 fn process_optional(value: int?) -> int {
     if value != null {
         return value + 10
@@ -84,15 +82,14 @@ fn process_optional(value: int?) -> int {
 fn handle_string(text: string?) {
     let result = text ?? "default"
     print(result)
-}
----
-EXPECTED:
-min_tokens: 10
-===
+}'''
+request = { transport = "cli", argv = ["semantic-tokens", "$file"] }
+checks = [{ op = "gte", path = ["result", "count"], value = 10 }]
 
-TEST: semantic_tokens_with_undefined_symbol
-TYPE: semantic_tokens
----
+[[tests]]
+name = "semantic_tokens_with_undefined_symbol"
+kind = "semantic_tokens"
+source = '''
 struct Sprite {
     width: int,
     height: int,
@@ -116,15 +113,14 @@ fn update_entities() {
     // More valid code after the error
     let another_sprite = Sprite { width: 32, height: 32 }
     draw_sprite(another_sprite, pos, rect(0, 0, 32, 32))
-}
----
-EXPECTED:
-min_tokens: 20
-===
+}'''
+request = { transport = "cli", argv = ["semantic-tokens", "$file"] }
+checks = [{ op = "gte", path = ["result", "count"], value = 20 }]
 
-TEST: semantic_tokens_incomplete_typing
-TYPE: semantic_tokens
----
+[[tests]]
+name = "semantic_tokens_incomplete_typing"
+kind = "semantic_tokens"
+source = '''
 // Test that semantic tokens work while actively typing
 struct Player {
     health: int,
@@ -151,14 +147,14 @@ fn game_loop() {
     if player.health > 0 {
         draw_player(player)
     }
-}
----
-EXPECTED:
-min_tokens: 15
-===
-TEST: semantic_tokens_await_delegation
-TYPE: semantic_tokens
----
+}'''
+request = { transport = "cli", argv = ["semantic-tokens", "$file"] }
+checks = [{ op = "gte", path = ["result", "count"], value = 15 }]
+
+[[tests]]
+name = "semantic_tokens_await_delegation"
+kind = "semantic_tokens"
+source = '''
 co fn inner() -> Coroutine<int> {
     yield 1
 }
@@ -166,8 +162,6 @@ co fn inner() -> Coroutine<int> {
 co fn outer() -> Coroutine<int> {
     await inner()
     yield 3
-}
----
-EXPECTED:
-min_tokens: 14
-===
+}'''
+request = { transport = "cli", argv = ["semantic-tokens", "$file"] }
+checks = [{ op = "gte", path = ["result", "count"], value = 14 }]

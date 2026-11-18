@@ -1,6 +1,8 @@
-TEST: find_references_local_variable
-TYPE: references
----
+[[tests]]
+name = "find_references_local_variable"
+kind = "references"
+position = [1, 8]
+source = '''
 fn main() {
     let count = 0
     print(count)
@@ -8,30 +10,15 @@ fn main() {
     if count > 10 {
         print("Done")
     }
-}
----
-POSITION: line=1, character=8
-EXPECTED:
-file: main.rock
-line: 1
-character: 8
-file: main.rock
-line: 2
-character: 10
-file: main.rock
-line: 3
-character: 4
-file: main.rock
-line: 3
-character: 12
-file: main.rock
-line: 4
-character: 7
-===
+}'''
+request = { transport = "cli", argv = ["references", "$target"] }
+checks = [{ op = "unordered_equal", path = ["result", "references", "*", "range", "start"], value = [{ line = 1, character = 8 }, { line = 2, character = 10 }, { line = 3, character = 4 }, { line = 3, character = 12 }, { line = 4, character = 7 }] }]
 
-TEST: find_references_function
-TYPE: references
----
+[[tests]]
+name = "find_references_function"
+kind = "references"
+position = [0, 3]
+source = '''
 fn calculate(a: int, b: int) -> int {
     return a + b
 }
@@ -40,27 +27,15 @@ fn main() {
     let x = calculate(5, 3)
     let y = calculate(10, 20)
     print(calculate(x, y))
-}
----
-POSITION: line=0, character=3
-EXPECTED:
-file: main.rock
-line: 0
-character: 3
-file: main.rock
-line: 5
-character: 12
-file: main.rock
-line: 6
-character: 12
-file: main.rock
-line: 7
-character: 10
-===
+}'''
+request = { transport = "cli", argv = ["references", "$target"] }
+checks = [{ op = "unordered_equal", path = ["result", "references", "*", "range", "start"], value = [{ line = 0, character = 3 }, { line = 5, character = 12 }, { line = 6, character = 12 }, { line = 7, character = 10 }] }]
 
-TEST: find_references_function_used_as_bare_value
-TYPE: references
----
+[[tests]]
+name = "find_references_function_used_as_bare_value"
+kind = "references"
+position = [9, 23]
+source = '''
 fn apply(f: fn(int) -> int, x: int) -> int {
     return f(x)
 }
@@ -72,21 +47,15 @@ fn double(x: int) -> int {
 fn main() {
     let result = apply(double, 10)
     print(result)
-}
----
-POSITION: line=9, character=23
-EXPECTED:
-file: main.rock
-line: 4
-character: 3
-file: main.rock
-line: 9
-character: 23
-===
+}'''
+request = { transport = "cli", argv = ["references", "$target"] }
+checks = [{ op = "unordered_equal", path = ["result", "references", "*", "range", "start"], value = [{ line = 4, character = 3 }, { line = 9, character = 23 }] }]
 
-TEST: find_references_struct_type
-TYPE: references
----
+[[tests]]
+name = "find_references_struct_type"
+kind = "references"
+position = [0, 7]
+source = '''
 struct Point {
     x: float,
     y: float,
@@ -99,33 +68,15 @@ fn distance(p1: Point, p2: Point) -> float {
 fn main() {
     let origin: Point = Point { x: 0.0, y: 0.0 }
     let p = Point { x: 3.0, y: 4.0 }
-}
----
-POSITION: line=0, character=7
-EXPECTED:
-file: main.rock
-line: 0
-character: 7
-file: main.rock
-line: 5
-character: 16
-file: main.rock
-line: 5
-character: 27
-file: main.rock
-line: 10
-character: 16
-file: main.rock
-line: 10
-character: 24
-file: main.rock
-line: 11
-character: 12
-===
+}'''
+request = { transport = "cli", argv = ["references", "$target"] }
+checks = [{ op = "unordered_equal", path = ["result", "references", "*", "range", "start"], value = [{ line = 0, character = 7 }, { line = 5, character = 16 }, { line = 5, character = 27 }, { line = 10, character = 16 }, { line = 10, character = 24 }, { line = 11, character = 12 }] }]
 
-TEST: find_references_struct_field
-TYPE: references
----
+[[tests]]
+name = "find_references_struct_field"
+kind = "references"
+position = [1, 4]
+source = '''
 struct Person {
     name: string,
     age: int,
@@ -138,30 +89,15 @@ fn main() {
     if p.age > 18 {
         print("Adult: " + p.name)
     }
-}
----
-POSITION: line=1, character=4
-EXPECTED:
-file: main.rock
-line: 1
-character: 4
-file: main.rock
-line: 6
-character: 21
-file: main.rock
-line: 7
-character: 12
-file: main.rock
-line: 8
-character: 14
-file: main.rock
-line: 10
-character: 28
-===
+}'''
+request = { transport = "cli", argv = ["references", "$target"] }
+checks = [{ op = "unordered_equal", path = ["result", "references", "*", "range", "start"], value = [{ line = 1, character = 4 }, { line = 6, character = 21 }, { line = 7, character = 12 }, { line = 8, character = 14 }, { line = 10, character = 28 }] }]
 
-TEST: find_references_parameter
-TYPE: references
----
+[[tests]]
+name = "find_references_parameter"
+kind = "references"
+position = [0, 9]
+source = '''
 fn greet(name: string, times: int) {
     for i in 0..times {
         print("Hello, " + name)
@@ -173,88 +109,49 @@ fn greet(name: string, times: int) {
 
 fn main() {
     greet("World", 3)
-}
----
-POSITION: line=0, character=9
-EXPECTED:
-file: main.rock
-line: 0
-character: 9
-file: main.rock
-line: 2
-character: 26
-file: main.rock
-line: 5
-character: 27
-===
-TEST: find_references_ufcs_method
-TYPE: references
----
+}'''
+request = { transport = "cli", argv = ["references", "$target"] }
+checks = [{ op = "unordered_equal", path = ["result", "references", "*", "range", "start"], value = [{ line = 0, character = 9 }, { line = 2, character = 26 }, { line = 5, character = 27 }] }]
+
+[[tests]]
+name = "find_references_ufcs_method"
+kind = "references"
+position = [3, 14]
+source = '''
 fn inc(x: int) -> int { x + 1 }
 fn main() {
     let a = inc(5)
     let b = 5.inc()
-}
----
-POSITION: line=3, character=14
-EXPECTED:
-file: main.rock
-line: 0
-character: 3
-file: main.rock
-line: 2
-character: 12
-file: main.rock
-line: 3
-character: 14
-===
+}'''
+request = { transport = "cli", argv = ["references", "$target"] }
+checks = [{ op = "unordered_equal", path = ["result", "references", "*", "range", "start"], value = [{ line = 0, character = 3 }, { line = 2, character = 12 }, { line = 3, character = 14 }] }]
 
-TEST: find_references_fn_typed_parameter_call
-TYPE: references
----
+[[tests]]
+name = "find_references_fn_typed_parameter_call"
+kind = "references"
+position = [1, 10]
+source = '''
 fn apply(g: fn() -> int) -> int {
     g() + g()
-}
----
-POSITION: line=1, character=10
-EXPECTED:
-file: main.rock
-line: 0
-character: 9
-file: main.rock
-line: 1
-character: 4
-file: main.rock
-line: 1
-character: 10
-===
+}'''
+request = { transport = "cli", argv = ["references", "$target"] }
+checks = [{ op = "unordered_equal", path = ["result", "references", "*", "range", "start"], value = [{ line = 0, character = 9 }, { line = 1, character = 4 }, { line = 1, character = 10 }] }]
 
-TEST: find_references_macro_param_ident_fragment
-TYPE: references
----
+[[tests]]
+name = "find_references_macro_param_ident_fragment"
+kind = "references"
+position = [0, 11]
+source = '''
 macro decl(Name: ident, Elem: ty) {
     struct Name { v: Elem }
-}
----
-POSITION: line=0, character=11
-EXPECTED:
-file: main.rock
-line: 0
-character: 11
-file: main.rock
-line: 1
-character: 11
-===
+}'''
+request = { transport = "cli", argv = ["references", "$target"] }
+checks = [{ op = "unordered_equal", path = ["result", "references", "*", "range", "start"], value = [{ line = 0, character = 11 }, { line = 1, character = 11 }] }]
 
-TEST: find_references_macro_param_ty_fragment
-TYPE: references
-SOURCE: find_references_macro_param_ident_fragment
-POSITION: line=0, character=24
-EXPECTED:
-file: main.rock
-line: 0
-character: 24
-file: main.rock
-line: 1
-character: 21
-===
+[[tests]]
+name = "find_references_macro_param_ty_fragment"
+kind = "references"
+position = [0, 24]
+source = { from_test = "find_references_macro_param_ident_fragment" }
+request = { transport = "cli", argv = ["references", "$target"] }
+checks = [{ op = "unordered_equal", path = ["result", "references", "*", "range", "start"], value = [{ line = 0, character = 24 }, { line = 1, character = 21 }] }]

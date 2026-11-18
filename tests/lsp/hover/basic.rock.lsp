@@ -1,6 +1,8 @@
-TEST: hover_basic_types
-TYPE: hover
----
+[[tests]]
+name = "hover_basic_types"
+kind = "hover"
+position = [1, 8]
+source = '''
 fn main() {
     let number = 42
     let text = "hello"
@@ -12,34 +14,30 @@ fn main() {
 struct Point {
     x: float,
     y: float,
-}
----
-POSITION: line=1, character=8
-EXPECTED:
-Type: int
-===
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: int" }]
 
-TEST: hover_function_types
-TYPE: hover
----
+[[tests]]
+name = "hover_function_types"
+kind = "hover"
+position = [0, 3]
+source = '''
 fn add(a: int, b: int) -> int {
     return a + b
 }
 
 fn main() {
     let result = add(5, 3)
-}
----
-POSITION: line=0, character=3
-EXPECTED:
-```rock
-fn add(a: int, b: int) -> int
-```
-===
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "```rock\nfn add(a: int, b: int) -> int\n```" }]
 
-TEST: hover_struct_types
-TYPE: hover
----
+[[tests]]
+name = "hover_struct_types"
+kind = "hover"
+position = [0, 7]
+source = '''
 struct Point {
     x: float,
     y: float,
@@ -47,19 +45,15 @@ struct Point {
 
 fn main() {
     let p = Point { x: 1.0, y: 2.0 }
-}
----
-POSITION: line=0, character=7
-EXPECTED:
-struct Point {
-  x: float,
-  y: float,
-}
-===
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "struct Point {\n  x: float,\n  y: float,\n}" }]
 
-TEST: hover_generic_types
-TYPE: hover
----
+[[tests]]
+name = "hover_generic_types"
+kind = "hover"
+position = [5, 8]
+source = '''
 fn identity<T>(value: T) -> T {
     return value
 }
@@ -67,16 +61,15 @@ fn identity<T>(value: T) -> T {
 fn main() {
     let num = identity(42)
     let text = identity("hello")
-}
----
-POSITION: line=5, character=8
-EXPECTED:
-Type: int
-===
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: int" }]
 
-TEST: hover_nullable_types
-TYPE: hover
----
+[[tests]]
+name = "hover_nullable_types"
+kind = "hover"
+position = [9, 8]
+source = '''
 fn find_user(id: int) -> string? {
     if id == 1 {
         return "Alice"
@@ -87,30 +80,28 @@ fn find_user(id: int) -> string? {
 
 fn main() {
     let user = find_user(1)
-}
----
-POSITION: line=9, character=8
-EXPECTED:
-Type: string?
-===
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: string?" }]
 
-TEST: hover_array_types
-TYPE: hover
----
+[[tests]]
+name = "hover_array_types"
+kind = "hover"
+position = [1, 8]
+source = '''
 fn main() {
     let numbers = [1, 2, 3, 4, 5]
     let texts = ["hello", "world"]
     let matrix = [[1, 2], [3, 4]]
-}
----
-POSITION: line=1, character=8
-EXPECTED:
-Type: [int]
-===
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: [int]" }]
 
-TEST: hover_shorthand_x
-TYPE: hover
----
+[[tests]]
+name = "hover_shorthand_x"
+kind = "hover"
+position = [10, 20]
+source = '''
 struct Point {
     x: int
     y: int
@@ -121,25 +112,24 @@ fn main() {
     let y = 200
 
     // Shorthand syntax - hover on 'x' field
-    let p = Point { «cursor»x, y }
-}
----
-EXPECTED:
-Type: int
-===
+    let p = Point { x, y }
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: int" }]
 
-TEST: hover_shorthand_y
-TYPE: hover
-SOURCE: hover_shorthand_x
-REPLACE: ["    // Shorthand syntax - hover on 'x' field", "    // Shorthand syntax - hover on 'y' field"]
-POSITION: line=10, character=23
-EXPECTED:
-Type: int
-===
+[[tests]]
+name = "hover_shorthand_y"
+kind = "hover"
+position = [10, 23]
+source = { from_test = "hover_shorthand_x", replace = [["    // Shorthand syntax - hover on 'x' field", "    // Shorthand syntax - hover on 'y' field"]] }
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: int" }]
 
-TEST: hover_shorthand_nested
-TYPE: hover
----
+[[tests]]
+name = "hover_shorthand_nested"
+kind = "hover"
+position = [21, 27]
+source = '''
 struct Point {
     x: int
     y: int
@@ -161,16 +151,16 @@ fn main() {
     let top_left = p
 
     // Nested shorthand - hover on 'top_left' field
-    let rect = Rectangle { «cursor»top_left, width, height }
-}
----
-EXPECTED:
-Type: struct Point
-===
+    let rect = Rectangle { top_left, width, height }
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: struct Point" }]
 
-TEST: hover_mixed_shorthand
-TYPE: hover
----
+[[tests]]
+name = "hover_mixed_shorthand"
+kind = "hover"
+position = [9, 20]
+source = '''
 struct Point {
     x: int
     y: int
@@ -180,56 +170,56 @@ fn main() {
     let x = 100
 
     // Mixed shorthand and explicit - hover on 'x' field
-    let p = Point { «cursor»x, y: 200 }
-}
----
-EXPECTED:
-Type: int
-===
+    let p = Point { x, y: 200 }
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: int" }]
 
-TEST: hover_for_loop_variable
-TYPE: hover
----
+[[tests]]
+name = "hover_for_loop_variable"
+kind = "hover"
+position = [6, 8]
+source = '''
 struct Item {
     name: string
 }
 
 fn main() {
     let items: [Item] = vec_new()
-    for «cursor»item in items {
+    for item in items {
         print(item.name)
     }
-}
----
-EXPECTED:
-Type: struct Item
-===
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: struct Item" }]
 
-TEST: hover_lambda_type
-TYPE: hover
----
+[[tests]]
+name = "hover_lambda_type"
+kind = "hover"
+position = [1, 8]
+source = '''
 fn main() {
-    let «cursor»f = (x: int) => x * 2
-}
----
-EXPECTED:
-Type: fn(int) -> int
-===
+    let f = (x: int) => x * 2
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: fn(int) -> int" }]
 
-TEST: hover_nullable_type
-TYPE: hover
----
+[[tests]]
+name = "hover_nullable_type"
+kind = "hover"
+position = [1, 8]
+source = '''
 fn main() {
-    let «cursor»x: int? = null
-}
----
-EXPECTED:
-Type: int?
-===
+    let x: int? = null
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: int?" }]
 
-TEST: hover_enum_variant
-TYPE: hover
----
+[[tests]]
+name = "hover_enum_variant"
+kind = "hover"
+position = [7, 8]
+source = '''
 enum Color {
     Red,
     Green,
@@ -237,96 +227,96 @@ enum Color {
 }
 
 fn main() {
-    let «cursor»c = Color::Red
-}
----
-EXPECTED:
-Type: enum Color
-===
+    let c = Color::Red
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: enum Color" }]
 
-TEST: hover_generic_instance
-TYPE: hover
----
+[[tests]]
+name = "hover_generic_instance"
+kind = "hover"
+position = [5, 8]
+source = '''
 struct Box<T> {
     item: T
 }
 
 fn main() {
-    let «cursor»b = Box { item: 42 }
-}
----
-EXPECTED:
-Type: Box<int>
-===
+    let b = Box { item: 42 }
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: Box<int>" }]
 
-TEST: hover_global_assignment
-TYPE: hover
----
+[[tests]]
+name = "hover_global_assignment"
+kind = "hover"
+position = [3, 4]
+source = '''
 global score: int = 0
 
 fn main() {
-    «cursor»score = 100
-}
----
-EXPECTED:
-Type: int
-===
+    score = 100
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: int" }]
 
-TEST: hover_safe_nav_result
-TYPE: hover
----
+[[tests]]
+name = "hover_safe_nav_result"
+kind = "hover"
+position = [6, 8]
+source = '''
 struct Player {
     name: string
 }
 
 fn main() {
     let p: Player? = null
-    let «cursor»n = p?.name
-}
----
-EXPECTED:
-Type: string?
-===
+    let n = p?.name
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: string?" }]
 
-TEST: hover_null_coalesce_result
-TYPE: hover
----
+[[tests]]
+name = "hover_null_coalesce_result"
+kind = "hover"
+position = [2, 8]
+source = '''
 fn main() {
     let x: int? = null
-    let «cursor»y = x ?? 42
-}
----
-EXPECTED:
-Type: int
-===
+    let y = x ?? 42
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: int" }]
 
-TEST: hover_tuple_destructure
-TYPE: hover
----
+[[tests]]
+name = "hover_tuple_destructure"
+kind = "hover"
+position = [2, 9]
+source = '''
 fn main() {
     let pair = (1, "hello")
-    let («cursor»a, b) = pair
-}
----
-EXPECTED:
-Type: int
-===
+    let (a, b) = pair
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: int" }]
 
-TEST: hover_nested_tuple_destructure
-TYPE: hover
----
+[[tests]]
+name = "hover_nested_tuple_destructure"
+kind = "hover"
+position = [2, 10]
+source = '''
 fn main() {
     let pair = ((1, 2), "hello")
-    let ((«cursor»a, b), c) = pair
-}
----
-EXPECTED:
-Type: int
-===
+    let ((a, b), c) = pair
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: int" }]
 
-TEST: hover_match_record_binding_shorthand
-TYPE: hover
----
+[[tests]]
+name = "hover_match_record_binding_shorthand"
+kind = "hover"
+position = [8, 20]
+source = '''
 enum Opt {
     Some { value: int },
     None,
@@ -335,27 +325,26 @@ enum Opt {
 fn main() {
     let o = Opt::Some { value: 42 }
     match o {
-        Opt::Some { «cursor»value } => { print(value) },
+        Opt::Some { value } => { print(value) },
         Opt::None => {},
     }
-}
----
-EXPECTED:
-Type: int
-===
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: int" }]
 
-TEST: hover_match_record_binding_explicit
-TYPE: hover
-SOURCE: hover_match_record_binding_shorthand
-REPLACE: ["        Opt::Some { value } => { print(value) },", "        Opt::Some { value: v } => { print(v) },"]
-POSITION: line=8, character=27
-EXPECTED:
-Type: int
-===
+[[tests]]
+name = "hover_match_record_binding_explicit"
+kind = "hover"
+position = [8, 27]
+source = { from_test = "hover_match_record_binding_shorthand", replace = [["        Opt::Some { value } => { print(value) },", "        Opt::Some { value: v } => { print(v) },"]] }
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: int" }]
 
-TEST: hover_match_enum_tuple_binding
-TYPE: hover
----
+[[tests]]
+name = "hover_match_enum_tuple_binding"
+kind = "hover"
+position = [8, 18]
+source = '''
 enum Opt {
     Some(int),
     None,
@@ -364,47 +353,47 @@ enum Opt {
 fn main() {
     let o = Opt::Some(42)
     match o {
-        Opt::Some(«cursor»v) => { print(v) },
+        Opt::Some(v) => { print(v) },
         Opt::None => {},
     }
-}
----
-EXPECTED:
-Type: int
-===
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: int" }]
 
-TEST: hover_while_let_binding
-TYPE: hover
----
+[[tests]]
+name = "hover_while_let_binding"
+kind = "hover"
+position = [2, 14]
+source = '''
 fn main() {
     let x: int? = 5
-    while let «cursor»val = x {
+    while let val = x {
         print(val)
         break
     }
-}
----
-EXPECTED:
-Type: int
-===
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: int" }]
 
-TEST: hover_if_let_binding
-TYPE: hover
----
+[[tests]]
+name = "hover_if_let_binding"
+kind = "hover"
+position = [2, 11]
+source = '''
 fn main() {
     let x: int? = 5
-    if let «cursor»val = x {
+    if let val = x {
         print(val)
     }
-}
----
-EXPECTED:
-Type: int
-===
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: int" }]
 
-TEST: hover_match_arm_record_variant
-TYPE: hover
----
+[[tests]]
+name = "hover_match_arm_record_variant"
+kind = "hover"
+position = [8, 11]
+source = '''
 enum E {
     A(x: int),
     B { y: int, z: int },
@@ -413,44 +402,40 @@ enum E {
 fn f(e: E) -> int {
     match e {
         E::A(n) => n
-        E::«cursor»B { y, z } => y + z
+        E::B { y, z } => y + z
     }
-}
----
-EXPECTED:
-```rock
-E::B { y: int, z: int }
-```
-===
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "```rock\nE::B { y: int, z: int }\n```" }]
 
-TEST: hover_match_arm_record_variant_field_binding
-TYPE: hover
-SOURCE: hover_match_arm_record_variant
-POSITION: line=8, character=15
-EXPECTED:
-Type: int
-===
+[[tests]]
+name = "hover_match_arm_record_variant_field_binding"
+kind = "hover"
+position = [8, 15]
+source = { from_test = "hover_match_arm_record_variant" }
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: int" }]
 
-TEST: hover_match_record_variant_field_name
-TYPE: hover
-SOURCE: hover_match_record_binding_explicit
-POSITION: line=8, character=20
-EXPECTED:
-value: int (field of Opt::Some)
-===
+[[tests]]
+name = "hover_match_record_variant_field_name"
+kind = "hover"
+position = [8, 20]
+source = { from_test = "hover_match_record_binding_explicit" }
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "value: int (field of Opt::Some)" }]
 
-TEST: hover_struct_pattern_field_name
-TYPE: hover
----
+[[tests]]
+name = "hover_struct_pattern_field_name"
+kind = "hover"
+position = [5, 16]
+source = '''
 struct Point { x: int, y: int }
 
 fn main() {
     let p = Point { x: 1, y: 2 }
     match p {
-        Point { «cursor»x: a, y: b } => { print(a + b) },
+        Point { x: a, y: b } => { print(a + b) },
     }
-}
----
-EXPECTED:
-x: int (field of Point)
-===
+}'''
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "x: int (field of Point)" }]

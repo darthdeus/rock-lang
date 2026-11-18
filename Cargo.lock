@@ -1788,6 +1788,7 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "test-utils",
+ "toml",
  "ustr",
  "wait-timeout",
  "walkdir",

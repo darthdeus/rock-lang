@@ -1,11 +1,10 @@
-Hover behavior on a live server after char-by-char typing. The one-shot CLI
-(`rock lsp hover`) resolves both positions correctly; only the incremental
-server path diverges, so these must stay edit_sequence tests.
+[[tests]]
+name = "hover_iteratee_after_typing_for_loop"
+kind = "edit_sequence"
 
-TEST: hover_iteratee_after_typing_for_loop
-TYPE: edit_sequence
----
-STEP 1:
+[[tests.steps]]
+mode = "replace"
+source = '''
 struct AggressorEntry {
     dmg: int
 }
@@ -16,33 +15,32 @@ struct Mob {
 
 fn f(m: Mob) {
 
-}
----
-CHECK: hover(8, 5)
-EXPECTED:
-Mob
----
-STEP 2 (type at 9:4):
+}'''
+
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/hover", params = { textDocument = { uri = "$uri" }, position = { line = 8, character = 5 } } }
+assertions = [{ op = "contains", path = ["result", "contents"], value = "Mob" }]
+
+[[tests.steps]]
+mode = "type_at"
+line = 9
+col = 4
+text = '''
 for a in m.aggressors {
     print(a.dmg)
-}
----
-CHECK: hover(9, 18)
-EXPECTED:
-[AggressorEntry]
-===
+}'''
 
-PINNED BUG (sentinel): after typing a for-loop into a live server, hover on
-the NEW loop binding (`a`) returns an empty hover; the correct answer is
-"Type: struct AggressorEntry" (the one-shot CLI and a non-typed live session
-both return it -- see hover_for_binding_fresh below). The `EXPECTED: none`
-below encodes today's wrong behavior. If this test FAILS, the incremental
-hover bug was fixed: change `none` to `AggressorEntry` and delete this note.
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/hover", params = { textDocument = { uri = "$uri" }, position = { line = 9, character = 18 } } }
+assertions = [{ op = "contains", path = ["result", "contents"], value = "[AggressorEntry]" }]
 
-TEST: hover_new_for_binding_after_typing_sentinel
-TYPE: edit_sequence
----
-STEP 1:
+[[tests]]
+name = "hover_new_for_binding_after_typing_sentinel"
+kind = "edit_sequence"
+
+[[tests.steps]]
+mode = "replace"
+source = '''
 struct AggressorEntry {
     dmg: int
 }
@@ -53,26 +51,32 @@ struct Mob {
 
 fn f(m: Mob) {
 
-}
----
-CHECK: hover(8, 5)
-EXPECTED:
-Mob
----
-STEP 2 (type at 9:4):
+}'''
+
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/hover", params = { textDocument = { uri = "$uri" }, position = { line = 8, character = 5 } } }
+assertions = [{ op = "contains", path = ["result", "contents"], value = "Mob" }]
+
+[[tests.steps]]
+mode = "type_at"
+line = 9
+col = 4
+text = '''
 for a in m.aggressors {
     print(a.dmg)
-}
----
-CHECK: hover(9, 8)
-EXPECTED:
-none
-===
+}'''
 
-TEST: hover_for_binding_fresh
-TYPE: edit_sequence
----
-STEP 1:
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/hover", params = { textDocument = { uri = "$uri" }, position = { line = 9, character = 8 } } }
+assertions = [{ op = "empty", path = ["result", "contents"], missing_is_empty = true, null_is_empty = true }]
+
+[[tests]]
+name = "hover_for_binding_fresh"
+kind = "edit_sequence"
+
+[[tests.steps]]
+mode = "replace"
+source = '''
 struct AggressorEntry {
     dmg: int
 }
@@ -85,9 +89,8 @@ fn f(m: Mob) {
     for a in m.aggressors {
         print(a.dmg)
     }
-}
----
-CHECK: hover(9, 8)
-EXPECTED:
-AggressorEntry
-===
+}'''
+
+[[tests.steps.checks]]
+request = { transport = "rpc", method = "textDocument/hover", params = { textDocument = { uri = "$uri" }, position = { line = 9, character = 8 } } }
+assertions = [{ op = "contains", path = ["result", "contents"], value = "AggressorEntry" }]

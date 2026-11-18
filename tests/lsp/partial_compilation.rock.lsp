@@ -1,26 +1,25 @@
-TEST: completion_during_editing_with_syntax_error
-TYPE: completion
----
+[[tests]]
+name = "completion_during_editing_with_syntax_error"
+kind = "completion"
+position = [6, 16]
+source = """
 fn add(a: int, b: int) -> int {
     return a + b
 }
 
 fn main() {
     let x = 42
-    let y = add(«cursor»
+    let y = add(
     // Syntax error: unclosed function call
-}
----
-EXPECTED:
-- x
-- y
-- add
+}"""
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["x", "y", "add"] }]
 
-===
-
-TEST: completion_after_valid_then_broken
-TYPE: completion
----
+[[tests]]
+name = "completion_after_valid_then_broken"
+kind = "completion"
+position = [10, 4]
+source = """
 struct Point {
     x: float,
     y: float,
@@ -31,23 +30,21 @@ fn create_point() -> Point {
 }
 
 fn get_point() -> Point {
-    «cursor»
+\u0020\u0020\u0020\u0020
 }
 
 fn main() {
     let invalid_syntax = broken
     // This line has invalid syntax but completion should still work
-}
----
-EXPECTED:
-- create_point
-- Point
+}"""
+request = { transport = "cli", argv = ["completion", "$target"] }
+checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["create_point", "Point"] }]
 
-===
-
-TEST: hover_during_editing_with_error
-TYPE: hover
----
+[[tests]]
+name = "hover_during_editing_with_error"
+kind = "hover"
+position = [1, 12]
+source = """
 fn calculate(num: int) -> int {
     return num * 2
 }
@@ -58,17 +55,14 @@ fn get_value() -> int {
 
 fn main() {
     let broken = this is invalid syntax
-}
----
-POSITION: line=1, character=12
-EXPECTED:
-Type: int
+}"""
+request = { transport = "cli", argv = ["hover", "$target"] }
+checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: int\n" }]
 
-===
-
-TEST: inlay_hints_with_partial_compilation
-TYPE: inlay_hints
----
+[[tests]]
+name = "inlay_hints_with_partial_compilation"
+kind = "inlay_hints"
+source = """
 fn process(value: int) -> string {
     return value.to_string()
 }
@@ -80,18 +74,6 @@ fn get_result() -> string {
 
 fn main() {
     let broken = invalid syntax here!!!
-}
----
-EXPECTED:
-fn process(value: int) -> string {
-    return value.to_string()
-}
-
-fn get_result() -> string {
-    let result«hint:: string» = process(«hint::value:»123)
-    return result
-}
-
-fn main() {
-    let broken = invalid syntax here!!!
-}
+}"""
+request = { transport = "cli", argv = ["inlay-hints", "$file"] }
+checks = [{ op = "contains_all", path = ["result", "hints"], value = [{ position = { line = 5 }, label = { text = "string", trim = true, strip_prefix = ":" } }, { position = { line = 5 }, label = { text = "value:", trim = true, strip_prefix = ":" } }] }]
