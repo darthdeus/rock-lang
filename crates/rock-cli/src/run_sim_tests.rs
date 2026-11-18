@@ -165,17 +165,24 @@ fn sim_receipt_prepare_releases_session() {
 }
 
 #[test]
-fn sim_receipt_registry_requires_source_files() {
-    let registry = SimRegistry {
-        wire_names: vec!["probe".to_string()],
-        env_by_wire: HashMap::new(),
-        source_files: HashMap::new(),
-    };
-    let missing = registry_json(&registry).unwrap_err();
-    assert!(
-        missing
-            .to_string()
-            .contains("compiled @sim `probe` has no recorded source file")
+fn sim_receipt_registry_round_trips_v4_entries_and_requires_source_files() {
+    let row = serde_json::json!({
+        "wire_name": "probe",
+        "env": [["MODE", "first"], ["MODE", "second"]],
+        "source_file": "src/probe.rock"
+    });
+    let entries = vec![serde_json::from_value::<RegisteredSim>(row.clone()).unwrap()];
+    let encoded = serde_json::to_value(entries).unwrap();
+    assert_eq!(encoded, serde_json::json!([row]));
+    let registry = parse_registry(&encoded).unwrap();
+    assert_eq!(registry.wire_names, ["probe"]);
+    assert_eq!(registry.source_files["probe"], "src/probe.rock");
+    assert_eq!(
+        registry.env_by_wire["probe"],
+        [
+            ("MODE".into(), "first".into()),
+            ("MODE".into(), "second".into())
+        ]
     );
 
     let malformed = serde_json::json!([{"wire_name":"probe", "env":[]}]);
@@ -834,62 +841,65 @@ fn lines(raw: &[&str]) -> Vec<String> {
     raw.iter().map(|s| s.to_string()).collect()
 }
 
-/// The wedged-child evasion, deterministically: a sim stuck inside one
-/// tick can flood `entry_start`-shaped lines, and the deadline may reset on
-/// none of them. After any violation the guard is poisoned, so even a line
-/// that would otherwise be the valid start extends nothing.
+fn entry_stream(name: &str, lines: impl IntoIterator<Item = String>) -> EntryStream {
+    let mut stream = EntryStream::new(name.to_owned(), true);
+    for line in lines {
+        stream.observe(&line, |_| {});
+    }
+    stream
+}
+
+fn checked_summary(stderr: &str) -> SimSummary {
+    let stream = entry_stream(
+        "fixture",
+        std::iter::once(start("fixture"))
+            .chain(stderr.lines().map(str::to_owned))
+            .chain(std::iter::once(end("fixture"))),
+    );
+    assert!(
+        stream.protocol_error.is_none(),
+        "{:?}",
+        stream.protocol_error
+    );
+    stream.summary
+}
+
 #[test]
 fn the_deadline_guard_resets_only_on_the_accepted_start() {
-    let mut g = Envelope::new("a");
-    assert!(
-        matches!(g.observe_boundary(&start("a")), Some(EnvelopeStep::Started)),
-        "the child's start resets"
-    );
-    assert!(
-        !matches!(
-            g.observe_boundary(&expect_ok("inside a")),
-            Some(EnvelopeStep::Started)
-        ),
-        "an ordinary op does not"
-    );
-    assert!(
-        !matches!(
-            g.observe_boundary("[   0.1s INFO ] raw logging"),
-            Some(EnvelopeStep::Started)
-        ),
-        "raw output does not"
-    );
-    assert!(
-        !matches!(g.observe_boundary(&start("a")), Some(EnvelopeStep::Started)),
-        "a second start does not"
-    );
-
-    let mut g = Envelope::new("a");
-    assert!(
-        !matches!(
-            g.observe_boundary(&expect_ok("before the start")),
-            Some(EnvelopeStep::Started)
-        ),
-        "an op before the start poisons"
-    );
-    assert!(
-        !matches!(g.observe_boundary(&start("a")), Some(EnvelopeStep::Started)),
-        "a poisoned guard must not resume resetting on a later well-formed start"
-    );
+    for first in [
+        start("a"),
+        expect_ok("orphan"),
+        "__SIM__ invalid".to_owned(),
+    ] {
+        let mut stream = EntryStream::new("a".to_string(), false);
+        assert_eq!(
+            matches!(
+                stream.observe(&first, |_| {}).boundary,
+                Some(EntryBoundary::Started)
+            ),
+            first == start("a")
+        );
+        for line in [expect_ok("ordinary op"), "raw log".to_owned(), start("a")] {
+            assert!(!matches!(
+                stream.observe(&line, |_| {}).boundary,
+                Some(EntryBoundary::Started)
+            ));
+        }
+        assert!(stream.protocol_error.is_some());
+    }
 }
 
 #[test]
 fn entry_frame_timing_is_validated_and_retained() {
-    let mut envelope = Envelope::new("a");
-    assert!(envelope.observe(&start("a")).is_ok());
+    let mut stream = entry_stream("a", [start("a")]);
     let valid = end_with_frame_timing(
         "a",
         3,
         r#"{"frames":3,"draw_frames":2,"submitted_frames":1,"logic_us":10,"render_cpu_us":20,"present_us":30}"#,
     );
     assert!(matches!(
-        envelope.observe(&valid),
-        Ok(EnvelopeStep::Ended(
+        stream.observe(&valid, |_| {}).boundary,
+        Some(EntryBoundary::Ended(
             Some(3),
             Some(EntryFrameTiming {
                 frames: 3,
@@ -901,18 +911,16 @@ fn entry_frame_timing_is_validated_and_retained() {
             }),
         ))
     ));
+    assert_eq!(stream.summary.frame_count, Some(3));
 
     for timing in [
         r#"{"frames":3,"draw_frames":4,"submitted_frames":1,"logic_us":10,"render_cpu_us":20,"present_us":30}"#,
         r#"{"frames":2,"draw_frames":2,"submitted_frames":1,"logic_us":10,"render_cpu_us":20,"present_us":30}"#,
         r#"{"frames":3,"draw_frames":2,"submitted_frames":1,"logic_us":-1,"render_cpu_us":20,"present_us":30}"#,
     ] {
-        let mut envelope = Envelope::new("a");
-        assert!(envelope.observe(&start("a")).is_ok());
+        let stream = entry_stream("a", [start("a"), end_with_frame_timing("a", 3, timing)]);
         assert!(
-            envelope
-                .observe(&end_with_frame_timing("a", 3, timing))
-                .is_err(),
+            stream.protocol_error.is_some(),
             "invalid frame timing must reject: {timing}"
         );
     }
@@ -954,29 +962,63 @@ fn the_envelope_partitions_operations_and_logging() {
         "[   0.4s INFO ] teardown".to_string(),
     ];
 
-    let out = split_child_stream(&stream, "a").expect("well-formed stream");
-    assert_eq!(out.sim, vec![expect_ok("from a")]);
+    let out = entry_stream("a", stream);
+    assert!(out.protocol_error.is_none());
+    assert_eq!(out.summary.expects_pass[0].message, "from a");
     assert!(out.started && out.terminated);
-    assert_eq!(out.frame_count, Some(7));
-    assert!(out.raw_all.iter().any(|l| l.contains("booting")));
-    assert!(out.raw_all.iter().any(|l| l.contains("teardown")));
+    assert_eq!(out.summary.frame_count, Some(7));
+    assert!(out.summary.diagnostics.contains("booting"));
+    assert!(out.summary.diagnostics.contains("teardown"));
 }
 
 /// A child killed mid-entry leaves its entry open. That is the ONE
 /// tolerated gap, and it is recorded rather than read as a clean close.
 #[test]
 fn a_killed_child_leaves_its_entry_unterminated() {
-    let out = split_child_stream(&[start("a"), expect_ok("partial")], "a")
-        .expect("a truncated stream is not malformed");
+    let out = entry_stream("a", [start("a"), expect_ok("partial")]);
     assert!(out.started && !out.terminated);
-    assert_eq!(out.sim, vec![expect_ok("partial")]);
+    assert!(out.protocol_error.is_none());
+    assert_eq!(out.summary.expects_pass[0].message, "partial");
+}
+
+#[test]
+fn stderr_reader_preserves_completed_lines_on_read_error_and_panic() {
+    for fail_read in [true, false] {
+        let mut input =
+            format!("{}\nboot details\n{}\n", start("a"), expect_ok("kept")).into_bytes();
+        if fail_read {
+            input.extend_from_slice(&[0xff, b'\n']);
+        } else {
+            input.extend_from_slice(end("a").as_bytes());
+        }
+        let mut stream = EntryStream::new("a".to_string(), true);
+        let warning = stream
+            .read(std::io::Cursor::new(input), |line| {
+                assert!(
+                    !matches!(line.boundary, Some(EntryBoundary::Ended(..))),
+                    "reporting failed"
+                );
+            })
+            .unwrap();
+        assert!(warning.contains(if fail_read {
+            "error reading game stderr"
+        } else {
+            "stderr reader thread panicked"
+        }));
+        assert!(stream.started && !stream.terminated);
+        assert!(stream.protocol_error.is_none());
+        assert_eq!(stream.summary.expects_pass[0].message, "kept");
+        assert_eq!(stream.summary.diagnostics, "boot details\n");
+    }
 }
 
 #[test]
 fn malformed_entry_frame_counts_are_rejected() {
     for raw in ["-1", "1.5", "null", "\"seven\""] {
         assert!(
-            split_child_stream(&[start("a"), end_with_frame_count("a", raw)], "a").is_err(),
+            entry_stream("a", [start("a"), end_with_frame_count("a", raw)])
+                .protocol_error
+                .is_some(),
             "invalid frame_count {raw} was accepted"
         );
     }
@@ -1007,7 +1049,7 @@ fn malformed_envelopes_are_rejected_not_guessed_at() {
     ];
     for (what, stream) in cases {
         assert!(
-            split_child_stream(&stream, "a").is_err(),
+            entry_stream("a", stream).protocol_error.is_some(),
             "{what} was accepted"
         );
     }
@@ -1173,7 +1215,7 @@ fn manual_gallery_selection_is_explicit_and_last_wins() {
 #[test]
 fn sim_summary_from_stderr_parses_exclude_op() {
     let stderr = "__SIM__ {\"op\":\"exclude\",\"reason\":\"opt-in fixture\"}\n";
-    let s = SimSummary::from_stderr(stderr);
+    let s = checked_summary(stderr);
     assert_eq!(s.excluded.as_deref(), Some("opt-in fixture"));
     assert!(s.saw_stop);
 }
@@ -1187,7 +1229,7 @@ __SIM__ {"op":"expect_ok","message":"b","site":"foo.rock:3"}
 __SIM__ {"op":"expect_fail","message":"c","site":"foo.rock:4"}
 __SIM__ {"op":"stop","site":"foo.rock:5"}
 "#;
-    let s = SimSummary::from_stderr(stderr);
+    let s = checked_summary(stderr);
     assert_eq!(s.expects_pass.len(), 2);
     assert_eq!(s.expects_fail.len(), 1);
     assert_eq!(s.expects_fail[0].message, "c");
@@ -1198,40 +1240,35 @@ __SIM__ {"op":"stop","site":"foo.rock:5"}
 
 #[test]
 fn foreign_stderr_prefixes_preserve_envelopes_deadlines_and_verdicts() {
-    let mut guard = Envelope::new("a");
-    let stream: Vec<String> = [
+    let mut stream = EntryStream::new("a".to_string(), true);
+    for (index, line) in [
         start("a"),
         expect_ok("checked"),
         r#"__SIM__ {"op": "stop"}"#.to_string(),
         end("a"),
     ]
     .into_iter()
-    .map(|line| format!("foreign stderr: {line}"))
-    .collect();
-    assert!(matches!(
-        guard.observe_boundary(&stream[0]),
-        Some(EnvelopeStep::Started)
-    ));
-    for line in &stream[1..] {
-        assert!(!matches!(
-            guard.observe_boundary(line),
-            Some(EnvelopeStep::Started)
-        ));
+    .enumerate()
+    {
+        let line = format!("foreign stderr: {line}");
+        let observed = stream.observe(&line, |_| {});
+        assert_eq!(observed.diagnostic, Some("foreign stderr: "));
+        assert_eq!(
+            matches!(observed.boundary, Some(EntryBoundary::Started)),
+            index == 0
+        );
     }
-    let entry = split_child_stream(&stream, "a").unwrap();
-    assert!(entry.started && entry.terminated);
-    assert_eq!(entry.raw_all, vec!["foreign stderr: "; 4]);
-    assert_eq!(
-        verdict_word(&SimSummary::from_stderr(&entry.sim.join("\n"))),
-        "PASS"
-    );
+    assert!(stream.protocol_error.is_none());
+    assert!(stream.started && stream.terminated);
+    assert_eq!(stream.summary.diagnostics, "foreign stderr: \n".repeat(4));
+    assert_eq!(verdict_word(&stream.summary), "PASS");
     for line in [
         "noise __SIM__",
         "noise __SIM__ broken JSON",
         r#"noise __SIM__ {"op":"stop"}junk"#,
     ] {
-        let error = split_child_stream(&[start("a"), line.to_string()], "a")
-            .err()
+        let error = entry_stream("a", [start("a"), line.to_string()])
+            .protocol_error
             .unwrap();
         assert!(error.to_string().contains("invalid sim marker"));
     }
@@ -1253,7 +1290,7 @@ io.stderr:write('`alsa::poll()` returned POLLERR\n')
         "{}",
         String::from_utf8_lossy(&child.stderr)
     );
-    let summary = SimSummary::from_stderr(&String::from_utf8(child.stderr).unwrap());
+    let summary = checked_summary(&String::from_utf8(child.stderr).unwrap());
     assert_eq!(
         verdict_word(&summary),
         "PASS",
@@ -1278,7 +1315,7 @@ emit('{"op":"stop"}', 'test.rock:2')
         "{}",
         stderr.lines().rev().take(5).collect::<Vec<_>>().join("\n")
     );
-    let summary = SimSummary::from_stderr(&stderr);
+    let summary = checked_summary(&stderr);
     assert_eq!(summary.expects_pass.len(), 20000);
     assert_eq!(verdict_word(&summary), "PASS");
 }
@@ -1292,23 +1329,32 @@ fn malformed_sim_markers_fail_the_summary() {
         "[]",
         r#"{"op":false}"#,
     ] {
-        let summary = SimSummary::from_stderr(&format!(
-            "__SIM__ {{\"op\":\"expect_ok\"}}\nnoise __SIM__ {marker}\n__SIM__ {{\"op\":\"stop\"}}"
-        ));
-        assert_eq!(verdict_word(&summary), "FAIL", "accepted {marker}");
-        assert!(
-            summary
-                .errors
-                .iter()
-                .any(|error| error.message.contains("invalid sim marker"))
+        let stream = entry_stream(
+            "a",
+            [
+                start("a"),
+                expect_ok("checked"),
+                format!("noise __SIM__ {marker}"),
+                r#"__SIM__ {"op":"stop"}"#.to_string(),
+                end("a"),
+            ],
         );
+        assert!(
+            stream
+                .protocol_error
+                .unwrap()
+                .to_string()
+                .contains("invalid sim marker")
+        );
+        assert_eq!(stream.summary.expects_pass.len(), 1);
+        assert!(!stream.terminated);
     }
 }
 
 #[test]
 fn summary_flags_missing_stop() {
     let stderr = r#"__SIM__ {"op":"expect_ok","message":"a","site":"foo.rock:1"}"#;
-    let s = SimSummary::from_stderr(stderr);
+    let s = checked_summary(stderr);
     assert_eq!(s.expects_pass.len(), 1);
     assert!(!s.saw_stop);
     assert!(!s.has_failures());
@@ -1317,7 +1363,7 @@ fn summary_flags_missing_stop() {
 #[test]
 fn summary_parses_allocation_census_and_preserves_frame_window() {
     let stderr = "__SIM__ {\"op\":\"allocation_census\",\"build_sha\":\"abc123\",\"rendering_enabled\":false,\"warmup_frames_requested\":2,\"warmup_frames\":2,\"frame_count\":6,\"measured_frames\":4,\"initialization_gross_kb\":3.5,\"outside_frame_gross_kb\":1.25,\"warmup_gross_kb\":8.0,\"measured_gross_kb\":24.0,\"total_gross_kb\":36.75,\"measured_allocator_calls\":40,\"measured_allocation_calls\":32,\"measured_reallocation_calls\":8,\"stop_sim_reached\":true,\"measurement_complete\":true}\n__SIM__ {\"op\":\"stop\"}";
-    let summary = SimSummary::from_stderr(stderr);
+    let summary = checked_summary(stderr);
     let census = summary.allocation_census.as_ref().expect("census result");
     assert_eq!(census.build_sha, "abc123");
     assert!(!census.rendering_enabled);
@@ -1387,7 +1433,7 @@ fn census_rankings_use_the_requested_per_frame_metric() {
 #[test]
 fn summary_compresses_site_to_stem_and_line() {
     let stderr = r#"__SIM__ {"op":"expect_fail","message":"x","site":"/work/repo/game/tests/sims/bandage.rock:29"}"#;
-    let s = SimSummary::from_stderr(stderr);
+    let s = checked_summary(stderr);
     assert_eq!(s.expects_fail[0].site, "bandage:29");
 }
 
