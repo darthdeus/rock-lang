@@ -51,17 +51,10 @@ struct CliCompileHost<'a> {
     lint_scope: crate::lint_pass::Scope,
     comptime: CliComptime<'a>,
     prepare_timings: Vec<(&'static str, std::time::Duration)>,
-    emission: CliEmission,
+    package_tests: Option<PackageTestFns>,
 }
 
-enum CliEmission {
-    Program,
-    WithAccessors,
-    Accessors(std::result::Result<String, CompilerError>),
-    PackageTests {
-        tests: Vec<(skull_mir::mir::FuncRef, skull::SkullTest)>,
-    },
-}
+type PackageTestFns = Vec<(skull_mir::mir::FuncRef, skull::SkullTest)>;
 
 enum CliComptime<'a> {
     /// Resolve from the entry path's enclosing project once the program
@@ -87,7 +80,7 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
 
     fn phase(&mut self, phase: skull::pipeline::Phase<'_>) {
         // Package tests do not contribute to the invocation compile budget.
-        if matches!(self.emission, CliEmission::PackageTests { .. }) {
+        if self.package_tests.is_some() {
             return;
         }
         use skull::pipeline::Phase;
@@ -188,30 +181,15 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
         entry: bone_semantic::prelude::ModuleId,
         target: skull::pipeline::EmitTarget,
     ) -> std::result::Result<skull::mir_emit::MirEmit, CompilerError> {
-        match &mut self.emission {
-            CliEmission::PackageTests { tests } => {
-                *tests =
-                    collect_package_test_fns(ws, self.lint_root.to_str().unwrap(), self.sources)?;
-                let roots = tests.iter().map(|(func, _)| *func).collect::<Vec<_>>();
-                return skull::mir_emit::FullEmit::package_test(&roots)
-                    .run(ws, entry)
-                    .map(|(emit, _cache)| emit);
-            }
-            CliEmission::WithAccessors => {}
-            _ => return skull::pipeline::emit_program(ws, entry, target),
+        if let Some(tests) = &mut self.package_tests {
+            *tests = collect_package_test_fns(ws, self.lint_root.to_str().unwrap(), self.sources)?;
+            let roots = tests.iter().map(|(func, _)| *func).collect::<Vec<_>>();
+            return skull::mir_emit::FullEmit::package_test(&roots)
+                .with_global_accessors()
+                .run(ws, entry)
+                .map(|(emit, _cache)| emit);
         }
-        // Accessor planning reads only the checked workspace and runs on one
-        // thread, so it overlaps emission instead of following it.
-        let (emit, metadata) = std::thread::scope(|scope| {
-            let metadata = scope.spawn(|| global_accessor_metadata(ws));
-            let emit = skull::pipeline::emit_program(ws, entry, target);
-            let metadata = metadata
-                .join()
-                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-            (emit, metadata)
-        });
-        self.emission = CliEmission::Accessors(metadata);
-        emit
+        skull::pipeline::emit_program(ws, entry, target)
     }
 
     fn report_soft_findings(&mut self, soft: Vec<bone_lints::Finding>) {
@@ -236,7 +214,7 @@ enum CliBuildMode<'a> {
 struct CliBuild {
     sources: SourceFiles,
     compiled: skull::pipeline::Compiled,
-    emission_mode: CliEmission,
+    package_tests: Option<PackageTestFns>,
     compile: Duration,
     body_costs: Option<std::path::PathBuf>,
 }
@@ -309,16 +287,11 @@ fn cli_build(mode: CliBuildMode<'_>) -> std::result::Result<CliBuild, CliBuildFa
             _ => CliComptime::FromEntry(path),
         },
         prepare_timings: Vec::new(),
-        emission: if production {
-            CliEmission::WithAccessors
-        } else if source.is_some() {
-            CliEmission::Program
-        } else {
-            CliEmission::PackageTests { tests: Vec::new() }
-        },
+        package_tests: (!production && source.is_none()).then(Vec::new),
     };
     let mut target = skull::pipeline::EmitTarget::SINGLE_SOURCE;
     target.project_root = production.then_some(path);
+    target.global_accessors = production;
     let body_costs;
     let compiled = if let Some((file, contents)) = source {
         body_costs = None;
@@ -345,11 +318,11 @@ fn cli_build(mode: CliBuildMode<'_>) -> std::result::Result<CliBuild, CliBuildFa
         errors: failure.errors,
     })?;
     let compile = started.elapsed();
-    let emission_mode = host.emission;
+    let package_tests = host.package_tests;
     Ok(CliBuild {
         sources,
         compiled,
-        emission_mode,
+        package_tests,
         compile,
         body_costs,
     })
@@ -1456,19 +1429,14 @@ fn skull_build_package_with_limit(
     let CliBuild {
         sources,
         compiled,
-        emission_mode,
+        package_tests,
         ..
     } = build;
     let skull::pipeline::Compiled {
         ws, emission: emit, ..
     } = compiled;
-    let CliEmission::PackageTests {
-        tests: test_fns, ..
-    } = emission_mode
-    else {
-        unreachable!("package tests build result");
-    };
-    let (lua, bridge_end) = (emit.lua, emit.globals_bridge_end);
+    let test_fns = package_tests.expect("package tests build result");
+    let lua = emit.lua;
     let files = test_fns
         .iter()
         .map(|(func, _)| ws.modules[func.module.index()].file.as_str().to_owned())
@@ -1478,13 +1446,6 @@ fn skull_build_package_with_limit(
         .map(|(_, test)| test)
         .collect::<Vec<_>>();
     let facts = test_program_facts(&ws);
-    let lua = install_global_accessors(lua, bridge_end, &ws)
-        .map_err(|e| SkullFailure {
-            reason: categorize(&e.message),
-            rendered: render_project_err(&sources, &e),
-        })?
-        .parts()
-        .concat();
     // The compiler state is dead once the program is emitted. Free it before
     // the program text is copied and the test process runs: project's peaks near
     // 5 GB, and keeping it resident doubled the memory a `rock test` needed
@@ -1583,7 +1544,7 @@ pub(crate) fn collect_package_test_fns(
     ws: &bone_semantic::inference::Workspace,
     dir: &str,
     sources: &SourceFiles,
-) -> std::result::Result<Vec<(skull_mir::mir::FuncRef, skull::SkullTest)>, CompilerError> {
+) -> std::result::Result<PackageTestFns, CompilerError> {
     let root = std::path::Path::new(dir)
         .canonicalize()
         .unwrap_or_else(|_| std::path::PathBuf::from(dir));
@@ -2145,7 +2106,6 @@ fn skull_emit_project_with_inputs(
     let CliBuild {
         sources,
         compiled,
-        emission_mode,
         compile,
         body_costs,
         ..
@@ -2153,9 +2113,6 @@ fn skull_emit_project_with_inputs(
     let skull::pipeline::Compiled {
         ws, mut emission, ..
     } = compiled;
-    let CliEmission::Accessors(metadata) = emission_mode else {
-        unreachable!("production build accessor metadata");
-    };
     crate::compile_budget::emission(&emission);
     if let Some(path) = body_costs
         && let Err(e) = crate::body_costs::write(&path, &ws, &emission.attribution)
@@ -2171,16 +2128,7 @@ fn skull_emit_project_with_inputs(
     let lua = std::mem::take(&mut emission.lua);
     crate::bone_backend::log_compile_stats(&sources, &ws, compile, compile, None);
 
-    let bridge_end = emission.globals_bridge_end;
-    let lua = match metadata.and_then(|metadata| GameProgram::new(lua, bridge_end, metadata, &ws)) {
-        Ok(lua) => lua,
-        Err(error) => {
-            eprintln!("{}", render_project_err(&sources, &error));
-            log::error!(target: "SKULL", "global accessor planning failed for {}", dir);
-            crate::invocation_log::exit(1);
-        }
-    };
-    crate::compile_budget::phase("global accessors");
+    let lua = GameProgram::new(lua, &ws);
     // Overlap workspace destruction with the final output write or runtime launch.
     #[cfg(not(feature = "sequential"))]
     rayon::spawn(move || drop((ws, emission)));
@@ -2220,243 +2168,15 @@ fn write_allocation_report(
 pub struct GameProgram {
     comptime_inputs: bone_semantic::inference::ComptimeInputs,
     lua: String,
-    metadata: String,
-    metadata_at: usize,
 }
 
 impl GameProgram {
-    fn new(
-        lua: String,
-        bridge_end: Option<usize>,
-        metadata: String,
-        ws: &bone_semantic::inference::Workspace,
-    ) -> std::result::Result<Self, CompilerError> {
-        let mut program = Self::with_metadata(lua, bridge_end, metadata)?;
-        program.comptime_inputs = ws.comptime_inputs.clone();
-        Ok(program)
-    }
-
-    /// `bridge_end` is where the emit says the bridge install ends; without
-    /// it the program is searched.
-    fn with_metadata(
-        lua: String,
-        bridge_end: Option<usize>,
-        metadata: String,
-    ) -> std::result::Result<Self, CompilerError> {
-        let marker = skull::mir_emit::GLOBALS_BRIDGE_LINE;
-        let metadata_at = match bridge_end {
-            Some(at) if lua.get(..at).is_some_and(|head| head.ends_with(marker)) => at,
-            Some(at) => {
-                return Err(CompilerError::new_no_location(format!(
-                    "internal: the global directory bridge does not end at byte {at}"
-                )));
-            }
-            None => {
-                memchr::memmem::find(lua.as_bytes(), marker.as_bytes()).ok_or_else(|| {
-                    CompilerError::new_no_location(
-                        "compiled program is missing its global directory".to_string(),
-                    )
-                })? + marker.len()
-            }
-        };
-        Ok(Self {
+    fn new(lua: String, ws: &bone_semantic::inference::Workspace) -> Self {
+        Self {
             lua,
-            metadata,
-            metadata_at,
-            comptime_inputs: Default::default(),
-        })
-    }
-
-    fn parts(&self) -> [&str; 3] {
-        let (head, tail) = self.lua.split_at(self.metadata_at);
-        [head, &self.metadata, tail]
-    }
-}
-
-fn install_global_accessors(
-    lua: String,
-    bridge_end: Option<usize>,
-    ws: &bone_semantic::inference::Workspace,
-) -> std::result::Result<GameProgram, CompilerError> {
-    GameProgram::new(lua, bridge_end, global_accessor_metadata(ws)?, ws)
-}
-
-/// The directory fields a host attaches to the emitted globals.
-fn global_accessor_metadata(
-    ws: &bone_semantic::inference::Workspace,
-) -> std::result::Result<String, CompilerError> {
-    let mut rows = std::collections::BTreeMap::new();
-    let scx = skull_mir::lower::ScalarCtx::new(ws);
-    build_global_nobox_accessors(ws, &scx, &mut rows)?;
-    let mut metadata = String::from("\n_G.__rock_global_decorate({");
-    for (identity, fields) in rows.into_iter().filter(|(_, fields)| !fields.is_empty()) {
-        metadata.push_str(&format!("[{identity:?}]={{{}}},\n", fields.join(",")));
-    }
-    metadata.push_str("})\n");
-    Ok(metadata)
-}
-
-/// The `get`/`set` directory fields of each `nobox` global: the rebuild and
-/// take-apart pair. A `nobox` global's storage is its leaf slots, so reflection
-/// cannot reach it as one stored value; these closures are its accessors.
-///
-/// Both directions consume one canonical accessor plan
-/// (`nobox_global_accessor_shape`), so they cannot drift from each other or from the
-/// storage: `get` is the positional leaf ctor over the plan's paths, and
-/// `set` reads the same paths in order. Nested cdata uses the flattened `_lct`
-/// representation; ordinary cdata and GC-table values retain `_ct` and `_vt`.
-///
-fn build_global_nobox_accessors(
-    ws: &bone_semantic::inference::Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
-    rows: &mut std::collections::BTreeMap<String, Vec<String>>,
-) -> std::result::Result<(), CompilerError> {
-    let state_slots = skull::mir_emit::lua_global_state_slots(ws, scx)?;
-    for m in ws.source_modules() {
-        for (_gid, g) in m.globals.iter().filter(|(_, global)| !global.is_const) {
-            let Some(acc) = skull_mir::lower::nobox_global_accessor_shape(ws, scx, g.ty)
-                .map_err(|e| CompilerError::new_no_location(e.message))?
-            else {
-                continue;
-            };
-            let skull_mir::lower::NoboxGlobalAccessorShape {
-                ty_name,
-                paths,
-                nullable,
-                storage,
-                ctor_suffix: suffix,
-                presence_path: _,
-                unbuildable,
-            } = acc;
-            let ty_symbol = skull_mir::mangle::type_symbol(ws, ty_name);
-            let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
-                .map_err(|e| CompilerError::new_no_location(e.message))?;
-            // The leaves are emitted symbols, matching the storage slot map.
-            let all_leaves = plan
-                .leaf_names(skull_mir::mangle::symbol_of_key(g.name))
-                .ok_or_else(|| {
-                    CompilerError::new_no_location(format!(
-                        "nobox global `{}` has an accessor shape but no leaf-name plan",
-                        g.name
-                    ))
-                })?;
-            // A nullable global leads with a presence leaf that has no path: it is
-            // not a field, so it is branched on rather than read. Everything below
-            // pairs the REMAINING leaves with the paths.
-            let (present, leaves) = if nullable {
-                let Some((p, rest)) = all_leaves.split_first() else {
-                    return Err(CompilerError::new_no_location(format!(
-                        "nullable nobox global `{}` has no presence leaf",
-                        g.name
-                    )));
-                };
-                (Some(*p), rest.to_vec())
-            } else {
-                (None, all_leaves)
-            };
-            if leaves.len() != paths.len() {
-                return Err(CompilerError::new_no_location(format!(
-                    "nobox global `{}` has {} leaves but {} leaf paths",
-                    g.name,
-                    leaves.len(),
-                    paths.len()
-                )));
-            }
-            // Both accessor directions are POSITIONAL over the leaf sequence, so
-            // they are sound only where the ctor is too. `nobox_global_accessor_shape`
-            // makes that call; guessing is how a leak becomes a miscompile, so an
-            // unbuildable shape rejects rather than emit a wrong accessor.
-            if let Some(why) = &unbuildable {
-                return Err(CompilerError::new_no_location(format!(
-                    "nobox global `{}` of type `{ty_name}` cannot be rebuilt: {why}",
-                    g.name
-                )));
-            }
-            let all_leaf_names = if let Some(present) = present {
-                std::iter::once(present)
-                    .chain(leaves.iter().copied())
-                    .collect::<Vec<_>>()
-            } else {
-                leaves.clone()
-            };
-            let state_keys = all_leaf_names
-                .iter()
-                .map(|leaf| {
-                    state_slots.get(leaf).copied().ok_or_else(|| {
-                        CompilerError::new_no_location(format!(
-                            "nobox global `{}` leaf `{leaf}` has no Lua storage slot",
-                            g.name
-                        ))
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let (present_key, value_keys) = if nullable {
-                let (present, values) = state_keys
-                    .split_first()
-                    .expect("a nullable shape has a presence storage slot");
-                (Some(*present), values.to_vec())
-            } else {
-                (None, state_keys)
-            };
-            let args = value_keys
-                .iter()
-                .map(|key| format!("__rock_globals[{key}]"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let writes = leaves
-                .iter()
-                .zip(&paths)
-                // Table boxes (leaf-table, and a GC table's `nobox` fields) store
-                // dotted paths as literal keys; cdata fields remain ordinary
-                // nested field reads.
-                .zip(&value_keys)
-                .map(|((_, p), key)| {
-                    let value = if storage != skull_mir::lower::ValueStorage::CData {
-                        format!("v[{:?}]", p.as_str())
-                    } else {
-                        format!("v.{}", p.as_str())
-                    };
-                    format!("__rock_globals[{key}] = {value}")
-                })
-                .collect::<Vec<_>>()
-                .join("; ");
-            let (get, set) = match present {
-                // Presence gates BOTH directions: rebuilding an absent value would
-                // hand reflection a struct of nils, and a write that left the leaves
-                // behind would let a later read resurrect the old value.
-                Some(_) => (
-                    format!(
-                        "if not __rock_globals[{}] then return nil end return {ty_symbol}{suffix}({args})",
-                        present_key
-                            .as_ref()
-                            .expect("nullable accessor has a presence key")
-                    ),
-                    format!(
-                        "__rock_globals[{}] = v ~= nil; if v ~= nil then {writes} else {} end",
-                        present_key
-                            .as_ref()
-                            .expect("nullable accessor has a presence key"),
-                        leaves
-                            .iter()
-                            .zip(&value_keys)
-                            .map(|(_, key)| format!("__rock_globals[{key}] = nil"))
-                            .collect::<Vec<_>>()
-                            .join("; ")
-                    ),
-                ),
-                None => (format!("return {ty_symbol}{suffix}({args})"), writes),
-            };
-            rows.entry(skull_mir::global_storage::global_identity(
-                m.logical_file,
-                g.name,
-            ))
-            .or_default()
-            .push(format!(
-                "get=function() {get} end,set=function(v) {set} end"
-            ));
+            comptime_inputs: ws.comptime_inputs.clone(),
         }
     }
-    Ok(())
 }
 
 /// A checked sim declaration, in workspace/source order. Wire identities use
@@ -2912,14 +2632,13 @@ pub(crate) fn skull_game_main<'a>(
     preamble: &'a str,
     program: &'a GameProgram,
     emits_main: bool,
-) -> [&'a str; 5] {
-    let [head, metadata, tail] = program.parts();
+) -> [&'a str; 3] {
     let entry = if emits_main {
         "\n__rock_main_wrapper(main)\n"
     } else {
         ""
     };
-    [preamble, head, metadata, tail, entry]
+    [preamble, &program.lua, entry]
 }
 
 fn write_program_parts(writer: &mut impl std::io::Write, parts: &[&str]) -> std::io::Result<()> {
@@ -3051,7 +2770,8 @@ fn emit_live_full(
         Some(selected_sims) => skull::mir_emit::FullEmit::selected_sims(selected_sims),
         None => skull::mir_emit::FullEmit::program(),
     };
-    emit.project_root(Some(project_dir))
+    emit.with_global_accessors()
+        .project_root(Some(project_dir))
         .renderer(skull::mir_emit::RendererTarget::Gl)
         .run(ws, entry)
 }
@@ -3154,8 +2874,7 @@ impl IncrementalProject {
                 anyhow::anyhow!("compiler did not publish an Artifact fingerprint")
             })?;
             let emits_main = emit.emits_main;
-            let lua = install_global_accessors(emit.lua, emit.globals_bridge_end, ws)
-                .map_err(|e| anyhow::anyhow!(render_project_err(project.sources(), &e)))?;
+            let lua = GameProgram::new(emit.lua, ws);
             (lua, c, artifact_fingerprint, emits_main)
         };
         let preamble = (RuntimeServices::registered().program_preamble)(dir, ProgramKind::Game)?;
@@ -3377,8 +3096,7 @@ impl IncrementalProject {
                     });
                 }
                 let emits_main = emit.emits_main;
-                let lua = install_global_accessors(emit.lua, emit.globals_bridge_end, ws)
-                    .map_err(|e| anyhow::anyhow!(render_project_err(self.project.sources(), &e)))?;
+                let lua = GameProgram::new(emit.lua, ws);
                 ((lua, emits_main), c)
             };
             self.preamble = (RuntimeServices::registered().program_preamble)(
@@ -3494,8 +3212,7 @@ impl IncrementalProject {
                 anyhow::anyhow!("compiler did not publish an Artifact fingerprint")
             })?;
             let emits_main = emit.emits_main;
-            let lua = install_global_accessors(emit.lua, emit.globals_bridge_end, ws)
-                .map_err(|e| anyhow::anyhow!(e.message))?;
+            let lua = GameProgram::new(emit.lua, ws);
             (lua, c, artifact_fingerprint, emits_main)
         };
         self.preamble = (RuntimeServices::registered().program_preamble)(

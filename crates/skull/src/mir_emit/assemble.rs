@@ -745,25 +745,6 @@ fn release_one_shot_chunks(
 
 type GlobalKey = (ModuleId, Idx<bone_semantic::hir::GlobalDef>);
 
-/// The value ctors a host's `nobox` global accessors call (rock-cli's
-/// `build_global_nobox_accessors` appends them after assembly). A shape the
-/// host cannot build is its error to report, so it is skipped here.
-fn host_accessor_value_ctors(ws: &Workspace, scx: &skull_mir::lower::ScalarCtx) -> Vec<Ustr> {
-    ws.source_modules()
-        .flat_map(|m| m.globals.iter().map(|(_, g)| g))
-        .filter(|g| !g.is_const)
-        .filter_map(|g| skull_mir::lower::nobox_global_accessor_shape(ws, scx, g.ty).ok()?)
-        .filter(|shape| shape.ctor_suffix != "_ct")
-        .map(|shape| {
-            Ustr::from(&format!(
-                "{}{}",
-                skull_mir::mangle::type_symbol(ws, shape.ty_name),
-                shape.ctor_suffix
-            ))
-        })
-        .collect()
-}
-
 /// The load-time scaffolding: runtime prelude, value struct and enum
 /// definitions, type tables. IR-agnostic, so it needs no chunk.
 fn scaffold_prelude_lua(
@@ -935,7 +916,7 @@ pub(super) struct EarlyAssembly {
     // Kept as results and reported where assembly always reported them, so a
     // body rejection still comes first.
     global_layout: Result<String, String>,
-    globals_directory: Result<String, CompilerError>,
+    globals_directory: Result<GlobalsDirectoryLua, CompilerError>,
     leaf_owner: Result<FxHashMap<Ustr, Ustr>, CompilerError>,
 }
 
@@ -952,6 +933,7 @@ pub(super) fn prepare_early_assembly(
     cg: &CodegenCtx,
     concrete: &crate::concrete_body::ConcreteBodies,
     attribution: bool,
+    global_accessors: bool,
 ) -> EarlyAssembly {
     let (scaffold, units) = parallel_join(
         || {
@@ -959,7 +941,7 @@ pub(super) fn prepare_early_assembly(
             let scaffold = scaffold_prelude_lua(ws, scx);
             let scaffold_time = ts.elapsed();
             let global_layout = skull_mir::global_storage::global_layout_id(ws, scx);
-            let globals_directory = globals_directory_lua(ws, scx, cg);
+            let globals_directory = globals_directory_lua(ws, scx, cg, global_accessors);
             let leaf_owner = global_leaf_owners(ws, scx);
             (
                 scaffold,
@@ -1038,6 +1020,7 @@ pub(super) fn assemble(
             &cache.cg,
             &cache.concrete,
             cache.attribution,
+            cache.global_accessors,
         )
     });
     let FoldedUnits {
@@ -1262,13 +1245,17 @@ pub(super) fn assemble(
         .len();
     let out = &mut asm.out;
     out.push_str(&globals_open_lua(&global_layout, cg, static_count));
+    let directory = globals_directory?;
     out.push_str(&wrap_large_lua_section(
         "__rock_globals_directory_part",
-        &globals_directory?,
+        &directory.publish,
     ));
     // A host attaches its own directory fields right after this line.
     out.push_str(GLOBALS_BRIDGE_LINE);
     let bridge_end_in_tail = out.len();
+    if !cg.line_directives() {
+        out.push_str(&directory.accessors);
+    }
 
     // Globals: an init fn + a dependency-ordered `<NAME> = __skull_ginit_<NAME>()`.
     // (Lowered above, so the walk could see their call edges; appended here, in
@@ -1319,7 +1306,7 @@ pub(super) fn assemble(
     let mut glue_calls = Vec::new();
     crate::push_value_ctor_calls(&asm.out[glue_start..], &mut glue_calls);
     runtime_refs.extend(glue_calls);
-    runtime_refs.extend(host_accessor_value_ctors(ws, scx));
+    runtime_refs.extend(directory.ctors);
     let value_ctor_lua = crate::value_ctor_defs(&value_ctors, &runtime_refs);
     let mut globals_bridge_end =
         Some(head.len() + value_ctor_lua.len() + definitions_lua.len() + bridge_end_in_tail);
@@ -1376,6 +1363,14 @@ pub(super) fn assemble(
     // numbered definition reports its position in that file.
     if cache.cg.line_directives() {
         out = skull_codegen_lua::resolve_line_directive_resets(&out, "main.lua");
+        // Resolve numbered definitions against the undecorated chunk, as before.
+        if !directory.accessors.is_empty() {
+            let at = out
+                .find(GLOBALS_BRIDGE_LINE)
+                .expect("assembled global bridge")
+                + GLOBALS_BRIDGE_LINE.len();
+            out.insert_str(at, &directory.accessors);
+        }
         globals_bridge_end = None;
     }
     cg.report_trace_frames(&out);

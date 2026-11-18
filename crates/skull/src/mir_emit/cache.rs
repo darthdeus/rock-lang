@@ -138,6 +138,7 @@ pub struct SkullEmitCache {
     /// Whether assembly computes the artifact fingerprint; false only for a
     /// one-shot build that asked [`FullEmit::without_fingerprint`].
     pub(super) publish_fingerprint: bool,
+    pub(super) global_accessors: bool,
     pub(super) build_kind: BuildKind,
     pub(super) selected_sim_functions: Option<FxHashSet<Ustr>>,
     pub(super) repair_stats: IncrementalRepairStats,

@@ -101,3 +101,32 @@ fn the_emit_reports_where_the_bridge_install_ends() {
         1
     );
 }
+
+#[test]
+fn full_and_incremental_programs_reflect_nullable_global_leaves() {
+    let ws =
+        ws_of("nobox value Point { x: int, y: int }\nglobal POINT: Point? = null\nfn main() {}");
+    let mid = skull::user_module_id(&ws).unwrap();
+    let (full, mut cache) = skull::mir_emit::FullEmit::program()
+        .with_global_accessors()
+        .run(&ws, mid)
+        .unwrap();
+    let incremental = skull::mir_emit::emit_incremental(&ws, &mut cache, &[]).unwrap();
+    for emit in [full, incremental] {
+        let mut lua = emit.lua;
+        lua.push_str(
+            r#"
+local point = assert(__rock_global_entry("POINT"))
+assert(__rock_global_get(point) == nil)
+__rock_global_set(point, {x=3,y=5})
+local value = __rock_global_get(point)
+assert(value.x == 3 and value.y == 5)
+__rock_global_set(point, nil)
+assert(__rock_global_get(point) == nil)
+for _, slot in ipairs(point.slots) do assert(not __rock_globals[slot]) end
+print("ok")
+"#,
+        );
+        assert_eq!(run_luajit(&lua), "ok");
+    }
+}

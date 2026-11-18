@@ -204,18 +204,96 @@ pub(super) fn globals_open_lua(layout: &str, cg: &CodegenCtx, static_count: usiz
     )
 }
 
+pub(super) struct GlobalsDirectoryLua {
+    pub publish: String,
+    pub accessors: String,
+    pub ctors: Vec<Ustr>,
+}
+
+fn accessor_fields(
+    entry: &skull_mir::global_storage::GlobalDirectoryEntry,
+    shape: &skull_mir::lower::NoboxGlobalAccessorShape,
+    ctor: &str,
+) -> Result<String, CompilerError> {
+    let name = entry.logical_name;
+    let (presence, slots) = if shape.nullable {
+        let (presence, slots) = entry.slots.split_first().ok_or_else(|| {
+            CompilerError::new_no_location(format!(
+                "nullable nobox global `{name}` has no presence leaf"
+            ))
+        })?;
+        (Some(presence), slots)
+    } else {
+        (None, entry.slots.as_slice())
+    };
+    if slots.len() != shape.paths.len() {
+        return Err(CompilerError::new_no_location(format!(
+            "nobox global `{name}` has {} leaves but {} leaf paths",
+            slots.len(),
+            shape.paths.len()
+        )));
+    }
+    if let Some(why) = &shape.unbuildable {
+        return Err(CompilerError::new_no_location(format!(
+            "nobox global `{name}` of type `{}` cannot be rebuilt: {why}",
+            shape.ty_name
+        )));
+    }
+    let cells: Vec<_> = slots
+        .iter()
+        .map(|key| format!("__rock_globals[{key}]"))
+        .collect();
+    let args = cells.join(", ");
+    let writes = cells
+        .iter()
+        .zip(&shape.paths)
+        .map(|(cell, path)| {
+            // Table boxes store dotted paths as literal keys. Cdata uses nested fields.
+            if shape.storage == skull_mir::lower::ValueStorage::CData {
+                format!("{cell} = v.{path}")
+            } else {
+                format!("{cell} = v[{:?}]", path.as_str())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let get = format!("return {ctor}({args})");
+    let (get, set) = if let Some(key) = presence {
+        let clear = cells
+            .iter()
+            .map(|cell| format!("{cell} = nil"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        (
+            format!("if not __rock_globals[{key}] then return nil end {get}"),
+            format!("__rock_globals[{key}] = v ~= nil; if v ~= nil then {writes} else {clear} end"),
+        )
+    } else {
+        (get, writes)
+    };
+    Ok(format!(
+        "get=function() {get} end,set=function(v) {set} end"
+    ))
+}
+
 /// The global directory every reflection reader and the `_G` bridge use.
 pub(super) fn globals_directory_lua(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     cg: &CodegenCtx,
-) -> Result<String, CompilerError> {
+    with_accessors: bool,
+) -> Result<GlobalsDirectoryLua, CompilerError> {
     use skull_codegen_lua::lua_string;
     let entries = skull_mir::global_storage::global_directory(ws, scx, |leaf| {
         cg.state_slot(leaf).map(|slot| slot.to_string())
     })
     .map_err(CompilerError::new_no_location)?;
     let mut out = String::from("_G.__rock_globals_publish({");
+    let mut accessors = String::new();
+    let mut ctors = Vec::new();
+    if with_accessors {
+        accessors.push_str("\n_G.__rock_global_decorate({");
+    }
     for entry in entries {
         let physical = entry
             .physical
@@ -230,9 +308,33 @@ pub(super) fn globals_directory_lua(
             lua_string(&entry.identity),
             entry.slots.join(",")
         );
+        let shape = match skull_mir::lower::nobox_global_accessor_shape(ws, scx, &entry.plan) {
+            Ok(Some(shape)) => shape,
+            Err(e) if with_accessors => return Err(CompilerError::new_no_location(e.message)),
+            _ => continue,
+        };
+        let ctor = format!(
+            "{}{}",
+            skull_mir::mangle::type_symbol(ws, shape.ty_name),
+            shape.ctor_suffix
+        );
+        if shape.ctor_suffix != "_ct" {
+            ctors.push(Ustr::from(&ctor));
+        }
+        if with_accessors {
+            let fields = accessor_fields(&entry, &shape, &ctor)?;
+            let _ = writeln!(accessors, "[{:?}]={{{fields}}},", entry.identity);
+        }
+    }
+    if with_accessors {
+        accessors.push_str("})\n");
     }
     out.push_str("})\n");
-    Ok(out)
+    Ok(GlobalsDirectoryLua {
+        publish: out,
+        accessors,
+        ctors,
+    })
 }
 
 /// Lower + emit one global's initializer fn, recording its `pending_init` line.
