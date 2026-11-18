@@ -7,6 +7,8 @@ use rock_lsp::do_workspace_symbols_workspace;
 fn workspace_names(ws: &mut rock_lsp::LspWorkspace, query: &str) -> Vec<String> {
     let params = WorkspaceSymbolParams {
         query: query.to_string(),
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
     };
     do_workspace_symbols_workspace(ws, &params)
         .unwrap()
@@ -34,6 +36,8 @@ fn workspace_symbols_order_by_name_file_and_position() {
         &mut ws,
         &WorkspaceSymbolParams {
             query: "series_".into(),
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
         },
     )
     .unwrap()

@@ -1,9 +1,18 @@
 //! One-shot CLI queries over the same workspace used by the LSP server.
 
 use anyhow::Result;
-use bone_query::BoneWorkspace;
-use lsp_types::{HoverContents, Position};
+use bone_query::{BoneWorkspace, FileUriExt};
+use lsp_types::{HoverContents, MarkedString, Position};
 use serde_json::json;
+
+fn marked_string(marked: MarkedString) -> String {
+    match marked {
+        MarkedString::String(text) => text,
+        MarkedString::LanguageString(block) => {
+            format!("```{}\n{}\n```", block.language, block.value)
+        }
+    }
+}
 
 /// `rock lsp hover <file:line:col>`.
 pub fn hover(file_path: &str, line: u32, column: u32) -> Result<()> {
@@ -16,7 +25,13 @@ pub fn hover(file_path: &str, line: u32, column: u32) -> Result<()> {
     let (contents, range) = match hover {
         Some(h) => {
             let text = match h.contents {
-                HoverContents::Markup(m) => m.value,
+                HoverContents::Markup(markup) => markup.value,
+                HoverContents::Scalar(marked) => marked_string(marked),
+                HoverContents::Array(marked) => marked
+                    .into_iter()
+                    .map(marked_string)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
             };
             (
                 text,

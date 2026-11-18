@@ -8,6 +8,7 @@
 //! miscoloring. The `.rock.lsp` fixtures miss this because they decode with
 //! bone's own legend; only the live server hits the mismatch.
 
+use bone_query::FileUriExt;
 use lsp_types::*;
 use rock_lsp::semantic_tokens::{compute_semantic_tokens_workspace, get_semantic_tokens_legend};
 

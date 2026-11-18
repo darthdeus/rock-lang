@@ -1,6 +1,7 @@
 //! Definition and reference ranges through the LSP workspace facade.
 
 use crate::fixture::{PATH, offset_of, workspace};
+use bone_query::FileUriExt;
 
 /// Byte offset of the `occurrence`-th (1-based) appearance of `needle` in `src`.
 fn nth_offset(src: &str, needle: &str, occurrence: usize) -> usize {

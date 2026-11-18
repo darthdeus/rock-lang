@@ -1,6 +1,7 @@
 //! Convert between compiler source coordinates and LSP locations.
 
 use super::{BoneProject, editor_path};
+use crate::FileUriExt;
 use crate::query::TextOf;
 use bone_semantic::prelude::Span;
 use lsp_types::{Location, Position, Range, Uri};

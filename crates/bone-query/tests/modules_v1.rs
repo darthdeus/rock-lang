@@ -7,6 +7,7 @@ use crate::completion::{assert_invariants, assert_labels, find, labels_of};
 use crate::fixture::{Project, assert_no_errors, covered, position_of_offset};
 use crate::label_asserts::{assert_lacks, assert_offers};
 use bone_query::BoneWorkspace;
+use bone_query::FileUriExt;
 use lsp_types::Position;
 
 /// A v1 `bin` package `app` on disk. The root fragment reaches the child
@@ -357,7 +358,9 @@ fn hover_on_v1_signature_types_records_each_nominal_spelling() {
     let qualified_hover = hover_at(pos_of(&text, "-> shapes::Box", 0, 11));
 
     for hover in [&alias_hover, &qualified_hover] {
-        let lsp_types::HoverContents::Markup(markup) = &hover.contents;
+        let lsp_types::HoverContents::Markup(markup) = &hover.contents else {
+            panic!("expected markup hover")
+        };
         assert!(
             markup.value.contains("struct app::shapes::Box"),
             "{markup:?}"
@@ -1029,6 +1032,7 @@ fn inlay_labels(bone: &BoneWorkspace, path: &str) -> Vec<String> {
         .into_iter()
         .map(|h| match h.label {
             lsp_types::InlayHintLabel::String(s) => s,
+            _ => panic!("expected a string inlay label"),
         })
         .collect()
 }

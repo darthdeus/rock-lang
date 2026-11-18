@@ -1,4 +1,5 @@
 use anyhow::Result;
+use bone_query::FileUriExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read as _, Write as _};

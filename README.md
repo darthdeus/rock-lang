@@ -149,12 +149,9 @@ rock sim demos/match3 boot_idle animated_swap
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 [MIT license](LICENSE-MIT) at your option.
 
-A few crates are forks and keep their upstream licenses: `crates/la-arena` and
-`crates/lsp-server-manual` come from
-[rust-analyzer](https://github.com/rust-lang/rust-analyzer) (MIT OR
-Apache-2.0), `crates/lsp-types-manual` from
-[lsp-types](https://github.com/gluon-lang/lsp-types) (MIT, see its `LICENSE`),
-and `crates/test-utils` ports `extract_annotations` from rust-analyzer.
+The `crates/la-arena` fork and `extract_annotations` in `crates/test-utils`
+come from [rust-analyzer](https://github.com/rust-lang/rust-analyzer)
+(MIT OR Apache-2.0).
 
 ## Acknowledgements
 

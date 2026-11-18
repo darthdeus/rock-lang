@@ -2,6 +2,7 @@
 //! a request.
 
 use crate::common::bone_ws;
+use bone_query::FileUriExt;
 use lsp_types::*;
 use rock_lsp::do_completion_workspace;
 
@@ -10,10 +11,14 @@ fn complete(src: &str, line: u32, ch: u32) -> CompletionList {
     let path = dir.path().join("main.rock");
     let mut ws = bone_ws(&path, src);
     let params = CompletionParams {
-        text_document: TextDocumentIdentifier {
-            uri: Uri::from_file_path(path.to_str().unwrap()).unwrap(),
-        },
-        position: Position::new(line, ch),
+        text_document_position: TextDocumentPositionParams::new(
+            TextDocumentIdentifier {
+                uri: Uri::from_file_path(path.to_str().unwrap()).unwrap(),
+            },
+            Position::new(line, ch),
+        ),
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
         context: None,
     };
     do_completion_workspace(&mut ws, &params)

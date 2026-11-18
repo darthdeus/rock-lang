@@ -227,7 +227,7 @@ dependencies = [
  "bone-semantic",
  "fs-err",
  "log",
- "lsp-types-manual",
+ "lsp-types",
  "rock-core",
  "rock-host",
  "rock-stdlib",
@@ -1114,22 +1114,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
-name = "lsp-server-manual"
+name = "lsp-server"
 version = "0.7.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d6ada348dbc2703cbe7637b2dda05cff84d3da2819c24abcb305dd613e0ba2e"
 dependencies = [
  "crossbeam-channel",
  "log",
  "serde",
+ "serde_derive",
  "serde_json",
 ]
 
 [[package]]
-name = "lsp-types-manual"
+name = "lsp-types"
 version = "0.97.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53353550a17c04ac46c585feb189c2db82154fc84b79c7a66c96c2c644f66071"
 dependencies = [
+ "bitflags 1.3.2",
  "fluent-uri",
  "serde",
  "serde_json",
+ "serde_repr",
 ]
 
 [[package]]
@@ -1725,7 +1732,7 @@ dependencies = [
  "globset",
  "libc",
  "log",
- "lsp-types-manual",
+ "lsp-types",
  "memchr",
  "mimalloc",
  "notify",
@@ -1846,8 +1853,8 @@ dependencies = [
  "clap",
  "fs-err",
  "log",
- "lsp-server-manual",
- "lsp-types-manual",
+ "lsp-server",
+ "lsp-types",
  "rock-host",
  "rock-log",
  "serde",
@@ -1896,7 +1903,7 @@ dependencies = [
  "bone-core",
  "bone-lints",
  "bone-semantic",
- "lsp-server-manual",
+ "lsp-server",
  "rock-core",
  "rock-lsp",
  "rock-stdlib",
@@ -2083,6 +2090,17 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "serde_repr"
+version = "0.1.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d3b1629de253c70a0508c3899572da79ca359fdab27c7920ff00406df418906"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
 ]
 
 [[package]]

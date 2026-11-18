@@ -7,6 +7,7 @@
 
 use crate::fixture::{Project, pos};
 use bone_query::BoneWorkspace;
+use bone_query::FileUriExt;
 use lsp_types::Uri;
 
 fn probe_path(name: &str) -> String {

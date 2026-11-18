@@ -5,6 +5,7 @@
 //! definition, shutdown/exit and unknown messages, asserting the exact
 //! outgoing messages.
 
+use bone_query::FileUriExt;
 use lsp_server::{Message, Notification, Request, RequestId};
 use rock_lsp::LspServer;
 use serde_json::{Value, json};
@@ -359,6 +360,35 @@ fn hover_and_definition_answer_through_handle() {
         target.ends_with("/stdlib/unified.rock"),
         "definition lands in the stdlib copy, got {target}"
     );
+}
+
+#[test]
+fn references_accept_minimal_text_document_position_params() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = uri_of(&dir.path().join("main.rock"));
+    let mut server = started();
+    roundtrip(
+        &mut server,
+        did_open(
+            &uri,
+            "fn main() {\n    let count = 1\n    print(count)\n}\n",
+        ),
+    );
+
+    let out = roundtrip(
+        &mut server,
+        req(
+            12,
+            "textDocument/references",
+            json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": 1, "character": 8 }
+            }),
+        ),
+    );
+    let resp = response(&out);
+    assert!(resp.error.is_none(), "references error: {:?}", resp.error);
+    assert!(resp.result.as_ref().is_some_and(Value::is_array));
 }
 
 #[test]
