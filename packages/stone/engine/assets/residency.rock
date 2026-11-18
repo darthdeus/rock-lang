@@ -26,9 +26,16 @@ fn residency_cache_new() -> ResidencyCache {
 }
 global RESIDENCY_CACHE: ResidencyCache = residency_cache_new()
 global RESIDENCY_PATH_IDENTITIES: Map<string, string> = map_new()
-// Cached, unreferenced bytes the LRU may hold: 2 GiB, a fixed Steam Deck
-// floor.
+// Cached, unreferenced bytes the LRU may hold. 2 GiB until the game sets its
+// own figure.
 global RESIDENCY_BUDGET: int = max(0, get_env_int("STONE_RESIDENCY_BUDGET_MB", 2048)) * 1024 * 1024
+
+// A game with a total memory target gives the cache what its resources in use
+// leave. A smaller budget takes effect at the next trim.
+pub fn residency_set_budget(bytes: int) { RESIDENCY_BUDGET = max(0, bytes) }
+pub fn residency_budget_bytes() -> int { return RESIDENCY_BUDGET }
+// Bytes of cached images nobody references.
+pub fn residency_cached_bytes() -> int { return RESIDENCY_CACHE.bytes }
 // Decoded bytes the native queue may hold past publication (RESIDENCY_BUDGET);
 // Prefetch submissions wait while the queue is fuller than this.
 global RESIDENCY_PREFETCH_INFLIGHT_BUDGET: int = 128 * 1024 * 1024
