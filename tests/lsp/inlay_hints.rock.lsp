@@ -14,10 +14,10 @@ request = { transport = "cli", argv = ["inlay-hints", "$file"] }
 op = "contains_all"
 path = ["result", "hints"]
 value = [
-  { position = { line = 1 }, label = { text = "int", trim = true, strip_prefix = ":" } },
-  { position = { line = 2 }, label = { text = "string", trim = true, strip_prefix = ":" } },
-  { position = { line = 3 }, label = { text = "[int]", trim = true, strip_prefix = ":" } },
-  { position = { line = 4 }, label = { text = "bool", trim = true, strip_prefix = ":" } },
+  { position = { line = 1 }, label = { text = "int", strip_prefix = ":" } },
+  { position = { line = 2 }, label = { text = "string", strip_prefix = ":" } },
+  { position = { line = 3 }, label = { text = "[int]", strip_prefix = ":" } },
+  { position = { line = 4 }, label = { text = "bool", strip_prefix = ":" } },
 ]
 
 [[tests]]
@@ -36,7 +36,7 @@ fn main() {
     map.insert("origin", p)
 }'''
 request = { transport = "cli", argv = ["inlay-hints", "$file"] }
-checks = [{ op = "contains_all", path = ["result", "hints"], value = [{ position = { line = 6 }, label = { text = "Point", trim = true, strip_prefix = ":" } }, { position = { line = 7 }, label = { text = "[Point]", trim = true, strip_prefix = ":" } }, { position = { line = 8 }, label = { text = "Map<string, Point>", trim = true, strip_prefix = ":" } }] }]
+checks = [{ op = "contains_all", path = ["result", "hints"], value = [{ position = { line = 6 }, label = { text = "Point", strip_prefix = ":" } }, { position = { line = 7 }, label = { text = "[Point]", strip_prefix = ":" } }, { position = { line = 8 }, label = { text = "Map<string, Point>", strip_prefix = ":" } }] }]
 
 [[tests]]
 name = "inlay_hints_function_parameters"
@@ -59,10 +59,10 @@ request = { transport = "cli", argv = ["inlay-hints", "$file"] }
 op = "contains_all"
 path = ["result", "hints"]
 value = [
-  { position = { line = 9 }, label = { text = "int", trim = true, strip_prefix = ":" } },
-  { position = { line = 9 }, label = { text = "x:", trim = true, strip_prefix = ":" } },
-  { position = { line = 9 }, label = { text = "y:", trim = true, strip_prefix = ":" } },
-  { position = { line = 9 }, label = { text = "operation:", trim = true, strip_prefix = ":" } },
+  { position = { line = 9 }, label = { text = "int", strip_prefix = ":" } },
+  { position = { line = 9 }, label = { text = "x:", strip_prefix = ":" } },
+  { position = { line = 9 }, label = { text = "y:", strip_prefix = ":" } },
+  { position = { line = 9 }, label = { text = "operation:", strip_prefix = ":" } },
 ]
 
 [[tests]]
@@ -84,11 +84,11 @@ request = { transport = "cli", argv = ["inlay-hints", "$file"] }
 op = "contains_all"
 path = ["result", "hints"]
 value = [
-  { position = { line = 5 }, label = { text = "int", trim = true, strip_prefix = ":" } },
-  { position = { line = 5 }, label = { text = "value:", trim = true, strip_prefix = ":" } },
-  { position = { line = 6 }, label = { text = "string", trim = true, strip_prefix = ":" } },
-  { position = { line = 6 }, label = { text = "value:", trim = true, strip_prefix = ":" } },
-  { position = { line = 7 }, label = { text = "[int]", trim = true, strip_prefix = ":" } },
+  { position = { line = 5 }, label = { text = "int", strip_prefix = ":" } },
+  { position = { line = 5 }, label = { text = "value:", strip_prefix = ":" } },
+  { position = { line = 6 }, label = { text = "string", strip_prefix = ":" } },
+  { position = { line = 6 }, label = { text = "value:", strip_prefix = ":" } },
+  { position = { line = 7 }, label = { text = "[int]", strip_prefix = ":" } },
 ]
 
 [[tests]]
@@ -113,10 +113,10 @@ request = { transport = "cli", argv = ["inlay-hints", "$file"] }
 op = "contains_all"
 path = ["result", "hints"]
 value = [
-  { position = { line = 9 }, label = { text = "string?", trim = true, strip_prefix = ":" } },
-  { position = { line = 9 }, label = { text = "id:", trim = true, strip_prefix = ":" } },
-  { position = { line = 10 }, label = { text = "string?", trim = true, strip_prefix = ":" } },
-  { position = { line = 10 }, label = { text = "id:", trim = true, strip_prefix = ":" } },
+  { position = { line = 9 }, label = { text = "string?", strip_prefix = ":" } },
+  { position = { line = 9 }, label = { text = "id:", strip_prefix = ":" } },
+  { position = { line = 10 }, label = { text = "string?", strip_prefix = ":" } },
+  { position = { line = 10 }, label = { text = "id:", strip_prefix = ":" } },
 ]
 
 [[tests]]
@@ -129,7 +129,7 @@ fn main() {
     let greet = (name) => print("Hello, " + name)
 }'''
 request = { transport = "cli", argv = ["inlay-hints", "$file"] }
-checks = [{ op = "contains_all", path = ["result", "hints"], value = [{ position = { line = 2 }, label = { text = "fn(int, int) -> int", trim = true, strip_prefix = ":" } }] }]
+checks = [{ op = "contains_all", path = ["result", "hints"], value = [{ position = { line = 2 }, label = { text = "fn(int, int) -> int", strip_prefix = ":" } }] }]
 
 [[tests]]
 name = "inlay_hints_for_loop_variable"
@@ -144,7 +144,7 @@ fn main() {
     }
 }'''
 request = { transport = "cli", argv = ["inlay-hints", "$file"] }
-checks = [{ op = "contains_all", path = ["result", "hints"], value = [{ position = { line = 4 }, label = { text = "Item", trim = true, strip_prefix = ":" } }] }]
+checks = [{ op = "contains_all", path = ["result", "hints"], value = [{ position = { line = 4 }, label = { text = "Item", strip_prefix = ":" } }] }]
 
 [[tests]]
 name = "inlay_hints_match_arm_enum_variant"
@@ -165,7 +165,7 @@ fn main() {
     }
 }'''
 request = { transport = "cli", argv = ["inlay-hints", "$file"] }
-checks = [{ op = "contains_all", path = ["result", "hints"], value = [{ position = { line = 8 }, label = { text = "Opt", trim = true, strip_prefix = ":" } }, { position = { line = 10 }, label = { text = "Point", trim = true, strip_prefix = ":" } }] }]
+checks = [{ op = "contains_all", path = ["result", "hints"], value = [{ position = { line = 8 }, label = { text = "Opt", strip_prefix = ":" } }, { position = { line = 10 }, label = { text = "Point", strip_prefix = ":" } }] }]
 
 [[tests]]
 name = "inlay_hints_dform_receiver"
@@ -181,4 +181,4 @@ fn Vec<T>.first(v) -> T {
     return v[0]
 }'''
 request = { transport = "cli", argv = ["inlay-hints", "$file"] }
-checks = [{ op = "contains_all", path = ["result", "hints"], value = [{ position = { line = 2 }, label = { text = "Mob", trim = true, strip_prefix = ":" } }, { position = { line = 6 }, label = { text = "Vec<T>", trim = true, strip_prefix = ":" } }] }]
+checks = [{ op = "contains_all", path = ["result", "hints"], value = [{ position = { line = 2 }, label = { text = "Mob", strip_prefix = ":" } }, { position = { line = 6 }, label = { text = "Vec<T>", strip_prefix = ":" } }] }]

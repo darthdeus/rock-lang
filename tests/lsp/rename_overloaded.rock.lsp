@@ -31,31 +31,7 @@ fn main() {
     let f2 = process(2.71)
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "transform"] }
-
-[[tests.checks]]
-op = "empty"
-path = ["error"]
-missing_is_empty = true
-null_is_empty = true
-
-[[tests.checks]]
-op = "applied_text_contains"
-path = ["result", "changes"]
-file = "$primary"
-source = "primary"
-value = [
-  "transform(x: int) -> int",
-  "transform(x: float) -> float",
-  "transform(x: string) -> string",
-  "transform(x: int, y: int) -> int",
-  "transform(42)",
-  "transform(3.14)",
-  "transform(\"test\")",
-  "transform(10, 20)",
-  "transform(100)",
-  "transform(2.71)",
-]
-encoding = "cli_bytes"
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_contains", path = ["result", "changes"], value = ["transform(x: int) -> int", "transform(x: float) -> float", "transform(x: string) -> string", "transform(x: int, y: int) -> int", "transform(42)", "transform(3.14)", "transform(\"test\")", "transform(10, 20)", "transform(100)", "transform(2.71)"] }]
 
 [[tests]]
 name = "rename_overloaded_function_from_call"
@@ -80,7 +56,7 @@ fn main() {
     let s = process("test")
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "convert"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_contains", path = ["result", "changes"], file = "$primary", source = "primary", value = ["convert(x: int) -> int", "convert(x: float) -> float", "convert(x: string) -> string", "convert(42)", "convert(3.14)", "convert(\"test\")"], encoding = "cli_bytes" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_contains", path = ["result", "changes"], value = ["convert(x: int) -> int", "convert(x: float) -> float", "convert(x: string) -> string", "convert(42)", "convert(3.14)", "convert(\"test\")"] }]
 
 [[tests]]
 name = "rename_single_overload_parameter"
@@ -104,7 +80,7 @@ fn main() {
     let result2 = calculate([1, 2, 3, 4, 5])
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "a"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_contains", path = ["result", "changes"], file = "$primary", source = "primary", value = ["calculate(a: int, y: int)", "return a + y"], encoding = "cli_bytes" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_contains", path = ["result", "changes"], value = ["calculate(a: int, y: int)", "return a + y"] }]
 
 [[tests]]
 name = "rename_generic_overloaded_function"
@@ -129,4 +105,4 @@ fn main() {
     let single = convert(d, 0)
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "transform"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_contains", path = ["result", "changes"], file = "$primary", source = "primary", value = ["transform<T>(items: [T]"], encoding = "cli_bytes" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_contains", path = ["result", "changes"], value = ["transform<T>(items: [T]"] }]

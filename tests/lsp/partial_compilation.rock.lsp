@@ -2,7 +2,7 @@
 name = "completion_during_editing_with_syntax_error"
 kind = "completion"
 position = [6, 16]
-source = """
+source = '''
 fn add(a: int, b: int) -> int {
     return a + b
 }
@@ -11,7 +11,7 @@ fn main() {
     let x = 42
     let y = add(
     // Syntax error: unclosed function call
-}"""
+}'''
 request = { transport = "cli", argv = ["completion", "$target"] }
 checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["x", "y", "add"] }]
 
@@ -44,7 +44,7 @@ checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"],
 name = "hover_during_editing_with_error"
 kind = "hover"
 position = [1, 12]
-source = """
+source = '''
 fn calculate(num: int) -> int {
     return num * 2
 }
@@ -55,14 +55,14 @@ fn get_value() -> int {
 
 fn main() {
     let broken = this is invalid syntax
-}"""
+}'''
 request = { transport = "cli", argv = ["hover", "$target"] }
 checks = [{ op = "trimmed_equals", path = ["result", "hover", "contents"], value = "Type: int\n" }]
 
 [[tests]]
 name = "inlay_hints_with_partial_compilation"
 kind = "inlay_hints"
-source = """
+source = '''
 fn process(value: int) -> string {
     return value.to_string()
 }
@@ -74,6 +74,6 @@ fn get_result() -> string {
 
 fn main() {
     let broken = invalid syntax here!!!
-}"""
+}'''
 request = { transport = "cli", argv = ["inlay-hints", "$file"] }
-checks = [{ op = "contains_all", path = ["result", "hints"], value = [{ position = { line = 5 }, label = { text = "string", trim = true, strip_prefix = ":" } }, { position = { line = 5 }, label = { text = "value:", trim = true, strip_prefix = ":" } }] }]
+checks = [{ op = "contains_all", path = ["result", "hints"], value = [{ position = { line = 5 }, label = { text = "string", strip_prefix = ":" } }, { position = { line = 5 }, label = { text = "value:", strip_prefix = ":" } }] }]

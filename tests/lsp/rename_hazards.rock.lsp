@@ -17,34 +17,7 @@ fn main() {
     spawn_it(count: "a")
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "amount"] }
-
-[[tests.checks]]
-op = "empty"
-path = ["error"]
-missing_is_empty = true
-null_is_empty = true
-
-[[tests.checks]]
-op = "applied_text_equals"
-path = ["result", "changes"]
-file = "$primary"
-source = "primary"
-expected = '''
-fn spawn_it(amount: int, size: float) {
-    print(amount)
-    print(size)
-}
-
-fn spawn_it(count: string) {
-    print(count)
-}
-
-fn main() {
-    spawn_it(amount: 3, size: 1.0)
-    spawn_it(count: "a")
-}'''
-encoding = "cli_bytes"
-trim = "end"
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = "fn spawn_it(amount: int, size: float) {\n    print(amount)\n    print(size)\n}\n\nfn spawn_it(count: string) {\n    print(count)\n}\n\nfn main() {\n    spawn_it(amount: 3, size: 1.0)\n    spawn_it(count: \"a\")\n}" }]
 
 [[tests]]
 name = "rename_param_from_caller_named_label_other_overload"
@@ -52,34 +25,7 @@ kind = "rename"
 position = [11, 13]
 source = { from_test = "rename_param_from_caller_named_label" }
 request = { transport = "cli", argv = ["rename", "$target", "label"] }
-
-[[tests.checks]]
-op = "empty"
-path = ["error"]
-missing_is_empty = true
-null_is_empty = true
-
-[[tests.checks]]
-op = "applied_text_equals"
-path = ["result", "changes"]
-file = "$primary"
-source = "primary"
-expected = '''
-fn spawn_it(count: int, size: float) {
-    print(count)
-    print(size)
-}
-
-fn spawn_it(label: string) {
-    print(label)
-}
-
-fn main() {
-    spawn_it(count: 3, size: 1.0)
-    spawn_it(label: "a")
-}'''
-encoding = "cli_bytes"
-trim = "end"
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = "fn spawn_it(count: int, size: float) {\n    print(count)\n    print(size)\n}\n\nfn spawn_it(label: string) {\n    print(label)\n}\n\nfn main() {\n    spawn_it(count: 3, size: 1.0)\n    spawn_it(label: \"a\")\n}" }]
 
 [[tests]]
 name = "rename_macro_name_from_call_refused"
@@ -139,7 +85,7 @@ kind = "rename"
 position = [0, 13]
 source = { from_test = "rename_macro_name_from_call_refused" }
 request = { transport = "cli", argv = ["rename", "$target", "v"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["macro double(x: expr) -> int { x + x }", "macro double(v: expr) -> int { v + v }"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["macro double(x: expr) -> int { x + x }", "macro double(v: expr) -> int { v + v }"]] } }]
 
 [[tests]]
 name = "rename_local_passed_as_macro_arg"
@@ -153,7 +99,7 @@ fn main() {
     print(double(n))
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "m"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["    let n = 5", "    let m = 5"], ["    print(double(n))", "    print(double(m))"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["    let n = 5", "    let m = 5"], ["    print(double(n))", "    print(double(m))"]] } }]
 
 [[tests]]
 name = "rename_fn_called_inside_macro_body"
@@ -171,7 +117,7 @@ fn main() {
     print(helper(2))
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "inc"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["helper", "inc"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["helper", "inc"]] } }]
 
 [[tests]]
 name = "rename_inline_lua_param_refused"
@@ -279,7 +225,7 @@ kind = "rename"
 position = [0, 15]
 source = { from_test = "rename_inline_lua_param_refused" }
 request = { transport = "cli", argv = ["rename", "$target", "probe2"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["probe", "probe2"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["probe", "probe2"]] } }]
 
 [[tests]]
 name = "rename_field_not_named_by_any_inline_body"
@@ -298,7 +244,7 @@ fn main() {
     print(m.hp + peek(m))
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "health"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["hp", "health"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["hp", "health"]] } }]
 
 [[tests]]
 name = "rename_param_sharing_a_word_with_another_inline_body"
@@ -306,7 +252,7 @@ kind = "rename"
 position = [2, 9]
 source = { from_test = "rename_inline_fn_name_is_fine", replace = [["fn main() {", "fn twice(x: int) -> int {"], ["    print(probe(1))", "    return probe(x) * 2"]] }
 request = { transport = "cli", argv = ["rename", "$target", "n"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["fn twice(x: int) -> int {", "fn twice(n: int) -> int {"], ["    return probe(x) * 2", "    return probe(n) * 2"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["fn twice(x: int) -> int {", "fn twice(n: int) -> int {"], ["    return probe(x) * 2", "    return probe(n) * 2"]] } }]
 
 [[tests]]
 name = "rename_fn_named_in_a_string_literal"
@@ -322,7 +268,7 @@ fn main() {
     print(helper(1))
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "helper2"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["fn helper(x: int) -> int {", "fn helper2(x: int) -> int {"], ["    print(helper(1))", "    print(helper2(1))"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["fn helper(x: int) -> int {", "fn helper2(x: int) -> int {"], ["    print(helper(1))", "    print(helper2(1))"]] } }]
 
 [[tests]]
 name = "rename_global_read_by_inline_body_in_another_file_refused"
@@ -359,11 +305,7 @@ kind = "rename"
 position = [0, 7]
 primary_file = "state.rock"
 request = { transport = "cli", argv = ["rename", "$target", "POINTS"] }
-checks = [
-  { op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true },
-  { op = "applied_text_equals", path = ["result", "changes"], file = "state.rock", source = "state.rock", expected = "global POINTS: int = 0", encoding = "cli_bytes", trim = "end" },
-  { op = "applied_text_equals", path = ["result", "changes"], file = "main.rock", source = "main.rock", expected = "inline(lua) fn peek() -> int = \"return 1\"\n\nfn main() {\n    POINTS = 2\n    print(peek())\n}", encoding = "cli_bytes", trim = "end" },
-]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "state.rock", expected = "global POINTS: int = 0" }, { op = "applied_text_equals", path = ["result", "changes"], file = "main.rock", expected = "inline(lua) fn peek() -> int = \"return 1\"\n\nfn main() {\n    POINTS = 2\n    print(peek())\n}" }]
 
 [[tests.files]]
 path = "state.rock"
@@ -400,7 +342,7 @@ fn main() {
     print(x)
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "y"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["        let x = 2", "        let y = 2"], ["        print(x)", "        print(y)"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["        let x = 2", "        let y = 2"], ["        print(x)", "        print(y)"]] } }]
 
 [[tests]]
 name = "rename_shadowed_local_in_same_block"
@@ -413,7 +355,7 @@ fn main() {
     print(x)
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "y"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["    let x = 1", "    let y = 1"], ["    let x = x + 1", "    let x = y + 1"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["    let x = 1", "    let y = 1"], ["    let x = x + 1", "    let x = y + 1"]] } }]
 
 [[tests]]
 name = "rename_fn_from_ufcs_call"
@@ -434,7 +376,7 @@ fn main() {
     print(area(c))
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "size"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["area", "size"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["area", "size"]] } }]
 
 [[tests]]
 name = "rename_receiver_form_fn"
@@ -455,7 +397,7 @@ fn main() {
     print(shift(p, 2))
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "nudge"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["shift", "nudge"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["shift", "nudge"]] } }]
 
 [[tests]]
 name = "rename_field_leaves_same_named_field_of_other_struct"
@@ -476,7 +418,7 @@ fn main() {
     print(a.hp + b.hp)
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "health"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = "struct A {\n    health: int,\n}\n\nstruct B {\n    hp: int,\n}\n\nfn main() {\n    let a = A { health: 1 }\n    let b = B { hp: 2 }\n    print(a.health + b.hp)\n}", encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = "struct A {\n    health: int,\n}\n\nstruct B {\n    hp: int,\n}\n\nfn main() {\n    let a = A { health: 1 }\n    let b = B { hp: 2 }\n    print(a.health + b.hp)\n}" }]
 
 [[tests]]
 name = "rename_local_inside_string_interpolation"
@@ -488,7 +430,7 @@ fn main() {
     print("n = {n}")
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "count"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["    let n = 5", "    let count = 5"], ["    print(\"n = {n}\")", "    print(\"n = {count}\")"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["    let n = 5", "    let count = 5"], ["    print(\"n = {n}\")", "    print(\"n = {count}\")"]] } }]
 
 [[tests]]
 name = "rename_lambda_param"
@@ -500,7 +442,7 @@ fn main() {
     print(f(1))
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "b"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["    let f = (a: int) => a + 1", "    let f = (b: int) => b + 1"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["    let f = (a: int) => a + 1", "    let f = (b: int) => b + 1"]] } }]
 
 [[tests]]
 name = "rename_struct_generic_param_reaches_its_uses"
@@ -516,4 +458,4 @@ fn main() {
     print(b.value)
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "U"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["T", "U"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["T", "U"]] } }]

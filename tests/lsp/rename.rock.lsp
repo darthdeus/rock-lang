@@ -8,7 +8,7 @@ fn main() {
     print(foo)
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "bar"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["foo", "bar"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["foo", "bar"]] } }]
 
 [[tests]]
 name = "rename_function_parameter"
@@ -24,7 +24,7 @@ fn main() {
     print(result)
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "value"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["x", "value"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["x", "value"]] } }]
 
 [[tests]]
 name = "rename_struct_field"
@@ -45,7 +45,7 @@ fn main() {
     print(p.x)
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "x_coord"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["x", "x_coord"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["x", "x_coord"]] } }]
 
 [[tests]]
 name = "rename_function_used_as_bare_value"
@@ -65,7 +65,7 @@ fn main() {
     print(result)
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "triple"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["double", "triple"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["double", "triple"]] } }]
 
 [[tests]]
 name = "rename_function_name"
@@ -85,7 +85,7 @@ fn main() {
     print(area(c))
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "calculate_area"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["area", "calculate_area"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["area", "calculate_area"]] } }]
 
 [[tests]]
 name = "rename_to_keyword_error"
@@ -116,7 +116,7 @@ fn map_pair<T, U>(first: T, second: U) -> (T, U) {
     return (first, second)
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "Element"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["fn identity<T>(value: T) -> T {", "fn identity<Element>(value: Element) -> Element {"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["fn identity<T>(value: T) -> T {", "fn identity<Element>(value: Element) -> Element {"]] } }]
 
 [[tests]]
 name = "rename_in_pattern_match"
@@ -135,7 +135,7 @@ fn my_unwrap<T>(opt: Option<T>) -> T? {
     }
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "inner"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["value", "inner"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["value", "inner"]] } }]
 
 [[tests]]
 name = "rename_shorthand_var_x"
@@ -156,7 +156,7 @@ fn main() {
     print(x)
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "x_coord"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["    let x = 100", "    let x_coord = 100"], ["    let p = Point { x, y }", "    let p = Point { x: x_coord, y }"], ["    print(x)", "    print(x_coord)"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["    let x = 100", "    let x_coord = 100"], ["    let p = Point { x, y }", "    let p = Point { x: x_coord, y }"], ["    print(x)", "    print(x_coord)"]] } }]
 
 [[tests]]
 name = "rename_shorthand_var_y"
@@ -164,7 +164,7 @@ kind = "rename"
 position = [10, 23]
 source = { from_test = "rename_shorthand_var_x", replace = [["    // Rename on shorthand variable 'x'", "    // Rename on shorthand variable 'y'"], ["    print(x)", "    print(y)"]] }
 request = { transport = "cli", argv = ["rename", "$target", "y_coord"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["    let y = 200", "    let y_coord = 200"], ["    let p = Point { x, y }", "    let p = Point { x, y: y_coord }"], ["    print(y)", "    print(y_coord)"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["    let y = 200", "    let y_coord = 200"], ["    let p = Point { x, y }", "    let p = Point { x, y: y_coord }"], ["    print(y)", "    print(y_coord)"]] } }]
 
 [[tests]]
 name = "rename_enum_variant_from_decl"
@@ -190,7 +190,7 @@ fn main() {
     print(describe(c))
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "Crimson"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["Red", "Crimson"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["Red", "Crimson"]] } }]
 
 [[tests]]
 name = "rename_enum_variant_from_use"
@@ -207,7 +207,7 @@ fn main() {
     print(c)
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "Crimson"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["Red", "Crimson"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["Red", "Crimson"]] } }]
 
 [[tests]]
 name = "rename_enum_variant_from_pattern"
@@ -230,7 +230,7 @@ fn main() {
     print(describe(Color::Red))
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "Crimson"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["Red", "Crimson"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["Red", "Crimson"]] } }]
 
 [[tests]]
 name = "rename_enum_tuple_variant"
@@ -254,7 +254,7 @@ fn main() {
     print(area(s))
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "Round"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["Circle", "Round"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["Circle", "Round"]] } }]
 
 [[tests]]
 name = "rename_enum_variant_same_name_other_enum_untouched"
@@ -278,7 +278,7 @@ fn main() {
     print(p)
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "Crimson"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = "enum Color {\n    Crimson,\n    Green,\n}\n\nenum Paint {\n    Red,\n    Blue,\n}\n\nfn main() {\n    let c = Color::Crimson\n    let p = Paint::Red\n    print(c)\n    print(p)\n}", encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = "enum Color {\n    Crimson,\n    Green,\n}\n\nenum Paint {\n    Red,\n    Blue,\n}\n\nfn main() {\n    let c = Color::Crimson\n    let p = Paint::Red\n    print(c)\n    print(p)\n}" }]
 
 [[tests]]
 name = "rename_enum_name"
@@ -302,7 +302,7 @@ fn main() {
     print(describe(c))
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "Hue"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["Color", "Hue"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["Color", "Hue"]] } }]
 
 [[tests]]
 name = "rename_generic_type_param_scoped"
@@ -317,7 +317,7 @@ fn second<T>(v: T) -> T {
     return v
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "Item"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["fn first<T>(x: T, y: T) -> T {", "fn first<Item>(x: Item, y: Item) -> Item {"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["fn first<T>(x: T, y: T) -> T {", "fn first<Item>(x: Item, y: Item) -> Item {"]] } }]
 
 [[tests]]
 name = "rename_pattern_shorthand_binding"
@@ -335,7 +335,7 @@ fn get_sum(p: Point) -> int {
     }
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "qx"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["        Point { x, y } => x + y,", "        Point { x: qx, y } => qx + y,"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["        Point { x, y } => x + y,", "        Point { x: qx, y } => qx + y,"]] } }]
 
 [[tests]]
 name = "rename_struct_field_with_shorthand_literal"
@@ -354,7 +354,7 @@ fn main() {
     print(p.x)
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "px"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["    x: int", "    px: int"], ["    let p = Point { x, y }", "    let p = Point { px: x, y }"], ["    print(p.x)", "    print(p.px)"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["    x: int", "    px: int"], ["    let p = Point { x, y }", "    let p = Point { px: x, y }"], ["    print(p.x)", "    print(p.px)"]] } }]
 
 [[tests]]
 name = "rename_struct_in_nullable_annotation"
@@ -376,7 +376,7 @@ fn give() -> Mob? {
     return held
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "Beast"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["Mob", "Beast"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["Mob", "Beast"]] } }]
 
 [[tests]]
 name = "rename_field_through_safe_nav"
@@ -396,7 +396,7 @@ fn main() {
     print(o.inner?.text ?? "none")
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "label"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["text", "label"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["text", "label"]] } }]
 
 [[tests]]
 name = "rename_fn_at_safe_nav_call_site"
@@ -416,7 +416,7 @@ fn main() {
     print(m?.mob_heal() ?? 0)
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "mob_restore"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["mob_heal", "mob_restore"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["mob_heal", "mob_restore"]] } }]
 
 [[tests]]
 name = "rename_field_with_sibling_ref_default"
@@ -433,7 +433,7 @@ fn main() {
     print(s.boosted)
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "strength"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["power", "strength"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["power", "strength"]] } }]
 
 [[tests]]
 name = "rename_param_updates_named_arg_call_sites"
@@ -450,7 +450,7 @@ fn main() {
     spawn_it(4, size: 2.0)
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "amount"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["count", "amount"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["count", "amount"]] } }]
 
 [[tests]]
 name = "rename_field_at_fieldref_key_path_arg"
@@ -466,7 +466,7 @@ fn main() {
     print("{field_get(m, .health)}")
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "vitality"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["health", "vitality"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["health", "vitality"]] } }]
 
 [[tests]]
 name = "rename_global_from_decl"
@@ -484,7 +484,7 @@ fn main() {
     print("s {SCORE}")
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "POINTS"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["SCORE", "POINTS"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["SCORE", "POINTS"]] } }]
 
 [[tests]]
 name = "rename_global_from_use_site"
@@ -499,7 +499,7 @@ fn bump() {
     SCOREBOARD = 2
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "POINTS"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["global SCORE: int = 0", "global POINTS: int = 0"], ["    SCORE = SCORE + 1", "    POINTS = POINTS + 1"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["global SCORE: int = 0", "global POINTS: int = 0"], ["    SCORE = SCORE + 1", "    POINTS = POINTS + 1"]] } }]
 
 [[tests]]
 name = "rename_newtype_from_decl"
@@ -517,7 +517,7 @@ fn main() {
     greet(id)
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "PlayerId"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["UserId", "PlayerId"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["UserId", "PlayerId"]] } }]
 
 [[tests]]
 name = "rename_newtype_from_annotation"
@@ -525,7 +525,7 @@ kind = "rename"
 position = [2, 13]
 source = { from_test = "rename_newtype_from_decl" }
 request = { transport = "cli", argv = ["rename", "$target", "PlayerId"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["UserId", "PlayerId"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["UserId", "PlayerId"]] } }]
 
 [[tests]]
 name = "rename_record_variant_field_from_decl"
@@ -556,10 +556,7 @@ null_is_empty = true
 op = "applied_text_equals"
 path = ["result", "changes"]
 file = "$primary"
-source = "primary"
 expected = { from_fixture = true, replace = [["    Potion { strength: int },", "    Potion { power: int },"], ["    let i = Item::Potion { strength: 3 }", "    let i = Item::Potion { power: 3 }"], ["        Item::Potion { strength } => print(strength),", "        Item::Potion { power: strength } => print(strength),"]] }
-encoding = "cli_bytes"
-trim = "end"
 
 [[tests]]
 name = "rename_record_variant_field_from_literal"
@@ -575,7 +572,7 @@ fn main() {
     print(i)
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "power"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["strength", "power"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["strength", "power"]] } }]
 
 [[tests]]
 name = "rename_decorator_from_decl"
@@ -596,7 +593,7 @@ fn other() {
     print(2)
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "fancy"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["cool", "fancy"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["cool", "fancy"]] } }]
 
 [[tests]]
 name = "rename_decorator_from_application"
@@ -612,4 +609,4 @@ fn thing() {
     print(1)
 }'''
 request = { transport = "cli", argv = ["rename", "$target", "fancy"] }
-checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", source = "primary", expected = { from_fixture = true, replace = [["cool", "fancy"]] }, encoding = "cli_bytes", trim = "end" }]
+checks = [{ op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true }, { op = "applied_text_equals", path = ["result", "changes"], file = "$primary", expected = { from_fixture = true, replace = [["cool", "fancy"]] } }]

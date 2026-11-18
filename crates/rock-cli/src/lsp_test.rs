@@ -87,29 +87,13 @@ enum Check {
         path: Vec<PathPart>,
         value: String,
     },
-    TrimEndEquals {
-        path: Vec<PathPart>,
-        value: String,
-    },
-    EndsWith {
-        path: Vec<PathPart>,
-        value: String,
-    },
     UnorderedEqual {
         path: Vec<PathPart>,
         value: Vec<Value>,
-        #[serde(default)]
-        null_is_empty: bool,
     },
     Gte {
         path: Vec<PathPart>,
         value: u64,
-    },
-    Exists {
-        path: Vec<PathPart>,
-        value: Value,
-        #[serde(default)]
-        null_is_empty: bool,
     },
     Absent {
         path: Vec<PathPart>,
@@ -127,20 +111,13 @@ enum Check {
     AppliedTextEquals {
         path: Vec<PathPart>,
         file: String,
-        source: String,
         expected: Content,
-        encoding: EditEncoding,
-        #[serde(default)]
-        trim: Option<TrimMode>,
         #[serde(default)]
         selector: Option<Value>,
     },
     AppliedTextContains {
         path: Vec<PathPart>,
-        file: String,
-        source: String,
         value: Vec<String>,
-        encoding: EditEncoding,
     },
 }
 
@@ -149,19 +126,6 @@ enum Check {
 enum PathPart {
     Key(String),
     Index(usize),
-}
-
-#[derive(Deserialize, Clone, Copy)]
-#[serde(rename_all = "snake_case")]
-enum EditEncoding {
-    CliBytes,
-    Utf16,
-}
-
-#[derive(Deserialize, Clone, Copy)]
-#[serde(rename_all = "snake_case")]
-enum TrimMode {
-    End,
 }
 
 #[derive(Deserialize, Clone)]
@@ -417,11 +381,8 @@ fn validate_check(check: &Check, path: &Path, name: &str) -> Result<()> {
         | Check::ContainsAll { path, .. }
         | Check::Equals { path, .. }
         | Check::TrimmedEquals { path, .. }
-        | Check::TrimEndEquals { path, .. }
-        | Check::EndsWith { path, .. }
         | Check::UnorderedEqual { path, .. }
         | Check::Gte { path, .. }
-        | Check::Exists { path, .. }
         | Check::Absent { path, .. }
         | Check::Empty { path, .. }
         | Check::AppliedTextEquals { path, .. }
@@ -445,10 +406,6 @@ fn validate_check(check: &Check, path: &Path, name: &str) -> Result<()> {
                 "applied_text_contains check has no values",
             ));
         }
-        Check::Empty {
-            missing_is_empty: true,
-            ..
-        } => {}
         _ => {}
     }
     Ok(())
@@ -472,19 +429,6 @@ fn apply_replacements(
     }
     Ok(())
 }
-#[derive(Clone, Copy)]
-struct LspServerCmd<'a> {
-    bin: &'a Path,
-}
-
-impl LspServerCmd<'_> {
-    fn command(&self) -> Command {
-        let mut command = Command::new(self.bin);
-        command.arg("lsp");
-        command
-    }
-}
-
 fn new_fixture_project(name: &str, with_manifest: bool) -> Result<(String, PathBuf)> {
     let test_dir = PathBuf::from(".lsp-test-tmp");
     fs_err::create_dir_all(&test_dir)?;
@@ -620,14 +564,15 @@ fn normalize_cli_reply(body: Value) -> Value {
 fn run_cli_request(
     test: &Fixture,
     request: &Request,
-    server: LspServerCmd,
+    server: &Path,
     test_file: &Path,
     uri: &str,
 ) -> Result<Option<(Value, String)>> {
     let Request::Cli { argv } = request else {
         anyhow::bail!("{}: expected a CLI request", request_label(test));
     };
-    let mut command = server.command();
+    let mut command = Command::new(server);
+    command.arg("lsp");
     for argument in argv {
         command.arg(expand_string(argument, test_file, uri, test.position)?);
     }
@@ -678,7 +623,7 @@ fn request_rpc(
 fn run_rpc_request(
     test: &Fixture,
     request: &Request,
-    server_cmd: LspServerCmd,
+    server_cmd: &Path,
     test_file: &Path,
     project_dir: &Path,
     uri: &str,
@@ -700,7 +645,7 @@ fn run_rpc_request(
     Ok((response, raw))
 }
 
-fn run_lsp_test(test: &Fixture, server: LspServerCmd) -> Result<bool> {
+fn run_lsp_test(test: &Fixture, server: &Path) -> Result<bool> {
     let (test_file, project_dir) = write_fixture_project(test)?;
     let result = (|| {
         let test_file = std::fs::canonicalize(test_file)?;
@@ -800,44 +745,12 @@ fn check_response(
             };
             Ok(actual.trim() == value.trim())
         }
-        Check::TrimEndEquals { path, value } => {
-            let values = select_values(response, path, None, false, &request_label(test), raw)?;
-            let Some(actual) = values.first().and_then(|actual| actual.as_str()) else {
-                return Err(anyhow::anyhow!(
-                    "{}: reply field is not a string; raw reply: {raw}",
-                    request_label(test)
-                ));
-            };
-            Ok(actual.trim_end() == value.trim_end())
-        }
-        Check::EndsWith { path, value } => {
-            let values = select_values(response, path, None, false, &request_label(test), raw)?;
-            Ok(values.iter().any(|actual| {
-                actual
-                    .as_str()
-                    .is_some_and(|actual| actual.ends_with(value))
-            }))
-        }
-        Check::UnorderedEqual {
-            path,
-            value,
-            null_is_empty,
-        } => {
+        Check::UnorderedEqual { path, value } => {
             validate_projection_arrays(response, path, &request_label(test), raw)?;
-            let values = select_values(
-                response,
-                path,
-                None,
-                *null_is_empty,
-                &request_label(test),
-                raw,
-            )?;
+            let values = select_values(response, path, None, false, &request_label(test), raw)?;
             let mut actual = values
                 .into_iter()
                 .flat_map(|value| {
-                    if value.is_null() && *null_is_empty {
-                        return Vec::new();
-                    }
                     value
                         .as_array()
                         .map(|array| array.iter().collect::<Vec<_>>())
@@ -868,21 +781,6 @@ fn check_response(
                     )
                 })?;
             Ok(count >= *value)
-        }
-        Check::Exists {
-            path,
-            value,
-            null_is_empty,
-        } => {
-            let values = select_values(
-                response,
-                path,
-                None,
-                *null_is_empty,
-                &request_label(test),
-                raw,
-            )?;
-            Ok(values.iter().any(|actual| value_contains(actual, value)))
         }
         Check::Absent {
             path,
@@ -942,40 +840,25 @@ fn check_response(
         Check::AppliedTextEquals {
             path,
             file,
-            source,
             expected,
-            encoding,
-            trim,
             selector,
         } => check_applied_text(
             test,
             response,
             path,
             file,
-            source,
             expected,
-            *encoding,
-            *trim,
             selector.as_ref(),
             raw,
             step_sources,
             None,
         ),
-        Check::AppliedTextContains {
-            path,
-            file,
-            source,
-            value,
-            encoding,
-        } => check_applied_text(
+        Check::AppliedTextContains { path, value } => check_applied_text(
             test,
             response,
             path,
-            file,
-            source,
+            "$primary",
             &Content::Text(String::new()),
-            *encoding,
-            None,
             None,
             raw,
             step_sources,
@@ -998,22 +881,12 @@ fn select_values<'a>(
     } else {
         None
     };
-    fn walk<'a>(
-        nodes: Vec<&'a Value>,
-        path: &[PathPart],
-        depth: usize,
-        selected_index: Option<usize>,
-        indexed: bool,
-        null_is_empty: bool,
-        request: &str,
-        raw: &str,
-    ) -> Result<Vec<&'a Value>> {
-        if depth == path.len() {
-            return Ok(nodes);
-        }
+    let mut nodes = vec![root];
+    let mut indexed = false;
+    for part in path {
         let mut next = Vec::new();
         for node in nodes {
-            match &path[depth] {
+            match part {
                 PathPart::Key(key) if key == "*" => {
                     if node.is_null() {
                         continue;
@@ -1058,38 +931,17 @@ fn select_values<'a>(
                 }
             }
         }
-        let selected = matches!(path[depth], PathPart::Key(ref key) if key == "*")
-            && selected_index.is_some()
-            && !indexed;
-        walk(
-            next,
-            path,
-            depth + 1,
-            selected_index,
-            indexed || selected,
-            null_is_empty,
-            request,
-            raw,
-        )
+        if matches!(part, PathPart::Key(key) if key == "*") && selected_index.is_some() {
+            indexed = true;
+        }
+        nodes = next;
     }
-    walk(
-        vec![root],
-        path,
-        0,
-        selected_index,
-        false,
-        null_is_empty,
-        request,
-        raw,
-    )
+    Ok(nodes)
 }
 
 fn value_contains(actual: &Value, expected: &Value) -> bool {
     match (actual, expected) {
         (Value::String(actual), Value::String(expected)) => actual.contains(expected),
-        (Value::Array(actual), Value::String(expected)) => actual
-            .iter()
-            .any(|value| value.as_str().is_some_and(|value| value.contains(expected))),
         (Value::Array(actual), Value::Object(_)) => {
             actual.iter().any(|value| partial_match(value, expected))
         }
@@ -1099,61 +951,29 @@ fn value_contains(actual: &Value, expected: &Value) -> bool {
 }
 
 fn partial_match(actual: &Value, expected: &Value) -> bool {
-    if let Some(pattern) = expected.as_object() {
-        if let Some(text) = pattern.get("text").and_then(Value::as_str) {
-            let Some(actual) = actual.as_str() else {
-                return false;
-            };
-            let mut actual = actual.to_string();
-            if pattern
-                .get("trim")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                actual = actual.trim().to_string();
-            }
-            if let Some(prefix) = pattern.get("strip_prefix").and_then(Value::as_str) {
-                if let Some(stripped) = actual.strip_prefix(prefix) {
-                    actual = stripped.to_string();
-                }
-            }
-            if pattern
-                .get("trim")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                actual = actual.trim().to_string();
-            }
-            return actual == text;
-        }
-        if let Some(alternatives) = pattern.get("one_of").and_then(Value::as_array) {
-            return alternatives
-                .iter()
-                .any(|alternative| partial_match(actual, alternative));
-        }
-        let Some(actual) = actual.as_object() else {
-            return false;
-        };
-        return pattern.iter().all(|(key, expected)| {
-            actual
-                .get(key)
-                .is_some_and(|actual| partial_match(actual, expected))
-        });
-    }
-    if let Some(expected) = expected.as_array() {
-        let Some(actual) = actual.as_array() else {
-            return false;
-        };
-        return expected.len() <= actual.len()
-            && expected
-                .iter()
-                .zip(actual)
-                .all(|(expected, actual)| partial_match(actual, expected));
-    }
-    if let (Some(actual), Some(expected)) = (actual.as_str(), expected.as_str()) {
+    let Some(pattern) = expected.as_object() else {
         return actual == expected;
+    };
+    if let Some(text) = pattern.get("text").and_then(Value::as_str) {
+        let Some(actual) = actual.as_str() else {
+            return false;
+        };
+        let actual = actual.trim();
+        let actual = pattern
+            .get("strip_prefix")
+            .and_then(Value::as_str)
+            .and_then(|prefix| actual.strip_prefix(prefix))
+            .unwrap_or(actual);
+        return actual.trim() == text;
     }
-    actual == expected
+    let Some(actual) = actual.as_object() else {
+        return false;
+    };
+    pattern.iter().all(|(key, expected)| {
+        actual
+            .get(key)
+            .is_some_and(|actual| partial_match(actual, expected))
+    })
 }
 
 fn validate_projection_arrays(
@@ -1274,10 +1094,7 @@ fn check_applied_text(
     response: &Value,
     path: &[PathPart],
     file: &str,
-    source: &str,
     expected: &Content,
-    encoding: EditEncoding,
-    trim: Option<TrimMode>,
     selector: Option<&Value>,
     raw: &str,
     step_sources: Option<&[String]>,
@@ -1296,13 +1113,13 @@ fn check_applied_text(
         }
     }
     let values = select_values(response, path, None, false, &request, raw)?;
-    let source_text = fixture_source(test, source)?;
+    let source_text = fixture_source(test, file)?;
     let expected_text = if contains.is_some() {
         String::new()
     } else {
         resolve_content(expected, test, step_sources)?
     };
-    let target_file = if file == "$primary" {
+    let target_file = if file == "$primary" || file == "primary" {
         &test.primary_file
     } else {
         file
@@ -1356,29 +1173,22 @@ fn check_applied_text(
                 .flat_map(|array| array.iter())
                 .collect()
         };
-        match encoding {
-            EditEncoding::CliBytes => apply_cli_text_edits(&source_text, &edits),
-            EditEncoding::Utf16 => apply_lsp_text_edits(&source_text, &edits)?,
-        }
+        apply_cli_text_edits(&source_text, &edits)
     };
     if let Some(needles) = contains {
         return Ok(needles.iter().all(|needle| actual.contains(needle)));
     }
-    if matches!(trim, Some(TrimMode::End)) {
-        let matches = actual.trim_end() == expected_text.trim_end();
-        if !matches && selector.is_some() {
-            let title = selector
-                .and_then(|selector| selector.get("title"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            return Err(anyhow::anyhow!(
-                "{request}: result after {title:?} differs\n--- expected\n{expected_text}\n--- actual\n{actual}"
-            ));
-        }
-        Ok(matches)
-    } else {
-        Ok(actual == expected_text)
+    let matches = actual.trim_end() == expected_text.trim_end();
+    if !matches && selector.is_some() {
+        let title = selector
+            .and_then(|selector| selector.get("title"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        return Err(anyhow::anyhow!(
+            "{request}: result after {title:?} differs\n--- expected\n{expected_text}\n--- actual\n{actual}"
+        ));
     }
+    Ok(matches)
 }
 
 fn code_action_edits<'a>(action: &'a Value, uri: &str) -> Result<Vec<&'a Value>> {
@@ -1637,7 +1447,7 @@ fn server_stderr_log() -> Result<PathBuf> {
     Ok(path)
 }
 
-fn start_lsp_server(command: LspServerCmd<'_>, root: &Path, name: &str) -> Result<LspServer> {
+fn start_lsp_server(command: &Path, root: &Path, name: &str) -> Result<LspServer> {
     let log = server_stderr_log()?;
     let stderr = || -> std::io::Result<Stdio> {
         Ok(Stdio::from(
@@ -1647,9 +1457,8 @@ fn start_lsp_server(command: LspServerCmd<'_>, root: &Path, name: &str) -> Resul
                 .open(&log)?,
         ))
     };
-    let mut child = command
-        .command()
-        .arg("serve")
+    let mut child = Command::new(command)
+        .args(["lsp", "serve"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(stderr()?)
@@ -1686,7 +1495,7 @@ fn start_lsp_server(command: LspServerCmd<'_>, root: &Path, name: &str) -> Resul
         }
         if !watcher_done.load(std::sync::atomic::Ordering::Relaxed) {
             eprintln!(
-                "[lsp-test watchdog] killing pid {pid} after 60s — test '{watcher_name}' wedged"
+                "[lsp-test watchdog] killing pid {pid} after 60s \u{2014} test '{watcher_name}' wedged"
             );
             #[cfg(unix)]
             unsafe {
@@ -1740,7 +1549,7 @@ fn delete_char_at(source: &str, line: usize, col: usize) -> (String, usize, usiz
     (lines.join("\n"), line, col)
 }
 
-fn run_edit_sequence(test: &Fixture, server_cmd: LspServerCmd<'_>) -> Result<Vec<String>> {
+fn run_edit_sequence(test: &Fixture, server_cmd: &Path) -> Result<Vec<String>> {
     let Step::Replace { source, .. } = &test.steps[0] else {
         anyhow::bail!(
             "test '{}': first edit_sequence step must replace the document",
@@ -1910,7 +1719,7 @@ impl FileTestResult {
     }
 }
 
-fn run_lsp_file(file: &Path, display_name: &str, server: LspServerCmd<'_>) -> FileTestResult {
+fn run_lsp_file(file: &Path, display_name: &str, server: &Path) -> FileTestResult {
     let started = bone_core::prelude::Instant::now();
     let mut result = FileTestResult {
         file_name: display_name.to_owned(),
@@ -2057,7 +1866,7 @@ pub(crate) fn run_lsp_suite(path: &Path) -> Result<usize> {
             .unwrap_or(file)
             .to_string_lossy();
         let display = relative.strip_suffix(".lsp").unwrap_or(&relative);
-        run_lsp_file(file, display, LspServerCmd { bin: &bin })
+        run_lsp_file(file, display, &bin)
     });
     let (mut passed, mut failed) = (0, 0);
     for result in &results {

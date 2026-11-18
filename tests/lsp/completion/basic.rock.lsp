@@ -36,14 +36,14 @@ checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"],
 name = "complete_local_variables"
 kind = "completion"
 position = [5, 16]
-source = '''
+source = """
 fn calculate() {
     let first_number = 42
     let second_number = 84
     let result = first_number + second_number
-    
+\u0020\u0020\u0020\u0020
     let sum = fi
-}'''
+}"""
 request = { transport = "cli", argv = ["completion", "$target"] }
 checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["first_number"] }]
 
@@ -139,14 +139,14 @@ checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"],
 name = "complete_local_vars_with_syntax_error"
 kind = "completion"
 position = [5, 19]
-source = '''
+source = """
 fn calculate() {
     let first_value = 10
     let second_value = 20
-    let invalid_syntax = 
-    
+    let invalid_syntax =\u0020
+\u0020\u0020\u0020\u0020
     let result = fi
-}'''
+}"""
 request = { transport = "cli", argv = ["completion", "$target"] }
 checks = [{ op = "contains_all", path = ["result", "completions", "*", "label"], value = ["first_value"] }]
 

@@ -6,8 +6,8 @@ primary_file = "math.rock"
 request = { transport = "cli", argv = ["rename", "$target", "sum_two_numbers"] }
 checks = [
   { op = "empty", path = ["error"], missing_is_empty = true, null_is_empty = true },
-  { op = "applied_text_equals", path = ["result", "changes"], file = "math.rock", source = "math.rock", expected = "fn sum_two_numbers(a: int, b: int) -> int {\n    return a + b\n}\n\nfn multiply(a: int, b: int) -> int {\n    return a * b\n}", encoding = "cli_bytes", trim = "end" },
-  { op = "applied_text_equals", path = ["result", "changes"], file = "main.rock", source = "main.rock", expected = "fn main() {\n    let sum = sum_two_numbers(5, 3)\n    let product = multiply(5, 3)\n    print(\"Sum: \" + sum.to_string())\n    print(\"Product: \" + product.to_string())\n}", encoding = "cli_bytes", trim = "end" },
+  { op = "applied_text_equals", path = ["result", "changes"], file = "math.rock", expected = "fn sum_two_numbers(a: int, b: int) -> int {\n    return a + b\n}\n\nfn multiply(a: int, b: int) -> int {\n    return a * b\n}" },
+  { op = "applied_text_equals", path = ["result", "changes"], file = "main.rock", expected = "fn main() {\n    let sum = sum_two_numbers(5, 3)\n    let product = multiply(5, 3)\n    print(\"Sum: \" + sum.to_string())\n    print(\"Product: \" + product.to_string())\n}" },
 ]
 
 [[tests.files]]
@@ -54,7 +54,6 @@ null_is_empty = true
 op = "applied_text_equals"
 path = ["result", "changes"]
 file = "types.rock"
-source = "types.rock"
 expected = '''
 struct Point2D {
     x: float,
@@ -66,14 +65,11 @@ fn distance(p1: Point2D, p2: Point2D) -> float {
     let dy = p2.y - p1.y
     return (dx * dx + dy * dy).sqrt()
 }'''
-encoding = "cli_bytes"
-trim = "end"
 
 [[tests.checks]]
 op = "applied_text_equals"
 path = ["result", "changes"]
 file = "geometry.rock"
-source = "geometry.rock"
 expected = '''
 fn create_origin() -> Point2D {
     return Point2D { x: 0.0, y: 0.0 }
@@ -87,26 +83,21 @@ fn create_unit_square() -> [Point2D] {
         Point2D { x: 0.0, y: 1.0 },
     ]
 }'''
-encoding = "cli_bytes"
-trim = "end"
 
 [[tests.checks]]
 op = "applied_text_equals"
 path = ["result", "changes"]
 file = "main.rock"
-source = "main.rock"
-expected = '''
+expected = """
 fn main() {
     let origin: Point2D = create_origin()
     let square = create_unit_square()
-    
+\u0020\u0020\u0020\u0020
     for p in square {
         let d = distance(origin, p)
-        print("Distance from origin: " + d.to_string())
+        print(\"Distance from origin: \" + d.to_string())
     }
-}'''
-encoding = "cli_bytes"
-trim = "end"
+}"""
 
 [[tests.files]]
 path = "types.rock"
@@ -140,16 +131,16 @@ fn create_unit_square() -> [Point] {
 
 [[tests.files]]
 path = "main.rock"
-text = '''
+text = """
 fn main() {
     let origin: Point = create_origin()
     let square = create_unit_square()
-    
+\u0020\u0020\u0020\u0020
     for p in square {
         let d = distance(origin, p)
-        print("Distance from origin: " + d.to_string())
+        print(\"Distance from origin: \" + d.to_string())
     }
-}'''
+}"""
 
 [[tests.files]]
 path = "stick.toml"
