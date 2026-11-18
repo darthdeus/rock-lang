@@ -3418,19 +3418,22 @@ impl<'a> Builder<'a> {
             if !self.is_open() {
                 return Ok(Vec::new());
             }
-            if self
-                .scx
-                .rep_arena()
-                .value_shape(r.representation())
-                .is_none()
-            {
-                return self.opaque_boundary_leaves(&r, shape, "return boundary");
-            }
-            let r = ValueBundle::new(
-                r.representation(),
-                self.owned_value_children(r.into_value())?,
-            );
-            return self.repr_to_leaves_bundle_for_shape(&r, shape);
+            let scx = self.scx;
+            let representation = r.representation();
+            let plan = scx.rep_arena().get(representation);
+            return match plan.layout() {
+                RepLayout::Opaque => self.repr_to_leaves_shape(r.value(), shape),
+                RepLayout::Leaves(actual) => {
+                    let r = ValueBundle::new(
+                        representation,
+                        self.owned_value_children(r.into_value())?,
+                    );
+                    self.repr_to_leaves_for_shape(&r, actual, shape)
+                }
+                RepLayout::Tuple { .. } => Err(self.gap_here(format!(
+                    "representation {representation:?} is not an opaque boundary at return boundary"
+                ))),
+            };
         }
         if let Some(shape) = self.result_tuple() {
             if shape.nullable {
