@@ -437,20 +437,6 @@ pub(super) fn ordered_spec_chunks<'a>(
     ordered
 }
 
-pub(super) fn emit_spec_bodies(
-    ws: &Workspace,
-    interner: &skull_mir::monoty::MonoInterner,
-    st: &WorklistState,
-    hoisted: &HashSet<ustr::Ustr>,
-    rejections: &mut Vec<(String, CompilerError)>,
-) -> String {
-    let chunks = emit_spec_chunks(ws, interner, st, hoisted, rejections);
-    ordered_spec_chunks(&chunks, &st.spec_lowered)
-        .into_iter()
-        .map(|chunk| chunk.js.as_str())
-        .collect()
-}
-
 /// Reject calls whose scalarized argument lanes would be dropped by a callee
 /// retaining a whole-value parameter. Omitted defaulted parameters are legal.
 /// Report one mismatch per body so all offending bodies remain visible.

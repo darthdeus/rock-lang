@@ -31,28 +31,31 @@ pub(super) struct JsGraphUpdate {
 fn js_root_plan(
     ws: &Workspace,
     extra_roots: &[(FuncRef, String)],
+    program_mode: bool,
 ) -> Result<JsRootPlan, CompilerError> {
-    let decorators = DecoratorTable::collect(ws);
     let mut named = extra_roots.to_vec();
     let mut seen: HashSet<FuncRef> = named.iter().map(|(fr, _)| *fr).collect();
-    for module in ws.source_modules() {
-        for (fid, f) in module.functions.iter() {
-            if decorators.is_decorated(f) {
-                let fr = FuncRef {
-                    module: module.id,
-                    func: fid,
-                };
-                if seen.insert(fr) {
-                    named.push((fr, callee_js_name(ws, fr)));
+    if program_mode {
+        let decorators = DecoratorTable::collect(ws);
+        for module in ws.source_modules() {
+            for (fid, f) in module.functions.iter() {
+                if decorators.is_decorated(f) {
+                    let fr = FuncRef {
+                        module: module.id,
+                        func: fid,
+                    };
+                    if seen.insert(fr) {
+                        named.push((fr, callee_js_name(ws, fr)));
+                    }
                 }
             }
         }
-    }
-    // Driver registration calls are outside MIR, so root their target under
-    // the bare symbol the driver calls, before building the artifact graph.
-    if let Some(fr) = shader_register_sibling(ws)? {
-        if seen.insert(fr) {
-            named.push((fr, "__rock_shader_register".to_string()));
+        // Driver registration calls are outside MIR, so root their target under
+        // the bare symbol the driver calls, before building the artifact graph.
+        if let Some(fr) = shader_register_sibling(ws)? {
+            if seen.insert(fr) {
+                named.push((fr, "__rock_shader_register".to_string()));
+            }
         }
     }
     let mut refs: Vec<FuncRef> = named.iter().map(|(fr, _)| *fr).collect();
@@ -68,11 +71,7 @@ fn js_root_plan(
 
 /// Graph roots only: a typed-JSON record walker calls these field factories
 /// from opaque JS, and the worklist emits one once a walker reaches its field.
-pub(super) fn push_json_factory_roots(
-    ws: &Workspace,
-    refs: &mut Vec<FuncRef>,
-    seen: &mut HashSet<FuncRef>,
-) {
+fn push_json_factory_roots(ws: &Workspace, refs: &mut Vec<FuncRef>, seen: &mut HashSet<FuncRef>) {
     for module in ws.modules.iter() {
         for (fid, f) in module.functions.iter() {
             let fr = FuncRef {
@@ -88,7 +87,7 @@ pub(super) fn push_json_factory_roots(
 
 /// Graph roots only: a synthesized call resolves to the entry's base instance,
 /// and the worklist emits a definition only for a call that survives lowering.
-pub(super) fn push_synthesized_entry_roots(
+fn push_synthesized_entry_roots(
     ws: &Workspace,
     refs: &mut Vec<FuncRef>,
     seen: &mut HashSet<FuncRef>,
@@ -104,7 +103,7 @@ pub(super) fn push_synthesized_entry_roots(
     }
 }
 
-pub(super) fn shader_root_refs(ws: &Workspace) -> Result<Vec<FuncRef>, CompilerError> {
+fn shader_root_refs(ws: &Workspace) -> Result<Vec<FuncRef>, CompilerError> {
     Ok(skull_mir::lower::collect_shader_pairs(ws)?
         .into_iter()
         .flat_map(|pair| pair.vert.into_iter().chain(std::iter::once(pair.frag)))
@@ -128,7 +127,7 @@ pub(super) fn extend_root_plan_from_inline_view(
     added
 }
 
-pub(super) fn new_js_session(
+fn new_js_session(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     roots: &[FuncRef],
@@ -221,7 +220,7 @@ pub fn emit_program(
         extra.push((fr, nm.clone()));
         nm
     });
-    let (build, _, _) = build_program_session(ws, &scx, &extra)?;
+    let (build, _, _) = build_program_session(ws, &scx, &extra, true)?;
     Ok(JsProgram {
         program: build.program,
         main_js_name,
@@ -242,7 +241,7 @@ pub fn emit_program_cached(
         extra.push((fr, name.clone()));
         name
     });
-    let (build, session, root_plan) = build_program_session(ws, &scx, &extra)?;
+    let (build, session, root_plan) = build_program_session(ws, &scx, &extra, true)?;
     let shader_collection = skull_mir::lower::collect_shader_collection(ws)?;
     let static_keys = build
         .chunks
@@ -275,38 +274,49 @@ pub fn emit_program_cached(
     Ok((program, cache))
 }
 
-/// The whole-file test emission plus its compiler-owned callable artifact. The
-/// runtime wrapper uses the artifact to decide whether CodeRef machinery is
-/// needed; the string-only API above remains for callers that only execute it.
+/// Emit test roots with module-load effects and report their callable slots.
 pub fn emit_program_with_roots_artifact(
     ws: &Workspace,
     roots: &[(FuncRef, String)],
 ) -> Result<(String, CodeArtifact), CompilerError> {
     let scx = js_scx(ws);
-    let build = build_program_session(ws, &scx, roots)?.0;
+    let build = build_program_session(ws, &scx, roots, true)?.0;
     Ok((build.program, build.code_artifact))
+}
+
+/// Emit only the requested roots and reachable definitions. Module-load
+/// callbacks can themselves require unsupported features in JS test units.
+pub fn emit_with_closure(
+    ws: &Workspace,
+    roots: &[(FuncRef, String)],
+) -> Result<String, CompilerError> {
+    let scx = js_scx(ws);
+    Ok(build_program_session(ws, &scx, roots, false)?.0.program)
 }
 
 fn build_program_session(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     extra_roots: &[(FuncRef, String)],
+    program_mode: bool,
 ) -> Result<(ProgramBuild, JsSession, JsRootPlan), CompilerError> {
-    for module in ws.source_modules() {
-        if let Some((why, span)) = skull_mir::lower::map_key_rejection(ws, module.id) {
-            return Err(CompilerError::new_with_label(
-                span,
-                format!("this `Map` key is not value-keyed and would silently miss: {why}"),
-            ));
+    if program_mode {
+        for module in ws.source_modules() {
+            if let Some((why, span)) = skull_mir::lower::map_key_rejection(ws, module.id) {
+                return Err(CompilerError::new_with_label(
+                    span,
+                    format!("this `Map` key is not value-keyed and would silently miss: {why}"),
+                ));
+            }
         }
     }
-    let mut root_plan = js_root_plan(ws, extra_roots)?;
+    let mut root_plan = js_root_plan(ws, extra_roots, program_mode)?;
     loop {
         let session = new_js_session(ws, scx, &root_plan.refs);
         if extend_root_plan_from_inline_view(&mut root_plan, &session.view) {
             continue;
         }
-        let build = assemble_program_core(ws, scx, &root_plan.named, &session)?;
+        let build = assemble_program_core(ws, scx, &root_plan.named, &session, program_mode)?;
         return Ok((build, session, root_plan));
     }
 }
