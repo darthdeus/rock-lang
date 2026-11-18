@@ -3489,9 +3489,6 @@ impl<'a> Builder<'a> {
             };
         }
         if let Some(shape) = self.result_tuple() {
-            if shape.nullable {
-                return self.nullable_tuple_return_slots(e, shape);
-            }
             if shape.splats(self.scx.rep_arena()) {
                 let r = self.lower_expr_repr(e)?.into_value();
                 if !self.is_open() {
@@ -3540,53 +3537,15 @@ impl<'a> Builder<'a> {
         out
     }
 
-    fn nullable_tuple_return_slots(
-        &mut self,
-        e: Idx<Expr>,
-        shape: &TupleLayout,
-    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let r = self.lower_expr_repr(e)?.into_value();
-        if !self.is_open() {
-            return Ok(Vec::new());
-        }
-        if let ValueRepr::Scalar(v) = &r {
-            if !matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
-                let v = *v;
-                if self.is_tuple_aggregate(v) {
-                    return self.tuple_repr_to_slots(r, shape);
-                }
-                let probe = self.absent_tuple_slots(shape);
-                let cells = self.fresh_cells(probe.len());
-                let present_bb = self.f.new_block();
-                let absent_bb = self.f.new_block();
-                let join = self.f.new_block();
-                self.branch_on_nil(v, absent_bb, present_bb);
-
-                self.cur = present_bb;
-                let mut vals = Vec::with_capacity(probe.len());
-                vals.push(self.emit_cur(Inst::Const(Lit::Bool(true))));
-                for index in 0..probe.len().saturating_sub(1) {
-                    vals.push(self.emit_cur(Inst::TupleIndex { base: v, index }));
-                }
-                for (cell, val) in cells.iter().copied().zip(vals) {
-                    self.store_cell(cell, val);
-                }
-                self.f.set_term(self.cur, Term::Goto(join));
-
-                self.cur = absent_bb;
-                for (cell, val) in cells.iter().copied().zip(probe) {
-                    self.store_cell(cell, val);
-                }
-                self.f.set_term(self.cur, Term::Goto(join));
-
-                self.cur = join;
-                return Ok(self.load_cells(&cells));
-            }
-            return Ok(self.absent_tuple_slots(shape));
-        }
-        self.tuple_repr_to_slots(r, shape)
-    }
-
+    /// The N return operands for a tuple-return `return <v>`. A fresh `MakeTuple`
+    /// in return position (the common `return (a, b)` and the `return f()` forward
+    /// where `f()` lowered to `MakeTuple(loads)`) is elided to its operands -- no
+    /// table alloc. A tuple value from elsewhere (a var/field holding a packed
+    /// table) is unpacked with `TupleIndex`.
+    /// Whether `v` is a tuple box built one value per element, read back the
+    /// same way. Every other value of a splatting tuple type -- loaded,
+    /// returned, joined or read out of storage -- is the flat box, so this is
+    /// the one place layout is decided.
     pub(crate) fn is_tuple_aggregate(&self, v: Idx<Inst>) -> bool {
         self.element_tuples.contains(&v)
     }
@@ -3625,6 +3584,45 @@ impl<'a> Builder<'a> {
             .collect()
     }
 
+    /// Flatten a tuple repr to the slot values `shape` describes -- the tuple
+    /// analogue of [`Self::repr_to_leaves`]. A `Tuple` repr (a splatting call
+    /// forwarded straight out, or a tuple literal) yields its parts; anything
+    /// else is a packed tuple, so each element is read back with `TupleIndex`
+    /// and a `Leaves` slot is field-read off the box.
+    ///
+    /// This owns the leading presence at a nullable shape, both arms, so it is
+    /// the exact inverse of [`Self::tuple_from_slots`] -- one oracle for where
+    /// presence sits on the wire. A repr that carries its OWN tag forwards that
+    /// tag: `return maybe(b)` hands on the callee's presence, and synthesizing
+    /// `true` here instead reported every absent forward as present.
+    /// The `present, <slots...>` wire of a flat box that may be nil: tested at
+    /// runtime and read per arm, absent as `false` plus nils.
+    fn nullable_box_slots(&mut self, boxed: Idx<Inst>, shape: &TupleLayout) -> Vec<Idx<Inst>> {
+        let absent = self.absent_tuple_slots(shape);
+        let cells = self.fresh_cells(absent.len());
+        let present_bb = self.f.new_block();
+        let absent_bb = self.f.new_block();
+        let join = self.f.new_block();
+        self.branch_on_nil(boxed, absent_bb, present_bb);
+
+        self.cur = present_bb;
+        let mut present = vec![self.emit_cur(Inst::Const(Lit::Bool(true)))];
+        present.extend(self.flat_box_slots(boxed, absent.len() - 1));
+        for (&cell, value) in cells.iter().zip(present) {
+            self.store_cell(cell, value);
+        }
+        self.f.set_term(self.cur, Term::Goto(join));
+
+        self.cur = absent_bb;
+        for (&cell, value) in cells.iter().zip(absent) {
+            self.store_cell(cell, value);
+        }
+        self.f.set_term(self.cur, Term::Goto(join));
+
+        self.cur = join;
+        self.load_cells(&cells)
+    }
+
     fn tuple_repr_to_slots(
         &mut self,
         r: ValueRepr,
@@ -3634,6 +3632,9 @@ impl<'a> Builder<'a> {
         if let ValueRepr::Scalar(v) = &r {
             if matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
                 return Ok(self.absent_tuple_slots(shape));
+            }
+            if shape.nullable && !self.is_tuple_aggregate(*v) {
+                return Ok(self.nullable_box_slots(*v, shape));
             }
         }
         let present = match (shape.nullable, &r) {

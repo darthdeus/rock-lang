@@ -41,9 +41,16 @@ impl<'a> Builder<'a> {
                 let v = self.lower_expr(expr)?;
                 self.stringify(expr, v)
             }
-            // Display tuples use one slot per logical member.
-            None if self.tuple_box_shape(expr)?.is_some() => {
-                let r = self.lower_expr_repr(expr)?.into_value();
+            None if let Some(shape) = self.tuple_box_shape(expr)? => {
+                // A tuple held as one box is rebuilt into its parts first, so it
+                // packs narrow and reaches the same rejection as an unpacked one.
+                let r = match self.lower_expr_repr(expr)?.into_value() {
+                    boxed @ ValueRepr::Scalar(_) => {
+                        let slots = self.tuple_repr_to_slots(boxed, &shape)?;
+                        self.tuple_from_slots(&shape, &slots, &mut 0)
+                    }
+                    parts => parts,
+                };
                 let v = self.pack(r)?;
                 self.stringify(expr, v)
             }

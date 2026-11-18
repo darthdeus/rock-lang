@@ -1009,6 +1009,10 @@ fn copy_through_a_name(i: int) {
     YS.push(t)
 }
 fn copy_each() { for t in XS { YS.push(t) } }
+fn copy_through_get(i: int) {
+    if let t = XS.get(i) { YS.push(t) }
+}
+fn copy_through_coalesce(i: int) { YS.push(XS.get(i + 1) ?? XS[i]) }
 fn copy_joined(i: int) {
     let t = if i > 0 { XS[i - 1] } else { XS[i] }
     YS.push(t)
@@ -1028,14 +1032,17 @@ fn main() {
     copy_direct(0)
     copy_through_a_name(0)
     copy_each()
+    copy_through_get(0)
+    copy_through_coalesce(0)
     copy_joined(0)
     copy_joined_unmarked(0)
 }
 "#;
 
 /// Copying a stored tuple element shares its immutable box -- directly, through
-/// an unwritten name, as a loop element, or out of a join whose arms are all
-/// stored -- rather than packing a new table, and reads none of its slots.
+/// an unwritten name, as a loop element, through a nullable return (`get`,
+/// `??`), or out of a join whose arms are all stored -- rather than packing a
+/// new table, and reads none of its slots.
 #[test]
 fn copying_a_stored_tuple_element_allocates_nothing() {
     let lua = emit_module(NOBOX_TUPLE_COPY);
@@ -1043,6 +1050,8 @@ fn copying_a_stored_tuple_element_allocates_nothing() {
         "copy_direct",
         "copy_through_a_name",
         "copy_each",
+        "copy_through_get",
+        "copy_through_coalesce",
         "copy_joined",
         "copy_joined_unmarked",
     ] {

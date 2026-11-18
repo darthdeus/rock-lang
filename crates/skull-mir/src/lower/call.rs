@@ -2961,6 +2961,16 @@ impl<'a> Builder<'a> {
                 }
             }
             RepLayout::Tuple(expected) => {
+                // A box of the tuple -- a nullable tuple's whole-value form -- is
+                // read through its slots, nil-tested when the slot is nullable.
+                if let ValueRepr::Scalar(_) = bundle.value()
+                    && matches!(
+                        self.scx.rep_arena().get(bundle.representation()).layout(),
+                        RepLayout::Opaque
+                    )
+                {
+                    return self.tuple_repr_to_slots(bundle.value().clone(), expected);
+                }
                 let actual = self
                     .scx
                     .rep_arena()

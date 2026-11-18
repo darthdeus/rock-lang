@@ -1599,11 +1599,10 @@ impl RepArena {
         } else if first_class && !matches!(ret.peel_nullable().0, crate::monoty::MonoTy::Tuple(_)) {
             Some(self.intern(target, RepUse::Return, RepLayout::Opaque))
         } else {
-            Some(self.plan_position(
+            Some(self.plan_result(
                 ws,
                 target,
                 ret,
-                RepUse::Return,
                 matches!(ret.peel_nullable().0, crate::monoty::MonoTy::Tuple(_)),
                 nobox_only,
             )?)
@@ -1654,6 +1653,25 @@ impl RepArena {
         self.plan(ws, target, ty, use_context, &facts, guarantees)
     }
 
+    /// A function's result. A nullable tuple returns one box or nil: its box is
+    /// the flat wire, so a stored tuple passes through without being unpacked
+    /// and packed again, and a fresh one is one table the trace can sink.
+    fn plan_result(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        ty: &crate::monoty::MonoTy,
+        tuple_spelled: bool,
+        nobox: bool,
+    ) -> Result<RepId, RepError> {
+        if let crate::monoty::MonoTy::Nullable(inner) = ty
+            && matches!(inner.as_ref(), crate::monoty::MonoTy::Tuple(_))
+        {
+            return Ok(self.intern(target, RepUse::Return, RepLayout::Opaque));
+        }
+        self.plan_position(ws, target, ty, RepUse::Return, tuple_spelled, nobox)
+    }
+
     fn function_from_declaration(
         &self,
         ws: &Workspace,
@@ -1690,11 +1708,10 @@ impl RepArena {
                 let id = if let Some(ty) = ty {
                     let is_tuple = matches!(ty, crate::monoty::MonoTy::Tuple(_));
                     if let Some(mode) = mode {
-                        self.plan_position(
+                        self.plan_result(
                             ws,
                             target,
                             &ty,
-                            RepUse::Return,
                             tuple_spelled || is_tuple,
                             mode.nobox_only_for(&ty),
                         )?
@@ -1769,11 +1786,10 @@ impl RepArena {
                 _ => false,
             };
             if mode.is_some() || tuple_spelled {
-                self.plan_position(
+                self.plan_result(
                     ws,
                     target,
                     ty,
-                    RepUse::Return,
                     tuple_spelled,
                     mode.is_some_and(|mode| mode.nobox_only_for(ty)),
                 )

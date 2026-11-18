@@ -1,10 +1,10 @@
 // A nullable TUPLE whose element is a `nobox` value -- `(NV, int)?`.
 //
-// The wire is a presence bool leading one slot per element, and a `let` binds
-// that wire cell-wise (`tuple_binds`) instead of packing it. Packing is what
-// used to happen, and it failed twice over: it boxed the `nobox` element, and a
-// packed tuple is structurally never nil, so `t == null` answered `false` on the
-// absent arm.
+// A call returns one flat box or nil; a parameter and a `?.` join carry a
+// presence bool leading one slot per element. Either way the absent value is
+// genuinely absent: a box built per element would box the `nobox` element, and
+// a tuple literal is structurally never nil, so `t == null` once answered
+// `false` on the absent arm.
 //
 // `?.` is NOT the discriminant. A safe-nav yielding a tuple and a plain call
 // declared `-> (NV, int)?` reached the same missing `let` arm; the safe-nav case
@@ -268,11 +268,10 @@ fn materialize_boxes_a_present_nullable_tuple() -> int {
 // ======== As a RETURN ========
 //
 // A NULLABLE tuple return whose element is a `nobox` value: `-> (NV2, float)?`.
-// The plain tuple form is covered by `tests/nobox/tuple.rock`; the `?` is
-// a separate wire, because a multi-value boundary must carry the null
-// discriminant alongside the splatted slots rather than boxing the whole tuple.
-// It leads: `present, <slots...>`, absent as `false, nil, ...` -- the same
-// convention `ValueShape::nullable` uses one level down.
+// The plain tuple form is covered by `tests/nobox/tuple.rock`. The `?` return
+// is one value: the tuple's flat box, or nil. A stored tuple (`Vec.get`,
+// `pop`) passes through without being unpacked and packed again, and a fresh
+// one is a table its caller's trace can sink.
 //
 // Live shape: `stone/engine/systems/shapes.rock`'s `line_intersects_circle` /
 // `line_intersects_rect`, both `-> (Vec2, float)?` consumed as
