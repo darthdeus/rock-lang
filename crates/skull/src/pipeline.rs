@@ -212,6 +212,9 @@ pub fn emit_program(
         .without_fingerprint()
         .project_root(target.project_root)
         .renderer(target.renderer);
+    if target.global_accessors {
+        emit = emit.with_global_accessors();
+    }
     if target.attribution {
         emit = emit.with_attribution();
     }
@@ -230,12 +233,15 @@ pub struct EmitTarget<'a> {
     /// prune to what the project reaches. `None` for a single source.
     pub project_root: Option<&'a str>,
     pub renderer: RendererTarget,
+    /// Emit reflection accessors for unboxed mutable globals.
+    pub global_accessors: bool,
     /// Keep per-body cost records ([`crate::mir_emit::FullEmit::with_attribution`]).
     pub attribution: bool,
 }
 
 impl EmitTarget<'_> {
     pub const SINGLE_SOURCE: EmitTarget<'static> = EmitTarget {
+        global_accessors: false,
         project_root: None,
         renderer: RendererTarget::Gl,
         attribution: false,

@@ -1,25 +1,18 @@
 use super::*;
 
 #[test]
-fn streamed_game_main_matches_metadata_splice_and_entry() {
-    let marker = "__rock_globals_install_bridge()\n";
+fn streamed_game_main_writes_program_and_optional_entry() {
     for emits_main in [false, true] {
-        let lua = format!("head\n{marker}tail\n{marker}last\n");
-        let metadata = "-- metadata\n";
-        let mut old = lua.clone();
-        old.insert_str(old.find(marker).unwrap() + marker.len(), metadata);
-        let expected = format!(
-            "preamble\n{old}{}",
-            if emits_main {
-                "\n__rock_main_wrapper(main)\n"
-            } else {
-                ""
-            }
-        );
-        let bridge_end = lua.find(marker).unwrap() + marker.len();
-        let searched = GameProgram::with_metadata(lua.clone(), None, metadata.into()).unwrap();
-        assert_eq!(searched.parts()[0].len(), bridge_end);
-        let program = GameProgram::with_metadata(lua, Some(bridge_end), metadata.into()).unwrap();
+        let program = GameProgram {
+            lua: "program\n".into(),
+            comptime_inputs: Default::default(),
+        };
+        let entry = if emits_main {
+            "\n__rock_main_wrapper(main)\n"
+        } else {
+            ""
+        };
+        let expected = format!("preamble\nprogram\n{entry}");
         let dir = tempfile::tempdir().unwrap();
         let main = dir.path().join("main.lua");
         let overlay = dir.path().join("incremental.lua");
@@ -30,9 +23,6 @@ fn streamed_game_main_matches_metadata_splice_and_entry() {
         assert_eq!(std::fs::read(&main).unwrap(), expected.as_bytes());
         assert!(!overlay.exists());
     }
-    assert!(GameProgram::with_metadata("no bridge".into(), None, "metadata".into()).is_err());
-    let lua = format!("head\n{marker}tail\n");
-    assert!(GameProgram::with_metadata(lua, Some(2), "metadata".into()).is_err());
 }
 
 #[test]

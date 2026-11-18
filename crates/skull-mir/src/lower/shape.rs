@@ -1455,11 +1455,6 @@ pub struct NoboxGlobalAccessorShape {
     /// From the shared physical storage classification -- the same answer the
     /// `_lct` ctor and the leaf-form pack site consume.
     pub ctor_suffix: &'static str,
-    /// The path of a leaf that is a nullable child's PRESENCE tag, if any. From
-    /// [`value_leaf_presence_flags`], positionally. Informational: a leaf-table
-    /// ctor takes tags like any other leaf, so this does NOT by itself make a
-    /// shape unbuildable.
-    pub presence_path: Option<Ustr>,
     /// Why no accessor can be built, if so. `_lct` is positional over physical
     /// leaves, while `_vt` is positional over its box keys (`gc_table_fields`),
     /// which split only `nobox` fields into leaves; a GC table with a nested
@@ -1470,45 +1465,12 @@ pub struct NoboxGlobalAccessorShape {
 pub fn nobox_global_accessor_shape(
     ws: &Workspace,
     scx: &ScalarCtx,
-    ty: TyId,
+    plan: &GlobalPlan,
 ) -> Result<Option<NoboxGlobalAccessorShape>, RepError> {
-    let plan = GlobalPlan::for_declared_type(ws, scx, ty)?;
     let Some(shape) = plan.value_shape() else {
         return Ok(None);
     };
-    let paths = plan.leaf_paths().ok_or_else(|| RepError {
-        span: None,
-        message: format!(
-            "`{}` has no physical leaf-path plan for global accessors",
-            shape.name
-        ),
-    })?;
-    // `value_leaf_paths` omits the global's own presence leaf, and
-    // `value_leaf_presence_flags` omits it too; both sequences therefore line
-    // up directly. Nested nullable fields remain represented in both.
-    let flags = plan.presence_flags().ok_or_else(|| RepError {
-        span: None,
-        message: format!(
-            "`{}` has no physical presence plan for global accessors",
-            shape.name
-        ),
-    })?;
-    if flags.len() != paths.len() {
-        return Err(RepError {
-            span: None,
-            message: format!(
-                "`{}` has {} presence entries for {} leaf paths",
-                shape.name,
-                flags.len(),
-                paths.len()
-            ),
-        });
-    }
-    let presence_path = flags
-        .iter()
-        .zip(paths.iter())
-        .find(|(is_tag, _)| **is_tag)
-        .map(|(_, p)| *p);
+    let paths = value_leaf_paths(shape);
     let storage = plan.value_storage().ok_or_else(|| RepError {
         span: None,
         message: format!(
@@ -1548,7 +1510,6 @@ pub fn nobox_global_accessor_shape(
         nullable: shape.nullable,
         storage,
         ctor_suffix,
-        presence_path,
         unbuildable,
     }))
 }

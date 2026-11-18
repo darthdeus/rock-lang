@@ -81,6 +81,8 @@ pub fn global_storage_keys(
 /// One mutable global in the published global directory: its identity, its
 /// display name, its physical leaves and the storage slot of each leaf.
 pub struct GlobalDirectoryEntry {
+    pub logical_name: Ustr,
+    pub plan: GlobalPlan,
     pub identity: String,
     pub name: String,
     pub physical: Vec<Ustr>,
@@ -118,6 +120,8 @@ pub fn global_directory(
                 .unwrap_or(&identity)
                 .to_string();
             entries.push(GlobalDirectoryEntry {
+                logical_name: global.name,
+                plan,
                 identity,
                 name,
                 physical,

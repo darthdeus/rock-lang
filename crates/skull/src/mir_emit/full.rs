@@ -706,6 +706,7 @@ pub(super) fn emit_full_build(
         renderer_target,
         shapes,
         fingerprint,
+        global_accessors,
         attribution,
     } = options;
     let mut setup_phases = SetupPhases::default();
@@ -811,7 +812,14 @@ pub(super) fn emit_full_build(
             parallel_join(
                 || {
                     let started = Instant::now();
-                    let early = prepare_early_assembly(ws, &scx, &cg, &concrete, attribution);
+                    let early = prepare_early_assembly(
+                        ws,
+                        &scx,
+                        &cg,
+                        &concrete,
+                        attribution,
+                        global_accessors,
+                    );
                     (early, started.elapsed())
                 },
                 || {
@@ -901,6 +909,7 @@ pub(super) fn emit_full_build(
         unit_comptime_reads: UnitComptimeReads::default(),
         renderer_target,
         publish_fingerprint: fingerprint,
+        global_accessors,
         build_kind: build.kind(),
         selected_sim_functions,
         repair_stats: IncrementalRepairStats::default(),

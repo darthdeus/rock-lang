@@ -319,10 +319,6 @@ impl GlobalPlan {
         self.arena.get(self.representation).leaf_paths()
     }
 
-    pub(crate) fn presence_flags(&self) -> Option<Vec<bool>> {
-        self.arena.get(self.representation).presence_flags()
-    }
-
     pub fn leaf_names(&self, base: Ustr) -> Option<Vec<Ustr>> {
         let shape = self.value_shape()?;
         Some(

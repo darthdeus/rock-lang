@@ -164,6 +164,7 @@ pub struct FullEmit<'a> {
     renderer_target: RendererTarget,
     shapes: ShapeOverrides,
     fingerprint: bool,
+    global_accessors: bool,
     attribution: bool,
 }
 
@@ -175,6 +176,7 @@ impl<'a> FullEmit<'a> {
             renderer_target: RendererTarget::Gl,
             shapes: ShapeOverrides::default(),
             fingerprint: true,
+            global_accessors: false,
             attribution: false,
         }
     }
@@ -208,6 +210,12 @@ impl<'a> FullEmit<'a> {
     /// down to what the project reaches. See [`is_library_module`].
     pub fn project_root(mut self, project_root: Option<&'a str>) -> Self {
         self.project_root = project_root;
+        self
+    }
+
+    /// Publish getters and setters for unboxed mutable globals in the host directory.
+    pub fn with_global_accessors(mut self) -> Self {
+        self.global_accessors = true;
         self
     }
 
