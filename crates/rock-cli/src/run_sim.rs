@@ -285,7 +285,10 @@ fn child_sim_selection() -> Result<Vec<String>> {
     }
 }
 
+mod events;
 mod worker_admission;
+
+use events::{SimEvent, parse_sim_marker};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct SimReceiptInput {
@@ -3127,7 +3130,6 @@ enum EntryBoundary {
 
 struct EntryLine<'a> {
     diagnostic: Option<&'a str>,
-    event: Option<serde_json::Value>,
     boundary: Option<EntryBoundary>,
 }
 
@@ -3148,7 +3150,7 @@ impl EntryStream {
     fn observe<'line>(
         &mut self,
         line: &'line str,
-        report: impl FnOnce(&EntryLine<'line>),
+        report: impl FnOnce(&EntryLine<'line>, Option<&SimEvent<'_>>),
     ) -> EntryLine<'line> {
         let (raw, payload) = line
             .split_once("__SIM__")
@@ -3156,21 +3158,24 @@ impl EntryStream {
         let keep_raw = payload.is_none() || !raw.is_empty();
         let mut observed = EntryLine {
             diagnostic: keep_raw.then_some(raw),
-            event: None,
             boundary: None,
         };
+        let payload_value;
+        let mut event = None;
         let mut protocol_error = None;
         let mut marker_error = None;
         if let Some(payload) = payload {
             match parse_sim_marker(payload, line) {
-                Ok(event) => {
+                Ok(value) => {
+                    payload_value = value;
+                    let op = payload_value["op"].as_str().expect("validated marker");
                     if self.protocol_error.is_none() {
-                        match self.boundary(&event, line) {
+                        match self.boundary(op, &payload_value, line) {
                             Ok(boundary) => observed.boundary = boundary,
                             Err(error) => protocol_error = Some(error),
                         }
                     }
-                    observed.event = Some(event);
+                    event = Some(SimEvent::decode(op, &payload_value));
                 }
                 Err(error) => {
                     if self.marker_error.is_none() {
@@ -3183,7 +3188,7 @@ impl EntryStream {
         }
 
         // Keep the completed prefix if reporting or reading panics.
-        report(&observed);
+        report(&observed, event.as_ref());
         if !self.started && !raw.is_empty() {
             if self.raw_tail.len() == 8 {
                 self.raw_tail.pop_front();
@@ -3203,9 +3208,8 @@ impl EntryStream {
                 self.summary.frame_count = frame_count;
             }
             None if self.protocol_error.is_none() => {
-                if let Some(event) = &observed.event {
-                    self.summary
-                        .record(event, event["op"].as_str().expect("validated marker"));
+                if let Some(event) = event {
+                    event.record(&mut self.summary);
                 }
             }
             None => {}
@@ -3216,7 +3220,7 @@ impl EntryStream {
     fn read(
         &mut self,
         reader: impl BufRead,
-        mut report: impl FnMut(&EntryLine<'_>),
+        mut report: impl FnMut(&EntryLine<'_>, Option<&SimEvent<'_>>),
     ) -> Option<String> {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             for line in reader.lines() {
@@ -3230,8 +3234,12 @@ impl EntryStream {
         }
     }
 
-    fn boundary(&self, event: &serde_json::Value, line: &str) -> Result<Option<EntryBoundary>> {
-        let op = event["op"].as_str().expect("validated marker");
+    fn boundary(
+        &self,
+        op: &str,
+        event: &serde_json::Value,
+        line: &str,
+    ) -> Result<Option<EntryBoundary>> {
         match op {
             "entry_start" => {
                 if self.started {
@@ -3268,12 +3276,14 @@ fn stderr_panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
 }
 
 fn envelope_frame_count(rest: &serde_json::Value, line: &str) -> Result<Option<usize>> {
-    let Some(raw) = extract_raw_field(rest, "frame_count") else {
-        return Ok(None);
-    };
-    raw.parse::<usize>()
-        .map(Some)
-        .map_err(|_| anyhow!("sim child sent an invalid entry frame_count: {line}"))
+    rest.get("frame_count")
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(|| anyhow!("sim child sent an invalid entry frame_count: {line}"))
+        })
+        .transpose()
 }
 
 fn envelope_frame_timing(
@@ -3288,7 +3298,7 @@ fn envelope_frame_timing(
 }
 
 fn envelope_name_matches(rest: &serde_json::Value, expected: &str, line: &str) -> Result<()> {
-    match extract_str_field(rest, "name") {
+    match rest["name"].as_str() {
         Some(name) if name == expected => Ok(()),
         Some(name) => Err(anyhow!(
             "sim child envelope names `{name}` where the runner asked for `{expected}`: {line}"
@@ -3526,72 +3536,41 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
         let quiet = quiet || buffered;
         std::thread::spawn(move || {
             let mut stream = EntryStream::new(name.clone(), buffered);
-            let diagnostic = stream.read(
-                BufReader::new(stderr_handle),
-                |EntryLine {
-                     diagnostic,
-                     event,
-                     boundary,
-                 }| {
-                    if matches!(boundary, Some(EntryBoundary::Started)) {
-                        *anchor.lock().unwrap() = rock_core::clock::Instant::now();
+            let diagnostic = stream.read(BufReader::new(stderr_handle), |observed, event| {
+                let boundary = &observed.boundary;
+                if matches!(boundary, Some(EntryBoundary::Started)) {
+                    *anchor.lock().unwrap() = rock_core::clock::Instant::now();
+                }
+                if let Some(recorder) = recorder.as_ref() {
+                    match boundary {
+                        Some(EntryBoundary::Started) => {
+                            recorder.worker_first_entry(worker_attempt, occurrence_id, &name);
+                            recorder.entry_start(worker_attempt, occurrence_id, &name);
+                        }
+                        Some(EntryBoundary::Ended(frame_count, frame_timing)) => {
+                            recorder.entry_end(
+                                worker_attempt,
+                                occurrence_id,
+                                &name,
+                                *frame_count,
+                                *frame_timing,
+                            );
+                        }
+                        _ => {}
                     }
-                    if let Some(recorder) = recorder.as_ref() {
-                        match boundary {
-                            Some(EntryBoundary::Started) => {
-                                recorder.worker_first_entry(worker_attempt, occurrence_id, &name);
-                                recorder.entry_start(worker_attempt, occurrence_id, &name);
-                            }
-                            Some(EntryBoundary::Ended(frame_count, frame_timing)) => {
-                                recorder.entry_end(
-                                    worker_attempt,
-                                    occurrence_id,
-                                    &name,
-                                    *frame_count,
-                                    *frame_timing,
-                                );
-                            }
-                            _ => {}
-                        }
+                }
+                if !buffered {
+                    if let Some(diagnostic) = observed.diagnostic {
+                        eprintln!("{diagnostic}");
                     }
-                    if !buffered {
-                        if let Some(diagnostic) = diagnostic {
-                            eprintln!("{diagnostic}");
-                        }
+                }
+                if let Some(event) = event {
+                    event.forward_reload(&reload_tx, &reload_completion_tx);
+                    if !quiet && let Some(line) = event.progress() {
+                        eprintln!("{line}");
                     }
-                    if let Some(rest) = event {
-                        let op = rest["op"].as_str().expect("validated marker");
-                        if op == "reload_edit" {
-                            // Send failure = the wait loop already reaped the child;
-                            // the edit can't apply, which the sim's own wait_for
-                            // timeout (or the post-exit drain) surfaces.
-                            let _ = reload_tx.send(ReloadEditReq {
-                                request_id: rest["request_id"].as_u64(),
-                                file: extract_str_field(rest, "file").unwrap_or_default(),
-                                find: extract_str_field(rest, "find").unwrap_or_default(),
-                                replace: extract_str_field(rest, "replace").unwrap_or_default(),
-                                site: extract_str_field(rest, "site").unwrap_or_default(),
-                            });
-                        }
-                        if op == "reload_terminal" {
-                            let terminal = match extract_str_field(rest, "status").as_deref() {
-                                Some("applied") => Some(ReloadTerminal::Applied),
-                                Some("failed") => Some(ReloadTerminal::Failed),
-                                _ => None,
-                            };
-                            if let Some(terminal) = terminal {
-                                let _ = reload_completion_tx.send(ReloadCompletion {
-                                    request_id: rest["request_id"].as_u64(),
-                                    terminal,
-                                });
-                            }
-                        }
-                        if !quiet {
-                            print_progress(rest, op);
-                        }
-                    }
-                },
-            );
+                }
+            });
             (stream, diagnostic)
         })
     };
@@ -3668,7 +3647,7 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
                             Err(e) => {
                                 reload_errors.push(SiteMessage {
                                     message: format!("reload request: {e}"),
-                                    site: compress_site(&req.site),
+                                    site: req.site,
                                 });
                                 break 'child (terminate_reload_child(&mut child)?, false);
                             }
@@ -3703,16 +3682,15 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
                                     "reload_edit returned non-incremental result {other:?}"
                                 );
                                 reload_ledger.insert(request_id, ReloadRequestState::Rejected);
-                                let site = compress_site(&req.site);
                                 reload_errors.push(SiteMessage {
                                     message: format!("reload_edit: {e}"),
-                                    site: site.clone(),
+                                    site: req.site,
                                 });
                                 break 'child (terminate_reload_child(&mut child)?, false);
                             }
                             Err(e) => {
                                 reload_ledger.insert(request_id, ReloadRequestState::Rejected);
-                                let site = compress_site(&req.site);
+                                let site = req.site;
                                 // Stream now for a single run; buffered callers emit
                                 // the retained error under their record lock.
                                 if !buffered {
@@ -3774,12 +3752,12 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
                         "reload_edit for `{}` arrived after the child exited (emit it before a wait_for on its effect)",
                         req.file
                     ),
-                    site: compress_site(&req.site),
+                    site: req.site,
                 });
             }
             Err(e) => reload_errors.push(SiteMessage {
                 message: format!("reload request after child exit: {e}"),
-                site: compress_site(&req.site),
+                site: req.site,
             }),
         }
     }
@@ -4019,110 +3997,6 @@ fn describe_worker_end(
     out
 }
 
-/// Compress a `@call_site` path to `<stem>:<line>` for display — the
-/// directory is noise and every sim file ends in `.rock`. Drops the
-/// workspace prefix implicitly by taking only the basename.
-fn compress_site(path: &str) -> String {
-    let (file_part, line_part) = match path.rsplit_once(':') {
-        Some((f, l)) => (f, Some(l)),
-        None => (path, None),
-    };
-    let basename = file_part.rsplit('/').next().unwrap_or(file_part);
-    let stem = basename.strip_suffix(".rock").unwrap_or(basename);
-    match line_part {
-        Some(l) => format!("{stem}:{l}"),
-        None => stem.to_string(),
-    }
-}
-
-/// Render one `__SIM__` op as a colored progress line, mirroring the
-/// `[file:line] op args` shape of the legacy `.sim` runner so muscle
-/// memory carries over. Unknown ops are silently dropped — this is
-/// progress display, not a parser. Heavy fields (image_snapshot path)
-/// are summarized rather than dumped.
-fn print_progress(rest: &serde_json::Value, op: &str) {
-    let site_raw = extract_str_field(rest, "site").unwrap_or_default();
-    let site = compress_site(&site_raw);
-    let prefix = if site.is_empty() {
-        String::new()
-    } else {
-        format!("[{}] ", site).bright_black().to_string()
-    };
-    let body = match op {
-        "start_game" => {
-            let n = extract_str_field(rest, "name").unwrap_or_default();
-            format!("{} {}", "start".cyan(), n.yellow())
-        }
-        "set_env" => {
-            let k = extract_str_field(rest, "key").unwrap_or_default();
-            let v = extract_str_field(rest, "value").unwrap_or_default();
-            format!("{} {}={}", "env".cyan(), k.yellow(), v)
-        }
-        "key" => {
-            let n = extract_str_field(rest, "name").unwrap_or_default();
-            format!("{} {}", "key".cyan(), n.yellow())
-        }
-        "click" => {
-            let x = extract_raw_field(rest, "x").unwrap_or_default();
-            let y = extract_raw_field(rest, "y").unwrap_or_default();
-            format!("{} {} {}", "click".cyan(), x, y)
-        }
-        "custom" => {
-            let n = extract_str_field(rest, "name").unwrap_or_default();
-            let a = extract_raw_field(rest, "args").unwrap_or_default();
-            format!("{} {} {}", "custom".cyan(), n.bright_cyan(), a)
-        }
-        "expect_ok" => {
-            let m = extract_str_field(rest, "message").unwrap_or_default();
-            format!("{} {}  {}", "expect".cyan(), m, "OK".green().bold())
-        }
-        "expect_fail" => {
-            let m = extract_str_field(rest, "message").unwrap_or_default();
-            let head = format!("{} {}  {}", "expect".cyan(), m, "FAIL".red().bold());
-            match (
-                extract_str_field(rest, "actual"),
-                extract_str_field(rest, "expected"),
-            ) {
-                (Some(a), Some(e)) => format!(
-                    "{head}\n        {} {}\n        {} {}",
-                    "actual:  ".red().bold(),
-                    a.red(),
-                    "expected:".green().bold(),
-                    e.green(),
-                ),
-                _ => head,
-            }
-        }
-        "image_snapshot" => {
-            let n = extract_str_field(rest, "name").unwrap_or_default();
-            format!("{} {}", "image_snapshot".cyan(), n.yellow())
-        }
-        "cleanup_path" => {
-            let p = extract_str_field(rest, "path").unwrap_or_default();
-            format!("{} {}", "cleanup_path".cyan(), p)
-        }
-        "reload_edit" => {
-            let f = extract_str_field(rest, "file").unwrap_or_default();
-            format!("{} {}", "reload_edit".cyan(), f.yellow())
-        }
-        "log" => {
-            let m = extract_str_field(rest, "message").unwrap_or_default();
-            format!("{} {}", "log".cyan(), m)
-        }
-        "error" => {
-            let m = extract_str_field(rest, "message").unwrap_or_default();
-            format!("{} {}", "error:".red().bold(), m)
-        }
-        "stop" => "stop".cyan().to_string(),
-        _ => return,
-    };
-    // Carve-out (logging-architecture.md decision 2): the live
-    // `[file:line] op args` progress/expect stream is the sim's
-    // result surface (PASS/FAIL/expect lines consumed by you/CI),
-    // not a log record — stays a direct, colored stderr write.
-    eprintln!("{prefix}{body}");
-}
-
 /// The on-disk source for a part's image baselines, from the compiled
 /// wire -> source mapping the part carries -- never a source-text scan, so
 /// same-named sims in different files resolve in their own files.
@@ -4321,67 +4195,6 @@ struct ImageSnapshotOp {
 }
 
 impl SimSummary {
-    fn record(&mut self, rest: &serde_json::Value, op: &str) {
-        let site_raw = extract_str_field(rest, "site").unwrap_or_default();
-        let site = compress_site(&site_raw);
-        match op {
-            "expect_ok" => {
-                let message = extract_str_field(rest, "message").unwrap_or_default();
-                self.expects_pass.push(SiteMessage { message, site });
-            }
-            "expect_fail" => {
-                let message = extract_str_field(rest, "message").unwrap_or_default();
-                self.expects_fail.push(SiteMessage { message, site });
-            }
-            "error" => {
-                let message = extract_str_field(rest, "message").unwrap_or_default();
-                self.errors.push(SiteMessage { message, site });
-            }
-            "stop" => self.saw_stop = true,
-            "exclude" => {
-                let reason =
-                    extract_str_field(rest, "reason").unwrap_or_else(|| "unspecified".to_string());
-                self.excluded = Some(reason);
-                self.saw_stop = true;
-            }
-            "no_checks" => {
-                self.no_checks = Some(extract_str_field(rest, "reason").unwrap_or_default());
-            }
-            "allocation_census" => match serde_path_to_error::deserialize(rest) {
-                Ok(census) if self.allocation_census.is_none() => {
-                    self.allocation_census = Some(census)
-                }
-                Ok(_) => self.errors.push(SiteMessage {
-                    message: "duplicate allocation census result".to_string(),
-                    site,
-                }),
-                Err(e) => self.errors.push(SiteMessage {
-                    message: format!("invalid allocation census result: {e}"),
-                    site,
-                }),
-            },
-            "image_snapshot" => {
-                let name = extract_str_field(rest, "name").unwrap_or_default();
-                let path = extract_str_field(rest, "path").unwrap_or_default();
-                let tol = rest["tol"].as_f64().unwrap_or(0.0);
-                let save_ok = rest["ok"].as_bool().unwrap_or(false);
-                self.image_snapshots.push(ImageSnapshotOp {
-                    name,
-                    path,
-                    tol,
-                    save_ok,
-                    site: site.clone(),
-                });
-            }
-            "cleanup_path" => {
-                if let Some(path) = extract_str_field(rest, "path") {
-                    self.cleanup_paths.push(path);
-                }
-            }
-            _ => {} // set_env / start_game / etc. are informational
-        }
-    }
-
     fn has_failures(&self) -> bool {
         !self.expects_fail.is_empty() || !self.errors.is_empty()
     }
@@ -4457,35 +4270,6 @@ impl SimSummary {
             total
         );
     }
-}
-
-/// Foreign stderr writers can leave a prefix before a complete marker. All
-/// consumers validate the entire payload before interpreting any operation.
-fn parse_sim_marker(payload: &str, line: &str) -> Result<serde_json::Value> {
-    let raw = payload
-        .strip_prefix(' ')
-        .ok_or_else(|| anyhow!("invalid sim marker: missing payload separator: {line}"))?;
-    let event: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|error| anyhow!("invalid sim marker ({error}): {line}"))?;
-    if !event.is_object()
-        || event
-            .get("op")
-            .and_then(serde_json::Value::as_str)
-            .is_none_or(str::is_empty)
-    {
-        return Err(anyhow!(
-            "invalid sim marker: expected an object with a nonempty string op: {line}"
-        ));
-    }
-    Ok(event)
-}
-
-fn extract_str_field(json: &serde_json::Value, key: &str) -> Option<String> {
-    json.get(key)?.as_str().map(str::to_owned)
-}
-
-fn extract_raw_field(json: &serde_json::Value, key: &str) -> Option<String> {
-    json.get(key).map(serde_json::Value::to_string)
 }
 
 #[cfg(test)]
