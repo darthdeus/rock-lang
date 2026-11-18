@@ -432,7 +432,7 @@ impl<'a> Builder<'a> {
                                 }
                                 None => {
                                     let v = self.lower_expr(value)?;
-                                    self.bind_for_pattern(&vars, v);
+                                    self.bind_for_pattern(&vars, v)?;
                                 }
                             }
                             continue;

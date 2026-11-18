@@ -634,3 +634,17 @@ fn generic_value_children_copy() {
     let f = HGenericOptional { o: absent }
     print("{optional} {e.o.w.f0} {f.o.w == null}")
 }
+
+// A tuple box is shared, so a value destructured out of one is its own copy
+// once the binding writes it; a joined tuple keeps its snapshot too.
+@test(output = "1 1 1")
+fn destructured_tuple_values_are_copies() {
+    let pairs = [(mkn(1), 0)]
+    let (n, _) = pairs[0]
+    n.a = 9
+    for (m, _) in pairs { m.a += 8 }
+    let joined = if pairs.len > 0 { pairs[0] } else { (mkn(0), 0) }
+    pairs.set(0, (mkn(7), 0))
+    let kept = pairs.len > 0
+    print("{if kept { 1 } else { 0 }} {joined.0.a} {joined.0.b}")
+}

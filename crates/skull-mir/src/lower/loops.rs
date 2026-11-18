@@ -687,10 +687,10 @@ impl<'a> Builder<'a> {
         match &pat {
             BindingPattern::Tuple(subs) if subs.len() == 2 => {
                 if let Some(entity) = entity {
-                    self.bind_for_pattern(&subs[0], entity);
+                    self.bind_for_pattern(&subs[0], entity)?;
                 }
                 if let Some(data) = data {
-                    self.bind_for_pattern(&subs[1], data);
+                    self.bind_for_pattern(&subs[1], data)?;
                 }
             }
             BindingPattern::Leaf(_) if entity_used || data_used => {
@@ -899,7 +899,7 @@ impl<'a> Builder<'a> {
             BindingPattern::Tuple(subs) if subs.len() == 2 => {
                 if self.loop_pattern_used(&subs[0]) {
                     let kv = self.emit_cur(Inst::Load(key_cell));
-                    self.bind_for_pattern(&subs[0], kv);
+                    self.bind_for_pattern(&subs[0], kv)?;
                 }
                 if !self.loop_pattern_used(&subs[1]) {
                     return Ok(());
@@ -913,7 +913,7 @@ impl<'a> Builder<'a> {
                         self.pack(r)?
                     }
                 };
-                self.bind_for_pattern(&subs[1], vv);
+                self.bind_for_pattern(&subs[1], vv)?;
                 Ok(())
             }
             BindingPattern::Leaf(_) => {
@@ -1083,7 +1083,7 @@ impl<'a> Builder<'a> {
             let ty = s.loop_binder_ty(&vars, None);
             let repr = s.loop_element_snapshot(ty, repr)?;
             let elem = s.pack(repr)?;
-            s.bind_for_pattern(&vars, elem);
+            s.bind_for_pattern(&vars, elem)?;
             Ok(())
         })
     }
@@ -1155,13 +1155,17 @@ impl<'a> Builder<'a> {
             }
         }
         let value = self.pack(repr)?;
-        self.bind_for_pattern(vars, value);
+        self.bind_for_pattern(vars, value)?;
         Ok(())
     }
 
     /// Bind a for-loop pattern to an element value: `Leaf` -> one cell; `Tuple`
     /// -> destructure via `TupleIndex` into a cell per element.
-    pub(crate) fn bind_for_pattern(&mut self, vars: &BindingPattern, value: Idx<Inst>) {
+    pub(crate) fn bind_for_pattern(
+        &mut self,
+        vars: &BindingPattern,
+        value: Idx<Inst>,
+    ) -> Result<(), CompilerError> {
         match vars {
             BindingPattern::Leaf(b) => {
                 let cell = self.new_binding_cell(
@@ -1181,26 +1185,38 @@ impl<'a> Builder<'a> {
                 // multi-return call packed as `MakeTuple(loads)`) binds directly to
                 // its operands -- no table alloc, no `TupleIndex`. This is what makes
                 // `let (ok, x) = next(it)` zero-alloc.
-                if let Inst::MakeTuple(vs) = &self.f.insts[value] {
-                    if vs.len() == subs.len() {
-                        let vs = vs.clone();
-                        for (sub, v) in subs.iter().zip(vs) {
-                            self.bind_for_pattern(sub, v);
-                        }
-                        self.mark_destructured(vars);
-                        return;
+                if let Inst::MakeTuple(vs) = &self.f.insts[value]
+                    && vs.len() == subs.len()
+                {
+                    let vs = vs.clone();
+                    for (sub, v) in subs.iter().zip(vs) {
+                        self.bind_for_pattern(sub, v)?;
                     }
+                    self.mark_destructured(vars);
+                    return Ok(());
                 }
                 for (i, sub) in subs.iter().enumerate() {
                     let elem = self.emit_cur(Inst::TupleIndex {
                         base: value,
                         index: i,
                     });
-                    self.bind_for_pattern(sub, elem);
+                    // The tuple box can be shared, so a value element the binding
+                    // writes through is its own copy, as a `match` binder's is.
+                    let elem = match sub {
+                        BindingPattern::Leaf(b) if !self.binding_stays_unwritten(*b) => {
+                            match self.binding_ty(*b).and_then(|ty| self.concrete_ty_id(ty)) {
+                                Some(ty) => self.copied_value_box(ty, elem)?,
+                                None => elem,
+                            }
+                        }
+                        _ => elem,
+                    };
+                    self.bind_for_pattern(sub, elem)?;
                 }
                 self.mark_destructured(vars);
             }
         }
+        Ok(())
     }
 
     /// Charge every cell a destructuring pattern bound to the destructure, for
@@ -1273,7 +1289,7 @@ impl<'a> Builder<'a> {
             (vars, slot) => {
                 let r = self.slot_repr(slot, values, idx);
                 let v = self.pack(r)?;
-                self.bind_for_pattern(vars, v);
+                self.bind_for_pattern(vars, v)?;
             }
         }
         Ok(())
@@ -1441,7 +1457,7 @@ impl<'a> Builder<'a> {
             _ => {
                 let r = self.tuple_from_slots(shape, &values, &mut idx);
                 let v = self.pack(r)?;
-                self.bind_for_pattern(vars, v);
+                self.bind_for_pattern(vars, v)?;
             }
         }
         Ok(())
