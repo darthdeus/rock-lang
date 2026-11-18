@@ -292,15 +292,15 @@ impl LiveProject {
         self.sources = watch_sources(&self.dir, is_game)?;
         self.entry_path = entry_path(&self.sources).unwrap_or_default();
         let files = crate::bone_backend::session_files(&self.sources);
-        let feed = files
-            .iter()
-            .map(|file| (file.path.clone(), file.text.clone()))
-            .collect::<Vec<_>>();
         let tracked = self.session.tracked_paths();
         let removed = tracked
             .into_iter()
             .filter(|path| !files.iter().any(|file| file.path == *path))
             .map(|path| path.to_string())
+            .collect::<Vec<_>>();
+        let feed = files
+            .into_iter()
+            .map(|file| (file.path, file.text))
             .collect::<Vec<_>>();
         let changes = update_session(
             &mut self.session,
