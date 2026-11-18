@@ -6,7 +6,7 @@
 use crate::common::{node, ws_with};
 
 /// Run `body` in a fresh `vm` context holding only the JS builtins plus a
-/// capturing `__rock_host`; prints `JSON.stringify({out, err})`.
+/// capturing `__rock_host`; prints `JSON.stringify([out, err])`.
 fn run_without_process(body: &str) -> (String, String) {
     let script = format!(
         r#"
@@ -17,9 +17,9 @@ vm.runInContext("var __out = [], __err = [];\n"
   + " write_err: function(s) {{ __err.push(s); }},"
   + " env_var: function(n) {{ return n === 'ROCK_TEST_SEED' ? '5' : null; }} }};\n", ctx);
 vm.runInContext({body}, ctx);
-process.stdout.write(vm.runInContext("JSON.stringify({{out: __out.join(''), err: __err.join('')}})", ctx));
+process.stdout.write(vm.runInContext("JSON.stringify([__out.join(''), __err.join('')])", ctx));
 "#,
-        body = js_string(body)
+        body = skull_codegen_js::emit::js_string_lit(body)
     );
     let output = node().arg("-e").arg(script).output().expect("run node");
     assert!(
@@ -27,46 +27,7 @@ process.stdout.write(vm.runInContext("JSON.stringify({{out: __out.join(''), err:
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    (field(&stdout, "out"), field(&stdout, "err"))
-}
-
-fn js_string(s: &str) -> String {
-    let mut o = String::from("\"");
-    for c in s.chars() {
-        match c {
-            '"' => o.push_str("\\\""),
-            '\\' => o.push_str("\\\\"),
-            '\n' => o.push_str("\\n"),
-            c => o.push(c),
-        }
-    }
-    o.push('"');
-    o
-}
-
-/// The string value of `"name":"..."` in the harness's flat JSON line.
-fn field(json: &str, name: &str) -> String {
-    let key = format!("\"{name}\":\"");
-    let start = json
-        .find(&key)
-        .unwrap_or_else(|| panic!("no `{name}` in {json}"))
-        + key.len();
-    let mut out = String::new();
-    let mut chars = json[start..].chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '"' => return out,
-            '\\' => match chars.next() {
-                Some('n') => out.push('\n'),
-                Some('t') => out.push('\t'),
-                Some(other) => out.push(other),
-                None => break,
-            },
-            c => out.push(c),
-        }
-    }
-    panic!("unterminated `{name}` in {json}");
+    serde_json::from_slice(&output.stdout).expect("decode captured streams")
 }
 
 /// The coroutine and log runtimes plus a program global table, then `tail`.

@@ -231,7 +231,7 @@ fn js_number(f: f64) -> Result<String, CompilerError> {
 
 /// Quote strings with UTF-16 escapes. JS string length counts UTF-16 code units,
 /// while Lua string length counts bytes.
-fn js_string_lit(s: &str) -> String {
+pub fn js_string_lit(s: &str) -> String {
     let mut o = String::from("\"");
     for c in s.chars() {
         match c {

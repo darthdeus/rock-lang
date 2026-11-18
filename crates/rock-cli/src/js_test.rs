@@ -455,30 +455,6 @@ fn build_run_program(emitted: &skull_codegen_js::emit::JsProgram) -> String {
     p
 }
 
-/// A JS double-quoted string literal for a Rust string, escaping the control
-/// and non-ASCII chars a JS lexer needs (test output can carry arbitrary
-/// bytes). `{:?}` would emit Rust's `\u{XXXX}`, which JS rejects.
-fn js_str(s: &str) -> String {
-    let mut o = String::from("\"");
-    for c in s.chars() {
-        match c {
-            '"' => o.push_str("\\\""),
-            '\\' => o.push_str("\\\\"),
-            '\n' => o.push_str("\\n"),
-            '\r' => o.push_str("\\r"),
-            '\t' => o.push_str("\\t"),
-            c if (c as u32) < 0x20 || (c as u32) > 0x7e => {
-                for u in c.encode_utf16(&mut [0u16; 2]) {
-                    o.push_str(&format!("\\u{:04x}", u));
-                }
-            }
-            c => o.push(c),
-        }
-    }
-    o.push('"');
-    o
-}
-
 /// True for the per-test reject a decorator-populated global read raises
 /// (`emit.rs` `discover_globals`) -- the marker that a whole-file emission (which
 /// runs the applications once) would lift the test.
@@ -502,12 +478,12 @@ fn build_node_program(
     p.push_str("var __tests = [\n");
     for (name, js_name, out, is_value) in tests {
         let out_js = match out {
-            Some(s) => js_str(s),
+            Some(s) => skull_codegen_js::emit::js_string_lit(s),
             None => "null".to_string(),
         };
         p.push_str(&format!(
             "  {{ f: {js_name}, name: {}, out: {out_js}, val: {is_value} }},\n",
-            js_str(name)
+            skull_codegen_js::emit::js_string_lit(name)
         ));
     }
     p.push_str("];\n");

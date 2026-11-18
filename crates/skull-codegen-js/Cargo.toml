@@ -23,6 +23,7 @@ comfy-la-arena = { workspace = true }
 ustr = { workspace = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 bone-semantic = { workspace = true }
 rock-stdlib = { workspace = true }
 skull = { workspace = true }
