@@ -244,36 +244,52 @@ fn cli_build(mode: CliBuildMode<'_>) -> std::result::Result<CliBuild, CliBuildFa
     if production {
         skull::pipeline::warm_stdlib();
     }
-    let (sources, lint_root) =
-        if let Some((file, contents)) = source {
-            crate::lint_pass::single_file_scope(file, contents)
+    let (mut sources, lint_root) = if let Some((file, contents)) = source {
+        crate::lint_pass::single_file_scope(file, contents)
+    } else {
+        let discovered = crate::unified_compile::discover_project_sources(std::path::Path::new(
+            path,
+        ))
+        .map_err(|error| CliBuildFailure::Setup {
+            context: Some("cannot load project"),
+            error,
+        })?;
+        let sources = if production {
+            rock_host::source_files::production_only(&discovered, std::path::Path::new(path))
+                .map_err(|error| CliBuildFailure::Setup {
+                    context: None,
+                    error: anyhow::anyhow!(error.to_string()),
+                })?
         } else {
-            let discovered =
-                crate::unified_compile::discover_project_sources(std::path::Path::new(path))
-                    .map_err(|error| CliBuildFailure::Setup {
-                        context: Some("cannot load project"),
-                        error,
-                    })?;
-            let sources = if production {
-                rock_host::source_files::production_only(&discovered, std::path::Path::new(path))
-                    .map_err(|error| CliBuildFailure::Setup {
-                        context: None,
-                        error: anyhow::anyhow!(error.to_string()),
-                    })?
-            } else {
-                crate::package_test_sources::select(&discovered, std::path::Path::new(path))
-                    .map_err(|error| CliBuildFailure::Setup {
-                        context: Some("cannot select package test sources"),
-                        error,
-                    })?
-            };
-            (sources, path.into())
+            discovered
         };
+        (sources, path.into())
+    };
     if production {
         crate::compile_budget::phase("discovery");
         crate::compile_budget::sources(&sources);
     }
     let started = Instant::now();
+    let project = if source.is_some() {
+        None
+    } else {
+        let assembled = if production {
+            skull_assemble_project(&sources)
+        } else {
+            let candidates = crate::package_test_sources::candidates(&sources, &lint_root)
+                .map_err(|error| CliBuildFailure::Setup {
+                    context: Some("cannot select package test sources"),
+                    error,
+                })?;
+            crate::package_test_sources::parse(&mut sources, &candidates)
+                .and_then(|(user_modules, entry)| mount_user_modules(user_modules, entry))
+        };
+        Some(assembled.map_err(|errors| CliBuildFailure::Compile {
+            stage: None,
+            sources: sources.clone(),
+            errors,
+        })?)
+    };
     let mut host = CliCompileHost {
         sources: &sources,
         lint_root: &lint_root,
@@ -297,12 +313,7 @@ fn cli_build(mode: CliBuildMode<'_>) -> std::result::Result<CliBuild, CliBuildFa
         body_costs = None;
         skull::pipeline::compile_source(file, contents, target, &mut host)
     } else {
-        let (modules, entry) =
-            skull_assemble_project(&sources).map_err(|errors| CliBuildFailure::Compile {
-                stage: None,
-                sources: sources.clone(),
-                errors,
-            })?;
+        let (modules, entry) = project.expect("project modules assembled");
         skull::pipeline::CompileHost::phase(&mut host, skull::pipeline::Phase::Parsed);
         body_costs = if production {
             crate::body_costs::begin()
@@ -455,6 +466,13 @@ pub(crate) fn skull_assemble_project(
     sources: &SourceFiles,
 ) -> std::result::Result<(skull_parser::stdlib::ModuleSet, ustr::Ustr), Vec<CompilerError>> {
     let (user_modules, entry_file, _parse) = crate::bone_backend::parse_user_modules(sources)?;
+    mount_user_modules(user_modules, entry_file)
+}
+
+fn mount_user_modules(
+    user_modules: Vec<skull_parser::Ast>,
+    entry_file: ustr::Ustr,
+) -> std::result::Result<(skull_parser::stdlib::ModuleSet, ustr::Ustr), Vec<CompilerError>> {
     let modules = skull::pipeline::with_stdlib(user_modules).map_err(|error| vec![error])?;
     Ok((modules, entry_file))
 }

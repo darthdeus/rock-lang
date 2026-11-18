@@ -1,303 +1,101 @@
-use crate::{SourceFiles, TokenKind, Tokenizer, Ustr};
 use anyhow::{Context, Result};
-use std::collections::{HashMap, HashSet};
+use rock_core::{CompilerError, SourceFiles};
+use rock_tokenizer::{Token, TokenKind};
+use rustc_hash::{FxHashMap, FxHashSet};
+use skull_parser::{
+    Ast, EnumVariantKind, ExprKind, FunctionBody, GlobalDef, Item, ItemKind, TypeExprKind,
+};
 use std::path::Path;
+use ustr::Ustr;
 
-#[derive(Debug, Default)]
-struct Scan {
-    definitions: HashSet<Ustr>,
-    mentions: HashSet<Ustr>,
-    keep_effects: bool,
-    has_test: bool,
-}
-
-fn literal_names(text: &str, names: &mut HashSet<Ustr>) {
-    for word in text.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
-        if word
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_alphabetic() || c == '_')
-        {
-            names.insert(Ustr::from(word));
-        }
-    }
-}
-
-fn declaration_name(tokens: &[TokenKind]) -> Option<Ustr> {
-    let TokenKind::Ident(mut name) = *tokens.first()? else {
-        return None;
-    };
-    let mut i = 1;
-    loop {
-        if tokens.get(i) == Some(&TokenKind::LessThan) {
-            let mut depth = 1;
-            i += 1;
-            while depth > 0 {
-                match tokens.get(i)? {
-                    TokenKind::LessThan => depth += 1,
-                    TokenKind::GreaterThan => depth -= 1,
-                    TokenKind::RightShift => depth -= 2,
-                    _ => {}
-                }
-                i += 1;
-            }
-        }
-        if !matches!(tokens.get(i), Some(TokenKind::Dot | TokenKind::DoubleColon)) {
-            return Some(name);
-        }
-        let Some(TokenKind::Ident(next)) = tokens.get(i + 1) else {
-            return None;
-        };
-        name = *next;
-        i += 2;
-    }
-}
-
-fn literal_constant(tokens: &[TokenKind]) -> bool {
-    let mut i = 1;
-    if !matches!(tokens.get(i), Some(TokenKind::Ident(_))) {
-        return false;
-    }
-    i += 1;
-    if tokens.get(i) == Some(&TokenKind::Colon) {
-        if !matches!(tokens.get(i + 1), Some(TokenKind::Ident(name))
-            if matches!(name.as_str(), "int" | "uint" | "float" | "bool" | "string"))
-        {
-            return false;
-        }
-        i += 2;
-    }
-    if tokens.get(i) != Some(&TokenKind::Assign) {
-        return false;
-    }
-    i += 1;
-    if matches!(tokens.get(i), Some(TokenKind::Minus | TokenKind::Plus)) {
-        i += 1;
-        if !matches!(
-            tokens.get(i),
-            Some(TokenKind::Int(..) | TokenKind::Float(_))
-        ) {
-            return false;
-        }
-    } else if !matches!(
-        tokens.get(i),
-        Some(
-            TokenKind::Int(..)
-                | TokenKind::Float(_)
-                | TokenKind::True
-                | TokenKind::False
-                | TokenKind::Null
-                | TokenKind::RawString(_)
-        )
-    ) && !matches!(tokens.get(i), Some(TokenKind::String(text)) if !text.as_str().contains(['{', '}']))
-    {
-        return false;
-    }
-    matches!(
-        tokens.get(i + 1),
-        Some(TokenKind::Newline | TokenKind::EOF | TokenKind::Semicolon)
-    )
-}
-
-fn scan(path: &str, source: &str) -> Result<Scan> {
-    let tokens = Tokenizer::from_code(path, source)
-        .tokenize()
-        .map_err(|error| anyhow::anyhow!("{path}: {}", error.message))?;
-    let tokens: Vec<_> = tokens
-        .into_iter()
-        .flat_map(|token| {
-            std::iter::once(token.kind)
-                .chain((token.trailing_newlines > 0).then_some(TokenKind::Newline))
-        })
-        .collect();
-    let constant_effects = tokens
+pub(crate) fn candidates(sources: &SourceFiles, project_root: &Path) -> Result<Vec<bool>> {
+    let root = project_root
+        .canonicalize()
+        .context("cannot resolve package test root")?;
+    sources
+        .files
         .iter()
-        .enumerate()
-        .any(|(i, token)| *token == TokenKind::Const && !literal_constant(&tokens[i..]));
-    let tokens: Vec<_> = tokens
-        .into_iter()
-        .filter(|token| {
-            !matches!(
-                token,
-                TokenKind::Comment(_) | TokenKind::Newline | TokenKind::EOF
-            )
-        })
-        .collect();
-    let mut scan = Scan {
-        keep_effects: constant_effects,
-        ..Scan::default()
-    };
-    let has_sim = tokens.windows(2).any(
-        |pair| matches!(pair, [TokenKind::At, TokenKind::Ident(name)] if name.as_str() == "sim"),
-    );
-    for (i, token) in tokens.iter().enumerate() {
-        match token {
-            TokenKind::Ident(name) => {
-                scan.mentions.insert(*name);
-            }
-            TokenKind::String(text) | TokenKind::RawString(text) => {
-                // String dispatch, interpolations and inline Lua are invisible
-                // to identifier tokens, but can still name a sim-file helper.
-                literal_names(text.as_str(), &mut scan.mentions);
-            }
-            TokenKind::Extern | TokenKind::Operator | TokenKind::Deco | TokenKind::Macro => {
-                scan.keep_effects = true
-            }
-            TokenKind::Global => {
-                // Initializers are module-load effects; the name scan cannot
-                // prove that an unreferenced initializer is pure.
-                scan.keep_effects = true;
-            }
-            _ => {}
-        }
-        let declares = matches!(
-            token,
-            TokenKind::Fn
-                | TokenKind::Struct
-                | TokenKind::Enum
-                | TokenKind::Newtype
-                | TokenKind::Type
-                | TokenKind::Global
-                | TokenKind::Const
-                | TokenKind::Macro
-        ) || (matches!(token, TokenKind::Ident(name) if matches!(name.as_str(), "value" | "trait"))
-            && matches!(tokens.get(i + 1), Some(TokenKind::Ident(_))));
-        if declares {
-            if let Some(name) = declaration_name(&tokens[i + 1..]) {
-                scan.definitions.insert(name);
-                if name.as_str().starts_with("__")
-                    || matches!(
-                        name.as_str(),
-                        "iter" | "next" | "to_string" | "hash" | "eq" | "cmp" | "len"
-                    )
-                {
-                    scan.keep_effects = true;
-                }
-            } else if !matches!(
-                tokens.get(i + 1),
-                Some(TokenKind::OpenParen | TokenKind::Operator)
-            ) {
-                let name = match token {
-                    TokenKind::Ident(name) => name.as_str(),
-                    _ => token.as_keyword_identifier().expect("declaration keyword"),
-                };
-                anyhow::bail!("{path}: cannot enumerate declaration after `{name}`");
-            }
-        }
-        if *token == TokenKind::At {
-            let Some(TokenKind::Ident(name)) = tokens.get(i + 1) else {
-                anyhow::bail!("{path}: cannot classify annotation");
+        .map(|source| {
+            let file = source.borrow();
+            let path = file.file.to_id_path();
+            let owner = match &file.package {
+                Some(tag) => sources
+                    .package_roots
+                    .iter()
+                    .find(|(id, _)| *id == tag.id)
+                    .map(|(_, root)| root.as_path())
+                    .with_context(|| format!("source {path} has no root for package {}", tag.id))?,
+                None => root.as_path(),
             };
-            scan.has_test |= name.as_str() == "test";
-            let neutral = matches!(
-                name.as_str(),
-                "sim" | "sim_env" | "pure" | "inline" | "allow"
-            );
-            let sim_phase = has_sim
-                && matches!(
-                    name.as_str(),
-                    "update"
-                        | "scene_update"
-                        | "late_update"
-                        | "prepare"
-                        | "draw"
-                        | "late_draw"
-                        | "post_imgui_draw"
-                );
-            scan.keep_effects |= !neutral && !sim_phase;
-            if name.as_str() == "sim" {
-                if let Some(TokenKind::String(wire) | TokenKind::RawString(wire)) =
-                    tokens.get(i + 3)
-                {
-                    literal_names(wire.as_str(), &mut scan.definitions);
-                }
-            }
-        }
-    }
-    Ok(scan)
+            Ok(sim_path(&path, owner))
+        })
+        .collect()
 }
 
 fn sim_path(path: &str, root: &Path) -> bool {
     let Ok(relative) = Path::new(path).strip_prefix(root) else {
         return false;
     };
-    let components: Vec<_> = relative.components().collect();
-    components
-        .windows(2)
-        .any(|pair| pair[0].as_os_str() == "tests" && pair[1].as_os_str() == "sims")
+    let mut parts = relative.iter();
+    let mut previous = parts.next();
+    for part in parts {
+        if previous.is_some_and(|p| p == "tests") && part == "sims" {
+            return true;
+        }
+        previous = Some(part);
+    }
+    false
 }
 
-/// Only package-test callers use this filter. Sim discovery and execution keep
-/// their full source set. False positives cost compilation; uncertain scans
-/// retain everything with a reason, and selected-source errors still reject.
-pub(crate) fn select(sources: &SourceFiles, project_root: &Path) -> Result<SourceFiles> {
-    let root = project_root
-        .canonicalize()
-        .context("cannot resolve package test root")?;
-    let package_roots: HashMap<_, _> = sources
-        .package_roots
-        .iter()
-        .map(|(id, root)| (*id, root.as_path()))
-        .collect();
-    let candidates = sources
-        .files
-        .iter()
-        .map(|source| {
-            let file = source.borrow();
-            let owner = match &file.package {
-                Some(tag) => *package_roots.get(&tag.id).with_context(|| {
-                    format!(
-                        "source {} has no root for package {}",
-                        file.file.to_id_path(),
-                        tag.id
-                    )
-                })?,
-                None => root.as_path(),
-            };
-            Ok(sim_path(&file.file.to_id_path(), owner))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let total = candidates.iter().filter(|candidate| **candidate).count();
+/// Reuse the trees used for selection for semantic checking. Every file must
+/// parse before we can tell which fragments a test needs.
+pub(crate) fn parse(
+    sources: &mut SourceFiles,
+    candidates: &[bool],
+) -> Result<(Vec<Ast>, Ustr), Vec<CompilerError>> {
+    let total = candidates.iter().filter(|&&candidate| candidate).count();
     if total == 0 {
-        return Ok(sources.clone());
+        let (modules, entry, _) = crate::bone_backend::parse_user_modules(sources)?;
+        return Ok((modules, entry));
     }
 
-    let scanned = sources
-        .files
-        .iter()
-        .map(|source| {
-            let file = source.borrow();
-            scan(&file.file.to_id_path(), &file.contents)
-        })
-        .collect::<Result<Vec<_>>>();
-    let scanned = match scanned {
-        Ok(scanned) => scanned,
-        Err(error) => {
-            log::warn!(target: "TEST_SOURCES", "package test sim closure kept all {total} sim files: {error:#}");
-            return Ok(sources.clone());
-        }
-    };
-    let mut definitions: HashMap<Ustr, Vec<usize>> = HashMap::new();
-    let mut selected = vec![false; sources.files.len()];
+    let parsed = crate::bone_backend::parse_user_files(sources, |source, file| {
+        skull_parser::parse_module_with_tokens(source, file, mentions)
+    })?;
+    let syntax = skull::pipeline::syntax_errors(parsed.iter().map(|(ast, _)| ast));
+    if !syntax.is_empty() {
+        return Err(syntax);
+    }
+
+    let mut providers = FxHashMap::<Ustr, Vec<usize>>::default();
+    let mut keep = vec![true; parsed.len()];
     let mut pending = Vec::new();
     let mut test_files = 0;
-    for (i, scanned) in scanned.iter().enumerate() {
+    for (i, (ast, _)) in parsed.iter().enumerate() {
         if candidates[i] {
-            for name in &scanned.definitions {
-                definitions.entry(*name).or_default().push(i);
+            let mut facts = Fragment::default();
+            facts.read(ast, &ast.items);
+            test_files += usize::from(facts.has_test);
+            keep[i] = ast
+                .module_header
+                .as_ref()
+                .is_some_and(|header| header.vis.is_some())
+                || facts.keep
+                || (facts.has_phase && !facts.has_sim)
+                || facts.names.is_empty();
+            for name in facts.names {
+                providers.entry(name).or_default().push(i);
             }
-            test_files += usize::from(scanned.has_test);
         }
-        if !candidates[i] || scanned.keep_effects || scanned.definitions.is_empty() {
-            selected[i] = true;
+        if keep[i] {
             pending.push(i);
         }
     }
     while let Some(i) = pending.pop() {
-        for name in &scanned[i].mentions {
-            for &provider in definitions.get(name).into_iter().flatten() {
-                if !selected[provider] {
-                    selected[provider] = true;
+        for name in &parsed[i].1 {
+            for &provider in providers.get(name).into_iter().flatten() {
+                if !keep[provider] {
+                    keep[provider] = true;
                     pending.push(provider);
                 }
             }
@@ -305,95 +103,157 @@ pub(crate) fn select(sources: &SourceFiles, project_root: &Path) -> Result<Sourc
     }
     let kept = candidates
         .iter()
-        .zip(&selected)
-        .filter(|(candidate, selected)| **candidate && **selected)
+        .zip(&keep)
+        .filter(|&(&candidate, &keep)| candidate && keep)
         .count();
     log::info!(target: "TEST_SOURCES", "package test sim closure: {kept}/{total} sim files, {test_files} files containing @test");
-    Ok(SourceFiles {
-        files: sources
-            .files
-            .iter()
-            .zip(selected)
-            .filter(|&(_, selected)| selected)
-            .map(|(file, _)| file.clone())
-            .collect(),
-        package_roots: sources.package_roots.clone(),
-        ns_aliases: sources.ns_aliases.clone(),
-    })
+
+    let modules: Vec<_> = parsed
+        .into_iter()
+        .zip(&keep)
+        .filter(|(_, keep)| **keep)
+        .map(|((ast, _), _)| ast)
+        .collect();
+    let entry = crate::bone_backend::project_entry(&modules)?;
+    *sources = sources.retaining(&keep);
+    Ok((modules, entry))
+}
+
+fn words(text: &str) -> impl Iterator<Item = Ustr> {
+    text.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|word| word.starts_with(|c: char| c.is_alphabetic() || c == '_'))
+        .map(Ustr::from)
+}
+
+fn mentions(tokens: &[Token]) -> FxHashSet<Ustr> {
+    let mut names = FxHashSet::default();
+    for token in tokens {
+        match token.kind {
+            TokenKind::Ident(name) => {
+                names.insert(name);
+            }
+            // String dispatch and inline backend code can name a helper too.
+            TokenKind::String(text) | TokenKind::RawString(text) => {
+                names.extend(words(text.as_str()))
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+#[derive(Default)]
+struct Fragment {
+    names: FxHashSet<Ustr>,
+    keep: bool,
+    has_test: bool,
+    has_sim: bool,
+    has_phase: bool,
+}
+
+impl Fragment {
+    fn read(&mut self, ast: &Ast, items: &[Item]) {
+        for item in items {
+            for annotation in &item.annotations {
+                match annotation.name.name.as_str() {
+                    "sim" => {
+                        self.has_sim = true;
+                        if let Some(arg) = annotation.args.first()
+                            && let ExprKind::String(wire) = ast.exprs[arg.value].kind
+                        {
+                            self.names.extend(words(wire.as_str()));
+                        }
+                    }
+                    "test" => {
+                        self.has_test = true;
+                        self.keep = true;
+                    }
+                    "sim_env" | "pure" | "inline" | "allow" => {}
+                    "update" | "scene_update" | "late_update" | "prepare" | "draw"
+                    | "late_draw" | "post_imgui_draw" => self.has_phase = true,
+                    _ => self.keep = true,
+                }
+            }
+            let name = match &item.kind {
+                ItemKind::Function(def) => {
+                    self.keep |= def.is_macro
+                        || !matches!(def.body, FunctionBody::Rock(_) | FunctionBody::Inline(..))
+                        || def.params.iter().any(|param| !param.annotations.is_empty());
+                    def.name.name
+                }
+                ItemKind::Struct(def) => {
+                    self.keep |= def.fields.iter().any(|field| !field.annotations.is_empty());
+                    def.name.name
+                }
+                ItemKind::Enum(def) => {
+                    self.keep |= def.variants.iter().any(|variant| {
+                        matches!(&variant.kind, EnumVariantKind::Record(fields) if fields.iter().any(|field| !field.annotations.is_empty()))
+                    });
+                    def.name.name
+                }
+                ItemKind::Newtype(def) => def.name.name,
+                ItemKind::Global(def) => {
+                    // Initializers can run effects at module load.
+                    self.keep |= !literal_constant(ast, def);
+                    def.name.name
+                }
+                ItemKind::Module(module) => {
+                    self.keep |= module.vis.is_some();
+                    self.read(ast, &module.items);
+                    continue;
+                }
+                ItemKind::Use(decl) => {
+                    self.keep |= decl.vis.is_some();
+                    continue;
+                }
+                ItemKind::Decorator(_) | ItemKind::MacroInvocation { .. } => {
+                    self.keep = true;
+                    continue;
+                }
+                ItemKind::Comment(_) | ItemKind::CompilerDirective(_) => continue,
+            };
+            // Overload resolution and builtins look up these names implicitly.
+            self.keep |= name.as_str().starts_with("__")
+                || matches!(
+                    name.as_str(),
+                    "iter" | "next" | "to_string" | "hash" | "eq" | "cmp" | "len"
+                );
+            self.names.insert(name);
+        }
+    }
+}
+
+fn literal_constant(ast: &Ast, def: &GlobalDef) -> bool {
+    def.is_const
+        && def.ty.is_none_or(|ty| {
+            let ty = &ast.types[ty];
+            !ty.is_nullable
+                && matches!(
+                    ty.kind,
+                    TypeExprKind::Int
+                        | TypeExprKind::Uint
+                        | TypeExprKind::Float
+                        | TypeExprKind::Bool
+                        | TypeExprKind::String
+                )
+        })
+        && def.value.is_some_and(|value| match ast.exprs[value].kind {
+            ExprKind::Int(..)
+            | ExprKind::Float(_)
+            | ExprKind::Bool(_)
+            | ExprKind::String(_)
+            | ExprKind::Null => true,
+            ExprKind::UnaryMinus(operand) => matches!(
+                ast.exprs[operand].kind,
+                ExprKind::Int(..) | ExprKind::Float(_)
+            ),
+            _ => false,
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn scan_keeps_global_effects_and_implicit_lookup() {
-        for source in [
-            "@test fn check() {}",
-            "@nomangle fn callback() {}",
-            "@on_reload fn reload() {}",
-            "@shader(fragment) fn shader() {}",
-            "global x: int = effect()",
-            "const x: int = effect()",
-            "fn iter() {}",
-            "fn __op_add() {}",
-            "extern(lua) fn host()",
-            "@update fn global_frame() {}",
-        ] {
-            assert!(
-                scan("fixture.rock", source).unwrap().keep_effects,
-                "{source}"
-            );
-        }
-        assert!(
-            !scan(
-                "fixture.rock",
-                "@update fn frame() {} @sim fn simulation() {}"
-            )
-            .unwrap()
-            .keep_effects
-        );
-        assert!(
-            !scan("fixture.rock", "const COUNT: int = -10\nfn unused() {}\n")
-                .unwrap()
-                .keep_effects
-        );
-    }
-
-    #[test]
-    fn scan_closes_methods_generics_strings_and_inline_lua() {
-        let scanned = scan(
-            "fixture.rock",
-            r#"
-fn Wrapper<T>.method(x: int) {}
-fn helper<T>(x: T) {}
-@sim("wire_alias") fn simulation() {}
-inline(lua) fn dispatch() = "return string_helper()"
-fn literal() -> string { "{interpolated_helper()}" }
-"#,
-        )
-        .unwrap();
-        for name in [
-            "method",
-            "helper",
-            "simulation",
-            "wire_alias",
-            "dispatch",
-            "literal",
-        ] {
-            assert!(scanned.definitions.contains(&Ustr::from(name)), "{name}");
-        }
-        for name in ["string_helper", "interpolated_helper"] {
-            assert!(scanned.mentions.contains(&Ustr::from(name)), "{name}");
-        }
-        assert!(!scanned.definitions.contains(&Ustr::from("Wrapper")));
-    }
-
-    #[test]
-    fn uncertain_scans_return_a_full_set_reason() {
-        assert!(scan("fixture.rock", "fn bad() { \"unterminated").is_err());
-        assert!(scan("fixture.rock", "fn ???").is_err());
-    }
 
     #[test]
     fn sim_paths_are_relative_to_the_owning_package() {

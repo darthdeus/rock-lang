@@ -17,7 +17,7 @@ pub use rock_core::errors::CompilerErrorKind;
 pub use rock_core::source_code::{GlobalPolicy, IdentityStorage, PackageTag};
 pub use rock_core::{CompilerError, SourceFiles, Span, source_file_from_path_and_contents};
 pub use rock_tokenizer::TokenKind;
-use rock_tokenizer::Tokenizer;
+use rock_tokenizer::{Token, Tokenizer};
 use ustr::Ustr;
 
 /// Tokenize `source` with rock's tokenizer and parse it into an arena `Ast`.
@@ -33,11 +33,21 @@ use ustr::Ustr;
 /// (completion, hover, rename, inlay) works on broken code and the recovery
 /// errors surface as diagnostics.
 pub fn parse_module(source: &str, file: Ustr) -> Result<Ast, CompilerError> {
+    parse_module_with_tokens(source, file, |_| ()).map(|(ast, ())| ast)
+}
+
+/// Observe the module's lexer output before the parser consumes it.
+pub fn parse_module_with_tokens<T>(
+    source: &str,
+    file: Ustr,
+    inspect: impl FnOnce(&[Token]) -> T,
+) -> Result<(Ast, T), CompilerError> {
     rock_core::source_code::validate_modules_directive(source, file)?;
     let tokens = Tokenizer::new(source, file).tokenize()?;
+    let facts = inspect(&tokens);
     let mut ast = Parser::new(tokens, source, 0).parse_module()?;
     ast.file = file;
-    Ok(ast)
+    Ok((ast, facts))
 }
 
 /// [`parse_module`] for a caller that has NO recovery story: a recovered syntax
