@@ -1,16 +1,15 @@
 //! The one logging backend.
 
-use once_cell::sync::Lazy;
 use rock_core::clock::Instant;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static LEVEL: AtomicU8 = AtomicU8::new(2);
 
-pub(crate) fn parse_level(s: &str) -> Option<u8> {
+fn parse_level(s: &str) -> Option<u8> {
     match s.trim().to_lowercase().as_str() {
         "error" | "0" => Some(0),
         "warn" | "1" => Some(1),
@@ -22,8 +21,7 @@ pub(crate) fn parse_level(s: &str) -> Option<u8> {
 }
 
 pub fn set_level(level: u8) {
-    let l = level.min(4);
-    LEVEL.store(l, Ordering::Relaxed);
+    LEVEL.store(level.min(4), Ordering::Relaxed);
     // Keep the `log` facade's static max-level gate in sync. Without
     // this, `log::info!` etc. short-circuit against the max-level set
     // once at init() and runtime level changes never open the gate even though our atomic
@@ -50,28 +48,6 @@ fn level_to_log(level: u8) -> log::LevelFilter {
         3 => log::LevelFilter::Debug,
         _ => log::LevelFilter::Trace,
     }
-}
-
-fn log_to_level(l: log::Level) -> u8 {
-    match l {
-        log::Level::Error => 0,
-        log::Level::Warn => 1,
-        log::Level::Info => 2,
-        log::Level::Debug => 3,
-        log::Level::Trace => 4,
-    }
-}
-
-// Third-party chatter (symphonia decode progress) is capped at warn so real problems still show.
-const NOISY_TARGET_PREFIXES: &[&str] = &["symphonia"];
-
-fn is_noisy(target: &str) -> bool {
-    NOISY_TARGET_PREFIXES.iter().any(|p| target.starts_with(p))
-}
-
-fn effective_max(target: &str) -> u8 {
-    let l = level();
-    if is_noisy(target) { l.min(1) } else { l }
 }
 
 pub struct Filter(env_filter::Filter);
@@ -107,21 +83,13 @@ pub enum Sink {
 static FILTER: OnceLock<Filter> = OnceLock::new();
 static FILE_SINK: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
 
-fn target_enabled(level: log::Level, target: &str) -> bool {
-    match FILTER.get() {
-        Some(filter) => filter.enabled(target, level),
-        None => log_to_level(level) <= effective_max(target),
+fn target_enabled(record_level: log::Level, target: &str) -> bool {
+    if let Some(filter) = FILTER.get() {
+        return filter.enabled(target, record_level);
     }
-}
-
-fn level_tag(l: log::Level) -> &'static str {
-    match l {
-        log::Level::Error => "ERROR",
-        log::Level::Warn => "WARN ",
-        log::Level::Info => "INFO ",
-        log::Level::Debug => "DEBUG",
-        log::Level::Trace => "TRACE",
-    }
+    // Third-party chatter (symphonia decode progress) is capped at warn so real problems still show.
+    record_level <= level_to_log(level())
+        && (!target.starts_with("symphonia") || record_level <= log::Level::Warn)
 }
 
 fn level_color(l: log::Level) -> &'static str {
@@ -134,7 +102,7 @@ fn level_color(l: log::Level) -> &'static str {
 
 const SGR_RESET: &str = "\x1b[0m";
 
-static COLOR: Lazy<bool> = Lazy::new(|| {
+static COLOR: LazyLock<bool> = LazyLock::new(|| {
     match std::env::var("ROCK_LOG_COLOR").as_deref().map(str::trim) {
         Ok("always") | Ok("1") => return true,
         Ok("never") | Ok("0") => return false,
@@ -163,14 +131,14 @@ fn fmt_body(target: &str, args: &std::fmt::Arguments) -> String {
 // epoch keeps the combined stream monotonic: the first process to
 // init() sets ROCK_LOG_EPOCH_MS; every child inherits it via the
 // environment and reports elapsed against the same origin.
-static EPOCH_MS: Lazy<u128> = Lazy::new(|| {
-    if let Ok(v) = std::env::var("ROCK_LOG_EPOCH_MS") {
-        if let Ok(ms) = v.parse::<u128>() {
-            return ms;
-        }
+static EPOCH_MS: LazyLock<u128> = LazyLock::new(|| {
+    if let Ok(v) = std::env::var("ROCK_LOG_EPOCH_MS")
+        && let Ok(ms) = v.parse::<u128>()
+    {
+        return ms;
     }
     let now = unix_millis(SystemTime::now());
-    // SAFETY: init() (the only caller, via Lazy::force) runs at process
+    // SAFETY: init() (the only caller, via LazyLock::force) runs at process
     // entry before any thread that concurrently mutates the environment;
     // children only ever take the parse branch above (var already set).
     unsafe { std::env::set_var("ROCK_LOG_EPOCH_MS", now.to_string()) };
@@ -202,9 +170,7 @@ fn format_line(
     wall_clock: bool,
 ) -> String {
     format!(
-        "[{:>8.3}s {}]{}{}",
-        elapsed,
-        level_tag(level),
+        "[{elapsed:>8.3}s {level:<5}]{}{}",
         if wall_clock { WALL_CLOCK_MARK } else { " " },
         fmt_body(target, args),
     )
@@ -278,12 +244,12 @@ pub fn init() {
     INIT.call_once(|| {
         // Establish (or inherit) the shared epoch and publish it to the
         // environment before any child is spawned.
-        Lazy::force(&EPOCH_MS);
+        LazyLock::force(&EPOCH_MS);
         log::set_logger(&LOGGER).expect("failed to install logger");
-        if let Ok(v) = std::env::var("ROCK_LOG") {
-            if let Some(l) = parse_level(&v) {
-                set_level(l); // also syncs log::max_level
-            }
+        if let Ok(v) = std::env::var("ROCK_LOG")
+            && let Some(l) = parse_level(&v)
+        {
+            set_level(l);
         }
     });
     // set_logger is one-shot; set_level (here + at runtime via
@@ -300,10 +266,10 @@ pub fn init_filtered(filter: Filter, sink: Sink) {
     if FILTER.set(filter).is_err() {
         panic!("rock-log: a filter is already installed");
     }
-    if let Sink::File(file) = sink {
-        if FILE_SINK.set(Mutex::new(file)).is_err() {
-            panic!("rock-log: a log file is already installed");
-        }
+    if let Sink::File(file) = sink
+        && FILE_SINK.set(Mutex::new(file)).is_err()
+    {
+        panic!("rock-log: a log file is already installed");
     }
     init();
 }
@@ -316,17 +282,17 @@ pub struct LogRecord {
     pub last_seen_secs: f64,
 }
 
-pub(crate) const RECORD_CAP: usize = 64;
+const RECORD_CAP: usize = 64;
 
 #[derive(Default)]
-pub(crate) struct RecordTable {
+struct RecordTable {
     rows: Vec<LogRecord>,
     total: u64,
     evicted: u64,
 }
 
 impl RecordTable {
-    pub fn record(&mut self, target: &str, message: &str, now_secs: f64) {
+    fn record(&mut self, target: &str, message: &str, now_secs: f64) {
         self.total += 1;
         let first_line = message.lines().next().unwrap_or("");
         if let Some(row) = self
@@ -357,23 +323,15 @@ impl RecordTable {
         });
     }
 
-    pub fn total(&self) -> u64 {
-        self.total
-    }
-
-    pub fn evicted(&self) -> u64 {
-        self.evicted
-    }
-
-    pub fn rows(&self) -> Vec<LogRecord> {
+    fn rows(&self) -> Vec<LogRecord> {
         let mut rows = self.rows.clone();
         rows.sort_by(|a, b| b.last_seen_secs.total_cmp(&a.last_seen_secs));
         rows
     }
 }
 
-static ERRORS: Lazy<Mutex<RecordTable>> = Lazy::new(|| Mutex::new(RecordTable::default()));
-static WARNINGS: Lazy<Mutex<RecordTable>> = Lazy::new(|| Mutex::new(RecordTable::default()));
+static ERRORS: LazyLock<Mutex<RecordTable>> = LazyLock::new(Mutex::default);
+static WARNINGS: LazyLock<Mutex<RecordTable>> = LazyLock::new(Mutex::default);
 
 fn record_table(level: log::Level) -> Option<&'static Mutex<RecordTable>> {
     match level {
@@ -384,11 +342,11 @@ fn record_table(level: log::Level) -> Option<&'static Mutex<RecordTable>> {
 }
 
 pub fn records_total(level: log::Level) -> u64 {
-    record_table(level).map_or(0, |t| t.lock().unwrap().total())
+    record_table(level).map_or(0, |t| t.lock().unwrap().total)
 }
 
 pub fn records_evicted(level: log::Level) -> u64 {
-    record_table(level).map_or(0, |t| t.lock().unwrap().evicted())
+    record_table(level).map_or(0, |t| t.lock().unwrap().evicted)
 }
 
 pub fn records(level: log::Level) -> Vec<LogRecord> {
@@ -441,14 +399,11 @@ fn collected_errors_for(thread: Option<std::thread::ThreadId>) -> Vec<String> {
     COLLECTED_ERRORS
         .lock()
         .unwrap()
-        .as_ref()
-        .map_or_else(Vec::new, |c| {
-            c.records
-                .iter()
-                .filter(|record| thread.is_none_or(|thread| record.thread == thread))
-                .map(|record| record.message.clone())
-                .collect()
-        })
+        .iter()
+        .flat_map(|collected| &collected.records)
+        .filter(|record| thread.is_none_or(|thread| record.thread == thread))
+        .map(|record| record.message.clone())
+        .collect()
 }
 
 pub fn collected_error_overflow() -> u64 {
@@ -472,24 +427,16 @@ fn take_collected_error_for(record: &str, thread: Option<std::thread::ThreadId>)
     let Some(records) = collected.as_mut().map(|c| &mut c.records) else {
         return false;
     };
-    match records
+    records
         .iter()
         .position(|r| r.message == record && thread.is_none_or(|thread| r.thread == thread))
-    {
-        Some(index) => {
-            records.remove(index);
-            true
-        }
-        None => false,
-    }
+        .map(|index| records.remove(index))
+        .is_some()
 }
 
-static DEDUP: Lazy<Mutex<HashSet<&'static str>>> = Lazy::new(|| Mutex::new(HashSet::new()));
-static THROTTLE: Lazy<Mutex<HashMap<&'static str, Instant>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
-
-static DEDUP_SUBJECT: Lazy<Mutex<HashSet<(&'static str, u64)>>> =
-    Lazy::new(|| Mutex::new(HashSet::new()));
+static DEDUP: LazyLock<Mutex<HashSet<&'static str>>> = LazyLock::new(Mutex::default);
+static DEDUP_SUBJECT: LazyLock<Mutex<HashSet<(&'static str, u64)>>> = LazyLock::new(Mutex::default);
+static THROTTLE: LazyLock<Mutex<HashMap<&'static str, Instant>>> = LazyLock::new(Mutex::default);
 
 pub fn once_should_emit(key: &'static str) -> bool {
     DEDUP.lock().unwrap().insert(key)
@@ -530,17 +477,17 @@ mod tests {
     use super::*;
 
     // The level is process-wide and the harness runs tests in parallel.
-    static LEVEL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static LOG_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    fn hold_level() -> std::sync::MutexGuard<'static, ()> {
-        LEVEL
+    fn lock_logger() -> std::sync::MutexGuard<'static, ()> {
+        LOG_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     #[test]
     fn set_level_syncs_facade_max_level() {
-        let _level = hold_level();
+        let _logger = lock_logger();
         set_level(0);
         assert_eq!(log::max_level(), log::LevelFilter::Error);
 
@@ -558,15 +505,14 @@ mod tests {
 
     #[test]
     fn noisy_third_party_targets_capped_at_warn() {
-        let _level = hold_level();
-        set_level(3); // debug — generous global level
-        assert!(!is_noisy("AUDIO"));
-        assert!(is_noisy("symphonia_core::probe"));
-        assert_eq!(effective_max("symphonia_core::probe"), 1); // warn
-        assert_eq!(effective_max("AUDIO"), 3); // our cat: full level
-        assert!(log_to_level(log::Level::Info) > effective_max("symphonia_format_ogg"));
-        assert!(log_to_level(log::Level::Warn) <= effective_max("symphonia_format_ogg"));
-        assert!(log_to_level(log::Level::Info) <= effective_max("AUDIO"));
+        let _logger = lock_logger();
+        set_level(0);
+        assert!(!target_enabled(log::Level::Warn, "symphonia_core::probe"));
+        set_level(3);
+        assert!(!target_enabled(log::Level::Info, "symphonia_core::probe"));
+        assert!(!target_enabled(log::Level::Debug, "symphonia_format_ogg"));
+        assert!(target_enabled(log::Level::Warn, "symphonia_format_ogg"));
+        assert!(target_enabled(log::Level::Debug, "AUDIO"));
     }
 
     #[test]
@@ -604,7 +550,7 @@ mod tests {
         table.record("LEVEL", "rejected: floor\nstack traceback: a", 1.0);
         table.record("LEVEL", "rejected: floor\nstack traceback: b", 2.0);
         table.record("SAVE", "rejected: floor", 3.0);
-        assert_eq!(table.total(), 3);
+        assert_eq!(table.total, 3);
         let rows = table.rows();
         assert_eq!(
             rows.len(),
@@ -627,8 +573,8 @@ mod tests {
         table.record("T", "fresh", 101.0);
         let rows = table.rows();
         assert_eq!(rows.len(), RECORD_CAP);
-        assert_eq!(table.evicted(), 1);
-        assert_eq!(table.total(), RECORD_CAP as u64 + 2);
+        assert_eq!(table.evicted, 1);
+        assert_eq!(table.total, RECORD_CAP as u64 + 2);
         assert!(
             rows.iter().any(|r| r.message == "fault 0"),
             "a repeat refreshes its row"
@@ -643,8 +589,9 @@ mod tests {
     #[test]
     fn logged_errors_and_warnings_reach_their_own_records() {
         // Held so its error record does not land in the collection test's list.
-        let _level = hold_level();
+        let _logger = lock_logger();
         init();
+        set_level(2);
         let warnings_before = records_total(log::Level::Warn);
         log::error!(target: "RLTEST_ERRORS", "error table witness {}", 7);
         log::warn!(target: "RLTEST_ERRORS", "warning table witness {}", 8);
@@ -669,8 +616,9 @@ mod tests {
 
     #[test]
     fn checked_runs_collect_error_records_up_to_the_cap() {
-        let _level = hold_level();
+        let _logger = lock_logger();
         init();
+        set_level(2);
         collect_errors();
         log::warn!(target: "COLLECT", "not an error");
         log::error!(target: "COLLECT", "first");
@@ -716,6 +664,13 @@ fn unix_millis(time: SystemTime) -> u128 {
 #[cfg(test)]
 mod release_tests {
     use super::*;
+
+    fn test_child(test: &str) -> std::process::Command {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child.args([test, "--exact", "--nocapture"]);
+        child
+    }
+
     #[test]
     #[should_panic(expected = "before UNIX epoch")]
     fn pre_epoch_clock_is_reported() {
@@ -743,15 +698,11 @@ mod release_tests {
         let dir = std::env::temp_dir().join(format!("rock-log-filtered-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("out.log");
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "release_tests::filtered_logger_writes_enabled_targets_to_its_file",
-                "--exact",
-                "--nocapture",
-            ])
-            .env("FILTERED_TEST_CHILD", &path)
-            .output()
-            .unwrap();
+        let output =
+            test_child("release_tests::filtered_logger_writes_enabled_targets_to_its_file")
+                .env("FILTERED_TEST_CHILD", &path)
+                .output()
+                .unwrap();
         let written = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(
@@ -781,12 +732,7 @@ mod release_tests {
             init();
             return;
         }
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "release_tests::logger_conflict_is_reported",
-                "--exact",
-                "--nocapture",
-            ])
+        let output = test_child("release_tests::logger_conflict_is_reported")
             .env("LOGGER_TEST_CHILD", "1")
             .output()
             .unwrap();
