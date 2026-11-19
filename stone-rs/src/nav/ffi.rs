@@ -42,7 +42,6 @@ struct NativeNav {
 }
 impl NativeNav {
     fn fork(&self) -> Self {
-        // Finished results retain their charged work; unfinished jobs restart independently.
         let jobs = self
             .jobs
             .iter()

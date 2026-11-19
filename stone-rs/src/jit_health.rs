@@ -116,16 +116,6 @@ pub extern "C" fn stone_lua_jit_health_sample() -> c_int {
     })
 }
 
-/// Per-frame native JIT deltas for the profiler row. Reads the live counters,
-/// diffs them against the stored baseline, writes exactly
-/// `abi::FRAME_DELTA_COLUMNS` whole-number floats into caller-owned `out`,
-/// and stores the live read as the new baseline, so consecutive calls delimit
-/// consecutive frames. `f32` matches the frame-record row precision: counter
-/// deltas are exact, and byte deltas only quantize past 2^24 per frame.
-/// Returns 1 on success. When the capability is absent it zero-fills and
-/// returns 0: rows stay JSON-safe, and the run-level export
-/// (`available: false`) tells readers to ignore them. A null `out` or a short
-/// `len` writes nothing and returns 0. No allocation on any path.
 #[no_mangle]
 pub extern "C" fn stone_lua_jit_health_frame_delta(out: *mut f32, len: usize) -> c_int {
     if out.is_null() || len < abi::FRAME_DELTA_COLUMNS {

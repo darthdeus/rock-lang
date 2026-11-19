@@ -89,9 +89,6 @@ pub(crate) fn frame() -> u64 {
     STREAMS.with(|s| s.borrow().frame)
 }
 
-/// Close the frame: fence it, move every stream to the next region, and
-/// delete retired buffers the GPU is done with. Called once per frame from
-/// `stone_reset_frame_stats`.
 pub(crate) fn begin_frame(gl: &DebugGl) {
     STREAMS.with(|s| unsafe { s.borrow_mut().begin_frame(gl) });
 }
@@ -204,8 +201,6 @@ impl Streams {
         if idle {
             return;
         }
-        // The GPU still reads this region: every stream moves to new storage.
-        // The other regions' fences guarded the retired buffers only.
         let buffers: Vec<glow::Buffer> = self
             .streams
             .iter_mut()
@@ -266,8 +261,6 @@ impl Streams {
             stream.cursor = 0;
             start = 0;
             end = data.len();
-            // Outgrown mid-frame: this frame's earlier draws still read the
-            // old buffer, so it is retired, not re-specified.
             self.retire(gl, old.into_iter().collect());
         }
         let stream = &mut self.streams[kind as usize];

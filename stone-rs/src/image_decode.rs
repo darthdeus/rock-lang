@@ -141,9 +141,6 @@ pub fn store_at_storage(
     }
 }
 
-/// Aspect-preserving reduction of `width` x `height` so its longer side is
-/// `cap`, rounded to nearest and never below one texel: 4096x1024 -> 256x64,
-/// 1000x300 -> 256x77. The input unchanged when `cap` is 0 or already fits.
 pub fn capped_dims_for(cap: u32, width: u32, height: u32) -> (u32, u32) {
     let longer = width.max(height);
     if cap == 0 || longer <= cap || width == 0 || height == 0 {
@@ -161,18 +158,6 @@ fn scale_side(side: u32, cap: u32, longer: u32) -> u32 {
     (scaled as u32).max(1)
 }
 
-/// Area-average RGBA8 `rgba` (`width` x `height`) down to `dst_w` x `dst_h`.
-///
-/// A box filter rather than point sampling because the sprite paths sample with
-/// NEAREST as often as LINEAR, so dropping 255 of every 256 texels of a 16x
-/// reduction would turn a silhouette into noise. Straight per-channel mean
-/// including alpha: a transparent source texel's colour bleeds into the average,
-/// which shows on a sprite edge and is the accepted cost of a sim-only cap.
-///
-/// `None` on input this filter cannot describe -- a length that is not the
-/// stated size, a zero destination side, or an enlargement. Each is a caller
-/// bug, so it is logged and the caller keeps the pixels it has rather than
-/// leaving a texture with no storage defined.
 pub fn box_downsample(
     rgba: &[u8],
     width: u32,
@@ -265,7 +250,6 @@ pub fn decode_rgba_bytes(data: &[u8], path: &str) -> Option<(Vec<u8>, u32, u32)>
 
 pub(crate) enum DecodeSource {
     Bytes(Vec<u8>),
-    // Dimensions admitted from the header before the main thread minted a handle.
     Asset { dimensions: (u32, u32) },
 }
 
@@ -351,17 +335,12 @@ pub(crate) fn submit(
                 format,
             },
         };
-        // The receiver is a process-lifetime static, so a send failure is not
-        // reachable; surface it rather than silently losing an upload.
         if let Err(e) = tx.send(decoded) {
             crate::log_once!("IMAGE", "decode result for {} lost: {}", path, e);
         }
     });
 }
 
-/// Take whatever has finished decoding without blocking. Lets the caller upload
-/// results while later decodes are still running, instead of batching every
-/// buffer to the end where they have all fallen out of cache.
 pub fn try_drain() -> Vec<Decoded> {
     let q = queue();
     let mut n = q.outstanding.lock().expect("outstanding poisoned");
@@ -387,10 +366,6 @@ pub(crate) fn outstanding_count() -> usize {
     *queue().outstanding.lock().expect("outstanding poisoned")
 }
 
-/// Block until every submitted job has come back, handing each to `each` as
-/// it is received so the caller can upload and drop it before the next
-/// arrives. Returns the microseconds spent blocked in receive, excluding
-/// `each`. Non-blocking when nothing is outstanding.
 pub fn drain_with(mut each: impl FnMut(Decoded)) -> u64 {
     let q = queue();
     let pending = {
@@ -408,7 +383,6 @@ pub fn drain_with(mut each: impl FnMut(Decoded)) -> u64 {
         waited += start.elapsed();
         match next {
             Ok(d) => each(d),
-            // Unreachable while the static sender lives; stop rather than spin.
             Err(e) => {
                 crate::log_once!(
                     "IMAGE",
@@ -436,7 +410,6 @@ pub fn recv_one() -> Option<Decoded> {
             *n -= 1;
             Some(d)
         }
-        // Unreachable while the static sender lives.
         Err(e) => {
             crate::log_once!(
                 "IMAGE",
@@ -459,9 +432,6 @@ pub(crate) fn test_completions(count: usize) -> Sender<Decoded> {
 mod cap_tests {
     use super::{box_downsample, capped_dims_for, decode_rgba_bytes, probe_dimensions};
 
-    /// A 4x4 split into four 2x2 blocks, each block a single constant so the
-    /// expected mean needs no arithmetic. Channel c of every texel is set to
-    /// `block * 16 + c` so a transposed or misindexed block is visible.
     fn quad_4x4() -> Vec<u8> {
         let mut rgba = vec![0u8; 4 * 4 * 4];
         for y in 0..4usize {
@@ -487,15 +457,11 @@ mod cap_tests {
 
     #[test]
     fn box_downsample_rounds_a_fractional_mean_to_nearest() {
-        // One 2x1 block per destination texel: (0,3) -> 1.5 -> 2, (4,5) -> 4.5 -> 5.
         let rgba = vec![0, 0, 0, 0, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5];
         let out = box_downsample(&rgba, 4, 1, 2, 1).expect("4x1 reduces to 2x1");
         assert_eq!(out, vec![2, 2, 2, 2, 5, 5, 5, 5]);
     }
 
-    /// 5 -> 2 is 2 source texels for the first destination and 3 for the second:
-    /// the block for destination x spans `[x*w/dw, (x+1)*w/dw)`, so a ratio that
-    /// is not an integer still covers every source texel exactly once.
     #[test]
     fn box_downsample_covers_every_texel_at_a_non_integer_ratio() {
         let rgba = vec![
@@ -554,15 +520,12 @@ mod cap_tests {
 
     #[test]
     fn cap_rounds_the_shorter_side_to_nearest() {
-        // 300 * 256 / 1000 = 76.8.
         assert_eq!(capped_dims_for(256, 1000, 300), (256, 77));
-        // 257 * 256 / 1000 = 65.79.
         assert_eq!(capped_dims_for(256, 1000, 257), (256, 66));
     }
 
     #[test]
     fn cap_never_produces_a_zero_side() {
-        // 3 * 256 / 4096 = 0.19, which must still be a storable texel.
         assert_eq!(capped_dims_for(256, 4096, 3), (256, 1));
         assert_eq!(capped_dims_for(1, 4096, 1024), (1, 1));
     }

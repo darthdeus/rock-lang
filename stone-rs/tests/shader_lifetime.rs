@@ -17,7 +17,6 @@ extern "C" {
 const COMBINED_VALID: &str = "#version 330 core\n#ifdef VERTEX\nlayout(location = 0) in vec2 p;\nout vec2 uv;\nvoid main() { uv = p; gl_Position = vec4(p, 0.0, 1.0); }\n#endif\n#ifdef PIXEL\nin vec2 uv;\nout vec4 c;\nvoid main() { c = vec4(uv, 0.0, 1.0); }\n#endif\n";
 const COMBINED_BAD_VERTEX: &str = "#version 330 core\n#ifdef VERTEX\nvoid main() { not valid glsl }\n#endif\n#ifdef PIXEL\nout vec4 c;\nvoid main() { c = vec4(1.0); }\n#endif\n";
 const COMBINED_BAD_FRAGMENT: &str = "#version 330 core\n#ifdef VERTEX\nlayout(location = 0) in vec2 p;\nvoid main() { gl_Position = vec4(p, 0.0, 1.0); }\n#endif\n#ifdef PIXEL\nvoid main() { not valid glsl }\n#endif\n";
-// Declares `uv` with a different type than the vertex output: both stages compile, linking fails.
 const COMBINED_UNLINKABLE: &str = "#version 330 core\n#ifdef VERTEX\nlayout(location = 0) in vec2 p;\nout vec2 uv;\nvoid main() { uv = p; gl_Position = vec4(p, 0.0, 1.0); }\n#endif\n#ifdef PIXEL\nin vec3 uv;\nout vec4 c;\nvoid main() { c = vec4(uv, 1.0); }\n#endif\n";
 
 /// Live (shader, program) objects in the context. Names are allocated from 1 in a fresh

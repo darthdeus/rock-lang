@@ -179,10 +179,6 @@ mod image_load_stats_tests {
     }
 }
 
-// =============================================================================
-// Image Handle
-// =============================================================================
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ImageFormat {
     R8,
@@ -279,14 +275,7 @@ pub(crate) struct LoadedImage {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) format: ImageFormat,
-    /// Wrap mode last set by `stone_image_set_wrap`. A bound sampler object
-    /// overrides the texture's own wrap state, so the sampler chosen for a draw
-    /// has to agree with it or a REPEAT texture (trails) silently clamps.
     pub(crate) repeat: bool,
-    /// Loaded headers-only under `STONE_ASSET_STUB`: correct size, no asset
-    /// pixels. The texture holds one white texel (`STUB_TEXEL`), so a draw that
-    /// samples it gets white rather than undefined contents -- that is the
-    /// contract, not a bug. Cleared the moment a writer defines real storage.
     pub(crate) stub: bool,
 }
 
@@ -304,16 +293,8 @@ thread_local! {
     /// `glGetTexLevelParameteriv` on this driver's GL-on-Metal path flushes, and
     /// one per image write put recurring 55 ms frames into every rendering sim.
     static CAPPED_STORAGE: RefCell<HashMap<u64, (u32, u32)>> = RefCell::new(HashMap::new());
-    /// Images whose load site declared their texels exact, so no cap may
-    /// resample them. A side table for the same reason `CAPPED_STORAGE` is one:
-    /// only an asset load can make this declaration, while `text.rs` and
-    /// `image_data.rs` also put entries in `IMAGES` and have nothing to say
-    /// about it. Empty in every process that publishes no cap.
     static EXACT_TEXELS: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
     static MIPMAPPED_IMAGES: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
-    /// Handles whose deferred decode failed to produce pixels
-    /// (IMAGE_DECODE_FAILURE_PRESENTATION). Readiness stays false for them,
-    /// so they never read Resident; their texture draws the placeholder fill.
     static FAILED_DECODE: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
     /// Cumulative failed deferred decodes, for the residency counters.
     static FAILED_DECODE_COUNT: RefCell<u64> = const { RefCell::new(0) };
@@ -361,23 +342,15 @@ fn mark_decode_failed(id: u64) {
     }
 }
 
-/// The failure placeholder's cells: the development missing-image checker's
-/// bright magenta on near-black, the same bytes `development_missing_image`
-/// (`assets.rock`) paints (`image_data_set_pixel` truncates, so 0.1 is 25).
 const DECODE_FAILED_BRIGHT: [u8; 4] = [255, 0, 204, 255];
 const DECODE_FAILED_DARK: [u8; 4] = [25, 0, 25, 255];
 
-/// Define a failed handle's texture as the placeholder checker at its storage
-/// size, through the same storage path a real upload takes. Every draw
-/// through the handle -- present and future -- samples the placeholder; the
-/// logical size is untouched, so sheet frames and UVs keep working.
 fn upload_decode_placeholder(id: u64) {
     let Some((w, h, format)) = with_image(id, |i| (i.width, i.height, i.format)) else {
         return;
     };
     let (sw, sh) = stored_size(id, (w, h));
     if format == ImageFormat::Bc1 {
-        // RGB565 magenta and black, selectors forming the same 2x2 checker.
         let block = [0x19, 0xf8, 0x03, 0x18, 0x50, 0x50, 0x05, 0x05];
         let blocks = block.repeat((format.level_bytes(sw, sh) / 8) as usize);
         publish_image_pixels(id, (w, h), (sw, sh), format, &blocks);
@@ -422,9 +395,6 @@ fn stored_size(handle: u64, logical: (u32, u32)) -> (u32, u32) {
         .unwrap_or(logical)
 }
 
-/// Record what a write just defined, so the next writer and the texel probe read
-/// one answer. Dropping the entry is how an image returns to full storage, which
-/// is why this takes both sizes rather than only the one it stores.
 fn record_storage(handle: u64, logical: (u32, u32), stored: (u32, u32)) {
     CAPPED_STORAGE.with(|c| {
         let mut capped = c.borrow_mut();
@@ -439,11 +409,6 @@ fn record_storage(handle: u64, logical: (u32, u32), stored: (u32, u32)) {
 /// What GL stores for a headers-only image: one texel.
 const STUB_STORAGE: (u32, u32) = (1, 1);
 
-/// The texel itself. White rather than `stone_get_white_image`'s own texture,
-/// even though the colour is the same: a handle OWNS the object
-/// `stone_unload_image` deletes and every image writer redefines, so one shared
-/// object would be freed out from under every other stubbed image the first time
-/// one was unloaded or reloaded.
 const STUB_RGBA8_TEXEL: [u8; 4] = [255, 255, 255, 255];
 const STUB_RG8_TEXEL: [u8; 2] = [255, 255];
 
@@ -573,7 +538,6 @@ fn register_loaded_image(
             },
         );
     });
-    // Before any deferred work: the pool and every later write read it.
     EXACT_TEXELS.with(|e| {
         if exact_texels {
             e.borrow_mut().insert(id);
@@ -620,13 +584,9 @@ mod stub_storage_tests {
     #[test]
     fn a_stub_stores_one_texel_and_keeps_its_logical_size() {
         assert_eq!(load_storage_dims(true, false, 1024, 512), STUB_STORAGE);
-        // `exact_texels` is a declaration about the FILE's texels. A stub holds
-        // none of them, so it cannot exempt one from the white texel.
         assert_eq!(load_storage_dims(true, true, 768, 768), STUB_STORAGE);
         assert_eq!(load_storage_dims(false, true, 768, 768), (768, 768));
 
-        // Through the registration the load itself performs, so the record and
-        // the answer cannot come apart.
         let handle = 0x5747_4231u64;
         let stored = load_storage_dims(true, false, 1024, 512);
         register_loaded_image(
@@ -663,21 +623,11 @@ mod stub_storage_tests {
     }
 }
 
-// =============================================================================
-// Image Loading (using `image` crate)
-// =============================================================================
-
-/// Decode an image to RGBA8 from the embedded asset registry first, falling
-/// back to disk. Returns `(rgba_bytes, width, height)`; logs once + None on
-/// failure. Shared by texture, ImageData, and cursor loaders so their sources
-/// and accepted formats cannot drift.
 pub(crate) fn decode_rgba_image(path_str: &str) -> Option<(Vec<u8>, u32, u32)> {
     let data = resolve_image_bytes(path_str)?;
     image_decode::decode_rgba_bytes(&data, path_str)
 }
 
-// Most baked PNGs reach their first IDAT within 64 bytes. Keep the larger
-// metadata window for other containers before the existing full-read fallback.
 const IMAGE_HEADER_PREFIX: usize = 64 * 1024;
 const IMAGE_HEADER_INITIAL: usize = 64;
 
@@ -713,8 +663,6 @@ mod image_header_tests {
             .encode_image(&pixels)
             .unwrap();
 
-        // A legal JPEG comment before the frame header pushes dimensions past
-        // the small admission read without changing the encoded image.
         let comment = vec![b'x'; 4096];
         assert_eq!(&jpeg[..2], &[0xff, 0xd8]);
         let mut bytes = jpeg[..2].to_vec();
@@ -736,9 +684,6 @@ mod image_header_tests {
     }
 }
 
-/// The compressed bytes behind an asset path, embedded registry first then
-/// disk. Split out so the deferred path in `stone_load_image` can header-probe
-/// and hand the same bytes to the decode pool without reading twice.
 fn resolve_image_bytes(path_str: &str) -> Option<Vec<u8>> {
     match asset_registry::resolve_asset(path_str) {
         Some(d) => Some(d),
@@ -855,8 +800,6 @@ fn load_image(
     };
     let exact_texels = exact_texels || format.blocks().is_some();
 
-    // Collect completed workers into the publication state. The load site
-    // publishes no pixels; only a pump or flush can make those images ready.
     let uploads = publish_uploads("load");
     if uploads.selected != 0 {
         record_image_upload(
@@ -867,12 +810,8 @@ fn load_image(
         );
     }
 
-    // A Prefetch handle needs dimensions now, but its full payload belongs on
-    // the decode worker. Stubs never need the payload at all.
     let mut read_in_worker = class == crate::image_publication::RequestClass::Deferred
         && !image_decode::stub_images()
-        // Without manifest dimensions, registry prefix resolution already
-        // copies the payload; keep that copy for the worker.
         && (declared_size.is_some() || !asset_registry::contains_asset(path_str));
     let prefix_only = image_decode::stub_images() || read_in_worker;
     let (data, header_dimensions, complete) = if read_in_worker && declared_size.is_some() {
@@ -898,19 +837,10 @@ fn load_image(
         }
     };
 
-    // A short prefix is already the entire file; keep those bytes for decode.
     if read_in_worker && complete {
         read_in_worker = false;
     }
 
-    // Allocate the texture at the header's dimensions and let the pool decode
-    // the pixels; `stone_flush_image_uploads` fills them in before anything
-    // draws. The handle and `stone_get_image_size` are correct immediately, so
-    // callers cannot observe the deferral. A header the probe can't read (or a
-    // build with no pool) decodes inline, exactly as before. Headers-only takes
-    // the same probe but queues nothing; either way a header the probe cannot
-    // read decodes rather than inventing a size, because a wrong `image_dims`
-    // would corrupt sheet math silently.
     let mut data = data;
     let mut probed = if prefix_only {
         header_dimensions
@@ -918,9 +848,6 @@ fn load_image(
         image_decode::probe_dimensions(&data)
     };
     if probed.is_none() && prefix_only {
-        // The prefix was not enough to find the dimensions, so this image has
-        // to be decoded after all -- and the truncated bytes cannot be what
-        // decodes. Re-read in full.
         data = match resolve_image_bytes(path_str) {
             Some(d) => d,
             None => {
@@ -929,8 +856,6 @@ fn load_image(
             }
         };
         if read_in_worker {
-            // A long header (for example JPEG metadata) keeps the old full-read
-            // path; if it probes now, decoding still runs on the worker.
             probed = image_decode::probe_dimensions(&data);
             read_in_worker = false;
         }
@@ -945,8 +870,6 @@ fn load_image(
     let (pixels, width, height) = match probed {
         Some((w, h)) => (None, w, h),
         None => match image_decode::decode_rgba_bytes(&data, path_str) {
-            // The decode pool caps on its own thread; this is the inline arm,
-            // so the reduction happens here instead.
             Some((rgba, w, h)) => match image_decode::store_at_storage(exact_texels, rgba, w, h)
                 .and_then(|stored| format.pack_rgba8_owned(stored))
             {
@@ -1021,9 +944,6 @@ fn load_image(
             glow::CLAMP_TO_EDGE as i32,
         );
 
-        // Async loads define storage at publication instead. Allocating here with
-        // a null image and filling it via tex_sub_image_2d later costs a second
-        // full pass over the pixels -- 427ms rather than 99ms for mag's 1.5GB.
         if let Some(data) = upload {
             tex_image_for_format(
                 gl,
@@ -1044,10 +964,6 @@ fn load_image(
     match texture {
         Some(Some(tex)) => {
             let id = crate::handles::mint(Class::Image);
-            // A deferred load has no storage yet, but the pool reduces to
-            // exactly this size and `upload_decoded` defines exactly it, so one
-            // record covers both arms; a stub's record is the white texel just
-            // defined, which is what a later write has to replace.
             register_loaded_image(
                 id,
                 tex,
@@ -1075,8 +991,6 @@ fn load_image(
             if inline_bytes > 0 {
                 record_image_upload(1, inline_bytes, 0, elapsed_us(texture_started));
             }
-            // Raster codecs produce RGBA before channel packing. DDS hands the
-            // publication queue the blocks directly.
             let decoded_format = if format.blocks().is_some() {
                 format
             } else {
@@ -1104,10 +1018,6 @@ pub(crate) fn refresh_image_mipmaps(handle: u64, texture: glow::Texture) {
     });
 }
 
-/// Publish every Required image, waiting for its decode if necessary.
-/// Deferred results stay pending until a pump publishes them or the request
-/// is promoted to Required. Readiness must precede drawing or pixel readback;
-/// an admitted handle alone does not expose sampleable pixels.
 #[no_mangle]
 pub extern "C" fn stone_flush_image_uploads() {
     let uploads = publish_uploads("flush");
@@ -1182,8 +1092,6 @@ fn upload_decoded(decoded: impl IntoIterator<Item = Arc<image_decode::Decoded>>)
             mark_decode_failed(d.id);
             continue;
         };
-        // The handle can be gone if the image was unloaded while its decode was
-        // in flight; the result is simply dropped.
         let Some((w, h, format)) =
             with_image(d.id, |image| (image.width, image.height, image.format))
         else {
@@ -1199,9 +1107,6 @@ fn upload_decoded(decoded: impl IntoIterator<Item = Arc<image_decode::Decoded>>)
             );
             continue;
         }
-        // `stone_get_image_size` already answered from the header probe, so a
-        // decode that disagrees would leave every caller's dimensions wrong for
-        // the texture this is about to define. Reject rather than upload.
         if (w, h) != (d.width, d.height) {
             log_once!(
                 "IMAGE",
@@ -1215,9 +1120,6 @@ fn upload_decoded(decoded: impl IntoIterator<Item = Arc<image_decode::Decoded>>)
             mark_decode_failed(d.id);
             continue;
         }
-        // The pool already reduced these bytes to the storage size. A length
-        // that disagrees would have `tex_image_2d` read past the buffer, so it
-        // is refused rather than uploaded.
         let (sw, sh) = d.stored;
         let expected = format.level_bytes(sw, sh) as usize;
         if pixels.len() != expected {
@@ -1268,10 +1170,6 @@ fn publish_image_pixels(
     true
 }
 
-/// Whether this live image holds the headers-only white texel rather than
-/// decoded pixels. Query the load outcome, not the process's decoder policy:
-/// a header probe can fail and require a real decode even in a stubbed run.
-/// False for an unknown handle.
 #[no_mangle]
 pub extern "C" fn stone_image_is_stub(handle: u64) -> bool {
     with_image(handle, |image| image.stub).unwrap_or(false)
@@ -1299,10 +1197,6 @@ pub extern "C" fn stone_image_storage_size(handle: u64, width: *mut c_int, heigh
     }
 }
 
-/// The logical size an asset would load at, read from its container header
-/// without decoding, allocating a texture or submitting work. Residency
-/// accounting prices an absent image with it. False (and 0x0) when the asset
-/// is missing or the header cannot be read.
 #[no_mangle]
 pub extern "C" fn stone_probe_image_size(
     path: *const c_char,
@@ -1342,9 +1236,6 @@ pub extern "C" fn stone_get_image_size(handle: u64, width: *mut c_int, height: *
     });
 }
 
-/// Switch an image's sampler wrap mode. Textures are created
-/// CLAMP_TO_EDGE; scrolling UVs (trails) need GL_REPEAT. Only meaningful
-/// for standalone images -- an atlas region cannot repeat.
 #[no_mangle]
 pub extern "C" fn stone_image_set_wrap(handle: u64, repeat: bool) -> bool {
     let texture = with_image(handle, |img| img.texture);
@@ -1424,7 +1315,6 @@ fn define_image_storage(
     with_image_mut(handle, |img| {
         img.width = logical.0;
         img.height = logical.1;
-        // Real pixels landed, so an image loaded headers-only stops being one.
         img.stub = false;
     });
     record_storage(handle, logical, stored);
@@ -1494,10 +1384,6 @@ pub extern "C" fn stone_image_decode_failed_count() -> u64 {
     FAILED_DECODE_COUNT.with(|c| *c.borrow())
 }
 
-// Immutable sampler objects, one per (filter, wrap) pair, created once and
-// never mutated -- explicit per-draw sampling, replacing the filter baked onto
-// the texture at load time. Indexed [filter][repeat], filter 0 = NEAREST.
-
 /// Bind an image's texture to a unit, resolved here from the image handle. The
 /// rendering path binds through this rather than fetching the name and handing
 /// it back; the raw getter below stays for cimgui, whose consumers are GL by
@@ -1511,8 +1397,6 @@ pub extern "C" fn stone_bind_image_texture_to_unit(handle: u64, unit: c_int) -> 
     }
 }
 
-// Uploads bind on the current unit. Preserve that unit's binding so publishing
-// one input cannot replace an earlier input of the draw being assembled.
 pub(crate) fn sample_image_texture_for_bind(handle: u64) -> Option<u32> {
     if let Some(texture) = sample_image_texture(handle) {
         return Some(texture);
@@ -1580,8 +1464,6 @@ fn stub_path(handle: u64) -> Option<String> {
 /// Free a previously stone_load_image'd handle and its GL texture.
 #[no_mangle]
 pub extern "C" fn stone_unload_image(handle: u64) {
-    // A request destroyed before publication must not keep its bytes
-    // counted, its readiness false, or a flush waiting for its decode.
     crate::image_publication::retire(handle);
     let removed = IMAGES.with(|images| images.borrow_mut().remove(&handle));
     FAILED_DECODE.with(|f| f.borrow_mut().remove(&handle));
@@ -1617,8 +1499,6 @@ pub extern "C" fn stone_reload_image(handle: u64, path: *const c_char) -> bool {
     }
     let path_str = unsafe { CStr::from_ptr(path).to_str().unwrap_or("") };
 
-    // A pending deferred upload for this handle would land after the reload and
-    // put the pre-edit pixels back; drain it first.
     stone_flush_image_uploads();
 
     let Some(format) = with_image(handle, |img| img.format) else {
@@ -1648,9 +1528,6 @@ pub extern "C" fn stone_reload_image(handle: u64, path: *const c_char) -> bool {
         None => return false,
     };
 
-    // A hot reload is an asset load like any other, so it stores at the cap --
-    // and honours the exactness this handle declared when it was first loaded,
-    // which is why that declaration outlives the call that made it.
     let exact = exact_texels(handle) || format != ImageFormat::Rgba8;
     let (storage_width, storage_height) = image_decode::storage_dims(exact, width, height);
     let Some(data) = image_decode::store_at_storage(exact, data, width, height)
@@ -1719,7 +1596,6 @@ pub extern "C" fn stone_get_white_image() -> u64 {
             return id;
         }
 
-        // Create 1x1 white texture
         let texture = with_gl(|gl| unsafe {
             let texture = match gl.create_texture() {
                 Ok(t) => t,
@@ -2041,7 +1917,6 @@ mod relight_rg8_gl_tests {
         let _session = GlSession::start();
         assert!(stone_supports_bc1(), "test driver requires S3TC");
         let mut dds = stone_texture::bc1_header(5, 3).unwrap().to_vec();
-        // Transparent first block, solid red second block.
         dds.extend([0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
         dds.extend([0x00, 0xf8, 0, 0, 0, 0, 0, 0]);
         let path = CString::new("test/cutout.dds").unwrap();

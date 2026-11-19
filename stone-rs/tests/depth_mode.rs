@@ -40,7 +40,6 @@ impl PassScope {
 
 impl Drop for PassScope {
     fn drop(&mut self) {
-        // Do not turn a failed assertion into a double panic during cleanup.
         if !unsafe { stone_gl_pass_state_end(self.0) } {
             log::error!("depth fixture failed to restore its native pass scope");
             if !std::thread::panicking() {

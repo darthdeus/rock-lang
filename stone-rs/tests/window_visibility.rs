@@ -54,11 +54,9 @@ fn show_after_hide_resets_user_time_zero_when_user_time_was_dirty() {
         xlib::XFlush(display);
     }
 
-    // Hide window
     stone_hide_window();
     assert!(stone_is_window_hidden());
 
-    // Show window: must stamp _NET_WM_USER_TIME = 0 so it does not steal focus
     stone_show_window();
 
     unsafe {
@@ -246,18 +244,15 @@ fn hide_and_show_preserves_position_after_runtime_move() {
     assert!(!window.is_null());
     stone_show_window_if_deferred();
 
-    // Move to a distinct position
     stone_set_window_position(500, 350);
     let mut x = 0;
     let mut y = 0;
     stone_get_window_position(&mut x, &mut y);
     assert_eq!((x, y), (500, 350));
 
-    // Hide window
     stone_hide_window();
     assert!(stone_is_window_hidden());
 
-    // Show window
     stone_show_window();
     assert!(!stone_is_window_hidden());
     stone_show_window_if_deferred();
@@ -321,8 +316,6 @@ fn hide_and_show_survives_wm_frame_teardown() {
         }
         stone_show_window();
         assert!(!stone_is_window_hidden());
-        // A game advances the deferred map from its frame loop; the WM decides
-        // when the window becomes viewable.
         for _ in 0..250 {
             if viewable() {
                 break;
@@ -342,9 +335,6 @@ fn hide_and_show_survives_wm_frame_teardown() {
             );
         }
     }
-    // The position is only readable once the WM has mapped the window, and the
-    // map is the WM's to schedule; require that it happened in nearly every
-    // cycle rather than in all of them.
     println!("mapped {mapped}/{CYCLES} cycles");
     assert!(
         mapped * 10 >= CYCLES * 9,
@@ -369,20 +359,16 @@ fn hide_and_show_preserves_fullscreen_mode() {
     assert!(!window.is_null());
     stone_show_window_if_deferred();
 
-    // Set desktop fullscreen
     stone_set_fullscreen(1);
     assert_eq!(stone_get_fullscreen(), 1);
 
-    // Hide while fullscreen
     stone_hide_window();
     assert!(stone_is_window_hidden());
 
-    // Show window
     stone_show_window();
     assert!(!stone_is_window_hidden());
     stone_show_window_if_deferred();
 
-    // Fullscreen must be restored
     assert_eq!(
         stone_get_fullscreen(),
         1,
@@ -409,14 +395,11 @@ fn saving_geometry_while_hidden_does_not_corrupt_saved_state() {
     assert!(!window.is_null());
     stone_show_window_if_deferred();
 
-    // Hide window
     stone_hide_window();
     assert!(stone_is_window_hidden());
 
-    // Call save_window_geometry while hidden - must be rejected by can_persist_window_geometry
     stone_save_window_geometry(title.as_ptr());
 
-    // Verify no geometry was written for this window while hidden
     let state_file = temp_dir.path().join("stone").join("window-geometry.json");
     if state_file.exists() {
         let content = std::fs::read_to_string(&state_file).unwrap();
@@ -534,8 +517,6 @@ fn window_manager_is_running() -> bool {
             return false;
         }
         let root = xlib::XDefaultRootWindow(display);
-        // Create the atom when nobody has: querying property 0 is a BadAtom
-        // that aborts the process through Xlib's default handler.
         let atom = xlib::XInternAtom(display, c"_NET_SUPPORTING_WM_CHECK".as_ptr(), 0);
         if atom == 0 {
             xlib::XCloseDisplay(display);

@@ -1,10 +1,3 @@
-//! Synchronous native rectangle query over a caller-owned actor snapshot.
-//!
-//! Records are indexed by arena slot and use five i32 lanes:
-//! active, x, y, generation, installed. The caller supplies the sparse slots
-//! collected from the rectangle's coarse spatial buckets. Results contain
-//! counts followed by matching slots, sorted into ascending arena-slot order.
-
 use std::mem::{align_of, size_of};
 
 const LANES_PER_RECORD: usize = 5;
@@ -29,15 +22,6 @@ fn ranges_overlap(a: (usize, usize), b: (usize, usize)) -> bool {
     a.0 < b.1 && b.0 < a.1
 }
 
-/// Query active actors from caller-supplied coarse-bucket candidates and write
-/// exact matches to `output` in ascending arena-slot order.
-///
-/// `records` is indexed by slot with five i32 lanes:
-/// `[active, x, y, generation, installed]`. `candidates` contains slots
-/// collected by the caller from the rectangle's coarse spatial buckets.
-/// `output` receives `[matched_count, examined_count, matching_slot...]`.
-/// Examination counts active candidates after the optional installed filter,
-/// before the exact inclusive rectangle test.
 #[no_mangle]
 pub extern "C" fn stone_actor_query_rect(
     records: *const i32,
@@ -82,9 +66,6 @@ pub extern "C" fn stone_actor_query_rect(
         return false;
     }
 
-    // Validate every caller-provided range before constructing slices or
-    // writing anything. The read-only inputs may alias each other, while the
-    // full output capacity must be disjoint from both inputs.
     let Some(records_range) = pointer_range(records, record_lanes) else {
         return false;
     };
@@ -114,8 +95,6 @@ pub extern "C" fn stone_actor_query_rect(
         unsafe { std::slice::from_raw_parts(candidates, candidate_count) }
     };
 
-    // Validate all slot indexes before creating the mutable output slice, so
-    // malformed candidates leave output untouched.
     for &slot in candidate_data {
         if slot < 0 || slot as usize >= slot_count {
             return false;
@@ -392,8 +371,6 @@ mod tests {
             3,
         ));
 
-        // Output cannot alias either read-only input, even when its written
-        // prefix would fit within the input allocation.
         assert!(!call(
             records.as_ptr(),
             5,

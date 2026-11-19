@@ -1,13 +1,3 @@
-//! TrueType fonts built in code for tests that need a font with a specific
-//! property the embedded DroidSans fallback lacks. The bytes are
-//! deterministic, so a test may compare them or write them to disk and expect
-//! the same file every run.
-//!
-//! Only the tables `ttf_parser::Face` reads are written: head, hhea, maxp
-//! (version 0.5), hmtx, loca, glyf and a single format 12 Unicode cmap. Glyph
-//! outlines are axis-aligned rectangles, one contour per horizontal run of
-//! set cells, wound clockwise as TrueType outer contours are.
-
 use std::path::PathBuf;
 
 const UNITS_PER_EM: u16 = 1000;
@@ -24,10 +14,6 @@ struct Glyph {
     rects: Vec<(i16, i16, i16, i16)>,
 }
 
-/// A pixel font covering printable ASCII. Every glyph is a 5x7 cell bitmap
-/// whose left column is always set, so each one carries ink; the remaining
-/// cells come from a fixed hash of the codepoint. The shapes are not letters:
-/// tests use this font for its grid, not its legibility.
 pub(crate) fn pixel_font() -> Vec<u8> {
     let mut glyphs = vec![Glyph {
         advance: 0,
@@ -50,9 +36,6 @@ pub(crate) fn pixel_font() -> Vec<u8> {
     build_font(&glyphs, &cmap, 7 * PIXEL_CELL, -2 * PIXEL_CELL)
 }
 
-/// A font with one filled symbol at U+1F600 and no other mapping: ASCII
-/// resolves to .notdef. Its codepoint lies past the BMP, so only the format 12
-/// cmap reaches it.
 pub(crate) fn symbol_only_font() -> Vec<u8> {
     let glyphs = vec![
         Glyph {
@@ -153,7 +136,6 @@ fn glyf_entry(glyph: &Glyph) -> Vec<u8> {
         .iter()
         .flat_map(|&(x0, y0, x1, y1)| [(x0, y0), (x0, y1), (x1, y1), (x1, y0)])
         .collect();
-    // Flag 0x01: on-curve; x and y are full int16 deltas.
     out.extend(std::iter::repeat_n(0x01u8, points.len()));
     let (mut px, mut py) = (0i16, 0i16);
     let mut ys = Vec::new();
@@ -263,7 +245,6 @@ fn build_font(glyphs: &[Glyph], cmap: &[(u32, u16)], ascender: i16, descender: i
         put_u32(&mut cmap_table, gid);
     }
 
-    // Table records must be sorted by tag.
     let tables: [(&[u8; 4], Vec<u8>); 7] = [
         (b"cmap", cmap_table),
         (b"glyf", glyf),

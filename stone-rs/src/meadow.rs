@@ -3,8 +3,6 @@
 
 use std::slice;
 
-// `f64::floor` is a library call on the baseline x86-64 target, and blade
-// generation takes it about twenty times per candidate.
 #[inline(always)]
 fn floor(x: f64) -> f64 {
     if x.abs().partial_cmp(&4503599627370496.0) != Some(std::cmp::Ordering::Less) {
@@ -81,7 +79,6 @@ fn profile(x: f64, y: f64) -> [f64; 3] {
     ]
 }
 
-// Each base has bounds, centre, radius, tree flag, vertex count, then XY pairs.
 struct Snapshot {
     fields: [f64; 27],
     bases: Vec<Base>,
@@ -189,7 +186,6 @@ fn cover_profile(wx: f64, wy: f64, woodland: bool) -> [f64; 3] {
         p
     }
 }
-// No position's open-ground density exceeds this, with room for rounding.
 fn cover_density_ceiling(woodland: bool) -> f64 {
     let open = 0.08 + 0.885;
     1.000001 * if woodland { 0.08 + open * 0.15 } else { open }
@@ -354,11 +350,6 @@ pub unsafe extern "C" fn stone_meadow_blades(
         let sx = p[0] + p[4] + (i % 8) as f64 / 8.0;
         let sy = p[1] + p[5] + (i / 8) as f64 / 8.0;
         let stream = (i / 64) as f64 * 97.0;
-        // A candidate survives only if its draw is within the density where
-        // it lands. Woodland's ceiling is low, so most are rejected on the
-        // draw alone, before their position is worked out; then edges, wear
-        // and props only thin the open-ground density, which rejects more
-        // before those are sampled.
         let draw = random(sx, sy, 83.0 + stream, p[8]);
         if draw > ceiling {
             continue;
@@ -462,7 +453,6 @@ fn sort_blades(blades: &mut [Blade]) {
             blades.swap(left, right);
         }
         blades.swap(high - 1, left);
-        // Recurse into the smaller partition to bound stack depth.
         if left - low < high - left {
             sort_blades(&mut blades[low..left]);
             low = left + 1;
@@ -491,7 +481,6 @@ pub unsafe extern "C" fn stone_meadow_sort(blades: *mut f32, count: i32) -> i32 
         return -1;
     }
     let blades = slice::from_raw_parts_mut(blades.cast::<Blade>(), count);
-    // Validate before mutation: NaN breaks the partition's sentinel comparisons.
     if blades.iter().any(|blade| !blade[1].is_finite()) {
         return -1;
     }
@@ -550,8 +539,6 @@ mod blade_tests {
         }
     }
 
-    // Blade generation rejects a candidate on the density ceiling, then on
-    // the open-ground density, before it samples edges, wear and props.
     #[test]
     fn density_stays_under_the_open_ground_density_and_its_ceiling() {
         for fields in [[1.0; 27], [5.0; 27], [0.0; 27]] {

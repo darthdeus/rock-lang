@@ -106,9 +106,6 @@ pub extern "C" fn stone_file_modtime(path: *const c_char) -> f64 {
         return -1.0;
     };
 
-    // Embedded assets (fire release mode) have no on-disk mtime. Return a
-    // fixed positive sentinel so file_modtime().unwrap() succeeds and the
-    // hot-reload watcher never fires on them.
     if crate::asset_registry::contains_asset(path_str) {
         return 1.0;
     }
@@ -136,14 +133,10 @@ pub extern "C" fn stone_file_write(path: *const c_char, data: *const c_char, len
         return false;
     };
 
-    // Create parent directories if needed
     if let Some(parent) = Path::new(path_str).parent() {
-        if !parent.as_os_str().is_empty() && fs::create_dir_all(parent).is_err() {
-            // Ignore error - directory might already exist
-        }
+        if !parent.as_os_str().is_empty() && fs::create_dir_all(parent).is_err() {}
     }
 
-    // Write the data
     let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, len) };
     match fs::File::create(path_str) {
         Ok(mut file) => file.write_all(bytes).is_ok(),
@@ -151,10 +144,6 @@ pub extern "C" fn stone_file_write(path: *const c_char, data: *const c_char, len
     }
 }
 
-/// Append data to a file, creating it (and parent dirs) if absent. The single
-/// write is atomic w.r.t. the append offset (O_APPEND), so a concurrent or
-/// interrupted writer never interleaves bytes into another record. Returns
-/// true on success.
 #[no_mangle]
 pub extern "C" fn stone_file_append(path: *const c_char, data: *const c_char, len: usize) -> bool {
     if path.is_null() || data.is_null() {
@@ -165,9 +154,7 @@ pub extern "C" fn stone_file_append(path: *const c_char, data: *const c_char, le
     };
 
     if let Some(parent) = Path::new(path_str).parent() {
-        if !parent.as_os_str().is_empty() && fs::create_dir_all(parent).is_err() {
-            // Ignore error - directory might already exist
-        }
+        if !parent.as_os_str().is_empty() && fs::create_dir_all(parent).is_err() {}
     }
 
     let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, len) };
@@ -218,17 +205,12 @@ fn sync_file(path: &str) -> bool {
     }
 }
 
-/// Read entire file into a malloc'd buffer.
-/// Checks the in-memory asset registry first, falls back to disk.
-/// Caller must free the returned buffer with libc::free.
-/// Returns NULL on failure, sets out_len to bytes read on success.
 #[no_mangle]
 pub extern "C" fn stone_file_read(path: *const c_char, out_len: *mut usize) -> *mut c_char {
     let Some(path_str) = (unsafe { cstr(path) }) else {
         return ptr::null_mut();
     };
 
-    // Override dir, then embedded registry, then disk.
     let contents = match crate::asset_registry::resolve_asset(path_str) {
         Some(data) => data,
         None => return ptr::null_mut(),
@@ -293,9 +275,6 @@ fn read_hostname() -> String {
     std::env::var("COMPUTERNAME").unwrap_or_default()
 }
 
-/// Probe a file or directory: -1 is an inspection error, 0 is absent and 1
-/// is present. Registry-aware so it agrees with stone_file_read: an embedded
-/// asset must report as existing even with no loose file on disk.
 #[no_mangle]
 pub extern "C" fn stone_file_exists_status(path: *const c_char) -> i32 {
     let Some(path_str) = (unsafe { cstr(path) }) else {
@@ -403,21 +382,10 @@ pub extern "C" fn stone_copy_file(src: *const c_char, dst: *const c_char) -> boo
     fs::copy(src_str, dst_str).is_ok()
 }
 
-/// Recursively copy `src` (file or directory tree) onto `dst`.
-/// Symlinks are copied via `fs::copy` (their target, for files) and
-/// never recursed into -- a directory symlink pointing at an ancestor
-/// would otherwise loop forever. `symlink_metadata` does not follow
-/// the link, so the `is_dir()` branch only fires for real dirs.
 fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     let file_type = fs::symlink_metadata(src)?.file_type();
     if file_type.is_dir() {
         fs::create_dir_all(dst)?;
-        // A single un-copyable entry (e.g. a directory symlink, which
-        // fs::copy cannot dereference) must not abort copying its
-        // siblings. Attempt every entry, then surface the first failure
-        // -- this honors the documented "partial tree left as-is,
-        // returns false on any failure" contract instead of bailing
-        // mid-directory in readdir order.
         let mut first_err: Option<std::io::Error> = None;
         for entry in fs::read_dir(src)? {
             let name = entry?.file_name();
@@ -436,8 +404,6 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
             fs::create_dir_all(parent)?;
         }
         if file_type.is_symlink() {
-            // Recreate the link itself; following it could cycle (and
-            // fs::copy on a dir-symlink errors outright).
             #[cfg(unix)]
             std::os::unix::fs::symlink(fs::read_link(src)?, dst)?;
             #[cfg(not(unix))]
@@ -449,12 +415,6 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Move/rename a path (file or directory tree). Tries an atomic
-/// same-filesystem rename first; on a cross-device failure (EXDEV)
-/// falls back to a recursive copy + delete so moves across mount
-/// points still work. Returns false if both the rename and the
-/// fallback fail. A failed copy leaves the source intact (we never
-/// delete a source we couldn't fully copy).
 #[no_mangle]
 pub extern "C" fn stone_rename(src: *const c_char, dst: *const c_char) -> bool {
     let (Some(src_str), Some(dst_str)) = (unsafe { (cstr(src), cstr(dst)) }) else {
@@ -476,10 +436,6 @@ pub extern "C" fn stone_rename(src: *const c_char, dst: *const c_char) -> bool {
     removed.is_ok()
 }
 
-/// List all files in a directory (excluding . and ..)
-/// Returns malloc'd array of malloc'd strings
-/// Caller must free with stone_free_string_array()
-/// Returns true on success, false on error
 #[no_mangle]
 pub extern "C" fn stone_list_directory(
     path: *const c_char,
@@ -519,21 +475,18 @@ pub extern "C" fn stone_list_directory(
         return true;
     }
 
-    // Allocate array of pointers
     let arr =
         unsafe { libc::malloc(count * std::mem::size_of::<*mut c_char>()) as *mut *mut c_char };
     if arr.is_null() {
         return false;
     }
 
-    // Allocate and copy each string
     for (i, name) in entries.iter().enumerate() {
         match CString::new(name.as_str()) {
             Ok(cstr) => {
                 let bytes = cstr.as_bytes_with_nul();
                 let str_ptr = unsafe { libc::malloc(bytes.len()) as *mut c_char };
                 if str_ptr.is_null() {
-                    // Free previously allocated strings
                     for j in 0..i {
                         unsafe { libc::free(*arr.add(j) as *mut std::ffi::c_void) };
                     }
@@ -546,7 +499,6 @@ pub extern "C" fn stone_list_directory(
                 }
             }
             Err(_) => {
-                // Free previously allocated strings
                 for j in 0..i {
                     unsafe { libc::free(*arr.add(j) as *mut std::ffi::c_void) };
                 }
@@ -768,13 +720,11 @@ mod xfer_tests {
     #[test]
     fn copy_tree_copies_file_and_tree() {
         let root = fresh_root();
-        // File case.
         let file = root.join("one.wav");
         let file_copy = root.join("one_copy.wav");
         fs::write(&file, b"1").unwrap();
         copy_tree(&file, &file_copy).unwrap();
         assert_eq!(fs::read(&file_copy).unwrap(), b"1");
-        // Tree case.
         let pack = root.join("Pack");
         fs::create_dir_all(pack.join("Sub")).unwrap();
         fs::write(pack.join("k.wav"), b"k").unwrap();
@@ -790,7 +740,6 @@ mod xfer_tests {
     #[cfg(unix)]
     #[test]
     fn copy_tree_does_not_recurse_symlink_cycle() {
-        // A dir containing a symlink back to itself must not loop.
         let root = fresh_root();
         let src = root.join("pack");
         fs::create_dir_all(&src).unwrap();
@@ -798,8 +747,6 @@ mod xfer_tests {
         std::os::unix::fs::symlink(&src, src.join("loop")).unwrap();
         let dst = root.join("out");
 
-        // Terminates (no stack overflow / hang). The cyclic symlink
-        // entry copies shallowly or errors -- either way, bounded.
         let _ = copy_tree(&src, &dst);
         assert_eq!(fs::read(dst.join("a.wav")).unwrap(), b"a");
         fs::remove_dir_all(&root).unwrap();
@@ -807,7 +754,6 @@ mod xfer_tests {
 
     #[test]
     fn copy_tree_mirrors_a_nested_tree() {
-        // Directly exercises the EXDEV fallback's core.
         let root = fresh_root();
         let src = root.join("src");
         let deep = src.join("a").join("b");

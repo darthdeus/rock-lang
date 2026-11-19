@@ -316,10 +316,6 @@ impl DirectorySyncFailure {
     }
 }
 
-// A crash keeps a renamed or created name only after its containing directory is
-// synced. Every publication records the directories whose entries it changed and
-// each phase syncs that set once, deepest first; ancestors enter the set only as
-// parents of directories this transaction created.
 #[derive(Default)]
 struct DirectoryBarriers {
     changed: Vec<PathBuf>,
@@ -1094,7 +1090,6 @@ fn worker_loop(
             }
             _ => JobResult::Failure,
         };
-        // Completion admits a successor, so release its predecessor's payload first.
         drop(request.work);
         accounting.fetch_sub(request.owned_bytes, Ordering::AcqRel);
         request.completion.finish(result);
@@ -1127,8 +1122,6 @@ fn write_single(request: &SingleRequest, id: i32, control: &WorkerControl) -> st
             file.sync_all()?;
             return Err(error);
         }
-        // Journal appends keep their own weaker contract: the data is synced,
-        // the directory name is not a publication barrier.
         return Ok(());
     }
     write_atomic(
@@ -1197,8 +1190,6 @@ fn write_pair(
         let second_before = read_previous(second)?;
         write_atomic(second, std::slice::from_ref(bytes), id, 1, barriers)?;
         if fail_second_sync {
-            // Injected: the second name is renamed into place but its durability
-            // acknowledgement fails, so both destinations roll back.
             restore_previous(second, &second_before, id, 3, barriers)?;
             return Err(std::io::Error::other("injected post-publish sync failure"));
         }
@@ -1272,8 +1263,6 @@ fn sync_directory(_directory: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-// create_dir_all does not report what it created; the ancestors of a created
-// directory are the only ones that still need a barrier.
 fn ensure_directory(directory: &Path, barriers: &mut DirectoryBarriers) -> std::io::Result<()> {
     if directory.as_os_str().is_empty() {
         return Ok(());
@@ -1337,8 +1326,6 @@ fn execute_transaction(
                     gate.block_request();
                 }
                 file_jobs_test_publication_pause_gate();
-                // Everything the root reaches is renamed into place by now, so
-                // those names must be durable before the root name can be.
                 if let Err(failure) = barriers.flush() {
                     log_io_error("directory barrier", &failure.directory, &failure.error);
                     cleanup(&transaction.cleanup_failure);
@@ -1359,8 +1346,6 @@ fn execute_transaction(
                     cancellation.complete();
                     return JobResult::DurabilityUncertain;
                 }
-                // The commit point: the root name reaches durability here and
-                // nowhere earlier, which is what acknowledgement reports.
                 if let Err(failure) = barriers.flush() {
                     log_io_error("publish durability", &write.path, &failure.error);
                     cancellation.complete();
@@ -1417,8 +1402,6 @@ fn execute_transaction(
         cancellation.complete();
         return JobResult::Cancelled;
     }
-    // Only a published transaction flushes at its commit point; every other
-    // transaction still owes its directory names a barrier before success.
     if let Err(failure) = barriers.flush() {
         log_io_error("directory barrier", &failure.directory, &failure.error);
         cleanup(&transaction.cleanup_failure);
@@ -2085,7 +2068,6 @@ mod tests {
             assert!(entered, "worker did not publish completion");
             assert_eq!(poll_queue(&queue, first, false), 1);
             assert_eq!(std::fs::read(root.path().join("first")).unwrap(), b"1234");
-            // Successful completion must admit the next maximum-sized payload.
             assert!(
                 queue
                     .lock()
@@ -2187,8 +2169,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    // The traced MAG compaction batch: 91 snapshot PNG publications across 12
-    // existing directories plus the root publication that makes them reachable.
     fn compaction_limits() -> Limits {
         Limits {
             max_pending_jobs: 4,
@@ -2232,8 +2212,6 @@ mod tests {
         listing
     }
 
-    // The published root names exactly what it reaches, so a test can check
-    // reachability from the durable root instead of from the fixture.
     fn compaction_batch(
         queue: &Mutex<Jobs>,
         save: &Path,
@@ -2301,8 +2279,6 @@ mod tests {
         let (job, manifest, files) = compaction_batch(&queue, &save, &directories, 1, 91);
         assert_eq!(poll_queue(&queue, job, true), 1);
         let synced = log.take();
-        // One barrier per changed snapshot directory, plus one for the root name
-        // after its rename. The fixture has 12 directories and 92 publications.
         assert_eq!(synced.len(), directories.len() + 1, "{synced:?}");
         assert!(synced.len() <= 24, "{} barriers", synced.len());
         for directory in &directories {
@@ -2369,8 +2345,6 @@ mod tests {
         assert_eq!(poll_queue(&queue, job, true), 1);
         let face = snapshots.join("level-0").join("face-1");
         let level = snapshots.join("level-0");
-        // Deepest first, then the created parents, then the root barrier: the
-        // chain stops at the directory that already existed before this save.
         assert_eq!(
             log.take(),
             vec![face, level, snapshots.clone(), save.clone(), save.clone()],
@@ -2405,8 +2379,6 @@ mod tests {
                 compaction_limits(),
                 Arc::new(DirectorySyncFailure::at(cut)),
             ));
-            // Barrier cuts are per directory, so one publication per directory
-            // reaches every cut; the full 91-file batch is measured above.
             let (job, _, files) =
                 compaction_batch(&queue, &save, &directories, 2, directories.len());
             match poll_queue(&queue, job, true) {

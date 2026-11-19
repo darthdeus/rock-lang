@@ -261,8 +261,6 @@ pub(crate) unsafe fn mesh_consumed(
     }
 }
 
-// Probe truth follows the actual element order. Expansion exists only while
-// observing a draw; production submissions keep their compact source buffer.
 pub(crate) unsafe fn indexed_mesh_consumed(
     data: *const f32,
     stride: usize,

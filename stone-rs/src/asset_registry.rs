@@ -1,9 +1,3 @@
-//! In-memory asset registry for fire (embedded game runner).
-//!
-//! Assets are registered via `stone_register_asset` before the game starts.
-//! Loading functions (image, sound, font, file_read) check the registry
-//! before hitting disk, making the game work with embedded assets.
-
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::{c_char, CStr};
 use std::path::{Path, PathBuf};
@@ -108,9 +102,6 @@ fn normalize_key(path: &str) -> String {
     path.replace('\\', "/")
 }
 
-/// Player-override directory, resolved once from the executable location as
-/// `<exe_dir>/mods/`. A missing directory skips probes; an inspection error
-/// blocks registered-asset fallback after it is logged.
 enum ModRoot {
     Missing,
     Present(PathBuf),
@@ -154,9 +145,6 @@ enum OverrideRead {
     Failed,
 }
 
-/// Read `<root>/<path>` if present. Invalid keys and missing files are misses;
-/// I/O failures are logged and stop resolution rather than falling through to
-/// the embedded copy.
 fn read_override(root: &Path, path: &str, prefix: Option<usize>) -> OverrideRead {
     let normalized = path.replace('\\', "/");
     let rel = Path::new(&normalized);
@@ -194,19 +182,6 @@ fn read_override(root: &Path, path: &str, prefix: Option<usize>) -> OverrideRead
     }
 }
 
-/// Resolve asset bytes for `path`, in priority order:
-///   1. `<exe_dir>/mods/<path>` on disk — player override of a SHIPPED asset.
-///   2. embedded registry — fire release assets.
-///   3. `<path>` on disk relative to cwd — dev mode / loose files.
-///
-/// `None` for misses or logged I/O errors. Single asset-byte source for every
-/// loader (image/audio/font/file_read) so priority can't drift.
-///
-/// The mods override fires ONLY for paths that are in the embedded registry.
-/// `stone_file_read` also serves runtime-written files (saves, settings,
-/// editor state) that are never registered, so a `mods/` file cannot shadow
-/// them and corrupt a read-after-write — this is precisely "override an
-/// existing shipped asset", not "intercept every relative read".
 pub fn resolve_asset(path: &str) -> Option<Vec<u8>> {
     match mod_root() {
         ModRoot::Present(root) => resolve_with_root(Some(root), path),
@@ -216,9 +191,6 @@ pub fn resolve_asset(path: &str) -> Option<Vec<u8>> {
     }
 }
 
-/// The first `n` bytes, for a caller that only needs a container header.
-/// Copies only the requested registry bytes and bounds disk reads, including
-/// player overrides, so header probes do not load entire sheets or sounds.
 pub fn resolve_asset_prefix(path: &str, n: usize) -> Option<Vec<u8>> {
     match mod_root() {
         ModRoot::Present(root) => resolve_prefix_with_root(Some(root), path, n),
@@ -289,8 +261,6 @@ fn resolve_with_root(root: Option<&Path>, path: &str) -> Option<Vec<u8>> {
                 OverrideRead::Failed => return None,
             }
         }
-        // Registry is populated once at boot and immutable after, so a
-        // positive contains_asset means get_asset resolves.
         return get_asset(path);
     }
     match std::fs::read(path) {
@@ -423,7 +393,6 @@ mod resolve_tests {
     #[test]
     fn override_dir_wins_over_registry() {
         let root = fresh_root();
-        // Unique key so the shared global registry can't collide across tests.
         let key = format!("world/floor_{}.png", UNIQ.fetch_add(1, Ordering::SeqCst));
         let embedded = b"EMBEDDED".to_vec();
         {
@@ -432,9 +401,7 @@ mod resolve_tests {
                 .get_or_insert_with(AssetRegistry::default)
                 .insert(key.clone(), embedded.clone());
         }
-        // No override on disk yet -> registry copy.
         assert_eq!(resolve_with_root(Some(&root), &key), Some(embedded));
-        // Drop a modded file mirroring the key -> it wins.
         let modded = root.join(&key);
         std::fs::create_dir_all(modded.parent().unwrap()).unwrap();
         std::fs::write(&modded, b"MODDED").unwrap();
@@ -447,16 +414,11 @@ mod resolve_tests {
 
     #[test]
     fn non_shipped_paths_are_never_overridden() {
-        // A runtime-written file (save/config) not in the registry must not be
-        // shadowed by a mods/ file at the same relative path -- otherwise a
-        // read-after-write of a save would return stale mod content.
         let root = fresh_root();
         let key = format!("saves/state_{}.json", UNIQ.fetch_add(1, Ordering::SeqCst));
         let modded = root.join(&key);
         std::fs::create_dir_all(modded.parent().unwrap()).unwrap();
         std::fs::write(&modded, b"MOD_SAVE").unwrap();
-        // Unregistered key -> override must NOT fire; falls to cwd disk, which
-        // has no such unique file -> None.
         assert_eq!(resolve_with_root(Some(&root), &key), None);
         std::fs::remove_dir_all(&root).unwrap();
     }

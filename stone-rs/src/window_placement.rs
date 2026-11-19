@@ -67,9 +67,6 @@ pub struct HiddenWindowState {
     pub windowed_bounds: WindowedBounds,
 }
 
-/// Resolve restored window placement when showing a previously hidden window.
-/// Preserves monitor, position, size, and mode; if a monitor disappeared,
-/// falls back to an available monitor using existing placement policy.
 pub fn resolve_hidden_window_restore(
     saved: HiddenWindowState,
     displays: &[crate::window_report::DisplayReport],
@@ -155,9 +152,6 @@ pub enum Source {
     Default,
 }
 
-/// Merge the sources over a concrete base (the game default). `sources` is
-/// ordered high precedence first; the first source that specifies a field wins,
-/// otherwise the base value is kept. `labels` names each source for provenance.
 pub fn merge_geometry(
     base: ResolvedGeometry,
     sources: &[(Source, PartialGeometry)],
@@ -183,9 +177,6 @@ pub fn merge_geometry(
     )
 }
 
-/// Parse `STONE_WINDOW` (`WxH+X+Y` or `WxH`) and `STONE_WINDOW_DISPLAY` (`<i>`).
-/// A malformed value yields None for that field (caller logs); this never
-/// panics.
 pub fn parse_env_geometry(window: Option<&str>, display: Option<&str>) -> PartialGeometry {
     let mut out = PartialGeometry::default();
     if let Some(w) = window {
@@ -202,7 +193,6 @@ pub fn parse_env_geometry(window: Option<&str>, display: Option<&str>) -> Partia
 /// `WxH`, `WxH+X+Y`, or `WxH-X-Y` mixes -- the sign precedes each coordinate.
 fn parse_window_spec(spec: &str) -> PartialGeometry {
     let mut out = PartialGeometry::default();
-    // Split the WxH head from an optional signed +X+Y / -X-Y tail.
     let bytes = spec.as_bytes();
     let mut split = spec.len();
     for (i, &b) in bytes.iter().enumerate() {
@@ -232,7 +222,6 @@ fn parse_pair(s: &str, sep: char) -> Option<(i32, i32)> {
 
 /// Parse `+X+Y` / `-X-Y` (each coordinate carries its own leading sign).
 fn parse_signed_pair(s: &str) -> Option<(i32, i32)> {
-    // Find the sign that starts the second coordinate (skip index 0's sign).
     let bytes = s.as_bytes();
     let mut split = 0;
     for (i, &b) in bytes.iter().enumerate() {
@@ -250,9 +239,6 @@ fn parse_signed_pair(s: &str) -> Option<(i32, i32)> {
     Some((x, y))
 }
 
-/// The hand-written machine config for one game: the `[game.<slug>]` and
-/// `[default]` geometry partials (merged later with the other geometry sources)
-/// and the ImGui scale, already resolved game-over-default.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MachineConfig {
     pub game: PartialGeometry,
@@ -262,9 +248,6 @@ pub struct MachineConfig {
     pub imgui_scale: Option<f32>,
 }
 
-/// Parse the machine config TOML for `game_slug`. Returns an error string on
-/// malformed TOML so the caller can log it (a present-but-broken config must
-/// never be silently ignored).
 pub fn parse_config_toml(toml_str: &str, game_slug: &str) -> Result<MachineConfig, String> {
     let value: toml::Value = toml::from_str(toml_str).map_err(|e| e.to_string())?;
     let default_table = value.get("default");
@@ -331,9 +314,6 @@ fn toml_pair(v: &toml::Value, field: &str) -> Result<(i32, i32), String> {
     Ok((a as i32, b as i32))
 }
 
-/// A stable per-topology key: display count + each display's bounds (order
-/// independent), FNV-1a hashed to hex. A laptop docked vs undocked hashes
-/// differently, so each keeps its own remembered geometry.
 pub fn topology_signature(displays: &[DisplayReport]) -> String {
     let mut bounds: Vec<(i32, i32, i32, i32)> = displays.iter().map(|d| d.bounds).collect();
     bounds.sort_unstable();
@@ -353,9 +333,6 @@ fn fnv1a_hex(s: &str) -> String {
     format!("{:016x}", h)
 }
 
-/// Slug for a game key: lowercase alphanumerics only (spaces/punctuation
-/// dropped). "Match 3" -> "match3". This is the `<slug>` in `[game.<slug>]`
-/// and in the saved-geometry key.
 pub fn game_slug(title: &str) -> String {
     title
         .chars()
@@ -363,10 +340,6 @@ pub fn game_slug(title: &str) -> String {
         .map(|c| c.to_ascii_lowercase())
         .collect()
 }
-
-// ============================================================================
-// I/O layer (dirs + read/write). Kept thin; the logic above is what's tested.
-// ============================================================================
 
 #[cfg(not(target_os = "windows"))]
 fn home_dir() -> Option<PathBuf> {
@@ -440,9 +413,6 @@ pub fn env_geometry() -> PartialGeometry {
     out
 }
 
-/// Read the machine config for this game. Missing file: skip silently (the one
-/// sanctioned absent-file fallback). Present-but-malformed: log an error and
-/// skip -- never silent.
 pub fn machine_config(game_slug: &str) -> MachineConfig {
     let Some(path) = config_file() else {
         return MachineConfig::default();
@@ -470,9 +440,6 @@ pub fn machine_config(game_slug: &str) -> MachineConfig {
     }
 }
 
-/// Read the saved geometry for (game, topology). Missing file / missing entry /
-/// unreadable JSON: None (a corrupt state file is logged, then ignored -- it is
-/// engine-owned and self-heals on the next write).
 pub fn saved_geometry(
     game_slug: &str,
     topo: &str,
@@ -502,8 +469,6 @@ pub fn saved_geometry(
         .get("display")
         .and_then(|d| d.as_i64())
         .map(|d| d as i32);
-    // The size the GAME asked for when this was written. Absent on entries
-    // saved before it was recorded -- see drop_stale_saved_size.
     let req = match (
         entry.get("req_w").and_then(|v| v.as_i64()),
         entry.get("req_h").and_then(|v| v.as_i64()),
@@ -521,18 +486,6 @@ pub fn saved_geometry(
     ))
 }
 
-/// A saved entry records the size the GAME asked for when it was written. If
-/// the game asks for a different default now, a developer changed it in code
-/// and that has to win over the remembered size -- otherwise editing
-/// GameConfig does nothing at all and the only cure is deleting a state file
-/// nobody remembers exists.
-///
-/// Only the SIZE is dropped. Position and display stay: changing a default
-/// size is no reason to move a window off the monitor its user put it on.
-///
-/// A legacy entry (written before the request was recorded) carries no request
-/// and cannot be shown to be fresh, so it is treated as stale. That costs one
-/// re-placement per game and then self-heals on the next save.
 pub fn drop_stale_saved_size(
     saved: PartialGeometry,
     saved_req: Option<(i32, i32)>,
@@ -594,7 +547,6 @@ fn save_geometry_to(
         ::log::error!(target: "STONE", "creating {} failed: {}", dir.display(), e);
         return false;
     }
-    // Merge into whatever is there so other games'/topologies' entries survive.
     let mut root: serde_json::Value = std::fs::read_to_string(path)
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
@@ -728,8 +680,6 @@ mod tests {
         assert!(!dropped);
     }
 
-    // The bug this exists for: the game's default moved and the remembered
-    // size silently outranked it, so a code edit did nothing.
     #[test]
     fn a_changed_request_drops_the_saved_size_and_keeps_the_place() {
         let (out, dropped) =
@@ -751,8 +701,6 @@ mod tests {
         assert!(dropped);
     }
 
-    // End to end through the merge: the game default wins the SIZE while the
-    // saved entry still wins position and display.
     #[test]
     fn a_dropped_size_falls_through_to_the_game_default() {
         let base = ResolvedGeometry {
@@ -798,7 +746,6 @@ mod tests {
             display: Some(0),
         };
         let (r, prov) = merge_geometry(base(), &[(Source::Env, env), (Source::Saved, saved)]);
-        // env wins size; saved provides pos + display (env is silent on them).
         assert_eq!(r.size, (1280, 720));
         assert_eq!(r.pos, (10, 20));
         assert_eq!(r.display, Some(0));
@@ -906,7 +853,6 @@ display = 1
             parse_config_toml(toml, "other").unwrap().imgui_scale,
             Some(2.0)
         );
-        // An integer is a scale too; a hand-written `2` must not be rejected.
         assert_eq!(
             parse_config_toml("[default]\nimgui_scale = 2\n", "x")
                 .unwrap()
@@ -991,7 +937,6 @@ display = 1
 
     #[test]
     fn restore_when_monitor_disappears_falls_back_to_available_display() {
-        // Window was on display 1 (at 2000, 100), but display 1 disappeared: only display 0 remains (0..1920)
         let displays = vec![disp(0, (0, 0, 1920, 1080))];
         let borders = crate::window_report::Borders {
             top: 30,
@@ -1016,7 +961,6 @@ display = 1
             placement.display, 0,
             "must fall back to available display 0"
         );
-        // Must clamp into display 0 (max_x = 1920 - 800 = 1120)
         assert!(placement.pos.0 >= 0 && placement.pos.0 <= 1120);
         assert_eq!(placement.size, (800, 600));
         assert_eq!(bounds.display, Some(0));

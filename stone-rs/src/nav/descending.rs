@@ -33,8 +33,6 @@ impl DescendSelection {
         }
     }
     fn candidate_rank(&self, c: &DescendCandidate) -> int {
-        // Distances are integers. This is the exact admission boundary of
-        // distance <= best + 0.2*hop, without floating point or contraction.
         if c.distance >= self.here || c.distance * 5 > self.best * 5 + c.hop {
             -1
         } else {

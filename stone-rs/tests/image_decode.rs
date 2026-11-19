@@ -1,6 +1,3 @@
-// Background decode probes: the dimension probe agrees with a full decode,
-// and malformed input is rejected without decoding.
-
 use stone_rs::image_decode;
 
 fn write_png(dir: &std::path::Path, name: &str, w: u32, h: u32) -> String {

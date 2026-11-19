@@ -1,10 +1,3 @@
-//! Glyph outline rasterization with synthetic bold and oblique.
-//!
-//! Outlines come from ttf-parser, rasterization and stroking from zeno.
-//! Synthesis is applied to the OUTLINE before rasterizing, so stems thicken
-//! and diagonals stay antialiased; a bitmap-level dilate or shear cannot do
-//! either.
-
 /// Which face a bake is producing. `Regular` reads the font's own outlines;
 /// the rest are synthesized from those same outlines.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -57,12 +50,6 @@ impl Face {
     }
 }
 
-/// Which synthesized faces a family DECLARES. `Regular` is always baked; the
-/// rest exist only when asked for, so the default bakes exactly the outlines
-/// the font shipped. A caller that requests an undeclared face is rejected
-/// upstream rather than served `Regular` -- synthesis is a declaration, not a
-/// fallback, and a pixel family declaring nothing is what keeps its atlas
-/// binary (`oblique_not_bold_antialiases_a_pixel_font`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct FaceSet {
     pub bold: bool,
@@ -104,10 +91,6 @@ impl FaceSet {
 /// real bold cut adds at UI sizes without closing counters.
 pub const BOLD_STRENGTH_PER_PX: f32 = 1.0 / 24.0;
 
-/// Oblique lean. Real italic faces report an `italicAngle` clustering at
-/// 11-12 degrees; CSS synthesizes at 14. The lower value reads as type
-/// rather than as a transform, and the web side must be told this angle
-/// explicitly rather than left to synthesize its own.
 pub const OBLIQUE_DEGREES: f32 = 12.0;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -312,11 +295,6 @@ impl ttf_parser::OutlineBuilder for OutlineSink {
 fn render_outline(cmds: &[zeno::Command], scale: f32, advance: f32, synth: Synth) -> RasterGlyph {
     use zeno::{Fill, Format, Mask, Stroke, Style, Transform};
 
-    // Scale, y-flip and oblique in ONE matrix, built directly rather than
-    // composed: zeno's `Transform::then` and `transform_point` do not share a
-    // row/column convention, so composing silently transposes the shear.
-    // `transform_point` is x' = px*xx + py*yx, y' = px*xy + py*yy, and a right
-    // lean wants x' = s*(px + py*tan), y' = -s*py.
     let shear = synth.skew_deg.to_radians().tan();
     let t = Transform::new(scale, 0.0, scale * shear, -scale, 0.0, 0.0);
 
@@ -329,10 +307,6 @@ fn render_outline(cmds: &[zeno::Command], scale: f32, advance: f32, synth: Synth
             .render()
     };
 
-    // Under Origin::TopLeft, `Placement.top` is the y-DOWN coordinate of the
-    // top edge, not a baseline-up bearing. The path is already y-flipped, so
-    // the glyph sits at negative y; RasterGlyph::top wants the distance UP
-    // from the baseline, hence the negation.
     let (fill_data, fill) = render(Style::Fill(Fill::NonZero));
 
     if synth.embolden <= 0.0 {
@@ -346,16 +320,10 @@ fn render_outline(cmds: &[zeno::Command], scale: f32, advance: f32, synth: Synth
         };
     }
 
-    // Embolden by unioning the fill with a centred stroke of the target
-    // width, which thickens stems outward without closing counters.
-    // `scale = false` puts the width in POST-transform pixels; zeno's default
-    // strokes in font units, where a pixel-sized width is ~1/2000 em and
-    // vanishes silently.
     let mut stroke = Stroke::new(synth.embolden);
     stroke.scale = false;
     let (stroke_data, stroked) = render(Style::Stroke(stroke));
 
-    // Union both bitmaps in the shared y-down placement space.
     let left = fill.left.min(stroked.left);
     let top = fill.top.min(stroked.top);
     let right = (fill.left + fill.width as i32).max(stroked.left + stroked.width as i32);
@@ -383,17 +351,11 @@ fn render_outline(cmds: &[zeno::Command], scale: f32, advance: f32, synth: Synth
         height: h,
         left: left as f32,
         top: -(top as f32),
-        // The stroke widens the glyph on both sides, so the advance has to
-        // grow with it or bold text sets tighter than it draws.
         advance: advance + synth.embolden,
         data,
     }
 }
 
-/// Fraction of the probe glyphs' ink texels that are only partially covered
-/// (1..=254). A pixel font rasterized on its native grid is near-binary (~0);
-/// off the grid -- or any smooth font, or a synthesized face -- antialiases
-/// edges into many partial texels. Returns 0 if nothing rasterized.
 pub fn gray_fraction(font: &RasterFont, probe: &[u8], synth: Synth) -> f32 {
     let mut ink = 0u64;
     let mut gray = 0u64;
@@ -427,16 +389,12 @@ mod synth_tests {
         crate::text::FALLBACK_FONT.to_vec()
     }
 
-    // The generated pixel font has a native grid; 48 rasterizes
-    // near-binary on it, the size the pixel-grid tests load.
     fn pixel_font() -> Vec<u8> {
         crate::test_fonts::pixel_font()
     }
 
     const PX: f32 = 32.0;
 
-    // Emboldening must add ink. A shear alone must not: it moves ink without
-    // creating it, so an italic that changes ink is transforming wrongly.
     #[test]
     fn bold_adds_ink_and_oblique_does_not() {
         let data = droid();
@@ -468,9 +426,6 @@ mod synth_tests {
         );
     }
 
-    // The lean must be to the RIGHT. A sign error still produces a slanted
-    // glyph with a plausible ink total, so ink alone cannot catch it; only
-    // the direction of the overhang can.
     #[test]
     fn oblique_leans_right() {
         let data = droid();
@@ -490,9 +445,6 @@ mod synth_tests {
         );
     }
 
-    // A pixel font on its native grid rasterizes binary. Regular must stay
-    // that way through the new rasterizer: this is what `offgrid` protects
-    // and what CrispArt depends on.
     #[test]
     fn pixel_font_regular_stays_binary() {
         let data = pixel_font();
@@ -504,9 +456,6 @@ mod synth_tests {
         );
     }
 
-    // Cross-check against an independent rasterizer: on unmodified glyphs the
-    // ttf-parser/zeno path must agree with fontdue. Without this the synthesis
-    // numbers above would have no control.
     #[test]
     fn regular_face_agrees_with_fontdue() {
         let data = droid();
@@ -550,9 +499,6 @@ mod synth_tests {
         assert_eq!(Face::from_index(Face::ALL.len()), None, "no fifth face");
     }
 
-    // Synthesis leaves the source font's vertical metrics alone, which is why
-    // mixed faces share a baseline for free. Units are pixels at this size:
-    // ascent up (positive), descent down (negative), both scaling with px.
     #[test]
     fn vertical_metrics_are_pixels_at_this_size() {
         let data = droid();
@@ -576,9 +522,6 @@ mod synth_tests {
         );
     }
 
-    // Advances must come from the font's own hmtx, not from the ink box.
-    // Emboldening widens the glyph, so the advance has to grow with it or
-    // bold text sets tighter than it draws.
     #[test]
     fn bold_advance_grows_with_the_stems() {
         let data = droid();

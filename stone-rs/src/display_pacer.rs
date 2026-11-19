@@ -93,12 +93,8 @@ fn wait_for_tick_after(seen: u64, timeout: Duration) -> bool {
 }
 
 const FALLBACK_PERIOD: Duration = Duration::from_micros(16_667);
-// No active display means no link can be created; try again this often so
-// vsync resumes when a display wakes.
 const LINK_RETRY: Duration = Duration::from_secs(1);
 
-// Long enough that a live link always ticks first, short enough that a
-// sleeping display paces the game at a usable rate instead of stopping it.
 fn tick_timeout(link: CVDisplayLinkRef) -> Duration {
     let period = unsafe { CVDisplayLinkGetNominalOutputVideoRefreshPeriod(link) };
     let period = if period.flags & CV_TIME_IS_INDEFINITE != 0
@@ -270,8 +266,6 @@ impl Drop for DisplayPacer {
 mod tests {
     use super::*;
 
-    // The tick counter is process-wide; a tick from one test would end the
-    // other's wait early.
     static SERIAL: Mutex<()> = Mutex::new(());
 
     #[test]

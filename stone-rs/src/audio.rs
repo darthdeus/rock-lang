@@ -11,12 +11,6 @@ use rodio::{
     ChannelCount, Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, SampleRate, Source,
 };
 
-/// `STONE_AUDIO_STUB=1` registers sounds WITHOUT decoding them: the handle is
-/// real and everything downstream keeps working, but the buffer is empty, so a
-/// play is silence that ends immediately.
-///
-/// Decoding is the whole cost here: mag's `mag_sfx_init` is ~100ms of Vorbis.
-/// The sim runner selects it explicitly for every sim child.
 pub fn stub_audio() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("STONE_AUDIO_STUB").as_deref() == Ok("1"))
@@ -50,34 +44,6 @@ pub extern "C" fn stone_audio_stub_active() -> bool {
     stub_audio()
 }
 
-/// Whether this process must not be heard, latched once from the environment.
-///
-/// `STONE_QUIET` and `audio_gate_muted()` are Rock-side and only advisory: they
-/// are checked at the compat call site, while `stone_play_sound`,
-/// `stone_play_music` and `stone_voice_set_gain` each drive a real device
-/// whenever one is open. A fixture that needs live voices for its assertions
-/// opens that gate -- mag's `ambience_region_switch` sets `STONE_QUIET = false`
-/// so `Voice.active()` has something to answer about -- and with
-/// `STONE_AUDIO_STUB=0` the ambience it starts was really audible during
-/// `rock sim mag`. So the suppression a sim cannot defeat sits on the OUTPUT,
-/// below every gate Rock can reach, and is read once rather than per play.
-///
-/// It mutes the output and nothing else. Every value a sim asserts on -- bus
-/// gain, lowpass, reverb, duck, the meter envelope, `samples_pulled`, voice
-/// liveness -- is computed upstream of the muted stage and is unchanged, which
-/// is the whole point: silencing by not attaching master would answer "no
-/// sound" and leave master at 0 pulls forever.
-///
-/// Nothing is set in a shipped run, so the stage is never installed there and
-/// the mixer graph is the one it has always been.
-///
-/// This is the ONE place the condition is computed. `stone_quiet_init` in
-/// `audio/playback.rock` seeds the Rock gate from it through
-/// `stone_audio_quiet_env` rather than re-reading the environment, so a fourth
-/// condition added here reaches both answers and they cannot drift apart. The
-/// two are still used differently -- Rock's `STONE_QUIET` is a mutable global
-/// that games also drive from their own settings, while this latch is what no
-/// Rock code can reopen -- but they start from one reading.
 fn output_muted() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -89,30 +55,10 @@ fn output_muted() -> bool {
     })
 }
 
-/// The decision itself, separated from the lookup so it is testable without
-/// mutating the process environment out from under a parallel test.
-///
-/// An explicit `STONE_QUIET=0` opts a deliberate headless audio test back in,
-/// and a sim is quiet whatever it asks for, because `ROCK_RUN_SIM` is the
-/// runner's variable and not a fixture's.
-///
-/// The opt-in is honoured ONCE and reaches both consequences from that one
-/// reading: false here makes `stone_audio_quiet_env` answer false, which leaves
-/// Rock's `STONE_QUIET` false so the compat gate passes plays through to the
-/// native calls, AND makes `Buses::new` attach master without the zero-gain
-/// stage so those plays are really audible. That is what unifying bought. While
-/// the condition was spelled in both places the opt-in had to be honoured
-/// twice, and nothing made the two honour it the same way.
 fn output_muted_from(quiet: Option<&str>, headless: Option<&str>, run_sim: Option<&str>) -> bool {
     quiet == Some("1") || (quiet.is_none() && headless == Some("1")) || run_sim.is_some()
 }
 
-/// The latch Rock's `STONE_QUIET` is seeded from, so the gate and the output
-/// mute are one reading of one condition rather than two spellings of it.
-///
-/// Latched, so it answers the environment the process STARTED with. That is
-/// what a backstop has to do: a fixture is free to call `os_setenv` mid-run,
-/// and that must not be able to buy an audible output.
 #[no_mangle]
 pub extern "C" fn stone_audio_quiet_env() -> bool {
     output_muted()
@@ -124,9 +70,6 @@ pub extern "C" fn stone_audio_quiet_env() -> bool {
 const STUB_CHANNELS: rodio::ChannelCount = rodio::nz!(2);
 const STUB_SAMPLE_RATE: rodio::SampleRate = rodio::nz!(48_000);
 
-/// Proves the asset is there without decoding it. A stub that skipped the
-/// lookup entirely would make a deleted or renamed sound invisible to every
-/// sim -- the load would succeed on a path that resolves to nothing.
 fn audio_asset_exists(path_str: &str) -> bool {
     match crate::asset_registry::resolve_asset_prefix(path_str, 4) {
         Some(b) if !b.is_empty() => true,
@@ -316,9 +259,6 @@ enum StreamDecoder {
     Looped(rodio::decoder::LoopedDecoder<EncodedCursor>),
 }
 
-/// Incremental decode of a stream source's encoded bytes. A looped decoder
-/// rebuilds from the first byte at end of data, so every pass yields exactly
-/// the samples a full decode yields and the seam is the authored loop point.
 struct StreamSource {
     decoder: StreamDecoder,
 }
@@ -376,22 +316,10 @@ impl Source for StreamSource {
     }
 }
 
-/// Time for a slewed bus parameter to cover ~63% of its distance to target.
-/// Long enough to kill zipper noise on a 60Hz-stepped target, short enough
-/// that a duck still reads as a duck.
 const SLEW_TAU_SECS: f32 = 0.010;
 
-/// Highest cutoff we let the lowpass reach, as a fraction of sample rate. A
-/// biquad goes unstable approaching Nyquist, so "off" is cutoff pinned here
-/// rather than a bypass branch -- no discontinuity when automation engages it.
-/// Not literally transparent: at 44.1kHz this sits at ~19.8kHz, so the top of
-/// the audible band still rolls off and Nyquist itself is rejected outright
-/// (`lowpass_open_still_rejects_nyquist`). Inaudible for real content.
 const LOWPASS_MAX_FRAC: f32 = 0.45;
 
-/// How fast a meter envelope falls once the signal has gone. Slow enough that
-/// a transient is still readable on a screen refreshing at 60Hz, fast enough
-/// that the meter follows a fade rather than trailing it.
 const METER_FALL_DB_PER_SEC: f32 = 20.0;
 
 /// Interleaved frame scratch. Fixed so the audio callback never allocates;
@@ -410,20 +338,11 @@ fn load_f32(cell: &AtomicU32) -> f32 {
     f32::from_bits(cell.load(Ordering::Relaxed))
 }
 
-/// Shared, lock-free bus parameters. Written from the game thread, read on the
-/// audio thread -- so atomics, never a Mutex (which is what rodio's own Player
-/// controls use, and why we don't ride those).
 struct BusParams {
     /// f32 bits. The *target*; BusSource slews the applied value toward it.
     gain: AtomicU32,
     samples_pulled: AtomicU64,
 
-    /// f32 bits. Meter envelope: rises instantly to a new output peak, falls at
-    /// METER_FALL_DB_PER_SEC. Maintained sample-side rather than by the reader,
-    /// because the device callback and the video frame run on unrelated clocks
-    /// -- a reader that did its own ballistics would be doing them on a signal
-    /// that reads zero whenever a poll lands between two callbacks. Reading is
-    /// a plain load: non-destructive, any number of consumers.
     meter: AtomicU32,
 
     /// Lowpass. Cutoff is slewed in log2(Hz) -- a linear Hz sweep sounds
@@ -525,7 +444,6 @@ impl Biquad {
         let y = self.b0 * x + s[0];
         s[0] = self.b1 * x - self.a1 * y + s[1];
         s[1] = self.b2 * x - self.a2 * y;
-        // Subnormal feedback can persist indefinitely and make silence costly.
         for state in s {
             if state.is_subnormal() {
                 *state = 0.0;
@@ -535,9 +453,6 @@ impl Biquad {
     }
 }
 
-/// Where a duck currently is. Linear ramps, so the timing is exact and
-/// assertable -- the reason to prefer an event-driven ducker over a
-/// signal-domain compressor for gameplay.
 #[derive(Clone, Copy, PartialEq)]
 enum DuckPhase {
     Idle,
@@ -545,13 +460,6 @@ enum DuckPhase {
     Release,
 }
 
-/// A mix group: its own sub-mixer, plus a wrapper that applies slewed gain to
-/// the summed result. Voices are added to `mixer()`; the wrapper is handed to
-/// a parent bus (or the device mixer) exactly once via `take_source`.
-///
-/// Bus tree today: every bus feeds `master`, and `master` is the single child
-/// of the device sink's mixer. Nesting means no rodio fork patch is needed to
-/// get post-mix master effects -- `master` IS the post-mix stage.
 struct Bus {
     mixer: rodio::mixer::Mixer,
     source: RefCell<Option<BusSource>>,
@@ -578,7 +486,6 @@ impl Bus {
                 frame: [0.0; MAX_CHANNELS],
                 applied_gain: 1.0,
                 meter_env: 0.0,
-                // Per-frame amplitude factor giving METER_FALL_DB_PER_SEC.
                 meter_decay: (10.0f32).powf(-METER_FALL_DB_PER_SEC / 20.0 / rate),
                 applied_cutoff_log2: max_cutoff(sample_rate).log2(),
                 applied_drive: 1.0,
@@ -651,13 +558,9 @@ impl Bus {
         store_f32(&p.reverb_wet, wet.clamp(0.0, 1.0));
         store_f32(&p.reverb_dry, dry.clamp(0.0, 1.0));
         store_f32(&p.reverb_width, width.clamp(0.0, 1.0));
-        // Release: everything above must be visible before the generation is.
         p.reverb_gen.fetch_add(1, Ordering::Release);
     }
 
-    /// Duck to `depth` over `attack` seconds, then back to unity over
-    /// `release`. Re-triggering restarts the attack, which is what you want
-    /// for repeated events (each new hit re-ducks).
     fn duck(&self, depth: f32, attack: f32, release: f32) {
         let p = &self.params;
         store_f32(&p.duck_depth, depth.clamp(0.0, 1.0));
@@ -672,19 +575,6 @@ fn slew_coeff(sample_rate: SampleRate) -> f32 {
     1.0 - (-1.0 / (SLEW_TAU_SECS * sample_rate.get() as f32)).exp()
 }
 
-/// A bus's output. **Infinite by construction**: a rodio `MixerSource` returns
-/// `None` once it runs dry, and a parent mixer permanently drops any child
-/// that returns `None` -- so an unwrapped sub-mixer would go silently deaf the
-/// first moment its last voice ended. Yielding 0.0 instead keeps the bus alive
-/// for the next voice. Pinned by `bus_survives_going_silent`.
-///
-/// Processes a whole interleaved frame at a time: the biquad needs per-channel
-/// state and the reverb is inherently stereo, neither of which a
-/// sample-at-a-time loop can express. Chain order is
-/// **distortion -> lowpass -> reverb -> gain*duck** -- drive, then tone, then
-/// space, with the fader last so a duck attenuates the reverb tail too.
-///
-/// Allocation-free: fixed scratch, no per-call heap, no locks.
 struct BusSource {
     inner: rodio::mixer::MixerSource,
     params: Arc<BusParams>,
@@ -741,7 +631,6 @@ impl BusSource {
         self.duck_gen = gen;
         let p = &self.params;
         self.duck_depth = f32_at(&p.duck_depth);
-        // A zero-length stage means "jump", so guard the divide.
         let attack = f32_at(&p.duck_attack) * self.sample_rate;
         let release = f32_at(&p.duck_release) * self.sample_rate;
         self.duck_attack_step = if attack < 1.0 { 1.0 } else { 1.0 / attack };
@@ -778,8 +667,6 @@ impl BusSource {
         for i in 0..self.channels.min(MAX_CHANNELS) {
             self.frame[i] = self.inner.next().unwrap_or(0.0);
         }
-        // Channels past the scratch still have to be consumed, or the stream
-        // would drift out of frame alignment.
         for _ in MAX_CHANNELS..self.channels {
             let _ = self.inner.next();
         }
@@ -789,8 +676,6 @@ impl BusSource {
         self.applied_drive += (f32_at(&p.distortion_drive) - self.applied_drive) * self.slew;
         self.applied_mix += (f32_at(&p.distortion_mix) - self.applied_mix) * self.slew;
 
-        // Cutoff slews in log2(Hz): a linear Hz ramp sweeps unevenly to the
-        // ear, because pitch perception is logarithmic.
         let target_log2 = f32_at(&p.cutoff).max(1.0).log2();
         self.applied_cutoff_log2 += (target_log2 - self.applied_cutoff_log2) * self.slew;
         if (self.applied_cutoff_log2 - self.coeff_cutoff_log2).abs() > 0.0005 {
@@ -825,10 +710,6 @@ impl BusSource {
             loudest = loudest.max(sample.abs());
         }
 
-        // Rise instantly, fall at a fixed rate: a meter that fell as slowly as
-        // it rose would never show a transient, and one that fell as fast as it
-        // rose would show nothing readable. The envelope lives here rather than
-        // in the reader because only here is the clock the signal's own.
         self.meter_env = (self.meter_env * self.meter_decay).max(loudest);
         store_f32(&self.params.meter, self.meter_env);
     }
@@ -901,10 +782,6 @@ struct Buses {
 }
 
 impl Buses {
-    /// `muted` pins the output silent WITHOUT touching the graph: master is
-    /// still attached and still pulled, so every bus counter, meter and voice
-    /// retires exactly as it does with audio on, and only the samples leaving
-    /// for the device are zeroed.
     fn new(sink: &MixerDeviceSink, muted: bool) -> Self {
         Self::attached(
             sink.mixer(),
@@ -930,15 +807,6 @@ impl Buses {
         buses
     }
 
-    /// The same bus graph with nothing draining it.
-    ///
-    /// Every bus parameter -- gain, lowpass, distortion, reverb, duck -- is
-    /// CPU-side state a sim entry can write and a successor can read, and none
-    /// of it needs a device. Under `STONE_AUDIO_STUB` the graph is built and
-    /// simply never attached to a sink, so that state exists and CROSSES
-    /// exactly as it does with audio on. The alternative -- no buses at all --
-    /// is what made the audio ambient row answer `Absent` for the default sim
-    /// configuration, which is a laundering hole wearing the word "absent".
     fn detached(channels: rodio::ChannelCount, rate: rodio::SampleRate) -> Self {
         let master = Bus::new(channels, rate);
         let buses = Buses {
@@ -976,34 +844,13 @@ impl Buses {
 }
 
 struct AudioState {
-    /// The output device, or `None` under `STONE_AUDIO_STUB`.
-    ///
-    /// A stubbed run has a real `AudioState` with no device rather than no
-    /// state at all. The difference is not cosmetic: with no state,
-    /// `stone_load_sound` minted an id and handed it to Rock while nothing was
-    /// inserted, so the `sound` class published an EMPTY live set -- measured
-    /// on bitgun's boot as `sound issued=23 live=0 unaccounted=23`. The
-    /// identity diff is structurally blind to that, since empty compares equal
-    /// to empty; only id accounting could name it.
-    ///
-    /// What a device gates is PLAYBACK, and only playback. Everything else --
-    /// the decoded buffers, the loaded tracks, the volumes, every bus
-    /// parameter -- is CPU-side state a sim entry can write and its successor
-    /// can read, so it exists either way.
     _stream: Option<MixerDeviceSink>,
     buses: Buses,
     sounds: HashMap<u64, SoundData>,
     pending_sound_admissions: VecDeque<u64>,
     inflight_sound_bytes: u64,
-    // Encoded bytes (ogg/etc.), decoded incrementally by each play
-    // (`StreamSource`). Held as bytes rather than a path so embedded-asset
-    // builds (fire) play music from the registry -- there is no loose file on
-    // disk in a shipped install.
     music: HashMap<u64, Arc<[u8]>>,
     music_playback: Option<MusicPlayback>,
-    // Every currently-playing voice, keyed by voice id. Voices that ended on
-    // their own are pruned on each play_sound call; membership here IS the
-    // liveness answer `stone_voice_active` gives (see `voice_active`).
     voices: HashMap<u64, Voice>,
 }
 
@@ -1082,8 +929,6 @@ fn audio_output_builder(
 fn open_audio_output() -> Result<MixerDeviceSink, rodio::DeviceSinkError> {
     use rodio::cpal::traits::{DeviceTrait, HostTrait};
     let host = rodio::cpal::default_host();
-    // Preserve rodio's default-device, then non-null fallback-device search,
-    // installing the engine callback before opening every attempted stream.
     host.default_output_device()
         .ok_or(rodio::DeviceSinkError::NoDevice)
         .and_then(|device| audio_output_builder(device)?.open_stream())
@@ -1118,12 +963,7 @@ pub extern "C" fn stone_audio_init() -> bool {
             return true;
         }
 
-        // Device-free runs retain decoding and bus state without negotiating
-        // an output stream with the system audio server.
         if audio_device_disabled() {
-            // A real state, with no device. The rate and channel count decide
-            // only the bus mixers' internal format, and under a stub no sample
-            // ever leaves them.
             *state.borrow_mut() = Some(AudioState {
                 _stream: None,
                 buses: Buses::detached(STUB_CHANNELS, STUB_SAMPLE_RATE),
@@ -1143,9 +983,6 @@ pub extern "C" fn stone_audio_init() -> bool {
             t_open.elapsed().as_secs_f64() * 1000.0);
         match opened {
             Ok(mut stream) => {
-                // Silence rodio's "Dropping DeviceSink, audio playing through
-                // this sink will stop" warning on program exit. We intentionally
-                // drop the sink at shutdown — that's the expected path, not a bug.
                 stream.log_on_drop(false);
                 let buses = Buses::new(&stream, output_muted());
                 *state.borrow_mut() = Some(AudioState {
@@ -1171,9 +1008,6 @@ pub extern "C" fn stone_audio_init() -> bool {
 #[no_mangle]
 pub extern "C" fn stone_audio_quit() {
     AUDIO_STATE.with(|state| {
-        // Dropping the whole state takes three classes' live sets with it, so
-        // it retires all three -- a bulk drop leaves the same accounting hole a
-        // skipped `remove` would.
         if let Some(audio) = state.borrow().as_ref() {
             for handle in audio.sounds.keys() {
                 crate::handles::retire(Class::Sound, *handle);
@@ -1223,7 +1057,6 @@ fn decode_sound_bytes(audio_bytes: Vec<u8>, path_str: &str) -> Option<(Vec<f32>,
     let sample_rate = decoder.sample_rate().get();
     let channels = decoder.channels().get();
     let mut samples: Vec<f32> = decoder.collect();
-    // The buffer is retained for the process lifetime; drop the growth slack.
     samples.shrink_to_fit();
 
     if samples.is_empty() {
@@ -1342,9 +1175,6 @@ pub extern "C" fn stone_load_sound_deferred(
     load_sound_recipe(path, frames, sample_rate, channels, false)
 }
 
-/// A looped source that holds its encoded file once admitted and decodes it
-/// incrementally per voice; it never holds PCM (`stone_sound_resident` stays
-/// false). The recipe is the same metadata a deferred sound carries.
 #[no_mangle]
 pub extern "C" fn stone_load_sound_stream(
     path: *const c_char,
@@ -1434,7 +1264,6 @@ pub extern "C" fn stone_service_sound_admissions() -> i64 {
             }
             let limit = SOUND_DECODE_IN_FLIGHT_BYTES;
             let stream = sound.stream;
-            // The budget bounds decoded PCM; a stream reads only its encoded file.
             let bytes = if stream {
                 0
             } else {
@@ -1549,9 +1378,6 @@ pub extern "C" fn stone_sound_stream_bytes(handle: u64) -> i64 {
     .unwrap_or(-1)
 }
 
-/// Re-decode `path` into the same sound `handle` in place. Stops in-flight
-/// players first; keeps the old recipe and samples on unknown handle or decode
-/// failure, so a corrupt/missing file never wipes a working sound.
 #[no_mangle]
 pub extern "C" fn stone_reload_sound(handle: u64, path: *const c_char) -> bool {
     if handle == 0 || path.is_null() {
@@ -1617,9 +1443,6 @@ pub extern "C" fn stone_sound_sample_count(handle: u64) -> i64 {
     .unwrap_or(-1)
 }
 
-/// How far into the track the single sink is now, in milliseconds, or -1 when
-/// nothing is playing. -1 rather than 0 because a sink that just started IS at
-/// 0, and "silent" is a different state from "at the beginning".
 #[no_mangle]
 pub extern "C" fn stone_music_position_ms() -> i64 {
     with_audio(|audio| {
@@ -1639,8 +1462,6 @@ pub extern "C" fn stone_load_music(path: *const c_char) -> u64 {
         Err(_) => return 0,
     };
 
-    // Music is held compressed and decoded on play, so the stub skips the read
-    // and the decoder probe; an empty buffer plays as silence.
     let bytes = if stub_audio() {
         if !audio_asset_exists(path_str) {
             return 0;
@@ -1661,9 +1482,6 @@ pub extern "C" fn stone_load_music(path: *const c_char) -> u64 {
         bytes
     };
 
-    // Same order as `stone_load_sound`, for the same reason: an id the class
-    // cannot show is `unaccounted`, and that is a property of there being no
-    // audio state rather than of the stub.
     AUDIO_STATE.with(|state| {
         let Some(ref mut audio) = *state.borrow_mut() else {
             crate::log_once!(
@@ -1706,9 +1524,6 @@ pub(crate) fn live_voice_ids() -> Vec<u64> {
     with_audio(|audio| Some(audio.voices.keys().copied().collect())).unwrap_or_default()
 }
 
-/// Whether the single music sink is playing something, and if so which handle
-/// (0 when nothing is). One sink and any number of loaded tracks, so "is music
-/// loaded" and "is music playing" are different questions.
 #[no_mangle]
 pub extern "C" fn stone_music_playing_handle() -> u64 {
     with_audio(|audio| audio.music_playback.as_ref().map(|p| p.handle)).unwrap_or(0)
@@ -1720,10 +1535,6 @@ fn stop_music_playback(playback: &mut Option<MusicPlayback>) {
     }
 }
 
-/// Drop a decoded music buffer, stopping playback only when the sink is playing
-/// THIS handle. There is one sink and any number of loaded tracks, so stopping
-/// unconditionally would silence whatever else was playing -- an entry's
-/// teardown of its own track would stop the boot process's music.
 #[no_mangle]
 pub extern "C" fn stone_unload_music(handle: u64) -> bool {
     AUDIO_STATE.with(|state| {
@@ -1767,34 +1578,10 @@ pub extern "C" fn stone_unload_sound(handle: u64) -> bool {
     })
 }
 
-/// Per-play gain and playback ratio. The gain is the caller's alone -- the
-/// bus applies its own downstream, and there is no third global on top of
-/// either. There used to be: `sound_volume` was folded in here regardless of
-/// which bus the voice was headed for, so the "sfx" level silently attenuated
-/// ambience and UI as well.
-///
-/// The speed floor is load-bearing: rodio resamples by the ratio, so 0 (or a
-/// negative, which a caller computing a pitch from a lifetime can produce)
-/// yields a player that consumes no samples and never reports empty -- it would
-/// sit in the voice map forever rather than fail.
 fn sound_play_params(volume: f32, speed: f32) -> (f32, f32) {
     (volume.max(0.0), speed.clamp(0.05, 8.0))
 }
 
-/// `source` at `ratio` playback speed, under a `decay` envelope when one is
-/// asked for.
-///
-/// `decay` is in seconds of OUTPUT, which is why it is applied after the speed:
-/// a caller asking for a two-second rumble means two seconds of what it hears,
-/// not two seconds of source it then stretched to six.
-///
-/// The ramp runs the whole length rather than only the tail because that is the
-/// shape the callers want (a struck thing ringing down); a sound that should
-/// hold and then release wants an envelope, not this.
-///
-/// Boxed so the two arms have one type and the shaping is reachable from a
-/// test. That costs nothing: `Player::append` hands the source to its queue,
-/// which boxes it anyway (rodio `queue.rs`, `append_with_signal`).
 fn shaped_source<S>(source: S, ratio: f32, decay: f32) -> Box<dyn Source<Item = f32> + Send>
 where
     S: Source<Item = f32> + Send + 'static,
@@ -1936,9 +1723,6 @@ where
     }
 }
 
-/// Stop and forget every voice playing `sound`. Used by asset-level ops
-/// (stop/unload/reload) -- a voice outliving its sound asset would keep
-/// playing samples the caller believes are gone.
 fn stop_voices_of(voices: &mut HashMap<u64, Voice>, sound: u64) {
     voices.retain(|id, v| {
         if v.sound == sound {
@@ -1951,11 +1735,6 @@ fn stop_voices_of(voices: &mut HashMap<u64, Voice>, sound: u64) {
     });
 }
 
-/// Start `handle` as a new voice on `bus`; returns its id, or 0 if the sound
-/// isn't loaded, the bus is unknown, or audio never initialized. Nonzero ids
-/// are unique for the process lifetime -- never reused, so a stale id can't
-/// address a later voice. A looped voice repeats the decoded sample buffer
-/// until explicitly stopped.
 #[no_mangle]
 pub extern "C" fn stone_play_sound(
     handle: u64,
@@ -1969,13 +1748,6 @@ pub extern "C" fn stone_play_sound(
 ) -> u64 {
     AUDIO_STATE.with(|state| {
         if let Some(ref mut audio) = *state.borrow_mut() {
-            // PLAYBACK is what a device gates, and it is gated explicitly here
-            // rather than falling out of there being no state at all. Nothing
-            // drains a stubbed bus graph, so a player appended to one would
-            // never empty -- `stone_voice_active` would answer true forever and
-            // `voices` would grow for the process lifetime. Returning 0 is the
-            // same answer a stubbed run has always given; what changed is that
-            // the sound the caller loaded is now really in the registry.
             if audio._stream.is_none() {
                 return 0;
             }
@@ -1986,17 +1758,9 @@ pub extern "C" fn stone_play_sound(
             if let Some(sound_data) = audio.sounds.get(&handle) {
                 let (gain, ratio) = sound_play_params(volume, speed);
 
-                // Per-play gain rides the player; the bus applies its own
-                // slewed gain downstream, so the two compose rather than
-                // one having to know about the other.
                 let player = Player::connect_new(bus.mixer());
                 player.set_volume(gain);
 
-                // Reverb is a BUS insert now, not a per-voice wrapper. Two
-                // consequences worth knowing: one tank costs the same whether
-                // one voice is playing or forty, and the tail no longer pitches
-                // with a slowed sample -- the reverb sits downstream of the
-                // speed, so the room keeps its own character.
                 let pan_control = spatial.then(|| Arc::new(AtomicU32::new(pan.to_bits())));
                 let input = if sound_data.stream {
                     let Some(encoded) = sound_data.encoded.clone() else {
@@ -2023,9 +1787,6 @@ pub extern "C" fn stone_play_sound(
                 };
                 player.append(input);
 
-                // Reap voices that ended on their own. Safe here because
-                // `append` bumps the player's sound_count synchronously, so a
-                // voice started this call never looks empty to a later one.
                 audio.voices.retain(|id, v| {
                     let live = !v.player.empty();
                     if !live {
@@ -2050,10 +1811,6 @@ pub extern "C" fn stone_play_sound(
     })
 }
 
-/// Length of a sound recipe in seconds, at its own rate (before any playback
-/// speed). 0 for an unknown handle -- callers treat that as "no duration to
-/// draw" rather than as an error, since a stale handle is already visible as
-/// such elsewhere.
 #[no_mangle]
 pub extern "C" fn stone_get_sound_duration(handle: u64) -> c_float {
     with_sound(handle, SoundData::duration_seconds).unwrap_or(0.0)
@@ -2093,8 +1850,6 @@ pub unsafe extern "C" fn stone_get_sound_peaks(
         let buckets = buckets as usize;
         let slice = std::slice::from_raw_parts_mut(out, buckets);
         for (b, slot) in slice.iter_mut().enumerate() {
-            // Span the samples by bucket index rather than stepping a cursor, so
-            // the last bucket always lands on the end however n divides.
             let lo = n * b / buckets;
             let hi = (n * (b + 1) / buckets).max(lo + 1).min(n);
             let mut peak = 0.0f32;
@@ -2120,11 +1875,6 @@ pub extern "C" fn stone_stop_sound(handle: u64) {
     });
 }
 
-/// True while `voice` is addressable. This is MAP MEMBERSHIP, not
-/// `Player::empty()`: rodio's `stop()` only sets an atomic, and the player's
-/// sound_count doesn't drop until the audio thread next drains the source, so
-/// an empty()-based answer would race with our own stop calls. A voice that
-/// ends on its own stays "active" until the next `stone_play_sound` reaps it.
 #[no_mangle]
 pub extern "C" fn stone_voice_active(voice: u64) -> bool {
     with_voice(voice, |_| ()).is_some()
@@ -2197,9 +1947,6 @@ pub extern "C" fn stone_play_music(handle: u64) {
             };
 
             stop_music_playback(&mut audio.music_playback);
-            // Same gate as `stone_play_sound`, and it comes after the decode on
-            // purpose: a stubbed run still proves the track DECODES, so a
-            // corrupt file is a failure there as much as here.
             if audio._stream.is_none() {
                 return;
             }
@@ -2217,31 +1964,16 @@ pub extern "C" fn stone_bus_set_gain(bus: u32, gain: c_float) -> bool {
     with_bus(bus, |b| b.set_gain(gain))
 }
 
-/// Samples this bus has produced. Monotonic; a bus that is alive and being
-/// pulled by the device advances it. Lets a headless test observe that a bus
-/// is live without capturing audio, and is the basis for level metering.
 #[no_mangle]
 pub extern "C" fn stone_bus_samples_pulled(bus: u32) -> u64 {
     read_bus(bus, 0, Bus::samples_pulled)
 }
 
-/// Loudest sample this bus has OUTPUT since the last call, post-fader -- so it
-/// reads what the bus is contributing to the mix, not what is playing into it,
-/// and a ducked or turned-down bus meters low. Can exceed 1.0: nothing limits
-/// the sum, so that is the clip indication.
-///
-/// Reading CLEARS the hold, which is what lets a per-video-frame poll catch a
-/// transient that peaked and decayed between two polls -- but also makes this
-/// single-consumer. Two callers polling the same bus each see whichever peaks
-/// landed since the other's read.
 #[no_mangle]
 pub extern "C" fn stone_bus_peak(bus: u32) -> c_float {
     read_bus(bus, 0.0, Bus::meter)
 }
 
-/// Lowpass insert. `cutoff_hz` is the automation target -- slewed sample-side
-/// in log2(Hz), so a per-frame value from Rock ramps smoothly. Cutoff at max
-/// (~0.45 * rate) is the transparent "off" position.
 #[no_mangle]
 pub extern "C" fn stone_bus_set_lowpass(bus: u32, cutoff_hz: c_float, q: c_float) -> bool {
     with_bus(bus, |b| b.set_lowpass(cutoff_hz, q))
@@ -2269,10 +2001,6 @@ pub extern "C" fn stone_bus_set_reverb(
     })
 }
 
-/// Duck this bus to `depth` over `attack_secs`, then recover over
-/// `release_secs`. Event-driven on purpose: the envelope is exact and
-/// assertable, unlike a signal-domain sidechain. Re-triggering restarts the
-/// attack, so repeated events re-duck.
 #[no_mangle]
 pub extern "C" fn stone_bus_duck(
     bus: u32,
@@ -2306,19 +2034,6 @@ fn with_audio<T>(f: impl FnOnce(&AudioState) -> Option<T>) -> Option<T> {
     AUDIO_STATE.with(|state| state.borrow().as_ref().and_then(f))
 }
 
-/// Set Freeverb reverb effect for sounds
-/// - enabled: whether to apply reverb to sounds
-/// - room_size: 0.0-1.0 (larger = more reverb)
-/// - damping: 0.0-1.0 (higher = darker sound)
-/// - wet: 0.0-1.0 (reverb signal level)
-/// - dry: 0.0-1.0 (original signal level)
-/// - width: 0.0-1.0 (stereo width)
-///
-/// Reverb on the MASTER bus. Was a per-voice wrapper applied at play time,
-/// which meant it only ever reached sounds started after it was switched on
-/// and never reached music at all; as a master insert it reaches everything,
-/// including already-playing voices. Signature unchanged, so games need no
-/// edit. Use `stone_bus_set_reverb` to put reverb on a specific bus.
 #[no_mangle]
 pub extern "C" fn stone_set_reverb(
     enabled: bool,
@@ -2404,7 +2119,6 @@ mod tests {
             }
             return;
         }
-        // (environment, opens no device, skips decoding)
         let cases = &[
             (&[] as &[(&str, &str)], false, false),
             (&[("STONE_HEADLESS", "1")], true, false),
@@ -2483,9 +2197,6 @@ mod tests {
         AudioStateRestore(previous)
     }
 
-    // These fixtures install detached audio state and exercise real decoding.
-    // Select it in a fresh process without mutating parallel tests' environment
-    // or acquiring an output device.
     fn delegate_decoded_audio_fixture(test: &str) -> bool {
         const CHILD: &str = "STONE_DECODE_FIXTURE";
         if std::env::var(CHILD).as_deref() == Ok(test) {
@@ -2595,9 +2306,6 @@ mod tests {
         );
     }
 
-    /// Control: proves the trap Bus exists to avoid is real. A bare sub-mixer
-    /// returns None once it runs dry, and the parent drops any child that
-    /// returns None -- so it goes permanently deaf, silently.
     #[test]
     fn bare_submixer_goes_deaf_after_running_dry() {
         let (parent, mut out) = rodio::mixer::mixer(ch2(), sr());
@@ -2741,9 +2449,6 @@ mod tests {
         );
     }
 
-    /// Pins what "wide open" actually means: cutoff maxes at 0.45*rate, so
-    /// Nyquist is above it and gets rejected. Documents the limit rather than
-    /// pretending the open position is bit-transparent.
     #[test]
     fn lowpass_open_still_rejects_nyquist() {
         let (bus, mut out) = wired();
@@ -2774,7 +2479,6 @@ mod tests {
         let full = mean_abs(&mut out, 2048, 256);
         assert!(full > 0.9, "undicked bus should be near unity, got {full}");
 
-        // 10ms attack to 0.2, 100ms release.
         bus.duck(0.2, 0.010, 0.100);
         let attack_samples = (0.010 * 44100.0) as usize * 2;
         let ducked = mean_abs(&mut out, attack_samples, 256);
@@ -2799,7 +2503,6 @@ mod tests {
         bus.set_reverb(true, 0.9, 0.2, 0.9, 0.1, 1.0);
         bus.mixer().add(dc(64, 1.0));
 
-        // Past the end of the 64-frame input.
         let tail = mean_abs(&mut out, 512, 4096);
         assert!(
             tail > 0.0001,
@@ -2807,9 +2510,6 @@ mod tests {
         );
     }
 
-    /// Without reverb the bus decays to silence. Not exactly 0.0: the lowpass
-    /// always runs (there is no bypass branch, by design), and biquad state
-    /// decays asymptotically -- so this asserts inaudible, not bit-zero.
     #[test]
     fn bus_without_reverb_decays_to_silence() {
         let (bus, mut out) = wired();
@@ -2821,18 +2521,11 @@ mod tests {
         );
     }
 
-    /// The meter reads the bus OUTPUT, so it sits after the fader: a bus
-    /// turned down is a bus that is not making noise, whatever is playing
-    /// into it.
     #[test]
     fn bus_peak_is_post_fader() {
         let (bus, mut out) = wired();
         bus.mixer().add(dc(400_000, 1.0));
 
-        // Settle first. The slowest thing here is not the fader's 10ms slew but
-        // the meter's own 20dB/sec fall: dropping to a quarter is -12dB, which
-        // takes 0.6s to walk down. Read before that and the assertion is about
-        // the falloff, not about where the meter ends up.
         let steady_meter = |out: &mut dyn Iterator<Item = f32>| {
             for _ in 0..(1.5 * 44100.0) as usize * 2 {
                 let _ = out.next();
@@ -2854,12 +2547,6 @@ mod tests {
         );
     }
 
-    /// Reading must not disturb the meter. This is the flicker regression: the
-    /// device callback and the video frame run on unrelated clocks (~23ms of
-    /// buffer against 16.7ms of vsync), so polls land between callbacks. A
-    /// reset-on-read counter hands those polls a true zero and the meter
-    /// strobes; an envelope maintained sample-side does not care when it is
-    /// looked at.
     #[test]
     fn bus_meter_is_stable_between_reads() {
         let (bus, mut out) = wired();
@@ -2871,15 +2558,10 @@ mod tests {
         assert!(first > 0.9, "meter should be lit, got {first}");
         assert_eq!(first, second, "reading the meter must not consume it");
 
-        // A poll landing with no samples pulled since the last one reads the
-        // same value, not zero.
         let idle = bus.meter();
         assert_eq!(first, idle, "a poll between callbacks must not read zero");
     }
 
-    /// It still has to fall, or every meter pins at the loudest thing that has
-    /// ever happened. Falls in the audio domain, so the rate is in dB/sec and
-    /// does not depend on how often anyone looks.
     #[test]
     fn bus_meter_falls_after_signal_stops() {
         let (bus, mut out) = wired();
@@ -2889,7 +2571,6 @@ mod tests {
         let lit = bus.meter();
         assert!(lit > 0.9, "meter should catch the blip, got {lit}");
 
-        // ~0.25s of silence: 20dB/sec puts it near -5dB, down but not out.
         let _ = mean_abs(&mut out, (0.25 * 44100.0) as usize * 2, 1);
         let falling = bus.meter();
         assert!(
@@ -2901,7 +2582,6 @@ mod tests {
             "and not have dropped straight out, got {falling}"
         );
 
-        // ~3s: well below the -60dB floor the UI draws.
         let _ = mean_abs(&mut out, (3.0 * 44100.0) as usize * 2, 1);
         let dark = bus.meter();
         assert!(dark < 0.001, "meter should decay to dark, got {dark}");
@@ -2917,8 +2597,6 @@ mod tests {
         bus.mixer()
             .add(SamplesBuffer::new(ch2(), sr(), vec![1.0f32; 40_000]));
 
-        // Settle the lowpass first -- its first output is b0 (~0.8 at the open
-        // cutoff), which has nothing to do with gain.
         for _ in 0..2048 {
             let _ = out.next();
         }
@@ -2927,7 +2605,6 @@ mod tests {
         let first = out.next().expect("bus is infinite");
         assert!(first > 0.9, "gain should start open, got {first}");
 
-        // Mid-slew: on its way down, but not there yet.
         for _ in 0..64 {
             let _ = out.next();
         }
@@ -2937,7 +2614,6 @@ mod tests {
             "expected mid-slew value, got {mid}"
         );
 
-        // Settled.
         for _ in 0..4096 {
             let _ = out.next();
         }
@@ -2948,9 +2624,6 @@ mod tests {
         );
     }
 
-    // Per-play shaping: the parameters a caller sets when the voice
-    // starts, as against the bus gain that shapes everything on it.
-
     #[test]
     fn per_play_gain_is_the_callers_alone() {
         let (gain, _) = sound_play_params(0.4, 1.0);
@@ -2959,8 +2632,6 @@ mod tests {
 
     #[test]
     fn per_play_gain_is_never_negative() {
-        // A caller fading a sound out past zero must go silent, not invert the
-        // waveform's phase against the other players on the mixer.
         let (gain, _) = sound_play_params(-0.3, 1.0);
         assert_eq!(gain, 0.0);
     }
@@ -3033,7 +2704,6 @@ mod tests {
 
     #[test]
     fn speed_never_reaches_zero() {
-        // See sound_play_params: a zero ratio is a player that never finishes.
         for speed in [0.0, -1.0, f32::MIN] {
             let (_, ratio) = sound_play_params(1.0, speed);
             assert!(ratio >= 0.05, "speed {speed} -> ratio {ratio}");
@@ -3046,16 +2716,6 @@ mod tests {
         assert_eq!(ratio, 8.0);
     }
 
-    /// The decay envelope is measured in seconds of OUTPUT, which is why it is
-    /// applied after the speed: a caller asking for a half-second rumble means
-    /// half a second of what it hears, not half a second of source it then
-    /// stretched to two.
-    ///
-    /// Note what that does NOT mean. `speed` does not resample; it lowers the
-    /// rate the source REPORTS (0.25 on a 1000 Hz source reports 250 Hz), and
-    /// `take_duration` counts against that reported rate. So the sample COUNT
-    /// falls to a quarter while the playing time is the half-second asked for.
-    /// Asserting on the count alone reads as an 8x error and is not one.
     #[test]
     fn decay_caps_output_length_not_source_length() {
         use rodio::Source;
@@ -3073,7 +2733,6 @@ mod tests {
         let out_rate = shaped.sample_rate().get() as f32;
         let secs = shaped.count() as f32 / out_rate;
 
-        // Without the cap this source plays for 4.0s (1.0s slowed to a quarter).
         assert!(
             (secs - 0.5).abs() < 0.02,
             "expected ~0.5s of playback, got {secs}s at {out_rate} Hz"
@@ -3185,7 +2844,6 @@ mod tests {
                 "streamed sample {index} matches the decoded loop it replaces"
             );
         }
-        // Largest step of the authored waveform, plus one quantum per side.
         let max_step = AMPLITUDE * std::f32::consts::TAU / PERIOD as f32 + 2.0 / 32768.0;
         for pass in 1..passes {
             let seam = pass * decoded.len();
@@ -3304,20 +2962,12 @@ mod tests {
         );
     }
 
-    /// A sim cannot buy itself an audible output. `ROCK_RUN_SIM` is the
-    /// runner's variable, so the fixture that flips the Rock gate to get live
-    /// voices -- mag's `ambience_region_switch` -- stays silent regardless.
     #[test]
     fn a_sim_is_muted_even_asking_for_the_gate_open() {
         assert!(output_muted_from(Some("0"), None, Some("some_sim")));
         assert!(output_muted_from(None, None, Some("some_sim")));
     }
 
-    /// The mute takes the OUTPUT and leaves the accounting: nothing audible
-    /// reaches the device while the bus is still pulled and still meters.
-    ///
-    /// The control arm is the point. Without it this asserts only that a
-    /// silent thing is silent, which a graph that was never fed also satisfies.
     #[test]
     fn a_muted_output_carries_no_signal_but_still_drains_its_bus() {
         let heard_through = |muted: bool| {

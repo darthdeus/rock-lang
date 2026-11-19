@@ -136,7 +136,6 @@ unsafe fn record(gl: &DebugGl, operation: &str, arguments: &[i64]) {
         }
         let mut textures = Vec::new();
         let units = gl.get_parameter_i32(glow::MAX_COMBINED_TEXTURE_IMAGE_UNITS);
-        // Enumerate all units: vertex samplers need not occupy fragment slots.
         for unit in 0..units {
             gl.active_texture(glow::TEXTURE0 + unit as u32);
             let texture = gl.get_parameter_i32(glow::TEXTURE_BINDING_2D) as u32;

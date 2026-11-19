@@ -1,42 +1,3 @@
-//! Exact live-handle sets for the native resource classes, a per-handle
-//! liveness query, a teardown that reports whether the handle is gone, and id
-//! accounting that checks each class's live set against the allocator.
-//!
-//! It publishes the registries that already exist rather than adding one. Every
-//! class here is a map or slot table the engine keeps for its own reasons.
-//!
-//! Handles are compared as exact SETS, never as counts, and that is sound
-//! because there is ONE id allocator (`handles::mint`), monotonic per class --
-//! an id is never handed out twice in one process, so a destroyed-and-recreated
-//! resource is a DIFFERENT key rather than the same one. Fonts are the one
-//! ledger class outside it, and cannot join: a font id is its 1-based slot in
-//! the `FONTS` vec, so the vec IS the allocator.
-//!
-//! Class ORDER is ownership order. Two entries in `IMAGES` are projections of a
-//! resource owned elsewhere -- a font's atlas and the lazily-minted white
-//! texture -- so their owner is torn down first and the image teardown knows
-//! about the aliasing rather than deleting a texture still in use. A sound
-//! precedes the voices playing it for the same reason -- dropping the sound
-//! stops them.
-//!
-//! The class list must be a COMPLETE inventory of what this crate owns, and a
-//! live-set reader cannot check that for itself: it is empty for a registry it
-//! never asks about. Two mechanisms make omission fail closed instead.
-//!
-//! `handles::Class` sizes `CLASSES`, so a variant with no entry and an entry
-//! with no variant are both compile errors, and a const assertion pins entry
-//! `i` to variant `i` so the lengths cannot agree while the rows are shifted.
-//! That covers the list. It does not cover the REGISTRY behind a row, so
-//! `id_accounting` crosses each class's published live set with what
-//! `handles::mint` independently recorded issuing it. An id the seam issued
-//! that the class cannot show is `unaccounted`; a live handle the seam never
-//! minted is `unissued`. Driven by `b3_id_accounting` in testbed.
-//!
-//! Both mechanisms are complete only over classes that MINT, so everything
-//! else is named in `NON_MINTING` with what covers it instead. Uniform blocks
-//! are the deliberate omission from the CLASS list: `BLOCKS` is keyed by SHADER
-//! handle, so `stone_destroy_shader` owns a program's whole resource set.
-
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
@@ -44,18 +5,12 @@ use std::os::raw::{c_char, c_int};
 use crate::handles::Class;
 
 pub(crate) struct NativeClass {
-    /// The `Class` variant this entry IS. Its discriminant is this entry's
-    /// index, asserted below, so the two lists cannot drift into a silent
-    /// off-by-one where every class answers with its neighbour's registry.
     pub(crate) class: Class,
     pub(crate) name: &'static str,
     live: fn() -> Vec<u64>,
     destroy: fn(u64),
 }
 
-/// Owners first: tearing a font down removes its atlas image, tearing a shader
-/// down removes its uniform blocks. Reversing this order would delete a texture
-/// or buffer that a still-live owner points at.
 pub(crate) const CLASSES: [NativeClass; Class::COUNT] = [
     NativeClass {
         class: Class::Font,
@@ -103,7 +58,6 @@ pub(crate) const CLASSES: [NativeClass; Class::COUNT] = [
             crate::audio::stone_unload_sound(h);
         },
     },
-    // AFTER `sound`, which owns it: `stone_unload_sound` stops its voices.
     NativeClass {
         class: Class::Voice,
         name: "voice",
@@ -134,10 +88,6 @@ pub(crate) const CLASSES: [NativeClass; Class::COUNT] = [
     },
 ];
 
-/// The array is sized by `Class::COUNT`, so a variant with no entry and an
-/// entry with no variant are both compile errors. This pins the remaining
-/// degree of freedom: entry `i` must BE variant `i`, or every class would
-/// answer with its neighbour's registry while the lengths still agreed.
 const _: () = {
     let mut i = 0;
     while i < Class::COUNT {
@@ -180,28 +130,9 @@ struct ClassAccounting {
     /// Issued ids in neither the live set nor the retired count. A registry
     /// whose `live` fn under-reports lands here.
     unaccounted: i64,
-    /// Live ids outside `1..=issued`, i.e. handles this class is publishing
-    /// that the seam never handed it. A registry minting from its own counter
-    /// lands here.
     unissued: u64,
 }
 
-/// Ask every minting class whether its published live set accounts for the ids
-/// it was issued.
-///
-/// This is the question the set diff cannot ask. The diff compares one class's
-/// live set at two TIMES, so a `live` fn that reports the wrong set reports it
-/// wrongly at both and the comparison is happy; and it never asks a registry
-/// that joined the crate without joining `CLASSES` anything at all. Accounting
-/// crosses the class's own answer with the allocator's independent record, so
-/// the two have to agree about a population neither one owns alone.
-///
-/// Both directions are checked because they fail differently. `unaccounted` is
-/// an id the seam issued that the class can no longer show -- under-reported
-/// live set, or a destroy that removed the entry without retiring it.
-/// `unissued` is a live handle the seam never minted -- a class that went back
-/// to a private counter, which leaves accounting looking green on the first
-/// number alone.
 fn id_accounting() -> Vec<ClassAccounting> {
     CLASSES
         .iter()
@@ -226,18 +157,6 @@ fn id_accounting() -> Vec<ClassAccounting> {
         .collect()
 }
 
-/// The id accounting for every minting class, as one line: a summary with the
-/// denominators the caller must assert, then one row per class.
-///
-/// Every class is reported, not only the offenders -- a report that lists only
-/// violations is indistinguishable from a report that examined nothing.
-///
-/// One KNOWN non-ledger source of `unaccounted`, so a caller does not
-/// mis-diagnose it: under `STONE_AUDIO_STUB=1` (the default for sims)
-/// `stone_load_sound` mints a sound id and returns it to Rock while
-/// `AUDIO_STATE` is None, so nothing is inserted and the class publishes an
-/// empty live set. Measured on bitgun's boot: 23 unaccounted stubbed, 0 with
-/// `STONE_AUDIO_STUB=0`. Pinned by `b3_id_accounting_stub_sound_sentinel`.
 #[no_mangle]
 pub extern "C" fn stone_native_id_accounting() -> *const c_char {
     let rows = id_accounting();
@@ -320,10 +239,6 @@ fn reply(s: String) -> *const c_char {
     })
 }
 
-/// The live handle set of one class, ascending, comma separated; the empty
-/// string for a class with nothing live. Null for an unknown class name, so a
-/// caller asking about a class that does not exist gets a refusal rather than
-/// an empty set that reads as "nothing leaked".
 #[no_mangle]
 pub extern "C" fn stone_native_live_handles(class: *const c_char) -> *const c_char {
     let Some(class) = class_arg(class) else {
@@ -339,13 +254,6 @@ pub extern "C" fn stone_native_live_handles(class: *const c_char) -> *const c_ch
     )
 }
 
-/// Whether one handle of one class is live: 1 live, 0 not live, -1 the CLASS is
-/// not one this engine has.
-///
-/// Three states and not two. A boolean forces an unknown class to answer "not
-/// live", which reads exactly like a dangling handle -- so a caller whose class
-/// names drifted from this list would silently report every handle of that type
-/// as missing, and be believed.
 #[no_mangle]
 pub extern "C" fn stone_native_handle_state(class: *const c_char, handle: u64) -> c_int {
     match class_arg(class) {
@@ -354,9 +262,6 @@ pub extern "C" fn stone_native_handle_state(class: *const c_char, handle: u64) -
     }
 }
 
-/// Destroy one handle of one class and report whether it is gone afterwards.
-/// The answer is read back from the live set rather than from the destroy call,
-/// so a teardown that silently no-ops cannot report success.
 #[no_mangle]
 pub extern "C" fn stone_native_destroy(class: *const c_char, handle: u64) -> bool {
     let Some(class) = class_arg(class) else {
@@ -370,14 +275,6 @@ pub extern "C" fn stone_native_destroy(class: *const c_char, handle: u64) -> boo
 mod tests {
     use super::*;
 
-    /// Which ledger classes draw their ids from the mint seam, pinned by name.
-    ///
-    /// `Class::COUNT` sizes `CLASSES`, so the two lists cannot disagree about
-    /// how many classes exist -- but nothing structural says a class MINTS.
-    /// A new class that quietly answers false here would be admitted to the
-    /// ledger while id accounting silently skipped it, which is the one hole
-    /// the enum leaves open. Font is the only legitimate false, and it is
-    /// forced: its id is a `FONTS` slot index the atlas path dereferences.
     #[test]
     fn every_ledger_class_mints_through_the_seam_except_the_one_that_cannot() {
         let non_minting: Vec<&str> = CLASSES
@@ -398,26 +295,12 @@ mod tests {
         );
     }
 
-    /// The registries this crate owns that id accounting cannot see, pinned so
-    /// a new non-minting registry is a decision rather than an omission.
-    ///
-    /// Accounting is complete only over classes that mint, and everything else
-    /// has to be named HERE with what covers it instead. A registry in neither list is the failure mode -- and the only
-    /// thing that can catch it is a reader noticing, which is why the coverage
-    /// status is spelled out per row rather than left to the name.
     #[test]
     fn the_registries_id_accounting_cannot_see_are_declared_with_their_coverage() {
         let names: Vec<&str> = NON_MINTING.iter().map(|(n, _)| *n).collect();
         assert_eq!(
             names,
-            vec![
-                // Rides the `shader` class; BLOCKS is keyed by shader handle.
-                "uniform_block",
-                // Path-keyed inotify watches.
-                "asset_watcher",
-                // Call-site-keyed dedup stores.
-                "log_dedup",
-            ],
+            vec!["uniform_block", "asset_watcher", "log_dedup",],
             "every registry outside the mint seam is named with its coverage"
         );
         for (name, coverage) in NON_MINTING {

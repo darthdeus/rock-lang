@@ -9,14 +9,11 @@ use stone_capture::{FrameStream, RowOrigin};
 
 use crate::with_gl;
 
-// Frames a recording may hold in memory: one being read back, the rest
-// queued behind a slow reader (a 4K frame is 33 MB).
 const FRAME_STREAM_BUFFERS: usize = 4;
 
 enum Recording {
     Idle,
     Live(FrameStream),
-    // A frame failed; later frames are refused until finish reports it.
     Failed(String),
 }
 
@@ -99,9 +96,6 @@ fn record_into(stream: &mut FrameStream, w: c_int, h: c_int) -> Result<(), Strin
     stream.submit(buffer, RowOrigin::BottomUp)
 }
 
-/// Ends the recording: writes every queued frame and closes the stream.
-/// False when any frame failed; the frame count and size are what the
-/// stream holds.
 #[no_mangle]
 pub extern "C" fn stone_frame_stream_finish(
     out_frames: *mut c_int,
@@ -140,7 +134,6 @@ pub extern "C" fn stone_frame_stream_finish(
 pub extern "C" fn stone_frame_stream_last_error() -> *const c_char {
     let last = LAST_ERROR.lock().unwrap_or_else(|e| e.into_inner());
     match last.as_ref() {
-        // The CString lives in the static until the next failure replaces it.
         Some(s) => s.as_ptr(),
         None => c"".as_ptr(),
     }

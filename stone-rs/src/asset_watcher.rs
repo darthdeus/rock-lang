@@ -118,7 +118,6 @@ fn on_events(result: Result<Vec<DebouncedEvent>, Vec<notify::Error>>) {
     {
         let mut reg = registered().lock().unwrap();
         for (key, asset) in reg.iter_mut() {
-            // Atomic saves may report the temporary sibling rather than the destination.
             if !all
                 && !hints
                     .iter()
@@ -160,7 +159,6 @@ pub extern "C" fn stone_watch_asset(path: *const c_char) {
     };
     let p = Path::new(path_str);
 
-    // Eat changes the bank's selected path on rebake; generation files are immutable.
     if immutable_eat_object(p) {
         return;
     }
@@ -344,7 +342,6 @@ mod tests {
         for file in [&path, &sibling] {
             stone_watch_asset(CString::new(file.to_str().unwrap()).unwrap().as_ptr());
         }
-        // Only injected events may satisfy the assertions, regardless of OS delivery.
         *watcher().lock().unwrap() = None;
         assert_eq!(poll_paths(), Vec::<String>::new());
         let reported = root.path().canonicalize().unwrap();

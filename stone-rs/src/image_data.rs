@@ -133,9 +133,6 @@ pub extern "C" fn stone_image_data_set_pixel(
     });
 }
 
-/// Bulk RGBA upload: copies `pixel_count * 4` bytes from `rgba` into the
-/// image data buffer starting at pixel 0. No partial writes — if the
-/// pixel_count exceeds image capacity, the call is a no-op.
 #[no_mangle]
 pub extern "C" fn stone_image_data_fill_rgba(handle: u64, rgba: *const u8, pixel_count: c_int) {
     if rgba.is_null() || pixel_count <= 0 {
@@ -156,9 +153,6 @@ pub extern "C" fn stone_image_data_fill_rgba(handle: u64, rgba: *const u8, pixel
     });
 }
 
-/// Bulk RGBA read, the inverse of `stone_image_data_fill_rgba`: copies
-/// `pixel_count * 4` bytes from pixel 0 into `rgba`. Returns false and writes
-/// nothing for an unknown handle or a count beyond the image's capacity.
 #[no_mangle]
 pub extern "C" fn stone_image_data_read_rgba(
     handle: u64,
@@ -197,7 +191,6 @@ pub extern "C" fn stone_image_data_get_pixel(
     IMAGE_DATAS.with(|ids| {
         if let Some(img_data) = ids.borrow().get(&handle) {
             if x < 0 || x >= img_data.width as i32 || y < 0 || y >= img_data.height as i32 {
-                // Out of bounds - set to zero
                 unsafe {
                     if !r.is_null() {
                         *r = 0.0;
@@ -231,7 +224,6 @@ pub extern "C" fn stone_image_data_get_pixel(
                 }
             }
         } else {
-            // Not found - set to zero
             unsafe {
                 if !r.is_null() {
                     *r = 0.0;
@@ -274,9 +266,6 @@ pub extern "C" fn stone_image_data_load_png(path: *const c_char) -> u64 {
     })
 }
 
-/// Decode PNG bytes without making the caller materialize a persistent file.
-/// The returned ImageData owns the decoded RGBA8 buffer until its handle is
-/// destroyed.
 #[no_mangle]
 pub unsafe extern "C" fn stone_image_data_load_png_bytes(bytes: *const u8, len: c_int) -> u64 {
     if bytes.is_null() || len <= 0 {
@@ -299,9 +288,6 @@ pub unsafe extern "C" fn stone_image_data_load_png_bytes(bytes: *const u8, len: 
     .unwrap_or(0)
 }
 
-/// Encode an ImageData handle as a PNG and write to `path`. Format is
-/// inferred from the extension; PNG is the only one currently exercised
-/// by the editor. Returns true on success.
 #[no_mangle]
 pub extern "C" fn stone_image_data_save_png(handle: u64, path: *const c_char) -> bool {
     if path.is_null() {
@@ -403,9 +389,6 @@ pub extern "C" fn stone_image_update_from_data(image_handle: u64, data_handle: u
             return false;
         };
 
-        // Copy-on-write: the first write to a BOOT-owned image is diverted onto
-        // a replacement texture so the boundary can hand boot's own object back.
-        // A refusal is a refusal -- boot's texture is never the fallback.
         let Some((texture, fresh)) =
             crate::image_write_target(image_handle, width, height, &pixels)
         else {
@@ -413,7 +396,6 @@ pub extern "C" fn stone_image_update_from_data(image_handle: u64, data_handle: u
         };
         if fresh {
             crate::image_texture::refresh_image_mipmaps(image_handle, texture);
-            // The replacement was created carrying exactly these pixels.
             return true;
         }
 

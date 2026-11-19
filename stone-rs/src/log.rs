@@ -1,15 +1,3 @@
-//! `log_once!` / `log_throttled!` — per-call-site dedup / throttle.
-//!
-//! These are the spam-guard macros for engine-side failures that would
-//! otherwise repeat 60×/sec. The dedup/throttle *state* and the actual
-//! emit now live in the one logger (`rock-log` + the `log` facade).
-//! These macros only keep their
-//! historical call-site signatures (`log_once!("CAT", "fmt", args)` /
-//! `log_throttled!("CAT", Duration, "fmt", args)`) so existing sites
-//! compile unchanged; they delegate the dedup/throttle decision to
-//! `rock_log` and emit via `log::` at `warn` level (spam-guard =
-//! recoverable failure; visible at the default `info`).
-
 /// Rock's level numbering (0 error, 1 warn); only those two keep records.
 fn record_level(level: std::os::raw::c_int) -> Option<::log::Level> {
     match level {
@@ -28,10 +16,6 @@ pub extern "C" fn stone_log_record_total(level: std::os::raw::c_int) -> std::os:
     })
 }
 
-/// The most recently seen distinct records at `level`, at most `max_rows`, one
-/// per line as `count<TAB>target<TAB>message`, then one `evicted<TAB>N` line
-/// when the bounded table dropped rows. Valid until the next call on this
-/// thread.
 #[no_mangle]
 pub extern "C" fn stone_log_records_text(
     level: std::os::raw::c_int,
@@ -70,10 +54,6 @@ pub extern "C" fn stone_log_collect_errors() {
     rock_log::collect_errors();
 }
 
-/// Collected error records, then a final line with the overflow count, as
-/// `record<NUL>...<NUL>overflow`. A record may span lines, so NUL separates.
-/// Returns the byte length; the text is valid until the next call on this
-/// thread.
 #[no_mangle]
 pub extern "C" fn stone_log_collected_errors(len: *mut usize) -> *const std::os::raw::c_char {
     collected_error_reply(rock_log::collected_errors(), len)
@@ -138,11 +118,6 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Emit at most once per call site, through the one logger.
-///
-/// ```ignore
-/// log_once!("AUDIO", "failed to load music: {}", path);
-/// ```
 #[macro_export]
 macro_rules! log_once {
     ($category:expr, $($arg:tt)*) => {{
@@ -152,13 +127,6 @@ macro_rules! log_once {
     }};
 }
 
-/// Rate-limit log lines from a single call site. `interval` is a
-/// `std::time::Duration`; first call emits, rest drop until elapsed.
-///
-/// ```ignore
-/// log_throttled!("RENDER", std::time::Duration::from_secs(1),
-///                "shader handle is 0; draw is a no-op");
-/// ```
 #[macro_export]
 macro_rules! log_throttled {
     ($category:expr, $interval:expr, $($arg:tt)*) => {{
@@ -176,7 +144,6 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    // Tests share global dedup state; serialize them.
     static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     #[test]

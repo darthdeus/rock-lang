@@ -15,12 +15,6 @@ pub extern "C" fn stone_save_screenshot(
     stone_save_screenshot_sized(path, w, h, max_size, ptr::null_mut(), ptr::null_mut())
 }
 
-// Same capture as stone_save_screenshot, plus the ACTUAL saved PNG
-// dimensions (which differ from w/h when max_size triggers a resize) via
-// out-pointers. A separate exported symbol rather than widening
-// stone_save_screenshot in place: that binding is called directly, for its
-// plain bool, by many existing sims and callers -- changing its signature
-// would break all of them for a dimension only one caller needs.
 #[no_mangle]
 pub extern "C" fn stone_save_screenshot_sized(
     path: *const c_char,
@@ -42,7 +36,6 @@ pub extern "C" fn stone_save_screenshot_sized(
     let width = w as usize;
     let height = h as usize;
 
-    // Read pixels from framebuffer
     let pixels = with_gl(|gl| unsafe {
         let mut pixels = vec![0u8; width * height * 4];
         gl.read_pixels(

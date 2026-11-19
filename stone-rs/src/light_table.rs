@@ -1,9 +1,3 @@
-//! Native packing for MAG's per-cell moving-light table.
-//!
-//! Inputs and outputs stay caller-owned. The caller measures into `counts`,
-//! retains its full data-buffer capacity, and packs only the populated table
-//! region; unused texel lanes and row padding are deliberately left as-is.
-
 use std::mem::{align_of, size_of};
 
 const MAX_EXACT_FLOAT_TEXELS: usize = 1 << 24;
@@ -48,7 +42,6 @@ fn table_shape(size: i32, cell_size: i32, epsilon: f64, count: i32) -> Option<Ta
     let source_texels = sources.checked_mul(LIGHT_ROW_TEXELS)?;
     let header_texels = cells.checked_add(source_texels)?;
 
-    // Every index stored in the rgba32f table must remain an exact f32 integer.
     if cells >= MAX_EXACT_FLOAT_TEXELS || header_texels >= MAX_EXACT_FLOAT_TEXELS {
         return None;
     }
@@ -128,8 +121,6 @@ fn source_geometry(
     })
 }
 
-// A source reaches a cell when the closed-circle and axis-aligned-cell regions
-// overlap; tangencies count as hits.
 fn source_reaches_cell(source: SourceGeometry, col: usize, row: usize, epsilon: f64) -> bool {
     let radius = source.radius + epsilon;
     let col = col as f64;
@@ -151,11 +142,6 @@ fn validate_positions(shape: TableShape, positions: *const f32) -> bool {
     true
 }
 
-/// Count each source's links to the receiving cells.
-///
-/// `counts` must point to at least `ceil(size / cell_size)^2` writable i32s.
-/// Returns the total link count, or -1 for an invalid shape, pointer, or table
-/// whose texel indices would not be exactly representable as f32 integers.
 #[no_mangle]
 pub extern "C" fn stone_light_table_measure(
     size: i32,
@@ -215,12 +201,6 @@ pub extern "C" fn stone_light_table_measure(
     i64::try_from(links).unwrap_or(-1)
 }
 
-/// Pack cell headers, source texels, and source links into the caller's buffer.
-///
-/// `counts` and `offsets` must each hold `ceil(size / cell_size)^2` i32s;
-/// source arrays hold `count` entries (or four floats per source); `data_len`
-/// is the full f32 capacity of `data`. Only the active table region is written.
-/// Returns false for invalid inputs or inconsistent counts.
 #[no_mangle]
 pub extern "C" fn stone_light_table_pack(
     size: i32,
@@ -299,8 +279,6 @@ pub extern "C" fn stone_light_table_pack(
         return false;
     }
 
-    // Outputs must be disjoint from all inputs and from each other. The caller
-    // may pass overlapping read-only source arrays, but not writable storage.
     let inputs = [
         positions_range,
         colors_range,
@@ -378,8 +356,6 @@ pub extern "C" fn stone_light_table_pack(
         }
     }
 
-    // Reject a counts buffer that did not come from this exact source snapshot.
-    // Per-link writes above are still bounded by the validated table capacity.
     cursor = shape.header_texels;
     for cell in 0..shape.cells {
         cursor += unsafe { *counts.add(cell) as usize };
@@ -409,12 +385,9 @@ mod tests {
 
     #[test]
     fn measure_and_pack_preserve_tangent_links_partial_edge_and_source_order() {
-        // Size 5 with 4-unit cells creates a 2x2 table. Source 0 sits exactly
-        // where all four cells meet; source 1 touches the partial right cell.
         let positions = [4.0, 1.0, 4.0, 0.0, 5.0, 1.0, 2.0, 0.0];
         let colors = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
         let owners = [41, 22];
-        // Deliberately descending rows: links retain input insertion order.
         let source_rows = [9, 2];
         let source_slots = [6, 3];
         let mut counts = [-1; 4];
@@ -453,8 +426,6 @@ mod tests {
         assert_eq!(texel(&data, 6), [22.0, 2.0, 3.0, 0.0]);
         assert_eq!(texel(&data, 7), [0.5, 0.6, 0.7, 0.8]);
 
-        // Cell 1 contains both sources, still in source-array order despite
-        // their reversed source_rows values. Other cells contain only source 0.
         assert_eq!(texel(&data, 8), [4.0, SENTINEL, SENTINEL, SENTINEL]);
         assert_eq!(texel(&data, 9), [4.0, SENTINEL, SENTINEL, SENTINEL]);
         assert_eq!(texel(&data, 10), [6.0, SENTINEL, SENTINEL, SENTINEL]);

@@ -1,8 +1,6 @@
 use std::path::PathBuf;
 
 pub fn artifact() -> PathBuf {
-    // The native harness supplies Cargo's exact artifact, even when the test
-    // executable and cdylib occupy different build directories.
     let artifact = std::env::var_os("STONE_TEST_LIB")
         .map(PathBuf::from)
         .unwrap_or_else(|| {

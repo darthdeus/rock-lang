@@ -45,13 +45,6 @@ fn ascii_slot(ch: char) -> Option<usize> {
     None
 }
 
-/// Which codepoints a font bakes. Slots `0..GLYPH_ASCII_SLOTS` are the identity
-/// block (32..=126 by codepoint, U+00C1 at 127) so the atlas grid, the face
-/// row-blocks and Rock's positional cap-height probe are unaffected by what a
-/// caller declares; declared extras append above it in first-appearance order.
-///
-/// The atlas is a pure function of the raster inputs, so this rides along with
-/// the font bytes, size and faces everywhere those three travel together.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 struct Charset {
     extras: Vec<char>,
@@ -64,8 +57,6 @@ impl Charset {
     fn parse(extra: &str) -> Charset {
         let mut set = Charset::default();
         for ch in extra.chars() {
-            // Silently dropped rather than rejected: both mean "already
-            // reachable", and a caller listing 'A' has asked for nothing new.
             if ascii_slot(ch).is_some() || set.extra_slots.contains_key(&ch) {
                 continue;
             }
@@ -107,19 +98,11 @@ impl Charset {
     }
 }
 
-// Shared text-rendering geometry. One per process; created by
-// stone_text_init. Each loaded font has its own atlas texture but
-// reuses this VAO/VBO for the draw call. The shader program is NOT owned
-// here: it is the Rock-authored text_shader (text_shader.rock), resolved
-// fresh per draw from the handle Rock passes (see draw_text_line_internal).
 struct TextPipeline {
     vao: glow::VertexArray,
     vbo: glow::Buffer,
 }
 
-// Per-font state. One entry per stone_load_font success; font_id is the
-// 1-based index into FONTS (0 reserved as the "invalid font" sentinel
-// returned by failed loads).
 struct FontEntry {
     /// `None` for a metrics-only font: `stone_load_font_metrics` rasterizes the
     /// atlas on the CPU but uploads nothing, so there is no texture to bind.
@@ -202,16 +185,10 @@ fn delete_font_textures(entries: &[FontEntry]) {
 
 thread_local! {
     static TEXT_PIPELINE: RefCell<Option<TextPipeline>> = const { RefCell::new(None) };
-    // Slot becomes None on stone_unload_font. font_ids are 1-based
-    // and monotonic (no slot reuse) — a stale id past unload looks up
-    // to None → silent no-op via with_font.
     static FONTS: RefCell<Vec<Option<FontEntry>>> = const { RefCell::new(Vec::new()) };
-    // Cached IMAGES handle per font, populated lazily by
-    // stone_get_font_atlas_image. Parallel to FONTS.
     static FONT_ATLAS_IMAGES: RefCell<Vec<Option<u64>>> = const { RefCell::new(Vec::new()) };
 }
 
-// Embedded fallback font (DroidSans.ttf, 187KB)
 pub(crate) const FALLBACK_FONT: &[u8] =
     include_bytes!("../../packages/stone/engine/assets/fonts/DroidSans.ttf");
 
@@ -223,7 +200,6 @@ fn font_slot_mut<R>(idx: usize, f: impl FnOnce(Option<&mut FontEntry>) -> R) -> 
     FONTS.with(|fonts| f(fonts.borrow_mut().get_mut(idx).and_then(Option::as_mut)))
 }
 
-// Resolve a 1-based font_id to a Vec index. Returns None if out of range.
 fn font_index(font_id: u32) -> Option<usize> {
     if font_id == 0 {
         return None;
@@ -250,8 +226,6 @@ pub extern "C" fn stone_text_init() -> bool {
         delete_font_textures(&prior_fonts);
     }
     forget_instance_images(&prior_fonts);
-    // Before the slots are cleared: every cached atlas image points at a
-    // texture the loop above just deleted, so it has to leave `IMAGES` too.
     forget_all_atlas_images();
     FONT_ATLAS_IMAGES.with(|i| i.borrow_mut().clear());
 
@@ -259,11 +233,6 @@ pub extern "C" fn stone_text_init() -> bool {
 }
 
 unsafe fn init_geometry(gl: &crate::DebugGl) -> bool {
-    // No shader compile here -- the text program is the Rock-authored
-    // text_shader (text_shader.rock), compiled through the rock_shader
-    // registry and bound per draw by handle (draw_text_line_internal).
-
-    // Create VAO and VBO for text rendering
     let vao = match gl.create_vertex_array() {
         Ok(vao) => vao,
         Err(error) => {
@@ -283,7 +252,6 @@ unsafe fn init_geometry(gl: &crate::DebugGl) -> bool {
     gl.bind_vertex_array(Some(vao));
     gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
 
-    // Allocate buffer (6 vertices * 4 floats per vertex = 24 floats)
     let empty_data: [f32; 24] = [0.0; 24];
     if gl
         .buffer_data_u8_slice(
@@ -299,9 +267,6 @@ unsafe fn init_geometry(gl: &crate::DebugGl) -> bool {
         return false;
     }
 
-    // Two Vec2 attrs over the interleaved [pos.xy, tex.xy] buffer, lockstep
-    // with text_shader.rock's TextVert (loc 0 = pos, loc 1 = texcoord;
-    // stride 16). Same bytes as the retired single packed-vec4 attr.
     let stride = 4 * std::mem::size_of::<f32>() as i32;
     gl.enable_vertex_attrib_array(0);
     gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, stride, 0);
@@ -343,14 +308,8 @@ pub(crate) fn shutdown() {
     FONT_ATLAS_IMAGES.with(|imgs| imgs.borrow_mut().clear());
 }
 
-// Representative glyphs for the pixel-grid-alignment probe: caps, round,
-// diagonal, and a descender.
 const GRID_PROBE: &[u8] = b"HMoxnwgB";
 
-// Fraction of the probe glyphs' *ink* texels (coverage > 0) that are only
-// partially covered (1..=254). A pixel font rasterized on its native grid
-// is near-binary (~0); off the grid -- or any smooth font -- antialiases
-// edges into many partial texels. Returns 0 if nothing rasterized.
 fn grid_gray_fraction(font_data: &[u8], px: f32) -> f32 {
     match RasterFont::new(font_data, px) {
         Ok(f) => glyph_raster::gray_fraction(&f, GRID_PROBE, Synth::REGULAR),
@@ -361,12 +320,6 @@ fn grid_gray_fraction(font_data: &[u8], px: f32) -> f32 {
 const GRID_CLEAN: f32 = 0.05; // <=5% partial ink = effectively a pixel grid
 const GRID_MARGIN: f32 = 0.15; // chosen must be this much grayer than clean
 
-// Decide whether `size` rasterizes a pixel font off its native grid. Returns
-// a warning message when the
-// chosen size antialiases but a much cleaner (near-binary) size exists
-// below it, meaning the font *can* be crisp so this size is a mistake.
-// Smooth fonts never go near-binary, so they return None. Pure (no I/O)
-// so it is unit-testable; warn_if_offgrid does the logging.
 fn offgrid_report(font_data: &[u8], size: i32, path: &str) -> Option<String> {
     if size < 8 {
         return None;
@@ -375,7 +328,6 @@ fn offgrid_report(font_data: &[u8], size: i32, path: &str) -> Option<String> {
     if chosen <= GRID_CLEAN {
         return None; // already crisp (native size or a clean multiple)
     }
-    // Cleanest integer ppem at or below the chosen size.
     let mut best_px = size;
     let mut best_gray = chosen;
     for px in 6..size {
@@ -397,8 +349,6 @@ fn offgrid_report(font_data: &[u8], size: i32, path: &str) -> Option<String> {
     }
 }
 
-// Warn (never fail) on an off-grid pixel-font rasterization. Best-effort,
-// startup-only. See offgrid_report.
 fn warn_if_offgrid(font_data: &[u8], size: i32, path: &str) {
     if let Some(msg) = offgrid_report(font_data, size, path) {
         ::log::warn!(target: "TEXT", "{}", msg);
@@ -413,18 +363,10 @@ struct RasterizedAtlas {
     glyphs: [Vec<GlyphInfo>; 4],
     atlas_width: u32,
     atlas_height: u32,
-    /// The unit-metric answers for these bytes, baked beside the atlas so
-    /// every commit path (load, reload, resize) publishes them
-    /// with the raster they describe. Read-only raster reproductions (the
-    /// RGBA8 copy) bake and drop them.
     unit_metrics: FontUnitMetrics,
     glyph_unit: [Vec<Option<GlyphUnitMetrics>>; 4],
 }
 
-// A pixel font is binary only on its own outlines, so declaring a face that
-// re-renders them off the grid is the same mistake warn_if_offgrid catches for
-// the size -- and it is silent without this, because the regular face the
-// size check probes stays clean either way.
 fn warn_if_synthesizing_a_pixel_font(font_data: &[u8], size: i32, faces: FaceSet, path: &str) {
     if !faces.synthesizes_anything() || size < 8 {
         return;
@@ -437,11 +379,6 @@ fn warn_if_synthesizing_a_pixel_font(font_data: &[u8], size: i32, faces: FaceSet
         Ok(f) => f,
         Err(_) => return,
     };
-    // Every declared face is measured, not just the first: an integer
-    // widening lands back on the grid (Silkscreen at 48px synthesizes bold
-    // at 0.006), so bold can be clean while oblique on the same font is
-    // 0.263.
-    // Picking one face to probe reports the clean one and stays silent.
     for face in faces.declared().filter(|f| *f != Face::Regular) {
         let gray = glyph_raster::gray_fraction(&font, GRID_PROBE, face.synth(size as f32));
         if gray - regular > GRID_MARGIN {
@@ -516,11 +453,6 @@ fn rasterize_glyphs_with(
         }
     }
 
-    // Rasterize once, then lay out: an outline rasterizer has no cheap
-    // metrics-only query, so a sizing pass would rasterize everything twice.
-    // The declared faces are baked together because the CELL has to hold the
-    // widest of them -- an oblique pushes ink past its own advance, so sizing
-    // cells from Regular alone would bleed bold-italic into its neighbour.
     let slots = charset.baked_slots();
     let glyph_count = slots.len();
     let baked: Vec<Face> = faces.declared().collect();
@@ -567,8 +499,6 @@ fn rasterize_glyphs_with(
         // a regular-only bake is exactly what it was before faces existed.
         let face_row = face_slot * rows_per_face;
         for (glyph_idx, &glyph_slot) in slots.iter().enumerate() {
-            // A codepoint the font does not cover stays invalid rather than
-            // borrowing .notdef's box: the draw path skips it explicitly.
             let g = match &rendered[face_slot][glyph_idx] {
                 Some(g) => g,
                 None => continue,
@@ -637,7 +567,6 @@ fn atlas_dimensions_respect_both_device_axes() {
 
 fn atlas_dimensions_supported(width: u32, height: u32) -> bool {
     let Some(limit) = with_gl(|gl| unsafe { gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE) }) else {
-        // Headless CPU bakes have no device constraint; upload validates again.
         return true;
     };
     if atlas_dimensions_fit(width, height, limit) {
@@ -740,8 +669,6 @@ fn rasterize_font(
                 glow::TEXTURE_WRAP_T,
                 glow::CLAMP_TO_EDGE as i32,
             );
-            // The atlas's own filter is never observed: every text batch binds the
-            // sampler its Font declared (Font.sampling).
             let filter = glow::NEAREST as i32;
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter);
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter);
@@ -787,10 +714,6 @@ fn rasterize_font(
 
 #[cfg(test)]
 thread_local! {
-    /// Forced upload success. Headless, `with_gl` answers None and every
-    /// upload fails, so every reload would bail before mutating anything and
-    /// the commit ordering would be untestable. The reload-atomicity tests set
-    /// this, standing in for a live context; production never sets it.
     static FORCE_UPLOADS_OK: Cell<bool> = const { Cell::new(false) };
     /// Forced dependent-atlas rebuild failure. Headless, a dependent rasterize
     /// cannot fail once the main bake succeeded (no GL size limit), so the
@@ -823,11 +746,6 @@ fn apply_raster(idx: usize, pixel_size: i32, raster: RasterizedAtlas) -> bool {
     let texture: Option<glow::Texture> = match font_slot(idx, |entry| {
         entry.map(|e| (e.atlas_texture, e.coverage_released))
     }) {
-        // The outer Option is "is there a font"; the inner one is "does it own a
-        // texture". A metrics-only font is refused here rather than silently
-        // reporting a successful re-raster: its CPU glyphs would go stale
-        // against the new pixel size with nothing saying so. A released font
-        // refreshes its CPU raster below and keeps the GPU down.
         Some((Some(t), _)) => Some(t),
         Some((None, true)) => None,
         Some((None, false)) => {
@@ -863,9 +781,6 @@ fn apply_raster(idx: usize, pixel_size: i32, raster: RasterizedAtlas) -> bool {
     font_slot_mut(idx, |entry| {
         if let Some(entry) = entry {
             entry.glyphs = raster.glyphs.clone();
-            // The unit answers move with the raster they describe: a failed
-            // reload never reaches this commit, so the old answers stand with
-            // the old bytes.
             entry.unit_metrics = raster.unit_metrics;
             entry.glyph_unit = raster.glyph_unit;
             entry.font_pixel_size = pixel_size;
@@ -922,9 +837,6 @@ struct BuiltInstanceRaster {
     raster: RasterizedAtlas,
 }
 
-/// Rebuild every extra coverage instance from new bytes WITHOUT publishing
-/// any of them. `None` is a failed rebuild, after which the caller must not
-/// commit anything; an empty vec is a font with no extra instances.
 fn build_instance_rasters(
     idx: usize,
     font_data: &[u8],
@@ -1055,14 +967,9 @@ fn load_font_with_residency_str(
     extra_str: &str,
     residency: AtlasResidency,
 ) -> c_uint {
-    // Override dir, then embedded registry, then disk; embedded font as a last resort.
     let font_data = match crate::asset_registry::resolve_asset(path_str) {
         Some(data) => data,
         None => {
-            // Once per site, through the one dedup store — falling back to the
-            // embedded font is expected for games that don't ship one (pac,
-            // sims, etc.). A `Once` cannot be reset at all, which is what put
-            // this beside the others in the boundary's residual list.
             crate::log_once!("TEXT",
                 "stone_load_font: failed to read font file '{}' — using embedded fallback (DroidSans.ttf)",
                 path_str);
@@ -1226,9 +1133,6 @@ fn with_font_entry<R>(font_id: u32, default: R, f: impl FnOnce(&FontEntry) -> R)
     })
 }
 
-/// Read one loaded font TOGETHER WITH the shared text pipeline. For the draw
-/// path only; a reader that does not touch the VAO belongs on
-/// [`with_font_entry`].
 fn with_font<R>(font_id: u32, default: R, f: impl FnOnce(&TextPipeline, &FontEntry) -> R) -> R {
     TEXT_PIPELINE.with(|tp| {
         let tp_ref = tp.borrow();
@@ -1240,8 +1144,6 @@ fn with_font<R>(font_id: u32, default: R, f: impl FnOnce(&TextPipeline, &FontEnt
     })
 }
 
-// Internal function that accepts optional baseline override
-// baseline_override: if >= 0, use this value instead of calculating from text
 fn draw_text_line_internal(
     shader: u64,
     font_id: u32,
@@ -1253,9 +1155,6 @@ fn draw_text_line_internal(
     baseline_override: f32,
 ) {
     with_font(font_id, (), |pipeline, entry| {
-        // The Rock-authored text_shader program, resolved fresh by handle
-        // (Rock passes get_shader_handle(text_shader)). Fail-closed: an
-        // unregistered/unknown handle skips loudly rather than drawing wrong.
         let program = match SHADERS.with(|s| s.borrow().get(&shader).map(|sh| sh.program)) {
             Some(p) => p,
             None => {
@@ -1267,9 +1166,6 @@ fn draw_text_line_internal(
                 return;
             }
         };
-        // Fail-closed for the same reason the unknown shader handle does:
-        // binding texture 0 instead would draw the white pixel through the glyph
-        // quads, which reads as a rendering bug rather than as the wrong font.
         let Some(atlas) = entry.atlas_texture else {
             crate::log_once!(
                 "TEXT",
@@ -1280,15 +1176,7 @@ fn draw_text_line_internal(
         };
         with_gl(|gl| unsafe {
             gl.use_program(Some(program));
-            // This path goes current without `stone_set_shader`, so it owes the
-            // same re-bind: `glBindBufferBase` binds a GLOBAL index, and without
-            // this the text program reads whichever program's buffer sits there.
             crate::uniform_block::bind_block_for_program(gl, shader);
-
-            // The camera matrices arrive in the ENGINE block at binding 0,
-            // filled by `stone_draw_text_for` before this call -- there is no
-            // by-name matrix write here any more, and a block member has no
-            // location to write to anyway.
 
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(atlas));
@@ -1302,17 +1190,13 @@ fn draw_text_line_internal(
                 glow::ONE_MINUS_SRC_ALPHA,
             );
 
-            // Calculate scale factor from font pixel size
-            // Preserve sign of scale (C version does this too)
             let sx = scale_x;
             let sy = scale_y;
             let abs_sy = sy.abs(); // For baseline calculations
 
-            // Use provided baseline or calculate from text
             let max_ascent = if baseline_override >= 0.0 {
                 baseline_override
             } else {
-                // Find max bearing_y (ascent) from all characters
                 let mut max_bearing = 0.0f32;
                 for c in text.chars() {
                     let Some(slot) = entry.charset.slot_of(c) else {
@@ -1581,18 +1465,9 @@ pub extern "C" fn stone_draw_text_ex(
         return;
     }
 
-    // For stone_draw_text_ex, we don't split on newlines - it's meant for single characters/lines
-    // with explicit baseline control
     draw_text_line_internal(shader.into(), font_id, text_str, x, y, sx, sy, baseline);
 }
 
-// =============================================================================
-// Font atlas exposure for unified text batching
-// =============================================================================
-
-/// Register the font atlas texture in the IMAGES table and apply swizzle
-/// so the GL_RED atlas reads as (r,r,r,r) in the sprite batch shader.
-/// Returns a cached image handle (same ID on repeated calls).
 fn retain_font_instance_image(image: &mut Option<u64>, atlas_image: u64) {
     if image.is_none() {
         *image = Some(atlas_image);
@@ -1606,18 +1481,11 @@ pub extern "C" fn stone_get_font_atlas_image(font_id: c_uint) -> u64 {
         None => return 0,
     };
 
-    // Fast path: cached.
     let cached = FONT_ATLAS_IMAGES.with(|imgs| imgs.borrow().get(idx).copied().flatten());
     if let Some(id) = cached {
         return id;
     }
 
-    // A metrics-only font has no texture to publish. Minting an Image over
-    // texture 0 would hand Rock a handle that samples the white pixel, and
-    // `register_image` would then declare a sampling for it process-wide. The
-    // refusal is also NOT cached below: 0 is the absence of an image, not an
-    // image id, and caching it would make the answer permanent for a font that
-    // a later GPU load could legitimately publish.
     let (has_atlas, released) = with_font_entry(font_id, (false, false), |entry| {
         (entry.atlas_texture.is_some(), entry.coverage_released)
     });
@@ -1643,7 +1511,6 @@ pub extern "C" fn stone_get_font_atlas_image(font_id: c_uint) -> u64 {
             .atlas_texture
             .expect("the metrics-only refusal above proved this font owns a texture");
 
-        // Apply texture swizzle so GL_RED atlas reads as (r,r,r,r)
         with_gl(|gl| unsafe {
             gl.bind_texture(glow::TEXTURE_2D, Some(atlas));
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_SWIZZLE_R, glow::RED as i32);
@@ -1652,7 +1519,6 @@ pub extern "C" fn stone_get_font_atlas_image(font_id: c_uint) -> u64 {
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_SWIZZLE_A, glow::RED as i32);
         });
 
-        // Register in IMAGES table (same pattern as stone_get_white_image)
         let id = crate::handles::mint(Class::Image);
         IMAGES.with(|images| {
             images.borrow_mut().insert(
@@ -1718,7 +1584,6 @@ pub extern "C" fn stone_get_font_atlas_size(
     })
 }
 
-// R8 coverage aliases count one byte per texel in the residency census.
 #[cfg(test)]
 mod font_census_tests {
     use super::*;
@@ -1731,10 +1596,6 @@ mod font_census_tests {
         glow::NativeTexture(std::num::NonZeroU32::new(n).expect("non-zero texture name"))
     }
 
-    /// Restores every registry the installer touches, on success and on
-    /// failure: Drop runs before a failed assertion unwinds past the test.
-    /// Lengths are captured at install time, so slots other tests leaked on
-    /// this thread are left alone.
     struct CensusFonts {
         fonts_len: usize,
         atlas_images_len: usize,
@@ -1871,7 +1732,6 @@ mod font_census_tests {
             "the per-image census agrees with the live total"
         );
 
-        // A later target bucket mints its own alias over its own R8 texture.
         let extra_texels = oracle_texels(CENSUS_EXTRA_PX);
         assert!(extra_texels > 0, "the second bake is a real atlas too");
         let before_extra = live_texture_bytes();
@@ -1891,9 +1751,6 @@ mod font_census_tests {
         );
     }
 
-    /// S10: releasing the logo coverage drops the compat atlas and every
-    /// bucket alias from the live total while the face (TTF bytes,
-    /// metrics) stays resident for the menu and for measurement.
     #[test]
     fn release_coverage_drops_aliases_and_keeps_the_face() {
         let mut guard = CensusFonts::capture();
@@ -2036,7 +1893,6 @@ pub(crate) mod retained_bytes {
     struct Counting;
 
     fn note(delta: isize) {
-        // TLS is gone during thread teardown; those frees are not measured.
         let _ = LIVE.try_with(|live| live.set(live.get() + delta));
     }
 
@@ -2094,9 +1950,6 @@ mod atlas_retention_tests {
         (w, h)
     }
 
-    /// The uploaded atlas lives in its texture; the CPU raster it came from
-    /// must not stay resident beside it. A metrics load shares the entry
-    /// shape with a GPU load and needs no context.
     #[test]
     fn a_loaded_font_retains_less_than_one_atlas_of_heap() {
         let before = retained_bytes::live();
@@ -2116,20 +1969,11 @@ mod atlas_retention_tests {
     }
 }
 
-/// How many text slots this font baked: the identity block plus whatever the
-/// load declared. Rock sizes its per-font glyph cache from this rather than
-/// from a literal, so a declared charset reaches the batcher without a second
-/// place agreeing about its size.
 #[no_mangle]
 pub extern "C" fn stone_get_font_slot_count(font_id: c_uint) -> c_int {
     with_font_entry(font_id, 0, |entry| entry.charset.slot_count() as c_int)
 }
 
-/// The codepoint baked at `slot`, or -1 for a slot that carries none (the
-/// 0..32 hole in the identity block, or an out-of-range index). Rock walks this
-/// once per load to build its codepoint -> slot map; the mapping is published
-/// from the charset that baked the atlas rather than recomputed from the same
-/// rules on the other side.
 #[no_mangle]
 pub extern "C" fn stone_get_font_slot_codepoint(font_id: c_uint, slot: c_int) -> c_int {
     if slot < 0 {
@@ -2143,10 +1987,6 @@ pub extern "C" fn stone_get_font_slot_codepoint(font_id: c_uint, slot: c_int) ->
     })
 }
 
-/// Write 9 floats to `out`: u0, v0, u1, v1, width, height, bearing_x, bearing_y, advance.
-/// `face` indexes Face::ALL (0 regular, 1 bold, 2 italic, 3 bold-italic).
-/// Returns false if the face was not declared at load, the glyph is invalid,
-/// or either index is out of range.
 #[no_mangle]
 pub extern "C" fn stone_get_glyph_info(
     font_id: c_uint,
@@ -2157,16 +1997,12 @@ pub extern "C" fn stone_get_glyph_info(
     if out.is_null() || char_code < 0 {
         return false;
     }
-    // The bound is Face::ALL's length, not a literal that can drift from it.
     let face = match usize::try_from(face).ok().and_then(Face::from_index) {
         Some(f) => f,
         None => return false,
     };
 
     with_font_entry(font_id, false, |entry| {
-        // The bound is the font's own slot count: a charset is per font, so a
-        // fixed literal here would either truncate a declared set or read past
-        // a smaller one.
         let Some(gi) = entry.glyphs[face.index()].get(char_code as usize) else {
             return false;
         };
@@ -2206,9 +2042,6 @@ fn instance_matches(instance: &AtlasInstance, pixel_size: i32, face_revision: u6
     instance.pixel_size == pixel_size && instance.face_revision == face_revision
 }
 
-/// Create or reuse one independent coverage raster product. The returned handle
-/// is stable until the face is unloaded; it is intentionally distinct from the
-/// face's backend id.
 #[no_mangle]
 pub extern "C" fn stone_ensure_font_atlas_instance(font_id: c_uint, pixel_size: c_int) -> u64 {
     if pixel_size < 1 {
@@ -2473,7 +2306,6 @@ pub extern "C" fn stone_get_font_unit_metrics(font_id: c_uint, out: *mut c_float
     let Some(idx) = font_index(font_id) else {
         return false;
     };
-    // Prepared at raster time from the same bytes: no parse, no clone.
     let metrics = font_slot(idx, |entry| entry.map(|entry| entry.unit_metrics));
     let Some(metrics) = metrics else { return false };
     unsafe {
@@ -2502,9 +2334,6 @@ pub extern "C" fn stone_get_glyph_unit_metrics(
     let Some(idx) = font_index(font_id) else {
         return false;
     };
-    // Prepared at raster time from the same bytes at unit scale: a slot
-    // outside the table, a charset hole and an uncovered codepoint all read
-    // back the `None` the per-query parse answered with. No parse, no clone.
     let metrics = font_slot(idx, |entry| {
         entry.and_then(|entry| {
             entry
@@ -2528,9 +2357,6 @@ pub extern "C" fn stone_get_glyph_unit_metrics(
     true
 }
 
-/// Live font ids (`native_ledger`). 1-based, and monotonic because
-/// `stone_load_font` only ever pushes -- so a font destroyed and reloaded is a
-/// different id rather than the same slot back.
 pub(crate) fn live_font_ids() -> Vec<u64> {
     FONTS.with(|fonts| {
         fonts
@@ -2598,19 +2424,6 @@ pub(crate) fn forget_atlas_image(image_id: u64) -> bool {
     true
 }
 
-/// Drop EVERY cached atlas image, through the same single-handle path that
-/// gets one right.
-///
-/// The two whole-subsystem teardowns -- `text_init`'s hot-reload re-entry and
-/// `shutdown` -- delete every font's atlas texture, so every cached
-/// `IMAGES` entry pointing at one is dangling the moment they run. Clearing
-/// `FONT_ATLAS_IMAGES` alone left those entries LIVE in the registry, naming
-/// deleted textures: an image leak the id census sees as `live`.
-///
-/// It delegates rather than restating: `forget_atlas_image` is where the
-/// retire, the registry removal and the "the font owns this texture, do not
-/// delete it" rule live, and a second copy of that rule is a second place for
-/// it to drift.
 fn forget_all_atlas_images() {
     let cached: Vec<u64> =
         FONT_ATLAS_IMAGES.with(|imgs| imgs.borrow().iter().filter_map(|slot| *slot).collect());
@@ -2648,7 +2461,6 @@ pub extern "C" fn stone_unload_font(font_id: c_uint) -> bool {
         Some(e) => e,
         None => return false,
     };
-    // Drop the cached IMAGES handle for this font's atlas, if any.
     let image_id = FONT_ATLAS_IMAGES.with(|imgs| {
         let mut imgs = imgs.borrow_mut();
         imgs[idx].take()
@@ -2673,12 +2485,6 @@ pub extern "C" fn stone_unload_font(font_id: c_uint) -> bool {
     true
 }
 
-/// Drop one font's atlas textures and image aliases while retaining its
-/// bytes, metrics and charset. Later raster demand can rebuild the atlases.
-///
-/// A metrics-shaped entry holds nothing native to drop and returns true
-/// without recording the release, so its size and reload behavior are
-/// unchanged. Idempotent otherwise. False only names an unknown font id.
 #[no_mangle]
 pub extern "C" fn stone_font_release_coverage(font_id: c_uint) -> bool {
     let idx = match font_index(font_id) {
@@ -2700,15 +2506,11 @@ pub extern "C" fn stone_font_release_coverage(font_id: c_uint) -> bool {
             gl.delete_texture(texture);
         }
         for instance in &instances {
-            // Instance 0 aliases the compat texture; deleting it twice would
-            // hand a later creation a recycled name.
             if Some(instance.texture) != atlas {
                 gl.delete_texture(instance.texture);
             }
         }
     });
-    // Instance 0 shares the compat alias id, so the removal decides who
-    // retires it, exactly as the unload path does.
     let mut retired = Vec::new();
     if let Some(id) = FONT_ATLAS_IMAGES.with(|imgs| imgs.borrow_mut()[idx].take()) {
         retired.push(id);
@@ -2745,9 +2547,6 @@ mod atlas_face_tests {
         italic: true,
     };
 
-    // Row count derived from the atlas the bake produced, not from the
-    // constants it was built from: the cell pitch is the v-distance between
-    // glyph 0 and glyph 16, which sit one row apart by construction.
     fn rows(a: &RasterizedAtlas) -> u32 {
         let h = a.atlas_height as f32;
         let r0 = a.glyphs[Face::Regular.index()][GLYPH_FIRST].v0 * h;
@@ -2795,8 +2594,6 @@ mod atlas_face_tests {
         assert!(accent.advance > 0.0, "Á must carry an advance");
     }
 
-    // Declaring one axis bakes that face and NOT the other, and not the
-    // combination either: bold-italic needs both axes.
     #[test]
     fn each_axis_is_declared_independently() {
         let bold_only = bake(FaceSet {
@@ -2827,11 +2624,6 @@ mod atlas_face_tests {
         );
     }
 
-    // Every baked glyph's UV box must stay inside its own cell. This is the
-    // overhang claim: the oblique pushes ink right of the advance, and cells
-    // sized from Regular alone would bleed bold-italic into its neighbour.
-    // The second assertion is what makes the first non-vacuous -- it proves
-    // the widest face IS wider, so cell sizing had to account for it.
     #[test]
     fn cells_hold_the_widest_face() {
         let four = bake(BOTH);
@@ -2869,9 +2661,6 @@ mod atlas_face_tests {
         }
     }
 
-    // Each face occupies its own row block, so the same character reads from
-    // four different places. Without this a face index could be accepted and
-    // quietly resolve to the same texels as Regular.
     #[test]
     fn faces_occupy_distinct_atlas_regions() {
         let four = bake(BOTH);
@@ -2895,11 +2684,6 @@ mod atlas_face_tests {
         );
     }
 
-    // The pixel-font guard. OBLIQUE is what breaks a pixel grid; synthetic
-    // bold at a clean size does NOT, because the widening (px/24) is a whole
-    // number of texels there and a centred stroke lands back on the grid.
-    // Both halves are asserted, because the bold half is exactly why the
-    // guard has to measure every declared face instead of probing one.
     #[test]
     fn oblique_not_bold_antialiases_a_pixel_font() {
         let font = pixel_font();
@@ -2939,16 +2723,11 @@ mod offgrid_tests {
         crate::test_fonts::pixel_font()
     }
 
-    // A pixel font has near-binary (clean) sizes and,
-    // between them, antialiased (off-grid) sizes. The detector must stay
-    // silent on the clean ones and fire on the dirty ones. 48 rasterizes
-    // near-binary, so it must NOT warn.
     #[test]
     fn offgrid_detector_fires_only_off_grid() {
         let font = pixel_font();
         let font = font.as_slice();
 
-        // 48 is on-grid (a clean multiple of the pixel grid).
         assert!(
             grid_gray_fraction(font, 48.0) <= GRID_CLEAN,
             "expected 48px near-binary, got {:.3}",
@@ -2959,9 +2738,6 @@ mod offgrid_tests {
             "48px should not warn (it is a clean multiple)"
         );
 
-        // Somewhere between native multiples there must be an off-grid
-        // size that the detector flags -- proves the fire path works, not
-        // just the early-out.
         let fired: Vec<i32> = (12..=64)
             .filter(|&px| offgrid_report(font, px, "pixel").is_some())
             .collect();
@@ -2971,8 +2747,6 @@ mod offgrid_tests {
         );
     }
 
-    // A smooth font (DroidSans, the embedded fallback) antialiases at
-    // every size, so no size is ever near-binary -> never warn.
     #[test]
     fn offgrid_detector_silent_on_smooth_font() {
         let font = FALLBACK_FONT;
@@ -3032,16 +2806,6 @@ mod atlas_image_teardown_tests {
         id
     }
 
-    /// Tearing the text subsystem down takes its cached atlas images OUT of
-    /// `IMAGES`, rather than clearing the cache slots and leaving live handles
-    /// naming deleted textures.
-    ///
-    /// `text_init`'s hot-reload re-entry and `shutdown` both delete
-    /// every font's atlas texture; an `IMAGES` entry that outlives that is a
-    /// dangling handle the id census counts as live.
-    ///
-    /// The population is asserted on BOTH sides -- present first, gone after --
-    /// so a run where nothing was ever cached cannot report the same green.
     #[test]
     fn tearing_down_the_atlas_cache_retires_its_image_handles() {
         let first = cache_atlas_image(0, 4001);
@@ -3101,7 +2865,6 @@ mod charset_tests {
         .expect("the symbol font bakes")
     }
 
-    // The whole point of the arc: a codepoint past ASCII reaches the atlas.
     #[test]
     fn a_declared_emoji_bakes_into_an_appended_slot() {
         let a = bake("\u{1F600}");
@@ -3119,9 +2882,6 @@ mod charset_tests {
         assert!(g.width > 0.0 && g.height > 0.0, "and has ink");
     }
 
-    // Declaring extras must not disturb the identity block: the grid, the face
-    // row-blocks and batch.rock's cap-height probe all index it positionally.
-    // Measured on a font that HAS ASCII, so "unchanged" is not vacuous.
     #[test]
     fn declaring_extras_leaves_the_ascii_slots_where_they_were() {
         let droid = FALLBACK_FONT.to_vec();
@@ -3157,11 +2917,6 @@ mod charset_tests {
         );
     }
 
-    // An emoji font like NotoEmoji carries no printable ASCII, so a mixed
-    // sentence needs two fonts however wide the charset gets. This is why the
-    // fallback arc exists rather than being an optimization, and Rock's
-    // cap-height probe takes its documented pixel-size fallback for this font
-    // rather than reading a valid 'X'.
     #[test]
     fn an_emoji_only_font_carries_emoji_but_no_ascii() {
         let a = bake("\u{1F600}");
@@ -3176,10 +2931,6 @@ mod charset_tests {
         );
     }
 
-    // A charset is a declaration, not a request: what the font does not cover
-    // stays invalid and the draw skips it, exactly as an uncovered ASCII slot
-    // already does. U+10FFFE is a Unicode noncharacter, permanently
-    // unassigned, so no font covers it.
     #[test]
     fn an_uncovered_declared_codepoint_bakes_invalid() {
         let a = bake("\u{10FFFE}");
@@ -3192,7 +2943,6 @@ mod charset_tests {
 
     #[test]
     fn the_charset_drops_duplicates_and_codepoints_ascii_already_reaches() {
-        // 'A' and the accent both already have identity slots.
         let c = Charset::parse("A\u{00C1}\u{1F600}\u{1F600}\u{1F44D}");
         assert_eq!(c.slot_count(), GLYPH_ASCII_SLOTS + 2, "two extras survive");
         assert_eq!(c.slot_of('A'), Some(b'A' as usize));
@@ -3203,8 +2953,6 @@ mod charset_tests {
     }
 }
 
-// The metrics-only load, exercised in the environment it exists for: a test
-// process with no window, so `with_gl` answers None for every caller.
 #[cfg(test)]
 mod metrics_only_font_tests {
     use super::*;
@@ -3261,10 +3009,6 @@ mod metrics_only_font_tests {
         }
     }
 
-    // `stone_load_font` resolves through the asset registry and falls back to the
-    // embedded DroidSans for a path it cannot read, which is what an unset
-    // registry does here -- so both loads below bake the SAME bytes and their
-    // metrics are comparable.
     fn load(residency: AtlasResidency) -> c_uint {
         let path = CString::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -3284,9 +3028,6 @@ mod metrics_only_font_tests {
         out
     }
 
-    // The capability itself. Without a window `stone_load_font` returns 0,
-    // because `rasterize_font`'s texture upload is `with_gl(..)?`; the metrics
-    // load succeeds at the same call site and hands back a usable id.
     #[test]
     fn a_metrics_load_succeeds_where_a_gpu_load_cannot() {
         assert_eq!(
@@ -3411,12 +3152,6 @@ mod metrics_only_font_tests {
     }
 }
 
-// A failed reload must leave the old font behind, not a hybrid: the commit
-// order (main atlas, coverage instances) is pinned here by
-// forcing uploads to succeed -- headless, `with_gl` answers None and every
-// reload would bail before mutating anything -- and forcing one dependent
-// rebuild to fail. Atlas pixels are not retained after upload, so the
-// snapshots below compare geometry, glyphs and revisions, not rasters.
 #[cfg(test)]
 mod reload_atomicity_tests {
     use super::*;
@@ -3507,7 +3242,6 @@ mod reload_atomicity_tests {
             face_revision: 0,
             coverage_released: false,
         };
-        // `FONT_ATLAS_IMAGES` runs parallel to `FONTS`; a load pushes both.
         let font_id = FONTS.with(|fonts| {
             let mut fonts = fonts.borrow_mut();
             fonts.push(Some(entry));
@@ -3656,10 +3390,6 @@ mod reload_atomicity_tests {
         assert_snapshot_restored(font, &before);
     }
 
-    // The control both failures are read against: with no fault forced, the
-    // same fixture reloads onto the new file completely -- bytes, atlas,
-    // instances and revisions -- so a failing assertion above is the commit
-    // order, not a fixture that could never reload.
     #[test]
     fn successful_reload_replaces_atlas_bytes_and_revisions() {
         let _faults = ReloadFaults::set(true, false);
@@ -3706,11 +3436,6 @@ mod reload_atomicity_tests {
 mod logo_atlas_tests {
     use super::*;
 
-    // Stone's display-bake probe: a large coverage bake of a real text face
-    // must fit a 2048 atlas page. 48 mirrors the production logo size MAG
-    // requests (MAG_LOGO_FONT_SIZE); MAG owns its settings, so this pins
-    // Stone's page budget with a Stone-local size instead of parsing MAG
-    // source -- if MAG changes its request, MAG pins its own.
     const STONE_DISPLAY_BAKE_PX: i32 = 48;
 
     // The logo's coverage draws are 48px splash lines; larger coverage comes

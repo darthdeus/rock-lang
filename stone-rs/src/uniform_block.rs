@@ -26,39 +26,18 @@ struct BlockBuffer {
     /// The program the block belongs to. An upload binds its range at once
     /// only while this program is current; otherwise the next switch binds it.
     program: glow::Program,
-    /// Where `bytes` were last streamed. Readable by draws of `range.frame`
-    /// only: a later frame reuses that region, so binding the block in a later
-    /// frame streams `bytes` again ([`bind_block`]).
     range: Option<StreamRange>,
-    /// The GLSL block name and the Rock-side shader key, for diagnostics only.
-    /// Binding is by slot. The key is needed because a block name alone does not
-    /// identify a block: `SpriteFragU` is declared both by the sprite batch and
-    /// by any custom pipeline that reuses it.
     name: String,
     shader_key: String,
     size: usize,
     /// Last bytes uploaded, including zero initialization. Render scopes
     /// snapshot these without synchronizing the GPU.
     bytes: Vec<u8>,
-    /// Whether anything has ever packed bytes into this block, and whether a
-    /// DRAW has ever issued against its program. A block drawn with while
-    /// nothing fills it reads zeroes in the shader forever, silently.
-    ///
-    /// `drawn` is stamped by [`mark_program_drawn`] at each real draw, with the
-    /// program that draw goes through -- see there for why an ambient
-    /// "currently bound" tracker misattributes. Both flags are sticky, so
-    /// [`report_unfilled_blocks`] fires only for a block never filled across the
-    /// WHOLE run, never for the ordinary set-then-draw ordering within a frame.
     uploaded: bool,
     drawn: bool,
     /// Reported once. This is checked every frame; a broken block is broken
     /// every frame.
     reported: bool,
-    /// The binding point this block was pointed at. Two programs may both use
-    /// index 0, which is exactly why a range cannot be bound there once and
-    /// left: `glBindBufferRange` is GLOBAL state, so the last program registered
-    /// would own the index for all of them. [`bind_block_for_program`] re-binds
-    /// every block of a program whenever that program goes current.
     binding: u32,
     /// The compiler's `UniformBlockPlan::fingerprint` for the layout this
     /// block was sized and bound for. An upload carries its own, from the plan
@@ -70,13 +49,7 @@ struct BlockBuffer {
 }
 
 thread_local! {
-    /// Per program, its blocks, one per binding. A LIST, not one entry: an A2
-    /// pipeline declares one block per STAGE, so keying by handle alone made
-    /// the second registration evict the first.
     static BLOCKS: RefCell<HashMap<u64, Vec<BlockBuffer>>> = RefCell::new(HashMap::new());
-    /// Block-owning programs only, so a draw through a program with no blocks
-    /// costs one miss. Populated at registration, where both the program object
-    /// and its shader handle are in hand.
     static BLOCK_PROGRAMS: RefCell<HashMap<glow::Program, u64>> = RefCell::new(HashMap::new());
 }
 
@@ -159,8 +132,6 @@ fn binding_state(handle: u64) -> serde_json::Value {
             std::num::NonZeroU32::new(gl.get_parameter_i32(glow::UNIFORM_BUFFER_BINDING) as u32)
                 .map(glow::NativeBuffer);
         let frame = crate::stream_buffer::frame();
-        // (buffer, offset, size) at an indexed binding point; size 0 is a
-        // whole-buffer `glBindBufferBase`.
         let bound_at = |index: u32| -> (Option<glow::Buffer>, i32, i32) {
             let buffer = std::num::NonZeroU32::new(
                 gl.get_parameter_indexed_i32(glow::UNIFORM_BUFFER_BINDING, index) as u32,
@@ -172,8 +143,6 @@ fn binding_state(handle: u64) -> serde_json::Value {
                 gl.get_parameter_indexed_i32(glow::UNIFORM_BUFFER_SIZE, index),
             )
         };
-        // A foreign range at the index may be shorter than this block, so the
-        // read is clamped to the buffer.
         let read_back = |buffer: glow::Buffer, offset: i32, size: usize| -> Vec<u8> {
             gl.bind_buffer(glow::UNIFORM_BUFFER, Some(buffer));
             let own = gl.get_buffer_parameter_i32(glow::UNIFORM_BUFFER, glow::BUFFER_SIZE).max(0);
@@ -210,8 +179,6 @@ fn binding_state(handle: u64) -> serde_json::Value {
                                 })
                             });
                             let (bound, bound_offset, bound_size) = bound_at(block.binding);
-                            // Read the BOUND range, not the block's own: a draw
-                            // reads whatever is at the index.
                             let read_size = if bound_size > 0 { block.size.min(bound_size as usize) } else { block.size };
                             let gpu = bound.map(|buf| read_back(buf, bound_offset, read_size));
                             let live = block.range.filter(|r| r.frame == frame);
@@ -292,12 +259,6 @@ fn program_of(handle: u64) -> Option<glow::Program> {
     SHADERS.with(|s| s.borrow().get(&handle).map(|shader| shader.program))
 }
 
-/// Point each uniform binding of `handle` at its block's range. Called from
-/// `stone_set_shader` on every program switch, because `glBindBufferRange`
-/// binds to a GLOBAL binding index rather than to the program: binding once at
-/// registration leaves whichever program registered LAST owning the index, and
-/// every other program then reads that program's bytes. The block belongs to
-/// the program, so it is re-bound wherever the program goes current.
 pub(crate) fn bind_block_for_program(gl: &crate::DebugGl, handle: u64) {
     BLOCKS.with(|b| {
         if let Some(blocks) = b.borrow_mut().get_mut(&handle) {
@@ -309,9 +270,6 @@ pub(crate) fn bind_block_for_program(gl: &crate::DebugGl, handle: u64) {
     });
 }
 
-/// Re-bind the current program's blocks for a new frame. Called at the frame
-/// boundary once the streams have advanced: the ranges bound now were written
-/// for the frame that ended, and only that frame's fence covers them.
 pub(crate) fn rebind_current_program(gl: &crate::DebugGl) {
     let Some(program) = crate::CURRENT_SHADER.with(|c| *c.borrow()) else {
         return;
@@ -360,20 +318,7 @@ unsafe fn stream_block(
     }
 }
 
-/// Stamp `program`'s blocks as drawn. Called at each real draw WITH the program
-/// that draw goes through.
-///
-/// Deliberately not an ambient "currently bound" tracker, which misattributes
-/// two ways: `track_text_draw_call` runs at the top of
-/// `draw_text_line_internal`, before the text program is bound and before the
-/// draw (so it credited whichever program came before, and fired even when the
-/// font was missing and nothing drew), and `stone_set_shader(0)` leaves nothing
-/// bound, so a later unrelated draw would credit the stale entry.
 pub(crate) fn mark_program_drawn(program: glow::Program) {
-    // One hash lookup on a map that holds ONLY block-owning programs, so the
-    // overwhelmingly common case -- a draw through a program with no blocks --
-    // misses immediately. This runs per draw call; scanning the shader registry
-    // here would put an O(shaders) walk on every draw in the frame.
     let handle = BLOCK_PROGRAMS.with(|m| m.borrow().get(&program).copied());
     let Some(handle) = handle else { return };
     BLOCKS.with(|b| {
@@ -385,15 +330,6 @@ pub(crate) fn mark_program_drawn(program: glow::Program) {
     });
 }
 
-/// Report every block a draw has issued against but which nothing has ever
-/// filled. Called at the frame boundary.
-///
-/// A block member has no `glGetUniformLocation`, so a by-name setter aimed at
-/// one writes nothing and the shader reads zeroes -- which looks like wrong game
-/// state, not like a wiring bug, and so survives every pixel oracle that does
-/// not happen to sample the affected pixels. This is the mechanism that makes
-/// the class loud: the engine knows every registered block, so a block never
-/// uploaded is decidable without anyone looking at the screen.
 pub(crate) fn report_unfilled_blocks() {
     BLOCKS.with(|b| {
         for blocks in b.borrow_mut().values_mut() {
@@ -417,10 +353,6 @@ pub(crate) fn report_unfilled_blocks() {
     });
 }
 
-/// How many blocks were drawn with while nothing filled them. The gate's
-/// enforcement point, not only its diagnostic: `check_unfilled_uniform_blocks`
-/// (stone/engine/rendering/uniform_block.rock) fails a sim on a non-zero count,
-/// and `rock frame`'s bounded run exits non-zero.
 #[no_mangle]
 pub extern "C" fn stone_unfilled_uniform_block_count() -> c_int {
     BLOCKS.with(|b| {
@@ -432,12 +364,6 @@ pub extern "C" fn stone_unfilled_uniform_block_count() -> c_int {
     })
 }
 
-/// Register `size` zero bytes for `handle`'s uniform block and point the
-/// program's block at `binding`.
-///
-/// Returns false and logs when the program declares no block of that name --
-/// never silently, because the symptom of a missed bind is a shader reading
-/// zeroes forever, which looks like wrong game state rather than a wiring bug.
 #[no_mangle]
 pub extern "C" fn stone_shader_bind_uniform_block(
     handle: u64,
@@ -478,7 +404,6 @@ pub extern "C" fn stone_shader_bind_uniform_block(
         // read 0 rather than whatever the driver handed back, or the same
         // source renders differently per driver and per run.
         let bytes = vec![0u8; size as usize];
-        // Deliberately NOT bound here: see `binding` above.
 
         BLOCK_PROGRAMS.with(|m| m.borrow_mut().insert(program, handle));
         BLOCKS.with(|b| {
@@ -626,9 +551,6 @@ pub extern "C" fn stone_shader_snapshot_uniform_block(
     })
 }
 
-/// Read actual GPU bytes for independent validation of uploads and snapshots:
-/// the block's range in this frame, as a draw would bind it (streamed again
-/// first when it was written in an earlier frame).
 #[no_mangle]
 pub extern "C" fn stone_shader_read_uniform_block(
     handle: u64,

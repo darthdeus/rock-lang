@@ -163,8 +163,6 @@ unsafe extern "C" fn stone_lua_counting_alloc(
         LuaAllocCounter::Calls.add(1);
         if nsize == 0 {
             if !ptr.is_null() {
-                // Only nsize == 0 is an unambiguous free request. A realloc
-                // may shrink in place, so its old size is not counted as free.
                 LuaAllocCounter::FreeCalls.add(1);
                 LuaAllocCounter::ExplicitFreed.add(osize as u64);
             }
@@ -183,8 +181,6 @@ unsafe extern "C" fn stone_lua_counting_alloc(
             }
         }
     }
-    // begin supplies the process-lifetime OnceLock value as callback userdata.
-    // Allocation callbacks cannot unwind or call back into Lua to report errors.
     (state.allocf)(state.ud, ptr, osize, nsize)
 }
 
@@ -304,9 +300,6 @@ use sdl2::keyboard::Mod;
 use sdl2::video::GLProfile;
 
 pub mod log;
-// Re-exported so the `#[macro_export]` log_once!/log_throttled! macros
-// can reach rock-log via `$crate` from any caller crate without that
-// crate needing a direct rock-log dependency.
 #[doc(hidden)]
 pub use rock_log as rock_log_reexport;
 mod actor_query;
@@ -367,13 +360,9 @@ mod macos_focus {
     use objc2::{class, msg_send};
     use std::cell::Cell;
 
-    // NSApplicationActivationPolicy values (NSInteger)
     const POLICY_ACCESSORY: i64 = 1;
     const POLICY_REGULAR: i64 = 0;
 
-    // Link AppKit so the ObjC classes (NSApplication, NSWorkspace, etc.) are
-    // available via the runtime. No wrappers generated — selectors resolve at
-    // call time via msg_send!.
     #[link(name = "AppKit", kind = "framework")]
     extern "C" {}
 
@@ -382,9 +371,6 @@ mod macos_focus {
         /// when Stone still owns frontmost status. 0 means "nothing saved".
         static PREVIOUS_FRONTMOST_PID: Cell<i32> = const { Cell::new(0) };
 
-        /// Latch: have we promoted NSApp from Accessory to Regular yet?
-        /// Flipped by `promote_to_regular_once`; guarantees the promotion
-        /// only runs on the first user interaction, not every event.
         static PROMOTED_TO_REGULAR: Cell<bool> = const { Cell::new(false) };
     }
 
@@ -398,8 +384,6 @@ mod macos_focus {
         unsafe {
             let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
             if !app.is_null() {
-                // -[NSApplication setActivationPolicy:] returns BOOL, not void —
-                // mismatched return type panics under objc2's runtime type-check.
                 let _: bool = msg_send![app, setActivationPolicy: POLICY_ACCESSORY];
             }
         }
@@ -462,8 +446,6 @@ mod macos_focus {
             if target.is_null() {
                 return;
             }
-            // Accessory policy permits this activation; the ownership check
-            // above is what keeps teardown from switching away from another app.
             let _: bool = msg_send![target, activateWithOptions: 0u64];
         }
     }
@@ -590,13 +572,10 @@ pub mod x11_wm {
         LAST_ERROR.with(|last| last.set(Some(error)));
         ERROR_COUNT.with(|count| count.set(count.get() + 1));
         if error.resource_gone() {
-            // One line per call site: a hide/show race can repeat every frame.
             crate::log_once!("STONE", "X error tolerated (the window manager replaced the frame under the request): {error}");
         } else {
             ::log::error!(target: "STONE", "X error surfaced (not fatal): {error}");
         }
-        // Xlib discards an errored request either way; returning 0 is what the
-        // default handler does before it exits the process.
         0
     }
 
@@ -881,7 +860,6 @@ fn move_window(window: &mut sdl2::video::Window, x: i32, y: i32) {
             );
             match x11_wm::errors_since(marker) {
                 None => return,
-                // Non-window errors are already surfaced by the handler.
                 Some(error) if !error.resource_gone() => return,
                 Some(error) if attempt == MOVE_ATTEMPTS => {
                     ::log::error!(target: "STONE", "window move to ({},{}) still named a destroyed window after {} attempts ({}); leaving the position to the WM", x, y, MOVE_ATTEMPTS, error);
@@ -933,31 +911,17 @@ pub struct StoneWindow {
     // can map it at the right spot with the loop already pumping. Some => a
     // deferred show is still pending; None once shown (or never deferred).
     pending_show: Option<PendingShow>,
-    // Retained runtime visibility. This is the LIVE answer to "is the window
-    // visible", not a startup environment variable: headless boot initializes
-    // it to hidden, runtime hide/show flips it, and rendering, input, and
-    // captures keep working either way. Read through stone_is_window_hidden.
     runtime_hidden: bool,
-    // Window title stashed at creation so geometry save and restore know the game key.
     title: String,
-    // Current display mode (windowed, maximized, fullscreen).
     window_mode: Cell<window_placement::WindowMode>,
-    // Ignore an unacknowledged fullscreen request when following WM exits.
     #[cfg(target_os = "linux")]
     wm_fullscreen_confirmed: Cell<bool>,
-    // Last normal windowed bounds (for returning from fullscreen/maximized or across hide/show).
     windowed_bounds: Cell<window_placement::WindowedBounds>,
-    // Captured window state when hidden.
     saved_state_on_hide: RefCell<Option<window_placement::HiddenWindowState>>,
-    // Whether this process started hidden and has never been shown yet.
     initial_hidden_boot: Cell<bool>,
-    // The size the GAME asked for (GameConfig), not the size the window ended
-    // up at. Saved alongside the geometry so a later launch can tell a
-    // remembered size from a stale one.
     requested_size: (i32, i32),
     requested_pos: (i32, i32),
     requested_display: Option<i32>,
-    // Machine config `imgui_scale`, read once with the geometry at creation.
     config_imgui_scale: Option<f32>,
     // Raw SDL pointers for cimgui -- its only reader, so they compile out
     // with the feature.
@@ -1170,10 +1134,6 @@ pub struct GraphicsStats {
     pub instanced_draws: c_int,
 }
 
-// =============================================================================
-// Global State
-// =============================================================================
-
 /// Per-frame statistics tracking
 #[derive(Default)]
 struct FrameStats {
@@ -1204,8 +1164,6 @@ thread_local! {
     // Set only on a visible window, so headless runs stay quiet.
     static INITIAL_BORDERS: std::cell::Cell<Option<window_report::Borders>> = const { std::cell::Cell::new(None) };
     static POST_FRAME_BORDERS_LOGGED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    // Window-change flags set during event polling, drained once per frame by
-    // the runner. Each bit is take-and-clear.
     static WINDOW_CHANGE_FLAGS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
@@ -1278,11 +1236,6 @@ fn take_window_change(bit: u32) -> bool {
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static GL_SWAP_COUNT: AtomicU64 = AtomicU64::new(0);
-// A programmatic `stone_quit()` sets this; the runner's event poll reads it
-// (stone_quit_requested) to end the loop after the CURRENT frame finishes.
-// Deferred so a quit from an @late_draw system (pause-menu "Quit") does not
-// tear down the window mid-frame -- the destructive teardown is stone_teardown(),
-// run once after the loop exits.
 static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn with_window<F, R>(f: F) -> Option<R>
@@ -1305,10 +1258,6 @@ where
 {
     with_window(|w| f(&w.gl))
 }
-
-// =============================================================================
-// Core Functions
-// =============================================================================
 
 /// Initialize Stone
 #[no_mangle]
@@ -1380,7 +1329,6 @@ pub extern "C" fn stone_teardown() -> bool {
     INITIALIZED.store(false, Ordering::SeqCst);
     QUIT_REQUESTED.store(false, Ordering::SeqCst);
 
-    // Return focus to the captured app only while Stone remains frontmost.
     #[cfg(target_os = "macos")]
     macos_focus::restore_previous_frontmost();
     true
@@ -1614,15 +1562,9 @@ pub extern "C" fn stone_create_window_ex(
         gl_attr.set_context_flags().debug().set();
     }
 
-    // Headless mode: hide the window (screenshots still work via gl.read_pixels)
     let headless = std::env::var("STONE_HEADLESS").is_ok();
     let fit_enabled = window_fit_enabled(headless);
 
-    // Boot window mode: 1 = borderless-desktop, 2 = exclusive. When set (and not
-    // headless) the window is born in that mode ON the requested display, shown
-    // only after the mode is applied -- so it never flashes windowed on the
-    // wrong monitor before the game's display-settings apply catches up.
-    // Headless always renders windowed at the requested size (portable shots).
     let boot_fs = if headless {
         None
     } else {
@@ -1648,19 +1590,11 @@ pub extern "C" fn stone_create_window_ex(
         && !born_fullscreen
         && std::env::var_os("STONE_IMMEDIATE_SHOW").is_none();
 
-    // Remembered placement: env > saved > machine config > the
-    // passed game default. Headless renders exactly what was requested, for
-    // portable snapshots -- so it ignores REMEMBERED geometry (saved file,
-    // machine config) but still honors an explicit STONE_WINDOW size, which is
-    // the caller requesting rather than the machine remembering. Position and
-    // display mean nothing to a window that is never shown.
     let base = window_placement::ResolvedGeometry {
         size: (width, height),
         pos: (x, y),
         display: if _display >= 0 { Some(_display) } else { None },
     };
-    // The hand-written machine config. Headless ignores it, like saved geometry:
-    // a portable snapshot must not depend on which machine took it.
     let machine = if headless {
         window_placement::MachineConfig::default()
     } else {
@@ -1672,10 +1606,6 @@ pub extern "C" fn stone_create_window_ex(
             ..base
         }
     } else if born_fullscreen {
-        // Fullscreen fills a whole display, so windowed placement memory is
-        // irrelevant. Target the requested display's usable origin (the windowed
-        // rect the mode restores to lands there); saved geometry stays reserved
-        // for the windowed mode, restored on the next windowed boot.
         let displays = gather_display_reports(&video);
         let d = displays
             .iter()
@@ -1693,9 +1623,6 @@ pub extern "C" fn stone_create_window_ex(
     let centered =
         resolved.pos.0 == SDL_WINDOWPOS_CENTERED && resolved.pos.1 == SDL_WINDOWPOS_CENTERED;
 
-    // Pre-clamp size (and position, when explicit) against usable_bounds before
-    // the window exists -- borders are unknown here, so zero; the
-    // post-create pass below re-fits with real/modeled borders.
     let mut build_w = resolved.size.0;
     let mut build_h = resolved.size.1;
     let mut build_x = resolved.pos.0;
@@ -1723,7 +1650,6 @@ pub extern "C" fn stone_create_window_ex(
         }
     }
 
-    // Create window with explicit position (match libstone behavior)
     let mut window_builder = video.window(title_str, build_w as u32, build_h as u32);
     window_builder.opengl();
 
@@ -1731,9 +1657,6 @@ pub extern "C" fn stone_create_window_ex(
         window_builder.resizable();
     }
 
-    // Born-fullscreen and deferred-windowed are created hidden and shown later
-    // (after the mode is set / after init), so the window never paints on the
-    // wrong monitor.
     if headless || born_fullscreen || defer_windowed_show {
         window_builder.hidden();
     }
@@ -1760,7 +1683,6 @@ pub extern "C" fn stone_create_window_ex(
         window_builder.hidden();
     }
 
-    // Use explicit position if provided, otherwise center.
     if centered {
         window_builder.position_centered();
     } else {
@@ -1821,7 +1743,6 @@ pub extern "C" fn stone_create_window_ex(
 
     let t_gl_context = t_boot.elapsed();
 
-    // Create glow context
     let mut gl = unsafe {
         glow::Context::from_loader_function(|s| video.gl_get_proc_address(s) as *const _)
     };
@@ -1851,8 +1772,6 @@ pub extern "C" fn stone_create_window_ex(
         if gl.supported_extensions().contains("GL_KHR_debug") {
             unsafe {
                 gl.enable(glow::DEBUG_OUTPUT);
-                // Synchronous: the callback fires on the offending call's
-                // stack, so STONE_GL_PANIC-style backtraces line up.
                 gl.enable(glow::DEBUG_OUTPUT_SYNCHRONOUS);
                 gl.debug_message_callback(|source, ty, id, severity, msg| {
                     match severity {
@@ -1865,7 +1784,6 @@ pub extern "C" fn stone_create_window_ex(
                         glow::DEBUG_SEVERITY_LOW => {
                             ::log::info!(target: "GL", "[khr src=0x{source:X} type=0x{ty:X} id={id}] {msg}")
                         }
-                        // Notifications (buffer usage hints etc.) are spammy.
                         _ => ::log::debug!(target: "GL", "[khr id={id}] {msg}"),
                     }
                 });
@@ -1879,7 +1797,6 @@ pub extern "C" fn stone_create_window_ex(
         }
     }
 
-    // Wrap in DebugGl for automatic error checking
     let debug_gl = DebugGl::new(gl);
 
     // The only record of what the driver actually offered. On a device with no
@@ -1897,7 +1814,6 @@ pub extern "C" fn stone_create_window_ex(
         ::log::info!(target: "STONE", "headless window draws into an owned {dw}x{dh} screen framebuffer");
     }
 
-    // Disable vsync
     if let Err(e) = video.gl_set_swap_interval(sdl2::video::SwapInterval::Immediate) {
         log_once!(
             "VIDEO",
@@ -1942,7 +1858,6 @@ pub extern "C" fn stone_create_window_ex(
         }
     }
 
-    // Set viewport
     let (drawable_w, drawable_h) = window.drawable_size();
     let (win_w, win_h) = window.size();
     let (win_x, win_y) = window.position();
@@ -1958,9 +1873,6 @@ pub extern "C" fn stone_create_window_ex(
         win_x, win_y, win_w, win_h, drawable_w, drawable_h, scale, display_index,
     );
 
-    // Always-on window/display report.
-    // Headless stays at the one-liner above; a visible window emits the full
-    // block (human INFO by default, one JSON line under STONE_WINDOW_REPORT=json).
     if !headless {
         let borders = query_window_borders(&window).unwrap_or(window_report::Borders {
             top: 0,
@@ -1992,7 +1904,6 @@ pub extern "C" fn stone_create_window_ex(
         debug_gl.viewport(0, 0, drawable_w as i32, drawable_h as i32);
     }
 
-    // Create event pump
     let event_pump = match sdl_context.event_pump() {
         Ok(ep) => ep,
         Err(e) => {
@@ -2009,12 +1920,9 @@ pub extern "C" fn stone_create_window_ex(
     };
     let controller_manager = input::SdlControllerManager::new(game_controller);
 
-    // Get raw pointers for cimgui before moving ownership
     let sdl_window_raw = window.raw() as *mut c_void;
     let gl_context_raw = unsafe { gl_context.raw() };
 
-    // Deferred windowed show: remember where to map it (its resolved, fit
-    // position on the still-hidden window) so the frame loop can show it there.
     let pending_show = if defer_windowed_show {
         Some(PendingShow {
             pos: window.position(),
@@ -2067,12 +1975,10 @@ pub extern "C" fn stone_create_window_ex(
 
     let ptr = Box::into_raw(stone_window);
 
-    // Store in thread-local
     WINDOW.with(|w| {
         *w.borrow_mut() = Some(unsafe { Box::from_raw(ptr) });
     });
 
-    // Return a pointer (but we manage it in thread-local)
     WINDOW.with(|w| {
         w.borrow()
             .as_ref()
@@ -2124,8 +2030,6 @@ pub extern "C" fn stone_poll_event(event: *mut StoneEvent) -> bool {
             }
         }
 
-        // Alt+Enter toggle fullscreen (repeat suppressed).
-        // Intercept before ImGui and gameplay so it does not inject a Return keypress.
         if let sdl2::event::Event::KeyDown {
             keycode: Some(sdl2::keyboard::Keycode::Return | sdl2::keyboard::Keycode::KpEnter),
             keymod,
@@ -2170,9 +2074,6 @@ pub extern "C" fn stone_poll_event(event: *mut StoneEvent) -> bool {
             }
         }
 
-        // Forward to ImGui first. The handler early-returns if
-        // imgui hasn't been initialized yet, so the call is safe
-        // before stone_imgui_init too.
         let _ = crate::imgui::process_event(&raw as *const _ as *mut std::ffi::c_void);
         let controller_event = {
             let mut manager = window.controller_manager.borrow_mut();
@@ -2199,17 +2100,9 @@ pub extern "C" fn stone_poll_event(event: *mut StoneEvent) -> bool {
                     win_event: sdl2::event::WindowEvent::FocusGained,
                     ..
                 } => {
-                    // First time the user focuses our window: promote
-                    // to Regular so Cmd-Tab/Dock behave normally.
-                    // No surface event — the game doesn't care.
                     macos_focus::promote_to_regular_once();
                     (*event) = StoneEvent::default();
                 }
-                // Window geometry changes are not surfaced as game
-                // events; they set take-and-clear flags the runner
-                // drains each frame. SizeChanged fires for
-                // both user resizes and programmatic set_size; Resized
-                // is the user-driven subset -- track either as resized.
                 Event::Window { win_event, .. } => {
                     use sdl2::event::WindowEvent as WE;
                     match win_event {
@@ -2343,10 +2236,6 @@ pub extern "C" fn stone_show_window_if_deferred() {
                 }
             }
             window.window.show();
-            // A tiling WM (i3) maps a floating window on the *focused*
-            // output and ignores the pre-map position; it does honor a move
-            // once mapped, so re-assert the position now to land it on the
-            // intended monitor.
             move_window(&mut window.window, px, py);
             ::log::info!(
                 target: "STONE",
@@ -2362,16 +2251,10 @@ pub extern "C" fn stone_show_window_if_deferred() {
     });
 }
 
-/// Hide the native window at runtime. Rendering, command handling, and
-/// glReadPixels captures continue exactly as in headless boot: the drawable
-/// is unmapped, not destroyed. This flips retained live state, not a startup
-/// environment variable.
 #[no_mangle]
 pub extern "C" fn stone_hide_window() {
     with_window_mut(|window| {
         if window.pending_show.is_some() {
-            // A deferred show is still pending: drop it, the window must
-            // stay unmapped.
             window.pending_show = None;
         }
         if !window.runtime_hidden {
@@ -2457,7 +2340,6 @@ fn show_window_impl(requested_mode: Option<c_int>) {
                 pos: window.requested_pos,
                 display: window.requested_display,
             };
-            // A headless boot skipped the machine config; the first show reads it.
             let machine =
                 window_placement::machine_config(&window_placement::game_slug(&window.title));
             let resolved = resolve_window_geometry(&window.title, base, &machine, &window._video);
@@ -2863,9 +2745,6 @@ pub extern "C" fn stone_vsync_active() -> bool {
         .unwrap_or(false);
 }
 
-/// Set VSync. Coerced to off while the force-off latch is set (see
-/// stone_force_vsync_off) so benchmark runs stay uncapped regardless of
-/// game-side vsync requests.
 #[no_mangle]
 pub extern "C" fn stone_set_vsync(enabled: c_int) {
     let enabled = if VSYNC_FORCED_OFF.with(|f| f.get()) {
@@ -2876,9 +2755,6 @@ pub extern "C" fn stone_set_vsync(enabled: c_int) {
     apply_swap_interval(enabled);
 }
 
-/// Latch vsync permanently off for the process (perf/sim mode). While
-/// latched, stone_set_vsync(1) is a no-op -- the authoritative benchmark
-/// invariant lives here, not in each game's settings code.
 #[no_mangle]
 pub extern "C" fn stone_force_vsync_off(force: c_int) {
     VSYNC_FORCED_OFF.with(|f| f.set(force != 0));
@@ -2949,10 +2825,6 @@ fn follow_wm_fullscreen_exit(window: &mut StoneWindow) {
     ::log::info!(target: "STONE", "the WM took the window out of fullscreen: windowed at ({},{}) size {}x{}", pos.0, pos.1, w, h);
 }
 
-/// A hidden window (headless boot or runtime hide) must not change the real
-/// display: exclusive fullscreen switches the monitor's mode, and moving or
-/// fullscreening reconfigures outputs on the developer's desktop. Show applies
-/// its own mode, so a request made while hidden has no lasting effect anyway.
 fn display_change_allowed(window: &StoneWindow, request: &str) -> bool {
     if window.runtime_hidden {
         ::log::debug!(target: "VIDEO", "{request} ignored while the window is hidden");
@@ -3037,15 +2909,10 @@ pub extern "C" fn stone_wall_time() -> f64 {
 /// Get time
 #[no_mangle]
 pub extern "C" fn stone_get_time() -> f64 {
-    // Use std::time for monotonic time
     static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     let start = START.get_or_init(std::time::Instant::now);
     start.elapsed().as_secs_f64()
 }
-
-// =============================================================================
-// Window Functions
-// =============================================================================
 
 #[no_mangle]
 pub extern "C" fn stone_get_window_size(width: *mut c_int, height: *mut c_int) {
@@ -3143,9 +3010,6 @@ pub extern "C" fn stone_get_fullscreen() -> c_int {
     .unwrap_or(0)
 }
 
-/// Persist the current window geometry for this game + display topology
-/// v1 trigger: clean quit. Headless never
-/// writes (its geometry is meaningless). Atomic write handled downstream.
 fn can_persist_window_geometry(
     runtime_hidden: bool,
     pending_show: bool,
@@ -3157,8 +3021,6 @@ fn can_persist_window_geometry(
 #[no_mangle]
 pub extern "C" fn stone_save_window_geometry(title: *const c_char) {
     if std::env::var_os("STONE_NO_WINDOW_FIT").is_some() {
-        // Opt-out also means "don't remember" -- a pinned one-off run
-        // shouldn't overwrite the saved geometry for normal launches.
         return;
     }
     let title_str = if title.is_null() {
@@ -3205,9 +3067,6 @@ pub extern "C" fn stone_save_window_geometry(title: *const c_char) {
     });
 }
 
-/// Take-and-clear the "window was resized" flag (user drag or programmatic
-/// set_size). The runner drains this each frame to realloc render canvases when
-/// no fixed internal render resolution is set.
 #[no_mangle]
 pub extern "C" fn stone_take_window_resized() -> bool {
     take_window_change(WC_RESIZED)
@@ -3271,9 +3130,6 @@ pub extern "C" fn stone_set_window_display(index: c_int) {
         if !display_change_allowed(window, "set_window_display") {
             return;
         }
-        // Already on the target display: nothing to do. Keeps a redundant
-        // re-apply (boot's first display push, reopening settings) from
-        // needlessly dropping + restoring fullscreen below.
         if window.window.display_index().ok() == Some(index) {
             return;
         }
@@ -3288,11 +3144,6 @@ pub extern "C" fn stone_set_window_display(index: c_int) {
         };
         let (ux, uy, uw, uh) = target.usable;
         let (ww, wh) = window.window.size();
-        // Move keeping the window's offset within its CURRENT display, so it
-        // lands in the same relative spot on the target monitor. This both
-        // makes a live monitor switch feel natural and undoes a WM's
-        // post-map relocation to the wrong monitor without re-centering
-        // (which would discard a remembered/dragged position).
         let cur = window.window.display_index().unwrap_or(index);
         let cur_origin = displays
             .iter()
@@ -3337,9 +3188,6 @@ pub extern "C" fn stone_set_window_display(index: c_int) {
     });
 }
 
-/// Select the exclusive-fullscreen display mode closest to (w, h) on the
-/// window's current display, before `stone_set_fullscreen(2)`.
-/// No-op when the display enumerates no modes (logged).
 #[no_mangle]
 pub extern "C" fn stone_set_display_mode(width: c_int, height: c_int) {
     with_window_mut(|window| {
@@ -3490,8 +3338,6 @@ fn query_window_borders(window: &sdl2::video::Window) -> Option<window_report::B
         sys::SDL_GetWindowBordersSize(window.raw(), &mut top, &mut left, &mut bottom, &mut right)
     };
     if rc != 0 {
-        // log_once: a per-frame getter (void's debug UI) polls this; the
-        // unsupported-WM reason is a static property, surface it exactly once.
         let err = unsafe { CStr::from_ptr(sys::SDL_GetError()) }
             .to_string_lossy()
             .into_owned();
@@ -3558,9 +3404,6 @@ const ZERO_BORDERS: window_report::Borders = window_report::Borders {
     right: 0,
 };
 
-/// Fit clamp is active only on a visible window and never when explicitly
-/// opted out. Headless (sim/snapshot) runs
-/// must render exactly the requested size on any host, so they never clamp.
 fn window_fit_enabled(headless: bool) -> bool {
     !headless && std::env::var_os("STONE_NO_WINDOW_FIT").is_none()
 }
@@ -3586,11 +3429,6 @@ fn effective_borders(queried: Option<window_report::Borders>) -> window_report::
     q
 }
 
-/// Resolve remembered placement: env override
-/// > saved geometry > machine config [game.<slug>] > [default] > game default
-///
-/// The supplied default is `base`. Reads three sources once; logs the winning provenance
-/// when any source overrode the default. Callers gate this on !headless.
 fn resolve_window_geometry(
     title: &str,
     base: window_placement::ResolvedGeometry,
@@ -3602,10 +3440,6 @@ fn resolve_window_geometry(
     let displays = gather_display_reports(video);
     let topo = window_placement::topology_signature(&displays);
     let env = window_placement::env_geometry();
-    // The remembered size only applies while the game still asks for the same
-    // default. A developer changing GameConfig has to beat a stale memory --
-    // otherwise the edit does nothing and the only cure is deleting a state
-    // file nobody remembers exists.
     let (saved, saved_dropped) = match window_placement::saved_geometry(&slug, &topo) {
         Some((partial, saved_req)) => {
             window_placement::drop_stale_saved_size(partial, saved_req, base.size)
@@ -3634,12 +3468,6 @@ fn resolve_window_geometry(
         window_placement::config_file_path().map_or_else(|| "<unresolved user config directory>".to_string(), |p| p.display().to_string()),
     );
 
-    // A game's explicit monitor (base.display -- e.g. a settings-screen choice)
-    // outranks saved geometry for WHICH display the window is on: if the
-    // remembered position isn't on that display, center the window there (the
-    // remembered size is kept). Env / machine-config displays are manual
-    // overrides and still win; a game with no preference (base.display == None)
-    // leaves saved geometry in full control.
     if let Some(d) = base.display {
         if matches!(prov.display, Source::Saved | Source::Default) {
             if let Some(disp) = displays.iter().find(|x| x.index == d) {
@@ -3675,11 +3503,6 @@ fn resolve_window_geometry(
     resolved
 }
 
-/// Clamp a requested window position so the whole frame stays on-screen, using
-/// the live window's size + borders. Returns the input unchanged when fit is
-/// disabled. The runner repositions the window after creation, and saved
-/// geometry from a detached monitor has the same shape, so the move path needs
-/// the same clamp as creation.
 fn clamp_window_position(
     video: &sdl2::VideoSubsystem,
     window: &sdl2::video::Window,
@@ -3709,12 +3532,6 @@ fn clamp_window_position(
     p.pos
 }
 
-// =============================================================================
-// Logging
-// =============================================================================
-
-// Screenshot - read framebuffer and save as PNG
-// Helper functions for stats tracking
 pub(crate) fn track_draw_call() {
     FRAME_STATS.with(|fs| {
         fs.borrow_mut().draw_calls += 1;
@@ -3798,10 +3615,8 @@ pub extern "C" fn stone_get_graphics_stats(stats: *mut GraphicsStats) {
     FRAME_STATS.with(|fs| {
         let frame_stats = fs.borrow();
 
-        // Count active images
         let image_count = IMAGES.with(|imgs| imgs.borrow().len() as c_int);
 
-        // Count active canvases
         let canvas_count = canvas::get_canvas_count() as c_int;
 
         let texture_memory_mib = texture_bytes_to_mib(live_texture_bytes());
@@ -3828,8 +3643,6 @@ pub extern "C" fn stone_get_graphics_stats(stats: *mut GraphicsStats) {
 
 #[no_mangle]
 pub extern "C" fn stone_get_live_texture_bytes() -> u64 {
-    // Legacy broad-memory callers mean every tracked image level and canvas
-    // attachment. Callers needing one category use the counters below.
     live_texture_bytes()
 }
 
@@ -3866,7 +3679,6 @@ pub extern "C" fn stone_reset_frame_stats() {
         stats.instanced_draws = 0;
     });
     image_texture::reset_image_frame_stats();
-    // The frame that just ended is the window in which a block had to be filled.
     crate::uniform_block::report_unfilled_blocks();
     with_gl(|gl| {
         stream_buffer::begin_frame(gl);
@@ -3874,14 +3686,9 @@ pub extern "C" fn stone_reset_frame_stats() {
     });
 }
 
-// ImageData functions
-
 // Re-export sprite functions that are used internally or externally
 pub use mesh::{stone_mesh_create, stone_mesh_draw, stone_mesh_free, stone_mesh_set_instances};
 pub use sprite::stone_draw_mesh;
-
-// Shader compile/link helpers now live in the shared `stone-gl` crate
-// (re-exported above for `crate::compile_shader` / `crate::link_program`).
 
 #[cfg(test)]
 mod tests {
@@ -3915,7 +3722,6 @@ mod tests {
         let allocation = ptr::dangling_mut::<u8>().cast();
         LUA_COUNTER_ACTIVE.store(true, Ordering::Relaxed);
         unsafe {
-            // Lua supplies a type tag rather than an old size for new objects.
             stone_lua_counting_alloc(ud, ptr::null_mut(), 5, 4096);
             assert_eq!(
                 stone_lua_counting_alloc(ud, allocation, 4096, 8192),

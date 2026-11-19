@@ -170,9 +170,6 @@ pub unsafe fn read_snapshot(reader: Option<Read>, state: *mut c_void) -> Option<
     Some(out)
 }
 
-/// Copy the bounded coalescing ring into Rust-owned memory. The native API
-/// returns a row count, or a negative value for an unavailable/incompatible
-/// reader. Its stride must exactly match the native structure size.
 pub unsafe fn read_coalescing(
     reader: Option<Coalescing>,
     state: *mut c_void,
@@ -265,7 +262,6 @@ mod tests {
         let d = frame_deltas(&prev, &cur);
         assert_eq!(FRAME_DELTA_COLUMNS, 18);
         assert_eq!(&d[0..5], &[5.0, 3.0, 2.0, 1.0, 23.0]);
-        // Top three abort reasons by (delta desc, index asc); ties prefer lower index.
         assert_eq!(&d[5..11], &[2.0, 9.0, 60.0, 9.0, 7.0, 4.0]);
         assert_eq!(&d[11..18], &[2.0, 512.0, 6.0, 1000.0, 4000.0, 11.0, 1.0]);
         let total: f64 = [4.0, 9.0, 9.0, 1.0].iter().sum();

@@ -294,7 +294,6 @@ impl GpuTimer {
         let scopes_requested = self.scopes_requested();
         let slot = &mut self.slots[self.write];
         if slot.state == SlotState::Pending {
-            // Readback fell a whole ring behind; this sample is lost.
             if scopes_requested {
                 self.aggregate.drop_frame();
             }
@@ -401,7 +400,6 @@ impl GpuTimer {
             return;
         }
         if self.stack.len() > 1 {
-            // A frame error unwound past open scopes (frame_error_recover).
             self.mark_unbalanced("GPU scopes still open at frame end");
             self.stack.truncate(1);
         }
@@ -419,15 +417,8 @@ impl GpuTimer {
         self.write = (self.write + 1) % RING;
     }
 
-    /// Non-blocking read of the oldest pending frame. Returns:
-    /// - `>= 0.0` GPU ms of that frame's root scope (from a few frames ago),
-    /// - `-1.0` no result ready yet,
-    /// - `-2.0` timer queries unsupported on this context.
-    ///
-    /// Scope samples of the same frame are aggregated as a side effect.
     pub fn poll_ms(&mut self, gl: &DebugGl) -> f32 {
         self.ensure_init(gl);
-        // Finish mode issues no queries; its frame total is the `frame` scope.
         if !self.supported || self.mode == ScopeMode::Finish {
             return -2.0;
         }
@@ -435,8 +426,6 @@ impl GpuTimer {
         if slot.state != SlotState::Pending {
             return -1.0;
         }
-        // Timestamps complete in submission order, so the root end -- the
-        // frame's last query -- being available implies the rest are.
         let last = slot.queries[slot.used - 1];
         if unsafe { gl.get_query_parameter_u32(last, glow::QUERY_RESULT_AVAILABLE) } == 0 {
             return -1.0;
@@ -466,9 +455,6 @@ impl GpuTimer {
         frame_ns as f32 / 1_000_000.0
     }
 
-    /// The wait for GPU work queued before the frame (the previous swap, and
-    /// passes submitted from update) is its own top-level row, so it is not
-    /// billed to the frame's first scope.
     fn finish_begin(&mut self, gl: &DebugGl) {
         let before = self.aggregate.path(None, "before_frame");
         let f = &mut self.finish;
@@ -535,7 +521,6 @@ impl GpuTimer {
             return;
         }
         if self.finish.stack.len() > 1 {
-            // A frame error unwound past open scopes (frame_error_recover).
             self.finish.unbalanced = true;
             if !self.unbalanced_logged {
                 self.unbalanced_logged = true;
@@ -577,10 +562,6 @@ impl GpuTimer {
         Some(query)
     }
 
-    /// Open a timed pass. Independent of the frame ring and of
-    /// `STONE_GPU_SCOPES`, so a game can time one pass in normal play. Does
-    /// nothing without timer queries, in finish mode, while another timed
-    /// pass is open, or with `TIMED_PASSES` results unread.
     pub fn timed_begin(&mut self, gl: &DebugGl) {
         self.ensure_init(gl);
         if !self.supported
@@ -608,9 +589,6 @@ impl GpuTimer {
         self.timed.push_back(TimedPass { tag, begin, end });
     }
 
-    /// Non-blocking read of the oldest timed pass. Returns its GPU ms
-    /// (`>= 0.0`) and records its tag for `timed_tag`, `-1.0` when none is
-    /// ready, or `-2.0` when passes cannot be timed on this context.
     pub fn timed_poll_ms(&mut self, gl: &DebugGl) -> f32 {
         self.ensure_init(gl);
         if !self.supported || self.mode == ScopeMode::Finish {
@@ -734,9 +712,6 @@ pub(crate) struct ScopeStat {
     pub depth: u32,
     pub frames: usize,
     pub calls_per_frame: f64,
-    /// Total time over every measured frame, including frames the scope did
-    /// not run in: what it costs per frame on average, where `mean` is what it
-    /// costs when it runs.
     pub ms_per_frame: f64,
     pub mean: f64,
     pub stddev: f64,
@@ -1107,7 +1082,6 @@ mod tests {
             }]);
         }
         let f = agg.stats().remove(0);
-        // metric_percentile_index: (p * (n - 1) + 50) / 100 over the sorted window.
         assert_eq!((f.p50, f.p90, f.p95, f.p99), (6.0, 9.0, 10.0, 10.0));
         assert_eq!(f.mean, 5.5);
     }

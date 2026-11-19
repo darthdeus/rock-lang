@@ -1,7 +1,3 @@
-//! MAG's integer navigation graph and route planner.
-//!
-//! Graph revisions are immutable while queries use them. Search scratch and
-//! caches belong to a query; workers never touch Lua or published plan storage.
 #![allow(non_camel_case_types)]
 use std::collections::BTreeMap;
 use std::ops::{Index, IndexMut};

@@ -120,7 +120,6 @@ struct QueuedTelemetryEvent {
 
 enum AppendCommand {
     Record(QueuedTelemetryEvent),
-    // Only tests flush: it is their barrier for observing queued rows.
     #[cfg_attr(not(test), allow(dead_code))]
     Flush(Sender<bool>),
     Finish,
@@ -685,10 +684,6 @@ fn invalid_input(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
-// The same bounds `validate_data` applies in tools/telemetry/ingest.py. They are
-// restated here rather than derived because the two processes ship separately: a
-// row the client accepts and the server refuses is a quarantined batch, so the
-// client has to refuse it first.
 fn valid_data_scalar(value: &Value) -> bool {
     match value {
         Value::Bool(_) => true,
@@ -766,13 +761,6 @@ fn prepare_channel_stats_dir(root: &Path, channel: &str) -> io::Result<PathBuf> 
     Ok(directory)
 }
 
-// Materialize the queue when it is opened, not on the first flush. Opening
-// already reports failure as "could not open the gameplay-event queue", which
-// is only true if the open actually proves the file is writable; deferring the
-// create to the first append turned a permission or full-disk error into a
-// silent success followed by a much later append failure. The file is synced
-// like an append so an opened-and-empty queue survives a crash the same way a
-// flushed one does.
 fn create_empty_queue(path: &Path) -> io::Result<()> {
     let file = OpenOptions::new().create(true).append(true).open(path)?;
     file.sync_all()?;
@@ -1087,10 +1075,6 @@ impl TelemetryDrain {
 
         let mut reader = BufReader::new(file);
         reader.seek(SeekFrom::Start(cursor))?;
-        // Rows accumulate into one JSONL body. `pending` counts every byte read
-        // since the last acknowledgement, including rows dropped for a stale
-        // generation, so the cursor advances past them with the batch that
-        // followed them rather than on its own.
         let mut batch = String::new();
         let mut pending = 0_u64;
         let mut line = String::new();
@@ -1522,8 +1506,6 @@ impl AppendWorker {
                         }
                         let mut appended = false;
                         if let Err(batch_error) = spool.record_batch(&events) {
-                            // No row can fit an already-full spool. A merely oversized
-                            // batch still retries individually to admit the rows that fit.
                             if events.len() == 1
                                 || batch_error
                                     .get_ref()
@@ -1803,9 +1785,6 @@ pub extern "C" fn stone_telemetry_record(
     let Some(name) = ffi_str(name) else {
         return false;
     };
-    // A null pointer and an empty string are both "this event has no data": the
-    // caller that never built one and the caller whose builder stayed empty must
-    // not produce different envelopes.
     let data = ffi_str(data).filter(|data| !data.is_empty());
     let Ok(mut active) = TELEMETRY.lock() else {
         return false;
@@ -1816,10 +1795,6 @@ pub extern "C" fn stone_telemetry_record(
     client.record_stat_data(name, timestamp, data).is_ok()
 }
 
-/// The client's admission check without a client: whether `stone_telemetry_record`
-/// would accept this event's name, timestamp and data. A sim's in-memory capture
-/// (`stone/engine/systems/telemetry.rock`) admits through this so a payload the
-/// queue refuses cannot pass a sim that never opened a queue.
 #[no_mangle]
 pub extern "C" fn stone_telemetry_validate(
     name: *const c_char,
@@ -1874,7 +1849,6 @@ pub extern "C" fn stone_telemetry_clear(root: *const c_char) -> bool {
     }
     match TelemetryRootLock::acquire(root) {
         Ok(Some(_root_lock)) => discard_stats(root).is_ok(),
-        // The owner drops its own spool when it observes the tombstone.
         Ok(None) => true,
         Err(_) => false,
     }
@@ -1889,15 +1863,8 @@ mod tests {
     use std::process::Stdio;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    // `AppendWorker::report_failure` warns through a process-global 10 s
-    // `log_throttled!` site, so every test that can emit through it serializes
-    // here; otherwise a sibling's warning suppresses this test's.
     static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
-    // Rows of this test's throttled "spool is full" line in the process-global
-    // warn table. The caller holds TEST_LOCK with a freshly reset throttle, so
-    // the before/after delta is this test's own rows, not a sibling's warns
-    // through another site.
     fn capped_spool_warnings() -> u64 {
         crate::rock_log_reexport::records(log::Level::Warn)
             .iter()
@@ -1923,10 +1890,6 @@ mod tests {
         }
     }
 
-    // The whole request: headers and body. An empty return is a peer that closed
-    // without sending one: a stray port probe from another test process, never a
-    // real upload. Test servers skip those connections instead of counting or
-    // answering them.
     fn read_full_http_request(stream: &mut TcpStream) -> String {
         stream.set_nonblocking(false).unwrap();
         stream
@@ -1963,9 +1926,6 @@ mod tests {
         String::from_utf8(request).unwrap()
     }
 
-    /// A local ingest. `respond` gets each request with its 1-based number and
-    /// returns the status to answer with; it may block or signal the test first.
-    /// Serves until `stop`, which returns every request answered.
     struct Ingest {
         address: std::net::SocketAddr,
         stop: Arc<AtomicBool>,
@@ -2055,9 +2015,6 @@ mod tests {
         assert_eq!(timing.shutdown_budget, Duration::from_secs(3));
     }
 
-    // Clone the spool's single row until the log spans more than one request body,
-    // so a drain is forced across a batch boundary. Cloning keeps the consent
-    // generation the drain filters on. Returns the row names in log order.
     fn grow_log_past_one_batch(events_path: &Path) -> Vec<String> {
         let template = fs::read_to_string(events_path)
             .unwrap()
@@ -2335,8 +2292,6 @@ mod tests {
 
     #[test]
     fn explicit_flush_reports_prior_persistence_failure() {
-        // Emits through the throttled spool-full site; hold the lock so the
-        // warning cannot land inside the asserting test's window.
         let _guard = TEST_LOCK.lock().unwrap();
         let root = fresh_root();
         let mut client = TelemetryClient::open(&root, identity(), "", "", false).unwrap();
@@ -2425,8 +2380,6 @@ mod tests {
 
     #[test]
     fn near_capacity_worker_still_accepts_a_smaller_row_after_rejection() {
-        // Emits through the throttled spool-full site; hold the lock so the
-        // warning cannot land inside the asserting test's window.
         let _guard = TEST_LOCK.lock().unwrap();
         let root = fresh_root();
         let mut client = TelemetryClient::open(&root, identity(), "", "", false).unwrap();
@@ -2629,9 +2582,6 @@ mod tests {
             "503 Service Unavailable"
         });
         let mut timing = test_upload_timing();
-        // Keep the first request in flight until the child publishes withdrawal.
-        // Otherwise timed-out retries can sit in the server's accept backlog and
-        // be mistaken for requests sent after withdrawal.
         timing.request_timeout = Duration::from_secs(30);
         let worker =
             UploadWorker::start_with_timing(&root, transport(&ingest, "secret"), timing).unwrap();
@@ -2838,8 +2788,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    // Absent counts as empty: callers asking "was anything written" do not care
-    // which of the two they get, and an eagerly created queue gives the latter.
     fn queue_len(path: &Path) -> u64 {
         match fs::metadata(path) {
             Ok(metadata) => metadata.len(),
@@ -2873,8 +2821,6 @@ mod tests {
             spool.record_stat("valid", -1).unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
-        // Opening the spool creates the queue, so "nothing was appended" is an
-        // empty file rather than an absent one.
         assert_eq!(queue_len(&spool.events_path), 0);
         let mut bad_identity = identity();
         bad_identity.channel = "playtest/other".into();
@@ -2926,13 +2872,9 @@ mod tests {
         assert_eq!(data["ratio"], 0.5);
         assert_eq!(data["first"], true);
         assert_eq!(data["lost"], serde_json::json!([12, 3]));
-        // The envelope key set is what ingest validates by exact equality, so a
-        // row with data must be exactly the base fields plus `data`.
         let keys: Vec<&String> = rows[0].as_object().unwrap().keys().collect();
         assert_eq!(keys.len(), 12, "unexpected envelope keys {keys:?}");
 
-        // Absent data must not emit the key at all, or the exact-set validator
-        // sees a different shape for every ordinary row.
         spool.record_stat("session_start", 1_754_600_001).unwrap();
         let rows = records(&root);
         assert!(
@@ -2995,7 +2937,6 @@ mod tests {
             r#"{"k":[{"nested":1}]}"#,
             r#"{"k":[null]}"#,
             r#"{"":1}"#,
-            // Beyond signed 64-bit, which ingest rejects as an int out of range.
             r#"{"k":18446744073709551615}"#,
             &long_key,
             &long_string,
@@ -3013,8 +2954,6 @@ mod tests {
             );
         }
 
-        // Both sides of admission: the shapes at the limit must still be taken,
-        // or the rejections above could be a validator that refuses everything.
         let max_key = format!(r#"{{"{}":1}}"#, "k".repeat(64));
         let max_string = format!(r#"{{"s":"{}"}}"#, "v".repeat(256));
         let max_keys = format!(
@@ -3050,13 +2989,8 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    // No single per-key or per-string bound reaches 8 KiB, so a fixture built from
-    // one long value can only ever exercise the 256-char string rule. The row bound
-    // lives where many maximal keys accumulate, which is where this builds its arms.
     #[test]
     fn an_oversized_event_is_rejected_at_the_ingest_event_bound() {
-        // One row per fresh spool, so every measurement is taken at sequence 1 and
-        // a digit rolling over cannot move the length under the arms.
         fn row_len(payload: &str) -> usize {
             let root = fresh_root();
             let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
@@ -3069,8 +3003,6 @@ mod tests {
             len
         }
 
-        // Each filled key costs less than one maximal string, so the gap left below
-        // the bound is always payable by the tuned tail.
         let filler = "v".repeat(240);
         let payload = |keys: usize, tail: usize| {
             let mut fields: Vec<String> = (0..keys)
@@ -3290,8 +3222,6 @@ mod tests {
             client.record_stat(&name, seq).unwrap();
         }
 
-        // Start the receive backstop after the append worker has persisted the
-        // rows. The hour-long flush window cannot account for this upload.
         client.flush().unwrap();
         let uploaded = uploaded_rx.recv_timeout(Duration::from_secs(10));
         client.finish(StopMode::Discard);
@@ -3359,9 +3289,6 @@ mod tests {
         client.finish(StopMode::Discard);
 
         assert!(!root.join("reports/stats").exists());
-        // The worker is joined, so nothing further can upload; drain anything
-        // already queued and fail only on a real request. An empty read is a
-        // stray port probe from another test process, not an upload attempt.
         loop {
             match listener.accept() {
                 Ok((mut stream, _)) => {
@@ -3632,8 +3559,6 @@ mod tests {
         let worker =
             UploadWorker::start_with_timing(&root, transport(&ingest, "secret"), timing).unwrap();
 
-        // A bounded wait on the condition, not a latency assertion: the bound
-        // only fires when the worker never attempts, however loaded the host.
         failed_rx.recv_timeout(Duration::from_secs(30)).unwrap();
         worker.finish(StopMode::Discard);
 
@@ -3652,12 +3577,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(250));
             "204 No Content"
         });
-        // Drive the production shutdown drain on this thread. Routing it
-        // through the spawned upload worker races the worker's first
-        // scheduling against the live-request timeout: a worker that enters
-        // its blocking send before the Finish lands fails the bound without
-        // production misbehaving. The through-worker Finish wiring stays
-        // covered by `shutdown_flushes_a_live_partial_batch`.
         let drain = TelemetryDrain::open(&root, "steam").unwrap();
         let transport = transport(&ingest, "secret");
 
@@ -3683,10 +3602,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// The native client's whole path -- a queued spool row, the upload worker,
-    /// the signed HTTP POST -- against a fixture server that records the
-    /// request. Asserts the records the client EMITS; the dev ingest's own
-    /// acceptance and storage belong to that ingest's tests.
     #[test]
     fn native_client_posts_the_documented_batch() {
         let root = fresh_root();
@@ -3736,9 +3651,6 @@ mod tests {
             "the batch is signed with this client's channel token"
         );
 
-        // The row is the one the game recorded, in the envelope the ingest
-        // documents: one JSON object per line, still carrying the structured
-        // data rather than the flattened name.
         let rows: Vec<Value> = body
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
@@ -3839,9 +3751,6 @@ mod tests {
         assert_eq!(sends, [["first", "second"]], "both rows ride one request");
         assert!(!upload_marker.exists(), "a refused batch is not an upload");
 
-        // The batch is the unit of acknowledgement, so a refused batch replays
-        // whole. Re-delivering a row is safe because the ingest keys each event
-        // by id and a repeat is a no-op there.
         let mut retried = Vec::new();
         TelemetryDrain::open(&root, "steam")
             .unwrap()
@@ -3872,9 +3781,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    // The mid-loop flush is a separate code path from the one at end-of-log, and
-    // only this arm refuses a send on it. Without it, acknowledging before
-    // sending there survives the whole suite.
     #[test]
     fn a_refused_first_batch_replays_from_the_start() {
         let root = fresh_root();
@@ -3970,8 +3876,6 @@ mod tests {
 
         let client = TelemetryClient::open(&root, identity(), "", "", false).unwrap();
 
-        // The reclaim removed both; reopening the spool recreates an empty
-        // queue, and the absent cursor is the reclamation witness.
         assert_eq!(queue_len(&root.join("reports/stats/steam/events.jsonl")), 0);
         assert!(!root.join("reports/stats/steam/cursor.log").exists());
 

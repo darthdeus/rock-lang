@@ -28,7 +28,6 @@ pub(super) fn nav_query_next_stamp(q: &mut NavQuery) {
 }
 
 pub(super) fn nav_query_begin(g: &NavGraph, q: &mut NavQuery, plan: &NavPlan) {
-    // A refresh may have added labels since the last query.
     let label_limit = nav_graph_label_limit(g);
     while q.comp_mark.len() < label_limit {
         q.comp_mark.push(0);
@@ -128,7 +127,6 @@ pub(super) fn nav_query_attach_start(g: &NavGraph, q: &mut NavQuery, plan: &NavP
         let y0 = max(plan.goal_y, g.cluster_y[cs]);
         let x1 = min(plan.goal_x + plan.goal_w, g.cluster_x[cs] + g.cluster_size);
         let y1 = min(plan.goal_y + plan.goal_h, g.cluster_y[cs] + g.cluster_size);
-        // One tile skips the loops, as in nav_tile_search's seeding.
         if x1 - x0 == 1 && y1 - y0 == 1 {
             nav_direct_at(q, ox + x0, oy + y0);
         } else {
@@ -182,12 +180,9 @@ pub(super) fn nav_query_reuse_goal(q: &mut NavQuery, c: int, plan: &NavPlan) -> 
         q.goal_count += 1;
     }
     q.goal_hits += 1;
-    // Cache reuse changes CPU work, never admission or answer ticks.
     entry.work
 }
 
-// One goal cluster per call: a Dijkstra seeded from every open goal tile in
-// it gives each of its entrances the cost to the nearest goal tile.
 pub(super) fn nav_query_attach_goal(g: &NavGraph, q: &mut NavQuery, plan: &NavPlan) -> int {
     let wc = q.gcx1 - q.gcx0 + 1;
     let total = if plan.goal_w > 0 {
@@ -268,7 +263,6 @@ pub(super) fn nav_query_attach_goal(g: &NavGraph, q: &mut NavQuery, plan: &NavPl
     work
 }
 
-// Component early-out, then A* seeded from the start's entrances.
 pub(super) fn nav_query_check(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan) -> int {
     let stamp = q.stamp;
     for i in 0..q.start_count {
@@ -312,7 +306,6 @@ pub(super) fn nav_query_check(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan
             let to = pair.to;
             let ready = pair.ready;
             let count = pair.count;
-            // Fixed indices keep this actor's choice stable while the cache grows.
             q.area_target = route_hash(plan.seed, from, to) % NAV_AREA_ROUTE_LIMIT;
             if !ready && count <= q.area_target {
                 q.area_building = true;
@@ -332,7 +325,6 @@ pub(super) fn nav_query_check(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan
         }
     }
     q.phase = NAV_Q_SEARCH;
-    // The search relaxes the seeds first.
     q.cand_from = -1;
     q.cand_count = 0;
     for i in 0..q.start_count {
@@ -373,8 +365,6 @@ pub(super) fn nav_area_search_begin(q: &mut NavQuery) {
 
 pub(super) fn nav_area_resume(q: &mut NavQuery) {
     nav_query_next_stamp(q);
-    // Anchor searches replace goal stamps, but the actor's costs are
-    // unchanged within this graph epoch. Restore stamps without tile searches.
     for i in 0..q.goal_count {
         let n = q.goal_node[i];
         q.goal_stamp[n] = q.stamp;
@@ -386,13 +376,6 @@ pub(super) fn nav_area_resume(q: &mut NavQuery) {
     q.phase = NAV_Q_CHECK;
 }
 
-// A* over entrances: f = g + octile distance to the goal rect (or via the
-// nearest usable pad, see `pad_h`), ties broken by larger g, then smaller
-// node id. Stops once the best f reaches the best complete cost (the direct
-// path, or an entrance plus its goal cost). An expansion gathers its
-// neighbours (`cand_*`); the shared heap is driven by one flat loop like
-// `nav_cluster_search`, each pass relaxing one candidate, making one sift
-// move, or popping and expanding. Positive noise preserves admissibility.
 pub(super) fn nav_query_search(
     g: &NavGraph,
     q: &mut NavQuery,
@@ -487,7 +470,6 @@ pub(super) fn nav_query_search(
                         q.best_node = n;
                     }
                 }
-                // Seeds and admitted crossings already derived this node's area.
                 let c = nav_node_cluster(g, n);
                 let i = nav_node_slot(g, n);
                 q.cand_from = n;
@@ -520,8 +502,6 @@ pub(super) fn nav_query_search(
                         nav_cand(q, n + 1, gn + edge_cost, l + 1);
                     }
                 }
-                // Endpoint slots (and, from an endpoint, every slot), except
-                // an endpoint on a blocked tile, which only its link reaches.
                 let first = if i < k { k } else { 0 };
                 for j in first..nav_cluster_slot_limit(g, c) {
                     if j == i {
@@ -569,10 +549,6 @@ pub(super) fn nav_octile(dx: int, dy: int) -> int {
     NAV_COST_STRAIGHT * max(ax, ay) + (NAV_COST_DIAGONAL - NAV_COST_STRAIGHT) * min(ax, ay)
 }
 
-// Octile distance in world tiles to the goal rect. The search takes the
-// smaller of this and the nearest usable pad plus the least usable link
-// cost (`pad_h`): a route either walks all the way or reaches some pad
-// first. Both terms are consistent, so their minimum is.
 pub(super) fn nav_goal_octile(plan: &NavPlan, x: int, y: int) -> int {
     let mut dx = 0;
     if x < plan.goal_wx {
@@ -691,8 +667,6 @@ pub(super) fn nav_route_ready(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan
     nav_unlink(q, plan);
 }
 
-// Refine once while the request is queued. The accepted route is followed
-// from retained flat storage, so following never searches or allocates scratch.
 pub(super) fn nav_materialize(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan) -> int {
     let p = plan.route.len() - 1;
     let wx = plan.route[p].x;
@@ -735,9 +709,6 @@ pub(super) fn nav_materialize(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan
     }
 }
 
-// Pads are sorted by x when the query begins. Visit outward from x until
-// x distance alone exceeds the best octile distance; no remaining pad can
-// improve it. The exact minimum serves both abstract nodes and tile proofs.
 pub(super) fn nav_nearest_pad(q: &NavQuery, x: int, y: int) -> int {
     if q.pad_count == 0 {
         return NAV_INF;
@@ -760,7 +731,6 @@ pub(super) fn nav_nearest_pad(q: &NavQuery, x: int, y: int) -> int {
             left < 0 || (right < q.pad_count && q.pad_x[right] - x < x - q.pad_x[left]);
         let p = if from_right { right } else { left };
         let dx = (q.pad_x[p] - x).abs();
-        // Division avoids overflowing a coordinate-distance product.
         if dx > best / NAV_COST_STRAIGHT {
             return best;
         }
@@ -824,9 +794,6 @@ pub(super) fn nav_cert_offer(
     true
 }
 
-// A* either proves no route can be shorter than candidate/1.3, or reaches
-// the exact optimum and retains it when the candidate exceeds the bound.
-// Teleport costs and corner admission are the same as in the abstract query.
 pub(super) fn nav_certify(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan, budget: int) -> int {
     let mut spent = 0;
     let size = SPACE_SIZE;
@@ -846,8 +813,6 @@ pub(super) fn nav_certify(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan, bu
     let mut wy = 0;
     let mut neighbour = 8;
     let mut link = -1;
-    // Like the abstract search, complete each heap sift in the search's
-    // flat loop. A looping heap helper here repeatedly aborts JIT recording.
     loop {
         if up >= 0 {
             let (hf, hg, hn) = (&mut heap.f, &mut heap.g, &mut heap.n);
@@ -861,7 +826,6 @@ pub(super) fn nav_certify(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan, bu
             let mut offered = 0;
             let mut via = 0;
             if neighbour < 8 {
-                // Preserve the old row-major neighbour and equal-cost parent order.
                 let direction = neighbour + if neighbour >= 4 { 1 } else { 0 };
                 neighbour += 1;
                 let dx = direction % 3 - 1;
@@ -918,8 +882,6 @@ pub(super) fn nav_certify(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan, bu
             popped = true;
         } else {
             popped = false;
-            // The first pop of a tile carries its least offered cost; later
-            // ones are stale and the tile is closed by then.
             if q.cert_closed[t] != q.stamp {
                 cost = q.cert_dist[t];
                 if plan.path_cost * 10 <= f * 13 {

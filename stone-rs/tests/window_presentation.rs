@@ -84,9 +84,6 @@ fn headless_screen_reaches_shown_window() {
 
         stone_set_window_size(400, 280);
         stone_set_canvas(0);
-        // A never-mapped native framebuffer can discard writes and still
-        // read black. Make a forbidden hidden-screen read observably invalid
-        // instead, then restore the attachments before asserting the outcome.
         let attachments = [glow::COLOR_ATTACHMENT0, glow::DEPTH_ATTACHMENT];
         let objects = attachments.map(|attachment| {
             let object = gl.get_framebuffer_attachment_parameter_i32(
@@ -133,8 +130,6 @@ fn headless_screen_reaches_shown_window() {
 
         let handles = x11_window::current();
         let display = handles.display;
-        // All runtime entry points share swap: ordinary show, windowed mode,
-        // fullscreen mode, and hide/show after a resize.
         for (index, mode) in [None, Some(0), Some(1), Some(0)].into_iter().enumerate() {
             stone_hide_window();
             stone_set_window_size(400, 280);
@@ -157,8 +152,6 @@ fn headless_screen_reaches_shown_window() {
                     0
                 );
                 if attrs.map_state == xlib::IsViewable {
-                    // Mapping can finish after the poll above. Let Stone observe
-                    // this confirmed map before asking it to present pixels.
                     stone_show_window_if_deferred();
                     break;
                 }
@@ -175,8 +168,6 @@ fn headless_screen_reaches_shown_window() {
             let mut width = 0;
             let mut height = 0;
             stone_get_drawable_size(&mut width, &mut height);
-            // Seed FBO 0 explicitly: an undefined initial back buffer cannot
-            // be a reliable black-window regression oracle.
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             gl.clear_color(0.0, 0.0, 0.0, 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
@@ -201,8 +192,6 @@ fn headless_screen_reaches_shown_window() {
                 )
                 .unwrap();
             }
-            // Present must ignore stale clipping, and preserve separate read
-            // and draw bindings for the next frame and capture readers.
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
             gl.enable(glow::SCISSOR_TEST);
             gl.scissor(0, 0, 1, 1);

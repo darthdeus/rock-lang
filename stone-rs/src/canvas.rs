@@ -8,12 +8,7 @@ use crate::{track_canvas_switch, with_gl, with_window};
 struct Canvas {
     fbo: glow::Framebuffer,
     texture: glow::Texture,
-    // A TEXTURE, not a renderbuffer: the depth-visualize overlay samples the
-    // world pass's own depth, and a renderbuffer cannot be sampled at all.
-    // Depth readback (glReadPixels DEPTH_COMPONENT) works against either.
     depth_texture: Option<glow::Texture>,
-    // Allocated capacity. A scene target is sized for its raster profile's
-    // bounded worst case and never resized by camera zoom.
     width: i32,
     height: i32,
     // The live rectangle inside that capacity, anchored at the GL origin.
@@ -22,29 +17,13 @@ struct Canvas {
     // Equal to (width, height) unless a raster profile says otherwise.
     active_w: i32,
     active_h: i32,
-    // The canvas format code (see `resolve_texture_format`), kept so a resize
-    // can re-specify the texture the way creation did.
     format: c_int,
-    // Whether anything has BOUND this canvas as a render target since it was
-    // created. `tex_image_2d(.., None)` leaves contents unspecified, so
-    // creation clears explicitly and this bit is what says the clear is still
-    // the whole truth.
-    //
-    // A conservative over-approximation on purpose: a bind is not proof of a
-    // draw, but the absence of one IS proof of no draw, and the consumer
-    // (`sim_native.rock`) fails closed on the bit being set. Erring toward
-    // "painted" costs a worker; erring the other way would silently zero a
-    // canvas whose boot projection was not blank.
     bound_as_target: bool,
 }
 
 thread_local! {
     static CANVASES: RefCell<HashMap<u64, Canvas>> = RefCell::new(HashMap::new());
     static CURRENT_FBO: RefCell<Option<glow::Framebuffer>> = const { RefCell::new(None) };
-    // Pixel dimensions of the currently-bound render target, so the sprite
-    // projection matches the active framebuffer (window-size or an internal-res
-    // canvas) instead of always assuming the window. (0,0) = unset -> fall back
-    // to the window in `current_target_size`.
     static CURRENT_TARGET_SIZE: RefCell<(f32, f32)> = const { RefCell::new((0.0, 0.0)) };
     // Integer-scale letterbox present: while set, binding the default
     // framebuffer confines the viewport to this rect instead of the full
@@ -54,8 +33,6 @@ thread_local! {
     // coordinate system all Rock-side math uses); converted to GL
     // bottom-origin drawable px at bind time.
     static PRESENT_VIEWPORT: RefCell<Option<(i32, i32, i32, i32)>> = const { RefCell::new(None) };
-    // The framebuffer that presents to the window: 0 (None) on a visible
-    // window, the owned `HeadlessScreen` after a headless boot.
     static DEFAULT_FBO: RefCell<Option<glow::Framebuffer>> = const { RefCell::new(None) };
 }
 
@@ -68,7 +45,6 @@ fn with_canvas_mut<T>(handle: u64, f: impl FnOnce(&mut Canvas) -> T) -> Option<T
 }
 
 pub(crate) fn set_default_framebuffer(fbo: Option<glow::Framebuffer>) {
-    // A new context must not inherit the previous context's owned screen.
     HEADLESS_SCREEN.with(|h| *h.borrow_mut() = None);
     DEFAULT_FBO.with(|d| *d.borrow_mut() = fbo);
 }
@@ -107,8 +83,6 @@ pub(crate) fn create_headless_screen(
     let color = gl.create_renderbuffer()?;
     let depth = gl.create_renderbuffer()?;
     unsafe {
-        // A renderbuffer name is not an object until first bound, and
-        // attaching one that is not is an INVALID_OPERATION.
         gl.bind_renderbuffer(glow::RENDERBUFFER, Some(color));
         gl.bind_renderbuffer(glow::RENDERBUFFER, Some(depth));
         gl.bind_renderbuffer(glow::RENDERBUFFER, None);
@@ -180,9 +154,6 @@ pub(crate) fn present_headless_screen(window: &sdl2::video::Window) {
     });
 }
 
-/// Re-specify the headless screen's storage at `width` x `height` when that is
-/// not its size, and establish blank contents as a fresh window's would be. The
-/// screen framebuffer must be bound. No-op without a headless screen.
 fn headless_screen_follow(gl: &crate::DebugGl, width: i32, height: i32) -> Result<(), String> {
     HEADLESS_SCREEN.with(|h| {
         let mut slot = h.borrow_mut();
@@ -216,8 +187,6 @@ fn headless_screen_follow(gl: &crate::DebugGl, width: i32, height: i32) -> Resul
     })
 }
 
-// Dimensions the sprite ortho projection should use: the bound canvas, or the
-// window when rendering to the default framebuffer / before any bind.
 pub(crate) fn current_target_size() -> (f32, f32) {
     let s = CURRENT_TARGET_SIZE.with(|c| *c.borrow());
     if s.0 > 0.0 && s.1 > 0.0 {
@@ -252,9 +221,6 @@ pub extern "C" fn stone_clear_canvas(r: c_float, g: c_float, b: c_float, a: c_fl
     });
 }
 
-/// Set (or clear) the letterbox present viewport applied whenever the
-/// default framebuffer is bound. Rect is (x, y, w, h) in logical window px,
-/// top-left origin. The caller re-binds canvas 0 to apply a change.
 #[no_mangle]
 pub extern "C" fn stone_set_present_viewport(active: bool, x: c_int, y: c_int, w: c_int, h: c_int) {
     PRESENT_VIEWPORT.with(|p| {
@@ -273,14 +239,6 @@ pub extern "C" fn stone_set_canvas_active(handle: u64, w: c_int, h: c_int) {
     });
 }
 
-/// Restrict rendering to a sub-rect of the CURRENTLY BOUND target, in that
-/// target's logical top-left-origin pixels. A fullscreen-quad pass drawn under
-/// one lands in the rect instead of over everything, which is what a corner
-/// preview is -- no sprite-convention twin of the pass shader needed.
-///
-/// There is deliberately NO reset call: `stone_set_canvas` already restores the
-/// bound target's full viewport, so re-binding the target is the one reset path
-/// and there is no second one to keep in sync with it.
 #[no_mangle]
 pub extern "C" fn stone_set_viewport_rect(x: c_int, y: c_int, w: c_int, h: c_int) {
     if w <= 0 || h <= 0 {
@@ -288,8 +246,6 @@ pub extern "C" fn stone_set_viewport_rect(x: c_int, y: c_int, w: c_int, h: c_int
         return;
     }
     let (lw, lh) = current_target_size();
-    // The default framebuffer is the only target whose logical size and pixel
-    // size can differ (hidpi); a canvas is its own pixels.
     let (sx, sy, ph) = if CURRENT_FBO.with(|c| c.borrow().is_none()) {
         crate::with_window(|win| {
             let (dw, dh) = win.window.drawable_size();
@@ -312,22 +268,17 @@ pub extern "C" fn stone_set_viewport_rect(x: c_int, y: c_int, w: c_int, h: c_int
 #[no_mangle]
 pub extern "C" fn stone_set_canvas(handle: u64) {
     if handle == 0 {
-        // Bind to default framebuffer (screen)
         with_gl(|gl| unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, resolve_target(None));
             gl.disable(glow::SCISSOR_TEST);
         });
         CURRENT_FBO.with(|c| *c.borrow_mut() = None);
 
-        // Restore viewport: the full drawable, or the letterbox present
-        // rect while one is active.
         with_window(|window| {
             let (dw, dh) = window.window.drawable_size();
             let (lw, lh) = window.window.size();
             let pv = PRESENT_VIEWPORT.with(|p| *p.borrow());
             with_gl(|gl| unsafe {
-                // Every frame binds the screen before drawing to it, so this
-                // is where a resize since the last frame reaches it.
                 if let Err(e) = headless_screen_follow(gl, dw as i32, dh as i32) {
                     crate::log_once!("CANVAS", "{e}");
                 }
@@ -352,16 +303,10 @@ pub extern "C" fn stone_set_canvas(handle: u64) {
     }
 
     with_canvas_mut(handle, |canvas| {
-        // Binding as the draw target is the last point before any draw,
-        // clear or blit can touch this canvas, so it is where "no longer
-        // provably blank" is recorded (`bound_as_target`).
         canvas.bound_as_target = true;
         with_gl(|gl| unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(canvas.fbo));
             gl.viewport(0, 0, canvas.active_w, canvas.active_h);
-            // glClear ignores the viewport but respects the scissor, so
-            // the scissor is what keeps a clear (and any overdraw) off the
-            // inactive margin.
             if canvas.active_w < canvas.width || canvas.active_h < canvas.height {
                 gl.enable(glow::SCISSOR_TEST);
                 gl.scissor(0, 0, canvas.active_w, canvas.active_h);
@@ -377,12 +322,6 @@ pub extern "C" fn stone_set_canvas(handle: u64) {
     track_canvas_switch();
 }
 
-/// How one canvas format code resolves on THIS context.
-///
-/// One function because creation and resize must agree exactly: a resize that
-/// re-specified the texture with a different internal format would leave the
-/// FBO, the readback path and the shaders reading a surface none of them expect,
-/// and nothing in the handle sets would say so.
 struct TextureFormat {
     internal_format: u32,
     tex_format: u32,
@@ -390,8 +329,6 @@ struct TextureFormat {
     int_format: bool,
 }
 
-// STONE_CANVAS_RGBA8 = 0, STONE_CANVAS_RGBA16F = 1, STONE_CANVAS_RGBA32F = 2,
-// STONE_CANVAS_R32I = 3 (integer entity-id target).
 fn resolve_texture_format(format: c_int) -> TextureFormat {
     let (internal_format, tex_format, data_type) = match format {
         1 => (glow::RGBA16F, glow::RGBA, glow::HALF_FLOAT),
@@ -411,8 +348,6 @@ fn is_float_format(format: c_int) -> bool {
     matches!(format, 1 | 2)
 }
 
-// R32I id target: readbacks must use RGBA_INTEGER/INT, and clears must go
-// through glClearBufferiv (glClear on integer buffers is undefined).
 fn is_int_format(format: c_int) -> bool {
     format == 3
 }
@@ -506,7 +441,6 @@ pub extern "C" fn stone_create_canvas(
         if !canvas_dimensions_supported(gl, width, height) {
             return 0;
         }
-        // Create FBO
         let fbo = match gl.create_framebuffer() {
             Ok(fbo) => fbo,
             Err(e) => {
@@ -516,7 +450,6 @@ pub extern "C" fn stone_create_canvas(
         };
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
 
-        // Create texture
         let texture = match gl.create_texture() {
             Ok(tex) => tex,
             Err(e) => {
@@ -546,17 +479,12 @@ pub extern "C" fn stone_create_canvas(
             glow::PixelUnpackData::Slice(None::<&[u8]>),
         );
 
-        // The texture object's own filter is never observed by a sampled bind:
-        // every reader of a canvas declares its sampling on the Pass input.
-        // Integer textures MUST be NEAREST anyway -- a linear-filtered integer
-        // texture is incomplete and samples zero.
         let filter = glow::NEAREST as i32;
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter);
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter);
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
 
-        // Attach texture to FBO
         gl.framebuffer_texture_2d(
             glow::FRAMEBUFFER,
             glow::COLOR_ATTACHMENT0,
@@ -565,7 +493,6 @@ pub extern "C" fn stone_create_canvas(
             0,
         );
 
-        // Create the depth attachment as a sampleable texture if requested.
         let depth_texture = if with_depth {
             let dt = match gl.create_texture() {
                 Ok(t) => Some(t),
@@ -587,16 +514,10 @@ pub extern "C" fn stone_create_canvas(
                     glow::UNSIGNED_INT,
                     glow::PixelUnpackData::Slice(None),
                 );
-                // A depth texture is not filterable and has no mips, so the
-                // default MIPMAP min filter would make it INCOMPLETE and every
-                // sample would read black -- indistinguishable from "near".
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
-                // Sample the stored value, not a shadow comparison -- NONE is
-                // the default, stated because the two read completely
-                // differently and nothing else here would say which we want.
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_COMPARE_MODE, glow::NONE as i32);
                 gl.bind_texture(glow::TEXTURE_2D, None);
                 gl.framebuffer_texture_2d(
@@ -612,7 +533,6 @@ pub extern "C" fn stone_create_canvas(
             None
         };
 
-        // Check FBO completeness
         let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
         if status != glow::FRAMEBUFFER_COMPLETE {
             crate::log_once!("CANVAS", "Framebuffer not complete: 0x{:X} ({}x{})", status, width, height);
@@ -625,15 +545,11 @@ pub extern "C" fn stone_create_canvas(
             return 0;
         }
 
-        // ESTABLISH blank contents; see `establish_blank_contents`. The FBO is
-        // still bound from the completeness check above.
         establish_blank_contents(gl, int_format, depth_texture.is_some());
 
-        // Restore previous FBO
         let current = CURRENT_FBO.with(|c| *c.borrow());
         gl.bind_framebuffer(glow::FRAMEBUFFER, resolve_target(current));
 
-        // Store canvas
         let id = crate::handles::mint(Class::Canvas);
         CANVASES.with(|canvases| {
             canvases.borrow_mut().insert(
@@ -657,11 +573,6 @@ pub extern "C" fn stone_create_canvas(
     .unwrap_or(0)
 }
 
-/// Clear one integer draw buffer of the CURRENTLY BOUND framebuffer to
-/// `value` via glClearBufferiv -- glClear on an integer color buffer is
-/// undefined per spec, so R32I id targets clear through this instead.
-/// `draw_buffer` is the draw-buffer index (0 for a bound id canvas's own
-/// FBO, 1 for the id attachment during the MRT color pass).
 #[no_mangle]
 pub extern "C" fn stone_clear_canvas_int(draw_buffer: c_int, value: c_int) {
     with_gl(|gl| unsafe {
@@ -669,22 +580,11 @@ pub extern "C" fn stone_clear_canvas_int(draw_buffer: c_int, value: c_int) {
     });
 }
 
-/// Whether this canvas has been bound as a render target since creation, i.e.
-/// whether its contents are still provably the blank ones creation established.
-/// False for a handle the registry does not know -- callers pair this with a
-/// liveness answer rather than reading it as "safe".
 #[no_mangle]
 pub extern "C" fn stone_canvas_bound_as_target(handle: u64) -> bool {
     with_canvas(handle, |c| c.bound_as_target).unwrap_or(false)
 }
 
-/// Whether this canvas's ACTIVE RECT is the one creation established.
-///
-/// State the pixel half cannot see: `stone_set_canvas_active` narrows the
-/// sub-rect every later bind draws and reads into, and it sets no
-/// `bound_as_target` flag, so a narrowed canvas answers "never painted" while
-/// its geometry has moved. Creation's value is the canvas's full size, which is a known state --
-/// so unlike the pixels this needs no snapshot.
 #[no_mangle]
 pub extern "C" fn stone_canvas_active_is_creation(handle: u64) -> bool {
     with_canvas(handle, |c| c.active_w == c.width && c.active_h == c.height).unwrap_or(false)
@@ -697,28 +597,16 @@ pub extern "C" fn stone_canvas_active_w(handle: u64) -> c_int {
     with_canvas(handle, |c| c.active_w).unwrap_or(-1)
 }
 
-/// The canvas's active height, or -1 for an unknown handle. Both axes are
-/// published because `stone_set_canvas_active` moves them independently, so a
-/// restore that put one back would be invisible to a reader of the other.
 #[no_mangle]
 pub extern "C" fn stone_canvas_active_h(handle: u64) -> c_int {
     with_canvas(handle, |c| c.active_h).unwrap_or(-1)
 }
 
-/// The canvas's ALLOCATED width, or -1 for an unknown handle.
-///
-/// Distinct from the active width above, and needed for its own reason: a
-/// scene-target reallocation now moves the STORAGE under a stable handle, so
-/// the Rock-side `Canvas.width` and the texture behind it can disagree with
-/// nothing in the handle sets to say so. This is the reader that can tell.
 #[no_mangle]
 pub extern "C" fn stone_canvas_capacity_w(handle: u64) -> c_int {
     with_canvas(handle, |c| c.width).unwrap_or(-1)
 }
 
-/// The canvas's allocated height, or -1 for an unknown handle. Both axes, for
-/// the reason both active axes are published: a restore that put one back would
-/// be invisible to a reader of the other.
 #[no_mangle]
 pub extern "C" fn stone_canvas_capacity_h(handle: u64) -> c_int {
     with_canvas(handle, |c| c.height).unwrap_or(-1)
@@ -748,17 +636,11 @@ pub extern "C" fn stone_get_live_canvas_handle(index: c_int) -> u64 {
     })
 }
 
-/// One canvas's storage: allocated width/height out, and the EFFECTIVE color
-/// format code (`STONE_CANVAS_*`) as the return. Effective, not requested: a
-/// float request this context downgraded reports RGBA8, which is what the
-/// texture holds. -1 for an unknown handle, with the outs untouched.
 #[no_mangle]
 pub extern "C" fn stone_canvas_report(handle: u64, width: *mut c_int, height: *mut c_int) -> c_int {
     if handle == 0 || width.is_null() || height.is_null() {
         return -1;
     }
-    // Directly, not through `lookup_canvas`: `CanvasInfo` does not carry the
-    // requested format code, which is what distinguishes 16F from 32F.
     let found = with_canvas(handle, |canvas| {
         (canvas.width, canvas.height, canvas.format)
     });
@@ -874,20 +756,12 @@ pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) 
     with_canvas_mut(handle, |c| {
         c.width = width;
         c.height = height;
-        // The active rectangle is expressed inside the capacity, so a new
-        // capacity has no old rectangle to keep: leaving a narrowed one
-        // would confine every later draw to a sub-rect of a surface that
-        // just changed shape. Callers re-declare it (`set_scene_active_rects`)
-        // exactly as they do after a create.
         c.active_w = width;
         c.active_h = height;
     });
     true
 }
 
-/// Replace the storage behind one canvas's colour texture, and its depth
-/// texture when it has one. The FBO must be bound by the caller; attachments
-/// name the texture objects and so survive untouched.
 unsafe fn respecify_storage(
     gl: &crate::DebugGl,
     spec: &TextureFormat,
@@ -978,9 +852,6 @@ pub(crate) fn canvas_texture_id(handle: u64) -> Option<u32> {
     with_canvas(handle, |c| c.texture.0.get())
 }
 
-/// The depth sibling. False when the canvas has no depth attachment, so a
-/// caller asking for one it does not have is refused rather than left with
-/// whatever the unit held.
 #[no_mangle]
 pub extern "C" fn stone_bind_canvas_depth_to_unit(handle: u64, unit: c_int) -> bool {
     if handle == 0 {
@@ -994,9 +865,6 @@ pub extern "C" fn stone_bind_canvas_depth_to_unit(handle: u64, unit: c_int) -> b
     }
 }
 
-/// Whether the registry still knows this handle. The binders answer false for a
-/// dead canvas too, but they answer it at BIND time -- a consumer that wants to
-/// refuse a pass before it clears its output needs to ask first.
 #[no_mangle]
 pub extern "C" fn stone_canvas_exists(handle: u64) -> bool {
     if handle == 0 {
@@ -1005,9 +873,6 @@ pub extern "C" fn stone_canvas_exists(handle: u64) -> bool {
     with_canvas(handle, |_| ()).is_some()
 }
 
-/// Whether a canvas has a depth attachment. Asked directly because the caller's
-/// question is about the attachment, not about a texture name -- comparing one
-/// to zero answered it only as long as attachments had integer names.
 #[no_mangle]
 pub extern "C" fn stone_canvas_has_depth(handle: u64) -> bool {
     if handle == 0 {
@@ -1029,20 +894,6 @@ pub extern "C" fn stone_get_canvas_texture(handle: u64) -> u32 {
     with_canvas(handle, |c| c.texture.0.get()).unwrap_or(0)
 }
 
-/// MRT: attach the `id`-canvas's color texture as COLOR_ATTACHMENT1 of the
-/// `color`-canvas's FBO. Leaves the FBO's draw-buffer list at its default
-/// ([ATTACHMENT0]) -- the color pass toggles [0,1]/[0] per frame
-/// (stone_set_draw_buffer_mask) so a later render into this canvas can't write the
-/// id attachment. The renderer arc (R6) folds entity-id output into the main
-/// color pass this way: one geometry traversal writes color to attachment 0
-/// and entity-id to attachment 1 (the id-canvas's texture), deleting the
-/// separate whole-scene entity_id pass. The id canvas keeps its own FBO for
-/// pixel readback and its texture for the detect shader -- both read the SAME
-/// texture object this attaches here, so they need no change.
-///
-/// Returns false (and logs) if either handle is unknown or the resulting FBO is
-/// incomplete. Idempotent: re-attaching the same pair is a no-op-equivalent
-/// rebind (used after a resolution-change canvas recreate).
 #[no_mangle]
 pub extern "C" fn stone_canvas_attach_id_target(color_handle: u64, id_handle: u64) -> bool {
     stone_canvas_attach_color_target(color_handle, id_handle, 1)
@@ -1108,10 +959,6 @@ pub extern "C" fn stone_canvas_attach_color_target(
             Some(id_texture),
             0,
         );
-        // Draw-buffer state stays the FBO default ([ATTACHMENT0]); the color
-        // pass toggles [0,1]/[0] per frame (stone_set_draw_buffer_mask) so a later
-        // render into this canvas can't write the id attachment. Completeness
-        // is independent of the draw-buffer list.
         let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
         let ok = status == glow::FRAMEBUFFER_COMPLETE;
         if !ok {
@@ -1120,10 +967,6 @@ pub extern "C" fn stone_canvas_attach_color_target(
                 "stone_canvas_attach_color_target: FBO incomplete 0x{:X} after MRT attach",
                 status
             );
-            // Roll back the attachment we just made: leaving COLOR_ATTACHMENT1
-            // bound to the id texture keeps the color FBO incomplete regardless
-            // of the draw-buffer list, so the whole world stops rendering. The
-            // caller degrades to single-buffer only when this FBO is complete.
             gl.framebuffer_texture_2d(
                 glow::FRAMEBUFFER,
                 glow::COLOR_ATTACHMENT0 + slot as u32,
@@ -1133,7 +976,6 @@ pub extern "C" fn stone_canvas_attach_color_target(
             );
         }
 
-        // Restore whatever FBO was bound.
         let current = CURRENT_FBO.with(|c| *c.borrow());
         gl.bind_framebuffer(glow::FRAMEBUFFER, resolve_target(current));
         ok
@@ -1178,12 +1020,6 @@ pub extern "C" fn stone_read_canvas_pixel(handle: u64, x: c_int, y: c_int) -> c_
     stone_read_canvas_pixel_channel(handle, x, y, 0)
 }
 
-/// Read an RGBA8 rect from the WINDOW (default framebuffer), (x, y) top-left
-/// drawable coordinates, rows written top-down into `out` (w*h*4 bytes).
-/// This sees the fully presented frame -- present blit, UI pool, everything --
-/// which no canvas readback can. Only meaningful BEFORE the swap: the
-/// post-swap back buffer is undefined, so callers go through the runner's
-/// pre-swap window-probe capture, not a direct mid-frame call.
 #[no_mangle]
 pub extern "C" fn stone_read_window_rect(x: c_int, y: c_int, w: c_int, h: c_int, out: *mut u8) {
     if out.is_null() || w <= 0 || h <= 0 {
@@ -1395,9 +1231,6 @@ fn read_canvas_region_rgba32f(
     .unwrap_or(false)
 }
 
-/// Read the rect (x, y, w, h) of the active image, top-left origin, as
-/// top-to-bottom RGBA floats in one readback. The rect must lie inside the
-/// active extent; capacity and result count components.
 #[no_mangle]
 pub extern "C" fn stone_canvas_read_region_rgba32f(
     handle: u64,
@@ -1469,11 +1302,6 @@ fn read_canvas_region_i32(
     .unwrap_or(false)
 }
 
-/// Read the rect (x, y, w, h) of the active image of an R32I canvas,
-/// top-left origin, as top-to-bottom signed 32-bit integers in one readback.
-/// One channel: the id. The rect must lie inside the active extent; capacity
-/// and result count integers. Returns -1 for a non-integer canvas: ids never
-/// travel the float readback path, which rounds above 2^24.
 #[no_mangle]
 pub extern "C" fn stone_canvas_read_region_i32(
     handle: u64,
@@ -1615,9 +1443,6 @@ pub unsafe extern "C" fn stone_canvas_upload_rgba32f(
     uploaded
 }
 
-/// Read the entire color buffer of an RGBA8 canvas and save it as a PNG.
-/// No resizing, no filtering — output is exactly canvas WxH. Returns false
-/// on unknown handle, null path, or save failure (logged to stderr).
 #[no_mangle]
 pub extern "C" fn stone_canvas_save_png(handle: u64, path: *const c_char) -> bool {
     if handle == 0 || path.is_null() {
@@ -1711,9 +1536,6 @@ pub(crate) struct CanvasInfo {
     pub int_format: bool,
 }
 
-/// Look up a canvas handle's FBO, dimensions, and attachment facts.
-/// Returns None if the handle is unknown. Used by pixel_readback for async
-/// single-pixel reads.
 pub(crate) fn lookup_canvas(handle: u64) -> Option<CanvasInfo> {
     with_canvas(handle, |c| CanvasInfo {
         fbo: c.fbo,

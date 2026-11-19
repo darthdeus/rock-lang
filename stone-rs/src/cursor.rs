@@ -111,12 +111,6 @@ pub extern "C" fn stone_create_cursor_from_image_data(
     .unwrap_or(0)
 }
 
-/// Set a system cursor (arrow, crosshair, hand, etc.).
-/// Returns cursor_id (0 = error).
-///
-/// Types: 0=Arrow, 1=IBeam, 2=Wait, 3=Crosshair, 4=WaitArrow,
-///        5=SizeNWSE, 6=SizeNESW, 7=SizeWE, 8=SizeNS, 9=SizeAll,
-///        10=No, 11=Hand
 #[no_mangle]
 pub extern "C" fn stone_set_system_cursor(cursor_type: c_int) -> u64 {
     let system = match cursor_type {

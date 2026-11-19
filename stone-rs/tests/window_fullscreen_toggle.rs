@@ -39,7 +39,6 @@ fn fullscreen_round_trip_restores_windowed_bounds() {
     stone_set_fullscreen(1);
     assert_eq!(stone_get_fullscreen(), 1);
 
-    // Back to windowed: must restore original bounds
     stone_set_fullscreen(0);
     assert_eq!(stone_get_fullscreen(), 0);
 
@@ -106,10 +105,8 @@ fn alt_enter_key_event_toggles_fullscreen_and_suppresses_repeat() {
     assert_eq!(stone_get_fullscreen(), 0);
 
     let mut event = StoneEvent::default();
-    // Drain creation events
     while stone_poll_event(&mut event) {}
 
-    // Push Alt+Enter KeyDown with repeat = false
     unsafe {
         let mut sdl_ev: sdl2::sys::SDL_Event = std::mem::zeroed();
         sdl_ev.type_ = sdl2::sys::SDL_EventType::SDL_KEYDOWN as u32;
@@ -122,14 +119,12 @@ fn alt_enter_key_event_toggles_fullscreen_and_suppresses_repeat() {
     }
 
     while stone_poll_event(&mut event) {}
-    // Window should now be in desktop fullscreen mode
     assert_eq!(
         stone_get_fullscreen(),
         1,
         "Alt+Enter keydown should switch to fullscreen"
     );
 
-    // Simulate key repeat while holding Alt+Enter (repeat = 1)
     unsafe {
         let mut sdl_ev: sdl2::sys::SDL_Event = std::mem::zeroed();
         sdl_ev.type_ = sdl2::sys::SDL_EventType::SDL_KEYDOWN as u32;
@@ -142,14 +137,12 @@ fn alt_enter_key_event_toggles_fullscreen_and_suppresses_repeat() {
     }
 
     while stone_poll_event(&mut event) {}
-    // Window should STILL be in fullscreen mode (repeat suppressed!)
     assert_eq!(
         stone_get_fullscreen(),
         1,
         "holding Alt+Enter should suppress repeat and not toggle back"
     );
 
-    // Push Alt+Enter KeyDown again with repeat = 0 (new press)
     unsafe {
         let mut sdl_ev: sdl2::sys::SDL_Event = std::mem::zeroed();
         sdl_ev.type_ = sdl2::sys::SDL_EventType::SDL_KEYDOWN as u32;
@@ -162,7 +155,6 @@ fn alt_enter_key_event_toggles_fullscreen_and_suppresses_repeat() {
     }
 
     while stone_poll_event(&mut event) {}
-    // Window should now be toggled back to windowed mode
     assert_eq!(
         stone_get_fullscreen(),
         0,
@@ -255,7 +247,6 @@ fn wm_fullscreen_exit_leaves_stone_windowed_at_the_wm_geometry() {
             "the window keeps the size the WM gave it"
         );
 
-        // A later windowed request is already satisfied and must preserve the WM's geometry.
         stone_set_fullscreen(0);
         run_frames(10);
         stone_get_window_size(&mut w, &mut h);

@@ -122,9 +122,6 @@ static IMGUI_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static IMGUI_PLATFORM_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static IMGUI_GL_BACKEND_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
-/// Vertices in the last frame `stone_imgui_render` submitted; -1 before the
-/// first one. Read from Rock through `stone_imgui_last_vtx_count` -- see the
-/// note there for why Lua cannot read the draw data itself.
 static LAST_VTX_COUNT: AtomicI32 = AtomicI32::new(-1);
 
 #[no_mangle]
@@ -135,7 +132,6 @@ pub extern "C" fn stone_imgui_init(_window: *mut StoneWindow) -> bool {
     LAST_VTX_COUNT.store(-1, Ordering::SeqCst);
     let result = with_window(|window: &StoneWindow| {
         unsafe {
-            // Create ImGui context
             let ctx = igCreateContext(ptr::null_mut());
             if ctx.is_null() {
                 ::log::error!(target: "IMGUI", "stone_imgui_init: failed to create ImGui context");
@@ -284,12 +280,6 @@ unsafe fn record_draw_data(draw_data: *mut ImDrawData) {
     LAST_VTX_COUNT.store((*draw_data).total_vtx_count, Ordering::SeqCst);
 }
 
-/// Vertices in the last rendered imgui frame, or -1 before the first render.
-///
-/// This exists because Lua cannot read it: `igGetDrawData()` returns NULL
-/// outside Render()..NewFrame(), and every Rock-visible frame phase sits
-/// between NewFrame and Render. A gate asserting imgui actually produced
-/// geometry -- rather than that its API merely answered -- needs this.
 #[no_mangle]
 pub extern "C" fn stone_imgui_last_vtx_count() -> c_int {
     LAST_VTX_COUNT.load(Ordering::SeqCst)

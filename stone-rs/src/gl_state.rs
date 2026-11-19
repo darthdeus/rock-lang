@@ -29,10 +29,6 @@ pub extern "C" fn stone_gl_flush() {
 // OpenGL / Canvas Functions
 // =============================================================================
 
-/// 0 = NEAREST, 1 = LINEAR, 2 = stable bilinear mip sampling. `None` for anything else: a texture filter has no
-/// sensible default to fall back to, and picking one silently is invisible
-/// until the texture magnifies. Keep in sync with the IMAGE_FILTER_* constants
-/// in stone/engine/lib.rock and with the web twin `__sw_gl_filter`.
 pub(crate) fn gl_filter_for(filter_mode: i32) -> Option<u32> {
     match filter_mode {
         0 => Some(glow::NEAREST),
@@ -113,13 +109,6 @@ fn samplers(gl: &DebugGl) -> Option<[[glow::Sampler; 2]; 3]> {
     })
 }
 
-/// Whether a sampler object is currently bound on texture `unit`. The engine's
-/// contract is that no unit carries one between draws: the paths that bind a
-/// texture without going through bind_sampled
-/// (rect batches and immediate draws, on unit 0) would otherwise inherit
-/// whatever the last sampled draw left behind. Pinned by the sampler_release
-/// sim -- a leaked sampler is invisible to a rendering oracle until some
-/// unrelated draw happens to sample that unit.
 #[no_mangle]
 pub extern "C" fn stone_sampler_bound(unit: c_int) -> bool {
     if unit < 0 {
@@ -134,12 +123,6 @@ pub extern "C" fn stone_sampler_bound(unit: c_int) -> bool {
     .unwrap_or(false)
 }
 
-/// Bind the sampler for `mode` (0 = nearest, 1 = linear, 2 = stable bilinear mip) on texture `unit`.
-/// `image` selects the wrap half of the pair: a sampler overrides the texture's
-/// own wrap, so binding one that disagrees would silently clamp a REPEAT
-/// texture. Pass 0 for a canvas -- canvas textures are always CLAMP_TO_EDGE.
-/// A negative `mode` releases that unit back to texture-object filtering, which
-/// the paths that bind a texture without going through here still rely on.
 #[no_mangle]
 pub extern "C" fn stone_bind_sampler(unit: c_int, mode: c_int, image: u64) {
     if unit < 0 {
@@ -161,23 +144,12 @@ pub extern "C" fn stone_bind_sampler(unit: c_int, mode: c_int, image: u64) {
         gl.bind_sampler(unit as u32, Some(table[mode as usize][repeat as usize]));
     });
 }
-// =============================================================================
-// Blend/Depth Mode
-// =============================================================================
 
-// Blend mode as an int, mirroring the Rock BlendMode enum
-// (blend_mode_to_int in commands.rock). An out-of-range int is
-// unreachable from typed Rock; the fallback logs once and stays alpha
-// rather than silently mis-rendering (the "lighten" bug class).
 #[no_mangle]
 pub extern "C" fn stone_set_blend_mode_i(mode: i32) {
-    // Every arm resets the blend equation: "lighten" sets GL_MAX, and
-    // without an explicit FUNC_ADD elsewhere the MAX equation would
-    // leak into every draw after a lighten bracket.
     with_gl(|gl| unsafe {
         match mode {
             0 => {
-                // Alpha
                 gl.enable(glow::BLEND);
                 gl.blend_equation(glow::FUNC_ADD);
                 gl.blend_func_separate(
@@ -188,7 +160,6 @@ pub extern "C" fn stone_set_blend_mode_i(mode: i32) {
                 );
             }
             1 => {
-                // Additive
                 gl.enable(glow::BLEND);
                 gl.blend_equation(glow::FUNC_ADD);
                 gl.blend_func_separate(
@@ -199,30 +170,25 @@ pub extern "C" fn stone_set_blend_mode_i(mode: i32) {
                 );
             }
             2 => {
-                // Multiply
                 gl.enable(glow::BLEND);
                 gl.blend_equation(glow::FUNC_ADD);
                 gl.blend_func_separate(glow::DST_COLOR, glow::ZERO, glow::DST_ALPHA, glow::ZERO);
             }
             3 => {
-                // Lighten -- per-channel max; GL_MAX ignores the factors.
                 gl.enable(glow::BLEND);
                 gl.blend_equation(glow::MAX);
                 gl.blend_func_separate(glow::ONE, glow::ONE, glow::ONE, glow::ONE);
             }
             4 => {
-                // Replace
                 gl.disable(glow::BLEND);
                 gl.blend_equation(glow::FUNC_ADD);
             }
             5 => {
-                // Accumulate -- alpha IGNORED, unlike Additive above.
                 gl.enable(glow::BLEND);
                 gl.blend_equation(glow::FUNC_ADD);
                 gl.blend_func_separate(glow::ONE, glow::ONE, glow::ONE, glow::ONE);
             }
             6 => {
-                // Premultiplied: the source RGB is already associated with coverage.
                 gl.enable(glow::BLEND);
                 gl.blend_equation(glow::FUNC_ADD);
                 gl.blend_func_separate(
@@ -284,8 +250,6 @@ impl BlendGlState {
     }
 }
 
-// Pass scopes are LIFO, including a pass submitted while another is executing.
-// Reuse capacity: snapshots allocate neither per draw nor after the stack warms.
 #[derive(Clone, Copy)]
 struct PassGlState {
     blend: BlendGlState,
@@ -468,12 +432,7 @@ pub extern "C" fn stone_gl_blend_state() -> *const c_char {
     })
 }
 
-// Once per unknown mode int (can only fire on a Rock/Rust enum-int
-// drift, not from typed callers). set_blend_mode runs per frame, so a
-// silent fallback would hide the drift indefinitely.
 fn warn_unknown_blend_mode(mode: i32) {
-    // Through the one dedup store, keyed by the MODE: a site-only key would
-    // report the first drifted int and swallow every other one.
     if crate::rock_log_reexport::once_should_emit_for(
         concat!(file!(), ":", line!()),
         mode as u32 as u64,
@@ -523,12 +482,6 @@ pub extern "C" fn stone_set_depth_mode(compare: *const c_char, write: bool) {
     });
 }
 
-/// THE depth clear. `glClear(DEPTH_BUFFER_BIT)` is gated by DEPTH_WRITEMASK,
-/// and `unset_depth_mode()` (`stone_set_depth_mode("always", false)`) ends every
-/// draw-list flush with it false -- so a depth clear issued with inherited state
-/// silently does nothing. Enabling writes first is not this call's private
-/// convention; it is what makes a depth clear a clear at all, which is why the
-/// canvas reset goes through here rather than reimplementing the pair.
 pub(crate) unsafe fn clear_depth_unmasked(gl: &DebugGl, depth: f32) {
     gl.depth_mask(true);
     gl.clear_depth_f32(depth);
@@ -604,23 +557,6 @@ pub extern "C" fn stone_set_gl_viewport(x: c_int, y: c_int, w: c_int, h: c_int) 
 /// for both GL_MAX_DRAW_BUFFERS and GL_MAX_COLOR_ATTACHMENTS.
 pub const DRAW_BUFFERS: usize = 8;
 
-/// Set the CURRENTLY-BOUND FBO's draw buffers from an attachment BITMASK: bit
-/// `i` enables COLOR_ATTACHMENT`i`, a clear bit below the highest set one
-/// writes GL_NONE at that slot. draw-buffer state is per-FBO. R6 uses this to
-/// confine MRT to the color pass: `0b11` ([ATTACHMENT0, ATTACHMENT1]) during
-/// the pass so both color and id are written+cleared, `0b1` afterward so any
-/// later render into the same canvas (e.g. a scene/composite pass) writes only
-/// color and can't clobber the id attachment.
-///
-/// The gaps are what a prefix count could not express. A world-damage mark
-/// blends re-authored albedo into the scene color and wet roughness into the
-/// material channels while leaving the picking ID, the surface normal and the
-/// surface owner exactly as the floor/wall producer wrote them: `0b00101`.
-/// A fragment output whose slot is GL_NONE is discarded, so the shader still
-/// declares every output up to the highest one it writes.
-///
-/// Bits at or above `DRAW_BUFFERS` are ignored, and an empty mask falls back
-/// to `0b1`.
 #[no_mangle]
 pub extern "C" fn stone_set_draw_buffer_mask(mask: c_int) {
     let bits = (mask as u32) & ((1 << DRAW_BUFFERS) - 1);

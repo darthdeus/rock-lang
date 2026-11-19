@@ -93,7 +93,6 @@ impl Channel {
 // CPU still answers every frame, once per frame of lag.
 const POLL_RING_DEPTH: usize = 4;
 
-// One polled read: the ring PBO it wrote, or none for a skipped submit.
 struct InFlight {
     idx: usize,
     fence: Option<glow::Fence>,
@@ -104,7 +103,6 @@ struct InFlight {
 }
 
 struct Slot {
-    // POLL_RING_DEPTH buffers; the blocking ping-pong uses the first two.
     pbos: Vec<glow::Buffer>,
     ready_idx: usize,
     staging_idx: usize,
@@ -122,11 +120,8 @@ struct Slot {
     staging_rect: ReadRect,
     ready_center: (i32, i32),
     staging_center: (i32, i32),
-    // Set by the first poll_id: submits then go to `inflight` instead of the
-    // ready/staging ping-pong.
     polled: bool,
     inflight: VecDeque<InFlight>,
-    // The pixel the last poll_id answer was submitted for.
     answer_center: (i32, i32),
     channel: Channel,
     shape: ReadShape,
@@ -391,10 +386,6 @@ fn readback_fence_ready(status: u32) -> bool {
     matches!(status, glow::ALREADY_SIGNALED | glow::CONDITION_SATISFIED)
 }
 
-/// Whether a polled read has landed. `fence_status` is a zero-timeout wait on
-/// its fence, None when it has none. Only a pending fence defers: a failed
-/// wait maps anyway, because a blocking read is correct and a slot that never
-/// answers is not.
 fn poll_answer_landed(garbage: bool, fence_status: Option<u32>) -> bool {
     garbage || fence_status != Some(glow::TIMEOUT_EXPIRED)
 }
@@ -525,11 +516,6 @@ pub(crate) fn release_all() {
     }
 }
 
-/// Queue a full RGBA8 canvas readback into a bounded PBO.
-///
-/// The caller must pass a resident canvas no larger than 128x128 pixels. The
-/// returned id remains pending until its GPU fence signals; poll with
-/// `stone_canvas_capture_poll` and release it explicitly afterwards.
 #[no_mangle]
 pub extern "C" fn stone_canvas_capture_begin(canvas_handle: u64) -> u64 {
     if canvas_handle == 0 {
@@ -668,9 +654,6 @@ pub extern "C" fn stone_canvas_capture_begin(canvas_handle: u64) -> u64 {
     id
 }
 
-/// Poll a queued canvas capture and copy it top-down into `out` when ready.
-/// Returns 0 while its zero-timeout fence wait reports pending, the byte count
-/// when copied, or -1 for an unknown, failed, or invalid request.
 #[no_mangle]
 pub extern "C" fn stone_canvas_capture_poll(id: u64, out: *mut u8, capacity: c_int) -> c_int {
     if id == 0 || out.is_null() || capacity < 0 {
@@ -785,9 +768,6 @@ pub extern "C" fn stone_pixel_readback_new(is_depth: c_int) -> u64 {
     id
 }
 
-/// Create an integer entity-id readback whose submit coordinate is the center
-/// of a square up to `max_side` x `max_side`. Consume returns the nonzero id whose
-/// visible pixel is nearest that center.
 #[no_mangle]
 pub extern "C" fn stone_pixel_readback_area_new(max_side: c_int) -> u64 {
     if max_side <= 0 {
@@ -806,15 +786,6 @@ pub(crate) fn live_readback_ids() -> Vec<u64> {
     SLOTS.with(|s| s.borrow().keys().copied().collect())
 }
 
-/// Return a slot to CREATION's state: nothing promoted, nothing pending.
-///
-/// The slot's cross-entry state is these flags, not the PBO bytes -- consume()
-/// returns the channel sentinel whenever `ready_primed` is false, so clearing
-/// them is exactly what a freshly created slot answers. The pixels themselves
-/// are unreachable until a submit primes them again.
-///
-/// Returns false for an unknown handle so the caller cannot report a reset it
-/// did not perform.
 #[no_mangle]
 pub extern "C" fn stone_pixel_readback_reset_contents(id: u64) -> bool {
     if id == 0 {
@@ -854,9 +825,6 @@ pub extern "C" fn stone_pixel_readback_destroy(id: u64) {
     });
 }
 
-/// Map the "ready" PBO (prior submit, DMA complete) and return the pixel
-/// value. Returns the channel sentinel if no prior submit has been promoted
-/// to ready or if the prior submit was skipped (OOB / unknown canvas).
 #[no_mangle]
 pub extern "C" fn stone_pixel_readback_consume(id: u64) -> c_float {
     if id == 0 {
@@ -872,9 +840,6 @@ pub extern "C" fn stone_pixel_readback_consume(id: u64) -> c_float {
     })
 }
 
-/// Non-blocking entity-id read: the ready answer as an id (0 for nothing or a
-/// skipped submit), or -1 while no answer has landed. Never waits on the GPU.
-/// `stone_pixel_readback_answer_x`/`_y` name the pixel an answer is for.
 #[no_mangle]
 pub extern "C" fn stone_pixel_readback_poll_id(id: u64) -> c_int {
     if id == 0 {
@@ -886,13 +851,11 @@ pub extern "C" fn stone_pixel_readback_poll_id(id: u64) -> c_int {
             return -1;
         };
         if !slot.polled {
-            // Reads queued in the ping-pong carry no fence; start the ring.
             slot.polled = true;
             slot.ready_primed = false;
             slot.staging_primed = false;
             return -1;
         }
-        // Lazy: landed_prefix stops waiting at the first pending read.
         let statuses = slot.inflight.iter().map(|read| {
             let status = if read.garbage {
                 None
@@ -935,9 +898,6 @@ pub extern "C" fn stone_pixel_readback_poll_id(id: u64) -> c_int {
     })
 }
 
-/// Take the oldest completed read from a polled slot. The first call starts
-/// the fenced ring and returns `None`; a failed or missing fence counts as
-/// landed, as in `poll_answer_landed`.
 fn take_oldest_landed(slot: &mut Slot) -> Option<InFlight> {
     if !slot.polled {
         slot.polled = true;
@@ -962,10 +922,6 @@ fn take_oldest_landed(slot: &mut Slot) -> Option<InFlight> {
     Some(read)
 }
 
-/// Non-blocking RGBA read from a polled color pixel slot. Returns 1 after
-/// copying all four channels, 0 for a skipped submit, -1 while pending (the
-/// first call primes the fenced ring), and -2 for invalid arguments, slot,
-/// fence, or map failure. `capacity` is measured in `c_float` elements.
 #[no_mangle]
 pub extern "C" fn stone_pixel_readback_poll_rgba(
     id: u64,
@@ -1010,7 +966,6 @@ pub extern "C" fn stone_pixel_readback_poll_rgba(
                     id
                 );
             }
-            // Retire a broken landed entry so it cannot permanently fill the ring.
             let _ = take_oldest_landed(slot);
             return -2;
         }
@@ -1076,8 +1031,6 @@ fn consume_ready(slot: &mut Slot) -> c_float {
     if !slot.ready_primed {
         return sentinel;
     }
-    // One-shot: each promoted submit is read at most once. A second
-    // consume() without an intervening submit returns sentinel.
     slot.ready_primed = false;
 
     if slot.ready_garbage {
@@ -1205,8 +1158,6 @@ fn pixel_readback_submit(id: u64, canvas_handle: u64, x: c_int, y: c_int, reques
             return;
         };
 
-        // A polled read goes to a free ring PBO; with every one in flight the
-        // request is dropped and the poll keeps answering the older ones.
         let ring_idx = if slot.polled {
             let in_flight: Vec<usize> = slot.inflight.iter().map(|read| read.idx).collect();
             let Some(idx) = poll_ring_free_index(&in_flight) else {
@@ -1216,8 +1167,6 @@ fn pixel_readback_submit(id: u64, canvas_handle: u64, x: c_int, y: c_int, reques
         } else {
             None
         };
-        // Promote prior staging to ready. The previous ready (if any and
-        // unconsumed) is dropped — we only keep the freshest primed value.
         if slot.staging_primed && ring_idx.is_none() {
             promote_staging(slot);
         }
@@ -1333,9 +1282,6 @@ fn pixel_readback_submit(id: u64, canvas_handle: u64, x: c_int, y: c_int, reques
             } else {
                 None
             };
-            // Restore full FBO binding — READ_FRAMEBUFFER alone leaves the
-            // read target dangling for subsequent code, and None means the
-            // window framebuffer (a real FBO on iOS, not 0).
             gl.bind_framebuffer(glow::FRAMEBUFFER, crate::canvas::resolve_target(prev_fbo));
             fence
         })
@@ -1374,17 +1320,14 @@ mod tests {
         assert!(!poll_answer_landed(false, Some(glow::TIMEOUT_EXPIRED)));
         assert!(poll_answer_landed(false, Some(glow::ALREADY_SIGNALED)));
         assert!(poll_answer_landed(false, Some(glow::CONDITION_SATISFIED)));
-        // A skipped read wrote no PBO, so it lands at once.
         assert!(poll_answer_landed(true, None));
         assert!(poll_answer_landed(true, Some(glow::TIMEOUT_EXPIRED)));
-        // A failed wait maps the PBO anyway: blocking is correct, never landing is not.
         assert!(poll_answer_landed(false, Some(glow::WAIT_FAILED)));
         assert!(poll_answer_landed(false, None));
     }
 
     #[test]
     fn a_poll_takes_the_newest_read_of_the_landed_run() {
-        // Fences signal in submission order; a pending read hides newer ones.
         assert_eq!(landed_prefix([true, true, false, true]), 2);
         assert_eq!(landed_prefix([false, true]), 0);
         assert_eq!(landed_prefix([true, true]), 2);

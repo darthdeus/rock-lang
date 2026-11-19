@@ -8,8 +8,6 @@ pub(super) fn nav_area_claim(nodes: &mut IdxVec<int>, area: &mut NavArea, n: int
     area.nodes.push(n);
 }
 
-// A local-slot representative is a stable ID even when clusters are visited
-// in different orders. Only search-touched clusters allocate area records.
 pub(super) fn nav_area_ensure(g: &NavGraph, q: &mut NavQuery, c: int) -> int {
     let a = &mut q.areas;
     if a.epoch != g.epoch {
@@ -65,7 +63,6 @@ pub(super) fn nav_area_ensure(g: &NavGraph, q: &mut NavQuery, c: int) -> int {
             }
             spent += 1;
         }
-        // Fixed medoids make cached routes independent of query endpoints.
         let mut best = 2_000_000_000;
         for i in 0..area.nodes.len() {
             let candidate = area.nodes[i];
@@ -90,7 +87,6 @@ pub(super) fn nav_area_anchor(q: &NavQuery, id: int) -> int {
     q.areas.areas[q.areas.index[id]].anchor
 }
 
-// A region spanning several areas keeps its existing multi-goal search.
 pub(super) fn nav_area_pair(_g: &NavGraph, q: &mut NavQuery, plan: &NavPlan) -> int {
     if q.start_count == 0 || q.goal_count == 0 {
         return -1;
@@ -120,7 +116,6 @@ pub(super) fn nav_area_pair(_g: &NavGraph, q: &mut NavQuery, plan: &NavPlan) -> 
             return i;
         }
     }
-    // Bounded FIFO storage; an eviction regenerates the same seed-independent set.
     if let Some(work) = a.work.as_mut() {
         work.misses += 1;
     }
@@ -182,15 +177,12 @@ pub(super) fn nav_area_edge_allowed(q: &NavQuery, from: int, to: int) -> bool {
     }
     let a = q.areas.nodes[from];
     let b = q.areas.nodes[to];
-    // Seeds and every admitted crossing already belong to the chosen sequence.
     if a == b {
         return true;
     }
     q.area_rank_stamp[b] == q.stamp && q.area_rank[b] == q.area_rank[a] + 1
 }
 
-// Extract an unpenalized abstract cost and deduplicated area sequence.
-// Reject loops and stop beyond the 1.3x bound of the area's cheapest route.
 pub(super) fn nav_area_accept(g: &NavGraph, q: &mut NavQuery) -> bool {
     let pair_index = q.area_pair;
     q.areas.pairs[pair_index].attempts += 1;

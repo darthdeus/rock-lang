@@ -49,7 +49,6 @@ pub extern "C" fn stone_create_shader_from_combined(src: *const c_char) -> u64 {
 
     let combined = unsafe { CStr::from_ptr(src).to_string_lossy() };
 
-    // Find where to insert #define after #version line
     let insert_point = if let Some(version_pos) = combined.find("#version") {
         combined[version_pos..]
             .find('\n')
@@ -91,10 +90,6 @@ pub extern "C" fn stone_destroy_shader(handle: u64) {
                 gl.delete_program(shader.program);
                 gl.delete_shader(shader._vertex_shader);
                 gl.delete_shader(shader._fragment_shader);
-                // The draw paths read CURRENT_SHADER for uniform lookups, so a
-                // destroyed program left named there is a deleted program the
-                // next draw would look up. Clearing only the matching one keeps
-                // an unrelated bound program bound.
                 CURRENT_SHADER.with(|c| {
                     let mut c = c.borrow_mut();
                     if *c == Some(shader.program) {
@@ -133,8 +128,6 @@ pub extern "C" fn stone_set_shader(handle: u64) {
             track_shader_switch();
         }
     });
-    // The uniform binding index is global state, so it follows the program
-    // rather than being claimed once at registration.
     with_gl(|gl| crate::uniform_block::bind_block_for_program(gl, handle));
 }
 

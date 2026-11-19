@@ -126,8 +126,6 @@ pub(crate) unsafe fn record(
         let native_fbo = std::num::NonZeroU32::new(fbo as u32).map(glow::NativeFramebuffer);
         gl.bind_framebuffer(glow::READ_FRAMEBUFFER, native_fbo);
         gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-        // Read in bounded strips so a full-resolution diagnostic never allocates
-        // an entire depth image. Preserve pack state because this is a probe.
         for (&n, v) in pack_names.iter().zip([1, 0, 0, 0]) {
             gl.pixel_store_i32(n, v);
         }

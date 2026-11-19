@@ -1,7 +1,5 @@
 use super::*;
 
-// One move of a sift-up of entry (f, g, n) from slot `i`: returns the parent
-// slot the entry must keep climbing from, or -1 once it has been placed.
 #[inline]
 pub(super) fn nav_heap_up_step(
     hf: &mut IdxVec<int>,
@@ -33,7 +31,6 @@ pub(super) fn nav_heap_up_step(
     next
 }
 
-// One move of a sift-down within `count` entries, or -1 after placement.
 #[inline]
 pub(super) fn nav_heap_down_step(
     hf: &mut IdxVec<int>,
@@ -78,7 +75,6 @@ pub(super) fn nav_heap_down_step(
     next
 }
 
-// Makes sure slot `h.count` exists; storage grows only past the peak.
 pub(super) fn nav_heap_reserve_slot(h: &mut NavHeap) {
     if h.count == h.f.len() {
         h.f.push(0);

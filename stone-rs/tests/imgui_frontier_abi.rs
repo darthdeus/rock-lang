@@ -24,7 +24,6 @@ fn compile(source: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         .arg("-L")
         .arg(lib)
         .arg(format!("-Wl,-rpath,{}", lib.display()))
-        // Cargo's LD_LIBRARY_PATH can contain an older top-level cdylib.
         .arg(c)
         .arg(artifact)
         .arg("-o")
@@ -118,7 +117,6 @@ fn concurrent_probes(dir: &std::path::Path, binary: &std::path::Path) {
 fn concurrent_headless_imgui_does_not_persist_shared_settings() {
     let (dir, binary) = headless_probe();
     let shared_ini = dir.path().join("imgui.ini");
-    // All children share a fresh cwd; TempDir cleans it even if an assertion fails.
     concurrent_probes(dir.path(), &binary);
     assert!(
         !shared_ini.exists(),

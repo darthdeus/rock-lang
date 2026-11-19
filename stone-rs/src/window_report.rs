@@ -87,15 +87,11 @@ pub fn resolve_window_placement(
     };
     let (ux, uy, uw, uh) = target.usable;
 
-    // Clamp size to the usable area minus borders (>=1 so a pathological
-    // borders-exceeds-usable case can't produce a zero/negative dimension).
     let max_w = (uw - borders.left - borders.right).max(1);
     let max_h = (uh - borders.top - borders.bottom).max(1);
     let w = req.size.0.min(max_w).max(1);
     let h = req.size.1.min(max_h).max(1);
 
-    // Clamp the content origin so the frame [pos-borders .. pos+size+borders]
-    // fits in usable_bounds. Size is already clamped, so the range is non-empty.
     let min_x = ux + borders.left;
     let max_x = ux + uw - w - borders.right;
     let min_y = uy + borders.top;
@@ -110,9 +106,6 @@ pub fn resolve_window_placement(
     }
 }
 
-/// Display selection: explicit index if it names a real display, else the
-/// display whose bounds contain the requested position, else the primary
-/// (first enumerated).
 fn select_display<'a>(
     req: &WindowRequest,
     displays: &'a [DisplayReport],
@@ -133,9 +126,6 @@ fn point_in_bounds(p: (i32, i32), bounds: (i32, i32, i32, i32)) -> bool {
     p.0 >= bx && p.0 < bx + bw && p.1 >= by && p.1 < by + bh
 }
 
-/// Pick the enumerated display mode closest to a target size for exclusive
-/// fullscreen: smallest pixel-area difference
-/// wins, ties broken by the higher refresh rate. None when the list is empty.
 pub fn closest_display_mode(
     modes: &[(i32, i32, i32)],
     target_w: i32,
@@ -143,7 +133,6 @@ pub fn closest_display_mode(
 ) -> Option<(i32, i32, i32)> {
     modes.iter().copied().min_by_key(|&(w, h, refresh)| {
         let area_diff = ((w as i64 * h as i64) - (target_w as i64 * target_h as i64)).abs();
-        // Negate refresh so a larger rate sorts first within an area tie.
         (area_diff, -(refresh as i64))
     })
 }
@@ -372,7 +361,6 @@ mod tests {
 
     #[test]
     fn fit_exceeds_reports_overflow() {
-        // usable h 870 - top 28 - bottom 0 = 842; request 1600 exceeds by 758.
         let r = report(
             (2560, 1600),
             Borders {
@@ -511,8 +499,6 @@ mod tests {
 
     #[test]
     fn placement_pulls_offscreen_position_back() {
-        // The m1key case: runner moves the window to x=2560 on a 1440-wide
-        // single display; the clamp must pull the whole frame back on-screen.
         let d = display_at(0, (0, 0, 1440, 900), (0, 30, 1440, 870));
         let req = WindowRequest {
             size: (800, 700),
@@ -520,7 +506,6 @@ mod tests {
             display: None,
         };
         let p = resolve_window_placement(req, &[d], NO_BORDERS);
-        // max_x = 0 + 1440 - 800 - 0 = 640; y floored to usable top 30.
         assert_eq!(p.pos, (640, 30));
         assert_eq!(p.display, 0);
     }
@@ -543,7 +528,6 @@ mod tests {
                 right: 4,
             },
         );
-        // max_x = 1440 - 800 - 4 = 636; min_y = 30 + 28 = 58.
         assert_eq!(p.pos, (636, 58));
     }
 
@@ -558,7 +542,6 @@ mod tests {
         };
         let p = resolve_window_placement(req, &[d0, d1], NO_BORDERS);
         assert_eq!(p.display, 1);
-        // x=100 is left of display[1] (starts at 1440), clamped to 1440; y stays.
         assert_eq!(p.pos, (1440, 100));
     }
 
@@ -600,7 +583,6 @@ mod tests {
     #[test]
     fn closest_mode_picks_nearest_area() {
         let modes = vec![(1280, 720, 60), (2560, 1440, 60)];
-        // 1920x1080 target: 720p area diff smaller than 1440p's.
         assert_eq!(
             closest_display_mode(&modes, 1920, 1080),
             Some((1280, 720, 60))

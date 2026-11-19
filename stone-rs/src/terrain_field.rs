@@ -33,8 +33,6 @@ pub(super) fn compute(
 
     let mut distance = vec![FIELD_FAR; sample_len];
 
-    // Seed the sample boundary and every cardinal solid/empty transition at
-    // half a sample from the separating edge.
     for y in 0..sample_height {
         if cancelled(cancellation, stopping) {
             return None;
@@ -53,9 +51,6 @@ pub(super) fn compute(
         }
     }
 
-    // The Rock buffer stores each cell as f32, while Rock's scalar `float`
-    // arithmetic is f64. Widen neighbors before adding, keep each cell's mins
-    // in f64, then round once when writing that cell back to the f32 field.
     for y in 0..sample_height {
         if cancelled(cancellation, stopping) {
             return None;

@@ -16,8 +16,6 @@ pub(super) fn nav_bools(n: int, value: bool) -> IdxVec<bool> {
     vec![value; n.max(0) as usize].into()
 }
 
-// Fixed node/tile scratch stores signed costs, stamps and indices. Growing
-// preserves stamps and active searches; shrinking follows link reassignment.
 pub(super) fn nav_buffer_resize(buffer: &IdxVec<int>, n: int, value: int) -> IdxVec<int> {
     if buffer.len() == n {
         return buffer.clone();
@@ -117,8 +115,6 @@ pub(super) fn nav_graph_space_input_error(
     None
 }
 
-// Transfers fresh contiguous vectors to the graph. The caller relinquishes
-// mutable tile aliases; retained graphs own independent vectors.
 pub(super) fn nav_graph_create_owned(
     spaces: &[NavSpaceLayout],
     blocked: IdxVec<bool>,
@@ -145,8 +141,6 @@ pub(super) fn nav_graph_layout_create(
 ) -> NavGraph {
     let s = cluster_size;
     let span = SPACE_SIZE / s;
-    // A border side's straight spans and diagonal crossings map to distinct
-    // tiles along it, the last of which is never used (N7).
     let per_side = s - 1;
     let mut g = NavGraph {
         cluster_size: s,
@@ -241,12 +235,10 @@ pub(super) fn nav_graph_layout_create(
     g
 }
 
-// Packs a cell into a map key; coordinates stay within 2^22.
 pub(super) fn nav_grid_key(x: int, y: int) -> int {
     (x + 4194304) * 8388608 + (y + 4194304)
 }
 
-// The cluster holding world tile `wx, wy`, or -1 where no space is.
 pub(super) fn nav_world_cluster(g: &NavGraph, wx: int, wy: int) -> int {
     let si = nav_world_space(g, wx, wy, -1);
     if si < 0 {
@@ -258,8 +250,6 @@ pub(super) fn nav_world_cluster(g: &NavGraph, wx: int, wy: int) -> int {
         + (wx - g.space_ox[si]).div_euclid(s)
 }
 
-// The vertices where four clusters meet, in any spaces: each cluster's
-// (0,0) corner, kept when the clusters west, north-west and north of it exist.
 pub(super) fn nav_vertices_init(g: &mut NavGraph) {
     let clusters = g.cluster_space.len();
     let s = g.cluster_size;
@@ -304,8 +294,6 @@ pub(super) fn nav_border_init(g: &mut NavGraph, vertical: bool, a: int, bc: int)
     g.cluster_border[bc * 4 + db] = b;
 }
 
-// Replaces the teleport links. The clusters of every old and new endpoint
-// are invalidated, so the next refresh rebuilds their rows, edges and components.
 pub(super) fn nav_graph_set_links(g: &mut NavGraph, links: &[NavLinkInput]) {
     for e in 0..g.ep_cluster.len() {
         let c = g.ep_cluster[e];
@@ -399,8 +387,6 @@ pub(super) fn nav_graph_set_links(g: &mut NavGraph, links: &[NavLinkInput]) {
         let c = g.ep_cluster[e];
         nav_mark_pending(g, c);
     }
-    // Endpoint ids were reassigned, so labels are recomputed from scratch;
-    // a labelling in progress restarts over the new ids.
     g.comp_full = true;
     if g.phase == NAV_PHASE_COMPONENTS {
         nav_components_begin(g);
@@ -429,8 +415,6 @@ pub(super) fn nav_space_index(g: &NavGraph, space: SpaceId) -> int {
     si
 }
 
-// Whether `place` is a tile of the graph, without nav_space_index's error
-// for a space the graph lacks.
 pub(super) fn nav_graph_holds(g: &NavGraph, place: Place) -> bool {
     if !g.id_space.contains_key(&place.space.value) {
         return false;
@@ -438,7 +422,6 @@ pub(super) fn nav_graph_holds(g: &NavGraph, place: Place) -> bool {
     place.grid.x >= 0 && place.grid.y >= 0 && place.grid.x < SPACE_SIZE && place.grid.y < SPACE_SIZE
 }
 
-// `place` on the world grid through its space's origin; a missing space is at origin.
 pub(super) fn nav_graph_world_tile(g: &NavGraph, place: Place) -> IVec2 {
     let si = g.id_space.get(&place.space.value).copied().unwrap_or(-1);
     if si < 0 {
@@ -451,8 +434,6 @@ pub(super) fn nav_tile_blocked(g: &NavGraph, si: int, x: int, y: int) -> bool {
     g.blocked[g.space_tile_base[si] + y * SPACE_SIZE + x]
 }
 
-// The space index holding world tile `wx, wy`, or -1: its cell's space.
-// `hint`, a space index or -1, is tried first.
 pub(super) fn nav_world_space(g: &NavGraph, wx: int, wy: int, hint: int) -> int {
     if hint >= 0 {
         let x = wx - g.space_ox[hint];
@@ -474,7 +455,6 @@ pub(super) fn nav_tile_extra(g: &NavGraph, si: int, x: int, y: int) -> int {
     g.extra[g.space_tile_base[si] + y * SPACE_SIZE + x]
 }
 
-// Extra hop cost of world tile `wx, wy`; outside every space there is none.
 pub(super) fn nav_world_extra(g: &NavGraph, wx: int, wy: int, hint: int) -> int {
     let si = nav_world_space(g, wx, wy, hint);
     if si < 0 {
@@ -487,13 +467,11 @@ pub(super) fn nav_tile_open_corners(g: &NavGraph, si: int, x: int, y: int) -> in
     g.corners[g.space_tile_base[si] + y * SPACE_SIZE + x]
 }
 
-// Whether tile `x, y` of space index `si` lets a diagonal hop pass its elbow.
 pub(super) fn nav_tile_elbow_clear(g: &NavGraph, si: int, x: int, y: int, corner: int) -> bool {
     let t = g.space_tile_base[si] + y * SPACE_SIZE + x;
     diagonal_elbow_clear(g.blocked[t], g.corners[t], corner)
 }
 
-// A world tile outside every space is blocked.
 pub(super) fn nav_world_blocked(g: &NavGraph, wx: int, wy: int, hint: int) -> bool {
     let si = nav_world_space(g, wx, wy, hint);
     if si < 0 {
@@ -502,7 +480,6 @@ pub(super) fn nav_world_blocked(g: &NavGraph, wx: int, wy: int, hint: int) -> bo
     g.blocked[g.space_tile_base[si] + (wy - g.space_oy[si]) * SPACE_SIZE + wx - g.space_ox[si]]
 }
 
-// Whether world tile `wx, wy` lets a diagonal hop pass its elbow; outside pinches.
 pub(super) fn nav_world_elbow_clear(
     g: &NavGraph,
     wx: int,
@@ -518,7 +495,6 @@ pub(super) fn nav_world_elbow_clear(
     diagonal_elbow_clear(g.blocked[t], g.corners[t], corner)
 }
 
-// The body step rule on world tiles: target open, and diagonal elbows clear.
 pub(super) fn nav_world_step_open(
     g: &NavGraph,
     x: int,
@@ -539,8 +515,6 @@ pub(super) fn nav_world_step_open(
         && nav_world_elbow_clear(g, x, ny, diagonal_step_corner(sx, sy, false), hint)
 }
 
-// A diagonal hop between open tiles whose elbows are blocked; legal only
-// through open corners, and with no straight-step detour.
 pub(super) fn nav_world_diagonal_crossing(
     g: &NavGraph,
     x: int,
@@ -555,7 +529,6 @@ pub(super) fn nav_world_diagonal_crossing(
         && nav_world_step_open(g, x, y, nx, ny, hint)
 }
 
-// Updates one tile. Walkability changes reach the graph through invalidate.
 pub(super) fn nav_graph_set_tile(
     g: &mut NavGraph,
     space: SpaceId,
@@ -585,7 +558,6 @@ pub(super) fn nav_mark_pending(g: &mut NavGraph, c: int) {
     }
 }
 
-// Marks every cluster of `space` touching `rect` (tile coordinates).
 pub(super) fn nav_graph_invalidate(g: &mut NavGraph, space: SpaceId, rect: IRect) {
     let si = nav_space_index(g, space);
     let x0 = rect.x.max(0);
@@ -604,7 +576,6 @@ pub(super) fn nav_graph_invalidate(g: &mut NavGraph, space: SpaceId, rect: IRect
     }
 }
 
-// Work units the last refresh call spent, for a caller sharing one budget.
 pub(super) fn nav_graph_refresh_spent(g: &NavGraph) -> int {
     g.refresh_spent
 }
@@ -613,8 +584,6 @@ pub(super) fn nav_graph_refresh_pending(g: &NavGraph) -> bool {
     g.phase != NAV_PHASE_IDLE || g.pending_list.len() > 0
 }
 
-// Rebuilds invalidated clusters; a started step always finishes and may
-// overrun the budget by one unit.
 pub(super) fn nav_graph_refresh(g: &mut NavGraph, budget: int) -> bool {
     g.refresh_spent = 0;
     loop {
@@ -683,8 +652,6 @@ pub(super) fn nav_graph_refresh(g: &mut NavGraph, budget: int) -> bool {
                 g.cursor_slot = 0;
                 continue;
             }
-            // Endpoint tiles change only with the cluster's own tiles; changed
-            // border and corner crossings are covered by searches from their slots.
             let border_slots = 4 * g.per_side;
             let need = g.round_full[c]
                 || (i < border_slots && g.round_dir[c * 4 + i.div_euclid(g.per_side)])
@@ -709,7 +676,6 @@ pub(super) fn nav_graph_refresh(g: &mut NavGraph, budget: int) -> bool {
     }
 }
 
-// Opens a refresh round; begin takes pending clusters one work unit at a time.
 pub(super) fn nav_round_begin(g: &mut NavGraph) {
     g.round_id += 1;
     g.epoch += 1;
@@ -791,8 +757,6 @@ pub(super) fn nav_place_entrance(
     g.border_count[b] = slot + 1;
 }
 
-// Clears cluster c's edges to its first `count` slots facing `dir` and marks
-// that side for the search phase.
 pub(super) fn nav_clear_dir(g: &mut NavGraph, c: int, dir: int, count: int) -> int {
     let k = g.k;
     for slot in 0..count {
@@ -810,7 +774,6 @@ pub(super) fn nav_clear_dir(g: &mut NavGraph, c: int, dir: int, count: int) -> i
     count * (k + g.cluster_ep_count[c])
 }
 
-// Re-places a border's entrances and clears both clusters' edges when they move.
 pub(super) fn nav_border_rebuild(g: &mut NavGraph, b: int) -> int {
     let a = g.border_a[b];
     let bc = g.border_b[b];
@@ -892,7 +855,6 @@ pub(super) fn nav_border_rebuild(g: &mut NavGraph, b: int) -> int {
             span_start = -1;
         }
     }
-    // Diagonal crossings between two closed pairs on either side of the border.
     let px = if vertical { 1 } else { 0 };
     let py = if vertical { 0 } else { 1 };
     for p in 0..(len - 1) {
@@ -929,7 +891,6 @@ pub(super) fn nav_border_rebuild(g: &mut NavGraph, b: int) -> int {
             moved = true;
         }
     }
-    // Unmoved entrances keep their edges; rebuilt clusters already rewrite theirs.
     if !moved {
         return work;
     }
@@ -945,7 +906,6 @@ pub(super) fn nav_border_rebuild(g: &mut NavGraph, b: int) -> int {
     work
 }
 
-// Clears cluster c's edges to corner slot q and marks the slot for search.
 pub(super) fn nav_clear_corner(g: &mut NavGraph, c: int, q: int) -> int {
     let k = g.k;
     let i = 4 * g.per_side + q;
@@ -963,7 +923,6 @@ pub(super) fn nav_clear_corner(g: &mut NavGraph, c: int, q: int) -> int {
     k + g.cluster_ep_count[c]
 }
 
-// Re-evaluates vertex v's two diagonal crossings.
 pub(super) fn nav_vertex_rebuild(g: &mut NavGraph, v: int) -> int {
     let x = g.vertex_x[v];
     let y = g.vertex_y[v];
@@ -975,7 +934,6 @@ pub(super) fn nav_vertex_rebuild(g: &mut NavGraph, v: int) -> int {
     2 + a + b
 }
 
-// Records whether vertex v's crossing from corner q to corner q - 2 is live.
 pub(super) fn nav_vertex_diagonal(g: &mut NavGraph, v: int, q: int, live: bool) -> int {
     if live == g.corner_live[v * 4 + q] {
         return 0;
@@ -987,14 +945,12 @@ pub(super) fn nav_vertex_diagonal(g: &mut NavGraph, v: int, q: int, live: bool) 
     a + b
 }
 
-// Intra-region costs are symmetric; retain the diagonal and one triangle.
 #[inline]
 fn nav_cost_index(g: &NavGraph, c: int, i: int, j: int) -> int {
     let hi = max(i, j);
     c * g.k * (g.k + 1) / 2 + hi * (hi + 1) / 2 + min(i, j)
 }
 
-// Writes the cost between local slots i and j of cluster c, both ways.
 pub(super) fn nav_slot_set(g: &mut NavGraph, c: int, i: int, j: int, cost: int) {
     let k = g.k;
     if i < k && j < k {
@@ -1013,7 +969,6 @@ pub(super) fn nav_slot_set(g: &mut NavGraph, c: int, i: int, j: int, cost: int) 
     }
 }
 
-// Cost between local slots i and j of cluster c, -1 without an intra-cluster path.
 pub(super) fn nav_intra_cost(g: &NavGraph, c: int, i: int, j: int) -> int {
     let k = g.k;
     if i < k && j < k {
@@ -1028,8 +983,6 @@ pub(super) fn nav_intra_cost(g: &NavGraph, c: int, i: int, j: int) -> int {
     g.ep_cost[g.ep_row[ep] + i]
 }
 
-// Scratch belongs to one cluster, across its source searches and refresh budgets.
-// Tile writes invalidate it; links do not change local step admission or costs.
 fn nav_cluster_prepare(g: &mut NavGraph, c: int) {
     if g.search_cluster == c {
         return;
@@ -1109,7 +1062,6 @@ fn nav_cluster_prepare_steps(g: &mut NavGraph, c: int, tile: int) {
     g.search_ready[tile] = true;
 }
 
-// Dijkstra from cluster slot `from`, writing costs to every live slot.
 pub(super) fn nav_cluster_search(g: &mut NavGraph, c: int, from: int) -> int {
     nav_cluster_prepare(g, c);
     let si = g.cluster_space[c];
@@ -1130,8 +1082,6 @@ pub(super) fn nav_cluster_search(g: &mut NavGraph, c: int, from: int) -> int {
     }
     let uniform = g.search_uniform;
     if uniform >= 0 {
-        // An unobstructed uniform rectangle has exact octile distances.
-        // Keep the same work charge so publication batches retain their boundaries.
         let straight = nav_edge_cost(NAV_COST_STRAIGHT, uniform, uniform);
         let diagonal = nav_edge_cost(NAV_COST_DIAGONAL, uniform, uniform);
         for j in 0..limit {
@@ -1149,7 +1099,6 @@ pub(super) fn nav_cluster_search(g: &mut NavGraph, c: int, from: int) -> int {
     if !start_blocked || (src >= g.ep_base && !nav_node_is_pad(g, src)) {
         g.dist[start] = 0;
         g.dist_stamp[start] = stamp;
-        // Open list with decrease-key; scan for the least cost, then tile.
         g.open_cost[0] = 0;
         g.open_tile[0] = start;
         g.open_slot[start] = 0;
@@ -1215,7 +1164,6 @@ pub(super) fn nav_cluster_search(g: &mut NavGraph, c: int, from: int) -> int {
     expanded + 1
 }
 
-// The least cost of stepping from blocked cluster tile `t` onto a reached tile.
 pub(super) fn nav_exit_cost(g: &NavGraph, c: int, t: int, stamp: int) -> int {
     let si = g.cluster_space[c];
     let ox = g.cluster_x[c];
@@ -1265,12 +1213,10 @@ pub(super) fn nav_exit_cost(g: &NavGraph, c: int, t: int, stamp: int) -> int {
     best
 }
 
-// True when endpoint node n stood on a blocked tile at its cluster's last rebuild.
 pub(super) fn nav_node_blocked_endpoint(g: &NavGraph, n: int) -> bool {
     n >= g.ep_base && g.ep_blocked[n - g.ep_base]
 }
 
-// Connected components over live nodes. Labels only identify the partition.
 pub(super) fn nav_components_begin(g: &mut NavGraph) {
     if g.comp_stamp >= NAV_STAMP_LIMIT {
         for i in 0..g.comp_visit.len() {
@@ -1302,7 +1248,6 @@ pub(super) fn nav_components_begin(g: &mut NavGraph) {
     }
 }
 
-// Returns true when the labelling is done.
 pub(super) fn nav_components_step(g: &mut NavGraph, budget: int) -> bool {
     while g.refresh_spent < budget {
         let stage = g.comp_stage;
@@ -1325,7 +1270,6 @@ pub(super) fn nav_components_step(g: &mut NavGraph, budget: int) -> bool {
                 g.comp_seeds = g.comp_tail;
             }
         } else if stage == NAV_COMP_SEEDS {
-            // Every seed first, in order: its edges are the ones that changed.
             if g.comp_unfinished <= 1 {
                 g.comp_stage = NAV_COMP_KEEP;
                 g.comp_cursor = 0;
@@ -1347,7 +1291,6 @@ pub(super) fn nav_components_step(g: &mut NavGraph, budget: int) -> bool {
                 g.refresh_spent += g.flood_count;
             }
         } else if stage == NAV_COMP_RACE {
-            // Running floods take turns, one expansion each.
             if g.comp_check_active {
                 if nav_components_apart_step(g, budget) && g.comp_check_apart {
                     g.comp_stage = NAV_COMP_KEEP;
@@ -1396,7 +1339,6 @@ pub(super) fn nav_components_step(g: &mut NavGraph, budget: int) -> bool {
                 }
             }
         } else if stage == NAV_COMP_KEEP {
-            // Each running flood keeps the largest old label it claims.
             if g.comp_cursor < g.flood_count {
                 let f = g.comp_cursor;
                 g.comp_cursor += 1;
@@ -1429,7 +1371,6 @@ pub(super) fn nav_components_step(g: &mut NavGraph, budget: int) -> bool {
                 g.comp_cursor = 0;
             }
         } else if stage == NAV_COMP_MERGE {
-            // A running flood joined old components; relabel its unreached nodes.
             if g.comp_cursor < g.comp_tail {
                 let n = g.queue[g.comp_cursor];
                 let flood = g.comp_group[n];
@@ -1457,7 +1398,6 @@ pub(super) fn nav_components_step(g: &mut NavGraph, budget: int) -> bool {
     false
 }
 
-// The node in cluster slot `i` whether or not it is live, or -1.
 pub(super) fn nav_cluster_slot_node(g: &NavGraph, c: int, i: int) -> int {
     if i >= g.k {
         return g.ep_base + g.cluster_eps[g.cluster_ep_start[c] + i - g.k];
@@ -1476,7 +1416,6 @@ pub(super) fn nav_cluster_slot_node(g: &NavGraph, c: int, i: int) -> int {
     b * 2 * g.per_side + side * g.per_side + i % g.per_side
 }
 
-// Takes cluster c's nodes off their labels and seeds a flood at each live one.
 pub(super) fn nav_components_detach(g: &mut NavGraph, c: int) -> int {
     let limit = g.k + g.cluster_ep_count[c];
     for i in 0..limit {
@@ -1511,7 +1450,6 @@ pub(super) fn nav_components_detach(g: &mut NavGraph, c: int) -> int {
     limit + 1
 }
 
-// Writes v[i], growing by one when i == len; storage is reused afterwards.
 pub(super) fn nav_put(v: &mut IdxVec<int>, i: int, value: int) {
     if i < v.len() {
         v[i] = value;
@@ -1568,7 +1506,6 @@ pub(super) fn nav_flood_running(g: &NavGraph, f: int) -> bool {
     g.flood_parent[f] == f && g.flood_open[f] > 0
 }
 
-// Root flood f holds a node of old label l.
 pub(super) fn nav_components_claim(g: &mut NavGraph, l: int, f: int) {
     nav_components_touch(g, l);
     let mut e = g.flood_claims[f];
@@ -1586,7 +1523,6 @@ pub(super) fn nav_components_claim(g: &mut NavGraph, l: int, f: int) {
     g.flood_claims[f] = c;
 }
 
-// Picks running flood f's label. Returns the claims walked.
 pub(super) fn nav_components_keep(g: &mut NavGraph, f: int) -> int {
     let mut walked = 0;
     let mut e = g.flood_claims[f];
@@ -1610,7 +1546,6 @@ pub(super) fn nav_components_keep(g: &mut NavGraph, f: int) -> int {
     2 * walked
 }
 
-// Resumes the race check, charging each flood and claim as it is inspected.
 pub(super) fn nav_components_apart_step(g: &mut NavGraph, budget: int) -> bool {
     let id = g.comp_check_id;
     while g.comp_check_flood < g.flood_count && g.refresh_spent < budget {
@@ -1648,7 +1583,6 @@ pub(super) fn nav_components_apart_step(g: &mut NavGraph, budget: int) -> bool {
     true
 }
 
-// The node across `u`'s border or link, then its cluster neighbours.
 pub(super) fn nav_components_expand(g: &mut NavGraph, u: int) {
     let group = g.comp_group[u];
     let mut f = nav_flood_root(g, group);
@@ -1673,7 +1607,6 @@ pub(super) fn nav_components_expand(g: &mut NavGraph, u: int) {
     }
 }
 
-// Flood f reaches node v, visiting it or merging with the flood that did.
 pub(super) fn nav_components_meet(g: &mut NavGraph, f: int, v: int) -> int {
     if g.comp_visit[v] != g.comp_stamp {
         g.comp_visit[v] = g.comp_stamp;
@@ -1700,7 +1633,6 @@ pub(super) fn nav_components_meet(g: &mut NavGraph, f: int, v: int) -> int {
     if o == f {
         return f;
     }
-    // A flood that ran out enumerated its whole component, so both still run.
     let root = f.min(o);
     let other = f.max(o);
     g.flood_parent[other] = root;
@@ -1715,7 +1647,6 @@ pub(super) fn nav_components_meet(g: &mut NavGraph, f: int, v: int) -> int {
         }
         g.flood_tail[root] = g.flood_tail[other];
     }
-    // The other's claims go in front of the root's (duplicates are harmless).
     let mut e = g.flood_claims[other];
     if e >= 0 {
         while g.claim_next[e] >= 0 {
@@ -1729,7 +1660,6 @@ pub(super) fn nav_components_meet(g: &mut NavGraph, f: int, v: int) -> int {
     root
 }
 
-// From node n of running flood r, relabels unreached neighbors carrying other labels.
 pub(super) fn nav_components_absorb(g: &mut NavGraph, n: int, r: int) {
     let mut p = nav_node_partner(g, n);
     if p < 0 {
@@ -1760,7 +1690,6 @@ pub(super) fn nav_components_take(g: &mut NavGraph, v: int, r: int) {
     g.comp_tail += 1;
 }
 
-// Node ids are dense in [0, nav_graph_node_limit); only live ids name nodes.
 pub(super) fn nav_graph_node_limit(g: &NavGraph) -> int {
     g.component.len()
 }
@@ -1769,7 +1698,6 @@ pub(super) fn nav_graph_cluster_count(g: &NavGraph) -> int {
     g.round_full.len()
 }
 
-// Border and corner slots per cluster; endpoint slots follow them.
 pub(super) fn nav_cluster_slot_count(g: &NavGraph) -> int {
     g.k
 }
@@ -1795,7 +1723,6 @@ pub(super) fn nav_node_place(g: &NavGraph, n: int) -> Place {
     }
 }
 
-// The node facing border or corner node `n` across its border or vertex.
 pub(super) fn nav_node_partner(g: &NavGraph, n: int) -> int {
     if n >= g.ep_base {
         return -1;
@@ -1811,7 +1738,6 @@ pub(super) fn nav_node_partner(g: &NavGraph, n: int) -> int {
     n - g.per_side
 }
 
-// The cost of the step from border or corner node `n` to its partner.
 pub(super) fn nav_node_partner_cost(g: &NavGraph, n: int) -> int {
     let p = nav_node_partner(g, n);
     let extra = nav_world_extra(g, g.node_x[n], g.node_y[n], -1)
@@ -1822,7 +1748,6 @@ pub(super) fn nav_node_partner_cost(g: &NavGraph, n: int) -> int {
     nav_edge_cost(NAV_COST_STRAIGHT, extra, 0)
 }
 
-// The link index of endpoint `n`, or -1 for a border or corner node.
 pub(super) fn nav_node_link(g: &NavGraph, n: int) -> int {
     if n < g.ep_base {
         return -1;
@@ -1830,12 +1755,10 @@ pub(super) fn nav_node_link(g: &NavGraph, n: int) -> int {
     (n - g.ep_base).div_euclid(2)
 }
 
-// True when `n` is a link's pad endpoint.
 pub(super) fn nav_node_is_pad(g: &NavGraph, n: int) -> bool {
     n >= g.ep_base && (n - g.ep_base) % 2 == 0
 }
 
-// The other endpoint of `n`'s link (either direction), or -1.
 pub(super) fn nav_node_link_other(g: &NavGraph, n: int) -> int {
     if n < g.ep_base {
         return -1;
@@ -1861,7 +1784,6 @@ pub(super) fn nav_node_cluster(g: &NavGraph, n: int) -> int {
     g.border_b[b]
 }
 
-// The node's local slot in its cluster.
 pub(super) fn nav_node_slot(g: &NavGraph, n: int) -> int {
     if n >= g.ep_base {
         return g.k + g.ep_index[n - g.ep_base];
@@ -1890,17 +1812,14 @@ pub(super) fn nav_node_component(g: &NavGraph, n: int) -> int {
     g.component[n]
 }
 
-// Component labels are below this.
 pub(super) fn nav_graph_label_limit(g: &NavGraph) -> int {
     g.label_size.len()
 }
 
-// Local slots of cluster `c`: k border slots, then its link endpoints.
 pub(super) fn nav_cluster_slot_limit(g: &NavGraph, c: int) -> int {
     g.k + g.cluster_ep_count[c]
 }
 
-// The live node in cluster slot `i`, or -1.
 pub(super) fn nav_cluster_node(g: &NavGraph, c: int, i: int) -> int {
     if i >= g.k {
         return g.ep_base + g.cluster_eps[g.cluster_ep_start[c] + i - g.k];
@@ -1923,12 +1842,10 @@ pub(super) fn nav_cluster_node(g: &NavGraph, c: int, i: int) -> int {
     b * 2 * g.per_side + side * g.per_side + slot
 }
 
-// True while an invalidation of `c` waits for refresh or a round is running.
 pub(super) fn nav_cluster_pending(g: &NavGraph, c: int) -> bool {
     g.pending[c] || g.phase != NAV_PHASE_IDLE
 }
 
-// The cluster holding tile `x, y` of space index `si`, or -1 outside it.
 pub(super) fn nav_tile_cluster(g: &NavGraph, si: int, x: int, y: int) -> int {
     if x < 0 || y < 0 || x >= SPACE_SIZE || y >= SPACE_SIZE {
         return -1;

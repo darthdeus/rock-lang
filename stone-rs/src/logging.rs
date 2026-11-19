@@ -35,24 +35,10 @@ pub extern "C" fn stone_log_set_level(level: StoneLogLevel) {
 
 #[no_mangle]
 pub extern "C" fn stone_log_get_level() -> StoneLogLevel {
-    // Idempotent: covers Rock reading the level before stone_init()
-    // (Lua global-init logging).
     rock_log::init();
     from_u8(rock_log::level())
 }
 
-/// Rock-side log emit bridge (Phase 4): the one sink for the whole
-/// game process. Rock's `__rock_log` / `log_once` / `log_throttled`
-/// call this instead of Lua `print()`. `rock_log::init()` is
-/// idempotent and makes early Rock logs (emitted during Lua
-/// global-init, before `stone_init()` runs) still install + gate
-/// correctly. Caller already level-gated, but we re-gate here so the
-/// one logger stays authoritative. `level`: 0=error..4=trace.
-///
-/// `wall_clock` is the log SITE's declaration that this record's content is a
-/// wall-clock measurement (`rock_log::WALL_CLOCK_MARK`). It cannot ride the
-/// `log` facade, which has no channel for it, so a declared record goes to the
-/// same backend through `rock_log::emit_wall_clock`.
 #[no_mangle]
 pub extern "C" fn stone_log(
     level: std::os::raw::c_int,

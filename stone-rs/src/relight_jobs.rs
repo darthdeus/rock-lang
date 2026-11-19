@@ -1,9 +1,3 @@
-//! Copied occupancy snapshots; no Lua or graphics state crosses this worker.
-//!
-//! The service keeps the occupancy last published for each caller-chosen
-//! snapshot key. A job diffs new occupancy against it, and publishing a
-//! finished job moves that job's copy in as the key's snapshot, so the caller
-//! holds no copy and none is made on the publishing thread.
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
@@ -44,7 +38,6 @@ struct Work {
 }
 struct Service {
     entries: Arc<Mutex<HashMap<u64, Entry>>>,
-    // Locked after `entries` wherever both are held.
     snapshots: Mutex<HashMap<i64, Arc<Vec<u8>>>>,
     sender: mpsc::SyncSender<Work>,
     worker: JoinHandle<()>,
@@ -129,9 +122,6 @@ fn diff(
     })
 }
 
-// A positive job handle, 0 when the worker is full (retry later), -1 for
-// invalid arguments. The job compares `next` with the snapshot published for
-// `snapshot`; a key with no snapshot of this length reports the whole domain.
 #[no_mangle]
 pub unsafe extern "C" fn stone_relight_diff_submit(
     snapshot: i64,
@@ -216,9 +206,6 @@ pub unsafe extern "C" fn stone_relight_diff_submit(
     handle as i64
 }
 
-// 0 pending, 1 published and consumed, -1 invalid. Publishing writes the
-// changed tile bounds to `region` and makes the job's occupancy the snapshot
-// later jobs for its key compare against.
 #[no_mangle]
 pub unsafe extern "C" fn stone_relight_diff_publish(handle: u64, region: *mut f32) -> i32 {
     let service_slot = slot().lock().unwrap();
@@ -245,8 +232,6 @@ pub unsafe extern "C" fn stone_relight_diff_publish(handle: u64, region: *mut f3
         .insert(entry.snapshot, Arc::new(result.pixels));
     1
 }
-// Forget a key's snapshot, so its next job reports the whole domain. The
-// caller cancels the key's pending job first.
 #[no_mangle]
 pub extern "C" fn stone_relight_snapshot_drop(snapshot: i64) {
     if let Some(service) = slot().lock().unwrap().as_ref() {
@@ -294,11 +279,9 @@ mod tests {
         let submit = |next: &[u8], samples: i32| unsafe {
             stone_relight_diff_submit(KEY, 8, samples, 1, next.as_ptr(), next.len() as i64)
         };
-        // A key with no snapshot reports the whole domain and publishes one.
         let first = submit(&next, 2);
         assert!(first > 0);
         assert_eq!(publish(first), WHOLE);
-        // The job owns its copy: edits after submit are not part of it.
         next[0] = 7;
         let second = submit(&next, 2);
         assert!(second > 0);
@@ -309,8 +292,6 @@ mod tests {
             unsafe { stone_relight_diff_publish(second as u64, region.as_mut_ptr()) },
             -1
         );
-        // The second job's occupancy is now the snapshot; all nines differ
-        // from it in every tile.
         let third = submit(&next, 2);
         assert_eq!(publish(third), [-1.0, -1.0, 2.0, 2.0]);
         let unchanged = submit(&next, 2);

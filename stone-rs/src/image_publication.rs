@@ -37,8 +37,6 @@ struct Publications {
     pending: Pending,
     workers: HashMap<u64, Weak<Request>>,
     selection_wait_us: u64,
-    // Presentation cost belongs to the current host frame: resetting
-    // statistics or changing the configured cap must not refund it.
     frame_uploaded_bytes: usize,
     frame_upload_time: Duration,
 }
@@ -122,8 +120,6 @@ impl Publications {
                 self.pending.ready.push_back(id);
             }
         }
-        // A retired request may still have a worker finishing. Its result
-        // belongs to no active request and can be released.
     }
 
     fn collect(&mut self) {
@@ -190,8 +186,6 @@ impl Publications {
                     continue;
                 };
                 let bytes = crate::image_texture::decoded_upload_bytes(&decoded);
-                // An indivisible image may exceed either allowance. Always
-                // make progress on the first image of a fresh frame.
                 if self.frame_uploaded_bytes > 0
                     && self.frame_uploaded_bytes.saturating_add(bytes) > budget
                 {
@@ -206,9 +200,6 @@ impl Publications {
         Ok(())
     }
 
-    /// Publish selected requests in readiness order. A flush retains Deferred
-    /// completions and waits only for Required requests; a blocking pump
-    /// publishes each completion before receiving the next one.
     fn stream(
         &mut self,
         site: &str,
@@ -262,8 +253,6 @@ impl Publications {
                 continue;
             };
             self.retire(id);
-            // Required flushes and explicit drains bypass the cap, but their
-            // uploads still spend this frame's remaining background allowance.
             self.frame_uploaded_bytes = self
                 .frame_uploaded_bytes
                 .saturating_add(crate::image_texture::decoded_upload_bytes(&d));
@@ -278,9 +267,6 @@ pub(crate) fn submit(id: u64, path: &str, width: u32, height: u32, class: Reques
         .unwrap_or_else(|e| fatal(e));
 }
 
-/// Drop a handle's active request, if any, as destruction does. Its bytes
-/// stop counting as pending, its readiness reports published, and a flush no
-/// longer waits for it.
 pub(crate) fn retire(id: u64) {
     PUBLICATIONS.with(|p| p.borrow_mut().retire(id));
 }
@@ -305,10 +291,6 @@ pub extern "C" fn stone_begin_image_upload_frame() {
 pub(crate) fn set_budget(bytes: usize) {
     PUBLICATIONS.with(|p| p.borrow_mut().pending.budget = bytes);
 }
-/// Limit background publication wall time across all pumps in a host frame.
-/// Zero disables this limit. Required flushes and explicit loading drains are
-/// unbounded, but consume the remaining background allowance. An individual
-/// upload is indivisible and can overshoot the limit.
 #[no_mangle]
 pub extern "C" fn stone_set_frame_image_upload_time_budget(microseconds: c_int) {
     PUBLICATIONS.with(|p| {
@@ -462,9 +444,6 @@ mod tests {
         assert!(p.pending.ready.is_empty());
     }
 
-    /// A flush must not hold every decoded buffer at once: each completion is
-    /// published (uploaded) before the next one is received, in the same order
-    /// and with the same journal batch as a drain-then-publish flush.
     #[test]
     fn flush_publishes_each_completion_before_receiving_the_next() {
         if crate::test_support::in_isolated_child(
@@ -556,9 +535,6 @@ mod tests {
         p
     }
 
-    /// A completion the worker sends only when told to, or after a timeout so
-    /// a flush that waits for it cannot hang the fixture. Reports whether it
-    /// was released by the signal rather than the timeout.
     fn release_on_signal(
         tx: std::sync::mpsc::Sender<Decoded>,
         id: u64,
@@ -642,8 +618,6 @@ mod tests {
             |d| {
                 order.push(d.id);
                 if d.id == 2 {
-                    // These complete after the initial collection, while a
-                    // Required request still keeps the flush open.
                     tx.send(result(3, 4)).unwrap();
                     tx.send(result(4, 4)).unwrap();
                 }
@@ -771,7 +745,6 @@ mod tests {
             "a second pump in the same frame cannot renew the spent allowance"
         );
         p.begin_frame();
-        // Completions arriving between pump sites share the same remainder.
         assert_eq!(sizes(p.select("pump", |_| true).unwrap()), [4]);
         p.receive(result(3, 4));
         assert_eq!(sizes(p.select("pump", |_| true).unwrap()), [4]);
@@ -837,8 +810,6 @@ mod tests {
             )
         });
         PUBLICATIONS.with(|p| p.borrow_mut().select("flush", |_| true).unwrap());
-        // A completion that arrives after the destroy belongs to no active
-        // request; it must not resurrect the retired one.
         tx.send(result(1, 4)).unwrap();
         PUBLICATIONS.with(|p| {
             let mut p = p.borrow_mut();

@@ -1,9 +1,3 @@
-//! Bounded native distance-field jobs.
-//!
-//! The Lua side owns published buffers and submits copied flow walkability or
-//! terrain solidity snapshots. Both kernels share one bounded worker and result
-//! transport; no Lua state crosses into the worker thread.
-
 use std::collections::HashMap;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -173,8 +167,6 @@ impl FlowService {
             return false;
         }
 
-        // Holding this lock across reservation and try_send makes shutdown
-        // unable to detach the sender between those two operations.
         let sender = self.sender.lock().unwrap();
         if self.stopping.load(Ordering::Acquire) || !self.reserve(&work) {
             return false;
@@ -294,9 +286,6 @@ impl FlowService {
         for entry in data.entries.values() {
             entry.cancellation.store(true, Ordering::Release);
         }
-        // Ready results have no worker message left to drain, so release them
-        // now. Pending/running entries retain their reservation until the
-        // worker consumes their canceled snapshot.
         for handle in ready_handles {
             data.remove(handle);
         }
@@ -440,19 +429,12 @@ fn compute_flow(
     .expect("non-cancellable flow computation was cancelled")
 }
 
-// One byte per padded cell: bit 0 set where a body may stand, bits 1-4 the
-// corners a blocked cell's static wall leaves open (corner i is bit i + 1;
-// 0 = (0,0), 1 = (1,0), 2 = (1,1), 3 = (0,1)). A diagonal needs each elbow
-// open or leaving the corner it passes open: MAG's one rule,
-// `diagonal_elbow_clear` in mag-simulation/movement.rock.
 const CELL_WALKABLE: u8 = 1;
 
 fn elbow_clear(cell: u8, corner: u32) -> bool {
     cell & CELL_WALKABLE != 0 || cell & (2 << corner) != 0
 }
 
-// The corner of the x elbow (x + dx, y) that a hop by (dx, dy) passes; the
-// y elbow's is the opposite one (`diagonal_step_corner`).
 fn step_corner(delta_x: i64, delta_y: i64) -> u32 {
     match (delta_x > 0, delta_y > 0) {
         (true, true) => 3,
@@ -612,8 +594,6 @@ pub extern "C" fn stone_flow_submit(
     )
 }
 
-// Terrain uses the same bounded queue, result transport and lifetime as flow.
-// The snapshot contains the game's wallish classification, not tile enum values.
 #[no_mangle]
 pub extern "C" fn stone_terrain_submit(
     width: i32,
@@ -747,7 +727,6 @@ mod tests {
         vec![value; (width + 2) * (height + 2)]
     }
 
-    // A blocked cell whose wall leaves `corner` open.
     fn open_corner(corner: u32) -> u8 {
         2 << corner
     }
@@ -781,7 +760,6 @@ mod tests {
         let width = 2;
         let height = 2;
         let mut walkable = padded_snapshot(width, height, true);
-        // Block the east elbow. The southeast tile must be reached around it.
         walkable[(width + 2) + 2] = 0;
         let result = compute_flow(width, height, 0, 0, 64, &walkable);
 
@@ -794,8 +772,6 @@ mod tests {
         let height = 2;
         let padded_width = width + 2;
         let mut cells = padded_snapshot(width, height, true);
-        // The hop from (0,0) to (1,1) passes corner 3 of the east elbow and
-        // corner 1 of the south elbow; both elbows are walls.
         let east = padded_width + 2;
         let south = 2 * padded_width + 1;
         cells[east] = open_corner(3);
@@ -808,7 +784,6 @@ mod tests {
         );
         assert_eq!(result.distances[width], FLOW_UNREACHABLE);
 
-        // One elbow covering its corner pinches the hop.
         cells[south] = open_corner(0);
         let result = compute_flow(width, height, 0, 0, 64, &cells);
         assert_eq!(result.distances[1 + width], FLOW_UNREACHABLE);
@@ -830,7 +805,6 @@ mod tests {
         let width = 3;
         let height = 1;
         let mut walkable = padded_snapshot(width, height, true);
-        // Keep the one-cell halo closed so only the cap can truncate.
         let padded_width = width + 2;
         for y in [0, height + 1] {
             for x in 0..padded_width {

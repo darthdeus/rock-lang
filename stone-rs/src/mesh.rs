@@ -18,12 +18,10 @@ struct RetainedMesh {
     inst_vbo: Option<glow::Buffer>,
     gl_mode: u32,
     vert_count: i32,
-    // Base attrib count = the first instance attrib's location.
     attr_count: i32,
     inst_count: i32,
     inst_layout: Option<ValidatedLayout>,
     inst_stride_floats: i32,
-    // Allocated bytes, including spare capacity retained after shrinking.
     vbo_bytes: u64,
     inst_vbo_bytes: u64,
 }
@@ -96,9 +94,6 @@ pub(crate) fn validate_layout(
     Some(validated)
 }
 
-/// Set up float attrib pointers at sequential locations starting at
-/// `first_loc` for the currently bound VBO. Returns the location after the
-/// last one configured.
 pub(crate) unsafe fn setup_attribs(
     gl: &crate::DebugGl,
     first_loc: u32,
@@ -218,9 +213,6 @@ pub extern "C" fn stone_mesh_create(
     })
 }
 
-/// Attach per-instance data (attribs continue after the base attribs,
-/// divisor 1). count 0 is valid (draws nothing). Calling twice on one mesh
-/// is rejected; subsequent uploads use stone_mesh_update_instances.
 #[no_mangle]
 pub extern "C" fn stone_mesh_set_instances(
     handle: u64,
@@ -381,7 +373,6 @@ pub extern "C" fn stone_mesh_update_instances(
         with_gl(|gl| unsafe {
             let bytes = std::slice::from_raw_parts(data as *const u8, byte_len);
             if byte_len as u64 > mesh.inst_vbo_bytes {
-                // Allocate separately so a failed growth leaves the live buffer intact.
                 let capacity = byte_len
                     .max((mesh.inst_vbo_bytes as usize).saturating_mul(2))
                     .min(i32::MAX as usize);
@@ -476,12 +467,6 @@ pub extern "C" fn stone_mesh_draw(handle: u64, tex: u64, count: c_int) -> c_int 
                     );
                     return -1;
                 };
-                // The mesh's own texture is unit 0. The sampler is NOT pointed
-                // there by name here: a `@textures` group assigns every unit at
-                // link time, and re-pointing one sampler per draw would silently
-                // override a slot the compiler chose. A shader without a group
-                // needs no assignment either -- an unset sampler already reads
-                // unit 0.
                 gl.active_texture(glow::TEXTURE0);
                 if let Some(native_tex) = std::num::NonZeroU32::new(tex_id) {
                     gl.bind_texture(glow::TEXTURE_2D, Some(glow::NativeTexture(native_tex)));
@@ -490,9 +475,6 @@ pub extern "C" fn stone_mesh_draw(handle: u64, tex: u64, count: c_int) -> c_int 
             }
 
             gl.bind_vertex_array(Some(mesh.vao));
-            // An instanced mesh with zero live instances issues nothing, so it
-            // is a skip rather than an untextured draw -- a caller auditing its
-            // texture slots owes nothing for a draw that did not happen.
             let mut drew = true;
             if mesh.inst_vbo.is_some() {
                 let n = if count < 0 {
@@ -531,10 +513,6 @@ pub(crate) fn live_mesh_ids() -> Vec<u64> {
     MESHES.with(|m| m.borrow().keys().copied().collect())
 }
 
-/// Asset-report census over the retained-mesh registry: population, one
-/// handle per index in id order,
-/// and the uploaded bytes a handle holds. 0 for an unknown handle: it holds
-/// no buffer, so there is nothing to count.
 #[no_mangle]
 pub extern "C" fn stone_get_live_mesh_count() -> c_int {
     MESHES.with(|m| m.borrow().len().min(c_int::MAX as usize) as c_int)

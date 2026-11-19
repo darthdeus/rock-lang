@@ -11,21 +11,10 @@ struct SpriteState {
     // that draw (stream_buffer.rs); this VAO holds none of its own.
     mesh_vao: glow::VertexArray,
     triangle_indices: Vec<u32>,
-    // Fullscreen-quad VAOs/VBOs (4-float vertex format: pos(2)+uv(2)).
-    // Static: uploaded once at init, never modified. Two orientations,
-    // selected per draw by the bound target (stone_draw_fullscreen_quad):
-    //   present  -- NDC-top -> UV v=0. The one constant flip that lands an
-    //               image-convention canvas upright on the bottom-up window.
-    //   identity -- NDC-top -> UV v=1. A 1:1 copy (input row N -> output row
-    //               N), so a canvas->canvas hop preserves content -- no
-    //               per-hop flip, no parity to track.
-    // Decoupled from the sprite VAO so stride changes there can't silently
-    // corrupt fullscreen draws.
     fs_quad_present_vao: glow::VertexArray,
     fs_quad_present_vbo: glow::Buffer,
     fs_quad_identity_vao: glow::VertexArray,
     fs_quad_identity_vbo: glow::Buffer,
-    // Storage replaced per draw for explicit or scaled UV mappings.
     fs_quad_scaled_vao: glow::VertexArray,
     fs_quad_scaled_vbo: glow::Buffer,
 }
@@ -43,9 +32,6 @@ fn stream_draw_chunks(total: usize) -> impl Iterator<Item = (usize, usize)> {
         .map(move |offset| (offset, (total - offset).min(MAX_STREAM_DRAW_VERTICES)))
 }
 
-// Fan ranges describe physical center/rim records among ordinary triangles.
-// Validate the complete topology before a backend-visible effect, then preserve
-// triangle and corner order while sharing the exact submitted vertex records.
 fn build_fan_indices(
     vertices: usize,
     ranges: &[i32],
@@ -155,14 +141,11 @@ unsafe fn upload_fs_quad(
 }
 
 unsafe fn stream_vertices(gl: &DebugGl, data: &[u8]) -> Result<(), String> {
-    // The caller binds its VBO. Replace storage so queued draws keep their vertices.
     gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, data, glow::STREAM_DRAW)
 }
 
 #[no_mangle]
 pub extern "C" fn stone_sprite_init() -> bool {
-    // Idempotent: the GPU host and explicit window setup both initialize, and
-    // a second init after a scene pass must succeed without reallocating.
     if initialized() {
         return with_gl(|_| true).unwrap_or(false);
     }
@@ -170,10 +153,6 @@ pub extern "C" fn stone_sprite_init() -> bool {
 }
 
 unsafe fn init_geometry(gl: &crate::DebugGl) -> bool {
-    // The sprite program is authored in Rock (sprite_basic_shader.rock) and
-    // compiled through the registry; this owns only the VAO/VBO geometry.
-
-    // Create VAO and VBO for sprite rendering (8-float format)
     let vao = match gl.create_vertex_array() {
         Ok(vao) => vao,
         Err(e) => {
@@ -193,7 +172,6 @@ unsafe fn init_geometry(gl: &crate::DebugGl) -> bool {
     gl.bind_vertex_array(Some(vao));
     gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
 
-    // Allocate buffer (6 vertices * 8 floats per vertex = 48 floats)
     let empty_data: [f32; 48] = [0.0; 48];
     if gl
         .buffer_data_u8_slice(
@@ -209,14 +187,11 @@ unsafe fn init_geometry(gl: &crate::DebugGl) -> bool {
         return false;
     }
 
-    // Set up vertex attributes: pos(2) + uv(2) + color(4) = 8 floats
     let stride = 8 * std::mem::size_of::<f32>() as i32;
 
-    // Position (location 0)
     gl.enable_vertex_attrib_array(0);
     gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, stride, 0);
 
-    // TexCoord (location 1)
     gl.enable_vertex_attrib_array(1);
     gl.vertex_attrib_pointer_f32(
         1,
@@ -227,7 +202,6 @@ unsafe fn init_geometry(gl: &crate::DebugGl) -> bool {
         2 * std::mem::size_of::<f32>() as i32,
     );
 
-    // Color (location 2)
     gl.enable_vertex_attrib_array(2);
     gl.vertex_attrib_pointer_f32(
         2,
@@ -252,13 +226,6 @@ unsafe fn init_geometry(gl: &crate::DebugGl) -> bool {
             return false;
         }
     };
-    // Two static fullscreen quads (pos(2)+uv(2), 6 verts each). They
-    // differ only in the UV.y column; stone_draw_fullscreen_quad picks by
-    // the bound target. See the SpriteState field comment for the split.
-    //
-    // present: NDC-top -> UV v=0. The window is bottom-up and canvases
-    // store image-convention content, so a present needs exactly this one
-    // flip.
     let Some((fs_quad_present_vao, fs_quad_present_vbo)) =
         upload_fs_quad(gl, &fs_quad_data(true, 1.0, 1.0))
     else {
@@ -267,8 +234,6 @@ unsafe fn init_geometry(gl: &crate::DebugGl) -> bool {
         gl.delete_vertex_array(mesh_vao);
         return false;
     };
-    // identity: NDC-top -> UV v=1 (V column flipped from present). A 1:1
-    // copy -- canvas->canvas hops preserve stored orientation.
     let Some((fs_quad_identity_vao, fs_quad_identity_vbo)) =
         upload_fs_quad(gl, &fs_quad_data(false, 1.0, 1.0))
     else {
@@ -307,7 +272,6 @@ unsafe fn init_geometry(gl: &crate::DebugGl) -> bool {
         });
     });
 
-    // Enable blending by default
     gl.enable(glow::BLEND);
     gl.blend_func_separate(
         glow::SRC_ALPHA,
@@ -347,11 +311,6 @@ pub extern "C" fn stone_current_shader_bound() -> bool {
 }
 
 thread_local! {
-    // The active-local UV transform the pass executor installs before a
-    // fullscreen draw: the sampled target's active rectangle as a fraction of
-    // its allocated capacity. Scaling the quad's UV column (rather than a
-    // uniform) keeps every fragment shader reading TexCoord as "the live
-    // image", including the ones with their own vertex stage.
     static FS_QUAD_UV_SCALE: RefCell<(f32, f32)> = const { RefCell::new((1.0, 1.0)) };
 }
 
@@ -362,9 +321,6 @@ pub extern "C" fn stone_set_fullscreen_uv_scale(sx: c_float, sy: c_float) {
     FS_QUAD_UV_SCALE.with(|c| *c.borrow_mut() = (sx.max(0.0), sy.max(0.0)));
 }
 
-// The two static quads' vertex data, scaled into the dynamic quad when the UV
-// scale is not identity. They differ only in the V column; see the SpriteState
-// field comment for the split.
 const FS_QUAD_PRESENT: [f32; 24] = [
     -1.0, 1.0, 0.0, 0.0, 1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 0.0, 1.0, -1.0, 1.0, 0.0, 0.0, 1.0, 1.0,
     1.0, 0.0, 1.0, -1.0, 1.0, 1.0,
@@ -374,14 +330,6 @@ const FS_QUAD_IDENTITY: [f32; 24] = [
     1.0, 1.0, 1.0, -1.0, 1.0, 0.0,
 ];
 
-/// The vertices `stone_draw_fullscreen_quad` submits for a target and UV scale.
-/// The two static quads are uploaded from it at init and the scaled
-/// respecification below writes it, so this file states that geometry once.
-///
-/// Serves the IMPERATIVE fullscreen path only (`pass.rock`, the debug
-/// overlays), which infers orientation from the bound target. The semantic
-/// submission goes through `stone_draw_fullscreen_rect` instead, where the
-/// caller states the corner mapping and nothing is inferred.
 fn fs_quad_data(to_window: bool, sx: f32, sy: f32) -> [f32; 24] {
     let mut data = if to_window {
         FS_QUAD_PRESENT
@@ -397,16 +345,6 @@ fn fs_quad_data(to_window: bool, sx: f32, sy: f32) -> [f32; 24] {
     data
 }
 
-/// THIS backend's tessellation of the fullscreen rectangle, given the corner UV
-/// mapping the submission resolved: `(u0, v0)` at NDC (-1,-1), `(u1, v1)` at
-/// NDC (+1,+1).
-///
-/// The mapping is the semantics; the order, the diagonal and the winding are
-/// this backend's own choice, and the WebGL tier deliberately picks a different
-/// one (`__sw_fsq_verts`). Both cover the same rectangle with the same texture
-/// mapping, which is the only thing a fragment-only shader can observe -- its
-/// vertex stage is compiler-generated and reads no vertex order
-/// (`a1_vertex_stage_is_compiler_owned_and_order_blind`).
 fn fs_rect_data(u0: f32, v0: f32, u1: f32, v1: f32) -> [f32; 24] {
     [
         -1.0, 1.0, u0, v1, 1.0, -1.0, u1, v0, -1.0, -1.0, u0, v0, -1.0, 1.0, u0, v1, 1.0, 1.0, u1,
@@ -460,17 +398,9 @@ pub extern "C" fn stone_draw_fullscreen_rect(u0: c_float, v0: c_float, u1: c_flo
 
 #[no_mangle]
 pub extern "C" fn stone_draw_fullscreen_quad() {
-    // Draw a fullscreen quad in NDC using the currently-bound shader.
-    // Vertex data is static and lives in fs_quad_vbo (uploaded once at init).
-    // The shader is expected to bypass or receive identity matrices; post-process
-    // callers set their own uProjection/uView to identity if needed.
     SPRITE_STATE.with(|s| {
         if let Some(ref state) = *s.borrow() {
             with_gl(|gl| unsafe {
-                // Pick by the bound target, never by the call site: the window
-                // gets the present quad (the one constant flip), a canvas gets
-                // the identity quad (1:1, preserves content). No pass chooses
-                // an orientation, so the mirrored-window class can't recur.
                 let to_window = crate::canvas::current_fbo().is_none();
                 let (sx, sy) = FS_QUAD_UV_SCALE.with(|c| *c.borrow());
                 let vao = if (sx - 1.0).abs() < 1e-9 && (sy - 1.0).abs() < 1e-9 {
@@ -480,8 +410,6 @@ pub extern "C" fn stone_draw_fullscreen_quad() {
                         state.fs_quad_identity_vao
                     }
                 } else {
-                    // Keep the UV transform in geometry so custom vertex
-                    // stages receive it too.
                     let data = fs_quad_data(to_window, sx, sy);
                     gl.bind_buffer(glow::ARRAY_BUFFER, Some(state.fs_quad_scaled_vbo));
                     if stream_vertices(gl, bytemuck::cast_slice(&data)).is_err() {
@@ -492,7 +420,6 @@ pub extern "C" fn stone_draw_fullscreen_quad() {
                 };
                 gl.bind_vertex_array(Some(vao));
                 gl.draw_arrays(glow::TRIANGLES, 0, 6);
-                // The fullscreen quad draws through whatever is bound.
                 if let Some(p) = CURRENT_SHADER.with(|c| *c.borrow()) {
                     crate::uniform_block::mark_program_drawn(p);
                 }
@@ -570,7 +497,6 @@ fn draw_mesh(
         return -1;
     }
 
-    // Prevent integer overflow in size calculation
     let stride_usize = stride as usize;
     let count_usize = count as usize;
     if stride_usize > 1024 || count < 0 {
@@ -636,12 +562,6 @@ fn draw_mesh(
                 }
             }
             return with_gl(|gl| unsafe {
-                // Every mesh draw runs under a bound program: the world/UI flush
-                // binds sprite_batch (or a pipeline), the immediate shape path
-                // binds sprite_basic + a pixel ortho, custom draws bind their own.
-                // Fail closed if nothing is bound -- a silent default-program
-                // fallback here is what masked the custom_draw shader desync
-                // (world_shader_after_custom_draw).
                 let active_shader = match CURRENT_SHADER.with(|c| *c.borrow()) {
                     Some(p) => p,
                     None => {
@@ -651,7 +571,6 @@ fn draw_mesh(
                 };
                 gl.use_program(Some(active_shader));
 
-                // Bind mesh VAO
                 gl.bind_vertex_array(Some(state.mesh_vao));
 
                 let tex_id = if tex_kind == 1 {
@@ -901,6 +820,3 @@ pub(crate) mod tests {
         assert_eq!(chunks.iter().map(|(_, count)| count).sum::<usize>(), total);
     }
 }
-
-// =============================================================================
-// Blend/Depth Mode
