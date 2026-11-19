@@ -1721,6 +1721,7 @@ fn mark_forwarded_params(caller: &mut MirFunc, callee: &MirFunc, scratch: &Inlin
     }
 }
 
+// Allocate every clone before remapping its operands.
 fn clone_body(caller: &mut MirFunc, callee: &MirFunc, scratch: &mut InlineScratch, kind: Kind) {
     caller.ensure_emit_ids();
     let (inst_base, cell_base, block_base) = caller.emit_nexts().unwrap();
@@ -2707,6 +2708,8 @@ fn fn_has_bounds(f: &bone_core::hir::Function) -> bool {
     f.generic_bounds.iter().any(Option::is_some)
 }
 
+// Walk block inst-lists, not the raw arena: a splice drops the consumed call from
+// its block but the arena still holds it.
 pub fn validate_no_residual_bound_calls(
     ws: &Workspace,
     f: &bone_core::hir::Function,

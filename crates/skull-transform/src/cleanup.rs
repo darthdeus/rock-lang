@@ -206,6 +206,7 @@ fn index_read_is_checked(kind: &ContainerKind) -> bool {
     )
 }
 
+// `Call`/`CallValue` run for effect; a checked `Index` must still execute.
 fn is_dead_value(inst: &Inst) -> bool {
     match inst {
         Inst::Index { kind, .. } => !index_read_is_checked(kind),

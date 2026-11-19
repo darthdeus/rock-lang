@@ -213,6 +213,7 @@ fn try_match(
         return None;
     }
 
+    // Swapping operands or taking the false arm reverses the comparison.
     if less != (slot_is_lhs == yield_is_then) {
         return None;
     }

@@ -719,6 +719,7 @@ pub fn transform_coroutine(
                 args: vec![msg],
             },
         );
+        // Unreachable (error() raised); a terminator is still required.
         step.blocks[raise].term = Term::Goto(dispatch);
         step.blocks[chk].term = Term::Branch {
             cond: ne,
