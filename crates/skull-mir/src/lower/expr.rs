@@ -260,18 +260,16 @@ impl<'a> Builder<'a> {
         let result = (|| -> Result<Idx<Inst>, CompilerError> {
             let before = self.f.params.len();
             for (i, pb) in params.into_iter().enumerate() {
-                let pname = self.body.binding_arena[pb].name;
                 let &id = lam_plan.params().get(i).ok_or_else(|| {
                     self.gap_here(format!("lambda ABI has no parameter slot {i}"))
                 })?;
-                self.bind_param_slot(pb, pname, self.scx.rep_arena().layout(id))?;
+                self.bind_param_slot(pb, self.scx.rep_arena().layout(id))?;
             }
             let param_cells: Vec<Idx<Cell>> = self.f.params.split_off(before);
             let entry = self.f.new_block();
             let saved = self.cur;
             self.cur = entry;
-            let lambda_params: Vec<Idx<BindingInfo>> = params.into_iter().collect();
-            self.copy_ref_borrowed_params(&lambda_params)?;
+            self.copy_ref_borrowed_params(params)?;
             let saved_ret_rep = self.ret_rep.take();
             let saved_flat_ret = self.flat_ret.take();
             let lambda_ret_ty = self.fn_result_ty(self.concrete_expr_ty(e))?;

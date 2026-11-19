@@ -345,12 +345,10 @@ impl<'a> Builder<'a> {
         child.f.nested_fn_identities = self.f.nested_fn_identities.clone();
 
         for (i, pb) in params.into_iter().enumerate() {
-            let pname = child.body.binding_arena[pb].name;
             let slot = child.param_slot(i)?;
-            child.bind_param_slot(pb, pname, slot)?;
+            child.bind_param_slot(pb, slot)?;
         }
-        let child_params: Vec<Idx<BindingInfo>> = params.into_iter().collect();
-        child.copy_ref_borrowed_params(&child_params)?;
+        child.copy_ref_borrowed_params(params)?;
 
         child.defers.push(Vec::new());
         if let Expr::Block { statements, tail } = child.body.expr_arena[body] {

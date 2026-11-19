@@ -830,9 +830,9 @@ impl<'a> Builder<'a> {
         child.site_owner = Some(inst.clone());
         child.static_owner = static_owner_tag(self.ws, self.scx, inf, inst);
         child.flat_ret = plan.ret;
-        let params: Vec<Idx<BindingInfo>> = body.param_bindings.into_iter().collect();
+        let params = body.param_bindings;
         let mut slot_cells = Vec::new();
-        for (i, &pb) in params.iter().enumerate() {
+        for (i, pb) in params.into_iter().enumerate() {
             if plan.sig.get(i).copied().flatten().is_some() {
                 let name = body.binding_arena[pb].name;
                 let cell = child.new_binding_cell(
@@ -847,7 +847,7 @@ impl<'a> Builder<'a> {
             }
         }
         let mut slot_cells = slot_cells.into_iter();
-        for (i, &pb) in params.iter().enumerate() {
+        for (i, pb) in params.into_iter().enumerate() {
             let name = body.binding_arena[pb].name;
             match plan.sig.get(i).copied().flatten() {
                 Some(key) => {
@@ -865,12 +865,11 @@ impl<'a> Builder<'a> {
                 }
                 None => {
                     let slot = child.param_slot(i)?;
-                    child.bind_param_slot(pb, name, slot)?;
+                    child.bind_param_slot(pb, slot)?;
                 }
             }
         }
-        child.fill_param_defaults()?;
-        child.copy_ref_borrowed_params(&params)?;
+        child.finish_params()?;
         child.lower_root()?;
         // Code belongs to the generated variant; persistent state belongs to the
         // concrete callable whose body it implements.

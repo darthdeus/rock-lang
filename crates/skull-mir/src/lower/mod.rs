@@ -19,6 +19,7 @@ use comfy_la_arena::{Idx, IdxRange, RawIdx};
 use skull_parser::CompilerError;
 use ustr::Ustr;
 
+use crate::code_identity::{CodeIdentity, CodeOwner, CodeOwnerKind};
 use crate::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcretePlans, ConcreteTypeTables};
 use crate::intrinsics::ExpandKind;
 use crate::mir::*;
@@ -1071,7 +1072,91 @@ pub fn lower_instance_with_plans(
     plan: &ConcreteBodyPlan,
     concrete_plans: &ConcretePlans,
 ) -> Result<MirFunc, CompilerError> {
-    lower_instance_with_plan_inner(ws, scx, plan, concrete_plans)
+    let inst = plan
+        .function_instance()
+        .ok_or_else(|| gap("concrete plan does not own a function instance"))?;
+    let (mid, fid) = (inst.func.module, inst.func.func);
+    let module = ws.module(mid);
+    let func = &module.functions[fid];
+    let at_decl = |error: CompilerError| error.or_at(func.name_span);
+    let owner = BodyOwner::Function(fid);
+    validate_concrete_bound_plan(func, plan)?;
+    let body = module
+        .bodies
+        .get(&owner)
+        .ok_or_else(|| gap("concrete plan function has no body"))?;
+    let inf = ws.inference(mid).and_then(|ir| ir.per_fn.get(&owner));
+    // The plan audits only fail on a compiler bug, so they run with the debug checks.
+    if crate::verify::checks_enabled() {
+        if let Some(inf) = inf {
+            validate_plan_type_tables(
+                ws,
+                inf,
+                body,
+                &plan.types,
+                "concrete plan",
+                func.param_decls
+                    .iter()
+                    .map(|param| param.ty)
+                    .chain(func.return_ty),
+            )?;
+        }
+        validate_plan_domains(plan, "concrete plan")?;
+        validate_concrete_callee_plans(ws, scx, plan, concrete_plans).map_err(at_decl)?;
+    }
+    if func.inline_body.is_some() {
+        return Err(at_decl(gap("inline(lua) body")));
+    }
+    let _shape_memo = shape::ShapeMemoScope::enter(scx.rep_arena.generation());
+
+    let mut f = MirFunc::new(func.name);
+    f.rep_arena = Some(scx.rep_arena().clone());
+    let resume_arg = func.is_coroutine.then(|| {
+        let cell = f.new_cell(Some(crate::names::ustr("__resume_arg")));
+        f.cells[cell].capture_identity = Some(crate::code_identity::CaptureIdentity::Generated {
+            role: crate::names::ustr("coroutine-resume-arg"),
+        });
+        cell
+    });
+    f.is_coroutine = func.is_coroutine;
+    f.resume_arg = resume_arg;
+    let abi = owner_abi_plan_for_body(ws, scx, concrete_plans, inst, plan).map_err(at_decl)?;
+    f.abi_plan = Some(abi.clone());
+    f.code_identity = Some(crate::code_identity::CodeIdentity::Named(inst.clone()));
+    f.code_abi_fingerprint = Some(abi.logical_fingerprint());
+    let mut b = Builder::new(
+        ws,
+        scx,
+        scx,
+        plan,
+        concrete_plans,
+        body,
+        inf,
+        f,
+        FlatVariants::for_root(inst.clone()),
+    );
+    b.f.lower_attribution.abi_param_shared_views =
+        usize::from(!abi.representation().params().is_empty());
+    b.generic_bounds = &func.generic_bounds;
+    b.defer_mode = stmt::DeferMode::for_body(func.is_coroutine, scx.target);
+    b.ret_rep = abi.representation().result();
+    b.param_plan = Some(abi);
+    b.fn_name_span = Some(func.name_span);
+    b.site_owner = Some(inst.clone());
+    // Only statics and hoisted functions need the overload's owner name.
+    if body
+        .statement_arena
+        .iter()
+        .any(|(_, s)| matches!(s, Statement::Static { .. } | Statement::Fn { .. }))
+    {
+        b.static_owner = static_owner_tag(ws, scx, inf, inst);
+    }
+    b.flat_ret = b.own_flat_return(inst).map_err(at_decl)?;
+    b.lower_params().map_err(at_decl)?;
+    b.lower_root().map_err(|e| at_decl(b.located(e)))?;
+    let variants = b.flat_variants.borrow_mut().take_funcs();
+    b.f.nested_fns.extend(variants);
+    Ok(finish_lower_attribution(b.f))
 }
 
 /// Reject a specialized bounded body whose witness tree was lost before any
@@ -1087,149 +1172,6 @@ pub fn validate_concrete_bound_plan(
         ));
     }
     Ok(())
-}
-
-fn lower_instance_with_plan_inner(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    plan: &ConcreteBodyPlan,
-    concrete_plans: &ConcretePlans,
-) -> Result<MirFunc, CompilerError> {
-    let inst = plan
-        .function_instance()
-        .ok_or_else(|| gap("concrete plan does not own a function instance"))?;
-    let (mid, fid) = (inst.func.module, inst.func.func);
-    let module = ws.module(mid);
-    let func = &module.functions[fid];
-    validate_concrete_bound_plan(func, plan)?;
-    let body = module
-        .bodies
-        .get(&BodyOwner::Function(fid))
-        .ok_or_else(|| gap("concrete plan function has no body"))?;
-    let inf = ws
-        .inference(mid)
-        .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fid)));
-    // The plan audits only fail on a compiler bug, so they run with the debug checks.
-    let audit = crate::verify::checks_enabled();
-    if let Some(inf) = inf.filter(|_| audit) {
-        validate_concrete_type_tables(
-            ws,
-            inf,
-            body,
-            &plan.types,
-            "concrete plan",
-            func.param_decls
-                .iter()
-                .map(|param| param.ty)
-                .chain(func.return_ty),
-        )?;
-        for (expr, _) in inf.expr_types.iter() {
-            if plan.types.expr_type(expr).is_none() && !plan.types.is_untyped_expr(expr) {
-                return Err(gap(format!(
-                    "concrete plan is missing expression type {expr:?}"
-                )));
-            }
-        }
-        for (binding, _) in inf.binding_types.iter() {
-            if plan.types.binding_type(binding).is_none() && !plan.types.is_untyped_binding(binding)
-            {
-                return Err(gap(format!(
-                    "concrete plan is missing binding type {binding:?}"
-                )));
-            }
-        }
-    }
-    if audit {
-        for site in plan.callees.keys() {
-            if !matches!(site.domain, crate::site::SiteDomain::Own)
-                && plan.domain_types(&site.domain).is_none()
-            {
-                return Err(gap(format!(
-                    "concrete plan is missing type tables for site domain {:?}",
-                    site.domain
-                )));
-            }
-        }
-        validate_concrete_callee_plans(ws, scx, plan, concrete_plans)
-            .map_err(|e| e.or_at(func.name_span))?;
-    }
-    lower_body(ws, scx, inst.func, inst.clone(), plan, concrete_plans)
-        .map_err(|e| e.or_at(func.name_span))
-}
-
-fn lower_body(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    self_ref: FuncRef,
-    subject: crate::instance::Instance,
-    concrete_plan: &ConcreteBodyPlan,
-    concrete_plans: &ConcretePlans,
-) -> Result<MirFunc, CompilerError> {
-    let (mid, fid) = (self_ref.module, self_ref.func);
-    let module = ws.module(mid);
-    let func = &module.functions[fid];
-    if func.inline_body.is_some() {
-        return Err(gap("inline(lua) body"));
-    }
-    let body = module
-        .bodies
-        .get(&BodyOwner::Function(fid))
-        .ok_or_else(|| gap("function has no body (extern?)"))?;
-    let inf = ws
-        .inference(mid)
-        .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fid)));
-    let _shape_memo = shape::ShapeMemoScope::enter(scx.rep_arena.generation());
-
-    let mut f = MirFunc::new(func.name);
-    f.rep_arena = Some(scx.rep_arena().clone());
-    let resume_arg = func.is_coroutine.then(|| {
-        let cell = f.new_cell(Some(crate::names::ustr("__resume_arg")));
-        f.cells[cell].capture_identity = Some(crate::code_identity::CaptureIdentity::Generated {
-            role: crate::names::ustr("coroutine-resume-arg"),
-        });
-        cell
-    });
-    f.is_coroutine = func.is_coroutine;
-    f.resume_arg = resume_arg;
-    let abi = owner_abi_plan_for_body(ws, scx, concrete_plans, &subject, concrete_plan)?;
-    f.abi_plan = Some(abi.clone());
-    f.code_identity = Some(crate::code_identity::CodeIdentity::Named(subject.clone()));
-    f.code_abi_fingerprint = Some(abi.logical_fingerprint());
-    let mut b = Builder::new(
-        ws,
-        scx,
-        scx,
-        concrete_plan,
-        concrete_plans,
-        body,
-        inf,
-        f,
-        FlatVariants::for_root(subject.clone()),
-    );
-    b.f.lower_attribution.abi_param_shared_views =
-        usize::from(!abi.representation().params().is_empty());
-    b.generic_bounds = &func.generic_bounds;
-    b.defer_mode = stmt::DeferMode::for_body(func.is_coroutine, scx.target);
-    b.ret_rep = abi.representation().result();
-    b.param_plan = Some(abi);
-    b.fn_name_span = Some(func.name_span);
-    b.site_owner = Some(subject.clone());
-    if body
-        .statement_arena
-        .iter()
-        .any(|(_, s)| matches!(s, Statement::Static { .. } | Statement::Fn { .. }))
-    {
-        b.static_owner = static_owner_tag(ws, scx, inf, &subject);
-    }
-    b.flat_ret = b.own_flat_return(&subject)?;
-    b.lower_params()?;
-    b.fill_param_defaults()?;
-    let params: Vec<Idx<BindingInfo>> = b.body.param_bindings.into_iter().collect();
-    b.copy_ref_borrowed_params(&params)?;
-    b.lower_root().map_err(|e| b.located(e))?;
-    let variants = b.flat_variants.borrow_mut().take_funcs();
-    b.f.nested_fns.extend(variants);
-    Ok(finish_lower_attribution(b.f))
 }
 
 /// Call a catalog factory through its owner ABI and pack its complete result.
@@ -1294,86 +1236,51 @@ pub(crate) fn lower_global_with_call_context(
     let ConcreteOwner::Global { module, index } = &plan.owner else {
         return Err(gap("concrete plan does not own a global"));
     };
-    let module_ref = ws.module(*module);
-    if *index as usize >= module_ref.globals.len() {
+    let mid = *module;
+    let module = ws.module(mid);
+    if *index as usize >= module.globals.len() {
         return Err(gap("concrete global plan has an invalid global index"));
     }
     let gid = Idx::from_raw(RawIdx::from_u32(*index));
-    validate_always_plan(
+    let def = &module.globals[gid];
+    let (body, inf) = validate_always_plan(
         ws,
         scx,
-        *module,
+        mid,
         BodyOwner::Global(gid),
         plan,
         concrete_plans,
+        [def.ty],
     )?;
-    lower_global_inner(ws, scx, call_scx, *module, gid, name, plan, concrete_plans)
-        .map_err(|e| e.or_at(module_ref.globals[gid].name_span))
-}
-
-fn lower_global_inner(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    call_scx: &ScalarCtx,
-    mid: ModuleId,
-    gid: Idx<bone_core::hir::GlobalDef>,
-    name: Ustr,
-    concrete_plan: &ConcreteBodyPlan,
-    concrete_plans: &ConcretePlans,
-) -> Result<Option<MirFunc>, CompilerError> {
-    let module = ws.module(mid);
-    let body = module
-        .bodies
-        .get(&BodyOwner::Global(gid))
-        .ok_or_else(|| gap("global has no body"))?;
     if body.root.is_none() {
         return Ok(None);
     }
-    let inf = ws
-        .inference(mid)
-        .and_then(|ir| ir.per_fn.get(&BodyOwner::Global(gid)));
-    let mut f = MirFunc::new(name);
-    f.code_identity = Some(crate::code_identity::CodeIdentity::Artifact(
-        crate::code_identity::CodeOwner::Artifact {
-            kind: crate::code_identity::CodeOwnerKind::Global,
-            module: module.file,
-            name: module.globals[gid].name,
-        },
-    ));
-    f.rep_arena = Some(scx.rep_arena().clone());
+    let f = artifact_mir(scx, name, CodeOwnerKind::Global, module.file, def.name);
     let mut b = Builder::new(
         ws,
         scx,
         call_scx,
-        concrete_plan,
+        plan,
         concrete_plans,
         body,
-        inf,
+        Some(inf),
         f,
         FlatVariantsHandle::default(),
     );
     let global_plan = GlobalPlan::for_concrete_result(
         ws,
         scx,
-        concrete_plan
-            .signature
-            .result
-            .map(|id| b.concrete_mono(id).clone()),
+        plan.signature.result.map(|id| b.concrete_mono(id).clone()),
     )
-    .map_err(|error| match error.span.or(b.cur_span) {
-        Some(span) => CompilerError::new_with_label(span, error.message),
-        None => CompilerError::new_no_location(error.message),
+    .map_err(|error| {
+        CompilerError::new_with_label(error.span.unwrap_or(def.name_span), error.message)
     })?;
-    b.f.global_plan = Some(global_plan);
     // A `nobox` global's initializer returns leaves; `mir_emit` binds one Lua
     // global per leaf.
-    b.ret_rep = (!scx.values_first_class).then(|| {
-        b.f.global_plan
-            .as_ref()
-            .expect("global plan")
-            .representation()
-    });
-    b.lower_root().map_err(|e| b.located(e))?;
+    b.ret_rep = (!scx.values_first_class).then(|| global_plan.representation());
+    b.f.global_plan = Some(global_plan);
+    b.lower_root()
+        .map_err(|e| b.located(e).or_at(def.name_span))?;
     Ok(Some(finish_lower_attribution(b.f)))
 }
 
@@ -1387,33 +1294,90 @@ pub fn lower_decorator_with_plans(
     let ConcreteOwner::Decorator { module, index } = &plan.owner else {
         return Err(gap("concrete plan does not own a decorator"));
     };
-    let module_ref = ws.module(*module);
-    if *index as usize >= module_ref.decorators.len() {
+    let mid = *module;
+    let module = ws.module(mid);
+    if *index as usize >= module.decorators.len() {
         return Err(gap(
             "concrete decorator plan has an invalid decorator index",
         ));
     }
     let did = Idx::from_raw(RawIdx::from_u32(*index));
-    validate_always_plan(
+    let def = &module.decorators[did];
+    let (body, inf) = validate_always_plan(
         ws,
         scx,
-        *module,
+        mid,
         BodyOwner::Decorator(did),
         plan,
         concrete_plans,
+        def.param_decls.iter().map(|param| param.ty),
     )?;
-    lower_decorator_inner(ws, scx, *module, did, name, plan, concrete_plans)
-        .map_err(|e| e.or_at(module_ref.decorators[did].span))
+    let target = body
+        .deco_target
+        .ok_or_else(|| gap("decorator body has no target binding").or_at(def.span))?;
+    let mut f = artifact_mir(
+        scx,
+        name,
+        CodeOwnerKind::Decorator,
+        module.file,
+        def.def_key,
+    );
+    let representation = scx
+        .rep_arena()
+        .boxed_function(scx.target(), plan.signature.params.len());
+    f.abi_representation = Some(representation.clone());
+    let mut b = Builder::new(
+        ws,
+        scx,
+        scx,
+        plan,
+        concrete_plans,
+        body,
+        Some(inf),
+        f,
+        FlatVariantsHandle::default(),
+    );
+    b.param_reps = representation.params().to_vec();
+    b.ret_rep = plan.signature.result.map(|_| {
+        representation
+            .result()
+            .expect("boxed decorator result plan")
+    });
+    // `target` is param 0, then the decorator's declared params.
+    let at_decl = |error: CompilerError| error.or_at(def.span);
+    b.bind_param_slot(target, &RepLayout::Opaque)
+        .map_err(at_decl)?;
+    b.lower_params().map_err(at_decl)?;
+    b.lower_root().map_err(|e| at_decl(b.located(e)))?;
+    Ok(finish_lower_attribution(b.f))
 }
 
-fn validate_always_plan(
-    ws: &Workspace,
+fn artifact_mir(
+    scx: &ScalarCtx,
+    symbol: Ustr,
+    kind: CodeOwnerKind,
+    module: Ustr,
+    name: Ustr,
+) -> MirFunc {
+    let mut f = MirFunc::new(symbol);
+    f.code_identity = Some(CodeIdentity::Artifact(CodeOwner::Artifact {
+        kind,
+        module,
+        name,
+    }));
+    f.rep_arena = Some(scx.rep_arena().clone());
+    f
+}
+
+fn validate_always_plan<'a>(
+    ws: &'a Workspace,
     scx: &ScalarCtx,
     mid: ModuleId,
     owner: BodyOwner,
     plan: &ConcreteBodyPlan,
     concrete_plans: &ConcretePlans,
-) -> Result<(), CompilerError> {
+    declared_types: impl IntoIterator<Item = TyId>,
+) -> Result<(&'a Body, &'a BodyInference), CompilerError> {
     let inf = ws
         .inference(mid)
         .and_then(|ir| ir.per_fn.get(&owner))
@@ -1423,54 +1387,48 @@ fn validate_always_plan(
         .bodies
         .get(&owner)
         .ok_or_else(|| gap("concrete always-emitted plan has no body"))?;
-    if !crate::verify::checks_enabled() {
-        return Ok(());
+    if crate::verify::checks_enabled() {
+        let label = "concrete always-emitted plan";
+        validate_plan_type_tables(ws, inf, body, &plan.types, label, declared_types)?;
+        validate_plan_domains(plan, label)?;
+        validate_concrete_callee_plans(ws, scx, plan, concrete_plans)?;
     }
-    let declared_types = match owner {
-        BodyOwner::Global(index) => vec![ws.module(mid).globals[index].ty],
-        BodyOwner::Decorator(index) => ws.module(mid).decorators[index]
-            .param_decls
-            .iter()
-            .map(|param| param.ty)
-            .collect(),
-        BodyOwner::Function(_)
-        | BodyOwner::StructDefaults(_)
-        | BodyOwner::Enum(_)
-        | BodyOwner::Newtype(_) => Vec::new(),
-    };
-    validate_concrete_type_tables(
-        ws,
-        inf,
-        body,
-        &plan.types,
-        "concrete always-emitted plan",
-        declared_types,
-    )?;
+    Ok((body, inf))
+}
+
+fn validate_plan_type_tables(
+    ws: &Workspace,
+    inf: &BodyInference,
+    body: &Body,
+    tables: &ConcreteTypeTables,
+    label: &str,
+    declared_types: impl IntoIterator<Item = TyId>,
+) -> Result<(), CompilerError> {
+    validate_concrete_type_tables(ws, inf, body, tables, label, declared_types)?;
     for (expr, _) in inf.expr_types.iter() {
-        if plan.types.expr_type(expr).is_none() && !plan.types.is_untyped_expr(expr) {
-            return Err(gap(format!(
-                "concrete always-emitted plan is missing expression type {expr:?}"
-            )));
+        if tables.expr_type(expr).is_none() && !tables.is_untyped_expr(expr) {
+            return Err(gap(format!("{label} is missing expression type {expr:?}")));
         }
     }
     for (binding, _) in inf.binding_types.iter() {
-        if plan.types.binding_type(binding).is_none() && !plan.types.is_untyped_binding(binding) {
-            return Err(gap(format!(
-                "concrete always-emitted plan is missing binding type {binding:?}"
-            )));
+        if tables.binding_type(binding).is_none() && !tables.is_untyped_binding(binding) {
+            return Err(gap(format!("{label} is missing binding type {binding:?}")));
         }
     }
+    Ok(())
+}
+
+fn validate_plan_domains(plan: &ConcreteBodyPlan, label: &str) -> Result<(), CompilerError> {
     for site in plan.callees.keys() {
         if !matches!(site.domain, crate::site::SiteDomain::Own)
             && plan.domain_types(&site.domain).is_none()
         {
             return Err(gap(format!(
-                "concrete always-emitted plan is missing type tables for site domain {:?}",
+                "{label} is missing type tables for site domain {:?}",
                 site.domain
             )));
         }
     }
-    validate_concrete_callee_plans(ws, scx, plan, concrete_plans)?;
     Ok(())
 }
 
@@ -1618,76 +1576,6 @@ fn validate_concrete_type_tables(
         }
     }
     Ok(())
-}
-
-fn lower_decorator_inner(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    mid: ModuleId,
-    did: Idx<bone_core::hir::DecoratorDef>,
-    name: Ustr,
-    concrete_plan: &ConcreteBodyPlan,
-    concrete_plans: &ConcretePlans,
-) -> Result<MirFunc, CompilerError> {
-    let module = ws.module(mid);
-    let body = module
-        .bodies
-        .get(&BodyOwner::Decorator(did))
-        .ok_or_else(|| gap("decorator has no body"))?;
-    let inf = ws
-        .inference(mid)
-        .and_then(|ir| ir.per_fn.get(&BodyOwner::Decorator(did)));
-    let target = body
-        .deco_target
-        .ok_or_else(|| gap("decorator body has no target binding"))?;
-    let mut f = MirFunc::new(name);
-    f.code_identity = Some(crate::code_identity::CodeIdentity::Artifact(
-        crate::code_identity::CodeOwner::Artifact {
-            kind: crate::code_identity::CodeOwnerKind::Decorator,
-            module: module.file,
-            name: module.decorators[did].def_key,
-        },
-    ));
-    f.rep_arena = Some(scx.rep_arena().clone());
-    let representation = scx
-        .rep_arena()
-        .boxed_function(scx.target(), concrete_plan.signature.params.len());
-    f.abi_representation = Some(representation.clone());
-    let param_reps = representation.params().to_vec();
-    let ret_rep = concrete_plan.signature.result.map(|_| {
-        representation
-            .result()
-            .expect("boxed decorator result plan")
-    });
-    let mut b = Builder::new(
-        ws,
-        scx,
-        scx,
-        concrete_plan,
-        concrete_plans,
-        body,
-        inf,
-        f,
-        FlatVariantsHandle::default(),
-    );
-    b.param_reps = param_reps;
-    b.ret_rep = ret_rep;
-    // `target` is param 0, then the decorator's declared params.
-    let tcell = b.new_binding_cell(
-        target,
-        b.body.binding_arena[target].name,
-        b.binding_ty(target),
-        crate::names::ustr(""),
-    );
-    b.f.cells[tcell].producer = crate::mir::CellProducer::Param;
-    b.f.params.push(tcell);
-    b.binds.insert(raw(target), tcell);
-    b.lower_params()?;
-    b.fill_param_defaults()?;
-    let params: Vec<Idx<BindingInfo>> = b.body.param_bindings.into_iter().collect();
-    b.copy_ref_borrowed_params(&params)?;
-    b.lower_root().map_err(|e| b.located(e))?;
-    Ok(finish_lower_attribution(b.f))
 }
 
 struct Builder<'a> {
@@ -2340,22 +2228,25 @@ impl<'a> Builder<'a> {
     }
 
     fn lower_params(&mut self) -> Result<(), CompilerError> {
-        let pbs: Vec<Idx<BindingInfo>> = self.body.param_bindings.into_iter().collect();
-        for (i, pb) in pbs.iter().enumerate() {
-            let name = self.body.binding_arena[*pb].name;
+        for (i, pb) in self.body.param_bindings.into_iter().enumerate() {
             let slot = self.param_slot(i)?;
-            self.bind_param_slot(*pb, name, slot)?;
+            self.bind_param_slot(pb, slot)?;
         }
-        Ok(())
+        self.finish_params()
+    }
+
+    fn finish_params(&mut self) -> Result<(), CompilerError> {
+        self.fill_param_defaults()?;
+        self.copy_ref_borrowed_params(self.body.param_bindings)
     }
 
     /// A caller may lend its own box to a boxed value parameter, so a `ref`-borrowed
     /// one is copied on entry.
     pub(crate) fn copy_ref_borrowed_params(
         &mut self,
-        params: &[Idx<BindingInfo>],
+        params: IdxRange<BindingInfo>,
     ) -> Result<(), CompilerError> {
-        for &pb in params {
+        for pb in params {
             if self.scx.values_first_class
                 || self.binding_is_ref(pb)
                 || !self.binding_ref_borrowed(pb)
@@ -2405,9 +2296,9 @@ impl<'a> Builder<'a> {
     pub(crate) fn bind_param_slot(
         &mut self,
         pb: Idx<BindingInfo>,
-        name: Ustr,
         slot: &RepLayout,
     ) -> Result<(), CompilerError> {
+        let name = self.body.binding_arena[pb].name;
         if !slot.splats() {
             let cty = self.binding_ty(pb);
             let cell = self.new_binding_cell(pb, name, cty, crate::names::ustr(""));
