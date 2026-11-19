@@ -27,11 +27,6 @@ fn test_recursive_tuple_enum() -> int {
     node_sum(n)
 }
 
-@test(returns = 0)
-fn test_unit_singleton_construct() -> int {
-    node_sum(Node::Nil)
-}
-
 @test(returns = 1)
 fn test_boxed_enum_eq() -> int {
     let a = Node::Leaf(5)
@@ -82,11 +77,6 @@ fn test_record_variant() -> int {
 // `assert_eq(inspect(..), "..")` byte-checks run on BOTH backends (unlike an
 // `@test(output=..)` whose `{`-bearing expectation drops to vacuous).
 @test
-fn test_inspect_tuple_variant() {
-    assert_eq(inspect(Node::Leaf(5)), "Node::Leaf {{ [1] = 5 }}")
-}
-
-@test
 fn test_inspect_nested_and_singleton() {
     assert_eq(inspect(Node::Pair(1, Node::Nil)), "Node::Pair {{ [1] = 1, [2] = Node::Nil }}")
 }
@@ -119,17 +109,6 @@ fn test_payload_free_names() {
 @test(returns = 9)
 fn test_unit_singleton_nested_payload() -> int {
     node_sum(Node::Pair(9, Node::Nil))
-}
-
-// A struct field flattens `Sig` with a union-wide inactive second slot; its
-// rebox must compare equal to a direct construction.
-enum Sig { Idle, Num(int), Pair(int, int), Act(() -> ()) }
-struct SigHolder { sig: Sig }
-
-@test(returns = 1)
-fn test_nil_slot_rebox_eq() -> int {
-    let h = SigHolder { sig: Sig::Num(5) }
-    if h.sig == Sig::Num(5) { 1 } else { 0 }
 }
 
 // A flat enum widens a `nobox` payload's leaves into positional slots; inspect

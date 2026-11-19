@@ -1,6 +1,6 @@
-// Enum patterns: wildcards, literals, nested and deeply nested variants,
-// bindings, nullable enums, patterns in different expression contexts, and
-// if-let over enum and nullable values.
+// Enum patterns: literals, nested and deeply nested variants, bindings,
+// record variants and struct patterns, tuple payloads and tuples of enums,
+// nullable enums, and patterns in loops, function returns and if-let.
 
 enum Option<T> {
     None,
@@ -19,7 +19,6 @@ enum Complex {
     Mixed(int, string, bool),
 }
 
-
 @test
 fn test_literal_patterns() {
     let num = 42
@@ -33,7 +32,6 @@ fn test_literal_patterns() {
 
     assert_eq(result, "forty-two")
 
-    // String literals
     let str = "hello"
     let greeting = match str {
         "hello" => "hi",
@@ -42,7 +40,6 @@ fn test_literal_patterns() {
     }
     assert_eq(greeting, "hi")
 
-    // Boolean literals
     let flag = true
     let status = match flag {
         true => "on",
@@ -91,12 +88,10 @@ fn test_pattern_variable_binding() {
     }
 }
 
-// Single variant enum for exhaustiveness testing
 enum Single {
     Only,
 }
 
-// Bool-like enum
 enum Toggle {
     On,
     Off,
@@ -104,14 +99,12 @@ enum Toggle {
 
 @test
 fn test_exhaustiveness_edge_cases() {
-    // Single variant enum should be exhaustive with just that variant
     let single = Single::Only
     let result = match single {
         Single::Only => "matched"
     }
     assert_eq(result, "matched")
 
-    // Bool-like enum
     let toggle = Toggle::On
     let state = match toggle {
         Toggle::On => true,
@@ -125,7 +118,6 @@ fn test_pattern_type_checking() {
     let opt_int: Option<int> = Option::Some(42)
     let opt_string: Option<string> = Option::Some("hello")
 
-    // Each should match correctly with its type
     let int_result = match opt_int {
         Option::None => 0,
         Option::Some(n) => n,
@@ -155,11 +147,9 @@ fn test_complex_enum_equality() {
     assert(r1 == r2)
     assert(r1 != r3)
 
-    // Different variants
     assert(c1 != r1)
 }
 
-// Tree enum for nested pattern testing
 enum Tree<T> {
     Leaf(T),
     Branch(Tree<T>, Tree<T>),
@@ -175,7 +165,6 @@ fn test_deeply_nested_patterns() {
         )
     )
 
-    // Match on the structure
     match tree {
         Tree::Branch(Tree::Leaf(a), Tree::Branch(Tree::Leaf(b), Tree::Leaf(c))) => {
             assert_eq(a, 1)
@@ -186,7 +175,6 @@ fn test_deeply_nested_patterns() {
     }
 }
 
-// Helper function for pattern matching in function returns
 fn extract_or_default(opt: Option<int>) -> int {
     match opt {
         Option::Some(n) => n,
@@ -198,7 +186,6 @@ fn extract_or_default(opt: Option<int>) -> int {
 fn test_pattern_contexts() {
     let values = [Option::Some(1), Option::None, Option::Some(2)]
 
-    // Pattern matching in loops
     let sum = 0
     for opt in values {
         match opt {
@@ -208,7 +195,6 @@ fn test_pattern_contexts() {
     }
     assert_eq(sum, 3)
 
-    // Pattern matching in function returns
     assert_eq(extract_or_default(Option::Some(42)), 42)
     assert_eq(extract_or_default(Option::None), 0)
 }
@@ -229,10 +215,219 @@ fn test_if_let_enum_pattern() {
     assert_eq(if let Some(v) = none { v } else { -1 }, -1)
 }
 
+enum Shape {
+    Point,
+    Line { start: FixVec2, end: FixVec2 },
+    Circle { center: FixVec2, radius: float },
+    Rectangle { x: float, y: float, width: float, height: float },
+}
 
-fn option_to_nullable<T>(opt: Option<T>) -> T? {
-    match opt {
-        Some(value) => value,
-        None => null,
+struct FixVec2 {
+    x: float,
+    y: float,
+}
+
+@test
+fn test_record_variant_pattern_matching() {
+    let shape = Shape::Circle { center: FixVec2 { x: 5.0, y: 5.0 }, radius: 2.5 }
+
+    match shape {
+        Point => print("Point"),
+        Line { start, end } => {
+            print("Line from ({start.x}, {start.y}) to ({end.x}, {end.y})")
+        }
+        Circle { center, radius } => {
+            assert_eq(center.x, 5.0)
+            assert_eq(center.y, 5.0)
+            assert_eq(radius, 2.5)
+            print("Circle at ({center.x}, {center.y}) with radius {radius}")
+        }
+        Rectangle { x, y, width, height } => {
+            print("Rectangle at ({x}, {y}) size {width}x{height}")
+        }
     }
+}
+
+@test
+fn test_record_variant_partial_destructuring() {
+    let rect = Shape::Rectangle { x: 10.0, y: 20.0, width: 100.0, height: 50.0 }
+
+    match rect {
+        Rectangle { x, y, .. } => {
+            assert_eq(x, 10.0)
+            assert_eq(y, 20.0)
+            print("Rectangle at ({x}, {y})")
+        }
+        _ => print("Not a rectangle"),
+    }
+}
+
+enum Message {
+    Move { x: int, y: int },
+    Write { text: string },
+    ChangeColor { r: int, g: int, b: int },
+    Resize { width: int, height: int },
+}
+
+@test
+fn test_record_only_enum() {
+    let msg = Message::Move { x: 10, y: 20 }
+
+    match msg {
+        Move { x, y } => {
+            assert_eq(x, 10)
+            assert_eq(y, 20)
+            print("Move to ({x}, {y})")
+        }
+        Write { text } => print("Write: {text}"),
+        ChangeColor { r, g, b } => print("Color: ({r}, {g}, {b})"),
+        Resize { width, height } => print("Resize to {width}x{height}"),
+    }
+}
+
+struct Point {
+    x: int,
+    y: int,
+}
+
+struct Wrapper {
+    inner: Point,
+    tag: int,
+}
+
+@test(output = "30")
+fn struct_match_shorthand() {
+    let p = Point { x: 10, y: 20 }
+    let sum = match p {
+        Point { x, y } => x + y,
+    }
+    print(sum)
+}
+
+@test(output = "42")
+fn struct_match_nested() {
+    let w = Wrapper { inner: Point { x: 5, y: 7 }, tag: 30 }
+    let total = match w {
+        Wrapper { inner: Point { x, y }, tag } => x + y + tag,
+    }
+    print(total)
+}
+
+enum Maybe<T> {
+    None,
+    Some(T),
+}
+
+enum Outcome<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+@test(output = "point: 10, 20\nnothing")
+fn test_match_enum_tuple_payload() {
+    let opt: Maybe<(int, int)> = Maybe::Some((10, 20))
+    print(
+        match opt {
+            Some((x, y)) => "point: {x}, {y}",
+            None => "nothing",
+        }
+    )
+    let none: Maybe<(int, int)> = Maybe::None
+    print(
+        match none {
+            Some((x, y)) => "point: {x}, {y}",
+            None => "nothing",
+        }
+    )
+}
+
+@test(output = "hello 42")
+fn test_match_extract_then_destructure() {
+    let opt: Maybe<(string, int)> = Maybe::Some(("hello", 42))
+    let val = match opt {
+        Some(pair) => pair,
+        None => ("default", 0),
+    }
+    let (s, n) = val
+    print("{s} {n}")
+}
+
+@test(output = "both: 1, hello")
+fn test_tuple_of_enums() {
+    let pair: (Maybe<int>, Maybe<string>) = (Maybe::Some(1), Maybe::Some("hello"))
+    let (a, b) = pair
+    let a_str = match a {
+        Some(x) => "{x}",
+        None => "none",
+    }
+    let b_str = match b {
+        Some(s) => s,
+        None => "none",
+    }
+    print("both: {a_str}, {b_str}")
+}
+
+@test(output = "ok: 10, 20\nerr: failed")
+fn test_result_tuple_ok() {
+    let ok: Outcome<(int, int), string> = Outcome::Ok((10, 20))
+    print(
+        match ok {
+            Ok((x, y)) => "ok: {x}, {y}",
+            Err(e) => "err: {e}",
+        }
+    )
+    let err: Outcome<(int, int), string> = Outcome::Err("failed")
+    print(
+        match err {
+            Ok((x, y)) => "ok: {x}, {y}",
+            Err(e) => "err: {e}",
+        }
+    )
+}
+
+struct Spot { x: int, y: int }
+
+@test(output = "point at 3, 4")
+fn test_enum_wrapping_struct() {
+    let opt: Maybe<Spot> = Maybe::Some(Spot { x: 3, y: 4 })
+    let msg = match opt {
+        Some(p) => "point at {p.x}, {p.y}",
+        None => "no point",
+    }
+    print(msg)
+}
+
+@test(output = "has value: 42\nnull")
+fn test_nullable_enum() {
+    let opt: Maybe<int>? = Maybe::Some(42)
+    if opt != null {
+        let msg = match opt {
+            Some(x) => "has value: {x}",
+            None => "none variant",
+        }
+        print(msg)
+    }
+    let absent: Maybe<int>? = null
+    if absent != null {
+        print("not null")
+    } else {
+        print("null")
+    }
+}
+
+@test(output = "A:1 B:none")
+fn test_vec_tuple_enum() {
+    let items: [(string, Maybe<int>)] = [("A", Maybe::Some(1)), ("B", Maybe::None)]
+    let out = ""
+    let first = true
+    for item in items {
+        if !first { out = out + " " }
+        first = false
+        let (name, val) = item
+        out = out + name + ":" + match val {
+            Some(x) => "{x}",
+            None => "none",
+        }
+    }
+    print(out)
 }

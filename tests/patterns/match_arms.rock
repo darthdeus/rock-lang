@@ -1,0 +1,270 @@
+// Literal, range, tuple, or- and null match arms. Range and tuple arms lower
+// to short-circuit conditions, exhaustive chains need no fallthrough arm, a
+// match result joins at the real continuation, and on a nullable scrutinee a
+// structural arm misses nil instead of reading through it, in any arm order.
+
+enum Dir { North, East, South, West }
+
+@test(output = "2")
+fn test_exhaustive_enum() {
+    let d = Dir::South
+    print(match d {
+        Dir::North => 0,
+        Dir::East => 1,
+        Dir::South => 2,
+        Dir::West => 3,
+    })
+}
+
+@test(output = "10\n20")
+fn test_range_two_arm() {
+    print(match 3 { 1..5 => 10, _ => 20 })
+    print(match 9 { 1..5 => 10, _ => 20 })
+}
+
+@test(output = "30")
+fn test_range_three_arm() {
+    let f = (x: int) => match x { 1..5 => 10, 6..10 => 20, _ => 30 }
+    print(f(100))
+}
+
+// Exhaustive match whose result feeds a following computation (join must be the
+// real continuation, not the virtual exit).
+@test(output = "7")
+fn test_match_result_used() {
+    let base = match Dir::East { Dir::North => 0, Dir::East => 5, Dir::South => 2, Dir::West => 3 }
+    print(base + 2)
+}
+
+fn tup(p: (int, int)) -> int {
+    return match p {
+        (0, 0) => 100,
+        (1, y) => y,
+        (x, _) => x,
+        _ => 42,
+    }
+}
+
+fn open_range(n: int) -> int {
+    return match n {
+        ..0 => 0,
+        100.. => 2,
+        _ => 1,
+    }
+}
+
+@test(output = "100\n7\n4")
+fn test_tuple_patterns() {
+    print("{tup((0, 0))}")
+    print("{tup((1, 7))}")
+    print("{tup((4, 9))}")
+}
+
+@test(output = "0\n1\n2")
+fn test_open_ranges() {
+    print("{open_range(-5)}")
+    print("{open_range(50)}")
+    print("{open_range(200)}")
+}
+
+@test(output = "neg
+zero
+pos
+pi")
+fn match_negative_int_pattern() {
+    let xs: [int] = [-1, 0, 1]
+    for x in xs {
+        match x {
+            -1 => print("neg"),
+            0 => print("zero"),
+            1 => print("pos"),
+            _ => print("other"),
+        }
+    }
+    let f: float = 3.14
+    match f {
+        3.14 => print("pi"),
+        _ => print("other"),
+    }
+}
+
+enum Faction {
+    Hostile,
+    AggressiveSummon,
+    Pet,
+    Neutral,
+}
+
+enum Color {
+    Red(int),
+    Blue(int),
+    Green(int),
+    Other,
+}
+
+fn is_friendly(f: Faction) -> bool {
+    match f {
+        Faction::Hostile | Faction::AggressiveSummon => false,
+        Faction::Pet | Faction::Neutral => true,
+    }
+}
+
+@test
+fn test_unit_variants_or() {
+    assert_eq(is_friendly(Faction::Hostile), false)
+    assert_eq(is_friendly(Faction::AggressiveSummon), false)
+    assert_eq(is_friendly(Faction::Pet), true)
+    assert_eq(is_friendly(Faction::Neutral), true)
+}
+
+@test
+fn test_or_mixes_payload_variants_no_bindings() {
+    let c = Color::Blue(7)
+    let s = match c {
+        Color::Red(_) | Color::Blue(_) | Color::Green(_) => "rgb",
+        Color::Other => "other",
+    }
+    assert_eq(s, "rgb")
+}
+
+@test
+fn test_or_with_guard() {
+    // With n=3 the first arm's pattern matches AND the guard holds, so the
+    // guarded branch wins over the unguarded `1|2|3` fallback below.
+    let n = 3
+    let s = match n {
+        1 | 2 | 3 if n > 2 => "two or three",
+        1 | 2 | 3 => "one or two",
+        _ => "other",
+    }
+    assert_eq(s, "two or three")
+    // Guard fails -> falls through to the unguarded or-pattern.
+    let m = 1
+    let t = match m {
+        1 | 2 | 3 if m > 2 => "two or three",
+        1 | 2 | 3 => "one or two",
+        _ => "other",
+    }
+    assert_eq(t, "one or two")
+    // Pattern misses entirely -> wildcard.
+    let k = 99
+    let u = match k {
+        1 | 2 | 3 if k > 2 => "two or three",
+        1 | 2 | 3 => "one or two",
+        _ => "other",
+    }
+    assert_eq(u, "other")
+}
+
+// First and middle position of an or-pattern in the arm list.
+@test
+fn test_or_pattern_position() {
+    let n = 2
+    let a = match n {
+        1 | 2 => "ab",
+        3 => "c",
+        _ => "z",
+    }
+    assert_eq(a, "ab")
+    let b = match n {
+        0 => "0",
+        1 | 2 | 3 => "small",
+        _ => "big",
+    }
+    assert_eq(b, "small")
+}
+
+@test
+fn test_or_with_ranges() {
+    let n = 7
+    let s = match n {
+        1..=5 | 10..=20 => "in-band",
+        _ => "out",
+    }
+    assert_eq(s, "out")
+    let m = 12
+    let t = match m {
+        1..=5 | 10..=20 => "in-band",
+        _ => "out",
+    }
+    assert_eq(t, "in-band")
+}
+
+// Nested match with or-patterns in both inner and outer.
+@test
+fn test_nested_match_or_patterns() {
+    let outer = Faction::Pet
+    let inner = Faction::Neutral
+    let s = match outer {
+        Faction::Hostile | Faction::AggressiveSummon => "agro",
+        Faction::Pet | Faction::Neutral => match inner {
+            Faction::Hostile | Faction::AggressiveSummon => "friendly-vs-agro",
+            Faction::Pet | Faction::Neutral => "friendly-vs-friendly",
+        },
+    }
+    assert_eq(s, "friendly-vs-friendly")
+}
+
+enum Sig {
+    Idle,
+    Num(int),
+}
+
+fn describe_sig(s: Sig?) -> int {
+    match s {
+        null => -1,
+        Sig::Idle => 0,
+        Sig::Num(x) => x,
+    }
+}
+
+@test
+fn null_arm_first() {
+    let none: Sig? = null
+    assert_eq(describe_sig(none), -1)
+    assert_eq(describe_sig(Sig::Idle), 0)
+    assert_eq(describe_sig(Sig::Num(9)), 9)
+}
+
+@test(output = "none\nc5")
+fn enum_arm_before_null_arm() {
+    fn tag(s: Sig?) -> string {
+        match s {
+            Sig::Num(r) => "c{r}",
+            null => "none",
+            _ => "idle",
+        }
+    }
+    let none: Sig? = null
+    print(tag(none))
+    print(tag(Sig::Num(5)))
+}
+
+@test(output = "none\n7 0")
+fn tuple_arm_before_null_arm() {
+    fn first(t: (int, int)?) -> string {
+        match t {
+            (a, 0) => "{a} 0",
+            null => "none",
+            (a, b) => "{a} {b}",
+        }
+    }
+    let none: (int, int)? = null
+    print(first(none))
+    print(first((7, 0)))
+}
+
+@test(output = "none\nsmall\nother")
+fn range_arm_before_null_arm() {
+    fn size(n: int?) -> string {
+        match n {
+            1..=9 => "small",
+            null => "none",
+            _ => "other",
+        }
+    }
+    let none: int? = null
+    print(size(none))
+    print(size(3))
+    print(size(100))
+}

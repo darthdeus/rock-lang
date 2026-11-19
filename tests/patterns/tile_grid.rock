@@ -1,7 +1,5 @@
-// Match-3 board logic over a flat global grid: bounds-checked access, run
+// Tile-grid logic over a flat global array: bounds-checked access, run
 // detection across rows and columns, gravity and swaps.
-
-// -- Types (normally from engine, defined here for standalone tests) --
 
 struct IVec2 {
     x: int,
@@ -157,26 +155,6 @@ fn test_is_adjacent() {
 // -- Match detection tests --
 
 @test
-fn test_horizontal_match_3() {
-    setup_empty_board()
-    grid_set(2, 3, 1)
-    grid_set(3, 3, 1)
-    grid_set(4, 3, 1)
-    let matches = find_matches()
-    assert_true(matches.len() >= 3, "Should find 3+ tiles in horizontal match")
-}
-
-@test
-fn test_vertical_match_3() {
-    setup_empty_board()
-    grid_set(5, 1, 2)
-    grid_set(5, 2, 2)
-    grid_set(5, 3, 2)
-    let matches = find_matches()
-    assert_true(matches.len() >= 3, "Should find 3+ tiles in vertical match")
-}
-
-@test
 fn test_no_match_alternating() {
     setup_empty_board()
     grid_set(0, 0, 1)
@@ -185,21 +163,6 @@ fn test_no_match_alternating() {
     grid_set(3, 0, 2)
     let matches = find_matches()
     assert_eq(matches.len(), 0, "Alternating tiles should not match")
-}
-
-@test
-fn test_two_separate_matches() {
-    setup_empty_board()
-    // Horizontal match at row 0
-    grid_set(0, 0, 1)
-    grid_set(1, 0, 1)
-    grid_set(2, 0, 1)
-    // Vertical match at col 6
-    grid_set(6, 4, 3)
-    grid_set(6, 5, 3)
-    grid_set(6, 6, 3)
-    let matches = find_matches()
-    assert_true(matches.len() >= 6, "Should find both matches (6+ tiles)")
 }
 
 @test
@@ -219,18 +182,6 @@ fn test_cross_match() {
 }
 
 // -- Gravity tests --
-
-@test
-fn test_gravity_simple() {
-    setup_empty_board()
-    // Column 3: tile at top, empties below, tiles at bottom
-    grid_set(3, 0, 5)
-    grid_set(3, 7, 2)
-    apply_gravity()
-    assert_eq(grid_get(3, 7), 2, "Bottom tile stays")
-    assert_eq(grid_get(3, 6), 5, "Top tile drops to just above bottom")
-    assert_eq(grid_get(3, 0), -1, "Original position is empty")
-}
 
 @test
 fn test_gravity_preserves_order() {

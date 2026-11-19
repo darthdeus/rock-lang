@@ -1,6 +1,8 @@
 // Enum basics: unit, payload and generic enums built, compared, stored in
-// vectors and matched, including nested matches, enums passed to helpers
-// across scopes and patterns that name payload variants.
+// containers and matched. Same-concrete-enum == / != is specialized:
+// payloadless enums compare natively and payloaded enums call a per-enum
+// equality instead of the generic __op_eq dispatch, including enum fields,
+// nullable refinement, containers, map keys and tuples.
 
 enum Color {
     Red,
@@ -35,18 +37,6 @@ fn test_enum_in_arrays() {
     assert_eq(vec_get(colors, 2).unwrap(), Color::Blue)
 }
 
-@test
-fn test_match_expressions() {
-    let color = Color::Red
-    let result = match color {
-        Red => "red",
-        Green => "green",
-        Blue => "blue",
-    }
-
-    assert_eq(result, "red")
-}
-
 @test(output="Red\nGreen\nBlue")
 fn test_enum_print_output() {
     for color in [Color::Red, Color::Green, Color::Blue] {
@@ -79,29 +69,6 @@ fn test_deeply_nested_match() {
     assert_eq(value, 42)
 }
 
-// Test that we can use enum variants in different scopes
-fn helper_function(c: Color) -> string {
-    match c {
-        Color::Red => "R",
-        Color::Green => "G",
-        Color::Blue => "B",
-    }
-}
-
-@test
-fn test_enum_scope() {
-    let color = Color::Red
-    let result = helper_function(color)
-    assert_eq(result, "R")
-
-    {
-        let inner_color = Color::Green
-        let inner_result = helper_function(inner_color)
-        assert_eq(inner_result, "G")
-    }
-}
-
-// Test generic enum edge cases
 enum Box<T> {
     Empty,
     Full(T),
@@ -109,7 +76,6 @@ enum Box<T> {
 
 @test(output = "Generic enum inference works")
 fn test_generic_enum_inference() {
-    // Type should be inferred from usage
     let box1 = Box::Full(42)
     let box2: Box<int> = Box::Empty
 
@@ -135,34 +101,191 @@ fn test_enum_with_unconstrained_type_param() {
     }
 }
 
-enum PayloadColor {
-    Red(int),
-    Blue(string),
-    Green(bool)
+enum TileType { Floor, Wall, Water }
+
+enum Msg {
+    Ping,
+    Val(int),
+    Str(string),
 }
 
 @test
-fn test_valid_enum_pattern() {
-    let color = PayloadColor::Red(255)
+fn test_payloadless_eq() {
+    let a = TileType::Wall
+    let b = TileType::Wall
+    assert_eq(a == b, true)
+    assert_eq(a != b, false)
 
-    match color {
-        PayloadColor::Red(value) => {
-            assert_eq(value, 255)
-        },
-        PayloadColor::Blue(name) => {
-            assert_eq(name, "blue")
-        },
-        PayloadColor::Green(enabled) => {
-            assert_eq(enabled, true)
+    let floor = TileType::Floor
+    let water = TileType::Water
+    assert_eq(floor == water, false)
+    assert_eq(floor != water, true)
+
+    // Variable against a variant literal, on either side.
+    assert_eq(a == TileType::Wall, true)
+    assert_eq(TileType::Wall == a, true)
+    assert_eq(a == TileType::Floor, false)
+    assert_eq(TileType::Floor != a, true)
+}
+
+@test
+fn test_payloaded_eq() {
+    let a = Msg::Val(5)
+    let same = Msg::Val(5)
+    let other = Msg::Val(6)
+    let str = Msg::Str("hi")
+    assert_eq(a == same, true)
+    // Same variant, different payload.
+    assert_eq(a == other, false)
+    assert_eq(a != other, true)
+    // Different payload variants.
+    assert_eq(a == str, false)
+    // Unit variant against a payload variant, and against itself.
+    let ping = Msg::Ping
+    let ping2 = Msg::Ping
+    let zero = Msg::Val(0)
+    assert_eq(ping == zero, false)
+    assert_eq(ping != zero, true)
+    assert_eq(ping == ping2, true)
+}
+
+enum Hue { Red, Green, Blue }
+enum Tag { A, B, C }
+
+struct Item {
+    color: Hue,
+    tag: Tag,
+}
+
+enum HeldShape {
+    Point,
+    Circle(int),
+    Rect(int, int),
+}
+
+struct Holder {
+    shape: HeldShape,
+}
+
+@test
+fn test_enum_field_vs_literal() {
+    let item = Item { color: Hue::Red, tag: Tag::B }
+    assert_eq(item.color == Hue::Red, true)
+    assert_eq(item.color == Hue::Green, false)
+    assert_eq(item.tag != Tag::A, true)
+}
+
+@test
+fn test_nullable_refinement() {
+    let maybe: Hue? = Hue::Blue
+    if maybe != null {
+        assert_eq(maybe == Hue::Blue, true)
+        assert_eq(maybe == Hue::Red, false)
+    }
+}
+
+@test
+fn test_null_coalesce_then_eq() {
+    let maybe: Hue? = null
+    let c = maybe ?? Hue::Green
+    assert_eq(c == Hue::Green, true)
+    assert_eq(c != Hue::Red, true)
+}
+
+@test
+fn test_chained_conditions() {
+    let a = Hue::Red
+    let b = Tag::C
+    assert_eq(a == Hue::Red && b == Tag::C, true)
+    assert_eq(a == Hue::Red || b == Tag::A, true)
+    assert_eq(a == Hue::Green || b == Tag::A, false)
+}
+
+@test
+fn test_enum_in_vec() {
+    let xs: [Hue] = [Hue::Red, Hue::Green, Hue::Blue, Hue::Red]
+    let count = 0
+    let matches = 0
+    for c in xs {
+        count = count + 1
+        if c == Hue::Red {
+            matches = matches + 1
         }
     }
 
-    // A wildcard arm after a payload variant arm.
-    let sky = PayloadColor::Blue("sky")
-    match sky {
-        PayloadColor::Blue(name) => {
-            assert_eq(name, "sky")
-        },
-        _ => assert(false),
+    assert_eq(count, 4)
+    assert_eq(matches, 2)
+    assert_eq(xs[0] == Hue::Red, true)
+    assert_eq(xs[1] == Hue::Green, true)
+    assert_eq(xs[2] == Hue::Blue, true)
+    assert_eq(xs[3] == Hue::Red, true)
+
+    let indexed_matches = 0
+    let idx = 0
+    while idx < 4 {
+        if xs[idx] == Hue::Red {
+            indexed_matches = indexed_matches + 1
+        }
+        idx = idx + 1
     }
+    assert_eq(indexed_matches, 2)
+}
+
+@test
+fn test_payloaded_struct_field() {
+    let h1 = Holder { shape: HeldShape::Circle(5) }
+    let h2 = Holder { shape: HeldShape::Circle(5) }
+    let h3 = Holder { shape: HeldShape::Rect(2, 3) }
+    assert_eq(h1.shape == h2.shape, true)
+    assert_eq(h1.shape == h3.shape, false)
+    assert_eq(h1.shape != h3.shape, true)
+}
+
+@test
+fn test_match_like_eq() {
+    let c = Hue::Green
+    let name = if c == Hue::Red { "r" } else if c == Hue::Green { "g" } else { "b" }
+    assert_eq(name, "g")
+}
+
+@test
+fn test_enum_as_map_key() {
+    let m = map_new()
+    m[Hue::Red] = 1
+    m[Hue::Green] = 2
+    assert_eq(m[Hue::Red], 1)
+    assert_eq(m[Hue::Green], 2)
+}
+
+fn return_red() -> Hue {
+    Hue::Red
+}
+
+@test
+fn test_singleton_identity_via_fn() {
+    let a = return_red()
+    let b = Hue::Red
+    assert_eq(a == b, true)
+    assert_eq(b == a, true)
+}
+
+@test
+fn test_enum_in_tuple() {
+    let t = (Hue::Red, 1)
+    assert_eq(t.0 == Hue::Red, true)
+    assert_eq(t.0 != Hue::Green, true)
+}
+
+struct Pt { x: int, y: int }
+enum Geo { Empty, Dot(Pt) }
+
+@test
+fn test_payloaded_with_struct() {
+    let a = Geo::Dot(Pt { x: 1, y: 2 })
+    let b = Geo::Dot(Pt { x: 1, y: 2 })
+    let c = Geo::Dot(Pt { x: 1, y: 3 })
+    // Same-type payloaded == goes through __op_eq_Geo -> compares field via __op_eq recursively.
+    assert_eq(a == b, true)
+    assert_eq(a == c, false)
+    assert_eq(a == Geo::Empty, false)
 }

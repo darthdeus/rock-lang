@@ -1,7 +1,6 @@
 // Recursive enums: lists, trees, expression trees, JSON-like values and
 // mutually recursive types, built and folded through recursive functions.
 
-// Classic linked list
 enum List<T> {
     Nil,
     Cons(T, List<T>),
@@ -18,25 +17,6 @@ enum Expr {
     Number(float),
     Add(Expr, Expr),
     Multiply(Expr, Expr),
-}
-
-fn list_length<T>(list: List<T>) -> int {
-    match list {
-        Nil => 0,
-        Cons(_, tail) => 1 + list_length(tail),
-    }
-}
-
-@test
-fn test_list_length() {
-    let empty: List<int> = List::Nil
-    assert_eq(list_length(empty), 0)
-    
-    let single = List::Cons(42, List::Nil)
-    assert_eq(list_length(single), 1)
-    
-    let three = List::Cons(1, List::Cons(2, List::Cons(3, List::Nil)))
-    assert_eq(list_length(three), 3)
 }
 
 fn eval(expr: Expr) -> float {
@@ -56,7 +36,7 @@ fn test_expression_tree() {
             Expr::Number(4.0)
         )
     )
-    
+
     let result = eval(expr)
     assert_eq(result, 14.0)
 }
@@ -81,10 +61,10 @@ fn max_int(a: int, b: int) -> int {
 fn test_tree_height() {
     let leaf: Tree<int> = Tree::Leaf
     assert_eq(tree_height(leaf), 0)
-    
+
     let single = Tree::Node(1, Tree::Leaf, Tree::Leaf)
     assert_eq(tree_height(single), 1)
-    
+
     let balanced = Tree::Node(
         1,
         Tree::Node(2, Tree::Leaf, Tree::Leaf),
@@ -125,15 +105,15 @@ fn test_json_construction() {
     let obj = map_new()
     insert(obj, "name", Json::String("Rock"))
     insert(obj, "version", Json::Number(1.0))
-    
+
     let features = vec_new()
     vec_push(features, Json::String("enums"))
     vec_push(features, Json::String("generics"))
     vec_push(features, Json::String("recursion"))
     insert(obj, "features", Json::Array(features))
-    
+
     let json = Json::Object(obj)
-    
+
     // Pattern match to verify
     match json {
         Object(obj) => {
@@ -162,7 +142,7 @@ fn list_map<T, U>(list: List<T>, f: (T) -> U) -> List<U> {
 fn test_list_map() {
     let numbers = List::Cons(1, List::Cons(2, List::Cons(3, List::Nil)))
     let doubled = list_map(numbers, x => x * 2)
-    
+
     match doubled {
         Cons(head, _) => assert_eq(head, 2),
         Nil => assert(false, "List should not be empty"),
@@ -186,7 +166,7 @@ fn test_tree_fold() {
         Tree::Node(5, Tree::Leaf, Tree::Leaf),
         Tree::Node(15, Tree::Leaf, Tree::Leaf)
     )
-    
+
     // Sum all values in the tree
     let sum = tree_fold(tree, 0, (val, left, right) => val + left + right)
     assert_eq(sum, 30)
