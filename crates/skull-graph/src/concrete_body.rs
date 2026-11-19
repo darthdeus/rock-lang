@@ -439,27 +439,25 @@ fn concrete_signature(
 ) -> Result<ConcreteSignature, MonoTyReason> {
     let f = &ws.module(inst.func.module).functions[inst.func.func];
     let arena = g.interner();
-    {
-        let params = f
-            .param_decls
-            .iter()
-            .map(|param| arena.convert_decl(ws, param.ty, subst))
-            .collect::<Result<Vec<_>, _>>()?;
-        let param_tuple_spelled = f
-            .param_decls
-            .iter()
-            .map(|param| declared_tuple_param(ws, param.ty))
-            .collect::<Result<Vec<_>, _>>()?;
-        let result = f
-            .return_ty
-            .map(|ty| arena.convert_decl(ws, ty, subst))
-            .transpose()?;
-        Ok(ConcreteSignature {
-            params,
-            param_tuple_spelled,
-            result,
-        })
-    }
+    let params = f
+        .param_decls
+        .iter()
+        .map(|param| arena.convert_decl(ws, param.ty, subst))
+        .collect::<Result<Vec<_>, _>>()?;
+    let param_tuple_spelled = f
+        .param_decls
+        .iter()
+        .map(|param| declared_tuple_param(ws, param.ty))
+        .collect::<Result<Vec<_>, _>>()?;
+    let result = f
+        .return_ty
+        .map(|ty| arena.convert_decl(ws, ty, subst))
+        .transpose()?;
+    Ok(ConcreteSignature {
+        params,
+        param_tuple_spelled,
+        result,
+    })
 }
 
 fn declared_tuple_param(ws: &Workspace, ty: TyId) -> Result<bool, MonoTyReason> {

@@ -8,9 +8,7 @@ pub mod shader_artifact;
 /// Whether emitted Lua carries LuaJIT line directives (`ROCK_SKULL_LINE_DIRECTIVES`).
 pub use skull_codegen_lua::line_directives_mode;
 
-pub use skull_graph::{
-    artifact, concrete_body, expr_subtree, instance_graph, shader, target_projection,
-};
+pub use skull_graph::{artifact, concrete_body, instance_graph, shader, target_projection};
 pub mod artifact_fingerprint;
 pub mod pipeline;
 

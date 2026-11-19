@@ -3,6 +3,7 @@ use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet};
 
 use bone_core::hir::{Body, BodyOwner, Function, TypeExpr, VarId};
+use bone_core::hir_walk::HirChild;
 use bone_core::prelude::{BoundNext, IterWitness, ModuleId, Span, TyId};
 use bone_core::workspace::{BodyInference, Workspace};
 use comfy_la_arena::Idx;
@@ -2578,7 +2579,7 @@ fn walk_struct_default_edges(
                 let Some(root) = defaults.field_defaults.get(f) else {
                     continue;
                 };
-                sub.extend(crate::expr_subtree::expr_subtree(defaults, *root));
+                sub.extend(expr_subtree(defaults, *root));
             }
             let inner = skull_mir::struct_defaults::slot_subst(Some(dinf), args);
             pending.push((defaults, dinf, inner, Some(sub)));
@@ -2598,7 +2599,7 @@ fn walk_struct_default_edges(
             let Some(root) = defaults.field_defaults.get(f) else {
                 continue;
             };
-            reached.extend(crate::expr_subtree::expr_subtree(defaults, *root));
+            reached.extend(expr_subtree(defaults, *root));
         }
         // Defaults resolve under the struct's slot bindings, not the enclosing instance's.
         let inner = skull_mir::struct_defaults::slot_subst(Some(inf), &args);
@@ -2615,6 +2616,18 @@ fn walk_struct_default_edges(
             Some(&reached),
         );
     }
+}
+
+fn expr_subtree(
+    body: &Body,
+    root: Idx<bone_core::hir::Expr>,
+) -> FxHashSet<Idx<bone_core::hir::Expr>> {
+    let mut out = FxHashSet::from_iter([root]);
+    body.walk_descendants(HirChild::Expr(root), &mut |child| match child {
+        HirChild::Expr(x) => out.insert(x),
+        HirChild::Statement(_) | HirChild::Pattern(_) => true,
+    });
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
