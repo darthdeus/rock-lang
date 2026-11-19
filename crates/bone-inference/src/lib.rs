@@ -119,13 +119,9 @@ pub struct Gamma<'a> {
     pub declared_ret_ty: Option<TyId>,
     pub coroutine_ret: Option<TyId>,
     pub loop_depth: u32,
-    /// Inferring a `defer` body: it runs while the function is already
-    /// leaving, so `return` has nothing to return from.
     pub in_defer: bool,
 
-    // Path refinements expire on effects that can mutate fields or globals.
     pub(crate) refined_nonnull: FxHashSet<Narrow>,
-    /// A call can revoke whole-local refinements for bindings a lambda writes.
     pub(crate) closure_assigned: FxHashSet<Idx<BindingInfo>>,
     /// Whole-local narrows of `closure_assigned` bindings in force, with the
     /// type each replaced; drained by [`Gamma::invalidate_mutable_refinements`].
@@ -149,9 +145,7 @@ pub struct Gamma<'a> {
     pub(crate) allow_frame_ref_return_place: bool,
     pub(crate) ref_binding_provenance: FxHashMap<Idx<BindingInfo>, RefProvenance>,
 
-    /// A lambda returning an iterable to an Iterator-bound slot needs a coercion.
     pub(crate) iter_result_lambda: Option<Idx<Expr>>,
-    /// The values of the `return`s in the innermost lambda being inferred.
     pub(crate) lambda_returns: Option<Vec<Idx<Expr>>>,
 
     pub out: BodyInference,
@@ -164,7 +158,6 @@ pub struct BodyCtx<'a> {
 }
 
 impl<'a> Gamma<'a> {
-    /// Drop paths and captured locals that a call or suspension can invalidate.
     pub(crate) fn invalidate_mutable_refinements(&mut self) {
         self.refined_nonnull.clear();
         self.refinement_epoch += 1;
@@ -270,7 +263,6 @@ impl<'a> Gamma<'a> {
         g
     }
 
-    /// Deferred constraints retry outside the syntactic walk.
     pub(crate) fn body_ctx(&self) -> BodyCtx<'a> {
         let ws: &'a Workspace = self.workspace;
         BodyCtx {
@@ -581,7 +573,6 @@ fn check_function(c: BodyCtx, gamma: &mut Gamma, f: &Function) -> Result<(), Com
             _ => Some(body),
         };
         if let Some(tail) = tail {
-            // Contextual checking gives returned lambdas the declared fn-value ABI.
             if let Err(e) = check_expr(c, gamma, body, ret_ty, c.body.expr_spans[tail]) {
                 gamma.body_errors.push(e);
             } else if let Err(e) = validate_frame_ref_return(c, gamma, body, ret_ty) {
@@ -607,7 +598,6 @@ fn check_function(c: BodyCtx, gamma: &mut Gamma, f: &Function) -> Result<(), Com
 
     gamma.out.deps = gamma.dep_acc.take();
 
-    // Opaque bodies are trusted and exited above.
     if fn_has_anno(f, "pure") {
         if fn_has_anno(f, "debug_impure") {
             gamma.body_errors.push(CompilerError::new_with_label(

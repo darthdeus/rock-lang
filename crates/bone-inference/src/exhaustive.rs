@@ -38,7 +38,6 @@ enum Pat {
 struct VariantShape {
     name: Ustr,
     fields: Vec<TyId>,
-    /// Field names of a record variant, in declaration order.
     field_names: Option<Vec<Ustr>>,
 }
 
@@ -52,7 +51,6 @@ enum Shape {
         name: Ustr,
         fields: Vec<(Ustr, TyId)>,
     },
-    /// A transparent newtype: one constructor over the wrapped type.
     Newtype {
         name: Ustr,
         field: TyId,
@@ -61,7 +59,6 @@ enum Shape {
         name: Ustr,
         variants: Vec<VariantShape>,
     },
-    /// No enumerable constructors: only a wildcard covers it.
     Opaque,
 }
 
@@ -71,7 +68,6 @@ enum Wit {
     Ctor(Ctor, TyId, Vec<Wit>),
 }
 
-/// An unguarded arm and its optional bare-variant tag test.
 pub(crate) struct ArmPattern {
     pub pattern: Idx<Pattern>,
     pub tag: Option<Ustr>,
@@ -99,7 +95,6 @@ pub(crate) fn missing_match_patterns(
         .collect();
     let witnesses = cx.missing(rows, &[scrut_ty], true, MAX_REPORTED + 1);
 
-    // A poisoned type already carries its own diagnostic.
     if cx.poisoned {
         return Vec::new();
     }
@@ -272,7 +267,6 @@ impl Checker<'_, '_, '_> {
         }
     }
 
-    /// Lower `pat` to the matrix form; nested bare names are bindings.
     fn lower(&mut self, pat: Idx<Pattern>, ty: TyId) -> Pat {
         let body = self.c.body;
         let shape = self.shape(ty);
@@ -375,7 +369,6 @@ impl Checker<'_, '_, '_> {
         }
     }
 
-    /// Lower record fields in declaration order, leaving omitted fields wild.
     fn lower_record_fields(
         &mut self,
         fields: IdxRange<RecordPatField>,
@@ -392,7 +385,6 @@ impl Checker<'_, '_, '_> {
         out
     }
 
-    /// Generate up to `limit` uncovered witnesses for the columns in `tys`.
     fn missing(
         &mut self,
         rows: Vec<Vec<Pat>>,
@@ -423,7 +415,6 @@ impl Checker<'_, '_, '_> {
         let shape = self.shape(ty);
         let all = all_ctors(&shape, &heads);
         if all.is_empty() {
-            // Only wildcard rows can cover a non-enumerable type.
             heads.clear();
         }
 

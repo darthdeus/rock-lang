@@ -32,7 +32,6 @@ pub(crate) enum PendingKind {
     },
 }
 
-/// First operand that resolves to a deferrable inference variable.
 pub(crate) fn deferrable_operand(
     gamma: &mut Gamma,
     tys: &[TyId],
@@ -61,7 +60,6 @@ fn unresolved_operand(gamma: &mut Gamma, tys: &[TyId], span: Span) -> Option<Var
     None
 }
 
-/// Make a result var deferrable so later operations can chain from it.
 pub(crate) fn defer_result_var(gamma: &mut Gamma, origin: DeferOrigin, span: Span) -> TyId {
     let ty = gamma.fresh_callsite_var(origin.name, span);
     let r = resolve(gamma, ty, span);

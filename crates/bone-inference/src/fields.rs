@@ -5,7 +5,6 @@ pub(crate) fn resolve_struct(gamma: &Gamma, name: Ustr) -> Option<StructId> {
     gamma.workspace.struct_by_name.get(&name).copied()
 }
 
-/// Map a nominal declaration's generic variables to an application's arguments.
 pub(crate) fn generic_arg_subs(
     gamma: &Gamma,
     generics: &[TyId],
@@ -28,7 +27,6 @@ pub(crate) fn resolve_enum(gamma: &Gamma, name: Ustr) -> Option<EnumId> {
     gamma.workspace.enums_by_name.get(&name).copied()
 }
 
-/// Find structs that define `field`, for inferring an unresolved base type.
 pub(crate) fn structs_with_field(gamma: &Gamma, field: Ustr) -> Vec<StructId> {
     let mut matches: Vec<StructId> = Vec::new();
 
@@ -86,7 +84,6 @@ impl From<StructFieldError> for CompilerError {
     }
 }
 
-// Resolve a field type on a resolved struct base, peeled for safe navigation.
 pub(crate) fn struct_field_ty(
     gamma: &mut Gamma,
     base_ty: TyId,
@@ -123,7 +120,6 @@ pub(crate) fn struct_field_ty(
             params,
         } => (*VEC, params),
 
-        // Preserve the original error instead of reporting a missing field.
         TypeExpr::Builtin(BuiltinTy::Error) => return Ok(base_ty),
 
         TypeExpr::Infer(..) => {
@@ -206,7 +202,6 @@ pub(crate) fn struct_field_ty(
     substitute(gamma, field_ty, &subs, span).map_err(StructFieldError::from)
 }
 
-/// Return a struct's instance-specific field types, peeling refs and nullable.
 pub fn struct_fields_of(
     gamma: &mut Gamma,
     base_ty: TyId,
@@ -337,7 +332,6 @@ fn ty_is_value_struct(gamma: &Gamma, ty: TyId) -> Option<Ustr> {
         .then_some(name)
 }
 
-/// Whether a value-struct field base reaches mutable storage rather than a temporary.
 fn value_field_write_is_place(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -358,9 +352,7 @@ fn value_field_write_is_place(
                 }
                 cur = parent;
             }
-            // Locals and parameters own their copies.
             Expr::Var(_) => return Ok(true),
-            // Calls and literals produce temporaries.
             _ => return Ok(false),
         }
     }
@@ -378,8 +370,6 @@ fn expr_is_reachable_storage(c: BodyCtx, e: Idx<Expr>) -> bool {
     }
 }
 
-/// Reject writes to value-struct fields on temporaries; writable places include
-/// locals, parameters, globals, and projections from mutable storage.
 pub(crate) fn reject_value_struct_field_write(
     c: BodyCtx,
     gamma: &mut Gamma,

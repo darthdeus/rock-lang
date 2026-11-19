@@ -24,7 +24,6 @@ impl Root {
 
 pub(crate) type Narrow = (Root, Vec<Ustr>);
 
-/// Root a field path in a local binding or global.
 pub(crate) fn path_key(c: BodyCtx, e: Idx<Expr>) -> Option<Narrow> {
     match c.body.expr_arena[e] {
         Expr::Var(b) => Some((Root::Local(b), vec![])),
@@ -79,7 +78,6 @@ fn cond_has_effect(gamma: &Gamma, c: BodyCtx, e: Idx<Expr>) -> bool {
             ..
         } if !callee_pure(e) && !is_stdlib_null_predicate(gamma, e) => true,
         Expr::SafeNavCall { .. } if !callee_pure(e) => true,
-        // A function value's body is opaque.
         Expr::Call {
             callee: Callee::Local(_) | Callee::Value(_),
             ..
@@ -116,7 +114,6 @@ fn child_has_effect(gamma: &Gamma, c: BodyCtx, child: bone_core::hir_walk::HirCh
     }
 }
 
-/// Outer locals assigned by lambdas, whose calls can revoke their narrows.
 pub(crate) fn closure_assigned_locals(body: &hir::Body) -> FxHashSet<Idx<BindingInfo>> {
     use bone_core::hir_walk::HirChild;
     let mut out = FxHashSet::default();
@@ -151,7 +148,6 @@ pub(crate) fn closure_assigned_locals(body: &hir::Body) -> FxHashSet<Idx<Binding
     out
 }
 
-/// Narrowings for each branch, excluding paths the condition can invalidate.
 pub(crate) fn detect_null_narrow(
     gamma: &Gamma,
     c: BodyCtx,
@@ -273,7 +269,6 @@ pub(crate) fn infer_branch(
     result
 }
 
-/// Narrowings that remain valid after an `if` statement whose other path exits.
 pub(crate) fn stmt_guard_narrows(gamma: &Gamma, c: BodyCtx, stmt: Idx<Statement>) -> Vec<Narrow> {
     let Statement::Expr(e) = c.body.statement_arena[stmt] else {
         return vec![];
@@ -309,7 +304,6 @@ pub(crate) fn stmt_guard_narrows(gamma: &Gamma, c: BodyCtx, stmt: Idx<Statement>
     }
 }
 
-/// Whether a branch has no tail and its final statement exits or never completes.
 fn expr_diverges(c: BodyCtx, e: Idx<Expr>) -> bool {
     match c.body.expr_arena[e] {
         Expr::Block { statements, tail } => tail.is_none() && block_ends_in_exit(c, statements),

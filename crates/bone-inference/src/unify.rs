@@ -85,7 +85,6 @@ pub(crate) fn substitute(
     }
 }
 
-/// Map children in arena order and rebuild a node only when needed.
 fn map_structural_type<E>(
     gamma: &mut Gamma,
     ty: TyId,
@@ -274,7 +273,6 @@ fn map_children<E>(
 }
 
 pub(crate) fn nullable_of(gamma: &mut Gamma, inner: TyId, span: Span) -> TyId {
-    // Keep nullable types canonical.
     if matches!(gamma.get(inner), TypeExpr::Nullable(_)) {
         return inner;
     }
@@ -363,7 +361,6 @@ pub(crate) fn types_equal(gamma: &Gamma, a: TyId, b: TyId) -> bool {
     }
 }
 
-/// Whether `var` appears in `ty`, following substitutions to prevent infinite types.
 fn occurs_in(gamma: &Gamma, var: VarId, ty: TyId) -> bool {
     gamma.workspace.type_any(
         Some(&gamma.out),

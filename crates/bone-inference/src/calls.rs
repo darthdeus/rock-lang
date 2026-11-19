@@ -95,7 +95,6 @@ fn keep_nearest_tier(
         .iter()
         .map(|&(mid, fid)| candidate_tier(gamma, family, mid, fid))
         .collect();
-    // If a candidate has no recorded tier, keep the original tie.
     let Some(nearest) = tiers
         .iter()
         .copied()
@@ -276,7 +275,6 @@ pub(crate) fn collapse_backend_variants<'c>(
     if candidates.len() <= 1 {
         return Cow::Borrowed(candidates);
     }
-    // An overload family with one backend never needs grouping.
     let first_backend = gamma.workspace.module(candidates[0].0).functions[candidates[0].1].backend;
     if candidates
         .iter()
@@ -284,7 +282,6 @@ pub(crate) fn collapse_backend_variants<'c>(
     {
         return Cow::Borrowed(candidates);
     }
-    // Preserve input order for determinism; group indices by variant key.
     let mut groups: SmallVec<[((Ustr, Ustr), SmallVec<[usize; 2]>); 4]> = SmallVec::new();
     for (i, &(mid, fid)) in candidates.iter().enumerate() {
         let key = gamma.workspace.backend_variant_key(mid, fid);
@@ -1064,13 +1061,11 @@ pub(crate) fn check_args(
     Ok(())
 }
 
-/// How a callee parameter slot is filled after `..spread` expansion.
 #[derive(Clone, Copy)]
 pub(crate) enum SlotFill {
-    /// A written positional or named argument.
     Direct(Idx<Expr>),
-    /// A field pulled from a spread operand: (operand expr, field type). The
-    /// param slot index encodes which field; skull-mir re-derives the name.
+    /// The param slot index encodes which spread field; skull-mir re-derives
+    /// its name.
     SpreadField(Idx<Expr>, TyId),
 }
 
@@ -1326,7 +1321,6 @@ pub(crate) fn resolve_named_call(
     let res = resolve_named_call_inner(gamma, c, call_expr, recv_override);
 
     let Err(e) = res else { return res };
-    // A failed operand already has a diagnostic. Suppress the cascading call error.
     let operands = recv_override
         .into_iter()
         .chain(
@@ -1715,7 +1709,6 @@ fn resolve_named_call_inner(
     )
 }
 
-/// Commit a selected overload, including when a deferred constraint retries.
 pub(crate) fn commit_selected_call(
     c: BodyCtx,
     gamma: &mut Gamma,

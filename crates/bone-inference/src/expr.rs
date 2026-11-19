@@ -176,7 +176,6 @@ pub(crate) fn infer_statement(
                         let vt = resolve(gamma, value_ty, span);
                         let peeled = resolve(gamma, scrut_ty, span);
                         let nullable = !types_equal(gamma, vt, peeled);
-                        // Suppress the cascading error for a poisoned scrutinee.
                         let poisoned = matches!(gamma.get(vt), TypeExpr::Builtin(BuiltinTy::Error));
                         if !nullable
                             && !poisoned
@@ -289,7 +288,6 @@ pub(crate) fn infer_statement(
                         }
                     }
                     None => {
-                        // An unannotated nested function gets its return type from its tail.
                         gamma.declared_ret_ty = None;
                         let body_ty = infer_expr(c, gamma, body)?;
                         let body_ty = resolve(gamma, body_ty, span);
@@ -366,7 +364,6 @@ pub(crate) fn infer_statement(
         }
     };
 
-    // Retry deferred lambda constraints at statement boundaries.
     drain_ready_pendings(gamma)?;
 
     Ok(())
@@ -1590,8 +1587,8 @@ pub(crate) fn infer_expr_used(
     Ok(ty)
 }
 
-/// Infers and resolves both operands of a binary operator. An integer literal
-/// facing a `uint` operand is checked as `uint` rather than left an `int`.
+/// An integer literal facing a `uint` operand is checked as `uint` rather than
+/// left an `int`.
 fn infer_if_arms(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -1818,7 +1815,6 @@ pub(crate) fn validate_frame_ref_return(
     );
 }
 
-/// Check whether an operand could be numeric after generic instantiation.
 fn may_be_numeric(gamma: &mut Gamma, ty: TyId, span: Span) -> bool {
     let mut ty = peel_nullable(gamma, ty, span);
     // A newtype cycle is rejected at its own declaration; bound the walk.
@@ -1884,7 +1880,6 @@ pub(crate) fn infer_range_bounds(
     }
 }
 
-/// Reject redundant optional operations only when non-nullability is known.
 pub(crate) fn redundant_optional_on(gamma: &mut Gamma, ty: TyId, span: Span) -> bool {
     let r = resolve(gamma, ty, span);
     !matches!(
@@ -1935,7 +1930,6 @@ fn infer_block(
     }
 
     let result = match tail {
-        // A checked tail uses the declared ABI for any returned function value.
         Some(tail) => match expected {
             Some(exp) => match check_expr(c, gamma, *tail, exp, c.body.expr_spans[*tail]) {
                 Ok(()) => exp,
@@ -1961,7 +1955,6 @@ fn infer_block(
         }
     };
 
-    // Unwind each guard's refinement in reverse to restore the original binding type.
     for (b, old, epoch) in g_saved.into_iter().rev() {
         gamma.restore_local_narrow(b, old, epoch);
     }
@@ -2157,7 +2150,6 @@ pub(crate) fn check_expr(
 
     let aty = infer_expr(c, gamma, e)?;
 
-    // If a float from division cannot fit int, point at the division.
     if let Err(coerce_err) = coerce(gamma, aty, expected, span) {
         let exp_r = resolve(gamma, expected, span);
         let aty_r = resolve(gamma, aty, span);
@@ -2193,8 +2185,6 @@ pub(crate) fn check_expr(
     Ok(())
 }
 
-// A cast classifies an inferred operand without binding its variables.
-// A type ascription supplies an expected type.
 pub(crate) fn check_cast(
     gamma: &mut Gamma,
     from: TyId,
@@ -2238,7 +2228,6 @@ pub(crate) fn check_cast(
         return Ok(());
     }
 
-    // Roll back the bindings from probing assignment compatibility.
     let snap = gamma.out.checkpoint();
     let compatible = gamma.trial(|g| coerce(g, from_r, to_r, span).is_ok());
     let erased = gamma.out.any_erasures_since(snap);
@@ -2400,7 +2389,6 @@ fn float_literal_value(c: BodyCtx, e: Idx<Expr>) -> Option<f64> {
     }
 }
 
-// Trace a division through arithmetic and binding initializers for diagnostics.
 pub(crate) fn find_float_div_span(c: BodyCtx, e: Idx<Expr>) -> Option<Span> {
     find_float_div_span_rec(c, e, 0)
 }

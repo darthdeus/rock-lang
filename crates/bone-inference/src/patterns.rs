@@ -336,7 +336,6 @@ pub(crate) fn pattern_binds(c: BodyCtx, pat: Idx<Pattern>) -> bool {
     !c.body.pattern_bindings(pat).is_empty()
 }
 
-/// Bind every leaf after the scrutinee has already failed inference.
 pub(crate) fn bind_pattern_leaves_to(
     c: BodyCtx,
     gamma: &mut Gamma,

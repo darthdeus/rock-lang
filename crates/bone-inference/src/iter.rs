@@ -1,6 +1,5 @@
 use super::*;
 
-/// The native buffers whose elements read as `int`.
 const INT_BUFFERS: &[&str] = &[
     "NativeBufferU8",
     "NativeBufferI8",
@@ -101,7 +100,6 @@ pub fn iterable_elem(gamma: &mut Gamma, ty: TyId, span: Span) -> Option<TyId> {
     })
 }
 
-/// Speculatively find the element yielded at an `Iterator<E>`-bounded parameter.
 pub fn iterator_elem(gamma: &mut Gamma, ty: TyId, span: Span) -> Option<TyId> {
     gamma.trial(|g| {
         let ty = resolve(g, ty, span);
@@ -113,7 +111,6 @@ pub fn iterator_elem(gamma: &mut Gamma, ty: TyId, span: Span) -> Option<TyId> {
     })
 }
 
-/// Probe `next` on `ty` or its plain `iter` result; `next_first` controls priority.
 fn protocol_next_ret(gamma: &mut Gamma, ty: TyId, next_first: bool, span: Span) -> Option<TyId> {
     // An unresolved or failed type would bind to whatever `next` takes.
     if matches!(
@@ -146,7 +143,6 @@ fn protocol_next_ret(gamma: &mut Gamma, ty: TyId, next_first: bool, span: Span) 
         .map(|(_, ret, _)| ret)
 }
 
-/// Whether `enumerate(coll)` uses builtin lowering instead of `EnumIter`.
 pub(crate) fn builtin_enumerable(gamma: &Gamma, ty: TyId) -> bool {
     match *gamma.get(ty) {
         TypeExpr::App {
@@ -214,7 +210,6 @@ pub(crate) fn infer_for_elem(
 
             match for_elem_ty(gamma, iter_ty, span) {
                 Ok(elem) => Ok(elem),
-                // User iterator witnesses drive the for-loop lowering.
                 Err(_not_builtin) => resolve_for_iter_protocol(c, gamma, iter, iter_ty, span),
             }
         }
@@ -527,7 +522,6 @@ pub(crate) fn implicit_iter_target(
     }
 }
 
-/// Generic variables whose parameters admit implicit iterable coercion.
 pub(crate) fn bounded_generic_vars(gamma: &Gamma, f: &Function) -> SmallVec<[VarId; 2]> {
     f.generics
         .iter()
@@ -548,7 +542,6 @@ pub(crate) fn declared_is_bounded_generic(
     matches!(*gamma.get(declared), TypeExpr::Generic(v, _) if bounded.contains(&v))
 }
 
-/// Add one point to fits that require implicit iteration.
 pub(crate) fn fit_cost_with_iter_coercion(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -638,7 +631,6 @@ pub(crate) fn resolve_unary_by_recv(
     Ok(((mid, fid), ret_res, subs))
 }
 
-/// Extract the yielded value or tuple from `next`'s bool-prefixed return.
 pub(crate) fn for_iter_next_elem(
     gamma: &mut Gamma,
     next_ret: TyId,

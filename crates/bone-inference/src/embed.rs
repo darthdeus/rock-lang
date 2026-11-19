@@ -8,7 +8,6 @@
 
 use super::*;
 
-/// Expressions in contexts that preserve embedded leaves.
 fn legal_positions(c: BodyCtx, gamma: &Gamma) -> FxHashSet<Idx<Expr>> {
     let mut ok: FxHashSet<Idx<Expr>> = FxHashSet::default();
 
@@ -59,8 +58,6 @@ fn legal_positions(c: BodyCtx, gamma: &Gamma) -> FxHashSet<Idx<Expr>> {
     ok
 }
 
-/// Whether a direct call passes arguments as scalar leaves.
-///
 /// Rock-bodied calls use the scalar ABI. Foreign, inline, `@nomangle`, and
 /// function-value calls materialize the aggregate.
 fn scalar_abi_callee(gamma: &Gamma, call: Idx<Expr>, callee: Callee) -> bool {
@@ -77,7 +74,6 @@ fn scalar_abi_callee(gamma: &Gamma, call: Idx<Expr>, callee: Callee) -> bool {
     }
 }
 
-/// Whether `<base>.<field>` is an embedded field.
 pub(crate) fn embed_field_of(gamma: &mut Gamma, base_ty: TyId, field: Ustr, span: Span) -> bool {
     // A nullable owner still owns the field; access validity is checked elsewhere.
     let ty = peel_nullable(gamma, base_ty, span);
@@ -98,7 +94,6 @@ pub(crate) fn embed_field_of(gamma: &mut Gamma, base_ty: TyId, field: Ustr, span
 }
 
 pub(crate) fn verify_embed_projection(c: BodyCtx, gamma: &mut Gamma) {
-    // Skip the arena scan when the workspace has no embedded fields.
     if !gamma.workspace.has_embed_fields {
         return;
     }

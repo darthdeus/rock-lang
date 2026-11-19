@@ -158,7 +158,6 @@ pub(crate) fn make_fn_ty(gamma: &mut Gamma, param_tys: &[TyId], ret: TyId, span:
     TyId::Local(idx)
 }
 
-/// Result expressions MIR lowers through for a return position.
 fn result_leaves(c: BodyCtx, e: Idx<Expr>, out: &mut Vec<Idx<Expr>>) {
     match c.body.expr_arena[e] {
         Expr::Block { tail, .. } => {

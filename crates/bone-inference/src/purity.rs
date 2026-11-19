@@ -1,7 +1,6 @@
 use super::*;
 use bone_core::hir_walk::HirChild;
 
-/// Whether control flow appears in a block, branch, match, or loop body.
 pub(crate) fn expr_contains_cf(c: BodyCtx, e: Idx<Expr>) -> bool {
     match c.body.expr_arena[e] {
         Expr::Return(_) | Expr::Break | Expr::Continue => true,
@@ -109,7 +108,6 @@ pub(crate) fn reject_captures(
     visit(c, HirChild::Expr(root), root_span, site, static_init)
 }
 
-/// Report impure constructs in evaluation order, excluding nested function bodies.
 pub(crate) fn verify_pure(
     c: BodyCtx,
     ws: &Workspace,
