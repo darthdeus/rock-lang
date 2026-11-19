@@ -165,7 +165,11 @@ pub(crate) fn run_stone_test(root: &Path) -> Result<()> {
         write_message(&event);
     };
 
-    let initial_files = collect_rock_files(&root)?;
+    let initial_files: Vec<PathBuf> = rock_host::project::find_rock_files_at_path(&root)?
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|path| !path.starts_with(&output_path))
+        .collect();
     if !initial_files.is_empty() {
         compile(initial_files);
     }
@@ -190,38 +194,4 @@ fn write_message(value: &Value) {
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "{value}");
     let _ = out.flush();
-}
-
-/// Recursive scan for `.rock` files under `root`, ignoring our own output
-/// directory. Used to detect whether an initial seed exists.
-fn collect_rock_files(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    let output_marker = root.join(".stone-test-out");
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let entries = std::fs::read_dir(&dir).map_err(|error| {
-            anyhow::anyhow!("read initial source directory `{}`: {error}", dir.display())
-        })?;
-        for entry in entries {
-            let entry = entry.map_err(|error| {
-                anyhow::anyhow!(
-                    "read entry in initial source directory `{}`: {error}",
-                    dir.display()
-                )
-            })?;
-            let path = entry.path();
-            if path == output_marker {
-                continue;
-            }
-            let meta = entry.metadata().map_err(|error| {
-                anyhow::anyhow!("inspect initial source path `{}`: {error}", path.display())
-            })?;
-            if meta.is_dir() {
-                stack.push(path);
-            } else if path.extension().and_then(|e| e.to_str()) == Some("rock") {
-                out.push(path);
-            }
-        }
-    }
-    Ok(out)
 }
