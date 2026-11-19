@@ -32,14 +32,14 @@ pub(super) fn artifact_comptime_reads(
         reads.extend(unit_reads.globals.values().flatten().cloned());
         reads.extend(unit_reads.decorators.iter().cloned());
     } else {
-        for (key, old_reads) in &cache.unit_comptime_reads.globals {
+        for (key, old_reads) in &cache.edit.unit_comptime_reads.globals {
             if !unit_reads.globals.contains_key(key) {
                 reads.extend(old_reads.iter().cloned());
             }
         }
         reads.extend(unit_reads.globals.values().flatten().cloned());
         if unit_reads.decorators.is_empty() {
-            reads.extend(cache.unit_comptime_reads.decorators.iter().cloned());
+            reads.extend(cache.edit.unit_comptime_reads.decorators.iter().cloned());
         } else {
             reads.extend(unit_reads.decorators.iter().cloned());
         }
@@ -1307,6 +1307,7 @@ pub(super) fn overlay_code_artifact(
                 let mut entry = entry.clone();
                 if entry.body_name.is_none() {
                     entry = cache
+                        .edit
                         .code_artifact
                         .entries
                         .get(&entry.identity)
@@ -1321,7 +1322,7 @@ pub(super) fn overlay_code_artifact(
         }
         let fref = body.func;
         let identity = skull_mir::code_identity::CodeIdentity::Named(Instance::base(fref));
-        let Some(entry) = cache.code_artifact.entries.get(&identity) else {
+        let Some(entry) = cache.edit.code_artifact.entries.get(&identity) else {
             continue;
         };
         let mut entry = entry.clone();

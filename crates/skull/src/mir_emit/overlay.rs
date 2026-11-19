@@ -103,14 +103,14 @@ fn assemble_overlay(
     if initialize_code_slots {
         out.push_str(skull_codegen_lua::FN_MT_PRELUDE);
     }
-    let mut candidate_code_artifact = cache.code_artifact.clone();
+    let mut candidate_code_artifact = cache.edit.code_artifact.clone();
     let d_clone_artifact = t_clone_artifact.elapsed();
     out.push_str("do\nlocal __rock_state_cell = __rock_globals\n");
     let mut unit_reads = UnitComptimeReads::default();
     let mut overwritten_globals = BTreeSet::new();
 
     let t_definitions = Instant::now();
-    let mut order: Vec<Instance> = cache.changed_since_full.iter().cloned().collect();
+    let mut order: Vec<Instance> = cache.edit.changed_since_full.iter().cloned().collect();
     order.sort_by_key(|b| overlay_order_key(&cache.scx, b));
     order.dedup();
     let value_ctors_at = out.len();
@@ -141,7 +141,7 @@ fn assemble_overlay(
 
     let d_definitions = t_definitions.elapsed();
     let t_code_slot_stage = Instant::now();
-    let has_code_slots = cache.code_artifact.has_escaping();
+    let has_code_slots = cache.edit.code_artifact.has_escaping();
     let code_slot_stage = code_slot_registration_lua_entries(
         ws,
         &cache.scx,
@@ -175,7 +175,7 @@ fn assemble_overlay(
     }
     // A generic's static can live in several callers' chunks, so a cell is gone
     // only when no current chunk declares it.
-    if !cache.static_cells_since_full.is_empty() {
+    if !cache.edit.static_cells_since_full.is_empty() {
         let current: FxHashSet<Ustr> = cache
             .chunks
             .values()
@@ -183,6 +183,7 @@ fn assemble_overlay(
             .flat_map(|chunk| chunk.statics.iter().map(|sc| sc.cell))
             .collect();
         let mut dropped: Vec<&StaticBaseline> = cache
+            .edit
             .static_cells_since_full
             .iter()
             .filter(|(cell, _)| !current.contains(*cell))
@@ -203,10 +204,11 @@ fn assemble_overlay(
     // Re-emits the changed consts and every const whose initializer transitively
     // reads one; a dependent can embed an upstream literal. Overloads merge under
     // one name, which can only add a const. Mutable globals are never re-emitted.
-    if !cache.changed_consts_since_full.is_empty() {
+    if !cache.edit.changed_consts_since_full.is_empty() {
         let deps = skull_mir::reach::symbol_references(ws);
 
         let changed_names: FxHashSet<Ustr> = cache
+            .edit
             .changed_consts_since_full
             .iter()
             .map(|&(mid, gid)| ws.module(mid).globals[gid].name)
@@ -320,12 +322,17 @@ fn assemble_overlay(
     ));
     let d_publication = t_publication.elapsed();
     let t_metadata = Instant::now();
-    let definition_plan = cache.definition_plan.as_deref().cloned().ok_or_else(|| {
-        CompilerError::new_no_location(
-            "Artifact fingerprint generation requires a complete DefinitionPlan".to_string(),
-        )
-    })?;
-    let global_layout = cache.global_layout.clone().ok_or_else(|| {
+    let definition_plan = cache
+        .edit
+        .definition_plan
+        .as_deref()
+        .cloned()
+        .ok_or_else(|| {
+            CompilerError::new_no_location(
+                "Artifact fingerprint generation requires a complete DefinitionPlan".to_string(),
+            )
+        })?;
+    let global_layout = cache.edit.global_layout.clone().ok_or_else(|| {
         CompilerError::new_no_location(
             "Artifact fingerprint generation requires a global layout".to_string(),
         )
@@ -333,7 +340,7 @@ fn assemble_overlay(
     let artifact_reads = artifact_comptime_reads(cache, &[], &unit_reads, false);
     let d_metadata = t_metadata.elapsed();
     let t_fingerprint = Instant::now();
-    let mut fingerprint_code_rows = cache.fingerprint_code_rows.clone().ok_or_else(|| {
+    let mut fingerprint_code_rows = cache.edit.fingerprint_code_rows.clone().ok_or_else(|| {
         CompilerError::new_no_location(
             "overlay requires a complete code fingerprint inventory".to_string(),
         )
@@ -453,25 +460,30 @@ pub fn emit_overlay_with_span_edits(
     if shader_changed {
         cache.refresh_shader_registrations(ws)?;
     }
-    cache.changed_since_full.extend(affected);
+    cache.edit.changed_since_full.extend(affected);
     for &(mid, owner) in reinferred {
         if let BodyOwner::Global(gid) = owner {
             if ws.module(mid).globals[gid].is_const {
-                cache.changed_consts_since_full.insert((mid, gid));
+                cache.edit.changed_consts_since_full.insert((mid, gid));
             }
         }
     }
     let t_replacements = Instant::now();
     let replacements = cache
+        .edit
         .changed_since_full
         .iter()
         .filter_map(|body| cache.chunks.get(body).and_then(|chunk| chunk.as_ref().ok()))
         .flat_map(|chunk| chunk.code_artifact.entries());
-    let next_code_artifact = cache.code_artifact.with_replacements(replacements);
+    let next_code_artifact = cache.edit.code_artifact.with_replacements(replacements);
     let initialize_code_slots =
-        !cache.code_artifact.has_escaping() && next_code_artifact.has_escaping();
+        !cache.edit.code_artifact.has_escaping() && next_code_artifact.has_escaping();
     let d_replacements = t_replacements.elapsed();
-    if !cache.code_artifact.compatible_overlay(&next_code_artifact) {
+    if !cache
+        .edit
+        .code_artifact
+        .compatible_overlay(&next_code_artifact)
+    {
         return Err(CompilerError::new_no_location(
             "Rock CodeRef compatibility requires a safe restart".to_string(),
         ));
@@ -485,20 +497,21 @@ pub fn emit_overlay_with_span_edits(
     if !body_only {
         let layout = skull_mir::global_storage::global_layout_id(ws, &cache.scx)
             .map_err(CompilerError::new_no_location)?;
-        if cache.global_layout.as_deref() != Some(layout.as_str()) {
+        if cache.edit.global_layout.as_deref() != Some(layout.as_str()) {
             return Err(CompilerError::new_no_location(
                 "Rock global layout changed; restart required".to_string(),
             ));
         }
     }
     let d_layout = t_layout.elapsed();
-    cache.code_artifact = std::sync::Arc::new(next_code_artifact);
+    cache.edit.code_artifact = std::sync::Arc::new(next_code_artifact);
     let t_stale = Instant::now();
     {
         let mut file_hashes: FxHashMap<Ustr, Option<u64>> = FxHashMap::default();
         // A global initializer's comptime input can go stale with no reinferred body.
         // A stale mutable global keeps its live value, as for a source edit.
         let stale_consts: Vec<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)> = cache
+            .edit
             .unit_comptime_reads
             .globals
             .iter()
@@ -508,7 +521,7 @@ pub fn emit_overlay_with_span_edits(
             })
             .map(|(key, _)| *key)
             .collect();
-        cache.changed_consts_since_full.extend(stale_consts);
+        cache.edit.changed_consts_since_full.extend(stale_consts);
     }
     let d_stale = t_stale.elapsed();
     let t_relower = t2.elapsed();
@@ -520,16 +533,13 @@ pub fn emit_overlay_with_span_edits(
         initialize_code_slots,
         fingerprint_identities,
     )?;
-    cache.fingerprint_code_rows = Some(fingerprint_code_rows);
-    cache.code_artifact = emit.code_artifact.clone();
-    cache.lifecycle_plan = Some(std::sync::Arc::new(emit.lifecycle_plan.clone()));
-    cache.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
-    cache.artifact_fingerprint = emit.artifact_fingerprint.clone();
+    cache.edit.fingerprint_code_rows = Some(fingerprint_code_rows);
+    cache.edit.record_artifact(&emit);
     for (key, reads) in overlay_unit_reads.globals {
         if reads.is_empty() {
-            cache.unit_comptime_reads.globals.remove(&key);
+            cache.edit.unit_comptime_reads.globals.remove(&key);
         } else {
-            cache.unit_comptime_reads.globals.insert(key, reads);
+            cache.edit.unit_comptime_reads.globals.insert(key, reads);
         }
     }
     if concrete_stats_requested() {
@@ -553,27 +563,27 @@ pub fn emit_overlay_with_span_edits(
         ("  stale comptime scan", d_stale),
         (
             "  graph update",
-            Duration::from_nanos(cache.repair_stats.graph_update_ns),
+            Duration::from_nanos(cache.edit.repair_stats.graph_update_ns),
         ),
         (
             "  concrete update",
-            Duration::from_nanos(cache.repair_stats.concrete_update_ns),
+            Duration::from_nanos(cache.edit.repair_stats.concrete_update_ns),
         ),
         (
             "  ArtifactView update",
-            Duration::from_nanos(cache.repair_stats.artifact_update_ns),
+            Duration::from_nanos(cache.edit.repair_stats.artifact_update_ns),
         ),
         (
             "  candidate update",
-            Duration::from_nanos(cache.repair_stats.candidate_update_ns),
+            Duration::from_nanos(cache.edit.repair_stats.candidate_update_ns),
         ),
         (
             "  affected selection",
-            Duration::from_nanos(cache.repair_stats.affected_selection_ns),
+            Duration::from_nanos(cache.edit.repair_stats.affected_selection_ns),
         ),
         (
             "  relowering",
-            Duration::from_nanos(cache.repair_stats.relowering_ns),
+            Duration::from_nanos(cache.edit.repair_stats.relowering_ns),
         ),
         ("assemble_overlay (+build_deco_map)", t_asm),
     ]);

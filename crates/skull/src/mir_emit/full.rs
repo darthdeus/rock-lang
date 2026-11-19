@@ -53,13 +53,6 @@ impl SetupPhases {
     }
 }
 
-struct FullRoots {
-    interface_roots: Vec<FuncRef>,
-    sim_roots: Vec<FuncRef>,
-    shader_roots: Vec<FuncRef>,
-    emission_roots: Vec<FuncRef>,
-}
-
 fn reject_workspace(ws: &Workspace, user_mid: ModuleId) -> Result<(), CompilerError> {
     if let Some(span) = skull_mir::lower::string_char_literal_out_of_range(ws, user_mid) {
         return Err(CompilerError::new_with_label(
@@ -106,7 +99,7 @@ fn collect_full_roots(
     (
         skull_mir::lower::ShaderCollection,
         Vec<crate::shader_artifact::ShaderProgram>,
-        FullRoots,
+        RootSet,
     ),
     CompilerError,
 > {
@@ -130,7 +123,7 @@ fn collect_full_roots(
     Ok((
         shader_collection,
         shader_programs,
-        FullRoots {
+        RootSet {
             interface_roots,
             sim_roots,
             shader_roots,
@@ -178,7 +171,7 @@ fn build_roots(
 /// until no new sim is reached.
 fn expand_selected_sim_roots(
     ws: &Workspace,
-    roots: &mut FullRoots,
+    roots: &mut RootSet,
     graph: &mut crate::instance_graph::InstanceGraph,
 ) -> Result<FxHashSet<Ustr>, CompilerError> {
     let sims = sim_refs_by_wire(ws);
@@ -599,40 +592,6 @@ fn index_dependents(
     (dependents, dependency_edges)
 }
 
-impl SkullEmitCache {
-    fn retain_full_build(
-        &mut self,
-        ws: &Workspace,
-        emit: &mut MirEmit,
-        emitted: FxHashSet<Instance>,
-        unit_reads: UnitComptimeReads,
-        built_specs: Vec<(Instance, Chunk)>,
-        mut dependency_edges: usize,
-    ) -> Result<(), CompilerError> {
-        self.emitted = emitted;
-        self.code_artifact = emit.code_artifact.clone();
-        self.lifecycle_plan = Some(std::sync::Arc::new(emit.lifecycle_plan.clone()));
-        self.global_layout = Some(emit.global_layout.clone());
-        self.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
-        self.artifact_fingerprint = emit.artifact_fingerprint.clone();
-        self.fingerprint_code_rows = Some(
-            crate::artifact_fingerprint::CodeRows::collect(
-                ws,
-                self.scx.interner(),
-                &emit.code_artifact,
-            )
-            .map_err(|error| CompilerError::new_no_location(error.to_string()))?,
-        );
-        self.unit_comptime_reads = unit_reads;
-        dependency_edges += self.absorb_spec_chunks(built_specs);
-        self.refresh_effect_snapshot(ws);
-        self.retain_static_cells(ws)?;
-        emit.compile_counts.chunks = self.chunks.len();
-        emit.compile_counts.dependency_edges = Some(dependency_edges);
-        Ok(())
-    }
-}
-
 pub(super) fn emit_full_build(
     ws: &Workspace,
     user_mid: ModuleId,
@@ -788,12 +747,6 @@ pub(super) fn emit_full_build(
         shader_lane.finished - shader_lane.started,
     ));
     let (dependents, dependency_edges) = index_dependents(&chunks, build.lifetime());
-    let FullRoots {
-        interface_roots,
-        sim_roots,
-        shader_roots,
-        emission_roots,
-    } = roots;
     let mut cache = SkullEmitCache {
         chunks,
         value_ctors: Vec::new(),
@@ -801,36 +754,19 @@ pub(super) fn emit_full_build(
         concrete,
         graph,
         lua_view,
-        changed_since_full: FxHashSet::default(),
         cg,
         scx,
         inline_cache: skull_transform::InlineCache::with_candidate_table(inline_candidate_table),
         dependents,
-        effect_snapshot: FxHashMap::default(),
-        changed_consts_since_full: FxHashSet::default(),
-        static_cells_since_full: FxHashMap::default(),
-        roots: RootCache {
-            interface_roots,
-            sim_roots,
-            shader_roots,
-            roots: emission_roots,
-        },
+        roots,
         shader_registrations,
         shader_view,
-        emitted: FxHashSet::default(),
-        code_artifact: std::sync::Arc::new(skull_mir::code_identity::CodeArtifact::default()),
-        lifecycle_plan: None,
-        global_layout: None,
-        definition_plan: None,
-        artifact_fingerprint: None,
-        fingerprint_code_rows: None,
-        unit_comptime_reads: UnitComptimeReads::default(),
         renderer_target,
         publish_fingerprint: fingerprint,
         global_accessors,
         build_kind: build.kind(),
         selected_sim_functions,
-        repair_stats: IncrementalRepairStats::default(),
+        edit: BodyEditState::default(),
         body_edit_rollback: None,
     };
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
@@ -859,14 +795,10 @@ pub(super) fn emit_full_build(
     };
     emit.graph_census = graph_census;
     if build.lifetime() == CacheLifetime::Retained {
-        cache.retain_full_build(
-            ws,
-            &mut emit,
-            emitted,
-            unit_reads,
-            built_specs,
-            dependency_edges,
-        )?;
+        let spec_edges = cache.retain_assembly(ws, &emit, emitted, unit_reads, built_specs)?;
+        cache.retain_static_cells(ws)?;
+        emit.compile_counts.chunks = cache.chunks.len();
+        emit.compile_counts.dependency_edges = Some(dependency_edges + spec_edges);
     }
     Ok((emit, cache))
 }

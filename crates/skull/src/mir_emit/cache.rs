@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) type EffectSnapshot = FxHashMap<FuncRef, bone_core::effects::MemEffect>;
+type EffectSnapshot = FxHashMap<FuncRef, bone_core::effects::MemEffect>;
 
 fn current_effect_snapshot(
     ws: &Workspace,
@@ -41,7 +41,6 @@ pub struct SkullEmitCache {
     pub(super) concrete: crate::concrete_body::ConcreteBodies,
     pub(super) graph: crate::instance_graph::InstanceGraph,
     pub(super) lua_view: crate::artifact::ArtifactView,
-    pub(super) changed_since_full: FxHashSet<Instance>,
     // Its overload set derives from signatures, so it holds across body edits;
     // an interface edit takes `emit_full`, which builds a fresh cache.
     pub(super) cg: CodegenCtx,
@@ -52,33 +51,15 @@ pub struct SkullEmitCache {
     // Codegen reverse dependencies: a chunk's text embeds or specializes another
     // declaration's body. Not derivable from the graph's call-edge `preds`.
     pub(super) dependents: FxHashMap<FuncRef, FxHashSet<Instance>>,
-    // Bounds elimination depends on transitive callee effects, residual calls included.
-    pub(super) effect_snapshot: EffectSnapshot,
-    // The overlay re-runs these inits unguarded. Mutable globals never appear:
-    // their guard keeps the live value across a reload.
-    pub(super) changed_consts_since_full: FxHashSet<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)>,
-    // Removed cells stay until the next full build, so a later overlay can retry
-    // a drop after a failed or skipped load.
-    pub(super) static_cells_since_full: FxHashMap<Ustr, StaticBaseline>,
-    pub(super) roots: RootCache,
+    pub(super) roots: RootSet,
     pub(super) shader_registrations: ShaderRegistrations,
     pub(super) shader_view: crate::shader_artifact::ShaderArtifactView,
-    // Keyed by emitted body, since a specialization is its own definition.
-    pub(super) emitted: FxHashSet<Instance>,
-    pub(super) code_artifact: std::sync::Arc<skull_mir::code_identity::CodeArtifact>,
-    pub(super) lifecycle_plan: Option<std::sync::Arc<skull_mir::lifecycle::LifecyclePlan>>,
-    pub(super) global_layout: Option<String>,
-    // Kept by body overlays: definition structure is a full-reload boundary.
-    pub(super) definition_plan: Option<std::sync::Arc<skull_mir::definition::DefinitionPlan>>,
-    pub(super) artifact_fingerprint: Option<String>,
-    pub(super) fingerprint_code_rows: Option<crate::artifact_fingerprint::CodeRows>,
-    pub(super) unit_comptime_reads: UnitComptimeReads,
     pub(super) renderer_target: RendererTarget,
     pub(super) publish_fingerprint: bool,
     pub(super) global_accessors: bool,
     pub(super) build_kind: BuildKind,
     pub(super) selected_sim_functions: Option<FxHashSet<Ustr>>,
-    pub(super) repair_stats: IncrementalRepairStats,
+    pub(super) edit: BodyEditState,
     pub(super) body_edit_rollback: Option<BodyEditRollback>,
 }
 
@@ -98,30 +79,49 @@ pub(super) enum CacheLifetime {
     OneShot,
 }
 
-#[derive(Clone, Default)]
-pub(super) struct RootCache {
+pub(super) struct RootSet {
     pub(super) interface_roots: Vec<FuncRef>,
     pub(super) sim_roots: Vec<FuncRef>,
     pub(super) shader_roots: Vec<FuncRef>,
-    pub(super) roots: Vec<FuncRef>,
+    pub(super) emission_roots: Vec<FuncRef>,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct BodyEditState {
+    pub(super) changed_since_full: FxHashSet<Instance>,
+    // The overlay re-runs these inits unguarded. Mutable globals never appear:
+    // their guard keeps the live value across a reload.
+    pub(super) changed_consts_since_full: FxHashSet<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)>,
+    // Removed cells stay until the next full build, so a later overlay can retry
+    // a drop after a failed or skipped load.
+    pub(super) static_cells_since_full: FxHashMap<Ustr, StaticBaseline>,
+    // Bounds elimination depends on transitive callee effects, residual calls included.
+    effect_snapshot: EffectSnapshot,
+    // Keyed by emitted body, since a specialization is its own definition.
+    emitted: FxHashSet<Instance>,
+    pub(super) code_artifact: std::sync::Arc<skull_mir::code_identity::CodeArtifact>,
+    lifecycle_plan: Option<std::sync::Arc<skull_mir::lifecycle::LifecyclePlan>>,
+    pub(super) global_layout: Option<String>,
+    // Kept by body overlays: definition structure is a full-reload boundary.
+    pub(super) definition_plan: Option<std::sync::Arc<skull_mir::definition::DefinitionPlan>>,
+    artifact_fingerprint: Option<String>,
+    pub(super) fingerprint_code_rows: Option<crate::artifact_fingerprint::CodeRows>,
+    pub(super) unit_comptime_reads: UnitComptimeReads,
+    pub(super) repair_stats: IncrementalRepairStats,
+}
+
+impl BodyEditState {
+    pub(super) fn record_artifact(&mut self, emit: &MirEmit) {
+        self.code_artifact = emit.code_artifact.clone();
+        self.lifecycle_plan = Some(std::sync::Arc::new(emit.lifecycle_plan.clone()));
+        self.artifact_fingerprint = emit.artifact_fingerprint.clone();
+    }
 }
 
 pub(super) struct BodyEditRollback {
     reinferred: Vec<(ModuleId, BodyOwner)>,
     edits: Vec<crate::instance_graph::TextEditDelta>,
-    changed_since_full: FxHashSet<Instance>,
-    changed_consts_since_full: FxHashSet<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)>,
-    effect_snapshot: EffectSnapshot,
-    static_cells_since_full: FxHashMap<Ustr, StaticBaseline>,
-    emitted: FxHashSet<Instance>,
-    code_artifact: std::sync::Arc<skull_mir::code_identity::CodeArtifact>,
-    lifecycle_plan: Option<std::sync::Arc<skull_mir::lifecycle::LifecyclePlan>>,
-    global_layout: Option<String>,
-    definition_plan: Option<std::sync::Arc<skull_mir::definition::DefinitionPlan>>,
-    artifact_fingerprint: Option<String>,
-    fingerprint_code_rows: Option<crate::artifact_fingerprint::CodeRows>,
-    unit_comptime_reads: UnitComptimeReads,
-    repair_stats: IncrementalRepairStats,
+    baseline: BodyEditState,
 }
 
 pub(super) fn comptime_reads_stale(
@@ -159,8 +159,34 @@ impl SkullEmitCache {
             .collect()
     }
 
-    pub(super) fn refresh_effect_snapshot(&mut self, ws: &Workspace) {
-        self.effect_snapshot = current_effect_snapshot(
+    pub(super) fn retain_assembly(
+        &mut self,
+        ws: &Workspace,
+        emit: &MirEmit,
+        emitted: FxHashSet<Instance>,
+        unit_reads: UnitComptimeReads,
+        built_specs: Vec<(Instance, Chunk)>,
+    ) -> Result<usize, CompilerError> {
+        self.edit.emitted = emitted;
+        self.edit.record_artifact(emit);
+        self.edit.global_layout = Some(emit.global_layout.clone());
+        self.edit.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
+        self.edit.fingerprint_code_rows = Some(
+            crate::artifact_fingerprint::CodeRows::collect(
+                ws,
+                self.scx.interner(),
+                &emit.code_artifact,
+            )
+            .map_err(|error| CompilerError::new_no_location(error.to_string()))?,
+        );
+        self.edit.unit_comptime_reads = unit_reads;
+        let dependency_edges = self.absorb_spec_chunks(built_specs);
+        self.refresh_effect_snapshot(ws);
+        Ok(dependency_edges)
+    }
+
+    fn refresh_effect_snapshot(&mut self, ws: &Workspace) {
+        self.edit.effect_snapshot = current_effect_snapshot(
             ws,
             self.dependents
                 .iter()
@@ -181,19 +207,7 @@ impl SkullEmitCache {
         self.body_edit_rollback = Some(BodyEditRollback {
             reinferred: reinferred.to_vec(),
             edits: edits.to_vec(),
-            changed_since_full: self.changed_since_full.clone(),
-            changed_consts_since_full: self.changed_consts_since_full.clone(),
-            effect_snapshot: self.effect_snapshot.clone(),
-            static_cells_since_full: self.static_cells_since_full.clone(),
-            emitted: self.emitted.clone(),
-            code_artifact: self.code_artifact.clone(),
-            lifecycle_plan: self.lifecycle_plan.clone(),
-            global_layout: self.global_layout.clone(),
-            definition_plan: self.definition_plan.clone(),
-            artifact_fingerprint: self.artifact_fingerprint.clone(),
-            fingerprint_code_rows: self.fingerprint_code_rows.clone(),
-            unit_comptime_reads: self.unit_comptime_reads.clone(),
-            repair_stats: self.repair_stats,
+            baseline: self.edit.clone(),
         });
     }
 
@@ -202,26 +216,14 @@ impl SkullEmitCache {
     }
 
     pub fn rollback_body_edit(&mut self, ws: &Workspace) -> Result<(), CompilerError> {
-        let Some(snapshot) = self.body_edit_rollback.take() else {
-            return Ok(());
-        };
-        let BodyEditRollback {
+        let Some(BodyEditRollback {
             reinferred,
             edits,
-            changed_since_full,
-            changed_consts_since_full,
-            effect_snapshot,
-            static_cells_since_full,
-            emitted,
-            code_artifact,
-            lifecycle_plan,
-            global_layout,
-            definition_plan,
-            artifact_fingerprint,
-            fingerprint_code_rows,
-            unit_comptime_reads,
-            repair_stats,
-        } = snapshot;
+            baseline,
+        }) = self.body_edit_rollback.take()
+        else {
+            return Ok(());
+        };
         let inverse_edits: Vec<_> = edits
             .iter()
             .map(|edit| crate::instance_graph::TextEditDelta {
@@ -243,19 +245,7 @@ impl SkullEmitCache {
             }
             Ok(())
         })();
-        self.changed_since_full = changed_since_full;
-        self.changed_consts_since_full = changed_consts_since_full;
-        self.effect_snapshot = effect_snapshot;
-        self.static_cells_since_full = static_cells_since_full;
-        self.emitted = emitted;
-        self.code_artifact = code_artifact;
-        self.lifecycle_plan = lifecycle_plan;
-        self.global_layout = global_layout;
-        self.definition_plan = definition_plan;
-        self.artifact_fingerprint = artifact_fingerprint;
-        self.fingerprint_code_rows = fingerprint_code_rows;
-        self.unit_comptime_reads = unit_comptime_reads;
-        self.repair_stats = repair_stats;
+        self.edit = baseline;
         result
     }
 
@@ -274,11 +264,12 @@ impl SkullEmitCache {
             .filter_map(|chunk| chunk.as_ref().ok())
             .flat_map(|chunk| chunk.comptime_reads.iter());
         let unit_reads = self
+            .edit
             .unit_comptime_reads
             .globals
             .values()
             .flatten()
-            .chain(self.unit_comptime_reads.decorators.iter());
+            .chain(self.edit.unit_comptime_reads.decorators.iter());
         for read in chunk_reads.chain(unit_reads) {
             if let skull_mir::mir::ComptimeInputId::File(path) = read.input {
                 out.insert(path, read.value_hash);
@@ -298,11 +289,11 @@ impl SkullEmitCache {
     }
 
     pub fn global_layout(&self) -> Option<&str> {
-        self.global_layout.as_deref()
+        self.edit.global_layout.as_deref()
     }
 
     pub fn lifecycle_plan(&self) -> Option<&skull_mir::lifecycle::LifecyclePlan> {
-        self.lifecycle_plan.as_deref()
+        self.edit.lifecycle_plan.as_deref()
     }
 
     pub fn body_edit_baseline_lifecycle_plan(
@@ -310,11 +301,11 @@ impl SkullEmitCache {
     ) -> Option<&skull_mir::lifecycle::LifecyclePlan> {
         self.body_edit_rollback
             .as_ref()
-            .and_then(|snapshot| snapshot.lifecycle_plan.as_deref())
+            .and_then(|snapshot| snapshot.baseline.lifecycle_plan.as_deref())
     }
 
     pub fn artifact_fingerprint(&self) -> Option<&str> {
-        self.artifact_fingerprint.as_deref()
+        self.edit.artifact_fingerprint.as_deref()
     }
 
     /// A live shader registry cannot remove a key from the running process,
@@ -508,7 +499,7 @@ impl SkullEmitCache {
         for chunk in self.chunks.values().flatten() {
             for sc in &chunk.statics {
                 if let std::collections::hash_map::Entry::Vacant(entry) =
-                    self.static_cells_since_full.entry(sc.cell)
+                    self.edit.static_cells_since_full.entry(sc.cell)
                 {
                     entry.insert(
                         StaticBaseline::of(ws, self.scx.interner(), sc)
@@ -520,7 +511,7 @@ impl SkullEmitCache {
         Ok(())
     }
 
-    pub(super) fn absorb_spec_chunks(&mut self, built: Vec<(Instance, Chunk)>) -> usize {
+    fn absorb_spec_chunks(&mut self, built: Vec<(Instance, Chunk)>) -> usize {
         let mut dependency_edges = 0;
         for (body, chunk) in built {
             dependency_edges += chunk.deps.len();
@@ -544,8 +535,8 @@ impl SkullEmitCache {
             }
         }
         self.chunks.remove(gone);
-        self.changed_since_full.remove(gone);
-        self.emitted.remove(gone);
+        self.edit.changed_since_full.remove(gone);
+        self.edit.emitted.remove(gone);
     }
 
     fn build_graph_added_chunks(
@@ -571,8 +562,8 @@ impl SkullEmitCache {
                 continue;
             }
             if let Some(Ok(chunk)) = cache.chunks.get(&body) {
-                if !cache.emitted.contains(&body) {
-                    cache.changed_since_full.insert(body.clone());
+                if !cache.edit.emitted.contains(&body) {
+                    cache.edit.changed_since_full.insert(body.clone());
                     fingerprint_identities.extend(
                         chunk
                             .code_artifact
@@ -656,7 +647,7 @@ impl SkullEmitCache {
                     .insert(body.clone());
             }
             cache.chunks.insert(body.clone(), Ok(chunk));
-            cache.changed_since_full.insert(body);
+            cache.edit.changed_since_full.insert(body);
         }
         (errs, fingerprint_identities)
     }
@@ -699,6 +690,7 @@ impl SkullEmitCache {
             // again once an edited inline Lua body spells it.
             for name in cache.cg.refresh_unread_constants(ws) {
                 cache
+                    .edit
                     .changed_consts_since_full
                     .extend(ws.source_modules().flat_map(|m| {
                         m.globals
@@ -709,7 +701,7 @@ impl SkullEmitCache {
             }
         }
         let mut fingerprint_identities = FxHashSet::default();
-        cache.repair_stats = IncrementalRepairStats::default();
+        cache.edit.repair_stats = IncrementalRepairStats::default();
         let mut flipped_frefs: FxHashSet<FuncRef> = FxHashSet::default();
         for (mid, owner) in reinferred {
             for name in cache.scx.update_body(ws, *mid, *owner) {
@@ -730,7 +722,7 @@ impl SkullEmitCache {
         let mut root_added = Vec::new();
         let mut root_removed = Vec::new();
         if shader_roots_changed {
-            let mut current_roots = cache.roots.roots.clone();
+            let mut current_roots = cache.roots.emission_roots.clone();
             for root in previous_shader_roots
                 .iter()
                 .filter(|root| !current_shader_roots.contains(root))
@@ -755,7 +747,7 @@ impl SkullEmitCache {
                 }
             }
             current_roots.sort_by_key(|root| (root.module.index(), root.func.into_raw()));
-            cache.roots.roots = current_roots;
+            cache.roots.emission_roots = current_roots;
         }
         cache.roots.shader_roots = current_shader_roots;
         // The view's update rows must describe the graph before this update.
@@ -767,7 +759,7 @@ impl SkullEmitCache {
             reinferred,
             edits,
         );
-        cache.repair_stats.graph_update_ns = t_graph.elapsed().as_nanos() as u64;
+        cache.edit.repair_stats.graph_update_ns = t_graph.elapsed().as_nanos() as u64;
         let t_concrete = Instant::now();
         let concrete_update = cache.concrete.update_local(
             ws,
@@ -776,7 +768,7 @@ impl SkullEmitCache {
             &update.removed,
             &update.revisited_owners,
         );
-        cache.repair_stats.concrete_update_ns = t_concrete.elapsed().as_nanos() as u64;
+        cache.edit.repair_stats.concrete_update_ns = t_concrete.elapsed().as_nanos() as u64;
 
         // Only the graph knows an instance was stranded; its chunk must go, or
         // reassembly re-emits a definition no call reaches.
@@ -790,7 +782,7 @@ impl SkullEmitCache {
             &cache.graph,
             &crate::artifact::ArtifactRequest::new(
                 crate::target_projection::LUAJIT_DESKTOP,
-                cache.roots.roots.as_slice(),
+                cache.roots.emission_roots.as_slice(),
             )
             .with_scalar_context(&cache.scx),
             &update.revisited,
@@ -799,7 +791,7 @@ impl SkullEmitCache {
             &root_added,
             &root_removed,
         );
-        cache.repair_stats.artifact_update_ns = t_artifact.elapsed().as_nanos() as u64;
+        cache.edit.repair_stats.artifact_update_ns = t_artifact.elapsed().as_nanos() as u64;
 
         let scx = &cache.scx;
         let cg = &cache.cg;
@@ -821,11 +813,12 @@ impl SkullEmitCache {
         // A changed callee memory effect reruns every caller's bounds elimination,
         // even through a residual call whose inline eligibility is unchanged.
         let effect_changed: FxHashSet<FuncRef> =
-            if cache.effect_snapshot.is_empty() && ws.vec_effects.get().is_none() {
+            if cache.edit.effect_snapshot.is_empty() && ws.vec_effects.get().is_none() {
                 FxHashSet::default()
             } else {
                 let effects = ws.effects();
                 cache
+                    .edit
                     .effect_snapshot
                     .iter()
                     .filter_map(|(&fref, previous)| {
@@ -898,7 +891,7 @@ impl SkullEmitCache {
             }
         }
         cache.inline_cache.replace_candidate_table(candidate_table);
-        cache.repair_stats.candidate_update_ns = t_candidate.elapsed().as_nanos() as u64;
+        cache.edit.repair_stats.candidate_update_ns = t_candidate.elapsed().as_nanos() as u64;
         let mut affected: FxHashSet<Instance> = changed
             .iter()
             .copied()
@@ -945,7 +938,7 @@ impl SkullEmitCache {
                 }
             }
         }
-        cache.repair_stats.affected_selection_ns = t_aff.elapsed().as_nanos() as u64;
+        cache.edit.repair_stats.affected_selection_ns = t_aff.elapsed().as_nanos() as u64;
 
         let t_relow = Instant::now();
         for body in &affected {
@@ -998,7 +991,7 @@ impl SkullEmitCache {
             Self::build_graph_added_chunks(cache, ws, &update.added);
         fingerprint_identities.extend(added_fingerprint_identities);
         cache.refresh_effect_snapshot(ws);
-        cache.repair_stats.relowering_ns = t_relow.elapsed().as_nanos() as u64;
+        cache.edit.repair_stats.relowering_ns = t_relow.elapsed().as_nanos() as u64;
         Ok((affected, update, added_errors, fingerprint_identities))
     }
 }
@@ -1035,23 +1028,7 @@ pub fn emit_incremental(
     if concrete_stats_requested() {
         emit.concrete_stats = cache.concrete.snapshot_build_stats();
     }
-    cache.emitted = emitted;
-    cache.code_artifact = emit.code_artifact.clone();
-    cache.lifecycle_plan = Some(std::sync::Arc::new(emit.lifecycle_plan.clone()));
-    cache.global_layout = Some(emit.global_layout.clone());
-    cache.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
-    cache.artifact_fingerprint = emit.artifact_fingerprint.clone();
-    cache.fingerprint_code_rows = Some(
-        crate::artifact_fingerprint::CodeRows::collect(
-            ws,
-            cache.scx.interner(),
-            &emit.code_artifact,
-        )
-        .map_err(|error| CompilerError::new_no_location(error.to_string()))?,
-    );
-    cache.unit_comptime_reads = unit_reads;
-    cache.absorb_spec_chunks(built_specs);
-    cache.refresh_effect_snapshot(ws);
+    cache.retain_assembly(ws, &emit, emitted, unit_reads, built_specs)?;
     emit.compile_counts.chunks = cache.chunks.len();
     let reassemble = t_asm.elapsed();
     emit.phases.push(("incr: re-emit affected bodies", reemit));
