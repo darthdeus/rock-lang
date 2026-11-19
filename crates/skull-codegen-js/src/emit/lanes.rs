@@ -14,7 +14,8 @@ pub(super) fn ret_slot(i: usize) -> String {
     format!("__rock_ret{i}")
 }
 
-/// `var __rock_ret1, ..;` sized for the widest multi-value wire; declared so a partial program without the prelude does not throw a ReferenceError.
+/// `var __rock_ret1, ..;` sized for the widest multi-value wire; declared so a partial program
+/// without the prelude does not throw a ReferenceError.
 pub(super) fn ret_slot_decls(n: usize) -> String {
     if n < 2 {
         return String::new();
@@ -23,7 +24,8 @@ pub(super) fn ret_slot_decls(n: usize) -> String {
     format!("var {};\n", names.join(", "))
 }
 
-/// The widest result wire in `bodies`, also covering `inline(js)` publishers: sloppy-mode JS turns a write past the bank into an implicit global.
+/// The widest result wire in `bodies`, also covering `inline(js)` publishers: sloppy-mode JS turns
+/// a write past the bank into an implicit global.
 pub(super) fn max_multi_wire(bodies: &[&MirFunc]) -> Result<usize, CompilerError> {
     pub(super) fn of(mf: &MirFunc) -> Result<usize, CompilerError> {
         let mut n = mf
@@ -101,7 +103,8 @@ pub(super) fn max_published_lanes(
         .map(|lanes| lanes.into_iter().max().unwrap_or(0))
 }
 
-/// `body` with comments and string/template literals blanked to spaces, preserving byte offsets so lexical checks see code only.
+/// `body` with comments and string/template literals blanked to spaces, preserving byte offsets so
+/// lexical checks see code only.
 fn code_only(body: &str) -> String {
     let b = body.as_bytes();
     let mut out = vec![b' '; b.len()];
@@ -276,7 +279,8 @@ pub(super) fn lower_publisher(
             args.len()
         )));
     }
-    // Evaluate every argument in order into temps before touching the bank: lane order must match JS argument order, and a throwing publisher must leave no lane behind.
+    // Evaluate every argument in order into temps before touching the bank: lane order must match
+    // JS argument order, and a throwing publisher must leave no lane behind.
     let prefix = &body[..return_at];
     let mut lowered = String::from(prefix);
     let temps: Vec<String> = (0..args.len()).map(publish_temp).collect();

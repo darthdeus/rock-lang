@@ -71,7 +71,8 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     template("sb_new", 0, "[]"),
     template("sb_push", 2, "$1.push($2)"),
     template("sb_build", 1, "$1.join(\"\")"),
-    // Signature key: keeps Map get distinct from NativeBuffer get, and wins before the latter's name/arity key.
+    // Signature key: keeps Map get distinct from NativeBuffer get, and wins before the latter's
+    // name/arity key.
     template("get_map_K_V_K", 2, "$1.get($2)"),
     // IIFE: the template reads the receiver and index twice.
     template(
@@ -1255,7 +1256,8 @@ function __rock_globals_install_bridge() {
 /// plus the `error` global backing the transform's `Inst::Global("error")` +
 /// `CallValue` raise shape (layout-stamp check, `await` re-raise). Defer
 /// failures go through `__rock_log` (error level, `CO` tag) exactly as the
-/// Lua body does, so an installed log sink sees them. Nil checks are truthiness (`!c.__defers`, `if (c.__inner)`) so
+/// Lua body does, so an installed log sink sees them. Nil checks are truthiness (`!c.__defers`, `if
+/// (c.__inner)`) so
 /// `undefined` and `null` both count as nil, matching the subset's loose rule.
 pub const JS_CORO_RUNTIME: &str = r#"
 function error(m) { throw new Error(m); }

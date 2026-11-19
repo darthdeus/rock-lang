@@ -157,7 +157,8 @@ impl<'a> WorklistState<'a> {
                 ws.module(requested.module).functions[requested.func].name
             ))
         })?;
-        // A root named only from opaque JS has no published symbol; that JS calls it by its JS name.
+        // A root named only from opaque JS has no published symbol; that JS calls it by its JS
+        // name.
         if self.names.get(&key).is_none() {
             self.names
                 .insert(key.clone(), callee_js_name(ws, requested));
@@ -206,7 +207,8 @@ impl<'a> WorklistState<'a> {
         self.rejections.push((name.to_string(), e));
     }
 
-    /// An opaque `inline(js)` body has no MIR global-read facts: recover its explicit `__G.name` reads; dynamic `__G[...]` has no fallback.
+    /// An opaque `inline(js)` body has no MIR global-read facts: recover its explicit `__G.name`
+    /// reads; dynamic `__G[...]` has no fallback.
     pub(super) fn queue_opaque_js_global_initializers(&mut self, ws: &Workspace) {
         let names: Vec<ustr::Ustr> = self
             .inline_js
@@ -363,7 +365,8 @@ pub(super) fn emit_inline_js_fn(
     Ok(format!("function {js_name}({params}) {{\n{src}\n}}\n"))
 }
 
-/// Register a body's `static` locals as `__G` state; no initializer is needed since an undefined done-flag is falsy.
+/// Register a body's `static` locals as `__G` state; no initializer is needed since an undefined
+/// done-flag is falsy.
 pub(super) fn register_statics(
     ws: &Workspace,
     interner: &skull_mir::monoty::MonoInterner,

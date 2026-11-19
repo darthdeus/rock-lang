@@ -479,7 +479,8 @@ pub(super) fn affected_const_names(
         .collect()
 }
 
-/// Order global-init assignments so each global inits after every global it transitively reads through its call graph; a cycle rejects.
+/// Order global-init assignments so each global inits after every global it transitively reads
+/// through its call graph; a cycle rejects.
 pub(super) fn order_global_inits(
     ginits: &[GlobalInit],
     lowered: &[(FuncRef, MirFunc)],

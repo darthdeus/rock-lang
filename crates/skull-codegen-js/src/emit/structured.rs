@@ -92,7 +92,8 @@ impl Emitter<'_> {
         ))
     }
 
-    /// JS access paths of an intrinsic call's result lanes; `None` for a real function, which packs its result into the return bank.
+    /// JS access paths of an intrinsic call's result lanes; `None` for a real function, which packs
+    /// its result into the return bank.
     pub(super) fn intrinsic_lane_paths(
         &self,
         iid: Idx<Inst>,
@@ -128,7 +129,8 @@ impl Emitter<'_> {
         Ok(Some(out))
     }
 
-    /// Depth-first lane paths in scalar-ABI order; `false` when a lane cannot be addressed on a JS value (nullable tuple presence lane, dotted leaf path).
+    /// Depth-first lane paths in scalar-ABI order; `false` when a lane cannot be addressed on a JS
+    /// value (nullable tuple presence lane, dotted leaf path).
     fn collect_lane_paths(
         &self,
         plan: &skull_mir::lower::BackendFnAbiPlan,
@@ -170,7 +172,9 @@ impl Emitter<'_> {
         }
     }
 
-    /// A multi-value capture: `d0 = <call>; d1 = __rock_ret1; ...`. The call and every bank read must stay one indivisible run of statements, or something could overwrite the bank between publish and capture.
+    /// A multi-value capture: `d0 = <call>; d1 = __rock_ret1; ...`. The call and every bank read
+    /// must stay one indivisible run of statements, or something could overwrite the bank between
+    /// publish and capture.
     pub(super) fn multi_assign(&self, dests: &[Idx<Cell>], call: &str) -> String {
         match dests {
             [] => format!("{call};"),

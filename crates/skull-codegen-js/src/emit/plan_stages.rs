@@ -210,7 +210,8 @@ pub(super) fn lifecycle_plan_stage_js(
                 )
                 .unwrap();
             }
-            // A scene thunk of one uniform signature: it resolves the live root for `scene_id` and calls through.
+            // A scene thunk of one uniform signature: it resolves the live root for `scene_id` and
+            // calls through.
             let key_lit = js_string_lit(&key);
             let sim_guard = (!entry.sim_wires.is_empty()).then(|| {
                 entry

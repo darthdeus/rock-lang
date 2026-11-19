@@ -1,4 +1,6 @@
-//! The MIR->JS emitter. Output is structured (goto-free): a `Branch` recovers into `if/else` rejoining at the immediate post-dominator. An unsupported MIR op is a spanned `CompilerError`, never emit-and-hope.
+//! The MIR->JS emitter. Output is structured (goto-free): a `Branch` recovers into `if/else`
+//! rejoining at the immediate post-dominator. An unsupported MIR op is a spanned `CompilerError`,
+//! never emit-and-hope.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -90,7 +92,9 @@ fn convert_body(ws: &Workspace, mf: &mut MirFunc, name: &str) -> Result<(), Comp
     skull_transform::body_chain::convert_body(ws, mf, name, &JS_CHAIN, &mut ()).map_err(|e| e.error)
 }
 
-/// The module-global surface an emitted body may reference: state renders into the scoped `__G` object so no body local can shadow it; a top-level fn used as a value renders as a logical CodeRef slot.
+/// The module-global surface an emitted body may reference: state renders into the scoped `__G`
+/// object so no body local can shadow it; a top-level fn used as a value renders as a logical
+/// CodeRef slot.
 #[derive(Clone, Default)]
 pub struct GlobalCtx {
     state: HashMap<ustr::Ustr, String>,
@@ -145,7 +149,8 @@ fn collect<T>(findings: &mut Vec<CompilerError>, r: Result<T, CompilerError>) {
     }
 }
 
-/// The accumulated per-definition rejections as one failure, sorted by emitted name; emission accumulates so the `--backend js` skip histogram lists every rejected definition.
+/// The accumulated per-definition rejections as one failure, sorted by emitted name; emission
+/// accumulates so the `--backend js` skip histogram lists every rejected definition.
 fn combine_rejections(mut rejections: Vec<(String, CompilerError)>) -> Result<(), CompilerError> {
     rejections.sort_by(|(a, _), (b, _)| a.cmp(b));
     match merge_findings(rejections.into_iter().map(|(_, e)| e).collect()) {
@@ -222,7 +227,8 @@ fn js_member(base: &str, f: &str) -> String {
     }
 }
 
-/// The JS name every co-emitted callee is called by; a call carrying an `Instance` targets that instantiation's standalone copy.
+/// The JS name every co-emitted callee is called by; a call carrying an `Instance` targets that
+/// instantiation's standalone copy.
 #[derive(Default)]
 pub struct CalleeNames {
     names: HashMap<Instance, String>,
@@ -319,16 +325,20 @@ struct Emitter<'a> {
     ws: &'a Workspace,
     mf: &'a MirFunc,
     callees: &'a CalleeNames,
-    /// Hoisted closure body names: the only `Inst::Global` a capture-free lambda creation site may reference.
+    /// Hoisted closure body names: the only `Inst::Global` a capture-free lambda creation site may
+    /// reference.
     hoisted: &'a HashSet<ustr::Ustr>,
     globals: &'a GlobalCtx,
     use_count: Vec<u32>,
-    /// Whether each inst folds into its single use site; a non-inlinable used value binds to a `v<raw>` temp so cell reads and effectful calls keep their order.
+    /// Whether each inst folds into its single use site; a non-inlinable used value binds to a
+    /// `v<raw>` temp so cell reads and effectful calls keep their order.
     inlinable: Vec<bool>,
-    /// Whether a multi-value `Term::Return` in the trampoline printer packs an array (ordinary-body fallback) or rejects (coroutine step, which returns through the step protocol).
+    /// Whether a multi-value `Term::Return` in the trampoline printer packs an array (ordinary-body
+    /// fallback) or rejects (coroutine step, which returns through the step protocol).
     pack_multi_return: bool,
     hoisted_temps: HashSet<u32>,
-    /// NativeBuffer slot refs used only as `Field`/`StoreField` bases render flat-slot access from their operands and emit no statement; any other use materializes a whole-element copy.
+    /// NativeBuffer slot refs used only as `Field`/`StoreField` bases render flat-slot access from
+    /// their operands and emit no statement; any other use materializes a whole-element copy.
     out: String,
     indent: usize,
 }

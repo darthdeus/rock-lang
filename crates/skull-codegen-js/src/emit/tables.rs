@@ -40,7 +40,8 @@ pub(super) fn emit_vt_eq(
     build_vt_eq_defs(ws, &vt_names)
 }
 
-/// Per-type `__rock_tostring_ty` renderers for every realized value struct, matching luajit's `__tostring`: `Name { f: v, .. }` with each leaf through `lua_tostring`.
+/// Per-type `__rock_tostring_ty` renderers for every realized value struct, matching luajit's
+/// `__tostring`: `Name { f: v, .. }` with each leaf through `lua_tostring`.
 pub(super) fn emit_tostring_ty(
     ws: &Workspace,
     registry: Option<&skull_mir::lower::StructRegistryPlan>,
@@ -111,7 +112,8 @@ pub(super) fn emit_tostring_ty(
     Ok(out)
 }
 
-/// The JS spelling of a display body shared with the luajit `__tostring` emitter; anything but string literals and `tostring(v.<key>)` reads is rejected.
+/// The JS spelling of a display body shared with the luajit `__tostring` emitter; anything but
+/// string literals and `tostring(v.<key>)` reads is rejected.
 fn js_display_expr(
     parts: &[skull_mir::lua_nesting::LuaDisplayPart],
 ) -> Result<String, CompilerError> {
@@ -175,7 +177,8 @@ pub(super) fn emit_inspect_ty(
     )
 }
 
-/// Per-enum `__rock_inspect_ty` renderers for scalar-tag-box enums. The box carries no variant name, so it is baked per tag to match luajit's cdata `__tostring`.
+/// Per-enum `__rock_inspect_ty` renderers for scalar-tag-box enums. The box carries no variant
+/// name, so it is baked per tag to match luajit's cdata `__tostring`.
 pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> String {
     use bone_core::hir::VariantPayload;
 
@@ -244,7 +247,8 @@ pub(super) fn emit_inspect_cdata_enums(ws: &Workspace) -> String {
     out
 }
 
-/// Descriptors for flat enum tuple payloads with a direct record-field walk, emitted from declarations so an inspect reached through a flattened field always has metadata.
+/// Descriptors for flat enum tuple payloads with a direct record-field walk, emitted from
+/// declarations so an inspect reached through a flattened field always has metadata.
 pub(super) fn emit_inspect_enum_payloads(ws: &Workspace) -> String {
     use bone_core::hir::{TypeCtor, TypeExpr, VariantPayload};
     use bone_core::prelude::TyId;
@@ -283,7 +287,8 @@ pub(super) fn emit_inspect_enum_payloads(ws: &Workspace) -> String {
                 let fields = nominal.and_then(|child| {
                     let sid = ws.struct_by_name.get(&child)?;
                     let structure = &ws.modules[sid.module.index()].structs[sid.def];
-                    // Lua's payload-name helper refuses a record walk when any declared field type is nominal, even if it occupies one scalar slot.
+                    // Lua's payload-name helper refuses a record walk when any declared field type
+                    // is nominal, even if it occupies one scalar slot.
                     let has_nominal_field = structure.fields.iter().any(|field| match field.ty {
                         TyId::Static(module, index) => matches!(
                             ws.module(module).ty_arena[index],
@@ -366,7 +371,9 @@ pub(super) fn emit_col_mat(
     build_col_mat_defs(ws, registry.column_plans(), registry.arena())
 }
 
-/// `__rock_col_mat["<E>"] = function(v, i) { return {...}; };` rebuilds one element from its leaf columns. The leaf paths come from the owned representation plan, the same source the lowering writes.
+/// `__rock_col_mat["<E>"] = function(v, i) { return {...}; };` rebuilds one element from its leaf
+/// columns. The leaf paths come from the owned representation plan, the same source the lowering
+/// writes.
 fn build_col_mat_defs(
     ws: &Workspace,
     plans: &std::collections::BTreeMap<ustr::Ustr, (bool, skull_mir::lower::RepId)>,
@@ -374,7 +381,8 @@ fn build_col_mat_defs(
 ) -> Result<String, CompilerError> {
     let mut out = String::new();
     for (name, (nobox, representation)) in plans {
-        // A `nobox` element has no materializer: every op needing one is already rejected in lowering.
+        // A `nobox` element has no materializer: every op needing one is already rejected in
+        // lowering.
         if *nobox {
             continue;
         }
@@ -384,7 +392,8 @@ fn build_col_mat_defs(
             ))
         })?;
         let Some(paths) = plan.leaf_paths() else {
-            // An enum value-shape has no struct declaration to rebuild against; reject like the static `inspect` of a scalarized enum.
+            // An enum value-shape has no struct declaration to rebuild against; reject like the
+            // static `inspect` of a scalarized enum.
             return Err(err(format!(
                 "JS subset: column element `{name}` is not a value struct \
                  (no declared shape to rebuild an element from)"
@@ -504,7 +513,8 @@ pub(super) fn nullary_main(
         })
 }
 
-/// A `self_ref` for inlining a non-function body (a `deco` def): any `FuncRef` the body does not itself call, so the self-call skip never suppresses a wanted callee.
+/// A `self_ref` for inlining a non-function body (a `deco` def): any `FuncRef` the body does not
+/// itself call, so the self-call skip never suppresses a wanted callee.
 pub(super) fn safe_self_ref(ws: &Workspace, mf: &MirFunc) -> FuncRef {
     let targets: HashSet<FuncRef> = skull_mir::reach::call_targets(mf).into_iter().collect();
     ws.source_modules()
@@ -518,7 +528,9 @@ pub(super) fn safe_self_ref(ws: &Workspace, mf: &MirFunc) -> FuncRef {
         .expect("workspace has a function the deco body does not call")
 }
 
-/// Valid `__rock_enum_*` names -> JS def line: `__rock_enum_<E>_names` (a `Map` keyed by ordinal) for an all-unit non-cdata enum, a `__rock_enum_<E>_<V>` singleton per unit variant of a mixed enum. Defs tolerate duplication across concatenated per-test programs.
+/// Valid `__rock_enum_*` names -> JS def line: `__rock_enum_<E>_names` (a `Map` keyed by ordinal)
+/// for an all-unit non-cdata enum, a `__rock_enum_<E>_<V>` singleton per unit variant of a mixed
+/// enum. Defs tolerate duplication across concatenated per-test programs.
 pub(super) fn build_enum_global_defs(ws: &Workspace) -> HashMap<ustr::Ustr, String> {
     use bone_core::hir::VariantPayload;
     let mut out = HashMap::new();
@@ -566,7 +578,8 @@ pub(super) fn build_enum_global_defs(ws: &Workspace) -> HashMap<ustr::Ustr, Stri
     out
 }
 
-/// Rebuild an `embed` field's logical value from the parent's physical leaves (`__rock_embed_view`); a nullable embed keeps presence at `<prefix>`.
+/// Rebuild an `embed` field's logical value from the parent's physical leaves
+/// (`__rock_embed_view`); a nullable embed keeps presence at `<prefix>`.
 fn embed_view_expr(
     ws: &Workspace,
     prefix: &str,
@@ -742,7 +755,8 @@ fn build_inspect_ty_defs(
     Ok(out)
 }
 
-/// `__rock_vt_eq` entries mirroring Lua `_vt.__eq`: `__op_eq` for scalars, enums and nested value structs; `===` (luajit's `rawequal`) for Vec/Map/Arena/reference-struct/generic/string fields.
+/// `__rock_vt_eq` entries mirroring Lua `_vt.__eq`: `__op_eq` for scalars, enums and nested value
+/// structs; `===` (luajit's `rawequal`) for Vec/Map/Arena/reference-struct/generic/string fields.
 pub(super) fn build_vt_eq_defs(
     ws: &Workspace,
     names: &BTreeMap<ustr::Ustr, skull_mir::lower::ValueStorage>,

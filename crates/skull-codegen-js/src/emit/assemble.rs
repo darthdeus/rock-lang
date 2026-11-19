@@ -191,7 +191,8 @@ pub(super) fn assemble_program_core(
                 stable.push_str(&init.js);
             }
         }
-        // A global initialized from a lambda stores its CodeRef, so initializers run after the code slots are staged.
+        // A global initialized from a lambda stores its CodeRef, so initializers run after the code
+        // slots are staged.
         out.push_str("}\n");
         stable.push_str("}\n");
         for init in init_lines {
@@ -228,7 +229,8 @@ pub(super) fn assemble_program_core(
             scx.interner(),
             &lifecycle_plan,
         )?);
-        // Decorator applications run after inits: a deco body pushes into a ginit-initialized registry.
+        // Decorator applications run after inits: a deco body pushes into a ginit-initialized
+        // registry.
         let applications =
             decorator_application_lines_js(ws, &decorators, scx.interner(), &st.names)?;
         out.push_str(&applications);

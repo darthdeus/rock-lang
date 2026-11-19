@@ -2,7 +2,8 @@
 
 use super::*;
 
-/// A value inst that still runs as a statement when unused: calls, bounds-checking or host-getter indexes, column/strided element checks and range-checked uint ops.
+/// A value inst that still runs as a statement when unused: calls, bounds-checking or host-getter
+/// indexes, column/strided element checks and range-checked uint ops.
 pub(super) fn evaluated_when_unused(inst: &Inst) -> bool {
     match inst {
         Inst::Index { kind, .. } => {
@@ -52,7 +53,8 @@ impl Emitter<'_> {
                     let line = match kind {
                         ContainerKind::NativeBuffer => format!("__nb_checked_set({b}, {i}, {v});"),
                         ContainerKind::NativeBufferInBounds => format!("{b}.ptr[{i}] = {v};"),
-                        // Column storage has no JS arm: reject, since one `value` operand cannot carry K leaves (lowering splits element writes into per-column stores).
+                        // Column storage has no JS arm: reject, since one `value` operand cannot
+                        // carry K leaves (lowering splits element writes into per-column stores).
                         ContainerKind::VecValueColumns(elem) => {
                             return Err(err(format!(
                                 "JS subset: whole-element store into column-stored `[{elem}]` \
@@ -67,7 +69,8 @@ impl Emitter<'_> {
                         ContainerKind::VecColumn | ContainerKind::VecStrideSlot => {
                             format!("{b}[{i}] = {v};")
                         }
-                        // The element index was bounds-checked once ahead of every leaf write; a JS boolean stores 1/0 in a Uint8Array already.
+                        // The element index was bounds-checked once ahead of every leaf write; a JS
+                        // boolean stores 1/0 in a Uint8Array already.
                         ContainerKind::NativeBufferLeaf => format!("{b}[{i}] = {v};"),
                         ContainerKind::NativeBufferValue(elem) => {
                             return Err(err(format!(
@@ -92,7 +95,9 @@ impl Emitter<'_> {
                     };
                     self.push(&line);
                 }
-                // One Map iteration step through the cursor-cached `__map_next` shim (insertion order, null at exhaustion); `table` renders idempotently, so re-rendering it is safe.
+                // One Map iteration step through the cursor-cached `__map_next` shim (insertion
+                // order, null at exhaustion); `table` renders idempotently, so re-rendering it is
+                // safe.
                 Inst::MapNext {
                     key_cell,
                     val_cell,
@@ -118,7 +123,8 @@ impl Emitter<'_> {
                 }
                 Inst::CallMulti { dests, func, args } => {
                     let call = self.render_call(iid, *func, args)?;
-                    // An intrinsic is one JS expression: lanes of a multi-lane result are read off that value, since no intrinsic writes the return bank.
+                    // An intrinsic is one JS expression: lanes of a multi-lane result are read off
+                    // that value, since no intrinsic writes the return bank.
                     let line = match self.intrinsic_lane_paths(iid, *func, dests.len())? {
                         Some(paths) => {
                             let temp = format!("__rock_mv{}", raw(iid));
@@ -191,7 +197,8 @@ impl Emitter<'_> {
                 let s = self.render_val(*v)?;
                 self.push(&format!("return {s};"));
             }
-            // Publish secondary lanes first: each operand is a temp or folded expression that cannot overwrite the bank.
+            // Publish secondary lanes first: each operand is a temp or folded expression that
+            // cannot overwrite the bank.
             _ => self.emit_multi_return(vs)?,
         }
         Ok(())

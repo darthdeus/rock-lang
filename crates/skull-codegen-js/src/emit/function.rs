@@ -14,7 +14,8 @@ pub fn emit_fn(ws: &Workspace, mf: &MirFunc, js_name: &str) -> Result<String, Co
     )
 }
 
-/// [`emit_fn`] with known co-emitted callees: a call to one renders as `<js name>(args)`; anything else unmapped rejects.
+/// [`emit_fn`] with known co-emitted callees: a call to one renders as `<js name>(args)`; anything
+/// else unmapped rejects.
 pub(crate) fn emit_fn_with_callees(
     ws: &Workspace,
     mf: &MirFunc,
@@ -40,7 +41,9 @@ pub(crate) fn emit_fn_with_callees(
     ))
 }
 
-/// A block trampoline `for(;;) switch(__bb)` for a region, the coroutine-step shape (dispatch-into-loops is irreducible, so the relooper cannot apply). Case bodies are braced so `let v<N>` temps stay case-local.
+/// A block trampoline `for(;;) switch(__bb)` for a region, the coroutine-step shape (dispatch-into-
+/// loops is irreducible, so the relooper cannot apply). Case bodies are braced so `let v<N>` temps
+/// stay case-local.
 pub fn emit_fn_trampoline(
     ws: &Workspace,
     mf: &MirFunc,
@@ -162,7 +165,8 @@ impl<'a> FnFrame<'a> {
     }
 }
 
-/// A body registering an ordinary-fn `defer` catches what escapes it: `__rock_defer_unwind` runs the cleanups above the entry depth LIFO and rethrows.
+/// A body registering an ordinary-fn `defer` catches what escapes it: `__rock_defer_unwind` runs
+/// the cleanups above the entry depth LIFO and rethrows.
 fn defer_unwind_wrap(unwind: bool, body: &str) -> String {
     if !unwind {
         return body.to_string();
@@ -181,7 +185,8 @@ pub(super) fn is_runtime_global(name: &str) -> bool {
         || name == skull_mir::mir::CORO_HOT_RELOAD
 }
 
-/// The shared mangle keyed on `(name, declared signature)`. Exempt fns keep their bare name because inline(js) bodies and driver lines are verbatim text.
+/// The shared mangle keyed on `(name, declared signature)`. Exempt fns keep their bare name because
+/// inline(js) bodies and driver lines are verbatim text.
 pub(crate) fn callee_js_name(ws: &Workspace, fr: FuncRef) -> String {
     let f = &ws.module(fr.module).functions[fr.func];
     skull_mir::mangle::mangle_fn(ws, f)

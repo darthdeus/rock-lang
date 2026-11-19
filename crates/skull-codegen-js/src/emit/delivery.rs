@@ -2,7 +2,8 @@
 
 use super::*;
 
-/// The backend-local delivery scheduler: lowers retained declarations, follows post-inline residual calls and emits the global/opaque bodies they need.
+/// The backend-local delivery scheduler: lowers retained declarations, follows post-inline residual
+/// calls and emits the global/opaque bodies they need.
 pub(super) struct JsDelivery<'a, 'b> {
     pub(super) ws: &'a Workspace,
     pub(super) scx: &'a skull_mir::lower::ScalarCtx,
@@ -419,7 +420,8 @@ pub(super) fn ordered_spec_chunks<'a>(
     ordered
 }
 
-/// Reject calls whose scalarized argument lanes a callee retaining a whole-value parameter would drop; one mismatch per body.
+/// Reject calls whose scalarized argument lanes a callee retaining a whole-value parameter would
+/// drop; one mismatch per body.
 pub(super) fn check_scalar_abi(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -432,7 +434,8 @@ pub(super) fn check_scalar_abi(
         .iter()
         .map(|(fr, mf)| (*fr, mf.params.len()))
         .collect();
-    // A specialized callee takes its instantiation's scalar ABI, so a spec-bound call is measured against its own copy, not the shared body.
+    // A specialized callee takes its instantiation's scalar ABI, so a spec-bound call is measured
+    // against its own copy, not the shared body.
     let spec_arities: HashMap<Instance, usize> = st
         .spec_lowered
         .iter()
@@ -449,7 +452,8 @@ pub(super) fn check_scalar_abi(
                     }
                     _ => continue,
                 };
-                // One admission rule over the emitted body the call targets, so the shared and specialized arms agree on the omitted-default window.
+                // One admission rule over the emitted body the call targets, so the shared and
+                // specialized arms agree on the omitted-default window.
                 let (body, arity, what) = match mf.spec_bindings.get(&iid) {
                     Some(inst) => match spec_arities.get(inst) {
                         None => continue,
@@ -493,7 +497,8 @@ pub(super) fn check_scalar_abi(
                     }
                 };
                 let cf = &ws.module(callee.module).functions[callee.func];
-                // A variadic surplus is passed past the declared params; only the lower bound is an ABI fact.
+                // A variadic surplus is passed past the declared params; only the lower bound is an
+                // ABI fact.
                 if argc < required || (argc > arity && !cf.is_variadic) {
                     findings.push(err(format!(
                         "JS subset: value-struct scalar ABI mismatch calling {what}`{}` \

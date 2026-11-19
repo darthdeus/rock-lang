@@ -24,7 +24,8 @@ pub(super) fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
     }
 }
 
-/// An expression candidate for folding into its single use; excludes impure or cell-order-sensitive values (`Load`/`Call`/`Index`/`Field`/`Len`).
+/// An expression candidate for folding into its single use; excludes impure or cell-order-sensitive
+/// values (`Load`/`Call`/`Index`/`Field`/`Len`).
 pub(super) fn always_inlinable(inst: &Inst) -> bool {
     matches!(inst, Inst::MakeEnv { .. }) || skull_mir::sinking::always_inlinable(inst)
 }
@@ -147,7 +148,8 @@ fn cap_inline_depth(mf: &MirFunc, blocks: &[Idx<Block>], inl: &mut [bool]) {
     }
 }
 
-/// Value temps whose use crosses their defining block: the trampoline puts blocks in sibling switch cases, so these are hoist-declared ([`Emitter::hoisted_temps`]).
+/// Value temps whose use crosses their defining block: the trampoline puts blocks in sibling switch
+/// cases, so these are hoist-declared ([`Emitter::hoisted_temps`]).
 pub(super) fn cross_block_temps(
     mf: &MirFunc,
     region: &[Idx<Block>],

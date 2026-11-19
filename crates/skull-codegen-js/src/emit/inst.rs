@@ -41,7 +41,8 @@ impl Emitter<'_> {
                 self.render_val(*a)?,
                 self.render_val(*b)?
             ),
-            // A zero divisor is the only way out of uint range, and LuaJIT yields inf/nan there; Rock int `/` floors, JS `/` does not.
+            // A zero divisor is the only way out of uint range, and LuaJIT yields inf/nan there;
+            // Rock int `/` floors, JS `/` does not.
             Inst::UintDiv(a, b) | Inst::IntDiv(a, b) => format!(
                 "Math.floor({} / {})",
                 self.render_val(*a)?,
@@ -57,15 +58,18 @@ impl Emitter<'_> {
             Inst::IntGeq(a, b) | Inst::UintGeq(a, b) | Inst::FloatGeq(a, b) => {
                 bin(a, ">=", b, self)?
             }
-            // Loose `== null` also matches `undefined`, so an omitted defaulted arg still trips the callee's default-fill guard.
+            // Loose `== null` also matches `undefined`, so an omitted defaulted arg still trips the
+            // callee's default-fill guard.
             Inst::Eq(a, b) if self.is_nil(*a) || self.is_nil(*b) => bin(a, "==", b, self)?,
             Inst::NotEq(a, b) if self.is_nil(*a) || self.is_nil(*b) => bin(a, "!=", b, self)?,
             Inst::Eq(a, b) => bin(a, "===", b, self)?,
             Inst::NotEq(a, b) => bin(a, "!==", b, self)?,
-            // Space after `-`: a negative literal would otherwise emit `(--1.5)`, JS's decrement operator.
+            // Space after `-`: a negative literal would otherwise emit `(--1.5)`, JS's decrement
+            // operator.
             Inst::Neg(x) => format!("(- {})", self.render_val(*x)?),
             Inst::Not(x) => format!("(!{})", self.render_val(*x)?),
-            // `bit.rshift` is logical (`>>>`), which yields unsigned; `| 0` restores luajit's signed result (`bit.rshift(-1, 0)` is -1).
+            // `bit.rshift` is logical (`>>>`), which yields unsigned; `| 0` restores luajit's
+            // signed result (`bit.rshift(-1, 0)` is -1).
             Inst::BitAnd(a, b) => bin(a, "&", b, self)?,
             Inst::BitOr(a, b) => bin(a, "|", b, self)?,
             Inst::BitXor(a, b) => bin(a, "^", b, self)?,
@@ -118,7 +122,8 @@ impl Emitter<'_> {
                 format!("((value) => value === false ? null : value)({value})")
             }
             Inst::FloatToInt(x) => format!("Math.floor({})", self.render_val(*x)?),
-            // Lua `..` stringifies operands (`%.14g` numbers); JS `+` does not, so every leaf goes through `lua_tostring`.
+            // Lua `..` stringifies operands (`%.14g` numbers); JS `+` does not, so every leaf goes
+            // through `lua_tostring`.
             Inst::StringConcat(a, b) => {
                 let mut parts = Vec::new();
                 self.collect_concat(&mut parts, *a);
@@ -130,7 +135,8 @@ impl Emitter<'_> {
                 format!("({})", rendered?.join(" + "))
             }
             Inst::ToString(x) => format!("lua_tostring({})", self.render_val(*x)?),
-            // Rock `%` is `a - floor(a / b) * b` (JS `%` truncates); operands appear twice, so an inlined expression binds once.
+            // Rock `%` is `a - floor(a / b) * b` (JS `%` truncates); operands appear twice, so an
+            // inlined expression binds once.
             Inst::IntMod(a, b) | Inst::FloatMod(a, b) => {
                 let (ra, rb) = (self.render_val(*a)?, self.render_val(*b)?);
                 if self.is_plain_operand(*a) && self.is_plain_operand(*b) {
@@ -140,7 +146,8 @@ impl Emitter<'_> {
                 }
             }
             Inst::Call { func, args } => self.render_call(iid, *func, args)?,
-            // Only capture-free hoisted closures and the `error` runtime global are emittable global reads.
+            // Only capture-free hoisted closures and the `error` runtime global are emittable
+            // global reads.
             Inst::Global(name) if self.mf.code_value_identities.contains_key(&iid) => {
                 let identity = &self.mf.code_value_identities[&iid];
                 let key = self
@@ -225,7 +232,9 @@ impl Emitter<'_> {
                 }
                 format!("({{{}}})", parts.join(", "))
             }
-            // A value struct is a plain `{__ty, ...}` object on JS. A GC-carrying one compares pointer fields by reference like luajit's `_vt.__eq`, via the per-type `__rock_vt_eq` registry consulted before the generic walk.
+            // A value struct is a plain `{__ty, ...}` object on JS. A GC-carrying one compares
+            // pointer fields by reference like luajit's `_vt.__eq`, via the per-type `__rock_vt_eq`
+            // registry consulted before the generic walk.
             Inst::MakeValueStruct {
                 name,
                 representation,
@@ -271,7 +280,9 @@ impl Emitter<'_> {
                 }
                 format!("({{{}}})", parts.join(", "))
             }
-            // A non-cdata enum boxes with 0-based positional keys through the nil-dropping ctor; a unit variant of a mixed enum is an interned singleton, so a bare `MakeEnum` carries payload.
+            // A non-cdata enum boxes with 0-based positional keys through the nil-dropping ctor; a
+            // unit variant of a mixed enum is an interned singleton, so a bare `MakeEnum` carries
+            // payload.
             Inst::MakeEnum {
                 tag,
                 ty,
@@ -304,7 +315,8 @@ impl Emitter<'_> {
                 match kind {
                     ContainerKind::NativeBuffer => format!("__nb_checked_get({b}, {i})"),
                     ContainerKind::NativeBufferInBounds => format!("{b}.ptr[{i}]"),
-                    // Lowering decomposes whole-element reads (`nb_leaf_element_repr`), so one reaching emit has no C leaf layout.
+                    // Lowering decomposes whole-element reads (`nb_leaf_element_repr`), so one
+                    // reaching emit has no C leaf layout.
                     ContainerKind::NativeBufferValue(elem) => {
                         return Err(err(format!(
                             "JS subset: whole-element read of `NativeBuffer<{elem}>` reached \
@@ -317,7 +329,8 @@ impl Emitter<'_> {
                     ContainerKind::VecInBounds | ContainerKind::VecNonNullInBounds => {
                         format!("{b}._data[{i}]")
                     }
-                    // Column storage has no element object; lowering decomposes whole-element reads (`column_element_repr`).
+                    // Column storage has no element object; lowering decomposes whole-element reads
+                    // (`column_element_repr`).
                     ContainerKind::VecValueColumns(elem) => {
                         return Err(err(format!(
                             "JS subset: whole-element read of column-stored `[{elem}]` reached \
@@ -330,7 +343,8 @@ impl Emitter<'_> {
                         )));
                     }
                     ContainerKind::VecColumn | ContainerKind::VecStrideSlot => format!("{b}[{i}]"),
-                    // The index is bounds-checked once per element; a `bool` view is a Uint8Array of 0/1 that reads back as a boolean.
+                    // The index is bounds-checked once per element; a `bool` view is a Uint8Array
+                    // of 0/1 that reads back as a boolean.
                     ContainerKind::NativeBufferLeaf => {
                         if self.leaf_view_is_bool(*base) {
                             format!("({b}[{i}] !== 0)")
@@ -365,7 +379,8 @@ impl Emitter<'_> {
                 ContainerKind::VecColumn | ContainerKind::VecStrideSlot => {
                     format!("{}.length", self.render_val(*base)?)
                 }
-                // A view has no length of its own; only the owning NativeBuffer knows the element count.
+                // A view has no length of its own; only the owning NativeBuffer knows the element
+                // count.
                 ContainerKind::NativeBufferLeaf => {
                     return Err(err("JS subset: `len` of a NativeBuffer leaf view"));
                 }
@@ -381,7 +396,8 @@ impl Emitter<'_> {
                 "int" => format!("new Int32Array({})", self.render_val(*count)?),
                 "uint32_t" => format!("new Uint32Array({})", self.render_val(*count)?),
                 "bool" => format!("new Uint8Array({})", self.render_val(*count)?),
-                // A value struct backs onto one flat `Float32Array(n * size/4)` in luajit's C layout, which the per-leaf views alias through `.buffer`.
+                // A value struct backs onto one flat `Float32Array(n * size/4)` in luajit's C
+                // layout, which the per-leaf views alias through `.buffer`.
                 other => {
                     let representation = representation.ok_or_else(|| {
                         err(format!(
@@ -410,14 +426,16 @@ impl Emitter<'_> {
                             "JS subset: native_buffer_alloc element ctype `{other}` is not a CData representation"
                         )));
                     }
-                    // A 4-byte-backed array needs a 4-byte multiple; an all-`bool` element would not and rejects.
+                    // A 4-byte-backed array needs a 4-byte multiple; an all-`bool` element would
+                    // not and rejects.
                     if size % 4 != 0 {
                         return Err(err(format!(
                             "JS subset: native_buffer_alloc element ctype `{other}` is {size} \
                              bytes, not a multiple of 4 -- no aligned TypedArray backing"
                         )));
                     }
-                    // The backing view uses float32 slots regardless of C width; keep that width for byte equality.
+                    // The backing view uses float32 slots regardless of C width; keep that width
+                    // for byte equality.
                     format!(
                         "Object.assign(new Float32Array(({}) * {}), {{__rock_elem_size: {size}}})",
                         self.render_val(*count)?,
@@ -425,7 +443,8 @@ impl Emitter<'_> {
                     )
                 }
             },
-            // The views and `.ptr` alias one `ArrayBuffer`, keeping leaf-addressed and whole-`.ptr` (host upload) access coherent.
+            // The views and `.ptr` alias one `ArrayBuffer`, keeping leaf-addressed and whole-`.ptr`
+            // (host upload) access coherent.
             Inst::FfiViewCast { cty, ptr } => {
                 let p = self.render_val(*ptr)?;
                 let array = match cty.as_str() {
@@ -443,7 +462,8 @@ impl Emitter<'_> {
                 format!("new {array}({p}.buffer, {p}.byteOffset)")
             }
             Inst::Field { base, field, .. } => js_member(&self.render_val(*base)?, field),
-            // Presence is a bool on the scalar ABI, so JS truthiness agrees with luajit's `present and value or nil`.
+            // Presence is a bool on the scalar ABI, so JS truthiness agrees with luajit's `present
+            // and value or nil`.
             Inst::MakeNullableValue { present, value } => format!(
                 "({} ? {} : null)",
                 self.render_val(*present)?,
@@ -463,7 +483,8 @@ impl Emitter<'_> {
                     self.render_val(*value)?
                 )
             }
-            // Plain arrays, not TypedArrays: V8's packed-double arrays beat `Float64Array` for strided reads. Nested leaf paths are dotted (`min.x`), so keys are quoted.
+            // Plain arrays, not TypedArrays: V8's packed-double arrays beat `Float64Array` for
+            // strided reads. Nested leaf paths are dotted (`min.x`), so keys are quoted.
             Inst::MakeVecColumns {
                 elem,
                 columns,
@@ -543,7 +564,8 @@ impl Emitter<'_> {
         })
     }
 
-    /// Flatten a `StringConcat` tree; a materialized child stays a leaf because its operands may be `let`s of another switch case.
+    /// Flatten a `StringConcat` tree; a materialized child stays a leaf because its operands may be
+    /// `let`s of another switch case.
     fn collect_concat(&self, parts: &mut Vec<Idx<Inst>>, id: Idx<Inst>) {
         if self.inlinable[raw(id) as usize] {
             if let Inst::StringConcat(a, b) = &self.mf.insts[id] {
@@ -555,7 +577,9 @@ impl Emitter<'_> {
         parts.push(id);
     }
 
-    /// A value constructor arriving as leaf paths. A CData box is a nested object, so a child's leaves are rebuilt under its field name; a TABLE box keys the leaf paths themselves, so they stay flat.
+    /// A value constructor arriving as leaf paths. A CData box is a nested object, so a child's
+    /// leaves are rebuilt under its field name; a TABLE box keys the leaf paths themselves, so they
+    /// stay flat.
     pub(super) fn render_leaf_form_value_struct(
         &self,
         name: ustr::Ustr,
@@ -626,7 +650,8 @@ impl Emitter<'_> {
         Ok(format!("({{{}}})", parts.join(", ")))
     }
 
-    /// Box an enum: `__rock_make_enum(<tag>, "<ty>", [0, p0, 1, p1, "name", v, ..])`; the ctor drops nil `kv` slots.
+    /// Box an enum: `__rock_make_enum(<tag>, "<ty>", [0, p0, 1, p1, "name", v, ..])`; the ctor
+    /// drops nil `kv` slots.
     fn render_make_enum(
         &self,
         tag_expr: &str,
@@ -758,7 +783,8 @@ impl Emitter<'_> {
         Ok(format!("({expr})"))
     }
 
-    /// The JS name this call site targets; an unemitted specialization resolves to `None` and rejects instead of reaching the boxed shared body.
+    /// The JS name this call site targets; an unemitted specialization resolves to `None` and
+    /// rejects instead of reaching the boxed shared body.
     pub(super) fn callee_name(&self, iid: Idx<Inst>, func: FuncRef) -> Option<&String> {
         let body = self
             .callees
@@ -832,7 +858,8 @@ impl Emitter<'_> {
     }
 }
 
-/// The minimum argument count a co-emitted callee accepts: MIR param count minus defaulted params, which arrive as `undefined` and fill callee-side.
+/// The minimum argument count a co-emitted callee accepts: MIR param count minus defaulted params,
+/// which arrive as `undefined` and fill callee-side.
 pub fn required_arg_count(
     ws: &Workspace,
     abi: &skull_mir::lower::BackendFnAbiPlan,
@@ -846,7 +873,9 @@ pub fn required_arg_count(
         .get(&BodyOwner::Function(fr.func))
         .map(|b| b.param_defaults.iter().map(|d| d.is_some()).collect())
         .unwrap_or_default();
-    // A defaulted value-struct param explodes to N leaf slots, all omittable together; widths come from the emitted body's own plan, since a specialization's leaf width can differ from the declaration's.
+    // A defaulted value-struct param explodes to N leaf slots, all omittable together; widths come
+    // from the emitted body's own plan, since a specialization's leaf width can differ from the
+    // declaration's.
     if let Some(widths) = abi.param_leaf_widths() {
         let omittable: usize = widths
             .iter()
@@ -866,7 +895,8 @@ pub enum JsSupply {
     Global(&'static str),
 }
 
-/// The one JS realization oracle for rendering, callee discovery and the artifact view; declaration-keyed mappings win before any declared body.
+/// The one JS realization oracle for rendering, callee discovery and the artifact view;
+/// declaration-keyed mappings win before any declared body.
 pub fn js_supply(ws: &Workspace, cf: &bone_core::hir::Function) -> Option<JsSupply> {
     if skull_mir::definition::is_artifact_catalog_accessor(cf) {
         let symbol = ustr::Ustr::from(skull_mir::mangle::mangle_fn(ws, cf).as_str());
@@ -879,7 +909,8 @@ pub fn js_supply(ws: &Workspace, cf: &bone_core::hir::Function) -> Option<JsSupp
     }
 }
 
-/// Render one supplied call. A template is padded to the declared arity with `undefined`, since defaulted trailing params are not in the call args.
+/// Render one supplied call. A template is padded to the declared arity with `undefined`, since
+/// defaulted trailing params are not in the call args.
 fn render_supply(supply: JsSupply, args: &[String], declared_arity: usize) -> String {
     match supply {
         JsSupply::Template(tmpl) => {
