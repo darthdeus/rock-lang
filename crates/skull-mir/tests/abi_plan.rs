@@ -504,16 +504,11 @@ fn leaf_places_carry_the_container_element_representation() {
     )
     .expect("a NativeBuffer value must have a concrete container plan");
     assert!(plan.is_leaf_addressed());
-    let address = arena
+    let addresses = arena
         .nominal_leaf_addresses(&ws, bone_core::hir::FnBackend::Lua, key(&ws, "V2"))
-        .expect("V2 has a leaf address plan")
-        .into_iter()
-        .next()
-        .expect("V2 has a nonzero leaf population");
-    let place = plan
-        .place(address.clone())
-        .expect("leaf storage owns the place");
-    assert_eq!(place, address);
+        .expect("V2 has a leaf address plan");
+    assert!(!addresses.is_empty());
+    assert_eq!(plan.leaf_places(), Some(&addresses[..]));
 }
 
 #[test]

@@ -316,21 +316,13 @@ impl ContainerPlan {
             .then_some(shape.name)
     }
 
-    pub(crate) fn leaf_addresses(&self) -> Option<&[LeafAddr]> {
-        self.leaf_addresses.as_deref()
+    pub fn leaf_places(&self) -> Option<&[LeafAddr]> {
+        self.leaf_addresses
+            .as_deref()
+            .filter(|_| self.is_leaf_addressed())
     }
 
     pub fn is_leaf_addressed(&self) -> bool {
         matches!(self.storage, ContainerStorage::LeafAddressed { .. })
-    }
-
-    pub fn place(&self, address: LeafAddr) -> Result<LeafAddr, RepError> {
-        if !self.is_leaf_addressed() {
-            return Err(RepError {
-                span: None,
-                message: "a non-leaf-addressed container cannot produce a leaf place".into(),
-            });
-        }
-        Ok(address)
     }
 }

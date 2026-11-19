@@ -506,16 +506,12 @@ impl<'a> Builder<'a> {
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
         let container = self.native_buffer_plan(elem)?;
-        let plan = container
-            .leaf_addresses()
-            .ok_or_else(|| gap("NativeBuffer element has no owned leaf address plan"))?;
         let dot = format!("{path}.");
-        let hit: Vec<LeafAddr> = plan
+        let hit: Vec<LeafAddr> = Self::nb_leaf_places(&container)?
             .iter()
             .filter(|a| a.path.as_str() == path || a.path.as_str().starts_with(&dot))
             .cloned()
-            .map(|address| container.place(address).map_err(|e| gap(e.message)))
-            .collect::<Result<_, _>>()?;
+            .collect();
         if hit.is_empty() {
             return Err(gap(format!(
                 "`{path}` is not a leaf of NativeBuffer<{elem}>"
@@ -548,13 +544,29 @@ impl<'a> Builder<'a> {
                 hit.len()
             )));
         }
+        self.nb_write_leaves(buf, checked, &hit, leaves);
+        Ok(())
+    }
+
+    fn nb_leaf_places(container: &ContainerPlan) -> Result<&[LeafAddr], CompilerError> {
+        container
+            .leaf_places()
+            .ok_or_else(|| gap("NativeBuffer element has no owned leaf address plan"))
+    }
+
+    fn nb_write_leaves(
+        &mut self,
+        buf: Idx<Inst>,
+        checked: Idx<Inst>,
+        places: &[LeafAddr],
+        leaves: Vec<Idx<Inst>>,
+    ) {
         let mut views = HashMap::default();
-        for (a, leaf) in hit.iter().zip(leaves) {
+        for (a, leaf) in places.iter().zip(leaves) {
             let at = self.leaf_index(checked, a);
             let view = self.leaf_view(buf, a.view_field, &mut views);
             self.write_index(view, at, leaf, ContainerKind::NativeBufferLeaf);
         }
-        Ok(())
     }
 
     /// Whether `elem` has a validated C leaf layout. Otherwise the existing
@@ -581,12 +593,10 @@ impl<'a> Builder<'a> {
         path: &str,
     ) -> Result<Option<LeafAddr>, CompilerError> {
         let container = self.native_buffer_plan(elem)?;
-        container
-            .leaf_addresses()
+        Ok(container
+            .leaf_places()
             .and_then(|plan| plan.iter().find(|a| a.path.as_str() == path))
-            .cloned()
-            .map(|addr| container.place(addr).map_err(|e| gap(e.message)))
-            .transpose()
+            .cloned())
     }
 
     pub(crate) fn nb_leaf_load(
@@ -636,13 +646,7 @@ impl<'a> Builder<'a> {
         let shape = container
             .element_shape(self.scx.rep_arena())
             .ok_or_else(|| gap("leaf-addressed element is not a value struct"))?;
-        let plan: Vec<LeafAddr> = container
-            .leaf_addresses()
-            .ok_or_else(|| gap("leaf-addressed element has no owned leaf address plan"))?
-            .iter()
-            .cloned()
-            .map(|address| container.place(address).map_err(|e| gap(e.message)))
-            .collect::<Result<_, _>>()?;
+        let plan = Self::nb_leaf_places(&container)?;
         let checked = self.nb_checked_index(buf, index)?;
         let mut views = HashMap::default();
         let leaves: Vec<Idx<Inst>> = plan
@@ -671,18 +675,12 @@ impl<'a> Builder<'a> {
         elem: Ustr,
     ) -> Result<(), CompilerError> {
         let container = self.native_buffer_plan(elem)?;
-        let plan: Vec<LeafAddr> = container
-            .leaf_addresses()
-            .ok_or_else(|| gap("leaf-addressed element has no owned leaf address plan"))?
-            .iter()
-            .cloned()
-            .map(|address| container.place(address).map_err(|e| gap(e.message)))
-            .collect::<Result<_, _>>()?;
         let bundle = self.lower_expr_repr(value)?;
         let shape = container
             .element_shape(self.scx.rep_arena())
             .ok_or_else(|| gap(format!("NativeBuffer<{elem}> has no value leaf plan")))?;
         let leaves = self.repr_to_storage_leaves(&bundle, &shape, "native buffer store")?;
+        let plan = Self::nb_leaf_places(&container)?;
         if leaves.len() != plan.len() {
             return Err(gap(format!(
                 "leaf store arity mismatch for NativeBuffer<{elem}>: {} leaves vs {} slots",
@@ -690,15 +688,8 @@ impl<'a> Builder<'a> {
                 plan.len()
             )));
         }
-        // The check precedes every leaf write: checking after would let the
-        // out-of-bounds writes happen first.
         let checked = self.nb_checked_index(buf, index)?;
-        let mut views = HashMap::default();
-        for (a, leaf) in plan.iter().zip(leaves) {
-            let at = self.leaf_index(checked, a);
-            let view = self.leaf_view(buf, a.view_field, &mut views);
-            self.write_index(view, at, leaf, ContainerKind::NativeBufferLeaf);
-        }
+        self.nb_write_leaves(buf, checked, plan, leaves);
         Ok(())
     }
 
