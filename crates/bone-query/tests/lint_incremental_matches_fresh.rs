@@ -1,6 +1,4 @@
-//! The language server's lint cache must publish exactly what a fresh load of
-//! the same texts publishes, after every step of a script mixing body edits,
-//! signature edits, added and removed functions, and renames.
+//! The lint cache must publish exactly what a fresh load of the same texts publishes.
 
 use crate::fixture::Project;
 use bone_query::BoneWorkspace;

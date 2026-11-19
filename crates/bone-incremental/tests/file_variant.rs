@@ -1,6 +1,4 @@
-// `Session::with_file_variant` -- the speculative-analysis primitive for IDE paths (completion
-// munges): apply a text variant of one tracked file through the normal update tiers, run a
-// query closure against the workspace, restore.
+// `Session::with_file_variant`: analyze a text variant of one tracked file, then restore.
 
 use bone_incremental::session::{Session, UpdateTier};
 use bone_semantic::prelude::*;
@@ -60,9 +58,7 @@ fn variant_visible_inside_and_gone_after() {
 
 #[test]
 fn untracked_path_is_added_then_removed() {
-    // A file the session REFUSED (its live text never lowered clean) is still
-    // completable: the variant is speculatively tracked, analyzed, and removed
-    // again -- the session ends as untracked as it started.
+    // A refused file is still completable, and the session ends as untracked as it started.
     let mut session = session();
     let seen = session
         .with_file_variant(

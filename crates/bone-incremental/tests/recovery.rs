@@ -1,5 +1,4 @@
-//! Error recovery. Lowering is total: an unresolved type name in any position lowers to
-//! `BuiltinTy::Error` with a diagnostic, and `semantic_pass` returns a coherent workspace.
+//! Lowering is total: an unresolved type name lowers to `BuiltinTy::Error` with a diagnostic.
 
 use crate::common;
 use bone_semantic::prelude::*;

@@ -1,6 +1,4 @@
-//! Modules-v1 incremental == fresh, compared on what resolution decided, and the deterministic
-//! gates for scope epochs. A sibling of `incremental.rs` rather than an extension of it: that
-//! oracle compares body diagnostics and types for v1 packages.
+//! Modules-v1 incremental == fresh, compared on what resolution decided.
 
 use crate::common::{self, PACKAGE, v1};
 

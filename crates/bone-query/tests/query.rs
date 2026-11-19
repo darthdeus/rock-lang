@@ -361,8 +361,7 @@ fn builtin_definitions() {
     }
 }
 
-/// Corpus fixtures pin reference starts; keep the query-level span-width
-/// invariant here because the corpus currently checks starts only.
+/// The corpus checks reference starts only, so span widths are checked here.
 #[test]
 fn reference_ranges_cover_only_names() {
     // (case, source, name, cursor occurrence)

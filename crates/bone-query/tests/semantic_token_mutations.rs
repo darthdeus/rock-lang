@@ -258,9 +258,7 @@ fn check_stream(bone: &BoneWorkspace, source: &str, require_tokens: bool, contex
     decoded.len()
 }
 
-// Workspace state is local to a case; nevertheless restore on unwind as well as
-// success to exercise repair after every malformed buffer. Update panics get
-// the same replay context as query/assertion panics.
+// Restore on unwind as well as success so every malformed buffer exercises repair.
 fn with_repair<T>(
     bone: &mut BoneWorkspace,
     seed: &str,

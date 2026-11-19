@@ -1,6 +1,4 @@
-// Single harness for this crate's integration tests: one linked binary
-// instead of one per file. nextest still runs each test in its own
-// process, so isolation is unchanged.
+// One harness: a single linked binary instead of one per file.
 
 #[path = "support/completion.rs"]
 mod completion;

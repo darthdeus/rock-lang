@@ -1,7 +1,4 @@
-//! Completion ranking corpus: each case pins a scoring outcome, so the fuzzy
-//! score, smart case, the type-directed buckets and the reachability
-//! expansion can be tuned without silent regressions. Add a case whenever a
-//! "wrong thing ranked first" bug is found.
+//! Completion ranking corpus: each case pins a scoring outcome.
 
 use crate::completion::*;
 use bone_query::BoneWorkspace;
@@ -151,8 +148,6 @@ fn expected_type_orders_candidates() {
              fn t(c: int) {\n  let sv: string = \"x\"\n  let iv = 7\n  draw(1, size: 2.0,<|> color: c)\n}\n",
             "sv < iv",
         ),
-        // A stray `(` in a string once lost the chain callee to the byte
-        // paren-matcher, so both overloads' params ranked.
         (
             "chain receiver with a paren in a string",
             "struct A { t: int }\nstruct B { t: int }\nfn m(a: A, x: int) {}\n\
@@ -281,8 +276,7 @@ fn expected_type_orders_candidates() {
              fn use_it(mob: Mob) {\n  mob.ai_state = makes<|>\n}\n",
             "make_state(mob) < ?makeshift_grid",
         ),
-        // A bare-ident assign target is typed `()` by inference (place
-        // position), which once gave the RHS no expected type.
+        // A bare-ident assign target is typed `()` by inference (place position).
         (
             "assignment to a local types the RHS",
             "struct Widget { id: int }\n\
@@ -295,7 +289,7 @@ fn expected_type_orders_candidates() {
 #[test]
 fn ranking_contexts_offer() {
     check_labels(&[
-        // The float-typed reach expansion (`WHITE_PIXEL.image_dims()`) is gone.
+        // No float-typed reach expansion (`WHITE_PIXEL.image_dims()`).
         (
             "UFCS arg slot of the receiver overload",
             "value Color { r: float, g: float, b: float, a: float }\nstruct UiRect { x: float }\n\
@@ -337,7 +331,7 @@ fn ranking_contexts_offer() {
              global BINDS: [SpellBindingX] = [\n  SpellBindingX { key: \"k\", kind: har<|> }\n]\n",
             &["*Harm*"],
         ),
-        // An enclosing call's unsupplied param once leaked in as `name:`.
+        // An enclosing call's unsupplied param must not leak in as `name:`.
         (
             "no named arg from the enclosing call",
             "struct Widget { x: int }\nfn run(w: Widget, replace_me: int) {}\n\
@@ -364,8 +358,7 @@ fn ranking_contexts_offer() {
              fn probe(s1: SpellX, s2: SpellX) {\n  let a = can<|>\n}\n",
             &["can_cast", "!can_cast(*"],
         ),
-        // Rendering an un-annotated receiver's type needs the body inference;
-        // without it this panicked.
+        // Rendering an un-annotated receiver's type needs the body inference.
         (
             "UFCS arg slot on a local receiver",
             "fn add_all<T>(xs: [T], ys: [T]) {}\nfn r() {\n  let nums = [1, 2]\n  nums.add_all(<|>)\n}\n",

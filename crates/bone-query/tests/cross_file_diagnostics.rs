@@ -1,6 +1,4 @@
-//! Cross-file diagnostics. The editor opens one buffer at a time, so the
-//! workspace indexes the whole project root and must keep every file's
-//! diagnostics current as any of them changes.
+//! The editor opens one buffer at a time, but every file's diagnostics must stay current.
 
 use crate::fixture::{Project, diagnostics_in};
 use bone_query::BoneWorkspace;
@@ -49,8 +47,7 @@ fn sibling_file_types_resolve_whether_loaded_or_opened() {
     assert!(errors(&diags).is_empty(), "update alone: {diags:?}");
 }
 
-/// Per-file hole diagnostics are cached across updates: an unrelated edit
-/// must keep another file's holes, and editing a file must refresh its own.
+/// Cached hole diagnostics survive unrelated edits and refresh when their own file changes.
 #[test]
 fn hole_diagnostics_survive_unrelated_edits_and_clear_on_fix() {
     let project = Project::new(&[
@@ -80,8 +77,7 @@ fn hole_diagnostics_survive_unrelated_edits_and_clear_on_fix() {
     );
 }
 
-/// A reinferred dependent that has a hole is never served a stale hole
-/// message, even though hole-free dependents skip the hole reparse.
+/// A reinferred dependent with a hole is never served a stale hole message.
 #[test]
 fn dependent_hole_message_refreshes_after_interface_edit() {
     let project = Project::new(&[
@@ -108,8 +104,7 @@ fn dependent_hole_message_refreshes_after_interface_edit() {
     );
 }
 
-/// The `./` hint has two labels, the `/` cause and the use site; each gets a
-/// published diagnostic so the editor paints both lines.
+/// Both labels of the `./` hint get a published diagnostic, so the editor paints both lines.
 #[test]
 fn multi_label_hint_publishes_a_diagnostic_per_line() {
     let src = "fn main() {\n  let h = 8 / 3\n  let x: int = 2 * h\n}\n";
@@ -127,9 +122,7 @@ fn multi_label_hint_publishes_a_diagnostic_per_line() {
     );
 }
 
-/// Only the whole-project pass sees duplicate structs in separate fragments
-/// of one module; it was once logged and dropped while `rock compile` rejected
-/// the program.
+/// Only the whole-project pass sees duplicate structs in separate fragments of one module.
 #[test]
 fn duplicate_struct_across_fragments_surfaces_in_lsp() {
     for repaired in ["a.rock", "b.rock"] {

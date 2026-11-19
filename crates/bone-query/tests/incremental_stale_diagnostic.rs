@@ -1,7 +1,4 @@
-//! Diagnostics from an intermediate edit state must clear once the buffer is
-//! valid again. The incremental body-edit fast path once carried syntax errors
-//! forward, so typing `as in` -> `as int` (where `as in` is a parse-recovery
-//! error) left a phantom "unsupported type" until an LSP restart.
+//! Diagnostics from an intermediate edit state must clear once the buffer is valid again.
 
 use crate::fixture::{PATH, Project};
 use bone_query::BoneWorkspace;
@@ -60,8 +57,7 @@ fn edits_through_broken_states_end_clean() {
     }
 }
 
-/// Flipping const to global in one file must re-infer the dependent module
-/// that writes the global and clear its diagnostic.
+/// Flipping const to global must re-infer the dependent module that writes the global.
 #[test]
 fn const_to_global_clears_assign_error_cross_file() {
     let manifest = (

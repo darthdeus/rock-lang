@@ -1,5 +1,4 @@
-//! Completion contexts: what each cursor context offers, how accepting an
-//! item edits the buffer, and how a context orders its candidates.
+//! Completion contexts: what each cursor context offers, how items edit, how they rank.
 
 use crate::completion::Insert::{Label, Plain, Snippet, Text};
 use crate::completion::*;
@@ -309,8 +308,7 @@ fn literal_and_block_contexts_offer() {
             "enum E { A, B }\nfn r(e: E) {\n  match e {\n    <|>\n  }\n}\n",
             &["E::A"],
         ),
-        // A unit variant has no record fields; reading the `if` brace as a
-        // record literal emptied all completion inside the block.
+        // A unit variant has no record fields, so the `if` brace is not a record literal.
         (
             "block after a unit-variant condition",
             "enum SpellKind { Fire, Dispel }\nfn spell_clear() {}\n\
@@ -568,8 +566,6 @@ fn comments_strings_and_numbers_offer_nothing() {
         );
     }
     check_empty(&[
-        // The byte scanner was comment-blind: these classified as an enum
-        // qualifier, a member access and a yield operand.
         (
             "qualifier in a comment",
             "enum SpellState { Idle, Loaded(int) }\nfn idle_check() {}\n\
@@ -585,7 +581,7 @@ fn comments_strings_and_numbers_offer_nothing() {
             "co fn frame_co() -> Coroutine<int> {\n  yield 1\n}\nfn frame() {}\n\
              fn t() {\n  // yield fr<|>\n}\n",
         ),
-        // Identifiers cannot start with a digit; `0` once matched `remap_to_01`.
+        // Identifiers cannot start with a digit.
         (
             "numeric literal",
             "fn remap_to_01(value: float, min1: float, max1: float) -> float {\n  value\n}\n\
@@ -1828,7 +1824,6 @@ fn contexts_order_candidates() {
              fn r() {\n  let tint = Color { r: 1.0 }\n  let tin = 3\n  paint(ti<|>)\n}\n",
             "tint < tin",
         ),
-        // -- slot-typed contexts: match-arm heads and `for x in` --
         (
             "arm head: scrutinee variant above a prefix-matching global",
             "enum AiState { Idle, Combat, Flee }\nglobal count: int = 0\n\

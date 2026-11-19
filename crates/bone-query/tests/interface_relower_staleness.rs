@@ -1,8 +1,4 @@
-//! An interface change that keeps a type's name must still re-lower the
-//! dependents whose signatures reference it. Generic arity is checked at lower
-//! time ("requires N type argument(s)"), so an arity change has to invalidate
-//! dependents like a removed type does, or the dependent is re-inferred
-//! against a stale lowering. A fresh workspace is the ground truth.
+//! Generic arity is checked at lower time, so an arity change must re-lower dependents.
 
 use crate::fixture::Project;
 use bone_query::BoneWorkspace;

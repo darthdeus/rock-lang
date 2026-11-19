@@ -1,6 +1,4 @@
-// Incremental == fresh oracle for `bone_semantic::Session` (see incremental compiler
-// invariants): apply an edit script to a session, batch `semantic_pass` the final texts, and
-// assert the two workspaces are equivalent.
+// Incremental == fresh oracle: apply an edit script, batch the final texts, compare.
 
 use bone_incremental::session::Session;
 use bone_semantic::prelude::*;
@@ -27,8 +25,7 @@ fn parse_files(files: &Files) -> Result<Vec<skull_parser::Ast>, CompilerError> {
     for f in files {
         let (path, text) = (&f.path, &f.text);
         let mut module = skull_parser::parse_module(text, Ustr::from(path.as_str()))?;
-        // The oracle must see what the session sees: `Session::new` stamps
-        // these same facts on every parse.
+        // `Session::new` stamps these same facts on every parse.
         module.package = f.package.clone();
         module.global_policy = f.global_policy;
         assert!(
@@ -319,9 +316,7 @@ fn multi_function_edit_keeps_types_after_a_single_body_edit() {
 fn oracle_signature_edit_breaks_then_fixes_cross_file_caller() {
     let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
 
-    // make_point loses a param: b.rock's two-arg call site goes stale.
-    // (An int->float param change would NOT break the caller - int literals
-    // coerce to float.)
+    // An int->float param change would not break the caller: int literals coerce.
     let changed = CROSS_FILE_A
         .replace("x: int, y: int", "x: int")
         .replace("y: y", "y: x");
@@ -331,7 +326,6 @@ fn oracle_signature_edit_breaks_then_fixes_cross_file_caller() {
         "caller in b.rock must error after the signature change"
     );
 
-    // Fix the caller; everything recovers.
     h.update(
         "b.rock",
         &CROSS_FILE_B.replace("make_point(0, 0)", "make_point(0)"),
@@ -382,7 +376,6 @@ fn sum_xy(p: Point) -> int {
     h.remove("c.rock");
     assert!(!h.session.is_tracked("c.rock"));
 
-    // Removing an untracked path is a quiet no-op.
     h.remove("c.rock");
     assert!(!h.session.is_tracked("c.rock"));
 }
@@ -410,8 +403,6 @@ fn deleting_a_definition_breaks_body_and_signature_users_then_recovers() {
 
 #[test]
 fn oracle_for_iter_protocol_invalidates_on_next_edit() {
-    // `for x in <user type>` resolves the iter/next protocol (bone records the fns in
-    // `for_iter_protocol`).
     let with_next = "\
 struct R { hi: int }
 struct RIt { cur: int, hi: int }
@@ -424,7 +415,6 @@ fn total() -> int { let s = 0; for x in (R { hi: 3 }) { s = s + x } s }
     let mut h = Harness::new(&[("it.rock", with_next)]);
     h.assert_clean();
 
-    // Drop `next` -> the loop can't resolve the protocol.
     let start = with_next.find("fn next").unwrap();
     let end = with_next.find("fn total").unwrap();
     let without_next = format!("{}{}", &with_next[..start], &with_next[end..]);
@@ -434,7 +424,6 @@ fn total() -> int { let s = 0; for x in (R { hi: 3 }) { s = s + x } s }
         "removing `next` must break the for-loop over R"
     );
 
-    // Restore -> recovers.
     h.update("it.rock", with_next);
     h.assert_clean();
 }
@@ -502,8 +491,6 @@ fn oracle_cascades_commit_errors_and_recover() {
 
 #[test]
 fn oracle_type_rename_cascades_both_directions() {
-    // Renaming a type breaks references to the OLD name and (re)resolves the NEW
-    // one. The oracle validates the whole workspace at each keystroke.
     let a = "struct Point { x: int }";
     let b = "fn px(p: Point) -> int { p.x }";
     let mut h = Harness::new(&[("a.rock", a), ("b.rock", b)]);
@@ -558,22 +545,15 @@ fn oracle_macro_def_retype_then_user_body_edit_sees_new_registry() {
     ]);
     h.assert_clean();
 
-    // Def edit: wrap now yields a string. Routes to rebuild_users (registry
-    // rebuilt); use.rock's `wrap(5)` is now string vs `-> int` -> error.
     h.update("m.rock", "macro wrap(e: expr) {\n    \"{e}\"\n}\n");
 
-    // Body edit of the user: must cook against the NEW (string) registry. A
-    // stale identity registry would make this pass; the batch comparator and
-    // the persisting type error pin the freshness.
+    // A stale registry would let this body edit pass.
     h.update("use.rock", "fn f() -> int { wrap(5) + 0 }");
 }
 
 #[test]
 fn oracle_globals_survive_repeated_updates() {
-    // Regression: globals_by_name maps name -> TyId whose module is the TYPE's home (builtin
-    // int for `global G: int`), not the defining module, so a purge keyed on the ty's module
-    // left stale user globals behind and every rebuild after the first died with "duplicate
-    // global".
+    // `global G: int` has a builtin type, so the purge must not key on the type module.
     let with_global = "
 global GRID_W: int = 8
 
@@ -584,15 +564,13 @@ fn area() -> int {
     let mut h = Harness::new(&[("g.rock", with_global)]);
     h.assert_clean();
 
-    // Any second rebuild re-registers the global; with the purge bug this
-    // failed before reaching inference.
     h.update(
         "g.rock",
         &with_global.replace("GRID_W * GRID_W", "GRID_W * GRID_W * 1"),
     );
     h.assert_clean();
 
-    // And a third, through the OTHER rebuild path (file add).
+    // Third rebuild, through the file-add path.
     h.update("h.rock", "fn use_area() -> int { area() }");
     h.assert_clean();
 }
@@ -827,8 +805,7 @@ impl FuzzModel {
             1 => FuzzBody::Param,
             2 => FuzzBody::AddConst(rng.pick(100) as i64),
             3 => {
-                // Target any slot of any PRESENT file, with the target's
-                // CURRENT arity (the call may rot later — intended).
+                // Uses the target's current arity; the call may rot later, which is intended.
                 let file = rng.pick(self.files.len());
                 let f = &self.files[file];
                 if !f.present {
@@ -861,10 +838,7 @@ fn fuzz_step(model: &mut FuzzModel, rng: &mut Rng, h: &mut Harness) -> String {
     let kind = rng.pick(10);
     let desc;
 
-    // File-level delete/restore (rarer than item mutations).
     if kind == 0 && model.files[file].present {
-        // Only delete if some OTHER file stays present (keep the workspace
-        // non-empty).
         if model
             .files
             .iter()
@@ -888,7 +862,6 @@ fn fuzz_step(model: &mut FuzzModel, rng: &mut Rng, h: &mut Harness) -> String {
     let slot = rng.pick(slots);
     match kind {
         1 => {
-            // Delete fn (keep at least one present fn in the file).
             let present_fns = model.files[file].fns.iter().filter(|f| f.is_some()).count();
             if present_fns > 1 && model.files[file].fns[slot].is_some() {
                 model.files[file].fns[slot] = None;
@@ -902,8 +875,7 @@ fn fuzz_step(model: &mut FuzzModel, rng: &mut Rng, h: &mut Harness) -> String {
             }
         }
         2 => {
-            // Signature edit: toggle arity (body kept valid - params only
-            // grow; callers recorded with the old arity may break).
+            // Params only grow, so the body stays valid; old-arity callers may break.
             let new_arity = 1 + rng.pick(2);
             match &mut model.files[file].fns[slot] {
                 Some(f) => {
@@ -920,7 +892,6 @@ fn fuzz_step(model: &mut FuzzModel, rng: &mut Rng, h: &mut Harness) -> String {
             }
         }
         3 => {
-            // Global add/remove/retarget.
             let f = &mut model.files[file];
             if f.global.is_some() && rng.pick(2) == 0 {
                 f.global = None;
@@ -932,7 +903,6 @@ fn fuzz_step(model: &mut FuzzModel, rng: &mut Rng, h: &mut Harness) -> String {
             }
         }
         _ => {
-            // Body edit (most common, mirrors real editing).
             let body = model.random_body(rng);
             model.files[file].fns[slot]
                 .get_or_insert(FuzzFn {
@@ -1018,9 +988,7 @@ fn fuzz_session_fixture_package_graph() {
         return;
     }
 
-    // This local two-package graph exercises production manifest discovery,
-    // package aliases, file selection, and per-file compiler metadata. Only
-    // root-package files are mutated, as in a real project edit.
+    // Only root-package files are mutated, as in a real project edit.
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/incremental_package/app");
     let graph =
@@ -1089,14 +1057,12 @@ fn fuzz_session_fixture_package_graph() {
             }
         }
     }
-    // Leave every file back at its original text.
     for f in &originals {
         let (path, original) = (&f.path, &f.text);
         h.update(path, original);
     }
 }
 
-// Regression for the lower-error-path leak + stale-diagnostic bug.
 #[test]
 fn body_lower_errors_are_replaced_not_accumulated() {
     let v = |b: &str| format!("struct P {{ x: int }}\nfn f(p: P) -> int {{\n{b}\n}}\n");
@@ -1104,7 +1070,6 @@ fn body_lower_errors_are_replaced_not_accumulated() {
     let bad = v("    let q: Nope = p\n    return p.x");
 
     let mut h = Harness::new(&[("a.rock", &ok)]);
-    // Repeatedly introduce and clear the same error to catch stale diagnostics.
     for _ in 0..25 {
         h.update("a.rock", &bad);
         h.assert_diagnostic("Nope");

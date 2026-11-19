@@ -1,8 +1,4 @@
-//! `LineIndex` is the batched O(log n + col) replacement for the O(offset)
-//! `offset_to_position` on hot paths (inlay hints convert ~one offset per hint).
-//! It MUST produce byte-identical positions or every hint misplaces, so pin
-//! equivalence across line shapes, multibyte glyphs, boundary + mid-char + past-
-//! EOF offsets.
+//! `LineIndex` must produce byte-identical positions to `offset_to_position`.
 
 use bone_query::{LineIndex, offset_to_position};
 

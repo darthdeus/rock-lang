@@ -1,6 +1,4 @@
-//! A body edit that keeps the line count (here: a longer literal inside
-//! `alpha`) moves later byte offsets but not later columns. Cached lint
-//! findings in other bodies must keep their columns.
+//! A same-line-count body edit shifts bytes, not columns; cached lints elsewhere keep columns.
 
 use crate::fixture::{PATH, workspace};
 use bone_query::BoneWorkspace;

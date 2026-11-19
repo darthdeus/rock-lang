@@ -1,6 +1,4 @@
-//! Position-blind invariants that hold for every completion response,
-//! whatever the cursor context. `support/completion.rs` checks them on every
-//! query, so one invariant guards a bug class across all fixtures.
+//! Position-blind invariants that hold for every completion response.
 
 use lsp_types::CompletionItem;
 

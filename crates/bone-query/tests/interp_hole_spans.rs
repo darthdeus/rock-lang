@@ -1,6 +1,4 @@
-//! Interpolation-hole spans must land on the hole's real source position. The
-//! tokenizer resolves escapes before the parser sees the string, so offsets
-//! derived from the token's content drift one byte left per preceding escape.
+//! The tokenizer resolves escapes before parsing, so hole spans must map back to source.
 
 use crate::fixture::{PATH, pos, workspace};
 
@@ -26,9 +24,7 @@ fn holes_resolve_past_escapes_and_non_ascii_text() {
     }
 }
 
-/// A hole may carry the enclosing literal's escapes (`"{f(\"a\")}"`). Each
-/// escape costs a source byte, so the sub-expression's spans are mapped back
-/// rather than laid out linearly.
+/// Escapes inside a hole cost source bytes, so its sub-expression spans are mapped back.
 #[test]
 fn hole_with_escaped_quotes_resolves_its_identifiers() {
     let src = "fn pick(sep: string, n: int) -> string { sep }\nfn main() {\n    let count = 2\n    print(\"[{pick(\\\",\\\", count)}]\")\n}\n";

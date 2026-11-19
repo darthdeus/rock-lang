@@ -1,9 +1,4 @@
-//! Goto-definition on a macro invocation name jumps to the `macro` decl, not
-//! to a token of the spliced expansion. Expansion erases the invocation and
-//! stamps its whole span onto every expanded template node, so the target is
-//! read off the registry on the raw pre-expansion AST, arity-selected like
-//! expansion. The semantic-token twin of this erasure is the "macro call
-//! whose template starts with a global" case in `semantic_tokens.rs`.
+//! Goto-definition on a macro invocation name jumps to the `macro` decl, not the expansion.
 
 use crate::fixture::{Project, pos};
 use bone_query::BoneWorkspace;
@@ -68,8 +63,7 @@ fn public_macro_navigation_survives_namespace_construction() {
     }
 }
 
-/// Macro names cannot collide with fns but can overload by arity; goto-def
-/// picks the overload the call's arity selects.
+/// Macros can overload by arity; goto-def picks the overload the call's arity selects.
 #[test]
 fn def_macro_overload_resolves_to_the_arity_matching_decl() {
     let path = probe_path("overload.rock");

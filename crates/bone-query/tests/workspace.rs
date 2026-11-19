@@ -1,5 +1,4 @@
-//! End-to-end tests for the bone-backed LSP facade (`bone_query`): feed a
-//! file in, query it, assert the LSP-shaped result.
+//! End-to-end tests for the bone-backed LSP facade.
 
 use crate::completion::{assert_labels, complete_in, labels_of};
 use crate::fixture::{PATH, Project, diagnostics_in, workspace};
@@ -378,8 +377,6 @@ fn completion_cases() {
     }
 }
 
-// The URI once was `file://unified.rock` (host `unified.rock`, empty path),
-// and nvim crashed applying a stdlib line number to an empty buffer.
 #[test]
 fn definition_of_stdlib_type_resolves_to_a_real_file() {
     let bone = workspace("struct Mob { health: int }\nfn f(e: Entity<Mob>) {}\n");
@@ -685,8 +682,7 @@ fn inlay_labels(src: &str, range: Range) -> Vec<String> {
 #[test]
 fn inlay_hint_cases() {
     let lines = |a, b| Range::new(Position::new(a, 0), Position::new(b, 0));
-    // (case, source, range, labels). A named argument already shows its name;
-    // mapping it positionally once labeled `d: 4` as `c:`.
+    // (case, source, range, labels). A named argument already shows its own name.
     let cases = [
         (
             "only the unannotated let",

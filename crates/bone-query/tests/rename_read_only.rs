@@ -1,6 +1,4 @@
-//! Rename only ever edits sources the user owns: a name shared with stdlib
-//! overloads stays out of the stdlib, and a reference rename cannot pin to one
-//! side refuses the rename instead of guessing.
+//! Rename edits only user-owned sources, and refuses when a reference rename cannot pin one side.
 
 use crate::fixture::{PATH, pos as at, workspace};
 use bone_query::BoneWorkspace;

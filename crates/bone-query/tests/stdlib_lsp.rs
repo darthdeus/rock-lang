@@ -1,7 +1,4 @@
-//! The stdlib is a first-class part of the workspace. The session keys the
-//! warm stdlib by the loader's stdlib ids (which make it the std package to
-//! bone), the editor sees its real canonical paths, and its source is seeded
-//! into the project's texts, so it behaves like any other file.
+//! The stdlib behaves like any other workspace file: real canonical paths, seeded texts.
 
 use crate::fixture::{Project, hover_markup};
 use bone_query::BoneWorkspace;

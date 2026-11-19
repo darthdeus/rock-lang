@@ -1,5 +1,4 @@
-//! LSP positions over the shapes that have gone wrong before: tokens spanning
-//! lines, multibyte text ahead of a name, UFCS calls and generic parameters.
+//! LSP positions over multiline tokens, multibyte text, UFCS calls and generic parameters.
 
 use crate::fixture::{PATH, decode_tokens, pos as at, workspace};
 use bone_query::BoneWorkspace;

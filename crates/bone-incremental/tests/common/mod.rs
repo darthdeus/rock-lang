@@ -1,10 +1,7 @@
-//! Comparator pieces shared by the incremental oracle and the modules-v1 differential harness
-//! (`v1_differential.rs`). Both compare an incrementally updated workspace with a fresh one
-//! over the same texts, so the text-anchored reading lives here once.
+//! Comparator pieces shared by the incremental oracle and the modules-v1 differential harness.
 
 use bone_semantic::prelude::*;
 
-/// `ModuleId` for a file checked through a harness.
 pub fn mid_for(ws: &Workspace, path: &str) -> ModuleId {
     ws.module_ids[&Ustr::from(path)]
 }
@@ -23,7 +20,6 @@ pub fn type_profile(ws: &Workspace, path: &str, text: &str, stride: usize) -> Ve
         .collect()
 }
 
-/// The package every single-package modules-v1 fixture belongs to.
 pub const PACKAGE: &str = "livev1";
 
 pub fn package_tag(id: u32, name: &str) -> skull_parser::PackageTag {

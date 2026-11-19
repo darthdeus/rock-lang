@@ -1,6 +1,4 @@
-//! Typed-hole reports: type holes (`let x: ? = expr`) report their inferred
-//! type, expression holes (`let x: int = ?`, `f(?)`) the type coerced from
-//! context, and both list the bindings in scope.
+//! Typed-hole reports: the inferred or context-coerced type, and the bindings in scope.
 
 use crate::fixture::{PATH, workspace};
 use lsp_types::Position;

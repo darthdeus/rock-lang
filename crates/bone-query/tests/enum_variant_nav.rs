@@ -1,6 +1,4 @@
-//! Hover and goto-definition on enum variant references and declarations.
-//! Patterns (an AST walk) and construction (HIR nodes) take different paths,
-//! so each is pinned.
+//! Hover and goto-definition on enum variants: patterns and construction take different paths.
 
 use crate::fixture::{PATH, assert_no_errors, hover_markup, pos, workspace};
 use bone_query::BoneWorkspace;
@@ -54,17 +52,12 @@ fn def(bone: &BoneWorkspace, p: Position) -> (u32, u32) {
 #[test]
 fn hover_on_variants_and_enum_qualifiers() {
     let cases: &[(&str, usize, &str)] = &[
-        // `SpellState::Casting(a, b, c)` pattern -- cursor on `Casting` (col 12).
+        // (marker, offset into it, expected); `(a` is the pattern, `(SpellKind` the construction
         ("SpellState::Casting(a", 12, VARIANT_CASTING),
-        // Same pattern -- cursor on the `SpellState` qualifier (col 0).
         ("SpellState::Casting(a", 0, ENUM_BODY),
-        // construction variant -> variant + payload
         ("SpellState::Casting(SpellKind", 12, VARIANT_CASTING),
-        // construction qualifier -> full enum body
         ("SpellState::Casting(SpellKind", 0, ENUM_BODY),
-        // `enum SpellState {` name on line 0, char 5.
         ("enum SpellState {", 5, ENUM_BODY),
-        // `    Casting(SpellKind, float, float),` variant name on line 2.
         ("Casting(SpellKind, float", 0, VARIANT_CASTING),
     ];
     let b = workspace(SRC);
@@ -76,9 +69,8 @@ fn hover_on_variants_and_enum_qualifiers() {
 #[test]
 fn definition_on_variants_and_enum_qualifiers() {
     let cases: &[(&str, usize, (u32, u32))] = &[
-        // `Casting(SpellKind, float, float)` decl is on line 2, char 4.
+        // (marker, offset into it, expected (line, char))
         ("SpellState::Casting(a", 12, (2, 4)),
-        // `enum SpellState` name is on line 0, char 5.
         ("SpellState::Casting(a", 0, (0, 5)),
         ("SpellState::Casting(SpellKind", 12, (2, 4)),
         ("SpellState::Casting(SpellKind", 0, (0, 5)),

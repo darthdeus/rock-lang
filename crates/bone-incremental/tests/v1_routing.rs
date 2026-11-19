@@ -1,5 +1,4 @@
-//! Namespace edits in a modules-v1 package must reach the same verdict in a live session and a
-//! fresh build. These cases cover names, visibility, imports, and module headers.
+//! Namespace edits in a modules-v1 package must match a fresh build.
 
 use crate::common::{self, in_package, package_tag, v1};
 use crate::v1_differential::V1Harness;

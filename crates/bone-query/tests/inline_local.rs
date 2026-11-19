@@ -1,6 +1,4 @@
-//! The "inline local" code action: replace every use of a `let` binding with
-//! its initializer (parenthesized when the initializer isn't atomic) and delete
-//! the `let`. Offered on the binding or any of its uses.
+//! The "inline local" code action, offered on the binding or any of its uses.
 
 use crate::fixture::{PATH, apply_edits, pos, workspace};
 use lsp_types::Position;
@@ -89,9 +87,7 @@ fn inlines_at_every_use() {
     }
 }
 
-/// Inlining copies the initializer into every use, so an initializer with
-/// side effects would run once per use (or per iteration, or per closure
-/// call) instead of once, or not at all without a use.
+/// An initializer with side effects would run once per use instead of once.
 #[test]
 fn not_offered_for_an_impure_initializer_that_would_run_a_different_number_of_times() {
     // (case, source with the binding at 1:8)

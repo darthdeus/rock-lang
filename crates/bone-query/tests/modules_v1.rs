@@ -1,7 +1,4 @@
-//! The LSP over a modules-v1 package: a file entering the
-//! session after the batch load keeps its manifest facts, and go-to-definition
-//! follows what the resolver recorded -- module paths, aliases, globs and
-//! re-exports -- to the defining item.
+//! The LSP over a modules-v1 package.
 
 use crate::completion::{assert_invariants, assert_labels, find, labels_of};
 use crate::fixture::{Project, assert_no_errors, covered, position_of_offset};
@@ -123,10 +120,7 @@ impl V1Project {
         ]))
     }
 
-    /// A workspace with the package loaded through the editor route
-    /// (`update` on the root fragment, as didOpen does), asserting the
-    /// package builds clean -- a test below that sees a diagnostic reads a
-    /// real regression, not a broken fixture.
+    /// A workspace loaded through the editor route (`update` on the root fragment), asserted clean.
     pub fn open(&self) -> BoneWorkspace {
         let (bone, diags) = self.0.open("main.rock");
         assert_no_errors(&diags);
@@ -178,12 +172,7 @@ fn errors_in(diags: &[(String, Vec<lsp_types::Diagnostic>)], path: &str) -> Vec<
         .collect()
 }
 
-// -- a file entering the session after the batch load -------------------------
-
-/// Opening a file the batch load did not see (created after the project was
-/// indexed) must read it as its package's dialect, with its package, exactly
-/// as the batch load reads its siblings. It used to enter through
-/// `Session::update_file` with no facts and parse as standalone v1.
+/// A file created after the batch load must read with its package's facts, like its siblings.
 #[test]
 fn a_file_created_after_the_load_is_read_as_its_package_reads_it() {
     let project = V1Project::new();
@@ -205,8 +194,6 @@ fn a_file_created_after_the_load_is_read_as_its_package_reads_it() {
     assert_eq!(file_name(&path), "shapes.rock");
     assert!(covered.contains("area"), "landed on {covered:?}");
 }
-
-// -- go-to-definition ---------------------------------------------------------
 
 fn definition_at(
     bone: &BoneWorkspace,
@@ -282,10 +269,7 @@ fn definition_cases() {
     }
 }
 
-// -- the std prelude ----------------------------------------------------------
-
-/// A v1 fragment sees the std prelude in the editor as it does in
-/// a compile: `print` and `*` resolve.
+/// A v1 fragment sees the std prelude in the editor as it does in a compile.
 #[test]
 fn the_std_prelude_resolves_in_a_v1_file() {
     let project = V1Project::new();
@@ -298,8 +282,6 @@ fn the_std_prelude_resolves_in_a_v1_file() {
         Vec::<String>::new()
     );
 }
-
-// -- go-to-definition on each path segment ------------------------------------
 
 /// The line a definition landed on, with its file.
 fn definition_line(
@@ -385,8 +367,6 @@ fn segments_after_a_body_edit_still_navigate() {
         assert!(covered.contains(item), "{needle} landed on {covered:?}");
     }
 }
-
-// -- completion ---------------------------------------------------------------
 
 /// Completion items at the end of `typed`, typed as a new line inside
 /// `main`'s body (the line after `let a = ...`).
@@ -728,10 +708,7 @@ fn callable_completion_uses_the_accessible_overload_not_the_family_first() {
 #[test]
 fn body_only_module_rebuild_refreshes_cached_callable_metadata_across_fragments() {
     let project = V1Project::new();
-    // Both files contribute to the same v1 module and both overloads are
-    // public. The first file's zero-arg declaration is initially first in the
-    // module's callable family; rebuilding its multiple item bodies moves the
-    // one-arg overload from the second file to the front.
+    // Rebuilding the first file's bodies moves the one-arg overload to the front of the family.
     let first = "pub mod shapes;\n\npub fn family() -> int {\n    0\n}\n\npub fn first_helper() -> int {\n    1\n}\n";
     let second = "pub mod shapes;\n\npub fn family(n: int) -> int {\n    n\n}\n";
     std::fs::write(project.dir.path().join("a.rock"), first).unwrap();
@@ -754,8 +731,7 @@ fn body_only_module_rebuild_refreshes_cached_callable_metadata_across_fragments(
     assert_eq!(before.insert_text.as_deref(), Some("fam()"));
     assert_eq!(before.insert_text_format, None);
 
-    // Change two bodies while keeping the module's item/signature layout.
-    // This takes the session's BodyOnly module-rebuild path.
+    // Keeping the item/signature layout takes the session's BodyOnly rebuild path.
     let first_body_edit = first
         .replace("    0\n", "    10\n")
         .replace("    1\n", "    2\n");
@@ -769,8 +745,6 @@ fn body_only_module_rebuild_refreshes_cached_callable_metadata_across_fragments(
         Some(lsp_types::InsertTextFormat::SNIPPET)
     );
 }
-
-// -- rename -------------------------------------------------------------------
 
 /// Every edit of a rename, as `(file name, line, covered old text, new text)`,
 /// sorted.
@@ -880,10 +854,7 @@ fn renaming_an_alias_renames_only_that_files_uses_of_it() {
     }
 }
 
-/// Type-directed synthesized items (call-throughs such as `f(pos)`, reach
-/// paths such as `pos.f()`) spell workspace function names too; in a v1
-/// file none may spell a DefKey. Pinned on a local chess-core fixture, where
-/// the prefix `ch_t` inside `ch_type(p)` can expose a `chess_core::` spelling.
+/// No synthesized completion item in a v1 file may spell a DefKey (`chess_core::`).
 #[test]
 fn no_completion_in_a_v1_file_spells_a_def_key() {
     let project =
@@ -907,9 +878,7 @@ fn no_completion_in_a_v1_file_spells_a_def_key() {
     }
 }
 
-/// A module alias is a path anchor: the alias segment of a path
-/// through it lands on the aliased module's header, and the member after it
-/// on the member's definition.
+/// A module alias segment lands on the module header, the member after it on its definition.
 #[test]
 fn a_module_alias_segment_lands_on_the_aliased_module() {
     let project = V1Project::new();
@@ -1024,8 +993,6 @@ fn qualified_nullable_annotations_are_not_expression_holes() {
     );
 }
 
-// -- inlay hints --------------------------------------------------------------
-
 fn inlay_labels(bone: &BoneWorkspace, path: &str) -> Vec<String> {
     let all = lsp_types::Range::new(Position::new(0, 0), Position::new(1000, 0));
     bone.inlay_hints(path, all)
@@ -1037,11 +1004,7 @@ fn inlay_labels(bone: &BoneWorkspace, path: &str) -> Vec<String> {
         .collect()
 }
 
-/// A v1 file that enters the session with a hard tokenizer error has no live
-/// module, so inlay hints come from the recovery reparse of the buffer. That
-/// reparse must read the file as its package does: read as standalone it lost its
-/// `pub mod` header and `use` items, and `area` typed as `<error>`. The
-/// control breaks the same file recoverably, so the session itself answers.
+/// A v1 buffer with a hard tokenizer error gets inlay hints from a reparse read as its package.
 #[test]
 fn recovery_reparse_reads_a_v1_buffer_as_its_package_does() {
     let head = "pub mod extra;\n\nuse super::shapes::area;\n\npub fn more() -> int {\n    let n = area(2)\n    n\n}\n\nfn broken() {\n";
@@ -1065,9 +1028,7 @@ fn recovery_reparse_reads_a_v1_buffer_as_its_package_does() {
     }
 }
 
-/// `use p::operator(+);` imports the `+` family under its internal name. Its
-/// glyph segment lands on the operator, as a named use item's leaf lands on
-/// what it names, and so does an alias of it.
+/// The glyph segment of `use p::operator(+);`, and an alias of it, land on the operator.
 #[test]
 fn an_operator_use_item_segment_lands_on_the_operator() {
     let project = V1Project::new();

@@ -1,5 +1,4 @@
-//! `.rock.tags` (extended ctags) emission, which the LSP regenerates on save
-//! through `BoneWorkspace::write_ctags`.
+//! `.rock.tags` (extended ctags) emission through `BoneWorkspace::write_ctags`.
 
 use crate::fixture::Project;
 use bone_query::BoneWorkspace;
@@ -71,8 +70,7 @@ fn write_ctags_emits_every_symbol_kind_with_its_fields() {
     );
 }
 
-/// A save in one project refreshes every loaded root, since the editor may
-/// hold a stale sibling from a prior session.
+/// A save refreshes every loaded root, since the editor may hold a stale sibling.
 #[test]
 fn write_all_ctags_regenerates_every_open_root() {
     let project = Project::new(&[
@@ -100,8 +98,7 @@ fn write_all_ctags_regenerates_every_open_root() {
     }
 }
 
-/// A standalone scratch file's root falls back to its parent (`~` or `/tmp`
-/// in real use); the save sweep must not scatter tags there.
+/// A scratch file's root falls back to its parent; the save sweep must not scatter tags there.
 #[test]
 fn write_all_ctags_skips_standalone_non_stick_roots() {
     let project = Project::new(&[
@@ -120,8 +117,7 @@ fn write_all_ctags_skips_standalone_non_stick_roots() {
     assert!(!project.dir.path().join(".rock.tags").exists());
 }
 
-/// Tags cover the opened file's unopened siblings and the stdlib, which points
-/// at the real stdlib file.
+/// Tags cover unopened siblings and the stdlib, pointing at the real stdlib file.
 #[test]
 fn write_ctags_covers_whole_project_and_stdlib() {
     let project = Project::new(&[

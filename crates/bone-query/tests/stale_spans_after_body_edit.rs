@@ -1,10 +1,4 @@
-//! A body edit that shifts lines inside one fn must not leave navigation spans
-//! of other fns at their pre-edit offsets.
-//!
-//! A parseable didChange localized to one body takes the incremental path,
-//! which keeps other bodies' HIR and shifts spans. Spans stored inline in HIR
-//! nodes (callee names, enum variants, literal and pattern field names) live
-//! outside the shifted side tables that locals read, so each carrier is pinned.
+//! A body edit that shifts lines in one fn must not leave other fns' navigation spans stale.
 
 use crate::fixture::{PATH, workspace};
 use bone_query::BoneWorkspace;
@@ -97,15 +91,9 @@ fn document_highlight_tracks_line_shift_from_other_fn_edit() {
     assert_eq!(starts, [(6, 8), (7, 11), (7, 19)]);
 }
 
-// The pinned tests cover only the span carriers someone named. The oracle
-// below requires navigation at every offset after an incremental edit to
-// match a from-scratch check of the same text, so any unshifted span shows.
-// (bone-incremental's own oracle compares only `type_at`, which reads the
-// shifted `node_index` and is blind to inline node spans.)
+// Navigation at every offset after an incremental edit must match a fresh check.
 
-/// For every cursor position in `text`, the sorted `query` results there.
-/// Empty results are dropped so a divergence report shows only the positions
-/// that actually resolve to something.
+/// For every cursor position in `text`, the sorted non-empty `query` results there.
 fn nav_profile<I>(
     bone: &BoneWorkspace,
     text: &str,
@@ -132,9 +120,7 @@ where
     out
 }
 
-/// Apply `before` then `after` incrementally, then compare references, hover,
-/// and definition at every offset against a fresh workspace built from `after`
-/// alone. All three read inline node spans, so each is an independent net.
+/// Compare references, hover and definition at every offset against a fresh workspace.
 fn assert_incremental_nav_matches_scratch(before: &str, after: &str) {
     let mut inc = workspace(before);
     inc.update(PATH, after.to_string());

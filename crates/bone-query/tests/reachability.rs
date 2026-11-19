@@ -1,9 +1,4 @@
-//! Unit tests for the type-reachability index that backs type-directed
-//! completion paths (`bone_query::reachability`). The integration behaviour
-//! (what completion offers) is in `completion_contexts.rs`; these pin the
-//! graph-search invariants directly: diamond fan-out, cycle termination, and
-//! the methods-with-args terminal-only rule. See
-//! `crates/bone-query/src/reachability.rs`.
+//! Graph-search invariants of the type-reachability index behind type-directed completion.
 
 use bone_query::reachability::{ReachResult, ReachabilityIndex};
 use bone_semantic::prelude::*;

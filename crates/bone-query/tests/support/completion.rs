@@ -1,6 +1,4 @@
-//! Completion fixtures: a `<|>` marker is the cursor, every query runs in a
-//! fresh workspace, and every response must satisfy the position-blind
-//! response invariants (`response_invariants.rs`).
+//! Completion fixtures: `<|>` is the cursor; every response must satisfy the response invariants.
 
 pub use crate::label_asserts::{assert_offers, label_matches};
 use bone_query::BoneWorkspace;

@@ -1,5 +1,4 @@
-//! Workspace invariants through a production session lifecycle. `Workspace::new` puts the
-//! synthetic `$builtin` module, owner of every builtin type node, in the ordinary module table.
+//! `Workspace::new` keeps the synthetic `$builtin` module in the ordinary module table.
 
 use bone_incremental::session::{Session, UpdateTier};
 use bone_semantic::prelude::*;

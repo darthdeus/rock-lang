@@ -1,6 +1,4 @@
-//! The "fill struct fields" code action emits the shorthand `field` for an
-//! in-scope binding (local or param) whose name matches the field and whose
-//! type is assignable, and a `field: ?` hole otherwise.
+//! "Fill struct fields": shorthand for a matching in-scope binding, `field: ?` otherwise.
 
 use crate::fixture::{PATH, workspace};
 use lsp_types::Position;
@@ -37,8 +35,6 @@ fn fills_from_matching_bindings_and_holes_the_rest() {
             &["y: ?"],
             &["x: ?"],
         ),
-        // `=> S { .. }` as a bare arm body used to be a parse error that masked
-        // this fill.
         (
             "literal as a bare match-arm body",
             "enum K { A, B }\nvalue S { x: float, y: float }\nfn f(k: K) -> S {\n    match k {\n        K::A => S { x: 1.0 }\n        K::B => S { x: 2.0, y: 3.0 }\n    }\n}\n",

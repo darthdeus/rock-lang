@@ -1,10 +1,4 @@
-//! LSP hover token resolution. Two concerns:
-//!  - Braces: hovering a real `{` / `}` resolves to the enclosing Block node
-//!    (the only lapper entries a Block emits -- see alloc_block_expr in
-//!    bone-lower). A silent miss means the block was allocated through plain
-//!    `alloc_expr` (no markers) instead of `alloc_block_expr`.
-//!  - Tokens: keywords and punctuation resolve to the enclosing construct;
-//!    whitespace resolves to nothing. See hover token resolution contract.
+//! LSP hover token resolution: braces resolve to their Block, whitespace to nothing.
 
 use crate::completion::cursor;
 use crate::fixture::{PATH, assert_text, hover_markup, pos, workspace};
@@ -21,10 +15,8 @@ fn hover_at(bone: &BoneWorkspace, pos: Position) -> String {
 
 #[test]
 fn brace_hover_resolves_the_block_in_every_braced_form() {
-    // Each block's tail is a MarkerS literal, so the BLOCK hovers "MarkerS"
-    // while any enclosing node that might shadow the brace offset hovers
-    // something else (or nothing). (name, source, text ending at the open
-    // brace, text ending at the close brace).
+    // Each block's tail is a MarkerS literal, so only the block itself hovers "MarkerS".
+    // (name, source, text ending at the open brace, text ending at the close brace)
     let pre = "struct MarkerS { f: int }\n";
     let cases: &[(&str, &str, &str, &str)] = &[
         (

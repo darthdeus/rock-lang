@@ -68,9 +68,7 @@ impl Project {
         Self { dir }
     }
 
-    /// The workspace's canonical key for `rel`. Per-file diagnostics are keyed by
-    /// `canonicalize_lenient`, which differs from `std::fs::canonicalize` on
-    /// Windows.
+    /// Workspace key for `rel`: `canonicalize_lenient`, not `fs::canonicalize` (differs on Windows).
     pub fn path(&self, rel: &str) -> String {
         bone_query::canonicalize_lenient(&self.dir.path().join(rel).to_string_lossy())
     }

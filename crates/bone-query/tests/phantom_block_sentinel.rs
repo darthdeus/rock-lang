@@ -1,8 +1,4 @@
-//! Synthetic braceless blocks (lambda `=> expr`, `@` trailing-lambda and
-//! match-arm `=> expr` bodies) span their inner expression, so brace-marker
-//! intervals derived from the block span landed 1-wide on the body's first and
-//! last characters and won the smallest-node lookup there. Every identifier
-//! offset must resolve like mid-identifier.
+//! Synthetic braceless blocks must not win the node lookup at their body's first and last char.
 
 use crate::fixture::{PATH, position_of_offset, workspace};
 
@@ -12,8 +8,7 @@ const PREAMBLE: &str = "struct MarkerS { f: int }\nenum MarkerE { AAA, BBB }\n";
 fn identifier_ends_resolve_like_its_middle_in_braceless_bodies() {
     // (case, body, references and rename edits)
     let cases: &[(&str, &str, usize)] = &[
-        // The synthetic-`return` block types as `never`, so the phantom also
-        // broke type-definition at the ends.
+        // The synthetic-`return` block types as `never`, so type-definition is checked at the ends too.
         (
             "braceless lambda body",
             "fn f(handle: MarkerS) {\n  let g = () => handle\n}\n",

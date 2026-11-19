@@ -1,6 +1,4 @@
-//! Assertions over completion label lists, shared by the completion tests.
-//! A pattern matches a label exactly; a leading or trailing `*` makes it a
-//! suffix, prefix or substring match (`movable*`, `*(*`).
+//! Label patterns match exactly; a leading or trailing `*` makes a suffix, prefix or substring match.
 
 pub fn label_matches(label: &str, pattern: &str) -> bool {
     let (lead, rest) = match pattern.strip_prefix('*') {

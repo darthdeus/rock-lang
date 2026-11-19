@@ -1,8 +1,4 @@
-//! Context-coverage sweep: completion, hover and goto-definition at a cursor
-//! in every syntactic context, each against a shared preamble of named
-//! symbols. Guards against a context silently returning nothing (field-name
-//! completion "eating" a value slot, literal recovery failing inside a
-//! lambda). Each test reports all broken contexts at once.
+//! Context-coverage sweep: completion, hover and goto-definition in every syntactic context.
 
 use crate::completion::{complete_in, cursor, label_matches, labels_of};
 use bone_query::BoneWorkspace;
@@ -176,11 +172,7 @@ fn completion_context_sweep() {
     report("completion", fails);
 }
 
-/// Hover must agree at every offset of an identifier. A spurious 1-wide
-/// `never` node at an identifier start once made hover show `never` at the
-/// first char and the real type one char in (canonical: a lambda body
-/// `() => IDENT` in a struct-literal field). Each `MARKER` (int) must hover
-/// informatively, and identically at its first char and one char in.
+/// Each `MARKER` (int) must hover informatively, identically at its first char and one char in.
 #[test]
 fn hover_context_sweep() {
     let cases: &[(&str, &str)] = &[
@@ -233,8 +225,7 @@ fn hover_context_sweep() {
     report("hover", fails);
 }
 
-/// The same phantom-`never` boundary made goto-definition return nothing at
-/// the first char of a lambda-body identifier.
+/// Goto-definition must resolve at the first char of a lambda-body identifier.
 #[test]
 fn definition_context_sweep() {
     let cases: &[(&str, &str)] = &[

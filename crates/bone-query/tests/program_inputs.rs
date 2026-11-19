@@ -1,6 +1,4 @@
-//! The editor loads a program's inputs the way a compile does: a stdlib that
-//! does not parse and a package graph that does not build are diagnostics, not
-//! a partial stdlib or an empty alias table that checks a different program.
+//! A broken stdlib or package graph is a diagnostic, not a silently different program.
 
 use bone_query::BoneWorkspace;
 use lsp_types::DiagnosticSeverity;

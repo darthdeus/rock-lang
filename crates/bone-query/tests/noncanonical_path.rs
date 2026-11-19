@@ -1,9 +1,4 @@
-//! A file reached via a non-canonical path spelling must resolve to the same
-//! module as the canonical one, not a second copy. On Windows, discovery
-//! canonicalizes to the `\\?\C:\...` form while the client sends `C:\...`;
-//! keyed verbatim, the file loads twice ("duplicate struct `Camera` across
-//! modules") and every read query misses it. A `/./` segment reproduces this
-//! on every platform: `canonicalize` collapses it, a string key keeps it.
+//! A non-canonical path spelling (Windows `\\?\` vs `C:\`, or `/./`) must resolve to one module.
 
 use bone_query::BoneWorkspace;
 use std::path::Path;
