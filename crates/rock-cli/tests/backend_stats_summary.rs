@@ -57,6 +57,22 @@ fn concrete_build_summary_reports_folded_totals_on_every_build() {
     assert!(text.contains("targeted result binding:"), "{text}");
     assert!(!text.contains("substitution: calls"), "{text}");
 
+    let graph = text
+        .lines()
+        .find(|line| line.contains("graph walks (one timed run):"))
+        .unwrap_or_else(|| panic!("no graph walks in report:\n{text}"));
+    let totals = pair(graph, "graph walks (one timed run): ", " owners, ");
+    assert!(totals.0 > 0, "{graph}");
+    let builds: Vec<_> = text
+        .lines()
+        .filter(|line| line.contains("graph build:"))
+        .collect();
+    assert_eq!(builds.len(), 3, "one graph build per iteration:\n{text}");
+    for build in builds {
+        let (_, walks) = build.split_once(" (").expect("graph build walk counts");
+        assert_eq!(pair(walks, "", " owner walks, "), totals, "{build}");
+    }
+
     let facts = text
         .lines()
         .find(|l| l.contains("concrete plan facts"))

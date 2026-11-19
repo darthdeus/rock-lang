@@ -700,77 +700,10 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
         );
     }
     let graph = &skull.graph_census;
-    if graph.owner_visits > 0 {
+    if graph.expanded > 0 {
         println!(
-            "  graph body facts (one timed run): {} owners, {} expanded; expressions {}, overloads {}, fn-values {}, dispatched {}, implicit-iter {}, bound-trees {}, bound-calls {}, iterators {}",
-            graph.owner_visits,
-            graph.expanded,
-            graph.body_exprs_scanned,
-            graph.resolved_overload_rows,
-            graph.fn_value_rows,
-            graph.dispatched_rows,
-            graph.implicit_iter_rows,
-            graph.bound_tree_rows,
-            graph.bound_call_rows,
-            graph.iterator_rows,
-        );
-        println!(
-            "  graph wavefront (one timed run; census {}): {} frontiers; owners p50/p95/max {}/{}/{}; singleton {}; ordinary/always {}/{}; ready/same-frontier-dependency {}/{}",
-            if graph.census_enabled {
-                "enabled"
-            } else {
-                "disabled; set ROCK_LOG=debug"
-            },
-            graph.frontier_count,
-            graph.frontier_owner_p50,
-            graph.frontier_owner_p95,
-            graph.frontier_owner_max,
-            graph.singleton_frontiers,
-            graph.ordinary_owner_visits,
-            graph.always_emitted_owner_visits,
-            graph.frontier_ready_owners,
-            graph.frontier_same_frontier_dependency_owners,
-        );
-        println!(
-            "  graph expansion: owner total/p50/p95/max {} / {} / {} / {} us; mono attempts/new/write/timed-mutations {}/{}/{}/{}; interner self-time {:.3} ms",
-            graph.expansion_ns_total / 1_000,
-            graph.expansion_ns_p50 / 1_000,
-            graph.expansion_ns_p95 / 1_000,
-            graph.expansion_ns_max / 1_000,
-            graph.mono_intern_attempts,
-            graph.mono_new_types,
-            graph.mono_write_acqs,
-            graph.mono_timed_mutation_calls,
-            graph.mono_interner_self_ns as f64 / 1_000_000.0,
-        );
-        println!(
-            "  graph contributions: reached {}, bound trees {}, edges {}, sites {}, struct-default domains {}, rejections {}, failures {}, always targets {}; index updates subst/trees/always/preds/decls {}/{}/{}/{}/{}; live unique {}/{}/{}/{}/{}",
-            graph.contribution_reached,
-            graph.contribution_bound_trees,
-            graph.contribution_edges,
-            graph.contribution_sites,
-            graph.contribution_struct_default_domains,
-            graph.contribution_rejections,
-            graph.contribution_failures,
-            graph.contribution_always_emitted_targets,
-            graph.index_subst_updates,
-            graph.index_trees_updates,
-            graph.index_always_emitted_updates,
-            graph.index_preds_updates,
-            graph.index_decls_updates,
-            graph.index_subst_unique,
-            graph.index_trees_unique,
-            graph.index_always_emitted_unique,
-            graph.index_preds_unique,
-            graph.index_decls_unique,
-        );
-        println!(
-            "  graph phases: uninstall {:.3} ms, index {:.3} ms, commit {:.3} ms, derive {:.3} ms, post-pass {:.3} ms",
-            graph.uninstall_ns as f64 / 1_000_000.0,
-            graph.index_maintenance_ns as f64 / 1_000_000.0,
-            graph.index_commit_ns as f64 / 1_000_000.0,
-            graph.derive_ns as f64 / 1_000_000.0,
-            graph.post_pass_ns as f64 / 1_000_000.0,
+            "  graph walks (one timed run): {} owners, {} settle rounds",
+            graph.expanded, graph.settle_rounds,
         );
     }
     let concrete = &skull.concrete_stats;
