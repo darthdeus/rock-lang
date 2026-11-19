@@ -1079,6 +1079,17 @@ fn gc_window_prepare() {
     stone_lua_counter_install()
 }
 
+fn gc_window_reset() {
+    GC_WIN_FRAME = 0
+    GC_WIN_N = -1
+    GC_WIN_START = -1
+    GC_WIN_MODE_RUNNING = false
+    GC_WIN_COLLECTOR_RUNNING_AT_START = false
+    GC_WIN_T0_KB = 0.0
+    GC_WIN_RESULT = -1.0
+    gc_window_clear_accounting()
+}
+
 pub fn gc_window_clear_accounting() {
     GC_WIN_SPLIT_AVAILABLE = false
     GC_WIN_TRACE_AVAILABLE = false
@@ -1694,21 +1705,34 @@ fn perf_frame_metric(live: Metric, history: Metric, trailing: bool = false) -> M
 }
 
 fn frame_metrics_reset() {
-    PROFILE_HEAP_KB = metric_new("heap_kb", MAX_FRAME_HISTORY)
-    metric_reset(PERF_FRAME_LOGIC_CPU)
-    FRAME_LOGIC_CPU = metric_new("logic_cpu", MAX_FRAME_HISTORY)
-    metric_reset(PERF_FRAME_RENDER_CPU)
-    FRAME_RENDER_CPU = metric_new("render_cpu", MAX_FRAME_HISTORY)
-    metric_reset(PERF_FRAME_EFFECTIVE_CPU)
-    FRAME_EFFECTIVE_CPU = metric_new("effective_cpu", MAX_FRAME_HISTORY)
-    metric_reset(PERF_FRAME_PRESENT)
-    FRAME_PRESENT = metric_new("present", MAX_FRAME_HISTORY)
-    metric_reset(PERF_FRAME_GPU)
-    FRAME_GPU = metric_new("gpu", MAX_FRAME_HISTORY)
-    metric_reset(PERF_FRAME_RENDERED)
-    FRAME_RENDERED = metric_new("rendered", MAX_FRAME_HISTORY)
-    metric_reset(PERF_FRAME_EVENT_TO_END)
-    FRAME_EVENT_TO_END = metric_new("event_to_end_frame", MAX_FRAME_HISTORY)
+    for m in [PROFILE_HEAP_KB, FRAME_LOGIC_CPU, PERF_FRAME_LOGIC_CPU, FRAME_RENDER_CPU,
+            PERF_FRAME_RENDER_CPU, FRAME_EFFECTIVE_CPU, PERF_FRAME_EFFECTIVE_CPU, FRAME_PRESENT,
+            PERF_FRAME_PRESENT, FRAME_GPU, PERF_FRAME_GPU, FRAME_RENDERED, PERF_FRAME_RENDERED,
+            FRAME_EVENT_TO_END, PERF_FRAME_EVENT_TO_END] {
+        metric_reset(m)
+    }
+}
+
+fn profiler_reset_stats() {
+    section_time_reset()
+    section_request_kb_reset()
+    section_work_reset()
+    section_observation_reset()
+    PROFILER.frame_count = 0
+    PROFILER.worst_frame_time = 0.0
+    PROFILER.lag_spike_count = 0
+    PROFILER.lag_spikes.clear()
+    PROFILER.heap_drops = 0
+    PROFILER.last_event_to_end_frame_ms = -1.0
+    PROF_WORST.count = 0
+    frame_metrics_reset()
+}
+
+fn image_profile_restart() {
+    stone_reset_image_profile_stats()
+    residency_reset_profile_stats()
+    IMAGE_PROFILE_STARTED = true
+    residency_profile_census_capture()
 }
 global IMAGE_PROFILE_STARTED: bool = false
 
@@ -1772,13 +1796,7 @@ fn init_profiler() {
     PROF_OPEN_TOP = 0
     PROF_DROPPED_TOP = 0
     GC_WIN_SECTION_REGISTRY_FROZEN = false
-    GC_WIN_N = -1
-    GC_WIN_FRAME = 0
-    GC_WIN_MODE_RUNNING = false
-    GC_WIN_COLLECTOR_RUNNING_AT_START = false
-    GC_WIN_T0_KB = 0.0
-    GC_WIN_RESULT = -1.0
-    gc_window_clear_accounting()
+    gc_window_reset()
     IMAGE_PROFILE_STARTED = false
     for name in PROFILE_DECLARED_SECTIONS { let _ = section_id(name, "profile_declare_section") }
     gc_window_prepare()
@@ -1996,61 +2014,26 @@ fn profiler_apply_pending_enabled() {
 }
 
 pub fn profiler_clear_samples() {
-    section_time_reset()
-    section_request_kb_reset()
-    section_work_reset()
-    section_observation_reset()
-    PROFILER.frame_count = 0
-    PROFILER.worst_frame_time = 0.0
-    PROFILER.lag_spike_count = 0
-    PROFILER.lag_spikes.clear()
-    PROFILER.heap_drops = 0
+    profiler_reset_stats()
     PROFILER.last_heap_bytes = 0
     PROFILER.last_heap_growth_bytes = 0
     PROFILER.last_frame_collected = false
-    metric_reset(PROFILE_HEAP_KB)
-    metric_reset(FRAME_LOGIC_CPU)
-    metric_reset(PERF_FRAME_LOGIC_CPU)
-    metric_reset(FRAME_RENDER_CPU)
-    metric_reset(PERF_FRAME_RENDER_CPU)
-    metric_reset(FRAME_EFFECTIVE_CPU)
-    metric_reset(PERF_FRAME_EFFECTIVE_CPU)
-    metric_reset(FRAME_PRESENT)
-    metric_reset(PERF_FRAME_PRESENT)
-    metric_reset(FRAME_GPU)
-    metric_reset(PERF_FRAME_GPU)
-    metric_reset(FRAME_RENDERED)
-    metric_reset(PERF_FRAME_RENDERED)
-    metric_reset(FRAME_EVENT_TO_END)
-    metric_reset(PERF_FRAME_EVENT_TO_END)
     PROF_CUR.count = 0
     PROF_CUR.dropped = 0
     PROF_LAST.count = 0
     PROF_LAST.dropped = 0
-    PROF_WORST.count = 0
     PROF_OPEN_TOP = 0
     PROF_DROPPED_TOP = 0
     PROFILER.current_depth = 0
     PROFILER.frame_profile_active = false
     PROFILER.pending_latency_event_t0 = -1.0
-    PROFILER.last_event_to_end_frame_ms = -1.0
     for i in 0..SECTION_COUNT { nb_set(SECTION_LAST_OBSERVATION_MS, i, 0.0) }
     section_pool_unfreeze()
-    GC_WIN_FRAME = 0
-    GC_WIN_N = -1
-    GC_WIN_START = -1
-    GC_WIN_MODE_RUNNING = false
-    GC_WIN_COLLECTOR_RUNNING_AT_START = false
-    GC_WIN_T0_KB = 0.0
-    GC_WIN_RESULT = -1.0
-    gc_window_clear_accounting()
+    gc_window_reset()
     section_window_begin_frame()
     PROFILER_ROWS.clear()
     PROFILER_ROWS_T = -1.0
-    stone_reset_image_profile_stats()
-    residency_reset_profile_stats()
-    IMAGE_PROFILE_STARTED = true
-    residency_profile_census_capture()
+    image_profile_restart()
 }
 
 // GPU timer: a GL_TIME_ELAPSED query
@@ -2171,12 +2154,7 @@ fn profile_frame_begin() {
         PERF_DRAWABLE_W = dw
         PERF_DRAWABLE_H = dh
     }
-    if !IMAGE_PROFILE_STARTED {
-        stone_reset_image_profile_stats()
-        residency_reset_profile_stats()
-        IMAGE_PROFILE_STARTED = true
-        residency_profile_census_capture()
-    }
+    if !IMAGE_PROFILE_STARTED { image_profile_restart() }
 
     profile_frame_timing_begin()
     sim_alloc_census_frame_begin()
@@ -2204,41 +2182,15 @@ fn profile_frame_begin() {
 fn profiler_finish_warmup(include_current_frame: bool) {
     gc_window_prepare()
     PROFILER.warmup_active = false
-    section_time_reset()
-    section_request_kb_reset()
-    section_work_reset()
-    section_observation_reset()
-    PROFILER.frame_count = 0
-    PROFILER.worst_frame_time = 0.0
-    PROFILER.lag_spike_count = 0
-    PROF_WORST.count = 0
-    PROFILER.lag_spikes.clear()
-    metric_reset(PROFILE_HEAP_KB)
-    PROFILER.heap_drops = 0
-    metric_reset(FRAME_LOGIC_CPU)
-    metric_reset(PERF_FRAME_LOGIC_CPU)
-    metric_reset(FRAME_RENDER_CPU)
-    metric_reset(PERF_FRAME_RENDER_CPU)
-    metric_reset(FRAME_EFFECTIVE_CPU)
-    metric_reset(PERF_FRAME_EFFECTIVE_CPU)
-    metric_reset(FRAME_PRESENT)
-    metric_reset(PERF_FRAME_PRESENT)
-    metric_reset(FRAME_GPU)
-    metric_reset(PERF_FRAME_GPU)
+    profiler_reset_stats()
     stone_gpu_scopes_reset_stats()
-    metric_reset(FRAME_RENDERED)
-    metric_reset(PERF_FRAME_RENDERED)
-    metric_reset(FRAME_EVENT_TO_END)
-    metric_reset(PERF_FRAME_EVENT_TO_END)
-    PROFILER.last_event_to_end_frame_ms = -1.0
     if include_current_frame {
         stone_reset_image_profile_stats_to_frame()
         residency_reset_profile_stats_to_frame()
+        residency_profile_census_capture()
     } else {
-        stone_reset_image_profile_stats()
-        residency_reset_profile_stats()
+        image_profile_restart()
     }
-    residency_profile_census_capture()
 }
 
 fn profile_frame_end() {
