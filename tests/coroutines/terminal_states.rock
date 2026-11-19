@@ -81,13 +81,13 @@ co fn bad() -> Coroutine<int> {
 fn test_raised_resume_is_terminal() {
     let c = bad()
     let v1 = c.resume()
-    print(v1 ?? -1)                // 1
+    print(v1 ?? -1)
     let raised = try_call(() => { let _ = c.resume() })
     print(raised)
     print(c.status())
     print(!c.completed())
     let v3 = c.resume()
-    if v3 == null { print("null") } else { print(v3) }  // "null"
+    if v3 == null { print("null") } else { print(v3) }
     print(c.status())
 }
 
@@ -99,15 +99,15 @@ co fn clean() -> Coroutine<int> {
 @test(output = "1\n2\nnull\ndead\ntrue\ndead")
 fn test_no_error_clean_path() {
     let c = clean()
-    print(c.resume() ?? -1)        // 1
-    print(c.resume() ?? -1)        // 2
-    let v = c.resume()             // null (body fall-off transitions __state < 0)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    let v = c.resume()
     if v == null { print("null") } else { print(v) }
-    print(c.status())              // "dead" (fall-off terminal)
+    print(c.status())
     print(c.completed())
     let v2 = c.resume()
     if v2 == null { /* dead */ }
-    print(c.status())              // "dead" (idempotent)
+    print(c.status())
 }
 
 global ERR_KILL_LOG: [string] = []
@@ -130,7 +130,7 @@ fn test_resume_error_runs_cleanup_once() {
     ERR_KILL_LOG = []
     let c = bad_with_hook()
     let v = c.resume()
-    print(v ?? -1)                 // 1
+    print(v ?? -1)
     print(try_call(() => { let _ = c.resume() }))
     print(c.status())
     print(!completed(c))
@@ -192,10 +192,10 @@ co fn ksuicide() -> Coroutine<int> {
 fn test_self_kill_then_yield_stays_dead() {
     K_SELF = ksuicide()
     if let c = K_SELF {
-        let _ = resume(c)   // -> yield 1
+        let _ = resume(c)
         let _ = resume(c)   // -> kill(self); reaches `yield 2`, must stay dead
         let st = status(c)
-        let _ = resume(c)   // no-op on a dead coroutine
+        let _ = resume(c)
         print("status={st} log={K_LOG} defer={K_DEFER}")
     }
 }

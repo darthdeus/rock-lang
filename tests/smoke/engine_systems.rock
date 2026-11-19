@@ -149,7 +149,6 @@ fn test_update_systems_run_in_stage_order() {
     clear(UPDATE_LOG)
     run_update_systems()
 
-    // Should run in stage order: input(0), physics(10), ai(20), render(100)
     assert_eq(vec_len(UPDATE_LOG), 4)
     assert_eq(UPDATE_LOG[0], "input")
     assert_eq(UPDATE_LOG[1], "physics")

@@ -11,8 +11,8 @@ fn test_g_access_unshadowed() {
 @test
 fn test_g_access_bypasses_local_shadow() {
     let GAF_GLOBAL = 11
-    assert_eq(GAF_GLOBAL, 11)         // bare reads local
-    assert_eq(_G.GAF_GLOBAL, 200)     // _G. reads global
+    assert_eq(GAF_GLOBAL, 11)
+    assert_eq(_G.GAF_GLOBAL, 200)
 }
 
 global GAF_COUNTER: int = 0
@@ -21,18 +21,18 @@ global GAF_COUNTER: int = 0
 fn test_g_access_write() {
     _G.GAF_COUNTER = 5
     assert_eq(_G.GAF_COUNTER, 5)
-    _G.GAF_COUNTER = 0  // reset for other tests
+    _G.GAF_COUNTER = 0
 }
 
 global GAF_SHADOWED: int = 50
 
 @test
 fn test_g_access_write_bypasses_shadow() {
-    let GAF_SHADOWED = 999       // local, doesn't touch global
+    let GAF_SHADOWED = 999
     _G.GAF_SHADOWED = 51
-    assert_eq(GAF_SHADOWED, 999) // local unaffected
+    assert_eq(GAF_SHADOWED, 999)
     assert_eq(_G.GAF_SHADOWED, 51)
-    _G.GAF_SHADOWED = 50         // restore
+    _G.GAF_SHADOWED = 50
 }
 
 // A bare global read in another fn's body emits as `_G.<name>`, so a

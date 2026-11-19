@@ -11,8 +11,8 @@ macro emit_zero(Name: ident) {
 }
 
 emit_zero!(zero_a)
-emit_zero!(zero_b,)  // trailing comma
-emit_zero(zero_c)    // sigil-less still works
+emit_zero!(zero_b,)
+emit_zero(zero_c)
 
 macro decl3(A: ident, B: ident, C: ident) {
     fn A() -> int { return 1 }
@@ -21,9 +21,9 @@ macro decl3(A: ident, B: ident, C: ident) {
 }
 
 decl3!(
-    multiline_a,  // first arg on its own line
-    multiline_b,  // trailing comment after comma
-    multiline_c   // last arg, no trailing comma
+    multiline_a,
+    multiline_b,
+    multiline_c
 )
 
 macro answer() { 42 }

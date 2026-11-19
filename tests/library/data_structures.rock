@@ -6,11 +6,9 @@
 fn test_map_basic_operations() {
     let map: Map<string, int> = map_new()
 
-    // Test empty map
     assert $ map.len() == 0
     assert $ get(map, "nonexistent") == null
 
-    // Test insertion
     insert(map, "one", 1)
     insert(map, "two", 2)
     insert(map, "three", 3)
@@ -20,12 +18,10 @@ fn test_map_basic_operations() {
     assert $ get(map, "two") == 2
     assert $ get(map, "three") == 3
 
-    // Test overwrite
     insert(map, "one", 100)
     assert $ get(map, "one") == 100
-    assert $ map.len() == 3 // Length should not change
+    assert $ map.len() == 3
 
-    // Test removal
     remove(map, "two")
     assert $ map.len() == 2
     assert $ get(map, "two") == null
@@ -49,7 +45,7 @@ fn test_array_operations() {
         index_sum = index_sum + i
     }
     assert sum == 150
-    assert index_sum == 10 // 0-based: 0+1+2+3+4
+    assert index_sum == 10
 }
 
 // Test complex nested data structures
@@ -63,7 +59,6 @@ struct Room {
 fn test_complex_nested_structures() {
     let dungeon: Map<string, Room> = map_new()
 
-    // Create room 1
     let items1 = ["sword", "key"]
     let connections1: Map<string, string> = map_new()
     insert(connections1, "north", "room2")
@@ -75,7 +70,6 @@ fn test_complex_nested_structures() {
         connections: connections1
     })
 
-    // Create room 2
     let items2 = ["potion", "gold"]
     let connections2: Map<string, string> = map_new()
     insert(connections2, "south", "room1")
@@ -86,7 +80,6 @@ fn test_complex_nested_structures() {
         connections: connections2
     })
 
-    // Test traversal
     let total_rooms = 0
     let total_items = 0
     let total_connections = 0
@@ -101,8 +94,8 @@ fn test_complex_nested_structures() {
     }
 
     assert total_rooms == 2
-    assert total_items == 4 // 2 + 2
-    assert total_connections == 3 // 2 + 1
+    assert total_items == 4
+    assert total_connections == 3
 }
 
 // Test Map with null/optional values
@@ -136,7 +129,6 @@ fn test_map_with_nullable_values() {
     assert non_null_count == 1
     assert zero_count == 1
 
-    // Test that getting a non-existent key returns null
     assert $ get(optional_map, "no_value") == null
     assert $ get(optional_map, "nonexistent") == null
 }
@@ -146,7 +138,6 @@ fn test_map_with_nullable_values() {
 fn test_map_iteration_consistency() {
     let test_map: Map<string, int> = map_new()
 
-    // Add items in a specific order
     insert(test_map, "z", 1)
     insert(test_map, "a", 2)
     insert(test_map, "m", 3)
@@ -154,7 +145,6 @@ fn test_map_iteration_consistency() {
     let first_run = ""
     let second_run = ""
 
-    // First iteration
     for (key, value) in test_map {
         first_run = first_run + key
     }
@@ -177,7 +167,6 @@ fn test_map_iteration_consistency() {
 fn test_large_collections() {
     let large_map: Map<string, int> = map_new()
 
-    // Add 100 items
     for i in 0..100 {
         let key = "item_" + to_string(i)
         insert(large_map, key, i * 2)
@@ -185,7 +174,6 @@ fn test_large_collections() {
 
     assert $ large_map.len() == 100
 
-    // Verify a few specific items
     assert $ get(large_map, "item_0") == 0
     assert $ get(large_map, "item_50") == 100
     assert $ get(large_map, "item_99") == 198
@@ -199,13 +187,13 @@ fn test_large_collections() {
         sum = sum + value
 
         // Basic validation
-        assert $ key.len() > 5 // "item_" prefix + number
+        assert $ key.len() > 5
         assert $ value >= 0
         assert $ value < 200
     }
 
     assert count == 100
-    assert sum == 9900 // sum of 0*2 + 1*2 + ... + 99*2 = 2 * (0+1+...+99) = 2 * 4950
+    assert sum == 9900
 }
 
 // String keys with special characters, including the empty string, round-trip

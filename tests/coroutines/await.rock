@@ -25,10 +25,10 @@ co fn outer_awaits() -> Coroutine<int, int, ()> {
 @test(output = "0\n1\n2\ninner-returned=42\n99")
 fn test_await_delegation() {
     let c = outer_awaits()
-    print(c.resume() ?? -1)  // 0
-    print(c.resume() ?? -1)  // 1
-    print(c.resume() ?? -1)  // 2
-    print(c.resume() ?? -1)  // inner-returned=42, then 99
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
 }
 
 // ---- Composition ----
@@ -48,11 +48,11 @@ co fn outer_delegates() -> Coroutine<int> {
 @test(output = "0\n1\n2\n3\n99\nnull")
 fn test_composition_basic() {
     let c = outer_delegates()
-    print(c.resume() ?? -99)  // 0 (outer)
-    print(c.resume() ?? -99)  // 1 (from inner)
-    print(c.resume() ?? -99)  // 2 (from inner)
-    print(c.resume() ?? -99)  // 3 (from inner)
-    print(c.resume() ?? -99)  // 99 (back in outer)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
     let r = c.resume()
     if r == null { print("null") } else { print(r) }
 }
@@ -110,25 +110,25 @@ co fn ns_middle() -> Coroutine<int, string> {
     yield 10
     let r = await ns_inner()
     yield 20
-    return r  // bubble inner's R up unchanged
+    return r
 }
 
 co fn ns_outer() -> Coroutine<int, string> {
     yield 100
     let r = await ns_middle()
     yield 200
-    return r  // bubble middle's R (which is inner's R) up
+    return r
 }
 
 @test(output = "100\n10\n1\n2\n20\n200\nnull\nresult=innermost")
 fn test_yield_star_three_deep_forwarding_and_return() {
     let c = ns_outer()
-    print(c.resume() ?? -1)  // 100 (outer)
-    print(c.resume() ?? -1)  // 10  (middle)
-    print(c.resume() ?? -1)  // 1   (inner)
-    print(c.resume() ?? -1)  // 2   (inner)
-    print(c.resume() ?? -1)  // 20  (middle, after await completes)
-    print(c.resume() ?? -1)  // 200 (outer, after await completes)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
     let last = c.resume()
     if last == null { print("null") } else { print(last) }
     let r = c.result()
@@ -146,11 +146,11 @@ fn test_yield_star_three_deep_forwarding_and_return() {
 @test(output = "100\n1\n2\n3\n200")
 fn test_yield_star_stored_handle_statement_form() {
     let c = outer_with_stored()
-    print(c.resume() ?? -1)        // 100 (outer's first yield)
-    print(c.resume() ?? -1)        // 1   (inner via delegation)
-    print(c.resume() ?? -1)        // 2
-    print(c.resume() ?? -1)        // 3
-    print(c.resume() ?? -1)        // 200
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
 }
 
 co fn outer_with_stored() -> Coroutine<int> {
@@ -168,9 +168,9 @@ co fn inner_with_return() -> Coroutine<int, string> {
 @test(output = "1\n7\n-1\nresult=ok")
 fn test_yield_star_stored_handle_let_binding_form() {
     let c = outer_capturing()
-    print(c.resume() ?? -1)        // 1   outer's yield
-    print(c.resume() ?? -1)        // 7   delegated (inner's only yield)
-    print(c.resume() ?? -1)        // -1  inner returns "from-inner"; outer
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
                                     //     binds `r`, then `return r` puts
                                     //     outer in terminal -- resume null
     let r = c.result()
@@ -210,11 +210,11 @@ co fn outer_delegates_resume_arg() -> Coroutine<int, (), int> {
 @test(output = "0\nouter-pre=10\n1\ninner-a=20\n2\ninner-b=30\n99\nouter-post=40\n-1")
 fn test_yield_star_resume_arg_flow() {
     let c = outer_delegates_resume_arg()
-    print(c.resume(0) ?? -1)   // 0 (outer first yield); arg=0 discarded
-    print(c.resume(10) ?? -1)  // outer-pre=10, then yields 1 (inner first yield)
-    print(c.resume(20) ?? -1)  // inner-a=20, then yields 2 (inner second yield)
-    print(c.resume(30) ?? -1)  // inner-b=30, inner falls off, outer yields 99
-    print(c.resume(40) ?? -1)  // outer-post=40, body falls off; resume returns -1
+    print(c.resume(0) ?? -1)
+    print(c.resume(10) ?? -1)
+    print(c.resume(20) ?? -1)
+    print(c.resume(30) ?? -1)
+    print(c.resume(40) ?? -1)
 }
 
 // ---- Kill propagation ----
@@ -254,10 +254,10 @@ co fn ks_outer() -> Coroutine<int> {
 fn test_yield_star_kill_propagates_two_deep() {
     KILL_LOG = []
     let c = ks_outer()
-    print(c.resume() ?? -1)  // 100 -- outer's first yield
-    print(c.resume() ?? -1)  // 10  -- middle's first yield
-    print(c.resume() ?? -1)  // 1   -- innermost yield 1
-    print(c.resume() ?? -1)  // 2   -- innermost yield 2
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
     // While suspended at innermost's `yield 2`, kill the outermost.
     // Expected: bottom-up fire of on_killed (innermost, middle, outer).
     c.kill()

@@ -67,7 +67,7 @@ fn test_nested_enum_match_extracts_inner() {
     let captured = 0
     while let L(J(x)) = e {
         captured = x
-        e = Outer::M(0)  // make next iter not match
+        e = Outer::M(0)
     }
     assert_eq(captured, 42)
 }

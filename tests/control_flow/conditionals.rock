@@ -53,11 +53,11 @@ fn test_else_if_chain() {
 fn test_shadow_variable_in_if() {
     let x: int = 5
     let result = if true {
-        let x = x  // Shadow outer x with same value
-        print(x)   // Print shadowed x
+        let x = x
+        print(x)
         x
     } else {
-        print(x)   // Print outer x
+        print(x)
         x
     }
     print(result)
@@ -67,7 +67,7 @@ fn test_shadow_variable_in_if() {
 fn test_nested_if_with_shadowing() {
     let x: int? = 5
     let result = if true {
-        let x = x.unwrap()  // Shadow with unwrapped value
+        let x = x.unwrap()
         print(x)
         5
     } else {
@@ -96,7 +96,6 @@ fn test_conditional_with_null_value() {
     let x = 5
     let y = 0
     
-    // Test conditional that returns null with type annotation
     let result: any? = if x > 5 {
         y = 20
         null
@@ -105,7 +104,6 @@ fn test_conditional_with_null_value() {
         null
     }
     
-    // Check that assignments happened
     if y == 50 {
         print("assignment complete")
     }
@@ -380,9 +378,9 @@ fn test_iife_performance_overhead() {
     }
 
     assert(results.len() == 1000, "Should process all 1000 values")
-    assert(results[0] == 0, "First value should be 0")    // i=0, even: 0*2=0
-    assert(results[1] == 3, "Second value should be 3")   // i=1, odd: 1*3=3
-    assert(results[2] == 4, "Third value should be 4")    // i=2, even: 2*2=4
+    assert(results[0] == 0, "First value should be 0")
+    assert(results[1] == 3, "Second value should be 3")
+    assert(results[2] == 4, "Third value should be 4")
 }
 
 // Test 19: Truthiness edge case - and/or optimization bug
@@ -394,7 +392,6 @@ fn test_truthiness_edge_case() {
     // If using (cond and then_value or else_value), this fails when then_value is false
     let x = if true { flag } else { true }
 
-    // Should be false, but and/or optimization would give true
     assert(x == false, "Should preserve false value, got: " + x.to_string())
 
     // Another edge case - consistent boolean type

@@ -71,22 +71,18 @@ fn comparison_operators_int_and_float() {
 
 @test(output = "false\nside effect called\ntrue")
 fn short_circuit_and_operator() {
-    // Test && short-circuit: false && side_effect() should not call side_effect
     let result1 = false && side_effect_true()
     print(result1)
 
-    // Test && short-circuit: true && side_effect() should call side_effect
     let result2 = true && side_effect_true()
     print(result2)
 }
 
 @test(output = "true\nside effect called\nfalse")
 fn short_circuit_or_operator() {
-    // Test || short-circuit: true || side_effect() should not call side_effect
     let result1 = true || side_effect_false()
     print(result1)
 
-    // Test || short-circuit: false || side_effect() should call side_effect
     let result2 = false || side_effect_false()
     print(result2)
 }

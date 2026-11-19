@@ -5,12 +5,12 @@
 co fn mutable_closure() -> Coroutine<int> {
     let count = 0
     let bump = () => { count = count + 10 }
-    yield count             // 0
-    bump()                  // count := 10 via closure
-    yield count             // 10
-    bump()                  // count := 20
-    bump()                  // count := 30
-    yield count             // 30
+    yield count
+    bump()
+    yield count
+    bump()
+    bump()
+    yield count
 }
 
 @test(output = "0\n10\n30")
@@ -30,12 +30,12 @@ co fn shared_capture() -> Coroutine<int> {
     let reader = () => n
     let bumper = () => { n = n + 1 }
 
-    yield reader()          // 100
+    yield reader()
     bumper()
-    yield reader()          // 101
+    yield reader()
     bumper()
     bumper()
-    yield reader()          // 103
+    yield reader()
 }
 
 @test(output = "100\n101\n103")
@@ -55,13 +55,13 @@ co fn long_lived_closure() -> Coroutine<int> {
     let snapshot = () => x
 
     x = 1
-    yield snapshot()        // 1
+    yield snapshot()
     x = 2
-    yield snapshot()        // 2
+    yield snapshot()
     x = 10
-    yield snapshot()        // 10
+    yield snapshot()
     x = x * 5
-    yield snapshot()        // 50
+    yield snapshot()
 }
 
 @test(output = "1\n2\n10\n50")

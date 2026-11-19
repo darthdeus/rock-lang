@@ -46,7 +46,6 @@ fn test_side_effect_arg_evaluated_once() {
     // Naive textual substitution: x → next_counter(); body becomes
     // `next_counter() + next_counter()`, counter ends at 2, result = 1+2 = 3.
     // Hygenic / let-binding substitution: counter ends at 1, result = 1+1 = 2.
-    // Test both possible behaviors and document which we get.
     assert(SIDE_EFFECT_COUNTER == 1 || SIDE_EFFECT_COUNTER == 2,
         "counter advanced — sanity check")
     if SIDE_EFFECT_COUNTER == 2 {

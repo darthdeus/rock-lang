@@ -28,7 +28,6 @@ fn test_unwrap_with_variable_usage() {
 
     if mesh != null {
         let mesh = mesh
-        // Use the unwrapped mesh multiple times
         draw_mesh(mesh)
         draw_mesh(mesh)
         assert_eq(mesh.data, 42)

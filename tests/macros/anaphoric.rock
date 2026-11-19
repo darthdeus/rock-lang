@@ -16,8 +16,8 @@ macro ana_read_global() -> int {
 @test
 fn test_anaphoric_picks_caller_local_over_def_global() {
     let ANA_GLOBAL = 42
-    assert_eq(ana_read_anaphoric(), 42)   // ^X reads caller local
-    assert_eq(ana_read_global(), 1000)    // bare X stays hygienic
+    assert_eq(ana_read_anaphoric(), 42)
+    assert_eq(ana_read_global(), 1000)
 }
 
 macro ana_double() -> int {

@@ -238,7 +238,6 @@ fn nonfor_enumerate_map() {
 
 @test(output = "1-2\n4-5\n7-8")
 fn nested_tuple_first_element() {
-    // Test destructuring nested tuples
     let items: [((int, int), string)] = vec_new()
     vec_push(items, ((1, 2), "a"))
     vec_push(items, ((4, 5), "b"))
@@ -258,7 +257,7 @@ fn enumerate_nested_tuple_structures() {
 
     // Enumerate gives index and whole tuple
     for (i, tuple) in enumerate(items) {
-        let pair = tuple.0  // First element is the nested tuple
+        let pair = tuple.0
         print("{i}: ({pair.0},{pair.1})")
     }
 }

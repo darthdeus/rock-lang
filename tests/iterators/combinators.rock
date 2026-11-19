@@ -63,7 +63,7 @@ fn filter_over_vec() {
     for x in v.iter().filter(x => x % 2 == 0) {
         total += x
     }
-    assert_eq(total, 12) // 2 + 4 + 6
+    assert_eq(total, 12)
 }
 
 @test
@@ -129,7 +129,7 @@ fn break_through_chain() {
         if x >= 6 { break }
         seen += 1
     }
-    assert_eq(seen, 2) // 2, 4
+    assert_eq(seen, 2)
 }
 
 @test
@@ -140,7 +140,7 @@ fn continue_through_chain() {
         if x % 2 == 0 { continue }
         total += x
     }
-    assert_eq(total, 8) // 3 + 5
+    assert_eq(total, 8)
 }
 
 @test
@@ -230,7 +230,7 @@ fn zip_over_mapped_chains() {
     for (x, y) in zip(a.iter().map(x => x * 10), b.iter()) {
         total += x + y
     }
-    assert_eq(total, 66) // (10+1) + (20+2) + (30+3)
+    assert_eq(total, 66)
 }
 
 @test
@@ -373,8 +373,8 @@ fn digits<I: Iterator<int>>(it: I) -> int {
 @test
 fn skip_cases() {
     assert_eq(digits([1, 2, 3, 4, 5].iter().skip(2)), 345)
-    assert_eq([1, 2].iter().skip(5).count(), 0)   // skip past end -> empty
-    assert_eq(digits([7, 8].iter().skip(0)), 78)  // skip 0 -> unchanged
+    assert_eq([1, 2].iter().skip(5).count(), 0)
+    assert_eq(digits([7, 8].iter().skip(0)), 78)
     // Countdown { from: 5 } yields 5,4,3,2,1; skip 2 -> 3,2,1
     assert_eq(digits((Countdown { from: 5 }).iter().skip(2)), 321)
 }
@@ -383,7 +383,7 @@ fn skip_cases() {
 fn step_by_basic() {
     // 0..10 step 3 -> 0,3,6,9
     assert_eq(digits((0..10).iter().step_by(3)), 369)
-    assert_eq(digits((0..4).iter().step_by(1)), 123)   // step 1 -> 1,2,3 (0 folds out)
+    assert_eq(digits((0..4).iter().step_by(1)), 123)
 }
 
 @test
@@ -395,7 +395,7 @@ fn step_by_after_skip() {
 @test
 fn take_cases() {
     assert_eq(digits((1..100).iter().take(3)), 123)
-    assert_eq([1, 2, 3].iter().take(9).count(), 3)  // take past end clamps
+    assert_eq([1, 2, 3].iter().take(9).count(), 3)
     assert_eq([1, 2, 3].iter().take(0).count(), 0)
     // take must STOP pulling, not drain then slice: an infinite-ish user
     // source (Countdown 1000) with take(3) still terminates.
@@ -413,7 +413,7 @@ fn chain_cases() {
 @test
 fn count_basic() {
     assert_eq([9, 8, 7, 6].iter().count(), 4)
-    assert_eq((1..10).iter().filter(x => x % 2 == 1).count(), 5)  // 1,3,5,7,9
+    assert_eq((1..10).iter().filter(x => x % 2 == 1).count(), 5)
 }
 
 @test
@@ -421,7 +421,7 @@ fn min_by_and_max_by() {
     assert_eq([3, 1, 2].iter().min_by(x => x + 0.0) ?? -1, 1)
     assert_eq([5].iter().min_by(x => x + 0.0) ?? -1, 5)
     let empty: [int] = []
-    assert_eq(empty.iter().min_by(x => x + 0.0) ?? -1, -1)  // empty -> null
+    assert_eq(empty.iter().min_by(x => x + 0.0) ?? -1, -1)
     assert_eq([3, 1, 2].iter().max_by(x => x + 0.0) ?? -1, 3)
     assert_eq([3, 1, 2].iter().min_by(x => -(x + 0.0)) ?? -1, 3)
 }
@@ -431,7 +431,7 @@ fn sum_and_sum_f() {
     assert_eq([1, 2, 3].iter().sum(), 6)
     let empty: [int] = []
     assert_eq(empty.iter().sum(), 0)
-    assert_eq((1..10).iter().filter(x => x % 2 == 1).sum(), 25)  // 1+3+5+7+9
+    assert_eq((1..10).iter().filter(x => x % 2 == 1).sum(), 25)
     let s = [1.5, 2.5].iter().sum_f()
     assert(s > 3.9999 && s < 4.0001, "float sum: {s}")
 }

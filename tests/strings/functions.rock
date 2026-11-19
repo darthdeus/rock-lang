@@ -31,8 +31,8 @@ fn test_string_split() {
 
 @test(output = "A\n65")
 fn test_string_char_byte() {
-    print(string_char(65))  // 'A'
-    print("ABC".unit_at(0))  // 65
+    print(string_char(65))
+    print("ABC".unit_at(0))
 }
 
 // sb_new / sb_push / sb_build: fragments build in push order, an empty

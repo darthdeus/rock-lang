@@ -135,8 +135,8 @@ macro hyg_inner(arg: expr) -> int {
 }
 
 macro hyg_outer(arg: expr) -> int {
-    let x = 1                  // outer body's local
-    hyg_inner(arg) + x         // inner gets outer's `arg` substituted in
+    let x = 1
+    hyg_inner(arg) + x
 }
 
 @test

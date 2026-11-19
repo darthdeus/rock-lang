@@ -24,39 +24,39 @@ fn basic_if_nullable() {
     let x: int? = 3
     
     if x != null {
-        let y = x + 1   // x is refined to int here
+        let y = x + 1
         print(y)
     }
     
-    x = null  // outer x is still int?
+    x = null
 }
 
 @test(output = "4")
 fn if_else_nullable_then() {
     let x: int? = 3
     if x != null {
-        let y = x + 1   // x is int in then branch
+        let y = x + 1
         print(y)
     } else {
-        let y = x       // x is int? in else branch (never executed)
+        let y = x
         print("null")
     }
     
-    x = null  // outer x is still int?
+    x = null
 }
 
 @test(output = "4")
 fn if_else_nullable_else() {
     let x: int? = 3
     if x == null {
-        let y = x       // x is int? in then branch (never executed)
+        let y = x
         print("null")
     } else {
-        let y = x + 1   // x is int in else branch
+        let y = x + 1
         print(y)
     }
     
-    x = null  // outer x is still int?
+    x = null
 }
 
 // ============================================
@@ -71,11 +71,10 @@ fn nullable_refine_nested_else() {
     if last_modified == null {
         print("not found")
     } else {
-        // Verify that `last_modified` is refined from `int?` to `int`
         let refined_last_modified: ? = last_modified
         
         if last_modified > item.last_modified {
-            item.last_modified = last_modified   // assign requires int
+            item.last_modified = last_modified
             print("updated {last_modified}")
         }
     }
@@ -85,16 +84,16 @@ fn nullable_refine_nested_else() {
 fn double_refinement_chain() {
     let x: int? = 10
     
-    if x != null {          // x : int in this branch
-        let x_refined_once: ? = x  // [1]
-        if x > 5 {          // still int
-            let x_refined_twice: ? = x  // [2]
+    if x != null {
+        let x_refined_once: ? = x
+        if x > 5 {
+            let x_refined_twice: ? = x
             print(x + 1)
         }
     }
     
-    let x_reverted: ? = x  // [3] - should revert to int? after scope
-    x = null  // outer x is still int?
+    let x_reverted: ? = x
+    x = null
 }
 
 // ============================================
@@ -108,8 +107,8 @@ fn refinement_with_multiple_variables() {
     
     if a != null && b != null {
         // Both a and b are refined to int here
-        let a_refined: ? = a  // [4]
-        let b_refined: ? = b  // [5]
+        let a_refined: ? = a
+        let b_refined: ? = b
         print(a)
         print(b)
     }
@@ -120,7 +119,7 @@ fn refinement_with_string_interpolation() {
     let value: int? = 42
     
     if value != null {
-        print("safe: {value}")  // value is refined to int
+        print("safe: {value}")
     } else {
         print("null value")
     }
@@ -135,7 +134,7 @@ fn refinement_with_is_null() {
     let x: int? = 5
     
     if !is_null(x) {
-        print("not null")  // x is refined to int
+        print("not null")
     } else {
         print("is null")
     }
@@ -146,7 +145,7 @@ fn refinement_with_negated_equality() {
     let x: int? = 7
     
     if !(x == null) {
-        print("value is {x}")  // x is refined to int
+        print("value is {x}")
     }
 }
 
@@ -165,7 +164,7 @@ fn refinement_complex_field_access() {
     let p: Point? = p_val
     
     if p != null {
-        let sum = p.x + p.y  // p is refined to Point
+        let sum = p.x + p.y
         print(sum)
     }
 }
@@ -180,7 +179,7 @@ fn refinement_in_while_loop() {
 
     while counter != null {
         if counter > 3 { break }
-        print(counter)  // counter is refined to int
+        print(counter)
         counter = counter + 1
         if counter > 3 {
             counter = null
@@ -201,7 +200,7 @@ fn refinement_with_function_call() {
     let value: int? = 10
     
     if value != null {
-        let result = process_value(value)  // value is refined to int
+        let result = process_value(value)
         print(result)
     }
 }
@@ -227,7 +226,7 @@ fn refinement_with_mutation() {
     let x: int? = 10
 
     if x != null {
-        x = x + 5    // x is refined to int, can be used in arithmetic
+        x = x + 5
         print("modified: {x}")
     }
 }

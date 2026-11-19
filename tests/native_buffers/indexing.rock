@@ -74,8 +74,8 @@ fn iterate_enumerate_tuple() {
         sum_idx = sum_idx + i
         sum_vals = sum_vals + v
     }
-    assert(sum_idx == 6)    // 0+1+2+3
-    assert(sum_vals == 100) // 10+20+30+40
+    assert(sum_idx == 6)
+    assert(sum_vals == 100)
 }
 
 @test

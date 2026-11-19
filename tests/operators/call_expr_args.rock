@@ -28,8 +28,8 @@ fn test_v_with_arithmetic_exprs() {
     // This should call v with two arguments
     let vec = fixv(2.0 * PAD, 3.0 * (BAR_HEIGHT + PAD))
 
-    assert_eq(vec.x, 20.0)  // 2 * 10
-    assert_eq(vec.y, 90.0)  // 3 * (20 + 10)
+    assert_eq(vec.x, 20.0)
+    assert_eq(vec.y, 90.0)
 }
 
 @test
@@ -47,7 +47,7 @@ fn test_v_with_complex_exprs() {
 
 @test
 fn test_v_in_nested_for_loops_with_multiplication() {
-    let bg_size = 28  // 448 / 16
+    let bg_size = 28
     let span = 3
 
     for x in (-span)..(span + 1) {
@@ -71,7 +71,6 @@ fn test_v_in_for_loop_as_function_arg() {
 
     for x in (-span)..(span + 1) {
         for y in (-span)..(span + 1) {
-            // Test fixv(x, y) as a function argument
             let result = process_vec(fixv(x, y))
             assert_eq(result.x, float(x))
             assert_eq(result.y, float(y))

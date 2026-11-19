@@ -10,8 +10,8 @@
 // on the whole-value-read path; the leaf-write-through-a-scalarized-local path
 // is tests/values/field_write_scalarized_local.rock.
 
-value Pt { x: int, y: int }            // C-mappable -> FFI-clean (cdata) tier
-value GcH { xs: [int], n: int }        // `xs` is not C-mappable -> GC (table) tier
+value Pt { x: int, y: int }
+value GcH { xs: [int], n: int }
 
 struct Owner { p: Pt, h: GcH }
 
@@ -144,9 +144,9 @@ fn nb_v2(n: int) -> NativeBuffer<V2> {
 fn test_nb_value_read_copies() {
     let buf = nb_v2(1)
     buf[0] = V2 { x: 1.0, y: 2.0 }
-    let v = buf[0]                      // whole-value read -> copy
-    buf[0] = V2 { x: 99.0, y: 99.0 }    // replace the slot wholesale
-    print("{v.x.floor()}")             // 1 (copy), not 99 (aliased slot)
+    let v = buf[0]
+    buf[0] = V2 { x: 99.0, y: 99.0 }
+    print("{v.x.floor()}")
 }
 
 // A leaf projection off the read still reads the live slot directly (no copy

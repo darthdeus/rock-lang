@@ -8,14 +8,14 @@ global LOG_COUNT: int = 0
 value V2 { x: int, y: int }
 
 fn __op_add(a: V2, b: V2) -> V2 {
-    LOG_COUNT = LOG_COUNT + 1           // SIDE EFFECT
+    LOG_COUNT = LOG_COUNT + 1
     return V2 { x: a.x + b.x, y: a.y + b.y }
 }
 
 // @inline fn with param used exactly twice -- drives the dup decision.
 @inline
 fn sum_twice(p: V2) -> int {
-    return p.x + p.y + p.x + p.y        // uses p 4 times (these are .x/.y field access -- purely field access on param)
+    return p.x + p.y + p.x + p.y
 }
 
 @test(output = "call_count=1 result=12")

@@ -12,7 +12,7 @@
 fn test_raw_skips_interpolation_and_escapes() {
     assert_eq(r"{x}", "{{x}}")
     assert_eq(r"{x:02d}", "{{x:02d}}")
-    assert_eq(r"\n", "\\n")  // literal two chars, not a newline
+    assert_eq(r"\n", "\\n")
     assert_eq(r"C:\path\to\file", "C:\\path\\to\\file")
     assert_eq(r"", "")
 }

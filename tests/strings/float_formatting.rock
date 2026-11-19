@@ -55,18 +55,18 @@ fn test_float_interpolation_smart_formatting() {
 
     // Smart formatting without format specifier
     assert_eq("{pi}", "3.1416")
-    assert_eq("{whole}", "5")             // Trailing zeros removed
+    assert_eq("{whole}", "5")
     assert_eq("{small}", "0.0001")
     // TODO: this should pass
     // assert_eq("{large}", "123456.789")
-    assert_eq("{tiny}", "1e-09")          // Scientific notation
+    assert_eq("{tiny}", "1e-09")
     assert_eq("{negative}", "-42.5")
     assert_eq("{half}", "0.5")
 
     // Explicit format specifiers work as expected
     assert_eq("{pi:.2f}", "3.14")
     assert_eq("{whole:.1f}", "5.0")
-    assert_eq("{large:.0f}", "123457")    // Rounds up
+    assert_eq("{large:.0f}", "123457")
 }
 
 @test

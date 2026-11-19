@@ -78,8 +78,8 @@ fn test_log_throttled_distinct_sites_independent() {
     log_set_level(0)
     log_throttled_with_now(0.0, "A", "a", 1.0, "key-a")
     log_throttled_with_now(0.0, "B", "b", 1.0, "key-b")
-    log_throttled_with_now(0.5, "A", "a", 1.0, "key-a")  // suppressed
-    log_throttled_with_now(0.5, "B", "b", 1.0, "key-b")  // suppressed
+    log_throttled_with_now(0.5, "A", "a", 1.0, "key-a")
+    log_throttled_with_now(0.5, "B", "b", 1.0, "key-b")
 }
 
 // Fires at interval boundaries (>=, not >) and suppresses within.
@@ -196,16 +196,16 @@ fn test_log_throttled_uses_engine_now_source() {
     log_set_level(0)
 
     log_set_now(0.0)
-    log_throttled("NS", "tick", 1.0, "ns-key")  // fires (first call)
+    log_throttled("NS", "tick", 1.0, "ns-key")
 
     log_set_now(0.5)
-    log_throttled("NS", "tick", 1.0, "ns-key")  // suppressed (< 1.0s)
+    log_throttled("NS", "tick", 1.0, "ns-key")
 
     log_set_now(1.0)
-    log_throttled("NS", "tick", 1.0, "ns-key")  // fires
+    log_throttled("NS", "tick", 1.0, "ns-key")
 
     log_set_now(2.5)
-    log_throttled("NS", "tick", 1.0, "ns-key")  // fires
+    log_throttled("NS", "tick", 1.0, "ns-key")
 
     log_clear_now()
 }
@@ -217,9 +217,8 @@ fn test_log_throttled_uses_engine_now_source() {
 fn test_log_throttled_falls_back_to_os_clock() {
     log_reset_dedup()
     log_set_level(0)
-    log_clear_now()  // ensure no leftover override from other tests
+    log_clear_now()
 
-    // First call always fires (no prior timestamp recorded).
     log_throttled("FB", "only-once", 9999.0, "fb-key")
     // Huge interval ensures os.clock() can't have advanced enough between
     // these two consecutive calls to fire again.
@@ -243,10 +242,10 @@ fn test_log_reset_dedup_clears_what_the_summary_reads() {
     log_set_level(0)
 
     log_once("A", "first", "key-a")
-    log_once("A", "first", "key-a")  // suppressed, and counted
+    log_once("A", "first", "key-a")
 
     log_reset_dedup()
-    log_suppression_summary()  // nothing left to report
+    log_suppression_summary()
 }
 
 // The other half: the latch is cleared too, so a summary can run again after

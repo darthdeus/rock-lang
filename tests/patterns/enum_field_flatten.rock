@@ -8,7 +8,7 @@ enum Sig {
     Idle,
     Num(int),
     Pair(int, int),
-    Act(() -> ()),   // closure payload -> Sig is non-cdata
+    Act(() -> ()),
 }
 
 struct Holder {
@@ -61,7 +61,7 @@ fn test_structural_eq_on_field() {
 fn test_field_copy_between_holders() {
     let a = Holder { sig: Sig::Pair(8, 9) }
     let b = Holder { sig: Sig::Idle }
-    b.sig = a.sig            // copy from another (flattened/boxed) field
+    b.sig = a.sig
     assert_eq(read(b), 17)
     assert_eq(b.sig == a.sig, true)
 }
@@ -79,8 +79,8 @@ enum Shape {
     Empty,
     Circle { r: int },
     Rect { w: int, h: int },
-    Line(int, int),              // a tuple variant alongside records (mixed)
-    Draw(() -> ()),              // closure payload -> Shape is non-cdata
+    Line(int, int),
+    Draw(() -> ()),
 }
 
 struct Canvas {

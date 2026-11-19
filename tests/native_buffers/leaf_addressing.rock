@@ -69,14 +69,14 @@ fn test_field_and_leaf_writes() {
     let buf = vert_buffer(1)
     buf[0] = make_vert(0.0, 0.0, 0)
 
-    buf[0].pos = NV { x: 10.0, y: 20.0 }   // W3
-    buf[0].id = 5                          // W4
-    buf[0].w = 2.5                         // W4
+    buf[0].pos = NV { x: 10.0, y: 20.0 }
+    buf[0].id = 5
+    buf[0].w = 2.5
     print("{buf[0].pos.x.floor()} {buf[0].pos.y.floor()} {buf[0].id} {buf[0].w}")
 
-    buf[0].pos.x++                         // W5 incdec on a nested leaf
-    buf[0].id++                            // W5 incdec on a top leaf
-    buf[0].w += 1.0                        // W5 compound assign
+    buf[0].pos.x++
+    buf[0].id++
+    buf[0].w += 1.0
     print("{buf[0].pos.x.floor()} {buf[0].pos.y.floor()} {buf[0].id} {buf[0].w}")
 }
 
@@ -86,8 +86,8 @@ fn test_element_copy() {
     let src = vert_buffer(2)
     let dst = vert_buffer(2)
     src[1] = make_vert(3.0, 4.0, 9)
-    dst[0] = src[1]      // across buffers
-    src[0] = src[1]      // within one buffer
+    dst[0] = src[1]
+    src[0] = src[1]
     print("{dst[0].pos.x.floor()} {dst[0].pos.y.floor()} {dst[0].id}")
     print("{src[0].pos.x.floor()} {src[0].pos.y.floor()} {src[0].id}")
 }
@@ -334,14 +334,13 @@ fn test_primitive_element_is_unaffected() {
 // get/set, grow (the internal element-copy loop), sort, clear.
 @test(output = "3\n9 1 5\n7 1 3\n1 3 7\n0")
 fn test_flat_vec_surface() {
-    let fv: FlatVec<Vert> = flat_vec_new(1)   // cap 1 forces a grow
+    let fv: FlatVec<Vert> = flat_vec_new(1)
     fv.push(make_vert(9.0, 0.0, 1))
     fv.push(make_vert(1.0, 0.0, 2))
     fv.push(make_vert(5.0, 0.0, 3))
     print("{fv.len}")
     print("{fv.get(0).pos.x.floor()} {fv.get(1).pos.x.floor()} {fv.get(2).pos.x.floor()}")
 
-    // set writes a whole element back over an existing slot.
     fv.set(0, make_vert(7.0, 0.0, 1))
     fv.set(2, make_vert(3.0, 0.0, 3))
     print("{fv.get(0).pos.x.floor()} {fv.get(1).pos.x.floor()} {fv.get(2).pos.x.floor()}")

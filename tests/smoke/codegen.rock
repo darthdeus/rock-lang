@@ -247,7 +247,7 @@ fn compound_assign() {
     print(d)
 
     let x = 5
-    x += 3 * 4  // Should be 5 + (3 * 4) = 17
+    x += 3 * 4
     print(x)
 
     let player = Player {
@@ -270,7 +270,7 @@ fn compound_assign() {
 fn compound_assign_with_globals() {
     global_counter += 50
     print(global_counter)
-    global_counter = 100  // Reset for other tests
+    global_counter = 100
 }
 
 // ============================================
@@ -383,7 +383,7 @@ fn test_both_branches(condition: bool) -> string {
 
 fn get_value_implicit() -> int {
     let x = 40
-    x + 2  // Implicit return
+    x + 2
 }
 
 @test(output = "early\nthen\n42\n42")

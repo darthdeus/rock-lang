@@ -110,7 +110,6 @@ fn mod_precedence_holds_for_floats() {
 fn unary_minus_with_division() {
     let x = 10.0
     let y = 2.0
-    // Should be (-10.0) / 2.0 = -5.0, then -5.0 - 2.0 = -7.0
     let result = -x / y - y
     print(result)
 }
@@ -121,7 +120,6 @@ fn unary_minus_in_compound_expression() {
     let b = 2.0
     let c = 4.0
     let d = 2.0
-    // Should be (-6.0) / 2.0 - 4.0 / 2.0 = -3.0 - 2.0 = -5.0
     // Bug would compute: -(6.0 / 2.0 - 4.0 / 2.0) = -(3.0 - 2.0) = -1.0
     let result = -a / b - c / d
     print(result)
@@ -134,7 +132,6 @@ fn unary_minus_field_access_with_division() {
     let th = 0.5
     // This is the actual pattern from the iso projection bug:
     // (-pos / tw - pos / th) / 2.0
-    // Should be: ((-6) / 1 - 6 / 0.5) / 2 = (-6 - 12) / 2 = -9
     // Bug computes: (-(6 / 1 - 6 / 0.5)) / 2 = -(6 - 12) / 2 = 3
     let result = (-pos / tw - pos / th) / 2.0
     print(result)

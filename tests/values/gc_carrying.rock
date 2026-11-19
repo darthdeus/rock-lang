@@ -31,7 +31,7 @@ fn find_bag(want: int) -> Bag? {
 @test(output = "7\n-1")
 fn gc_nullable_return() {
     let b = find_bag(1)
-    print(if b != null { bag_sum(b) } else { -1 })   // (1+2+3) + 1 = 7
+    print(if b != null { bag_sum(b) } else { -1 })
     let none = find_bag(0)
     print(if none != null { bag_sum(none) } else { -1 })
 }
@@ -41,8 +41,8 @@ fn gc_nullable_return() {
 @test(output = "34")
 fn gc_vec_store() {
     let bags: [Bag] = []
-    bags.push(make_bag(1, 2, 3, 4))    // sum 6+4 = 10
-    bags.push(make_bag(5, 6, 7, 6))    // sum 18+6 = 24
+    bags.push(make_bag(1, 2, 3, 4))
+    bags.push(make_bag(5, 6, 7, 6))
     let total = 0
     for b in bags { total = total + bag_sum(b) }
     print(total)
@@ -58,7 +58,7 @@ struct Holder {
 @test(output = "16")
 fn gc_struct_field_store() {
     let h = Holder { bag: make_bag(2, 4, 6, 4), tag: 9 }
-    print(bag_sum(h.bag))              // 12 + 4 = 16
+    print(bag_sum(h.bag))
 }
 
 // ----- 4. Global store (nullable global).
@@ -67,7 +67,7 @@ global GBAG: Bag? = null
 
 @test(output = "42")
 fn gc_global_store() {
-    GBAG = make_bag(10, 20, 9, 3)      // 39 + 3 = 42; GBAG refines non-null here
+    GBAG = make_bag(10, 20, 9, 3)
     print(bag_sum(GBAG))
 }
 
@@ -77,14 +77,14 @@ fn gc_global_store() {
 fn gc_capture() {
     let b = make_bag(1, 2, 3, 4)
     let f = () => bag_sum(b)
-    print(f())                          // 6 + 4 = 10
+    print(f())
 }
 
 // ----- 6. Coroutine yielding the whole value (boxed across the yield).
 
 co fn co_bags() -> Coroutine<Bag> {
-    yield make_bag(1, 1, 1, 1)          // 3 + 1 = 4
-    yield make_bag(2, 2, 2, 2)          // 6 + 2 = 8
+    yield make_bag(1, 1, 1, 1)
+    yield make_bag(2, 2, 2, 2)
 }
 
 @test(output = "4\n8")
@@ -105,10 +105,10 @@ fn gc_coroutine_yield_value() {
 fn gc_eq_ref_identity() {
     let xs = [1, 2, 3]
     let a = Bag { xs: xs, n: 5 }
-    let b = Bag { xs: xs, n: 5 }        // same xs ref, same n -> equal
+    let b = Bag { xs: xs, n: 5 }
     let ys = [1, 2, 3]
-    let c = Bag { xs: ys, n: 5 }        // different xs ref (equal contents) -> not equal
-    let d = Bag { xs: xs, n: 6 }        // same xs ref, different n -> not equal
+    let c = Bag { xs: ys, n: 5 }
+    let d = Bag { xs: xs, n: 6 }
     let e = Bag { xs: [1, 2, 3], n: 5 }
     let f = Bag { xs: [1, 2, 3], n: 5 }
     print("{a == b} {a == c} {a == d} {e == f}")
@@ -137,7 +137,7 @@ fn find_pair(want: int) -> Pair<int>? {
 @test(output = "33\n-1")
 fn gc_generic_nullable_return() {
     let p = find_pair(3)
-    print(if p != null { pair_sum(p) } else { -1 })   // 3 + 30 = 33
+    print(if p != null { pair_sum(p) } else { -1 })
     let none = find_pair(0)
     print(if none != null { pair_sum(none) } else { -1 })
 }
@@ -145,11 +145,11 @@ fn gc_generic_nullable_return() {
 @test(output = "132")
 fn gc_generic_vec_store() {
     let ps: [Pair<int>] = []
-    ps.push(make_pair(1, 10))          // 11
-    ps.push(make_pair(11, 110))        // 121
+    ps.push(make_pair(1, 10))
+    ps.push(make_pair(11, 110))
     let total = 0
     for p in ps { total = total + pair_sum(p) }
-    print(total)                        // 132
+    print(total)
 }
 
 // ----- 10. deepcopy of a GC-carrying value struct DEEP-COPIES (not shares):
@@ -160,7 +160,7 @@ fn gc_generic_vec_store() {
 
 @test(output = "7 false true")
 fn gc_deepcopy_deep_copies_and_preserves_fields() {
-    let b = make_bag(1, 2, 3, 1)       // xs=[1,2,3], n=1 -> sum 7
+    let b = make_bag(1, 2, 3, 1)
     let c = deepcopy(b)
     print("{bag_sum(c)} {b == c} {bag_sum(b) == bag_sum(c)}")
 }

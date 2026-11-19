@@ -9,7 +9,7 @@ enum Cmd {
     Stop,
     Go(int),
     Move { dx: int, dy: int },
-    Run(() -> ()),       // closure payload -> Cmd is non-cdata (boxed today)
+    Run(() -> ()),
 }
 
 // Returns a flat enum.
@@ -38,7 +38,7 @@ fn roundtrip(n: int) -> int {
 fn test_return_then_match() {
     assert_eq(eval(make_cmd(0)), 0)
     assert_eq(eval(make_cmd(5)), 5)
-    assert_eq(eval(make_cmd(-3)), 0)   // Move { dx: -3, dy: 3 } -> 0
+    assert_eq(eval(make_cmd(-3)), 0)
 }
 
 @test
@@ -123,10 +123,10 @@ fn test_local_whole_value_use() {
 @test
 fn test_local_captured_by_closure() {
     let e = Ev::Tick(11)
-    let get = () => read_ev(e)      // closure captures the threaded local (the cells)
+    let get = () => read_ev(e)
     assert_eq(get(), 11)
-    e = Ev::At { x: 5, y: 20 }   // reassign after capture; closure sees the update
-    assert_eq(get(), 25)         // captures the VARIABLE, so reads the new value
+    e = Ev::At { x: 5, y: 20 }
+    assert_eq(get(), 25)
     assert_eq(read_ev(e), 25)
 }
 
@@ -140,7 +140,7 @@ enum Sig {
     Idle,
     Num(int),
     Pair(int, int),
-    Act(() -> ()),      // closure payload -> Sig is non-cdata (boxed/flat, not cdata)
+    Act(() -> ()),
 }
 
 // nullable RETURN (nil on the not-found path)
@@ -173,7 +173,7 @@ fn test_return_value() {
     assert_eq(find(5) != null, true)
     assert_eq(describe(find(5)), 5)
     assert_eq(describe(find(0)), 0)
-    assert_eq(describe(find(-3)), 0)   // Pair(-3, 3) -> 0
+    assert_eq(describe(find(-3)), 0)
 }
 
 @test

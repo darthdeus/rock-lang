@@ -89,7 +89,7 @@ fn greet(name: string) -> string {
 }
 
 fn count_chars(s: string) -> int {
-    return 13  // "Hello, World!" has 13 characters
+    return 13
 }
 
 // Function return type inference

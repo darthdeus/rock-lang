@@ -36,17 +36,17 @@ co fn outer_fields() -> Coroutine<int> {
 @test(output = "7\n5\n99\n-1")
 fn scalarize_yield_star_local_arg() {
     let c = outer_locals()
-    print(c.resume() ?? -1)   // 7  (inner_leg)
-    print(c.resume() ?? -1)   // 5  (middle's a+b after delegation)
-    print(c.resume() ?? -1)   // 99 (outer after delegation)
-    print(c.resume() ?? -1)   // -1 (done)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
 }
 
 @test(output = "7\n5\n99\n-1")
 fn scalarize_yield_star_field_arg() {
     let c = outer_fields()
-    print(c.resume() ?? -1)   // 7
-    print(c.resume() ?? -1)   // 5
-    print(c.resume() ?? -1)   // 99
-    print(c.resume() ?? -1)   // -1
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
 }

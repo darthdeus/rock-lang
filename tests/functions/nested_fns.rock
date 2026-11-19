@@ -20,7 +20,7 @@ fn sum_incs(xs: [int]) -> int {
 
 @test(output = "9")
 fn test_nested_fn_basic_call() {
-    print("{sum_incs([1, 2, 3])}")   // (1+1)+(2+1)+(3+1) = 9
+    print("{sum_incs([1, 2, 3])}")
 }
 
 // --- Passed as a value (zero-alloc fn reference, not a closure) ---
@@ -86,14 +86,14 @@ fn test_nested_fn_sibling_blocks_distinct() {
 fn base_val(x: int) -> int { x + 1000 }
 
 fn uses_shadow() -> int {
-    fn base_val(x: int) -> int { x + 1 }   // shadows the top-level base_val
+    fn base_val(x: int) -> int { x + 1 }
     return base_val(5)
 }
 
 @test(output = "6 1005")
 fn test_nested_fn_shadows_toplevel() {
-    let inner = uses_shadow()    // nested -> 6
-    let outer = base_val(5)      // top-level -> 1005
+    let inner = uses_shadow()
+    let outer = base_val(5)
     print("{inner} {outer}")
 }
 
@@ -109,8 +109,8 @@ fn tick() -> int {
 
 @test(output = "2 4")
 fn test_nested_fn_uses_static() {
-    let a = tick()   // 2
-    let b = tick()   // 4 (static persists across calls)
+    let a = tick()
+    let b = tick()
     print("{a} {b}")
 }
 

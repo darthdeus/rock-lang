@@ -94,7 +94,6 @@ fn test_enum_scope() {
     let result = helper_function(color)
     assert_eq(result, "R")
 
-    // Test in nested scope
     {
         let inner_color = Color::Green
         let inner_result = helper_function(inner_color)
@@ -112,7 +111,7 @@ enum Box<T> {
 fn test_generic_enum_inference() {
     // Type should be inferred from usage
     let box1 = Box::Full(42)
-    let box2: Box<int> = Box::Empty  // Need explicit type for unit variants
+    let box2: Box<int> = Box::Empty
 
     match box1 {
         Box::Full(n) => assert_eq(n, 42),

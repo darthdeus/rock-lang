@@ -42,7 +42,7 @@ fn my_vec_map<T, U>(vec: My<T>, f: (T) -> U) -> My<U> {
 }
 
 // Global variable declarations
-global dt: float = 1.0/60.0  // Floating-point division
+global dt: float = 1.0/60.0
 global image: Image
 
 // Extern function declaration
@@ -76,13 +76,13 @@ fn test_assign_math() {
 @test(output = "1")
 fn let_global() {
     let assets = Image{}
-    print(1)  // Just verify it compiles
+    print(1)
 }
 
 @test(output = "0.0167", type_holes = [[4, "float"]])
 fn initialized_global() {
     let dt_typed: ? = dt
-    print("{dt:.4f}")  // Use fixed precision to avoid platform differences
+    print("{dt:.4f}")
 }
 
 // Nullable type tests
@@ -91,7 +91,7 @@ fn basic_if_nullable() {
     let x: int? = 3
 
     if x != null {
-        let y = x + 1   // ok: x is `int`
+        let y = x + 1
         let x_typed: ? = x
         print(y)
     }
@@ -101,7 +101,7 @@ fn basic_if_nullable() {
 fn if_else_nullable_then() {
     let x: int? = 3
     if x != null {
-        let y = x + 1   // x is `int`
+        let y = x + 1
         let x_typed: ? = x
         print(y)
     } else {
@@ -115,7 +115,7 @@ fn if_else_nullable_else() {
     if x == null {
         // Won't reach here when x = 3
     } else {
-        let y = x + 1   // x is `int`
+        let y = x + 1
         let x_typed: ? = x
         print(y)
     }
@@ -188,7 +188,7 @@ fn shadow_else_outer() -> int {
         let x = x
         x
     } else {
-        x  // refers to outer
+        x
     }
 }
 

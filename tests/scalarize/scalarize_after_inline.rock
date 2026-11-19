@@ -40,8 +40,8 @@ fn test_inline_returned_vec_locally_scalarizable() {
 fn test_inline_nested_struct_returns() {
     // tile_center(1, 0) = v((1.5-0.5), -(1.5+0.5)) = v(1.0, -2.0)
     let q = tile_center(1, 0)
-    let qx = q.x as int           // 1
-    let qy_abs = if q.y < 0.0 { -q.y as int } else { q.y as int }  // 2
+    let qx = q.x as int
+    let qy_abs = if q.y < 0.0 { -q.y as int } else { q.y as int }
     print("{qx} {qy_abs}")
 }
 

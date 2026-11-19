@@ -58,7 +58,7 @@ fn test_nested_pure_call_hoists() {
     for i in 0..10 {
         sum = sum + add(square_plus(limit), 1)
     }
-    print(sum)  // 10 * (110 + 1) = 1110
+    print(sum)
 }
 
 // Test that a non-pure call inside the loop stays untouched even if

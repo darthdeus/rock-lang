@@ -39,13 +39,11 @@ fn test_nullable_function_unwrap_and_pass() {
 
 @test(output = "null\ntest")
 fn test_nullable_function_null_case() {
-    // Test null case
     let f: (fn() -> ())? = null
     if f == null {
         print("null")
     }
     
-    // Test non-null case  
     f = test_fn
     if f != null {
         f()

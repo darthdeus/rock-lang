@@ -14,19 +14,19 @@ struct Point {
 fn test_lambda_type_inference() {
     // Inference from array element type
     let numbers = [1, 2, 3, 4, 5]
-    let doubled = numbers.iter().map(x => x * 2).collect()  // x inferred as int
+    let doubled = numbers.iter().map(x => x * 2).collect()
     assert_eq(doubled[0], 2)
     assert_eq(doubled[4], 10)
 
     // Inference with string operations
     let names = ["alice", "bob", "charlie"]
-    let lengths = names.map(s => s.len()).collect()  // s inferred as string
-    assert_eq(lengths[0], 5)  // "alice" has 5 chars
-    assert_eq(lengths[2], 7)  // "charlie" has 7 chars
+    let lengths = names.map(s => s.len()).collect()
+    assert_eq(lengths[0], 5)
+    assert_eq(lengths[2], 7)
 
     // Inference with tuples
     let pairs = [(1, "a"), (2, "b"), (3, "c")]
-    let firsts = pairs.iter().map(p => p.0).collect()  // p inferred as (int, string)
+    let firsts = pairs.iter().map(p => p.0).collect()
     let seconds = pairs.iter().map(p => p.1).collect()
     assert_eq(firsts[0], 1)
     assert_eq(seconds[2], "c")
@@ -49,7 +49,7 @@ fn test_lambda_struct_inference() {
 
     // Complex expressions
     let older = people.iter().filter(p => p.age > 28).collect()
-    assert_eq(vec_len(older), 2)  // Alice and Charlie
+    assert_eq(vec_len(older), 2)
 }
 
 @test
@@ -99,7 +99,7 @@ fn test_typed_underscore() {
 fn test_underscore_complex_expressions() {
     // Arithmetic expressions
     let complex_calc: (int) -> int = (_ + 5) * 2
-    assert_eq(complex_calc(10), 30)  // (10 + 5) * 2
+    assert_eq(complex_calc(10), 30)
 
     // Nested field access
     let people = [

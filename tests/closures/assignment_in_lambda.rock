@@ -178,16 +178,16 @@ fn test_assignment_operators_in_lambdas() {
     let mul_assign = (v: int) => counter *= v
     let div_assign = (v: int) => counter = counter ./ v
 
-    add_assign(5)     // 10 + 5 = 15
+    add_assign(5)
     assert_eq(counter, 15)
 
-    sub_assign(3)     // 15 - 3 = 12
+    sub_assign(3)
     assert_eq(counter, 12)
 
-    mul_assign(2)     // 12 * 2 = 24
+    mul_assign(2)
     assert_eq(counter, 24)
 
-    div_assign(4)     // 24 / 4 = 6
+    div_assign(4)
     assert_eq(counter, 6)
 }
 
@@ -250,10 +250,10 @@ fn test_dynamic_index_assignment() {
 
     let assign_computed = (n: int, val: int) => matrix[get_row(n)][get_col(n)] = val
 
-    assign_computed(4, 99)  // n=4: row=1, col=1 -> matrix[1][1] = 99
+    assign_computed(4, 99)
     assert_eq(matrix[1][1], 99)
 
-    assign_computed(8, 88)  // n=8: row=2, col=2 -> matrix[2][2] = 88
+    assign_computed(8, 88)
     assert_eq(matrix[2][2], 88)
 }
 
@@ -356,7 +356,7 @@ fn test_assignment_in_loop_edge_case() {
         // Empty body - work is done in condition
     }
 
-    assert_eq(sum, 15)  // 1+2+3+4+5
+    assert_eq(sum, 15)
     assert_eq(idx, 5)
 }
 
@@ -472,7 +472,7 @@ fn test_computed_nested_assignment() {
     let offset = 1
 
     let assign = (base: int) => obj.counters[(base + offset) % 3] = base * multiplier
-    assign(4)  // Should assign to index (4+1)%3 = 2, value 4*10 = 40
+    assign(4)
 
     assert_eq(obj.counters[2], 40)
 }
@@ -503,7 +503,7 @@ fn test_conditional_assignment_logic() {
         data[index] = final_val
     }
 
-    conditional_assign(2, 25)  // 25 * 2 = 50
+    conditional_assign(2, 25)
 
     assert_eq(data[2], 50)
 }
@@ -531,5 +531,5 @@ fn test_recursive_assignment_pattern() {
     assign(1, 42)
 
     assert_eq(global_recursive_data[1][0], 42)
-    assert_eq(global_recursive_data[1][1], 44)  // 42 + 2
+    assert_eq(global_recursive_data[1][1], 44)
 }

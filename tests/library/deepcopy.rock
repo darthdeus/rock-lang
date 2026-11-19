@@ -35,7 +35,7 @@ enum CoEv { Tick(int) }
 
 co fn dc_counter() -> Coroutine<CoEv> {
     let n = 0
-    let bump = () => { n = n + 1  n }   // record stored in a frame field; captures `s`
+    let bump = () => { n = n + 1  n }
     yield CoEv::Tick(bump())
     yield CoEv::Tick(bump())
     yield CoEv::Tick(bump())

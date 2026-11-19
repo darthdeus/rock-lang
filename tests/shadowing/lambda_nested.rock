@@ -43,7 +43,7 @@ fn test_lambda_shadowing_with_continue_in_nested_closure() {
             // continue  // The continue statement is crucial to trigger the bug
             }
 
-            let mesh = mesh  // Shadow with non-nullable
+            let mesh = mesh
 
             // Direct call works
             draw_mesh(mesh)

@@ -30,7 +30,7 @@ fn test_nested_loops_continue() {
         while j < 3 {
             j = j + 1
             if j == 2 {
-                continue  // Should only skip inner loop iteration
+                continue
             }
             vec_push(results, i * 10 + j)
         }
@@ -49,14 +49,14 @@ fn test_continue_with_complex_conditions() {
         // Multiple conditions with continue
         if i % 2 == 0 {
             if i % 4 == 0 {
-                continue  // Skip multiples of 4
+                continue
             }
-            vec_push(results, i)  // Keep multiples of 2 but not 4
+            vec_push(results, i)
         } else {
             if i % 3 == 0 {
-                continue  // Skip multiples of 3 (odd)
+                continue
             }
-            vec_push(results, i)  // Keep odd numbers not divisible by 3
+            vec_push(results, i)
         }
     }
 
@@ -70,14 +70,14 @@ fn test_continue_with_break() {
     while i < 20 {
         i = i + 1
         if i > 15 {
-            break  // Exit loop completely
+            break
         }
         if i % 3 == 0 {
-            continue  // Skip multiples of 3
+            continue
         }
         vec_push(results, i)
         if vec_len(results) >= 8 {
-            break  // Exit after collecting 8 items
+            break
         }
     }
 
@@ -97,10 +97,10 @@ fn test_deeply_nested_continue() {
             while k < 3 {
                 k = k + 1
                 if k == 2 {
-                    continue  // Only affects innermost loop
+                    continue
                 }
                 if j == 2 && k == 1 {
-                    continue  // Skip specific case
+                    continue
                 }
                 vec_push(results, i * 100 + j * 10 + k)
             }
@@ -119,7 +119,7 @@ fn test_for_loop_basic_continue() {
 
     for x in arr {
         if x % 2 == 0 {
-            continue  // Skip even numbers
+            continue
         }
         vec_push(results, x)
     }
@@ -134,7 +134,7 @@ fn test_for_loop_basic_break() {
 
     for x in arr {
         if x > 5 {
-            break  // Stop when we reach numbers > 5
+            break
         }
         vec_push(results, x)
     }
@@ -149,10 +149,10 @@ fn test_for_loop_continue_and_break() {
 
     for x in arr {
         if x > 10 {
-            break  // Stop when we reach numbers > 10
+            break
         }
         if x % 3 == 0 {
-            continue  // Skip multiples of 3
+            continue
         }
         vec_push(results, x)
     }
@@ -169,10 +169,10 @@ fn test_nested_for_loops_with_continue() {
     for i in outer_arr {
         for j in inner_arr {
             if j == 20 {
-                continue  // Skip inner value 20
+                continue
             }
             if i == 2 && j == 30 {
-                continue  // Skip specific combination
+                continue
             }
             vec_push(results, i * 100 + j)
         }
@@ -190,12 +190,12 @@ fn test_nested_for_loops_with_break() {
     for i in outer_arr {
         for j in inner_arr {
             if j > 30 {
-                break  // Break inner loop when j > 30
+                break
             }
             vec_push(results, i * 100 + j)
         }
         if i >= 3 {
-            break  // Break outer loop when i >= 3
+            break
         }
     }
 
@@ -210,19 +210,19 @@ fn test_nested_for_loops_continue_and_break() {
 
     for i in outer_arr {
         if i == 4 {
-            continue  // Skip entire i=4 iteration
+            continue
         }
         for j in inner_arr {
             if j % 2 == 0 {
-                continue  // Skip even j values
+                continue
             }
             if j > 5 {
-                break  // Break inner loop when j > 5
+                break
             }
             vec_push(results, i * 10 + j)
         }
         if vec_len(results) >= 12 {
-            break  // Break outer loop after collecting enough results
+            break
         }
     }
 
@@ -242,12 +242,12 @@ fn test_for_loop_with_early_collection_limit() {
 
     for x in arr {
         if x % 7 == 0 {
-            continue  // Skip multiples of 7 (7, 14)
+            continue
         }
         if collected >= 5 {
             // Stop collecting after 5 items, but continue processing to test continue still works
             if x % 3 == 0 {
-                continue  // Test continue still works after collection stops
+                continue
             }
             // Don't add to results, but don't break either
         } else {
@@ -271,13 +271,13 @@ fn test_mixed_loop_types_with_continue() {
     while i < 3 {
         i = i + 1
         if i == 2 {
-            continue  // Skip i=2 iteration
+            continue
         }
 
         // Inner for loop
         for x in arr {
             if x % 2 == 0 {
-                continue  // Skip even numbers
+                continue
             }
             vec_push(results, i * 10 + x)
         }
@@ -295,23 +295,23 @@ fn test_deeply_nested_mixed_continue_break() {
 
     for i in outer_arr {
         if i == 4 {
-            break  // Break outer loop at i=4
+            break
         }
 
         for j in middle_arr {
             if i == 1 && j == 20 {
-                continue  // Skip specific middle combination
+                continue
             }
 
             for k in inner_arr {
                 if k == 200 {
-                    continue  // Skip k=200 in all cases
+                    continue
                 }
                 if k > 300 {
-                    break  // Break inner loop when k > 300
+                    break
                 }
                 if i == 2 && j == 30 && k == 300 {
-                    continue  // Skip specific triple combination
+                    continue
                 }
                 vec_push(results, i * 10000 + j * 100 + k)
             }
@@ -337,12 +337,12 @@ fn test_continue_break_with_side_effects() {
 
         if x > 10 {
             break_triggered = true
-            break  // Break when x > 10
+            break
         }
 
         if x % 4 == 0 {
             // Side effect happens even when we continue
-            continue  // Skip multiples of 4
+            continue
         }
 
         vec_push(results, x)

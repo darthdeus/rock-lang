@@ -157,7 +157,6 @@ fn shape_draw(shape: Shape, tint: Color = color(1.0, 0.0, 0.0, 0.5), duration: f
 fn test_method_call_with_multiple_named_args() {
     let s = Shape { x: 1.0, y: 2.0, width: 3.0, height: 4.0 }
 
-    // Call with multiple named arguments in different order
     let result = s.shape_draw(border: 2.5, tint: color(0.5, 0.5, 0.5, 1.0))
     assert(result == "tint.r=0.5, border=2.5", "Expected custom color and border, got: {result}")
 }
@@ -189,7 +188,6 @@ fn test_method_with_complex_default_expression() {
     let result = s.shape_draw_complex(radius: 7.5)
     assert(result == "effect.a=0.75, intensity=1, radius=7.5", "Expected default effect and intensity, custom radius, got: {result}")
 
-    // Set intensity, skip others
     let result2 = s.shape_draw_complex(intensity: 0.5)
     assert(result2 == "effect.a=0.75, intensity=0.5, radius=0", "Expected default effect, custom intensity, default radius, got: {result2}")
 }
@@ -215,11 +213,9 @@ fn test_original_bug_scenario() {
 
     // This was the failing case: calling with only inset named argument
     // Previously would generate: debug_draw(shape, 0.2, nil, 0)
-    // Now correctly generates: debug_draw(shape, color(1,0,0,0.5), nil, 0.2)
     let result = shape.debug_draw(inset: 0.2)
     assert(result == true, "Should return true for default red color (r=1.0)")
 
-    // Test with custom color that returns false
     let blue = color(0.0, 0.0, 1.0, 1.0)
     let result2 = shape.debug_draw(blue, inset: 0.1)
     assert(result2 == false, "Should return false for blue color (r=0.0)")

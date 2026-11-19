@@ -33,13 +33,13 @@ fn pick_bag(c: bool) -> Bag? {
 @test(output = "3\n-1\n9\n-1")
 fn nullable_pick_both_tiers() {
     let p = pick_pair(true)
-    print(if p != null { p.a + p.b } else { -1 })     // 1+2 = 3
+    print(if p != null { p.a + p.b } else { -1 })
     let pn = pick_pair(false)
-    print(if pn != null { pn.a + pn.b } else { -1 })   // null -> -1
+    print(if pn != null { pn.a + pn.b } else { -1 })
     let b = pick_bag(true)
-    print(if b != null { bag_head(b) } else { -1 })    // 9
+    print(if b != null { bag_head(b) } else { -1 })
     let bn = pick_bag(false)
-    print(if bn != null { bag_head(bn) } else { -1 })  // null -> -1
+    print(if bn != null { bag_head(bn) } else { -1 })
 }
 
 // ----- 2. Cross-block alias of a nullable root (the shape the "no nil store on
@@ -65,13 +65,13 @@ fn alias_bag(cond: bool, side: bool) -> Bag? {
 @test(output = "9\n-1\n8\n-1")
 fn alias_of_nullable_both_tiers() {
     let p = alias_pair(true, true)
-    print(if p != null { p.a + p.b } else { -1 })     // 4+5 = 9
+    print(if p != null { p.a + p.b } else { -1 })
     let pn = alias_pair(false, true)
-    print(if pn != null { pn.a + pn.b } else { -1 })   // null -> -1
+    print(if pn != null { pn.a + pn.b } else { -1 })
     let b = alias_bag(true, true)
-    print(if b != null { bag_head(b) } else { -1 })    // 8
+    print(if b != null { bag_head(b) } else { -1 })
     let bn = alias_bag(false, true)
-    print(if bn != null { bag_head(bn) } else { -1 })  // null -> -1
+    print(if bn != null { bag_head(bn) } else { -1 })
 }
 
 // ----- 3. Refined nullable: `if v != null { return v }`. The binding is `V?`
@@ -91,13 +91,13 @@ fn passthru_bag(v: Bag?) -> Bag? {
 @test(output = "30\n-1\n5\n-1")
 fn refined_nullable_both_tiers() {
     let p = passthru_pair(Pair { a: 10, b: 20 })
-    print(if p != null { p.a + p.b } else { -1 })     // 30
+    print(if p != null { p.a + p.b } else { -1 })
     let pn = passthru_pair(null)
-    print(if pn != null { pn.a + pn.b } else { -1 })   // -1
+    print(if pn != null { pn.a + pn.b } else { -1 })
     let b = passthru_bag(Bag { xs: [5] })
-    print(if b != null { bag_head(b) } else { -1 })    // 5
+    print(if b != null { bag_head(b) } else { -1 })
     let bn = passthru_bag(null)
-    print(if bn != null { bag_head(bn) } else { -1 })  // -1
+    print(if bn != null { bag_head(bn) } else { -1 })
 }
 
 // ----- 4. The SOUND remat case: a non-null value binding that escapes on a hit
@@ -120,7 +120,7 @@ fn arena_scan_hit_and_miss() {
     let _ = CELLS.insert(Cell { tag: 10 })
     let _ = CELLS.insert(Cell { tag: 20 })
     let hit = find_cell(20)
-    print(if hit != null { hit.get().unwrap().tag } else { -1 })   // 20
+    print(if hit != null { hit.get().unwrap().tag } else { -1 })
     let miss = find_cell(99)
-    print(if miss != null { miss.get().unwrap().tag } else { -1 })  // null -> -1
+    print(if miss != null { miss.get().unwrap().tag } else { -1 })
 }

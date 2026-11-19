@@ -200,11 +200,11 @@ struct InitIVec2 { x: int, y: int }
 
 // The wrong overload comes first in declaration order.
 fn init_fixv(x: int, y: int) -> InitVec2 {
-    return InitVec2 { x: 5.0, y: 9.0 }  // This should be selected for init_fixv(5, 9)
+    return InitVec2 { x: 5.0, y: 9.0 }
 }
 
 fn init_fixv(iv: InitIVec2) -> InitVec2 {
-    return InitVec2 { x: 1.0, y: 2.0 }  // This was incorrectly selected due to iteration order
+    return InitVec2 { x: 1.0, y: 2.0 }
 }
 
 // Global variable initialization - this is where the bug occurred

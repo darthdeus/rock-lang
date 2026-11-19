@@ -11,7 +11,7 @@ global VS_LIST: [Vec2i] = [Vec2i { x: 1, y: 1 }]
 @test
 fn rebinding_global_value_struct_leaves_shared_snapshot_intact() {
     let snapshot = VS_GLOBAL
-    VS_GLOBAL = Vec2i { x: 7, y: 9 }    // a later frame rebinds the global
+    VS_GLOBAL = Vec2i { x: 7, y: 9 }
     assert(snapshot.x == 0 && snapshot.y == 0)
     assert(VS_GLOBAL.x == 7 && VS_GLOBAL.y == 9)
     // Value equality compares contents.

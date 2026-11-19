@@ -34,8 +34,8 @@ fn consume_nonnull(d: V2) -> int { return d.x * 100 + d.y }
 @test(output = "1020\n30")
 fn scalarized_value_at_both_arg_shapes() {
     let v = make_v2(10, 20)
-    print(consume_nonnull(v))     // scalar-ABI splat path
-    print(consume_or_default(v))  // nullable cdata-ABI pack path
+    print(consume_nonnull(v))
+    print(consume_or_default(v))
 }
 
 value FV2 { x: float, y: float }

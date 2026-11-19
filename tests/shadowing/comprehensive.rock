@@ -109,10 +109,10 @@ fn test_else_block_shadowing() {
 
 @test(output = "50\n15\n50")
 fn test_global_shadowing() {
-    print(g)  // Should print the global 'g'
+    print(g)
     if true {
-        let g = 15  // Local 'g' shadows the global 'g' within this scope
-        print(g)    // Should print the local 'g'
+        let g = 15
+        print(g)
     }
-    print(g)  // Should print the global 'g' again after the local scope ends
+    print(g)
 }

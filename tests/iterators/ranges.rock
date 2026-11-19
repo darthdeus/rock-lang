@@ -100,7 +100,6 @@ fn test_range_arithmetic_precedence() {
 
 @test
 fn test_range_with_variables() {
-    // Test with variables to ensure precedence still works
     let x = 10
     let y = 3
     let count = 0
@@ -111,7 +110,7 @@ fn test_range_with_variables() {
         count = count + 1
     }
 
-    assert_eq(count, 7)  // Should iterate 7 times (0 through 6 exclusive)
+    assert_eq(count, 7)
 }
 
 // -- Bounds that are function calls --

@@ -55,12 +55,12 @@ fn test_shadow_in_complex_expression() {
     let y = 1000
     
     let result = if true {
-        let x = x + 10  // x = 110
-        let y = y + x   // y = 1110
+        let x = x + 10
+        let y = y + x
         
         if x > 100 {
-            let x = y - x  // x = 1000
-            let y = x + 100  // y = 1100
+            let x = y - x
+            let y = x + 100
             y
         } else {
             x
@@ -80,15 +80,15 @@ fn test_interdependent_shadows() {
     let c = 3
     
     let result = if true {
-        let a = b + c    // a = 5
-        let b = a + c    // b = 8
-        let c = a + b - c  // c = 10
+        let a = b + c
+        let b = a + c
+        let c = a + b - c
         
         if a < b {
-            let a = c - a  // a = 5
-            let b = a      // b = 5
-            let c = a + b  // c = 10
-            a + b + c      // 5 + 5 + 10 = 20
+            let a = c - a
+            let b = a
+            let c = a + b
+            a + b + c
         } else {
             a + b + c
         }
@@ -106,25 +106,25 @@ fn test_multilevel_lambda_capture() {
     print("Outer: " + x.to_string())
     
     let f1 = () => {
-        return x  // Captures x = 1
+        return x
     }
     
     if true {
         let x = 10
         let f2 = () => {
-            return x  // Captures x = 10
+            return x
         }
         
         if true {
             let x = 100
             let f3 = () => {
-                return x  // Captures x = 100
+                return x
             }
             
             if true {
                 let x = 1000
                 let f4 = () => {
-                    return x  // Captures x = 1000
+                    return x
                 }
                 
                 print("Capture1: " + f1().to_string())
@@ -140,10 +140,10 @@ fn test_multilevel_lambda_capture() {
 @test(output = "Final: 10")
 fn test_shadow_accumulation() {
     let sum: int = 0
-    let sum: int = sum + 1  // sum = 1
-    let sum: int = sum + 2  // sum = 3
-    let sum: int = sum + 3  // sum = 6
-    let sum: int = sum + 4  // sum = 10
+    let sum: int = sum + 1
+    let sum: int = sum + 2
+    let sum: int = sum + 3
+    let sum: int = sum + 4
     print("Final: " + sum.to_string())
 }
 // Test 5 v2: Shadowing with mutation and loops
@@ -153,12 +153,12 @@ fn test_shadow_in_loop_iterations() {
     let i = 0
     
     while i < 5 {
-        let sum = sum + i  // Shadow sum in each iteration
+        let sum = sum + i
         print("Iteration " + i.to_string() + ": " + sum.to_string())
         i = i + 1
     }
     
-    print("Outer sum: " + sum.to_string())  // Original sum unchanged
+    print("Outer sum: " + sum.to_string())
 }
 
 // Test 6: Shadowing with array destructuring in loops
@@ -221,7 +221,7 @@ fn test_shadow_in_struct_literal() {
 
 // Test 9: Function parameter shadowing with defaults
 fn shadow_with_default(x: int = 10) -> int {
-    let x = x * 2  // Shadow parameter
+    let x = x * 2
     return x
 }
 
@@ -237,9 +237,9 @@ fn recursive_shadow(n: int) -> int {
         return 0
     }
     
-    let n = n - 1  // Shadow parameter
+    let n = n - 1
     let result = recursive_shadow(n)
-    let n = result + 1  // Shadow again
+    let n = result + 1
     return n
 }
 
@@ -254,10 +254,10 @@ fn process_with_shadow(flag: bool) -> int {
     
     if flag {
         let x = x * 2
-        return x  // Early return with shadowed value
+        return x
     }
     
-    let x = 200  // This shadow only happens if no early return
+    let x = 200
     return x
 }
 

@@ -119,8 +119,8 @@ fn slot_reuse_after_remove() {
 
     print("e1 index: {e1._slot}")
 
-    a.remove(e1)                    // free slot 0
-    let e3 = a.insert(30)           // should reuse slot 0
+    a.remove(e1)
+    let e3 = a.insert(30)
 
     print("e3 index: {e3._slot}")   // must be 0, not 2
     // Generations are issued per ARENA, not per slot: e1 took 0, e2 took 1, so
@@ -136,13 +136,13 @@ fn slot_reuse_lifo_order() {
     let e1 = a.insert("b")
     let e2 = a.insert("c")
 
-    a.remove(e0)  // free stack: [0]
-    a.remove(e1)  // free stack: [0, 1]
+    a.remove(e0)
+    a.remove(e1)
 
     // free_indices is a stack (LIFO): last pushed (1) is popped first
-    let r1 = a.insert("d")   // pops 1
-    let r2 = a.insert("e")   // pops 0
-    let r3 = a.insert("f")   // no free slots, appends at index 3
+    let r1 = a.insert("d")
+    let r2 = a.insert("e")
+    let r3 = a.insert("f")
 
     print("reused: {r1._slot}")
     print("reused: {r2._slot}")
@@ -152,9 +152,9 @@ fn slot_reuse_lifo_order() {
 @test(output = "stale get: true\nfresh get: 42")
 fn generation_prevents_stale_access() {
     let a: Arena<int> = arena_new()
-    let e1 = a.insert(10)    // slot 0, gen 0
-    a.remove(e1)              // free slot 0
-    let e2 = a.insert(42)    // reuse slot 0, gen 1
+    let e1 = a.insert(10)
+    a.remove(e1)
+    let e2 = a.insert(42)
 
     // Stale handle (e1, gen 0) must not see new data
     let stale = a.get(e1)

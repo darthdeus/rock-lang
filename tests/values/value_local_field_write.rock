@@ -9,11 +9,11 @@
 // Sibling coverage: writes through mutable storage are
 // tests/values/place_leaf_write.rock and field_write_scalarized_local.rock.
 
-value In { c: int, s: string }          // GC-carrying (string field)
+value In { c: int, s: string }
 value Pt { x: int, b: In }
-value FPoint { x: float, y: float }     // FFI-clean, scalarizable
-value MaybeIn { x: int, b: In? }        // opaque nullable child
-value Gen<T> { v: T, n: int }           // generic child
+value FPoint { x: float, y: float }
+value MaybeIn { x: int, b: In? }
+value Gen<T> { v: T, n: int }
 nobox value Sid { value: int }
 nobox value Place { space: Sid, pos: FPoint }
 nobox value MaybeSid { a: Sid?, k: int }

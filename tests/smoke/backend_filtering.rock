@@ -34,12 +34,10 @@ fn test_backend_filtering() {
     print("Running on: ")
     print(platform)
 
-    // Test number formatting
     let formatted = format_number(42.12345)
     print("Formatted: ")
     print(formatted)
 
-    // Test table size
     print("Table size test passed")
 }
 

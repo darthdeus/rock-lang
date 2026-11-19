@@ -45,8 +45,8 @@ fn nullable_promotion_does_not_contaminate_variables() {
     let length: int = 5
     let n: int = 5
     let maybe: int? = promote_int(length)
-    print(n + maybe.unwrap())  // both still int -> 10
-    print(length)               // length unchanged
+    print(n + maybe.unwrap())
+    print(length)
 }
 
 @test(output = "3\ntrue")

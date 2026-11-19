@@ -96,7 +96,7 @@ fn test_if_expression_type_change_shadow() {
     let value = 42
 
     let result = if true {
-        let value = "hello"  // Shadow with different type
+        let value = "hello"
         print("Type changed to string: " + value)
         value
     } else {
@@ -131,8 +131,8 @@ fn test_if_expression_closure_capture() {
     let capture_before = () => x
 
     let result = if true {
-        let x = 10  // Shadow
-        let capture_after = () => capture_before()  // Still captures original x
+        let x = 10
+        let capture_after = () => capture_before()
         print("Captured before shadow: " + capture_before().to_string())
         print("Captured after shadow: " + capture_after().to_string())
         print("Local shadow: " + x.to_string())
@@ -189,7 +189,7 @@ fn test_if_expression_loop_shadow() {
 
     let result = if true {
         let values = [1, 2, 3]
-        let sum = 0  // Shadow outer sum
+        let sum = 0
 
         for val in values {
             sum = sum + val
@@ -197,7 +197,7 @@ fn test_if_expression_loop_shadow() {
 
         print("Loop sum: " + sum.to_string())
 
-        let sum = 100  // Shadow again
+        let sum = 100
         print("Shadowed in if: " + sum.to_string())
         sum
     } else {
@@ -219,14 +219,14 @@ fn test_function_shadow_in_if() {
     let before = f_test11()
 
     let result = if true {
-        let f = 100  // Shadow function with variable
+        let f = 100
         print("Shadowed f: " + f.to_string())
         f
     } else {
-        f_test11()  // Would call function
+        f_test11()
     }
 
-    let after = f_test11()  // Function still accessible
+    let after = f_test11()
 }
 
 // Helper for test 12
@@ -237,7 +237,6 @@ fn process_text(text: string? = null) {
         text
     }
 
-    // Now text is non-nullable and we can use it
     print("Processing: " + text)
 }
 
@@ -250,7 +249,7 @@ fn test_nullable_shadow_with_chaining() {
 // Helper for test 13
 fn process_generic<T>(value: T, flag: bool) -> int {
     if flag {
-        let T = 100  // Shadow type parameter with variable
+        let T = 100
         print("Shadowed T: " + T.to_string())
         return T
     } else {
@@ -373,6 +372,6 @@ fn test_nested_if_values() {
 @test(output = "2")
 fn test_typed_let_shadow_with_binop() {
     let x: int = 1
-    let x = x + 1  // Shadow with binary operator
+    let x = x + 1
     print(x.to_string())
 }

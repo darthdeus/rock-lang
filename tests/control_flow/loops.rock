@@ -51,7 +51,7 @@ fn vec_iteration_type_check() {
     let sum = 0
 
     for x in vec {
-        let x_typed: ? = x  // [0] - Should be int
+        let x_typed: ? = x
         sum += x
     }
 
@@ -68,7 +68,7 @@ fn map_iteration_type_check() {
     let sum = 0
 
     for (key, value) in map {
-        let value_typed: ? = value  // [1] - Should be int
+        let value_typed: ? = value
         sum += value
     }
 
@@ -82,7 +82,7 @@ fn array_iteration_type_check() {
     let sum = 0
 
     for x in arr {
-        let x_typed: ? = x  // [2] - Should be int
+        let x_typed: ? = x
         sum += x
     }
 
@@ -104,7 +104,7 @@ fn nested_loops_with_continue_complex() {
         loop {
             inner = inner + 1
             if inner == 2 {
-                continue  // inner continue
+                continue
             }
             result = result + inner
             if inner >= 3 {
@@ -113,7 +113,7 @@ fn nested_loops_with_continue_complex() {
         }
 
         if outer == 1 {
-            continue  // outer continue
+            continue
         }
         result = result + 10
     }
@@ -181,7 +181,7 @@ fn test_arena_tuple_iteration_type_check() {
     let sum = 0
 
     for (entity, value) in arena {
-        let value_typed: ? = value    // [3] - Should be int
+        let value_typed: ? = value
         sum += value
     }
 

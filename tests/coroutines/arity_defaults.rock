@@ -77,24 +77,24 @@ co fn arity_two_implicit() -> Coroutine<int, string> {
 @test(output = "1\nnull\n1\nresult=done\n1\nnull\n1\nresult=done")
 fn test_coroutine_arity_three_forms_unify() {
     let a = arity_one_explicit_unit()
-    print(a.resume() ?? -1)         // 1
+    print(a.resume() ?? -1)
     let r1 = a.resume()
-    if r1 == null { print("null") } else { print(r1) }  // null
+    if r1 == null { print("null") } else { print(r1) }
 
     let b = arity_two_explicit_unit_n()
-    print(b.resume() ?? -1)         // 1
+    print(b.resume() ?? -1)
     let _r2 = b.resume()
     let rb = b.result()
-    if rb == null { print("null") } else { print("result={rb}") }  // result=done
+    if rb == null { print("null") } else { print("result={rb}") }
 
     let c = arity_one_implicit()
-    print(c.resume() ?? -1)         // 1
+    print(c.resume() ?? -1)
     let r3 = c.resume()
-    if r3 == null { print("null") } else { print(r3) }  // null
+    if r3 == null { print("null") } else { print(r3) }
 
     let d = arity_two_implicit()
-    print(d.resume() ?? -1)         // 1
+    print(d.resume() ?? -1)
     let _r4 = d.resume()
     let rd = d.result()
-    if rd == null { print("null") } else { print("result={rd}") }  // result=done
+    if rd == null { print("null") } else { print("result={rd}") }
 }

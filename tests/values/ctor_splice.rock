@@ -38,7 +38,7 @@ fn value_in_a_record_round_trips() {
     let b = find_bag(1)
     if b == null { print("no bag"); return }
     let shelf = Shelf { bag: b, label: "shelf" }
-    print(bag_sum(shelf.bag))   // xs = [1, 2], n = 1 -> 4
+    print(bag_sum(shelf.bag))
     print(shelf.label)
 }
 

@@ -32,7 +32,7 @@ fn u16_buffer_indices() {
     for v in indices {
         sum = sum + v
     }
-    assert(sum == 150)  // 0 + 10 + 20 + 30 + 40 + 50
+    assert(sum == 150)
 }
 
 @test
@@ -53,8 +53,8 @@ fn i16_buffer_audio_style() {
 fn u32_buffer_packed_colors() {
     // uint32_t for packed 0xRRGGBBAA colors.
     let colors = native_buffer_u32(2)
-    colors[0] = 0xFF0000FF  // red, full alpha
-    colors[1] = 0x00FF00FF  // green
+    colors[0] = 0xFF0000FF
+    colors[1] = 0x00FF00FF
     assert(colors[0] == 0xFF0000FF)
     assert(colors[1] == 0x00FF00FF)
 }
@@ -99,6 +99,6 @@ fn enumerate_phantom_variant() {
         idx_sum = idx_sum + i
         val_sum = val_sum + v
     }
-    assert(idx_sum == 3)  // 0+1+2
-    assert(val_sum == 30) // 5+10+15
+    assert(idx_sum == 3)
+    assert(val_sum == 30)
 }

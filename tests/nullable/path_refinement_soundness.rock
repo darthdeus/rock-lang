@@ -32,7 +32,7 @@ fn invalidation_after_nullable_assign() {
     let b = Box { val: Val { n: 1 }, label: "x" }
     let maybe: Val? = null
     if b.val != null {
-        b.val = maybe  // maybe is Val?, could be null
+        b.val = maybe
         // refinement invalidated — must re-check
         if b.val != null {
             print("still set")

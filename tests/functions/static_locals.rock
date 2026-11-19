@@ -71,8 +71,8 @@ fn loop_static() -> int {
 
 @test(output = "3 6")
 fn test_static_in_loop_one_cell() {
-    let a = loop_static()   // m: 1,2,3 across iterations -> n = 3
-    let b = loop_static()   // m persists across calls: 4,5,6 -> n = 6
+    let a = loop_static()
+    let b = loop_static()
     print("{a} {b}")
 }
 
@@ -95,12 +95,12 @@ fn maybe_static(take: bool) -> int {
 
 @test(output = "-1 0 42 1 42 1")
 fn test_first_reach_untaken_branch_never_inits() {
-    let a = maybe_static(false)   // branch not taken -> init never runs
-    let r1 = INIT_RUNS            // 0
-    let b = maybe_static(true)    // first reach -> init runs exactly once
-    let r2 = INIT_RUNS            // 1
-    let c = maybe_static(true)    // reached again -> init does NOT re-run
-    let r3 = INIT_RUNS            // still 1
+    let a = maybe_static(false)
+    let r1 = INIT_RUNS
+    let b = maybe_static(true)
+    let r2 = INIT_RUNS
+    let c = maybe_static(true)
+    let r3 = INIT_RUNS
     print("{a} {r1} {b} {r2} {c} {r3}")
 }
 
@@ -123,7 +123,7 @@ fn sibling_blocks() -> int {
 
 @test(output = "11 22")
 fn test_sibling_block_statics_distinct() {
-    let r1 = sibling_blocks()   // a1: 0->1, a2: 0->10 => 11
-    let r2 = sibling_blocks()   // a1: 1->2, a2: 10->20 => 22 (each cell persists)
+    let r1 = sibling_blocks()
+    let r2 = sibling_blocks()
     print("{r1} {r2}")
 }

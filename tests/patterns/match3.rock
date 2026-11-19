@@ -227,8 +227,8 @@ fn test_cross_match() {
 fn test_gravity_simple() {
     setup_empty_board()
     // Column 3: tile at top, empties below, tiles at bottom
-    grid_set(3, 0, 5)  // tile at top
-    grid_set(3, 7, 2)  // tile at bottom
+    grid_set(3, 0, 5)
+    grid_set(3, 7, 2)
     apply_gravity()
     assert_eq(grid_get(3, 7), 2, "Bottom tile stays")
     assert_eq(grid_get(3, 6), 5, "Top tile drops to just above bottom")
@@ -238,9 +238,9 @@ fn test_gravity_simple() {
 @test
 fn test_gravity_preserves_order() {
     setup_empty_board()
-    grid_set(0, 0, 1) // top
-    grid_set(0, 2, 2) // middle (with gap)
-    grid_set(0, 4, 3) // lower (with gap)
+    grid_set(0, 0, 1)
+    grid_set(0, 2, 2)
+    grid_set(0, 4, 3)
     apply_gravity()
     assert_eq(grid_get(0, 7), 3, "Bottom-most value")
     assert_eq(grid_get(0, 6), 2, "Middle value")

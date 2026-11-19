@@ -49,7 +49,6 @@ fn eval(expr: Expr) -> float {
 
 @test
 fn test_expression_tree() {
-    // Create expression: 2 * (3 + 4)
     let expr = Expr::Multiply(
         Expr::Number(2.0),
         Expr::Add(
@@ -123,7 +122,6 @@ enum Block {
 
 @test
 fn test_json_construction() {
-    // Create a simple JSON object
     let obj = map_new()
     insert(obj, "name", Json::String("Rock"))
     insert(obj, "version", Json::Number(1.0))
@@ -165,7 +163,6 @@ fn test_list_map() {
     let numbers = List::Cons(1, List::Cons(2, List::Cons(3, List::Nil)))
     let doubled = list_map(numbers, x => x * 2)
     
-    // Verify first element is doubled
     match doubled {
         Cons(head, _) => assert_eq(head, 2),
         Nil => assert(false, "List should not be empty"),
@@ -185,7 +182,6 @@ fn tree_fold<T, U>(tree: Tree<T>, leaf_val: U, node_fn: (T, U, U) -> U) -> U {
 
 @test
 fn test_tree_fold() {
-    // Create a tree with values
     let tree = Tree::Node(10,
         Tree::Node(5, Tree::Leaf, Tree::Leaf),
         Tree::Node(15, Tree::Leaf, Tree::Leaf)

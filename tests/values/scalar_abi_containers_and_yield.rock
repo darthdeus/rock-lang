@@ -183,8 +183,8 @@ fn test_defer_value_binop_chain() {
     SIDE_EFFECT_ACC = 0
     {
         defer {
-            record_sum(make_v2(1, 2))                       // +3
-            record_sum(v2_scale(V2 { x: 1, y: 1 }, 7) * 1)  // +14
+            record_sum(make_v2(1, 2))
+            record_sum(v2_scale(V2 { x: 1, y: 1 }, 7) * 1)
         }
     }
     print(SIDE_EFFECT_ACC)

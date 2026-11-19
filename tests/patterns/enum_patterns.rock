@@ -81,7 +81,6 @@ fn test_pattern_variable_binding() {
         _ => assert(false),
     }
 
-    // Test with record variant
     let point = Complex::Record { x: 3.14, y: 2.71 }
     match point {
         Complex::Record { x, y } => {

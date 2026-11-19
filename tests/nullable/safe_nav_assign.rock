@@ -122,7 +122,7 @@ fn assign_3_levels_deep() {
 @test(output = "-1")
 fn assign_3_levels_null_at_middle() {
     let a: A? = A { b: null }
-    a?.b?.c?.d = D { e: null }  // no-op: b is null
+    a?.b?.c?.d = D { e: null }
     print(a?.b?.c?.d?.e?.value ?? -1)
 }
 
