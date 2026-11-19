@@ -36,12 +36,6 @@ fn elapsed_us(start: std::time::Instant) -> c_int {
     c_int::try_from(start.elapsed().as_micros()).unwrap_or(c_int::MAX)
 }
 
-fn note_profile_activity(profile: &mut ImageLoadStats, frame_was_inactive: bool) {
-    if frame_was_inactive {
-        profile.active_frames = profile.active_frames.saturating_add(1);
-    }
-}
-
 fn image_stats_active(stats: &ImageLoadStats) -> bool {
     stats.load_calls > 0
         || stats.load_failures > 0
@@ -50,69 +44,56 @@ fn image_stats_active(stats: &ImageLoadStats) -> bool {
         || stats.upload_us > 0
 }
 
-fn record_image_load(success: bool, bytes: usize, us: c_int) {
+fn saturating_count(count: usize) -> c_int {
+    c_int::try_from(count).unwrap_or(c_int::MAX)
+}
+
+impl ImageLoadStats {
+    fn add_load(&mut self, success: bool, bytes: usize, us: c_int) {
+        if success {
+            self.load_calls = self.load_calls.saturating_add(1);
+            self.decoded_bytes = self.decoded_bytes.saturating_add(saturating_count(bytes));
+        } else {
+            self.load_failures = self.load_failures.saturating_add(1);
+        }
+        self.load_us = self.load_us.saturating_add(us);
+    }
+
+    fn add_upload(&mut self, calls: usize, bytes: usize, wait_us: c_int, upload_us: c_int) {
+        self.upload_calls = self.upload_calls.saturating_add(saturating_count(calls));
+        self.upload_bytes = self.upload_bytes.saturating_add(saturating_count(bytes));
+        self.wait_us = self.wait_us.saturating_add(wait_us);
+        self.upload_us = self.upload_us.saturating_add(upload_us);
+        self.max_wait_us = self.max_wait_us.max(wait_us);
+    }
+}
+
+/// Apply `add` to this frame's and the profile's stats, marking both active.
+fn record_image_stats(add: impl Fn(&mut ImageLoadStats)) {
     FRAME_IMAGE_LOAD_STATS.with(|frame| {
         let mut frame = frame.borrow_mut();
         let inactive = !image_stats_active(&frame);
-        if success {
-            frame.load_calls = frame.load_calls.saturating_add(1);
-            frame.decoded_bytes = frame
-                .decoded_bytes
-                .saturating_add(c_int::try_from(bytes).unwrap_or(c_int::MAX));
-        } else {
-            frame.load_failures = frame.load_failures.saturating_add(1);
-        }
-        frame.load_us = frame.load_us.saturating_add(us);
+        add(&mut frame);
         frame.active_frames = 1;
-
         PROFILE_IMAGE_LOAD_STATS.with(|profile| {
             let mut profile = profile.borrow_mut();
-            note_profile_activity(&mut profile, inactive);
-            if success {
-                profile.load_calls = profile.load_calls.saturating_add(1);
-                profile.decoded_bytes = profile
-                    .decoded_bytes
-                    .saturating_add(c_int::try_from(bytes).unwrap_or(c_int::MAX));
-            } else {
-                profile.load_failures = profile.load_failures.saturating_add(1);
+            if inactive {
+                profile.active_frames = profile.active_frames.saturating_add(1);
             }
-            profile.load_us = profile.load_us.saturating_add(us);
+            add(&mut profile);
         });
     });
+}
+
+fn record_image_load(success: bool, bytes: usize, us: c_int) {
+    record_image_stats(|stats| stats.add_load(success, bytes, us));
 }
 
 fn record_image_upload(calls: usize, bytes: usize, wait_us: c_int, upload_us: c_int) {
     if calls == 0 && bytes == 0 && wait_us == 0 && upload_us == 0 {
         return;
     }
-    FRAME_IMAGE_LOAD_STATS.with(|frame| {
-        let mut frame = frame.borrow_mut();
-        let inactive = !image_stats_active(&frame);
-        frame.upload_calls = frame
-            .upload_calls
-            .saturating_add(c_int::try_from(calls).unwrap_or(c_int::MAX));
-        frame.upload_bytes = frame
-            .upload_bytes
-            .saturating_add(c_int::try_from(bytes).unwrap_or(c_int::MAX));
-        frame.wait_us = frame.wait_us.saturating_add(wait_us);
-        frame.upload_us = frame.upload_us.saturating_add(upload_us);
-        frame.max_wait_us = frame.max_wait_us.max(wait_us);
-        frame.active_frames = 1;
-
-        PROFILE_IMAGE_LOAD_STATS.with(|profile| {
-            let mut profile = profile.borrow_mut();
-            note_profile_activity(&mut profile, inactive);
-            profile.upload_calls = profile
-                .upload_calls
-                .saturating_add(c_int::try_from(calls).unwrap_or(c_int::MAX));
-            profile.upload_bytes = profile
-                .upload_bytes
-                .saturating_add(c_int::try_from(bytes).unwrap_or(c_int::MAX));
-            profile.wait_us = profile.wait_us.saturating_add(wait_us);
-            profile.upload_us = profile.upload_us.saturating_add(upload_us);
-            profile.max_wait_us = profile.max_wait_us.max(wait_us);
-        });
-    });
+    record_image_stats(|stats| stats.add_upload(calls, bytes, wait_us, upload_us));
 }
 
 pub(crate) fn reset_image_frame_stats() {
@@ -1093,7 +1074,7 @@ pub extern "C" fn stone_set_frame_image_upload_budget(bytes: c_int) {
 
 #[no_mangle]
 pub extern "C" fn stone_image_uploads_pending() -> c_int {
-    c_int::try_from(crate::image_publication::pending()).unwrap_or(c_int::MAX)
+    saturating_count(crate::image_publication::pending())
 }
 
 #[no_mangle]
