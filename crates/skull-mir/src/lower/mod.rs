@@ -1,8 +1,8 @@
 //! Lower resolved HIR into MIR blocks, cells and typed instructions.
 
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::rc::Rc;
 use std::sync::OnceLock;
 
@@ -169,7 +169,6 @@ mod storage;
 pub use storage::SYNTHESIZED_ENTRIES;
 mod structs;
 mod types;
-
 
 fn prefixed(field: Ustr, leaves: Vec<(Ustr, Idx<Inst>)>) -> Vec<(Ustr, Idx<Inst>)> {
     leaves
@@ -3201,7 +3200,6 @@ pub fn param_null_overrides_default(ws: &Workspace, body: &Body, index: usize, t
     }
 }
 
-
 pub(crate) fn ty_node(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<TypeExpr> {
     match ty {
         TyId::Static(mid, idx) => Some(ws.module(mid).ty_arena[idx]),
@@ -3239,7 +3237,10 @@ fn map_key_rejection_reason(
             | BuiltinTy::Error,
         ) => None,
         TypeExpr::Generic(..) | TypeExpr::Infer(..) => None,
-        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } => {
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        } => {
             if let Some(nid) = ws.newtypes_by_name.get(&name) {
                 let wrapped = ws.modules[nid.module.index()].newtypes[nid.def].wrapped;
                 let wrapped = resolve_tyid(ws, inf, wrapped)?;
@@ -3251,14 +3252,16 @@ fn map_key_rejection_reason(
             // type cdata- or table-carrying.
             if ws.enums_by_name.contains_key(&name) {
                 return (!is_payload_free_enum(ws, name)).then(|| {
-                        format!(
-                            "`{name}` has payload-carrying variants, keyed by cdata or object \
+                    format!(
+                        "`{name}` has payload-carrying variants, keyed by cdata or object \
                              identity (a payload-free enum is an int ordinal and stays allowed)"
-                        )
-                    });
+                    )
+                });
             }
             if is_value_struct(ws, name) {
-                Some(format!("`{name}` is a `value` struct, keyed by cdata identity"))
+                Some(format!(
+                    "`{name}` is a `value` struct, keyed by cdata identity"
+                ))
             } else {
                 Some(format!("`{name}` is a struct, keyed by object identity"))
             }
@@ -3266,21 +3269,22 @@ fn map_key_rejection_reason(
         TypeExpr::Tuple { .. } => {
             Some("a tuple is an aggregate, keyed by object identity".to_string())
         }
-        TypeExpr::App { ctor: TypeCtor::Array, .. } => {
-            Some("an array is an aggregate, keyed by object identity".to_string())
-        }
-        TypeExpr::App { ctor: TypeCtor::Map, .. } => {
-            Some("a `Map` is an aggregate, keyed by object identity".to_string())
-        }
-        TypeExpr::App { ctor: TypeCtor::Ref, .. } => {
-            Some("a frame reference cannot be stored as a map key".to_string())
-        }
+        TypeExpr::App {
+            ctor: TypeCtor::Array,
+            ..
+        } => Some("an array is an aggregate, keyed by object identity".to_string()),
+        TypeExpr::App {
+            ctor: TypeCtor::Map,
+            ..
+        } => Some("a `Map` is an aggregate, keyed by object identity".to_string()),
+        TypeExpr::App {
+            ctor: TypeCtor::Ref,
+            ..
+        } => Some("a frame reference cannot be stored as a map key".to_string()),
         TypeExpr::Nullable(..) => {
             Some("a nullable key cannot be distinguished from a missing entry".to_string())
         }
-        TypeExpr::Function { .. } => {
-            Some("a function is keyed by identity".to_string())
-        }
+        TypeExpr::Function { .. } => Some("a function is keyed by identity".to_string()),
     }
 }
 
@@ -3395,7 +3399,6 @@ pub fn gc_value_c_boundary(ws: &Workspace, mid: ModuleId) -> Option<(String, Spa
     }
     None
 }
-
 
 fn resolve_call_fn(
     ws: &Workspace,

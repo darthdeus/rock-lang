@@ -75,40 +75,38 @@ impl<'a> Builder<'a> {
         // Structured targets consume the materialized logical diamonds: their
         // structurizer cannot yet recover every direct short-circuit CFG.
         let direct = self.scx.target == bone_core::hir::FnBackend::Lua;
-        let result = (|| {
-            match self.body.expr_arena[e] {
-                Expr::BinOp {
-                    op: BinOp::And,
-                    lhs,
-                    rhs,
-                } if direct => {
-                    let rhs_bb = self.f.new_block();
-                    self.lower_branch(lhs, rhs_bb, else_bb, true)?;
-                    self.cur = rhs_bb;
-                    self.lower_branch(rhs, then_bb, else_bb, condition)
-                }
-                Expr::BinOp {
-                    op: BinOp::Or,
-                    lhs,
-                    rhs,
-                } if direct => {
-                    let rhs_bb = self.f.new_block();
-                    self.lower_branch(lhs, then_bb, rhs_bb, true)?;
-                    self.cur = rhs_bb;
-                    self.lower_branch(rhs, then_bb, else_bb, condition)
-                }
-                Expr::Not(x, _) if direct && self.overload_target(e).is_none() => {
-                    self.lower_branch(x, else_bb, then_bb, true)
-                }
-                _ => {
-                    let cond = if condition {
-                        self.lower_condition(e)?
-                    } else {
-                        self.lower_expr(e)?
-                    };
-                    self.branch_to(cond, then_bb, else_bb);
-                    Ok(())
-                }
+        let result = (|| match self.body.expr_arena[e] {
+            Expr::BinOp {
+                op: BinOp::And,
+                lhs,
+                rhs,
+            } if direct => {
+                let rhs_bb = self.f.new_block();
+                self.lower_branch(lhs, rhs_bb, else_bb, true)?;
+                self.cur = rhs_bb;
+                self.lower_branch(rhs, then_bb, else_bb, condition)
+            }
+            Expr::BinOp {
+                op: BinOp::Or,
+                lhs,
+                rhs,
+            } if direct => {
+                let rhs_bb = self.f.new_block();
+                self.lower_branch(lhs, then_bb, rhs_bb, true)?;
+                self.cur = rhs_bb;
+                self.lower_branch(rhs, then_bb, else_bb, condition)
+            }
+            Expr::Not(x, _) if direct && self.overload_target(e).is_none() => {
+                self.lower_branch(x, else_bb, then_bb, true)
+            }
+            _ => {
+                let cond = if condition {
+                    self.lower_condition(e)?
+                } else {
+                    self.lower_expr(e)?
+                };
+                self.branch_to(cond, then_bb, else_bb);
+                Ok(())
             }
         })();
         let result = result.map_err(|e| self.located(e));
