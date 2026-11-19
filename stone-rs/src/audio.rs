@@ -336,10 +336,6 @@ fn store_f32(cell: &AtomicU32, v: f32) {
     cell.store(v.to_bits(), Ordering::Relaxed);
 }
 
-fn load_f32(cell: &AtomicU32) -> f32 {
-    f32::from_bits(cell.load(Ordering::Relaxed))
-}
-
 // Written on the game thread, read on the audio thread: atomics only, never a Mutex.
 struct BusParams {
     /// f32 bits. The *target*; BusSource slews the applied value toward it.
@@ -532,7 +528,7 @@ impl Bus {
 
     /// Current meter envelope. A plain load -- reading it changes nothing.
     fn meter(&self) -> f32 {
-        load_f32(&self.params.meter)
+        f32_at(&self.params.meter)
     }
 
     fn samples_pulled(&self) -> u64 {
@@ -863,6 +859,21 @@ struct AudioState {
     voices: HashMap<u64, Voice>,
 }
 
+impl AudioState {
+    fn new(stream: Option<MixerDeviceSink>, buses: Buses) -> Self {
+        Self {
+            _stream: stream,
+            buses,
+            sounds: HashMap::new(),
+            pending_sound_admissions: VecDeque::new(),
+            inflight_sound_bytes: 0,
+            music: HashMap::new(),
+            music_playback: None,
+            voices: HashMap::new(),
+        }
+    }
+}
+
 thread_local! {
     static AUDIO_STATE: RefCell<Option<AudioState>> = const { RefCell::new(None) };
 }
@@ -973,16 +984,10 @@ pub extern "C" fn stone_audio_init() -> bool {
         }
 
         if audio_device_disabled() {
-            *state.borrow_mut() = Some(AudioState {
-                _stream: None,
-                buses: Buses::detached(STUB_CHANNELS, STUB_SAMPLE_RATE),
-                sounds: HashMap::new(),
-                pending_sound_admissions: VecDeque::new(),
-                inflight_sound_bytes: 0,
-                music: HashMap::new(),
-                music_playback: None,
-                voices: HashMap::new(),
-            });
+            *state.borrow_mut() = Some(AudioState::new(
+                None,
+                Buses::detached(STUB_CHANNELS, STUB_SAMPLE_RATE),
+            ));
             return true;
         }
 
@@ -994,16 +999,7 @@ pub extern "C" fn stone_audio_init() -> bool {
             Ok(mut stream) => {
                 stream.log_on_drop(false);
                 let buses = Buses::new(&stream, output_muted());
-                *state.borrow_mut() = Some(AudioState {
-                    _stream: Some(stream),
-                    buses,
-                    sounds: HashMap::new(),
-                    pending_sound_admissions: VecDeque::new(),
-                    inflight_sound_bytes: 0,
-                    music: HashMap::new(),
-                    music_playback: None,
-                    voices: HashMap::new(),
-                });
+                *state.borrow_mut() = Some(AudioState::new(Some(stream), buses));
                 true
             }
             Err(e) => {
@@ -1197,17 +1193,9 @@ pub extern "C" fn stone_load_sound_stream(
 #[no_mangle]
 pub extern "C" fn stone_sound_admit(handle: u64) -> bool {
     if stub_audio() {
-        return AUDIO_STATE.with(|state| {
-            state
-                .borrow()
-                .as_ref()
-                .is_some_and(|audio| audio.sounds.contains_key(&handle))
-        });
+        return with_sound(handle, |_| ()).is_some();
     }
-    AUDIO_STATE.with(|state| {
-        let Some(ref mut audio) = *state.borrow_mut() else {
-            return false;
-        };
+    with_audio_mut(|audio| {
         let Some(sound) = audio.sounds.get_mut(&handle) else {
             return false;
         };
@@ -1218,6 +1206,7 @@ pub extern "C" fn stone_sound_admit(handle: u64) -> bool {
         audio.pending_sound_admissions.push_back(handle);
         true
     })
+    .unwrap_or(false)
 }
 
 #[no_mangle]
@@ -1228,10 +1217,7 @@ pub extern "C" fn stone_service_sound_admissions() -> i64 {
             .expect("sound admissions poisoned");
         results.drain(..).collect()
     };
-    let (published, scheduled) = AUDIO_STATE.with(|state| {
-        let Some(ref mut audio) = *state.borrow_mut() else {
-            return (0, Vec::new());
-        };
+    let (published, scheduled) = with_audio_mut(|audio| {
         let mut published = 0;
         for result in completed {
             audio.inflight_sound_bytes = audio
@@ -1295,7 +1281,8 @@ pub extern "C" fn stone_service_sound_admissions() -> i64 {
             scheduled.push((handle, path, bytes, stream));
         }
         (published, scheduled)
-    });
+    })
+    .unwrap_or_default();
 
     for (handle, path, reserved_bytes, stream) in scheduled {
         rayon::spawn(move || {
@@ -1347,15 +1334,13 @@ pub extern "C" fn stone_sound_decode_sync(handle: u64) -> i64 {
         return -1;
     };
     let elapsed_us = started.elapsed().as_micros().min(i64::MAX as u128) as i64;
-    let published = AUDIO_STATE.with(|state| {
-        let Some(ref mut audio) = *state.borrow_mut() else {
-            return false;
-        };
-        let Some(sound) = audio.sounds.get_mut(&handle) else {
-            return false;
-        };
-        sound.publish_decoded(samples, sample_rate, channels)
-    });
+    let published = with_audio_mut(|audio| {
+        audio
+            .sounds
+            .get_mut(&handle)
+            .is_some_and(|sound| sound.publish_decoded(samples, sample_rate, channels))
+    })
+    .unwrap_or(false);
     if published {
         elapsed_us
     } else {
@@ -1412,31 +1397,28 @@ pub extern "C" fn stone_reload_sound(handle: u64, path: *const c_char) -> bool {
         AdmissionPayload::Pcm(samples, rate, channels)
     };
 
-    AUDIO_STATE.with(|state| {
-        if let Some(ref mut audio) = *state.borrow_mut() {
-            if !audio.sounds.contains_key(&handle) {
-                return false;
+    with_audio_mut(|audio| {
+        if !audio.sounds.contains_key(&handle) {
+            return false;
+        }
+        stop_voices_of(&mut audio.voices, handle);
+        let Some(sound) = audio.sounds.get_mut(&handle) else {
+            return false;
+        };
+        sound.path = path_str.to_owned();
+        sound.admitting = false;
+        sound.samples = None;
+        sound.encoded = None;
+        match payload {
+            AdmissionPayload::Pcm(samples, rate, channels) => {
+                sound.publish_decoded(samples, rate, channels)
             }
-            stop_voices_of(&mut audio.voices, handle);
-            let Some(sound) = audio.sounds.get_mut(&handle) else {
-                return false;
-            };
-            sound.path = path_str.to_owned();
-            sound.admitting = false;
-            sound.samples = None;
-            sound.encoded = None;
-            match payload {
-                AdmissionPayload::Pcm(samples, rate, channels) => {
-                    sound.publish_decoded(samples, rate, channels)
-                }
-                AdmissionPayload::Encoded(encoded, rate, channels) => {
-                    sound.publish_encoded(encoded, rate, channels)
-                }
+            AdmissionPayload::Encoded(encoded, rate, channels) => {
+                sound.publish_encoded(encoded, rate, channels)
             }
-        } else {
-            false
         }
     })
+    .unwrap_or(false)
 }
 
 /// How many decoded samples one sound holds NOW. Zero means the recipe exists
@@ -1546,45 +1528,39 @@ fn stop_music_playback(playback: &mut Option<MusicPlayback>) {
 
 #[no_mangle]
 pub extern "C" fn stone_unload_music(handle: u64) -> bool {
-    AUDIO_STATE.with(|state| {
-        if let Some(ref mut audio) = *state.borrow_mut() {
-            let removed = audio.music.remove(&handle).is_some();
-            if removed {
-                crate::handles::retire(Class::Music, handle);
-            }
-            if removed
-                && audio
-                    .music_playback
-                    .as_ref()
-                    .is_some_and(|p| p.handle == handle)
-            {
-                stop_music_playback(&mut audio.music_playback);
-            }
-            return removed;
+    with_audio_mut(|audio| {
+        if audio.music.remove(&handle).is_none() {
+            return false;
         }
-        false
+        crate::handles::retire(Class::Music, handle);
+        if audio
+            .music_playback
+            .as_ref()
+            .is_some_and(|p| p.handle == handle)
+        {
+            stop_music_playback(&mut audio.music_playback);
+        }
+        true
     })
+    .unwrap_or(false)
 }
 
 /// Free a loaded sound, stopping its playing voices first so a hot-reloaded
 /// file does not keep playing the old samples. False if the handle was absent.
 #[no_mangle]
 pub extern "C" fn stone_unload_sound(handle: u64) -> bool {
-    AUDIO_STATE.with(|state| {
-        if let Some(ref mut audio) = *state.borrow_mut() {
-            stop_voices_of(&mut audio.voices, handle);
-            audio
-                .pending_sound_admissions
-                .retain(|pending| *pending != handle);
-            let removed = audio.sounds.remove(&handle).is_some();
-            if removed {
-                crate::handles::retire(Class::Sound, handle);
-            }
-            removed
-        } else {
-            false
+    with_audio_mut(|audio| {
+        stop_voices_of(&mut audio.voices, handle);
+        audio
+            .pending_sound_admissions
+            .retain(|pending| *pending != handle);
+        let removed = audio.sounds.remove(&handle).is_some();
+        if removed {
+            crate::handles::retire(Class::Sound, handle);
         }
+        removed
     })
+    .unwrap_or(false)
 }
 
 // The speed floor matters: a zero or negative ratio yields a player that never empties
@@ -1760,72 +1736,69 @@ pub extern "C" fn stone_play_sound(
     spatial: bool,
     pan: c_float,
 ) -> u64 {
-    AUDIO_STATE.with(|state| {
-        if let Some(ref mut audio) = *state.borrow_mut() {
-            // Nothing drains a stubbed bus graph, so an appended player would never empty.
-            if audio._stream.is_none() {
-                return 0;
-            }
-            let Some(bus) = audio.buses.get(bus) else {
-                crate::log_once!("AUDIO", "stone_play_sound: unknown bus {}", bus);
+    with_audio_mut(|audio| {
+        // Nothing drains a stubbed bus graph, so an appended player would never empty.
+        if audio._stream.is_none() {
+            return 0;
+        }
+        let Some(bus) = audio.buses.get(bus) else {
+            crate::log_once!("AUDIO", "stone_play_sound: unknown bus {}", bus);
+            return 0;
+        };
+        let Some(sound_data) = audio.sounds.get(&handle) else {
+            return 0;
+        };
+        let (gain, ratio) = sound_play_params(volume, speed);
+        let pan_control = spatial.then(|| Arc::new(AtomicU32::new(pan.to_bits())));
+        let input = if sound_data.stream {
+            let Some(encoded) = sound_data.encoded.clone() else {
                 return 0;
             };
-            if let Some(sound_data) = audio.sounds.get(&handle) {
-                let (gain, ratio) = sound_play_params(volume, speed);
+            let source = match StreamSource::new(encoded, looped) {
+                Ok(source) => source,
+                Err(e) => {
+                    crate::log_once!(
+                        "AUDIO",
+                        "stone_play_sound: stream {} does not decode: {}",
+                        sound_data.path,
+                        e
+                    );
+                    return 0;
+                }
+            };
+            voice_source(source, ratio, decay, pan_control.clone())
+        } else {
+            let Some(source) = sound_data.as_source(looped) else {
+                return 0;
+            };
+            voice_source(source, ratio, decay, pan_control.clone())
+        };
+        let player = Player::connect_new(bus.mixer());
+        player.set_volume(gain);
+        player.append(input);
 
-                let player = Player::connect_new(bus.mixer());
-                player.set_volume(gain);
-
-                let pan_control = spatial.then(|| Arc::new(AtomicU32::new(pan.to_bits())));
-                let input = if sound_data.stream {
-                    let Some(encoded) = sound_data.encoded.clone() else {
-                        return 0;
-                    };
-                    let source = match StreamSource::new(encoded, looped) {
-                        Ok(source) => source,
-                        Err(e) => {
-                            crate::log_once!(
-                                "AUDIO",
-                                "stone_play_sound: stream {} does not decode: {}",
-                                sound_data.path,
-                                e
-                            );
-                            return 0;
-                        }
-                    };
-                    voice_source(source, ratio, decay, pan_control.clone())
-                } else {
-                    let Some(source) = sound_data.as_source(looped) else {
-                        return 0;
-                    };
-                    voice_source(source, ratio, decay, pan_control.clone())
-                };
-                player.append(input);
-
-                // Safe to reap here: `append` bumps sound_count synchronously, so a voice started
-                // this call never looks empty.
-                audio.voices.retain(|id, v| {
-                    let live = !v.player.empty();
-                    if !live {
-                        crate::handles::retire(Class::Voice, *id);
-                    }
-                    live
-                });
-
-                let voice_id = crate::handles::mint(Class::Voice);
-                audio.voices.insert(
-                    voice_id,
-                    Voice {
-                        sound: handle,
-                        player,
-                        pan: pan_control,
-                    },
-                );
-                return voice_id;
+        // Safe to reap here: `append` bumps sound_count synchronously, so a voice started
+        // this call never looks empty.
+        audio.voices.retain(|id, v| {
+            let live = !v.player.empty();
+            if !live {
+                crate::handles::retire(Class::Voice, *id);
             }
-        }
-        0
+            live
+        });
+
+        let voice_id = crate::handles::mint(Class::Voice);
+        audio.voices.insert(
+            voice_id,
+            Voice {
+                sound: handle,
+                player,
+                pan: pan_control,
+            },
+        );
+        voice_id
     })
+    .unwrap_or(0)
 }
 
 #[no_mangle]
@@ -1885,11 +1858,7 @@ pub unsafe extern "C" fn stone_get_sound_peaks(
 
 #[no_mangle]
 pub extern "C" fn stone_stop_sound(handle: u64) {
-    AUDIO_STATE.with(|state| {
-        if let Some(ref mut audio) = *state.borrow_mut() {
-            stop_voices_of(&mut audio.voices, handle);
-        }
-    });
+    with_audio_mut(|audio| stop_voices_of(&mut audio.voices, handle));
 }
 
 /// Map membership, not `Player::empty()`: rodio's `stop()` drains on the audio thread
@@ -1903,16 +1872,15 @@ pub extern "C" fn stone_voice_active(voice: u64) -> bool {
 /// False if the voice was already gone (idempotent).
 #[no_mangle]
 pub extern "C" fn stone_voice_stop(voice: u64) -> bool {
-    AUDIO_STATE.with(|state| {
-        if let Some(ref mut audio) = *state.borrow_mut() {
-            if let Some(v) = audio.voices.remove(&voice) {
-                crate::handles::retire(Class::Voice, voice);
-                v.player.stop();
-                return true;
-            }
-        }
-        false
+    with_audio_mut(|audio| {
+        let Some(v) = audio.voices.remove(&voice) else {
+            return false;
+        };
+        crate::handles::retire(Class::Voice, voice);
+        v.player.stop();
+        true
     })
+    .unwrap_or(false)
 }
 
 /// Per-voice gain, composed with the global SFX volume. Takes effect within
@@ -1946,33 +1914,31 @@ pub extern "C" fn stone_voice_set_speed(voice: u64, speed: c_float) -> bool {
 
 #[no_mangle]
 pub extern "C" fn stone_play_music(handle: u64) {
-    AUDIO_STATE.with(|state| {
-        if let Some(ref mut audio) = *state.borrow_mut() {
-            let Some(bytes) = audio.music.get(&handle).cloned() else {
-                crate::log_once!("AUDIO", "stone_play_music: unknown music handle {}", handle);
-                return;
-            };
-            let source = match StreamSource::new(bytes, true) {
-                Ok(source) => source,
-                Err(e) => {
-                    crate::log_once!(
-                        "AUDIO",
-                        "stone_play_music: Failed to decode music {}: {}",
-                        handle,
-                        e
-                    );
-                    return;
-                }
-            };
-
-            stop_music_playback(&mut audio.music_playback);
-            if audio._stream.is_none() {
+    with_audio_mut(|audio| {
+        let Some(bytes) = audio.music.get(&handle).cloned() else {
+            crate::log_once!("AUDIO", "stone_play_music: unknown music handle {}", handle);
+            return;
+        };
+        let source = match StreamSource::new(bytes, true) {
+            Ok(source) => source,
+            Err(e) => {
+                crate::log_once!(
+                    "AUDIO",
+                    "stone_play_music: Failed to decode music {}: {}",
+                    handle,
+                    e
+                );
                 return;
             }
-            let player = Player::connect_new(audio.buses.music.mixer());
-            player.append(source);
-            audio.music_playback = Some(MusicPlayback { handle, player });
+        };
+
+        stop_music_playback(&mut audio.music_playback);
+        if audio._stream.is_none() {
+            return;
         }
+        let player = Player::connect_new(audio.buses.music.mixer());
+        player.append(source);
+        audio.music_playback = Some(MusicPlayback { handle, player });
     });
 }
 
@@ -2052,6 +2018,10 @@ fn with_voice<T>(voice: u64, f: impl FnOnce(&Voice) -> T) -> Option<T> {
 
 fn with_audio<T>(f: impl FnOnce(&AudioState) -> Option<T>) -> Option<T> {
     AUDIO_STATE.with(|state| state.borrow().as_ref().and_then(f))
+}
+
+fn with_audio_mut<T>(f: impl FnOnce(&mut AudioState) -> T) -> Option<T> {
+    AUDIO_STATE.with(|state| state.borrow_mut().as_mut().map(f))
 }
 
 #[no_mangle]
@@ -2242,16 +2212,7 @@ mod tests {
     }
 
     fn empty_audio_state() -> AudioState {
-        AudioState {
-            _stream: None,
-            buses: Buses::detached(ch2(), sr()),
-            sounds: HashMap::new(),
-            pending_sound_admissions: VecDeque::new(),
-            inflight_sound_bytes: 0,
-            music: HashMap::new(),
-            music_playback: None,
-            voices: HashMap::new(),
-        }
+        AudioState::new(None, Buses::detached(ch2(), sr()))
     }
 
     fn ch2() -> ChannelCount {
