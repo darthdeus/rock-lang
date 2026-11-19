@@ -75,7 +75,7 @@ pub fn program_session(
     let frag = skull_codegen_glsl::resolve_root(ws, mid, frag)?;
     let program = ShaderProgram { vert, frag };
     let roots = vert.into_iter().chain([frag]).collect();
-    let graph = skull::instance_graph::build(ws, roots, false);
+    let graph = skull::instance_graph::build(ws, roots);
     let scx =
         ScalarCtx::new_values_first_class(ws).sharing(std::sync::Arc::clone(graph.interner()));
     let mut artifact = skull::shader_artifact::realize_shader_with_context(

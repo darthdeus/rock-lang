@@ -214,8 +214,7 @@ pub fn shader_library_session(
     roots: Vec<FuncRef>,
 ) -> Result<ShaderLibrarySession, CompilerError> {
     let interner = Arc::new(MonoInterner::new());
-    let graph =
-        skull_graph::instance_graph::build_in(ws, roots.clone(), false, Arc::clone(&interner));
+    let graph = skull_graph::instance_graph::build_in(ws, roots.clone(), Arc::clone(&interner));
     let scx = ScalarCtx::new_values_first_class(ws).sharing(interner);
     let view = realize_shader_library_view(ws, &graph, &roots)?;
     Ok(ShaderLibrarySession { scx, view })

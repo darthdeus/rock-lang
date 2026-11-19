@@ -6,7 +6,7 @@ fn lower_test_instance(
     fref: FuncRef,
 ) -> (ScalarCtx, MirFunc, Arc<ConcreteBodyPlan>) {
     let interner = Arc::new(MonoInterner::new());
-    let graph = skull_graph::instance_graph::build_in(ws, vec![fref], false, Arc::clone(&interner));
+    let graph = skull_graph::instance_graph::build_in(ws, vec![fref], Arc::clone(&interner));
     let concrete = skull_graph::concrete_body::build(ws, &graph);
     let scx = ScalarCtx::new_values_first_class(ws).sharing(Arc::clone(&interner));
     let plan = Arc::clone(

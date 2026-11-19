@@ -376,7 +376,7 @@ pub(crate) fn shader_validate(dirs: &[String], skip_gpu: bool) -> Result<()> {
                     .chain(std::iter::once(program.frag))
             })
             .collect();
-        let graph = skull::instance_graph::build(&ws, roots, false);
+        let graph = skull::instance_graph::build(&ws, roots);
         let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(&ws)
             .sharing(std::sync::Arc::clone(graph.interner()));
 

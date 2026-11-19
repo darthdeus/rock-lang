@@ -2815,12 +2815,8 @@ fn top() -> int { return sum_all(Counter { n: 0 }) }
             func: fid,
         };
         let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
-        let graph = skull_graph::instance_graph::build_in(
-            &ws,
-            vec![top],
-            false,
-            std::sync::Arc::clone(&interner),
-        );
+        let graph =
+            skull_graph::instance_graph::build_in(&ws, vec![top], std::sync::Arc::clone(&interner));
         let concrete = skull_graph::concrete_body::build(&ws, &graph);
         let scx = ScalarCtx::new(&ws).sharing(std::sync::Arc::clone(&interner));
 

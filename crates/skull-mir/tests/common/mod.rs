@@ -104,8 +104,7 @@ pub fn lower(source: &str, name: &str) -> MirFunc {
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut [ast]).expect("semantic pass");
     let root = decl(&ws, name);
     let interner = Arc::new(MonoInterner::new());
-    let graph =
-        skull_graph::instance_graph::build_in(&ws, vec![root], false, Arc::clone(&interner));
+    let graph = skull_graph::instance_graph::build_in(&ws, vec![root], Arc::clone(&interner));
     let concrete = skull_graph::concrete_body::build(&ws, &graph);
     let scx = ScalarCtx::new(&ws).sharing(interner);
     let plan = &concrete.plans[&Instance::base(root)];

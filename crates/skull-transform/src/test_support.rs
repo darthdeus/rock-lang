@@ -28,8 +28,7 @@ pub(crate) fn lower_fixture(
         func: fid,
     };
     let interner = Arc::new(MonoInterner::new());
-    let graph =
-        skull_graph::instance_graph::build_in(&ws, vec![root], false, Arc::clone(&interner));
+    let graph = skull_graph::instance_graph::build_in(&ws, vec![root], Arc::clone(&interner));
     let concrete = skull_graph::concrete_body::build(&ws, &graph);
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(Arc::clone(&interner));
     let plan = concrete

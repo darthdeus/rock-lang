@@ -220,7 +220,7 @@ fn expand_selected_sim_roots(
             &roots.shader_roots,
         );
         let interner = std::sync::Arc::clone(graph.interner());
-        *graph = crate::instance_graph::build_in(ws, roots.emission_roots.clone(), false, interner);
+        *graph = crate::instance_graph::build_in(ws, roots.emission_roots.clone(), interner);
     }
     let reached = graph
         .instances
@@ -662,12 +662,8 @@ pub(super) fn emit_full_build(
         join_in_place(
             || early_contexts(ws, early_interner, shapes),
             || {
-                let mut graph = crate::instance_graph::build_in(
-                    ws,
-                    roots.emission_roots.clone(),
-                    false,
-                    interner,
-                );
+                let mut graph =
+                    crate::instance_graph::build_in(ws, roots.emission_roots.clone(), interner);
                 let selected_sim_functions = if matches!(build, FullBuild::SelectedSims(_)) {
                     Some(expand_selected_sim_roots(ws, &mut roots, &mut graph)?)
                 } else {

@@ -740,8 +740,8 @@ pub fn is_spanless(span: &Span) -> bool {
 ///
 /// `roots` is supplied by the caller so this shares production's root
 /// discovery instead of re-deriving it.
-pub fn build(ws: &Workspace, roots: Vec<FuncRef>, _perturb: bool) -> InstanceGraph {
-    build_in(ws, roots, false, std::sync::Arc::new(MonoInterner::new()))
+pub fn build(ws: &Workspace, roots: Vec<FuncRef>) -> InstanceGraph {
+    build_in(ws, roots, std::sync::Arc::new(MonoInterner::new()))
 }
 
 /// [`build`] against an arena the caller already owns.
@@ -752,7 +752,6 @@ pub fn build(ws: &Workspace, roots: Vec<FuncRef>, _perturb: bool) -> InstanceGra
 pub fn build_in(
     ws: &Workspace,
     roots: Vec<FuncRef>,
-    _perturb: bool,
     interner: std::sync::Arc<MonoInterner>,
 ) -> InstanceGraph {
     let t_build = Instant::now();

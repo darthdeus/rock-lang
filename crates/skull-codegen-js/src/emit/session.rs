@@ -131,8 +131,7 @@ fn new_js_session(
     scx: &skull_mir::lower::ScalarCtx,
     roots: &[FuncRef],
 ) -> JsSession {
-    let graph =
-        skull_graph::instance_graph::build_in(ws, roots.to_vec(), false, scx.interner_handle());
+    let graph = skull_graph::instance_graph::build_in(ws, roots.to_vec(), scx.interner_handle());
     let mappings = artifact::ArtifactMappings::for_backend(bone_core::hir::FnBackend::Js)
         .with_supply(&crate::JsBackendRealization);
     let view = artifact::realize(

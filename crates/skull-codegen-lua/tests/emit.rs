@@ -581,7 +581,6 @@ fn emit_inlined(src: &str, fn_name: &str) -> String {
                 func: fid,
             })
             .collect(),
-        false,
         interner.clone(),
     );
     let bodies = skull_graph::concrete_body::build(&ws, &graph);

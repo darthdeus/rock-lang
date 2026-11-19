@@ -1485,7 +1485,7 @@ fn emit_shader_program_with_view(
         .into_iter()
         .chain(std::iter::once(program.frag))
         .collect();
-    let graph = skull::instance_graph::build(ws, roots, false);
+    let graph = skull::instance_graph::build(ws, roots);
     let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
         .sharing(std::sync::Arc::clone(graph.interner()));
     let programs = [program];

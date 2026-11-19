@@ -577,7 +577,7 @@ pub fn overlay_or_restart(
 
 pub fn graph_for(ws: &Workspace) -> (InstanceGraph, Vec<skull_mir::mir::FuncRef>) {
     let roots = skull::mir_emit::emission_roots(ws, None);
-    (instance_graph::build(ws, roots.clone(), false), roots)
+    (instance_graph::build(ws, roots.clone()), roots)
 }
 
 pub fn body_calls(body: &str, symbol: &str) -> bool {

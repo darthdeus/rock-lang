@@ -40,8 +40,7 @@ fn lower_test_roots(
     roots: &[FuncRef],
 ) -> (ScalarCtx, skull_graph::concrete_body::ConcreteBodies) {
     let interner = Arc::new(skull_mir::monoty::MonoInterner::new());
-    let graph =
-        skull_graph::instance_graph::build_in(ws, roots.to_vec(), false, Arc::clone(&interner));
+    let graph = skull_graph::instance_graph::build_in(ws, roots.to_vec(), Arc::clone(&interner));
     let bodies = skull_graph::concrete_body::build(ws, &graph);
     let scx = ScalarCtx::new(ws).sharing(interner);
     (scx, bodies)

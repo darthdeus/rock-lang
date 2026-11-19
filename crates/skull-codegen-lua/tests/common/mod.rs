@@ -26,7 +26,7 @@ pub fn lower_test_ref_with_graph(
         func: fid,
     };
     let interner = Arc::new(MonoInterner::new());
-    let graph = instance_graph::build_in(ws, vec![root], false, Arc::clone(&interner));
+    let graph = instance_graph::build_in(ws, vec![root], Arc::clone(&interner));
     let scx = ScalarCtx::new(ws).sharing(Arc::clone(&interner));
     let concrete = skull_graph::concrete_body::build(ws, &graph);
     let plan = concrete
