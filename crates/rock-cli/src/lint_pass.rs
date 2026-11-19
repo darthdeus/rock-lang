@@ -208,6 +208,7 @@ pub fn findings_with(
         // is not the author's to fix here, and a consumer must not fail a build on a
         // dependency's findings. Scanned rather than warm: an engine body calling
         // into game code is a real reachability edge, and dropping it would
+        // false-flag the game's callbacks as dead.
         let owned = owned_files(texts, root);
         let report: FxHashMap<Ustr, &str> = texts
             .iter()

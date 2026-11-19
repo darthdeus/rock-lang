@@ -216,8 +216,9 @@ fn exec_luajit_file(lua_file: &Path, app_args: &[String]) -> Result<()> {
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
 
-    // The CLI goes silent here: the next output is whatever the game
-    // prints once Stone's engine init runs. luajit loading +
+    // The CLI goes silent here until Stone's engine init prints. Loading
+    // luajit, JIT-warming main.lua and ffi.load-ing native libs can take
+    // seconds, so the launch is logged to tell a slow handoff from a hang.
     let spawn_t = bone_core::prelude::Instant::now();
     log::info!(target: "RUN", "launching luajit -> {}", lua_file.display());
 

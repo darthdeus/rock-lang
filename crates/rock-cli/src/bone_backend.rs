@@ -1,4 +1,4 @@
-//! The type-checking front end shared by every command: `rock check` and the
+//! The type-checking front end shared by every command.
 
 use crate::Result;
 use bone_core::prelude::Instant;
