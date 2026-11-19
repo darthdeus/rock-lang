@@ -2657,8 +2657,7 @@ fn dump_perf_summary() {
         perf_emit("No frames recorded\n")
     } else {
         let rendered = perf_frame_metric(FRAME_RENDERED, PERF_FRAME_RENDERED)
-        dump_perf_summary_pretty(n, PROFILER.warmup_seconds,
-            rendered.mean, rendered.p50, rendered.p99,
+        dump_perf_summary_pretty(n, PROFILER.warmup_seconds, rendered.mean,
             PROFILER.worst_frame_time * 1000.0, collect_hierarchical_stats(),
             stone_get_graphics_stats())
     }
@@ -2719,8 +2718,6 @@ fn dump_perf_summary_pretty(
     n: int,
     warmup_s: float,
     avg_ms: float,
-    _median_ms: float,
-    _p99_ms: float,
     worst_ms: float,
     stats: [ProfileStats],
     gfx: GraphicsStats,
