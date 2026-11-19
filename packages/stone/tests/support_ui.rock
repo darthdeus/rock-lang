@@ -1,0 +1,74 @@
+// Input and UI state back to boot, so no test sees another's holds, focus or
+// keyboard capture.
+fn ui_input_reset() {
+    input_reset_state()
+    UI_MOUSE = ui_mouse_state_new()
+    UI_FOCUS = ui_focus_state_new()
+    UI_ID_DEBUG = ui_id_debug_new()
+    UI_INPUT_CAPTURE = false
+    REBIND_INPUT_CONSUMED = false
+}
+
+fn ui_input_isolated(body: fn()) {
+    ui_input_reset()
+    defer { ui_input_reset() }
+    body()
+}
+
+fn test_action_drop(action: ActionDef) {
+    action_remove(action)
+    bindings_forget_raw_entry(action.name())
+}
+
+fn ui_nav_wired(body: fn()) {
+    ui_input_isolated(() => {
+        assert(ACTIONS.get("ftap_down") == null, "a previous test leaked its nav actions")
+        let acts: [ActionDef] = []
+        for (name, key) in [("ftap_up", "up"), ("ftap_down", "down"), ("ftap_left", "left"),
+            ("ftap_right", "right"), ("ftap_confirm", "return"), ("ftap_back", "escape")] {
+            acts.push(action_new(name, [key_bind(key)], ui: true))
+        }
+        defer { for action in acts { test_action_drop(action) } }
+        ui_nav_use(acts[0], acts[1], acts[2], acts[3], acts[4], acts[5])
+        body()
+    })
+}
+
+// Production frame order (runner.rock): poll events, then the authority
+// projection, mouse/focus resolution, end-of-frame snapshot.
+fn ui_nav_frame() {
+    input_select_game_authority()
+    ui_mouse_begin_frame()
+    ui_focus_begin_frame()
+    input_end_frame()
+}
+
+fn ui_with_test_font(body: fn()) {
+    let saved = DEFAULT_FONT
+    let font = load_font_metrics(project_asset_path("@engine/assets/fonts/DroidSans.ttf"), 48,
+        extra: "\u{00e9}").unwrap()
+    DEFAULT_FONT = font
+    defer { DEFAULT_FONT = saved; unload_font(font) }
+    body()
+}
+
+fn profiler_window_open(frames: int) {
+    GC_WIN_N = frames
+    GC_WIN_START = 1
+    GC_WIN_FRAME = 0
+    GC_WIN_T0_KB = 0.0
+    GC_WIN_ACCOUNT_CURSOR_KB = 0.0
+    GC_WIN_FRAME_START_KB = 0.0
+}
+
+fn json_at(value: JsonValue, path: [string]) -> JsonValue {
+    let at = value
+    for name in path { at = json_field(at, name) ?? json_null() }
+    return at
+}
+
+fn json_int_at(value: JsonValue, path: [string]) -> int { return json_as_int(json_at(value, path)).unwrap() }
+fn json_float_at(value: JsonValue, path: [string]) -> float { return json_as_float(json_at(value, path)).unwrap() }
+fn json_str_at(value: JsonValue, path: [string]) -> string { return json_as_str(json_at(value, path)).unwrap() }
+fn json_bool_at(value: JsonValue, path: [string]) -> bool { return json_as_bool(json_at(value, path)).unwrap() }
+fn json_array_at(value: JsonValue, path: [string]) -> [JsonValue] { return json_as_array(json_at(value, path)).unwrap() }

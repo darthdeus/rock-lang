@@ -22,35 +22,40 @@ fn profiler_section_history_frame(name: string, duration_seconds: float) {
     profile_frame_end()
 }
 
-fn profiler_section_history_complete(report_json: string) -> bool {
-    let report = json_decode(report_json).unwrap()
-    let history = json_field(report, "sections_per_frame") ?? json_null()
+fn profiler_section_history_json(report_json: string) -> JsonValue {
+    let history = json_at(json_decode(report_json).unwrap(), ["sections_per_frame"])
     assert(!json_is_null(history), "perf must export full-window section frames")
-    return json_as_bool(json_field(history, "complete") ?? json_null()) ?? true
+    return history
 }
 
-fn profiler_section_history_dropped_events(report_json: string) -> int {
-    let report = json_decode(report_json).unwrap()
-    let history = json_field(report, "sections_per_frame") ?? json_null()
-    assert(!json_is_null(history), "perf must export full-window section frames")
-    return json_as_int(json_field(history, "dropped_events") ?? json_null()).unwrap()
+fn profiler_section_history_complete(report_json: string) -> bool {
+    return json_as_bool(json_at(profiler_section_history_json(report_json), ["complete"])) ?? true
 }
 
 fn profiler_section_history_sample_count(report_json: string, target: string) -> int {
-    let report = json_decode(report_json).unwrap()
-    let history = json_field(report, "sections_per_frame") ?? json_null()
-    assert(!json_is_null(history), "perf must export full-window section frames")
-    let rows = json_as_array(json_field(history, "rows") ?? json_null()).unwrap()
     let count = -1
-    for row in rows {
-        let name = json_as_str(json_field(row, "name") ?? json_null()) ?? ""
-        if name == target {
-            let ms = json_field(row, "ms") ?? json_null()
-            count = json_as_int(json_field(ms, "n") ?? json_null()).unwrap()
-        }
+    for row in json_array_at(profiler_section_history_json(report_json), ["rows"]) {
+        if json_str_at(row, ["name"]) == target { count = json_int_at(row, ["ms", "n"]) }
     }
     assert(count >= 0, "section frame history does not contain {target}")
     return count
+}
+
+// Each named row spreads `total` ms over 132 frames, all but one of them empty.
+fn profiler_section_history_check_sums(rows: [JsonValue], totals: Map<string, float>) {
+    let found = 0
+    for row in rows {
+        let name = json_str_at(row, ["name"])
+        let total = totals.get(name) ?? continue
+        found += 1
+        assert_eq(json_int_at(row, ["ms", "n"]), 132)
+        assert(abs(json_float_at(row, ["ms", "mean"]) - total / 132.0) < 0.0001,
+            "{name}: sums per frame with zeroes for absent frames")
+        assert_eq(json_float_at(row, ["ms", "p99"]), 0.0)
+        assert(abs(json_float_at(row, ["ms", "max"]) - total) < 0.001,
+            "{name}: max frame sum: {json_encode(json_at(row, ["ms"]))}")
+    }
+    assert_eq(found, totals.len(), "every expected name has a row")
 }
 
 fn profiler_section_history_full_window() {
@@ -78,48 +83,25 @@ fn profiler_section_history_full_window() {
     nb_set(PROF_CUR.start_t, 0, 3.0)
     nb_set(PROF_CUR.end_t, 0, 3.002)
     profile_frame_end()
-    let report = json_decode(profiler_perf_json()).unwrap()
-    let history = json_field(report, "sections_per_frame") ?? json_null()
-    assert(!json_is_null(history), "perf must export full-window section frames")
-    let rows = json_as_array(json_field(history, "rows") ?? json_null()).unwrap()
-    for row in rows {
-        let name = json_as_str(json_field(row, "name") ?? json_null()) ?? ""
-        if name != "history.burst" && name != "history.late" { continue }
-        let ms = json_field(row, "ms") ?? json_null()
-        assert_eq(json_as_int(json_field(ms, "n") ?? json_null()).unwrap(), 132)
-        let total = if name == "history.burst" { 5.0 } else { 2.0 }
-        let calls = if name == "history.burst" { 2 } else { 1 }
-        assert_eq(json_as_int(json_field(row, "calls").unwrap()).unwrap(), calls)
-        assert(abs(json_as_float(json_field(row, "calls_per_frame").unwrap()).unwrap()
-            - (calls as float) / 132.0) < 0.000001)
-        let mean = json_as_float(json_field(ms, "mean") ?? json_null()).unwrap()
-        assert(abs(mean - total / 132.0) < 0.0001, "all calls sum per frame, including absent frames")
-        assert_eq(json_as_float(json_field(ms, "p99") ?? json_null()).unwrap(), 0.0)
-        assert(abs(json_as_float(json_field(ms, "max") ?? json_null()).unwrap() - total) < 0.001, "{name}: max frame sum: {json_encode(ms)}")
-    }
+    let history = profiler_section_history_json(profiler_perf_json())
+    let rows = json_array_at(history, ["rows"])
     assert_eq(rows.len(), 4, "observation names are registered alongside timed sections")
-
-    let observations = json_as_array(json_field(history, "observations_per_frame") ?? json_null()).unwrap()
-    assert_eq(observations.len(), 2, "full-window observations include early and late names")
-    let observed_found = false
-    let late_observed_found = false
-    for row in observations {
-        let name = json_as_str(json_field(row, "name") ?? json_null()) ?? ""
-        if name != "history.observed" && name != "history.late_observed" { continue }
-        let ms = json_field(row, "ms") ?? json_null()
-        assert_eq(json_as_int(json_field(ms, "n") ?? json_null()).unwrap(), 132)
-        let total = if name == "history.observed" { 5.0 } else { 7.0 }
-        let mean = json_as_float(json_field(ms, "mean") ?? json_null()).unwrap()
-        assert(abs(mean - total / 132.0) < 0.0001,
-            "observation totals are summed per frame with zeroes for absent frames")
-        assert_eq(json_as_float(json_field(ms, "p99") ?? json_null()).unwrap(), 0.0)
-        assert(abs(json_as_float(json_field(ms, "max") ?? json_null()).unwrap() - total) < 0.001,
-            "{name}: max frame observation sum: {json_encode(ms)}")
-        if name == "history.observed" { observed_found = true }
-        if name == "history.late_observed" { late_observed_found = true }
+    let section_totals: Map<string, float> = map_new()
+    section_totals["history.burst"] = 5.0
+    section_totals["history.late"] = 2.0
+    profiler_section_history_check_sums(rows, section_totals)
+    for row in rows {
+        let name = json_str_at(row, ["name"])
+        let calls = if name == "history.burst" { 2 } else if name == "history.late" { 1 } else { continue }
+        assert_eq(json_int_at(row, ["calls"]), calls)
+        assert(abs(json_float_at(row, ["calls_per_frame"]) - (calls as float) / 132.0) < 0.000001)
     }
-    assert(observed_found, "full-window history contains the early observation")
-    assert(late_observed_found, "full-window history contains the late observation")
+    let observations = json_array_at(history, ["observations_per_frame"])
+    assert_eq(observations.len(), 2, "full-window observations include early and late names")
+    let observation_totals: Map<string, float> = map_new()
+    observation_totals["history.observed"] = 5.0
+    observation_totals["history.late_observed"] = 7.0
+    profiler_section_history_check_sums(observations, observation_totals)
 }
 
 fn profiler_section_history_warmup_and_clear() {
@@ -178,7 +160,7 @@ fn profiler_section_history_incomplete() {
     PROF_CUR.dropped = 1
     profile_frame_end()
     let dropped_report = profiler_perf_json()
-    assert_eq(profiler_section_history_dropped_events(dropped_report), 1)
+    assert_eq(json_int_at(profiler_section_history_json(dropped_report), ["dropped_events"]), 1)
     assert_eq(profiler_section_history_complete(dropped_report), false,
         "a dropped measured event makes the frame history incomplete")
 

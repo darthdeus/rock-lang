@@ -1,7 +1,5 @@
 use stone::*
 
-// Probes for the UI batch flush in stone/engine/rendering/batch.rock.
-//
 // The GL UI flush must honor each batch's stored normal_sampling (like the
 // world flush and draw_list do) and must release every secondary sampler
 // after each draw (normal, surface, auxiliary, material), so one batch's
@@ -104,14 +102,10 @@ fn ui_batch_sampler_channel(target: Canvas, x: int, channel: int) -> float {
     return stone_read_canvas_pixel_channel(target.handle.0, x, 4, channel)
 }
 
-fn ui_batch_sampler_setup() {
+fn ui_batch_sampler_guarded(body: fn(SampledTexture) -> ()) {
     setup_stone()
     assert(stone_gpu_host_ensure(), "borrow the process GPU host")
     assert(stone_sprite_init())
-}
-
-fn ui_batch_sampler_fixture(fail_after_draw: bool) {
-    ui_batch_sampler_setup()
     let saved_pool = CURRENT_UI_POOL
     let saved_canvas = CURRENT_CANVAS_HANDLE
     let saved_shader = WATCHER.current_shader_name
@@ -119,19 +113,7 @@ fn ui_batch_sampler_fixture(fail_after_draw: bool) {
     let saved_serial = TEXT_RENDER_ORDER_SERIAL
     let saved_flush_order = TEXT_UI_FLUSH_ORDER
     let saved_white = WHITE_PIXEL
-    let split: Image? = null
-    let white_img: Image? = null
-    let pool: RenderBatchPool? = null
-    let control_pool: RenderBatchPool? = null
-    let output: Canvas? = null
-    let control: Canvas? = null
     defer {
-        discard_pool_batches(pool.unwrap())
-        discard_pool_batches(control_pool.unwrap())
-        destroy_canvas(control.unwrap())
-        destroy_canvas(output.unwrap())
-        release_owned_image(white_img.unwrap())
-        release_owned_image(split.unwrap())
         WHITE_PIXEL = saved_white
         TEXT_RENDER_ORDER_SERIAL = saved_serial
         TEXT_UI_FLUSH_ORDER = saved_flush_order
@@ -143,115 +125,129 @@ fn ui_batch_sampler_fixture(fail_after_draw: bool) {
         unset_depth_mode()
         reset_camera()
     }
-    split = ui_batch_sampler_split_image(TextureFilter::Nearest)
-    white_img = ui_batch_sampler_solid(v(1.0, 1.0, 1.0, 1.0))
+    let white_img = ui_batch_sampler_solid(v(1.0, 1.0, 1.0, 1.0))
+    defer { release_owned_image(white_img) }
     WHITE_PIXEL = white_img
-    let white = sampled_image(white_img.unwrap())
-    pool = render_batch_pool_new()
-    control_pool = render_batch_pool_new()
-    output = new_canvas(16.0, 8.0, "rgba16f")
-    control = new_canvas(16.0, 8.0, "rgba16f")
-    let pipe = pipeline(rock_shader(sprite_batch_vert,
-        ui_batch_sampler_filter_frag))
-    load_pending_shader_sources()
-    assert(get_shader_handle(pipe.shader_name) != 0)
+    body(sampled_image(white_img))
+}
 
-    let fullscreen = BLIT_PIPELINE
-    load_pending_shader_sources()
-    assert(get_shader_handle(fullscreen.shader_name) != 0)
-    CURRENT_UI_POOL = render_batch_scope(pool.unwrap())
-    let rect = ui_rect(4.0, 0.0, 8.0, 8.0)
-    let shader_error = world_fixture_raised(() => { let _ = rect.shader(fullscreen) })
-    let quad_error = world_fixture_raised(() => { let _ = rect.shader_quad(fullscreen) })
-    CURRENT_UI_POOL = saved_pool
-    stone_flush_image_uploads()
-    assert(shader_error != null && quad_error != null,
-        "fullscreen shaders must reject pixel-space UI: shader={shader_error}, quad={quad_error}")
-    assert(shader_error.unwrap().contains(fullscreen.shader_name)
-        && quad_error.unwrap().contains(fullscreen.shader_name), "UI errors identify the incompatible shader")
-    assert_eq(batch_pool_active_count(pool.unwrap()), 0, "rejected UI shaders enqueue no geometry")
-    assert(run_pass(Pass { pipeline: fullscreen, output: output,
-        slot_inputs: [(white, TextureFilter::Nearest)] }), "fullscreen shader remains valid for a pass")
-    assert(ui_batch_sampler_channel(output.unwrap(), 12, 0) > 0.9,
-        "the fullscreen control reaches real pixels")
-
-    let ui_pipe = pipeline(rock_shader(sprite_batch_vert, ui_batch_sampler_primary_frag))
-    for ctx in [UI_CTX_OUTPUT, UI_CTX_COMPOSITE] {
-        CURRENT_UI_POOL = render_batch_scope(pool.unwrap())
-        let scale = UiRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0, ctx }.ctx_scale()
-        let left = UiRect { x: 0.0, y: 0.0, w: 8.0 / scale, h: 8.0 / scale, ctx }
-        let right = UiRect { ..left, x: 8.0 / scale }
-        let _ = left.shader(ui_pipe)
-        let _ = right.shader_quad(ui_pipe)
-        CURRENT_UI_POOL = saved_pool
-        with_canvas(output.unwrap(), () => {
-            clear_screen(0.0, 0.0, 0.0, 0.0)
-            render_ui_batches(pool.unwrap(), projection_extent: v(16.0, 8.0))
-        })
-        for x in [4, 12] {
-            assert(ui_batch_sampler_channel(output.unwrap(), x, 0) > 0.9,
-                "both UI shader methods retain explicit-vertex pixels in context {ctx}")
+fn ui_batch_sampler_fixture(fail_after_draw: bool) {
+    ui_batch_sampler_guarded((white) => {
+        let saved_pool = CURRENT_UI_POOL
+        let split = ui_batch_sampler_split_image(TextureFilter::Nearest)
+        let pool = render_batch_pool_new()
+        let control_pool = render_batch_pool_new()
+        let output = new_canvas(16.0, 8.0, "rgba16f")
+        let control = new_canvas(16.0, 8.0, "rgba16f")
+        defer {
+            discard_pool_batches(pool)
+            discard_pool_batches(control_pool)
+            destroy_canvas(control)
+            destroy_canvas(output)
+            release_owned_image(split)
         }
-    }
+        let pipe = pipeline(rock_shader(sprite_batch_vert,
+            ui_batch_sampler_filter_frag))
+        load_pending_shader_sources()
+        assert(get_shader_handle(pipe.shader_name) != 0)
 
-    let linear_batch = ui_batch_sampler_filter_batch(pool.unwrap(), pipe,
-        white, 1, v(0.0, 0.0))
-    linear_batch.normal = sampled_image(split.unwrap())
-    linear_batch.normal_sampling = TextureFilter::Linear
-    let nearest_batch = ui_batch_sampler_filter_batch(pool.unwrap(), pipe,
-        white, 2, v(8.0, 0.0))
-    nearest_batch.normal = sampled_image(split.unwrap())
-    nearest_batch.normal_sampling = TextureFilter::Nearest
-    stone_flush_image_uploads()
-    with_canvas(output.unwrap(), () => {
-        clear_screen(0.0, 0.0, 0.0, 0.0)
-        render_ui_batches(pool.unwrap(), projection_extent: v(16.0, 8.0))
-    })
+        let fullscreen = BLIT_PIPELINE
+        load_pending_shader_sources()
+        assert(get_shader_handle(fullscreen.shader_name) != 0)
+        CURRENT_UI_POOL = render_batch_scope(pool)
+        let rect = ui_rect(4.0, 0.0, 8.0, 8.0)
+        let shader_error = world_fixture_raised(() => { let _ = rect.shader(fullscreen) })
+        let quad_error = world_fixture_raised(() => { let _ = rect.shader_quad(fullscreen) })
+        CURRENT_UI_POOL = saved_pool
+        stone_flush_image_uploads()
+        assert(shader_error != null && quad_error != null,
+            "fullscreen shaders must reject pixel-space UI: shader={shader_error}, quad={quad_error}")
+        assert(shader_error.unwrap().contains(fullscreen.shader_name)
+            && quad_error.unwrap().contains(fullscreen.shader_name), "UI errors identify the incompatible shader")
+        assert_eq(batch_pool_active_count(pool), 0, "rejected UI shaders enqueue no geometry")
+        assert(run_pass(Pass { pipeline: fullscreen, output: output,
+            slot_inputs: [(white, TextureFilter::Nearest)] }), "fullscreen shader remains valid for a pass")
+        assert(ui_batch_sampler_channel(output, 12, 0) > 0.9,
+            "the fullscreen control reaches real pixels")
 
-    let control_linear = ui_batch_sampler_filter_batch(control_pool.unwrap(),
-        pipe, white, 1, v(0.0, 0.0))
-    let control_nearest = ui_batch_sampler_filter_batch(control_pool.unwrap(),
-        pipe, white, 2, v(8.0, 0.0))
-    let previous_blend = CURRENT_BLEND
-    let unfilled_before = stone_unfilled_texture_slot_count()
-    with_canvas(control.unwrap(), () => {
-        clear_screen(0.0, 0.0, 0.0, 0.0)
-        unset_depth_mode()
-        set_blend_mode(BlendMode::Replace)
-        with_shader(pipe.shader_name, () => {
-            setup_ui_pass_shader(pipe.shader_name,
-                v(16.0, 8.0), TargetConvention::Direct)
-            bind_sprite_normal_texture(pipe.shader_name,
-                sampled_image(split.unwrap()), TextureFilter::Linear)
-            draw_batch_mesh(control_linear)
-            bind_sprite_normal_texture(pipe.shader_name,
-                sampled_image(split.unwrap()), TextureFilter::Nearest)
-            draw_batch_mesh(control_nearest)
+        let ui_pipe = pipeline(rock_shader(sprite_batch_vert, ui_batch_sampler_primary_frag))
+        for ctx in [UI_CTX_OUTPUT, UI_CTX_COMPOSITE] {
+            CURRENT_UI_POOL = render_batch_scope(pool)
+            let scale = UiRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0, ctx }.ctx_scale()
+            let left = UiRect { x: 0.0, y: 0.0, w: 8.0 / scale, h: 8.0 / scale, ctx }
+            let right = UiRect { ..left, x: 8.0 / scale }
+            let _ = left.shader(ui_pipe)
+            let _ = right.shader_quad(ui_pipe)
+            CURRENT_UI_POOL = saved_pool
+            with_canvas(output, () => {
+                clear_screen(0.0, 0.0, 0.0, 0.0)
+                render_ui_batches(pool, projection_extent: v(16.0, 8.0))
+            })
+            for x in [4, 12] {
+                assert(ui_batch_sampler_channel(output, x, 0) > 0.9,
+                    "both UI shader methods retain explicit-vertex pixels in context {ctx}")
+            }
+        }
+
+        let linear_batch = ui_batch_sampler_filter_batch(pool, pipe,
+            white, 1, v(0.0, 0.0))
+        linear_batch.normal = sampled_image(split)
+        linear_batch.normal_sampling = TextureFilter::Linear
+        let nearest_batch = ui_batch_sampler_filter_batch(pool, pipe,
+            white, 2, v(8.0, 0.0))
+        nearest_batch.normal = sampled_image(split)
+        nearest_batch.normal_sampling = TextureFilter::Nearest
+        stone_flush_image_uploads()
+        with_canvas(output, () => {
+            clear_screen(0.0, 0.0, 0.0, 0.0)
+            render_ui_batches(pool, projection_extent: v(16.0, 8.0))
         })
-        set_blend_mode(previous_blend)
-    })
-    assert(stone_unfilled_texture_slot_count() == unfilled_before,
-        "explicit normal binds fill both declared slots of the control draw")
 
-    for channel in 0..2 {
-        let flushed = ui_batch_sampler_channel(output.unwrap(), 4, channel)
-        let expected = ui_batch_sampler_channel(control.unwrap(), 4, channel)
-        assert(abs(flushed - expected) < 0.01,
-            "UI flush honors stored Linear normal filtering (channel {channel}: flushed=({ui_batch_sampler_channel(output.unwrap(), 4, 0)}, {ui_batch_sampler_channel(output.unwrap(), 4, 1)}) control=({ui_batch_sampler_channel(control.unwrap(), 4, 0)}, {ui_batch_sampler_channel(control.unwrap(), 4, 1)}))")
-        let flushed_nearest = ui_batch_sampler_channel(output.unwrap(), 12, channel)
-        let expected_nearest = ui_batch_sampler_channel(control.unwrap(), 12, channel)
-        assert(abs(flushed_nearest - expected_nearest) < 0.01,
-            "UI flush honors stored Nearest normal filtering (channel {channel}: {flushed_nearest} vs {expected_nearest})")
-    }
-    assert(ui_batch_sampler_channel(output.unwrap(), 4, 0) > 0.38
-        && ui_batch_sampler_channel(output.unwrap(), 4, 0) < 0.62,
-        "stored Linear normal filtering blends the split edge")
-    assert(ui_batch_sampler_channel(output.unwrap(), 12, 0) < 0.05,
-        "stored Nearest normal filtering snaps to the dark texel")
-    assert(abs(ui_batch_sampler_channel(output.unwrap(), 4, 1) - 1.0) < 0.01
-        && abs(ui_batch_sampler_channel(output.unwrap(), 12, 1) - 1.0) < 0.01,
-        "the UI flush preserves primary sampling")
-    if fail_after_draw { error("intentional UI batch sampler fixture failure") }
+        let control_linear = ui_batch_sampler_filter_batch(control_pool,
+            pipe, white, 1, v(0.0, 0.0))
+        let control_nearest = ui_batch_sampler_filter_batch(control_pool,
+            pipe, white, 2, v(8.0, 0.0))
+        let previous_blend = CURRENT_BLEND
+        let unfilled_before = stone_unfilled_texture_slot_count()
+        with_canvas(control, () => {
+            clear_screen(0.0, 0.0, 0.0, 0.0)
+            unset_depth_mode()
+            set_blend_mode(BlendMode::Replace)
+            with_shader(pipe.shader_name, () => {
+                setup_ui_pass_shader(pipe.shader_name,
+                    v(16.0, 8.0), TargetConvention::Direct)
+                bind_sprite_normal_texture(pipe.shader_name,
+                    sampled_image(split), TextureFilter::Linear)
+                draw_batch_mesh(control_linear)
+                bind_sprite_normal_texture(pipe.shader_name,
+                    sampled_image(split), TextureFilter::Nearest)
+                draw_batch_mesh(control_nearest)
+            })
+            set_blend_mode(previous_blend)
+        })
+        assert(stone_unfilled_texture_slot_count() == unfilled_before,
+            "explicit normal binds fill both declared slots of the control draw")
+
+        for channel in 0..2 {
+            let flushed = ui_batch_sampler_channel(output, 4, channel)
+            let expected = ui_batch_sampler_channel(control, 4, channel)
+            assert(abs(flushed - expected) < 0.01,
+                "UI flush honors stored Linear normal filtering (channel {channel}: flushed=({ui_batch_sampler_channel(output, 4, 0)}, {ui_batch_sampler_channel(output, 4, 1)}) control=({ui_batch_sampler_channel(control, 4, 0)}, {ui_batch_sampler_channel(control, 4, 1)}))")
+            let flushed_nearest = ui_batch_sampler_channel(output, 12, channel)
+            let expected_nearest = ui_batch_sampler_channel(control, 12, channel)
+            assert(abs(flushed_nearest - expected_nearest) < 0.01,
+                "UI flush honors stored Nearest normal filtering (channel {channel}: {flushed_nearest} vs {expected_nearest})")
+        }
+        assert(ui_batch_sampler_channel(output, 4, 0) > 0.38
+            && ui_batch_sampler_channel(output, 4, 0) < 0.62,
+            "stored Linear normal filtering blends the split edge")
+        assert(ui_batch_sampler_channel(output, 12, 0) < 0.05,
+            "stored Nearest normal filtering snaps to the dark texel")
+        assert(abs(ui_batch_sampler_channel(output, 4, 1) - 1.0) < 0.01
+            && abs(ui_batch_sampler_channel(output, 12, 1) - 1.0) < 0.01,
+            "the UI flush preserves primary sampling")
+        if fail_after_draw { error("intentional UI batch sampler fixture failure") }
+    })
 }
 
 @test
@@ -261,128 +257,90 @@ fn ui_batch_stored_normal_filtering_reaches_pixels() {
 
 @test
 fn ui_batch_secondary_samplers_released_after_draw() {
-    ui_batch_sampler_setup()
-    let saved_pool = CURRENT_UI_POOL
-    let saved_canvas = CURRENT_CANVAS_HANDLE
-    let saved_shader = WATCHER.current_shader_name
-    let saved_blend = CURRENT_BLEND
-    let saved_serial = TEXT_RENDER_ORDER_SERIAL
-    let saved_flush_order = TEXT_UI_FLUSH_ORDER
-    let saved_white = WHITE_PIXEL
-    let normal_img: Image? = null
-    let surface_img: Image? = null
-    let auxiliary_img: Image? = null
-    let material_img: Image? = null
-    let white_img: Image? = null
-    let pool: RenderBatchPool? = null
-    let fallback_pool: RenderBatchPool? = null
-    let output: Canvas? = null
-    let fallback_output: Canvas? = null
-    defer {
-        discard_pool_batches(pool.unwrap())
-        discard_pool_batches(fallback_pool.unwrap())
-        destroy_canvas(fallback_output.unwrap())
-        destroy_canvas(output.unwrap())
-        release_owned_image(white_img.unwrap())
-        release_owned_image(material_img.unwrap())
-        release_owned_image(auxiliary_img.unwrap())
-        release_owned_image(surface_img.unwrap())
-        release_owned_image(normal_img.unwrap())
-        WHITE_PIXEL = saved_white
-        TEXT_RENDER_ORDER_SERIAL = saved_serial
-        TEXT_UI_FLUSH_ORDER = saved_flush_order
-        CURRENT_UI_POOL = saved_pool
-        set_canvas_handle(saved_canvas)
-        if saved_shader != null { set_shader(saved_shader) } else { unset_shader() }
-        WATCHER.current_shader_name = saved_shader
-        set_blend_mode(saved_blend)
-        unset_depth_mode()
-        reset_camera()
-    }
-    normal_img = ui_batch_sampler_solid(v(0.23, 0.31, 0.42, 1.0))
-    surface_img = ui_batch_sampler_solid(v(0.51, 0.62, 0.73, 1.0))
-    auxiliary_img = ui_batch_sampler_solid(v(0.74, 0.83, 0.34, 1.0))
-    material_img = ui_batch_sampler_solid(v(0.9, 0.1, 0.2, 1.0))
-    white_img = ui_batch_sampler_solid(v(1.0, 1.0, 1.0, 1.0))
-    WHITE_PIXEL = white_img
-    let white = sampled_image(white_img.unwrap())
-    pool = render_batch_pool_new()
-    fallback_pool = render_batch_pool_new()
-    output = new_canvas(16.0, 8.0, "rgba16f")
-    fallback_output = new_canvas(16.0, 8.0, "rgba16f")
-    let release_pipe = pipeline(rock_shader(sprite_batch_vert,
-        ui_batch_sampler_release_frag))
-    let primary_pipe = pipeline(rock_shader(sprite_batch_vert,
-        ui_batch_sampler_primary_frag))
-    load_pending_shader_sources()
-    assert(get_shader_handle(release_pipe.shader_name) != 0)
-    assert(get_shader_handle(primary_pipe.shader_name) != 0)
+    ui_batch_sampler_guarded((white) => {
+        let normal_img = ui_batch_sampler_solid(v(0.23, 0.31, 0.42, 1.0))
+        let surface_img = ui_batch_sampler_solid(v(0.51, 0.62, 0.73, 1.0))
+        let auxiliary_img = ui_batch_sampler_solid(v(0.74, 0.83, 0.34, 1.0))
+        let material_img = ui_batch_sampler_solid(v(0.9, 0.1, 0.2, 1.0))
+        let pool = render_batch_pool_new()
+        let fallback_pool = render_batch_pool_new()
+        let output = new_canvas(16.0, 8.0, "rgba16f")
+        let fallback_output = new_canvas(16.0, 8.0, "rgba16f")
+        defer {
+            discard_pool_batches(pool)
+            discard_pool_batches(fallback_pool)
+            destroy_canvas(fallback_output)
+            destroy_canvas(output)
+            release_owned_image(material_img)
+            release_owned_image(auxiliary_img)
+            release_owned_image(surface_img)
+            release_owned_image(normal_img)
+        }
+        let release_pipe = pipeline(rock_shader(sprite_batch_vert,
+            ui_batch_sampler_release_frag))
+        let primary_pipe = pipeline(rock_shader(sprite_batch_vert,
+            ui_batch_sampler_primary_frag))
+        load_pending_shader_sources()
+        assert(get_shader_handle(release_pipe.shader_name) != 0)
+        assert(get_shader_handle(primary_pipe.shader_name) != 0)
 
-    let normal_slot = shader_texture_slot_if_present(release_pipe.shader_name, "uNormalTex")
-    let surface_slot = shader_texture_slot_if_present(release_pipe.shader_name, "uSurfaceTex")
-    let auxiliary_slot = shader_texture_slot_if_present(release_pipe.shader_name, "uAuxiliaryTex")
-    let material_slot = shader_texture_slot_if_present(release_pipe.shader_name, "uMaterialTex")
-    assert(normal_slot >= 0 && surface_slot >= 0
-        && auxiliary_slot >= 0 && material_slot >= 0,
-        "the release probe owns a compiler slot per secondary sampler")
+        let normal_slot = shader_texture_slot_if_present(release_pipe.shader_name, "uNormalTex")
+        let surface_slot = shader_texture_slot_if_present(release_pipe.shader_name, "uSurfaceTex")
+        let auxiliary_slot = shader_texture_slot_if_present(release_pipe.shader_name, "uAuxiliaryTex")
+        let material_slot = shader_texture_slot_if_present(release_pipe.shader_name, "uMaterialTex")
+        assert(normal_slot >= 0 && surface_slot >= 0
+            && auxiliary_slot >= 0 && material_slot >= 0,
+            "the release probe owns a compiler slot per secondary sampler")
 
-    let first = ui_batch_sampler_filter_batch(pool.unwrap(), release_pipe,
-        white, 1, v(0.0, 0.0))
-    first.normal = sampled_image(normal_img.unwrap())
-    first.surface = sampled_image(surface_img.unwrap())
-    first.auxiliary = sampled_image(auxiliary_img.unwrap())
-    first.material = sampled_image(material_img.unwrap())
-    let second = ui_batch_sampler_filter_batch(pool.unwrap(), release_pipe,
-        white, 2, v(8.0, 0.0))
-    second.normal = sampled_image(normal_img.unwrap())
-    second.surface = sampled_image(surface_img.unwrap())
-    second.auxiliary = sampled_image(auxiliary_img.unwrap())
-    second.material = sampled_image(material_img.unwrap())
-    stone_flush_image_uploads()
-    with_canvas(output.unwrap(), () => {
-        clear_screen(0.0, 0.0, 0.0, 0.0)
-        render_ui_batches(pool.unwrap(), projection_extent: v(16.0, 8.0))
+        for (z, x) in [(1, 0.0), (2, 8.0)] {
+            let batch = ui_batch_sampler_filter_batch(pool, release_pipe, white, z, v(x, 0.0))
+            batch.normal = sampled_image(normal_img)
+            batch.surface = sampled_image(surface_img)
+            batch.auxiliary = sampled_image(auxiliary_img)
+            batch.material = sampled_image(material_img)
+        }
+        stone_flush_image_uploads()
+        with_canvas(output, () => {
+            clear_screen(0.0, 0.0, 0.0, 0.0)
+            render_ui_batches(pool, projection_extent: v(16.0, 8.0))
+        })
+        for x in [4, 12] {
+            let r = ui_batch_sampler_channel(output, x, 0)
+            let g = ui_batch_sampler_channel(output, x, 1)
+            let b = ui_batch_sampler_channel(output, x, 2)
+            let a = ui_batch_sampler_channel(output, x, 3)
+            assert(abs(r - 0.23) < 0.04 && abs(g - 0.62) < 0.04
+                && abs(b - 0.34) < 0.04 && abs(a - 0.9) < 0.04,
+                "successive UI batches sample normal, surface, auxiliary and material at quad {x}: got ({r}, {g}, {b}, {a})")
+        }
+        for (slot, name) in [(normal_slot, "normal"), (surface_slot, "surface"),
+            (auxiliary_slot, "auxiliary"), (material_slot, "material")] {
+            assert(!stone_sampler_bound(slot), "the UI flush releases its {name} sampler after each draw")
+        }
+
+        let filter_pipe = pipeline(rock_shader(sprite_batch_vert,
+            ui_batch_sampler_filter_frag))
+        load_pending_shader_sources()
+        assert(get_shader_handle(filter_pipe.shader_name) != 0)
+        let _ = ui_batch_sampler_filter_batch(fallback_pool,
+            primary_pipe, white, 1, v(0.0, 0.0))
+        let fallback = ui_batch_sampler_filter_batch(fallback_pool,
+            filter_pipe, white, 2, v(8.0, 0.0))
+        fallback.normal = null
+        stone_flush_image_uploads()
+        let unfilled_before = stone_unfilled_texture_slot_count()
+        with_canvas(fallback_output, () => {
+            clear_screen(0.0, 0.0, 0.0, 0.0)
+            render_ui_batches(fallback_pool, projection_extent: v(16.0, 8.0))
+        })
+        assert(stone_unfilled_texture_slot_count() == unfilled_before,
+            "secondary binders skip samplers absent from the shader")
+        assert(abs(ui_batch_sampler_channel(fallback_output, 4, 0) - 1.0) < 0.01,
+            "a uTexture-only UI batch still renders its implicit unit-zero image")
+        assert(abs(ui_batch_sampler_channel(fallback_output, 12, 0) - 1.0) < 0.01
+            && abs(ui_batch_sampler_channel(fallback_output, 12, 1) - 1.0) < 0.01,
+            "a null UI normal binds the white fallback after nonwhite batches")
     })
-    for x in [4, 12] {
-        let r = ui_batch_sampler_channel(output.unwrap(), x, 0)
-        let g = ui_batch_sampler_channel(output.unwrap(), x, 1)
-        let b = ui_batch_sampler_channel(output.unwrap(), x, 2)
-        let a = ui_batch_sampler_channel(output.unwrap(), x, 3)
-        assert(abs(r - 0.23) < 0.04 && abs(g - 0.62) < 0.04
-            && abs(b - 0.34) < 0.04 && abs(a - 0.9) < 0.04,
-            "successive UI batches sample normal, surface, auxiliary and material at quad {x}: got ({r}, {g}, {b}, {a})")
-    }
-    assert(!stone_sampler_bound(normal_slot),
-        "the UI flush releases its normal sampler after each draw")
-    assert(!stone_sampler_bound(surface_slot),
-        "the UI flush releases its surface sampler after each draw")
-    assert(!stone_sampler_bound(auxiliary_slot),
-        "the UI flush releases its auxiliary sampler after each draw")
-    assert(!stone_sampler_bound(material_slot),
-        "the UI flush releases its material sampler after each draw")
-
-    let filter_pipe = pipeline(rock_shader(sprite_batch_vert,
-        ui_batch_sampler_filter_frag))
-    load_pending_shader_sources()
-    assert(get_shader_handle(filter_pipe.shader_name) != 0)
-    let _ = ui_batch_sampler_filter_batch(fallback_pool.unwrap(),
-        primary_pipe, white, 1, v(0.0, 0.0))
-    let fallback = ui_batch_sampler_filter_batch(fallback_pool.unwrap(),
-        filter_pipe, white, 2, v(8.0, 0.0))
-    fallback.normal = null
-    stone_flush_image_uploads()
-    let unfilled_before = stone_unfilled_texture_slot_count()
-    with_canvas(fallback_output.unwrap(), () => {
-        clear_screen(0.0, 0.0, 0.0, 0.0)
-        render_ui_batches(fallback_pool.unwrap(), projection_extent: v(16.0, 8.0))
-    })
-    assert(stone_unfilled_texture_slot_count() == unfilled_before,
-        "secondary binders skip samplers absent from the shader")
-    assert(abs(ui_batch_sampler_channel(fallback_output.unwrap(), 4, 0) - 1.0) < 0.01,
-        "a uTexture-only UI batch still renders its implicit unit-zero image")
-    assert(abs(ui_batch_sampler_channel(fallback_output.unwrap(), 12, 0) - 1.0) < 0.01
-        && abs(ui_batch_sampler_channel(fallback_output.unwrap(), 12, 1) - 1.0) < 0.01,
-        "a null UI normal binds the white fallback after nonwhite batches")
 }
 
 @test
@@ -416,89 +374,69 @@ fn ui_batch_sampler_fixture_restores_after_failure() {
 
 @test
 fn ui_batch_secondary_sources_and_filters_reach_pixels() {
-    ui_batch_sampler_setup()
-    let saved_pool = CURRENT_UI_POOL
-    let saved_canvas = CURRENT_CANVAS_HANDLE
-    let saved_shader = WATCHER.current_shader_name
-    let saved_blend = CURRENT_BLEND
-    let saved_serial = TEXT_RENDER_ORDER_SERIAL
-    let saved_flush_order = TEXT_UI_FLUSH_ORDER
-    let saved_white = WHITE_PIXEL
-    let white_img = ui_batch_sampler_solid(v(1.0, 1.0, 1.0, 1.0))
-    let split_nearest = ui_batch_sampler_split_image(TextureFilter::Nearest)
-    let split_linear = ui_batch_sampler_split_image(TextureFilter::Linear)
-    let canvas_normal = new_canvas(1.0, 1.0, "rgba16f")
-    let canvas_surface = new_canvas(1.0, 1.0, "rgba16f")
-    let canvas_auxiliary = new_canvas(1.0, 1.0, "rgba16f")
-    let output = new_canvas(40.0, 8.0, "rgba16f")
-    let pool = render_batch_pool_new()
-    defer {
-        discard_pool_batches(pool)
-        destroy_canvas(output)
-        destroy_canvas(canvas_auxiliary)
-        destroy_canvas(canvas_surface)
-        destroy_canvas(canvas_normal)
-        release_owned_image(split_linear)
-        release_owned_image(split_nearest)
-        release_owned_image(white_img)
-        WHITE_PIXEL = saved_white
-        TEXT_RENDER_ORDER_SERIAL = saved_serial
-        TEXT_UI_FLUSH_ORDER = saved_flush_order
-        CURRENT_UI_POOL = saved_pool
-        set_canvas_handle(saved_canvas)
-        if saved_shader != null { set_shader(saved_shader) } else { unset_shader() }
-        WATCHER.current_shader_name = saved_shader
-        set_blend_mode(saved_blend)
-        unset_depth_mode()
-        reset_camera()
-    }
-    with_canvas(canvas_normal, () => clear_screen(0.72, 0.13, 0.23, 1.0))
-    with_canvas(canvas_surface, () => clear_screen(0.14, 0.46, 0.36, 1.0))
-    with_canvas(canvas_auxiliary, () => clear_screen(0.27, 0.53, 0.87, 1.0))
-    WHITE_PIXEL = white_img
-    let white = sampled_image(white_img)
-    let pipe = pipeline(rock_shader(sprite_batch_vert, ui_batch_sampler_binding_frag))
-    load_pending_shader_sources()
-    assert(get_shader_handle(pipe.shader_name) != 0)
+    ui_batch_sampler_guarded((white) => {
+        let split_nearest = ui_batch_sampler_split_image(TextureFilter::Nearest)
+        let split_linear = ui_batch_sampler_split_image(TextureFilter::Linear)
+        let canvas_normal = new_canvas(1.0, 1.0, "rgba16f")
+        let canvas_surface = new_canvas(1.0, 1.0, "rgba16f")
+        let canvas_auxiliary = new_canvas(1.0, 1.0, "rgba16f")
+        let output = new_canvas(40.0, 8.0, "rgba16f")
+        let pool = render_batch_pool_new()
+        defer {
+            discard_pool_batches(pool)
+            destroy_canvas(output)
+            destroy_canvas(canvas_auxiliary)
+            destroy_canvas(canvas_surface)
+            destroy_canvas(canvas_normal)
+            release_owned_image(split_linear)
+            release_owned_image(split_nearest)
+        }
+        with_canvas(canvas_normal, () => clear_screen(0.72, 0.13, 0.23, 1.0))
+        with_canvas(canvas_surface, () => clear_screen(0.14, 0.46, 0.36, 1.0))
+        with_canvas(canvas_auxiliary, () => clear_screen(0.27, 0.53, 0.87, 1.0))
+        let pipe = pipeline(rock_shader(sprite_batch_vert, ui_batch_sampler_binding_frag))
+        load_pending_shader_sources()
+        assert(get_shader_handle(pipe.shader_name) != 0)
 
-    let from_canvas = ui_batch_sampler_filter_batch(pool, pipe, white, 1, v(0.0, 0.0))
-    from_canvas.normal = sampled_canvas(canvas_normal)
-    from_canvas.surface = sampled_canvas(canvas_surface)
-    from_canvas.auxiliary = sampled_canvas(canvas_auxiliary)
-    let absent = ui_batch_sampler_filter_batch(pool, pipe, white, 2, v(8.0, 0.0))
-    absent.normal = null
-    absent.surface = null
-    absent.auxiliary = null
-    let surface_nearest = ui_batch_sampler_filter_batch(pool, pipe, white, 3, v(16.0, 0.0))
-    surface_nearest.surface = sampled_image(split_nearest)
-    surface_nearest.surface_sampling = TextureFilter::Nearest
-    let surface_linear = ui_batch_sampler_filter_batch(pool, pipe, white, 4, v(24.0, 0.0))
-    surface_linear.surface = sampled_image(split_nearest)
-    surface_linear.surface_sampling = TextureFilter::Linear
-    let auxiliary_declared = ui_batch_sampler_filter_batch(pool, pipe, white, 5, v(32.0, 0.0))
-    auxiliary_declared.auxiliary = sampled_image(split_linear)
-    stone_flush_image_uploads()
-    with_canvas(output, () => {
-        clear_screen(0.0, 0.0, 0.0, 0.0)
-        render_ui_batches(pool, projection_extent: v(40.0, 8.0))
+        let from_canvas = ui_batch_sampler_filter_batch(pool, pipe, white, 1, v(0.0, 0.0))
+        from_canvas.normal = sampled_canvas(canvas_normal)
+        from_canvas.surface = sampled_canvas(canvas_surface)
+        from_canvas.auxiliary = sampled_canvas(canvas_auxiliary)
+        let absent = ui_batch_sampler_filter_batch(pool, pipe, white, 2, v(8.0, 0.0))
+        absent.normal = null
+        absent.surface = null
+        absent.auxiliary = null
+        let surface_nearest = ui_batch_sampler_filter_batch(pool, pipe, white, 3, v(16.0, 0.0))
+        surface_nearest.surface = sampled_image(split_nearest)
+        surface_nearest.surface_sampling = TextureFilter::Nearest
+        let surface_linear = ui_batch_sampler_filter_batch(pool, pipe, white, 4, v(24.0, 0.0))
+        surface_linear.surface = sampled_image(split_nearest)
+        surface_linear.surface_sampling = TextureFilter::Linear
+        let auxiliary_declared = ui_batch_sampler_filter_batch(pool, pipe, white, 5, v(32.0, 0.0))
+        auxiliary_declared.auxiliary = sampled_image(split_linear)
+        stone_flush_image_uploads()
+        with_canvas(output, () => {
+            clear_screen(0.0, 0.0, 0.0, 0.0)
+            render_ui_batches(pool, projection_extent: v(40.0, 8.0))
+        })
+
+        let r = ui_batch_sampler_channel(output, 4, 0)
+        let g = ui_batch_sampler_channel(output, 4, 1)
+        let b = ui_batch_sampler_channel(output, 4, 2)
+        let a = ui_batch_sampler_channel(output, 4, 3)
+        assert(abs(r - 0.72) < 0.04 && abs(g - 0.46) < 0.04 && abs(b - 0.87) < 0.04 && a > 0.95,
+            "Canvas normal, surface and auxiliary samplers reach their own channels: got ({r}, {g}, {b}, {a})")
+        for channel in 0..4 {
+            let value = ui_batch_sampler_channel(output, 12, channel)
+            assert(value > 0.95,
+                "null normal, surface and auxiliary samplers bind white after a nonwhite batch (channel {channel}: {value})")
+        }
+        let nearest = ui_batch_sampler_channel(output, 20, 1)
+        assert(nearest < 0.05, "the surface binder honors stored Nearest sampling ({nearest})")
+        let linear = ui_batch_sampler_channel(output, 28, 1)
+        assert(linear > 0.38 && linear < 0.62, "the surface binder honors stored Linear sampling ({linear})")
+        let declared = ui_batch_sampler_channel(output, 36, 2)
+        assert(declared > 0.38 && declared < 0.62,
+            "the auxiliary binder uses an image's declared Linear sampling ({declared})")
     })
-
-    let r = ui_batch_sampler_channel(output, 4, 0)
-    let g = ui_batch_sampler_channel(output, 4, 1)
-    let b = ui_batch_sampler_channel(output, 4, 2)
-    let a = ui_batch_sampler_channel(output, 4, 3)
-    assert(abs(r - 0.72) < 0.04 && abs(g - 0.46) < 0.04 && abs(b - 0.87) < 0.04 && a > 0.95,
-        "Canvas normal, surface and auxiliary samplers reach their own channels: got ({r}, {g}, {b}, {a})")
-    for channel in 0..4 {
-        let value = ui_batch_sampler_channel(output, 12, channel)
-        assert(value > 0.95,
-            "null normal, surface and auxiliary samplers bind white after a nonwhite batch (channel {channel}: {value})")
-    }
-    let nearest = ui_batch_sampler_channel(output, 20, 1)
-    assert(nearest < 0.05, "the surface binder honors stored Nearest sampling ({nearest})")
-    let linear = ui_batch_sampler_channel(output, 28, 1)
-    assert(linear > 0.38 && linear < 0.62, "the surface binder honors stored Linear sampling ({linear})")
-    let declared = ui_batch_sampler_channel(output, 36, 2)
-    assert(declared > 0.38 && declared < 0.62,
-        "the auxiliary binder uses an image's declared Linear sampling ({declared})")
 }

@@ -272,20 +272,16 @@ fn profiler_gc_unknown_bounded() {
         assert_eq(GC_WIN_UNKNOWN_SECTIONS, names.len() * 2, "every rejection is counted")
         GC_WIN_FRAME += GC_WIN_N
         GC_WIN_SECTION_REGISTRY_FROZEN = false
-        let diagnostic = gc_window_unknown_sections_json()
-        let json = json_decode(diagnostic).unwrap()
-        let rows = json_as_array(json_field(json, "sections").unwrap()).unwrap()
+        let json = json_decode(gc_window_unknown_sections_json()).unwrap()
+        let rows = json_array_at(json, ["sections"])
         assert_eq(rows.len(), MAX_GC_WINDOW_UNKNOWN_NAMES, "diagnostics stay bounded")
-        let hits = json_as_int(json_field(json, "unretained_hits").unwrap()).unwrap()
-        for row in rows {
-            hits += json_as_int(json_field(row, "hits").unwrap()).unwrap()
-        }
+        let hits = json_int_at(json, ["unretained_hits"])
+        for row in rows { hits += json_int_at(row, ["hits"]) }
         assert_eq(hits, GC_WIN_UNKNOWN_SECTIONS, "retained and unretained hits account for all rejections")
-        assert_eq(json_as_str(json_field(rows[0], "name").unwrap()).unwrap(), names[0],
-            "control characters survive JSON encoding")
-        assert_eq(json_as_str(json_field(rows[1], "name").unwrap()).unwrap().len(), 256,
+        assert_eq(json_str_at(rows[0], ["name"]), names[0], "control characters survive JSON encoding")
+        assert_eq(json_str_at(rows[1], ["name"]).len(), 256,
             "long diagnostic names have a bounded output prefix")
-        assert_eq(json_as_int(json_field(rows[1], "name_bytes").unwrap()).unwrap(), names[1].len(),
+        assert_eq(json_int_at(rows[1], ["name_bytes"]), names[1].len(),
             "the prefix reports the original name length")
         gc_window_clear_accounting()
         assert_eq(GC_WIN_UNKNOWN_SECTIONS, 0)

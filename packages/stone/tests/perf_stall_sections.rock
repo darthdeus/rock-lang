@@ -19,25 +19,24 @@ fn perf_stall_sections_frame(update_s: float, child_s: float, render_s: float) {
 }
 
 fn perf_stall_sections_report() -> JsonValue {
-    let report = json_decode(profiler_perf_json()).unwrap()
-    return json_field(report, "stall_sections") ?? json_null()
+    return json_at(json_decode(profiler_perf_json()).unwrap(), ["stall_sections"])
+}
+
+fn perf_stall_sections_profiler(history: bool) {
+    PERF_SECTION_HISTORY = history
+    init_profiler()
+    ENGINE.profiler_enabled = true
+    PROFILER_SECTIONS_OFF = 0
+    GC_WIN_N = 0
 }
 
 @nomangle
 fn perf_stall_sections_entry(_which: int) {
     PERF_FRAME_CAPTURE = true
-    PERF_SECTION_HISTORY = false
-    init_profiler()
-    ENGINE.profiler_enabled = true
-    PROFILER_SECTIONS_OFF = 0
-    GC_WIN_N = 0
+    perf_stall_sections_profiler(false)
     assert(json_is_null(perf_stall_sections_report()), "no section history, no stall sections")
 
-    PERF_SECTION_HISTORY = true
-    init_profiler()
-    ENGINE.profiler_enabled = true
-    PROFILER_SECTIONS_OFF = 0
-    GC_WIN_N = 0
+    perf_stall_sections_profiler(true)
     HITCH = hitch_ledger_new()
     PERF_RECORDS = perf_records_new()
     perf_scenario_wait("synthetic")
@@ -58,28 +57,27 @@ fn perf_stall_sections_entry(_which: int) {
 
     let stalls = perf_stall_sections_report()
     assert(!json_is_null(stalls), "section history exports stall sections")
-    assert_eq(json_as_float(json_field(stalls, "threshold_ms").unwrap()).unwrap(), 33.0)
-    assert_eq(json_as_bool(json_field(stalls, "complete").unwrap()).unwrap(), true)
-    let rows = json_as_array(json_field(stalls, "rows").unwrap()).unwrap()
+    assert_eq(json_float_at(stalls, ["threshold_ms"]), 33.0)
+    assert(json_bool_at(stalls, ["complete"]))
+    let rows = json_array_at(stalls, ["rows"])
     assert_eq(rows.len(), 1, "only the 40 ms frame is a stall: {json_encode(stalls)}")
     let row = rows[0]
-    assert_eq(json_as_int(json_field(row, "frame").unwrap()).unwrap(), 12)
-    assert(abs(json_as_float(json_field(row, "frame_ms").unwrap()).unwrap() - 40.0) < 0.001)
-    let sections = json_as_array(json_field(row, "sections").unwrap()).unwrap()
+    assert_eq(json_int_at(row, ["frame"]), 12)
+    assert(abs(json_float_at(row, ["frame_ms"]) - 40.0) < 0.001)
+    let sections = json_array_at(row, ["sections"])
     assert_eq(sections.len(), 3, "every timed section of the frame is listed: {json_encode(row)}")
     let names: [string] = []
-    for section in sections { names.push(json_as_str(json_field(section, "name").unwrap()).unwrap()) }
+    for section in sections { names.push(json_str_at(section, ["name"])) }
     assert_eq(names.join(","), "stall.update,stall.update.child,stall.render", "sections sort by inclusive ms")
-    assert(abs(json_as_float(json_field(sections[0], "ms").unwrap()).unwrap() - 30.0) < 0.001)
-    assert(abs(json_as_float(json_field(sections[1], "ms").unwrap()).unwrap() - 25.0) < 0.001)
-    assert_eq(json_as_int(json_field(sections[0], "depth").unwrap()).unwrap(), 0)
-    assert_eq(json_as_int(json_field(sections[1], "depth").unwrap()).unwrap(), 1)
+    assert(abs(json_float_at(sections[0], ["ms"]) - 30.0) < 0.001)
+    assert(abs(json_float_at(sections[1], ["ms"]) - 25.0) < 0.001)
+    assert_eq(json_int_at(sections[0], ["depth"]), 0)
+    assert_eq(json_int_at(sections[1], ["depth"]), 1)
 
     SECTION_HISTORY_FIRST_FRAME = 13
     let misaligned = perf_stall_sections_report()
-    assert_eq(json_as_bool(json_field(misaligned, "complete").unwrap()).unwrap(), false)
-    let misaligned_row = json_as_array(json_field(misaligned, "rows").unwrap()).unwrap()[0]
-    assert(json_is_null(json_field(misaligned_row, "sections") ?? json_null()),
+    assert(!json_bool_at(misaligned, ["complete"]))
+    assert(json_is_null(json_at(json_array_at(misaligned, ["rows"])[0], ["sections"])),
         "a frame outside the history window exports null sections")
 }
 

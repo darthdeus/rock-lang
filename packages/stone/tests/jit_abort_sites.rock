@@ -1,8 +1,5 @@
 // The counter-only trace handler runs inside every timing capture, so it
-// records abort sites as numeric ids and only the perf export resolves them
-// through the census naming path. These rules hold that shape: a window's
-// rows are exactly its aborts (warmup sites do not leak in), an abort joins
-// its trace's start, and the top-N list never loses the total.
+// records abort sites as numeric ids and only the perf export resolves them.
 
 // Fresh closures: an abort site is (func object, pc), so each call is a new
 // site even though the source line is shared.
@@ -55,12 +52,7 @@ fn jit_abort_sites_frame() {
 }
 
 fn jit_abort_sites_window(frames: int, in_window: fn()) {
-    GC_WIN_N = frames
-    GC_WIN_START = 1
-    GC_WIN_FRAME = 0
-    GC_WIN_T0_KB = 0.0
-    GC_WIN_ACCOUNT_CURSOR_KB = 0.0
-    GC_WIN_FRAME_START_KB = 0.0
+    profiler_window_open(frames)
     jit_abort_sites_frame()
     in_window()
     while GC_WIN_FRAME < GC_WIN_START + GC_WIN_N {
@@ -69,20 +61,11 @@ fn jit_abort_sites_window(frames: int, in_window: fn()) {
 }
 
 fn jit_abort_sites_report() -> JsonValue {
-    let doc = json_decode(profiler_perf_json()).unwrap()
-    return json_field(json_field(doc, "run").unwrap(), "jit_trace").unwrap()
+    return json_at(json_decode(profiler_perf_json()).unwrap(), ["run", "jit_trace"])
 }
 
-fn jit_abort_sites_rows(report: JsonValue) -> [JsonValue] {
-    return json_as_array(json_field(report, "abort_sites") ?? json_null()).unwrap()
-}
-
-fn jit_abort_sites_total(report: JsonValue) -> int {
-    return json_as_int(json_field(report, "abort_sites_total") ?? json_null()).unwrap()
-}
-
-fn jit_abort_sites_field(row: JsonValue, name: string) -> string {
-    return json_as_str(json_field(row, name) ?? json_null()).unwrap()
+fn jit_abort_sites_proto(row: JsonValue, name: string) -> string {
+    return json_encode(json_field(row, name).unwrap())
 }
 
 @test
@@ -98,8 +81,6 @@ fn jit_abort_sites_are_the_window_and_join_their_start() {
             for _ in 0..3 {
                 __stone_jit_count_event(counts, "abort", 21, site, 0, JIT_ABORT_SITES_REASON, 0)
             }
-            // No start for trace 22: the site keeps its abort location and
-            // reports no start location.
             __stone_jit_count_event(counts, "abort", 22, orphan, 0, JIT_ABORT_SITES_REASON, 0)
             let external = jit_abort_sites_external()
             __stone_jit_count_event(counts, "start", 23, external, 0, JIT_ABORT_SITES_REASON, 0)
@@ -108,42 +89,39 @@ fn jit_abort_sites_are_the_window_and_join_their_start() {
             }
         })
         let report = jit_abort_sites_report()
-        let rows = jit_abort_sites_rows(report)
+        let rows = json_array_at(report, ["abort_sites"])
         assert_eq(rows.len(), 3, "one row per aborted site, warmup excluded: {json_encode(report)}")
-        assert_eq(jit_abort_sites_total(report), 6, "every window abort is counted: {json_encode(report)}")
+        assert_eq(json_int_at(report, ["abort_sites_total"]), 6, "every window abort is counted: {json_encode(report)}")
         let joined = rows[0]
         let unjoined = rows[2]
-        assert_eq(json_encode(json_field(rows[1], "start_proto").unwrap()), "null",
+        assert_eq(jit_abort_sites_proto(rows[1], "start_proto"), "null",
             "an external function has an explicit unregistered start identity")
-        assert_eq(json_encode(json_field(rows[1], "abort_proto").unwrap()), "null",
+        assert_eq(jit_abort_sites_proto(rows[1], "abort_proto"), "null",
             "an external function has an explicit unregistered abort identity")
-        let population = json_as_int(json_field(report, "program_prototypes") ?? json_null()) ?? 0
-        assert(population > 0, "the measured recorder registers the loaded program prototypes")
-        let start = json_field(joined, "start_proto") ?? json_null()
-        let abort = json_field(joined, "abort_proto") ?? json_null()
+        assert(json_int_at(report, ["program_prototypes"]) > 0,
+            "the measured recorder registers the loaded program prototypes")
+        let start = json_at(joined, ["start_proto"])
         assert(json_field(start, "function_id") != null, "the trace start has a loaded prototype identity")
-        assert_eq(json_encode(start), json_encode(abort), "start and abort share their prototype")
-        assert(json_as_int(json_field(start, "bytecodes") ?? json_null()).unwrap() > 0)
-        assert(json_as_int(json_field(start, "definition_line") ?? json_null()).unwrap() > 0)
-        assert(json_as_str(json_field(start, "source") ?? json_null()).unwrap().len() > 0)
-        assert_eq(json_encode(json_field(unjoined, "start_proto").unwrap()), "null",
+        assert_eq(json_encode(start), jit_abort_sites_proto(joined, "abort_proto"), "start and abort share their prototype")
+        assert(json_int_at(start, ["bytecodes"]) > 0)
+        assert(json_int_at(start, ["definition_line"]) > 0)
+        assert(json_str_at(start, ["source"]).len() > 0)
+        assert_eq(jit_abort_sites_proto(unjoined, "start_proto"), "null",
             "an absent start has an explicit unregistered identity")
-        assert(json_encode(json_field(unjoined, "abort_proto").unwrap()) != json_encode(abort),
+        assert(jit_abort_sites_proto(unjoined, "abort_proto") != json_encode(start),
             "different definitions retain different prototype identities")
-        assert_eq(json_as_int(json_field(joined, "count") ?? json_null()).unwrap(), 3,
-            "the repeated site ranks first: {json_encode(report)}")
-        assert_eq(json_as_int(json_field(unjoined, "count") ?? json_null()).unwrap(), 1,
-            "the single abort ranks last: {json_encode(report)}")
-        assert(jit_abort_sites_field(joined, "reason").len() > 0, "a row names its reason: {json_encode(joined)}")
-        assert_eq(jit_abort_sites_field(joined, "reason"), jit_abort_sites_field(unjoined, "reason"),
+        assert_eq(json_int_at(joined, ["count"]), 3, "the repeated site ranks first: {json_encode(report)}")
+        assert_eq(json_int_at(unjoined, ["count"]), 1, "the single abort ranks last: {json_encode(report)}")
+        assert(json_str_at(joined, ["reason"]).len() > 0, "a row names its reason: {json_encode(joined)}")
+        assert_eq(json_str_at(joined, ["reason"]), json_str_at(unjoined, ["reason"]),
             "the same traceerr index renders one reason: {json_encode(report)}")
-        assert(jit_abort_sites_field(joined, "abort_loc") != "(?)",
+        assert(json_str_at(joined, ["abort_loc"]) != "(?)",
             "a real function and pc resolve a location: {json_encode(joined)}")
-        assert_eq(jit_abort_sites_field(joined, "start_loc"), jit_abort_sites_field(joined, "abort_loc"),
+        assert_eq(json_str_at(joined, ["start_loc"]), json_str_at(joined, ["abort_loc"]),
             "the trace started where it was aborted: {json_encode(joined)}")
-        assert_eq(jit_abort_sites_field(unjoined, "start_loc"), "(?)",
+        assert_eq(json_str_at(unjoined, ["start_loc"]), "(?)",
             "an unstarted trace has no start location: {json_encode(unjoined)}")
-        assert(jit_abort_sites_field(unjoined, "abort_loc") != jit_abort_sites_field(joined, "abort_loc"),
+        assert(json_str_at(unjoined, ["abort_loc"]) != json_str_at(joined, ["abort_loc"]),
             "two code sites keep two rows: {json_encode(report)}")
     })
     assert(json_decode(profiler_perf_json()) != null,
@@ -162,17 +140,17 @@ fn jit_abort_sites_top_fifty_keeps_the_total() {
             }
         })
         let report = jit_abort_sites_report()
-        let rows = jit_abort_sites_rows(report)
+        let rows = json_array_at(report, ["abort_sites"])
         assert_eq(rows.len(), 50, "the export lists the top 50 sites: {json_encode(report)}")
-        assert_eq(jit_abort_sites_total(report), 60,
+        assert_eq(json_int_at(report, ["abort_sites_total"]), 60,
             "the total counts every site, listed or not: {json_encode(report)}")
         let listed = 0
-        let prototype = json_encode(json_field(rows[0], "abort_proto").unwrap())
+        let prototype = jit_abort_sites_proto(rows[0], "abort_proto")
         assert(prototype != "null", "the closure definition is registered")
         for row in rows {
-            assert_eq(json_encode(json_field(row, "abort_proto").unwrap()), prototype,
+            assert_eq(jit_abort_sites_proto(row, "abort_proto"), prototype,
                 "fresh closures of one definition share its prototype identity")
-            listed += json_as_int(json_field(row, "count") ?? json_null()).unwrap()
+            listed += json_int_at(row, ["count"])
         }
         assert_eq(listed, 50, "the listed rows carry one abort each: {json_encode(report)}")
     })

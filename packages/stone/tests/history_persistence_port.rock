@@ -150,51 +150,57 @@ fn snapshot_history_legacy_validation_does_not_rewrite_source() {
     assert(remove_dir(dir))
 }
 
+fn history_tree(max_nodes: int, labels: [string]) -> SnapshotHistory {
+    let tree = snapshot_history_empty(max_nodes)
+    snapshot_history_ensure_root(tree, "root")
+    history_commit(tree, labels)
+    return tree
+}
+
+fn history_commit(tree: SnapshotHistory, labels: [string]) {
+    for label in labels { assert(snapshot_history_commit(tree, label.lower(), label), "commit {label}") }
+}
+
+fn history_undo(tree: SnapshotHistory) -> SnapshotHistoryNode? {
+    return snapshot_history_jump(tree, snapshot_history_undo_target(tree) ?? -1)
+}
+
+fn history_redo(tree: SnapshotHistory) -> SnapshotHistoryNode? {
+    return snapshot_history_jump(tree, snapshot_history_redo_target(tree) ?? -1)
+}
+
+fn history_current(tree: SnapshotHistory) -> string { return tree.nodes[tree.current].label }
+
 @test
 fn snapshot_history_prune_keeps_the_current_lane_and_first_future() {
-    let history = snapshot_history_empty(10)
-    snapshot_history_ensure_root(history, "root")
-    assert_eq(snapshot_history_commit(history, "a", "A"), true)
-    assert_eq(snapshot_history_commit(history, "b", "B"), true)
-    let _back_to_a = snapshot_history_jump(history, snapshot_history_undo_target(history, "b" != history.nodes[history.current].snap) ?? -1)
-    assert_eq(history.nodes[history.current].label, "A")
-    assert_eq(snapshot_history_commit(history, "c", "C"), true)
-    assert_eq(snapshot_history_commit(history, "d", "D"), true)
-    let _back_to_c = snapshot_history_jump(history, snapshot_history_undo_target(history, "d" != history.nodes[history.current].snap) ?? -1)
-    assert_eq(snapshot_history_commit(history, "e", "E"), true)
-    let _back_to_c_again = snapshot_history_jump(history, snapshot_history_undo_target(history, "e" != history.nodes[history.current].snap) ?? -1)
-    assert_eq(history.nodes[history.current].label, "C",
-        "undo after a fork returns to the live node")
+    let history = history_tree(10, ["A", "B"])
+    history_undo(history)
+    assert_eq(history_current(history), "A")
+    history_commit(history, ["C", "D"])
+    history_undo(history)
+    history_commit(history, ["E"])
+    history_undo(history)
+    assert_eq(history_current(history), "C", "undo after a fork returns to the live node")
     assert_eq(history.nodes.len(), 6, "the pre-prune tree retains both branches")
 
-    assert_eq(snapshot_history_prune(history), true, "a forked history can be pruned")
-    assert_eq(history.nodes.len(), 4, "prune keeps root, ancestors, and first future")
-    assert_eq(history.nodes[0].label, "start", "prune keeps the root")
-    assert_eq(history.nodes[1].label, "A", "prune keeps the ancestor")
-    assert_eq(history.nodes[2].label, "C", "prune keeps the current node")
-    assert_eq(history.nodes[3].label, "D", "prune keeps the first redo future")
-    assert_eq(history.nodes[history.current].label, "C",
-        "prune remaps the current pointer")
-    assert_eq(snapshot_history_prune(history), false,
-        "pruning an already linear lane is a no-op")
+    assert(snapshot_history_prune(history), "a forked history can be pruned")
+    let labels: [string] = []
+    for node in history.nodes { labels.push(node.label) }
+    assert_eq(labels.join(","), "start,A,C,D", "prune keeps root, ancestors, current and first future")
+    assert_eq(history_current(history), "C", "prune remaps the current pointer")
+    assert(!snapshot_history_prune(history), "pruning an already linear lane is a no-op")
 
-    let redo = snapshot_history_jump(history, snapshot_history_redo_target(history) ?? -1)
-    assert_eq(redo != null, true, "the surviving future remains redoable")
-    assert_eq(history.nodes[history.current].label, "D",
-        "redo follows the surviving future")
-    let _undo_d = snapshot_history_jump(history, snapshot_history_undo_target(history, "d" != history.nodes[history.current].snap) ?? -1)
-    let _undo_c = snapshot_history_jump(history, snapshot_history_undo_target(history, "c" != history.nodes[history.current].snap) ?? -1)
-    assert_eq(history.nodes[history.current].label, "A",
-        "undo walks back through the retained ancestors")
+    assert(history_redo(history) != null, "the surviving future remains redoable")
+    assert_eq(history_current(history), "D", "redo follows the surviving future")
+    history_undo(history)
+    history_undo(history)
+    assert_eq(history_current(history), "A", "undo walks back through the retained ancestors")
 }
 
 @test
 fn snapshot_history_clean_uses_live_snapshot_and_starts_a_new_tree() {
-    let tree = snapshot_history_empty(10)
-    snapshot_history_ensure_root(tree, "root")
-    snapshot_history_commit(tree, "a", "A")
-    snapshot_history_commit(tree, "b", "B")
-    snapshot_history_jump(tree, snapshot_history_undo_target(tree, "b" != tree.nodes[tree.current].snap) ?? -1)
+    let tree = history_tree(10, ["A", "B"])
+    history_undo(tree)
     snapshot_history_clean(tree, "live uncommitted edit")
     assert_eq(tree.nodes.len(), 1, "single baseline node")
     assert_eq(tree.current, 0, "current is the new root")
@@ -202,48 +208,33 @@ fn snapshot_history_clean_uses_live_snapshot_and_starts_a_new_tree() {
     assert_eq(tree.nodes[0].parent, -1, "baseline is a root")
     assert_eq(tree.nodes[0].children.len(), 0, "no future")
     assert_eq(tree.nodes[0].snap, "live uncommitted edit", "clean captures its live input")
-    assert_eq(snapshot_history_jump(tree, snapshot_history_undo_target(tree, "live uncommitted edit" != tree.nodes[tree.current].snap) ?? -1) == null, true)
-    assert_eq(snapshot_history_jump(tree, snapshot_history_redo_target(tree) ?? -1) == null, true)
+    assert(history_undo(tree) == null && history_redo(tree) == null, "a clean tree has no undo or redo")
 }
 
 @test
 fn snapshot_history_forks_preserve_both_futures() {
-    let tree = snapshot_history_empty(10)
-    snapshot_history_ensure_root(tree, "root")
-    snapshot_history_commit(tree, "a", "A")
-    snapshot_history_commit(tree, "b", "B")
-    snapshot_history_jump(tree, snapshot_history_undo_target(tree, "b" != tree.nodes[tree.current].snap) ?? -1)
-    snapshot_history_commit(tree, "c", "C")
+    let tree = history_tree(10, ["A", "B"])
+    history_undo(tree)
+    history_commit(tree, ["C"])
     assert_eq(tree.nodes.len(), 4, "root plus three strokes; no branch destroyed")
     assert_eq(tree.nodes[1].children.len(), 2, "A has both futures: B and C")
-    let b = snapshot_history_jump(tree, 2)
-    assert_eq(b != null, true)
-    assert_eq(b.unwrap().snap, "b", "the abandoned branch remains reachable")
-    let c = snapshot_history_jump(tree, 3)
-    assert_eq(c != null, true)
-    assert_eq(c.unwrap().snap, "c", "the newer branch remains reachable")
+    assert_eq(snapshot_history_jump(tree, 2).unwrap().snap, "b", "the abandoned branch remains reachable")
+    assert_eq(snapshot_history_jump(tree, 3).unwrap().snap, "c", "the newer branch remains reachable")
     snapshot_history_jump(tree, 1)
-    let latest = snapshot_history_jump(tree, snapshot_history_redo_target(tree) ?? -1)
-    assert_eq(latest != null, true)
-    assert_eq(latest.unwrap().snap, "c", "redo chooses the most recent branch")
+    assert_eq(history_redo(tree).unwrap().snap, "c", "redo chooses the most recent branch")
 }
 
 @test
 fn snapshot_history_clamps_linear_roots_and_old_forks() {
-    let tree = snapshot_history_empty(3)
-    snapshot_history_ensure_root(tree, "root")
-    snapshot_history_commit(tree, "a", "A")
-    snapshot_history_commit(tree, "b", "B")
-    snapshot_history_commit(tree, "c", "C")
+    let tree = history_tree(3, ["A", "B", "C"])
     assert_eq(tree.nodes.len(), 3, "clamped to maximum nodes")
     assert_eq(tree.nodes[0].label, "A", "root collapsed into A")
     assert_eq(tree.nodes[0].parent, -1, "A is the new root")
-    assert_eq(tree.nodes[tree.current].label, "C", "current remains the newest stroke")
-    snapshot_history_jump(tree, snapshot_history_undo_target(tree, "c" != tree.nodes[tree.current].snap) ?? -1)
-    snapshot_history_commit(tree, "d", "D")
-    snapshot_history_commit(tree, "e", "E")
+    assert_eq(history_current(tree), "C", "current remains the newest stroke")
+    history_undo(tree)
+    history_commit(tree, ["D", "E"])
     assert_eq(tree.nodes.len(), 3, "fork clamp holds the cap")
     assert_eq(tree.nodes[0].label, "B", "B is the root after collapses")
     assert_eq(tree.nodes[0].children.len(), 1, "abandoned branch C is pruned")
-    assert_eq(tree.nodes[tree.current].label, "E", "current rides the active branch")
+    assert_eq(history_current(tree), "E", "current rides the active branch")
 }

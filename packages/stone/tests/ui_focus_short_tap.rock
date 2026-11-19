@@ -1,229 +1,95 @@
-struct TapNavActions {
-    up: ActionDef,
-    dn: ActionDef,
-    lf: ActionDef,
-    rt: ActionDef,
-    cf: ActionDef,
-    bk: ActionDef,
-}
-
-// Input and UI state back to boot, so no test sees another's holds, focus or
-// keyboard capture.
-fn tapnav_reset() {
-    input_reset_state()
-    UI_MOUSE = ui_mouse_state_new()
-    UI_FOCUS = ui_focus_state_new()
-    UI_ID_DEBUG = ui_id_debug_new()
-    UI_INPUT_CAPTURE = false
-    REBIND_INPUT_CONSUMED = false
-}
-
-fn tapnav_wire() -> TapNavActions {
-    let acts = TapNavActions {
-        up: action_new("ftap_up", [key_bind("up")], ui: true),
-        dn: action_new("ftap_down", [key_bind("down")], ui: true),
-        lf: action_new("ftap_left", [key_bind("left")], ui: true),
-        rt: action_new("ftap_right", [key_bind("right")], ui: true),
-        cf: action_new("ftap_confirm", [key_bind("return")], ui: true),
-        bk: action_new("ftap_back", [key_bind("escape")], ui: true),
-    }
-    ui_nav_use(acts.up, acts.dn, acts.lf, acts.rt, acts.cf, acts.bk)
-    return acts
-}
-
-fn tapnav_unwire(acts: TapNavActions) {
-    action_remove(acts.up)
-    action_remove(acts.dn)
-    action_remove(acts.lf)
-    action_remove(acts.rt)
-    action_remove(acts.cf)
-    action_remove(acts.bk)
-    bindings_forget_raw_entry("ftap_up")
-    bindings_forget_raw_entry("ftap_down")
-    bindings_forget_raw_entry("ftap_left")
-    bindings_forget_raw_entry("ftap_right")
-    bindings_forget_raw_entry("ftap_confirm")
-    bindings_forget_raw_entry("ftap_back")
-}
-
-fn tapnav_register() {
+fn tapnav_step() {
     ui_focus_set_scope("ftap")
     let r = ui_rect(100.0, 100.0, 200.0, 30.0)
-    ui_focus_item(ui_id("ftap", "a"), r, "ftap")
-    ui_focus_item(ui_id("ftap", "b"), r, "ftap")
-    ui_focus_item(ui_id("ftap", "c"), r, "ftap")
+    for key in ["a", "b", "c"] { ui_focus_item(ui_id("ftap", key), r, "ftap") }
+    ui_nav_frame()
 }
 
-// Production frame order (runner.rock): poll events, then the authority
-// projection, mouse/focus resolution, end-of-frame snapshot.
-fn tapnav_frame() {
-    input_select_game_authority()
-    ui_mouse_begin_frame()
-    ui_focus_begin_frame()
-    input_end_frame()
+// Press and release land in one poll, before the frame that reads them.
+fn tapnav_tap(key: string) {
+    input_physical_key_pressed(key, key, 0, false)
+    input_physical_key_released(key, key)
+    tapnav_step()
 }
 
-fn tapnav_poll_tap(key: string, scan: string) {
-    input_physical_key_pressed(key, scan, 0, false)
-    input_physical_key_released(key, scan)
-}
-
-fn tapnav_assert_clean() {
-    assert(ACTIONS.get("ftap_down") == null,
-        "ftap: a previous test leaked its nav actions")
+fn tapnav_enter() {
+    tapnav_step()
+    assert(!UI_FOCUS.nav_mode, "ftap: no input leaves pointer mode")
+    tapnav_tap("down")
+    assert(UI_FOCUS.nav_mode, "ftap: a same-poll tap enters nav mode")
+    assert(ui_focused(ui_id("ftap", "a")), "ftap: the entering tap focuses the first item")
+    assert(UI_INPUT_CAPTURE, "ftap: nav-mode focus captures the keyboard")
 }
 
 @test
 fn ui_focus_short_tap_moves_once_without_repeat() {
-    tapnav_reset()
-    defer { tapnav_reset() }
-    tapnav_assert_clean()
-    let acts = tapnav_wire()
-    defer { tapnav_unwire(acts) }
-
-    let ia = ui_id("ftap", "a")
-    let ib = ui_id("ftap", "b")
-    let ic = ui_id("ftap", "c")
-
-    tapnav_register()
-    tapnav_frame()
-    assert(!UI_FOCUS.nav_mode, "ftap: no input leaves pointer mode")
-
-    tapnav_poll_tap("down", "down")
-    tapnav_register()
-    tapnav_frame()
-    assert(UI_FOCUS.nav_mode, "ftap: a same-poll tap enters nav mode")
-    assert(ui_focused(ia), "ftap: the entering tap focuses the first item")
-    assert(UI_INPUT_CAPTURE, "ftap: nav-mode focus captures the keyboard")
-
-    tapnav_poll_tap("down", "down")
-    tapnav_register()
-    tapnav_frame()
-    assert(ui_focused(ib), "ftap: a same-poll tap moves focus to the next item")
-    assert(!ui_focused(ia) && !ui_focused(ic),
-        "ftap: the tap moves one item, not zero or two")
-
-    tapnav_register()
-    tapnav_frame()
-    assert(ui_focused(ib), "ftap: a quiet frame after a tap repeats nothing")
-    assert(UI_FOCUS.nav_mode, "ftap: nav mode survives a quiet frame")
+    ui_nav_wired(() => {
+        tapnav_enter()
+        tapnav_tap("down")
+        assert(ui_focused(ui_id("ftap", "b")), "ftap: a same-poll tap moves focus to the next item")
+        assert(!ui_focused(ui_id("ftap", "a")) && !ui_focused(ui_id("ftap", "c")),
+            "ftap: the tap moves one item, not zero or two")
+        tapnav_step()
+        assert(ui_focused(ui_id("ftap", "b")), "ftap: a quiet frame after a tap repeats nothing")
+        assert(UI_FOCUS.nav_mode, "ftap: nav mode survives a quiet frame")
+    })
 }
 
 @test
 fn ui_focus_short_tap_confirms_once() {
-    tapnav_reset()
-    defer { tapnav_reset() }
-    tapnav_assert_clean()
-    let acts = tapnav_wire()
-    defer { tapnav_unwire(acts) }
-
-    let ia = ui_id("ftap", "a")
-    let ib = ui_id("ftap", "b")
-
-    tapnav_register()
-    tapnav_frame()
-    tapnav_poll_tap("down", "down")
-    tapnav_register()
-    tapnav_frame()
-    assert(ui_focused(ia), "ftap: the entering tap focuses the first item")
-
-    tapnav_poll_tap("return", "return")
-    tapnav_register()
-    tapnav_frame()
-    assert(ui_focus_confirmed(ia), "ftap: a same-poll confirm tap fires for the focused item")
-    assert(!ui_focus_confirmed(ib), "ftap: confirm does not fire for unfocused items")
-
-    tapnav_register()
-    tapnav_frame()
-    assert(!ui_focus_confirmed(ia), "ftap: confirm is a one-frame edge after a tap")
-    assert(ui_focused(ia), "ftap: confirming leaves focus unmoved")
+    ui_nav_wired(() => {
+        let ia = ui_id("ftap", "a")
+        tapnav_enter()
+        tapnav_tap("return")
+        assert(ui_focus_confirmed(ia), "ftap: a same-poll confirm tap fires for the focused item")
+        assert(!ui_focus_confirmed(ui_id("ftap", "b")), "ftap: confirm does not fire for unfocused items")
+        tapnav_step()
+        assert(!ui_focus_confirmed(ia), "ftap: confirm is a one-frame edge after a tap")
+        assert(ui_focused(ia), "ftap: confirming leaves focus unmoved")
+    })
 }
 
 @test
 fn ui_focus_short_tap_drives_lr_once() {
-    tapnav_reset()
-    defer { tapnav_reset() }
-    tapnav_assert_clean()
-    let acts = tapnav_wire()
-    defer { tapnav_unwire(acts) }
-
-    let ia = ui_id("ftap", "a")
-
-    tapnav_register()
-    tapnav_frame()
-    tapnav_poll_tap("down", "down")
-    tapnav_register()
-    tapnav_frame()
-    assert(ui_focused(ia), "ftap: the entering tap focuses the first item")
-
-    tapnav_poll_tap("left", "left")
-    tapnav_register()
-    tapnav_frame()
-    assert_eq(UI_FOCUS.lr_dir, -1, "ftap: a same-poll left tap resolves -1")
-
-    tapnav_register()
-    tapnav_frame()
-    assert_eq(UI_FOCUS.lr_dir, 0, "ftap: a quiet frame after a left tap resolves 0")
-
-    tapnav_poll_tap("right", "right")
-    tapnav_register()
-    tapnav_frame()
-    assert_eq(UI_FOCUS.lr_dir, 1, "ftap: a same-poll right tap resolves +1")
+    ui_nav_wired(() => {
+        tapnav_enter()
+        tapnav_tap("left")
+        assert_eq(UI_FOCUS.lr_dir, -1, "ftap: a same-poll left tap resolves -1")
+        tapnav_step()
+        assert_eq(UI_FOCUS.lr_dir, 0, "ftap: a quiet frame after a left tap resolves 0")
+        tapnav_tap("right")
+        assert_eq(UI_FOCUS.lr_dir, 1, "ftap: a same-poll right tap resolves +1")
+    })
 }
 
 @test
 fn ui_focus_held_key_fires_one_edge() {
-    tapnav_reset()
-    defer { tapnav_reset() }
-    tapnav_assert_clean()
-    let acts = tapnav_wire()
-    defer { tapnav_unwire(acts) }
-
-    let ia = ui_id("ftap", "a")
-    let ib = ui_id("ftap", "b")
-
-    tapnav_register()
-    tapnav_frame()
-
-    input_physical_key_pressed("down", "down", 0, false)
-    tapnav_register()
-    tapnav_frame()
-    assert(ui_focused(ia), "ftap: a held key enters nav mode on the first item")
-
-    tapnav_register()
-    tapnav_frame()
-    assert(ui_focused(ia), "ftap: a held key does not re-fire without a new press")
-    assert(!ui_focused(ib), "ftap: a held key does not advance focus by itself")
-
-    input_physical_key_released("down", "down")
-    tapnav_register()
-    tapnav_frame()
-    assert(ui_focused(ia), "ftap: releasing a held key leaves focus unmoved")
+    ui_nav_wired(() => {
+        let ia = ui_id("ftap", "a")
+        tapnav_step()
+        input_physical_key_pressed("down", "down", 0, false)
+        tapnav_step()
+        assert(ui_focused(ia), "ftap: a held key enters nav mode on the first item")
+        tapnav_step()
+        assert(ui_focused(ia), "ftap: a held key does not advance focus without a new press")
+        input_physical_key_released("down", "down")
+        tapnav_step()
+        assert(ui_focused(ia), "ftap: releasing a held key leaves focus unmoved")
+    })
 }
 
 @test
 fn ui_focus_sim_midframe_injection_still_lands() {
-    tapnav_reset()
-    defer { tapnav_reset() }
-    tapnav_assert_clean()
-    let acts = tapnav_wire()
-    defer { tapnav_unwire(acts) }
-    SIM_INPUT_SYNTHETIC_ONLY = true
-
-    let ia = ui_id("ftap", "a")
-    let ib = ui_id("ftap", "b")
-
-    tapnav_register()
-    tapnav_frame()
-
-    on_key_pressed_with_identity("down", "down", 0, false)
-    tapnav_register()
-    tapnav_frame()
-    assert(ui_focused(ia), "ftap: a mid-frame injected press enters nav mode")
-
-    on_key_released_with_identity("down", "down")
-    tapnav_register()
-    tapnav_frame()
-    assert(ui_focused(ia), "ftap: releasing an injected key leaves focus unmoved")
-    assert(!ui_focused(ib), "ftap: an injected press moves at most once")
+    ui_nav_wired(() => {
+        let ia = ui_id("ftap", "a")
+        SIM_INPUT_SYNTHETIC_ONLY = true
+        tapnav_step()
+        on_key_pressed_with_identity("down", "down", 0, false)
+        tapnav_step()
+        assert(ui_focused(ia), "ftap: a mid-frame injected press enters nav mode")
+        on_key_released_with_identity("down", "down")
+        tapnav_step()
+        assert(ui_focused(ia), "ftap: releasing an injected key leaves focus unmoved")
+        assert(!ui_focused(ui_id("ftap", "b")), "ftap: an injected press moves at most once")
+    })
 }

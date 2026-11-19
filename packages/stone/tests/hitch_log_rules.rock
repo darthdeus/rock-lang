@@ -1,18 +1,19 @@
 @test
 fn hitch_present_misses_log_only_when_loud() {
     let saved = HITCH
+    defer { HITCH = saved }
     HITCH = hitch_ledger_new()
     HITCH.loud_ms = 50.0
     assert(!hitch_logs_frame("present", 30.0), "a short present wait is counted, not printed")
     assert(hitch_logs_frame("present", 50.0), "a loud present wait prints")
     assert(hitch_logs_frame("render", 25.1), "a game-explained hitch prints at the threshold")
     assert(hitch_logs_frame("gc", 26.0), "every non-present cause prints")
-    HITCH = saved
 }
 
 @test
 fn hitch_window_tally_resets_once_per_window() {
     let saved = HITCH
+    defer { HITCH = saved }
     HITCH = hitch_ledger_new()
     HITCH.window_secs = 60.0
     hitch_window_tick(100.0)
@@ -22,7 +23,6 @@ fn hitch_window_tally_resets_once_per_window() {
     hitch_window_tick(160.0)
     assert_eq(HITCH.win_hitches, 0, "an elapsed window reads and resets the tally")
     assert_eq(hitch_count_for("present"), 1, "lifetime counts are untouched")
-    HITCH = saved
 }
 
 @test

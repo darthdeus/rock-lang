@@ -74,17 +74,11 @@ fn profiler_overflow_unwind(names: [string]) {
     assert_eq(PROF_LAST.dropped, 0)
 }
 
-fn profiler_overflow_same_name() {
-    profiler_overflow_fixture(() => { profiler_overflow_unwind(["overflow.parent"]) })
-}
-
 fn profiler_overflow_nested() {
-    profiler_overflow_fixture(() => {
-        profiler_overflow_unwind(["overflow.parent", "overflow.parent", "overflow.parent"])
-    })
-    profiler_overflow_fixture(() => {
-        profiler_overflow_unwind(["overflow.parent", "overflow.child", "overflow.parent"])
-    })
+    for names in [["overflow.parent"], ["overflow.parent", "overflow.parent", "overflow.parent"],
+        ["overflow.parent", "overflow.child", "overflow.parent"]] {
+        profiler_overflow_fixture(() => { profiler_overflow_unwind(names) })
+    }
 }
 
 fn profiler_overflow_cleanup() {
@@ -108,23 +102,19 @@ fn profiler_overflow_cleanup() {
     assert_eq(PROF_OPEN_TOP, 0, "the fixture clears the open stack")
     assert_eq(PROF_DROPPED_TOP, 0, "the fixture clears the dropped scopes")
     assert_eq(PROFILER.current_depth, 0, "the fixture clears the depth")
-    profiler_overflow_same_name()
+    profiler_overflow_fixture(() => { profiler_overflow_unwind(["overflow.parent"]) })
 }
 
 @nomangle fn profiler_overflow_case(which: int) {
-    if which == 0 { profiler_overflow_same_name() }
     if which == 1 { profiler_overflow_nested() }
     if which == 2 { profiler_overflow_cleanup() }
 }
 
 @test
-fn profiler_overflow_dropped_same_name_end_keeps_recorded_parent_open() {
-    profiler_test_process("profiler_overflow_case", 0)
-}
-@test
 fn profiler_overflow_dropped_nesting_levels_unwind_without_closing_parent() {
     profiler_test_process("profiler_overflow_case", 1)
 }
+
 @test
 fn profiler_overflow_fixture_cleans_up_after_failure() {
     profiler_test_process("profiler_overflow_case", 2)

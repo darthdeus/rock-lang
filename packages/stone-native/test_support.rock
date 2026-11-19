@@ -23,11 +23,6 @@ pub inline(lua) fn world_fixture_log_capture() = """
 """
 
 pub inline(lua) fn world_fixture_log_count() -> int = "return #_G.__world_fixture_logs"
-pub inline(lua) fn world_fixture_throttled_log_count() -> int = """
-    local count = 0
-    for _, n in pairs(__rock_log_counts or {}) do count = count + n end
-    return count
-"""
 pub inline(lua) fn world_fixture_log_text() -> string = "return table.concat(_G.__world_fixture_logs, \"\\n\")"
 pub inline(lua) fn world_fixture_log_restore() = """
     _G.__rock_log_sink = _G.__world_fixture_previous_sink

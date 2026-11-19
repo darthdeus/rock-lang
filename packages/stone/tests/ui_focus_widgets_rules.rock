@@ -13,7 +13,6 @@ struct FocusWidgetsSaved {
 fn focus_widgets_with(body: fn(Entity<UiSkin>) -> ()) {
     setup_stone()
     assert(stone_gpu_host_ensure(), "the widget fixture has a native view surface")
-    tapnav_reset()
     let saved = FocusWidgetsSaved {
         pointer: sim_mouse_override,
         clock: time,
@@ -33,7 +32,6 @@ fn focus_widgets_with(body: fn(Entity<UiSkin>) -> ()) {
         skin.remove()
         WHITE_PIXEL = saved.white
         release_owned_image(white)
-        tapnav_reset()
         sim_mouse_override = saved.pointer
         time = saved.clock
         ACTION_REPEAT_DELAY = saved.repeat_delay
@@ -43,20 +41,19 @@ fn focus_widgets_with(body: fn(Entity<UiSkin>) -> ()) {
         UI_SLIDER_DRAG = saved.slider_drag
         UI_FEEL = saved.feel
     }
-    tapnav_assert_clean()
-    let acts = tapnav_wire()
-    defer { tapnav_unwire(acts) }
-    SIM_INPUT_SYNTHETIC_ONLY = true
-    IMGUI_MOUSE_CAPTURE_OVERRIDE = false
-    UI_RENDER_BATCHES = render_batch_pool_new()
-    UI_SLIDER_DRAG = null
-    UI_FEEL = UiFeelState { base: UiFeel {}, named: map_new() }
-    time = 100.0
-    body(skin)
+    ui_nav_wired(() => {
+        SIM_INPUT_SYNTHETIC_ONLY = true
+        IMGUI_MOUSE_CAPTURE_OVERRIDE = false
+        UI_RENDER_BATCHES = render_batch_pool_new()
+        UI_SLIDER_DRAG = null
+        UI_FEEL = UiFeelState { base: UiFeel {}, named: map_new() }
+        time = 100.0
+        body(skin)
+    })
 }
 
 fn focus_widgets_frame() {
-    tapnav_frame()
+    ui_nav_frame()
     time += 1.0 / 60.0
 }
 
@@ -291,10 +288,7 @@ fn ui_focus_nav_moves_wraps_repeats_and_hands_focus_back_to_the_pointer() {
         let ib = ui_id("fsim", "b")
         let ic = ui_id("fsim", "c")
         let attack = action_new("fsim_attack", [key_bind("f")])
-        defer {
-            action_remove(attack)
-            bindings_forget_raw_entry("fsim_attack")
-        }
+        defer { test_action_drop(attack) }
         focus_widgets_point(v(900.0, 900.0))
         focus_widgets_nav_register()
         assert(!ui_focused(ia) && !ui_wants_input(), "pointer mode focuses nothing and captures nothing")
