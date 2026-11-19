@@ -1,6 +1,3 @@
-//! The Phase 6 raw-input census must inspect typechecked HIR call sites, not a
-//! markdown or source-text inventory.
-
 use crate::support;
 use bone_lints::{Finding, LintOptions, RAW_INPUT_MIGRATION};
 

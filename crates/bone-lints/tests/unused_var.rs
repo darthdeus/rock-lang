@@ -1,8 +1,5 @@
-//! unused-var lint over bone HIR, run through `lint_workspace`.
-
 use crate::support::{lint_only, quoted};
 
-/// The unused names `lint_workspace` reports, after `// rock: allow` suppression.
 fn names(src: &str) -> Vec<String> {
     let mut ns: Vec<String> = lint_only(&[("<unused_var>", src)], bone_lints::UNUSED_VAR)
         .iter()
@@ -20,7 +17,6 @@ fn unread_bindings_are_flagged() {
             "fn f() -> int {\n    let x = 5\n    3\n}",
             "x",
         ),
-        // `y` is assigned but never read as a value -> still unused.
         (
             "write_only_local_is_flagged",
             "fn f() -> int {\n    let y = 5\n    y = 6\n    3\n}",
@@ -36,7 +32,6 @@ fn unread_bindings_are_flagged() {
             "fn f() -> int {\n    let (a, b) = (1, 2)\n    a\n}",
             "b",
         ),
-        // b is never read
         (
             "unused_param_is_flagged",
             "fn f(a: int, b: int) -> int { a }",
@@ -47,7 +42,6 @@ fn unread_bindings_are_flagged() {
             "deco init tagged(value: int) {}",
             "value",
         ),
-        // `n` binds the `Some` payload but is never read -> unused.
         (
             "unused_match_payload_bind_is_flagged",
             "enum Opt {\n    Some(int),\n    None,\n}\n\
@@ -55,7 +49,6 @@ fn unread_bindings_are_flagged() {
                match o {\n        Some(n) => 5,\n        None => 0,\n    }\n}",
             "n",
         ),
-        // if-let bind never read
         (
             "unused_if_let_bind_is_flagged",
             "fn f(o: int?) -> int {\n    if let x = o {\n        7\n    } else {\n        0\n    }\n}",
@@ -71,11 +64,8 @@ fn unread_bindings_are_flagged() {
 fn used_or_exempt_bindings_are_not_flagged() {
     let cases: &[&str] = &[
         "enum Opt { Some { value: int } }\nfn f() -> Opt { let n = 1; Opt::Some { value: n } }",
-        // x is read, must not be flagged
         "fn f() -> int {\n    let x = 5\n    x\n}",
-        // `_x` opts out of the warning
         "fn f() -> int {\n    let _x = 5\n    3\n}",
-        // `x += 1` reads x, so x is used.
         "fn f() -> int {\n    let x = 0\n    x += 1\n    3\n}",
         // artifact-definition metadata consumes `key`
         r#"
@@ -87,20 +77,14 @@ deco init widget(key: string) {}
 @lifecycle(phase="update", owner="process", stage_param="stage")
 deco init update(stage: int = 100) {}
 "#,
-        // a is read
         "fn f(a: int) -> int { a }",
-        // `_a` opts out
         "fn f(_a: int, b: int) -> int { b }",
-        // The Lua body uses a/b invisibly (no HIR body -> root is None). Flagging
-        // these would false-positive on every FFI/inline(lua) shim.
+        // Inline and extern parameters are used by the target code.
         "inline(lua) fn add(a: int, b: int) -> int = \"\"\"return a + b\"\"\"",
-        // extern params are consumed by C
         "extern(lua) fn c_add(a: int, b: int) -> int",
-        // `a` is a lambda param (Param-kind but outside the fn's param_bindings).
-        // Only the enclosing fn's OWN params are candidates.
+        // Only the enclosing function's own parameters are candidates.
         "fn f() -> int {\n    let g = (a: int) => 1\n    g(5)\n}",
-        // bone lowers the bare `None` arm to a Let binding; it must NOT be
-        // reported as an unused variable.
+        // The bare `None` arm lowers to a Let binding.
         "enum Opt {\n    Some(int),\n    None,\n}\n\
                fn f(o: Opt) -> int {\n    \
                match o {\n        Some(n) => n,\n        None => 0,\n    }\n}",
