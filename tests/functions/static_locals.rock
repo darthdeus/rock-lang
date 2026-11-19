@@ -1,5 +1,6 @@
 // `static` local behavior: private per-declaration storage that persists across
-// calls, initialized on first reach.
+// calls, initialized on first reach; an initializer may read a global (once)
+// and bind its own locals and lambdas.
 
 // --- One cell across calls ---
 
@@ -126,4 +127,33 @@ fn test_sibling_block_statics_distinct() {
     let r1 = sibling_blocks()
     let r2 = sibling_blocks()
     print("{r1} {r2}")
+}
+
+global capture_seed: int = 10
+
+fn snapshot_global() -> int {
+    static n = capture_seed
+    return n
+}
+
+@test(output = "10 10")
+fn static_initializer_can_read_global_once() {
+    capture_seed = 10
+    let first = snapshot_global()
+    capture_seed = 20
+    print("{first} {snapshot_global()}")
+}
+
+fn initializer_local() -> int {
+    static n = {
+        let base = 7
+        let add = x => x + base
+        add(1)
+    }
+    return n
+}
+
+@test(output = "8 8")
+fn static_initializer_can_bind_its_own_locals() {
+    print("{initializer_local()} {initializer_local()}")
 }

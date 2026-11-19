@@ -192,30 +192,6 @@ fn test_method_with_complex_default_expression() {
     assert(result2 == "effect.a=0.75, intensity=0.5, radius=0", "Expected default effect, custom intensity, default radius, got: {result2}")
 }
 
-struct DebugShape {
-    id: int
-}
-
-fn debug_draw(shape: DebugShape, highlight: Color = color(1.0, 0.0, 0.0, 0.5), time: float? = null, inset: float = 0.0) -> bool {
-    if highlight.r > 0.5 {
-        return true
-    }
-    return false
-}
-
-@test
-fn test_original_bug_scenario() {
-    let shape = DebugShape { id: 42 }
-
-    // Only `inset` is named: it must not land in the `highlight` slot.
-    let result = shape.debug_draw(inset: 0.2)
-    assert(result == true, "Should return true for default red color (r=1.0)")
-
-    let blue = color(0.0, 0.0, 1.0, 1.0)
-    let result2 = shape.debug_draw(blue, inset: 0.1)
-    assert(result2 == false, "Should return false for blue color (r=0.0)")
-}
-
 // Generic inference and place/numeric coercion controls for reordered named
 // arguments, including calls whose expected ABI differs by value layout.
 

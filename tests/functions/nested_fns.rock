@@ -5,7 +5,8 @@
 // Current restrictions: no capture of enclosing params/locals,
 // decl-before-use (self-recursion ok, no forward/mutual
 // recursion), no generics, no annotations. A nested fn body MAY call in-scope
-// sibling nested fns and read/write in-scope `static`s + module globals.
+// sibling nested fns, read/write in-scope `static`s + module globals, and take
+// enclosing values as ordinary arguments.
 
 // --- Basic call by name ---
 
@@ -140,4 +141,27 @@ fn generic_with_nested<T>(tag: T, n: int) -> int {
 @test(output = "30 40")
 fn test_generic_nested_fn_lambda() {
     print("{generic_with_nested(1.5, 3)} {generic_with_nested(\"a\", 4)}")
+}
+
+fn explicit_threshold(threshold: int) -> int {
+    fn keep(x: int, limit: int) -> bool { x > limit }
+    return if keep(5, threshold) { 1 } else { 0 }
+}
+
+@test(output = "1 0")
+fn nested_function_can_receive_enclosing_value_as_argument() {
+    print("{explicit_threshold(3)} {explicit_threshold(7)}")
+}
+
+global helper_offset: int = 4
+
+fn sibling_call() -> int {
+    fn earlier(x: int) -> int { x + helper_offset }
+    fn later(x: int) -> int { earlier(x) * 2 }
+    return later(3)
+}
+
+@test(output = "14")
+fn nested_function_can_call_prior_sibling_and_read_global() {
+    print(sibling_call())
 }

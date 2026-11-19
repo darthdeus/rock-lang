@@ -1,0 +1,219 @@
+// Calls: overloads chosen by arity under named and positional args, generic
+// recursion, per-overload static cells, every fn-type spelling, missing
+// trailing arguments and return values reading as null, and a call through a
+// receiver preferring a function-typed field over a same-named UFCS fn.
+
+fn foo(a: int) -> string {
+    return "one"
+}
+
+fn foo(a: int, b: int) -> string {
+    return "two"
+}
+
+@test(output = "one\ntwo\ntwo\ntwo\ntwo")
+fn overload_resolution_with_named_and_positional() {
+    print(foo(1))
+    print(foo(1, 2))
+    print(foo(a: 3, b: 4))
+    print(foo(b: 5, a: 6))
+    print(foo(7, b: 8))
+}
+
+fn countdown<T>(x: T, n: int) -> int {
+    if n <= 0 { return 0 }
+    return 1 + countdown(x, n - 1)
+}
+
+@test
+fn same_instance_recursion_runs() {
+    assert_eq(countdown(1, 5), 5)
+    assert_eq(countdown("s", 3), 3)
+}
+
+fn count(value: int) -> int {
+    static n = 0
+    n = n + 1
+    return n
+}
+
+fn count(value: string) -> int {
+    static n = 0
+    n = n + 1
+    return n
+}
+
+@test
+fn overload_statics_keep_separate_cells() {
+    assert_eq(count(41), 1)
+    assert_eq(count("hello"), 1)
+    assert_eq(count(41), 2)
+    assert_eq(count("hello"), 2)
+}
+
+fn void_fn() {
+    print("void")
+}
+
+fn string_fn() -> string {
+    "hello"
+}
+
+fn identity(s: string) -> string {
+    s
+}
+
+// fn() shorthand (defaults to fn() -> ())
+fn call_fn_shorthand(f: fn()) {
+    f()
+}
+
+fn call_fn_explicit_void(f: fn() -> ()) {
+    f()
+}
+
+fn call_paren_void(f: () -> ()) {
+    f()
+}
+
+fn call_fn_with_return(f: fn() -> string) -> string {
+    f()
+}
+
+fn call_paren_with_return(f: () -> string) -> string {
+    f()
+}
+
+fn call_fn_with_params(f: fn(string) -> string) -> string {
+    f("test")
+}
+
+fn call_paren_with_params(f: (string) -> string) -> string {
+    f("test")
+}
+
+// T -> U bare syntax (no parentheses around a single parameter)
+fn call_bare_syntax(f: string -> string) -> string {
+    f("test")
+}
+
+@test(output = "void\nvoid\nvoid")
+fn test_void_fn_type_syntaxes() {
+    call_fn_shorthand(void_fn)
+    call_fn_explicit_void(void_fn)
+    call_paren_void(void_fn)
+}
+
+@test(output = "hello\nhello")
+fn test_return_fn_type_syntaxes() {
+    print(call_fn_with_return(string_fn))
+    print(call_paren_with_return(string_fn))
+}
+
+@test(output = "test\ntest\ntest")
+fn test_param_fn_type_syntaxes() {
+    print(call_fn_with_params(identity))
+    print(call_paren_with_params(identity))
+    print(call_bare_syntax(identity))
+}
+
+// A function-typed field on the receiver wins over a same-named UFCS function.
+// A UFCS candidate whose self type does not match the receiver is rejected
+// rather than being called with the wrong value.
+struct SentinelOther {
+    n: int,
+}
+
+// Records whether the unrelated UFCS function ran.
+global SENTINEL_UFCS_HIT: bool = false
+
+fn sentinel_lit(self: SentinelOther) -> bool {
+    SENTINEL_UFCS_HIT = true
+    return true
+}
+
+struct SentinelHolder {
+    sentinel_lit: () -> bool,
+}
+
+fn sentinel_says_false() -> bool {
+    return false
+}
+
+@test
+fn a_fn_field_wins_over_a_same_named_ufcs_free_fn() {
+    SENTINEL_UFCS_HIT = false
+    let h = SentinelHolder { sentinel_lit: sentinel_says_false }
+
+    // The field returns false. The free fn returns true and sets the flag.
+    let got = h.sentinel_lit()
+
+    assert(!got, "h.sentinel_lit() must call the function-typed field")
+    assert(!SENTINEL_UFCS_HIT, "a mismatched UFCS function must not run")
+}
+
+// The control: with no same-named free function in scope, a closure field is
+// called correctly. Without this, the sentinel above could be pinning "closure
+// fields never work" rather than "UFCS shadows them".
+@test
+fn a_closure_field_with_no_shadow_is_called_normally() {
+    let h = SentinelHolder { sentinel_lit: sentinel_says_false }
+    let direct = h.sentinel_lit
+    assert(!direct(), "reading the field and calling it uses the field")
+}
+
+value Pair { a: int, b: int }
+
+fn count_present(a: int?, b: int?, c: string?) -> int {
+    let n = 0
+    if a != null { n += 1 }
+    if b != null { n += 1 }
+    if c != null { n += 1 }
+    return n
+}
+
+fn pick(x: int) -> Pair? {
+    if x > 3 {
+        return null
+    }
+    return Pair { a: x, b: x * 2 }
+}
+
+fn pick_pair_and_label(x: int) -> (Pair?, string?) {
+    if x > 3 {
+        return (null, null)
+    }
+    return (Pair { a: x, b: x }, "small")
+}
+
+struct Counter { hits: int = 0 }
+
+fn bump(c: Counter, by: int?, label: string?) -> int {
+    c.hits += by ?? 1
+    if label != null { c.hits += 100 }
+    return c.hits
+}
+
+@test
+fn trailing_null_arguments_read_as_null() {
+    assert_eq(count_present(1, null, null), 1)
+    assert_eq(count_present(null, null, null), 0)
+    assert_eq(count_present(1, 2, null), 2)
+    assert_eq(count_present(1, 2, "x"), 3)
+    let c = Counter {}
+    assert_eq(bump(c, null, null), 1)
+    assert_eq(bump(c, 5, null), 6)
+}
+
+@test
+fn absent_optional_value_returns_read_as_null() {
+    assert_null(pick(9))
+    let p = pick(2) ?? Pair { a: 0, b: 0 }
+    assert_eq(p.b, 4)
+    let (q, label) = pick_pair_and_label(9)
+    assert_null(q)
+    assert_null(label)
+    let (r, label2) = pick_pair_and_label(1)
+    assert_eq((r ?? Pair { a: 0, b: 0 }).a, 1)
+    assert_eq(label2 ?? "", "small")
+}

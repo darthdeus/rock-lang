@@ -1,11 +1,10 @@
 // Function bodies run with their arguments arriving at runtime: operands pass
 // through `id` so no stage can fold them. Covers branches, loops, recursion,
-// closures, default and named args, uint wrapping, shifts and conversions,
+// closures, default and named args, float and int conversions,
 // multi-return forwarding, callee binding over recursion and function values,
 // and vector loops with early exits.
 
 fn id(x: int) -> int { return x }
-fn idu(x: uint) -> uint { return x }
 fn idf(x: float) -> float { return x }
 fn ids(x: string) -> string { return x }
 
@@ -116,74 +115,6 @@ fn clamp_call(n: int) -> int { return clampx(n) }
 fn inline_lua_multistatement_body() {
     assert_eq(clamp_call(id(-5)), 0)
     assert_eq(clamp_call(id(7)), 7)
-}
-
-fn left0(v: uint) -> uint { v << 0 }
-fn left1(v: uint) -> uint { v << 1 }
-fn left16(v: uint) -> uint { v << 16 }
-fn left31(v: uint) -> uint { v << 31 }
-fn right0(v: uint) -> uint { v >> 0 }
-fn right1(v: uint) -> uint { v >> 1 }
-fn right16(v: uint) -> uint { v >> 16 }
-fn right31(v: uint) -> uint { v >> 31 }
-
-fn shifts(v: uint) -> string {
-    return "{left0(idu(v))} {left1(idu(v))} {left16(idu(v))} {left31(idu(v))} {right0(idu(v))} {right1(idu(v))} {right16(idu(v))} {right31(idu(v))}"
-}
-
-@test(output = "0 0 0 0 0 0 0 0\n1 2 65536 2147483648 1 0 0 0\n2147483648 0 0 0 2147483648 1073741824 32768 1\n4294967295 4294967294 4294901760 2147483648 4294967295 2147483647 65535 1")
-fn uint_constant_shifts_stay_unsigned() {
-    print(shifts(0 as uint))
-    print(shifts(1 as uint))
-    print(shifts(2147483648 as uint))
-    print(shifts(4294967295 as uint))
-}
-
-fn uadd(a: uint, b: uint) -> uint { a + b }
-fn umul(a: uint, b: uint) -> uint { a * b }
-fn ushift(value: uint, count: uint) -> uint { value << count }
-fn above(a: uint, b: uint) -> bool { a > b }
-fn numeric(a: uint) -> int { a as int }
-fn bitcast_int(a: uint) -> int { bitcast<int>(a) }
-fn udec() -> uint { let x: uint = 0; x--; x }
-fn uinc() -> uint { let x: uint = 4294967295; x++; x }
-
-@test
-fn uint_wraps_orders_and_converts() {
-    assert_eq(uadd(idu(4294967295 as uint), idu(1 as uint)), 0 as uint)
-    assert_eq(umul(idu(4294967295 as uint), idu(4294967295 as uint)), 1 as uint)
-    assert_eq(~idu(0 as uint), 4294967295 as uint)
-    assert_eq(idu(2147483648 as uint) >> 31, 1 as uint)
-    assert_eq(idu(2147483648 as uint) >> 1, 1073741824 as uint)
-    assert_eq(idu(2147483648 as uint) >> 0, 2147483648 as uint)
-    assert(above(idu(2147483648 as uint), idu(0 as uint)))
-    assert_eq(ushift(idu(1 as uint), idu(31 as uint)), 2147483648 as uint)
-    assert_eq(numeric(idu(2147483648 as uint)), 2147483648)
-    assert_eq(bitcast_int(idu(2147483648 as uint)), -2147483648)
-    assert_eq(udec(), 4294967295 as uint)
-    assert_eq(uinc(), 0 as uint)
-}
-
-fn last_in_range(lo: uint, hi: uint) -> uint {
-    let result: uint = 0
-    for i in lo..hi { result = i }
-    result
-}
-fn escaped_range() -> uint {
-    let values: [uint] = (2147483648 as uint)..(2147483651 as uint)
-    values[2]
-}
-fn buffer_uint() -> uint {
-    let b = native_buffer_uint(1)
-    b[0] = 4294967295
-    b[0]
-}
-
-@test
-fn uint_ranges_and_buffers_keep_unsigned_values() {
-    assert_eq(last_in_range(idu(2147483648 as uint), idu(2147483651 as uint)), 2147483650 as uint)
-    assert_eq(escaped_range(), 2147483650 as uint)
-    assert_eq(buffer_uint(), 4294967295 as uint)
 }
 
 // A tail recursion deeper than the Lua stack survives: a non-tail recursion

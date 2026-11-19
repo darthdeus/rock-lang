@@ -1,7 +1,8 @@
 // Global and const initializers: typed scalar globals, a global computed from
 // another global, and lambdas stored in a struct field, directly in a global,
 // in array literals, capturing an initializer local, and with a nested lambda
-// in the body. Rejected initializers are in
+// in the body, a global mutated through calls inside one interpolation, and
+// a nobox global stored as its leaves. Rejected initializers are in
 // tests/errors/assignment.rock.err.
 
 global good_global: int = 42
@@ -68,4 +69,28 @@ fn test_global_lambda_reads_current_global() {
 @test(output = "7 9")
 fn test_global_lambda_capture_and_nested_lambda() {
     print("{OFFSET_BY(4)} {TWICE_PLUS_ONE(4)}")
+}
+
+global COUNTER: int = 0
+
+fn bump() -> int {
+    COUNTER = COUNTER + 1
+    return COUNTER
+}
+
+// Mutate a global through a call chain and read it back between calls.
+@test(output = "1 2 3")
+fn counter_output() {
+    COUNTER = 0
+    print("{bump()} {bump()} {bump()}")
+}
+
+// A `nobox` global is stored as its leaves; its initializer assigns each one.
+nobox value NP { x: int, y: int }
+
+global ORIGIN: NP = NP { x: 3, y: 4 }
+
+@test(returns = 34)
+fn nobox_global_initializes_its_leaves() -> int {
+    return ORIGIN.x * 10 + ORIGIN.y
 }
