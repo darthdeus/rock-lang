@@ -400,12 +400,7 @@ mod resolve_tests {
         // Unique key: the global registry is shared across tests.
         let key = format!("world/floor_{}.png", UNIQ.fetch_add(1, Ordering::SeqCst));
         let embedded = b"EMBEDDED".to_vec();
-        {
-            let mut guard = REGISTRY.lock().unwrap();
-            guard
-                .get_or_insert_with(AssetRegistry::default)
-                .insert(key.clone(), embedded.clone());
-        }
+        let _asset = register_guarded_asset(key.clone(), embedded.clone());
         assert_eq!(resolve_with_root(Some(&root), &key), Some(embedded));
         let modded = root.join(&key);
         std::fs::create_dir_all(modded.parent().unwrap()).unwrap();

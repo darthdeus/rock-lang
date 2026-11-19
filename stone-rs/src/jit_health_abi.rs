@@ -270,19 +270,16 @@ mod tests {
     }
     #[test]
     fn frame_deltas_pad_missing_reasons_and_keep_sign() {
-        let (prev, mut cur) = pair(|_| {});
-        cur.aborts[41] = 2;
-        cur.live_traces = 3;
-        let mut prev2 = cur;
-        let mut cur2 = cur;
-        cur2.aborts[41] = 5;
-        cur2.live_traces = 1;
-        cur2.arena_occupied_bytes = 100;
-        prev2.arena_occupied_bytes = 250;
-        prev2.code_current_free_bytes = 900;
-        cur2.code_current_free_bytes = 300;
-        let _ = prev;
-        let d = frame_deltas(&prev2, &cur2);
+        let (mut prev, mut cur) = pair(|_| {});
+        prev.aborts[41] = 2;
+        prev.live_traces = 3;
+        prev.arena_occupied_bytes = 250;
+        prev.code_current_free_bytes = 900;
+        cur.aborts[41] = 5;
+        cur.live_traces = 1;
+        cur.arena_occupied_bytes = 100;
+        cur.code_current_free_bytes = 300;
+        let d = frame_deltas(&prev, &cur);
         assert_eq!(&d[4..11], &[3.0, 41.0, 3.0, -1.0, 0.0, -1.0, 0.0]);
         assert_eq!(&d[13..16], &[-2.0, -150.0, -600.0]);
     }
@@ -298,13 +295,15 @@ mod tests {
         assert_eq!(&d[5..11], &[-1.0, 0.0, -1.0, 0.0, -1.0, 0.0]);
     }
     #[test]
-    fn capability_absent_reports_unavailable() {
+    fn unusable_capability_reports_unavailable() {
         unsafe {
             let state = std::ptr::dangling_mut::<u8>().cast();
             assert!(read_snapshot(None, state).is_none());
             assert!(read_snapshot(Some(unsupported), state).is_none());
             assert!(read_snapshot(Some(rejected), state).is_none());
             assert!(read_snapshot(Some(present), std::ptr::null_mut()).is_none());
+            assert!(read_snapshot(Some(wrong_version), state).is_none());
+            assert!(read_snapshot(Some(wrong_size), state).is_none());
         }
     }
     #[test]
@@ -314,15 +313,6 @@ mod tests {
             assert_eq!((s.root_starts, s.side_compiles, s.aborts[34]), (11, 7, 9));
         }
     }
-    #[test]
-    fn incompatible_schema_reports_unavailable() {
-        unsafe {
-            let state = std::ptr::dangling_mut::<u8>().cast();
-            assert!(read_snapshot(Some(wrong_version), state).is_none());
-            assert!(read_snapshot(Some(wrong_size), state).is_none());
-        }
-    }
-
     unsafe extern "C" fn coalescing_present(
         state: *mut c_void,
         version: u32,
