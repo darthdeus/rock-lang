@@ -1,9 +1,9 @@
-// NativeBuffer<T> wraps a contiguous LuaJIT ffi buffer (`ffi.new("T[?]", n)`)
-// with a phantom type parameter so get/set dispatch to the right primitive.
+// Scalar NativeBuffer<T>: a contiguous LuaJIT ffi buffer whose `buf[i]`
+// desugars to 0-based `buf.ptr[i]`. Construction, indexing, iteration (also
+// inside a `co fn`), bounds checks and their elision, and typed `ptr` fields.
 
-// Simulates a C function that reads from a `float*` pointer. Takes the
-// raw cdata (buf.ptr) and returns a sum — exercises the FFI pass-through
-// contract: NativeBuffer<float>.ptr acts as `float*` to native code.
+// Stands in for a C function taking `float*`: `NativeBuffer<float>.ptr` must
+// index like one.
 @nomangle inline(lua) fn sum_float_ptr(p: any, n: int) -> float = """
     local s = 0.0
     for i = 0, n - 1 do s = s + p[i] end
@@ -38,46 +38,6 @@ fn scalar_buffer_roundtrip() {
     assert(nb_get(ints, 2) == 2026)
 }
 
-@test
-fn float_buffer_tight_loop() {
-    let n = 64
-    let buf = native_buffer_float(n)
-    let i = 0
-    while i < n {
-        nb_set(buf, i, (i * 2) as float)
-        i = i + 1
-    }
-    let sum = 0.0
-    i = 0
-    while i < n {
-        sum = sum + nb_get(buf, i)
-        i = i + 1
-    }
-    // sum of 0,2,4,...,126 = 2 * (0+1+...+63) = 2 * 63*64/2 = 4032
-    assert(sum == 4032.0)
-}
-
-@test
-fn zero_length_buffer() {
-    // LuaJIT accepts ffi.new("float[?]", 0) and returns a valid but unusable
-    // pointer. We should not crash on construction.
-    let buf = native_buffer_float(0)
-    assert(buf.len == 0)
-}
-
-@test
-fn large_buffer() {
-    // 1M floats = 4 MB; well within reasonable test memory.
-    let n = 1000 * 1000
-    let buf = native_buffer_float(n)
-    assert(buf.len == n)
-    // Write two sentinels far apart; read back.
-    nb_set(buf, 0, -1.5)
-    nb_set(buf, n - 1, 2.75)
-    assert(nb_get(buf, 0) == -1.5)
-    assert(nb_get(buf, n - 1) == 2.75)
-}
-
 @test(backends = "lua")
 fn ffi_pass_through() {
     // The .ptr field must be usable as a raw C pointer by FFI-declared
@@ -108,4 +68,292 @@ fn struct_field_interop() {
     assert(nb_get(batch.indices, 5) == 42)
     assert(batch.positions.len == 4)
     assert(batch.indices.len == 6)
+}
+
+@test
+fn index_reads_and_writes() {
+    let buf = native_buffer_float(3)
+    nb_set(buf, 0, 1.5)
+    nb_set(buf, 2, 3.5)
+    assert(buf[0] == 1.5)
+    assert(buf[2] == 3.5)
+    buf[0] = 10.5
+    buf[1] = 20.5
+    buf[2] = 30.5
+    assert(nb_get(buf, 0) == 10.5)
+    assert(nb_get(buf, 1) == 20.5)
+    assert(nb_get(buf, 2) == 30.5)
+
+    let ints = native_buffer_int(3)
+    ints[0] = 11
+    ints[2] = 33
+    assert(ints[0] == 11)
+    assert(ints[2] == 33)
+}
+
+@test
+fn round_trip_through_index() {
+    let n = 100
+    let buf = native_buffer_float(n)
+    for i in 0..n {
+        buf[i] = (i * 2) as float
+    }
+    let sum = 0.0
+    for i in 0..n {
+        sum = sum + buf[i]
+    }
+    // 2*(0+1+...+99) = 2 * 99*100/2 = 9900
+    assert(sum == 9900.0)
+}
+
+@test
+fn iterate_for_v_in_buf() {
+    let buf = native_buffer_float(5)
+    for i in 0..5 {
+        buf[i] = (i + 1) as float
+    }
+    let sum = 0.0
+    for v in buf {
+        sum = sum + v
+    }
+    assert(sum == 15.0)
+}
+
+@test
+fn iterate_enumerate_tuple() {
+    let buf = native_buffer_int(4)
+    buf[0] = 10
+    buf[1] = 20
+    buf[2] = 30
+    buf[3] = 40
+    let sum_vals = 0
+    let sum_idx = 0
+    for (i, v) in enumerate(buf) {
+        sum_idx = sum_idx + i
+        sum_vals = sum_vals + v
+    }
+    assert(sum_idx == 6)
+    assert(sum_vals == 100)
+}
+
+@test
+fn iterate_empty_buffer() {
+    let buf = native_buffer_float(0)
+    let count = 0
+    for _v in buf {
+        count = count + 1
+    }
+    assert(count == 0)
+}
+
+// Indexed reads as a let initializer and a print argument.
+@test(output = "42\n3\n9")
+fn test_buffer_indexed_read_print() {
+    let ints = native_buffer_int(4)
+    ints[0] = 42
+    let i = ints[0]
+    print(i)
+    let floats = native_buffer_float(4)
+    floats[2] = 3.0
+    print(floats[2] as int)
+    let bytes = native_buffer_u8(8)
+    bytes[3] = 9
+    let b = bytes[3]
+    print(b)
+}
+
+co fn yield_each_value(buf: NativeBuffer<int>) -> Coroutine<int> {
+    for v in buf {
+        yield v
+    }
+}
+
+@test(output = "11\n22\n33\nnull")
+fn coroutine_for_v_in_buf() {
+    let buf = native_buffer_int(3)
+    buf[0] = 11
+    buf[1] = 22
+    buf[2] = 33
+    let c = yield_each_value(buf)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r) }
+}
+
+co fn yield_with_index(buf: NativeBuffer<int>) -> Coroutine<int> {
+    for (i, v) in enumerate(buf) {
+        yield i * 100 + v
+    }
+}
+
+@test(output = "11\n122\n233\nnull")
+fn coroutine_enumerate_tuple() {
+    let buf = native_buffer_int(3)
+    buf[0] = 11
+    buf[1] = 22
+    buf[2] = 33
+    let c = yield_with_index(buf)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r) }
+}
+
+co fn yield_break_early(buf: NativeBuffer<int>) -> Coroutine<int> {
+    for v in buf {
+        if v >= 100 { break }
+        yield v
+    }
+}
+
+@test(output = "1\n5\nnull")
+fn coroutine_break_inside_for() {
+    let buf = native_buffer_int(4)
+    buf[0] = 1
+    buf[1] = 5
+    buf[2] = 200
+    buf[3] = 7
+    let c = yield_break_early(buf)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r) }
+}
+
+@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
+    local ok, err = pcall(f)
+    return not ok
+"""
+
+@test
+fn in_bounds_works() {
+    let buf = native_buffer_float(3)
+    buf[0] = 1.5
+    buf[1] = 2.5
+    buf[2] = 3.5
+    assert(buf[0] == 1.5)
+    assert(buf[1] == 2.5)
+    assert(buf[2] == 3.5)
+}
+
+@test
+fn out_of_bounds_access_errors() {
+    let buf = native_buffer_float(3)
+    buf[0] = 10.0
+    assert(try_call(() => { let _x = buf[5] }), "read past the end")
+    assert(try_call(() => { buf[10] = 99.0 }), "write past the end")
+
+    let ints = native_buffer_int(5)
+    assert(try_call(() => { let _x = ints[-1] }), "negative read")
+
+    // len-1 is valid; len is out of bounds (half-open).
+    let edge = native_buffer_int(4)
+    edge[3] = 42
+    assert(edge[3] == 42)
+    assert(try_call(() => { let _x = edge[4] }), "read at len")
+}
+
+@test(output = "0 1 2 3 6")
+fn counted_fill_and_sum() {
+    let b = native_buffer_float(4)
+    for i in 0..b.len { b[i] = i as float }
+    let t = 0.0
+    for i in 0..b.len { t += b[i] }
+    print("{b[0]} {b[1]} {b[2]} {b[3]} {t}")
+}
+
+@test(output = "true")
+fn an_index_at_the_length_still_raises() {
+    let b = native_buffer_int(3)
+    let failed = try_call(() => {
+        for i in 0..b.len + 1 { b[i] = i }
+    })
+    print("{failed}")
+}
+
+fn set_slot(b: NativeBuffer<int>, i: int, v: int) -> bool {
+    if i < 0 || i >= b.len { return false }
+    b[i] = v
+    return true
+}
+
+@test(output = "true false false 7")
+fn a_guarded_slot_write() {
+    let b = native_buffer_int(3)
+    let a = set_slot(b, 1, 7)
+    let c = set_slot(b, 3, 8)
+    let d = set_slot(b, -1, 9)
+    print("{a} {c} {d} {b[1]}")
+}
+
+@test(output = "3")
+fn a_checked_read_covers_the_write_that_follows() {
+    let b = native_buffer_int(2)
+    b[1] = 2
+    let v = b[1]
+    b[1] = v + 1
+    print(b[1])
+}
+
+fn read_after_native_write(xs: [int], indices: NativeBuffer<int>) -> int {
+    if indices[0] < 0 || indices[0] >= xs.len() { return 0 }
+    nb_set(indices, 0, 999)
+    return xs[indices[0]]
+}
+
+@test(output = "true")
+fn native_write_invalidates_an_element_used_as_an_index() {
+    let indices = native_buffer_int(1)
+    indices[0] = 0
+    let xs = [7]
+    print(try_call(() => { let result = read_after_native_write(xs, indices) }))
+}
+
+@test
+fn ptr_fields_are_typed() {
+    let f = native_buffer_float(4)
+    let pf: Ptr<float> = f.ptr
+    f[0] = 3.14
+    assert(f[0] > 3.13 && f[0] < 3.15)
+
+    let i = native_buffer_int(4)
+    let pi: Ptr<int> = i.ptr
+    i[0] = 42
+    assert(i[0] == 42)
+
+    let u8 = native_buffer_u8(4)
+    let pu8: PtrU8 = u8.ptr
+    u8[0] = 200
+    assert(u8[0] == 200)
+
+    let i8 = native_buffer_i8(4)
+    let pi8: PtrI8 = i8.ptr
+    i8[0] = -100
+    assert(i8[0] == -100)
+
+    let u16 = native_buffer_u16(4)
+    let pu16: PtrU16 = u16.ptr
+    u16[0] = 65000
+    assert(u16[0] == 65000)
+
+    let i16 = native_buffer_i16(4)
+    let pi16: PtrI16 = i16.ptr
+    i16[0] = -32000
+    assert(i16[0] == -32000)
+
+    let u32 = native_buffer_u32(4)
+    let pu32: PtrU32 = u32.ptr
+    u32[0] = 4000000000
+    assert(u32[0] == 4000000000)
+}
+
+fn len_float(p: Ptr<float>, n: int) -> int { return n }
+
+@test
+fn accepts_matching_typed_ptr() {
+    let buf = native_buffer_float(8)
+    assert(len_float(buf.ptr, buf.len) == 8)
 }

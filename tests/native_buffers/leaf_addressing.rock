@@ -1,11 +1,8 @@
 // Leaf addressing for a `NativeBuffer<T>` / `FlatVec<T>` whose `T` is an
-// FFI-clean value struct: every element access reads/writes the leaves through
-// typed views, so the element never materializes. That is what lets a `nobox`
-// field live in one -- the sink that blocked match3
-// (`make_world_text_vertex`, packages/stone/engine/rendering/text.rock).
-//
-// (no `_ct(` on the buffer path) live in crates/skull/tests/, since a value
-// assertion cannot see a surviving ctor.
+// FFI-clean value struct: every element access reads and writes the leaves
+// through typed views, so the element never materializes and a `nobox` field
+// can live in one. Covers nested, mixed-width (including f32), float64, enum
+// and generic elements.
 
 nobox value NV {
     x: float,
@@ -351,4 +348,57 @@ fn test_flat_vec_surface() {
 
     fv.clear()
     print("{fv.len}")
+}
+
+value F32V2 { x: f32, y: f32 }
+value F32Vertex { pos: F32V2, uv: F32V2, id: f32, w: f32 }
+value F32Flags { on: bool, n: int, hit: bool, v: f32 }
+value Wide { x: float, y: float }
+
+@test
+fn nested_float_leaves_round_trip_across_elements() {
+    let vertices: NativeBuffer<F32Vertex> = native_buffer_alloc(2)
+    vertices[0] = F32Vertex { pos: F32V2 { x: 1.0, y: 2.0 }, uv: F32V2 { x: 3.0, y: 4.0 }, id: 5.0, w: 6.0 }
+    vertices[1] = F32Vertex { pos: F32V2 { x: 7.0, y: 8.0 }, uv: F32V2 { x: 9.0, y: 10.0 }, id: 11.0, w: 12.0 }
+    let first = vertices[0]
+    let second = vertices[1]
+    assert_eq(first.pos.x, 1.0)
+    assert_eq(first.pos.y, 2.0)
+    assert_eq(first.uv.x, 3.0)
+    assert_eq(first.uv.y, 4.0)
+    assert_eq(first.id, 5.0)
+    assert_eq(first.w, 6.0)
+    assert_eq(second.pos.x, 7.0)
+    assert_eq(second.pos.y, 8.0)
+    assert_eq(second.uv.x, 9.0)
+    assert_eq(second.uv.y, 10.0)
+    assert_eq(second.id, 11.0)
+    assert_eq(second.w, 12.0)
+}
+
+@test
+fn mixed_width_views_keep_their_offsets_and_strides() {
+    let flags: NativeBuffer<F32Flags> = native_buffer_alloc(2)
+    flags[0] = F32Flags { on: false, n: 17, hit: true, v: 2.5 }
+    flags[1] = F32Flags { on: false, n: 29, hit: false, v: 4.5 }
+    flags[1].on = true
+    assert_eq(flags[0].on, false)
+    assert_eq(flags[0].n, 17)
+    assert_eq(flags[0].hit, true)
+    assert_eq(flags[0].v, 2.5)
+    assert_eq(flags[1].on, true)
+    assert_eq(flags[1].n, 29)
+    assert_eq(flags[1].hit, false)
+    assert_eq(flags[1].v, 4.5)
+}
+
+@test
+fn float64_views_round_trip_across_elements() {
+    let values: NativeBuffer<Wide> = native_buffer_alloc(2)
+    values[0] = Wide { x: 16777217.25, y: 1.0000000000000002 }
+    values[1] = Wide { x: 16777219.25, y: 1.0000000000000004 }
+    assert_eq(values[0].x, 16777217.25)
+    assert_eq(values[0].y, 1.0000000000000002)
+    assert_eq(values[1].x, 16777219.25)
+    assert_eq(values[1].y, 1.0000000000000004)
 }
