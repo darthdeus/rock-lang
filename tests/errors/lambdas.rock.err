@@ -48,15 +48,8 @@ fn main() {
 }
 
 //=== TEST CASE: lambda_param_monomorphic_fail_Generic ===
-// Lambda params with no annotation AND no expected-type slot (non-arg
-// position, e.g. `let f = x => ...`) get a fresh inference var rather than a
-// hard error. The var is constrained monomorphically by the body and by every
-// application site, and is left free (no error) if nothing constrains it.
-// Verified against real rock: `x => x * 2` => `fn(int) -> int`, identity applied
-// at int => `fn(int) -> int`, fully-unconstrained `x => x` is accepted, applying
-// one binding at two types is a unify error.
-// applying the same binding at two incompatible types is a unify error
-// (the param is one monomorphic var, not let-polymorphic)
+// An unannotated lambda param without an expected type is one monomorphic
+// inference var, so applying the binding at two types is a mismatch.
 //! expect: type mismatch: expected `int`, found `string`
 fn f() -> int {
     let g = x => x
@@ -112,10 +105,7 @@ fn main() {
 
 //=== TEST CASE: placeholder_in_explicit_lambda_let_init_Generic ===
 //! expect: `_` placeholder cannot appear inside an explicit lambda or block expression
-// `_` inside the Let init of an explicit lambda's block. The walker
-// historically only visited Expression+Return stmts, so the inner `_`
-// silently desugared to its own lambda and the explicit-lambda guard
-// never fired. Now `lambda_contains_placeholder` walks Let too.
+// `_` inside a `let` initializer of an explicit lambda's block.
 fn main() {
     let xs = [1, 2, 3]
     let _ys = vec_map(xs, y => { let z = _ + y; z })
@@ -144,7 +134,6 @@ struct Point {
 fn main() {
     let points = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]
 
-    // This should fail - Point doesn't match any `get` overload.
     // (Before the unified get() accessors landed this produced a
     // SymbolNotFound error; now `get` is a known symbol with several
     // overloads for Vec/Map/HashMap/NativeBuffer, none of which match

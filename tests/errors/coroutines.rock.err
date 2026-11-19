@@ -16,19 +16,9 @@ co fn outer_int() -> Coroutine<int> {
 }
 
 //=== TEST CASE: falloff_int_result ===
-// a `co fn` whose declared result R is a concrete non-unit,
-// non-nullable type must not be able to FALL OFF the end of its body:
-// bone coerces only explicit `return <expr>` statements to R (a
-// coroutine's body tail is discarded, never coerced), so a reachable
-// fall-off would stamp the completed terminal with `__return` nil --
-// and `result()`/`take_result` would hand out a nil typed as R. The
-// rejection is EMIT-time (skull-mir `lower_root`), on the bone-accepted
-// program. Unit R (the default) and nullable R (nil is a legal value)
-// stay admitted; a body whose end is unreachable (every path returns /
-// `while true`) is fine. A generic R is checked per concrete
-// instantiation: falling off at a non-unit, non-nullable R rejects,
-// including when the instantiation is reached through a generic caller
-// (tests/coroutines/generic_result_falloff.rock pins the admitted ones).
+// A `co fn` with a concrete non-unit, non-nullable result type may not fall
+// off the end of its body, which would leave a nil result typed as R. Checked
+// per instantiation for a generic R.
 //! expect: can fall off the end of its body, but its coroutine result type is not `()`
 co fn gen() -> Coroutine<int, string> {
     yield 1
@@ -145,11 +135,8 @@ fn main() {
 }
 
 //=== TEST CASE: resume_taking_coroutine_not_iterable_Rejected ===
-// a `Coroutine<Y, R, N>` with `N != ()` is NOT iterable -- the
-// stdlib `next` adapter is only defined for `N = ()`, because a
-// `for` head cannot supply the resume-arg the body's `let x = yield V`
-// expects. The mismatch rejects at the loop naturally (no `next`
-// overload fits), never a silent wrong-arity resume.
+// A coroutine with a non-unit resume type is not iterable: a `for` head
+// cannot supply the resume argument.
 //! expect: type `Coroutine<int, (), int>` is not iterable
 co fn echo() -> Coroutine<int, (), int> {
     let x = yield 1

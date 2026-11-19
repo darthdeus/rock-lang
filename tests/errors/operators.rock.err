@@ -1,7 +1,5 @@
 //=== TEST CASE: newtype_string_ordering_rejected_Generic ===
-// Ordering on a non-numeric newtype is rejected: the inner type (`string`) is
-// not orderable. (rock: "Ordering comparisons are only supported for numeric
-// types".)
+// Ordering a newtype forwards to its inner type, and `string` is not orderable.
 //! expect: ordering operators require numeric operands, got Name
 newtype Name(string)
 fn f() -> bool {
@@ -107,10 +105,7 @@ operator [](x: V, i: int) -> int { return 1 }
 fn main() {}
 
 //=== TEST CASE: plain_fn_spelling_Generic ===
-// The reserved name is reserved in EVERY spelling, not just the `operator`
-// one with a Rock body. Both of these were accepted and ignored while the
-// rejection keyed on narrower guards; each is the same swallow wearing a
-// different hat.
+// The reserved name is reserved in every spelling.
 //! expect: operator `==` is not overloadable
 value V { a: int }
 fn __op_eq(x: V, y: V) -> bool { return true }
@@ -123,10 +118,8 @@ value V { a: int }
 fn main() {}
 
 //=== TEST CASE: newtype_eq_with_int_IncompatibleNewtypeOperation ===
-// The admitted side is NOT here: a rejection suite cannot express "accepted
-// and then actually dispatched", and acceptance alone would pass even if `+`
-// were silently ignored too. `tests/operators/overloadable.rock` covers all
-// six overloadable symbols by asserting each returns its marker.
+// The overloadable symbols are covered positively in
+// tests/operators/overloadable.rock.
 //! expect: type mismatch: expected `int`, found `UserId`
 newtype UserId(int)
 

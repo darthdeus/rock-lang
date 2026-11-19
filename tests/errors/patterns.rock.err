@@ -537,7 +537,6 @@ fn f(c: Color) -> int {
 }
 
 //=== TEST CASE: or_binding_rejected_Generic ===
-// Bindings in alternatives are rejected (rock's explicit v1 limitation).
 //! expect: or-patterns cannot bind variables, use `_` for payload
 enum E { A(int), B(int) }
 fn f(e: E) -> int {
@@ -545,10 +544,7 @@ fn f(e: E) -> int {
 }
 
 //=== TEST CASE: or_mixed_literal_rejected_Generic ===
-// Mixed-type literal alternatives are rejected: a `string` literal cannot
-// coerce to the `int` scrutinee. (rock CURRENTLY accepts this -- a latent bug
-// where literal-pattern arms are not checked against the scrutinee type; bone
-// is correctly stricter. Flip only if rock's literal-pattern check is fixed.)
+// A `string` literal alternative cannot match an `int` scrutinee.
 //! expect: type mismatch: expected `int`, found `string`
 fn f(n: int) -> string {
     match n { 1 | "two" => "x", _ => "y" }
@@ -569,10 +565,8 @@ fn f(p: (int, int)) -> int {
 }
 
 //=== TEST CASE: no_condition_chain_Parse ===
+// `while let` has no `&&` chains, unlike `if let`.
 //! expect: expected OpenCurly, got And
-// `while let` has no `&&` chains (unlike `if let`), so the scrutinee parses
-// at the same precedence as an if-let clause: the `&&` is a parse error,
-// never a silently bool-typed scrutinee.
 fn main() {
     let v: int? = 1
     while let x = v && x > 0 {
@@ -581,9 +575,8 @@ fn main() {
 }
 
 //=== TEST CASE: irrefutable_non_nullable_Useless ===
+// A `while let` pattern that cannot miss is an infinite loop.
 //! expect: never runs
-// `while let` is `while true { let .. else { break } }`: a pattern that can
-// never miss over a non-nullable value is an infinite loop by construction.
 fn main() {
     while let x = 5 {
         print(x)

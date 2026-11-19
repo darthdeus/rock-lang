@@ -278,18 +278,13 @@ fn main() {
 }
 
 //=== TEST CASE: intrinsic_declared_with_wrong_arity ===
+// The one-argument fingerprint form returns `int`; a one-argument packer
+// returning unit is malformed.
 //! expect: `@uniform_expand` fn `packu` takes either three arguments
 value U { a: float }
 
-// The rejection is about the DECLARATION, not the call: a call that disagrees
-// with a well-declared intrinsic is bone's ordinary "missing required argument",
-// which would pass this file without reaching the expansion at all.
-//
-// One argument IS a legal shape -- it is the layout-fingerprint form, which is
-// how a call site says which of a program's blocks it means. What makes this
-// one malformed is the RETURN TYPE: the fingerprint form declares `-> int`, and
-// a 1-arg fn returning unit is a packer missing its two views. The shape is
-// keyed on the declared return type, the way `@vertex_expand` keys on its own.
+// The one-argument fingerprint form returns `int`; a one-argument packer
+// returning unit is malformed.
 @uniform_expand inline(lua) fn packu<T>(u: T) = """
     error("compiler-expanded")
 """

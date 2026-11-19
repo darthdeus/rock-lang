@@ -208,9 +208,7 @@ fn main() {
 
 //=== TEST CASE: return_inside_defer_body_Generic ===
 //! expect: `return` is not allowed inside a `defer`
-// A deferred block runs while the function is already returning, so a
-// `return` in it has nothing to return from (it used to overflow the
-// compiler's stack: each return spliced the same defer again).
+// A deferred block runs while the function is already returning.
 fn t() -> int {
     defer { return 1 }
     2
@@ -243,9 +241,7 @@ fn f() -> int {
 }
 
 //=== TEST CASE: bare_return_value_position_rejected_Generic ===
-// a bare `return` in VALUE position is still a unit return -- the position does
-// not change that it returns nothing where an int is declared. Must be rejected
-// (bone is intentionally stricter than rock here: rock accepts this).
+// A bare `return` in value position is still a unit return.
 //! expect: type mismatch: expected `int`, found `()`
 fn f() -> int {
     let x: int = return

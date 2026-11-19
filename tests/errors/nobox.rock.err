@@ -13,20 +13,10 @@ fn main() {
 }
 
 //=== TEST CASE: opaque_body_via_global_init_Generic ===
+// A fn with a fixed boxed ABI cannot become a `nobox` fn value, and a global
+// initializer is checked like any body; otherwise the leaves splat into a
+// callee that binds one param per field.
 //! expect: `lscore` cannot be taken as a fn value because its fixed ABI does not match the type-derived
-// a fn whose fixed ABI cannot adopt the type-derived `nobox` fn-value
-// ABI is rejected in a GLOBAL INITIALIZER, exactly as it already is at
-// a direct call site. A call through a fn value cannot see its callee,
-// so both ends agree only by reading the same signature -- at a `nobox`
-// param that means splatted leaves, which an opaque body, an `extern`
-// and a `@nomangle` fn all keep their own boxed ABI against.
-//
-// The gate ran on fn bodies and decorator bodies but not on global
-// initializers, so this route reached codegen and MISCOMPILED: the
-// leaves splat, the callee binds one param per leaf, and everything
-// shifts by one. `fn(p: P, k: float) -> float { return k }` returned
-// `p.y`. A dispatch table (`global HANDLERS: [(Vec2) -> float]`) is an
-// ordinary shape, so this was reachable from real code.
 nobox value P { x: float, y: float }
 
 inline(lua) fn lscore(p: P) -> float = """
@@ -69,19 +59,9 @@ fn main() {
 }
 
 //=== TEST CASE: nobox_bare_return_from_inline_lua ===
+// An opaque body returning a bare nobox value hands back a box where the call
+// site expects leaves. The escape is `@scalar_abi` returning the leaves.
 //! expect: nobox value `NV2` cannot cross the boxed return of `hand_boxed`
-// a BARE (non-tuple) `nobox` return from an opaque body. The callee
-// writes its own `return`, so a hand-written box is handed back where
-// the call site expects leaves -- and Lua's `.field` does not
-// distinguish a table from cdata, so it COMPILED CLEAN AND PASSED.
-// The guarantee was violated with no diagnostic at all.
-//
-// The param direction (`reject_nobox_boxed_call_args`) and the TUPLE return
-// (`reject_nobox_opaque_tuple_return`) were both already checked; a plain
-// `-> NV2` was the one uncovered position.
-//
-// The escape is `@scalar_abi` + returning the leaves, which the message names.
-// Positive control (accepted, leaves returned): `tests/nobox/opaque_return.rock`.
 nobox value NV2 { x: float, y: float }
 
 inline(lua) fn hand_boxed() -> NV2 = """
@@ -93,29 +73,10 @@ fn main() {
 }
 
 //=== TEST CASE: nobox_materialization_in_a_shader_body ===
+// A `@shader` fn body is CPU-callable Lua, so the nobox guarantee applies to
+// it. The sink is a whole tuple interpolation, which has nowhere to put the
+// value but a box.
 //! expect: nobox value `NV2` survived lowering as an implicit materialization, while emitting
-// a `@shader` fn's body is ordinary CPU-executable Lua -- the authoring
-// contract promises shader fns "compile
-// to Lua as normal fns, so shader helper math is CPU-callable and
-// `@test`-able", and nothing rejects a CPU call to one. So the `nobox`
-// guarantee applies to it like any other body: an implicit
-// materialization inside a `@shader` fn must reject.
-//
-// The materialization below is unrelated to any GPU intrinsic: a box is
-// authorized only AT a `@gpu_only` call boundary, never anywhere inside a body
-// that happens to be annotated.
-//
-// The sink has to be a shape with nowhere to put the value but a box. A bare
-// nobox global stores LEAVES and a value-struct outer stores flat leaf keys, so
-// either would pass here for the wrong reason.
-//
-// Interpolating a WHOLE tuple that carries one is the sink, and it is chosen
-// because it is PERMANENT: asking for a single runtime-typed value is F1
-// erasure, a justified box that is meant to stay a rejection
-// (`tests/errors/nobox.rock.err`). A tuple element in a COLLECTION used to
-// stand here and was the wrong choice -- that was an open gap, it closed, and
-// this case went green while the shader rule it guards was untouched. Do not
-// re-point this at a sink the matrix lists as live.
 nobox value NV2 { x: float, y: float }
 
 @shader(fragment)
@@ -130,13 +91,9 @@ fn main() {
 }
 
 //=== TEST CASE: whole_tuple_escape_of_a_nobox_Generic ===
+// Interpolating a whole tuple asks for one runtime-typed value, which is a
+// box. Project the slots or `materialize` deliberately.
 //! expect: nobox value `SNV` survived lowering as an implicit materialization, while emitting `main`
-// NOT an unbuilt mechanism -- the guarantee firing, pinned so the boundary
-// cannot move unnoticed. A nullable tuple carrying a nobox element is bound and
-// used slot-wise (seventeen shapes in `tests/nobox/nullable_tuple.rock`), but
-// interpolating the WHOLE tuple asks for one value with a runtime type, which is
-// a box by definition -- the same justified-box class as `inspect` over a column
-// vec. Project the slots instead (`t.0.x`), or `materialize` deliberately.
 nobox value SNV { x: int, y: int }
 fn maybe(b: bool) -> (SNV, int)? {
     if b { return (SNV { x: 3, y: 6 }, 1) }
@@ -148,13 +105,8 @@ fn main() {
 }
 
 //=== TEST CASE: inline_tuple_interpolation_of_a_nobox_Generic ===
+// The same boundary without a binding, rejected at a different site.
 //! expect: nobox value `INV` survived lowering as an implicit materialization, while emitting `main`
-// The same boundary reached WITHOUT a binding. It rejects through a different
-// site (`stringify_non_null`, not the packed repr) and is pinned separately
-// because it once compiled while the bound form above rejected: the box had
-// already widened, so `inspect` walked a 3-slot table and would have rendered a
-// 3-tuple. That is a silent wrong answer, which the widened box cannot leave to
-// the residue check -- there is no `<name>_ct` left for it to find.
 nobox value INV { x: float, y: float }
 fn inv(k: float) -> INV { return INV { x: k, y: 2.0 } }
 fn main() {
@@ -162,10 +114,8 @@ fn main() {
 }
 
 //=== TEST CASE: direct_inspect_of_a_tuple_carrying_a_nobox_Generic ===
+// The same boundary reached by calling `inspect`.
 //! expect: cannot inspect a tuple carrying a nobox value
-// The call-boundary spelling of the case above: `inspect` reached by name rather
-// than through interpolation. Pinned as its own case because the two are checked
-// at different sites and only one of them used to exist.
 nobox value DNV { x: float, y: float }
 fn dnv(k: float) -> DNV { return DNV { x: k, y: 2.0 } }
 fn main() {
@@ -173,10 +123,8 @@ fn main() {
 }
 
 //=== TEST CASE: implicit_tuple_at_an_inline_body_Generic ===
+// An opaque body would read the flat box as a wider tuple.
 //! expect: a tuple carrying a nobox value cannot cross boxed call boundary `count`
-// The guarantee firing at a body the compiler cannot see into: it would be
-// handed the flat box and read a wider tuple. `materialize(t)` hands it one
-// boxed value per element (`tests/nobox/tuple.rock`).
 nobox value BNV { x: float, y: float }
 inline(lua) fn count(v: any) -> int = """ return #v """
 fn main() {
@@ -483,10 +431,8 @@ fn main() {
 }
 
 //=== TEST CASE: newtype_over_value_struct_map_key_Generic ===
+// A newtype over a `value` struct is still cdata.
 //! expect: `WrapValue` wraps `VKey` is a `value` struct
-// The escape hatch the old diagnostic recommended: a `newtype` wrapping a
-// `value` struct is still cdata, so the wrapper reintroduces the defect the
-// rejection exists to stop.
 value VKey { a: int }
 newtype WrapValue(VKey)
 

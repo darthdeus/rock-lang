@@ -1,17 +1,7 @@
 //=== TEST CASE: plain_fn_without_a_body ===
+// Only `extern fn` may omit a body; any other bodyless fn is rejected rather
+// than becoming an extern C declaration that fails at run time.
 //! expect: this function has no body: expected a block `{ .
-// a function body must be a block or an inline string, never absent
-//
-// `finish_fn_def` answered a missing body with `extern_body.unwrap_or(ExternC)`.
-// Only the `extern fn` caller passes `Some`, so every other bodyless form --
-// plain `fn`, `co fn`, `operator`, `inline(<backend>) fn` -- silently became an
-// extern C declaration that type-checked and then failed at RUNTIME with
-// "attempt to call global 'c' (a nil value)". The comment there claimed the
-// non-extern callers never reached it; they did.
-//
-// An `extern(lua) fn f() -> int` (no body, no `= "..."`) is still legal and is
-// covered positively in the extern suite -- this rejection is for the forms
-// that are NOT foreign declarations.
 fn c(x: int) -> int
 
 fn main() {
@@ -27,12 +17,10 @@ fn g() -> int {
 }
 
 //=== TEST CASE: lambda_values_eq_Generic ===
+// Fn identity depends on representation (capture-free lambdas share one fn,
+// capturing ones are per-creation records), so `==`/`!=` on fn values is
+// rejected. Comparing a nullable fn against `null` stays legal.
 //! expect: Cannot compare fn values: fn identity is not meaningful
-// `==`/`!=` on fn-typed values is rejected: capture-free lambdas
-// share one hoisted fn value and capturing lambdas become per-creation
-// records, so fn identity is representation-dependent and never
-// meaningful.
-// Comparing a nullable fn against `null` stays legal (refinement).
 fn mk() -> fn() -> int { return () => 42 }
 
 fn main() {
@@ -60,16 +48,8 @@ fn main() {
 }
 
 //=== TEST CASE: generic_eq_capture_free_fn_arg_Generic ===
+// A generic `==` instantiated with a fn type is rejected at the call site.
 //! expect: Cannot compare fn values: `same` compares a generic parameter with `==`/`!=`, but it is
-// comparing fn values THROUGH a generic wrapper is rejected at the
-// call site. `fn same<T>(a: T, b: T) -> bool { a == b }` type-checks
-// (the operands are `T`, not a fn type), but a call that binds `T` to a
-// fn type reaches an `==` on fn values -- whose identity is not
-// meaningful (a capture-free lambda is one shared hoisted fn; a
-// capturing lambda is a fresh record per creation). The direct ban is
-// `lambda_values_eq` above; this closes the
-// generic bypass at the call site (bone-semantic fn_identity).
-// Aliased operands and forwarding through another generic follow.
 fn same<T>(a: T, b: T) -> bool { return a == b }
 fn mk() -> fn() -> int { return () => 1 }
 
@@ -96,8 +76,6 @@ fn main() {
 }
 
 //=== TEST CASE: generic_eq_annotated_both_alias_Generic ===
-// ANNOTATED aliases are T-typed too. (The unannotated both-alias form:
-// `generic_eq_fn_arg_both_unannotated_alias` below.)
 //! expect: Cannot compare fn values: `same` compares a generic parameter with `==`/`!=`, but it is
 fn same<T>(a: T, b: T) -> bool { let x: T = a; let y: T = b; return x == y }
 fn mk() -> fn() -> int { return () => 1 }
@@ -107,13 +85,8 @@ fn main() {
 }
 
 //=== TEST CASE: generic_eq_fn_arg_both_unannotated_alias_Generic ===
+// Unannotated aliases infer as `T`, so the comparison is still on `T`.
 //! expect: Cannot compare fn values: `same` compares a generic parameter with `==`/`!=`, but it is
-// aliasing BOTH operands of a generic `==` through unannotated lets
-// does not hide the comparison. `let x = a` infers `x: T`, and the
-// generic fn-eq summary (bone-semantic fn_identity) reads each
-// operand's INFERRED type, not its declared one, so `x == y` still
-// compares `T` and a call instantiating `T` with a fn type is
-// rejected.
 fn same<T>(a: T, b: T) -> bool { let x = a; let y = b; return x == y }
 fn mk() -> fn() -> int { return () => 1 }
 
@@ -132,6 +105,7 @@ fn main() {
 }
 
 //=== TEST CASE: generic_eq_fn_arg_transitive_two_levels_Generic ===
+// Forwarding a generic into a callee that compares it is itself a comparison.
 //! expect: Cannot compare fn values: `outer` compares a generic parameter with `==`/`!=`, but it is
 fn same<T>(a: T, b: T) -> bool { return a == b }
 fn mid<U>(a: U, b: U) -> bool { return same(a, b) }
@@ -156,17 +130,8 @@ fn main() {
 }
 
 //=== TEST CASE: expression_bodied_fn ===
+// Rock has no expression-bodied fn form; `= <expr>` is not an inline body.
 //! expect: an `= <body>` function body must be a string literal
-// an `= <body>` function body must be a string literal
-//
-// `= <expr>` parsed the expression, THREW IT AWAY, and kept an empty inline
-// source -- so `fn c(x: int) -> int = x + 1` emitted `function c(x) return end`
-// and answered nil. The comment called it recovery from a malformed inline
-// body, but it ran on the ordinary path and produced a silently wrong program.
-//
-// Rock has no expression-bodied function form. If one is ever wanted, it is a
-// language decision with a lowering behind it, not a parser fallthrough.
-// Reproduces identically on `operator` and on the `Type.method` form.
 fn c(x: int) -> int = x + 1
 
 fn main() {
@@ -174,11 +139,6 @@ fn main() {
 }
 
 //=== TEST CASE: call_non_fn_fail_Generic ===
-// Calling a fn-typed parameter (callback). `f(x)` where `f: fn(A) -> B` resolves
-// the callee to a LOCAL binding (not a top-level fn), checks each arg against A
-// (with coercion), and yields B. Needed for the higher-order stdlib fns
-// (map/filter/find/any/all/sort) whose Rock bodies invoke their fn params.
-// calling a non-function local is an error
 //! expect: Attempted to call a non-function type int
 fn f(x: int) -> int {
     x(5)
@@ -327,9 +287,7 @@ fn use_f() -> int {
 }
 
 //=== TEST CASE: param_default_refs_param_Generic ===
-// Params are NOT in scope inside defaults (rock: "defaults are injected at
-// the call site and other params are not in scope"), so a default referencing
-// a sibling param is rejected...
+// Defaults are evaluated at the call site, where other params are not in scope.
 //! expect: `a` did not resolve to any definition
 fn f2(a: int = 1, b: int = a) -> int {
     let r = b
@@ -368,8 +326,8 @@ fn f() -> int {
 }
 
 //=== TEST CASE: unknown_named_param_fail_Generic ===
-// A named arg matching no parameter on ANY candidate must be rejected (the bug
-// silently accepted it as positional whenever the arity happened to line up).
+// A named arg matching no parameter on any candidate is rejected, even when
+// the positional arity lines up.
 //! expect: No overload for `draw` with argument types (Image, int)
 struct Image { w: int }
 fn draw(image: Image) -> int { 0 }
@@ -528,7 +486,6 @@ fn main() { let _ = outer(3) }
 
 //=== TEST CASE: nested_fn_with_generics_Generic ===
 //! expect: nested functions cannot be generic
-// v1: no generics on nested fns.
 fn outer() -> int {
     fn id<T>(x: T) -> T { x }
     return id(7)
@@ -537,7 +494,6 @@ fn main() { let _ = outer() }
 
 //=== TEST CASE: nested_fn_with_annotation_Generic ===
 //! expect: nested functions cannot have annotations
-// v1: no annotations on nested fns.
 fn outer() -> int {
     @pure
     fn inc(x: int) -> int { x + 1 }
@@ -559,9 +515,8 @@ fn outer() -> int {
 fn main() { let _ = outer() }
 
 //=== TEST CASE: nested_fn_mutual_recursion_Generic ===
+// Nested fns are declare-before-use, so they cannot be mutually recursive.
 //! expect: `is_odd` did not resolve to any definition
-// v1 decl-before-use forbids mutual recursion: `is_even` calls `is_odd` before
-// it is declared.
 fn parity(n: int) -> bool {
     fn is_even(k: int) -> bool { if k == 0 { return true }  return is_odd(k - 1) }
     fn is_odd(k: int) -> bool { if k == 0 { return false }  return is_even(k - 1) }

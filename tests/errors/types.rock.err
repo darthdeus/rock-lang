@@ -392,9 +392,8 @@ fn main() {
 
 //=== TEST CASE: vec_of_tuples_dot0_rejected_Generic ===
 //! expect: cannot index a non-tuple type [(int, string)]
-// `[(A,B)].0` used to auto-project to `[A]` (map .0 over the vec). That
-// magic was removed -- a tuple index applies to a tuple/newtype, not a
-// vec of them. The explicit form is `pairs.map(_.0)`.
+// A tuple index applies to a tuple or newtype, not to a vec of them; the
+// explicit form is `pairs.map(_.0)`.
 fn test() -> int {
     let pairs: [(int, string)] = [(1, "a"), (2, "b")]
     let firsts = pairs.0  // ERROR: Expected tuple or newtype, found [(int, string)]

@@ -94,7 +94,6 @@ fn f() -> Shape {
 
 //=== TEST CASE: embed_whole_value_binding_Generic ===
 //! expect: `p` is an `embed` field: it has no independently storable value
-// THE headline case: illegal even where flattening would physically be a no-op.
 struct Pt { x: int, y: int }
 struct Holder { embed p: Pt, tag: int }
 
@@ -168,9 +167,9 @@ fn main() {
 }
 
 //=== TEST CASE: embed_readable_field_ref_Generic ===
+// `.p` may satisfy a write-only selector, but a readable one hands out the
+// whole value.
 //! expect: a readable selector would hand out the whole value
-// The extraction hole `WriteFieldRef` closed: `.p` may satisfy a write-only
-// selector, but a readable one hands out the whole value.
 struct Pt { x: int, y: int }
 struct Holder { embed p: Pt, tag: int }
 
@@ -410,8 +409,9 @@ fn main() {
 }
 
 //=== TEST CASE: sibling_param_collides_with_a_nested_leaf_Generic ===
+// The value type alone is unambiguous; the nested leaf `r.tl.x` collides
+// with a sibling param spelled `r__tl__x`, which only a signature check sees.
 //! expect: `collide2` would emit the Lua parameter `r__tl__x` twice
-// The same class one level deeper: the sibling param spells out a NESTED leaf.
 value V2 { x: float, y: float }
 value Rect { tl: V2, br: V2 }
 

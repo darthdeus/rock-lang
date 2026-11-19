@@ -41,14 +41,8 @@ fn main() { test() }
 
 //=== TEST CASE: divergence_refinement_of_global_unsound_Generic ===
 //! expect: cannot access field `x` on non-struct type GFoo?
-// D4: divergence-based narrowing
-// A global refinement must NOT survive an intervening effect: a non-@pure
-// call may reassign the global, so a use AFTER such a call is unrefined and
-// `g_div.x` must error. (bone DOES refine a global after `if g == null {
-// return }` when nothing reassigns it -- see
-// bone-semantic/tests/fixtures/global_nullable_refine.rock; rock never
-// refines a global at all. Both reject THIS case: the impure call drops the
-// refinement.)
+// A non-`@pure` call may reassign a global, so it drops the global's
+// refinement.
 struct GFoo { x: int }
 global g_div: GFoo? = GFoo { x: 1 }
 
@@ -65,29 +59,15 @@ fn use_global_div() -> int {
 fn main() { use_global_div() }
 
 //=== TEST CASE: nullable_ordering_rejected_Generic ===
-// Joining a nullable with its base type is the LUB `T?` (verified vs rock):
-// `int? == int` type-checks, `[a, 1]` infers `[int?]`, but ordering a
-// nullable (`int? < int`) is still rejected ("Cannot compare nullable").
-// The bug: `join` fell through to `unify`, which can't unify `int?` with
-// `int`. Fix lives in `join` (peel either/both nullable, join inners,
-// re-wrap once), so equality accepts and ordering's orderable-check rejects.
-// Ordering a nullable is still rejected.
+// Equality joins `int?` with `int`, but ordering a nullable is rejected.
 //! expect: ordering operators require numeric operands, got int?
 fn f(a: int?) -> bool {
     a < 1
 }
 
 //=== TEST CASE: refine_or_rhs_neq_no_narrow_Generic ===
-// Intra-`||` refinement: the RHS of `||` runs only when the LHS is false, so it
-// sees the LHS's ELSE narrowings. Dual of the `&&` RHS seeing the LHS's THEN
-// narrowings (nullable_path_refinement `refine_and_chain`). This is what lets
-// `if c == null || !c.in_reach()` type-check -- the guard-combine of two
-// `if c == null { .. }` / `if !c.in_reach() { .. }` early returns.
-//
-// DIVERGENCE from rock: rock does not narrow across `||` operands at all. bone implements the intended dual-of-`&&`
-// rule; the guard-combine is the motivating case.
-// SOUNDNESS: `x != null` false in the RHS => `x` IS null there, so no narrowing.
-// The RHS `x.v` must stay a compile error (plain `.field` on a nullable).
+// The RHS of `||` sees the LHS's else-narrowings; when `x != null` is false,
+// `x` is null there, so `x.v` stays an error.
 //! expect: cannot access field `v` on non-struct type S?
 struct S { v: int }
 fn f(x: S?) -> bool {
@@ -96,12 +76,7 @@ fn f(x: S?) -> bool {
 
 //=== TEST CASE: nullable_tuple_index_write_Generic ===
 //! expect: cannot assign to this expression: it is not a variable, field, or element
-// Assignment through tuple index on nullable type
-// `t.0 = v` where `t: (int, int)?` would crash at runtime if `t` is
-// null (live emits invalid Lua; typed-ANF rejects). Refine via
-// null-check first or use a non-nullable tuple. Per CLAUDE.md
-// "NEVER swallow errors": semantic surfaces this so it never reaches
-// codegen.
+// Writing a tuple element through a nullable base is rejected.
 fn maybe_tup() -> (int, int)? { (1, 2) }
 
 fn test() {
@@ -113,13 +88,7 @@ fn main() { test() }
 
 //=== TEST CASE: nullable_tuple_index_read_Generic ===
 //! expect: cannot index a non-tuple type (int, int)?
-// Reading a tuple element off a nullable base must use ?. for safety
-// `t.0` where `t: (int, int)?` would index `nil` at runtime if `t` is
-// null. Plain `.N` on a nullable base is rejected exactly like plain
-// `.field` on a nullable struct (`nullable_field_on_struct` above);
-// the nil-safe form is `?.0`. After the TupleIndex->FieldAccess
-// unification, `.0` is a FieldAccess with a numeric field name and a
-// nullable base is rejected in `infer_tuple_index`.
+// Reading a tuple element off a nullable base needs `?.0`.
 fn maybe_tup() -> (int, int)? { (1, 2) }
 
 fn test() -> int {
@@ -131,15 +100,7 @@ fn main() { let _ = test() }
 
 //=== TEST CASE: let_nullable_value_call_into_non_null_Generic ===
 //! expect: type mismatch: expected `V2`, found `V2?`
-// nullable value-struct can't implicitly unwrap to non-null
-//
-// These tests pin the SEMANTIC checks that make the Bucket-C ANF
-// guards at `rock-codegen/src/anf/lower.rs` (sites tagged "H3 R3
-// nullable cdata value-returning call") structurally unreachable.
-// If semantic ever stops rejecting these shapes, ANF would fire its
-// defensive `Unsupported` reject and the test below would FAIL
-// differently (panic instead of compile-error) — surfacing the
-// lost upstream guard.
+// A nullable value struct does not implicitly unwrap to non-null.
 value V2 { x: int, y: int }
 
 fn make() -> V2? { return V2 { x: 1, y: 2 } }

@@ -232,11 +232,7 @@ fn f(v: int?, w: int?) -> int {
 fn main() {}
 
 //=== TEST CASE: let_no_init_simple_Generic ===
-// `let` binding requires an initializer (uninitialized `let x: T` removed)
 //! expect: let without value is not supported
-// Uninitialized `let x: T` is disallowed — declare and assign in one
-// step (`let x = <value>`). Previously allowed (pre-declare a slot,
-// assign later); removed.
 fn test() -> int {
     let x: int   // ERROR: `let` binding requires an initializer
     x = 5
@@ -255,10 +251,7 @@ fn test() {
 fn main() { test() }
 
 //=== TEST CASE: let_enum_variant_Refutable ===
-// refutable patterns in `let`/`for` are rejected
-//
-// A `let` or `for` pattern must match every value of its type; a pattern
-// that can fail belongs in `match`, `if let`, or `let ... else`.
+// A `let` or `for` pattern must match every value of its type.
 //! expect: can fail
 enum Opt { None, Some(int) }
 fn main() {
@@ -337,14 +330,12 @@ fn main() {
 //=== TEST CASE: basic_self_reference_Generic ===
 //! expect: `x` did not resolve to any definition
 fn main() {
-    // This should fail - variable cannot reference itself in its own initializer
     let x = x
 }
 
 //=== TEST CASE: self_reference_with_type_annotation_Generic ===
 //! expect: `z` did not resolve to any definition
 fn main() {
-    // This should fail - type annotation doesn't change the scoping rules
     let z: int = z + 1
 }
 
@@ -375,9 +366,8 @@ co fn gen() -> Coroutine<int> {
 fn main() { let c = gen()  let _ = c.resume() }
 
 //=== TEST CASE: static_init_reads_param_Generic ===
+// The initializer runs once, so a param read would snapshot the first call.
 //! expect: static initializer may not read local `count`
-// The initializer runs once, not per call -- a param read would silently
-// snapshot the first reaching call's value. Rejected.
 fn draw(count: int) -> int {
     static scratch = count
     return scratch
@@ -395,9 +385,8 @@ fn f() -> int {
 fn main() { let _ = f() }
 
 //=== TEST CASE: static_init_reads_local_shadowing_global_Generic ===
+// The local read is rejected; it does not fall back to the like-named global.
 //! expect: static initializer may not read local `base`
-// Must ERROR on the local read, NOT silently bind the like-named global. This
-// is why enforcement is resolve-then-reject, not module-scope re-resolution.
 global base: int = 100
 fn f() -> int {
     let base = 7
@@ -408,8 +397,6 @@ fn main() { let _ = f() }
 
 //=== TEST CASE: static_mangled_cell_name_unresolvable_from_source_Generic ===
 //! expect: `__static_f_n` did not resolve to any definition
-// This generated-looking name is absent from source scope. It is not the
-// current emitted cell spelling, so this alone does not prove cell privacy.
 fn f() -> int {
     static n = 0
     return __static_f_n

@@ -94,10 +94,7 @@ fn bad_index(v: Vec<int>) -> int {
 
 //=== TEST CASE: pure_and_debug_impure_conflict_Generic ===
 //! expect: `@pure` and `@debug_impure` on the same function are contradictory
-// `@pure` (no side effects) and `@debug_impure` (debug-only side
-// effect) on the same function is a contradiction. Rejected at the
-// annotation-registration site in type_declaration_pass, before
-// purity verification runs.
+// `@pure` and `@debug_impure` on one function contradict each other.
 @pure
 @debug_impure
 fn bad_both() -> int {
@@ -106,11 +103,8 @@ fn bad_both() -> int {
 
 //=== TEST CASE: pure_calls_unannotated_pure_Generic ===
 //! expect: calls `double_it` which is not provably pure
-// Calls a function that is genuinely pure but NOT annotated `@pure`. Under
-// the annotation-contract model (matching bone), a `@pure` body may only
-// call callees that are themselves annotated `@pure` -- being pure by
-// inference is not enough. The user vouches via the annotation; the callee's
-// own verification guarantees its body.
+// A `@pure` body may only call callees annotated `@pure`; being pure by
+// inference is not enough.
 fn double_it(x: int) -> int { return x + x }
 
 @pure
@@ -120,24 +114,15 @@ fn bad_calls_unannotated_pure() -> int {
 
 //=== TEST CASE: pure_reads_global_via_method_Generic ===
 //! expect: reads global `GLO`
-// Reading a mutable global in METHOD-RECEIVER position (`G.m()`) is a global
-// read, exactly like a bare `G`. The receiver sits in the call's `func` (a UFCS
-// `recv.method()` desugars to `method(recv)`), which the purity walker must
-// check -- not only the explicit args. The callee `double_val` is @pure, so the
-// only impurity is the read of `GLO` in receiver position.
+// A global read in method-receiver position is a global read.
 global GLO: int = 0
 @pure fn double_val(x: int) -> int { return x + x }
 @pure fn bad_reads_global_via_method() -> int { return GLO.double_val() }
 
 //=== TEST CASE: pure_mutates_own_local_int_Generic ===
+// `@pure` rejects every assignment syntactically, even to a local that never
+// escapes.
 //! expect: performs an assignment (mutation)
-// PINNED CURRENT BEHAVIOR, believed OVER-RESTRICTIVE. `@pure` rejects EVERY
-// assignment form syntactically, without asking WHAT is mutated. This body is
-// referentially transparent -- `x` is a function-local that never escapes, so
-// the fn is a constant function of its (empty) arguments -- and is rejected
-// anyway. If purity becomes effect-aware (writes to non-escaping locals
-// allowed, writes to globals/params/captures still rejected), this case starts
-// COMPILING: delete it then, and move the shape to a positive `.rock` test.
 @pure
 fn pure_mutates_own_local() -> int {
     let x = 1
@@ -147,10 +132,8 @@ fn pure_mutates_own_local() -> int {
 
 //=== TEST CASE: pure_local_value_field_write_Generic ===
 //! expect: performs an assignment (mutation)
-// The user-reported shape (a shader helper): a `@pure` fn building a Vec2-like
-// value in a local and adjusting one component. The write itself is legal
-// (tests/values/value_local_field_write.rock); only this syntactic purity
-// rejection fires. Effect-aware purity would accept it (#107).
+// A local value field write in a `@pure` fn is rejected by the syntactic
+// purity check, though the write itself is legal.
 value V2 { x: float, y: float }
 
 @pure
@@ -241,10 +224,7 @@ fn main() {
 }
 
 //=== TEST CASE: bare_field_no_context_fail_Generic ===
-// ---------------------------------------------------------------------------
-// D. a bare `.field` with no expected FieldRef type is an error (same as a
-//    SiblingFieldRef outside a struct default).
-// ---------------------------------------------------------------------------
+// A bare `.field` with no expected field reference type.
 //! expect: field reference `.attack_co` is only valid against an expected `FieldRef<T, V>` / `ReadFieldRef<T,
 struct Mob { health: int, attack_co: int? }
 fn main() {
@@ -253,10 +233,7 @@ fn main() {
 }
 
 //=== TEST CASE: generic_container_wrong_field_fail_Generic ===
-// ---------------------------------------------------------------------------
-// G. wrong field on the container's T -- T is solved from the Entity<T> arg,
-//    and the named field doesn't exist on that struct.
-// ---------------------------------------------------------------------------
+// A field missing on the `T` solved from the `Entity<T>` argument.
 //! expect: struct `Rock` has no field `attack_co`
 struct Mob { health: int, attack_co: int? }
 struct Rock { mass: int }
@@ -268,11 +245,7 @@ fn main() {
 }
 
 //=== TEST CASE: value_struct_writable_field_fail_Generic ===
-// ---------------------------------------------------------------------------
-// H. A writable ref into a value struct would write to a temporary copy.
-//    The WRITABLE former refuses. The read-only ReadFieldRef
-//    former accepts, which is what field_get takes.
-// ---------------------------------------------------------------------------
+// A writable ref into a value struct would write to a temporary copy.
 //! expect: cannot form a writable field reference `.x` into `value` struct `FixVec2`: a value argument is a
 value FixVec2 { x: float, y: float }
 fn take(f: FieldRef<FixVec2, float>) {}
@@ -290,9 +263,6 @@ fn main() {
 }
 
 //=== TEST CASE: write_field_ref_widen_fail_Generic ===
-// INVARIANT in V, like `FieldRef`. Write-only contravariance would be sound but
-// has no consumer; invariance is the conservative choice and relaxing it later
-// is source-compatible.
 //! expect: type mismatch: expected `int?`, found `int` -- a writable field reference is invariant, so
 struct Mob { health: int, attack_co: int? }
 fn take(f: WriteFieldRef<Mob, int?>) {}
@@ -320,9 +290,9 @@ fn main() {
 }
 
 //=== TEST CASE: write_field_ref_to_read_field_ref_Generic ===
+// A write-only selector must not reach a readable one, or an embedded field's
+// whole value reads out.
 //! expect: type mismatch: expected `ReadFieldRef<Mob, int?>`, found `WriteFieldRef<Mob, int?>`
-// The extraction hole `WriteFieldRef` exists to close: a write-only selector
-// must not reach a readable one, or an embedded field's whole value reads out.
 struct Mob { health: int, attack_co: int? }
 
 fn take_read(f: ReadFieldRef<Mob, int?>) {}
