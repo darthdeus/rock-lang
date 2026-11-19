@@ -358,7 +358,7 @@ impl<'a> Builder<'a> {
         for (i, pb) in params.into_iter().enumerate() {
             let pname = child.body.binding_arena[pb].name;
             let slot = child.param_slot(i)?;
-            child.bind_param_slot(pb, pname, &slot)?;
+            child.bind_param_slot(pb, pname, slot)?;
         }
         let child_params: Vec<Idx<BindingInfo>> = params.into_iter().collect();
         child.copy_ref_borrowed_params(&child_params)?;

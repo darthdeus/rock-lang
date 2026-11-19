@@ -139,10 +139,11 @@ fn rename_macro_param() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace(
-            "macro double(x: expr) -> int { x + x }",
-            "macro double(v: expr) -> int { v + v }"
-        ))
+        source
+            .replace(
+                "macro double(x: expr) -> int { x + x }",
+                "macro double(v: expr) -> int { v + v }"
+            )
             .trim_end()
     );
 }
@@ -160,9 +161,9 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source
+        source
             .replace("    let n = 5", "    let m = 5")
-            .replace("    print(double(n))", "    print(double(m))"))
+            .replace("    print(double(n))", "    print(double(m))")
             .trim_end()
     );
 }
@@ -184,7 +185,7 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("helper", "inc")).trim_end()
+        source.replace("helper", "inc").trim_end()
     );
 }
 
@@ -331,7 +332,7 @@ fn rename_inline_fn_name_is_fine() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("probe", "probe2")).trim_end()
+        source.replace("probe", "probe2").trim_end()
     );
 }
 
@@ -353,7 +354,7 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("hp", "health")).trim_end()
+        source.replace("hp", "health").trim_end()
     );
 }
 
@@ -370,9 +371,9 @@ fn rename_param_sharing_a_word_with_another_inline_body() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source
+        source
             .replace("fn twice(x: int) -> int {", "fn twice(n: int) -> int {")
-            .replace("    return probe(x) * 2", "    return probe(n) * 2"))
+            .replace("    return probe(x) * 2", "    return probe(n) * 2")
             .trim_end()
     );
 }
@@ -392,9 +393,9 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source
+        source
             .replace("fn helper(x: int) -> int {", "fn helper2(x: int) -> int {")
-            .replace("    print(helper(1))", "    print(helper2(1))"))
+            .replace("    print(helper(1))", "    print(helper2(1))")
             .trim_end()
     );
 }
@@ -474,9 +475,9 @@ fn rename_shadowing_inner_local() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source
+        source
             .replace("        let x = 2", "        let y = 2")
-            .replace("        print(x)", "        print(y)"))
+            .replace("        print(x)", "        print(y)")
             .trim_end()
     );
 }
@@ -493,9 +494,9 @@ fn rename_shadowed_local_in_same_block() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source
+        source
             .replace("    let x = 1", "    let y = 1")
-            .replace("    let x = x + 1", "    let x = y + 1"))
+            .replace("    let x = x + 1", "    let x = y + 1")
             .trim_end()
     );
 }
@@ -520,7 +521,7 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("area", "size")).trim_end()
+        source.replace("area", "size").trim_end()
     );
 }
 
@@ -544,7 +545,7 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("shift", "nudge")).trim_end()
+        source.replace("shift", "nudge").trim_end()
     );
 }
 
@@ -599,9 +600,9 @@ fn rename_local_inside_string_interpolation() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source
+        source
             .replace("    let n = 5", "    let count = 5")
-            .replace("    print(\"n = {n}\")", "    print(\"n = {count}\")"))
+            .replace("    print(\"n = {n}\")", "    print(\"n = {count}\")")
             .trim_end()
     );
 }
@@ -617,10 +618,11 @@ fn rename_lambda_param() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace(
-            "    let f = (a: int) => a + 1",
-            "    let f = (b: int) => b + 1"
-        ))
+        source
+            .replace(
+                "    let f = (a: int) => a + 1",
+                "    let f = (b: int) => b + 1"
+            )
             .trim_end()
     );
 }
@@ -640,6 +642,6 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("T", "U")).trim_end()
+        source.replace("T", "U").trim_end()
     );
 }

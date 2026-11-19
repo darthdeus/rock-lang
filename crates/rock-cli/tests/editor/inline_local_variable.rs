@@ -11,12 +11,13 @@ fn inline_simple_variable() {
     let reply = doc.request("textDocument/codeAction", json!({"range": {"start": {"line": 1, "character": 8}, "end": {"line": 1, "character": 8}}, "context": {"diagnostics": []}}));
     assert_eq!(
         doc.apply_action(&reply, "Inline local `x`").trim_end(),
-        (&source.replace(
-            r#"    let x = 42
+        source
+            .replace(
+                r#"    let x = 42
     print(x)
 "#,
-            "    print(42)\n"
-        ))
+                "    print(42)\n"
+            )
             .trim_end()
     );
 }
@@ -34,15 +35,16 @@ fn inline_variable_multiple_uses() {
     let reply = doc.request("textDocument/codeAction", json!({"range": {"start": {"line": 1, "character": 8}, "end": {"line": 1, "character": 8}}, "context": {"diagnostics": []}}));
     assert_eq!(
         doc.apply_action(&reply, "Inline local `value`").trim_end(),
-        (&source.replace(
-            r#"    let value = 10 + 20
+        source
+            .replace(
+                r#"    let value = 10 + 20
     print(value)
     let result = value * 2
 "#,
-            r#"    print(10 + 20)
+                r#"    print(10 + 20)
     let result = (10 + 20) * 2
 "#
-        ))
+            )
             .trim_end()
     );
 }
@@ -58,12 +60,13 @@ fn inline_variable_with_complex_expression() {
     let reply = doc.request("textDocument/codeAction", json!({"range": {"start": {"line": 1, "character": 8}, "end": {"line": 1, "character": 8}}, "context": {"diagnostics": []}}));
     assert_eq!(
         doc.apply_action(&reply, "Inline local `temp`").trim_end(),
-        (&source.replace(
-            r#"    let temp = x * 2 + 1
+        source
+            .replace(
+                r#"    let temp = x * 2 + 1
     return temp * temp
 "#,
-            "    return (x * 2 + 1) * (x * 2 + 1)\n"
-        ))
+                "    return (x * 2 + 1) * (x * 2 + 1)\n"
+            )
             .trim_end()
     );
 }
@@ -84,12 +87,13 @@ fn main() {
     let reply = doc.request("textDocument/codeAction", json!({"range": {"start": {"line": 5, "character": 8}, "end": {"line": 5, "character": 8}}, "context": {"diagnostics": []}}));
     assert_eq!(
         doc.apply_action(&reply, "Inline local `num`").trim_end(),
-        (&source.replace(
-            r#"    let num = 42
+        source
+            .replace(
+                r#"    let num = 42
     let result = process(num)
 "#,
-            "    let result = process(42)\n"
-        ))
+                "    let result = process(42)\n"
+            )
             .trim_end()
     );
 }
@@ -134,12 +138,13 @@ fn main() {
     let reply = doc.request("textDocument/codeAction", json!({"range": {"start": {"line": 6, "character": 8}, "end": {"line": 6, "character": 8}}, "context": {"diagnostics": []}}));
     assert_eq!(
         doc.apply_action(&reply, "Inline local `x`").trim_end(),
-        (&source.replace(
-            r#"    let x = get_value()
+        source
+            .replace(
+                r#"    let x = get_value()
     print(x)
 "#,
-            "    print(get_value())\n"
-        ))
+                "    print(get_value())\n"
+            )
             .trim_end()
     );
 }
@@ -237,15 +242,16 @@ fn main() {
     let reply = doc.request("textDocument/codeAction", json!({"range": {"start": {"line": 7, "character": 8}, "end": {"line": 7, "character": 8}}, "context": {"diagnostics": []}}));
     assert_eq!(
         doc.apply_action(&reply, "Inline local `s`").trim_end(),
-        (&source.replace(
-            r#"    let s = p.x + p.y
+        source
+            .replace(
+                r#"    let s = p.x + p.y
     print(s)
     print(s)
 "#,
-            r#"    print(p.x + p.y)
+                r#"    print(p.x + p.y)
     print(p.x + p.y)
 "#
-        ))
+            )
             .trim_end()
     );
 }
@@ -264,12 +270,13 @@ fn inline_variable_in_if_condition() {
     assert_eq!(
         doc.apply_action(&reply, "Inline local `condition`")
             .trim_end(),
-        (&source.replace(
-            r#"    let condition = true
+        source
+            .replace(
+                r#"    let condition = true
     if condition {
 "#,
-            "    if true {\n"
-        ))
+                "    if true {\n"
+            )
             .trim_end()
     );
 }
@@ -286,12 +293,13 @@ fn inline_string_variable() {
     assert_eq!(
         doc.apply_action(&reply, "Inline local `message`")
             .trim_end(),
-        (&source.replace(
-            r#"    let message = "Hello, World!"
+        source
+            .replace(
+                r#"    let message = "Hello, World!"
     print(message)
 "#,
-            "    print(\"Hello, World!\")\n"
-        ))
+                "    print(\"Hello, World!\")\n"
+            )
             .trim_end()
     );
 }
@@ -310,10 +318,12 @@ fn inline_variable_nested_scope() {
     let reply = doc.request("textDocument/codeAction", json!({"range": {"start": {"line": 1, "character": 8}, "end": {"line": 1, "character": 8}}, "context": {"diagnostics": []}}));
     assert_eq!(
         doc.apply_action(&reply, "Inline local `outer`").trim_end(),
-        (&source.replace("    let outer = 10\n", "").replace(
-            "        let inner = outer + 5\n",
-            "        let inner = 10 + 5\n"
-        ))
+        source
+            .replace("    let outer = 10\n", "")
+            .replace(
+                "        let inner = outer + 5\n",
+                "        let inner = 10 + 5\n"
+            )
             .trim_end()
     );
 }
@@ -326,9 +336,9 @@ fn inline_use_after_unicode_on_the_same_line() {
     let reply = doc.request("textDocument/codeAction", json!({"range": {"start": {"line": 1, "character": 8}, "end": {"line": 1, "character": 8}}, "context": {"diagnostics": []}}));
     assert_eq!(
         doc.apply_action(&reply, "Inline local `x`").trim_end(),
-        (&source
+        source
             .replace("    let x = 42\n", "")
-            .replace("print(x)", "print(42)"))
+            .replace("print(x)", "print(42)")
             .trim_end()
     );
 }

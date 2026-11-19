@@ -13,7 +13,7 @@ fn rename_local_variable_simple() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("foo", "bar")).trim_end()
+        source.replace("foo", "bar").trim_end()
     );
 }
 
@@ -32,7 +32,7 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("x", "value")).trim_end()
+        source.replace("x", "value").trim_end()
     );
 }
 
@@ -56,7 +56,7 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("x", "x_coord")).trim_end()
+        source.replace("x", "x_coord").trim_end()
     );
 }
 
@@ -79,7 +79,7 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("double", "triple")).trim_end()
+        source.replace("double", "triple").trim_end()
     );
 }
 
@@ -102,7 +102,7 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("area", "calculate_area")).trim_end()
+        source.replace("area", "calculate_area").trim_end()
     );
 }
 
@@ -144,10 +144,11 @@ fn map_pair<T, U>(first: T, second: U) -> (T, U) {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace(
-            "fn identity<T>(value: T) -> T {",
-            "fn identity<Element>(value: Element) -> Element {"
-        ))
+        source
+            .replace(
+                "fn identity<T>(value: T) -> T {",
+                "fn identity<Element>(value: Element) -> Element {"
+            )
             .trim_end()
     );
 }
@@ -170,7 +171,7 @@ fn my_unwrap<T>(opt: Option<T>) -> T? {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("value", "inner")).trim_end()
+        source.replace("value", "inner").trim_end()
     );
 }
 
@@ -196,13 +197,13 @@ fn rename_shorthand_var_x() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source
+        source
             .replace("    let x = 100", "    let x_coord = 100")
             .replace(
                 "    let p = Point { x, y }",
                 "    let p = Point { x: x_coord, y }"
             )
-            .replace("    print(x)", "    print(x_coord)"))
+            .replace("    print(x)", "    print(x_coord)")
             .trim_end()
     );
 }
@@ -220,13 +221,13 @@ fn rename_shorthand_var_y() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source
+        source
             .replace("    let y = 200", "    let y_coord = 200")
             .replace(
                 "    let p = Point { x, y }",
                 "    let p = Point { x, y: y_coord }"
             )
-            .replace("    print(y)", "    print(y_coord)"))
+            .replace("    print(y)", "    print(y_coord)")
             .trim_end()
     );
 }
@@ -256,7 +257,7 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("Red", "Crimson")).trim_end()
+        source.replace("Red", "Crimson").trim_end()
     );
 }
 
@@ -276,7 +277,7 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("Red", "Crimson")).trim_end()
+        source.replace("Red", "Crimson").trim_end()
     );
 }
 
@@ -302,7 +303,7 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("Red", "Crimson")).trim_end()
+        source.replace("Red", "Crimson").trim_end()
     );
 }
 
@@ -329,7 +330,7 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("Circle", "Round")).trim_end()
+        source.replace("Circle", "Round").trim_end()
     );
 }
 
@@ -399,7 +400,7 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("Color", "Hue")).trim_end()
+        source.replace("Color", "Hue").trim_end()
     );
 }
 
@@ -417,10 +418,11 @@ fn second<T>(v: T) -> T {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace(
-            "fn first<T>(x: T, y: T) -> T {",
-            "fn first<Item>(x: Item, y: Item) -> Item {"
-        ))
+        source
+            .replace(
+                "fn first<T>(x: T, y: T) -> T {",
+                "fn first<Item>(x: Item, y: Item) -> Item {"
+            )
             .trim_end()
     );
 }
@@ -442,10 +444,11 @@ fn get_sum(p: Point) -> int {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace(
-            "        Point { x, y } => x + y,",
-            "        Point { x: qx, y } => qx + y,"
-        ))
+        source
+            .replace(
+                "        Point { x, y } => x + y,",
+                "        Point { x: qx, y } => qx + y,"
+            )
             .trim_end()
     );
 }
@@ -468,13 +471,13 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source
+        source
             .replace("    x: int", "    px: int")
             .replace(
                 "    let p = Point { x, y }",
                 "    let p = Point { px: x, y }"
             )
-            .replace("    print(p.x)", "    print(p.px)"))
+            .replace("    print(p.x)", "    print(p.px)")
             .trim_end()
     );
 }
@@ -500,7 +503,7 @@ fn give() -> Mob? {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("Mob", "Beast")).trim_end()
+        source.replace("Mob", "Beast").trim_end()
     );
 }
 
@@ -523,7 +526,7 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("text", "label")).trim_end()
+        source.replace("text", "label").trim_end()
     );
 }
 
@@ -546,7 +549,7 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("mob_heal", "mob_restore")).trim_end()
+        source.replace("mob_heal", "mob_restore").trim_end()
     );
 }
 
@@ -566,7 +569,7 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("power", "strength")).trim_end()
+        source.replace("power", "strength").trim_end()
     );
 }
 
@@ -586,7 +589,7 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("count", "amount")).trim_end()
+        source.replace("count", "amount").trim_end()
     );
 }
 
@@ -605,7 +608,7 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("health", "vitality")).trim_end()
+        source.replace("health", "vitality").trim_end()
     );
 }
 
@@ -626,7 +629,7 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("SCORE", "POINTS")).trim_end()
+        source.replace("SCORE", "POINTS").trim_end()
     );
 }
 
@@ -644,9 +647,9 @@ fn bump() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source
+        source
             .replace("global SCORE: int = 0", "global POINTS: int = 0")
-            .replace("    SCORE = SCORE + 1", "    POINTS = POINTS + 1"))
+            .replace("    SCORE = SCORE + 1", "    POINTS = POINTS + 1")
             .trim_end()
     );
 }
@@ -670,7 +673,7 @@ fn rename_newtype_from_decl() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("UserId", "PlayerId")).trim_end()
+        source.replace("UserId", "PlayerId").trim_end()
     );
 }
 
@@ -682,7 +685,7 @@ fn rename_newtype_from_annotation() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("UserId", "PlayerId")).trim_end()
+        source.replace("UserId", "PlayerId").trim_end()
     );
 }
 
@@ -705,7 +708,7 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source
+        source
             .replace(
                 "    Potion { strength: int },",
                 "    Potion { power: int },"
@@ -717,7 +720,7 @@ fn main() {
             .replace(
                 "        Item::Potion { strength } => print(strength),",
                 "        Item::Potion { power: strength } => print(strength),"
-            ))
+            )
             .trim_end()
     );
 }
@@ -737,7 +740,7 @@ fn main() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("strength", "power")).trim_end()
+        source.replace("strength", "power").trim_end()
     );
 }
 
@@ -761,7 +764,7 @@ fn other() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("cool", "fancy")).trim_end()
+        source.replace("cool", "fancy").trim_end()
     );
 }
 
@@ -780,7 +783,7 @@ fn thing() {
     assert!(reply["error"].is_null(), "{reply}");
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("cool", "fancy")).trim_end()
+        source.replace("cool", "fancy").trim_end()
     );
 }
 
@@ -791,6 +794,6 @@ fn rename_reference_after_non_bmp_text() {
     let reply = project.cli("rename", Some((1, 8)), &["bar"]);
     assert_eq!(
         project.renamed(&reply, None).trim_end(),
-        (&source.replace("foo", "bar")).trim_end()
+        source.replace("foo", "bar").trim_end()
     );
 }

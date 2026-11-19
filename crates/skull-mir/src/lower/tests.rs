@@ -9,7 +9,7 @@ fn missing_wire_slot_rejects_instead_of_boxing() {
         },)
         .is_ok()
     );
-    let err = super::required_wire_slot(&slots, 1, false, "fixture", |message| super::gap(message))
+    let err = super::required_wire_slot(&slots, 1, false, "fixture", super::gap)
         .expect_err("a missing non-variadic slot must reject");
     assert!(
         err.message.contains("fixture has no ABI slot 1"),
@@ -17,9 +17,8 @@ fn missing_wire_slot_rejects_instead_of_boxing() {
         err.message
     );
 
-    let variadic =
-        super::required_wire_slot(&slots, 3, true, "fixture", |message| super::gap(message))
-            .expect("a variadic call reuses its declared tail slot");
+    let variadic = super::required_wire_slot(&slots, 3, true, "fixture", super::gap)
+        .expect("a variadic call reuses its declared tail slot");
     assert!(matches!(variadic, RepLayout::Opaque));
 }
 

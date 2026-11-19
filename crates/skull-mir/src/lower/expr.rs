@@ -319,7 +319,7 @@ impl<'a> Builder<'a> {
                     Some(shape) if shape.splats(self.scx.rep_arena()) => {
                         let r = self.lower_expr_repr(body)?;
                         if self.is_open() {
-                            self.tuple_repr_to_slots(r.into_value(), &shape)?
+                            self.tuple_repr_to_slots(r.into_value(), shape)?
                         } else {
                             Vec::new()
                         }

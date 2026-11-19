@@ -2532,7 +2532,7 @@ impl<'a> Builder<'a> {
         for (i, pb) in pbs.iter().enumerate() {
             let name = self.body.binding_arena[*pb].name;
             let slot = self.param_slot(i)?;
-            self.bind_param_slot(*pb, name, &slot)?;
+            self.bind_param_slot(*pb, name, slot)?;
         }
         Ok(())
     }

@@ -2501,7 +2501,7 @@ impl<'a> Builder<'a> {
         {
             return Ok(*boxed);
         }
-        let mut slots = self.tuple_repr_to_slots(bundle.value().clone(), &shape)?;
+        let mut slots = self.tuple_repr_to_slots(bundle.value().clone(), shape)?;
         if !shape.nullable {
             return Ok(self.flat_tuple_box(slots));
         }

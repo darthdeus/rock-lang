@@ -883,7 +883,7 @@ impl<'a> Builder<'a> {
                 }
                 None => {
                     let slot = child.param_slot(i)?;
-                    child.bind_param_slot(pb, name, &slot)?;
+                    child.bind_param_slot(pb, name, slot)?;
                 }
             }
         }
