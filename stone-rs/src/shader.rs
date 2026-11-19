@@ -161,8 +161,7 @@ pub extern "C" fn stone_shader_set_texture(h: u64, n: *const c_char, unit: c_int
     });
 }
 
-#[no_mangle]
-pub extern "C" fn stone_bind_texture_to_unit(tex: u32, unit: c_int) -> c_int {
+pub(crate) fn stone_bind_texture_to_unit(tex: u32, unit: c_int) -> c_int {
     if tex == 0 || unit < 0 {
         return 0;
     }

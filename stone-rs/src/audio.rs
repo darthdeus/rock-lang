@@ -628,18 +628,6 @@ impl Bus {
         self.params.samples_pulled.load(Ordering::Relaxed)
     }
 
-    fn duck_count(&self) -> u64 {
-        self.params.duck_gen.load(Ordering::Relaxed)
-    }
-
-    fn gain(&self) -> f32 {
-        load_f32(&self.params.gain)
-    }
-
-    fn lowpass_cutoff(&self) -> f32 {
-        load_f32(&self.params.cutoff)
-    }
-
     /// Cutoff is clamped into (20Hz, 0.45*rate]; the top of that range is the
     /// transparent "off" position.
     fn set_lowpass(&self, cutoff_hz: f32, q: f32) {
@@ -2237,14 +2225,6 @@ pub extern "C" fn stone_bus_samples_pulled(bus: u32) -> u64 {
     read_bus(bus, 0, Bus::samples_pulled)
 }
 
-/// This bus's TARGET gain -- what was last asked for, not the slewed value the
-/// audio thread is currently applying (which lives sample-side). Enough to
-/// assert that a settings apply reached the right bus.
-#[no_mangle]
-pub extern "C" fn stone_bus_gain(bus: u32) -> c_float {
-    read_bus(bus, 0.0, Bus::gain)
-}
-
 /// Loudest sample this bus has OUTPUT since the last call, post-fader -- so it
 /// reads what the bus is contributing to the mix, not what is playing into it,
 /// and a ducked or turned-down bus meters low. Can exceed 1.0: nothing limits
@@ -2259,27 +2239,12 @@ pub extern "C" fn stone_bus_peak(bus: u32) -> c_float {
     read_bus(bus, 0.0, Bus::meter)
 }
 
-/// How many ducks have been FIRED on this bus. The latch generation the audio
-/// thread already reads to notice a retrigger, exposed as-is -- so a caller can
-/// assert that an event ducked the right bus without capturing audio. It says
-/// nothing about the envelope's shape, which runs sample-side; that is pinned
-/// by `duck_attacks_then_releases`.
-#[no_mangle]
-pub extern "C" fn stone_bus_duck_count(bus: u32) -> u64 {
-    read_bus(bus, 0, Bus::duck_count)
-}
-
 /// Lowpass insert. `cutoff_hz` is the automation target -- slewed sample-side
 /// in log2(Hz), so a per-frame value from Rock ramps smoothly. Cutoff at max
 /// (~0.45 * rate) is the transparent "off" position.
 #[no_mangle]
 pub extern "C" fn stone_bus_set_lowpass(bus: u32, cutoff_hz: c_float, q: c_float) -> bool {
     with_bus(bus, |b| b.set_lowpass(cutoff_hz, q))
-}
-
-#[no_mangle]
-pub extern "C" fn stone_bus_lowpass_cutoff(bus: u32) -> c_float {
-    read_bus(bus, 0.0, Bus::lowpass_cutoff)
 }
 
 /// Distortion insert. `drive` >= 1 into a soft clipper, `mix` 0..1 against

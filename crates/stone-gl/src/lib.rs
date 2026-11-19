@@ -52,25 +52,9 @@ pub static GL_ERROR_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 /// as `stone_shader_error_count`; bounded runs exit nonzero on it.
 pub static SHADER_ERROR_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Seeded from `STONE_SHADER_FORCE_FAIL` on first read and settable after that
-/// (`stone_shader_force_fail`). A process-wide `OnceLock` read could not prove
-/// per-ENTRY attribution: both entries of a differential pair would see the same
-/// value, so no arm could diverge.
-static FORCE_SHADER_FAIL: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(-1);
-
 fn force_shader_failure() -> bool {
-    let current = FORCE_SHADER_FAIL.load(std::sync::atomic::Ordering::Relaxed);
-    if current >= 0 {
-        return current == 1;
-    }
-    let from_env = i8::from(std::env::var("STONE_SHADER_FORCE_FAIL").as_deref() == Ok("1"));
-    FORCE_SHADER_FAIL.store(from_env, std::sync::atomic::Ordering::Relaxed);
-    from_env == 1
-}
-
-/// Turn the injection above on or off from inside a running entry.
-pub fn set_force_shader_failure(on: bool) {
-    FORCE_SHADER_FAIL.store(i8::from(on), std::sync::atomic::Ordering::Relaxed);
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("STONE_SHADER_FORCE_FAIL").as_deref() == Ok("1"))
 }
 
 #[cfg(debug_assertions)]

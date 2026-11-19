@@ -326,23 +326,6 @@ fn reply(s: String) -> *const c_char {
     })
 }
 
-/// How many resource classes the ledger covers. Callers enumerate the engine's
-/// list rather than keeping their own -- a second list is a second thing to
-/// forget a class in.
-#[no_mangle]
-pub extern "C" fn stone_native_class_count() -> c_int {
-    CLASSES.len() as c_int
-}
-
-/// Name of class `index`, or null when out of range.
-#[no_mangle]
-pub extern "C" fn stone_native_class_name(index: c_int) -> *const c_char {
-    match CLASSES.get(index as usize) {
-        Some(c) => reply(c.name.to_string()),
-        None => std::ptr::null(),
-    }
-}
-
 /// The live handle set of one class, ascending, comma separated; the empty
 /// string for a class with nothing live. Null for an unknown class name, so a
 /// caller asking about a class that does not exist gets a refusal rather than

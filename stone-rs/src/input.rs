@@ -1174,21 +1174,6 @@ pub(crate) fn canonical_scancode(name: &str) -> Option<sdl2::keyboard::Scancode>
 }
 
 #[no_mangle]
-pub extern "C" fn stone_is_mouse_button_down(button: c_int) -> bool {
-    with_window(|window: &StoneWindow| {
-        let pump = window.event_pump.borrow();
-        let mouse = pump.mouse_state();
-        match button {
-            1 => mouse.left(),
-            2 => mouse.middle(),
-            3 => mouse.right(),
-            _ => false,
-        }
-    })
-    .unwrap_or(false)
-}
-
-#[no_mangle]
 pub extern "C" fn stone_get_mouse_position(x: *mut c_int, y: *mut c_int) {
     with_window(|window: &StoneWindow| {
         let pump = window.event_pump.borrow();

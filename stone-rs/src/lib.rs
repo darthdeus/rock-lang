@@ -341,7 +341,6 @@ pub(crate) use image_texture::{
     LoadedImage, IMAGES, WHITE_IMAGE,
 };
 mod canvas;
-mod clipboard;
 #[cfg(target_os = "macos")]
 mod display_pacer;
 mod gl_state;
@@ -2677,13 +2676,6 @@ fn activate_window_impl(window: &mut StoneWindow) {
 /// GL errors DebugGl has seen since process start (0 in release builds,
 /// where the per-call check compiles out). Sims assert this stays 0.
 /// u32 so LuaJIT sees a plain number, not a boxed uint64_t cdata.
-/// Make every subsequent shader compile/link fail, from inside a running entry.
-/// The env spelling (`STONE_SHADER_FORCE_FAIL`) still seeds it.
-#[no_mangle]
-pub extern "C" fn stone_shader_force_fail(on: bool) {
-    stone_gl::set_force_shader_failure(on);
-}
-
 #[no_mangle]
 pub extern "C" fn stone_gl_error_count() -> u32 {
     stone_gl::GL_ERROR_COUNT.load(std::sync::atomic::Ordering::Relaxed) as u32
@@ -3209,8 +3201,7 @@ pub extern "C" fn stone_set_window_title(_window: *mut StoneWindow, title: *cons
     });
 }
 
-#[no_mangle]
-pub extern "C" fn stone_set_window_position(x: c_int, y: c_int) {
+pub fn stone_set_window_position(x: c_int, y: c_int) {
     with_window_mut(|window| {
         let (fx, fy) = clamp_window_position(&window._video, &window.window, x, y);
         move_window(&mut window.window, fx, fy);

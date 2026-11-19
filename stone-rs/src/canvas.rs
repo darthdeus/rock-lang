@@ -1096,22 +1096,6 @@ pub extern "C" fn stone_get_canvas_texture(handle: u64) -> u32 {
     with_canvas(handle, |c| c.texture.0.get()).unwrap_or(0)
 }
 
-/// The DEPTH attachment's GL name, or 0. Same standing as the accessor above:
-/// the debug overlay's imgui path, not the rendering path. A separate accessor
-/// rather than a second `Canvas` value -- the depth attachment is not a render
-/// target and has no FBO of its own, so anything shaped like a Canvas would be
-/// a lie about what can be done with it.
-#[no_mangle]
-pub extern "C" fn stone_get_canvas_depth_texture(handle: u64) -> u32 {
-    if handle == 0 {
-        return 0;
-    }
-
-    with_canvas(handle, |c| c.depth_texture.map(|t| t.0.get()))
-        .flatten()
-        .unwrap_or(0)
-}
-
 /// MRT: attach the `id`-canvas's color texture as COLOR_ATTACHMENT1 of the
 /// `color`-canvas's FBO. Leaves the FBO's draw-buffer list at its default
 /// ([ATTACHMENT0]) -- the color pass toggles [0,1]/[0] per frame
