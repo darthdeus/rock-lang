@@ -37,7 +37,7 @@ impl<T, V> ArenaMap<Idx<T>, V> {
 
     /// Returns whether the map contains a value for the specified index.
     pub fn contains_idx(&self, idx: Idx<T>) -> bool {
-        matches!(self.v.get(Self::to_idx(idx)), Some(Some(_)))
+        self.get(idx).is_some()
     }
 
     /// Removes an index from the map, returning the value at the index if the index was previously in the map.
@@ -59,17 +59,17 @@ impl<T, V> ArenaMap<Idx<T>, V> {
     /// Returns a reference to the value associated with the provided index
     /// if it is present.
     pub fn get(&self, idx: Idx<T>) -> Option<&V> {
-        self.v.get(Self::to_idx(idx)).and_then(|it| it.as_ref())
+        self.v.get(Self::to_idx(idx)).and_then(Option::as_ref)
     }
 
     /// Returns an iterator over the values in the map.
     pub fn values(&self) -> impl DoubleEndedIterator<Item = &V> {
-        self.v.iter().filter_map(|o| o.as_ref())
+        self.v.iter().filter_map(Option::as_ref)
     }
 
     /// Returns an iterator over mutable references to the values in the map.
     pub fn values_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut V> {
-        self.v.iter_mut().filter_map(|o| o.as_mut())
+        self.v.iter_mut().filter_map(Option::as_mut)
     }
 
     /// Returns an iterator over the arena indexes and values in the map.

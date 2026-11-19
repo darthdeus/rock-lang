@@ -139,6 +139,12 @@ impl<T> Clone for IdxRange<T> {
     }
 }
 
+impl<T> Default for IdxRange<T> {
+    fn default() -> Self {
+        Self::new_empty()
+    }
+}
+
 impl<T> IdxRange<T> {
     /// Creates a new index range
     /// inclusive of the start value and exclusive of the end value.
@@ -151,9 +157,8 @@ impl<T> IdxRange<T> {
 
     /// Creates a new empty index range
     pub fn new_empty() -> Self {
-        IdxRange::new_exclusive(
-            Idx::from_raw(RawIdx::from_u32(0))..Idx::from_raw(RawIdx::from_u32(0)),
-        )
+        let zero = Idx::from_raw(RawIdx::from_u32(0));
+        Self::new_exclusive(zero..zero)
     }
 
     /// Creates a new index range
@@ -183,7 +188,7 @@ impl<T> IdxRange<T> {
         Idx::from_raw(RawIdx::from(self.range.1))
     }
 
-    /// Returns a crab range for the range
+    /// Returns the raw index range.
     pub fn make_range(&self) -> Range<u32> {
         self.range.0..self.range.1
     }
@@ -193,7 +198,7 @@ impl<T> Iterator for IdxRange<T> {
     type Item = Idx<T>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.range.0 >= self.range.1 {
+        if Self::is_empty(self) {
             return None;
         }
         let raw = self.range.0;
@@ -219,7 +224,7 @@ impl<T> Iterator for IdxRange<T> {
 
 impl<T> DoubleEndedIterator for IdxRange<T> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        if self.range.0 >= self.range.1 {
+        if Self::is_empty(self) {
             return None;
         }
         self.range.1 -= 1;
@@ -377,8 +382,8 @@ impl<T> AsMut<[T]> for Arena<T> {
 }
 
 impl<T> Default for Arena<T> {
-    fn default() -> Arena<T> {
-        Arena { data: Vec::new() }
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -420,15 +425,14 @@ impl<T> FromIterator<T> for Arena<T> {
 }
 
 /// An iterator over the arena’s elements.
-pub struct IntoIter<T>(Enumerate<<Vec<T> as IntoIterator>::IntoIter>);
+pub struct IntoIter<T>(Enumerate<std::vec::IntoIter<T>>);
 
 impl<T> Iterator for IntoIter<T> {
     type Item = (Idx<T>, T);
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.0
-            .next()
-            .map(|(idx, value)| (Idx::from_raw(RawIdx(idx as u32)), value))
+        let (idx, value) = self.0.next()?;
+        Some((Idx::from_raw(RawIdx(idx as u32)), value))
     }
 }
 
