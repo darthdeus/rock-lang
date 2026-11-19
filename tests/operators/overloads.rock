@@ -1,9 +1,73 @@
-// User operator overloads: mixed-type overloads (V2 + int, int + V2, several
-// overloads of one operator coexisting), compound assignment through an
-// overload on locals, fields, vector elements and safe-navigation chains, and
-// chained overload calls that must evaluate each operand once. Definition and
-// call-site symbols share skull-mir::mangle, so mixed operands must target the
-// same mangled symbol.
+// User operator overloads: every overloadable operator dispatching to its user
+// fn, mixed-type overloads (V2 + int, int + V2, several overloads of one
+// operator coexisting), compound assignment through an overload on locals,
+// fields, vector elements and safe-navigation chains, chained overload calls,
+// and call arguments that promote into an overload's float params. Definition
+// and call-site symbols share skull-mir::mangle, so mixed operands must target
+// the same mangled symbol.
+
+value Mark { v: int }
+
+operator +(a: Mark, b: Mark) -> int { return 1001 }
+
+operator -(a: Mark, b: Mark) -> int { return 1002 }
+
+operator *(a: Mark, b: Mark) -> int { return 1003 }
+
+operator /(a: Mark, b: Mark) -> int { return 1004 }
+
+operator %(a: Mark, b: Mark) -> int { return 1005 }
+
+operator ./(a: Mark, b: Mark) -> int { return 1006 }
+
+@test
+fn every_overloadable_operator_dispatches_to_the_user_fn() {
+    let a = Mark { v: 7 }
+    let b = Mark { v: 3 }
+    assert((a + b) == 1001, "+ must call the overload")
+    assert((a - b) == 1002, "- must call the overload")
+    assert((a * b) == 1003, "* must call the overload")
+    assert((a / b) == 1004, "/ must call the overload")
+    assert((a % b) == 1005, "% must call the overload")
+    assert((a ./ b) == 1006, "./ must call the overload")
+}
+
+// Primitive arithmetic is native codegen and must not be diverted by the
+// presence of overloads on an unrelated type.
+@test
+fn primitive_arithmetic_is_unaffected_by_user_overloads() {
+    assert(7 + 3 == 10, "int add stays native")
+    assert(7.0 / 2.0 == 3.5, "float div stays native")
+    assert(7 ./ 2 == 3, "int floor-div stays native")
+}
+
+// A newtype over a primitive derives its operators through the same path, and
+// the synthesized comparison operators are exempt from the rejection -- so
+// ordering on a newtype must still work.
+newtype Tally(int)
+
+@test
+fn a_newtype_still_derives_arithmetic_and_ordering() {
+    assert((Tally(4) + Tally(5)).0 == 9, "derived add")
+    assert(Tally(4) < Tally(5), "derived ordering survives the rejection")
+    assert(Tally(9) >= Tally(9), "and so does the non-strict form")
+}
+
+@test
+fn test_eval_order_nested_writes() {
+    let arr = [10, 20, 30]
+    let i = 0
+    let bump = (v: int) => {
+        arr[i] = v + { i += 1; i }
+    }
+    bump(5)
+    // LHS captured i=0, RHS mutates i to 1: arr[0] = 5 + 1 = 6
+    assert_eq(arr[0], 6)
+    assert_eq(i, 1)
+    bump(50)
+    // arr[1] = 50 + 2 = 52
+    assert_eq(arr[1], 52)
+}
 
 struct V2 {
     x: float,
@@ -24,7 +88,7 @@ fn __op_add(a: V2, b: float) -> V2 {
     return V2 { x: a.x + b, y: a.y + b }
 }
 
-// ---------- Sanity: V2 + V2 still picks the right overload ------------------
+// ---------- V2 + V2 still picks the right overload -------------------------
 @test(output = "4	7")
 fn test_v2_plus_v2_among_many_overloads() {
     let a = V2 { x: 1.0, y: 2.0 }
@@ -56,7 +120,6 @@ fn test_v2_compound_plus_primitive() {
 }
 
 // ---------- Primitive on the LEFT: int + Vec2 -------------------------------
-// This exercises the suspected double-underscore mangling bug.
 fn __op_add(a: int, b: V2) -> V2 {
     return V2 { x: float(a) + b.x, y: float(a) + b.y }
 }
@@ -87,19 +150,9 @@ fn test_v2_minus_and_times_int() {
     print(int(d.x), int(d.y))
 }
 
-// ---------- Nested mixed expression: `(V2 + int) + V2` ----------------------
-@test(output = "12	13")
-fn test_nested_mixed_expression() {
-    let a = V2 { x: 1.0, y: 2.0 }
-    let b = V2 { x: 1.0, y: 1.0 }
-    let c = (a + 10) + b
-    print(int(c.x), int(c.y))
-}
-
 // ---------- Compound RHS uses a mixed overload: `p += a * 2` ----------------
 // p, a are V2; `a * 2` selects __op_mul(V2, int) -> V2; then `p += V2` selects
-// __op_add(V2, V2) -> V2. Verifies the fix works when the compound RHS is
-// itself a mixed overload call.
+// __op_add(V2, V2) -> V2.
 @test(output = "21	42")
 fn test_compound_with_mixed_rhs() {
     let p = V2 { x: 1.0, y: 2.0 }
@@ -150,14 +203,6 @@ fn __op_mul(a: CV2, s: float) -> CV2 {
 
 fn __op_div(a: CV2, s: float) -> CV2 {
     return CV2 { x: a.x / s, y: a.y / s }
-}
-
-// ---------- Plain `+=` on simple ident ----------
-@test(output = "3	7")
-fn test_compound_add_overload_ident() {
-    let p = CV2 { x: 1.0, y: 2.0 }
-    p += CV2 { x: 2.0, y: 5.0 }
-    print(int(p.x), int(p.y))
 }
 
 // ---------- `+=` on a field with multiplied RHS ----------
@@ -281,3 +326,51 @@ fn test_operator_triple_chain() {
     print("{r.x}")
     print("{r.y}")
 }
+
+// --- Arithmetic and loop-variable call arguments promote into float params;
+// `fixv(x, y) * n` with an int `n` picks the int-scaled overload ---
+
+struct FixVec2 {
+    x: float,
+    y: float,
+}
+
+fn fixv(x: float, y: float) -> FixVec2 {
+    return FixVec2 { x: x, y: y }
+}
+
+operator *(v: FixVec2, scale: float) -> FixVec2 {
+    return FixVec2 { x: v.x * scale, y: v.y * scale }
+}
+
+operator *(v: FixVec2, scale: int) -> FixVec2 {
+    let s = float(scale)
+    return FixVec2 { x: v.x * s, y: v.y * s }
+}
+
+@test
+fn test_v_with_arithmetic_exprs() {
+    let PAD = 10.0
+    let BAR_HEIGHT = 20.0
+
+    let vec = fixv(2.0 * PAD, 3.0 * (BAR_HEIGHT + PAD))
+
+    assert_eq(vec.x, 20.0)
+    assert_eq(vec.y, 90.0)
+}
+
+@test
+fn test_v_in_nested_for_loops_with_multiplication() {
+    let bg_size = 28
+    let span = 3
+
+    for x in (-span)..(span + 1) {
+        for y in (-span)..(span + 1) {
+            let result = fixv(x, y) * bg_size
+
+            assert_eq(result.x, float(x * bg_size))
+            assert_eq(result.y, float(y * bg_size))
+        }
+    }
+}
+

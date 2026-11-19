@@ -119,7 +119,7 @@ fn main() {}
 
 //=== TEST CASE: newtype_eq_with_int_IncompatibleNewtypeOperation ===
 // The overloadable symbols are covered positively in
-// tests/operators/overloadable.rock.
+// tests/operators/overloads.rock.
 //! expect: type mismatch: expected `int`, found `UserId`
 newtype UserId(int)
 

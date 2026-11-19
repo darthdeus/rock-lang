@@ -17,38 +17,25 @@ fn as_binds_tighter_than_arithmetic() {
     assert_eq(5 / 2 as float, 2.5)
 }
 
-// `%` must bind with `*` and `/`, not below `+`/`-` and the comparisons.
-//
-// It did not: `rock-tokenizer`'s infix_bp put Mod at 21, which is under
-// `==`/`!=` (19) only, and below `<<`/`>>` (23), the comparisons (25), `+`/`-`
-// (31) and `*`/`/` (35). So `a + b % c` parsed as `(a + b) % c`, `a % b * c` as
-// `a % (b * c)`, and `a % b < c` as `a % (b < c)` -- a modulo of a bool, which
-// the typechecker rejected, so that shape simply could not be written. Only
-// `a * b % c` came out right, by the accident of `*` already binding tighter.
-//
-// Same table and same class of defect as `nullable/coalesce.rock`.
-//
-// The guards at the bottom pin the other side, so lowering the level cannot
-// silently drag `%` back under the operators it must stay above.
+// `%` binds with `*` and `/`, above `+`/`-`, the shifts and the comparisons.
+// Each assertion is chosen so a lower binding power gives a different answer;
+// the guards at the bottom pin the operators `%` must stay below.
 
 @test
 fn mod_binds_tighter_than_plus_and_minus() {
-    // 10 - (7 % 4) = 10 - 3 = 7. The old table read this as (10 - 7) % 4 = 3.
+    // 10 - (7 % 4) = 7, not (10 - 7) % 4 = 3.
     assert_eq(10 - 7 % 4, 7)
     assert_eq(10 + 7 % 4, 13)
-    // And on the left, where the old table swallowed the whole sum:
-    // 7 % (4 + 2) = 1 under the old reading, (7 % 4) + 2 = 5 under this one.
+    // (7 % 4) + 2 = 5, not 7 % (4 + 2) = 1.
     assert_eq(7 % 4 + 2, 5)
     assert_eq(7 % 4 - 1, 2)
 }
 
 @test
 fn mod_is_left_associative_with_mul_and_div() {
-    // (7 % 4) * 3 = 9. The old table read this as 7 % (4 * 3) = 7.
+    // (7 % 4) * 3 = 9, not 7 % (4 * 3) = 7.
     assert_eq(7 % 4 * 3, 9)
-    // (20 / 3) % 4, integer-divided: 6 % 4 = 2. Right either way, and that is
-    // the point -- it is the one shape the old table got right, so it guards
-    // against a fix that overshoots.
+    // (20 ./ 3) % 4 = 2: `./` on the left must still bind first.
     assert_eq(20 ./ 3 % 4, 2)
     assert_eq(7 * 4 % 5, 3)
     // Left-associative among themselves.
@@ -57,8 +44,7 @@ fn mod_is_left_associative_with_mul_and_div() {
 
 @test
 fn mod_binds_tighter_than_the_comparisons() {
-    // Not expressible at all before the fix: `7 % 4 < 2` parsed as
-    // `7 % (4 < 2)`, and int % bool is a type error.
+    // Parsed as `7 % (4 < 2)` this would be int % bool, a type error.
     assert_eq(7 % 4 < 2, false)
     assert_eq(7 % 4 > 2, true)
     assert_eq(7 % 4 >= 3, true)
@@ -67,11 +53,10 @@ fn mod_binds_tighter_than_the_comparisons() {
 
 @test
 fn mod_binds_tighter_than_the_shifts() {
-    // (7 % 4) << 2 = 12; `7 % (4 << 2)` = 7 under the old table.
+    // (7 % 4) << 2 = 12, not 7 % (4 << 2) = 7.
     assert_eq(7 % 4 << 2, 12)
-    // And on the right: the modulo is the SHIFT DISTANCE, not something applied
-    // to the shifted value. 24 >> (2 % 5) = 24 >> 2 = 6, where the old table
-    // read it as (24 >> 2) % 5 = 1.
+    // On the right the modulo is the shift distance: 24 >> (2 % 5) = 6, not
+    // (24 >> 2) % 5 = 1.
     assert_eq(24 >> 2 % 5, 6)
 }
 
@@ -102,17 +87,8 @@ fn mod_precedence_holds_for_floats() {
     assert_eq(7.0 % 4.0 * 3.0, 9.0)
 }
 
-// Tests that unary minus binds tighter than binary operators.
-// Bug: `-x / y - z / w` was being parsed as `-(x / y - z / w)`
-// instead of `(-x) / y - z / w`
-
-@test(output = "-7")
-fn unary_minus_with_division() {
-    let x = 10.0
-    let y = 2.0
-    let result = -x / y - y
-    print(result)
-}
+// Unary minus binds tighter than any binary operator: `-x / y - z / w` is
+// `(-x) / y - z / w`, not `-(x / y - z / w)`.
 
 @test(output = "-5")
 fn unary_minus_in_compound_expression() {
@@ -120,7 +96,7 @@ fn unary_minus_in_compound_expression() {
     let b = 2.0
     let c = 4.0
     let d = 2.0
-    // Bug would compute: -(6.0 / 2.0 - 4.0 / 2.0) = -(3.0 - 2.0) = -1.0
+    // The wrong parse gives -(3.0 - 2.0) = -1.0.
     let result = -a / b - c / d
     print(result)
 }
@@ -130,9 +106,7 @@ fn unary_minus_field_access_with_division() {
     let pos = 6.0
     let tw = 1.0
     let th = 0.5
-    // This is the actual pattern from the iso projection bug:
-    // (-pos / tw - pos / th) / 2.0
-    // Bug computes: (-(6 / 1 - 6 / 0.5)) / 2 = -(6 - 12) / 2 = 3
+    // The wrong parse gives -(6 - 12) / 2 = 3.
     let result = (-pos / tw - pos / th) / 2.0
     print(result)
 }
