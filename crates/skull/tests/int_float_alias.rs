@@ -1,4 +1,4 @@
-use crate::common::{self, function_body};
+use crate::common::{emit_module, function_body, run_main};
 
 fn register_moves(body: &str) -> Vec<&str> {
     body.lines()
@@ -38,10 +38,10 @@ fn main() {
 
 #[test]
 fn reused_int_to_float_across_a_yield_aliases_and_resumes_its_value() {
-    let lua = common::try_emit_module(YIELD_ACROSS).expect("emit");
+    let lua = emit_module(YIELD_ACROSS);
     let step = function_body(&lua, "scaled_int__step");
     assert_eq!(register_moves(step), Vec::<&str>::new());
-    assert_eq!(common::run_main(&lua), "42\n18\n7");
+    assert_eq!(run_main(&lua), "42\n18\n7");
 }
 
 const SELECTION: &str = r#"
@@ -64,11 +64,11 @@ fn main() {
 
 #[test]
 fn aliased_int_to_float_selection_operand_keeps_native_minmax() {
-    let lua = common::try_emit_module(SELECTION).expect("emit");
+    let lua = emit_module(SELECTION);
     let body = function_body(&lua, "min_param_int_float");
     assert!(body.contains("math.min(c0, c1)"));
     let body = function_body(&lua, "min_register_int_float");
     assert!(body.contains("math.min("));
     assert_eq!(register_moves(body), Vec::<&str>::new());
-    assert_eq!(common::run_main(&lua), "2\n2.5\n8.5\n0");
+    assert_eq!(run_main(&lua), "2\n2.5\n8.5\n0");
 }

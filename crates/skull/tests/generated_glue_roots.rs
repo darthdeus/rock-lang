@@ -1,9 +1,8 @@
 use crate::common::{
-    self, definition_symbols, emit_v1_package, fn_ref, module_id, ws_v1_package,
+    self, body_id, definition_symbols, emit_v1_package, module_id, ws_v1_package,
     ws_with_dependency_module, ws_with_stdlib_module,
 };
 use skull::mir_emit::emit_full;
-use ustr::Ustr;
 
 const SIM_LIB: &str = r#"
 fn register_sim(name: string, body: () -> int) { print("{name}:{body()}") }
@@ -51,19 +50,12 @@ fn shared_prefix_dependency_retains_only_reached_bodies() {
         "fn unused_dependency_body() -> int { return 7 }\nfn reached_dependency_body() -> int { return 9 }",
         "fn main() { print(0) }",
     );
-    let main = fn_ref(&edited, "main");
-    let incremental = skull::mir_emit::emit_incremental(
-        &edited,
-        &mut cache,
-        &[(
-            main.module,
-            bone_semantic::hir::BodyOwner::Function(main.func),
-        )],
-    )
-    .expect("remove the dependency call incrementally");
+    let incremental =
+        skull::mir_emit::emit_incremental(&edited, &mut cache, &[body_id(&edited, "main")])
+            .expect("remove the dependency call incrementally");
     let fresh = skull::mir_emit::FullEmit::program()
         .project_root(Some("/tmp/rock-mono-project"))
-        .run(&edited, main.module)
+        .run(&edited, mid)
         .expect("fresh emission after removing the dependency call")
         .0;
     assert_eq!(incremental.lua, fresh.lua);
@@ -103,9 +95,8 @@ fn v1_sim_glue_rejects_two_register_sim_definitions() {
     ];
     let ws = ws_v1_package("v1sims_twice", &fragments);
     let mid = module_id(&ws, "main.rock");
-    let error = match skull::mir_emit::emit_workspace_mir(&ws, mid) {
-        Ok(_) => panic!("two registrars must not emit"),
-        Err(error) => error,
+    let Err(error) = skull::mir_emit::emit_workspace_mir(&ws, mid) else {
+        panic!("two registrars must not emit");
     };
     assert!(
         error.message.contains("engine_a::register_sim")
@@ -119,10 +110,7 @@ fn a_shared_prefix_alone_does_not_validate_the_project_root() {
         "fn unused_dependency_body() -> int { return 7 }",
         "fn main() { print(\"hi\") }",
     );
-    let mid = *ws
-        .module_ids
-        .get(&Ustr::from("/tmp/rock-mono-project/main.rock"))
-        .unwrap();
+    let mid = module_id(&ws, "/tmp/rock-mono-project/main.rock");
     let result = skull::mir_emit::FullEmit::program()
         .project_root(Some("/tmp/rock-mono"))
         .run(&ws, mid);

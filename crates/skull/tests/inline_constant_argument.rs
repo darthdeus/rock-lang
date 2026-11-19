@@ -18,5 +18,5 @@ fn inlined_branch_on_constant_argument_folds() {
     let lua = emit_module(SRC);
     let body = function_body(&lua, "caller");
     assert!(!body.contains("if "));
-    assert_eq!(run_main(&lua).trim(), "7");
+    assert_eq!(run_main(&lua), "7");
 }

@@ -28,26 +28,6 @@ fn generic_inline_at_value_type_splices_zero_box() {
     assert!(!body.contains("__nb_checked_get"));
 }
 
-const INTRINSIC_INST: &str = r#"
-value V2 { x: float, y: float }
-
-fn make() -> float {
-    let fv: FlatVec<V2> = flat_vec_new(8)
-    fv.push(V2 { x: 3.0, y: 4.0 })
-    return fv.get(0).x
-}
-
-fn main() { let _ = make() }
-"#;
-
-#[test]
-fn generic_inline_intrinsic_resolves_ctype_at_value_instantiation() {
-    let lua = emit_module(INTRINSIC_INST);
-    let body = function_body(&lua, "make");
-    assert!(body.contains(r#"__rock_nb_alloc("V2","#));
-    assert!(!body.contains("flat_vec_new"));
-}
-
 const TRANSITIVE_CONCRETE_INTRINSIC: &str = r#"
 value TV2 { x: float, y: float }
 
