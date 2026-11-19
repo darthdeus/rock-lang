@@ -1,6 +1,6 @@
 use bone_core::modules::{
-    FragmentScope, NsNode, NsPackage, NsVisibility, STD_PACKAGE_ID, STD_PACKAGE_NAME, UsePathRef,
-    is_stdlib_module_file,
+    DefKind, FragmentScope, NsNode, NsPackage, NsVisibility, STD_PACKAGE_ID, STD_PACKAGE_NAME,
+    UsePathRef, is_stdlib_module_file,
 };
 use skull_parser::stdlib::ModuleSet;
 use skull_parser::{Ast, Item, ItemKind};
@@ -936,7 +936,7 @@ fn api_closure_failure_of(
     let module_reachable =
         ws.ns.package(pkg_id).is_some() && reachable_modules.contains(&meta.node);
     let is_exported = match meta.kind {
-        bone_core::modules::DefKind::Callable => {
+        DefKind::Callable => {
             // Check reachability before scanning members of every overload family.
             (reachable_defs.contains(def_key) || module_reachable)
                 && ws.functions_by_name.get(def_key).is_some_and(|fns| {
@@ -982,7 +982,7 @@ fn api_closure_failure_of(
 
     if is_exported {
         match meta.kind {
-            bone_core::modules::DefKind::Callable => {
+            DefKind::Callable => {
                 if let Some(fn_list) = ws.functions_by_name.get(def_key) {
                     for &(mid, fid) in fn_list {
                         if !ws.callable_member_is_public(*def_key, mid, fid) {
@@ -1001,7 +1001,7 @@ fn api_closure_failure_of(
                     }
                 }
             }
-            bone_core::modules::DefKind::Type => {
+            DefKind::Type => {
                 if let Some(sid) = ws.struct_by_name.get(def_key) {
                     let s = &ws.module(sid.module).structs[sid.def];
                     for f in &s.fields {
@@ -1031,7 +1031,7 @@ fn api_closure_failure_of(
                     need(nt.wrapped, nt.span, "payload of exported newtype")?;
                 }
             }
-            bone_core::modules::DefKind::Global => {
+            DefKind::Global => {
                 if let Some(&ty) = ws
                     .globals_by_name
                     .get(&meta.name)
@@ -1218,7 +1218,7 @@ pub enum ScopeItem {
     /// declared visibility and item span.
     Def {
         name: ustr::Ustr,
-        kind: &'static str,
+        kind: DefKind,
         vis: Option<skull_parser::Visibility>,
         span: Span,
     },
@@ -1546,13 +1546,8 @@ fn register_stdlib_items(
             continue;
         };
         let (name, kind) = (*name, *kind);
-        let table = match kind {
-            "type" => &mut root.owned_types,
-            "global" => &mut root.owned_globals,
-            "callable" => &mut root.owned_callables,
-            _ => &mut root.owned_decorators,
-        };
-        if table.contains_key(&name) && kind != "callable" {
+        let table = root.owned_table_mut(kind);
+        if table.contains_key(&name) && kind != DefKind::Callable {
             return Err(CompilerError::new_with_label(
                 *span,
                 format!("duplicate standard-library export `{name}`"),
@@ -1691,11 +1686,7 @@ fn register_items(
                 }
                 {
                     let parent = ensure_namespace_node(ws, pkg_id, path, node_key);
-                    if parent.owned_types.contains_key(block_name)
-                        || parent.owned_globals.contains_key(block_name)
-                        || parent.owned_callables.contains_key(block_name)
-                        || parent.owned_decorators.contains_key(block_name)
-                    {
+                    if parent.owned(*block_name).is_some() {
                         errs.push(CompilerError::new_with_label(
                             *item_span,
                             format!(
@@ -1749,11 +1740,11 @@ fn register_items(
                 def_key_buf.push_str(&bare);
                 let def_key = ustr::Ustr::from(&def_key_buf);
                 // The definition check reports duplicate decorators with their first location.
-                if kind == "decorator" && node.owned_decorators.contains_key(&bare) {
+                if kind == DefKind::Decorator && node.owned_decorators.contains_key(&bare) {
                     continue;
                 }
                 let callable_overload =
-                    kind == "callable" && node.owned_callables.contains_key(&bare);
+                    kind == DefKind::Callable && node.owned_callables.contains_key(&bare);
                 let taken = node.owned_types.contains_key(&bare)
                     || node.owned_globals.contains_key(&bare)
                     || (node.owned_callables.contains_key(&bare) && !callable_overload)
@@ -1769,25 +1760,13 @@ fn register_items(
                     ));
                     continue;
                 }
-                let table = match kind {
-                    "type" => &mut node.owned_types,
-                    "global" => &mut node.owned_globals,
-                    "callable" => &mut node.owned_callables,
-                    _ => &mut node.owned_decorators,
-                };
-                table.insert(bare, def_key);
-                let def_kind = match kind {
-                    "type" => bone_core::modules::DefKind::Type,
-                    "global" => bone_core::modules::DefKind::Global,
-                    "callable" => bone_core::modules::DefKind::Callable,
-                    _ => bone_core::modules::DefKind::Decorator,
-                };
+                node.owned_table_mut(kind).insert(bare, def_key);
                 let vis = NsVisibility::from_parser(
                     &item_vis
                         .clone()
                         .unwrap_or(skull_parser::Visibility::Private),
                 );
-                if def_kind == bone_core::modules::DefKind::Callable {
+                if kind == DefKind::Callable {
                     let members = node.callable_members.entry(bare).or_default();
                     let ordinal = members.iter().filter(|member| member.file == file).count();
                     members.push(bone_core::modules::CallableMember {
@@ -1800,13 +1779,13 @@ fn register_items(
                     package: pkg_id,
                     module: path.to_vec(),
                     node: node_key,
-                    kind: def_kind,
+                    kind,
                     name: bare,
                     // Keep the first callable's location as stable family metadata.
                     vis,
                     span: *item_span,
                 };
-                if def_kind == bone_core::modules::DefKind::Callable {
+                if kind == DefKind::Callable {
                     ws.defs.entry(def_key).or_insert(meta);
                 } else {
                     ws.defs.insert(def_key, meta);
@@ -1862,15 +1841,15 @@ fn share_export(
     }
 }
 
-fn owned_name_and_kind(item: &ItemKind) -> Option<(ustr::Ustr, &'static str)> {
+fn owned_name_and_kind(item: &ItemKind) -> Option<(ustr::Ustr, DefKind)> {
     match item {
-        ItemKind::Struct(s) => Some((s.name.name, "type")),
-        ItemKind::Enum(e) => Some((e.name.name, "type")),
-        ItemKind::Newtype(n) => Some((n.name.name, "type")),
-        ItemKind::Global(g) => Some((g.name.name, "global")),
+        ItemKind::Struct(s) => Some((s.name.name, DefKind::Type)),
+        ItemKind::Enum(e) => Some((e.name.name, DefKind::Type)),
+        ItemKind::Newtype(n) => Some((n.name.name, DefKind::Type)),
+        ItemKind::Global(g) => Some((g.name.name, DefKind::Global)),
         // The macro registry owns discovery; expansion removes these before lowering.
-        ItemKind::Function(f) if !f.is_macro => Some((f.name.name, "callable")),
-        ItemKind::Decorator(d) => Some((d.name.name, "decorator")),
+        ItemKind::Function(f) if !f.is_macro => Some((f.name.name, DefKind::Callable)),
+        ItemKind::Decorator(d) => Some((d.name.name, DefKind::Decorator)),
         _ => None,
     }
 }

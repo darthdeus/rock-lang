@@ -225,6 +225,16 @@ impl NsNode {
         .into_iter()
         .find_map(|(table, kind)| table.get(&name).map(|&key| (key, kind)))
     }
+
+    pub fn owned_table_mut(&mut self, kind: DefKind) -> &mut FxHashMap<Ustr, Ustr> {
+        match kind {
+            DefKind::Type => &mut self.owned_types,
+            DefKind::Global => &mut self.owned_globals,
+            DefKind::Callable => &mut self.owned_callables,
+            DefKind::Decorator => &mut self.owned_decorators,
+            DefKind::Module => unreachable!("modules are children, not owned definitions"),
+        }
+    }
 }
 
 /// A module-scope `pub use` / `private use`. The target stays unresolved: the

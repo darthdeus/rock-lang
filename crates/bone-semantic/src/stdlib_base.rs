@@ -8,6 +8,7 @@ use skull_parser::{Ast, ItemKind, collect_registry, cook_one, is_hygiene_name, m
 
 use crate::prelude::*;
 use crate::semantic_passes::{FragmentContribution, ScopeItem};
+use bone_core::modules::DefKind;
 
 /// The names through which a user file can reach the warm modules.
 #[derive(Clone, Debug, Default)]
@@ -59,7 +60,7 @@ pub fn apart_from(warm: &WarmNames, ast: &Ast, contribution: &FragmentContributi
     fn apart(items: &[ScopeItem], warm: &FxHashSet<Ustr>) -> bool {
         items.iter().all(|item| match item {
             ScopeItem::Def { name, kind, .. } => {
-                let bare = *kind == "callable" && name.as_str().starts_with("__op_");
+                let bare = *kind == DefKind::Callable && name.as_str().starts_with("__op_");
                 !(bare && warm.contains(name))
             }
             ScopeItem::Module { items, .. } => apart(items, warm),
