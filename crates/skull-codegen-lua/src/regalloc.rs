@@ -329,20 +329,32 @@ fn raw<T>(i: Idx<T>) -> usize {
     u32::from(i.into_raw()) as usize
 }
 
-/// The registers `inst` reads, seeing through operands folded into it.
-pub(crate) fn effective_uses(
+/// The registers operand `v` reads, seeing through folded operands.
+fn register_reads(func: &MirFunc, inline: &[bool], v: Idx<Inst>, push: &mut impl FnMut(Idx<Inst>)) {
+    if inline[raw(v)] {
+        func.insts[v].uses_each(&mut |u| register_reads(func, inline, u, push));
+    } else {
+        push(v);
+    }
+}
+
+/// The cells operand `v` reads, seeing through folded operands and counting
+/// a value computed in a cell.
+fn cell_reads(
     func: &MirFunc,
     inline: &[bool],
-    inst: &Inst,
-    push: &mut impl FnMut(Idx<Inst>),
+    alias: &[Option<Idx<Cell>>],
+    v: Idx<Inst>,
+    push: &mut impl FnMut(Idx<Cell>),
 ) {
-    inst.uses_each(&mut |u| {
-        if inline[raw(u)] {
-            effective_uses(func, inline, &func.insts[u], push);
-        } else {
-            push(u);
+    if let Some(cell) = alias_at(alias, v) {
+        push(cell);
+    } else if inline[raw(v)] {
+        match &func.insts[v] {
+            Inst::Load(cell) => push(*cell),
+            nested => nested.uses_each(&mut |u| cell_reads(func, inline, alias, u, push)),
         }
-    });
+    }
 }
 
 /// A counted loop the emitter renders as a Lua `for` block.
@@ -565,17 +577,16 @@ impl Reads {
         &self.leaves[start as usize..end as usize]
     }
 
-    /// The registers `leaves` read under `inline`, as [`effective_uses`].
+    /// The registers `leaves` read under `inline`.
     fn values(func: &MirFunc, inline: &[bool], leaves: &[u32], mut push: impl FnMut(Idx<Inst>)) {
         for &leaf in leaves {
-            if leaf & CELL_LEAF != 0 {
-                continue;
-            }
-            let v = Idx::from_raw(RawIdx::from_u32(leaf));
-            if inline[raw(v)] {
-                effective_uses(func, inline, &func.insts[v], &mut push);
-            } else {
-                push(v);
+            if leaf & CELL_LEAF == 0 {
+                register_reads(
+                    func,
+                    inline,
+                    Idx::from_raw(RawIdx::from_u32(leaf)),
+                    &mut push,
+                );
             }
         }
     }
@@ -594,15 +605,13 @@ impl Reads {
                 push(Idx::from_raw(RawIdx::from_u32(leaf & !CELL_LEAF)));
                 continue;
             }
-            let v = Idx::from_raw(RawIdx::from_u32(leaf));
-            if let Some(cell) = alias_at(alias, v) {
-                push(cell);
-            } else if inline[raw(v)] {
-                match &func.insts[v] {
-                    Inst::Load(cell) => push(*cell),
-                    nested => inlined_operand_cell_uses(func, inline, alias, nested, &mut push),
-                }
-            }
+            cell_reads(
+                func,
+                inline,
+                alias,
+                Idx::from_raw(RawIdx::from_u32(leaf)),
+                &mut push,
+            );
         }
     }
 }
@@ -884,28 +893,6 @@ pub(crate) fn cell_uses(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
 /// [`store_targets`]); an empty table means none is.
 pub(crate) fn alias_at(alias: &[Option<Idx<Cell>>], v: Idx<Inst>) -> Option<Idx<Cell>> {
     alias.get(raw(v)).copied().flatten()
-}
-
-fn inlined_operand_cell_uses(
-    func: &MirFunc,
-    inline: &[bool],
-    alias: &[Option<Idx<Cell>>],
-    inst: &Inst,
-    push: &mut impl FnMut(Idx<Cell>),
-) {
-    inst.uses_each(&mut |value| {
-        if let Some(cell) = alias_at(alias, value) {
-            push(cell);
-            return;
-        }
-        if !inline[raw(value)] {
-            return;
-        }
-        match &func.insts[value] {
-            Inst::Load(cell) => push(*cell),
-            nested => inlined_operand_cell_uses(func, inline, alias, nested, push),
-        }
-    });
 }
 
 /// Counting a value computed in a cell.
