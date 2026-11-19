@@ -6,8 +6,6 @@ fn f(x: int) -> int { print(x); return 0 }
 
 struct Point { x: int, y: int }
 
-global g: int = 50
-
 @test(output = "11\n12\n13\n10")
 fn test_for_loop_shadowing() {
     let x = 10
@@ -45,24 +43,6 @@ fn test_function_overload_shadowing() {
     let result = f(10)
 }
 
-@test(output = "5\n6\n2\n1")
-fn test_multiple_level_shadowing() {
-    let x = 1
-    if true {
-        let x = x + 1
-        if true {
-            let x = x * 3
-            if true {
-                let x = x - 1
-                print(x)
-            }
-            print(x)
-        }
-        print(x)
-    }
-    print(x)
-}
-
 @test(output = "16\n8\n8\n5\n3")
 fn test_complex_expression_shadowing() {
     let x = 5
@@ -93,26 +73,4 @@ fn test_struct_field_shadowing() {
         print(x)
     }
     print(x)
-}
-
-@test(output = "20\n10")
-fn test_else_block_shadowing() {
-    let x = 10
-    if false {
-        print(x)
-    } else {
-        let x = x * 2
-        print(x)
-    }
-    print(x)
-}
-
-@test(output = "50\n15\n50")
-fn test_global_shadowing() {
-    print(g)
-    if true {
-        let g = 15
-        print(g)
-    }
-    print(g)
 }

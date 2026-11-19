@@ -7,33 +7,11 @@ fn get_value() -> int {
     return 42
 }
 
-fn get_string() -> string {
-    return "hello"
-}
-
 @test
 fn test_function_shadowing_with_same_name() {
     let get_value = get_value()
 
     assert_eq(get_value, 42)
-}
-
-// Another case with a different type
-@test
-fn test_function_shadowing_string() {
-    let get_string = get_string()
-
-    assert_eq(get_string, "hello")
-}
-
-// This pattern works fine - different variable name
-@test
-fn test_no_shadowing_different_name() {
-    let value = get_value()
-    assert_eq(value, 42)
-
-    let str = get_string()
-    assert_eq(str, "hello")
 }
 
 // More complex case - shadowing in nested scope

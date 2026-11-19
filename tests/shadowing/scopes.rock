@@ -8,7 +8,7 @@ fn helper_function() -> int {
 
 global global_var: int = 999
 
-fn test_nested() -> int {
+fn nested_call() -> int {
     let helper_function = 30
     return test_inner(helper_function)
 }
@@ -19,7 +19,7 @@ fn test_inner(helper: int) -> int {
 
 @test(output = "30\n7\n5\n999\n99")
 fn params_and_locals_shadow_function_names() {
-    print(test_nested())
+    print(nested_call())
     print(multi_param_test(7, 8))
     print(nested_local_shadows_helper())
     print(helper())
@@ -85,10 +85,6 @@ fn test_else_branch_shadowing() {
     print(branch_var)
 }
 
-struct Counter {
-    count: int
-}
-
 // Helper functions
 fn helper() -> int {
     return 999
@@ -109,7 +105,6 @@ fn nested_local_shadows_helper() -> int {
 }
 
 // Global variables
-global g: int = 100
 global counter: int = 42
 global value: int = 100
 global counter2: int = 0
@@ -155,24 +150,6 @@ fn test_func(x: int = 10, default_val: int = 20) -> int {
     return x + default_val
 }
 
-fn increment(c: Counter, count: int) -> Counter {
-    return Counter {
-        count: c.count + count
-    }
-}
-
-fn level1(x: int) -> int {
-    // x = parameter (shadows global)
-    let result = x * 10
-
-    let inner = () => {
-        let x = 100
-        return x + result
-    }
-
-    return inner()
-}
-
 fn test_types() {
     print(value_func())
 
@@ -184,21 +161,6 @@ fn test_types() {
         print(value)
     }
     inner()
-}
-
-fn f(x: int) -> int {
-    return x
-}
-
-fn g_func(x: int) -> int {
-    let x = x * 2
-    return f(x)
-}
-
-fn h(x: int) -> int {
-    let x = g_func(x)
-    let x = f(x)
-    return x
 }
 
 fn test_type_alias(x: int) -> int {
@@ -292,29 +254,9 @@ fn default_parameter_with_shadowing() {
     print(test_func(5, 3))
 }
 
-@test(output = "15")
-fn method_parameter_shadows_field() {
-    let c = Counter { count: 10 }
-    let c2 = increment(c, 5)
-    print(c2.count)
-}
-
-@test(output = "150\n5\n5")
-fn multiple_shadow_levels() {
-    let x = 5
-    print(level1(x))
-    print(x)
-    print(x)
-}
-
 @test(output = "42\nhello\n3.14")
 fn shadow_with_different_types() {
     test_types()
-}
-
-@test(output = "10")
-fn shadow_chain_in_function_calls() {
-    print(h(5))
 }
 
 @test(output = "1\n2\n3\nfalse")

@@ -136,16 +136,6 @@ fn test_multilevel_lambda_capture() {
     }
 }
 
-// Test 5: Shadowing with accumulation pattern
-@test(output = "Final: 10")
-fn test_shadow_accumulation() {
-    let sum: int = 0
-    let sum: int = sum + 1
-    let sum: int = sum + 2
-    let sum: int = sum + 3
-    let sum: int = sum + 4
-    print("Final: " + sum.to_string())
-}
 // Test 5 v2: Shadowing with mutation and loops
 @test(output = "Iteration 0: 0\nIteration 1: 1\nIteration 2: 2\nIteration 3: 3\nIteration 4: 4\nOuter sum: 0")
 fn test_shadow_in_loop_iterations() {

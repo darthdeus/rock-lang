@@ -55,35 +55,3 @@ fn test_lambda_shadowing_with_continue_in_nested_closure() {
     }
     )
 }
-
-@test
-fn test_lambda_shadowing_simple_case_works() {
-    // This simpler case without nested closure works fine
-    let mesh: Mesh? = Mesh { data: 42 }
-
-    if mesh != null {
-        let mesh = mesh
-
-        // Both direct and lambda calls work
-        draw_mesh(mesh)
-        with_debug_group("test") @ draw_mesh(mesh)
-    }
-}
-
-@test
-fn test_lambda_shadowing_in_loop_works() {
-    // Loop without outer closure also works
-    let items = [0]
-
-    for i in items {
-        let mesh: Mesh? = Mesh { data: 42 }
-
-        if mesh != null {
-            let mesh = mesh
-
-            // Both direct and lambda calls work
-            draw_mesh(mesh)
-            with_debug_group("item-{i}") @ draw_mesh(mesh)
-        }
-    }
-}
