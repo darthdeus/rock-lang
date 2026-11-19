@@ -5,25 +5,15 @@ use bone_semantic::inference::{ComptimeInputs, ComptimeVarValue};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// The invocation's `--channel`/`--var` selection. Set once by `run_cli`
-/// before dispatch; read-only afterwards. Per-invocation CLI state, not a
-/// mutable mechanism -- resolution itself stays per-project at the
-/// chokepoints.
 #[derive(Debug, Default)]
 struct CliSelection {
     channel: Option<String>,
-    /// `--target-os`: the artifact target for the `platform` builtin. A
-    /// cross-build packages on one OS for another, so the packaging host is
-    /// only a proxy used when this is absent.
     target_os: Option<String>,
     overrides: std::collections::HashMap<String, String>,
 }
 
 static SELECTION: OnceLock<CliSelection> = OnceLock::new();
 
-/// Record the invocation's selection. `overrides` are raw `NAME=VALUE`
-/// strings; a malformed one rejects here so the failure names the flag rather
-/// than surfacing as an undeclared-var error later.
 pub(crate) fn set_invocation_selection(
     channel: Option<String>,
     target_os: Option<String>,
@@ -36,8 +26,6 @@ pub(crate) fn set_invocation_selection(
         };
         parsed.insert(name.to_string(), value.to_string());
     }
-    // rock-host consumers of the channel (dependency resolution, source
-    // loading) cannot read SELECTION; mirror the same values into rock-host.
     rock_host::stick::set_invocation_channel(channel.clone());
     SELECTION
         .set(CliSelection {
@@ -49,8 +37,6 @@ pub(crate) fn set_invocation_selection(
     Ok(())
 }
 
-/// The invocation's explicit selection as `rock` arguments, for a child
-/// `rock` that compiles on this invocation's behalf.
 pub fn invocation_selection_args() -> Vec<String> {
     let Some(selection) = SELECTION.get() else {
         return Vec::new();
@@ -82,7 +68,6 @@ mod tests {
     }
 }
 
-/// A single-file build inherits build variables from its enclosing project.
 pub(crate) fn stamp_workspace(
     ws: &mut bone_semantic::inference::Workspace,
     anchor: &Path,
@@ -91,11 +76,6 @@ pub(crate) fn stamp_workspace(
     Ok(())
 }
 
-/// [`inputs_for_project_dir`] keyed by the invocation's entry path: a file
-/// anchors at its parent (so a single file inside a `[build.vars]` project
-/// behaves the same as the project build, on both backends), a directory at
-/// itself. A path that does not exist on disk (synthetic in-memory module)
-/// has no enclosing project and resolves empty.
 pub(crate) fn inputs_for_entry_path(anchor: &Path) -> Result<ComptimeInputs> {
     let dir = if anchor.is_dir() {
         anchor
@@ -114,17 +94,12 @@ pub(crate) fn inputs_for_project_dir(dir: &Path) -> Result<ComptimeInputs> {
     inputs_for_project_dir_as(dir, None)
 }
 
-/// A project's comptime inputs, resolved on a thread of their own. Its `cmd`
-/// vars are processes the compile would otherwise wait on before discovery,
-/// and nothing reads the values before the program checks.
 pub(crate) enum ProjectInputs {
     Ready(ComptimeInputs),
     Resolving(std::thread::JoinHandle<Result<ComptimeInputs>>),
 }
 
 impl ProjectInputs {
-    /// Start resolving the project at/above `dir`. The compiler image hash
-    /// starts as soon as the inputs say a source fingerprint needs it.
     pub(crate) fn resolve(dir: &Path) -> Self {
         let dir = dir.to_path_buf();
         Self::Resolving(std::thread::spawn(move || {
@@ -151,8 +126,6 @@ impl From<ComptimeInputs> for ProjectInputs {
     }
 }
 
-/// [`inputs_for_project_dir`] as resolved by a `build_command` invocation
-/// (`ROCK_BUILD_COMMAND`), whatever command this process is.
 pub(crate) fn inputs_for_project_dir_as(
     dir: &Path,
     build_command: Option<&str>,
@@ -190,9 +163,6 @@ pub(crate) fn inputs_for_project_dir_as(
     inputs_for_project_with_config(&project_dir, &cfg, build_command)
 }
 
-/// Resolve inputs from a config the caller has already parsed. Release
-/// preparation uses this path so `[release]` selection and `[build.vars]`
-/// resolution share one `StickConfig` parse.
 pub(crate) fn inputs_for_project_with_config(
     project_dir: &Path,
     cfg: &rock_host::stick::StickConfig,
@@ -242,8 +212,6 @@ pub(crate) fn inputs_for_project_with_config(
         .into_iter()
         .map(|name| ustr::Ustr::from(&name))
         .collect();
-    // Fallback only: an embed normally resolves against the calling file's own
-    // package root, and reaches this when the module has no file on disk.
     inputs.embed_root = Some(project_dir.to_path_buf());
     for (name, var) in resolved.vars {
         inputs.vars.insert(
@@ -297,8 +265,6 @@ fn resolve_source_fingerprints(
         hash.update(value.as_bytes());
     }
     let mut resolved = Vec::new();
-    // Declarations share files, and each file's identity and bytes are the
-    // same at every owner.
     let mut identities = rustc_hash::FxHashMap::default();
     let mut texts = rustc_hash::FxHashMap::default();
     let mut source_text = |file: &str| -> Option<String> {
@@ -355,8 +321,6 @@ fn resolve_source_fingerprints(
             .map_err(anyhow::Error::msg)?;
         hash.update((owners.len() as u64).to_le_bytes());
         for owner in owners {
-            // Canonical declaration identity is stable across worktree roots.
-            // Hash all defining bytes, including defaults and helper bodies.
             field(
                 &mut hash,
                 bone_core::modules::display_name(owner.name.as_str()),
@@ -418,7 +382,6 @@ fn resolve_source_fingerprints(
     Ok(())
 }
 
-/// Resolve a filesystem support file from the selected package or project.
 pub(crate) fn resolve_source_fingerprint_support_path(
     file: &str,
     embed_root: Option<&Path>,
@@ -449,10 +412,6 @@ pub(crate) fn resolve_source_fingerprint_support_path(
     })
 }
 
-/// Resolve declared fingerprints using the checked program's source snapshot.
-/// The reader must return exactly the bytes used to check each file; support
-/// files fall back to the project's filesystem. Stdlib always uses the same
-/// compiler-selected snapshot as parsing, including embedded installations.
 pub(crate) fn resolve_checked_inputs(
     ws: &bone_semantic::inference::Workspace,
     mut inputs: ComptimeInputs,
@@ -503,11 +462,6 @@ pub(crate) fn resolve_checked_inputs(
     Ok(inputs)
 }
 
-/// Start computing [`compiler_identity`] on its own thread when `inputs`
-/// will need it. Hashing the compiler image takes longer than discovery and
-/// parsing together on a dev build, and nothing before the checked program
-/// reads it, so the fingerprint resolution finds it ready instead of paying
-/// for it on the compile's critical path.
 pub(crate) fn prefetch_compiler_identity(inputs: &ComptimeInputs) {
     if inputs.source_fingerprints.is_empty() {
         return;
@@ -517,8 +471,6 @@ pub(crate) fn prefetch_compiler_identity(inputs: &ComptimeInputs) {
     });
 }
 
-/// Content identity of the running compiler image, used by source
-/// fingerprints. Never substitutes a checkout revision.
 pub(crate) fn compiler_identity() -> Result<String> {
     static IDENTITY: OnceLock<Result<String, String>> = OnceLock::new();
     IDENTITY
@@ -543,14 +495,6 @@ pub(crate) fn compiler_identity() -> Result<String> {
 /// Hash the parts of a compiler image that can affect execution. An ELF
 /// image (Linux) hashes only its `PT_LOAD` segments: everything the loader
 /// maps, headers included in segment fields, with `p_memsz` covering BSS.
-/// Bytes outside load segments -- DWARF debug sections, `.symtab`, section
-/// headers -- cannot change what the compiler does, and on a Linux release
-/// binary they are ~94% of the file (hundreds of ms of hashing per compile).
-/// Debug info derives from the loaded code, so any compiler code change
-/// still changes this identity. Non-ELF images (e.g. Mach-O, where debug
-/// data already lives outside the executable) hash the whole file, as
-/// before. Any ELF inconsistency also falls back to the whole file rather
-/// than guessing.
 fn hash_compiler_image<R: std::io::Read + std::io::Seek>(image: &mut R) -> std::io::Result<String> {
     use std::io::SeekFrom;
     // Identity, not authentication: a 128-bit non-cryptographic hash reads
@@ -603,8 +547,6 @@ struct ElfLoadSegment {
     memsz: u64,
 }
 
-/// `PT_LOAD` segments of an ELF image in file order, or `None` for a
-/// non-ELF or inconsistent image (the caller then hashes the whole file).
 fn elf_load_segments<R: std::io::Read + std::io::Seek>(
     image: &mut R,
 ) -> std::io::Result<Option<Vec<ElfLoadSegment>>> {
@@ -802,8 +744,6 @@ mod compiler_image_tests {
         }
     }
 
-    /// Minimal ELF64-LE image: one PT_LOAD over "CODECODE" at offset 128,
-    /// then trailing bytes outside every load segment (the debug stand-in).
     fn elf_image() -> Vec<u8> {
         let mut bytes = vec![0u8; 128];
         bytes[..4].copy_from_slice(b"\x7fELF");
@@ -850,8 +790,6 @@ mod compiler_image_tests {
     fn non_elf_and_broken_elf_fall_back_to_whole_file() {
         assert_ne!(identity(b"plain bytes A"), identity(b"plain bytes B"));
         assert_eq!(identity(b"plain bytes"), identity(b"plain bytes"));
-        // Truncated ELF header, and a phdr table past EOF: no panic, and a
-        // trailing change still moves the whole-file fallback identity.
         let truncated = &elf_image()[..20];
         let _ = identity(truncated);
         let mut past_eof = elf_image();

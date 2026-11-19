@@ -37,9 +37,6 @@ fn categorize_stone_changes(
         if native.excludes(path) {
             continue;
         }
-        // Normalize separators once so the substring checks below work
-        // identically on Windows (`stone-rs\src\foo.rs`) and Unix
-        // (`stone-rs/src/foo.rs`). All match strings use `/`.
         let path_str = path.to_string_lossy().replace('\\', "/");
 
         if sound_paths.contains(path.as_path()) || sound_inputs.contains(path) {
@@ -61,20 +58,10 @@ fn categorize_stone_changes(
             changes.changed_libstone.push(filename);
         } else if is_compiler_source(path) {
             changes.changed_compiler.push(filename);
-        } else if path_str.ends_with(".rock") {
-            changes.changed_paths.insert(path.clone());
-        } else if comptime.contains(path.as_path()) {
-            // An embedded input is a source: routing it as a changed
-            // non-source path makes LiveProject take the full-rebuild arm,
-            // which re-reads the file .
+        } else if path_str.ends_with(".rock") || comptime.contains(path.as_path()) {
             changes.changed_paths.insert(path.clone());
         } else if filename == "stick.toml" {
             changes.needs_native_rebuild = true;
-            // A [build.vars]/[engine]/[assets]/[release] edit mid-session: route as
-            // a changed non-source path so LiveProject takes the
-            // full-rebuild arm, whose session rebuild re-resolves declared
-            // inputs. Dropping it here left stale vars until the next
-            // structural edit.
             changes.changed_paths.insert(path.clone());
         }
     }
@@ -170,7 +157,6 @@ impl StoneWatcher {
         if self.handle.is_some() && self.paths == paths && self.inputs == *inputs {
             return Ok(());
         }
-        // Arm new roots and input parents before dropping the previous watches.
         let handle = FileWatcher::default_for_rock_sources()
             .with_restart_suffix(PathBuf::from("tmp/restart.txt"))
             .filter_initial_creates()
@@ -205,18 +191,12 @@ fn watch_all_files<'a>(
     Ok(Some(watch))
 }
 
-/// Content hash anchoring a declared input the compiler never reads (the
-/// sound project file): the hash of what is on disk now. An unreadable file
-/// anchors to 0, which only costs one extra watcher event before the seed
-/// converges on the file's real bytes.
 fn declaration_hash(path: &std::path::Path) -> u64 {
     std::fs::read_to_string(path)
         .map(|text| skull_mir::mir::comptime_value_hash(&text))
         .unwrap_or(0)
 }
 
-/// Reseed the shared comptime set and its routing mirror after a successful
-/// build: the compiled program's declared inputs plus the sound project file.
 fn reseed_comptime_watch(
     compiler: &crate::game_runtime::GameCompiler,
     sound_paths: &std::collections::HashSet<PathBuf>,
@@ -280,10 +260,6 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
         rock_engine_host::project::STONE_SESSION_DIR,
     ));
 
-    // The compiler gets the canonical project root: a compile stamps its
-    // `embed_root` from the dir it was handed, so a relative dir would give
-    // the session's artifact a different identity from the `rock frame`
-    // compile of the same sources.
     let compiler_dir = PathBuf::from(path)
         .canonicalize()
         .map_err(|error| anyhow::anyhow!("canonicalize the project root {path}: {error}"))?;
@@ -295,7 +271,6 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
     );
     let mut changed_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
 
-    // Route changes to declared inputs using the same set as the watcher.
     let comptime_watch: crate::file_watcher::SharedWatchSet = Default::default();
     let mut sound_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     if let Some(sound_project) = crate::package::sound_project_path_for(path)? {
@@ -309,9 +284,6 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
     });
     let mut watched: std::collections::HashSet<PathBuf> = sound_paths.clone();
 
-    // Build the rock compiler and engine cdylibs (stone-rs + optional extras
-    // per game's [engine] needs) beside the initial compile, which does not
-    // read them.
     let initial_build = crate::frame_runtime::beside(
         || build_all_for_game(path),
         || {
@@ -339,11 +311,6 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
         None
     };
 
-    // Set up file watcher for game files, stdlib, stone (engine Rock code),
-    // stone-rs / optional extras (engine Rust crates), the rock compiler, and
-    // tmp/ for the restart-trigger file. FileWatcher silently skips
-    // nonexistent paths, so listing the optional crates is safe on machines
-    // where they aren't checked out.
     let rock_root = PathBuf::from(rock_host::rock_dir());
     let mut engine_watch_paths = vec![
         rock_root.join("stone-rs/src"),
@@ -361,12 +328,8 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
     let mut watch_paths = stone_source_watch_paths(path, &compiler);
     watch_paths.extend(engine_watch_paths.iter().cloned());
 
-    // Create channel for file change events
     let (change_tx, change_rx) = channel::<FileChangeEvent>();
 
-    // Canonical rock-source watcher + stone-only opt-ins: manual
-    // restart via `touch tmp/restart.txt`, and engine-rebuild
-    // extensions (stone-rs / C / stick.toml changes rebuild libstone).
     let restart_files = vec![
         rock_root.join("tmp/restart.txt"),
         PathBuf::from("tmp/restart.txt"),
@@ -378,7 +341,6 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
 
     info!("Watching for changes...");
 
-    // Track what needs rebuilding
     let mut sound_dirty = false;
     let mut force_game_compile = !initial_compilation_success;
 
@@ -392,7 +354,6 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
         };
         wait_for_reload_resume(&reload_control)?;
         let _keep_native_watch = &native_watcher;
-        // Check for manual restart trigger first
         if event.is_restart_trigger {
             info!("Manual restart triggered (tmp/restart.txt detected)");
         }
@@ -415,8 +376,6 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
         let changed_libstone = changes.changed_libstone;
         let changed_compiler = changes.changed_compiler;
 
-        // Print change summary only for libstone/compiler changes (game changes
-        // are already visible in the "Recompiling N module (foo.rock)..." line)
         if !changed_libstone.is_empty() || !changed_compiler.is_empty() {
             let mut parts = Vec::new();
             if !changed_libstone.is_empty() {
@@ -428,17 +387,6 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
             info!("Changed: {}", parts.join(" | "));
         }
 
-        // Rebuild engine + compiler in dependency order. On failure we log
-        // and proceed instead of aborting the iteration: the previous
-        // successful build of each is still on disk, so the running game
-        // can keep iterating against the old dylib / old compiler binary
-        // until the user fixes the error. Without this, a typo in
-        // stone-rs/foo.rs would also block hot-reload of unrelated game
-        // edits saved in the same tick.
-        //
-        // `should_restart` only accumulates from rebuilds that actually
-        // succeeded (plus manual restart) — we don't restart the game
-        // process to load a dylib that didn't get produced.
         let mut should_restart = event.is_restart_trigger;
         let mut compiler_rebuilt = false;
 
@@ -484,8 +432,6 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
                     info!("Compiler rebuilt successfully");
                     should_restart = true;
                     compiler_rebuilt = true;
-                    // The next compile passes force_full=true so the backend
-                    // drops its caches and re-analyzes with the new compiler.
                 }
                 Err(e) => {
                     error!(
@@ -525,8 +471,6 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
             reexec_with_new_binary(&mut game_process);
         }
 
-        // Recompile game if user changes are pending or the compiler was
-        // just rebuilt (force_full re-analyzes with the new compiler).
         let has_game_changes = !changed_paths.is_empty() || force_game_compile;
         let mut compilation_succeeded = false;
         if has_game_changes || compiler_rebuilt {
@@ -572,8 +516,6 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
                 info!("Restarting game process...");
                 drop(game_process.take());
             }
-            // A fresh process loads main.lua only, so fold any overlay or
-            // deferred write into it before launching.
             if let Err(e) = compiler.canonicalize_for_restart() {
                 let action = if restarting { "restart" } else { "start" };
                 error!("fold before {action} failed: {e} ({action} may load a stale main.lua)");
@@ -598,8 +540,6 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
 
 fn build_all_for_game(game_path: &str) -> Result<()> {
     if rock_engine_host::engine_build::prebuilt_game() {
-        // Validate every required staged library; the engine helper refuses
-        // missing receipts instead of falling through to a source build.
         return rock_engine_host::engine_build::build_engine_libs(game_path);
     }
     if rock_host::project::is_release_layout() {
@@ -608,12 +548,6 @@ fn build_all_for_game(game_path: &str) -> Result<()> {
 
     let optional_libs = rock_engine_host::engine_build::game_engine_libs(game_path)?;
 
-    // No `-p`: resolver-2 unifies features over the SELECTED packages only, so
-    // a narrower selection is a distinct feature resolution and rebuilds every
-    // shared dep plus the whole compiler stack under a second -C metadata.
-    // Staying on the default-member selection keeps one set of artifacts,
-    // shared with rock.sh's build. stone-rs is not a default member, so it
-    // builds on its own, as every other launch builds it.
     info!("Building engine + compiler (cargo)...");
 
     rock_host::cargo::run_cargo(
@@ -621,8 +555,6 @@ fn build_all_for_game(game_path: &str) -> Result<()> {
         "Failed to build compiler",
     )?;
     rock_engine_host::engine_build::build_libstone()?;
-    // One helper, not a second build+stage pair here: two of them drift, and
-    // the drift is invisible until a lib builds on one path and not the other.
     for lib in &optional_libs {
         rock_engine_host::engine_build::build_optional_engine_lib(lib)?;
     }
@@ -693,7 +625,6 @@ fn start_game_process(
 ) -> Result<BoundChild> {
     let mut cmd = rock_engine_host::runtime::build_luajit_command(lua_file, app_args);
     cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-    // Only the stone watch loop enables the in-game hot-reload watcher.
     cmd.env("STONE_HOT_RELOAD", "1")
         .env("STONE_BUILD_ID", build_id)
         .env(
@@ -740,9 +671,6 @@ mod tests {
         } else {
             "so"
         };
-        // SHA-1 of empty bytes is an independent known digest. Source-drift
-        // validation is covered by the engine receipt tests; here the receipt
-        // proves that startup and compiler reload never invoke Cargo.
         let empty_sha1 = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
         let receipt = dir.path().join("receipt.json");
         for case in ["missing", "valid", "corrupt"] {
@@ -794,8 +722,6 @@ mod tests {
             assert!(!marker.exists(), "prebuilt startup invoked Cargo: {case}");
         }
     }
-    /// Concurrent sessions never share a slot or the shared main.lua, and a
-    /// session keeps its slot across restarts.
     #[test]
     fn session_dirs_separate_by_game_and_pid() {
         let p = |game, pid| rock_engine_host::project::stone_session_main_lua_path(game, pid);
@@ -805,7 +731,6 @@ mod tests {
         assert_ne!(p("sample", 1), p("sample", 2));
         assert_ne!(p("sample", 1), p("other", 1));
         assert_eq!(p("sample", 1), p("sample", 1));
-        // A nested project path contributes its name, not its separators.
         assert_eq!(
             p("games/nested", 7).components().count(),
             p("nested", 7).components().count()
@@ -1053,9 +978,6 @@ mod watch_reload_tests {
         panic!("watcher never reported {}", path.display());
     }
 
-    // Events arrive in order, so once a fresh barrier file is reported every
-    // earlier event, including the fixture's setup writes, has been consumed.
-    // Returns the barrier, whose own trailing events may still arrive later.
     fn drain_setup_events(rx: &Receiver<FileChangeEvent>, dir: &std::path::Path) -> PathBuf {
         let barrier = dir.join("barrier.rock");
         write_until_reported(rx, &barrier, "fn barrier() {}\n");
@@ -1090,8 +1012,6 @@ mod watch_reload_tests {
 
         let event = write_until_reported(&rx, &sim, "fn probe( {\n");
         let mut changes = categorize(&event);
-        // Setup writes of the fixture may be reported in the same batch; they are
-        // not the edit under test.
         for setup in [
             &barrier,
             &fixture.root.join("main.rock"),
@@ -1209,8 +1129,6 @@ mod watch_reload_tests {
 
     #[test]
     fn stone_embedded_inputs_follow_recompilation_and_atomic_saves() {
-        // Invoking a package subdirectory loads its sources, but its legal
-        // embedded inputs can still live elsewhere inside the package root.
         let dir = tempfile::tempdir().unwrap();
         let package = dir.path().join("tmp/package");
         let source_root = package.join("src");
@@ -1255,7 +1173,6 @@ mod watch_reload_tests {
                 &watched,
             )
             .unwrap();
-        // An input-parent watch must not admit even a Rock source beside it.
         std::fs::write(package.join("data/unrelated.rock"), "fn unrelated() {}\n").unwrap();
         assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
 
@@ -1309,7 +1226,6 @@ mod watch_reload_tests {
                 &watched,
             )
             .unwrap();
-        // A source write can produce trailing events after recompilation.
         rx.try_iter().for_each(drop);
         std::fs::write(&input, "unused input").unwrap();
         let deadline = Instant::now() + Duration::from_millis(300);

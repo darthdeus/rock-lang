@@ -21,43 +21,25 @@ pub(crate) type WatchHandle =
 #[cfg(target_os = "macos")]
 pub(crate) type WatchHandle = macos::MacHandle;
 
-/// Match tmp components relative to a watched root, including projects under a system temp directory.
 fn is_tmp_scratch_file(path: &Path, roots: &[PathBuf]) -> bool {
     match roots.iter().find_map(|r| path.strip_prefix(r).ok()) {
         Some(rel) => rel
             .components()
             .any(|c| c.as_os_str().to_str() == Some("tmp")),
-        // Outside every watched root: not our scratch. Be conservative
-        // — never drop a path we can't attribute to a project tmp/.
         None => false,
     }
 }
 
-/// Unified file watcher for Rock compiler
 pub struct FileWatcher {
     debounce_ms: u64,
-    /// Whether to filter out metadata-only changes (like touch)
-    /// Optional relative path suffix that the host treats as a restart input.
     restart_suffix: Option<PathBuf>,
-    /// Exact restart files outside the source roots; their parents are watched
-    /// non-recursively so scratch output never becomes a source root.
     restart_files: Vec<PathBuf>,
     watch_extensions: Vec<String>,
     watch_all_files: bool,
-    /// Exact files watched IN ADDITION to the extension filter, shared with
-    /// the owner so it can be updated after watcher creation. Used for
-    /// embed_string inputs: the set is only known
-    /// after a compile, and grows/shrinks as the game's embeds change.
     extra_files: Option<SharedWatchSet>,
-    /// Ignore macOS create history for unchanged files present when a watch starts.
     ignore_existing_creates: bool,
 }
 
-/// Canonicalized paths consulted by the debounce filter on every event, plus
-/// the content hash of each declared input the compiler baked in. The hash
-/// lets a later observation compare against what was compiled rather than
-/// against the startup instant, so an edit within the startup tick is not
-/// seeded silently. Hashes are consulted only when present.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SharedWatchSet {
     paths: std::sync::Arc<parking_lot::Mutex<HashSet<PathBuf>>>,
@@ -68,22 +50,17 @@ impl SharedWatchSet {
     fn paths(&self) -> parking_lot::MutexGuard<'_, HashSet<PathBuf>> {
         self.paths.lock()
     }
-    /// Record the hash of the bytes the compiler baked in for `path`
-    /// (`skull_mir::mir::comptime_value_hash` of the file text).
     pub(crate) fn set_compiled_hash(&self, path: PathBuf, hash: u64) {
         self.compiled.lock().insert(path, hash);
     }
-    /// The compiler-baked hash for `path`, if the producer supplied one.
     #[cfg(any(target_os = "macos", all(test, unix)))]
     pub(crate) fn compiled_hash(&self, path: &Path) -> Option<u64> {
         self.compiled.lock().get(path).copied()
     }
-    /// Insert `path` with its compiler-baked hash in one step.
     pub(crate) fn insert_with_hash(&self, path: PathBuf, hash: u64) {
         self.paths().insert(path.clone());
         self.set_compiled_hash(path, hash);
     }
-    /// Replace the whole set with `files` and their compiler-baked hashes.
     pub(crate) fn replace_with_hashes(&self, files: Vec<(PathBuf, u64)>) {
         let mut paths = self.paths();
         let mut compiled = self.compiled.lock();
@@ -205,7 +182,6 @@ impl FileWatcher {
     }
 }
 
-/// File change event data
 #[derive(Debug, Clone)]
 pub struct FileChangeEvent {
     pub paths: HashSet<PathBuf>,
@@ -232,7 +208,6 @@ impl FileWatcher {
         }
     }
 
-    /// Supply a host's relative restart path, including inputs below skipped scratch directories.
     pub fn with_restart_suffix(mut self, suffix: PathBuf) -> Self {
         self.restart_suffix = Some(suffix);
         self
@@ -243,7 +218,6 @@ impl FileWatcher {
         self
     }
 
-    /// Set file extensions to watch
     pub(crate) fn with_extensions(mut self, extensions: Vec<String>) -> Self {
         self.watch_extensions = extensions;
         self
@@ -254,8 +228,6 @@ impl FileWatcher {
         self
     }
 
-    /// Watch these exact files as well as the extension set; the shared handle
-    /// stays with the caller, which refreshes it after each compile.
     pub(crate) fn with_shared_extra_files(mut self, files: SharedWatchSet) -> Self {
         self.extra_files = Some(files);
         self
@@ -289,9 +261,6 @@ impl FileWatcher {
     ) -> Result<WatchHandle> {
         let config = self;
 
-        // Canonicalized watched roots, captured for `is_tmp_scratch_file`'s
-        // root-relative `tmp/` check. notify reports event paths under the
-        // canonical root, so the roots must be canonical to strip_prefix.
         let scratch_roots: Vec<PathBuf> = paths
             .iter()
             .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
@@ -339,161 +308,141 @@ impl FileWatcher {
             InitialFiles::capture(&scratch_roots, &config.watch_extensions, &extra_files)
         });
 
-        // Track last data modification time for each file
-        // to debounce metadata events against data events
         let mut data_write_timestamps: HashMap<PathBuf, Instant> = HashMap::new();
         const METADATA_DEBOUNCE_MS: u64 = 50;
 
         let mut debouncer = new_debouncer(
             Duration::from_millis(config.debounce_ms),
             None,
-            move |result: Result<Vec<DebouncedEvent>, Vec<notify::Error>>| {
-                match result {
-                    Ok(events) => {
-                        let mut affected_paths = HashSet::new();
-                        let mut has_relevant_changes = false;
-                        let mut is_restart_trigger = false;
+            move |result: Result<Vec<DebouncedEvent>, Vec<notify::Error>>| match result {
+                Ok(events) => {
+                    let mut affected_paths = HashSet::new();
+                    let mut has_relevant_changes = false;
+                    let mut is_restart_trigger = false;
 
-                        for event in events {
-                            let event_paths: Vec<&PathBuf> = event
-                                .paths
-                                .iter()
-                                .filter(|path| {
-                                    !initial_files.as_ref().is_some_and(|initial| {
-                                        initial.is_unchanged_create(&event.kind, path)
-                                    }) && (scratch_roots.iter().any(|root| path.starts_with(root))
-                                        || restart_files.contains(path.as_path())
-                                        || config.extra_files.as_ref().is_some_and(|extra| {
-                                            extra.paths().contains(path.as_path())
-                                        }))
-                                })
-                                .collect();
-                            if event_paths.is_empty() {
-                                continue;
+                    for event in events {
+                        let event_paths: Vec<&PathBuf> = event
+                            .paths
+                            .iter()
+                            .filter(|path| {
+                                !initial_files.as_ref().is_some_and(|initial| {
+                                    initial.is_unchanged_create(&event.kind, path)
+                                }) && (scratch_roots.iter().any(|root| path.starts_with(root))
+                                    || restart_files.contains(path.as_path())
+                                    || config.extra_files.as_ref().is_some_and(|extra| {
+                                        extra.paths().contains(path.as_path())
+                                    }))
+                            })
+                            .collect();
+                        if event_paths.is_empty() {
+                            continue;
+                        }
+                        for &path in &event_paths {
+                            if restart_files.contains(path.as_path())
+                                || config.matches_restart_suffix(path)
+                            {
+                                is_restart_trigger = true;
+                                has_relevant_changes = true;
+                                affected_paths.insert(path.clone());
                             }
+                        }
+
+                        let affects_watched_files = event_paths.iter().any(|path| {
+                            if config.watch_all_files {
+                                return !path.to_string_lossy().ends_with('~');
+                            }
+                            if let Some(extra) = config.extra_files.as_ref() {
+                                let member = extra.paths().contains(path.as_path());
+                                if member {
+                                    return true;
+                                }
+                            }
+                            if let Some(ext) = path.extension() {
+                                if let Some(ext_str) = ext.to_str() {
+                                    if path.to_string_lossy().ends_with('~') {
+                                        return false;
+                                    }
+                                    return config.watch_extensions.contains(&ext_str.to_string());
+                                }
+                            }
+                            false
+                        });
+
+                        let is_relevant = match event.kind {
+                            notify::EventKind::Modify(modify_kind) => match modify_kind {
+                                ModifyKind::Data(_) => {
+                                    let now = Instant::now();
+                                    for &path in &event_paths {
+                                        if restart_files.contains(path.as_path())
+                                            || config.matches_restart_suffix(path)
+                                            || !is_tmp_scratch_file(path, &scratch_roots)
+                                        {
+                                            data_write_timestamps.insert(path.clone(), now);
+                                        }
+                                    }
+                                    true
+                                }
+                                ModifyKind::Metadata(_) => {
+                                    let mut should_debounce = false;
+                                    for &path in &event_paths {
+                                        if let Some(last_data_write) =
+                                            data_write_timestamps.get(path)
+                                        {
+                                            let elapsed =
+                                                Instant::now().duration_since(*last_data_write);
+                                            if elapsed < Duration::from_millis(METADATA_DEBOUNCE_MS)
+                                            {
+                                                should_debounce = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    if should_debounce {
+                                        false
+                                    } else {
+                                        is_restart_trigger || affects_watched_files
+                                    }
+                                }
+                                ModifyKind::Name(_) => true,
+                                ModifyKind::Any => true,
+                                ModifyKind::Other => true,
+                            },
+                            notify::EventKind::Remove(_) => true,
+                            notify::EventKind::Create(_) => true,
+                            notify::EventKind::Other => true,
+                            notify::EventKind::Any => true,
+                            notify::EventKind::Access(_) => false,
+                        };
+
+                        if is_relevant && (affects_watched_files || is_restart_trigger) {
+                            has_relevant_changes = true;
                             for &path in &event_paths {
-                                if restart_files.contains(path.as_path())
-                                    || config.matches_restart_suffix(path)
+                                if !restart_files.contains(path.as_path())
+                                    && !config.matches_restart_suffix(path)
+                                    && is_tmp_scratch_file(path, &scratch_roots)
                                 {
-                                    is_restart_trigger = true;
-                                    has_relevant_changes = true;
+                                    continue;
+                                }
+                                let is_backup = path.to_string_lossy().ends_with('~');
+                                if !path.is_dir() && !is_backup {
                                     affected_paths.insert(path.clone());
                                 }
                             }
-
-                            let affects_watched_files = event_paths.iter().any(|path| {
-                                if config.watch_all_files {
-                                    return !path.to_string_lossy().ends_with('~');
-                                }
-                                if let Some(extra) = config.extra_files.as_ref() {
-                                    let member = extra.paths().contains(path.as_path());
-                                    if member {
-                                        return true;
-                                    }
-                                }
-                                if let Some(ext) = path.extension() {
-                                    if let Some(ext_str) = ext.to_str() {
-                                        // Ignore backup files ending with ~
-                                        if path.to_string_lossy().ends_with('~') {
-                                            return false;
-                                        }
-                                        return config
-                                            .watch_extensions
-                                            .contains(&ext_str.to_string());
-                                    }
-                                }
-                                false
-                            });
-
-                            // Determine if this is a relevant event
-                            let is_relevant = match event.kind {
-                                notify::EventKind::Modify(modify_kind) => {
-                                    match modify_kind {
-                                        ModifyKind::Data(_) => {
-                                            // Data modifications always go through
-                                            // and update the timestamp for each affected file
-                                            // Explicit restart inputs bypass the scratch filter.
-                                            let now = Instant::now();
-                                            for &path in &event_paths {
-                                                if restart_files.contains(path.as_path())
-                                                    || config.matches_restart_suffix(path)
-                                                    || !is_tmp_scratch_file(path, &scratch_roots)
-                                                {
-                                                    data_write_timestamps.insert(path.clone(), now);
-                                                }
-                                            }
-                                            true
-                                        }
-                                        ModifyKind::Metadata(_) => {
-                                            // Check if we should debounce this metadata event
-                                            // against a recent data event on the same file
-                                            let mut should_debounce = false;
-                                            for &path in &event_paths {
-                                                if let Some(last_data_write) =
-                                                    data_write_timestamps.get(path)
-                                                {
-                                                    let elapsed = Instant::now()
-                                                        .duration_since(*last_data_write);
-                                                    if elapsed
-                                                        < Duration::from_millis(
-                                                            METADATA_DEBOUNCE_MS,
-                                                        )
-                                                    {
-                                                        should_debounce = true;
-                                                        break;
-                                                    }
-                                                }
-                                            }
-
-                                            if should_debounce {
-                                                false
-                                            } else {
-                                                is_restart_trigger || affects_watched_files
-                                            }
-                                        }
-                                        ModifyKind::Name(_) => true,
-                                        ModifyKind::Any => true,
-                                        ModifyKind::Other => true,
-                                    }
-                                }
-                                notify::EventKind::Remove(_) => true,
-                                notify::EventKind::Create(_) => true,
-                                notify::EventKind::Other => true,
-                                notify::EventKind::Any => true,
-                                // Access events never indicate a content change.
-                                notify::EventKind::Access(_) => false,
-                            };
-
-                            if is_relevant && (affects_watched_files || is_restart_trigger) {
-                                has_relevant_changes = true;
-                                for &path in &event_paths {
-                                    if !restart_files.contains(path.as_path())
-                                        && !config.matches_restart_suffix(path)
-                                        && is_tmp_scratch_file(path, &scratch_roots)
-                                    {
-                                        continue;
-                                    }
-                                    let is_backup = path.to_string_lossy().ends_with('~');
-                                    if !path.is_dir() && !is_backup {
-                                        affected_paths.insert(path.clone());
-                                    }
-                                }
-                            }
-                        }
-
-                        if has_relevant_changes && !affected_paths.is_empty() {
-                            let event = FileChangeEvent {
-                                paths: affected_paths,
-                                is_restart_trigger,
-                            };
-                            // Ignore send errors (receiver might have been dropped)
-                            let _ = change_tx.send(event);
                         }
                     }
-                    Err(errors) => {
-                        for error in errors {
-                            log::error!(target: "WATCH", "file watcher error: {}", error);
-                        }
+
+                    if has_relevant_changes && !affected_paths.is_empty() {
+                        let event = FileChangeEvent {
+                            paths: affected_paths,
+                            is_restart_trigger,
+                        };
+                        let _ = change_tx.send(event);
+                    }
+                }
+                Err(errors) => {
+                    for error in errors {
+                        log::error!(target: "WATCH", "file watcher error: {}", error);
                     }
                 }
             },
@@ -593,8 +542,6 @@ mod macos {
         hash: [u8; 32],
         verified_at: SystemTime,
     }
-    /// Keep the path in the message itself: the CLI prints only the top of
-    /// an error chain, and a bare OS error does not say what was missing.
     fn path_error(error: std::io::Error, operation: &str, path: &Path) -> anyhow::Error {
         std::io::Error::new(
             error.kind(),
@@ -691,7 +638,6 @@ mod macos {
                 Err(error) => return Err(stat_error(error, root)),
             };
             let identity = (metadata.dev(), metadata.ino());
-            // Follow directory links, but never recurse back into an ancestor.
             if !ancestors.insert(identity) {
                 return Ok(());
             }
@@ -860,9 +806,6 @@ mod macos {
                         .extra_files
                         .as_ref()
                         .is_some_and(|extra| extra.paths().contains(path));
-                    // A newly declared embed may predate this watcher. Its seed
-                    // establishes a baseline; an edit since startup still gets through.
-                    // With a compiler-baked hash the seed compares content, not time.
                     let declared_seed = old.is_none()
                         && declared
                         && match self
@@ -897,8 +840,6 @@ mod macos {
                     event.paths.insert(path.clone());
                 }
             }
-            // Commit stamps only with the complete event; later IO failures must
-            // leave earlier edits eligible for the retry.
             let retained: HashSet<&PathBuf> = candidates.iter().collect();
             self.files.retain(|path, _| retained.contains(&path));
             for (path, state) in updates {
@@ -919,7 +860,6 @@ mod macos {
     #[cfg(target_os = "macos")]
     impl Drop for MacHandle {
         fn drop(&mut self) {
-            // The worker may already have stopped when its consumer disconnected.
             if self.stop.send(()).is_err() {
                 log::debug!(target: "WATCH", "file watcher worker already stopped");
             }
@@ -938,9 +878,6 @@ mod macos {
         paths: Vec<PathBuf>,
         change_tx: Sender<FileChangeEvent>,
     ) -> Result<MacHandle> {
-        // Exact inputs, and even their directories, may not exist yet: an
-        // installed SDK has no tmp/ for its restart trigger. Canonicalize the
-        // nearest existing ancestor; every scan stats the rest afresh.
         let canonical = |path: PathBuf| -> Result<PathBuf> {
             let absolute = std::path::absolute(&path)
                 .map_err(|error| path_error(error, "resolve watch path", &path))?;
@@ -991,7 +928,6 @@ mod macos {
                     }
                     match observation.scan(false) {
                         Ok(event) if !event.paths.is_empty() => {
-                            // A disconnected consumer ends this watcher's lifetime.
                             if change_tx.send(event).is_err() {
                                 break;
                             }
@@ -1078,8 +1014,6 @@ mod macos {
                 observation.scan(false).unwrap().paths.is_empty(),
                 "declaring an unchanged input must not manufacture a reload"
             );
-            // A different size keeps the edit visible even when the filesystem
-            // clock gives it the seed's timestamp.
             std::fs::write(&input, "input edited").unwrap();
             assert_eq!(
                 observation.scan(false).unwrap().paths,
@@ -1087,8 +1021,6 @@ mod macos {
             );
             let pending = dir.path().canonicalize().unwrap().join("pending.txt");
             std::fs::write(&pending, "changed before first admission scan").unwrap();
-            // A coarse filesystem clock can stamp this write at or before the
-            // startup instant; pin startup just before it.
             let stamp = Stamp::read(&pending).unwrap();
             observation.started = UNIX_EPOCH
                 + Duration::new(stamp.changed.0 as u64, stamp.changed.1 as u32)
@@ -1178,8 +1110,6 @@ mod macos {
             }
             let mut observation = observation(root.clone(), FileWatcher::new());
             assert_eq!(observation.files.len(), 1);
-            // Age directories past the filesystem tick; recent ones are reread
-            // until the tick passes so same-tick changes are not missed.
             let old = SystemTime::now() - Duration::from_secs(5);
             for dir in observation.directories.keys().cloned().collect::<Vec<_>>() {
                 set_mtime(&dir, old);
@@ -1201,7 +1131,6 @@ mod macos {
             );
             let added = root.join("assets/source.rock");
             std::fs::write(&added, "new source").unwrap();
-            // Model creation within the filesystem clock's startup tick.
             let stamp = Stamp::read(&added).unwrap();
             observation.started =
                 UNIX_EPOCH + Duration::new(stamp.changed.0 as u64, stamp.changed.1 as u32);
@@ -1236,8 +1165,6 @@ mod macos {
                 assert!(event.is_restart_trigger);
             }
         }
-        /// An installed SDK has no `tmp/`, so the restart trigger's directory
-        /// is created only when someone requests a restart.
         #[cfg(target_os = "macos")]
         #[test]
         fn restart_file_in_a_missing_directory_is_watched_until_created() {
@@ -1271,7 +1198,6 @@ mod macos {
             std::fs::write(&source, "before").unwrap();
             let mut observation = observation(root.clone(), FileWatcher::new());
             std::fs::write(&source, "after").unwrap();
-            // A symlink loop is a deterministic metadata IO error even as root.
             std::os::unix::fs::symlink(&broken, &broken).unwrap();
             assert!(
                 observation
@@ -1324,7 +1250,6 @@ mod macos {
                 (current.size, current.modified),
                 (recorded.size, recorded.modified)
             );
-            // Linux ctime always advances; a coarse clock would hold it.
             observation.files.get_mut(&source).unwrap().stamp = current;
             assert_eq!(
                 observation.scan(false).unwrap().paths,
@@ -1344,7 +1269,6 @@ mod macos {
             let recorded = observation.directories.get(&pkg).unwrap().stamp.clone();
             set_mtime(&pkg, modified_time(&recorded));
             let current = Stamp::read(&pkg).unwrap();
-            // Coarse clock holds ctime/size at the recorded tick.
             observation.directories.get_mut(&pkg).unwrap().stamp = current;
             assert_eq!(
                 observation.scan(false).unwrap().paths,
