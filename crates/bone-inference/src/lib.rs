@@ -235,7 +235,7 @@ impl<'a> Gamma<'a> {
         }
     }
 
-    pub(crate) fn access_site(&self) -> AccessSite<'_> {
+    pub(crate) fn access_site(&self) -> AccessSite<'a> {
         let file = self.workspace.module(self.current_module_id).file;
         if let Some(frag) = self.workspace.fragment_scopes.get(&file) {
             AccessSite {

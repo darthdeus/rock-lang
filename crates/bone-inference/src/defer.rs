@@ -134,6 +134,7 @@ fn retry_pending(gamma: &mut Gamma, pending: Pending) -> Result<(), CompilerErro
                 &args,
                 arg_ty,
                 arg_tys,
+                IdxRange::new_empty(),
                 name,
                 span,
             ) {

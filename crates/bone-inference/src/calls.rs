@@ -14,17 +14,12 @@ pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> Callees {
     let name = family.key();
     let _span = tracing::info_span!("resolve_callee", name = %name).entered();
 
-    let ws = gamma.workspace;
     match *family {
         CallFamily::Resolved(key) => member_overloads(gamma, key),
         CallFamily::Merged { file, .. } => {
-            let members = ws
-                .module_ids
-                .get(&file)
-                .and_then(|mid| ws.module(*mid).call_families.get(&name))
-                .unwrap_or_else(|| {
-                    panic!("merged family `{name}` of `{file}` was not recorded at lowering")
-                });
+            let members = merged_members(gamma, file, name).unwrap_or_else(|| {
+                panic!("merged family `{name}` of `{file}` was not recorded at lowering")
+            });
             let mut out = Callees::default();
             for &member in members {
                 let callees = member_overloads(gamma, member.key);
@@ -34,6 +29,18 @@ pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> Callees {
             out
         }
     }
+}
+
+fn merged_members<'w>(
+    gamma: &Gamma<'w>,
+    file: Ustr,
+    name: Ustr,
+) -> Option<&'w [hir::FamilyMember]> {
+    let ws = gamma.workspace;
+    ws.module(ws.module_ids.get(&file).copied()?)
+        .call_families
+        .get(&name)
+        .map(Vec::as_slice)
 }
 
 fn member_overloads(gamma: &Gamma, key: Ustr) -> Callees {
@@ -62,24 +69,17 @@ fn member_overloads(gamma: &Gamma, key: Ustr) -> Callees {
 /// family, where no tier orders the candidates.
 fn candidate_tier(
     gamma: &Gamma,
-    family: CallFamily,
-    mid: ModuleId,
-    fid: Idx<Function>,
+    members: &[hir::FamilyMember],
+    candidate: (ModuleId, Idx<Function>),
 ) -> Option<FamilyTier> {
-    let CallFamily::Merged { name, file } = family else {
-        return None;
-    };
-    let ws = gamma.workspace;
-    let members = ws
-        .module_ids
-        .get(&file)
-        .and_then(|m| ws.module(*m).call_families.get(&name))?;
     members
         .iter()
         .filter(|member| {
-            ws.functions_by_name
+            gamma
+                .workspace
+                .functions_by_name
                 .get(&member.key)
-                .is_some_and(|fns| fns.contains(&(mid, fid)))
+                .is_some_and(|fns| fns.contains(&candidate))
         })
         .map(|member| member.tier)
         .min()
@@ -88,27 +88,19 @@ fn candidate_tier(
 /// Lookup tier breaks equal-cost ties across members, so a module can override an import.
 fn keep_nearest_tier(
     gamma: &Gamma,
-    family: CallFamily,
+    members: &[hir::FamilyMember],
     tied: &mut SmallVec<[(ModuleId, Idx<Function>); 4]>,
 ) {
-    let tiers: SmallVec<[Option<FamilyTier>; 4]> = tied
+    let Some(tiers) = tied
         .iter()
-        .map(|&(mid, fid)| candidate_tier(gamma, family, mid, fid))
-        .collect();
-    let Some(nearest) = tiers
-        .iter()
-        .copied()
+        .map(|&candidate| candidate_tier(gamma, members, candidate))
         .collect::<Option<SmallVec<[FamilyTier; 4]>>>()
-        .and_then(|t| t.into_iter().min())
     else {
         return;
     };
-    let mut i = 0;
-    tied.retain(|_| {
-        let keep = tiers[i] == Some(nearest);
-        i += 1;
-        keep
-    });
+    let nearest = tiers.iter().min().copied();
+    let mut tiers = tiers.into_iter();
+    tied.retain(|_| tiers.next() == nearest);
 }
 
 fn ty_has_generic_hole(gamma: &Gamma, ty: TyId) -> bool {
@@ -128,7 +120,7 @@ fn param_genericity(gamma: &mut Gamma, param: TyId, span: Span) -> usize {
     if matches!(*gamma.get(p), TypeExpr::Infer(..) | TypeExpr::Generic(..)) {
         return 2;
     }
-    if ty_has_generic_hole(gamma, p) { 1 } else { 0 }
+    usize::from(ty_has_generic_hole(gamma, p))
 }
 
 pub(crate) fn fit_cost(gamma: &mut Gamma, arg: TyId, param: TyId, span: Span) -> Option<usize> {
@@ -159,52 +151,32 @@ pub(crate) fn fit_cost(gamma: &mut Gamma, arg: TyId, param: TyId, span: Span) ->
             };
             fit_cost(gamma, from_inner, p.with_idx(pi), span)
         }
-        _ => {
-            let p_is_iface = match *gamma.get(p) {
+        (&from, &to) => {
+            let cost = match to {
                 TypeExpr::App {
-                    ctor: TypeCtor::Nominal(n),
+                    ctor: TypeCtor::Nominal(name),
                     ..
-                } => gamma.workspace.interface_names.contains(&n),
-                _ => false,
-            };
-
-            // Score full field references as either capability, as coercion does.
-            let p_is_single_cap_from_fieldref = match (*gamma.get(a), *gamma.get(p)) {
-                (
-                    TypeExpr::App {
-                        ctor: TypeCtor::Nominal(an),
-                        ..
-                    },
-                    TypeExpr::App {
-                        ctor: TypeCtor::Nominal(pn),
-                        ..
-                    },
-                ) => {
-                    bone_core::modules::is_intrinsic_key(an, "FieldRef")
-                        && bone_core::modules::is_intrinsic_key_in(
-                            pn,
-                            &["ReadFieldRef", "WriteFieldRef"],
-                        )
+                } if gamma.workspace.interface_names.contains(&name) => 3,
+                TypeExpr::App {
+                    ctor: TypeCtor::Nominal(name),
+                    ..
+                // Score full field references as either capability, as coercion does.
+                } if bone_core::modules::is_intrinsic_key_in(
+                    name,
+                    &["ReadFieldRef", "WriteFieldRef"],
+                ) && matches!(from, TypeExpr::App { ctor: TypeCtor::Nominal(source), .. }
+                            if bone_core::modules::is_intrinsic_key(source, "FieldRef")) =>
+                {
+                    1
                 }
-                _ => false,
+                _ if frame_ref_target(gamma, p).is_some() => 1 + penalty,
+                _ => return None,
             };
-
-            let p_is_frame_ref = frame_ref_target(gamma, p).is_some();
-            if p_is_iface || p_is_single_cap_from_fieldref || p_is_frame_ref {
-                let snap = gamma.out.checkpoint();
-                if gamma.trial(|g| coerce(g, a, p, span).is_ok()) {
-                    return Some(if p_is_iface {
-                        3
-                    } else if p_is_frame_ref {
-                        1 + penalty
-                    } else {
-                        1
-                    });
-                }
-
-                gamma.out.rollback_to(snap);
+            let snap = gamma.out.checkpoint();
+            if gamma.trial(|g| coerce(g, a, p, span).is_ok()) {
+                return Some(cost);
             }
-
+            gamma.out.rollback_to(snap);
             None
         }
     }
@@ -245,7 +217,7 @@ fn render_candidate_sig(gamma: &Gamma, mid: ModuleId, fid: Idx<Function>) -> Str
 }
 
 /// Prefer portable, then Lua, so the native emitter usually keeps the representative.
-fn backend_rank(b: skull_parser::FnBackend) -> u8 {
+fn backend_rank(b: skull_parser::FnBackend) -> usize {
     match b {
         skull_parser::FnBackend::Any => 0,
         skull_parser::FnBackend::Lua => 1,
@@ -275,51 +247,33 @@ pub(crate) fn collapse_backend_variants<'c>(
     if candidates.len() <= 1 {
         return Cow::Borrowed(candidates);
     }
-    let first_backend = gamma.workspace.module(candidates[0].0).functions[candidates[0].1].backend;
+    let backend_of =
+        |(mid, fid): (ModuleId, Idx<Function>)| gamma.workspace.module(mid).functions[fid].backend;
+    let first_backend = backend_of(candidates[0]);
     if candidates
         .iter()
-        .all(|&(mid, fid)| gamma.workspace.module(mid).functions[fid].backend == first_backend)
+        .all(|&candidate| backend_of(candidate) == first_backend)
     {
         return Cow::Borrowed(candidates);
     }
-    let mut groups: SmallVec<[((Ustr, Ustr), SmallVec<[usize; 2]>); 4]> = SmallVec::new();
-    for (i, &(mid, fid)) in candidates.iter().enumerate() {
+    let mut groups: SmallVec<[((Ustr, Ustr), SmallVec<[_; 2]>); 4]> = SmallVec::new();
+    for &(mid, fid) in candidates {
         let key = gamma.workspace.backend_variant_key(mid, fid);
         match groups.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, v)) => v.push(i),
-            None => groups.push((key, smallvec::smallvec![i])),
+            Some((_, group)) => group.push((mid, fid)),
+            None => groups.push((key, smallvec::smallvec![(mid, fid)])),
         }
     }
     let mut out = Vec::with_capacity(candidates.len());
-    for (_, idxs) in groups {
-        if idxs.len() == 1 {
-            out.push(candidates[idxs[0]]);
-            continue;
-        }
-        let backend_of =
-            |i: usize| gamma.workspace.module(candidates[i].0).functions[candidates[i].1].backend;
-        let all_distinct = {
-            let mut seen: SmallVec<[skull_parser::FnBackend; 3]> = SmallVec::new();
-            idxs.iter().all(|&i| {
-                let b = backend_of(i);
-                if seen.contains(&b) {
-                    false
-                } else {
-                    seen.push(b);
-                    true
-                }
-            })
-        };
-        if all_distinct {
-            let rep = *idxs
-                .iter()
-                .min_by_key(|&&i| backend_rank(backend_of(i)))
-                .unwrap();
-            out.push(candidates[rep]);
+    for (_, group) in groups {
+        let mut by_backend = [None; 3];
+        if group.iter().all(|&candidate| {
+            let rank = backend_rank(backend_of(candidate));
+            by_backend[rank].replace(candidate).is_none()
+        }) {
+            out.extend(by_backend.into_iter().flatten().next());
         } else {
-            for &i in &idxs {
-                out.push(candidates[i]);
-            }
+            out.extend(group);
         }
     }
     Cow::Owned(out)
@@ -334,49 +288,15 @@ pub(crate) fn select_overload(
     args: &[Idx<Expr>],
     arg_ty: &FxHashMap<Idx<Expr>, TyId>,
     arg_tys_msg: &[TyId],
-    name: Ustr,
-    span: Span,
-) -> Result<(ModuleId, Idx<Function>), SelectError> {
-    select_overload_with_generics(
-        c,
-        gamma,
-        family,
-        &callees.visible,
-        &callees.hidden,
-        recv_ty,
-        args,
-        arg_ty,
-        arg_tys_msg,
-        IdxRange::new_empty(),
-        name,
-        span,
-    )
-}
-
-pub(crate) fn select_overload_with_generics(
-    c: BodyCtx,
-    gamma: &mut Gamma,
-    family: CallFamily,
-    candidates: &[(ModuleId, Idx<Function>)],
-    hidden: &[(ModuleId, Idx<Function>)],
-    recv_ty: Option<TyId>,
-    args: &[Idx<Expr>],
-    arg_ty: &FxHashMap<Idx<Expr>, TyId>,
-    arg_tys_msg: &[TyId],
     generic_args: IdxRange<TypeExpr>,
     name: Ustr,
     span: Span,
 ) -> Result<(ModuleId, Idx<Function>), SelectError> {
-    let collapsed = collapse_backend_variants(gamma, candidates);
+    let collapsed = collapse_backend_variants(gamma, &callees.visible);
     let candidates: &[(ModuleId, Idx<Function>)] = &collapsed;
 
-    let mut best_cost: Option<usize> = None;
-    let mut best_set: SmallVec<[(ModuleId, Idx<Function>); 4]> = SmallVec::new();
-    // When no candidate fits, report a bound failure from an otherwise fitting candidate.
-    let mut bound_fail: Option<CompilerError> = None;
-
-    for &(mid, fid) in candidates {
-        match score_candidate_with_generics(
+    let score = |gamma: &mut Gamma, (mid, fid)| {
+        score_candidate(
             c,
             gamma,
             mid,
@@ -386,14 +306,22 @@ pub(crate) fn select_overload_with_generics(
             arg_ty,
             generic_args,
             span,
-        ) {
+        )
+    };
+    let mut best_cost: Option<usize> = None;
+    let mut best_set: SmallVec<[(ModuleId, Idx<Function>); 4]> = SmallVec::new();
+    // When no candidate fits, report a bound failure from an otherwise fitting candidate.
+    let mut bound_fail: Option<CompilerError> = None;
+
+    for &candidate in candidates {
+        match score(gamma, candidate) {
             Some(Ok(cost)) => {
                 if best_cost.is_none_or(|bc| cost < bc) {
                     best_cost = Some(cost);
                     best_set.clear();
                 }
                 if best_cost == Some(cost) {
-                    best_set.push((mid, fid));
+                    best_set.push(candidate);
                 }
             }
             Some(Err(error)) if bound_fail.is_none() => bound_fail = Some(error),
@@ -402,13 +330,14 @@ pub(crate) fn select_overload_with_generics(
     }
 
     if best_set.len() > 1
-        && matches!(family, CallFamily::Merged { .. })
+        && let CallFamily::Merged { file, name } = family
         && !args
             .iter()
             .any(|arg| ty_has_generic_hole(gamma, arg_ty[arg]))
         && recv_ty.is_none_or(|ty| !ty_has_generic_hole(gamma, ty))
+        && let Some(members) = merged_members(gamma, file, name)
     {
-        keep_nearest_tier(gamma, family, &mut best_set);
+        keep_nearest_tier(gamma, members, &mut best_set);
     }
 
     match best_set.len() {
@@ -440,22 +369,12 @@ pub(crate) fn select_overload_with_generics(
 
         _ => {
             let args_msg = arg_tys_msg.iter().map(|t| gamma.render(*t)).join(", ");
-            let hidden_fit = hidden.iter().any(|&(mid, fid)| {
-                matches!(
-                    score_candidate_with_generics(
-                        c,
-                        gamma,
-                        mid,
-                        fid,
-                        recv_ty,
-                        args,
-                        arg_ty,
-                        generic_args,
-                        span,
-                    ),
-                    Some(Ok(_))
-                )
-            });
+            let fits =
+                |gamma: &mut Gamma, candidate| matches!(score(gamma, candidate), Some(Ok(_)));
+            let hidden_fit = callees
+                .hidden
+                .iter()
+                .any(|&candidate| fits(gamma, candidate));
             if !hidden_fit && bound_fail.is_none() && recv_ty.is_none() && generic_args.is_empty() {
                 if let Some((symbol, true)) = bone_core::hir::operator_entry(
                     name.rsplit("::").next().unwrap_or(name.as_str()),
@@ -518,7 +437,7 @@ pub(crate) fn select_overload_with_generics(
             let home_hint = if hidden_fit || bound_fail.is_some() {
                 None
             } else {
-                home_module_hint(c, gamma, recv_ty, args, arg_ty, generic_args, name, span)
+                home_module_hint(c, gamma, recv_ty, args, arg_ty, name, span, fits)
             };
             let overloads = candidates
                 .iter()
@@ -558,9 +477,9 @@ fn home_module_hint(
     recv_ty: Option<TyId>,
     args: &[Idx<Expr>],
     arg_ty: &FxHashMap<Idx<Expr>, TyId>,
-    generic_args: IdxRange<TypeExpr>,
     name: Ustr,
     span: Span,
+    fits: impl Fn(&mut Gamma, (ModuleId, Idx<Function>)) -> bool,
 ) -> Option<String> {
     let ws = gamma.workspace;
     let first = recv_ty.or_else(|| args.first().map(|a| arg_ty[a]))?;
@@ -607,30 +526,14 @@ fn home_module_hint(
     }
     path.push(bare);
     let path = path.join("::");
-    let admitted: SmallVec<[(ModuleId, Idx<Function>); 2]> = ws
+    if !ws
         .functions_by_name
         .get(&key)?
         .iter()
         .copied()
         .filter(|&(mid, fid)| ws.callable_member_admits(key, mid, fid, site))
-        .collect();
-    let fits = admitted.iter().any(|&(mid, fid)| {
-        matches!(
-            score_candidate_with_generics(
-                c,
-                gamma,
-                mid,
-                fid,
-                recv_ty,
-                args,
-                arg_ty,
-                generic_args,
-                span,
-            ),
-            Some(Ok(_))
-        )
-    });
-    if !fits {
+        .any(|candidate| fits(gamma, candidate))
+    {
         return None;
     }
     let receiver = match (recv_ty, args.first().map(|&a| &c.body.expr_arena[a])) {
@@ -710,30 +613,24 @@ pub(crate) fn check_named_fields(
         }
     }
 
-    if base_covers_all {
-        if let Some(skey) = struct_key {
-            let site = gamma.access_site();
-            for f in fields {
-                if !seen.contains(&f.name) {
-                    field_access(gamma, skey, f.name, site, FieldAccessNeed::Read)
-                        .map_err(|e| e.to_compiler_error(span))?;
-                    field_access(gamma, skey, f.name, site, FieldAccessNeed::Write)
-                        .map_err(|e| e.to_compiler_error(span))?;
-                }
+    for field in fields.iter().filter(|field| !seen.contains(&field.name)) {
+        if base_covers_all {
+            if let Some(key) = struct_key {
+                let site = gamma.access_site();
+                field_access(gamma, key, field.name, site, FieldAccessNeed::Read)
+                    .map_err(|e| e.to_compiler_error(span))?;
+                field_access(gamma, key, field.name, site, FieldAccessNeed::Write)
+                    .map_err(|e| e.to_compiler_error(span))?;
             }
-        }
-    } else {
-        for f in fields {
-            if !seen.contains(&f.name) && !f.has_default {
-                comp_error!(span, "Missing field `{}` in {} literal", f.name, what);
-            }
+        } else if !field.has_default {
+            comp_error!(span, "Missing field `{}` in {} literal", field.name, what);
         }
     }
 
     Ok(())
 }
 
-pub(crate) fn score_candidate_with_generics(
+fn score_candidate(
     c: BodyCtx,
     gamma: &mut Gamma,
     mid: ModuleId,
@@ -864,10 +761,10 @@ fn check_call_arguments(
     };
 
     for (index, fill) in slots.into_iter().enumerate() {
-        let index = (offset + index).min(params.len() - 1);
         if !scoring && fill.is_none() {
             continue;
         }
+        let index = (offset + index).min(params.len() - 1);
         let declared = params[index].ty;
         if !scoring && has_bounds {
             check_iterator_bounds(c, gamma, function, &subs, &mut bounds, false, 0, span)?;
@@ -912,14 +809,10 @@ fn check_call_arguments(
             continue;
         }
 
-        if frame_ref_target(gamma, expected).is_some()
-            && let SlotFill::Direct(arg) = fill
-        {
-            refs.push(arg);
-        }
+        let is_ref = frame_ref_target(gamma, expected).is_some();
         match fill {
             SlotFill::SpreadField(arg, actual) => {
-                if frame_ref_target(gamma, expected).is_some() {
+                if is_ref {
                     return Err(CompilerError::new_with_label(
                         c.body.expr_spans[arg],
                         "a `ref` argument must be passed directly; call spreads supply copied fields".to_string(),
@@ -928,6 +821,10 @@ fn check_call_arguments(
                 coerce(gamma, actual, expected, c.body.expr_spans[arg])?;
             }
             SlotFill::Direct(arg) => {
+                let arg_span = c.body.expr_spans[arg];
+                if is_ref {
+                    refs.push(arg);
+                }
                 let bounded = declared_is_bounded_generic(gamma, declared, &bounded_vars)
                     && !matches!(c.body.expr_arena[arg], Expr::Lambda { .. });
                 let iter_result = !bounded
@@ -944,23 +841,16 @@ fn check_call_arguments(
                             resolve(gamma, ty, span)
                         }
                     };
-                    let actual = match implicit_iter_target(c, gamma, actual, span) {
-                        Some((witness, ty)) => {
-                            coerce(gamma, ty, expected, c.body.expr_spans[arg])?;
-                            gamma.out.implicit_iter_args.insert(arg, witness);
-                            None
-                        }
-                        None => Some(actual),
-                    };
-                    if let Some(actual) = actual {
-                        coerce(gamma, actual, expected, c.body.expr_spans[arg])?;
+                    let implicit = implicit_iter_target(c, gamma, actual, span);
+                    let actual = implicit.as_ref().map_or(actual, |(_, ty)| *ty);
+                    coerce(gamma, actual, expected, arg_span)?;
+                    if let Some((witness, _)) = implicit {
+                        gamma.out.implicit_iter_args.insert(arg, witness);
                     }
                 } else {
                     match inferred.get(&arg) {
-                        Some(&actual) if frame_ref_target(gamma, expected).is_none() => {
-                            coerce(gamma, actual, expected, c.body.expr_spans[arg])?
-                        }
-                        _ => check_expr(c, gamma, arg, expected, c.body.expr_spans[arg])?,
+                        Some(&actual) if !is_ref => coerce(gamma, actual, expected, arg_span)?,
+                        _ => check_expr(c, gamma, arg, expected, arg_span)?,
                     }
                 }
                 gamma.iter_result_lambda = None;
@@ -968,28 +858,19 @@ fn check_call_arguments(
                     reject_iterable_fn_value_result(c, gamma, arg, span)?;
                 }
                 if let Some(&actual) = gamma.out.expr_types.get(arg) {
-                    reject_redundant_unwrap(
-                        gamma,
-                        function,
-                        name,
-                        index,
-                        actual,
-                        c.body.expr_spans[arg],
-                    )?;
+                    reject_redundant_unwrap(gamma, function, name, index, actual, arg_span)?;
                 }
             }
         }
     }
-    if let Some(call) = call
-        && !refs.is_empty()
-    {
-        gamma.out.ref_call_args.insert(call, refs);
-    }
-    if let Some(call) = call
-        && has_bounds
-    {
-        check_iterator_bounds(c, gamma, function, &subs, &mut bounds, true, 0, span)?;
-        gamma.out.bound_call_trees.insert(call, bounds);
+    if let Some(call) = call {
+        if !refs.is_empty() {
+            gamma.out.ref_call_args.insert(call, refs);
+        }
+        if has_bounds {
+            check_iterator_bounds(c, gamma, function, &subs, &mut bounds, true, 0, span)?;
+            gamma.out.bound_call_trees.insert(call, bounds);
+        }
     }
     Ok((cost, subs))
 }
@@ -1062,7 +943,7 @@ pub(crate) fn check_args(
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum SlotFill {
+enum SlotFill {
     Direct(Idx<Expr>),
     /// The param slot index encodes which spread field; skull-mir re-derives
     /// its name.
@@ -1091,7 +972,7 @@ fn map_nominal_spread_fields<T>(
 }
 
 /// Call spreads require statically known nominal struct fields.
-pub(crate) fn spread_struct_fields(
+fn spread_struct_fields(
     gamma: &mut Gamma,
     op_ty: TyId,
     span: Span,
@@ -1138,7 +1019,7 @@ macro_rules! slot_fail {
     }}
 }
 
-pub(crate) fn reorder_call_args(
+fn reorder_call_args(
     c: BodyCtx,
     gamma: &mut Gamma,
     args: &[Idx<Expr>],
@@ -1184,50 +1065,34 @@ pub(crate) fn reorder_call_args(
             continue;
         }
 
-        match c.body.arg_names.get(&arg) {
-            None => {
-                if pos >= param_decls.len() {
-                    slot_fail!(
-                        report,
-                        span,
-                        "Too many positional arguments, expected at most {}",
-                        param_decls.len()
-                    );
-                }
-
-                if slots[pos].is_some() {
-                    slot_fail!(
-                        report,
-                        span,
-                        "Multiple values provided for parameter `{}`",
-                        param_decls[pos].name
-                    );
-                }
-                slots[pos] = Some(SlotFill::Direct(arg));
-                pos += 1;
+        let name = c.body.arg_names.get(&arg);
+        let index = if let Some(&name) = name {
+            let Some(index) = param_decls.iter().position(|param| param.name == name) else {
+                slot_fail!(report, span, "unknown parameter `{}`", name);
+            };
+            index
+        } else {
+            if pos >= param_decls.len() {
+                slot_fail!(
+                    report,
+                    span,
+                    "Too many positional arguments, expected at most {}",
+                    param_decls.len()
+                );
             }
-
-            Some(nm) => {
-                let Some(pi) = param_decls.iter().position(|p| p.name == *nm) else {
-                    slot_fail!(report, span, "unknown parameter `{}`", nm)
-                };
-
-                match slots[pi] {
-                    // An explicit named argument can override a preceding spread field.
-                    Some(SlotFill::SpreadField(..)) | None => {
-                        slots[pi] = Some(SlotFill::Direct(arg))
-                    }
-                    Some(SlotFill::Direct(_)) => {
-                        slot_fail!(
-                            report,
-                            span,
-                            "Multiple values provided for parameter `{}`",
-                            nm
-                        )
-                    }
-                }
-            }
+            pos += 1;
+            pos - 1
+        };
+        // An explicit named argument can override a preceding spread field.
+        if slots[index].is_some_and(|fill| name.is_none() || matches!(fill, SlotFill::Direct(_))) {
+            slot_fail!(
+                report,
+                span,
+                "Multiple values provided for parameter `{}`",
+                param_decls[index].name
+            );
         }
+        slots[index] = Some(SlotFill::Direct(arg));
     }
 
     for i in 0..num_required {
@@ -1341,16 +1206,15 @@ pub(crate) fn resolve_named_call(
     // Suggest a field read only for failures at the call or receiver, not later arguments.
     let (recv_ty, recv_span) = match recv_override {
         Some(r) => (resolve(gamma, r, span), None),
-        None if !args.is_empty() && c.body.method_call_recvs.contains(&args.start()) => {
-            match infer_expr(c, gamma, args.start()) {
-                Ok(t) => (
-                    resolve(gamma, t, span),
-                    Some(c.body.expr_spans[args.start()]),
-                ),
+        None => {
+            let Some(recv) = method_receiver(c.body, args) else {
+                return Err(e);
+            };
+            match infer_expr(c, gamma, recv) {
+                Ok(t) => (resolve(gamma, t, span), Some(c.body.expr_spans[recv])),
                 Err(_) => return Err(e),
             }
         }
-        None => return Err(e),
     };
 
     let err_span = e.labels.first().map(|l| l.span);
@@ -1375,6 +1239,10 @@ pub(crate) fn resolve_named_call(
     Err(e)
 }
 
+fn method_receiver(body: &Body, args: IdxRange<Expr>) -> Option<Idx<Expr>> {
+    (!args.is_empty() && body.method_call_recvs.contains(&args.start())).then(|| args.start())
+}
+
 fn written_method_name(
     c: BodyCtx,
     recv_override: Option<TyId>,
@@ -1383,9 +1251,7 @@ fn written_method_name(
 ) -> Option<Ustr> {
     let receiver = match (recv_override, &c.body.expr_arena[call_expr]) {
         (Some(_), Expr::SafeNavCall { receiver, .. }) => *receiver,
-        (None, _) if !args.is_empty() && c.body.method_call_recvs.contains(&args.start()) => {
-            args.start()
-        }
+        (None, _) => method_receiver(c.body, args)?,
         _ => return None,
     };
     c.body.method_names.get(&receiver).copied()
@@ -1420,32 +1286,20 @@ fn resolve_named_call_inner(
     let span = c.body.expr_spans[call_expr];
     let name = family.key();
     let _span = tracing::info_span!("named_call", name = %name).entered();
-    let Callees {
-        visible: all_candidates,
-        hidden,
-    } = resolve_callee(gamma, &family);
+    let mut callees = resolve_callee(gamma, &family);
     // Empty merged families are scoped misses, not workspace-wide lookup requests.
-    let candidates: FnList = if generic_args.is_empty() {
-        all_candidates
-    } else {
-        all_candidates
-            .into_iter()
-            .filter(|(mid, fid)| {
-                gamma.workspace.module(*mid).functions[*fid].generics.len() == generic_args.len()
-            })
-            .collect()
-    };
+    if !generic_args.is_empty() {
+        callees.visible.retain(|(mid, fid)| {
+            gamma.workspace.module(*mid).functions[*fid].generics.len() == generic_args.len()
+        });
+    }
 
     // A callable field wins over a free function with the same name.
     let method_recv: Option<TyId> = match recv_override {
         Some(r) => Some(resolve(gamma, r, span)),
-
-        None if !args.is_empty() && c.body.method_call_recvs.contains(&args.start()) => {
-            let recv_ty = infer_expr(c, gamma, args.start())?;
-            Some(resolve(gamma, recv_ty, span))
-        }
-
-        None => None,
+        None => method_receiver(c.body, args)
+            .map(|recv| infer_expr(c, gamma, recv).map(|ty| resolve(gamma, ty, span)))
+            .transpose()?,
     };
 
     if let Some(recv_ty) = method_recv {
@@ -1454,16 +1308,10 @@ fn resolve_named_call_inner(
             let field_ty = resolve(gamma, field_ty, span);
 
             if matches!(gamma.get(field_ty), TypeExpr::Function { .. }) {
-                let call_args = if recv_override.is_some() {
-                    args
-                } else {
-                    let r = args.make_range();
-
-                    IdxRange::new_exclusive(
-                        Idx::from_raw(RawIdx::from_u32(r.start + 1))
-                            ..Idx::from_raw(RawIdx::from_u32(r.end)),
-                    )
-                };
+                let mut call_args = args;
+                if recv_override.is_none() {
+                    call_args.next();
+                }
 
                 gamma.out.fn_field_calls.insert(call_expr, field);
                 gamma.out.fn_field_call_types.insert(call_expr, field_ty);
@@ -1493,14 +1341,12 @@ fn resolve_named_call_inner(
         }
     }
 
-    if candidates.is_empty() {
+    let unary = unary_operator_entry(name.as_str()).is_some();
+    if callees.visible.is_empty() {
         let unbound_scoped_family = match family {
-            CallFamily::Merged { file, name } => gamma
-                .workspace
-                .module_ids
-                .get(&file)
-                .and_then(|mid| gamma.workspace.module(*mid).call_families.get(&name))
-                .is_some_and(Vec::is_empty),
+            CallFamily::Merged { file, name } => {
+                merged_members(gamma, file, name).is_some_and(<[_]>::is_empty)
+            }
             CallFamily::Resolved(_) => false,
         };
         if recv_override.is_none() && !unbound_scoped_family {
@@ -1511,9 +1357,6 @@ fn resolve_named_call_inner(
                     return call_fn_value(c, gamma, gty, args, span);
                 }
             }
-        }
-
-        if recv_override.is_none() && !unbound_scoped_family {
             if let Some(NewtypeId { module: ntm, def }) = resolve_newtype(gamma, name) {
                 let nt = &gamma.workspace.module(ntm).newtypes[def];
                 let (subs, fresh) = gamma.instantiate_generics(&nt.generics, span)?;
@@ -1527,13 +1370,11 @@ fn resolve_named_call_inner(
                     );
                 }
 
-                for arg in args.into_iter() {
-                    let aspan = c.body.expr_spans[arg];
-                    let aty = infer_expr(c, gamma, arg)?;
-                    let w_sub = substitute(gamma, nt.wrapped, &subs, aspan)?;
-
-                    coerce(gamma, aty, w_sub, aspan)?;
-                }
+                let arg = args.start();
+                let aspan = c.body.expr_spans[arg];
+                let aty = infer_expr(c, gamma, arg)?;
+                let w_sub = substitute(gamma, nt.wrapped, &subs, aspan)?;
+                coerce(gamma, aty, w_sub, aspan)?;
 
                 let arg_tys: Vec<TyId> = fresh.iter().map(|&f| resolve(gamma, f, span)).collect();
                 let result = gamma.nominal_app(name, &arg_tys, span);
@@ -1542,7 +1383,7 @@ fn resolve_named_call_inner(
             }
         }
 
-        if unary_operator_entry(name.as_str()).is_some() {
+        if unary {
             let operand = args
                 .into_iter()
                 .next()
@@ -1551,9 +1392,7 @@ fn resolve_named_call_inner(
             return Err(unary_operator_error(gamma, name, operand, span));
         }
 
-        let method_call = recv_override.is_some()
-            || (!args.is_empty() && c.body.method_call_recvs.contains(&args.start()));
-        if unbound_scoped_family && !method_call {
+        if unbound_scoped_family && method_recv.is_none() {
             return Err(CompilerError::new_with_label(
                 span,
                 format!("`{name}` did not resolve to any definition"),
@@ -1583,23 +1422,22 @@ fn resolve_named_call_inner(
     }
 
     let mut preinferred: FxHashMap<Idx<Expr>, TyId> = FxHashMap::default();
+    let arg_list = args.into_iter().collect_vec();
 
     // A hidden member may be the one the arguments match, so only a family
     // with nothing hidden may skip scoring.
-    let single =
-        candidates.len() == 1 && hidden.is_empty() && unary_operator_entry(name.as_str()).is_none();
+    let single = callees.visible.len() == 1 && callees.hidden.is_empty() && !unary;
     let (callee_mid, callee_fn) = if single {
-        candidates[0]
+        callees.visible[0]
     } else {
         let mut arg_tys: Vec<TyId> = Vec::new();
         let mut arg_ty: FxHashMap<Idx<Expr>, TyId> = FxHashMap::default();
-        let mut arg_list: Vec<Idx<Expr>> = Vec::new();
 
         if let Some(r) = recv_override {
             arg_tys.push(resolve(gamma, r, span));
         }
 
-        for a in args {
+        for &a in &arg_list {
             // Field selectors and lambdas need the winning parameter type.
             let t = if matches!(c.body.expr_arena[a], Expr::Lambda { .. }) {
                 gamma.fresh_callsite_var(*Q_LAM, span)
@@ -1614,15 +1452,13 @@ fn resolve_named_call_inner(
 
             arg_tys.push(t);
             arg_ty.insert(a, t);
-            arg_list.push(a);
         }
 
-        match select_overload_with_generics(
+        match select_overload(
             c,
             gamma,
             family,
-            &candidates,
-            &hidden,
+            &callees,
             recv_override,
             &arg_list,
             &arg_ty,
@@ -1634,9 +1470,7 @@ fn resolve_named_call_inner(
             Ok(pick) => pick,
 
             Err(e) => {
-                if matches!(&e, SelectError::NoFit(_))
-                    && unary_operator_entry(name.as_str()).is_some()
-                {
+                if matches!(&e, SelectError::NoFit(_)) && unary {
                     return Err(unary_operator_error(
                         gamma,
                         name,
@@ -1646,31 +1480,30 @@ fn resolve_named_call_inner(
                 }
 
                 // Retry a tie once the lambda parameter is pinned, before giving an operator error.
-                if let SelectError::Tied(_) = e {
-                    if !gamma.quiet {
-                        if let Some((v, origin)) = deferrable_operand(gamma, &arg_tys, span) {
-                            let result = defer_result_var(gamma, origin, span);
-                            // Treat a deferred callee as impure until resolved.
-                            gamma.invalidate_mutable_refinements();
-                            queue_pending(
-                                gamma,
-                                v,
-                                Pending {
-                                    kind: PendingKind::Call {
-                                        call_expr,
-                                        recv_override,
-                                        arg_ty,
-                                        arg_tys,
-                                        preinferred,
-                                    },
-                                    origin,
-                                    span,
-                                    result,
-                                },
-                            );
-                            return Ok(result);
-                        }
-                    }
+                if let SelectError::Tied(_) = e
+                    && !gamma.quiet
+                    && let Some((v, origin)) = deferrable_operand(gamma, &arg_tys, span)
+                {
+                    let result = defer_result_var(gamma, origin, span);
+                    // Treat a deferred callee as impure until resolved.
+                    gamma.invalidate_mutable_refinements();
+                    queue_pending(
+                        gamma,
+                        v,
+                        Pending {
+                            kind: PendingKind::Call {
+                                call_expr,
+                                recv_override,
+                                arg_ty,
+                                arg_tys,
+                                preinferred,
+                            },
+                            origin,
+                            span,
+                            result,
+                        },
+                    );
+                    return Ok(result);
                 }
 
                 if name
@@ -1693,7 +1526,6 @@ fn resolve_named_call_inner(
         }
     };
 
-    let arg_list: Vec<Idx<Expr>> = args.into_iter().collect();
     commit_selected_call(
         c,
         gamma,
@@ -1751,17 +1583,12 @@ pub(crate) fn commit_selected_call(
         gamma.out.call_generic_bindings.insert(call_expr, bindings);
     }
 
-    // The call's effects occur after receiver and argument evaluation.
-    let callee_pure = fn_has_anno(
-        &gamma.workspace.module(callee_mid).functions[callee_fn],
-        "pure",
-    );
-
     let ret_ty = function
         .return_ty
         .unwrap_or_else(|| gamma.workspace.builtins.unit());
 
-    if !callee_pure {
+    // The call's effects occur after receiver and argument evaluation.
+    if !fn_has_anno(function, "pure") {
         gamma.invalidate_mutable_refinements();
     }
 

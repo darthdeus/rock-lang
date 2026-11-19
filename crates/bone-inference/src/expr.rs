@@ -1544,6 +1544,7 @@ pub(crate) fn infer_expr_used(
                     &[target, value],
                     &arg_ty,
                     &arg_tys,
+                    IdxRange::new_empty(),
                     op_fn,
                     expr_span,
                 )?

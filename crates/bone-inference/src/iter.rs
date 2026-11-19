@@ -599,6 +599,7 @@ pub(crate) fn resolve_unary_by_recv(
             &[],
             &FxHashMap::default(),
             &[recv_ty],
+            IdxRange::new_empty(),
             name,
             span,
         )?
