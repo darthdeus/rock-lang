@@ -20,10 +20,54 @@ const MAX_TRANSACTION_FRAGMENT_BYTES: usize = 64 * 1024;
 const MAX_TRANSACTION_FRAGMENTS: usize = MAX_PENDING_BYTES / (4 * 1024);
 const MAX_PATH_BYTES: usize = 4096;
 
-static FILE_JOBS_TEST_PAUSED: AtomicU8 = AtomicU8::new(0);
-static FILE_JOBS_TEST_ENTERED: AtomicU8 = AtomicU8::new(0);
-static FILE_JOBS_TEST_PUBLICATION_PAUSED: AtomicU8 = AtomicU8::new(0);
-static FILE_JOBS_TEST_PUBLICATION_ENTERED: AtomicU8 = AtomicU8::new(0);
+struct PausePoint {
+    paused: AtomicU8,
+    entered: AtomicU8,
+}
+
+impl PausePoint {
+    const fn new() -> Self {
+        Self {
+            paused: AtomicU8::new(0),
+            entered: AtomicU8::new(0),
+        }
+    }
+
+    fn gate(&self) {
+        if !file_jobs_test_enabled() {
+            return;
+        }
+        let control = file_jobs_test_control();
+        let mut guard = control.state.lock().unwrap();
+        if self.paused.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        self.entered.store(1, Ordering::Release);
+        control.wake.notify_all();
+        while self.paused.load(Ordering::Acquire) != 0 {
+            guard = control.wake.wait(guard).unwrap();
+        }
+        self.entered.store(0, Ordering::Release);
+    }
+
+    fn pause(&self) -> bool {
+        if !file_jobs_test_enabled() {
+            return false;
+        }
+        let control = file_jobs_test_control();
+        let _guard = control.state.lock().unwrap();
+        self.entered.store(0, Ordering::Release);
+        self.paused.store(1, Ordering::Release);
+        true
+    }
+
+    fn entered(&self) -> bool {
+        file_jobs_test_enabled() && self.entered.load(Ordering::Acquire) != 0
+    }
+}
+
+static WORKER_PAUSE: PausePoint = PausePoint::new();
+static PUBLICATION_PAUSE: PausePoint = PausePoint::new();
 
 struct FileJobsTestControl {
     state: Mutex<()>,
@@ -41,40 +85,6 @@ fn file_jobs_test_control() -> &'static FileJobsTestControl {
 fn file_jobs_test_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("STONE_FILE_JOBS_TEST_CONTROL").as_deref() == Ok("1"))
-}
-
-fn file_jobs_test_pause_gate() {
-    if !file_jobs_test_enabled() {
-        return;
-    }
-    let control = file_jobs_test_control();
-    let mut guard = control.state.lock().unwrap();
-    if FILE_JOBS_TEST_PAUSED.load(Ordering::Acquire) == 0 {
-        return;
-    }
-    FILE_JOBS_TEST_ENTERED.store(1, Ordering::Release);
-    control.wake.notify_all();
-    while FILE_JOBS_TEST_PAUSED.load(Ordering::Acquire) != 0 {
-        guard = control.wake.wait(guard).unwrap();
-    }
-    FILE_JOBS_TEST_ENTERED.store(0, Ordering::Release);
-}
-
-fn file_jobs_test_publication_pause_gate() {
-    if !file_jobs_test_enabled() {
-        return;
-    }
-    let control = file_jobs_test_control();
-    let mut guard = control.state.lock().unwrap();
-    if FILE_JOBS_TEST_PUBLICATION_PAUSED.load(Ordering::Acquire) == 0 {
-        return;
-    }
-    FILE_JOBS_TEST_PUBLICATION_ENTERED.store(1, Ordering::Release);
-    control.wake.notify_all();
-    while FILE_JOBS_TEST_PUBLICATION_PAUSED.load(Ordering::Acquire) != 0 {
-        guard = control.wake.wait(guard).unwrap();
-    }
-    FILE_JOBS_TEST_PUBLICATION_ENTERED.store(0, Ordering::Release);
 }
 
 #[derive(Clone, Copy)]
@@ -393,18 +403,6 @@ impl DirectoryBarriers {
     }
 }
 
-struct TransactionBuilder {
-    operations: Vec<TransactionOp>,
-    cleanup_success: Vec<PathBuf>,
-    cleanup_failure: Vec<PathBuf>,
-    cleanup_directories: Vec<CleanupDirectory>,
-    cleanup_entries: usize,
-    cleanup_bytes: usize,
-    bytes: usize,
-    fragments: usize,
-    published: bool,
-}
-
 struct Transaction {
     operations: Vec<TransactionOp>,
     cleanup_success: Vec<PathBuf>,
@@ -417,7 +415,7 @@ struct Transaction {
     published: bool,
 }
 
-impl TransactionBuilder {
+impl Transaction {
     fn new() -> Self {
         Self {
             operations: Vec::new(),
@@ -521,20 +519,6 @@ impl TransactionBuilder {
         paths.push(path);
         true
     }
-
-    fn finish(self) -> Transaction {
-        Transaction {
-            operations: self.operations,
-            cleanup_success: self.cleanup_success,
-            cleanup_failure: self.cleanup_failure,
-            cleanup_directories: self.cleanup_directories,
-            cleanup_entries: self.cleanup_entries,
-            cleanup_bytes: self.cleanup_bytes,
-            bytes: self.bytes,
-            fragments: self.fragments,
-            published: self.published,
-        }
-    }
 }
 
 #[derive(Clone, Default)]
@@ -556,7 +540,7 @@ struct WorkerControl {
 struct Jobs {
     sender: mpsc::SyncSender<Request>,
     pending: HashMap<i32, Pending>,
-    transactions: HashMap<i32, TransactionBuilder>,
+    transactions: HashMap<i32, Transaction>,
     next: i32,
     reserved_jobs: usize,
     accounting: Arc<AtomicUsize>,
@@ -719,7 +703,7 @@ impl Jobs {
             return None;
         }
         let id = self.next_id()?;
-        self.transactions.insert(id, TransactionBuilder::new());
+        self.transactions.insert(id, Transaction::new());
         Some(id)
     }
 
@@ -995,15 +979,14 @@ impl Jobs {
         if self.pending.len() + self.reserved_jobs >= self.limits.max_pending_jobs {
             return None;
         }
-        let builder = self.transactions.remove(&id)?;
+        let transaction = self.transactions.remove(&id)?;
         let job_id = match self.next_id() {
             Some(job_id) => job_id,
             None => {
-                self.transactions.insert(id, builder);
+                self.transactions.insert(id, transaction);
                 return None;
             }
         };
-        let transaction = builder.finish();
         let completion = Arc::new(Completion::new());
         let cancellation = Arc::new(Cancellation::new());
         let pending = Pending {
@@ -1025,20 +1008,7 @@ impl Jobs {
             }
             Err(mpsc::TrySendError::Full(request)) => {
                 if let Work::Transaction(transaction) = request.work {
-                    self.transactions.insert(
-                        id,
-                        TransactionBuilder {
-                            operations: transaction.operations,
-                            cleanup_success: transaction.cleanup_success,
-                            cleanup_failure: transaction.cleanup_failure,
-                            cleanup_directories: transaction.cleanup_directories,
-                            cleanup_entries: transaction.cleanup_entries,
-                            cleanup_bytes: transaction.cleanup_bytes,
-                            bytes: transaction.bytes,
-                            fragments: transaction.fragments,
-                            published: transaction.published,
-                        },
-                    );
+                    self.transactions.insert(id, transaction);
                 }
                 None
             }
@@ -1076,7 +1046,7 @@ fn worker_loop(
     #[cfg(not(test))]
     let _ = &control;
     for request in receiver {
-        file_jobs_test_pause_gate();
+        WORKER_PAUSE.gate();
         #[cfg(test)]
         if let Some(gate) = &control.gate {
             gate.block_request();
@@ -1324,76 +1294,85 @@ fn execute_transaction(
     id: i32,
     control: &WorkerControl,
 ) -> JobResult {
+    let result = match run_transaction(transaction, cancellation, id, control) {
+        Ok(()) => {
+            cleanup(&transaction.cleanup_success);
+            if transaction.published {
+                cleanup_directories(&transaction.cleanup_directories);
+            }
+            JobResult::Success
+        }
+        // The root name may already be visible, so the failure cleanup could delete live state.
+        Err(JobResult::DurabilityUncertain) => JobResult::DurabilityUncertain,
+        Err(result) => {
+            cleanup(&transaction.cleanup_failure);
+            result
+        }
+    };
+    cancellation.complete();
+    result
+}
+
+fn run_transaction(
+    transaction: &Transaction,
+    cancellation: &Cancellation,
+    id: i32,
+    control: &WorkerControl,
+) -> Result<(), JobResult> {
     let mut barriers = DirectoryBarriers::observed(control);
     for (sequence, operation) in transaction.operations.iter().enumerate() {
         match operation {
             TransactionOp::Publish(write) => {
                 if !cancellation.claim_publication() {
-                    cleanup(&transaction.cleanup_failure);
-                    cancellation.complete();
-                    return JobResult::Cancelled;
+                    return Err(JobResult::Cancelled);
                 }
                 #[cfg(test)]
                 if let Some(gate) = &control.publication_gate {
                     gate.block_request();
                 }
-                file_jobs_test_publication_pause_gate();
+                PUBLICATION_PAUSE.gate();
                 // Everything the root reaches must be durable before the root name can be.
                 if let Err(failure) = barriers.flush() {
                     log_io_error("directory barrier", &failure.directory, &failure.error);
-                    cleanup(&transaction.cleanup_failure);
-                    cancellation.complete();
-                    return JobResult::Failure;
+                    return Err(JobResult::Failure);
                 }
                 if let Err(error) =
                     write_atomic(&write.path, &write.fragments, id, sequence, &mut barriers)
                 {
                     log_io_error("publish", &write.path, &error);
-                    cleanup(&transaction.cleanup_failure);
-                    cancellation.complete();
-                    return JobResult::Failure;
+                    return Err(JobResult::Failure);
                 }
                 if control.take_publish_sync_failure() {
                     let error = std::io::Error::other("injected post-publish sync failure");
                     log_io_error("publish durability", &write.path, &error);
-                    cancellation.complete();
-                    return JobResult::DurabilityUncertain;
+                    return Err(JobResult::DurabilityUncertain);
                 }
                 // Commit point: the root name becomes durable here and nowhere earlier.
                 if let Err(failure) = barriers.flush() {
                     log_io_error("publish durability", &write.path, &failure.error);
-                    cancellation.complete();
-                    return JobResult::DurabilityUncertain;
+                    return Err(JobResult::DurabilityUncertain);
                 }
             }
             TransactionOp::Write(write) => {
                 if cancellation.is_cancelled() {
-                    cleanup(&transaction.cleanup_failure);
-                    cancellation.complete();
-                    return JobResult::Cancelled;
+                    return Err(JobResult::Cancelled);
                 }
                 if let Err(error) =
                     write_atomic(&write.path, &write.fragments, id, sequence, &mut barriers)
                 {
                     log_io_error("write", &write.path, &error);
-                    cleanup(&transaction.cleanup_failure);
-                    cancellation.complete();
-                    return JobResult::Failure;
+                    return Err(JobResult::Failure);
                 }
             }
             TransactionOp::Png(png) => {
                 if cancellation.is_cancelled() {
-                    cleanup(&transaction.cleanup_failure);
-                    cancellation.complete();
-                    return JobResult::Cancelled;
+                    return Err(JobResult::Cancelled);
                 }
                 let encoded = match encode_png(&png.pixels, png.width, png.height) {
                     Ok(encoded) => encoded,
                     Err(error) => {
                         log_io_error("png encode", &png.path, &error);
-                        cleanup(&transaction.cleanup_failure);
-                        cancellation.complete();
-                        return JobResult::Failure;
+                        return Err(JobResult::Failure);
                     }
                 };
                 if let Err(error) = write_atomic(
@@ -1404,30 +1383,19 @@ fn execute_transaction(
                     &mut barriers,
                 ) {
                     log_io_error("png write", &png.path, &error);
-                    cleanup(&transaction.cleanup_failure);
-                    cancellation.complete();
-                    return JobResult::Failure;
+                    return Err(JobResult::Failure);
                 }
             }
         }
     }
     if cancellation.is_cancelled() {
-        cleanup(&transaction.cleanup_failure);
-        cancellation.complete();
-        return JobResult::Cancelled;
+        return Err(JobResult::Cancelled);
     }
     if let Err(failure) = barriers.flush() {
         log_io_error("directory barrier", &failure.directory, &failure.error);
-        cleanup(&transaction.cleanup_failure);
-        cancellation.complete();
-        return JobResult::Failure;
+        return Err(JobResult::Failure);
     }
-    cleanup(&transaction.cleanup_success);
-    if transaction.published {
-        cleanup_directories(&transaction.cleanup_directories);
-    }
-    cancellation.complete();
-    JobResult::Success
+    Ok(())
 }
 
 fn encode_png(pixels: &[u8], width: u32, height: u32) -> std::io::Result<Vec<u8>> {
@@ -1526,18 +1494,11 @@ fn is_plain_filename(filename: &str) -> bool {
         && !filename.contains('\\')
 }
 
-fn copy_bytes(data: *const c_char, len: usize, max_len: usize) -> Option<Vec<u8>> {
+fn copy_bytes<T>(data: *const T, len: usize, max_len: usize) -> Option<Vec<u8>> {
     if data.is_null() || len > max_len {
         return None;
     }
     Some(unsafe { std::slice::from_raw_parts(data.cast::<u8>(), len) }.to_vec())
-}
-
-fn copy_bytes_u8(data: *const u8, len: usize, max_len: usize) -> Option<Vec<u8>> {
-    if data.is_null() || len > max_len {
-        return None;
-    }
-    Some(unsafe { std::slice::from_raw_parts(data, len) }.to_vec())
 }
 
 fn poll_job(id: i32, wait: bool) -> i32 {
@@ -1745,7 +1706,7 @@ pub extern "C" fn stone_file_transaction_write_png(
         return false;
     }
     drop(job_queue);
-    let Some(pixels) = copy_bytes_u8(pixels, length, MAX_TRANSACTION_FRAGMENT_BYTES) else {
+    let Some(pixels) = copy_bytes(pixels, length, MAX_TRANSACTION_FRAGMENT_BYTES) else {
         let job_queue = jobs().lock().unwrap();
         job_queue.release_bytes(length);
         return false;
@@ -1851,26 +1812,12 @@ pub extern "C" fn stone_file_transaction_poll(job: i32, wait: bool) -> i32 {
 
 #[no_mangle]
 pub extern "C" fn stone_file_jobs_test_pause() -> bool {
-    if !file_jobs_test_enabled() {
-        return false;
-    }
-    let control = file_jobs_test_control();
-    let _guard = control.state.lock().unwrap();
-    FILE_JOBS_TEST_ENTERED.store(0, Ordering::Release);
-    FILE_JOBS_TEST_PAUSED.store(1, Ordering::Release);
-    true
+    WORKER_PAUSE.pause()
 }
 
 #[no_mangle]
 pub extern "C" fn stone_file_jobs_test_pause_publication() -> bool {
-    if !file_jobs_test_enabled() {
-        return false;
-    }
-    let control = file_jobs_test_control();
-    let _guard = control.state.lock().unwrap();
-    FILE_JOBS_TEST_PUBLICATION_ENTERED.store(0, Ordering::Release);
-    FILE_JOBS_TEST_PUBLICATION_PAUSED.store(1, Ordering::Release);
-    true
+    PUBLICATION_PAUSE.pause()
 }
 
 #[no_mangle]
@@ -1880,20 +1827,20 @@ pub extern "C" fn stone_file_jobs_test_release() -> bool {
     }
     let control = file_jobs_test_control();
     let _guard = control.state.lock().unwrap();
-    FILE_JOBS_TEST_PAUSED.store(0, Ordering::Release);
-    FILE_JOBS_TEST_PUBLICATION_PAUSED.store(0, Ordering::Release);
+    WORKER_PAUSE.paused.store(0, Ordering::Release);
+    PUBLICATION_PAUSE.paused.store(0, Ordering::Release);
     control.wake.notify_all();
     true
 }
 
 #[no_mangle]
 pub extern "C" fn stone_file_jobs_test_entered() -> bool {
-    file_jobs_test_enabled() && FILE_JOBS_TEST_ENTERED.load(Ordering::Acquire) != 0
+    WORKER_PAUSE.entered()
 }
 
 #[no_mangle]
 pub extern "C" fn stone_file_jobs_test_publication_entered() -> bool {
-    file_jobs_test_enabled() && FILE_JOBS_TEST_PUBLICATION_ENTERED.load(Ordering::Acquire) != 0
+    PUBLICATION_PAUSE.entered()
 }
 
 #[cfg(test)]
@@ -2822,7 +2769,7 @@ mod tests {
         let queue = Mutex::new(Jobs::new_with_gate(limits(4, 64), Arc::clone(&gate)));
         let path = root.join("payload");
         let mut caller_bytes = b"before".to_vec();
-        let copied = copy_bytes(caller_bytes.as_ptr().cast(), caller_bytes.len(), 64).unwrap();
+        let copied = copy_bytes(caller_bytes.as_ptr(), caller_bytes.len(), 64).unwrap();
         let job = queue
             .lock()
             .unwrap()
