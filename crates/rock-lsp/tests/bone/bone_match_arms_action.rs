@@ -3,8 +3,7 @@
 //! When the cursor is in a `match` over an enum that's missing variants, the
 //! bone backend offers an action whose edit inserts `EnumName::Variant => {}`
 //! arms for the uncovered variants. Empty `match x {}`, partial matches, and the
-//! no-op cases (exhaustive / wildcard) are all exercised here -- there's no
-//! `.rock.lsp` fixture type for code actions.
+//! no-op cases (exhaustive / wildcard) are exercised here.
 
 use crate::common::*;
 use lsp_types::*;

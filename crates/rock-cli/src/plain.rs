@@ -268,6 +268,11 @@ pub(crate) static SKULL: BackendSpec = BackendSpec {
         }),
         (Operation::Test, |cx| {
             let files = cx.get_test_files()?;
+            if files.iter().any(|path| path.ends_with(".rock.lsp")) {
+                anyhow::bail!(
+                    ".rock.lsp fixtures have been retired. Run the editor tests with `cargo test -p rock-cli editor::`."
+                );
+            }
             let filter = cx.test_filter()?;
             rock_cli::skull_backend::skull_test(&files, filter.as_ref(), cx.args.test_threads)
         }),

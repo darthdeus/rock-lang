@@ -2496,18 +2496,7 @@ pub(crate) fn skull_test(
         println!("  @test shards: {shards} LuaJIT processes per package (ROCK_TEST_SHARDS)");
     }
 
-    // LSP fixtures run through the bone-backed LSP (skull's language server),
-    // via the same dispatch helper rock's `test` uses. Failures count toward
-    // the non-zero exit alongside @test failures.
-    let suites_start = Instant::now();
-    let mut lsp_failed = 0usize;
-    for path in paths {
-        lsp_failed += crate::lsp_test::run_lsp_suite(std::path::Path::new(path))?;
-    }
-
-    // Error-test fixtures (`.rock.err`) verify rejection, which happens in the
-    // shared bone front end before codegen -- so skull folds them in too.
-    crate::invocation_log::note_phase("lsp_suite", suites_start.elapsed().as_millis() as u64);
+    // Error-test fixtures (`.rock.err`) verify rejection in the shared front end.
     let err_start = Instant::now();
     let mut err_failed = 0usize;
     for path in paths {
@@ -2515,7 +2504,7 @@ pub(crate) fn skull_test(
     }
 
     crate::invocation_log::note_phase("error_suite", err_start.elapsed().as_millis() as u64);
-    crate::invocation_log::note_counts(&[("lsp_failed", lsp_failed), ("error_failed", err_failed)]);
+    crate::invocation_log::note_counts(&[("error_failed", err_failed)]);
 
     if let Some(filter) = filter.filter(|_| tests_total == 0) {
         anyhow::bail!(
@@ -2525,7 +2514,7 @@ pub(crate) fn skull_test(
         );
     }
 
-    if tests_failed > 0 || test_fails > 0 || failed > 0 || lsp_failed > 0 || err_failed > 0 {
+    if tests_failed > 0 || test_fails > 0 || failed > 0 || err_failed > 0 {
         crate::invocation_log::exit(1);
     }
     Ok(())

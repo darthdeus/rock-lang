@@ -5,8 +5,7 @@
 //! legend and emits indices into THAT; if those indices aren't translated to the
 //! advertised legend, the client decodes every token as the wrong type (bone's
 //! `0`=KEYWORD reads as the advertised `0`=NAMESPACE, etc.) -> pervasive
-//! miscoloring. The `.rock.lsp` fixtures miss this because they decode with
-//! bone's own legend; only the live server hits the mismatch.
+//! miscoloring. This test decodes the result against the server's legend.
 
 use bone_query::FileUriExt;
 use lsp_types::*;

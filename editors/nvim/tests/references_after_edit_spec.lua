@@ -2,10 +2,8 @@
 --
 -- User-reported flow: add a line inside fn A, move the cursor onto a symbol
 -- in fn B -> occurrence spans must use post-edit offsets, not be off by the
--- line delta. The `.rock.lsp` edit_sequence harness proves the server handles
--- didChange correctly; this spec closes the remaining gap -- nvim's own
--- didChange emission (incremental sync from nvim_buf_set_lines) feeding the
--- same request.
+-- line delta. This spec feeds the server Neovim's own didChange notification
+-- after an incremental edit from nvim_buf_set_lines.
 
 local function fail(msg)
   io.stderr:write('FAIL: ' .. msg .. '\n')

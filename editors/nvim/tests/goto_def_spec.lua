@@ -1,12 +1,7 @@
 -- textDocument/definition round-trip against a real rock-lsp.
 --
--- The `.rock.lsp` harness covers single-file goto-def cases (~34
--- tests in `tests/lsp/goto_definition.rock.lsp`) and the Rust
--- integration tests cover multi-file jumps
--- (`rock-lsp/tests/multi_file_goto_def.rs`). This spec closes the
--- CLI/server drift gap by driving `textDocument/definition` over
--- the live LSP protocol — the same path nvim's
--- `vim.lsp.buf.definition()` uses.
+-- The CLI editor tests cover source-level definition queries. This spec
+-- drives the live LSP protocol used by `vim.lsp.buf.definition()`.
 --
 -- Asserts:
 --   * the request reaches the server (no error)

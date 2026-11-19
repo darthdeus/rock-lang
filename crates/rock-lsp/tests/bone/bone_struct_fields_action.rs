@@ -5,8 +5,7 @@
 //! backend offers an action whose edit inserts `field: ?` for each missing
 //! field. Fields with a default are not added (omitting them is legal). The
 //! generated `?` is a Rock expression hole, so the result type-checks and the
-//! user can hover each `?` for its expected type. There's no `.rock.lsp`
-//! fixture type for code actions, so this is a Rust end-to-end test.
+//! user can hover each `?` for its expected type.
 
 use crate::common::*;
 use lsp_types::*;

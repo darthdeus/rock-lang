@@ -57,7 +57,6 @@ colored = { workspace = true }
 serde_json = { workspace = true }
 serde_path_to_error = "0.1"
 serde = { workspace = true, features = ["derive"] }
-toml = { version = "0.8.23", default-features = false, features = ["parse"] }
 fs-err = { workspace = true }
 walkdir = { workspace = true }
 tempfile = "3.0"
@@ -77,6 +76,7 @@ sysinfo = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]
+lsp-server = { workspace = true }
 test-utils = { workspace = true }
 
 # Cargo cannot combine workspace lint inheritance with this crate's check-cfg.

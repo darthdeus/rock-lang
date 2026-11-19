@@ -1,11 +1,7 @@
 -- textDocument/references round-trip against a real rock-lsp.
 --
--- The Rust integration tests (`rock-lsp/tests/find_references_*.rs`)
--- exercise `find_references` directly via in-memory SourceFiles —
--- they do not touch the JSON-RPC server. The `.rock.lsp` harness is
--- single-file only. This spec closes the CLI/server drift gap by
--- driving `textDocument/references` over the live LSP protocol on
--- a real two-file project.
+-- Exercise `textDocument/references` on a two-file project through
+-- the live LSP protocol.
 --
 -- Asserts:
 --   * the request reaches the server (no error)

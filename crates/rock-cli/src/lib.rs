@@ -53,7 +53,6 @@ pub(crate) mod lint_pass;
 pub mod lint_union;
 pub mod live_project;
 mod lsp_survey;
-mod lsp_test;
 mod package_test_sources;
 mod parallel_runner;
 pub mod skull_backend;

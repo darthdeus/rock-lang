@@ -42,9 +42,9 @@ and JS. Tests that JS cannot compile are reported as skips; CI caps their
 count with `JS_MAX_SKIPS` in `.github/workflows/ci.yml`.
 
 The runtime corpus lives in `tests/`, grouped by feature. Expected compiler
-errors live under `tests/errors/`; editor fixtures live under `tests/lsp/`.
+errors live under `tests/errors/`.
 Test labels use only the parent directory and filename, so avoid deeper topic
-nesting. A path component named `errors` or `lsp` selects a special runner.
+nesting. A path component named `errors` selects the compile-failure runner.
 
 ## Differential testing
 
@@ -94,31 +94,15 @@ must all match. Without an expectation, an unrelated rejection can satisfy the
 case. The case name suffix is only a label. The error runner scans the selected
 file's parent directory, so use a separate directory to run one fixture alone.
 
-## LSP fixtures
+## Editor tests
 
-Run a single-request `.rock.lsp` fixture with:
+Run editor cases with `cargo test -p rock-cli editor::`. Add a test name
+to run one case. The tests invoke the one-shot `rock lsp` commands or send
+requests and notifications to the server's message handler. Edit sequence
+tests send each change before checking the reply. Longer stress sequences
+run with `cargo test -p rock-cli editor:: -- --ignored`.
 
-```sh
-cargo run --quiet --bin rock -- test tests/lsp/goto_definition.rock.lsp
-```
-
-For behavior that depends on prior edits, use an `edit_sequence` fixture such
-as [`edit_sequence.rock.lsp`](../tests/lsp/edit_sequence.rock.lsp). Query and
-protocol tests also live in the `bone-query` and `rock-lsp` crates.
-
-LSP fixture files use TOML. Each `[[tests]]` entry has a `name`, a `kind` label,
-source text (or `files` for a multi-file project), a `request`, and generic
-`checks`. Requests select CLI or JSON-RPC transport and state the method or
-arguments. Checks use JSON paths and predicates such as `contains_all`,
-`unordered_equal`, `gte`, `empty`, and `applied_text_equals`. Edit checks apply
-the returned changes to the fixture source before comparing the expected text.
-
-Source can be shared from an earlier case with `source = { from_test = "case" }`.
-Add `replace = [["old", "new"]]` pairs to create a variant. Edit sequences use
-`[[tests.steps]]` entries with `mode = "replace"`, `"type_at"`, or
-`"delete_at"`; a later full-document replacement can reuse an earlier step
-with `source = { from_step = 1, replace = [["old", "new"]] }`. Checks attached
-to a step run after that edit has been sent to the server.
+Query and protocol tests also live in the `bone-query` and `rock-lsp` crates.
 
 ## Stone simulations
 
