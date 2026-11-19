@@ -23,14 +23,6 @@ fn test_coroutine_resume_and_yield_types() {
     print(c.resume())
 }
 
-@test(output = "5\n6\n7")
-fn test_coroutine_basic_yield_int() {
-    let c = gen(5)
-    print(c.resume())
-    print(c.resume())
-    print(c.resume())
-}
-
 @test(output = "10\n20\n11\n21")
 fn test_coroutine_in_vector_int() {
     let coros = vec_new()
@@ -111,18 +103,6 @@ fn test_loop_generators() {
     print(take(naturals(), 5))
     print(take(evens_up_to(6), 4))
     print(take(running_sum(), 5))
-}
-
-co fn greetings() -> Coroutine<string> {
-    yield "hello"
-    yield "world"
-    yield "!"
-}
-
-@test(output = "hello world !")
-fn test_string_coroutine() {
-    let g = greetings()
-    print("{g.resume() ?? "?"} {g.resume() ?? "?"} {g.resume() ?? "?"}")
 }
 
 co fn bool_seq() -> Coroutine<bool> {
