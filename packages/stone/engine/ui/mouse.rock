@@ -69,24 +69,28 @@ pub struct UiMouseState {
     anchor_ref_h: float,
 }
 
-pub global UI_MOUSE: UiMouseState = UiMouseState {
-    last: vec_new(),
-    last_count: 0,
-    cur: vec_new(),
-    cur_count: 0,
-    hot: 0,
-    hot_prev: 0,
-    active: 0,
-    clicked: 0,
-    was_down: false,
-    press_event: false,
-    anchor_x: 0.0,
-    anchor_y: 0.0,
-    anchor_w: 0.0,
-    anchor_h: 0.0,
-    anchor_ctx: 0,
-    anchor_ref_h: 0.0,
+fn ui_mouse_state_new() -> UiMouseState {
+    return UiMouseState {
+        last: vec_new(),
+        last_count: 0,
+        cur: vec_new(),
+        cur_count: 0,
+        hot: 0,
+        hot_prev: 0,
+        active: 0,
+        clicked: 0,
+        was_down: false,
+        press_event: false,
+        anchor_x: 0.0,
+        anchor_y: 0.0,
+        anchor_w: 0.0,
+        anchor_h: 0.0,
+        anchor_ctx: 0,
+        anchor_ref_h: 0.0,
+    }
 }
+
+pub global UI_MOUSE: UiMouseState = ui_mouse_state_new()
 
 // Capture the active drag's reference geometry, in the rect's TARGET units
 // (output px, or scene texels). Called by a widget on its own ui_clicked edge
@@ -138,15 +142,19 @@ pub struct UiIdDebug {
     last_dupe_name: string,
 }
 
-pub global UI_ID_DEBUG: UiIdDebug = UiIdDebug {
-    enabled: false,
-    scopes: map_new(),
-    labels: map_new(),
-    seen: map_new(),
-    dupes: 0,
-    hash_collisions: 0,
-    last_dupe_name: "",
+fn ui_id_debug_new() -> UiIdDebug {
+    return UiIdDebug {
+        enabled: false,
+        scopes: map_new(),
+        labels: map_new(),
+        seen: map_new(),
+        dupes: 0,
+        hash_collisions: 0,
+        last_dupe_name: "",
+    }
 }
+
+pub global UI_ID_DEBUG: UiIdDebug = ui_id_debug_new()
 
 pub const UI_ID_JOIN_FORMATS: int = 0
 

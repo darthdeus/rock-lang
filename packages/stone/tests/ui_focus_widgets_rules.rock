@@ -6,9 +6,7 @@
 // boundaries so accumulated time cannot flake a comparison.
 
 struct FocusWidgetsSaved {
-    tap: TapNavSnapshot,
     pointer: Vec2?,
-    synthetic_mouse: Map<int, bool>,
     clock: float,
     repeat_delay: float,
     repeat_rate: float,
@@ -22,10 +20,9 @@ struct FocusWidgetsSaved {
 fn focus_widgets_with(body: fn(Entity<UiSkin>) -> ()) {
     setup_stone()
     assert(stone_gpu_host_ensure(), "the widget fixture has a native view surface")
+    tapnav_reset()
     let saved = FocusWidgetsSaved {
-        tap: tapnav_isolate(),
         pointer: sim_mouse_override,
-        synthetic_mouse: synthetic_mouse_down,
         clock: time,
         repeat_delay: ACTION_REPEAT_DELAY,
         repeat_rate: ACTION_REPEAT_RATE,
@@ -44,9 +41,8 @@ fn focus_widgets_with(body: fn(Entity<UiSkin>) -> ()) {
         skin.remove()
         WHITE_PIXEL = saved.white
         release_owned_image(white)
-        tapnav_restore(saved.tap)
+        tapnav_reset()
         sim_mouse_override = saved.pointer
-        synthetic_mouse_down = saved.synthetic_mouse
         time = saved.clock
         ACTION_REPEAT_DELAY = saved.repeat_delay
         ACTION_REPEAT_RATE = saved.repeat_rate
@@ -60,7 +56,6 @@ fn focus_widgets_with(body: fn(Entity<UiSkin>) -> ()) {
     defer { tapnav_unwire(acts) }
     SIM_INPUT_SYNTHETIC_ONLY = true
     IMGUI_MOUSE_CAPTURE_OVERRIDE = false
-    synthetic_mouse_down = map_new()
     UI_RENDER_BATCHES = render_batch_pool_new()
     UI_SLIDER_DRAG = null
     UI_FEEL = UiFeelState { base: UiFeel {}, named: map_new() }

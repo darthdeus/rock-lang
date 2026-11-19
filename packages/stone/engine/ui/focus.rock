@@ -69,35 +69,39 @@ pub struct UiFocusState {
     lr_dir: int,
 }
 
-pub global UI_FOCUS: UiFocusState = UiFocusState {
-    last: vec_new(),
-    last_count: 0,
-    cur: vec_new(),
-    cur_count: 0,
-    scope: "",
-    nav_mode: false,
-    focused_ids: map_new(),
-    focused_idx: map_new(),
-    live_id: 0,
-    confirmed_id: 0,
-    up: null,
-    down_act: null,
-    left: null,
-    right: null,
-    confirm: null,
-    back: null,
-    up_was: false,
-    down_was: false,
-    confirm_was: false,
-    held_since: 0.0,
-    last_fire: 0.0,
-    prev_mouse: v(-1.0, -1.0),
-    left_was: false,
-    right_was: false,
-    lr_held_since: 0.0,
-    lr_last_fire: 0.0,
-    lr_dir: 0,
+fn ui_focus_state_new() -> UiFocusState {
+    return UiFocusState {
+        last: vec_new(),
+        last_count: 0,
+        cur: vec_new(),
+        cur_count: 0,
+        scope: "",
+        nav_mode: false,
+        focused_ids: map_new(),
+        focused_idx: map_new(),
+        live_id: 0,
+        confirmed_id: 0,
+        up: null,
+        down_act: null,
+        left: null,
+        right: null,
+        confirm: null,
+        back: null,
+        up_was: false,
+        down_was: false,
+        confirm_was: false,
+        held_since: 0.0,
+        last_fire: 0.0,
+        prev_mouse: v(-1.0, -1.0),
+        left_was: false,
+        right_was: false,
+        lr_held_since: 0.0,
+        lr_last_fire: 0.0,
+        lr_dir: 0,
+    }
 }
+
+pub global UI_FOCUS: UiFocusState = ui_focus_state_new()
 
 // Wire the game's six nav actions (once, at @init). Left/right/back are
 // stored for the slider/back consumers; up/down/confirm drive the MVP.
