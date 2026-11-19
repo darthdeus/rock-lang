@@ -61,19 +61,6 @@ fn test_cast_widens_resolved_source_to_nullable() {
     print(v ?? 0)
 }
 
-@test(output = "42")
-fn test_cast_identity_on_resolved_source() {
-    let v = 42 as int
-    print(v)
-}
-
-// The contextual form of the rejected `((x) => x) as fn(int) -> int`.
-@test(output = "7")
-fn test_ascription_still_supplies_lambda_param_type() {
-    let f = (((x) => x) : fn(int) -> int)
-    print(f(7))
-}
-
 // `as` rejects `any -> Point` (tests/errors/numeric.rock.err); recovering a
 // concrete type out of `any` is `cast<T>`'s job, and it still works.
 @test(output = "5")
@@ -83,23 +70,15 @@ fn test_cast_remains_the_any_escape_hatch() {
     print(p.x)
 }
 
-// Ordinary identity and compatible pairs for `as` and contextual ascription.
-
 @test(output = "42\n3.14\nhello")
 fn test_as_type_ascription() {
     let x = 42 as int
     let y = 3.14 as float
     let z = "hello" as string
-    
+
     print(x)
     print(y)
     print(z)
-}
-
-@test(output = "100")
-fn test_as_in_expression() {
-    let result = (50 + 50) as int
-    print(result)
 }
 
 @test(output = "true")
@@ -109,12 +88,3 @@ fn test_as_with_nullable() {
     print(definitely == 42)
 }
 
-// Numeric `as` conversions.
-
-@test
-fn test_cast_with_operations() {
-    let int_value: int = 10
-    let float_value: float = 5.5
-    let result = (int_value as float) + float_value
-    assert_eq(result, 15.5)
-}

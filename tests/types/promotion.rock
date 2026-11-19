@@ -1,5 +1,65 @@
-// Array literal element types join to their least upper bound: int with
-// float gives float, null with T gives T?.
+// Numeric and nullable promotion: int literals mixed into float arithmetic,
+// float fields and int literal divisors in call arguments, min/max over mixed
+// int and float arguments, and array literal elements joining to their least
+// upper bound (int with float gives float, null with T gives T?).
+
+@test(output = "5.14\n5\n50\n4.5\n60")
+fn test_literal_promotion_with_float_locals() {
+    let x: float = 3.14
+    let sum = x + 2
+    print(sum)
+    let y: float = 10.0
+    let quotient = y / 2
+    print(quotient)
+    let z: float = 100.0
+    print(z / 2)
+    let w: float = 5.5
+    let difference = w - 1
+    print(difference)
+    let a: float = 10.0
+    let b: float = 100.0
+    let chain = a + b / 2
+    print(chain)
+}
+
+struct UiRect {
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+}
+
+struct FixVec2 {
+    x: float,
+    y: float,
+}
+
+fn vec2(x: float, y: float) -> FixVec2 {
+    return FixVec2 { x: x, y: y }
+}
+
+fn center(r: UiRect) -> FixVec2 {
+    return vec2(r.x + r.w / 2, r.y + r.h / 2)
+}
+
+@test(output = "60")
+fn test_vec2_like_construction() {
+    let rect = UiRect { x: 10.0, y: 20.0, w: 100.0, h: 200.0 }
+    let c = center(rect)
+    print(c.x)
+}
+
+@test
+fn test_min_with_int_float() {
+    let result = min(3, 4.0);
+    assert_eq(result, 3.0);
+}
+
+@test
+fn test_max_with_int_float() {
+    let result = max(5.5, 2);
+    assert_eq(result, 5.5);
+}
 
 @test
 fn test_int_float_promotion() {

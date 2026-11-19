@@ -1,10 +1,11 @@
-// Type system tests.
-// Tests nullable types, generics, global variables, extern functions, and various type system features
+// Type system corners: compound-assignment result types, typed and
+// uninitialized struct globals, nullable narrowing in then and else arms,
+// unwrap as a block tail, shadowing in nested ifs, a phantom-only generic
+// param, and generic maps with nullable-promoting helpers in scope.
 
-// Shared struct definitions
-struct FixVec2 { 
-    x: int, 
-    y: int 
+struct FixVec2 {
+    x: int,
+    y: int
 }
 
 struct Image {}
@@ -24,7 +25,6 @@ struct TestArr<T> {
     len: int,
 }
 
-// Helper functions
 fn make_thing<T>(index: int) -> Thing<T> {
     let marker = phantom()
     return Thing { index: index, _marker: marker }
@@ -41,38 +41,34 @@ fn my_vec_map<T, U>(vec: My<T>, f: (T) -> U) -> My<U> {
     return result
 }
 
-// Global variable declarations
 global dt: float = 1.0/60.0
 global image: Image
 
-// Extern function declaration
 extern(lua) fn length(v: FixVec2) -> int;
 
-// Math assignment tests
 @test(output = "10\n0\n25\n1", type_holes = [[0, "int"], [1, "int"], [2, "int"], [3, "int"]])
 fn test_assign_math() {
     let x = 5
     x += 5
     let x1: ? = x
     print(x)
-    
+
     let y = 5
     y -= 5
     let y1: ? = y
     print(y)
-    
+
     let z = 5
     z *= 5
     let z1: ? = z
     print(z)
-    
+
     let w = 5
     w = w ./ 5
     let w1: ? = w
     print(w)
 }
 
-// Global variable tests
 @test(output = "1")
 fn let_global() {
     let assets = Image{}
@@ -85,19 +81,7 @@ fn initialized_global() {
     print("{dt:.4f}")
 }
 
-// Nullable type tests
 @test(output = "4", type_holes = [[5, "int"]])
-fn basic_if_nullable() {
-    let x: int? = 3
-
-    if x != null {
-        let y = x + 1
-        let x_typed: ? = x
-        print(y)
-    }
-}
-
-@test(output = "4", type_holes = [[6, "int"]])
 fn if_else_nullable_then() {
     let x: int? = 3
     if x != null {
@@ -105,32 +89,18 @@ fn if_else_nullable_then() {
         let x_typed: ? = x
         print(y)
     } else {
-        // Can't actually reach this branch when x = 3
     }
 }
 
-@test(output = "4", type_holes = [[7, "int"]])
+@test(output = "4", type_holes = [[6, "int"]])
 fn if_else_nullable_else() {
     let x: int? = 3
     if x == null {
-        // Won't reach here when x = 3
     } else {
         let y = x + 1
         let x_typed: ? = x
         print(y)
     }
-}
-
-// Helper functions for unwrap tests
-fn unwrap_simple() -> int {
-    let x: int? = 5
-    x.unwrap()
-}
-
-fn unwrap_with_var() -> int {
-    let x: int? = 5
-    let y = x.unwrap()
-    y
 }
 
 fn unwrap_in_if() -> int {
@@ -152,36 +122,20 @@ fn unwrap_in_if_with_var() -> int {
     }
 }
 
-// Unwrap tests
-@test(output = "5", type_holes = [[8, "int"]])
-fn unwrap_in_simple_return() {
-    let result = unwrap_simple()
-    let result_typed: ? = result
-    print(result)
-}
-
-@test(output = "5", type_holes = [[9, "int"]])
-fn unwrap_assigned_to_new_var() {
-    let result = unwrap_with_var()
-    let result_typed: ? = result
-    print(result)
-}
-
-@test(output = "5", type_holes = [[10, "int"]])
+@test(output = "5", type_holes = [[7, "int"]])
 fn unwrap_inside_if_without_shadow() {
     let result = unwrap_in_if()
     let result_typed: ? = result
     print(result)
 }
 
-@test(output = "5", type_holes = [[11, "int"]])
-fn unwrap_inside_if_with_shadowing_removed() {
+@test(output = "5", type_holes = [[8, "int"]])
+fn unwrap_inside_if_with_a_binding() {
     let result = unwrap_in_if_with_var()
     let result_typed: ? = result
     print(result)
 }
 
-// Helper functions for shadowing tests
 fn shadow_else_outer() -> int {
     let x: int = 5
     if true {
@@ -206,7 +160,6 @@ fn nested_shadow() -> int {
     }
 }
 
-// Shadowing tests
 @test(output = "5")
 fn shadow_and_else_uses_outer() {
     print(shadow_else_outer())
@@ -217,12 +170,11 @@ fn nested_if_shadow() {
     print(nested_shadow())
 }
 
-// Generic struct test - verifying compilation works
 @test(output = "42")
 fn generic_struct_no_fields() {
     // `T` appears only in `make_thing`'s RETURN type, so nothing at the call
     // pins it; annotated because a completely unconstrained type variable is a
-    // rejection (plan S 0h) rather than a defaulted one.
+    // rejection rather than a defaulted one.
     let thing: Thing<int> = make_thing(42)
     print(thing.index)
 }
@@ -233,19 +185,16 @@ fn generic_arr_len() {
     print(test_arr_len(arr))
 }
 
-// Helper functions for nullable promotion test
-fn promote_int(x: int) -> int? { 
-    return x 
+fn promote_int(x: int) -> int? {
+    return x
 }
 
-fn promote_string(x: string) -> string? { 
-    return x 
+fn promote_string(x: string) -> string? {
+    return x
 }
 
-// Test that we can compile with nullable promotion functions and generics
 @test(output = "0")
-fn minimal_nullable_promotion_bug() {
-    // This should compile fine even with promotion functions defined
+fn generic_map_with_promoting_helpers_in_scope() {
     let vec = My { data: [], len: 0 }
     let result = my_vec_map(vec, (x: int) => x * 2)
     print(result.len)

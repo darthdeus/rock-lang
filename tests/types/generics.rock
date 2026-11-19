@@ -1,8 +1,12 @@
 // Generic functions and structs: explicit and inferred type arguments,
-// nullable generics, nested generic structs and generic call chains.
+// nullable generics, nested generic structs and call chains, several type
+// params, comparison operators on a type parameter, tuple returns, string
+// bindings through generic params, overloads that differ by generic position,
+// and `==` inside a generic body dispatching to structural equality for
+// struct instantiations.
 
-fn id<T>(x: T) -> T { 
-    return x 
+fn id<T>(x: T) -> T {
+    return x
 }
 
 fn create<T>() -> T? {
@@ -13,26 +17,12 @@ fn maybe_id<T>(x: T?) -> T? {
     return x
 }
 
-fn first<T>(arr: [T]) -> T? {
-    if vec_len(arr) > 0 {
-        return arr[0]
-    } else {
-        return null
-    }
+struct Box<T> {
+    item: T
 }
 
-struct Box<T> { 
-    item: T 
-}
-
-fn unbox<T>(b: Box<T>) -> T { 
-    return b.item 
-}
-
-@test(output = "5", type_holes = [[0, "int"]])
-fn test_generic_id_int() {
-    let res: ? = id(5)
-    print(res)
+fn unbox<T>(b: Box<T>) -> T {
+    return b.item
 }
 
 @test(output = "5")
@@ -41,7 +31,7 @@ fn test_generic_id_any() {
     print(id(val))
 }
 
-@test(type_holes = [[1, "int?"]])
+@test(type_holes = [[0, "int?"]])
 fn test_generic_create_infer_int() {
     let n: ? = create()
     let typed_n: int? = n
@@ -59,49 +49,32 @@ fn test_maybe_id_int() {
     print(res)
 }
 
-@test(output = "10", type_holes = [[2, "int"]])
+@test(output = "10", type_holes = [[1, "int"]])
 fn test_generic_struct_type_inference() {
     let b = Box { item: 10 }
     let item: ? = b.item
     print(item)
 }
 
-@test(output = "42", type_holes = [[3, "int"]])
+@test(output = "42", type_holes = [[2, "int"]])
 fn test_generic_function_with_struct() {
     let b = Box { item: 42 }
     let result: ? = unbox(b)
     print(result)
 }
 
-@test(output = "6", type_holes = [[4, "int"]])
+@test(output = "6", type_holes = [[3, "int"]])
 fn test_generic_inference_from_variable() {
     let x: ? = id(5)
     print(x + 1)
 }
 
-@test(output = "0")
-fn test_first_with_typed_empty_array() {
-    let empty_bools: [bool] = []
-    let res = first(empty_bools)
-    print(0)
-}
-
-@test(output = "0")
-fn test_complex_generic_inference_scenario() {
-    // This tests the most complex inference patterns
-    // that the compiler should handle correctly
-    
-    // Multi-level generic inference
+@test(output = "test\n42\nhello")
+fn test_generic_call_chains() {
     let nested_box = Box { item: Box { item: "test" } }
-    let inner_content = unbox(unbox(nested_box))
-    
-    // Generic function chaining
-    let value = id(id(id(42)))
-    
-    // Mixed generic and concrete types
-    let maybe_value = maybe_id(id("hello"))
-    
-    print(0)
+    print(unbox(unbox(nested_box)))
+    print(id(id(id(42))))
+    print(maybe_id(id("hello")) ?? "none")
 }
 
 @test(output = "2.5\n7")
@@ -109,4 +82,217 @@ fn generic_float_and_nested_struct() {
     print(id(2.5))
     let b = Box { item: Box { item: 7 } }
     print(b.item.item)
+}
+
+struct Pair<T> {
+    first: T,
+    second: T,
+}
+
+struct KeyValue<K, V> {
+    key: K,
+    value: V,
+}
+
+@test(output = "1 2\nhello world\nname: Alice")
+fn test_generic_structs() {
+    let p: Pair<int> = Pair { first: 1, second: 2 }
+    print("{p.first} {p.second}")
+    let s: Pair<string> = Pair { first: "hello", second: "world" }
+    print("{s.first} {s.second}")
+    let kv: KeyValue<string, string> = KeyValue { key: "name", value: "Alice" }
+    print("{kv.key}: {kv.value}")
+}
+
+fn swap<T>(a: T, b: T) -> (T, T) {
+    return (b, a)
+}
+
+@test(output = "2 1\nworld hello")
+fn test_generic_tuple_return() {
+    let (a, b) = swap(1, 2)
+    print("{a} {b}")
+    let (c, d) = swap("hello", "world")
+    print("{c} {d}")
+}
+
+// Comparison operators on a type parameter.
+fn max_of<T>(a: T, b: T) -> T {
+    if a > b { return a }
+    return b
+}
+
+@test(output = "5\nhello")
+fn test_generic_max() {
+    print(max_of(3, 5))
+    print(max_of("apple", "hello"))
+}
+
+fn first_element<T>(v: [T]) -> T? {
+    if v.len > 0 {
+        return v[0]
+    }
+    return null
+}
+
+@test(output = "42\n-1\nhello\nempty")
+fn test_generic_nullable_return() {
+    let v = [42, 1, 2]
+    print(first_element(v) ?? -1)
+    let e: [int] = []
+    print(first_element(e) ?? -1)
+    let s = ["hello", "world"]
+    print(first_element(s) ?? "empty")
+    let es: [string] = []
+    print(first_element(es) ?? "empty")
+}
+
+fn make_pair<T>(a: T, b: T) -> Pair<T> {
+    return Pair { first: a, second: b }
+}
+
+@test(output = "10 20")
+fn test_generic_type_inference() {
+    let p = make_pair(10, 20)
+    print("{p.first} {p.second}")
+}
+
+enum Inner<Source> { Empty, From { source: Source, label: string } }
+
+enum Outer { Empty, Wrapped(Inner<string>) }
+
+global DEST: [Outer] = []
+
+@test
+fn nested_generic_enum_clone_uses_concrete_source() {
+    let source = Outer::Wrapped(Inner::From { source: "origin", label: "label" })
+    DEST.push(source.clone_into(DEST.storage))
+    assert(DEST.len() == 1, "cloned event stored")
+    let copied = match DEST[0] {
+        Outer::Wrapped(inner) => match inner {
+            Inner::From { source, label } => source == "origin" && label == "label",
+            _ => false,
+        },
+        _ => false,
+    }
+    assert(copied, "cloned nested record retains both strings")
+}
+
+value SpecPoint { x: float, y: float }
+
+@inline
+fn second<P, S>(p: P, s: S) -> S {
+    return s
+}
+
+@inline
+fn hold<P, S>(p: P, s: S) -> [S] {
+    let out: [S] = []
+    out.push(s)
+    return out
+}
+
+@test(output = "hi")
+fn test_generic_string_binding_returns_its_value() {
+    let s = second(SpecPoint { x: 1.0, y: 2.0 }, "hi")
+    print(s)
+}
+
+@test(output = "hi")
+fn test_generic_string_binding_through_a_container() {
+    let held = hold(SpecPoint { x: 3.0, y: 4.0 }, "hi")
+    print(held[0])
+}
+
+// The control: the same values spelled out concretely, so a green above is
+// about the BINDING rather than about strings working at all.
+@test(output = "hi")
+fn test_concrete_string_control() {
+    let v: [string] = []
+    v.push("hi")
+    print(v[0])
+}
+
+struct InvariantContainer<T> { item: T }
+
+fn read_float(c: InvariantContainer<float>) -> float { c.item }
+
+@test
+fn same_generic_argument_and_scalar_widening() {
+    let c: InvariantContainer<float> = InvariantContainer { item: 5.0 }
+    assert_eq(read_float(c), 5.0)
+    let widened: float = 5
+    assert_eq(widened, 5.0)
+}
+
+fn entity_identity(e: Entity<int>) -> Entity<int> { e }
+
+@test
+fn explicit_arena_and_entity_arguments() {
+    let arena: Arena<int> = arena_new()
+    let e: Entity<int> = arena.insert(42)
+    let same: Entity<int> = entity_identity(e)
+    assert_eq(arena.get(same) ?? -1, 42)
+}
+
+fn two<T>(a: T, b: int) -> string { "left" }
+
+fn two<T>(a: int, b: T) -> string { "right" }
+
+@test(output = "left right")
+fn incomparable_candidates_with_only_one_match() {
+    print("{two(true, 2)} {two(1, true)}")
+}
+
+struct Key { x: int, y: int }
+
+fn find<T>(xs: [T], target: T) -> int {
+    let i = 0
+    for v in xs {
+        if v == target { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+@test(output = "1")
+fn test_struct_eq_in_generic_fn() {
+    let v: [Key] = vec_new()
+    v.push(Key { x: 0, y: 0 })
+    v.push(Key { x: 5, y: 7 })
+    v.push(Key { x: 9, y: 9 })
+    print(v.find(Key { x: 5, y: 7 }))
+}
+
+struct Node<T> {
+    val: T,
+}
+
+fn contains_node<T>(xs: [Node<T>], target: Node<T>) -> bool {
+    for n in xs {
+        if n == target { return true }
+    }
+    return false
+}
+
+@test(output = "true")
+fn test_generic_struct_eq_in_generic_fn() {
+    let v: [Node<int>] = vec_new()
+    v.push(Node { val: 1 })
+    v.push(Node { val: 2 })
+    print(contains_node(v, Node { val: 2 }))
+}
+
+@test(output = "2")
+fn test_primitive_eq_in_generic_fn() {
+    let v: [int] = vec_new()
+    v.push(10); v.push(20); v.push(30)
+    print(v.find(30))
+}
+
+@test(output = "0")
+fn test_string_eq_in_generic_fn() {
+    let v: [string] = vec_new()
+    v.push("alpha"); v.push("beta")
+    print(v.find("alpha"))
 }

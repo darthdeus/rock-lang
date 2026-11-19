@@ -1,4 +1,6 @@
-// Names that collide or look reserved: field names, struct/enum names and result struct redefinition.
+// Names that collide or look reserved: runtime marker field neighbours, a
+// user `Result` struct shadowing the stdlib one, and a struct sharing its name
+// with an enum tuple variant.
 
 // Neighbours of the three runtime marker field names remain legal.
 struct RefFields { __inner: int, __pred: int, _fn: int }
@@ -30,7 +32,7 @@ struct Result<T, E> {
 fn test_different_result() {
     let r: Result<int, string> = Result{ ok: 456, err: null };
     if r.ok != null {
-        print("Ok: 456");
+        print("Ok: {r.ok}");
     }
 }
 
@@ -42,20 +44,11 @@ enum Shape {
     Rect(string)
 }
 
-@test 
-fn test_struct_should_work_with_tuple_variant() {
-    // When enum has tuple variant, struct should be unambiguous
+@test(output = "5 test")
+fn test_struct_and_same_named_tuple_variant() {
     let rect_struct = Rect { x: 5.0 }
-    assert_eq(rect_struct.x, 5.0)
-}
-
-@test
-fn test_enum_variant_should_work() {
-    // Qualified enum variant should always work
     let rect_variant = Shape::Rect("test")
-    // We need pattern matching to test this properly
-}
-
-fn main() {
-    print("Testing struct/enum collision fixes")
+    match rect_variant {
+        Shape::Rect(label) => print("{rect_struct.x.floor()} {label}"),
+    }
 }

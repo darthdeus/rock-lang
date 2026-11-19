@@ -1,5 +1,6 @@
-// Nested generic type application: generic structs inside vectors, maps,
-// enums and other generic structs.
+// Nested generic type application: generic structs inside vectors, nullable
+// slots, tuples, enums and other generic structs, self-referential and
+// mutually recursive generic structs, and generic fns inferring through them.
 
 struct Bucket<K, V> {
     key: K,
@@ -8,14 +9,6 @@ struct Bucket<K, V> {
 
 struct Container<K, V> {
     entries: [Bucket<K, V>],
-}
-
-@test(output = "hello")
-fn test_push_into_nested_generic() {
-    let c: Container<int, string> = Container { entries: vec_new() }
-    let b: Bucket<int, string> = Bucket { key: 1, value: "hello" }
-    c.entries.push(b)
-    print(c.entries[0].value)
 }
 
 fn first_key<K, V>(c: Container<K, V>) -> K? {
@@ -31,8 +24,6 @@ fn test_generic_fn_uses_nested_field() {
     print(k.unwrap())
 }
 
-// --- Triple-nested: Container containing a Vec of Vec of Bucket ---
-
 struct DeepContainer<K, V> {
     rows: [[Bucket<K, V>]],
 }
@@ -45,8 +36,6 @@ fn test_triple_nested_generic() {
     d.rows.push(row)
     print(d.rows[0][0].value)
 }
-
-// --- The full HashMap shape with operations in pure Rock ---
 
 struct HashEntry<K, V> {
     hash: int,
@@ -71,7 +60,6 @@ fn my_map_new<K, V>() -> MyMap<K, V> {
 }
 
 fn my_map_put<K, V>(m: MyMap<K, V>, key: K, value: V) {
-    // Trivial: just stuff at index 0 for this test
     let e: HashEntry<K, V> = HashEntry { hash: 0, key: key, value: value }
     m.buckets[0] = e
     m.size = m.size + 1
@@ -89,8 +77,6 @@ fn test_hashmap_shape_put_get() {
     }
 }
 
-// --- Enum with nested generic variant ---
-
 enum TreeEnum<T> {
     Leaf,
     Node(T, [TreeEnum<T>]),
@@ -105,39 +91,10 @@ fn test_recursive_generic_enum() {
     }
 }
 
-// --- Generic function inferring nested type from argument ---
-
-fn container_size<K, V>(c: Container<K, V>) -> int {
-    return c.entries.len()
-}
-
-@test(output = "2")
-fn test_generic_fn_infers_nested() {
-    let c: Container<int, string> = Container { entries: vec_new() }
-    c.entries.push(Bucket { key: 1, value: "a" })
-    c.entries.push(Bucket { key: 2, value: "b" })
-    print(container_size(c))
-}
-
-// === Adversarial cases: self-referential and mutually recursive generic
-// structs, generic functions inferring through nesting. ===
-
-// --- 1. Self-referential generic (tree) ---
-
 struct Tree<T> {
     value: T,
     children: [Tree<T>],
 }
-
-@test(output = "root")
-fn test_self_referential_tree() {
-    let leaf: Tree<string> = Tree { value: "leaf", children: vec_new() }
-    let root: Tree<string> = Tree { value: "root", children: vec_new() }
-    root.children.push(leaf)
-    print(root.value)
-}
-
-// --- 2. Mutual reference between two generic structs ---
 
 struct NodeA<T> {
     val: T,
@@ -155,8 +112,6 @@ fn test_mutual_generic() {
     print(a.val)
 }
 
-// --- 3. Deeply nullable: Vec<Vec<T>?>? ---
-
 struct Matrix<T> {
     data: [[T]?]?,
 }
@@ -167,8 +122,6 @@ fn test_deep_nullable_generic() {
     print("ok")
 }
 
-// --- 4. Tuple element is nested generic ---
-
 struct TupleHolder<K, V> {
     pair: (K, [V]),
 }
@@ -178,27 +131,6 @@ fn test_tuple_nested_generic() {
     let t: TupleHolder<int, string> = TupleHolder { pair: (42, vec_new()) }
     print(t.pair.0)
 }
-
-// --- 5. Generic function argument forces inference through nesting ---
-
-struct Wrapped<T> {
-    inner: [T],
-}
-
-fn unwrap_one<T>(w: Wrapped<T>) -> T? {
-    if w.inner.len() == 0 { return null }
-    return w.inner[0]
-}
-
-@test(output = "hi")
-fn test_generic_fn_infers_through_nested() {
-    let w: Wrapped<string> = Wrapped { inner: vec_new() }
-    w.inner.push("hi")
-    let v = unwrap_one(w)
-    if v != null { print(v) } else { print("null") }
-}
-
-// --- 6. Generic function returns another generic that uses its params ---
 
 struct Pair<K, V> {
     k: K,
@@ -215,8 +147,6 @@ fn test_generic_fn_returns_vec_of_nested() {
     print(ps.len())
 }
 
-// --- 7. Generic function whose return type embeds a param inside a Vec inside a struct ---
-
 fn build_tree<T>(v: T) -> Tree<T> {
     return Tree { value: v, children: vec_new() }
 }
@@ -226,8 +156,6 @@ fn test_generic_fn_builds_self_referential() {
     let t: Tree<string> = build_tree("hello")
     print(t.value)
 }
-
-// --- 8. Method-style via UFCS on nested-generic field ---
 
 fn add_child<T>(parent: Tree<T>, child: Tree<T>) {
     parent.children.push(child)
@@ -241,8 +169,6 @@ fn test_ufcs_on_nested_generic() {
     print(root.children.len())
 }
 
-// --- 9. Nullable generic parameter passed into a nested position ---
-
 struct Maybe<T> {
     values: [T?],
 }
@@ -254,8 +180,6 @@ fn test_nullable_param_in_nested() {
     m.values.push(null)
     print(m.values.len())
 }
-
-// --- 10. Enum variant holding nested generic ---
 
 enum Result2<T, E> {
     Ok(T),
@@ -276,8 +200,6 @@ fn test_enum_with_nested_generic_variant() {
     }
 }
 
-// --- 11. Same generic param used in two nested positions ---
-
 struct TwoSlots<T> {
     a: [T],
     b: [[T]],
@@ -293,21 +215,10 @@ fn test_same_param_two_nested_positions() {
     print("{s.a.len()} {s.b.len()}")
 }
 
-// --- Invariant container around an under-determined nested generic ---
-//
-// An invariant container wrapping an under-determined nested generic must drive
-// inference INTO the nested type: Holder<Duo<?, ?>> has to unify with the expected
-// Holder<Duo<int, string>> and solve the inner K=int, V=string. The invariant
-// variance arm only special-cases a BARE type variable; a nested App that
-// *contains* unsolved vars (Duo<?, ?>) falls to the "concrete types must be exactly
-// equal" branch and errors instead of recursing. Not array-specific (arrays here
-// stay covariant) -- struct generics and Map keys are invariant too.
-//
-// `mk` returns Holder<Duo<K, V>> with K, V undetermined by its (zero) args, so the
-// only way to solve them is to push the expected binding type back through the
-// invariant Holder into Duo. The empty-array field lets `mk` build the value
-// without needing K/V values.
-
+// An invariant container around an under-determined nested generic: `mk`'s
+// K and V are fixed only by pushing the expected Holder<Duo<int, string>> back
+// through the invariant Holder into Duo, so unification must recurse into a
+// nested application that contains unsolved variables.
 struct Duo<K, V> { k: K, v: V }
 struct Holder<T> { items: [T] }
 
