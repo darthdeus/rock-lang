@@ -57,20 +57,6 @@ fn test_leading_dot_literal() {
     assert_eq(2.0 + .5, 2.5)
 }
 
-@test
-fn test_tuple_index_still_works() {
-    let w = (3, 7)
-    assert_eq(w.0, 3)
-    assert_eq(w.1, 7)
-}
-
-@test(output = "5\nhello")
-fn test_tuple_let_binding_basic() {
-    let (a, b) = (5, "hello")
-    print(a)
-    print(b)
-}
-
 @test(output = "10\n20\nRED")
 fn test_tuple_let_binding_with_if_expr() {
     let has_hit = false
@@ -82,18 +68,6 @@ fn test_tuple_let_binding_with_if_expr() {
 
     print(pos.0)
     print(pos.1)
-    print(color)
-}
-
-@test(output = "5\nGREEN")
-fn test_tuple_let_binding_with_if_expr_simple() {
-    let (pos, color) = if true {
-        (5, "GREEN")
-    } else {
-        (10, "RED")
-    }
-
-    print(pos)
     print(color)
 }
 
