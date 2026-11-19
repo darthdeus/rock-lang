@@ -239,10 +239,6 @@ impl ShaderInterfacePlan {
         self.uniform_groups.iter().find(|g| g.role == role)
     }
 
-    pub fn array_group(&self, stage: ShaderStage) -> Option<&LogicalArrayGroup> {
-        self.array_groups.iter().find(|g| g.stage == stage)
-    }
-
     pub fn sampler_names(&self) -> Vec<Ustr> {
         self.textures
             .as_ref()

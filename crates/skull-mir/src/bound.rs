@@ -1,4 +1,4 @@
-use bone_core::workspace::{BodyInference, Workspace};
+use bone_core::workspace::BodyInference;
 
 use crate::instance::Instance;
 use crate::monoty::MonoInterner;
@@ -38,18 +38,4 @@ pub struct BoundCtx<'a> {
     pub inf: Option<&'a BodyInference>,
     pub incoming: &'a ResolvedBoundTree,
     pub interner: &'a MonoInterner,
-}
-
-pub fn concrete_body_ctx<'a>(
-    ws: &'a Workspace,
-    mid: bone_core::prelude::ModuleId,
-    owner: bone_core::hir::BodyOwner,
-    incoming: &'a ResolvedBoundTree,
-    interner: &'a MonoInterner,
-) -> BoundCtx<'a> {
-    BoundCtx {
-        inf: ws.inference(mid).and_then(|r| r.per_fn.get(&owner)),
-        incoming,
-        interner,
-    }
 }
