@@ -1,21 +1,18 @@
 use crate::common::{emit_module, run_luajit};
 
-#[test]
-fn no_code_ref_values_omit_code_ref_runtime() {
-    let lua = emit_module("fn main() {}\n");
-    assert!(!lua.contains("if not _G.__rock_code_slot_mt then"));
-}
+const LAMBDA: &str = "fn main() { let f = () => 1; print(f()) }\n";
 
 #[test]
-fn programs_without_definition_roles_do_not_stage_an_empty_plan() {
+fn programs_without_code_refs_or_definitions_omit_their_runtime() {
     let lua = emit_module("fn main() {}\n");
+    assert!(!lua.contains("if not _G.__rock_code_slot_mt then"));
     assert!(!lua.contains("__rock_definition_plan_stage("));
     assert_eq!(run_luajit(&format!("{lua}\nprint('PASS')")), "PASS");
 }
 
 #[test]
 fn typed_definition_catalog_lookup_is_fail_closed_and_counts_population() {
-    let lua = emit_module("fn main() { let f = () => 1; print(f()) }\n");
+    let lua = emit_module(LAMBDA);
     let driver = r#"
 local missing_plan = not pcall(function() __rock_definition_catalog("widgets") end)
 __rock_code_slot_begin()
@@ -37,31 +34,24 @@ end
 }
 
 #[test]
-fn prelude_defines_shared_fn_metatable() {
-    let lua = emit_module("fn main() { let f = () => 1; print(f()) }\n");
-    assert!(
-        lua.contains("if not _G.__rock_fn_mt then")
-            && lua.contains("invalid Rock CodeRef environment")
-            && lua.contains("e.__slot.current_body(e, ...)")
-    );
-    assert!(lua.contains("if not _G.__rock_fn_mt then"));
-}
-
-#[test]
-fn record_is_callable_via_call_metamethod() {
-    let lua = emit_module("fn main() { let f = () => 1; print(f()) }\n");
+fn record_is_callable_via_call_metamethod_only_with_a_slot() {
+    let lua = emit_module(LAMBDA);
     let driver = "\n\
         __rock_code_slot_begin()\n\
         __rock_code_slot_stage(\"record\", function(e, y) return e.x + y end, \"record-abi\")\n\
         __rock_code_slot_publish()\n\
         local rec = setmetatable({ __slot = __rock_code_slot_ref(\"record\"), x = 100 }, _G.__rock_fn_mt)\n\
-        print(rec(5))\n";
-    assert_eq!(run_luajit(&format!("{lua}{driver}")), "105");
+        print(rec(5))\n\
+        print(pcall(setmetatable({}, _G.__rock_fn_mt)))\n";
+    assert_eq!(
+        run_luajit(&format!("{lua}{driver}")),
+        "105\nfalse\tinvalid Rock CodeRef environment"
+    );
 }
 
 #[test]
 fn metatable_identity_preserved_across_reload() {
-    let prog = emit_module("fn main() { let f = () => 1; print(f()) }\n");
+    let prog = emit_module(LAMBDA);
     let script = format!(
         "_G.HOT_RELOAD = false\n{prog}\n\
          local mt_before = _G.__rock_fn_mt\n\
@@ -80,7 +70,7 @@ fn metatable_identity_preserved_across_reload() {
 
 #[test]
 fn code_slot_publish_is_transactional_and_preserves_slot_identity() {
-    let lua = emit_module("fn main() { let f = () => 1; print(f()) }\n");
+    let lua = emit_module(LAMBDA);
     let driver = r#"
 __rock_code_slot_begin()
 __rock_code_slot_stage("probe", function() return 1 end, "abi")
@@ -99,7 +89,7 @@ if not ok and before == after and after() == 1 then print("PASS") else print("FA
 
 #[test]
 fn lifecycle_plan_publishes_in_the_code_slot_transaction() {
-    let lua = emit_module("fn main() { let f = () => 1; print(f()) }\n");
+    let lua = emit_module(LAMBDA);
     let driver = r#"
 __rock_code_slot_begin()
 __rock_code_slot_stage("probe", function() return 1 end, "abi")
@@ -122,7 +112,7 @@ if not ok and _G.__rock_lifecycle_plan_pending == nil
 
 #[test]
 fn definition_plan_publishes_and_aborts_with_the_code_slot_transaction() {
-    let lua = emit_module("fn main() { let f = () => 1; print(f()) }\n");
+    let lua = emit_module(LAMBDA);
     let driver = r#"
 __rock_code_slot_begin()
 __rock_code_slot_stage("probe", function() return 1 end, "abi")

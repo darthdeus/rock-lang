@@ -41,10 +41,7 @@ fn main() {
     print("{bump(pick(xs[0], h, 2))}")
 }
 "#;
-    let err = match try_emit_module(source) {
-        Ok(_) => panic!("a flat and a boxed `ref` return of one callee must not emit"),
-        Err(err) => err,
-    };
+    let err = try_emit_module(source).expect_err("a flat and a boxed `ref` return must not emit");
     assert!(err.message.contains("`pick`") && err.message.contains("differently stored reference"));
     assert!(!err.labels.is_empty());
 }
@@ -76,10 +73,7 @@ fn main() {{
 }}
 "#
         );
-        let err = match try_emit_module(&source) {
-            Ok(_) => panic!("{label}: a rebinding across storage shapes must not emit"),
-            Err(err) => err,
-        };
+        let err = try_emit_module(&source).expect_err(label);
         assert!(err.message.contains("cannot reassign"));
         assert!(!err.labels.is_empty());
     }

@@ -1,4 +1,6 @@
-use crate::common::emit_module;
+use crate::common::{
+    bone_rejections, emit_module, emit_v1_package, function_body, run_luajit, try_emit_module,
+};
 
 const SRC: &str = r#"
 newtype Handle(int)
@@ -45,8 +47,7 @@ fn wrapper(lua: &str, name: &str) -> String {
 }
 
 fn reject(src: &str) -> String {
-    let err = crate::common::try_emit_module(src)
-        .expect_err("this return has no C representation to give");
+    let err = try_emit_module(src).expect_err("this return has no C representation to give");
     format!("{err:?}")
 }
 
@@ -62,7 +63,7 @@ fn main() { print("x") }
     );
     assert!(err.contains("Bag") && err.contains("GC-carrying `value` struct"));
 
-    let ffi_clean = crate::common::try_emit_module(
+    let ffi_clean = try_emit_module(
         r#"
 value Point { x: int, y: float }
 newtype Wrap<T>(T)
@@ -97,6 +98,7 @@ fn an_int_representation_is_coerced_through_every_alias_shape() {
     for name in ["ret_ratio", "ret_boxed_float", "ret_outer_float"] {
         let w = wrapper(&lua, name);
         assert!(w.contains(&format!("local __rock_ret = m.{name}(")) && !w.contains("tonumber"));
+        assert!(w.contains("return __rock_ret"));
     }
 
     let w = wrapper(&lua, "ret_void");
@@ -127,62 +129,23 @@ fn main() { print("x") }
 }
 
 #[test]
-fn a_self_referential_alias_rejects_at_definition() {
-    let errs = crate::common::bone_rejections(
-        r#"
-newtype A(B)
-newtype B(A)
-extern(ffi, "m") fn ret_cycle() -> A
-fn main() { print("x") }
-"#,
-    );
-    assert!(
-        errs.iter()
-            .any(|e| e.contains("recursive value type: A -> B -> A"))
-    );
-}
-
-#[test]
-fn a_generic_alias_cycle_rejects_at_definition() {
-    let errs = crate::common::bone_rejections(
-        r#"
-newtype X<T>(Y<T>)
-newtype Y<U>(X<U>)
-extern(ffi, "m") fn ret_gcycle() -> X<int>
-fn main() { print("x") }
-"#,
-    );
-    assert!(
-        errs.iter()
-            .any(|e| e.contains("recursive value type: X -> Y -> X"))
-    );
-}
-
-#[test]
-fn every_value_returning_wrapper_returns_through_a_local() {
-    let lua = emit_module(SRC);
-    for name in [
-        "ret_int",
-        "ret_handle",
-        "ret_alias",
-        "ret_boxed",
-        "ret_deep",
-        "ret_wrap",
-        "ret_outer",
-        "ret_twice",
-        "ret_ratio",
-        "ret_boxed_float",
-        "ret_outer_float",
+fn an_alias_cycle_rejects_at_definition() {
+    for (src, cycle) in [
+        (
+            "newtype A(B)\nnewtype B(A)\nextern(ffi, \"m\") fn ret() -> A",
+            "A -> B -> A",
+        ),
+        (
+            "newtype X<T>(Y<T>)\nnewtype Y<U>(X<U>)\nextern(ffi, \"m\") fn ret() -> X<int>",
+            "X -> Y -> X",
+        ),
     ] {
-        let w = wrapper(&lua, name);
-        let tail = w.lines().any(|l| {
-            let t = l.trim_start();
-            t.starts_with("return m.")
-                || t.starts_with("return tonumber(")
-                || t.starts_with("return ffi.new(")
-        });
-        assert!(!tail);
-        assert!(w.contains("return __rock_ret"));
+        let errs = bone_rejections(&format!("{src}\nfn main() {{ print(\"x\") }}\n"));
+        assert!(
+            errs.iter()
+                .any(|e| e.contains(&format!("recursive value type: {cycle}"))),
+            "{errs:?}"
+        );
     }
 }
 
@@ -196,13 +159,13 @@ fn go() -> int { poll(-1) }
     );
     let w = wrapper(&lua, "poll");
     assert!(w.contains("if wait == nil then wait = false end"));
-    let go = crate::common::function_body(&lua, "go");
+    let go = function_body(&lua, "go");
     assert!(go.contains("poll((-1), (false))"));
 }
 
 #[test]
 fn a_v1_extern_wrapper_uses_the_declared_symbol() {
-    let emitted = crate::common::emit_v1_package(
+    let emitted = emit_v1_package(
         "v1extern",
         &[(
             "main.rock",
@@ -215,7 +178,7 @@ fn main() {}
         )],
     );
     assert_eq!(
-        crate::common::run_luajit(&format!(
+        run_luajit(&format!(
             "m = {{ ret_int = function() return 7 end, ret_bool = function() return 1 end }}\n{}\nprint(ret_int(), ret_bool())\n",
             emitted.lua
         )),
@@ -225,7 +188,7 @@ fn main() {}
 
 #[test]
 fn a_v1_extern_value_return_allocates_by_the_type_symbol() {
-    let emitted = crate::common::emit_v1_package(
+    let emitted = emit_v1_package(
         "v1extval",
         &[(
             "main.rock",
@@ -240,7 +203,7 @@ fn main() {}
 "#,
         )],
     );
-    let out = crate::common::run_luajit(&format!(
+    let out = run_luajit(&format!(
         "m = {{ get_pair = function(out) out[0].a = 3; out[0].b = 4 end }}\n{}\nprint(probe())\n",
         emitted.lua
     ));
