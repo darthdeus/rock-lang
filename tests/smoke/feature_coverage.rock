@@ -1,15 +1,13 @@
-// Comprehensive coverage tests for all features built in the arenas branch.
-// Each test is labeled with the feature it covers.
+// Arena slots and length, nullable tuple projections out of arena pairs and
+// vecs, and safe navigation (?.field, ?.method(), ?.let) combined with ??.
 
 struct Inner { value: int }
 struct Outer { inner: Inner?, name: string }
 struct Mob { name: string, health: int }
-struct Container { data: Mob? }
 
 fn double(x: int) -> int { return x * 2 }
 fn get_hp(mob: Mob) -> int { return mob.health }
 
-// -- Arena slot reuse --
 
 @test(output = "0\n1")
 fn arena_slot_reuse_verified() {
@@ -21,7 +19,6 @@ fn arena_slot_reuse_verified() {
     print(arena_slot_count(a))
 }
 
-// -- Arena O(1) len across all operations --
 
 @test(output = "0\n3\n2\n0")
 fn arena_len_all_ops() {
@@ -37,7 +34,6 @@ fn arena_len_all_ops() {
     print(a.len())
 }
 
-// -- .0/.1 on nullable tuples --
 
 @test(output = "Orc\ntrue\ntrue\ntrue")
 fn nullable_tuple_dot_all_cases() {
@@ -50,7 +46,6 @@ fn nullable_tuple_dot_all_cases() {
     print(mobs.pairs().find(_.1.name == "Ghost")?.0 == null)
 }
 
-// -- projecting tuple fields out of a vec via .map(_.N) --
 
 @test(output = "1\n2\na\nb\n0\n0")
 fn vec_tuple_dot_both() {
@@ -78,7 +73,6 @@ fn vec_tuple_dot0_from_map() {
     print(vec_len(mobs.pairs().map(p => (p.0, p.1.health)).map(_.0).collect()))
 }
 
-// -- ?.method() --
 
 @test(output = "100\ntrue\n0")
 fn safenav_method() {
@@ -90,7 +84,6 @@ fn safenav_method() {
     print(x?.double() ?? 0)
 }
 
-// -- ?. + ?? combined --
 
 @test(output = "hello\ndefault\n0")
 fn safenav_coalesce_combos() {
@@ -101,7 +94,6 @@ fn safenav_coalesce_combos() {
     print(f2?.inner?.value ?? 0)
 }
 
-// -- ?.let --
 
 @test(output = "10\ntrue")
 fn safenav_let_basic() {
@@ -111,7 +103,6 @@ fn safenav_let_basic() {
     print(y?.let { y * 2 } == null)
 }
 
-// -- Full chain: find -> ?.1 -> ?.field -> ?? --
 
 @test(output = "Orc\ndefault\n100\n0")
 fn full_chain_all_features() {
@@ -124,7 +115,6 @@ fn full_chain_all_features() {
     print(mobs.pairs().find(_.1.name == "Ghost")?.1?.get_hp() ?? 0)
 }
 
-// -- filter .0 remove all --
 
 @test(output = "0")
 fn filter_dot0_remove_all() {
@@ -135,7 +125,6 @@ fn filter_dot0_remove_all() {
     print(mobs.len())
 }
 
-// -- find + remove + find again --
 
 @test(output = "true\ntrue")
 fn find_remove_find() {
@@ -147,17 +136,8 @@ fn find_remove_find() {
     print(mobs.pairs().find(_.1.name == "Orc") == null)
 }
 
-// -- Nullable struct field with ?. --
 
-@test(output = "42\n0")
-fn nullable_field_safenav() {
-    let c = Container { data: Mob { name: "X", health: 42 } }
-    print(c.data?.health ?? 0)
-    let c2 = Container { data: null }
-    print(c2.data?.health ?? 0)
-}
 
-// -- find on empty arena --
 
 @test(output = "true\ntrue")
 fn find_empty() {

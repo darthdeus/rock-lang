@@ -1,10 +1,10 @@
 // Runtime results of lowering paths that once miscompiled: global init order
-// through edges only a transitive scan sees, nobox and defaulted value-struct
-// boundaries, checked uint casts and shifts, nil-guarded calls through
-// fn-typed fields, and inlined callees whose single result crosses a branch.
+// through edges only a transitive scan sees, initializers sharing mutable state
+// running once per program rather than once per test, nobox and defaulted
+// value-struct boundaries, checked uint casts and shifts, nil-guarded calls
+// through fn-typed fields, and inlined callees whose single result crosses a
+// branch.
 
-// `B` reads `A` only inside `Foo`'s field-default helper, and is declared
-// first, so source order alone initializes it too early.
 global INIT_B: InitFoo = InitFoo {}
 struct InitFoo { x: int = INIT_A }
 global INIT_A: int = 42
@@ -138,3 +138,19 @@ fn inl_void_then_value() -> int { inl_touch(); return 7 }
 fn inlined_void_straight_result() {
     print(inl_void_then_value())
 }
+
+global SHARED_COUNTER: int = 0
+
+fn sentinel_next_id() -> int {
+    SHARED_COUNTER = SHARED_COUNTER + 1
+    return SHARED_COUNTER
+}
+
+global sentinel_g1: int = sentinel_next_id()
+global sentinel_g2: int = sentinel_next_id()
+
+@test(output = "1")
+fn first_global() { print(sentinel_g1) }
+
+@test(output = "2")
+fn second_global() { print(sentinel_g2) }

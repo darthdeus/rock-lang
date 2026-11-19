@@ -1,5 +1,8 @@
 // Lexing and parsing corners: keyword-named identifiers, leading-dot floats,
-// leading-minus continuation, statement separators and let bindings.
+// leading-minus continuation, statement separators, let bindings, quote
+// forms and a `mod self;` declaration.
+
+mod self;
 
 fn lua_keywords(end: int, local: int, nil: int, repeat: int, until: int, elseif: int, then: int, function: int, not: int, and: int, or: int, goto: int, do: int) -> int {
     return end + local + nil + repeat + until + elseif + then + function + not + and + or + goto + do
@@ -205,4 +208,11 @@ fn test_value_keyword_and_ident() {
     let v = V2 { x: 1, y: 2 }
     print("{v.x.floor()}")
     print("{v.y.floor()}")
+}
+
+@test
+fn token_forms_keep_lexical_edges() {
+    assert_eq(-.5, -0.5)
+    assert_eq('world', "world")
+    assert_eq('', "")
 }
