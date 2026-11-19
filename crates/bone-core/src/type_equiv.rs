@@ -115,6 +115,7 @@ impl Workspace {
     }
 }
 
+/// Generic parameter ids are allocated per arena, so they compare only within one.
 fn same_arena(a: TyRef<'_>, b: TyRef<'_>) -> bool {
     match (a.ty, b.ty) {
         (TyId::Static(x, _), TyId::Static(y, _)) => x == y,
