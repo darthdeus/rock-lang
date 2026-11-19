@@ -11,6 +11,10 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    env:
+      # Compiler-bug checks (the MIR verifier, printed-name scopes) are off in
+      # an ordinary compile; every test suite turns them on.
+      ROCK_MIR_CHECKS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -60,17 +64,11 @@ jobs:
       - name: Test bundle installer
         run: python3 -m unittest discover -s scripts -p test_gamelibs.py
       - name: Test Stone packages
-        # Compiler-bug checks (the MIR verifier, printed-name scopes) are off
-        # in an ordinary compile; the test suites turn them on.
-        env:
-          ROCK_MIR_CHECKS: "1"
         run: |
           cargo run --locked -p rock-cli --bin rock -- test packages/stone-core
           cargo run --locked -p rock-cli --bin rock -- test packages/stone
       - name: Test language corpus
         id: lua_corpus
-        env:
-          ROCK_MIR_CHECKS: "1"
         run: |
           export ROCK_CI_REAL_LUAJIT="$(python3 scripts/gamelibs.py path)/bin/luajit"
           export ROCK_CI_CAPTURE_DIR="$RUNNER_TEMP/large-storage-capture"
