@@ -79,7 +79,7 @@ fn c2_global_value_place_write() {
 //
 // Copying at the boundary unconditionally was rejected -- it defeats
 // scalarization sinking and the deliberate in-place batch.rock append path.
-value GcM { m: Map<int, int>, n: int }
+value GcM { m: Map<int, int>, n: int }   // a Map leaf -> GC tier, reference leaf
 struct C3Own { p: Pt }
 struct C3GcOwn { g: GcM }
 

@@ -170,9 +170,9 @@ fn test_yield_star_stored_handle_let_binding_form() {
     let c = outer_capturing()
     print(c.resume() ?? -1)
     print(c.resume() ?? -1)
+    // inner returns "from-inner"; outer binds `r`, then `return r` puts outer
+    // in terminal -- resume null
     print(c.resume() ?? -1)
-                                    //     binds `r`, then `return r` puts
-                                    //     outer in terminal -- resume null
     let r = c.result()
     if r == "from-inner" {
         print("result=ok")

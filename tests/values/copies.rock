@@ -73,9 +73,9 @@ fn read_only_and_produced_copies_snapshot_before_mutation() {
     print("{a} {b} {c} {producer.reads}")
 }
 
-value Pt { x: int, y: int }
+value Pt { x: int, y: int }            // C-mappable -> FFI-clean (cdata) tier
 
-value GcH { xs: [int], n: int }
+value GcH { xs: [int], n: int }        // `xs` is not C-mappable -> GC (table) tier
 
 struct Owner { p: Pt, h: GcH }
 

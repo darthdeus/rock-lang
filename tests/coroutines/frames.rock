@@ -17,6 +17,8 @@ inline(js) fn frames_same(a: Coroutine<int>, b: Coroutine<int>) -> bool = """
     return a === b;
 """
 
+// Identity holds only while every creation allocates a fresh frame; pooling or
+// interning frames would break these tests.
 @test
 fn two_spawns_of_one_co_fn_are_distinct_frames() {
     let a = ticker()

@@ -4,12 +4,12 @@ value RayTarget { angle: float, x: float, y: float }
 
 @test(output = "0\n3\n7\n2\n42")
 fn test_flat_vec_push_get_len() {
-    let rays: FlatVec<RayTarget> = flat_vec_new(2)
+    let rays: FlatVec<RayTarget> = flat_vec_new(2)   // small cap -> push forces a grow
     print("{rays.len}")
 
     rays.push(RayTarget { angle: 0.5, x: 1.0, y: 2.0 })
     rays.push(RayTarget { angle: 0.1, x: 3.0, y: 4.0 })
-    rays.push(RayTarget { angle: 0.9, x: 5.0, y: 6.0 })
+    rays.push(RayTarget { angle: 0.9, x: 5.0, y: 6.0 })   // triggers 2 -> 4 grow
     print("{rays.len}")
 
     // The grown buffer preserved every element field-wise.
@@ -31,7 +31,7 @@ fn test_flat_vec_sort_non_capturing() {
     rays.push(RayTarget { angle: 0.1, x: 0.0, y: 0.0 })
     rays.push(RayTarget { angle: 0.5, x: 0.0, y: 0.0 })
 
-    rays.sort((t) => t.angle)
+    rays.sort((t) => t.angle)   // capture-free key -> shared fn, no per-call closure
 
     for i in 0..rays.len {
         print("{rays.get(i).angle}")

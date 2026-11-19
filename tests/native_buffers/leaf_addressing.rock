@@ -334,7 +334,7 @@ fn test_primitive_element_is_unaffected() {
 // get/set, grow (the internal element-copy loop), sort, clear.
 @test(output = "3\n9 1 5\n7 1 3\n1 3 7\n0")
 fn test_flat_vec_surface() {
-    let fv: FlatVec<Vert> = flat_vec_new(1)
+    let fv: FlatVec<Vert> = flat_vec_new(1)   // cap 1 forces a grow
     fv.push(make_vert(9.0, 0.0, 1))
     fv.push(make_vert(1.0, 0.0, 2))
     fv.push(make_vert(5.0, 0.0, 3))

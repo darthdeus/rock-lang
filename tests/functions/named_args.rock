@@ -192,15 +192,11 @@ fn test_method_with_complex_default_expression() {
     assert(result2 == "effect.a=0.75, intensity=0.5, radius=0", "Expected default effect, custom intensity, default radius, got: {result2}")
 }
 
-// Test that verifies the original bug is fixed
 struct DebugShape {
     id: int
 }
 
 fn debug_draw(shape: DebugShape, highlight: Color = color(1.0, 0.0, 0.0, 0.5), time: float? = null, inset: float = 0.0) -> bool {
-    // This mirrors the original bug scenario
-    // If arguments are in wrong positions, highlight.r would be a number (inset value)
-    // causing "attempt to index local 'highlight' (a number value)"
     if highlight.r > 0.5 {
         return true
     }
@@ -211,8 +207,7 @@ fn debug_draw(shape: DebugShape, highlight: Color = color(1.0, 0.0, 0.0, 0.5), t
 fn test_original_bug_scenario() {
     let shape = DebugShape { id: 42 }
 
-    // This was the failing case: calling with only inset named argument
-    // Previously would generate: debug_draw(shape, 0.2, nil, 0)
+    // Only `inset` is named: it must not land in the `highlight` slot.
     let result = shape.debug_draw(inset: 0.2)
     assert(result == true, "Should return true for default red color (r=1.0)")
 

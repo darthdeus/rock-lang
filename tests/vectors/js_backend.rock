@@ -1,4 +1,6 @@
-// Vec sort and drain equality on the JS backend.
+// Vec sort and drain equality on the JS backend. LuaJIT's table.sort is
+// unstable and JS's is stable, so sort tests check only the key order, never a
+// tie order.
 
 fn show_ints(xs: [int]) -> string {
     let parts: [string] = []

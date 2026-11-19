@@ -11,8 +11,8 @@ fn test_g_access_unshadowed() {
 @test
 fn test_g_access_bypasses_local_shadow() {
     let GAF_GLOBAL = 11
-    assert_eq(GAF_GLOBAL, 11)
-    assert_eq(_G.GAF_GLOBAL, 200)
+    assert_eq(GAF_GLOBAL, 11)         // bare reads local
+    assert_eq(_G.GAF_GLOBAL, 200)     // _G. reads global
 }
 
 global GAF_COUNTER: int = 0

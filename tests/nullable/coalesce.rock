@@ -180,6 +180,7 @@ fn coalesce_stays_below_comparison() {
     // `a ?? 1 == 2` groups as `a ?? (1 == 2)` -- C# semantics, `??` sits
     // below `==`. This only typechecks under that grouping: the tighter
     // reading would be `(bool? ?? 1) == 2`, a bool-vs-int mismatch, so the
+    // test cannot pass for the wrong reason.
     let miss = co_none_b() ?? 1 == 2
     assert_eq(miss, false)
 

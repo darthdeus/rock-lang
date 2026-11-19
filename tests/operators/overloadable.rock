@@ -1,5 +1,7 @@
 // Overloadable operators and index writes.
 
+// Each operator returns a marker rather than the arithmetic answer, so a test
+// passes only if the user fn was called.
 value Mark { v: int }
 
 operator +(a: Mark, b: Mark) -> int { return 1001 }

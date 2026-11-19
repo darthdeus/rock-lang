@@ -9,7 +9,7 @@ enum Cmd {
     Stop,
     Go(int),
     Move { dx: int, dy: int },
-    Run(() -> ()),
+    Run(() -> ()),       // closure payload -> Cmd is non-cdata
 }
 
 // Returns a flat enum.
@@ -123,10 +123,10 @@ fn test_local_whole_value_use() {
 @test
 fn test_local_captured_by_closure() {
     let e = Ev::Tick(11)
-    let get = () => read_ev(e)
+    let get = () => read_ev(e)      // closure captures the threaded local (the cells)
     assert_eq(get(), 11)
     e = Ev::At { x: 5, y: 20 }
-    assert_eq(get(), 25)
+    assert_eq(get(), 25)         // captures the VARIABLE, so reads the new value
     assert_eq(read_ev(e), 25)
 }
 
@@ -140,7 +140,7 @@ enum Sig {
     Idle,
     Num(int),
     Pair(int, int),
-    Act(() -> ()),
+    Act(() -> ()),      // closure payload -> Sig is non-cdata
 }
 
 // nullable RETURN (nil on the not-found path)

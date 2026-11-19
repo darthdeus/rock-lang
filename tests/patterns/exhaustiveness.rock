@@ -20,7 +20,7 @@ fn test_exhaustive_age_ranges() {
 @test
 fn test_literal_and_range_coverage() {
     // One exhaustive mix of literals, inclusive, exclusive and open ranges,
-    // with every arm exercised (the old suite proved each shape compiled and
+    // with every arm exercised.
     fn describe(x: int) -> string {
         match x {
             ..=-10 => "very_negative",

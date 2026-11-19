@@ -162,6 +162,8 @@ extern(ffi, "testlib") fn get_render_stats() -> RenderStats
 
 extern(ffi, "testlib") fn reset_stats()
 
+// The testlib functions are never called: compiling their declarations is the
+// check.
 @test
 fn ffi_value_types_construct() {
     let v = FixVec2 { x: 3.0, y: 4.0 }

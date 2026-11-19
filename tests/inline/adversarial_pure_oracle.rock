@@ -124,7 +124,7 @@ fn test_licm_respects_shadow() {
 fn test_licm_zero_trip_loop_safe() {
     let limit = 5
     let sum = 0
-    for i in 10..10 {
+    for i in 10..10 {   // zero trips
         sum = sum + div_safe(100, limit)
     }
     print(sum)

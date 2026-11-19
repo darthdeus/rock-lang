@@ -105,10 +105,10 @@ fn gc_coroutine_yield_value() {
 fn gc_eq_ref_identity() {
     let xs = [1, 2, 3]
     let a = Bag { xs: xs, n: 5 }
-    let b = Bag { xs: xs, n: 5 }
+    let b = Bag { xs: xs, n: 5 }        // same xs ref, same n -> equal
     let ys = [1, 2, 3]
-    let c = Bag { xs: ys, n: 5 }
-    let d = Bag { xs: xs, n: 6 }
+    let c = Bag { xs: ys, n: 5 }        // different xs ref (equal contents) -> not equal
+    let d = Bag { xs: xs, n: 6 }        // same xs ref, different n -> not equal
     let e = Bag { xs: [1, 2, 3], n: 5 }
     let f = Bag { xs: [1, 2, 3], n: 5 }
     print("{a == b} {a == c} {a == d} {e == f}")

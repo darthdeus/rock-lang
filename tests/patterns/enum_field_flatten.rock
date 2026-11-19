@@ -8,7 +8,7 @@ enum Sig {
     Idle,
     Num(int),
     Pair(int, int),
-    Act(() -> ()),
+    Act(() -> ()),   // closure payload -> Sig is non-cdata
 }
 
 struct Holder {
@@ -79,8 +79,8 @@ enum Shape {
     Empty,
     Circle { r: int },
     Rect { w: int, h: int },
-    Line(int, int),
-    Draw(() -> ()),
+    Line(int, int),              // a tuple variant alongside records (mixed)
+    Draw(() -> ()),              // closure payload -> Shape is non-cdata
 }
 
 struct Canvas {

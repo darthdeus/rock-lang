@@ -70,16 +70,16 @@ fn test_nullable_type_args() {
 
 hold!(
     HolderA,
-    BoxL<
-        int
+    BoxL< // comment after `<`
+        int  // comment before `>`
     >
 )
 
 hold!(
     TupHolder,
     (
-        int?,
-        [bool]
+        int?,    // nullable int
+        [bool]   // vec of bool
     )
 )
 

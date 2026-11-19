@@ -263,7 +263,7 @@ co fn echo_back() -> Coroutine<int, (), int> {
 @test(output = "1\n42\n2\n7\n3\n0\n-1\n-1\nnull")
 fn test_resume_with_value_basic() {
     let c = echo_back()
-    print(c.resume(0) ?? -1)
+    print(c.resume(0) ?? -1)   // pre-first-yield resume; arg=0 discarded
     print(c.resume(42) ?? -1)
     print(c.resume(7) ?? -1)
     print(c.resume(0) ?? -1)
