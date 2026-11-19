@@ -1,6 +1,3 @@
-//! Lower concrete plans to MIR and assemble emitted definitions with the Lua runtime.
-//! Global initializers are ordered by transitive dependencies.
-
 use bone_core::prelude::Instant;
 use bone_semantic::hir::{BodyOwner, Expr};
 use bone_semantic::inference::Workspace;
@@ -53,8 +50,6 @@ use shaders::*;
 use unit::*;
 use validate::*;
 
-/// O(1) container lengths and a dependency total folded by the existing
-/// production dependency-index loop. No diagnostic graph walk is needed.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CompileCounts {
     pub concrete_plans: usize,
@@ -62,7 +57,6 @@ pub struct CompileCounts {
     pub dependency_edges: Option<usize>,
 }
 
-/// The assembled Lua program and what was emitted into it.
 /// The line after which a host attaches its own global directory fields.
 pub const GLOBALS_BRIDGE_LINE: &str = "__rock_globals_install_bridge()\n";
 
@@ -72,60 +66,27 @@ pub struct MirEmit {
     /// The byte offset in `lua` just past [`GLOBALS_BRIDGE_LINE`]. `None` for
     /// an overlay, which has no bridge, and for text rewritten after assembly.
     pub globals_bridge_end: Option<usize>,
-    /// Allocation-capable operations registered by final Lua emission, with
-    /// residual call edges and compiler-owned per-frame lifecycle routes.
     pub allocation_report: crate::allocation_report::AllocationReport,
-    /// Artifact-owned callable identities and their self-validating census.
     pub code_artifact: std::sync::Arc<skull_mir::code_identity::CodeArtifact>,
-    /// The compiler-owned lifecycle inventory staged by this artifact.
     pub lifecycle_plan: skull_mir::lifecycle::LifecyclePlan,
     /// The mutable-global layout fingerprint the program opens its storage with.
     pub global_layout: String,
-    /// The compiler-owned definition inventory included in the exact Artifact
-    /// identity and published to the runtime.
     pub definition_plan: skull_mir::definition::DefinitionPlan,
-    /// The semantic identity of this exact emitted Artifact. It is computed
-    /// before the backend payload leaves the compiler; `None` only when the
-    /// build asked [`FullEmit::without_fingerprint`], because its host never
-    /// reloads or replays the program.
+    /// `None` when built with [`FullEmit::without_fingerprint`].
     pub artifact_fingerprint: Option<String>,
-    /// Coarse per-stage time for the emit, in run order. `setup:` entries are
-    /// direct wall-clock measurements; the remaining entries cover HIR->MIR
-    /// lowering, MIR cleanup, Lua emission, and sequential assembly. The latter
-    /// are per-unit elapsed timers that overlap under parallel emit and become
-    /// wall-clock measurements under `sequential`.
     pub phases: Vec<(&'static str, std::time::Duration)>,
-    /// ABI-plan memo counters over the emitting context's lifetime (== this
-    /// emission for a full build, cumulative across edits on the incremental
-    /// paths). Counts, so load-immune: `hits() > 0` on any real corpus is the
-    /// memo's non-vacuity witness. Surfaced by `backend-stats`.
     pub abi_plan_stats: skull_mir::lower::AbiPlanMemoStats,
-    /// Body-oriented attribution for the current emission. Counters are reduced
-    /// from per-body results after the parallel fanout, so the hot passes do not
-    /// use shared atomics.
     pub attribution: EmitAttribution,
-    /// Shared-arena traffic split at the setup/fanout boundary (full builds;
-    /// zeroed on paths without a fresh setup phase). The `*_final - *_setup`
-    /// deltas are the post-setup traffic a frozen read view would serve.
     pub arena_traffic: ArenaTraffic,
-    /// The three independent setup lanes and their production populations.
-    /// The overlap bits come from the lanes' actual execution intervals, not
-    /// from a wall-clock estimate.
     pub setup_lanes: SetupLaneAttribution,
-    /// Operational graph work and repeated source-fact populations from the
-    /// graph used by this emission.
     pub graph_census: crate::instance_graph::RunStats,
-    /// Concrete-plan ownership and assembly populations from this emission.
     pub concrete_stats: crate::concrete_body::ConcreteBuildStats,
     /// Whether the host should append the generated main call.
     pub emits_main: bool,
-    /// Every shader this artifact registers, as the source the registration
-    /// carries, in registration order. Shared with the emit cache, which
-    /// keeps them across incremental builds.
+    /// Every registered shader, in registration order.
     pub shaders: std::sync::Arc<[ShaderSource]>,
 }
 
-/// One registered shader's emitted source.
 #[derive(Clone, Debug)]
 pub struct ShaderSource {
     pub key: String,
@@ -138,9 +99,7 @@ pub enum ShaderLanguage {
     Glsl,
 }
 
-/// Emit the whole workspace once. `user_mid` is the entry module. Registered
-/// shaders emit Core330 for desktop OpenGL. See [`FullEmit`] for the other
-/// build kinds and options.
+/// Emit the whole workspace once.
 pub fn emit_workspace_mir(ws: &Workspace, user_mid: ModuleId) -> Result<MirEmit, CompilerError> {
     FullEmit::one_shot()
         .with_attribution()
@@ -156,7 +115,6 @@ pub fn emit_full(
     FullEmit::program().run(ws, user_mid)
 }
 
-/// One full emit: the build kind it starts from, refined by the builder methods.
 #[derive(Clone, Copy)]
 pub struct FullEmit<'a> {
     build: FullBuild<'a>,
@@ -193,8 +151,7 @@ impl<'a> FullEmit<'a> {
         Self::new(FullBuild::OneShotProgram)
     }
 
-    /// A package's `rock test` program, rooted at its `tests`. See
-    /// [`BuildKind::PackageTest`].
+    /// A package's `rock test` program, rooted at its `tests`.
     pub fn package_test(tests: &'a [FuncRef]) -> Self {
         Self::new(FullBuild::PackageTest(tests))
     }
@@ -205,9 +162,8 @@ impl<'a> FullEmit<'a> {
         Self::new(FullBuild::SelectedSims(sims))
     }
 
-    /// Scope the build to a PROJECT directory: modules outside it (a
-    /// stick.toml dependency such as a host library) are libraries and prune
-    /// down to what the project reaches. See [`is_library_module`].
+    /// Scope the build to a project directory: modules outside it are
+    /// libraries and prune down to what the project reaches.
     pub fn project_root(mut self, project_root: Option<&'a str>) -> Self {
         self.project_root = project_root;
         self
@@ -220,16 +176,13 @@ impl<'a> FullEmit<'a> {
     }
 
     /// Skip the artifact fingerprint. Only a host that writes the program once
-    /// and never reloads or replays it can do without; the fingerprint is the
-    /// serial tail of assembly.
+    /// and never reloads or replays it can do without.
     pub fn without_fingerprint(mut self) -> Self {
         self.fingerprint = false;
         self
     }
 
-    /// Fold every emitted body's attribution record into
-    /// [`MirEmit::attribution`]. Only the backend statistics read it, so a
-    /// build that does not ask skips the fold.
+    /// Fold every emitted body's attribution record into [`MirEmit::attribution`].
     pub fn with_attribution(mut self) -> Self {
         self.attribution = true;
         self
@@ -262,7 +215,6 @@ pub enum RendererTarget {
     Gl,
 }
 
-/// What an emitted program is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BuildKind {
     /// A game, tool or single-file program; it may be reloaded in place.
@@ -272,30 +224,18 @@ pub(crate) enum BuildKind {
     PackageTest,
 }
 
-/// Emitted-shape overrides for one emit, for a test that must drive two
-/// shapes in one test binary. `Default` -- `None` everywhere -- is the
-/// production path.
+/// Emitted-shape overrides for a test that drives two shapes in one binary.
 #[derive(Clone, Copy, Default)]
 pub struct ShapeOverrides {
     /// `Some(false)` emits a body that breaks a LuaJIT parse-time frame cap
-    /// instead of rejecting it. Not a production switch and not readable from
-    /// the environment: the boundary-agreement test needs the Lua of a rejected
-    /// body so it can ask the bundled LuaJIT whether that Lua really fails to
-    /// load (`skull_codegen_lua::CodegenCtx::set_frame_limits`).
+    /// instead of rejecting it, so a test can ask the bundled LuaJIT whether
+    /// that Lua really fails to load.
     pub frame_limits: Option<bool>,
     /// Overrides `ROCK_SKULL_LINE_DIRECTIVES`
     /// (`skull_codegen_lua::CodegenCtx::set_line_directives`).
     pub line_directives: Option<bool>,
 }
 
-/// Absolutize `project_root` so it can be path-component-matched against module file
-/// paths, which are absolute for a project build.
-///
-/// Rejects a root that matches NO module. The caller passing a relative or stale
-/// directory would otherwise silently classify the project's own sources as
-/// library modules -- pruning MORE than intended, with no signal. That is the
-/// failure this whole guard exists for: a path predicate that quietly matches
-/// nothing looks exactly like one that works.
 fn canonical_project_root(
     ws: &Workspace,
     project_root: Option<&str>,

@@ -1,8 +1,5 @@
-//! The full build: setup lanes, the per-body fanout and assembly.
-
 use super::*;
 
-/// A full build's kind with the roots it is taken over.
 #[derive(Clone, Copy)]
 pub(super) enum FullBuild<'a> {
     Program,
@@ -44,7 +41,6 @@ pub(super) struct ShaderRegistrations {
     pub(super) keys: BTreeSet<String>,
 }
 
-/// Setup timings in run order, reported ahead of assembly's own phases.
 #[derive(Default)]
 struct SetupPhases(Vec<(&'static str, Duration)>);
 
@@ -57,7 +53,6 @@ impl SetupPhases {
     }
 }
 
-/// The root sets one full build is taken over.
 struct FullRoots {
     interface_roots: Vec<FuncRef>,
     sim_roots: Vec<FuncRef>,
@@ -65,7 +60,6 @@ struct FullRoots {
     emission_roots: Vec<FuncRef>,
 }
 
-/// Whole-workspace rejections that precede any graph or lowering work.
 fn reject_workspace(ws: &Workspace, user_mid: ModuleId) -> Result<(), CompilerError> {
     if let Some(span) = skull_mir::lower::string_char_literal_out_of_range(ws, user_mid) {
         return Err(CompilerError::new_with_label(
@@ -104,9 +98,6 @@ fn reject_workspace(ws: &Workspace, user_mid: ModuleId) -> Result<(), CompilerEr
     Ok(())
 }
 
-/// Generated glue is part of the ROOT INPUT. Shader declarations are known
-/// before the graph; their GLSL bodies are rendered only after the view owns
-/// the retained instances.
 fn collect_full_roots(
     ws: &Workspace,
     build: FullBuild<'_>,
@@ -148,7 +139,6 @@ fn collect_full_roots(
     ))
 }
 
-/// The interface and sim-glue roots of one build kind.
 fn build_roots(
     ws: &Workspace,
     build: FullBuild<'_>,
@@ -184,9 +174,6 @@ fn build_roots(
     })
 }
 
-/// A selected-sims build roots the sims a reached body names, until no new
-/// one is reached, rebuilding the graph over each widened root set. Returns
-/// the names of the sims the final graph reaches.
 fn expand_selected_sim_roots(
     ws: &Workspace,
     roots: &mut FullRoots,
@@ -232,7 +219,6 @@ fn expand_selected_sim_roots(
             &roots.sim_roots,
             &roots.shader_roots,
         );
-        // The scalar and codegen contexts already mint against this arena.
         let interner = std::sync::Arc::clone(graph.interner());
         *graph = crate::instance_graph::build_in(ws, roots.emission_roots.clone(), false, interner);
     }
@@ -248,8 +234,6 @@ fn expand_selected_sim_roots(
         .collect())
 }
 
-/// Concrete lowering plans for every retained instance; a plan that cannot be
-/// built rejects the compile.
 fn build_concrete_plans(
     ws: &Workspace,
     graph: &crate::instance_graph::InstanceGraph,
@@ -294,9 +278,6 @@ fn build_concrete_plans(
     Ok(concrete)
 }
 
-/// The scalar context lowering will use and the codegen context over it,
-/// short of the call graph. Both read the workspace only (the value-reference
-/// scan, the global state slots), so they are built beside the graph.
 type EarlyContexts = (
     skull_mir::lower::ScalarCtx,
     Result<CodegenCtx, CompilerError>,
@@ -312,9 +293,6 @@ fn early_contexts(
     (scx, cg)
 }
 
-/// Lane one: the CPU artifact view, realized with the scalar context lowering
-/// will use, and the call graph of the closed instance graph, off the plan
-/// build's path.
 fn cpu_artifact_lane(
     ws: &Workspace,
     graph: &crate::instance_graph::InstanceGraph,
@@ -358,9 +336,6 @@ fn cpu_artifact_lane(
     )
 }
 
-/// The shader view and its registration lines. They read the concrete plans
-/// and nothing a CPU body lowers from, so the build runs them beside the
-/// fan-out.
 fn shader_lane(
     ws: &Workspace,
     graph: &crate::instance_graph::InstanceGraph,
@@ -378,8 +353,6 @@ fn shader_lane(
     SetupLaneWindow,
 ) {
     let started = Instant::now();
-    // The overload set lives in `cg` (computed once there);
-    // borrow it rather than rescanning the workspace.
     let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
         .sharing(std::sync::Arc::clone(graph.interner()));
     let result = (|| {
@@ -406,7 +379,6 @@ fn shader_lane(
     )
 }
 
-/// What the concurrent setup lanes produce.
 struct SetupLanes {
     lua_view: crate::artifact::ArtifactView,
     scx: skull_mir::lower::ScalarCtx,
@@ -415,9 +387,6 @@ struct SetupLanes {
     windows: [(&'static str, Duration); 2],
 }
 
-/// The graph is complete before these lanes start; shared interning remains
-/// synchronized. The CPU artifact lane runs beside the concrete plan build.
-/// ABI plans are derived where a body first asks for one.
 fn run_setup_lanes(
     ws: &Workspace,
     graph: &crate::instance_graph::InstanceGraph,
@@ -431,8 +400,8 @@ fn run_setup_lanes(
         std::sync::Arc::ptr_eq(&scx.interner_handle(), graph.interner()),
         "the scalar context mints against the graph's arena"
     );
-    // The plan build stays on this thread: its build counter is a
-    // thread-local witness the incremental repair statistics read back.
+    // Stays on this thread: its build counter is a thread-local the
+    // incremental repair statistics read back.
     let (cpu_result, (plans_result, plans_lane)) = join_in_place(
         || cpu_artifact_lane(ws, graph, emission_roots, scx, cg),
         || {
@@ -494,8 +463,6 @@ fn run_setup_lanes(
     ))
 }
 
-/// The codegen context over the final global state slots; the call graph is
-/// set once the instance graph is closed.
 fn workspace_codegen_ctx(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -512,9 +479,6 @@ fn workspace_codegen_ctx(
     Ok(cg)
 }
 
-/// The emitted param list must be injective. Checked per SIGNATURE, over every
-/// function rather than just the emitted set: a duplicate Lua param is illegal
-/// regardless of which filter would have reached the body.
 fn reject_abi_param_collisions(ws: &Workspace, scx: &skull_mir::lower::ScalarCtx, cg: &CodegenCtx) {
     for m in ws.source_modules() {
         for (fid, _) in m.functions.iter() {
@@ -531,23 +495,13 @@ fn reject_abi_param_collisions(ws: &Workspace, scx: &skull_mir::lower::ScalarCtx
 
 type ChunkMap = FxHashMap<Instance, Result<Chunk, CompilerError>>;
 
-/// The fan-out's bodies, one filled slot per declaration, in the order the
-/// chunk map is built in.
 type FanOutBodies = Vec<Option<(Instance, Result<Chunk, CompilerError>)>>;
 
-/// One job of the fan-out: a retained declaration's body (with its position,
-/// which fixes the chunk map's order) or a specialization a lowered body
-/// demanded.
 enum FanOutJob<'w> {
     Body(usize, FuncRef, &'w bone_semantic::hir::Function),
     Spec(Instance),
 }
 
-/// Emit every retained ordinary/coroutine body into its chunk, in parallel
-/// with one inline cache per worker over a shared candidate table, together
-/// with every specialization those bodies demand: a body's demand joins the
-/// same queue the moment the body is lowered, so specializations need no
-/// window of their own after the fan-out.
 fn emit_full_chunks<'a>(
     ws: &'a Workspace,
     cg: &CodegenCtx,
@@ -580,9 +534,6 @@ fn emit_full_chunks<'a>(
         .enumerate()
         .map(|(at, (self_ref, f))| FanOutJob::Body(at, self_ref, f))
         .collect();
-    // Libraries are listed before the modules that use them. Starting the
-    // users first starts the specialization chains they demand early, so
-    // the chains do not run alone after the other bodies are done.
     jobs.reverse();
     let inline_candidate_table = setup_phases.timed("setup: inline candidate table", || {
         build_inline_candidate_table(
@@ -598,12 +549,8 @@ fn emit_full_chunks<'a>(
         )
     })?;
     queue.attribution = attribution;
-    // One slot per body, so the chunk map is built in declaration order
-    // without moving the chunks through a sort.
     let bodies: std::sync::Mutex<FanOutBodies> =
         std::sync::Mutex::new(std::iter::repeat_with(|| None).take(jobs.len()).collect());
-    // The fan-out's wall window, beside the per-unit sums the chunks carry:
-    // the budget reads idle time as threads * window - summed unit time.
     setup_phases.timed("window: fan-out", || {
         par_drain(
             jobs,
@@ -636,8 +583,6 @@ fn emit_full_chunks<'a>(
     Ok((bodies, inline_candidate_table, queue))
 }
 
-/// Seed the reverse dependency index from every chunk's codegen deps (only a
-/// retained cache keeps it). Also returns the dependency-edge total.
 fn index_dependents(
     chunks: &ChunkMap,
     lifetime: CacheLifetime,
@@ -658,9 +603,6 @@ fn index_dependents(
 }
 
 impl SkullEmitCache {
-    /// Keep what a retained build's later incremental and overlay builds start
-    /// from: the emitted set, the artifact identity, the absorbed
-    /// specializations and the static storage inventory.
     fn retain_full_build(
         &mut self,
         ws: &Workspace,
@@ -687,7 +629,6 @@ impl SkullEmitCache {
         self.unit_comptime_reads = unit_reads;
         dependency_edges += self.absorb_spec_chunks(built_specs);
         self.refresh_effect_snapshot(ws);
-        // Include specialized statics after their chunks have been absorbed.
         self.retain_static_cells(ws)?;
         emit.compile_counts.chunks = self.chunks.len();
         emit.compile_counts.dependency_edges = Some(dependency_edges);
@@ -717,16 +658,14 @@ pub(super) fn emit_full_build(
     })?;
     let project_root = project_root.as_deref();
 
-    // **The graph is built FIRST, into a fresh arena, and `scx` shares that
-    // arena rather than minting its own.** An `Instance` the graph mints has to
-    // mean something to lowering, and a second arena would be a second identity
-    // for the same instance. See `SkullEmitCache::graph`.
+    // `scx` shares the graph's arena so an `Instance` the graph mints means
+    // the same thing to lowering.
     let (shader_collection, shader_programs, mut roots) = setup_phases
         .timed("setup: root collection", || {
             collect_full_roots(ws, build, project_root)
         })?;
-    // The graph build stays on this thread: its build counter is a
-    // thread-local witness the incremental repair statistics read back.
+    // Stays on this thread: its build counter is a thread-local the
+    // incremental repair statistics read back.
     let (early, graph_result) = setup_phases.timed("setup: graph", || {
         let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
         let early_interner = std::sync::Arc::clone(&interner);
@@ -752,8 +691,6 @@ pub(super) fn emit_full_build(
         )
     });
     let (mut graph, selected_sim_functions) = graph_result?;
-    // The CPU artifact view and the codegen context read only the graph, so
-    // they are built while the concrete plans are.
     let (mut concrete, lanes) = setup_phases.timed("setup: concrete plans+lanes", || {
         run_setup_lanes(
             ws,
@@ -776,25 +713,16 @@ pub(super) fn emit_full_build(
     });
 
     let setup_traffic = (scx.rep_arena_stats(), scx.interner().stats());
-    // Nothing the fan-out lowers reads the graph's records; only the shader
-    // view beside it does. A one-shot build hands them to that lane, which
-    // frees them when it finishes, so the fan-out reuses their memory.
     let concrete_stats = if concrete_stats_requested() {
         concrete.snapshot_build_stats()
     } else {
         crate::concrete_body::ConcreteBuildStats::default()
     };
-    // The per-owner build statistics serve incremental repair and the snapshot
-    // above; a one-shot build has neither past this point.
     if build.lifetime() == CacheLifetime::OneShot {
         drop_in_background(concrete.take_build_stats());
     }
     let graph_records = (build.lifetime() == CacheLifetime::OneShot).then(|| graph.take_records());
     let spec_queue = SpecQueue::new(ws, &scx, graph_records.as_ref().unwrap_or(&graph), None);
-    // The chunk-free assembly inputs (scaffold, decorator and global units,
-    // globals directory) are prepared beside the chunk build, on the same
-    // pool, instead of serially at the start of assembly. So is the shader
-    // view, which no CPU body reads.
     let (chunks, ((early, early_window), (shader_result, shader_lane))) = parallel_join(
         || {
             emit_full_chunks(
@@ -840,9 +768,6 @@ pub(super) fn emit_full_build(
     );
     let (shader_view, shader_registrations) = shader_result?;
     let (bodies, inline_candidate_table, spec_queue) = chunks?;
-    // The chunk map only moves the finished bodies, so it is built while the
-    // specializations are settled. Decorator and global units are lowered
-    // beside the fan-out; what they demand is usually built already.
     let (chunks, specs) = parallel_join(
         || {
             let filled = |slot: Option<_>| slot.expect("every fan-out body is emitted");

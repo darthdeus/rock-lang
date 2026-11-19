@@ -1,11 +1,5 @@
-//! Assembly of the complete program text and its artifact identity.
-
 use super::*;
 
-/// Comptime reads made by ALWAYS-EMITTED units, which have no Chunk to carry
-/// them: per-global (keyed so the overlay can re-init exactly the stale one)
-/// plus decorator definitions (files only -- decorators re-apply on full
-/// rebuild, so the watch set is all they need).
 #[derive(Clone, Default)]
 pub(crate) struct UnitComptimeReads {
     pub(super) globals: FxHashMap<
@@ -79,24 +73,13 @@ pub(super) fn artifact_fingerprint(
     })
 }
 
-/// What one assembly accumulates while it pulls every emitted definition into
-/// the program text, in the order `assemble` visits them.
 struct Assembly {
     out: String,
-    // Per-stage lower/cleanup/emit/regalloc times: chunk times (captured during the
-    // parallel `emit_full`/`emit_incremental` chunk build) summed in as chunks are
-    // pulled, plus the decorator/global units re-emitted here. Under parallel emit
-    // these are summed per-unit elapsed time across workers (so they exceed the wall-clock emit
-    // total `backend-stats` measures). `t_scaffold` is the directly-timed
-    // SEQUENTIAL remainder (prelude/value-structs/type-tables + global-init
-    // ordering + deco application).
     times: PhaseTimes,
     t_scaffold: Duration,
     attribution: AttributionAccumulator,
     needed_specs: Vec<skull_mir::bound::SpecDemand>,
     rejections: Rejections,
-    /// Global-init ordering facts of the lowered units, in merge order:
-    /// (body, globals read, functions called).
     unit_facts: Vec<(Ustr, Vec<Ustr>, Vec<Ustr>)>,
     all_statics: Vec<skull_mir::mir::StaticCell>,
     code_artifact: skull_mir::code_identity::CodeArtifact,
@@ -108,7 +91,6 @@ struct Assembly {
 }
 
 impl Assembly {
-    /// An assembly that starts from what the lowered units contribute.
     fn new(cache: &SkullEmitCache, units: UnitFacts) -> Self {
         let mut attribution = if cache.attribution {
             candidate_setup_attribution(cache)
@@ -138,10 +120,6 @@ impl Assembly {
         }
     }
 
-    /// Function definitions, every module (cached chunk for ordinary/coroutine,
-    /// regenerated for extern / inline(lua)). The cached chunks were built in
-    /// parallel by `emit_full`/`emit_incremental`; here we pull their Lua and sum
-    /// their captured phase times back into the breakdown.
     fn push_function_definitions<'c>(
         &mut self,
         ws: &Workspace,
@@ -150,8 +128,6 @@ impl Assembly {
         definitions: &mut DefinitionOrder<'c>,
         facts: &mut Vec<(Ustr, &'c Chunk)>,
     ) -> Result<(), CompilerError> {
-        // Each function's placement reads only that function, so all of them
-        // are found in parallel and the ordered pass only appends.
         let fns: Vec<(FuncRef, &bone_semantic::hir::Function)> = source_functions(ws).collect();
         let placements: Vec<Placement<'c>> = {
             use bone_core::prelude::*;
@@ -171,9 +147,6 @@ impl Assembly {
         Ok(())
     }
 
-    /// Ordinary / coroutine: place the cached chunk. Its global-init facts
-    /// count whether or not it is emitted; everything else it carries is read
-    /// from `definitions` once the order is complete.
     fn pull_cached_chunk<'c>(
         &mut self,
         f: &bone_semantic::hir::Function,
@@ -205,10 +178,6 @@ impl Assembly {
         }
     }
 
-    /// Order the init lines by their transitive global-read closure over the full
-    /// call graph (now that every fn's direct facts are recorded), then append the
-    /// static resets, the initializer calls and the remaining load-time
-    /// registrations.
     fn push_initializers(
         &mut self,
         ws: &Workspace,
@@ -242,9 +211,7 @@ impl Assembly {
         let init_lines = sort_global_init_lines(inits, &leaf_owner)?;
         out.push_str(&state_initializer_lua(&init_lines));
 
-        // Decorator APPLICATIONS (after global inits so a deco body can push a global).
         out.push_str(&decorator_application_lines(ws, decorators, scx)?);
-        // `@sim` registrations (after fn + global defs; same init slot as rock).
         if cache.build_kind == BuildKind::Program {
             out.push_str(&sim_registration_lines(
                 ws,
@@ -252,9 +219,6 @@ impl Assembly {
                 cache.selected_sim_functions.as_ref(),
             )?);
         }
-        // `rock_shader` pipeline registrations:
-        // one top-level `__rock_shader_register(key, glsl)` per distinct pair, so a
-        // reload re-`dofile`s them with the new source (hot-reload parity).
         out.push_str(&cache.shader_registrations.lua);
         if has_code_slot_publication {
             out.push_str(code_slot_publish_lua(
@@ -263,16 +227,12 @@ impl Assembly {
                 lifecycle_declarations,
             ));
         }
-        // Closes the block the runtime prelude opens (the storage cell becomes a
-        // closed upvalue here); anything appended after this line runs outside it.
+        // Closes the block the runtime prelude opens.
         out.push_str("end\n");
         self.t_scaffold += ts.elapsed();
         Ok(())
     }
 
-    /// `times.emit` brackets emit_function/emit_named/emit_coroutine; `times.regalloc`
-    /// is the subset spent in `color_values` inside them (per-unit reset/read, exact
-    /// even under parallel emit). stringify = the remainder.
     fn phases(&self) -> Vec<(&'static str, Duration)> {
         let times = &self.times;
         let t_stringify = times.emit - times.regalloc;
@@ -292,8 +252,6 @@ impl Assembly {
     }
 }
 
-/// The inline-candidate table's setup counters, the starting point of this
-/// assembly's attribution.
 fn candidate_setup_attribution(cache: &SkullEmitCache) -> AttributionAccumulator {
     let mut attribution = AttributionAccumulator {
         enabled: true,
@@ -351,7 +309,6 @@ fn candidate_setup_attribution(cache: &SkullEmitCache) -> AttributionAccumulator
     attribution
 }
 
-/// Collect opaque callees that still need definitions after inlining.
 fn collect_needed_foreign(
     ws: &Workspace,
     cache: &SkullEmitCache,
@@ -359,8 +316,6 @@ fn collect_needed_foreign(
     spec_chunks: &FxHashMap<Instance, Chunk>,
 ) -> FxHashSet<Instance> {
     const BODIES_PER_JOB: usize = 512;
-    // Only an `inline(lua)` declaration is ever looked up in the set, so
-    // every other callee is dropped where it is read.
     let foreign = |f: &FuncRef| ws.module(f.module).functions[f.func].inline_body.is_some();
     let fns: Vec<(FuncRef, &bone_semantic::hir::Function)> = source_functions(ws).collect();
     let specs: Vec<&Chunk> = spec_chunks.values().collect();
@@ -393,7 +348,6 @@ fn collect_needed_foreign(
         .collect()
 }
 
-/// Every source function with its reference, in declaration order.
 fn source_functions(
     ws: &Workspace,
 ) -> impl Iterator<Item = (FuncRef, &bone_semantic::hir::Function)> {
@@ -411,8 +365,6 @@ fn source_functions(
     })
 }
 
-/// The name, parameter list and body of the thin wrapper binding an
-/// `extern(ffi, "lib")` fn to its loaded library handle.
 fn ffi_extern_wrapper(
     ws: &Workspace,
     f: &bone_semantic::hir::Function,
@@ -426,11 +378,8 @@ fn ffi_extern_wrapper(
         .collect::<Vec<_>>()
         .join(", ");
     let body = match extern_ret(ws, f)? {
-        // Returns an OWNING copy, never `__out[0]`. LuaJIT does
-        // not keep the parent array alive through a reference
-        // into it, so handing one back is a use-after-free that
-        // reads fine until the memory is reused
-        // (`tests/extern_value_return_ownership.rs`).
+        // Returns an owning copy: LuaJIT does not keep the parent
+        // array alive through a reference into it.
         ExternRet::ValueStruct(key) => {
             let sname = skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(&key));
             let call_args = if params.is_empty() {
@@ -443,9 +392,8 @@ fn ffi_extern_wrapper(
                 skull_codegen_lua::wrapper_return(&format!("ffi.new(\"{sname}\", __out[0])"))
             )
         }
-        // `return <call>` is a `CALLT` into C, which a root trace
-        // cannot leave through; the bound local makes it a `RET`
-        // (`wrapper_return`). `Bool` ends in a compare, not a call.
+        // `return <call>` is a `CALLT` into C, which a root trace cannot
+        // leave through; the bound local makes it a `RET`.
         ExternRet::Int | ExternRet::Uint => {
             skull_codegen_lua::wrapper_return(&format!("tonumber({lib}.{nm}({params}))"))
         }
@@ -456,9 +404,6 @@ fn ffi_extern_wrapper(
     Ok((nm, params, body))
 }
 
-/// inline(lua): emit the hand-written body verbatim, wrapping a
-/// value-returning bodyless-`return` and prepending default fills.
-/// (Js inline bodies were skipped by the backend guard.)
 fn inline_lua_definition(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -488,22 +433,12 @@ fn inline_lua_definition(
     format!("function {name}({params})\n{prologue}{body}\nend\n")
 }
 
-/// What [`Assembly::push_initializers`] orders by, found concurrently with the
-/// definition text; the errors surface where the initializers are written.
 struct InitOrdering {
     reach: skull_mir::reach::GlobalReach,
     leaf_owner: Result<FxHashMap<Ustr, Ustr>, CompilerError>,
     static_resets: Result<String, CompilerError>,
 }
 
-/// The transitive global reads of the initializers in `inits`, over the
-/// lowered units' facts and then each placed declaration's (a later key
-/// overwrites an earlier one).
-///
-/// Only the initializers' closures are read, and they reach a small part of
-/// the program, so the closure is taken over the bodies they reach. That
-/// changes the order of each dependency list but not its set, and the init
-/// order reads it as a set.
 fn transitive_global_reads(
     inits: &[(Ustr, Ustr, String)],
     units: &[(Ustr, Vec<Ustr>, Vec<Ustr>)],
@@ -533,10 +468,6 @@ fn transitive_global_reads(
     skull_mir::reach::transitive_global_reads(&globals, &calls)
 }
 
-/// Init ordering is stated over SOURCE globals, but a `nobox` global is READ
-/// through its leaves, so a leaf dep has to resolve back to the group that
-/// owns it or the dependent initializer sorts before it. Built from the
-/// globals that actually mint leaves -- never a name-shape guess.
 fn global_leaf_owners(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -546,9 +477,6 @@ fn global_leaf_owners(
         for (_, g) in module.globals.iter() {
             let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
                 .map_err(|e| CompilerError::new_no_location(e.message))?;
-            // Leaf names are the emitted symbols; the owner they resolve back
-            // to is the global's LOGICAL name, which is what an init line and a
-            // plain global read are keyed on.
             if let Some(leaves) = plan.leaf_names(skull_mir::mangle::symbol_of_key(g.name)) {
                 for leaf in leaves {
                     leaf_owner.insert(leaf, g.name);
@@ -559,10 +487,6 @@ fn global_leaf_owners(
     Ok(leaf_owner)
 }
 
-/// `static` cells: on reload, RESET (nil the cell + clear the done-flag) when
-/// the init/type key changed since last run, so the next reach re-inits with
-/// the edited initializer; an unchanged key preserves the live cell. Dedup by
-/// cell.
 fn static_reset_lines(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -586,8 +510,6 @@ fn static_reset_lines(
     Ok(static_resets)
 }
 
-/// Every definition this assembly actually emitted: the source-order bodies
-/// the same gates admitted, plus the specialized instances.
 fn emitted_bodies(
     ws: &Workspace,
     cache: &SkullEmitCache,
@@ -620,7 +542,6 @@ fn emitted_bodies(
     emitted_bodies
 }
 
-/// Where one source function goes in the definitions, in source order.
 enum Placement<'c> {
     None,
     Text(Result<String, CompilerError>),
@@ -636,25 +557,11 @@ fn place_function<'c>(
 ) -> Placement<'c> {
     let mid = self_ref.module;
     let fid = self_ref.func;
-    // A JS-backend decl (`inline(js)` / `extern(js)`) is inert on luajit:
-    // its lua sibling (if any) carries the binding, and a js-only call from
-    // lua-reachable code is rejected at call lowering (resolve_funcref).
     if f.backend == bone_semantic::hir::FnBackend::Js {
         return Placement::None;
     }
-    // Whole-program DCE (`emit_def`) gates both chunk construction and
-    // definition emission. Retained bodies still fail hard when their
-    // plan or chunk is missing; pruned dependency bodies have neither by
-    // design.
     let emit_def = should_emit_via_view(ws, &cache.lua_view, self_ref);
     if f.is_extern {
-        // An `extern(ffi, "lib")` fn needs a thin wrapper binding it to the
-        // loaded library handle. A non-ffi extern is a pre-existing global.
-        //
-        // Gated by the VIEW like every other definition. `is_emission_root`
-        // roots every `extern`, so in practice the view retains them all
-        // and this changes no output -- but an ungated write is a second
-        // population input, and one is the whole point of the cut.
         let Some(lib) = f.ffi_lib else {
             return Placement::None;
         };
@@ -662,11 +569,6 @@ fn place_function<'c>(
             Ok(wrapper) => wrapper,
             Err(err) => return Placement::Text(Err(err)),
         };
-        // The rejection above runs for EVERY extern; only the WRITE
-        // is gated. Pruning may change which definitions are emitted
-        // and nothing else -- gating the whole arm suppressed
-        // `extern_ret`'s unbound-generic rejection, whose subject is
-        // a generic declaration the view holds no base instance for.
         if !emit_def {
             return Placement::None;
         }
@@ -676,16 +578,6 @@ fn place_function<'c>(
         )));
     }
     if let Some((_, body)) = f.inline_body {
-        // Retention alone (`emit_def`) over-emits here -- see
-        // `needed_foreign`'s doc. Three independent reasons still force
-        // emission regardless of splicing eligibility: a publication
-        // obligation (`@nomangle`), a residual (non-spliced) demand, or
-        // being a ROOT in its own right (an own-project inline(lua) fn
-        // is unconditionally rooted by `is_emission_root` even with no
-        // caller at all -- same reasoning as `main`/`@sim`/`@test`;
-        // found empirically, `anvil`'s `sv_close`/`sv_is_eof` etc. have
-        // no call site anywhere in the corpus and are rooted purely by
-        // living in the project's own file).
         if !emits_foreign_definition(ws, &cache.lua_view, needed_foreign, self_ref) {
             return Placement::None;
         }
@@ -697,11 +589,6 @@ fn place_function<'c>(
             body.as_str(),
         )));
     }
-    // An `Iterator`-bounded fn has no standalone emission (it exists
-    // only inlined at its call sites) -- deliberately absent.
-    //
-    // A generic declaration has no definition of its own. Its bodies are
-    // its instances, placed by `order_specialized_callees`.
     if f.has_iterator_bounds() || is_generic(f) {
         return Placement::None;
     }
@@ -713,8 +600,6 @@ fn place_function<'c>(
     Placement::Chunk(emit_def, chunk)
 }
 
-/// One-shot builds drop the chunk cache once its last reader is done: capture
-/// the artifact's comptime reads and the chunk and dependency counts first.
 fn release_one_shot_chunks(
     cache: &mut SkullEmitCache,
     built_specs: &mut Vec<(Instance, Chunk)>,
@@ -745,8 +630,6 @@ fn release_one_shot_chunks(
 
 type GlobalKey = (ModuleId, Idx<bone_semantic::hir::GlobalDef>);
 
-/// The load-time scaffolding: runtime prelude, value struct and enum
-/// definitions, type tables. IR-agnostic, so it needs no chunk.
 fn scaffold_prelude_lua(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -794,11 +677,8 @@ end
     Ok((out, value_ctors))
 }
 
-/// What the lowered decorator and global units contribute to an assembly
-/// besides their text, in unit order.
 #[derive(Default)]
 struct UnitFacts {
-    /// Global-init ordering facts: (body, globals read, functions called).
     facts: Vec<(Ustr, Vec<Ustr>, Vec<Ustr>)>,
     calls: Vec<FuncRef>,
     names: Vec<Ustr>,
@@ -808,14 +688,10 @@ struct UnitFacts {
     reads: UnitComptimeReads,
     rejections: Vec<CompilerError>,
     specs: Vec<skull_mir::bound::SpecDemand>,
-    /// Each unit's cost record with its text's bytes and lines, kept only
-    /// by a build that attributes.
     costs: Vec<(UnitAttribution, (usize, usize))>,
 }
 
 impl UnitFacts {
-    /// Fold parallel `UnitOut`s IN ORDER: append each unit's Lua to `out`,
-    /// collect call-graph facts / pending inits, sum phase times.
     fn merge_units(
         &mut self,
         results: Vec<UnitOut>,
@@ -846,8 +722,6 @@ impl UnitFacts {
     }
 }
 
-/// Scoped decorator and global definitions, with initializer calls held for
-/// dependency ordering.
 struct FoldedUnits {
     decorator_lua: String,
     globals_lua: String,
@@ -880,8 +754,6 @@ fn fold_units(
         &mut decorator_lua,
         &mut Vec::new(),
     );
-    // par_map preserves input order, so keys and results zip positionally --
-    // the same pairing merge_units relies on for output order.
     for (key, u) in global_keys.iter().zip(global_units.iter()) {
         if !u.comptime_reads.is_empty() {
             facts.reads.globals.insert(*key, u.comptime_reads.clone());
@@ -903,25 +775,17 @@ fn fold_units(
     }
 }
 
-/// The assembly inputs that need no chunk: the scaffold prelude, the folded
-/// decorator and global units, the global layout and the globals directory.
-/// A full build prepares them beside its fan-out so the pool, not the
-/// assembly tail, pays for them; an incremental build prepares them at the
-/// start of assembly.
 pub(super) struct EarlyAssembly {
     scaffold: Result<(String, crate::ValueCtors), CompilerError>,
     scaffold_time: Duration,
     decorators: DecoratorTable,
     units: FoldedUnits,
-    // Kept as results and reported where assembly always reported them, so a
-    // body rejection still comes first.
     global_layout: Result<String, String>,
     globals_directory: Result<GlobalsDirectoryLua, CompilerError>,
     leaf_owner: Result<FxHashMap<Ustr, Ustr>, CompilerError>,
 }
 
 impl EarlyAssembly {
-    /// The specializations the decorator and global units demand.
     pub(super) fn demands(&self) -> &[skull_mir::bound::SpecDemand] {
         &self.units.facts.specs
     }
@@ -952,9 +816,6 @@ pub(super) fn prepare_early_assembly(
             )
         },
         || {
-            // The decorator table is built up front (sequential, cheap)
-            // because an application usually names a decorator declared in
-            // another module; the bodies lower+emit in parallel.
             let decorators = DecoratorTable::collect(ws);
             let decorator_units = par_map(decorators.definitions().to_vec(), |(mid, did)| {
                 emit_decorator_unit(ws, scx, cg, concrete, mid, did)
@@ -996,8 +857,6 @@ pub(super) fn assemble(
         chunks: cache.chunks.len(),
         dependency_edges: None,
     };
-    // Serial assembly steps, each a wall window; the compile budget lists
-    // them under the assembly window so no serial tail hides in "codegen".
     let mut steps: Vec<(&'static str, Duration)> = Vec::new();
     let mut step_started = Instant::now();
     let mut step = |name: &'static str, steps: &mut Vec<(&'static str, Duration)>| {
@@ -1032,22 +891,17 @@ pub(super) fn assemble(
     let mut asm = Assembly::new(cache, unit_facts);
     let (scaffold, value_ctors) = scaffold?;
     asm.out = scaffold;
-    // Value ctors go here, ahead of any load-time caller, once assembly knows
-    // which ones the emitted text calls.
     let value_ctors_at = asm.out.len();
     asm.t_scaffold += scaffold_time;
     asm.out.push_str(&decorator_lua);
     step("assembly: prelude+globals", &mut steps);
 
-    // Start from the artifact view, then check which definitions still need delivery.
     let (mut spec_chunks, spec_rejected) = specs.unwrap_or_else(|| {
         view_driven_specialized_chunks(ws, &cache.cg, &cache.scx, cache, &asm.needed_specs)
     });
     step("assembly: specialized chunks", &mut steps);
     let needed_foreign =
         || collect_needed_foreign(ws, cache, &asm.always_emitted_calls, &spec_chunks);
-    // Factory lowering is the last concrete-plan reader. Keep its text in the
-    // original output slot, but release one-shot plans before copying definitions.
     let (needed_foreign, early_definition_stage) = if lifetime == CacheLifetime::OneShot {
         let (needed_foreign, stage) = parallel_join(needed_foreign, || {
             let plan = skull_mir::definition::collect(ws)?;
@@ -1064,16 +918,12 @@ pub(super) fn assemble(
 
     let head = std::mem::take(&mut asm.out);
     let specialized_instances: Vec<_> = spec_chunks.keys().cloned().collect();
-    // The ordered pass only places definitions. What reads the placed chunks
-    // -- their text, code identities, callee binds, init facts, statics --
-    // is independent per reader, so the readers run concurrently after it.
     let (definitions_lua, binds_lua, init_ordering, mut runtime_refs, enum_names_lua) = {
         let unit_demands = std::mem::take(&mut asm.needed_specs);
         let mut order = DefinitionOrder::default();
         let mut facts: Vec<(Ustr, &Chunk)> = Vec::new();
         asm.push_function_definitions(ws, cache, &needed_foreign, &mut order, &mut facts)?;
         let declared = order.emitted.len();
-        // Only a body that is actually emitted can demand a specialization.
         let mut demands: Vec<&skull_mir::bound::SpecDemand> = unit_demands
             .iter()
             .chain(order.emitted.iter().flat_map(|&chunk| chunk.specs.iter()))
@@ -1129,8 +979,6 @@ pub(super) fn assemble(
                         || {
                             parallel_join(
                                 || {
-                                    // A dropped definition's `static` cells do not
-                                    // exist, so only emitted chunks register them.
                                     all_statics.extend(
                                         order
                                             .emitted
@@ -1188,22 +1036,14 @@ pub(super) fn assemble(
     drop(spec_chunks);
     step("assembly: definitions", &mut steps);
 
-    // Every emitted definition has now been visited, so this is the earliest
-    // point where the whole rejection list exists. Anything past here is
-    // scaffolding (init ordering, deco application) whose own errors are
-    // unrelated to a body that cannot emit.
     std::mem::take(&mut asm.rejections).into_result()?;
     let cg = &cache.cg;
     let scx = &cache.scx;
     if let Some(err) = cg.take_rejection() {
         return Err(err);
     }
-    // The text after the definitions; the head and definitions are joined to
-    // it once the value ctors in front of them are known.
     asm.out.push_str(&binds_lua);
     asm.out.push_str(&enum_names_lua);
-    // Everything from here on is generated glue rather than cached chunks, so
-    // its value ctor calls are read from the text.
     let glue_start = asm.out.len();
     let sims = match (cache.build_kind, cache.selected_sim_functions.as_ref()) {
         (BuildKind::Program, Some(selected)) => SimValues::Selected(selected),
@@ -1250,23 +1090,17 @@ pub(super) fn assemble(
         "__rock_globals_directory_part",
         &directory.publish,
     ));
-    // A host attaches its own directory fields right after this line.
     out.push_str(GLOBALS_BRIDGE_LINE);
     let bridge_end_in_tail = out.len();
     if !cg.line_directives() {
         out.push_str(&directory.accessors);
     }
 
-    // Globals: an init fn + a dependency-ordered `<NAME> = __skull_ginit_<NAME>()`.
-    // (Lowered above, so the walk could see their call edges; appended here, in
-    // the original slot, so the emitted text is unchanged.)
     out.push_str(&globals_lua);
     let has_definition_plan = !definition_plan.catalogs.is_empty();
     if has_code_slot_publication {
         out.push_str(skull_codegen_lua::FN_MT_PRELUDE);
     }
-    // Global initializer bodies (including their escaping lambdas) are now
-    // defined, so slot staging must follow them but precede initializer calls.
     code_artifact
         .check_stageable()
         .map_err(CompilerError::new_no_location)?;
@@ -1321,13 +1155,6 @@ pub(super) fn assemble(
     step("assembly: initializers", &mut steps);
     let mut phases = asm.phases();
 
-    // A synthetic top-level name (`<fn>__lambda<k>`, `<co>__step`/`__on_*`/...)
-    // that collides with a user fn/global was recorded during chunk emit (above,
-    // and in `emit_incremental`'s re-emit). Reject with a spanned diagnostic
-    // rather than emit two clobbering top-level defs. Covers `emit_full` +
-    // `emit_incremental` (both funnel through here); the overlay fast path drains
-    // in `emit_overlay` and propagates the same error.
-    // Only a retained cache records which bodies were emitted.
     let emitted_bodies = if lifetime == CacheLifetime::Retained {
         emitted_bodies(ws, cache, &needed_foreign, specialized_instances)
     } else {
@@ -1359,11 +1186,8 @@ pub(super) fn assemble(
         })
         .transpose()?;
     step("assembly: fingerprint", &mut steps);
-    // The file name a host writes the program to; generated code after a
-    // numbered definition reports its position in that file.
     if cache.cg.line_directives() {
         out = skull_codegen_lua::resolve_line_directive_resets(&out, "main.lua");
-        // Resolve numbered definitions against the undecorated chunk, as before.
         if !directory.accessors.is_empty() {
             let at = out
                 .find(GLOBALS_BRIDGE_LINE)
@@ -1417,9 +1241,8 @@ pub(super) fn code_slot_registration_lua_entries<'a>(
             String::new()
         });
     }
-    // Thousands of slots share a few hundred call ABIs, so each distinct ABI is
-    // spelled once in a table. `do ... end` keeps that local out of the
-    // enclosing function's local budget.
+    // `do ... end` keeps the ABI table local out of the enclosing
+    // function's Lua local budget.
     let mut abi_index: FxHashMap<&str, usize> = FxHashMap::default();
     let mut abis = String::new();
     let mut stages = String::new();
@@ -1459,7 +1282,6 @@ pub(super) fn overlay_code_artifact(
             {
                 let mut entry = entry.clone();
                 if entry.body_name.is_none() {
-                    // An unchanged named value needs the resolved ABI as well as its body.
                     entry = cache
                         .code_artifact
                         .entries
@@ -1613,15 +1435,6 @@ pub(super) fn lifecycle_plan_stage_lua(
                 ),
                 None => "nil".to_string(),
             };
-            // A compiler-synthesized thunk of one uniform signature
-            // (`scene_id: int -> ()`) per entry, process- and scene-owned alike
-            // -- never the raw slot. A process thunk ignores its argument; a
-            // scene thunk resolves the live root for `scene_id` and calls
-            // through, skipping a Scene that closed since the population
-            // snapshot was taken (`__scene_root_any` returns nil there). Neither
-            // arm asks the value its runtime type: membership in the type's live
-            // population, established once at Scene creation
-            // (`__scene_type_bucket_insert`), is the only test.
             let sim_guard = (!entry.sim_wires.is_empty()).then(|| {
                 entry
                     .sim_wires
