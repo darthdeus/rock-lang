@@ -330,7 +330,7 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
             );
         }
         println!(
-            "      accepted: straight {}, general {}, direct {}, transitive {}, ordinary {}, specialized {}, bounded {}, hoisted {}; clone source i/c/b {}/{}/{} live {}/{}/{} cloned {}/{}/{} dead-source {}/{}/{} dead-cloned {}/{}/{} cleanup-roots {}",
+            "      accepted: straight {}, general {}, direct {}, transitive {}, ordinary {}, specialized {}, bounded {}, hoisted {}; clone source i/c/b {}/{}/{} live {}/{}/{} cloned {}/{}/{}",
             census.straight_accepted,
             census.general_accepted,
             census.direct_splices,
@@ -348,39 +348,6 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
             census.clone.cloned_instructions,
             census.clone.cloned_cells,
             census.clone.cloned_blocks,
-            census.clone.dead_instructions,
-            census.clone.dead_cells,
-            census.clone.dead_blocks,
-            census.clone.dead_cloned_instructions,
-            census.clone.dead_cloned_cells,
-            census.clone.dead_cloned_blocks,
-            census.clone.cleanup_load_roots,
-        );
-        println!(
-            "      remaps entries/capacity/growth i/c/b {}/{}/{} / {}/{}/{} / {}/{}/{}; arena realloc i/c/b {}/{}/{}; reserve i/c/b {}/{}/{}; args {}/{} dests {}/{}; prefix/tail {}/{}; nested/static {}/{}",
-            census.clone.inst_remap_entries,
-            census.clone.cell_remap_entries,
-            census.clone.block_remap_entries,
-            census.clone.inst_remap_capacity,
-            census.clone.cell_remap_capacity,
-            census.clone.block_remap_capacity,
-            census.clone.inst_remap_growth,
-            census.clone.cell_remap_growth,
-            census.clone.block_remap_growth,
-            census.clone.inst_arena_reallocations,
-            census.clone.cell_arena_reallocations,
-            census.clone.block_arena_reallocations,
-            census.clone.caller_reserved_instructions,
-            census.clone.caller_reserved_cells,
-            census.clone.caller_reserved_blocks,
-            census.clone.argument_elements,
-            census.clone.argument_stores,
-            census.clone.destination_elements,
-            census.clone.destination_stores,
-            census.clone.block_prefix_copies,
-            census.clone.block_tail_copies,
-            census.clone.nested_function_imports,
-            census.clone.static_imports,
         );
         println!(
             "      targeted result binding: index {} values/{:.3} ms, bindings {}, users {}, terminators {}, replacements {}, {:.3} ms",
@@ -413,29 +380,6 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
                 row.stores_added,
             );
         }
-        macro_rules! side {
-            ($name:literal, $field:ident) => {
-                println!(
-                    "      side {}: source/examined/copied {}/{}/{}",
-                    $name,
-                    census.clone.side_tables.$field.source_rows,
-                    census.clone.side_tables.$field.examined,
-                    census.clone.side_tables.$field.copied,
-                );
-            };
-        }
-        side!("spec_bindings", spec_bindings);
-        side!("callee_instances", callee_instances);
-        side!("abi_plans", abi_plans);
-        side!("representation_plans", representation_plans);
-        side!("closure_environment_plans", closure_environment_plans);
-        side!("raw_bound_trees", raw_bound_trees);
-        side!("resolved_bound_trees", resolved_bound_trees);
-        side!("function_value_symbols", function_value_symbols);
-        side!("instruction_spans", instruction_spans);
-        side!("call_sites", call_sites);
-        side!("call_site_owners", call_site_owners);
-        side!("iterator_headers", iterator_headers);
         if !census.candidate_worker_derivations.is_empty() {
             println!(
                 "      candidate derivations by worker: {:?}",
@@ -453,13 +397,12 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
         println!("    top inline owners:");
         for owner in &attribution.inline.top_owners {
             println!(
-                "      {:28} {} splices, {} copied instructions, {:.3} ms, live {}, dead {}",
+                "      {:28} {} splices, {} copied instructions, {:.3} ms, live {}",
                 owner.owner,
                 owner.splices,
                 owner.copied_instructions,
                 owner.splice_ns as f64 / 1_000_000.0,
                 owner.live_cloned_entries,
-                owner.dead_cloned_entries,
             );
         }
     }

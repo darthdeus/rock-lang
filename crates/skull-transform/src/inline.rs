@@ -115,29 +115,6 @@ pub struct SpliceRecord {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct InlineSideTableFamily {
-    pub source_rows: usize,
-    pub examined: usize,
-    pub copied: usize,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct InlineSideTableStats {
-    pub spec_bindings: InlineSideTableFamily,
-    pub callee_instances: InlineSideTableFamily,
-    pub abi_plans: InlineSideTableFamily,
-    pub representation_plans: InlineSideTableFamily,
-    pub closure_environment_plans: InlineSideTableFamily,
-    pub raw_bound_trees: InlineSideTableFamily,
-    pub resolved_bound_trees: InlineSideTableFamily,
-    pub function_value_symbols: InlineSideTableFamily,
-    pub instruction_spans: InlineSideTableFamily,
-    pub call_sites: InlineSideTableFamily,
-    pub call_site_owners: InlineSideTableFamily,
-    pub iterator_headers: InlineSideTableFamily,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InlineCloneStats {
     pub source_instructions: usize,
     pub source_cells: usize,
@@ -148,37 +125,6 @@ pub struct InlineCloneStats {
     pub cloned_instructions: usize,
     pub cloned_cells: usize,
     pub cloned_blocks: usize,
-    pub dead_instructions: usize,
-    pub dead_cells: usize,
-    pub dead_blocks: usize,
-    pub dead_cloned_instructions: usize,
-    pub dead_cloned_cells: usize,
-    pub dead_cloned_blocks: usize,
-    pub cleanup_load_roots: usize,
-    pub inst_remap_entries: usize,
-    pub cell_remap_entries: usize,
-    pub block_remap_entries: usize,
-    pub inst_remap_capacity: usize,
-    pub cell_remap_capacity: usize,
-    pub block_remap_capacity: usize,
-    pub inst_remap_growth: usize,
-    pub cell_remap_growth: usize,
-    pub block_remap_growth: usize,
-    pub inst_arena_reallocations: usize,
-    pub cell_arena_reallocations: usize,
-    pub block_arena_reallocations: usize,
-    pub caller_reserved_instructions: usize,
-    pub caller_reserved_cells: usize,
-    pub caller_reserved_blocks: usize,
-    pub argument_elements: usize,
-    pub argument_stores: usize,
-    pub destination_elements: usize,
-    pub destination_stores: usize,
-    pub block_prefix_copies: usize,
-    pub block_tail_copies: usize,
-    pub nested_function_imports: usize,
-    pub static_imports: usize,
-    pub side_tables: InlineSideTableStats,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -231,61 +177,6 @@ impl InlineCloneStats {
         self.cloned_instructions += other.cloned_instructions;
         self.cloned_cells += other.cloned_cells;
         self.cloned_blocks += other.cloned_blocks;
-        self.dead_instructions += other.dead_instructions;
-        self.dead_cells += other.dead_cells;
-        self.dead_blocks += other.dead_blocks;
-        self.dead_cloned_instructions += other.dead_cloned_instructions;
-        self.dead_cloned_cells += other.dead_cloned_cells;
-        self.dead_cloned_blocks += other.dead_cloned_blocks;
-        self.cleanup_load_roots += other.cleanup_load_roots;
-        self.inst_remap_entries += other.inst_remap_entries;
-        self.cell_remap_entries += other.cell_remap_entries;
-        self.block_remap_entries += other.block_remap_entries;
-        self.inst_remap_capacity += other.inst_remap_capacity;
-        self.cell_remap_capacity += other.cell_remap_capacity;
-        self.block_remap_capacity += other.block_remap_capacity;
-        self.inst_remap_growth += other.inst_remap_growth;
-        self.cell_remap_growth += other.cell_remap_growth;
-        self.block_remap_growth += other.block_remap_growth;
-        self.inst_arena_reallocations += other.inst_arena_reallocations;
-        self.cell_arena_reallocations += other.cell_arena_reallocations;
-        self.block_arena_reallocations += other.block_arena_reallocations;
-        self.caller_reserved_instructions += other.caller_reserved_instructions;
-        self.caller_reserved_cells += other.caller_reserved_cells;
-        self.caller_reserved_blocks += other.caller_reserved_blocks;
-        self.argument_elements += other.argument_elements;
-        self.argument_stores += other.argument_stores;
-        self.destination_elements += other.destination_elements;
-        self.destination_stores += other.destination_stores;
-        self.block_prefix_copies += other.block_prefix_copies;
-        self.block_tail_copies += other.block_tail_copies;
-        self.nested_function_imports += other.nested_function_imports;
-        self.static_imports += other.static_imports;
-        self.side_tables.add(other.side_tables);
-    }
-}
-
-impl InlineSideTableStats {
-    pub fn add(&mut self, other: Self) {
-        macro_rules! add_family {
-            ($field:ident) => {
-                self.$field.source_rows += other.$field.source_rows;
-                self.$field.examined += other.$field.examined;
-                self.$field.copied += other.$field.copied;
-            };
-        }
-        add_family!(spec_bindings);
-        add_family!(callee_instances);
-        add_family!(abi_plans);
-        add_family!(representation_plans);
-        add_family!(closure_environment_plans);
-        add_family!(raw_bound_trees);
-        add_family!(resolved_bound_trees);
-        add_family!(function_value_symbols);
-        add_family!(instruction_spans);
-        add_family!(call_sites);
-        add_family!(call_site_owners);
-        add_family!(iterator_headers);
     }
 }
 
@@ -1033,111 +924,6 @@ fn live_closure_at(header: &MirFunc, func: &MirFunc) -> LiveClosure {
     live
 }
 
-fn side_family(source_rows: usize, retained: usize) -> InlineSideTableFamily {
-    InlineSideTableFamily {
-        source_rows,
-        examined: retained,
-        copied: retained,
-    }
-}
-
-fn template_counts(func: &MirFunc, live: &LiveClosure) -> InlineCloneStats {
-    let live_instructions = live.insts.len();
-    let live_cells = live.cells.len();
-    let live_blocks = live.blocks.len();
-    let live_inst = |id: &Idx<Inst>| live.insts.contains(id);
-    let live_block = |id: &Idx<Block>| live.blocks.contains(id);
-    let mut side = InlineSideTableStats {
-        spec_bindings: side_family(
-            func.spec_bindings.len(),
-            func.spec_bindings.keys().filter(|id| live_inst(id)).count(),
-        ),
-        callee_instances: side_family(
-            func.callee_instances.len(),
-            func.callee_instances
-                .keys()
-                .filter(|id| live_inst(id))
-                .count(),
-        ),
-        abi_plans: side_family(
-            func.call_abi_plans.len(),
-            func.call_abi_plans
-                .keys()
-                .filter(|id| live_inst(id))
-                .count(),
-        ),
-        representation_plans: side_family(
-            func.call_rep_plans.len(),
-            func.call_rep_plans
-                .keys()
-                .filter(|id| live_inst(id))
-                .count(),
-        ),
-        closure_environment_plans: side_family(
-            func.closure_env_plans.len(),
-            func.closure_env_plans
-                .keys()
-                .filter(|id| live_inst(id))
-                .count(),
-        ),
-        raw_bound_trees: side_family(
-            func.bound_trees.len(),
-            func.bound_trees.keys().filter(|id| live_inst(id)).count(),
-        ),
-        resolved_bound_trees: side_family(
-            func.resolved_bound_trees.len(),
-            func.resolved_bound_trees
-                .keys()
-                .filter(|id| live_inst(id))
-                .count(),
-        ),
-        function_value_symbols: side_family(
-            func.fn_value_symbols.len(),
-            func.fn_value_symbols
-                .keys()
-                .filter(|id| live_inst(id))
-                .count(),
-        ),
-        instruction_spans: side_family(
-            func.inst_spans.iter().count(),
-            func.inst_spans
-                .iter()
-                .filter(|(id, _)| live_inst(id))
-                .count(),
-        ),
-        ..InlineSideTableStats::default()
-    };
-    let retained_call_sites = func.call_sites.keys().filter(|id| live_inst(id)).count();
-    side.call_sites = side_family(func.call_sites.len(), retained_call_sites);
-    let retained_owners: HashSet<u32> = func
-        .call_sites
-        .iter()
-        .filter(|(id, _)| live_inst(id))
-        .map(|(_, site)| site.owner.0)
-        .collect();
-    side.call_site_owners = side_family(func.site_owners.len(), retained_owners.len());
-    side.iterator_headers = side_family(
-        func.for_iter_headers.len(),
-        func.for_iter_headers
-            .iter()
-            .filter(|id| live_block(id))
-            .count(),
-    );
-    InlineCloneStats {
-        source_instructions: func.insts.len(),
-        source_cells: func.cells.len(),
-        source_blocks: func.blocks.len(),
-        live_instructions,
-        live_cells,
-        live_blocks,
-        dead_instructions: func.insts.len().saturating_sub(live_instructions),
-        dead_cells: func.cells.len().saturating_sub(live_cells),
-        dead_blocks: func.blocks.len().saturating_sub(live_blocks),
-        side_tables: side,
-        ..InlineCloneStats::default()
-    }
-}
-
 /// Compact the candidate once before it is used at multiple call sites.
 fn compact_live_template(
     mut source: MirFunc,
@@ -1415,19 +1201,6 @@ pub(crate) fn compact_split_body(header: &MirFunc, arena: &MirFunc, facts: &Aren
     compact
 }
 
-#[derive(Clone, Copy, Default)]
-struct CloneMapStats {
-    inst_entries: usize,
-    cell_entries: usize,
-    block_entries: usize,
-    inst_capacity: usize,
-    cell_capacity: usize,
-    block_capacity: usize,
-    inst_growth: usize,
-    cell_growth: usize,
-    block_growth: usize,
-}
-
 fn map_forced_cells(
     caller: &MirFunc,
     callee: &MirFunc,
@@ -1457,66 +1230,6 @@ fn map_forced_cells(
             (target_cell, block_base + source_block)
         })
         .collect()
-}
-
-fn full_clone_stats(
-    cand: &CalleeBody,
-    straight: bool,
-    argument_elements: usize,
-    destination_elements: usize,
-    prefix: usize,
-    tail: usize,
-    maps: CloneMapStats,
-    coalesced_cells: usize,
-    arena_reallocations: (usize, usize, usize),
-) -> InlineCloneStats {
-    let mut stats = cand.template;
-    stats.cloned_instructions = stats.live_instructions;
-    stats.cloned_cells = stats.live_cells;
-    stats.cloned_blocks = if straight { 0 } else { stats.live_blocks };
-    stats.dead_instructions = stats
-        .source_instructions
-        .saturating_sub(stats.live_instructions);
-    stats.dead_cells = stats.source_cells.saturating_sub(stats.live_cells);
-    stats.dead_blocks = stats.source_blocks.saturating_sub(stats.live_blocks);
-    stats.dead_cloned_instructions = 0;
-    stats.dead_cloned_cells = 0;
-    stats.dead_cloned_blocks = 0;
-    stats.cleanup_load_roots = if straight {
-        0
-    } else {
-        cand.func.inline_cleanup_load_cells.len()
-    };
-    stats.inst_remap_entries = maps.inst_entries;
-    stats.cell_remap_entries = maps.cell_entries;
-    stats.block_remap_entries = maps.block_entries;
-    stats.inst_remap_capacity = maps.inst_capacity;
-    stats.cell_remap_capacity = maps.cell_capacity;
-    stats.block_remap_capacity = maps.block_capacity;
-    stats.inst_remap_growth = maps.inst_growth;
-    stats.cell_remap_growth = maps.cell_growth;
-    stats.block_remap_growth = maps.block_growth;
-    stats.inst_arena_reallocations = arena_reallocations.0;
-    stats.cell_arena_reallocations = arena_reallocations.1;
-    stats.block_arena_reallocations = arena_reallocations.2;
-    stats.caller_reserved_instructions = cand.func.insts.len();
-    stats.caller_reserved_cells = cand.func.cells.len().saturating_sub(coalesced_cells);
-    stats.caller_reserved_blocks = if straight { 0 } else { cand.func.blocks.len() };
-    stats.argument_elements = argument_elements;
-    stats.cloned_cells = stats.live_cells.saturating_sub(coalesced_cells);
-    stats.argument_stores = cand
-        .func
-        .params
-        .len()
-        .min(argument_elements)
-        .saturating_sub(coalesced_cells);
-    stats.destination_elements = destination_elements;
-    stats.destination_stores = destination_elements;
-    stats.block_prefix_copies = prefix;
-    stats.block_tail_copies = tail;
-    stats.nested_function_imports = cand.func.nested_fns.len();
-    stats.static_imports = cand.func.statics.len();
-    stats
 }
 
 fn reject_candidate(
@@ -1637,7 +1350,15 @@ fn classify(
     }
     let coalescable_params: Vec<bool> = mf.params.iter().map(|p| !rebound.contains(p)).collect();
     let live = live_closure(&mf);
-    let template = template_counts(&mf, &live);
+    let template = InlineCloneStats {
+        source_instructions: mf.insts.len(),
+        source_cells: mf.cells.len(),
+        source_blocks: mf.blocks.len(),
+        live_instructions: live.insts.len(),
+        live_cells: live.cells.len(),
+        live_blocks: live.blocks.len(),
+        ..InlineCloneStats::default()
+    };
     let compact_started = timing.as_ref().map(|_| Instant::now());
     let (mf, block_map) = compact_live_template(mf, &live);
     if let Some(start) = compact_started {
@@ -2006,12 +1727,7 @@ fn mark_forwarded_params(caller: &mut MirFunc, callee: &MirFunc, scratch: &Inlin
 }
 
 /// Allocate every clone before remapping its operands.
-fn clone_body(
-    caller: &mut MirFunc,
-    callee: &MirFunc,
-    scratch: &mut InlineScratch,
-    kind: Kind,
-) -> CloneMapStats {
+fn clone_body(caller: &mut MirFunc, callee: &MirFunc, scratch: &mut InlineScratch, kind: Kind) {
     caller.ensure_emit_ids();
     let (inst_base, cell_base, block_base) = caller.emit_nexts().unwrap();
     caller.insts.reserve(callee.insts.len());
@@ -2019,7 +1735,6 @@ fn clone_body(
         .cells
         .reserve(callee.cells.len().saturating_sub(scratch.overrides.len()));
     scratch.cell_map.clear();
-    let cell_capacity = scratch.cell_map.capacity();
     scratch.cell_map.reserve(callee.cells.len());
     let mut skipped_cells = 0u32;
     for (cid, cell) in callee.cells.iter() {
@@ -2033,7 +1748,6 @@ fn clone_body(
         scratch.cell_map.insert(cid, mapped);
     }
     mark_forwarded_params(caller, callee, scratch);
-    let block_capacity = scratch.block_map.capacity();
     scratch.block_map.clear();
     if kind == Kind::General {
         import_cleanup_load_cells(caller, callee, &scratch.cell_map);
@@ -2051,7 +1765,6 @@ fn clone_body(
         }
     }
     scratch.inst_map.clear();
-    let inst_capacity = scratch.inst_map.capacity();
     scratch.inst_map.reserve(callee.insts.len());
     scratch.inst_ids.clear();
     scratch.inst_ids.reserve(callee.insts.len());
@@ -2103,22 +1816,6 @@ fn clone_body(
             block_base
         },
     ));
-
-    CloneMapStats {
-        inst_entries: scratch.inst_map.len(),
-        cell_entries: scratch.cell_map.len(),
-        block_entries: scratch.block_map.len(),
-        inst_capacity: scratch.inst_map.capacity(),
-        cell_capacity: scratch.cell_map.capacity(),
-        block_capacity: if kind == Kind::General {
-            scratch.block_map.capacity()
-        } else {
-            0
-        },
-        inst_growth: usize::from(scratch.inst_map.capacity() != inst_capacity),
-        cell_growth: usize::from(scratch.cell_map.capacity() != cell_capacity),
-        block_growth: usize::from(scratch.block_map.capacity() != block_capacity),
-    }
 }
 
 fn import_cleanup_load_cells(
@@ -2631,7 +2328,7 @@ fn splice(
     scratch: &mut InlineScratch,
     uses: &mut UseIndex,
     census: &mut InlineScanStats,
-) -> Result<(CloneMapStats, usize), CompilerError> {
+) -> Result<usize, CompilerError> {
     scratch.added_blocks.clear();
     let callee = &cand.func;
     let (bid, idx) = site.pos;
@@ -2639,7 +2336,7 @@ fn splice(
     let site_tree = func.bound_trees.remove(&site.call_id);
     let site_resolved_tree = func.resolved_bound_trees.remove(&site.call_id);
     let coalesced_cells = coalesce_overrides(func, cand, args, (bid, idx), pinned, scratch);
-    let maps = clone_body(func, callee, scratch, cand.kind);
+    clone_body(func, callee, scratch, cand.kind);
     let repack_mark = func.insts.len();
     resolve_cloned_bound_calls(
         func,
@@ -2673,7 +2370,7 @@ fn splice(
         Kind::Straight => splice_straight(func, &site, cand, scratch, uses, &forwarded, census),
         Kind::General => splice_general(func, &site, cand, scratch, uses),
     }
-    Ok((maps, coalesced_cells))
+    Ok(coalesced_cells)
 }
 
 fn bind_params(
@@ -2940,25 +2637,14 @@ pub(crate) fn inline_functions_with_plans(
             uses = Some(built);
         }
         let uses = uses.as_mut().expect("built above");
-        let argument_elements = site.args.len();
-        let destination_elements = site.dests.as_ref().map_or(0, Vec::len);
-        let prefix = pos.1;
-        let tail = func.blocks[pos.0].insts.len().saturating_sub(pos.1 + 1);
         let (cands, census, scratch) = (&cache.cands, &mut cache.census, &mut cache.scratch);
         let cand = cands[&site.inst]
             .as_ref()
             .expect("site implies a cached candidate");
         let splice_start = cache.census_enabled.then(Instant::now);
-        let arena_capacities = cache.census_enabled.then(|| {
-            (
-                func.insts.capacity(),
-                func.cells.capacity(),
-                func.blocks.capacity(),
-            )
-        });
         let result_cell = usize::from(cand.kind == Kind::General && site.dests.is_none());
         let blocks_before = func.blocks.len();
-        let (maps, coalesced_cells) = splice(
+        let coalesced_cells = splice(
             func,
             site,
             cand,
@@ -2970,15 +2656,6 @@ pub(crate) fn inline_functions_with_plans(
             uses,
             census,
         )?;
-        let arena_reallocations = arena_capacities
-            .map(|(inst_capacity, cell_capacity, block_capacity)| {
-                (
-                    usize::from(func.insts.capacity() > inst_capacity),
-                    usize::from(func.cells.capacity() > cell_capacity),
-                    usize::from(func.blocks.capacity() > block_capacity),
-                )
-            })
-            .unwrap_or_default();
         top.extend(scratch.added_blocks.drain(..));
         pin_cells(func, &top, blocks_before, &mut pinned);
         let splice_ns = splice_start
@@ -2991,17 +2668,16 @@ pub(crate) fn inline_functions_with_plans(
             bounded: cand.bounded,
             transitive,
             callee_insts: cand.insts,
-            clone: full_clone_stats(
-                cand,
-                cand.kind == Kind::Straight,
-                argument_elements,
-                destination_elements,
-                prefix,
-                tail,
-                maps,
-                coalesced_cells,
-                arena_reallocations,
-            ),
+            clone: InlineCloneStats {
+                cloned_instructions: cand.template.live_instructions,
+                cloned_cells: cand.template.live_cells.saturating_sub(coalesced_cells),
+                cloned_blocks: if cand.kind == Kind::Straight {
+                    0
+                } else {
+                    cand.template.live_blocks
+                },
+                ..cand.template
+            },
             splice_ns,
         });
         // The caller must import cells referenced by the spliced body.

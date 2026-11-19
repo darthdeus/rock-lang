@@ -55,6 +55,9 @@ fn concrete_build_summary_reports_folded_totals_on_every_build() {
     assert!(out.status.success(), "{text}");
 
     assert!(text.contains("targeted result binding:"), "{text}");
+    assert!(text.contains("clone source i/c/b"), "{text}");
+    assert!(!text.contains("dead-cloned"), "{text}");
+    assert!(!text.contains("side spec_bindings:"), "{text}");
     assert!(!text.contains("substitution: calls"), "{text}");
 
     let graph = text
