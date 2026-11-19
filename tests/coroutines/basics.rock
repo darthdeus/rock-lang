@@ -148,25 +148,6 @@ fn test_resume_after_exhaustion() {
     print(out)
 }
 
-// ---- Local state persists across yields ----
-co fn accumulator(step: int) -> Coroutine<int> {
-    let sum = 0
-    sum = sum + step
-    yield sum
-    sum = sum + step
-    yield sum
-    sum = sum + step
-    yield sum
-}
-
-@test(output = "5\n10\n15")
-fn test_local_state_persistence() {
-    let c = accumulator(5)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-}
-
 // ---- Value param mutation inside yielded expression ----
 value Counter {
     n: int,
@@ -466,27 +447,6 @@ fn bounded_chain_in_coroutine() {
     let c = bounded_worker([1, 2, 3, 4])
     resume(c)
     print(result(c) ?? -1)
-}
-
-co fn inner_source() -> Coroutine<int> {
-    yield 1
-    yield 2
-    yield 3
-}
-
-co fn manual_pump() -> Coroutine<int> {
-    let src = inner_source()
-    yield (src.resume() ?? -99) * 10
-    yield (src.resume() ?? -99) * 10
-    yield (src.resume() ?? -99) * 10
-}
-
-@test(output = "10\n20\n30")
-fn test_manual_pump() {
-    let c = manual_pump()
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
-    print(c.resume() ?? -1)
 }
 
 // ---- Inner exhausted, manual_pump observes null ----

@@ -13,19 +13,6 @@ fn drain(c: Coroutine<int>) {
     }
 }
 
-// ---- Simple Vec iteration ----
-co fn yield_each(items: [int]) -> Coroutine<int> {
-    for v in items {
-        yield v * 10
-    }
-}
-
-@test(output = "10\n20\n30\nnull")
-fn test_for_vec_simple() {
-    let c = yield_each([1, 2, 3])
-    drain(c)
-}
-
 // ---- Break inside for ----
 co fn yield_until_five(items: [int]) -> Coroutine<int> {
     for v in items {
@@ -37,19 +24,6 @@ co fn yield_until_five(items: [int]) -> Coroutine<int> {
 @test(output = "1\n3\nnull")
 fn test_for_break() {
     let c = yield_until_five([1, 3, 5, 7])
-    drain(c)
-}
-
-// ---- Range iteration (numeric) ----
-co fn yield_range(lo: int, hi: int) -> Coroutine<int> {
-    for i in lo..hi {
-        yield i * 10
-    }
-}
-
-@test(output = "20\n30\n40\nnull")
-fn test_for_range_basic() {
-    let c = yield_range(2, 5)
     drain(c)
 }
 

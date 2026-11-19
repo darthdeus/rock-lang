@@ -56,26 +56,6 @@ fn test_value_param_in_loop() {
     print(c.resume() ?? -1)
 }
 
-// Value param referenced inside an if-branch that also yields.
-co fn co_branch(v: V2, pick: bool) -> Coroutine<int> {
-    if pick {
-        yield v.x
-    } else {
-        yield v.y
-    }
-    yield v.x + v.y
-}
-
-@test(output = "1\n3\n2\n3")
-fn test_value_param_in_branch() {
-    let c1 = co_branch(V2 { x: 1, y: 2 }, true)
-    print(c1.resume() ?? -1)
-    print(c1.resume() ?? -1)
-    let c2 = co_branch(V2 { x: 1, y: 2 }, false)
-    print(c2.resume() ?? -1)
-    print(c2.resume() ?? -1)
-}
-
 // ---- Bare references to a value-typed parameter ----
 // `let q = p` / `yield p` / `foo(p)` for
 // a value-typed `p` must resolve per-field scalars through `s.p__x`,

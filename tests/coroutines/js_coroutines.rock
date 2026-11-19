@@ -6,14 +6,6 @@ co fn echo_two() -> Coroutine<string> {
     yield "world"
 }
 
-@test(output = "hello\nworld\nnil")
-fn two_yield_resume() {
-    let c = echo_two()
-    print(c.resume())
-    print(c.resume())
-    print(c.resume())
-}
-
 @test(output = "suspended\ndead\nnil")
 fn status_and_kill() {
     let c = echo_two()

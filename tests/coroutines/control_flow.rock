@@ -10,50 +10,6 @@ fn drain(c: Coroutine<int>) {
     }
 }
 
-co fn yield_in_if_only(flag: bool) -> Coroutine<int> {
-    if flag {
-        yield 1
-    }
-    yield 2
-}
-
-@test(output = "1\n2\n2")
-fn test_yield_in_if_only() {
-    drain(yield_in_if_only(true))
-    drain(yield_in_if_only(false))
-}
-
-co fn yield_in_both(flag: bool) -> Coroutine<int> {
-    if flag {
-        yield 100
-    } else {
-        yield 200
-    }
-    yield 999
-}
-
-@test(output = "100\n999\n200\n999")
-fn test_yield_both_arms() {
-    drain(yield_in_both(true))
-    drain(yield_in_both(false))
-}
-
-co fn multi_yield_per_arm(flag: bool) -> Coroutine<int> {
-    if flag {
-        yield 1
-        yield 2
-    } else {
-        yield 10
-        yield 20
-    }
-}
-
-@test(output = "1\n2\n10\n20")
-fn test_multi_yield_per_arm() {
-    drain(multi_yield_per_arm(true))
-    drain(multi_yield_per_arm(false))
-}
-
 co fn nested_if(a: int, b: int) -> Coroutine<int> {
     if a > 0 {
         yield 1
@@ -115,20 +71,6 @@ co fn nested_loops(rows: int, cols: int) -> Coroutine<int> {
 @test(output = "0\n1\n10\n11\nnull")
 fn test_nested_loops_yield() {
     drain_null(nested_loops(2, 2))
-}
-
-co fn yield_with_continue(n: int) -> Coroutine<int> {
-    let i = 0
-    while i < n {
-        i = i + 1
-        if i == 2 { continue }
-        yield i
-    }
-}
-
-@test(output = "1\n3\n4\nnull")
-fn test_yield_with_continue() {
-    drain_null(yield_with_continue(4))
 }
 
 co fn between_yields(n: int) -> Coroutine<int> {

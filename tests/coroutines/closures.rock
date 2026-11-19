@@ -1,10 +1,99 @@
-// Closures created inside a co fn's defer (or hook) block that capture
-// locals of that block. The step's scope-exit splice and the detached
-// cleanup copy share one hoisted body per lambda site, so both copies must
-// capture the block's locals the same way: boxed when written, by value
-// when only read, never through the coroutine frame.
+// Closures in co fn bodies. A closure that captures a frame local sees its
+// mutations, even when created in one state arm and called after a yield.
+// A closure created inside a defer or hook block captures that block's
+// locals boxed when written and by value when only read, never through the
+// frame, because the scope-exit splice and the detached cleanup copy share
+// one hoisted body per lambda site.
 
-// ---- Closure captures both a frame local and a defer-local ----
+co fn mutable_closure() -> Coroutine<int> {
+    let count = 0
+    let bump = () => { count = count + 10 }
+    yield count
+    bump()
+    yield count
+    bump()
+    bump()
+    yield count
+}
+
+@test(output = "0\n10\n30")
+fn test_closure_mutates_captured_scalar() {
+    let c = mutable_closure()
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+}
+
+// ---- Multiple closures sharing captured scalar ----
+// Two closures capture the same hoisted local. Mutations via one are
+// visible via the other. This is the canonical "counter + reader"
+// pattern seen in practice.
+co fn shared_capture() -> Coroutine<int> {
+    let n = 100
+    let reader = () => n
+    let bumper = () => { n = n + 1 }
+
+    yield reader()
+    bumper()
+    yield reader()
+    bumper()
+    bumper()
+    yield reader()
+}
+
+@test(output = "100\n101\n103")
+fn test_multiple_closures_share_state() {
+    let c = shared_capture()
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+}
+
+// ---- Closure invoked across MULTIPLE yield boundaries ----
+// Stress test: a single closure captures a scalar, and is invoked
+// repeatedly across many state transitions. Must see the latest value
+// each time.
+co fn long_lived_closure() -> Coroutine<int> {
+    let x = 0
+    let snapshot = () => x
+
+    x = 1
+    yield snapshot()
+    x = 2
+    yield snapshot()
+    x = 10
+    yield snapshot()
+    x = x * 5
+    yield snapshot()
+}
+
+@test(output = "1\n2\n10\n50")
+fn test_closure_across_many_yields() {
+    let c = long_lived_closure()
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+}
+
+fn apply_to(f: fn(int) -> int, x: int) -> int { return f(x) }
+
+// A named nested fn inside a co fn keeps its own hoisted lambda.
+co fn nested_fn_lambda(k: int) -> Coroutine<int> {
+    fn scaled(x: int) -> int {
+        return apply_to((v) => v * 10, x)
+    }
+    yield scaled(k)
+    yield scaled(k + 1)
+}
+
+@test(output = "30\n40")
+fn test_nested_fn_lambda_in_co_fn() {
+    let c = nested_fn_lambda(3)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+}
+
 co fn defer_mixed_capture() -> Coroutine<int> {
     let base = 100
     defer {

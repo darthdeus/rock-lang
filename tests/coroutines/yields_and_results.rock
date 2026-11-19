@@ -1,0 +1,422 @@
+// Yield, result and resume types. `resume()` returns `Y?`, so a yielded null
+// reads like exhaustion; `Coroutine<Y>` == `Coroutine<Y, ()>` ==
+// `Coroutine<Y, (), ()>`; a co fn with a non-unit R returns a value read with
+// `.result()`, which stays null for bare returns, fall-off and kills; and a
+// `Coroutine<Y, R, ()>` iterates as itself through the stdlib `next` adapter.
+
+co fn falls_off() -> Coroutine<int> {
+    yield 1
+    yield 2
+}
+
+co fn explicit_all() -> Coroutine<int, (), ()> {
+    yield 7
+}
+
+co fn count_to(n: int) -> Coroutine<int, string> {
+    let i = 0
+    while i < n {
+        yield i
+        i = i + 1
+    }
+    return "done"
+}
+
+@test
+fn bare_and_explicit_unit_slots_unify() {
+    let a: Coroutine<int, ()> = falls_off()
+    let b: Coroutine<int> = explicit_all()
+    assert(a.resume() == 1)
+    assert(b.resume() == 7)
+}
+
+struct Box<R = ()> {
+    c: Coroutine<int, R>
+}
+
+@test
+fn default_param_threads_into_coroutine_field() {
+    let b: Box<string> = Box { c: count_to(2) }
+    while status(b.c) == "suspended" {
+        b.c.resume()
+    }
+    assert(b.c.result() == "done")
+
+    let u: Box = Box { c: falls_off() }
+    assert(u.c.resume() == 1)
+}
+
+@test
+fn fall_off_generator_iterates() {
+    let sum = 0
+    for v in falls_off() {
+        sum = sum + v
+    }
+    assert(sum == 3)
+}
+
+// ---- Arity 1, 2 and 3 forms unify ----
+
+co fn arity_one_explicit_unit() -> Coroutine<int, (), ()> {
+    yield 1
+}
+
+co fn arity_two_explicit_unit_n() -> Coroutine<int, string, ()> {
+    yield 1
+    return "done"
+}
+
+co fn arity_one_implicit() -> Coroutine<int> {
+    yield 1
+}
+
+co fn arity_two_implicit() -> Coroutine<int, string> {
+    yield 1
+    return "done"
+}
+
+@test(output = "1\nnull\n1\nresult=done\n1\nnull\n1\nresult=done")
+fn test_coroutine_arity_three_forms_unify() {
+    let a = arity_one_explicit_unit()
+    print(a.resume() ?? -1)
+    let r1 = a.resume()
+    if r1 == null { print("null") } else { print(r1) }
+
+    let b = arity_two_explicit_unit_n()
+    print(b.resume() ?? -1)
+    let _r2 = b.resume()
+    let rb = b.result()
+    if rb == null { print("null") } else { print("result={rb}") }
+
+    let c = arity_one_implicit()
+    print(c.resume() ?? -1)
+    let r3 = c.resume()
+    if r3 == null { print("null") } else { print(r3) }
+
+    let d = arity_two_implicit()
+    print(d.resume() ?? -1)
+    let _r4 = d.resume()
+    let rd = d.result()
+    if rd == null { print("null") } else { print("result={rd}") }
+}
+
+enum Ev {
+    Tick(int),
+    Pair(int, int),
+    Done,
+    Act(() -> ()),      // closure payload -> Ev is non-cdata (boxed/flat)
+}
+
+co fn stream(n: int) -> Coroutine<Ev> {
+    let i = 0
+    while i < n {
+        yield Ev::Tick(i)
+        yield Ev::Pair(i, i)
+        i = i + 1
+    }
+    yield Ev::Done
+}
+
+fn score(e: Ev) -> int {
+    return match e {
+        Ev::Tick(x) => x
+        Ev::Pair(a, b) => a + b
+        Ev::Done => 100
+        Ev::Act(_) => -1
+    }
+}
+
+@test
+fn test_yield_flat_enum() {
+    let c = stream(2)
+    let sum = 0
+    let count = 0
+    let running = true
+    while running {
+        let e = c.resume()
+        if e != null {
+            count = count + 1
+            sum = sum + score(e)
+        } else {
+            running = false
+        }
+    }
+    // Tick(0), Pair(0,0), Tick(1), Pair(1,1), Done = 0 + 0 + 1 + 2 + 100 = 103; 5 yields
+    assert_eq(sum, 103)
+    assert_eq(count, 5)
+}
+
+// A payload-free variant yielded in a loop: the singleton-vs-rebox case.
+co fn ticks(n: int) -> Coroutine<Ev> {
+    let i = 0
+    while i < n {
+        yield Ev::Done
+        i = i + 1
+    }
+}
+
+@test
+fn test_yield_payload_free() {
+    let c = ticks(3)
+    let count = 0
+    let running = true
+    while running {
+        let e = c.resume()
+        if e != null {
+            count = count + 1
+            assert_eq(score(e), 100)
+        } else {
+            running = false
+        }
+    }
+    assert_eq(count, 3)
+}
+
+struct Player {
+    name: string,
+    health: int,
+}
+
+co fn nullable_ints() -> Coroutine<int?> {
+    yield 1
+    yield null
+    yield 3
+}
+
+@test(output = "1\n-1\n3")
+fn test_nullable_yield() {
+    let c = nullable_ints()
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+co fn make_players() -> Coroutine<Player> {
+    yield Player { name: "Alice", health: 100 }
+    yield Player { name: "Bob", health: 80 }
+}
+
+@test(output = "Alice: 100hp Bob")
+fn test_coroutine_struct_yield_narrowing() {
+    let c = make_players()
+    let a = c.resume()
+    let b = c.resume()
+    let out = ""
+    if a != null { out = "{a.name}: {a.health}hp" }
+    if b != null { out = out + " " + b.name }
+    print(out)
+}
+
+@test(output = "Alice\nBob\nnobody")
+fn test_coroutine_resume_safenav() {
+    let c = make_players()
+    print(c.resume()?.name ?? "nobody")
+    print(c.resume()?.name ?? "nobody")
+    print(c.resume()?.name ?? "nobody")
+}
+
+co fn pairs() -> Coroutine<(int, string)> {
+    yield (1, "one")
+    yield (2, "two")
+}
+
+@test(output = "1: one")
+fn test_coroutine_tuple_yield() {
+    let c = pairs()
+    let p = c.resume()
+    if p != null {
+        let (num, name) = p
+        print("{num}: {name}")
+    }
+}
+
+co fn bare_return() -> Coroutine<int> {
+    yield 1
+    return
+}
+
+co fn plain_unit() -> Coroutine<int> {
+    yield 1
+    yield 2
+}
+
+co fn explicit_unit() -> Coroutine<int, ()> {
+    yield 1
+    return
+}
+
+@test(output = "1 null\nnull\nnull")
+fn test_unit_returns_leave_result_null() {
+    let c = bare_return()
+    let v = c.resume()
+    let _drain = c.resume()
+    let r = c.result()
+    let pv = if v != null { "{v}" } else { "null" }
+    let pr = if r != null { "stashed" } else { "null" }
+    print("{pv} {pr}")
+
+    let c = plain_unit()
+    let _drain1 = c.resume()
+    let _drain2 = c.resume()
+    let _drain3 = c.resume()
+    let r = c.result()
+    if r != null { print("stashed") } else { print("null") }
+
+    let c = explicit_unit()
+    let _y = c.resume()
+    let _drain = c.resume()
+    let r = c.result()
+    if r != null { print("stashed") } else { print("null") }
+}
+
+// While the coroutine is mid-yield, no terminal `return expr` has fired,
+// so `.result()` returns null.
+
+co fn two_steps() -> Coroutine<int, string> {
+    yield 1
+    yield 2
+    return "done"
+}
+
+@test(output = "1 2 null\nnull null done")
+fn test_result_progression() {
+    let c = two_steps()
+    let y1 = c.resume()
+    let r_after_first = c.result()
+    let y2 = c.resume()
+    let r_after_second = c.result()
+    let drain = c.resume()
+    let r_after_term = c.result()
+    let pd = if drain != null { "{drain}" } else { "null" }
+    print("{y1 ?? -1} {y2 ?? -1} {pd}")
+    let p1 = if r_after_first != null { "{r_after_first}" } else { "null" }
+    let p2 = if r_after_second != null { "{r_after_second}" } else { "null" }
+    let p3 = if r_after_term != null { "{r_after_term}" } else { "null" }
+    print("{p1} {p2} {p3}")
+}
+
+// Kill is not completion: a killed coroutine never writes its result.
+
+co fn produces_after_yield() -> Coroutine<int, string> {
+    yield 1
+    return "would-have-returned"
+}
+
+@test(output = "null")
+fn test_kill_does_not_set_result() {
+    let c = produces_after_yield()
+    let _y = c.resume()
+    c.kill()
+    let r = c.result()
+    if r != null { print("{r}") } else { print("null") }
+}
+
+// ---- Multi-field return values ----
+// Tuple and value-struct returns box as a single value in the return slot,
+// so both fields read back through `.result()` on every backend.
+
+co fn two_out() -> Coroutine<int, (int, int)> {
+    yield 1
+    return (42, 99)
+}
+
+@test(output = "42 99")
+fn test_multivalue_tuple_co_return() {
+    let c = two_out()
+    let _y = c.resume()
+    let _drain = c.resume()
+    let r = c.result()
+    if r != null {
+        let (a, b) = r
+        print("{a} {b}")
+    } else {
+        print("null")
+    }
+}
+
+value Pair { a: int, b: int }
+
+co fn make_pair() -> Coroutine<int, Pair> {
+    yield 1
+    return Pair { a: 42, b: 99 }
+}
+
+@test(output = "42 99")
+fn test_value_struct_co_return() {
+    let c = make_pair()
+    let _y = c.resume()
+    let _drain = c.resume()
+    let r = c.result()
+    if r != null {
+        print("{r.a} {r.b}")
+    } else {
+        print("null")
+    }
+}
+
+value Tree {
+    val: int,
+    kids: [Tree],
+}
+
+// Pre-order walk; `await` delegates each subtree's elements as our own.
+co fn walk(t: Tree) -> Coroutine<int, (), ()> {
+    yield t.val
+    for k in t.kids {
+        await walk(k)
+    }
+}
+
+fn leaf(v: int) -> Tree {
+    return Tree { val: v, kids: [] }
+}
+
+@test(output = "1\n2\n4\n5\n3")
+fn test_tree_walk_generator() {
+    let root = Tree {
+        val: 1,
+        kids: [
+            Tree { val: 2, kids: [leaf(4), leaf(5)] },
+            leaf(3),
+        ],
+    }
+    for v in walk(root) {
+        print(v)
+    }
+}
+
+// Nullable `Y`: a yielded `null` is a real element, not a stop-sentinel.
+co fn maybe_nums() -> Coroutine<int?, (), ()> {
+    yield 1
+    yield null
+    yield 3
+}
+
+@test(output = "1\nNULL\n3")
+fn test_nullable_yield_elements() {
+    for v in maybe_nums() {
+        if v == null {
+            print("NULL")
+        } else {
+            print(v)
+        }
+    }
+}
+
+// Lazy combinator chain: the coroutine IS an iterator (it has `next`), so it
+// flows straight into `map`/`filter` at their `Iterator`-bounded params.
+co fn count_up(n: int) -> Coroutine<int, (), ()> {
+    let i = 0
+    while i < n {
+        yield i
+        i = i + 1
+    }
+}
+
+@test(output = "0\n4\n8")
+fn test_combinator_chain_over_generator() {
+    let out = count_up(6).filter(_ % 2 == 0).map(_ * 2).collect()
+    for v in out {
+        print(v)
+    }
+}
