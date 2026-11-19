@@ -331,7 +331,7 @@ mod test_fonts;
 mod test_support;
 pub(crate) use image_texture::{
     image_write_target, live_image_bytes, live_mip_bytes, live_texture_bytes, stone_unload_image,
-    LoadedImage, IMAGES, WHITE_IMAGE,
+    IMAGES, WHITE_IMAGE,
 };
 mod canvas;
 #[cfg(target_os = "macos")]
