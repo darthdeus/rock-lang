@@ -1,16 +1,10 @@
 use super::*;
 
 impl Emitter<'_> {
-    pub(crate) fn emit_inst(&mut self, out: &mut String, id: Idx<Inst>) {
-        if self.inlinable[raw(id) as usize] {
-            return;
-        }
-        if self.hoist.contains_key(&id) {
-            return;
-        }
+    pub(crate) fn emit_statement(&mut self, out: &mut String, id: Idx<Inst>) {
         self.mark_line(out, id);
-        if matches!(&self.func.insts[id], Inst::Call { .. })
-            && self.try_emit_inline_lua_splice(out, id)
+        if let Inst::Call { func, args } = &self.func.insts[id]
+            && self.splice_inline_lua(out, func_of(self.ws, *func), args, id)
         {
             return;
         }
@@ -18,9 +12,7 @@ impl Emitter<'_> {
         if inst.produces_value() {
             out.push(' ');
             // Only a discarded call result reaches here without a register.
-            if self.colors[raw(id) as usize] != u32::MAX
-                || regalloc::alias_at(self.alias, id).is_some()
-            {
+            if self.has_value_local(id) {
                 self.write_value_name(out, id);
                 out.push_str(" = ");
             }
@@ -70,14 +62,6 @@ impl Emitter<'_> {
             .unwrap_or(name)
     }
 
-    fn try_emit_inline_lua_splice(&mut self, out: &mut String, id: Idx<Inst>) -> bool {
-        let Inst::Call { func, args } = &self.func.insts[id] else {
-            return false;
-        };
-        let callee = func_of(self.ws, *func);
-        self.splice_inline_lua(out, callee, args, id)
-    }
-
     /// Splicing keeps cdata the body produces in the caller's scope so LuaJIT
     /// can sink it; a call boundary forces it to materialize.
     fn splice_inline_lua(
@@ -102,13 +86,12 @@ impl Emitter<'_> {
         };
         // A spliced call is never tree-folded, so `result` has a register
         // unless nothing reads it.
-        let mut lv = String::new();
-        if self.colors[raw(result) as usize] == u32::MAX
-            && regalloc::alias_at(self.alias, result).is_none()
-        {
-            lv.push_str("local _");
+        let discarded = !self.has_value_local(result);
+        let mut destination = String::new();
+        if discarded {
+            destination.push_str("local _");
         } else {
-            self.write_value_name(&mut lv, result);
+            self.write_value_name(&mut destination, result);
         }
 
         // A parameter the body only reads takes a plain operand in place of a
@@ -118,7 +101,7 @@ impl Emitter<'_> {
         let splice_start = out.len();
         let first_site = self.allocation.map_or(0, |a| a.sites.borrow().len());
         let mut locals = String::new();
-        let mut stand_ins = Vec::new();
+        let mut substitutions = Vec::new();
         for (p, a) in callee.param_decls.iter().zip(args.iter()) {
             let mut operand = String::new();
             self.write_opnd(&mut operand, *a);
@@ -141,17 +124,19 @@ impl Emitter<'_> {
                 && movable()
                 && analyzed.reads_param_only(p.name.as_str())
             {
-                stand_ins.push((p.name.as_str(), operand));
+                substitutions.push((p.name.as_str(), operand));
             } else {
                 let _ = writeln!(locals, "  local {} = {operand}", p.name);
             }
         }
-        let subs: Vec<(&str, &str)> = stand_ins.iter().map(|(p, o)| (*p, o.as_str())).collect();
+        let subs: Vec<_> = substitutions
+            .iter()
+            .map(|(p, o)| (*p, o.as_str()))
+            .collect();
         let body = analyzed.substitute_params(&subs);
         // A discarded call result runs as a bare call; any other discarded
         // result still needs a local to evaluate it into.
         let result = result_expr(&body, shape);
-        let discarded = lv.starts_with("local");
         let bare = discarded && result.is_some_and(is_call_statement);
         let block =
             !locals.is_empty() || discarded && !bare && result.is_some() || declares_names(&body);
@@ -159,7 +144,7 @@ impl Emitter<'_> {
             out.push_str(" do\n");
         }
         out.push_str(&locals);
-        render_spliced_inline_lua(out, &body, shape, (!bare).then_some(lv.as_str()));
+        render_spliced_inline_lua(out, &body, shape, (!bare).then_some(destination.as_str()));
         if block {
             out.push_str(" end\n");
         }
@@ -181,7 +166,7 @@ impl Emitter<'_> {
     /// True if `id` renders as a bare name or literal, so an inline shape may
     /// spell it twice without re-evaluating or re-allocating.
     pub(crate) fn opnd_is_plain(&self, id: Idx<Inst>) -> bool {
-        if self.hoist.contains_key(&id) || !self.inlinable[raw(id) as usize] {
+        if !self.inlinable[raw(id) as usize] || self.hoist.contains_key(&id) {
             return true;
         }
         matches!(self.func.insts[id], Inst::Load(_) | Inst::Const(_))
@@ -192,23 +177,20 @@ impl Emitter<'_> {
     }
 
     pub(crate) fn write_opnd(&self, out: &mut String, id: Idx<Inst>) {
-        if self.inlinable[raw(id) as usize] {
-            if let Inst::Load(cell) = self.func.insts[id] {
-                write_cellname(out, self.func, self.frame, self.cell_colors, cell);
-                return;
-            }
-        }
-        // int->float is the identity on LuaJIT: every number is a double.
-        if self.inlinable[raw(id) as usize] {
-            if let Inst::IntToFloat(x) = self.func.insts[id] {
-                return self.write_opnd(out, x);
+        let folded = self.inlinable[raw(id) as usize];
+        if folded {
+            match self.func.insts[id] {
+                Inst::Load(cell) => {
+                    return write_cellname(out, self.func, self.frame, self.cell_colors, cell);
+                }
+                // int->float is the identity on LuaJIT: every number is a double.
+                Inst::IntToFloat(x) => return self.write_opnd(out, x),
+                _ => {}
             }
         }
         if let Some(&g) = self.hoist.get(&id) {
             out.push_str(&self.hoist_names[g as usize]);
-            return;
-        }
-        if self.inlinable[raw(id) as usize] {
+        } else if folded {
             // A bare negative literal under unary `-` would form `--`, a Lua comment.
             out.push('(');
             self.write_value(out, id, &self.func.insts[id]);
@@ -218,15 +200,15 @@ impl Emitter<'_> {
         }
     }
 
+    pub(crate) fn has_value_local(&self, id: Idx<Inst>) -> bool {
+        self.colors[raw(id) as usize] != u32::MAX || regalloc::alias_at(self.alias, id).is_some()
+    }
+
     fn write_value_name(&self, out: &mut String, id: Idx<Inst>) {
         match regalloc::alias_at(self.alias, id) {
             Some(cell) => write_cellname(out, self.func, self.frame, self.cell_colors, cell),
             None => write_vname(out, self.func, &self.colors, id),
         }
-    }
-
-    pub(crate) fn collect_concat(&self, parts: &mut Vec<Idx<Inst>>, id: Idx<Inst>) {
-        concat_run(self.func, self.inlinable, parts, id);
     }
 
     pub(crate) fn opnd_str(&self, id: Idx<Inst>) -> String {

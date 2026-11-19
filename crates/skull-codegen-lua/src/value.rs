@@ -24,19 +24,9 @@ impl Emitter<'_> {
             Inst::Const(l) => write_lit(out, l),
             Inst::Global(g) => {
                 if let Some(identity) = self.func.code_value_identities.get(&id) {
-                    out.push_str("__rock_code_slot_ref(");
-                    out.push_str(&lua_string(&identity.logical_key(self.ws, self.interner)));
-                    out.push(')');
-                } else if self.has_state_slot(*g) {
-                    out.push_str(self.ctx.state_table());
-                    out.push('[');
-                    self.write_state_slot(out, *g);
-                    out.push(']');
+                    self.write_code_slot_ref(out, identity);
                 } else {
-                    out.push_str(
-                        self.bound_name(skull_mir::mangle::symbol_of_key(*g))
-                            .as_str(),
-                    );
+                    self.write_global(out, *g);
                 }
             }
             Inst::Load(c) => write_cellname(out, self.func, self.frame, self.cell_colors, *c),
@@ -49,9 +39,7 @@ impl Emitter<'_> {
             Inst::UintMul(a, b) => self.write_u32_mul(out, a, b),
             Inst::IntDiv(a, b) | Inst::UintDiv(a, b) => {
                 out.push_str("math.floor(");
-                self.write_opnd(out, *a);
-                out.push_str(" / ");
-                self.write_opnd(out, *b);
+                self.write_bin(out, "/", a, b);
                 out.push(')');
             }
             Inst::FloatDiv(a, b) => self.write_bin(out, "/", a, b),
@@ -72,8 +60,8 @@ impl Emitter<'_> {
             Inst::StringConcat(a, b) => {
                 // A flat concat run lets LuaJIT allocate the result once with BC_CAT.
                 let mut parts = Vec::new();
-                self.collect_concat(&mut parts, *a);
-                self.collect_concat(&mut parts, *b);
+                concat_run(self.func, self.inlinable, &mut parts, *a);
+                concat_run(self.func, self.inlinable, &mut parts, *b);
                 for (i, p) in parts.iter().enumerate() {
                     if i > 0 {
                         out.push_str(" .. ");
@@ -81,11 +69,7 @@ impl Emitter<'_> {
                     self.write_opnd(out, *p);
                 }
             }
-            Inst::ToString(x) => {
-                out.push_str("tostring(");
-                self.write_opnd(out, *x);
-                out.push(')');
-            }
+            Inst::ToString(x) => self.write_builtin_call(out, "tostring", &[*x]),
             Inst::Format { value, fmt } => {
                 out.push_str("string.format(");
                 write_lua_string(out, fmt.as_str());
@@ -94,27 +78,15 @@ impl Emitter<'_> {
                 out.push(')');
             }
             Inst::FormatDyn { value, fmt } => {
-                out.push_str("string.format(");
-                self.write_opnd(out, *fmt);
-                out.push_str(", ");
-                self.write_opnd(out, *value);
-                out.push(')');
+                self.write_builtin_call(out, "string.format", &[*fmt, *value]);
             }
-            Inst::FloatToInt(x) => {
-                out.push_str("math.floor(");
-                self.write_opnd(out, *x);
-                out.push(')');
-            }
+            Inst::FloatToInt(x) => self.write_builtin_call(out, "math.floor", &[*x]),
             // These LuaJIT identity conversions must reference their operand:
             // rendering it would evaluate a producer twice.
             Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::UintToInt(x) => {
                 self.write_opnd(out, *x)
             }
-            Inst::FloatToF32(x) => {
-                out.push_str("__rock_f32(");
-                self.write_opnd(out, *x);
-                out.push(')');
-            }
+            Inst::FloatToF32(x) => self.write_builtin_call(out, "__rock_f32", &[*x]),
             Inst::IntToUint(x) | Inst::FloatToUint(x) => self.write_checked_u32(out, *x),
             Inst::UintBitcastInt(x) => {
                 out.push_str("(((");
@@ -150,22 +122,18 @@ impl Emitter<'_> {
                 out.push_str("not ");
                 self.write_opnd(out, *x);
             }
-            Inst::BitNot(x) => {
-                out.push_str("bit.bnot(");
-                self.write_opnd(out, *x);
-                out.push(')');
-            }
+            Inst::BitNot(x) => self.write_builtin_call(out, "bit.bnot", &[*x]),
             Inst::UintBitNot(x) => {
                 out.push_str("(bit.bnot(");
                 self.write_opnd(out, *x);
                 out.push_str(")) % 4294967296");
             }
 
-            Inst::BitAnd(a, b) => self.write_bitfn(out, "bit.band", a, b),
-            Inst::BitOr(a, b) => self.write_bitfn(out, "bit.bor", a, b),
-            Inst::BitXor(a, b) => self.write_bitfn(out, "bit.bxor", a, b),
-            Inst::Shl(a, b) => self.write_bitfn(out, "bit.lshift", a, b),
-            Inst::Shr(a, b) => self.write_bitfn(out, "bit.rshift", a, b),
+            Inst::BitAnd(a, b) => self.write_builtin_call(out, "bit.band", &[*a, *b]),
+            Inst::BitOr(a, b) => self.write_builtin_call(out, "bit.bor", &[*a, *b]),
+            Inst::BitXor(a, b) => self.write_builtin_call(out, "bit.bxor", &[*a, *b]),
+            Inst::Shl(a, b) => self.write_builtin_call(out, "bit.lshift", &[*a, *b]),
+            Inst::Shr(a, b) => self.write_builtin_call(out, "bit.rshift", &[*a, *b]),
             Inst::UintBitAnd(a, b) => self.write_u32_bitfn(out, "bit.band", a, b),
             Inst::UintBitOr(a, b) => self.write_u32_bitfn(out, "bit.bor", a, b),
             Inst::UintBitXor(a, b) => self.write_u32_bitfn(out, "bit.bxor", a, b),
@@ -319,21 +287,9 @@ impl Emitter<'_> {
                 ty,
                 positional,
                 named,
-            } => {
-                out.push_str("{__variant = ");
+            } => self.write_enum_box(out, *ty, positional, named, |out| {
                 write_lua_string(out, tag.as_str());
-                out.push_str(", __ty = ");
-                write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, *ty).as_str());
-                for id in positional {
-                    out.push_str(", ");
-                    self.write_opnd(out, *id);
-                }
-                for (n, id) in named {
-                    let _ = write!(out, ", {n} = ");
-                    self.write_opnd(out, *id);
-                }
-                out.push('}');
-            }
+            }),
             Inst::MakeEnumDyn {
                 tag,
                 ty,
@@ -378,7 +334,7 @@ impl Emitter<'_> {
                 // The live length guards a logical element, independently of
                 // false or nil leaves and stale physical storage.
                 let fast =
-                    self.repeatable(*vec, 2) && self.repeatable(*index, 2) && self.has_home(id);
+                    self.repeatable(*vec, 2) && self.repeatable(*index, 2) && self.used_as_expr(id);
                 if fast {
                     self.write_opnd(out, *index);
                     out.push_str(" >= 0 and ");
@@ -389,11 +345,7 @@ impl Emitter<'_> {
                     self.write_opnd(out, *index);
                     out.push_str(" + 1) or ");
                 }
-                out.push_str("__vec_checked_index(");
-                self.write_opnd(out, *vec);
-                out.push_str(", ");
-                self.write_opnd(out, *index);
-                out.push(')');
+                self.write_builtin_call(out, "__vec_checked_index", &[*vec, *index]);
             }
             Inst::Len { base, kind } => match kind {
                 ContainerKind::Vec
@@ -411,11 +363,7 @@ impl Emitter<'_> {
                 ContainerKind::NativeBufferLeaf => {
                     unreachable!("`len` of a leaf view: lowering must ask the owning buffer")
                 }
-                ContainerKind::VecColumn | ContainerKind::VecStrideSlot => {
-                    out.push('#');
-                    self.write_opnd(out, *base);
-                }
-                ContainerKind::Map => {
+                ContainerKind::VecColumn | ContainerKind::VecStrideSlot | ContainerKind::Map => {
                     out.push('#');
                     self.write_opnd(out, *base);
                 }
@@ -437,39 +385,40 @@ impl Emitter<'_> {
                 unreachable!("placeholder bound-call must be substituted before emit")
             }
 
-            Inst::MakeEnv { fn_ref, fields } => match fn_ref {
-                Some(_name) => {
-                    out.push_str("setmetatable({ ");
+            Inst::MakeEnv { fn_ref, fields } => {
+                let callable = fn_ref.is_some();
+                if callable {
+                    out.push_str("setmetatable({ __slot = ");
                     let identity = self
                         .func
                         .code_value_identities
                         .get(&id)
                         .expect("Rock closure MakeEnv missing compiler-owned CodeRef identity");
-                    out.push_str("__slot = __rock_code_slot_ref(");
-                    out.push_str(&lua_string(&identity.logical_key(self.ws, self.interner)));
-                    out.push(')');
-                    for (f, v) in fields {
-                        out.push_str(", ");
-                        out.push_str(f.as_str());
-                        out.push_str(" = ");
-                        self.write_opnd(out, *v);
-                    }
-                    out.push_str(" }, __rock_fn_mt)");
-                }
-                None => {
+                    self.write_code_slot_ref(out, identity);
+                } else {
                     out.push('{');
-                    for (i, (f, v)) in fields.iter().enumerate() {
-                        if i > 0 {
-                            out.push_str(", ");
-                        }
-                        out.push_str(f.as_str());
-                        out.push_str(" = ");
-                        self.write_opnd(out, *v);
-                    }
-                    out.push('}');
                 }
-            },
+                for (i, (field, value)) in fields.iter().enumerate() {
+                    if callable || i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(field.as_str());
+                    out.push_str(" = ");
+                    self.write_opnd(out, *value);
+                }
+                out.push_str(if callable { " }, __rock_fn_mt)" } else { "}" });
+            }
         }
+    }
+
+    fn write_code_slot_ref(
+        &self,
+        out: &mut String,
+        identity: &skull_mir::code_identity::CodeIdentity,
+    ) {
+        out.push_str("__rock_code_slot_ref(");
+        write_lua_string(out, &identity.logical_key(self.ws, self.interner));
+        out.push(')');
     }
 
     fn write_bin(&self, out: &mut String, op: &str, a: &Idx<Inst>, b: &Idx<Inst>) {
@@ -480,12 +429,10 @@ impl Emitter<'_> {
         self.write_opnd(out, *b);
     }
 
-    fn write_bitfn(&self, out: &mut String, f: &str, a: &Idx<Inst>, b: &Idx<Inst>) {
-        out.push_str(f);
+    pub(crate) fn write_builtin_call(&self, out: &mut String, name: &str, args: &[Idx<Inst>]) {
+        out.push_str(name);
         out.push('(');
-        self.write_opnd(out, *a);
-        out.push_str(", ");
-        self.write_opnd(out, *b);
+        self.write_csv(out, args);
         out.push(')');
     }
 
@@ -497,7 +444,7 @@ impl Emitter<'_> {
 
     fn write_u32_bitfn(&self, out: &mut String, f: &str, a: &Idx<Inst>, b: &Idx<Inst>) {
         out.push('(');
-        self.write_bitfn(out, f, a, b);
+        self.write_builtin_call(out, f, &[*a, *b]);
         out.push_str(" % 4294967296)");
     }
 
@@ -514,9 +461,7 @@ impl Emitter<'_> {
         if valid_constant_shift_count(self.func, count) {
             self.write_opnd(out, count);
         } else {
-            out.push_str("__rock_u32_shift_count(");
-            self.write_opnd(out, count);
-            out.push(')');
+            self.write_builtin_call(out, "__rock_u32_shift_count", &[count]);
         }
     }
 
@@ -547,20 +492,17 @@ impl Emitter<'_> {
             }
             return;
         }
-        out.push_str("__rock_checked_u32(");
-        self.write_opnd(out, x);
-        out.push(')');
+        self.write_builtin_call(out, "__rock_checked_u32", &[x]);
     }
 
     /// Whether `id` may be written a second time on a path that is rarely
     /// taken: it renders as a bare local or a literal, or as field reads or
     /// one integer sum over those, which have no effect to repeat.
     fn repeatable(&self, id: Idx<Inst>, depth: u8) -> bool {
-        if !self.inlinable[raw(id) as usize] || self.hoist.contains_key(&id) {
+        if self.opnd_is_plain(id) {
             return true;
         }
         match self.func.insts[id] {
-            Inst::Load(_) | Inst::Const(_) => true,
             Inst::Field { base, .. } | Inst::TupleIndex { base, .. } if depth > 0 => {
                 self.repeatable(base, depth - 1)
             }
@@ -571,13 +513,11 @@ impl Emitter<'_> {
         }
     }
 
-    fn has_home(&self, id: Idx<Inst>) -> bool {
-        self.inlinable[raw(id) as usize]
-            || self.colors[raw(id) as usize] != u32::MAX
-            || regalloc::alias_at(self.alias, id).is_some()
+    fn used_as_expr(&self, id: Idx<Inst>) -> bool {
+        self.inlinable[raw(id) as usize] || self.has_value_local(id)
     }
 
-    pub(crate) fn write_vec_slot(&self, out: &mut String, index: Idx<Inst>) {
+    fn write_vec_slot(&self, out: &mut String, index: Idx<Inst>) {
         match self.func.insts[index] {
             Inst::Const(Lit::Int(i))
                 if (0..i64::from(i32::MAX)).contains(&i)
@@ -608,35 +548,21 @@ impl Emitter<'_> {
             // out of bounds, and the helper tells which. A read whose result
             // is discarded is a bare statement, which only the call can be.
             ContainerKind::Vec | ContainerKind::VecNonNull
-                if self.repeatable(base, 2) && self.repeatable(index, 2) && self.has_home(id) =>
+                if self.repeatable(base, 2)
+                    && self.repeatable(index, 2)
+                    && self.used_as_expr(id) =>
             {
+                // The helper distinguishes a nil element from an out-of-bounds slot.
                 for prefix in ["", " or ("] {
                     out.push_str(prefix);
-                    self.write_opnd(out, base);
-                    out.push_str("._data[");
-                    self.write_vec_slot(out, index);
-                    out.push(']');
+                    self.write_index_place(out, base, index, ContainerKind::VecInBounds);
                 }
-                out.push_str(" == nil and __vec_checked_get(");
-                self.write_opnd(out, base);
-                out.push_str(", ");
-                self.write_opnd(out, index);
-                out.push_str("))");
-            }
-            ContainerKind::Vec | ContainerKind::VecNonNull => {
-                out.push_str("__vec_checked_get(");
-                self.write_opnd(out, base);
-                out.push_str(", ");
-                self.write_opnd(out, index);
+                out.push_str(" == nil and ");
+                self.write_builtin_call(out, "__vec_checked_get", &[base, index]);
                 out.push(')');
             }
-            // The index was proven within `[0, len)`, so the slot holds the
-            // element, nil and false included: no fallback.
-            ContainerKind::VecInBounds | ContainerKind::VecNonNullInBounds => {
-                self.write_opnd(out, base);
-                out.push_str("._data[");
-                self.write_vec_slot(out, index);
-                out.push(']');
+            ContainerKind::Vec | ContainerKind::VecNonNull => {
+                self.write_builtin_call(out, "__vec_checked_get", &[base, index]);
             }
             // Lowering decomposes whole-element reads of column storage into
             // per-column reads; any Lua emitted here would be wrong code.
@@ -653,39 +579,48 @@ impl Emitter<'_> {
                 )
             }
             ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_) => {
-                out.push_str("__nb_checked_get(");
-                self.write_opnd(out, base);
-                out.push_str(", ");
-                self.write_opnd(out, index);
-                out.push(')');
+                self.write_builtin_call(out, "__nb_checked_get", &[base, index]);
+            }
+            _ => self.write_index_place(out, base, index, kind),
+        }
+    }
+
+    pub(crate) fn write_index_place(
+        &self,
+        out: &mut String,
+        base: Idx<Inst>,
+        index: Idx<Inst>,
+        kind: ContainerKind,
+    ) {
+        self.write_opnd(out, base);
+        match kind {
+            // The index was proven within `[0, len)`, so the slot holds the
+            // element, nil and false included: no fallback.
+            ContainerKind::VecInBounds | ContainerKind::VecNonNullInBounds => {
+                out.push_str("._data[");
+                self.write_vec_slot(out, index);
+                out.push(']');
+                return;
             }
             ContainerKind::NativeBufferInBounds => {
-                self.write_opnd(out, base);
-                out.push_str(".ptr[");
-                self.write_opnd(out, index);
-                out.push(']');
+                out.push_str(".ptr");
+            }
+            ContainerKind::Record => {
+                if let Inst::Const(Lit::Str(field)) = &self.func.insts[index] {
+                    write_field_key(out, field.as_str());
+                    return;
+                }
             }
             // `index` is already 1-based and checked (`VecCheckedIndex`).
             ContainerKind::VecColumn
             | ContainerKind::VecStrideSlot
             | ContainerKind::NativeBufferLeaf
-            | ContainerKind::Map => {
-                self.write_opnd(out, base);
-                out.push('[');
-                self.write_opnd(out, index);
-                out.push(']');
-            }
-            ContainerKind::Record => {
-                self.write_opnd(out, base);
-                if let Inst::Const(Lit::Str(field)) = &self.func.insts[index] {
-                    write_field_key(out, field.as_str());
-                } else {
-                    out.push('[');
-                    self.write_opnd(out, index);
-                    out.push(']');
-                }
-            }
+            | ContainerKind::Map => {}
+            _ => unreachable!("{kind:?} has no directly indexable storage"),
         }
+        out.push('[');
+        self.write_opnd(out, index);
+        out.push(']');
     }
 
     /// A flat Vec's header. Only a reservation (`cap > 0`) ever writes one, so
@@ -730,9 +665,8 @@ impl Emitter<'_> {
         value: Idx<Inst>,
     ) {
         if self.never_nil(value) {
-            let _ = write!(out, " {target} = ");
-            self.write_opnd(out, value);
-            out.push('\n');
+            let _ = write!(out, " {target}");
+            self.write_assignment_rhs(out, value);
             return;
         }
         if !self.opnd_is_plain(value) {
@@ -741,10 +675,7 @@ impl Emitter<'_> {
             });
         }
         out.push_str(" if ");
-        if !matches!(self.func.insts[value], Inst::Const(Lit::Nil)) {
-            self.write_opnd(out, value);
-            out.push_str(" ~= nil or ");
-        }
+        self.write_non_nil_disjunct(out, value);
         let _ = write!(out, "{target} ~= nil then {target} = ");
         self.write_opnd(out, value);
         out.push_str(" end\n");
@@ -754,7 +685,7 @@ impl Emitter<'_> {
     // Only compiler-owned plain frame fields take this path; user stores keep
     // their assignment and metamethod behavior. Scoped vN temporaries evaluate
     // every RHS once before any destination changes.
-    pub(crate) fn write_frame_assignment(
+    fn write_frame_assignment(
         &self,
         out: &mut String,
         targets: &[(String, bool)],
@@ -814,6 +745,15 @@ impl Emitter<'_> {
         }
         rhs(out);
         out.push('\n');
+    }
+
+    /// A store of literal nil skips its statically-false `nil ~= nil`
+    /// disjunct; the field test still decides.
+    pub(crate) fn write_non_nil_disjunct(&self, out: &mut String, value: Idx<Inst>) {
+        if !matches!(self.func.insts[value], Inst::Const(Lit::Nil)) {
+            self.write_opnd(out, value);
+            out.push_str(" ~= nil or ");
+        }
     }
 }
 

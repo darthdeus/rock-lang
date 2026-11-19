@@ -64,20 +64,10 @@ impl Emitter<'_> {
         }
     }
 
-    fn write_pending_kills(
-        &self,
-        out: &mut String,
-        bb: Idx<Block>,
-        at_entry: bool,
-        after: Option<Idx<Inst>>,
-    ) {
-        let locals: &[regalloc::KillLocal] = if at_entry {
-            self.kills.at_entry(bb)
-        } else {
-            match after {
-                Some(id) => self.kills.after_inst(id),
-                None => &[],
-            }
+    fn write_pending_kills(&self, out: &mut String, bb: Idx<Block>, after: Option<Idx<Inst>>) {
+        let locals = match after {
+            Some(id) => self.kills.after_inst(id),
+            None => self.kills.at_entry(bb),
         };
         self.write_kills(out, locals);
     }
@@ -88,19 +78,21 @@ impl Emitter<'_> {
             && !self.inlinable[raw(id) as usize]
             && !self.hoist.contains_key(&id)
     }
-    pub(crate) fn has_state_slot(&self, name: ustr::Ustr) -> bool {
-        let symbol = skull_mir::mangle::symbol_of_key(name);
-        self.state_slots.contains_key(&symbol) || self.static_slots.contains_key(&symbol)
-    }
 
-    pub(crate) fn write_state_slot(&self, out: &mut String, name: ustr::Ustr) {
+    pub(crate) fn write_global(&self, out: &mut String, name: ustr::Ustr) {
         let name = skull_mir::mangle::symbol_of_key(name);
         if let Some(&slot) = self.state_slots.get(&name) {
+            out.push_str(self.ctx.state_table());
+            out.push('[');
             push_uint(out, slot);
+            out.push(']');
         } else if let Some(slot) = self.static_slots.get(&name) {
-            out.push_str(&lua_string(slot));
+            out.push_str(self.ctx.state_table());
+            out.push('[');
+            write_lua_string(out, slot);
+            out.push(']');
         } else {
-            unreachable!("state slot checked before emission")
+            out.push_str(self.bound_name(name).as_str());
         }
     }
 
@@ -129,7 +121,7 @@ impl Emitter<'_> {
 
     pub(crate) fn emit_block(&mut self, out: &mut String, bb: Idx<Block>) {
         if self.emitted[raw(bb) as usize] {
-            return; // already emitted (e.g. as a loop body block)
+            return;
         }
         self.emitted[raw(bb) as usize] = true;
         self.drop_fallthrough_goto(out, bb);
@@ -213,27 +205,23 @@ impl Emitter<'_> {
         } else {
             None
         };
-        let mut live_region = !returns || last_impure.is_some();
-        let mut pending: Option<Idx<Inst>> = None;
-        let mut first = true;
+        let mut needs_kills = !returns || last_impure.is_some();
+        let mut pending = None;
         for &id in &insts[..emitted_len] {
-            if self.suppressed[raw(id) as usize] {
+            if !self.emits_statement(id) {
                 continue;
             }
-            if self.emits_statement(id) {
-                if live_region {
-                    self.write_pending_kills(out, bb, first, pending);
-                }
-                first = false;
-                pending = Some(id);
+            if needs_kills {
+                self.write_pending_kills(out, bb, pending);
             }
-            self.emit_inst(out, id);
+            self.emit_statement(out, id);
+            pending = Some(id);
             if Some(id) == last_impure {
-                live_region = !returns;
+                needs_kills = false;
             }
         }
-        if live_region {
-            self.write_pending_kills(out, bb, first, pending);
+        if needs_kills {
+            self.write_pending_kills(out, bb, pending);
         }
         if let Some(tail) = tail {
             self.emit_tail_forward(out, tail[0]);
@@ -322,7 +310,7 @@ impl Emitter<'_> {
         self.emit_block(out, body_entry);
         for &bb in self.rpo {
             if region.contains(&bb) {
-                self.emit_block(out, bb); // self-skips body_entry / already-emitted
+                self.emit_block(out, bb);
             }
         }
         self.emitted[raw(latch) as usize] = true;

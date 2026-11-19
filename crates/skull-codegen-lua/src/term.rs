@@ -19,21 +19,22 @@ impl Emitter<'_> {
         let Term::Goto(join) = block.term else {
             return None;
         };
-        let store = match block.insts.as_slice() {
-            [] => None,
-            [s] => match self.func.insts[*s] {
-                Inst::Store { cell, value } => Some((cell, value)),
-                _ => return None,
-            },
-            [l, s] if matches!(self.func.insts[*l], Inst::Load(_) | Inst::Const(_)) => {
-                match self.func.insts[*s] {
-                    Inst::Store { cell, value } if value == *l => Some((cell, value)),
-                    _ => return None,
-                }
-            }
-            _ => return None,
+        let Some((&last, leading)) = block.insts.split_last() else {
+            return Some(SelectionArm::Join { store: None, join });
         };
-        Some(SelectionArm::Join { store, join })
+        let Inst::Store { cell, value } = self.func.insts[last] else {
+            return None;
+        };
+        match leading {
+            [] => {}
+            [id] if *id == value
+                && matches!(self.func.insts[*id], Inst::Load(_) | Inst::Const(_)) => {}
+            _ => return None,
+        }
+        Some(SelectionArm::Join {
+            store: Some((cell, value)),
+            join,
+        })
     }
 
     fn selection_cell_matches(
@@ -190,11 +191,8 @@ impl Emitter<'_> {
         let hi = self.selection_float_literal(no, upper)?;
         // The source tests the lower bound first; an inverted range would lose
         // that priority in a nested min/max expression. NaN bounds are unordered.
-        if !matches!(
-            lo.partial_cmp(&hi),
-            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-        ) || !self.selection_matches(bb, cond, inner_value, value)
-        {
+        let ordered_bounds = lo <= hi;
+        if !ordered_bounds || !self.selection_matches(bb, cond, inner_value, value) {
             return None;
         }
         if inner_target != target {
@@ -324,20 +322,17 @@ impl Emitter<'_> {
 
     pub(crate) fn emit_term(&mut self, out: &mut String, term: &Term, bb: Idx<Block>) {
         match term {
-            Term::Return(vals) if !vals.is_empty() => self.mark_inline_operand(out, vals[0]),
-            Term::Branch { cond, .. } => self.mark_inline_operand(out, *cond),
-            _ => {}
-        }
-        match term {
             // Lua allows `return` only as a block's last statement; `do ... end` makes
             // it legal anywhere.
-            Term::Return(vals) if !vals.is_empty() => {
-                out.push_str(" do return ");
-                self.write_csv(out, self.trim_trailing_nils(vals, 1));
+            Term::Return(vals) => {
+                if let Some(&first) = vals.first() {
+                    self.mark_inline_operand(out, first);
+                    out.push_str(" do return ");
+                    self.write_csv(out, self.trim_trailing_nils(vals, 1));
+                } else {
+                    out.push_str(" do return");
+                }
                 out.push_str(" end\n");
-            }
-            Term::Return(_) => {
-                out.push_str(" do return end\n");
             }
             // Bone proves these blocks dead; reaching one is a compiler bug,
             // which a bare return would turn into a silent early exit.
@@ -356,6 +351,7 @@ impl Emitter<'_> {
                 then_bb,
                 else_bb,
             } => {
+                self.mark_inline_operand(out, *cond);
                 if let Some((target, value)) = self.selection(bb, *cond, *then_bb, *else_bb) {
                     self.write_selection(out, bb, target, value);
                     if let SelectionTarget::Cell { join, .. } = target {
@@ -388,8 +384,9 @@ impl Emitter<'_> {
         positional: &[Idx<Inst>],
         named: &[(ustr::Ustr, Idx<Inst>)],
     ) {
+        let write_tag = |out: &mut String| self.write_opnd(out, tag);
         if matches!(self.func.insts[tag], Inst::Const(_)) {
-            self.write_enum_box(out, tag, ty, positional, named);
+            self.write_enum_box(out, ty, positional, named, write_tag);
             return;
         }
         let cached = self.enum_box_groups.borrow().get(&ty).cloned();
@@ -440,12 +437,8 @@ impl Emitter<'_> {
                 }
                 out.push_str(") and ");
             }
-            let selected: Vec<_> = named
-                .iter()
-                .copied()
-                .filter(|(name, _)| fields.contains(name))
-                .collect();
-            self.write_enum_box(out, tag, ty, &positional[..*width], &selected);
+            let selected = named.iter().filter(|(name, _)| fields.contains(name));
+            self.write_enum_box(out, ty, &positional[..*width], selected, write_tag);
             if i + 1 < groups.len() {
                 out.push_str(" or ");
             }
@@ -455,16 +448,16 @@ impl Emitter<'_> {
         }
     }
 
-    fn write_enum_box(
+    pub(crate) fn write_enum_box<'a>(
         &self,
         out: &mut String,
-        tag: Idx<Inst>,
         ty: ustr::Ustr,
         positional: &[Idx<Inst>],
-        named: &[(ustr::Ustr, Idx<Inst>)],
+        named: impl IntoIterator<Item = &'a (ustr::Ustr, Idx<Inst>)>,
+        write_tag: impl FnOnce(&mut String),
     ) {
         out.push_str("{__variant = ");
-        self.write_opnd(out, tag);
+        write_tag(out);
         out.push_str(", __ty = ");
         write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, ty).as_str());
         for id in positional {
@@ -493,6 +486,7 @@ impl Emitter<'_> {
     /// function may count its arguments.
     pub(crate) fn call_args<'v>(&self, func: FuncRef, args: &'v [Idx<Inst>]) -> &'v [Idx<Inst>] {
         let f = func_of(self.ws, func);
+        // Foreign or variadic callees can observe their argument count.
         if f.is_extern || f.is_variadic || f.inline_body.is_some() || f.ffi_lib.is_some() {
             return args;
         }

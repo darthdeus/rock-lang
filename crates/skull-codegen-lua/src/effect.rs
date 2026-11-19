@@ -52,9 +52,7 @@ impl Emitter<'_> {
                 out.push(' ');
                 scope_guard::assigning(self.func);
                 write_cellname(out, self.func, self.frame, self.cell_colors, *cell);
-                out.push_str(" = ");
-                self.write_opnd(out, *value);
-                out.push('\n');
+                self.write_assignment_rhs(out, *value);
             }
             Inst::StoreField { base, field, value } => {
                 if let Some(frame) = self.frame {
@@ -65,32 +63,8 @@ impl Emitter<'_> {
                         return;
                     }
                 }
-                // Compiler-owned plain fields cannot invoke host callbacks.
-                // Avoid LuaJIT rehashing an absent key for a no-op nil store.
-                let guard = self.opnd_is_plain(*base)
-                    && self.opnd_is_plain(*value)
-                    && !self.never_nil(*value);
-                if guard {
-                    out.push_str(" if ");
-                    // A store of literal nil skips its statically-false
-                    // `nil ~= nil` disjunct; the field test still decides.
-                    if !matches!(self.func.insts[*value], Inst::Const(Lit::Nil)) {
-                        self.write_opnd(out, *value);
-                        out.push_str(" ~= nil or ");
-                    }
-                    self.write_opnd(out, *base);
-                    write_field_key(out, field.as_str());
-                    out.push_str(" ~= nil then\n");
-                }
-                out.push(' ');
-                self.write_opnd(out, *base);
-                write_field_key(out, field.as_str());
-                out.push_str(" = ");
-                self.write_opnd(out, *value);
-                out.push('\n');
-                if guard {
-                    out.push_str(" end\n");
-                }
+                // StoreField targets compiler-owned tables without host metamethods.
+                self.write_field_assignment(out, *base, field.as_str(), *value, false);
             }
             Inst::StoreIndex {
                 base,
@@ -98,95 +72,11 @@ impl Emitter<'_> {
                 value,
                 kind,
             } => {
-                match kind {
+                let checked_set = match kind {
                     ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_) => {
-                        out.push_str(" __nb_checked_set(");
-                        self.write_opnd(out, *base);
-                        out.push_str(", ");
-                        self.write_opnd(out, *index);
-                        out.push_str(", ");
-                        self.write_opnd(out, *value);
-                        out.push_str(")\n");
+                        Some("__nb_checked_set")
                     }
-                    ContainerKind::Vec | ContainerKind::VecNonNull => {
-                        out.push_str(" __vec_checked_set(");
-                        self.write_opnd(out, *base);
-                        out.push_str(", ");
-                        self.write_opnd(out, *index);
-                        out.push_str(", ");
-                        self.write_opnd(out, *value);
-                        out.push_str(")\n");
-                    }
-                    ContainerKind::NativeBufferInBounds => {
-                        out.push(' ');
-                        self.write_opnd(out, *base);
-                        out.push_str(".ptr[");
-                        self.write_opnd(out, *index);
-                        out.push_str("] = ");
-                        self.write_opnd(out, *value);
-                        out.push('\n');
-                    }
-                    ContainerKind::VecInBounds | ContainerKind::VecNonNullInBounds => {
-                        out.push(' ');
-                        self.write_opnd(out, *base);
-                        out.push_str("._data[");
-                        self.write_vec_slot(out, *index);
-                        out.push_str("] = ");
-                        self.write_opnd(out, *value);
-                        out.push('\n');
-                    }
-                    ContainerKind::Map
-                    | ContainerKind::VecColumn
-                    | ContainerKind::VecStrideSlot
-                    | ContainerKind::NativeBufferLeaf => {
-                        out.push(' ');
-                        self.write_opnd(out, *base);
-                        out.push('[');
-                        self.write_opnd(out, *index);
-                        out.push_str("] = ");
-                        self.write_opnd(out, *value);
-                        out.push('\n');
-                    }
-                    ContainerKind::Record => {
-                        let field = match &self.func.insts[*index] {
-                            Inst::Const(Lit::Str(field)) => Some(*field),
-                            _ => None,
-                        };
-                        let guard = field.is_some()
-                            && self.opnd_is_plain(*base)
-                            && self.opnd_is_plain(*value)
-                            && !self.never_nil(*value);
-                        if guard {
-                            out.push_str(" if ");
-                            if !matches!(self.func.insts[*value], Inst::Const(Lit::Nil)) {
-                                self.write_opnd(out, *value);
-                                out.push_str(" ~= nil or ");
-                            }
-                            // Test the metatable before reading the field: a
-                            // getter must not run merely because we store nil.
-                            out.push_str("getmetatable(");
-                            self.write_opnd(out, *base);
-                            out.push_str(") ~= nil or ");
-                            self.write_opnd(out, *base);
-                            write_field_key(out, field.unwrap().as_str());
-                            out.push_str(" ~= nil then\n");
-                        }
-                        out.push(' ');
-                        self.write_opnd(out, *base);
-                        if let Some(field) = field {
-                            write_field_key(out, field.as_str());
-                        } else {
-                            out.push('[');
-                            self.write_opnd(out, *index);
-                            out.push(']');
-                        }
-                        out.push_str(" = ");
-                        self.write_opnd(out, *value);
-                        out.push('\n');
-                        if guard {
-                            out.push_str(" end\n");
-                        }
-                    }
+                    ContainerKind::Vec | ContainerKind::VecNonNull => Some("__vec_checked_set"),
                     // One `value` operand cannot carry K leaves; lowering splits
                     // an element write into per-column stores.
                     ContainerKind::VecValueColumns(elem) => {
@@ -195,26 +85,26 @@ impl Emitter<'_> {
                     ContainerKind::VecValueStrided(elem) => {
                         unreachable!("whole-element store into strided [{elem}] reached emit")
                     }
+                    _ => None,
+                };
+                if let Some(setter) = checked_set {
+                    out.push(' ');
+                    self.write_builtin_call(out, setter, &[*base, *index, *value]);
+                    out.push('\n');
+                } else if matches!(kind, ContainerKind::Record)
+                    && let Inst::Const(Lit::Str(field)) = &self.func.insts[*index]
+                {
+                    self.write_field_assignment(out, *base, field.as_str(), *value, true);
+                } else {
+                    out.push(' ');
+                    self.write_index_place(out, *base, *index, *kind);
+                    self.write_assignment_rhs(out, *value);
                 }
             }
             Inst::StoreGlobal { name, value } => {
-                if self.has_state_slot(*name) {
-                    out.push(' ');
-                    out.push_str(self.ctx.state_table());
-                    out.push('[');
-                    self.write_state_slot(out, *name);
-                    out.push_str("] = ");
-                    self.write_opnd(out, *value);
-                    out.push('\n');
-                } else {
-                    let _ = write!(
-                        out,
-                        " {} = ",
-                        self.bound_name(skull_mir::mangle::symbol_of_key(*name))
-                    );
-                    self.write_opnd(out, *value);
-                    out.push('\n');
-                }
+                out.push(' ');
+                self.write_global(out, *name);
+                self.write_assignment_rhs(out, *value);
             }
             Inst::ArrayPush { arr, value, kind } => {
                 // `arr` is spelled up to four times; render it once.
@@ -223,9 +113,8 @@ impl Emitter<'_> {
                     ContainerKind::Vec | ContainerKind::VecNonNull => {
                         // Increment len before the write: the data table is 1-indexed.
                         let _ = writeln!(out, " {a}.len = {a}.len + 1");
-                        let _ = write!(out, " {a}._data[{a}.len] = ");
-                        self.write_opnd(out, *value);
-                        out.push('\n');
+                        let _ = write!(out, " {a}._data[{a}.len]");
+                        self.write_assignment_rhs(out, *value);
                     }
                     // Column push bumps the shared `len` once, then writes K
                     // columns -- more than one `value`, so lowering splits it.
@@ -274,6 +163,47 @@ impl Emitter<'_> {
             }
             _ => unreachable!("not an effect"),
         }
+    }
+
+    fn write_field_assignment(
+        &self,
+        out: &mut String,
+        base: Idx<Inst>,
+        field: &str,
+        value: Idx<Inst>,
+        check_metatable: bool,
+    ) {
+        // Compiler-owned plain fields cannot invoke host callbacks.
+        // Avoid LuaJIT rehashing an absent key for a no-op nil store.
+        let guard = self.opnd_is_plain(base) && self.opnd_is_plain(value) && !self.never_nil(value);
+        let write_target = |out: &mut String| {
+            self.write_opnd(out, base);
+            write_field_key(out, field);
+        };
+        if guard {
+            out.push_str(" if ");
+            self.write_non_nil_disjunct(out, value);
+            if check_metatable {
+                // Test the metatable before reading the field: a
+                // getter must not run merely because we store nil.
+                self.write_builtin_call(out, "getmetatable", &[base]);
+                out.push_str(" ~= nil or ");
+            }
+            write_target(out);
+            out.push_str(" ~= nil then\n");
+        }
+        out.push(' ');
+        write_target(out);
+        self.write_assignment_rhs(out, value);
+        if guard {
+            out.push_str(" end\n");
+        }
+    }
+
+    pub(crate) fn write_assignment_rhs(&self, out: &mut String, value: Idx<Inst>) {
+        out.push_str(" = ");
+        self.write_opnd(out, value);
+        out.push('\n');
     }
 }
 
