@@ -2748,75 +2748,6 @@ pub fn draw_profiler_overlay() {
     }
 }
 
-struct MemStats {
-    heap_kb_avg: float,
-    heap_kb_max: float,
-    heap_drops: int,
-    // Gross Lua allocator request traffic bytes/frame from the GC window.
-    gross_lua_alloc_request_kb_per_frame: float,
-    positive_lua_growth_kb_per_frame: float,
-    explicit_lua_free_kb_per_frame: float,
-    lua_reallocation_shrink_kb_per_frame: float,
-    lua_allocator_calls: int,
-    lua_allocation_calls: int,
-    lua_reallocation_calls: int,
-    lua_free_calls: int,
-    gc_allocator_stats_available: bool,
-    gc_window_frames: int,
-    gc_window_available: bool,
-    gc_window_valid: bool,
-    gc_window_mode_running: bool,
-    gc_collector_running_at_start: bool,
-    gc_section_exclusive_kb_per_frame: float,
-    gc_unsectioned_kb_per_frame: float,
-    gc_accounting_residual_kb_per_frame: float,
-    gc_accounted_total_kb_per_frame: float,
-    gc_cursor_residual_kb_per_frame: float,
-    gc_frame_samples: int,
-    gc_dropped_events: int,
-    gc_monotonic_failure: bool,
-    gc_unknown_sections: int,
-    gc_late_sections: int,
-    gc_late_pool_capacity: int,
-    gc_late_pool_exhausted: int,
-    gc_negative_frame_index: int,
-    gc_negative_section_id: int,
-    gc_negative_delta_kb: float,
-    gc_running_at_negative: bool,
-    gc_open_sections: int,
-    gc_section_events: int,
-    gc_frame_mean_kb: float,
-    gc_frame_p50_kb: float,
-    gc_frame_p95_kb: float,
-    gc_frame_p99_kb: float,
-    gc_frame_max_kb: float,
-    gc_worst_frame_index: int,
-    gc_worst_frame_total_kb: float,
-    gc_worst_frame_max_single_event_section_id: int,
-    gc_worst_frame_max_single_event_kb: float,
-    gc_frame_section_slots: int,
-    gc_frame_section_overflow: int,
-    gc_cache_requests: int,
-    gc_cache_hits: int,
-    gc_cache_misses: int,
-    gc_cache_builds: int,
-    gc_cache_evictions: int,
-    gc_cache_high_water: int,
-    gc_cache_entries_examined: int,
-    gc_cache_max_entries_examined: int,
-    gc_world_layout_builds: int,
-    gc_cache_ui_requests: int,
-    gc_cache_ui_hits: int,
-    gc_cache_ui_misses: int,
-    gc_cache_ui_builds: int,
-    gc_cache_ui_evictions: int,
-    gc_cache_world_requests: int,
-    gc_cache_world_hits: int,
-    gc_cache_world_misses: int,
-    gc_cache_world_builds: int,
-    gc_cache_world_evictions: int,
-}
-
 global PERF_DRAWABLE_W: int = 0
 global PERF_DRAWABLE_H: int = 0
 global PERF_OUT_PATH: string = ""
@@ -2852,75 +2783,6 @@ fn perf_out_flush() {
     PERF_OUT_BUF = ""
 }
 
-fn perf_memory_snapshot() -> MemStats {
-    return MemStats {
-        heap_kb_avg: PROFILE_HEAP_KB.mean,
-        heap_kb_max: PROFILE_HEAP_KB.max,
-        heap_drops: PROFILER.heap_drops,
-        gross_lua_alloc_request_kb_per_frame: GC_WIN_RESULT,
-        positive_lua_growth_kb_per_frame: GC_WIN_POSITIVE_GROWTH_RESULT,
-        explicit_lua_free_kb_per_frame: GC_WIN_EXPLICIT_FREE_RESULT,
-        lua_reallocation_shrink_kb_per_frame: GC_WIN_REALLOC_SHRINK_RESULT,
-        lua_allocator_calls: GC_WIN_ALLOC_CALLS_RESULT,
-        lua_allocation_calls: GC_WIN_ALLOCATION_CALLS_RESULT,
-        lua_reallocation_calls: GC_WIN_REALLOCATION_CALLS_RESULT,
-        lua_free_calls: GC_WIN_FREE_CALLS_RESULT,
-        gc_allocator_stats_available: GC_WIN_ALLOC_STATS_AVAILABLE,
-        gc_window_frames: GC_WIN_N,
-        gc_window_available: GC_WIN_RESULT >= 0.0,
-        gc_window_valid: GC_WIN_ACCOUNTING_VALID,
-        gc_window_mode_running: GC_WIN_MODE_RUNNING,
-        gc_collector_running_at_start: GC_WIN_COLLECTOR_RUNNING_AT_START,
-        gc_section_exclusive_kb_per_frame: GC_WIN_SECTION_EXCLUSIVE_SUM_RESULT,
-        gc_unsectioned_kb_per_frame: GC_WIN_UNSECTIONED_RESULT,
-        gc_accounting_residual_kb_per_frame: GC_WIN_RESIDUAL_RESULT,
-        gc_accounted_total_kb_per_frame: GC_WIN_ACCOUNTED_TOTAL_RESULT,
-        gc_cursor_residual_kb_per_frame: GC_WIN_CURSOR_RESIDUAL_RESULT,
-        gc_frame_samples: GC_WIN_FRAME_SAMPLES,
-        gc_dropped_events: GC_WIN_DROPPED_EVENTS,
-        gc_monotonic_failure: GC_WIN_MONOTONIC_FAILURE,
-        gc_unknown_sections: GC_WIN_UNKNOWN_SECTIONS,
-        gc_late_sections: GC_WIN_LATE_SECTIONS,
-        gc_late_pool_capacity: GC_WIN_LATE_POOL_CAPACITY,
-        gc_late_pool_exhausted: GC_WIN_LATE_POOL_EXHAUSTED,
-        gc_negative_frame_index: GC_WIN_NEGATIVE_FRAME_INDEX_RESULT,
-        gc_negative_section_id: GC_WIN_NEGATIVE_SECTION_ID_RESULT,
-        gc_negative_delta_kb: GC_WIN_NEGATIVE_DELTA_KB_RESULT,
-        gc_running_at_negative: GC_WIN_RUNNING_AT_NEGATIVE,
-        gc_open_sections: PROF_OPEN_TOP,
-        gc_section_events: if GC_WIN_RESULT >= 0.0 { gc_window_section_event_count() } else { -1 },
-        gc_frame_mean_kb: GC_WIN_FRAME_MEAN_RESULT,
-        gc_frame_p50_kb: GC_WIN_FRAME_P50_RESULT,
-        gc_frame_p95_kb: GC_WIN_FRAME_P95_RESULT,
-        gc_frame_p99_kb: GC_WIN_FRAME_P99_RESULT,
-        gc_frame_max_kb: GC_WIN_FRAME_MAX_RESULT,
-        gc_worst_frame_index: GC_WIN_WORST_FRAME_INDEX_RESULT,
-        gc_worst_frame_total_kb: GC_WIN_WORST_FRAME_TOTAL_KB_RESULT,
-        gc_worst_frame_max_single_event_section_id: GC_WIN_WORST_FRAME_SECTION_ID_RESULT,
-        gc_worst_frame_max_single_event_kb: GC_WIN_WORST_FRAME_SECTION_KB_RESULT,
-        gc_frame_section_slots: GC_WIN_FRAME_SECTION_SLOT_COUNT,
-        gc_frame_section_overflow: GC_WIN_FRAME_SECTION_OVERFLOW,
-        gc_cache_requests: TEXT_LAYOUT_CACHE_WINDOW_REQUESTS,
-        gc_cache_hits: TEXT_LAYOUT_CACHE_WINDOW_HITS,
-        gc_cache_misses: TEXT_LAYOUT_CACHE_WINDOW_MISSES,
-        gc_cache_builds: TEXT_LAYOUT_CACHE_WINDOW_BUILDS,
-        gc_cache_evictions: TEXT_LAYOUT_CACHE_WINDOW_EVICTIONS,
-        gc_cache_high_water: TEXT_LAYOUT_CACHE_WINDOW_HIGH_WATER,
-        gc_cache_entries_examined: TEXT_LAYOUT_CACHE_WINDOW_ENTRIES_EXAMINED,
-        gc_cache_max_entries_examined: TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED,
-        gc_world_layout_builds: TEXT_LAYOUT_CACHE_WINDOW_WORLD_BUILDS,
-        gc_cache_ui_requests: TEXT_LAYOUT_CACHE_WINDOW_UI_REQUESTS,
-        gc_cache_ui_hits: TEXT_LAYOUT_CACHE_WINDOW_UI_HITS,
-        gc_cache_ui_misses: TEXT_LAYOUT_CACHE_WINDOW_UI_MISSES,
-        gc_cache_ui_builds: TEXT_LAYOUT_CACHE_WINDOW_UI_BUILDS,
-        gc_cache_ui_evictions: TEXT_LAYOUT_CACHE_WINDOW_UI_EVICTIONS,
-        gc_cache_world_requests: TEXT_LAYOUT_CACHE_WINDOW_WORLD_REQUESTS,
-        gc_cache_world_hits: TEXT_LAYOUT_CACHE_WINDOW_WORLD_HITS,
-        gc_cache_world_misses: TEXT_LAYOUT_CACHE_WINDOW_WORLD_MISSES,
-        gc_cache_world_builds: TEXT_LAYOUT_CACHE_WINDOW_WORLD_BUILDS,
-        gc_cache_world_evictions: TEXT_LAYOUT_CACHE_WINDOW_WORLD_EVICTIONS,
-    }
-}
 
 fn dump_perf_summary() {
     PERF_OUT_PATH = env_var("PERF_OUT") ?? ""
@@ -2939,7 +2801,7 @@ fn dump_perf_summary() {
         dump_perf_summary_pretty(n, PROFILER.warmup_seconds,
             rendered.mean, rendered.p50, rendered.p99,
             PROFILER.worst_frame_time * 1000.0, collect_hierarchical_stats(),
-            stone_get_graphics_stats(), perf_memory_snapshot())
+            stone_get_graphics_stats())
     }
     perf_out_flush()
 }
@@ -3003,7 +2865,6 @@ fn dump_perf_summary_pretty(
     worst_ms: float,
     stats: [ProfileStats],
     gfx: GraphicsStats,
-    mem: MemStats,
 ) {
     let warmup_note = if warmup_s > 0.0 {
         ", warmup={warmup_s}s"
@@ -3054,7 +2915,7 @@ fn dump_perf_summary_pretty(
     perf_emit("\n")
     perf_emit("Graphics  draw_calls={gfx.draw_calls}  text_draws={gfx.text_draw_calls}  stream_uploads={gfx.stream_upload_calls}  stream_replacements={gfx.stream_storage_replacements}  stream_bytes={gfx.stream_upload_bytes}  streamed_vertices={gfx.streamed_vertices}  retained_uploads={gfx.retained_upload_calls}  retained_bytes={gfx.retained_upload_bytes}  retained_vertices={gfx.retained_uploaded_vertices}\n")
     perf_emit("Batches   world={RENDER_BATCH_MESH_LAST}/{RENDER_BATCH_ACTIVE_LAST}/{RENDER_BATCH_VERTS_LAST}v  ui={UI_RENDER_MESH_LAST}/{UI_RENDER_ACTIVE_LAST}/{UI_RENDER_VERTS_LAST}v  overlay={OVERLAY_RENDER_MESH_LAST}/{OVERLAY_RENDER_ACTIVE_LAST}/{OVERLAY_RENDER_VERTS_LAST}v  pool_world={RENDER_BATCHES.len()}  pool_ui={UI_RENDER_BATCHES.len()}  births_last={POOL_BIRTHS_LAST}\n")
-    perf_emit("Memory    heap avg {mem.heap_kb_avg:8.1f}  max {mem.heap_kb_max:8.1f} KB   heap_drops={mem.heap_drops}\n")
+    perf_emit("Memory    heap avg {PROFILE_HEAP_KB.mean:8.1f}  max {PROFILE_HEAP_KB.max:8.1f} KB   heap_drops={PROFILER.heap_drops}\n")
     let images = stone_get_image_profile_stats()
     perf_emit("Images    loads={images.load_calls} failures={images.load_failures} decoded={images.decoded_bytes}B load={images.load_us}us uploads={images.upload_calls} uploaded={images.upload_bytes}B wait={images.wait_us}us upload={images.upload_us}us active_frames={images.active_frames} max_wait={images.max_wait_us}us\n")
     let residency = residency_profile_stats()
@@ -3155,7 +3016,6 @@ pub fn profiler_perf_json() -> string {
     let mcode = if PERF_SECTION_HISTORY && PERF_FRAME_CAPTURE { perf_section_mcode_snapshot_json() } else { "null" }
     let stats = collect_hierarchical_stats()
     let gfx = stone_get_graphics_stats()
-    let mem = perf_memory_snapshot()
     let frame_ms = __perf_json_frame_ms(false)
     let frame_ms_trailing = __perf_json_frame_ms(true)
     let sections_json = __perf_json_sections(stats)
@@ -3163,7 +3023,7 @@ pub fn profiler_perf_json() -> string {
     let section_frames = __perf_json_section_frames(mcode)
     let stall_sections = __perf_json_stall_sections(stats)
     let observations_json = __perf_json_observations()
-    let mem_json = __perf_json_memory(mem)
+    let mem_json = __perf_json_memory()
     let graphics = "{{\"draw_calls\":{gfx.draw_calls},\"text_draws\":{gfx.text_draw_calls},\"shader_switches\":{gfx.shader_switches},\"canvas_switches\":{gfx.canvas_switches},\"stream_upload_calls\":{gfx.stream_upload_calls},\"stream_storage_replacements\":{gfx.stream_storage_replacements},\"stream_upload_bytes\":{gfx.stream_upload_bytes},\"streamed_vertices\":{gfx.streamed_vertices},\"retained_upload_calls\":{gfx.retained_upload_calls},\"retained_upload_bytes\":{gfx.retained_upload_bytes},\"retained_uploaded_vertices\":{gfx.retained_uploaded_vertices},\"world_active_batches\":{RENDER_BATCH_ACTIVE_LAST},\"world_mesh_batches\":{RENDER_BATCH_MESH_LAST},\"world_batch_vertices\":{RENDER_BATCH_VERTS_LAST},\"ui_active_batches\":{UI_RENDER_ACTIVE_LAST},\"ui_mesh_batches\":{UI_RENDER_MESH_LAST},\"ui_batch_vertices\":{UI_RENDER_VERTS_LAST},\"overlay_active_batches\":{OVERLAY_RENDER_ACTIVE_LAST},\"overlay_mesh_batches\":{OVERLAY_RENDER_MESH_LAST},\"overlay_batch_vertices\":{OVERLAY_RENDER_VERTS_LAST},\"pool_world\":{RENDER_BATCHES.len()},\"pool_ui\":{UI_RENDER_BATCHES.len()},\"births_last\":{POOL_BIRTHS_LAST}}}"
     let resources = perf_resources_json()
     let gpu_scopes = stone_gpu_scopes_json()
@@ -3487,56 +3347,58 @@ fn __perf_json_observations() -> string {
     return "[{join(parts, \",\")}]"
 }
 
-fn __perf_json_memory(mem: MemStats) -> string {
+fn __perf_json_memory() -> string {
+    let available = GC_WIN_RESULT >= 0.0
+    let section_event_count = if available { gc_window_section_event_count() } else { -1 }
     let heap = __perf_json_metric(PROFILE_HEAP_KB)
-    let requested = if mem.gc_window_frames > 0 {
-        "{mem.gc_window_frames}"
+    let requested = if GC_WIN_N > 0 {
+        "{GC_WIN_N}"
     } else { "null" }
-    let measured = if mem.gc_window_available {
-        "{mem.gc_window_frames}"
+    let measured = if available {
+        "{GC_WIN_N}"
     } else { "null" }
-    let mode = if !mem.gc_window_available {
+    let mode = if !available {
         "null"
-    } else if mem.gc_window_mode_running {
+    } else if GC_WIN_MODE_RUNNING {
         "\"running\""
     } else { "\"stopped\"" }
-    let collector_running_at_start = if mem.gc_window_available {
-        "{mem.gc_collector_running_at_start}"
+    let collector_running_at_start = if available {
+        "{GC_WIN_COLLECTOR_RUNNING_AT_START}"
     } else { "null" }
-    let section_events = __perf_json_nullable_int(mem.gc_section_events)
-    let monotonic_failure = if mem.gc_window_available {
-        "{mem.gc_monotonic_failure}"
+    let section_events = __perf_json_nullable_int(section_event_count)
+    let monotonic_failure = if available {
+        "{GC_WIN_MONOTONIC_FAILURE}"
     } else { "null" }
-    let running_at_negative = if mem.gc_window_available {
-        "{mem.gc_running_at_negative}"
+    let running_at_negative = if available {
+        "{GC_WIN_RUNNING_AT_NEGATIVE}"
     } else { "null" }
-    let negative_sample = if !mem.gc_window_available {
+    let negative_sample = if !available {
         "null"
-    } else if mem.gc_negative_frame_index >= 0 {
-        "{{\"frame_index\":{mem.gc_negative_frame_index},\"section_id\":{__perf_json_nullable_int(mem.gc_negative_section_id)},\"delta_kb\":{mem.gc_negative_delta_kb:.4f}}}"
+    } else if GC_WIN_NEGATIVE_FRAME_INDEX_RESULT >= 0 {
+        "{{\"frame_index\":{GC_WIN_NEGATIVE_FRAME_INDEX_RESULT},\"section_id\":{__perf_json_nullable_int(GC_WIN_NEGATIVE_SECTION_ID_RESULT)},\"delta_kb\":{GC_WIN_NEGATIVE_DELTA_KB_RESULT:.4f}}}"
     } else {
         "{{\"frame_index\":null,\"section_id\":null,\"delta_kb\":null}}"
     }
-    let distribution = "{{\"mean_kb_per_frame\":{__perf_json_gc_float(mem.gc_frame_mean_kb, mem.gc_window_available)},\"p50_kb_per_frame\":{__perf_json_gc_float(mem.gc_frame_p50_kb, mem.gc_window_available)},\"p95_kb_per_frame\":{__perf_json_gc_float(mem.gc_frame_p95_kb, mem.gc_window_available)},\"p99_kb_per_frame\":{__perf_json_gc_float(mem.gc_frame_p99_kb, mem.gc_window_available)},\"max_kb_per_frame\":{__perf_json_gc_float(mem.gc_frame_max_kb, mem.gc_window_available)}}}"
-    let allocator_available = mem.gc_window_available && mem.gc_allocator_stats_available
-    let worst_frame = "{{\"frame_index\":{__perf_json_gc_int(mem.gc_worst_frame_index, mem.gc_window_available)},\"total_kb\":{__perf_json_gc_float(mem.gc_worst_frame_total_kb, mem.gc_window_available)},\"max_single_event\":{{\"section_id\":{__perf_json_gc_int(mem.gc_worst_frame_max_single_event_section_id, mem.gc_window_available)},\"kb\":{__perf_json_gc_float(mem.gc_worst_frame_max_single_event_kb, mem.gc_window_available)}}},\"sections\":{__perf_json_worst_frame_sections(mem.gc_window_available)}}}"
-    let cache = if mem.gc_cache_requests >= 0 {
-        let examined_avg = if mem.gc_cache_requests > 0 {
-            (mem.gc_cache_entries_examined as float) / (mem.gc_cache_requests as float)
+    let distribution = "{{\"mean_kb_per_frame\":{__perf_json_gc_float(GC_WIN_FRAME_MEAN_RESULT, available)},\"p50_kb_per_frame\":{__perf_json_gc_float(GC_WIN_FRAME_P50_RESULT, available)},\"p95_kb_per_frame\":{__perf_json_gc_float(GC_WIN_FRAME_P95_RESULT, available)},\"p99_kb_per_frame\":{__perf_json_gc_float(GC_WIN_FRAME_P99_RESULT, available)},\"max_kb_per_frame\":{__perf_json_gc_float(GC_WIN_FRAME_MAX_RESULT, available)}}}"
+    let allocator_available = available && GC_WIN_ALLOC_STATS_AVAILABLE
+    let worst_frame = "{{\"frame_index\":{__perf_json_gc_int(GC_WIN_WORST_FRAME_INDEX_RESULT, available)},\"total_kb\":{__perf_json_gc_float(GC_WIN_WORST_FRAME_TOTAL_KB_RESULT, available)},\"max_single_event\":{{\"section_id\":{__perf_json_gc_int(GC_WIN_WORST_FRAME_SECTION_ID_RESULT, available)},\"kb\":{__perf_json_gc_float(GC_WIN_WORST_FRAME_SECTION_KB_RESULT, available)}}},\"sections\":{__perf_json_worst_frame_sections(available)}}}"
+    let cache = if TEXT_LAYOUT_CACHE_WINDOW_REQUESTS >= 0 {
+        let examined_avg = if TEXT_LAYOUT_CACHE_WINDOW_REQUESTS > 0 {
+            (TEXT_LAYOUT_CACHE_WINDOW_ENTRIES_EXAMINED as float) / (TEXT_LAYOUT_CACHE_WINDOW_REQUESTS as float)
         } else { 0.0 }
-        "{{\"requests\":{mem.gc_cache_requests},\"hits\":{mem.gc_cache_hits},\"misses\":{mem.gc_cache_misses},\"builds\":{mem.gc_cache_builds},\"evictions\":{mem.gc_cache_evictions},\"high_water\":{mem.gc_cache_high_water},\"avg_entries_examined\":{examined_avg:.4f},\"max_entries_examined\":{mem.gc_cache_max_entries_examined},\"world_layout_builds\":{mem.gc_world_layout_builds},\"ui\":{{\"requests\":{mem.gc_cache_ui_requests},\"hits\":{mem.gc_cache_ui_hits},\"misses\":{mem.gc_cache_ui_misses},\"builds\":{mem.gc_cache_ui_builds},\"evictions\":{mem.gc_cache_ui_evictions}}},\"world\":{{\"requests\":{mem.gc_cache_world_requests},\"hits\":{mem.gc_cache_world_hits},\"misses\":{mem.gc_cache_world_misses},\"builds\":{mem.gc_cache_world_builds},\"evictions\":{mem.gc_cache_world_evictions}}}}}"
+        "{{\"requests\":{TEXT_LAYOUT_CACHE_WINDOW_REQUESTS},\"hits\":{TEXT_LAYOUT_CACHE_WINDOW_HITS},\"misses\":{TEXT_LAYOUT_CACHE_WINDOW_MISSES},\"builds\":{TEXT_LAYOUT_CACHE_WINDOW_BUILDS},\"evictions\":{TEXT_LAYOUT_CACHE_WINDOW_EVICTIONS},\"high_water\":{TEXT_LAYOUT_CACHE_WINDOW_HIGH_WATER},\"avg_entries_examined\":{examined_avg:.4f},\"max_entries_examined\":{TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED},\"world_layout_builds\":{TEXT_LAYOUT_CACHE_WINDOW_WORLD_BUILDS},\"ui\":{{\"requests\":{TEXT_LAYOUT_CACHE_WINDOW_UI_REQUESTS},\"hits\":{TEXT_LAYOUT_CACHE_WINDOW_UI_HITS},\"misses\":{TEXT_LAYOUT_CACHE_WINDOW_UI_MISSES},\"builds\":{TEXT_LAYOUT_CACHE_WINDOW_UI_BUILDS},\"evictions\":{TEXT_LAYOUT_CACHE_WINDOW_UI_EVICTIONS}}},\"world\":{{\"requests\":{TEXT_LAYOUT_CACHE_WINDOW_WORLD_REQUESTS},\"hits\":{TEXT_LAYOUT_CACHE_WINDOW_WORLD_HITS},\"misses\":{TEXT_LAYOUT_CACHE_WINDOW_WORLD_MISSES},\"builds\":{TEXT_LAYOUT_CACHE_WINDOW_WORLD_BUILDS},\"evictions\":{TEXT_LAYOUT_CACHE_WINDOW_WORLD_EVICTIONS}}}}}"
     } else { "null" }
-    let unknown_sections = __perf_json_gc_int(mem.gc_unknown_sections, mem.gc_window_available)
-    let late_sections = __perf_json_gc_int(mem.gc_late_sections, mem.gc_window_available)
-    let late_capacity = __perf_json_gc_int(mem.gc_late_pool_capacity, mem.gc_window_available)
-    let late_exhausted = __perf_json_gc_int(mem.gc_late_pool_exhausted, mem.gc_window_available)
+    let unknown_sections = __perf_json_gc_int(GC_WIN_UNKNOWN_SECTIONS, available)
+    let late_sections = __perf_json_gc_int(GC_WIN_LATE_SECTIONS, available)
+    let late_capacity = __perf_json_gc_int(GC_WIN_LATE_POOL_CAPACITY, available)
+    let late_exhausted = __perf_json_gc_int(GC_WIN_LATE_POOL_EXHAUSTED, available)
     let unknown_diagnostics = gc_window_unknown_sections_json()
-    let split = gc_window_split_json(mem.gc_window_available)
-    let trace = gc_window_trace_json(mem.gc_window_available)
+    let split = gc_window_split_json(available)
+    let trace = gc_window_trace_json(available)
     let requested_start = get_env_int("PERF_GC_WINDOW_START", 100)
     let after_warmup = os_getenv("PERF_GC_WINDOW_AFTER_WARMUP") == "1"
-    let gc_window = "{{\"requested_start_frame\":{requested_start},\"after_warmup\":{after_warmup},\"allocation_split\":{split},\"jit_trace\":{trace},\"start_frame\":{__perf_json_gc_int(GC_WIN_START, mem.gc_window_available)},\"requested_frames\":{requested},\"measured_frames\":{measured},\"available\":{mem.gc_window_available},\"valid\":{mem.gc_window_valid},\"mode\":{mode},\"collector_running_at_start\":{collector_running_at_start},\"gross_request_kb_per_frame\":{__perf_json_gc_float(mem.gross_lua_alloc_request_kb_per_frame, mem.gc_window_available)},\"positive_growth_kb_per_frame\":{__perf_json_gc_float(mem.positive_lua_growth_kb_per_frame, allocator_available)},\"explicit_free_kb_per_frame\":{__perf_json_gc_float(mem.explicit_lua_free_kb_per_frame, allocator_available)},\"reallocation_shrink_kb_per_frame\":{__perf_json_gc_float(mem.lua_reallocation_shrink_kb_per_frame, allocator_available)},\"allocator_calls\":{__perf_json_gc_int(mem.lua_allocator_calls, allocator_available)},\"allocation_calls\":{__perf_json_gc_int(mem.lua_allocation_calls, allocator_available)},\"reallocation_calls\":{__perf_json_gc_int(mem.lua_reallocation_calls, allocator_available)},\"free_calls\":{__perf_json_gc_int(mem.lua_free_calls, allocator_available)},\"accounted_total_kb_per_frame\":{__perf_json_gc_float(mem.gc_accounted_total_kb_per_frame, mem.gc_window_available)},\"sum_exclusive_section_kb_per_frame\":{__perf_json_gc_float(mem.gc_section_exclusive_kb_per_frame, mem.gc_window_available)},\"unsectioned_kb_per_frame\":{__perf_json_gc_float(mem.gc_unsectioned_kb_per_frame, mem.gc_window_available)},\"accounting_residual_kb_per_frame\":{__perf_json_gc_float(mem.gc_accounting_residual_kb_per_frame, mem.gc_window_available)},\"cursor_residual_kb_per_frame\":{__perf_json_gc_float(mem.gc_cursor_residual_kb_per_frame, mem.gc_window_available)},\"frame_samples\":{__perf_json_gc_int(mem.gc_frame_samples, mem.gc_window_available)},\"dropped_events\":{__perf_json_gc_int(mem.gc_dropped_events, mem.gc_window_available)},\"unknown_sections\":{unknown_sections},\"unknown_section_diagnostics\":{unknown_diagnostics},\"late_sections\":{late_sections},\"late_pool_capacity\":{late_capacity},\"late_pool_exhausted\":{late_exhausted},\"frame_section_slots\":{__perf_json_gc_int(mem.gc_frame_section_slots, mem.gc_window_available)},\"frame_section_overflow\":{__perf_json_gc_int(mem.gc_frame_section_overflow, mem.gc_window_available)},\"monotonic_failure\":{monotonic_failure},\"running_at_negative\":{running_at_negative},\"negative_sample\":{negative_sample},\"open_sections\":{__perf_json_gc_int(mem.gc_open_sections, mem.gc_window_available)},\"section_events\":{section_events},\"frame_distribution\":{distribution},\"worst_frame\":{worst_frame},\"text_layout_cache\":{cache}}}"
-    return "{{\"heap_kb\":{heap},\"heap_drops\":{mem.heap_drops},\"gross_lua_alloc_request_kb_per_frame\":{__perf_json_gc_float(mem.gross_lua_alloc_request_kb_per_frame, mem.gc_window_available)},\"gc_window\":{gc_window}}}"
+    let gc_window = "{{\"requested_start_frame\":{requested_start},\"after_warmup\":{after_warmup},\"allocation_split\":{split},\"jit_trace\":{trace},\"start_frame\":{__perf_json_gc_int(GC_WIN_START, available)},\"requested_frames\":{requested},\"measured_frames\":{measured},\"available\":{available},\"valid\":{GC_WIN_ACCOUNTING_VALID},\"mode\":{mode},\"collector_running_at_start\":{collector_running_at_start},\"gross_request_kb_per_frame\":{__perf_json_gc_float(GC_WIN_RESULT, available)},\"positive_growth_kb_per_frame\":{__perf_json_gc_float(GC_WIN_POSITIVE_GROWTH_RESULT, allocator_available)},\"explicit_free_kb_per_frame\":{__perf_json_gc_float(GC_WIN_EXPLICIT_FREE_RESULT, allocator_available)},\"reallocation_shrink_kb_per_frame\":{__perf_json_gc_float(GC_WIN_REALLOC_SHRINK_RESULT, allocator_available)},\"allocator_calls\":{__perf_json_gc_int(GC_WIN_ALLOC_CALLS_RESULT, allocator_available)},\"allocation_calls\":{__perf_json_gc_int(GC_WIN_ALLOCATION_CALLS_RESULT, allocator_available)},\"reallocation_calls\":{__perf_json_gc_int(GC_WIN_REALLOCATION_CALLS_RESULT, allocator_available)},\"free_calls\":{__perf_json_gc_int(GC_WIN_FREE_CALLS_RESULT, allocator_available)},\"accounted_total_kb_per_frame\":{__perf_json_gc_float(GC_WIN_ACCOUNTED_TOTAL_RESULT, available)},\"sum_exclusive_section_kb_per_frame\":{__perf_json_gc_float(GC_WIN_SECTION_EXCLUSIVE_SUM_RESULT, available)},\"unsectioned_kb_per_frame\":{__perf_json_gc_float(GC_WIN_UNSECTIONED_RESULT, available)},\"accounting_residual_kb_per_frame\":{__perf_json_gc_float(GC_WIN_RESIDUAL_RESULT, available)},\"cursor_residual_kb_per_frame\":{__perf_json_gc_float(GC_WIN_CURSOR_RESIDUAL_RESULT, available)},\"frame_samples\":{__perf_json_gc_int(GC_WIN_FRAME_SAMPLES, available)},\"dropped_events\":{__perf_json_gc_int(GC_WIN_DROPPED_EVENTS, available)},\"unknown_sections\":{unknown_sections},\"unknown_section_diagnostics\":{unknown_diagnostics},\"late_sections\":{late_sections},\"late_pool_capacity\":{late_capacity},\"late_pool_exhausted\":{late_exhausted},\"frame_section_slots\":{__perf_json_gc_int(GC_WIN_FRAME_SECTION_SLOT_COUNT, available)},\"frame_section_overflow\":{__perf_json_gc_int(GC_WIN_FRAME_SECTION_OVERFLOW, available)},\"monotonic_failure\":{monotonic_failure},\"running_at_negative\":{running_at_negative},\"negative_sample\":{negative_sample},\"open_sections\":{__perf_json_gc_int(PROF_OPEN_TOP, available)},\"section_events\":{section_events},\"frame_distribution\":{distribution},\"worst_frame\":{worst_frame},\"text_layout_cache\":{cache}}}"
+    return "{{\"heap_kb\":{heap},\"heap_drops\":{PROFILER.heap_drops},\"gross_lua_alloc_request_kb_per_frame\":{__perf_json_gc_float(GC_WIN_RESULT, available)},\"gc_window\":{gc_window}}}"
 }
 
 
