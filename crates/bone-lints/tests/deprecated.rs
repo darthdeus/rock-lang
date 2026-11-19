@@ -43,7 +43,7 @@ fn resolves_overloads_and_does_not_warn_at_the_declaration() {
 fn honors_suppression_and_selection() {
     let src = "@deprecated\nfn old() {}\nfn main() {\n    // rock: allow(deprecated)\n    old()\n    old() // rock: allow(deprecated)\n}";
     assert!(findings(src).is_empty(), "{:?}", findings(src));
-    assert!(crate::support::lint_only(&[("<deprecated>", src)], "stdlib_ufcs").is_empty());
+    assert!(crate::support::lint_only(&[("<deprecated>", src)], "unused_var").is_empty());
 }
 
 #[test]

@@ -1,6 +1,6 @@
 //! Run build lints and apply the invocation's reporting policy.
 
-use bone_core::prelude::{FxHashMap, FxHashSet, ModuleId, Ustr};
+use bone_core::prelude::{FxHashMap, FxHashSet, Ustr};
 use bone_semantic::inference::Workspace;
 use rock_core::{CompilerError, SourceFiles};
 use std::path::Path;
@@ -234,10 +234,6 @@ pub fn findings_with(
     })
 }
 
-pub fn report_files(sources: &SourceFiles, root: &Path) -> FxHashSet<Ustr> {
-    with_source_texts(sources, |texts| owned_files(texts, root))
-}
-
 fn owned_files(texts: &FxHashMap<Ustr, &str>, root: &Path) -> FxHashSet<Ustr> {
     let owned = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     texts
@@ -299,13 +295,6 @@ pub(crate) fn unused_fns_under(
         }
         out
     })
-}
-
-/// The modules of `ws` this build does not own -- [`skull::pipeline::warm_module_ids`] for a
-/// caller holding only the `SourceFiles`. `rock lint` needs it to validate
-/// `--ignore-types` against the project's own type names.
-pub(crate) fn warm_modules(ws: &Workspace, sources: &SourceFiles) -> FxHashSet<ModuleId> {
-    with_source_texts(sources, |texts| skull::pipeline::warm_module_ids(ws, texts))
 }
 
 fn with_source_texts<R>(

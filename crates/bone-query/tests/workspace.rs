@@ -368,35 +368,6 @@ fn project_lints() {
             )),
             &[],
         ),
-        // `backend_sibling_mismatch` is an explicit parity audit, not an LSP lint.
-        (
-            "mismatched backend siblings",
-            &[
-                ("stick.toml", lib),
-                (
-                    "m.rock",
-                    "inline(lua) fn probe(x: int) -> int = \"return x\"\ninline(js) fn probe(x: float) -> int = \"return x;\"\n",
-                ),
-            ],
-            "m.rock",
-            "m.rock",
-            None,
-            &["backend_sibling_mismatch", "backend sibling mismatch"],
-        ),
-        (
-            "matching backend siblings",
-            &[
-                ("stick.toml", lib),
-                (
-                    "m.rock",
-                    "inline(lua) fn probe(x: int) -> int = \"return x\"\ninline(js) fn probe(x: int) -> int = \"return x;\"\n",
-                ),
-            ],
-            "m.rock",
-            "m.rock",
-            None,
-            &["backend_sibling_mismatch", "backend sibling mismatch"],
-        ),
     ];
     for (case, files, opened, checked, wanted, unwanted) in cases {
         let project = Project::new(files);

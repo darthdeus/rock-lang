@@ -1,4 +1,4 @@
-use bone_lints::{KNOWN_LINTS, LintOptions, lint_workspace};
+use bone_lints::{KNOWN_LINTS, lint_workspace};
 use bone_semantic::prelude::*;
 use rock_core::errors::CompilerErrorLevel;
 
@@ -44,17 +44,4 @@ fn catalog_suppression() {
         let fs = crate::lint(&[(FILE, &src)], &Default::default(), true);
         assert_eq!(fs.iter().map(|f| f.lint).collect::<Vec<_>>(), ["unused_fn"]);
     }
-}
-
-#[test]
-fn backend_sibling_mismatch_is_opt_in() {
-    let src = "inline(lua) fn probe(x: int) -> int = \"return x\"\ninline(js) fn probe(x: float) -> int = \"return x;\"\nfn main() {}";
-    let lint = bone_lints::BACKEND_SIBLING_MISMATCH;
-    assert!(
-        crate::lint(&[(FILE, src)], &Default::default(), true)
-            .iter()
-            .all(|f| f.lint != lint)
-    );
-    let fs = crate::lint(&[(FILE, src)], &LintOptions::only([lint.to_owned()]), true);
-    assert!(fs.iter().any(|f| f.lint == lint));
 }

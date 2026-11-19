@@ -1,8 +1,8 @@
 //! Lints over bone's typechecked HIR. Reads semantic results without re-typechecking.
 
 use bone_core::hir::{
-    AnnoValue, BinOp, BindingInfo, BindingKind, BodyOwner, Callee, Expr, FnBackend, Function,
-    Module, Statement, TyId, TypeCtor, TypeExpr,
+    AnnoValue, BinOp, BindingInfo, BindingKind, BodyOwner, Callee, Expr, Function, Module,
+    Statement, TyId, TypeCtor, TypeExpr,
 };
 use bone_core::prelude::*;
 use bone_core::workspace::{BodyInference, BoundNext, BoundTree};
@@ -11,7 +11,8 @@ use std::collections::BTreeSet;
 use std::hash::Hash;
 
 mod call_lints;
-pub use call_lints::{DEPRECATED, STDLIB_UFCS};
+pub use call_lints::DEPRECATED;
+use call_lints::deprecated_calls_in_body;
 
 fn unused_vars_in_body_with_metadata(
     body: &Body,
@@ -142,11 +143,7 @@ pub const KNOWN_LINTS: &[&str] = &[
     UNUSED_PURE_EXPR,
     TRANSMUTE_OF_NULLABLE,
     TASK_NULL_ABANDON,
-    BACKEND_SIBLING_MISMATCH,
-    METHOD_SYNTAX,
-    STDLIB_UFCS,
     DEPRECATED,
-    ROW_ESCAPE,
     RAW_INPUT_MIGRATION,
     RAW_INPUT_CLASSIFICATION,
     ACTION_CALLERS,
@@ -155,10 +152,6 @@ pub const KNOWN_LINTS: &[&str] = &[
 /// Lints excluded from the default selection. These often produce broad
 /// migration or audit findings and must be selected explicitly.
 pub const OPT_IN_LINTS: &[&str] = &[
-    BACKEND_SIBLING_MISMATCH,
-    METHOD_SYNTAX,
-    STDLIB_UFCS,
-    ROW_ESCAPE,
     RAW_INPUT_MIGRATION,
     RAW_INPUT_CLASSIFICATION,
     ACTION_CALLERS,
@@ -172,8 +165,6 @@ pub use rock_host::stick::ActionLayerPolicy;
 pub struct LintOptions {
     action_policy: Option<std::sync::Arc<ActionLayerPolicy>>,
     only: Option<Vec<String>>,
-    only_types: Option<FxHashSet<Ustr>>,
-    ignore_types: FxHashSet<Ustr>,
 }
 
 impl LintOptions {
@@ -189,28 +180,6 @@ impl LintOptions {
             only: Some(names.into_iter().collect()),
             ..Default::default()
         }
-    }
-
-    /// Exclude these receiver types from the `method_syntax` sweep.
-    pub fn ignoring_types(mut self, names: impl IntoIterator<Item = Ustr>) -> Self {
-        self.ignore_types = names.into_iter().collect();
-        self
-    }
-
-    /// Restrict `method_syntax` to these receiver types. Composes with
-    /// [`LintOptions::ignoring_types`], which subtracts from this set.
-    pub fn over_types(mut self, names: impl IntoIterator<Item = Ustr>) -> Self {
-        self.only_types = Some(names.into_iter().collect());
-        self
-    }
-
-    /// Whether `method_syntax` may report over receiver type `name`.
-    pub(crate) fn covers_type(&self, name: Ustr) -> bool {
-        let name = Ustr::from(bone_core::modules::display_name(name.as_str()));
-        self.only_types
-            .as_ref()
-            .is_none_or(|only| only.contains(&name))
-            && !self.ignore_types.contains(&name)
     }
 
     pub fn enabled(&self, lint: &str) -> bool {
@@ -1395,18 +1364,7 @@ impl IncrementalLintCache {
         self.files.remove(&file);
         let mut cached = CachedFileFindings::new(source);
         if let Some(module) = ws.user_modules(warm).find(|module| module.file == file) {
-            debug_assert!(
-                !sel.enabled(METHOD_SYNTAX),
-                "method_syntax is not cacheable"
-            );
-            for finding in local_findings(
-                ws,
-                module,
-                &self.variants,
-                source,
-                sel,
-                &FxHashSet::default(),
-            ) {
+            for finding in local_findings(ws, module, &self.variants, source, sel) {
                 cached.add_raw_local(module, finding);
             }
             cached.index_bodies(module);
@@ -1597,18 +1555,15 @@ fn remove_from_set<K: Eq + Hash, V: Eq + Hash>(
 }
 
 fn is_global_lint(lint: &str) -> bool {
-    matches!(lint, UNUSED_FN | BACKEND_SIBLING_MISMATCH | ACTION_CALLERS)
+    matches!(lint, UNUSED_FN | ACTION_CALLERS)
 }
 
 fn cacheable_selection(sel: &LintOptions) -> bool {
-    sel.only.is_none() && sel.only_types.is_none() && sel.ignore_types.is_empty()
+    sel.only.is_none()
 }
 
 fn is_inference_lint(lint: &str) -> bool {
-    matches!(
-        lint,
-        TRANSMUTE_OF_NULLABLE | TASK_NULL_ABANDON | ROW_ESCAPE | STDLIB_UFCS | DEPRECATED
-    )
+    matches!(lint, TRANSMUTE_OF_NULLABLE | TASK_NULL_ABANDON | DEPRECATED)
 }
 
 fn finding_offset(finding: &Finding) -> usize {
@@ -1775,15 +1730,8 @@ fn inference_body_findings(
         let found = task_null_abandon_in_body(ws, bi, body);
         out.extend(found);
     }
-    if sel.enabled(ROW_ESCAPE) {
-        out.extend(
-            row_escapes_in_body(ws, bi, body, tail_sink(module, &owner))
-                .into_iter()
-                .map(RowEscape::finding),
-        );
-    }
-    if sel.enabled(STDLIB_UFCS) || sel.enabled(DEPRECATED) {
-        out.extend(call_lints::findings(ws, bi, body, sel));
+    if sel.enabled(DEPRECATED) {
+        out.extend(deprecated_calls_in_body(ws, bi, body));
     }
     out
 }
@@ -1794,17 +1742,12 @@ fn local_findings(
     variants: &FxHashSet<Ustr>,
     src: &str,
     sel: &LintOptions,
-    types: &FxHashSet<Ustr>,
 ) -> Vec<Finding> {
     let mut out: Vec<Finding> = module
         .bodies
         .iter()
         .flat_map(|(owner, body)| flat_body_findings(module, *owner, body, variants, sel))
         .collect();
-    if sel.enabled(METHOD_SYNTAX) {
-        let found = method_syntax_in_module(ws, module, types, src);
-        out.extend(found);
-    }
     if sel.enabled(RAW_INPUT_MIGRATION)
         && let Some(policy) = sel.action_policy.as_deref()
     {
@@ -1853,16 +1796,6 @@ fn workspace_findings_by_file(
     let mut out: FxHashMap<Ustr, Vec<Finding>> = FxHashMap::default();
     if is_bin && sel.enabled(UNUSED_FN) {
         out = unused_fns_by_file(ws, warm, reachable);
-    }
-    if sel.enabled(BACKEND_SIBLING_MISMATCH) {
-        // Warm declarations participate in sibling checks, but are not reported on.
-        let warm_files: FxHashSet<Ustr> = warm.iter().map(|&mid| ws.module(mid).file).collect();
-        for (file, findings) in backend_sibling_mismatches_by_file(ws) {
-            if warm_files.contains(&file) {
-                continue;
-            }
-            out.entry(file).or_default().extend(findings);
-        }
     }
     if sel.enabled(ACTION_CALLERS)
         && let Some(policy) = sel.action_policy.as_deref()
@@ -1919,13 +1852,6 @@ fn lint_modules<'ws, T: Send>(
 ) -> Vec<T> {
     let mut by_file = workspace_findings_by_file(ws, warm, is_bin, sel, reachable);
     let variants = enum_variant_names(ws, warm);
-    let types = if sel.enabled(METHOD_SYNTAX) {
-        let mut names = nominal_type_names(ws, warm);
-        names.retain(|&n| sel.covers_type(n));
-        names
-    } else {
-        FxHashSet::default()
-    };
     let mut per_module = Vec::new();
     for module in ws.user_modules(warm) {
         let Some(&src) = sources.get(&module.file) else {
@@ -1939,7 +1865,7 @@ fn lint_modules<'ws, T: Send>(
     per_module
         .into_par_iter()
         .map(|(module, src, workspace_findings)| {
-            let mut found = local_findings(ws, module, &variants, src, sel, &types);
+            let mut found = local_findings(ws, module, &variants, src, sel);
             found.extend(workspace_findings.into_iter().flatten());
             report(
                 module,
@@ -2020,161 +1946,6 @@ fn allow_args_name(args: &str, lint_name: &str) -> bool {
         rest.chars().next(),
         None | Some(' ') | Some('\t') | Some(',') | Some(')')
     )
-}
-
-pub const BACKEND_SIBLING_MISMATCH: &str = "backend_sibling_mismatch";
-
-/// Declaration data used by sibling comparison.
-#[derive(Clone, Debug)]
-struct SiblingDecl {
-    name: Ustr,
-    signature: String,
-    ret: String,
-    backend: FnBackend,
-    span: Span,
-    file: Ustr,
-}
-
-fn sibling_decl(ws: &Workspace, mid: ModuleId, fid: Idx<Function>) -> SiblingDecl {
-    let module = ws.module(mid);
-    let function = &module.functions[fid];
-    SiblingDecl {
-        name: function.name,
-        signature: format!(
-            "({})",
-            function
-                .param_decls
-                .iter()
-                .map(|p| ws.render(None, p.ty))
-                .join(", ")
-        ),
-        ret: function
-            .return_ty
-            .map(|ty| ws.render(None, ty))
-            .unwrap_or_else(|| "()".to_string()),
-        backend: function.backend,
-        span: function.name_span,
-        file: module.file,
-    }
-}
-
-/// Backend name, or `None` for portable `Any`, which serves every backend.
-fn backend_name(b: FnBackend) -> Option<&'static str> {
-    match b {
-        FnBackend::Lua => Some("lua"),
-        FnBackend::Js => Some("js"),
-        FnBackend::Any => None,
-    }
-}
-
-/// Report declarations whose overloads differ across concrete backends. The
-/// rendered parameter list is the overload key; portable `Any` declarations
-/// serve every backend, and names on only one backend are not mismatches.
-/// Stdlib declarations participate, but findings belong to the file of each
-/// offending declaration.
-pub(crate) fn backend_sibling_mismatches_by_file(ws: &Workspace) -> FxHashMap<Ustr, Vec<Finding>> {
-    let mut out: FxHashMap<Ustr, Vec<Finding>> = FxHashMap::default();
-    for decls in ws.functions_by_name.values() {
-        for finding in sibling_set_mismatches(ws, decls) {
-            let file = finding.1;
-            out.entry(file).or_default().push(finding.0);
-        }
-    }
-    out
-}
-
-/// Whether declarations span two concrete backends, the sibling-set precondition.
-fn spans_two_backends(ws: &Workspace, decls: &[(ModuleId, Idx<Function>)]) -> bool {
-    let mut seen: Option<&'static str> = None;
-    for &(mid, fid) in decls {
-        if mid.is_builtin() {
-            continue;
-        }
-        let Some(b) = backend_name(ws.module(mid).functions[fid].backend) else {
-            continue;
-        };
-        match seen {
-            None => seen = Some(b),
-            Some(prev) if prev != b => return true,
-            Some(_) => {}
-        }
-    }
-    false
-}
-
-/// Findings for one name's declaration set, paired with their source files.
-fn sibling_set_mismatches(
-    ws: &Workspace,
-    decls: &[(ModuleId, Idx<Function>)],
-) -> Vec<(Finding, Ustr)> {
-    if decls.len() < 2 {
-        return Vec::new();
-    }
-    // Avoid rendering signatures for name sets that cannot be siblings.
-    if !spans_two_backends(ws, decls) {
-        return Vec::new();
-    }
-    let infos: Vec<SiblingDecl> = decls
-        .iter()
-        .filter(|(mid, _)| !mid.is_builtin())
-        .map(|&(mid, fid)| sibling_decl(ws, mid, fid))
-        .collect();
-
-    let concrete: Vec<&'static str> = infos
-        .iter()
-        .filter_map(|d| backend_name(d.backend))
-        .unique()
-        .collect();
-    if concrete.len() < 2 {
-        return Vec::new();
-    }
-
-    let mut out = Vec::new();
-    for d in &infos {
-        let Some(here) = backend_name(d.backend) else {
-            continue;
-        };
-        for &other in &concrete {
-            if other == here {
-                continue;
-            }
-            let served = infos.iter().any(|o| {
-                o.signature == d.signature && backend_name(o.backend).is_none_or(|b| b == other)
-            });
-            if !served {
-                out.push((
-                    Finding::warning(
-                        BACKEND_SIBLING_MISMATCH,
-                        d.span,
-                        format!(
-                            "backend sibling mismatch: `{}{}` declared for `{here}` but no `{other}` declaration has this signature -- \
-                             a `{other}` build cannot emit a call to it",
-                            d.name, d.signature
-                        ),
-                    ),
-                    d.file,
-                ));
-            }
-        }
-        if let Some(o) = infos
-            .iter()
-            .find(|o| o.signature == d.signature && o.ret != d.ret && o.backend != d.backend)
-        {
-            out.push((
-                Finding::warning(
-                    BACKEND_SIBLING_MISMATCH,
-                    d.span,
-                    format!(
-                        "backend sibling mismatch: `{}{}` returns a different type than its `{}` sibling (`{}`) -- \
-                         overloads key on params, so these are one overload with two answers",
-                        d.name, d.signature, backend_name(o.backend).unwrap_or("portable"), o.ret
-                    ),
-                ),
-                d.file,
-            ));
-        }
-    }
-    out
 }
 
 pub const UNUSED_FN: &str = "unused_fn";
@@ -2521,8 +2292,6 @@ fn head_ty(ws: &Workspace, bi: &BodyInference, ty: TyId) -> (TyId, TypeExpr) {
     ws.resolve_ty(Some(bi), ty).expect("body supplied")
 }
 
-pub(crate) const METHOD_SYNTAX: &str = "method_syntax";
-
 /// A direct call to an input observation primitive in a user module.
 #[derive(Clone, Debug)]
 pub(crate) struct RawInputSite {
@@ -2713,231 +2482,6 @@ fn missing_action_caller(policy: &ActionLayerPolicy, action: Ustr, span: Span) -
             policy.production_label
         ),
     )
-}
-
-/// Prefix-form declarations that can use receiver syntax. Param 0 must be a
-/// bare user nominal type; extern and shader entry points are excluded.
-pub(crate) fn method_syntax_in_module(
-    ws: &Workspace,
-    module: &Module,
-    types: &FxHashSet<Ustr>,
-    src: &str,
-) -> Vec<Finding> {
-    let mut out = Vec::new();
-    for (_, f) in module.functions.iter() {
-        if f.is_extern
-            || f.annotations.iter().any(|a| a.is_builtin("shader"))
-            || declared_name(f.name.as_str()) == "main"
-            || f.name_span.file != module.file
-        {
-            continue;
-        }
-        let Some(recv) = f.param_decls.first() else {
-            continue;
-        };
-        let Some(receiver) = nominal_name(ws, recv.ty) else {
-            continue;
-        };
-        if !types.contains(&receiver)
-            || !spelled_at(src, f.name, f.name_span)
-            || written_as_method(src, f.span, f.name_span)
-        {
-            continue;
-        }
-        let name = f.name;
-        let params = rewritten_params(ws, f);
-        out.push(Finding::advice(
-            METHOD_SYNTAX,
-            f.name_span,
-            format!("`{name}` takes `{receiver}` as its first parameter -- declare it as `fn {receiver}.{name}({params})`"),
-        ));
-    }
-    out
-}
-
-/// Render the receiver-form parameter list. If any parameter has a default,
-/// use `..` rather than suggest a signature that drops its default expression.
-fn rewritten_params(ws: &Workspace, f: &Function) -> String {
-    if f.param_decls.iter().any(|p| p.has_default) {
-        return format!("{}, ..", f.param_decls[0].name);
-    }
-    f.param_decls
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            if i == 0 {
-                p.name.to_string()
-            } else {
-                format!("{}: {}", p.name, ws.render(None, p.ty))
-            }
-        })
-        .join(", ")
-}
-
-/// Return only bare nominal types; receiver paths cannot express other types or
-/// applied type arguments.
-fn nominal_name(ws: &Workspace, ty: TyId) -> Option<Ustr> {
-    let te = match ty {
-        TyId::Static(m, i) => ws.module(m).ty_arena[i],
-        // Declaration parameter types are static; body-local types are not candidates.
-        TyId::Local(_) => return None,
-    };
-    match te {
-        TypeExpr::App {
-            ctor: TypeCtor::Nominal(name),
-            params,
-        } if params.len() == 0 => Some(name),
-        _ => None,
-    }
-}
-
-/// Whether `name_span` spells this declaration's name. Synthetic and
-/// macro-expanded declarations point at other source text and are excluded.
-fn spelled_at(src: &str, name: Ustr, name_span: Span) -> bool {
-    let (a, b) = name_span.offset_range();
-    if b > src.len() || a > b || !src.is_char_boundary(a) || !src.is_char_boundary(b) {
-        return false;
-    }
-    &src[a..b] == declared_name(name.as_str())
-}
-
-/// Whether the source uses receiver syntax; both forms lower to the same HIR.
-fn written_as_method(src: &str, fn_span: Span, name_span: Span) -> bool {
-    let (start, end) = (fn_span.offset_range().0, name_span.offset_range().0);
-    if end > src.len() || start > end {
-        return false;
-    }
-    if !src.is_char_boundary(start) || !src.is_char_boundary(end) {
-        return false;
-    }
-    src[start..end].trim_end().ends_with('.')
-}
-
-/// Names from `names` that are not declared user nominal types. Callers reject
-/// these so a misspelled type filter cannot silently appear to work.
-pub fn unknown_type_names(ws: &Workspace, warm: &FxHashSet<ModuleId>, names: &[Ustr]) -> Vec<Ustr> {
-    let known: FxHashSet<_> = nominal_type_names(ws, warm)
-        .into_iter()
-        .map(|name| Ustr::from(bone_core::modules::display_name(name.as_str())))
-        .collect();
-    names
-        .iter()
-        .copied()
-        .filter(|n| !known.contains(n))
-        .collect()
-}
-
-/// How a row left the scope governed by its arena's lifetime.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum EscapeKind {
-    StoreGlobal,
-    StoreStatic,
-    StoreField,
-    StoreCollection,
-    Return,
-    ClosureCapture,
-    AnyErasure,
-    AcrossYield,
-    FfiArg,
-}
-
-/// What the lint can claim about each escape kind.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum EscapeClass {
-    /// The row may be held beyond an invalidation point.
-    Hazard,
-    /// A hazard only if retained; the lint has no interprocedural retention analysis.
-    Unprovable,
-    /// Not itself a hazard; the intraprocedural check stops at this boundary.
-    Propagation,
-}
-
-impl EscapeKind {
-    pub fn class(self) -> EscapeClass {
-        match self {
-            EscapeKind::StoreGlobal
-            | EscapeKind::StoreStatic
-            | EscapeKind::StoreField
-            | EscapeKind::StoreCollection
-            | EscapeKind::AcrossYield => EscapeClass::Hazard,
-            EscapeKind::ClosureCapture | EscapeKind::FfiArg | EscapeKind::AnyErasure => {
-                EscapeClass::Unprovable
-            }
-            // Returning a reference does not itself invalidate its slot.
-            EscapeKind::Return => EscapeClass::Propagation,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            EscapeKind::StoreGlobal => "store_global",
-            EscapeKind::StoreStatic => "store_static",
-            EscapeKind::StoreField => "store_field",
-            EscapeKind::StoreCollection => "store_collection",
-            EscapeKind::Return => "return",
-            EscapeKind::ClosureCapture => "closure_capture",
-            EscapeKind::AnyErasure => "any_erasure",
-            EscapeKind::AcrossYield => "across_yield",
-            EscapeKind::FfiArg => "ffi_arg",
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct RowEscape {
-    pub kind: EscapeKind,
-    /// Rendered type of the row.
-    pub row_type: String,
-    pub span: Span,
-}
-
-pub const ROW_ESCAPE: &str = "row_escape";
-
-impl RowEscape {
-    fn finding(self) -> Finding {
-        let (ty, kind) = (&self.row_type, self.kind.as_str());
-        let message = match self.kind.class() {
-            EscapeClass::Hazard => format!(
-                "row of `{ty}` is held past an invalidation point here ({kind}) -- \
-                 the slot can be removed or the Scene unloaded before the next read; \
-                 hold the `Entity` and re-`get()` instead"
-            ),
-            EscapeClass::Unprovable => format!(
-                "row of `{ty}` leaves the checked region here ({kind}) -- safe only if \
-                 the consumer does not retain it, which nothing here proves"
-            ),
-            EscapeClass::Propagation => format!(
-                "row of `{ty}` is returned here -- not a defect: a `return` invalidates \
-                 nothing. The row becomes the CALLER's to account for, and this check \
-                 does not cross the boundary, so audit the callers"
-            ),
-        };
-        Finding::advice(ROW_ESCAPE, self.span, message)
-    }
-}
-
-mod row_escape;
-use row_escape::row_escapes_in_body;
-pub use row_escape::{RowPopulation, row_population};
-
-/// Where the body's trailing expression goes, if anywhere.
-fn tail_sink(module: &Module, owner: &BodyOwner) -> Option<EscapeKind> {
-    match owner {
-        BodyOwner::Function(fid) => module.functions[*fid].return_ty.map(|_| EscapeKind::Return),
-        BodyOwner::Global(_) => Some(EscapeKind::StoreGlobal),
-        // Aggregate defaults are stored in their containing value.
-        _ => Some(EscapeKind::StoreField),
-    }
-}
-
-pub(crate) fn nominal_type_names(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> FxHashSet<Ustr> {
-    let mut out = FxHashSet::default();
-    for m in ws.user_modules(warm) {
-        out.extend(m.struct_by_name.keys().copied());
-        out.extend(m.enums_by_name.keys().copied());
-        out.extend(m.newtypes_by_name.keys().copied());
-    }
-    out
 }
 
 pub(crate) const TASK_NULL_ABANDON: &str = "task_null_abandon";

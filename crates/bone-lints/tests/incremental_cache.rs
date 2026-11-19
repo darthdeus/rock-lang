@@ -57,10 +57,6 @@ fn action_selection() -> LintOptions {
         .with_action_policy(Some(&support::POLICY))
 }
 
-fn sibling_selection() -> LintOptions {
-    LintOptions::only([bone_lints::BACKEND_SIBLING_MISMATCH.to_owned()])
-}
-
 /// A cache after a full lint of `parts`.
 fn seeded_cache(parts: &[(&str, &str)], selection: &LintOptions) -> IncrementalLintCache {
     let mut cache = IncrementalLintCache::default();
@@ -282,55 +278,6 @@ fn action_caller_edits_refresh_opt_in_findings() {
         assert_eq!(cached.len(), expected);
         assert!(cached.iter().all(|f| f.error.message.contains("ACT_USED")));
     }
-}
-
-#[test]
-fn sibling_suppression_edits_remove_stale_findings() {
-    let old = "inline(lua) fn probe(x: int) -> int = \"return x\"\ninline(js) fn probe(x: float) -> int = \"return x;\"\nfn main() {}\n";
-    let matched = "inline(lua) fn probe(x: int) -> int = \"return x\"\ninline(js) fn probe(x: int) -> int = \"return x;\"\nfn main() {}\n";
-    let suppressed = matched
-        .replace(
-            "inline(lua)",
-            "// rock: allow(backend_sibling_mismatch)\ninline(lua)",
-        )
-        .replace(
-            "inline(js)",
-            "// rock: allow(backend_sibling_mismatch)\ninline(js)",
-        );
-    let selection = sibling_selection();
-    assert!(
-        crate::lint(&[(FILE, old)], &selection, true)
-            .iter()
-            .any(|finding| finding.lint == bone_lints::BACKEND_SIBLING_MISMATCH)
-    );
-    let mut cache = seeded_cache(&[(FILE, old)], &selection);
-    let mut step = |src: &str, function: Option<&str>, edit: Option<TextEditDelta>| {
-        let (findings, _) = body_edit(
-            &mut cache,
-            &[(FILE, src)],
-            &selection,
-            &[FILE],
-            function,
-            edit,
-        );
-        assert!(
-            findings
-                .iter()
-                .all(|finding| finding.lint != bone_lints::BACKEND_SIBLING_MISMATCH)
-        );
-    };
-    step(matched, Some("main"), None);
-    let insertion = suppressed.find("// rock").expect("allow");
-    step(
-        &suppressed,
-        None,
-        Some(shift(insertion, matched, &suppressed, 2)),
-    );
-    step(
-        matched,
-        None,
-        Some(shift(insertion, &suppressed, matched, -2)),
-    );
 }
 
 #[test]

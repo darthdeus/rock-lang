@@ -186,12 +186,7 @@ pub static COMMANDS: &[&CliCommand] = &[
             if cx.args.union {
                 return rock_cli::lint_union::do_lint_union(&path, cx.args.consumers.as_deref());
             }
-            rock_cli::do_lint(
-                &path,
-                cx.args.lints.as_deref(),
-                cx.args.only_types.as_deref(),
-                cx.args.ignore_types.as_deref(),
-            )
+            rock_cli::do_lint(&path, cx.args.lints.as_deref())
         }),
     },
     &CliCommand {

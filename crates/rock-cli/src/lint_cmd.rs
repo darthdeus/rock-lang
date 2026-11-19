@@ -14,12 +14,7 @@ use std::path::{Path, PathBuf};
 /// keeps `tests/` sources: a sim is code the author maintains, and `@sim` /
 /// `@test` decorators are reachability roots, so dropping them would report
 /// their callees as dead.
-pub(crate) fn do_lint(
-    path: &str,
-    lints: Option<&str>,
-    only_types: Option<&str>,
-    ignore_types: Option<&str>,
-) -> Result<()> {
+pub(crate) fn do_lint(path: &str, lints: Option<&str>) -> Result<()> {
     let sel = match lints {
         // A typo would run nothing and report success, so an unknown name is a
         // rejection, not a silent no-op.
@@ -42,14 +37,8 @@ pub(crate) fn do_lint(
         }
         None => bone_lints::LintOptions::default(),
     };
-    let only = type_names(only_types);
-    let ignored = type_names(ignore_types);
-    let mut sel = sel
-        .with_action_policy(rock_host::stick::ActionLayerPolicy::load(Path::new(path))?.as_ref())
-        .ignoring_types(ignored.iter().copied());
-    if only_types.is_some() {
-        sel = sel.over_types(only.iter().copied());
-    }
+    let sel = sel
+        .with_action_policy(rock_host::stick::ActionLayerPolicy::load(Path::new(path))?.as_ref());
     let p = Path::new(path);
     let (ws, sources, root) = if p.is_dir() {
         let sources = crate::unified_compile::discover_project_sources(Path::new(path))?;
@@ -77,41 +66,7 @@ pub(crate) fn do_lint(
         (ws, crate::common::single_source(path, &src), root)
     };
 
-    // The two lists fail in opposite directions, so a bad name is handled in
-    // opposite ways. `--only-types` fails CLOSED: a typo drops the type from
-    // the sweep and the run reports a project that looks converted, so it
-    // rejects. `--ignore-types` fails OPEN: a typo filters nothing and the type
-    // keeps appearing, which is visible -- naming it beats failing the run.
-    if !only.is_empty() || !ignored.is_empty() {
-        let warm = lint_pass::warm_modules(&ws, &sources);
-        let unknown_only = bone_lints::unknown_type_names(&ws, &warm, &only);
-        if !unknown_only.is_empty() {
-            anyhow::bail!(
-                "--only-types names no type in this project: {}",
-                join(&unknown_only)
-            );
-        }
-        let unknown_ignored = bone_lints::unknown_type_names(&ws, &warm, &ignored);
-        if !unknown_ignored.is_empty() {
-            log::warn!(target: "LINT", "--ignore-types names no type in this project: {}",
-                join(&unknown_ignored));
-        }
-    }
-
     let findings = lint_pass::findings_with(&ws, &sources, &root, Scope::WholeProject, &sel);
-
-    // `row_escape` is a CENSUS, so it reports the population it examined
-    // alongside the findings. A bare zero cannot be read: a project with no
-    // `Arena` at all scores the same as one whose every row stays put, and the
-    // build-or-delete decision this feeds
-    // turns on telling those apart.
-    if sel.enabled(bone_lints::ROW_ESCAPE) {
-        let warm = lint_pass::warm_modules(&ws, &sources);
-        let report = lint_pass::report_files(&sources, &root);
-        let pop = bone_lints::row_population(&ws, &warm, &report);
-        log::info!(target: "LINT", "{}: examined {} row source(s), {} row binding(s) in {} body(ies)",
-            path, pop.sources, pop.bindings, pop.bodies);
-    }
 
     if findings.is_empty() {
         log::info!(target: "LINT", "{}: no findings", path);
@@ -139,24 +94,6 @@ pub(crate) fn do_lint(
         anyhow::bail!("{errors} lint error(s)");
     }
     Ok(())
-}
-
-/// A comma-separated `--only-types` / `--ignore-types` list.
-fn type_names(list: Option<&str>) -> Vec<ustr::Ustr> {
-    list.into_iter()
-        .flat_map(|l| l.split(','))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ustr::Ustr::from)
-        .collect()
-}
-
-fn join(names: &[ustr::Ustr]) -> String {
-    names
-        .iter()
-        .map(|u| u.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// `8 unused_var, 4 unused_fn`, most frequent first.
