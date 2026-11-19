@@ -112,16 +112,8 @@ pub static COMMANDS: &[&CliCommand] = &[
         route: Route::Backend(Operation::Compile),
     },
     &CliCommand {
-        name: "compile-single",
-        route: Route::Backend(Operation::CompileSingle),
-    },
-    &CliCommand {
         name: "test",
         route: Route::Backend(Operation::Test),
-    },
-    &CliCommand {
-        name: "test-compile",
-        route: Route::Backend(Operation::TestCompile),
     },
     &CliCommand {
         name: "run",
@@ -256,8 +248,6 @@ pub(crate) static SKULL: BackendSpec = BackendSpec {
             rock_cli::skull_backend::skull_test(&files, filter.as_ref(), cx.args.test_threads)
         }),
         (Operation::Compile, skull_compile),
-        (Operation::CompileSingle, skull_compile),
-        (Operation::TestCompile, skull_compile),
         (Operation::Run, |cx| {
             let file = cx.get_required_file("run")?;
             rock_cli::skull_backend::skull_run(file, &cx.args.app_args)
@@ -357,9 +347,7 @@ pub fn command_metadata(command: &CliCommand) -> registry::CommandMetadata {
         log_invocation: matches!(
             command.cli_name(),
             "compile"
-                | "compile-single"
                 | "test"
-                | "test-compile"
                 | "run"
                 | "watch"
                 | "lint"
@@ -372,12 +360,7 @@ pub fn command_metadata(command: &CliCommand) -> registry::CommandMetadata {
         compiler_process: if command.cli_name() == "check"
             || matches!(
                 command.operation(),
-                Some(
-                    Operation::Compile
-                        | Operation::CompileSingle
-                        | Operation::Test
-                        | Operation::TestCompile
-                )
+                Some(Operation::Compile | Operation::Test)
             ) {
             registry::CompilerProcess::Always
         } else if command.operation() == Some(Operation::Sim) {

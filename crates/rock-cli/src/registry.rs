@@ -158,8 +158,6 @@ pub type Handler = fn(&CommandContext) -> Result<()>;
 pub enum Operation {
     Test,
     Compile,
-    CompileSingle,
-    TestCompile,
     Run,
     Watch,
     Stone,

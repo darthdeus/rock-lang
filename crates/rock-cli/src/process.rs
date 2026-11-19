@@ -73,7 +73,7 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
 
     let args = Args::parse();
 
-    // Same shape and exit code as an invalid `ROCK_BACKEND`.
+    // Same shape and exit code as clap rejecting an argument.
     if let Err(error) = rock_cli::common::thread_count_request() {
         eprintln!("error: {error}");
         std::process::exit(2);

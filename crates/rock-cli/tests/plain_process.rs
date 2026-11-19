@@ -224,22 +224,6 @@ fn plain_compiler_process_without_private_runtime() {
     assert!(formatted.status.success(), "{}", text(&formatted));
     let checked = invoke(root.path(), &["fmt", "main.rock", "--check"]);
     assert!(checked.status.success(), "{}", text(&checked));
-    let checked_before = invoke(root.path(), &["--check", "fmt", "main.rock"]);
-    assert!(checked_before.status.success(), "{}", text(&checked_before));
-    let wrong_command = invoke(root.path(), &["--check", "compile"]);
-    assert_eq!(
-        wrong_command.status.code(),
-        Some(2),
-        "{}",
-        text(&wrong_command)
-    );
-    let duplicate_check = invoke(root.path(), &["--check", "fmt", "main.rock", "--check"]);
-    assert_eq!(
-        duplicate_check.status.code(),
-        Some(2),
-        "{}",
-        text(&duplicate_check)
-    );
     assert!(!root.path().join("prebuilt").exists());
 }
 
@@ -314,32 +298,6 @@ fn library_resolves_game_services_without_private_registration() {
         env[std::ffi::OsStr::new("STONE_HEADLESS")],
         Some(std::ffi::OsStr::new("1"))
     );
-}
-
-#[test]
-fn retired_backend_is_rejected_before_source_discovery() {
-    let root = tempfile::tempdir().unwrap();
-    for backend in ["c", "bone"] {
-        for command in ["compile", "test", "run", "watch"] {
-            let out = invoke(
-                root.path(),
-                &[command, "missing.rock", "--backend", backend],
-            );
-            assert_eq!(out.status.code(), Some(2), "{}", text(&out));
-            assert_mentions(&out, "invalid value");
-        }
-        let out = rock(root.path())
-            .args(["run", "missing.rock"])
-            .env("ROCK_BACKEND", backend)
-            .output()
-            .unwrap();
-        assert_eq!(out.status.code(), Some(2), "{}", text(&out));
-        assert_mentions(
-            &out,
-            &format!("invalid value '{backend}' for 'ROCK_BACKEND'"),
-        );
-    }
-    assert!(!root.path().join("tmp").exists());
 }
 
 #[cfg(feature = "backend-js")]
@@ -473,7 +431,6 @@ fn plain_watch_resolves_project_outside_workspace() {
             .args(["watch", ".", "--output"])
             .arg(&output)
             .env("ROCK_LOG", "info")
-            .env_remove("ROCK_BACKEND")
             .stdout(Stdio::from(stream.try_clone().unwrap()))
             .stderr(Stdio::from(stream))
             .spawn()
@@ -617,76 +574,26 @@ fn invalid_commands_and_options_report_their_exit_status_and_argument() {
             "unrecognized subcommand 'hole-info'",
         ),
         (
-            &["lsp", "prepare-rename"],
-            2,
-            "unrecognized subcommand 'prepare-rename'",
-        ),
-        (
             &["fix", "missing.rock"],
             1,
             "command `fix` is unavailable in this build",
-        ),
-        (
-            &["run", "--lib", "library", "main.rock"],
-            2,
-            "unexpected argument '--lib'",
         ),
         (
             &["run", "--timeout", "5"],
             2,
             "unexpected argument '--timeout'",
         ),
+        (&["compile", "--check"], 2, "unexpected argument '--check'"),
         (
-            &["frame", "--headless"],
+            &["run", "missing.rock", "--backend", "c"],
             2,
-            "unexpected argument '--headless'",
-        ),
-        (
-            &["perf", "--headless"],
-            2,
-            "unexpected argument '--headless'",
+            "invalid value 'c'",
         ),
     ];
     for (args, code, fragment) in cases {
         let output = invoke(root.path(), args);
         assert_eq!(output.status.code(), Some(*code), "{}", text(&output));
         assert_mentions(&output, fragment);
-    }
-    let help = text(&invoke(root.path(), &["--help"]));
-    for (command, option, value) in [
-        ("test", "--require-test", Some("sentinel")),
-        ("test", "--show-passing", Some("sentinel")),
-        ("test", "--all-rejections", Some("sentinel")),
-        ("test", "--rejections-out", Some("sentinel")),
-        ("check", "--warmup-seconds", Some("0")),
-        ("check", "--workers", None),
-        ("check", "--isolated", None),
-        ("check", "--multi-order", None),
-        ("check", "--renderer", Some("gl")),
-        ("check", "--dump-state", None),
-        ("check", "--port", Some("8000")),
-        ("check", "--single-file", None),
-        ("check", "--itch", None),
-        ("check", "--agent-headless", None),
-        ("check", "--agent-access", None),
-        ("check", "--level", Some("catalog-entry")),
-        ("check", "--daemon-sock", Some("daemon.sock")),
-        ("test", "--type-validation", None),
-        ("test", "--clean", None),
-        ("test", "--watch", None),
-        ("test", "--no-timeout", None),
-        ("test", "--package", None),
-        ("run", "--lib", None),
-    ] {
-        let mut args = vec![command, "missing.rock", option];
-        args.extend(value);
-        let output = invoke(root.path(), &args);
-        assert_eq!(output.status.code(), Some(2), "{option}: {}", text(&output));
-        assert_mentions(&output, &format!("unexpected argument '{option}'"));
-        assert!(
-            !help.contains(option),
-            "removed option remained in help: {option}"
-        );
     }
     assert!(!root.path().join("tmp").exists());
 }
@@ -876,7 +783,7 @@ fn plain_compiles_deeply_nested_generated_code() {
         for (name, source) in nested_programs(depth) {
             let file = format!("{name}.rock");
             std::fs::write(root.path().join(&file), source).unwrap();
-            let out = invoke(root.path(), &["compile-single", &file]);
+            let out = invoke(root.path(), &["compile", &file]);
             assert!(out.status.success(), "{name}: {}", text(&out));
             assert!(
                 String::from_utf8_lossy(&out.stdout).contains("print"),
@@ -895,7 +802,7 @@ fn plain_rejects_nesting_beyond_the_limit_with_a_diagnostic() {
     for (name, source) in [sum, ifs] {
         let file = format!("{name}.rock");
         std::fs::write(root.path().join(&file), source).unwrap();
-        let out = invoke(root.path(), &["compile-single", &file]);
+        let out = invoke(root.path(), &["compile", &file]);
         assert!(!out.status.success(), "{name} compiled");
         assert!(
             text(&out).contains("nested too deeply"),
@@ -1028,7 +935,7 @@ fn plain_rock_runs_relocated_outside_any_checkout() {
     let root = tempfile::tempdir().unwrap();
     write(root.path(), "main.rock", "fn main() { print(6 * 7) }\n");
     let run = |args: &[&str]| start_relocated(&exe, root.path(), args);
-    let compiled = run(&["compile-single", "main.rock"]);
+    let compiled = run(&["compile", "main.rock"]);
     assert!(compiled.status.success(), "{}", text(&compiled));
     assert!(
         String::from_utf8_lossy(&compiled.stdout).contains("print"),

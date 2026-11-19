@@ -17,7 +17,7 @@ pub(crate) fn arguments(command: clap::Command) -> clap::Command {
                 .help("For `rock sim`: rewrite snapshot baselines instead of diffing."),
             Arg::new("jobs").long("jobs").short('j').value_name("N")
                 .value_parser(clap::value_parser!(usize))
-                .help("For `rock sim`: run up to N sim children concurrently (default: CPU count capped by ROCK_SIM_JOBS when it is a positive integer; explicit -j overrides that environment cap; bounded by total RAM at 3.6 GiB per lane and free GPU memory less a 6 GiB reserve at 2 GiB per lane; requests above the RAM budget are rejected, while requests above only the free-GPU budget run at that budget with a warning; at most the core count; a named run narrows N to its name count first; 1 = serial). Applies to the whole-suite and multi-name forms."),
+                .help("For `rock sim`: run up to N sim children concurrently (default: CPU count, bounded by total RAM at 3.6 GiB per lane and free GPU memory less a 6 GiB reserve at 2 GiB per lane; requests above the RAM budget are rejected, while requests above only the free-GPU budget run at that budget with a warning; at most the core count; a named run narrows N to its name count first; 1 = serial). Applies to the whole-suite and multi-name forms."),
             Arg::new("full-asset-jobs").long("full-asset-jobs").value_name("R")
                 .value_parser(clap::value_parser!(usize))
                 .help("For `rock sim`: allow at most R of the concurrent children to hold full-size assets (STONE_ASSET_STUB=0 with STONE_IMAGE_MAX_SIDE=0, 2-4 GB of GPU memory each); the remaining slots up to --jobs run the other entries. Default 2. Bounded by --jobs."),

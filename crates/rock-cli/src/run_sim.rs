@@ -2741,17 +2741,6 @@ fn sim_cpu_count() -> usize {
         .unwrap_or(1)
 }
 
-/// Only the default lane count takes the environment cap; explicit jobs keep
-/// the physical CPU/RAM/GPU bounds independently of this preference. Invalid
-/// or zero caps leave the CPU default in charge.
-fn default_sim_jobs(cores: usize, env_cap: Option<&str>) -> usize {
-    env_cap
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|jobs| *jobs > 0)
-        .unwrap_or(cores)
-        .clamp(1, cores.max(1))
-}
-
 /// Resolve the cap on concurrently FULL-ASSET children (`entry_full_assets`).
 /// Such a child holds every image at the file's own size on the GPU (2-4 GB
 /// on the measured host, against 0.2-0.4 GB for any other child, rendering
@@ -2774,14 +2763,7 @@ pub(crate) fn resolve_jobs(
 ) -> Result<usize> {
     let requested = narrow_to_lanes(requested, lanes);
     let budget = sim_job_budget();
-    let env_cap = std::env::var("ROCK_SIM_JOBS").ok();
-    let jobs = resolve_jobs_with(
-        requested,
-        update_snapshots,
-        sim_cpu_count(),
-        budget,
-        env_cap.as_deref(),
-    )?;
+    let jobs = resolve_jobs_with(requested, update_snapshots, sim_cpu_count(), budget)?;
     if let Some(asked) = requested.filter(|_| !update_snapshots) {
         static WARNED: std::sync::Once = std::sync::Once::new();
         if jobs < asked.min(sim_cpu_count()) {
@@ -2804,13 +2786,11 @@ fn resolve_pool_jobs(
         ram: sim_job_budget().ram,
         gpu: sim_cpu_count(),
     };
-    let env_cap = std::env::var("ROCK_SIM_JOBS").ok();
     resolve_jobs_with(
         narrow_to_lanes(requested, lanes),
         update_snapshots,
         sim_cpu_count(),
         budget,
-        env_cap.as_deref(),
     )
 }
 
@@ -2841,7 +2821,6 @@ fn resolve_jobs_with(
     update_snapshots: bool,
     cores: usize,
     budget: JobBudget,
-    env_cap: Option<&str>,
 ) -> Result<usize> {
     if update_snapshots {
         if requested.is_some_and(|j| j > 1) {
@@ -2851,7 +2830,7 @@ fn resolve_jobs_with(
         return Ok(1);
     }
     let jobs = match requested {
-        None => budget.lanes().min(default_sim_jobs(cores, env_cap)),
+        None => budget.lanes(),
         Some(jobs) if jobs > budget.ram => {
             anyhow::bail!(
                 "--jobs {jobs} exceeds the RAM budget of {} lanes",
@@ -2930,8 +2909,7 @@ fn sim_job_budget() -> JobBudget {
             log::warn!(target: "SIM", "GPU memory probe failed: {reason}; limiting to one lane");
             budget.gpu = 1;
         }
-        let env_cap = std::env::var("ROCK_SIM_JOBS").ok();
-        let default_jobs = budget.lanes().min(default_sim_jobs(cores, env_cap.as_deref()));
+        let default_jobs = budget.lanes();
         log::info!(target: "SIM",
             "default jobs {default_jobs}: {cores} cores, total RAM {total_ram:?} MiB at 3.6 GiB a lane ({} lanes), free GPU {free_vram:?} MiB less {SIM_VRAM_RESERVE_MIB} MiB reserve at {SIM_LANE_VRAM_MIB} MiB a lane ({} lanes)",
             budget.ram, budget.gpu);

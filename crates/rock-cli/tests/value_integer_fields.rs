@@ -125,7 +125,7 @@ fn unchecked_value_integer_stores_emit_no_check_helper() {
         "value V { x: int }\nfn store(x: int) -> int { let v = V { x: x }; v.x = x; v.x++ ; return v.x }\nfn main() { print(store(1)) }\n",
     ).unwrap();
     let out = rock(dir.path())
-        .args(["compile-single", "unchecked.rock"])
+        .args(["compile", "unchecked.rock"])
         .env("ROCK_MIR_CHECKS", "0")
         .output()
         .unwrap();

@@ -78,7 +78,7 @@ pub(crate) use formatting::*;
 pub use registry::{BackendSpec, CliCommand, Operation};
 pub(crate) use watch::*;
 
-/// Compiler backend selected via `--backend` / `ROCK_BACKEND`. Each variant's
+/// Compiler backend selected via `--backend`. Each variant's
 /// name, served operations and policy are registered in
 /// the supplied `Registrations::backends` table; the game compile pipeline
 /// keys on the variant.
@@ -87,10 +87,6 @@ pub enum Backend {
     Skull,
     Js,
     Glsl,
-}
-
-pub(crate) fn resolve_backend(explicit: Option<Backend>) -> Backend {
-    explicit.unwrap_or(Backend::Skull)
 }
 
 /// Shared invocation values plus inert transport filled by registered host decoders.
@@ -138,7 +134,7 @@ pub struct Args {
     pub jv: bool,
 
     /// Resolved compiler backend for this invocation (default `skull`; see
-    /// `from_matches`). Override with `--backend` or `ROCK_BACKEND`.
+    /// `from_matches`). Override with `--backend`.
     pub backend: Backend,
 
     /// Build lint pass: `--no-lints` drops the `Warning`/`Advice` tiers from a
@@ -181,12 +177,6 @@ impl Args {
             .disable_help_subcommand(true)
             .subcommand_required(true)
             .arg_required_else_help(true)
-            .arg(
-                Arg::new("check-before")
-                    .long("check")
-                    .action(ArgAction::SetTrue)
-                    .hide(true),
-            )
             .arg(Arg::new("filter").long("filter").value_name("PAT")
                 .help("For `rock test`: run @tests whose function name or source path contains a comma-separated substring."))
             .arg(Arg::new("skip-gpu").long("skip-gpu").action(ArgAction::SetTrue)
@@ -227,7 +217,7 @@ impl Args {
                 .help("For `rock lint --union`: directory to search for consumers (default: the lib's parent). Pass the repo root for a nested lib like `libs/example-core`."))
             .arg(Arg::new("backend").long("backend")
                 .value_parser(BackendSpec::value_parser())
-                .help(format!("Compiler backend (default: skull). {}. Also settable via ROCK_BACKEND.", registry::BackendSpec::all().iter().map(|spec| format!("{}{}", spec.name, if spec.omitted.is_some() { " (not in this build)" } else { "" })).collect::<Vec<_>>().join(", "))))
+                .help(format!("Compiler backend (default: skull). {}.", registry::BackendSpec::all().iter().map(|spec| format!("{}{}", spec.name, if spec.omitted.is_some() { " (not in this build)" } else { "" })).collect::<Vec<_>>().join(", "))))
             // Host argument groups use this root slot as an insertion point.
             // Actual app arguments are parsed from the selected command.
             .arg(
@@ -237,8 +227,7 @@ impl Args {
                     .hide(true),
             );
         let mut command = (registry::registered().arguments)(command).mut_args(|arg| {
-            if arg.get_id() == "app_args" || arg.get_id() == "check-before" || arg.get_id() == "var"
-            {
+            if arg.get_id() == "app_args" || arg.get_id() == "var" {
                 arg
             } else {
                 arg.global(true)
@@ -268,28 +257,11 @@ impl Args {
     }
 
     pub fn from_matches(m: clap::ArgMatches) -> Self {
-        let check_before = m.get_flag("check-before");
         let mut build_var_overrides = m
             .get_many::<String>("var")
             .map(|vals| vals.cloned().collect::<Vec<_>>())
             .unwrap_or_default();
         let (command_name, m) = m.subcommand().expect("command required");
-        if check_before && command_name != "fmt" {
-            Self::command()
-                .error(
-                    clap::error::ErrorKind::UnknownArgument,
-                    "`--check` is only valid for `rock fmt`",
-                )
-                .exit();
-        }
-        if check_before && m.get_flag("check") {
-            Self::command()
-                .error(
-                    clap::error::ErrorKind::ArgumentConflict,
-                    "`--check` may be supplied only once",
-                )
-                .exit();
-        }
         let command = CliCommand::named(command_name).expect("registered subcommand");
         build_var_overrides.extend(
             m.get_many::<String>("var")
@@ -315,7 +287,7 @@ impl Args {
             allocation_census: Default::default(),
             allocation_sites: Default::default(),
             profile: m.get_one::<String>("profile").cloned(),
-            check: check_before || (command_name == "fmt" && m.get_flag("check")),
+            check: command_name == "fmt" && m.get_flag("check"),
             iters: *m.get_one::<usize>("iters").unwrap(),
             warmup: *m.get_one::<usize>("warmup").unwrap(),
             verbose: m.get_flag("verbose"),
@@ -344,26 +316,10 @@ impl Args {
             lints: m.get_one::<String>("lints").cloned(),
             union: m.get_flag("union"),
             consumers: m.get_one::<String>("consumers").cloned(),
-            // An explicit flag takes precedence over ROCK_BACKEND.
-            backend: {
-                let explicit = m.get_one::<Backend>("backend").copied().or_else(|| {
-                    let name = std::env::var("ROCK_BACKEND").ok()?;
-                    match BackendSpec::named(&name) {
-                        Some(spec) => Some(spec.backend),
-                        // Same shape and exit code as clap's rejection of an
-                        // unknown `--backend` value.
-                        None => {
-                            let names: Vec<&str> = BackendSpec::all().iter().map(|b| b.name).collect();
-                            eprintln!(
-                                "error: invalid value '{name}' for 'ROCK_BACKEND'\n  [possible values: {}]",
-                                names.join(", ")
-                            );
-                            std::process::exit(2);
-                        }
-                    }
-                });
-                resolve_backend(explicit)
-            },
+            backend: m
+                .get_one::<Backend>("backend")
+                .copied()
+                .unwrap_or(Backend::Skull),
         };
         (registry::registered().decode_arguments)(m, &mut args);
         args
@@ -425,68 +381,5 @@ mod completion_tests {
             .expect("the script completes --format");
         let values = format_arm.lines().nth(1).unwrap_or_default();
         assert!(values.contains("pretty json"), "{values}");
-    }
-}
-
-#[cfg(test)]
-mod command_tree_tests {
-    #[test]
-    fn fmt_is_a_subcommand_with_local_check() {
-        let command = crate::Args::command();
-        let fmt = command.find_subcommand("fmt").expect("fmt is registered");
-        assert!(fmt.get_arguments().any(|arg| arg.get_id() == "check"));
-        let help = command
-            .clone()
-            .try_get_matches_from(["rock", "fmt", "--help"])
-            .unwrap_err()
-            .to_string();
-        assert!(help.contains("Usage: rock fmt"), "{help}");
-        assert!(help.contains("--check"), "{help}");
-        for (argv, expected) in [
-            (&["rock", "fmt"][..], true),
-            (&["rock", "fmt", "--check", "main.rock"], true),
-            (&["rock", "fmt", "main.rock", "--check"], true),
-            (&["rock", "--check", "fmt", "main.rock"], true),
-            (&["rock", "fmt", "--check", "--check"], false),
-            (&["rock", "compile", "--check"], false),
-            (&["rock", "help", "fmt"], false),
-        ] {
-            assert_eq!(
-                command.clone().try_get_matches_from(argv).is_ok(),
-                expected,
-                "{argv:?}"
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod removed_option_tests {
-    #[test]
-    fn unused_cli_options_are_unavailable() {
-        for option in ["--out", "--sim-entry", "--top"] {
-            assert!(
-                crate::Args::command()
-                    .try_get_matches_from(["rock", "compile", "input.rock", option, "20"])
-                    .is_err(),
-                "{option} is still accepted"
-            );
-        }
-    }
-    #[test]
-    fn unused_modes_are_unavailable() {
-        for option in ["--stdout", "--no-stdlib", "--lua-line-directives", "--plan"] {
-            assert!(
-                crate::Args::command()
-                    .try_get_matches_from(["rock", "compile", "input.rock", option])
-                    .is_err(),
-                "{option} is still accepted"
-            );
-        }
-        assert!(
-            crate::Args::command()
-                .try_get_matches_from(["rock", "sim", "input", "--jobs", "2", "--jobs-force"])
-                .is_err()
-        );
     }
 }

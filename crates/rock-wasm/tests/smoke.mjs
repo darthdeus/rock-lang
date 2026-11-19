@@ -2,7 +2,7 @@
 //   node crates/rock-wasm/tests/smoke.mjs <rock_wasm.wasm> <rock>
 // Loads the module the way a Worker does (the stdlib is the copy embedded in
 // the module), compiles each fixture and requires its Lua to equal native
-// `rock compile-single` output byte for byte. Then checks shader
+// `rock compile` output byte for byte. Then checks shader
 // output, format, and that source nested past the limit is a diagnostic
 // rather than a trap.
 import fs from 'node:fs';
@@ -54,7 +54,7 @@ for (const name of fs.readdirSync(fixtureDir).filter((n) => n.endsWith('.rock'))
     check(false, `${name} compiles in wasm: ${JSON.stringify(wasm.diagnostics ?? wasm)}`);
     continue;
   }
-  const native = execFileSync(rockBin, ['compile-single', file], { encoding: 'utf8', maxBuffer: 1 << 28 });
+  const native = execFileSync(rockBin, ['compile', file], { encoding: 'utf8', maxBuffer: 1 << 28 });
   check(wasm.lua === native, `${name}: wasm Lua equals native (${wasm.lua.length} bytes, ${ms} ms)`);
 }
 

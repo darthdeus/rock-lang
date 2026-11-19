@@ -7,15 +7,15 @@ fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// `(request, update_snapshots, cap, expected lanes)`.
-type JobsCase = (Option<usize>, bool, Option<&'static str>, usize);
+/// `(request, update_snapshots, expected lanes)`.
+type JobsCase = (Option<usize>, bool, usize);
 
 fn assert_jobs(cores: usize, budget: JobBudget, cases: &[JobsCase]) {
-    for &(request, update, cap, expected) in cases {
+    for &(request, update, expected) in cases {
         assert_eq!(
-            resolve_jobs_with(request, update, cores, budget, cap).unwrap(),
+            resolve_jobs_with(request, update, cores, budget).unwrap(),
             expected,
-            "request {request:?}, update {update}, cap {cap:?}"
+            "request {request:?}, update {update}"
         );
     }
 }
@@ -599,54 +599,6 @@ fn lanes_dispatch_longest_first_with_untimed_lanes_last_in_plan_order() {
     assert_eq!(longest_first(&estimates), vec![2, 5, 0, 3, 1, 4]);
 }
 
-#[test]
-fn sim_environment_cap_reaches_default_lane_resolution() {
-    const CHILD: &str = "ROCK_SIM_CAP_PROBE";
-    if std::env::var_os(CHILD).is_some() {
-        assert_eq!(resolve_jobs(None, None, false).unwrap(), 1);
-        assert_eq!(resolve_pool_jobs(None, None, false).unwrap(), 1);
-        return;
-    }
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "run_sim::tests::sim_environment_cap_reaches_default_lane_resolution",
-            "--exact",
-            "--nocapture",
-        ])
-        .env(CHILD, "1")
-        .env("ROCK_SIM_JOBS", "1")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[test]
-fn sim_environment_caps_defaults_but_explicit_jobs_ignore_the_cap() {
-    let budget = JobBudget { ram: 10, gpu: 8 };
-    let lanes = budget.lanes();
-    assert_jobs(
-        32,
-        budget,
-        &[
-            (None, false, Some("2"), 2),
-            (Some(6), false, Some("2"), 6),
-            (Some(6), true, Some("2"), 1),
-            (None, false, Some("99"), lanes),
-            (None, false, None, lanes),
-            (None, false, Some("0"), lanes),
-            (None, false, Some("invalid"), lanes),
-            (None, false, Some("-1"), lanes),
-            (None, false, Some("184467440737095516160"), lanes),
-        ],
-    );
-    assert!(resolve_jobs_with(Some(12), false, 32, budget, Some("2")).is_err());
-}
-
 /// The job count is a safety bound, not a preference: it must never exceed
 /// what the machine can run, and `--update-snapshots` must pin to serial
 /// because it writes baseline files whose destinations are not proven
@@ -659,17 +611,17 @@ fn resolve_jobs_is_bounded_and_serial_for_snapshot_updates() {
         budget,
         &[
             // No request takes the memory budget.
-            (None, false, None, 4),
-            (Some(1), false, None, 1),
-            (Some(4), false, None, 4),
+            (None, false, 4),
+            (Some(1), false, 1),
+            (Some(4), false, 4),
             // 0 is meaningless; clamp up rather than deadlock on an empty pool.
-            (Some(0), false, None, 1),
+            (Some(0), false, 1),
             // --update-snapshots wins over ANY explicit request.
-            (None, true, None, 1),
-            (Some(8), true, None, 1),
+            (None, true, 1),
+            (Some(8), true, 1),
         ],
     );
-    let error = resolve_jobs_with(Some(10), false, cores, budget, None).unwrap_err();
+    let error = resolve_jobs_with(Some(10), false, cores, budget).unwrap_err();
     assert!(error.to_string().contains("RAM budget of 4"));
 }
 
@@ -679,13 +631,9 @@ fn a_request_above_only_the_free_gpu_budget_runs_at_that_budget() {
     assert_jobs(
         cores,
         budget,
-        &[
-            (Some(8), false, None, 2),
-            (Some(10), false, None, 2),
-            (None, false, None, 2),
-        ],
+        &[(Some(8), false, 2), (Some(10), false, 2), (None, false, 2)],
     );
-    let error = resolve_jobs_with(Some(11), false, cores, budget, None).unwrap_err();
+    let error = resolve_jobs_with(Some(11), false, cores, budget).unwrap_err();
     assert!(
         error
             .to_string()
@@ -699,25 +647,12 @@ fn a_request_above_the_known_lanes_is_narrowed_before_the_budget() {
     let (cores, budget) = (32, JobBudget { ram: 1, gpu: 1 });
     // One name under a one-lane budget runs in its one lane.
     assert_eq!(
-        resolve_jobs_with(
-            narrow_to_lanes(Some(4), Some(1)),
-            false,
-            cores,
-            budget,
-            None
-        )
-        .unwrap(),
+        resolve_jobs_with(narrow_to_lanes(Some(4), Some(1)), false, cores, budget).unwrap(),
         1
     );
     // Two names still need two lanes, which the RAM budget refuses.
-    let error = resolve_jobs_with(
-        narrow_to_lanes(Some(4), Some(2)),
-        false,
-        cores,
-        budget,
-        None,
-    )
-    .unwrap_err();
+    let error =
+        resolve_jobs_with(narrow_to_lanes(Some(4), Some(2)), false, cores, budget).unwrap_err();
     assert!(error.to_string().contains("--jobs 2 exceeds"), "{error}");
     // Unknown lanes leave the request alone; no request stays no request.
     assert_eq!(narrow_to_lanes(Some(4), None), Some(4));
@@ -748,11 +683,7 @@ fn the_default_job_count_leaves_a_fixed_gpu_memory_reserve() {
 fn default_jobs_fit_ram_and_gpu_budgets() {
     let studio = memory_budgets(14, Some(36 * 1024), None);
     assert_eq!(studio.lanes(), 10);
-    assert_jobs(
-        14,
-        studio,
-        &[(None, false, None, 10), (Some(14), true, None, 1)],
-    );
+    assert_jobs(14, studio, &[(None, false, 10), (Some(14), true, 1)]);
     assert_eq!(memory_budgets(32, Some(62 * 1024), Some(17851)).lanes(), 5);
     assert_eq!(memory_budgets(32, Some(62 * 1024), None).lanes(), 17);
     assert_eq!(memory_budgets(2, Some(36 * 1024), None).lanes(), 2);

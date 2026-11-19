@@ -24,7 +24,6 @@ pub fn rock(root: &Path) -> Command {
         "ROCK_STDLIB_DIR",
         "ROCK_SKULL_LINE_DIRECTIVES",
         "ROCK_TEST_FILTER",
-        "ROCK_BACKEND",
         "LUA_PATH",
         "LUA_CPATH",
     ] {

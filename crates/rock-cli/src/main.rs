@@ -64,7 +64,7 @@ mod allocator_tests {
     #[test]
     fn compiler_process_kinds() {
         let named = |name| { rock_cli::CliCommand::named(name) }.expect("registered command");
-        for command in ["check", "compile", "compile-single", "test", "test-compile"] {
+        for command in ["check", "compile", "test"] {
             assert!(rock_cli::compiler_process(named(command), false));
         }
         assert!(rock_cli::compiler_process(named("sim"), true));
