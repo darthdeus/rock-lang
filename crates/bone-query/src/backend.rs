@@ -1114,7 +1114,8 @@ impl BoneWorkspace {
         // Resolve enum-pattern path spans before the enclosing match expression.
         let pat_hover = raw_ast
             .as_ref()
-            .and_then(|ast| crate::query::enum_variant_pattern_hover(ws, mid, ast, offset));
+            .and_then(|ast| crate::query::enum_variant_pattern_at(ws, mid, ast, offset))
+            .and_then(|token| token.hover(ws));
         // Node resolution runs first (so a param NAME/TYPE in the signature
         // resolves to itself); the fn-signature hover is the FALLBACK for the
         // signature tokens no node covers (`fn`/parens/`->`), bounded by `src`
@@ -1219,7 +1220,8 @@ impl BoneWorkspace {
         }
         let pat_def = raw
             .as_ref()
-            .and_then(|ast| crate::query::enum_variant_pattern_def(ws, mid, ast, offset));
+            .and_then(|ast| crate::query::enum_variant_pattern_at(ws, mid, ast, offset))
+            .and_then(|token| token.declaration(ws));
         let span = pat_def
             .or_else(|| crate::query::generic_param_def(ws, mid, offset))
             .or_else(|| crate::query::definition_at(ws, mid, inf, offset))?;

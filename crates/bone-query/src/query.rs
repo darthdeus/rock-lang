@@ -78,7 +78,7 @@ impl<'a> ResolvedPosition<'a> {
         binding_of_node(self.body?, self.node?)
     }
 
-    fn literal_field(&self, expr: Idx<hir::Expr>) -> Option<RecordFieldToken> {
+    fn literal_field(&self, expr: Idx<hir::Expr>) -> Option<Token> {
         let body = self.body?;
         let (record, fields) = RecordType::literal(&body.expr_arena[expr])?;
         let include_colon =
@@ -95,21 +95,51 @@ impl<'a> ResolvedPosition<'a> {
                 }
                 start <= self.offset && self.offset < end
             })?;
-        Some(RecordFieldToken {
-            record,
-            name: field.name,
+        Some(Token {
+            target: RefTarget::Field(record, field.name),
             span: field.name_span,
         })
     }
 
-    fn record_pattern_field(&self) -> Option<RecordFieldToken> {
+    fn enum_variant_token(&self, expr: Idx<hir::Expr>) -> Option<Token> {
+        let body = self.body?;
+        let hir::Expr::EnumVariant {
+            enum_name,
+            enum_name_span,
+            variant,
+            variant_span,
+            ..
+        } = body.expr_arena[expr]
+        else {
+            return None;
+        };
+        if let Some(field) = self.literal_field(expr) {
+            return Some(field);
+        }
+        let variant_span = body.name_spans[variant_span];
+        if span_contains(&variant_span, self.offset) {
+            return Some(Token {
+                target: RefTarget::EnumVariant(enum_name, variant),
+                span: variant_span,
+            });
+        }
+        let enum_span = body.name_spans[enum_name_span];
+        let on_qualifier = enum_span.offset_range().0 <= self.offset
+            && self.offset < variant_span.offset_range().0;
+        on_qualifier.then_some(Token {
+            target: RefTarget::Enum(enum_name),
+            span: enum_span,
+        })
+    }
+
+    fn record_pattern_field(&self) -> Option<Token> {
         self.body?
             .pattern_arena
             .iter()
             .find_map(|(id, _)| self.pattern_field(id))
     }
 
-    fn pattern_field(&self, id: Idx<hir::Pattern>) -> Option<RecordFieldToken> {
+    fn pattern_field(&self, id: Idx<hir::Pattern>) -> Option<Token> {
         let body = self.body?;
         let hir::Pattern::Record { fields, .. } = body.pattern_arena[id] else {
             return None;
@@ -122,9 +152,8 @@ impl<'a> ResolvedPosition<'a> {
             return None;
         }
         let (record, _) = RecordType::pattern(self.ws, body, self.bi, id)?;
-        Some(RecordFieldToken {
-            record,
-            name: field.name,
+        Some(Token {
+            target: RefTarget::Field(record, field.name),
             span: field.name_span,
         })
     }
@@ -140,7 +169,7 @@ pub fn definition_at(
     let body = at.body?;
     if let Some(span) = at
         .record_pattern_field()
-        .and_then(|field| field.definition(ws))
+        .and_then(|field| field.target.declaration(ws))
     {
         return Some(span);
     }
@@ -174,37 +203,25 @@ pub fn definition_at(
                 .per_fn
                 .get(&owner)
                 .and_then(|bi| field_ref_struct(ws, bi, *bi.expr_types.get(e)?))
-                .and_then(|sname| RecordType::Struct(sname).field(ws, *name))
-                .map(|field| field.span)
+                .and_then(|sname| {
+                    RefTarget::Field(RecordType::Struct(sname), *name).declaration(ws)
+                })
                 .or_else(|| def_of_name(ws, *name)),
 
             hir::Expr::StructLiteral { name, .. } => {
                 if let Some(field) = at.literal_field(e) {
-                    return field.definition(ws);
+                    return field.target.declaration(ws);
                 }
-                struct_def_by_name(ws, *name).map(|def| def.name_span)
+                RefTarget::Struct(*name).declaration(ws)
             }
 
-            // The variant name -> the variant decl; the enum qualifier -> the
-            // enum decl.
-            hir::Expr::EnumVariant {
-                enum_name,
-                variant,
-                variant_span,
-                ..
-            } => {
+            hir::Expr::EnumVariant { enum_name, .. } => {
                 if let Some(seg) = path_segment_at(ws, mid, offset) {
                     return segment_target_def(ws, seg.target);
                 }
-                if let Some(field) = at.literal_field(e) {
-                    return field.definition(ws);
-                }
-                let (vs, ve) = body.name_spans[*variant_span].offset_range();
-                if vs <= offset && offset < ve {
-                    variant_def_span(ws, Some(*enum_name), *variant)
-                } else {
-                    def_of_name(ws, *enum_name)
-                }
+                at.enum_variant_token(e)
+                    .map_or(RefTarget::Enum(*enum_name), |token| token.target)
+                    .declaration(ws)
             }
 
             // `recv.field` -> the field's declaration in recv's struct.
@@ -212,7 +229,7 @@ pub fn definition_at(
                 let bi = inf.per_fn.get(&owner)?;
                 let base_ty = *bi.expr_types.get(*base)?;
                 let sname = types::nominal_name(ws, Some(bi), base_ty)?;
-                Some(RecordType::Struct(sname).field(ws, *field)?.span)
+                RefTarget::Field(RecordType::Struct(sname), *field).declaration(ws)
             }
 
             _ => None,
@@ -268,14 +285,9 @@ pub(crate) fn type_definition_at(
     inf: &InferenceResult,
     offset: usize,
 ) -> Option<Span> {
-    let module = ws.modules.get(mid.index())?;
-    let owner = module.body_at(offset)?;
-    let body = module.bodies.get(&owner)?;
-    let bi = inf.per_fn.get(&owner)?;
-
-    let node = node_at(body, offset)?;
-
-    let ty = match node {
+    let at = ResolvedPosition::new(ws, mid, Some(inf), offset, NodePolicy::Narrowest)?;
+    let bi = at.bi?;
+    let ty = match at.node? {
         NodeRef::Binding(b) => *bi.binding_types.get(b)?,
         NodeRef::Expr(e) => *bi.expr_types.get(e)?,
         _ => return None,
@@ -382,7 +394,7 @@ pub fn hover_at(
                             {
                                 return Some(hit);
                             }
-                            if let Some(def) = render_struct_def(ws, *name) {
+                            if let Some(def) = RefTarget::Struct(*name).hover(ws) {
                                 return Some((def, span));
                             }
                         }
@@ -397,16 +409,7 @@ pub fn hover_at(
                                 return Some((h, body.name_spans[*name_span]));
                             }
                         }
-                        // Variant construction (`Enum::Variant(..)`): the
-                        // variant name -> the variant + payload, the enum
-                        // qualifier -> the full enum body.
-                        hir::Expr::EnumVariant {
-                            enum_name,
-                            enum_name_span,
-                            variant,
-                            variant_span,
-                            ..
-                        } => {
+                        hir::Expr::EnumVariant { .. } => {
                             if let Some(seg) = path_segment_at(ws, mid, offset) {
                                 let text = match seg.target {
                                     hir::SegmentTarget::Variant { enum_key, variant } => {
@@ -417,19 +420,10 @@ pub fn hover_at(
                                 }?;
                                 return Some((text, seg.span));
                             }
-                            if let Some(field) = at.literal_field(e) {
-                                return field.hover(ws);
-                            }
-                            let (vs, ve) = body.name_spans[*variant_span].offset_range();
-                            if vs <= offset && offset < ve {
-                                if let Some(s) = render_variant(ws, Some(*enum_name), *variant) {
-                                    return Some((s, body.name_spans[*variant_span]));
-                                }
-                            } else if body.name_spans[*enum_name_span].offset_range().0 <= offset
-                                && offset < vs
-                            {
-                                if let Some(s) = render_enum_def(ws, *enum_name) {
-                                    return Some((s, body.name_spans[*enum_name_span]));
+                            if let Some(token) = at.enum_variant_token(e) {
+                                let hit = token.hover(ws);
+                                if hit.is_some() || matches!(token.target, RefTarget::Field(..)) {
+                                    return hit;
                                 }
                             }
                         }
@@ -438,7 +432,9 @@ pub fn hover_at(
                         // not the raw FieldRef wrapper type.
                         hir::Expr::SiblingRef(name) => {
                             if let Some(sname) = field_ref_struct(ws, bi, *bi.expr_types.get(e)?) {
-                                if let Some(s) = RecordType::Struct(sname).render_field(ws, *name) {
+                                if let Some(s) =
+                                    RefTarget::Field(RecordType::Struct(sname), *name).hover(ws)
+                                {
                                     return Some((s, span));
                                 }
                             }
@@ -1158,21 +1154,17 @@ impl ResolvedPosition<'_> {
             for (expr, node) in body.expr_arena.iter() {
                 let selected = selected == Some(NodeRef::Expr(expr));
                 match node {
-                    hir::Expr::EnumVariant {
-                        enum_name,
-                        enum_name_span,
-                        variant,
-                        variant_span,
-                        ..
-                    } => {
-                        if span_contains(&body.name_spans[*variant_span], offset) {
-                            offer(1, RefTarget::EnumVariant(*enum_name, *variant));
-                        }
-                        if span_contains(&body.name_spans[*enum_name_span], offset) {
-                            offer(11, RefTarget::Enum(*enum_name));
-                        }
-                        if let Some(field) = self.literal_field(expr) {
-                            offer(51, field.target());
+                    hir::Expr::EnumVariant { .. } => {
+                        if let Some(token) = self
+                            .enum_variant_token(expr)
+                            .filter(|token| span_contains(&token.span, offset))
+                        {
+                            let rank = match token.target {
+                                RefTarget::EnumVariant(..) => 1,
+                                RefTarget::Enum(_) => 11,
+                                _ => 51,
+                            };
+                            offer(rank, token.target);
                         }
                     }
                     hir::Expr::StructLiteral { name, .. } if selected => {
@@ -1189,7 +1181,7 @@ impl ResolvedPosition<'_> {
                             offer(31, target);
                         }
                         if let Some(field) = self.literal_field(expr) {
-                            offer(41, field.target());
+                            offer(41, field.target);
                         }
                     }
                     hir::Expr::FieldAccess { base, field } if selected => {
@@ -1272,11 +1264,11 @@ impl ResolvedPosition<'_> {
                     _ => {}
                 }
                 if let Some(field) = self.pattern_field(id) {
-                    let rank = match field.record {
-                        RecordType::Struct(_) => 42,
-                        RecordType::Variant(..) => 52,
+                    let rank = match field.target {
+                        RefTarget::Field(RecordType::Struct(_), _) => 42,
+                        _ => 52,
                     };
-                    offer(rank, field.target());
+                    offer(rank, field.target);
                 }
             }
         }
@@ -1722,24 +1714,42 @@ enum RecordType {
     Variant(Ustr, Ustr),
 }
 
+/// A name token in source and the symbol it names.
 #[derive(Clone, Copy)]
-struct RecordFieldToken {
-    record: RecordType,
-    name: Ustr,
+pub(crate) struct Token {
+    target: RefTarget,
     span: Span,
 }
 
-impl RecordFieldToken {
-    fn definition(self, ws: &Workspace) -> Option<Span> {
-        Some(self.record.field(ws, self.name)?.span)
+impl Token {
+    pub(crate) fn declaration(self, ws: &Workspace) -> Option<Span> {
+        self.target.declaration(ws)
     }
 
-    fn hover(self, ws: &Workspace) -> Option<(String, Span)> {
-        Some((self.record.render_field(ws, self.name)?, self.span))
+    pub(crate) fn hover(self, ws: &Workspace) -> Option<(String, Span)> {
+        Some((self.target.hover(ws)?, self.span))
+    }
+}
+
+impl RefTarget {
+    fn declaration(self, ws: &Workspace) -> Option<Span> {
+        match self {
+            Self::EnumVariant(en, variant) => variant_def_span(ws, Some(en), variant),
+            Self::Enum(name) => def_of_name(ws, name),
+            Self::Struct(name) => struct_def_by_name(ws, name).map(|def| def.name_span),
+            Self::Field(record, name) => Some(record.field(ws, name)?.span),
+            _ => None,
+        }
     }
 
-    fn target(self) -> RefTarget {
-        RefTarget::Field(self.record, self.name)
+    fn hover(self, ws: &Workspace) -> Option<String> {
+        match self {
+            Self::EnumVariant(en, variant) => render_variant(ws, Some(en), variant),
+            Self::Enum(name) => render_enum_def(ws, name),
+            Self::Struct(name) => render_struct_def(ws, name),
+            Self::Field(record, name) => record.render_field(ws, name),
+            _ => None,
+        }
     }
 }
 
@@ -2823,70 +2833,15 @@ fn find_binding_by_name(body: &Body, head: &str, offset: usize) -> Option<Idx<hi
     best.map(|(_, idx)| idx)
 }
 
-/// Hover for an enum-variant pattern, using parser path spans to distinguish
-/// the variant token from its enum qualifier.
-pub(crate) fn enum_variant_pattern_hover(
+/// The variant name or enum qualifier of a match-arm pattern under `offset`,
+/// using parser path spans. One-segment record paths stay with HIR, which can
+/// distinguish a struct from a variant.
+pub(crate) fn enum_variant_pattern_at(
     ws: &Workspace,
     mid: ModuleId,
     ast: &skull_parser::Ast,
     offset: usize,
-) -> Option<(String, Span)> {
-    match variant_head_at(ws, mid, ast, offset)? {
-        VariantHead::Variant { enum_name, variant } => {
-            render_variant(ws, enum_name, variant.name).map(|s| (s, variant.span))
-        }
-        VariantHead::Qualifier {
-            enum_name,
-            variant,
-            span,
-        } => {
-            let edef = enum_def_for_variant(ws, Some(enum_name), variant)?;
-            render_enum_def(ws, edef.name).map(|s| (s, span))
-        }
-    }
-}
-
-/// Goto-definition for an enum-variant match pattern: the variant name -> the
-/// variant decl, the enum qualifier -> the enum decl. Mirrors
-/// [`enum_variant_pattern_hover`].
-pub(crate) fn enum_variant_pattern_def(
-    ws: &Workspace,
-    mid: ModuleId,
-    ast: &skull_parser::Ast,
-    offset: usize,
-) -> Option<Span> {
-    match variant_head_at(ws, mid, ast, offset)? {
-        VariantHead::Variant { enum_name, variant } => {
-            variant_def_span(ws, enum_name, variant.name)
-        }
-        VariantHead::Qualifier {
-            enum_name, variant, ..
-        } => enum_def_for_variant(ws, Some(enum_name), variant).map(|e| e.name_span),
-    }
-}
-
-/// The part of a match-arm variant pattern head under the cursor.
-enum VariantHead<'a> {
-    Variant {
-        enum_name: Option<Ustr>,
-        variant: &'a skull_parser::Ident,
-    },
-    /// The enum qualifier plus the `::` up to the variant name.
-    Qualifier {
-        enum_name: Ustr,
-        variant: Ustr,
-        span: Span,
-    },
-}
-
-/// Walks match-arm patterns for the variant head under `offset`. One-segment
-/// record paths stay with HIR, which can distinguish a struct from a variant.
-fn variant_head_at<'a>(
-    ws: &Workspace,
-    mid: ModuleId,
-    ast: &'a skull_parser::Ast,
-    offset: usize,
-) -> Option<VariantHead<'a>> {
+) -> Option<Token> {
     fn path_variant(
         ws: &Workspace,
         mid: ModuleId,
@@ -2961,12 +2916,24 @@ fn variant_head_at<'a>(
             })
     }
 
-    fn in_pattern<'a>(
+    fn variant_token(
+        ws: &Workspace,
+        enum_name: Option<Ustr>,
+        variant: &skull_parser::Ident,
+    ) -> Option<Token> {
+        let en = enum_def_for_variant(ws, enum_name, variant.name)?.name;
+        Some(Token {
+            target: RefTarget::EnumVariant(en, variant.name),
+            span: variant.span,
+        })
+    }
+
+    fn in_pattern(
         ws: &Workspace,
         mid: ModuleId,
-        pat: &'a skull_parser::Pattern,
+        pat: &skull_parser::Pattern,
         offset: usize,
-    ) -> Option<VariantHead<'a>> {
+    ) -> Option<Token> {
         use skull_parser::Pattern;
         let (path, subs, record) = match pat {
             Pattern::PathVariant { path, args } => {
@@ -2994,14 +2961,10 @@ fn variant_head_at<'a>(
                     return None;
                 }
                 let enum_name = pattern_enum_name(ws, mid, variant.span).flatten();
-                return if record {
-                    enum_name.map(|enum_name| VariantHead::Variant {
-                        enum_name: Some(enum_name),
-                        variant,
-                    })
-                } else {
-                    Some(VariantHead::Variant { enum_name, variant })
-                };
+                if record && enum_name.is_none() {
+                    return None;
+                }
+                return variant_token(ws, enum_name, variant);
             }
             return subs
                 .into_iter()
@@ -3015,18 +2978,15 @@ fn variant_head_at<'a>(
         };
         let (enum_ident, variant_ident) = enum_path_names(path)?;
         if on(variant_ident.span) {
-            return Some(VariantHead::Variant {
-                enum_name: Some(enum_key),
-                variant: variant_ident,
-            });
+            return variant_token(ws, Some(enum_key), variant_ident);
         }
         let (es, _) = enum_ident.span.offset_range();
         let (vs, _) = variant_ident.span.offset_range();
         let span = enum_ident.span.with_offset_range((es, vs));
         if on(span) {
-            return Some(VariantHead::Qualifier {
-                enum_name: enum_key,
-                variant,
+            enum_def_for_variant(ws, Some(enum_key), variant)?;
+            return Some(Token {
+                target: RefTarget::Enum(enum_key),
                 span,
             });
         }
