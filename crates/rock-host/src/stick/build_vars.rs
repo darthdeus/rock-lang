@@ -348,8 +348,8 @@ mod tests {
         cfg
     }
 
-    fn no_overrides() -> HashMap<String, String> {
-        HashMap::new()
+    fn resolve(cfg: &StickConfig, dir: &Path, channel: Option<&str>) -> Result<ResolvedBuildVars> {
+        resolve_build_vars(cfg, dir, channel, None, &HashMap::new(), None)
     }
 
     #[test]
@@ -360,9 +360,7 @@ mod tests {
             "[build.vars]\nENDPOINT = \"https://example.test\"\nCHANNEL = { builtin = \"channel\" }\nCLOCK = { value = \"now\", volatile = true }\n",
         ));
         let dir = tempfile::tempdir().unwrap();
-        let resolved =
-            resolve_build_vars(&cfg, dir.path(), Some("steam"), None, &no_overrides(), None)
-                .unwrap();
+        let resolved = resolve(&cfg, dir.path(), Some("steam")).unwrap();
         assert_eq!(resolved.channel, "steam");
         assert_eq!(resolved.vars["ENDPOINT"].value, "https://example.test");
         assert_eq!(resolved.vars["CHANNEL"].value, "steam");
@@ -380,14 +378,13 @@ mod tests {
         ));
         let dir = tempfile::tempdir().unwrap();
 
-        let dev = resolve_build_vars(&cfg, dir.path(), Some("dev"), None, &no_overrides(), None)
-            .expect("off-channel source uses its default");
+        let dev =
+            resolve(&cfg, dir.path(), Some("dev")).expect("off-channel source uses its default");
         assert_eq!(dev.vars["TREE"].value, "development");
         assert!(!dev.source_fingerprints.contains_key("TREE"));
 
-        let steam =
-            resolve_build_vars(&cfg, dir.path(), Some("steam"), None, &no_overrides(), None)
-                .expect("active source fingerprint is deferred");
+        let steam = resolve(&cfg, dir.path(), Some("steam"))
+            .expect("active source fingerprint is deferred");
         assert!(
             !steam.vars.contains_key("TREE"),
             "deferred values must not use placeholders"
@@ -414,8 +411,7 @@ mod tests {
             "[build.vars]\nPLATFORM = { builtin = \"platform\" }\n",
         ));
         let dir = tempfile::tempdir().unwrap();
-        let host =
-            resolve_build_vars(&cfg, dir.path(), Some("dev"), None, &no_overrides(), None).unwrap();
+        let host = resolve(&cfg, dir.path(), Some("dev")).unwrap();
         let expected = match std::env::consts::OS {
             "macos" => "osx",
             other => other,
@@ -436,7 +432,7 @@ mod tests {
             dir.path(),
             Some("steam"),
             Some("windows"),
-            &no_overrides(),
+            &HashMap::new(),
             None,
         )
         .unwrap();
@@ -446,7 +442,7 @@ mod tests {
             dir.path(),
             Some("web"),
             Some("windows"),
-            &no_overrides(),
+            &HashMap::new(),
             None,
         )
         .unwrap();
@@ -463,7 +459,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         for target in ["win64", "ios", "web"] {
             let err =
-                resolve_build_vars(&cfg, dir.path(), None, Some(target), &no_overrides(), None)
+                resolve_build_vars(&cfg, dir.path(), None, Some(target), &HashMap::new(), None)
                     .expect_err("unsupported target os must reject");
             assert!(
                 format!("{err}").contains(target),
@@ -480,13 +476,12 @@ mod tests {
             "[build.vars]\nCHANNEL = { builtin = \"channel\" }\n",
         ));
         let dir = tempfile::tempdir().unwrap();
-        let err = resolve_build_vars(&cfg, dir.path(), Some("stema"), None, &no_overrides(), None)
+        let err = resolve(&cfg, dir.path(), Some("stema"))
             .expect_err("explicit channel with no declared channels must reject");
         let msg = format!("{err}");
         assert!(msg.contains("stema"), "error names the channel: {msg}");
 
-        let resolved =
-            resolve_build_vars(&cfg, dir.path(), None, None, &no_overrides(), None).unwrap();
+        let resolved = resolve(&cfg, dir.path(), None).unwrap();
         assert_eq!(resolved.vars["CHANNEL"].value, "dev");
     }
 
@@ -499,8 +494,7 @@ mod tests {
         ));
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("marker.txt"), "from-project-dir\n").unwrap();
-        let resolved =
-            resolve_build_vars(&cfg, dir.path(), None, None, &no_overrides(), None).unwrap();
+        let resolved = resolve(&cfg, dir.path(), None).unwrap();
         assert_eq!(resolved.vars["MARKER"].value, "from-project-dir");
         assert_eq!(resolved.vars["CHAN"].value, "dev");
     }
@@ -519,8 +513,7 @@ mod tests {
             wait("b.marker", "a.marker"),
         ));
         let dir = tempfile::tempdir().unwrap();
-        let resolved =
-            resolve_build_vars(&cfg, dir.path(), None, None, &no_overrides(), None).unwrap();
+        let resolved = resolve(&cfg, dir.path(), None).unwrap();
         assert_eq!(resolved.vars["A"].value, "a.marker");
         assert_eq!(resolved.vars["B"].value, "b.marker");
     }
@@ -533,7 +526,7 @@ mod tests {
         ));
         let dir = tempfile::tempdir().unwrap();
         let resolved =
-            resolve_build_vars(&cfg, dir.path(), None, None, &no_overrides(), Some("sim")).unwrap();
+            resolve_build_vars(&cfg, dir.path(), None, None, &HashMap::new(), Some("sim")).unwrap();
         assert_eq!(resolved.vars["COMMAND"].value, "sim");
     }
 
@@ -562,8 +555,8 @@ mod tests {
             "[build.vars]\nTOKEN = { cmd = \"echo s3cr3t-in-stderr >&2; echo s3cr3t-in-cmd >/dev/null; exit 7\", secret = true }\n",
         ));
         let dir = tempfile::tempdir().unwrap();
-        let err = resolve_build_vars(&cfg, dir.path(), None, None, &no_overrides(), None)
-            .expect_err("a failing cmd must fail the invocation");
+        let err =
+            resolve(&cfg, dir.path(), None).expect_err("a failing cmd must fail the invocation");
         let msg = format!("{err}");
         assert!(
             msg.contains("TOKEN"),
@@ -595,8 +588,8 @@ mod tests {
             "[build.vars]\nSHA = { cmd = \"echo diagnostic-detail >&2; exit 7\" }\n",
         ));
         let dir = tempfile::tempdir().unwrap();
-        let err = resolve_build_vars(&cfg, dir.path(), None, None, &no_overrides(), None)
-            .expect_err("a failing cmd must fail the invocation");
+        let err =
+            resolve(&cfg, dir.path(), None).expect_err("a failing cmd must fail the invocation");
         let msg = format!("{err}");
         assert!(msg.contains("SHA"), "error names the var: {msg}");
         assert!(
@@ -631,7 +624,7 @@ mod tests {
             "NEEDED = { cmd = \"false\", channels = [\"steam\"] }\n",
         ));
         let dir = tempfile::tempdir().unwrap();
-        let err = resolve_build_vars(&cfg, dir.path(), Some("dev"), None, &no_overrides(), None)
+        let err = resolve(&cfg, dir.path(), Some("dev"))
             .expect_err("restricted var with no default must reject off-channel");
         assert!(
             format!("{err}").contains("NEEDED"),
@@ -643,8 +636,7 @@ mod tests {
             "[build]\nchannels = [\"dev\", \"steam\"]\ndefault_channel = \"dev\"\n",
             "[build.vars]\nTOKEN = { cmd = \"false\", channels = [\"steam\"], default = \"none\" }\n",
         ));
-        let resolved =
-            resolve_build_vars(&cfg, dir.path(), Some("dev"), None, &no_overrides(), None).unwrap();
+        let resolved = resolve(&cfg, dir.path(), Some("dev")).unwrap();
         assert_eq!(
             resolved.vars["TOKEN"].value, "none",
             "off-channel uses default, cmd never runs"
@@ -659,11 +651,11 @@ mod tests {
             "[build.vars]\nTOKEN = { cmd = \"false\", optional_channels = [\"dev\"], default = \"\" }\n",
         ));
         let dir = tempfile::tempdir().unwrap();
-        let dev = resolve_build_vars(&cfg, dir.path(), Some("dev"), None, &no_overrides(), None)
+        let dev = resolve(&cfg, dir.path(), Some("dev"))
             .expect("optional dev command failure uses its default");
         assert_eq!(dev.vars["TOKEN"].value, "");
 
-        let err = resolve_build_vars(&cfg, dir.path(), Some("steam"), None, &no_overrides(), None)
+        let err = resolve(&cfg, dir.path(), Some("steam"))
             .expect_err("the same command must remain required on steam");
         assert!(format!("{err}").contains("TOKEN"));
     }
@@ -676,7 +668,7 @@ mod tests {
             "[build.vars]\nX = { cmd = \"echo boom >&2; exit 3\" }\n",
         ));
         let dir = tempfile::tempdir().unwrap();
-        let err = resolve_build_vars(&cfg, dir.path(), None, None, &no_overrides(), None)
+        let err = resolve(&cfg, dir.path(), None)
             .expect_err("failing cmd must fail resolution, never default silently");
         let msg = format!("{err:#}");
         assert!(
@@ -689,8 +681,8 @@ mod tests {
     fn undeclared_channel_rejects() {
         let cfg = fixture("[package]\nname = \"x\"\n[build]\nchannels = [\"dev\"]\n");
         let dir = tempfile::tempdir().unwrap();
-        let err = resolve_build_vars(&cfg, dir.path(), Some("stema"), None, &no_overrides(), None)
-            .expect_err("undeclared channel must reject");
+        let err =
+            resolve(&cfg, dir.path(), Some("stema")).expect_err("undeclared channel must reject");
         assert!(
             format!("{err}").contains("stema"),
             "error names the channel: {err}"
@@ -701,7 +693,7 @@ mod tests {
     fn channel_arg_without_build_section_rejects() {
         let cfg = StickConfig::new_from_str("[package]\nname = \"x\"\n").unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let err = resolve_build_vars(&cfg, dir.path(), Some("steam"), None, &no_overrides(), None)
+        let err = resolve(&cfg, dir.path(), Some("steam"))
             .expect_err("--channel with no [build] section must reject");
         assert!(
             format!("{err}").contains("[build]"),
@@ -713,8 +705,7 @@ mod tests {
     fn no_build_section_resolves_empty() {
         let cfg = StickConfig::new_from_str("[package]\nname = \"x\"\n").unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let resolved =
-            resolve_build_vars(&cfg, dir.path(), None, None, &no_overrides(), None).unwrap();
+        let resolved = resolve(&cfg, dir.path(), None).unwrap();
         assert!(resolved.vars.is_empty());
         assert_eq!(resolved.channel, "dev");
     }
