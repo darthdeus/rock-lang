@@ -28,7 +28,7 @@ struct Nominal {
 /// reaching `Node` through a stored argument).
 struct Edge {
     target: Ustr,
-    via: Option<String>,
+    via: Option<TyId>,
     span: Span,
 }
 
@@ -40,8 +40,14 @@ pub(crate) fn check_value_recursion(ws: &mut Workspace, fresh: &[ModuleId]) {
     for (&key, nominal) in nominals.iter() {
         let out = edges.entry(key).or_default();
         for &(ty, span) in &nominal.members {
-            by_value_targets(ws, &nominals, &stored, ty, &mut |target, via| {
-                out.push(Edge { target, via, span });
+            walk_stored(ws, &nominals, &stored, ty, None, &mut |te, via| {
+                if let TypeExpr::App {
+                    ctor: TypeCtor::Nominal(target),
+                    ..
+                } = te
+                {
+                    out.push(Edge { target, via, span });
+                }
             });
         }
     }
@@ -61,13 +67,13 @@ pub(crate) fn check_value_recursion(ws: &mut Workspace, fresh: &[ModuleId]) {
             };
             reported.insert(edge.span);
             let mut steps = vec![nominal.display.to_string()];
-            if let Some(via) = &edge.via {
-                steps.push(via.clone());
+            if let Some(via) = edge.via {
+                steps.push(ws.render(None, via));
             }
             for step in rest {
                 let n = &nominals[&step.0];
                 if let Some(via) = step.1 {
-                    steps.push(via);
+                    steps.push(ws.render(None, via));
                 }
                 steps.push(n.display.to_string());
             }
@@ -150,7 +156,11 @@ fn stored_params(
             }
             let mut vars = Vec::new();
             for &(ty, _) in &nominal.members {
-                by_value_params(ws, nominals, &stored, ty, &mut vars);
+                walk_stored(ws, nominals, &stored, ty, None, &mut |te, _| {
+                    if let TypeExpr::Generic(var, _) = te {
+                        vars.push(var);
+                    }
+                });
             }
             for var in vars {
                 if let Some(i) = nominal.params.iter().position(|&p| p == var) {
@@ -164,91 +174,44 @@ fn stored_params(
     }
 }
 
-/// The type params `ty` holds by value.
-fn by_value_params(
+/// Visit by-value nominals and generics, with the outermost nominal crossed
+/// through a stored argument as the diagnostic witness.
+fn walk_stored(
     ws: &Workspace,
     nominals: &FxHashMap<Ustr, Nominal>,
     stored: &FxHashMap<Ustr, FxHashSet<usize>>,
     ty: TyId,
-    out: &mut Vec<VarId>,
+    via: Option<TyId>,
+    visit: &mut impl FnMut(TypeExpr, Option<TyId>),
 ) {
     let Some((ty, te)) = ws.resolve_ty(None, ty) else {
         return;
     };
     match te {
-        TypeExpr::Generic(var, _) => out.push(var),
-        TypeExpr::Nullable(inner) => by_value_params(ws, nominals, stored, ty.with_idx(inner), out),
+        TypeExpr::Generic(..) => visit(te, via),
+        TypeExpr::Nullable(inner) => {
+            walk_stored(ws, nominals, stored, ty.with_idx(inner), via, visit);
+        }
         TypeExpr::Tuple { elements } => {
             for idx in elements {
-                by_value_params(ws, nominals, stored, ty.with_idx(idx), out);
+                walk_stored(ws, nominals, stored, ty.with_idx(idx), via, visit);
             }
         }
         TypeExpr::App {
             ctor: TypeCtor::Nominal(n),
             params,
         } if nominals.contains_key(&n) => {
+            visit(te, via);
             let Some(held) = stored.get(&n) else { return };
+            let via = via.or(Some(ty));
             for (i, idx) in params.into_iter().enumerate() {
                 if held.contains(&i) {
-                    by_value_params(ws, nominals, stored, ty.with_idx(idx), out);
+                    walk_stored(ws, nominals, stored, ty.with_idx(idx), via, visit);
                 }
             }
         }
         _ => {}
     }
-}
-
-/// Every by-value nominal `ty` contains, each with the outermost type that
-/// reached it when that is not the nominal itself.
-fn by_value_targets(
-    ws: &Workspace,
-    nominals: &FxHashMap<Ustr, Nominal>,
-    stored: &FxHashMap<Ustr, FxHashSet<usize>>,
-    ty: TyId,
-    sink: &mut dyn FnMut(Ustr, Option<String>),
-) {
-    fn walk(
-        ws: &Workspace,
-        nominals: &FxHashMap<Ustr, Nominal>,
-        stored: &FxHashMap<Ustr, FxHashSet<usize>>,
-        ty: TyId,
-        via: Option<&str>,
-        sink: &mut dyn FnMut(Ustr, Option<String>),
-    ) {
-        let Some((ty, te)) = ws.resolve_ty(None, ty) else {
-            return;
-        };
-        match te {
-            TypeExpr::Nullable(inner) => walk(ws, nominals, stored, ty.with_idx(inner), via, sink),
-            TypeExpr::Tuple { elements } => {
-                for idx in elements {
-                    walk(ws, nominals, stored, ty.with_idx(idx), via, sink);
-                }
-            }
-            TypeExpr::App {
-                ctor: TypeCtor::Nominal(n),
-                params,
-            } if nominals.contains_key(&n) => {
-                sink(n, via.map(str::to_string));
-                let Some(held) = stored.get(&n) else { return };
-                let rendered;
-                let via = match via {
-                    Some(v) => v,
-                    None => {
-                        rendered = ws.render(None, ty);
-                        &rendered
-                    }
-                };
-                for (i, idx) in params.into_iter().enumerate() {
-                    if held.contains(&i) {
-                        walk(ws, nominals, stored, ty.with_idx(idx), Some(via), sink);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    walk(ws, nominals, stored, ty, None, sink)
 }
 
 /// The shortest edge path from `from` back to `goal`, as (nominal, via) steps
@@ -257,7 +220,7 @@ fn path_back(
     edges: &FxHashMap<Ustr, Vec<Edge>>,
     from: Ustr,
     goal: Ustr,
-) -> Option<Vec<(Ustr, Option<String>)>> {
+) -> Option<Vec<(Ustr, Option<TyId>)>> {
     // Each step records the nominal entered and the edge that entered it.
     let mut prev: FxHashMap<Ustr, Option<(Ustr, usize)>> = FxHashMap::default();
     prev.insert(from, None);
@@ -267,7 +230,7 @@ fn path_back(
             let mut steps = Vec::new();
             let mut cur = at;
             while let Some(Some((parent, edge_ix))) = prev.get(&cur).copied() {
-                steps.push((cur, edges[&parent][edge_ix].via.clone()));
+                steps.push((cur, edges[&parent][edge_ix].via));
                 cur = parent;
             }
             steps.push((from, None));

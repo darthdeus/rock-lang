@@ -11,12 +11,6 @@ use bone_lower::{LowerCtx, lower_annotations_in_scope};
 use crate::hir::{BuiltinTy, TypeCtor, TypeExpr, VariantPayload};
 use crate::{hir::Module, prelude::*};
 
-struct LowerItem<'a> {
-    module: &'a mut Module,
-    rock_module: &'a Ast,
-    fragment_scope: FragmentScope,
-}
-
 /// Record index-free trailing defaults. Lowering validates them and reports spans.
 fn trailing_generic_defaults(
     ast: &Ast,
@@ -91,8 +85,7 @@ fn module_nominal_facts(scope: &FragmentScope, rock_mod: &Ast) -> ModuleNominalF
         ));
         Ok(())
     };
-    let start = scope.module_path.clone();
-    for_each_def_item(rock_mod.items.as_slice(), &start, &mut walk)
+    for_each_def_item(&rock_mod.items, &scope.module_path, &mut walk)
         .expect("reading nominal facts rejects nothing");
     facts
 }
@@ -220,15 +213,7 @@ pub fn lower_modules_seeded(
     }
 
     ws.log_time("nominal facts", gap_timer);
-    let mut items = modules
-        .iter_mut()
-        .zip(rock_modules.iter())
-        .map(|(a, b)| LowerItem {
-            module: a,
-            rock_module: b,
-            fragment_scope: ws.fragment_scopes[&b.file].clone(),
-        })
-        .collect_vec();
+    let mut items = modules.iter_mut().zip(rock_modules).collect_vec();
 
     {
         let _span = tracing::info_span!("forward_decls").entered();
@@ -236,8 +221,8 @@ pub fn lower_modules_seeded(
 
         items
             .par_iter_mut()
-            .map(|item| {
-                pass_register_forward_decls(item.rock_module, item.module, &item.fragment_scope)
+            .map(|(module, ast)| {
+                pass_register_forward_decls(ast, module, &ws.fragment_scopes[&ast.file])
             })
             .collect::<Result<Vec<()>, CompilerError>>()?;
 
@@ -247,13 +232,12 @@ pub fn lower_modules_seeded(
 
     // Validate non-function annotations after more specific forward-declaration errors.
     // Resolve their names so user decorators cannot enter builtin branches.
-    for lower_item in items.iter_mut() {
-        let mut ctx = LowerCtx::new(ws, lower_item.module, lower_item.rock_module, 0);
-        let fragment_scope = lower_item.fragment_scope.clone();
-        let start = fragment_scope.module_path.clone();
+    for (module, ast) in &mut items {
+        let mut ctx = LowerCtx::new(ws, module, ast, 0);
+        let fragment_scope = &ws.fragment_scopes[&ast.file];
         for_each_def_item(
-            lower_item.rock_module.items.as_slice(),
-            &start,
+            &ast.items,
+            &fragment_scope.module_path,
             &mut |ast_item, path| {
                 if ast_item.annotations.is_empty() {
                     return Ok(());
@@ -275,7 +259,7 @@ pub fn lower_modules_seeded(
                 let lowered = lower_annotations_in_scope(&ctx, &ast_item.annotations, &item_scope)?;
                 validate_annotations(pos, &lowered, &ws.decorator_names)?;
                 if let ItemKind::Struct(def) = &ast_item.kind {
-                    let name = map_key(&fragment_scope, path, def.name.name);
+                    let name = map_key(fragment_scope, path, def.name.name);
                     let index = ctx.module.struct_by_name[&name];
                     ctx.module.structs[index].consume =
                         lowered.iter().any(|anno| anno.is_builtin("consume"));
@@ -291,8 +275,8 @@ pub fn lower_modules_seeded(
         let _span = tracing::info_span!("name_reg").entered();
         let timer = Instant::now();
 
-        for item in items.iter_mut() {
-            let mid = item.module.module_id();
+        for (module, _) in &mut items {
+            let mid = module.module_id();
 
             // Keep the first declaration so its uses still lower. Record duplicates as
             // interface errors so the editor can show them with partial results.
@@ -304,9 +288,9 @@ pub fn lower_modules_seeded(
                     || ws.newtypes_by_name.contains_key(name)
             };
 
-            for (name, def) in item.module.struct_by_name.iter() {
+            for (name, def) in module.struct_by_name.iter() {
                 if type_taken(ws, name) {
-                    let span = item.module.structs[*def].span;
+                    let span = module.structs[*def].span;
                     dup_errs.push(CompilerError::new_with_label(
                         span,
                         format!("duplicate struct `{}` across modules", name),
@@ -322,9 +306,9 @@ pub fn lower_modules_seeded(
                 }
             }
 
-            for (name, def) in item.module.enums_by_name.iter() {
+            for (name, def) in module.enums_by_name.iter() {
                 if type_taken(ws, name) {
-                    let span = item.module.enums[*def].span;
+                    let span = module.enums[*def].span;
                     dup_errs.push(CompilerError::new_with_label(
                         span,
                         format!("duplicate enum `{}` across modules", name),
@@ -340,9 +324,9 @@ pub fn lower_modules_seeded(
                 }
             }
 
-            for (name, def) in item.module.newtypes_by_name.iter() {
+            for (name, def) in module.newtypes_by_name.iter() {
                 if type_taken(ws, name) {
-                    let span = item.module.newtypes[*def].span;
+                    let span = module.newtypes[*def].span;
                     dup_errs.push(CompilerError::new_with_label(
                         span,
                         format!("duplicate newtype `{}` across modules", name),
@@ -358,7 +342,7 @@ pub fn lower_modules_seeded(
                 }
             }
 
-            item.module.interface_errors.extend(dup_errs);
+            module.interface_errors.extend(dup_errs);
         }
 
         ws.log_time("register names", timer);
@@ -369,10 +353,10 @@ pub fn lower_modules_seeded(
         let _span = tracing::info_span!("lower_fields").entered();
 
         items
-            .par_iter_mut()
-            .map(|item| {
-                let first_var = item.module.lower_var_high_water;
-                let mut ctx = LowerCtx::new(ws, item.module, item.rock_module, first_var);
+            .into_par_iter()
+            .map(|(module, ast)| {
+                let first_var = module.lower_var_high_water;
+                let mut ctx = LowerCtx::new(ws, module, ast, first_var);
 
                 pass_lower_fields(&mut ctx)?;
                 bone_lower::record_use_paths(&mut ctx);
@@ -1944,10 +1928,6 @@ fn reuse_body(
             .per_fn
             .insert(owner, prev.per_fn.remove(&owner).unwrap());
 
-        if let Some(e) = prev.errors.remove(&owner) {
-            result.errors.insert(owner, e);
-        }
-
         true
     } else {
         false
@@ -1959,8 +1939,7 @@ pub(crate) fn pass_register_forward_decls(
     module: &mut Module,
     scope: &FragmentScope,
 ) -> Result<(), CompilerError> {
-    let start = scope.module_path.clone();
-    for_each_def_item(rock_module.items.as_slice(), &start, &mut |item, path| {
+    for_each_def_item(&rock_module.items, &scope.module_path, &mut |item, path| {
         let def_key = |name: &ustr::Ustr| map_key(scope, path, *name);
         if let ItemKind::Struct(s) = &item.kind {
             let reg_name = def_key(&s.name.name);
@@ -2036,8 +2015,7 @@ pub(crate) fn pass_lower_fields(ctx: &mut LowerCtx) -> Result<(), CompilerError>
     let a = ctx.ast;
     let scope = ctx.fragment_scope().clone();
     let reg_key = |name: &ustr::Ustr, path: &[ustr::Ustr]| map_key(&scope, path, *name);
-    let start = scope.module_path.clone();
-    for_each_def_item(a.items.as_slice(), &start, &mut |item, path| {
+    for_each_def_item(&a.items, &scope.module_path, &mut |item, path| {
         match &item.kind {
             ItemKind::Struct(s) => lower_struct_def(ctx, s, reg_key(&s.name.name, path))?,
             ItemKind::Enum(e) => lower_enum_def(ctx, e, reg_key(&e.name.name, path))?,
@@ -2054,8 +2032,7 @@ pub(crate) fn pass_lower_functions(ctx: &mut LowerCtx) -> Result<(), CompilerErr
     let a = ctx.ast;
     let scope = ctx.fragment_scope().clone();
     let reg_key = |name: &ustr::Ustr, path: &[ustr::Ustr]| map_key(&scope, path, *name);
-    let start = scope.module_path.clone();
-    for_each_def_item(a.items.as_slice(), &start, &mut |item, path| {
+    for_each_def_item(&a.items, &scope.module_path, &mut |item, path| {
         match &item.kind {
             ItemKind::Function(f) => {
                 if f.is_macro {

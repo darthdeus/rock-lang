@@ -1,0 +1,14 @@
+//- stored_argument_cycle @fail=recursive value type: Node -> Wrapper<Node> -> Node
+value Leaf<T> { item: T? }
+newtype Wrapper<T>(Leaf<T>)
+value Node { next: Wrapper<Node> }
+
+//- phantom_argument_breaks_cycle
+value Leaf<T> { id: int }
+newtype Wrapper<T>(Leaf<T>)
+value Node { next: Wrapper<Node> }
+fn read(n: Node) -> Node {
+    let x = n
+      //^ Node
+    x
+}

@@ -368,22 +368,21 @@ impl<'a> BodyCtx<'a> {
         }
     }
 
-    fn call_args(&self, call: Idx<Expr>) -> Vec<Idx<Expr>> {
-        match &self.body.expr_arena[call] {
-            Expr::Call { args, .. } => (*args).into_iter().collect(),
-            Expr::SafeNavCall { receiver, args, .. } => {
-                std::iter::once(*receiver).chain(*args).collect()
-            }
+    fn call_args(&self, call: Idx<Expr>) -> impl Iterator<Item = Idx<Expr>> {
+        let (receiver, args) = match self.body.expr_arena[call] {
+            Expr::Call { args, .. } => (None, args),
+            Expr::SafeNavCall { receiver, args, .. } => (Some(receiver), args),
             _ => unreachable!("call arguments requested for a non-call"),
-        }
+        };
+        receiver.into_iter().chain(args)
     }
 
     /// The callee's parameter each argument fills: by name when named,
     /// positionally otherwise.
-    fn bind_args(&self, callee: &Function, args: &[Idx<Expr>]) -> Vec<Option<Arg>> {
+    fn bind_args(&self, callee: &Function, call: Idx<Expr>) -> Vec<Option<Arg>> {
         let mut bound: Vec<Option<Arg>> = vec![None; callee.param_decls.len()];
         let mut next = 0;
-        for &arg in args {
+        for arg in self.call_args(call) {
             let slot = match self.body.arg_names.get(&arg) {
                 Some(name) => callee.param_decls.iter().position(|p| p.name == *name),
                 None => {
@@ -424,20 +423,17 @@ impl<'a> BodyCtx<'a> {
         };
         let at = self.body.expr_spans[e];
         match self.body.expr_arena[target] {
-            Expr::Index { base, .. } if self.is_map(base) => self.write(effect, base, at),
-            Expr::FieldAccess { base, field } if field.as_str() == "len" && self.is_vec(base) => {
+            Expr::Index { base, .. } if self.collection_ctor(base) == Some(TypeCtor::Map) => {
+                self.write(effect, base, at)
+            }
+            Expr::FieldAccess { base, field }
+                if field.as_str() == "len"
+                    && self.collection_ctor(base) == Some(TypeCtor::Array) =>
+            {
                 self.write(effect, base, at)
             }
             _ => {}
         }
-    }
-
-    fn is_map(&self, e: Idx<Expr>) -> bool {
-        self.collection_ctor(e) == Some(TypeCtor::Map)
-    }
-
-    fn is_vec(&self, e: Idx<Expr>) -> bool {
-        self.collection_ctor(e) == Some(TypeCtor::Array)
     }
 
     fn collection_ctor(&self, e: Idx<Expr>) -> Option<TypeCtor> {
@@ -455,16 +451,21 @@ impl<'a> BodyCtx<'a> {
             return CallSite::Unknown;
         };
         let function = &self.ws.module(callee.0).functions[callee.1];
-        let generics = match self.bi.call_generic_bindings.get(&call) {
-            Some(bindings) => bindings.iter().map(|&ty| self.key(ty)).collect(),
-            None => Vec::new(),
-        };
-        let args = self.bind_args(function, &self.call_args(call));
         CallSite::Known(Edge {
             callee,
-            generics,
-            args,
+            generics: self.generic_keys(call),
+            args: self.bind_args(function, call),
         })
+    }
+
+    fn generic_keys(&self, call: Idx<Expr>) -> Vec<String> {
+        self.bi
+            .call_generic_bindings
+            .get(&call)
+            .into_iter()
+            .flatten()
+            .map(|&ty| self.key(ty))
+            .collect()
     }
 
     /// The collections an argument points into an element of, with their
@@ -518,12 +519,7 @@ impl<'a> BodyCtx<'a> {
                     if !is_reference_struct(self.ws, self.bi, target)
                         && let Some(callee) = self.resolved(e)
                     {
-                        let generics = self
-                            .bi
-                            .call_generic_bindings
-                            .get(&e)
-                            .map(|types| types.iter().map(|&ty| self.key(ty)).collect::<Vec<_>>())
-                            .unwrap_or_default();
+                        let generics = self.generic_keys(e);
                         for key in self.return_origins.roots(self.ws, callee) {
                             out.push(Root {
                                 key: substitute(&key, &generics),
