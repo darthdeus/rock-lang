@@ -22,13 +22,8 @@ fn generic_inline_at_value_type_splices_zero_box() {
     let lua = emit_module(VALUE_INST);
     let body = function_body(&lua, "use_buf");
 
-    // The value never boxes: the specialized splice threads it as scalar leaves.
     assert!(!body.contains("V2_ct("));
-    // The boxed whole-value store is gone -- the store scalarizes to field writes.
     assert!(!body.contains("__nb_checked_set"));
-    // Positive: the element is bounds-checked once by INDEX and its leaves are
-    // written through typed views -- no slot reference is fetched, so the
-    // specialized store allocates nothing on any path, not just on trace.
     assert!(body.contains("__nb_checked_index"));
     assert!(!body.contains("__nb_checked_get"));
 }
@@ -49,11 +44,7 @@ fn main() { let _ = make() }
 fn generic_inline_intrinsic_resolves_ctype_at_value_instantiation() {
     let lua = emit_module(INTRINSIC_INST);
     let body = function_body(&lua, "make");
-    // The specialized `native_buffer_alloc<T>` names the concrete element ctype --
-    // the whole point of P2 for the alloc intrinsic (P1 could only do it at a
-    // concrete, non-generic call site).
     assert!(body.contains(r#"__rock_nb_alloc("V2","#));
-    // No dangling call to the shared generic `flat_vec_new` survives.
     assert!(!body.contains("flat_vec_new"));
 }
 

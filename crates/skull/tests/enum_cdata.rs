@@ -14,8 +14,6 @@ fn classify(n: int) -> int {
     }
 }
 
-// Escaping: stored in a Vec, so the enum is a real cdata (not SROA scalars). The
-// value `__eq` metatype must make equal-field cdata compare equal.
 fn eq_escaping() -> int {
     let xs = [Shape::Circle(5), Shape::Circle(5), Shape::Square(5)]
     let a = if xs[0] == xs[1] { 1 } else { 0 }
@@ -122,11 +120,9 @@ fn main() { t() }
 #[test]
 fn cdata_enum_record_payload() {
     let lua = emit_module(RECORD_SRC);
-    // Mixed tuple `_0` (Circle) + record `_w`/`_h` (Box) slots in one cdef.
     assert!(lua.contains("int _0; int _w; int _h; } Shape;"));
 
     let prog = lua;
-    // Record fields sorted alphabetically (h before w) -- matches rock's inspect.
     assert_eq!(run_fn(&prog, "t"), "15 12 0 | Shape::Box { h = 4, w = 3 }");
 }
 

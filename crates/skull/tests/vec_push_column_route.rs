@@ -29,8 +29,7 @@ fn main() {
 "#;
 
 fn reaches_boxed_body(lua: &str) -> bool {
-    // `main`'s body: the always-emitted `vec_push` definition contains `._data`
-    // too, so a module-wide match would answer yes for any program.
+    // The always-emitted `vec_push` definition also contains `._data`.
     function_body(lua, "main").contains("._data")
 }
 

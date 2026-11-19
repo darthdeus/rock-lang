@@ -66,7 +66,6 @@ fn a_splice_preserves_read_order_without_empty_blocks() {
     let body = function_body(&lua, "run");
     assert!(!body.contains("local v = "));
     assert!(!body.contains(" do\n end"));
-    // A discarded call result needs no local to bind it.
     assert!(body.contains("tostring("));
     assert!(!body.contains("local _"));
     assert!(body.contains("local b = (c0.b)"));

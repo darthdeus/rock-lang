@@ -83,7 +83,6 @@ fn fixture(leaves: usize, held: usize) -> String {
 #[test]
 fn three_live_fifty_leaf_values_load_and_run() {
     let lua = try_emit_module(&fixture(50, 3)).expect("emits");
-    // v0: 1 + 50, v1: 2 + 50 + 1, v2: 3 + 50 + 2.
     assert_eq!(run_main(&lua), "159");
 }
 
@@ -113,8 +112,6 @@ fn four_live_fifty_leaf_values_are_a_spanned_compile_error() {
     let label = err.labels.first().expect("a spanned label");
     assert_eq!(label.span.file.as_str(), "<test>");
     assert_eq!(err.location.file.as_str(), "<test>");
-    // And the Lua it would have emitted really is unloadable, so the rejection
-    // is not the compiler being timid.
     let lua = emit_module_without_frame_limits(&fixture(50, 4));
     let load = luajit_loads(&lua).expect_err("must not load");
     assert!(load.contains("more than 200 local variables") || load.contains("too complex"));
@@ -143,8 +140,6 @@ fn walk(name: &str, lo: usize, hi: usize, mk: impl Fn(usize) -> String) {
         .collect();
     assert!(verdicts.iter().any(|ok| *ok));
     assert!(verdicts.iter().any(|ok| !*ok));
-    // Monotone by construction: once the frame is too wide, widening it further
-    // cannot make it load again.
     let flip = verdicts
         .iter()
         .position(|ok| !*ok)

@@ -50,7 +50,6 @@ nobox value Column { x: int, y: int }
         m[i] = Row { x: i }
         c[i] = Column { x: i, y: i + 1 }
     }
-    // Replacing an existing entry must be visible on later iterations.
     let seen = 0
     for (k, v) in m {
         if seen == 0 {

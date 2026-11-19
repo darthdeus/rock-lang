@@ -61,7 +61,6 @@ fn declared_on(line: &str) -> Vec<String> {
     while let Some(at) = rest.find("function") {
         rest = &rest[at + "function".len()..];
         let Some(open) = rest.find('(') else { break };
-        // Only a parameter list: anything but a name between `function` and `(`.
         if rest[..open].contains(')') || rest[..open].contains(',') {
             continue;
         }
@@ -146,11 +145,7 @@ fn undeclared_kills(lua: &str) -> Vec<(String, usize, String)> {
 #[test]
 fn every_nil_kill_names_a_declared_local() {
     let lua = emit_module(SRC);
-    // Guard: the defect needs the FORWARDED call shape, `noise(v(..))` rendered
-    // as one nested call with the `v` results as trailing arguments. If the
-    // inliner ever swallows `noise`, this test stops exercising the path and
-    // must say so rather than pass vacuously.
-    // Both callees are bound, so the shape is one alias called on another.
+    // Without the forwarded `noise(v(..))` shape this test would pass vacuously.
     let forwarded = nested_alias_calls(&lua);
     assert!(forwarded >= 4);
     let bad = undeclared_kills(&lua);

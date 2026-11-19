@@ -147,8 +147,6 @@ fn main() {
 fn arena_bare_loop_used_entity_scalarizes_into_call() {
     let lua = emit_module(ARENA_BARE_LOOP_USED_ENTITY);
     let hot = function_body(&lua, "hot");
-    // The entity threads to `get` as scalar leaves (arena, index, generation) --
-    // no `Entity_vt` materialization, no table, no surviving pair tuple.
     assert!(!hot.contains("Entity_vt") && !hot.contains("{"));
     assert!(
         crate::common::definitions_of(&lua, "get_Entity")
@@ -192,7 +190,6 @@ fn arena_scan_returning_entity_keeps_leaves_until_a_boxed_sink() {
     let lua = emit_module(ARENA_SCAN_RETURN_ENTITY);
     let find = function_body(&lua, "scan_return_hit");
     assert!(!find.contains("Entity_vt(") && !find.contains("Entity_ct(") && !find.contains('{'));
-    // No un-tagged raw Entity table leaked (the lower_for_arena MakeStruct bug).
     assert!(!find.contains("_arena ="));
     let main = function_body(&lua, "main");
     assert_eq!(main.matches("Entity_vt(").count(), 1);

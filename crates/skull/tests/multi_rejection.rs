@@ -33,8 +33,6 @@ fn every_rejection_is_reported_not_just_the_first() {
     let all = messages(&err);
     assert_eq!(all.len(), 3);
 
-    // Each names its own function: the point of reporting all of them is to get
-    // a SITE TABLE, so three copies of one message would be no better than one.
     for want in ["sink_one", "sink_two", "sink_three"] {
         assert!(all.iter().any(|m| m.contains(want)));
     }
@@ -74,12 +72,6 @@ fn every_failing_specialization_is_reported_not_just_the_first() {
     let err =
         try_emit_module(TWO_FAILING_SPECIALIZATIONS).expect_err("both specializations must reject");
     let all = messages(&err);
-    // `pair` splats its `(T, float)?` return (presence bool then the slots) and
-    // `nullable_pair` binds that wire, so neither materializes on the way. The
-    // second rejection is the whole-tuple ESCAPE into the interpolation, which is
-    // the guarantee firing by design rather than an unbuilt mechanism -- so it
-    // stays a rejection, and the property under test (BOTH specializations get
-    // reported, not just the first) keeps its two sites.
     for want in ["specialized `tuple_in_coll", "specialized `nullable_pair"] {
         assert!(all.iter().any(|m| m.contains(want)));
     }
@@ -125,7 +117,6 @@ fn main() { sink_one() }
 
 #[test]
 fn a_lowering_rejection_points_at_the_expression() {
-    // Generic, so type-check accepts it and only the `string` instance fails.
     let src = r#"
 fn bump<T>(x: T) -> T {
     x++

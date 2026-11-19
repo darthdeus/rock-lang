@@ -92,9 +92,6 @@ fn the_wide_uniform_witness_uses_one_slot_per_wide_value() {
     luajit_loads(&lua).expect("the emitted chunk must load");
     assert_eq!(function_params(&lua, "sprite_uniform").len(), 2);
     assert_eq!(function_params(&lua, "uniform_signal").len(), 1);
-    // Per iteration: count 1 + sprite_position.x (the index) + sprite_receiver 1
-    // + origin.x 0.5, plus 0 + 1 + 2 from the three live narrow locals.
-    // (2.5 + 3.5 + 4.5) + 3 * 3 = 19.5.
     assert_eq!(run_main(&lua), "19.5");
 }
 
@@ -120,7 +117,6 @@ fn main() {{ print(\"{{roundtrip(0.0)}}\") }}
     );
     let lua = try_emit_module(&src).expect("reading nobox fields out of a boxed wide value");
     assert_eq!(run_main(&lua), "16");
-    // The `nobox` value that IS a parameter keeps its scalar lanes.
     assert_eq!(function_params(&lua, "with_anchor").len(), 5);
 }
 
@@ -203,7 +199,6 @@ const BUDGET_NOBOX_WIDE: usize = 30;
 const BUDGET_NARROW: usize = 12;
 
 fn budget_src() -> String {
-    // Whole-value bindings retain the declared transport for the budget test.
     let value = |kw: &str, name: &str, n: usize| {
         let fields = (0..n)
             .map(|k| format!("m{k}: float"))
@@ -229,8 +224,6 @@ fn budget_mixed(a_value: M, b_value: M, c_value: M, n_value: NB, d_value: N) -> 
     return a.m0 + b.m1 + c.m2 + n.m0 + d.m3
 }}
 
-// The `nobox` member is the WIDEST thing in this signature, so a budget that
-// ranked candidates by lanes without excluding `nobox` would box it first.
 fn budget_nobox_widest(n_value: NW, a_value: M, b_value: M, c_value: M) -> float {{
     let n = n_value; let a = a_value; let b = b_value; let c = c_value;
     return n.m0 + a.m0 + b.m1 + c.m2
@@ -278,8 +271,6 @@ fn the_lane_budget_boxes_widest_ordinary_values_and_never_nobox_values() {
     assert_eq!(run_main(&lua), "15");
     let params = function_params(&lua, "budget_mixed");
     assert_eq!(params.len(), 1 + BUDGET_MEMBER * 2 + BUDGET_NARROW * 2);
-    // The WIDEST member here is the `nobox` one. Ranking candidates without
-    // excluding `nobox` would box it and stop; the budget must box an `M`.
     let widest = function_params(&lua, "budget_nobox_widest");
     assert_eq!(widest.len(), BUDGET_NOBOX_WIDE + 1 + BUDGET_MEMBER * 2);
 }
@@ -367,15 +358,11 @@ fn a_boxed_parameter_does_not_alias_the_callers_value() {
         "{}
 global CALLER: W
 global CALLEE: W
-// The callee keeps its boxed parameter in its own storage and then mutates it.
-// If the box were the caller's, `CALLER.a0` would move with it.
 fn keep_and_mutate(w: W) -> float {{
     CALLEE = w
     CALLEE.a0 = 99.0
     return CALLEE.a0
 }}
-// And the other direction: the caller writes AFTER the call, which the copy the
-// callee kept must not see.
 fn main() {{
     CALLER = mkw(1.0)
     let seen = keep_and_mutate(CALLER)

@@ -111,11 +111,7 @@ fn nonescaping_payload_enum_does_not_allocate_table() {
     let lua = emit_module(SRC);
     assert_eq!(run_fn(&lua, "t"), "1 99 3");
     let body = function_body(&lua, "classify");
-    // The `MakeEnum` table literal must be GONE from the hot body. (`= "Circle"`
-    // survives as a scalarized field-cell store; only the `{__variant = ` TABLE
-    // construction is the allocation we remove.)
     assert!(!body.contains("{__variant = "));
-    // The scalarized form keeps the variant tag string as a plain field-cell value.
     assert!(body.contains("\"Circle\""));
 }
 
@@ -145,8 +141,6 @@ fn mixed_payload_and_unit_enum_does_not_allocate_table() {
     assert_eq!(run_fn(&lua, "t"), "1 99 7 4");
     let body = function_body(&lua, "classify");
     assert!(!body.contains("{__variant = "));
-    // The unit variant's singleton ref must be scalarized away too (the cell no
-    // longer references the global -- its tag is a plain `"Point"` field-cell value).
     assert!(!body.contains("__rock_enum_Shape_Point"));
 }
 

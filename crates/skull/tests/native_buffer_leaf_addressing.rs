@@ -29,9 +29,6 @@ fn nested_value_store_materializes_no_ctor() {
 
 #[test]
 fn nested_value_store_takes_no_slot_reference() {
-    // Indexing a cdata array of struct type returns a REFERENCE cdata (24 B,
-    // measured). Leaf addressing goes through a typed view instead, so no slot
-    // is taken at all.
     let lua = emit_module(NESTED_STORE);
     let body = function_body(&lua, "fill");
     assert!(!body.contains("__nb_checked_get("));
@@ -66,8 +63,6 @@ fn a_whole_element_store_bounds_checks_exactly_once_first() {
     let checks = body.matches("checked").count();
     assert_eq!(checks, 1);
 
-    // Ordering: the check has to come before the buffer is addressed through a
-    // typed view (`r6 = r3.__vf`), which is where every leaf write goes.
     let check_at = body.find("checked").expect("a bounds check");
     let first_view_use = body
         .find(".__v")
@@ -77,8 +72,6 @@ fn a_whole_element_store_bounds_checks_exactly_once_first() {
 
 #[test]
 fn nested_value_read_takes_no_slot_reference() {
-    // A read costs TWO reference cdatas today: the slot, then the nested field
-    // (`r1 = __nb_checked_get(..)`, `r2 = r1.pos`). Both must be gone.
     let lua = emit_module(NESTED_READ);
     let body = function_body(&lua, "total");
     assert!(!body.contains("__nb_checked_get("));
@@ -105,15 +98,11 @@ fn main() {
 fn a_single_field_leaf_read_loads_only_that_leaf() {
     let lua = emit_module(SINGLE_FIELD_READ);
     let body = function_body(&lua, "read_one");
-    // Count the view-indexed loads. `Vert` has 6 leaves; only `pos.x` is used.
     let loads = body.matches("[(").count() + body.matches("[__").count();
     let view_reads = body.matches(".__v").count();
     assert!(view_reads <= 1);
     assert!(loads <= 1);
-    // The PRECONDITION for dropping the other loads: the element's bounds check
-    // is hoisted, so each leaf read carries no error of its own. If this ever
-    // stops being emitted, the DCE exemption is deleting a real check --
-    // `leaf_read_still_bounds_checks` in the .rock suite is the runtime half.
+    // Dropping the unused loads is only sound while the bounds check is hoisted.
     assert!(body.contains("__nb_checked_index("));
 }
 

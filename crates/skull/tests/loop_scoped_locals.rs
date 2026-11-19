@@ -23,8 +23,6 @@ fn main() { print("{hot(1.0, 2.0, 8)}") }
         .find(" for ")
         .unwrap_or_else(|| panic!("no for loop in:\n{body}"));
     let after_for = &body[for_pos..];
-    // The body entry has no label (only the `for` line enters it), so the
-    // in-loop decl must be the first line inside the loop.
     let decl = after_for.lines().nth(1).unwrap_or_default();
     assert!(decl.trim_start().starts_with("local r"));
 }
@@ -48,9 +46,6 @@ fn main() { print("{hot(1.0, 2.0, 8)}") }
 "#;
     let lua = emit_module(src);
     let body = function_body(&lua, "hot");
-    // `pre` is multi-use (pre * pre after the loop): a real register whose value
-    // crosses the loop. Every rN referenced after the loop's `end` must be
-    // declared at fn top (the first `local` line), else it reads nil.
     let top_decl = body
         .lines()
         .find(|l| l.trim_start().starts_with("local "))

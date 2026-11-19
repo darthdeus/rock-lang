@@ -7,9 +7,6 @@ fn mk_cap(x: int) -> fn() -> int { return () => x }
 fn main() { let f = mk_cap(5) print("{f()}") }
 "#;
     let lua = emit_module(src);
-    // The capturing lambda hoists to an env-carrying body. Post-cutover the env
-    // param is a normal (colored `c<N>`) cell materialized by the pass, not the
-    // magic `__rock_env` local the old codegen path named it.
     let lam = format!("{}__lambda0", mangled_name(&lua, "mk_cap"));
     assert!(lua.contains(&format!("function {lam}(c")));
     let body = function_body(&lua, "mk_cap");
@@ -41,8 +38,6 @@ fn main() {
     let body = function_body(&lua, "pair_box");
     assert!(body.contains("= {v = "));
     assert!(body.contains("setmetatable({ __slot = __rock_code_slot_ref("));
-    // A boxed capture field passes the box TABLE (no `.v`); each hoisted body
-    // reads/writes it through `__rock_env.c<N>.v`.
     assert!(lua.contains(".v"));
     let out = run_main(&lua);
     assert_eq!(out, "0\n2");
@@ -59,15 +54,9 @@ fn main() {
 }
 "#;
     let lua = emit_module(src);
-    // Both lambdas hoist (the outer captures `x` transitively, threading it in);
-    // inst-arena order fixes which k is inner vs outer, so assert order-agnostically.
-    // Post-cutover the env param is a colored `c<N>` cell, not the magic `__rock_env`.
     let m = mangled_name(&lua, "outer_cap");
     assert!(lua.contains(&format!("function {m}__lambda0(c")));
     assert!(lua.contains(&format!("function {m}__lambda1(c")));
-    // The OUTER hoisted body constructs the INNER record, seeding the capture from
-    // its OWN env (the transitive thread). The exact env-field render is a colored
-    // `c<N>.c<M>`; the behavior below proves the thread, so pin only the record.
     let outer_builds_inner = (0..2).any(|k| {
         let body = function_body(&lua, &format!("{m}__lambda{k}"));
         body.contains("setmetatable({ __slot = __rock_code_slot_ref(")
@@ -92,9 +81,6 @@ fn drive() -> int {
 fn main() { print("{drive()}") }
 "#;
     let lua = emit_module(src);
-    // The mutated lambda param rebinds to a box seeded from the param. The pass
-    // materializes the box as `c<N> = {v = <param>}` (an assignment at the hoisted
-    // body entry); the old codegen path wrote `local c<N> = { v = c<N> }`.
     assert!(lua.contains("{v = "));
     let out = run_main(&lua);
     assert_eq!(out, "15");
@@ -158,8 +144,6 @@ fn main() {
 @nomangle inline(lua) fn stash_orig(p: Pair) = "_G.__O = p"
 "#;
     let lua = emit_module(src);
-    // orig bumped twice (10 -> 12); the copy was taken before either bump (still
-    // 10) and must not observe the original's writes.
     let driver = "\n\
         main()\n\
         print(tostring(__O.get()) .. \"\\t\" .. tostring(__P.get()))\n";

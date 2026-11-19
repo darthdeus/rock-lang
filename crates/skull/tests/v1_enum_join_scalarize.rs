@@ -22,6 +22,5 @@ fn an_if_joined_v1_enum_stays_in_leaves() {
     let emitted = emit_v1_package("v1join", &[("main.rock", &v1_src)]);
     let body = function_body(&emitted.lua, &mangled_name(&emitted.lua, "begin"));
     assert!(!body.contains("{__variant"));
-    // The scalarized `__ty` leaf is the runtime tag every box of the type carries.
     assert!(!body.contains("\"v1join::"));
 }

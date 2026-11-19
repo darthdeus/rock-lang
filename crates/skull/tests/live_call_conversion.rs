@@ -67,7 +67,6 @@ fn field_derived_len_is_evaluated_once_through_conversion() {
             .replace("\r\n", "\n"),
         "0\n0"
     );
-    // This suffix covers both the Vec.len wrapper and its vec_len helper.
     let length_calls = body.matches("len_arr_T_spec_p_int(").count();
     let length_reads = body.matches(".len").count();
     assert_eq!(length_calls + length_reads, 1);

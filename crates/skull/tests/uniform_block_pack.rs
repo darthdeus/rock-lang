@@ -119,8 +119,6 @@ fn the_pack_is_stores_not_a_call_and_never_boxes() {
 }
 
 const GLOBAL_SOURCE: &str = r#"
-// `Mat4` is stored as a flat leaf table (keys like `c0.x`) while `Vec4`
-// nests, so the two storage conventions are both read through here.
 value Wide { a: Vec4, b: Vec4, c: Vec4, d: Vec4, m: Mat4 }
 
 global BLOCK: Wide = Wide {

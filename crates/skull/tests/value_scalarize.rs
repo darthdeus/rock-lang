@@ -38,18 +38,6 @@ value Color { r: float, g: float, b: float, a: float }
 value FixVec3 { x: float, y: float, z: float }
 @nomangle inline(lua) fn __same(a: Color, b: Color) -> bool = "return a.r == b.r and a.g == b.g and a.b == b.b and a.a == b.a"
 
-// `c` is field-read into a local (`let r = c.r`) AND used as a whole struct
-// (`__same(c, c2)`; `==` compares leaves). The whole-struct use escapes, so the
-// cell must NOT be split and the `Color_ct` cdata must be KEPT for the call. The field read `c.r` itself folds to
-// its construction operand `k` (a `value` struct is IMMUTABLE, so `Field(Color_ct,
-// r)` == the `r` operand -- the copy-prop forwarding), independent of the kept
-// cdata. The half-rewrite hazard this pins: forwarding the read to a never-stored
-// per-field CELL (an uninitialized read) -- the runtime check below catches that.
-//
-// Field values depend on the param `k` so the ctors are NOT all-constant -- this
-// isolates opt #1 (SROA keeps the cdata) from opt #7 (const hoisting would lift
-// an all-constant ctor to a module-scope global, also leaving the body with no
-// `Color_ct(`; covered separately in `const_hoist.rs`).
 fn coexist(k: float) -> float {
     let c = Color { r: k, g: 0.5, b: 0.0, a: 1.0 }
     let v = FixVec3 { x: k, y: 20.0, z: 30.0 }
@@ -62,7 +50,7 @@ fn coexist(k: float) -> float {
 
 @nomangle inline(lua) fn __out(x: float) = "io.write(tostring(x))"
 fn main() {
-    __out(coexist(2.0))   // 2.0 (c.r) + 30.0 (v.z) + 1.0 (same c c2) = 33
+    __out(coexist(2.0))
 }
 "#;
 
@@ -70,13 +58,8 @@ fn main() {
 fn value_struct_with_whole_use_keeps_cdata() {
     let lua = emit_module(VALUE_FIELD_AND_WHOLE_USE);
     let body = function_body(&lua, "coexist");
-    // The whole-struct argument escapes, so the cdata must be KEPT (not SROA'd).
     assert!(body.contains("Color_ct("));
-    // The separate field read `c.r` folds to its construction operand (no `.r`
-    // projection needed), since the value struct is immutable.
     assert!(!body.contains(".r"));
-    // Runtime guard against a BAD fold (e.g. an uninitialized-cell read): the value
-    // must be exactly 33.
 
     assert_eq!(run_main(&lua), "33");
 }
@@ -85,8 +68,6 @@ fn value_struct_with_whole_use_keeps_cdata() {
 fn value_struct_field_reads_dont_materialize_cdata() {
     let lua = emit_module(VALUE_FIELD_LOOP);
     let hot = function_body(&lua, "hot");
-    // The inlined value structs are consumed only by field reads, so neither
-    // ctor should survive in the hot loop -- SROA splits the cells into scalars.
     assert!(!hot.contains("FixVec2_ct("));
     assert!(!hot.contains("IVec2_ct("));
 }
@@ -116,13 +97,9 @@ fn main() {
 fn native_buffer_value_store_writes_leaves_through_views() {
     let lua = emit_module(NATIVE_BUFFER_VALUE_STORE);
     let body = function_body(&lua, "fill");
-    // Leaf form: the element is bounds-checked ONCE by index, then each leaf is
-    // written through its own view -- no slot reference is taken at all.
     assert!(body.contains("__nb_checked_index("));
     assert!(!body.contains("__nb_checked_get("));
-    // NOT the packed form (build the whole cdata and copy it in).
     assert!(!body.contains("__nb_checked_set("));
-    // No ctor survives -- neither the element's nor a nested field's.
     for ct in ["Vert_ct(", "V2_ct("] {
         assert!(!body.contains(ct));
     }
@@ -143,7 +120,6 @@ fn main() { let _ = drive(3, 4) }
 fn generic_value_struct_rides_scalar_abi() {
     let lua = emit_module(GENERIC_VALUE_SCALARIZE);
     let sum = function_body(&lua, "pair_sum");
-    // Scalarized params: two leaf args, not a single boxed table.
     assert!(!sum.contains("Pair_vt") && !sum.contains("Pair_ct"));
     let drive = function_body(&lua, "drive");
     assert!(!drive.contains("Pair_vt") && !drive.contains("Pair_ct"));
@@ -326,8 +302,6 @@ fn main() {
 fn a_value_copy_shares_its_enum_children() {
     let lua = emit_module(ENUM_CHILD_OF_A_COPIED_VALUE);
     let body = function_body(&lua, "set_count");
-    // `let item` keeps its join as leaves, so the one `kind` box is the
-    // stored item's; the copies of `item` add none.
     assert_eq!(body.matches("__ty = \"QKind\"").count(), 1);
     assert_eq!(run_main(&lua), "8 8 0 0 gold");
 }

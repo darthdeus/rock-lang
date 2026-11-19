@@ -37,7 +37,6 @@ fn t() {
         BlendMode::Additive => "Add"
         BlendMode::Multiply => "M"
     }
-    // c.z direct, and area(c) crosses the scalar-ABI boundary by value.
     print("{c.z} {s} {area(c)}")
 }
 
@@ -47,17 +46,12 @@ fn main() { t() }
 #[test]
 fn value_struct_with_enum_field_has_cdef_int_not_table() {
     let lua = emit_module(SRC);
-    // Cmd must get a real cdef ctor (scalarized), with `blend` an int field.
     assert!(lua.contains("Cmd_ct") && lua.contains("} Cmd;"));
-    // The construction must NOT build a `{__ty = "Cmd", ...}` table.
     assert!(!lua.contains("__ty = \"Cmd\""));
-    // A payload-free enum is an `int` globally: NO singleton tables, NO `__tag`,
-    // NO `by_tag` (the dual-rep is gone). Its names table exists only for interp
-    // stringify, which this program never does; `blend` stores a plain int.
     assert!(!lua.contains("__rock_enum_BlendMode_names = {"));
     assert!(!lua.contains("__rock_enum_BlendMode_Additive ="));
     assert!(!lua.contains("__ty = \"BlendMode\""));
-    assert!(!lua.contains("_by_tag")); // Construct, `match c.blend`, and a by-value pass across the scalar ABI.
+    assert!(!lua.contains("_by_tag"));
     assert_eq!(run_fn(&lua, "t"), "5 Add 5");
 }
 

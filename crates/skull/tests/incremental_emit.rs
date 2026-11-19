@@ -289,12 +289,10 @@ fn a_later_edit_to_a_generic_reaches_an_instantiation_an_earlier_edit_added() {
         + &generic("MARK1")
         + "global G1: float = tally_of([P { x: 1.0, y: 0.0 }]).x\n\
            fn use_it() -> float { return G1 }";
-    // Edit 1: `use_it` gains the first call at `Q`.
     let v2 = types.to_string()
         + &generic("MARK1")
         + "global G1: float = tally_of([P { x: 1.0, y: 0.0 }]).x\n\
            fn use_it() -> float { return tally_of([Q { a: 1.0, b: 2.0, c: 3.0 }]).a }";
-    // Edit 2: the GENERIC's own body changes. Both instantiations must move.
     let v3 = types.to_string()
         + &generic("MARK2")
         + "global G1: float = tally_of([P { x: 1.0, y: 0.0 }]).x\n\
@@ -315,8 +313,6 @@ fn a_later_edit_to_a_generic_reaches_an_instantiation_an_earlier_edit_added() {
 
     let ws3 = crate::common::ws_with_stdlib(&v3);
     let o2 = emit_overlay(&ws3, &mut cache, &[body_id(&ws3, "tally_of")]);
-    // The marker is what makes "re-emitted" observable; a name-only check would
-    // pass on the stale definition.
     let bodies: Vec<&str> = o2
         .lua
         .lines()
@@ -338,9 +334,9 @@ fn an_instantiation_that_returns_after_being_pruned_is_rebuilt_not_reused() {
     let no_q = "fn use_it() -> float { return G1 }";
 
     let v1 = types.to_string() + &generic("MARK1") + keep_alive + calls_q;
-    let v2 = types.to_string() + &generic("MARK1") + keep_alive + no_q; // strands Q
-    let v3 = types.to_string() + &generic("MARK2") + keep_alive + no_q; // edits the generic
-    let v4 = types.to_string() + &generic("MARK2") + keep_alive + calls_q; // Q returns
+    let v2 = types.to_string() + &generic("MARK1") + keep_alive + no_q;
+    let v3 = types.to_string() + &generic("MARK2") + keep_alive + no_q;
+    let v4 = types.to_string() + &generic("MARK2") + keep_alive + calls_q;
 
     let ws1 = crate::common::ws_with_stdlib(&v1);
     let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
@@ -408,9 +404,6 @@ fn a_body_edit_to_a_generic_coroutine_reemits_its_specializations() {
               \x20   return walk(xs)\n\
               }";
     let v2 = v1.replace("return 1", "return 2");
-    // The population, asserted in the same test: without a specialized
-    // coroutine in v1 there is nothing for the edit to invalidate and the
-    // comparison would pass over an empty set.
     let ws = ws_with_stdlib(v1);
     let (full, mut cache) = emit_full_of(&ws, "initial emit");
     let spec_steps = definition_names(&full.lua)
@@ -659,12 +652,9 @@ value Config { chosen: int, spare: int, label: string }
     let leaf = "@inline\nfn helper() -> int { 3 }\n\
                 fn use_it() -> float { helper() }\n\
                 fn other() -> int { 7 }";
-    // `mk` returns a `value` struct, inlined into `use_v` as a scalarized
-    // CallMulti: the inline dependency must cover CallMulti callees too.
     let ctor = "value V2 { x: int, y: int }\n\
                 @inline\nfn mk() -> V2 { V2 { x: 1, y: 2 } }\n\
                 fn use_v() -> int { let v = mk()\n v.x }";
-    // Removing the last call retracts the generic instance and its chunk.
     let last_edge = "fn leaf<T>(x: T) -> T { x }\nfn main() { let x = leaf(3) }";
     let cases: [(fn(&str) -> Workspace, &str, String, &str); 6] = [
         (
@@ -703,7 +693,6 @@ fn inline_decisions_follow_helper_edits() {
              @nomangle fn other() -> int {{ 7 }}"
         )
     };
-    // The caller starts over the 400-cell splice budget.
     let over_budget = |value: i32| {
         let mut src = format!(
             "@inline @nomangle fn helper() -> int {{ {value} }}\n\
@@ -790,7 +779,6 @@ fn body_edit_to_a_generic_reemits_its_specializations() {
     let spec = "function first_arr_T_spec_a_n2_V2_0_z(";
     let ws1 = ws_of(v1);
     let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
-    // One liveness walk decides the specialized body, so it is emitted once.
     assert_eq!(full.lua.matches(spec).count(), 1);
 
     let (_, mut incremental_cache) = emit_full_of(&ws1, "initial emit");
@@ -970,7 +958,6 @@ fn repeated_body_overlays_keep_the_fingerprint_of_a_full_emit() {
     let original = ws_of(&source);
     let (_, mut cache) = emit_full_of(&original, "emit_full v1");
     let edit = |value: i32| ws_of(&source.replacen("return 1 }", &format!("return {value} }}"), 1));
-    // A rolled-back overlay must leave no fingerprint rows behind.
     let rolled_back = edit(2);
     let edited = [body_id(&rolled_back, "helper")];
     cache.begin_body_edit_transaction(&edited, &[]);

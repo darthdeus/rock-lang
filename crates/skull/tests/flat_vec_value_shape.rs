@@ -23,18 +23,9 @@ fn flat_vec_push_read_loop_is_zero_box() {
     let lua = emit_module(FLAT_VEC_LOOP);
     let body = function_body(&lua, "fill");
 
-    // The value struct never boxes anywhere in the loop -- the element threads as
-    // scalar leaves into the flat slot (the P3 zero-`_ct` oracle). (A growth copy
-    // `grown[i] = old[i]` legitimately uses `__nb_checked_set` with a cdata REF,
-    // not a box, so it is `_ct`-free too.)
     assert!(!body.contains("V2_ct("));
-    // The push writes the element's LEAVES through typed views -- no slot
-    // reference is fetched at all, so there is no `slot.x = ..` to look for.
-    // The bounds check moves to the index (`__nb_checked_index`).
     assert!(!body.contains("__nb_checked_get("));
     assert!(body.contains("__nb_checked_index("));
-    // The ffi array is the concrete element ctype (the specialized alloc intrinsic).
     assert!(body.contains(r#"__rock_nb_alloc("V2","#));
-    // No dangling call to a shared generic op survives the specialized splices.
     assert!(!body.contains("flat_vec_new") && !body.contains(" push("));
 }

@@ -34,7 +34,6 @@ fn nonloop_capture_hoists_to_by_value_record() {
     assert!(!body.contains("__fn"));
     assert!(!body.contains("function("));
     assert!(!body.contains("return function"));
-    // The single-assignment captures are by-value fields -- no box declared.
     assert!(!declares_box(body));
 }
 

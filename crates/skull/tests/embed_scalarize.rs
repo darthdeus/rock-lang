@@ -186,8 +186,6 @@ fn main() {}
         crate::common::run_luajit(&format!("{}\nprint({probe}())\n", emitted.lua)),
         "4"
     );
-    // The flat-enum layout beside the type table is read by the same `__ty`
-    // spelling (serialization.rock's column walk).
     let keys: Vec<&str> = emitted
         .lua
         .lines()

@@ -8,11 +8,8 @@ const TWO_CONST_NESTED: &str = r#"
 value FixVec2 { x: float, y: float }
 value Outer { a: FixVec2, b: FixVec2, c: float }
 
-// A `[Outer]` Vec, NOT a NativeBuffer: `Outer` has 5 leaves, over
-// `MAX_COLUMN_LEAVES`, so the Vec keeps boxed elements and the ctor genuinely
-// has to be built. (A NativeBuffer element is leaf-addressed now and writes the
-// constant leaves straight through its views, so it builds no ctor to hoist --
-// which would make this test vacuous rather than exercise hoisting.)
+// `Outer` exceeds `MAX_COLUMN_LEAVES`, so the Vec boxes its elements and the
+// ctor must be built; a NativeBuffer or column Vec would leave nothing to hoist.
 fn fill(out: [Outer], n: int) {
     for i in 0..n {
         out.push(Outer { a: FixVec2 { x: 3.0, y: 7.0 }, b: FixVec2 { x: 3.0, y: 7.0 }, c: i as float })
@@ -29,12 +26,9 @@ fn main() {
 #[test]
 fn const_value_struct_ctor_is_hoisted_to_module_scope() {
     let lua = emit_module(TWO_CONST_NESTED);
-    // The distinctive ctor is BUILT exactly once, in a module-scope hoist def.
     let builds = count(&lua, "FixVec2_ct(3.0, 7.0)");
     assert_eq!(builds, 1);
-    // The def is a `__skull_kc_*` global assignment, not inside the loop.
     assert!(lua.contains("__skull_kc_") && lua.contains("= FixVec2_ct(3.0, 7.0)"));
-    // The hot function rebuilds nothing -- it references the global instead.
     let body = function_body(&lua, "fill");
     assert_eq!(count(body, "FixVec2_ct("), 0);
     assert!(body.contains("__skull_kc_"));

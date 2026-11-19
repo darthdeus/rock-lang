@@ -2,8 +2,6 @@ use crate::common::emit_module;
 
 #[test]
 fn struct_field_hole_emits_a_runtime_error_and_keeps_the_function() {
-    // The canonical case: `P { x: 1, y: ? }` -- a missing field value. Before,
-    // the whole function was dropped and `p.y` silently read `nil`.
     let lua = emit_module(
         "struct P { x: int, y: int }\nfn boom() -> int {\n    let p = P { x: 1, y: ? }\n    return p.y\n}\nfn main() {}\n",
     );

@@ -13,7 +13,6 @@ enum Pairs { F(float), I(int) }
 """
 
 fn main() {
-    // Lexically first, but lower priority than the struct expansion below.
     let _ = stride(3)
     let _ = pairs(3)
 }

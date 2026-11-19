@@ -59,18 +59,14 @@ const NOBOX_NULLABLE_FIELD: &str = r#"
 nobox value NV2 { x: float, y: float }
 struct Txt { pos: NV2?, t: float }
 
-// The write half: an OPAQUE nullable value into the field (the literal and the
-// `null` cases already threaded).
 fn spawn(p: NV2?) -> Txt { return Txt { pos: p, t: 1.0 } }
 fn spawn_literal() -> Txt { return Txt { pos: NV2 { x: 9.0, y: 8.0 }, t: 2.0 } }
 
-// The read half: presence test, then a read through the narrowed field.
 fn read(c: Txt) -> float {
     if c.pos != null { return c.pos.x }
     return -1.0
 }
 
-// Mutation through the field, both directions.
 fn clear(c: Txt) -> float {
     c.pos = null
     return read(c)
@@ -91,10 +87,6 @@ fn main() {
 }
 "#;
 
-/// Shape (b): a `T?` `nobox` value in a struct FIELD, stored as presence plus
-/// leaves rather than a box. Presence lives at the field's own undotted key,
-/// which flattening leaves free, so an absent child is a nil presence over nil
-/// leaves and no consumer needs a box to test against.
 #[test]
 fn a_nullable_nobox_field_is_stored_as_presence_and_leaves() {
     let lua = emit_module(NOBOX_NULLABLE_FIELD);
@@ -118,8 +110,6 @@ nobox value NV2 { x: float, y: float }
 
 fn mk(x: float, y: float) -> NV2 { return NV2 { x: x, y: y } }
 
-// Two INDEPENDENT sinks of the same class, on distinct lines, in one body.
-// Same permanent sink as `NOBOX_INDIRECT_SINK` -- read the note there.
 fn bad() -> int {
     let t = (mk(1.0, 2.0), 1.0)
     print("{t}")
@@ -133,11 +123,6 @@ fn main() {
 }
 "#;
 
-/// Two INDEPENDENT violations in one body are both reported. The verifier used
-/// to return on the first, so a body with two sinks looked like a body with
-/// one -- which is how `queue_effect_uniforms`'s `pass_uniforms` gap stayed
-/// invisible behind an earlier rejection, and how any "N sinks left" count read
-/// as a total when it was a floor.
 #[test]
 fn every_nobox_violation_in_one_body_is_reported() {
     let err =
@@ -285,9 +270,6 @@ fn main() {
 #[test]
 fn closure_capture_stores_nobox_leaves() {
     let lua = emit_module(NOBOX_CLOSURE_CAPTURE);
-    // `capture` plus the lambda hoisted out of it. Read by NAME rather than as
-    // the text between two headers: the bound callee shape moves an enclosing
-    // definition into a factory, so the two are not adjacent in the chunk.
     let names = crate::common::definitions_matching(&lua, "capture");
     assert!(!names.is_empty(), "no `capture` definition in:\n{lua}");
     let bodies: String = names
@@ -360,8 +342,6 @@ fn global_of_a_nobox_value_stores_leaves() {
     assert_eq!(run_main(&lua), "3\n12\n300");
 }
 
-// Re-pointed for the same reason as `NOBOX_INDIRECT_SINK`, and to the same
-// permanent sink -- see the note there before changing either.
 const NOBOX_STDLIB_SINK_LIB: &str = r#"
 nobox value SV2 { x: float, y: float }
 
@@ -535,8 +515,6 @@ fn main() { print("{outer(1.0)}") }
 
 #[test]
 fn a_nested_fn_with_an_inferred_nobox_return_threads_leaves() {
-    // An inferred return is as much a part of the signature as a written one:
-    // reading only the optional annotation drops the callee to the boxed ABI.
     let lua = emit_module(NOBOX_NESTED_FN_INFERRED_RETURN);
     let body = body_of_synthetic(&lua, "_make_");
     assert!(
@@ -553,7 +531,6 @@ fn indirect(f: (NV2) -> float, v: NV2) -> float { return f(v) }
 
 fn both_ways(p: NV2) -> float {
     fn sum(v: NV2) -> float { return v.x + v.y }
-    // The SAME fn, called directly and through the fn value, in one body.
     return sum(p) + indirect(sum, p)
 }
 
@@ -563,12 +540,6 @@ fn main() {
 }
 "#;
 
-/// The load-bearing invariant of the fn-value ABI: a DIRECT call, a call through
-/// the fn VALUE, and the definition all pass the same arity, because all three
-/// read the leaf count off the same fn type. `direct` is called both ways in one
-/// program, so a disagreement is a wrong-arity call rather than a subtle
-/// mis-shape -- and passing the SAME fn both ways is the case a callee-identity
-/// ABI cannot get right.
 #[test]
 fn direct_and_indirect_calls_of_one_fn_agree_on_arity() {
     let lua = emit_module(NOBOX_FN_TYPE_AGREES);
@@ -664,11 +635,7 @@ fn main() { let _ = last([]) }
 fn a_nobox_rejection_anchors_on_the_offending_expression() {
     let err =
         try_emit_module(NOBOX_REJECTION_SITE).expect_err("a boxed sink materializes the value");
-    // Assert on the byte offset, not `line`/`col`: the three coordinate systems
-    // for spans disagree on their base, and the offset is
-    // the one that needs no conversion. The `fn` header is the anchor this used
-    // to report, and a whole-fn anchor cannot tell two violations in one body
-    // apart -- which is how one sink hid another inside `draw_fractures`.
+    // Span `line`/`col` bases disagree across coordinate systems; the offset does not.
     let start = NOBOX_REJECTION_SITE
         .find("    sink(NV2")
         .expect("fixture line");
@@ -695,9 +662,6 @@ fn nobox_in_gc_value_src(site: &str, main: &str) -> String {
     format!("{NOBOX_IN_GC_VALUE_DECLS}{site}\nfn main() {{ {main} }}\n")
 }
 
-// Positions that carry the outer value as leaves: a flat-enum payload and a
-// scalar-ABI argument. Neither builds the `Map_vt` box, so neither boxes a
-// nobox field.
 const NOBOX_IN_GC_VALUE_LEAF_SITES: [(&str, &str, &str, &str); 2] = [
     (
         "enum payload",
@@ -729,10 +693,6 @@ fn a_gc_tier_value_threaded_as_leaves_keeps_its_nobox_fields_unboxed() {
     }
 }
 
-// Positions that store the outer value in a table slot, so its `Map_vt` box
-// is real. The box keys each `nobox` field's leaves by dotted path
-// (`size.x`), the layout a plain struct and a leaf-table value already use, so
-// storing it builds no `Id_ct`/`Grid_ct`.
 const NOBOX_IN_GC_VALUE_BOXED_SITES: [(&str, &str, &str, &str); 3] = [
     (
         "struct literal field",
@@ -770,10 +730,6 @@ fn a_stored_gc_tier_value_keeps_its_nobox_fields_as_leaves() {
     }
 }
 
-// The observable surface of a stored GC-tier value with a `nobox` field --
-// field write through a row, `==`, structural `tostring`, a Vec of them -- is
-// the unmarked twin's, which boxes `V2` as an ordinary value. Both must print
-// the same text; the marked one must not build a `V2` box to do it.
 const NOBOX_IN_GC_VALUE_SURFACE: &str = r#"
 nobox value V2 { x: float, y: float }
 value Row { label: string, pos: V2 }
@@ -819,10 +775,6 @@ fn a_stored_gc_tier_value_with_a_nobox_field_matches_its_unmarked_twin() {
     assert_eq!(run_main(&marked), expected);
 }
 
-// Nullable, nested and generic-parent `nobox` fields of a stored GC-tier value:
-// whole-field and nested-leaf writes, an absent tag written back to `null`, an
-// enum payload, and `==` over the presence tag. The unmarked twin is no oracle
-// for `==` here: it compares a `V2?` field by reference.
 const NOBOX_IN_GC_VALUE_NULLABLE_NESTED: &str = r#"
 nobox value V2 { x: float, y: float }
 nobox value Rect { lo: V2, hi: V2 }
@@ -893,11 +845,6 @@ fn a_stored_gc_tier_value_keeps_nullable_and_nested_nobox_fields_as_leaves() {
     );
 }
 
-// A leaf read through a `nobox` field of an UNBOXED GC-tier value (a scalar-ABI
-// param) projects the leaf off the value's Group. The `_vt` box keys that leaf
-// as `lock.place.x`, but building the box just to read the key back is an
-// allocation the leaf-threaded value never needed (application's
-// `hostile_target_evaluate` reads `input.lock.target` this way per mob).
 const NOBOX_IN_GC_VALUE_PARAM_LEAF_READ: &str = r#"
 nobox value P { x: int, y: int }
 nobox value Id { a: int, b: int }
@@ -933,9 +880,6 @@ fn a_leaf_read_through_a_nobox_field_of_a_gc_tier_param_does_not_box() {
     assert_eq!(run_main(&lua), "13");
 }
 
-// Functional update of a GC-tier value whose base is a local: the fields the
-// literal does not name come off the base by the box's layout, so a `nobox`
-// field is read by its leaves (application's `CarriedItemView { ..view, id }`).
 const NOBOX_IN_GC_VALUE_FUNCTIONAL_UPDATE: &str = r#"
 nobox value C { r: float, g: float }
 enum Kind { Plain, Tagged(string) }
@@ -959,10 +903,6 @@ fn a_functional_update_of_a_gc_tier_value_reads_nobox_fields_by_leaf() {
     assert_eq!(run_main(&lua), "3.75");
 }
 
-// The same read off a BOXED GC-tier local (reassigned in a loop, so it lives in
-// one cell): the enum inside the `nobox` field is keyed by its leaves
-// (`lock.target.__tag`, ...), so reading the whole enum off `lock.target`
-// found nil. A hostile-target lock read in an application had this shape.
 const NOBOX_IN_GC_VALUE_BOXED_LOCAL_ENUM_READ: &str = r#"
 nobox value P { x: int, y: int }
 nobox value Id { a: int, b: int }
@@ -1049,10 +989,6 @@ fn main() {
 }
 "#;
 
-/// Copying a stored tuple element shares its immutable box -- directly, through
-/// an unwritten name, as a loop element, through an inlined return or a
-/// nullable return (`get`, `??`), or out of a join whose arms are all stored --
-/// rather than packing a new table, and reads none of its slots.
 #[test]
 fn copying_a_stored_tuple_element_allocates_nothing() {
     let lua = emit_module(NOBOX_TUPLE_COPY);

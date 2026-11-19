@@ -40,8 +40,6 @@ fn overload_add_orphans_running_global_sentinel() {
         .unwrap();
 
     assert_eq!(fresh, "fresh=52");
-    // The reloaded chunk's authoritative int fn carries the edit, at the SAME name.
     assert_eq!(canon, "canonical=52");
-    // No bare `foo` global exists under always-mangle -- there is nothing to orphan.
     assert_eq!(bare, "bare_foo_present=false");
 }

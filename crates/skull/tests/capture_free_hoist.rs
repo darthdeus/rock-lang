@@ -93,9 +93,7 @@ fn capture_free_lambda_hoists_to_named_toplevel() {
     assert!(lua.contains(&format!("function {lam}(")));
     let body = function_body(&lua, "free_loop");
     assert!(body.contains("__rock_code_slot_ref("));
-    // An anonymous inline closure renders `function(` (no space); the enclosing
-    // fn header is `function free_loop(` (space + name), so `function(` is the
-    // precise marker of a leftover inline closure.
+    // Only an anonymous closure renders `function(` without a space.
     assert!(!body.contains("function("));
 }
 
@@ -123,14 +121,11 @@ fn transitive(x: int) -> fn() -> int {
 fn main() { let g = transitive(7) print("{g()}") }
 "#;
     let lua = emit_module(src);
-    // Both lambdas capture the root param `x`, so both hoist to env-carrying bodies
-    // (a colored `c<N>` env param, not the old magic `__rock_env` local).
     let m = mangled_name(&lua, "transitive");
     assert!(
         lua.contains(&format!("function {m}__lambda0(c"))
             && lua.contains(&format!("function {m}__lambda1(c"))
     );
-    // and it still behaves (the inner reads x threaded through both envs).
     let out = run_main(&lua);
     assert_eq!(out, "7");
 }

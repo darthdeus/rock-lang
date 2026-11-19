@@ -177,7 +177,6 @@ fn aliased_captures_around_a_spliced_body_in_a_loop_run_correctly() {
                  for i in 0..n { s = s + leaf(twice(i)) + other(i) }\n\
                  return s\n\
                }";
-    // sum over i < 4 of (2i + 1) + 3i
     assert_eq!(run(src, "caller(4)"), "34");
 }
 

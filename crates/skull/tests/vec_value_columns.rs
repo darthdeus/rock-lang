@@ -1,5 +1,3 @@
-//! Check Lua lowering and runtime behavior for vectors backed by leaf columns.
-
 use crate::common::{emit_module, function_body};
 
 const VEC_VALUE_LOOP: &str = r#"
@@ -20,8 +18,6 @@ fn fill(n: int) -> float {
 fn main() { let _ = fill(8) }
 "#;
 
-/// The headline properties: pushes and reads stay in leaf columns without
-/// constructing or fetching whole elements.
 #[test]
 fn vec_of_value_struct_uses_columns_for_push_and_read() {
     let lua = emit_module(VEC_VALUE_LOOP);
@@ -34,9 +30,6 @@ fn vec_of_value_struct_uses_columns_for_push_and_read() {
         !body.contains("_data"),
         "[V2] push still wrote the single `_data` backing; source:\n{VEC_VALUE_LOOP}\nemitted body:\n{body}"
     );
-    // The literal builds one array per leaf. Regalloc splits the store itself
-    // into `rN = vec.x` / `rN[i] = ..`, so assert the CONSTRUCTION shape (which
-    // is stable) rather than a fused `vec.x[i]` text that never appears.
     assert!(
         body.contains(r#"["x"] = {}"#) && body.contains(r#"["y"] = {}"#),
         "[V2] literal did not build per-leaf column arrays; source:\n{VEC_VALUE_LOOP}\nemitted body:\n{body}"
@@ -93,14 +86,6 @@ fn sum(xs: [V2]) -> float {
 fn main() { let _: [V2] = []; let _ = sum([]) }
 "#;
 
-/// Binding a whole element (`let v = xs[i]`) is legal and must stay flat: each
-/// leaf loads from its column and SROA peels the binding.
-///
-/// NOTE the assertion is on the FETCH, not on `V2_ct(`. A no-ctor assertion is
-/// vacuously green today -- `__vec_checked_get` hands back the element table
-/// that storage already boxed, so no *new* ctor is needed and the test would
-/// pass while the property is false. Asserting the whole-element fetch is gone
-/// is what actually distinguishes flat from boxed.
 #[test]
 fn binding_a_whole_element_loads_leaves_not_an_element() {
     let lua = emit_module(VEC_ELEM_BIND);
@@ -115,9 +100,6 @@ fn binding_a_whole_element_loads_leaves_not_an_element() {
         "`let v = xs[i]` rematerialized the element:\n{body}"
     );
 }
-
-// These contexts emit separate callable bodies. Check the selected body because
-// the shared VecIter template remains in the module either way.
 
 const VEC_IN_SPECIALIZED_LAMBDA: &str = r#"
 value V2 { x: float, y: float }
@@ -171,8 +153,6 @@ fn column_vec_iteration_works_in_separately_emitted_contexts() {
     ] {
         let lua = emit_module(source);
         let body = crate::common::body_of_synthetic(&lua, selector);
-        // A positive column read distinguishes flat storage from a boxed loop
-        // that also avoids the unspecialized VecIter template.
         for needle in required {
             assert!(
                 body.contains(needle),
@@ -199,10 +179,6 @@ fn main() {
 }
 "#;
 
-/// `vec_new()` is the fourth representation-boundary primitive and the odd one
-/// out: its element type comes from the CALL's own type, not from a receiver, so
-/// the container plan cannot read it off an argument. The concrete boundary
-/// plan must therefore construct the columns before the next column write.
 #[test]
 fn vec_new_at_a_column_element_builds_empty_columns() {
     let lua = crate::common::try_emit_module(VEC_NEW_COLUMN).expect("vec_new at [V2] must emit");
@@ -241,8 +217,6 @@ fn main() { print(fill_reference_rows([3])) }
     assert!(!body.contains("ReferenceRow_ct("), "{body}");
 }
 
-/// Two leaves of one element in one expression share the element's bounds
-/// check, on both flat layouts, and load each column they use only once.
 #[test]
 fn two_leaves_of_one_element_check_once() {
     for (decl, layout, init) in [
@@ -297,8 +271,6 @@ nobox value Wide { a: float, b: float, c: float, d: float, e: float, f: float }
 }
 "#;
 
-/// An empty flat Vec with no reserved capacity never writes its header, so
-/// every such Vec of one element type shares one header table.
 #[test]
 fn empty_flat_vecs_share_their_header() {
     let lua = emit_module(EMPTY_FLAT_VECS);

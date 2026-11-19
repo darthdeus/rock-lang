@@ -15,7 +15,6 @@ fn value_struct_element_emits_ctype_ffi_new() {
     let lua = emit_module(VALUE_ELEM);
     let body = function_body(&lua, "native_buffer_v2");
     assert!(body.contains(r#"__rock_nb_alloc("V2","#));
-    // The wrapper builds a NativeBuffer around the ffi array; no per-type ctor.
     assert!(body.contains(r#"__ty = "NativeBuffer""#));
     assert!(!body.contains("__nb_alloc_"));
 }

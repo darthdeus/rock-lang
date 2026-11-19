@@ -10,7 +10,6 @@ static STDLIB: std::sync::LazyLock<Vec<skull_parser::Ast>> = std::sync::LazyLock
         .collect()
 });
 
-/// `src` parsed as `file`, after the stdlib when `stdlib` is set.
 fn workspace_of(src: &str, file: &str, stdlib: bool) -> Workspace {
     let mut modules = if stdlib { STDLIB.clone() } else { Vec::new() };
     modules.push(skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse"));
@@ -31,8 +30,7 @@ mod lua_definition_scope_tests {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    /// Panics when luajit cannot be spawned: a host without it must report red
-    /// for a test that never ran, never green.
+    // Panics without luajit so a test that never ran cannot pass.
     fn luajit_loads(lua: &str) -> (bool, String) {
         let mut child = Command::new("luajit")
             .arg("-")
@@ -103,8 +101,6 @@ mod unread_constant_tests {
             .expect("function")
     }
 
-    /// The full build drops the unread `FOO`; an overlay whose edited inline
-    /// Lua body now spells it must initialize the global.
     #[test]
     fn an_overlay_initializes_a_constant_an_edited_inline_body_spells() {
         let ws1 = unread_ws(SRC);

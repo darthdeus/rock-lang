@@ -41,7 +41,6 @@ fn generated_code_after_a_numbered_definition_is_numbered_by_its_place_in_main_l
         .collect();
     assert!(!resets.is_empty());
     for (index, line) in resets {
-        // `index` is zero-based; the directive numbers the line after it.
         assert_eq!(line, format!("# {} \"main.lua\"", index + 2));
     }
     assert!(!lua.contains(skull_codegen_lua::LINE_DIRECTIVE_RESET));

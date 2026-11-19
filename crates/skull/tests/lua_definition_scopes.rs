@@ -10,9 +10,6 @@ fn full_emit_partitions_a_large_project_definition_population() {
     source.push_str("fn main() { print(\"{generated_0() + generated_4096()}\") }\n");
 
     let lua = emit_module(&source);
-    // The callee binding pass is partitioned into the same kind of scope.
-    // This fixture has exactly one bound body -- `main` is the only fn that
-    // calls another emitted fn -- so it adds exactly one more.
     assert_eq!(lua.matches("do\n(function()\n").count(), 3);
     assert_eq!(run_main(&lua), "4096");
 }

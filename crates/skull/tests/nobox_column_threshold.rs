@@ -72,8 +72,6 @@ fn every_leaf_count_round_trips_and_the_storage_tier_flips_at_the_threshold() {
         assert_eq!(got, vec![want_present.as_str(), "-1 false"]);
         rows.push((leaves, is_column_stored(&lua)));
     }
-    // The flip itself: at or below 4 leaves the element is columns, above it a
-    // box. Asserted as the whole sweep so a moved constant reads as one diff.
     assert_eq!(
         rows,
         vec![(3, true), (4, true), (5, false), (6, false), (7, false)]

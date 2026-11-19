@@ -14,7 +14,6 @@ fn main() {
 #[test]
 fn single_use_reads_and_calls_render_in_their_consumer() {
     let lua = emit_module(SHAPES);
-    // Two host property reads must retain their order; the first is staged.
     assert!(function_body(&lua, "sum").contains(" local r"));
     let body = function_body(&lua, "scaled");
     assert!(!body.contains(" local r"));

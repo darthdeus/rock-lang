@@ -40,10 +40,7 @@ pub fn bone_rejections(src: &str) -> Vec<String> {
 
 pub fn bone_rejection_errors(src: &str) -> Vec<skull_parser::CompilerError> {
     let mut modules = with_stdlib(src, "<test>");
-    // BOTH channels. `semantic_pass` returns `Err` for a violation it treats as
-    // fatal (a struct-field annotation is one) and RECORDS the rest on the
-    // workspace; reading only the recorded set turns the fatal ones into a
-    // panic inside the helper rather than a rejection the caller can assert.
+    // Fatal violations come back as `Err`; the rest are recorded on the workspace.
     let ws = match semantic_pass(&mut modules) {
         Ok(ws) => ws,
         Err(e) => return vec![e],
@@ -355,9 +352,7 @@ pub fn definition_names(lua: &str) -> Vec<&str> {
     }
     for (at, m) in lua.match_indices(factory_head.as_str()) {
         let rest = &lua[at + m.len()..];
-        // The binding pass (`F = __rock_mk_F(..)`) shares the prefix and is not
-        // a definition; only a factory HEADER carries ` = function(` on its own
-        // line.
+        // The binding line `F = __rock_mk_F(..)` shares the prefix but is no header.
         if let Some(end) = rest.find(" = function(") {
             if !rest[..end].contains('\n') {
                 names.push((at, &rest[..end]));

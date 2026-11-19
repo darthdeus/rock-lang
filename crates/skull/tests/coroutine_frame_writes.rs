@@ -88,8 +88,6 @@ fn spilled_int_to_float_alias_reads_a_valid_slot_after_resume() {
     let conv = func.emit(entry, Inst::IntToFloat(m));
     let k1 = func.emit(entry, Inst::Const(Lit::Int(1)));
     let q = func.emit(entry, Inst::IntAdd(m, k1));
-    // Two stores keep `q` materialized in between: without liveness through
-    // the alias it would reuse the operand's register.
     let qa = func.new_cell(Some(Ustr::from("qa")));
     let qb = func.new_cell(Some(Ustr::from("qb")));
     func.emit(entry, Inst::Store { cell: qa, value: q });

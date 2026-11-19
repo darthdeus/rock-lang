@@ -59,8 +59,6 @@ fn build_var_non_literal_arg_rejects() {
 
 #[test]
 fn build_var_misuse_in_uninstantiated_generic_rejects() {
-    // A generic fn with no call sites never lowers, so the expander's own
-    // error cannot fire -- only the fatal gate sees this body.
     let src = r#"
 fn dead_generic<T>(x: T) -> string {
     return build_var("NOPE")
@@ -125,10 +123,6 @@ fn broken() -> string {
 
 #[test]
 fn embed_resolves_against_the_calling_files_own_package() {
-    // A LIBRARY file (host) embeds relative to its own stick.toml dir, not
-    // the consuming project's embed_root -- the cimgui migration's
-    // prerequisite. The calling
-    // file's dir has a stick.toml; embed_root points somewhere else entirely.
     let pkg = tempfile::tempdir().unwrap();
     std::fs::write(
         pkg.path().join("stick.toml"),

@@ -93,8 +93,6 @@ fn a_nested_nobox_field_does_not_box_when_the_outer_materializes() {
 fn a_two_level_nesting_flattens_through_the_intermediate() {
     let lua = emit_module(TWO_LEVEL);
     assert!(!function_body(&lua, "setup").contains("NV2_ct("));
-    // Flattening happens at the OUTERMOST materialization: a bottom-up rewrite
-    // would allocate an intermediate Box2 per construction.
     assert!(!function_body(&lua, "setup").contains("Box2_ct("));
     assert_eq!(run_main(&lua).trim(), "1 2 3 4 5 6");
 }
@@ -110,8 +108,6 @@ fn an_opaque_nested_operand_is_decomposed_not_rejected() {
 fn a_nullable_nobox_field_in_a_gc_tier_outer_carries_presence() {
     let lua = emit_module(NULLABLE_FIELD);
     assert!(!function_body(&lua, "__rock_state_initialize").contains("NV2_ct("));
-    // The presence tag leads the leaves, so an absent payload is representable
-    // without a box to be nil.
     assert!(
         function_body(&lua, "__rock_state_initialize").contains("Opt_lct((true), (1.0), (2.0))")
     );

@@ -40,9 +40,6 @@ fn main() { ROOT = load() }
 "#,
     );
     let key = "a_n4_Room_0_z";
-    // Through the shape-aware helper: under the bound callee shape the
-    // definition header is `__rock_mk_scene_create.. = function(`, so splitting
-    // on `\nfunction ` finds nothing.
     let scene_create_body = crate::common::function_body(&emit.lua, "scene_create");
     assert!(scene_create_body.contains(key));
     assert!(!scene_create_body.contains("__rock_get_type"));

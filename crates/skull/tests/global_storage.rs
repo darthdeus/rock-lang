@@ -51,8 +51,6 @@ print(first ~= second and second ~= third
 #[test]
 fn the_program_opens_sized_storage_before_initializing() {
     let lua = emit_module(FIXTURE);
-    // the array fixpoint is the next power of two above the highest slot, plus
-    // one for index 0; the hash part has a 16-node floor.
     let open = lua
         .lines()
         .find(|l| l.starts_with("__rock_state_cell = __rock_globals_open("))
@@ -64,8 +62,7 @@ fn the_program_opens_sized_storage_before_initializing() {
         .map(|n| n.parse().expect("capacity number"))
         .collect();
     assert_eq!(nums[1], 9);
-    // The hash size counts the stdlib's own statics too, so pin its shape, not
-    // its value: a power of two no smaller than the 16-node floor.
+    // The hash part also counts stdlib statics, so pin only its shape.
     assert!(nums[0] >= 16 && nums[0].is_power_of_two());
     let open_at = lua
         .find("\n__rock_state_cell = __rock_globals_open(")

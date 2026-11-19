@@ -46,11 +46,8 @@ fn param_lambda_hoists_as_record_under_frame() {
     let w = mangled_name(&lua, "worker");
     let step_name = format!("{w}__step");
     let step = function_body(&lua, &step_name);
-    // `s` is the step's first param cell. Its environment field keeps the
-    // stable emit-cell key, while the field value is the colored param name.
     let s = function_params(&lua, &step_name)[0];
     let state_field = state_capture_field(step, s);
-    // the co-fn lambda hoists to a sibling top-level fn taking (env, <param>).
     let lp = function_params(&lua, &format!("{w}__step__lambda0"));
     assert_eq!(lp.len(), 2);
     assert!(step.contains("__slot = __rock_code_slot_ref(") && state_field.is_some());
@@ -117,12 +114,7 @@ fn loop_binding_snapshots_by_value_into_record() {
     let lp_name = mangled_name(&lua, "looper");
     let step = function_body(&lua, &format!("{lp_name}__step"));
     assert!(step.contains("__slot = __rock_code_slot_ref("));
-    // The record field value is a frame-field READ (`= c<S>.c<i>`): snapshot,
-    // not a shared reference.
     assert!(contains_digit_bridge(step, "= c", ".c"));
-    // The hoisted body reads its by-value snapshot as a single `.c<slot>` field
-    // hop off its env, and NEVER through `s` at call time (the final-value bug
-    // D4(b) avoids -- a via-`s` capture would need another field hop).
     let body = function_body(&lua, &format!("{lp_name}__step__lambda"));
     assert!(contains_digit_bridge(body, ".c", ""));
     assert_eq!(body.matches(".c").count(), 1);

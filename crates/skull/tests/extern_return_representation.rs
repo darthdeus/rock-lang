@@ -94,10 +94,6 @@ fn an_int_representation_is_coerced_through_every_alias_shape() {
         );
     }
 
-    // `float` never arrives as cdata from LuaJIT, so coercing it would be cost
-    // with no property behind it -- and a blanket `tonumber` would silently turn
-    // a `bool` return into 1/0. `ret_boxed_float` is the arm that separates
-    // "substitutes correctly" from "coerces every newtype".
     for name in ["ret_ratio", "ret_boxed_float", "ret_outer_float"] {
         let w = wrapper(&lua, name);
         assert!(w.contains(&format!("local __rock_ret = m.{name}(")) && !w.contains("tonumber"));

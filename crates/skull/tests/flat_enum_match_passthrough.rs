@@ -48,8 +48,6 @@ fn a_flat_enum_match_returning_its_scrutinee_does_not_box() {
     for name in ["field_join", "let_join", "param_join"] {
         let body = function_body(&lua, &mangled_name(&lua, name));
         assert!(!body.contains("{__variant"));
-        // A box the scalarizer removed still leaves its `__ty` leaf and nil
-        // guard behind: the catch-all bind must pass the cells through.
         assert!(!body.contains("\"Src\""));
     }
     lua.push_str("\nprint(probe())\n");

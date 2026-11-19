@@ -169,7 +169,6 @@ pub fn total() -> int {
 
 #[test]
 fn a_generic_specialized_at_a_v1_nominal_emits_runnable_lua() {
-    // Keep the specialized definition available for the identifier checks.
     let _inline = inline_off_guard();
     let emitted = emit_v1_package(
         "v1spec",
