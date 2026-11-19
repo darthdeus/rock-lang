@@ -24,7 +24,7 @@ fn focus_widgets_with(body: fn(Entity<UiSkin>) -> ()) {
         feel: UI_FEEL,
         white: WHITE_PIXEL,
     }
-    let white = outline_canvas_white()
+    let white = test_white_image()
     WHITE_PIXEL = white
     let skin = ui_skin_create(UiSkin { image: sampled_image(white), source: irect(0, 0, 1, 1),
         pad_l: 6.0, pad_r: 6.0, pad_t: 4.0, pad_b: 4.0 })

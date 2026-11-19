@@ -1,10 +1,7 @@
 @test
 fn c_ui_text_art_cache_and_coverage() {
     assert(stone_gpu_host_ensure())
-    let pixels = new_owned_image_data(1, 1)
-    image_data_set_pixel(pixels, 0, 0, 1.0, 1.0, 1.0, 1.0)
-    WHITE_PIXEL = new_owned_image_from_data(pixels)
-    release_owned_image_data(pixels)
+    WHITE_PIXEL = test_white_image()
     assert(stone_text_init())
     load_pending_shader_sources()
     let font = load_font(project_asset_path("@engine/assets/fonts/DroidSans.ttf"), 24,

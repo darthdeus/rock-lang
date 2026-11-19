@@ -116,7 +116,7 @@ fn ui_batch_sampler_guarded(body: fn(SampledTexture) -> ()) {
         TEXT_RENDER_ORDER_SERIAL = saved_serial
         TEXT_UI_FLUSH_ORDER = saved_flush_order
     }
-    let white_img = ui_batch_sampler_solid(v(1.0, 1.0, 1.0, 1.0))
+    let white_img = test_white_image()
     defer { release_owned_image(white_img) }
     WHITE_PIXEL = white_img
     body(sampled_image(white_img))

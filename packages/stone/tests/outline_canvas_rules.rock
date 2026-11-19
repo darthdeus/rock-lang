@@ -2,8 +2,6 @@ use stone::*
 
 const OUTLINE_CANVAS_STYLE: Outline = Outline { entity_id: 1, color: color(0.1, 1.0, 0.3, 1.0), width: 4.0 }
 
-fn outline_canvas_white() -> Image { return test_white_image() }
-
 fn outline_canvas_fixture(body: fn(SampledTexture) -> ()) {
     gpu_test_host()
     let saved_canvas = CURRENT_CANVAS_HANDLE
