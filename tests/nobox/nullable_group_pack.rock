@@ -173,7 +173,7 @@ fn a_named_fn_argument_returns_a_nullable_nobox() {
 }
 
 // A stored `() -> NV` cannot adopt a `() -> NV?` ABI directly (pinned in
-// tests/errors/nobox_fn_return_nullable_coercion.rock.err); a lambda adapter is
+// tests/errors/nobox.rock.err); a lambda adapter is
 // the accepted spelling. The unmarked fn value coerces directly.
 fn accepts_nullable_nv(callback: () -> NV?) -> int { return callback()?.x ?? -1 }
 

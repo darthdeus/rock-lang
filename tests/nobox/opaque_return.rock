@@ -1,5 +1,5 @@
 // Positive control for the bare-return reject
-// (`tests/errors/nobox_opaque_value_return.rock.err`): the shapes that must
+// (`tests/errors/nobox.rock.err`): the shapes that must
 // KEEP compiling once an opaque body's boxed `nobox` return is refused. The
 // reject keys on "opaque AND not `@scalar_abi`", so each case below differs
 // from the rejected one by exactly one of those two conditions.

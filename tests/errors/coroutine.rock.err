@@ -21,3 +21,204 @@ co fn outer_int() -> Coroutine<int> {
     await inner_str()
 }
 
+//=== TEST CASE: falloff_int_result ===
+// a `co fn` whose declared result R is a concrete non-unit,
+// non-nullable type must not be able to FALL OFF the end of its body:
+// bone coerces only explicit `return <expr>` statements to R (a
+// coroutine's body tail is discarded, never coerced), so a reachable
+// fall-off would stamp the completed terminal with `__return` nil --
+// and `result()`/`take_result` would hand out a nil typed as R. The
+// rejection is EMIT-time (skull-mir `lower_root`), on the bone-accepted
+// program. Unit R (the default) and nullable R (nil is a legal value)
+// stay admitted; a body whose end is unreachable (every path returns /
+// `while true`) is fine. A generic R is checked per concrete
+// instantiation: falling off at a non-unit, non-nullable R rejects,
+// including when the instantiation is reached through a generic caller
+// (tests/coroutines/generic_result_falloff.rock pins the admitted ones).
+//! expect: can fall off the end of its body, but its coroutine result type is not `()`
+co fn gen() -> Coroutine<int, string> {
+    yield 1
+}
+fn main() {
+    let c = gen()
+    resume(c)
+}
+
+//=== TEST CASE: falloff_after_conditional_return ===
+//! expect: can fall off the end of its body, but its coroutine result type is not `()`
+// One arm returns, the other falls through to the end -- the fall-off is
+// reachable, so it still rejects.
+co fn maybe(flag: bool) -> Coroutine<int, int> {
+    yield 1
+    if flag {
+        return 7
+    }
+}
+fn main() {
+    let c = maybe(true)
+    resume(c)
+}
+
+//=== TEST CASE: falloff_generic_result_at_int ===
+//! expect: can fall off the end of its body, but its coroutine result type is not `()`
+co fn gen<R>(x: R) -> Coroutine<int, R> {
+    yield 1
+}
+fn main() {
+    let c = gen(5)
+    resume(c)
+}
+
+//=== TEST CASE: falloff_generic_result_through_generic_caller ===
+//! expect: can fall off the end of its body, but its coroutine result type is not `()`
+co fn gen<R>(x: R) -> Coroutine<int, R> {
+    yield 1
+}
+co fn wrap<R>(x: R) -> Coroutine<int, R> {
+    let r = await gen(x)
+    return r
+}
+fn main() {
+    let c = wrap("s")
+    resume(c)
+}
+
+//=== TEST CASE: coroutine_cannot_receive_a_flat_element_ref ===
+// relocatable element references cannot be retained by coroutines.
+//! expect: cannot pass a reference into a relocatable Vec or Map element to `bump`: the reference is retained by a coroutine
+value Cell { w: int }
+co fn bump(c: ref Cell) -> Coroutine<int> {
+    c.w += 1
+    yield c.w
+}
+fn main() {
+    let xs: [Cell] = [Cell { w: 1 }]
+    let c = bump(xs[0])
+    resume(c)
+}
+
+//=== TEST CASE: coroutine_cannot_receive_a_forwarded_flat_element_ref ===
+//! expect: cannot pass a reference into a relocatable Vec or Map element to `relay`: the reference is retained by a coroutine
+value Cell { w: int }
+co fn bump(c: ref Cell) -> Coroutine<int> {
+    c.w += 1
+    yield c.w
+}
+fn relay(c: ref Cell) -> Coroutine<int> { return bump(c) }
+fn main() {
+    let xs: [Cell] = [Cell { w: 1 }]
+    let c = relay(xs[0])
+    resume(c)
+}
+
+//=== TEST CASE: coroutine_cannot_receive_a_map_element_ref ===
+//! expect: cannot pass a reference into a relocatable Vec or Map element to `bump`: the reference is retained by a coroutine
+value Cell { w: int }
+co fn bump(c: ref Cell) -> Coroutine<int> { yield c.w }
+fn main() {
+    let cells: Map<string, Cell> = map_new()
+    cells["a"] = Cell { w: 1 }
+    let task = bump(cells["a"])
+}
+
+//=== TEST CASE: coroutine_cannot_receive_an_explicit_vec_element_ref ===
+//! expect: cannot retain a reference into relocatable Vec or Map storage
+value Cell { w: int }
+co fn read(c: ref Cell) -> Coroutine<int> { yield c.w }
+fn main() {
+    let cells: [Cell] = [Cell { w: 1 }]
+    let borrowed: ref Cell = cells[0]
+    let task = read(borrowed)
+}
+
+//=== TEST CASE: coroutine_cannot_receive_an_explicit_map_element_ref ===
+//! expect: cannot retain a reference into relocatable Vec or Map storage
+value Cell { w: int }
+co fn read(c: ref Cell) -> Coroutine<int> { yield c.w }
+fn main() {
+    let cells: Map<string, Cell> = map_new()
+    cells["a"] = Cell { w: 1 }
+    let borrowed: ref Cell = cells["a"]
+    let task = read(borrowed)
+}
+
+//=== TEST CASE: overloaded_coroutine_cannot_receive_a_vec_element_ref ===
+//! expect: cannot pass a reference into a relocatable Vec or Map element to `read`: the reference is retained by a coroutine
+value Cell { w: int }
+co fn read(c: ref Cell) -> Coroutine<int> { yield c.w }
+fn main() {
+    let cells: [Cell] = [Cell { w: 1 }]
+    let task = read(cells[0])
+}
+
+//=== TEST CASE: overloaded_coroutine_cannot_receive_a_map_element_ref ===
+//! expect: cannot pass a reference into a relocatable Vec or Map element to `read`: the reference is retained by a coroutine
+value Cell { w: int }
+co fn read(c: ref Cell) -> Coroutine<int> { yield c.w }
+fn main() {
+    let cells: Map<string, Cell> = map_new()
+    cells["a"] = Cell { w: 1 }
+    let task = read(cells["a"])
+}
+
+//=== TEST CASE: coroutine_cannot_borrow_a_spread_vec_element_field ===
+//! expect: No overload for `read` with argument types (Wrapper)
+value Cell { w: int }
+value Wrapper { c: Cell }
+co fn read(c: ref Cell) -> Coroutine<int> { yield c.w }
+fn main() {
+    let cells: [Wrapper] = [Wrapper { c: Cell { w: 1 } }]
+    let task = read(..cells[0])
+}
+
+//=== TEST CASE: coroutine_cannot_borrow_a_spread_map_element_field ===
+//! expect: No overload for `read` with argument types (Wrapper)
+value Cell { w: int }
+value Wrapper { c: Cell }
+co fn read(c: ref Cell) -> Coroutine<int> { yield c.w }
+fn main() {
+    let cells: Map<string, Wrapper> = map_new()
+    cells["a"] = Wrapper { c: Cell { w: 1 } }
+    let task = read(..cells["a"])
+}
+
+//=== TEST CASE: resume_taking_coroutine_not_iterable_Rejected ===
+// a `Coroutine<Y, R, N>` with `N != ()` is NOT iterable -- the
+// stdlib `next` adapter is only defined for `N = ()`, because a
+// `for` head cannot supply the resume-arg the body's `let x = yield V`
+// expects. The mismatch rejects at the loop naturally (no `next`
+// overload fits), never a silent wrong-arity resume.
+//! expect: type `Coroutine<int, (), int>` is not iterable
+co fn echo() -> Coroutine<int, (), int> {
+    let x = yield 1
+    yield x
+}
+
+fn main() {
+    for v in echo() {
+        print(v)
+    }
+}
+
+//=== TEST CASE: co_fn_requires_coroutine_result_Generic ===
+// a co fn result annotation must be a Coroutine type.
+// This formerly claimed to reject the bounded call, but the invalid annotation
+// rejects first. The corrected chain runs in coroutine_bound_calls.rock.
+//! expect: Expected a Coroutine type, got int
+co fn worker(xs: [int]) -> int {
+    let evens = xs.iter().filter(x => x % 2 == 0).collect()
+    return evens.len
+}
+fn main() {
+    let n = worker([1, 2, 3, 4])
+    print("n={n}")
+}
+
+//=== TEST CASE: coroutine_return_r_mismatch_Generic ===
+// co fn `return e` checks e against R (the Coroutine's 2nd param), not the
+// whole Coroutine type. `Coroutine<int, string>` synthesizes N=(); R=string.
+// return value not matching R is rejected.
+//! expect: type mismatch: expected `string`, found `int`
+co fn g() -> Coroutine<int, string> {
+    return 42
+}

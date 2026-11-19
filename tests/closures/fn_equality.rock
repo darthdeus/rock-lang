@@ -3,7 +3,7 @@
 // --- Null checks on optional fn values ---
 //
 // `==`/`!=` between fn values is a compile error (fn identity is not
-// meaningful -- tests/errors/fn_identity_compare.rock.err), but comparing an
+// meaningful -- tests/errors/fn.rock.err), but comparing an
 // OPTIONAL fn against the null literal is refinement and must keep working,
 // including calling through the refined value.
 
@@ -94,7 +94,7 @@ fn test_capfree_same_site_equal() {
 
 // --- Generic `==` wrappers ---
 // Comparing fn values through a generic wrapper is a compile error
-// (tests/errors/fn_identity_generic.rock.err). The same wrapper over non-fn
+// (tests/errors/fn.rock.err). The same wrapper over non-fn
 // types still compiles and runs: the call-site check fires only when a
 // `==`-compared type param resolves to a fn type.
 
@@ -115,7 +115,7 @@ fn test_same_non_fn_types_through_generic() {
 
 // Forwarding a generic into a `==`-comparing callee is fine for non-fn types:
 // only a fn instantiation is rejected
-// (tests/errors/fn_identity_generic_transitive.rock.err).
+// (tests/errors/fn.rock.err).
 fn same_via<T>(a: T, b: T) -> bool { return same(a, b) }
 
 @test(output = "true false")

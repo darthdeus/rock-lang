@@ -6,7 +6,7 @@
 //
 //
 // The box is AUTHORIZED at the boundary (emitted as an explicit materialization),
-// NOT by exempting the calling body -- see `tests/errors/nobox_shader_cpu_body.rock.err`
+// NOT by exempting the calling body -- see `tests/errors/nobox.rock.err`
 // for the CPU-side box inside a `@shader` fn that must still reject.
 
 nobox value NV2 { x: float, y: float }

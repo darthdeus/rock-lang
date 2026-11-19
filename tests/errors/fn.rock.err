@@ -1,0 +1,219 @@
+//=== TEST CASE: plain_fn_without_a_body ===
+// a function body must be a block or an inline string, never absent
+//
+// `finish_fn_def` answered a missing body with `extern_body.unwrap_or(ExternC)`.
+// Only the `extern fn` caller passes `Some`, so every other bodyless form --
+// plain `fn`, `co fn`, `operator`, `inline(<backend>) fn` -- silently became an
+// extern C declaration that type-checked and then failed at RUNTIME with
+// "attempt to call global 'c' (a nil value)". The comment there claimed the
+// non-extern callers never reached it; they did.
+//
+// An `extern(lua) fn f() -> int` (no body, no `= "..."`) is still legal and is
+// covered positively in the extern suite -- this rejection is for the forms
+// that are NOT foreign declarations.
+fn c(x: int) -> int
+
+fn main() {
+    let _ = c(1)
+}
+
+//=== TEST CASE: free_syntax_does_not_see_field_Generic ===
+//! expect: `f` did not resolve to any definition
+struct S { f: fn() -> int }
+fn g() -> int {
+    let s = S { f: () => 42 }
+    f(s)
+}
+
+//=== TEST CASE: lambda_values_eq_Generic ===
+// `==`/`!=` on fn-typed values is rejected: capture-free lambdas
+// share one hoisted fn value and capturing lambdas become per-creation
+// records, so fn identity is representation-dependent and never
+// meaningful.
+// Comparing a nullable fn against `null` stays legal (refinement).
+fn mk() -> fn() -> int { return () => 42 }
+
+fn main() {
+    let a = mk()
+    let b = mk()
+    if a == b { print("same") }   // ERROR: fn identity comparison
+}
+
+//=== TEST CASE: lambda_values_noteq_Generic ===
+fn mk() -> fn() -> int { return () => 42 }
+
+fn main() {
+    let a = mk()
+    let b = mk()
+    if a != b { print("diff") }   // ERROR: fn identity comparison
+}
+
+//=== TEST CASE: named_fn_values_eq_Generic ===
+fn foo() -> int { return 1 }
+
+fn main() {
+    let a = foo
+    let b = foo
+    if a == b { print("same") }   // ERROR: fn identity comparison
+}
+
+//=== TEST CASE: nullable_fn_values_eq_Generic ===
+fn main() {
+    let a: (fn() -> int)? = null
+    let b: (fn() -> int)? = null
+    if a == b { print("same") }   // ERROR: fn identity comparison (nullable strips)
+}
+
+//=== TEST CASE: generic_eq_capture_free_fn_arg_Generic ===
+// comparing fn values THROUGH a generic wrapper is rejected at the
+// call site. `fn same<T>(a: T, b: T) -> bool { a == b }` type-checks
+// (the operands are `T`, not a fn type), but a call that binds `T` to a
+// fn type reaches an `==` on fn values -- whose identity is not
+// meaningful (a capture-free lambda is one shared hoisted fn; a
+// capturing lambda is a fresh record per creation). The direct ban is
+// `lambda_values_eq` above; this closes the
+// generic bypass at the call site (bone-semantic fn_identity).
+// Aliased operands and forwarding through another generic follow.
+fn same<T>(a: T, b: T) -> bool { return a == b }
+fn mk() -> fn() -> int { return () => 1 }
+
+fn main() {
+    if same(mk(), mk()) { print("same") }   // ERROR: fn identity via generic
+}
+
+//=== TEST CASE: generic_eq_capturing_fn_arg_Generic ===
+fn same<T>(a: T, b: T) -> bool { return a == b }
+fn mk2(x: int) -> fn() -> int { return () => x }
+
+fn main() {
+    if same(mk2(1), mk2(1)) { print("same") }   // ERROR: fn identity via generic
+}
+
+//=== TEST CASE: generic_neq_fn_arg_Generic ===
+fn diff<T>(a: T, b: T) -> bool { return a != b }
+fn mk() -> fn() -> int { return () => 1 }
+
+fn main() {
+    if diff(mk(), mk()) { print("diff") }   // ERROR: fn identity via generic
+}
+
+//=== TEST CASE: generic_eq_nullable_fn_arg_Generic ===
+fn same<T>(a: T, b: T) -> bool { return a == b }
+fn mk() -> (fn() -> int)? { return () => 1 }
+
+fn main() {
+    if same(mk(), mk()) { print("same") }   // ERROR: nullable-fn identity via generic
+}
+
+// Aliasing ONE operand does not escape: `x` infers as `T`.
+//=== TEST CASE: generic_eq_single_unannotated_alias_Generic ===
+fn same<T>(a: T, b: T) -> bool { let x = a; return x == b }
+fn mk() -> fn() -> int { return () => 1 }
+
+fn main() {
+    if same(mk(), mk()) { print("same") }   // ERROR: `x` is still a T operand
+}
+
+// ANNOTATED aliases are T-typed too. (The unannotated both-alias form:
+// `generic_eq_fn_arg_both_unannotated_alias` below.)
+//=== TEST CASE: generic_eq_annotated_both_alias_Generic ===
+fn same<T>(a: T, b: T) -> bool { let x: T = a; let y: T = b; return x == y }
+fn mk() -> fn() -> int { return () => 1 }
+
+fn main() {
+    if same(mk(), mk()) { print("same") }   // ERROR: annotated aliases stay T-typed
+}
+
+//=== TEST CASE: generic_eq_fn_arg_both_unannotated_alias_Generic ===
+// aliasing BOTH operands of a generic `==` through unannotated lets
+// does not hide the comparison. `let x = a` infers `x: T`, and the
+// generic fn-eq summary (bone-semantic fn_identity) reads each
+// operand's INFERRED type, not its declared one, so `x == y` still
+// compares `T` and a call instantiating `T` with a fn type is
+// rejected.
+fn same<T>(a: T, b: T) -> bool { let x = a; let y = b; return x == y }
+fn mk() -> fn() -> int { return () => 1 }
+
+fn main() {
+    if same(mk(), mk()) { print("same") }   // ERROR: aliases are still T-typed
+}
+
+//=== TEST CASE: generic_eq_fn_arg_call_operands_Generic ===
+fn mk_t<T>(x: T) -> T { return x }
+fn same<T>(a: T, b: T) -> bool { return mk_t(a) == mk_t(b) }
+fn mk() -> fn() -> int { return () => 1 }
+
+fn main() {
+    if same(mk(), mk()) { print("same") }   // ERROR: call operands infer as T
+}
+
+//=== TEST CASE: generic_eq_fn_arg_transitive_Generic ===
+// forwarding a generic into a callee that `==`-compares it is itself
+// a comparison. `outer<T>` instantiates `same`'s compared generic with
+// its own `T`, so the generic fn-eq summary (bone-semantic
+// fn_identity, a whole-program fixpoint after inference) marks
+// `outer`'s `T` compared too, and `outer(mk(), mk())` is rejected.
+fn same<T>(a: T, b: T) -> bool { return a == b }
+fn outer<T>(a: T, b: T) -> bool { return same(a, b) }
+fn mk() -> fn() -> int { return () => 1 }
+
+fn main() {
+    if outer(mk(), mk()) { print("same") }   // ERROR: fn identity two levels down
+}
+
+//=== TEST CASE: generic_eq_fn_arg_transitive_two_levels_Generic ===
+fn same<T>(a: T, b: T) -> bool { return a == b }
+fn mid<U>(a: U, b: U) -> bool { return same(a, b) }
+fn outer<V>(a: V, b: V) -> bool { return mid(a, b) }
+fn mk() -> fn() -> int { return () => 1 }
+
+fn main() {
+    if outer(mk(), mk()) { print("same") }   // ERROR: fn identity three levels down
+}
+
+//=== TEST CASE: generic_eq_fn_arg_mutual_recursion_Generic ===
+fn ping<T>(a: T, b: T, n: int) -> bool {
+    if n == 0 { return a == b }
+    return pong(a, b, n - 1)
+}
+fn pong<T>(a: T, b: T, n: int) -> bool { return ping(a, b, n) }
+fn mk() -> fn() -> int { return () => 1 }
+
+fn main() {
+    if pong(mk(), mk(), 2) { print("same") }   // ERROR: compared through a cycle
+}
+
+//=== TEST CASE: expression_bodied_fn ===
+// an `= <body>` function body must be a string literal
+//
+// `= <expr>` parsed the expression, THREW IT AWAY, and kept an empty inline
+// source -- so `fn c(x: int) -> int = x + 1` emitted `function c(x) return end`
+// and answered nil. The comment called it recovery from a malformed inline
+// body, but it ran on the ordinary path and produced a silently wrong program.
+//
+// Rock has no expression-bodied function form. If one is ever wanted, it is a
+// language decision with a lowering behind it, not a parser fallthrough.
+// Reproduces identically on `operator` and on the `Type.method` form.
+fn c(x: int) -> int = x + 1
+
+fn main() {
+    let _ = c(1)
+}
+
+//=== TEST CASE: call_non_fn_fail_Generic ===
+// Calling a fn-typed parameter (callback). `f(x)` where `f: fn(A) -> B` resolves
+// the callee to a LOCAL binding (not a top-level fn), checks each arg against A
+// (with coercion), and yields B. Needed for the higher-order stdlib fns
+// (map/filter/find/any/all/sort) whose Rock bodies invoke their fn params.
+// calling a non-function local is an error
+//! expect: Attempted to call a non-function type int
+fn f(x: int) -> int {
+    x(5)
+}
+
+//=== TEST CASE: call_fn_wrong_arity_fail_Generic ===
+// wrong arity calling a fn value
+//! expect: Expected 1 to 1 arguments in call to value of type fn(T) -> U, but got 2
+fn apply<T, U>(f: fn(T) -> U, x: T) -> U {
+    f(x, x)
+}

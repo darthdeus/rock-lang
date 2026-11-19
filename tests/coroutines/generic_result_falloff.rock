@@ -1,7 +1,7 @@
 // A generic-result co fn that can fall off its end is judged per concrete
 // instantiation. At a nullable or unit R the fall-off is a legal completion
 // carrying nil; at a non-unit, non-nullable R it is rejected at emit time
-// (tests/errors/coroutine_falloff_nonunit.rock.err). A generic R whose every
+// (tests/errors/coroutine.rock.err). A generic R whose every
 // path returns is fine at any R.
 
 co fn gfall<R>(x: R) -> Coroutine<int, R> {

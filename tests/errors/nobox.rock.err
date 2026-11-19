@@ -1,0 +1,149 @@
+//=== TEST CASE: bound_callback_nullable_nobox_return ===
+// A stored function returning a nobox value has a fixed leaf return ABI.
+// A nullable return adds a presence slot, so the value needs a lambda adapter.
+fn accepts_nullable_position(callback: () -> Vec2?) -> Vec2 {
+    return callback().unwrap()
+}
+
+fn main() {
+    let callback: () -> Vec2 = () => v(7.0, 9.0)
+    let position = accepts_nullable_position(callback) // ERROR: incompatible return ABI
+    print("{position.x}")
+}
+
+//=== TEST CASE: opaque_body_via_global_init_Generic ===
+// a fn whose fixed ABI cannot adopt the type-derived `nobox` fn-value
+// ABI is rejected in a GLOBAL INITIALIZER, exactly as it already is at
+// a direct call site. A call through a fn value cannot see its callee,
+// so both ends agree only by reading the same signature -- at a `nobox`
+// param that means splatted leaves, which an opaque body, an `extern`
+// and a `@nomangle` fn all keep their own boxed ABI against.
+//
+// The gate ran on fn bodies and decorator bodies but not on global
+// initializers, so this route reached codegen and MISCOMPILED: the
+// leaves splat, the callee binds one param per leaf, and everything
+// shifts by one. `fn(p: P, k: float) -> float { return k }` returned
+// `p.y`. A dispatch table (`global HANDLERS: [(Vec2) -> float]`) is an
+// ordinary shape, so this was reachable from real code.
+nobox value P { x: float, y: float }
+
+inline(lua) fn lscore(p: P) -> float = """
+    return p.x * 100.0 + p.y
+"""
+
+global HANDLER: (P) -> float = lscore   // ERROR: fixed ABI cannot adopt the leaf ABI
+
+fn main() {
+    let g = HANDLER
+    print("{g(P { x: 3.0, y: 7.0 })}")
+}
+
+//=== TEST CASE: opaque_body_in_global_vec_Generic ===
+nobox value P { x: float, y: float }
+
+inline(lua) fn lscore(p: P) -> float = """
+    return p.x * 100.0 + p.y
+"""
+
+global FS: [(P) -> float] = [lscore]   // ERROR: same gate, through a container
+
+fn main() {
+    let g = FS[0]
+    print("{g(P { x: 3.0, y: 7.0 })}")
+}
+
+//=== TEST CASE: nomangle_fn_via_global_init_Generic ===
+nobox value P { x: float, y: float }
+
+// Not an opaque body -- an ordinary Rock fn whose `@nomangle` bare name pins its
+// declared boxed ABI. It produced a SILENT wrong answer (returned `p.y` for `k`).
+@nomangle fn scorer(p: P, k: float) -> float { return k }
+
+global HANDLER: (P, float) -> float = scorer   // ERROR: fixed ABI cannot adopt the leaf ABI
+
+fn main() {
+    let g = HANDLER
+    print("{g(P { x: 3.0, y: 7.0 }, 999.0)}")
+}
+
+//=== TEST CASE: extern_fn_via_global_init_Generic ===
+nobox value P { x: float, y: float }
+
+extern(lua) fn take_p(p: P) -> float
+
+global H: (P) -> float = take_p   // ERROR: an FFI boundary cannot splat leaves
+
+fn main() {
+    let g = H
+    print("{g(P { x: 1.0, y: 2.0 })}")
+}
+
+//=== TEST CASE: nobox_bare_return_from_inline_lua ===
+// a BARE (non-tuple) `nobox` return from an opaque body. The callee
+// writes its own `return`, so a hand-written box is handed back where
+// the call site expects leaves -- and Lua's `.field` does not
+// distinguish a table from cdata, so it COMPILED CLEAN AND PASSED.
+// The guarantee was violated with no diagnostic at all.
+//
+// The param direction (`reject_nobox_boxed_call_args`) and the TUPLE return
+// (`reject_nobox_opaque_tuple_return`) were both already checked; a plain
+// `-> NV2` was the one uncovered position.
+//
+// The escape is `@scalar_abi` + returning the leaves, which the message names.
+// Positive control (accepted, leaves returned): `tests/nobox/opaque_return.rock`.
+nobox value NV2 { x: float, y: float }
+
+inline(lua) fn hand_boxed() -> NV2 = """
+    return NV2_ct(3.0, 4.0)
+"""
+
+fn main() {
+    print("{hand_boxed().x}")
+}
+
+//=== TEST CASE: nobox_bare_return_from_nomangle_inline_lua ===
+nobox value NV2 { x: float, y: float }
+
+@nomangle inline(lua) fn hand_boxed_fixed_name() -> NV2 = """
+    return NV2_ct(3.0, 4.0)
+"""
+
+fn main() {
+    print("{hand_boxed_fixed_name().x}")
+}
+
+//=== TEST CASE: nobox_materialization_in_a_shader_body ===
+// a `@shader` fn's body is ordinary CPU-executable Lua -- the authoring
+// contract promises shader fns "compile
+// to Lua as normal fns, so shader helper math is CPU-callable and
+// `@test`-able", and nothing rejects a CPU call to one. So the `nobox`
+// guarantee applies to it like any other body: an implicit
+// materialization inside a `@shader` fn must reject.
+//
+// The materialization below is unrelated to any GPU intrinsic: a box is
+// authorized only AT a `@gpu_only` call boundary, never anywhere inside a body
+// that happens to be annotated.
+//
+// The sink has to be a shape with nowhere to put the value but a box. A bare
+// nobox global stores LEAVES and a value-struct outer stores flat leaf keys, so
+// either would pass here for the wrong reason.
+//
+// Interpolating a WHOLE tuple that carries one is the sink, and it is chosen
+// because it is PERMANENT: asking for a single runtime-typed value is F1
+// erasure, a justified box that is meant to stay a rejection
+// (`tests/errors/nobox_container_gaps.rock.err`). A tuple element in a COLLECTION used to
+// stand here and was the wrong choice -- that was an open gap, it closed, and
+// this case went green while the shader rule it guards was untouched. Do not
+// re-point this at a sink the matrix lists as live.
+nobox value NV2 { x: float, y: float }
+
+@shader(fragment)
+fn leaky_frag(tc: NV2) -> Vec4 {
+    let t = (tc, 1.0)
+    let s = "{t}"
+    return v(0.0, 0.0, 0.0, 1.0)
+}
+
+fn main() {
+    let _ = leaky_frag(NV2 { x: 1.0, y: 2.0 })
+}
