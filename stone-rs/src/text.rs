@@ -2067,19 +2067,6 @@ pub extern "C" fn stone_get_font_atlas_instance_pixel_size(
 }
 
 #[no_mangle]
-pub extern "C" fn stone_get_font_atlas_instance_image(font_id: c_uint, index: c_uint) -> u64 {
-    let Some(idx) = font_index(font_id) else {
-        return 0;
-    };
-    font_slot(idx, |entry| {
-        entry
-            .and_then(|entry| entry.instances.get(index as usize))
-            .and_then(|instance| instance.image)
-            .unwrap_or(0)
-    })
-}
-
-#[no_mangle]
 pub extern "C" fn stone_get_font_atlas_image_cached(font_id: c_uint) -> u64 {
     let Some(idx) = font_index(font_id) else {
         return 0;

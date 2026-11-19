@@ -729,7 +729,6 @@ pub @nomangle inline(lua) fn setup_stone() = """
         uint64_t stone_ensure_font_atlas_instance(uint32_t font_id, int pixel_size);
         uint64_t stone_get_font_instance_image(uint64_t instance_id);
         int stone_get_font_atlas_instance_pixel_size(uint32_t font_id, uint32_t index);
-        uint64_t stone_get_font_atlas_instance_image(uint32_t font_id, uint32_t index);
         uint64_t stone_get_font_atlas_instance_image_at(uint32_t font_id, int index);
         uint8_t stone_get_font_instance_size(uint64_t instance_id, int* width, int* height);
         int stone_get_font_instance_pixel_size(uint64_t instance_id);
@@ -2016,11 +2015,9 @@ extern(ffi, "stone") fn stone_get_font_atlas_size(font_id: int, width: Ptr<int>,
 pub @inline inline(lua) fn stone_ensure_font_atlas_instance_ffi(font_id: int, pixel_size: int) -> int = "tonumber(stone.stone_ensure_font_atlas_instance(font_id, pixel_size))"
 pub @inline inline(lua) fn stone_get_font_instance_image_ffi(instance_id: int) -> int = "tonumber(stone.stone_get_font_instance_image(instance_id))"
 @inline inline(lua) fn stone_get_font_atlas_instance_pixel_size_ffi(font_id: int, index: int) -> int = "stone.stone_get_font_atlas_instance_pixel_size(font_id, index)"
-@inline inline(lua) fn stone_get_font_atlas_instance_image_ffi(font_id: int, index: int) -> int = "tonumber(stone.stone_get_font_atlas_instance_image(font_id, index))"
 extern(ffi, "stone") fn stone_ensure_font_atlas_instance(font_id: int, pixel_size: int) -> int
 extern(ffi, "stone") fn stone_get_font_instance_image(instance_id: int) -> int
 extern(ffi, "stone") fn stone_get_font_atlas_instance_pixel_size(font_id: int, index: int) -> int
-extern(ffi, "stone") fn stone_get_font_atlas_instance_image(font_id: int, index: int) -> int
 pub extern(ffi, "stone") fn stone_get_font_atlas_instance_image_at(font_id: int, index: int) -> int
 extern(ffi, "stone") fn stone_get_font_instance_size(instance_id: int, width: Ptr<int>, height: Ptr<int>) -> bool
 pub extern(ffi, "stone") fn stone_get_font_instance_byte_len(instance_id: int) -> int
