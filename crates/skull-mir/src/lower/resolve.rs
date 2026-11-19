@@ -358,7 +358,7 @@ impl<'a> Builder<'a> {
         let repr = match selected {
             FieldShape::Prim => ValueRepr::Scalar(leaves[0]),
             FieldShape::Nested(shape) => {
-                let repr = Self::rebuild_from_leaves(&shape, &leaves, &mut 0);
+                let repr = Self::rebuild_from_leaves(&shape, &leaves);
                 let owner = self.concrete_expr_ty(e);
                 self.mark_borrowed_value_children(&shape, &repr, owner)?;
                 repr
@@ -581,8 +581,7 @@ impl<'a> Builder<'a> {
             Expr::Var(b) if self.group_binds.contains_key(&raw(b)) => {
                 let (cells, shape) = self.group_binds.get(&raw(b)).cloned().unwrap();
                 let leaves: Vec<Idx<Inst>> = cells.iter().map(|&c| self.read_leaf(c)).collect();
-                let mut idx = 0;
-                let repr = Self::rebuild_from_leaves(&shape, &leaves, &mut idx);
+                let repr = Self::rebuild_from_leaves(&shape, &leaves);
                 if !self.scx.values_first_class {
                     let owner = self.concrete_expr_ty(e);
                     self.mark_borrowed_value_children(&shape, &repr, owner)?;
@@ -691,7 +690,7 @@ impl<'a> Builder<'a> {
                             .into_iter()
                             .map(|key| self.read_field(parent, crate::names::ustr(&key)))
                             .collect::<Vec<_>>();
-                        return Ok(Self::rebuild_from_leaves(&shape, &leaves, &mut 0));
+                        return Ok(Self::rebuild_from_leaves(&shape, &leaves));
                     }
                     if let Some(name) = self.value_struct_of(e)
                         && self.is_nobox_struct(name)

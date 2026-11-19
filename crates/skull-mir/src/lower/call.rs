@@ -640,7 +640,7 @@ impl<'a> Builder<'a> {
             let index = self.emit_cur(Inst::StringConcat(*selector, suffix));
             leaves.push(self.read_index(*owner, index, ContainerKind::Map));
         }
-        Ok(Some(Self::rebuild_from_leaves(shape, &leaves, &mut 0)))
+        Ok(Some(Self::rebuild_from_leaves(shape, &leaves)))
     }
 
     pub(crate) fn concrete_callee_for_site(
@@ -1369,8 +1369,7 @@ impl<'a> Builder<'a> {
                     self.f
                         .call_rep_plans
                         .insert(call, abi.representation.clone());
-                    let mut idx = 0;
-                    let value = Self::rebuild_from_leaves(shape, &leaves, &mut idx);
+                    let value = Self::rebuild_from_leaves(shape, &leaves);
                     return self.call_result_bundle(&abi.representation, value);
                 }
                 let callee_v = match self.value_binds.get(&raw(b)) {
@@ -1726,7 +1725,7 @@ impl<'a> Builder<'a> {
             let dests = self.fresh_cells(shape.leaf_count());
             let (call, leaves) = self.call_multi(dests, func, args);
             self.record_call(call, func, dc)?;
-            return Ok(Self::rebuild_from_leaves(shape, &leaves, &mut 0));
+            return Ok(Self::rebuild_from_leaves(shape, &leaves));
         }
         if let Some(shape) = tuple {
             return self.emit_tuple_call_tree(e, func, args, shape, dc);
@@ -1799,10 +1798,9 @@ impl<'a> Builder<'a> {
         let dests = self.fresh_cells(shape.leaf_count());
         let (call, leaves) = self.call_value_multi(dests, callee, argv);
         self.f.call_rep_plans.insert(call, plan);
-        let mut idx = 0;
         Ok(ValueBundle::new(
             result,
-            Self::rebuild_from_leaves(shape, &leaves, &mut idx),
+            Self::rebuild_from_leaves(shape, &leaves),
         ))
     }
 
@@ -3277,7 +3275,7 @@ impl<'a> Builder<'a> {
                             let copy = s.owned_value_children(copy)?;
                             s.repr_to_leaves_shape(&copy, inner)
                         })?;
-                        return Ok(Self::rebuild_from_leaves(shape, &leaves, &mut 0));
+                        return Ok(Self::rebuild_from_leaves(shape, &leaves));
                     }
                 }
                 s.owned_value_children(r)
@@ -3417,7 +3415,7 @@ impl<'a> Builder<'a> {
     ) -> Result<ValueRepr, CompilerError> {
         if !self.boxed_copy_uses_gc_fields(shape)? {
             let leaves = self.cdata_leaves(v, shape)?;
-            let copy = Self::rebuild_from_leaves(shape, &leaves, &mut 0);
+            let copy = Self::rebuild_from_leaves(shape, &leaves);
             self.mark_borrowed_value_children(shape, &copy, owner_ty)?;
             return Ok(copy);
         }
@@ -3456,7 +3454,7 @@ impl<'a> Builder<'a> {
                 .collect();
             return Ok(match fs {
                 FieldShape::Prim => ValueRepr::Scalar(leaves[0]),
-                FieldShape::Nested(sub) => Self::rebuild_from_leaves(sub, &leaves, &mut 0),
+                FieldShape::Nested(sub) => Self::rebuild_from_leaves(sub, &leaves),
             });
         }
         let fv = self.read_value_field(v, *fname);
@@ -3475,7 +3473,7 @@ impl<'a> Builder<'a> {
             }
             FieldShape::Nested(sub) if sub.nullable => {
                 let leaves = self.nullable_child_leaf_range(fv, sub, 0..sub.leaf_count())?;
-                let copy = Self::rebuild_from_leaves(sub, &leaves, &mut 0);
+                let copy = Self::rebuild_from_leaves(sub, &leaves);
                 let sub_ty = self.nested_owner_ty(shape.name, owner_ty, *fname, sub.name)?;
                 self.mark_borrowed_value_children(sub, &copy, sub_ty.as_deref())?;
                 copy
@@ -3569,7 +3567,11 @@ impl<'a> Builder<'a> {
         }
     }
 
-    pub(crate) fn rebuild_from_leaves(
+    pub(crate) fn rebuild_from_leaves(shape: &ValueShape, leaves: &[Idx<Inst>]) -> ValueRepr {
+        Self::rebuild_leaves_at(shape, leaves, &mut 0)
+    }
+
+    pub(crate) fn rebuild_leaves_at(
         shape: &ValueShape,
         leaves: &[Idx<Inst>],
         idx: &mut usize,
@@ -3588,7 +3590,7 @@ impl<'a> Builder<'a> {
                     *idx += 1;
                     ValueRepr::Scalar(value)
                 }
-                FieldShape::Nested(sub) => Self::rebuild_from_leaves(sub, leaves, idx),
+                FieldShape::Nested(sub) => Self::rebuild_leaves_at(sub, leaves, idx),
             })
             .collect();
         ValueRepr::Group {

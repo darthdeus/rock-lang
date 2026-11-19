@@ -658,7 +658,7 @@ impl<'a> Builder<'a> {
             let dests = self.fresh_cells(shape.leaf_count());
             let leaves = multi(self, dests, argv);
             return Ok(FlatCallOut::Value(Self::rebuild_from_leaves(
-                shape, &leaves, &mut 0,
+                shape, &leaves,
             )));
         }
         if let Some(shape) = ret_tuple {
@@ -1138,7 +1138,7 @@ impl<'a> Builder<'a> {
         };
         Ok(ValueBundle::new(
             representation,
-            Self::rebuild_from_leaves(&shape, &leaves, &mut 0),
+            Self::rebuild_from_leaves(&shape, &leaves),
         ))
     }
 }

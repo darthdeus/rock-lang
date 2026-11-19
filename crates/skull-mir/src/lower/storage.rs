@@ -176,10 +176,9 @@ impl<'a> Builder<'a> {
     ) -> Result<ValueBundle, CompilerError> {
         let shape = self.column_shape(elem)?;
         let leaves = self.strided_element_leaves(vec, index, elem, &shape, 0..shape.leaf_count());
-        let mut idx = 0;
         Ok(ValueBundle::new(
             elem.representation(),
-            Self::rebuild_from_leaves(&shape, &leaves, &mut idx),
+            Self::rebuild_from_leaves(&shape, &leaves),
         ))
     }
 
@@ -407,8 +406,7 @@ impl<'a> Builder<'a> {
         } else {
             let shape = self.column_shape(elem)?;
             let leaves = self.cdata_leaves(value, &shape)?;
-            let mut leaf = 0;
-            let unpacked = Self::rebuild_from_leaves(&shape, &leaves, &mut leaf);
+            let unpacked = Self::rebuild_from_leaves(&shape, &leaves);
             ValueBundle::new(elem.representation(), unpacked)
         };
         self.strided_append_bundle(vec, &bundle, elem)?;
@@ -631,10 +629,9 @@ impl<'a> Builder<'a> {
                 self.read_index(view, at, ContainerKind::NativeBufferLeaf)
             })
             .collect();
-        let mut idx = 0;
         Ok(ValueBundle::new(
             container.element_rep(),
-            Self::rebuild_from_leaves(&shape, &leaves, &mut idx),
+            Self::rebuild_from_leaves(&shape, &leaves),
         ))
     }
 
@@ -714,10 +711,9 @@ impl<'a> Builder<'a> {
                 self.read_index(col, slot, ContainerKind::VecColumn)
             })
             .collect();
-        let mut idx = 0;
         Ok(ValueBundle::new(
             elem.representation(),
-            Self::rebuild_from_leaves(&shape, &leaves, &mut idx),
+            Self::rebuild_from_leaves(&shape, &leaves),
         ))
     }
 
@@ -1470,8 +1466,7 @@ impl<'a> Builder<'a> {
                 ValueRepr::Scalar(loaded[0]),
             ));
         }
-        let mut idx = 0;
-        let inner = Self::rebuild_from_leaves(&shape, &loaded, &mut idx);
+        let inner = Self::rebuild_from_leaves(&shape, &loaded);
         let value = match inner {
             ValueRepr::Group { name, parts, .. } => ValueRepr::Group {
                 name,

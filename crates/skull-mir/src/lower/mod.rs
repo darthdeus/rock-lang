@@ -2573,7 +2573,7 @@ impl<'a> Builder<'a> {
                     .iter()
                     .map(|&leaf| self.read_leaf(leaf))
                     .collect::<Vec<_>>();
-                let repr = Self::rebuild_from_leaves(&shape, &leaves, &mut 0);
+                let repr = Self::rebuild_from_leaves(&shape, &leaves);
                 self.mark_borrowed_value_children(&shape, &repr, Some(ty))?;
                 let value = self.with_value_lending(false, |s| s.pack(repr))?;
                 let cell = self.new_binding_cell(
@@ -3436,7 +3436,7 @@ impl<'a> Builder<'a> {
                 *idx += 1;
                 ValueRepr::Scalar(v)
             }
-            RepLayout::Leaves(vs) => Self::rebuild_from_leaves(vs, slots, idx),
+            RepLayout::Leaves(vs) => Self::rebuild_leaves_at(vs, slots, idx),
             RepLayout::Tuple(inner) => self.tuple_from_slots(inner, slots, idx),
         }
     }

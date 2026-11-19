@@ -631,10 +631,7 @@ impl<'a> Builder<'a> {
             .map(|g| self.emit_cur(Inst::Global(*g)))
             .collect();
         match shape {
-            Some(shape) => {
-                let mut idx = 0;
-                Self::rebuild_from_leaves(&shape, &vals, &mut idx)
-            }
+            Some(shape) => Self::rebuild_from_leaves(&shape, &vals),
             None => ValueRepr::Scalar(vals[0]),
         }
     }

@@ -279,8 +279,7 @@ impl<'a> Builder<'a> {
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = join;
         let leaves = self.load_cells(&cells);
-        let mut idx = 0;
-        Self::rebuild_from_leaves(value_shape, &leaves, &mut idx)
+        Self::rebuild_from_leaves(value_shape, &leaves)
     }
 
     /// Parts are leaf Scalars in `[tag, _0.., <rec>..]` order.

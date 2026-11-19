@@ -286,7 +286,7 @@ impl<'a> Builder<'a> {
             .into_iter()
             .map(|key| self.read_field(parent, crate::names::ustr(&key)))
             .collect::<Vec<_>>();
-        Self::rebuild_from_leaves(shape, &leaves, &mut 0)
+        Self::rebuild_from_leaves(shape, &leaves)
     }
 
     pub(crate) fn load_embed_repr(

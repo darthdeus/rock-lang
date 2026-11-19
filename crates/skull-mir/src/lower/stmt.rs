@@ -106,7 +106,7 @@ impl<'a> Builder<'a> {
             .collect();
         let boxed = self.lower_place_base(value)?;
         let leaves = self.cdata_leaf_demand(boxed, &expanded, &demand)?;
-        let repr = Self::rebuild_from_leaves(&selected, &leaves, &mut 0);
+        let repr = Self::rebuild_from_leaves(&selected, &leaves);
         self.mark_borrowed_value_children(&selected, &repr, self.concrete_expr_ty(value))?;
         let repr = self.own_opaque_parameter_children(repr, &selected)?;
         let leaves = self.repr_to_leaves_shape(&repr, &selected)?;
