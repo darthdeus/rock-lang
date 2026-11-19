@@ -1,11 +1,8 @@
 //! Modules-v1 namespace data.
-//!
-//! The namespace tree is built per workspace by the semantic pass from the v1
-//! fragments' headers, inline mod blocks, and use declarations. Definition
-//! identity uses canonical DefKeys (`<package>::<module path>::<name>`): the
-//! workspace `*_by_name` maps keep their types, but v1 items register under
-//! their DefKey while compiler-owned items keep bare names. The tree itself is
-//! only the SCOPE map — resolution lives in `bone-lower/src/resolve.rs`.
+//! The namespace tree is the scope map the semantic pass builds from v1
+//! fragment headers, inline mod blocks and use declarations; resolution lives
+//! in `bone-lower/src/resolve.rs`. User items register under canonical DefKeys
+//! (`<package>::<module path>::<name>`), compiler-owned items under bare names.
 
 use crate::prelude::*;
 
@@ -13,8 +10,7 @@ use crate::prelude::*;
 pub type PackageId = u32;
 
 /// Reserved package id for the compiler-owned virtual standard library.
-/// Package graph ids are dense from zero, so the maximum value cannot be
-/// assigned by a host graph.
+/// Package graph ids are dense from zero, so a host never assigns this one.
 pub const STD_PACKAGE_ID: PackageId = u32::MAX;
 pub const STD_PACKAGE_NAME: &str = "std";
 
@@ -23,19 +19,17 @@ pub use rock_core::source_code::{STANDALONE_PACKAGE_PREFIX, artifact_name, displ
 /// How a compiler-known type former is admitted and resolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IntrinsicType {
-    /// The nominal field references. They are members of the std export view
-    /// (`std::FieldRef`, the v1 prelude), so they resolve only while the
-    /// stdlib is loaded, and a bare key admits as a nominal type.
+    /// Members of the std export view, so they resolve only while the stdlib is
+    /// loaded.
     FieldRef,
-    /// Builtin formers with their own lowering. They resolve bare at the std
-    /// tier without being std exports: `std::Map` names nothing.
+    /// Builtin formers with their own lowering; they resolve bare at the std
+    /// tier but are not std exports.
     Former,
 }
 
-/// The one inventory of compiler-known type formers that have no source
-/// declaration of their own. Their canonical keys are the bare spellings,
-/// so a package type with the same tail
-/// (`geo::Map`) is never one of them.
+/// Compiler-known type formers with no source declaration. Their keys are the
+/// bare spellings, so a package type with the same tail (`geo::Map`) is never
+/// one of them.
 pub(crate) const STD_INTRINSIC_TYPES: &[(&str, IntrinsicType)] = &[
     ("FieldRef", IntrinsicType::FieldRef),
     ("ReadFieldRef", IntrinsicType::FieldRef),
@@ -45,23 +39,17 @@ pub(crate) const STD_INTRINSIC_TYPES: &[(&str, IntrinsicType)] = &[
     ("Iterator", IntrinsicType::Former),
 ];
 
-/// Stdlib ownership is read from the loader's source-file id, never inferred
-/// from linked files or path components.
 pub use rock_core::{is_stdlib_module_file, stdlib_file_name};
 
-/// Intrinsic recognition is keyed by the canonical DefKey, not by a path's
-/// display tail. A v1 definition such as `other::FieldRef` therefore cannot
-/// enter an intrinsic branch merely because it has the same final segment.
-/// The whole key is compared as text: interning `spelling` here would take the
-/// shared interner lock on hot inference paths across all workers.
+/// Compares the whole canonical key, so `other::FieldRef` is not an intrinsic.
+/// Interning `spelling` instead would take the shared interner lock on hot
+/// inference paths.
 pub fn is_intrinsic_key(key: Ustr, spelling: &str) -> bool {
     key.as_str() == spelling
 }
 
-/// The component indices of a VALID swizzle read on `struct_name` -- the
-/// arity/alphabet rules of `vec_swizzle_ty` with the errors collapsed to None.
-/// Callers (assignment rejection, MIR expansion) key off "would this read as a
-/// swizzle"; invalid shapes surface through the read-path diagnostics instead.
+/// The component indices of a valid swizzle read on `struct_name`; invalid
+/// shapes return None and are diagnosed on the read path.
 pub fn vec_swizzle_components_of(struct_name: Ustr, field: &str) -> Option<Vec<usize>> {
     let arity = vec_swizzle_arity(struct_name)?;
     if field.is_empty() || field.len() > 4 {
@@ -89,8 +77,6 @@ pub fn intrinsic_type(key: Ustr) -> Option<IntrinsicType> {
         .map(|&(_, kind)| kind)
 }
 
-/// Whether `key` is one of the field-reference formers (`FieldRef`,
-/// `ReadFieldRef`, `WriteFieldRef`).
 pub fn is_field_ref_former(key: Ustr) -> bool {
     intrinsic_type(key) == Some(IntrinsicType::FieldRef)
 }
@@ -103,9 +89,8 @@ pub fn std_exported_intrinsic_types() -> impl Iterator<Item = &'static str> {
         .map(|&(name, _)| name)
 }
 
-/// Stdlib `value` descriptors whose Lua representation is one host slot (the
-/// cdata for a `Ptr`, the buffer table with its leaf views for a
-/// `NativeBuffer`): copying one shares the referent and never rebuilds it.
+/// Stdlib `value` descriptors whose Lua representation is one host slot, so
+/// copying one shares the referent.
 pub(crate) const STD_DESCRIPTOR_TYPES: &[&str] = &[
     "Ptr",
     "PtrU8",
@@ -135,7 +120,6 @@ pub fn is_intrinsic_key_in(key: Ustr, spellings: &[&str]) -> bool {
 pub(crate) type ModulePath = Vec<Ustr>;
 
 /// The source site performing an access check.
-/// None package indicates compiler-owned callers.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct AccessSite<'a> {
     pub package: Option<PackageId>,
@@ -154,7 +138,7 @@ impl<'a> AccessSite<'a> {
 /// Visibility of a namespace node or export binding.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NsVisibility {
-    /// Defining module + descendants (the default).
+    /// Defining module and its descendants (the default).
     Private,
     /// `pub(super)`.
     Super,
@@ -186,10 +170,8 @@ pub fn is_setter_audience_within_getter(write_vis: &NsVisibility, read_vis: &NsV
     *write_vis == NsVisibility::Private && *read_vis != NsVisibility::Private
 }
 
-/// One callable declaration in an overload family. The family key alone is
-/// not enough to identify a member because multiple files may contribute to
-/// one logical module; the source file and per-file overload ordinal identify
-/// the member without depending on source offsets that body edits can shift.
+/// The source file and per-file overload ordinal identify a member: several
+/// files may contribute to one module, and offsets shift with body edits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CallableMember {
     pub file: Ustr,
@@ -197,11 +179,8 @@ pub struct CallableMember {
     pub vis: NsVisibility,
 }
 
-/// One namespace node: a logical module within a package. Multi-file
-/// contributions coalesce here; the node owns visibility and the items
-/// declared in it (callables stay families in the workspace maps — the node
-/// records their presence and the DefKey prefix). Callable visibility stays
-/// on each family member rather than on the shared family key.
+/// A logical module within a package; multi-file contributions coalesce here.
+/// Callable visibility lives on each family member, not the family key.
 #[derive(Clone, Debug, Default)]
 pub struct NsNode {
     /// `::`-joined module path ("" for the package root).
@@ -210,35 +189,32 @@ pub struct NsNode {
     /// Explicit visibility declarations (`pub mod x;` headers / blocks).
     /// Conflicting declarations are a build error at tree construction.
     pub vis: Option<NsVisibility>,
-    /// Ancestor node keys, root first. Filled at construction.
+    /// Ancestor node keys, root first.
     pub ancestors: Vec<Ustr>,
     /// Types owned here: bare name -> DefKey.
     pub owned_types: FxHashMap<Ustr, Ustr>,
     /// Globals/constants owned here: bare name -> DefKey.
     pub owned_globals: FxHashMap<Ustr, Ustr>,
-    /// Callable families owned here: bare name -> family DefKey prefix (the
-    /// family key is the DefKey itself; overloads share it).
+    /// Callable families owned here: bare name -> family DefKey, shared by
+    /// overloads.
     pub owned_callables: FxHashMap<Ustr, Ustr>,
-    /// The declarations contributing each callable family, in source order.
-    /// This is the authoritative per-member visibility table; `DefMeta::vis`
-    /// is not meaningful for callable families.
+    /// The declarations of each callable family, in source order: the
+    /// per-member visibility table (`DefMeta::vis` is meaningless for
+    /// callables).
     pub callable_members: FxHashMap<Ustr, Vec<CallableMember>>,
-    /// Decorators owned here.
     pub owned_decorators: FxHashMap<Ustr, Ustr>,
-    /// Child modules by segment.
     pub children: FxHashMap<Ustr, Ustr>,
-    /// Shared named export bindings from `pub use` / `private use` at module
-    /// scope, by bound name, as distinct from fragment-local imports, which live
-    /// on the fragment (file) in `FragmentScope`.
+    /// Named export bindings from module-scope `pub use` / `private use`;
+    /// fragment-local imports live in `FragmentScope`.
     pub exports: FxHashMap<Ustr, ExportBinding>,
-    /// Shared glob export bindings (`pub use a::*;`). A module may hold any
-    /// number; they sit below owned names and named exports.
+    /// Glob export bindings (`pub use a::*;`), below owned names and named
+    /// exports.
     pub glob_exports: Vec<ExportBinding>,
 }
 
 impl NsNode {
-    /// The definition this node owns under `name`, with its kind, read from
-    /// the type, global, callable and decorator tables in that order.
+    /// The definition this node owns under `name`, checking types, globals,
+    /// callables and decorators in that order.
     pub fn owned(&self, name: Ustr) -> Option<(Ustr, DefKind)> {
         [
             (&self.owned_types, DefKind::Type),
@@ -251,10 +227,9 @@ impl NsNode {
     }
 }
 
-/// A shared export binding: `pub use` / `private use` at module
-/// scope. The target stays UNRESOLVED — the resolver chases it lazily from
-/// the exporting module (with cycle rejection), so declaration order never
-/// matters and pure re-export cycles diagnose at use.
+/// A module-scope `pub use` / `private use`. The target stays unresolved: the
+/// resolver chases it lazily with cycle rejection, so declaration order never
+/// matters.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExportBinding {
     pub target: UsePathRef,
@@ -272,8 +247,8 @@ pub enum DefKind {
     Module,
 }
 
-/// Metadata for one canonical definition. Diagnostics and the
-/// LSP render `name`/the shortest accessible path, never the raw key.
+/// Metadata for one canonical definition. Diagnostics render `name` or the
+/// shortest accessible path, never the raw key.
 #[derive(Clone, Debug)]
 pub struct DefMeta {
     pub package: PackageId,
@@ -287,42 +262,38 @@ pub struct DefMeta {
     pub span: crate::prelude::Span,
 }
 
-/// Fragment facts for one v1 file: which package/module it contributes to
-/// and its own fragment-local imports.
+/// Which package and module a v1 file contributes to, and its fragment-local
+/// imports.
 #[derive(Clone, Debug, Default)]
 pub struct FragmentScope {
     pub package: PackageId,
     pub package_name: Ustr,
     pub module_path: ModulePath,
-    /// Plain `use` bindings local to this fragment: local name -> every
-    /// (unresolved) use path bound under it, in source order. Resolution is
-    /// lazy so declaration order never matters; pure cycles diagnose at use,
-    /// and several paths compose or conflict there.
+    /// Fragment-local `use` bindings: local name -> every unresolved path bound
+    /// under it, in source order. Resolved lazily at use.
     pub named: FxHashMap<Ustr, Vec<UsePathRef>>,
     /// Module scopes this fragment globs (`use a::b::*;`), unresolved.
     pub globs: Vec<UsePathRef>,
 }
 
-/// An unresolved use path: `::`-root flag plus the segments (contextual
-/// `self`/`super` stay as segment spellings for the resolver).
+/// An unresolved use path; `self`/`super` stay as segment spellings for the
+/// resolver.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UsePathRef {
     pub from_root: bool,
     pub segments: Vec<Ustr>,
 }
 
-/// The key of a package's root module node: the empty path. Interned once,
-/// since resolver lookups ask for it constantly and interning takes a lock.
+/// Interned once: resolver lookups ask for it constantly and interning takes a
+/// lock.
 pub fn root_key() -> Ustr {
     static ROOT: std::sync::LazyLock<Ustr> = std::sync::LazyLock::new(|| Ustr::from(""));
     *ROOT
 }
 
 impl UsePathRef {
-    /// Order use paths exactly as the joined `"::"` string would, without
-    /// allocating it: the byte stream is the segments with `::` between them,
-    /// so a segment boundary compares as the separator bytes (a segment that
-    /// is a prefix of another does not simply sort first).
+    /// Orders like the joined `"::"` string without allocating it, so a segment
+    /// that is a prefix of another does not simply sort first.
     pub fn cmp_joined(&self, other: &UsePathRef) -> std::cmp::Ordering {
         fn joined_bytes(path: &UsePathRef) -> impl Iterator<Item = u8> + '_ {
             path.segments.iter().enumerate().flat_map(|(i, s)| {
@@ -335,41 +306,31 @@ impl UsePathRef {
             .then_with(|| joined_bytes(self).cmp(joined_bytes(other)))
     }
 
-    /// Insert `path` into `paths`, kept in [`UsePathRef::cmp_joined`] order
-    /// (after any equal path, as a stable sort of the insertion order would
-    /// place it), so lookups walk glob bindings in a fixed order without
-    /// sorting them each time.
+    /// Insert `item` after any equal path in [`UsePathRef::cmp_joined`] order,
+    /// so glob lookups walk a fixed order without sorting.
     pub fn insert_sorted<T>(paths: &mut Vec<T>, item: T, path: impl Fn(&T) -> &UsePathRef) {
         let at = paths.partition_point(|p| path(p).cmp_joined(path(&item)).is_le());
         paths.insert(at, item);
     }
 }
 
-/// Host-supplied alias tables (one entry per package), so cross-package
-/// resolution uses the graph's dependency names rather than guessing.
 pub use rock_core::package_aliases::{NsAliases, PackageAliases};
 
-/// One namespace fact a lowering read (scope epochs). A module's
-/// lowering records every probe its lookups made, hit or miss, so an edit to
-/// the namespace tree re-lowers exactly the modules that read a changed fact.
+/// One namespace fact a lowering read, hit or miss, so a tree edit re-lowers
+/// exactly the modules that read a changed fact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ScopeProbe {
-    /// What module `node` of `package` offers under `name`: its owned entry,
-    /// named export binding and child module of that name, the owned
-    /// definition's `DefMeta`, and -- through the node's glob export
-    /// bindings -- whatever they open. A glob target is probed in turn.
+    /// Module `node`'s entry under `name`: owned definition and its `DefMeta`,
+    /// named export, child module, and whatever its glob exports open.
     Member {
         package: PackageId,
         node: Ustr,
         name: Ustr,
     },
-    /// Module `node` of `package` entered as a path segment: its presence and
-    /// its declared visibility.
+    /// Module `node` entered as a path segment: its presence and visibility.
     Node { package: PackageId, node: Ustr },
 }
 
-/// Per-package scope facts the resolver needs, built by the semantic pass
-/// from the fragments plus the host's alias tables.
 #[derive(Clone, Debug, Default)]
 pub struct NsTree {
     pub packages: FxHashMap<PackageId, NsPackage>,
@@ -389,7 +350,6 @@ impl NsPackage {
         self.nodes.get(&path_key)
     }
 
-    /// `::`-join module segments into the node key.
     pub fn path_key(segments: &[Ustr]) -> Ustr {
         let joined = segments
             .iter()
@@ -399,7 +359,6 @@ impl NsPackage {
         Ustr::from(&joined)
     }
 
-    /// [`NsPackage::path_key`] as a method form for readability at call sites.
     pub fn key_of(&self, segments: &[Ustr]) -> Ustr {
         Self::path_key(segments)
     }
@@ -414,15 +373,12 @@ impl NsTree {
         self.package(STD_PACKAGE_ID)?.node(root_key())
     }
 
-    /// Look up one member of the compiler-owned default export view.
     pub fn std_definition(&self, name: Ustr) -> Option<(Ustr, DefKind)> {
         self.std_root()?.owned(name)
     }
 
-    /// Whether `vis` on a node in `owner_pkg` admits access FROM
-    /// (from_pkg, from_path). `from_path` is the
-    /// accessing module's path within its own package; cross-package access
-    /// only ever sees `Pub`.
+    /// Whether `vis` on a node in `owner_pkg` admits access from `from_path` in
+    /// `from_pkg`.
     pub fn can_access(
         &self,
         vis: &NsVisibility,
@@ -446,9 +402,8 @@ impl NsTree {
     }
 }
 
-/// Build the canonical DefKey for a definition: the package's
-/// self name, the `::`-joined module path, then the item name. Encoding is
-/// injective because `::` cannot occur inside an identifier.
+/// The canonical DefKey: package self name, module path, then item name, joined
+/// by `::`, which no identifier contains.
 pub fn def_key(pkg_self_name: &str, module_path: &[Ustr], name: &str) -> Ustr {
     if pkg_self_name == STD_PACKAGE_NAME {
         return Ustr::from(name);

@@ -1803,9 +1803,8 @@ fn workspace_findings_by_file(
     out
 }
 
-/// Run selected lints for `sources`, the files reported and the source text used
-/// for suppression. Other non-warm modules remain inputs to workspace lints but
-/// do not produce findings. The default selection excludes [`OPT_IN_LINTS`].
+/// Run the selected lints and report findings for `sources`, whose text drives
+/// suppression. Other non-warm modules are inputs to workspace lints only.
 pub fn lint_workspace(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,
@@ -1888,8 +1887,6 @@ pub fn filter_suppressed_findings(findings: Vec<Finding>, source: &str) -> Vec<F
 fn suppression_entries(source: &str) -> FxHashSet<(usize, &'static str)> {
     let mut allow = FxHashSet::default();
     for (n, line) in allow_lines(source) {
-        // The `rock: allow(` head does not depend on the lint, so parse it once
-        // per comment and only then try each lint name.
         let mut rest = line;
         while let Some(pos) = find_comment_start(rest) {
             let after = &rest[pos + 2..];
@@ -2530,7 +2527,6 @@ fn place_type(bi: &BodyInference, body: &Body, target: Idx<Expr>) -> Option<TyId
     }
 }
 
-/// Whether a type is a nullable `Task` slot.
 fn is_task_slot(ws: &Workspace, bi: &BodyInference, ty: TyId) -> bool {
     let (id, TypeExpr::Nullable(inner)) = head_ty(ws, bi, ty) else {
         return false;

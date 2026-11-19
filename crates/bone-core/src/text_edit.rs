@@ -37,11 +37,9 @@ impl TextEditDelta {
     /// Move a span that [`moves`](Self::moves) by the byte and line deltas.
     /// Returns whether it moved.
     ///
-    /// `col_range` is deliberately kept. Incremental edits are confined to one
-    /// body, and every kept node after it belongs to a later top-level item,
-    /// which starts on a later physical line (items are newline-separated), so
-    /// its column is unchanged even when the edit changed the length of a line.
-    /// Arithmetic saturates: a stale span must not wrap to a huge offset.
+    /// `col_range` is kept: an edit is confined to one body and every kept node
+    /// after it starts on a later line. Arithmetic saturates so a stale span
+    /// cannot wrap.
     pub fn shift_span(&self, span: &mut Span) -> bool {
         if !self.moves(span) {
             return false;

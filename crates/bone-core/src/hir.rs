@@ -185,7 +185,6 @@ pub struct Body {
     pub lowered_tys: Arena<TypeExpr>,
     pub lowered_ty_spans: ArenaMap<Idx<TypeExpr>, Span>,
 
-    // TODO: make this IdxMap instead and A/B benchmark?
     pub arg_names: FxHashMap<Idx<Expr>, Ustr>,
     pub method_call_recvs: FxHashSet<Idx<Expr>>,
     /// Targets shared by several control-flow edges; branch-local narrowing
@@ -487,7 +486,6 @@ impl Module {
     }
 
     pub fn insert_body(&mut self, owner: BodyOwner, mut body: Body) {
-        // Bodies survive until emission; discard arena growth slack.
         body.shrink_to_fit();
         self.bodies.insert(owner, body);
     }
@@ -961,9 +959,8 @@ pub fn overloadable_operator_symbols() -> String {
 
 #[derive(Clone, Debug)]
 pub enum Statement {
-    /// `let pattern = value [else { .. }]`. Without `else` the pattern must
-    /// be irrefutable (checked in bone-inference); with `else` the block runs
-    /// on a miss and must diverge.
+    /// `let pattern = value [else { .. }]`. Without `else` the pattern must be
+    /// irrefutable; the `else` block runs on a miss and must diverge.
     Let {
         pattern: Idx<Pattern>,
         value: Idx<Expr>,

@@ -23,7 +23,6 @@ pub enum HirChild {
 }
 
 impl Body {
-    /// Calls `f` on each direct child of `node`.
     pub fn for_each_child(&self, node: HirChild, mut f: impl FnMut(HirChild)) {
         let _ = self.try_for_each_child(node, |c| -> Result<(), Infallible> {
             f(c);
@@ -31,7 +30,6 @@ impl Body {
         });
     }
 
-    /// Calls `f` on each direct child of `node`, stopping at the first error.
     pub fn try_for_each_child<E>(
         &self,
         node: HirChild,
@@ -44,8 +42,8 @@ impl Body {
         }
     }
 
-    /// Calls `f` on every descendant of `node`, depth-first, parents before
-    /// children. `f` returns whether to descend into the node it was given.
+    /// Depth-first, parents before children; `f` returns whether to descend
+    /// into its node.
     pub fn walk_descendants(&self, node: HirChild, f: &mut impl FnMut(HirChild) -> bool) {
         self.for_each_child(node, |child| {
             if f(child) {
@@ -54,7 +52,6 @@ impl Body {
         });
     }
 
-    /// Calls `f` on each direct child of `e`, stopping at the first error.
     fn try_for_each_expr_child<E>(
         &self,
         e: Idx<Expr>,
@@ -213,7 +210,6 @@ impl Body {
         Ok(())
     }
 
-    /// Calls `f` on each direct child of `s`, stopping at the first error.
     fn try_for_each_statement_child<E>(
         &self,
         s: Idx<Statement>,
@@ -252,7 +248,6 @@ impl Body {
         Ok(())
     }
 
-    /// Calls `f` on each direct child of `p`, stopping at the first error.
     fn try_for_each_pattern_child<E>(
         &self,
         p: Idx<Pattern>,

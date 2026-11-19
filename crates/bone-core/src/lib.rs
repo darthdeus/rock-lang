@@ -1,10 +1,5 @@
-//! bone-core: the foundation layer of the bone typechecker.
-//!
-//! Pure data and storage with no dependency on lowering or the inference
-//! algorithm: the HIR data types, the id types (`ModuleId`/`StructId`/...), the
-//! `comp_error!`/`unify_fail!` macros, small utilities, and the parallelism
-//! shim, plus `Workspace` and the inference result types. `lower` and
-//! `inference` both build on this.
+//! The bone typechecker's data layer: HIR, ids, `Workspace` and inference
+//! results, with no dependency on lowering or the inference algorithm.
 
 #[macro_use]
 pub mod prelude;

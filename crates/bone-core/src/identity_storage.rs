@@ -497,9 +497,8 @@ pub(crate) const UNPACKAGED_PROGRAMS: &str = "unpackaged programs";
 /// The census label for stdlib files.
 pub(crate) const STDLIB_PACKAGE: &str = "std";
 
-/// Programs embedded in Rust tests that declare a package of their own. They
-/// belong to [`UNPACKAGED_PROGRAMS`] until S8 rewrites them; the census does
-/// not count them.
+/// Programs embedded in Rust tests that declare a package of their own; the
+/// census does not count them.
 pub(crate) const RUST_EMBEDDED_PACKAGES: &[&str] = &[
     "enum_json_v1",
     "legacyapp",

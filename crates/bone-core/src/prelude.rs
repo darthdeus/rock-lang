@@ -128,10 +128,8 @@ pub struct NewtypeDef {
     pub wrapped: TyId,
 }
 
-// ---------------------------------------------------------------------------
-// Parallelism shim. `sequential` cargo feature swaps rayon's
-// `par_iter`/`into_par_iter`/`collect_vec_list` onto std iterators for a clean
-// single-threaded sampling profile; call sites stay unchanged.
+// The `sequential` feature swaps rayon onto std iterators for single-threaded
+// profiling.
 #[cfg(not(feature = "sequential"))]
 pub use rayon::iter::{
     IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,

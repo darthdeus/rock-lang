@@ -202,9 +202,8 @@ fn row_edge_literals(ws: &Workspace, body: &Body, bi: &BodyInference) -> FxHashS
     rows
 }
 
-/// Every position in one function body that stores an identity struct: the
-/// S0b body check. `bi` is the body's inference; types it left unresolved are
-/// not reported.
+/// Every position in one function body that stores an identity struct. Types
+/// `bi` left unresolved are not reported.
 pub fn identity_body_sites(
     ws: &Workspace,
     function: &Function,

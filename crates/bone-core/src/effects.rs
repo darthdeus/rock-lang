@@ -2,22 +2,17 @@
 //! callee may write, so an optimization that holds a fact about a place can
 //! keep it across calls that provably leave the place alone.
 //!
-//! The effect is a conservative upper bound over the callee and everything
-//! it can reach. A Rock body contributes what it writes itself (a field
-//! assignment names its field; an index assignment writes an element; a
-//! global assignment writes a global) joined with the effects of every call
-//! it makes. Anything whose body cannot be read -- an `inline(lua)`, `extern`
-//! or `operator(lua)` body, a call through a function value, a yield (the
-//! resumer runs), a call the inference left unresolved -- writes everything,
-//! with reviewed exceptions for opaque bodies marked `@pure` or `@nowrite`.
-//! A `for` statement
-//! joins the protocol functions it desugars to.
+//! The effect is a conservative upper bound over the callee and everything it
+//! can reach: a Rock body's own field, element and global writes joined with
+//! the effects of its calls. Anything whose body cannot be read (`inline(lua)`,
+//! `extern`, `operator(lua)`, a call through a function value, a yield, an
+//! unresolved call) writes everything, except opaque bodies marked `@pure` or
+//! `@nowrite`. A `for` statement joins the protocol functions it desugars to.
 //!
 //! `@pure` is otherwise not consulted: a `@pure` Rock body is simply walked
 //! and found to write nothing on its own (see `docs/purity.md`).
 //!
-//! The table is the least fixpoint of a monotone system over the call graph
-//! (a cycle of bodies that write nothing writes nothing), computed once per
+//! The table is the least fixpoint over the call graph, computed once per
 //! workspace and dropped whenever a module's inference is replaced.
 
 use crate::hir::{
@@ -120,7 +115,6 @@ impl EffectTable {
                     .filter(|_| f.param_decls.iter().any(|p| is_fn_typed(ws, p.ty)))
             })
             .collect();
-        // Pass one: each body's own writes and its resolved callees.
         let mut local: Vec<Vec<(MemEffect, Vec<(ModuleId, Idx<Function>)>)>> =
             Vec::with_capacity(ws.modules.len());
         for module in &ws.modules {
@@ -137,7 +131,6 @@ impl EffectTable {
             }
             local.push(fns);
         }
-        // Pass two: close over the call graph.
         let mut table: Vec<Vec<MemEffect>> = local
             .iter()
             .map(|fns| fns.iter().map(|(own, _)| own.clone()).collect())
@@ -197,13 +190,10 @@ fn opaque_effect(f: &Function, callback_libraries: &FxHashSet<Ustr>) -> Option<M
             }
         });
     }
-    // `@nowrite`: the body stores to no table field, element or global the
-    // program can reach, including NativeBuffer storage (IO, allocation and
-    // raising are fine).
-    // `@writes_elems`: it stores only into elements of containers it is
-    // handed. Both are promises about raw target code that nothing but
-    // review can check, exactly like the body itself; `@pure` on an opaque
-    // body is the same promise and more.
+    // `@nowrite`: the body stores to no table field, element, global or
+    // NativeBuffer the program can reach. `@writes_elems`: it stores only into
+    // elements of containers it is handed. Like `@pure` on an opaque body, both
+    // are unchecked promises about raw target code.
     let has = |name: &str| f.annotations.iter().any(|a| a.is_builtin(name));
     if has("pure") || has("nowrite") {
         return Some(MemEffect::none());
@@ -346,9 +336,8 @@ fn equality_operand_may_call_metamethod(
     )
 }
 
-/// A Rock body's own writes and the callees it reaches. Lambda bodies are
-/// walked with the rest: a lambda that writes makes its creator write,
-/// which is conservative.
+/// A Rock body's own writes and the callees it reaches. A lambda's writes count
+/// as its creator's.
 fn body_effect(
     ws: &Workspace,
     body: &crate::hir::Body,

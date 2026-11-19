@@ -1,12 +1,9 @@
-//! Compilation storage + inference RESULT data (no algorithm).
-//! `Workspace` is the shared store both lowering and inference build on;
-//! the result structs are pure data the inference algorithm populates.
+//! Compilation storage shared by lowering and inference, plus the inference result data.
 
 use crate::hir::*;
 use crate::prelude::*;
 
-/// Record [`Workspace::module_timings`]; set by a host that reports source
-/// costs, off otherwise so a compile pays nothing.
+/// Record [`Workspace::module_timings`]; off unless a host reports source costs.
 pub static MODULE_TIMINGS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -32,14 +29,12 @@ pub struct Workspace {
     pub has_embed_fields: bool,
     pub enums_by_name: FxHashMap<Ustr, EnumId>,
     pub newtypes_by_name: FxHashMap<Ustr, NewtypeId>,
-    /// Generic parameters collected before cross-module type lowering.
     /// Keys are canonical DefKeys for user items and bare names for compiler-owned items.
     /// The first defining module owns an entry; re-lowering refreshes its own.
     pub type_generics: FxHashMap<Ustr, TypeGenerics>,
     pub interface_names: FxHashSet<Ustr>,
     pub globals_by_name: FxHashMap<Ustr, TyId>,
-    /// Names of `const` globals (read-only). A whole-global assignment to one of
-    /// these is rejected in inference; mutable `global`s are absent.
+    /// Names of `const` globals; a whole-global assignment to one is rejected.
     pub const_globals: FxHashSet<Ustr>,
 
     pub functions_by_name: FxHashMap<Ustr, FnList>,
@@ -47,10 +42,8 @@ pub struct Workspace {
     /// replacing a function signature in place.
     pub param_signatures: Vec<ArenaMap<Idx<Function>, Ustr>>,
 
-    /// Workspace-wide `deco` declaration names, collected from the ASTs in
-    /// `lower_modules` BEFORE lowering (like `type_generics`) so
-    /// annotation validation can accept `@<deco>` cross-module. Insert-only:
-    /// the incremental single-module re-lower augments rather than wipes.
+    /// Workspace-wide `deco` names, collected before lowering so annotations accept `@<deco>`
+    /// cross-module. Insert-only.
     pub decorator_names: FxHashSet<Ustr>,
 
     pub phase_timings: Vec<(&'static str, Duration)>,
@@ -79,9 +72,8 @@ pub struct Workspace {
     /// Host inputs stamped after checking for expansion during code generation.
     pub comptime_inputs: ComptimeInputs,
 
-    /// Enforce identity storage in files outside any package instead of
-    /// counting them as unmigrated unpackaged programs. The bone fixture
-    /// harness sets it: its programs are the rule's fixtures.
+    /// Enforce identity storage in files outside any package instead of counting them as unmigrated
+    /// unpackaged programs.
     pub identity_storage_enforce_unpackaged: bool,
 
     /// Skip recording scope probes and navigation spans when no session retains HIR.
@@ -98,17 +90,13 @@ pub struct ComptimeInputs {
     /// Retained with the values so watcher seeding and rollback use the same snapshot.
     pub source_fingerprint_files: FxHashMap<Ustr, u64>,
     pub vars: FxHashMap<Ustr, ComptimeVarValue>,
-    /// Declared metadata whose value is intentionally outside executable
-    /// Artifact identity (for example a presentation build clock). The
-    /// compiler validates every name before excluding its value hash.
+    /// Declared metadata whose value stays out of artifact identity; each name is validated before
+    /// its value hash is excluded.
     pub volatile_vars: FxHashSet<Ustr>,
-    /// Effective declared build channel for package metadata. Empty means a
-    /// synthetic/type-only workspace did not come through CLI resolution.
+    /// Declared build channel for package metadata; empty in synthetic workspaces.
     pub channel: String,
-    /// FALLBACK root for `embed_string(path)`, used only when the calling
-    /// module has no file on disk to resolve from (a synthetic module).
-    /// Normally the path resolves against the nearest stick.toml at or above
-    /// the CALLING file. None and no calling file = every embed rejects.
+    /// Fallback root for `embed_string(path)` when the calling module has no file on disk;
+    /// otherwise the path resolves against the nearest stick.toml above the calling file.
     pub embed_root: Option<std::path::PathBuf>,
     /// Where `embed_string` reads from: the filesystem natively, or the
     /// files a host without one supplied.
@@ -128,9 +116,8 @@ pub struct SourceFingerprint {
 #[derive(Clone, Debug)]
 pub struct ComptimeVarValue {
     pub value: String,
-    /// Metadata hygiene, not confidentiality: hashed
-    /// into cache keys, ALLOWED in the compiled program payload, and kept out
-    /// of logs, diagnostics, manifests and cache metadata.
+    /// Hashed into cache keys and allowed in the program payload, but kept out of logs,
+    /// diagnostics, manifests and cache metadata.
     pub secret: bool,
 }
 
@@ -373,9 +360,7 @@ impl Workspace {
         id
     }
 
-    /// [`Self::insert_module`] for every module of a pass at once: the
-    /// modules land first, then their parameter signatures render side by
-    /// side, since rendering reads only the workspace.
+    /// [`Self::insert_module`] for every module of a pass at once.
     pub fn insert_modules(&mut self, modules: impl IntoIterator<Item = Module>) -> Vec<ModuleId> {
         let mut modules = modules.into_iter();
         let mut ids: Vec<ModuleId> = Vec::with_capacity(modules.size_hint().0);
@@ -390,8 +375,6 @@ impl Workspace {
                     self.modules.len(),
                     "insert_modules: non-sequential module id leaves a gap"
                 );
-                // Modules are large; growing one push at a time copies every
-                // module already placed at each doubling.
                 if self.modules.len() == self.modules.capacity() {
                     self.modules.reserve(1 + modules.size_hint().0);
                 }
@@ -452,23 +435,19 @@ impl Workspace {
         self.module(ModuleId::builtin())
     }
 
-    // Evicting the synthetic module at index zero would dangle builtin type IDs.
-
-    /// Whether eviction must keep `mid`: only the builtin module.
+    /// Whether eviction must keep `mid`: only the builtin module, whose types builtin IDs point
+    /// into.
     pub fn is_permanent_module(mid: ModuleId) -> bool {
         mid.is_builtin()
     }
 
-    /// Every module compiled from source (user, stdlib and warm modules
-    /// alike), in id order: all modules but the builtin one.
+    /// Every module compiled from source, in id order: all but the builtin one.
     pub fn source_modules(&self) -> impl Iterator<Item = &Module> {
         self.modules.iter().filter(|m| !m.id.is_builtin())
     }
 
-    /// The source modules outside `warm` (a session's warm stdlib set; an
-    /// empty set selects every source module). The user code an editor
-    /// session owns, re-lowers and lints. Warm modules carry real paths, so
-    /// `warm`, not the file id, is what tells them apart.
+    /// The source modules outside a session's `warm` stdlib set; an empty set selects every source
+    /// module.
     pub fn user_modules<'a>(
         &'a self,
         warm: &'a FxHashSet<ModuleId>,
@@ -662,24 +641,20 @@ impl Substitutions {
     }
 }
 
-/// How a bounded generic's `next` resolves at one instantiation site. Built at
-/// mono roots (a `for` over a concrete chain type, or a call of a bounded fn)
-/// during conformance checking; skull's inliner consumes it to substitute the
-/// placeholder bound-calls inside the spliced callee body.
+/// How a bounded generic's `next` resolves at one instantiation site, for skull's inliner to
+/// substitute the placeholder bound-calls in the spliced callee.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BoundNext {
-    /// Concrete instantiation: the resolved `next` overload, plus the tree for
-    /// ITS bounded generics (chains nest: `next(MapIter<VecIter<..>, ..>)`
-    /// resolves to MapIter's `next`, whose inner bound resolves to VecIter's).
+    /// The resolved `next` overload plus the tree for its own bounded generics, since iterator
+    /// chains nest.
     Concrete {
         func: (ModuleId, Idx<Function>),
         sub: BoundTree,
         /// Synthetic calls have no expression key in `call_generic_bindings`.
         next_generics: FxHashMap<VarId, TyId>,
     },
-    /// The instantiation was the ENCLOSING fn's own bounded generic (bound
-    /// propagation): resolves via the caller's placeholder for that generic
-    /// index when the caller is itself inlined at a concrete root.
+    /// The enclosing function's own bounded generic, resolved through the caller's placeholder when
+    /// the caller is inlined at a concrete root.
     CallerGeneric(usize),
 }
 
@@ -728,30 +703,20 @@ pub struct BodyInference {
     pub call_generic_bindings: FxHashMap<Idx<Expr>, Vec<TyId>>,
     /// Iterator protocol witnesses, keyed by the loop's iter expression.
     pub for_iter_protocol: FxHashMap<Idx<Expr>, ForIterInfo>,
-    /// In a body with `I: Iterator<E>` bounds: `next(x)` calls where `x: I`.
-    /// Keyed by the call expr; value = the generic's index into the enclosing
-    /// fn's `generics`. skull lowers these as placeholder callees resolved at
-    /// inline time.
+    /// `next(x)` calls where `x: I` for a bound `I: Iterator<E>`, mapped to the generic's index in
+    /// the enclosing function. Skull lowers them as placeholder callees resolved at inline time.
     pub bound_calls: FxHashMap<Idx<Expr>, usize>,
-    /// Same, for `iter(x)` where `x: I` -- identity (types as `I`, lowers to
-    /// the argument itself, no call).
+    /// `iter(x)` where `x: I`: identity, lowered to the argument itself.
     pub bound_identity_calls: FxHashSet<Idx<Expr>>,
-    /// Method-syntax calls (`recv.f(..)`, `recv?.f(..)`) that go through the
-    /// receiver's fn-typed field `f` instead of a function, keyed by the call
-    /// expr. skull lowers exactly these as indirect calls through the field.
+    /// Method-syntax calls through the receiver's fn-typed field `f` rather than a function.
     pub fn_field_calls: FxHashMap<Idx<Expr>, Ustr>,
-    /// The resolved function type of each call above. Skull uses this same
-    /// type-derived ABI plan as other function-value calls; the return type
-    /// alone cannot describe flattened arguments or opaque boundaries.
+    /// The resolved function type of each call above, for skull's function-value call ABI.
     pub fn_field_call_types: FxHashMap<Idx<Expr>, TyId>,
-    /// Calls of bounded fns: the conformance-resolution tree built at the call
-    /// site, keyed by the call expr. Tells skull how to substitute the
-    /// placeholder bound-calls inside that callee when it is inlined here.
+    /// Calls of bounded functions: the conformance tree used when the callee is inlined at the
+    /// call.
     pub bound_call_trees: FxHashMap<Idx<Expr>, BoundTree>,
-    /// Args (incl. UFCS receivers) implicitly coerced iterable->iterator at an
-    /// `Iterator`-bounded param: arg expr -> the resolved `iter` witness. skull
-    /// wraps the lowered arg value in this call (the call-argument analog of
-    /// `for_iter_protocol`'s `iter`).
+    /// Arguments implicitly coerced from iterable to iterator at an `Iterator`-bounded parameter,
+    /// with the resolved `iter` witness skull wraps them in.
     pub implicit_iter_args: FxHashMap<Idx<Expr>, IterWitness>,
     /// Inferred variables for the declared generics in a struct default body.
     pub struct_default_generic_slots: Vec<TyId>,
@@ -763,9 +728,8 @@ pub struct BodyInference {
 
     pub trail: Vec<(VarId, Option<TyId>)>,
 
-    /// Every coercion `coerce` accepted into an `any` target: the span and the
-    /// source type. A trial's rollback drops the ones it recorded. The
-    /// identity-storage body check reads them.
+    /// Every coercion accepted into an `any` target, with its source type; read by the
+    /// identity-storage body check.
     pub any_erasures: Vec<(Span, TyId)>,
 
     pub deps: FxHashSet<Ustr>,
@@ -780,8 +744,7 @@ pub struct BodyCheckpoint {
 }
 
 impl BodyInference {
-    /// Release the spare capacity inference left in the tables a stored
-    /// result keeps until the program is emitted.
+    /// Release spare capacity in tables a stored result keeps until emission.
     pub fn shrink_to_fit(&mut self) {
         self.expr_types.shrink_to_fit();
         self.record_pattern_types.shrink_to_fit();
@@ -845,9 +808,8 @@ impl BodyInference {
         self.any_erasures.truncate(cp.any_erasures);
     }
 
-    /// [`Self::rollback_to`], also dropping every type allocated since `cp`.
-    /// Only for a caller that knows nothing it recorded since `cp` outside the
-    /// substitution trail still names one of those types.
+    /// [`Self::rollback_to`], also dropping every type allocated since `cp`. Only sound when
+    /// nothing outside the substitution trail still names one of those types.
     pub fn discard_since(&mut self, cp: BodyCheckpoint) {
         self.rollback_to(cp);
         self.ty_arena.truncate(cp.types);

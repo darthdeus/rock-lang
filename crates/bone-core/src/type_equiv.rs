@@ -1,9 +1,7 @@
 //! Semantic type equivalence over the HIR type arenas.
 //!
-//! [`Workspace::render`] is presentation: distinct types can render the same
-//! (two declarations' generic `T`, or a generic `T` and a nominal `T`). Code
-//! that asks "are these the same type?" goes through
-//! [`Workspace::types_equivalent`] instead.
+//! [`Workspace::render`] is presentation: distinct types can render the same,
+//! so equality questions go through [`Workspace::types_equivalent`].
 
 use crate::hir::*;
 use crate::prelude::*;
@@ -46,11 +44,6 @@ enum Arena {
 
 impl Workspace {
     /// Whether `a` and `b` denote the same type.
-    ///
-    /// The comparison is structural over every arena, so the same type built
-    /// in two modules' arenas (or in a module arena and a body arena) is
-    /// equivalent; the module or file a `TyId` lives in is not part of the
-    /// type's identity.
     ///
     /// - Builtins compare by kind.
     /// - Nominal types compare by name and then argument-wise. The name is the

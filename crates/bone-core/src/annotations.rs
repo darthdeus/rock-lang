@@ -1,12 +1,7 @@
-//! Annotation registry + validation.
-//!
-//! One table decides which annotation names are legal at which declaration
-//! positions and what arguments they take. Fail closed: a position with no
-//! registered names rejects every annotation, and unknown names reject
-//! everywhere -- the compiler refuses what it does not understand instead
-//! of silently ignoring it. Names backed by a user `deco` declaration are
-//! legal on fns; their args are the deco's own params, checked at
-//! decorator application, not here.
+//! Annotation registry and validation. Fail closed: a position with no
+//! registered names rejects every annotation and unknown names reject
+//! everywhere. Names backed by a user `deco` are legal on functions; their
+//! arguments are checked at decorator application.
 
 use crate::hir::{AnnoValue, Annotation};
 use crate::prelude::*;
@@ -262,13 +257,9 @@ fn validate_decorator_args(anno: &Annotation) -> Result<(), CompilerError> {
     Ok(())
 }
 
-/// `@repr(opaque)` waives a rule that exists ONLY for bodies the compiler
-/// cannot see into, so on a Rock body there is no assumption to waive and the
-/// annotation would be a claim nothing consults. Rejected there rather than
-/// ignored -- a reader must not be able to believe a contract is in force.
-///
-/// Separate from [`validate_annotations`] because it needs the enclosing fn,
-/// which the registry table deliberately does not see.
+/// `@repr(opaque)` waives a rule that exists only for bodies the compiler
+/// cannot see into, so on a Rock body it is rejected rather than left as a
+/// contract nothing consults.
 pub fn validate_param_repr_against_body(
     fn_name: Ustr,
     param_decls: &[crate::hir::ParamDecl],
