@@ -33,7 +33,6 @@
 //! //   | int
 //! ```
 
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// Hang backstop for a test that waits on an event, a condition or a child.
@@ -45,38 +44,37 @@ pub const HANG_BACKSTOP: Duration = Duration::from_secs(300);
 
 pub fn extract_annotations(text: &str) -> Vec<((usize, usize), String)> {
     let mut res: Vec<((usize, usize), String)> = Vec::new();
-    let mut line_start_map: BTreeMap<usize, usize> = BTreeMap::new();
-    let mut line_start: usize = 0;
-    let mut prev_line_annotations: Vec<(usize, usize)> = Vec::new();
+    let mut targets = Vec::new();
+    let mut line_start = 0;
+    let mut previous_annotations = Vec::<(usize, usize)>::new();
+    let mut line_annotations = Vec::new();
 
     for line in text.split_inclusive('\n') {
-        let mut this_line_annotations: Vec<(usize, usize)> = Vec::new();
+        line_annotations.clear();
         let split = line
             .split_once("//")
             .filter(|(_, suffix)| !suffix.trim_start().starts_with("//"));
         let line_length = if let Some((prefix, suffix)) = split {
             let annotation_offset = prefix.len() + "//".len();
-            for ann in extract_line_annotations(suffix.trim_end_matches('\n')) {
-                match ann {
-                    LineAnnotation::Annotation { range, content } => {
-                        let abs = (range.0 + annotation_offset, range.1 + annotation_offset);
-                        this_line_annotations.push((abs.1, res.len()));
-                        let (_, &target_line_start) = line_start_map
-                            .range(abs.1..)
-                            .next()
-                            .expect("annotation refers to a line not yet seen");
-                        let abs = (abs.0 + target_line_start, abs.1 + target_line_start);
-                        res.push((abs, content));
-                    }
-                    LineAnnotation::Continuation { offset, content } => {
-                        let offset = offset + annotation_offset;
-                        let &(_, idx) = prev_line_annotations
-                            .iter()
-                            .find(|&&(off, _)| off == offset)
-                            .expect("continuation has no preceding annotation");
-                        res[idx].1.push('\n');
-                        res[idx].1.push_str(&content);
-                    }
+            let suffix = suffix.trim_end_matches('\n');
+            let marker = if suffix.contains('^') { '^' } else { '|' };
+            for ((start, end), content) in annotations_on_line(suffix, marker) {
+                let end = end + annotation_offset;
+                if marker == '|' {
+                    let &(_, idx) = previous_annotations
+                        .iter()
+                        .find(|&&(column, _)| column == end)
+                        .expect("continuation has no preceding annotation");
+                    res[idx].1.push('\n');
+                    res[idx].1.push_str(content);
+                } else {
+                    let target = targets.partition_point(|&(length, _)| length >= end);
+                    let &(_, target_start) = targets[..target]
+                        .last()
+                        .expect("annotation refers to a line not yet seen");
+                    let range = (start + annotation_offset + target_start, end + target_start);
+                    line_annotations.push((end, res.len()));
+                    res.push((range, content.to_owned()));
                 }
             }
             annotation_offset
@@ -84,79 +82,47 @@ pub fn extract_annotations(text: &str) -> Vec<((usize, usize), String)> {
             line.len()
         };
 
-        line_start_map = line_start_map.split_off(&line_length);
-        line_start_map.insert(line_length, line_start);
-        line_start += line.len();
-        prev_line_annotations = this_line_annotations;
-    }
-
-    res
-}
-
-enum LineAnnotation {
-    Annotation {
-        range: (usize, usize),
-        content: String,
-    },
-    Continuation {
-        offset: usize,
-        content: String,
-    },
-}
-
-fn extract_line_annotations(mut line: &str) -> Vec<LineAnnotation> {
-    let mut res = Vec::new();
-    let mut offset: usize = 0;
-    let marker: fn(char) -> bool = if line.contains('^') {
-        |c| c == '^'
-    } else {
-        |c| c == '|'
-    };
-    while let Some(idx) = line.find(marker) {
-        offset += idx;
-        line = &line[idx..];
-
-        let mut len = line.chars().take_while(|&it| it == '^').count();
-        let mut continuation = false;
-        if len == 0 {
-            assert!(line.starts_with('|'), "expected ^ or |");
-            continuation = true;
-            len = 1;
+        while targets
+            .last()
+            .is_some_and(|&(length, _)| length <= line_length)
+        {
+            targets.pop();
         }
-        let range = (offset, offset + len);
-        let after_caret = &line[len..];
-        let end_marker = after_caret.find('$');
-        let next = after_caret.find(marker).map_or(line.len(), |it| it + len);
-
-        let cond = |end_marker: usize| {
-            end_marker < next
-                && (after_caret[end_marker + 1..].is_empty()
-                    || after_caret[end_marker + 1..]
-                        .strip_prefix(|c: char| c.is_whitespace() || c == '^')
-                        .is_some())
-        };
-        let content = match end_marker {
-            Some(em) if cond(em) => &after_caret[..em],
-            _ => after_caret[..next - len].trim_end(),
-        };
-
-        let content = content.trim_start().to_owned();
-
-        let annotation = if continuation {
-            LineAnnotation::Continuation {
-                offset: range.1,
-                content,
-            }
-        } else {
-            LineAnnotation::Annotation { range, content }
-        };
-        res.push(annotation);
-
-        line = &line[next..];
-        offset += next;
+        targets.push((line_length, line_start));
+        line_start += line.len();
+        std::mem::swap(&mut previous_annotations, &mut line_annotations);
     }
 
     res
+}
+
+fn annotations_on_line(
+    mut line: &str,
+    marker: char,
+) -> impl Iterator<Item = ((usize, usize), &str)> {
+    let mut offset = 0;
+    std::iter::from_fn(move || {
+        let idx = line.find(marker)?;
+        let start = offset + idx;
+        line = &line[idx..];
+        let len = line.bytes().take_while(|&byte| byte == b'^').count().max(1);
+        let rest = &line[len..];
+        let next = rest.find(marker).map_or(line.len(), |idx| idx + len);
+        let terminates = |end: usize| {
+            end < next
+                && rest[end + 1..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| c.is_whitespace() || c == '^')
+        };
+        let content = match rest.find('$').filter(|&end| terminates(end)) {
+            Some(end) => &rest[..end],
+            None => rest[..next - len].trim_end(),
+        };
+        line = &line[next..];
+        offset = start + next;
+        Some(((start, start + len), content.trim_start()))
+    })
 }
 
 #[derive(Debug)]
@@ -166,30 +132,32 @@ pub struct Section<'a> {
 }
 
 pub fn parse_sections(src: &str) -> Vec<Section<'_>> {
-    let mut out = Vec::new();
-    let mut current: Option<(&str, usize)> = None;
-    let mut cursor = 0;
+    fixture_sections(src, |line| line.trim_end().strip_prefix("//- "))
+        .map(|(name, content)| Section { name, content })
+        .collect()
+}
 
-    for line in src.split_inclusive('\n') {
-        let line_end = cursor + line.len();
-        if let Some(name) = line.trim_end().strip_prefix("//- ") {
-            if let Some((prev_name, prev_start)) = current.take() {
-                out.push(Section {
-                    name: prev_name,
-                    content: &src[prev_start..cursor],
-                });
+fn fixture_sections<'a>(
+    src: &'a str,
+    parse_header: impl Fn(&'a str) -> Option<&'a str> + 'a,
+) -> impl Iterator<Item = (&'a str, &'a str)> + 'a {
+    let mut lines = src.split_inclusive('\n');
+    let mut offset = 0;
+    let mut current = None;
+    std::iter::from_fn(move || {
+        for line in lines.by_ref() {
+            let start = offset;
+            offset += line.len();
+            let Some(header) = parse_header(line) else {
+                continue;
+            };
+            if let Some((previous, body_start)) = current.replace((header, offset)) {
+                return Some((previous, &src[body_start..start]));
             }
-            current = Some((name, line_end));
         }
-        cursor = line_end;
-    }
-    if let Some((name, start)) = current {
-        out.push(Section {
-            name,
-            content: &src[start..],
-        });
-    }
-    out
+        let (header, body_start) = current.take()?;
+        Some((header, &src[body_start..]))
+    })
 }
 
 #[cfg(test)]
@@ -245,6 +213,28 @@ world more
     fn sections_none_returns_empty() {
         let src = "fn f() {}\n";
         assert!(parse_sections(src).is_empty());
+    }
+
+    #[test]
+    fn embedded_files_borrow_lf_and_normalize_crlf() {
+        let body = concat!(
+            "ignored\r\n",
+            "  //-- app.rock @pkg=old,7 @v1 @pkg=app,9\r\n",
+            "let x = 1;\r\n",
+            "//^ int\r\n",
+            "//--\n",
+            "last\n\n",
+        );
+        let files = parse_embedded_files(body);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].file, "app.rock");
+        assert_eq!(files[0].package, Some(("app", 9)));
+        assert_eq!(files[0].src, "let x = 1;\n//^ int");
+        assert_eq!(files[1].file, "file.rock");
+        assert_eq!(files[1].package, None);
+        assert_eq!(files[1].src, "last\n");
+        let (_, lf_source) = body.split_once("//--\n").unwrap();
+        assert_eq!(files[1].src.as_ptr(), lf_source.as_ptr());
     }
 
     #[test]
@@ -369,56 +359,34 @@ pub struct EmbeddedFile<'a> {
     pub src: &'a str,
 }
 
-/// An open embedded file: name, package, marker line index.
-type OpenFile<'a> = (&'a str, Option<(&'a str, u32)>, usize);
-
 /// Split a fixture section body into embedded files. Lines `//-- <name>
 /// [@pkg=<self_name>,<id>] [@v1]` start a file; everything until the next
-/// marker is that file's source.
+/// marker is that file's source. Embedded source normalizes CRLF to LF
+/// and omits the final line ending.
 pub fn parse_embedded_files(body: &str) -> Vec<EmbeddedFile<'_>> {
-    let mut files: Vec<EmbeddedFile> = Vec::new();
-    let mut current: Option<OpenFile> = None;
-    for (idx, line) in body.lines().enumerate() {
-        if let Some(rest) = line.trim_start().strip_prefix("//--") {
-            if let Some(prev) = current.take() {
-                let src = body
-                    .lines()
-                    .skip(prev.2 + 1)
-                    .take(idx - prev.2 - 1)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                files.push(EmbeddedFile {
-                    file: prev.0,
-                    package: prev.1,
-                    src: Box::leak(src.into_boxed_str()),
-                });
-            }
-            let mut it = rest.split_whitespace();
-            let file = it.next().unwrap_or("file.rock");
-            let mut package = None;
-            for token in it {
-                if let Some(spec) = token.strip_prefix("@pkg=") {
+    fixture_sections(body, |line| line.trim_start().strip_prefix("//--"))
+        .map(|(header, src)| {
+            let mut tokens = header.split_whitespace();
+            let file = tokens.next().unwrap_or("file.rock");
+            let package = tokens
+                .rev()
+                .find_map(|token| token.strip_prefix("@pkg="))
+                .map(|spec| {
                     let mut parts = spec.split(',');
-                    let name: &str = parts.next().unwrap_or("pkg");
-                    let id = parts
-                        .next()
-                        .and_then(|v| v.parse::<u32>().ok())
-                        .unwrap_or(0);
-                    let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
-                    package = Some((leaked, id));
-                }
-            }
-            let leaked_file: &'static str = Box::leak(file.to_string().into_boxed_str());
-            current = Some((leaked_file, package, idx));
-        }
-    }
-    if let Some(prev) = current.take() {
-        let src = body.lines().skip(prev.2 + 1).collect::<Vec<_>>().join("\n");
-        files.push(EmbeddedFile {
-            file: prev.0,
-            package: prev.1,
-            src: Box::leak(src.into_boxed_str()),
-        });
-    }
-    files
+                    let name = parts.next().unwrap_or_default();
+                    let id = parts.next().and_then(|id| id.parse().ok()).unwrap_or(0);
+                    (name, id)
+                });
+            let src = src
+                .strip_suffix("\r\n")
+                .or_else(|| src.strip_suffix('\n'))
+                .unwrap_or(src);
+            let src = if src.contains("\r\n") {
+                Box::leak(src.replace("\r\n", "\n").into_boxed_str())
+            } else {
+                src
+            };
+            EmbeddedFile { file, package, src }
+        })
+        .collect()
 }
