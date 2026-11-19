@@ -2712,9 +2712,7 @@ impl IncrementalProject {
         Self::init_impl(dir, main_path, incremental_path, false, None, |_| Ok(None))
     }
 
-    /// Sim-runner build: same as [`IncrementalProject::init`] but discovery KEEPS
-    /// test-only files -- `@sim` bodies live in `tests/sims/` and must be part
-    /// of the emitted program.
+    #[cfg(test)]
     pub fn init_with_tests(
         dir: &str,
         main_path: &std::path::Path,
@@ -2813,7 +2811,7 @@ impl IncrementalProject {
         self.project.sources()
     }
 
-    /// The `[build.vars]` selection this build stamped into its workspace.
+    #[cfg(test)]
     pub fn comptime_inputs(&self) -> &bone_semantic::inference::ComptimeInputs {
         &self.project.workspace().comptime_inputs
     }
