@@ -1,0 +1,539 @@
+// Purity-driven optimizations: const-fold, CSE, DCE and LICM of @pure calls,
+// the dup-safety verdict that lets an @inline body read an argument several
+// times, and the struct-literal field peephole. A wrong "pure" verdict
+// duplicates, drops or moves an effect, so every case prints what the
+// unoptimized program prints.
+
+@pure
+fn square(x: int) -> int {
+    return x * x
+}
+
+@pure
+fn add(a: int, b: int) -> int { return a + b }
+
+@pure
+fn double(x: int) -> int {
+    return x + x
+}
+
+@pure
+fn my_abs(x: int) -> int {
+    if x < 0 { return -x }
+    return x
+}
+
+value V2 { x: float, y: float }
+
+value Pt { x: int, y: int }
+
+struct Rect { w: int, h: int }
+
+@pure
+fn length_sq(p: V2) -> float {
+    return p.x * p.x + p.y * p.y
+}
+
+@pure fn make_v2(a: float, b: float) -> V2 {
+    return V2 { x: a, y: b }
+}
+
+fn side(label: string) -> int {
+    print(label)
+    return 0
+}
+
+enum Opt { Some(int), None }
+
+@pure
+fn pure_match(o: Opt) -> int {
+    return match o {
+        Some(v) => v,
+        None => 0,
+    }
+}
+
+@pure
+fn pure_recursion(n: int) -> int {
+    if n <= 0 { return 0 }
+    return pure_recursion(n - 1) + n
+}
+
+const SCALE: float = 2.0
+const BASE: int = 10
+
+@pure fn scaled(x: float) -> float {
+    return x * SCALE
+}
+
+@pure fn shifted(x: int) -> int {
+    return x + BASE
+}
+
+// Accepted: a binding match, direct self-recursion and const global reads.
+@test
+fn pure_accepts_side_effect_free_bodies() {
+    assert_eq(pure_match(Opt::Some(42)), 42)
+    assert_eq(pure_match(Opt::None), 0)
+    assert_eq(pure_recursion(5), 15)
+    assert_eq(scaled(3.0), 6.0)
+    assert_eq(shifted(5), 15)
+}
+
+@pure
+fn ptriple(x: int) -> int {
+    return x + x + x
+}
+
+@pure
+fn linear(a: int, b: int, x: int) -> int {
+    return a * x + b
+}
+
+@pure
+fn boolish(a: bool, b: bool) -> bool {
+    return a && b
+}
+
+@pure
+fn neg_int(x: int) -> int {
+    return -x
+}
+
+fn impure_neg(x: int) -> int {
+    return -x
+}
+
+@pure fn mk_pt(a: int, b: int) -> Pt {
+    return Pt { x: a, y: b }
+}
+
+@test(output = "15\n23\n19\ntrue\n49\n3\n7\n-9\n-5\n30")
+fn test_pure_calls_fold() {
+    let a = ptriple(5)
+    print(a)
+    let b = linear(4, 3, 5)
+    print(b)
+    let c = linear(ptriple(2), 1, 3)
+    print(c)
+    let d = boolish(true, true)
+    print(d)
+    let n = 7
+    let e = square(n)
+    print(e)
+    let f = (-3).neg_int()
+    print(f)
+    let g = (3).add(4)
+    print(g)
+    let m = 9
+    let h = m.neg_int()
+    print(h)
+    let i = (5).impure_neg()
+    print(i)
+    let v = mk_pt(10, 20)
+    print(v.x + v.y)
+}
+
+// The folder must floor `./` and `%` like the runtime when one operand is negative.
+@pure fn idiv(a: int, b: int) -> int { return a ./ b }
+@pure fn imod(a: int, b: int) -> int { return a % b }
+
+@test(output = "5\n-4\n-4\n3\n1\n-1\n-1")
+fn test_int_div_mod_match_runtime() {
+    print("{idiv(20, 4)}")
+    print("{idiv(-7, 2)}")
+    print("{idiv(7, -2)}")
+    print("{idiv(-7, -2)}")
+    print("{imod(-7, 2)}")
+    print("{imod(7, -2)}")
+    print("{imod(-7, -2)}")
+}
+
+@test(output = "14\n12\n13\n50\n50\n194")
+fn test_cse() {
+    let x = -7
+    let same = my_abs(x) + my_abs(x)
+    print(same)
+    let a = -5
+    let b = -7
+    print(my_abs(a) + my_abs(b))
+    let m = -3
+    let c = my_abs(m)
+    m = 10
+    let d = my_abs(m)
+    print(c + d)
+    let k = 5
+    let y = 0
+    let e = square(k)
+    y = y + 1
+    let f = square(k)
+    print(e + f)
+    let point = V2 { x: 3.0, y: 4.0 }
+    print((point.length_sq() + point.length_sq()) as int)
+    let p = V2 { x: 3.0, y: 4.0 }
+    let q = V2 { x: 5.0, y: 12.0 }
+    print((p.length_sq() + q.length_sq()) as int)
+}
+
+fn native_buffer_v2(n: int) -> NativeBuffer<V2> {
+    return native_buffer_alloc(n)
+}
+
+fn print_v2s(buf: NativeBuffer<V2>, n: int) {
+    for i in 0..n {
+        let v = buf[i]
+        print("{v.x.floor()} {v.y.floor()}")
+    }
+}
+
+// A multi-line `//` comment between sibling pure-call statements used to
+// reset the CSE table.
+@test(output = "1 1\n2 2\n1 1")
+fn test_cse_across_buffer_writes_and_comments() {
+    let buf = native_buffer_v2(3)
+    buf[0] = make_v2(1.0, 1.0)
+    // multi-line
+    // comment
+    // here
+    buf[1] = make_v2(2.0, 2.0)
+    buf[2] = make_v2(1.0, 1.0)
+    print_v2s(buf, 3)
+}
+
+@inline
+@pure fn make_v2_inline(x: float, y: float) -> V2 {
+    return V2 { x: x, y: y }
+}
+
+@test(output = "1 2\n3 2\n3 4\n3 4\n1 2")
+fn test_cse_inline_pure_buffer_writes() {
+    let buf = native_buffer_v2(5)
+    let a = 1.0
+    let b = 2.0
+    let c = 3.0
+    let d = 4.0
+    buf[0] = make_v2_inline(a, b)
+    buf[1] = make_v2_inline(c, b)
+    buf[2] = make_v2_inline(c, d)
+    buf[3] = make_v2_inline(c, d)
+    buf[4] = make_v2_inline(a, b)
+    print_v2s(buf, 5)
+}
+
+@test(output = "side\nok")
+fn test_dce_drops_discarded_calls_but_keeps_impure_args() {
+    square(5)
+    let _ = square(7)
+    add(side("side"), 2)
+    print("ok")
+}
+
+@debug_impure
+inline(lua) fn trace_int(n: int) = "-- trace {n}"
+
+@debug_impure
+inline(js) fn trace_int(n: int) = "/* trace {n} */"
+
+@pure
+fn noisy_identity(n: int) -> int {
+    trace_int(n)
+    return n
+}
+
+@pure
+fn shout(n: int) -> int {
+    print("shout")
+    return n * 2
+}
+
+@test(output = "7\nshout\n20")
+fn test_debug_impure_demotes_but_compiles() {
+    let x = noisy_identity(7)
+    print(x)
+    let r = shout(10)
+    print(r)
+}
+
+// Demotion must propagate through every layer of a transitive chain and
+// across mutual recursion; otherwise DCE or CSE drops a print.
+@pure fn l5(n: int) -> int { print("leaf5"); return n }
+@pure fn l4(n: int) -> int { return l5(n) }
+@pure fn l3(n: int) -> int { return l4(n) }
+@pure fn l2(n: int) -> int { return l3(n) }
+@pure fn l1(n: int) -> int { return l2(n) }
+
+@pure fn ping(n: int) -> int {
+    if n <= 0 { return 0 }
+    print("ping")
+    return pong(n - 1)
+}
+@pure fn pong(n: int) -> int {
+    if n <= 0 { return 0 }
+    return ping(n - 1)
+}
+
+@pure fn identity_int(n: int) -> int { return n }
+
+@test(output = "leaf5\nok\nleaf5\nleaf5\ndone\nleaf5\nping\nping\nafter")
+fn test_demoted_chain_not_dropped_or_collapsed() {
+    l1(1)
+    print("ok")
+    let a = l1(42)
+    let b = l1(42)
+    print("done")
+    identity_int(l1(99))
+    ping(3)
+    print("after")
+}
+
+@pure
+fn square_plus(x: int) -> int {
+    return x * x + x
+}
+
+@pure fn div_safe(a: int, b: int) -> int {
+    return if b == 0 { 0 } else { a ./ b }
+}
+
+@test(output = "1100 1100 1110 45 25 5 0")
+fn test_licm_hoists_invariant_calls() {
+    let limit = 10
+    let a = 0
+    for i in 0..10 {
+        a = a + square_plus(limit)
+    }
+    let b = 0
+    let i = 0
+    while i < 10 {
+        b = b + square_plus(limit)
+        i = i + 1
+    }
+    let c = 0
+    for i in 0..10 {
+        c = c + add(square_plus(limit), 1)
+    }
+    let x = 0 - 5
+    let d = 0
+    for i in 0..3 {
+        for j in 0..3 {
+            d = d + my_abs(x)
+        }
+    }
+    let point = V2 { x: 3.0, y: 4.0 }
+    let e = 0.0
+    for i in 0..1 {
+        e = e + point.length_sq()
+    }
+    let fa = 2.0
+    let fb = 3.0
+    let f = 0.0
+    for i in 0..1 {
+        let v = make_v2(fa, fb)
+        f = f + v.x + v.y
+    }
+    let g = 0
+    for i in 10..10 {
+        g = g + div_safe(100, limit)
+    }
+    print("{a} {b} {c} {d} {e as int} {f as int} {g}")
+}
+
+global SENT_G: float = 0.0
+
+fn sent_set_g(v: float) {
+    SENT_G = v
+}
+
+@pure
+fn pure_double(x: float) -> float {
+    return x * 2.0
+}
+
+// Variant calls stay in the loop: a loop-var argument, an impure print, an
+// inner shadow of an outer name, an invariant the outer loop reassigns, and a
+// global written by a call each iteration.
+@test(output = "42\n42\n42\n145 24 180 66")
+fn test_licm_keeps_variant_calls() {
+    let limit = 10
+    let a = 0
+    for i in 0..10 {
+        a = a + add(limit, i)
+    }
+    let p = 42
+    for i in 0..3 {
+        print(p)
+    }
+    let x = 10
+    let b = 0
+    for i in 0..4 {
+        let x = 3
+        b = b + double(x)
+    }
+    let y = 0
+    let c = 0
+    for i in 0..3 {
+        y = i * 10
+        for j in 0..3 {
+            c = c + double(y)
+        }
+    }
+    SENT_G = 1.0
+    let total = 0.0
+    for i in 0..3 {
+        sent_set_g(float(i + 10))
+        total = total + pure_double(SENT_G)
+    }
+    print("{a} {b} {c} {total as int}")
+}
+
+@inline
+fn triple(x: int) -> int {
+    return x + x + x
+}
+
+@inline
+fn sum_3(a: float) -> float {
+    return a + a + a
+}
+
+fn abs_like(n: int) -> int {
+    return if n < 0 { 0 - n } else { n }
+}
+
+@pure
+inline(lua) fn lua_abs(n: int) -> int = "if n < 0 then return -n else return n end"
+
+@pure
+inline(js) fn lua_abs(n: int) -> int = "return n < 0 ? -n : n;"
+
+// A body-defined fn calling a @pure opaque fn is verified pure itself.
+fn abs_doubled(n: int) -> int {
+    return lua_abs(n) * 2
+}
+
+@pure
+fn square_plus_one(n: int) -> int {
+    let s = n * n
+    return s + 1
+}
+
+@pure
+fn plus_two(n: int) -> int {
+    return square_plus_one(n) + 2
+}
+
+global G_CONST: int = 10
+
+global G_MUT: int = 7
+
+fn read_global() -> int {
+    return G_MUT
+}
+
+fn fib(n: int) -> int {
+    return if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+
+// Whatever the dup-safety verdict, an @inline triple prints what the
+// out-of-line call would.
+@test(output = "15 15 15 30\n4.5 12 51 57\n30 21 15")
+fn test_dup_safe_arguments() {
+    let a = 3
+    let b = 2
+    print("{triple(abs_like(-5))} {triple(a + b)} {triple(lua_abs(-5))} {triple(abs_doubled(-5))}")
+    let x = -1.5
+    print("{sum_3(abs(x))} {sum_3(floor(4.7))} {sum_3(square_plus_one(4) as float)} {sum_3(plus_two(4) as float)}")
+    print("{triple(G_CONST)} {triple(read_global())} {triple(fib(5))}")
+}
+
+enum Color { Red, Green, Blue }
+
+@inline
+fn pair_eq(c: Color) -> bool {
+    return c == c
+}
+
+@inline
+fn concat_twice(s: string) -> string {
+    return s + s
+}
+
+fn make_greeting(name: string) -> string {
+    return "hello {name}"
+}
+
+fn mk_point(n: int) -> Pt {
+    return Pt { x: n, y: n }
+}
+
+@inline
+fn pt_sum(p: Pt) -> int {
+    return p.x + p.y + p.x
+}
+
+@test(output = "true\nhello bobhello bob\n15")
+fn test_dup_safe_enum_string_and_value_args() {
+    let r = pair_eq(Color::Red)
+    print(r)
+    let s = concat_twice(make_greeting("bob"))
+    print(s)
+    let t = pt_sum(mk_point(5))
+    print(t)
+}
+
+global LOG_COUNT: int = 0
+
+value Summed { x: int, y: int }
+
+fn __op_add(a: Summed, b: Summed) -> Summed {
+    LOG_COUNT = LOG_COUNT + 1
+    return Summed { x: a.x + b.x, y: a.y + b.y }
+}
+
+@inline
+fn sum_twice(p: Summed) -> int {
+    return p.x + p.y + p.x + p.y
+}
+
+// A BinOp over bare idents is not dup-safe when the operator is a
+// side-effecting overload.
+@test(output = "call_count=1 result=12")
+fn test_binop_overload_side_effect() {
+    LOG_COUNT = 0
+    let a = Summed { x: 1, y: 2 }
+    let b = Summed { x: 2, y: 1 }
+    let r = sum_twice(a + b)
+    print("call_count={LOG_COUNT} result={r}")
+}
+
+@pure @nomangle
+inline(lua) fn trusted_abs(x: int) -> int = "return math.abs(x)"
+
+@pure @nomangle
+inline(js) fn trusted_abs(x: int) -> int = "return Math.abs(x);"
+
+@test(output = "10\n14\nafter")
+fn test_pure_opaque_licm_cse_dce() {
+    let sum = 0
+    for i in 0..5 {
+        sum = sum + trusted_abs(0 - 2)
+    }
+    print(sum)
+    let x = 0 - 7
+    print(trusted_abs(x) + trusted_abs(x))
+    trusted_abs(99)
+    print("after")
+}
+
+// The field peephole folds `Lit { .. }.f` only when every sibling init is dup-safe.
+@test(output = "4\n20\n6\nboom\n4\nboom\n3\nboom\n1")
+fn test_struct_lit_field_peephole() {
+    print(Rect { w: 4, h: 5 }.w)
+    print(Rect { w: 4, h: 5 }.w * Rect { w: 4, h: 5 }.h)
+    print(Rect { w: double(3), h: 100 }.w)
+    let a = Rect { w: 4, h: side("boom") }.w
+    print(a)
+    let b = Pt { x: 3, y: side("boom") }.x
+    print(b)
+    print(Pt { x: 1, y: side("boom") }.x)
+}

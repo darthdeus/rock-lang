@@ -20,16 +20,12 @@ newtype SymbolId(int)
 newtype SymbolIds(string)
 
 @test
-fn distinct_fields_and_shared_names_in_separate_structs() {
+fn distinct_and_shared_names_in_separate_owners() {
     let record = MemberControl { x: 2, y: 3.5 }
     let value = ValueMemberControl { x: 5, y: 7 }
     assert_eq(record.x, 2)
     assert_eq(record.y, 3.5)
     assert_eq(value.x + value.y, 12)
-}
-
-@test
-fn distinct_variants_and_shared_names_in_separate_owners() {
     assert(MemberEvents::Tick == MemberEvents::Tick)
     match MemberEvents::Ticks(11) {
         MemberEvents::Ticks(n) => assert_eq(n, 11),
@@ -48,10 +44,6 @@ fn distinct_variants_and_shared_names_in_separate_owners() {
     match OtherMemberEvents::Tick(23) {
         OtherMemberEvents::Tick(n) => assert_eq(n, 23),
     }
-}
-
-@test
-fn distinct_nearby_newtype_names() {
     let id = SymbolId(29)
     let ids = SymbolIds("many")
     assert_eq(id.0, 29)
@@ -63,16 +55,11 @@ co fn worker() -> Coroutine<int> {
     yield 1
 }
 
-@test(output = "42")
-fn a_hook_name_without_a_hook_compiles() {
-    let w = worker()
-    print("{worker_0__on_killed()}")
-}
-
 @nomangle fn bar_0__lambda0() -> int { return 3 }
 fn bar() -> int { return 1 }
 
-@test(output = "3 1")
-fn a_lambda_name_without_a_lambda_compiles() {
-    print("{bar_0__lambda0()} {bar()}")
+@test(output = "42 3 1")
+fn hook_and_lambda_names_without_a_hook_or_lambda_compile() {
+    let w = worker()
+    print("{worker_0__on_killed()} {bar_0__lambda0()} {bar()}")
 }

@@ -97,7 +97,7 @@ fn expressions() {
     print(before_arrow)
 }
 
-@test(output = "3\nyes\n6")
+@test(/* expected */ output = "3\nyes\n6")
 fn statements() {
     // before let
     let a = 1 // first
@@ -118,6 +118,3 @@ fn statements() {
     }
     print(sum)
 }
-
-@test(/* expected */ output = "hi")
-fn annotation_args() { print("hi") }

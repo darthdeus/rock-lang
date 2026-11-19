@@ -1,0 +1,905 @@
+// @inline splicing: a spliced body must behave exactly like the out-of-line
+// call. Every argument evaluates once, in source order; body locals never
+// collide with caller locals.
+
+global CALLS: int = 0
+
+fn produce(n: int) -> int {
+    CALLS = CALLS + 1
+    return n
+}
+
+fn tick(label: string) -> int {
+    CALLS = CALLS + 1
+    print("{label}={CALLS}")
+    return CALLS
+}
+
+struct IVec2 { x: int, y: int }
+struct IRect { x: int, y: int, w: int, h: int }
+struct Color { r: int, g: int, b: int, a: int }
+struct FixVec2 { x: float, y: float }
+struct Range { lo: int, hi: int }
+struct Wrap { n: int }
+
+fn bump_by(n: int) -> int {
+    CALLS = CALLS + n
+    return 0
+}
+
+fn make_color(r: int, g: int, b: int, a: int) -> Color {
+    CALLS = CALLS + 1
+    return Color { r: r, g: g, b: b, a: a }
+}
+
+fn produce_ivec(x: int, y: int) -> IVec2 {
+    CALLS = CALLS + 1
+    return IVec2 { x: x, y: y }
+}
+
+@inline
+fn id(x: int) -> int {
+    return x
+}
+
+@inline
+fn add_one(x: int) -> int {
+    return x + 1
+}
+
+@inline
+fn trailing_expr(x: int, y: int) -> int {
+    x + y
+}
+
+@inline
+fn gid<T>(x: T) -> T {
+    return x
+}
+
+@inline
+fn doubled(x: int) -> int {
+    return x * 2
+}
+
+@inline
+fn added(x: int, y: int) -> int {
+    return x + y
+}
+
+@inline
+fn with_default(x: int, k: int = 10) -> int {
+    return x + k
+}
+
+@inline
+fn multiple_defaults(a: int = 1, b: int = 2, c: int = 3) -> int {
+    return a * 100 + b * 10 + c
+}
+
+@inline
+fn level3(x: int) -> int {
+    return x + 1
+}
+
+@inline
+fn level2(x: int) -> int {
+    return level3(x) * 2
+}
+
+@inline
+fn level1(x: int) -> int {
+    return level2(x) + level3(x)
+}
+
+@inline
+fn level0(x: int) -> int {
+    return level1(x) - level2(x) + level3(x)
+}
+
+@inline
+fn mul(a: int, b: int) -> int { a * b }
+
+@test(output = "42\n6\n7\n100\n42\n3\nhello\n5 5\n10\n12\n20")
+fn test_bodies_generics_and_ufcs() {
+    print(id(42))
+    print(add_one(5))
+    print(trailing_expr(3, 4))
+    print(add_one(add_one(add_one(id(97)))))
+    print(gid(42))
+    print(gid(3.14) as int)
+    print(gid("hello"))
+    print("{gid(5)} {gid(5)}")
+    print(5.doubled())
+    print(5.added(7))
+    print(5.doubled().added(10))
+}
+
+@test(output = "15\n7\n123\n923\n957\n12\n18\n18\n20")
+fn test_default_args_and_nested_chains() {
+    print(with_default(5))
+    print(with_default(5, 2))
+    print(multiple_defaults())
+    print(multiple_defaults(9))
+    print(multiple_defaults(9, c: 7, b: 5))
+    print(level2(5))
+    print(level1(5))
+    print(level0(8))
+    print(added(mul(2, 3), mul(2, 7)))
+}
+
+fn ranged(a: int, b: int, step: int = 1) -> int { a + b + step }
+
+// A 2-arg call to an out-of-line 3-param callee: the callee fills the default.
+@test(returns = 6)
+fn test_defaulted_param_out_of_line() -> int { ranged(2, 3) }
+
+inline(lua) fn variant_plus_one(x: int) -> int = """return x + 1"""
+
+inline(js) fn variant_plus_one(x: int) -> int = """return x + 1"""
+
+inline(lua) fn variant_triple(x: int) -> int = """return x * 3"""
+
+inline(js) fn variant_triple(x: int) -> int = """return x + x + x"""
+
+fn apply_variant(f: fn(int) -> int, x: int) -> int { return f(x) }
+
+@test(output = "42,12\n12,15")
+fn test_backend_pair_called_directly_and_as_value() {
+    print("{variant_plus_one(41)},{variant_triple(4)}")
+    let g = variant_triple
+    print("{apply_variant(g, 4)},{apply_variant(variant_triple, 5)}")
+}
+
+@inline
+fn params_reversed_usage(a: int, b: int) -> int {
+    return b * 100 + a
+}
+
+@inline
+fn ignore_second(a: int, b: int) -> int {
+    return a
+}
+
+@inline
+fn constant_42(a: int, b: int) -> int {
+    return 42
+}
+
+@test(output = "A=1\nB=2\n201\nA=1\nB=2\n1\n42 2")
+fn test_arg_order_and_unused_args() {
+    CALLS = 0
+    let r = params_reversed_usage(tick("A"), tick("B"))
+    print(r)
+    CALLS = 0
+    let s = ignore_second(tick("A"), tick("B"))
+    print(s)
+    CALLS = 0
+    let t = constant_42(produce(1), produce(2))
+    print("{t} {CALLS}")
+}
+
+@inline
+fn square(x: int) -> int {
+    return x * x
+}
+
+@inline
+fn triple(x: int) -> int {
+    return x + x + x
+}
+
+@inline
+fn deep_use(x: int) -> int {
+    return (x * 2) + (x * 3) + x
+}
+
+@inline
+fn mix(x: int, mult: int) -> int {
+    return x * mult + x
+}
+
+@inline
+fn double(x: int) -> int {
+    return x + x
+}
+
+@test(output = "49 1\n30 2\n42 3\n33 4\n12 5")
+fn test_multi_use_param_evaluates_once() {
+    CALLS = 0
+    let a = square(produce(7))
+    print("{a} {CALLS}")
+    let b = triple(produce(10))
+    print("{b} {CALLS}")
+    let c = deep_use(produce(7))
+    print("{c} {CALLS}")
+    let d = mix(produce(3), 10)
+    print("{d} {CALLS}")
+    let e = double(triple(produce(2)))
+    print("{e} {CALLS}")
+}
+
+@inline
+fn rebind(x: int) -> int {
+    x = x + 1
+    return x
+}
+
+@inline
+fn bump(x: int) -> int {
+    x += 1
+    return x
+}
+
+@inline
+fn post_inc(x: int) -> int {
+    x++
+    return x
+}
+
+@inline
+fn set_x(p: IVec2) -> int {
+    p.x = 99
+    return p.x + p.y
+}
+
+fn set_x_plain(p: IVec2) -> int {
+    p.x = 99
+    return p.x + p.y
+}
+
+// Writing a scalar param stays local; a struct field write is visible to the
+// caller, exactly as through the out-of-line twin.
+@test(output = "11 1\n6 2\n6 3\n6 5\n101 99 101 99 101 1")
+fn test_body_writes_param() {
+    CALLS = 0
+    let a = rebind(produce(10))
+    print("{a} {CALLS}")
+    let b = bump(produce(5))
+    print("{b} {CALLS}")
+    let c = post_inc(produce(5))
+    print("{c} {CALLS}")
+    let v = 5
+    let d = bump(v)
+    print("{d} {v}")
+    let p = IVec2 { x: 1, y: 2 }
+    let r = set_x(p)
+    let q = IVec2 { x: 1, y: 2 }
+    let s = set_x_plain(q)
+    CALLS = 0
+    let t = set_x(produce_ivec(1, 2))
+    print("{r} {p.x} {s} {q.x} {t} {CALLS}")
+}
+
+@inline
+fn twice_plus(n: int, k: int) -> int {
+    return n + n + k
+}
+
+@inline
+fn call_then_read(n: int, f: () -> ()) -> int {
+    f()
+    return n
+}
+
+@inline
+fn read_after_branch(n: int, flag: bool) -> int {
+    if flag { return n + 1 }
+    return n
+}
+
+// A param may read through to the caller local only while nothing can write
+// that local before the body ends.
+@test(output = "2 5\n1 7\n4 9\n3 3")
+fn test_param_snapshots_its_argument() {
+    let x = 1
+    let r = twice_plus(x, { x = 5; 0 })
+    print("{r} {x}")
+    let y = 1
+    let set = () => { y = 7 }
+    let s = call_then_read(y, set)
+    print("{s} {y}")
+    let z = 3
+    let t = read_after_branch(z, if z > 0 { z = 9; true } else { false })
+    print("{t} {z}")
+    let w = 1
+    let u = twice_plus(w, 1)
+    print("{u} {w + 2}")
+}
+
+@inline
+fn sum_xy(p: IVec2) -> int {
+    return p.x + p.y
+}
+
+@inline
+fn lopsided(p: IVec2) -> int {
+    return p.x + p.x + p.y
+}
+
+@inline
+fn color_sum(c: Color) -> int {
+    return c.r + c.g + c.b + c.a
+}
+
+@inline
+fn read_x(p: IVec2) -> int {
+    return p.x
+}
+
+@inline
+fn make_v(a: int, b: int) -> IVec2 {
+    return IVec2 { x: a, y: b }
+}
+
+@inline
+fn quadrupled(v: IVec2) -> int {
+    return v.x + v.x + v.x + v.x + v.y + v.y + v.y + v.y
+}
+
+@inline
+fn rect_area(r: IRect) -> int {
+    return r.w * r.h
+}
+
+@inline
+fn identity_wrap(w: Wrap) -> Wrap {
+    return w
+}
+
+// A call argument is hoisted whole; a struct-literal argument read only
+// through fields is substituted per field; a bare use takes the whole value.
+@test(output = "7 1\n10 2\n10 3\n5 4\n7 7 40 12 5")
+fn test_struct_args() {
+    CALLS = 0
+    let a = sum_xy(produce_ivec(3, 4))
+    print("{a} {CALLS}")
+    let b = color_sum(make_color(1, 2, 3, 4))
+    print("{b} {CALLS}")
+    let c = lopsided(produce_ivec(3, 4))
+    print("{c} {CALLS}")
+    let d = read_x(IVec2 { x: 5, y: produce(99) })
+    print("{d} {CALLS}")
+    let m = 3
+    let n = 7
+    let w = Wrap { n: 5 }
+    let r = identity_wrap(w)
+    print("{sum_xy(IVec2 { x: 3, y: 4 })} {sum_xy(make_v(3, 4))} {quadrupled(IVec2 { x: m, y: n })} {rect_area(IRect { x: 0, y: 0, w: 3, h: 4 })} {r.n}")
+}
+
+@inline
+fn add_then_double(x: int) -> int {
+    let t = x + 1
+    return t * 2
+}
+
+@inline
+fn chain(x: int) -> int {
+    let a = x + 1
+    let b = a * 2
+    return b - 1
+}
+
+@inline
+fn double_let(x: int) -> int {
+    let t = x + 1
+    let t = t * 2
+    return t
+}
+
+@inline
+fn uses_local_named_x(a: int) -> int {
+    let x = a * 10
+    let y = x + 1
+    return y
+}
+
+@inline
+fn shadow_param(t: int) -> int {
+    let t = t + 1
+    return t
+}
+
+@inline
+fn ignore_param_shadow(a: int) -> int {
+    let a = 999
+    return a
+}
+
+@test(output = "8 7 12\n100 8\n5 51\n11\n42 999")
+fn test_body_lets_and_caller_collisions() {
+    print("{add_then_double(3)} {chain(3)} {double_let(5)}")
+    let t = 100
+    let r = add_then_double(3)
+    print("{t} {r}")
+    let x = 5
+    let s = uses_local_named_x(x)
+    print("{x} {s}")
+    print(shadow_param(10))
+    let a = 42
+    let u = ignore_param_shadow(a)
+    print("{a} {u}")
+}
+
+@inline
+fn sum_vec(xs: [int]) -> int {
+    let total = 0
+    for x in xs {
+        total = total + x
+    }
+    return total
+}
+
+@inline
+fn count_down_sum(n: int) -> int {
+    let acc = 0
+    let i = n
+    while i > 0 {
+        acc = acc + i
+        i = i - 1
+    }
+    return acc
+}
+
+@test(output = "99 500 15\n15")
+fn test_loops_in_body() {
+    let x = 99
+    let total = 500
+    let xs = [1, 2, 3, 4, 5]
+    let r = sum_vec(xs)
+    print("{x} {total} {r}")
+    let s = count_down_sum(5)
+    print(s)
+}
+
+@inline
+fn is_positive(x: int) -> bool {
+    return x > 0
+}
+
+@test(output = "10 11 12 13 14\npos pos neg zero pos\n30")
+fn test_inline_in_loops_and_conditions() {
+    let out = ""
+    for i in 0..5 {
+        if out != "" { out += " " }
+        out += "{added(i, 10)}"
+    }
+    print(out)
+    let signs = ""
+    for x in [1, 2, -3, 0, 7] {
+        if signs != "" { signs += " " }
+        if is_positive(x) {
+            signs += "pos"
+        } else if x == 0 {
+            signs += "zero"
+        } else {
+            signs += "neg"
+        }
+    }
+    print(signs)
+    let total = 0
+    for i in 1..5 {
+        total += square(i)
+    }
+    print(total)
+}
+
+@inline
+fn saturating_sub(a: int, b: int) -> int {
+    return if a > b { a - b } else { 0 }
+}
+
+@inline
+fn my_sign(x: int) -> int {
+    return if x > 0 { 1 } else { if x < 0 { -1 } else { 0 } }
+}
+
+@inline
+fn clamp_to_range(v: int, r: Range) -> int {
+    return if v < r.lo { r.lo } else { if v > r.hi { r.hi } else { v } }
+}
+
+@test(output = "5 0\n1 -1 0\n5 10 0\n7")
+fn test_if_bodies() {
+    print("{saturating_sub(10, 5)} {saturating_sub(3, 7)}")
+    print("{my_sign(42)} {my_sign(-5)} {my_sign(0)}")
+    let r = Range { lo: 0, hi: 10 }
+    print("{clamp_to_range(5, r)} {clamp_to_range(99, r)} {clamp_to_range(-5, r)}")
+    print(clamp_to_range(7, Range { lo: 0, hi: 10 }))
+}
+
+enum Sign { Pos, Neg, Zero }
+
+@inline
+fn classify(x: int) -> Sign {
+    return match x {
+        0 => Sign::Zero,
+        _ => if x > 0 { Sign::Pos } else { Sign::Neg },
+    }
+}
+
+@inline
+fn describe(s: Sign) -> string {
+    return match s {
+        Sign::Pos => "pos",
+        Sign::Neg => "neg",
+        Sign::Zero => "zero",
+    }
+}
+
+@inline
+fn bucket(x: int) -> string {
+    return match x {
+        0 => "none",
+        1 => "one",
+        2 => "two",
+        _ => "many",
+    }
+}
+
+@inline
+fn double_or_zero(x: int) -> int {
+    return match x {
+        0 => 0,
+        _ => x * 2,
+    }
+}
+
+@inline
+fn band(x: int) -> string {
+    return match x {
+        2..10 => "mid",
+        _ => "out",
+    }
+}
+
+@test(output = "pos\nneg\nzero\npos\nnone\none\ntwo\nmany\nmany\n0\n2\n4\n0\n10\nout\nmid\nmid\nout")
+fn test_match_bodies() {
+    for x in [1, -3, 0, 7] {
+        let r = describe(classify(x))
+        print(r)
+    }
+    for i in 0..5 {
+        let r = bucket(i)
+        print(r)
+    }
+    for x in [0, 1, 2, 0, 5] {
+        let r = double_or_zero(x)
+        print(r)
+    }
+    for x in [0, 3, 7, 20] {
+        let r = band(x)
+        print(r)
+    }
+}
+
+enum Opt { None, Some(int) }
+
+enum OptPair { None, Some((int, int)) }
+
+@inline
+fn unwrap_or_zero(o: Opt) -> int {
+    return match o {
+        Opt::None => 0,
+        Opt::Some(v) => v,
+    }
+}
+
+@inline
+fn sum_pair_or_zero(p: OptPair) -> int {
+    return match p {
+        OptPair::None => 0,
+        OptPair::Some((a, b)) => a + b,
+    }
+}
+
+@inline
+fn unwrap_double_or_zero(o: int?) -> int {
+    if let x = o {
+        return x * 2
+    } else {
+        return 0
+    }
+}
+
+// Pattern bindings in the body are renamed away from caller locals `v` and `x`.
+@test(output = "42\n0\n999 7\n11\n0\n777 10 0")
+fn test_binding_patterns() {
+    let v = 999
+    print(unwrap_or_zero(Opt::Some(42)))
+    print(unwrap_or_zero(Opt::None))
+    let r = unwrap_or_zero(Opt::Some(7))
+    print("{v} {r}")
+    print(sum_pair_or_zero(OptPair::Some((4, 7))))
+    print(sum_pair_or_zero(OptPair::None))
+    let x = 777
+    let a: int? = 5
+    let b: int? = null
+    let s = unwrap_double_or_zero(a)
+    print("{x} {s} {unwrap_double_or_zero(b)}")
+}
+
+@inline
+fn make_vec2(x: float, y: float) -> FixVec2 {
+    return FixVec2 { x: x, y: y }
+}
+
+@inline
+fn origin() -> FixVec2 {
+    return FixVec2 { x: 0.0, y: 0.0 }
+}
+
+@inline
+fn vadd(a: FixVec2, b: FixVec2) -> FixVec2 {
+    return FixVec2 { x: a.x + b.x, y: a.y + b.y }
+}
+
+@inline
+fn vsub(a: FixVec2, b: FixVec2) -> FixVec2 {
+    return FixVec2 { x: a.x - b.x, y: a.y - b.y }
+}
+
+@inline
+fn vdot(a: FixVec2, b: FixVec2) -> float {
+    return a.x * b.x + a.y * b.y
+}
+
+@inline
+fn vscale(a: FixVec2, k: float) -> FixVec2 {
+    return FixVec2 { x: a.x * k, y: a.y * k }
+}
+
+@inline
+fn iv_to_v(i: IVec2) -> FixVec2 {
+    return FixVec2 { x: i.x as float, y: i.y as float }
+}
+
+@test(output = "3 4\n0 0\n4 6\n-2 -2\n11\n4 6\n7 -4")
+fn test_struct_returning_helpers() {
+    let p = make_vec2(3.0, 4.0)
+    print("{p.x as int} {p.y as int}")
+    let o = origin()
+    print("{o.x as int} {o.y as int}")
+    let a = make_vec2(1.0, 2.0)
+    let b = FixVec2 { x: 3.0, y: 4.0 }
+    let s = vadd(a, b)
+    print("{s.x as int} {s.y as int}")
+    let d = vsub(a, b)
+    print("{d.x as int} {d.y as int}")
+    print(vdot(a, b) as int)
+    let r = vscale(FixVec2 { x: 2.0, y: 3.0 }, 2.0)
+    print("{r.x as int} {r.y as int}")
+    let v = iv_to_v(IVec2 { x: 7, y: -4 })
+    print("{v.x as int} {v.y as int}")
+}
+
+fn fit(w: int, h: int, available: float) -> Vec2 {
+    let width = 256
+    let height = max(1, (width as float * h as float / w as float) as int)
+    let size = v(width as float, height as float)
+    let factor = min(1.0, available / size.x)
+    return size * factor
+}
+
+@test(output = "32 16 256 128")
+fn inlined_numeric_parameters_preserve_float_coercions() {
+    let small = fit(128, 64, 32.0)
+    let large = fit(128, 64, 512.0)
+    print("{small.x as int} {small.y as int} {large.x as int} {large.y as int}")
+}
+
+@inline
+fn tap(r: int) -> int {
+    produce(0)
+    return r
+}
+
+@inline
+fn double_tap(r: int) -> int {
+    produce(0)
+    produce(0)
+    r
+}
+
+@inline
+fn tap_with(r: int, add: int) -> int {
+    bump_by(add)
+    return r
+}
+
+@test(output = "7 1\n42 4\n5 6\n9 16")
+fn test_prefix_statements_before_result() {
+    CALLS = 0
+    let a = tap(7)
+    print("{a} {CALLS}")
+    let b = tap(tap(tap(42)))
+    print("{b} {CALLS}")
+    let c = double_tap(5)
+    print("{c} {CALLS}")
+    let d = tap_with(9, 10)
+    print("{d} {CALLS}")
+}
+
+@inline
+fn tap_struct(r: IVec2) -> IVec2 {
+    produce(0)
+    return r
+}
+
+// A multi-statement splice right after a `let` must not run into the previous
+// Lua line ("ambiguous syntax (function call x new statement)").
+@test(output = "6")
+fn test_multistatement_splice_after_let() {
+    CALLS = 0
+    let r = IVec2 { x: 1, y: 2 }
+    tap_struct(r)
+    tap_struct(r)
+    let n = produce(0)
+    tap(1)
+    tap(2)
+    tap(3)
+    print(CALLS)
+}
+
+fn make_pair(x: int) -> (int, int) {
+    return (x + 1, x * 2)
+}
+
+@inline
+fn call_pair(f: fn(int) -> (int, int), x: int) -> int {
+    let (a, b) = f(x)
+    return a + b
+}
+
+@test(output = "31\n7 9 31")
+fn test_indirect_multi_return_keeps_caller_locals() {
+    print(call_pair(make_pair, 10))
+    let keep_a = 7
+    let keep_b = 9
+    let r = call_pair(make_pair, 10)
+    print("{keep_a} {keep_b} {r}")
+}
+
+@inline
+fn snapshot_lambda(x: int) -> fn() -> int { return () => x + 1 }
+
+@inline
+fn forwarded_lambda(x: int) -> fn() -> int { return snapshot_lambda(x) }
+
+@nomangle
+fn transitive_fallback(x: int) -> fn() -> int { return forwarded_lambda(x) }
+
+@inline
+fn mutable_lambda(x: int) -> fn() -> int {
+    let n = x
+    let read = () => { n += 1; return n }
+    n += 10
+    return read
+}
+
+@inline
+fn loop_lambdas() -> [fn() -> int] {
+    let readers: [fn() -> int] = []
+    for i in 0..3 { readers.push(() => i) }
+    return readers
+}
+
+@nomangle
+fn snapshot_pair(a: int, b: int) -> [fn() -> int] {
+    return [snapshot_lambda(a), snapshot_lambda(b)]
+}
+
+@nomangle
+fn snapshot_iterations() -> [fn() -> int] {
+    let readers: [fn() -> int] = []
+    let x = 10
+    for i in 0..3 {
+        readers.push(snapshot_lambda(x))
+        x += 10
+    }
+    return readers
+}
+
+@nomangle
+fn mutable_fallback(x: int) -> fn() -> int { return mutable_lambda(x) }
+
+@nomangle
+fn loop_fallback() -> [fn() -> int] { return loop_lambdas() }
+
+@nomangle
+fn snapshot_hot_loop(iterations: int) -> int {
+    let total = 0
+    for i in 0..iterations {
+        let read = snapshot_lambda(i)
+        total += read()
+    }
+    return total
+}
+
+@test(output = "5050\n4 8\n4 8 4 8\n11 21 31\n14 15 31 16\n0 1 2\n42 42 1")
+fn test_capturing_lambdas() {
+    print("{snapshot_hot_loop(100)}")
+    let first = transitive_fallback(3)
+    let second = transitive_fallback(7)
+    print("{first()} {second()}")
+    let pair = snapshot_pair(3, 7)
+    print("{pair[0]()} {pair[1]()} {pair[0]()} {pair[1]()}")
+    let readers = snapshot_iterations()
+    print("{readers[0]()} {readers[1]()} {readers[2]()}")
+    let m1 = mutable_fallback(3)
+    let m2 = mutable_fallback(20)
+    print("{m1()} {m1()} {m2()} {m1()}")
+    let loops = loop_fallback()
+    print("{loops[0]()} {loops[1]()} {loops[2]()}")
+    CALLS = 0
+    let f = snapshot_lambda(produce(41))
+    print("{f()} {f()} {CALLS}")
+}
+
+global BLOCK_CALLS: int = 0
+
+fn bump_block() -> int {
+    BLOCK_CALLS = BLOCK_CALLS + 1
+    10
+}
+
+// `let x = { ... }` and `let x = if ...` lower without a closure wrapper.
+@test(output = "6 5 6\n1 99\n20 1")
+fn test_let_block_rvalues() {
+    let a = {
+        let a = 1
+        let b = 2
+        let c = 3
+        a + b + c
+    }
+    let b = {
+        let t = 5
+        if t > 0 { t } else { 0 }
+    }
+    let c = {
+        let t = {
+            let u = 1
+            u + 1
+        }
+        t * 3
+    }
+    print("{a} {b} {c}")
+    let t = 99
+    let d = {
+        let t = 1
+        t
+    }
+    print("{d} {t}")
+    BLOCK_CALLS = 0
+    let e = {
+        let v = bump_block()
+        v * 2
+    }
+    print("{e} {BLOCK_CALLS}")
+}
+
+@test(output = "15 7\n1 2\nmany 2 7\n42 -1\nA=1\n1 1\nB=2\n2 2")
+fn test_let_if_rvalues() {
+    let c = true
+    let d = false
+    let a = if c { let t = 10; t + 5 } else { 7 }
+    let b = if d { let t = 10; t + 5 } else { 7 }
+    print("{a} {b}")
+    let e = if c { 1 } else { 2 }
+    let f = if d { 1 } else { 2 }
+    print("{e} {f}")
+    let n = 2
+    let s = if n == 0 { "zero" } else if n == 1 { "one" } else { "many" }
+    let nested = if c { if d { 1 } else { 2 } } else { 3 }
+    let x = 99
+    let x = if x > 0 { 7 } else { 8 }
+    print("{s} {nested} {x}")
+    let p: int? = if c { 42 } else { null }
+    let q: int? = if d { 42 } else { null }
+    print("{p ?? -1} {q ?? -1}")
+    CALLS = 0
+    let y = if true { tick("A") } else { tick("B") }
+    print("{y} {CALLS}")
+    let z = if false { tick("A") } else { tick("B") }
+    print("{z} {CALLS}")
+}
