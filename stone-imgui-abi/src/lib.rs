@@ -126,108 +126,84 @@ pub const IM_DRAW_CALLBACK_RESET_RENDER_STATE: isize = -8;
 mod tests {
     use super::*;
     use std::mem::{align_of, offset_of, size_of};
-    use std::path::Path;
 
-    fn cdef_source() -> String {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("workspace root")
-            .join("packages/stone/prebuilt/cimgui/cdef.lua");
-        std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
-    }
+    const CDEF: &str = include_str!("../../packages/stone/prebuilt/cimgui/cdef.lua");
 
-    fn fields(src: &str, name: &str) -> Vec<(String, String)> {
-        let marker = format!("struct {name}\n{{");
-        let start = src
-            .find(&marker)
-            .unwrap_or_else(|| panic!("cdef.lua no longer declares `{marker}`"));
-        let body_start = src[start..].find('{').expect("struct body") + start + 1;
-        let body_end = src[body_start..].find('}').expect("struct end") + body_start;
-        src[body_start..body_end]
+    fn assert_struct_prefix(name: &str, expected: &[&str]) {
+        let (_, rest) = CDEF
+            .split_once(&format!("\nstruct {name}\n{{"))
+            .unwrap_or_else(|| panic!("cdef.lua no longer declares struct {name}"));
+        let (body, _) = rest.split_once('}').expect("struct end");
+        let actual: Vec<_> = body
             .lines()
             .map(str::trim)
-            .filter(|line| !line.is_empty() && line.ends_with(';'))
-            .map(|line| {
-                let decl = line.trim_end_matches(';').trim();
-                let (ty, name) = decl.rsplit_once(char::is_whitespace).unwrap_or(("", decl));
-                (
-                    ty.trim().to_owned(),
-                    name.trim_start_matches('*').to_owned(),
-                )
-            })
-            .collect()
+            .filter(|line| line.ends_with(';'))
+            .take(expected.len())
+            .collect();
+        assert_eq!(actual, expected, "struct {name}");
     }
 
     #[test]
     fn consumed_struct_prefixes_match_shipped_cdef() {
-        let src = cdef_source();
-        assert_eq!(
-            fields(&src, "ImDrawData")[..10],
-            [
-                ("_Bool".into(), "Valid".into()),
-                ("int".into(), "CmdListsCount".into()),
-                ("int".into(), "TotalIdxCount".into()),
-                ("int".into(), "TotalVtxCount".into()),
-                ("ImVector_ImDrawListPtr".into(), "CmdLists".into()),
-                ("ImVec2".into(), "DisplayPos".into()),
-                ("ImVec2".into(), "DisplaySize".into()),
-                ("ImVec2".into(), "FramebufferScale".into()),
-                ("ImGuiViewport*".into(), "OwnerViewport".into()),
-                ("ImVector_ImTextureDataPtr*".into(), "Textures".into()),
-            ]
+        assert_struct_prefix(
+            "ImDrawData",
+            &[
+                "_Bool Valid;",
+                "int CmdListsCount;",
+                "int TotalIdxCount;",
+                "int TotalVtxCount;",
+                "ImVector_ImDrawListPtr CmdLists;",
+                "ImVec2 DisplayPos;",
+                "ImVec2 DisplaySize;",
+                "ImVec2 FramebufferScale;",
+                "ImGuiViewport* OwnerViewport;",
+                "ImVector_ImTextureDataPtr* Textures;",
+            ],
         );
-        assert_eq!(
-            fields(&src, "ImDrawCmd")[..9],
-            [
-                ("ImVec4".into(), "ClipRect".into()),
-                ("ImTextureRef".into(), "TexRef".into()),
-                ("unsigned int".into(), "VtxOffset".into()),
-                ("unsigned int".into(), "IdxOffset".into()),
-                ("unsigned int".into(), "ElemCount".into()),
-                ("ImDrawCallback".into(), "UserCallback".into()),
-                ("void*".into(), "UserCallbackData".into()),
-                ("int".into(), "UserCallbackDataSize".into()),
-                ("int".into(), "UserCallbackDataOffset".into()),
-            ]
+        assert_struct_prefix(
+            "ImDrawCmd",
+            &[
+                "ImVec4 ClipRect;",
+                "ImTextureRef TexRef;",
+                "unsigned int VtxOffset;",
+                "unsigned int IdxOffset;",
+                "unsigned int ElemCount;",
+                "ImDrawCallback UserCallback;",
+                "void* UserCallbackData;",
+                "int UserCallbackDataSize;",
+                "int UserCallbackDataOffset;",
+            ],
         );
-        assert_eq!(
-            fields(&src, "ImDrawVert")[..3],
-            [
-                ("ImVec2".into(), "pos".into()),
-                ("ImVec2".into(), "uv".into()),
-                ("ImU32".into(), "col".into()),
-            ]
+        assert_struct_prefix("ImDrawVert", &["ImVec2 pos;", "ImVec2 uv;", "ImU32 col;"]);
+        assert!(CDEF.contains("typedef unsigned short ImDrawIdx;"));
+        assert_struct_prefix(
+            "ImDrawList",
+            &[
+                "ImVector_ImDrawCmd CmdBuffer;",
+                "ImVector_ImDrawIdx IdxBuffer;",
+                "ImVector_ImDrawVert VtxBuffer;",
+            ],
         );
-        assert!(src.contains("typedef unsigned short ImDrawIdx;"));
-        assert_eq!(
-            fields(&src, "ImDrawList")[..3],
-            [
-                ("ImVector_ImDrawCmd".into(), "CmdBuffer".into()),
-                ("ImVector_ImDrawIdx".into(), "IdxBuffer".into()),
-                ("ImVector_ImDrawVert".into(), "VtxBuffer".into()),
-            ]
-        );
-        assert_eq!(
-            fields(&src, "ImTextureData")[..16],
-            [
-                ("int".into(), "UniqueID".into()),
-                ("ImTextureStatus".into(), "Status".into()),
-                ("void*".into(), "BackendUserData".into()),
-                ("ImTextureID".into(), "TexID".into()),
-                ("ImTextureFormat".into(), "Format".into()),
-                ("int".into(), "Width".into()),
-                ("int".into(), "Height".into()),
-                ("int".into(), "BytesPerPixel".into()),
-                ("unsigned char*".into(), "Pixels".into()),
-                ("ImTextureRect".into(), "UsedRect".into()),
-                ("ImTextureRect".into(), "UpdateRect".into()),
-                ("ImVector_ImTextureRect".into(), "Updates".into()),
-                ("int".into(), "UnusedFrames".into()),
-                ("unsigned short".into(), "RefCount".into()),
-                ("_Bool".into(), "UseColors".into()),
-                ("_Bool".into(), "WantDestroyNextFrame".into()),
-            ]
+        assert_struct_prefix(
+            "ImTextureData",
+            &[
+                "int UniqueID;",
+                "ImTextureStatus Status;",
+                "void* BackendUserData;",
+                "ImTextureID TexID;",
+                "ImTextureFormat Format;",
+                "int Width;",
+                "int Height;",
+                "int BytesPerPixel;",
+                "unsigned char* Pixels;",
+                "ImTextureRect UsedRect;",
+                "ImTextureRect UpdateRect;",
+                "ImVector_ImTextureRect Updates;",
+                "int UnusedFrames;",
+                "unsigned short RefCount;",
+                "_Bool UseColors;",
+                "_Bool WantDestroyNextFrame;",
+            ],
         );
     }
 
