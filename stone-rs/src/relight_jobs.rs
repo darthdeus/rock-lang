@@ -1,3 +1,5 @@
+//! Copied occupancy snapshots; no Lua or graphics state crosses this worker.
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
@@ -38,6 +40,7 @@ struct Work {
 }
 struct Service {
     entries: Arc<Mutex<HashMap<u64, Entry>>>,
+    // Locked after `entries` wherever both are held.
     snapshots: Mutex<HashMap<i64, Arc<Vec<u8>>>>,
     sender: mpsc::SyncSender<Work>,
     worker: JoinHandle<()>,
@@ -232,6 +235,7 @@ pub unsafe extern "C" fn stone_relight_diff_publish(handle: u64, region: *mut f3
         .insert(entry.snapshot, Arc::new(result.pixels));
     1
 }
+// The caller cancels the key's pending job first.
 #[no_mangle]
 pub extern "C" fn stone_relight_snapshot_drop(snapshot: i64) {
     if let Some(service) = slot().lock().unwrap().as_ref() {

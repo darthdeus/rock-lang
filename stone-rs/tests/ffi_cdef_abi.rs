@@ -446,6 +446,7 @@ fn compatible(rust: &Ty, c: &Ty, is_return: bool) -> bool {
     }
     match (rust, c) {
         (Ty::Ptr(_), Ty::Ptr(_)) => c.is_void_ptr(),
+        // A Rust bool must hold 0 or 1: reading one as a byte is fine, the reverse is not.
         (Ty::Bool, Ty::Int { bits: 8, .. }) => is_return,
         (Ty::Int { bits: 8, .. }, Ty::Bool) => true,
         (Ty::Named(r), Ty::Named(c)) => r == c || format!("Stone{r}") == *c,

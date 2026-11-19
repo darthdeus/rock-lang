@@ -51,6 +51,8 @@ pub(super) fn compute(
         }
     }
 
+    // Cells are stored as f32 but Rock's float is f64: widen, keep mins in f64, round once on
+    // write.
     for y in 0..sample_height {
         if cancelled(cancellation, stopping) {
             return None;

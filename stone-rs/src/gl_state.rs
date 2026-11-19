@@ -29,6 +29,8 @@ pub extern "C" fn stone_gl_flush() {
 // OpenGL / Canvas Functions
 // =============================================================================
 
+/// 0 = NEAREST, 1 = LINEAR, 2 = stable bilinear mip. Keep in sync with IMAGE_FILTER_* in
+/// stone/engine/lib.rock and the web `__sw_gl_filter`.
 pub(crate) fn gl_filter_for(filter_mode: i32) -> Option<u32> {
     match filter_mode {
         0 => Some(glow::NEAREST),
@@ -123,6 +125,8 @@ pub extern "C" fn stone_sampler_bound(unit: c_int) -> bool {
     .unwrap_or(false)
 }
 
+/// A sampler overrides the texture's wrap, so `image` selects the wrap; pass 0 for a canvas
+/// (always CLAMP_TO_EDGE). A negative `mode` releases the unit.
 #[no_mangle]
 pub extern "C" fn stone_bind_sampler(unit: c_int, mode: c_int, image: u64) {
     if unit < 0 {
@@ -145,6 +149,8 @@ pub extern "C" fn stone_bind_sampler(unit: c_int, mode: c_int, image: u64) {
     });
 }
 
+/// Mirrors the Rock BlendMode enum (blend_mode_to_int in commands.rock). Every arm resets
+/// the blend equation so lighten's GL_MAX cannot leak into later draws.
 #[no_mangle]
 pub extern "C" fn stone_set_blend_mode_i(mode: i32) {
     with_gl(|gl| unsafe {
@@ -250,6 +256,8 @@ impl BlendGlState {
     }
 }
 
+// Pass scopes are LIFO, including a pass submitted while another executes. Snapshots
+// allocate neither per draw nor once the stack is warm.
 #[derive(Clone, Copy)]
 struct PassGlState {
     blend: BlendGlState,
@@ -482,6 +490,8 @@ pub extern "C" fn stone_set_depth_mode(compare: *const c_char, write: bool) {
     });
 }
 
+/// glClear(DEPTH_BUFFER_BIT) is gated by DEPTH_WRITEMASK, which draw-list flushes leave
+/// false, so a depth clear must enable writes first.
 pub(crate) unsafe fn clear_depth_unmasked(gl: &DebugGl, depth: f32) {
     gl.depth_mask(true);
     gl.clear_depth_f32(depth);

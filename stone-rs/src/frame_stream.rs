@@ -134,6 +134,7 @@ pub extern "C" fn stone_frame_stream_finish(
 pub extern "C" fn stone_frame_stream_last_error() -> *const c_char {
     let last = LAST_ERROR.lock().unwrap_or_else(|e| e.into_inner());
     match last.as_ref() {
+        // The CString lives in the static until the next failure replaces it.
         Some(s) => s.as_ptr(),
         None => c"".as_ptr(),
     }

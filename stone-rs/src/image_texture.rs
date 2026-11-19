@@ -275,6 +275,7 @@ pub(crate) struct LoadedImage {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) format: ImageFormat,
+    /// A bound sampler overrides texture wrap, so draws must choose one that agrees.
     pub(crate) repeat: bool,
     pub(crate) stub: bool,
 }
@@ -342,6 +343,7 @@ fn mark_decode_failed(id: u64) {
     }
 }
 
+// Same bytes as `development_missing_image` in assets.rock.
 const DECODE_FAILED_BRIGHT: [u8; 4] = [255, 0, 204, 255];
 const DECODE_FAILED_DARK: [u8; 4] = [25, 0, 25, 255];
 
@@ -409,6 +411,8 @@ fn record_storage(handle: u64, logical: (u32, u32), stored: (u32, u32)) {
 /// What GL stores for a headers-only image: one texel.
 const STUB_STORAGE: (u32, u32) = (1, 1);
 
+// Each stub owns its texture: unload and writers delete or redefine it, so a shared white
+// texture would be freed under other stubs.
 const STUB_RGBA8_TEXEL: [u8; 4] = [255, 255, 255, 255];
 const STUB_RG8_TEXEL: [u8; 2] = [255, 255];
 
@@ -1120,6 +1124,7 @@ fn upload_decoded(decoded: impl IntoIterator<Item = Arc<image_decode::Decoded>>)
             mark_decode_failed(d.id);
             continue;
         }
+        // A length mismatch would make tex_image_2d read past the buffer.
         let (sw, sh) = d.stored;
         let expected = format.level_bytes(sw, sh) as usize;
         if pixels.len() != expected {
@@ -1397,6 +1402,8 @@ pub extern "C" fn stone_bind_image_texture_to_unit(handle: u64, unit: c_int) -> 
     }
 }
 
+// Uploads bind on the current unit; preserve its binding so publishing one input cannot
+// replace an earlier input of the draw being assembled.
 pub(crate) fn sample_image_texture_for_bind(handle: u64) -> Option<u32> {
     if let Some(texture) = sample_image_texture(handle) {
         return Some(texture);
@@ -1499,6 +1506,7 @@ pub extern "C" fn stone_reload_image(handle: u64, path: *const c_char) -> bool {
     }
     let path_str = unsafe { CStr::from_ptr(path).to_str().unwrap_or("") };
 
+    // A pending upload would land after the reload and restore the old pixels.
     stone_flush_image_uploads();
 
     let Some(format) = with_image(handle, |img| img.format) else {

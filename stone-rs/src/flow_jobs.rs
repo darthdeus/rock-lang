@@ -1,3 +1,5 @@
+//! No Lua state crosses into the worker thread; it reads copied snapshots.
+
 use std::collections::HashMap;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -167,6 +169,7 @@ impl FlowService {
             return false;
         }
 
+        // Held across reserve and try_send so shutdown cannot detach the sender in between.
         let sender = self.sender.lock().unwrap();
         if self.stopping.load(Ordering::Acquire) || !self.reserve(&work) {
             return false;
@@ -286,6 +289,8 @@ impl FlowService {
         for entry in data.entries.values() {
             entry.cancellation.store(true, Ordering::Release);
         }
+        // Ready results have no worker message left; pending entries keep their reservation until
+        // the worker consumes the cancelled snapshot.
         for handle in ready_handles {
             data.remove(handle);
         }
@@ -429,6 +434,8 @@ fn compute_flow(
     .expect("non-cancellable flow computation was cancelled")
 }
 
+// One byte per padded cell: bit 0 walkable; bits 1-4 the corners a blocked cell's wall
+// leaves open (corner i is bit i + 1; 0 = (0,0), 1 = (1,0), 2 = (1,1), 3 = (0,1)).
 const CELL_WALKABLE: u8 = 1;
 
 fn elbow_clear(cell: u8, corner: u32) -> bool {

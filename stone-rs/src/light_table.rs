@@ -42,6 +42,7 @@ fn table_shape(size: i32, cell_size: i32, epsilon: f64, count: i32) -> Option<Ta
     let source_texels = sources.checked_mul(LIGHT_ROW_TEXELS)?;
     let header_texels = cells.checked_add(source_texels)?;
 
+    // Every index stored in the rgba32f table must stay an exact f32 integer.
     if cells >= MAX_EXACT_FLOAT_TEXELS || header_texels >= MAX_EXACT_FLOAT_TEXELS {
         return None;
     }
@@ -279,6 +280,7 @@ pub extern "C" fn stone_light_table_pack(
         return false;
     }
 
+    // Outputs must be disjoint from all inputs and each other; read-only inputs may overlap.
     let inputs = [
         positions_range,
         colors_range,

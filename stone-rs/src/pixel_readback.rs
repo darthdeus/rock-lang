@@ -516,6 +516,7 @@ pub(crate) fn release_all() {
     }
 }
 
+/// The canvas must be resident and at most 128x128. Release the id explicitly.
 #[no_mangle]
 pub extern "C" fn stone_canvas_capture_begin(canvas_handle: u64) -> u64 {
     if canvas_handle == 0 {
@@ -1282,6 +1283,7 @@ fn pixel_readback_submit(id: u64, canvas_handle: u64, x: c_int, y: c_int, reques
             } else {
                 None
             };
+            // Restore the full binding; None is the window framebuffer, a real FBO on iOS.
             gl.bind_framebuffer(glow::FRAMEBUFFER, crate::canvas::resolve_target(prev_fbo));
             fence
         })

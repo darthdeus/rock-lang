@@ -116,6 +116,8 @@ pub extern "C" fn stone_lua_jit_health_sample() -> c_int {
     })
 }
 
+/// Writes exactly `abi::FRAME_DELTA_COLUMNS` floats; a null `out` or short `len` writes
+/// nothing. No allocation on any path.
 #[no_mangle]
 pub extern "C" fn stone_lua_jit_health_frame_delta(out: *mut f32, len: usize) -> c_int {
     if out.is_null() || len < abi::FRAME_DELTA_COLUMNS {

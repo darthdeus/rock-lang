@@ -182,6 +182,9 @@ fn read_override(root: &Path, path: &str, prefix: Option<usize>) -> OverrideRead
     }
 }
 
+/// Priority: `<exe_dir>/mods/<path>`, then the embedded registry, then `<path>` on disk.
+/// The mods override applies only to registered paths, so it cannot shadow saves or other
+/// runtime-written files.
 pub fn resolve_asset(path: &str) -> Option<Vec<u8>> {
     match mod_root() {
         ModRoot::Present(root) => resolve_with_root(Some(root), path),
@@ -261,6 +264,8 @@ fn resolve_with_root(root: Option<&Path>, path: &str) -> Option<Vec<u8>> {
                 OverrideRead::Failed => return None,
             }
         }
+        // The registry is immutable after boot, so a positive contains_asset means get_asset
+        // resolves.
         return get_asset(path);
     }
     match std::fs::read(path) {
@@ -393,6 +398,7 @@ mod resolve_tests {
     #[test]
     fn override_dir_wins_over_registry() {
         let root = fresh_root();
+        // Unique key: the global registry is shared across tests.
         let key = format!("world/floor_{}.png", UNIQ.fetch_add(1, Ordering::SeqCst));
         let embedded = b"EMBEDDED".to_vec();
         {

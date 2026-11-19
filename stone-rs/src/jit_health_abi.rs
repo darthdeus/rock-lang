@@ -170,6 +170,7 @@ pub unsafe fn read_snapshot(reader: Option<Read>, state: *mut c_void) -> Option<
     Some(out)
 }
 
+/// The row stride must exactly match the native structure size.
 pub unsafe fn read_coalescing(
     reader: Option<Coalescing>,
     state: *mut c_void,

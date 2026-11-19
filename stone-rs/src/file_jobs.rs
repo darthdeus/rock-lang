@@ -316,6 +316,8 @@ impl DirectorySyncFailure {
     }
 }
 
+// A crash keeps a created or renamed name only after its directory is synced. Each phase
+// syncs the changed directories once, deepest first.
 #[derive(Default)]
 struct DirectoryBarriers {
     changed: Vec<PathBuf>,
@@ -1090,6 +1092,7 @@ fn worker_loop(
             }
             _ => JobResult::Failure,
         };
+        // Completion admits a successor, so release this payload first.
         drop(request.work);
         accounting.fetch_sub(request.owned_bytes, Ordering::AcqRel);
         request.completion.finish(result);
@@ -1326,6 +1329,7 @@ fn execute_transaction(
                     gate.block_request();
                 }
                 file_jobs_test_publication_pause_gate();
+                // Everything the root reaches must be durable before the root name can be.
                 if let Err(failure) = barriers.flush() {
                     log_io_error("directory barrier", &failure.directory, &failure.error);
                     cleanup(&transaction.cleanup_failure);
@@ -1346,6 +1350,7 @@ fn execute_transaction(
                     cancellation.complete();
                     return JobResult::DurabilityUncertain;
                 }
+                // Commit point: the root name becomes durable here and nowhere earlier.
                 if let Err(failure) = barriers.flush() {
                     log_io_error("publish durability", &write.path, &failure.error);
                     cancellation.complete();

@@ -163,6 +163,7 @@ unsafe extern "C" fn stone_lua_counting_alloc(
         LuaAllocCounter::Calls.add(1);
         if nsize == 0 {
             if !ptr.is_null() {
+                // Only nsize == 0 is an unambiguous free; a realloc may shrink in place.
                 LuaAllocCounter::FreeCalls.add(1);
                 LuaAllocCounter::ExplicitFreed.add(osize as u64);
             }
@@ -181,6 +182,7 @@ unsafe extern "C" fn stone_lua_counting_alloc(
             }
         }
     }
+    // Allocation callbacks cannot unwind or call back into Lua.
     (state.allocf)(state.ud, ptr, osize, nsize)
 }
 
@@ -384,6 +386,7 @@ mod macos_focus {
         unsafe {
             let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
             if !app.is_null() {
+                // Returns BOOL, not void; a mismatched type panics under objc2's type check.
                 let _: bool = msg_send![app, setActivationPolicy: POLICY_ACCESSORY];
             }
         }
@@ -1236,6 +1239,7 @@ fn take_window_change(bit: u32) -> bool {
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 static GL_SWAP_COUNT: AtomicU64 = AtomicU64::new(0);
+// Deferred: the loop ends after the current frame, and stone_teardown runs after it exits.
 static QUIT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn with_window<F, R>(f: F) -> Option<R>

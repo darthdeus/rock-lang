@@ -266,6 +266,7 @@ impl Drop for DisplayPacer {
 mod tests {
     use super::*;
 
+    // The tick counter is process-wide; a tick from one test would end another's wait.
     static SERIAL: Mutex<()> = Mutex::new(());
 
     #[test]

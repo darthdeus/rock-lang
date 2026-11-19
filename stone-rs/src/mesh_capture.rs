@@ -126,6 +126,7 @@ pub(crate) unsafe fn record(
         let native_fbo = std::num::NonZeroU32::new(fbo as u32).map(glow::NativeFramebuffer);
         gl.bind_framebuffer(glow::READ_FRAMEBUFFER, native_fbo);
         gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+        // Bounded strips never allocate a whole depth image; pack state is restored after.
         for (&n, v) in pack_names.iter().zip([1, 0, 0, 0]) {
             gl.pixel_store_i32(n, v);
         }

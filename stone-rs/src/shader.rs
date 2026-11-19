@@ -128,6 +128,7 @@ pub extern "C" fn stone_set_shader(handle: u64) {
             track_shader_switch();
         }
     });
+    // Uniform binding indices are global, so blocks re-bind whenever the program changes.
     with_gl(|gl| crate::uniform_block::bind_block_for_program(gl, handle));
 }
 

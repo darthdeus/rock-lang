@@ -80,6 +80,7 @@ thread_local! {
 
 fn reset_worker_query(query: &mut NavQuery) {
     let mut previous = std::mem::take(query);
+    // Keep storage, not cached answers: worker assignment must not change the work charged.
     query.stamp = previous.stamp;
     query.tile_stamp_id = previous.tile_stamp_id;
     macro_rules! retain {

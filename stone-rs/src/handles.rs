@@ -1,5 +1,8 @@
+//! Each class counts from 1; 0 is never minted (callers use 0 as "no handle").
+
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// One variant per `native_ledger::CLASSES` entry, in order; the discriminant is the index.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Class {
     Font,

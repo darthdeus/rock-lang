@@ -33,6 +33,7 @@ impl DescendSelection {
         }
     }
     fn candidate_rank(&self, c: &DescendCandidate) -> int {
+        // Exact integer form of distance <= best + 0.2 * hop.
         if c.distance >= self.here || c.distance * 5 > self.best * 5 + c.hop {
             -1
         } else {

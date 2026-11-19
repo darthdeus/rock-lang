@@ -11,6 +11,8 @@ pub(crate) struct NativeClass {
     destroy: fn(u64),
 }
 
+/// Owners first: a font owns its atlas image and a shader its uniform blocks. Reversing
+/// this would delete a texture or buffer a live owner still uses.
 pub(crate) const CLASSES: [NativeClass; Class::COUNT] = [
     NativeClass {
         class: Class::Font,
@@ -58,6 +60,7 @@ pub(crate) const CLASSES: [NativeClass; Class::COUNT] = [
             crate::audio::stone_unload_sound(h);
         },
     },
+    // After `sound`, which owns it: `stone_unload_sound` stops its voices.
     NativeClass {
         class: Class::Voice,
         name: "voice",
@@ -88,6 +91,7 @@ pub(crate) const CLASSES: [NativeClass; Class::COUNT] = [
     },
 ];
 
+// Entry i must be variant i, or each class would answer with its neighbour's registry.
 const _: () = {
     let mut i = 0;
     while i < Class::COUNT {

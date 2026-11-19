@@ -245,6 +245,7 @@ fn build_font(glyphs: &[Glyph], cmap: &[(u32, u16)], ascender: i16, descender: i
         put_u32(&mut cmap_table, gid);
     }
 
+    // Table records must be sorted by tag.
     let tables: [(&[u8; 4], Vec<u8>); 7] = [
         (b"cmap", cmap_table),
         (b"glyf", glyf),

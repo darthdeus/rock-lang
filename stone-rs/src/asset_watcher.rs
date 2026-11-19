@@ -342,6 +342,7 @@ mod tests {
         for file in [&path, &sibling] {
             stone_watch_asset(CString::new(file.to_str().unwrap()).unwrap().as_ptr());
         }
+        // Only injected events may satisfy the assertions, regardless of OS delivery.
         *watcher().lock().unwrap() = None;
         assert_eq!(poll_paths(), Vec::<String>::new());
         let reported = root.path().canonicalize().unwrap();

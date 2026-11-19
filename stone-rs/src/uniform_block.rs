@@ -26,6 +26,7 @@ struct BlockBuffer {
     /// The program the block belongs to. An upload binds its range at once
     /// only while this program is current; otherwise the next switch binds it.
     program: glow::Program,
+    /// Valid for draws of `range.frame` only; a later frame streams `bytes` again.
     range: Option<StreamRange>,
     name: String,
     shader_key: String,
@@ -38,6 +39,8 @@ struct BlockBuffer {
     /// Reported once. This is checked every frame; a broken block is broken
     /// every frame.
     reported: bool,
+    /// `glBindBufferRange` is global state, so blocks re-bind whenever their program goes
+    /// current (`bind_block_for_program`).
     binding: u32,
     /// The compiler's `UniformBlockPlan::fingerprint` for the layout this
     /// block was sized and bound for. An upload carries its own, from the plan
@@ -270,6 +273,8 @@ pub(crate) fn bind_block_for_program(gl: &crate::DebugGl, handle: u64) {
     });
 }
 
+/// Called at the frame boundary after streams advance: the bound ranges belong to the
+/// frame that ended.
 pub(crate) fn rebind_current_program(gl: &crate::DebugGl) {
     let Some(program) = crate::CURRENT_SHADER.with(|c| *c.borrow()) else {
         return;

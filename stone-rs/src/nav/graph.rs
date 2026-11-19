@@ -235,6 +235,7 @@ pub(super) fn nav_graph_layout_create(
     g
 }
 
+// Coordinates must stay within 2^22.
 pub(super) fn nav_grid_key(x: int, y: int) -> int {
     (x + 4194304) * 8388608 + (y + 4194304)
 }

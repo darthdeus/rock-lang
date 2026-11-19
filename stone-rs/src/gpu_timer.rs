@@ -426,6 +426,8 @@ impl GpuTimer {
         if slot.state != SlotState::Pending {
             return -1.0;
         }
+        // Timestamps complete in submission order, so the last query being available implies the
+        // rest are.
         let last = slot.queries[slot.used - 1];
         if unsafe { gl.get_query_parameter_u32(last, glow::QUERY_RESULT_AVAILABLE) } == 0 {
             return -1.0;

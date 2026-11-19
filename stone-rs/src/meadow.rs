@@ -481,6 +481,7 @@ pub unsafe extern "C" fn stone_meadow_sort(blades: *mut f32, count: i32) -> i32 
         return -1;
     }
     let blades = slice::from_raw_parts_mut(blades.cast::<Blade>(), count);
+    // Before mutation: NaN breaks the partition's sentinel comparisons.
     if blades.iter().any(|blade| !blade[1].is_finite()) {
         return -1;
     }

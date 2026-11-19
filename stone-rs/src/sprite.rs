@@ -11,6 +11,8 @@ struct SpriteState {
     // that draw (stream_buffer.rs); this VAO holds none of its own.
     mesh_vao: glow::VertexArray,
     triangle_indices: Vec<u32>,
+    // present: NDC top -> v=0, the one flip onto the bottom-up window. identity: NDC top ->
+    // v=1, so canvas-to-canvas hops preserve content.
     fs_quad_present_vao: glow::VertexArray,
     fs_quad_present_vbo: glow::Buffer,
     fs_quad_identity_vao: glow::VertexArray,
@@ -141,6 +143,7 @@ unsafe fn upload_fs_quad(
 }
 
 unsafe fn stream_vertices(gl: &DebugGl, data: &[u8]) -> Result<(), String> {
+    // Replace storage so queued draws keep their vertices.
     gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, data, glow::STREAM_DRAW)
 }
 
@@ -345,6 +348,7 @@ fn fs_quad_data(to_window: bool, sx: f32, sy: f32) -> [f32; 24] {
     data
 }
 
+/// `(u0, v0)` maps to NDC (-1,-1) and `(u1, v1)` to (+1,+1).
 fn fs_rect_data(u0: f32, v0: f32, u1: f32, v1: f32) -> [f32; 24] {
     [
         -1.0, 1.0, u0, v1, 1.0, -1.0, u1, v0, -1.0, -1.0, u0, v0, -1.0, 1.0, u0, v1, 1.0, 1.0, u1,

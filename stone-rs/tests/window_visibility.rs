@@ -517,6 +517,8 @@ fn window_manager_is_running() -> bool {
             return false;
         }
         let root = xlib::XDefaultRootWindow(display);
+        // Create the atom if absent: querying property 0 is BadAtom, which aborts the process
+        // through Xlib's default handler.
         let atom = xlib::XInternAtom(display, c"_NET_SUPPORTING_WM_CHECK".as_ptr(), 0);
         if atom == 0 {
             xlib::XCloseDisplay(display);

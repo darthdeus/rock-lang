@@ -144,6 +144,7 @@ pub extern "C" fn stone_file_write(path: *const c_char, data: *const c_char, len
     }
 }
 
+/// One O_APPEND write, so concurrent writers never interleave bytes within a record.
 #[no_mangle]
 pub extern "C" fn stone_file_append(path: *const c_char, data: *const c_char, len: usize) -> bool {
     if path.is_null() || data.is_null() {
@@ -205,6 +206,7 @@ fn sync_file(path: &str) -> bool {
     }
 }
 
+/// The caller frees the returned buffer with libc::free. NULL on failure.
 #[no_mangle]
 pub extern "C" fn stone_file_read(path: *const c_char, out_len: *mut usize) -> *mut c_char {
     let Some(path_str) = (unsafe { cstr(path) }) else {
@@ -382,6 +384,7 @@ pub extern "C" fn stone_copy_file(src: *const c_char, dst: *const c_char) -> boo
     fs::copy(src_str, dst_str).is_ok()
 }
 
+// Symlinks are recreated, never recursed into: a link to an ancestor would loop.
 fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     let file_type = fs::symlink_metadata(src)?.file_type();
     if file_type.is_dir() {
@@ -436,6 +439,7 @@ pub extern "C" fn stone_rename(src: *const c_char, dst: *const c_char) -> bool {
     removed.is_ok()
 }
 
+/// The caller frees the array with stone_free_string_array().
 #[no_mangle]
 pub extern "C" fn stone_list_directory(
     path: *const c_char,

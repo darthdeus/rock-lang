@@ -84,6 +84,8 @@ fn headless_screen_reaches_shown_window() {
 
         stone_set_window_size(400, 280);
         stone_set_canvas(0);
+        // A never-mapped native framebuffer can discard writes and still read black, so a
+        // forbidden hidden-screen read is made observably invalid.
         let attachments = [glow::COLOR_ATTACHMENT0, glow::DEPTH_ATTACHMENT];
         let objects = attachments.map(|attachment| {
             let object = gl.get_framebuffer_attachment_parameter_i32(

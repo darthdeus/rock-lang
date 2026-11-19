@@ -23,6 +23,7 @@ fn compile(source: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         .arg(gamelibs)
         .arg("-L")
         .arg(lib)
+        // rpath: Cargo's LD_LIBRARY_PATH can contain an older top-level cdylib.
         .arg(format!("-Wl,-rpath,{}", lib.display()))
         .arg(c)
         .arg(artifact)

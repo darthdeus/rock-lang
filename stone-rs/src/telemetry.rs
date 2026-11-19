@@ -684,6 +684,8 @@ fn invalid_input(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
+// Mirrors `validate_data` in tools/telemetry/ingest.py: the client must refuse what the
+// server would quarantine.
 fn valid_data_scalar(value: &Value) -> bool {
     match value {
         Value::Bool(_) => true,
@@ -1863,6 +1865,7 @@ mod tests {
     use std::process::Stdio;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    // Serializes tests that can emit through the process-global throttled warning site.
     static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     fn capped_spool_warnings() -> u64 {
@@ -1890,6 +1893,8 @@ mod tests {
         }
     }
 
+    // Empty means a peer closed without a request: a stray port probe from another test
+    // process.
     fn read_full_http_request(stream: &mut TcpStream) -> String {
         stream.set_nonblocking(false).unwrap();
         stream
@@ -2582,6 +2587,8 @@ mod tests {
             "503 Service Unavailable"
         });
         let mut timing = test_upload_timing();
+        // Keep the first request in flight until withdrawal, so backlogged retries are not
+        // mistaken for later requests.
         timing.request_timeout = Duration::from_secs(30);
         let worker =
             UploadWorker::start_with_timing(&root, transport(&ingest, "secret"), timing).unwrap();

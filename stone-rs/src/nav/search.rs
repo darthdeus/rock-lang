@@ -180,6 +180,7 @@ pub(super) fn nav_query_reuse_goal(q: &mut NavQuery, c: int, plan: &NavPlan) -> 
         q.goal_count += 1;
     }
     q.goal_hits += 1;
+    // Cache reuse changes CPU work, never admission or answer ticks.
     entry.work
 }
 
@@ -667,6 +668,7 @@ pub(super) fn nav_route_ready(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan
     nav_unlink(q, plan);
 }
 
+// Following the accepted route never searches or allocates scratch.
 pub(super) fn nav_materialize(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan) -> int {
     let p = plan.route.len() - 1;
     let wx = plan.route[p].x;
@@ -709,6 +711,7 @@ pub(super) fn nav_materialize(g: &NavGraph, q: &mut NavQuery, plan: &mut NavPlan
     }
 }
 
+// Pads are sorted by x when the query begins.
 pub(super) fn nav_nearest_pad(q: &NavQuery, x: int, y: int) -> int {
     if q.pad_count == 0 {
         return NAV_INF;

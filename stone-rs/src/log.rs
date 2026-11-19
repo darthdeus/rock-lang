@@ -16,6 +16,7 @@ pub extern "C" fn stone_log_record_total(level: std::os::raw::c_int) -> std::os:
     })
 }
 
+/// Valid until the next call on this thread.
 #[no_mangle]
 pub extern "C" fn stone_log_records_text(
     level: std::os::raw::c_int,
@@ -54,6 +55,8 @@ pub extern "C" fn stone_log_collect_errors() {
     rock_log::collect_errors();
 }
 
+/// NUL-separated records, then the overflow count. Valid until the next call on this
+/// thread.
 #[no_mangle]
 pub extern "C" fn stone_log_collected_errors(len: *mut usize) -> *const std::os::raw::c_char {
     collected_error_reply(rock_log::collected_errors(), len)
@@ -144,6 +147,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
+    // Tests share global dedup state.
     static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     #[test]

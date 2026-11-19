@@ -45,6 +45,8 @@ fn ascii_slot(ch: char) -> Option<usize> {
     None
 }
 
+/// Slots `0..GLYPH_ASCII_SLOTS` are the identity block (32..=126, U+00C1 at 127), which
+/// Rock indexes positionally; declared extras append above it.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 struct Charset {
     extras: Vec<char>,
@@ -185,6 +187,7 @@ fn delete_font_textures(entries: &[FontEntry]) {
 
 thread_local! {
     static TEXT_PIPELINE: RefCell<Option<TextPipeline>> = const { RefCell::new(None) };
+    // font_ids are 1-based and never reuse a slot; unloaded slots become None.
     static FONTS: RefCell<Vec<Option<FontEntry>>> = const { RefCell::new(Vec::new()) };
     static FONT_ATLAS_IMAGES: RefCell<Vec<Option<u64>>> = const { RefCell::new(Vec::new()) };
 }
@@ -226,6 +229,7 @@ pub extern "C" fn stone_text_init() -> bool {
         delete_font_textures(&prior_fonts);
     }
     forget_instance_images(&prior_fonts);
+    // Before the slots clear: cached atlas images name textures just deleted.
     forget_all_atlas_images();
     FONT_ATLAS_IMAGES.with(|i| i.borrow_mut().clear());
 
@@ -267,6 +271,7 @@ unsafe fn init_geometry(gl: &crate::DebugGl) -> bool {
         return false;
     }
 
+    // Lockstep with text_shader.rock's TextVert: loc 0 = pos, loc 1 = texcoord, stride 16.
     let stride = 4 * std::mem::size_of::<f32>() as i32;
     gl.enable_vertex_attrib_array(0);
     gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, stride, 0);
@@ -1176,6 +1181,7 @@ fn draw_text_line_internal(
         };
         with_gl(|gl| unsafe {
             gl.use_program(Some(program));
+            // Goes current without `stone_set_shader`, so it re-binds the global block indices too.
             crate::uniform_block::bind_block_for_program(gl, shader);
 
             gl.active_texture(glow::TEXTURE0);
@@ -1987,6 +1993,8 @@ pub extern "C" fn stone_get_font_slot_codepoint(font_id: c_uint, slot: c_int) ->
     })
 }
 
+/// Writes 9 floats: u0, v0, u1, v1, width, height, bearing_x, bearing_y, advance.
+/// `face` indexes Face::ALL.
 #[no_mangle]
 pub extern "C" fn stone_get_glyph_info(
     font_id: c_uint,
@@ -2506,6 +2514,7 @@ pub extern "C" fn stone_font_release_coverage(font_id: c_uint) -> bool {
             gl.delete_texture(texture);
         }
         for instance in &instances {
+            // Instance 0 aliases the compat texture; deleting it twice would free a recycled name.
             if Some(instance.texture) != atlas {
                 gl.delete_texture(instance.texture);
             }

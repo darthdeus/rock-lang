@@ -295,6 +295,8 @@ impl ttf_parser::OutlineBuilder for OutlineSink {
 fn render_outline(cmds: &[zeno::Command], scale: f32, advance: f32, synth: Synth) -> RasterGlyph {
     use zeno::{Fill, Format, Mask, Stroke, Style, Transform};
 
+    // One matrix, built directly: zeno's `Transform::then` and `transform_point` disagree on
+    // row/column convention, so composing transposes the shear.
     let shear = synth.skew_deg.to_radians().tan();
     let t = Transform::new(scale, 0.0, scale * shear, -scale, 0.0, 0.0);
 
@@ -307,6 +309,8 @@ fn render_outline(cmds: &[zeno::Command], scale: f32, advance: f32, synth: Synth
             .render()
     };
 
+    // Under Origin::TopLeft `Placement.top` is y-down; RasterGlyph::top is up from the
+    // baseline, hence the negation below.
     let (fill_data, fill) = render(Style::Fill(Fill::NonZero));
 
     if synth.embolden <= 0.0 {
@@ -321,6 +325,7 @@ fn render_outline(cmds: &[zeno::Command], scale: f32, advance: f32, synth: Synth
     }
 
     let mut stroke = Stroke::new(synth.embolden);
+    // Width in post-transform pixels; zeno's default strokes in font units.
     stroke.scale = false;
     let (stroke_data, stroked) = render(Style::Stroke(stroke));
 

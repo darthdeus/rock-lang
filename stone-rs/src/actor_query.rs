@@ -22,6 +22,8 @@ fn ranges_overlap(a: (usize, usize), b: (usize, usize)) -> bool {
     a.0 < b.1 && b.0 < a.1
 }
 
+/// `records` has five i32 lanes per slot: `[active, x, y, generation, installed]`.
+/// `output` receives `[matched_count, examined_count, matching_slot...]`, slots ascending.
 #[no_mangle]
 pub extern "C" fn stone_actor_query_rect(
     records: *const i32,
@@ -66,6 +68,7 @@ pub extern "C" fn stone_actor_query_rect(
         return false;
     }
 
+    // Read-only inputs may alias each other; the full output capacity must be disjoint from both.
     let Some(records_range) = pointer_range(records, record_lanes) else {
         return false;
     };
@@ -95,6 +98,8 @@ pub extern "C" fn stone_actor_query_rect(
         unsafe { std::slice::from_raw_parts(candidates, candidate_count) }
     };
 
+    // Validate every slot before creating the mutable output slice, so malformed candidates
+    // leave output untouched.
     for &slot in candidate_data {
         if slot < 0 || slot as usize >= slot_count {
             return false;

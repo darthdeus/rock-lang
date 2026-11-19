@@ -1,3 +1,6 @@
+//! Graph revisions are immutable while queries use them. Workers never touch Lua or
+//! published plan storage.
+
 #![allow(non_camel_case_types)]
 use std::collections::BTreeMap;
 use std::ops::{Index, IndexMut};

@@ -8,6 +8,7 @@ use crate::{track_canvas_switch, with_gl, with_window};
 struct Canvas {
     fbo: glow::Framebuffer,
     texture: glow::Texture,
+    // A texture, not a renderbuffer: the depth overlay samples it.
     depth_texture: Option<glow::Texture>,
     width: i32,
     height: i32,
@@ -83,6 +84,8 @@ pub(crate) fn create_headless_screen(
     let color = gl.create_renderbuffer()?;
     let depth = gl.create_renderbuffer()?;
     unsafe {
+        // A renderbuffer name is not an object until first bound; attaching it unbound is
+        // INVALID_OPERATION.
         gl.bind_renderbuffer(glow::RENDERBUFFER, Some(color));
         gl.bind_renderbuffer(glow::RENDERBUFFER, Some(depth));
         gl.bind_renderbuffer(glow::RENDERBUFFER, None);
@@ -154,6 +157,7 @@ pub(crate) fn present_headless_screen(window: &sdl2::video::Window) {
     });
 }
 
+/// The screen framebuffer must be bound.
 fn headless_screen_follow(gl: &crate::DebugGl, width: i32, height: i32) -> Result<(), String> {
     HEADLESS_SCREEN.with(|h| {
         let mut slot = h.borrow_mut();
@@ -221,6 +225,7 @@ pub extern "C" fn stone_clear_canvas(r: c_float, g: c_float, b: c_float, a: c_fl
     });
 }
 
+/// Rect is (x, y, w, h) in logical window px, top-left origin. Re-bind canvas 0 to apply.
 #[no_mangle]
 pub extern "C" fn stone_set_present_viewport(active: bool, x: c_int, y: c_int, w: c_int, h: c_int) {
     PRESENT_VIEWPORT.with(|p| {
@@ -307,6 +312,8 @@ pub extern "C" fn stone_set_canvas(handle: u64) {
         with_gl(|gl| unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(canvas.fbo));
             gl.viewport(0, 0, canvas.active_w, canvas.active_h);
+            // glClear ignores the viewport but respects the scissor, which keeps clears off the
+            // inactive margin.
             if canvas.active_w < canvas.width || canvas.active_h < canvas.height {
                 gl.enable(glow::SCISSOR_TEST);
                 gl.scissor(0, 0, canvas.active_w, canvas.active_h);
@@ -322,6 +329,8 @@ pub extern "C" fn stone_set_canvas(handle: u64) {
     track_canvas_switch();
 }
 
+// Creation and resize must resolve formats identically, or the FBO, readback and shaders
+// disagree about the surface.
 struct TextureFormat {
     internal_format: u32,
     tex_format: u32,
@@ -329,6 +338,7 @@ struct TextureFormat {
     int_format: bool,
 }
 
+// STONE_CANVAS_RGBA8 = 0, RGBA16F = 1, RGBA32F = 2, R32I = 3 (integer entity-id target).
 fn resolve_texture_format(format: c_int) -> TextureFormat {
     let (internal_format, tex_format, data_type) = match format {
         1 => (glow::RGBA16F, glow::RGBA, glow::HALF_FLOAT),
@@ -348,6 +358,7 @@ fn is_float_format(format: c_int) -> bool {
     matches!(format, 1 | 2)
 }
 
+// R32I: readbacks use RGBA_INTEGER/INT; clears use glClearBufferiv (glClear is undefined).
 fn is_int_format(format: c_int) -> bool {
     format == 3
 }
@@ -479,6 +490,7 @@ pub extern "C" fn stone_create_canvas(
             glow::PixelUnpackData::Slice(None::<&[u8]>),
         );
 
+        // Integer textures must be NEAREST: a linear-filtered integer texture is incomplete.
         let filter = glow::NEAREST as i32;
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, filter);
         gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, filter);
@@ -514,6 +526,7 @@ pub extern "C" fn stone_create_canvas(
                     glow::UNSIGNED_INT,
                     glow::PixelUnpackData::Slice(None),
                 );
+                // No mips: the default MIPMAP min filter would leave the depth texture incomplete.
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
                 gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
@@ -762,6 +775,7 @@ pub extern "C" fn stone_canvas_resize(handle: u64, width: c_int, height: c_int) 
     true
 }
 
+/// The caller must bind the FBO; attachments name the texture objects and survive.
 unsafe fn respecify_storage(
     gl: &crate::DebugGl,
     spec: &TextureFormat,
@@ -1020,6 +1034,8 @@ pub extern "C" fn stone_read_canvas_pixel(handle: u64, x: c_int, y: c_int) -> c_
     stone_read_canvas_pixel_channel(handle, x, y, 0)
 }
 
+/// (x, y) are top-left drawable coordinates. Valid only before the swap: the post-swap
+/// back buffer is undefined.
 #[no_mangle]
 pub extern "C" fn stone_read_window_rect(x: c_int, y: c_int, w: c_int, h: c_int, out: *mut u8) {
     if out.is_null() || w <= 0 || h <= 0 {

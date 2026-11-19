@@ -373,6 +373,7 @@ pub extern "C" fn stone_mesh_update_instances(
         with_gl(|gl| unsafe {
             let bytes = std::slice::from_raw_parts(data as *const u8, byte_len);
             if byte_len as u64 > mesh.inst_vbo_bytes {
+                // Allocate separately so a failed growth leaves the live buffer intact.
                 let capacity = byte_len
                     .max((mesh.inst_vbo_bytes as usize).saturating_mul(2))
                     .min(i32::MAX as usize);

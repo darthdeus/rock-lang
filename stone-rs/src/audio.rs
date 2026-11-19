@@ -55,10 +55,12 @@ fn output_muted() -> bool {
     })
 }
 
+// Separate from the environment lookup so tests need not mutate the process environment.
 fn output_muted_from(quiet: Option<&str>, headless: Option<&str>, run_sim: Option<&str>) -> bool {
     quiet == Some("1") || (quiet.is_none() && headless == Some("1")) || run_sim.is_some()
 }
 
+/// Latched at process start, so a mid-run `os_setenv` cannot make a sim audible.
 #[no_mangle]
 pub extern "C" fn stone_audio_quiet_env() -> bool {
     output_muted()
@@ -338,6 +340,7 @@ fn load_f32(cell: &AtomicU32) -> f32 {
     f32::from_bits(cell.load(Ordering::Relaxed))
 }
 
+// Written on the game thread, read on the audio thread: atomics only, never a Mutex.
 struct BusParams {
     /// f32 bits. The *target*; BusSource slews the applied value toward it.
     gain: AtomicU32,
@@ -444,6 +447,7 @@ impl Biquad {
         let y = self.b0 * x + s[0];
         s[0] = self.b1 * x - self.a1 * y + s[1];
         s[1] = self.b2 * x - self.a2 * y;
+        // Subnormal feedback can persist indefinitely and make silence costly.
         for state in s {
             if state.is_subnormal() {
                 *state = 0.0;
@@ -558,6 +562,7 @@ impl Bus {
         store_f32(&p.reverb_wet, wet.clamp(0.0, 1.0));
         store_f32(&p.reverb_dry, dry.clamp(0.0, 1.0));
         store_f32(&p.reverb_width, width.clamp(0.0, 1.0));
+        // Release: every store above must be visible before the generation is.
         p.reverb_gen.fetch_add(1, Ordering::Release);
     }
 
@@ -575,6 +580,8 @@ fn slew_coeff(sample_rate: SampleRate) -> f32 {
     1.0 - (-1.0 / (SLEW_TAU_SECS * sample_rate.get() as f32)).exp()
 }
 
+// Infinite by construction: a parent mixer permanently drops a child that returns None,
+// so a dry bus yields 0.0. Runs on the audio thread: no allocation, no locks.
 struct BusSource {
     inner: rodio::mixer::MixerSource,
     params: Arc<BusParams>,
@@ -667,6 +674,7 @@ impl BusSource {
         for i in 0..self.channels.min(MAX_CHANNELS) {
             self.frame[i] = self.inner.next().unwrap_or(0.0);
         }
+        // Channels past the scratch must still be consumed to keep frame alignment.
         for _ in MAX_CHANNELS..self.channels {
             let _ = self.inner.next();
         }
@@ -851,6 +859,7 @@ struct AudioState {
     inflight_sound_bytes: u64,
     music: HashMap<u64, Arc<[u8]>>,
     music_playback: Option<MusicPlayback>,
+    // Membership is the liveness answer `stone_voice_active` gives.
     voices: HashMap<u64, Voice>,
 }
 
@@ -1578,10 +1587,13 @@ pub extern "C" fn stone_unload_sound(handle: u64) -> bool {
     })
 }
 
+// The speed floor matters: a zero or negative ratio yields a player that never empties
+// and would stay in the voice map forever.
 fn sound_play_params(volume: f32, speed: f32) -> (f32, f32) {
     (volume.max(0.0), speed.clamp(0.05, 8.0))
 }
 
+// `decay` is in seconds of output, so it is applied after the speed change.
 fn shaped_source<S>(source: S, ratio: f32, decay: f32) -> Box<dyn Source<Item = f32> + Send>
 where
     S: Source<Item = f32> + Send + 'static,
@@ -1735,6 +1747,8 @@ fn stop_voices_of(voices: &mut HashMap<u64, Voice>, sound: u64) {
     });
 }
 
+/// Returns the voice id, or 0. Nonzero ids are never reused, so a stale id cannot address
+/// a later voice.
 #[no_mangle]
 pub extern "C" fn stone_play_sound(
     handle: u64,
@@ -1748,6 +1762,7 @@ pub extern "C" fn stone_play_sound(
 ) -> u64 {
     AUDIO_STATE.with(|state| {
         if let Some(ref mut audio) = *state.borrow_mut() {
+            // Nothing drains a stubbed bus graph, so an appended player would never empty.
             if audio._stream.is_none() {
                 return 0;
             }
@@ -1787,6 +1802,8 @@ pub extern "C" fn stone_play_sound(
                 };
                 player.append(input);
 
+                // Safe to reap here: `append` bumps sound_count synchronously, so a voice started
+                // this call never looks empty.
                 audio.voices.retain(|id, v| {
                     let live = !v.player.empty();
                     if !live {
@@ -1875,6 +1892,8 @@ pub extern "C" fn stone_stop_sound(handle: u64) {
     });
 }
 
+/// Map membership, not `Player::empty()`: rodio's `stop()` drains on the audio thread
+/// later, so an empty()-based answer would race our own stops.
 #[no_mangle]
 pub extern "C" fn stone_voice_active(voice: u64) -> bool {
     with_voice(voice, |_| ()).is_some()
@@ -1969,6 +1988,7 @@ pub extern "C" fn stone_bus_samples_pulled(bus: u32) -> u64 {
     read_bus(bus, 0, Bus::samples_pulled)
 }
 
+/// Reading clears the hold, so this is single-consumer.
 #[no_mangle]
 pub extern "C" fn stone_bus_peak(bus: u32) -> c_float {
     read_bus(bus, 0.0, Bus::meter)
@@ -2197,6 +2217,8 @@ mod tests {
         AudioStateRestore(previous)
     }
 
+    // Runs these fixtures in a fresh process: no environment mutation under parallel tests
+    // and no output device.
     fn delegate_decoded_audio_fixture(test: &str) -> bool {
         const CHILD: &str = "STONE_DECODE_FIXTURE";
         if std::env::var(CHILD).as_deref() == Ok(test) {

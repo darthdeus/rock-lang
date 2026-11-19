@@ -116,6 +116,7 @@ fn stamps_user_time_zero_on_x11() {
         let mut nitems: c_ulong = 0;
         let mut bytes_after: c_ulong = 0;
         let mut prop: *mut c_uchar = std::ptr::null_mut();
+        // Same connection as the stamp, so XChangeProperty is processed before this round-trip.
         let status = xlib::XGetWindowProperty(
             dpy,
             win,
