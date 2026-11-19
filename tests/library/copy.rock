@@ -1,8 +1,79 @@
-// deepcopy is aliasing-preserving and cycle-safe: one seen-map per copy,
-// `seen[src] = dst` recorded before recursing children. A snapshot must
-// preserve the object graph -- two references to one table (or one shared
-// capture box) copy to ONE table in the copy, and a cyclic table copies
-// without blowing the stack.
+// Copying runtime values. deepcopy is aliasing-preserving and cycle-safe: one
+// seen-map per copy, `seen[src] = dst` recorded before recursing children, so
+// two references to one table (or one shared capture box) copy to ONE table in
+// the copy and a cyclic graph copies without blowing the stack. Vecs, maps,
+// native buffers, flat vecs and userdata resources copy to independent
+// storage. `clone_into` copies a value into a destination owner's storage,
+// evaluating the destination first.
+
+struct Inner { v: int }
+
+struct State { a: Inner, b: Inner }
+
+// A shared inner struct copies ONCE: mutating via `a` shows through `b`; the
+// original is untouched.
+@test(output = "99\n99\n1")
+fn shared_ref_copies_once() {
+    let inner = Inner { v: 1 }
+    let s = State { a: inner, b: inner }
+    let c = deepcopy(s)
+    c.a.v = 99
+    print(c.a.v)
+    print(c.b.v)
+    print(s.a.v)
+}
+
+struct Node { tag: int, next: Node? }
+
+// A self-referential struct copies without hanging; the copy's cycle points
+// into the COPY.
+@test(output = "5\n5\n1")
+fn cycle_copies_without_hanging() {
+    let n = Node { tag: 1, next: null }
+    n.next = n
+    let c = deepcopy(n)
+    c.tag = 5
+    print(c.tag)
+    if c.next != null {
+        print(c.next.tag)
+    }
+    print(n.tag)
+}
+
+// A deep-copied Vec, and the vecs nested in it, are independent of the
+// original.
+@test(output = "10\n1\n1\n99")
+fn vec_copy_is_independent() {
+    let v = [1, 2, 3]
+    let c = deepcopy(v)
+    c.set(0, 10)
+    print(c[0])
+    print(v[0])
+    let orig = [[1], [2]]
+    let nested = deepcopy(orig)
+    nested[0][0] = 99
+    print(orig[0][0])
+    print(nested[0][0])
+}
+
+// A deep-copied Map is independent of the original.
+@test(output = "20\n2")
+fn map_copy_is_independent() {
+    let m = map_new()
+    m["k"] = 2
+    let c = deepcopy(m)
+    c["k"] = 20
+    print(c["k"])
+    print(m["k"])
+}
+
+// Primitives pass through unchanged.
+@test(output = "42\ntrue\ntrue")
+fn primitive_passthrough() {
+    print(deepcopy(42))
+    print(deepcopy("foo") == "foo")
+    print(deepcopy(true))
+}
 
 struct Pair { get: fn() -> int, bump: fn() -> int }
 
@@ -23,7 +94,7 @@ fn shared_box_aliasing_preserved_in_copy() {
     print(orig.get())
 }
 
-// P2: a capturing co-fn lambda hoists to an
+// A capturing co-fn lambda hoists to an
 // env record whose `c<S>` capture is the frame table itself, and the record
 // lives in a frame field -> the frame holds a record that points back at the
 // frame (a cycle). Two things must hold on deepcopy of the suspended handle:
@@ -186,3 +257,63 @@ fn table_copy_plain_table_has_no_metatable() {
 inline(lua) fn __test_make_plain() -> any = """
     return { a = 1, b = 2 }
 """
+
+struct CloneEvent { path: string }
+
+global CLONE_LOG: [CloneEvent] = []
+
+fn record_clone(path: string) {
+    let owned = path.clone_into(CLONE_LOG.storage)
+    CLONE_LOG.push(CloneEvent { path: owned })
+}
+
+@test
+fn clone_into_copies_a_dynamic_string_into_a_global_owner() {
+    let suffix = 17
+    record_clone("sound-{suffix}")
+    let event = CLONE_LOG[0]
+    assert(event.path == "sound-17")
+}
+
+fn clone_points_destination(points: [Vec2]) -> Storage {
+    points.push(Vec2 { x: 5.0, y: 6.0 })
+    return CLONE_LOG.storage
+}
+
+@test
+fn clone_into_copies_column_vectors_after_evaluating_the_destination() {
+    let points = [Vec2 { x: 1.0, y: 2.0 }, Vec2 { x: 3.0, y: 4.0 }]
+    let copied = points.clone_into(clone_points_destination(points))
+    assert_eq(copied.len(), 3)
+    assert_eq(copied[2].x, 5.0)
+    points[0] = Vec2 { x: 9.0, y: 10.0 }
+    assert_eq(copied[0].x, 1.0)
+    copied.push(Vec2 { x: 11.0, y: 12.0 })
+    assert_eq(points.len(), 3)
+    assert_eq(copied.len(), 4)
+}
+
+@test
+fn clone_into_preserves_nullable_column_presence_without_aliasing() {
+    let points: [Vec2?] = [null, Vec2 { x: 3.0, y: 4.0 }]
+    let copied = points.clone_into(CLONE_LOG.storage)
+    points[0] = Vec2 { x: 1.0, y: 2.0 }
+    copied[1] = null
+    assert(copied[0] == null)
+    assert(points[1] != null)
+    assert_eq(points[1].unwrap().x, 3.0)
+}
+
+fn clone_points_destination_call(points: [Vec2], destination: fn([Vec2]) -> Storage) -> Storage {
+    return destination(points)
+}
+
+@test
+fn clone_into_evaluates_an_indirect_destination_before_copying_columns() {
+    let points = [Vec2 { x: 1.0, y: 2.0 }]
+    let copied = points.clone_into(clone_points_destination_call(points, clone_points_destination))
+    assert_eq(copied.len(), 2)
+    assert_eq(copied[1].x, 5.0)
+    points[1] = Vec2 { x: 9.0, y: 10.0 }
+    assert_eq(copied[1].x, 5.0)
+}

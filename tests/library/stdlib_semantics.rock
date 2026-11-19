@@ -1,7 +1,8 @@
-// Tests for stdlib audit fixes
-// Each section corresponds to one audited stdlib item.
+// Stdlib semantics: full-precision PI, literal string replace, structural
+// assert_eq, sort by key, find/any/all on empty and non-empty vecs, the unwrap
+// family, inspect formatting, the exclusive __rock_range bound, uniform .len()
+// and key-sorted map keys/values.
 
-// --- Item 2: PI precision ---
 
 @test
 fn test_pi_precision() {
@@ -13,7 +14,6 @@ fn test_pi_precision() {
     assert(pi_str.starts_with("3.14159265358"), "PI should have at least 12 correct digits, got: {pi_str}")
 }
 
-// --- Item 4: replace % in replacement ---
 
 @test
 fn test_string_replace_is_literal() {
@@ -25,7 +25,6 @@ fn test_string_replace_is_literal() {
     assert_eq("hello world".replace("world", "rock"), "hello rock")
 }
 
-// --- Item 5: __op_eq structural equality ---
 
 struct EqTestPoint { x: int, y: int }
 
@@ -44,7 +43,6 @@ fn test_op_eq() {
     assert_ne(true, false)
 }
 
-// --- Item 13: sort correctness ---
 
 @test
 fn test_vec_sort() {
@@ -75,7 +73,6 @@ fn test_vec_sort_by_field() {
     assert_eq(v[2].name, "c")
 }
 
-// --- Item 14: find/any/all ---
 
 @test
 fn test_vec_find_any_all() {
@@ -94,7 +91,6 @@ fn test_vec_find_any_all() {
     assert_true(empty.all(x => false))
 }
 
-// --- Item 16: unwrap/expect ---
 
 @test
 fn test_unwrap_family() {
@@ -106,7 +102,6 @@ fn test_unwrap_family() {
     assert_eq(expect(y, "should not fail"), 10)
 }
 
-// --- Item 1: inspect deduplication ---
 
 struct InspectPoint { x: int, y: int }
 
@@ -124,7 +119,6 @@ fn test_inspect() {
     print(inspect(empty))
 }
 
-// --- Item 17: __rock_range has an exclusive upper bound ---
 
 @test
 fn test_rock_range_exclusive_upper_bound() {
@@ -137,7 +131,6 @@ fn test_rock_range_exclusive_upper_bound() {
     assert_eq(one[0], 0)
 }
 
-// --- Item 10: UFCS .len() works uniformly ---
 
 struct LenArenaItem { value: int }
 
@@ -167,7 +160,6 @@ fn test_len_ufcs() {
     assert_eq(a.len(), 2)
 }
 
-// --- Item 18: keys/values sort stability ---
 
 @test
 fn test_map_keys_and_values_sorted_by_key() {

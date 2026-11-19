@@ -1,35 +1,133 @@
-// Comprehensive tests for basic data structures
-// Tests Maps, arrays, and other collections with various operations
+// Stdlib collection calls on vecs and maps: push/set/pop, insert/remove/get,
+// contains/len/clear, to_array, map and filter with inferred lambda params,
+// the unified `.get(key) -> T?` accessor (null on miss), enumerate, nested
+// collections, nullable map values, iteration stability, growth to 100 keys
+// and special-character keys; plus the assert_* family.
 
-// Test Map basic operations
-@test
-fn test_map_basic_operations() {
-    let map: Map<string, int> = map_new()
+@test(output = "hi\nbye\nfoo\nfoo\nbye\nlen: 0")
+fn vector_insert_and_lookup() {
+    let v = vec_new()
 
-    assert $ map.len() == 0
-    assert $ get(map, "nonexistent") == null
+    vec_push(v, "hi")
+    print(vec_get(v, 0))
 
-    insert(map, "one", 1)
-    insert(map, "two", 2)
-    insert(map, "three", 3)
+    vec_set(v, 0, "bye")
+    vec_push(v, "foo")
+    print(vec_get(v, 0))
+    print(vec_get(v, 1))
 
-    assert $ map.len() == 3
-    assert $ get(map, "one") == 1
-    assert $ get(map, "two") == 2
-    assert $ get(map, "three") == 3
+    let a = pop(v)
+    let b = pop(v)
+    let _c = pop(v)
 
-    insert(map, "one", 100)
-    assert $ get(map, "one") == 100
-    assert $ map.len() == 3
-
-    remove(map, "two")
-    assert $ map.len() == 2
-    assert $ get(map, "two") == null
-    assert $ get(map, "one") == 100
-    assert $ get(map, "three") == 3
+    print(a)
+    print(b)
+    print("len: {vec_len(v)}")
 }
 
-// Test array indexing and enumerate
+@test(output = "100\n100\ntrue\nVec {{ }}\nVec {{ {{ \"hp\", 100 }} }}\nVec {{ {{ \"hp\", 150 }} }}")
+fn map_insert_remove_and_to_array() {
+    let m: Map<string, int> = map_new()
+    insert(m, "hp", 100)
+    print(get(m, "hp"))
+    print(remove(m, "hp"))
+    print(get(m, "hp") == null)
+    let empty: Map<int, string> = map_new()
+    print(inspect(to_array(empty)))
+    insert(m, "hp", 100)
+    print(inspect(to_array(m)))
+    insert(m, "hp", 150)
+    print(inspect(to_array(m)))
+}
+
+@test(output = "0\nfalse\ntrue\nfalse\n2\n0")
+fn contains_len_and_clear() {
+    let empty: Map<int, string> = map_new()
+    print(empty.len())
+    print(empty.contains(42))
+
+    let m: Map<string, int> = map_new()
+    insert(m, "a", 1)
+    insert(m, "b", 2)
+    print(m.contains("a"))
+    print(m.contains("c"))
+    print(m.len())
+    clear(m)
+    print(m.len())
+}
+
+// Unannotated lambda params infer `int` from the receiver.
+@test
+fn vec_map_and_filter() {
+    assert_eq([1, 2, 3, 4, 5].iter().map((x) => x * 2).collect(), [2, 4, 6, 8, 10])
+    assert_eq([10, 20, 30].iter().map((x) => x + 5).collect(), [15, 25, 35])
+    let empty: [int] = vec_new()
+    assert(vec_len(empty.iter().map((x) => x * 2).collect()) == 0)
+
+    assert_eq([1, 2, 3, 4, 5, 6].iter().filter((x) => x % 2 == 0).collect(), [2, 4, 6])
+    assert(vec_len([1, 3, 5, 7, 9].iter().filter((x) => x % 2 == 0).collect()) == 0)
+    assert_eq([2, 4, 6, 8].iter().filter((x) => x % 2 == 0).collect(), [2, 4, 6, 8])
+}
+
+@test
+fn test_assertion_functions() {
+    assert_eq(5, 5, "Five should equal five")
+    assert_eq("hello", "hello", "Strings should match")
+
+    assert_ne(5, 10, "Five should not equal ten")
+    assert_ne("hello", "world", "Different strings should not be equal")
+
+    assert_true(true, "True should be true")
+    assert_true(5 > 3, "5 should be greater than 3")
+
+    assert_false(false, "False should be false")
+    assert_false(3 > 5, "3 should not be greater than 5")
+
+    let null_value: int? = null
+    assert_null(null_value, "Null value should be null")
+
+    let non_null_value: int? = 42
+    assert_not_null(non_null_value, "Non-null value should not be null")
+
+    print("All assertion tests passed!")
+}
+
+@test
+fn vec_get_ufcs() {
+    let v = [10, 20, 30]
+    assert(v.get(0) == 10)
+    assert(v.get(1) == 20)
+    assert(v.get(2) == 30)
+    assert(v.get(3) == null)
+    assert(v.get(-1) == null)
+}
+
+@test
+fn map_get_ufcs() {
+    let m: Map<string, int> = map_new()
+    insert(m, "hp", 100)
+    insert(m, "mp", 50)
+    assert(m.get("hp") == 100)
+    assert(m.get("mp") == 50)
+    assert(m.get("missing") == null)
+}
+
+@test
+fn get_chains_with_null_coalesce() {
+    let v = [10, 20, 30]
+    let m: Map<string, int> = map_new()
+    insert(m, "answer", 42)
+
+    let x = v.get(100) ?? -1
+    assert(x == -1)
+
+    let y = m.get("answer") ?? 0
+    assert(y == 42)
+
+    let z = m.get("missing") ?? 0
+    assert(z == 0)
+}
+
 @test
 fn test_array_operations() {
     let numbers = [10, 20, 30, 40, 50]
@@ -48,7 +146,6 @@ fn test_array_operations() {
     assert index_sum == 10
 }
 
-// Test complex nested data structures
 struct Room {
     name: string,
     items: [string],
@@ -98,18 +195,14 @@ fn test_complex_nested_structures() {
     assert total_connections == 3
 }
 
-// Test Map with null/optional values
-// Note: In Lua backend, setting a value to null removes the key from the map
+// Inserting null removes the key on Lua, so only present values are stored.
 @test
 fn test_map_with_nullable_values() {
     let optional_map: Map<string, int?> = map_new()
 
     insert(optional_map, "has_value", 42)
     insert(optional_map, "zero_value", 0)
-    // Note: inserting null in Lua removes the key, so we skip it
-    // insert(optional_map, "no_value", null)
 
-    // Only 2 entries since null removes keys in Lua
     assert $ optional_map.len() == 2
 
     let non_null_count = 0
@@ -133,7 +226,7 @@ fn test_map_with_nullable_values() {
     assert $ get(optional_map, "nonexistent") == null
 }
 
-// Test iteration order consistency (Maps typically don't guarantee order)
+// Map order is unspecified but stable between two walks.
 @test
 fn test_map_iteration_consistency() {
     let test_map: Map<string, int> = map_new()
@@ -149,20 +242,16 @@ fn test_map_iteration_consistency() {
         first_run = first_run + key
     }
 
-    // Second iteration should be consistent
     for (key, value) in test_map {
         second_run = second_run + key
     }
 
-    // Order should be consistent between runs
     assert first_run == second_run
     assert $ first_run.len() == 3
 
-    // All keys should be present
     assert $ first_run == "zam" || first_run == "zma" || first_run == "azm" || first_run == "amz" || first_run == "mza" || first_run == "maz"
 }
 
-// Test large collections performance/behavior
 @test
 fn test_large_collections() {
     let large_map: Map<string, int> = map_new()
@@ -178,7 +267,6 @@ fn test_large_collections() {
     assert $ get(large_map, "item_50") == 100
     assert $ get(large_map, "item_99") == 198
 
-    // Iterate through all items
     let count = 0
     let sum = 0
 
@@ -186,7 +274,6 @@ fn test_large_collections() {
         count = count + 1
         sum = sum + value
 
-        // Basic validation
         assert $ key.len() > 5
         assert $ value >= 0
         assert $ value < 200

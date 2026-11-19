@@ -1,5 +1,8 @@
-// Property test: metric_add keeps the sorted window, ring and summaries equal
-// to a model rebuilt from scratch after every sample.
+// The stdlib `Metric` windowed-statistics type. A property test keeps the
+// sorted window, ring and summaries (count, mean, min, max, percentiles,
+// stddev) equal to a model rebuilt after every sample across window caps, then
+// checks reset; the rest pin newest-first metric_recent across a ring wrap,
+// re-adding after reset, snapshots and rolling totals over many evictions.
 
 fn model_sort(model: NativeBuffer<float>, count: int) {
     for a in 0..count {
@@ -124,4 +127,81 @@ fn lower_bound_uses_the_wide_cap_branch() {
         let short = metric_lower_bound(m, n, v, 240)
         assert(short == want, "narrow lower_bound({v}) = {short}, want {want}")
     }
+}
+
+@test(output = "recent 0=5 1=4 4=1")
+fn test_metric_recent_order() {
+    let m = metric_new("t", 16)
+    for i in 1..6 {
+        metric_add(m, i as float)
+    }
+    let r0 = metric_recent(m, 0) as int
+    let r1 = metric_recent(m, 1) as int
+    let r4 = metric_recent(m, 4) as int
+    print("recent 0={r0} 1={r1} 4={r4}")
+}
+
+// After ring wrap (cap 3, add 1..5 -> window {3,4,5}), newest-first still
+// reads 5,4,3 -- exercises the modular index past the buffer boundary.
+@test(output = "recent 0=5 1=4 2=3")
+fn test_metric_recent_wrap() {
+    let m = metric_new("t", 3)
+    for i in 1..6 {
+        metric_add(m, i as float)
+    }
+    let r0 = metric_recent(m, 0) as int
+    let r1 = metric_recent(m, 1) as int
+    let r2 = metric_recent(m, 2) as int
+    print("recent 0={r0} 1={r1} 2={r2}")
+}
+
+// metric_reset zeroes count/head/summary in place; a re-add after reset
+// starts a fresh window with no stale samples bleeding through.
+@test(output = "before n=5 mean=3 | after n=0 mean=0 | readd n=1 mean=9")
+fn test_metric_reset() {
+    let m = metric_new("t", 16)
+    for i in 1..6 {
+        metric_add(m, i as float)
+    }
+    let b_n = m.count
+    let b_mean = m.mean as int
+    metric_reset(m)
+    let a_n = m.count
+    let a_mean = m.mean as int
+    metric_add(m, 9.0)
+    let r_n = m.count
+    let r_mean = m.mean as int
+    print("before n={b_n} mean={b_mean} | after n={a_n} mean={a_mean} | readd n={r_n} mean={r_mean}")
+}
+
+@test(output = "snap mean=3 p99=5 n=5")
+fn test_metric_snapshot() {
+    let m = metric_new("t", 16)
+    for i in 1..6 {
+        metric_add(m, i as float)
+    }
+    let s = metric_snapshot(m)
+    let me = s.mean as int
+    let p99 = s.p99 as int
+    print("snap mean={me} p99={p99} n={s.n}")
+}
+
+@test(output = "rolling mean=true std=true")
+fn test_metric_rolling_totals() {
+    let cap = 120
+    let samples = 10000
+    let m = metric_new("rolling", cap)
+    for i in 0..samples {
+        metric_add(m, (i % 257) as float)
+    }
+    let sum = 0.0
+    let sum_sq = 0.0
+    for i in (samples - cap)..samples {
+        let x = (i % 257) as float
+        sum += x
+        sum_sq += x * x
+    }
+    let mean = sum / (cap as float)
+    let stddev = sqrt(max(0.0, sum_sq / (cap as float) - mean * mean))
+    print("rolling mean={abs(m.mean - mean) < 0.0001} std={abs(m.stddev - stddev) < 0.0001}")
 }

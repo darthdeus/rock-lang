@@ -1,4 +1,4 @@
-//! tests/library/js_try_call.rock runs try_call and unused checked index
+//! tests/library/js_runtime.rock runs try_call and unused checked index
 //! reads on both backends. Here an unused read through a foreign Map or
 //! Vec must still enter its host getter.
 

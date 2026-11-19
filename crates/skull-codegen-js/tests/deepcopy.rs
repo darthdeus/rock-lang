@@ -1,6 +1,6 @@
 //! The JS deepcopy runtime (`JS_DEEPCOPY_RUNTIME`) on shapes only the JS
 //! backend has: a code-ref environment and a NativeBuffer with typed leaf views.
-//! Deepcopy of program values is tests/library/js_deepcopy.rock.
+//! Deepcopy of program values is tests/library/copy.rock.
 
 #[test]
 fn copied_code_ref_env_shares_logical_slot() {
