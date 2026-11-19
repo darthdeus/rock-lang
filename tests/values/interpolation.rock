@@ -14,59 +14,27 @@ fn __op_add(a: V2, b: V2) -> V2 {
     return V2 { x: a.x + b.x, y: a.y + b.y }
 }
 
-// Arithmetic inside the placeholder, with a field access on a
-// value-returning call; the multi-return must not truncate to one scalar.
-@test(output = "sum=7")
-fn interp_value_call_field_access() {
-    print("sum={make_v2(3, 4).x + make_v2(3, 4).y}")
-}
-
-// Field access on a value binop that dispatches through the scalar
-// ABI. `(a+b).x` must route through the pack-aware emission rather
-// than the raw multi-return.
-@test(output = "xy=6")
-fn interp_value_binop_field_access() {
-    let a = V2 { x: 1, y: 2 }
-    let b = V2 { x: 3, y: 0 }
-    print("xy={(a + b).x + (a + b).y}")
-}
-
-// A whole value renders every field, not just the first scalar.
-@test
-fn interp_whole_value_call_contains_fields() {
-    let s = "{make_v2(123, 456)}"
-    assert(s.contains("123"), "rendered string should include x from call")
-    assert(s.contains("456"), "rendered string should include y from call")
-}
-
 value Seg { a: V2, b: V2 }
 
 fn show(v: V2) -> string {
     return "{v}"
 }
 
-@test(output = "true")
-fn test_value_param_interpoland_renders() {
-    let s = show(V2 { x: 3, y: 7 })
-    print(s.contains("x: 3"))
-}
-
-@test(output = "true")
-fn test_value_literal_interpoland_renders() {
+// `(a + b).x` and a field of a value-returning call must not truncate the
+// scalar-ABI multi-return to one scalar.
+@test(output = "sum=7\nxy=6\n3-7")
+fn interp_value_fields_calls_and_whole_values() {
+    print("sum={make_v2(3, 4).x + make_v2(3, 4).y}")
     let a = V2 { x: 1, y: 2 }
-    let s = "{a}"
-    print(s.contains("x: 1") && s.contains("y: 2"))
-}
-
-@test(output = "true")
-fn test_nested_value_interpoland_renders() {
+    let b = V2 { x: 3, y: 0 }
+    print("xy={(a + b).x + (a + b).y}")
+    let call = "{make_v2(123, 456)}"
+    assert(call.contains("123") && call.contains("456"), "whole call result renders every field")
+    assert(show(V2 { x: 3, y: 7 }).contains("x: 3"), "value param renders")
+    let literal = "{a}"
+    assert(literal.contains("x: 1") && literal.contains("y: 2"), "value local renders")
     let g = Seg { a: V2 { x: 1, y: 2 }, b: V2 { x: 3, y: 4 } }
-    let s = "{g}"
-    print(s.contains("Seg"))
-}
-
-@test(output = "3-7")
-fn test_value_field_interpolands() {
+    assert("{g}".contains("Seg"), "nested value renders")
     let v = V2 { x: 3, y: 7 }
     print("{v.x}-{v.y}")
 }

@@ -24,20 +24,6 @@ fn test_flat_vec_push_get_len() {
     print("{rays.get(0).x.floor()}")
 }
 
-@test(output = "0.1\n0.5\n0.9")
-fn test_flat_vec_sort_non_capturing() {
-    let rays: FlatVec<RayTarget> = flat_vec_new(4)
-    rays.push(RayTarget { angle: 0.9, x: 0.0, y: 0.0 })
-    rays.push(RayTarget { angle: 0.1, x: 0.0, y: 0.0 })
-    rays.push(RayTarget { angle: 0.5, x: 0.0, y: 0.0 })
-
-    rays.sort((t) => t.angle)   // capture-free key -> shared fn, no per-call closure
-
-    for i in 0..rays.len {
-        print("{rays.get(i).angle}")
-    }
-}
-
 // Descending input -- the insertion-sort worst case, where every element shifts
 // the whole prefix. The pivot is held across those shifts, so this is what goes
 // wrong if a whole-value element read binds interior storage instead of copying:
@@ -60,32 +46,22 @@ fn test_flat_vec_sort_pivot_survives_shifts() {
     print("{sum.floor()}")
 }
 
-// fv[i] unified-indexing + `for v in fv` sugar over FlatVec<T: value>.
-// fv[i] indexes the buf storage (debug capacity-checked; fv.get is the
-// len-checked accessor); `for` is a numeric loop over 0..fv.len.
-
+// `for` and `enumerate` over a FlatVec visit 0..len, not the capacity.
 value SV2 { x: float, y: float }
 
-@test
-fn flat_vec_index_read_write() {
-    let fv: FlatVec<SV2> = flat_vec_new(4)
-    fv.push(SV2 { x: 1.0, y: 2.0 })
-    fv.push(SV2 { x: 3.0, y: 4.0 })
-    fv[0] = SV2 { x: 9.0, y: 8.0 }
-    let a = fv[0]
-    let b = fv[1]
-    assert_eq(a.x, 9.0)
-    assert_eq(a.y, 8.0)
-    assert_eq(b.x, 3.0)
-    assert_eq(fv.len, 2)
-}
-
-@test
-fn flat_vec_for_iterates_len_not_capacity() {
+@test(output = "0 1\n1 2\n2 3\n2 3")
+fn flat_vec_index_and_loops_visit_live_elements() {
     let fv: FlatVec<SV2> = flat_vec_new(8)
-    fv.push(SV2 { x: 1.0, y: 10.0 })
+    fv.push(SV2 { x: 0.0, y: 0.0 })
     fv.push(SV2 { x: 2.0, y: 20.0 })
     fv.push(SV2 { x: 3.0, y: 30.0 })
+    fv[0] = SV2 { x: 1.0, y: 10.0 }
+    let a = fv[0]
+    let b = fv[1]
+    assert_eq(a.x, 1.0)
+    assert_eq(a.y, 10.0)
+    assert_eq(b.x, 2.0)
+    assert_eq(fv.len, 3)
     let sx = 0.0
     let n = 0
     for v in fv {
@@ -94,14 +70,6 @@ fn flat_vec_for_iterates_len_not_capacity() {
     }
     assert_eq(sx, 6.0)
     assert_eq(n, 3)
-}
-
-@test(output = "0 1\n1 2\n2 3\n2 3")
-fn flat_vec_enumerate_counts_live_elements() {
-    let fv: FlatVec<SV2> = flat_vec_new(8)
-    fv.push(SV2 { x: 1.0, y: 10.0 })
-    fv.push(SV2 { x: 2.0, y: 20.0 })
-    fv.push(SV2 { x: 3.0, y: 30.0 })
     for (i, v) in enumerate(fv) {
         print("{i} {v.x.floor()}")
     }
@@ -204,28 +172,14 @@ fn sum2(v: V2) -> int {
     return v.x + v.y
 }
 
-@test(output = "3")
-fn test_index_field_read() {
+@test(output = "3\n3\n3, 4\n1, 2\n3, 4")
+fn test_value_vec_reads() {
     let xs: [V2] = [make_v2(1, 2), make_v2(3, 4)]
     print(xs[0].x + xs[0].y)
-}
-
-@test(output = "3")
-fn test_index_into_scalar_abi_arg() {
-    let xs: [V2] = [make_v2(1, 2), make_v2(3, 4)]
     print(sum2(xs[0]))
-}
-
-@test(output = "3, 4")
-fn test_value_vec_index() {
     let vs: [V2] = [V2 { x: 1, y: 2 }, V2 { x: 3, y: 4 }]
     let v = vs[1]
     print("{v.x}, {v.y}")
-}
-
-@test(output = "1, 2\n3, 4")
-fn test_value_vec_for_loop() {
-    let vs: [V2] = [V2 { x: 1, y: 2 }, V2 { x: 3, y: 4 }]
     for v in vs {
         print("{v.x}, {v.y}")
     }
@@ -237,16 +191,6 @@ enum Shape { A(Spec), B(Spec) }
 
 struct Holder { id: int, flag: bool, shape: Shape }
 
-@test(output = "17 false 3 5")
-fn struct_update_carries_a_flat_enum_field_from_its_physical_slots() {
-    let h = Holder { id: 17, flag: true, shape: Shape::A(Spec { x: 3.0, y: 5.0 }) }
-    let c = Holder { ..h, flag: false }
-    match c.shape {
-        Shape::A(s) => print("{c.id} {c.flag} {s.x as int} {s.y as int}"),
-        Shape::B(s) => print("wrong {s.x}"),
-    }
-}
-
 fn consume_shape(id: int, flag: bool, shape: Shape) {
     match shape {
         Shape::A(s) => print("{id} {flag} {s.x as int} {s.y as int}"),
@@ -254,22 +198,10 @@ fn consume_shape(id: int, flag: bool, shape: Shape) {
     }
 }
 
-@test(output = "19 true 7 11")
-fn call_spread_carries_a_flat_enum_field_from_its_physical_slots() {
-    let h = Holder { id: 19, flag: true, shape: Shape::A(Spec { x: 7.0, y: 11.0 }) }
-    consume_shape(..h)
-}
-
 struct ChildHolder { p: Spec, id: int }
 
 fn consume_child(p: Spec, id: int) {
     print("{id} {p.x as int} {p.y as int}")
-}
-
-@test(output = "31 23 29")
-fn call_spread_carries_a_nobox_child_from_its_physical_slots() {
-    let h = ChildHolder { p: Spec { x: 23.0, y: 29.0 }, id: 31 }
-    consume_child(..h)
 }
 
 struct MaybeHolder { p: Spec?, id: int }
@@ -283,8 +215,20 @@ fn consume_maybe(p: Spec?, id: int) {
     print("{id} {s.x as int} {s.y as int}")
 }
 
-@test(output = "43 37 41\n47 absent")
-fn call_spread_carries_nullable_nobox_presence_and_leaves() {
+// Struct update and call spread read flat-enum, nobox and nullable nobox
+// fields from their physical slots.
+@test(output = "17 false 3 5\n19 true 7 11\n31 23 29\n43 37 41\n47 absent")
+fn spreads_carry_flat_fields_from_their_physical_slots() {
+    let h = Holder { id: 17, flag: true, shape: Shape::A(Spec { x: 3.0, y: 5.0 }) }
+    let c = Holder { ..h, flag: false }
+    match c.shape {
+        Shape::A(s) => print("{c.id} {c.flag} {s.x as int} {s.y as int}"),
+        Shape::B(s) => print("wrong {s.x}"),
+    }
+    let spread = Holder { id: 19, flag: true, shape: Shape::A(Spec { x: 7.0, y: 11.0 }) }
+    consume_shape(..spread)
+    let child = ChildHolder { p: Spec { x: 23.0, y: 29.0 }, id: 31 }
+    consume_child(..child)
     let present = MaybeHolder { p: Spec { x: 37.0, y: 41.0 }, id: 43 }
     let absent = MaybeHolder { p: null, id: 47 }
     consume_maybe(..present)

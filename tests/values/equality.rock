@@ -17,52 +17,10 @@ fn eq_landmark(n: int) -> EqMarch { EqMarch::Landmark(n) }
 
 fn eq_spec(m: EqMarch) -> EqSpec { EqSpec { march: m, label: "same" } }
 
-@test(output = "true true false false")
-fn enum_equality_control() {
-    print("{eq_none() == eq_none()} {eq_tile(1) == eq_tile(1)} {eq_tile(1) == eq_tile(3)} {eq_tile(1) == eq_landmark(1)}")
-}
-
-@test(output = "true")
-fn value_enum_unit_eq() {
-    print(eq_spec(eq_none()) == eq_spec(eq_none()))
-}
-
-@test(output = "true false true")
-fn value_enum_tile_eq() {
-    let a = eq_spec(eq_tile(1))
-    let b = eq_spec(eq_tile(1))
-    let c = eq_spec(eq_tile(3))
-    print("{a == b} {a == c} {a != c}")
-}
-
-@test(output = "true false false")
-fn value_enum_int_eq() {
-    let a = eq_spec(eq_landmark(7))
-    let b = eq_spec(eq_landmark(7))
-    let c = eq_spec(eq_landmark(8))
-    print("{a == b} {a == c} {a == eq_spec(eq_none())}")
-}
-
-@test(output = "true false")
-fn nested_value_enum_eq() {
-    let a = EqOuter { spec: eq_spec(eq_tile(1)), n: 9 }
-    let b = EqOuter { spec: eq_spec(eq_tile(1)), n: 9 }
-    let c = EqOuter { spec: eq_spec(eq_tile(3)), n: 9 }
-    print("{a == b} {a == c}")
-}
-
-// This path reaches enum slots through an inline child of a GC value box.
+// The inline child reaches enum slots through an inline child of a GC value box.
 nobox value EqInline { march: EqMarch }
 
 value EqEmbedded { child: EqInline, label: string }
-
-@test(output = "true false")
-fn inline_child_enum_eq() {
-    let a = EqEmbedded { child: EqInline { march: eq_tile(1) }, label: "same" }
-    let b = EqEmbedded { child: EqInline { march: eq_tile(1) }, label: "same" }
-    let c = EqEmbedded { child: EqInline { march: eq_tile(3) }, label: "same" }
-    print("{a == b} {a == c}")
-}
 
 // Two global reads are copied leaf Groups; the enum payload still compares
 // structurally, not by its table's identity.
@@ -70,8 +28,26 @@ global EQ_G1: EqSpec = EqSpec { march: eq_tile(1), label: "same" }
 
 global EQ_G2: EqSpec = EqSpec { march: eq_tile(1), label: "same" }
 
-@test(output = "true false")
-fn global_value_enum_eq() {
+@test(output = "true true false false\ntrue\ntrue false true\ntrue false false\ntrue false\ntrue false\ntrue false")
+fn enum_payloads_compare_structurally_inside_values() {
+    print("{eq_none() == eq_none()} {eq_tile(1) == eq_tile(1)} {eq_tile(1) == eq_tile(3)} {eq_tile(1) == eq_landmark(1)}")
+    print(eq_spec(eq_none()) == eq_spec(eq_none()))
+    let a = eq_spec(eq_tile(1))
+    let b = eq_spec(eq_tile(1))
+    let c = eq_spec(eq_tile(3))
+    print("{a == b} {a == c} {a != c}")
+    let la = eq_spec(eq_landmark(7))
+    let lb = eq_spec(eq_landmark(7))
+    let lc = eq_spec(eq_landmark(8))
+    print("{la == lb} {la == lc} {la == eq_spec(eq_none())}")
+    let oa = EqOuter { spec: eq_spec(eq_tile(1)), n: 9 }
+    let ob = EqOuter { spec: eq_spec(eq_tile(1)), n: 9 }
+    let oc = EqOuter { spec: eq_spec(eq_tile(3)), n: 9 }
+    print("{oa == ob} {oa == oc}")
+    let ea = EqEmbedded { child: EqInline { march: eq_tile(1) }, label: "same" }
+    let eb = EqEmbedded { child: EqInline { march: eq_tile(1) }, label: "same" }
+    let ec = EqEmbedded { child: EqInline { march: eq_tile(3) }, label: "same" }
+    print("{ea == eb} {ea == ec}")
     print("{EQ_G1 == EQ_G2} {EQ_G1 == eq_spec(eq_tile(3))}")
 }
 
@@ -93,29 +69,21 @@ global EQ_PRESENT: EqParent = EqParent { child: EqPoint { x: 1 }, kind: EqKind::
 
 global EQ_GRAND: EqGrand = EqGrand { mid: EqMid { child: null }, kind: EqKind::Empty, label: "same" }
 
-@test(output = "true true false false")
-fn absent_inline_child_eq() {
+@test(output = "true true false false\ntrue false false true\ntrue false")
+fn inline_child_presence_eq() {
     let a = EQ_ABSENT == EqParent { child: null, kind: EqKind::Named("same"), label: "same" }
     let b = EqParent { child: null, kind: EqKind::Named("same"), label: "same" } == EQ_ABSENT
     let c = EQ_ABSENT != EqParent { child: null, kind: EqKind::Named("same"), label: "same" }
     let d = EqParent { child: null, kind: EqKind::Named("same"), label: "same" } != EQ_ABSENT
     print("{a} {b} {c} {d}")
-}
-
-@test(output = "true false false true")
-fn present_inline_child_eq() {
-    let a = EQ_PRESENT == EqParent { child: EqPoint { x: 1 }, kind: EqKind::Named("same"), label: "same" }
-    let b = EQ_PRESENT == EqParent { child: EqPoint { x: 2 }, kind: EqKind::Named("same"), label: "same" }
-    let c = EQ_PRESENT == EqParent { child: null, kind: EqKind::Named("same"), label: "same" }
-    let d = EQ_PRESENT != EqParent { child: null, kind: EqKind::Named("same"), label: "same" }
-    print("{a} {b} {c} {d}")
-}
-
-@test(output = "true false")
-fn absent_inline_grandchild_eq() {
-    let a = EQ_GRAND == EqGrand { mid: EqMid { child: null }, kind: EqKind::Empty, label: "same" }
-    let b = EQ_GRAND != EqGrand { mid: EqMid { child: null }, kind: EqKind::Empty, label: "same" }
-    print("{a} {b}")
+    let pa = EQ_PRESENT == EqParent { child: EqPoint { x: 1 }, kind: EqKind::Named("same"), label: "same" }
+    let pb = EQ_PRESENT == EqParent { child: EqPoint { x: 2 }, kind: EqKind::Named("same"), label: "same" }
+    let pc = EQ_PRESENT == EqParent { child: null, kind: EqKind::Named("same"), label: "same" }
+    let pd = EQ_PRESENT != EqParent { child: null, kind: EqKind::Named("same"), label: "same" }
+    print("{pa} {pb} {pc} {pd}")
+    let ga = EQ_GRAND == EqGrand { mid: EqMid { child: null }, kind: EqKind::Empty, label: "same" }
+    let gb = EQ_GRAND != EqGrand { mid: EqMid { child: null }, kind: EqKind::Empty, label: "same" }
+    print("{ga} {gb}")
 }
 
 enum PotionKind {
@@ -149,22 +117,17 @@ fn begin_drag(view: ItemView) -> DragState {
     return DragState { action: Action::Item(view.kind) }
 }
 
-@test(output = "true")
-fn nested_enum_payloads_keep_value_equality_after_struct_storage() {
-    let expected = Action::Item(ItemKind::Potion(PotionKind::Heal))
-    let drag = begin_drag(project())
-    print("{drag.action == expected}")
-}
-
 struct Point { x: int, y: int }
 
 enum Shape { Empty, Dot(Point) }
 
-@test(output = "true")
-fn opaque_struct_payloads_keep_structural_equality() {
+@test(output = "true true")
+fn nested_and_struct_payloads_keep_structural_equality() {
+    let expected = Action::Item(ItemKind::Potion(PotionKind::Heal))
+    let drag = begin_drag(project())
     let a = Shape::Dot(Point { x: 1, y: 2 })
     let b = Shape::Dot(Point { x: 1, y: 2 })
-    print("{a == b}")
+    print("{drag.action == expected} {a == b}")
 }
 
 value V2 { x: float, y: float }
@@ -201,11 +164,6 @@ fn ne_gc_different_tag(tag_a: int, tag_b: int) -> bool {
     return Wrap { tag: tag_a, name: n } != Wrap { tag: tag_b, name: n }
 }
 
-@test(output = "true false true false true true")
-fn scalar_and_gc_carrying_values_compare_contents() {
-    print("{eq_scalar(1.0, 2.0, 1.0, 2.0)} {eq_scalar(1.0, 2.0, 1.0, 3.0)} {ne_scalar(1.0, 2.0, 1.0, 3.0)} {ne_scalar(1.0, 2.0, 1.0, 2.0)} {eq_gc_same_ref(5)} {ne_gc_different_tag(5, 6)}")
-}
-
 fn same(x: Handle<int>, y: Handle<int>) -> bool { return x == y }
 
 fn differ(x: Handle<int>, y: Handle<int>) -> bool { return x != y }
@@ -218,11 +176,6 @@ fn handle_eq(a: int, b: int, c: int, d: int) -> bool {
 fn handle_ne(a: int, b: int, c: int, d: int) -> bool {
     let x: Handle<int> = Handle { slot: a, generation: b }
     return differ(x, Handle { slot: c, generation: d })
-}
-
-@test(output = "true false false false true")
-fn leaf_wise_equality_compares_every_field() {
-    print("{handle_eq(1, 2, 1, 2)} {handle_eq(1, 2, 1, 3)} {handle_eq(1, 2, 4, 2)} {handle_ne(1, 2, 1, 2)} {handle_ne(1, 2, 1, 3)}")
 }
 
 // A C-layout `value` stores `float` leaves as single precision, so leaves read
@@ -247,8 +200,11 @@ fn stored_float_ne(r: float, g: float) -> bool {
     return differ_tint(h, Tint { r: r, g: g, n: 3 })
 }
 
-@test(output = "true false true")
-fn a_stored_float_value_equals_a_fresh_operand() {
+// The last line: a stored single-precision float value equals a fresh operand.
+@test(output = "true false true false true true\ntrue false false false true\ntrue false true")
+fn leaf_wise_equality_compares_every_field() {
+    print("{eq_scalar(1.0, 2.0, 1.0, 2.0)} {eq_scalar(1.0, 2.0, 1.0, 3.0)} {ne_scalar(1.0, 2.0, 1.0, 3.0)} {ne_scalar(1.0, 2.0, 1.0, 2.0)} {eq_gc_same_ref(5)} {ne_gc_different_tag(5, 6)}")
+    print("{handle_eq(1, 2, 1, 2)} {handle_eq(1, 2, 1, 3)} {handle_eq(1, 2, 4, 2)} {handle_ne(1, 2, 1, 2)} {handle_ne(1, 2, 1, 3)}")
     print("{stored_float_eq(0.4, 0.1)} {stored_float_ne(0.4, 0.1)} {stored_float_eq(0.5, 0.25)}")
 }
 

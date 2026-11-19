@@ -18,14 +18,11 @@ fn ref_test_read_hp(player: ref RefTestPlayer) -> int {
 }
 
 @test
-fn ref_parameter_borrows_a_struct_place() {
-    let player = RefTestPlayer { hp: 10 }
-    ref_test_set_hp(player, 42)
-    assert_eq(ref_test_read_hp(player), 42)
-}
+fn ref_parameter_borrows_a_struct_place_and_an_entity() {
+    let local = RefTestPlayer { hp: 10 }
+    ref_test_set_hp(local, 42)
+    assert_eq(ref_test_read_hp(local), 42)
 
-@test
-fn entity_borrow_resolves_a_frame_reference() {
     let players: Arena<RefTestPlayer> = arena_new()
     let entity = players.insert(RefTestPlayer { hp: 7 })
     let player = entity.borrow().unwrap()
@@ -63,17 +60,10 @@ fn borrow_of_a_table_stored_value_element_writes_through() {
     assert_eq(maybes.get(c).unwrap().w ?? 0, 9)
 }
 
-// -- Refs into a scalarizable owner --
-//
-// A `ref` (local, argument, or returned place) into a local whose storage
-// holds a `value` struct. The write goes through an alias the MIR transforms
-// cannot see, so the borrowed root cell must stay whole: SROA splitting or
-// rematerializing it, or copy-prop forwarding its loads to the value ctor,
-// moves the write onto a temporary while reads fold to the ctor's original
-// operands. The lowering marks the root cell `borrowed`.
-//
-// Sibling coverage: tests/values/field_write_scalarized_local.rock (direct
-// `h.p.x = v` writes on the owner).
+// A `ref` (local, argument, or returned place) into a local holding a `value`
+// struct writes through an alias the MIR transforms cannot see, so the borrowed
+// root cell must stay whole through SROA and copy propagation. Each shape gets
+// its own owner local.
 
 value RaQuery {
     head: int = -1,
@@ -103,11 +93,42 @@ fn ra_set_gc(q: ref RaGcQuery, v: int) {
 fn seed(n: int) -> int { return n }
 
 @test
-fn ref_local_write_reaches_scalarized_owner() {
+fn ref_local_writes_reach_the_owner() {
     let g = RaGraph {}
     let q: ref RaQuery = g.query
     q.head = 3
     assert_eq(g.query.head, 3)
+
+    let r = RaGraph {}
+    let rq: ref RaQuery = r.query
+    rq.head = seed(7)
+    rq.head += 1
+    assert_eq(r.query.head, 8)
+    assert_eq(rq.head, 8)
+
+    let gc = RaGcGraph {}
+    let gq: ref RaGcQuery = gc.query
+    gq.head = 3
+    gq.free.push(1)
+    assert_eq(gc.query.head, 3)
+    assert_eq(gc.query.free.len(), 1)
+
+    let s = RaGraph {}
+    let before = s.query
+    let sq: ref RaQuery = s.query
+    sq.head = 5
+    assert_eq(before.head, -1)
+    assert_eq(s.query.head, 5)
+
+    let p = RaQuery {}
+    let pq: ref RaQuery = p
+    pq.head = 5
+    assert_eq(p.head, 5)
+
+    let o = RaOuter {}
+    let oq: ref RaQuery = o.q
+    oq.head = 7
+    assert_eq(o.q.head, 7)
 }
 
 @test
@@ -138,59 +159,6 @@ fn ref_local_rebinding_borrows_each_new_place() {
     assert_eq(local.head, 4)
 }
 
-@test
-fn ref_local_runtime_write_reaches_scalarized_owner() {
-    let g = RaGraph {}
-    let q: ref RaQuery = g.query
-    q.head = seed(7)
-    q.head += 1
-    assert_eq(g.query.head, 8)
-    assert_eq(q.head, 8)
-}
-
-@test
-fn ref_local_write_reaches_gc_value_owner() {
-    let g = RaGcGraph {}
-    let q: ref RaGcQuery = g.query
-    q.head = 3
-    q.free.push(1)
-    assert_eq(g.query.head, 3)
-    assert_eq(g.query.free.len(), 1)
-}
-
-@test
-fn ref_param_write_reaches_scalarized_owner() {
-    let g = RaGraph {}
-    ra_set(g.query, 4)
-    assert_eq(g.query.head, 4)
-}
-
-@test
-fn ref_param_write_is_seen_by_a_later_copy() {
-    let g = RaGraph {}
-    ra_set(g.query, 4)
-    let q = g.query
-    assert_eq(q.head, 4)
-}
-
-@test
-fn ref_param_write_is_seen_by_a_later_copy_of_gc_value() {
-    let g = RaGcGraph {}
-    ra_set_gc(g.query, 4)
-    let q = g.query
-    assert_eq(q.head, 4)
-}
-
-@test
-fn copy_taken_before_ref_write_stays_a_snapshot() {
-    let g = RaGraph {}
-    let before = g.query
-    let q: ref RaQuery = g.query
-    q.head = 5
-    assert_eq(before.head, -1)
-    assert_eq(g.query.head, 5)
-}
-
 value RaOuter {
     q: RaQuery = RaQuery {},
     n: int = 0,
@@ -217,75 +185,51 @@ fn ra_query_of_outlined(g: ref RaGraph) -> ref RaQuery {
 }
 
 @test
-fn ref_param_write_reaches_whole_value_local() {
+fn ref_param_and_returned_ref_writes_reach_the_owner() {
+    let g = RaGraph {}
+    ra_set(g.query, 4)
+    assert_eq(g.query.head, 4)
+
+    let c = RaGraph {}
+    ra_set(c.query, 4)
+    let cq = c.query
+    assert_eq(cq.head, 4)
+
+    let gc = RaGcGraph {}
+    ra_set_gc(gc.query, 4)
+    let gq = gc.query
+    assert_eq(gq.head, 4)
+
     let p = RaQuery {}
     ra_set(p, 4)
     assert_eq(p.head, 4)
-}
 
-@test
-fn ref_local_write_reaches_whole_value_local() {
-    let p = RaQuery {}
-    let q: ref RaQuery = p
-    q.head = 5
-    assert_eq(p.head, 5)
-}
-
-@test
-fn ref_param_write_reaches_nested_value_local() {
     let o = RaOuter {}
     ra_set(o.q, 6)
     assert_eq(o.q.head, 6)
+
+    let s = RaGraph {}
+    ra_graph_set(s, 8)
+    assert_eq(s.query.head, 8)
+
+    let r = RaGraph {}
+    let rq: ref RaQuery = ra_query_of(r)
+    rq.head = 9
+    assert_eq(r.query.head, 9)
+
+    let u = RaGraph {}
+    let uq: ref RaQuery = ra_query_of_outlined(u)
+    uq.head = 9
+    assert_eq(u.query.head, 9)
+
+    let i = RaGraph {}
+    ra_set_inline(i.query, 3)
+    assert_eq(i.query.head, 3)
 }
 
-@test
-fn ref_local_write_reaches_nested_value_local() {
-    let o = RaOuter {}
-    let q: ref RaQuery = o.q
-    q.head = 7
-    assert_eq(o.q.head, 7)
-}
-
-@test
-fn struct_ref_param_projects_a_written_value_field() {
-    let g = RaGraph {}
-    ra_graph_set(g, 8)
-    assert_eq(g.query.head, 8)
-}
-
-@test
-fn returned_ref_write_reaches_scalarized_owner() {
-    let g = RaGraph {}
-    let q: ref RaQuery = ra_query_of(g)
-    q.head = 9
-    assert_eq(g.query.head, 9)
-}
-
-@test
-fn returned_ref_write_reaches_scalarized_owner_outlined() {
-    let g = RaGraph {}
-    let q: ref RaQuery = ra_query_of_outlined(g)
-    q.head = 9
-    assert_eq(g.query.head, 9)
-}
-
-@test
-fn inlined_ref_param_write_reaches_scalarized_owner() {
-    let g = RaGraph {}
-    ra_set_inline(g.query, 3)
-    assert_eq(g.query.head, 3)
-}
-
-// -- Refs to a stored value with a nobox field --
-//
-// A `ref` parameter to a stored `value` whose field is a `nobox` value. Reads
-// and writes through the ref reach the stored row's own representation of the
-// child (dotted leaf keys and a presence tag on a table parent) instead of
-// packing the child into a box. Covers a nullable child (read, non-null write,
-// null write), a non-nullable child on a cdata and on a GC-table parent, a
-// nobox child nested inside a nullable nobox child, and a nested nobox child of
-// a cdata parent. A cdata parent nests a non-inline child, so its whole-field
-// write goes leaf-wise through the stored child, with or without a ref.
+// A `ref` to a stored `value` whose field is a `nobox` value reaches the row's
+// own representation of the child (dotted leaf keys and a presence tag on a
+// table parent, leaf-wise on a cdata parent) instead of packing it into a box.
 
 nobox value RnId {
     value: int,
@@ -407,12 +351,6 @@ fn ref_nullable_nobox_field_read_write_and_clear_reach_the_row() {
     assert(rows[0].binding.live == null)
     assert_eq(rn_live_value(row.binding), -1)
     assert(!rn_suspend(row.binding))
-}
-
-@test
-fn ref_nobox_field_copy_taken_before_write_keeps_the_old_value() {
-    let rows: [RnRow] = []
-    rows.push(rn_row(2))
     assert(rn_resume(rows[0].binding, RnId { value: 3 }))
     let before = rows[0].binding
     assert(rn_suspend(rows[0].binding))
@@ -431,6 +369,10 @@ fn ref_non_nullable_nobox_field_on_scalar_and_gc_parents() {
     assert_eq(rn_bump_gc(row.gc), 4)
     assert_eq(rows[0].gc.live.value, 14)
     assert_eq(rows[0].gc.tags.len(), 1)
+    let cur = row.plain.live
+    row.plain.live = RnId { value: cur.value + 10 }
+    assert_eq(rows[0].plain.live.value, 16)
+    assert_eq(cur.value, 6)
 }
 
 @test
@@ -460,17 +402,6 @@ fn ref_nested_nobox_field_of_a_cdata_parent() {
     assert_eq(rows[0].deep.pair.a.value, 1)
 }
 
-@test
-fn direct_whole_nobox_field_write_on_a_cdata_parent() {
-    let rows: [RnRow] = []
-    rows.push(rn_row(8))
-    let row = rows[0]
-    let cur = row.plain.live
-    row.plain.live = RnId { value: cur.value + 1 }
-    assert_eq(rows[0].plain.live.value, 9)
-    assert_eq(cur.value, 8)
-}
-
 // -- Frame-reference uses the borrow rules accept --
 
 value RefRulePosition { x: int }
@@ -481,37 +412,28 @@ fn ref_rule_move(position: ref RefRulePosition) { position.x = 2 }
 fn ref_rule_same(position: ref RefRulePosition) -> ref RefRulePosition { return position }
 fn ref_rule_damage(player: RefRulePlayer) { player.hp = 1 }
 
-// A Vec element lives through the immediate ref-parameter call; the push after
-// it is no hazard.
-@test(output = "2\n2")
-fn vec_element_lives_through_an_immediate_ref_call() {
-    let positions = [RefRulePosition { x: 1 }]
-    ref_rule_move(positions[0])
-    positions.push(RefRulePosition { x: 3 })
-    print(positions[0].x)
-    print(positions.len())
-}
-
 fn ref_rule_retain(player: ref RefRulePlayer) {
     let from_player: ref RefRulePosition = ref_rule_same(player.position)
     let from_global: ref RefRulePosition = REF_RULE_ORIGIN
     from_player.x = from_global.x
 }
 
-// Subfields of a ref input and globals are frame-stable, so they can be retained.
-@test(output = "5")
-fn frame_stable_subfields_and_globals_are_retainable() {
+fn ref_rule_damage_through(player: ref RefRulePlayer) { ref_rule_damage(player) }
+
+// A Vec element lives through an immediate ref call (the later push is no
+// hazard); subfields of a ref input and globals are frame-stable, so they can
+// be retained; an explicit ref fills an identity parameter.
+@test(output = "2\n2\n5\n1")
+fn frame_reference_uses_the_borrow_rules_accept() {
+    let positions = [RefRulePosition { x: 1 }]
+    ref_rule_move(positions[0])
+    positions.push(RefRulePosition { x: 3 })
+    print(positions[0].x)
+    print(positions.len())
     let player = RefRulePlayer { position: RefRulePosition { x: 0 }, hp: 3 }
     ref_rule_retain(player)
     print(player.position.x)
-}
-
-fn ref_rule_damage_through(player: ref RefRulePlayer) { ref_rule_damage(player) }
-
-// An explicit ref to an identity struct is the borrow an identity parameter takes.
-@test(output = "1")
-fn explicit_ref_fills_an_identity_parameter() {
-    let player = RefRulePlayer { position: RefRulePosition { x: 0 }, hp: 3 }
-    ref_rule_damage_through(player)
-    print(player.hp)
+    let other = RefRulePlayer { position: RefRulePosition { x: 0 }, hp: 3 }
+    ref_rule_damage_through(other)
+    print(other.hp)
 }

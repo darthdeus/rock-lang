@@ -1,15 +1,11 @@
-// GC-carrying value structs: materialization shapes, then equality.
-//
-// A `value` struct with a non-C-mappable field (`[int]`, `Arena<T>`, ...) or a
-// generic `value` struct is GC-CARRYING: it scalarizes through calls exactly
-// like an FFI-clean value struct, but materializes as a Lua table
-// (`<Name>_vt(...)`), not cdata. Equality compares scalar and nested value
-// fields structurally and GC-ref fields BY REFERENCE.
+// A `value` with a non-C-mappable field, or a generic one, is GC-carrying: it
+// materializes as a `<Name>_vt` table sharing one metatable, and equality is
+// structural for scalar and value fields, by reference for GC-ref fields.
 
-value Bag {
-    xs: [int],
-    n: int,
-}
+value Bag { xs: [int], n: int }
+struct Holder { bag: Bag, tag: int }
+value Marks { a: [int], b: [int] }
+value Pair<T> { a: T, b: T }
 
 fn make_bag(a: int, b: int, c: int, n: int) -> Bag {
     return Bag { xs: [a, b, c], n: n }
@@ -21,104 +17,27 @@ fn bag_sum(b: Bag) -> int {
     return s + b.n
 }
 
-// ----- 1. Nullable return (keeps the boxed ABI -> forces materialization).
-
 fn find_bag(want: int) -> Bag? {
     if want == 0 { return null }
     return make_bag(want, want * 2, want * 3, want)
 }
 
-@test(output = "7\n-1")
-fn gc_nullable_return() {
-    let b = find_bag(1)
-    print(if b != null { bag_sum(b) } else { -1 })
-    let none = find_bag(0)
-    print(if none != null { bag_sum(none) } else { -1 })
-}
-
-// ----- 2. Vec store + read-back.
-
-@test(output = "34")
-fn gc_vec_store() {
-    let bags: [Bag] = []
-    bags.push(make_bag(1, 2, 3, 4))
-    bags.push(make_bag(5, 6, 7, 6))
-    let total = 0
-    for b in bags { total = total + bag_sum(b) }
-    print(total)
-}
-
-// ----- 3. Struct-field store.
-
-struct Holder {
-    bag: Bag,
-    tag: int,
-}
-
-@test(output = "16")
-fn gc_struct_field_store() {
-    let h = Holder { bag: make_bag(2, 4, 6, 4), tag: 9 }
-    print(bag_sum(h.bag))
-}
-
-// ----- 4. Global store (nullable global).
-
 global GBAG: Bag? = null
-
-@test(output = "42")
-fn gc_global_store() {
-    GBAG = make_bag(10, 20, 9, 3)
-    print(bag_sum(GBAG))
-}
-
-// ----- 5. Capture in a closure.
-
-@test(output = "10")
-fn gc_capture() {
-    let b = make_bag(1, 2, 3, 4)
-    let f = () => bag_sum(b)
-    print(f())
-}
-
-// ----- 6. Coroutine yielding the whole value (boxed across the yield).
 
 co fn co_bags() -> Coroutine<Bag> {
     yield make_bag(1, 1, 1, 1)
     yield make_bag(2, 2, 2, 2)
 }
 
-@test(output = "4\n8")
-fn gc_coroutine_yield_value() {
-    let c = co_bags()
-    let a = c.resume()
-    print(if a != null { bag_sum(a) } else { -1 })
-    let b = c.resume()
-    print(if b != null { bag_sum(b) } else { -1 })
+global ORDER: [int] = []
+
+fn mark(n: int) -> [int] {
+    ORDER.push(n)
+    return [n]
 }
 
-// ----- 7. String interpolation of a container-carrying value is rejected at
-// compile time (tests/errors/strings.rock.err).
-
-// ----- 8. Equality: scalar structural, GC-ref BY REFERENCE.
-
-@test(output = "true false false false")
-fn gc_eq_ref_identity() {
-    let xs = [1, 2, 3]
-    let a = Bag { xs: xs, n: 5 }
-    let b = Bag { xs: xs, n: 5 }        // same xs ref, same n -> equal
-    let ys = [1, 2, 3]
-    let c = Bag { xs: ys, n: 5 }        // different xs ref (equal contents) -> not equal
-    let d = Bag { xs: xs, n: 6 }        // same xs ref, different n -> not equal
-    let e = Bag { xs: [1, 2, 3], n: 5 }
-    let f = Bag { xs: [1, 2, 3], n: 5 }
-    print("{a == b} {a == c} {a == d} {e == f}")
-}
-
-// ----- 9. Generic value struct (generic => GC-tier, uniform slot).
-
-value Pair<T> {
-    a: T,
-    b: T,
+fn make_marks() -> Marks? {
+    return Marks { a: mark(1), b: mark(2) }
 }
 
 fn make_pair(x: int, y: int) -> Pair<int> {
@@ -134,137 +53,86 @@ fn find_pair(want: int) -> Pair<int>? {
     return make_pair(want, want * 10)
 }
 
-@test(output = "33\n-1")
-fn gc_generic_nullable_return() {
-    let p = find_pair(3)
-    print(if p != null { pair_sum(p) } else { -1 })
-    let none = find_pair(0)
-    print(if none != null { pair_sum(none) } else { -1 })
-}
+@test(output = "7 -1 34 16 7 42 10\n4 8\n1 2\n33 -1 132")
+fn gc_materialization_shapes() {
+    let b = find_bag(1)
+    if b == null { print("no bag"); return }
+    let none = find_bag(0)
+    let bags: [Bag] = []
+    bags.push(make_bag(1, 2, 3, 4))
+    bags.push(make_bag(5, 6, 7, 6))
+    let total = 0
+    for x in bags { total = total + bag_sum(x) }
+    let h = Holder { bag: make_bag(2, 4, 6, 4), tag: 9 }
+    let refined = Holder { bag: b, tag: 0 }
+    GBAG = make_bag(10, 20, 9, 3)
+    let gsum = bag_sum(GBAG)
+    let captured = make_bag(1, 2, 3, 4)
+    let f = () => bag_sum(captured)
+    print("{bag_sum(b)} {if none != null { bag_sum(none) } else { -1 }} {total} {bag_sum(h.bag)} {bag_sum(refined.bag)} {gsum} {f()}")
 
-@test(output = "132")
-fn gc_generic_vec_store() {
+    let c = co_bags()
+    let y1 = c.resume()
+    let y2 = c.resume()
+    print("{if y1 != null { bag_sum(y1) } else { -1 }} {if y2 != null { bag_sum(y2) } else { -1 }}")
+
+    let m = make_marks()
+    if m == null { print("none") } else { print("{ORDER[0]} {ORDER[1]}") }
+
+    let p = find_pair(3)
+    let pn = find_pair(0)
     let ps: [Pair<int>] = []
     ps.push(make_pair(1, 10))
     ps.push(make_pair(11, 110))
-    let total = 0
-    for p in ps { total = total + pair_sum(p) }
-    print(total)
+    let ptotal = 0
+    for q in ps { ptotal = ptotal + pair_sum(q) }
+    print("{if p != null { pair_sum(p) } else { -1 }} {if pn != null { pair_sum(pn) } else { -1 }} {ptotal}")
 }
 
-// ----- 10. deepcopy of a GC-carrying value struct DEEP-COPIES (not shares):
-// its fields survive, and because a value struct may hold a mutable ref the
-// walk copies that ref -- so the GC-ref field is a fresh instance and value eq
-// (GC-ref BY REFERENCE) reports the copy as distinct. (Self-contained cdata
-// value structs are shared; the plan's "copy is share" holds only for those.)
+value VecBox { xs: [int], n: int }
+value SBox { s: string, n: int }
+value Point { x: int, y: int }
+value Tagged { p: Point, xs: [int] }
+value Wrap { inner: VecBox, k: int }
+struct Ref { v: int }
+value HasRef { r: Ref, n: int }
 
-@test(output = "7 false true")
-fn gc_deepcopy_deep_copies_and_preserves_fields() {
-    let b = make_bag(1, 2, 3, 1)
-    let c = deepcopy(b)
-    print("{bag_sum(c)} {b == c} {bag_sum(b) == bag_sum(c)}")
-}
+// deepcopy of a GC-carrying value copies its GC-ref fields, so the copy compares unequal.
+@test(output = "true false false false true\ntrue true false true false true false true false\n7 false true")
+fn gc_equality_per_field_kind() {
+    let xs = [1, 2, 3]
+    let a = Bag { xs: xs, n: 5 }
+    let b = Bag { xs: xs, n: 5 }
+    let c = Bag { xs: [1, 2, 3], n: 5 }
+    let d = Bag { xs: xs, n: 6 }
+    let e = Bag { xs: [1, 2, 3], n: 5 }
+    let shelf = Holder { bag: a, tag: 0 }
+    print("{a == b} {a == c} {a == d} {e == c} {shelf.bag == b}")
 
-// The per-field split per field type. Two Vecs with EQUAL CONTENTS but
-// different identity compare != (gc_eq_ref_identity above): that is where
-// value-struct eq diverges from the contents walk a reference struct gets.
-
-value VecBox {
-    xs: [int],
-    n: int,
-}
-
-// ----- String field compares BY VALUE (Lua interns; JS `===` is by-value).
-
-value SBox {
-    s: string,
-    n: int,
-}
-
-@test(output = "true")
-fn string_field_by_value_eq() {
     let w = "wor"
-    let a = SBox { s: "{w}ld", n: 1 }
-    let b = SBox { s: "world", n: 1 }
-    print(a == b)
-}
-
-// ----- Nested SCALAR value-struct field: structural (a cdata `Point` on
-// luajit compares byte-value; equal contents -> equal, differing -> not).
-
-value Point {
-    x: int,
-    y: int,
-}
-
-value Tagged {
-    p: Point,
-    xs: [int],
-}
-
-@test(output = "true false")
-fn nested_scalar_valuestruct_field_structural() {
-    let xs = [1, 2]
-    let a = Tagged { p: Point { x: 1, y: 2 }, xs: xs }
-    let b = Tagged { p: Point { x: 1, y: 2 }, xs: xs }
-    let c = Tagged { p: Point { x: 9, y: 2 }, xs: xs }
-    print("{a == b} {a == c}")
-}
-
-// ----- Nested GC-carrying value-struct field: structural (recurses into
-// that struct's own per-field split -- its inner Vec is still BY REFERENCE).
-
-value Wrap {
-    inner: VecBox,
-    k: int,
-}
-
-@test(output = "true false")
-fn nested_gc_valuestruct_field_structural() {
+    let s1 = SBox { s: "{w}ld", n: 1 }
+    let s2 = SBox { s: "world", n: 1 }
+    let ys = [1, 2]
+    let t1 = Tagged { p: Point { x: 1, y: 2 }, xs: ys }
+    let t2 = Tagged { p: Point { x: 1, y: 2 }, xs: ys }
+    let t3 = Tagged { p: Point { x: 9, y: 2 }, xs: ys }
     let shared = [7, 8]
-    let a = Wrap { inner: VecBox { xs: shared, n: 3 }, k: 9 }
-    let b = Wrap { inner: VecBox { xs: shared, n: 3 }, k: 9 }
-    // Same inner Vec ref + equal scalars -> equal.
-    let c = Wrap { inner: VecBox { xs: [7, 8], n: 3 }, k: 9 }
-    // Inner Vec has equal contents but different identity -> not equal.
-    print("{a == b} {a == c}")
+    let w1 = Wrap { inner: VecBox { xs: shared, n: 3 }, k: 9 }
+    let w2 = Wrap { inner: VecBox { xs: shared, n: 3 }, k: 9 }
+    let w3 = Wrap { inner: VecBox { xs: [7, 8], n: 3 }, k: 9 }
+    let r = Ref { v: 7 }
+    let r1 = HasRef { r: r, n: 1 }
+    let r2 = HasRef { r: r, n: 1 }
+    let r3 = HasRef { r: Ref { v: 7 }, n: 1 }
+    let p1 = make_pair(3, 4)
+    let p2 = make_pair(3, 4)
+    let p3 = make_pair(3, 5)
+    print("{s1 == s2} {t1 == t2} {t1 == t3} {w1 == w2} {w1 == w3} {r1 == r2} {r1 == r3} {p1 == p2} {p1 == p3}")
+
+    let orig = make_bag(1, 2, 3, 1)
+    let copy = deepcopy(orig)
+    print("{bag_sum(copy)} {orig == copy} {bag_sum(orig) == bag_sum(copy)}")
 }
-
-// ----- Reference-struct field compares BY REFERENCE (the `rawequal` arm).
-
-struct Ref {
-    v: int,
-}
-
-value HasRef {
-    r: Ref,
-    n: int,
-}
-
-@test(output = "true false")
-fn ref_struct_field_by_reference() {
-    let shared = Ref { v: 7 }
-    let a = HasRef { r: shared, n: 1 }
-    let b = HasRef { r: shared, n: 1 }
-    let c = HasRef { r: Ref { v: 7 }, n: 1 }
-    // b shares the Ref identity (equal); c has an equal-contents but distinct
-    // Ref (NOT equal -- a reference struct field is compared by identity).
-    print("{a == b} {a == c}")
-}
-
-// ----- Generic value struct (generic => GC-tier). Fields are the generic
-// `T`, compared by reference; for `int` payloads that is value-eq.
-@test(output = "true false")
-fn generic_pair_eq() {
-    let a = make_pair(3, 4)
-    let b = make_pair(3, 4)
-    let c = make_pair(3, 5)
-    print("{a == b} {a == c}")
-}
-
-// Inspect uses the same sorted equals-format for GC-free and GC-carrying values.
-// The cdata tostring representation remains covered by print_composites.rock.
-// These byte pins run on both backends.
 
 @test
 fn inspect_gc_carrying_values() {

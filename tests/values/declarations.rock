@@ -58,6 +58,16 @@ fn value_types_construct_and_coexist() {
     let o = Outer { pos: Inner { a: 1.0, b: 2.0 }, scale: 3.0 }
     assert(o.pos.a == 1.0)
     assert(o.scale == 3.0)
+
+    let fv = FixVec2 { x: 3.0, y: 4.0 }
+    assert(fv.x == 3.0)
+    assert(fv.y == 4.0)
+    let s = Stats { a: 10, b: 20 }
+    assert(s.a == 10)
+    assert(s.b == 20)
+    let r = RenderStats { draw_calls: 5, shader_switches: 3 }
+    assert(r.draw_calls == 5)
+    assert(r.shader_switches == 3)
 }
 
 value CatalogValueDef {
@@ -82,6 +92,8 @@ fn define_catalog_second() -> CatalogValueDef {
     return CatalogValueDef { is_open: () => false, scope: "second", stage: 10 }
 }
 
+// Widget entries keep declaration order, not key order, and a catalog with no
+// members is an empty list rather than missing.
 @test(output = "catalog values preserved")
 fn definition_catalog_preserves_value_factory_results() {
     let direct = define_catalog_first()
@@ -103,6 +115,13 @@ fn definition_catalog_preserves_value_factory_results() {
     let copied = plan[0].definition
     assert(!copied.is_open() && copied.scope == "second" && copied.stage == 10,
         "catalog values remain complete after copying")
+
+    let widgets = widget_definition_plan()
+    assert_eq(widgets.len, 2)
+    assert_eq(widgets[0].key, "beta")
+    assert_eq(widgets[0].definition.value, 2)
+    assert_eq(widgets[1].key, "alpha")
+    assert_eq(empty_widget_definition_plan().len, 0)
     print("catalog values preserved")
 }
 
@@ -125,18 +144,6 @@ fn make_beta() -> WidgetDef { return WidgetDef { value: 2 } }
 
 @widget(key="alpha")
 fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
-
-// Entries keep declaration order, not key order, and a catalog with no
-// members is an empty list rather than missing.
-@test
-fn catalog_entries_keep_declaration_order() {
-    let plan = widget_definition_plan()
-    assert_eq(plan.len, 2)
-    assert_eq(plan[0].key, "beta")
-    assert_eq(plan[0].definition.value, 2)
-    assert_eq(plan[1].key, "alpha")
-    assert_eq(empty_widget_definition_plan().len, 0)
-}
 
 value FixVec2 { x: float, y: float }
 
@@ -162,21 +169,6 @@ extern(ffi, "testlib") fn get_render_stats() -> RenderStats
 
 extern(ffi, "testlib") fn reset_stats()
 
-// The testlib functions are never called: compiling their declarations is the
-// check.
-@test
-fn ffi_value_types_construct() {
-    let v = FixVec2 { x: 3.0, y: 4.0 }
-    assert(v.x == 3.0)
-    assert(v.y == 4.0)
-    let s = Stats { a: 10, b: 20 }
-    assert(s.a == 10)
-    assert(s.b == 20)
-    let r = RenderStats { draw_calls: 5, shader_switches: 3 }
-    assert(r.draw_calls == 5)
-    assert(r.shader_switches == 3)
-}
-
 value V2 { x: int, y: int }
 
 // @nomangle => emitted name == source name == cdata ABI (a single cdata
@@ -185,81 +177,53 @@ value V2 { x: int, y: int }
     return V2 { x: x, y: y }
 }
 
-@test(output = "3\n4")
-fn test_nomangle_value_return_is_single_cdata() {
-    // `local v = mk_v2(3,4)` binds ONE local; if mk_v2 wrongly
-    // multi-returned `3, 4` this truncates to v=3 and `v.x` crashes
-    // (number indexed). Correct: v is one Vec2 cdata.
-    let v = mk_v2(3, 4)
-    print("{v.x}")
-    print("{v.y}")
-}
-
-// A regular (mangled) fn still uses the scalar ABI -- sanity that
-// the fix did not break the scalar-ABI return path.
+// A regular (mangled) fn still uses the scalar ABI.
 fn mk_v2_mangled(x: int, y: int) -> V2 {
     return V2 { x: x, y: y }
 }
 
-@test(output = "30")
-fn test_mangled_value_return_still_scalar_abi() {
-    let v = mk_v2_mangled(5, 6)
-    print("{v.x * v.y}")
+@test(output = "3\n4\n30")
+fn test_nomangle_and_mangled_value_returns() {
+    let v = mk_v2(3, 4)
+    print("{v.x}")
+    print("{v.y}")
+    let m = mk_v2_mangled(5, 6)
+    print("{m.x * m.y}")
 }
 
 const STEP: float = 1.0 / 60.0
 
 @test
-fn test_envelope_attack_timing() {
+fn test_envelope_attack_release_and_retarget() {
     let e = envelope(0.2, 0.5)
     assert_eq(e.value, 0, "starts at zero")
-
     for _i in 0..6 { e.step_by(1.0, STEP) }
     assert(e.value > 0.45 && e.value < 0.55, "half attack after 0.1s")
-
     for _i in 0..12 { e.step_by(1.0, STEP) }
     assert_eq(e.value, 1.0, "reaches goal exactly, no asymptotic tail")
-}
 
-@test
-fn test_envelope_release_slower_than_attack() {
-    let e = envelope(0.1, 0.5)
-    for _i in 0..12 { e.step_by(1.0, STEP) }
-    assert_eq(e.value, 1.0, "attacked to full")
+    let r = envelope(0.1, 0.5)
+    let first = r.step_by(1.0, STEP)
+    assert_eq(first, r.value, "step_by returns the new value")
+    for _i in 0..11 { r.step_by(1.0, STEP) }
+    assert_eq(r.value, 1.0, "attacked to full")
+    for _i in 0..6 { r.step_by(0.0, STEP) }
+    assert(r.value > 0.75 && r.value < 0.85, "release at its own rate")
+    for _i in 0..60 { r.step_by(0.0, STEP) }
+    assert_eq(r.value, 0.0, "releases to exactly zero")
 
-    for _i in 0..6 { e.step_by(0.0, STEP) }
-    assert(e.value > 0.75 && e.value < 0.85, "release at its own rate")
+    let p = envelope(0.2, 0.4)
+    for _i in 0..120 { p.step_by(0.25, STEP) }
+    assert_eq(p.value, 0.25, "sustains a partial goal from below")
+    for _i in 0..120 { p.step_by(1.0, STEP) }
+    for _i in 0..120 { p.step_by(0.25, STEP) }
+    assert_eq(p.value, 0.25, "settles onto a partial goal from above")
 
-    for _i in 0..60 { e.step_by(0.0, STEP) }
-    assert_eq(e.value, 0.0, "releases to exactly zero")
-}
-
-@test
-fn test_envelope_partial_goal_holds() {
-    let e = envelope(0.2, 0.4)
-    for _i in 0..120 { e.step_by(0.25, STEP) }
-    assert_eq(e.value, 0.25, "sustains a partial goal from below")
-
-    for _i in 0..120 { e.step_by(1.0, STEP) }
-    for _i in 0..120 { e.step_by(0.25, STEP) }
-    assert_eq(e.value, 0.25, "settles onto a partial goal from above")
-}
-
-@test
-fn test_envelope_retarget_is_continuous() {
-    let e = envelope(0.2, 0.2)
-    for _i in 0..3 { e.step_by(1.0, STEP) }
-    let mid = e.value
+    let t = envelope(0.2, 0.2)
+    for _i in 0..3 { t.step_by(1.0, STEP) }
+    let mid = t.value
     assert(mid > 0.2 && mid < 0.3, "mid-attack")
-
-    e.step_by(0.0, STEP)
-    assert(e.value < mid, "flip to release moves down from current value")
-    assert(mid - e.value < 0.1, "no pop on retarget")
-}
-
-@test
-fn test_envelope_step_returns_value() {
-    let e = envelope(0.1, 0.1)
-    let r = e.step_by(1.0, STEP)
-    assert_eq(r, e.value, "step_by returns the new value")
+    t.step_by(0.0, STEP)
+    assert(t.value < mid, "flip to release moves down from current value")
+    assert(mid - t.value < 0.1, "no pop on retarget")
 }

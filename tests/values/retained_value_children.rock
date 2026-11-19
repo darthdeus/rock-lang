@@ -33,58 +33,29 @@ fn read_vec_snapshot(records: [Solid]) -> int {
     return saved.child.x
 }
 
-@test(output = "1")
-fn retained_nullable_child_is_a_snapshot() {
-    let owner = Owner { record: Record { child: Point { x: 1, y: 2 }, refs: [] } }
-    print(read_snapshot(owner))
-}
-
-@test(output = "1")
-fn retained_nested_nullable_child_is_a_snapshot() {
-    let tree = Tree { branch: Branch {
-        record: Record { child: Point { x: 1, y: 2 }, refs: [] }, refs: [] } }
-    print(read_nested_snapshot(tree))
-}
-
-@test(output = "1")
-fn retained_child_passed_after_owner_write_is_a_snapshot() {
-    let owner = Owner { record: Record { child: Point { x: 1, y: 2 }, refs: [] } }
-    print(pass_snapshot_child(owner))
-}
-
-@test(output = "1\n2\n3")
-fn retained_child_in_a_loop_is_a_snapshot() {
-    let owner = Owner { record: Record { child: Point { x: 1, y: 2 }, refs: [] } }
-    for i in 1..4 {
-        owner.record.child = Point { x: i, y: 2 }
-        let saved = owner.record
-        owner.record.child.x = 99
-        print(saved.child?.x ?? -1)
-    }
-}
-
-@test(output = "1")
-fn retained_nonnull_vec_child_is_a_snapshot() {
-    let records: [Solid] = [Solid { child: Point { x: 1, y: 2 }, refs: [] }]
-    print(read_vec_snapshot(records))
-}
-
-@test(output = "-1\n-1\n-1")
-fn retained_nullable_children_preserve_absence() {
-    print(read_snapshot(Owner { record: Record { child: null, refs: [] } }))
-    print(read_nested_snapshot(Tree { branch: Branch { record: null, refs: [] } }))
-    print(read_nested_snapshot(Tree { branch: Branch {
-        record: Record { child: null, refs: [] }, refs: [] } }))
-}
-
 fn share_reference_child(owner: Owner) -> int {
     let saved = owner.record
     owner.record.refs.push(7)
     return saved.refs.len()
 }
 
-@test(output = "1")
-fn retained_value_children_keep_reference_leaves_shared() {
-    let owner = Owner { record: Record { child: null, refs: [] } }
-    print(share_reference_child(owner))
+fn owner(child: Point?) -> Owner { Owner { record: Record { child: child, refs: [] } } }
+
+// Retained value children are snapshots; reference leaves stay shared.
+@test(output = "1 1 1 1 1\n-1 -1 -1\n1\n2\n3")
+fn retained_value_children_are_snapshots() {
+    let tree = Tree { branch: Branch {
+        record: Record { child: Point { x: 1, y: 2 }, refs: [] }, refs: [] } }
+    let records: [Solid] = [Solid { child: Point { x: 1, y: 2 }, refs: [] }]
+    print("{read_snapshot(owner(Point { x: 1, y: 2 }))} {read_nested_snapshot(tree)} {pass_snapshot_child(owner(Point { x: 1, y: 2 }))} {read_vec_snapshot(records)} {share_reference_child(owner(null))}")
+    let empty_tree = Tree { branch: Branch { record: null, refs: [] } }
+    let empty_record = Tree { branch: Branch { record: Record { child: null, refs: [] }, refs: [] } }
+    print("{read_snapshot(owner(null))} {read_nested_snapshot(empty_tree)} {read_nested_snapshot(empty_record)}")
+    let looped = owner(Point { x: 1, y: 2 })
+    for i in 1..4 {
+        looped.record.child = Point { x: i, y: 2 }
+        let saved = looped.record
+        looped.record.child.x = 99
+        print(saved.child?.x ?? -1)
+    }
 }

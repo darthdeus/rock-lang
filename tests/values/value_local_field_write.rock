@@ -1,19 +1,14 @@
 // A field write through a value local or a by-value parameter replaces that
 // binding's whole value (#107): `a.b.c = v` means `a = A { ..a, b: B { ..a.b,
 // c: v } }`, whatever the representation (boxed, scalarized, nobox). No other
-// copy observes the write: not the value it was copied from, not a caller's
-// argument, not a container it was pushed into. A call result or literal is
-// still a temporary, and `field_set` still cannot take a value
-// (tests/errors/assignment.rock.err).
-//
-// Sibling coverage: writes through mutable storage are
-// tests/values/place_leaf_write.rock and field_write_scalarized_local.rock.
+// copy observes the write. Writes through mutable storage are
+// tests/values/place_leaf_write.rock.
 
 value In { c: int, s: string }          // GC-carrying (string field)
 value Pt { x: int, b: In }
 value FPoint { x: float, y: float }     // FFI-clean, scalarizable
 value MaybeIn { x: int, b: In? }        // opaque nullable child
-value Gen<T> { v: T, n: int }           // generic child
+value Gen<T> { v: T, n: int }
 nobox value Sid { value: int }
 nobox value Place { space: Sid, pos: FPoint }
 nobox value MaybeSid { a: Sid?, k: int }
@@ -41,159 +36,60 @@ fn mode_n(m: Mode) -> int {
     }
 }
 
-// -- Plain, compound and inc/dec forms on a local --
-
-@test(output = "1 9")
-fn copy_does_not_see_write() {
+@test(output = "1 9 9 1\n1 6 1\n2 0 1 2\n1 2\nx 1 y a\n0 2 9")
+fn local_forms() {
     let v = mk()
     let a = v
     a.x = 9
-    print("{v.x} {a.x}")
-}
-
-@test(output = "9 1")
-fn source_write_does_not_reach_copy() {
-    let v = mk()
-    let a = v
-    v.x = 9
-    print("{v.x} {a.x}")
-}
-
-@test(output = "1 6 1")
-fn nested_compound() {
-    let v = mk()
-    let a = v
-    let i = a.b
-    a.b.c += 5
-    print("{v.b.c} {a.b.c} {i.c}")
-}
-
-@test(output = "2 0 1 2")
-fn incdec_prefix_postfix() {
-    let a = mk()
-    let old = a.x++
-    let new = --a.b.c
-    print("{a.x} {a.b.c} {old} {a.x}")
+    let v2 = mk()
+    let a2 = v2
+    v2.x = 9
+    print("{v.x} {a.x} {v2.x} {a2.x}")
+    let v3 = mk()
+    let a3 = v3
+    let i = a3.b
+    a3.b.c += 5
+    print("{v3.b.c} {a3.b.c} {i.c}")
+    let a4 = mk()
+    let old = a4.x++
+    let new = --a4.b.c
+    print("{a4.x} {a4.b.c} {old} {a4.x}")
     assert_eq(new, 0)
+    let a5 = mk()
+    let b5 = a5
+    a5.b = In { c: 2, s: "z" }
+    print("{b5.b.c} {a5.b.c}")
+    let v6 = mk()
+    let a6 = v6
+    let b6 = v6
+    a6.b.s = "x"
+    b6.b.s = "y"
+    print("{a6.b.s} {a6.b.c} {b6.b.s} {v6.b.s}")
+    let w = WithEnum { m: Mode::Off, k: 0 }
+    let w2 = w
+    w.m = Mode::On(2)
+    w.k = 9
+    print("{mode_n(w2.m)} {mode_n(w.m)} {w.k}")
 }
 
-@test(output = "1 2")
-fn whole_child_replaced() {
-    let a = mk()
-    let b = a
-    a.b = In { c: 2, s: "z" }
-    print("{b.b.c} {a.b.c}")
-}
-
-@test(output = "x 1 y a")
-fn gc_carrying_fields() {
-    let v = mk()
-    let a = v
-    let b = v
-    a.b.s = "x"
-    b.b.s = "y"
-    print("{a.b.s} {a.b.c} {b.b.s} {v.b.s}")
-}
-
-@test(output = "0.5 1")
-fn scalarized_local() {
+@test(output = "0.5 1 3 1 2 1")
+fn scalarized_local_forms() {
     let s = FPoint { x: 0.5, y: 0.5 }
     s.y *= 2.0
-    print("{s.x} {s.y}")
-}
-
-@test(output = "3 1")
-fn written_in_a_loop() {
     let p = FPoint { x: 0.0, y: 1.0 }
     let i = 0
     while i < 3 {
         p.x += 1.0
         i++
     }
-    print("{p.x} {p.y}")
-}
-
-@test(output = "2 1")
-fn written_on_one_branch() {
-    let p = FPoint { x: 1.0, y: 1.0 }
-    let q = p
+    let o = FPoint { x: 1.0, y: 1.0 }
+    let q = o
     if q.x > 0.0 {
         q.x = 2.0
     } else {
         q.y = 5.0
     }
-    print("{q.x} {p.x}")
-}
-
-@test(output = "0 2 9")
-fn enum_field() {
-    let w = WithEnum { m: Mode::Off, k: 0 }
-    let v = w
-    w.m = Mode::On(2)
-    w.k = 9
-    print("{mode_n(v.m)} {mode_n(w.m)} {w.k}")
-}
-
-// -- Where the local's value came from --
-
-@test(output = "1 9")
-fn reassigned_from_another_local() {
-    let v = mk()
-    let a = mk()
-    a = v
-    a.x = 9
-    print("{v.x} {a.x}")
-}
-
-@test(output = "1 9")
-fn copied_from_global() {
-    let a = G
-    a.x = 9
-    print("{G.x} {a.x}")
-}
-
-@test(output = "1 9")
-fn copied_from_struct_field() {
-    let h = Holder { p: mk() }
-    let a = h.p
-    a.x = 9
-    print("{h.p.x} {a.x}")
-}
-
-@test(output = "1 9")
-fn copied_from_element() {
-    let xs = [mk()]
-    let a = xs[0]
-    a.b.c = 9
-    print("{xs[0].b.c} {a.b.c}")
-}
-
-@test(output = "1 5")
-fn child_built_from_another_local() {
-    let i = In { c: 1, s: "a" }
-    let a = Pt { x: 1, b: i }
-    a.b.c = 5
-    print("{i.c} {a.b.c}")
-}
-
-@test(output = "1 5")
-fn child_assigned_from_another_local() {
-    let i = In { c: 1, s: "a" }
-    let a = mk()
-    a.b = i
-    a.b.c = 5
-    print("{i.c} {a.b.c}")
-}
-
-@test(output = "0 1 2")
-fn pushed_copies_keep_their_values() {
-    let xs: [Pt] = []
-    let a = mk()
-    for i in 0..3 {
-        a.b.c = i
-        xs.push(a)
-    }
-    print("{xs[0].b.c} {xs[1].b.c} {xs[2].b.c}")
+    print("{s.x} {s.y} {p.x} {p.y} {q.x} {o.x}")
 }
 
 fn written_copy_of(p: Pt) -> Pt {
@@ -202,14 +98,39 @@ fn written_copy_of(p: Pt) -> Pt {
     return a
 }
 
-@test(output = "a w")
-fn returned_written_copy() {
+@test(output = "1 9 1 9 1 9 1 9\n1 5 1 5\n0 1 2 a w")
+fn copy_sources() {
     let v = mk()
-    let w = written_copy_of(v)
-    print("{v.b.s} {w.b.s}")
+    let a = mk()
+    a = v
+    a.x = 9
+    let g = G
+    g.x = 9
+    let h = Holder { p: mk() }
+    let hp = h.p
+    hp.x = 9
+    let xs = [mk()]
+    let e = xs[0]
+    e.b.c = 9
+    print("{v.x} {a.x} {G.x} {g.x} {h.p.x} {hp.x} {xs[0].b.c} {e.b.c}")
+    let i = In { c: 1, s: "a" }
+    let built = Pt { x: 1, b: i }
+    built.b.c = 5
+    let j = In { c: 1, s: "a" }
+    let assigned = mk()
+    assigned.b = j
+    assigned.b.c = 5
+    print("{i.c} {built.b.c} {j.c} {assigned.b.c}")
+    let ys: [Pt] = []
+    let pushed = mk()
+    for n in 0..3 {
+        pushed.b.c = n
+        ys.push(pushed)
+    }
+    let src = mk()
+    let w = written_copy_of(src)
+    print("{ys[0].b.c} {ys[1].b.c} {ys[2].b.c} {src.b.s} {w.b.s}")
 }
-
-// -- Parameter roots: the caller's argument never changes --
 
 fn bump_param(p: Pt) -> int {
     p.b.c = 7
@@ -217,35 +138,14 @@ fn bump_param(p: Pt) -> int {
     return p.b.c + p.x
 }
 
-@test(output = "1 1 9")
-fn param_root() {
-    let v = mk()
-    let r = bump_param(v)
-    print("{v.b.c} {v.x} {r}")
-}
-
 fn double_y(p: FPoint) -> FPoint {
     p.y *= 2.0
     return p
 }
 
-@test(output = "0.5 1")
-fn scalarized_param_root() {
-    let s = FPoint { x: 0.5, y: 0.5 }
-    let t = double_y(s)
-    print("{s.y} {t.y}")
-}
-
 fn Pt.bump(p) -> int {
     p.x += 1
     return p.x
-}
-
-@test(output = "2 1")
-fn method_receiver_is_by_value() {
-    let v = mk()
-    let r = v.bump()
-    print("{r} {v.x}")
 }
 
 fn mkwide() -> Wide {
@@ -266,73 +166,31 @@ fn bump_wide(w: Wide) -> int {
     return w.e9
 }
 
-@test(output = "109 9 w")
-fn boxed_param_root() {
-    let w = mkwide()
-    let r = bump_wide(w)
-    print("{r} {w.e9} {w.s}")
-}
-
-@test(output = "9 50")
-fn boxed_local_copy() {
-    let w = mkwide()
-    let v = w
-    v.e9 = 50
-    print("{w.e9} {v.e9}")
-}
-
-@test(output = "1 2")
-fn lambda_param_root() {
+@test(output = "1 1 9 0.5 1 2 1\n109 9 w 9 50\n1 2")
+fn param_roots() {
     let v = mk()
+    let r = bump_param(v)
+    let s = FPoint { x: 0.5, y: 0.5 }
+    let t = double_y(s)
+    let m = mk()
+    let mr = m.bump()
+    print("{v.b.c} {v.x} {r} {s.y} {t.y} {mr} {m.x}")
+    let w = mkwide()
+    let wr = bump_wide(w)
+    let w2 = mkwide()
+    let w3 = w2
+    w3.e9 = 50
+    print("{wr} {w.e9} {w.s} {w2.e9} {w3.e9}")
+    let l = mk()
     let f = (p: Pt) => {
         p.x += 1
         return p.x
     }
-    let r = f(v)
-    print("{v.x} {r}")
-}
-
-// -- Pattern, loop and static bindings are locals too --
-
-@test(output = "1 1 1")
-fn for_binding_is_a_copy() {
-    let xs = [mk(), mk()]
-    for p in xs {
-        p.x = 9
-        p.b.c = 9
-    }
-    print("{xs[0].x} {xs[1].x} {xs[0].b.c}")
-}
-
-@test(output = "1 9")
-fn if_let_binding() {
-    let o: Pt? = mk()
-    let r = 0
-    if let p = o {
-        p.x = 9
-        r = p.x
-    }
-    print("{o?.x ?? 0} {r}")
+    let lr = f(l)
+    print("{l.x} {lr}")
 }
 
 enum Slot { Full(Pt), Empty }
-
-@test(output = "1 9")
-fn match_payload_binding() {
-    let e = Slot::Full(mk())
-    let r = 0
-    match e {
-        Slot::Full(p) => {
-            p.x = 9
-            r = p.x
-        },
-        Slot::Empty => {},
-    }
-    match e {
-        Slot::Full(p) => print("{p.x} {r}"),
-        Slot::Empty => {},
-    }
-}
 
 fn static_counter() -> int {
     static s = Pt { x: 0, b: In { c: 0, s: "" } }
@@ -341,79 +199,37 @@ fn static_counter() -> int {
     return s.x * 10 + snap.x
 }
 
-@test(output = "10 21")
-fn static_root() {
+@test(output = "1 1 1\n1 9\n1 9\n10 21")
+fn pattern_and_static_bindings() {
+    let xs = [mk(), mk()]
+    for p in xs {
+        p.x = 9
+        p.b.c = 9
+    }
+    print("{xs[0].x} {xs[1].x} {xs[0].b.c}")
+    let o: Pt? = mk()
+    let r = 0
+    if let p = o {
+        p.x = 9
+        r = p.x
+    }
+    print("{o?.x ?? 0} {r}")
+    let e = Slot::Full(mk())
+    let r2 = 0
+    match e {
+        Slot::Full(p) => {
+            p.x = 9
+            r2 = p.x
+        },
+        Slot::Empty => {},
+    }
+    match e {
+        Slot::Full(p) => print("{p.x} {r2}"),
+        Slot::Empty => {},
+    }
     let a = static_counter()
     let b = static_counter()
     print("{a} {b}")
-}
-
-// -- Nullable roots and children --
-
-// A `V?` local is written once it is known to be present.
-@test(output = "1 5")
-fn nullable_root_after_check() {
-    let v: Pt? = mk()
-    let w = v
-    if v != null {
-        v.x = 5
-    }
-    print("{w?.x ?? 0} {v?.x ?? 0}")
-}
-
-@test(output = "5 1")
-fn nullable_child_after_check() {
-    let a = MaybeIn { x: 1, b: In { c: 1, s: "a" } }
-    let b = a
-    if a.b != null {
-        a.b.c = 5
-    }
-    print("{a.b?.c ?? 0} {b.b?.c ?? 0}")
-}
-
-@test(output = "1 5")
-fn nullable_child_built_from_another_local() {
-    let i = In { c: 1, s: "a" }
-    let a = MaybeIn { x: 1, b: i }
-    if a.b != null {
-        a.b.c = 5
-    }
-    print("{i.c} {a.b?.c ?? 0}")
-}
-
-@test(output = "1 1 5")
-fn nullable_child_copied_from_element() {
-    let i = In { c: 1, s: "a" }
-    let xs = [MaybeIn { x: 0, b: i }]
-    let a = xs[0]
-    if a.b != null {
-        a.b.c = 5
-    }
-    print("{i.c} {xs[0].b?.c ?? 0} {a.b?.c ?? 0}")
-}
-
-// The binding holds its leaves; the opaque child's box is still the source's.
-@test(output = "1 5 1")
-fn nullable_child_of_if_let_binding() {
-    let o: MaybeIn? = MaybeIn { x: 1, b: In { c: 1, s: "a" } }
-    let r = 0
-    if let p = o {
-        if p.b != null {
-            p.b.c = 5
-            r = p.b.c
-        }
-    }
-    print("{o?.b?.c ?? 0} {r} {o?.x ?? 0}")
-}
-
-@test(output = "1 5")
-fn nullable_child_read_out_before_write() {
-    let a = MaybeIn { x: 1, b: In { c: 1, s: "a" } }
-    let i = a.b
-    if a.b != null {
-        a.b.c = 5
-    }
-    print("{i?.c ?? 0} {a.b?.c ?? 0}")
 }
 
 fn read_out_then_write(a: MaybeIn) -> int {
@@ -424,35 +240,61 @@ fn read_out_then_write(a: MaybeIn) -> int {
     return (i?.c ?? 0) * 10 + (a.b?.c ?? 0)
 }
 
-@test(output = "15 1")
-fn nullable_child_of_param_read_out_before_write() {
+@test(output = "1 5 5 1\n1 5 1 1 5\n1 5 1\n1 5 15 1\n1 2 7 1 5")
+fn nullable_roots_and_children() {
+    let v: Pt? = mk()
+    let w = v
+    if v != null {
+        v.x = 5
+    }
     let a = MaybeIn { x: 1, b: In { c: 1, s: "a" } }
-    let r = read_out_then_write(a)
-    print("{r} {a.b?.c ?? 0}")
-}
-
-@test(output = "1 2 7")
-fn generic_child() {
+    let b = a
+    if a.b != null {
+        a.b.c = 5
+    }
+    print("{w?.x ?? 0} {v?.x ?? 0} {a.b?.c ?? 0} {b.b?.c ?? 0}")
+    let i = In { c: 1, s: "a" }
+    let built = MaybeIn { x: 1, b: i }
+    if built.b != null {
+        built.b.c = 5
+    }
+    let j = In { c: 1, s: "a" }
+    let xs = [MaybeIn { x: 0, b: j }]
+    let e = xs[0]
+    if e.b != null {
+        e.b.c = 5
+    }
+    print("{i.c} {built.b?.c ?? 0} {j.c} {xs[0].b?.c ?? 0} {e.b?.c ?? 0}")
+    // The binding holds its leaves; the opaque child's box is still the source's.
+    let o: MaybeIn? = MaybeIn { x: 1, b: In { c: 1, s: "a" } }
+    let r = 0
+    if let p = o {
+        if p.b != null {
+            p.b.c = 5
+            r = p.b.c
+        }
+    }
+    print("{o?.b?.c ?? 0} {r} {o?.x ?? 0}")
+    let ro = MaybeIn { x: 1, b: In { c: 1, s: "a" } }
+    let out = ro.b
+    if ro.b != null {
+        ro.b.c = 5
+    }
+    let pa = MaybeIn { x: 1, b: In { c: 1, s: "a" } }
+    let pr = read_out_then_write(pa)
+    print("{out?.c ?? 0} {ro.b?.c ?? 0} {pr} {pa.b?.c ?? 0}")
     let g = Gen { v: mk(), n: 1 }
     let h = g
     g.v.x = 7
     h.n = 2
-    print("{g.n} {h.n} {g.v.x}")
+    let k = In { c: 1, s: "a" }
+    let gk = Gen { v: k, n: 0 }
+    gk.v.c = 5
+    print("{g.n} {h.n} {g.v.x} {k.c} {gk.v.c}")
 }
-
-@test(output = "1 5")
-fn generic_child_built_from_another_local() {
-    let i = In { c: 1, s: "a" }
-    let g = Gen { v: i, n: 0 }
-    g.v.c = 5
-    print("{i.c} {g.v.c}")
-}
-
-// -- Safe navigation: `v?.f = x` writes only when every link is present --
 
 value Wrap { p: Pt?, n: int }
 value Deep { q: Pt?, n: int }
-nobox value MaybeSid2 { a: Sid?, k: int }
 
 fn mkn(present: bool) -> Pt? {
     if present {
@@ -468,106 +310,52 @@ fn mkd(present: bool) -> Deep? {
     return null
 }
 
-@test(output = "1 5")
-fn safe_nav_root_copied_from_call() {
-    let w = mkn(true)
-    let v = w
-    v?.x = 5
-    print("{w?.x ?? 0} {v?.x ?? 0}")
-}
-
-@test(output = "1 5")
-fn safe_nav_root_copied_from_local() {
-    let w: Pt? = mk()
-    let v = w
-    v?.x = 5
-    print("{w?.x ?? 0} {v?.x ?? 0}")
-}
-
-@test(output = "0 true")
-fn safe_nav_absent_root_is_a_no_op() {
-    let v = mkn(false)
-    v?.x = 5
-    v?.x += 2
-    print("{v?.x ?? 0} {v == null}")
-}
-
-@test(output = "3 1")
-fn safe_nav_compound() {
-    let w = mkn(true)
-    let v = w
-    v?.x += 2
-    print("{v?.x ?? 0} {w?.x ?? 0}")
-}
-
-@test(output = "7 1")
-fn safe_nav_whole_child() {
-    let w = mkn(true)
-    let v = w
-    v?.b = In { c: 7, s: "z" }
-    print("{(v?.b)?.c ?? 0} {(w?.b)?.c ?? 0}")
-}
-
-@test(output = "3 1")
-fn safe_nav_opaque_child() {
-    let w = Wrap { p: mk(), n: 0 }
-    let v = w
-    v.p?.x += 2
-    print("{v.p?.x ?? 0} {w.p?.x ?? 0}")
-}
-
-@test(output = "5 1 0")
-fn safe_nav_two_links() {
-    let d = mkd(true)
-    let e = d
-    e?.q?.x = 5
-    let f = mkd(false)
-    f?.q?.x = 5
-    print("{(e?.q)?.x ?? 0} {(d?.q)?.x ?? 0} {(f?.q)?.x ?? 0}")
-}
-
 fn safe_nav_through_param(w: Wrap, v: Pt?) -> int {
     w.p?.x = 5
     v?.x += 10
     return (w.p?.x ?? 0) * 100 + (v?.x ?? 0)
 }
 
-@test(output = "511 1 1")
-fn safe_nav_param_roots() {
-    let w = Wrap { p: mk(), n: 0 }
-    let v = mkn(true)
-    let r = safe_nav_through_param(w, v)
-    print("{r} {w.p?.x ?? 0} {v?.x ?? 0}")
-}
-
-@test(output = "4 3 0")
-fn safe_nav_nobox_child() {
-    let m = MaybeSid2 { a: Sid { value: 3 }, k: 0 }
+// `v?.f = x` writes only when every link is present.
+@test(output = "1 5 1 5 3 1\n0 true\n7 1 3 1\n5 1 0\n511 1 1\n4 3 0")
+fn safe_nav() {
+    let w = mkn(true)
+    let v = w
+    v?.x = 5
+    let wl: Pt? = mk()
+    let vl = wl
+    vl?.x = 5
+    let wc = mkn(true)
+    let vc = wc
+    vc?.x += 2
+    print("{w?.x ?? 0} {v?.x ?? 0} {wl?.x ?? 0} {vl?.x ?? 0} {vc?.x ?? 0} {wc?.x ?? 0}")
+    let absent = mkn(false)
+    absent?.x = 5
+    absent?.x += 2
+    print("{absent?.x ?? 0} {absent == null}")
+    let wb = mkn(true)
+    let vb = wb
+    vb?.b = In { c: 7, s: "z" }
+    let wo = Wrap { p: mk(), n: 0 }
+    let vo = wo
+    vo.p?.x += 2
+    print("{(vb?.b)?.c ?? 0} {(wb?.b)?.c ?? 0} {vo.p?.x ?? 0} {wo.p?.x ?? 0}")
+    let d = mkd(true)
+    let e = d
+    e?.q?.x = 5
+    let f = mkd(false)
+    f?.q?.x = 5
+    print("{(e?.q)?.x ?? 0} {(d?.q)?.x ?? 0} {(f?.q)?.x ?? 0}")
+    let pw = Wrap { p: mk(), n: 0 }
+    let pv = mkn(true)
+    let r = safe_nav_through_param(pw, pv)
+    print("{r} {pw.p?.x ?? 0} {pv?.x ?? 0}")
+    let m = MaybeSid { a: Sid { value: 3 }, k: 0 }
     let n = m
     n.a?.value += 1
-    let z = MaybeSid2 { a: null, k: 0 }
+    let z = MaybeSid { a: null, k: 0 }
     z.a?.value = 9
     print("{n.a?.value ?? 0} {m.a?.value ?? 0} {z.a?.value ?? 0}")
-}
-
-// -- nobox values: leaves only, never a box --
-
-@test(output = "3 9 1 4.5 3")
-fn nobox_local() {
-    let p = mkp()
-    let q = p
-    q.space.value = 9
-    q.pos.x += 3.5
-    q.pos.y++
-    print("{p.space.value} {q.space.value} {p.pos.x} {q.pos.x} {q.pos.y}")
-}
-
-@test(output = "7 3")
-fn nobox_whole_child() {
-    let p = mkp()
-    let q = p
-    q.space = Sid { value: 7 }
-    print("{q.space.value} {p.space.value}")
 }
 
 fn nobox_param(p: Place) -> int {
@@ -576,15 +364,21 @@ fn nobox_param(p: Place) -> int {
     return p.space.value + p.pos.x as int
 }
 
-@test(output = "6 3 1")
-fn nobox_param_root() {
+@test(output = "3 9 1 4.5 3\n7 3\n6 3 1\n5 3")
+fn nobox() {
     let p = mkp()
-    let r = nobox_param(p)
-    print("{r} {p.space.value} {p.pos.x}")
-}
-
-@test(output = "5 3")
-fn nobox_nullable_child() {
+    let q = p
+    q.space.value = 9
+    q.pos.x += 3.5
+    q.pos.y++
+    print("{p.space.value} {q.space.value} {p.pos.x} {q.pos.x} {q.pos.y}")
+    let p2 = mkp()
+    let q2 = p2
+    q2.space = Sid { value: 7 }
+    print("{q2.space.value} {p2.space.value}")
+    let p3 = mkp()
+    let r = nobox_param(p3)
+    print("{r} {p3.space.value} {p3.pos.x}")
     let m = MaybeSid { a: Sid { value: 3 }, k: 0 }
     let n = m
     if n.a != null {
@@ -593,12 +387,10 @@ fn nobox_nullable_child() {
     print("{n.a?.value ?? 0} {m.a?.value ?? 0}")
 }
 
-// -- Captures and coroutines --
-
 // A closure shares the binding, so it sees a field write exactly as it sees
 // a whole-value reassignment.
-@test(output = "5 5")
-fn capture_sees_write_like_reassignment() {
+@test(output = "5 5\n1 3\n1 7 7\n1 5 5\n3 2")
+fn captures() {
     let a = mk()
     let b = mk()
     let fa = () => a.x
@@ -606,44 +398,28 @@ fn capture_sees_write_like_reassignment() {
     a.x = 5
     b = Pt { ..b, x: 5 }
     print("{fa()} {fb()}")
-}
-
-@test(output = "1 3")
-fn captured_source_does_not_see_copy_write() {
     let v = mk()
     let f = () => v.x
-    let a = v
-    a.x = 3
-    print("{f()} {a.x}")
-}
-
-@test(output = "1 7 7")
-fn closure_writes_nested_field() {
-    let v = mk()
-    let a = v
-    let set = (n: int) => { a.b.c = n }
+    let c = v
+    c.x = 3
+    print("{f()} {c.x}")
+    let v2 = mk()
+    let a2 = v2
+    let set = (n: int) => { a2.b.c = n }
     set(7)
-    let get = () => a.b.c
-    print("{v.b.c} {a.b.c} {get()}")
-}
-
-@test(output = "1 5 5")
-fn escaping_closure() {
-    let v = mk()
-    let a = v
+    let get = () => a2.b.c
+    print("{v2.b.c} {a2.b.c} {get()}")
+    let v3 = mk()
+    let a3 = v3
     let fs: [fn() -> int] = []
-    fs.push(() => a.x)
-    a.x = 5
-    print("{v.x} {a.x} {fs[0]()}")
-}
-
-@test(output = "3 2")
-fn nobox_capture() {
+    fs.push(() => a3.x)
+    a3.x = 5
+    print("{v3.x} {a3.x} {fs[0]()}")
     let p = FPoint { x: 1.0, y: 2.0 }
     let q = Sid { value: 0 }
-    let f = () => p.x + q.value as float
+    let fp = () => p.x + q.value as float
     p.x = 3.0
-    print("{f()} {p.y}")
+    print("{fp()} {p.y}")
 }
 
 co fn co_param(p: Pt) -> Coroutine<int, (), ()> {
@@ -651,15 +427,6 @@ co fn co_param(p: Pt) -> Coroutine<int, (), ()> {
     yield p.x
     p.b.c += 1
     yield p.b.c
-}
-
-@test(output = "11 2 1")
-fn coroutine_param_root() {
-    let v = mk()
-    let c = co_param(v)
-    let a = c.resume() ?? -1
-    let b = c.resume() ?? -1
-    print("{a} {b} {v.x}")
 }
 
 co fn co_local() -> Coroutine<int, (), ()> {
@@ -672,14 +439,6 @@ co fn co_local() -> Coroutine<int, (), ()> {
     yield b.x * 10 + f()
 }
 
-@test(output = "4 16")
-fn coroutine_local_and_capture() {
-    let c = co_local()
-    let x = c.resume() ?? -1
-    let y = c.resume() ?? -1
-    print("{x} {y}")
-}
-
 co fn co_nobox() -> Coroutine<int, (), ()> {
     let p = mkp()
     p.space.value = 11
@@ -688,16 +447,24 @@ co fn co_nobox() -> Coroutine<int, (), ()> {
     yield p.space.value
 }
 
-@test(output = "11 12")
-fn coroutine_nobox_local() {
-    let c = co_nobox()
+@test(output = "11 2 1\n4 16\n11 12")
+fn coroutines() {
+    let v = mk()
+    let c = co_param(v)
     let a = c.resume() ?? -1
     let b = c.resume() ?? -1
-    print("{a} {b}")
+    print("{a} {b} {v.x}")
+    let l = co_local()
+    let x = l.resume() ?? -1
+    let y = l.resume() ?? -1
+    print("{x} {y}")
+    let n = co_nobox()
+    let n1 = n.resume() ?? -1
+    let n2 = n.resume() ?? -1
+    print("{n1} {n2}")
 }
 
-// -- Value tests: these also run under `rock test --backend glsl` --
-
+// Builtin vector values; these also run under `rock test --backend glsl`.
 fn shift3(v: Vec3) -> float {
     v.z *= 2.0
     v.x++
@@ -711,24 +478,14 @@ fn vec3_param_root() -> float {
     return r + v.x + v.z
 }
 
-@test(returns = 3.5)
-fn vec2_local_copy() -> float {
+@test(returns = 407.0)
+fn vec2_local_writes() -> float {
     let v = Vec2 { x: 1.0, y: 2.0 }
     let w = v
     w.y += 0.5
-    return v.x + w.y
-}
-
-@test(returns = 5.0)
-fn vec2_postfix_result() -> float {
-    let v = Vec2 { x: 2.0, y: 0.0 }
-    let old = v.x++
-    return old + v.x
-}
-
-@test(returns = 7.0)
-fn vec2_prefix_result() -> float {
-    let v = Vec2 { x: 2.0, y: 0.0 }
-    let new = ++v.x
-    return new + v.x + v.y + 1.0
+    let a = Vec2 { x: 2.0, y: 0.0 }
+    let old = a.x++
+    let b = Vec2 { x: 2.0, y: 0.0 }
+    let new = ++b.x
+    return (v.x + w.y) * 100.0 + (old + a.x) * 10.0 + new + b.x + b.y + 1.0
 }

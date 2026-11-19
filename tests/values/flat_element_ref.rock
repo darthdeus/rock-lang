@@ -10,6 +10,17 @@ nobox value FerQ2 { x: float, y: float }
 
 nobox value FerWide { kind: int, at: FerQ2, a: int, b: int, c: int }
 
+struct FerBox { cell: FerCell }
+
+struct FerPair { a: FerCell, b: FerCell }
+
+fn fer_cells() -> [FerCell] {
+    let xs: [FerCell] = []
+    xs.push(FerCell { inner: FerInner { v: 1 }, w: 2 })
+    xs.push(FerCell { inner: FerInner { v: 3 }, w: 4 })
+    return xs
+}
+
 fn fer_bump(c: ref FerCell) -> int {
     c.w += 1
     return c.w
@@ -20,7 +31,6 @@ fn fer_bump_inner(c: ref FerInner) -> int {
     return c.v
 }
 
-// A `ref` parameter handed on to further `ref` parameters, whole and nested.
 fn fer_bump_both(c: ref FerCell) -> int {
     fer_bump(c)
     return fer_bump_inner(c.inner)
@@ -46,8 +56,6 @@ fn fer_move_at(q: ref FerQ2) -> float {
     q.y += 0.5
     return q.y
 }
-
-struct FerBox { cell: FerCell }
 
 // The stored value is the preceding caller's input, not a call-count formula.
 fn fer_static_exchange<T>(c: ref FerInner, tag: T) -> int {
@@ -81,17 +89,15 @@ fn fer_static_history_is_shared_across_flat_storage_shapes() {
     let second = fer_static_exchange(xs[0], 0)
     assert_eq(xs[0].v, first, "column ref sees ordinary call history")
     let nested: [FerCell] = [FerCell { inner: FerInner { v: 43 }, w: 71 }]
-    let sibling = nested[0].w
     let third = fer_static_exchange(nested[0].inner, 0)
     assert_eq(nested[0].inner.v, second, "nested prefix shares the same history")
-    assert_eq(nested[0].w, sibling, "sibling is not overwritten")
+    assert_eq(nested[0].w, 71, "sibling is not overwritten")
     let rows: [FerStaticWide] = [FerStaticWide {
         inner: FerInner { v: 59 }, a: 1, b: 2, c: 3, d: 4, e: 5
     }]
-    let row_sibling = rows[0].e
     let fourth = fer_static_exchange(rows[0].inner, 0)
     assert_eq(rows[0].inner.v, third, "strided prefix shares column history")
-    assert_eq(rows[0].e, row_sibling, "strided sibling is not overwritten")
+    assert_eq(rows[0].e, 5, "strided sibling is not overwritten")
     let m: Map<string, FerInner> = map_new()
     m["key"] = FerInner { v: 83 }
     let fifth = fer_static_exchange(m["key"], 0)
@@ -133,6 +139,94 @@ fn fer_static_concrete_callables_keep_distinct_histories() {
     assert_eq(control.inner.v, control_next, "ordinary string instance sees only string writes")
 }
 
+@test
+fn fer_vec_element_ref_args_write_the_element() {
+    let xs: [FerCell] = []
+    xs.push(FerCell { inner: FerInner { v: 10 }, w: 20 })
+    xs.push(FerCell { inner: FerInner { v: 30 }, w: 40 })
+    let snapshot = xs[1]
+    assert_eq(fer_bump(xs[0]), 21, "whole element")
+    assert_eq(xs[0].w, 21, "vec element holds the ref write")
+    assert_eq(xs[0].inner.v, 10, "sibling leaf unchanged")
+    assert_eq(xs[1].w, 40, "neighbouring element unchanged")
+    assert_eq(fer_bump_inner(xs[1].inner), 31, "nested field")
+    assert_eq(xs[1].inner.v, 31, "nested field holds the ref write")
+    assert_eq(xs[1].w, 40, "owner's sibling leaf unchanged")
+    assert_eq(fer_bump_both(xs[1]), 32, "ref param passed on")
+    assert_eq(xs[1].w, 41, "the passed-on whole-element write landed")
+    assert_eq(fer_tick(xs[1]), 33, "increment through the ref")
+    xs[1].w++
+    assert_eq(xs[1].inner.v, 33, "element holds the increment through the ref")
+    assert_eq(xs[1].w, 42, "element holds the indexed increment")
+    let (w, v) = fer_bump_pair(xs[1])
+    assert_eq((w, v), (43, 34), "tuple-returning callee")
+    assert_eq(xs[1].w, 43, "element holds the whole-element write")
+    assert_eq(xs[1].inner.v, 34, "element holds the nested write")
+    assert_eq(xs[0].w, 21, "neighbouring element unchanged")
+    assert_eq(xs[0].inner.v, 10, "neighbouring element unchanged")
+    assert_eq(snapshot.w, 40, "a whole-element copy keeps the old leaves")
+    assert_eq(snapshot.inner.v, 30, "a whole-element copy keeps the old nested leaf")
+
+    let os: [FerOuter] = []
+    os.push(FerOuter { cell: FerCell { inner: FerInner { v: 1 }, w: 2 }, z: 3 })
+    os.push(FerOuter { cell: FerCell { inner: FerInner { v: 4 }, w: 5 }, z: 6 })
+    assert_eq(fer_bump(os[1].cell), 6, "deep prefix")
+    assert_eq(fer_bump_inner(os[1].cell.inner), 5, "deeper prefix")
+    assert_eq(os[1].cell.w, 6, "cell field holds the ref write")
+    assert_eq(os[1].cell.inner.v, 5, "inner field holds the ref write")
+    assert_eq(os[1].z, 6, "owner's sibling leaf unchanged")
+    assert_eq(os[0].cell.w, 2, "neighbouring element unchanged")
+    assert_eq(os[0].cell.inner.v, 1, "neighbouring element unchanged")
+}
+
+@test
+fn fer_map_ref_args_write_the_value() {
+    let m: Map<string, FerCell> = map_new()
+    m["a"] = FerCell { inner: FerInner { v: 10 }, w: 20 }
+    m["b"] = FerCell { inner: FerInner { v: 30 }, w: 40 }
+    assert_eq(fer_bump(m["a"]), 21, "whole value")
+    assert_eq(m["a"].w, 21, "map value holds the ref write")
+    assert_eq(m["a"].inner.v, 10, "sibling leaf unchanged")
+    assert_eq(m["b"].w, 40, "neighbouring value unchanged")
+    assert_eq(fer_bump_inner(m["b"].inner), 31, "nested field")
+    assert_eq(m["b"].inner.v, 31, "nested field holds the ref write")
+    assert_eq(m["b"].w, 40, "owner's sibling leaf unchanged")
+    assert_eq(m["a"].inner.v, 10, "neighbouring value unchanged")
+}
+
+// No flat argument, but the result addresses an Arena value column.
+fn fer_borrow(a: Arena<FerCell>, e: Entity<FerCell>) -> (ref FerCell)? {
+    return a.borrow(e)
+}
+
+fn fer_bump_unit(c: ref FerCell) { c.w += 1 }
+
+@test
+fn fer_arena_borrows_write_the_element() {
+    let a: Arena<FerCell> = arena_new()
+    let first = a.insert(FerCell { inner: FerInner { v: 10 }, w: 20 })
+    let second = a.insert(FerCell { inner: FerInner { v: 30 }, w: 40 })
+    let c = a.borrow(first)
+    assert(c != null, "a live entity borrows")
+    assert_eq(fer_bump(c.unwrap()), 21, "arena borrow")
+    assert_eq(a.get(first).unwrap().w, 21, "arena element holds the ref write")
+    assert_eq(a.get(first).unwrap().inner.v, 10, "sibling leaf unchanged")
+    assert_eq(a.get(second).unwrap().w, 40, "neighbouring element unchanged")
+    let d = second.borrow()
+    if d != null {
+        fer_bump_inner(d.inner)
+    }
+    assert_eq(second.get().unwrap().inner.v, 31, "the nested entity-borrow write landed")
+    assert_eq(second.get().unwrap().w, 40, "owner's sibling leaf unchanged")
+    assert_eq(first.get().unwrap().inner.v, 10, "neighbouring element unchanged")
+    let e = fer_borrow(a, first)
+    if e != null { fer_bump_unit(e) }
+    assert_eq(first.get().unwrap().w, 22, "the borrowed ref result took the write")
+    assert_eq(second.get().unwrap().w, 40, "the other element is unchanged")
+    a.remove(first)
+    assert(a.borrow(first) == null, "a dead entity does not borrow")
+}
+
 // Recursive `ref` returns hand the argument back up the call chain, so every
 // return addresses the argument's storage, flat or boxed.
 fn fer_descend(c: ref FerCell, n: int) -> ref FerCell {
@@ -151,248 +245,34 @@ fn fer_descend_odd(c: ref FerCell, n: int) -> ref FerCell {
 }
 
 @test
-fn fer_vec_whole_element_arg_writes_the_element() {
-    let xs: [FerCell] = []
-    xs.push(FerCell { inner: FerInner { v: 10 }, w: 20 })
-    xs.push(FerCell { inner: FerInner { v: 30 }, w: 40 })
-    let before = xs[0].w
-    let sibling = xs[0].inner.v
-    let neighbour = xs[1].w
-    let seen = fer_bump(xs[0])
-    assert(seen != before, "the write through the ref is visible through it")
-    assert_eq(xs[0].w, seen, "vec element holds the ref write")
-    assert_eq(xs[0].inner.v, sibling, "sibling leaf unchanged")
-    assert_eq(xs[1].w, neighbour, "neighbouring element unchanged")
-}
-
-@test
-fn fer_vec_nested_field_arg_writes_the_element() {
-    let xs: [FerCell] = []
-    xs.push(FerCell { inner: FerInner { v: 10 }, w: 20 })
-    xs.push(FerCell { inner: FerInner { v: 30 }, w: 40 })
-    let before = xs[1].inner.v
-    let sibling = xs[1].w
-    let neighbour = xs[0].inner.v
-    let seen = fer_bump_inner(xs[1].inner)
-    assert(seen != before, "the write through the ref is visible through it")
-    assert_eq(xs[1].inner.v, seen, "nested field holds the ref write")
-    assert_eq(xs[1].w, sibling, "owner's sibling leaf unchanged")
-    assert_eq(xs[0].inner.v, neighbour, "neighbouring element unchanged")
-}
-
-@test
-fn fer_vec_deep_prefix_args_write_the_element() {
-    let os: [FerOuter] = []
-    os.push(FerOuter { cell: FerCell { inner: FerInner { v: 1 }, w: 2 }, z: 3 })
-    os.push(FerOuter { cell: FerCell { inner: FerInner { v: 4 }, w: 5 }, z: 6 })
-    let w_before = os[1].cell.w
-    let v_before = os[1].cell.inner.v
-    let z_before = os[1].z
-    let neighbour_w = os[0].cell.w
-    let neighbour_v = os[0].cell.inner.v
-    let seen_w = fer_bump(os[1].cell)
-    let seen_v = fer_bump_inner(os[1].cell.inner)
-    assert(seen_w != w_before && seen_v != v_before, "writes visible through the refs")
-    assert_eq(os[1].cell.w, seen_w, "cell field holds the ref write")
-    assert_eq(os[1].cell.inner.v, seen_v, "inner field holds the ref write")
-    assert_eq(os[1].z, z_before, "owner's sibling leaf unchanged")
-    assert_eq(os[0].cell.w, neighbour_w, "neighbouring element unchanged")
-    assert_eq(os[0].cell.inner.v, neighbour_v, "neighbouring element unchanged")
-}
-
-@test
-fn fer_vec_ref_param_passed_on_writes_the_element() {
-    let xs: [FerCell] = []
-    xs.push(FerCell { inner: FerInner { v: 10 }, w: 20 })
-    xs.push(FerCell { inner: FerInner { v: 30 }, w: 40 })
-    let w_before = xs[1].w
-    let v_before = xs[1].inner.v
-    let neighbour = xs[0]
-    let seen_v = fer_bump_both(xs[1])
-    assert(xs[1].w != w_before, "the whole-element write landed")
-    assert(seen_v != v_before, "the nested write is visible through the ref")
-    assert_eq(xs[1].inner.v, seen_v, "nested field holds the ref write")
-    assert_eq(xs[0].w, neighbour.w, "neighbouring element unchanged")
-    assert_eq(xs[0].inner.v, neighbour.inner.v, "neighbouring element unchanged")
-}
-
-@test
-fn fer_increments_through_ref_and_index_write_the_element() {
-    let xs: [FerCell] = []
-    xs.push(FerCell { inner: FerInner { v: 10 }, w: 20 })
-    xs.push(FerCell { inner: FerInner { v: 30 }, w: 40 })
-    let before = xs[1]
-    let neighbour = xs[0]
-    let seen = fer_tick(xs[1])
-    xs[1].w++
-    let w = before.w
-    w++
-    assert(seen != before.inner.v, "the increment is visible through the ref")
-    assert_eq(xs[1].inner.v, seen, "element holds the increment through the ref")
-    assert_eq(xs[1].w, w, "element holds the indexed increment")
-    assert_eq(xs[0].w, neighbour.w, "neighbouring element unchanged")
-    assert_eq(xs[0].inner.v, neighbour.inner.v, "neighbouring element unchanged")
-}
-
-@test
-fn fer_tuple_returning_callee_writes_the_element() {
-    let xs: [FerCell] = []
-    xs.push(FerCell { inner: FerInner { v: 10 }, w: 20 })
-    xs.push(FerCell { inner: FerInner { v: 30 }, w: 40 })
-    let before = xs[1]
-    let neighbour = xs[0]
-    let (seen_w, seen_v) = fer_bump_pair(xs[1])
-    assert(seen_w != before.w && seen_v != before.inner.v, "writes visible through the ref")
-    assert_eq(xs[1].w, seen_w, "element holds the whole-element write")
-    assert_eq(xs[1].inner.v, seen_v, "element holds the nested write")
-    assert_eq(xs[0].w, neighbour.w, "neighbouring element unchanged")
-    assert_eq(xs[0].inner.v, neighbour.inner.v, "neighbouring element unchanged")
-}
-
-@test
-fn fer_map_whole_element_arg_writes_the_element() {
-    let m: Map<string, FerCell> = map_new()
-    m["a"] = FerCell { inner: FerInner { v: 10 }, w: 20 }
-    m["b"] = FerCell { inner: FerInner { v: 30 }, w: 40 }
-    let before = m["a"].w
-    let sibling = m["a"].inner.v
-    let neighbour = m["b"].w
-    let seen = fer_bump(m["a"])
-    assert(seen != before, "the write through the ref is visible through it")
-    assert_eq(m["a"].w, seen, "map value holds the ref write")
-    assert_eq(m["a"].inner.v, sibling, "sibling leaf unchanged")
-    assert_eq(m["b"].w, neighbour, "neighbouring value unchanged")
-}
-
-@test
-fn fer_map_nested_field_arg_writes_the_element() {
-    let m: Map<string, FerCell> = map_new()
-    m["a"] = FerCell { inner: FerInner { v: 10 }, w: 20 }
-    m["b"] = FerCell { inner: FerInner { v: 30 }, w: 40 }
-    let before = m["b"].inner.v
-    let sibling = m["b"].w
-    let neighbour = m["a"].inner.v
-    let seen = fer_bump_inner(m["b"].inner)
-    assert(seen != before, "the write through the ref is visible through it")
-    assert_eq(m["b"].inner.v, seen, "nested field holds the ref write")
-    assert_eq(m["b"].w, sibling, "owner's sibling leaf unchanged")
-    assert_eq(m["a"].inner.v, neighbour, "neighbouring value unchanged")
-}
-
-@test
-fn fer_arena_borrow_writes_the_element() {
-    let a: Arena<FerCell> = arena_new()
-    let first = a.insert(FerCell { inner: FerInner { v: 10 }, w: 20 })
-    let second = a.insert(FerCell { inner: FerInner { v: 30 }, w: 40 })
-    let before = a.get(first).unwrap()
-    let neighbour = a.get(second).unwrap()
-    let c = a.borrow(first)
-    assert(c != null, "a live entity borrows")
-    let seen = fer_bump(c.unwrap())
-    let after = a.get(first).unwrap()
-    assert(seen != before.w, "the write through the ref is visible through it")
-    assert_eq(after.w, seen, "arena element holds the ref write")
-    assert_eq(after.inner.v, before.inner.v, "sibling leaf unchanged")
-    assert_eq(a.get(second).unwrap().w, neighbour.w, "neighbouring element unchanged")
-}
-
-@test
-fn fer_entity_borrow_writes_the_element() {
-    let a: Arena<FerCell> = arena_new()
-    let first = a.insert(FerCell { inner: FerInner { v: 10 }, w: 20 })
-    let second = a.insert(FerCell { inner: FerInner { v: 30 }, w: 40 })
-    let before = second.get().unwrap()
-    let neighbour = first.get().unwrap()
-    let c = second.borrow()
-    if c != null {
-        fer_bump_inner(c.inner)
-    }
-    let after = second.get().unwrap()
-    assert(after.inner.v != before.inner.v, "the nested write landed")
-    assert_eq(after.w, before.w, "owner's sibling leaf unchanged")
-    assert_eq(first.get().unwrap().inner.v, neighbour.inner.v, "neighbouring element unchanged")
-}
-
-@test
-fn fer_arena_borrow_of_a_removed_entity_is_null() {
-    let a: Arena<FerCell> = arena_new()
-    let first = a.insert(FerCell { inner: FerInner { v: 10 }, w: 20 })
-    a.remove(first)
-    assert(a.borrow(first) == null, "a dead entity does not borrow")
-}
-
-@test
-fn fer_strided_row_args_write_the_element() {
-    let ws: [FerWide] = vec_new_with_capacity(4)
-    ws.push(FerWide { kind: 1, at: FerQ2 { x: 1.0, y: 2.0 }, a: 3, b: 4, c: 5 })
-    ws.push(FerWide { kind: 6, at: FerQ2 { x: 7.0, y: 8.0 }, a: 9, b: 10, c: 11 })
-    let b_before = ws[1].b
-    let y_before = ws[1].at.y
-    let row = ws[1]
-    let neighbour = ws[0]
-    let seen_b = fer_bump_wide(ws[1])
-    let seen_y = fer_move_at(ws[1].at)
-    assert(seen_b != b_before && seen_y != y_before, "writes visible through the refs")
-    assert_eq(ws[1].b, seen_b, "row holds the whole-element ref write")
-    assert_eq(ws[1].at.y, seen_y, "row holds the nested ref write")
-    assert_eq(ws[1].a, row.a, "sibling leaf unchanged")
-    assert_eq(ws[1].c, row.c, "sibling leaf unchanged")
-    assert_eq(ws[1].at.x, row.at.x, "nested sibling leaf unchanged")
-    assert_eq(ws[0].b, neighbour.b, "neighbouring row unchanged")
-    assert_eq(ws[0].at.y, neighbour.at.y, "neighbouring row unchanged")
-}
-
-@test
-fn fer_recursive_ref_return_writes_the_element() {
-    let xs: [FerCell] = []
-    xs.push(FerCell { inner: FerInner { v: 10 }, w: 20 })
-    xs.push(FerCell { inner: FerInner { v: 30 }, w: 40 })
-    let os: [FerOuter] = []
-    os.push(FerOuter { cell: FerCell { inner: FerInner { v: 1 }, w: 2 }, z: 3 })
-    os.push(FerOuter { cell: FerCell { inner: FerInner { v: 4 }, w: 5 }, z: 6 })
-    let boxed = FerBox { cell: FerCell { inner: FerInner { v: 7 }, w: 8 } }
-    let before = xs[0]
-    let neighbour = xs[1]
-    let outer_before = os[1]
-    let outer_neighbour = os[0].cell.w
-    let boxed_before = boxed.cell
-    let seen = fer_bump(fer_descend(xs[0], 12))
-    let seen_outer = fer_bump(fer_descend(os[1].cell, 5))
-    let seen_boxed = fer_bump(fer_descend(boxed.cell, 3))
-    assert(seen != before.w, "the write through the returned ref is visible through it")
-    assert_eq(xs[0].w, seen, "vec element holds the write through the returned ref")
-    assert_eq(xs[0].inner.v, before.inner.v, "sibling leaf unchanged")
-    assert_eq(xs[1].w, neighbour.w, "neighbouring element unchanged")
-    assert(seen_outer != outer_before.cell.w, "the nested write is visible through the ref")
-    assert_eq(os[1].cell.w, seen_outer, "nested field holds the write through the returned ref")
-    assert_eq(os[1].z, outer_before.z, "owner's sibling leaf unchanged")
-    assert_eq(os[0].cell.w, outer_neighbour, "neighbouring element unchanged")
-    assert(seen_boxed != boxed_before.w, "the boxed write is visible through the ref")
-    assert_eq(boxed.cell.w, seen_boxed, "boxed value holds the write through the returned ref")
-    assert_eq(boxed.cell.inner.v, boxed_before.inner.v, "boxed sibling leaf unchanged")
-}
-
-@test
-fn fer_mutually_recursive_ref_return_writes_the_element() {
+fn fer_recursive_ref_returns_write_the_element() {
     let xs: [FerCell] = []
     xs.push(FerCell { inner: FerInner { v: 10 }, w: 20 })
     xs.push(FerCell { inner: FerInner { v: 30 }, w: 40 })
     xs.push(FerCell { inner: FerInner { v: 50 }, w: 60 })
+    let os: [FerOuter] = []
+    os.push(FerOuter { cell: FerCell { inner: FerInner { v: 1 }, w: 2 }, z: 3 })
+    os.push(FerOuter { cell: FerCell { inner: FerInner { v: 4 }, w: 5 }, z: 6 })
     let boxed = FerBox { cell: FerCell { inner: FerInner { v: 7 }, w: 8 } }
-    let before_even = xs[0].w
-    let before_odd = xs[1].w
-    let untouched = xs[2]
-    let boxed_before = boxed.cell.w
-    let seen_even = fer_bump(fer_descend_even(xs[0], 6))
-    let seen_odd = fer_bump(fer_descend_odd(xs[1], 7))
-    let seen_boxed = fer_bump(fer_descend_odd(boxed.cell, 3))
-    assert(seen_even != before_even && seen_odd != before_odd, "writes visible through the refs")
-    assert_eq(xs[0].w, seen_even, "element reached through the even entry holds the write")
-    assert_eq(xs[1].w, seen_odd, "element reached through the odd entry holds the write")
-    assert_eq(xs[2].w, untouched.w, "neighbouring element unchanged")
-    assert_eq(xs[2].inner.v, untouched.inner.v, "neighbouring element unchanged")
-    assert(seen_boxed != boxed_before, "the boxed write is visible through the ref")
-    assert_eq(boxed.cell.w, seen_boxed, "boxed value holds the write through the returned ref")
+    assert_eq(fer_bump(fer_descend(xs[0], 12)), 21, "vec element through the returned ref")
+    assert_eq(xs[0].w, 21, "vec element holds the write")
+    assert_eq(xs[0].inner.v, 10, "sibling leaf unchanged")
+    assert_eq(xs[1].w, 40, "neighbouring element unchanged")
+    assert_eq(fer_bump(fer_descend(os[1].cell, 5)), 6, "nested field through the returned ref")
+    assert_eq(os[1].cell.w, 6, "nested field holds the write")
+    assert_eq(os[1].z, 6, "owner's sibling leaf unchanged")
+    assert_eq(os[0].cell.w, 2, "neighbouring element unchanged")
+    assert_eq(fer_bump(fer_descend(boxed.cell, 3)), 9, "boxed value through the returned ref")
+    assert_eq(boxed.cell.w, 9, "boxed value holds the write")
+    assert_eq(boxed.cell.inner.v, 7, "boxed sibling leaf unchanged")
+    assert_eq(fer_bump(fer_descend_even(xs[0], 6)), 22, "even entry")
+    assert_eq(fer_bump(fer_descend_odd(xs[1], 7)), 41, "odd entry")
+    assert_eq(fer_bump(fer_descend_odd(boxed.cell, 3)), 10, "boxed odd entry")
+    assert_eq(xs[0].w, 22, "element reached through the even entry holds the write")
+    assert_eq(xs[1].w, 41, "element reached through the odd entry holds the write")
+    assert_eq(xs[2].w, 60, "neighbouring element unchanged")
+    assert_eq(xs[2].inner.v, 50, "neighbouring element unchanged")
+    assert_eq(boxed.cell.w, 10, "boxed value holds the cycle write")
 }
 
 // Rebinding a local `ref` moves it to another element: writes before the
@@ -444,29 +324,49 @@ fn fer_rebind_wide(a: ref FerWide, b: ref FerWide) -> int {
     return r.b
 }
 
-struct FerPair { a: FerCell, b: FerCell }
+fn fer_rebind_param(a: ref FerCell, b: ref FerCell) -> int {
+    a.w += 1
+    a = b
+    a.w += 100
+    return a.w
+}
 
 @test
-fn fer_rebound_ref_writes_only_its_new_target() {
+fn fer_rebound_refs_write_only_their_new_target() {
     let xs: [FerCell] = []
     xs.push(FerCell { inner: FerInner { v: 10 }, w: 20 })
     xs.push(FerCell { inner: FerInner { v: 30 }, w: 40 })
     xs.push(FerCell { inner: FerInner { v: 50 }, w: 60 })
-    let first_before = xs[0]
-    let second_before = xs[1]
-    let untouched = xs[2]
-    let (seen_first, seen_second) = fer_rebind_write(xs[0], xs[1])
-    assert(seen_first != first_before.w, "the write before rebinding is visible")
-    assert(seen_second != second_before.w, "the write after rebinding is visible")
-    assert_eq(xs[0].w, seen_first, "first target holds only the write before rebinding")
-    assert_eq(xs[1].w, seen_second, "second target holds the write after rebinding")
-    assert_eq(xs[0].inner.v, first_before.inner.v, "first target's sibling unchanged")
-    assert_eq(xs[1].inner.v, second_before.inner.v, "second target's sibling unchanged")
-    assert_eq(xs[2].w, untouched.w, "neighbouring element unchanged")
+    assert_eq(fer_rebind_write(xs[0], xs[1]), (21, 140), "writes before and after rebinding")
+    assert_eq(xs[0].w, 21, "first target holds only the write before rebinding")
+    assert_eq(xs[1].w, 140, "second target holds the write after rebinding")
+    assert_eq(xs[0].inner.v, 10, "first target's sibling unchanged")
+    assert_eq(xs[1].inner.v, 30, "second target's sibling unchanged")
+    assert_eq(xs[2].w, 60, "neighbouring element unchanged")
+    assert_eq(fer_bump(fer_pick(xs[0], xs[1], true)), 141, "the chosen element")
+    assert_eq(xs[0].w, 21, "the element not chosen is unchanged")
+    assert_eq(fer_bump(fer_pick(xs[0], xs[1], false)), 22, "the kept element")
+    assert_eq(xs[1].w, 141, "the element not kept is unchanged")
+    assert_eq(fer_rebind_through_call(xs[0], xs[1]), 142, "rebound to a ref result")
+    assert_eq(xs[1].w, 142, "the element the call returned holds the write")
+    assert_eq(xs[0].w, 22, "the element bound first is unchanged")
+    let pair = FerPair { a: xs[0], b: xs[1] }
+    let flat_total = fer_rebind_in_loop(xs[0], xs[1], 5)
+    let boxed_total = fer_rebind_in_loop(pair.a, pair.b, 5)
+    assert_eq(flat_total, boxed_total, "flat and boxed refs rebind alike in a loop")
+    assert_eq(xs[0].w, pair.a.w, "first element took the same writes as the boxed one")
+    assert_eq(xs[1].w, pair.b.w, "second element took the same writes as the boxed one")
+    let flat_seen = fer_rebind_param(xs[0], xs[1])
+    let boxed_seen = fer_rebind_param(pair.a, pair.b)
+    assert_eq(flat_seen, boxed_seen, "flat and boxed parameters rebind alike")
+    assert_eq(xs[0].w, pair.a.w, "first element took only the write before rebinding")
+    assert_eq(xs[1].w, flat_seen, "second element holds the write after rebinding")
+    assert_eq(xs[0].inner.v, 10, "sibling leaf unchanged")
+    assert_eq(xs[1].inner.v, 30, "sibling leaf unchanged")
 }
 
 @test
-fn fer_rebound_ref_moves_between_containers() {
+fn fer_rebound_ref_moves_between_containers_and_prefixes() {
     let xs: [FerCell] = [FerCell { inner: FerInner { v: 1 }, w: 2 }]
     let ys: [FerCell] = [FerCell { inner: FerInner { v: 3 }, w: 4 }]
     let m: Map<string, FerCell> = map_new()
@@ -479,242 +379,103 @@ fn fer_rebound_ref_moves_between_containers() {
     assert_eq(m["a"].w, map_first, "first map value holds the write before rebinding")
     assert_eq(m["b"].w, map_second, "second map value holds the write after rebinding")
     assert_eq(m["b"].inner.v, 7, "map sibling unchanged")
-}
-
-@test
-fn fer_rebound_nested_prefix_ref_writes_its_new_target() {
     let os: [FerOuter] = []
     os.push(FerOuter { cell: FerCell { inner: FerInner { v: 1 }, w: 2 }, z: 3 })
     os.push(FerOuter { cell: FerCell { inner: FerInner { v: 4 }, w: 5 }, z: 6 })
-    let (seen_first, seen_second) = fer_rebind_write(os[0].cell, os[1].cell)
-    assert_eq(os[0].cell.w, seen_first, "first nested target holds its write")
-    assert_eq(os[1].cell.w, seen_second, "second nested target holds its write")
+    assert_eq(fer_rebind_write(os[0].cell, os[1].cell), (3, 105), "nested prefix targets")
+    assert_eq(os[0].cell.w, 3, "first nested target holds its write")
+    assert_eq(os[1].cell.w, 105, "second nested target holds its write")
     assert_eq(os[0].z, 3, "owner's sibling leaf unchanged")
     assert_eq(os[1].z, 6, "owner's sibling leaf unchanged")
 }
 
-@test
-fn fer_conditionally_rebound_ref_return_addresses_the_chosen_element() {
-    let xs: [FerCell] = []
-    xs.push(FerCell { inner: FerInner { v: 10 }, w: 20 })
-    xs.push(FerCell { inner: FerInner { v: 30 }, w: 40 })
-    let first = xs[0].w
-    let second = xs[1].w
-    let seen_second = fer_bump(fer_pick(xs[0], xs[1], true))
-    assert(seen_second != second, "the write through the chosen ref is visible")
-    assert_eq(xs[1].w, seen_second, "the chosen element holds the write")
-    assert_eq(xs[0].w, first, "the element not chosen is unchanged")
-    let seen_first = fer_bump(fer_pick(xs[0], xs[1], false))
-    assert(seen_first != first, "the write through the kept ref is visible")
-    assert_eq(xs[0].w, seen_first, "the kept element holds the write")
-    assert_eq(xs[1].w, seen_second, "the element not kept is unchanged")
-}
+fn fer_q_sum(q: FerQ2) -> float { return q.x * 100.0 + q.y }
 
-@test
-fn fer_ref_rebound_to_a_ref_result_writes_that_element() {
-    let xs: [FerCell] = []
-    xs.push(FerCell { inner: FerInner { v: 10 }, w: 20 })
-    xs.push(FerCell { inner: FerInner { v: 30 }, w: 40 })
-    let first = xs[0].w
-    let seen = fer_rebind_through_call(xs[0], xs[1])
-    assert_eq(xs[1].w, seen, "the element the call returned holds the write")
-    assert_eq(xs[0].w, first, "the element bound first is unchanged")
-}
-
-@test
-fn fer_ref_rebound_in_a_loop_alternates_its_target() {
-    let xs: [FerCell] = []
-    xs.push(FerCell { inner: FerInner { v: 10 }, w: 20 })
-    xs.push(FerCell { inner: FerInner { v: 30 }, w: 40 })
-    let pair = FerPair { a: FerCell { inner: FerInner { v: 10 }, w: 20 }, b: FerCell { inner: FerInner { v: 30 }, w: 40 } }
-    let flat_total = fer_rebind_in_loop(xs[0], xs[1], 5)
-    let boxed_total = fer_rebind_in_loop(pair.a, pair.b, 5)
-    assert_eq(flat_total, boxed_total, "flat and boxed refs rebind alike")
-    assert_eq(xs[0].w, pair.a.w, "first element took the same writes as the boxed one")
-    assert_eq(xs[1].w, pair.b.w, "second element took the same writes as the boxed one")
-    assert_eq(xs[0].inner.v, 10, "sibling leaf unchanged")
-}
-
-@test
-fn fer_rebound_strided_row_ref_writes_its_new_row() {
-    let ws: [FerWide] = vec_new_with_capacity(4)
-    ws.push(FerWide { kind: 1, at: FerQ2 { x: 1.0, y: 2.0 }, a: 3, b: 4, c: 5 })
-    ws.push(FerWide { kind: 6, at: FerQ2 { x: 7.0, y: 8.0 }, a: 9, b: 10, c: 11 })
-    let first = ws[0].b
-    let seen = fer_rebind_wide(ws[0], ws[1])
-    assert(seen != 10, "the write through the rebound ref is visible")
-    assert_eq(ws[1].b, seen, "the second row holds the write")
-    assert_eq(ws[1].c, 11, "the second row's sibling is unchanged")
-    assert_eq(ws[0].b, first, "the first row is unchanged")
-}
-
-fn fer_rebind_param(a: ref FerCell, b: ref FerCell) -> int {
-    a.w += 1
-    a = b
-    a.w += 100
-    return a.w
-}
-
-@test
-fn fer_rebound_ref_parameter_writes_its_new_target() {
-    let xs: [FerCell] = []
-    xs.push(FerCell { inner: FerInner { v: 10 }, w: 20 })
-    xs.push(FerCell { inner: FerInner { v: 30 }, w: 40 })
-    let pair = FerPair { a: FerCell { inner: FerInner { v: 10 }, w: 20 }, b: FerCell { inner: FerInner { v: 30 }, w: 40 } }
-    let flat_seen = fer_rebind_param(xs[0], xs[1])
-    let boxed_seen = fer_rebind_param(pair.a, pair.b)
-    assert_eq(flat_seen, boxed_seen, "flat and boxed parameters rebind alike")
-    assert_eq(xs[0].w, pair.a.w, "first element took only the write before rebinding")
-    assert_eq(xs[1].w, flat_seen, "second element holds the write after rebinding")
-    assert_eq(xs[1].inner.v, 30, "sibling leaf unchanged")
-}
-
-value FrInner { v: int }
-
-value FrCell { inner: FrInner, w: int }
-
-nobox value FrQ2 { x: float, y: float }
-
-nobox value FrWide { kind: int, at: FrQ2, a: int, b: int, c: int }
-
-fn fr_inner_v(i: FrInner) -> int { return i.v }
-
-fn fr_q_sum(q: FrQ2) -> float { return q.x * 100.0 + q.y }
-
-fn fr_id<T>(x: T) -> T { return x }
-
-fn fr_descend(c: ref FrCell, n: int) -> ref FrCell {
-    if n == 0 { return c }
-    return fr_descend(c, n - 1)
-}
-
-fn fr_cells() -> [FrCell] {
-    let xs: [FrCell] = []
-    xs.push(FrCell { inner: FrInner { v: 1 }, w: 2 })
-    xs.push(FrCell { inner: FrInner { v: 3 }, w: 4 })
-    return xs
-}
-
-fn fr_snapshot_then_bump(c: ref FrCell) -> FrCell {
-    let copy = FrCell { inner: c.inner, w: c.w }
-    c.w += 1
-    return copy
-}
-
-fn fr_nested_reads_around_a_write(c: ref FrCell) -> int {
-    let before = fr_inner_v(c.inner)
-    c.inner.v += 5
-    return before * 100 + fr_inner_v(c.inner)
-}
-
-// Equality reads the whole element before and after a write through `c`.
-fn fr_equal_before_and_after(c: ref FrCell) -> (bool, bool) {
-    let before = c == FrCell { inner: FrInner { v: 3 }, w: 4 }
-    c.w = 40
-    let after = c == FrCell { inner: FrInner { v: 3 }, w: 40 }
-    return (before, after)
-}
-
-// A `ref` handed through a generic identity still addresses the element.
-fn fr_alias_sees_write(c: ref FrCell) -> int {
-    let r = fr_id(c)
-    c.w += 10
-    return r.w
-}
-
-// No flat argument, but the result addresses an Arena value column.
-fn fr_borrow(a: Arena<FrCell>, e: Entity<FrCell>) -> (ref FrCell)? {
-    return a.borrow(e)
-}
-
-fn fr_bump(c: ref FrCell) { c.w += 1 }
-
-// A tuple result with a table-held leaf returns through the flat variant.
-fn fr_label_and_bump(c: ref FrCell) -> (string, int) {
-    c.w += 1
-    return ("w{c.w}", c.inner.v)
-}
-
-fn fr_wide_rewrite(r: ref FrWide) -> float {
+fn fer_wide_rewrite(r: ref FerWide) -> float {
     let before = r.at
     r.b = 100
     r.at.y = 0.5
     r.c += 1
-    return before.y * 1000.0 + fr_q_sum(r.at)
+    return before.y * 1000.0 + fer_q_sum(r.at)
 }
 
 @test
-fn fr_value_read_before_a_write_keeps_the_old_leaves() {
-    let xs = fr_cells()
-    let copy = fr_snapshot_then_bump(xs[0])
-    assert_eq(copy.w, 2, "the value read keeps the old leaf")
-    assert_eq(copy.inner.v, 1, "the value read keeps the old nested leaf")
-    assert_eq(xs[0].w, 3, "the element took the write")
-    assert_eq(xs[1].w, 4, "the neighbour is unchanged")
-}
-
-@test
-fn fr_nested_value_reads_see_the_write_between_them() {
-    let xs = fr_cells()
-    assert_eq(fr_nested_reads_around_a_write(xs[1]), 308, "nested reads before and after")
-    assert_eq(xs[1].inner.v, 8, "the nested write landed")
-    assert_eq(xs[1].w, 4, "the sibling leaf is unchanged")
-}
-
-@test
-fn fr_whole_element_equality_reads_the_current_leaves() {
-    let xs = fr_cells()
-    let (before, after) = fr_equal_before_and_after(xs[1])
-    assert(before, "the whole read matches the stored element")
-    assert(after, "the whole read after the write matches the new element")
-    assert_eq(xs[1].w, 40, "the element took the write")
-}
-
-@test
-fn fr_ref_through_a_generic_identity_aliases_the_element() {
-    let xs = fr_cells()
-    assert_eq(fr_alias_sees_write(xs[0]), 12, "the alias reads the write")
-    assert_eq(xs[0].w, 12, "the element took the write")
-    assert_eq(xs[1].w, 4, "the neighbour is unchanged")
-}
-
-@test
-fn fr_ref_results_read_whole_nested_and_leaf_values() {
-    let xs = fr_cells()
-    assert_eq(fr_inner_v(fr_descend(xs[1], 3).inner), 3, "nested value of a ref result")
-    assert_eq(fr_descend(xs[1], 2).w, 4, "leaf of a ref result")
-    assert(fr_descend(xs[1], 2) == FrCell { inner: FrInner { v: 3 }, w: 4 }, "whole ref result")
-    assert(fr_descend(xs[0], 1) != FrCell { inner: FrInner { v: 3 }, w: 4 }, "the other element")
-}
-
-@test
-fn fr_strided_row_reads_around_writes() {
-    let ws: [FrWide] = vec_new_with_capacity(4)
-    ws.push(FrWide { kind: 1, at: FrQ2 { x: 1.0, y: 2.0 }, a: 3, b: 4, c: 5 })
-    ws.push(FrWide { kind: 6, at: FrQ2 { x: 7.0, y: 8.0 }, a: 9, b: 10, c: 11 })
-    assert_eq(fr_wide_rewrite(ws[1]), 8700.5, "nested reads before and after")
+fn fer_strided_row_refs_write_and_read_the_row() {
+    let ws: [FerWide] = vec_new_with_capacity(4)
+    ws.push(FerWide { kind: 1, at: FerQ2 { x: 1.0, y: 2.0 }, a: 3, b: 4, c: 5 })
+    ws.push(FerWide { kind: 6, at: FerQ2 { x: 7.0, y: 8.0 }, a: 9, b: 10, c: 11 })
+    assert_eq(fer_bump_wide(ws[1]), 20, "whole-row ref")
+    assert_eq(fer_move_at(ws[1].at), 8.5, "nested ref")
+    assert_eq(ws[1].b, 20, "row holds the whole-element ref write")
+    assert_eq(ws[1].at.y, 8.5, "row holds the nested ref write")
+    assert_eq(ws[1].a, 9, "sibling leaf unchanged")
+    assert_eq(ws[1].at.x, 7.0, "nested sibling leaf unchanged")
+    assert_eq(fer_rebind_wide(ws[0], ws[1]), 30, "rebound row ref")
+    assert_eq(ws[1].b, 30, "the second row holds the write")
+    assert_eq(ws[1].c, 11, "the second row's sibling is unchanged")
+    assert_eq(fer_wide_rewrite(ws[1]), 9200.5, "nested reads before and after")
     assert_eq(ws[1].b, 100, "the row holds the write")
     assert_eq(ws[1].c, 12, "the row holds the compound write")
     assert_eq(ws[1].at.x, 7.0, "the nested sibling is unchanged")
     assert_eq(ws[0].b, 4, "the neighbouring row is unchanged")
+    assert_eq(ws[0].at.y, 2.0, "the neighbouring row is unchanged")
+}
+
+fn fer_inner_v(i: FerInner) -> int { return i.v }
+
+fn fer_id<T>(x: T) -> T { return x }
+
+fn fer_snapshot_then_bump(c: ref FerCell) -> FerCell {
+    let copy = FerCell { inner: c.inner, w: c.w }
+    c.w += 1
+    return copy
+}
+
+fn fer_nested_reads_around_a_write(c: ref FerCell) -> int {
+    let before = fer_inner_v(c.inner)
+    c.inner.v += 5
+    return before * 100 + fer_inner_v(c.inner)
+}
+
+// Equality reads the whole element before and after a write through `c`.
+fn fer_equal_before_and_after(c: ref FerCell) -> (bool, bool) {
+    let before = c == FerCell { inner: FerInner { v: 3 }, w: 4 }
+    c.w = 40
+    let after = c == FerCell { inner: FerInner { v: 3 }, w: 40 }
+    return (before, after)
+}
+
+fn fer_alias_sees_write(c: ref FerCell) -> int {
+    let r = fer_id(c)
+    c.w += 10
+    return r.w
+}
+
+// A tuple result with a table-held leaf returns through the flat variant.
+fn fer_label_and_bump(c: ref FerCell) -> (string, int) {
+    c.w += 1
+    return ("w{c.w}", c.inner.v)
 }
 
 @test
-fn fr_ref_result_of_a_call_without_flat_arguments_writes_the_element() {
-    let a: Arena<FrCell> = arena_new()
-    let first = a.insert(FrCell { inner: FrInner { v: 1 }, w: 2 })
-    let second = a.insert(FrCell { inner: FrInner { v: 3 }, w: 4 })
-    let c = fr_borrow(a, first)
-    if c != null { fr_bump(c) }
-    assert_eq(first.get().unwrap().w, 3, "the borrowed element took the write")
-    assert_eq(second.get().unwrap().w, 4, "the other element is unchanged")
-}
-
-@test
-fn fr_tuple_result_with_a_string_reads_after_the_write() {
-    let xs = fr_cells()
-    let (label, v) = fr_label_and_bump(xs[1])
-    assert_eq(label, "w5", "the string leaf reads the write")
-    assert_eq(v, 3, "the int leaf")
-    assert_eq(xs[1].w, 5, "the element took the write")
+fn fer_value_reads_through_refs_see_the_current_leaves() {
+    let xs = fer_cells()
+    assert_eq(fer_inner_v(fer_descend(xs[1], 3).inner), 3, "nested value of a ref result")
+    assert_eq(fer_descend(xs[1], 2).w, 4, "leaf of a ref result")
+    assert(fer_descend(xs[1], 2) == FerCell { inner: FerInner { v: 3 }, w: 4 }, "whole ref result")
+    assert(fer_descend(xs[0], 1) != FerCell { inner: FerInner { v: 3 }, w: 4 }, "the other element")
+    let copy = fer_snapshot_then_bump(xs[0])
+    assert_eq(copy.w, 2, "the value read keeps the old leaf")
+    assert_eq(copy.inner.v, 1, "the value read keeps the old nested leaf")
+    assert_eq(xs[0].w, 3, "the element took the write")
+    assert_eq(fer_equal_before_and_after(xs[1]), (true, true), "whole reads around a write")
+    assert_eq(xs[1].w, 40, "the element took the write")
+    assert_eq(fer_nested_reads_around_a_write(xs[1]), 308, "nested reads before and after")
+    assert_eq(xs[1].inner.v, 8, "the nested write landed")
+    assert_eq(fer_alias_sees_write(xs[0]), 13, "a ref through a generic identity aliases")
+    assert_eq(xs[0].w, 13, "the element took the write")
+    let (label, v) = fer_label_and_bump(xs[1])
+    assert_eq(label, "w41", "the string leaf reads the write")
+    assert_eq(v, 8, "the int leaf")
+    assert_eq(xs[1].w, 41, "the element took the write")
 }

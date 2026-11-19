@@ -1,7 +1,7 @@
 // Taking a value-returning fn as a fn value gives its calls a boxed (opaque)
 // result representation, program-wide. Every value-shaped destination of such
-// a call must still read the leaves off the box; the representation alone has
-// no leaf plan. (`value_adversarial_phase3` hit this only in combination.)
+// a call must still read the leaves off the box: a flat enum payload, a
+// leafwise flat-enum equality and a coroutine's yield slots.
 
 value V2 { x: float, y: float }
 
@@ -18,26 +18,6 @@ enum MaybeV2 {
     Nope,
 }
 
-// The fn-value use that changes `make_v2`'s result representation.
-@test(output = "30")
-fn test_fn_value_call() {
-    let w = invoke_fn(make_v2, 10.0, 20.0)
-    print("{(w.x + w.y).floor()}")
-}
-
-@test(output = "7")
-fn test_flat_enum_payload_from_boxed_call() {
-    let a = MaybeV2::Just(make_v2(3.0, 4.0))
-    let s = match a {
-        MaybeV2::Just(v) => v.x + v.y,
-        MaybeV2::Nope => 0.0,
-    }
-    print("{s.floor()}")
-}
-
-// The same holds for a flat enum: `mk_sh` taken as a fn value gives its calls
-// a boxed result, which the leafwise equality and a coroutine's yield slots
-// must read leaf by leaf.
 enum Sh {
     A(V2),
     B(float),
@@ -58,20 +38,24 @@ fn sh_sum(s: Sh) -> float {
     }
 }
 
-@test(output = "true\nfalse")
-fn test_flat_enum_equality_of_boxed_calls() {
-    print("{mk_sh(1.0) == mk_sh(1.0)}")
-    print("{invoke_sh(mk_sh, 1.0) == mk_sh(2.0)}")
-}
-
 co fn yield_boxed_call() -> Coroutine<Sh> {
     yield mk_sh(2.0)
 }
 
-@test(output = "4")
-fn test_flat_enum_yield_of_boxed_call() {
+@test(output = "30\n7\ntrue\nfalse\n4")
+fn boxed_results_read_leafwise() {
+    let w = invoke_fn(make_v2, 10.0, 20.0)
+    print("{(w.x + w.y).floor()}")
+    let a = MaybeV2::Just(make_v2(3.0, 4.0))
+    let s = match a {
+        MaybeV2::Just(v) => v.x + v.y,
+        MaybeV2::Nope => 0.0,
+    }
+    print("{s.floor()}")
+    print("{mk_sh(1.0) == mk_sh(1.0)}")
+    print("{invoke_sh(mk_sh, 1.0) == mk_sh(2.0)}")
     let c = yield_boxed_call()
-    if let s = resume(c) {
-        print("{sh_sum(s).floor()}")
+    if let y = resume(c) {
+        print("{sh_sum(y).floor()}")
     }
 }

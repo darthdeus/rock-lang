@@ -38,45 +38,38 @@ fn lr_move(r: ref LrRow, d: int) {
 }
 
 @test
-fn whole_read() {
+fn holder_field_whole_and_leaf_access() {
     let hs = lr_holders()
     let p = hs[0].row.pos
     assert_eq(p.x, 1)
     assert_eq(p.y, 2)
     assert_eq(hs[0].row.pos, LrV2 { x: 1, y: 2 })
-}
-
-@test
-fn whole_write() {
-    let hs = lr_holders()
     let h = hs[0]
-    h.row.pos = LrV2 { x: 7, y: 8 }
-    assert_eq(hs[0].row.pos.x, 7)
-    assert_eq(hs[0].row.pos.y, 8)
-    let p = hs[0].row.pos
-    assert_eq(p.x + p.y, 15)
-}
-
-@test
-fn leaf_write_after_whole_write() {
-    let hs = lr_holders()
-    let h = hs[0]
-    let p = h.row.pos
+    let snap = h.row.pos
+    let row_snap = h.row
     h.row.pos = LrV2 { x: p.x + 1, y: h.row.pos.y + 1 }
     h.row.pos.x = h.row.pos.x + 100
     assert_eq(hs[0].row.pos.x, 102)
     assert_eq(hs[0].row.pos.y, 3)
-}
-
-@test
-fn sibling_kept() {
-    let hs = lr_holders()
-    let h = hs[0]
+    h.row.pos = LrV2 { x: 7, y: 8 }
+    assert_eq(hs[0].row.pos.x, 7)
+    assert_eq(hs[0].row.pos.y, 8)
+    let q = hs[0].row.pos
+    assert_eq(q.x + q.y, 15)
     h.row.pos = LrV2 { x: 3, y: 4 }
     h.row.pos.y = 9
     assert_eq(h.row.id, 1)
     assert_eq(h.row.tag.unwrap().value, 5)
     assert_eq(h.row.pos, LrV2 { x: 3, y: 9 })
+    assert_eq(snap, LrV2 { x: 1, y: 2 })
+    assert_eq(row_snap.pos, LrV2 { x: 1, y: 2 })
+    h.row.tag = null
+    h.row.pos = LrV2 { x: 5, y: 6 }
+    assert(h.row.tag == null, "tag cleared")
+    h.row.tag = LrId { value: 9 }
+    h.row.pos.x = 50
+    assert_eq(h.row.tag.value, 9)
+    assert_eq(hs[0].row.pos, LrV2 { x: 50, y: 6 })
 }
 
 @test
@@ -92,19 +85,6 @@ fn through_ref_param() {
 }
 
 @test
-fn copy_stays_a_snapshot() {
-    let hs = lr_holders()
-    let h = hs[0]
-    let snap = h.row.pos
-    let row_snap = h.row
-    h.row.pos = LrV2 { x: 40, y: 50 }
-    h.row.pos.x = 41
-    assert_eq(snap, LrV2 { x: 1, y: 2 })
-    assert_eq(row_snap.pos, LrV2 { x: 1, y: 2 })
-    assert_eq(h.row.pos, LrV2 { x: 41, y: 50 })
-}
-
-@test
 fn vec_stored_parent() {
     let rows: [LrRow] = []
     rows.push(LrRow { id: 1, pos: LrV2 { x: 1, y: 2 } })
@@ -116,17 +96,4 @@ fn vec_stored_parent() {
     assert_eq(rows[0].pos, LrV2 { x: 1, y: 2 })
     assert_eq(rows[1].tag.unwrap().value, 6)
     assert_eq(lr_sum(rows[1]), 341)
-}
-
-@test
-fn nullable_nobox_sibling() {
-    let hs = lr_holders()
-    let h = hs[0]
-    h.row.tag = null
-    h.row.pos = LrV2 { x: 5, y: 6 }
-    assert(h.row.tag == null, "tag cleared")
-    h.row.tag = LrId { value: 9 }
-    h.row.pos.x = 50
-    assert_eq(h.row.tag.value, 9)
-    assert_eq(hs[0].row.pos, LrV2 { x: 50, y: 6 })
 }

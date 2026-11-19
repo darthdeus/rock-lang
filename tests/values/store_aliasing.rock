@@ -1,7 +1,5 @@
 // Storing one value into two places copies it: a later write through either
-// place must not reach the other. Covers stores from params, optional fields,
-// map lookups, array elements, closures, unwraps and coalesces, for plain and
-// GC-carrying (string-holding) values.
+// place must not reach the other, whatever the source of the stored value.
 
 value AliasPoint { x: int, y: int }
 value AliasWrap { p: AliasPoint, n: int }
@@ -16,172 +14,133 @@ fn alias_store_twice(e: AliasPoint?, h: AliasHolder) {
 
 fn alias_store_optional(e: AliasPoint?, h: AliasHolder) { h.o = e }
 
-@test
-fn storing_one_value_twice_copies() {
-    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 } }
-    alias_store_twice(AliasPoint { x: 1, y: 2 }, h)
-    h.a.x = 5
-    assert_eq(h.b.x, 1, "value stores alias")
+fn holder(o: AliasPoint?) -> AliasHolder {
+    return AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 }, o: o }
+}
+
+fn wrap_holder() -> AliasHolder {
+    return AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 }, w: AliasWrap { p: AliasPoint { x: 1, y: 2 }, n: 0 } }
 }
 
 @test
-fn field_param_field_store_copies() {
-    let src = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 },
-        o: AliasPoint { x: 3, y: 4 } }
-    let dst = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 } }
+fn storing_one_value_twice_copies() {
+    let h = holder(null)
+    alias_store_twice(AliasPoint { x: 1, y: 2 }, h)
+    h.a.x = 5
+    assert_eq(h.b.x, 1, "param")
+
+    let src = holder(AliasPoint { x: 3, y: 4 })
+    let dst = holder(null)
     alias_store_optional(src.o, dst)
     alias_store_twice(dst.o, dst)
     dst.a.x = 9
-    assert_eq(dst.b.x, 3, "value stores alias across a parameter")
-}
+    assert_eq(dst.b.x, 3, "field through a parameter")
 
-@test
-fn optional_field_if_let_store_twice_copies() {
-    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 }, o: AliasPoint { x: 1, y: 2 } }
-    if let v = h.o {
-        h.a = v
-        h.b = v
+    let hf = holder(AliasPoint { x: 1, y: 2 })
+    if let v = hf.o {
+        hf.a = v
+        hf.b = v
     }
-    h.a.x = 5
-    assert_eq(h.b.x, 1, "stores alias")
-}
+    hf.a.x = 5
+    assert_eq(hf.b.x, 1, "optional field if-let")
+    assert_eq(hf.o.unwrap().x, 1, "optional field source")
 
-@test
-fn map_optional_value_if_let_store_twice_copies() {
     let m: Map<string, AliasPoint?> = map_new()
     m["k"] = AliasPoint { x: 1, y: 2 }
-    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 } }
+    let hm = holder(null)
     if let v = m["k"] {
-        h.a = v
-        h.b = v
+        hm.a = v
+        hm.b = v
     }
-    h.a.x = 5
-    assert_eq(h.b.x, 1, "stores alias")
-}
+    hm.a.x = 5
+    assert_eq(hm.b.x, 1, "map optional value")
 
-@test
-fn map_get_if_let_store_twice_copies() {
-    let m: Map<string, AliasPoint> = map_new()
-    m["k"] = AliasPoint { x: 1, y: 2 }
-    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 } }
-    if let v = m.get("k") {
-        h.a = v
-        h.b = v
+    let mg: Map<string, AliasPoint> = map_new()
+    mg["k"] = AliasPoint { x: 1, y: 2 }
+    let hg = holder(null)
+    if let v = mg.get("k") {
+        hg.a = v
+        hg.b = v
     }
-    h.a.x = 5
-    assert_eq(h.b.x, 1, "stores alias")
-}
+    hg.a.x = 5
+    assert_eq(hg.b.x, 1, "map get")
 
-@test
-fn optional_array_element_if_let_store_twice_copies() {
     let xs: [AliasPoint?] = [AliasPoint { x: 1, y: 2 }, null]
-    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 } }
+    let hx = holder(null)
     if let v = xs[0] {
-        h.a = v
-        h.b = v
+        hx.a = v
+        hx.b = v
     }
-    h.a.x = 5
-    assert_eq(h.b.x, 1, "stores alias")
-}
+    hx.a.x = 5
+    assert_eq(hx.b.x, 1, "optional element")
 
-@test
-fn optional_array_for_loop_if_let_store_twice_copies() {
-    let xs: [AliasPoint?] = [AliasPoint { x: 1, y: 2 }]
-    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 } }
+    let hl = holder(null)
     for e in xs {
         if let v = e {
-            h.a = v
-            h.b = v
+            hl.a = v
+            hl.b = v
         }
     }
-    h.a.x = 5
-    assert_eq(h.b.x, 1, "stores alias")
-}
+    hl.a.x = 5
+    assert_eq(hl.b.x, 1, "optional element loop")
 
-@test
-fn coalesced_optional_field_store_twice_copies() {
-    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 }, o: AliasPoint { x: 1, y: 2 } }
-    let v = h.o ?? AliasPoint { x: 9, y: 9 }
-    h.a = v
-    h.b = v
-    h.a.x = 5
-    assert_eq(h.b.x, 1, "stores alias")
-}
+    let hc = holder(AliasPoint { x: 1, y: 2 })
+    let vc = hc.o ?? AliasPoint { x: 9, y: 9 }
+    hc.a = vc
+    hc.b = vc
+    hc.a.x = 5
+    assert_eq(hc.b.x, 1, "coalesce")
 
-@test
-fn optional_wrapper_field_store_twice_copies() {
-    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 }, w: AliasWrap { p: AliasPoint { x: 1, y: 2 }, n: 0 } }
-    if let w = h.w {
-        h.a = w.p
-        h.b = w.p
-    }
-    h.a.x = 5
-    assert_eq(h.b.x, 1, "stores alias")
-}
+    let hu = holder(AliasPoint { x: 1, y: 2 })
+    let vu = hu.o.unwrap()
+    hu.a = vu
+    hu.b = vu
+    hu.a.x = 5
+    assert_eq(hu.b.x, 1, "unwrap")
 
-@test
-fn closure_captured_optional_if_let_store_twice_copies() {
-    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 }, o: AliasPoint { x: 1, y: 2 } }
-    let o = h.o
+    let hk = holder(AliasPoint { x: 1, y: 2 })
+    let o = hk.o
     let f = () => {
         if let v = o {
-            h.a = v
-            h.b = v
+            hk.a = v
+            hk.b = v
         }
         return 0
     }
     f()
-    h.a.x = 5
-    assert_eq(h.b.x, 1, "stores alias")
-}
+    hk.a.x = 5
+    assert_eq(hk.b.x, 1, "closure capture")
 
-@test
-fn unwrap_store_twice_copies() {
-    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 }, o: AliasPoint { x: 1, y: 2 } }
-    let v = h.o.unwrap()
-    h.a = v
-    h.b = v
-    h.a.x = 5
-    assert_eq(h.b.x, 1, "stores alias")
-}
-
-@test
-fn optional_field_to_optional_field_copies() {
-    let s = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 }, o: AliasPoint { x: 1, y: 2 } }
-    let d = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 } }
+    let s = holder(AliasPoint { x: 1, y: 2 })
+    let d = holder(null)
     d.o = s.o
     if let x = d.o {
         d.a = x
     }
     d.a.x = 5
-    let sx = s.o.unwrap().x
-    assert_eq(sx, 1, "stores alias")
+    assert_eq(s.o.unwrap().x, 1, "optional field to optional field")
 }
 
 @test
-fn optional_wrapper_store_then_write_copies() {
-    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 }, w: AliasWrap { p: AliasPoint { x: 1, y: 2 }, n: 0 } }
-    let g = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 } }
-    if let x = h.w {
+fn storing_a_wrapped_value_twice_copies() {
+    let h = wrap_holder()
+    if let w = h.w {
+        h.a = w.p
+        h.b = w.p
+    }
+    h.a.x = 5
+    assert_eq(h.b.x, 1, "wrapper field")
+
+    let src = wrap_holder()
+    let g = holder(null)
+    if let x = src.w {
         g.w = x
     }
     if let gw = g.w {
         g.a = gw.p
     }
     g.a.x = 5
-    let hx = h.w.unwrap().p.x
-    assert_eq(hx, 1, "stores alias")
-}
-
-@test
-fn optional_field_if_let_store_into_field_keeps_source() {
-    let h = AliasHolder { a: AliasPoint { x: 0, y: 0 }, b: AliasPoint { x: 0, y: 0 }, o: AliasPoint { x: 1, y: 2 } }
-    if let v = h.o {
-        h.a = v
-    }
-    h.a.x = 5
-    let sx = h.o.unwrap().x
-    assert_eq(sx, 1, "stores alias")
+    assert_eq(src.w.unwrap().p.x, 1, "wrapper stored then written")
 }
 
 value AliasLabel { text: string, n: int }
@@ -190,14 +149,6 @@ struct AliasLabelHolder { a: AliasLabel, b: AliasLabel }
 fn alias_label_store_twice(v: AliasLabel, h: AliasLabelHolder) {
     h.a = v
     h.b = v
-}
-
-@test
-fn gc_tier_plain_value_store_twice_copies() {
-    let h = AliasLabelHolder { a: AliasLabel { text: "a", n: 0 }, b: AliasLabel { text: "b", n: 0 } }
-    alias_label_store_twice(AliasLabel { text: "x", n: 1 }, h)
-    h.a.n = 5
-    assert_eq(h.b.n, 1, "gc-tier value stores alias")
 }
 
 fn gc_alias_store_twice(e: AliasLabel?, h: AliasLabelHolder) {
@@ -210,67 +161,26 @@ fn gc_alias_store_twice(e: AliasLabel?, h: AliasLabelHolder) {
 @test
 fn storing_one_gc_value_twice_copies() {
     let h = AliasLabelHolder { a: AliasLabel { text: "a", n: 0 }, b: AliasLabel { text: "b", n: 0 } }
-    gc_alias_store_twice(AliasLabel { text: "x", n: 1 }, h)
+    alias_label_store_twice(AliasLabel { text: "x", n: 1 }, h)
     h.a.n = 5
-    assert_eq(h.b.n, 1, "GC value stores copy independently")
+    assert_eq(h.b.n, 1, "plain")
+    let g = AliasLabelHolder { a: AliasLabel { text: "a", n: 0 }, b: AliasLabel { text: "b", n: 0 } }
+    gc_alias_store_twice(AliasLabel { text: "x", n: 1 }, g)
+    g.a.n = 5
+    assert_eq(g.b.n, 1, "optional")
 }
 
-// Whole-value reads of a `value` struct must COPY -- the invariant the
-// mutable-place model rests on. Binding, argument, return and boxed-storage
-// uses copy the value. Nullability is not
-// observable: a `V?` read out of a mutable place copies its leaves when the
-// value is present and stays null when it is absent.
-//
-// The absent cases also check that copying does not read leaves from null.
-
+// A `V?` read out of a mutable place copies its leaves when present and stays
+// null when absent, at every place root; an absent value must not be indexed.
 struct NonNull1 { p: AliasPoint }
 struct NonNull2 { p: AliasPoint }
 struct Nullable1 { p: AliasPoint? }
 struct Nullable2 { p: AliasPoint? }
+struct Owner { inner: Nullable1? }
+struct NNB { p: AliasPoint }
+struct OwnerNN { inner: NNB? }
 
 fn nullable_identity(a: Nullable1) -> Nullable1 { return a }
-
-// A whole-value read of a non-nullable field copies, so the write through
-// `b` leaves `a` alone.
-@test(output = "b=99 a=1")
-fn non_nullable_value_field_read_copies() {
-    let a = NonNull1 { p: AliasPoint { x: 1, y: 2 } }
-    let b = NonNull2 { p: a.p }
-    b.p.x = 99
-    print("b={b.p.x} a={a.p.x}")
-}
-
-// Nullability is the only difference from the control above, and the output is
-// the same.
-@test(output = "b=99 a=1")
-fn nullable_value_field_read_copies() {
-    let a = Nullable1 { p: AliasPoint { x: 1, y: 2 } }
-    let b = Nullable2 { p: nullable_identity(a).p }
-    if b.p != null && a.p != null {
-        b.p.x = 99
-        print("b={b.p.x} a={a.p.x}")
-    }
-}
-
-// A `V?` whole-value read out of a mutable place copies its leaves when the
-// value is present and stays null when it is absent -- at every place root, not
-// just the struct field pinned above.
-// The absent cases are load-bearing: an absent value has no leaves, so an
-// unconditional split would index nil.
-@test(output = "null")
-fn absent_field_read_stays_null() {
-    let a = Nullable1 { p: null }
-    let b = Nullable2 { p: a.p }
-    if b.p == null { print("null") } else { print("boxed") }
-}
-
-@test(output = "c=1 a=99")
-fn let_bound_nullable_field_copies() {
-    let a = Nullable1 { p: AliasPoint { x: 1, y: 2 } }
-    let c = a.p
-    if a.p != null { a.p.x = 99 }
-    if c != null && a.p != null { print("c={c.x} a={a.p.x}") }
-}
 
 fn read_out_of_param(a: Nullable1) {
     let b = Nullable2 { p: a.p }
@@ -280,11 +190,6 @@ fn read_out_of_param(a: Nullable1) {
     }
 }
 
-@test(output = "b=99 a=1")
-fn param_root_copies() {
-    read_out_of_param(Nullable1 { p: AliasPoint { x: 1, y: 2 } })
-}
-
 global G_PT: AliasPoint? = null
 
 // Through a fn so the read site sees the declared `AliasPoint?`, not a refinement.
@@ -292,95 +197,83 @@ fn set_g_pt(v: AliasPoint?) {
     G_PT = v
 }
 
-@test(output = "b=99 g=1")
-fn global_root_copies() {
+fn presence(b: Nullable2) -> string { return if b.p == null { "null" } else { "boxed" } }
+
+@test(output = "b=99 a=1\nb=99 a=1\nc=1 a=99\nb=99 a=1\nb=99 g=1\nb=99 e=1\nb=99 m=1\nb=99 a=1\nb=99 a=1\nb=99 a=1\nnull null null null")
+fn whole_value_reads_of_places_copy() {
+    let nn = NonNull1 { p: AliasPoint { x: 1, y: 2 } }
+    let nb = NonNull2 { p: nn.p }
+    nb.p.x = 99
+    print("b={nb.p.x} a={nn.p.x}")
+
+    let na = Nullable1 { p: AliasPoint { x: 1, y: 2 } }
+    let b = Nullable2 { p: nullable_identity(na).p }
+    if b.p != null && na.p != null {
+        b.p.x = 99
+        print("b={b.p.x} a={na.p.x}")
+    }
+
+    let la = Nullable1 { p: AliasPoint { x: 1, y: 2 } }
+    let c = la.p
+    if la.p != null { la.p.x = 99 }
+    if c != null && la.p != null { print("c={c.x} a={la.p.x}") }
+
+    read_out_of_param(Nullable1 { p: AliasPoint { x: 1, y: 2 } })
+
     set_g_pt(AliasPoint { x: 1, y: 2 })
-    let b = Nullable2 { p: G_PT }
-    if b.p != null {
-        b.p.x = 99
-        if G_PT != null { print("b={b.p.x} g={G_PT.x}") }
+    let gb = Nullable2 { p: G_PT }
+    if gb.p != null {
+        gb.p.x = 99
+        if G_PT != null { print("b={gb.p.x} g={G_PT.x}") }
     }
-}
 
-@test(output = "null")
-fn absent_global_read_stays_null() {
-    set_g_pt(null)
-    let b = Nullable2 { p: G_PT }
-    if b.p == null { print("null") } else { print("boxed") }
-}
-
-@test(output = "b=99 e=1")
-fn vec_element_root_copies() {
     let xs: [AliasPoint?] = [AliasPoint { x: 1, y: 2 }]
-    let b = Nullable2 { p: xs[0] }
-    if b.p != null {
-        b.p.x = 99
+    let xb = Nullable2 { p: xs[0] }
+    if xb.p != null {
+        xb.p.x = 99
         let e = xs[0]
-        if e != null { print("b={b.p.x} e={e.x}") }
+        if e != null { print("b={xb.p.x} e={e.x}") }
     }
-}
 
-@test(output = "b=99 m=1")
-fn map_value_root_copies() {
     let m: Map<int, AliasPoint?> = map_new()
     m[7] = AliasPoint { x: 1, y: 2 }
-    let b = Nullable2 { p: m[7] }
-    if b.p != null {
-        b.p.x = 99
+    let mb = Nullable2 { p: m[7] }
+    if mb.p != null {
+        mb.p.x = 99
         let mv = m[7]
-        if mv != null { print("b={b.p.x} m={mv.x}") }
+        if mv != null { print("b={mb.p.x} m={mv.x}") }
     }
-}
 
-struct Owner { inner: Nullable1? }
-
-@test(output = "b=99 a=1")
-fn safenav_nullable_field_copies() {
     let o = Owner { inner: Nullable1 { p: AliasPoint { x: 1, y: 2 } } }
-    let b = Nullable2 { p: o.inner?.p }
-    if b.p != null && o.inner != null && o.inner.p != null {
-        b.p.x = 99
-        print("b={b.p.x} a={o.inner.p.x}")
+    let ob = Nullable2 { p: o.inner?.p }
+    if ob.p != null && o.inner != null && o.inner.p != null {
+        ob.p.x = 99
+        print("b={ob.p.x} a={o.inner.p.x}")
     }
-}
 
-@test(output = "null")
-fn safenav_absent_field_stays_null() {
-    let o = Owner { inner: Nullable1 { p: null } }
-    let b = Nullable2 { p: o.inner?.p }
-    if b.p == null { print("null") } else { print("boxed") }
-}
-
-@test(output = "null")
-fn safenav_absent_base_stays_null() {
-    let o = Owner { inner: null }
-    let b = Nullable2 { p: o.inner?.p }
-    if b.p == null { print("null") } else { print("boxed") }
-}
-
-struct NNB { p: AliasPoint }
-struct OwnerNN { inner: NNB? }
-
-@test(output = "b=99 a=1")
-fn safenav_nonnullable_field_copies() {
-    let o = OwnerNN { inner: NNB { p: AliasPoint { x: 1, y: 2 } } }
-    let b = Nullable2 { p: o.inner?.p }
-    if b.p != null && o.inner != null {
-        b.p.x = 99
-        print("b={b.p.x} a={o.inner.p.x}")
+    let on = OwnerNN { inner: NNB { p: AliasPoint { x: 1, y: 2 } } }
+    let onb = Nullable2 { p: on.inner?.p }
+    if onb.p != null && on.inner != null {
+        onb.p.x = 99
+        print("b={onb.p.x} a={on.inner.p.x}")
     }
-}
 
-// A non-nullable field read through an owner already refined to non-null: the
-// non-nullable copy-out arm, the control for the arms above.
-@test(output = "b=99 a=1")
-fn nonnullable_field_of_refined_owner_copies() {
-    let o = OwnerNN { inner: NNB { p: AliasPoint { x: 1, y: 2 } } }
-    if o.inner != null {
-        let b = Nullable2 { p: o.inner.p }
-        if b.p != null {
-            b.p.x = 99
-            print("b={b.p.x} a={o.inner.p.x}")
+    let r = OwnerNN { inner: NNB { p: AliasPoint { x: 1, y: 2 } } }
+    if r.inner != null {
+        let rb = Nullable2 { p: r.inner.p }
+        if rb.p != null {
+            rb.p.x = 99
+            print("b={rb.p.x} a={r.inner.p.x}")
         }
     }
+
+    let absent_field = Nullable1 { p: null }
+    let af = Nullable2 { p: absent_field.p }
+    set_g_pt(null)
+    let ag = Nullable2 { p: G_PT }
+    let sf = Owner { inner: Nullable1 { p: null } }
+    let asf = Nullable2 { p: sf.inner?.p }
+    let sb = Owner { inner: null }
+    let asb = Nullable2 { p: sb.inner?.p }
+    print("{presence(af)} {presence(ag)} {presence(asf)} {presence(asb)}")
 }

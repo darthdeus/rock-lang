@@ -2,7 +2,7 @@
 
 enum Sig { A, B(string) }
 
-// `show` takes the struct by param so the parent survives as a table (a
+// Each `show` takes the struct by param so the parent survives as a table (a
 // non-escaping parent scalarizes away and never exposes the key collision).
 struct TagHolder { sig: Sig, sig__tag: int }
 
@@ -13,12 +13,6 @@ fn show_tag(h: TagHolder) {
     }
 }
 
-@test(output = "B seven 42")
-fn test_discriminant_slot_vs_user_field() {
-    show_tag(TagHolder { sig: Sig::B("seven"), sig__tag: 42 })
-}
-
-// The positional payload slot, same shape.
 struct PayloadHolder { sig: Sig, sig__0: int }
 
 fn show_payload(h: PayloadHolder) {
@@ -28,12 +22,6 @@ fn show_payload(h: PayloadHolder) {
     }
 }
 
-@test(output = "B seven 7")
-fn test_payload_slot_vs_user_field() {
-    show_payload(PayloadHolder { sig: Sig::B("seven"), sig__0: 7 })
-}
-
-// A record-payload variant's named slot.
 enum Shape { Dot, Circle { r: string } }
 
 struct ShapeHolder { shape: Shape, shape__r: int }
@@ -45,13 +33,6 @@ fn show_shape(h: ShapeHolder) {
     }
 }
 
-@test(output = "circle big 5")
-fn test_named_slot_vs_user_field() {
-    show_shape(ShapeHolder { shape: Shape::Circle { r: "big" }, shape__r: 5 })
-}
-
-// CONTROL: the ordinary flattened-enum field still round-trips with no user
-// field in the way, so the tests above fail on the COLLISION, not on flattening.
 struct Plain { sig: Sig, other: int }
 
 fn show_plain(h: Plain) {
@@ -61,8 +42,13 @@ fn show_plain(h: Plain) {
     }
 }
 
-@test(output = "B seven 1")
-fn test_flat_enum_field_control() {
+// User fields named like the flattened tag, positional and named payload slots;
+// `Plain` is the control with no colliding field.
+@test(output = "B seven 42\nB seven 7\ncircle big 5\nB seven 1")
+fn test_flat_enum_slots_vs_user_fields() {
+    show_tag(TagHolder { sig: Sig::B("seven"), sig__tag: 42 })
+    show_payload(PayloadHolder { sig: Sig::B("seven"), sig__0: 7 })
+    show_shape(ShapeHolder { shape: Shape::Circle { r: "big" }, shape__r: 5 })
     show_plain(Plain { sig: Sig::B("seven"), other: 1 })
 }
 
@@ -94,6 +80,13 @@ fn projected_payload(state: ProjectedState) -> int {
     }
 }
 
+global PROJECTED_READS: int = 0
+
+fn projected_once(state: ProjectedState) -> ProjectedState {
+    PROJECTED_READS += 1
+    return state
+}
+
 @test
 fn flat_enum_record_projection_reads_unit_and_payload() {
     let state = projected_state(ProjectedSnapshot {
@@ -106,16 +99,13 @@ fn flat_enum_record_projection_reads_unit_and_payload() {
     })
     assert(!projected_is_player(state))
     assert_eq(projected_payload(state), 10)
-}
 
-@test
-fn flat_enum_record_projection_agrees_for_literal_and_whole_store() {
-    let state = ProjectedState {
+    let literal = ProjectedState {
         snapshot: ProjectedSnapshot {
             lock: ProjectedLock { target: ProjectedTarget::Player, visible: false },
         },
     }
-    assert(projected_is_player(state))
+    assert(projected_is_player(literal))
     let snapshot = ProjectedSnapshot {
         lock: ProjectedLock {
             target: ProjectedTarget::Mob(ProjectedId {
@@ -124,29 +114,16 @@ fn flat_enum_record_projection_agrees_for_literal_and_whole_store() {
             visible: true,
         },
     }
-    state.snapshot = snapshot
-    assert_eq(projected_payload(state), 60)
-    let copied = state.snapshot
-    state.snapshot.lock.target = ProjectedTarget::Player
+    literal.snapshot = snapshot
+    assert_eq(projected_payload(literal), 60)
+    let copied = literal.snapshot
+    literal.snapshot.lock.target = ProjectedTarget::Player
     assert_eq(projected_payload(projected_state(copied)), 60)
-    assert(projected_is_player(state))
-}
+    assert(projected_is_player(literal))
 
-global PROJECTED_READS: int = 0
-
-fn projected_once(state: ProjectedState) -> ProjectedState {
-    PROJECTED_READS += 1
-    return state
-}
-
-@test
-fn flat_enum_record_projection_evaluates_owner_once() {
-    let state = projected_state(ProjectedSnapshot {
-        lock: ProjectedLock { target: ProjectedTarget::Player, visible: false },
-    })
     PROJECTED_READS = 0
     let player = false
-    if let ProjectedTarget::Player = projected_once(state).snapshot.lock.target {
+    if let ProjectedTarget::Player = projected_once(literal).snapshot.lock.target {
         player = true
     }
     assert(player)
@@ -196,12 +173,16 @@ enum MixedPatternOccupant { None, Prop(int, int), Fixture(MixedPatternSpec) }
 
 enum MixedPatternSubject { None, Object(MixedPatternPlace, MixedPatternOccupant) }
 
+enum SentInner { Named(string), Empty }
+
+enum SentOuter { Msg(SentInner), Other }
+
 fn mixed_pattern_subject(occupant: MixedPatternOccupant) -> MixedPatternSubject {
     return MixedPatternSubject::Object(MixedPatternPlace { space: 1, x: 11, y: 10 }, occupant)
 }
 
 @test
-fn nested_flat_enum_separate_match_control() {
+fn nested_flat_enum_binds_mixed_payload() {
     let subject = mixed_pattern_subject(MixedPatternOccupant::Prop(0, 1))
     let result = match subject {
         MixedPatternSubject::Object(place, occupant) => match occupant {
@@ -211,18 +192,20 @@ fn nested_flat_enum_separate_match_control() {
         _ => false,
     }
     assert(result, "the constructed payload survives separate matches")
-}
-
-@test
-fn nested_flat_enum_binds_mixed_payload() {
-    let result = match mixed_pattern_subject(MixedPatternOccupant::Prop(0, 1)) {
+    let nested = match mixed_pattern_subject(MixedPatternOccupant::Prop(0, 1)) {
         MixedPatternSubject::Object(place, MixedPatternOccupant::Prop(id, orient)) => place.x == 11 && id == 0 && orient == 1,
         _ => false,
     }
-    // REGRESSION GUARD (was a pinned bug until the flat-enum nested read landed):
-    // a nested flat enum shares the parent's slots, so the inner pattern must read
-    // the tag and payload slots directly instead of treating the tag as a box.
-    assert_eq(result, true, "nested mixed-enum pattern binds its flattened payload")
+    // A nested flat enum shares the parent's slots: the inner pattern reads them directly.
+    assert(nested, "nested mixed-enum pattern binds its flattened payload")
+    let v = SentOuter::Msg(SentInner::Named("Harm"))
+    let got = ""
+    match v {
+        SentOuter::Msg(SentInner::Named(spell)) => { got = spell }
+        SentOuter::Msg(_) => { got = "fallback" }
+        SentOuter::Other => { got = "other" }
+    }
+    assert_eq(got, "Harm", "a nested arm binds a string payload from the parent's slots")
 }
 
 co fn nested_mixed_pattern_coroutine() -> Coroutine<int> {
@@ -239,32 +222,7 @@ co fn nested_mixed_pattern_coroutine() -> Coroutine<int> {
 fn nested_flat_enum_mixed_payload_after_yield() {
     let c = nested_mixed_pattern_coroutine()
     assert_eq(c.resume() ?? -9, 0)
-    // Same nested shape after suspension: the resumed frame rebuilds the same slots.
     assert_eq(c.resume() ?? -9, 1)
-}
-
-// String payload: the nested arm must read and bind it, not just inspect the tag.
-
-enum SentInner {
-    Named(string),
-    Empty,
-}
-
-enum SentOuter {
-    Msg(SentInner),
-    Other,
-}
-
-@test
-fn nested_flat_enum_binds_string_payload() {
-    let v = SentOuter::Msg(SentInner::Named("Harm"))
-    let got = ""
-    match v {
-        SentOuter::Msg(SentInner::Named(spell)) => { got = spell }
-        SentOuter::Msg(_) => { got = "fallback" }
-        SentOuter::Other => { got = "other" }
-    }
-    assert_eq(got, "Harm", "a nested flat-enum arm binds its payload from the parent's slots")
 }
 
 nobox value ItemLeaf { value: int }
@@ -362,9 +320,9 @@ fn field_read_loop() -> bool {
     return true
 }
 
-@test(output = "true")
+@test
 fn mixed_enum_field_read_loop_clears_previous_payload() {
-    print(field_read_loop())
+    assert(field_read_loop())
 }
 
 co fn tick() -> Coroutine<int> { yield 1 }
@@ -388,7 +346,7 @@ fn field_read_coroutine() -> bool {
     return c.resume() == null
 }
 
-@test(output = "true")
+@test
 fn mixed_enum_field_read_across_await_clears_previous_payload() {
-    print(field_read_coroutine())
+    assert(field_read_coroutine())
 }

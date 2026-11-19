@@ -45,160 +45,90 @@ fn read_produced(h: Holder) -> int {
     return saved.used + (saved.child?.kept ?? 0)
 }
 
-@test(output = "19 8 180")
-fn selected_leaves_keep_the_original_snapshot() {
+@test(output = "19 8 180 19 19\n18 7 18 1")
+fn snapshots_keep_their_leaves_before_the_source_mutates() {
     let present = holder(true)
     let absent = holder(false)
     let saved_present = consume(present)
     let saved_absent = consume(absent)
-    print("{saved_present} {saved_absent} {present.snapshot.used + (present.snapshot.child?.kept ?? 0)}")
-}
-
-@test(output = "19 19")
-fn unused_nullable_children_do_not_affect_the_copy() {
-    let present = holder(true)
-    present.snapshot.ignored = Detail { kept: 23, spare: 31 }
-    let absent = holder(true)
-    print("{consume(present)} {consume(absent)}")
-}
-
-@test(output = "18 7 18 1")
-fn read_only_and_produced_copies_snapshot_before_mutation() {
-    let present = holder(true)
-    let absent = holder(false)
+    let ignored = holder(true)
+    ignored.snapshot.ignored = Detail { kept: 23, spare: 31 }
+    print("{saved_present} {saved_absent} {present.snapshot.used + (present.snapshot.child?.kept ?? 0)} {consume(ignored)} {consume(holder(true))}")
+    let a = read_only(holder(true))
+    let b = read_only(holder(false))
     let producer = holder(true)
-    let a = read_only(present)
-    let b = read_only(absent)
     let c = read_produced(producer)
     print("{a} {b} {c} {producer.reads}")
 }
 
-value Pt { x: int, y: int }            // C-mappable -> FFI-clean (cdata) tier
-
-value GcH { xs: [int], n: int }        // `xs` is not C-mappable -> GC (table) tier
-
+value Pt { x: int, y: int }
+value GcH { xs: [int], n: int }
 struct Owner { p: Pt, h: GcH }
+value NestOuter { xs: [int], p: Pt }
+struct NestOwner { g: NestOuter }
 
 fn mk_owner(seed: int) -> Owner {
     return Owner { p: Pt { x: seed, y: seed }, h: GcH { xs: [seed], n: seed } }
 }
 
 fn owner_identity(o: Owner) -> Owner { return o }
-
 fn mk_pt(seed: int) -> Pt { return Pt { x: seed, y: seed } }
-
 fn mk_gc(seed: int) -> GcH { return GcH { xs: [seed], n: seed } }
-
-global G_OWNER: Owner = mk_owner(1)
-
-global G_PT: Pt = mk_pt(1)
-
-global G_GC: GcH = mk_gc(1)
-
-@test(output = "1 99")
-fn test_field_read_copies_ffi_clean() {
-    let o = mk_owner(1)
-    let copy = o.p
-    let stored = Owner { p: owner_identity(o).p, h: o.h }
-    o.p.x = 99
-    assert_eq(stored.p.x, 1)
-    print("{copy.x} {o.p.x}")
-}
-
-@test(output = "1 99")
-fn test_field_read_copies_gc() {
-    let o = mk_owner(1)
-    let copy = o.h
-    let stored = Owner { p: o.p, h: owner_identity(o).h }
-    o.h.n = 99
-    assert_eq(stored.h.n, 1)
-    print("{copy.n} {o.h.n}")
-}
-
-@test(output = "1 77")
-fn test_global_field_read_copies_ffi_clean() {
-    let copy = G_OWNER.p
-    G_OWNER.p.x = 77
-    print("{copy.x} {G_OWNER.p.x}")
-}
-
-@test(output = "1 77")
-fn test_global_field_read_copies_gc() {
-    let copy = G_OWNER.h
-    G_OWNER.h.n = 77
-    print("{copy.n} {G_OWNER.h.n}")
-}
-
-@test(output = "1 55")
-fn test_bare_global_read_copies_ffi_clean() {
-    let copy = G_PT
-    G_PT.x = 55
-    print("{copy.x} {G_PT.x}")
-}
-
-@test(output = "1 55")
-fn test_bare_global_read_copies_gc() {
-    let copy = G_GC
-    G_GC.n = 55
-    print("{copy.n} {G_GC.n}")
-}
-
-@test(output = "1 99")
-fn test_vec_element_read_copies_gc() {
-    let v: [GcH] = [mk_gc(1)]
-    let copy = v[0]
-    v[0].n = 99
-    print("{copy.n} {v[0].n}")
-}
-
-// A nested value field is snapshotted through its own leaves, not by its
-// pointer: a shallow expansion would copy the nested box's address and the write
-// would still be observable.
-value NestOuter { xs: [int], p: Pt }
-
-struct NestOwner { g: NestOuter }
+fn ident_pt(p: Pt) -> Pt { return p }
 
 fn mk_nest(seed: int) -> NestOwner {
     return NestOwner { g: NestOuter { xs: [seed], p: Pt { x: seed, y: seed } } }
 }
 
-@test(output = "1 99")
-fn test_nested_value_field_is_deep_copied() {
-    let o = mk_nest(1)
-    let copy = o.g
-    o.g.p.x = 99
-    print("{copy.p.x} {o.g.p.x}")
-}
+global G_OWNER: Owner = mk_owner(1)
+global G_PT: Pt = mk_pt(1)
+global G_GC: GcH = mk_gc(1)
 
-// A REFERENCE leaf stays SHARED: a GC leaf is one slot, so copying the wrapper
-// must not deep-copy the array it points at.
-@test(output = "7 7")
-fn test_copy_shares_reference_leaf() {
-    let o = mk_nest(1)
-    let copy = o.g
-    o.g.xs[0] = 7
-    print("{copy.xs[0]} {o.g.xs[0]}")
-}
-
-// CONTROL: a function round-trip already copies (params/returns ride the scalar
-// ABI) -- it must keep doing so.
-fn ident_pt(p: Pt) -> Pt { return p }
-
-@test(output = "1 99")
-fn test_fn_roundtrip_still_copies() {
+// Both tiers; a nested value is copied through its leaves, a reference leaf is shared.
+@test(output = "1 99 1 99\n1 77 1 77\n1 55 1 55\n1 99\n1 99 7 7\n1 99")
+fn whole_value_reads_copy() {
     let o = mk_owner(1)
-    let copy = ident_pt(o.p)
+    let copy = o.p
+    let stored = Owner { p: owner_identity(o).p, h: o.h }
     o.p.x = 99
-    print("{copy.x} {o.p.x}")
-}
+    assert_eq(stored.p.x, 1)
+    let og = mk_owner(1)
+    let copy_gc = og.h
+    let stored_gc = Owner { p: og.p, h: owner_identity(og).h }
+    og.h.n = 99
+    assert_eq(stored_gc.h.n, 1)
+    print("{copy.x} {o.p.x} {copy_gc.n} {og.h.n}")
 
-// Whole-value reads of a `NativeBuffer<T: value>` / `FlatVec<T>` element COPY;
-// they must not bind an interior cdata reference into the array
-//
-// Demonstrated with WHOLESALE element replacement (`buf[i] = V2 {..}`), a legal
-// place write under both the immutability and mutable-value-semantics models.
-// If `let v = buf[i]` bound the slot reference, replacing the slot afterwards
-// would be observed through `v`; a copy is unaffected.
+    let gp = G_OWNER.p
+    G_OWNER.p.x = 77
+    let gh = G_OWNER.h
+    G_OWNER.h.n = 77
+    print("{gp.x} {G_OWNER.p.x} {gh.n} {G_OWNER.h.n}")
+
+    let bp = G_PT
+    G_PT.x = 55
+    let bg = G_GC
+    G_GC.n = 55
+    print("{bp.x} {G_PT.x} {bg.n} {G_GC.n}")
+
+    let v: [GcH] = [mk_gc(1)]
+    let elem = v[0]
+    v[0].n = 99
+    print("{elem.n} {v[0].n}")
+
+    let nest = mk_nest(1)
+    let nest_copy = nest.g
+    nest.g.p.x = 99
+    let shared = mk_nest(1)
+    let shared_copy = shared.g
+    shared.g.xs[0] = 7
+    print("{nest_copy.p.x} {nest.g.p.x} {shared_copy.xs[0]} {shared.g.xs[0]}")
+
+    let r = mk_owner(1)
+    let round = ident_pt(r.p)
+    r.p.x = 99
+    print("{round.x} {r.p.x}")
+}
 
 value V2 { x: float, y: float }
 
@@ -206,152 +136,17 @@ fn nb_v2(n: int) -> NativeBuffer<V2> {
     return native_buffer_alloc(n)
 }
 
-// A whole-value read bound to a local is a COPY: mutating the source slot
-// wholesale does not reach through the earlier binding.
-@test(output = "1")
-fn test_nb_value_read_copies() {
+// A whole NativeBuffer element read copies; a leaf projection reads the live slot.
+@test(output = "1 99")
+fn native_buffer_element_reads() {
     let buf = nb_v2(1)
     buf[0] = V2 { x: 1.0, y: 2.0 }
     let v = buf[0]
     buf[0] = V2 { x: 99.0, y: 99.0 }
-    print("{v.x.floor()}")
-}
-
-// A leaf projection off the read still reads the live slot directly (no copy
-// obligation): reading buf[0].x AFTER the replace sees the new value.
-@test(output = "99")
-fn test_nb_leaf_read_is_live() {
-    let buf = nb_v2(1)
-    buf[0] = V2 { x: 1.0, y: 2.0 }
-    buf[0] = V2 { x: 99.0, y: 99.0 }
-    print("{buf[0].x.floor()}")
-}
-
-value Wide {
-    f0: int, f1: int, f2: int, f3: int, f4: int, f5: int, f6: int, f7: int, f8: int, f9: int,
-    f10: int, f11: int, f12: int, f13: int, f14: int, f15: int, f16: int, f17: int, f18: int, f19: int,
-    f20: int, f21: int, f22: int, f23: int, f24: int, f25: int, f26: int, f27: int, f28: int, f29: int,
-    f30: int, f31: int, f32: int, f33: int, f34: int, f35: int, f36: int, f37: int, f38: int, f39: int,
-    f40: int, f41: int, f42: int, f43: int, f44: int, f45: int, f46: int, f47: int, f48: int, f49: int,
-}
-
-value Narrow { a: int, b: int }
-
-struct HW { w: Wide }
-
-struct HN { n: Narrow }
-
-fn mkw(n: int) -> Wide { return Wide { f0: n, f1: n, f2: n, f3: n, f4: n, f5: n, f6: n, f7: n, f8: n, f9: n, f10: n, f11: n, f12: n, f13: n, f14: n, f15: n, f16: n, f17: n, f18: n, f19: n, f20: n, f21: n, f22: n, f23: n, f24: n, f25: n, f26: n, f27: n, f28: n, f29: n, f30: n, f31: n, f32: n, f33: n, f34: n, f35: n, f36: n, f37: n, f38: n, f39: n, f40: n, f41: n, f42: n, f43: n, f44: n, f45: n, f46: n, f47: n, f48: n, f49: n } }
-
-fn mkn(n: int) -> Narrow { return Narrow { a: n, b: n } }
-
-fn stash(h1: HW, h2: HW, w: Wide) -> int {
-    h1.w = w
-    h2.w = w
-    h1.w.f0 = 99
-    return h2.w.f0 + w.f0
-}
-
-fn cap(n: int) -> () -> Wide {
-    let w = mkw(n)
-    return () => w
-}
-
-fn id(w: Wide) -> Wide { return w }
-
-fn store_into(h: HW, w: Wide) { h.w = w }
-
-@test(output = "2")
-fn wide_param_stored_twice() {
-    let w = mkw(1)
-    print(stash(HW { w: mkw(0) }, HW { w: mkw(0) }, w))
-}
-
-@test(output = "1 1 1")
-fn wide_local_into_two_ctors() {
-    let w = mkw(1)
-    let h1 = HW { w: w }
-    let h2 = HW { w: w }
-    h1.w.f0 = 99
-    print("{h2.w.f0} {w.f0} {h1.w.f0 - 98}")
-}
-
-@test(output = "3")
-fn wide_closure_result_into_ctor() {
-    let f = cap(3)
-    let h = HW { w: f() }
-    h.w.f0 = 99
-    print(f().f0)
-}
-
-@test(output = "1 1")
-fn wide_local_array_literal() {
-    let w = mkw(1)
-    let a = [w, w]
-    a[0].f0 = 99
-    print("{a[1].f0} {w.f0}")
-}
-
-@test(output = "1 1")
-fn wide_local_pushed_twice() {
-    let w = mkw(1)
-    let xs: [Wide] = []
-    xs.push(w)
-    xs.push(w)
-    xs[0].f0 = 99
-    print("{xs[1].f0} {w.f0}")
-}
-
-@test(output = "1")
-fn wide_param_stored_by_callee() {
-    let w = mkw(1)
-    let h = HW { w: mkw(0) }
-    store_into(h, w)
-    h.w.f0 = 99
-    print(w.f0)
-}
-
-@test(output = "1")
-fn wide_param_returned_then_stored() {
-    let w = mkw(1)
-    let h = HW { w: id(w) }
-    h.w.f0 = 99
-    print(w.f0)
-}
-
-@test(output = "1")
-fn narrow_closure_result_local_into_ctor() {
-    let w = mkn(1)
-    let f = () => w
-    let p = f()
-    let h = HN { n: p }
-    h.n.a = 99
-    print(p.a)
-}
-
-// A local built by a ctor is scalarized and rebuilt at each escape; reassigning
-// it a box it did not build must keep that true.
-@test(output = "3 3")
-fn wide_built_local_reassigned_a_borrowed_box() {
-    let f = cap(3)
-    let w = mkw(1)
-    w = f()
-    let h1 = HW { w: w }
-    let h2 = HW { w: w }
-    h1.w.f0 = 99
-    print("{h2.w.f0} {f().f0}")
-}
-
-@test(output = "1 1")
-fn narrow_built_local_reassigned_a_borrowed_box() {
-    let src = mkn(1)
-    let f = () => src
-    let n = Narrow { a: 0, b: 0 }
-    n = f()
-    let h1 = HN { n: n }
-    let h2 = HN { n: n }
-    h1.n.a = 99
-    print("{h2.n.a} {f().a}")
+    let live = nb_v2(1)
+    live[0] = V2 { x: 1.0, y: 2.0 }
+    live[0] = V2 { x: 99.0, y: 99.0 }
+    print("{v.x.floor()} {live[0].x.floor()}")
 }
 
 fn rewrapped_nb_v2(n: int) -> NativeBuffer<V2> {
@@ -359,15 +154,9 @@ fn rewrapped_nb_v2(n: int) -> NativeBuffer<V2> {
     return NativeBuffer { ptr: fresh.ptr, len: fresh.len }
 }
 
-value PtrHolder {
-    p: Ptr<float>,
-    n: int,
-}
-
-value BufHolder {
-    buf: NativeBuffer<V2>,
-    tag: int,
-}
+value PtrHolder { p: Ptr<float>, n: int }
+value BufHolder { buf: NativeBuffer<V2>, tag: int }
+struct BufOwner { nb: NativeBuffer<V2> }
 
 fn rewrap(h: PtrHolder) -> NativeBuffer<float> {
     return NativeBuffer { ptr: h.p, len: h.n }
@@ -377,84 +166,53 @@ fn bump(h: BufHolder) {
     h.buf[1] = V2 { x: h.buf[1].x + 1.0, y: h.buf[1].y + 2.0 }
 }
 
-@test(output = "2.5")
-fn ptr_in_value_survives_copy() {
-    let buf = native_buffer_float(4)
-    buf[2] = 2.5
-    let h = PtrHolder { p: buf.ptr, n: buf.len }
-    let copy = h
-    let again = rewrap(copy)
-    print("{again[2]}")
-}
+global OWNED: NativeBuffer<float> = native_buffer_float(4)
 
-@test(output = "4 7")
-fn native_buffer_in_value_keeps_leaf_views() {
+@test(output = "2.5 4 7 9\n2 1 1\n4 3\n7")
+fn pointer_values_copy_their_leaves() {
+    let fb = native_buffer_float(4)
+    fb[2] = 2.5
+    let ph = PtrHolder { p: fb.ptr, n: fb.len }
+    let pcopy = ph
+    let again = rewrap(pcopy)
     let h = BufHolder { buf: rewrapped_nb_v2(2), tag: 1 }
     h.buf[1] = V2 { x: 3.0, y: 5.0 }
-    let copy = h
-    bump(copy)
-    print("{h.buf[1].x} {copy.buf[1].y}")
-}
-
-@test(output = "9")
-fn native_buffer_copied_through_local_keeps_views() {
+    let hcopy = h
+    bump(hcopy)
     let a = rewrapped_nb_v2(3)
     let b = a
     b[2] = V2 { x: 9.0, y: 0.0 }
-    print("{a[2].x}")
-}
+    print("{again[2]} {h.buf[1].x} {hcopy.buf[1].y} {a[2].x}")
 
-struct BufOwner {
-    nb: NativeBuffer<V2>,
-}
-
-global OWNED: NativeBuffer<float> = native_buffer_float(4)
-
-@test(output = "2 1 1")
-fn field_write_does_not_reach_a_copy() {
     let o = BufOwner { nb: rewrapped_nb_v2(2) }
     o.nb[1] = V2 { x: 1.0, y: 0.0 }
     let before = o.nb
     o.nb.len = 1
     print("{before.len} {o.nb.len} {o.nb[0].x + before[1].x}")
-}
 
-@test(output = "4 3")
-fn global_field_write_does_not_reach_a_copy() {
-    let before = OWNED
+    let gbefore = OWNED
     OWNED.len = 3
-    print("{before.len} {OWNED.len}")
-}
+    print("{gbefore.len} {OWNED.len}")
 
-@test(output = "7")
-fn ptr_field_write_refreshes_leaf_views() {
-    let o = BufOwner { nb: rewrapped_nb_v2(1) }
+    let po = BufOwner { nb: rewrapped_nb_v2(1) }
     let other = rewrapped_nb_v2(1)
     other[0] = V2 { x: 7.0, y: 0.0 }
-    o.nb.ptr = other.ptr
-    print("{o.nb[0].x}")
+    po.nb.ptr = other.ptr
+    print("{po.nb[0].x}")
 }
 
 value Vec2i { x: int, y: int }
 
 global VS_GLOBAL: Vec2i = Vec2i { x: 0, y: 0 }
-
 global VS_LIST: [Vec2i] = [Vec2i { x: 1, y: 1 }]
 
-// Rebinding a global leaves an earlier whole-value read intact.
 @test
-fn rebinding_global_value_struct_leaves_shared_snapshot_intact() {
+fn replacing_a_value_leaves_earlier_reads_intact() {
     let snapshot = VS_GLOBAL
     VS_GLOBAL = Vec2i { x: 7, y: 9 }
     assert(snapshot.x == 0 && snapshot.y == 0)
     assert(VS_GLOBAL.x == 7 && VS_GLOBAL.y == 9)
-    // Value equality compares contents.
     assert(snapshot == Vec2i { x: 0, y: 0 })
-}
-
-// Replacing a container slot also leaves an earlier whole-value read intact.
-@test
-fn replacing_value_struct_in_container_leaves_leaf_intact() {
     let held = VS_LIST[0]
     VS_LIST.push(Vec2i { x: 9, y: 9 })
     VS_LIST[0] = Vec2i { x: 5, y: 5 }
@@ -464,10 +222,10 @@ fn replacing_value_struct_in_container_leaves_leaf_intact() {
 
 // https://github.com/darthdeus/rock-lang/issues/404
 value CopyChild { x: int, y: int }
-
 nobox value FlatChild { x: int, y: int }
-
 value CopyParent { value: CopyChild, flat: FlatChild }
+nobox value SingleChild { x: int }
+value SingleParent { child: SingleChild }
 
 fn observe_copy_parent(x: CopyParent) { print(x.flat.x) }
 
@@ -481,15 +239,6 @@ fn copy_parent_across_branch(input: int) {
     observe_copy_parent(copy)
 }
 
-@test(output = "-1\n-1")
-fn nested_nobox_copy_across_branch() {
-    copy_parent_across_branch(3)
-}
-
-nobox value SingleChild { x: int }
-
-value SingleParent { child: SingleChild }
-
 fn copy_single_parent_across_branch(input: int) {
     let whole = SingleParent { child: SingleChild { x: input } }
     let copy = whole
@@ -498,13 +247,10 @@ fn copy_single_parent_across_branch(input: int) {
     print(copy.child.x)
 }
 
-@test(output = "0\n0\n1\n1")
-fn single_nobox_child_copy_across_dynamic_branch() {
+@test(output = "-1\n-1\n0\n0\n1\n1")
+fn nested_nobox_copy_across_branch() {
+    copy_parent_across_branch(3)
     for input in 0..2 { copy_single_parent_across_branch(input) }
-}
-
-@test
-fn nested_nobox_copy_remains_a_snapshot() {
     let whole = SingleParent { child: SingleChild { x: 3 } }
     let copy = whole
     if false { print(0) }

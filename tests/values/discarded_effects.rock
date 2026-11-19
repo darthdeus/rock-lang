@@ -1,6 +1,5 @@
-// A discarded value still runs its effects: an unused throwing conversion
-// keeps its runtime error, and returning an optional aggregate never projects
-// leaves out of a placeholder nil.
+// A discarded value still runs its effects, and an optional aggregate return
+// never projects leaves out of a placeholder nil.
 
 @nomangle inline(lua) fn raises(f: fn()) -> bool = """
     local ok, err = pcall(f)

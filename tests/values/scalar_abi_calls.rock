@@ -1,17 +1,7 @@
 // Scalar ABI: call arguments, containers, yields and leaf name ambiguity.
 
-value V2 {
-    x: float,
-    y: float,
-}
-
-value V3 {
-    r: float,
-    g: float,
-    b: float,
-}
-
-// ----- Returning helpers (Rock, scalarized multi-return). -----
+value V2 { x: float, y: float }
+value V3 { r: float, g: float, b: float }
 
 fn make_v2(a: float, b: float) -> V2 {
     return V2 { x: a, y: b }
@@ -21,23 +11,22 @@ fn make_v3(r: float, g: float, b: float) -> V3 {
     return V3 { r: r, g: g, b: b }
 }
 
+fn sum_xy(v: V2) -> float {
+    return v.x + v.y
+}
+
 fn sum3(v: V3) -> float {
     return v.r + v.g + v.b
 }
 
-// A Rock fn that takes (V2, V2, float) -- two scalarized value params +
-// one scalar, exercising multiple non-last value-call args.
 fn plus2(a: V2, b: V2, bias: float) -> V2 {
     return V2 { x: a.x + b.x + bias, y: a.y + b.y + bias }
 }
 
-// Scalarized callee with a scalar param in non-last position (ordering
-// stress).
 fn mix(bias: float, v: V2) -> V2 {
     return V2 { x: v.x + bias, y: v.y + bias }
 }
 
-// Nullable-param cdata callee -- must receive packed cdata (or nil).
 fn maybe_scale(v: V2?, k: float) -> float {
     if v != null {
         return v.x * k + v.y * k
@@ -45,124 +34,36 @@ fn maybe_scale(v: V2?, k: float) -> float {
     return 0
 }
 
-// ----- Value-returning call as LAST positional arg, scalarized. -----
-
-@test(output = "30\n60")
-fn adv_last_positional_scalarized() {
-    // make_v2 is the LAST positional slot -- Lua last-arg rule preserves
-    // multi-return. No hoisting needed.
-    let r = mix(10.0, make_v2(20.0, 50.0))
-    print("{r.x.floor()}")
-    print("{r.y.floor()}")
-}
-
-// ----- Nullable value-typed param receives a literal, null, and a
-// value-call result.
-
-@test(output = "90\n0\n30")
-fn adv_nullable_param_arguments() {
-    print("{maybe_scale(V2 { x: 10, y: 20 }, 3.0).floor()}")
-    print("{maybe_scale(null, 3.0).floor()}")
-    print("{maybe_scale(make_v2(5.0, 5.0), 3.0).floor()}")
-}
-
-// ----- Cascading scalarized calls -- triple nesting.
-
-@test(output = "70\n130")
-fn adv_triple_nested_scalarized() {
-    // plus2(plus2(make_v2(1,2), make_v2(10,20), 5), make_v2(50,100), 5)
-    // Innermost: 1+10+5, 2+20+5 = 16, 27
-    // Middle: 16+50+5, 27+100+5 = 71, 132
-    // outer adds bias 5
-    let r = plus2(plus2(make_v2(1, 2), make_v2(10, 20), 5), make_v2(50, 100), 5)
-    print("{(r.x - 1).floor()}")
-    print("{(r.y - 2).floor()}")
-}
-
-// ----- Field access on value-returning call (existing, sanity).
-
-@test(output = "10")
-fn adv_field_on_call() {
-    print("{make_v2(10, 20).x.floor()}")
-}
-
-// ----- Multi-field value struct (3 fields) -- non-last scalarized.
-
-@test(output = "30")
-fn adv_three_field_non_last() {
-    print("{sum3(make_v3(5.0, 10.0, 15.0)).floor()}")
-}
-
-// ----- Named-arg call where the value-call is non-last positional.
-
 fn tagged(label: string, v: V2, scale: float) -> float {
     return v.x * scale + v.y * scale
 }
-
-@test(output = "90")
-fn adv_named_arg_with_value_call() {
-    // `v: make_v2(...)` passed positionally (slot 1, non-last). Scale
-    // is named. Tests that emission handles named-arg ordering with a
-    // value-returning call in the preceding positional slot.
-    let out = tagged("hi", make_v2(10, 20), scale: 3)
-    print("{out.floor()}")
-}
-
-// ----- An if-expression with a value-returning call in a branch, fed
-// into a scalarized-ABI arg slot, once truncated to the first scalar.
 
 fn sum3_scaled(v: V3, scale: float) -> float {
     return (v.r + v.g + v.b) * scale
 }
 
-@test(output = "36\n9\n27")
-fn adv_if_branch_value_calls() {
+@test fn value_call_arguments() {
+    let r = mix(10.0, make_v2(20.0, 50.0))
+    assert_eq(r.x * 100.0 + r.y, 3060.0)
+    assert_eq(maybe_scale(V2 { x: 10, y: 20 }, 3.0), 90.0)
+    assert_eq(maybe_scale(null, 3.0), 0.0)
+    assert_eq(maybe_scale(make_v2(5.0, 5.0), 3.0), 30.0)
+    let n = plus2(plus2(make_v2(1, 2), make_v2(10, 20), 5), make_v2(50, 100), 5)
+    assert_eq(n.x * 1000.0 + n.y, 71132.0)
+    assert_eq(make_v2(10, 20).x, 10.0)
+    assert_eq(sum3(make_v3(5.0, 10.0, 15.0)), 30.0)
+    assert_eq(tagged("hi", make_v2(10, 20), scale: 3), 90.0)
     let yes = true
     let no = false
-    let else_call = sum3_scaled(
-        if no { V3 { r: 1, g: 1, b: 1 } } else { make_v3(3.0, 4.0, 5.0) },
-        3.0,
-    )
-    print("{else_call.floor()}")
-    let then_call = sum3_scaled(
-        if yes { make_v3(1.0, 1.0, 1.0) } else { V3 { r: 9, g: 9, b: 9 } },
-        3.0,
-    )
-    print("{then_call.floor()}")
-    let both_calls = sum3_scaled(
-        if no { make_v3(1.0, 1.0, 1.0) } else { make_v3(2.0, 3.0, 4.0) },
-        3.0,
-    )
-    print("{both_calls.floor()}")
+    assert_eq(sum3_scaled(if no { V3 { r: 1, g: 1, b: 1 } } else { make_v3(3.0, 4.0, 5.0) }, 3.0), 36.0)
+    assert_eq(sum3_scaled(if yes { make_v3(1.0, 1.0, 1.0) } else { V3 { r: 9, g: 9, b: 9 } }, 3.0), 9.0)
+    assert_eq(sum3_scaled(if no { make_v3(1.0, 1.0, 1.0) } else { make_v3(2.0, 3.0, 4.0) }, 3.0), 27.0)
+    assert_eq(sum_xy(V2 { x: 1, y: 2 }), 3.0)
+    let v = make_v2(3, 7)
+    assert_eq(sum_xy(v), 10.0)
 }
 
-// Simple: takes value, reads fields.
-fn sum_xy(v: V2) -> float {
-    return v.x + v.y
-}
-
-// Nested: inner returns V2 (Rock), outer takes V2 as last arg.
-// Last-arg multi-return is preserved by Lua, so this works without
-// pre-statement hoisting.
-fn make(x: float, y: float) -> V2 {
-    return V2 { x: x, y: y }
-}
-
-@test(output = "3\n10")
-fn test_scalarized_abi() {
-    // Literal in call-arg position.
-    let a = sum_xy(V2 { x: 1, y: 2 })
-    print("{a.floor()}")
-    // Ident + nested Rock-to-Rock call (make returns V2, sum_xy takes
-    // V2 -- inner is the ONLY arg, so multi-return is last-arg safe).
-    let v = make(3, 7)
-    print("{sum_xy(v).floor()}")
-}
-
-value IV2 {
-    x: int,
-    y: int,
-}
+value IV2 { x: int, y: int }
 
 fn make_iv2(a: int, b: int) -> IV2 {
     return IV2 { x: a, y: b }
@@ -176,10 +77,8 @@ fn iv2_scale(v: IV2, k: int) -> IV2 {
     return IV2 { x: v.x * k, y: v.y * k }
 }
 
-// --- 1. Arena of value structs ---------------------------------------------
-
-@test(output = "3\n7\n10")
-fn test_arena_value_insert_get() {
+@test(output = "3\n7\n10\n21")
+fn arena_of_values() {
     let a: Arena<IV2> = arena_new()
     let e1 = a.insert(IV2 { x: 1, y: 2 })
     let e2 = a.insert(make_iv2(3, 4))
@@ -190,49 +89,25 @@ fn test_arena_value_insert_get() {
     print(iv2_sum(v1))
     print(iv2_sum(v2))
     print(iv2_sum(v3))
-}
-
-@test(output = "21")
-fn test_arena_value_for_iter() {
-    let a: Arena<IV2> = arena_new()
-    a.insert(IV2 { x: 1, y: 2 })
-    a.insert(IV2 { x: 3, y: 4 })
-    a.insert(IV2 { x: 5, y: 6 })
+    let b: Arena<IV2> = arena_new()
+    b.insert(IV2 { x: 1, y: 2 })
+    b.insert(IV2 { x: 3, y: 4 })
+    b.insert(IV2 { x: 5, y: 6 })
     let sum = 0
-    for (_, v) in a {
+    for (_, v) in b {
         sum = sum + v.x + v.y
     }
     print(sum)
 }
-
-// --- 2. Coroutine yield of value types ------------------------------------
 
 co fn yield_value_call() -> Coroutine<IV2> {
     yield make_iv2(1, 2)
     yield make_iv2(10, 20)
 }
 
-@test(output = "3\n30")
-fn test_yield_value_call() {
-    let c = yield_value_call()
-    let a = c.resume() ?? IV2 { x: 0, y: 0 }
-    let b = c.resume() ?? IV2 { x: 0, y: 0 }
-    print(iv2_sum(a))
-    print(iv2_sum(b))
-}
-
 co fn yield_value_literal() -> Coroutine<IV2> {
     yield IV2 { x: 7, y: 8 }
     yield IV2 { x: 100, y: 200 }
-}
-
-@test(output = "15\n300")
-fn test_yield_value_literal() {
-    let c = yield_value_literal()
-    let a = c.resume() ?? IV2 { x: 0, y: 0 }
-    let b = c.resume() ?? IV2 { x: 0, y: 0 }
-    print(iv2_sum(a))
-    print(iv2_sum(b))
 }
 
 co fn yield_value_local() -> Coroutine<IV2> {
@@ -242,33 +117,17 @@ co fn yield_value_local() -> Coroutine<IV2> {
     yield w
 }
 
-@test(output = "11\n110")
-fn test_yield_value_local() {
-    let c = yield_value_local()
+fn drain2(c: Coroutine<IV2>) -> int {
     let a = c.resume() ?? IV2 { x: 0, y: 0 }
     let b = c.resume() ?? IV2 { x: 0, y: 0 }
-    print(iv2_sum(a))
-    print(iv2_sum(b))
+    return iv2_sum(a) * 1000 + iv2_sum(b)
 }
 
-// --- 3. FunctionRef to fn with value-typed params -------------------------
-
-@test(output = "30\n200\n7")
-fn test_fn_ref_value_param() {
-    let f: fn(IV2) -> int = iv2_sum
-    let g: fn(IV2, int) -> IV2 = iv2_scale
-    print(f(IV2 { x: 10, y: 20 }))
-    let scaled = g(IV2 { x: 10, y: 10 }, 10)
-    print(scaled.x + scaled.y)
-    // Also verify: fn-ref called on a value-returning Rock call as an arg
-    let h: fn(IV2) -> int = iv2_sum
-    print(h(make_iv2(3, 4)))
+@test fn yields_of_values() {
+    assert_eq(drain2(yield_value_call()), 3030)
+    assert_eq(drain2(yield_value_literal()), 15300)
+    assert_eq(drain2(yield_value_local()), 11110)
 }
-
-// --- 4. defer with value-returning call -----------------------------------
-// defer body runs on scope exit. Its body may contain value calls; the
-// return value is discarded but side effects / scalar semantics must not
-// truncate.
 
 global SIDE_EFFECT_ACC: int = 0
 
@@ -276,8 +135,6 @@ fn record_sum(v: IV2) -> IV2 {
     SIDE_EFFECT_ACC = SIDE_EFFECT_ACC + v.x + v.y
     return v
 }
-
-// --- 5. Operator-overload chains (3-deep) ---------------------------------
 
 fn __op_add(a: IV2, b: IV2) -> IV2 {
     return IV2 { x: a.x + b.x, y: a.y + b.y }
@@ -287,21 +144,7 @@ fn __op_mul(a: IV2, k: int) -> IV2 {
     return IV2 { x: a.x * k, y: a.y * k }
 }
 
-@test(output = "19")
-fn test_op_chain_4_terms() {
-    // (a + b) * 2 + c
-    let a = IV2 { x: 1, y: 2 }
-    let b = IV2 { x: 3, y: 1 }
-    let c = IV2 { x: 2, y: 3 }
-    let r = (a + b) * 2 + c
-    print(r.x + r.y)
-}
-
-// --- 6. Generics with value types -----------------------------------------
-// A generic fn with `T: value` or an unconstrained T receiving a value
-// struct uses cdata ABI (generic monomorphizations always keep cdata).
-// Verifies the stdlib pattern used by Vec<IV2>, Arena<IV2>, etc.
-
+// Generic instantiations keep the boxed ABI.
 fn box_first<T>(items: [T]) -> T? {
     if items.len() > 0 {
         return items[0]
@@ -309,19 +152,21 @@ fn box_first<T>(items: [T]) -> T? {
     return null
 }
 
-@test(output = "5")
-fn test_generic_passthrough_value() {
+@test fn fn_refs_operators_generics_and_defer() {
+    let f: fn(IV2) -> int = iv2_sum
+    let g: fn(IV2, int) -> IV2 = iv2_scale
+    assert_eq(f(IV2 { x: 10, y: 20 }), 30)
+    let scaled = g(IV2 { x: 10, y: 10 }, 10)
+    assert_eq(scaled.x + scaled.y, 200)
+    assert_eq(f(make_iv2(3, 4)), 7)
+    let a = IV2 { x: 1, y: 2 }
+    let b = IV2 { x: 3, y: 1 }
+    let c = IV2 { x: 2, y: 3 }
+    let r = (a + b) * 2 + c
+    assert_eq(r.x * 100 + r.y, 1009)
     let xs: [IV2] = [IV2 { x: 2, y: 3 }, IV2 { x: 10, y: 20 }]
     let first = box_first(xs) ?? IV2 { x: 0, y: 0 }
-    print(first.x + first.y)
-}
-
-// --- 7. Defer body with binop-returning-value consumed by side effect -----
-// Exercises a binop chain inside a defer block (a new statement context)
-// to catch IIFE-wrap or state-hoist regressions.
-
-@test(output = "17")
-fn test_defer_value_binop_chain() {
+    assert_eq(first.x + first.y, 5)
     SIDE_EFFECT_ACC = 0
     {
         defer {
@@ -329,7 +174,7 @@ fn test_defer_value_binop_chain() {
             record_sum(iv2_scale(IV2 { x: 1, y: 1 }, 7) * 1)
         }
     }
-    print(SIDE_EFFECT_ACC)
+    assert_eq(SIDE_EFFECT_ACC, 17)
 }
 
 nobox value P { x: float, y: float }
@@ -338,15 +183,11 @@ nobox value R { tl: P, tl__x: float }
 
 fn apply(f: (R) -> float, r: R) -> float { return f(r) }
 
-@test fn ambiguous_leaves_read_correctly_through_a_fn_value() {
+@test fn ambiguous_leaves_read_correctly() {
     let r = R { tl: P { x: 1.0, y: 20.0 }, tl__x: 300.0 }
     assert_eq(apply((a) => a.tl.x + a.tl.y + a.tl__x, r), 321.0)
     assert_eq(apply((a) => a.tl__x, r), 300.0)
     assert_eq(apply((a) => a.tl.x, r), 1.0)
-}
-
-@test fn ambiguous_leaves_read_correctly_at_a_direct_call() {
-    let r = R { tl: P { x: 1.0, y: 20.0 }, tl__x: 300.0 }
     assert_eq(r.tl.x, 1.0)
     assert_eq(r.tl.y, 20.0)
     assert_eq(r.tl__x, 300.0)

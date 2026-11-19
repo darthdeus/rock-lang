@@ -13,60 +13,26 @@ fn get_v(h: Holder) -> V2 {
     return h.v
 }
 
-@test(output = "3-4")
-fn test_cdata_subfield_read() {
-    let h = Holder { v: V2 { x: 3, y: 4 }, tag: 9 }
-    print("{h.v.x}-{h.v.y}")
-}
-
-@test(output = "7")
-fn test_cdata_to_scalar_local() {
-    let h = Holder { v: V2 { x: 3, y: 4 }, tag: 0 }
-    let p = h.v
-    print("{p.x + p.y}")
-}
-
-@test(output = "25")
-fn test_cdata_into_scalar_abi_arg() {
-    let h = Holder { v: V2 { x: 3, y: 4 }, tag: 0 }
-    print("{dist2(h.v)}")
-}
-
-@test(output = "5")
-fn test_cdata_returned_then_read() {
-    let h = Holder { v: V2 { x: 5, y: 12 }, tag: 0 }
-    let g = get_v(h)
-    print("{g.x}")
-}
-
-@test(output = "169")
-fn test_cdata_field_chain_into_call() {
-    let h = Holder { v: V2 { x: 5, y: 12 }, tag: 0 }
-    print("{dist2(get_v(h))}")
-}
-
 struct BareHolder { v: V2 }
 
 fn sum2(v: V2) -> int {
     return v.x + v.y
 }
 
-@test(output = "12")
-fn test_cdata_subfield_read_single_field_holder() {
-    let h = BareHolder { v: V2 { x: 5, y: 7 } }
-    print(h.v.x + h.v.y)
-}
-
-@test(output = "12")
-fn test_cdata_to_scalar_local_single_field_holder() {
-    let h = BareHolder { v: V2 { x: 5, y: 7 } }
+@test(output = "3-4\n7\n25\n5\n169\n12\n12\n12")
+fn test_cdata_reads() {
+    let h = Holder { v: V2 { x: 3, y: 4 }, tag: 9 }
+    print("{h.v.x}-{h.v.y}")
     let p = h.v
-    print(p.x + p.y)
-}
-
-@test(output = "12")
-fn test_cdata_into_scalar_abi_arg_single_field_holder() {
-    let h = BareHolder { v: V2 { x: 5, y: 7 } }
-    // sum2 takes V2 through the scalar ABI, so h.v unpacks into leaves.
-    print(sum2(h.v))
+    print("{p.x + p.y}")
+    print("{dist2(h.v)}")
+    let r = Holder { v: V2 { x: 5, y: 12 }, tag: 0 }
+    let g = get_v(r)
+    print("{g.x}")
+    print("{dist2(get_v(r))}")
+    let b = BareHolder { v: V2 { x: 5, y: 7 } }
+    print(b.v.x + b.v.y)
+    let q = b.v
+    print(q.x + q.y)
+    print(sum2(b.v))
 }

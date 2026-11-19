@@ -1,5 +1,5 @@
-// Generic value producers must preserve the element representation through
-// map and FlatVec reads, including nullable column rows.
+// Generic value producers preserve the element representation through map and
+// FlatVec reads, including nullable column rows.
 
 nobox value Pair { x: int, y: int }
 
@@ -11,24 +11,6 @@ fn lookup<K, V>(m: Map<K, V>, key: K) -> V? {
 fn required<K, V>(m: Map<K, V>, key: K) -> V {
     let value = m[key]
     return value
-}
-
-@test(output = "7 true 11")
-fn generic_map_reads_keep_the_element_plan_and_missing_key_presence() {
-    let m: Map<string, Pair> = map_new()
-    m["hit"] = Pair { x: 7, y: 11 }
-    let hit = lookup(m, "hit")
-    let miss = lookup(m, "miss")
-    print("{hit?.x ?? -1} {miss == null} {required(m, "hit").y}")
-}
-
-@test(output = "7 11")
-fn generic_flat_vec_index_keeps_the_native_element_plan() {
-    let v: FlatVec<Pair> = flat_vec_new(2)
-    v.push(Pair { x: 3, y: 5 })
-    v.push(Pair { x: 7, y: 11 })
-    let value = read(v, 1)
-    print("{value.x} {value.y}")
 }
 
 fn read<T>(v: FlatVec<T>, index: int) -> T {
@@ -45,16 +27,28 @@ fn choose(sources: [Sound], index: int) -> Sound? {
     return result
 }
 
-@test(output = "11 21 31 41\ntrue true")
-fn nullable_column_reads_preserve_nested_value_fields_and_absence() {
+@test(output = "7 true 11\n7 11\n11 21 31 41\ntrue true")
+fn generic_producers_keep_the_element_plan_and_absence() {
+    let m: Map<string, Pair> = map_new()
+    m["hit"] = Pair { x: 7, y: 11 }
+    let hit = lookup(m, "hit")
+    let miss = lookup(m, "miss")
+    print("{hit?.x ?? -1} {miss == null} {required(m, "hit").y}")
+
+    let v: FlatVec<Pair> = flat_vec_new(2)
+    v.push(Pair { x: 3, y: 5 })
+    v.push(Pair { x: 7, y: 11 })
+    let value = read(v, 1)
+    print("{value.x} {value.y}")
+
     let sources: [Sound] = [Sound {
         handle: Handle { scene: 11, arena: 21, slot: 31, generation: 41 }
     }]
-    let hit = choose(sources, 0)
+    let found = choose(sources, 0)
     let low = choose(sources, -1)
     let high = choose(sources, 1)
-    if hit == null { print("missing") } else {
-        print("{hit.handle.scene} {hit.handle.arena} {hit.handle.slot} {hit.handle.generation}")
+    if found == null { print("missing") } else {
+        print("{found.handle.scene} {found.handle.arena} {found.handle.slot} {found.handle.generation}")
     }
     print("{low == null} {high == null}")
 }

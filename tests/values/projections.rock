@@ -228,15 +228,12 @@ fn step() -> Step {
     ] }
 }
 
-@test(output = "5")
-fn one_field_of_each_copied_element() {
-    let n = 0
-    for layer in step().layers { n += layer.name.len() }
-    print(n)
-}
-
-@test(output = "8 15")
-fn nested_value_field_after_unused_fields() {
+// Loops over copied elements that read only some of their fields.
+@test(output = "5\n8 15\n7 2")
+fn copied_elements_read_only_the_fields_they_use() {
+    let names = 0
+    for layer in step().layers { names += layer.name.len() }
+    print(names)
     let n = 0.0
     let m = 0
     for layer in step().layers {
@@ -244,16 +241,12 @@ fn nested_value_field_after_unused_fields() {
         m += layer.name.len() * 3
     }
     print("{n} {m}")
-}
-
-@test(output = "7 2")
-fn unused_fields_before_a_call() {
     calls = 0
-    let n = 0
+    let k = 0
     for layer in step().layers {
         let copy = layer
-        n += count()
-        n += copy.name.len()
+        k += count()
+        k += copy.name.len()
     }
-    print("{n} {calls}")
+    print("{k} {calls}")
 }
