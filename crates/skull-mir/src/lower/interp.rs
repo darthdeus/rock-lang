@@ -1,5 +1,3 @@
-//! String interpolation and `format`: rendering a hole, the nil-guarded and
-//! non-null render paths, width/precision padding, and the piece emitter.
 use super::*;
 
 impl<'a> Builder<'a> {
@@ -13,9 +11,6 @@ impl<'a> Builder<'a> {
             let s = match self.body.interp_part_arena[p] {
                 InterpPart::Literal(lit) => self.emit_cur(Inst::Const(Lit::Str(lit))),
                 InterpPart::Value { expr, spec } => {
-                    // Every call a hole synthesizes belongs to the HOLE, not to
-                    // the enclosing `Interp`: two float holes in one literal
-                    // would otherwise be one site.
                     self.with_site_expr(expr, |s| s.lower_interp_hole(expr, spec))?
                 }
             };
@@ -42,8 +37,6 @@ impl<'a> Builder<'a> {
                 self.stringify(expr, v)
             }
             None if let Some(shape) = self.tuple_box_shape(expr)? => {
-                // A tuple held as one box is rebuilt into its parts first, so it
-                // packs narrow and reaches the same rejection as an unpacked one.
                 let r = match self.lower_expr_repr(expr)?.into_value() {
                     boxed @ ValueRepr::Scalar(_) => {
                         let slots = self.tuple_repr_to_slots(boxed, &shape)?;
@@ -65,8 +58,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// A structural hole renders from the value's own representation, so a
-    /// scalarized or flat value is never packed just to be printed.
     pub(crate) fn stringify_structural(
         &mut self,
         expr: Idx<Expr>,
@@ -92,7 +83,6 @@ impl<'a> Builder<'a> {
                 };
                 self.render_structural_route(&route, group, Some(present))
             }
-            // A flat enum has no presence leaf: a nil tag is its null.
             ValueRepr::Group {
                 name,
                 parts,
@@ -130,7 +120,6 @@ impl<'a> Builder<'a> {
         let Some(present) = present else {
             return self.render_fmt(&tree, Vec::new(), repr);
         };
-        // A nullable scalarized hole: the same null text as any other hole.
         self.render_present_or_null(present, true, "nil", |s| {
             s.render_fmt(&tree, Vec::new(), repr)
         })
@@ -144,7 +133,6 @@ impl<'a> Builder<'a> {
         self.error_at_hole(msg)
     }
 
-    /// `cur_expr` is the hole while it lowers (`with_site_expr`).
     fn error_at_hole(&self, msg: String) -> CompilerError {
         match self.cur_expr {
             Some(e) => CompilerError::new_with_label(self.body.expr_spans[e], msg),
@@ -152,27 +140,20 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Default `{x}` stringify for value `v` of expression `expr`, dispatched on
-    /// `expr`'s static type.
     pub(crate) fn stringify(
         &mut self,
         expr: Idx<Expr>,
         v: Idx<Inst>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        // A literal `{null}` hole renders `tostring(nil)` = "nil".
         if matches!(self.body.expr_arena[expr], Expr::Null) {
             return Ok(self.emit_cur(Inst::ToString(v)));
         }
-        // Guard against absence before dispatching the non-null formatting route.
         if self.expr_is_nullable(expr) {
             return self.nil_guarded_render(v, |s| s.stringify_non_null(expr, v));
         }
         self.stringify_non_null(expr, v)
     }
 
-    /// `if v == nil then "nil" else <render(v)>` -- the guard every interpolation
-    /// path needs on a nullable hole, since `expr_ty` peels `Nullable` and the
-    /// renderer is chosen from the non-null shape.
     pub(crate) fn nil_guarded_render(
         &mut self,
         v: Idx<Inst>,
@@ -196,8 +177,6 @@ impl<'a> Builder<'a> {
         Ok(self.emit_cur(Inst::Load(result)))
     }
 
-    /// `stringify` for a value known to be present. Split out so the nullable
-    /// guard above can reuse every arm on its non-null path.
     pub(crate) fn stringify_non_null(
         &mut self,
         expr: Idx<Expr>,
@@ -207,7 +186,6 @@ impl<'a> Builder<'a> {
         self.render_stringify(&route, Vec::new(), v)
     }
 
-    /// Share route selection with the instance graph.
     pub(crate) fn render_stringify(
         &mut self,
         route: &StringifyRoute,
@@ -219,8 +197,6 @@ impl<'a> Builder<'a> {
             StringifyRoute::FormatFloat => {
                 self.dispatched_call("__rock_format_float", path, vec![v])
             }
-            // A transparent newtype renders `Name(<inner>)`; its runtime value IS
-            // the raw inner, so `tostring` it directly.
             StringifyRoute::Newtype(name) => {
                 let name = bone_core::modules::display_name(name.as_str());
                 let open = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(
@@ -231,7 +207,6 @@ impl<'a> Builder<'a> {
                 let a = self.emit_cur(Inst::StringConcat(open, inner));
                 Ok(self.emit_cur(Inst::StringConcat(a, close)))
             }
-            // Look up the name by the enum's zero-based integer tag.
             StringifyRoute::EnumNames(name) => {
                 let names = self.emit_cur(Inst::Global(crate::mangle::enum_names_global(
                     self.ws, *name,
@@ -260,9 +235,6 @@ impl<'a> Builder<'a> {
         v: Idx<Inst>,
         spec: &bone_core::hir::InterpSpec,
     ) -> Result<Idx<Inst>, CompilerError> {
-        // Same `Nullable`-peel guard as `stringify`: a null with a spec would reach
-        // `string.format("%.2f", nil)`. A null has nothing to pad or round, so it
-        // renders bare "nil" whatever the spec asks for.
         if self.expr_is_nullable(expr) {
             let spec = *spec;
             return self.nil_guarded_render(v, move |s| s.lower_format_non_null(expr, v, &spec));
@@ -270,21 +242,14 @@ impl<'a> Builder<'a> {
         self.lower_format_non_null(expr, v, spec)
     }
 
-    /// `lower_format` for a value known to be present.
     pub(crate) fn lower_format_non_null(
         &mut self,
         expr: Idx<Expr>,
         v: Idx<Inst>,
         spec: &bone_core::hir::InterpSpec,
     ) -> Result<Idx<Inst>, CompilerError> {
-        // Every decision below -- which helper is called, and the flags the
-        // printf rendering reads -- comes from the ONE plan the instance walk
-        // also reads. This function renders it.
         let plan = self.dispatch().format_plan(expr, spec);
 
-        // A composite has no printf conversion: render it structurally (at
-        // `.N` precision when asked, via `inspect_formatted`) and then run the
-        // same pad path a conversion would.
         if let Some(structural) = plan.structural.clone() {
             let rendered = match structural {
                 StructuralRender::Formatted => {
@@ -296,8 +261,6 @@ impl<'a> Builder<'a> {
             return self.pad_to_width(rendered, spec);
         }
 
-        // `%` (percent) and `b` (binary) have no printf equivalent -> the stdlib
-        // helpers; width/align deferred to the pad helper (skip_width set above).
         let mut out = match plan.special {
             Some("__rock_fmt_percent") => {
                 let prec = self.lower_precision(spec)?;
@@ -308,8 +271,7 @@ impl<'a> Builder<'a> {
             }
             Some(other) => return Err(gap(format!("unplanned format helper `{other}`"))),
             None => {
-                // printf path. An integer-class conversion on a float floors first
-                // (Lua `%d` truncates toward zero; rock floors toward -inf).
+                // Lua `%d` truncates toward zero; Rock floors toward -inf.
                 let v = if plan.val_is_float && matches!(plan.ty, Some('d' | 'x' | 'X' | 'o')) {
                     self.emit_cur(Inst::FloatToInt(v))
                 } else {
@@ -332,15 +294,11 @@ impl<'a> Builder<'a> {
                 self.dispatched_call("__rock_fmt_grouping", Vec::new(), vec![out, sep_v, grp_v])?;
         }
         if plan.needs_pad {
-            // Pad AFTER grouping (separators count toward the field width).
             out = self.pad_to_width(out, spec)?;
         }
         Ok(out)
     }
 
-    /// Pad an already-rendered string to the spec's field width. A width of 0
-    /// (no width in the spec) leaves the string untouched, so this is safe to
-    /// call unconditionally.
     pub(crate) fn pad_to_width(
         &mut self,
         out: Idx<Inst>,
@@ -361,8 +319,6 @@ impl<'a> Builder<'a> {
         self.dispatched_call("__rock_fmt_pad", Vec::new(), vec![out, w, align_v, fill_v])
     }
 
-    /// A spec's precision as a value: static `Int`, dynamic `{.{p}}` expression,
-    /// or `-1` (none).
     pub(crate) fn lower_precision(
         &mut self,
         spec: &bone_core::hir::InterpSpec,
@@ -374,9 +330,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Emit `string.format` from decomposed [`FmtPiece`]s: a single static
-    /// conversion ([`Inst::Format`]) when all-literal, else assemble the
-    /// conversion string at runtime and [`Inst::FormatDyn`].
     pub(crate) fn emit_format_pieces(
         &mut self,
         v: Idx<Inst>,

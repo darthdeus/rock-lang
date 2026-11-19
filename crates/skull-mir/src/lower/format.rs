@@ -1,9 +1,7 @@
-//! Structural display for enums, value records and handles.
 use super::*;
 use crate::monoty::{MonoSubst, convert_decl};
 use bone_core::hir::VariantPayload;
 
-/// How an absent nullable payload prints: Rock's spelling, not the backend's.
 const NULL_TEXT: &str = "null";
 
 fn source_name(name: Ustr) -> String {
@@ -12,7 +10,6 @@ fn source_name(name: Ustr) -> String {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum FmtNode {
-    /// A scalar, a string or a payload-free enum, with its logical type.
     Leaf {
         route: StringifyRoute,
         ty: MonoTy,
@@ -22,18 +19,15 @@ pub enum FmtNode {
         name: Ustr,
         variants: Vec<FmtVariant>,
     },
-    /// `Name { field: <..>, .. }`.
     Record {
         name: Ustr,
         fields: Vec<(Ustr, FmtNode)>,
     },
-    /// `Entity<T>(scene=.., ..)`: the handle's identity integers, unresolved.
     Handle {
         name: Ustr,
         label: String,
         fields: Vec<(&'static str, Ustr)>,
     },
-    /// `Name(<inner>)` for a transparent newtype.
     Newtype {
         name: Ustr,
         inner: Box<FmtNode>,
@@ -54,8 +48,6 @@ pub enum FmtPayload {
 }
 
 impl FmtNode {
-    /// Every stdlib call a render of this tree synthesizes, keyed by the path
-    /// lowering passes to `dispatched_call` for it.
     pub fn obligations(&self, path: &mut Vec<u32>, out: &mut Vec<(Vec<u32>, &'static str)>) {
         match self {
             Self::Leaf { route, .. } => {
@@ -95,8 +87,6 @@ impl FmtNode {
     }
 }
 
-/// Whether `name` is a type the structural formatter owns at the top level of
-/// a hole: an enum, a value record or a handle. Identity structs keep `inspect`.
 pub(crate) fn formats_structurally(ws: &Workspace, name: Ustr) -> bool {
     if handle_fields(name).is_some() || ws.enums_by_name.contains_key(&name) {
         return true;
@@ -122,7 +112,6 @@ fn handle_fields(name: Ustr) -> Option<&'static [(&'static str, &'static str)]> 
     }
 }
 
-/// The source spelling of a type, for a handle's type argument.
 fn type_label(ty: &MonoTy) -> String {
     match ty {
         MonoTy::Int => "int".into(),
@@ -177,8 +166,6 @@ fn nominal_subst(ws: &Workspace, generics: &[TyId], params: &[MonoTy]) -> Option
     Some(subst)
 }
 
-/// The format tree for a value of type `ty`, or why the formatter cannot print
-/// it. Unsupported kinds are a formatter limit (spec), reported at compile time.
 pub(crate) fn format_tree(ws: &Workspace, ty: &MonoTy) -> Result<FmtNode, String> {
     format_tree_in(ws, ty, &mut Vec::new())
 }
@@ -329,7 +316,6 @@ fn nominal_tree(
 }
 
 impl<'a> Builder<'a> {
-    /// Render `repr`, a value whose format tree is `node`.
     pub(crate) fn render_fmt(
         &mut self,
         node: &FmtNode,
@@ -415,8 +401,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// A payload read off flat-enum union storage names no single member; on a
-    /// native backend, a local of the leaf's type selects it.
     fn native_leaf(&mut self, v: Idx<Inst>, ty: &MonoTy) -> Idx<Inst> {
         if !self.scx.native_flat_enums || matches!(self.f.insts[v], Inst::Const(_)) {
             return v;
@@ -427,7 +411,6 @@ impl<'a> Builder<'a> {
         self.emit_cur(Inst::Load(cell))
     }
 
-    /// `open` + `label_i .. piece_i` joined by ", " + `close`, one flat concat run.
     fn join_pieces(
         &mut self,
         open: &str,
@@ -447,7 +430,6 @@ impl<'a> Builder<'a> {
         self.emit_cur(Inst::StringConcat(out, c))
     }
 
-    /// `cond` selects the rendered value (`cond_is_present` true) or `null_text`.
     pub(crate) fn render_present_or_null(
         &mut self,
         cond: Idx<Inst>,
@@ -478,9 +460,6 @@ impl<'a> Builder<'a> {
         Ok(self.emit_cur(Inst::Load(result)))
     }
 
-    /// The declared fields `wanted` of a value record or handle, each as its own
-    /// representation: a scalarized group already holds them in declaration
-    /// order; a materialized value (cdata or table) is read by field name.
     fn record_parts(
         &mut self,
         name: Ustr,
@@ -542,8 +521,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// One tag test per variant, each arm rendering its payload in declaration
-    /// order. Payload reads follow `match_pattern`'s, so every layout agrees.
     pub(crate) fn render_enum(
         &mut self,
         node: &FmtNode,
@@ -562,9 +539,6 @@ impl<'a> Builder<'a> {
         })?;
         let cdata = plan.cdata().is_some();
         let flat_shape = plan.flat().cloned();
-        // A value constructed in place has a constant tag. Only its arm is
-        // reachable; the others would read slots holding nil or another
-        // variant's payload.
         let known = match scrut {
             Scrut::Cells { tag, .. } => match self.f.insts[*tag] {
                 Inst::Const(Lit::Str(variant)) => Some(variant),
@@ -599,8 +573,6 @@ impl<'a> Builder<'a> {
                                 if let Some(mut inner) =
                                     self.nested_flat_enum_scrut(scrut, slot, &vs)?
                                 {
-                                    // The nested tag shares its slot with other
-                                    // variants' payloads, like any leaf.
                                     if let Scrut::Cells { tag, .. } = &mut inner {
                                         *tag = self.native_leaf(*tag, &MonoTy::String);
                                     }
@@ -635,15 +607,12 @@ impl<'a> Builder<'a> {
             self.store_and_join(result, rendered, join);
             self.cur = fail;
         }
-        // Every tag is covered above; a value reaching here is corrupt.
         self.f.set_term(self.cur, Term::Unreachable);
         self.cur = join;
         Ok(self.emit_cur(Inst::Load(result)))
     }
 }
 
-/// Rebuild a widened payload position's leaves as the nested group its value
-/// shape describes.
 fn leaves_to_repr(
     shape: &ValueShape,
     leaves: &mut impl Iterator<Item = Idx<Inst>>,

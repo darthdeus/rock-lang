@@ -1,12 +1,8 @@
-//! Collection and type KIND queries the walk dispatches on: which vec/map/
-//! native-buffer flavour a receiver is, element types behind a column, and the
-//! numeric coercions (`int`->`float`, binding and param types).
 use super::*;
 use crate::monoty::MonoTy;
 
 impl<'a> Builder<'a> {
     pub(crate) fn mark_record_base(&mut self, source: Idx<Expr>, value: Idx<Inst>) {
-        // Shader lowering uses native first-class structs, with no host objects.
         if self.scx.target == bone_core::hir::FnBackend::Any {
             return;
         }
@@ -163,8 +159,6 @@ impl<'a> Builder<'a> {
         Ok(arena.value_shape(rep).map(|shape| shape.name))
     }
 
-    /// Whether `e` is a Vec, Map or Arena whose elements have no per-element
-    /// table (column or strided storage).
     pub(crate) fn flat_stored_container(&self, e: Idx<Expr>) -> Result<bool, CompilerError> {
         match self.concrete_ty(e)? {
             Some(ty) => self.flat_stored_container_type(ty),
@@ -172,7 +166,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// [`Self::flat_stored_container`] for a container type.
     pub(crate) fn flat_stored_container_type(&self, ty: &MonoTy) -> Result<bool, CompilerError> {
         for family in [
             ContainerFamily::Vec,
@@ -214,9 +207,6 @@ impl<'a> Builder<'a> {
         Ok(self.boxed_vec_kind(elem))
     }
 
-    /// The kind of a `[T]` with one `_data` backing. On Lua an element that is
-    /// never nil fills every live slot, so an in-bounds access cannot reach a
-    /// metamethod of a foreign backing table.
     pub(crate) fn boxed_vec_kind(&self, elem: Option<&MonoTy>) -> ContainerKind {
         if matches!(self.scx.target, bone_core::hir::FnBackend::Lua)
             && elem.is_some_and(|ty| crate::nilness::monoty_never_nil(self.ws, ty))
@@ -267,7 +257,6 @@ impl<'a> Builder<'a> {
             .map(|plan| plan.strided_elem(self.scx.rep_arena()))
     }
 
-    /// Nullable elements add a presence column.
     pub(crate) fn column_shape(&self, elem: ColumnElem) -> Result<ValueShape, CompilerError> {
         let shape = self
             .scx
@@ -287,7 +276,6 @@ impl<'a> Builder<'a> {
             .and_then(|plan| plan.column_elem(self.scx.rep_arena())))
     }
 
-    /// A planned expression table is authoritative under specialization.
     pub(crate) fn concrete_ty(&self, e: Idx<Expr>) -> Result<Option<&'a MonoTy>, CompilerError> {
         if self.concrete_expr_is_untyped(e) {
             return Ok(None);
@@ -297,8 +285,6 @@ impl<'a> Builder<'a> {
             .ok_or_else(|| self.gap_here("concrete plan has no type for this expression"))
     }
 
-    /// `m.data`, the column Vec a column-stored Map's values live in. Every
-    /// leaf read/write goes through the ordinary Vec column machinery on this.
     pub(crate) fn map_col_data(&mut self, m: Idx<Inst>) -> Idx<Inst> {
         self.emit_cur(Inst::Field {
             nonthrowing: false,
@@ -307,8 +293,6 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// The NativeBuffer container kind for base expr `e`: value-struct elements
-    /// carry their name so the JS emitter can lower flat slots (Lua identical).
     pub(crate) fn nb_kind(&self, e: Idx<Expr>) -> Result<ContainerKind, CompilerError> {
         match self.nb_value_elem(e)? {
             Some(elem) => Ok(ContainerKind::NativeBufferValue(elem)),
@@ -316,7 +300,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// FlatVec indexing addresses the backing NativeBuffer.
     pub(crate) fn lower_index_base(
         &mut self,
         base: Idx<Expr>,
@@ -363,8 +346,6 @@ impl<'a> Builder<'a> {
         Err(self.gap_here("container expression is missing from the concrete type plan"))
     }
 
-    // --- type queries (decision: ops are typed at BUILD time) ---
-
     pub(crate) fn arith_ty(&self, e: Idx<Expr>) -> Option<ArithTy> {
         if let Some(ty) = self.concrete_expr_ty(e) {
             return self.arith_ty_of_mono(ty);
@@ -391,7 +372,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Coerce typed integer reads at expected-float boundaries.
     pub(crate) fn coerced(
         &mut self,
         value: Idx<Inst>,
@@ -423,9 +403,6 @@ impl<'a> Builder<'a> {
         )
     }
 
-    /// A variable binding's type: the inferred type, falling back to the declared
-    /// annotation. The expected type at a `let`/assignment coercion sink and the
-    /// [`Cell::ty`] for a binding cell.
     pub(crate) fn binding_ty(&self, name: Idx<BindingInfo>) -> Option<TyId> {
         self.inf
             .and_then(|i| i.binding_types.get(name).copied())
@@ -446,7 +423,6 @@ impl<'a> Builder<'a> {
             })
     }
 
-    /// [`Self::coerced`] against a `let`/assignment target binding's type.
     pub(crate) fn coerced_to_binding(
         &mut self,
         value: Idx<Inst>,

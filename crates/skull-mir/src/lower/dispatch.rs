@@ -1,8 +1,3 @@
-//! Shared type-directed routes for interpolation and structural equality.
-//!
-//! Lowering consumes each route to choose an arm; the instance graph consumes
-//! its call obligations. [`DispatchCtx`] supplies the same type context to both.
-
 use bone_core::hir::{BinOp, Body, BuiltinTy, Expr, InterpSpec, TyId, TypeCtor, TypeExpr};
 use bone_core::prelude::Idx;
 use bone_core::workspace::{BodyInference, Workspace};
@@ -12,9 +7,6 @@ use super::{EnumPlan, RepArena, RepGuarantees, RepUse, RepUseFacts, shape::is_pa
 use crate::concrete::{ConcreteBodyPlan, ConcreteTypeTables};
 use crate::monoty::MonoSubst;
 
-/// Type and representation context for route decisions. The graph walk uses a
-/// target-neutral context and sets `values_first_class` to false; GLSL cannot
-/// reach these routes. Concrete lowering supplies its backend and plans.
 #[derive(Clone, Copy)]
 pub struct DispatchCtx<'a> {
     pub ws: &'a Workspace,
@@ -25,41 +17,24 @@ pub struct DispatchCtx<'a> {
     pub interner: Option<&'a crate::monoty::MonoInterner>,
     pub rep_arena: &'a RepArena,
     pub target: bone_core::hir::FnBackend,
-    /// Logical substitution for the target-neutral graph walk. Concrete
-    /// lowering sets this to `None` because every type decision must come from
-    /// its concrete plan.
     pub logical_subst: Option<&'a MonoSubst>,
     pub values_first_class: bool,
 }
 
-/// Default route for rendering an interpolation hole.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum StringifyRoute {
-    /// `tostring(v)` -- int, bool, string, and a literal `null` hole.
     ToString,
-    /// `__rock_quote_string(v)` -- a string inside a structural rendering,
-    /// quoted and escaped as a Rock literal.
     EscapedString,
-    /// `__rock_format_float(v)`.
     FormatFloat,
-    /// `Name(<tostring inner>)` for a transparent newtype.
     Newtype(Ustr),
-    /// `__rock_enum_<E>_names[v]` for a payload-free enum.
     EnumNames(Ustr),
-    /// `inspect(v)`.
     Inspect,
-    /// The structural enum / value-record / handle rendering.
     Structural(Box<super::format::FmtNode>),
-    /// The structural formatter cannot print this type; the reason names the
-    /// part it rejects.
     Unprintable(String),
-    /// No render exists -- lowering gaps.
     Unsupported,
 }
 
 impl StringifyRoute {
-    /// The stdlib entry this route CALLS, if any. `None` is a route that emits
-    /// only primitive instructions.
     pub fn synthesized_callee(&self) -> Option<&'static str> {
         match self {
             Self::FormatFloat => Some("__rock_format_float"),
@@ -69,8 +44,6 @@ impl StringifyRoute {
         }
     }
 
-    /// Every call this route synthesizes, with its path within the hole. Only
-    /// a structural rendering makes more than one.
     pub fn obligations(&self) -> Vec<(Vec<u32>, &'static str)> {
         match self {
             Self::Structural(tree) => {
@@ -87,17 +60,13 @@ impl StringifyRoute {
     }
 }
 
-/// Whether equality uses primitive instructions or the structural helper.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EqRoute {
-    /// Primitive `==` / `~=` on already-lowered operands.
     Primitive,
-    /// The structural stdlib walk -- `__op_eq` / `__op_ne`.
     Structural,
 }
 
 impl EqRoute {
-    /// The stdlib entry this route CALLS, if any.
     pub fn synthesized_callee(&self, op: BinOp) -> Option<&'static str> {
         match self {
             Self::Structural => Some(if matches!(op, BinOp::Eq) {
@@ -110,9 +79,6 @@ impl EqRoute {
     }
 }
 
-/// Declarations callable by the bare emitted symbol `name`. Resolution is
-/// target-neutral: backend selection happens when the concrete call plan is
-/// built, and JS may supply a body for an `inline(lua)` declaration.
 pub fn dispatched_callee_decls(ws: &Workspace, name: &str) -> Vec<crate::mir::FuncRef> {
     let mut resolved = Vec::new();
     for (key, decls) in &ws.functions_by_name {
@@ -129,11 +95,6 @@ pub fn dispatched_callee_decls(ws: &Workspace, name: &str) -> Vec<crate::mir::Fu
     resolved
 }
 
-/// THE declaration a conditionally-synthesized call to `name` resolves to.
-///
-/// Canonicalize every candidate through the backend-variant grouping oracle
-/// and demand unanimity. The instance walk records this representative in the
-/// concrete call plan for lowering.
 pub fn dispatched_callee_decl(ws: &Workspace, name: &str) -> Option<crate::mir::FuncRef> {
     let mut reps = dispatched_callee_decls(ws, name)
         .into_iter()
@@ -142,43 +103,25 @@ pub fn dispatched_callee_decl(ws: &Workspace, name: &str) -> Option<crate::mir::
     reps.all(|r| r == first).then_some(first)
 }
 
-/// How a `{x:spec}` hole renders a value that has no printf conversion.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum StructuralRender {
-    /// `inspect_formatted(v, prec)` -- the spec asked for a precision.
     Formatted,
-    /// The ordinary by-type render, then padded.
     Plain(StringifyRoute),
 }
 
-/// Helper calls and formatting choices for one format spec. Lowering renders
-/// the plan; the instance graph reads [`Self::obligations`].
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct FormatPlan {
-    /// The conversion letter implied by the value's type when the spec omits
-    /// one (`{x:5}`).
     pub inferred: Option<char>,
-    /// Set iff the value has no printf conversion at all.
     pub structural: Option<StructuralRender>,
-    /// `__rock_fmt_percent` / `__rock_fmt_binary`, when the conversion has no
-    /// printf equivalent.
     pub special: Option<&'static str>,
-    /// Separator and digit-group size for `__rock_fmt_grouping`.
     pub grouping: Option<(char, i64)>,
-    /// Whether `__rock_fmt_pad` runs after the conversion.
     pub needs_pad: bool,
-    /// Whether the printf conversion string omits the width (the pad helper
-    /// takes it instead).
     pub skip_width: bool,
-    /// The value's type is `float`, which floors before an integer conversion.
     pub val_is_float: bool,
-    /// The effective conversion letter: the spec's, else [`Self::inferred`].
     pub ty: Option<char>,
 }
 
 impl FormatPlan {
-    /// Stdlib calls in lowering order. Structural rendering always calls pad;
-    /// no width makes padding a runtime no-op, not an omitted call.
     pub fn obligations(&self) -> Vec<(Vec<u32>, &'static str)> {
         let mut out: Vec<(Vec<u32>, &'static str)> = Vec::new();
         match &self.structural {
@@ -205,18 +148,13 @@ impl FormatPlan {
     }
 }
 
-/// The complete render plan for ONE interpolation hole.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum HolePlan {
-    /// No spec: render by the hole's own type.
     Plain(StringifyRoute),
-    /// A format spec.
     Formatted(FormatPlan),
 }
 
 impl HolePlan {
-    /// Every synthesized callee obligation this hole carries, each with the
-    /// path that identifies it within the hole.
     pub fn obligations(&self) -> Vec<(Vec<u32>, &'static str)> {
         match self {
             Self::Plain(route) => route.obligations(),
@@ -226,12 +164,6 @@ impl HolePlan {
 }
 
 impl<'a> DispatchCtx<'a> {
-    // --- type resolution --------------------------------------------------
-    //
-    // The `Builder` methods of these names delegate here; this is the only
-    // implementation.
-
-    /// The stored type node, WITHOUT the specialization substitution.
     pub(crate) fn raw_ty_node(&self, ty: TyId) -> Option<TypeExpr> {
         Some(match ty {
             TyId::Static(mid, idx) => self.ws.module(mid).ty_arena[idx],
@@ -239,9 +171,6 @@ impl<'a> DispatchCtx<'a> {
         })
     }
 
-    /// The concrete logical type for a plan-owned slot. This is deliberately
-    /// separate from `TypeExpr`: a `MonoTy` owns all children and does not need
-    /// an HIR arena to fabricate a partial node.
     pub(crate) fn concrete_ty(&self, ty: TyId) -> Option<&'a crate::monoty::MonoTy> {
         let id = self.concrete_types?.ty_type(ty)?;
         self.concrete_mono(id)
@@ -259,14 +188,10 @@ impl<'a> DispatchCtx<'a> {
         Some(self.interner?.get_ref(id))
     }
 
-    /// The stored HIR node. Concrete plan consumers use `concrete_ty` or
-    /// `concrete_expr_ty` for resolved facts; this accessor never fabricates a
-    /// partial HIR node for a concrete generic argument.
     pub(crate) fn ty_node(&self, ty: TyId) -> Option<TypeExpr> {
         self.raw_ty_node(ty)
     }
 
-    /// Chase `Infer` and peel `Nullable`.
     pub(crate) fn resolve_ty(&self, ty: TyId) -> Option<TypeExpr> {
         match self.ty_node(ty)? {
             TypeExpr::Infer(var, _) => self.resolve_ty(self.inf?.substitutions.get(var)?),
@@ -275,7 +200,6 @@ impl<'a> DispatchCtx<'a> {
         }
     }
 
-    /// Chase `Infer` WITHOUT peeling `Nullable`, keeping the `TyId`.
     pub(crate) fn resolve_tyid(&self, ty: TyId) -> Option<TyId> {
         match self.ty_node(ty)? {
             TypeExpr::Infer(var, _) => self.resolve_tyid(self.inf?.substitutions.get(var)?),
@@ -294,8 +218,6 @@ impl<'a> DispatchCtx<'a> {
         if self.concrete_plan.is_some() {
             return false;
         }
-        // A generic bound to `E?` is nullable and `ty_node` cannot say so: it
-        // substitutes the PAYLOAD. Read the raw node before that erases the `?`.
         if let Some(TypeExpr::Generic(var, _)) = self.raw_ty_node(ty) {
             if let Some(b) = self.logical_subst.and_then(|subst| subst.get(&var)) {
                 return b.peel_nullable().1;
@@ -376,18 +298,10 @@ impl<'a> DispatchCtx<'a> {
         self.is_nobox_struct(name).then_some(name)
     }
 
-    /// Whether `name` is a `value` struct. Lua/C equality reaches its per-type
-    /// `__eq` directly; JS uses the structural equality helper.
     pub fn is_value_struct(&self, name: Ustr) -> bool {
         crate::lower::shape::is_value_struct(self.ws, name)
     }
 
-    /// The declared `value` struct name of `e`'s (nullable-peeled) static
-    /// type, or `None` when it is not a `value` struct. Unlike
-    /// [`Self::nobox_value_name`] this does NOT require the `nobox`
-    /// annotation -- it is the equality-only question "does this type already
-    /// carry a native-`==`-reachable `__eq`", which every `value` struct
-    /// answers yes to regardless of storage tier or ABI opt-in.
     pub(crate) fn value_struct_name(&self, e: Idx<Expr>) -> Option<Ustr> {
         if let Some(ty) = self.concrete_expr_ty(e) {
             let (payload, _) = ty.peel_nullable();
@@ -412,10 +326,6 @@ impl<'a> DispatchCtx<'a> {
         self.is_value_struct(name).then_some(name)
     }
 
-    /// Whether `e`'s static type is an enum ALL of whose variants are unit (no
-    /// payload). Those variants lower to interned singleton globals --
-    /// reference-equal across uses -- so `==`/`!=` is native Lua `==`/`~=`, not
-    /// the dynamic `__op_eq` (`type()`/`pairs()`) walk.
     pub(crate) fn is_payloadless_enum(&self, e: Idx<Expr>) -> bool {
         if let Some(ty) = self.concrete_expr_ty(e) {
             let (payload, _) = ty.peel_nullable();
@@ -488,12 +398,6 @@ impl<'a> DispatchCtx<'a> {
         )
     }
 
-    // --- the two dispatch oracles ------------------------------------------
-
-    /// The route a `{x}` hole with NO format spec takes, for a value already
-    /// known present. The nullable guard wraps this rather than changing it --
-    /// `expr_ty` peels `Nullable`, so the arm is picked from the non-null shape
-    /// on both sides.
     pub(crate) fn stringify_route(&self, expr: Idx<Expr>) -> StringifyRoute {
         if self.is_null_lit(expr) {
             return StringifyRoute::ToString;
@@ -566,9 +470,6 @@ impl<'a> DispatchCtx<'a> {
         }
     }
 
-    /// The structural rendering of `expr`'s non-null type, when that type is
-    /// one the structural formatter owns (an enum with a payload, a value
-    /// record, a handle). `None` leaves the hole to the by-type routes.
     pub(crate) fn structural_route(&self, expr: Idx<Expr>) -> Option<StringifyRoute> {
         let ty = self.hole_mono(expr)?;
         let (payload, _) = ty.peel_nullable();
@@ -582,7 +483,6 @@ impl<'a> DispatchCtx<'a> {
         })
     }
 
-    /// Arguments whose native print representation exposes enum or leaf storage.
     pub fn print_routes(&self, call: Idx<Expr>) -> Vec<(Idx<Expr>, StringifyRoute)> {
         let Expr::Call {
             callee: bone_core::hir::Callee::Unresolved { name, .. },
@@ -626,10 +526,6 @@ impl<'a> DispatchCtx<'a> {
             .collect()
     }
 
-    /// `tostring(x)` / `to_string(x)` where `x` formats structurally: the
-    /// argument and its route. Only the stdlib's extern `tostring` and the
-    /// `to_string(any)` fallback qualify -- a user function or a typed overload
-    /// of either name is an ordinary call.
     pub fn tostring_route(&self, call: Idx<Expr>) -> Option<(Idx<Expr>, StringifyRoute)> {
         let Expr::Call {
             callee: bone_core::hir::Callee::Unresolved { name, .. },
@@ -664,7 +560,6 @@ impl<'a> DispatchCtx<'a> {
         Some((arg, self.structural_route(arg)?))
     }
 
-    /// The logical type of `expr` from whichever plan this context carries.
     fn hole_mono(&self, expr: Idx<Expr>) -> Option<crate::monoty::MonoTy> {
         if let Some(ty) = self.concrete_expr_ty(expr) {
             return Some((*ty).clone());
@@ -678,8 +573,6 @@ impl<'a> DispatchCtx<'a> {
         crate::monoty::convert(self.ws, inf, ty, self.logical_subst.unwrap_or(&empty)).ok()
     }
 
-    /// Whether `e`'s type is a composite (tuple/array/map/struct/enum) -- what
-    /// `inspect`/`inspect_formatted` render structurally.
     pub(crate) fn is_composite_expr(&self, e: Idx<Expr>) -> bool {
         if let Some(ty) = self.concrete_expr_ty(e) {
             let (payload, _) = ty.peel_nullable();
@@ -719,7 +612,6 @@ impl<'a> DispatchCtx<'a> {
         }
     }
 
-    /// THE plan for one interpolation hole. `spec` is the hole's format spec.
     pub fn hole_plan(&self, hole: Idx<Expr>, spec: Option<&InterpSpec>) -> HolePlan {
         let Some(spec) = spec else {
             return HolePlan::Plain(self.stringify_route(hole));
@@ -727,8 +619,6 @@ impl<'a> DispatchCtx<'a> {
         HolePlan::Formatted(self.format_plan(hole, spec))
     }
 
-    /// THE plan for a `{x:spec}` hole. Every branch that decides a stdlib call
-    /// is here; the printf conversion STRING is not, because it emits no call.
     pub(crate) fn format_plan(&self, hole: Idx<Expr>, spec: &InterpSpec) -> FormatPlan {
         let inferred = if self.concrete_plan.is_some() {
             match self.concrete_expr_ty(hole) {
@@ -754,10 +644,6 @@ impl<'a> DispatchCtx<'a> {
             }
         };
         let has_precision = spec.precision.is_some() || spec.precision_expr.is_some();
-        // A composite has no printf conversion. The numeric-presentation flags
-        // have no meaning on a structural rendering, so a spec carrying one
-        // falls through to the printf path and gaps there rather than being
-        // silently ignored.
         let structural = (spec.format_type.is_none()
             && inferred.is_none()
             && spec.grouping.is_none()
@@ -799,7 +685,6 @@ impl<'a> DispatchCtx<'a> {
             None
         };
         let grouping = grouping_sep.map(|sep| {
-            // `_` with a radix conversion groups by nibble (4), else by 3.
             let group = match (sep, ty) {
                 ('_', Some('x' | 'X' | 'o' | 'b')) => 4i64,
                 _ => 3i64,
@@ -818,8 +703,6 @@ impl<'a> DispatchCtx<'a> {
         }
     }
 
-    /// Whether the equality call site needs the structural helper. Null tests
-    /// and same-type `nobox` comparisons are handled as primitive operations.
     pub fn eq_route(&self, lhs: Idx<Expr>, rhs: Idx<Expr>) -> EqRoute {
         if self.is_null_lit(lhs) || self.is_null_lit(rhs) {
             return EqRoute::Primitive;
@@ -829,10 +712,6 @@ impl<'a> DispatchCtx<'a> {
                 return EqRoute::Primitive;
             }
         }
-        // Lua/C value structs have native equality. JS objects reach their
-        // per-type equality registry through the structural helper instead.
-        // The target-neutral graph retains that JS callee obligation too.
-        // Different names retain the helper's type-mismatch check.
         if let (Some(ln), Some(rn)) = (self.value_struct_name(lhs), self.value_struct_name(rhs)) {
             if ln == rn {
                 return if matches!(

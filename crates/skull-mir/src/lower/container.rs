@@ -188,11 +188,8 @@ impl ContainerPlan {
                 } => crate::lower::dense_flat_enum_vec_eligible(ws, *name),
                 _ => false,
             };
-        // A wide `nobox` value struct stores row-major in one table: a column
-        // per leaf costs a table lookup, bounds check and barrier per leaf on
-        // every push and read, which is what made a 50-leaf push end hot traces
-        // at LuaJIT's constant limit. A generic field remains one opaque leaf,
-        // so type arguments do not change the declared row offsets.
+        // A column per leaf costs a lookup, bounds check and barrier per leaf, which
+        // ended hot traces at LuaJIT's constant limit for wide structs.
         let wide_nobox_struct = matches!(family, ContainerFamily::Vec)
             && !nullable
             && column_eligible
@@ -325,7 +322,6 @@ impl ContainerPlan {
         matches!(self.storage, ContainerStorage::LeafAddressed { .. })
     }
 
-    /// `address` as a place in this container, which must be leaf-addressed.
     pub fn place(&self, address: LeafAddr) -> Result<LeafAddr, RepError> {
         if !self.is_leaf_addressed() {
             return Err(RepError {

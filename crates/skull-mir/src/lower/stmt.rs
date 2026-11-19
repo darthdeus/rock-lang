@@ -1,36 +1,20 @@
-//! Statement lowering: `static` locals, nested `fn`s and their ABI, the
-//! statement list itself, and the `defer` machinery (inline splice, the LIFO
-//! run at block exit and before every `return`, and the coroutine copy).
 use super::*;
 
-/// How a pending `defer` is reached when its scope dies instead of exiting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PendingDefer {
-    /// Spliced at scope exit only: a global initializer or decorator, or a
-    /// backend without unwind support.
     Inline,
-    /// A temporary generator owned by a `for` scope.
     LoopCoroutine {
         iterator: Idx<Cell>,
         flag: Option<Idx<Cell>>,
     },
-    /// A co fn defer: its frame flag guards the splice and the terminal
-    /// cleanup copy (`MirFunc::coro_defers`).
     CoFlag(Idx<Cell>),
-    /// An ordinary fn defer whose cleanup closure is on the runtime unwind
-    /// stack; the splice pops it.
     Unwind,
 }
 
-/// How a body's `defer` statements reach a death of their scope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DeferMode {
-    /// Scope exit only: a global initializer or decorator, or a backend
-    /// without unwind support.
     Inline,
-    /// An ordinary fn, nested fn or lambda body on the Lua or JS target.
     Unwind,
-    /// A `co fn` body (not a lambda inside it).
     CoFlag,
 }
 
@@ -50,8 +34,6 @@ impl DeferMode {
 }
 
 impl<'a> Builder<'a> {
-    /// A local consumed only by projections needs no whole box. Read its
-    /// selected fields now, before later mutations, and retain their leaves.
     fn lower_projected_value_let(
         &mut self,
         name: Idx<BindingInfo>,
@@ -84,8 +66,6 @@ impl<'a> Builder<'a> {
         {
             return Ok(false);
         }
-        // Constructors and control flow keep their normal eager evaluation.
-        // A source binding already held in leaves has no box to read.
         let place = match self.body.expr_arena[value] {
             Expr::Var(b) => !self.group_binds.contains_key(&raw(b)),
             Expr::FieldAccess { .. } => {
@@ -152,7 +132,6 @@ impl<'a> Builder<'a> {
         Ok(true)
     }
 
-    /// A static initializer runs once, even across reloads.
     pub(crate) fn lower_static(
         &mut self,
         name: Idx<BindingInfo>,
@@ -217,10 +196,6 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// The value ABI of a nested `fn`, read by both its definition and its call
-    /// sites. Same rule as [`BackendFnAbiPlan`] for a top-level fn, minus annotation
-    /// gates: a fn value narrows to `nobox` shapes; a direct-only fn may use every
-    /// scalarizable value shape.
     pub(crate) fn nested_fn_abi(
         &self,
         name: Idx<BindingInfo>,
@@ -268,16 +243,10 @@ impl<'a> Builder<'a> {
         Ok(if abi.uses_scalar_abi() { abi } else { boxed })
     }
 
-    /// The owner segment of a private global this body mints (a `static`
-    /// cell, a hoisted nested fn). Definition keys use their symbol form.
     fn static_owner_symbol(&self) -> Ustr {
         crate::mangle::symbol_of_key(self.static_owner)
     }
 
-    /// Hoist a nested `fn` to a private top-level [`MirFunc`] `__local_<owner>_
-    /// <name>_<ctr>`. The name is registered in `nested_fn_globals` BEFORE the
-    /// body is lowered so self-recursion resolves; the child inherits the
-    /// parent's in-scope statics + sibling nested fns (decl-before-use).
     pub(crate) fn lower_nested_fn(
         &mut self,
         name: Idx<BindingInfo>,
@@ -329,7 +298,6 @@ impl<'a> Builder<'a> {
         child.param_reps = abi.representation.params().to_vec();
         child.ret_rep = abi.representation.result();
         child.site_owner = self.site_owner.clone();
-        // Hoisted bodies can see sibling definitions and statics.
         child.static_cells = self.static_cells.clone();
         child.nested_fn_globals = self.nested_fn_globals.clone();
 
@@ -387,9 +355,6 @@ impl<'a> Builder<'a> {
         stmts: IdxRange<Statement>,
     ) -> Result<bool, CompilerError> {
         for sidx in stmts {
-            // Coarse anchor for anything lowered outside an expression (a `for`
-            // desugaring's element bind, a scope-exit splice). `lower_expr`
-            // narrows it wherever a real expression is in hand.
             self.cur_span = self.body.statement_spans.get(sidx).copied();
             match self.body.statement_arena[sidx].clone() {
                 Statement::Let {
@@ -401,8 +366,6 @@ impl<'a> Builder<'a> {
                         self.lower_let_else(pattern, value, else_e)?;
                         continue;
                     }
-                    // `let Wrapper(x) = e` — a transparent newtype's runtime
-                    // value IS the inner, so `x` binds directly to the value.
                     if let Pattern::Newtype { sub, .. } = self.body.pattern_arena[pattern]
                         && let Pattern::Bind(var) = self.body.pattern_arena[sub]
                     {
@@ -419,8 +382,6 @@ impl<'a> Builder<'a> {
                     }
                     let name = match binding_view(self.body, pattern) {
                         Some(BindingPattern::Leaf(name)) => name,
-                        // `let (a, b) = e` — destructure via TupleIndex into a
-                        // cell per leaf (the same machinery `for (k,v)` uses).
                         Some(vars @ BindingPattern::Tuple(_)) => {
                             match self
                                 .expr_tuple_shape(value)?
@@ -437,8 +398,6 @@ impl<'a> Builder<'a> {
                             }
                             continue;
                         }
-                        // A record or nested pattern destructures through the
-                        // match machinery; bone proved it irrefutable.
                         None => {
                             self.lower_let_match(pattern, value)?;
                             continue;
@@ -453,8 +412,6 @@ impl<'a> Builder<'a> {
                     if self.binding_is_ref(name) {
                         self.check_ref_holder(value)?;
                     }
-                    // Scalar values live in leaf cells, matching the call ABI
-                    // instead of relying on later SROA.
                     let threaded_shape =
                         if let Some(shape) = self.flat_enum_value_shape_of(value)? {
                             Some(shape)
@@ -482,9 +439,6 @@ impl<'a> Builder<'a> {
                                         r.representation(), actual, shape
                                     )));
                                 }
-                                // A nullable binding keeps its presence lane even when
-                                // the source plan is non-null with presence on the
-                                // Group (a map column `get`).
                                 let shape = if shape.nullable && !actual.nullable {
                                     shape
                                 } else {
@@ -495,21 +449,12 @@ impl<'a> Builder<'a> {
                                     self.repr_to_leaves_bundle_for_shape(&r, &shape)?,
                                 ))
                             }
-                            // A container-read copy's producer plan is boxed, so
-                            // it has no leaf shape - but the snapshot just split
-                            // the value into the binding shape's lanes. Thread
-                            // those instead of packing them straight back into
-                            // a fresh wrapper (#827).
                             None if matches!(r.value(), ValueRepr::Group { parts, .. } if parts.len() == shape.fields.len()) => {
                                 Some((
                                     shape.clone(),
                                     self.repr_to_leaves_shape(&r.value().clone(), &shape)?,
                                 ))
                             }
-                            // A `nobox` binding whose first value arrives boxed
-                            // (a `@gpu_only` intrinsic's return) still threads its
-                            // leaves: a single boxed cell would force every later
-                            // assignment to pack an implicit box to match it (#37).
                             None if matches!(r.value(), ValueRepr::Scalar(_))
                                 && !shape.nullable
                                 && self.is_nobox_struct(shape.name) =>
@@ -524,7 +469,6 @@ impl<'a> Builder<'a> {
                         if let Some((shape, leaves)) =
                             threaded_leaves.as_ref().filter(|(shape, _)| {
                                 self.binding_stays_unwritten(name)
-                                    // A flat enum binding keeps its compiler-owned cells.
                                     && !EnumPlan::for_name(self.ws, shape.name)
                                         .is_some_and(|plan| plan.flat().is_some())
                             })
@@ -577,11 +521,6 @@ impl<'a> Builder<'a> {
                             .expr_tuple_shape(value)?
                             .filter(|shape| shape.splats(self.scx.rep_arena())));
                         if let Some(shape) = shape {
-                            // A splatting tuple binds its WIRE -- one cell per slot, led
-                            // by presence when the wire carries one. Packing it instead
-                            // boxes the `nobox` element the splat exists to keep
-                            // unboxed; a packed tuple is also structurally never nil, so
-                            // a nullable one answered `t == null` as false when absent.
                             let r = self.lower_expr_repr(value)?.into_value();
                             let slots = self.tuple_repr_to_slots(r, &shape)?;
                             self.bind_tuple_slots(name, &slots, shape);
@@ -595,10 +534,6 @@ impl<'a> Builder<'a> {
                                 None if self.binding_is_ref(name) => {
                                     self.lower_ref_borrow(value)?
                                 }
-                                // The binding's own box is not an escape: every
-                                // whole use of the binding copies again. A `ref`
-                                // borrow writes the box in place, so a binding one
-                                // reaches owns its value children.
                                 None if self
                                     .value_struct_of(value)
                                     .is_some_and(|n| !self.is_nobox_struct(n)) =>
@@ -631,8 +566,6 @@ impl<'a> Builder<'a> {
                                                 && expanded.leaf_count()
                                                     <= WIDE_VALUE_PAYLOAD_LEAF_CUT
                                             {
-                                                // Keep nullable snapshots in leaves: packing and
-                                                // rereading them would retain descriptor reads.
                                                 let leaves =
                                                     s.repr_to_leaves_shape(&r, &expanded)?;
                                                 snapshot_leaves = Some((expanded, leaves));
@@ -685,11 +618,6 @@ impl<'a> Builder<'a> {
                     self.lower_return(opt)?;
                     return Ok(true);
                 }
-                // Collected, not run inline; spliced at every scope exit. Dying
-                // (an error, or a co fn kill) also exits every open scope, so
-                // registration builds a detached cleanup copy: a co fn sets a
-                // frame flag for its terminal cleanup (`MirFunc::coro_defers`),
-                // an ordinary fn pushes the copy as an unwind closure.
                 Statement::Defer(body) => {
                     let pending = match self.defer_mode {
                         DeferMode::CoFlag => {
@@ -752,8 +680,6 @@ impl<'a> Builder<'a> {
         Ok(false)
     }
 
-    /// Splice the current (innermost) block scope's pending `defer` bodies in
-    /// LIFO order into the current block — the normal block-exit path.
     pub(crate) fn run_top_frame(&mut self) -> Result<(), CompilerError> {
         if let Some(frame) = self.defers.last() {
             for (body, pending) in frame.clone().into_iter().rev() {
@@ -763,15 +689,10 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Splice EVERY pending defer (all enclosing block scopes, innermost first,
-    /// each LIFO) — before a `return` that abandons those scopes.
     pub(crate) fn run_all_defers(&mut self) -> Result<(), CompilerError> {
         self.run_defers_above(0)
     }
 
-    /// Splice the pending defers of every block scope at index `depth` or
-    /// deeper (innermost first, each LIFO) — the scopes a `return` (depth 0)
-    /// or a `break`/`continue` (the loop's entry depth) leaves.
     pub(crate) fn run_defers_above(&mut self, depth: usize) -> Result<(), CompilerError> {
         let frames: Vec<Vec<(Idx<Expr>, PendingDefer)>> = self
             .defers
@@ -789,7 +710,6 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Clear the frame flag before running a coroutine's cleanup.
     pub(crate) fn lower_defer_splice(
         &mut self,
         body: Idx<Expr>,
@@ -826,11 +746,6 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Lower one copy of a `defer` body. A co fn's defer body cannot yield,
-    /// so it runs to completion once started and a `defer` (or owned loop
-    /// coroutine) nested in it only needs its own scope-exit splice. As a
-    /// frame-flag cleanup it would be registered once per copy of the outer
-    /// body, each a detached function for the same source site.
     fn lower_defer_body(&mut self, body: Idx<Expr>) -> Result<(), CompilerError> {
         let was = std::mem::replace(&mut self.in_defer_body, true);
         let mode = self.defer_mode;
@@ -843,11 +758,6 @@ impl<'a> Builder<'a> {
         res
     }
 
-    /// Register an ordinary fn's `defer` for unwinding: its detached copy
-    /// becomes a capture-converted `fn()` closure pushed on the runtime cleanup
-    /// stack (`MirFunc::registers_defer_cleanup`). A binding the body reassigns
-    /// after this point is shared with the closure, so the cleanup reads its
-    /// current value exactly as the inline splice does.
     fn register_unwind_defer(&mut self, body: Idx<Expr>) -> Result<(), CompilerError> {
         let span = self.cur_span;
         let plan = self
@@ -857,8 +767,6 @@ impl<'a> Builder<'a> {
             })?
             .ok_or_else(|| self.gap_here("defer cleanup has no function representation"))?;
         let entry = self.lower_detached_defer(body, None)?;
-        // The closure's CodeRef site is the defer body: the statement span is
-        // not recorded inside a lambda body, where it would alias the lambda.
         self.cur_span = self.body.expr_spans.get(body).copied();
         let lambda = self.emit_cur(Inst::Lambda {
             params: Vec::new(),
@@ -877,7 +785,6 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Coroutine termination can enter this cleanup from outside the main CFG.
     pub(crate) fn lower_detached_defer(
         &mut self,
         body: Idx<Expr>,
@@ -932,8 +839,6 @@ impl<'a> Builder<'a> {
         Ok(repr)
     }
 
-    /// Lower an expression in statement position (value discarded). A tail-less
-    /// block lowers to nothing (no dead unit); side-effecting tails still run.
     pub(crate) fn lower_stmt_expr(&mut self, e: Idx<Expr>) -> Result<(), CompilerError> {
         match self.body.expr_arena[e] {
             Expr::Block { statements, tail } => {
@@ -941,8 +846,6 @@ impl<'a> Builder<'a> {
                 let terminated = self.lower_stmts(statements)?;
                 if !terminated {
                     if let Some(t) = tail {
-                        // The tail is itself statement-position: a tail `if`/`match`
-                        // skips its result cell too.
                         self.lower_stmt_expr(t)?;
                     }
                     self.run_top_frame()?;
@@ -950,9 +853,6 @@ impl<'a> Builder<'a> {
                 self.defers.pop();
                 Ok(())
             }
-            // Control flow in statement position: lower WITHOUT a result cell (the
-            // discarded if/match result + its store/load is the bulk of skull's
-            // trace-hostile dead-cell soup). Arms recurse statement-position.
             Expr::If {
                 cond,
                 then_branch,
@@ -965,8 +865,6 @@ impl<'a> Builder<'a> {
                 else_branch,
             } => self.lower_if_let_stmt(pattern, value, then_branch, else_branch),
             Expr::Match { scrutinee, arms } => self.lower_match_stmt(scrutinee, arms),
-            // Assignments are statements (unit value); lower the effect directly
-            // so statement position leaves no dead unit.
             Expr::Assign { target, value } => self.lower_assign_effect(target, value),
             Expr::CompoundAssign {
                 target,

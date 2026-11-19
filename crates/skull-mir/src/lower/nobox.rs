@@ -1,8 +1,6 @@
-//! Explicit materialization and ABI checks for `nobox` values.
 use super::*;
 
 impl<'a> Builder<'a> {
-    /// Reject implicit boxing at opaque call boundaries.
     pub(crate) fn authorize_gpu_boundary_boxes(&mut self, func: &FuncRef, args: &[Idx<Inst>]) {
         let callee = &self.ws.module(func.module).functions[func.func];
         if !crate::intrinsics::is_gpu_only(callee) {
@@ -44,13 +42,9 @@ impl<'a> Builder<'a> {
             return Ok(());
         }
         let callee = &self.ws.module(func.module).functions[func.func];
-        // GPU-only calls use native values in GLSL and never execute on Lua.
         if crate::intrinsics::is_gpu_only(callee) {
             return Ok(());
         }
-        // Only a body the compiler cannot see into reads a tuple box by its user
-        // layout. The stdlib's opaque primitives are storage: they hold a
-        // splatting tuple's flat box without reading it.
         let foreign_body = (callee.inline_body.is_some() || callee.is_extern)
             && !bone_core::modules::is_stdlib_module_file(
                 self.ws.module(func.module).file.as_str(),
@@ -62,7 +56,6 @@ impl<'a> Builder<'a> {
                 }
                 continue;
             }
-            // A flat element `ref` passes its container and slot, never a box.
             if self.is_flat_ref_call_arg(arg) {
                 continue;
             }
@@ -95,7 +88,6 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Opaque bodies may assume row storage, including inside tuple parameters.
     pub(crate) fn reject_column_container_opaque_slots(
         &self,
         e: Idx<Expr>,
@@ -120,7 +112,6 @@ impl<'a> Builder<'a> {
         )
     }
 
-    /// Nullable and tuple slots can still carry the same underlying container.
     fn param_slot_hazard_mono(
         &self,
         mono: &crate::monoty::MonoTy,
@@ -229,9 +220,6 @@ impl<'a> Builder<'a> {
         if callee.param_decls.len() != signature.params.len() {
             return Err(self.gap_here("concrete callee signature has the wrong parameter count"));
         }
-        // The JS `deepcopy` runtime rebuilds every TypedArray over one copy of
-        // its buffer, so a leaf-addressed native container comes back with its
-        // views over its own storage, in and out.
         let leaf_views_rebuilt =
             callee.name == "deepcopy" && crate::intrinsics::is_intrinsic(callee);
         for (i, id) in signature.params.iter().enumerate() {
@@ -280,7 +268,6 @@ impl<'a> Builder<'a> {
             .is_some_and(|pd| pd.annotations.iter().any(|a| a.is_builtin("repr")))
     }
 
-    /// A named function value must match the ABI derived from its type.
     pub(crate) fn reject_fn_value_abi_mismatch(
         &self,
         e: Idx<Expr>,
@@ -343,9 +330,6 @@ impl<'a> Builder<'a> {
             return Ok(());
         }
         let callee = &self.ws.module(func.module).functions[func.func];
-        // Same authorization as the arg direction: a `@gpu_only` intrinsic's
-        // boxed return is not a real boundary (on the GPU it is a native vector,
-        // and the Lua body only `error(...)`s).
         if crate::intrinsics::is_gpu_only(callee) {
             return Ok(());
         }
@@ -390,8 +374,6 @@ impl<'a> Builder<'a> {
         )
     }
 
-    /// A (value) struct field's declared type, for the value-struct-literal
-    /// construction sink (`Vec2 { x: 0 }` -> the `x` field coerces int->float).
     pub(crate) fn struct_field_ty(&self, name: Ustr, field: Ustr) -> Option<TyId> {
         let sid = *self.ws.struct_by_name.get(&name)?;
         let sd = &self.ws.modules[sid.module.index()].structs[sid.def];
@@ -424,9 +406,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Coerce a value-struct field's repr int->float at CONSTRUCTION (before any
-    /// scalar-ABI splat, per the plan): only a `Scalar` leaf can be an int; a
-    /// `Group` / nested-value repr is already composite.
     pub(crate) fn coerce_field_repr(
         &mut self,
         r: ValueRepr,
@@ -475,9 +454,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The scalar class of a resolved type, seeing through a TRANSPARENT newtype
-    /// to its wrapped type (a `newtype Score(int)` is the raw int at runtime, so
-    /// `<`/`+`/... on it are native int ops — matching its identity lowering).
     pub(crate) fn arith_ty_of(&self, te: TypeExpr) -> Option<ArithTy> {
         match te {
             TypeExpr::Builtin(BuiltinTy::Int) => Some(ArithTy::Int),
@@ -500,7 +476,6 @@ impl<'a> Builder<'a> {
         self.dispatch().nobox_value_name(e)
     }
 
-    /// First-class values need no box, so the target already meets the guarantee.
     pub(crate) fn is_nobox_struct(&self, name: Ustr) -> bool {
         self.dispatch().is_nobox_struct(name)
     }
@@ -583,7 +558,6 @@ impl<'a> Builder<'a> {
             return Ok(None);
         }
         match self.body.expr_arena[e] {
-            // Use the global's declared nullability to preserve its leaf positions.
             Expr::Global(name) => {
                 let Some(&ty) = self.ws.globals_by_name.get(&name) else {
                     return Ok(None);
@@ -593,9 +567,6 @@ impl<'a> Builder<'a> {
                 let Some(shape) = plan.value_shape().cloned() else {
                     return Ok(None);
                 };
-                // Minted from the global's emitted SYMBOL, matching
-                // `global_storage::physical_leaf_names`: a v1 DefKey is not an
-                // identifier, and these leaves ARE emitted Lua globals.
                 let symbol = crate::mangle::symbol_of_key(name);
                 let leaves = (0..shape.leaf_count())
                     .map(|i| nobox_global_leaf_name(symbol, i))
@@ -643,7 +614,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Read a `nobox` global place back as an unboxed repr.
     pub(crate) fn nobox_global_load(
         &mut self,
         expr: Idx<Expr>,
@@ -669,7 +639,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Write `value` into a `nobox` global place, leaf by leaf.
     pub(crate) fn nobox_global_store(
         &mut self,
         target: Idx<Expr>,

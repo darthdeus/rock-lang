@@ -1,6 +1,3 @@
-//! Pattern matching: `match` as expression and statement, arm tests, scrutinee
-//! payload reads (positional and named), tag testing, and the `if let` /
-//! `while let` / `for` range forms built on the same machinery.
 use super::*;
 
 enum LetScrutinee {
@@ -13,11 +10,6 @@ enum LetScrutinee {
 }
 
 impl<'a> Builder<'a> {
-    /// `match scrut { pat => body, ... }` as a value. Each arm is a test block
-    /// (branch to its body on match, else to the next arm) and a body block that
-    /// binds, checks the guard, then stores its value into a result **cell** and
-    /// jumps to the join. A sub-pattern that needs its own test (a nested enum)
-    /// emits it before any child read, so a parent tag gates every child slot.
     pub(crate) fn lower_match(
         &mut self,
         scrut: Idx<Expr>,
@@ -47,8 +39,6 @@ impl<'a> Builder<'a> {
         self.finish_join(values, join)
     }
 
-    /// `match` in STATEMENT position (value discarded): same arm walk, each
-    /// body lowered as a statement with NO result cell / store / load.
     pub(crate) fn lower_match_stmt(
         &mut self,
         scrut: Idx<Expr>,
@@ -61,9 +51,6 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// The arm walk shared by every `match` position: per arm, a test block
-    /// (failures jump to the next arm) and a guard check, then `sink` consumes
-    /// the arm body and routes to `join`. Leaves `self.cur` at `join`.
     fn lower_match_arms(
         &mut self,
         scrut: Idx<Expr>,
@@ -76,11 +63,6 @@ impl<'a> Builder<'a> {
         let scrut_s = self.lower_scrut(scrut)?;
         let join = self.f.new_block();
 
-        // Over a NULLABLE scrutinee, an arm that tests structure cannot match
-        // nil and must not read through it (a tuple index or range compare on
-        // nil is a runtime error): miss to the next arm first, and rebuild a
-        // splatting tuple's flat box on the non-nil side. Once an UNGUARDED
-        // null-matching arm has run, nil cannot reach a later arm.
         let scrut_nullable = self.expr_is_nullable(scrut);
         let mut nil_possible = scrut_nullable;
         for aidx in arms {
@@ -90,9 +72,6 @@ impl<'a> Builder<'a> {
             let arm_scrut = scrut_s.clone();
             if scrut_nullable && !matches_null {
                 let val_v = self.scrut_value(&arm_scrut);
-                // Skip the nil test once an unguarded null arm has run, but
-                // the flat-box rebuild is a LAYOUT fact, not a nil fact: it
-                // applies on every non-null arm.
                 if nil_possible {
                     let cont = self.f.new_block();
                     self.branch_on_nil(val_v, next, cont);
@@ -102,8 +81,6 @@ impl<'a> Builder<'a> {
             if matches_null && arm.guard.is_none() {
                 nil_possible = false;
             }
-            // Emit this arm's pattern tests (failures jump to `next`); on success
-            // `self.cur` is the block where the bindings are in scope.
             self.match_pattern(
                 &arm_scrut,
                 arm.pattern,
@@ -121,38 +98,23 @@ impl<'a> Builder<'a> {
             sink(self, arm.body, join)?;
             self.cur = next;
         }
-        // No arm matched: bone checks exhaustiveness, so this is unreachable.
         self.f.set_term(self.cur, Term::Unreachable);
         self.cur = join;
         Ok(())
     }
 
-    /// Recursively test `pat` against the value `val`, branching to `fail` on any
-    /// mismatch and binding pattern variables on the success path. Advances
-    /// `self.cur` to the block where matching continues (so a parent tag test
-    /// always gates a child read — the access-path ordering). Emits no test for
-    /// irrefutable forms (wildcard / bind / tuple-of-binds).
     pub(crate) fn match_pattern(
         &mut self,
         scrut: &Scrut,
         pat: Idx<Pattern>,
         fail: Idx<Block>,
-        // The scrutinee enum's variant names (empty if not an enum). `top` is true
-        // only at the pattern root — an unqualified `Red` there is a nullary
-        // variant tag test, not a binding. `scrut_enum` is the scrutinee's enum
-        // name (used at `top` to int-compare a payload-free tag); nested patterns
-        // pass `None` and rely on their own `enum_name`.
         variants: &HashSet<Ustr>,
         top: bool,
         scrut_enum: Option<Ustr>,
-        // The scrutinee's concrete type where it is known. A nested position
-        // (payload, field, wrapped value, tuple element) is always storage, so
-        // this is what tells a tuple sub-pattern its box is the flat wire.
         ty: Option<&MonoTy>,
     ) -> Result<(), CompilerError> {
         match self.body.pattern_arena[pat] {
             Pattern::Wildcard => Ok(()),
-            // A newtype is transparent: its inner pattern tests the same value.
             Pattern::Newtype { name, sub, .. } => {
                 let wrapped = ty.and_then(|ty| self.member_ty(ty, name, Member::Wrapped));
                 self.match_pattern(
@@ -167,16 +129,10 @@ impl<'a> Builder<'a> {
             }
             Pattern::Bind(b) => {
                 let name = self.body.binding_arena[b].name;
-                // `match c { Red => .. }` — bone lowers an unqualified nullary
-                // variant as a catch-all bind; at the root, if the name is a
-                // variant of the scrutinee enum it's a tag test (old skull parity).
                 if top && variants.contains(&name) {
                     self.test_tag(scrut, name, scrut_enum, fail);
                     return Ok(());
                 }
-                // A threaded flat enum binds as its cells; boxing it here cost a
-                // table that the arm's join or first payload read unpacked again.
-                // Native backends bind their own tagged enum value.
                 if let Scrut::Cells {
                     tag,
                     positional,
@@ -209,8 +165,6 @@ impl<'a> Builder<'a> {
                     return self.bind_loop_element_repr(&BindingPattern::Leaf(b), repr.clone());
                 }
                 let mut val = self.scrut_value(scrut);
-                // The scrutinee's storage still holds the bound box; a binder a
-                // ref borrow can write through gets its own copy.
                 if !self.binding_is_ref(b)
                     && self.binding_ref_borrowed(b)
                     && let Some(ty) = self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty))
@@ -236,16 +190,8 @@ impl<'a> Builder<'a> {
                 sub,
                 ..
             } => {
-                // The variant's enum: the qualified name on the pattern, else the
-                // scrutinee's enum (an unqualified `Variant` form). `test_tag`
-                // gates on `payload_free_ordinal(en, variant)`: a payload-free
-                // unit variant int-compares its ordinal; a payload-carrying
-                // variant resolves to None there and takes the `.__variant` path.
                 let en = enum_name.or(scrut_enum);
                 self.test_tag(scrut, variant, en, fail);
-                // A cdata enum's payload lives in its `_<i>` C field (cut 1: `_0`);
-                // a table enum's is the positional `[i+1]` slot; a FLATTENED field's
-                // is the parent's `{prefix}__i` slot (see `scrut_payload`).
                 let cdata = en.is_some_and(|e| {
                     EnumPlan::for_name(self.ws, e).is_some_and(|plan| plan.cdata().is_some())
                 });
@@ -253,22 +199,10 @@ impl<'a> Builder<'a> {
                     EnumPlan::for_name(self.ws, e).and_then(|plan| plan.flat().cloned())
                 });
                 for (i, sp) in sub.into_iter().enumerate() {
-                    // POSITION -> SLOT. They differ once any position ahead of
-                    // this one is widened: `V2(Vec2)` at position 0 spans two
-                    // slots, so a sibling `Vec4Array(buf, n)` finds `n` at slot 2.
-                    // Indexing by position read the widened value's second leaf
-                    // and handed `nil` to the count.
                     let slot = flat_shape.as_ref().map_or(i, |s| s.slot_offset(i));
-                    // Thread the sub-pattern's enum (from this variant's payload
-                    // type) so a NESTED enum pattern (`L(J(x))`) tests its own tag
-                    // repr -- else an unqualified `J` defaults to the `.__variant`
-                    // table path and faults on a cdata inner enum.
                     let sub_enum = en.and_then(|e| self.variant_payload_enum(e, variant, i));
                     let payload_ty =
                         ty.and_then(|ty| self.member_ty(ty, variant, Member::Position(i)));
-                    // A payload position widened to a `nobox` value's leaves binds
-                    // THE LEAVES -- rebuilding a box here to bind one cell is the
-                    // materialization the widening exists to avoid.
                     if let Some(vs) = self.flat_payload_leaf_shape(en, variant, i) {
                         if let Pattern::Bind(b) = self.body.pattern_arena[sp] {
                             let Some(shape) = flat_shape.as_ref() else {
@@ -278,11 +212,6 @@ impl<'a> Builder<'a> {
                             self.bind_leaves(b, &leaves, vs)?;
                             continue;
                         }
-                        // A position widened for a NESTED FLAT ENUM holds that
-                        // enum's own cells, not a value: the inner pattern has to
-                        // test the tag SLOT and read the payload SLOTS. Reading the
-                        // position as one value hands it the inner tag string, and
-                        // `.__variant` on a string matches no arm.
                         if let Some(inner) = self.nested_flat_enum_scrut(scrut, slot, &vs)? {
                             self.match_pattern(
                                 &inner,
@@ -312,7 +241,6 @@ impl<'a> Builder<'a> {
                 Ok(())
             }
             Pattern::Tuple { elements } => {
-                // A boxed splatting tuple is the flat wire in a table.
                 let stored = match (scrut, ty) {
                     (Scrut::Val(v), Some(ty)) if !self.is_tuple_aggregate(*v) => self
                         .concrete_rep_tuple(ty, RepUse::Return, true, false)?
@@ -367,26 +295,19 @@ impl<'a> Builder<'a> {
                 let en = enum_name.or(scrut_enum);
                 if let Some(variant) = name {
                     if enum_name.is_some() || (top && variants.contains(&variant)) {
-                        // `test_tag` picks the repr: a cdata record enum compares
-                        // `.__tag`, a table enum `.__variant`.
                         self.test_tag(scrut, variant, en, fail);
                     }
                 }
-                // A FLATTENED field reads its `{prefix}__<field>` slot; a cdata enum's
-                // record payload lives in `_<field>` C slots; a table enum (or a plain
-                // struct destructure, `name` = None) reads the field key directly.
                 let cdata = name.is_some()
                     && en.is_some_and(|e| {
                         EnumPlan::for_name(self.ws, e).is_some_and(|plan| plan.cdata().is_some())
                     });
-                // Snapshot a bound value before an arm can write back into its source.
                 let struct_destructure = name
                     .is_some_and(|n| self.ws.struct_by_name.contains_key(&n))
                     && enum_name.is_none()
                     && !(top && name.is_some_and(|n| variants.contains(&n)));
                 for rfidx in fields {
                     let rpf = self.body.record_pat_field_arena[rfidx];
-                    // Embedded children need to be rebuilt from their parent's leaves.
                     let embedded = match (name, scrut) {
                         (Some(sname), Scrut::Val(_))
                             if self.ws.struct_by_name.contains_key(&sname) =>
@@ -444,7 +365,6 @@ impl<'a> Builder<'a> {
                 end,
                 inclusive,
             } => {
-                // Assumes an int discriminant (the common range-pattern case).
                 let val = self.scrut_value(scrut);
                 if let Some(s) = start {
                     let sv = self.lower_expr(s)?;
@@ -463,11 +383,6 @@ impl<'a> Builder<'a> {
                 Ok(())
             }
             Pattern::Or { alternatives } => {
-                // `A | B | C` matches if ANY alternative does: test each in turn,
-                // success -> a shared `matched` continuation, mismatch -> the next
-                // alternative (last -> the arm `fail`). Alternatives must be
-                // binding-free (a binding set on only one branch would be undefined
-                // on the others in the shared body).
                 let alts: Vec<Idx<Pattern>> = alternatives.into_iter().collect();
                 for &alt in &alts {
                     if self.pattern_binds(alt, variants, top) {
@@ -478,11 +393,7 @@ impl<'a> Builder<'a> {
                 for (i, &alt) in alts.iter().enumerate() {
                     let is_last = i + 1 == alts.len();
                     let next_alt = if is_last { fail } else { self.f.new_block() };
-                    // An or-pattern preserves `top`, so a top-level `A | B` on a
-                    // payload-free enum keeps the int-compare path -> forward
-                    // `scrut_enum` (nested alternatives carry `None` anyway).
                     self.match_pattern(scrut, alt, next_alt, variants, top, scrut_enum, ty)?;
-                    // success path of this alternative -> the shared continuation.
                     self.goto_if_open(matched);
                     if !is_last {
                         self.cur = next_alt;
@@ -494,8 +405,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Whether `pat` introduces a real binding (not a top-level variant-name tag
-    /// test). Used to reject or-pattern alternatives that bind.
     pub(crate) fn pattern_binds(
         &self,
         pat: Idx<Pattern>,
@@ -524,9 +433,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The enum NAME of payload field `i` of `enum_name::variant`, if that field's
-    /// type is itself an enum (`None` otherwise) -- threaded into a nested match so
-    /// the inner pattern tests the inner enum's tag repr.
     pub(crate) fn variant_payload_enum(
         &self,
         enum_name: Ustr,
@@ -550,9 +456,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Lower a match/if-let/while-let scrutinee: a flattened enum field stays a
-    /// `Scrut::Flat` (tag/payload read from the parent's slots, no box); anything
-    /// else lowers to an ordinary value.
     pub(crate) fn lower_scrut(&mut self, e: Idx<Expr>) -> Result<Scrut, CompilerError> {
         if let Expr::FieldAccess { base, field } = self.body.expr_arena[e] {
             if let Some(TypeExpr::App {
@@ -582,8 +485,6 @@ impl<'a> Builder<'a> {
         self.scrut_from_repr(repr)
     }
 
-    /// Preserve a tuple element's flat-enum representation until the pattern
-    /// proves it needs a whole value.
     pub(crate) fn scrut_from_repr(&mut self, repr: ValueRepr) -> Result<Scrut, CompilerError> {
         match repr {
             ValueRepr::Group { name, parts, .. }
@@ -618,7 +519,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The scrutinee as an unpacked value, boxing only what is already a box.
     fn scrut_repr(&mut self, scrut: &Scrut) -> ValueRepr {
         match scrut {
             Scrut::Val(v) => ValueRepr::Scalar(*v),
@@ -631,8 +531,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The scrutinee as a whole value -- materializing a flattened field / threaded
-    /// cells into a boxed enum (only on a path that genuinely needs the whole value).
     pub(crate) fn scrut_value(&mut self, scrut: &Scrut) -> Idx<Inst> {
         match scrut {
             Scrut::Val(v) | Scrut::Repr { boxed: v, .. } => *v,
@@ -686,7 +584,6 @@ impl<'a> Builder<'a> {
         shape.position_shape(i, Some(n)).cloned()
     }
 
-    /// The `width` slot values of a widened payload position, in leaf order.
     pub(crate) fn scrut_payload_leaves(
         &mut self,
         scrut: &Scrut,
@@ -700,7 +597,6 @@ impl<'a> Builder<'a> {
             .collect()
     }
 
-    /// Read a nested flat enum beginning at its position in the outer wire.
     pub(crate) fn nested_flat_enum_scrut(
         &mut self,
         scrut: &Scrut,
@@ -739,7 +635,6 @@ impl<'a> Builder<'a> {
         }))
     }
 
-    /// One raw positional SLOT of the scrutinee (not a position -- a slot).
     fn scrut_slot(&mut self, scrut: &Scrut, slot: usize) -> Idx<Inst> {
         match scrut {
             Scrut::Repr { boxed, .. } => self.scrut_slot(&Scrut::Val(*boxed), slot),
@@ -761,9 +656,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The scrutinee's `i`th positional payload: threaded cells hold it directly; a
-    /// flat field reads the parent's `{prefix}__i` slot; a cdata enum reads its
-    /// `_<i>` C field; a table enum reads the positional `[i+1]` slot.
     pub(crate) fn scrut_payload(&mut self, scrut: &Scrut, i: usize, cdata: bool) -> Idx<Inst> {
         match scrut {
             Scrut::Repr { boxed, .. } => self.scrut_payload(&Scrut::Val(*boxed), i, cdata),
@@ -783,9 +675,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The scrutinee's named (record) payload `field`: threaded cells hold it
-    /// directly; a flat field reads the parent's `{prefix}__<field>` slot; a cdata
-    /// enum reads its `_<field>` C slot; a table enum reads the field key directly.
     pub(crate) fn scrut_named(
         &mut self,
         scrut: &Scrut,
@@ -822,10 +711,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Tag test -> continue on match, else `fail`. Five reprs: a payload-free enum
-    /// IS its ordinal int (compare ints); a cdata enum compares `.__tag` (int); a
-    /// table enum compares `.__variant` (string); a FLATTENED field compares its
-    /// `{prefix}__tag` slot; threaded CELLS compare the held tag (both strings).
     pub(crate) fn test_tag(
         &mut self,
         scrut: &Scrut,
@@ -842,7 +727,6 @@ impl<'a> Builder<'a> {
         };
         if let Some(tag) = flat_tag {
             if let Inst::Const(Lit::Str(actual)) = self.f.insts[tag] {
-                // Inactive flat payload lanes may carry a different literal type.
                 let cont = self.f.new_block();
                 self.f.set_term(
                     self.cur,
@@ -879,8 +763,6 @@ impl<'a> Builder<'a> {
         self.branch_or_fail(cond, fail);
     }
 
-    /// `cond` true -> a fresh continuation block (`self.cur` advances), false ->
-    /// `fail`.
     pub(crate) fn branch_or_fail(&mut self, cond: Idx<Inst>, fail: Idx<Block>) {
         let cont = self.f.new_block();
         self.branch_to(cond, cont, fail);
@@ -964,17 +846,12 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// How an `if let`/`while let` tests its scrutinee. A nullable `nobox`
-    /// binding and a names-only pattern over a nullable tuple branch on the
-    /// presence leaf they carry, so neither packs a box to compare with nil.
     fn let_scrutinee(
         &mut self,
         pattern: Idx<Pattern>,
         value: Idx<Expr>,
     ) -> Result<LetScrutinee, CompilerError> {
         if let Pattern::Bind(binding) = self.body.pattern_arena[pattern]
-            // A bind named like a scrutinee variant is a TAG TEST, not a
-            // binding -- it must go through the generic match machinery.
             && !self
                 .scrut_variants(value)
                 .contains(&self.body.binding_arena[binding].name)
@@ -999,8 +876,6 @@ impl<'a> Builder<'a> {
         Ok(LetScrutinee::Generic)
     }
 
-    /// Test `value` against an `if let`/`while let` pattern. A miss jumps to
-    /// `miss`; a match leaves `self.cur` where the pattern's names are bound.
     fn lower_let_test(
         &mut self,
         pattern: Idx<Pattern>,
@@ -1018,22 +893,15 @@ impl<'a> Builder<'a> {
         self.bind_present_let(pattern, kind, &values)
     }
 
-    /// `let <pattern> = value` with a pattern beyond names and tuples: run the
-    /// general match machinery with an unreachable miss block (bone proved the
-    /// pattern irrefutable).
     pub(crate) fn lower_let_match(
         &mut self,
         pattern: Idx<Pattern>,
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
-        // `miss` keeps its default Unreachable terminator: no value escapes it.
         let miss = self.f.new_block();
         self.lower_let_test(pattern, value, miss)
     }
 
-    /// `let <pattern> = value else { .. }`: test and bind exactly like
-    /// `if let`, but the bindings live on in the ENCLOSING block and the else
-    /// block diverges (checked in bone), so there is no join to build.
     pub(crate) fn lower_let_else(
         &mut self,
         pattern: Idx<Pattern>,
@@ -1045,14 +913,10 @@ impl<'a> Builder<'a> {
         let cont = self.cur;
         self.cur = else_bb;
         self.lower_stmt_expr(else_block)?;
-        // The else end is unreachable (it diverges); fall back to the match
-        // path, where the statement list continues with the bindings live.
         self.cur = cont;
         Ok(())
     }
 
-    /// A nullable scrutinee misses on nil before its pattern is matched;
-    /// otherwise a plain binding would always match and bind nil.
     fn match_let(
         &mut self,
         pattern: Idx<Pattern>,
@@ -1084,11 +948,6 @@ impl<'a> Builder<'a> {
         self.match_pattern(scrut, pattern, miss, variants, true, scrut_enum, scrut_ty)
     }
 
-    /// The concrete type of one member of a value of type `owner_ty`: a
-    /// variant's payload position or record field (`owner` names the variant),
-    /// a struct field, or a newtype's wrapped value. `owner_ty`'s own generic
-    /// arguments substitute the declaration, so a nested generic instance
-    /// answers for itself.
     fn member_ty(&self, owner_ty: &MonoTy, owner: Ustr, member: Member) -> Option<MonoTy> {
         use bone_core::hir::VariantPayload;
         let MonoTy::App {
@@ -1129,7 +988,6 @@ impl<'a> Builder<'a> {
         crate::monoty::convert_decl(self.ws, decl, &subst).ok()
     }
 
-    /// Read the flat slots of `val_v` back into per-element scruts.
     fn rebuild_splat_box(
         &mut self,
         shape: TupleLayout,
@@ -1158,9 +1016,6 @@ impl<'a> Builder<'a> {
         Ok(Scrut::Tuple(parts))
     }
 
-    /// Whether `pat` can match a NULL scrutinee: a hole, a plain binding, the
-    /// `null` literal, or an or-pattern with such an alternative. Every other
-    /// top-level pattern tests structure, which a nil cannot carry.
     fn pattern_matches_null(&self, pat: Idx<Pattern>, variants: &HashSet<Ustr>) -> bool {
         match self.body.pattern_arena[pat] {
             Pattern::Wildcard => true,
@@ -1173,7 +1028,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The presence and bound leaves of a presence-carrying scrutinee.
     fn lower_present_let(
         &mut self,
         value: Idx<Expr>,
@@ -1238,11 +1092,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The DECLARED nullable-tuple shape of a call, without lowering it.
-    ///
-    /// Read off the CALLEE's return type, never off `e`'s own type: safe-nav
-    /// gives `h?.pair()` the same `Nullable(Tuple)` with no presence slot, so
-    /// keying on the expression type would branch on a slot that is not there.
     pub(crate) fn nullable_tuple_call_shape(
         &self,
         e: Idx<Expr>,
@@ -1268,16 +1117,12 @@ impl<'a> Builder<'a> {
         if !any_named && self.is_fn_global(name) {
             return Ok(None);
         }
-        // The CALLEE's instantiation, via the same oracle `lower_call` uses --
-        // not the enclosing body's `spec_subst`, which is empty in a
-        // non-generic caller and left every slot `Opaque`.
         let Some(shape) = self.call_ret_tuple_shape(e)? else {
             return Ok(None);
         };
         Ok(shape.nullable.then_some(shape))
     }
 
-    /// An actual nullable tuple wire carries presence; a boxed tuple can simply be nil.
     pub(crate) fn nullable_tuple_wire_shape(
         &self,
         e: Idx<Expr>,
@@ -1303,8 +1148,6 @@ impl<'a> Builder<'a> {
         self.nullable_tuple_call_shape(e)
     }
 
-    /// Whether `e` is one of the three `?.` forms -- the expressions whose join
-    /// mints its own presence tag.
     pub(crate) fn is_safe_nav(&self, e: Idx<Expr>) -> bool {
         matches!(
             self.body.expr_arena[e],
@@ -1312,10 +1155,6 @@ impl<'a> Builder<'a> {
         )
     }
 
-    /// Whether `pat` is names and holes only -- irrefutable, so the presence slot
-    /// is the ONLY test the match needs. Anything that carries its own test (a
-    /// literal, a variant, a record) is excluded and still matches against the
-    /// packed scrutinee.
     fn pattern_is_names_only(&self, pat: Idx<Pattern>) -> bool {
         match self.body.pattern_arena[pat] {
             Pattern::Bind(_) | Pattern::Wildcard => true,
@@ -1356,9 +1195,6 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// `for i in lo..hi { body }` (exclusive): a header testing `i < hi`, a body,
-    /// a **latch** that increments `i` (so `continue` still steps), and an exit.
-    /// The loop var and the loop bound are both cells.
     pub(crate) fn lower_for_range(
         &mut self,
         var_b: Idx<BindingInfo>,

@@ -1,10 +1,3 @@
-//! What a body reads of each parameter, before parameter expansion: `None` when
-//! the parameter is used as a whole value, otherwise the set of its fields the
-//! body names (empty when the body never mentions the parameter). Any mention
-//! that is not a direct field read outside a lambda -- passing it on, writing
-//! into it, capturing it, calling it -- counts as a whole use, so the answer is
-//! conservative. This is
-//! not an effect or alias analysis: argument evaluation stays at the call site.
 use super::{BodyOwner, Workspace, raw};
 use crate::mir::FuncRef;
 use bone_core::hir::{Body, Callee, Expr};
@@ -12,7 +5,6 @@ use bone_core::hir_walk::HirChild;
 use std::ops::Range;
 use ustr::Ustr;
 
-/// Field lists hold each name once, in first-mention order.
 pub(super) type Demand = Option<Vec<Option<Vec<Ustr>>>>;
 
 pub(super) fn of_function(ws: &Workspace, func: FuncRef) -> Demand {
@@ -23,7 +15,6 @@ pub(super) fn of_function(ws: &Workspace, func: FuncRef) -> Demand {
     fields(body)
 }
 
-/// Identifies a demand across edits; equal keys give equal transports.
 pub(super) fn key(demand: &Demand) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -44,7 +35,6 @@ pub(super) fn key(demand: &Demand) -> u64 {
 fn fields(body: &Body) -> Demand {
     let params = body.param_bindings.make_range();
     let mut demand = vec![Some(Vec::new()); params.len()];
-    // Once every parameter has a whole use, no later mention can change the answer.
     fn whole(slot: &mut Option<Vec<Ustr>>, open: &mut usize) {
         if slot.take().is_some() {
             *open -= 1;
@@ -94,7 +84,6 @@ fn fields(body: &Body) -> Demand {
                         whole(&mut demand[i], open);
                     }
                 }
-                // Field transport does not cover writes into the parameter.
                 Expr::Assign { target, .. } | Expr::CompoundAssign { target, .. } => {
                     let mut root = target;
                     while let Expr::FieldAccess { base, .. }
@@ -109,7 +98,6 @@ fn fields(body: &Body) -> Demand {
                         whole(&mut demand[i], open);
                     }
                 }
-                // A capture holds the whole value.
                 Expr::Lambda { body: inner, .. } => {
                     visit(body, HirChild::Expr(inner), params, demand, open, true);
                     return;

@@ -1,7 +1,3 @@
-//! Structured sort keys: `Vec<T>.sort<K>` where `K` is a value struct or a
-//! tuple compares `K` leaf by leaf, first leaf first. The stdlib routes such a
-//! sort through `__sort_key_wide` (a compile-time bool an `if` folds on) and
-//! `__sort_key_lt` (the comparison), so a scalar key keeps its original path.
 use super::call::DirectCall;
 use super::*;
 use crate::lower::shape::mono_value_shape;
@@ -24,8 +20,6 @@ impl<'a> Builder<'a> {
             && decl.param_decls.len() == 2
     }
 
-    /// Only the stdlib sort consumes this private callback ABI. Evaluate and
-    /// place arguments like the ordinary binder, including spread overrides.
     pub(crate) fn sort_call_args(
         &mut self,
         e: Idx<Expr>,
@@ -37,7 +31,6 @@ impl<'a> Builder<'a> {
         if !self.is_stdlib_sort(func) {
             return Ok(None);
         }
-        // Vec.sort already received the private callback from its caller.
         if self.site_owner.as_ref().is_some_and(|owner| {
             let module = self.ws.module(owner.func.module);
             module.functions[owner.func.func].name.as_str() == "sort"
@@ -137,8 +130,6 @@ impl<'a> Builder<'a> {
         if original == plan {
             return Ok(callee);
         }
-        // An existing function value may also be called elsewhere. Adapt its
-        // fixed ABI at the sort boundary rather than changing those calls.
         let capture = self.fresh_cells(1)[0];
         self.store_cell(capture, callee);
         let saved = self.cur;
@@ -213,7 +204,6 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// The key type `K` of a `fn(T) -> K` argument.
     fn sort_key_ty(&self, key_fn: Idx<Expr>) -> Result<MonoTy, CompilerError> {
         match self.concrete_expr_ty(key_fn) {
             Some(MonoTy::Function { ret, .. }) => Ok((**ret).clone()),
@@ -221,10 +211,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Whether a sort keyed by `fn(T) -> K` takes the compiled leaf sort
-    /// rather than the backend's own sort: a structured `K` compares leaf by
-    /// leaf, and a splatting `T` reaches the key as slots, which a backend sort
-    /// handing it one stored element cannot supply.
     fn sort_takes_leaf_path(&self, key_fn_ty: &MonoTy) -> Result<bool, CompilerError> {
         let MonoTy::Function { params, ret } = key_fn_ty else {
             return Err(self.gap_here("sort key function has no concrete function type"));
@@ -247,7 +233,6 @@ impl<'a> Builder<'a> {
         self.sort_takes_leaf_path(ty)
     }
 
-    /// `if __sort_key_wide(f) { .. } else { .. }`: the arm to lower, decided now.
     pub(crate) fn static_sort_key_condition(
         &self,
         cond: Idx<Expr>,
@@ -260,7 +245,6 @@ impl<'a> Builder<'a> {
         else {
             return Ok(None);
         };
-        // Every `if` asks; only the one stdlib spelling pays for resolution.
         if name.as_str() != "__sort_key_wide" {
             return Ok(None);
         }
@@ -289,8 +273,6 @@ impl<'a> Builder<'a> {
         ))
     }
 
-    /// `key_fn(a) < key_fn(b)` over the leaves of `K`: the first unequal leaf
-    /// decides, and equal keys are not less.
     pub(crate) fn expand_sort_key_lt(
         &mut self,
         e: Idx<Expr>,
@@ -302,8 +284,6 @@ impl<'a> Builder<'a> {
         let ty = self.sort_key_ty(*key_fn)?;
         let leaf_tys = match self.validate_sort_key(e, &ty) {
             Ok(leaves) => leaves,
-            // Generic stdlib bodies lower independently of their callers. The
-            // sort boundary rejects this key at the user's call instead.
             Err(_) if self.uses_sort_key_leaf_abi() => {
                 return Ok(ValueRepr::Scalar(
                     self.emit_cur(Inst::Const(Lit::Bool(false))),
@@ -354,7 +334,6 @@ impl<'a> Builder<'a> {
         Ok(ValueRepr::Scalar(self.emit_cur(Inst::Load(result))))
     }
 
-    /// One call of the key, flattened to its leaves.
     fn sort_key_leaves(
         &mut self,
         plan: &FunctionRepPlan,
@@ -399,7 +378,6 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// The leaf types of key type `K`, or why `K` has no order.
     fn sort_key_leaf_tys(&self, ty: &MonoTy) -> Result<Vec<MonoTy>, String> {
         let mut out = Vec::new();
         self.push_sort_key_leaf_tys(ty, &mut out)?;
@@ -435,8 +413,6 @@ fn leaf_lt(ty: &MonoTy, l: Idx<Inst>, r: Idx<Inst>) -> Inst {
     match ty {
         MonoTy::Int => Inst::IntLt(l, r),
         MonoTy::Uint => Inst::UintLt(l, r),
-        // Both backends emit `<` for strings too, which is the order a scalar
-        // string key sorts by.
         _ => Inst::FloatLt(l, r),
     }
 }

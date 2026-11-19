@@ -1,27 +1,16 @@
-//! The transport plan for a lowered coroutine body.
-
 use bone_core::workspace::Workspace;
 
 use super::{EnumFlatShape, coroutine_yield_channel_mono};
 use crate::concrete::{ConcreteBodyPlan, ConcreteSignature};
 use crate::monoty::{MonoCtor, MonoInterner, MonoTy, MonoTyReason};
 
-/// Every symbol a transformed `co fn` owns, plus its yield channel.
 pub struct CoroutinePlan {
     base: String,
-    /// The concrete `Coroutine<yield, result, next>` type of this instance.
-    /// Emitters use the derived channel below, while retaining the full result
-    /// for consumers that need the coroutine contract itself.
     pub result: Option<MonoTy>,
-    /// `Some` -> the step writes yield leaves into reused `s.__y*` frame slots
-    /// and the boxed `__resume` rebuilds a variant box from them.
     pub channel: Option<EnumFlatShape>,
 }
 
 impl CoroutinePlan {
-    /// Build the plan consumed by an emitter from the graph-owned concrete
-    /// signature. `base` remains target-owned: Lua uses the instance symbol,
-    /// while JS passes the artifact-selected symbol.
     pub fn from_concrete_plan(
         ws: &Workspace,
         interner: &MonoInterner,
@@ -65,7 +54,6 @@ impl CoroutinePlan {
         )
     }
 
-    /// The constructor's own name -- the symbol a call site targets.
     pub fn base(&self) -> &str {
         &self.base
     }
@@ -88,13 +76,10 @@ impl CoroutinePlan {
         format!("{}__defer{k}", self.base)
     }
 
-    /// `slot` is the hook's frame field (`__on_killed`, ...), which is also its
-    /// name suffix.
     pub fn hook(&self, slot: &str) -> String {
         format!("{}{slot}", self.base)
     }
 
-    /// The helper suffixes known before the MIR transform.
     pub fn declared_suffixes(&self) -> Vec<&'static str> {
         let mut out = vec!["__step", "__resume"];
         if self.channel.is_some() {
