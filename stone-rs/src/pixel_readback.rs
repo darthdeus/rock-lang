@@ -1354,46 +1354,83 @@ mod tests {
     }
 
     #[test]
-    fn area_pick_keeps_the_exact_center_hit() {
-        let bytes = rgba_i32(&[0, 0, 9, 0, 7, 0, 0, 0, 0]);
-
-        assert_eq!(nearest_int_id(&bytes, 3, 3, 16, 4, 8, 5, 9, false), 7);
-    }
-
-    #[test]
-    fn area_pick_uses_the_nearest_nonzero_pixel() {
-        let bytes = rgba_i32(&[
-            0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ]);
-
-        assert_eq!(nearest_int_id(&bytes, 5, 5, 16, 10, 20, 12, 22, false), 13);
-    }
-
-    #[test]
-    fn area_pick_ignores_surface_metadata() {
-        let bytes = rgba_i32(&[0, 0, 0, 0, -512, 13, 0, 0, 0]);
-        assert_eq!(nearest_int_id(&bytes, 3, 3, 16, 0, 0, 1, 1, false), 13);
-    }
-
-    #[test]
-    fn area_pick_breaks_distance_ties_by_id() {
-        let bytes = rgba_i32(&[0, 0, 0, 9, 0, 3, 0, 0, 0]);
-
-        assert_eq!(nearest_int_id(&bytes, 3, 3, 16, 0, 0, 1, 1, false), 3);
-    }
-
-    #[test]
-    fn area_pick_handles_a_region_clipped_at_the_canvas_edge() {
-        let bytes = rgba_i32(&[0, 21, 0, 0]);
-
-        assert_eq!(nearest_int_id(&bytes, 2, 2, 16, 0, 0, 0, 0, false), 21);
-    }
-
-    #[test]
-    fn area_pick_accounts_for_gl_rows_being_bottom_up() {
-        let bytes = rgba_i32(&[0, 8, 0, 0, 0, 0, 0, 0, 13]);
-
-        assert_eq!(nearest_int_id(&bytes, 3, 3, 16, 0, 0, 1, 0, true), 13);
+    fn area_pick_selects_the_nearest_nonzero_id() {
+        struct Case {
+            name: &'static str,
+            ids: &'static [i32],
+            side: usize,
+            rect: (i32, i32, i32, i32),
+            bottom_up: bool,
+            expect: i32,
+        }
+        let cases = [
+            Case {
+                name: "exact center hit",
+                ids: &[0, 0, 9, 0, 7, 0, 0, 0, 0],
+                side: 3,
+                rect: (4, 8, 5, 9),
+                bottom_up: false,
+                expect: 7,
+            },
+            Case {
+                name: "nearest nonzero pixel",
+                ids: &[
+                    0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                ],
+                side: 5,
+                rect: (10, 20, 12, 22),
+                bottom_up: false,
+                expect: 13,
+            },
+            Case {
+                name: "surface metadata ignored",
+                ids: &[0, 0, 0, 0, -512, 13, 0, 0, 0],
+                side: 3,
+                rect: (0, 0, 1, 1),
+                bottom_up: false,
+                expect: 13,
+            },
+            Case {
+                name: "distance ties break by id",
+                ids: &[0, 0, 0, 9, 0, 3, 0, 0, 0],
+                side: 3,
+                rect: (0, 0, 1, 1),
+                bottom_up: false,
+                expect: 3,
+            },
+            Case {
+                name: "region clipped at the canvas edge",
+                ids: &[0, 21, 0, 0],
+                side: 2,
+                rect: (0, 0, 0, 0),
+                bottom_up: false,
+                expect: 21,
+            },
+            Case {
+                name: "gl rows are bottom up",
+                ids: &[0, 8, 0, 0, 0, 0, 0, 0, 13],
+                side: 3,
+                rect: (0, 0, 1, 0),
+                bottom_up: true,
+                expect: 13,
+            },
+        ];
+        for case in cases {
+            let (x0, y0, x1, y1) = case.rect;
+            let bytes = rgba_i32(case.ids);
+            let picked = nearest_int_id(
+                &bytes,
+                case.side,
+                case.side,
+                16,
+                x0,
+                y0,
+                x1,
+                y1,
+                case.bottom_up,
+            );
+            assert_eq!(picked, case.expect, "{}", case.name);
+        }
     }
 
     #[test]

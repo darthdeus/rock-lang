@@ -2647,15 +2647,9 @@ mod tests {
     }
 
     #[test]
-    fn per_play_gain_is_the_callers_alone() {
-        let (gain, _) = sound_play_params(0.4, 1.0);
-        assert!((gain - 0.4).abs() < 1e-6, "gain {gain}");
-    }
-
-    #[test]
-    fn per_play_gain_is_never_negative() {
-        let (gain, _) = sound_play_params(-0.3, 1.0);
-        assert_eq!(gain, 0.0);
+    fn play_params_pass_gain_through_and_clamp_negatives() {
+        assert!((sound_play_params(0.4, 1.0).0 - 0.4).abs() < 1e-6);
+        assert_eq!(sound_play_params(-0.3, 1.0).0, 0.0);
     }
 
     #[test]
@@ -2725,17 +2719,12 @@ mod tests {
     }
 
     #[test]
-    fn speed_never_reaches_zero() {
+    fn speed_ratio_is_bounded() {
         for speed in [0.0, -1.0, f32::MIN] {
             let (_, ratio) = sound_play_params(1.0, speed);
             assert!(ratio >= 0.05, "speed {speed} -> ratio {ratio}");
         }
-    }
-
-    #[test]
-    fn speed_is_bounded_above() {
-        let (_, ratio) = sound_play_params(1.0, 500.0);
-        assert_eq!(ratio, 8.0);
+        assert_eq!(sound_play_params(1.0, 500.0).1, 8.0);
     }
 
     #[test]

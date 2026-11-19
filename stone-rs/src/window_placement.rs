@@ -776,25 +776,32 @@ mod tests {
     }
 
     #[test]
-    fn env_parse_size_and_pos() {
-        let g = parse_env_geometry(Some("1280x720+100+50"), None);
-        assert_eq!(g.size, Some((1280, 720)));
-        assert_eq!(g.pos, Some((100, 50)));
-    }
-
-    #[test]
-    fn env_parse_size_only() {
-        let g = parse_env_geometry(Some("800x600"), Some("2"));
-        assert_eq!(g.size, Some((800, 600)));
-        assert_eq!(g.pos, None);
-        assert_eq!(g.display, Some(2));
-    }
-
-    #[test]
-    fn env_parse_negative_pos() {
-        let g = parse_env_geometry(Some("640x480-10-20"), None);
-        assert_eq!(g.size, Some((640, 480)));
-        assert_eq!(g.pos, Some((-10, -20)));
+    fn env_parse_reads_size_position_and_display() {
+        let cases = [
+            (
+                Some("1280x720+100+50"),
+                None,
+                Some((1280, 720)),
+                Some((100, 50)),
+                None,
+            ),
+            (Some("800x600"), Some("2"), Some((800, 600)), None, Some(2)),
+            (
+                Some("640x480-10-20"),
+                None,
+                Some((640, 480)),
+                Some((-10, -20)),
+                None,
+            ),
+        ];
+        for (geometry, display, size, pos, parsed_display) in cases {
+            let g = parse_env_geometry(geometry, display);
+            assert_eq!(
+                (g.size, g.pos, g.display),
+                (size, pos, parsed_display),
+                "{geometry:?}"
+            );
+        }
     }
 
     #[test]
