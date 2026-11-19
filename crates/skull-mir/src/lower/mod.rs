@@ -3534,11 +3534,6 @@ impl<'a> Builder<'a> {
         out
     }
 
-    /// The N return operands for a tuple-return `return <v>`. A fresh `MakeTuple`
-    /// in return position (the common `return (a, b)` and the `return f()` forward
-    /// where `f()` lowered to `MakeTuple(loads)`) is elided to its operands -- no
-    /// table alloc. A tuple value from elsewhere (a var/field holding a packed
-    /// table) is unpacked with `TupleIndex`.
     /// Whether `v` is a tuple box built one value per element, read back the
     /// same way. Every other value of a splatting tuple type -- loaded,
     /// returned, joined or read out of storage -- is the flat box, so this is
@@ -3576,9 +3571,7 @@ impl<'a> Builder<'a> {
                 return vs.clone();
             }
         }
-        (0..n)
-            .map(|i| self.emit_cur(Inst::TupleIndex { base: v, index: i }))
-            .collect()
+        self.flat_box_slots(v, n)
     }
 
     /// Flatten a tuple repr to the slot values `shape` describes -- the tuple

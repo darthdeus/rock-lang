@@ -1023,6 +1023,8 @@ fn copy_joined(i: int) {
 value UV2 { x: float, y: float }
 global UX: [(UV2, int)] = []
 global UY: [(UV2, int)] = []
+@inline fn stored_at_unmarked(i: int) -> (UV2, int) { return UX[i] }
+fn copy_through_an_inlined_return_unmarked(i: int) { UY.push(stored_at_unmarked(i)) }
 fn copy_joined_unmarked(i: int) {
     let t = if i > 0 { UX[i - 1] } else { UX[i] }
     UY.push(t)
@@ -1038,7 +1040,12 @@ fn main() {
     copy_through_get(0)
     copy_through_coalesce(0)
     copy_joined(0)
+    copy_through_an_inlined_return_unmarked(0)
     copy_joined_unmarked(0)
+    let (v, n) = UY[0]
+    print(v.x)
+    print(v.y)
+    print(n)
 }
 "#;
 
@@ -1057,6 +1064,7 @@ fn copying_a_stored_tuple_element_allocates_nothing() {
         "copy_through_get",
         "copy_through_coalesce",
         "copy_joined",
+        "copy_through_an_inlined_return_unmarked",
         "copy_joined_unmarked",
     ] {
         let body = function_body(&lua, name);
@@ -1069,4 +1077,5 @@ fn copying_a_stored_tuple_element_allocates_nothing() {
             "`{name}` read a slot of a tuple it only copies:\n{body}"
         );
     }
+    assert_eq!(run_main(&lua), "1\n2\n3");
 }
