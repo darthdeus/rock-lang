@@ -115,28 +115,14 @@ fn call_key(expr: &Expr) -> Option<Ustr> {
     }
 }
 
-fn parse(files: &[SessionFile]) -> Result<Vec<Ast>, CompilerError> {
-    files
-        .iter()
-        .map(|f| {
-            let mut ast = skull_parser::parse_module(&f.text, Ustr::from(f.path.as_str()))?;
-            ast.package = f.package.clone();
-            Ok(ast)
-        })
-        .collect()
-}
-
 fn fresh(files: &[SessionFile]) -> Outcome {
     fresh_with(files, &NsAliases::default())
 }
 
 fn fresh_with(files: &[SessionFile], aliases: &NsAliases) -> Outcome {
-    let session = Session::new(warm(), files.to_vec(), aliases);
-    let batch = parse(files).and_then(|asts| {
-        let mut modules = warm();
-        modules.extend(asts);
-        semantic_pass_with_aliases(&mut modules, aliases)
-    });
+    let warm = warm();
+    let session = Session::new(warm.clone(), files.to_vec(), aliases);
+    let batch = common::batch_check(&warm, files, aliases);
     let outcome = |result: Result<Workspace, CompilerError>| match result {
         Ok(ws) => Outcome::Built(snapshot(&ws, files)),
         Err(error) => Outcome::Refused(error.message),

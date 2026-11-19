@@ -4,7 +4,7 @@ use bone_incremental::session::Session;
 use bone_semantic::prelude::*;
 
 use crate::common;
-use common::type_profile;
+use common::{batch_check, files, type_profile};
 
 fn parse_rock_with_file(src: &str, file: &str) -> Result<skull_parser::Ast, CompilerError> {
     skull_parser::parse_module_clean(src, Ustr::from(file))
@@ -17,36 +17,6 @@ fn warm_prelude() -> skull_parser::Ast {
 }
 
 type Files = Vec<bone_incremental::session::SessionFile>;
-
-use common::files;
-
-fn parse_files(files: &Files) -> Result<Vec<skull_parser::Ast>, CompilerError> {
-    let mut modules = Vec::with_capacity(files.len());
-    for f in files {
-        let (path, text) = (&f.path, &f.text);
-        let mut module = skull_parser::parse_module(text, Ustr::from(path.as_str()))?;
-        // `Session::new` stamps these same facts on every parse.
-        module.package = f.package.clone();
-        module.global_policy = f.global_policy;
-        assert!(
-            !module.items.is_empty(),
-            "harness fixture {path} parsed to zero items; bone keys modules by \
-             first-item span so an empty file would collide on ModuleId(\"\")"
-        );
-        modules.push(module);
-    }
-    Ok(modules)
-}
-
-fn batch_check(
-    warm: &[skull_parser::Ast],
-    files: &Files,
-    aliases: &bone_core::modules::NsAliases,
-) -> Result<Workspace, CompilerError> {
-    let mut modules = warm.to_vec();
-    modules.extend(parse_files(files)?);
-    semantic_pass_with_aliases(&mut modules, aliases)
-}
 
 fn diag_keys(ws: &Workspace) -> Vec<(String, usize, String)> {
     let mut keys: Vec<_> = ws

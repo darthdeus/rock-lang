@@ -2,6 +2,22 @@
 
 use bone_semantic::prelude::*;
 
+pub fn batch_check(
+    warm: &[skull_parser::Ast],
+    files: &[bone_incremental::session::SessionFile],
+    aliases: &bone_core::modules::NsAliases,
+) -> Result<Workspace, CompilerError> {
+    let mut modules = warm.to_vec();
+    for file in files {
+        let mut ast = skull_parser::parse_module(&file.text, Ustr::from(file.path.as_str()))?;
+        // `Session::new` stamps these same facts on every parse.
+        ast.package = file.package.clone();
+        ast.global_policy = file.global_policy;
+        modules.push(ast);
+    }
+    semantic_pass_with_aliases(&mut modules, aliases)
+}
+
 pub fn mid_for(ws: &Workspace, path: &str) -> ModuleId {
     ws.module_ids[&Ustr::from(path)]
 }
