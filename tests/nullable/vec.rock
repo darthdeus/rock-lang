@@ -1,5 +1,4 @@
-// Tests for Vec<T?> (nullable element vector) and Vec<T>? (nullable vector)
-// These have distinct semantics and different codegen paths.
+// `[T?]` (nullable elements) and `[T]?` (nullable vector) take distinct paths.
 
 struct Mob { name: string, health: int }
 

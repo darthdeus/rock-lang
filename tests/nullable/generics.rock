@@ -1,4 +1,5 @@
-// Adversarial tests: Generics + Nullable interactions
+// Nullable types through generics: `T?` params, nullable fields of generic
+// structs, `T?` at an already nullable `T`, and `??`/`==` on the result.
 
 struct Box<T> {
     val: T,
@@ -7,8 +8,6 @@ struct Box<T> {
 struct NullableBox<T> {
     val: T?,
 }
-
-// --- Generic functions with nullable ---
 
 fn identity<T>(x: T?) -> T? {
     return x
@@ -28,8 +27,6 @@ fn test_generic_nullable_identity() {
     }
 }
 
-// --- Generic struct with nullable field ---
-
 @test(output = "42\nnull")
 fn test_nullable_box() {
     let b: NullableBox<int> = NullableBox { val: 42 }
@@ -41,8 +38,6 @@ fn test_nullable_box() {
         print("null")
     }
 }
-
-// --- What happens when T is already nullable? ---
 
 // T = int?, so val: T? is int?? and must flatten to int?.
 @test(output = "42\nnull")
@@ -134,8 +129,6 @@ fn test_describe_generic_nullable_field_of_nullable() {
     print("{describe_box(a)} {describe_box(b)}")
 }
 
-// --- Generic function returning non-nullable from nullable ---
-
 fn my_unwrap_or<T>(x: T?, fallback: T) -> T {
     if x != null {
         return x
@@ -150,8 +143,6 @@ fn test_generic_my_unwrap_or() {
     let y: int? = null
     print(my_unwrap_or(y, 0))
 }
-
-// --- Generic nullable with struct fields ---
 
 struct Pair<A, B> {
     first: A?,
@@ -169,8 +160,6 @@ fn test_generic_pair() {
     let d = n.second ?? 0
     print("{c} {d}")
 }
-
-// --- Nested generic + nullable ---
 
 struct Wrapper<T> {
     inner: Box<T>?,

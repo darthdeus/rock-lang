@@ -108,14 +108,8 @@ fn boxed_value_payload_control() {
     }
 }
 
-// Precedence: `??` must bind TIGHTER than assignment.
-//
-// It did not: `rock-tokenizer`'s infix_bp put DoubleQuestionMark at 3 and
-// Assign at 5, so `x = a ?? b` parsed as `(x = a) ?? b` -- the assignment
-// became the left operand of the coalesce. Every assignment form was hit
-// (global, local, field, index, compound), and `??` was the only operator
-// affected: `x = a + b` and `x = a || b` were always fine.
-//
+// Precedence: `??` binds tighter than every assignment form, so `x = a ?? b`
+// is `x = (a ?? b)`.
 // The guards at the bottom pin the other side, so raising the level cannot
 // silently drag `??` above the operators it must stay below.
 

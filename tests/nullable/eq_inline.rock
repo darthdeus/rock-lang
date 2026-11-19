@@ -1,5 +1,5 @@
-// Regression test for same-type == specialization when one or both
-// operands are nullable. The guard must not dereference a nil operand.
+// Same-type == specialization with one or both operands nullable: the guard
+// must not dereference a nil operand.
 
 enum Color { Red, Green, Blue }
 
