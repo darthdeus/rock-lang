@@ -1,6 +1,6 @@
-// Name resolution under shadowing: parameters and locals over functions and
-// globals, block and branch scopes, lambda captures, loop variables, default
-// parameters, and type names.
+// Locals, parameters and generic parameters named like functions, globals
+// and types: each resolves to the nearest binding, and a `let` may read the
+// outer meaning of its own name in its initializer.
 
 fn helper_function() -> int {
     return 99
@@ -38,13 +38,13 @@ fn parameter_shadows_global_variable() {
 fn test_block_scope_shadowing() {
     let x = 1
     print(x)
-    
+
     // Inner block with shadowing
     {
         let x = 2
         print(x)
     }
-    
+
     print(x)
 }
 
@@ -61,10 +61,10 @@ fn multi_param_test(helper_function: int, v: int) -> int {
 fn test_sequential_let_shadowing() {
     let x = 1
     print(x)
-    
+
     let x = 2
     print(x)
-    
+
     let x = x - 1
     print(x)
 }
@@ -73,7 +73,7 @@ fn test_sequential_let_shadowing() {
 fn test_else_branch_shadowing() {
     let branch_var = 5
     print(branch_var)
-    
+
     if false {
         let branch_var = 99
         print(branch_var)
@@ -81,11 +81,10 @@ fn test_else_branch_shadowing() {
         let branch_var = 10
         print(branch_var)
     }
-    
+
     print(branch_var)
 }
 
-// Helper functions
 fn helper() -> int {
     return 999
 }
@@ -98,13 +97,11 @@ fn value_func() -> int {
     return 42
 }
 
-
 fn nested_local_shadows_helper() -> int {
     let helper = 5
     return test_inner(helper)
 }
 
-// Global variables
 global counter: int = 42
 global value: int = 100
 global counter2: int = 0
@@ -145,7 +142,6 @@ fn test_lambda_global() {
     print(g2)
 }
 
-// Additional helper functions
 fn test_func(x: int = 10, default_val: int = 20) -> int {
     return x + default_val
 }
@@ -166,14 +162,6 @@ fn test_types() {
 fn test_type_alias(x: int) -> int {
     // 'int' in type annotation refers to the type, not the variable
     return x * 2
-}
-
-fn f_recursive(n: int) -> int {
-    if n <= 0 {
-        return 0
-    }
-    let f = n
-    return f + f
 }
 
 @test(output = "0\n50\n1")
@@ -303,7 +291,106 @@ fn type_alias_shadows_variable() {
     print(int)
 }
 
-@test(output = "10")
-fn recursive_shadow_pattern() {
-    print(f_recursive(5))
+fn get_value() -> int {
+    return 42
+}
+
+@test
+fn test_function_shadowing_with_same_name() {
+    let get_value = get_value()
+
+    assert_eq(get_value, 42)
+}
+
+fn get_function() -> fn() -> int {
+    return () => 100
+}
+
+@test
+fn test_function_returning_function_shadowing() {
+    let get_function = get_function()
+    let result = get_function()
+    assert_eq(result, 100)
+}
+
+global global_func: fn() -> int = () => 200
+
+@test
+fn test_global_function_shadowing() {
+    // Shadowing a global function
+    let global_func = global_func()
+    assert_eq(global_func, 200)
+}
+
+struct B<T> {
+    val: T,
+}
+
+// stdlib's `transmute<A, B>` must resolve its own `B`, not this struct.
+@test(output = "ok")
+fn test_just_declaring_struct_B() {
+    let b: B<int> = B { val: 5 }
+    print("ok")
+}
+
+// User-defined function where param name matches a user struct name.
+fn identity_param<B>(x: B) -> B {
+    return x
+}
+
+@test(output = "42")
+fn test_user_generic_param_shadows_struct() {
+    let r = identity_param(42)
+    print(r)
+}
+
+// Generic param shadows an enum.
+enum E {
+    Alpha,
+    Beta,
+}
+
+fn identity_E<E>(x: E) -> E {
+    return x
+}
+
+@test(output = "7")
+fn test_user_generic_param_shadows_enum() {
+    let r = identity_E(7)
+    print(r)
+}
+
+// Struct generic param shadows top-level struct.
+struct Node<B> {
+    v: B,
+}
+
+@test(output = "3")
+fn test_struct_generic_param_shadows_struct() {
+    let n: Node<int> = Node { v: 3 }
+    print(n.v)
+}
+
+// A struct's generic parameter shadowing a top-level *enum* name.
+struct Holder<E> {
+    e: E,
+}
+
+@test(output = "99")
+fn test_struct_generic_param_shadows_enum() {
+    let h: Holder<int> = Holder { e: 99 }
+    print(h.e)
+}
+
+// Enum generic param shadows top-level struct.
+enum Wrap<B> {
+    Value(B),
+}
+
+@test(output = "11")
+fn test_enum_generic_param_shadows_struct() {
+    let w: Wrap<int> = Wrap::Value(11)
+    match w {
+        Wrap::Value(v) => print(v),
+    }
 }
