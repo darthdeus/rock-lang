@@ -1,6 +1,3 @@
-//! Project the shared instance graph onto one backend. Select declarations,
-//! check boundary delivery, and assign emitted symbols to retained instances.
-
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use bone_core::hir::{FnBackend, Function};
@@ -18,9 +15,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 /// Native mappings are supplied by matching inline bodies or by the backend.
 #[derive(Clone, Copy)]
 pub struct ArtifactMappings<'a> {
-    /// The backend whose in-source body slot IS this artifact's mapping.
     pub inline_backend: FnBackend,
-    /// This artifact's backend realization oracle, when it has one.
     pub supply: Option<&'a dyn BackendRealization>,
 }
 
@@ -37,16 +32,10 @@ impl<'a> ArtifactMappings<'a> {
         self
     }
 
-    /// Does this artifact's BACKEND supply `f` itself -- with no declared body
-    /// emitted for it at all? Asked at the top of realization, ahead of sibling
-    /// selection and ahead of every body branch, because that is where the
-    /// backend asks it.
     fn supplies(&self, ws: &Workspace, f: &Function) -> bool {
         self.supply.is_some_and(|s| s.supplies(ws, f))
     }
 
-    /// Does this artifact map `f` NATIVELY? A Rock body is not consulted --
-    /// that is the portable rung, a different answer to a different question.
     pub fn maps(&self, ws: &Workspace, f: &Function) -> bool {
         if f.inline_body
             .is_some_and(|(be, _)| instance_graph::serves(be, self.inline_backend))
@@ -84,22 +73,15 @@ impl SymbolPlanner {
 
 pub static REALIZED_SYMBOLS: SymbolPlanner = SymbolPlanner::Realized;
 
-/// Everything one artifact view is taken through.
 pub struct ArtifactRequest<'a> {
-    /// The artifact's full target: platform, execution and optional shader.
-    /// [`realize`] derives a platform+execution CPU target; shader packaging is
-    /// carried and reported but cannot reach admission.
     pub spec: TargetSpec,
     pub mappings: ArtifactMappings<'a>,
-    /// The artifact's emission roots, never re-derived from the graph's contents.
     pub roots: &'a [FuncRef],
     pub symbols: &'a SymbolPlanner,
     scalar_context: Option<&'a skull_mir::lower::ScalarCtx>,
 }
 
 impl<'a> ArtifactRequest<'a> {
-    /// The default request for `spec`: its own backend's mapping, no table, and
-    /// the logical spelling.
     pub fn new(spec: TargetSpec, roots: &'a [FuncRef]) -> Self {
         Self {
             mappings: ArtifactMappings::for_backend(spec.cpu.backend),
@@ -134,7 +116,6 @@ impl<'a> ArtifactRequest<'a> {
             );
             return context;
         }
-        // Standalone graph consumers have no emission context to retain.
         local.get_or_init(|| {
             skull_mir::lower::ScalarCtx::new(ws)
                 .with_target(backend)
@@ -153,42 +134,21 @@ impl<'a> ArtifactRequest<'a> {
     }
 }
 
-/// How this artifact supplies a retained declaration: the same `@intrinsic`
-/// declaration is [`Self::NativeMapping`] on one artifact and
-/// [`Self::PortableFallback`] on another.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Realization {
-    /// A Rock body this artifact lowers.
     RockBody,
-    /// A foreign body this artifact emits verbatim.
     ForeignBody(BoundaryClass),
-    /// An `@intrinsic` this artifact maps natively.
     NativeMapping,
-    /// An `@intrinsic` with no mapping here, served by its portable Rock body.
     PortableFallback,
-    /// A declaration with no `@intrinsic` marker that this artifact's backend
-    /// supplies itself, with no declared body emitted at all -- the JS
-    /// backend's `phantom`, `error` and `map_new` renderings. The same oracle
-    /// answers for [`Self::NativeMapping`]; what separates them is whether the
-    /// DECLARATION carries the marker.
+    /// Supplied by the backend itself for a declaration without `@intrinsic`.
     HostBinding,
-    /// An `@intrinsic` whose emission is compile-time on every backend
-    /// (`@struct_expand` and friends). It has no callable body to map or fall
-    /// back to, so neither question applies.
     CompileTimeExpansion,
 }
 
 impl Realization {
-    /// The boundary class this realization is, when it is one. A `Rock`
-    /// callee has none; a foreign or erased one does, and its class is part of
-    /// the [`BoundaryId`] a dependency must terminate in.
     pub fn boundary_class(self) -> Option<BoundaryClass> {
         match self {
             Self::ForeignBody(c) => Some(c),
-            // A hand-written backend binding is class 1.3 by content -- a
-            // mapping that lives in Rust, per backend, rather than in the
-            // source -- so it names the same contract an `@intrinsic` mapping
-            // does.
             Self::NativeMapping | Self::CompileTimeExpansion | Self::HostBinding => {
                 Some(BoundaryClass::Intrinsic)
             }
@@ -203,55 +163,31 @@ pub struct Realized {
     pub kind: Realization,
 }
 
-/// Why a declaration in the shared graph is not realizable on this artifact.
-/// Each keeps its cause, because
-/// "unavailable" collapses three different diagnostics into one word.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Unrealizable {
-    /// The declaration's backend does not serve this artifact. The
-    /// `@nomangle`-sibling case: a JS body in a Lua walk.
     ForeignToArtifact,
-    /// The artifact's capabilities do not supply this boundary CLASS
-    /// (`extern` with no foreign symbols, a verbatim body with no inline
-    /// backend).
     ClassUnsupported(BoundaryClass),
-    /// `@native_required`, and this artifact has no native mapping for it.
-    /// A Rock fallback does not answer: the marker's whole content is that the
-    /// portable rung is skipped.
     NativeMappingMissing,
 }
 
-/// One target's realization of a graph it did not build.
 #[derive(Clone)]
 pub struct ArtifactView {
     pub spec: TargetSpec,
-    /// The artifact's root instances -- realizable emission roots, plus the
-    /// callees of always-emitted bodies, which have no incoming edge.
+    /// Realizable emission roots, plus callees of always-emitted bodies.
     pub roots: BTreeSet<Instance>,
     /// Realizable request roots. Their definitions are required even when
     /// every call is inlined.
     pub declared_roots: BTreeSet<Instance>,
     /// Function values need addressable definitions even with no direct calls.
     pub fn_value_targets: BTreeSet<Instance>,
-    /// Retained ROCK instances: reachable from `roots`, realizable here, and
-    /// lowered from a Rock body. A SUBSET of `g.instances`.
-    ///
-    /// A boundary has no body the artifact lowers, so enqueueing it as an
-    /// instance would ask for callees it does not have.
+    /// Retained instances lowered from a Rock body; boundaries are excluded.
     pub instances: BTreeSet<Instance>,
-    /// Boundary identities keyed by shared instance, including generic arguments.
     pub boundaries: BTreeMap<Instance, BoundaryId>,
-    /// How each retained instance is supplied here, and by which declaration.
     pub realization: BTreeMap<Instance, Realized>,
-    /// One planned symbol per retained instance for this artifact.
     pub symbols: BTreeMap<Instance, String>,
-    /// Bare-name roots recorded by the shared graph for retained `inline(js)`
-    /// declarations. These are opaque-boundary obligations, not MIR delivery
-    /// edges; JS adds the targets to its next graph/view construction.
+    /// Bare-name roots of retained `inline(js)` declarations; not MIR delivery edges.
     pub opaque_boundary_roots: BTreeMap<DeclKey, FxHashSet<FuncRef>>,
-    /// Foreign result widths derived from each concrete instance ABI.
     pub publisher_lanes: BTreeMap<Instance, usize>,
-    /// Retained instances whose substitution is missing from the shared graph.
     pub missing_substitutions: BTreeSet<Instance>,
     /// Required `@nomangle` definitions keyed by the exact declaration. Calls can
     /// still resolve via a sibling in `realization`.
@@ -262,14 +198,10 @@ pub struct ArtifactView {
 #[derive(Clone, Default)]
 struct ArtifactIndex {
     realizable: FxHashMap<Instance, Result<Realized, Unrealizable>>,
-    /// The graph revision the view's decisions were taken over.
     graph_revision: u64,
-    /// Derived before the first edit, while the graph still matches this view.
     update_rows: bool,
     outgoing: FxHashMap<Instance, FxHashMap<Site, Instance>>,
     incoming: FxHashMap<Instance, FxHashSet<Instance>>,
-    /// Realizable instances an always-emitted body takes as a value. They have
-    /// no caller instance whose sites record them.
     always_fn_values: FxHashSet<Instance>,
     realization_by_decl: FxHashMap<FuncRef, FxHashSet<Instance>>,
     instances_by_decl: FxHashMap<FuncRef, FxHashSet<Instance>>,
@@ -314,9 +246,7 @@ impl ArtifactIndex {
     }
 }
 
-/// Whether `i` is one of the request's own roots. A `@shader` stage entry is
-/// registered as GLSL text, never named from Lua, so it is retained only when
-/// ordinary code reaches it.
+/// A `@shader` stage entry is registered as GLSL text, so it is never a root.
 fn declared_root(ws: &Workspace, root_decls: &BTreeSet<DeclKey>, i: &Instance) -> bool {
     root_decls.contains(&DeclKey(i.func))
         && !skull_mir::lower::is_shader_entry(&ws.module(i.func.module).functions[i.func.func])
@@ -349,10 +279,8 @@ fn publication_candidates(ws: &Workspace, req: &ArtifactRequest<'_>) -> BTreeMap
 }
 
 impl ArtifactView {
-    /// Derive the update-only rows from `g`, the graph this view was realized
-    /// from, unless an earlier update already did. A caller about to update
-    /// the graph calls this first: the rows describe the graph BEFORE the
-    /// update, which is what the update retracts.
+    /// Call before updating the graph: the rows must describe the graph this
+    /// view was realized from.
     pub fn prepare_update(&mut self, g: &InstanceGraph) {
         if self.index.update_rows {
             return;
@@ -364,9 +292,6 @@ impl ArtifactView {
              from; call `prepare_update` before updating the graph"
         );
         self.index.update_rows = true;
-        // Each owner's row is its own; the rows are built in parallel and the
-        // reverse rows, which join owners, are filled from them in owner order.
-        // A callee is listed once per owner.
         let owner_rows: Vec<(&Instance, ArtifactSiteRows<'_>)> = {
             use bone_core::prelude::*;
             let owners: Vec<_> = g.call_sites().collect();
@@ -393,8 +318,6 @@ impl ArtifactView {
         }
     }
 
-    /// Apply a graph delta and an explicit root delta. Production callers keep
-    /// the requested root set in their own cache and pass only changed roots.
     pub fn update_local_with_root_delta(
         &mut self,
         ws: &Workspace,
@@ -437,7 +360,6 @@ impl ArtifactView {
         root_added: &BTreeSet<DeclKey>,
         root_removed: &BTreeSet<DeclKey>,
     ) {
-        // A caller that did not update the graph may skip `prepare_update`.
         self.prepare_update(g);
         self.index.graph_revision = g.revision();
         let mut root_subjects = BTreeSet::new();
@@ -487,8 +409,6 @@ impl ArtifactView {
                     .map(|preds| (i.clone(), preds.clone()))
             })
             .collect();
-        // Remove only the outgoing rows owned by the changed subjects. The
-        // old rows remain in `old_outgoing` for the local dirty-region walk.
         for i in &subjects {
             if let Some(edges) = self.index.outgoing.remove(i) {
                 for callee in edges.values() {
@@ -568,9 +488,6 @@ impl ArtifactView {
             return;
         }
 
-        // Only the connected region around a changed owner can change
-        // reachability. This uses the retained view's predecessor/successor
-        // indexes; no graph-wide candidate scan is needed.
         let mut dirty = subjects.clone();
         let mut queue: VecDeque<Instance> = subjects.iter().cloned().collect();
         while let Some(i) = queue.pop_front() {
@@ -698,8 +615,6 @@ impl ArtifactView {
         }
         self.publisher_lanes.remove(i);
         self.missing_substitutions.remove(i);
-        // The dirty region includes every caller of this target; their output
-        // is installed again only after all dirty targets have been retracted.
         self.fn_value_targets.remove(i);
     }
 
@@ -862,22 +777,18 @@ impl ArtifactView {
         }
     }
 
-    /// Whether this artifact retains `i`, however it is supplied.
     pub fn retains(&self, i: &Instance) -> bool {
         self.realization.contains_key(i)
     }
 }
 
-/// The emitter's precedence is native mapping, portable fallback, then rejection.
-/// `@native_required` disables the fallback.
 fn realize_decl(
     ws: &Workspace,
     rep: FuncRef,
     target: &CpuTargetSpec,
     mappings: &ArtifactMappings<'_>,
 ) -> Result<Realized, Unrealizable> {
-    // Expansions and backend mappings must win before sibling selection.
-    // They can serve a call even without a source body for this backend.
+    // Must precede sibling selection: these serve calls with no body for this backend.
     let rep_f = &ws.module(rep.module).functions[rep.func];
     if intrinsics::expand_kind(rep_f).is_some() && supports(target, BoundaryClass::Intrinsic) {
         return Ok(Realized {
@@ -886,10 +797,6 @@ fn realize_decl(
         });
     }
     if supports(target, BoundaryClass::Intrinsic) && mappings.supplies(ws, rep_f) {
-        // ONE rung, ONE oracle. `@intrinsic` or not only decides which LABEL
-        // the census carries -- both are the same backend-supplied contract
-        // (`Realization::boundary_class`), and asking the two questions
-        // separately is what let `map_new` reach a body branch.
         let kind = if intrinsics::is_intrinsic(rep_f) {
             Realization::NativeMapping
         } else {
@@ -907,9 +814,6 @@ fn realize_decl(
     })
 }
 
-/// How the SELECTED declaration is supplied. Split from the selection above so
-/// the two questions -- which declaration, and what kind of body it has -- cannot
-/// be answered against different `FuncRef`s.
 fn realize_body(
     ws: &Workspace,
     decl: FuncRef,
@@ -917,16 +821,12 @@ fn realize_body(
     target: &CpuTargetSpec,
     mappings: &ArtifactMappings<'_>,
 ) -> Result<Realization, Unrealizable> {
-    // An erased runtime entry is an IDENTITY, not a body kind: S 1.4's contract
-    // is that the entry exists under its bare name for every target skull
-    // emits, so it is classified before anything reads a body slot.
     if crate::instance_graph::is_erased_runtime_entry(f) {
         return class_or_reject(target, BoundaryClass::ErasedRuntimeEntry);
     }
     if f.is_extern {
-        // `extern(js)` names the browser/runtime surface, not a host C symbol;
-        // the JS artifact owns that boundary even though the web platform does
-        // not expose the desktop foreign-symbol capability.
+        // `extern(js)` names the browser surface, not a host symbol, so it needs
+        // no foreign-symbol capability.
         if f.backend == FnBackend::Js && target.backend == FnBackend::Js {
             return Ok(Realization::ForeignBody(BoundaryClass::Extern));
         }
@@ -936,17 +836,12 @@ fn realize_body(
         if !supports(target, BoundaryClass::Intrinsic) {
             return Err(Unrealizable::ClassUnsupported(BoundaryClass::Intrinsic));
         }
-        // An expansion intrinsic has no callable body on ANY backend -- its
-        // emission is compile-time at MIR lowering -- so neither the mapping
-        // nor the fallback question applies to it.
         if intrinsics::expand_kind(f).is_some() {
             return Ok(Realization::CompileTimeExpansion);
         }
         if mappings.maps(ws, f) {
             return Ok(Realization::NativeMapping);
         }
-        // THE discriminant. Asked of the declaration, before the fallback rung,
-        // and never satisfied by the presence of a Rock body.
         if intrinsics::is_native_required(f) {
             return Err(Unrealizable::NativeMappingMissing);
         }
@@ -972,11 +867,8 @@ fn class_or_reject(
     }
 }
 
-/// Whether the module actually HOLDS a Rock body for `decl`.
-///
-/// `instance_graph::has_rock_body` reads the declaration only -- "no foreign
-/// body" -- which answers TRUE for an expansion intrinsic that has no body at
-/// all. The portable rung needs the body itself.
+/// Unlike `instance_graph::has_rock_body`, requires the body itself, which an
+/// expansion intrinsic lacks.
 fn has_rock_body(ws: &Workspace, decl: FuncRef) -> bool {
     ws.module(decl.module)
         .bodies
@@ -985,14 +877,8 @@ fn has_rock_body(ws: &Workspace, decl: FuncRef) -> bool {
 
 /// Realize existing graph instances for the artifact request.
 pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> ArtifactView {
-    // Shader packaging is absent from this value by construction. Platform
-    // capabilities remain available for host boundary admission.
     let target = req.spec.cpu();
-    // Realizability of every instance the graph holds, computed once. It is a
-    // property of the DECLARATION and the artifact, independent of reachability.
     let mut realizable: FxHashMap<Instance, Result<Realized, Unrealizable>> = FxHashMap::default();
-    // A declaration's instances all realize the same way, so answer each
-    // declaration once; a generic-heavy program has several instances per decl.
     let mut by_decl: FxHashMap<FuncRef, Result<Realized, Unrealizable>> = FxHashMap::default();
     for i in &g.instances {
         let realized = *by_decl
@@ -1001,8 +887,6 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         realizable.insert(i.clone(), realized);
     }
 
-    // Canonicalize request roots to the representatives used as instance keys.
-    // Always-emitted callees are roots because they have no caller instance.
     let root_decls: BTreeSet<DeclKey> = req
         .roots
         .iter()
@@ -1027,12 +911,9 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         }
     }
 
-    // Reachability follows the walk's site records rather than the coarser
-    // graph edges, which do not identify each caller-to-callee relation.
     let site_tables: FxHashMap<&Instance, &BTreeMap<Site, instance_graph::SiteRecord>> =
         g.call_sites().collect();
 
-    // Walk outgoing sites only for retained Rock bodies.
     struct Admission<'g> {
         admitted: FxHashSet<&'g Instance>,
         reached: Vec<(&'g Instance, Realized)>,
@@ -1063,8 +944,6 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     for r in root_refs {
         walk.admit(r, &index.realizable);
     }
-    // A function named by a global initializer or a decorator body is a value
-    // take with no caller instance, so the site walk below cannot see it.
     index.always_fn_values = roots
         .iter()
         .filter(|r| g.is_always_emitted_fn_value(r))
@@ -1099,9 +978,6 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         .collect();
     drop(site_tables);
 
-    // One symbol per retained instance, from THIS artifact's planner.
-    // The planner answers each instance independently; the names are
-    // derived in parallel and recorded in instance order.
     let planned: Vec<(&Instance, String)> = {
         use bone_core::prelude::*;
         let rows: Vec<(&Instance, Realized)> = realization.iter().map(|(i, r)| (i, *r)).collect();
@@ -1112,11 +988,6 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     let symbols: BTreeMap<Instance, String> =
         planned.into_iter().map(|(i, s)| (i.clone(), s)).collect();
 
-    // THE boundary identities, minted once, per retained instance. Every
-    // consumer -- an ordinary call site and an opaque dependency alike -- reads
-    // this map rather than constructing an id of its own, so an artifact cannot
-    // name one boundary two ways. The symbol is the PLANNER's, which is what
-    // makes a renaming planner visible here instead of silently ignored.
     let boundaries: BTreeMap<Instance, BoundaryId> = realization
         .iter()
         .filter_map(|(i, r)| {
@@ -1136,9 +1007,6 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
 
     let retained_decls: BTreeSet<DeclKey> = realization.values().map(|r| DeclKey(r.decl)).collect();
 
-    // The result-lane width of every foreign body this artifact emits. Asked of
-    // the SELECTED declaration -- the one whose body is emitted -- under this
-    // artifact's own execution backend.
     let scalar_context = std::cell::OnceCell::new();
     let scx = req.scalar_context(ws, g, &scalar_context);
     let mut publisher_lanes: BTreeMap<Instance, usize> = BTreeMap::new();
@@ -1147,7 +1015,6 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
             if !matches!(r.kind, Realization::ForeignBody(BoundaryClass::InlineBody)) {
                 continue;
             }
-            // Use the instance arguments positionally for the selected sibling's ABI.
             if g.substitution(i).is_none() {
                 continue;
             }
@@ -1181,17 +1048,12 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         }
     }
 
-    // The invariant finding, over EVERY retained instance rather than only the
-    // foreign-body slice: a producer that bypassed `reach`'s recorder is a
-    // graph defect wherever it lands, and the lane question is just the first
-    // consumer that would have read the hole as "concrete".
     let missing_substitutions: BTreeSet<Instance> = realization
         .keys()
         .filter(|i| g.concreteness(i) == Concreteness::Missing)
         .cloned()
         .collect();
 
-    // The exact declaration must have a graph expansion to publish its bare name.
     let publication_candidates = publication_candidates(ws, req);
     for (instance, symbol) in &publication_candidates {
         index

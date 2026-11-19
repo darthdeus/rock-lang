@@ -1,8 +1,5 @@
-//! Identity storage only an instance's substitution shows. `fn stash<T>(x: T) { let v = [x] }`
-//! stores nothing bone can see; `stash<Unit>` stores an identity struct in a
-//! Vec. The body walk is bone's own ([`identity_body_sites_with`]), reading
-//! each slot's type under the instance's substitution, and the sites bone
-//! already reports for the unsubstituted body are left to bone.
+//! Identity storage only an instance substitution shows, such as `stash<Unit>`
+//! storing an identity struct in a Vec.
 
 use bone_core::hir::{Body, Function};
 use bone_core::identity_storage::{
@@ -42,9 +39,7 @@ impl<'a> IdentityTypes for MonoTypes<'a> {
     }
 }
 
-/// Whether storing a value of `ty` stores an identity. A type argument for
-/// which this is false cannot make any position of the body store one, so it
-/// is the cheap gate before a body is re-read under its substitution.
+/// Whether storing a value of `ty` stores an identity.
 pub fn stores_identity(ws: &Workspace, ty: &MonoTy) -> bool {
     identity_violation_in(
         ws,
@@ -55,9 +50,6 @@ pub fn stores_identity(ws: &Workspace, ty: &MonoTy) -> bool {
     .is_some()
 }
 
-/// Verdicts already reached, by position and type. A verdict depends on the
-/// type and the workspace's declarations only, and the bodies one thread
-/// walks ask about the same few types.
 #[derive(Default)]
 pub(crate) struct IdentityVerdicts([FxHashMap<MonoTy, Option<IdentityStorageViolation>>; 3]);
 
@@ -155,8 +147,6 @@ pub(crate) fn substitution_only_sites(
         })
         .collect();
     sites.retain(|site| !params.contains(&key(site)));
-    // Most bodies store an identity only through a parameter, so the
-    // declared body is read for the few that have a site left.
     if sites.is_empty() {
         return sites;
     }

@@ -1,5 +1,3 @@
-//! Backend selection and foreign-call availability for artifact admission.
-
 use crate::instance_graph::BoundaryClass;
 use bone_core::hir::FnBackend;
 

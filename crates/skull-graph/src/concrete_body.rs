@@ -1,5 +1,3 @@
-//! Concrete lowering plans and build statistics.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -22,9 +20,7 @@ use crate::instance_graph::{
 };
 use crate::target_projection::CpuTargetSpec;
 
-/// A callee whose body skull does not lower. The declaration preserves its
-/// contract identity when backend siblings share a symbol; the target and
-/// class make availability part of the identity rather than a later lookup.
+/// A callee whose body skull does not lower.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct BoundaryId {
     pub declaration: FuncRef,
@@ -35,27 +31,20 @@ pub struct BoundaryId {
 
 type TypeConversionMemo = FxHashMap<TyId, Result<MonoTyId, MonoTyReason>>;
 
-/// Lowering plans, failure indexes, and per-owner build statistics.
 #[derive(Clone, Default)]
 pub struct ConcreteBodies {
     pub plans: Arc<ConcretePlans>,
     pub always_plans: ConcreteAlwaysPlans,
     instance_stats: FxHashMap<Instance, ConcreteBuildStats>,
     always_stats: FxHashMap<ConcreteOwner, ConcreteBuildStats>,
-    /// Foreign-domain publication is a shared full-build contribution. It is
-    /// kept separately because it has no single owner; local body stats never
-    /// mutate it or fold a second copy into the aggregate.
     global_build_stats: ConcreteBuildStats,
     plan_failure_index: BTreeMap<Instance, MonoTyReason>,
     always_plan_failure_index: FxHashMap<ConcreteOwner, MonoTyReason>,
     candidate_keys: BTreeSet<Instance>,
     owner_candidates: FxHashMap<Instance, FxHashSet<Instance>>,
-    /// Derived from `owner_candidates` by its first reader, an owner-local
-    /// update: a whole-program compile reads only the key set.
     candidate_index: std::sync::OnceLock<CandidateIndex>,
 }
 
-/// The reverse views of `ConcreteBodies::owner_candidates`.
 #[derive(Clone, Default)]
 struct CandidateIndex {
     by_func: FxHashMap<FuncRef, FxHashSet<Instance>>,
@@ -75,7 +64,6 @@ pub struct ConcreteBuildStats {
     pub callee_scans: usize,
     pub callee_rows_visited: usize,
     pub plan_callee_map_inserts: usize,
-    /// Recorded signature values; these share the callee map entry.
     pub plan_callee_signature_inserts: usize,
     pub type_nodes_examined: usize,
     pub type_node_memo_hits: usize,
@@ -135,9 +123,7 @@ impl ConcreteBodies {
         self.always_plans.get(owner)
     }
 
-    /// A staged cache shares the outer table with its last-good owner until it
-    /// crosses this boundary. Clone only the ordered handle map; unchanged
-    /// concrete bodies remain shared by their per-entry `Arc`.
+    /// Clone the shared handle map before mutating; per-entry `Arc`s stay shared.
     pub fn detach_plan_store(&mut self) {
         if Arc::strong_count(&self.plans) > 1 {
             self.plans = Arc::new((*self.plans).clone());
@@ -173,8 +159,7 @@ impl ConcreteBodies {
         })
     }
 
-    /// Release the per-owner stats, for a build that will neither repair
-    /// these plans incrementally nor inspect their build statistics.
+    /// Release the per-owner stats; the plans can no longer be updated incrementally.
     pub fn take_build_stats(&mut self) -> impl Send + 'static {
         (
             std::mem::take(&mut self.instance_stats),
@@ -492,9 +477,6 @@ fn declared_tuple_param(ws: &Workspace, ty: TyId) -> Result<bool, MonoTyReason> 
     }
 }
 
-/// Resolve the concrete signature a graph instance owns before a consumer
-/// needs a full body plan. This is used by graph-side helper accounting, whose
-/// pass runs before `ConcreteBodies::build` installs per-body tables.
 pub(crate) fn concrete_signature_for_instance(
     ws: &Workspace,
     g: &InstanceGraph,
@@ -759,10 +741,6 @@ fn concrete_owner_order(left: &ConcreteOwner, right: &ConcreteOwner) -> std::cmp
 type PublishedSignatures = FxHashMap<Instance, Result<ConcreteSignatureHandle, MonoTyReason>>;
 type PublishedDomains = BTreeMap<SiteDomain, Result<ConcreteTypeTables, MonoTyReason>>;
 
-/// What a fresh build publishes before it plans bodies: every instance a
-/// signature is derived for, and every site domain whose struct defaults are
-/// converted. Each owner's rows are read off its own record in parallel; only
-/// the de-duplication is serial.
 struct PublicationInputs<'g> {
     instances: Vec<&'g Instance>,
     domains: BTreeSet<SiteDomain>,
@@ -774,8 +752,6 @@ fn collect_publication_inputs(g: &InstanceGraph) -> PublicationInputs<'_> {
     #[cfg(not(feature = "sequential"))]
     let (instances, domains) = {
         use rayon::prelude::*;
-        // Each worker folds its owners into sets of its own; the sets are
-        // merged pairwise, so no single thread hashes every row.
         owners
             .into_par_iter()
             .fold(
@@ -809,10 +785,6 @@ struct PublicationSets<'g> {
 }
 
 impl<'g> PublicationSets<'g> {
-    /// Expanded instances publish themselves, their resolved callees and the
-    /// domains of their resolved sites; every owner publishes the callees of
-    /// its always-emitted sites, and an always-emitted owner also the domains
-    /// of all of them. Both kinds publish their struct-default domains.
     fn add(&mut self, owner: &'g Owner, contribution: &'g crate::instance_graph::Contribution) {
         let mut domains: Vec<&'g SiteDomain> = Vec::new();
         if let Owner::Instance(i) = owner {
@@ -841,7 +813,6 @@ impl<'g> PublicationSets<'g> {
                     .map(|site| &site.domain),
             );
         }
-        // Publication skips a body's own domain, which almost every site has.
         self.domains.extend(
             domains
                 .into_iter()
@@ -870,9 +841,6 @@ fn publish_signatures(
     instances: Vec<&Instance>,
 ) -> (PublishedSignatures, std::time::Duration) {
     let started = bone_core::prelude::Instant::now();
-    // Each signature converts one declaration's types against the shared
-    // interner, which locks only for a type it has not seen; the table is
-    // keyed by instance, so the derivation order is not observable.
     let published: PublishedSignatures = {
         use bone_core::prelude::*;
         instances
@@ -894,7 +862,6 @@ fn publish_signatures(
     (published, elapsed)
 }
 
-/// What a fresh build publishes for every body plan to read.
 struct Publication {
     signatures: PublishedSignatures,
     domains: PublishedDomains,
@@ -1028,9 +995,6 @@ fn publish_foreign_domains(
         .into_iter()
         .filter(|domain| !matches!(domain, SiteDomain::Own))
         .collect();
-    // One struct-defaults body per domain, converted against the shared
-    // interner; the published map is keyed by domain, so the order the
-    // domains convert in is not observable.
     let published: Vec<(
         SiteDomain,
         Result<ConcreteTypeTables, MonoTyReason>,
@@ -1269,8 +1233,6 @@ where
     let mut out = BTreeMap::new();
     for domain in domains {
         stats.foreign_domain_requests += 1;
-        // An own-body site needs no foreign table; it is never inserted, so
-        // counting it here would make every such request look unique.
         let SiteDomain::StructDefaults(..) = domain else {
             continue;
         };
@@ -1290,7 +1252,6 @@ where
     Ok(out)
 }
 
-/// Project recorded graph sites into lowering plans.
 fn concrete_plan_from_sites(
     g: &InstanceGraph,
     inst: &Instance,
@@ -1591,9 +1552,6 @@ where
     items.into_par_iter().map(f).collect()
 }
 
-/// The prepared rows are consumed where they lie: a 16k-row table of large
-/// values copied into a ready list first cost more serial time than the copy
-/// suggests.
 fn produce_instances(
     g: &InstanceGraph,
     prepared: Vec<Option<PreparedInstance>>,
@@ -1607,7 +1565,6 @@ fn produce_instances(
 }
 
 /// Build a concrete lowering plan for every instance the walk expanded.
-///
 /// The tables intern into the graph's arena: a second arena would hand out ids
 /// that mean nothing beside `Instance::args`.
 pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
@@ -1623,10 +1580,7 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
     let expansion_time = t_expansion.elapsed();
 
     let t_preparation = bone_core::prelude::Instant::now();
-    // Each preparation converts one body's types; the interner takes its
-    // write lock only for a type it has not seen, so the bodies convert in
-    // parallel. Both collects keep the input order, so the published tables
-    // do not depend on the schedule.
+    // Both collects keep input order, so the published tables do not depend on the schedule.
     let always_owners = g
         .contributions
         .keys()
@@ -1635,8 +1589,6 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
             Owner::Instance(_) => None,
         })
         .collect::<Vec<_>>();
-    // What is published reads the graph and nothing a preparation produces,
-    // so it is derived beside the preparations.
     let (publication, (prepared, always_inputs)) = bone_core::prelude::join_in_place(
         || publish(ws, g, timing_enabled),
         || {
@@ -1712,8 +1664,6 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
         let keys: BTreeSet<Instance> = keys.into_iter().cloned().collect();
         (keys, started.elapsed())
     };
-    // The results are sorted by instance, so the ordered tables are built in
-    // bulk from the sorted rows rather than one insertion at a time.
     let mut plan_rows: Vec<(Instance, Arc<skull_mir::concrete::ConcreteBodyPlan>)> = Vec::new();
     let mut per_inst = Vec::new();
     let mut t_convert = std::time::Duration::ZERO;
@@ -1724,8 +1674,6 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
     let mut owner_stats_insert_time = std::time::Duration::ZERO;
     let mut slot_tyids = 0usize;
     let mut unique_slot_tyids = 0usize;
-    // The candidate keys read only the rows taken above, so they are
-    // collected beside the rest of the merge.
     let ((candidate_keys, candidate_install_time), ()) =
         bone_core::prelude::join_in_place(collect_candidate_keys, || {
             for built in results.into_iter().flatten() {

@@ -1,5 +1,3 @@
-//! Lexical references in opaque JavaScript bodies.
-
 #[derive(Clone, Copy)]
 enum Token<'a> {
     Name(&'a str),

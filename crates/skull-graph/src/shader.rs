@@ -1,5 +1,3 @@
-//! Target-neutral shader populations realized from the shared instance graph.
-
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -17,7 +15,6 @@ pub struct ShaderProgram {
     pub frag: FuncRef,
 }
 
-/// The graph-owned population for one shader stage of one registered program.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ShaderStageView {
     pub stage: ShaderStage,
@@ -29,8 +26,7 @@ pub struct ShaderStageView {
     pub dependencies: Vec<FuncRef>,
 }
 
-/// The graph-owned populations for one registered shader program. `stages` is
-/// in registration order: vertex first when present, fragment second.
+/// `stages` is in registration order: vertex first when present, fragment second.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ShaderProgramView {
     pub program: ShaderProgram,
@@ -38,10 +34,7 @@ pub struct ShaderProgramView {
     pub concrete_plans: Arc<ConcretePlans>,
 }
 
-/// The graph-owned population for an explicit-root GLSL function library.
-/// Unlike [`ShaderProgramView`], this has no registered shader stages or
-/// interface contract: the caller supplies ordinary function roots and the
-/// backend only packages their retained definitions.
+/// An explicit-root GLSL function library, with no shader stages or interface contract.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ShaderLibraryView {
     pub roots: Vec<Instance>,
