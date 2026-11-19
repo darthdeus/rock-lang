@@ -131,11 +131,9 @@ fn arc(r: float) -> (float) -> NV {
     assert_eq(p.y, 5.0)
 }
 
-// A LAMBDA whose RETURN is a nobox value, filling a fn-value param. The
-// discriminant is the lambda: the same `fn(NV) -> NV` param filled by a
-// TOP-LEVEL fn already worked, because only a lambda's own expression type was
-// never recorded, so its return ABI silently fell back to boxed while the
-// indirect call site read the leaf ABI off the fn type.
+// A LAMBDA whose RETURN is a nobox value, filling a fn-value param, against the
+// same param filled by a top-level fn: the indirect call site reads the leaf
+// ABI off the fn type, so the lambda's own return must use it too.
 fn swap(v: NV) -> NV { return NV { x: v.y, y: v.x } }
 
 fn remap(f: (NV) -> NV, v: NV) -> NV { return f(v) }
@@ -149,8 +147,6 @@ fn remap(f: (NV) -> NV, v: NV) -> NV { return f(v) }
     assert_eq(lam.x, 3.0)
     assert_eq(lam.y, 1.0)
 }
-
-// Returned lambdas at a nullable nobox return: `fn_value_nullable_return.rock`.
 
 // A lambda literal returning a plain value, passed where the fn type returns a
 // nullable nobox value, takes the nullable return ABI.
@@ -171,24 +167,13 @@ fn call_or(f: (() -> Vec2)?, dx: float) -> float {
     return dx
 }
 
-@test fn lambda_literal_at_a_nullable_fn_value_param() {
-    assert_eq(call_or(() => src(), -1.0), 1.0)
-}
-
-// The three shapes that already worked, kept as controls so a fix that moves
-// the ABI for all fn values shows up here rather than only in a game.
 fn call_plain(f: () -> Vec2) -> float { return f().x }
 
-@test fn lambda_literal_at_a_plain_fn_value_param() {
+@test fn vec2_fn_values_at_plain_and_nullable_params() {
+    assert_eq(call_or(() => src(), -1.0), 1.0)
     assert_eq(call_plain(() => src()), 1.0)
-}
-
-@test fn lambda_bound_to_a_local_then_passed() {
     let f: () -> Vec2 = () => src()
     assert_eq(call_or(f, -1.0), 1.0)
-}
-
-@test fn named_fn_at_a_nullable_fn_value_param() {
     assert_eq(call_or(src, -1.0), 1.0)
 }
 
@@ -208,11 +193,8 @@ fn apply_or(f: ((Vec2) -> Vec2)?, p: Vec2) -> float {
 
 // A hand-written `@scalar_abi` body is the one definition whose ABI is NOT
 // narrowed to what the type yields, so it is where the two ends most easily
-// disagree. At a nullable reference it used to reach the boxed ABI and reject;
-// the peel makes both ends read leaves. The VALUE is asserted, not just that it
+// disagree. At a nullable reference both ends must read leaves. The VALUE is asserted, not just that it
 // compiles -- a leaf-order or arity slip emits fine and answers wrong.
-// The unmarked-value twin of this shape must still REJECT:
-// `skull/tests/value_scalarize.rs::unmarked_value_through_a_nullable_fn_value_still_rejects`.
 @scalar_abi inline(lua) fn mk_v() -> Vec2 = """
     return 1.0, 2.0
 """

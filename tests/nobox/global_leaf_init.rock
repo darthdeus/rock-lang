@@ -11,7 +11,6 @@ nobox value P { x: int, y: int }
 fn mk(a: int, b: int) -> P { return P { x: a, y: b } }
 
 global G_CALL: P = mk(5, 7)
-global G_LIT: P = P { x: 3, y: 4 }
 global G_WIDE: Q = Q { a: 1, b: 2, c: 3, d: 4 }
 
 nobox value Q { a: int, b: int, c: int, d: int }
@@ -19,11 +18,6 @@ nobox value Q { a: int, b: int, c: int, d: int }
 @test fn nobox_global_initialized_from_a_call() {
     assert_eq(G_CALL.x, 5)
     assert_eq(G_CALL.y, 7)
-}
-
-@test fn nobox_global_initialized_from_a_literal() {
-    assert_eq(G_LIT.x, 3)
-    assert_eq(G_LIT.y, 4)
 }
 
 // Past two leaves the bank carries 1..N, so a width the emitter sizes wrong

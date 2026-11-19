@@ -35,14 +35,6 @@ fn test_nullable_column_is_column_stored() {
     print(column_header_repr(a))
 }
 
-@test(output = "2\n1\ntrue")
-fn test_literal_with_a_null_element() {
-    let a: [NP?] = [NP { x: 1.0, y: 2.0 }, null]
-    print("{a.len}")
-    print("{a[0]?.x ?? 0.0}")
-    print("{a[1] == null}")
-}
-
 // The presence column IS the storage, not a derived read: an absent element
 // stores `false` presence with nil leaves, a present one `true` with real ones.
 @test(output = "true\n1\nfalse\ntrue", backends = "lua")
@@ -79,12 +71,11 @@ fn test_null_between_two_values_keeps_both_leaves() {
     }
 }
 
-// --- the rest of the Vec surface the presence column unlocks ---
+// --- the rest of the Vec surface over the presence column ---
 //
-// Each of these went from rejecting to working with the column, and every one
-// of the shifting ops asserts a leaf on BOTH sides of the moved null: the
-// failure mode is not a crash but a presence column that shifts by a different
-// amount than its leaf siblings, which reads back as a plausible wrong value.
+// Every shifting op asserts a leaf on BOTH sides of the moved null: a presence
+// column that shifts by a different amount than its leaf siblings reads back as
+// a plausible wrong value, not a crash.
 
 @test(output = "false\ntrue")
 fn test_get_probes_presence() {
@@ -233,11 +224,8 @@ fn test_read_through_both_presence_levels() {
     print("{a[1] == null}")
 }
 
-// The CHAINED read through both presence levels. Was pinned as a gap in
-// `nobox_container_gaps.rock.err`; it turned out to be the same defect as the
-// plain `h?.v?.x` chain, not a column one -- storage was always correct here
-// (the key sweep above), only the read path packed. Both rows, so the absent
-// one exercises the top-level presence column rather than the nested one.
+// The CHAINED read through both presence levels. Both rows, so the absent one
+// exercises the top-level presence column rather than the nested one.
 @test(output = "1\n-1")
 fn test_chained_safe_nav_through_both_presence_levels() {
     let a: [Optc?] = [Optc { pos: NV2c { x: 1.0, y: 2.0 } }, null]

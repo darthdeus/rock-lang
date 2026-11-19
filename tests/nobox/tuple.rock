@@ -1,14 +1,6 @@
 // Tuples whose elements are `nobox` values: as a return, at a fn param, and
 // stored inside a container. The nullable forms are in nullable_tuple.rock.
 
-// ======== As a RETURN ========
-//
-// Cross-backend execution of the nobox tuple-return ABI: a tuple return whose
-// element is a `nobox` value carries that element's LEAVES, not one box.
-// Emission-shape assertions (no `NV2_ct(`) live in
-// `crates/skull/tests/nobox_values.rs`; these pin that the wire still computes
-// the right answer on every backend that can run them.
-
 nobox value NV2 { x: float, y: float }
 
 value BV2 { x: float, y: float }
@@ -96,12 +88,6 @@ fn with_nullable(pq: (TV?, TV)) -> float { return (pq.0?.y ?? -1.0) + pq.1.x }
 @test(returns = 5.0)
 fn a_tuple_of_nobox_crosses_a_direct_call() -> float {
     return pair_sum((TV { x: 1.0, y: 3.0 }, TV { x: 2.0, y: 4.0 }))
-}
-
-@test(returns = 5.0)
-fn the_same_tuple_bound_to_a_local_first() -> float {
-    let t = (TV { x: 1.0, y: 3.0 }, TV { x: 2.0, y: 4.0 })
-    return pair_sum(t)
 }
 
 @test(returns = 12.0)

@@ -47,13 +47,6 @@ fn declared_nullable_tuple_binds_absent() -> int {
     return -1
 }
 
-@test(returns = 10)
-fn a_bound_nullable_tuple_projects_its_slots() -> int {
-    let t = maybe(true)
-    if t == null { return -1 }
-    return t.0.x + t.0.y + t.1
-}
-
 // --- `?.` yielding a tuple ---
 
 @test(returns = 1)
@@ -115,11 +108,9 @@ fn if_let_misses_an_absent_nullable_tuple() -> int {
     if let t = pick(false)?.wire2() { return t.1 } else { return 1 }
 }
 
-// A DESTRUCTURING pattern is the same wire, and it used to miss the presence
-// slot entirely: only `Pattern::Bind` took the wire-aware path, so `(v, n)` fell
-// through to the boxed one, where the nil test is against a `MakeTuple` that is
-// never nil -- always-present, else arm deleted, absent arm reading nil leaves.
-// A hole is names-only too, and still consumes its slots.
+// A DESTRUCTURING pattern reads the same presence slot; a tuple literal is never
+// nil, so testing a rebuilt tuple would make the absent arm read nil leaves. A
+// hole is names-only, and still consumes its slots.
 
 @test(returns = 10)
 fn if_let_destructures_a_present_nullable_tuple() -> int {
@@ -314,30 +305,22 @@ fn absent_is_null_and_present_is_not() {
 
 @test(returns = 13)
 fn present_binds_leaves_in_tail_position() -> int {
+    if hit_tail(-1.0) != null { return -2 }
     if let t = hit_tail(1.0) {
         return (t.0 + t.1.x + t.1.y) as int
     }
     return -1
 }
 
-@test
-fn absent_is_null_in_tail_position() {
-    assert(hit_tail(-1.0) == null)
-}
-
 // The asymmetry guard: an UNMARKED value keeps the single boxed tuple, so the
 // same source still round-trips both ways and the wire above stays off.
 @test(returns = 13)
 fn unmarked_element_still_round_trips() -> int {
+    if hit_boxed(-1.0) != null { return -2 }
     if let t = hit_boxed(1.0) {
         return (t.0.x + t.0.y + t.1) as int
     }
     return -1
-}
-
-@test
-fn unmarked_absent_is_null() {
-    assert(hit_boxed(-1.0) == null)
 }
 
 // ======== At a fn PARAM ========

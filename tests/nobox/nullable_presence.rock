@@ -1,5 +1,7 @@
-// Presence of nullable nobox values: absent tags, merges, phi returns, tuple
-// options and inline child projections.
+// Presence of nullable nobox values: merges, phi returns, absent tags, tuple
+// options, inline child projections, the concrete-shape operations (null test,
+// refined field read, fn-value crossing) and `== null` results consumed as
+// booleans in every position.
 
 nobox value P { x: int, y: int }
 
@@ -21,9 +23,7 @@ fn present_merge_carries_its_leaves() -> int {
     return p.x * 10 + p.y
 }
 
-// The merge as the returned EXPRESSION, with no local to land in. The local is
-// where the sentinel's crash was observed, so this asks whether the local was
-// load-bearing or incidental.
+// The merge as the returned EXPRESSION, with no local to land in.
 fn merged_no_local(present: bool) -> P? {
     return if present { P { x: 7, y: 8 } } else { null }
 }
@@ -59,8 +59,7 @@ fn safe_nav_off_a_merge() {
     assert_eq(merged(false)?.x ?? -1, -1)
 }
 
-// `materialize` is a PASSENGER on this shape -- deleting it from the reported
-// repro left an identical crash. Pinned so it stays one after the fix.
+// `materialize` of the merged value is a passenger: presence and leaves survive it.
 fn merged_materialized(present: bool) -> P? {
     let v: P? = if present { P { x: 5, y: 6 } } else { null }
     return materialize(v)
@@ -80,16 +79,6 @@ fn materialized_non_nullable() -> P { return materialize(P { x: 5, y: 6 }) }
 fn materialize_on_a_non_nullable_nobox_value_is_correct() {
     let p = materialized_non_nullable()
     print("{p.x} {p.y}")
-}
-
-fn null_local() -> P? {
-    let v: P? = null
-    return v
-}
-
-@test(output = "absent=true")
-fn a_nullable_nobox_local_with_no_phi_reports_absent() {
-    print("absent={null_local() == null}")
 }
 
 nobox value NV2 { x: float, y: float }
@@ -211,4 +200,235 @@ fn optional_inline_child_projection_keeps_constructor_folding() {
     owner.envelope = null
     let value = before.unwrap()
     print("{value.point.x} {value.point.y} {value.tag} {child(owner) == null}")
+}
+
+// -- The operations a nullable `nobox` value supports when its shape is
+// CONCRETE: a null test reads presence, a refined field read reads a leaf, and
+// a merge stores per cell. Each control below removes one of the conjuncts a
+// value-position merge needs (the merge, the nullability, the mark). --
+
+nobox value CP { x: float, y: float }
+
+value CQ { x: float, y: float }
+
+// An unused element costs nothing and still type-checks.
+
+fn ignores(p: CP?) -> int { return 42 }
+
+@test(returns = 84)
+fn unused_nullable_param() -> int {
+    return ignores(CP { x: 1.0, y: 2.0 }) + ignores(null)
+}
+
+// A null test reads presence.
+
+fn is_absent(p: CP?) -> bool { return p == null }
+
+@test(returns = 1)
+fn null_test_reads_presence() -> int {
+    let present_says_absent = is_absent(CP { x: 1.0, y: 2.0 })
+    let absent_says_absent = is_absent(null)
+    return if !present_says_absent && absent_says_absent { 1 } else { 0 }
+}
+
+// A refined field read reads the leaf.
+
+fn get_x(p: CP?) -> float {
+    if p != null { return p.x }
+    return -1.0
+}
+
+@test(returns = 6)
+fn refined_field_read_reads_the_leaf() -> int {
+    return (get_x(CP { x: 7.0, y: 2.0 }) + get_x(null)) as int
+}
+
+// A nullable nobox value crosses a fn-value boundary.
+
+fn apply(f: (CP?) -> bool, p: CP?) -> bool { return f(p) }
+
+@test(returns = 1)
+fn nullable_crosses_a_fn_value_param() -> int {
+    let g = (p: CP?) => p == null
+    return if !apply(g, CP { x: 1.0, y: 2.0 }) && apply(g, null) { 1 } else { 0 }
+}
+
+// A lambda RETURNED as a fn value at a nullable nobox return, with no merge in
+// its body (the merging form is in fn_values.rock).
+fn identity_maker() -> (CP?) -> CP? { return (p: CP?) => p }
+
+@test(returns = 8)
+fn returned_lambda_without_a_merge_keeps_its_arity() -> int {
+    let g = identity_maker()
+    let got = g(CP { x: 7.0, y: 2.0 })?.x ?? -1.0
+    return (got + if g(null) == null { 1.0 } else { 0.0 }) as int
+}
+
+// No merge at all.
+fn absent_without_merge() -> CP? {
+    let v: CP? = null
+    return v
+}
+
+@test(returns = 1)
+fn no_merge_is_correct() -> int {
+    return if absent_without_merge() == null { 1 } else { 0 }
+}
+
+// A branch, but the arms RETURN rather than producing a merged value.
+fn pick_by_return(present: bool) -> CP? {
+    if present { return CP { x: 5.0, y: 6.0 } }
+    return null
+}
+
+@test(returns = 1)
+fn statement_position_returns_do_not_merge() -> int {
+    return if pick_by_return(true) != null && pick_by_return(false) == null { 1 } else { 0 }
+}
+
+// A value-position merge on a marked but NON-nullable value: no presence leaf.
+fn pick_present(a: bool) -> CP {
+    let v: CP = if a { CP { x: 5.0, y: 6.0 } } else { CP { x: 1.0, y: 2.0 } }
+    return v
+}
+
+@test(returns = 6)
+fn merge_of_two_present_arms() -> int {
+    return (pick_present(true).x + pick_present(false).x) as int
+}
+
+// A value-position merge on a nullable but UNMARKED value: no leaf realization.
+fn pick_unmarked(present: bool) -> CQ? {
+    let v: CQ? = if present { CQ { x: 5.0, y: 6.0 } } else { null }
+    return v
+}
+
+@test(returns = 1)
+fn unmarked_nullable_merge() -> int {
+    return if pick_unmarked(true) != null && pick_unmarked(false) == null { 1 } else { 0 }
+}
+
+// -- `== null` / `!= null` on a nullable nobox field consumed as a boolean in
+// every position: struct field, local, argument, return, equality operand,
+// short circuit and condition. --
+
+nobox value PresenceId { scene: int, arena: int, slot: int, generation: int }
+value BoxedPresenceId { scene: int, arena: int, slot: int, generation: int }
+struct PresenceState { id: PresenceId? = null }
+struct BoxedPresenceState { id: BoxedPresenceId? = null }
+struct PresenceRow { present: bool = false }
+
+fn check_presence(value: bool, expected: bool) { assert_eq(value, expected) }
+fn presence_return(state: PresenceState) -> bool { return state.id != null }
+fn absence_return(state: PresenceState) -> bool { return state.id == null }
+fn present_state() -> PresenceState {
+    return PresenceState { id: PresenceId { scene: 0, arena: 1, slot: 1, generation: 0 } }
+}
+fn presence_tuple(present: bool) -> (PresenceId, int)? {
+    if present { return (PresenceId { scene: 0, arena: 1, slot: 1, generation: 0 }, 7) }
+    return null
+}
+
+// Each position is checked for an absent state `a` and a present state `p`.
+
+@test
+fn nobox_presence_field() {
+    let a = PresenceState {}
+    let p = present_state()
+    let a_present = PresenceRow { present: a.id != null }
+    let a_absent = PresenceRow { present: a.id == null }
+    let p_present = PresenceRow { present: p.id != null }
+    let p_absent = PresenceRow { present: p.id == null }
+    assert_eq(a_present.present, false)
+    assert_eq(a_absent.present, true)
+    assert_eq(p_present.present, true)
+    assert_eq(p_absent.present, false)
+}
+
+@test
+fn nobox_presence_local() {
+    let a = PresenceState {}
+    let p = present_state()
+    let a_present: bool = a.id != null
+    let a_absent: bool = a.id == null
+    let p_present: bool = p.id != null
+    let p_absent: bool = p.id == null
+    assert_eq(a_present, false)
+    assert_eq(a_absent, true)
+    assert_eq(p_present, true)
+    assert_eq(p_absent, false)
+}
+
+@test
+fn nobox_presence_parameter() {
+    let a = PresenceState {}
+    let p = present_state()
+    check_presence(a.id != null, false)
+    check_presence(a.id == null, true)
+    check_presence(p.id != null, true)
+    check_presence(p.id == null, false)
+}
+
+@test
+fn nobox_presence_return() {
+    let a = PresenceState {}
+    let p = present_state()
+    assert_eq(presence_return(a), false)
+    assert_eq(absence_return(a), true)
+    assert_eq(presence_return(p), true)
+    assert_eq(absence_return(p), false)
+}
+
+@test
+fn nobox_presence_equality() {
+    let a = PresenceState {}
+    let p = present_state()
+    assert_eq((a.id != null) == false, true)
+    assert_eq((null != a.id) == false, true)
+    assert_eq((a.id == null) == true, true)
+    assert_eq((null == a.id) == true, true)
+    assert_eq((p.id != null) == true, true)
+    assert_eq((null != p.id) == true, true)
+    assert_eq((p.id == null) == false, true)
+    assert_eq((null == p.id) == false, true)
+}
+
+@test
+fn nobox_short_circuit_values() {
+    let a = PresenceState {}
+    let p = present_state()
+    assert_eq(true && a.id != null, false)
+    assert_eq(false || a.id != null, false)
+    assert_eq(true && p.id != null, true)
+    assert_eq(false || p.id != null, true)
+}
+
+@test
+fn tuple_presence_values() {
+    let absent = presence_tuple(false)
+    check_presence(absent != null, false)
+    check_presence(absent == null, true)
+    let present = presence_tuple(true)
+    check_presence(present != null, true)
+    check_presence(present == null, false)
+}
+
+@test
+fn nobox_direct_conditions() {
+    let state = PresenceState {}
+    if state.id != null { error("absent presence condition") }
+    if state.id == null {} else { error("absent absence condition") }
+    if state.id != null || state.id != null { error("absent disjunction") }
+    let live = present_state()
+    if live.id != null && true {} else { error("present conjunction") }
+    while live.id != null { live.id = null }
+    assert_eq(live.id == null, true)
+}
+
+@test
+fn boxed_absent_presence_control() {
+    let state = BoxedPresenceState {}
+    let row = PresenceRow { present: state.id != null }
+    assert_eq(row.present, false)
+    check_presence(state.id == null, true)
 }

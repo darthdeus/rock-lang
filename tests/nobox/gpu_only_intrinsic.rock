@@ -4,7 +4,6 @@
 // A CPU caller is separately rejected by `gpu_only_call_rejection`, so the only
 // callers that reach here are GPU contexts.
 //
-//
 // The box is AUTHORIZED at the boundary (emitted as an explicit materialization),
 // NOT by exempting the calling body -- see `tests/errors/nobox.rock.err`
 // for the CPU-side box inside a `@shader` fn that must still reject.
@@ -23,9 +22,8 @@ fn nobox_sampler_frag(uTexture: Sampler2D, tc: NV2) -> Vec4 {
 }
 
 @test(output = "ok")
-fn a_gpu_only_intrinsic_accepts_a_nobox_value() {
-    // Emission of the shader entry above is the assertion; it rejected before
-    // `@gpu_only` was exempted from the boxed-call-boundary check.
+fn gpu_shaders_in_this_file_emit() {
+    // Emitting every shader entry in this file is the assertion.
     print("ok")
 }
 
@@ -37,14 +35,9 @@ fn mapped_intrinsic_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
     return texture(uTexture, tc)
 }
 
-@test(output = "ok2")
-fn a_mapped_gpu_intrinsic_emits() {
-    print("ok2")
-}
-
-// A conditionally reassigned sampled vector (#37). The binding's first value is
-// the intrinsic's boxed return; the literal on one branch then had to share that
-// one boxed cell, so it was packed into an implicit `Vec4` box and rejected.
+// A conditionally reassigned sampled vector: the binding's first value is the
+// intrinsic's return and one branch overwrites it with a literal, which must
+// not pack into an implicit `Vec4` box.
 @shader(fragment)
 fn reassigned_sample_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
     let color = texture(uTexture, tc)
@@ -66,7 +59,3 @@ fn separate_color_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
     return Vec4 { x: rgb.x, y: rgb.y, z: rgb.z, w: sampled.w }
 }
 
-@test(output = "ok3")
-fn a_conditionally_reassigned_sample_emits() {
-    print("ok3")
-}

@@ -1,8 +1,7 @@
 // Reading `nobox` values stored in fields: plain value children of a nobox
-// field, nested nullable nobox fields with a `= null` default, and widening a
-// non-nullable field read into a nullable slot.
-
-// -- Plain value children of a nobox field --
+// field, nested nullable nobox fields with a `= null` default, widening a
+// non-nullable field read into a nullable slot, and declaration defaults
+// (`= null` and value defaults) on omitted nobox fields.
 
 nobox value FieldSid { value: int }
 value FieldPoint { x: float, y: float }
@@ -115,21 +114,10 @@ fn map_value_keeps_nested_nobox_presence() {
 // -- Widening a `nobox` value read out of a FIELD into a nullable slot.
 //
 // `prev = p.pos`, where `pos: Vec2` is declared non-nullable and `prev` is
-// `Vec2?`, lowered the presence as a runtime `p.pos ~= nil` test. That test is
-// an opaque use of the box, so SROA could no longer peel the cell feeding it,
-// and the `Vec2` ctor survived to emit as an implicit materialization -- the
-// `nobox` guarantee's own rejection, on a program that never mentions null.
-//
-// The declared field type already answers the presence question. A `nobox`
-// field read now takes the leaf-splitting Group form regardless of whether its
-// base is a mutable place, so presence is the static `true` a Group carries,
-// exactly as the `embed` path beside it already did for a marked child.
-//
-// Controls, because both conjuncts are needed to reproduce: `plain_target_*`
-// keeps the field read and drops the nullability, `ctor_source_*` keeps the
-// nullability and sources the value from a ctor instead of a field. Each
-// compiled and answered correctly while the subject rejected, so a fix that
-// only satisfies them has not touched the defect.
+// `Vec2?`: the declared field type answers the presence question statically,
+// so no runtime nil test keeps the box alive. `plain_target_*` keeps the field
+// read and drops the nullability, `ctor_source_*` keeps the nullability and
+// sources the value from a ctor instead. --
 
 nobox value V2 { x: float, y: float }
 value Pt { pos: V2, born: float }
@@ -217,4 +205,100 @@ fn plain_target_control() -> int {
 @test(returns = 9)
 fn ctor_source_control() -> int {
     return max_step_ctor(3) as int
+}
+
+nobox value NbColor { r: float, g: float }
+value BoxColor { r: float, g: float }
+
+// -- Declaration defaults on omitted nobox fields, with explicit-null and
+// plain `value` controls. --
+
+struct NbHolder {
+    id: int,
+    tint: NbColor? = null,
+}
+
+struct NbHolderNoDefault {
+    id: int,
+    tint: NbColor?,
+}
+
+struct BoxHolder {
+    id: int,
+    tint: BoxColor? = null,
+}
+
+fn describe(t: NbColor?) -> string {
+    if t != null { return "some({t.r},{t.g})" }
+    return "null"
+}
+
+// Field omitted, `= null` declaration default injected.
+@test(output = "1 null")
+fn nobox_null_default_omitted() {
+    let h = NbHolder { id: 1 }
+    print("{h.id} {describe(h.tint)}")
+}
+
+// Same, forced through a real fn return so the struct actually materializes.
+@test(output = "2 null")
+fn nobox_null_default_omitted_through_return() {
+    fn make() -> NbHolder { return NbHolder { id: 2 } }
+    let h = make()
+    print("{h.id} {describe(h.tint)}")
+}
+
+// Control: a stored non-null nobox value round-trips through the field.
+@test(output = "4 some(1,2)")
+fn nobox_stored_value() {
+    fn make() -> NbHolderNoDefault {
+        return NbHolderNoDefault { id: 4, tint: NbColor { r: 1, g: 2 } }
+    }
+    let h = make()
+    print("{h.id} {describe(h.tint)}")
+}
+
+// Control: a stored explicit null round-trips through the field.
+@test(output = "5 null")
+fn nobox_stored_null() {
+    fn make() -> NbHolderNoDefault { return NbHolderNoDefault { id: 5, tint: null } }
+    let h = make()
+    print("{h.id} {describe(h.tint)}")
+}
+
+// Control: the same default on a `value` instead of a `nobox value`.
+@test(output = "6 null")
+fn plain_value_null_default_omitted() {
+    let h = BoxHolder { id: 6 }
+    let present = if h.tint != null { "some" } else { "null" }
+    print("{h.id} {present}")
+}
+
+nobox value NbPair { r: float, g: float }
+
+struct NbDefaulted {
+    id: int,
+    tint: NbPair = NbPair { r: 7, g: 8 },
+    hint: NbPair? = NbPair { r: 9, g: 10 },
+}
+
+// The other two defaults on a `nobox` field: a non-nullable one, and a
+// nullable one whose default is a real value rather than `null`.
+@test(output = "7 7 8 9 10")
+fn nobox_value_default_omitted() {
+    let h = NbDefaulted { id: 7 }
+    let t = h.hint
+    if t != null {
+        print("{h.id} {h.tint.r} {h.tint.g} {t.r} {t.g}")
+    }
+}
+
+@test(output = "8 7 8 9 10")
+fn nobox_value_default_through_return() {
+    fn make() -> NbDefaulted { return NbDefaulted { id: 8 } }
+    let h = make()
+    let t = h.hint
+    if t != null {
+        print("{h.id} {h.tint.r} {h.tint.g} {t.r} {t.g}")
+    }
 }

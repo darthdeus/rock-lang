@@ -1,17 +1,7 @@
-// `?.` producing a `nobox` value. All three safe-nav forms joined their nil and
-// value arms through ONE result cell, and a `nobox` value is leaves plus a
-// presence tag, which does not fit one cell -- so it packed to a box and tripped
-// the materialization rejection.
-//
-// The join itself was never the problem: `if`/`match` as VALUES already store
-// per-slot (`repr_join_slot` + `store_repr_and_join`). Safe-nav simply was not
-// dispatched through it -- `lower_expr_repr` had no `SafeNav*` arm at all, so
-// every form fell through to the packed `Scalar` default.
-//
-// Not a JS gap: it rejected identically on luajit.
-//
-// CHAINING a second `?.` straight onto the result was a second, separate defect
-// on the same surface -- covered at the bottom of this file.
+// `?.` producing a `nobox` value. A nobox value is leaves plus a presence tag,
+// so all three safe-nav forms (field, call, `?.let`) join their nil and value
+// arms per slot, as `if`/`match` values do, instead of packing a box. Chaining
+// a second `?.` onto the result is covered at the bottom of this file.
 
 nobox value NV { x: int, y: int }
 
@@ -48,23 +38,13 @@ fn safe_nav_let_yields_a_nobox_value() -> int {
 
 fn none() -> Holder? { return null }
 
-@test(returns = 1)
-fn safe_nav_field_on_null_is_absent() -> int {
+@test(returns = 3)
+fn every_safe_nav_form_on_null_is_absent() -> int {
     let a = none()?.v
-    return if a == null { 1 } else { 0 }
-}
-
-@test(returns = 1)
-fn safe_nav_call_on_null_is_absent() -> int {
-    let a = none()?.wire()
-    return if a == null { 1 } else { 0 }
-}
-
-@test(returns = 1)
-fn safe_nav_let_on_null_is_absent() -> int {
+    let b = none()?.wire()
     let n = none()
-    let a = n?.let { n.v }
-    return if a == null { 1 } else { 0 }
+    let c = n?.let { n.v }
+    return (if a == null { 1 } else { 0 }) + (if b == null { 1 } else { 0 }) + (if c == null { 1 } else { 0 })
 }
 
 // Both arms reached from ONE call site, so a join that only ever saw the present
@@ -130,16 +110,10 @@ fn an_unmarked_value_chains_through_two_safe_navs() -> int {
 //
 // The producing form does not matter, which is why one fix closed all three.
 
-@test(returns = 3)
+@test(returns = 36)
 fn a_nobox_value_chains_through_two_safe_navs() -> int {
     let h: Holder? = Holder { v: NV { x: 3, y: 6 }, n: 1 }
-    return h?.v?.x ?? -1
-}
-
-@test(returns = 6)
-fn the_chain_reads_the_SECOND_field_too() -> int {
-    let h: Holder? = Holder { v: NV { x: 3, y: 6 }, n: 1 }
-    return h?.v?.y ?? -1
+    return (h?.v?.x ?? -1) * 10 + (h?.v?.y ?? -1)
 }
 
 // The absent arm: the fallback must fire rather than the chain reading leaves

@@ -80,6 +80,23 @@
     assert_eq(sy, 6.0)
 }
 
+@test fn map_nobox_enumerate_reads_values() {
+    let m: Map<string, Vec2> = map_new()
+    m["a"] = Vec2 { x: 1.0, y: 2.0 }
+    m["b"] = Vec2 { x: 3.0, y: 4.0 }
+    let n = 0
+    let sum = 0.0
+    let index_sum = 0
+    for (i, (k, v)) in enumerate(m) {
+        n += 1
+        index_sum += i
+        sum += v.x + v.y
+    }
+    assert_eq(n, 2)
+    assert_eq(index_sum, 1)
+    assert_eq(sum, 10.0)
+}
+
 // clear() retains column capacity; the map must still behave as empty.
 @test fn map_nobox_clear_then_rebuild() {
     let m: Map<string, Vec2> = map_new()

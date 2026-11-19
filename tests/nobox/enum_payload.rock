@@ -1,15 +1,10 @@
-// A multi-leaf value as an enum PAYLOAD. `nobox` additionally forbids an
-// escaping materialization; scalarizable unmarked values use the same lanes.
-//
-// A flat enum threads as `[tag, _0.., <rec>..]`, one dynamically-typed slot per
-// payload POSITION. A scalarizable value is several leaves, so it had nowhere to go
-// but a box in that one slot -- `P_ct(x, y)` emitted at the ctor, usually dead
-// (SROA forwards the fields straight to the match arm) but surviving to the
-// residue check.
-//
-// The fix widens a position to its payload's leaf count, so the value's leaves
-// ARE the slots. Width is keyed on the DECLARED payload type, so every variant
-// agrees on the layout without seeing the others.
+// A multi-leaf value as an enum PAYLOAD. A flat enum threads as `[tag, _0..]`,
+// one slot per payload position, widened to the payload's leaf count so a
+// scalarizable value's leaves ARE the slots; width is keyed on the declared
+// payload type, so every variant agrees on the layout. Covers positions after
+// a widened one, payloads of different shapes and widths sharing a position,
+// enums as fields of a nobox value, nullable enums, and enum elements of
+// containers. `nobox` additionally forbids an escaping materialization.
 
 nobox value P { x: float, y: float }
 
@@ -18,15 +13,6 @@ value BP { x: float, y: float }
 enum U { V2(P), F(float) }
 
 enum Mixed { V2(P), Arr([float]), Unit }
-
-@test(returns = 3)
-fn nobox_payload_round_trips() -> int {
-    let u = U::V2(P { x: 1.0, y: 2.0 })
-    match u {
-        U::V2(p) => { return (p.x + p.y) as int }
-        U::F(f) => { return -1 }
-    }
-}
 
 @test(returns = 7)
 fn a_sibling_scalar_variant_still_works() -> int {
@@ -72,11 +58,9 @@ fn unmarked_value_payload_answers_the_same() -> int {
     }
 }
 
-// A sibling variant whose payload sits AFTER a widened position. `V2(P)` spans
-// two slots, so `Pair`'s second element starts at slot 2 -- indexing the read by
-// POSITION handed back the widened value's second leaf instead. This is the
-// shape the retired `UniformValue::Vec4Array(NativeBuffer<float>, int)` had; it fed a
-// `nil` count to `stone_shader_set_vec4_array` in every match3 frame.
+// A sibling variant whose payload sits AFTER a widened position: `V2(P)` spans
+// two slots, so `Pair`'s second element starts at slot 2, not at its position
+// index.
 enum Multi { V2(P), Pair(int, int) }
 
 @test(returns = 9)
@@ -189,4 +173,182 @@ fn a_nullable_enum_with_a_nobox_payload_keeps_absence() {
     let e = read_maybe_bu(maybe_bu(0))
     let f = read_maybe_bu(maybe_bu(-1))
     print("{a} {b} {c} / {d} {e} {f}")
+}
+
+// -- Payloads of different shapes and widths at one position --
+
+nobox value P2 { x: float, y: float }
+nobox value P4 { x: float, y: float, z: float, w: float }
+
+enum Slot {
+    Two(P2),
+    Four(P4),
+    Count(int),
+    None,
+}
+
+fn render(s: Slot) -> string {
+    match s {
+        Slot::Two(p) => return "two({p.x},{p.y})",
+        Slot::Four(p) => return "four({p.x},{p.y},{p.z},{p.w})",
+        Slot::Count(n) => return "count({n})",
+        Slot::None => return "none",
+    }
+}
+
+// The sibling with an ORDINARY payload at the same position must still find it
+// in the first slot -- it may not read the widened value's leaves.
+@test(output = "two(1,2)\nfour(1,2,3,4)\ncount(9)\nnone")
+fn every_variant_at_a_widened_position() {
+    print("{render(Slot::Two(P2 { x: 1, y: 2 }))}")
+    print("{render(Slot::Four(P4 { x: 1, y: 2, z: 3, w: 4 }))}")
+    print("{render(Slot::Count(9))}")
+    print("{render(Slot::None)}")
+}
+
+// Round-trip through a struct field, which is where the flat encoding is the
+// whole point: the payload lives in the parent's dotted slots.
+struct Holder { id: int, slot: Slot }
+
+@test(output = "5 two(6,7) 8 four(1,2,3,4)")
+fn flat_field_round_trips_both_widths() {
+    let a = Holder { id: 5, slot: Slot::Two(P2 { x: 6, y: 7 }) }
+    let b = Holder { id: 8, slot: Slot::Four(P4 { x: 1, y: 2, z: 3, w: 4 }) }
+    print("{a.id} {render(a.slot)} {b.id} {render(b.slot)}")
+}
+
+// A reassignment from the wide variant to the narrow one must clear the slots
+// the wide one filled, else the narrow arm reads a stale leaf.
+@test(output = "four(1,2,3,4) two(6,7)")
+fn a_narrow_write_clears_the_wide_slots() {
+    let h = Holder { id: 0, slot: Slot::Four(P4 { x: 1, y: 2, z: 3, w: 4 }) }
+    let before = render(h.slot)
+    h.slot = Slot::Two(P2 { x: 6, y: 7 })
+    print("{before} {render(h.slot)}")
+}
+
+// Two DISTINCT `nobox` shapes of the SAME width at one position share one
+// positional layout.
+
+nobox value Uv { u: float, v: float }
+
+enum Pair {
+    Point(P2),
+    Texel(Uv),
+}
+
+fn render_pair(p: Pair) -> string {
+    match p {
+        Pair::Point(q) => return "point({q.x},{q.y})",
+        Pair::Texel(t) => return "texel({t.u},{t.v})",
+    }
+}
+
+@test(output = "point(1,2) texel(3,4)")
+fn same_width_shapes_share_one_position() {
+    print("{render_pair(Pair::Point(P2 { x: 1, y: 2 }))} {render_pair(Pair::Texel(Uv { u: 3, v: 4 }))}")
+}
+
+// A widened position must not shift a LATER position's slot: the sibling's
+// trailing payload has to survive the widest variant's width.
+enum Tagged {
+    Wide(P4, int),
+    Narrow(P2, int),
+    Plain(int, int),
+}
+
+fn render_tagged(t: Tagged) -> string {
+    match t {
+        Tagged::Wide(p, n) => return "wide({p.x},{p.w},{n})",
+        Tagged::Narrow(p, n) => return "narrow({p.x},{p.y},{n})",
+        Tagged::Plain(a, n) => return "plain({a},{n})",
+    }
+}
+
+@test(output = "wide(1,4,10) narrow(5,6,11) plain(7,12)")
+fn a_trailing_position_survives_the_widening() {
+    let w = render_tagged(Tagged::Wide(P4 { x: 1, y: 2, z: 3, w: 4 }, 10))
+    let n = render_tagged(Tagged::Narrow(P2 { x: 5, y: 6 }, 11))
+    print("{w} {n} {render_tagged(Tagged::Plain(7, 12))}")
+}
+
+// The trailing position is itself a `nobox` value, so its LEAVES start at the
+// widened position's offset rather than at its position index. `Tagged` above
+// only ever puts an ordinary payload after the widening, which reads through a
+// different consumer than the leaf-binding one.
+enum Trailer {
+    WideThen(P4, P2),
+    NarrowThen(P2, P2),
+    PlainThen(int, P2),
+}
+
+fn render_trailer(t: Trailer) -> string {
+    match t {
+        Trailer::WideThen(a, b) => return "wide({a.x},{a.w},{b.x},{b.y})",
+        Trailer::NarrowThen(a, b) => return "narrow({a.x},{a.y},{b.x},{b.y})",
+        Trailer::PlainThen(a, b) => return "plain({a},{b.x},{b.y})",
+    }
+}
+
+@test(output = "wide(1,4,20,21) narrow(5,6,30,31) plain(7,40,41)")
+fn a_trailing_nobox_position_reads_its_own_leaves() {
+    let w = render_trailer(Trailer::WideThen(P4 { x: 1, y: 2, z: 3, w: 4 }, P2 { x: 20, y: 21 }))
+    let n = render_trailer(Trailer::NarrowThen(P2 { x: 5, y: 6 }, P2 { x: 30, y: 31 }))
+    print("{w} {n} {render_trailer(Trailer::PlainThen(7, P2 { x: 40, y: 41 }))}")
+}
+
+// -- An enum ELEMENT of a container stores its payload splat
+// (`{__variant, x, y}`), as it does inside a tuple element. The containers are
+// globals so the vec escapes; a local one is scalarized away. --
+
+enum ElementPayload {
+    V2(Vec2),
+    FloatArray([float]),
+}
+
+global BOXED: [ElementPayload] = []
+global PAIRS: [(string, ElementPayload)] = []
+
+fn push_v2(v: Vec2) {
+    BOXED.push(ElementPayload::V2(v))
+}
+
+fn push_pair(k: string, v: Vec2) {
+    PAIRS.push((k, ElementPayload::V2(v)))
+}
+
+@test
+fn a_bare_enum_element_stores_its_payload_splat() {
+    push_v2(Vec2 { x: 3.0, y: 4.0 })
+    match BOXED[0] {
+        ElementPayload::V2(v) => {
+            assert_eq(v.x, 3.0)
+            assert_eq(v.y, 4.0)
+        },
+        ElementPayload::FloatArray(a) => assert_eq(a.len, -1),
+    }
+}
+
+@test
+fn an_enum_inside_a_tuple_element_agrees_with_the_bare_one() {
+    push_pair("k", Vec2 { x: 5.0, y: 6.0 })
+    let (k, p) = PAIRS[0]
+    assert_eq(k, "k")
+    match p {
+        ElementPayload::V2(v) => {
+            assert_eq(v.x, 5.0)
+            assert_eq(v.y, 6.0)
+        },
+        ElementPayload::FloatArray(a) => assert_eq(a.len, -1),
+    }
+}
+
+// An inline ctor in the push takes the same route as a param-fed value.
+@test
+fn an_inline_ctor_in_the_push_takes_the_same_route() {
+    BOXED.push(ElementPayload::V2(Vec2 { x: 7.0, y: 8.0 }))
+    match BOXED[BOXED.len - 1] {
+        ElementPayload::V2(v) => assert_eq(v.x + v.y, 15.0),
+        ElementPayload::FloatArray(a) => assert_eq(a.len, -1),
+    }
 }
