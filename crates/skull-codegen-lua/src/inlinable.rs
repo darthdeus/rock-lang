@@ -418,6 +418,8 @@ pub(crate) fn alias_int_to_float(
     }
 }
 
+/// A folded child `StringConcat` contributes its own operands; any other
+/// operand, including an unfolded concat, stays one operand.
 pub(crate) fn concat_run(
     func: &MirFunc,
     inlinable: &[bool],

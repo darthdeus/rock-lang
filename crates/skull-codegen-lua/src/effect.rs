@@ -217,6 +217,7 @@ impl Emitter<'_> {
                 }
             }
             Inst::ArrayPush { arr, value, kind } => {
+                // `arr` is spelled up to four times; render it once.
                 let a = self.opnd_str(*arr);
                 match kind {
                     ContainerKind::Vec | ContainerKind::VecNonNull => {

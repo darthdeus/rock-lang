@@ -361,6 +361,8 @@ fn scalar_constants(ws: &Workspace) -> HashMap<ustr::Ustr, Lit> {
         }
 
         fn fold(&self, id: Idx<Expr>, depth: usize) -> Option<Lit> {
+            // Initializers nest without bound; a deep one stays a runtime
+            // expression rather than growing the compiler stack.
             if depth >= 64 {
                 return None;
             }
@@ -934,6 +936,7 @@ pub fn lua_int_vec(items: &[i64]) -> String {
 }
 
 /// Lua keywords never reach here: the tokenizer escapes them to `__rock_<kw>`.
+/// A bracketed constant key compiles to the same `TGETS` as dot syntax.
 fn is_lua_ident(s: &str) -> bool {
     let mut cs = s.chars();
     cs.next()

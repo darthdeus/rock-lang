@@ -61,7 +61,8 @@ pub(crate) fn render_scope(
     let cell_has_local = |cid: Idx<Cell>| -> bool {
         param_cells[raw(cid) as usize] || (!is_frame(&cid) && referenced[raw(cid) as usize])
     };
-    // `<local> = nil` kills keep dead slots out of LuaJIT exit snapshots.
+    // `<local> = nil` kills keep dead slots out of LuaJIT exit snapshots. A
+    // coroutine `__step` keeps raw cell names and frame fields; it gets none.
     let kills = if frame.is_some() {
         regalloc::NilKills::default()
     } else {

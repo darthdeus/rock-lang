@@ -751,7 +751,9 @@ impl Emitter<'_> {
     }
 
     // Nil writes into absent Lua hash slots can repeatedly rehash a full frame.
-    // Scoped vN temporaries evaluate every RHS once before any destination changes.
+    // Only compiler-owned plain frame fields take this path; user stores keep
+    // their assignment and metamethod behavior. Scoped vN temporaries evaluate
+    // every RHS once before any destination changes.
     pub(crate) fn write_frame_assignment(
         &self,
         out: &mut String,
