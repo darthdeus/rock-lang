@@ -2575,35 +2575,7 @@ impl<'a> Builder<'a> {
                     return Ok(out);
                 }
 
-                let nil = self.emit_cur(Inst::Const(Lit::Nil));
-                let present = self.emit_cur(Inst::NotEq(*v, nil));
-                let cells = self.fresh_cells(field_count);
-                let nil_bb = self.f.new_block();
-                let value_bb = self.f.new_block();
-                let join = self.f.new_block();
-                self.branch_to(present, value_bb, nil_bb);
-
-                self.cur = nil_bb;
-                for cell in &cells {
-                    let value = self.emit_cur(Inst::Const(Lit::Nil));
-                    self.store_cell(*cell, value);
-                }
-                self.f.set_term(self.cur, Term::Goto(join));
-
-                self.cur = value_bb;
-                let mut inner = shape.clone();
-                inner.nullable = false;
-                let leaves = self.cdata_leaves(*v, &inner)?;
-                for (cell, value) in cells.iter().zip(leaves) {
-                    self.store_cell(*cell, value);
-                }
-                self.f.set_term(self.cur, Term::Goto(join));
-
-                self.cur = join;
-                let mut out = Vec::with_capacity(1 + field_count);
-                out.push(present);
-                out.extend(self.load_cells(&cells));
-                Ok(out)
+                self.nullable_value_leaves(*v, shape, field_count, Self::cdata_leaves)
             }
             ValueRepr::Scalar(v) => self.cdata_leaves(*v, shape),
         }
@@ -2900,10 +2872,7 @@ impl<'a> Builder<'a> {
         let mut out = Vec::new();
         let mut offset = 0;
         for (i, (fname, fs)) in shape.fields.iter().enumerate() {
-            let count = match fs {
-                FieldShape::Prim => 1,
-                FieldShape::Nested(sub) => sub.leaf_count(),
-            };
+            let count = fs.leaf_count();
             let child_demand = &demand[offset..offset + count];
             offset += count;
             if !child_demand.iter().any(|&used| used) {
@@ -2947,46 +2916,23 @@ impl<'a> Builder<'a> {
         demand: &[bool],
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let count = demand[1..].iter().filter(|&&used| used).count();
-        let mut leaves =
-            self.nullable_value_leaf_range(fv, sub, 0..count + 1, |s, value, shape| {
-                s.cdata_leaf_demand(value, shape, &demand[1..])
-            })?;
+        let mut leaves = self.nullable_value_leaves(fv, sub, count, |s, value, shape| {
+            s.cdata_leaf_demand(value, shape, &demand[1..])
+        })?;
         if !demand[0] {
             leaves.remove(0);
         }
         Ok(leaves)
     }
 
-    fn nullable_child_leaf_range(
-        &mut self,
-        fv: Idx<Inst>,
-        sub: &ValueShape,
-        range: std::ops::Range<usize>,
-    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let payload = range.start.saturating_sub(1)..range.end.saturating_sub(1);
-        self.nullable_value_leaf_range(fv, sub, range, |s, value, shape| {
-            s.cdata_leaf_range(value, shape, payload)
-        })
-    }
-
+    /// Split a possibly nil box into presence and the requested payload leaves.
     fn nullable_value_leaves(
         &mut self,
         fv: Idx<Inst>,
         sub: &ValueShape,
+        field_count: usize,
         read: impl FnOnce(&mut Self, Idx<Inst>, &ValueShape) -> Result<Vec<Idx<Inst>>, CompilerError>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        self.nullable_value_leaf_range(fv, sub, 0..sub.leaf_count(), read)
-    }
-
-    fn nullable_value_leaf_range(
-        &mut self,
-        fv: Idx<Inst>,
-        sub: &ValueShape,
-        range: std::ops::Range<usize>,
-        read: impl FnOnce(&mut Self, Idx<Inst>, &ValueShape) -> Result<Vec<Idx<Inst>>, CompilerError>,
-    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let include_presence = range.start == 0 && !range.is_empty();
-        let field_count = range.end.saturating_sub(1) - range.start.saturating_sub(1);
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
         let present = self.emit_cur(Inst::NotEq(fv, nil));
         let cells = self.fresh_cells(field_count);
@@ -3009,11 +2955,8 @@ impl<'a> Builder<'a> {
         }
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = join;
-        let mut out = if include_presence {
-            vec![present]
-        } else {
-            Vec::new()
-        };
+        let mut out = Vec::with_capacity(1 + field_count);
+        out.push(present);
         out.extend(self.load_cells(&cells));
         Ok(out)
     }
@@ -3035,10 +2978,7 @@ impl<'a> Builder<'a> {
                     found = Some(field_shape);
                     break;
                 }
-                offset += match field_shape {
-                    FieldShape::Prim => 1,
-                    FieldShape::Nested(shape) => shape.leaf_count(),
-                };
+                offset += field_shape.leaf_count();
             }
             let field_shape = found?;
             selected = Some(field_shape);
@@ -3050,10 +2990,7 @@ impl<'a> Builder<'a> {
             }
         }
         let selected = selected?.clone();
-        let count = match &selected {
-            FieldShape::Prim => 1,
-            FieldShape::Nested(shape) => shape.leaf_count(),
-        };
+        let count = selected.leaf_count();
         Some((offset..offset + count, selected))
     }
 
@@ -3385,11 +3322,16 @@ impl<'a> Builder<'a> {
                     let representation = s.concrete_rep_id(&ty, RepUse::Return, false, false)?;
                     if let Some(shape) = s.scx.rep_arena().value_shape(representation) {
                         // Wide values retain the planner's boxed wire rather than widening a frame.
-                        let leaves = s.nullable_value_leaves(*v, shape, |s, value, inner| {
-                            let copy = s.boxed_copy_repr_of(value, inner, Some(payload))?;
-                            let copy = s.owned_value_children(copy)?;
-                            s.repr_to_leaves_shape(&copy, inner)
-                        })?;
+                        let leaves = s.nullable_value_leaves(
+                            *v,
+                            shape,
+                            shape.leaf_count() - 1,
+                            |s, value, inner| {
+                                let copy = s.boxed_copy_repr_of(value, inner, Some(payload))?;
+                                let copy = s.owned_value_children(copy)?;
+                                s.repr_to_leaves_shape(&copy, inner)
+                            },
+                        )?;
                         return Ok(Self::rebuild_from_leaves(shape, &leaves));
                     }
                 }
@@ -3590,7 +3532,8 @@ impl<'a> Builder<'a> {
                 ValueRepr::Scalar(fv)
             }
             FieldShape::Nested(sub) if sub.nullable => {
-                let leaves = self.nullable_child_leaf_range(fv, sub, 0..sub.leaf_count())?;
+                let leaves =
+                    self.nullable_value_leaves(fv, sub, sub.leaf_count() - 1, Self::cdata_leaves)?;
                 let copy = Self::rebuild_from_leaves(sub, &leaves);
                 let sub_ty = self.nested_owner_ty(shape.name, owner_ty, *fname, sub.name)?;
                 self.mark_borrowed_value_children(sub, &copy, sub_ty.as_deref())?;
