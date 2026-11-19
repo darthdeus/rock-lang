@@ -1,6 +1,5 @@
-// Generic newtypes in function signature positions (param + return).
-// Regression: these were rejected with "Type constructor 'Box' not found"
-// while generic structs in the same positions worked.
+// Generic newtypes in function signature positions (param + return), which
+// must resolve as generic structs do.
 
 newtype Box<T>(T)
 newtype DualBox<T, U>((T, U))
@@ -69,7 +68,7 @@ fn test_app_wrapped_through_fn_signature() {
     print(h.0.get() ?? 0)
 }
 
-// ---- Adversarial: newtype nested in other types in fn signatures ----
+// ---- Newtype nested in other types in fn signatures ----
 
 fn returns_vec_of_box<T>(x: T) -> [Box<T>] {
     [Box(x)]
