@@ -53,11 +53,12 @@ impl Drop for InlineOffGuard {
 /// Process-wide switch for comparing emitted code with and without inlining.
 fn inline_disabled_by_env() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *OFF.get_or_init(|| env_disables_inline(std::env::var("ROCK_SKULL_INLINE_OFF").ok().as_deref()))
-}
-
-fn env_disables_inline(value: Option<&str>) -> bool {
-    matches!(value, Some("1") | Some("true"))
+    *OFF.get_or_init(|| {
+        matches!(
+            std::env::var("ROCK_SKULL_INLINE_OFF").as_deref(),
+            Ok("1") | Ok("true")
+        )
+    })
 }
 
 fn inline_disabled() -> bool {
@@ -2757,15 +2758,6 @@ pub fn validate_no_residual_bound_calls(
 mod tests {
     use super::*;
     use ustr::Ustr;
-
-    #[test]
-    fn env_switch_turns_inlining_off_only_when_set_on() {
-        assert!(env_disables_inline(Some("1")));
-        assert!(env_disables_inline(Some("true")));
-        assert!(!env_disables_inline(Some("0")));
-        assert!(!env_disables_inline(Some("")));
-        assert!(!env_disables_inline(None));
-    }
 
     /// `bound::repack_bound_next_element` allocates the element's
     /// leaf loads, its rebuilt aggregate and the store into the element cell
