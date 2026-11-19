@@ -936,7 +936,7 @@ fn f(xs: [[int]], i: int) -> int { return xs[pick(xs[0])][i] }";
 
 #[test]
 fn whole_gc_snapshots_read_only_demanded_leaves() {
-    let src = include_str!("../../../tests/values/demanded_value_copy.rock");
+    let src = include_str!("../../../tests/values/copies.rock");
     for name in ["consume", "read_only", "read_produced"] {
         let lua = emit_clean(src, name);
         for unused in [
