@@ -1,4 +1,4 @@
-use crate::common::emit_rejection;
+use crate::common::{compile_and_run, emit_module, emit_rejection};
 
 const ARENA_PARAM: &str = r#"
 value G { x: float, y: float }
@@ -25,17 +25,6 @@ fn main() {
     print("{probe(a)}")
 }
 "#;
-
-#[test]
-fn an_arena_at_a_column_element_rejects() {
-    let msg = emit_rejection(ARENA_PARAM);
-    assert!(msg.contains("Arena<G>") && msg.contains("probe"));
-}
-
-#[test]
-fn an_arena_at_a_boxed_element_is_admitted() {
-    assert!(crate::common::try_emit_module(ARENA_BOXED_ELEM).is_ok());
-}
 
 const CTOR_RETURNS_COLUMN_VEC: &str = r#"
 value G { x: float, y: float }
@@ -78,18 +67,22 @@ fn main() {
 "#;
 
 #[test]
-fn an_opaque_body_returning_a_column_vec_rejects() {
-    let msg = emit_rejection(CTOR_RETURNS_COLUMN_VEC);
-    assert!(msg.contains("cannot BUILD column-stored `[G]`") && msg.contains("make"));
-}
-
-#[test]
-fn an_opaque_body_returning_a_boxed_vec_is_admitted() {
-    assert!(crate::common::try_emit_module(CTOR_RETURNS_BOXED_VEC).is_ok());
+fn opaque_bodies_reject_column_storage_and_admit_boxed_storage() {
+    for (src, needles) in [
+        (ARENA_PARAM, ["Arena<G>", "probe"]),
+        (
+            CTOR_RETURNS_COLUMN_VEC,
+            ["cannot BUILD column-stored `[G]`", "make"],
+        ),
+    ] {
+        let msg = emit_rejection(src);
+        assert!(needles.iter().all(|n| msg.contains(n)), "{msg}");
+    }
+    emit_module(ARENA_BOXED_ELEM);
+    emit_module(CTOR_RETURNS_BOXED_VEC);
 }
 
 #[test]
 fn the_stdlib_constructors_still_mint_column_storage() {
-    let lua = crate::common::emit_module(STDLIB_CTORS_STILL_ROUTE);
-    assert_eq!(crate::common::run_main(&lua), "135");
+    assert_eq!(compile_and_run(STDLIB_CTORS_STILL_ROUTE), "135");
 }

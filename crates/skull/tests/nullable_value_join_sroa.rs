@@ -137,31 +137,15 @@ fn main() {
 "#;
 
 #[test]
-fn if_let_join_of_nullable_value_field_builds_no_box() {
+fn if_let_unwrap_and_coalesce_of_a_nullable_value_field_build_no_box() {
     let lua = emit_module(JOIN);
-    let body = function_body(&lua, "poll_in");
-    for ctor in ["Tk_vt(", "Tk_ct(", "Ent_vt(", "Ent_ct("] {
-        assert!(!body.contains(ctor));
+    for name in ["poll_in", "first_a", "reads_st"] {
+        let body = function_body(&lua, name);
+        for ctor in ["Tk_vt(", "Tk_ct(", "Ent_vt(", "Ent_ct("] {
+            assert!(!body.contains(ctor), "{name}: {body}");
+        }
     }
     assert_eq!(run_main(&lua), "3 true 3 true false 4 true -1 false");
-}
-
-#[test]
-fn unwrap_of_nullable_value_field_builds_no_box() {
-    let lua = emit_module(JOIN);
-    let body = function_body(&lua, "first_a");
-    for ctor in ["Tk_vt(", "Tk_ct(", "Ent_vt(", "Ent_ct("] {
-        assert!(!body.contains(ctor));
-    }
-}
-
-#[test]
-fn coalesce_return_binding_of_nullable_value_field_builds_no_box() {
-    let lua = emit_module(JOIN);
-    let body = function_body(&lua, "reads_st");
-    for ctor in ["Tk_vt(", "Tk_ct(", "Ent_vt(", "Ent_ct("] {
-        assert!(!body.contains(ctor));
-    }
 }
 
 #[test]
