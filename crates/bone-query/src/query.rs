@@ -3048,11 +3048,11 @@ pub(crate) fn variant_record_fields(
 fn smallest_expr_covering(
     body: &Body,
     offset: usize,
-    matches: impl Fn(&hir::Expr) -> bool,
+    matches: impl Fn(Idx<hir::Expr>, &hir::Expr) -> bool,
 ) -> Option<Idx<hir::Expr>> {
     body.expr_arena
         .iter()
-        .filter(|(_, expr)| matches(expr))
+        .filter(|&(e, expr)| matches(e, expr))
         .filter_map(|(e, _)| {
             let (start, end) = body.expr_spans.get(e)?.offset_range();
             (start <= offset && offset < end).then(|| (end - start, e))
@@ -3072,7 +3072,9 @@ pub(crate) fn match_arms_fill(
     let body = module.bodies.get(&owner)?;
     let bi = inf.per_fn.get(&owner)?;
 
-    let e = smallest_expr_covering(body, offset, |expr| matches!(expr, hir::Expr::Match { .. }))?;
+    let e = smallest_expr_covering(body, offset, |_, expr| {
+        matches!(expr, hir::Expr::Match { .. })
+    })?;
     let (enum_name, missing) = match_missing_variants(ws, body, bi, e)?;
     let arms_text: Vec<String> = missing
         .iter()
@@ -3132,7 +3134,7 @@ pub(crate) fn struct_fields_fill(
     let body = module.bodies.get(&owner)?;
     let bi = inf.per_fn.get(&owner)?;
 
-    let e = smallest_expr_covering(body, offset, |expr| {
+    let e = smallest_expr_covering(body, offset, |_, expr| {
         matches!(expr, hir::Expr::StructLiteral { .. })
     })?;
     let hir::Expr::StructLiteral {
@@ -3461,30 +3463,15 @@ pub fn generate_function(
     let body = module.bodies.get(&owner)?;
     let bi = inf.per_fn.get(&owner)?;
 
-    let mut best: Option<(usize, Idx<hir::Expr>)> = None;
-    for (e, expr) in body.expr_arena.iter() {
-        let hir::Expr::Call {
-            callee: hir::Callee::Unresolved { .. },
-            ..
-        } = expr
-        else {
-            continue;
-        };
-        if bi.resolved_overload_calls.contains_key(&e) {
-            continue;
-        }
-        let Some(sp) = body.expr_spans.get(e) else {
-            continue;
-        };
-        let (s, en) = sp.offset_range();
-        if s <= offset && offset < en {
-            let len = en - s;
-            if best.map_or(true, |(bl, _)| len < bl) {
-                best = Some((len, e));
+    let e = smallest_expr_covering(body, offset, |e, expr| {
+        matches!(
+            expr,
+            hir::Expr::Call {
+                callee: hir::Callee::Unresolved { .. },
+                ..
             }
-        }
-    }
-    let (_, e) = best?;
+        ) && !bi.resolved_overload_calls.contains_key(&e)
+    })?;
     let hir::Expr::Call {
         callee: hir::Callee::Unresolved { name, .. },
         args,
