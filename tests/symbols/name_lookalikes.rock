@@ -1,5 +1,9 @@
+// Names that look like compiler-synthesized names, or differ only slightly from
+// each other, must resolve to the user's own definitions.
+
 // Duplicate names are checked within their declaration owner.
 struct MemberControl { x: int, y: float }
+
 value ValueMemberControl { x: int, y: int }
 
 enum MemberEvents {
@@ -12,6 +16,7 @@ enum MemberEvents {
 enum OtherMemberEvents { Tick(int) }
 
 newtype SymbolId(int)
+
 newtype SymbolIds(string)
 
 @test
@@ -51,4 +56,23 @@ fn distinct_nearby_newtype_names() {
     let ids = SymbolIds("many")
     assert_eq(id.0, 29)
     assert_eq(ids.0, "many")
+}
+
+@nomangle fn worker_0__on_killed() -> int { return 42 }
+co fn worker() -> Coroutine<int> {
+    yield 1
+}
+
+@test(output = "42")
+fn a_hook_name_without_a_hook_compiles() {
+    let w = worker()
+    print("{worker_0__on_killed()}")
+}
+
+@nomangle fn bar_0__lambda0() -> int { return 3 }
+fn bar() -> int { return 1 }
+
+@test(output = "3 1")
+fn a_lambda_name_without_a_lambda_compiles() {
+    print("{bar_0__lambda0()} {bar()}")
 }

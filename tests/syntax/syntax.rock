@@ -1,0 +1,234 @@
+// Lexing and parsing corners: keyword-named identifiers, leading-dot floats,
+// leading-minus continuation, statement separators and let bindings.
+
+fn lua_keywords(end: int, local: int, nil: int, repeat: int, until: int, elseif: int, then: int, function: int, not: int, and: int, or: int, goto: int, do: int) -> int {
+    return end + local + nil + repeat + until + elseif + then + function + not + and + or + goto + do
+}
+
+fn js_keywords(var: int, this: int, arguments: int, new: int, delete: int, typeof: int, void: int, class: int, switch: int, case: int, default: int, catch: int, try: int, finally: int, throw: int, with: int, eval: int, instanceof: int, debugger: int, export: int, extends: int, super: int, undefined: int, NaN: int, Infinity: int) -> int {
+    return var + this + arguments + new + delete + typeof + void + class + switch + case + default + catch + try + finally + throw + with + eval + instanceof + debugger + export + extends + super + undefined + NaN + Infinity
+}
+
+// The runtime names stay callable inside a body that shadows them.
+fn runtime_names(math: int, string: int, ffi: int, bit: int, select: int, print: int, error: int, pairs: int, setmetatable: int) -> int {
+    let t = math + string + ffi + bit + select + print + error + pairs + setmetatable
+    return t + floor(1.5) as int + "ab".len()
+}
+
+@test
+fn lua_keyword_parameters() {
+    assert_eq(lua_keywords(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1), 13)
+}
+
+@test
+fn js_keyword_parameters() {
+    assert_eq(js_keywords(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1), 25)
+}
+
+@test
+fn runtime_name_parameters() {
+    assert_eq(runtime_names(1, 1, 1, 1, 1, 1, 1, 1, 1), 12)
+}
+
+@test
+fn keyword_lambda_parameters() {
+    let f = (end: int, var: int) => end * 10 + var
+    assert_eq(f(1, 2), 12)
+}
+
+@test
+fn keyword_locals() {
+    let end = 1
+    let var = 2
+    let local = 3
+    let this = 4
+    let function = 5
+    assert_eq(end + var + local + this + function, 15)
+}
+
+@test
+fn test_leading_dot_literal() {
+    let a = .35
+    assert_eq(a, 0.35)
+    let b: float = .5
+    assert_eq(b, 0.5)
+    let xs = [.1, .25, .5]
+    assert_eq(xs[0] + xs[1] + xs[2], 0.85)
+    assert_eq(2.0 + .5, 2.5)
+}
+
+@test
+fn test_tuple_index_still_works() {
+    let w = (3, 7)
+    assert_eq(w.0, 3)
+    assert_eq(w.1, 7)
+}
+
+@test(output = "5\nhello")
+fn test_tuple_let_binding_basic() {
+    let (a, b) = (5, "hello")
+    print(a)
+    print(b)
+}
+
+@test(output = "10\n20\nRED")
+fn test_tuple_let_binding_with_if_expr() {
+    let has_hit = false
+    let (pos, color) = if has_hit {
+        ((5, 10), "GREEN")
+    } else {
+        ((10, 20), "RED")
+    }
+
+    print(pos.0)
+    print(pos.1)
+    print(color)
+}
+
+@test(output = "5\nGREEN")
+fn test_tuple_let_binding_with_if_expr_simple() {
+    let (pos, color) = if true {
+        (5, "GREEN")
+    } else {
+        (10, "RED")
+    }
+
+    print(pos)
+    print(color)
+}
+
+@test(output = "42\nworld")
+fn test_tuple_let_binding_with_type_annotation() {
+    let (x, y): (int, string) = (42, "world")
+    print(x)
+    print(y)
+}
+
+inline(lua) fn test_keywords(end: int, function: string) -> string = """
+    return tostring(__rock_end) .. __rock_function  -- Keep Lua syntax in extern block
+
+"""
+
+@test(output = "42test", backends = "lua")
+fn test_keyword_names_in_extern_functions() {
+    print(test_keywords(42, "test"))
+}
+
+fn continued_return() -> float {
+    return 10.0
+        - 1.0
+}
+
+fn add_pair(a: float, b: float) -> float {
+    return a + b
+}
+
+@test
+fn leading_minus_continues_the_expression() {
+    let value = 10.0
+        - 1.0
+    assert_eq(value, 9.0)
+    let a = 10.0
+    let b = 1.0
+    assert_eq(abs(a
+        - b), 9.0)
+    assert_eq(continued_return(), 9.0)
+}
+
+@test
+fn leading_minus_after_a_comma_remains_unary() {
+    assert_eq(add_pair(
+        10.0,
+        - 1.0,
+    ), 9.0)
+}
+
+// --- Enum: newline-separated variants ---
+
+enum NewlineEnum {
+    X
+    Y
+    Z
+}
+
+@test(output = "X")
+fn test_newline_separated_enum_compiles() {
+    let v = NewlineEnum::X
+    let s = match v {
+        NewlineEnum::X => "X",
+        NewlineEnum::Y => "Y",
+        NewlineEnum::Z => "Z",
+    }
+    print(s)
+}
+
+// --- Match arms: trailing comma optional after the final arm ---
+
+enum Color { Red, Green, Blue }
+
+@test(output = "red")
+fn test_match_arms_without_commas() {
+    let c = Color::Red
+    let name = match c {
+        Color::Red => "red"
+        Color::Green => "green"
+        Color::Blue => "blue"
+    }
+    print(name)
+}
+
+// --- Enum: comments between variants ---
+
+enum BlendMode {
+    Alpha,    // Normal alpha blending
+    // This is a comment between variants
+    Additive, // Additive blending for effects
+    /* Block comment */
+    Multiply, // Multiply blending
+}
+
+enum TestEnum {
+    First,
+    // Comment at the end
+    Second
+}
+
+@test
+fn test_enum_with_comments() {
+    let mode = BlendMode::Multiply
+    let test = TestEnum::Second
+    assert(mode == BlendMode::Multiply)
+    assert(test == TestEnum::Second)
+}
+
+value V2 {
+    x: float,
+    y: float,
+}
+
+// `value` as a param name, local binding, and field name -- all stay
+// as plain identifiers.
+struct Box {
+    value: int,
+}
+
+fn id_param(value: int) -> int {
+    return value
+}
+
+fn id_local() -> int {
+    let value = 7
+    return value
+}
+
+@test(output = "12\n7\n42\n1\n2")
+fn test_value_keyword_and_ident() {
+    let b = Box { value: 12 }
+    print("{b.value}")
+    print("{id_local()}")
+    print("{id_param(42)}")
+
+    let v = V2 { x: 1, y: 2 }
+    print("{v.x.floor()}")
+    print("{v.y.floor()}")
+}

@@ -1,8 +1,48 @@
-// `table_unset(t, k)` is the stdlib primitive `t[k] = nil` backing Map.remove
-// and the Vec drain ops (pop / remove_at / swap_remove / clear). On JS it
-// dispatches on `instanceof Map` -- `map.delete(k)` vs `delete arr[k]` -- so a
-// removed Map key reads back as nil and a popped Vec slot becomes a hole the
-// tracked `.len` skips.
+// Map equality and table unset behavior on the JS backend.
+
+@test(output = "false false true")
+fn map_direct_eq() {
+    let a = map_new()
+    a[1] = 10
+    let diff_value = map_new()
+    diff_value[1] = 20
+    let diff_size = map_new()
+    diff_size[1] = 10
+    diff_size[2] = 20
+    let reordered = map_new()
+    reordered[2] = 20
+    reordered[1] = 10
+    print("{a == diff_value} {a == diff_size} {diff_size == reordered}")
+}
+
+@test(output = "true false")
+fn map_string_keys() {
+    let a = map_new()
+    a["x"] = 1
+    let b = map_new()
+    b["x"] = 1
+    let c = map_new()
+    c["x"] = 2
+    print("{a == b} {a == c}")
+}
+
+// A Map behind a reference-struct field takes the eq-walk path.
+
+struct Holder {
+    m: Map<int, int>,
+    tag: int,
+}
+
+@test(output = "true false")
+fn map_struct_field() {
+    let a = Holder { m: map_new(), tag: 9 }
+    a.m[1] = 10
+    let b = Holder { m: map_new(), tag: 9 }
+    b.m[1] = 10
+    let c = Holder { m: map_new(), tag: 9 }
+    c.m[1] = 99
+    print("{a == b} {a == c}")
+}
 
 // A removed Map key reads back as nil and remove returns the old value;
 // siblings survive, and removing an absent key returns null.

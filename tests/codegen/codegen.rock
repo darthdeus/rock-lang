@@ -1,0 +1,121 @@
+// Backend edge cases: JS publishers and opaque calls, inline headers and scalar
+// constant boundaries.
+
+nobox value Pair { x: int, y: int }
+
+@scalar_abi inline(lua) fn publish_probe<T>(value: T) -> (bool, int) =
+    "return true, 7"
+
+@scalar_abi inline(js) fn publish_probe<T>(value: T) -> (bool, int) =
+    "return __rock_publish(true, 7);"
+
+fn generic_publish_sum() -> int {
+    let (ok_pair, pair_value) = publish_probe(Pair { x: 1, y: 2 })
+    let (ok_int, int_value) = publish_probe(3)
+    return pair_value + int_value
+}
+
+@test(returns = 14, backends = "js")
+fn generic_inline_publishers_run_at_each_instance() -> int {
+    generic_publish_sum()
+}
+
+@nomangle fn opaque_root_probe(x: int) -> int { x + 7 }
+
+inline(lua) fn opaque_call_probe(x: int) -> int = "return opaque_root_probe(x)"
+
+inline(js) fn opaque_call_probe(x: int) -> int = """
+    return opaque_root_probe(x);
+"""
+
+@test(returns = 12, backends = "js")
+fn opaque_js_calls_keep_their_rock_callee() -> int {
+    opaque_call_probe(5)
+}
+
+@nomangle inline(lua) fn opaque_sibling_probe(x: int) -> int = "return x * 5"
+
+@nomangle inline(js) fn opaque_sibling_probe(x: int) -> int =
+    "return x * 5;"
+
+inline(lua) fn opaque_sibling_call_probe(x: int) -> int = "return opaque_sibling_probe(x)"
+
+inline(js) fn opaque_sibling_call_probe(x: int) -> int = """
+    return opaque_sibling_probe(x);
+"""
+
+@test(returns = 20, backends = "js")
+fn opaque_js_calls_keep_their_js_sibling() -> int {
+    opaque_sibling_call_probe(4)
+}
+
+inline(lua) fn inline_member_header() -> int = """
+local holder = {}
+function holder.answer()
+    return 37
+end
+return holder.answer()
+"""
+
+inline(js) fn inline_member_header() -> int = "return 37;"
+
+@test(returns = 37)
+fn inline_member_function_is_not_a_compiler_definition() -> int {
+    inline_member_header()
+}
+
+global BOUNDARY_BASE: int = 8
+
+global BOUNDARY_READS: int = 0
+
+fn boundary_input() -> int { BOUNDARY_READS += 1; return 8 }
+
+const BOUNDARY_MUTABLE: int = BOUNDARY_BASE * 128
+
+const BOUNDARY_EFFECTFUL: int = boundary_input() * 128
+
+const BOUNDARY_UINT_MAX: uint = 4294967295 as uint
+
+const BOUNDARY_UINT_ONE: uint = 1 as uint
+
+const BOUNDARY_WRAPPED: uint = BOUNDARY_UINT_MAX + BOUNDARY_UINT_ONE
+
+const BOUNDARY_DIVZERO: float = 1.0 / 0.0
+
+const BOUNDARY_OVERFLOW: float = 1e308 * 1e308
+
+const BOUNDARY_LIMIT: int = 9007199254740991
+
+const BOUNDARY_OUTSIDE: int = BOUNDARY_LIMIT + 2
+
+const BOUNDARY_NEGATIVE_ZERO: float = -0.0 * 2.0
+
+const BOUNDARY_BOOL: bool = true
+
+const BOUNDARY_FOLDED_BASE: int = 8
+
+const BOUNDARY_FOLDED_INT: int = BOUNDARY_FOLDED_BASE * 128
+
+const BOUNDARY_SUM: float = 1.0 + 0.000001
+
+const BOUNDARY_SCALE: float = (4.5 - 1.5) * 2.0
+
+const BOUNDARY_QUOTIENT: float = 7 / 2
+
+@test
+fn scalar_constant_values_preserve_runtime_boundaries() {
+    assert_eq(BOUNDARY_MUTABLE, 1024)
+    assert_eq(BOUNDARY_EFFECTFUL, 1024)
+    assert_eq(BOUNDARY_READS, 1)
+    assert_eq(BOUNDARY_WRAPPED, 0 as uint)
+    assert(BOUNDARY_DIVZERO > 1e308, "division by zero remains infinite")
+    assert(BOUNDARY_OVERFLOW > 1e308, "overflow remains infinite")
+    assert_eq(BOUNDARY_OUTSIDE, 9007199254740991 + 2)
+    assert(1.0 / BOUNDARY_NEGATIVE_ZERO < 0.0, "negative zero survives")
+    assert(BOUNDARY_BOOL, "boolean constants remain true")
+    assert_eq(BOUNDARY_FOLDED_INT, 1024)
+    assert_eq(BOUNDARY_SUM, 1.000001)
+    assert_eq(BOUNDARY_SCALE, 6.0)
+    assert_eq(BOUNDARY_QUOTIENT, 3.5)
+    assert_eq(2147483648 | 1, -2147483647)
+}
