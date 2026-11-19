@@ -1,4 +1,5 @@
-// Coroutine basics: yield/resume and independent instances held in a vec.
+// Coroutine basics: resume and yield types, linear bodies, resume values, tuple
+// state, early exit, exhaustion, handle typing and overloads.
 
 co fn echo() -> Coroutine<string> {
     print("started")
@@ -43,4 +44,540 @@ fn test_coroutine_in_vector_int() {
     print(b.resume())
     print(a.resume())
     print(b.resume())
+}
+
+co fn count_three(start: int) -> Coroutine<int> {
+    yield start
+    yield start + 1
+    yield start + 2
+}
+
+@test(output = "10 11 12\n1 100 2 101")
+fn test_basic_and_independent_instances() {
+    let c = count_three(10)
+    let a = c.resume() ?? -1
+    let b = c.resume() ?? -1
+    let d = c.resume() ?? -1
+    print("{a} {b} {d}")
+
+    let x = count_three(1)
+    let y = count_three(100)
+    let r1 = x.resume() ?? -1
+    let r2 = y.resume() ?? -1
+    let r3 = x.resume() ?? -1
+    let r4 = y.resume() ?? -1
+    print("{r1} {r2} {r3} {r4}")
+}
+
+co fn naturals() -> Coroutine<int> {
+    let n = 0
+    loop {
+        yield n
+        n = n + 1
+    }
+}
+
+co fn evens_up_to(limit: int) -> Coroutine<int> {
+    let i = 0
+    while i < limit {
+        if i % 2 == 0 {
+            yield i
+        }
+        i = i + 1
+    }
+}
+
+co fn running_sum() -> Coroutine<int> {
+    let sum = 0
+    let i = 1
+    loop {
+        sum = sum + i
+        yield sum
+        i = i + 1
+    }
+}
+
+fn take(c: Coroutine<int>, n: int) -> string {
+    let out = ""
+    for i in 0..n {
+        if i > 0 { out = out + " " }
+        out = out + "{c.resume() ?? -1}"
+    }
+    return out
+}
+
+@test(output = "0 1 2 3 4\n0 2 4 -1\n1 3 6 10 15")
+fn test_loop_generators() {
+    print(take(naturals(), 5))
+    print(take(evens_up_to(6), 4))
+    print(take(running_sum(), 5))
+}
+
+co fn greetings() -> Coroutine<string> {
+    yield "hello"
+    yield "world"
+    yield "!"
+}
+
+@test(output = "hello world !")
+fn test_string_coroutine() {
+    let g = greetings()
+    print("{g.resume() ?? "?"} {g.resume() ?? "?"} {g.resume() ?? "?"}")
+}
+
+co fn bool_seq() -> Coroutine<bool> {
+    yield true
+    yield false
+    yield true
+}
+
+co fn single_bool() -> Coroutine<bool> {
+    yield false
+}
+
+// A yielded false must stay distinct from the exhausted null.
+@test(output = "true false true\nfalse null")
+fn test_bool_coroutine_and_exhaustion() {
+    let b = bool_seq()
+    print("{b.resume() ?? false} {b.resume() ?? true} {b.resume() ?? false}")
+
+    let c = single_bool()
+    let first = c.resume()
+    let second = c.resume()
+    let first_str = "null"
+    if first != null { first_str = "{first}" }
+    let second_str = "null"
+    if second != null { second_str = "{second}" }
+    print("{first_str} {second_str}")
+}
+
+co fn two_items() -> Coroutine<int> {
+    yield 1
+    yield 2
+}
+
+@test(output = "1 2 null null null")
+fn test_resume_after_exhaustion() {
+    let c = two_items()
+    let out = ""
+    for i in 0..5 {
+        if i > 0 { out = out + " " }
+        let v = c.resume()
+        if v == null { out = out + "null" } else { out = out + "{v}" }
+    }
+    print(out)
+}
+
+// ---- Linear yield chain ----
+co fn linear() -> Coroutine<int> {
+    yield 1
+    yield 2
+    yield 3
+}
+
+@test(output = "1\n2\n3")
+fn test_linear_chain() {
+    let c = linear()
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// ---- Local state persists across yields ----
+co fn accumulator(step: int) -> Coroutine<int> {
+    let sum = 0
+    sum = sum + step
+    yield sum
+    sum = sum + step
+    yield sum
+    sum = sum + step
+    yield sum
+}
+
+@test(output = "5\n10\n15")
+fn test_local_state_persistence() {
+    let c = accumulator(5)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// ---- Value param mutation inside yielded expression ----
+value Counter {
+    n: int,
+}
+
+co fn mutate_counter(c: Counter) -> Coroutine<int> {
+    c = Counter { n: c.n + 1 }
+    yield c.n
+    c = Counter { n: c.n + 10 }
+    yield c.n
+    c = Counter { n: c.n + 100 }
+    yield c.n
+}
+
+@test(output = "1\n11\n111")
+fn test_struct_param_mutation() {
+    let counter = Counter { n: 0 }
+    let c = mutate_counter(counter)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// ---- Exhaustion returns null ----
+co fn two_values() -> Coroutine<int> {
+    yield 42
+    yield 99
+}
+
+@test(output = "42\n99\nnull")
+fn test_exhaustion_returns_null() {
+    let c = two_values()
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r) }
+}
+
+// ---- Multiple independent instances ----
+@test(output = "1\n100\n2\n200")
+fn test_independent_instances() {
+    let a = accumulator(1)
+    let b = accumulator(100)
+    print(a.resume() ?? -1)
+    print(b.resume() ?? -1)
+    print(a.resume() ?? -1)
+    print(b.resume() ?? -1)
+}
+
+// ---- No yields: the first resume runs the body and exhausts ----
+co fn no_yields() -> Coroutine<int> {
+}
+
+co fn side_effect_only() -> Coroutine<int> {
+    print("ran")
+}
+
+@test(output = "null\nran\nnull")
+fn test_bodies_without_yields_exhaust_immediately() {
+    let c = no_yields()
+    let r = c.resume()
+    if r == null { print("null") } else { print(r) }
+    let d = side_effect_only()
+    let s = d.resume()
+    if s == null { print("null") } else { print(s) }
+}
+
+co fn echo_back() -> Coroutine<int, (), int> {
+    //                          ^Y    ^R    ^N -- non-unit N enables
+    //                                             let-bound yield form
+    let x = yield 1
+    print(x)
+    let y = yield 2
+    print(y)
+    let z = yield 3
+    print(z)
+}
+
+@test(output = "1\n42\n2\n7\n3\n0\n-1\n-1\nnull")
+fn test_resume_with_value_basic() {
+    let c = echo_back()
+    print(c.resume(0) ?? -1)
+    print(c.resume(42) ?? -1)
+    print(c.resume(7) ?? -1)
+    print(c.resume(0) ?? -1)
+    print(c.resume(0) ?? -1)
+    let last = c.resume(0)
+    if last == null { print("null") } else { print(last) }
+}
+
+// ---- Per-yield feedback in a loop: every resume binds its value ----
+
+co fn accumulator() -> Coroutine<int, int, int> {
+    //                          ^Y   ^R   ^N
+    let total: int = 0
+    let i: int = 0
+    while i < 3 {
+        let v = yield i
+        total = total + v
+        i = i + 1
+    }
+    return total
+}
+
+@test(output = "0\n1\n2\nfinal=60")
+fn test_resume_with_value_loop() {
+    let c = accumulator()
+    print(c.resume(0) ?? -1)
+    print(c.resume(10) ?? -1)
+    print(c.resume(20) ?? -1)
+    let last = c.resume(30)
+    if last != null { print("unexpected={last}") }
+    let r = c.result()
+    if r != null { print("final={r}") } else { print("final=null") }
+}
+
+fn pair() -> (int, int) {
+    return (10, 20)
+}
+
+co fn tuple_basic() -> Coroutine<int> {
+    let (a, b) = pair()
+    yield a
+    yield b
+    yield a + b
+}
+
+@test(output = "10\n20\n30\n1\n2\n3")
+fn test_tuple_basic() {
+    let c = tuple_basic()
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+
+    let h = tuple_literal()
+    print(h.resume() ?? -1)
+    print(h.resume() ?? -1)
+    print(h.resume() ?? -1)
+}
+
+// Each component must persist across yields independently.
+co fn tuple_persists() -> Coroutine<int> {
+    let (x, y) = pair()
+    yield x
+    x = x + 1
+    yield y
+    yield x
+}
+
+@test(output = "10\n20\n11")
+fn test_tuple_persists_across_yields() {
+    let c = tuple_persists()
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// Tuple literal RHS (no call).
+co fn tuple_literal() -> Coroutine<int> {
+    let (a, b, c) = (1, 2, 3)
+    yield a
+    yield b
+    yield c
+}
+
+// ---- return inside co fn body ----
+co fn early_return(flag: bool) -> Coroutine<int> {
+    yield 1
+    if flag {
+        return;
+    }
+    yield 2
+    yield 3
+}
+
+@test(output = "1\nnull\n1\n2\n3")
+fn test_early_return() {
+    let c = early_return(true)
+    print(c.resume() ?? -1)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r) }
+
+    let c = early_return(false)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// ---- return before any yield ----
+co fn return_first(flag: bool) -> Coroutine<int> {
+    if flag {
+        return;
+    }
+    yield 42
+}
+
+@test(output = "null")
+fn test_return_before_any_yield() {
+    let c = return_first(true)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r) }
+}
+
+// ---- return inside nested loop ----
+co fn return_in_loop(n: int) -> Coroutine<int> {
+    let i = 0
+    while i < n {
+        yield i
+        if i >= 2 {
+            return;
+        }
+        i = i + 1
+    }
+}
+
+@test(output = "0\n1\n2\nnull")
+fn test_return_in_loop() {
+    let c = return_in_loop(10)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r) }
+}
+
+co fn scaled(n: int) -> Coroutine<float> {
+    let m = n * 2
+    let f = m as float
+    let tag = m + 100
+    yield f + (tag as float)
+    yield f + (tag as float) + 1.0
+}
+
+@test(output = "120\n121")
+fn int_to_float_alias_survives_a_yield() {
+    let c = scaled(5)
+    print(c.resume())
+    print(c.resume())
+}
+
+co fn counter() -> Coroutine<int> {
+    yield 1
+    yield 2
+}
+
+@test(output = "Coroutine")
+fn coroutine_handle_is_ty_tagged() {
+    let c = counter()
+    print(__rock_get_type(c) ?? "untagged")
+}
+
+@test(output = "suspended\n1\n2\nnull")
+fn driver_fns_work_without_a_guard() {
+    let c = counter()
+    print(c.status())
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+    let r = c.resume()
+    if r == null { print("null") } else { print(r) }
+}
+
+co fn counter_to_three() -> Coroutine<int> {
+    yield 1
+    yield 2
+    yield 3
+}
+
+@test(output = "co=42\n1\n2\n3")
+fn co_is_usable_as_identifier() {
+    let co = 42
+    print("co={co}")
+    let coro = counter_to_three()
+    print(coro.resume())
+    print(coro.resume())
+    print(coro.resume())
+}
+
+struct HasCo {
+    co: int,
+}
+
+@test(output = "field=7")
+fn co_is_usable_as_field_name() {
+    let h = HasCo { co: 7 }
+    print("field={h.co}")
+}
+
+co fn read(number: int) -> Coroutine<int> {
+    yield number
+    yield number + 1
+}
+
+co fn read(text: string) -> Coroutine<string> {
+    yield text
+    yield text + "!"
+}
+
+@test
+fn coroutine_overloads_keep_separate_frame_layouts() {
+    let number = read(41)
+    let text = read("hello")
+
+    assert_eq(number.resume() ?? -1, 41)
+    assert_eq(text.resume() ?? "missing", "hello")
+    assert_eq(number.resume() ?? -1, 42)
+    assert_eq(text.resume() ?? "missing", "hello!")
+}
+
+value CoroutineRefCell { w: int }
+
+struct CoroutineRefHolder { cell: CoroutineRefCell }
+
+co fn coroutine_ref_bump(c: ref CoroutineRefCell) -> Coroutine<int> {
+    c.w += 1
+    yield c.w
+}
+
+@test
+fn a_coroutine_can_receive_a_boxed_value_field_ref() {
+    let holder = CoroutineRefHolder { cell: CoroutineRefCell { w: 7 } }
+    let c = coroutine_ref_bump(holder.cell)
+    resume(c)
+    assert_eq(holder.cell.w, 8)
+}
+
+// The old bounded-call rejection used an invalid `-> int` annotation.
+// With a Coroutine result and an explicit resume, the chain runs normally.
+co fn bounded_worker(xs: [int]) -> Coroutine<int, int> {
+    let evens = xs.iter().filter(x => x % 2 == 0).collect()
+    return evens.len
+}
+
+@test(output = "2")
+fn bounded_chain_in_coroutine() {
+    let c = bounded_worker([1, 2, 3, 4])
+    resume(c)
+    print(result(c) ?? -1)
+}
+
+co fn inner_source() -> Coroutine<int> {
+    yield 1
+    yield 2
+    yield 3
+}
+
+co fn manual_pump() -> Coroutine<int> {
+    let src = inner_source()
+    yield (src.resume() ?? -99) * 10
+    yield (src.resume() ?? -99) * 10
+    yield (src.resume() ?? -99) * 10
+}
+
+@test(output = "10\n20\n30")
+fn test_manual_pump() {
+    let c = manual_pump()
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// ---- Inner exhausted, manual_pump observes null ----
+co fn short_inner() -> Coroutine<int> {
+    yield 7
+}
+
+co fn pump_until_null() -> Coroutine<int> {
+    let src = short_inner()
+    let first = src.resume()
+    if first == null { yield -1 } else { yield first }
+    let second = src.resume()
+    if second == null { yield -1 } else { yield second }
+}
+
+@test(output = "7\n-1")
+fn test_pump_observes_inner_exhaustion() {
+    let c = pump_until_null()
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
 }

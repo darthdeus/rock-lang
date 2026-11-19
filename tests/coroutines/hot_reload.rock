@@ -1,0 +1,207 @@
+// Hot reload notifications through awaits and owned for loops.
+
+global HR: [string] = []
+
+co fn hr_inner() -> Coroutine<int> {
+    on_hot_reload { HR.push("inner") }
+    yield 1
+    yield 2
+}
+
+co fn hr_middle() -> Coroutine<int> {
+    on_hot_reload { HR.push("middle") }
+    await hr_inner()
+}
+
+co fn hr_outer() -> Coroutine<int> {
+    on_hot_reload { HR.push("outer") }
+    await hr_middle()
+    yield 3
+}
+
+@test(output = "1 outer,middle,inner")
+fn test_fire_reaches_every_awaited_level() {
+    HR = []
+    let c = hr_outer()
+    let v = c.resume() ?? -1
+    fire_hot_reload(c)
+    print("{v} {HR.join(",")}")
+}
+
+@test(output = "3 outer")
+fn test_fire_after_await_finished_reaches_only_the_outer() {
+    HR = []
+    let c = hr_outer()
+    c.resume()
+    c.resume()
+    let v = c.resume() ?? -1
+    fire_hot_reload(c)
+    print("{v} {HR.join(",")}")
+}
+
+// An outer hook that kills its own coroutine takes the chain down before
+// the inner would be notified: a dead inner does not hear the reload.
+global SELF: Coroutine<int>? = null
+
+co fn hr_respawning() -> Coroutine<int> {
+    on_hot_reload {
+        HR.push("outer")
+        if let c = SELF { kill(c) }
+    }
+    await hr_inner()
+}
+
+@test(output = "outer dead")
+fn test_outer_hook_that_kills_stops_the_chain() {
+    HR = []
+    let c = hr_respawning()
+    SELF = c
+    c.resume()
+    fire_hot_reload(c)
+    print("{HR.join(",")} {c.status()}")
+}
+
+global RELOADS: [string] = []
+
+global GENERATOR: Coroutine<int>? = null
+
+co fn reload_generator() -> Coroutine<int> {
+    on_hot_reload { RELOADS.push("generator") }
+    yield 1
+    yield 2
+}
+
+co fn reload_loop() -> Coroutine<int> {
+    on_hot_reload { RELOADS.push("outer") }
+    for v in reload_generator() { yield v }
+    yield 3
+}
+
+@test
+fn owned_generator_hears_reload_only_while_active() {
+    RELOADS = []
+    let c = reload_loop()
+    c.resume()
+    fire_hot_reload(c)
+    assert_eq(RELOADS.join(","), "outer,generator")
+    c.resume()
+    c.resume()
+    RELOADS = []
+    fire_hot_reload(c)
+    assert_eq(RELOADS.join(","), "outer")
+    kill(c)
+}
+
+co fn reload_nested() -> Coroutine<int> {
+    on_hot_reload { RELOADS.push("nested") }
+    for v in reload_generator() {
+        for w in reload_generator() { yield v + w }
+    }
+}
+
+co fn reload_await_loop() -> Coroutine<int> {
+    on_hot_reload { RELOADS.push("await") }
+    await reload_nested()
+}
+
+@test
+fn reload_walks_awaits_and_nested_owned_loops() {
+    RELOADS = []
+    let c = reload_await_loop()
+    c.resume()
+    fire_hot_reload(c)
+    assert_eq(RELOADS.join(","), "await,nested,generator,generator")
+    kill(c)
+}
+
+co fn reload_named(g: Coroutine<int>) -> Coroutine<int> {
+    for v in g { yield v }
+}
+
+@test
+fn named_generator_does_not_hear_owners_reload() {
+    RELOADS = []
+    let g = reload_generator()
+    let c = reload_named(g)
+    c.resume()
+    fire_hot_reload(c)
+    assert_eq(RELOADS.len(), 0)
+    kill(c)
+    kill(g)
+}
+
+co fn reload_kills_owner() -> Coroutine<int> {
+    on_hot_reload {
+        RELOADS.push("outer")
+        if let c = GENERATOR { kill(c) }
+    }
+    for v in reload_generator() { yield v }
+}
+
+@test
+fn outer_reload_hook_cancelling_owner_stops_generator_notification() {
+    RELOADS = []
+    let c = reload_kills_owner()
+    GENERATOR = c
+    c.resume()
+    fire_hot_reload(c)
+    assert_eq(RELOADS.join(","), "outer")
+    assert_eq(c.status(), "dead")
+}
+
+co fn reload_before_and_after_loop() -> Coroutine<int> {
+    yield 0
+    for v in reload_generator() { break }
+    yield 3
+}
+
+@test
+fn reload_ignores_unstarted_and_broken_loop_generators() {
+    RELOADS = []
+    let c = reload_before_and_after_loop()
+    fire_hot_reload(c)
+    c.resume()
+    fire_hot_reload(c)
+    c.resume()
+    fire_hot_reload(c)
+    assert_eq(RELOADS.len(), 0)
+    kill(c)
+}
+
+global HR_LOG: [string] = []
+
+co fn hr_co() -> Coroutine<int> {
+    on_hot_reload { HR_LOG.push("hr") }
+    yield 1
+    yield 2
+}
+
+// resume() must NOT fire on_hot_reload.
+@test(output = "v1=1 log=0\nv2=2 log=0")
+fn test_on_hot_reload_silent_on_resume() {
+    HR_LOG = []
+    let c = hr_co()
+    let v1 = c.resume()
+    print("v1={v1 ?? -1} log={HR_LOG.len()}")
+    let v2 = c.resume()
+    print("v2={v2 ?? -1} log={HR_LOG.len()}")
+}
+
+// fire_hot_reload() fires the hook; a second fire fires again (it is not
+// one-shot), and a fire after the coroutine is dead is a no-op.
+@test(output = "after1=1\nafter2=2\nv=null\nafterdead=2")
+fn test_fire_hot_reload_fires_hook() {
+    HR_LOG = []
+    let c = hr_co()
+    let _ = c.resume()
+    fire_hot_reload(c)
+    print("after1={HR_LOG.len()}")
+    fire_hot_reload(c)
+    print("after2={HR_LOG.len()}")
+    // drain to completion, then fire on a dead handle -> no-op.
+    let _ = c.resume()
+    let last = c.resume()
+    if last == null { print("v=null") } else { print("v={last}") }
+    fire_hot_reload(c)
+    print("afterdead={HR_LOG.len()}")
+}

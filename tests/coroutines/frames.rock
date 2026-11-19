@@ -1,8 +1,55 @@
-// A flat-enum channel's yield slots are seeded in the frame literal and
-// cleared to nil, so the step only ever writes keys the frame already has
-// (docs/luajit-performance.md). The seeds must be invisible: a frame has to
-// look the same to anything that walks it, at every point in its life, and a
-// coroutine that is never resumed must behave exactly as before.
+// Frame identity and yield-slot seeding.
+
+co fn ticker() -> Coroutine<int> {
+    yield 1
+    yield 2
+}
+
+co fn other() -> Coroutine<int> {
+    yield 9
+}
+
+inline(lua) fn frames_same(a: Coroutine<int>, b: Coroutine<int>) -> bool = """
+    return rawequal(a, b)
+"""
+
+inline(js) fn frames_same(a: Coroutine<int>, b: Coroutine<int>) -> bool = """
+    return a === b;
+"""
+
+@test
+fn two_spawns_of_one_co_fn_are_distinct_frames() {
+    let a = ticker()
+    let b = ticker()
+    assert_eq(frames_same(a, b), false)
+}
+
+@test
+fn a_frame_is_identical_to_itself() {
+    // Control: without this, a `frames_same` that always returned false would
+    // satisfy every other assertion here.
+    let a = ticker()
+    assert_eq(frames_same(a, a), true)
+}
+
+@test
+fn distinctness_survives_advancing_both() {
+    // Guards the replace-mid-poll shape specifically: identity must still
+    // discriminate after the frames have run, not just at construction.
+    let a = ticker()
+    let b = ticker()
+    assert_eq(a.resume() ?? -1, 1)
+    assert_eq(b.resume() ?? -1, 1)
+    assert_eq(b.resume() ?? -1, 2)
+    assert_eq(frames_same(a, b), false)
+}
+
+@test
+fn distinct_co_fns_are_distinct_frames() {
+    let a = ticker()
+    let b = other()
+    assert_eq(frames_same(a, b), false)
+}
 
 enum Signal {
     Idle,
