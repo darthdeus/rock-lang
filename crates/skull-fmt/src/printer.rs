@@ -1318,7 +1318,7 @@ impl<'a> Printer<'a> {
             | ExprKind::Bool(_)
             | ExprKind::SiblingFieldRef(_)
             | ExprKind::FunctionRef(_)
-            | ExprKind::Path { .. }
+            | ExprKind::Path(_)
             | ExprKind::AnaphoricIdent(_) => self.raw(data.span),
 
             ExprKind::Paren(inner) => Doc::surround("(", self.expr(*inner), ")"),

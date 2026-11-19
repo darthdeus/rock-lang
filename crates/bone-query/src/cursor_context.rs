@@ -204,7 +204,7 @@ impl CursorAst {
     pub(crate) fn qualified_base(&self) -> Option<String> {
         if let Some(node) = self.chain.first().copied() {
             match &self.expr(node).kind {
-                ExprKind::Path { path, .. } | ExprKind::PathStructLiteral { path, .. } => {
+                ExprKind::Path(path) | ExprKind::PathStructLiteral { path, .. } => {
                     if let Some((base, variant)) = enum_path_names(path)
                         && path.segments.len() == 2
                         && !path.from_root
@@ -551,7 +551,7 @@ impl CursorAst {
         };
         match &self.expr(*func).kind {
             ExprKind::Ident(id) => Some((id.name.to_string(), pos as u32, None)),
-            ExprKind::Path { path, .. } => {
+            ExprKind::Path(path) => {
                 Some((path.segments.last()?.name.to_string(), pos as u32, None))
             }
             ExprKind::FieldAccess(recv, method) | ExprKind::SafeNavigation(recv, method) => {
@@ -614,7 +614,7 @@ impl CursorAst {
         };
         let callee = match &self.expr(*func).kind {
             ExprKind::Ident(id) => id.name.to_string(),
-            ExprKind::Path { path, .. } => path.segments.last()?.name.to_string(),
+            ExprKind::Path(path) => path.segments.last()?.name.to_string(),
             _ => return None,
         };
         let mut positional = 0usize;

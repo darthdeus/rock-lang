@@ -252,10 +252,7 @@ impl<'s, 'd, R: Rewrite> Graft<'s, 'd, R> {
     fn expr_kind(&mut self, kind: &mut ExprKind) {
         match kind {
             ExprKind::Ident(id) => id.name = self.rw.resolve(id.name),
-            ExprKind::Path { path, generic_args } => {
-                self.path(path);
-                self.types(generic_args);
-            }
+            ExprKind::Path(path) => self.path(path),
             ExprKind::PathStructLiteral {
                 path,
                 bases,

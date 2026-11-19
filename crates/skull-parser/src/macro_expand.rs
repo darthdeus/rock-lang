@@ -753,17 +753,7 @@ fn expr_to_type_expr(ast: &mut Ast, e: Idx<ExprData>) -> Option<Idx<TypeExprData
             };
             Some(ast.ty(span, k, false))
         }
-        ExprKind::Path { path, generic_args } => {
-            let kind = if generic_args.is_empty() {
-                TypeExprKind::Path(path)
-            } else {
-                TypeExprKind::AppPath {
-                    ctor: path,
-                    args: generic_args,
-                }
-            };
-            Some(ast.ty(span, kind, false))
-        }
+        ExprKind::Path(path) => Some(ast.ty(span, TypeExprKind::Path(path), false)),
         ExprKind::ArrayLiteral(elems) if elems.len() == 1 => {
             let inner = expr_to_type_expr(ast, elems[0])?;
             Some(ast.ty(span, TypeExprKind::Array(inner), false))
@@ -1126,7 +1116,7 @@ fn refs_in_block(ast: &Ast, b: Idx<BlockData>, names: &UstrSet, occ: &mut Vec<(U
 fn refs_in_expr(ast: &Ast, e: Idx<ExprData>, names: &UstrSet, occ: &mut Vec<(Ustr, Span)>) {
     match &ast.exprs[e].kind {
         ExprKind::Ident(id) => note(id, names, occ),
-        ExprKind::Path { path, .. } | ExprKind::PathStructLiteral { path, .. } => {
+        ExprKind::Path(path) | ExprKind::PathStructLiteral { path, .. } => {
             refs_in_path(path, names, occ)
         }
         ExprKind::Match { arms, .. } => {

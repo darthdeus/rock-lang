@@ -1565,10 +1565,7 @@ pub(crate) fn lower_expr_value(
                 // VALUE (`Expr::Global`) and the call becomes `Callee::Value`, which
                 // MIR cannot give a callee identity -- a direct call must carry the
                 // family's DefKey exactly as the bare-name form does.
-                ExprKind::Path {
-                    path,
-                    generic_args: path_generics,
-                } if path_generics.is_empty() && ctx.v1_path_callable(path).is_some() => {
+                ExprKind::Path(path) if ctx.v1_path_callable(path).is_some() => {
                     let key = ctx.v1_path_callable(path).expect("guard resolved it");
                     ctx.record_path(body, TyPos::Body, path, hir::SegmentTarget::Def(key));
                     let args_range =
@@ -1593,10 +1590,7 @@ pub(crate) fn lower_expr_value(
 
                 // A path enum constructor with payload; value-position paths lower
                 // as unit variants and would otherwise drop these arguments.
-                ExprKind::Path {
-                    path,
-                    generic_args: path_generics,
-                } if path_generics.is_empty() && ctx.v1_path_variant(path).is_some() => {
+                ExprKind::Path(path) if ctx.v1_path_variant(path).is_some() => {
                     let (enum_key, variant) = ctx.v1_path_variant(path).expect("guard resolved it");
                     let (enum_span, variant_span) = variant_path_spans(path);
                     ctx.record_path(
@@ -1859,14 +1853,7 @@ pub(crate) fn lower_expr_value(
 
         // Modules-v1 value-position paths: `p::f` (callable family/global),
         // `p::CONST`, `p::E::V`, or `p::Type` used as a value.
-        ExprKind::Path { path, generic_args } => {
-            if !generic_args.is_empty() {
-                return Err(CompilerError::new_with_label(
-                    e.span,
-                    "generic arguments on a qualified path are not valid in value position"
-                        .to_string(),
-                ));
-            }
+        ExprKind::Path(path) => {
             let frag = ctx.fragment_scope();
             let use_path = use_path_ref(path);
             let target =
@@ -3835,7 +3822,7 @@ fn compound_place_temps(a: &Ast, place: &Idx<ExprData>) -> Vec<Idx<ExprData>> {
                 walk(a, o, false, out);
                 out.push(*i);
             }
-            ExprKind::Ident(_) | ExprKind::Path { .. } => {}
+            ExprKind::Ident(_) | ExprKind::Path(_) => {}
             // A non-place root is not assignable; leave it to the ordinary
             // diagnostics rather than assigning to a temporary.
             _ if root => {}
@@ -3918,7 +3905,7 @@ fn expr_is_pure(a: &Ast, e: &Idx<ExprData>) -> bool {
     use skull_parser::ExprKind;
 
     match &a.e(e).kind {
-        ExprKind::Ident(_) | ExprKind::Path { .. } => true,
+        ExprKind::Ident(_) | ExprKind::Path(_) => true,
         _ if expr_is_literal(a, e) => true,
         ExprKind::Paren(o) | ExprKind::FieldAccess(o, _) | ExprKind::BitNot(o) => {
             expr_is_pure(a, o)

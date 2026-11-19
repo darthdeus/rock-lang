@@ -2897,13 +2897,7 @@ impl<'a> Parser<'a> {
             let start = self.span();
             let path = self.parse_root_path()?;
             let span = self.span_from(start);
-            return Ok(self.ast.expr(
-                span,
-                ExprKind::Path {
-                    path,
-                    generic_args: Vec::new(),
-                },
-            ));
+            return Ok(self.ast.expr(span, ExprKind::Path(path)));
         }
 
         if self.kind() == TokenKind::Dot && matches!(self.peek_kind(), TokenKind::Ident(_)) {
@@ -3046,13 +3040,7 @@ impl<'a> Parser<'a> {
                 }
                 if qualified {
                     let span = self.span_from(start);
-                    Ok(self.ast.expr(
-                        span,
-                        ExprKind::Path {
-                            path,
-                            generic_args: Vec::new(),
-                        },
-                    ))
+                    Ok(self.ast.expr(span, ExprKind::Path(path)))
                 } else {
                     Ok(self
                         .ast

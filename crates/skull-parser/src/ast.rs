@@ -139,10 +139,7 @@ pub enum ExprKind {
     Hole(u32, Option<Ustr>),
 
     Ident(Ident),
-    Path {
-        path: Path,
-        generic_args: Vec<Idx<TypeExprData>>,
-    },
+    Path(Path),
     PathStructLiteral {
         path: Path,
         bases: Vec<Idx<ExprData>>,

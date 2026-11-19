@@ -23,10 +23,7 @@ macro_rules! walkers {
         pub(crate) fn $expr(v: &mut (impl $visit + ?Sized), kind: & $($mut)* ExprKind) {
             match kind {
                 ExprKind::Ident(id) => v.ident(id),
-                ExprKind::Path { path, generic_args } => {
-                    v.path(path);
-                    for t in generic_args { v.ty(t); }
-                }
+                ExprKind::Path(path) => v.path(path),
                 ExprKind::PathStructLiteral { path, bases, fields } => {
                     v.path(path);
                     for e in bases { v.expr(e); }
