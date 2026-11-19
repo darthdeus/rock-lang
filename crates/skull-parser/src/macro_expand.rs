@@ -12,6 +12,7 @@ const MAX_MACRO_DEPTH: usize = 64;
 #[derive(Clone, Debug)]
 struct MacroTemplate {
     params: Vec<MParam>,
+    arity: MacroArity,
     body: Idx<BlockData>,
     /// The macro's declared return type, if any. An expr-macro expansion is
     /// wrapped in `(:: <body> <return_ty>)` so the post-expansion type-checker
@@ -84,61 +85,64 @@ pub fn is_hygiene_name(name: &str) -> bool {
 
 const HYGIENE_PREFIX: &str = "__inline_local_";
 
+fn functions(ast: &Ast) -> impl Iterator<Item = &FunctionDef> {
+    ast.items.iter().filter_map(|item| match &item.kind {
+        ItemKind::Function(f) => Some(f),
+        _ => None,
+    })
+}
+
 /// Reject conflicting function names and overlapping overloads of equal priority.
 pub fn check_macro_name_uniqueness<'a>(
     modules: impl IntoIterator<Item = &'a Ast> + Clone,
 ) -> Vec<CompilerError> {
-    let mut fn_names: UstrSet = UstrSet::default();
-    for m in modules.clone() {
-        for item in &m.items {
-            if let ItemKind::Function(f) = &item.kind {
-                if !f.is_macro {
-                    fn_names.insert(f.name.name);
-                }
-            }
-        }
-    }
+    let fn_names: UstrSet = modules
+        .clone()
+        .into_iter()
+        .flat_map(functions)
+        .filter(|f| !f.is_macro)
+        .map(|f| f.name.name)
+        .collect();
     let mut errs = Vec::new();
     let mut reported: UstrSet = UstrSet::default();
     let mut arities: UstrMap<Vec<(MacroArity, Span)>> = UstrMap::default();
-    for m in modules {
-        for item in &m.items {
-            if let ItemKind::Function(f) = &item.kind {
-                if f.is_macro {
-                    let arity = MacroArity::of(f);
-                    let earlier = arities.entry(f.name.name).or_default();
-                    if let Some((argc, at)) = earlier
-                        .iter()
-                        .find_map(|(other, at)| Some((arity.overlap(other)?, at.start())))
-                    {
-                        errs.push(CompilerError::new_with_label(
-                            f.name.span,
-                            format!(
-                                "duplicate definition of macro `{}` taking {argc} argument{}: already defined at {}:{}",
-                                f.name.name,
-                                if argc == 1 { "" } else { "s" },
-                                at.file,
-                                at.line + 1
-                            ),
-                        ));
-                    }
-                    earlier.push((arity, f.name.span));
-                }
-                if f.is_macro && fn_names.contains(&f.name.name) && reported.insert(f.name.name) {
-                    errs.push(CompilerError::new_with_label(
-                        f.name.span,
-                        format!(
-                            "macro `{0}` collides with a function named `{0}` -- a macro name must be unique in call position (`{0}(...)` would be ambiguous between the two). Rename the macro or the function.",
-                            f.name.name
-                        ),
-                    ));
-                }
-            }
+    for f in modules
+        .into_iter()
+        .flat_map(functions)
+        .filter(|f| f.is_macro)
+    {
+        let arity = MacroArity::of(f);
+        let earlier = arities.entry(f.name.name).or_default();
+        if let Some((argc, at)) = earlier
+            .iter()
+            .find_map(|(other, at)| Some((arity.overlap(other)?, at.start())))
+        {
+            errs.push(CompilerError::new_with_label(
+                f.name.span,
+                format!(
+                    "duplicate definition of macro `{}` taking {argc} argument{}: already defined at {}:{}",
+                    f.name.name,
+                    if argc == 1 { "" } else { "s" },
+                    at.file,
+                    at.line + 1
+                ),
+            ));
+        }
+        earlier.push((arity, f.name.span));
+        if fn_names.contains(&f.name.name) && reported.insert(f.name.name) {
+            errs.push(CompilerError::new_with_label(
+                f.name.span,
+                format!(
+                    "macro `{0}` collides with a function named `{0}` -- a macro name must be unique in call position (`{0}(...)` would be ambiguous between the two). Rename the macro or the function.",
+                    f.name.name
+                ),
+            ));
         }
     }
     errs
 }
 
+#[derive(Clone, Debug)]
 struct MacroArity {
     lo: usize,
     hi: usize,
@@ -161,6 +165,11 @@ impl MacroArity {
         }
     }
 
+    fn accepts(&self, argc: usize) -> bool {
+        (self.lo..=self.hi).contains(&argc)
+    }
+
+    /// The smallest argument count claimed by both overloads at equal priority.
     fn overlap(&self, other: &Self) -> Option<usize> {
         let lo = self.lo.max(other.lo);
         (self.variadic == other.variadic && lo <= self.hi.min(other.hi)).then_some(lo)
@@ -189,15 +198,17 @@ fn call_label_errors(m: &Ast, reg: &Registry) -> Vec<CompilerError> {
         else {
             continue;
         };
-        let Err(err) = bind_macro_args(&tmpl.params, &macro_args(receiver, args)) else {
+        let Err(err) = bind_macro_args(&tmpl.params, macro_args(receiver, args)) else {
             continue;
         };
-        let names: Vec<String> = tmpl.params.iter().map(|p| p.name.to_string()).collect();
         let msg = match err {
-            BindErr::UnknownLabel(l) => format!(
-                "macro `{name}` has no parameter named `{l}` -- its parameters are ({}). An argument label must name a parameter; it is not a positional argument.",
-                names.join(", ")
-            ),
+            BindErr::UnknownLabel(l) => {
+                let names: Vec<_> = tmpl.params.iter().map(|p| p.name.as_str()).collect();
+                format!(
+                    "macro `{name}` has no parameter named `{l}` -- its parameters are ({}). An argument label must name a parameter; it is not a positional argument.",
+                    names.join(", ")
+                )
+            }
             BindErr::AlreadyBound(l) => {
                 format!("macro `{name}` got two values for parameter `{l}`")
             }
@@ -263,16 +274,14 @@ fn macro_callee(ast: &Ast, func: Idx<ExprData>) -> Option<(Ustr, Option<Idx<Expr
     }
 }
 
-fn macro_args(receiver: Option<Idx<ExprData>>, args: &[FunctionCallArg]) -> Vec<MacroArg> {
-    let mut values = Vec::with_capacity(args.len() + usize::from(receiver.is_some()));
-    if let Some(value) = receiver {
-        values.push(MacroArg { label: None, value });
-    }
-    values.extend(args.iter().map(|a| MacroArg {
-        label: a.name.as_ref().map(|n| n.name),
-        value: a.value,
-    }));
-    values
+fn macro_args(
+    receiver: Option<Idx<ExprData>>,
+    args: &[FunctionCallArg],
+) -> impl Iterator<Item = (Option<Ustr>, Idx<ExprData>)> + '_ {
+    receiver.into_iter().map(|value| (None, value)).chain(
+        args.iter()
+            .map(|a| (a.name.as_ref().map(|n| n.name), a.value)),
+    )
 }
 
 fn fragment_kind(ast: &Ast, ty: Idx<TypeExprData>) -> Option<Frag> {
@@ -290,13 +299,7 @@ fn fragment_kind(ast: &Ast, ty: Idx<TypeExprData>) -> Option<Frag> {
 fn build_registry<'a>(modules: impl IntoIterator<Item = &'a Ast>) -> Registry {
     let mut reg = Registry::default();
     for m in modules {
-        for item in &m.items {
-            let ItemKind::Function(f) = &item.kind else {
-                continue;
-            };
-            if !f.is_macro {
-                continue;
-            }
+        for f in functions(m).filter(|f| f.is_macro) {
             let Some(body_block) = f.body.rock_block() else {
                 continue;
             };
@@ -317,6 +320,7 @@ fn build_registry<'a>(modules: impl IntoIterator<Item = &'a Ast>) -> Registry {
                 .collect();
             reg.entry(f.name.name).or_default().push(MacroTemplate {
                 params,
+                arity: MacroArity::of(f),
                 body,
                 return_ty,
                 items,
@@ -338,20 +342,15 @@ fn expand_top_level_macros(ast: &mut Ast, reg: &Registry) {
     }
     let mut out: Vec<Item> = Vec::with_capacity(ast.items.len());
     for item in std::mem::take(&mut ast.items) {
-        let ItemKind::MacroInvocation { name, args, .. } = &item.kind else {
+        let ItemKind::MacroInvocation { name, args, .. } = item.kind else {
             out.push(item);
             continue;
         };
-        let (name, args) = (name.clone(), args.clone());
-        let args: Vec<MacroArg> = args
-            .into_iter()
-            .map(|value| MacroArg { label: None, value })
-            .collect();
         // Dropping an unexpandable invocation would compile the module with
         // that part of the source silently missing.
         let span = item.span;
         let errors_before = ast.recovery_errors.len();
-        match expand_item_macro(ast, name.clone(), &args, reg) {
+        match expand_item_macro(ast, &name, &args, reg) {
             Some(items) => out.extend(items),
             None if ast.recovery_errors.len() > errors_before => {}
             None => {
@@ -391,23 +390,16 @@ fn item_arity_matches(d: &MacroTemplate, argc: usize) -> bool {
     !d.items.is_empty() && required <= argc && argc <= total
 }
 
-fn has_body_statements(tmpl: &MacroTemplate) -> bool {
-    tmpl.tmpl.blocks[tmpl.body]
-        .statements
-        .iter()
-        .any(|s| !matches!(tmpl.tmpl.stmts[*s].kind, StatementKind::Comment(_)))
-}
-
 fn expand_item_macro(
     ast: &mut Ast,
-    name: Ident,
-    args: &[MacroArg],
+    name: &Ident,
+    args: &[Idx<ExprData>],
     reg: &Registry,
 ) -> Option<Vec<Item>> {
     let argc = args.len();
     let cands = reg.get(&name.name)?;
     let tmpl = cands.iter().find(|d| item_arity_matches(d, argc))?;
-    if has_body_statements(tmpl) {
+    if body_statements(&tmpl.tmpl, tmpl.body).next().is_some() {
         ast.recovery_errors.push(CompilerError::new_with_label(
             name.span,
             format!(
@@ -420,7 +412,7 @@ fn expand_item_macro(
 
     let mut ty_subs: UstrMap<Idx<TypeExprData>> = UstrMap::default();
     let mut expr_subs: UstrMap<Idx<ExprData>> = UstrMap::default();
-    let bound = bind_macro_args(&tmpl.params, args).ok()?;
+    let bound = bind_macro_args(&tmpl.params, args.iter().map(|&value| (None, value))).ok()?;
     for (p, slot) in tmpl.params.iter().zip(bound.slots) {
         let arg = match slot {
             Some(arg) => arg,
@@ -473,18 +465,8 @@ fn expand_in_ast(ast: &mut Ast, reg: &Registry) {
             ItemKind::Decorator(d) => {
                 blocks.push((d.body, d.params.iter().map(|p| p.name.name).collect()))
             }
-            ItemKind::Global(g) => {
-                if let Some(v) = g.value {
-                    exprs.push(v);
-                }
-            }
-            ItemKind::Struct(s) => {
-                for fl in &s.fields {
-                    if let Some(d) = fl.default {
-                        exprs.push(d);
-                    }
-                }
-            }
+            ItemKind::Global(g) => exprs.extend(g.value),
+            ItemKind::Struct(s) => exprs.extend(s.fields.iter().filter_map(|f| f.default)),
             _ => {}
         }
     }
@@ -574,35 +556,11 @@ fn expand_block(
     }
     stack.push(scope);
     for s in stmts {
-        expand_stmt(ast, s, reg, depth, stack);
+        let mut steps = Steps::default();
+        walk::statement(&mut steps, &ast.stmts[s].kind);
+        expand_steps(ast, steps, reg, depth, stack);
     }
     stack.pop();
-}
-
-fn expand_stmt(
-    ast: &mut Ast,
-    s: Idx<StatementData>,
-    reg: &Registry,
-    depth: usize,
-    stack: &mut Vec<ShadowScope>,
-) {
-    let mut steps = Steps::default();
-    if let StatementKind::NestedFn(f) = &ast.stmts[s].kind {
-        for p in &f.params {
-            if let Some(e) = p.default {
-                steps.0.push(Step::Expr(e));
-            }
-        }
-        steps.0.push(Step::Enter);
-        steps
-            .0
-            .extend(f.params.iter().map(|p| Step::Bind(p.name.name)));
-        steps.0.push(Step::Block(f.body));
-        steps.0.push(Step::Exit);
-    } else {
-        walk::statement(&mut steps, &ast.stmts[s].kind);
-    }
-    expand_steps(ast, steps, reg, depth, stack);
 }
 
 fn expand_expr(
@@ -656,7 +614,8 @@ fn try_expand(
         return;
     }
 
-    let Ok(bound) = bind_macro_args(&tmpl.params, &macro_args(receiver, args)) else {
+    let Ok(Bound { slots, mut rest }) = bind_macro_args(&tmpl.params, macro_args(receiver, args))
+    else {
         return;
     };
     let mut inst = Instantiation {
@@ -667,12 +626,11 @@ fn try_expand(
         subs: UstrMap::default(),
         variadic: UstrMap::default(),
     };
-    for (i, p) in tmpl.params.iter().enumerate() {
+    for (p, slot) in tmpl.params.iter().zip(slots) {
         if p.is_variadic {
-            let rest = bound.variadic.as_ref().filter(|(vi, _)| *vi == i);
-            let rest = rest.map(|(_, v)| v.clone()).unwrap_or_default();
-            inst.variadic.insert(p.name, rest);
-        } else if let Some(a) = bound.slots[i] {
+            // The first variadic parameter consumes all remaining positional arguments.
+            inst.variadic.insert(p.name, std::mem::take(&mut rest));
+        } else if let Some(a) = slot {
             inst.subs.insert(p.name, a);
         } else if let Some(d) = p.default {
             let g = Graft::new(&tmpl.tmpl, ast, Plain).expr(d);
@@ -698,35 +656,35 @@ fn try_expand(
     };
 }
 
-fn extract_body_value(ast: &mut Ast, body: Idx<BlockData>) -> Idx<ExprData> {
-    let meaningful: Vec<Idx<StatementData>> = ast.blocks[body]
+fn body_statements(
+    ast: &Ast,
+    body: Idx<BlockData>,
+) -> impl DoubleEndedIterator<Item = Idx<StatementData>> + '_ {
+    ast.blocks[body]
         .statements
         .iter()
         .copied()
         .filter(|s| !matches!(ast.stmts[*s].kind, StatementKind::Comment(_)))
-        .collect();
+}
 
-    if let Some(&last) = meaningful.last() {
-        let trailing = match &ast.stmts[last].kind {
-            StatementKind::Return { value: Some(e), .. } => Some(*e),
-            _ => None,
-        };
-        if let Some(e) = trailing {
-            ast.stmts[last].kind = StatementKind::Expression(e);
+/// Make the trailing `return` a block value, eliding the block for a lone expression.
+fn extract_body_value(ast: &mut Ast, body: Idx<BlockData>) -> Idx<ExprData> {
+    let (first, last) = {
+        let mut meaningful = body_statements(ast, body);
+        (meaningful.next(), meaningful.next_back())
+    };
+    if let Some(first) = first {
+        let kind = &mut ast.stmts[last.unwrap_or(first)].kind;
+        if let StatementKind::Return { value: Some(e), .. } = kind {
+            *kind = StatementKind::Expression(*e);
         }
-    }
-
-    if meaningful.len() == 1 {
-        if let StatementKind::Expression(e) = &ast.stmts[meaningful[0]].kind {
+        if last.is_none()
+            && let StatementKind::Expression(e) = kind
+        {
             return *e;
         }
     }
-
-    let span = ast.blocks[body].span;
-    ast.exprs.alloc(ExprData {
-        span,
-        kind: ExprKind::Block(body),
-    })
+    ast.expr(ast.blocks[body].span, ExprKind::Block(body))
 }
 
 fn expr_to_type_expr(ast: &mut Ast, e: Idx<ExprData>) -> Option<Idx<TypeExprData>> {
@@ -794,12 +752,6 @@ impl Rewrite for Fragments {
     }
 }
 
-#[derive(Clone, Copy)]
-struct MacroArg {
-    label: Option<Ustr>,
-    value: Idx<ExprData>,
-}
-
 enum BindErr {
     UnknownLabel(Ustr),
     AlreadyBound(Ustr),
@@ -808,18 +760,21 @@ enum BindErr {
 
 struct Bound {
     slots: Vec<Option<Idx<ExprData>>>,
-    variadic: Option<(usize, Vec<Idx<ExprData>>)>,
+    rest: Vec<Idx<ExprData>>,
 }
 
-fn bind_macro_args(params: &[MParam], args: &[MacroArg]) -> Result<Bound, BindErr> {
-    let mut slots: Vec<Option<Idx<ExprData>>> = vec![None; params.len()];
-    let mut variadic: Option<(usize, Vec<Idx<ExprData>>)> = None;
+fn bind_macro_args(
+    params: &[MParam],
+    args: impl IntoIterator<Item = (Option<Ustr>, Idx<ExprData>)>,
+) -> Result<Bound, BindErr> {
+    let mut slots = vec![None; params.len()];
+    let mut rest = Vec::new();
     // Next param a positional arg would fill. Labels never move it: `f(1, c: 3)`
     // leaves 3's slot for the next positional, matching fn-call binding.
-    let mut next = 0usize;
+    let mut next = 0;
 
-    for a in args {
-        match a.label {
+    for (label, value) in args {
+        match label {
             Some(l) => {
                 let Some(i) = params.iter().position(|p| p.name == l) else {
                     return Err(BindErr::UnknownLabel(l));
@@ -832,60 +787,43 @@ fn bind_macro_args(params: &[MParam], args: &[MacroArg]) -> Result<Bound, BindEr
                 if slots[i].is_some() {
                     return Err(BindErr::AlreadyBound(l));
                 }
-                slots[i] = Some(a.value);
+                slots[i] = Some(value);
             }
             None => {
                 while next < params.len() && slots[next].is_some() {
                     next += 1;
                 }
-                if next >= params.len() {
-                    // Arity selection admitted this call, so the only way to run
-                    // past the last param is a trailing variadic; without one
-                    // there is no slot and the overload was mis-selected.
-                    match variadic.as_mut() {
-                        Some((_, rest)) => rest.push(a.value),
-                        None => {
-                            return Err(BindErr::UnknownLabel(
-                                params.last().map(|p| p.name).unwrap_or_default(),
-                            ));
-                        }
-                    }
-                    continue;
-                }
-                if params[next].is_variadic {
-                    variadic.get_or_insert((next, Vec::new())).1.push(a.value);
+                // Arity selection admitted this call, so the only way to run
+                // past the last param is a trailing variadic; without one
+                // there is no slot and the overload was mis-selected.
+                let Some(param) = params.get(next) else {
+                    return Err(BindErr::UnknownLabel(
+                        params.last().map(|p| p.name).unwrap_or_default(),
+                    ));
+                };
+                if param.is_variadic {
+                    rest.push(value);
                 } else {
-                    slots[next] = Some(a.value);
+                    slots[next] = Some(value);
                     next += 1;
                 }
             }
         }
     }
 
-    if variadic.is_none() {
-        if let Some(i) = params.iter().position(|p| p.is_variadic) {
-            variadic = Some((i, Vec::new()));
-        }
-    }
-    Ok(Bound { slots, variadic })
+    Ok(Bound { slots, rest })
 }
 
+/// Prefer a fixed overload when both a fixed and a variadic overload accept the call.
 fn select_overload(cands: &[MacroTemplate], argc: usize) -> Option<&MacroTemplate> {
-    let mut exact: Option<&MacroTemplate> = None;
-    let mut variadic: Option<&MacroTemplate> = None;
+    let mut exact = None;
+    let mut variadic = None;
     for d in cands {
-        match d.params.iter().position(|p| p.is_variadic) {
-            Some(v_idx) => {
-                if argc >= v_idx && variadic.is_none() {
-                    variadic = Some(d);
-                }
-            }
-            None => {
-                let total = d.params.len();
-                let required = d.params.iter().filter(|p| p.default.is_none()).count();
-                if argc >= required && argc <= total {
-                    exact = Some(d);
-                }
+        if d.arity.accepts(argc) {
+            if d.arity.variadic {
+                variadic.get_or_insert(d);
+            } else {
+                exact = Some(d);
             }
         }
     }

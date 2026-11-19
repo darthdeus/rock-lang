@@ -146,7 +146,10 @@ macro_rules! walkers {
                         for e in & $($mut)* p.default { v.expr(e); }
                     }
                     for t in & $($mut)* f.return_ty { v.ty(t); }
+                    v.enter();
+                    for p in & $($mut)* f.params { v.bind(& $($mut)* p.name); }
                     v.block(& $($mut)* f.body);
+                    v.exit();
                 }
                 StatementKind::Return { value, .. } => {
                     for e in value { v.expr(e); }
