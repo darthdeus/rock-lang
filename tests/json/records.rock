@@ -1,4 +1,5 @@
-// JSON records: wire names, presence, diagnostics and native arrays.
+// JSON records: wire names, presence, declared defaults and omission,
+// diagnostics, native arrays, adapters, flat enums and malformed fields.
 
 struct JsonNamedRecord {
     @json_name("wire_name")
@@ -238,4 +239,253 @@ fn json_record_native_array_respects_element_wire_adapters() {
     assert_eq(point.len(), 2)
     let result = json_record_decode<JsonNativeRows>(codec, wire).unwrap()
     assert_eq(result.points[0].x, 1.0)
+}
+
+struct JsonDefaultCache { values: [int] = [] }
+struct JsonDeclaredDefaults {
+    required: int,
+    @json_default
+    label: string? = "fresh",
+    @json_default
+    children: [JsonDefaultCache] = [JsonDefaultCache {}],
+    @json_skip
+    cache: JsonDefaultCache = JsonDefaultCache {},
+}
+
+@test
+fn json_record_declared_defaults_are_fresh_and_do_not_weaken_supplied_values() {
+    let codec = JsonRecordCodec { reject_unknown_fields: true }
+    let sample = JsonDeclaredDefaults { required: 0 }
+    let input = json_decode("{{\"required\":7}}").unwrap()
+    let first = json_record_decode<JsonDeclaredDefaults>(codec, input).unwrap()
+    let second = json_record_decode(codec, input, sample).unwrap()
+    first.children[0].values.push(1)
+    first.cache.values.push(2)
+    assert_eq(second.children[0].values.len(), 0)
+    assert_eq(second.cache.values.len(), 0)
+    assert_eq(first.label.unwrap(), "fresh")
+    let explicit_null = json_decode("{{\"required\":7,\"label\":null}}").unwrap()
+    assert(json_record_decode(codec, explicit_null, sample).unwrap().label == null)
+    for bad in ["{{}}", "{{\"required\":7,\"children\":false}}", "{{\"required\":7,\"cache\":{{}}}}"] {
+        assert(json_record_decode(codec, json_decode(bad).unwrap(), sample) == null)
+    }
+    let encoded = json_record_encode(codec, first)
+    assert(json_field(encoded, "cache") == null)
+    assert_eq(json_record_decode(codec, encoded, sample).unwrap().cache.values.len(), 0)
+}
+
+global JSON_DEFAULT_CALLS: int = 0
+fn json_declared_default_call() -> int {
+    JSON_DEFAULT_CALLS += 1
+    return JSON_DEFAULT_CALLS
+}
+struct JsonCalledDefault {
+    @json_default
+    number: int = json_declared_default_call(),
+    @json_skip
+    callback: fn() -> int = () => 42,
+}
+
+@test
+fn json_record_only_evaluates_absent_defaults() {
+    let original = JSON_DEFAULT_CALLS
+    defer { JSON_DEFAULT_CALLS = original }
+    let sample = JsonCalledDefault { number: 0 }
+    let codec = JsonRecordCodec {}
+    let first = json_record_decode(codec, json_decode("{{}}").unwrap(), sample).unwrap()
+    assert_eq(first.number, original + 1)
+    assert_eq(first.callback(), 42)
+    let supplied = json_decode("{{\"number\":9}}").unwrap()
+    let second = json_record_decode(codec, supplied, sample).unwrap()
+    assert_eq(second.number, 9)
+    json_record_encode(codec, second)
+    assert_eq(JSON_DEFAULT_CALLS, original + 1)
+}
+
+value JsonDefaultValue { x: int, y: int }
+struct JsonNativeDefault {
+    @json_default
+    point: JsonDefaultValue = JsonDefaultValue { x: 3, y: 4 },
+}
+
+@test
+fn json_record_declared_defaults_preserve_native_value_representation() {
+    let result = json_record_decode(JsonRecordCodec {}, json_decode("{{}}").unwrap(), JsonNativeDefault {}).unwrap()
+    assert_eq(result.point.x, 3)
+    assert_eq(result.point.y, 4)
+}
+
+fn json_empty_text(text: string) -> bool { return text == "" }
+fn json_zero_number(number: int) -> bool { return number == 0 }
+struct JsonOmittedDefaults {
+    @json_omit_if(json_empty_text)
+    text: string = "",
+    @json_omit_if(json_zero_number)
+    count: int = 0,
+}
+
+@test
+fn json_record_omits_fields_using_typed_predicates() {
+    let codec = JsonRecordCodec { reject_unknown_fields: true }
+    let empty = JsonOmittedDefaults {}
+    assert_eq(json_encode(json_record_encode(codec, empty)), "{{}}")
+    let decoded = json_record_decode(codec, json_decode("{{}}").unwrap(), empty).unwrap()
+    assert_eq(decoded.text, "")
+    assert_eq(decoded.count, 0)
+    let filled = JsonOmittedDefaults { text: "keep", count: 7 }
+    let wire = json_record_encode(codec, filled)
+    assert_eq(json_as_str(json_field(wire, "text").unwrap()).unwrap(), "keep")
+    assert_eq(json_as_int(json_field(wire, "count").unwrap()).unwrap(), 7)
+}
+
+nobox value JsonOptionalTile { x: int, y: int }
+fn json_absent_value<T>(value: T?) -> bool { return value == null }
+struct JsonOptionalTileContext {
+    @json_omit_if(json_absent_value)
+    tile: JsonOptionalTile? = null,
+}
+
+fn json_optional_tile_context(tile: JsonOptionalTile?) -> JsonOptionalTileContext {
+    return JsonOptionalTileContext { tile }
+}
+
+@test
+fn json_record_omission_predicate_accepts_nullable_native_values() {
+    let codec = JsonRecordCodec {}
+    let empty = json_optional_tile_context(null)
+    assert_eq(json_encode(json_record_encode(codec, empty)), "{{}}")
+    let present = JsonOptionalTileContext { tile: JsonOptionalTile { x: 2, y: 3 } }
+    let decoded = json_record_decode<JsonOptionalTileContext>(codec, json_record_encode(codec, present)).unwrap()
+    assert_eq(decoded.tile.unwrap().x, 2)
+}
+
+enum Kind { First, Second }
+
+nobox value Tint { red: float, visible: bool }
+
+nobox value Point { x: int, y: int }
+
+nobox value Marker { point: Point, tint: Tint }
+
+value Key { namespace: string, name: string }
+
+nobox value Label { name: string, marker: Marker?, key: Key }
+
+struct Packet { kind: Kind, tint: Tint, spare: Tint?, marker: Marker, backup: Marker?, rows: [Label] }
+
+fn marker_encode(value: Marker) -> JsonValue {
+    return json_array([json_int(value.point.x), json_int(value.point.y),
+        json_float(value.tint.red), json_bool(value.tint.visible)])
+}
+
+fn marker_decode(value: JsonValue) -> Marker? {
+    let fields = json_as_array(value) ?? return null
+    if fields.len() != 4 { return null }
+    return Marker { point: Point { x: json_as_int(fields[0]) ?? return null,
+        y: json_as_int(fields[1]) ?? return null },
+        tint: Tint { red: json_as_float(fields[2]) ?? return null,
+            visible: json_as_bool(fields[3]) ?? return null } }
+}
+
+fn kind_encode(value: Kind) -> JsonValue { return json_str(if value == Kind::First { "a" } else { "b" }) }
+
+fn kind_decode(value: JsonValue) -> Kind? {
+    let key = json_as_str(value) ?? return null
+    if key == "a" { return Kind::First }
+    if key == "b" { return Kind::Second }
+    return null
+}
+
+@test(output = "ok")
+fn typed_json_uses_declared_scalar_enum_adapters_and_embedded_values() {
+    let key = Key { namespace: "sample", name: "record" }
+    let marker = Marker { point: Point { x: 7, y: -3 }, tint: Tint { red: 0.25, visible: false } }
+    let codec = JsonRecordCodec { adapters: [json_record_adapter(Kind::First, kind_encode, kind_decode),
+        json_record_adapter(marker, marker_encode, marker_decode)] }
+    let source = Packet { kind: Kind::Second, tint: Tint { red: 0.5, visible: false }, spare: null, marker, backup: marker,
+        rows: [Label { name: "first", marker, key }, Label { name: "empty", marker: null, key }] }
+    let wire = json_record_encode(codec, source)
+    assert(json_as_str(json_field(wire, "kind").unwrap()).unwrap() == "b")
+    let copy = json_record_decode(codec, wire, source).unwrap()
+    assert(copy == source)
+    assert(json_encode(json_field(wire, "marker").unwrap()) == "[7,-3,0.25,false]")
+    assert(copy.backup.unwrap().point.y == -3 && !copy.backup.unwrap().tint.visible)
+    assert(copy.rows.len() == 2 && copy.rows[0].marker.unwrap().point.x == 7)
+    assert(copy.rows[1].marker == null && copy.rows[1].key == key)
+    copy.rows.push(Label { name: "added", marker, key })
+    copy.rows[0] = Label { name: "changed", marker: null, key }
+    assert(source.rows.len() == 2 && source.rows[0].name == "first")
+    assert(copy.rows[2].marker.unwrap().tint.red == 0.25)
+    json_as_object(wire).unwrap()["backup"] = json_null()
+    assert(json_record_decode(codec, wire, source).unwrap().backup == null)
+    json_as_object(wire).unwrap()["marker"] = json_str("invalid")
+    assert(json_record_decode(codec, wire, source) == null)
+    json_as_object(wire).unwrap()["marker"] = marker_encode(marker)
+    json_as_object(wire).unwrap()["kind"] = json_str("unknown")
+    assert(json_record_decode(codec, wire, source) == null)
+    print("ok")
+}
+
+enum Event { Empty, Text(string), Colored(string, Tint), Pair(string, int) }
+
+enum Wrapper { Wrapped(Event), Other(string) }
+
+struct Record { event: Event, envelope: Wrapper, optional: Event? }
+
+@test(output = "ok")
+fn typed_json_flat_enum_fields_and_widened_payloads() {
+    let codec = JsonRecordCodec {}
+    for event in [Event::Empty, Event::Text("hello"), Event::Colored("red", Tint { red: 0.5, visible: false }), Event::Pair("count", 7)] {
+        let source = Record { event, envelope: Wrapper::Wrapped(event), optional: if event == Event::Empty { null } else { event } }
+        let wire = json_record_encode(codec, source)
+        let copy = json_record_decode(codec, json_decode(json_encode(wire)).unwrap(), source).unwrap()
+        assert(copy == source)
+        assert(json_encode(json_record_encode(codec, copy)) == json_encode(wire))
+        if let Event::Colored(label, tint) = copy.event {
+            assert(label == "red" && tint.red == 0.5 && !tint.visible)
+        }
+    }
+    print("ok")
+}
+
+enum ChangeEvent { Empty, Text(string), Pair(int, float), Names([string]) }
+
+value ValueTint { red: float, visible: bool }
+
+value Change { event: ChangeEvent, count: int }
+
+struct ChangeLog {
+    rows: [Change],
+    title: string?,
+    weights: Map<string, float>,
+    tint: ValueTint,
+}
+
+@test(output = "ok")
+fn typed_json_records_roundtrip_and_reject_malformed_fields() {
+    let codec = JsonRecordCodec {}
+    let weights: Map<string, float> = map_new()
+    weights["alpha"] = 1.25
+    let source = ChangeLog { rows: [Change { event: ChangeEvent::Empty, count: 1 },
+        Change { event: ChangeEvent::Pair(5, 2.5), count: 2 },
+        Change { event: ChangeEvent::Names(["a", "b"]), count: 3 }],
+        title: null, weights, tint: ValueTint { red: 0.75, visible: false } }
+    let wire = json_record_encode(codec, source)
+    let copy = json_record_decode(codec, json_decode(json_encode(wire)).unwrap(), source).unwrap()
+    assert(copy == source)
+    assert(!same_ref(copy, source))
+    copy.rows[0] = Change { event: ChangeEvent::Text("changed"), count: 8 }
+    assert(source.rows[0].count == 1)
+    let fields = json_as_object(wire).unwrap()
+    fields["rows"] = json_str("wrong")
+    assert(json_record_decode(codec, wire, source) == null)
+    fields["rows"] = json_array([json_object(map_new())])
+    assert(json_record_decode(codec, wire, source) == null)
+    fields["rows"] = json_array([])
+    fields["weights"] = json_str("wrong")
+    assert(json_record_decode(codec, wire, source) == null)
+    fields["weights"] = json_object(map_new())
+    fields["title"] = json_int(4)
+    assert(json_record_decode(codec, wire, source) == null)
+    print("ok")
 }

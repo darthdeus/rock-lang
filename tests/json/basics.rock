@@ -1,6 +1,6 @@
-// Tests for the pure-Rock JSON library (stone/engine/json.rock).
-
-// Encoder
+// The pure-Rock JSON value API: encode, decode, escapes and code points,
+// pretty printing, nesting depth, number grammar, and JsonValue built through
+// generic callbacks.
 
 // Whole-valued floats lose the trailing .0 -- keeps round-trips compact.
 // Non-finite floats encoding as null is pinned in number_exact.rock.
@@ -44,8 +44,7 @@ fn json_decode_str(src: string) -> string {
     return json_as_str(json_decode(src) ?? json_null()) ?? "DECODE-FAILED"
 }
 
-// The decode side of the same five escapes. It went untested while encode was
-// covered, and `\r` decoded to the letter `r` for as long as that was true.
+// The decode side of the same five escapes.
 @test
 fn test_decode_string_escape_units() {
     let bs = string_char(92)
@@ -77,16 +76,6 @@ fn test_encode_arrays_and_objects() {
     assert_eq(json_encode(json_object(m)), "{{\"a\":1,\"b\":2,\"c\":3}}")
 }
 
-@test
-fn test_encode_nested() {
-    let inner: Map<string, JsonValue> = map_new()
-    insert(inner, "x", json_int(10))
-    let outer: Map<string, JsonValue> = map_new()
-    insert(outer, "inner", json_object(inner))
-    insert(outer, "list", json_array([json_int(1), json_int(2)]))
-    assert_eq(json_encode(json_object(outer)), "{{\"inner\":{{\"x\":10}},\"list\":[1,2]}}")
-}
-
 // Decoder
 
 @test
@@ -112,15 +101,6 @@ fn test_decode_scalars() {
 }
 
 @test
-fn test_decode_strings() {
-    assert_eq(json_decode_str("\"hello\""), "hello")
-    assert_eq(json_decode_str("\"a\\\"b\\nc\\\\d\""), "a\"b\nc\\d")
-    assert_eq(json_decode_str("\"a\\\"b\\\"c\\\"d\""), "a\"b\"c\"d")
-    // \u0041 = "A"
-    assert_eq(json_decode_str("\"\\u0041\""), "A")
-}
-
-@test
 fn test_decode_string_mixed_escaped_runs() {
     let v = json_decode("\"alpha\\\"bravo\\u0043delta\\\\echo\\nfoxtrot\"")
     assert(v != null, "decode mixed escaped runs")
@@ -139,26 +119,6 @@ fn test_decode_arrays() {
     assert_eq(json_as_int(arr[0]) ?? 0, 1)
     assert_eq(json_as_int(arr[1]) ?? 0, 2)
     assert_eq(json_as_int(arr[2]) ?? 0, 3)
-}
-
-@test
-fn test_decode_object_simple() {
-    let v = json_decode("{{\"a\":1,\"b\":\"x\"}}")
-    assert(v != null, "decode object")
-    let m = json_as_object(v.unwrap())
-    assert(m != null, "is object")
-    let mm = m.unwrap()
-    assert_eq(json_as_int(mm["a"]) ?? 0, 1)
-    assert_eq(json_as_str(mm["b"]) ?? "", "x")
-}
-
-@test
-fn test_decode_whitespace() {
-    let v = json_decode("  {{  \"a\"  :  [  1  ,  2  ]  }}  ")
-    assert(v != null, "decode with whitespace")
-    let arr = json_as_array(json_field(v.unwrap(), "a") ?? json_null())
-    assert(arr != null, "got array")
-    assert_eq(arr.unwrap().len(), 2)
 }
 
 @test
@@ -250,19 +210,6 @@ fn test_pretty_scalar_inline() {
     insert(m, "x", json_int(1))
     insert(m, "y", json_int(2))
     assert_eq(json_encode_pretty(json_object(m)), "{{\"x\":1,\"y\":2}}")
-}
-
-// A container with nested containers expands one child per line, indented,
-// while the leaf objects stay compact.
-@test
-fn test_pretty_nested_expands() {
-    let a: Map<string, JsonValue> = map_new()
-    insert(a, "type", json_str("wall"))
-    insert(a, "x", json_int(0))
-    let root: Map<string, JsonValue> = map_new()
-    insert(root, "tiles", json_array([json_object(a)]))
-    let expected = "{{\n  \"tiles\": [\n    {{\"type\":\"wall\",\"x\":0}}\n  ]\n}}"
-    assert_eq(json_encode_pretty(json_object(root)), expected)
 }
 
 // An item nesting an object expands by default; under a key named in
@@ -375,8 +322,6 @@ fn test_json_nesting_limit_boundary() {
 
 @test
 fn test_json_nesting_past_limit_rejects_without_crashing() {
-    // Before the depth limit these overflowed the interpreter stack and took
-    // the process down instead of returning null.
     assert(json_decode(json_nested_arrays(5000)) == null,
         "5000 nested arrays must reject, not crash")
     assert(json_decode(json_nested_objects(5000)) == null,
@@ -443,9 +388,8 @@ fn test_json_number_grammar_admits() {
 
 // Unescaped control characters
 //
-// JSON requires every byte below 0x20 inside a string to be escaped. The
-// ordinary-character run breaks only on `"` and `\`, so a raw newline or tab
-// used to pass straight through.
+// JSON requires every byte below 0x20 inside a string to be escaped, but the
+// ordinary-character run breaks only on `"` and `\`.
 
 @test
 fn test_json_string_rejects_raw_control_bytes() {
@@ -474,4 +418,125 @@ fn test_json_string_admits_escaped_and_high_bytes() {
     assert(json_decode("[\"{string_char(127)}\"]") != null, "0x7F DEL is legal raw")
     // High bytes carrying UTF-8 must still pass through untouched.
     assert(json_decode("[\"é\"]") != null, "UTF-8 multibyte is legal raw")
+}
+
+// Surrogate pair for the emoji at U+1F600 decodes to one code point.
+@test
+fn test_json_surrogate_pair_is_one_code_point() {
+    let decoded = json_decode("\"\\ud83d\\ude00\"")
+    let s = json_as_str(decoded.unwrap()).unwrap()
+    assert(s == "\u{1F600}")
+    let cps: [int] = []
+    for cp in s.chars() { cps.push(cp) }
+    assert_eq(cps.len(), 1)
+    assert_eq(cps[0], 0x1F600)
+}
+
+// The byte layouts below are luajit's string representation (UTF-8 bytes).
+// JS strings are UTF-16; tests/strings/code_points.rock covers both backends.
+
+fn assert_units(s: string, units: [int]) {
+    assert_eq(s.len(), units.len())
+    for i in 0..units.len() { assert_eq(s.unit_at(i), units[i]) }
+}
+
+// Surrogate pair for the emoji at U+1F600 must decode to a 4-byte UTF-8
+// sequence, and from_codepoint must encode each width boundary.
+@test(backends = "lua")
+fn test_utf8_byte_layouts() {
+    let decoded = json_decode("\"\\ud83d\\ude00\"")
+    assert(decoded != null)
+    let s = json_as_str(decoded.unwrap())
+    assert(s != null)
+    assert_units(s.unwrap(), [0xF0, 0x9F, 0x98, 0x80])
+    assert_units(from_codepoint(0x7F), [0x7F])
+    assert_units(from_codepoint(0x80), [0xC2, 0x80])
+    assert_units(from_codepoint(0x7FF), [0xDF, 0xBF])
+    assert_units(from_codepoint(0x800), [0xE0, 0xA0, 0x80])
+    assert_units(from_codepoint(0xFFFF), [0xEF, 0xBF, 0xBF])
+    assert_units(from_codepoint(0x10000), [0xF0, 0x90, 0x80, 0x80])
+    assert_units(from_codepoint(0x10FFFF), [0xF4, 0x8F, 0xBF, 0xBF])
+}
+
+@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
+    local ok, err = pcall(f)
+    return not ok
+"""
+
+@test
+fn test_from_codepoint_invalid_errors() {
+    assert(try_call(() => { let _x = from_codepoint(-1) }))
+    assert(try_call(() => { let _x = from_codepoint(0x110000) }))
+    assert(try_call(() => { let _x = from_codepoint(0xD800) }))
+    assert(try_call(() => { let _x = from_codepoint(0xDFFF) }))
+}
+
+// Malformed input is data, not a programmer error: a lone surrogate escape
+// must yield a decode failure (null), never a runtime error.
+@test
+fn test_json_lone_surrogate_fails_soft() {
+    assert(json_decode("\"\\ud83d\"") == null)
+    assert(json_decode("\"\\ude00\"") == null)
+    assert(json_decode("\"\\ud83dx\"") == null)
+}
+
+value PlaceJsonContext { names: [string] }
+struct PlaceJsonWorld { context: PlaceJsonContext }
+nobox value JsonPlace { index: int, x: int, y: int }
+
+fn place_json(context: PlaceJsonContext, place: JsonPlace) -> JsonValue {
+    let out: Map<string, JsonValue> = map_new()
+    out["name"] = json_str(context.names[place.index])
+    out["grid"] = json_array([json_int(place.x), json_int(place.y)])
+    return json_object(out)
+}
+
+fn encode_place<W>(context: W, place: JsonPlace,
+                   encode: fn(W, JsonPlace) -> JsonValue,
+                   fields: Map<string, JsonValue> = map_new()) -> JsonValue {
+    fields["place"] = encode(context, place)
+    return json_object(fields)
+}
+
+fn world_place_json(world: PlaceJsonWorld, place: JsonPlace) -> JsonValue {
+    return place_json(world.context, place)
+}
+
+@test
+fn c_place_json_callback_builds_into_a_supplied_map() {
+    let context = PlaceJsonContext { names: ["first", "second"] }
+    let fields: Map<string, JsonValue> = map_new()
+    fields["keep"] = json_int(73)
+    let encoded = encode_place(context, JsonPlace { index: 1, x: 4, y: 9 }, place_json, fields)
+    let place = json_field(encoded, "place").unwrap()
+    assert(json_as_str(json_field(place, "name").unwrap()).unwrap() == "second")
+    let grid = json_as_array(json_field(place, "grid").unwrap()).unwrap()
+    assert(grid.len() == 2)
+    assert(json_as_int(grid[0]).unwrap() == 4 && json_as_int(grid[1]).unwrap() == 9)
+    assert(json_as_int(json_field(encoded, "keep").unwrap()).unwrap() == 73)
+    assert(json_as_int(fields["keep"]).unwrap() == 73)
+}
+
+@test
+fn c_place_json_callback_builds_into_a_default_map() {
+    let context = PlaceJsonContext { names: ["first", "second"] }
+    let encoded = encode_place(context, JsonPlace { index: 0, x: 2, y: 3 }, place_json)
+    let place = json_field(encoded, "place").unwrap()
+    assert(json_as_str(json_field(place, "name").unwrap()).unwrap() == "first")
+    let grid = json_as_array(json_field(place, "grid").unwrap()).unwrap()
+    assert(json_as_int(grid[0]).unwrap() == 2 && json_as_int(grid[1]).unwrap() == 3)
+}
+
+@test
+fn c_place_json_callback_borrows_an_arena_world() {
+    let worlds: Arena<PlaceJsonWorld> = arena_new()
+    let handle = worlds.insert(PlaceJsonWorld {
+        context: PlaceJsonContext { names: ["arena"] },
+    })
+    let encoded = encode_place(handle.get().unwrap(),
+        JsonPlace { index: 0, x: 5, y: 6 }, world_place_json)
+    let place = json_field(encoded, "place").unwrap()
+    assert(json_as_str(json_field(place, "name").unwrap()).unwrap() == "arena")
+    let grid = json_as_array(json_field(place, "grid").unwrap()).unwrap()
+    assert(json_as_int(grid[0]).unwrap() == 5 && json_as_int(grid[1]).unwrap() == 6)
 }

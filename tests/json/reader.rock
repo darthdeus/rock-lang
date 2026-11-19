@@ -1,0 +1,157 @@
+// The JSON source reader: grammar and depth validation with rejection paths,
+// field and array indexing, string segments and integer precision.
+
+@test
+fn reader_validation_finishes_the_root_before_end_of_input() {
+    for raw in ["0", "-1", "1.25", "true", "false", "null", "\"plain\"", "[]", "{{}}",
+        "[0,{{\"a\":[[],{{}}]}}]", "{{\"a\":[],\"b\":{{}},\"a\":1}}", "  [1] \n"] {
+        let reader = json_reader_decode(raw)
+        assert(reader != null, raw)
+        assert_eq(json_encode(json_reader_materialize(reader.unwrap())), json_encode(json_decode(raw).unwrap()))
+    }
+}
+
+@test
+fn reader_validation_keeps_container_grammar_and_depth() {
+    for raw in ["[1,]", "{{\"a\":1,}}", "[[],,[]]", "{{\"a\" 1}}", "[1}}", "{{]",
+        "[", "{{", "[1", "{{\"a\":", "{{\"a\":1", "[[]", "0 0", "[] []", "01", "1e"] {
+        assert(json_reader_decode(raw) == null, raw)
+    }
+    let legal = "[".repeat(json_max_depth()) + "0" + "]".repeat(json_max_depth())
+    assert(json_reader_decode(legal) != null)
+    assert(json_reader_decode("[" + legal + "]") == null)
+}
+
+@test
+fn reader_string_segments_preserve_prefix_escapes_and_tail() {
+    for (raw, expected) in [("\"prefix\\nmid\\tend\"", "prefix\nmid\tend"),
+        ("\"\\u0041tail\"", "Atail"), ("\"head\\uD83D\\uDE00tail\"", "head" + from_codepoint(0x1F600) + "tail"),
+        ("\"\\n\\t\"", "\n\t"), ("\"plain\"", "plain"), ("\"x\\\\y\\\"z\"", "x\\y\"z")] {
+        let reader = json_reader_decode(raw).unwrap()
+        assert_eq(json_reader_as_str(reader).unwrap(), expected)
+        assert_eq(json_as_str(json_decode(raw).unwrap()).unwrap(), expected)
+    }
+}
+
+@test
+fn reader_validation_preserves_rejection_diagnostics() {
+    for (raw, path, offset) in [
+        ("", "$", 0), (" \t", "$", 2),
+        ("[1,]", "$[1]", 3), ("{{\"a\":1,}}", "$", 7),
+        ("{{\"a\" 1}}", "$", 5), ("[truX]", "$[0]", 1),
+        ("[falsex]", "$", 6), ("0 0", "$", 2),
+        ("{{\"a\":", "$[\"a\"]", 5),
+        ("{{\"a\":-}}", "$[\"a\"]", 6),
+        ("{{\"a\":1.}}", "$[\"a\"]", 7),
+        ("{{\"a\":1e+}}", "$[\"a\"]", 8),
+        ("{{\"a\":\"a\n\"}}", "$[\"a\"]", 8),
+        ("{{\"a\":\"\\uZZZZ\"}}", "$[\"a\"]", 12),
+        ("{{\"a\":[\"\\q\"]}}", "$[\"a\"][0]", 9),
+        ("{{\"a\":[{{\"x\":\"\\uD800tail\"}}]}}", "$[\"a\"][0][\"x\"]", 18),
+    ] {
+        let calls = [0]
+        assert(json_reader_decode(raw, (got_path, got_offset, message) => {
+            calls[0] += 1
+            assert_eq(got_path, path, raw)
+            assert_eq(got_offset, offset, raw)
+            assert_eq(message, "invalid JSON", raw)
+        }) == null, raw)
+        assert_eq(calls[0], 1, raw)
+        assert(json_reader_decode(raw) == null, raw)
+    }
+}
+
+@test
+fn reader_integer_conversion_matches_host_at_precision_boundaries() {
+    for literal in ["0", "-0", "1", "-1", "2147483648", "-2147483649",
+        "999999999999999", "-999999999999999", "1000000000000000",
+        "9007199254740991", "9007199254740993", "999999999999999999"] {
+        let expected = literal.parse_int().unwrap()
+        let reader = json_reader_decode(literal).unwrap()
+        assert_eq(json_reader_as_int(reader).unwrap(), expected, literal)
+        assert_eq(json_reader_strict_int(reader).unwrap(), expected, literal)
+        assert_eq(json_reader_as_float(reader).unwrap(), expected as float, literal)
+    }
+}
+
+@test
+fn reader_index_root_and_nested_fields_keep_last_decoded_key() {
+    let src = "{{\"\\u0061\":1,\"a\":2,\"nested\":{{\"x\":3,\"x\":4}}}}"
+    let reader = json_reader_decode(src).unwrap()
+
+    assert_eq(json_reader_field_as_int(reader, "a").unwrap(), 2)
+    assert(json_reader_field(reader, "missing") == null)
+    let nested = json_reader_field(reader, "nested").unwrap()
+    assert_eq(json_reader_field_as_int(nested, "x").unwrap(), 4)
+}
+
+@test
+fn reader_index_arrays_support_mixed_values_and_both_iteration_modes() {
+    let reader = json_reader_decode("[{{\"a\":2}},1,\"x\",true,null,[3]]").unwrap()
+    let array = json_reader_as_array(reader).unwrap()
+    assert_eq(array.len(), 6)
+
+    let next_iter = array.iter()
+    let (more, first) = next_iter.next()
+    assert(more)
+    assert_eq(json_reader_field_as_int(first, "a").unwrap(), 2)
+
+    let unindexed_iter = array.iter()
+    let (more, unindexed) = unindexed_iter.next_unindexed()
+    assert(more)
+    assert(json_reader_is_object(unindexed))
+    assert_eq(json_reader_field_as_int(unindexed, "a").unwrap(), 2)
+
+    let seen = 0
+    for entry in array {
+        if seen == 0 { assert(json_reader_is_object(entry)) }
+        else if seen == 1 { assert_eq(json_reader_as_int(entry).unwrap(), 1) }
+        else if seen == 2 { assert_eq(json_reader_as_str(entry).unwrap(), "x") }
+        else if seen == 3 { assert_eq(json_reader_as_bool(entry).unwrap(), true) }
+        else if seen == 4 { assert(json_reader_is_null(entry)) }
+        else {
+            let inner = json_reader_as_array(entry).unwrap()
+            assert_eq(inner.len(), 1)
+            assert_eq(json_reader_as_int(inner.get_at(0)).unwrap(), 3)
+        }
+        seen += 1
+    }
+    assert_eq(seen, 6)
+
+    let object_at_index = array.get_at(0)
+    assert_eq(json_reader_field_as_int(object_at_index, "a").unwrap(), 2)
+}
+
+@test
+fn reader_index_min_bytes_preserves_access_results() {
+    let src = "[{{\"small\":1,\"nested\":{{\"value\":2}},\"items\":[3,4]}}]"
+    for threshold in [0, 1, 10000] {
+        let reader = json_reader_decode(src, null, threshold).unwrap()
+        let array = json_reader_as_array(reader).unwrap()
+        assert_eq(array.len(), 1)
+        let row = array.get_at(0)
+        assert_eq(json_reader_field_as_int(row, "small").unwrap(), 1)
+        let nested = json_reader_field(row, "nested").unwrap()
+        assert_eq(json_reader_field_as_int(nested, "value").unwrap(), 2)
+        let items = json_reader_as_array(json_reader_field(row, "items").unwrap()).unwrap()
+        assert_eq(items.len(), 2)
+        assert_eq(json_reader_as_int(items.get_at(1)).unwrap(), 4)
+    }
+}
+
+@test
+fn reader_index_reports_depth_rejection() {
+    let errors: [string] = []
+    let rejected = (path: string, offset: int, problem: string) => {
+        errors.push(path)
+        errors.push("{offset}")
+        errors.push(problem)
+    }
+    let depth = json_max_depth() + 1
+    let src = "[".repeat(depth) + "0" + "]".repeat(depth)
+    assert(json_reader_decode(src, rejected) == null)
+    assert_eq(errors.len(), 3)
+    assert_eq(errors[0], "$" + "[0]".repeat(json_max_depth()))
+    assert_eq(errors[1], "{json_max_depth()}")
+    assert_eq(errors[2], "maximum JSON depth exceeded")
+}

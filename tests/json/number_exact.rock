@@ -3,21 +3,17 @@
 // `parse_int` on that literal, compared by equality rather than a tolerance.
 //
 // The float arms are a REAL comparison: `parse_number` reaches C `strtod_l`
-// through `parse_float_at` and no longer calls `parse_float` at all, so the two
+// through `parse_float_at` and does not call `parse_float`, so the two
 // sides are two different parsers and equality is a claim about both. The int
 // arms still share the oracle. (`json_as_int` on a float literal would coerce,
 // so the float arms go through `json_as_float`, which returns null for an Int
 // and would fail the assert rather than silently compare a truncation.)
 //
-// It is also the admission gate for any future fast path -- a digit accumulator
-// that computes the value arithmetically was written and measured
-// which decoded 999999999999999999 as
-// 1e+18, because `int` is double-backed on luajit and the bound had been set at
-// 18 digits rather than the 15 that 2^53 allows. This file is what caught it.
-//
-// So the corpus straddles the bounds such a path needs -- 15 significant
-// digits, 22 fractional digits, exponents -- rather than sampling typical
-// values.
+// It is also the admission gate for any fast path that computes the value
+// arithmetically: `int` is double-backed on luajit, so such a path is exact only
+// up to the 15 digits that 2^53 allows. The corpus straddles the bounds such a
+// path needs -- 15 significant digits, 22 fractional digits, exponents --
+// rather than sampling typical values.
 
 fn decoded_float(lit: string) -> float {
     let v = json_decode(lit)

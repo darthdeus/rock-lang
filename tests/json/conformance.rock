@@ -92,10 +92,8 @@ fn test_json_conformance_manifest_shape() {
     assert_eq(either, 35, "i_ case count")
 }
 
-// The two deepest structure cases (50,000 and 100,000 levels) used to abort
-// the process on a stack overflow and had to sit outside the loop. json_decode
-// now rejects them via json_max_depth(), so they run with everything else --
-// which is what makes this a gate against the crash coming back.
+// The two deepest structure cases (50,000 and 100,000 levels) must reject via
+// json_max_depth() rather than overflow the stack.
 @test
 fn test_json_conformance_deep_structure_cases_reject() {
     let deep = [
