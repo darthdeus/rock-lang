@@ -1,9 +1,0 @@
-fn counter_fn() -> fn() -> int {
-    return () => { let n = 5 n = n + 1 return n }
-}
-@test(output = "6\n6")
-fn hoisted_lambda_locals_stay_per_call() {
-    let f = counter_fn()
-    print("{f()}")
-    print("{f()}")
-}

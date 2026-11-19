@@ -1,0 +1,159 @@
+// Nullable representations: ascribed values, embeds, array stores, enum field defaults and receivers.
+
+// https://github.com/darthdeus/rock-lang/issues/401
+value AscribedPair { x: int, y: int }
+
+fn ascribed_field(x: int) -> int {
+    return (AscribedPair { x: x, y: 2 } : AscribedPair?)?.x ?? -1
+}
+
+fn AscribedPair.total(self, extra: int = 3) -> int {
+    return self.x + self.y + extra
+}
+
+fn ascribed_method(x: int) -> int {
+    return (AscribedPair { x: x, y: 2 } : AscribedPair?)?.total() ?? -1
+}
+
+@test
+fn nullable_value_ascription_preserves_constructor_type() {
+    assert_eq(ascribed_field(7), 7)
+    assert_eq(ascribed_method(7), 12)
+}
+
+struct Payload { n: int }
+
+struct State { embed payload: Payload? }
+
+fn absent() -> Payload? { return null }
+
+fn clear_payload(s: State) { s.payload = null }
+
+fn take(p: Payload?) -> int { if p == null { return -1 }; return p.n }
+
+@test(output = "-1")
+fn nullable_embed_clear_normalizes_dynamic_absence_before_boxed_read() {
+    let s = State { payload: Payload { n: 7 } }
+    s.payload = absent()
+    clear_payload(s)
+    print("{take(s.payload)}")
+}
+
+value OptionalArrayPoint { x: int, y: int }
+
+struct OptionalArrayHolder { points: [OptionalArrayPoint?] }
+
+fn optional_array_first(points: [OptionalArrayPoint?]) -> int {
+    return points[0].unwrap().x
+}
+
+@test
+fn c_optional_array_literal_local_store() {
+    let source = [OptionalArrayPoint { x: 1, y: 2 }]
+    let points: [OptionalArrayPoint?] = [source[0]]
+    source[0].x = 9
+    assert_eq(points.len(), 1)
+    assert_eq(points[0].unwrap().x, 1)
+    assert_eq(points[0].unwrap().y, 2)
+}
+
+@test
+fn c_optional_array_literal_keeps_null_entries() {
+    let points: [OptionalArrayPoint?] = [null, OptionalArrayPoint { x: 3, y: 4 }, null]
+    assert_eq(points.len(), 3)
+    assert_eq(points[0], null)
+    assert_eq(points[1].unwrap().x, 3)
+    assert_eq(points[2], null)
+}
+
+@test
+fn c_optional_array_literal_field_store() {
+    let holder = OptionalArrayHolder { points: [OptionalArrayPoint { x: 5, y: 6 }] }
+    assert_eq(holder.points[0].unwrap().x, 5)
+}
+
+@test
+fn c_optional_array_literal_argument_store() {
+    assert_eq(optional_array_first([OptionalArrayPoint { x: 7, y: 8 }]), 7)
+}
+
+struct Canvas {
+    handle: int,
+    width: float,
+    height: float,
+}
+
+enum Source {
+    Image(int),
+    Canvas(Canvas),
+}
+
+struct Draw {
+    id: int,
+    source: Source? = null,
+}
+
+fn source_name(source: Source?) -> string {
+    if source == null { return "null" }
+    return match source {
+        Source::Image(_) => "image"
+        Source::Canvas(_) => "canvas"
+    }
+}
+
+@test(output = "1 null")
+fn nullable_payload_enum_null_default_is_constructed() {
+    let draw = Draw { id: 1 }
+    print("{draw.id} {source_name(draw.source)}")
+}
+
+@test(output = "2 image")
+fn nullable_payload_enum_value_control() {
+    let draw = Draw { id: 2, source: Source::Image(7) }
+    print("{draw.id} {source_name(draw.source)}")
+}
+
+@test(output = "3 null")
+fn nullable_payload_enum_explicit_null_control() {
+    let draw = Draw { id: 3, source: null }
+    print("{draw.id} {source_name(draw.source)}")
+}
+
+value Pair { x: int, y: int }
+
+nobox value Flat { x: int, y: int }
+
+struct RefRow { n: int }
+
+struct Owner { row: Row? = null, pair: Pair? = null, flat: Flat? = null }
+
+value Row { text: string, n: int }
+
+fn scalar_pair(present: bool) -> Pair? {
+    if present { return Pair { x: 13, y: 17 } }
+    return null
+}
+
+fn tuple_pair(present: bool) -> (int, int)? {
+    if present { return (19, 23) }
+    return null
+}
+
+fn reference_row(present: bool) -> RefRow? {
+    if present { return RefRow { n: 29 } }
+    return null
+}
+
+@test(output = "-1 -1 -1\n-1 -1 -1\n13 19 29\n31 41 43")
+fn optional_receiver_representations_preserve_absence_and_selected_values() {
+    for present in [false, true] {
+        let h = Owner {}
+        if present {
+            h.row = Row { text: "row", n: 31 }
+            h.pair = Pair { x: 37, y: 41 }
+            h.flat = Flat { x: 43, y: 47 }
+        }
+        print("{scalar_pair(present)?.x ?? -1} {tuple_pair(present)?.0 ?? -1} {reference_row(present)?.n ?? -1}")
+        print("{h.row?.n ?? -1} {h.pair?.y ?? -1} {h.flat?.x ?? -1}")
+    }
+}

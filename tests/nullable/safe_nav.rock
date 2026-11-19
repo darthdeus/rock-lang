@@ -1,8 +1,9 @@
-// Safe navigation `?.`: field chains, `?? default`, `?.let`, `?.0`/`?.1` on
-// nullable tuples, UFCS `?.method()`, and nullable struct fields.
+// Safe navigation over tuples, value receivers and mixed enum fields.
 
 struct Inner { value: int }
+
 struct Outer { inner: Inner?, name: string }
+
 struct Mob { name: string, health: int }
 
 fn boss_mobs() -> Arena<Mob> {
@@ -229,6 +230,7 @@ fn safenav_arena_find_pattern() {
 }
 
 struct SmallInner { v: int }
+
 struct SmallOuter { inner: SmallInner? }
 
 fn deep(o: SmallOuter?) -> int {
@@ -255,4 +257,207 @@ fn test_single_safenav() {
     print("{shallow(i)}")
     let n: SmallInner? = null
     print("{shallow(n)}")
+}
+
+newtype UserId(int)
+
+fn maybe_user(have: bool) -> UserId? {
+    if have { UserId(42) } else { null }
+}
+
+@test(output = "42\n-1")
+fn test_nullable_newtype_dot0() {
+    let u = maybe_user(true)
+    let v = u?.0
+    print(v ?? -1)
+    let none = maybe_user(false)
+    let w = none?.0
+    print(w ?? -1)
+}
+
+fn maybe_pair(have: bool) -> (int, string)? {
+    if have { (7, "hi") } else { null }
+}
+
+@test(output = "7\n-1")
+fn test_nullable_tuple_dot0() {
+    let p = maybe_pair(true)
+    let v = p?.0
+    print(v ?? -1)
+    let none = maybe_pair(false)
+    let w = none?.0
+    print(w ?? -1)
+}
+
+value NV2 { x: float, y: float }
+
+struct SV2 { x: float, y: float }
+
+fn vec_len(v: NV2) -> float { return v.x + v.y }
+
+fn smag(v: SV2) -> float { return v.x + v.y }
+
+fn by_field(m: Map<int, NV2>, k: int) -> float { return m.get(k)?.x ?? -1.0 }
+
+fn by_method(m: Map<int, NV2>, k: int) -> float { return m.get(k)?.vec_len() ?? -1.0 }
+
+fn by_let(m: Map<int, NV2>, k: int) -> float { return m.get(k)?.let { 5.0 } ?? -1.0 }
+
+fn s_by_method(m: Map<int, SV2>, k: int) -> float { return m.get(k)?.smag() ?? -1.0 }
+
+fn seeded() -> Map<int, NV2> {
+    let m: Map<int, NV2> = map_new()
+    m[1] = NV2 { x: 1.0, y: 2.0 }
+    return m
+}
+
+@test
+fn safe_nav_field_hits_and_misses() {
+    assert_eq(by_field(seeded(), 1), 1.0)
+    assert_eq(by_field(seeded(), 9), -1.0)
+}
+
+// The miss used to crash: the method ran on the miss path with nil leaves.
+@test
+fn safe_nav_method_hits_and_misses() {
+    assert_eq(by_method(seeded(), 1), 3.0)
+    assert_eq(by_method(seeded(), 9), -1.0)
+}
+
+// The miss used to return 5, the hit value.
+@test
+fn safe_nav_let_hits_and_misses() {
+    assert_eq(by_let(seeded(), 1), 5.0)
+    assert_eq(by_let(seeded(), 9), -1.0)
+}
+
+// The control: a reference struct receiver is a real box, so `== nil` was always
+// the right test for it. It must stay that way.
+@test
+fn a_struct_receiver_hits_and_misses() {
+    let m: Map<int, SV2> = map_new()
+    m[1] = SV2 { x: 1.0, y: 2.0 }
+    assert_eq(s_by_method(m, 1), 3.0)
+    assert_eq(s_by_method(m, 9), -1.0)
+}
+
+// A nullable value local as the receiver of a UFCS `?.method()` whose self
+// parameter takes the value directly (scalar ABI): the null check tests the
+// nullable local and the hit branch passes the value's fields.
+
+value V2 { x: int, y: int }
+
+fn sum(self: V2) -> int {
+    self.x + self.y
+}
+
+@test
+fn test_safenav_ufcs_value_receiver() {
+    let v: V2? = V2 { x: 7, y: 9 }
+    let s = v?.sum() ?? -1
+    assert_eq(s, 16)
+    let none: V2? = null
+    let t = none?.sum() ?? -1
+    assert_eq(t, -1)
+}
+
+enum Kind { None, Named(string), Pair(int, float) }
+
+enum Mode { Off, Level(int) }
+
+enum UnitOnly { A, B }
+
+value VH<T> { field: T }
+
+struct SH<T> { field: T, other: int }
+
+struct Holder<T> { field: T }
+
+global G: SH<Kind>? = null
+
+fn value_holder() -> VH<Kind>? { return VH { field: Kind::None } }
+
+fn global_holder() -> SH<Kind>? { return G }
+
+fn holder_of(m: Mode) -> Holder<Mode>? { return Holder { field: m } }
+
+fn no_holder() -> Holder<Mode>? { return null }
+
+fn field_is_off(h: Holder<Mode>?) -> bool { return h?.field == Mode::Off }
+
+fn field_or_level(h: Holder<Mode>?) -> Mode { return h?.field ?? Mode::Level(3) }
+
+@test
+fn test_value_holder_unit_field() {
+    let v = value_holder()
+    assert(v?.field == Kind::None)
+    let a = v?.field ?? Kind::Named("x")
+    assert(a == Kind::None)
+}
+
+@test
+fn test_struct_holder_through_global() {
+    G = SH { field: Kind::None, other: 1 }
+    let g = global_holder()
+    assert(g?.field == Kind::None)
+    let b = g?.field ?? Kind::Pair(1, 2.0)
+    assert(b == Kind::None)
+    G = null
+}
+
+@test
+fn test_payload_field_is_not_the_unit_variant() {
+    let s: SH<Kind>? = SH { field: Kind::Named("q"), other: 2 }
+    assert(!(s?.field == Kind::None))
+    assert(s?.field == Kind::Named("q"))
+    assert(!(s?.field == Kind::Named("r")))
+    let p = s?.field ?? Kind::None
+    assert(p == Kind::Named("q"))
+    match p {
+        Kind::Named(name) => assert(name == "q"),
+        _ => assert(false),
+    }
+}
+
+@test
+fn test_local_holder_unit_field() {
+    let h: Holder<Mode>? = Holder { field: Mode::Off }
+    assert(h?.field == Mode::Off)
+    let m = h?.field ?? Mode::Level(3)
+    assert(m == Mode::Off)
+}
+
+@test
+fn test_holder_through_parameter_and_call() {
+    assert(field_is_off(holder_of(Mode::Off)))
+    assert(!field_is_off(holder_of(Mode::Level(1))))
+    assert(field_or_level(holder_of(Mode::Off)) == Mode::Off)
+    assert(field_or_level(holder_of(Mode::Level(7))) == Mode::Level(7))
+}
+
+@test
+fn test_null_holder() {
+    let n: Holder<Mode>? = null
+    assert(!(n?.field == Mode::Off))
+    assert(n?.field == null)
+    let k = n?.field ?? Mode::Off
+    assert(k == Mode::Off)
+    assert(!field_is_off(no_holder()))
+    assert(field_or_level(no_holder()) == Mode::Level(3))
+}
+
+@test
+fn test_controls() {
+    // Plain unwrap and field access.
+    let h: Holder<Mode>? = Holder { field: Mode::Off }
+    assert(h.unwrap().field == Mode::Off)
+    // A directly assigned optional enum, coalesced.
+    let direct: Mode? = Mode::Off
+    let d = direct ?? Mode::Level(9)
+    assert(d == Mode::Off)
+    // A unit-only enum through the same holder shape.
+    let u: Holder<UnitOnly>? = Holder { field: UnitOnly::B }
+    assert(u?.field == UnitOnly::B)
+    let w = u?.field ?? UnitOnly::A
+    assert(w == UnitOnly::B)
 }

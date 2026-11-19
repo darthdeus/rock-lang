@@ -1,7 +1,4 @@
-// Null coalescing `??`.
-//
-// Typing: T? ?? T -> T and T? ?? T? -> T? (inner types must match;
-// mismatches are compile errors).
+// Coalescing nullable values: map values and value struct literal fields.
 
 @test(output = "5\n0\n0\n42\nhello\n\n3.14\nfalse\ntrue\ntrue")
 fn coalesce_keeps_present_values_including_falsy_ones() {
@@ -125,6 +122,7 @@ fn boxed_value_payload_control() {
 global CO_G: int = 0
 
 fn co_some() -> int? { return 5 }
+
 fn co_none() -> int? { return null }
 
 struct CoS { v: int }
@@ -187,4 +185,82 @@ fn coalesce_stays_below_comparison() {
 
     let hit = co_none_b() ?? 2 == 2
     assert_eq(hit, true)
+}
+
+value CoalescePoint { a: int, b: int }
+
+value CoalesceLabel { a: int, label: string }
+
+@test(output = "15\n23\ntrue\n31")
+fn nullable_map_coalesce_preserves_values_and_absence() {
+    let points: Map<string, CoalescePoint?> = map_new()
+    points["present"] = CoalescePoint { a: 7, b: 8 }
+    points["absent"] = null
+    let present = points.get("present") ?? CoalescePoint { a: 0, b: 0 }
+    let absent = points.get("absent") ?? CoalescePoint { a: 11, b: 12 }
+    print(present.a + present.b)
+    print(absent.a + absent.b)
+    print(points.get("absent") == null)
+    let missing = points.get("missing") ?? CoalescePoint { a: 15, b: 16 }
+    print(missing.a + missing.b)
+}
+
+@test(output = "7:x\n11:fallback\ntrue")
+fn nullable_gc_map_coalesce_preserves_values_and_absence() {
+    let labels: Map<string, CoalesceLabel?> = map_new()
+    labels["present"] = CoalesceLabel { a: 7, label: "x" }
+    labels["absent"] = null
+    let present = labels.get("present") ?? CoalesceLabel { a: 0, label: "wrong" }
+    let absent = labels.get("absent") ?? CoalesceLabel { a: 11, label: "fallback" }
+    print("{present.a}:{present.label}")
+    print("{absent.a}:{absent.label}")
+    print(labels.get("absent") == null)
+}
+
+struct InlineThing { at: Vec2 = v(0, 0) }
+
+@test(output = "7 8")
+fn coalesce_into_value_struct_literal_field_is_correct() {
+    let fallback: Vec2? = null
+    let t = InlineThing { at: fallback ?? v(7, 8) }
+    print("{t.at.x as int} {t.at.y as int}")
+}
+
+fn make_thing(fallback: Vec2?) -> InlineThing? {
+    return InlineThing { at: fallback ?? return null }
+}
+
+@test(output = "13 17\ntrue")
+fn a_diverging_coalesce_arm_does_not_build_the_parent_from_nil_leaves() {
+    let t = make_thing(v(13, 17)).unwrap()
+    print("{t.at.x as int} {t.at.y as int}")
+    print("{make_thing(null) == null}")
+}
+
+@test(output = "7 8")
+fn hoisting_the_coalesce_into_a_let_is_correct() {
+    let fallback: Vec2? = null
+    let launch = fallback ?? v(7, 8)
+    let t = InlineThing { at: launch }
+    print("{t.at.x as int} {t.at.y as int}")
+}
+
+struct Boxed { a: int, b: int }
+
+struct BoxedThing { at: Boxed = Boxed { a: 0, b: 0 } }
+
+@test(output = "7 8")
+fn a_boxed_struct_through_the_same_coalesce_is_correct() {
+    let fallback: Boxed? = null
+    let t = BoxedThing { at: fallback ?? Boxed { a: 7, b: 8 } }
+    print("{t.at.a} {t.at.b}")
+}
+
+struct ScalarThing { n: int = 0 }
+
+@test(output = "7")
+fn a_scalar_through_the_same_coalesce_is_correct() {
+    let fallback: int? = null
+    let t = ScalarThing { n: fallback ?? 7 }
+    print("{t.n}")
 }

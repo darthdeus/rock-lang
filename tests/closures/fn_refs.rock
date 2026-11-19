@@ -1,9 +1,20 @@
-// An `extern(lua) fn` declares a name that ALREADY EXISTS as a Lua global (see
-// `is_root` in skull/src/mir_emit.rs) -- it does not emit an `ffi.cdef`, so a
-// libc symbol like `floorf` is nil at every reference site, a direct call
-// included. `extern(ffi, "lib") fn` is the other form: it emits a wrapper
-// binding `lib.<name>`. Both are reachable as fn values, and the globals below
-// are the control that says so -- a global initializer is not a special case.
+// Function references: cross-module, extern and declared tuple-returning fn types.
+
+struct FnBox {
+    f: fn(float) -> int,
+}
+
+@test
+fn fn_ref_cross_module_let_binding() {
+    let f: fn(float) -> int = float_to_int
+    assert(f(2.7) == 2)
+}
+
+@test
+fn fn_ref_cross_module_struct_field() {
+    let b = FnBox { f: float_to_int }
+    assert(b.f(3.4) == 3)
+}
 
 extern(lua) fn rawequal(a: int, b: int) -> bool
 
@@ -24,10 +35,15 @@ inline(js) fn twice(a: float) -> float = """
 struct Holder { f: (string, int) -> string }
 
 global EQ: (int, int) -> bool = rawequal
+
 global REP: (string, int) -> string = rep
+
 global REPS: [(string, int) -> string] = [rep]
+
 global HELD: Holder = Holder { f: rep }
+
 global TAKE_P: (P) -> float = take_p
+
 global TWICE: (float) -> float = twice
 
 fn apply(f: (string, int) -> string, s: string, n: int) -> string { return f(s, n) }
@@ -45,3 +61,26 @@ fn apply(f: (string, int) -> string, s: string, n: int) -> string { return f(s, 
 
 @test fn value_param_fn_via_global() { let g = TAKE_P; assert_eq(g(P { x: 1.0, y: 2.0 }), 3.0) }
 @test fn inline_lua_fn_via_global() { let g = TWICE; assert_eq(g(3.0), 6.0) }
+
+@test fn a_lambda_inferred_without_an_expectation_splats_its_tuple() {
+    let f = (x: int) => (x, x + 1)
+    let (a, b) = f(5)
+    assert_eq(a, 5)
+    assert_eq(b, 6)
+}
+
+@test fn a_lambda_checked_against_a_declared_fn_type_splats_its_tuple() {
+    let g: (int) -> (int, int) = x => (x, x + 1)
+    let (a, b) = g(5)
+    assert_eq(a, 5)
+    assert_eq(b, 6)
+}
+
+fn take(f: (int) -> (int, int)) -> int {
+    let (a, b) = f(7)
+    return a * 100 + b
+}
+
+@test fn the_same_lambda_at_a_fn_value_param_agrees_with_its_callee() {
+    assert_eq(take(x => (x, x + 1)), 708)
+}

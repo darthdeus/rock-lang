@@ -1,10 +1,5 @@
-// The shapes that EMIT, paired one-for-one with the rejecting shapes that
-// identify the remaining sink classes.
-// Each fn here is the control half of a discriminant: its twin -- a tuple
-// crossing a phi, a tuple pushed into a collection, an `else if` chain, a
-// nullable tuple return, the same fn under @nomangle -- rejects at emit today.
-// Together they say WHICH property forces materialization, which a rejection
-// span alone cannot.
+// Shapes at nobox boundaries: cast identity, runtime values, GC tier
+// materialization, zero-leaf children and call spec keys.
 
 nobox value NV2 { x: float, y: float }
 
@@ -61,4 +56,276 @@ fn nsb_phi_inside_tuple(c: bool) -> float {
     assert_eq(nsb_phi_two_arm(false), 3.0)
     assert_eq(nsb_phi_flat_match(NsbFam::C), 3.0)
     assert_eq(nsb_phi_inside_tuple(true), 2.0)
+}
+
+nobox value V { x: int, y: int }
+
+fn cast(n: int) -> V {
+    return V { x: n + 1, y: n + 2 }
+}
+
+@test(output = "11 12")
+fn user_cast_is_not_the_identity_intrinsic() {
+    let v = cast(10)
+    print("{v.x} {v.y}")
+}
+
+// The stdlib `cast` must keep threading the repr -- this is the column read the
+// fast path exists for.
+@test(output = "1")
+fn stdlib_cast_still_threads_repr() {
+    let xs: [V] = [V { x: 1, y: 2 }]
+    let got = xs.get(0)
+    if got != null { print("{got.x}") }
+}
+
+nobox value Source { x: int, y: int }
+
+nobox value Result { total: int }
+
+fn cast(value: Source) -> Result { return Result { total: value.x + value.y } }
+
+fn consume(value: Result) -> int { return value.total }
+
+@test(output = "18")
+fn user_cast_after_a_column_read_keeps_its_result_representation() {
+    let values: [Source] = [Source { x: 7, y: 11 }]
+    print(consume(cast(values[0])))
+}
+
+fn matches(value: NV2?, expected: NV2) -> bool {
+    return value == expected && expected == value
+}
+
+// Mixed nullable/non-nullable equality compares presence, then leaves.
+@test(output = "true\ntrue\ntrue")
+fn nullable_nobox_equality_with_a_non_nullable_operand_compares_presence_and_leaves() {
+    let expected = NV2 { x: 1.0, y: 2.0 }
+    print(matches(expected, expected))
+    print(!matches(null, expected))
+    print(!matches(NV2 { x: 1.0, y: 3.0 }, expected))
+}
+
+value V2 { x: float, y: float }
+
+fn apply(f: fn(V2) -> float, v: V2) -> float { return f(v) }
+
+fn outer(p: V2) -> float {
+    fn sum(v: V2) -> float { return v.x + v.y }
+    return sum(p) + apply(sum, p)
+}
+
+// A nested fn reachable as a fn value cannot splat, so its direct calls must
+// use the same boxed ABI.
+@test(output = "6")
+fn a_nested_fn_taken_by_value_keeps_one_boxed_abi_at_every_call() {
+    print("{outer(V2 { x: 1.0, y: 2.0 })}")
+}
+
+inline(lua) fn show_closure(v: any) -> string = "return tostring(v.id) .. ':' .. tostring(v.f(4))"
+
+nobox value CRow { id: int, f: fn(int) -> int }
+
+fn twice(n: int) -> int { return n * 2 }
+
+@test(output = "2:8", backends = "lua")
+fn a_closure_field_boxes_through_the_value_table() {
+    let v = CRow { id: 2, f: twice }
+    print(show_closure(materialize(v)))
+}
+
+// `Say` carries a string, so `Note` is a flat enum: a unit variant nil-pads
+// the payload slot, a payload variant fills it.
+enum Note { Silent, Say(string) }
+
+nobox value NRow { id: int, note: Note }
+
+inline(lua) fn show_note(v: any) -> string = "return tostring(v.id) .. ':' .. tostring(v.note.__variant) .. ':' .. tostring(v.note[1])"
+
+@test(output = "1:Silent:nil\n2:Say:hi", backends = "lua")
+fn a_flat_enum_field_boxes_both_variant_kinds() {
+    let a = NRow { id: 1, note: Note::Silent }
+    let b = NRow { id: 2, note: Note::Say("hi") }
+    print(show_note(materialize(a)))
+    print(show_note(materialize(b)))
+}
+
+nobox value Outer { label: string, pos: NV2 }
+
+inline(lua) fn show_outer(v: any) -> string = "return v.label .. ':' .. tostring(v['pos.x']) .. ':' .. tostring(v['pos.y'])"
+
+@test(output = "L:1:2", backends = "lua")
+fn a_nested_nobox_field_boxes_inside_a_gc_tier_outer() {
+    let v = Outer { label: "L", pos: NV2 { x: 1.0, y: 2.0 } }
+    print(show_outer(materialize(v)))
+}
+
+nobox value SRow { kind: int, label: string }
+
+inline(lua) fn show_srow(v: any) -> string = "if v == nil then return 'absent' end return tostring(v.kind) .. v.label"
+
+fn pick(on: bool) -> SRow? {
+    if on { return SRow { kind: 7, label: "z" } }
+    return null
+}
+
+@test(output = "7z\nabsent", backends = "lua")
+fn a_nullable_gc_tier_value_reaches_the_sink_as_nil_when_absent() {
+    print(show_srow(materialize(pick(true))))
+    print(show_srow(materialize(pick(false))))
+}
+
+nobox value Marker {}
+
+value Tagged { m: Marker?, a: float, b: float, c: float, d: float }
+
+// The unmarked control: `Marker` unflattened, so `Tagged2` is stored by its
+// declared fields and the ctor choice is trivially right. Every assertion below
+// has a twin here.
+value Marker2 {}
+
+value Tagged2 { m: Marker2?, a: float, b: float, c: float, d: float }
+
+@test(returns = 1)
+fn present_zero_leaf_child_reads_present() -> int {
+    let m: Map<string, Tagged> = map_new()
+    m["k"] = Tagged { m: Marker {}, a: 1.0, b: 2.0, c: 3.0, d: 4.0 }
+    return if m["k"].m != null { 1 } else { 0 }
+}
+
+@test(returns = 1)
+fn absent_zero_leaf_child_reads_absent() -> int {
+    let m: Map<string, Tagged> = map_new()
+    m["k"] = Tagged { m: null, a: 1.0, b: 2.0, c: 3.0, d: 4.0 }
+    return if m["k"].m == null { 1 } else { 0 }
+}
+
+// The presence tag sits at leaf 0, ahead of every data leaf. A ctor emitted
+// against the wrong signature shifts the whole list, so the scalars are what
+// catch a shift that both null tests above would still read correctly.
+@test(returns = 1234)
+fn sibling_scalars_survive_the_present_ctor() -> int {
+    let m: Map<string, Tagged> = map_new()
+    m["k"] = Tagged { m: Marker {}, a: 1.0, b: 2.0, c: 3.0, d: 4.0 }
+    let t = m["k"]
+    return (t.a * 1000.0 + t.b * 100.0 + t.c * 10.0 + t.d) as int
+}
+
+@test(returns = 1234)
+fn sibling_scalars_survive_the_absent_ctor() -> int {
+    let m: Map<string, Tagged> = map_new()
+    m["k"] = Tagged { m: null, a: 1.0, b: 2.0, c: 3.0, d: 4.0 }
+    let t = m["k"]
+    return (t.a * 1000.0 + t.b * 100.0 + t.c * 10.0 + t.d) as int
+}
+
+@test(returns = 1)
+fn control_unmarked_present_reads_present() -> int {
+    let m: Map<string, Tagged2> = map_new()
+    m["k"] = Tagged2 { m: Marker2 {}, a: 1.0, b: 2.0, c: 3.0, d: 4.0 }
+    return if m["k"].m != null { 1 } else { 0 }
+}
+
+@test(returns = 1)
+fn control_unmarked_absent_reads_absent() -> int {
+    let m: Map<string, Tagged2> = map_new()
+    m["k"] = Tagged2 { m: null, a: 1.0, b: 2.0, c: 3.0, d: 4.0 }
+    return if m["k"].m == null { 1 } else { 0 }
+}
+
+@test(returns = 1234)
+fn control_unmarked_scalars_survive() -> int {
+    let m: Map<string, Tagged2> = map_new()
+    m["k"] = Tagged2 { m: Marker2 {}, a: 1.0, b: 2.0, c: 3.0, d: 4.0 }
+    let t = m["k"]
+    return (t.a * 1000.0 + t.b * 100.0 + t.c * 10.0 + t.d) as int
+}
+
+nobox value NP { x: float, y: float }
+
+struct Holder<T> { items: [T] }
+
+fn Holder<T>.pick(h) -> (int, T)? {
+    if vec_len(h.items) == 0 { return null }
+    return (0, h.items[0])
+}
+
+fn Holder<T>.first_pair(h) -> (int, T) {
+    return (0, h.items[0])
+}
+
+@test(output = "true")
+fn a_plain_tuple_returning_generic_call_reaches_the_specialized_copy() {
+    let full: Holder<NP> = Holder { items: [NP { x: 3.0, y: 4.0 }] }
+    print("{full.pick() != null}")
+}
+
+@test(output = "true")
+fn a_safe_nav_tuple_returning_call_reaches_the_specialized_copy() {
+    let h: Holder<NP>? = Holder { items: [NP { x: 1.0, y: 2.0 }] }
+    print("{h?.first_pair() != null}")
+}
+
+// The `(bool, T)` iterator protocol outside a `for` head.
+@test(output = "true")
+fn a_directly_called_next_reaches_the_specialized_copy() {
+    let v: [NP] = [NP { x: 1.0, y: 2.0 }]
+    let it = v.iter()
+    let (ok, p) = it.next()
+    print("{ok}")
+}
+
+nobox value Tint { r: float, g: float, b: float, a: float }
+
+value Row { key: string, count: int, color: Tint }
+
+fn row(index: int) -> Row {
+    return Row { key: "item", count: index, color: Tint { r: 1.0, g: 2.0, b: 3.0, a: 4.0 } }
+}
+
+fn with_check(check: fn() -> ()) { check() }
+
+@test(output = "10")
+fn hoisted_closure_does_not_validate_discarded_parent_blocks() {
+    let offset = 7
+    with_check(() => {
+        with_check(() => {
+            let total = offset
+            for index in 0..3 {
+                let item = row(index)
+                total += item.count
+            }
+            print(total)
+        })
+    })
+}
+
+@test fn map_nobox_enumerate_reads_values() {
+    let m: Map<string, Vec2> = map_new()
+    m["a"] = Vec2 { x: 1.0, y: 2.0 }
+    m["b"] = Vec2 { x: 3.0, y: 4.0 }
+    let n = 0
+    let sum = 0.0
+    let index_sum = 0
+    for (i, (k, v)) in enumerate(m) {
+        n += 1
+        index_sum += i
+        sum += v.x + v.y
+    }
+    assert_eq(n, 2)
+    assert_eq(index_sum, 1)
+    assert_eq(sum, 10.0)
+}
+
+@test fn map_nobox_enumerate_visits_each_key_once() {
+    let m: Map<string, Vec2> = map_new()
+    m["a"] = Vec2 { x: 1.0, y: 2.0 }
+    m["b"] = Vec2 { x: 3.0, y: 4.0 }
+    let keys = 0
+    for (i, (k, _)) in enumerate(m) {
+        if k == "a" || k == "b" {
+            keys += 1
+        }
+    }
+    assert_eq(keys, 2)
 }

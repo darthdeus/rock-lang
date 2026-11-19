@@ -1,0 +1,249 @@
+// Presence of nullable nobox values: absent tags, merges, phi returns, tuple
+// options and inline child projections.
+
+nobox value P { x: int, y: int }
+
+fn merged(present: bool) -> P? {
+    let v: P? = if present { P { x: 5, y: 6 } } else { null }
+    return v
+}
+
+@test
+fn merge_reports_presence() {
+    assert(merged(false) == null)
+    assert(merged(true) != null)
+}
+
+@test(returns = 56)
+fn present_merge_carries_its_leaves() -> int {
+    let p = merged(true)
+    if p == null { return -1 }
+    return p.x * 10 + p.y
+}
+
+// The merge as the returned EXPRESSION, with no local to land in. The local is
+// where the sentinel's crash was observed, so this asks whether the local was
+// load-bearing or incidental.
+fn merged_no_local(present: bool) -> P? {
+    return if present { P { x: 7, y: 8 } } else { null }
+}
+
+@test
+fn merge_without_a_local() {
+    assert(merged_no_local(false) == null)
+    let p = merged_no_local(true)
+    if p == null { assert(false) } else { assert_eq(p.x * 10 + p.y, 78) }
+}
+
+// A merge whose present arm is COMPUTED rather than a literal: the leaves reach
+// the join from a call, not from constants the emitter could fold.
+fn make(a: int) -> P { return P { x: a, y: a + 1 } }
+
+fn merged_computed(present: bool, a: int) -> P? {
+    let v: P? = if present { make(a) } else { null }
+    return v
+}
+
+@test
+fn merge_of_a_computed_arm() {
+    let p = merged_computed(true, 3)
+    if p == null { assert(false) } else { assert_eq(p.x * 10 + p.y, 34) }
+    assert(merged_computed(false, 3) == null)
+}
+
+// Safe navigation off the merged value, which reads presence and a leaf in one
+// expression rather than through a refinement.
+@test
+fn safe_nav_off_a_merge() {
+    assert_eq(merged(true)?.x ?? -1, 5)
+    assert_eq(merged(false)?.x ?? -1, -1)
+}
+
+// `materialize` is a PASSENGER on this shape -- deleting it from the reported
+// repro left an identical crash. Pinned so it stays one after the fix.
+fn merged_materialized(present: bool) -> P? {
+    let v: P? = if present { P { x: 5, y: 6 } } else { null }
+    return materialize(v)
+}
+
+@test
+fn merge_through_materialize() {
+    assert(merged_materialized(false) == null)
+    let p = merged_materialized(true)
+    if p == null { assert(false) } else { assert_eq(p.x * 10 + p.y, 56) }
+}
+
+fn phi_materialized(present: bool) -> P? {
+    let v: P? = if present { P { x: 5, y: 6 } } else { null }
+    return materialize(v)
+}
+
+fn phi_plain(present: bool) -> P? {
+    let v: P? = if present { P { x: 5, y: 6 } } else { null }
+    return v
+}
+
+@test(output = "absent=true")
+fn an_absent_nobox_option_from_a_phi_reports_absent_through_materialize() {
+    print("absent={phi_materialized(false) == null}")
+}
+
+@test(output = "absent=true")
+fn an_absent_nobox_option_from_a_phi_reports_absent_without_materialize() {
+    print("absent={phi_plain(false) == null}")
+}
+
+@test(output = "present=5")
+fn the_present_path_of_the_same_phi_is_correct() {
+    print("present={phi_materialized(true)?.x ?? -1}")
+}
+
+fn materialized_non_nullable() -> P { return materialize(P { x: 5, y: 6 }) }
+
+@test(output = "5 6")
+fn materialize_on_a_non_nullable_nobox_value_is_correct() {
+    let p = materialized_non_nullable()
+    print("{p.x} {p.y}")
+}
+
+fn null_local() -> P? {
+    let v: P? = null
+    return v
+}
+
+@test(output = "absent=true")
+fn a_nullable_nobox_local_with_no_phi_reports_absent() {
+    print("absent={null_local() == null}")
+}
+
+fn early_return_null(present: bool) -> P? {
+    if !present { return null }
+    return P { x: 5, y: 6 }
+}
+
+@test(output = "absent=true\npresent=5")
+fn a_statement_position_return_null_reports_absent() {
+    print("absent={early_return_null(false) == null}")
+    print("present={early_return_null(true)?.x ?? -1}")
+}
+
+nobox value NV2 { x: float, y: float }
+
+fn absent() -> NV2? { return null }
+
+// Leaf-table storage: every field is scalarizable.
+value Opt { pos: NV2?, a: float }
+
+global G: Opt = Opt { pos: null, a: 3.0 }
+
+global H: Opt = Opt { pos: NV2 { x: 1.0, y: 2.0 }, a: 3.0 }
+
+@test fn null_literal_and_null_assignment_store_the_same_tag() {
+    H.pos = null
+    assert(G == H)
+    assert(H.pos == null)
+}
+
+@test fn an_absent_operand_stores_the_literal_tag() {
+    let none: NV2? = absent()
+    let a = Opt { pos: none, a: 3.0 }
+    let b = Opt { pos: absent(), a: 3.0 }
+    assert(a == G)
+    assert(b == G)
+    assert(a == b)
+}
+
+// A map stores its value's leaves in columns as they arrive, so the read-back
+// tags keep their spelling and the comparison has to agree on absence.
+@test fn map_column_reads_compare_equal_across_spellings() {
+    let m: Map<string, Opt> = map_new()
+    m.insert("call", Opt { pos: absent(), a: 3.0 })
+    m.insert("global", G)
+    assert(m.get("call") == m.get("global"))
+    assert(m.get("call") == G)
+}
+
+// GC-table storage: an opaque field keeps the box from flattening.
+value Named { pos: NV2?, name: string }
+
+global NG: Named = Named { pos: null, name: "n" }
+
+global NH: Named = Named { pos: NV2 { x: 1.0, y: 2.0 }, name: "n" }
+
+@test fn gc_table_null_literal_and_null_assignment_store_the_same_tag() {
+    NH.pos = null
+    assert(NG == NH)
+    assert(NH.pos == null)
+}
+
+@test fn gc_table_absent_operand_stores_the_literal_tag() {
+    let none: NV2? = absent()
+    let a = Named { pos: none, name: "n" }
+    let b = Named { pos: absent(), name: "n" }
+    assert(a == NG)
+    assert(b == NG)
+}
+
+nobox value NP { x: float, y: float }
+
+value CV { x: float, y: float }
+
+struct Holder<T> { items: [T] }
+
+fn Holder<T>.pick(h) -> (int, T)? {
+    if vec_len(h.items) == 0 { return null }
+    return (0, h.items[0])
+}
+
+@test(output = "false")
+fn a_null_tuple_option_at_a_nobox_element_reads_as_null() {
+    let empty: Holder<NP> = Holder { items: [] }
+    print("{empty.pick() != null}")
+}
+
+@test(output = "true 0 7 9")
+fn a_present_tuple_option_at_a_nobox_element_still_reads_its_values() {
+    let h: Holder<NP> = Holder { items: [NP { x: 7.0, y: 9.0 }] }
+    let ok = h.pick() != null
+    if let t = h.pick() {
+        print("{ok} {t.0} {t.1.x} {t.1.y}")
+    } else {
+        print("MISS")
+    }
+}
+
+@test(output = "false")
+fn a_null_tuple_option_at_an_unmarked_column_element_reads_as_null() {
+    let empty: Holder<CV> = Holder { items: [] }
+    print("{empty.pick() != null}")
+}
+
+fn pick_non_generic(flag: bool) -> (int, NP)? {
+    if !flag { return null }
+    return (1, NP { x: 3.0, y: 4.0 })
+}
+
+@test(output = "false")
+fn a_null_tuple_option_from_a_non_generic_fn_reads_as_null() {
+    print("{pick_non_generic(false) != null}")
+}
+
+nobox value Point { x: int, y: int }
+
+nobox value Inner { point: Point, tag: int }
+
+nobox value SnapshotEnvelope { inner: Inner, flag: int }
+
+struct Owner { envelope: SnapshotEnvelope? }
+
+fn child(owner: Owner) -> Inner? { return owner.envelope?.inner }
+
+@test(output = "2 3 7 true")
+fn optional_inline_child_projection_keeps_constructor_folding() {
+    let owner = Owner { envelope: SnapshotEnvelope {
+        inner: Inner { point: Point { x: 2, y: 3 }, tag: 7 }, flag: 11 } }
+    let before = child(owner)
+    owner.envelope = null
+    let value = before.unwrap()
+    print("{value.point.x} {value.point.y} {value.tag} {child(owner) == null}")
+}

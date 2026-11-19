@@ -335,7 +335,7 @@ fn test_json_nesting_within_limit_decodes() {
 
 // The limit must bound NESTING, not the number of containers in the document.
 // A document far wider than the limit but only two deep is the common real
-// shape -- mag's level.json is 6315 sibling tile objects -- and it must decode.
+// shape -- thousands of sibling tile objects -- and it must decode.
 // Every conformance case is tiny, so nothing else in the suite can see this:
 // dropping the depth decrement leaves the whole corpus green while making a
 // real save file undecodable.

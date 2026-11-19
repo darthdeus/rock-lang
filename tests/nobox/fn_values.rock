@@ -1,0 +1,314 @@
+// nobox values crossing indirect (fn value) calls: the ABI is read from the fn
+// type at both ends, so returns, params and opaque bodies must agree.
+
+nobox value Facts { found: bool, row: int }
+
+fn lookup_row(world: int, row: int) -> Facts {
+    return Facts { found: true, row: row }
+}
+
+fn apply_value<W>(world: W, row: int, lookup: fn(W, int) -> Facts) -> bool {
+    let facts = lookup(world, row)
+    return facts.found && facts.row == row
+}
+
+@test(output = "true")
+fn generic_fn_value_call_receives_all_nobox_value_leaves() {
+    let lookup: fn(int, int) -> Facts = lookup_row
+    print(apply_value(1, 7, lookup))
+}
+
+struct Lookup<W> { callback: fn(W, int) -> Facts }
+
+fn apply_field<W>(world: W, row: int, lookup: Lookup<W>) -> bool {
+    let facts = lookup.callback(world, row)
+    return facts.found && facts.row == row
+}
+
+@test(output = "true")
+fn generic_function_field_call_receives_all_nobox_value_leaves() {
+    let lookup: Lookup<int> = Lookup { callback: lookup_row }
+    print(apply_field(1, 7, lookup))
+}
+
+fn apply_safe_nav(lookup: Lookup<int>?, row: int) -> bool {
+    let facts = lookup?.callback(1, row)
+    if facts == null { return false }
+    return facts.found && facts.row == row
+}
+
+@test(output = "true\nfalse")
+fn safe_nav_function_field_call_preserves_nobox_result_lanes() {
+    let lookup: Lookup<int>? = Lookup { callback: lookup_row }
+    print(apply_safe_nav(lookup, 7))
+    print(apply_safe_nav(null, 7))
+}
+
+nobox value P { x: int, y: int }
+
+fn mk_tail() -> (bool) -> P? { present => if present { P { x: 5, y: 6 } } else { null } }
+
+@test(output = "5 6 -1")
+fn a_returned_lambda_at_a_nullable_nobox_return_reads_the_right_field() {
+    let f = mk_tail()
+    print("{f(true)?.x ?? -1} {f(true)?.y ?? -1} {f(false)?.x ?? -1}")
+}
+
+fn mk_explicit() -> (bool) -> P? { return present => if present { P { x: 5, y: 6 } } else { null } }
+
+@test(output = "5 -1")
+fn an_explicitly_returned_lambda_reads_the_right_field() {
+    let f = mk_explicit()
+    print("{f(true)?.x ?? -1} {f(false)?.x ?? -1}")
+}
+
+fn mk_via_local() -> (bool) -> P? {
+    let g: (bool) -> P? = present => if present { P { x: 5, y: 6 } } else { null }
+    return g
+}
+
+@test(output = "5")
+fn a_lambda_returned_through_a_declared_local_is_correct() {
+    let f = mk_via_local()
+    print("{f(true)?.x ?? -1}")
+}
+
+fn mk_non_null() -> (bool) -> P { present => P { x: 5, y: 6 } }
+
+@test(output = "5 6")
+fn a_returned_lambda_at_a_non_nullable_nobox_return_is_correct() {
+    let f = mk_non_null()
+    let p = f(true)
+    print("{p.x} {p.y}")
+}
+
+fn maybe(present: bool) -> P? { if present { P { x: 5, y: 6 } } else { null } }
+
+@test(output = "5")
+fn a_named_fn_bound_as_that_fn_value_is_correct() {
+    let f: (bool) -> P? = maybe
+    print("{f(true)?.x ?? -1}")
+}
+
+fn use_it(f: (bool) -> P?) -> int { f(true)?.x ?? -1 }
+
+@test(output = "5")
+fn a_named_fn_passed_as_a_fn_value_param_is_correct() {
+    print("{use_it(maybe)}")
+}
+
+@test(output = "5")
+fn the_same_lambda_bound_to_a_typed_local_is_correct() {
+    let f: (bool) -> P? = present => if present { P { x: 5, y: 6 } } else { null }
+    print("{f(true)?.x ?? -1}")
+}
+
+nobox value NV { x: float, y: float }
+
+fn apply(f: (NV) -> float, v: NV) -> float {
+    return f(v)
+}
+
+// A NESTED fn taken by value keeps the leaf ABI rather than dropping to boxed.
+fn via_nested(p: NV) -> float {
+    fn sum(v: NV) -> float { return v.x + v.y }
+    return apply(sum, p)
+}
+
+// The return half: a lambda handing a nobox value back through the multi-return
+// wire.
+fn arc(r: float) -> (float) -> NV {
+    t => NV { x: t * r, y: t + r }
+}
+
+@test fn a_nobox_value_crosses_a_fn_value_call() {
+    assert_eq(apply((a) => a.x, NV { x: 3.0, y: 0.0 }), 3.0)
+    assert_eq(via_nested(NV { x: 1.0, y: 2.0 }), 3.0)
+
+    let stroke = arc(2.0)
+    let p = stroke(3.0)
+    assert_eq(p.x, 6.0)
+    assert_eq(p.y, 5.0)
+}
+
+// A LAMBDA whose RETURN is a nobox value, filling a fn-value param. The
+// discriminant is the lambda: the same `fn(NV) -> NV` param filled by a
+// TOP-LEVEL fn already worked, because only a lambda's own expression type was
+// never recorded, so its return ABI silently fell back to boxed while the
+// indirect call site read the leaf ABI off the fn type.
+fn swap(v: NV) -> NV { return NV { x: v.y, y: v.x } }
+
+fn remap(f: (NV) -> NV, v: NV) -> NV { return f(v) }
+
+@test fn a_lambda_returning_a_nobox_value_keeps_the_leaf_abi() {
+    let ctrl = remap(swap, NV { x: 1.0, y: 3.0 })
+    assert_eq(ctrl.x, 3.0)
+    assert_eq(ctrl.y, 1.0)
+
+    let lam = remap(v => NV { x: v.y, y: v.x }, NV { x: 1.0, y: 3.0 })
+    assert_eq(lam.x, 3.0)
+    assert_eq(lam.y, 1.0)
+}
+
+// Returned lambdas at a nullable nobox return: `fn_value_nullable_return.rock`.
+
+// A lambda literal returning a plain value, passed where the fn type returns a
+// nullable nobox value, takes the nullable return ABI.
+fn accepts_nullable_position(callback: () -> Vec2?) -> Vec2 {
+    return callback().unwrap()
+}
+
+@test fn literal_value_callback_gets_nullable_return_abi() {
+    let position = accepts_nullable_position(() => v(7.0, 9.0))
+    assert_eq(position.x, 7.0)
+    assert_eq(position.y, 9.0)
+}
+
+fn src() -> Vec2 { return v(1.0, 2.0) }
+
+fn call_or(f: (() -> Vec2)?, dx: float) -> float {
+    if f != null { return f().x }
+    return dx
+}
+
+@test fn lambda_literal_at_a_nullable_fn_value_param() {
+    assert_eq(call_or(() => src(), -1.0), 1.0)
+}
+
+@test fn absent_arm_of_a_nullable_fn_value_param() {
+    assert_eq(call_or(null, -1.0), -1.0)
+}
+
+// The three shapes that already worked, kept as controls so a fix that moves
+// the ABI for all fn values shows up here rather than only in a game.
+fn call_plain(f: () -> Vec2) -> float { return f().x }
+
+@test fn lambda_literal_at_a_plain_fn_value_param() {
+    assert_eq(call_plain(() => src()), 1.0)
+}
+
+@test fn lambda_bound_to_a_local_then_passed() {
+    let f: () -> Vec2 = () => src()
+    assert_eq(call_or(f, -1.0), 1.0)
+}
+
+@test fn named_fn_at_a_nullable_fn_value_param() {
+    assert_eq(call_or(src, -1.0), 1.0)
+}
+
+// A nobox value in PARAM position through the same nullable reference, since
+// `fn_value_abi` splats params as well as the return.
+fn scale(p: Vec2) -> Vec2 { return v(p.x * 2.0, p.y * 2.0) }
+
+fn apply_or(f: ((Vec2) -> Vec2)?, p: Vec2) -> float {
+    if f != null { return f(p).x }
+    return -1.0
+}
+
+@test fn nobox_param_through_a_nullable_fn_value() {
+    assert_eq(apply_or((q) => scale(q), v(3.0, 4.0)), 6.0)
+    assert_eq(apply_or(null, v(3.0, 4.0)), -1.0)
+}
+
+// A hand-written `@scalar_abi` body is the one definition whose ABI is NOT
+// narrowed to what the type yields, so it is where the two ends most easily
+// disagree. At a nullable reference it used to reach the boxed ABI and reject;
+// the peel makes both ends read leaves. The VALUE is asserted, not just that it
+// compiles -- a leaf-order or arity slip emits fine and answers wrong.
+// The unmarked-value twin of this shape must still REJECT:
+// `skull/tests/value_scalarize.rs::unmarked_value_through_a_nullable_fn_value_still_rejects`.
+@scalar_abi inline(lua) fn mk_v() -> Vec2 = """
+    return 1.0, 2.0
+"""
+
+@scalar_abi inline(js) fn mk_v() -> Vec2 = """
+    return __rock_publish(1.0, 2.0);
+"""
+
+@test fn scalar_abi_body_through_a_nullable_fn_value() {
+    assert_eq(call_or(mk_v, -1.0), 1.0)
+    assert_eq(call_or(null, -1.0), -1.0)
+}
+
+nobox value NV2 { x: float, y: float }
+
+value BV2 { x: float, y: float }
+
+// The escape the rejection's message names: opaque body, opted in, returns the
+// LEAVES rather than a box.
+@scalar_abi inline(lua) fn leaves() -> NV2 = """
+    return 3.0, 4.0
+"""
+
+// Fixed name AND the leaf ABI -- `@scalar_abi` overrides the `@nomangle` gate,
+// so a hand-written caller spelling the bare name still gets leaves.
+@scalar_abi
+@nomangle inline(lua) fn leaves_fixed_name() -> NV2 = """
+    return 5.0, 6.0
+"""
+
+// Not opaque: an ordinary Rock body, which skull emits itself.
+fn rock_bodied() -> NV2 {
+    return NV2 { x: 7.0, y: 8.0 }
+}
+
+// Not nobox: an UNMARKED value still rides the single-cdata return out of an
+// opaque body, exactly as before. This is the asymmetry guard -- the reject
+// must not widen to every value type.
+@nomangle inline(lua) fn unmarked_boxed() -> BV2 = """
+    return BV2_ct(9.0, 10.0)
+"""
+
+// A tuple return whose element is nobox is covered by the tuple sibling; its
+// `@scalar_abi` form must still pass.
+@scalar_abi inline(lua) fn leaves_in_tuple() -> (bool, NV2) = """
+    return true, 1.0, 2.0
+"""
+
+@test(backends = "lua") fn opted_in_leaf_return_round_trips() {
+    let a = leaves()
+    assert_eq(a.x + a.y, 7.0)
+    let b = leaves_fixed_name()
+    assert_eq(b.x + b.y, 11.0)
+}
+
+@test(backends = "lua") fn non_opaque_and_unmarked_returns_are_untouched() {
+    let c = rock_bodied()
+    assert_eq(c.x + c.y, 15.0)
+    let d = unmarked_boxed()
+    assert_eq(d.x + d.y, 19.0)
+}
+
+@test(backends = "lua") fn opted_in_tuple_element_still_splats() {
+    let (ok, p) = leaves_in_tuple()
+    assert(ok)
+    assert_eq(p.x + p.y, 3.0)
+}
+
+struct Pt { x: int, y: int }
+
+struct Holder { p: Pt, tag: int }
+
+fn read_struct_field(h: Holder, f: ReadFieldRef<Holder, Pt>) -> int {
+    return field_get(h, f).x
+}
+
+@test(output = "7")
+fn a_boxed_struct_field_reads_correctly_through_the_same_primitive() {
+    let h = Holder { p: Pt { x: 7, y: 0 }, tag: 1 }
+    print("{read_struct_field(h, .p)}")
+}
+
+value VPt { x: int, y: int }
+
+struct VHolder { p: VPt, tag: int }
+
+fn read_value_field(h: VHolder, f: ReadFieldRef<VHolder, VPt>) -> int {
+    return field_get(h, f).x
+}
+
+@test(output = "9")
+fn an_unmarked_value_field_reads_correctly_through_the_same_primitive() {
+    let h = VHolder { p: VPt { x: 9, y: 0 }, tag: 1 }
+    print("{read_value_field(h, .p)}")
+}

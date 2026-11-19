@@ -1,5 +1,4 @@
-// Lambda basics: calling a lambda, capturing enclosing locals, passing and
-// returning closures, multi-statement bodies and loops inside a lambda.
+// Lambda basics: capabilities, escaping, per-call locals, dead nested lambdas and parameter shadowing.
 
 fn apply(f: fn(int) -> int, x: int) -> int {
     return f(x)
@@ -73,4 +72,233 @@ fn test_lambda_with_internal_loop() {
         s
     }
     print(sum_to(5))
+}
+
+fn apply_closure_capabilities(f: (int) -> int, x: int) -> int { f(x) }
+
+fn twice(f: (int) -> int, x: int) -> int { f(x) + f(x) }
+
+fn adder(n: int) -> (int) -> int { (x: int) => x + n }
+
+@test(output = "6\n17\n25\n13\n20")
+fn test_calls_and_captures() {
+    print(apply_closure_capabilities(y => y + 1, 5))
+
+    let n = 7
+    let g = (x: int) => x + n
+    print(g(10))
+
+    let sq = (x: int) => x * x
+    print(sq(3) + sq(4))
+
+    let add10 = adder(10)
+    print(add10(3))
+
+    let base = 4
+    print(twice(x => x + base, 6))
+}
+
+@test(output = "7")
+fn test_capture_mutation() {
+    let sum = 0
+    let add = (x: int) => { sum = sum + x }
+    add(3)
+    add(4)
+    print(sum)
+}
+
+@test(output = "1\n-1")
+fn test_lambda_branch() {
+    let sign = (x: int) => if x >= 0 { 1 } else { 0 - 1 }
+    print(sign(42))
+    print(sign(-3))
+}
+
+value Pt2 { x: float, y: float }
+
+@test(output = "7")
+fn test_capture_value_struct_leaf() {
+    let p = Pt2 { x: 3.0, y: 4.0 }
+    let f = () => p.x + p.y
+    print(f())
+}
+
+// Each closure snapshots its iteration's struct.
+@test(output = "3\n5\n7")
+fn test_capture_value_struct_per_iteration() {
+    let pts = [Pt2 { x: 1.0, y: 2.0 }, Pt2 { x: 2.0, y: 3.0 }, Pt2 { x: 3.0, y: 4.0 }]
+    let fns: [fn() -> float] = []
+    for p in pts {
+        fns.push(() => p.x + p.y)
+    }
+    for f in fns { print(f()) }
+}
+
+// The outer lambda captures `inc` and passes it to `apply_twice`, itself a
+// lambda, which invokes it through a fn-typed param.
+@test(output = "11")
+fn test_lambda_calls_lambda_hof() {
+    let inc = (x: int) => x + 1
+    let apply_twice = (g: fn(int) -> int, x: int) => g(g(x))
+    let outer = () => apply_twice(inc, 9)
+    print(outer())
+}
+
+@test(output = "20")
+fn test_lambda_calls_captured_lambda() {
+    let dbl = (x: int) => x * 2
+    let run = () => dbl(10)
+    print(run())
+}
+
+// Both lambdas close over one shared box; `bump`'s mutation is visible through
+// the call and to the enclosing scope.
+@test(output = "1\n2\n2")
+fn test_lambda_calls_lambda_shared_box() {
+    let n = 0
+    let bump = () => { n = n + 1 }
+    let bump_and_read = () => { bump(); return n }
+    print(bump_and_read())
+    print(bump_and_read())
+    print(n)
+}
+
+fn make_shared_counter() -> fn() -> int {
+    let last = 1
+    let read = () => last
+    let bump = () => { last = last + 10; return last }
+    assert(read() == 1, "initial shared cell")
+    assert(bump() == 11 && last == 11, "closure mutation reaches enclosing scope")
+    last = 100
+    assert(read() == 100, "enclosing mutation reaches sibling closure")
+    return bump
+}
+
+@test
+fn c_escaping_mutable_capture_preserves_aliasing() {
+    let bump = make_shared_counter()
+    let alias = bump
+    assert(bump() == 110, "box survives the creating frame")
+    assert(alias() == 120 && bump() == 130, "copied function handles share the box")
+}
+
+fn make_curve_factory(base: int) -> fn(int) -> fn(int) -> int {
+    return (step: int) => {
+        let radius = base + step
+        return (t: int) => radius + t
+    }
+}
+
+@test
+fn c_nested_returned_closure_preserves_capture_types() {
+    let factory = make_curve_factory(40)
+    let first = factory(2)
+    let second = factory(10)
+    assert(first(3) == 45 && second(3) == 53, "inner captures belong to their invocation")
+    assert(first(4) == 46, "later factory calls do not overwrite earlier captures")
+}
+
+struct ClosureRenderBatch { vbo: int }
+
+fn closure_render_pass(draw: fn() -> ()) { draw() }
+
+@test
+fn c_nested_renderer_callback_captures_borrowed_batch() {
+    let batch = ClosureRenderBatch { vbo: 40 }
+    let count = 2
+    closure_render_pass(() => {
+        closure_render_pass(() => {
+            closure_render_pass(() => {
+                assert(batch.vbo + count == 42, "nested synchronous renderer captures")
+                batch.vbo = 50
+            })
+        })
+    })
+    assert(batch.vbo == 50, "renderer callback observes the borrowed batch")
+}
+
+fn counter_fn() -> fn() -> int {
+    return () => { let n = 5 n = n + 1 return n }
+}
+
+@test(output = "6\n6")
+fn hoisted_lambda_locals_stay_per_call() {
+    let f = counter_fn()
+    print("{f()}")
+    print("{f()}")
+}
+
+fn two_deep() -> int {
+    if false {
+        let outer = () => {
+            let inner = () => 3
+            return inner()
+        }
+        return outer()
+    }
+    return 42
+}
+
+fn three_deep() -> int {
+    if false {
+        let outer = () => {
+            let mid = () => {
+                let inner = () => 7
+                return inner()
+            }
+            return mid()
+        }
+        return outer()
+    }
+    return 5
+}
+
+fn capturing(x: int) -> int {
+    if false {
+        let outer = () => {
+            let inner = () => x + 1
+            return inner()
+        }
+        return outer()
+    }
+    return x * 2
+}
+
+@test(output = "42 5 8")
+fn dead_nested_lambdas_compile_and_the_live_path_runs() {
+    print("{two_deep()} {three_deep()} {capturing(4)}")
+}
+
+global e: int = 5
+
+fn make_direct(x: int) -> fn() -> int { return () => x + e }
+
+@test(output = "6")
+fn global_e_read_in_capturing_lambda() {
+    let f = make_direct(1)
+    print("{f()}")
+}
+
+fn make_nested(x: int) -> fn() -> fn() -> int {
+    return () => {
+        return () => x + e
+    }
+}
+
+@test(output = "7")
+fn global_e_read_in_nested_capture_body() {
+    let f = make_nested(2)
+    let g = f()
+    print("{g()}")
+}
+
+fn make_local(x: int) -> fn() -> int {
+    let e = x
+    return () => e
+}
+
+@test(output = "3")
+fn local_e_captured_normally() {
+    let f = make_local(3)
+    print("{f()}")
 }
