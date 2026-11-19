@@ -158,6 +158,24 @@ fn diagnostics_label_the_offending_expression() {
             "cannot interpolate",
             "u()",
         ),
+        (
+            "fn f(value: any) -> string { return \"{value}\" }",
+            "f",
+            "cannot interpolate",
+            "value",
+        ),
+        (
+            "fn f(value: any) -> string { return \"{value:.2f}\" }",
+            "f",
+            "cannot interpolate",
+            "value",
+        ),
+        (
+            "fn f(value: any?) -> string { return \"{value}\" }",
+            "f",
+            "cannot interpolate",
+            "value",
+        ),
     ] {
         let ws = check(src).expect("recovered, not aborted");
         let err = fn_errors(&ws, fn_name)
@@ -166,23 +184,6 @@ fn diagnostics_label_the_offending_expression() {
             .unwrap_or_else(|| panic!("{src}: no `{message}` error"));
         let label = err.labels.first().expect("labeled error");
         assert_eq!(text(src, &label.span), labeled, "{src}");
-    }
-}
-
-#[test]
-fn any_interpolation_errors_label_the_hole() {
-    for src in [
-        "fn f(value: any) -> string { return \"{value}\" }",
-        "fn f(value: any) -> string { return \"{value:.2f}\" }",
-        "fn f(value: any?) -> string { return \"{value}\" }",
-    ] {
-        let ws = check(src).expect("semantic pass recovers with a body error");
-        let err = fn_errors(&ws, "f")
-            .iter()
-            .find(|e| e.message.contains("cannot interpolate"))
-            .unwrap_or_else(|| panic!("{src}: no interpolation error"));
-        let label = err.labels.first().expect("the hole is labeled");
-        assert_eq!(text(src, &label.span), "value", "{src}");
     }
 }
 
