@@ -3,7 +3,6 @@
 use super::*;
 
 impl FnEmit<'_> {
-    /// The GLSL type of a value instruction.
     pub(crate) fn ty_of(&self, iid: Idx<Inst>) -> Result<GlslTy, CompilerError> {
         Ok(match &self.f.insts[iid] {
             Inst::Const(Lit::Float(_)) => GlslTy::Float,
@@ -76,7 +75,6 @@ impl FnEmit<'_> {
             })?,
             Inst::Global(name) => match const_lit(self.ws, *name) {
                 Some(lit) => const_lit_ty(&lit),
-                // `profile_body` rejects every non-constant global read first.
                 None => {
                     return Err(err(
                         self.span(),
@@ -165,7 +163,6 @@ impl FnEmit<'_> {
         self.render_val(iid)
     }
 
-    /// Render an expression or a reference to its retained call result.
     pub(crate) fn render_val(&self, iid: Idx<Inst>) -> Result<String, CompilerError> {
         if let Some(name) = self.value_name.get(&iid) {
             return Ok(name.clone());
@@ -195,8 +192,6 @@ impl FnEmit<'_> {
             Inst::Const(Lit::Bool(b)) => b.to_string(),
             Inst::Const(Lit::Nil) => return Err(err(self.span(), "shader profile: null literal is not tier 0")),
             Inst::Const(Lit::Str(_)) => return Err(err(self.span(), "shader profile: string literal is not tier 0")),
-            // Admitted by `profile_body` only when it folds, so a miss here is a
-            // profile/emit divergence, not user error.
             Inst::Global(name) => const_lit(self.ws, *name)
                 .as_ref()
                 .and_then(render_const_lit)
@@ -204,10 +199,6 @@ impl FnEmit<'_> {
                     "shader profile: const `{name}` passed the profile pass but did not fold at emit -- a compiler bug"
                 )))?,
             Inst::Load(c) => {
-                // A global-base struct param has no GLSL identity -- its fields
-                // are bare globals, read via `Field` (which never renders the
-                // base). A `Load` reaching expression position is a copy/alias
-                // (`let v = vary`) that would reference the dropped param name.
                 if self.global_cells.contains(c) {
                     return Err(err(self.span(), format!(
                         "shader profile: the struct param `{}` can only be read field-by-field (its fields are GLSL globals) -- it cannot be copied or aliased",
@@ -254,8 +245,6 @@ impl FnEmit<'_> {
             Inst::UintLeq(a, b) => bin(a, "<=", b, self)?,
             Inst::UintGt(a, b) => bin(a, ">", b, self)?,
             Inst::UintGeq(a, b) => bin(a, ">=", b, self)?,
-            // Untyped Eq/NotEq: operands arrive same-typed (a mixed `float == int`
-            // was int->float-coerced at lowering), so render a plain compare.
             Inst::Eq(a, b) => bin(a, "==", b, self)?,
             Inst::NotEq(a, b) => bin(a, "!=", b, self)?,
             Inst::Neg(x) => format!("(-{})", self.render_val(*x)?),
@@ -267,8 +256,6 @@ impl FnEmit<'_> {
             Inst::Shl(a, b) | Inst::UintShl(a, b) => bin(a, "<<", b, self)?,
             Inst::Shr(a, b) | Inst::UintShr(a, b) => bin(a, ">>", b, self)?,
             Inst::FloatToInt(x) => format!("int({})", self.render_val(*x)?),
-            // int->float subsumption (inserted at lowering): fold an int literal
-            // to float text, else materialize the `float(...)` conversion.
             Inst::IntToFloat(x) => match &self.f.insts[*x] {
                 Inst::Const(Lit::Int(i)) => fmt_float(*i as f64),
                 _ => format!("float({})", self.render_val(*x)?),
@@ -287,24 +274,12 @@ impl FnEmit<'_> {
                     format!("{}.{}", self.render_val(*base)?, field)
                 }
             }
-            // `MaterializeValueStruct` renders identically: on the GPU an
-            // authorized box is just a `vec2(..)` ctor -- the authorization is a
-            // Lua-side concept (`authorize_gpu_boundary_boxes`).
             Inst::MakeValueStruct { name, fields, .. } | Inst::MaterializeValueStruct { name, fields, .. } => {
-                // GLSL must never see the post-normalization LEAF form (dotted
-                // field names, `flatten_nobox_nested_ctors`). It cannot today --
-                // this crate never calls `skull_transform`, so it never runs
-                // `cleanup` -- and it must not start: GLSL has real nested ctors
-                // where the nested form is correct and free, so flattening would
-                // be actively wrong here. Fail loud if a pipeline change ever
-                // routes normalized MIR to this emitter.
                 debug_assert!(
                     !fields.iter().any(|(f, _)| f.contains('.')),
                     "GLSL received the nobox leaf form for `{name}`: this emitter \
                      must not run on `cleanup`-normalized MIR"
                 );
-                // Bvec3 components render at a bool context; the vecN ctors take
-                // float components (int operands materialize an IntToFloat).
                 let (ctor, comp_ty) = match nominal_glsl_ty(name.as_str()) {
                     Some(t @ (GlslTy::Vec2 | GlslTy::Vec3 | GlslTy::Vec4)) => (t.name(), GlslTy::Float),
                     Some(GlslTy::Bvec3) => ("bvec3", GlslTy::Bool),
@@ -319,10 +294,6 @@ impl FnEmit<'_> {
         })
     }
 
-    /// Render a direct call. `iid` names the call SITE, which is where the
-    /// callee's instantiation is recorded -- both the emitted name and every
-    /// declared param/return type resolve through it, so a specialized callee
-    /// and its definition cannot disagree.
     fn render_call(
         &self,
         iid: Idx<Inst>,
@@ -333,8 +304,6 @@ impl FnEmit<'_> {
         let callee = self.callee_inst(iid);
         let param_types = self.call_param_types(iid)?;
         let name = declared_name(cf.name.as_str());
-        // A non-scalar `__op_*` call is a Vec operator -> native infix. An int
-        // operand (`*(Vec2, int)`) is cast to float (GLSL has no vec*int).
         if let Some(sym) = vec_op_symbol(name) {
             if args.len() == 2 {
                 let render_operand = |i: usize, e: &Self| -> Result<String, CompilerError> {
@@ -359,19 +328,12 @@ impl FnEmit<'_> {
                 ));
             }
         }
-        // Args render against the declared param type where it maps to GLSL
-        // (a generic param, e.g. `min<T>`, doesn't -- those render plain).
         let arg_t = |i: usize, a: Idx<Inst>, e: &Self| -> Result<String, CompilerError> {
             match param_types.get(i).copied().flatten() {
                 Some(want) => e.render_val_t(a, want),
                 None => e.render_val(a),
             }
         };
-        // A `v(...)` ctor call with a vector param (the mixed ctors in
-        // stdlib/vec.rock, `v(rgb, 1.0)`) must not hit the arity-keyed scalar
-        // rows (`("v", 2)` -> vec2) -- the (name, arity) same-arity type-drift
-        // hazard. GLSL constructors take mixed components natively, so emit
-        // vecN(...) with N = the summed component count.
         if name == "v"
             && param_types
                 .iter()
@@ -428,7 +390,6 @@ impl FnEmit<'_> {
             }
             return Ok(s);
         }
-        // An emittable user fn -> a plain call to THIS INSTANCE's GLSL name.
         let gname = callee.symbol(self.ws, self.interner);
         let rargs: Result<Vec<String>, CompilerError> = args
             .iter()
@@ -442,14 +403,11 @@ impl FnEmit<'_> {
         self.fn_span
     }
 
-    /// Emit the straight-line effect statements of a block: Stores (assignments)
-    /// and void (effect-only) calls like `discard()`, plus shared vector calls.
     pub(crate) fn emit_block_effects(&mut self, b: Idx<Block>) -> Result<(), CompilerError> {
         for iid in self.f.blocks[b].insts.clone() {
             let line: Option<String> = match &self.f.insts[iid] {
                 Inst::Store { cell, value } => {
                     let (cell, value) = (*cell, *value);
-                    // Folded diamond result / bound temp: no storage, inlined.
                     if self.folded_cond.contains_key(&cell) || self.folded_bound.contains_key(&cell)
                     {
                         None
@@ -485,10 +443,6 @@ impl FnEmit<'_> {
     }
 
     pub(crate) fn emit_return(&mut self, vs: &[Idx<Inst>]) -> Result<(), CompilerError> {
-        // `void main()` mode: `return <Struct { field, ... }>` destructures into a
-        // named global assignment per field -- vertex varyings (a `position` field
-        // -> gl_Position) or MRT fragment outputs (a `FragDepth` field ->
-        // gl_FragDepth).
         if let Some(mo) = self.main_out.clone() {
             let [v] = vs else {
                 return Err(err(
@@ -513,10 +467,6 @@ impl FnEmit<'_> {
                 let (target, want) = if let Some((_, gl, ty)) = builtin {
                     (gl.to_string(), ty)
                 } else {
-                    // bone typechecks the returned struct against the varyings/MRT
-                    // struct, so every field is in the map. Reject rather than
-                    // defaulting: a classify/emit drift would otherwise silently
-                    // emit a Float-typed assignment for a vec/int output.
                     let ty = mo.fields.get(&name).copied().ok_or_else(|| {
                         err(
                             self.span(),

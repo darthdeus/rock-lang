@@ -67,8 +67,6 @@ pub(crate) fn helper_prelude<'a>(bodies: impl IntoIterator<Item = &'a MirFunc>) 
     s
 }
 
-/// The declarations behind `instances`, first occurrence first: two instances
-/// of one generic helper share a source declaration.
 fn declaration_dependencies<'a>(instances: impl Iterator<Item = &'a Instance>) -> Vec<FuncRef> {
     let mut seen = BTreeSet::new();
     instances
@@ -150,9 +148,6 @@ fn visit_shader_library(
             } else if is_lowered_native_operator(ws, f, &callee, graph.interner()) {
                 continue;
             } else if f.is_extern || f.inline_body.is_some() {
-                // The supplied population stops at an opaque boundary. The
-                // emitter still sees the call while profiling the caller and
-                // reports the boundary after any earlier body-level rejection.
                 continue;
             } else {
                 visit_shader_library(ws, graph, callee, retained, builtins, active, done, order)?;
@@ -164,9 +159,6 @@ fn visit_shader_library(
     Ok(())
 }
 
-/// Realize an explicit-root function-library population from the shared graph.
-/// This is deliberately separate from registered shader programs: the roots
-/// have no stage or interface contract, only concrete definitions and helpers.
 pub(crate) fn realize_shader_library_view(
     ws: &Workspace,
     graph: &InstanceGraph,
@@ -228,9 +220,6 @@ pub fn shader_library_session(
     Ok(ShaderLibrarySession { scx, view })
 }
 
-/// Emit a no-`#version` GLSL function library from a supplied graph population.
-/// The view owns identity, retention, builtins, order and dependencies; this
-/// function only lowers those instances, validates their bodies and renders them.
 pub fn emit_shader_library_with_view(
     ws: &Workspace,
     scx: &ScalarCtx,

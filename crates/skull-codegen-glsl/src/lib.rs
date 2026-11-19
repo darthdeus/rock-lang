@@ -103,9 +103,6 @@ pub fn render_shader_plan(
     }
 }
 
-/// Emit one program from its graph-owned stage populations: a vertex +
-/// fragment pair renders one `#ifdef VERTEX`/`#ifdef PIXEL` file, a lone
-/// fragment root renders its PIXEL block over the default fullscreen VERTEX.
 pub fn emit_shader_with_view(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -116,7 +113,6 @@ pub fn emit_shader_with_view(
     render_shader_plan(ws, scx.interner(), &plan, profile)
 }
 
-/// A tier-0 GLSL type. Everything else is rejected by the profile pass.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum GlslTy {
     Float,
@@ -126,14 +122,9 @@ enum GlslTy {
     Vec2,
     Vec3,
     Vec4,
-    /// Bool-vector; LOCAL/TEMP only (GLSL forbids bool interpolants, and the tier
-    /// has no bvec upload path -- rejected in attr/varying/uniform position).
     Bvec3,
     Mat4,
-    /// Opaque; param/uniform position only (GLSL forbids sampler locals/returns).
     Sampler2D,
-    /// Integer sampler (the R32I entity-id tier). Same opacity rules as
-    /// Sampler2D; read via texture_id().
     ISampler2D,
 }
 
@@ -173,7 +164,6 @@ fn err(span: Span, msg: impl Into<String>) -> CompilerError {
     CompilerError::new_with_label(span, msg.into())
 }
 
-/// The `TypeExpr` behind a static TyId (declared signature/field types are static).
 fn ty_expr(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
     match ty {
         TyId::Static(m, idx) => Some(ws.module(m).ty_arena[idx]),
@@ -191,7 +181,6 @@ fn builtin_glsl_ty(ty: BuiltinTy) -> Option<GlslTy> {
     }
 }
 
-/// The tier-0 GLSL type of a nominal, or `None`.
 fn nominal_glsl_ty(n: &str) -> Option<GlslTy> {
     match n {
         "Vec2" | "Vec2f" => Some(GlslTy::Vec2),
@@ -205,9 +194,6 @@ fn nominal_glsl_ty(n: &str) -> Option<GlslTy> {
     }
 }
 
-/// The tier-0 GLSL type of a concrete logical type -- the shape a generic is
-/// BOUND to at the instance being emitted. Same tier-0 admission as the
-/// declared-type path, asked of `MonoTy` instead of `TypeExpr`.
 fn mono_glsl_ty(t: &MonoTy) -> Option<GlslTy> {
     match t {
         MonoTy::Float => Some(GlslTy::Float),
@@ -240,11 +226,6 @@ fn concrete_glsl_ty(
     })
 }
 
-/// Render a Rock type to its tier-0 GLSL type UNDER `subst`, or reject.
-///
-/// A declared `T` has no GLSL type; the instance's binding for `T` does. This
-/// is why the same helper is tier 0 at `T = float` and rejected at `T = string`
-/// -- a verdict about the declaration is a verdict about neither.
 fn glsl_ty(
     ws: &Workspace,
     subst: &SpecSubst,
@@ -296,7 +277,6 @@ fn fmt_float(f: f64) -> String {
     }
 }
 
-/// The GLSL type a folded const literal renders at.
 fn const_lit_ty(lit: &Lit) -> GlslTy {
     match lit {
         Lit::Int(_) => GlslTy::Int,
@@ -306,7 +286,6 @@ fn const_lit_ty(lit: &Lit) -> GlslTy {
     }
 }
 
-/// Render a folded const literal as a GLSL expression.
 fn render_const_lit(lit: &Lit) -> Option<String> {
     match lit {
         Lit::Float(f) => Some(fmt_float(*f)),
@@ -317,94 +296,49 @@ fn render_const_lit(lit: &Lit) -> Option<String> {
     }
 }
 
-/// A cosmetic-tier fold of a lowered `&&`/`||`/expression-`if` diamond back into
-/// one GLSL expression. The diamond stored its
-/// result into a single-use cell across two single-store arms; instead of
-/// emitting the diamond we render this expression at the cell's one use.
 #[derive(Clone, Copy)]
 struct FoldedDiamond {
     cond: Idx<Inst>,
     then_val: Idx<Inst>,
     else_val: Idx<Inst>,
     kind: FoldKind,
-    /// The result cell's GLSL type -- ternary arms render at this type so an
-    /// int-in-float-context arm keeps the coercion the diamond's store applied.
     result_ty: GlslTy,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum FoldKind {
-    /// `if a then b else false` == `(a && b)`.
     And,
-    /// `if a then true else b` == `(a || b)`.
     Or,
-    /// `if a then b else c` == `(a ? b : c)`.
     Ternary,
 }
 
 struct FnEmit<'a> {
     ws: &'a Workspace,
-    /// The build's one arena: a callee instance's arguments are ids into it, so
-    /// the name a call renders and the substitution its result types resolve
-    /// through both read it.
     interner: &'a MonoInterner,
     f: &'a MirFunc,
-    /// GLSL return type (None = void); floats coerce int-literal returns.
     ret_ty: Option<GlslTy>,
-    /// Cell -> emitted GLSL identifier.
     cell_name: HashMap<Idx<Cell>, String>,
-    /// Cell -> GLSL type (params from signature, others from first store).
     cell_ty: HashMap<Idx<Cell>, GlslTy>,
-    /// Shared vector calls retain their MIR evaluation point instead of being
-    /// expanded once per swizzle component.
     value_name: HashMap<Idx<Inst>, String>,
-    /// Loop headers matching the range-`for` shape -> their counted-loop info.
     counted: HashMap<Idx<Block>, CountedLoop>,
-    /// Other natural-loop headers (general `while`) -> their region.
     general: HashMap<Idx<Block>, LoopRegion>,
-    /// Dominators / post-dominators / natural loops.
     structure: Structure,
-    /// Loop headers currently being emitted (so the header region walk doesn't
-    /// re-wrap them as a fresh loop).
     active: HashSet<Idx<Block>>,
     out: String,
     indent: usize,
-    /// Guard against unstructured control flow / infinite walks.
     visited: HashSet<Idx<Block>>,
-    /// Entry mode: the cells of the "global-base" struct params -- attribute,
-    /// uniform, and varyings structs, whose field reads render as bare GLSL
-    /// globals (attributes/uniforms/varyings are globals, not struct members).
     global_cells: HashSet<Idx<Cell>>,
-    /// Entry mode: global field name -> GLSL type (for `ty_of` on those reads).
-    /// Names are collision-checked unique, so one combined map covers all bases.
     uniform_fields: HashMap<Ustr, GlslTy>,
-    /// Entry mode: sampler/array param cells, which render AS the declared
-    /// global itself (`texture(t, ..)` reads `t`) and so keep their exact
-    /// spelling while every other cell renames apart from the globals.
     global_ref_cells: HashSet<Idx<Cell>>,
-    /// Entry mode: global names no local or value param may take (the
-    /// program's whole declared-global surface, plus written builtins).
     reserved_names: HashSet<String>,
     ignored_type_cells: HashSet<Idx<Cell>>,
-    /// Cosmetic folds. A diamond's
-    /// single-use result cell -> the expression it renders as; the diamond itself
-    /// is skipped, its declaration + stores suppressed.
     folded_cond: HashMap<Idx<Cell>, FoldedDiamond>,
-    /// The branch block a `folded_cond` diamond starts at -> its result cell
-    /// (so `emit_seq` skips the diamond and jumps to its join).
     folded_block: HashMap<Idx<Block>, Idx<Cell>>,
-    /// A counted-loop bound temp folded into the for-header -> its const value.
     folded_bound: HashMap<Idx<Cell>, Idx<Inst>>,
-    /// `void main()` mode: the fn is emitted as `void main()` and its terminal
-    /// `return <MakeValueStruct>` destructures into a named global assignment per
-    /// field (vertex varyings, or MRT fragment outputs).
     main_out: Option<MainOut>,
     /// The fn's name span -- body-level emit errors anchor here (MIR insts carry
     /// no spans, so per-expression precision is not available).
     fn_span: Span,
     concrete_plan: &'a ConcreteBodyPlan,
-    /// Every direct call in this body, resolved to its callee INSTANCE by
-    /// [`callee_inst_at`]. Built once so the name a call renders and the type
-    /// its result takes come from one answer.
     callee_insts: HashMap<Idx<Inst>, ShaderInstance>,
 }

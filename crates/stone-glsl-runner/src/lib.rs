@@ -75,8 +75,6 @@ pub fn run() {
     let gl_ctx = match GlCtx::create(profile) {
         Ok(c) => c,
         Err(e) => {
-            // The caller treats exit 2 as an error unless `--skip-gpu` was
-            // explicitly requested.
             eprintln!("stone-glsl-runner: no GL context: {e}");
             std::process::exit(2);
         }
@@ -138,7 +136,6 @@ fn escape(s: &str) -> String {
 }
 
 struct GlCtx {
-    // Order matters for Drop: gl before context before window before subsystems.
     gl: glow::Context,
     int_fbo: FboTarget,
     float_fbo: FboTarget,
@@ -262,7 +259,6 @@ impl GlCtx {
     }
 }
 
-/// A 1x1 offscreen color target with the given internal/read format.
 unsafe fn make_target(
     gl: &glow::Context,
     internal: u32,

@@ -7,8 +7,6 @@ fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").expect("CARGO_CFG_TARGET_OS");
     let profile = env::var("PROFILE").expect("PROFILE");
 
-    // SDL2_LIB_DIR is an optional custom SDL2 development library directory;
-    // otherwise the system linker locates SDL2.
     if let Some(value) = env::var_os("SDL2_LIB_DIR") {
         let lib_dir = PathBuf::from(value);
         assert!(

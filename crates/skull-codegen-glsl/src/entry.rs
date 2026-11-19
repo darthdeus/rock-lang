@@ -2,35 +2,15 @@
 
 use super::*;
 
-/// A classified shader entry signature (A1 fragment, or an A2 pipeline stage).
 pub(crate) struct EntryShape {
-    /// Param indices whose field reads render as bare GLSL globals and which are
-    /// dropped from the emitted signature: the A1 uniform struct, or a pipeline
-    /// stage's attribute / uniform / varyings structs.
     pub(crate) global_params: Vec<usize>,
-    /// Combined global field name -> GLSL type (for `ty_of` on bare-global
-    /// reads). Names are collision-checked unique across all global structs.
     pub(crate) uniform_fields: Vec<(Ustr, GlslTy)>,
-    /// Sampler param INDICES, dropped from the emitted signature and read as
-    /// bare globals. Indices only: which samplers exist and what kind they are
-    /// is the interface's answer, and a second copy here is what let the vertex
-    /// stage reference a sampler it never declared.
     pub(crate) sampler_params: Vec<usize>,
-    /// `UniformArray<T>` param indices. Dropped from the signature and referenced
-    /// by name (via `at()` -> indexing); NOT tier-0-typed, so they are skipped
-    /// when typing param cells.
     pub(crate) arrays: Vec<usize>,
-    /// `void main()` mode: presence switches emission to `void main()` with a
-    /// return-struct destructure (vertex varyings, or MRT fragment outputs).
     pub(crate) main_out: Option<MainOut>,
-    /// Global names the entry's locals and value params must not take (every
-    /// bare global the program declares, so hoisting cannot shadow one).
     pub(crate) reserved: Vec<Ustr>,
 }
 
-/// The default fullscreen vertex stage -- identical to the hand-written
-/// vignette/heat_shimmer VERTEX blocks (the loader compiles the one file twice
-/// with `#define VERTEX` / `#define PIXEL`).
 const FULLSCREEN_VERTEX: &str = "layout (location = 0) in vec2 aPos;
 layout (location = 1) in vec2 aTexCoord;
 
@@ -42,7 +22,6 @@ void main() {
 }
 ";
 
-/// The nominal name behind a declared type, if any (`ShimmerU`, `Sampler2D`).
 pub(crate) fn nominal_name(ws: &Workspace, ty: TyId) -> Option<Ustr> {
     match ty_expr(ws, ty)? {
         TypeExpr::App {
@@ -53,11 +32,6 @@ pub(crate) fn nominal_name(ws: &Workspace, ty: TyId) -> Option<Ustr> {
     }
 }
 
-/// A1's body-emission view, derived from its completed interface.
-///
-/// The uniform field types come from `iface`, which got them from
-/// `uniform_group_members` -- the same classifier the std140 packer reads, so a
-/// body's typing and a block's bytes cannot disagree about a field.
 fn entry_shape(
     global_params: &[usize],
     sampler_params: &[usize],
@@ -76,35 +50,22 @@ fn entry_shape(
 pub struct ShaderEmission {
     pub source: String,
     pub dependencies: Vec<FuncRef>,
-    /// What this program's interface MEANS, with no target in it. Published so
-    /// a second backend can answer it without re-classifying the entry.
     pub interface: ShaderInterfacePlan,
     /// GLSL's physical answer: bindings, std140 layouts, fingerprints and
     /// texture units. The engine binds against THIS -- it never parses `source`
     /// and never recomputes a layout.
     pub abi: ShaderAbiPlan,
-    /// The program's concrete bodies, per stage. Target-neutral: a second
-    /// backend renders these under the same interface rather than re-walking
-    /// the entry and re-deciding what the program packages.
     pub ir: ShaderIR,
 }
 
-/// Lowered entry and helpers, ready to render with the retained concrete plans.
 pub(crate) struct StagePlan {
-    /// The stage's concrete bodies -- target-neutral, and the only part of this
-    /// plan a non-GLSL backend would want.
     pub(crate) ir: ShaderStageIr,
-    /// The stage's helpers plus the stage entry itself -- the hot-reload
-    /// dependency set. DECLARATIONS: a reload watches source files, and two
-    /// instances of one generic helper share one.
     pub(crate) dependencies: Vec<FuncRef>,
     pub(crate) concrete_plans: Arc<ConcretePlans>,
     pub(crate) concrete_interner: Arc<MonoInterner>,
 }
 
 impl StagePlan {
-    /// The helpers this stage emits: the int-div/mod prelude the reachable
-    /// bodies need, then each helper definition in emission order.
     pub(crate) fn render_helpers(
         &self,
         ws: &Workspace,
@@ -129,7 +90,6 @@ impl StagePlan {
         Ok(out)
     }
 
-    /// The stage entry's definition, rendered under its interface shape.
     pub(crate) fn render_entry(
         &self,
         ws: &Workspace,
@@ -285,7 +245,6 @@ pub(crate) fn reject_population_cycles(
     Ok(())
 }
 
-/// The fullscreen fragment entry and its resolved interface.
 pub(crate) struct EntryPlan {
     fref: FuncRef,
     shape: EntryShape,
@@ -293,11 +252,9 @@ pub(crate) struct EntryPlan {
     /// What the program's interface MEANS -- roles, names, order, neutral
     /// kinds. Target-neutral, and the sole input to `abi`.
     interface: ShaderInterfacePlan,
-    /// GLSL's physical answer to `interface`.
     abi: ShaderAbiPlan,
 }
 
-/// The stage `view` holds for `stage`, or a rejection naming the program form.
 pub(crate) fn program_stage<'a>(
     view: &'a ShaderProgramView,
     stage: ShaderStage,
@@ -314,8 +271,6 @@ pub(crate) fn program_stage<'a>(
         })
 }
 
-/// The single-entry plan of a program view: the fragment stage planned, for
-/// a caller that keeps the plan and renders it later.
 pub(crate) fn plan_shader_entry_program(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -344,7 +299,6 @@ pub(crate) fn plan_shader_entry_program(
             ));
         }
     }
-    // The stage classification admits interface params such as uniform structs.
     let class = classify_entry(ws, f)?;
     let stage = plan_stage_from_view(ws, scx, stage_view, IrStage::Fragment, &view.concrete_plans)?;
     let interface = ShaderInterfacePlan {
@@ -365,11 +319,7 @@ pub(crate) fn plan_shader_entry_program(
             f.name_span,
         )?,
         bare_samplers: bare_sampler_list(&class.samplers, &class.global_params, IrStage::Fragment),
-        // A1's entry returns one colour; MRT is an A2 feature.
         fragment_output: FragmentOutput::Single(WireKind::F32x4),
-        // A1 has no vertex stage of its own (it rides the fullscreen quad), and
-        // `classify_entry` refuses a `UniformArray` param outright -- arrays are
-        // an A2 feature, so these are absences rather than omissions.
         ..Default::default()
     };
     check_entry_collisions(&interface, f.name_span)?;

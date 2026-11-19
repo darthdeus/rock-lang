@@ -90,9 +90,6 @@ impl StructuredEmit for FnEmit<'_> {
         cond: Idx<Inst>,
         else_bb: Idx<Block>,
     ) -> Option<Option<Idx<Block>>> {
-        // Direct shader calls materialize scalar literal defaults at the call
-        // site. Other MIR defaults still need their nil path, which GLSL
-        // cannot represent and must reject.
         let materialized_default = self
             .f
             .param_default_guards
@@ -101,16 +98,11 @@ impl StructuredEmit for FnEmit<'_> {
         if materialized_default {
             return Some(Some(else_bb));
         }
-        // A folded short-circuit / ternary diamond emits nothing here -- its
-        // expression renders at the result cell's one use. Skip to the join
-        // (ipdom); both arms are absorbed.
         self.folded_block
             .contains_key(&b)
             .then(|| self.structure.ipdom(b))
     }
 
-    /// The loop's condition test: the `Branch` in the body with a direct
-    /// successor to the exit.
     fn loop_test(&mut self, region: &LoopRegion) -> Result<LoopTest, CompilerError> {
         let test = region
             .body

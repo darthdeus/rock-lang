@@ -35,9 +35,6 @@ impl<'a> BlockWire<'a> {
                 w.member_names.push(m.name.as_str());
                 w.member_offsets.push(m.offset as i64);
                 w.member_kinds.push(m.kind.code() as i64);
-                // A scalar member takes no array payload, and the host's push
-                // verbs reject a capacity-0 target rather than writing one
-                // element into it.
                 w.member_capacities.push(0);
                 w.member_strides.push(0);
             }
@@ -60,8 +57,6 @@ impl<'a> BlockWire<'a> {
     }
 }
 
-/// A stage's `UniformArray<T>` members, as a logical group. `None` when the
-/// stage declares none.
 pub(crate) fn logical_array_group(
     stage: IrStage,
     owner: Ustr,
@@ -87,17 +82,10 @@ pub(crate) fn wire_kind_of(t: GlslTy) -> WireKind {
         GlslTy::Vec3 | GlslTy::Bvec3 => WireKind::F32x3,
         GlslTy::Vec4 => WireKind::F32x4,
         GlslTy::Mat4 => WireKind::Mat4,
-        // A sampler is a RESOURCE, never an interpolated or returned value; it
-        // reaches the interface through `LogicalTextureGroup` instead.
         GlslTy::Sampler2D | GlslTy::ISampler2D => WireKind::I32,
     }
 }
 
-/// A stage's own uniform members plus the program's `@engine` members, spelled
-/// for GLSL -- what a body needs to type a bare-global read.
-///
-/// From the INTERFACE. The shapes carried a second GLSL-typed copy of the same
-/// fields, which is the drift this split exists to remove.
 pub(crate) fn stage_uniform_fields(
     iface: &ShaderInterfacePlan,
     stage: IrStage,
@@ -110,9 +98,6 @@ pub(crate) fn stage_uniform_fields(
         .collect()
 }
 
-/// The varyings a program passes between stages, spelled for GLSL. Names,
-/// kinds and `@flat` come from the INTERFACE; only the spelling is this
-/// target's.
 pub(crate) fn interface_varyings(iface: &ShaderInterfacePlan) -> Vec<(Ustr, GlslTy, bool)> {
     iface
         .varyings
@@ -121,7 +106,6 @@ pub(crate) fn interface_varyings(iface: &ShaderInterfacePlan) -> Vec<(Ustr, Glsl
         .collect()
 }
 
-/// The fragment stage's MRT outputs, or `None` for the single implicit one.
 pub(crate) fn interface_mrt_outputs(iface: &ShaderInterfacePlan) -> Option<Vec<(Ustr, GlslTy)>> {
     match &iface.fragment_output {
         FragmentOutput::Mrt(outs) => Some(outs.iter().map(|(n, k)| (*n, wire_glsl(*k))).collect()),
@@ -153,15 +137,6 @@ pub(crate) struct StageAbi<'a> {
 }
 
 impl StageAbi<'_> {
-    /// The stage's uniform resources: the engine block first (it binds at
-    /// index 0 and both stages declare the same one), then the stage's own
-    /// block, its `@size(N)` array block, and its samplers.
-    ///
-    /// The array block is separate from the scalar one because its LIFETIME
-    /// is: arrays change per activation, the scalar group per draw. Samplers
-    /// are opaque, so GLSL forbids them inside a uniform block; they stay loose
-    /// beside it and bind by unit -- the grouped ones in the ABI's unit order,
-    /// then the bare ones.
     pub(crate) fn declarations(&self) -> String {
         let mut out = String::new();
         for block in self.engine_block.iter().chain(&self.uniform_block) {
@@ -194,7 +169,6 @@ fn stage_samplers_in_unit_order(
             out.push(*s);
         }
     }
-    // The bare ones have no unit to sort by, so they keep declaration order.
     out.extend(mine.iter().filter(|(n, _)| !group.contains(n)).copied());
     out
 }
@@ -222,9 +196,6 @@ pub(crate) fn stage_abi<'a>(
     }
 }
 
-/// The samplers that are NOT part of a `@textures` group -- loose params whose
-/// unit the CPU picks. `has_bare_sampler` answers whether any exist (a
-/// rejection when a group is also present); this is the list itself.
 pub(crate) fn bare_sampler_list(
     samplers: &[(usize, Ustr, SamplerKind)],
     grouped_params: &[usize],
@@ -241,12 +212,6 @@ pub(crate) fn bare_sampler_list(
         .collect()
 }
 
-/// The neutral member list of a uniform group.
-///
-/// `gpu_layout::uniform_group_members` is the ONE classifier -- the same one
-/// `uniform_block` reads before laying anything out, so the interface and the
-/// CPU packer cannot disagree about a kind. Places come later, from
-/// `std140_block`, over exactly these members.
 fn logical_members(
     ws: &Workspace,
     struct_name: Ustr,
@@ -296,9 +261,7 @@ pub(crate) fn logical_textures(
 /// The engine consumes these assignments directly.
 #[derive(Clone, Debug, Default)]
 pub struct ShaderAbiPlan {
-    /// Scalar blocks in binding order. Bindings are fixed by role.
     pub uniform_blocks: Vec<(u32, GlslUniformBlock)>,
-    /// Array blocks have their own bindings and upload lifetime.
     pub uniform_array_blocks: Vec<(u32, UniformArrayBlockPlan)>,
     /// Sampler names in UNIT order -- unit N is index N. GLSL 3.30 has no
     /// `layout(binding=)`, so the engine needs each name once to point the
@@ -316,7 +279,6 @@ impl ShaderAbiPlan {
         }
     }
 
-    /// The binding a stage's array block takes.
     fn array_binding_of(stage: IrStage) -> u32 {
         match stage {
             IrStage::Vertex => UNIFORM_BLOCK_BINDING_VERTEX_ARRAYS,
@@ -349,8 +311,6 @@ impl ShaderAbiPlan {
         }
         uniform_array_blocks.sort_by_key(|(b, _)| *b);
 
-        // Declaration order IS unit order, which is the contract `@attr`
-        // already uses for locations.
         let texture_units = iface.sampler_names();
 
         Ok(ShaderAbiPlan {
@@ -361,10 +321,6 @@ impl ShaderAbiPlan {
     }
 }
 
-/// One std140 block of a GLSL program. `name` is the group type's symbol, which
-/// the declaration, the block wire and the semantic wire all spell; the plan's
-/// `struct_name` stays the DefKey, because the fingerprint hashes it and the CPU
-/// packer's plan of the same type must hash the same bytes.
 #[derive(Clone, Debug)]
 pub struct GlslUniformBlock {
     pub name: Ustr,
@@ -401,12 +357,6 @@ pub(crate) fn check_stage_sampler_budget(
     ))
 }
 
-/// Uniform block binding indices, assigned by param ROLE so the slot is
-/// structural rather than a consequence of how many groups a program declares.
-/// Slot 0 is RESERVED for `@engine` whether or not the program has one, which is
-/// what lets the engine reject a foreign block there at registration. The array
-/// slots are reserved on the same terms: ES 3.0 guarantees 12 uniform blocks per
-/// stage and 24 combined, so five reserved indices are affordable.
 pub(crate) const UNIFORM_BLOCK_BINDING_ENGINE: u32 = 0;
 pub(crate) const UNIFORM_BLOCK_BINDING_VERTEX: u32 = 1;
 pub(crate) const UNIFORM_BLOCK_BINDING_FRAGMENT: u32 = 2;

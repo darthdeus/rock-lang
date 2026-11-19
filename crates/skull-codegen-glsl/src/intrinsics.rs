@@ -2,8 +2,6 @@
 
 use super::*;
 
-/// Stdlib name and arity to GLSL expression template. Vector operators render
-/// at the call site. User functions with matching spellings keep their bodies.
 const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     ("sin", 1, "sin($1)"),
     ("cos", 1, "cos($1)"),
@@ -18,21 +16,15 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     ("sign", 1, "sign($1)"),
     ("pow", 2, "pow($1, $2)"),
     ("atan2", 2, "atan($1, $2)"),
-    // GLSL round() half-way rounding is implementation-defined; pin floor(x+0.5).
     ("round", 1, "floor($1 + 0.5)"),
     ("min", 2, "min($1, $2)"),
     ("max", 2, "max($1, $2)"),
     ("clamp", 3, "clamp($1, $2, $3)"),
     ("lerp", 3, "mix($1, $2, $3)"),
     ("smoothstep", 3, "smoothstep($1, $2, $3)"),
-    // int<->float identity casts.
     ("int_to_float", 1, "float($1)"),
     ("float", 1, "float($1)"),
     ("to_float", 1, "float($1)"),
-    // Vec method helpers (the field-math bodies never emit). Keyed by the base
-    // method name, which mangling strips the receiver-type prefix from
-    // (`Vec2.dot` -> `dot`); GLSL `dot`/`length`/`distance` are overloaded across
-    // vecN, so one entry covers Vec2/Vec3/Vec4.
     ("dot", 2, "dot($1, $2)"),
     ("length", 1, "length($1)"),
     ("distance", 2, "distance($1, $2)"),
@@ -46,43 +38,23 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     ("v", 0, "vec2(0.0)"),
     ("zero", 0, "vec2(0.0)"),
     ("texture", 2, "texture($1, $2)"),
-    // Integer-sampler id read (R32I tier): texture() on isampler2D returns
-    // ivec4; the id is the only channel anyone reads.
     ("texture_id", 2, "texture($1, $2).r"),
-    // textureSize returns ivec2; wrap in vec2(...) so the result is a float Vec2
-    // (matches Rock's `-> Vec2`, and the gl_FragCoord/size divides it feeds).
     ("texture_size", 1, "vec2(textureSize($1, 0))"),
-    // GPU builtins. frag_coord/discard take no
-    // args -> bare builtins (discard renders as the statement `discard;`, see
-    // emit_block_effects). Fragment-stage gating lives in the pipeline emitter.
     ("frag_coord", 0, "gl_FragCoord"),
     ("fwidth", 1, "fwidth($1)"),
     ("dfdx", 1, "dFdx($1)"),
     ("dfdy", 1, "dFdy($1)"),
     ("discard", 0, "discard"),
     ("vertex_id", 0, "gl_VertexID"),
-    // Uniform-array indexing (decision 3): `at(arr, i)` on an UniformArray<T>
-    // param renders as plain GLSL indexing of the declared uniform array.
     ("at", 2, "$1[$2]"),
-    // Bool-vector tier. isnan/isinf are GLSL builtins.
-    // `any` here is arity-1 (Bvec3 reduction) -- distinct from the iterator
-    // `any` (arity-2, not a shader intrinsic). `greater_than`/`to_vec3` carry
-    // portable Rock bodies for luajit/JS; these templates render the native
-    // GLSL inline so the bodies never emit on the shader path.
     ("isnan", 1, "isnan($1)"),
     ("isinf", 1, "isinf($1)"),
-    // The native bvec3 ctor: inline, since a helper fn named `bvec3` would
-    // collide with the GLSL builtin type constructor.
     ("bvec3", 3, "bvec3($1, $2, $3)"),
     ("any", 1, "any($1)"),
     ("greater_than", 2, "greaterThan($1, $2)"),
     ("to_vec3", 1, "vec3($1)"),
 ];
 
-/// The GLSL intrinsic template for a callee, or `None` if it must be emitted as
-/// a GLSL fn definition. Only the stdlib's
-/// declarations are keyed (the Vec methods and constructors are plain stdlib
-/// fns): a user fn that shares a name and arity is its own function.
 pub(crate) fn intrinsic_template(f: &Function) -> Option<&'static str> {
     if !skull_mir::intrinsics::is_intrinsic(f)
         && !bone_core::modules::is_stdlib_module_file(f.span.file.as_str())
@@ -130,13 +102,6 @@ pub(crate) const GLSL_KEYWORDS: &str = "
     imageBuffer iimageBuffer uimageBuffer sizeof cast namespace using row_major
 ";
 
-/// The GLSL-side callable spellings the emitter renders, derived from
-/// [`GLSL_INTRINSICS`] so the reserved set can never drift from the table: a
-/// template's `ident(` callees plus bare-identifier templates. The spelling is
-/// what GLSL sees, not the Rock name -- `atan` from Rock `atan2`, `mix` from
-/// `lerp`, `textureSize` nested inside `texture_size`'s wrapper -- while
-/// Rock-side spellings with no emitted callee (`lerp`, `v`, `at`, `round`)
-/// stay unreserved, so existing shaders using them as locals do not churn.
 pub(crate) fn glsl_builtin_callables() -> Vec<&'static str> {
     let mut out = Vec::new();
     for (_, _, tmpl) in GLSL_INTRINSICS {
@@ -166,9 +131,6 @@ pub(crate) fn glsl_builtin_callables() -> Vec<&'static str> {
     out
 }
 
-/// The graph sees HIR call obligations before scalar operators are lowered away,
-/// so it needs the concrete argument types to distinguish a vector infix from a
-/// scalar MIR instruction.
 pub fn renders_inline_instance(
     ws: &Workspace,
     f: &Function,
@@ -218,7 +180,6 @@ pub fn is_lowered_native_operator(
     })
 }
 
-/// The GLSL infix operator symbol for a non-scalar `__op_*` (Vec operator) call.
 pub(crate) fn vec_op_symbol(name: &str) -> Option<&'static str> {
     match name {
         "__op_add" => Some("+"),

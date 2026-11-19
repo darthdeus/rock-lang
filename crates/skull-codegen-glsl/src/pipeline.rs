@@ -2,7 +2,6 @@
 
 use super::*;
 
-/// One stage's varyings, as `in` or `out` declarations.
 fn varying_decls(iface: &ShaderInterfacePlan, dir: &str) -> String {
     let mut out = String::new();
     for (n, t, flat) in interface_varyings(iface) {
@@ -28,9 +27,6 @@ fn emit_vertex_stage(
             .copied()
             .chain(v.res.global_params())
             .collect(),
-        // Body-level typing of bare-global reads. Attribute types come from the
-        // INTERFACE, spelled here -- `GlslTy` is the emitter's own working type
-        // for body cells and does not travel back upward.
         uniform_fields: iface
             .vertex_inputs
             .iter()
@@ -63,8 +59,6 @@ fn emit_vertex_stage(
         ));
     }
     out.push('\n');
-    // Vertex texture fetch is legal in GL 3.3, so the vertex stage declares the
-    // samplers it reads like the fragment stage does.
     out.push_str(&resolved.declarations());
     if resolved.uniform_block.is_some()
         || resolved.engine_block.is_some()
@@ -135,8 +129,6 @@ fn emit_fragment_stage(
     out.push('\n');
     out.push_str(&stage.render_helpers(ws, interner)?);
     out.push_str(&stage.render_entry(ws, interner, &shape)?);
-    // Single-output: the entry fn returns Vec4; main() forwards it to FragColor.
-    // MRT: the entry IS `void main()` (destructured), so no wrapper.
     if mrt_outputs.is_none() {
         out.push_str(&format!(
             "\nvoid main() {{\n  FragColor = {}();\n}}\n",
@@ -146,12 +138,6 @@ fn emit_fragment_stage(
     Ok(out)
 }
 
-/// Every interface-declared name landing in GLSL's ONE cross-stage namespace:
-/// attributes, uniform/engine members, array members, varyings, samplers and
-/// MRT outs. The completeness argument lives here once: every name a program
-/// declares is in the interface exactly once, so a role added to the interface
-/// joins every consumer by existing rather than by someone remembering to
-/// chain it.
 fn interface_global_names(iface: &ShaderInterfacePlan) -> Vec<Ustr> {
     iface
         .vertex_inputs
@@ -184,16 +170,6 @@ fn interface_global_names(iface: &ShaderInterfacePlan) -> Vec<Ustr> {
         .collect()
 }
 
-/// Every global name an entry's locals and value params must not take: the
-/// interface's whole census above, plus the stage I/O the interface never
-/// claims (A1's `TexCoord`, single-output `FragColor`) and the two GL builtins
-/// a `void main()` entry writes (`gl_Position`, `gl_FragDepth`). One set for
-/// every entry: over-reservation is semantics-preserving (a renamed local keeps
-/// every use through its one `cell_name`), while under-reservation is the
-/// silent shadowing miscompile, so this errs wide. Mangled helper names and
-/// block names are out: a local spelling one is unreachable in practice, and a
-/// collision there is a loud driver error (calling a non-function), never a
-/// silent wrong read.
 pub(crate) fn entry_reserved_names(iface: &ShaderInterfacePlan) -> Vec<Ustr> {
     interface_global_names(iface)
         .into_iter()
@@ -215,10 +191,6 @@ pub(crate) fn entry_reserved_names(iface: &ShaderInterfacePlan) -> Vec<Ustr> {
 /// `interface_global_names`), so the engine block, declared in both stages but
 /// ONE block, is listed once.
 fn check_pipeline_collisions(iface: &ShaderInterfacePlan, span: Span) -> Result<(), CompilerError> {
-    // gl_Position is always reserved. `FragColor` is reserved only for the
-    // single-output form -- with MRT the outputs are explicit named fields (one
-    // of which may itself be `FragColor`), so they go through the collision check
-    // like any other name rather than being pre-seeded.
     let mut seen: HashSet<Ustr> = [Ustr::from("gl_Position")].into_iter().collect();
     if !matches!(iface.fragment_output, FragmentOutput::Mrt(_)) {
         seen.insert(Ustr::from("FragColor"));
@@ -252,9 +224,6 @@ fn check_block_name_collisions<'a>(
     span: Span,
 ) -> Result<(), CompilerError> {
     let mut seen: HashSet<Ustr> = HashSet::default();
-    // The engine block is declared in BOTH stages but is ONE block, so the
-    // scalar list is deduped by identity before the census rather than after --
-    // otherwise it collides with itself.
     let names = scalar
         .map(|p| (p.plan.struct_name, p.name))
         .collect::<HashSet<_>>()
@@ -273,7 +242,6 @@ fn check_block_name_collisions<'a>(
     Ok(())
 }
 
-/// The retained vertex and fragment plans and their shared interface.
 pub(crate) struct PipelinePlan {
     vshape: VertexShape,
     fshape: FragShape,
@@ -282,7 +250,6 @@ pub(crate) struct PipelinePlan {
     /// What the program's interface MEANS -- roles, names, order, neutral
     /// kinds. Target-neutral, and the sole input to `abi`.
     pub(crate) interface: ShaderInterfacePlan,
-    /// GLSL's physical answer to `interface`.
     abi: ShaderAbiPlan,
 }
 
@@ -319,7 +286,6 @@ pub(crate) fn plan_shader_pipeline_from_view(
     let varyings = classify_varyings(ws, vshape.varyings_ty, vf.name_span)?;
     let fshape = classify_pipeline_fragment(ws, ff, vshape.varyings_ty)?;
 
-    // A shared vertex entry can pair with fragments that use different uniform types.
     let vert_group = vshape
         .res
         .uniform_group
@@ -331,7 +297,6 @@ pub(crate) fn plan_shader_pipeline_from_view(
         .map(|g| logical_uniform_group(ws, UniformRole::Stage(IrStage::Fragment), g, ff.name_span))
         .transpose()?;
 
-    // Both stages agree on one engine block. The host checks its layout fingerprint.
     let engine_group = match (vshape.res.engine_group, fshape.res.engine_group) {
         (Some(v), Some(f)) if v != f => {
             return Err(err(
@@ -347,15 +312,9 @@ pub(crate) fn plan_shader_pipeline_from_view(
         .map(|g| logical_uniform_group(ws, UniformRole::Engine, g, vf.name_span))
         .transpose()?;
 
-    // One array block per stage that declares `@size(N)` params, at its own
-    // reserved binding. Built from the SAME std140 authority as the scalar
-    // blocks above and refusing the same element set, so the declaration and the
-    // host's offsets cannot come from two different answers.
     let vert_array_group = logical_array_group(IrStage::Vertex, vf.name, &vshape.res.arrays);
     let frag_array_group = logical_array_group(IrStage::Fragment, ff.name, &fshape.res.arrays);
 
-    // `@textures` is one group per PROGRAM (texture units are program-scoped),
-    // unlike `@uniform`, which is one block per STAGE.
     let group = match (vshape.res.texture_group, fshape.res.texture_group) {
         (Some(v), Some(f)) if v != f => {
             return Err(err(
@@ -368,9 +327,6 @@ pub(crate) fn plan_shader_pipeline_from_view(
         (v, f) => v.or(f),
     };
     let bare = vshape.res.has_bare_sampler() || fshape.res.has_bare_sampler();
-    // WHICH stages read the group -- a stage that samples must declare the
-    // sampler in its own section, so "the program has one" cannot drive
-    // emission.
     let group_stages: Vec<IrStage> = [
         vshape
             .res
@@ -479,11 +435,6 @@ pub(crate) fn render_shader_pipeline(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
-    // Each block carries its binding, taken from the param ROLE: the engine
-    // block at 0 (both stages name it), the vertex group at 1, the fragment
-    // group at 2. Unlike `@textures` -- one group per PROGRAM, since texture
-    // units are program-scoped -- `@uniform` blocks are per STAGE, so differing
-    // types there are correct rather than a collision.
     Ok(ShaderEmission {
         source,
         dependencies,

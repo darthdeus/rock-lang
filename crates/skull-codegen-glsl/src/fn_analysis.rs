@@ -3,17 +3,6 @@
 use super::*;
 
 impl FnEmit<'_> {
-    /// Assign unique GLSL identifiers to cells and retained vector calls.
-    ///
-    /// In entry mode the hoisted locals share the function scope with the
-    /// program's bare globals, so a local named like a uniform lane (or an
-    /// attribute, varying, sampler, array member or output) would shadow it
-    /// with no diagnostic. A local named like a GLSL builtin callable (`cos`,
-    /// `mix`, `float`, ...) breaks the builtin call the same way, in EVERY fn
-    /// -- helpers emit with an empty interface reserved set. Global-reference
-    /// cells (sampler/array params) claim their exact spellings first -- they
-    /// ARE the global -- and every other cell dedups apart from the reserved
-    /// globals, lexical keywords, builtin callables, and its siblings.
     pub(crate) fn assign_names(&mut self, rpo: &[Idx<Block>]) -> Result<(), CompilerError> {
         let mut used: HashSet<String> = HashSet::default();
         let claim = |used: &mut HashSet<String>, base: String| -> String {
@@ -26,8 +15,6 @@ impl FnEmit<'_> {
             used.insert(name.clone());
             name
         };
-        // Global references first, in cell order (deterministic): a sampler
-        // keeps `t` while a same-named local becomes `t_1`, never the reverse.
         let mut refs: Vec<Idx<Cell>> = self.global_ref_cells.iter().copied().collect();
         refs.sort_by_key(|c| c.into_raw().into_u32());
         for cid in refs {
@@ -77,8 +64,6 @@ impl FnEmit<'_> {
                 retained.insert(iid);
                 continue;
             }
-            // Inlining a shared component repeats its source too. A retained
-            // call stops propagation: its arguments render only in its binding.
             self.rendered_uses_each(iid, &mut |v| pending.push(v));
         }
         for (iid, _) in self.f.insts.iter() {
@@ -88,8 +73,6 @@ impl FnEmit<'_> {
             let name = claim(&mut used, "call_result".to_string());
             self.value_name.insert(iid, name);
         }
-        // A retained call is a statement in its original arm, so that arm can
-        // no longer be absorbed into a folded expression.
         let mut unfold = Vec::new();
         for (&block, &cell) in &self.folded_block {
             let Term::Branch {
@@ -130,8 +113,6 @@ impl FnEmit<'_> {
         self.f.insts[iid].uses_each(push);
     }
 
-    /// Constructors and arithmetic over existing values can be repeated; an
-    /// actual function evaluation inside them must retain single evaluation.
     fn trivial_value(&self, iid: Idx<Inst>, memo: &mut HashMap<Idx<Inst>, bool>) -> bool {
         if let Some(&trivial) = memo.get(&iid) {
             return trivial;
@@ -151,17 +132,10 @@ impl FnEmit<'_> {
         trivial
     }
 
-    /// Whether `iid` is a `Load` of an entry-mode global-base struct param cell
-    /// (attribute/uniform/varyings) -- a field read off it renders as a bare
-    /// global, not a struct member.
     pub(crate) fn is_uniform_base(&self, iid: Idx<Inst>) -> bool {
         matches!(self.f.insts[iid], Inst::Load(c) if self.global_cells.contains(&c))
     }
 
-    /// Type every non-param cell: prefer bone's binding type ([`Cell::ty`]) where
-    /// it maps to a tier-0 GLSL type (fixes `let y: float = 0`, whose first store's
-    /// rep is int); fall back to first-store inference (RPO) for compiler-minted
-    /// temps (if-result, loop counter) that carry no binding type.
     pub(crate) fn compute_cell_types(&mut self, rpo: &[Idx<Block>]) -> Result<(), CompilerError> {
         for (cid, cell) in self.f.cells.iter() {
             if self.cell_ty.contains_key(&cid) {
@@ -221,18 +195,9 @@ impl FnEmit<'_> {
         Ok(())
     }
 
-    /// Detect the cosmetic-tier folds: `&&`/`||`
-    /// short-circuit diamonds collapse back to infix boolean expressions.
     pub(crate) fn compute_folds(&mut self, rpo: &[Idx<Block>]) {
         let reach: HashSet<Idx<Block>> = rpo.iter().copied().collect();
-        // Cell load-counts over reachable code -- a fold is only sound when the
-        // diamond's result cell has exactly one use.
         let mut load_count: HashMap<Idx<Cell>, usize> = HashMap::default();
-        // Stores too: the fold renders the diamond at the cell's use, so the
-        // diamond's two arms must be the cell's ONLY writers. A nested ladder
-        // (`match n { 1 => .., 2 => .., _ => .. }`) folds its inner diamond while
-        // an OUTER arm also stores the same single-use cell -- suppressing that
-        // arm's store and silently dropping the case.
         let mut store_count: HashMap<Idx<Cell>, usize> = HashMap::default();
         for &b in &reach {
             for &iid in &self.f.blocks[b].insts {
@@ -244,10 +209,6 @@ impl FnEmit<'_> {
             }
         }
 
-        // Short-circuit diamonds: a `Branch` whose two arms each single-store the
-        // same single-use bool cell, one arm storing the `&&`/`||` const identity.
-        // `a && b` lowers to `if a then b else false`; `a || b` to
-        // `if a then true else b` (`lower_and`/`lower_or`, no And/Or inst).
         for b in reach.iter().copied() {
             let Term::Branch {
                 cond,
@@ -279,11 +240,6 @@ impl FnEmit<'_> {
             let Some(&result_ty) = self.cell_ty.get(&rcell) else {
                 continue;
             };
-            // Soundness: the fold moves the expression to the cell's use site, so
-            // its inputs must be unchanged there. The arms go straight to `join`
-            // and store only `rcell`, so the only place an input could be mutated
-            // between the diamond and the use is `join` before the use -- require
-            // the use to be in `join` with no store preceding it.
             if !self.use_hoistable_to(rcell, join) {
                 continue;
             }
@@ -326,12 +282,6 @@ impl FnEmit<'_> {
         }
     }
 
-    /// Whether a counted-loop bound value is loop-invariant enough to inline into
-    /// the `for` header (see the fold in `precompute`). Conservative: a const, or
-    /// pure int arithmetic / int<->float casts over cells that are stored exactly
-    /// once in the fn (so re-reading in the folded condition can't change). The
-    /// loop counter is multi-store, so it can never sneak in. Anything else (a
-    /// call like `min(n, 16)`, a texture read) stays a temp -- the safe default.
     fn bound_value_is_invariant(&self, v: Idx<Inst>) -> bool {
         match self.f.insts[v] {
             Inst::Const(_) => true,
@@ -346,8 +296,6 @@ impl FnEmit<'_> {
         }
     }
 
-    /// The single value stored to `cell`, or `None` if it is stored zero or more
-    /// than once anywhere in the fn.
     fn single_store_value(&self, cell: Idx<Cell>) -> Option<Idx<Inst>> {
         let mut found = None;
         for (_, blk) in self.f.blocks.iter() {
@@ -365,9 +313,6 @@ impl FnEmit<'_> {
         found
     }
 
-    /// Whether `rcell`'s single use is in `join` with no `Store` preceding it
-    /// there -- the condition that makes hoisting the folded expression to the
-    /// use site sound (no input can be mutated between the diamond and the use).
     fn use_hoistable_to(&self, rcell: Idx<Cell>, join: Idx<Block>) -> bool {
         for &iid in &self.f.blocks[join].insts {
             match self.f.insts[iid] {
@@ -379,8 +324,6 @@ impl FnEmit<'_> {
         false
     }
 
-    /// If `arm` is a single-store block (exactly one `Store`, any number of pure
-    /// value insts) ending `Goto(join)`, return its `(cell, stored value)`.
     fn single_store_arm(
         &self,
         arm: Idx<Block>,
@@ -405,7 +348,6 @@ impl FnEmit<'_> {
         matches!(self.f.insts[iid], Inst::Const(Lit::Bool(b)) if b == want)
     }
 
-    /// Render a folded diamond as one GLSL expression.
     pub(crate) fn render_folded(&self, fd: &FoldedDiamond) -> Result<String, CompilerError> {
         let cond = self.render_val(fd.cond)?;
         Ok(match fd.kind {

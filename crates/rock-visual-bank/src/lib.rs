@@ -149,10 +149,6 @@ pub struct Travel {
     pub curve: Vec<f32>,
 }
 
-/// A world prop: three relight channels plus one mask per `masks` entry, on an
-/// atlas of `frame_size.w` x `frame_size.h * rows`. `rows` is every baked
-/// azimuth row times `orientations` (a projectile bakes one row per flight
-/// direction at one orientation).
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PropLine {
@@ -286,9 +282,6 @@ pub struct ArchitecturalPiece {
     pub variants: Vec<ArchitecturalVariant>,
 }
 
-/// An animation directory's `sheet.json`: the packed cell rects
-/// `[x, y, w, h, origin_x, origin_y, mirrored]`, direction-major over all
-/// eight directions, and optional joint tracks `[direction][frame] = [x, y, z]`.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SheetGeometry {
@@ -860,10 +853,6 @@ pub fn validate_floor_texture(
     }
 }
 
-/// A walkable slope on a prop, in the prop's unturned tile coordinates (the
-/// collision_footprint frame, placement point at [0.5, 0.5]). Inside `area`
-/// ([min, max] corners) the ground rises from 0 at `run[0]` to `rise` metres
-/// at `run[1]` along +x and stays at `rise` past it. A negative rise descends.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WalkRamp {
@@ -1145,7 +1134,6 @@ mod tests {
     fn floor_wang_admission() {
         let region = Some([0, 0, 2048, 2048]);
         assert!(validate_floor_texture(Some([2, 2]), region, Some([2, 2]), (2048, 2048)).is_ok());
-        // Two sets of four tiles of two cells need a region divisible by sixteen cells.
         assert!(
             validate_floor_texture(
                 Some([2, 2]),

@@ -2,45 +2,27 @@
 
 use super::*;
 
-/// The resource params either pipeline stage may declare: its `@uniform` and
-/// `@engine` groups, its `@textures` group, bare samplers and uniform arrays.
 #[derive(Default)]
 pub(crate) struct StageResources {
-    /// `@uniform` struct param indices (at most one).
     pub(crate) uniform_params: Vec<usize>,
     /// The `@uniform` group's struct name, if the stage declares one. Each
     /// stage gets its own std140 block at its own binding index -- the stages
     /// declare DIFFERENT types and cannot be made to share one.
     pub(crate) uniform_group: Option<Ustr>,
-    /// `@engine` struct param indices (at most one).
     pub(crate) engine_params: Vec<usize>,
-    /// The `@engine` group's struct name, if the stage declares one. A separate
-    /// ROLE from `@uniform`, not a second one of them: the engine produces it,
-    /// its lifetime is the pass rather than the draw, and it binds at index 0 so
-    /// both stages of a program name the same block.
     pub(crate) engine_group: Option<Ustr>,
-    /// `@textures` group param indices. Their fields are already expanded into
-    /// `samplers`; the params themselves render as bare globals like a uniform
-    /// struct, so they belong in `global_params`. Vertex texture fetch is legal
-    /// in GL 3.3.
     pub(crate) texture_params: Vec<usize>,
-    /// The `@textures` group's struct name, if the stage declares one.
     pub(crate) texture_group: Option<Ustr>,
     pub(crate) samplers: Vec<(usize, Ustr, SamplerKind)>,
-    /// `UniformArray<T>` params, declaration order -- the array block's members.
     pub(crate) arrays: Vec<ArrayParam>,
 }
 
-/// What a stage param is once the shared resource roles have been ruled out.
 enum OtherParam {
-    /// A tier-0 value that is not a sampler: no stage accepts one.
     Value(GlslTy),
-    /// A value struct, whose role marker the stage decides.
     Struct,
 }
 
 impl StageResources {
-    /// Record param `i` if it is an array, a `@textures` group or a sampler.
     fn classify(
         &mut self,
         ws: &Workspace,
@@ -109,7 +91,6 @@ impl StageResources {
         Ok(())
     }
 
-    /// The group params whose field reads render as bare globals.
     pub(crate) fn global_params(&self) -> impl Iterator<Item = usize> + '_ {
         self.engine_params
             .iter()
@@ -127,42 +108,22 @@ impl StageResources {
     }
 }
 
-/// A classified `@shader(vertex)` entry.
 pub(crate) struct VertexShape {
-    /// Attribute struct param indices, in location-assignment order (per-vertex
-    /// `@attr` first, then `@instance` -- the numbering continues).
     pub(crate) attr_params: Vec<usize>,
-    /// The attribute structs in location-assignment order, in the NEUTRAL
-    /// vocabulary. Locations follow declaration order;
-    /// the spelling from `attr_glsl_ty` at the point of emission.
     pub(crate) inputs: Vec<LogicalVertexInput>,
     pub(crate) res: StageResources,
-    /// The varyings value-struct return type.
     pub(crate) varyings_ty: TyId,
 }
 
-/// A classified varyings value struct.
 pub(crate) struct VaryingsShape {
-    /// Varyings EXCLUDING `position`, in the NEUTRAL vocabulary. This IS the
-    /// interface's list -- not a GLSL-typed copy of it -- so there is nothing
-    /// for the two to disagree about.
     pub(crate) varyings: Vec<LogicalVarying>,
 }
 
-/// The pipeline fragment entry's varyings-struct param index: always the first.
 pub(crate) const VARYINGS_PARAM: usize = 0;
 
-/// A classified pipeline `@shader(fragment)` entry (varyings-consuming form).
 pub(crate) struct FragShape {
     pub(crate) res: StageResources,
-    /// How the stage's colour output is shaped, in the NEUTRAL vocabulary:
-    /// `Mrt` when the entry returns a value struct (one
-    /// `layout(location=N) out <ty> <field>` per field, declaration order),
-    /// `Single` for the implicit `FragColor` (`I32` for an R32I-only target).
-    /// This IS the interface's answer, not a GLSL-typed copy of it.
     pub(crate) output: FragmentOutput,
-    /// The output struct carries a `FragDepth: float` field (gl_FragDepth),
-    /// which is excluded from `output`.
     pub(crate) frag_depth: bool,
 }
 
@@ -170,8 +131,6 @@ fn has_anno(annos: &[bone_core::hir::Annotation], name: &str) -> bool {
     annos.iter().any(|a| a.name.name.as_str() == name)
 }
 
-/// The int argument of an `@name(N)` annotation, if present (arity/type are
-/// registry-validated upstream).
 fn anno_int(annos: &[bone_core::hir::Annotation], name: &str) -> Option<i64> {
     annos
         .iter()
@@ -183,16 +142,6 @@ fn anno_int(annos: &[bone_core::hir::Annotation], name: &str) -> Option<i64> {
         })
 }
 
-/// The element WIRE KIND of a `UniformArray<T>`-typed param, or `None` when the
-/// type is not the uniform-array phantom.
-///
-/// A wire kind and not a [`GlslTy`], because the array block's DECLARATION is
-/// rendered from the layout plan: classifying the element here as a GLSL type
-/// too would make the emitter a second authority on what an array holds, free to
-/// disagree with the one that computed the offsets. Which kinds are ADMITTED is
-/// likewise `uniform_array_block`'s answer, not this function's -- it rejects
-/// `Vec3`/`Mat4`/`bool`/`uint` with a span, so re-stating the set here would be the same
-/// drift one level down.
 fn uniform_array_elem(
     ws: &Workspace,
     ty: TyId,
@@ -218,11 +167,6 @@ fn uniform_array_elem(
     if let Some(k) = skull_mir::gpu_layout::wire_kind(ws, ety) {
         return Ok(Some(k));
     }
-    // The element has no std140 form. Naming it needs its GLSL spelling, and
-    // when THAT fails too the right diagnostic is the one `glsl_ty` produced --
-    // it knows why the type is unusable, and this function does not. Replacing
-    // it with a fabricated `?` would discard the compiler's own information at
-    // exactly the point the author needs it.
     let name = glsl_ty(
         ws,
         &SpecSubst::default(),
@@ -239,15 +183,11 @@ fn uniform_array_elem(
     ))
 }
 
-/// One classified `UniformArray<T>` param: where it sits in the entry's
-/// signature (so it can be dropped from the emitted one) and its DECLARATION for
-/// the layout planner.
 pub(crate) struct ArrayParam {
     pub(crate) param: usize,
     pub(crate) decl: ArrayMemberDecl,
 }
 
-/// Report layout errors at the @size annotation the author can change.
 fn classify_array_param(
     ws: &Workspace,
     pd: &bone_core::hir::ParamDecl,
@@ -265,9 +205,6 @@ fn classify_array_param(
         ))
     })?;
     let n = anno_int(&pd.annotations, "size").expect("@size arity/type is registry-validated");
-    // `N` is source-controlled, so it reaches the layout as a `u32` only through
-    // a rejection: a negative or absurd literal must not wrap into a small
-    // capacity that then passes the very budget check it should fail.
     let capacity = u32::try_from(n).map_err(|_| {
         CompilerError::new_with_label(anno.span, format!(
             "shader {stage}: uniform-array param `{}` has @size({n}), which is not a usable element count",
@@ -285,7 +222,6 @@ fn classify_array_param(
     }))
 }
 
-/// Use the layout plan's element kinds and capacities for the declaration.
 pub(crate) fn uniform_array_block_decl(plan: &UniformArrayBlockPlan) -> String {
     let mut s = format!("layout(std140) uniform {} {{\n", plan.block_name);
     for m in &plan.members {
@@ -300,23 +236,12 @@ pub(crate) fn uniform_array_block_decl(plan: &UniformArrayBlockPlan) -> String {
     s
 }
 
-/// The [`StructDef`] behind a nominal type, if any.
 fn struct_def_of(ws: &Workspace, ty: TyId) -> Option<&StructDef> {
     let sname = nominal_name(ws, ty)?;
     let &sid = ws.struct_by_name.get(&sname)?;
     Some(&ws.modules[sid.module.index()].structs[sid.def])
 }
 
-/// The `layout(std140) uniform <Blk> { .. };` declaration for a group.
-///
-/// Declared with NO instance name, which is what keeps this change confined to
-/// declaration lines: an unnamed-instance block's members are bare GLSL globals,
-/// so every body reading them is byte-identical to the loose form.
-///
-/// Members come from the PLAN, not from a second walk of the struct -- the same
-/// single-oracle rule `VertexShape.attrs` follows for attributes. The driver
-/// resolves members by name, so the names here and the offsets the packer writes
-/// must come from one place or they can drift silently.
 pub(crate) fn uniform_block_decl(block: &GlslUniformBlock) -> String {
     let mut s = format!("layout(std140) uniform {} {{\n", block.name);
     for m in &block.plan.members {
@@ -326,8 +251,6 @@ pub(crate) fn uniform_block_decl(block: &GlslUniformBlock) -> String {
     s
 }
 
-/// Attribute/uniform fields of a struct param, GLSL-typed (a sampler-typed field
-/// rejects -- samplers are params, not struct fields).
 fn struct_gl_fields(
     ws: &Workspace,
     ty: TyId,
@@ -368,8 +291,6 @@ fn struct_gl_fields(
     Ok(out)
 }
 
-/// Samplers that are NOT part of a `@textures` group -- bare params, still
-/// bound by name and a hand-assigned unit on the CPU side.
 pub(crate) fn has_bare_sampler(
     samplers: &[(usize, Ustr, SamplerKind)],
     texture_params: &[usize],
@@ -377,9 +298,6 @@ pub(crate) fn has_bare_sampler(
     samplers.iter().any(|(i, _, _)| !texture_params.contains(i))
 }
 
-/// The neutral kind of a tier-0 sampler type. The inverse of
-/// [`sampler_glsl_ty`], and the point where a declared sampler param leaves
-/// GLSL's vocabulary for the interface's.
 fn sampler_kind_of(t: GlslTy) -> SamplerKind {
     match t {
         GlslTy::ISampler2D => SamplerKind::Int,
@@ -394,10 +312,6 @@ pub(crate) fn sampler_glsl_ty(k: SamplerKind) -> GlslTy {
     }
 }
 
-/// A `@textures` group param expands to one sampler declaration per field, at
-/// the unit the artifact assigned from field order. Every entry carries the
-/// GROUP's param index: the param itself is dropped from the GLSL signature and
-/// its field reads render as bare globals, exactly like a `@uniform` struct.
 fn texture_group_samplers(
     ws: &Workspace,
     ty: TyId,
@@ -423,11 +337,8 @@ fn texture_group_samplers(
         .collect())
 }
 
-/// Other roles excluded by a texture-group annotation.
 const PARAM_ROLES: [&str; 4] = ["attr", "instance", "uniform", "engine"];
 
-/// `@textures` is exclusive with the other param roles -- a group is a binding
-/// set of its own, not attribute or uniform-block data.
 fn reject_conflicting_texture_role(
     annos: &[bone_core::hir::Annotation],
     name: Ustr,
@@ -447,9 +358,6 @@ fn reject_conflicting_texture_role(
     Ok(())
 }
 
-/// How this backend spells an `AttrKind`. The artifact stays target-neutral
-/// (kind + arity); GLSL names live here, and a WGSL or Metal emitter writes its
-/// own version of this one function.
 pub(crate) fn attr_glsl_ty(k: AttrKind) -> GlslTy {
     match k {
         AttrKind::F32 => GlslTy::Float,
@@ -460,9 +368,6 @@ pub(crate) fn attr_glsl_ty(k: AttrKind) -> GlslTy {
     }
 }
 
-/// Classify a `@shader(vertex)` entry: value-struct params carry a role marker
-/// (`@attr` / `@instance` / `@uniform`); samplers are type-distinguished; the
-/// return type is the varyings struct.
 pub(crate) fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, CompilerError> {
     let span = f.name_span;
     let (mut per_vertex, mut instanced) = (Vec::new(), Vec::new());
@@ -519,9 +424,6 @@ pub(crate) fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShap
     let instanced_from = per_vertex.len();
     for (n, &i) in per_vertex.iter().chain(instanced.iter()).enumerate() {
         attr_params.push(i);
-        // GLSL forbids `in bool` -- bool is legal only as a uniform. A GLSL
-        // legality gate, not a source of attribute data: the artifact would
-        // reject bool too, but only as "not a vertex-attribute type".
         let gl_fields = struct_gl_fields(ws, f.param_decls[i].ty, span, "attribute")?;
         if let Some((n, _)) = gl_fields.iter().find(|&&(_, t)| t == GlslTy::Bool) {
             return Err(err(
@@ -562,9 +464,6 @@ pub(crate) fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShap
     })
 }
 
-/// Classify the varyings struct: a required `position: Vec4` field (-> gl_Position,
-/// suppressed as a varying), plus the other fields as varyings. An int-typed
-/// varying without `@flat` rejects (GLSL mandates flat integer interpolation).
 pub(crate) fn classify_varyings(
     ws: &Workspace,
     ty: TyId,
@@ -612,7 +511,6 @@ pub(crate) fn classify_varyings(
                 ),
             ));
         }
-        // GLSL forbids bool in/out variables entirely (even flat).
         if fty == GlslTy::Bool {
             return Err(err(
                 span,
@@ -637,9 +535,6 @@ pub(crate) fn classify_varyings(
     Ok(VaryingsShape { varyings })
 }
 
-/// Classify a pipeline `@shader(fragment)` entry: the first param is the varyings
-/// struct (its type must equal the vertex entry's return type); the rest are
-/// `@uniform` structs and samplers.
 pub(crate) fn classify_pipeline_fragment(
     ws: &Workspace,
     f: &Function,
@@ -702,12 +597,6 @@ pub(crate) fn classify_pipeline_fragment(
         }
     }
     res.check_counts(span, "fragment")?;
-    // Return: a single Vec4 (implicit FragColor), a single int (an R32I-only
-    // target, e.g. the silhouette mask), OR a value struct of Vec4/int fields
-    // (MRT -- one `layout(location=N) out <ty> <field>` per field, in order;
-    // int fields feed R32I attachments).
-    // A `FragDepth: float` field is gl_FragDepth, not an MRT output: it takes
-    // no location, so the colour fields keep theirs.
     let mut frag_depth = false;
     let output = match f
         .return_ty
@@ -775,8 +664,6 @@ pub(crate) fn classify_pipeline_fragment(
     })
 }
 
-/// Reject a fragment-stage read of the varyings `position` field: it is
-/// gl_Position (vertex-only), not a fragment input.
 pub(crate) fn reject_position_read(
     mf: &MirFunc,
     varyings_cell: Idx<Cell>,

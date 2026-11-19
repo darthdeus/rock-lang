@@ -3,9 +3,6 @@
 use super::*;
 
 impl FnEmit<'_> {
-    /// The instantiation the call at `iid` reaches its callee at.
-    ///
-    /// The map and the renderer walk the same instructions.
     pub(crate) fn callee_inst(&self, iid: Idx<Inst>) -> &ShaderInstance {
         self.callee_insts
             .get(&iid)
@@ -46,8 +43,6 @@ impl FnEmit<'_> {
     }
 }
 
-/// Lowering records concrete callees; unrecorded synthesized runtime calls
-/// are non-generic.
 pub(crate) fn callee_inst_at(mf: &MirFunc, iid: Idx<Inst>, func: FuncRef) -> ShaderInstance {
     ShaderInstance::new(
         mf.callee_instances
@@ -62,21 +57,12 @@ pub(crate) fn callee_inst_at(mf: &MirFunc, iid: Idx<Inst>, func: FuncRef) -> Sha
 /// MRT fragment outputs (`layout(location=N) out vec4`).
 #[derive(Clone)]
 pub(crate) struct MainOut {
-    /// Field name -> GLSL type (the assignment target's type).
     pub(crate) fields: HashMap<Ustr, GlslTy>,
-    /// The one field that is a GL builtin rather than a named output:
-    /// vertex `position` -> `gl_Position`, fragment `FragDepth` ->
-    /// `gl_FragDepth`. `(field, builtin, type)`.
     pub(crate) builtin: Option<(&'static str, &'static str, GlslTy)>,
 }
 
-/// The fragment output field that is written to `gl_FragDepth`.
 pub(crate) const FRAG_DEPTH_FIELD: &str = "FragDepth";
 
-/// Emit `<ret> <name>(<params>) { <body> }` for one lowered INSTANCE at its
-/// concrete plan, optionally in ENTRY mode: the uniform-struct and sampler
-/// params are dropped from the GLSL signature (their reads render as bare
-/// uniform globals) and the fn keeps its bare Rock name.
 pub(crate) fn emit_fn_def_with(
     ws: &Workspace,
     interner: &MonoInterner,
@@ -95,8 +81,6 @@ pub(crate) fn emit_fn_def_with(
     } else {
         inst.symbol(ws, interner)
     };
-    // A `void main()` entry destructures its returned struct into globals
-    // (gl_Position + varyings, or MRT outs) -- no signature return type.
     let ret_ty = if emits_main {
         None
     } else {
@@ -108,7 +92,6 @@ pub(crate) fn emit_fn_def_with(
     };
     let ret = ret_ty.map_or("void", |t| t.name());
 
-    // Share the recorded owner between type queries and rendering.
     let mut callee_insts: HashMap<Idx<Inst>, ShaderInstance> = HashMap::default();
     for (iid, inst) in mf.insts.iter() {
         if let Inst::Call { func, .. } = inst {
@@ -116,8 +99,6 @@ pub(crate) fn emit_fn_def_with(
         }
     }
 
-    // GLSL emits every loop as `while (true) { <test>; if (!c) break; .. }`, so
-    // a test-less `loop {}` stays unregistered and rejects in the walker.
     let st = structure::analyze(mf);
     let (counted, general) = structure::split_loops(mf, &st, CountedBound::Any);
 
@@ -172,8 +153,6 @@ pub(crate) fn emit_fn_def_with(
         callee_insts,
         value_name: HashMap::default(),
     };
-    // Global-base struct params + samplers + uniform arrays are dropped from the
-    // GLSL signature.
     let dropped: HashSet<usize> = entry
         .map(|s| {
             s.global_params
@@ -184,11 +163,6 @@ pub(crate) fn emit_fn_def_with(
                 .collect()
         })
         .unwrap_or_default();
-    // A global-base struct param is not a tier-0 GLSL leaf; its reads render
-    // as bare globals. Samplers DO map (`sampler2D`), so they still get a cell
-    // type. Uniform-array params have no tier-0 type either -- their only legal
-    // use is as `at()`'s first arg, which renders the cell name (= the declared
-    // uniform array).
     for (i, &c) in mf.params.iter().enumerate() {
         if e.ignored_type_cells.contains(&c) {
             continue;
@@ -212,7 +186,6 @@ pub(crate) fn emit_fn_def_with(
     e.compute_folds(&rpo);
     e.assign_names(&rpo)?;
 
-    // Parameter list (entry mode drops uniform-struct + sampler params).
     let params: Vec<String> = mf
         .params
         .iter()
@@ -224,15 +197,12 @@ pub(crate) fn emit_fn_def_with(
         })
         .collect();
 
-    // Declare every non-param cell up front (hoisted -- avoids GLSL block-scope
-    // leaks and lets a counter/accumulator span nested loops).
     let param_set: HashSet<Idx<Cell>> = mf.params.iter().copied().collect();
     let mut decls = String::new();
     for (cid, _) in mf.cells.iter() {
         if param_set.contains(&cid) {
             continue;
         }
-        // A folded diamond result / bound temp has no storage -- it renders inline.
         if e.folded_cond.contains_key(&cid) || e.folded_bound.contains_key(&cid) {
             continue;
         }
@@ -250,9 +220,6 @@ pub(crate) fn emit_fn_def_with(
     ))
 }
 
-/// A cell's preferred GLSL spelling: its source name with the compiler's own
-/// `__rock_` prefix stripped and `__` runs collapsed (a Rock local cannot
-/// shadow what it cannot spell), else a cell-indexed temporary.
 pub(crate) fn cell_base_name(cell: &Cell, cid: Idx<Cell>) -> String {
     cell.name
         .map(|n| {

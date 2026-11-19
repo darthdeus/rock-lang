@@ -38,7 +38,6 @@ pub(crate) fn lower_profiled_body(
             format!("shader profile: no concrete plan for `{}`", f.name),
         )
     })?;
-    // Entry signatures are checked against their stage interface.
     if !is_entry {
         check_tier0_signature_concrete(scx.interner(), &plan.signature, span)?;
     }
@@ -100,7 +99,6 @@ pub(crate) fn lower_profiled_body(
             {
                 continue;
             }
-            // An unused nil placeholder is legal; rendering rejects live nulls.
             allowed if is_tier0_inst(allowed) => continue,
             other => inst_kind(other),
         };
@@ -158,13 +156,8 @@ pub(crate) fn checked_body_calls(
     Ok(retained)
 }
 
-/// Depth cap on `const A = B` alias chains. A cycle is impossible in a
-/// well-formed program (bone rejects one), so this only bounds a pathological
-/// chain rather than implementing cycle detection.
 const CONST_CHAIN_DEPTH: usize = 16;
 
-/// Fold literal constants and their aliases at the point of use.
-/// Arithmetic lowers to calls, which this fold does not evaluate.
 pub(crate) fn const_lit(ws: &Workspace, name: Ustr) -> Option<Lit> {
     const_lit_depth(ws, name, 0)
 }
@@ -204,7 +197,6 @@ fn fold_const_expr(
     }
 }
 
-/// The instructions every shader backend lowers. A backend may accept more.
 fn is_tier0_inst(inst: &Inst) -> bool {
     matches!(
         inst,
@@ -263,7 +255,6 @@ fn is_tier0_inst(inst: &Inst) -> bool {
     )
 }
 
-/// A short human name for a rejected instruction kind (for the error message).
 pub(crate) fn inst_kind(inst: &Inst) -> &'static str {
     match inst {
         Inst::Global(_) => "global read",
