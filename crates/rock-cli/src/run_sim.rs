@@ -1758,19 +1758,25 @@ where
         return (0..n).map(|i| (i, task(i))).collect();
     }
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let collected: Mutex<Vec<(usize, Result<T>)>> = Mutex::new(Vec::new());
-    let lanes = width.jobs.min(n);
+    run_pool(width, n, || {
+        let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        (i < n).then(|| (i, task(i)))
+    })
+}
+
+fn run_pool<T: Send>(
+    width: &PoolWidth,
+    n: usize,
+    run_next: impl Fn() -> Option<T> + Sync,
+) -> Vec<T> {
+    let collected = Mutex::new(Vec::with_capacity(n));
     std::thread::scope(|scope| {
-        for _ in 0..lanes {
+        for _ in 0..width.jobs.min(n) {
             scope.spawn(|| {
                 loop {
                     let _slot = width.enter();
-                    let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    if i >= n {
-                        break;
-                    }
-                    let r = task(i);
-                    collected.lock().unwrap().push((i, r));
+                    let Some(result) = run_next() else { break };
+                    collected.lock().unwrap().push(result);
                 }
             });
         }
@@ -1916,45 +1922,32 @@ where
         live_capped: 0,
     });
     let freed = std::sync::Condvar::new();
-    let collected: Mutex<Vec<(usize, Result<T>)>> = Mutex::new(Vec::new());
-    let lanes = jobs.min(n);
-    std::thread::scope(|scope| {
-        for _ in 0..lanes {
-            scope.spawn(|| {
-                loop {
-                    let _slot = width.enter();
-                    let picked = {
-                        let mut q = queue.lock().unwrap();
-                        loop {
-                            if q.live_capped < capped_jobs {
-                                if let Some(i) = q.capped.pop_front() {
-                                    q.live_capped += 1;
-                                    break Some((i, true));
-                                }
-                            }
-                            if let Some(i) = q.other.pop_front() {
-                                break Some((i, false));
-                            }
-                            if q.capped.is_empty() {
-                                break None;
-                            }
-                            q = freed.wait(q).unwrap();
-                        }
-                    };
-                    let Some((i, is_capped)) = picked else { break };
-                    let r = task(i);
-                    collected.lock().unwrap().push((i, r));
-                    if is_capped {
-                        queue.lock().unwrap().live_capped -= 1;
-                        freed.notify_all();
+    run_pool(width, n, || {
+        let (i, is_capped) = {
+            let mut q = queue.lock().unwrap();
+            loop {
+                if q.live_capped < capped_jobs {
+                    if let Some(i) = q.capped.pop_front() {
+                        q.live_capped += 1;
+                        break (i, true);
                     }
                 }
-            });
+                if let Some(i) = q.other.pop_front() {
+                    break (i, false);
+                }
+                if q.capped.is_empty() {
+                    return None;
+                }
+                q = freed.wait(q).unwrap();
+            }
+        };
+        let result = task(i);
+        if is_capped {
+            queue.lock().unwrap().live_capped -= 1;
+            freed.notify_all();
         }
-    });
-    collected
-        .into_inner()
-        .expect("no lane panicked while holding the results lock")
+        Some((i, result))
+    })
 }
 
 const DEFAULT_SIM_ALLOCATION_WARMUP_FRAMES: usize = 2;

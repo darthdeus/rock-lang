@@ -1,71 +1,67 @@
 //! Dispatch the sim command.
+use crate::run_sim::{
+    do_list_sims, do_run_allocation_census, do_run_allocation_sites, do_run_sims, resolve_jobs,
+};
 use anyhow::Result;
+
+type AllocationCommand = fn(&str, &[String], &str, Option<usize>) -> Result<()>;
 
 /// `rock sim`: list, allocation diagnostics, or a run. Only skull serves sims.
 pub(crate) fn handle_sim(cx: &crate::CommandContext) -> Result<()> {
-    if cx.args.allocation_census.is_some() && cx.args.allocation_sites.is_some() {
-        anyhow::bail!("--allocation-census and --allocation-sites are separate diagnostic arms");
-    }
+    let args = &cx.args;
+    let diagnostic: Option<(_, _, _, AllocationCommand)> = match (
+        args.allocation_census.as_deref(),
+        args.allocation_sites.as_deref(),
+    ) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("--allocation-census and --allocation-sites are separate diagnostic arms")
+        }
+        (None, Some(path)) => Some((
+            "--allocation-sites",
+            "allocation sites need a project: rock sim --allocation-sites DIR <project> [name]",
+            path,
+            do_run_allocation_sites,
+        )),
+        (Some(path), None) => Some((
+            "--allocation-census",
+            "allocation census needs a project: rock sim --allocation-census PATH <project> [name]",
+            path,
+            do_run_allocation_census,
+        )),
+        (None, None) => None,
+    };
     // Validate before compiling, including paths with only one sim and no pool.
-    if cx.args.jobs.is_some_and(|j| j > 1) {
-        let updates = cx.args.update_snapshots
-            && cx.args.allocation_census.is_none()
-            && cx.args.allocation_sites.is_none();
+    if args.jobs.is_some_and(|j| j > 1) {
         // A named run has one lane per name; the other arms learn theirs only
         // after compiling.
-        let named_request = cx.args.files.len() > 1
-            && !cx.args.list
-            && cx.args.allocation_census.is_none()
-            && cx.args.allocation_sites.is_none();
-        let lanes = named_request.then(|| cx.args.files.len() - 1);
-        crate::run_sim::resolve_jobs(cx.args.jobs, lanes, updates)?;
+        let named_run = diagnostic.is_none() && !args.list && args.files.len() > 1;
+        let lanes = named_run.then(|| args.files.len() - 1);
+        resolve_jobs(
+            args.jobs,
+            lanes,
+            diagnostic.is_none() && args.update_snapshots,
+        )?;
     }
-    if let Some(path) = cx.args.allocation_sites.as_deref() {
-        if cx.args.list {
-            anyhow::bail!("--allocation-sites cannot be combined with sim --list");
-        }
-        if cx.args.files.is_empty() {
-            anyhow::bail!(
-                "allocation sites need a project: rock sim --allocation-sites DIR <project> [name]"
-            );
-        }
-        crate::run_sim::do_run_allocation_sites(
-            &cx.args.files[0],
-            &cx.args.files[1..],
-            path,
-            cx.args.jobs,
-        )
-    } else if let Some(path) = cx.args.allocation_census.as_deref() {
-        if cx.args.list {
-            anyhow::bail!("--allocation-census cannot be combined with sim --list");
-        }
-        if cx.args.files.is_empty() {
-            anyhow::bail!(
-                "allocation census needs a project: rock sim --allocation-census PATH <project> [name]"
-            );
-        }
-        crate::run_sim::do_run_allocation_census(
-            &cx.args.files[0],
-            &cx.args.files[1..],
-            path,
-            cx.args.jobs,
-        )
-    } else if cx.args.list {
-        if cx.args.files.is_empty() {
-            anyhow::bail!("sim --list needs a project: rock sim --list <project>");
-        }
-        let project = &cx.args.files[0];
-        crate::run_sim::do_list_sims(project)
-    } else if cx.args.files.is_empty() {
-        anyhow::bail!("sim needs a project: rock sim <project> [name]");
+    let files = args.files.split_first();
+    if let Some((flag, usage, path, run)) = diagnostic {
+        anyhow::ensure!(!args.list, "{flag} cannot be combined with sim --list");
+        let (project, names) = files.ok_or_else(|| anyhow::anyhow!("{usage}"))?;
+        run(project, names, path, args.jobs)
+    } else if args.list {
+        let (project, _) = files.ok_or_else(|| {
+            anyhow::anyhow!("sim --list needs a project: rock sim --list <project>")
+        })?;
+        do_list_sims(project)
     } else {
-        crate::run_sim::do_run_sims(
-            &cx.args.files[0],
-            &cx.args.files[1..],
-            cx.args.quiet,
-            cx.args.update_snapshots,
-            cx.args.jobs,
-            cx.args.full_asset_jobs,
+        let (project, names) = files
+            .ok_or_else(|| anyhow::anyhow!("sim needs a project: rock sim <project> [name]"))?;
+        do_run_sims(
+            project,
+            names,
+            args.quiet,
+            args.update_snapshots,
+            args.jobs,
+            args.full_asset_jobs,
         )
     }
 }
