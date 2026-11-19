@@ -92,7 +92,6 @@ fn allocation_report_writer_is_explicit_and_writes_the_compiler_report() {
 mod overlay_test_support;
 use overlay_test_support::*;
 
-/// A project whose only source is `main.rock`, compiled once at boot.
 struct ProjectFixture {
     dir: tempfile::TempDir,
     root: String,
@@ -132,7 +131,6 @@ impl ProjectFixture {
         })
     }
 
-    /// Replace `main.rock` and recompile it through the production route.
     fn edit(&mut self, text: &str) -> anyhow::Result<super::SkullReload> {
         std::fs::write(&self.source, text).expect("edited source");
         self.project.recompile(
@@ -185,9 +183,6 @@ mod overlay_runtime_tests {
 
     use super::overlay_test_support::{SYS_STUB, run_parts, stub_for};
 
-    /// Execute the files written by `IncrementalProject`, including the game entry
-    /// wrapper. The two small host hooks make this the same Lua artifact the
-    /// engine consumes while keeping the test independent of a renderer.
     fn run_project_artifacts(
         main_path: &Path,
         incremental_path: &Path,
@@ -230,9 +225,6 @@ mod overlay_runtime_tests {
             "body edit must write incremental.lua"
         );
 
-        // The first call is made by main.lua's production entry wrapper. The
-        // second call happens after the overlay is loaded, so the static cell
-        // proves both changed code and retained state.
         run_project_artifacts(&fx.main, &fx.incremental, true)
     }
 
@@ -255,9 +247,6 @@ mod overlay_runtime_tests {
         );
     }
 
-    /// A program build defines only what its entry reaches, so an edit that
-    /// starts calling an own function nothing called before must define it
-    /// in the published artifacts.
     #[test]
     fn production_reload_defines_an_own_function_an_edit_starts_calling() {
         let mut fx = super::ProjectFixture::boot(
@@ -336,7 +325,6 @@ mod overlay_runtime_tests {
         );
     }
 
-    /// Reads a yielded event in the fixtures below.
     const SCORE4: &str = "fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n";
     const SCORE2: &str = "fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }\n}\n";
 
@@ -345,13 +333,10 @@ mod overlay_runtime_tests {
             "@nomangle\nfn pump() {\n  let c = GEN\n  if c != null {\n    let e = c.resume()\n    if e != null { print(\"{score(e)}\") } else { print(\"-1\") }\n  }\n}\n"
         };
     }
-    /// Host hooks: `start()` makes the coroutine, `pump()` resumes and prints it.
     const START_PUMP: &str = concat!("@nomangle\nfn start() { GEN = gen() }\n", pump_source!());
     const OUTER_START_PUMP: &str =
         concat!("@nomangle\nfn start() { GEN = outer() }\n", pump_source!());
 
-    /// A Session warmed at v0: `baseline` is the frozen `main.lua`, and `cache`
-    /// accumulates across overlays exactly as `IncrementalProject`'s does.
     struct Live {
         session: bone_incremental::session::Session,
         mid: bone_semantic::prelude::ModuleId,
@@ -373,7 +358,6 @@ mod overlay_runtime_tests {
             }
         }
 
-        /// Apply an edit whose premise is that it stays in the body-only tier.
         fn body_edit(&mut self, src: &str) -> bone_incremental::session::UpdateResult {
             let update = self.session.update_file("main.rock", src).expect("update");
             assert!(
@@ -399,7 +383,6 @@ mod overlay_runtime_tests {
             self.emit(&update)
         }
 
-        /// Apply an edit that must leave the body-only tier; the rebuilt program.
         fn full_reload(&mut self, src: &str) -> String {
             let update = self.session.update_file("main.rock", src).expect("update");
             assert!(
@@ -431,19 +414,14 @@ mod overlay_runtime_tests {
         }
     }
 
-    /// Load `program` with its stub, then run `steps` and compare stdout.
     fn assert_run(program: &str, steps: &[&str], expected: &str, ctx: &str) {
         let mut parts = vec![program, stub_for(program)];
         parts.extend_from_slice(steps);
         assert_stdout(run_parts(&parts), expected, ctx);
     }
 
-    // A body-only reload can first construct a previously unused value type;
-    // its constructor must already exist in the frozen full baseline.
     #[test]
     fn overlay_referencing_baseline_value_ctor_runtime_eq() {
-        // An opaque Lua parameter requires boxing; equality and field reads can
-        // compare scalar leaves without ever invoking the constructor.
         let decl = "value P { x: int, y: int }\nglobal INPUT: int = 5\n\
                     inline(lua) fn ctor_sum(p: P) -> int = \"return p.x + p.y\"\n";
         let v0 = format!(
@@ -467,10 +445,6 @@ mod overlay_runtime_tests {
         assert_run(&fresh, &["main()"], "11", "fresh value constructor build");
     }
 
-    /// A minimal game-shaped module: one `@update` system whose body writes
-    /// `tick_val` to an observable global, plus the engine's deco/registry/clear
-    /// machinery and a frame runner. `run_frame()` drives the registry exactly as
-    /// the engine's `run_update_systems` does (iterate, call `system.func()`).
     fn sim_fixture(tick_val: i32) -> String {
         format!(
             "struct UpdateSystem {{ func: fn() -> (), name: string, stage: int }}\n\
@@ -486,11 +460,8 @@ mod overlay_runtime_tests {
         )
     }
 
-    /// Run the registry-driving frame and report the observable global.
     const SIM_DRIVER: &str = "run_frame() print(TICK_OUT)";
 
-    /// An existing lifecycle entry must invoke the edited body through its
-    /// retained CodeRef. The overlay contains no decorator rebind call.
     #[test]
     fn sim_overlay_refreshes_existing_code_ref_registry_entry() {
         let v0 = sim_fixture(1);
@@ -498,7 +469,6 @@ mod overlay_runtime_tests {
 
         let mut live = Live::boot(&v0);
 
-        // Baseline: the registry runs the v0 body.
         assert_run(
             &live.baseline,
             &[SIM_DRIVER],
@@ -524,10 +494,6 @@ mod overlay_runtime_tests {
         );
     }
 
-    /// Slot publication belongs to the OUTER successful overlay boundary. A
-    /// later top-level initializer failure must leave an already-stored value
-    /// on v0, even though the overlay has staged the edited callback body.
-    /// The mutually recursive edge keeps the direct call as a global lookup.
     #[test]
     fn failed_overlay_after_late_top_level_work_keeps_direct_calls_and_code_refs_old() {
         let v0 = format!(
@@ -568,8 +534,6 @@ mod overlay_runtime_tests {
         );
     }
 
-    /// A failed initializer restores compiler-owned constants and newly emitted
-    /// specializations even when the program has no escaping function values.
     #[test]
     fn failed_overlay_without_code_refs_restores_globals_and_can_retry() {
         let v0 = r#"
@@ -756,12 +720,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         }
     }
 
-    /// A `co fn` BODY edit, delivered through a REAL `Session.update_file`, must
-    /// re-emit the coroutine into the overlay so a fresh invocation runs the new
-    /// body -- exactly like an ordinary fn. The corpus sweep can't catch this: it
-    /// fabricates `reinferred` from every function directly, bypassing the Session
-    /// (where the fast-path body reparse slices the item from `fn`, dropping `co`).
-    /// This drives the genuine edit pipeline end to end.
     #[test]
     fn coroutine_body_edit_overlay_runs_new_body() {
         let v0 = "co fn counter() -> Coroutine<int> {\n  yield 1\n  yield 2\n}\n\
@@ -789,19 +747,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
     }
 
-    /// A FLAT-ENUM-yielding `co fn` body edit, through the overlay, must re-emit the
-    /// frame-slot yield channel and CodeRefs for the ctor's `__advance`/`__resume`
-    /// fields, then a freshly-created coroutine must run the new body, threading the
-    /// yield through the slots -- no `{__variant}` box on the concrete consumer path.
-    /// Guards the frame-slot channel against a hot-reload regression; the scalar-yield
-    /// test above does not exercise the channel (int yields keep the multi-return
-    /// path).
     #[test]
     fn flat_enum_coroutine_body_edit_overlay_threads_and_runs_new_body() {
-        // The `Act(() -> ())` closure payload makes Ev NON-cdata-eligible, so it is a
-        // genuinely FLAT (boxed) enum that rides the frame-slot channel -- an
-        // all-scalar-payload enum would scalarize as a `_ct` cdata instead (mirrors
-        // `tests/coroutines/enum_thread_yield.rock`).
         let prog = |a: i32, b: i32| {
             format!(
                 "enum Ev {{ Tick(int), Pair(int, int), Done, Act(() -> ()) }}\n\
@@ -836,19 +783,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
     }
 
-    /// The load-bearing hot-reload case: a flat-enum coroutine created + first-resumed
-    /// under v0, then resumed again ACROSS a body-edit overlay on the SAME live object
-    /// (the engine's per-frame poll pattern). The live object keeps its v0
-    /// `__advance`/`__resume` closures, but `__advance` calls `gen_0__step` by GLOBAL
-    /// name, so a mid-flight resume runs the NEW step -- writing the new yield leaves
-    /// into the SAME reused `__y*` slots on the object/frame (the enum shape is
-    /// unchanged), which the (baseline, unchanged) `pump` reads directly. If
-    /// `__advance` had captured the step by value, resume #2 would run the stale v0
-    /// body (Pair(1,2)=3, not Pair(10,20)=30).
     #[test]
     fn live_flat_enum_coroutine_survives_overlay_and_threads_new_body() {
-        // `Act(() -> ())` forces Ev to be a FLAT (boxed) enum on the frame-slot
-        // channel (an all-scalar-payload enum would be a `_ct` cdata instead).
         let prog = |a: i32, b: i32| {
             format!(
                 "enum Ev {{ Tick(int), Pair(int, int), Done, Act(() -> ()) }}\n\
@@ -864,8 +800,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let overlay = live.overlay(&v1);
 
-        // start() + pump() under v0 (Tick(1)=1), then overlay, then pump() x3 on the
-        // SAME live coroutine under v1: Pair(10,20)=30, Done=100, then done -> -1.
         assert_run(
             &live.baseline,
             &["start()", "pump()", &overlay, "pump()", "pump()", "pump()"],
@@ -876,8 +810,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
     const EXPECT_LAYOUT_ERROR: &str = "local ok, err = pcall(pump); assert(not ok and tostring(err):find('frame layout changed', 1, true)); pump()";
 
-    /// A new yield point renumbers coroutine states, so a suspended v0 frame
-    /// must be killed cleanly when the edited step runs.
     #[test]
     fn live_coroutine_yield_renumber_overlay_stamp_kills() {
         let prog = |extra: &str| {
@@ -895,12 +827,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let overlay = live.overlay(&v1);
 
-        // v0: pump() -> Tick(1)=1, suspended at state 1 (before print("fire")).
-        // Overlay renumbers: the new Ev::Done yield becomes state 1, so the live
-        // frame's __state=1 would resume at the WRONG yield point (pre-stamp it
-        // replayed the already-delivered Tick(1), then ran fire/cleanup a pump
-        // late). The per-state variant tags in the layout stamp catch the
-        // renumbering: resume #2 stamp-kills the coroutine -> -1, no replay.
         assert_run(
             &live.baseline,
             &[
@@ -916,12 +842,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
     }
 
-    /// `await` under hot reload: a live outer+inner delegation chain must pick up
-    /// a BodyOnly edit to the INNER co fn's body. The chain is advance-by-field
-    /// (outer holds the inner object) + step-by-global-name (inner's stale advance
-    /// resolves `inner_0__step` at call time), and both mechanisms must compose
-    /// across the delegation boundary. Guards the Part B kill/advance/delegate
-    /// refactor.
     #[test]
     fn live_yield_star_delegation_survives_inner_body_overlay() {
         let prog = |a: i32, b: i32| {
@@ -940,10 +860,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let overlay = live.overlay(&v1);
 
-        // pump #1 under v0: outer primes inner, re-yields inner's Tick(1). Overlay
-        // (layout-stable: constants only). pump #2 resumes the live chain: the
-        // inner's stale advance runs the NEW inner_0__step -> Tick(20). pump #3:
-        // inner done -> outer's delegate exits, outer completes -> -1.
         assert_run(
             &live.baseline,
             &["start()", "pump()", &overlay, "pump()", "pump()"],
@@ -952,10 +868,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
     }
 
-    /// A layout cancellation of an outer coroutine suspended mid-`await`
-    /// must chain into the delegated inner: explicit `kill()` recurses through
-    /// `__inner` (firing the inner's on_killed), and layout cancellation must match --
-    /// otherwise the inner is orphaned and its cleanup hook never runs.
     #[test]
     fn stamp_killed_outer_chains_kill_into_delegated_inner() {
         let prog = |extra: &str| {
@@ -978,8 +890,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         let mut live = Live::boot(&v0);
         let overlay = live.overlay(&v1);
 
-        // pump #1: outer primes inner -> Tick(1). Overlay shifts OUTER's layout.
-        // pump #2: outer stamp-killed -> -1, and the inner's on_killed must fire.
         assert_run(
             &live.baseline,
             &[
@@ -994,9 +904,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
     }
 
-    /// `gen` must be rejected naming `needle`. Emission collects per-fn skips
-    /// rather than failing the whole unit, so either surface is accepted, but
-    /// the co fn must not emit.
     fn assert_co_fn_rejected(src: &str, needle: &str) {
         let session = bone_session(files(src)).expect("session");
         let mid = skull::user_module_id(session.workspace()).unwrap();
@@ -1014,11 +921,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         }
     }
 
-    /// A coroutine hook (`on_killed`/`on_resume`/`on_hot_reload`) argument must
-    /// be a lambda literal: the hook is peeled to the constructor, which can
-    /// only re-render a lambda with the frame context. Any other fn-typed
-    /// expression used to SILENTLY install no hook --
-    /// it must be a compile error instead.
     #[test]
     fn non_lambda_coroutine_hook_arg_rejected() {
         let src = "enum Ev { Tick(int), Act(() -> ()) }\n\
@@ -1028,8 +930,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         assert_co_fn_rejected(src, "lambda");
     }
 
-    /// `yield` inside a `defer` body is a compile error (a defer body cannot
-    /// suspend -- it may run during terminal cleanup with no resume protocol).
     #[test]
     fn yield_inside_defer_body_rejected() {
         let src = "enum Ev { Tick(int), Act(() -> ()) }\n\
@@ -1038,14 +938,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         assert_co_fn_rejected(src, "defer");
     }
 
-    /// Layout drift via the Interface tier (which does NOT protect live
-    /// coroutines): a full rebuild is a re-`dofile`, not a restart -- mutable
-    /// globals carry the `_G.HOT_RELOAD` preservation guard, so a live coroutine
-    /// held in a global SURVIVES the full reload, and its stale `__advance`
-    /// resolves the step by global name into the NEW program. A realistic
-    /// Interface edit (widen a variant + use the new payload, which also inserts
-    /// a local) would then drive the old frame with a step compiled for a
-    /// different layout -- the stamp kills the survivor cleanly instead.
     #[test]
     fn live_coroutine_survives_full_reload_and_shape_edit_stamp_kills() {
         let prog = |enum_tick: &str, yield_tick: &str, score_tick: &str| {
@@ -1058,11 +950,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                  {START_PUMP}"
             )
         };
-        // Widen Tick BEYOND the current max payload width (Pair's 2 -> Tick's 3),
-        // so the frame-slot yield channel genuinely grows -- the shape edit shifts
-        // the layout stamp (a within-width widen would be absorbed by the union
-        // channel and, post-P2-fix, is correctly layout-stable). The enum edit is
-        // Interface tier, delivered via a FULL rebuild.
         let v0 = prog("Tick(int)", "Ev::Tick(a)", "Ev::Tick(x) => x");
         let v1 = prog(
             "Tick(int, int, int)",
@@ -1074,8 +961,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let full1 = live.full_reload(&v1);
 
-        // Premise (non-inverted, stays green): the live coroutine SURVIVES the full
-        // re-dofile -- the mutable-global preservation guard keeps GEN.
         assert_run(
             &live.baseline,
             &[
@@ -1089,11 +974,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
             "a live coroutine in a mutable global must survive a full re-dofile (HOT_RELOAD guard)",
         );
 
-        // Resuming the survivor: the v1 step's layout stamp (yield channel
-        // widened by the Tick payload growing past the union width) rejects the
-        // v0 frame. The error reaches the caller and a later pump prints -1.
-        // Pre-stamp this crashed the consumer on the shifted frame
-        // read, through the very tier the hot-reload contract once claimed was safe.
         assert_run(
             &live.baseline,
             &[
@@ -1109,7 +989,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
     }
 
-    /// Equal type names can hide incompatible layouts in a live LuaJIT process.
     #[test]
     fn struct_field_add_full_reload_nil_poisons_live_instances() {
         let v0 = "struct Mob { hp: int }\n\
@@ -1131,9 +1010,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let full1 = live.full_reload(v1);
 
-        // Survival premise: the live v0 instance rides through the full
-        // re-dofile untouched -- `"Mob?"` didn't change, so the guard skips
-        // the re-init and the old-shape table persists.
         assert_run(
             &live.baseline,
             &[
@@ -1147,8 +1023,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
             "a live struct instance must survive the full re-dofile WITHOUT the added field",
         );
 
-        // Corruption: the v1 reader assumes `armor: int` on an instance that
-        // never had it -- `m.hp + m.armor` is arithmetic on nil.
         let composed = run_parts(&[
             &live.baseline,
             stub_for(&live.baseline),
@@ -1158,9 +1032,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
             &full1,
             "describe()",
         ]);
-        // Assert the SPECIFIC failure: any-error-is-success would also pass on a
-        // timeout or an unrelated load error, which is how a pin like this rots
-        // into proving nothing.
         let diag = composed
             .expect_errored("expected the recompiled reader to die on the nil-valued added field");
         assert!(
@@ -1169,7 +1040,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
     }
 
-    /// A new cdef cannot replace a layout already loaded by LuaJIT.
     #[test]
     fn value_struct_reorder_full_reload_is_caught_by_the_layout_check() {
         let v0 = "value P { x: int, y: int }\n\
@@ -1191,7 +1061,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let full1 = live.full_reload(v1);
 
-        // v0 alone: sanity -- set/show agree on the layout.
         assert_run(
             &live.baseline,
             &["store_p()", "show()"],
@@ -1199,20 +1068,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
             "value-struct v0 fixture",
         );
 
-        // Composed: the v1 chunk re-cdefs P (silent no-op), so LuaJIT keeps the
-        // v0 layout. Left alone this misassigns silently -- the v1 positional
-        // ctor (y first) feeds the frozen v0 ctype (x first) and `show()` prints
-        // the SWAP, `2,1`, with no error anywhere.
-        //
-        // It no longer gets that far. The emitted leaf-layout check
-        // (`value_leaf_layout_checks`) compares skull's computed offsets against
-        // `ffi.offsetof` at chunk load, sees v1's `y@0` against the frozen
-        // `y@4`, and aborts. The restart policy is still the PRIMARY response --
-        // `struct_shape_hash` hashes fields in order, so the real driver drifts
-        // and respawns cold long before a chunk like this loads (this fixture
-        // composes the two chunks by hand, bypassing that gate). The check is
-        // the loud backstop for anything that ever slips past it, which is what
-        // makes this class detectable rather than silent.
         let composed = run_parts(&[
             &live.baseline,
             stub_for(&live.baseline),
@@ -1223,9 +1078,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
             "store_p()",
             "show()",
         ]);
-        // Assert the SPECIFIC diagnostic: any-error-is-success would also pass on
-        // an unrelated load failure or a timeout, which is how a test like this
-        // rots into proving nothing.
         let diag = composed.expect_errored(
             "a reordered value struct reloaded into a frozen ctype must be caught by \
              the leaf-layout check, not silently misassigned",
@@ -1236,8 +1088,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
     }
 
-    /// An edited `@on_reload` callback must refresh through its retained CodeRef,
-    /// and the callback registration must survive a second overlay and fire.
     #[test]
     fn on_reload_code_ref_refreshes_and_refires_across_overlays() {
         let prog = |step: i32, unrelated: i32| {
@@ -1258,8 +1108,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         let overlay1 = live.overlay(&v1);
         let overlay2 = live.overlay(&v2);
 
-        // The first edit changes the registered callback's body; the second only
-        // changes an unrelated body. Both fires must run the refreshed callback.
         assert_run(
             &live.baseline,
             &[
@@ -1275,7 +1123,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
     }
 
-    /// A coroutine created after a body edit must run the new capturing lambda.
     #[test]
     fn cofn_capturing_lambda_body_edit_overlay_created_after_reload() {
         let prog = |op: char| {
@@ -1292,7 +1139,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         let mut live = Live::boot(&v0);
 
         let overlay = live.overlay(&v1);
-        // Created AFTER the overlay -> the v1 lambda (4*3=12), then done -> -1.
         assert_run(
             &live.baseline,
             &[&overlay, "start()", "pump()", "pump()"],
@@ -1301,9 +1147,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
     }
 
-    /// A LIVE coroutine created BEFORE the reload survives a layout-stable body
-    /// edit, and its stored capturing record resolves the edited body through
-    /// the same logical CodeRef as a record created afterwards.
     #[test]
     fn cofn_lambda_record_snapshot_refreshes_across_reload() {
         let prog = |op: char| {
@@ -1319,8 +1162,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
         let mut live = Live::boot(&v0);
         let overlay = live.overlay(&v1);
-        // start() + pump() under v0: f(3)=8. Overlay (op *). The same stored
-        // record now resolves lambda0's edited body, then g uses lambda1.
         let fresh = Live::boot(&v1).baseline;
         let fresh_output = "15\n15\n15\n-1";
         assert_run(
@@ -1418,7 +1259,6 @@ mod shape_drift_tests {
             "the new-shape main.lua write must be DEFERRED -- the old process must never dofile it"
         );
 
-        // The restart path canonicalizes: force_full writes the new program.
         fx.force_full().expect("force_full");
         assert_ne!(
             fx.main_text(),
@@ -1426,8 +1266,6 @@ mod shape_drift_tests {
             "canonicalize after the kill must write the deferred new-shape program"
         );
 
-        // Re-baselined: recompiling the same source again is a no-op, not a
-        // second restart request.
         let again = fx.edit(v1).expect("recompile same");
         assert!(
             matches!(again, SkullReload::NoChange),
@@ -1435,10 +1273,6 @@ mod shape_drift_tests {
         );
     }
 
-    /// Layout edits that freeze against the running process: marking a `value`
-    /// type `nobox` moves its globals from one boxed slot to leaf globals while
-    /// the rendered type (all the preservation guard compares) stays the same,
-    /// and a value-struct field reorder changes the process ctype.
     #[test]
     fn value_layout_edits_request_restart() {
         for (v0, v1, ty) in [
@@ -1625,10 +1459,6 @@ mod force_full_tests {
     use super::ProjectFixture;
     use crate::skull_backend::SkullReload;
 
-    /// init at v1 -> body-edit to v2 (writes the overlay) -> force_full. The
-    /// canonical `main.lua` must equal a fresh full build of v2, must DIFFER from
-    /// the v1 baseline (proving the edit was actually folded in, not served
-    /// stale), and `incremental.lua` must be wiped.
     #[test]
     fn force_full_folds_overlay_matches_fresh_and_wipes() {
         // Needs a `main`: emission is reachability-driven, so a fixture with no
@@ -1637,15 +1467,10 @@ mod force_full_tests {
         let v1 = "fn helper() -> int { 3 }\nfn use_it() -> int { helper() }\nfn main() { print(\"{use_it()}\") }\n";
         let v2 = "fn helper() -> int { 5 }\nfn use_it() -> int { helper() }\nfn main() { print(\"{use_it()}\") }\n";
 
-        // init at v1: writes main.lua(v1), wipes any overlay.
         let mut fx = ProjectFixture::boot(v1);
         let main_v1 = fx.main_text();
         assert!(!fx.incremental.exists(), "init must leave no overlay");
 
-        // Body edit to v2: a BodyOnly recompile writes the overlay; main.lua
-        // stays the v1 baseline. Passing the changed file exercises the fast path
-        // (re-read only `main.rock`); if it failed to pick up v2, the byte-identity
-        // check against a fresh v2 build below would catch it.
         let reload = fx.edit(v2).expect("recompile v2");
         assert!(
             matches!(reload, SkullReload::Incremental { .. }),
@@ -1658,7 +1483,6 @@ mod force_full_tests {
             "a body edit must NOT touch main.lua (overlay carries the change)"
         );
 
-        // force_full: fold the overlay back into main.lua, wipe the overlay.
         fx.force_full().expect("force_full");
         let main_forced = fx.main_text();
         assert!(!fx.incremental.exists(), "force_full must wipe the overlay");
@@ -1667,8 +1491,6 @@ mod force_full_tests {
             "force_full must fold the v2 edit into main.lua, not serve the stale v1 baseline"
         );
 
-        // Ground truth: a from-scratch full build of v2 (separate output path,
-        // same on-disk source). force_full's main.lua must match it byte-for-byte.
         let fresh_main = fx.dir.path().join("fresh_main.lua");
         let fresh_inc = fx.dir.path().join("fresh_incremental.lua");
         let fresh =
@@ -1685,17 +1507,8 @@ mod force_full_tests {
         );
     }
 
-    /// A project with a type error (a call to a non-existent function) must make
-    /// `init` FAIL, not silently emit a partial `main.lua`. The bug: emit_full
-    /// drops the un-checkable body but keeps its `__deco_init` registration, so
-    /// the registered `func` is a nil global -> a baffling runtime nil-call
-    /// instead of the clean compile error. `recompile` gates on
-    /// `session.diagnostics()`; `init` must too.
     #[test]
     fn init_rejects_project_with_type_error() {
-        // `boot` calls a function that does not exist -> bone collects a
-        // diagnostic but Session::new still succeeds, so without the gate
-        // emit_full produces a partial program.
         let dir = tempfile::tempdir().expect("tempdir");
         let main_lua = dir.path().join("main.lua");
         std::fs::write(
@@ -1719,25 +1532,16 @@ mod force_full_tests {
         );
     }
 
-    /// A recompile that hits a type error must retain the last-good compiler
-    /// Session as well as the last-good written artifact. The restart fold can
-    /// therefore proceed against the retained program instead of discovering a
-    /// broken intermediate state.
     #[test]
     fn failed_recompile_retains_session_and_last_good_artifact() {
-        // init at a valid v1 -> main.lua(v1).
         let v1 = "fn helper() -> int { 3 }\nfn use_it() -> int { helper() }\n";
         let mut fx = ProjectFixture::boot(v1);
         let main_v1 = fx.main_text();
 
-        // Edit to a broken v2 (calls a non-existent function). recompile bails
-        // and must restore the v1 compiler Session before returning.
         let v2 = "fn helper() -> int { 3 }\nfn use_it() -> int { nope() }\n";
         let reload = fx.edit(v2);
         assert!(reload.is_err(), "recompile must bail on the broken edit");
 
-        // A fold after the failed update now sees the retained v1 Session and
-        // succeeds without changing the last-good artifact.
         let res = fx.force_full();
         assert!(
             res.is_ok(),
@@ -1801,11 +1605,6 @@ mod incremental_lint_snapshot_tests {
 
 #[cfg(test)]
 mod value_test_exec {
-    //! `@test(returns = <literal>)` end-to-end on the luajit executor: the
-    //! harness emits a VALUE marker, the host compares
-    //! (`test_protocol::compare_value`). Discovery rejections (the
-    //! returns+expect_failure contradiction) must fail the unit, never route
-    //! through the expect-compile-failure escape.
 
     use super::super::*;
 
@@ -1966,7 +1765,6 @@ fn build_with_limit(dir: &tempfile::TempDir, limit: Duration) -> LimitedBuild {
     super::skull_build_package_with_limit(dir.path().to_str().unwrap(), limit, 1, None)
 }
 
-/// The failure list of a run that must have failed with exactly `passed` passes.
 #[track_caller]
 fn failures_after(result: LimitedBuild, passed: usize) -> Vec<String> {
     match result {
@@ -1991,8 +1789,6 @@ fn test_limit_bounds_program_loading() {
         None,
         false,
     );
-    // The program never finishes loading; the bound only leaves room for a
-    // loaded host.
     assert!(start.elapsed() < Duration::from_millis(100) + Duration::from_secs(30));
     let error = result.expect_err("loading must time out");
     assert!(
@@ -2005,8 +1801,6 @@ fn test_limit_bounds_program_loading() {
 
 #[test]
 fn test_limit_resets_for_each_test() {
-    // Healthy tests whose sum exceeds the limit: the limit bounds one test's
-    // inactivity, not the file's total time.
     let dir = file_limit_package("os.execute('sleep 0.3')", None);
     add_tests(
         &dir,
@@ -2034,9 +1828,6 @@ fn add_tests(dir: &tempfile::TempDir, tests: &[(&str, &str)]) {
 
 #[test]
 fn test_limit_reruns_the_tests_after_a_stopped_one() {
-    // A hung test, a crashing one and an early exit each stop their process;
-    // the tests after them still run, and only the three that stopped fail,
-    // by name.
     let dir = file_limit_package("os.execute('sleep 0.1')", None);
     add_tests(
         &dir,
@@ -2083,8 +1874,6 @@ fn test_limit_reruns_the_tests_after_a_stopped_one() {
 
 #[test]
 fn test_limit_bounds_the_reruns_of_a_shard() {
-    // A defect that hangs every test costs a bounded number of processes; the
-    // tests after the last one are still named.
     let dir = file_limit_package("while true do end", None);
     let hung = (0..super::SHARD_RESTARTS + 1)
         .map(|i| format!("hung_test_{i}"))
@@ -2204,8 +1993,6 @@ fn package_compile_holds_a_compile_slot_only_while_compiling() {
         "[package]\nname = \"slot-probe\"\ntype = \"lib\"\n",
     )
     .unwrap();
-    // A held slot is a `held-*` file in the slot directory until released: the
-    // test passes only if the compile released its slot before its tests ran.
     std::fs::write(
         package.path().join("probe.rock"),
         format!(
@@ -2286,8 +2073,6 @@ fn plain_luajit_without_runtime_layout() {
 
 #[cfg(test)]
 mod watch_route_tests {
-    //! Edits a watcher delivers, through the production `IncrementalProject`
-    //! route, checked by running the published Lua.
 
     use super::super::{IncrementalProject, SkullReload};
     use super::{ExecOutcome, ProjectFixture, exec_lua};
@@ -2325,8 +2110,6 @@ mod watch_route_tests {
             .expect("recompile")
     }
 
-    /// Callers bind their callees as upvalues, so an overlay that redefines
-    /// only the callee must rebind the caller too.
     #[test]
     fn a_callee_body_edit_reaches_its_bound_caller() {
         let v0 = "global SCORE: int = 0\n\
@@ -2401,8 +2184,6 @@ mod watch_route_tests {
         );
     }
 
-    /// Global initializers have no function chunk, so their embed reads must
-    /// still reach the watch set.
     #[test]
     fn a_global_initializer_embed_is_watched_and_rebuilt() {
         let (dir, mut project) = boot_files(&[
@@ -2427,9 +2208,6 @@ mod watch_route_tests {
         assert!(main.contains("global-embed-v2") && !main.contains("global-embed-v1"));
     }
 
-    /// Stone's `clear_all_systems` runs before every reload: the compiler-owned
-    /// shutdown plan must survive it unchanged, and `SIMS` must be emptied so
-    /// the reload re-registers each sim once.
     #[test]
     fn stone_reload_clear_keeps_the_lifecycle_plan_and_empties_sims() {
         let manifest = "[package]\nname = \"deco_cleanup_test\"\ntype = \"bin\"\n\
@@ -2445,7 +2223,6 @@ mod watch_route_tests {
         let (dir, _project) = boot_files(&[("stick.toml", manifest), ("main.rock", source)]);
         let main_lua = dir.path().join("main.lua");
         let text = std::fs::read_to_string(&main_lua).unwrap();
-        // Either callee binding: `name = __rock_mk_name(...)` or `function name(`.
         let clears: Vec<&str> = text
             .lines()
             .filter_map(|line| {
