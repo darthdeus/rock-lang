@@ -12,6 +12,7 @@ use bone_core::hir::{
     BinOp, BindingInfo, Body, BodyOwner, BuiltinTy, Callee, Expr, Function, MatchArm, Pattern,
     Statement, TyId, TypeCtor, TypeExpr, VariantArgs, VariantPayload,
 };
+use bone_core::hir_walk::HirChild;
 use bone_core::prelude::{BoundNext, ForIterInfo, ModuleId, Span};
 use bone_core::workspace::{BodyInference, Workspace};
 use comfy_la_arena::{Idx, IdxRange, RawIdx};
@@ -795,348 +796,278 @@ fn static_owner_tag(
     crate::names::ustr(&format!("{}_{:06x}", name, h.finish() & 0xff_ffff))
 }
 
-/// Content hash of a `static` initializer -- the reload key's init half. Hashes
-/// names / literals / operator kinds and recurses, but NEVER an arena `Idx`
-/// (those shift when unrelated code in the body is edited). So it changes iff
-/// the initializer's meaning changes, and editing code elsewhere in the fn
-/// leaves it untouched (the cell is preserved across that reload).
+/// Visit child contents to keep their arena indices out of the reload key.
 fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map::DefaultHasher) {
-    use bone_core::hir::{Callee, Expr, InterpPart, VariantArgs};
+    hash_init_node(body, HirChild::Expr(e), h);
+}
+
+fn hash_init_node(body: &Body, node: HirChild, h: &mut std::collections::hash_map::DefaultHasher) {
+    use bone_core::hir::InterpPart;
     use std::hash::Hash;
-    macro_rules! go {
-        ($x:expr) => {
-            hash_init_expr(body, $x, h)
-        };
-    }
     macro_rules! tag {
         ($n:expr) => {
             ($n as u16).hash(h)
         };
     }
-    match body.expr_arena[e] {
-        Expr::Unit => tag!(0),
-        Expr::Null => tag!(1),
-        Expr::Error => tag!(12),
-        Expr::Hole(n) => {
-            tag!(2);
-            n.hash(h);
-        }
-        Expr::Int(v) => {
-            tag!(3);
-            v.hash(h);
-        }
-        Expr::Float(v) => {
-            tag!(4);
-            v.hash(h);
-        }
-        Expr::Bool(v) => {
-            tag!(5);
-            v.hash(h);
-        }
-        Expr::String(s) => {
-            tag!(6);
-            s.hash(h);
-        }
-        Expr::Var(b) => {
-            tag!(7);
-            body.binding_arena[b].name.hash(h);
-        }
-        Expr::Global(n) => {
-            tag!(8);
-            Ustr::from(bone_core::modules::artifact_name(n.as_str())).hash(h);
-        }
-        Expr::SiblingRef(n) => {
-            tag!(9);
-            n.hash(h);
-        }
-        Expr::Tuple(es) | Expr::Array(es) => {
-            tag!(10);
-            for x in es {
-                go!(x);
+
+    // Cases that interleave payload with child hashes keep their own traversal.
+    match node {
+        HirChild::Expr(e) => match body.expr_arena[e] {
+            Expr::Unit => tag!(0),
+            Expr::Null => tag!(1),
+            Expr::Error => tag!(12),
+            Expr::Hole(n) => {
+                tag!(2);
+                n.hash(h);
             }
-        }
-        Expr::InterpolatedString(parts) => {
-            tag!(13);
-            for p in parts {
-                match body.interp_part_arena[p] {
-                    InterpPart::Literal(s) => {
-                        tag!(130);
-                        s.hash(h);
-                    }
-                    InterpPart::Value { expr, spec } => {
-                        tag!(131);
-                        go!(expr);
-                        if let Some(spec) = spec {
-                            tag!(132);
-                            hash_interp_spec(body, &spec, h);
+            Expr::Int(v) => {
+                tag!(3);
+                v.hash(h);
+            }
+            Expr::Float(v) => {
+                tag!(4);
+                v.hash(h);
+            }
+            Expr::Bool(v) => {
+                tag!(5);
+                v.hash(h);
+            }
+            Expr::String(s) => {
+                tag!(6);
+                s.hash(h);
+            }
+            Expr::Var(b) => {
+                tag!(7);
+                body.binding_arena[b].name.hash(h);
+            }
+            Expr::Global(n) => {
+                tag!(8);
+                Ustr::from(bone_core::modules::artifact_name(n.as_str())).hash(h);
+            }
+            Expr::SiblingRef(n) => {
+                tag!(9);
+                n.hash(h);
+            }
+            Expr::Tuple(_) | Expr::Array(_) => tag!(10),
+            Expr::InterpolatedString(parts) => {
+                tag!(13);
+                for p in parts {
+                    match body.interp_part_arena[p] {
+                        InterpPart::Literal(s) => {
+                            tag!(130);
+                            s.hash(h);
+                        }
+                        InterpPart::Value { expr, spec } => {
+                            tag!(131);
+                            hash_init_expr(body, expr, h);
+                            if let Some(spec) = spec {
+                                tag!(132);
+                                hash_interp_spec(body, &spec, h);
+                            }
                         }
                     }
                 }
+                return;
             }
-        }
-        Expr::Not(i, _)
-        | Expr::BitNot(i)
-        | Expr::UnaryMinus(i, _)
-        | Expr::Spread(i)
-        | Expr::YieldDelegate(i) => {
-            tag!(14);
-            go!(i);
-        }
-        Expr::Return(o) => {
-            tag!(19);
-            if let Some(i) = o {
-                go!(i);
+            Expr::Not(..)
+            | Expr::BitNot(_)
+            | Expr::UnaryMinus(..)
+            | Expr::Spread(_)
+            | Expr::YieldDelegate(_) => tag!(14),
+            Expr::Return(_) => tag!(19),
+            Expr::Yield(_) => tag!(20),
+            Expr::Break => tag!(21),
+            Expr::Continue => tag!(22),
+            Expr::As { target, kind, .. } => {
+                tag!(23);
+                target.hash(h);
+                kind.hash(h);
             }
-        }
-        Expr::Yield(o) => {
-            tag!(20);
-            if let Some(i) = o {
-                go!(i);
+            Expr::TupleIndex { index, .. } => {
+                tag!(24);
+                index.hash(h);
             }
-        }
-        Expr::Break => tag!(21),
-        Expr::Continue => tag!(22),
-        Expr::As {
-            value,
-            target,
-            kind,
-        } => {
-            tag!(23);
-            target.hash(h);
-            kind.hash(h);
-            go!(value);
-        }
-        Expr::TupleIndex { tuple, index } => {
-            tag!(24);
-            index.hash(h);
-            go!(tuple);
-        }
-        Expr::FieldAccess { base, field } | Expr::SafeNav { base, field } => {
-            tag!(25);
-            field.hash(h);
-            go!(base);
-        }
-        Expr::IncDec {
-            target,
-            decrement,
-            postfix,
-        } => {
-            tag!(27);
-            decrement.hash(h);
-            postfix.hash(h);
-            go!(target);
-        }
-        Expr::Index { base, index } => {
-            tag!(28);
-            go!(base);
-            go!(index);
-        }
-        Expr::Range { low, high } => {
-            tag!(29);
-            go!(low);
-            go!(high);
-        }
-        Expr::BinOp { op, lhs, rhs } => {
-            tag!(30);
-            std::mem::discriminant(&op).hash(h);
-            go!(lhs);
-            go!(rhs);
-        }
-        Expr::Assign { target, value } => {
-            tag!(31);
-            go!(target);
-            go!(value);
-        }
-        Expr::CompoundAssign {
-            target,
-            op_fn,
-            value,
-            ..
-        } => {
-            tag!(32);
-            op_fn.hash(h);
-            go!(target);
-            go!(value);
-        }
-        Expr::If {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            tag!(33);
-            go!(cond);
-            go!(then_branch);
-            if let Some(x) = else_branch {
-                go!(x);
+            Expr::FieldAccess { field, .. } | Expr::SafeNav { field, .. } => {
+                tag!(25);
+                field.hash(h);
             }
-        }
-        Expr::IfLet {
-            pattern,
-            value,
-            then_branch,
-            else_branch,
-        } => {
-            tag!(34);
-            go!(value);
-            hash_init_pattern(body, pattern, h);
-            go!(then_branch);
-            if let Some(x) = else_branch {
-                go!(x);
+            Expr::IncDec {
+                decrement, postfix, ..
+            } => {
+                tag!(27);
+                decrement.hash(h);
+                postfix.hash(h);
             }
-        }
-        Expr::Lambda { body: b, .. } => {
-            tag!(35);
-            go!(b);
-        }
-        Expr::Block { statements, tail } => {
-            tag!(36);
-            for s in statements {
-                hash_init_stmt(body, s, h);
+            Expr::Index { .. } => tag!(28),
+            Expr::Range { .. } => tag!(29),
+            Expr::BinOp { op, .. } => {
+                tag!(30);
+                std::mem::discriminant(&op).hash(h);
             }
-            if let Some(t) = tail {
-                go!(t);
+            Expr::Assign { .. } => tag!(31),
+            Expr::CompoundAssign { op_fn, .. } => {
+                tag!(32);
+                op_fn.hash(h);
             }
-        }
-        Expr::Match { scrutinee, arms } => {
-            tag!(37);
-            go!(scrutinee);
-            for a in arms {
-                let arm = body.match_arm_arena[a];
-                hash_init_pattern(body, arm.pattern, h);
-                if let Some(g) = arm.guard {
-                    go!(g);
-                }
-                go!(arm.body);
-            }
-        }
-        Expr::Call { callee, args, .. } => {
-            tag!(38);
-            match callee {
-                Callee::Unresolved { name, .. } => {
-                    tag!(380);
-                    Ustr::from(bone_core::modules::artifact_name(name.as_str())).hash(h);
-                }
-                Callee::Local(b) => {
-                    tag!(381);
-                    body.binding_arena[b].name.hash(h);
-                }
-                Callee::Value(v) => {
-                    tag!(382);
-                    go!(v);
-                }
-            }
-            for x in args {
-                go!(x);
-            }
-        }
-        Expr::SafeNavCall {
-            receiver,
-            method,
-            args,
-            ..
-        } => {
-            tag!(39);
-            method.hash(h);
-            go!(receiver);
-            for x in args {
-                go!(x);
-            }
-        }
-        Expr::SafeNavLet {
-            receiver, body: b, ..
-        } => {
-            tag!(40);
-            go!(receiver);
-            go!(b);
-        }
-        Expr::StructLiteral {
-            name,
-            fields,
-            bases,
-        } => {
-            tag!(41);
-            Ustr::from(bone_core::modules::artifact_name(name.as_str())).hash(h);
-            for b in bases {
-                go!(b);
-            }
-            for fld in fields {
-                let f = body.struct_lit_field_arena[fld];
-                f.name.hash(h);
-                go!(f.value);
-            }
-        }
-        Expr::EnumVariant {
-            enum_name,
-            variant,
-            args,
-            ..
-        } => {
-            tag!(42);
-            Ustr::from(bone_core::modules::artifact_name(enum_name.as_str())).hash(h);
-            variant.hash(h);
-            match args {
-                VariantArgs::Unit => tag!(420),
-                VariantArgs::Tuple(es) => {
-                    tag!(421);
-                    for x in es {
-                        go!(x);
+            Expr::If { .. } => tag!(33),
+            Expr::IfLet { .. } => tag!(34),
+            Expr::Lambda { .. } => tag!(35),
+            Expr::Block { .. } => tag!(36),
+            Expr::Match { .. } => tag!(37),
+            Expr::Call { callee, .. } => {
+                tag!(38);
+                match callee {
+                    Callee::Unresolved { name, .. } => {
+                        tag!(380);
+                        Ustr::from(bone_core::modules::artifact_name(name.as_str())).hash(h);
                     }
+                    Callee::Local(b) => {
+                        tag!(381);
+                        body.binding_arena[b].name.hash(h);
+                    }
+                    Callee::Value(_) => tag!(382),
                 }
-                VariantArgs::Record(fs) => {
-                    tag!(422);
-                    for fld in fs {
-                        let f = body.struct_lit_field_arena[fld];
-                        f.name.hash(h);
-                        go!(f.value);
+            }
+            Expr::SafeNavCall { method, .. } => {
+                tag!(39);
+                method.hash(h);
+            }
+            Expr::SafeNavLet { .. } => tag!(40),
+            Expr::StructLiteral {
+                name,
+                fields,
+                bases,
+            } => {
+                tag!(41);
+                Ustr::from(bone_core::modules::artifact_name(name.as_str())).hash(h);
+                for base in bases {
+                    hash_init_expr(body, base, h);
+                }
+                hash_init_fields(body, fields, h);
+                return;
+            }
+            Expr::EnumVariant {
+                enum_name,
+                variant,
+                args,
+                ..
+            } => {
+                tag!(42);
+                Ustr::from(bone_core::modules::artifact_name(enum_name.as_str())).hash(h);
+                variant.hash(h);
+                match args {
+                    VariantArgs::Unit => tag!(420),
+                    VariantArgs::Tuple(_) => tag!(421),
+                    VariantArgs::Record(fields) => {
+                        tag!(422);
+                        hash_init_fields(body, fields, h);
+                        return;
                     }
                 }
             }
-        }
+        },
+        HirChild::Statement(s) => match body.statement_arena[s] {
+            Statement::Let {
+                pattern,
+                value,
+                else_block,
+            } => {
+                hash_init_expr(body, value, h);
+                hash_init_node(body, HirChild::Pattern(pattern), h);
+                else_block.is_some().hash(h);
+                if let Some(e) = else_block {
+                    hash_init_expr(body, e, h);
+                }
+                return;
+            }
+            Statement::Return(None)
+            | Statement::Break
+            | Statement::Continue
+            | Statement::Comment(_) => b'x'.hash(h),
+            Statement::Expr(_)
+            | Statement::Defer(_)
+            | Statement::Return(Some(_))
+            | Statement::Static { .. }
+            | Statement::Fn { .. }
+            | Statement::For { .. }
+            | Statement::While { .. } => {}
+        },
+        HirChild::Pattern(p) => match body.pattern_arena[p] {
+            Pattern::Wildcard => tag!(50),
+            Pattern::Bind(b) => {
+                tag!(51);
+                body.binding_arena[b].name.hash(h);
+            }
+            Pattern::Literal(_) => tag!(52),
+            Pattern::Range {
+                start,
+                end,
+                inclusive,
+            } => {
+                tag!(53);
+                inclusive.hash(h);
+                for e in [start, end] {
+                    e.is_some().hash(h);
+                    if let Some(e) = e {
+                        hash_init_expr(body, e, h);
+                    }
+                }
+                return;
+            }
+            Pattern::EnumVariant {
+                enum_name, variant, ..
+            } => {
+                tag!(54);
+                (
+                    enum_name
+                        .map(|name| Ustr::from(bone_core::modules::artifact_name(name.as_str()))),
+                    variant,
+                )
+                    .hash(h);
+            }
+            Pattern::Record {
+                enum_name,
+                name,
+                fields,
+                rest,
+                ..
+            } => {
+                tag!(55);
+                (
+                    enum_name
+                        .map(|name| Ustr::from(bone_core::modules::artifact_name(name.as_str()))),
+                    name.map(|name| Ustr::from(bone_core::modules::artifact_name(name.as_str()))),
+                    rest,
+                )
+                    .hash(h);
+                for f in fields {
+                    let f = body.record_pat_field_arena[f];
+                    f.name.hash(h);
+                    hash_init_node(body, HirChild::Pattern(f.pat), h);
+                }
+                return;
+            }
+            Pattern::Tuple { .. } => tag!(56),
+            Pattern::Or { .. } => tag!(57),
+            Pattern::Newtype { name, .. } => {
+                tag!(58);
+                name.hash(h);
+            }
+        },
     }
+    body.for_each_child(node, |child| hash_init_node(body, child, h));
 }
 
-fn hash_init_stmt(
+fn hash_init_fields(
     body: &Body,
-    s: Idx<Statement>,
+    fields: IdxRange<bone_core::hir::StructLitField>,
     h: &mut std::collections::hash_map::DefaultHasher,
 ) {
-    use bone_core::hir::Statement;
     use std::hash::Hash;
-    macro_rules! go {
-        ($x:expr) => {
-            hash_init_expr(body, $x, h)
-        };
-    }
-    match body.statement_arena[s] {
-        Statement::Let {
-            pattern,
-            value,
-            else_block,
-        } => {
-            go!(value);
-            hash_init_pattern(body, pattern, h);
-            else_block.is_some().hash(h);
-            if let Some(e) = else_block {
-                go!(e);
-            }
-        }
-        Statement::Expr(value)
-        | Statement::Defer(value)
-        | Statement::Return(Some(value))
-        | Statement::Static { value, .. } => go!(value),
-        Statement::Fn { body: b, .. } => go!(b),
-        Statement::For { iter, body: b, .. } => {
-            go!(iter);
-            go!(b);
-        }
-        Statement::While { cond, body: b } => {
-            go!(cond);
-            go!(b);
-        }
-        Statement::Return(None)
-        | Statement::Break
-        | Statement::Continue
-        | Statement::Comment(_) => (b'x').hash(h),
+    for field in fields {
+        let field = body.struct_lit_field_arena[field];
+        field.name.hash(h);
+        hash_init_expr(body, field.value, h);
     }
 }
 
@@ -1165,94 +1096,6 @@ fn hash_interp_spec(
         e.is_some().hash(h);
         if let Some(e) = e {
             hash_init_expr(body, e, h);
-        }
-    }
-}
-
-/// [`hash_init_expr`] for a pattern: what it matches decides the value.
-fn hash_init_pattern(
-    body: &Body,
-    p: Idx<bone_core::hir::Pattern>,
-    h: &mut std::collections::hash_map::DefaultHasher,
-) {
-    use bone_core::hir::Pattern;
-    use std::hash::Hash;
-    match body.pattern_arena[p] {
-        Pattern::Wildcard => 50u16.hash(h),
-        Pattern::Bind(b) => {
-            51u16.hash(h);
-            body.binding_arena[b].name.hash(h);
-        }
-        Pattern::Literal(e) => {
-            52u16.hash(h);
-            hash_init_expr(body, e, h);
-        }
-        Pattern::Range {
-            start,
-            end,
-            inclusive,
-        } => {
-            53u16.hash(h);
-            inclusive.hash(h);
-            for e in [start, end] {
-                e.is_some().hash(h);
-                if let Some(e) = e {
-                    hash_init_expr(body, e, h);
-                }
-            }
-        }
-        Pattern::EnumVariant {
-            enum_name,
-            variant,
-            sub,
-            ..
-        } => {
-            54u16.hash(h);
-            (
-                enum_name.map(|name| Ustr::from(bone_core::modules::artifact_name(name.as_str()))),
-                variant,
-            )
-                .hash(h);
-            for s in sub {
-                hash_init_pattern(body, s, h);
-            }
-        }
-        Pattern::Record {
-            enum_name,
-            name,
-            fields,
-            rest,
-            ..
-        } => {
-            55u16.hash(h);
-            (
-                enum_name.map(|name| Ustr::from(bone_core::modules::artifact_name(name.as_str()))),
-                name.map(|name| Ustr::from(bone_core::modules::artifact_name(name.as_str()))),
-                rest,
-            )
-                .hash(h);
-            for f in fields {
-                let f = body.record_pat_field_arena[f];
-                f.name.hash(h);
-                hash_init_pattern(body, f.pat, h);
-            }
-        }
-        Pattern::Tuple { elements } => {
-            56u16.hash(h);
-            for s in elements {
-                hash_init_pattern(body, s, h);
-            }
-        }
-        Pattern::Or { alternatives } => {
-            57u16.hash(h);
-            for s in alternatives {
-                hash_init_pattern(body, s, h);
-            }
-        }
-        Pattern::Newtype { name, sub, .. } => {
-            58u16.hash(h);
-            name.hash(h);
-            hash_init_pattern(body, sub, h);
         }
     }
 }

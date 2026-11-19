@@ -21,7 +21,10 @@ const PROBE: &str = "\
 global RESULT: int = 0
 global DO_SET: bool = false
 fn probe() -> int {
-    static n = 42
+    static n = {
+        let (initial, _) = (42, 0)
+        initial
+    }
     if DO_SET { n = 99 }
     return n
 }
@@ -50,11 +53,7 @@ fn static_reload_preserves_unless_the_initializer_changed() {
             PROBE.replace("    return n\n", "    let unused = 0\n    return n\n"),
             "99",
         ),
-        (
-            "initializer edit",
-            PROBE.replace("static n = 42", "static n = 7"),
-            "7",
-        ),
+        ("initializer edit", PROBE.replace("(42, 0)", "(7, 0)"), "7"),
     ] {
         let after = emit_without_stdlib(&after);
         assert_eq!(result_after_reload(&before, &after), expected);
