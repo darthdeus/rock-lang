@@ -1,7 +1,8 @@
-use crate::common::module_id;
+use crate::common::{emit_v1_package, module_id, run_luajit, ws_v1_package};
+
 #[test]
 fn a_nomangle_v1_type_keeps_its_declared_symbol() {
-    let emitted = crate::common::emit_v1_package(
+    let emitted = emit_v1_package(
         "v1abi",
         &[(
             "main.rock",
@@ -28,14 +29,14 @@ fn main() {}
         )],
     );
     assert_eq!(
-        crate::common::run_luajit(&format!("{}\nprint(probe())\n", emitted.lua)),
+        run_luajit(&format!("{}\nprint(probe())\n", emitted.lua)),
         "0.5 AbiHandle 3"
     );
 }
 
 #[test]
 fn a_nomangle_type_cannot_take_a_legacy_types_symbol() {
-    let ws = crate::common::ws_v1_package(
+    let ws = ws_v1_package(
         "v1clash",
         &[(
             "main.rock",
@@ -46,9 +47,8 @@ fn main() {}
         )],
     );
     let mid = module_id(&ws, "main.rock");
-    let err = match skull::mir_emit::emit_workspace_mir(&ws, mid) {
-        Ok(_) => panic!("a @nomangle `Vec2` must not share the stdlib Vec2's symbol"),
-        Err(e) => e.message,
+    let Err(err) = skull::mir_emit::emit_workspace_mir(&ws, mid) else {
+        panic!("a @nomangle `Vec2` must not share the stdlib Vec2's symbol");
     };
-    assert!(err.contains("would both emit as `Vec2`"));
+    assert!(err.message.contains("would both emit as `Vec2`"));
 }

@@ -1,3 +1,5 @@
+use crate::common::emit_rejection;
+
 const FIELD_GET_NOBOX: &str = r#"
 struct Row { pos: Vec2, tag: int }
 
@@ -38,29 +40,22 @@ fn main() {
 }
 "#;
 
-fn emit_err(src: &str) -> String {
-    match crate::common::try_emit_module(src) {
-        Ok(_) => String::new(),
-        Err(e) => format!("{e}"),
+#[test]
+fn nobox_values_are_rejected_at_boxed_generic_boundaries() {
+    for (src, needles) in [
+        (
+            FIELD_GET_NOBOX,
+            &["cannot cross the boxed return of `field_get`", "Vec2"][..],
+        ),
+        (
+            GENERIC_RETURN_NOBOX,
+            &["cannot cross the boxed return of `unwrap_generic`", "Vec2"][..],
+        ),
+        (FIELD_SET_NOBOX, &["cannot cross boxed call boundary"][..]),
+    ] {
+        let err = emit_rejection(src);
+        for needle in needles {
+            assert!(err.contains(needle), "{err}");
+        }
     }
-}
-
-#[test]
-fn a_field_get_of_a_nobox_field_is_rejected_at_the_return_boundary() {
-    let err = emit_err(FIELD_GET_NOBOX);
-    assert!(err.contains("cannot cross the boxed return of `field_get`") && err.contains("Vec2"));
-}
-
-#[test]
-fn a_generic_nobox_return_is_rejected_at_an_opaque_boundary() {
-    let err = emit_err(GENERIC_RETURN_NOBOX);
-    assert!(
-        err.contains("cannot cross the boxed return of `unwrap_generic`") && err.contains("Vec2")
-    );
-}
-
-#[test]
-fn the_write_direction_of_the_same_field_is_rejected() {
-    let err = emit_err(FIELD_SET_NOBOX);
-    assert!(err.contains("cannot cross boxed call boundary"));
 }

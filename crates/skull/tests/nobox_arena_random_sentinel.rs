@@ -1,4 +1,4 @@
-use crate::common::run_luajit_capturing;
+use crate::common::{compile_and_run, emit_module, run_main};
 
 const MARKED: &str = r#"
 nobox value NP { x: float, y: float }
@@ -23,23 +23,9 @@ fn main() {
 "#;
 
 #[test]
-fn arena_random_at_a_nobox_element_works() {
-    let lua = crate::common::try_emit_module(MARKED).expect("marked column element must emit");
-    let (ok, out) = run_luajit_capturing(&format!("{lua}\nmain()\n"));
-    assert!(ok);
-    assert_eq!(out.trim(), "true");
-}
-
-#[test]
-fn arena_random_at_a_nobox_element_targets_the_specialized_copy() {
-    let lua = crate::common::try_emit_module(MARKED).expect("marked column element must emit");
-    assert!(lua.contains("random_Arena_T_spec_"));
-}
-
-#[test]
-fn arena_random_at_an_unmarked_column_element_works() {
-    let lua = crate::common::try_emit_module(UNMARKED).expect("unmarked column element must emit");
-    let (ok, out) = run_luajit_capturing(&format!("{lua}\nmain()\n"));
-    assert!(ok);
-    assert_eq!(out.trim(), "true");
+fn arena_random_works_at_nobox_and_unmarked_column_elements() {
+    let marked = emit_module(MARKED);
+    assert!(marked.contains("random_Arena_T_spec_"));
+    assert_eq!(run_main(&marked), "true");
+    assert_eq!(compile_and_run(UNMARKED), "true");
 }

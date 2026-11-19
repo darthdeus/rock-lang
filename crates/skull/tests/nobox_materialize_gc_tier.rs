@@ -57,10 +57,18 @@ fn main() {
 "#;
 
 #[test]
-fn a_string_field_boxes_through_the_value_table() {
-    let lua = emit_module(STRING_FIELD);
-    assert!(function_body(&lua, "main").contains("SRow_vt("));
-    assert_eq!(run_main(&lua), "1a");
+fn explicit_materialize_boxes_through_its_storage_tier_constructor() {
+    for (src, ctor, expected) in [
+        (STRING_FIELD, "SRow_vt(", "1a"),
+        (ARRAY_FIELD, "ARow_vt(", "1:3:20"),
+        (LEAF_TABLE_TIER, "Opt_lct(", "true:1:2:3"),
+        (NESTED_CDATA_TIER, "Box2_lct(", "1 4"),
+    ] {
+        let lua = emit_module(src);
+        let main = function_body(&lua, "main");
+        assert!(main.contains(ctor) && !main.contains("NV2_ct("), "{main}");
+        assert_eq!(run_main(&lua), expected);
+    }
 }
 
 #[test]
@@ -77,30 +85,7 @@ fn the_marked_and_unmarked_boxes_are_the_same_shape() {
             .to_string()
     };
     assert_eq!(ctor(&marked), ctor(&plain));
-    assert_eq!(run_main(&plain), run_main(&marked),);
-}
-
-#[test]
-fn an_array_field_boxes_through_the_value_table() {
-    let lua = emit_module(ARRAY_FIELD);
-    assert!(function_body(&lua, "main").contains("ARow_vt("));
-    assert_eq!(run_main(&lua), "1:3:20");
-}
-
-#[test]
-fn a_leaf_table_value_boxes_through_its_dotted_key_constructor() {
-    let lua = emit_module(LEAF_TABLE_TIER);
-    assert!(function_body(&lua, "main").contains("Opt_lct("));
-    assert_eq!(run_main(&lua), "true:1:2:3");
-}
-
-#[test]
-fn a_nested_cdata_value_boxes_as_one_leaf_constructor() {
-    let lua = emit_module(NESTED_CDATA_TIER);
-    let main = function_body(&lua, "main");
-    assert!(main.contains("Box2_lct("));
-    assert!(!main.contains("NV2_ct("));
-    assert_eq!(run_main(&lua), "1 4");
+    assert_eq!(run_main(&plain), run_main(&marked));
 }
 
 #[test]

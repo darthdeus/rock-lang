@@ -67,9 +67,7 @@ fn every_leaf_count_round_trips_and_the_storage_tier_flips_at_the_threshold() {
         let want_present: String = std::iter::once("1 2".to_string())
             .chain((0..extra).map(|i| format!(" {}", i + 3)))
             .collect();
-        let got = run_main(&lua);
-        let got: Vec<&str> = got.trim().lines().collect();
-        assert_eq!(got, vec![want_present.as_str(), "-1 false"]);
+        assert_eq!(run_main(&lua), format!("{want_present}\n-1 false"));
         rows.push((leaves, is_column_stored(&lua)));
     }
     assert_eq!(
