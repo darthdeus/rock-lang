@@ -18,11 +18,6 @@ fn show<T>(x: T) -> string {
     return tostring(x)
 }
 
-@test(output = "P2 {{ x: 1, y: 2 }}")
-fn print_value_struct() {
-    print(P2 { x: 1, y: 2 })
-}
-
 @test(output = "P2 {{ x: 3, y: 4 }}\nnil")
 fn print_nullable_value_struct() {
     let q: P2? = P2 { x: 3, y: 4 }

@@ -1,0 +1,247 @@
+// The stdlib string functions -- split, replace, contains, starts_with,
+// ends_with, trim, join, find, upper, lower, repeat, substring, the string
+// builder and concatenation -- and the Lua-pattern edges every backend must
+// agree on. split and replace feed the delimiter or needle into Lua
+// gmatch/gsub, so they must escape pattern magic characters.
+
+@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
+    local ok, err = pcall(f)
+    return not ok
+"""
+
+// Splitting by "(" or "[" leaves the unmatched closer in the tail element.
+@test(output = "[a|b|c]\n[abc]\n[a|b|]\n[|a|b]\n[a|b|c]\n[a|b|c]\n[a|b|c]\n[a|b|c]\n[a|b]\n[a|b)c]\n[a|b]c]")
+fn test_split() {
+    print("[{join("a,b,c".split(","), "|")}]")
+    print("[{join("abc".split(","), "|")}]")
+    print("[{join("a,b,".split(","), "|")}]")
+    print("[{join(",a,b".split(","), "|")}]")
+    print("[{join("aXYbXYc".split("XY"), "|")}]")
+    print("[{join("a.b.c".split("."), "|")}]")
+    print("[{join("a%b%c".split("%"), "|")}]")
+    print("[{join("a-b-c".split("-"), "|")}]")
+    print("[{join("a*b".split("*"), "|")}]")
+    print("[{join("a(b)c".split("("), "|")}]")
+    print("[{join("a[b]c".split("["), "|")}]")
+}
+
+// An empty delimiter or needle is a programmer error -- there is nothing to
+// split on or find -- so both raise.
+@test
+fn test_split_and_replace_reject_empty_pattern() {
+    assert(try_call(() => { let _x = "hello".split("") }))
+    assert(try_call(() => { let _x = "abc".replace("", "X") }))
+}
+
+// A lone "%" in the replacement survives as a literal "%" (the escaped_new
+// "%%" -> "%%%%" dance), not a gsub capture; a replacement containing the
+// needle does not re-match.
+@test(output = "[a;b;c]\n[hello bar hello]\n[a_b]\n[a_b]\n[a%b]\n[aXXb]\n[abc]\n[a_b]]\n[a_b]")
+fn test_replace() {
+    print("[{"a,b,c".replace(",", ";")}]")
+    print("[{"foo bar foo".replace("foo", "hello")}]")
+    print("[{"a.b".replace(".", "_")}]")
+    print("[{"a%b".replace("%", "_")}]")
+    print("[{"aXb".replace("X", "%")}]")
+    print("[{"aXb".replace("X", "XX")}]")
+    print("[{"abc".replace("z", "Y")}]")
+    print("[{"a[b]".replace("[", "_")}]")
+    print("[{"a-b".replace("-", "_")}]")
+}
+
+// Plain-text search, so "." matches a literal dot, not any char.
+@test(output = "true\nfalse\ntrue\ntrue\nfalse\nfalse")
+fn test_contains() {
+    print("hello".contains("ell"))
+    print("hello".contains("xyz"))
+    print("hello".contains(""))
+    print("a.b".contains("."))
+    print("ab".contains("abc"))
+    print("".contains("hello"))
+}
+
+@test(output = "true\nfalse\ntrue\nfalse\ntrue\ntrue\nfalse\ntrue\nfalse\ntrue")
+fn test_starts_with_ends_with() {
+    print("hello".starts_with("he"))
+    print("hello".starts_with("lo"))
+    print("hello".starts_with(""))
+    print("ab".starts_with("abc"))
+    print("".starts_with(""))
+    print("hello".ends_with("lo"))
+    print("hello".ends_with("he"))
+    print("hello".ends_with(""))
+    print("ab".ends_with("abc"))
+    print("".ends_with(""))
+}
+
+@test(output = "[hi]\n[]\n[hi]\n[hi]")
+fn test_trim() {
+    print("[{"  hi  ".trim()}]")
+    print("[{"".trim()}]")
+    print("[{"\t\nhi\n\t".trim()}]")
+    print("[{"hi".trim()}]")
+}
+
+@test(output = "[a,b,c]\n[]\n[x]\n[a-b-c]")
+fn test_join() {
+    let empty: [string] = []
+    print("[{join(["a", "b", "c"], ",")}]")
+    print("[{join(empty, ",")}]")
+    print("[{join(["x"], ",")}]")
+    print("[{join(["a", "b", "c"], "-")}]")
+}
+
+// find: 0-based unit index, -1 on miss; plain text, so "." finds the literal
+// dot at index 1, not index 0. The optional start skips earlier matches.
+@test(output = "2\n0\n3\n-1\n0\n1\n-1\n3")
+fn test_find() {
+    print("hello".find("ll"))
+    print("hello".find("he"))
+    print("hello".find("lo"))
+    print("hello".find("z"))
+    print("hello".find(""))
+    print("a.b".find("."))
+    print("ab".find("abc"))
+    print("abcabc".find("a", 1))
+}
+
+@test(output = "HELLO\nhello\n[ababab]\n[]")
+fn test_upper_lower_repeat() {
+    print("heLLo".upper())
+    print("heLLo".lower())
+    print("[{"ab".repeat(3)}]")
+    print("[{"ab".repeat(0)}]")
+}
+
+// Lua-pattern edges. Patterns outside the JS translator's subset (%u, %b, %f,
+// position captures) are not exercised.
+fn m(s: string, p: string) -> string {
+    return string_match(s, p) ?? "none"
+}
+
+@test
+fn anchors_are_literal_away_from_the_ends() {
+    assert_eq(m("a$b", "a$b"), "a$b")
+    assert_eq(m("a^b", "a^b"), "a^b")
+    assert_eq(m("ab", "^a"), "a")
+    assert_eq(m("ab", "b$"), "b")
+}
+
+@test
+fn quantifiers_without_an_item_are_literal() {
+    assert_eq(m("-", "-"), "-")
+    assert_eq(m("*", "*"), "*")
+    assert_eq(m("a-", "a%-$"), "a-")
+    assert_eq(m("+x", "^+x"), "+x")
+    assert_eq(m("(a)", "%(a%)"), "(a)")
+}
+
+@test
+fn whitespace_class_covers_vertical_tab_and_form_feed() {
+    assert_eq(m("\u{0B}", "%s"), "\u{0B}")
+    assert_eq(m("\u{0C}", "[%s]"), "\u{0C}")
+}
+
+@test
+fn sets_accept_a_leading_bracket_and_negated_classes() {
+    assert_eq(m("x]", "[]]"), "]")
+    assert_eq(m("x]", "[^]]"), "x")
+    assert_eq(m("A_", "[%W]+"), "_")
+    assert_eq(m("1a", "[%A]+"), "1")
+}
+
+@test
+fn gsub_replacement_only_interprets_percent() {
+    assert_eq("a".gsub("a", "$&"), "$&")
+    assert_eq("a".gsub("(a)", "$1"), "$1")
+    assert_eq("a".gsub("a", "$$"), "$$")
+    assert_eq("ab".gsub("%w+", "<%0>"), "<ab>")
+    assert_eq("ab".gsub("a", "[%1]"), "[a]b")
+    assert_eq("ab".gsub("(a)", "[%1]"), "[a]b")
+    assert_eq("ab".gsub("b", "%%"), "a%")
+}
+
+fn print_message(msg: string) {
+    print(msg)
+}
+
+fn get_greeting(name: string) -> string {
+    return "Hello, " + name + "!"
+}
+
+fn get_prefix() -> string { return "pre" }
+
+fn get_suffix() -> string { return "fix" }
+
+@test(output = "Hello World\nHello, Rock!\npre-fix\nMatch!\nhello world")
+fn test_string_concatenation_positions() {
+    print_message("Hello" + " " + "World")
+    print(get_greeting("Rock"))
+    print(get_prefix() + "-" + get_suffix())
+    let prefix = "test"
+    let suffix = "ing"
+    if prefix + suffix == "testing" {
+        print("Match!")
+    }
+    let maybe_string: string? = "hello"
+    if !is_null(maybe_string) {
+        print(maybe_string + " world")
+    }
+}
+
+@test(output = "true\nfalse\nhello\na b c\nline1\nline2\ntab\there")
+fn test_string_values() {
+    let a = "hello"
+    let b = "hello"
+    let c = "world"
+    print(a == b)
+    print(a == c)
+    let opt: string? = "hello"
+    print(opt ?? "default")
+    let v = ["a", "b", "c"]
+    let out = ""
+    let first = true
+    for s in v {
+        if !first { out = out + " " }
+        first = false
+        out = out + s
+    }
+    print(out)
+    print("line1\nline2")
+    print("tab\there")
+}
+
+// substring(start, end) is a 0-based, end-exclusive slice.
+@test(output = "hello\nworld\nlo wo\n[]")
+fn test_string_substring() {
+    let s = "hello world"
+    print(s.substring(0, 5))
+    print(s.substring(6, 11))
+    print(s.substring(3, 8))
+    print("[{s.substring(2, 2)}]")
+}
+
+// sb_new / sb_push / sb_build: fragments build in push order, an empty
+// builder builds the empty string.
+@test(output = "foobarbaz\n[]\n0123")
+fn test_string_builder() {
+    let sb = sb_new()
+    sb_push(sb, "foo")
+    sb_push(sb, "bar")
+    sb_push(sb, "baz")
+    print(sb_build(sb))
+    let empty = sb_new()
+    print("[{sb_build(empty)}]")
+    let looped = sb_new()
+    for i in 0..4 {
+        sb_push(looped, tostring(i))
+    }
+    print(sb_build(looped))
+}
+
+// A negative count produces an empty string, as Lua's string.rep does.
+@test
+fn repeat_negative_count_is_empty() {
+    let count = -1
+    assert_eq("ab".repeat(count), "")
+}

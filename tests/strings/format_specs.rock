@@ -1,4 +1,6 @@
-// String interpolation format specifiers.
+// String interpolation format specifiers: float, integer, string and
+// composite formatting, grouping, doubled braces, and precision applied to
+// struct and array fields.
 
 struct FixVec2 { x: float, y: float }
 struct Pair { a: int, b: int }
@@ -159,7 +161,7 @@ fn string_formatting_cases() {
     let s = "hi"
     assert_eq("[{s:10s}]", "[        hi]")
     assert_eq("[{s:>10s}]", "[        hi]")
-    // Untyped width used to reach math.floor; left alignment parsed but was ignored.
+    // Untyped width and left alignment on a string.
     assert_eq("[{s:>10}]", "[        hi]")
     assert_eq("[{s:<10}]", "[hi        ]")
     assert_eq("[{s:<10s}]", "[hi        ]")
@@ -292,3 +294,182 @@ fn formatting_entry_points() {
     print("{neg:.2f}")
     print("[{format_float(3.14159, 6, 2)}]")
 }
+
+@test
+fn test_grouping_comma() {
+    let n = 1000000
+    assert_eq("{n:,}", "1,000,000")
+    assert_eq("{n:,d}", "1,000,000")
+    let x = 1234.5
+    assert_eq("{x:,.2f}", "1,234.50")
+    let neg = -1000000
+    assert_eq("{neg:,d}", "-1,000,000")
+    // Values under 1000 get no separator.
+    let small = 42
+    assert_eq("{small:,d}", "42")
+    let edge = 999
+    assert_eq("{edge:,d}", "999")
+    let thousand = 1000
+    assert_eq("{thousand:,d}", "1,000")
+    // Grouping is applied before padding; the resulting "1,000" has
+    // length 5, padded to 10 with leading spaces.
+    assert_eq("[{thousand:10,d}]", "[     1,000]")
+}
+
+@test
+fn test_grouping_underscore() {
+    let h = 0xdeadbeef
+    assert_eq("{h:_x}", "dead_beef")
+    let n = 1000000
+    assert_eq("{n:_d}", "1_000_000")
+}
+
+struct P { x: int }
+
+value ScalarBag { x: int, n: int }
+
+@test
+fn composite_without_numeric_flags() {
+    let p = P { x: 1 }
+    // These keep the widths from the rejected sign and zero-pad cases.
+    assert_eq("{p:12}", " P {{ x = 1 }}")
+    assert_eq("{p:}", "P {{ x = 1 }}")
+    let xs = [1, 2]
+    assert_eq("{xs:8}", "Vec {{ 1, 2 }}")
+}
+
+@test
+fn top_level_value_record_with_scalar_fields() {
+    let b = ScalarBag { x: 1, n: 5 }
+    assert_eq("{b}", "ScalarBag {{ x: 1, n: 5 }}")
+    assert_eq(tostring(b), "ScalarBag {{ x: 1, n: 5 }}")
+}
+
+struct Mixed {
+    name: string,
+    value: float,
+    count: int
+}
+
+@test
+fn test_struct_float_formatting() {
+    let pos = FixVec2 { x: 5.123123, y: 43240.432432 }
+
+    // Without format spec - full precision
+    let full = "{pos}"
+    assert(full.contains("5.123123"))
+    assert(full.contains("43240.432432"))
+
+    // With .1 precision - rounds to 1 decimal place
+    let one_decimal = "{pos:.1}"
+    assert(one_decimal.contains("5.1"))
+    assert(one_decimal.contains("43240.4"))
+    assert(!one_decimal.contains("5.123"))
+
+    // With .3 precision - rounds to 3 decimal places
+    let three_decimal = "{pos:.3}"
+    assert(three_decimal.contains("5.123"))
+    assert(three_decimal.contains("43240.432"))
+
+    // With .0 precision - rounds to whole numbers
+    let whole = "{pos:.0}"
+    assert(whole.contains("x = 5"))
+    assert(whole.contains("y = 43240"))
+}
+
+@test
+fn test_mixed_struct_formatting() {
+    let data = Mixed { name: "test", value: 3.14159, count: 42 }
+
+    // With precision - only affects float fields
+    let formatted = "{data:.2}"
+    assert(formatted.contains("name = \"test\""))
+    assert(formatted.contains("value = 3.14"))
+    assert(formatted.contains("count = 42"))
+}
+
+struct Container {
+    position: FixVec2,
+    label: string
+}
+
+@test
+fn test_nested_struct_formatting() {
+    let obj = Container {
+        position: FixVec2 { x: 1.23456, y: 9.87654 },
+        label: "object"
+    }
+
+    // Precision applies to nested structs too
+    let formatted = "{obj:.1}"
+    assert(formatted.contains("x = 1.2"))
+    assert(formatted.contains("y = 9.9"))
+    assert(formatted.contains("label = \"object\""))
+}
+
+@test
+fn test_array_of_floats_formatting() {
+    let values = [1.111, 2.222, 3.333]
+
+    // Precision applies to array elements within the Vec structure
+    let formatted = "{values:.1}"
+    assert(formatted.contains("1.1, 2.2, 3.3"))
+    assert(!formatted.contains("1.111"))
+    assert(!formatted.contains("2.222"))
+    assert(!formatted.contains("3.333"))
+}
+
+@test
+fn test_individual_field_formatting_still_works() {
+    let pos = FixVec2 { x: 5.123123, y: 43240.432432 }
+
+    // Individual field formatting should continue to work
+    assert("{pos.x:.1}" == "5.1")
+    assert("{pos.y:.2}" == "43240.43")
+}
+
+fn square(x: int) -> int {
+    return x * x
+}
+
+struct Point {
+    x: int,
+    y: int
+}
+
+// Width, zero-pad and sign without a type letter on an int.
+@test(output = "042\n7\n07\n00007\n+42\n-17\n100\n0100")
+fn integer_width_sign_and_octal() {
+    let x = 42
+    print("{x:03}")
+    let y = 7
+    print("{y:01}")
+    print("{y:02}")
+    print("{y:05}")
+    let neg = -17
+    print("{x:+}")
+    print("{neg:+}")
+    let o = 64
+    print("{o:o}")
+    print("{o:#o}")
+}
+
+// A single-hole interpolation's leading pad must survive to stdout (no
+// surrounding literal to protect it).
+@test(output = "   42")
+fn integer_width_single_hole() {
+    let x = 42
+    print("{x:5}")
+}
+
+@test(output = "Result: 16.000\nSquare of 7 is 0049\nDistance: 25.00")
+fn format_spec_on_expressions() {
+    let x = 5
+    let y = 3
+    print("Result: {x * y + 1:.3f}")
+    let n = 7
+    print("Square of {n} is {square(n):04d}")
+    let p = Point { x: 3, y: 4 }
+    print("Distance: {(p.x * p.x + p.y * p.y):.2f}")
+}
+

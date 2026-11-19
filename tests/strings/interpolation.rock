@@ -1,13 +1,56 @@
-// String interpolation holes: nested interpolated strings, `::` paths inside
-// a hole, and null values.
+// String interpolation holes: values of each kind, nested interpolated
+// strings, `::` paths and named-argument colons inside a hole, and null
+// values.
+
+struct Info { val: int }
+
+struct Named {
+    name: string,
+    tag: string,
+}
+
+@test(output = "hello world\npi = 3.14\nflag = true\nsum = 7\nresult = 6\nnested: 42\nAlice:admin\nempty: true\n42 and 3.14\nstart42middle42end\nDec: 255, Hex: ff, Oct: 377\nThis is just a string")
+fn test_interpolation_basics() {
+    let name = "world"
+    print("hello {name}")
+    let pi = 3.14
+    print("pi = {pi}")
+    let flag = true
+    print("flag = {flag}")
+    let a = 3
+    let b = 4
+    print("sum = {a + b}")
+    let x = 2
+    print("result = {x * 3}")
+    let info = Info { val: 42 }
+    print("nested: {info.val}")
+    let n = Named { name: "Alice", tag: "admin" }
+    print("{n.name}:{n.tag}")
+    let s = ""
+    print("empty: {s == ""}")
+    let v = 42
+    print("{v} and {pi}")
+    print("start{v}middle{v}end")
+    let w = 255
+    print("Dec: {w}, Hex: {w:x}, Oct: {w:o}")
+    print("This is just a string")
+}
+
+// A `:` nested inside brackets belongs to the expression, not the `:spec`
+// split.
+fn add2(a: int, b: int = 1) -> int { return a + b }
+
+@test(output = "10")
+fn test_nested_call_named_arg_in_hole() {
+    print("{add2(add2(3, b: 4), b: 3)}")
+}
 
 // --- Nested interpolation ---
 //
 // An interpolated string nested inside another interpolation's hole. The
 // outer string's parts must be exactly its own: a nested literal's parts are
-// lowered while the outer ones are being collected, and must not land inside
-// the outer part range (that printed "a: 11.1911.19" for the first case, and
-// rejected a leaked `{y}` part as undefined when its `let` sat in the branch).
+// lowered while the outer ones are being collected and must stay out of the
+// outer part range, including when a `let` in the branch binds a hole.
 
 enum Mode {
     Fmt,
@@ -131,14 +174,6 @@ fn test_doubly_nested() {
     assert_eq(r, "o: m: i: 6")
 }
 
-@test
-fn test_bound_to_a_local_first() {
-    let x = 11.19
-    let ok = true
-    let bound = if ok { "{x:.2f}" } else { "no" }
-    assert_eq("c: {bound}", "c: 11.19")
-}
-
 // --- `::` in a hole ---
 //
 // A `::` inside an interpolation hole is a PATH separator, not the start of a
@@ -214,10 +249,8 @@ fn shade(c: Col) -> string {
 // An interpolation hole holding a NULL renders "nil", whatever its static type.
 //
 // `expr_ty` PEELS `Nullable` (docs: `resolve_ty`), so `stringify` picks its arm
-// from the non-null shape and the value can still arrive nil. Three arms did not
-// survive that: a float ran `__rock_format_float(nil)` ("bad argument to 'abs'"),
-// a payload-free enum indexed `__rock_enum_<E>_names[nil]` and then concatenated
-// the nil, and a newtype rendered `Id(nil)` instead of `nil`.
+// from the non-null shape and the value can still arrive nil: the float, enum
+// and newtype arms must each guard for it.
 
 newtype Id(int)
 value Pt { x: int, y: int }

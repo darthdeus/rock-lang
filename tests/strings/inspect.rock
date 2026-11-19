@@ -1,5 +1,5 @@
-// inspect() and interpolation of composite values: scalars, structs, enums,
-// collections, null fields and function values.
+// inspect() and interpolation of composite values: scalars, structs, value
+// structs, enums, collections, null fields and function values.
 
 @test(output = "\"hello\"\n42\ntrue")
 fn test_inspect_simple_types() {
@@ -230,27 +230,26 @@ enum Status {
     let p = Point { x: 10, y: 20 }
     let result = "{p}"
     assert(!result.contains("0x"), "Struct should not show memory address")
-    // Type name display for user-defined structs is now implemented
     assert(result.contains("Point"), "Struct should show type name")
     assert(result.contains("x") && result.contains("10"), "Struct should show fields")
-    
+
     let arr = [1, 2, 3]
     let arr_str = "{arr}"
     assert(!arr_str.contains("0x"), "Array should not show memory address")
     assert(arr_str.contains("Vec"), "Array should show Vec type")
     assert(arr_str.contains("1") && arr_str.contains("2") && arr_str.contains("3"), "Array should show contents")
-    
+
     let tup = (42, "hello")
     let tup_str = "{tup}"
     assert(tup_str.contains("42"), "Tuple should show first element")
     assert(tup_str.contains("hello"), "Tuple should show second element")
-    
+
     let status1 = Status::Ok
     let status1_str = "{status1}"
     assert(!status1_str.contains("0x"), "Enum should not show memory address")
     assert(status1_str.contains("Status"), "Enum should show type name")
     assert(status1_str.contains("Ok"), "Enum should show variant")
-    
+
     let status2 = Status::Error("oops")
     let status2_str = "{status2}"
     assert(status2_str.contains("Status"), "Enum should show type name")
@@ -270,3 +269,59 @@ fn test_inspect_empty_map() {
     let m: Map<string, int> = map_new()
     assert_eq(inspect(m), "{{}}")
 }
+
+struct Person { name: string, age: int }
+
+struct Triple { a: int, b: int, c: int }
+
+struct EmptyRef {}
+
+value EmptyValue {}
+
+// Byte-exact renders, through `assert_eq` so braces can be escaped.
+@test
+fn exact_struct_renders() {
+    assert_eq(inspect(EmptyRef {}), "EmptyRef {{  }}")
+    assert_eq(inspect(Person { name: "Alice", age: 30 }), "Person {{ age = 30, name = \"Alice\" }}")
+    assert_eq(inspect(Triple { a: 1, b: 2, c: 3 }), "Triple {{\n  a = 1,\n  b = 2,\n  c = 3\n}}")
+    assert_eq(inspect([10, 20, 30]), "Vec {{ 10, 20, 30 }}")
+}
+
+// GC-free value structs use the same sorted equals-format as table-backed
+// structs. Wide nested values follow the generic multiline indentation too.
+value V2 { y: int, x: int }
+
+value IV { x: int, y: int }
+
+value NestedV { a: IV, b: int }
+
+value V3 { z: int, x: int, y: int }
+
+value V3Holder { item: V3, tag: int, extra: int }
+
+fn inspect_any(value: any) -> string { return inspect(value) }
+
+fn inspect_dynamic_v3_holder(item: V3) -> string {
+    return inspect(V3Holder { item: item, tag: 9, extra: 4 })
+}
+
+@test
+fn value_struct_render() {
+    assert_eq(inspect(EmptyValue {}), "EmptyValue {{  }}")
+    assert_eq(inspect(V2 { y: 5, x: 3 }), "V2 {{ x = 3, y = 5 }}")
+    assert_eq(inspect(NestedV { a: IV { x: 1, y: 2 }, b: 9 }), "NestedV {{ a = IV {{ x = 1, y = 2 }}, b = 9 }}")
+    assert_eq(inspect(V3 { y: 5, z: 7, x: 3 }), "V3 {{\n  x = 3,\n  y = 5,\n  z = 7\n}}")
+    assert_eq(inspect(V3Holder { item: V3 { y: 5, z: 7, x: 3 }, tag: 9, extra: 4 }), "V3Holder {{\n  extra = 4,\n  item = V3 {{\n    x = 3,\n    y = 5,\n    z = 7\n  }},\n  tag = 9\n}}")
+    assert_eq(inspect_dynamic_v3_holder(V3 { y: 5, z: 7, x: 3 }), "V3Holder {{\n  extra = 4,\n  item = V3 {{\n    x = 3,\n    y = 5,\n    z = 7\n  }},\n  tag = 9\n}}")
+    assert_eq(inspect_any(V3 { y: 5, z: 7, x: 3 }), "V3 {{\n  x = 3,\n  y = 5,\n  z = 7\n}}")
+    assert_eq(inspect_any(EmptyValue {}), "EmptyValue {{  }}")
+}
+
+// An embedded child is physically inline; inspect rebuilds the logical child.
+struct EmbedHolder { embed p: Point, tag: int }
+
+@test
+fn embed_field_render() {
+    assert_eq(inspect(EmbedHolder { p: Point { x: 1, y: 2 }, tag: 3 }), "EmbedHolder {{ p = Point {{ x = 1, y = 2 }}, tag = 3 }}")
+}
+

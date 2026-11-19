@@ -1,6 +1,7 @@
-// Float rendering by print and by interpolation without a format spec:
-// trailing zeros dropped, scientific notation for very small and large
-// magnitudes, at most 14 significant digits.
+// Float text both ways: rendering by print and by interpolation without a
+// format spec (trailing zeros dropped, scientific notation for very small and
+// large magnitudes, at most 14 significant digits) and parse_float, which
+// follows LuaJIT's tonumber.
 
 @test(output = "1\n2\n1.5\n3.14159\n0.1\n0.3\n1000000\n1e-06\n2\n4\n0.5\n1.5\n2.5\n3\n3.5\n4\n4.5\ntrue\ntrue\nfalse\ntrue")
 fn float_print_values() {
@@ -27,24 +28,8 @@ fn float_print_values() {
     print(1.5 < 2.0)
 }
 
-@test(output = "1.0 becomes 1\n1.5 becomes 1.5\n3.14 becomes 3.14")
-fn float_literal_interpolation() {
-    print("1.0 becomes {1.0}")
-    print("1.5 becomes {1.5}")
-    print("3.14 becomes {3.14}")
-}
-
-// --- Interpolation without a format specifier ---
-//
-// When a float is interpolated without a format specifier,
-// Rock uses smart formatting that:
-// - Removes trailing zeros (5.0 becomes "5")
-// - Uses scientific notation for very small/large numbers
-// - Limits precision to 14 significant digits
-
 @test
 fn test_float_interpolation_smart_formatting() {
-    // Various float values
     let pi = 3.14159265358979
     let whole = 5.0
     let small = 0.0001
@@ -53,12 +38,9 @@ fn test_float_interpolation_smart_formatting() {
     let negative = -42.5
     let half = 0.5
 
-    // Smart formatting without format specifier
     assert_eq("{pi}", "3.1416")
     assert_eq("{whole}", "5")
     assert_eq("{small}", "0.0001")
-    // TODO: this should pass
-    // assert_eq("{large}", "123456.789")
     assert_eq("{tiny}", "1e-09")
     assert_eq("{negative}", "-42.5")
     assert_eq("{half}", "0.5")
@@ -79,9 +61,7 @@ fn test_float_interpolation_in_strings() {
 }
 
 // Non-finite floats. luajit reaches C `%.2g`, which spells these inf/-inf/nan;
-// the JS port reconstructs a value from its mantissa bits, so before it grew
-// the same guard it threw "Infinity cannot be converted to a BigInt" instead of
-// formatting. Both backends run this file, which is what makes it a parity gate.
+// the JS port reconstructs a value from its mantissa bits and must guard them.
 @test
 fn test_non_finite_float_interpolation() {
     let inf = "1e400".parse_float().unwrap()
@@ -179,4 +159,82 @@ fn interpolation_rounds_exact_ties_to_even() {
 fn seventeen_digits_just_below_a_power_of_ten() {
     let value = 1e15 * [1e16][0]
     assert_eq("{value:.17g}", "9.9999999999999996e+30")
+}
+
+// parse_float, rendered back through tostring; "nil" when it rejects.
+fn show(s: string) -> string {
+    let r = s.parse_float()
+    if r == null { "nil" } else { tostring(r) }
+}
+
+@test
+fn test_basic_forms() {
+    assert_eq(show("12"), "12")
+    assert_eq(show("1.5"), "1.5")
+    assert_eq(show("1e3"), "1000")
+    assert_eq(show("0x1A"), "26")
+    assert_eq(show("  3  "), "3")
+    assert_eq(show("12abc"), "nil")
+    assert_eq(show(""), "nil")
+    assert_eq(show("   "), "nil")
+}
+
+// A parsed value flows through arithmetic (it is a real float).
+@test(output = "7")
+fn test_arith() {
+    let a = "3.5".parse_float() ?? 0.0
+    let b = "3.5".parse_float() ?? 0.0
+    print(tostring(a + b))
+}
+
+// LuaJIT's tonumber also reads inf/infinity/nan in any case with an optional
+// sign, signed and fractional hex with a binary exponent, and `0b` binary. It
+// rejects the `0o` octal prefix that JS `Number` accepts.
+@test
+fn test_non_finite_spellings() {
+    assert_eq(show("inf"), "inf")
+    assert_eq(show("-INF"), "-inf")
+    assert_eq(show("+Infinity"), "inf")
+    assert_eq(show("  -infinity  "), "-inf")
+    assert_eq(show("nan"), "nan")
+    assert_eq(show("-NaN"), "nan")
+    assert_eq(show("infinit"), "nil")
+    assert_eq(show("infx"), "nil")
+    assert_eq(show("nan(1)"), "nil")
+}
+
+@test
+fn test_hex_forms() {
+    assert_eq(show("-0x10"), "-16")
+    assert_eq(show("+0x10"), "16")
+    assert_eq(show("0X1F"), "31")
+    assert_eq(show("0x1.8"), "1.5")
+    assert_eq(show("0x.8"), "0.5")
+    assert_eq(show("0x1p4"), "16")
+    assert_eq(show("0x1P-2"), "0.25")
+    assert_eq(show("0x1.8p1"), "3")
+    assert_eq(show("0x1e3"), "483")
+    assert_eq(show("0x"), "nil")
+    assert_eq(show("0x."), "nil")
+    assert_eq(show("0x1p"), "nil")
+    assert_eq(show("0x-1"), "nil")
+    assert_eq(show("0xG"), "nil")
+}
+
+@test
+fn test_prefixes_and_signs() {
+    assert_eq(show("0b101"), "5")
+    assert_eq(show("-0B11"), "-3")
+    assert_eq(show("0b102"), "nil")
+    assert_eq(show("0b1.1"), "nil")
+    assert_eq(show("0o17"), "nil")
+    assert_eq(show("-0"), "-0")
+    assert_eq(show("+.5"), "0.5")
+    assert_eq(show("1."), "1")
+    assert_eq(show("."), "nil")
+    assert_eq(show("1e"), "nil")
+    assert_eq(show("+-1"), "nil")
+    assert_eq(show("- 5"), "nil")
+    assert_eq(show("1_0"), "nil")
+    assert_eq(show("1e400"), "inf")
 }

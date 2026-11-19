@@ -1,7 +1,7 @@
 //! `inspect` of a value an opaque `inline(js)` body built: the renderer must
 //! read the object it is given, whether or not the program also constructs the
 //! same type itself. Exact renders of program-built values are
-//! tests/strings/js_inspect.rock, which runs on both backends.
+//! tests/strings/inspect.rock, which runs on both backends.
 
 use crate::common::ws_with;
 
