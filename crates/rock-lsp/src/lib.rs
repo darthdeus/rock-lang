@@ -1,17 +1,9 @@
 #![allow(clippy::mutable_key_type)]
 
-/// Open a tracing info-span scoped to the rest of the enclosing block.
-#[macro_export]
-macro_rules! scope {
-    ($name:expr) => {
-        let _scope = ::tracing::info_span!($name).entered();
-    };
-}
-
 use std::str::FromStr;
 
 use anyhow::Result;
-use bone_query::FileUriExt;
+use bone_query::{BoneWorkspace, FileUriExt};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument, Exit,
@@ -25,8 +17,7 @@ use lsp_types::request::{
     Shutdown, SignatureHelpRequest, WorkspaceSymbolRequest,
 };
 use lsp_types::{
-    CompletionList, ExecuteCommandParams, Hover, InlayHint, Location, SignatureHelp,
-    TextDocumentPositionParams, Uri,
+    CompletionList, ExecuteCommandParams, InlayHint, Location, TextDocumentPositionParams, Uri,
 };
 
 #[cfg(not(target_family = "wasm"))]
@@ -351,18 +342,22 @@ impl LspServer {
 
         let ws = &mut self.workspace;
         match req.method.as_str() {
-            GotoDefinition::METHOD => {
-                answer_optional::<GotoDefinition, _, _, _>(req, ws, go_to_definition_workspace)
-            }
-            GotoTypeDefinition::METHOD => answer_optional::<GotoTypeDefinition, _, _, _>(
-                req,
-                ws,
-                go_to_type_definition_workspace,
-            ),
+            GotoDefinition::METHOD => answer::<GotoDefinition, _>(req, ws, |ws, params| {
+                at_position(ws, params, BoneWorkspace::definition)
+                    .map(|loc| loc.map(|loc| vec![loc].into()))
+            }),
+            GotoTypeDefinition::METHOD => answer::<GotoTypeDefinition, _>(req, ws, |ws, params| {
+                at_position(ws, params, BoneWorkspace::type_definition)
+                    .map(|loc| loc.map(|loc| vec![loc].into()))
+            }),
             References::METHOD => answer::<References, _>(req, ws, find_references_workspace),
-            HoverRequest::METHOD => answer::<HoverRequest, _>(req, ws, do_hover_workspace),
+            HoverRequest::METHOD => answer::<HoverRequest, _>(req, ws, |ws, params| {
+                at_position(ws, params, BoneWorkspace::hover)
+            }),
             SignatureHelpRequest::METHOD => {
-                answer::<SignatureHelpRequest, _>(req, ws, do_signature_help_workspace)
+                answer::<SignatureHelpRequest, _>(req, ws, |ws, params| {
+                    at_position(ws, params, BoneWorkspace::signature_help)
+                })
             }
             InlayHintRequest::METHOD => {
                 answer::<InlayHintRequest, _>(req, ws, do_inlay_hints_workspace)
@@ -371,9 +366,10 @@ impl LspServer {
                 answer_optional::<Completion, _, _, _>(req, ws, do_completion_workspace)
             }
             PrepareRenameRequest::METHOD => {
-                answer::<PrepareRenameRequest, _>(req, ws, |workspace, params| {
-                    prepare_rename_workspace(workspace, params)
-                        .map(|range| range.map(lsp_types::PrepareRenameResponse::Range))
+                answer::<PrepareRenameRequest, _>(req, ws, |ws, params| {
+                    // A refusal becomes the request's error, which editors show as the reason.
+                    let range = at_position(ws, params, BoneWorkspace::prepare_rename)??;
+                    Ok(range.map(lsp_types::PrepareRenameResponse::Range))
                 })
             }
             Rename::METHOD => answer::<Rename, _>(req, ws, do_rename_workspace),
