@@ -4,6 +4,7 @@
 //!
 //! Column eligibility itself is decided in `shape` -- this is the code that
 //! builds and reads the layout that module describes.
+use super::flat_ref::FlatRefVal;
 use super::*;
 
 /// Every stdlib entry [`Builder::call_spine`] may call. Builds root them
@@ -470,47 +471,30 @@ impl<'a> Builder<'a> {
         Ok(self.native_buffer_plan(elem)?.is_leaf_addressed())
     }
 
-    /// Resolve a single-leaf NativeBuffer read-modify-write place. JS needs this
-    /// path because TypedArray elements are values; Lua's FFI element is an
-    /// assignable struct reference. Aggregate paths have no scalar update.
-    pub(crate) fn nb_leaf_rmw_place(
-        &mut self,
-        target: Idx<Expr>,
-    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, Ustr, LeafAddr)>, CompilerError> {
-        if self.scx.target != bone_core::hir::FnBackend::Js {
-            return Ok(None);
-        }
-        let Expr::FieldAccess { base, field } = self.body.expr_arena[target] else {
-            return Ok(None);
-        };
-        let Some((buf, checked, elem, path)) = self.nb_leaf_field_place(base, field)? else {
-            return Ok(None);
-        };
+    pub(crate) fn nb_leaf_address(
+        &self,
+        elem: Ustr,
+        path: &str,
+    ) -> Result<Option<LeafAddr>, CompilerError> {
         let container = self.native_buffer_plan(elem)?;
-        let Some(addr) = container
+        container
             .leaf_addresses()
             .and_then(|plan| plan.iter().find(|a| a.path.as_str() == path))
             .cloned()
-        else {
-            return Ok(None);
-        };
-        let place = container.place(addr).map_err(|e| gap(e.message))?;
-        Ok(Some((buf, checked, elem, place)))
+            .map(|addr| container.place(addr).map_err(|e| gap(e.message)))
+            .transpose()
     }
 
-    /// The load half of [`Self::nb_leaf_rmw_place`].
     pub(crate) fn nb_leaf_load(
         &mut self,
         buf: Idx<Inst>,
         checked: Idx<Inst>,
         addr: &LeafAddr,
     ) -> Idx<Inst> {
-        let at = self.leaf_index(checked, addr);
-        let view = self.leaf_view(buf, addr.view_field, &mut HashMap::default());
+        let (view, at) = self.nb_leaf_slot(buf, checked, addr);
         self.read_index(view, at, ContainerKind::NativeBufferLeaf)
     }
 
-    /// The store half of [`Self::nb_leaf_rmw_place`].
     pub(crate) fn nb_leaf_store(
         &mut self,
         buf: Idx<Inst>,
@@ -518,9 +502,19 @@ impl<'a> Builder<'a> {
         addr: &LeafAddr,
         value: Idx<Inst>,
     ) {
+        let (view, at) = self.nb_leaf_slot(buf, checked, addr);
+        self.write_index(view, at, value, ContainerKind::NativeBufferLeaf);
+    }
+
+    fn nb_leaf_slot(
+        &mut self,
+        buf: Idx<Inst>,
+        checked: Idx<Inst>,
+        addr: &LeafAddr,
+    ) -> (Idx<Inst>, Idx<Inst>) {
         let at = self.leaf_index(checked, addr);
         let view = self.leaf_view(buf, addr.view_field, &mut HashMap::default());
-        self.write_index(view, at, value, ContainerKind::NativeBufferLeaf);
+        (view, at)
     }
 
     /// `buf[i]` on a leaf-addressed NativeBuffer: bounds-check the ELEMENT once,
@@ -1231,13 +1225,7 @@ impl<'a> Builder<'a> {
             base: container, ..
         } = self.body.expr_arena[cur]
         {
-            match self.vec_column_elem_of(container)? {
-                Some(elem) => Some(elem),
-                None => match self.vec_strided_elem_of(container)? {
-                    Some(elem) => Some(elem),
-                    None => self.map_column_value_of(container)?,
-                },
-            }
+            self.flat_container_elem(container)?.map(|(elem, _)| elem)
         } else {
             // A flat `ref` binding or call addresses the element or a nested
             // value inside it; its path leads the chain.
@@ -1271,64 +1259,24 @@ impl<'a> Builder<'a> {
             }))
     }
 
-    /// `Some((vec, slot, elem))` iff `e` is `xs[i]` over a
-    /// column-stored Vec — the shape that has no element slot to serve as a
-    /// place base.
-    pub(crate) fn column_index_place(
+    pub(crate) fn lower_flat_index_place(
         &mut self,
         e: Idx<Expr>,
-    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, ColumnElem)>, CompilerError> {
-        // Reached from a PLACE path, which never lowers `e` as a value, so the
-        // cursor names whatever encloses the assignment. The walk keys this
-        // obligation on `e` itself.
-        self.with_site_expr(e, |s| s.column_index_place_at(e))
-    }
-
-    fn column_index_place_at(
-        &mut self,
-        e: Idx<Expr>,
-    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, ColumnElem)>, CompilerError> {
-        let Expr::Index { base, index } = self.body.expr_arena[e] else {
-            return Ok(None);
-        };
-        // A column-stored Map resolves to the SAME place one indirection out:
-        // the spine turns the key into a slot, and the slot indexes `data`.
-        // Without this a field write through `m[k]` takes a whole-element place
-        // base, which the wrapper has no slot for.
-        if let Some(elem) = self.map_column_value_of(base)? {
-            let m = self.lower_expr(base)?;
-            let k = self.lower_expr(index)?;
-            let slot = self.call_spine("__map_col_slot_checked", vec![m, k])?;
-            let data = self.map_col_data(m);
-            let at = self.checked_column_index(data, slot);
-            return Ok(Some((data, at, elem)));
-        }
-        let Some(elem) = self.vec_column_elem_of(base)? else {
-            return Ok(None);
-        };
-        let vec = self.lower_expr(base)?;
-        let i = self.lower_expr(index)?;
-        let slot = self.checked_column_index(vec, i);
-        Ok(Some((vec, slot, elem)))
-    }
-
-    /// `Some((vec, slot, elem))` iff `e` is `xs[i]` over a strided Vec -- the
-    /// row has no element table to serve as a place base.
-    pub(crate) fn strided_index_place(
-        &mut self,
-        e: Idx<Expr>,
-    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, ColumnElem)>, CompilerError> {
+        key: FlatRefKey,
+    ) -> Result<FlatRefVal, CompilerError> {
         self.with_site_expr(e, |s| {
             let Expr::Index { base, index } = s.body.expr_arena[e] else {
-                return Ok(None);
+                return Err(s.gap_here("flat place must name an indexed element"));
             };
-            let Some(elem) = s.vec_strided_elem_of(base)? else {
-                return Ok(None);
-            };
-            let vec = s.lower_expr(base)?;
-            let i = s.lower_expr(index)?;
-            let slot = s.checked_column_index(vec, i);
-            Ok(Some((vec, slot, elem)))
+            let map = key.storage == FlatStorage::Columns && s.map_column_value_of(base)?.is_some();
+            let mut vec = s.lower_expr(base)?;
+            let mut index = s.lower_expr(index)?;
+            if map {
+                index = s.call_spine("__map_col_slot_checked", vec![vec, index])?;
+                vec = s.map_col_data(vec);
+            }
+            let slot = s.checked_column_index(vec, index);
+            Ok(FlatRefVal { vec, slot, key })
         })
     }
 
@@ -1356,25 +1304,47 @@ impl<'a> Builder<'a> {
         Ok((paths, leaves))
     }
 
-    /// `xs[i].<path> = v` on a strided Vec: store into the slots of the row
-    /// under `path`. A primitive leaf (`at.x`) is one slot; a whole nested
-    /// value field (`at`, given as `nested`) is its leaves' slots, from `v`
-    /// lowered once.
-    pub(crate) fn strided_leaf_store(
+    pub(crate) fn flat_field_store(
         &mut self,
-        vec: Idx<Inst>,
-        slot: Idx<Inst>,
-        elem: ColumnElem,
-        field: Ustr,
+        place: FlatRefVal,
         nested: Option<&ValueShape>,
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
-        let shape = self.column_shape(elem)?;
-        let row = value_leaf_paths(&shape);
+        let FlatRefVal { vec, slot, key } = place;
+        let FlatRefKey {
+            elem,
+            storage,
+            prefix: field,
+        } = key;
+        if storage == FlatStorage::Columns && elem.nullable {
+            return Err(gap(format!(
+                "cannot write `{field}` through an element of `[{}?]`; refine the                  element to non-null and store it whole",
+                elem.name
+            )));
+        }
+
+        let row = match storage {
+            FlatStorage::Strided => value_leaf_paths(&self.column_shape(elem)?),
+            FlatStorage::Columns => {
+                if nested.is_none() && !value_leaf_paths(&self.column_shape(elem)?).contains(&field)
+                {
+                    return Err(gap(format!(
+                        "`{field}` is not a field of column-stored `[{}]`",
+                        elem.name
+                    )));
+                }
+                Vec::new()
+            }
+        };
         let (paths, leaves) = match nested {
             Some(sub) => self.nested_field_leaves(field, sub, value)?,
             None => (vec![field], vec![self.lower_expr(value)?]),
         };
+        if storage == FlatStorage::Columns {
+            self.store_column_leaves(vec, slot, paths, leaves);
+            return Ok(());
+        }
+
         let offsets = paths
             .iter()
             .map(|path| row.iter().position(|p| p == path))
@@ -1393,51 +1363,8 @@ impl<'a> Builder<'a> {
             } else {
                 self.emit_cur(Inst::VecStrideNilToFalse(v))
             };
-            let at = self.strided_slot_index(slot, shape.leaf_count(), offset);
+            let at = self.strided_slot_index(slot, row.len(), offset);
             self.write_index(data, at, v, ContainerKind::VecStrideSlot);
-        }
-        Ok(())
-    }
-
-    /// `xs[i].<path> = v` on a column-stored Vec: store into the columns under
-    /// `path`. A primitive leaf (`inner.a`) is one column; a whole nested value
-    /// field (`inner`, given as `nested`) is every leaf column under it, keyed
-    /// as [`column_leaf_paths`] keys them, from `v` lowered once.
-    pub(crate) fn column_leaf_store(
-        &mut self,
-        vec: Idx<Inst>,
-        slot: Idx<Inst>,
-        elem: ColumnElem,
-        field: Ustr,
-        nested: Option<&ValueShape>,
-        value: Idx<Expr>,
-    ) -> Result<(), CompilerError> {
-        // A NULLABLE element has no field place at all: bone rejects `.field` on
-        // a `T?` before this, and writing one leaf of a slot whose presence says
-        // "absent" would be a silent half-write. Reject rather than trust that.
-        if elem.nullable {
-            return Err(gap(format!(
-                "cannot write `{field}` through an element of `[{}?]`; refine the \
-                 element to non-null and store it whole",
-                elem.name
-            )));
-        }
-        let (paths, leaves) = match nested {
-            Some(sub) => self.nested_field_leaves(field, sub, value)?,
-            None => {
-                let shape = self.column_shape(elem)?;
-                if !value_leaf_paths(&shape).contains(&field) {
-                    return Err(gap(format!(
-                        "`{field}` is not a field of column-stored `[{}]`",
-                        elem.name
-                    )));
-                }
-                (vec![field], vec![self.lower_expr(value)?])
-            }
-        };
-        for (path, leaf) in paths.into_iter().zip(leaves) {
-            let col = self.read_field(vec, path);
-            self.write_index(col, slot, leaf, ContainerKind::VecColumn);
         }
         Ok(())
     }

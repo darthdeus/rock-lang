@@ -149,9 +149,7 @@ fn scan_returns(
 }
 
 impl<'a> Builder<'a> {
-    /// The flat storage of `container`'s elements, in the order
-    /// [`Self::flat_field_path`] resolves it.
-    fn flat_container_elem(
+    pub(crate) fn flat_container_elem(
         &self,
         container: Idx<Expr>,
     ) -> Result<Option<(ColumnElem, FlatStorage)>, CompilerError> {
@@ -597,15 +595,7 @@ impl<'a> Builder<'a> {
             .classify_flat_ref(e)?
             .ok_or_else(|| self.gap_here("lowering a flat `ref` of a non-flat place"))?;
         match self.body.expr_arena[e] {
-            Expr::Index { .. } => {
-                let place = match key.storage {
-                    FlatStorage::Columns => self.column_index_place(e)?,
-                    FlatStorage::Strided => self.strided_index_place(e)?,
-                };
-                let (vec, slot, _) =
-                    place.ok_or_else(|| self.gap_here("flat element index has no column place"))?;
-                Ok(FlatRefVal { vec, slot, key })
-            }
+            Expr::Index { .. } => self.lower_flat_index_place(e, key),
             Expr::FieldAccess { base, .. } => {
                 let base = self.lower_flat_ref(base)?;
                 Ok(FlatRefVal { key, ..base })
@@ -1029,56 +1019,49 @@ impl<'a> Builder<'a> {
             .collect()
     }
 
-    pub(crate) fn flat_leaf_load(
-        &mut self,
-        vec: Idx<Inst>,
-        slot: Idx<Inst>,
-        elem: ColumnElem,
-        storage: FlatStorage,
-        path: Ustr,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        match storage {
-            FlatStorage::Columns => {
-                let col = self.read_field(vec, path);
-                Ok(self.read_index(col, slot, ContainerKind::VecColumn))
-            }
-            FlatStorage::Strided => {
-                let (at, data) = self.flat_strided_slot(vec, slot, elem, path)?;
-                let stored = self.read_index(data, at, ContainerKind::VecStrideSlot);
-                Ok(if self.strided_stores_raw(elem) {
-                    stored
-                } else {
-                    self.emit_cur(Inst::VecStrideFalseToNil(stored))
-                })
-            }
-        }
+    pub(crate) fn flat_leaf_load(&mut self, place: FlatRefVal) -> Result<Idx<Inst>, CompilerError> {
+        let (base, index, kind) = self.flat_leaf_slot(place)?;
+        let value = self.read_index(base, index, kind);
+        Ok(
+            if kind == ContainerKind::VecStrideSlot && !self.strided_stores_raw(place.key.elem) {
+                self.emit_cur(Inst::VecStrideFalseToNil(value))
+            } else {
+                value
+            },
+        )
     }
 
     pub(crate) fn flat_leaf_store(
         &mut self,
-        vec: Idx<Inst>,
-        slot: Idx<Inst>,
-        elem: ColumnElem,
-        storage: FlatStorage,
-        path: Ustr,
+        place: FlatRefVal,
         value: Idx<Inst>,
     ) -> Result<(), CompilerError> {
-        match storage {
+        let (base, index, kind) = self.flat_leaf_slot(place)?;
+        let value =
+            if kind == ContainerKind::VecStrideSlot && !self.strided_stores_raw(place.key.elem) {
+                self.emit_cur(Inst::VecStrideNilToFalse(value))
+            } else {
+                value
+            };
+        self.write_index(base, index, value, kind);
+        Ok(())
+    }
+
+    fn flat_leaf_slot(
+        &mut self,
+        place: FlatRefVal,
+    ) -> Result<(Idx<Inst>, Idx<Inst>, ContainerKind), CompilerError> {
+        let FlatRefVal { vec, slot, key } = place;
+        match key.storage {
             FlatStorage::Columns => {
-                let col = self.read_field(vec, path);
-                self.write_index(col, slot, value, ContainerKind::VecColumn);
+                let col = self.read_field(vec, key.prefix);
+                Ok((col, slot, ContainerKind::VecColumn))
             }
             FlatStorage::Strided => {
-                let (at, data) = self.flat_strided_slot(vec, slot, elem, path)?;
-                let value = if self.strided_stores_raw(elem) {
-                    value
-                } else {
-                    self.emit_cur(Inst::VecStrideNilToFalse(value))
-                };
-                self.write_index(data, at, value, ContainerKind::VecStrideSlot);
+                let (at, data) = self.flat_strided_slot(vec, slot, key.elem, key.prefix)?;
+                Ok((data, at, ContainerKind::VecStrideSlot))
             }
         }
-        Ok(())
     }
 
     fn flat_strided_slot(
@@ -1103,26 +1086,34 @@ impl<'a> Builder<'a> {
         Ok((at, data))
     }
 
-    /// `(vec, slot, elem, storage)` of the root of a flat field path: an
-    /// index into a flat container, or a flat `ref` binding or call.
+    /// Resolve a field path against an indexed element or a flat borrow.
     pub(crate) fn flat_root_place(
         &mut self,
         root: Idx<Expr>,
-    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, ColumnElem, FlatStorage)>, CompilerError> {
-        if matches!(self.body.expr_arena[root], Expr::Index { .. }) {
-            if let Some((vec, slot, elem)) = self.column_index_place(root)? {
-                return Ok(Some((vec, slot, elem, FlatStorage::Columns)));
-            }
-            if let Some((vec, slot, elem)) = self.strided_index_place(root)? {
-                return Ok(Some((vec, slot, elem, FlatStorage::Strided)));
-            }
-            return Ok(None);
+        prefix: Ustr,
+    ) -> Result<Option<FlatRefVal>, CompilerError> {
+        if let Expr::Index { base, .. } = self.body.expr_arena[root] {
+            let Some((elem, storage)) = self.flat_container_elem(base)? else {
+                return Ok(None);
+            };
+            let key = FlatRefKey {
+                elem,
+                storage,
+                prefix,
+            };
+            return self.lower_flat_index_place(root, key).map(Some);
         }
         if self.classify_flat_ref(root)?.is_none() {
             return Ok(None);
         }
-        let val = self.lower_flat_ref(root)?;
-        Ok(Some((val.vec, val.slot, val.key.elem, val.key.storage)))
+        let place = self.lower_flat_ref(root)?;
+        Ok(Some(FlatRefVal {
+            key: FlatRefKey {
+                prefix,
+                ..place.key
+            },
+            ..place
+        }))
     }
 
     /// The root of a flat field path that is not an index: a flat `ref`
@@ -1195,25 +1186,15 @@ impl<'a> Builder<'a> {
                 let Some((root, path, nested)) = self.flat_field_path(base, field)? else {
                     return Ok(None);
                 };
-                let Some((vec, slot, elem, storage)) = self.flat_root_place(root)? else {
+                let Some(place) = self.flat_root_place(root, path)? else {
                     return Err(self.gap_here("flat `ref` read has no root place"));
                 };
-                match nested {
-                    None => {
-                        let leaf = self.flat_leaf_load(vec, slot, elem, storage, path)?;
-                        self.value_bundle_for_expr(e, ValueRepr::Scalar(leaf))
-                            .map(Some)
-                    }
-                    Some(_) => {
-                        let key = FlatRefKey {
-                            elem,
-                            storage,
-                            prefix: path,
-                        };
-                        self.flat_group_read(FlatRefVal { vec, slot, key })
-                            .map(Some)
-                    }
+                if nested.is_some() {
+                    return self.flat_group_read(place).map(Some);
                 }
+                let leaf = self.flat_leaf_load(place)?;
+                self.value_bundle_for_expr(e, ValueRepr::Scalar(leaf))
+                    .map(Some)
             }
             _ => Ok(None),
         }
@@ -1224,7 +1205,12 @@ impl<'a> Builder<'a> {
         let keys = self.flat_leaf_keys(&val.key, &shape);
         let leaves = keys
             .into_iter()
-            .map(|path| self.flat_leaf_load(val.vec, val.slot, val.key.elem, val.key.storage, path))
+            .map(|prefix| {
+                self.flat_leaf_load(FlatRefVal {
+                    key: FlatRefKey { prefix, ..val.key },
+                    ..val
+                })
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let representation = if val.key.prefix.is_empty() {
             val.key.elem.representation()
@@ -1235,20 +1221,5 @@ impl<'a> Builder<'a> {
             representation,
             Self::rebuild_from_leaves(&shape, &leaves, &mut 0),
         ))
-    }
-
-    /// The single leaf `<base>.<field>` names under a flat root, for a
-    /// read-modify-write (`c.v += 1`, `xs[i].v++`).
-    pub(crate) fn flat_leaf_rmw_place(
-        &mut self,
-        base: Idx<Expr>,
-        field: Ustr,
-    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, ColumnElem, FlatStorage, Ustr)>, CompilerError> {
-        let Some((root, path, None)) = self.flat_field_path(base, field)? else {
-            return Ok(None);
-        };
-        Ok(self
-            .flat_root_place(root)?
-            .map(|(vec, slot, elem, storage)| (vec, slot, elem, storage, path)))
     }
 }

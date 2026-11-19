@@ -1,6 +1,24 @@
 //! Expression lowering: the main dispatch, place bases, assignment and
 //! compound assignment, `++`/`--`, safe navigation, and array/spread literals.
+use super::flat_ref::FlatRefVal;
 use super::*;
+
+enum Place {
+    Cell(Idx<Cell>),
+    Global(Ustr),
+    Field(Idx<Inst>, Ustr),
+    Index(Idx<Inst>, Idx<Inst>, ContainerKind),
+    Flat(FlatRefVal),
+    Native(Idx<Inst>, Idx<Inst>, LeafAddr),
+}
+
+enum Write<'a, 'f> {
+    Assign(Idx<Expr>),
+    Update {
+        postfix: bool,
+        apply: &'f dyn Fn(&mut Builder<'a>, Idx<Inst>) -> Result<Idx<Inst>, CompilerError>,
+    },
+}
 
 impl<'a> Builder<'a> {
     /// Forward a terminal destination through the syntax that has no value
@@ -1068,12 +1086,12 @@ impl<'a> Builder<'a> {
     }
 
     /// Rebuild each first-class value along the field path.
-    fn first_class_field_update(
+    fn write_first_class_field(
         &mut self,
+        target: Idx<Expr>,
         cell: Idx<Cell>,
         path: &[(Ustr, Ustr)],
-        result: Option<bool>,
-        update: impl FnOnce(&mut Self, Idx<Inst>) -> Result<Idx<Inst>, CompilerError>,
+        write: Write<'a, '_>,
     ) -> Result<Option<Idx<Inst>>, CompilerError> {
         let mut levels = vec![self.emit_cur(Inst::Load(cell))];
         for &(_, field) in &path[..path.len() - 1] {
@@ -1083,8 +1101,16 @@ impl<'a> Builder<'a> {
         let (_, last) = path[path.len() - 1];
         let base = *levels.last().expect("root level");
         let old = self.read_field(base, last);
-        let new = update(self, old)?;
-        let mut value = new;
+        let (mut value, result) = match write {
+            Write::Assign(rhs) => {
+                let expected = self.concrete_expr_ty(target);
+                (self.lower_expr_with_expected(rhs, expected)?, None)
+            }
+            Write::Update { postfix, apply } => {
+                let new = apply(self, old)?;
+                (new, Some(if postfix { old } else { new }))
+            }
+        };
         for (&(name, field), &base) in path.iter().zip(&levels).rev() {
             let parts = self
                 .struct_field_names_required(name)?
@@ -1105,61 +1131,184 @@ impl<'a> Builder<'a> {
         }
         // GLSL renders a value at its use, so a result read before the store
         // but used after it would see the new field. Snapshot it in a cell.
-        let snapshot = result.map(|old_wanted| {
+        let snapshot = result.map(|result| {
             let snap = self.f.new_cell(None);
-            self.store_cell(snap, if old_wanted { old } else { new });
+            self.store_cell(snap, result);
             snap
         });
         self.store_cell(cell, value);
         Ok(snapshot.map(|snap| self.emit_cur(Inst::Load(snap))))
     }
 
-    /// `place.f = v` where `place` lies in a scalarized binding's leaves.
-    fn group_leaf_store(
+    fn write_group_field(
         &mut self,
         target: Idx<Expr>,
         cells: &[GroupLeaf],
-        selected: &FieldShape,
-        value: Idx<Expr>,
-    ) -> Result<(), CompilerError> {
-        let leaves = match selected {
-            FieldShape::Prim => {
-                let expected = self.concrete_expr_ty(target);
-                vec![self.lower_expr_with_expected(value, expected)?]
-            }
+        shape: FieldShape,
+        write: Write<'a, '_>,
+    ) -> Result<Option<Idx<Inst>>, CompilerError> {
+        match shape {
+            FieldShape::Prim => self.write_scalar(
+                Place::Cell(cells[0].cell()),
+                self.concrete_expr_ty(target),
+                write,
+            ),
             FieldShape::Nested(shape) => {
-                let r = self.lower_expr_repr(value)?;
-                self.repr_to_storage_leaves(&r, shape, "scalarized field assignment")?
+                let Write::Assign(value) = write else {
+                    unreachable!("scalar update of aggregate storage");
+                };
+                let repr = self.lower_expr_repr(value)?;
+                let leaves =
+                    self.repr_to_storage_leaves(&repr, &shape, "scalarized field assignment")?;
+                for (leaf, value) in cells.iter().zip(leaves) {
+                    self.store_cell(leaf.cell(), value);
+                }
+                Ok(None)
             }
-        };
-        for (leaf, value) in cells.iter().zip(leaves) {
-            self.store_cell(leaf.cell(), value);
+        }
+    }
+
+    fn read_place(&mut self, place: &Place) -> Result<Idx<Inst>, CompilerError> {
+        Ok(match *place {
+            Place::Cell(cell) => self.emit_cur(Inst::Load(cell)),
+            Place::Global(name) => self.emit_cur(Inst::Global(name)),
+            Place::Field(base, key) => self.read_field(base, key),
+            Place::Index(base, index, kind) => self.read_index(base, index, kind),
+            Place::Flat(place) => self.flat_leaf_load(place)?,
+            Place::Native(buf, slot, ref addr) => self.nb_leaf_load(buf, slot, addr),
+        })
+    }
+
+    fn write_place(&mut self, place: &Place, value: Idx<Inst>) -> Result<(), CompilerError> {
+        match *place {
+            Place::Cell(cell) => {
+                self.store_cell(cell, value);
+            }
+            Place::Global(name) => {
+                self.emit_cur(Inst::StoreGlobal { name, value });
+            }
+            Place::Field(base, key) => {
+                self.write_field(base, key, value);
+            }
+            Place::Index(base, index, kind) => {
+                self.write_index(base, index, value, kind);
+            }
+            Place::Flat(place) => self.flat_leaf_store(place, value)?,
+            Place::Native(buf, slot, ref addr) => self.nb_leaf_store(buf, slot, addr, value),
         }
         Ok(())
     }
 
-    /// Recursively read the storage of an assignment target's base.
+    fn write_scalar(
+        &mut self,
+        place: Place,
+        expected: Option<&MonoTy>,
+        write: Write<'a, '_>,
+    ) -> Result<Option<Idx<Inst>>, CompilerError> {
+        let (value, result) = match write {
+            Write::Assign(rhs) => (self.lower_expr_with_expected(rhs, expected)?, None),
+            Write::Update { postfix, apply } => {
+                let old = self.read_place(&place)?;
+                let new = apply(self, old)?;
+                (new, Some(if postfix { old } else { new }))
+            }
+        };
+        self.write_place(&place, value)?;
+        Ok(result)
+    }
+
+    fn index_place(
+        &mut self,
+        base: Idx<Expr>,
+        index: Idx<Expr>,
+    ) -> Result<(Idx<Inst>, Idx<Inst>, ContainerKind), CompilerError> {
+        let (base, kind) = self.lower_index_base(base)?;
+        let index = self.lower_expr(index)?;
+        Ok((base, index, kind))
+    }
+
+    fn field_plan(
+        &self,
+        base: Idx<Expr>,
+        field: Ustr,
+        spliced: bool,
+    ) -> Result<Option<StructFieldPlan>, CompilerError> {
+        match self.field_base_ty(base) {
+            Some(TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            }) if self.swizzle_of(base, field).is_none() => {
+                self.struct_field_plan(name, field, spliced).map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn physical_field_place(
+        &mut self,
+        base: Idx<Expr>,
+        field: Ustr,
+        absent: Option<Idx<Block>>,
+    ) -> Result<(Idx<Inst>, Ustr, Option<ValueShape>), CompilerError> {
+        let (holder, key, shape, _) = self.physical_field_layout(base, field)?;
+        let owner = self.lower_place_base_with_guard(holder, absent)?;
+        Ok((owner, key, shape))
+    }
+
     pub(crate) fn lower_place_base(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
-        let value = self.lower_place_base_inner(e)?;
+        self.lower_place_base_with_guard(e, None)
+    }
+
+    fn lower_place_base_with_guard(
+        &mut self,
+        e: Idx<Expr>,
+        absent: Option<Idx<Block>>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let value = self.read_place_base(e, absent)?;
         self.mark_record_base(e, value);
         Ok(value)
     }
 
-    fn lower_place_base_inner(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
-        let nobox_global_place = self.nobox_global_place(e)?;
-        let flat_field = match self.body.expr_arena[e] {
-            Expr::FieldAccess { base, field } if self.swizzle_of(base, field).is_none() => {
-                match self.field_base_ty(base) {
-                    Some(TypeExpr::App {
-                        ctor: TypeCtor::Nominal(sname),
-                        ..
-                    }) => Some(self.struct_field_plan(sname, field, false)?),
-                    _ => None,
+    fn guard_place_receiver(&mut self, recv: Idx<Inst>, absent: Idx<Block>) {
+        let present = self.f.new_block();
+        self.branch_on_nil(recv, absent, present);
+        self.cur = present;
+    }
+
+    fn read_place_base(
+        &mut self,
+        e: Idx<Expr>,
+        absent: Option<Idx<Block>>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let syntax = &self.body.expr_arena[e];
+        if let (Some(join), &Expr::SafeNav { base, field }) = (absent, syntax) {
+            if let Some((guards, cells, FieldShape::Prim)) = self.group_leaf_walk(e) {
+                self.group_presence_guard(&guards, join);
+                return self.group_leaf_place_base(e, cells[0]);
+            }
+            let recv = self.lower_place_base_with_guard(base, absent)?;
+            self.guard_place_receiver(recv, join);
+            return self.read_place(&Place::Field(recv, field));
+        }
+        if let Expr::FieldAccess { base, field } = *syntax {
+            let flat = self
+                .field_plan(base, field, false)?
+                .and_then(|plan| plan.flat_shape());
+            let direct = self.swizzle_of(base, field).is_none() && flat.is_none();
+            if absent.is_none() || !direct {
+                if let Some((cells, FieldShape::Prim)) = self.group_leaf_place(e) {
+                    return self.group_leaf_place_base(e, cells[0]);
+                }
+                if self.flat_leaf_path(base, field)?.is_some() {
+                    return self.lower_expr(e);
                 }
             }
-            _ => None,
-        };
-        match self.body.expr_arena[e] {
+            if direct {
+                let (owner, key, _) = self.physical_field_place(base, field, absent)?;
+                return self.read_place(&Place::Field(owner, key));
+            }
+        }
+        match *syntax {
             // Element stores, leaf places and `ref` borrows of flat storage are
             // decomposed before this ([`flat_ref`]); a flat element has no
             // table to name as a place.
@@ -1172,11 +1321,10 @@ impl<'a> Builder<'a> {
                 ))
             }
             Expr::Index { base, index } => {
-                let (b, kind) = self.lower_index_base(base)?;
-                let i = self.lower_expr(index)?;
-                Ok(self.read_index(b, i, kind))
+                let (base, index, kind) = self.index_place(base, index)?;
+                self.read_place(&Place::Index(base, index, kind))
             }
-            Expr::Global(name) if nobox_global_place.is_some() => {
+            Expr::Global(name) if self.nobox_global_place(e)?.is_some() => {
                 Err(CompilerError::new_with_label(
                     self.body.expr_spans[e],
                     format!(
@@ -1185,39 +1333,15 @@ impl<'a> Builder<'a> {
                     ),
                 ))
             }
-            Expr::Global(name) => Ok(self.emit_cur(Inst::Global(name))),
+            Expr::Global(name) => self.read_place(&Place::Global(name)),
             Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
-                Ok(self.emit_cur(Inst::Global(self.static_cells[&raw(b)])))
+                self.read_place(&Place::Global(self.static_cells[&raw(b)]))
             }
             Expr::Var(b)
                 if self.boxed_value_local(b, e).is_some()
                     || self.nullable_boxed_value_local(b, e).is_some() =>
             {
-                Ok(self.emit_cur(Inst::Load(self.binds[&raw(b)])))
-            }
-            Expr::FieldAccess { .. }
-                if let Some((cells, FieldShape::Prim)) = self.group_leaf_place(e) =>
-            {
-                self.group_leaf_place_base(e, cells[0])
-            }
-            // A leaf of a column-stored or strided element has no slot to name;
-            // read it. A leaf that can be a place base holds a reference
-            // (`xs[i].o` in `xs[i].o.hp = v`), so the read is that object.
-            Expr::FieldAccess { base, field } if self.flat_leaf_path(base, field)?.is_some() => {
-                self.lower_expr(e)
-            }
-            // A swizzle and a flattened-enum field are not places (both
-            // materialize a fresh value); leave them to the rvalue path, which
-            // rejects or copies as it does today.
-            Expr::FieldAccess { base, field }
-                if self.swizzle_of(base, field).is_none()
-                    && !flat_field
-                        .as_ref()
-                        .is_some_and(|p| p.flat_shape().is_some()) =>
-            {
-                let (pbase, key) = self.physical_field(base, field)?;
-                let b = self.lower_place_base(pbase)?;
-                Ok(self.read_field(b, key))
+                self.read_place(&Place::Cell(self.binds[&raw(b)]))
             }
             // Reject a value temporary as an assignment base.
             Expr::Call { .. } | Expr::SafeNavCall { .. } if self.expr_is_value_struct(e) => {
@@ -1232,59 +1356,27 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn lower_guarded_place_base(
+    fn write_guarded_field(
         &mut self,
-        e: Idx<Expr>,
-        absent_join: Idx<Block>,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let value = self.lower_guarded_place_base_inner(e, absent_join)?;
-        self.mark_record_base(e, value);
-        Ok(value)
-    }
-
-    fn lower_guarded_place_base_inner(
-        &mut self,
-        e: Idx<Expr>,
-        absent_join: Idx<Block>,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let flat_field = match self.body.expr_arena[e] {
-            Expr::FieldAccess { base, field } if self.swizzle_of(base, field).is_none() => {
-                match self.field_base_ty(base) {
-                    Some(TypeExpr::App {
-                        ctor: TypeCtor::Nominal(sname),
-                        ..
-                    }) => Some(self.struct_field_plan(sname, field, false)?),
-                    _ => None,
-                }
-            }
-            _ => None,
-        };
-        match self.body.expr_arena[e] {
-            Expr::SafeNav { .. }
-                if let Some((guards, cells, FieldShape::Prim)) = self.group_leaf_walk(e) =>
-            {
-                self.group_presence_guard(&guards, absent_join);
-                self.group_leaf_place_base(e, cells[0])
-            }
-            Expr::SafeNav { base, field } => {
-                let recv = self.lower_guarded_place_base(base, absent_join)?;
-                let present = self.f.new_block();
-                self.branch_on_nil(recv, absent_join, present);
-                self.cur = present;
-                Ok(self.read_field(recv, field))
-            }
-            Expr::FieldAccess { base, field }
-                if self.swizzle_of(base, field).is_none()
-                    && !flat_field
-                        .as_ref()
-                        .is_some_and(|p| p.flat_shape().is_some()) =>
-            {
-                let (pbase, key) = self.physical_field(base, field)?;
-                let base = self.lower_guarded_place_base(pbase, absent_join)?;
-                Ok(self.read_field(base, key))
-            }
-            _ => self.lower_place_base(e),
+        target: Idx<Expr>,
+        base: Idx<Expr>,
+        field: Ustr,
+        write: Write<'a, '_>,
+    ) -> Result<(), CompilerError> {
+        let join = self.f.new_block();
+        if let Some((guards, cells, shape)) = self.group_leaf_walk(target)
+            && (matches!(write, Write::Assign(_)) || matches!(shape, FieldShape::Prim))
+        {
+            self.group_presence_guard(&guards, join);
+            self.write_group_field(target, &cells, shape, write)?;
+        } else {
+            let recv = self.lower_place_base_with_guard(base, Some(join))?;
+            self.guard_place_receiver(recv, join);
+            self.write_scalar(Place::Field(recv, field), None, write)?;
         }
+        self.f.set_term(self.cur, Term::Goto(join));
+        self.cur = join;
+        Ok(())
     }
 
     /// `place.f = v` on a stdlib descriptor. Copies share its one Lua table, so
@@ -1296,18 +1388,14 @@ impl<'a> Builder<'a> {
         field: Ustr,
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
-        enum Owner {
-            Field(Idx<Inst>, Ustr),
-            Global(Ustr),
-        }
         let owner = match self.body.expr_arena[place] {
             Expr::FieldAccess { base, field: slot } => {
-                let (pbase, key) = self.physical_field(base, slot)?;
-                Owner::Field(self.lower_place_base(pbase)?, key)
+                let (base, key, _) = self.physical_field_place(base, slot, None)?;
+                Place::Field(base, key)
             }
-            Expr::Global(name) => Owner::Global(name),
+            Expr::Global(name) => Place::Global(name),
             Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
-                Owner::Global(self.static_cells[&raw(b)])
+                Place::Global(self.static_cells[&raw(b)])
             }
             _ => {
                 return Err(self.gap_here(
@@ -1316,10 +1404,7 @@ impl<'a> Builder<'a> {
                 ));
             }
         };
-        let old = match owner {
-            Owner::Field(b, key) => self.read_field(b, key),
-            Owner::Global(name) => self.emit_cur(Inst::Global(name)),
-        };
+        let old = self.read_place(&owner)?;
         let key = self.emit_cur(Inst::Const(Lit::Str(field)));
         let v = self.lower_expr(value)?;
         // The write's target names the site, which a statement-position
@@ -1328,11 +1413,79 @@ impl<'a> Builder<'a> {
         let fresh = self.call_spine("__descriptor_with", vec![old, key, v]);
         self.cur_expr = outer_expr;
         let fresh = fresh?;
-        match owner {
-            Owner::Field(b, key) => self.write_field(b, key, fresh),
-            Owner::Global(name) => self.emit_cur(Inst::StoreGlobal { name, value: fresh }),
+        self.write_place(&owner, fresh)
+    }
+
+    fn write_field_target(
+        &mut self,
+        target: Idx<Expr>,
+        base: Idx<Expr>,
+        field: Ustr,
+        globals: Option<(Vec<Ustr>, Option<ValueShape>)>,
+        write: Write<'a, '_>,
+    ) -> Result<Option<Idx<Inst>>, CompilerError> {
+        if let Some((cell, path)) = self.first_class_field_place(target) {
+            return self.write_first_class_field(target, cell, &path, write);
+        }
+        if let Some((cells, shape)) = self.group_leaf_place(target)
+            && (matches!(write, Write::Assign(_)) || matches!(shape, FieldShape::Prim))
+        {
+            return self.write_group_field(target, &cells, shape, write);
+        }
+        match write {
+            Write::Assign(value) => {
+                if let Some((leaves, shape)) = globals {
+                    self.nobox_global_store(target, &leaves, shape, value)?;
+                    return Ok(None);
+                }
+                if !self.scx.values_first_class
+                    && matches!(
+                        self.field_base_ty(base),
+                        Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })
+                            if bone_core::modules::is_descriptor_key(name)
+                    )
+                {
+                    self.descriptor_field_store(target, base, field, value)?;
+                    return Ok(None);
+                }
+            }
+            // JS updates the typed-array leaf. Lua can update the FFI struct slot.
+            Write::Update { .. } if self.scx.target == bone_core::hir::FnBackend::Js => {
+                if let Some((buf, slot, elem, path)) = self.nb_leaf_field_place(base, field)?
+                    && let Some(addr) = self.nb_leaf_address(elem, &path)?
+                {
+                    return self.write_scalar(Place::Native(buf, slot, addr), None, write);
+                }
+            }
+            _ => {}
+        }
+        let flat = self.flat_field_path(base, field)?;
+        let flat = match write {
+            Write::Assign(_) => flat.or(Some((base, field, None))),
+            Write::Update { .. } => flat.filter(|(_, _, shape)| shape.is_none()),
         };
-        Ok(())
+        if let Some((root, path, shape)) = flat
+            && let Some(place) = self.flat_root_place(root, path)?
+        {
+            return match write {
+                Write::Assign(value) => {
+                    self.flat_field_store(place, shape.as_ref(), value)?;
+                    Ok(None)
+                }
+                Write::Update { .. } => self.write_scalar(Place::Flat(place), None, write),
+            };
+        }
+        if let Write::Assign(value) = write {
+            if let Some((buf, slot, elem, path)) = self.nb_leaf_field_place(base, field)? {
+                self.nb_leaf_field_store(buf, slot, elem, &path, value)?;
+            } else {
+                self.store_physical_field(target, base, field, value)?;
+            }
+            Ok(None)
+        } else {
+            let (base, key, _) = self.physical_field_place(base, field, None)?;
+            self.write_scalar(Place::Field(base, key), None, write)
+        }
     }
 
     pub(crate) fn lower_assign_effect(
@@ -1381,7 +1534,7 @@ impl<'a> Builder<'a> {
             Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
                 let name = self.static_cells[&raw(b)];
                 let v = self.lower_expr(value)?;
-                self.emit_cur(Inst::StoreGlobal { name, value: v });
+                self.write_place(&Place::Global(name), v)?;
             }
             // All uses of a flat reference need the same storage layout.
             Expr::Var(b) if self.flat_ref_binds.contains_key(&raw(b)) => {
@@ -1438,173 +1591,20 @@ impl<'a> Builder<'a> {
                     }
                     _ => v,
                 };
-                self.store_cell(cell, v);
-            }
-            Expr::FieldAccess { .. }
-                if let Some((cell, path)) = self.first_class_field_place(target) =>
-            {
-                let expected = self.concrete_expr_ty(target);
-                self.first_class_field_update(cell, &path, None, |s, _| {
-                    s.lower_expr_with_expected(value, expected)
-                })?;
-            }
-            Expr::FieldAccess { .. }
-                if let Some((cells, selected)) = self.group_leaf_place(target) =>
-            {
-                self.group_leaf_store(target, &cells, &selected, value)?;
-            }
-            // A leaf of a `nobox` global (`SPOT.x = v`, `SPOT.a.b = v`): the
-            // group has no slot to take a place base of, so the write lands in
-            // the leaf global itself.
-            Expr::FieldAccess { .. } if nobox_global_place.is_some() => {
-                let (leaves, shape) = nobox_global_place.clone().expect("guard matched");
-                self.nobox_global_store(target, &leaves, shape, value)?;
-            }
-            Expr::FieldAccess { base, field }
-                if !self.scx.values_first_class
-                    && matches!(
-                        self.field_base_ty(base),
-                        Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })
-                            if bone_core::modules::is_descriptor_key(name)
-                    ) =>
-            {
-                self.descriptor_field_store(target, base, field, value)?;
+                self.write_place(&Place::Cell(cell), v)?;
             }
             Expr::FieldAccess { base, field } => {
-                // `xs[i].x = v` / `xs[i].at.x = v` on a column-stored or strided
-                // Vec: there is no element slot to take a place base of, so the
-                // write lands directly in the leaf columns under the dotted path.
-                let (root, path, nested) = self
-                    .flat_field_path(base, field)?
-                    .unwrap_or((base, field, None));
-                if let Some((vec, idx, elem, storage)) = self.flat_root_place(root)? {
-                    return match storage {
-                        FlatStorage::Columns => {
-                            self.column_leaf_store(vec, idx, elem, path, nested.as_ref(), value)
-                        }
-                        FlatStorage::Strided => {
-                            self.strided_leaf_store(vec, idx, elem, path, nested.as_ref(), value)
-                        }
-                    };
-                }
-                // A leaf-addressed buffer has no whole-element place to write through.
-                if let Some((buf, idx, elem, path)) = self.nb_leaf_field_place(base, field)? {
-                    return self.nb_leaf_field_store(buf, idx, elem, &path, value);
-                }
-                // A whole embedded field (`p.f = Foo { .. }`): the child has no
-                // slot of its own, so write its leaves. Composition happens
-                // BEFORE this, so `p.f` here is the child, not a physical key.
-                let embed_plan = match self.field_base_ty(base) {
-                    Some(TypeExpr::App {
-                        ctor: TypeCtor::Nominal(sname),
-                        ..
-                    }) if self.swizzle_of(base, field).is_none() => {
-                        Some(self.struct_field_plan(sname, field, false)?)
-                    }
-                    _ => None,
-                };
-                if let Some((cname, nullable)) = embed_plan.as_ref().and_then(|p| p.embed()) {
-                    let (pbase, key) = self.physical_field(base, field)?;
-                    let b = self.lower_place_base(pbase)?;
-                    self.store_embed(b, key, cname, nullable, value)?;
-                    return Ok(());
-                }
-                // An embed LEAF write composes to one dotted key on the parent
-                // that holds it (`h.p.x = 9` -> `h["p.x"] = 9`).
-                let (pbase, key, projected_shape, _) = self.physical_field_layout(base, field)?;
-                let b = self.lower_place_base(pbase)?;
-                if let Some(sname) = self.leaf_table_base(base)?
-                    && self.leaf_table_value_child(sname, field)?.is_some()
-                {
-                    return self.store_leaf_table_child(b, sname, field, key, value);
-                }
-                if let Some(shape) = projected_shape {
-                    let repr = self.lower_expr_repr(value)?;
-                    let leaves = self.repr_to_leaves_bundle_for_shape(&repr, &shape)?;
-                    let keys = super::shape::leaf_names(&shape, key.as_str(), ".");
-                    for (slot, value) in Self::pair_embed_leaves(
-                        keys.into_iter()
-                            .map(|key| crate::names::ustr(&key))
-                            .collect(),
-                        leaves,
-                    )? {
-                        self.write_field(b, slot, value);
-                    }
-                    return Ok(());
-                }
-                let spliced_embed = match self.field_base_ty(base) {
-                    Some(TypeExpr::App {
-                        ctor: TypeCtor::Nominal(sname),
-                        ..
-                    }) if key != field && self.swizzle_of(base, field).is_none() => {
-                        self.struct_field_plan(sname, field, true)?.embed()
-                    }
-                    _ => None,
-                };
-                if let Some((cname, nullable)) = spliced_embed {
-                    let leaves = self.embed_value_leaves(nullable, cname, value)?;
-                    for (slot, v) in Self::embed_field_slots(key, leaves) {
-                        self.write_field(b, slot, v);
-                    }
-                    return Ok(());
-                }
-                // A flattened enum field: write the discriminant + payload slots
-                // directly on the parent table (no nested box).
-                let flat_plan = match self.field_base_ty(base) {
-                    Some(TypeExpr::App {
-                        ctor: TypeCtor::Nominal(sname),
-                        ..
-                    }) if self.swizzle_of(base, field).is_none() => {
-                        Some(self.struct_field_plan(sname, field, false)?)
-                    }
-                    _ => None,
-                };
-                if let Some(shape) = flat_plan.and_then(|p| p.flat_shape()) {
-                    let cells = self.lower_flat_value(&shape, value)?;
-                    self.store_flat_cells(b, key, cells);
-                    return Ok(());
-                }
-                // A whole `nobox` child that is not inline lives nested in its
-                // cdata parent: write its leaves through the stored child, the
-                // inverse of `cdata_leaves`, rather than box a copy to store.
-                if !self.scx.values_first_class
-                    && let Some(cname) = self.value_struct_of(target)
-                    && self.is_nobox_struct(cname)
-                {
-                    let shape = self.nominal_rep_shape_required(cname, false)?;
-                    if self.shape_is_plain_keys(&shape) {
-                        let r = self.lower_expr_repr(value)?;
-                        let leaves = self.repr_to_leaves_bundle_for_shape(&r, &shape)?;
-                        let paths = self.boxed_leaf_paths(&shape, true)?;
-                        if paths.len() != leaves.len() {
-                            return Err(self.gap_here(format!(
-                                "`{cname}` has {} leaf paths but the value produced {} leaves",
-                                paths.len(),
-                                leaves.len()
-                            )));
-                        }
-                        let child = self.read_field(b, key);
-                        for (path, leaf) in paths.into_iter().zip(leaves) {
-                            let (last, walk) = path.split_last().ok_or_else(|| {
-                                self.gap_here(format!("`{cname}` has an empty leaf path"))
-                            })?;
-                            let mut at = child;
-                            for seg in walk {
-                                at = self.read_field(at, *seg);
-                            }
-                            self.write_field(at, *last, leaf);
-                        }
-                        return Ok(());
-                    }
-                }
-                let expected = self.concrete_expr_ty(target);
-                let v = self.lower_expr_with_expected(value, expected)?;
-                self.write_field(b, key, v);
+                self.write_field_target(
+                    target,
+                    base,
+                    field,
+                    nobox_global_place,
+                    Write::Assign(value),
+                )?;
             }
             // The synthesized store call belongs to the target expression.
             Expr::Index { base, index } => self.with_site_expr(target, |s| {
-                let (b, kind) = s.lower_index_base(base)?;
-                let i = s.lower_expr(index)?;
+                let (b, i, kind) = s.index_place(base, index)?;
                 // Column storage has no element slot: the write goes leaf-wise
                 // into K columns, so the value is consumed as a repr and never
                 // boxed. Mirrors `column_element_repr` on the read side.
@@ -1625,44 +1625,117 @@ impl<'a> Builder<'a> {
                     }
                 }
                 let v = s.lower_expr(value)?;
-                s.write_index(b, i, v, kind);
-                Ok(())
+                s.write_place(&Place::Index(b, i, kind), v)
             })?,
-            Expr::Global(_) if nobox_global_place.is_some() => {
-                let (leaves, shape) = nobox_global_place.clone().expect("guard matched");
+            Expr::Global(_) if let Some((leaves, shape)) = nobox_global_place => {
                 self.nobox_global_store(target, &leaves, shape, value)?;
             }
             Expr::Global(name) => {
                 let v = self.lower_expr(value)?;
-                self.emit_cur(Inst::StoreGlobal { name, value: v });
-            }
-            // An absent link skips evaluation of the right-hand side.
-            Expr::SafeNav { .. }
-                if let Some((guards, cells, selected)) = self.group_leaf_walk(target) =>
-            {
-                let join = self.f.new_block();
-                self.group_presence_guard(&guards, join);
-                self.group_leaf_store(target, &cells, &selected, value)?;
-                self.f.set_term(self.cur, Term::Goto(join));
-                self.cur = join;
+                self.write_place(&Place::Global(name), v)?;
             }
             Expr::SafeNav { base, field } => {
-                let join = self.f.new_block();
-                let recv = self.lower_guarded_place_base(base, join)?;
-                let store_bb = self.f.new_block();
-                self.branch_on_nil(recv, join, store_bb);
-                self.cur = store_bb;
-                let v = self.lower_expr(value)?;
-                self.write_field(recv, field, v);
-                self.f.set_term(self.cur, Term::Goto(join));
-                self.cur = join;
+                self.write_guarded_field(target, base, field, Write::Assign(value))?;
             }
             _ => return Err(gap("assignment to this target form (later)")),
         }
         Ok(())
     }
 
-    /// Evaluate the read-modify-write target once, before the right-hand side.
+    fn store_physical_field(
+        &mut self,
+        target: Idx<Expr>,
+        base: Idx<Expr>,
+        field: Ustr,
+        value: Idx<Expr>,
+    ) -> Result<(), CompilerError> {
+        // A whole embedded field (`p.f = Foo { .. }`): the child has no
+        // slot of its own, so write its leaves. Composition happens
+        // BEFORE this, so `p.f` here is the child, not a physical key.
+        let embed_plan = self.field_plan(base, field, false)?;
+        if let Some((cname, nullable)) = embed_plan.as_ref().and_then(|p| p.embed()) {
+            let (b, key, _) = self.physical_field_place(base, field, None)?;
+            self.store_embed(b, key, cname, nullable, value)?;
+            return Ok(());
+        }
+        // An embed LEAF write composes to one dotted key on the parent
+        // that holds it (`h.p.x = 9` -> `h["p.x"] = 9`).
+        let (b, key, projected_shape) = self.physical_field_place(base, field, None)?;
+        if let Some(sname) = self.leaf_table_base(base)?
+            && self.leaf_table_value_child(sname, field)?.is_some()
+        {
+            return self.store_leaf_table_child(b, sname, field, key, value);
+        }
+        if let Some(shape) = projected_shape {
+            let repr = self.lower_expr_repr(value)?;
+            let leaves = self.repr_to_leaves_bundle_for_shape(&repr, &shape)?;
+            let keys = super::shape::leaf_names(&shape, key.as_str(), ".");
+            for (slot, value) in Self::pair_embed_leaves(
+                keys.into_iter()
+                    .map(|key| crate::names::ustr(&key))
+                    .collect(),
+                leaves,
+            )? {
+                self.write_field(b, slot, value);
+            }
+            return Ok(());
+        }
+        if key != field
+            && let Some((cname, nullable)) = self
+                .field_plan(base, field, true)?
+                .and_then(|plan| plan.embed())
+        {
+            let leaves = self.embed_value_leaves(nullable, cname, value)?;
+            for (slot, v) in Self::embed_field_slots(key, leaves) {
+                self.write_field(b, slot, v);
+            }
+            return Ok(());
+        }
+        // A flattened enum field: write the discriminant + payload slots
+        // directly on the parent table (no nested box).
+        if let Some(shape) = embed_plan.and_then(|p| p.flat_shape()) {
+            let cells = self.lower_flat_value(&shape, value)?;
+            self.store_flat_cells(b, key, cells);
+            return Ok(());
+        }
+        // A whole `nobox` child that is not inline lives nested in its
+        // cdata parent: write its leaves through the stored child, the
+        // inverse of `cdata_leaves`, rather than box a copy to store.
+        if !self.scx.values_first_class
+            && let Some(cname) = self.value_struct_of(target)
+            && self.is_nobox_struct(cname)
+        {
+            let shape = self.nominal_rep_shape_required(cname, false)?;
+            if self.shape_is_plain_keys(&shape) {
+                let r = self.lower_expr_repr(value)?;
+                let leaves = self.repr_to_leaves_bundle_for_shape(&r, &shape)?;
+                let paths = self.boxed_leaf_paths(&shape, true)?;
+                if paths.len() != leaves.len() {
+                    return Err(self.gap_here(format!(
+                        "`{cname}` has {} leaf paths but the value produced {} leaves",
+                        paths.len(),
+                        leaves.len()
+                    )));
+                }
+                let child = self.read_field(b, key);
+                for (path, leaf) in paths.into_iter().zip(leaves) {
+                    let (last, walk) = path.split_last().ok_or_else(|| {
+                        self.gap_here(format!("`{cname}` has an empty leaf path"))
+                    })?;
+                    let mut at = child;
+                    for seg in walk {
+                        at = self.read_field(at, *seg);
+                    }
+                    self.write_field(at, *last, leaf);
+                }
+                return Ok(());
+            }
+        }
+        let expected = self.concrete_expr_ty(target);
+        let v = self.lower_expr_with_expected(value, expected)?;
+        self.write_place(&Place::Field(b, key), v)
+    }
+
     pub(crate) fn assign_target_is_f32(&self, target: Idx<Expr>) -> bool {
         let (Expr::FieldAccess { base, field } | Expr::SafeNav { base, field }) =
             self.body.expr_arena[target]
@@ -1770,55 +1843,24 @@ impl<'a> Builder<'a> {
             None
         };
         let combine = |s: &mut Self, cur| -> Result<Idx<Inst>, CompilerError> {
-            let new = s.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
+            let mut new = s.compound_combine(e, scalar, op_fn, overload, cur, value)?;
+            if f32_target {
+                new = s.emit_cur(Inst::FloatToF32(new));
+            }
             Ok(s.check_integer_field(new, s.assign_integer_field_unsigned(target)))
         };
         let Expr::SafeNav { base, field } = self.body.expr_arena[target] else {
-            unreachable!("compound assignment without a top-level safe navigation")
+            unreachable!("compound assignment without a top-level safe navigation");
         };
-        if let Some((guards, cells, FieldShape::Prim)) = self.group_leaf_walk(target) {
-            let join = self.f.new_block();
-            self.group_presence_guard(&guards, join);
-            let cell = cells[0].cell();
-            let cur = self.emit_cur(Inst::Load(cell));
-            let new_v = combine(self, cur)?;
-            self.store_cell(cell, new_v);
-            self.f.set_term(self.cur, Term::Goto(join));
-            self.cur = join;
-        } else {
-            let join = self.f.new_block();
-            let recv = self.lower_guarded_place_base(base, join)?;
-            let store_bb = self.f.new_block();
-            self.branch_on_nil(recv, join, store_bb);
-            self.cur = store_bb;
-            let cur = self.read_field(recv, field);
-            let new_v = combine(self, cur)?;
-            self.write_field(recv, field, new_v);
-            self.f.set_term(self.cur, Term::Goto(join));
-            self.cur = join;
-        }
-        Ok(())
-    }
-
-    /// `cur <op> rv`: native arith for a scalar target, else the resolved
-    /// operator-overload call `op_fn(cur, rv)`.
-    /// [`Self::compound_combine`], rounding the result for an `f32` target.
-    fn compound_combine_f32(
-        &mut self,
-        e: Idx<Expr>,
-        f32_target: bool,
-        scalar: Option<(ArithTy, ArithTy)>,
-        op_fn: Ustr,
-        overload: Option<FuncRef>,
-        cur: Idx<Inst>,
-        rhs: Idx<Expr>,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let v = self.compound_combine(e, scalar, op_fn, overload, cur, rhs)?;
-        Ok(if f32_target {
-            self.emit_cur(Inst::FloatToF32(v))
-        } else {
-            v
-        })
+        self.write_guarded_field(
+            target,
+            base,
+            field,
+            Write::Update {
+                postfix: false,
+                apply: &combine,
+            },
+        )
     }
 
     pub(crate) fn compound_combine(
@@ -1879,107 +1921,40 @@ impl<'a> Builder<'a> {
                 bumped
             }
         };
-        self.lower_read_modify_write(target, nobox_global_place, postfix, |s, old| {
-            Ok(bump(s, old))
-        })
-    }
-
-    /// Read `target`, store `update` of the read back into it, and yield the old
-    /// value for postfix increments/decrements, the new one for prefix.
-    fn lower_read_modify_write(
-        &mut self,
-        target: Idx<Expr>,
-        nobox_global_place: Option<(Vec<Ustr>, Option<ValueShape>)>,
-        postfix: bool,
-        update: impl FnOnce(&mut Self, Idx<Inst>) -> Result<Idx<Inst>, CompilerError>,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let update = |s: &mut Self, old| -> Result<Idx<Inst>, CompilerError> {
-            let new = update(s, old)?;
+        let update = |s: &mut Self, old| {
+            let new = bump(s, old);
             Ok(s.check_integer_field(new, s.assign_integer_field_unsigned(target)))
         };
-        let pick = |old, new| if postfix { old } else { new };
-        match self.body.expr_arena[target] {
+        let write = Write::Update {
+            postfix,
+            apply: &update,
+        };
+        let place = match self.body.expr_arena[target] {
             Expr::Var(b) if self.static_cells.contains_key(&raw(b)) => {
-                let name = self.static_cells[&raw(b)];
-                let old = self.emit_cur(Inst::Global(name));
-                let new = update(self, old)?;
-                self.emit_cur(Inst::StoreGlobal { name, value: new });
-                Ok(pick(old, new))
+                Place::Global(self.static_cells[&raw(b)])
             }
-            Expr::Var(b) => {
-                let cell = *self
+            Expr::Var(b) => Place::Cell(
+                *self
                     .binds
                     .get(&raw(b))
-                    .ok_or_else(|| gap("read-modify-write of an unbound variable"))?;
-                let old = self.emit_cur(Inst::Load(cell));
-                let new = update(self, old)?;
-                self.store_cell(cell, new);
-                Ok(pick(old, new))
-            }
-            // A primitive leaf of a `nobox` global (`SPOT.x++`) is its own global.
-            // `arith_ty` already restricted the target to a scalar, so a whole
-            // group can never reach here.
-            _ if matches!(nobox_global_place.as_ref(), Some((_, None))) => {
-                let (leaves, _) = nobox_global_place.expect("guard matched");
-                let name = leaves[0];
-                let old = self.emit_cur(Inst::Global(name));
-                let new = update(self, old)?;
-                self.emit_cur(Inst::StoreGlobal { name, value: new });
-                Ok(pick(old, new))
-            }
-            Expr::Global(name) => {
-                let old = self.emit_cur(Inst::Global(name));
-                let new = update(self, old)?;
-                self.emit_cur(Inst::StoreGlobal { name, value: new });
-                Ok(pick(old, new))
-            }
-            Expr::FieldAccess { .. }
-                if let Some((cell, path)) = self.first_class_field_place(target) =>
-            {
-                self.first_class_field_update(cell, &path, Some(postfix), update)
-                    .map(|value| value.expect("increment/decrement requests a result"))
-            }
-            Expr::FieldAccess { .. }
-                if let Some((cells, FieldShape::Prim)) = self.group_leaf_place(target) =>
-            {
-                let cell = cells[0].cell();
-                let old = self.emit_cur(Inst::Load(cell));
-                let new = update(self, old)?;
-                self.store_cell(cell, new);
-                Ok(pick(old, new))
-            }
+                    .ok_or_else(|| gap("read-modify-write of an unbound variable"))?,
+            ),
+            // The target's numeric type rules out a whole nobox group.
+            _ if let Some((leaves, None)) = nobox_global_place => Place::Global(leaves[0]),
+            Expr::Global(name) => Place::Global(name),
             Expr::FieldAccess { base, field } => {
-                if let Some((buf, checked, _, place)) = self.nb_leaf_rmw_place(target)? {
-                    let old = self.nb_leaf_load(buf, checked, &place);
-                    let new = update(self, old)?;
-                    self.nb_leaf_store(buf, checked, &place, new);
-                    return Ok(pick(old, new));
-                }
-                if let Some((vec, slot, elem, storage, path)) =
-                    self.flat_leaf_rmw_place(base, field)?
-                {
-                    let old = self.flat_leaf_load(vec, slot, elem, storage, path)?;
-                    let new = update(self, old)?;
-                    self.flat_leaf_store(vec, slot, elem, storage, path, new)?;
-                    return Ok(pick(old, new));
-                }
-                let (pbase, key) = self.physical_field(base, field)?;
-                let b = self.lower_place_base(pbase)?;
-                let old = self.read_field(b, key);
-                let new = update(self, old)?;
-                self.write_field(b, key, new);
-                Ok(pick(old, new))
+                return self
+                    .write_field_target(target, base, field, None, write)
+                    .map(|v| v.expect("increment/decrement requests a result"));
             }
             Expr::Index { base, index } => {
-                let (b, kind) = self.lower_index_base(base)?;
-                let i = self.lower_expr(index)?;
-                let old = self.read_index(b, i, kind);
-                let new = update(self, old)?;
-                self.write_index(b, i, new, kind);
-                Ok(pick(old, new))
+                let (base, index, kind) = self.index_place(base, index)?;
+                Place::Index(base, index, kind)
             }
-            _ => Err(gap("read-modify-write of a non-assignable target")),
-        }
+            _ => return Err(gap("read-modify-write of a non-assignable target")),
+        };
+        self.write_scalar(place, None, write)
+            .map(|v| v.expect("increment/decrement requests a result"))
     }
 
     pub(crate) fn safe_nav_call_value_repr(
