@@ -1221,6 +1221,35 @@ mod tests {
         })
     }
 
+    fn has_active_changed(
+        events: &[ControllerManagerEvent],
+        expected_from: Option<u32>,
+        expected_to: Option<u32>,
+    ) -> bool {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                ControllerManagerEvent::ActiveChanged { from, to }
+                    if *from == expected_from && *to == expected_to
+            )
+        })
+    }
+
+    fn has_axis(
+        events: &[ControllerManagerEvent],
+        expected_axis: Axis,
+        expected_value: i16,
+        expected_sync: bool,
+    ) -> bool {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                ControllerManagerEvent::Axis { axis, value, sync, .. }
+                    if *axis == expected_axis && *value == expected_value && *sync == expected_sync
+            )
+        })
+    }
+
     #[test]
     fn supported_scancode_labels_are_never_empty() {
         for entry in SCANCODE_TOKENS {
@@ -1255,22 +1284,8 @@ mod tests {
         assert_eq!(manager.active_instance_id(), None);
 
         let first_activity = manager.axis_event(10, Axis::LeftX, 20_000);
-        assert!(first_activity.iter().any(|event| matches!(
-            event,
-            ControllerManagerEvent::ActiveChanged {
-                from: None,
-                to: Some(10)
-            }
-        )));
-        assert!(first_activity.iter().any(|event| matches!(
-            event,
-            ControllerManagerEvent::Axis {
-                axis: Axis::LeftX,
-                value: 20_000,
-                sync: false,
-                ..
-            }
-        )));
+        assert!(has_active_changed(&first_activity, None, Some(10)));
+        assert!(has_axis(&first_activity, Axis::LeftX, 20_000, false));
         assert_eq!(manager.active_instance_id(), Some(10));
 
         let held = manager.button_event(10, Button::A, true);
@@ -1278,22 +1293,8 @@ mod tests {
         assert!(manager.effective_button(Button::A));
 
         let switched = manager.axis_event(20, Axis::RightX, -20_000);
-        assert!(switched.iter().any(|event| matches!(
-            event,
-            ControllerManagerEvent::ActiveChanged {
-                from: Some(10),
-                to: Some(20)
-            }
-        )));
-        assert!(switched.iter().any(|event| matches!(
-            event,
-            ControllerManagerEvent::Axis {
-                axis: Axis::RightX,
-                value: -20_000,
-                sync: false,
-                ..
-            }
-        )));
+        assert!(has_active_changed(&switched, Some(10), Some(20)));
+        assert!(has_axis(&switched, Axis::RightX, -20_000, false));
         assert!(!event_has_button(&switched, Button::A, true, false));
         assert!(!manager.effective_button(Button::A));
         assert_eq!(manager.effective_axis(Axis::LeftX), 0);
@@ -1302,13 +1303,7 @@ mod tests {
         assert!(event_has_button(&second_press, Button::B, true, false));
 
         let removed = manager.remove_controller(20);
-        assert!(removed.iter().any(|event| matches!(
-            event,
-            ControllerManagerEvent::ActiveChanged {
-                from: Some(20),
-                to: None
-            }
-        )));
+        assert!(has_active_changed(&removed, Some(20), None));
         assert_eq!(manager.active_instance_id(), None);
         assert!(!manager.effective_button(Button::B));
 
