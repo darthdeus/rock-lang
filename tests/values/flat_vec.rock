@@ -1,7 +1,4 @@
-// FlatVec<T>: growable flat storage for FFI-clean value structs. Exercises
-// push (with growth past the initial capacity), indexed get/set, len/clear, and
-// non-capturing sort. The emit test pins the zero-`_ct` lowering shape; this is
-// the runtime oracle.
+// Flat vecs of value structs, element reads, spreads and recursive storage.
 
 value RayTarget { angle: float, x: float, y: float }
 
@@ -158,7 +155,9 @@ fn flat_vec_equality_compares_live_elements_by_value() {
 // not take the check with them.
 
 nobox value Four { a: int, b: int, c: int, d: int }
+
 nobox value Six { a: int, b: int, c: int, d: int, e: int, f: int }
+
 enum Dense { A(int), B(int, int) }
 
 @nomangle inline(lua) fn raises(f: fn()) -> bool = """
@@ -193,4 +192,126 @@ fn unused_out_of_range_reads_raise_on_every_tier() {
         let _ = xs[5].a
     })
     print("{boxed} {columns} {dense} {rows} {field}")
+}
+
+value V2 { x: int, y: int }
+
+fn make_v2(x: int, y: int) -> V2 {
+    return V2 { x: x, y: y }
+}
+
+fn sum2(v: V2) -> int {
+    return v.x + v.y
+}
+
+@test(output = "3")
+fn test_index_field_read() {
+    let xs: [V2] = [make_v2(1, 2), make_v2(3, 4)]
+    print(xs[0].x + xs[0].y)
+}
+
+@test(output = "3")
+fn test_index_into_scalar_abi_arg() {
+    let xs: [V2] = [make_v2(1, 2), make_v2(3, 4)]
+    print(sum2(xs[0]))
+}
+
+@test(output = "3, 4")
+fn test_value_vec_index() {
+    let vs: [V2] = [V2 { x: 1, y: 2 }, V2 { x: 3, y: 4 }]
+    let v = vs[1]
+    print("{v.x}, {v.y}")
+}
+
+@test(output = "1, 2\n3, 4")
+fn test_value_vec_for_loop() {
+    let vs: [V2] = [V2 { x: 1, y: 2 }, V2 { x: 3, y: 4 }]
+    for v in vs {
+        print("{v.x}, {v.y}")
+    }
+}
+
+nobox value Spec { x: float, y: float }
+
+enum Shape { A(Spec), B(Spec) }
+
+struct Holder { id: int, flag: bool, shape: Shape }
+
+@test(output = "17 false 3 5")
+fn struct_update_carries_a_flat_enum_field_from_its_physical_slots() {
+    let h = Holder { id: 17, flag: true, shape: Shape::A(Spec { x: 3.0, y: 5.0 }) }
+    let c = Holder { ..h, flag: false }
+    match c.shape {
+        Shape::A(s) => print("{c.id} {c.flag} {s.x as int} {s.y as int}"),
+        Shape::B(s) => print("wrong {s.x}"),
+    }
+}
+
+fn consume_shape(id: int, flag: bool, shape: Shape) {
+    match shape {
+        Shape::A(s) => print("{id} {flag} {s.x as int} {s.y as int}"),
+        Shape::B(s) => print("wrong {s.x}"),
+    }
+}
+
+@test(output = "19 true 7 11")
+fn call_spread_carries_a_flat_enum_field_from_its_physical_slots() {
+    let h = Holder { id: 19, flag: true, shape: Shape::A(Spec { x: 7.0, y: 11.0 }) }
+    consume_shape(..h)
+}
+
+struct ChildHolder { p: Spec, id: int }
+
+fn consume_child(p: Spec, id: int) {
+    print("{id} {p.x as int} {p.y as int}")
+}
+
+@test(output = "31 23 29")
+fn call_spread_carries_a_nobox_child_from_its_physical_slots() {
+    let h = ChildHolder { p: Spec { x: 23.0, y: 29.0 }, id: 31 }
+    consume_child(..h)
+}
+
+struct MaybeHolder { p: Spec?, id: int }
+
+fn consume_maybe(p: Spec?, id: int) {
+    if p == null {
+        print("{id} absent")
+        return
+    }
+    let s = p
+    print("{id} {s.x as int} {s.y as int}")
+}
+
+@test(output = "43 37 41\n47 absent")
+fn call_spread_carries_nullable_nobox_presence_and_leaves() {
+    let present = MaybeHolder { p: Spec { x: 37.0, y: 41.0 }, id: 43 }
+    let absent = MaybeHolder { p: null, id: 47 }
+    consume_maybe(..present)
+    consume_maybe(..absent)
+}
+
+value RecursiveRefCell { w: int }
+
+fn recursive_ref_first(c: ref RecursiveRefCell, n: int) -> ref RecursiveRefCell {
+    if n == 0 { return c }
+    return recursive_ref_second(c, n - 1)
+}
+
+fn recursive_ref_second(c: ref RecursiveRefCell, n: int) -> ref RecursiveRefCell {
+    return recursive_ref_third(c, n)
+}
+
+fn recursive_ref_third(c: ref RecursiveRefCell, n: int) -> ref RecursiveRefCell {
+    return recursive_ref_first(c, n)
+}
+
+fn recursive_ref_write(c: ref RecursiveRefCell) { c.w += 1 }
+
+@test
+fn mutually_recursive_ref_returns_settle_on_the_flat_element_storage() {
+    let xs: [RecursiveRefCell] = [RecursiveRefCell { w: 7 }, RecursiveRefCell { w: 13 }]
+    recursive_ref_write(recursive_ref_first(xs[0], 5))
+    assert_eq(xs[0].w, 8)
+    assert_eq(xs[1].w, 13)
 }

@@ -1,0 +1,263 @@
+// Field projection: demand, globals, snapshots, read order and covered reads.
+
+value Plain { x: int, y: int }
+
+value Child { point: Plain, opaque: Plain? }
+
+nobox value Flat { x: int, y: int }
+
+value Wide {
+    f0: int = 0, f1: int = 1, f2: int = 2, f3: int = 3, f4: int = 4,
+    f5: int = 5, f6: int = 6, f7: int = 7, f8: int = 8, f9: int = 9,
+    f10: int = 10, f11: int = 11, f12: int = 12, f13: int = 13, f14: int = 14,
+    f15: int = 15, f16: int = 16, f17: int = 17, f18: int = 18, f19: int = 19,
+    f20: int = 20, f21: int = 21, f22: int = 22, f23: int = 23, f24: int = 24,
+    f25: int = 25, f26: int = 26, f27: int = 27, f28: int = 28, f29: int = 29,
+    f30: int = 30, f31: int = 31, f32: int = 32, f33: int = 33, f34: int = 34,
+    f35: int = 35, f36: int = 36, f37: int = 37, f38: int = 38, f39: int = 39,
+    f40: int = 40, f41: int = 41, f42: int = 42, f43: int = 43, f44: int = 44,
+    f45: int = 45, f46: int = 46, f47: int = 47, f48: int = 48, f49: int = 49,
+    child: Child, nullable: Flat?
+}
+
+struct Owner { wide: Wide, calls: int }
+
+fn scalar(v: Wide) -> int { v.f1 }
+
+fn nested(v: Wide) -> int { v.child.point.y }
+
+fn selected(v: Wide) -> Child { v.child }
+
+fn nullable(v: Wide) -> Flat? { v.nullable }
+
+fn narrowed(v: Wide) -> int { if v.nullable != null { return v.nullable.y }; return -1 }
+
+fn narrowed_root(v: Wide?) -> int { if v != null { return v.f1 }; return -1 }
+
+fn opaque(v: Wide) -> Plain? { v.child.opaque }
+
+fn produced(o: Owner) -> Wide { o.calls += 1; return o.wide }
+
+fn sum(a: int, b: int) -> int { a + b }
+
+fn ordered(v: Wide) -> int { sum(v.f1, { v = Wide { ..v, f1: 90 }; 1 }) }
+
+@test(output = "1\n5\n2\n5\n5\n11\n11\n17\n17\n1\n-1\n1\n1\ntrue\n-1\n2")
+fn boxed_wide_projection_preserves_selected_snapshots_and_opaque_children() {
+    let o = Owner { wide: Wide { child: Child { point: Plain { x: 3, y: 5 },
+        opaque: Plain { x: 7, y: 11 } }, nullable: Flat { x: 13, y: 17 } }, calls: 0 }
+    let local = o.wide
+    let before = selected(local)
+    let direct_before = o.wide.child
+    let opaque_before = opaque(local)
+    let nullable_before = nullable(local)
+    print(scalar(local))
+    print(nested(local))
+    print(ordered(local))
+    o.wide.child.point.y = 99
+    if o.wide.child.opaque != null { o.wide.child.opaque.y = 101 }
+    o.wide.nullable = Flat { x: 103, y: 107 }
+    print(before.point.y)
+    print(direct_before.point.y)
+    print(before.opaque?.y ?? -1)
+    print(opaque_before?.y ?? -1)
+    print(nullable_before?.y ?? -1)
+    print(narrowed(local))
+    print(narrowed_root(local))
+    print(narrowed_root(null))
+    print(produced(o).f1)
+    print(o.calls)
+    o.wide.nullable = null
+    print(nullable(o.wide) == null)
+    print(narrowed(o.wide))
+    print(local.f2)
+}
+
+value Point { x: int = 3, y: int = 5 }
+
+nobox value Flat_projection_globals { x: int = 7, y: int = 11 }
+
+value Config { child: Point = Point {}, optional: Point? = Point {}, flat: Flat_projection_globals? = Flat_projection_globals {}, spare: int = 13 }
+
+global CONFIG: Config = Config {}
+
+global MAYBE: Config? = Config {}
+
+global FLAT: Flat_projection_globals? = Flat_projection_globals {}
+
+value Generic<T> { child: T, spare: int }
+
+global GENERIC: Generic<Point> = Generic { child: Point {}, spare: 17 }
+
+fn mutate() -> int { CONFIG.child.y = 99; CONFIG.optional = null; CONFIG.flat = null; return 1 }
+
+fn observe(p: Point, ignored: int) -> int { p.y }
+
+fn narrowed_projection_globals() -> int { if MAYBE != null { return MAYBE.child.y }; return -1 }
+
+fn flat() -> int { if FLAT != null { return FLAT.y }; return -1 }
+
+@test(output = "17\n5\n5\n5\n99\n5\n5\n5\n11\ntrue\ntrue\n5\n-1\n11\n-1")
+fn global_projections_preserve_snapshots_and_read_order() {
+    let generic_child = GENERIC.child
+    print(GENERIC.spare)
+    print(GENERIC.child.y)
+    GENERIC.child.y = 101
+    print(generic_child.y)
+    let whole = CONFIG
+    let child = CONFIG.child
+    let optional = CONFIG.optional
+    let selected_flat = CONFIG.flat
+    print(observe(CONFIG.child, mutate()))
+    print(CONFIG.child.y)
+    print(whole.child.y)
+    print(child.y)
+    print(optional?.y ?? -1)
+    print(selected_flat?.y ?? -1)
+    print(CONFIG.optional == null)
+    print(CONFIG.flat == null)
+    print(narrowed_projection_globals())
+    MAYBE = null
+    print(narrowed_projection_globals())
+    print(flat())
+    FLAT = null
+    print(flat())
+}
+
+nobox value Point_projection_snapshots { x: int, y: int }
+
+nobox value Branch { spare: int, child: Point_projection_snapshots? }
+
+value PlainPoint { x: int, y: int }
+
+value Box { child: PlainPoint?, spare: int }
+
+struct State { branch: Branch, ordinary: Box, calls: int }
+
+fn selected_projection_snapshots(v: Branch) -> Point_projection_snapshots? { v.child }
+
+fn nested_projection_snapshots(v: Branch) -> int { if let p = v.child { return p.y }; return -1 }
+
+fn ordinary(v: Box) -> PlainPoint? { v.child }
+
+fn produced_projection_snapshots(s: State) -> Branch { s.calls += 1; return s.branch }
+
+fn mutate_projection_snapshots(s: State) -> int { s.branch.child = Point_projection_snapshots { x: 30, y: 40 }; return 1 }
+
+fn ordered_projection_snapshots(v: Branch) -> int { sum(v.spare, { v = Branch { spare: 99, child: null }; 1 }) }
+
+@test(output = "5\n8\n5\n40\n13\n40\n1\ntrue\n-1")
+fn immediate_projections_preserve_nullable_snapshots_and_evaluation_order() {
+    let s = State {
+        branch: Branch { spare: 7, child: Point_projection_snapshots { x: 3, y: 5 } },
+        ordinary: Box { child: PlainPoint { x: 11, y: 13 }, spare: 17 }, calls: 0 }
+    let saved = selected_projection_snapshots(s.branch)
+    let opaque = ordinary(s.ordinary)
+    print(nested_projection_snapshots(s.branch))
+    print(ordered_projection_snapshots(s.branch))
+    print(saved?.y ?? -1)
+    mutate_projection_snapshots(s)
+    print(nested_projection_snapshots(s.branch))
+    if s.ordinary.child != null { s.ordinary.child.y = 100 }
+    print(opaque?.y ?? -1)
+    print(produced_projection_snapshots(s).child?.y ?? -1)
+    print(s.calls)
+    s.branch.child = null
+    print(selected_projection_snapshots(s.branch) == null)
+    print(nested_projection_snapshots(s.branch))
+}
+
+struct P { x: int, y: int }
+
+global marks: int = 0
+
+fn bump() -> int { marks += 1; return marks }
+
+fn change(p: P) { p.x = 50 }
+
+fn field_before_store(p: P) -> int {
+    let old = p.x
+    p.x = 9
+    return old * 100 + p.x
+}
+
+fn field_before_call(p: P) -> int {
+    let old = p.x
+    change(p)
+    return old * 100 + p.x
+}
+
+fn cell_before_store(a: int) -> int {
+    let x = a
+    let old = x
+    x = x + 10
+    return old * 100 + x
+}
+
+fn length_before_push() -> int {
+    let v: [int] = []
+    v.push(v.len())
+    v.push(v.len())
+    v.push(v[1] + v.len())
+    return v[0] * 100 + v[1] * 10 + v[2]
+}
+
+fn call_once_in_product() -> uint {
+    let a = bump() as uint
+    return a * 3 as uint
+}
+
+@test(output = "109 150 111 13 3 1")
+fn folded_reads_stay_ordered_against_writes() {
+    let p = P { x: 1, y: 2 }
+    let q = P { x: 1, y: 2 }
+    let product = call_once_in_product()
+    print("{field_before_store(p)} {field_before_call(q)} {cell_before_store(1)} {length_before_push()} {product} {marks}")
+}
+
+value Point_covered_field_reads { x: float, y: float }
+
+value Layer { volume: float, speed: float, at: Point_covered_field_reads, name: string }
+
+struct Step { layers: Vec<Layer> }
+
+global calls: int = 0
+
+fn count() -> int { calls += 1; return 1 }
+
+fn step() -> Step {
+    return Step { layers: [
+        Layer { volume: 1.0, speed: 2.0, at: Point_covered_field_reads { x: 3.0, y: 4.0 }, name: "ab" },
+        Layer { volume: 5.0, speed: 6.0, at: Point_covered_field_reads { x: 7.0, y: 8.0 }, name: "cde" },
+    ] }
+}
+
+@test(output = "5")
+fn one_field_of_each_copied_element() {
+    let n = 0
+    for layer in step().layers { n += layer.name.len() }
+    print(n)
+}
+
+@test(output = "8 15")
+fn nested_value_field_after_unused_fields() {
+    let n = 0.0
+    let m = 0
+    for layer in step().layers {
+        n += layer.at.y - layer.at.x + layer.volume
+        m += layer.name.len() * 3
+    }
+    print("{n} {m}")
+}
+
+@test(output = "7 2")
+fn unused_fields_before_a_call() {
+    calls = 0
+    let n = 0
+    for layer in step().layers {
+        let copy = layer
+        n += count()
+        n += copy.name.len()
+    }
+    print("{n} {calls}")
+}

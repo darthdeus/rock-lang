@@ -1,0 +1,394 @@
+// Flat enum layouts: field key collisions, record projection, nesting, leaf gaps and mixed reads.
+
+enum Sig { A, B(string) }
+
+// `show` takes the struct by param so the parent survives as a table (a
+// non-escaping parent scalarizes away and never exposes the key collision).
+struct TagHolder { sig: Sig, sig__tag: int }
+
+fn show_tag(h: TagHolder) {
+    match h.sig {
+        Sig::A => print("A {h.sig__tag}")
+        Sig::B(n) => print("B {n} {h.sig__tag}")
+    }
+}
+
+@test(output = "B seven 42")
+fn test_discriminant_slot_vs_user_field() {
+    show_tag(TagHolder { sig: Sig::B("seven"), sig__tag: 42 })
+}
+
+// The positional payload slot, same shape.
+struct PayloadHolder { sig: Sig, sig__0: int }
+
+fn show_payload(h: PayloadHolder) {
+    match h.sig {
+        Sig::A => print("A {h.sig__0}")
+        Sig::B(n) => print("B {n} {h.sig__0}")
+    }
+}
+
+@test(output = "B seven 7")
+fn test_payload_slot_vs_user_field() {
+    show_payload(PayloadHolder { sig: Sig::B("seven"), sig__0: 7 })
+}
+
+// A record-payload variant's named slot.
+enum Shape { Dot, Circle { r: string } }
+
+struct ShapeHolder { shape: Shape, shape__r: int }
+
+fn show_shape(h: ShapeHolder) {
+    match h.shape {
+        Shape::Dot => print("dot {h.shape__r}")
+        Shape::Circle { r } => print("circle {r} {h.shape__r}")
+    }
+}
+
+@test(output = "circle big 5")
+fn test_named_slot_vs_user_field() {
+    show_shape(ShapeHolder { shape: Shape::Circle { r: "big" }, shape__r: 5 })
+}
+
+// CONTROL: the ordinary flattened-enum field still round-trips with no user
+// field in the way, so the tests above fail on the COLLISION, not on flattening.
+struct Plain { sig: Sig, other: int }
+
+fn show_plain(h: Plain) {
+    match h.sig {
+        Sig::A => print("A {h.other}")
+        Sig::B(n) => print("B {n} {h.other}")
+    }
+}
+
+@test(output = "B seven 1")
+fn test_flat_enum_field_control() {
+    show_plain(Plain { sig: Sig::B("seven"), other: 1 })
+}
+
+nobox value ProjectedId { scene: int, arena: int, slot: int, generation: int }
+
+enum ProjectedTarget { Player, Mob(ProjectedId) }
+
+nobox value ProjectedLock { target: ProjectedTarget, visible: bool }
+
+nobox value ProjectedSnapshot { lock: ProjectedLock }
+
+struct ProjectedState { snapshot: ProjectedSnapshot }
+
+fn projected_state(snapshot: ProjectedSnapshot) -> ProjectedState {
+    return ProjectedState { snapshot }
+}
+
+fn projected_is_player(state: ProjectedState) -> bool {
+    if let ProjectedTarget::Player = state.snapshot.lock.target {
+        return true
+    }
+    return false
+}
+
+fn projected_payload(state: ProjectedState) -> int {
+    return match state.snapshot.lock.target {
+        ProjectedTarget::Player => -1,
+        ProjectedTarget::Mob(id) => id.scene + id.arena + id.slot + id.generation,
+    }
+}
+
+@test
+fn flat_enum_record_projection_reads_unit_and_payload() {
+    let state = projected_state(ProjectedSnapshot {
+        lock: ProjectedLock { target: ProjectedTarget::Player, visible: false },
+    })
+    assert(projected_is_player(state))
+    assert_eq(projected_payload(state), -1)
+    state.snapshot.lock.target = ProjectedTarget::Mob(ProjectedId {
+        scene: 1, arena: 2, slot: 3, generation: 4,
+    })
+    assert(!projected_is_player(state))
+    assert_eq(projected_payload(state), 10)
+}
+
+@test
+fn flat_enum_record_projection_agrees_for_literal_and_whole_store() {
+    let state = ProjectedState {
+        snapshot: ProjectedSnapshot {
+            lock: ProjectedLock { target: ProjectedTarget::Player, visible: false },
+        },
+    }
+    assert(projected_is_player(state))
+    let snapshot = ProjectedSnapshot {
+        lock: ProjectedLock {
+            target: ProjectedTarget::Mob(ProjectedId {
+                scene: 11, arena: 13, slot: 17, generation: 19,
+            }),
+            visible: true,
+        },
+    }
+    state.snapshot = snapshot
+    assert_eq(projected_payload(state), 60)
+    let copied = state.snapshot
+    state.snapshot.lock.target = ProjectedTarget::Player
+    assert_eq(projected_payload(projected_state(copied)), 60)
+    assert(projected_is_player(state))
+}
+
+global PROJECTED_READS: int = 0
+
+fn projected_once(state: ProjectedState) -> ProjectedState {
+    PROJECTED_READS += 1
+    return state
+}
+
+@test
+fn flat_enum_record_projection_evaluates_owner_once() {
+    let state = projected_state(ProjectedSnapshot {
+        lock: ProjectedLock { target: ProjectedTarget::Player, visible: false },
+    })
+    PROJECTED_READS = 0
+    let player = false
+    if let ProjectedTarget::Player = projected_once(state).snapshot.lock.target {
+        player = true
+    }
+    assert(player)
+    assert_eq(PROJECTED_READS, 1)
+}
+
+nobox value ProjectedOptionalSnapshot { lock: ProjectedLock? }
+
+struct ProjectedOptionalState { snapshot: ProjectedOptionalSnapshot }
+
+fn projected_optional_state(snapshot: ProjectedOptionalSnapshot) -> ProjectedOptionalState {
+    return ProjectedOptionalState { snapshot }
+}
+
+fn projected_optional_payload(state: ProjectedOptionalState) -> int {
+    if let lock = state.snapshot.lock {
+        return match lock.target {
+            ProjectedTarget::Player => 0,
+            ProjectedTarget::Mob(id) => id.slot,
+        }
+    }
+    return -1
+}
+
+@test
+fn flat_enum_record_projection_preserves_nullable_child() {
+    let state = projected_optional_state(ProjectedOptionalSnapshot { lock: null })
+    assert_eq(projected_optional_payload(state), -1)
+    state.snapshot.lock = ProjectedLock {
+        target: ProjectedTarget::Mob(ProjectedId {
+            scene: 2, arena: 3, slot: 5, generation: 7,
+        }),
+        visible: false,
+    }
+    assert_eq(projected_optional_payload(state), 5)
+    state.snapshot.lock = ProjectedLock { target: ProjectedTarget::Player, visible: false }
+    assert_eq(projected_optional_payload(state), 0)
+    state.snapshot.lock = null
+    assert_eq(projected_optional_payload(state), -1)
+}
+
+nobox value MixedPatternPlace { space: int, x: int, y: int }
+
+struct MixedPatternSpec { name: string }
+
+enum MixedPatternOccupant { None, Prop(int, int), Fixture(MixedPatternSpec) }
+
+enum MixedPatternSubject { None, Object(MixedPatternPlace, MixedPatternOccupant) }
+
+fn mixed_pattern_subject(occupant: MixedPatternOccupant) -> MixedPatternSubject {
+    return MixedPatternSubject::Object(MixedPatternPlace { space: 1, x: 11, y: 10 }, occupant)
+}
+
+@test
+fn nested_flat_enum_separate_match_control() {
+    let subject = mixed_pattern_subject(MixedPatternOccupant::Prop(0, 1))
+    let result = match subject {
+        MixedPatternSubject::Object(place, occupant) => match occupant {
+            MixedPatternOccupant::Prop(id, orient) => place.x == 11 && id == 0 && orient == 1,
+            _ => false,
+        },
+        _ => false,
+    }
+    assert(result, "the constructed payload survives separate matches")
+}
+
+@test
+fn nested_flat_enum_binds_mixed_payload() {
+    let result = match mixed_pattern_subject(MixedPatternOccupant::Prop(0, 1)) {
+        MixedPatternSubject::Object(place, MixedPatternOccupant::Prop(id, orient)) => place.x == 11 && id == 0 && orient == 1,
+        _ => false,
+    }
+    // REGRESSION GUARD (was a pinned bug until the flat-enum nested read landed):
+    // a nested flat enum shares the parent's slots, so the inner pattern must read
+    // the tag and payload slots directly instead of treating the tag as a box.
+    assert_eq(result, true, "nested mixed-enum pattern binds its flattened payload")
+}
+
+co fn nested_mixed_pattern_coroutine() -> Coroutine<int> {
+    yield 0
+    match mixed_pattern_subject(MixedPatternOccupant::Prop(0, 1)) {
+        MixedPatternSubject::Object(place, MixedPatternOccupant::Prop(id, orient)) => {
+            yield if place.x == 11 && id == 0 && orient == 1 { 1 } else { -1 }
+        },
+        _ => { yield -2 },
+    }
+}
+
+@test
+fn nested_flat_enum_mixed_payload_after_yield() {
+    let c = nested_mixed_pattern_coroutine()
+    assert_eq(c.resume() ?? -9, 0)
+    // Same nested shape after suspension: the resumed frame rebuilds the same slots.
+    assert_eq(c.resume() ?? -9, 1)
+}
+
+// String payload: the nested arm must read and bind it, not just inspect the tag.
+
+enum SentInner {
+    Named(string),
+    Empty,
+}
+
+enum SentOuter {
+    Msg(SentInner),
+    Other,
+}
+
+@test
+fn nested_flat_enum_binds_string_payload() {
+    let v = SentOuter::Msg(SentInner::Named("Harm"))
+    let got = ""
+    match v {
+        SentOuter::Msg(SentInner::Named(spell)) => { got = spell }
+        SentOuter::Msg(_) => { got = "fallback" }
+        SentOuter::Other => { got = "other" }
+    }
+    assert_eq(got, "Harm", "a nested flat-enum arm binds its payload from the parent's slots")
+}
+
+nobox value ItemLeaf { value: int }
+
+nobox value ItemSlot { leaf: ItemLeaf }
+
+struct ItemInner { slot: ItemSlot }
+
+struct ItemOuter { inner: ItemInner }
+
+struct Item { outer: ItemOuter, flagged: bool }
+
+enum ItemRef { None, Plain(Entity<Item>), Flagged(Entity<Item>) }
+
+fn item_ref(entity: Entity<Item>, item: Item) -> ItemRef {
+    return if item.flagged { ItemRef::Flagged(entity) } else { ItemRef::Plain(entity) }
+}
+
+// A native enum return must replace the leaves initialized by a variant.
+@test fn enum_return_assignment_projects_variant_and_leaf() {
+    let rows: Arena<Item> = arena_new()
+    let item = rows.insert(Item {
+        flagged: true,
+        outer: ItemOuter {
+            inner: ItemInner { slot: ItemSlot { leaf: ItemLeaf { value: 17 } } },
+        },
+    })
+    let target_leaf: ItemLeaf? = null
+    let kind = ItemRef::Plain(item)
+    if let target = item.get() {
+        kind = item_ref(item, target)
+        target_leaf = target.outer.inner.slot.leaf
+    }
+    match kind {
+        ItemRef::Flagged(entity) => assert(entity == item),
+        _ => assert(false),
+    }
+    if let leaf = target_leaf {
+        assert_eq(leaf.value, 17)
+    } else { assert(false) }
+    let _ = arena_destroy(rows)
+    let _ = __arena_drain_retired()
+}
+
+struct RecordLeft { id: int }
+
+struct RecordRight { id: int }
+
+enum RecordKind { Left(RecordLeft), Right(RecordRight) }
+
+struct Record { right: bool }
+
+fn Record.kind(record) -> RecordKind? {
+    if record.right { return RecordKind::Right(RecordRight { id: 43 }) }
+    return null
+}
+
+// A nullable native return replaces both presence and payload leaves.
+@test fn nullable_enum_return_assignment_projects_presence_and_payload() {
+    let records: Arena<Record> = arena_new()
+    let record = records.insert(Record { right: true })
+    let kind: RecordKind? = null
+    if let value = record.get() { kind = value.kind() }
+    if let value = kind {
+        match value {
+            RecordKind::Right(right) => assert_eq(right.id, 43),
+            RecordKind::Left(_) => assert(false),
+        }
+    } else { assert(false) }
+    if let value = record.get() { value.right = false }
+    kind = record.get().unwrap().kind()
+    assert(kind == null)
+    let _ = arena_destroy(records)
+    let _ = __arena_drain_retired()
+}
+
+enum State { Idle, Casting(string, int), Named { name: string } }
+
+struct Combat { state: State }
+
+fn set_state(combat: Combat, i: int) {
+    combat.state = if i % 4 == 0 { State::Casting("spell", i) }
+        else if i % 4 == 2 { State::Named { name: "named" } }
+        else { State::Idle }
+}
+
+fn field_read_loop() -> bool {
+    let combat = Combat { state: State::Idle }
+    for i in 0..12 {
+        set_state(combat, i)
+        let state = combat.state
+        if i % 2 == 1 { if state != State::Idle { return false } }
+        else if state == State::Idle { return false }
+    }
+    return true
+}
+
+@test(output = "true")
+fn mixed_enum_field_read_loop_clears_previous_payload() {
+    print(field_read_loop())
+}
+
+co fn tick() -> Coroutine<int> { yield 1 }
+
+co fn field_read_await_loop(combat: Combat) -> Coroutine<int> {
+    for i in 0..12 {
+        set_state(combat, i)
+        let state = combat.state
+        await tick()
+        if i % 2 == 1 { yield if state == State::Idle { 1 } else { 0 } }
+        else { yield if state != State::Idle { 1 } else { 0 } }
+    }
+}
+
+fn field_read_coroutine() -> bool {
+    let c = field_read_await_loop(Combat { state: State::Idle })
+    for _ in 0..12 {
+        if c.resume() != 1 { return false }
+        if c.resume() != 1 { return false }
+    }
+    return c.resume() == null
+}
+
+@test(output = "true")
+fn mixed_enum_field_read_across_await_clears_previous_payload() {
+    print(field_read_coroutine())
+}

@@ -1,0 +1,286 @@
+// Scalarized value locals: reassignment, field writes and nullable children.
+
+value V2 { x: int, y: int }
+
+@test(output = "30")
+fn test_value_local_reassign_struct_lit() {
+    let v = V2 { x: 1, y: 2 }
+    v = V2 { x: 10, y: 20 }
+    print(v.x + v.y)
+}
+
+@test(output = "30")
+fn test_value_local_reassign_from_other_local() {
+    let v1 = V2 { x: 10, y: 20 }
+    let v = V2 { x: 1, y: 2 }
+    v = v1
+    print(v.x + v.y)
+}
+
+fn make_v2(a: int, b: int) -> V2 {
+    return V2 { x: a, y: b }
+}
+
+@test(output = "30")
+fn test_value_local_reassign_from_call() {
+    let v = V2 { x: 1, y: 2 }
+    v = make_v2(10, 20)
+    print(v.x + v.y)
+}
+
+// Reassignment must COPY, not bind the source place: the tests above check
+// that the value arrives, these that it is independent of its source.
+
+struct Box { p: V2 }
+
+struct NBox { p: V2? }
+
+@test(output = "v=1 src=99")
+fn reassign_from_field_copies() {
+    let src = Box { p: V2 { x: 1, y: 2 } }
+    let v = V2 { x: 0, y: 0 }
+    v = src.p
+    src.p.x = 99
+    print("v={v.x} src={src.p.x}")
+}
+
+@test(output = "v=1 src=99")
+fn reassign_from_nullable_field_copies() {
+    let src = NBox { p: V2 { x: 1, y: 2 } }
+    let v = V2 { x: 0, y: 0 }
+    if src.p != null {
+        v = src.p
+        src.p.x = 99
+        print("v={v.x} src={src.p.x}")
+    }
+}
+
+@test(output = "7")
+fn reassign_nullable_local() {
+    let a: V2? = V2 { x: 1, y: 2 }
+    a = V2 { x: 7, y: 8 }
+    if a != null { print("{a.x}") }
+}
+
+fn make_v2_scalarized_nullable(x: int, y: int) -> V2 {
+    return V2 { x: x, y: y }
+}
+
+// `dest: V2? = null`: the cdata-ABI nullable slot that triggered the
+// widening at the call site. Sum the components to distinguish from
+// the default-arg path (which would receive nil -> 0).
+fn consume_or_default(dest: V2? = null) -> int {
+    if dest == null {
+        return -1
+    }
+    let d = dest
+    return d.x + d.y
+}
+
+@test(output = "30")
+fn scalarized_value_at_nullable_arg() {
+    let v = make_v2_scalarized_nullable(10, 20)
+    // Receiving nil here would return -1.
+    let got = consume_or_default(v)
+    print(got)
+}
+
+// The same local consumed at a V2 slot and at a V2? slot; both must observe
+// the same value.
+fn consume_nonnull(d: V2) -> int { return d.x * 100 + d.y }
+
+@test(output = "1020\n30")
+fn scalarized_value_at_both_arg_shapes() {
+    let v = make_v2_scalarized_nullable(10, 20)
+    print(consume_nonnull(v))
+    print(consume_or_default(v))
+}
+
+value FV2 { x: float, y: float }
+
+fn make_fv2(x: float, y: float) -> FV2 { return FV2 { x: x, y: y } }
+
+// A fn returning a value whose body joins over a nullable scrutinee by
+// refinement (bare `v` after the null check). The join is typed nullable, but
+// the return slot is the multi-value scalar ABI, so the result must splat at
+// the return boundary.
+fn opt_or_fn(v: FV2?, fb: FV2) -> FV2 {
+    if v != null { v } else { fb }
+}
+
+fn takes_v(v: FV2) -> float { return v.x + v.y }
+
+@test(output = "30\n2")
+fn return_slot_some_and_none() {
+    let some: FV2? = FV2 { x: 10.0, y: 20.0 }
+    let none: FV2? = null
+    let fb = FV2 { x: 1.0, y: 1.0 }
+    print(takes_v(opt_or_fn(some, fb)))
+    print(takes_v(opt_or_fn(none, fb)))
+}
+
+value Handle { id: int, tags: [int] }
+
+value Asset { image: Handle?, shadow: Handle?, width: int }
+
+global ART: Asset? = null
+
+global KEPT: Asset? = null
+
+fn sample(a: Asset) -> int { return (a.image?.id ?? 0) + (a.shadow?.id ?? 0) + a.width }
+
+fn draw_asset() -> int {
+    let art = ART ?? return -1
+    return sample(art) + sample(art)
+}
+
+fn keep_asset() { let art = ART ?? return; KEPT = art }
+
+fn mutate(a: ref Asset) { if a.image != null { a.image.id = 99 } }
+
+fn borrow_asset() { let art = ART ?? return; mutate(art) }
+
+@test(output = "-1\n24\n2 2\n2")
+fn a_coalesced_nullable_asset_keeps_owned_copies() {
+    print(draw_asset())
+    ART = Asset { image: Handle { id: 2, tags: [] }, shadow: Handle { id: 3, tags: [] }, width: 7 }
+    print(draw_asset())
+    keep_asset()
+    borrow_asset()
+    print("{ART?.image?.id ?? 0} {KEPT?.image?.id ?? 0}")
+    if ART != null && ART.image != null { ART.image.id = 11 }
+    print(KEPT?.image?.id ?? 0)
+}
+
+// Fifty fields keep `W` boxed, so the copy really owns a nullable child.
+value W {
+    f0: int, f1: int, f2: int, f3: int, f4: int, f5: int, f6: int, f7: int, f8: int, f9: int,
+    f10: int, f11: int, f12: int, f13: int, f14: int, f15: int, f16: int, f17: int, f18: int, f19: int,
+    f20: int, f21: int, f22: int, f23: int, f24: int, f25: int, f26: int, f27: int, f28: int, f29: int,
+    f30: int, f31: int, f32: int, f33: int, f34: int, f35: int, f36: int, f37: int, f38: int, f39: int,
+    f40: int, f41: int, f42: int, f43: int, f44: int, f45: int, f46: int, f47: int, f48: int, f49: int,
+}
+
+value WOuter { w: W?, xs: [int] }
+
+struct WHolder { o: WOuter }
+
+fn mkw() -> W {
+    return W {
+        f0: 1, f1: 1, f2: 1, f3: 1, f4: 1, f5: 1, f6: 1, f7: 1, f8: 1, f9: 1,
+        f10: 1, f11: 1, f12: 1, f13: 1, f14: 1, f15: 1, f16: 1, f17: 1, f18: 1, f19: 1,
+        f20: 1, f21: 1, f22: 1, f23: 1, f24: 1, f25: 1, f26: 1, f27: 1, f28: 1, f29: 1,
+        f30: 1, f31: 1, f32: 1, f33: 1, f34: 1, f35: 1, f36: 1, f37: 1, f38: 1, f39: 1,
+        f40: 1, f41: 1, f42: 1, f43: 1, f44: 1, f45: 1, f46: 1, f47: 1, f48: 1, f49: 1,
+    }
+}
+
+@test(output = "1")
+fn a_copy_keeps_its_sources_nullable_child_snapshot() {
+    let src = WHolder { o: WOuter { w: mkw(), xs: [] } }
+    let o = src.o
+    if src.o.w != null { src.o.w.f0 = 99 }
+    print(o.w?.f0 ?? -1)
+}
+
+value Pt { x: int, y: int }
+
+value Inner { a: int }
+
+value Outer { i: Inner, b: int }
+
+struct Holder { p: Pt }
+
+struct Deep { o: Outer }
+
+fn seed(n: int) -> int { return n }
+
+// --- the write must be observable through the local ---
+
+@test(output = "5")
+fn scalarized_local_runtime_init_leaf_write() {
+    let s = seed(1)
+    let h = Holder { p: Pt { x: s, y: 2 } }
+    h.p.x = 5
+    print("{h.p.x}")
+}
+
+@test(output = "11")
+fn scalarized_local_compound_assign() {
+    let s = seed(1)
+    let h = Holder { p: Pt { x: s, y: 2 } }
+    h.p.x = h.p.x + 10
+    print("{h.p.x}")
+}
+
+@test(output = "2")
+fn scalarized_local_inc() {
+    let s = seed(1)
+    let h = Holder { p: Pt { x: s, y: 2 } }
+    h.p.x++
+    print("{h.p.x}")
+}
+
+// The untouched sibling leaf must survive the write.
+@test(output = "5 2")
+fn scalarized_local_other_leaf_survives() {
+    let h = Holder { p: Pt { x: 1, y: 2 } }
+    h.p.x = 5
+    print("{h.p.x} {h.p.y}")
+}
+
+@test(output = "9 2")
+fn scalarized_local_nested_value_leaf_write() {
+    let d = Deep { o: Outer { i: Inner { a: 1 }, b: 2 } }
+    d.o.i.a = 9
+    print("{d.o.i.a} {d.o.b}")
+}
+
+// A whole-field replacement was always correct; it must stay so.
+@test(output = "7 8")
+fn scalarized_local_whole_field_replace() {
+    let h = Holder { p: Pt { x: 1, y: 2 } }
+    h.p = Pt { x: 7, y: 8 }
+    print("{h.p.x} {h.p.y}")
+}
+
+// Two independent locals must not share storage.
+@test(output = "5 1")
+fn scalarized_locals_do_not_alias() {
+    let a = Holder { p: Pt { x: 1, y: 2 } }
+    let b = Holder { p: Pt { x: 1, y: 2 } }
+    a.p.x = 5
+    print("{a.p.x} {b.p.x}")
+}
+
+// --- controls: shapes that already worked ---
+
+fn read_x(h: Holder) -> int { return h.p.x }
+
+@test(output = "7")
+fn escaping_local_leaf_write_control() {
+    let s = seed(1)
+    let h = Holder { p: Pt { x: s, y: 2 } }
+    h.p.x = 7
+    print("{read_x(h)}")
+}
+
+@test(output = "5")
+fn param_held_leaf_write_control() {
+    let h = Holder { p: Pt { x: seed(1), y: 2 } }
+    print("{param_write(h)}")
+}
+
+fn param_write(h: Holder) -> int {
+    h.p.x = 5
+    return h.p.x
+}
+
+// A read-only scalarized local must still scalarize (no write, nothing to pin
+// but the value); this is the shape the optimization exists for.
+@test(output = "1")
+fn scalarized_local_read_only_control() {
+    let s = seed(1)
+    let h = Holder { p: Pt { x: s, y: 2 } }
+    print("{h.p.x}")
+}
