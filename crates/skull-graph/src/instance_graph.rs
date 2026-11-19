@@ -106,13 +106,6 @@ impl InstanceBoundTree {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct BoundTreeDisagreement {
-    pub instance: Instance,
-    pub recorded: InstanceBoundTree,
-    pub incoming: InstanceBoundTree,
-}
-
 /// Which of the two bounded-witness roots a conformance tree hangs under.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum BoundRoot {
@@ -2220,24 +2213,6 @@ impl InstanceGraph {
             .filter(|(_, a)| !a.dissent.is_empty())
             .map(|(i, _)| i.clone())
             .collect()
-    }
-
-    pub fn bound_tree_disagreements(&self) -> impl Iterator<Item = BoundTreeDisagreement> + '_ {
-        self.index.trees.iter().flat_map(|(i, a)| {
-            let recorded = a.decided().clone();
-            let out: Vec<BoundTreeDisagreement> = a
-                .dissent
-                .values()
-                .chain(std::iter::once(&a.value))
-                .filter(|v| **v != recorded)
-                .map(|v| BoundTreeDisagreement {
-                    instance: i.clone(),
-                    recorded: recorded.clone(),
-                    incoming: v.clone(),
-                })
-                .collect();
-            out
-        })
     }
 
     /// **Owner-local**: is this instance rooted by an always-emitted body?

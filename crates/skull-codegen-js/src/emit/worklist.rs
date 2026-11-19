@@ -95,10 +95,7 @@ impl<'a> WorklistState<'a> {
                 .clone();
             names.names.entry(inst.clone()).or_insert(name);
         }
-        let bound_tree_disagreements = graph
-            .bound_tree_disagreements()
-            .map(|finding| finding.instance)
-            .collect();
+        let bound_tree_disagreements = graph.bound_tree_dissenters().into_iter().collect();
         let artifact_decls = view
             .realization
             .iter()
