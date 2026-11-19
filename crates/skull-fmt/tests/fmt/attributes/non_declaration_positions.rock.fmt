@@ -1,5 +1,4 @@
 //! Test: annotations that are NOT on a declaration survive formatting
-//! Tags: annotations, params, struct_fields
 //!
 //! `AnnoPos` (crates/bone-core/src/annotations.rs) is the list of positions the
 //! parser accepts an annotation in. Everything below is one of the positions

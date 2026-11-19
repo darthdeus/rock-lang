@@ -1,5 +1,4 @@
 //! Error: Lambda type inference error tests
-//! Tags: lambdas, type-inference, methods
 
 //=== TEST CASE: lambda_parameter_wrong_method_Generic ===
 struct Point {

@@ -1,5 +1,4 @@
 //! Test: Loop statement formatting
-//! Tags: loops, for, while, control-flow
 
 //=== TEST CASE:basic_for_loop_formatting ===
 

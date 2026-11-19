@@ -1,5 +1,4 @@
 //! Error: relocatable element references cannot be retained by coroutines.
-//! Tags: coroutines, refs, flat-storage
 
 //=== TEST CASE: coroutine_cannot_receive_a_flat_element_ref ===
 //! expect: cannot pass a reference into a relocatable Vec or Map element to `bump`: the reference is retained by a coroutine

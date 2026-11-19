@@ -1,5 +1,4 @@
 //! Test: nested function declarations
-//! Tags: nested_fn, declarations, locals
 
 //=== TEST CASE: nested_fn_inferred_and_annotated ===
 fn outer(xs: [int]) -> int {

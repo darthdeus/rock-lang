@@ -3,7 +3,6 @@
 //!        discriminant is capitalization, so an uppercase arm name over an
 //!        enum scrutinee must name a real variant -- a typo would otherwise
 //!        become a silent catch-all and kill every arm after it.
-//! Tags: patterns, enums, match
 
 //=== TEST CASE: unqualified_unknown_variant_rejected ===
 //! expect: enum `Choice` has no variant `Nope`

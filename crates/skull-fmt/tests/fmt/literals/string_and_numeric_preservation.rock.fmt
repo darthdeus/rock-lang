@@ -1,5 +1,4 @@
 //! Test: String and numeric literal preservation
-//! Tags: literals, strings, numbers
 
 //=== TEST CASE:string_escape_preservation ===
 

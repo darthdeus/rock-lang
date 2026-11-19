@@ -1,5 +1,4 @@
 //! Test: Trailing newline normalization
-//! Tags: newlines, normalization, file-endings
 
 //=== TEST CASE:no_trailing_newline ===
 

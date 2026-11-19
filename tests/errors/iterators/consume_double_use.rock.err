@@ -1,7 +1,6 @@
 //! `@consume` values cannot be reused after ownership transfer, including
 //! through branches, containers, calls, closures, and returns. Iterator `next`
 //! borrows the cursor, so a partial read before one terminal consume is valid.
-//! Tags: iterators, consume, affine
 
 //=== TEST CASE: double_for_over_cursor_Generic ===
 //! expect: use of consumed binding

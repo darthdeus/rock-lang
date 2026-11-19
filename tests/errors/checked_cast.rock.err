@@ -2,7 +2,6 @@
 //!        A pair outside it is rejected rather than emitted as identity, and
 //!        the operand must infer on its own -- `as` is not contextual, so the
 //!        target may not supply the operand's missing types.
-//! Tags: cast, types, mono
 
 //=== TEST CASE: cast_string_to_int_MismatchedType ===
 //! expect: cannot convert `string` to `int` with `as`

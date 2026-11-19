@@ -1,5 +1,4 @@
 //! Error: Complex type mismatch scenarios
-//! Tags: types, structs, complex
 
 //=== TEST CASE: struct_to_struct_mismatch_MismatchedType ===
 struct Point { x: int, y: int }

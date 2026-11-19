@@ -1,5 +1,4 @@
 //! Error: @pure verification rejects Rock bodies that aren't provably pure
-//! Tags: pure, verification
 
 //=== TEST CASE: pure_reads_global_Generic ===
 //! expect: reads global `COUNTER`

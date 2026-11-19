@@ -1,5 +1,4 @@
 //! Test: byte-offset slicing survives a multibyte char earlier in the source
-//! Tags: regressions, unicode, offsets
 
 // `Span.offset_range` is byte-based (the tokenizer advances `byte_offset` by
 // `len_utf8()` per char). The printer slices the source with those offsets

@@ -1,5 +1,4 @@
 //! Test: Integration scenarios and real-world code patterns
-//! Tags: integration, real-world, type-casting, conditionals
 
 //=== TEST CASE: type_casting_with_division ===
 fn test() {

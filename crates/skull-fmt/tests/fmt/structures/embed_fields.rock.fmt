@@ -1,5 +1,4 @@
 //! Test: `embed` field modifier survives formatting
-//! Tags: struct, embed, fields
 
 //=== TEST CASE: embed_field_preserved ===
 struct Holder {

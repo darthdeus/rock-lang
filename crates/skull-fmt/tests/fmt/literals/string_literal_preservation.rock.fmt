@@ -1,5 +1,4 @@
 //! Test: String literal preservation and escape handling
-//! Tags: strings, literals, escapes
 
 //=== TEST CASE: string_escape_preservation ===
 fn test() {

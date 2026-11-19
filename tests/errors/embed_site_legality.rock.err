@@ -1,7 +1,6 @@
 //! Error: what may be embedded at all. `embed` inlines a type's LEAVES into
 //!        the parent, so the embedded type must have leaves the compiler can
 //!        name statically, and the embed graph must terminate.
-//! Tags: embed, site-legality, scalarization
 
 //=== TEST CASE: embed_primitive_Generic ===
 struct Holder { embed n: int }

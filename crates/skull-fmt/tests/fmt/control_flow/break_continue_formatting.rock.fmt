@@ -1,5 +1,4 @@
 //! Test: Break and continue statement formatting
-//! Tags: break, continue, control-flow
 
 //=== TEST CASE:break_fmt ===
 

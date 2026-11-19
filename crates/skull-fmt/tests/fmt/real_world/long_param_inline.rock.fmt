@@ -1,5 +1,4 @@
 //! Test: Long parameter list inline functions
-//! Tags: inline, functions, parameters
 
 //=== TEST CASE:long_param_inline_functions ===
 

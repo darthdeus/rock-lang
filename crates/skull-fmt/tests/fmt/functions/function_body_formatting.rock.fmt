@@ -1,5 +1,4 @@
 //! Test: Function body formatting
-//! Tags: functions, body, newlines, spacing
 
 //=== TEST CASE:preserve_newlines_in_function_body ===
 

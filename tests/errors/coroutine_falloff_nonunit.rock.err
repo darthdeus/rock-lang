@@ -11,7 +11,6 @@
 //!        instantiation: falling off at a non-unit, non-nullable R rejects,
 //!        including when the instantiation is reached through a generic caller
 //!        (tests/coroutines/generic_result_falloff.rock pins the admitted ones).
-//! Tags: skull, coroutine, emit-time, fall-off
 
 //=== TEST CASE: falloff_int_result ===
 //! expect: can fall off the end of its body, but its coroutine result type is not `()`

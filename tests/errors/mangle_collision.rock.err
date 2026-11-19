@@ -10,7 +10,6 @@
 //!        so the rejection is EMIT-time and this suite runs skull emission on the
 //!        bone-accepted case. Positive controls (successful emit + the emitted
 //!        name) live in rock-lang/crates/skull/tests/backend_variant_mangling.rs.
-//! Tags: skull, codegen, mangle, emit-time
 
 //=== TEST CASE: distinct_signatures_collide_Generic ===
 // `foo(int, int) -> int` and `foo_int(int) -> int` both mangle to `foo_int_int`.

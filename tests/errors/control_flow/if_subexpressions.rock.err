@@ -1,5 +1,4 @@
 //! Error: Control flow statements in if-expression subexpressions
-//! Tags: control-flow, if-expressions, restrictions
 
 //=== TEST CASE: continue_in_multi_assign_rhs_ControlFlowInSubexpression ===
 //! expect: control flow (return/break/continue) is not allowed in an `if` used as a tuple element of a destructuring assignment

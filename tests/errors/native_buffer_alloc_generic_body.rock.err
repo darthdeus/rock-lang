@@ -6,7 +6,6 @@
 //!        the specialized element cannot name a cdef. This replaces the blanket
 //!        generic-body rejection. The positive value case is covered by an emit
 //!        test.
-//! Tags: native-buffer, intrinsic, generics, specialization, gc-value, emit-time
 
 //=== TEST CASE: native_buffer_alloc_generic_gc_value ===
 struct FlatVec<T> { buf: NativeBuffer<T>, len: int }

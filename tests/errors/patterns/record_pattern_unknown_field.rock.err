@@ -1,7 +1,6 @@
 //! Error: a record pattern naming a field its struct or record variant does
 //!        not declare is rejected by the front end, so no lowering ever reads
 //!        an absent field (which a table backend would read back as nil).
-//! Tags: patterns, records, fields
 
 //=== TEST CASE: struct_destructure_unknown_field_Generic ===
 struct P { x: int }

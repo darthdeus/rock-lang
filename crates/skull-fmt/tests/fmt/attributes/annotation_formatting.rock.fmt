@@ -1,5 +1,4 @@
 //! Test: Annotation formatting
-//! Tags: annotations, decorators
 
 //=== TEST CASE: annotation_without_params ===
 @test

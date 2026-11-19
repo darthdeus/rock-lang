@@ -5,7 +5,6 @@
 //!        a HARD spanned error from concrete native-buffer representation
 //!        selection, NOT the lenient silent-skip (which would leave a dangling nil
 //!        call).
-//! Tags: native-buffer, intrinsic, value-struct, c-boundary, emit-time
 
 //=== TEST CASE: native_buffer_alloc_heap_struct ===
 struct Heap { xs: [int] }

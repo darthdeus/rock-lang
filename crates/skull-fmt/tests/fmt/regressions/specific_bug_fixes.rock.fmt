@@ -1,5 +1,4 @@
 //! Test: Specific bug regression tests
-//! Tags: regressions, bugs, edge-cases
 
 //=== TEST CASE:comment_relocation_bug ===
 

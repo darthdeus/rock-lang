@@ -2,7 +2,6 @@
 //!        Its flat array needs a C layout (`ffi.new("T[?]")`), which this
 //!        representation does not have. FFI-clean value structs remain valid
 //!        NativeBuffer elements.
-//! Tags: value-struct, gc-carrying, native-buffer, c-boundary, emit-time
 
 //=== TEST CASE: gc_value_nativebuffer_alloc ===
 value Bag { xs: [int], n: int }

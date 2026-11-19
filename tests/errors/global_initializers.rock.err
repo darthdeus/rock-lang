@@ -1,6 +1,5 @@
 //! Error: global initializers are resolved and type-checked like any other
 //!        expression.
-//! Tags: globals, types
 
 //=== TEST CASE: undefined_name_UndefinedGlobal ===
 //! expect: `undefined_variable` did not resolve to any definition

@@ -1,5 +1,4 @@
 //! Error: nullable value-struct can't implicitly unwrap to non-null
-//! Tags: nullable, value, soundness, bucket-c-upstream
 //!
 //! These tests pin the SEMANTIC checks that make the Bucket-C ANF
 //! guards at `rock-codegen/src/anf/lower.rs` (sites tagged "H3 R3

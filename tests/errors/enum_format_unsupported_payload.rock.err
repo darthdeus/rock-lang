@@ -1,7 +1,6 @@
 //! Error: formatting an enum whose payload the structural formatter cannot
 //!        print (identity struct, container, callback) is rejected at compile
 //!        time instead of printing a table address.
-//! Tags: interpolation, enum, formatting
 
 //=== TEST CASE: enum_identity_struct_payload_interp_Generic ===
 //! expect: cannot format this value: `Body` is an identity struct

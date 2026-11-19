@@ -1,7 +1,6 @@
 //! Error: writes whose target is not a place, and `++`/`--` of a target that
 //!        is not a number, are rejected at type-check with the source location
 //!        instead of surfacing as an unlocated lowering failure.
-//! Tags: assignment, incdec, diagnostics
 
 //=== TEST CASE: incdec_string_NotNumeric ===
 //! expect: `++` needs a numeric target

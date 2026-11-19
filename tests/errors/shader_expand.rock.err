@@ -4,7 +4,6 @@
 //!        (arg0 vertex, arg1 fragment). The expander rejects, with a spanned
 //!        error, a non-reference arg (literal/local/lambda), a non-`@shader` fn,
 //!        and a stage mismatch (swapped vertex/fragment).
-//! Tags: shader_expand, rock_shader, emit-time
 
 //=== TEST CASE: arg_not_a_fn_reference_Generic ===
 value AV { p: Vec2 }

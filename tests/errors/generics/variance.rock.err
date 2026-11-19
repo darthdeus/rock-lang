@@ -1,5 +1,4 @@
 //! Error: Invariant generic positions reject covariant assignment
-//! Tags: generics, variance, soundness
 
 //=== TEST CASE: entity_invariance_MismatchedType ===
 //! expect: type mismatch: expected `float`, found `int`

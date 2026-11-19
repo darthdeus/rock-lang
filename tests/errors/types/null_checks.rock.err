@@ -1,5 +1,4 @@
 //! Error: Null used with non-nullable types
-//! Tags: types, null, nullable
 
 //=== TEST CASE: struct_field_null_NullAssignmentToNonNullable ===
 struct Foo { x: int }

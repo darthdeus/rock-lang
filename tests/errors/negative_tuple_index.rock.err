@@ -1,6 +1,5 @@
 //! Error: a tuple index is a plain digit run. The tokenizer folds a sign
 //!        into the literal, so `t.-1` used to parse as index 2^64 - 1.
-//! Tags: tuples, parser
 
 //=== TEST CASE: negative_tuple_index ===
 //! expect: must be followed by an identifier or integer

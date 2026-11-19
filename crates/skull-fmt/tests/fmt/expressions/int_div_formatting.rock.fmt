@@ -1,5 +1,4 @@
 //! Test: `./` integer-division operator formatting
-//! Tags: expressions, operators, int-div
 
 //=== TEST CASE: int_div_spaced ===
 

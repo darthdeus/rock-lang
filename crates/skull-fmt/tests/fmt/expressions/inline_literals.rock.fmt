@@ -1,5 +1,4 @@
 //! Test: Inline function literals
-//! Tags: inline, literals, functions
 
 //=== TEST CASE: inline_literal_preservation ===
 // Single-line inline functions should preserve their quotes

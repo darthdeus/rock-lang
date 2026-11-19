@@ -1,5 +1,4 @@
 //! Test: Tuple expression formatting
-//! Tags: tuples, expressions, destructuring
 
 //=== TEST CASE:basic_tuple_literals ===
 

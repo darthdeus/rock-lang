@@ -1,5 +1,4 @@
 //! Test: member-chain layout (`a.b().c().d()`)
-//! Tags: expressions, method-chains, wrapping
 
 // A chain of >=2 method calls that fits stays on one line; one that overflows
 // breaks one call per line (head kept with the receiver) rather than collapsing

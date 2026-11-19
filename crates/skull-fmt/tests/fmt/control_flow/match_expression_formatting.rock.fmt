@@ -1,5 +1,4 @@
 //! Test: Match expression formatting
-//! Tags: match, enum, patterns
 
 //=== TEST CASE:match_enum_shorthand_fields ===
 

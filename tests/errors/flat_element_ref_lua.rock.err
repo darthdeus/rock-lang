@@ -4,7 +4,6 @@
 //!        needs that storage to vary at run time, or a `ref` result to reach a
 //!        site that cannot take two values, is rejected when the body lowers.
 //!        The supported forms run in tests/values/flat_element_ref.rock.
-//! Tags: skull, ref, flat-storage, emit-time
 
 //=== TEST CASE: returns_disagree_across_swapped_recursion ===
 //! expect: returns a `ref` to a flat-stored container element on one path and a differently stored reference on another

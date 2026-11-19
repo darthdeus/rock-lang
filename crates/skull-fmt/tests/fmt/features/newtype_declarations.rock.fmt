@@ -1,5 +1,4 @@
 //! Test: Newtype declarations formatting
-//! Tags: newtype, types, spacing
 
 //=== TEST CASE: newtype_basic ===
 newtype UserId(int)

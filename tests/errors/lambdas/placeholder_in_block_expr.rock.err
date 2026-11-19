@@ -3,7 +3,6 @@
 //!        produce a stuck lambda that gets bound to a name and used
 //!        in a non-callable position, surfacing as a confusing late
 //!        LuaJIT runtime error.
-//! Tags: lambdas, placeholders
 
 //=== TEST CASE: placeholder_in_block_let_init_Generic ===
 //! expect: `_` placeholder cannot appear inside an explicit lambda or block expression

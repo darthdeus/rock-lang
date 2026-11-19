@@ -1,5 +1,4 @@
 //! Test: Enum definition formatting with field count threshold
-//! Tags: enums, structures, field-count-threshold
 
 //=== TEST CASE:enum_definition_formatting_field_count_threshold ===
 

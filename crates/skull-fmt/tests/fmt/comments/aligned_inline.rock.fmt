@@ -1,5 +1,4 @@
 //! Test: Preserve aligned inline comments
-//! Tags: comments, alignment, inline
 
 //=== TEST CASE: aligned_inline_comments ===
 // Aligned comments should maintain their column alignment

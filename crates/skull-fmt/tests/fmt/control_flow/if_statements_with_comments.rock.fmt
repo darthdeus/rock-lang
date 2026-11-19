@@ -1,5 +1,4 @@
 //! Test: If statements with inline comments
-//! Tags: if-statements, comments, inline
 
 //=== TEST CASE: single_line_if_statements_with_comments ===
 fn test() {

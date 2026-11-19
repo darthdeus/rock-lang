@@ -1,5 +1,4 @@
 //! Test: Real-world function formatting
-//! Tags: functions, real-world
 
 //=== TEST CASE: complex_functions_stay_multiline ===
 // Complex single-expression functions should not be collapsed

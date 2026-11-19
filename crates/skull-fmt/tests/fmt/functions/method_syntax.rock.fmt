@@ -1,5 +1,4 @@
 //! Test: D-form method syntax formatting
-//! Tags: functions, methods, dform
 
 //=== TEST CASE:simple_dform ===
 fn Mob.take_damage(m, amount: int) -> int {

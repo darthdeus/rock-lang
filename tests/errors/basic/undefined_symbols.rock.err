@@ -1,5 +1,4 @@
 //! Error: Basic undefined symbol tests
-//! Tags: basic, symbols
 
 //=== TEST CASE: undefined_function_SymbolNotFound ===
 fn main() {

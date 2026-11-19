@@ -1,5 +1,4 @@
 //! Test: Coroutine function formatting
-//! Tags: coroutines, co_fn, yield
 
 //=== TEST CASE: simple_coroutine ===
 co fn count(start: int) -> Coroutine<int> {

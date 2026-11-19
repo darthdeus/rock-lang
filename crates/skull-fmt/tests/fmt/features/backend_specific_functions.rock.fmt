@@ -1,5 +1,4 @@
 //! Test: Backend-specific function formatting
-//! Tags: inline, extern, lua, backend
 
 //=== TEST CASE: inline_lua_format ===
 inline(lua) fn get_platform_name() -> string = """return "Lua Backend" """

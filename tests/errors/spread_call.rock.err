@@ -1,7 +1,6 @@
 //! Error: call-site struct spread `f(..op)` rejects unmatched fields,
 //!        named/spread and spread/spread collisions, and non-struct operands
 //!        (struct-spread plan M2, rules 2-5).
-//! Tags: struct-spread, call-spread
 
 //=== TEST CASE: spread_unmatched_field_Generic ===
 // Rule 2: every field of the spread struct must name a callee param.

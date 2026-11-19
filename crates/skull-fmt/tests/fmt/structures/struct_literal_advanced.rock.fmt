@@ -1,5 +1,4 @@
 //! Test: Advanced struct literal formatting
-//! Tags: structs, literals, complex
 
 //=== TEST CASE: simple_struct_literal ===
 fn test() {

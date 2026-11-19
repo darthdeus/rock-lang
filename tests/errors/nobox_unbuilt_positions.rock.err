@@ -13,7 +13,6 @@
 //!        field holding a nobox value (`tests/nobox/nested_ctor.rock`), and a
 //!        generic fn returning `T?` at a nobox `T`
 //!        (`tests/nobox/nullable_group_pack.rock`).
-//! Tags: nobox, coroutines, statics, newtypes, generics
 
 //=== TEST CASE: coroutine_yields_a_bare_nobox_value_Generic ===
 // The yield channel threads flat-enum leaves through frame slots; a bare value

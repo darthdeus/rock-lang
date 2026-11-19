@@ -14,7 +14,6 @@
 //!        is legal and computes correctly. That accepted shape is pinned as a
 //!        positive test in tests/values/scalar_abi_leaf_name_ambiguity.rock; the
 //!        non-colliding emit control is in rock-lang/crates/skull/tests/value_scalarize.rs.
-//! Tags: skull, codegen, scalar-abi, value-struct, emit-time
 
 //=== TEST CASE: direct_scalar_abi_call_Generic ===
 value V2 { x: float, y: float }

@@ -1,5 +1,4 @@
 //! Error: Self-referential variable binding tests
-//! Tags: variables, scoping, self-reference
 
 //=== TEST CASE: basic_self_reference_Generic ===
 fn main() {

@@ -9,7 +9,6 @@
 //!        has no source-level case: every admitted attribute kind is 4-byte
 //!        aligned, so no struct can currently violate it. It is pinned instead at
 //!        the unit level against a hand-built plan.
-//! Tags: vertex_expand, vertex_plan, emit-time
 
 //=== TEST CASE: arg_not_a_buffer_Generic ===
 @vertex_expand inline(lua) fn vstride<T>(u: T) -> int = """

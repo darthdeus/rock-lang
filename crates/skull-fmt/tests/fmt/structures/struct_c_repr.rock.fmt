@@ -1,5 +1,4 @@
 //! Test: value struct formatting round-trip
-//! Tags: structs, value, c-repr, ffi
 
 //=== TEST CASE:basic_value ===
 

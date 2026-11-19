@@ -1,5 +1,4 @@
 //! Error: invalid default-type-param declarations reject at the decl
-//! Tags: generics,defaults
 
 //=== TEST CASE: non_trailing_default_Generic ===
 //! expect: type parameter `B` without a default follows defaulted `A`; defaults must be trailing

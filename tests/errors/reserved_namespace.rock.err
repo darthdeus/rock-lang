@@ -12,7 +12,6 @@
 //!        the exact emitted-Lua substring) stay in
 //!        rock-lang/crates/skull/tests/reserved_namespace.rs -- a rejection suite can't
 //!        assert successful emission.
-//! Tags: skull, codegen, reserved-namespace, emit-time
 
 //=== TEST CASE: global_r1_Generic ===
 global r1: int = 100

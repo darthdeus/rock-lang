@@ -1,5 +1,4 @@
 //! Error: D-form method declaration restrictions and receiver type resolution
-//! Tags: methods, dform, parser
 
 //=== TEST CASE: annotated_receiver_Generic ===
 //! expect: the receiver takes its type from the path; write it without a type annotation

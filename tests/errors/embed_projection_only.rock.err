@@ -3,7 +3,6 @@
 //!        ERASED, or MATERIALIZED. Leaf reads, place writes, whole-field ctor
 //!        writes and scalar-ABI round-trips stay legal (positive coverage in
 //!        tests/values/embed.rock).
-//! Tags: embed, projection-only, scalarization
 
 //=== TEST CASE: embed_whole_value_binding_Generic ===
 //! expect: `p` is an `embed` field: it has no independently storable value

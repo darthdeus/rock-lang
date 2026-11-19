@@ -1,5 +1,4 @@
 //! Error: a null-check narrow does not survive an effect hidden in the condition or a lambda
-//! Tags: nullable, narrowing, soundness, pure
 
 // `g.f != null && <rest>` narrows `g.f` for the then-branch only while the
 // rest of the condition cannot null it. A call that is not `@pure` can, so

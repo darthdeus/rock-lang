@@ -3,7 +3,6 @@
 //!        finite layout. It is rejected where it is defined, however it is
 //!        used, and a nullable link does not break the cycle. Recursion must
 //!        go through a reference or a handle.
-//! Tags: value, layout, recursion
 
 //=== TEST CASE: direct_self_RecursiveValue ===
 //! expect: recursive value type: Node -> Node; use a reference or handle

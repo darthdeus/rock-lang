@@ -2,7 +2,6 @@
 //! Unknown name, disallowed position, and bad
 //! arity -- each rejects with a spanned CompilerError from the registry
 //! validation during field lowering.
-//! Tags: annotations, registry, field
 
 //=== TEST CASE: unknown_annotation_name_on_field_Generic ===
 //! expect: unknown annotation `@totally_unknown_anno`

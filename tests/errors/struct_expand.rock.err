@@ -3,7 +3,6 @@
 //!        not a value struct, a field's type has no payload-unique variant of the
 //!        target enum, a field type matches two
 //!        variants (ambiguous), and a return type that is not `[(string, <enum>)]`.
-//! Tags: struct_expand, pass_uniforms, emit-time
 
 //=== TEST CASE: arg_not_value_struct_Generic ===
 enum E { F(float), I(int) }

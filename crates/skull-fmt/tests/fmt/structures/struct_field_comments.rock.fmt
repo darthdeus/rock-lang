@@ -1,5 +1,4 @@
 //! Test: Struct field inline comments preservation
-//! Tags: structs, comments, fields
 
 //=== TEST CASE:struct_field_comments ===
 

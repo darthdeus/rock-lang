@@ -1,5 +1,4 @@
 //! Error: GPU-only intrinsics -- a direct CPU-side call is rejected at emit
-//! Tags: intrinsics, gpu_only, shader
 
 //=== TEST CASE: texture_direct_cpu_call_Generic ===
 fn use_texture() -> Vec4 {

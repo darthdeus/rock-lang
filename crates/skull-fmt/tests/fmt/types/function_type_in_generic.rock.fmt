@@ -1,5 +1,4 @@
 //! Test: a function type as a generic arg whose return is itself generic
-//! Tags: types, functions, generics, regressions
 
 // `Map<.., () -> Coroutine<CoFrame>>` ends in `>>`, tokenized as one `>>` token
 // the parser splits -- which left the function type's span one `>` too long.

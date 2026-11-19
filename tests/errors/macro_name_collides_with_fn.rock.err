@@ -1,5 +1,4 @@
 //! Error: a macro name colliding with a function name is rejected
-//! Tags: macros, uniqueness
 
 // A macro name must be unique against function names across the whole module
 // set: `foo(...)` in call position is ambiguous when both a `macro foo` and a

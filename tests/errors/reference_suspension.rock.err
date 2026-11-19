@@ -1,5 +1,4 @@
 //! Error: frame refs cannot remain usable across coroutine suspension
-//! Tags: refs,coroutines
 
 //=== TEST CASE: parameter_used_after_yield_Generic ===
 //! expect: frame borrow is used after a coroutine suspension

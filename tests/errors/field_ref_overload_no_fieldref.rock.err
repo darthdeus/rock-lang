@@ -1,5 +1,4 @@
 //! Error: A `.field` arg still rejects when the winning overload's slot is not FieldRef
-//! Tags: field_ref, overloads
 
 //=== TEST CASE: field_ref_picked_slot_not_fieldref_Generic ===
 struct Mob { health: int }

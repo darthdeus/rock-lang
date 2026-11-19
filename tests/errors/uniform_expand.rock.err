@@ -7,7 +7,6 @@
 //!        struct, and a group with no std140 form. Generic wrappers are admitted
 //!        and validated when their retained concrete instances reach the
 //!        expander.
-//! Tags: uniform_expand, gpu_layout, emit-time
 
 //=== TEST CASE: intrinsic_declared_with_wrong_arity ===
 value U { a: float }

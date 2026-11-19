@@ -1,6 +1,5 @@
 //! Error: `static` local rejects.
 //!        Diagnostics distinguish declaration restrictions, captures and name lookup.
-//! Tags: static, rejects
 
 //=== TEST CASE: static_in_pure_fn_writes_globals_Generic ===
 //! expect: `@pure` function declares a `static` (writes module state)

@@ -1,5 +1,4 @@
 //! Error: `.N` on a vec-of-tuples no longer auto-projects; use `.map(_.N)`
-//! Tags: tuple, vec, projection
 
 //=== TEST CASE: vec_of_tuples_dot0_rejected_Generic ===
 // `[(A,B)].0` used to auto-project to `[A]` (map .0 over the vec). That

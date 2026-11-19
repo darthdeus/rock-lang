@@ -1,5 +1,4 @@
 //! Test: forms whose spelling the printer once changed or broke
-//! Tags: regressions, roundtrip, macros, comments, operators
 
 //=== TEST CASE: call_type_arguments_and_single_tuples_are_kept ===
 fn f() {

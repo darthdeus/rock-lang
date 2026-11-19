@@ -7,7 +7,6 @@
 //!        degrades to identity; Lua clobbers the field value). Other
 //!        `__`-prefixed names stay legal (stdlib iterator structs use
 //!        `__inner`/`__pred`/...).
-//! Tags: structs, value-structs, reserved-names
 
 //=== TEST CASE: struct_field_fn_Generic ===
 //! expect: Reserved field name `__fn` in struct `Sneaky`: `__fn`, `__ty`, and `__variant` are runtime marker keys

@@ -1,5 +1,4 @@
 //! Error: `let` binding requires an initializer (uninitialized `let x: T` removed)
-//! Tags: let, bindings
 
 //=== TEST CASE: let_no_init_simple_Generic ===
 //! expect: let without value is not supported

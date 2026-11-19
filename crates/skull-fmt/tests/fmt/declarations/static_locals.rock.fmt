@@ -1,5 +1,4 @@
 //! Test: static local declarations
-//! Tags: static, declarations, locals
 
 //=== TEST CASE: static_inferred_and_annotated ===
 fn f() {

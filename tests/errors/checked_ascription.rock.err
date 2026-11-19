@@ -1,7 +1,6 @@
 //! Error: contextual ascription is checked -- the ascribed type is the
 //!        operand's expected type, so only ordinary assignment compatibility
 //!        is accepted. Explicit narrowing belongs to `as`.
-//! Tags: ascription, types, mono
 
 //=== TEST CASE: ascribe_int_to_string_MismatchedType ===
 fn main() {

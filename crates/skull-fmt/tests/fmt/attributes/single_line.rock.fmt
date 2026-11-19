@@ -1,5 +1,4 @@
 //! Test: Keep attributes on same line when possible
-//! Tags: attributes, decorators, single-line
 
 //=== TEST CASE: simple_attributes_stay_inline ===
 // Simple attributes should stay on same line

@@ -6,7 +6,6 @@
 //!            same-signature same-backend duplicate is NOT collapsed: the
 //!            second definition is rejected. (3) An unknown inline
 //!            backend name is a fail-closed parse rejection.
-//! Tags: backends, extern-js, inline-js, overloads, stone-web
 
 //=== TEST CASE: js_only_extern_called_from_lua_Generic ===
 extern(js) fn js_only() -> int

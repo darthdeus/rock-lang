@@ -1,5 +1,4 @@
 //! Error: Type mismatch error tests
-//! Tags: types, mismatches
 
 //=== TEST CASE: string_to_int_mismatch_MismatchedType ===
 fn main() {

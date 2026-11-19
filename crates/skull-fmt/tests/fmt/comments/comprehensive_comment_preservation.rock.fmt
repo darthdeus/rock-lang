@@ -1,5 +1,4 @@
 //! Test: Comprehensive comment preservation patterns
-//! Tags: comments, preservation, mixed
 
 //=== TEST CASE:comment_preservation_after_assert ===
 

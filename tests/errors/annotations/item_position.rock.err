@@ -2,7 +2,6 @@
 //! Unknown name, bad arity, and disallowed
 //! position -- each rejects with a spanned CompilerError from the registry
 //! validation (fn items in function building, non-fn items in module lowering).
-//! Tags: annotations, registry, item
 
 //=== TEST CASE: unknown_annotation_name_on_item_Generic ===
 //! expect: unknown annotation `@totally_unknown_anno`

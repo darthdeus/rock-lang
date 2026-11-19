@@ -1,6 +1,5 @@
 //! Error: unwrap / expect / unwrap_or on a non-nullable value is redundant,
 //!        rejected the same way `x ?? d` on a non-nullable is
-//! Tags: types, null, nullable
 
 //=== TEST CASE: unwrap_method_Generic ===
 fn main() {

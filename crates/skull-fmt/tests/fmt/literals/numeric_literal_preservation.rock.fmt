@@ -1,5 +1,4 @@
 //! Test: Numeric literal preservation (hex, binary, float)
-//! Tags: literals, numbers, hex, binary, float
 
 //=== TEST CASE:hex_literal_preservation ===
 

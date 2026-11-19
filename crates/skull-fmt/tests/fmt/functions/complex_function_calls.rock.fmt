@@ -1,5 +1,4 @@
 //! Test: Complex function call formatting
-//! Tags: function-calls, complex, multiline
 
 //=== TEST CASE: fn_calls_nowrap ===
 fn test() {

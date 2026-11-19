@@ -9,7 +9,6 @@
 //!        `Iterator`-bounded fn) stopped being unemittable when D-1 gave bounded
 //!        bodies standalone emission, and this test failed open until it was
 //!        noticed.
-//! Tags: monomorphization, recursion, emit-time, reject-dont-fallback
 
 //=== TEST CASE: polymorphic_recursion ===
 fn rec<T>(x: T, n: int) -> int {

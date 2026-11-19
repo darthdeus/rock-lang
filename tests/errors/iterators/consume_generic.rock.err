@@ -1,5 +1,4 @@
 //! Iterator bounds make generic bindings affine, including inside an uncalled function.
-//! Tags: iterators, consume, affine, generics
 
 //=== TEST CASE: bounded_generic_double_for_Generic ===
 //! expect: use of consumed binding `it`

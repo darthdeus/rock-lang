@@ -1,5 +1,4 @@
 //! Test: Struct spread (call-site `..arg`) and functional-update (`{ ..base }`)
-//! Tags: struct-spread, functional-update, calls
 
 //=== TEST CASE: call_spread_inline ===
 fn test() {

@@ -1,5 +1,4 @@
 //! Error: token forms that are valid only in specific lexical or syntax contexts
-//! Tags: tokenizer, directives, members
 
 //=== TEST CASE: unterminated_single_quoted_string ===
 //! expect: unterminated string literal

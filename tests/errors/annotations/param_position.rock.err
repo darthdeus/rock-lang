@@ -2,7 +2,6 @@
 //! Unknown name, disallowed position, and bad
 //! arg kind -- each rejects with a spanned CompilerError from the registry
 //! validation during function building.
-//! Tags: annotations, registry, param
 
 //=== TEST CASE: unknown_annotation_name_on_param_Generic ===
 //! expect: unknown annotation `@totally_unknown_anno`

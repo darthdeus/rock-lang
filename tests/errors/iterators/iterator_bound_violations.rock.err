@@ -2,7 +2,6 @@
 //!        missing piece. Bounds are STRUCTURAL: `C` satisfies `Iterator<E>` iff
 //!        `next(C) -> (bool, E)` resolves. Replaces the parse-error sentinel
 //!        (bounds now parse).
-//! Tags: iterators, generics, bounds
 
 //=== TEST CASE: non_iterator_arg_fails_bound_Generic ===
 //! expect: `int` does not satisfy `Iterator<T>`: no `next(int) -> (bool, E)` function in scope

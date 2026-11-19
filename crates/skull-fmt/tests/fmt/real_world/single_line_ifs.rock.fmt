@@ -1,5 +1,4 @@
 //! Test: Single-line if preservation
-//! Tags: control-flow, if-statements
 
 //=== TEST CASE: single_line_if_preservation ===
 fn draw_debug_lines(neighbors: Neighbors, pos: Vec2) {

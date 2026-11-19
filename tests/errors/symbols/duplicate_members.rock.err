@@ -1,5 +1,4 @@
 //! Error: Duplicate member names within one type definition
-//! Tags: symbols, duplicates, structs, enums
 
 //=== TEST CASE: duplicate_struct_field_Generic ===
 //! expect: Duplicate field `x` in struct `Foo`

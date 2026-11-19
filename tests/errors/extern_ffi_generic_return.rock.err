@@ -12,7 +12,6 @@
 //!        The concrete-return externs stay legal and are exercised by
 //!        `tests/closures/extern_fn_value.rock`; this rejects only the
 //!        shape that has no representation to pick.
-//! Tags: extern, ffi, generics, c-boundary, emit-time
 
 //=== TEST CASE: extern_ffi_generic_return ===
 extern(ffi, "m") fn opaque_ret<T>() -> T

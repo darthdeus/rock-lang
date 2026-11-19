@@ -2,7 +2,6 @@
 //!        has no type -- defer-to-use does not invent one. The local
 //!        `*(UnpinnedW, int)` overload ties with stdlib `*(int, int)`, so `x * 2` cannot
 //!        pick eagerly, and with no later call the param stays unresolved.
-//! Tags: lambdas, inference, defer-to-use
 
 //=== TEST CASE: unpinned_lambda_param_mul_Generic ===
 struct UnpinnedW { a: float }

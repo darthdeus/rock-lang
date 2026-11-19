@@ -1,5 +1,4 @@
 //! Error: a match over an enum must cover every variant or have a catch-all arm.
-//! Tags: patterns, enums, match, exhaustiveness
 
 //=== TEST CASE: missing_plain_variant_NonExhaustive ===
 //! expect: Non-exhaustive match expression. Missing patterns: Blue

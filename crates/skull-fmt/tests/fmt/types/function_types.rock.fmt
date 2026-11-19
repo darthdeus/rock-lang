@@ -1,5 +1,4 @@
 //! Test: Function type syntax
-//! Tags: types, functions, syntax
 
 //=== TEST CASE: function_type_syntax ===
 struct Test {

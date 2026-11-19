@@ -1,5 +1,4 @@
 //! Test: Extern/inline function formatting
-//! Tags: extern, inline, functions
 
 //=== TEST CASE: extern_function_preservation ===
 inline(lua) fn get_working_directory() -> string = """

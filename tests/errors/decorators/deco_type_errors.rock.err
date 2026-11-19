@@ -1,5 +1,4 @@
 //! Error: Decorator body type error tests
-//! Tags: decorators, types
 
 //=== TEST CASE: deco_init_type_mismatch_MismatchedType ===
 deco init bad_types {

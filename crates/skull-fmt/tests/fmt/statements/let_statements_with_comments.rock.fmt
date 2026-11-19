@@ -1,5 +1,4 @@
 //! Test: Let statements with inline comments
-//! Tags: let-statements, comments, inline
 
 //=== TEST CASE:let_statements_with_inline_comments ===
 

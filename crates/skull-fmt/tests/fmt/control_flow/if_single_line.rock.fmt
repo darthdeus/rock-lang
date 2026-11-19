@@ -1,5 +1,4 @@
 //! Test: Preserve single-line if statements when appropriate
-//! Tags: if, control-flow, single-line
 
 //=== TEST CASE: simple_single_line_ifs ===
 fn test() {

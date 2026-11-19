@@ -1,5 +1,4 @@
 //! Error: Duplicate pattern matching tests
-//! Tags: patterns, match, duplicates
 
 //=== TEST CASE: duplicate_wildcard_DuplicatePattern ===
 //! expect: duplicate wildcard pattern in match expression - only one unguarded `_` arm is allowed

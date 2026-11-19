@@ -11,7 +11,6 @@
 //!        `stone/engine/systems/coroutines.rock` casts a generic `R?` to `R`,
 //!        where there is no `?? default` to reach for and null is a legal `R`).
 //!        Suppression is name-matched, which the wrong-name case below pins.
-//! Tags: lint, nullable, cast, error-severity
 
 //=== TEST CASE: cast_strips_nullability ===
 fn maybe_int() -> int? {

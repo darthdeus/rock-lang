@@ -4,7 +4,6 @@
 //!        rejected at the call with a spanned error instead of reaching the
 //!        error body. A call that disagrees with a well-formed declaration is
 //!        bone's ordinary argument error; these declarations are malformed.
-//! Tags: struct_expand, vertex_expand, uniform_expand, uniform_values, emit-time
 
 //=== TEST CASE: struct_expand_with_two_parameters ===
 //! expect: `@struct_expand` fn `epairs` takes exactly one argument

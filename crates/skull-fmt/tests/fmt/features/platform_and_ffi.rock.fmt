@@ -1,5 +1,4 @@
 //! Test: Platform-specific and FFI formatting
-//! Tags: conditional-compilation, varargs, ffi
 //! NOTE: These syntax features are not yet supported in current Rock parser
 //! NOTE: Tests are commented out until conditional compilation and varargs are supported
 

@@ -1,5 +1,4 @@
 //! Error: `let ... else` rejections
-//! Tags: patterns, let
 
 //=== TEST CASE: else_must_diverge_NonDiverging ===
 //! expect: must diverge

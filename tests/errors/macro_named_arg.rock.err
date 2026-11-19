@@ -1,5 +1,4 @@
 //! Error: a macro argument label must name a parameter of that macro, once
-//! Tags: macros, named-args
 
 // Macro args bind by label when one is given (tests/macros/named_args.rock).
 // A label naming no parameter is a typo, not a positional arg -- the expander

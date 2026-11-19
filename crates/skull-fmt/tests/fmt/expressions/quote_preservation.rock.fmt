@@ -1,5 +1,4 @@
 //! Test: Quote style preservation in inline functions
-//! Tags: inline, strings, quotes
 
 //=== TEST CASE: quote_style_preservation ===
 // Triple quotes should be preserved even for single-line strings

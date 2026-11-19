@@ -1,5 +1,4 @@
 //! Test: Struct init formatter regressions (multi-field, shorthand, block values)
-//! Tags: struct-init, shorthand, regressions
 
 //=== TEST CASE: struct_init_field_shorthand ===
 fn f() {

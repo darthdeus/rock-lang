@@ -1,5 +1,4 @@
 //! Test: Tuple and pattern destructuring formatting
-//! Tags: destructuring, tuples, let, for
 
 //=== TEST CASE: tuple_let_destructure ===
 fn test() {

@@ -1,5 +1,4 @@
 //! Test: Enum definitions and variant formatting
-//! Tags: enums, match, variants
 
 //=== TEST CASE: simple_enum ===
 enum Direction {

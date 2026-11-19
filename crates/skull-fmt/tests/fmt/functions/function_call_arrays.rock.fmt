@@ -1,5 +1,4 @@
 //! Test: Function calls with array arguments
-//! Tags: function-calls, arrays, formatting
 
 //=== TEST CASE:function_call_with_array_argument_formatting ===
 

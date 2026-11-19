@@ -1,5 +1,4 @@
 //! Test: Annotation preservation
-//! Tags: annotations, functions
 
 //=== TEST CASE: parameter_annotation_preservation ===
 // inline(lua) generic fn signatures format unchanged

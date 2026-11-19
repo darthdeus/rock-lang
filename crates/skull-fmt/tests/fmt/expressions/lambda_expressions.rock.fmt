@@ -1,5 +1,4 @@
 //! Test: Lambda expression formatting
-//! Tags: lambdas, arrow-syntax, closures
 
 //=== TEST CASE:lambda_arrow_syntax ===
 

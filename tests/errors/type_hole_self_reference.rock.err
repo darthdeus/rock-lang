@@ -1,7 +1,6 @@
 //! Error: a type hole filled by an unconstrained nullable generic result
 //!        must not bind an inference variable to a type containing itself
 //!        (the checker used to overflow its stack walking `T??...`).
-//! Tags: inference, type-hole, generics
 
 //=== TEST CASE: hole_bound_to_nullable_generic_result ===
 //! expect: would contain itself

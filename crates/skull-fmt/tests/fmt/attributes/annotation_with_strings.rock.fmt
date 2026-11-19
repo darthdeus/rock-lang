@@ -1,5 +1,4 @@
 //! Test: defensive verbatim passthrough on parse-error input
-//! Tags: annotations, strings, passthrough, recovery
 //!
 //! A bare string item after `@test` (`@test\n"desc"\nfn ...`) is NOT valid Rock:
 //! a string literal cannot start an item. It is undocumented, used in zero real

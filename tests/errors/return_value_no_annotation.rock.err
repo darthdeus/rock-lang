@@ -7,7 +7,6 @@
 //!        side-effecting call, not a return); only an explicit `return <value>`
 //!        rejects. A NESTED un-annotated fn stays inferred-return (v1), so its
 //!        `return` is unchecked -- this rule governs the top-level body only.
-//! Tags: return-type, unit, type-mismatch
 
 //=== TEST CASE: return_value_from_unannotated_fn_Generic ===
 struct Trail { x: int }

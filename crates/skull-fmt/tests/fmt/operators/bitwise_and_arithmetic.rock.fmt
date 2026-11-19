@@ -1,5 +1,4 @@
 //! Test: Bitwise and arithmetic operator formatting
-//! Tags: operators, bitwise, arithmetic
 
 //=== TEST CASE:preserve_spacing_around_operators ===
 

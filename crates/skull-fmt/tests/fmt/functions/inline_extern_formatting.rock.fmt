@@ -1,5 +1,4 @@
 //! Test: Inline and extern function formatting
-//! Tags: inline, extern, backend-specific
 
 //=== TEST CASE: inline_lua_format ===
 inline(lua) fn lua_specific_code() -> string = """return "lua_result" """

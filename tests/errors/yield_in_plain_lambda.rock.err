@@ -8,7 +8,6 @@
 //!        Yield arm silently accepted. Then ANF lowering tripped on
 //!        `UnsupportedExpr("Yield")` inside the recursively-lowered
 //!        lambda body, surfacing as a confusing codegen-level message.
-//! Tags: coroutines, lambdas
 
 //=== TEST CASE: yield_with_value_in_lambda_Generic ===
 //! expect: yield is only allowed in a coroutine (co fn)

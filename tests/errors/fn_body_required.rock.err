@@ -1,5 +1,4 @@
 //! Error: a function body must be a block or an inline string, never absent
-//! Tags: parser, fn, silent-fallback
 
 // `finish_fn_def` answered a missing body with `extern_body.unwrap_or(ExternC)`.
 // Only the `extern fn` caller passes `Some`, so every other bodyless form --

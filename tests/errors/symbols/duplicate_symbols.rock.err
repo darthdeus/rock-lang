@@ -1,5 +1,4 @@
 //! Error: Duplicate symbol detection tests
-//! Tags: symbols, duplicates
 
 //=== TEST CASE: duplicate_enum_DuplicateSymbol ===
 //! expect: duplicate definition `DrawCommand`

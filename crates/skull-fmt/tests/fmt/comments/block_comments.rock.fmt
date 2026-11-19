@@ -1,5 +1,4 @@
 //! Test: Block comment (/* */) preservation
-//! Tags: comments, block, preservation
 
 //=== TEST CASE: block_comment_between_statements ===
 fn t() {

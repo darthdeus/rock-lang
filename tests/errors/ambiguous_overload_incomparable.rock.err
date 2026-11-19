@@ -1,5 +1,4 @@
 //! Error: two incomparable generic overloads tie -- ambiguous
-//! Tags: overloads, generics
 
 // Overload ranking has a genericity cost (`int` beats `[T]` beats `T`;
 // `param_genericity` in bone-inference), so the bare-`T`-catch-all-vs-concrete

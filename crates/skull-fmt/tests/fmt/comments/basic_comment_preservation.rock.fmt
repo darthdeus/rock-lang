@@ -1,5 +1,4 @@
 //! Test: Basic comment preservation
-//! Tags: comments, preservation
 
 //=== TEST CASE: basic_comment_preservation ===
 // This is a comment

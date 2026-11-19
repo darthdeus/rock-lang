@@ -1,5 +1,4 @@
 //! Error: an `= <body>` function body must be a string literal
-//! Tags: parser, inline, silent-fallback
 
 // `= <expr>` parsed the expression, THREW IT AWAY, and kept an empty inline
 // source -- so `fn c(x: int) -> int = x + 1` emitted `function c(x) return end`

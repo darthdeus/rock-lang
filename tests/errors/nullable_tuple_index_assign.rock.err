@@ -1,5 +1,4 @@
 //! Error: Assignment through tuple index on nullable type
-//! Tags: nullable, tuple, safenav, soundness
 
 //=== TEST CASE: nullable_tuple_index_write_Generic ===
 // `t.0 = v` where `t: (int, int)?` would crash at runtime if `t` is

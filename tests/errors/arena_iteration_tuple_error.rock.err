@@ -1,5 +1,4 @@
 //! Error: Arena iteration tuple access error tests
-//! Tags: arena, tuples, type_mismatches
 
 //=== TEST CASE: tuple_first_on_non_tuple_Generic ===
 //! expect: Mob

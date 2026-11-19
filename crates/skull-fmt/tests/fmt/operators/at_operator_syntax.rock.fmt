@@ -1,5 +1,4 @@
 //! Test: @ operator syntax formatting
-//! Tags: operators, at-operator, blocks, lambda
 
 //=== TEST CASE:basic_at_operator_usage ===
 

@@ -4,7 +4,6 @@
 //!        `@test`-able", and nothing rejects a CPU call to one. So the `nobox`
 //!        guarantee applies to it like any other body: an implicit
 //!        materialization inside a `@shader` fn must reject.
-//! Tags: nobox, shader, gpu, guarantee, emit-time
 //!
 //! The materialization below is unrelated to any GPU intrinsic: a box is
 //! authorized only AT a `@gpu_only` call boundary, never anywhere inside a body

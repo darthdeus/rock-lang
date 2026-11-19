@@ -1,5 +1,4 @@
 //! Error: Generic type validation tests
-//! Tags: generics, validation
 
 //=== TEST CASE: struct_missing_type_args_Generic ===
 //! expect: Generic type `GenericStruct` requires 1 type argument(s)

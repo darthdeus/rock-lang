@@ -1,5 +1,4 @@
 //! Error: Field access on nullable type must use ?. for safety
-//! Tags: nullable, safenav, soundness
 
 //=== TEST CASE: nullable_field_on_struct_Generic ===
 struct Foo { x: int }

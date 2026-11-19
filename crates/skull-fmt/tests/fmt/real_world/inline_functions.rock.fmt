@@ -1,5 +1,4 @@
 //! Test: Inline function formatting
-//! Tags: inline, functions
 
 //=== TEST CASE: inline_function_formatting ===
 // Inline functions should stay on same line with their annotation

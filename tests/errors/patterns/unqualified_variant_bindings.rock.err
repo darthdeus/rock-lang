@@ -1,5 +1,4 @@
 //! Error: a bare uppercase name against an enum scrutinee is a variant test
-//! Tags: patterns, enums
 
 // `match` has always read an uppercase arm name as a variant (and rejected a
 // typo'd one). The same rule now applies to every pattern position, so an

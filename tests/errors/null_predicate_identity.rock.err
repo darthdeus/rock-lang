@@ -1,5 +1,4 @@
 //! Error: user-defined is_null functions do not prove non-nullness
-//! Tags: nullable, narrowing, overloads
 
 //=== TEST CASE: same_name_predicate_does_not_prove_nonnull_Generic ===
 //! expect: cannot access field `n` on non-struct type Payload?

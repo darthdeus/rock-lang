@@ -1,5 +1,4 @@
 //! Error: Newtype operator error tests
-//! Tags: newtypes, operators
 
 //=== TEST CASE: newtype_eq_with_int_IncompatibleNewtypeOperation ===
 newtype UserId(int)

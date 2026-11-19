@@ -1,5 +1,4 @@
 //! Test: Global variable declarations with comments
-//! Tags: globals, comments, declarations
 
 //=== TEST CASE: globals_with_comments ===
 global global_counter: int = 0  // Track application state

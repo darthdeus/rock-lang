@@ -2,7 +2,6 @@
 //!        alphabets, writes (swizzles are read-only synthetic fields), and
 //!        swizzle-shaped names on non-vec receivers stay plain missing-field
 //!        errors.
-//! Tags: swizzle, vec, fields
 
 //=== TEST CASE: vec2_component_out_of_arity_Rejected ===
 fn main() {

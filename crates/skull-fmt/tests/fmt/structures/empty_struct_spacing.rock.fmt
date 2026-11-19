@@ -1,5 +1,4 @@
 //! Test: Empty struct spacing rules
-//! Tags: structs, spacing, empty-structs
 
 //=== TEST CASE:consecutive_empty_struct_spacing ===
 

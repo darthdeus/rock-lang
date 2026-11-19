@@ -2,7 +2,6 @@
 //! Reject aggregate and payload-carrying keys, including newtypes wrapping
 //! them: equal fresh instances otherwise miss by identity. Scalar-backed
 //! newtypes and payload-free enums remain allowed.
-//! Tags: map, keys
 
 //=== TEST CASE: value_struct_map_key_annotation_Generic ===
 //! expect: `IVec2` is a `value` struct

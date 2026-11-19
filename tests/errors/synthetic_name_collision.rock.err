@@ -12,7 +12,6 @@
 //!        makes them collide, so the rejection is EMIT-time and this suite runs
 //!        skull emission on the bone-accepted case. The positive controls are
 //!        tests/symbols/synthetic_name_lookalikes.rock.
-//! Tags: skull, codegen, synthetic-name, emit-time
 
 //=== TEST CASE: global_vs_lambda_Generic ===
 //! expect: compiler-reserved synthetic name

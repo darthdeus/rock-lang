@@ -5,7 +5,6 @@
 //! therefore only meaningful where a body is opaque to the compiler: on a
 //! regular Rock fn there is no assumption to waive, and admitting it there
 //! would let a reader believe a contract was in force that nothing consults.
-//! Tags: annotations, registry, param, boundary-contracts
 
 //=== TEST CASE: repr_opaque_on_a_regular_rock_fn_Generic ===
 //! expect: `@repr(opaque)` applies to a parameter of an `inline(..)` or `extern` boundary

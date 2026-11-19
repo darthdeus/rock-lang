@@ -39,7 +39,6 @@
 //!        `inspect` and `to_lua_array` over a column `[Vec2]` also reject and
 //!        are deliberately NOT in this file: those are F1 erasure, a justified
 //!        box, and are meant to stay rejections.
-//! Tags: nobox, collections, columns, arena
 
 //=== TEST CASE: whole_tuple_escape_of_a_nobox_Generic ===
 // NOT an unbuilt mechanism -- the guarantee firing, pinned so the boundary

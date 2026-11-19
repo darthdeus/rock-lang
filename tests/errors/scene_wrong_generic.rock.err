@@ -6,7 +6,6 @@
 //!        the typechecker, and this pins that it does. Same property for
 //!        `SceneBuilder.arena<T>()`, whose element type comes from the expected
 //!        type at the call site.
-//! Tags: scenes, generics, weak-handles
 
 //=== TEST CASE: scene_handle_of_wrong_root_type_Generic ===
 struct RoomState { n: int }

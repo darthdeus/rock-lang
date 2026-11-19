@@ -3,7 +3,6 @@
 //!        replaces its whole value (tests/values/value_local_field_write.rock),
 //!        but a call result is a temporary, and `field_set` receives a copy
 //!        of its argument, not the caller's place.
-//! Tags: value, immutability, field-refs
 
 //=== TEST CASE: value_struct_field_set_Immutable ===
 //! expect: a value argument is a copy

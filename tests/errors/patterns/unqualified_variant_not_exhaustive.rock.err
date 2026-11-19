@@ -2,7 +2,6 @@
 //!        Reading it as an irrefutable binding made a partial match look
 //!        exhaustive to bone while skull emitted a tag test, so the uncovered
 //!        variant fell through and the fn returned nil.
-//! Tags: patterns, enums, match, exhaustiveness
 
 //=== TEST CASE: unqualified_variant_arm_does_not_catch_all ===
 //! expect: Non-exhaustive match expression. Missing patterns: B

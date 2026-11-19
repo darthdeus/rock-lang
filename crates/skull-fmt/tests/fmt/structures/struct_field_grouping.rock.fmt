@@ -1,5 +1,4 @@
 //! Test: Struct field grouping with blank lines
-//! Tags: structs, blank-lines, grouping
 
 //=== TEST CASE: struct_field_grouping_with_blank_lines ===
 fn test() {

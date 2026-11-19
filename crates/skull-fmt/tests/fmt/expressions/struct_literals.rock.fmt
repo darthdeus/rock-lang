@@ -1,5 +1,4 @@
 //! Test: Struct literal formatting
-//! Tags: expressions, structs, single-line
 
 //=== TEST CASE: simple_struct_literals_stay_inline ===
 fn test() {

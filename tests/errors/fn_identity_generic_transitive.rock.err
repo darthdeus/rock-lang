@@ -4,7 +4,6 @@
 //!        fn_identity, a whole-program fixpoint after inference) marks
 //!        `outer`'s `T` compared too, and `outer(mk(), mk())` is rejected.
 //!        Base cases: tests/errors/fn_identity_generic.rock.err.
-//! Tags: closures, fn-values, equality, generics
 
 //=== TEST CASE: generic_eq_fn_arg_transitive_Generic ===
 fn same<T>(a: T, b: T) -> bool { return a == b }

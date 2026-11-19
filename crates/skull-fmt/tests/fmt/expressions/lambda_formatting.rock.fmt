@@ -1,5 +1,4 @@
 //! Test: Lambda expression formatting
-//! Tags: lambdas, arrows, functions
 
 //=== TEST CASE: simple_lambda_expressions ===
 fn test() {

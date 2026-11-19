@@ -1,5 +1,4 @@
 //! Test: macro bodies keep their item declarations
-//! Tags: macros, declarations
 
 // Item declarations in a macro body live outside the block's statement list.
 // Printing the block alone DELETED them, silently emptying the macro.

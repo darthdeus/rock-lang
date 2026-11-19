@@ -1,5 +1,4 @@
 //! Test: a trailing comment on a statement that expands across lines
-//! Tags: regressions, comments, idempotence
 
 // A one-line `if c { a; b }  // cmt` expands (two body statements force
 // multi-line). The comment must land ONCE, on the closing `}` -- not dropped

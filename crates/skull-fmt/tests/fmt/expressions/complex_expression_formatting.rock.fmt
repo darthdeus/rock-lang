@@ -1,5 +1,4 @@
 //! Test: Complex expression formatting and line breaking
-//! Tags: expressions, line-breaking, complex
 
 //=== TEST CASE:complex_let_statements_with_long_expressions ===
 

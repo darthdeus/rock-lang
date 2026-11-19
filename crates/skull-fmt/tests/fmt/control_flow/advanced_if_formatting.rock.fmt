@@ -1,5 +1,4 @@
 //! Test: Advanced if statement formatting
-//! Tags: if, control-flow, complex
 
 //=== TEST CASE:simple_if_collapse ===
 

@@ -3,7 +3,6 @@
 //!        `for` head cannot supply the resume-arg the body's `let x = yield V`
 //!        expects. The mismatch rejects at the loop naturally (no `next`
 //!        overload fits), never a silent wrong-arity resume.
-//! Tags: coroutines, generators, iterator, resume
 
 //=== TEST CASE: resume_taking_coroutine_not_iterable_Rejected ===
 //! expect: type `Coroutine<int, (), int>` is not iterable

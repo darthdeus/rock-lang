@@ -6,7 +6,6 @@
 //!        a `@native_required @intrinsic` fn whose only body is a Rock body (the
 //!        luajit mapping is the `inline(lua)` body; a Rock body is a fallback, and
 //!        native-required has no fallback to fall back from).
-//! Tags: intrinsic, native_required, emit-time
 
 //=== TEST CASE: native_required_without_intrinsic_Generic ===
 @native_required inline(lua) fn spin(x: int) -> int = """

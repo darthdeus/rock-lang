@@ -1,6 +1,5 @@
 //! Error: increment/decrement of a `const` global is rejected -- consts are
 //!        read-only, same rule as plain and compound assignment.
-//! Tags: const, immutability, incdec
 
 //=== TEST CASE: const_post_increment_Rejected ===
 const COUNTER: int = 0

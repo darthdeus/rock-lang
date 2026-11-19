@@ -2,7 +2,6 @@
 //!        `FieldRef` is the TOP and coerces DOWN to both single-capability
 //!        formers; `ReadFieldRef` and `WriteFieldRef` are INCOMPARABLE, and a
 //!        write-capable selector is INVARIANT in its field type.
-//! Tags: field_ref, write_field_ref, lattice, invariance
 
 //=== TEST CASE: write_field_ref_to_read_field_ref_Generic ===
 // The extraction hole `WriteFieldRef` exists to close: a write-only selector

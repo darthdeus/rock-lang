@@ -9,7 +9,6 @@
 //!        Aliased operands: fn_identity_generic_let_alias.rock.err;
 //!        forwarding through another generic:
 //!        fn_identity_generic_transitive.rock.err.
-//! Tags: closures, fn-values, equality, generics
 
 //=== TEST CASE: generic_eq_capture_free_fn_arg_Generic ===
 fn same<T>(a: T, b: T) -> bool { return a == b }

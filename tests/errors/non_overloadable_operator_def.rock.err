@@ -1,5 +1,4 @@
 //! Error: defining a non-overloadable operator must reject rather than be silently dropped
-//! Tags: operators,overloading
 
 // Only `+ - * / % ./` dispatch to a user fn in their binary form. Prefix `-`
 // and `!` have their own callable families; the other operator symbols parse

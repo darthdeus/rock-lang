@@ -2,7 +2,6 @@
 //!        wildcard or binding arm, the unguarded literal and range arms have
 //!        to cover every value; otherwise an uncovered value reaches the
 //!        unreachable fallthrough block at runtime.
-//! Tags: patterns, match, exhaustiveness, integers
 
 //=== TEST CASE: single_range_NonExhaustive ===
 //! expect: Non-exhaustive match expression. Missing patterns: `..=0`, `11..`

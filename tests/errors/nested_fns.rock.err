@@ -1,7 +1,6 @@
 //! Error: nested `fn` v1 rejects.
 //!        v1 restrictions: no capture of enclosing params/locals, no generics,
 //!        no annotations, decl-before-use (no forward/mutual recursion).
-//! Tags: nested_fn, rejects
 
 //=== TEST CASE: nested_fn_reads_enclosing_param_Generic ===
 //! expect: nested function may not read enclosing local `threshold`

@@ -1,5 +1,4 @@
 //! Error: refutable patterns in `let`/`for` are rejected
-//! Tags: patterns, let
 
 // A `let` or `for` pattern must match every value of its type; a pattern
 // that can fail belongs in `match`, `if let`, or `let ... else`.

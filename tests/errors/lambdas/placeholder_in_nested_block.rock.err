@@ -1,6 +1,5 @@
 //! Error: `_` placeholder inside Let/For/While statements of an explicit
 //!        lambda body must be detected (walker visits all stmt kinds).
-//! Tags: lambdas, placeholders
 
 //=== TEST CASE: placeholder_in_explicit_lambda_let_init_Generic ===
 //! expect: `_` placeholder cannot appear inside an explicit lambda or block expression

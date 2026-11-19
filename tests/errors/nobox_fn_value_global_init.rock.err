@@ -11,7 +11,6 @@
 //!        shifts by one. `fn(p: P, k: float) -> float { return k }` returned
 //!        `p.y`. A dispatch table (`global HANDLERS: [(Vec2) -> float]`) is an
 //!        ordinary shape, so this was reachable from real code.
-//! Tags: nobox, fn-values, globals, abi
 
 //=== TEST CASE: opaque_body_via_global_init_Generic ===
 nobox value P { x: float, y: float }

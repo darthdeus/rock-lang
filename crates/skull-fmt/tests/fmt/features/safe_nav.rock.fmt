@@ -1,5 +1,4 @@
 //! Test: Safe navigation operator formatting
-//! Tags: safe_nav, nullable, expressions
 
 //=== TEST CASE: safe_nav_field_access ===
 fn get_name(p: Player?) -> string {

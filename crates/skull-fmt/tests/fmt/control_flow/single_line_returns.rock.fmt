@@ -1,5 +1,4 @@
 //! Test: Single line return statements
-//! Tags: returns, single-line, if-statements
 
 //=== TEST CASE:single_line_if_return_with_comment ===
 

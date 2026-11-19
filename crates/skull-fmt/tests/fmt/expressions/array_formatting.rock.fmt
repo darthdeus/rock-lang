@@ -1,5 +1,4 @@
 //! Test: Array formatting and preservation
-//! Tags: arrays, collections, formatting
 
 //=== TEST CASE: preserve_array_formatting ===
 fn test() {

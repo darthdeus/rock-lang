@@ -4,7 +4,6 @@
 //!        arm, but not all by the same arm, is still reported as missing.
 //!        Without the check such a value reached the unreachable fallthrough
 //!        block at runtime.
-//! Tags: patterns, match, exhaustiveness, tuples, enums
 
 //=== TEST CASE: tuple_int_columns_NonExhaustive ===
 //! expect: Non-exhaustive match expression. Missing patterns:

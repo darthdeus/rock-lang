@@ -3,7 +3,6 @@
 //!        records, so fn identity is representation-dependent and never
 //!        meaningful.
 //!        Comparing a nullable fn against `null` stays legal (refinement).
-//! Tags: closures, fn-values, equality
 
 //=== TEST CASE: lambda_values_eq_Generic ===
 fn mk() -> fn() -> int { return () => 42 }

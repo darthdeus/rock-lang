@@ -1,5 +1,4 @@
 //! Test: Simple nested function call indentation
-//! Tags: structs, function-calls, indentation
 
 //=== TEST CASE:simple_nested_struct_in_function ===
 

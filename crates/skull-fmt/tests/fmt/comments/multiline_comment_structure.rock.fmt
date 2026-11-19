@@ -1,5 +1,4 @@
 //! Test: Multiline comment structure preservation
-//! Tags: comments, multiline, structure, globals
 
 //=== TEST CASE:multiline_comments_preserve_structure ===
 

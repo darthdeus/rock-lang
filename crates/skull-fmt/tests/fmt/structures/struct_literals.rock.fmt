@@ -1,5 +1,4 @@
 //! Test: Struct literal formatting
-//! Tags: structs, literals, single-line, multiline
 
 //=== TEST CASE: simple_struct_literals_oneline ===
 fn test() {

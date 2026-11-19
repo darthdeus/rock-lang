@@ -1,5 +1,4 @@
 //! Test: From scratch formatting (unformatted -> formatted)
-//! Tags: unformatted, minified, spacing, regression
 
 //=== TEST CASE:simple_function_formatting ===
 

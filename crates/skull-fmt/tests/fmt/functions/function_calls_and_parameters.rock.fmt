@@ -1,5 +1,4 @@
 //! Test: Function calls and parameter formatting
-//! Tags: functions, calls, parameters
 
 //=== TEST CASE:long_function_call_wrapping ===
 // Layout preserver: no width-driven reflow. An assignment the author wrote on

@@ -4,7 +4,6 @@
 //!        on its own) and would mean a different code unit on a UTF-16 backend;
 //!        a negative literal aborts `string.char` at runtime. Portable only for
 //!        0..=127; for code points use `from_codepoint`.
-//! Tags: string_char, portability, emit-time
 
 //=== TEST CASE: string_char_above_ascii_Generic ===
 fn main() {

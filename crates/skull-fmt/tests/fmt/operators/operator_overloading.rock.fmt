@@ -1,5 +1,4 @@
 //! Test: Operator overloading syntax formatting
-//! Tags: operators, overloading, operator-functions
 
 //=== TEST CASE: basic_operator_overloading ===
 operator(lua) +(a: int, b: int) -> int = "a + b"

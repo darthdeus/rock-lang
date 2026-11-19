@@ -4,7 +4,6 @@
 //!        operand's INFERRED type, not its declared one, so `x == y` still
 //!        compares `T` and a call instantiating `T` with a fn type is
 //!        rejected. Base cases: tests/errors/fn_identity_generic.rock.err.
-//! Tags: closures, fn-values, equality, generics
 
 //=== TEST CASE: generic_eq_fn_arg_both_unannotated_alias_Generic ===
 fn same<T>(a: T, b: T) -> bool { let x = a; let y = b; return x == y }

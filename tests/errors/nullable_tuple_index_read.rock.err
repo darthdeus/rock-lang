@@ -1,5 +1,4 @@
 //! Error: Reading a tuple element off a nullable base must use ?. for safety
-//! Tags: nullable, tuple, safenav, soundness
 
 //=== TEST CASE: nullable_tuple_index_read_Generic ===
 // `t.0` where `t: (int, int)?` would index `nil` at runtime if `t` is

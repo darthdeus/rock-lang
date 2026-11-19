@@ -4,7 +4,6 @@
 //!        error. These pin that the
 //!        rejection survives; diagnostics should name what is missing (iter vs
 //!        next).
-//! Tags: iterators, for-loop
 
 //=== TEST CASE: no_iter_fn_for_struct_Generic ===
 struct Thing { n: int }

@@ -1,5 +1,4 @@
 //! Test: Generic type parameters and constraints
-//! Tags: generics, types, constraints
 
 //=== TEST CASE: simple_generic_fn ===
 fn identity<T>(x: T) -> T {

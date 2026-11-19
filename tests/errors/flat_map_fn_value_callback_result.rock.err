@@ -2,7 +2,6 @@
 //!        the callback is a lambda, whose result expressions can be wrapped
 //!        in `iter`. A named fn returning a Vec is rejected with the two
 //!        spellings that work (tests/iterators/implicit_coercion.rock).
-//! Tags: iterators, coercion, flat_map
 
 //=== TEST CASE: named_fn_vec_result_Generic ===
 fn pair(n: int) -> [int] { return [n, n] }

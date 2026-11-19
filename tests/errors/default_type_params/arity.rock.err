@@ -1,5 +1,4 @@
 //! Error: defaulted generics still enforce min/max arity at use sites
-//! Tags: generics,defaults
 
 //=== TEST CASE: too_few_args_bare_Generic ===
 //! expect: Generic type `P` requires at least 1 type argument(s)

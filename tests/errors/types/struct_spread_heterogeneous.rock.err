@@ -1,5 +1,4 @@
 //! Error: Heterogeneous struct/tuple spread into a typed array must error
-//! Tags: types, spread, soundness
 
 //=== TEST CASE: heterogeneous_struct_spread_Generic ===
 struct Mixed {

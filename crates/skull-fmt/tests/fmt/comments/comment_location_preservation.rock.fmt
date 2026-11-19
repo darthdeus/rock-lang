@@ -1,5 +1,4 @@
 //! Test: Comment location preservation
-//! Tags: comments, location, standalone
 
 //=== TEST CASE:preserve_comment_location_in_function ===
 

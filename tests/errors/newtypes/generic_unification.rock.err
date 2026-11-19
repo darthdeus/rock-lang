@@ -1,7 +1,6 @@
 //! Error: a generic newtype constructor must unify its argument with the
 //!        wrapped type pattern; a conflicting or wrongly shaped argument is
 //!        rejected.
-//! Tags: newtypes, generics, inference
 
 //=== TEST CASE: map_key_value_conflict_TypeMismatch ===
 // Map<T, T> requires the key and value positions to bind the same T;

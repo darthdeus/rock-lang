@@ -1,5 +1,4 @@
 //! Error: a macro invocation must emit everything its expansion produces
-//! Tags: macros
 
 // A top-level invocation splices items into the module and an expression or
 // statement invocation splices the body into the caller. Each case used to

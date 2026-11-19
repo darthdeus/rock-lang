@@ -1,5 +1,4 @@
 //! Test: a fn signature's params wrap based on the signature alone, not the body
-//! Tags: regressions, functions, params, idempotence
 
 // A one-line source fn whose body is a wide struct literal: the body expands,
 // but the params must NOT wrap (the signature itself fits). Measuring the params
