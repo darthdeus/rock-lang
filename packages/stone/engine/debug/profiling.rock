@@ -900,38 +900,28 @@ pub fn section_request_kb_metric(id: int) -> Metric { return SECTION_REQUEST_KB[
 pub fn section_work_metric(id: int) -> Metric { return SECTION_WORK[id].get().unwrap() }
 fn section_observation_metric(id: int) -> Metric { return SECTION_OBSERVATION[id].get().unwrap() }
 
-pub fn section_time_reset() {
-    for m in SECTION_TIME { metric_reset(m.get().unwrap()) }
+fn section_stats_reset() {
+    for metrics in [SECTION_TIME, SECTION_FRAME_TIME, SECTION_FRAME_OBSERVATION, SECTION_REQUEST_KB,
+            SECTION_WORK, SECTION_OBSERVATION] {
+        for m in metrics { metric_reset(m.get().unwrap()) }
+    }
     for w in SECTION_WINDOWS {
         w.calls = 0
         w.seconds = 0.0
+        w.work_units = 0
+        w.work_observations = 0
+        w.observations = 0
+        w.observation_ms = 0.0
         metric_reset(w.frame_ms)
         metric_reset(w.calls_per_frame)
+        metric_reset(w.work_per_frame)
+        metric_reset(w.observations_per_frame)
     }
-    for m in SECTION_FRAME_TIME { metric_reset(m.get().unwrap()) }
-    for m in SECTION_FRAME_OBSERVATION { metric_reset(m.get().unwrap()) }
     SECTION_HISTORY_FIRST_FRAME = -1
     if PERF_SECTION_HISTORY && PERF_FRAME_CAPTURE {
         for id in 0..SECTION_TIME.len() { nb_set(SECTION_HISTORY_CALLS, id, 0) }
     }
     SECTION_HISTORY_DROPPED = 0
-}
-pub fn section_request_kb_reset() { for m in SECTION_REQUEST_KB { metric_reset(m.get().unwrap()) } }
-pub fn section_work_reset() {
-    for m in SECTION_WORK { metric_reset(m.get().unwrap()) }
-    for w in SECTION_WINDOWS {
-        w.work_units = 0
-        w.work_observations = 0
-        metric_reset(w.work_per_frame)
-    }
-}
-fn section_observation_reset() {
-    for m in SECTION_OBSERVATION { metric_reset(m.get().unwrap()) }
-    for w in SECTION_WINDOWS {
-        w.observations = 0
-        w.observation_ms = 0.0
-        metric_reset(w.observations_per_frame)
-    }
 }
 global SECTION_LAST_SECONDS: NativeBuffer<float> = native_buffer_float(MAX_PROFILE_ENTRIES)
 global SECTION_LAST_OBSERVATION_MS: NativeBuffer<float> = native_buffer_float(MAX_PROFILE_ENTRIES)
@@ -1590,6 +1580,11 @@ pub fn perf_frame_history_add(m: Metric, v: float) {
     m.head = (m.head + 1) % m.cap
 }
 
+fn frame_metric_add(live: Metric, history: Metric, value: float) {
+    metric_add(live, value)
+    if PERF_FRAME_CAPTURE && !PROFILER.warmup_active { perf_frame_history_add(history, value) }
+}
+
 fn perf_frame_heap_sift(values: NativeBuffer<float>, start: int, n: int) {
     let root = start
     while root * 2 + 1 < n {
@@ -1638,10 +1633,7 @@ fn frame_metrics_reset() {
 }
 
 fn profiler_reset_stats() {
-    section_time_reset()
-    section_request_kb_reset()
-    section_work_reset()
-    section_observation_reset()
+    section_stats_reset()
     PROFILER.frame_count = 0
     PROFILER.worst_frame_time = 0.0
     PROFILER.lag_spike_count = 0
@@ -2047,24 +2039,16 @@ fn profile_frame_timing_end(frame_end_time: float, rendered_ms: float) {
     let t_pre = if PROFILER.frame_t_pre_swap >= 0.0 { PROFILER.frame_t_pre_swap } else { frame_end_time }
     let t_post = if PROFILER.frame_t_post_swap >= 0.0 { PROFILER.frame_t_post_swap } else { t_pre }
     let to_ms = 1000.0
-    metric_add(FRAME_LOGIC_CPU, max(0.0, t_logic - t0) * to_ms)
-    metric_add(FRAME_RENDER_CPU, max(0.0, t_pre - t_logic) * to_ms)
-    metric_add(FRAME_EFFECTIVE_CPU, max(0.0, t_pre - t0) * to_ms)
-    metric_add(FRAME_PRESENT, max(0.0, t_post - t_pre) * to_ms)
+    frame_metric_add(FRAME_LOGIC_CPU, PERF_FRAME_LOGIC_CPU, max(0.0, t_logic - t0) * to_ms)
+    frame_metric_add(FRAME_RENDER_CPU, PERF_FRAME_RENDER_CPU, max(0.0, t_pre - t_logic) * to_ms)
+    frame_metric_add(FRAME_EFFECTIVE_CPU, PERF_FRAME_EFFECTIVE_CPU, max(0.0, t_pre - t0) * to_ms)
+    frame_metric_add(FRAME_PRESENT, PERF_FRAME_PRESENT, max(0.0, t_post - t_pre) * to_ms)
     let rendered = if rendered_ms >= 0.0 { rendered_ms } else { max(0.0, frame_end_time - t0) * to_ms }
-    metric_add(FRAME_RENDERED, rendered)
-    if PERF_FRAME_CAPTURE && !PROFILER.warmup_active {
-        perf_frame_history_add(PERF_FRAME_LOGIC_CPU, metric_recent(FRAME_LOGIC_CPU, 0))
-        perf_frame_history_add(PERF_FRAME_RENDER_CPU, metric_recent(FRAME_RENDER_CPU, 0))
-        perf_frame_history_add(PERF_FRAME_EFFECTIVE_CPU, metric_recent(FRAME_EFFECTIVE_CPU, 0))
-        perf_frame_history_add(PERF_FRAME_PRESENT, metric_recent(FRAME_PRESENT, 0))
-        perf_frame_history_add(PERF_FRAME_RENDERED, metric_recent(FRAME_RENDERED, 0))
-    }
+    frame_metric_add(FRAME_RENDERED, PERF_FRAME_RENDERED, rendered)
     let gpu_ms = gpu_timer_poll_ms()
     if gpu_ms >= 0.0 {
         PROFILER.gpu_supported = true
-        metric_add(FRAME_GPU, gpu_ms)
-        if PERF_FRAME_CAPTURE && !PROFILER.warmup_active { perf_frame_history_add(PERF_FRAME_GPU, gpu_ms) }
+        frame_metric_add(FRAME_GPU, PERF_FRAME_GPU, gpu_ms)
     } else if gpu_ms < -1.5 {
         PROFILER.gpu_supported = false
     }
@@ -2138,8 +2122,7 @@ fn profile_frame_end() {
 
     if PROFILER.pending_latency_event_t0 >= 0.0 {
         let event_ms = max(0.0, frame_end_time - PROFILER.pending_latency_event_t0) * 1000.0
-        metric_add(FRAME_EVENT_TO_END, event_ms)
-        if PERF_FRAME_CAPTURE && !PROFILER.warmup_active { perf_frame_history_add(PERF_FRAME_EVENT_TO_END, event_ms) }
+        frame_metric_add(FRAME_EVENT_TO_END, PERF_FRAME_EVENT_TO_END, event_ms)
         PROFILER.last_event_to_end_frame_ms = event_ms
         PROFILER.pending_latency_event_t0 = -1.0
     }
