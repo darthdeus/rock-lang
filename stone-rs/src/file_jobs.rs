@@ -594,6 +594,15 @@ impl TestGate {
         }
     }
 
+    fn wait_until_entered_for(&self, timeout: std::time::Duration) -> bool {
+        let state = self.state.lock().unwrap();
+        let (state, _) = self
+            .ready
+            .wait_timeout_while(state, timeout, |state| !state.0)
+            .unwrap();
+        state.0
+    }
+
     fn release(&self) {
         let mut state = self.state.lock().unwrap();
         state.1 = true;
@@ -2076,20 +2085,7 @@ mod tests {
         ));
         let first = queued_write(&queue, root.path().join("first"), b"1234");
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let entered = {
-                let mut state = gate.state.lock().unwrap();
-                let deadline = std::time::Instant::now() + Duration::from_secs(5);
-                loop {
-                    if state.0 {
-                        break true;
-                    }
-                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                    if remaining.is_zero() {
-                        break false;
-                    }
-                    state = gate.ready.wait_timeout(state, remaining).unwrap().0;
-                }
-            };
+            let entered = gate.wait_until_entered_for(Duration::from_secs(5));
             assert!(entered, "worker did not publish completion");
             assert_eq!(poll_queue(&queue, first, false), 1);
             assert_eq!(std::fs::read(root.path().join("first")).unwrap(), b"1234");
@@ -2870,6 +2866,17 @@ mod pair_tests {
         assert_eq!(std::fs::read(&second).unwrap(), b"old quest");
     }
 
+    fn write_edit_and_quest(first: &CString, second: &CString) -> i32 {
+        stone_file_write_pair_async(
+            first.as_ptr(),
+            c"edit".as_ptr(),
+            4,
+            second.as_ptr(),
+            c"quest".as_ptr(),
+            5,
+        )
+    }
+
     #[test]
     fn paired_writes_roll_back_first_and_keep_queue_running() {
         let root = tempfile::tempdir().unwrap();
@@ -2879,37 +2886,16 @@ mod pair_tests {
         std::fs::write(&blocker, b"blocker").unwrap();
         let first = CString::new(first_path.to_str().unwrap()).unwrap();
         let bad = CString::new(blocker.join("quest").to_str().unwrap()).unwrap();
-        let failed = stone_file_write_pair_async(
-            first.as_ptr(),
-            c"edit".as_ptr(),
-            4,
-            bad.as_ptr(),
-            c"quest".as_ptr(),
-            5,
-        );
+        let failed = write_edit_and_quest(&first, &bad);
         assert_eq!(stone_file_write_poll(failed, true), -1);
         assert_eq!(std::fs::read(&first_path).unwrap(), b"original");
         std::fs::remove_file(&first_path).unwrap();
-        let absent = stone_file_write_pair_async(
-            first.as_ptr(),
-            c"edit".as_ptr(),
-            4,
-            bad.as_ptr(),
-            c"quest".as_ptr(),
-            5,
-        );
+        let absent = write_edit_and_quest(&first, &bad);
         assert_eq!(stone_file_write_poll(absent, true), -1);
         assert!(!first_path.exists());
         let second_path = root.path().join("quest");
         let second = CString::new(second_path.to_str().unwrap()).unwrap();
-        let ok = stone_file_write_pair_async(
-            first.as_ptr(),
-            c"edit".as_ptr(),
-            4,
-            second.as_ptr(),
-            c"quest".as_ptr(),
-            5,
-        );
+        let ok = write_edit_and_quest(&first, &second);
         assert_eq!(stone_file_write_poll(ok, true), 1);
         assert_eq!(std::fs::read(first_path).unwrap(), b"edit");
         assert_eq!(std::fs::read(second_path).unwrap(), b"quest");
