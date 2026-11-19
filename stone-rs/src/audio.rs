@@ -2231,11 +2231,40 @@ mod tests {
         true
     }
 
+    fn mono_source(samples: Vec<f32>, looped: bool) -> SoundSource {
+        SoundSource {
+            samples: Arc::new(samples),
+            sample_rate: 1000,
+            channels: 1,
+            position: 0,
+            looped,
+        }
+    }
+
+    fn empty_audio_state() -> AudioState {
+        AudioState {
+            _stream: None,
+            buses: Buses::detached(ch2(), sr()),
+            sounds: HashMap::new(),
+            pending_sound_admissions: VecDeque::new(),
+            inflight_sound_bytes: 0,
+            music: HashMap::new(),
+            music_playback: None,
+            voices: HashMap::new(),
+        }
+    }
+
     fn ch2() -> ChannelCount {
         NonZero::new(2u16).unwrap()
     }
     fn sr() -> SampleRate {
         NonZero::new(44100u32).unwrap()
+    }
+    fn wired() -> (Bus, impl Iterator<Item = f32>) {
+        let (parent, out) = rodio::mixer::mixer(ch2(), sr());
+        let bus = Bus::new(ch2(), sr());
+        parent.add(bus.take_source());
+        (bus, out)
     }
     fn blip() -> SamplesBuffer {
         SamplesBuffer::new(ch2(), sr(), vec![1.0f32, 1.0])
@@ -2299,16 +2328,7 @@ mod tests {
 
     #[test]
     fn resident_sound_peaks_partition_pcm_into_known_buckets() {
-        let mut audio = AudioState {
-            _stream: None,
-            buses: Buses::detached(ch2(), sr()),
-            sounds: HashMap::new(),
-            pending_sound_admissions: VecDeque::new(),
-            inflight_sound_bytes: 0,
-            music: HashMap::new(),
-            music_playback: None,
-            voices: HashMap::new(),
-        };
+        let mut audio = empty_audio_state();
         let mut sound = SoundData::recipe("fixture.ogg".to_owned(), 7, 48_000, 1);
         assert!(sound.publish_decoded(vec![0.2, -0.91, 0.1, -0.75, 0.3, -0.4, 0.67], 48_000, 1));
         audio.sounds.insert(0x57, sound);
@@ -2349,9 +2369,7 @@ mod tests {
 
     #[test]
     fn bus_survives_going_silent() {
-        let (parent, mut out) = rodio::mixer::mixer(ch2(), sr());
-        let bus = Bus::new(ch2(), sr());
-        parent.add(bus.take_source());
+        let (bus, mut out) = wired();
 
         bus.mixer().add(blip());
         assert!(heard(&mut out, 64), "bus should be audible at first");
@@ -2364,9 +2382,7 @@ mod tests {
     /// capturing audio.
     #[test]
     fn bus_counts_pulled_samples() {
-        let (parent, mut out) = rodio::mixer::mixer(ch2(), sr());
-        let bus = Bus::new(ch2(), sr());
-        parent.add(bus.take_source());
+        let (bus, mut out) = wired();
 
         assert_eq!(bus.samples_pulled(), 0);
         for _ in 0..64 {
@@ -2441,18 +2457,17 @@ mod tests {
         sum / n as f32
     }
 
-    fn wired() -> (Bus, impl Iterator<Item = f32>) {
-        let (parent, out) = rodio::mixer::mixer(ch2(), sr());
-        let bus = Bus::new(ch2(), sr());
-        parent.add(bus.take_source());
-        (bus, out)
+    /// Steady-state level of `source` through a bus configured by `configure`.
+    fn bus_level(source: SamplesBuffer, configure: impl FnOnce(&Bus)) -> f32 {
+        let (bus, mut out) = wired();
+        bus.mixer().add(source);
+        configure(&bus);
+        mean_abs(&mut out, 8192, 8192)
     }
 
     #[test]
     fn lowpass_open_passes_audible_highs() {
-        let (bus, mut out) = wired();
-        bus.mixer().add(square(40_000, 8));
-        let level = mean_abs(&mut out, 8192, 8192);
+        let level = bus_level(square(40_000, 8), |_| {});
         assert!(
             level > 0.7,
             "wide-open lowpass should pass 5.5kHz, got {level}"
@@ -2461,10 +2476,7 @@ mod tests {
 
     #[test]
     fn lowpass_attenuates_highs() {
-        let (bus, mut out) = wired();
-        bus.mixer().add(square(40_000, 8));
-        bus.set_lowpass(400.0, 0.707);
-        let level = mean_abs(&mut out, 8192, 8192);
+        let level = bus_level(square(40_000, 8), |bus| bus.set_lowpass(400.0, 0.707));
         assert!(
             level < 0.05,
             "400Hz lowpass should crush 5.5kHz, got {level}"
@@ -2473,9 +2485,7 @@ mod tests {
 
     #[test]
     fn lowpass_open_still_rejects_nyquist() {
-        let (bus, mut out) = wired();
-        bus.mixer().add(nyquist(40_000));
-        let level = mean_abs(&mut out, 8192, 8192);
+        let level = bus_level(nyquist(40_000), |_| {});
         assert!(level < 0.01, "Nyquist sits above max cutoff, got {level}");
     }
 
@@ -2483,10 +2493,7 @@ mod tests {
     /// let it run away above unity.
     #[test]
     fn distortion_clips_without_exploding() {
-        let (bus, mut out) = wired();
-        bus.mixer().add(dc(40_000, 0.25));
-        bus.set_distortion(8.0, 1.0);
-        let level = mean_abs(&mut out, 8192, 8192);
+        let level = bus_level(dc(40_000, 0.25), |bus| bus.set_distortion(8.0, 1.0));
         assert!(level > 0.3, "drive should lift a quiet signal, got {level}");
         assert!(level <= 1.0, "soft clip must not exceed unity, got {level}");
     }
@@ -2517,29 +2524,27 @@ mod tests {
         );
     }
 
-    /// Reverb lives on the bus now, not per voice -- so it must ring on after
-    /// its input has stopped.
+    /// Reverb lives on the bus, not per voice, so it must ring on after its
+    /// input has stopped; without it the bus decays to silence.
     #[test]
     fn bus_reverb_rings_after_input_stops() {
-        let (bus, mut out) = wired();
-        bus.set_reverb(true, 0.9, 0.2, 0.9, 0.1, 1.0);
-        bus.mixer().add(dc(64, 1.0));
-
-        let tail = mean_abs(&mut out, 512, 4096);
+        let tail = |reverb: bool| {
+            let (bus, mut out) = wired();
+            if reverb {
+                bus.set_reverb(true, 0.9, 0.2, 0.9, 0.1, 1.0);
+            }
+            bus.mixer().add(dc(64, 1.0));
+            mean_abs(&mut out, 512, 4096)
+        };
+        let ringing = tail(true);
         assert!(
-            tail > 0.0001,
-            "reverb tail should outlast its input, got {tail}"
+            ringing > 0.0001,
+            "reverb tail should outlast its input, got {ringing}"
         );
-    }
-
-    #[test]
-    fn bus_without_reverb_decays_to_silence() {
-        let (bus, mut out) = wired();
-        bus.mixer().add(dc(64, 1.0));
-        let tail = mean_abs(&mut out, 512, 4096);
+        let dry = tail(false);
         assert!(
-            tail < 1e-9,
-            "no reverb: bus should decay to silence, got {tail}"
+            dry < 1e-9,
+            "no reverb: bus should decay to silence, got {dry}"
         );
     }
 
@@ -2613,11 +2618,8 @@ mod tests {
     /// it -- a stepped gain zippers.
     #[test]
     fn bus_gain_slews_to_target() {
-        let (parent, mut out) = rodio::mixer::mixer(ch2(), sr());
-        let bus = Bus::new(ch2(), sr());
-        parent.add(bus.take_source());
-        bus.mixer()
-            .add(SamplesBuffer::new(ch2(), sr(), vec![1.0f32; 40_000]));
+        let (bus, mut out) = wired();
+        bus.mixer().add(dc(20_000, 1.0));
 
         for _ in 0..2048 {
             let _ = out.next();
@@ -2731,16 +2733,7 @@ mod tests {
     fn decay_caps_output_length_not_source_length() {
         use rodio::Source;
 
-        let rate = 1000u32;
-        let src = SoundSource {
-            samples: std::sync::Arc::new(vec![1.0; rate as usize]), // 1.0s mono
-            sample_rate: rate,
-            channels: 1,
-            position: 0,
-            looped: false,
-        };
-
-        let shaped = super::shaped_source(src, 0.25, 0.5);
+        let shaped = shaped_source(mono_source(vec![1.0; 1000], false), 0.25, 0.5);
         let out_rate = shaped.sample_rate().get() as f32;
         let secs = shaped.count() as f32 / out_rate;
 
@@ -2754,16 +2747,7 @@ mod tests {
     /// full amplitude (which is a click, and the reason this is a fade at all).
     #[test]
     fn decay_ramps_to_silence() {
-        let rate = 1000u32;
-        let src = SoundSource {
-            samples: std::sync::Arc::new(vec![1.0; rate as usize]),
-            sample_rate: rate,
-            channels: 1,
-            position: 0,
-            looped: false,
-        };
-
-        let out: Vec<f32> = super::shaped_source(src, 1.0, 0.5).collect();
+        let out: Vec<f32> = shaped_source(mono_source(vec![1.0; 1000], false), 1.0, 0.5).collect();
 
         assert!(out[0] > 0.9, "starts at full amplitude, got {}", out[0]);
         let last = out[out.len() - 1];
@@ -2771,31 +2755,15 @@ mod tests {
     }
 
     #[test]
-    fn looped_playback_repeats_past_the_source_end() {
-        let src = SoundSource {
-            samples: std::sync::Arc::new(vec![0.25, 0.75]),
-            sample_rate: 1000,
-            channels: 1,
-            position: 0,
-            looped: true,
-        };
+    fn looped_playback_repeats_and_one_shot_ends() {
+        let looped: Vec<f32> = shaped_source(mono_source(vec![0.25, 0.75], true), 1.0, 0.0)
+            .take(6)
+            .collect();
+        assert_eq!(looped, vec![0.25, 0.75, 0.25, 0.75, 0.25, 0.75]);
 
-        let out: Vec<f32> = super::shaped_source(src, 1.0, 0.0).take(6).collect();
-        assert_eq!(out, vec![0.25, 0.75, 0.25, 0.75, 0.25, 0.75]);
-    }
-
-    #[test]
-    fn one_shot_playback_still_ends() {
-        let src = SoundSource {
-            samples: std::sync::Arc::new(vec![0.25, 0.75]),
-            sample_rate: 1000,
-            channels: 1,
-            position: 0,
-            looped: false,
-        };
-
-        let out: Vec<f32> = super::shaped_source(src, 1.0, 0.0).collect();
-        assert_eq!(out, vec![0.25, 0.75]);
+        let once: Vec<f32> =
+            shaped_source(mono_source(vec![0.25, 0.75], false), 1.0, 0.0).collect();
+        assert_eq!(once, vec![0.25, 0.75]);
     }
 
     /// 16-bit stereo WAV of a whole number of periods: a sine on the left and
@@ -2895,16 +2863,7 @@ mod tests {
         ) {
             return;
         }
-        let _audio_restore = install_audio_state(AudioState {
-            _stream: None,
-            buses: Buses::detached(ch2(), sr()),
-            sounds: HashMap::new(),
-            pending_sound_admissions: VecDeque::new(),
-            inflight_sound_bytes: 0,
-            music: HashMap::new(),
-            music_playback: None,
-            voices: HashMap::new(),
-        });
+        let _audio_restore = install_audio_state(empty_audio_state());
         let path = format!(
             "{}/../packages/stone/tests/fixtures/tone.ogg",
             env!("CARGO_MANIFEST_DIR")
@@ -2971,11 +2930,10 @@ mod tests {
             !output_muted_from(Some("0"), Some("1"), None),
             "an explicit STONE_QUIET=0 opts a headless audio test back in"
         );
-    }
-
-    #[test]
-    fn a_sim_is_muted_even_asking_for_the_gate_open() {
-        assert!(output_muted_from(Some("0"), None, Some("some_sim")));
+        assert!(
+            output_muted_from(Some("0"), None, Some("some_sim")),
+            "a sim is muted even when asking for the gate open"
+        );
         assert!(output_muted_from(None, None, Some("some_sim")));
     }
 
