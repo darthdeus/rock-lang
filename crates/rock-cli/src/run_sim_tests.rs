@@ -7,7 +7,6 @@ fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// `(request, update_snapshots, expected lanes)`.
 type JobsCase = (Option<usize>, bool, usize);
 
 fn assert_jobs(cores: usize, budget: JobBudget, cases: &[JobsCase]) {
@@ -27,7 +26,6 @@ fn stopped() -> SimSummary {
     }
 }
 
-/// Run `body` under LuaJIT with stone's real `__SIM__` emitter as `emit`.
 fn run_with_production_emitter(body: &str) -> std::process::Output {
     let production = std::fs::read_to_string(
         rock_stdlib::package_dir("stone")
@@ -197,8 +195,6 @@ fn sim_receipt_registry_round_trips_v4_entries_and_requires_source_files() {
 #[test]
 fn receipt_sweep_reclaims_dead_pid_roots_and_keeps_live_ones() {
     let tmp = tempfile::tempdir().unwrap();
-    // `u32::MAX` converts to no unix pid: dead on every platform the
-    // liveness probe runs on.
     let dead = tmp.path().join(format!("sim-receipt-{}-stale", u32::MAX));
     let live = tmp
         .path()
@@ -208,8 +204,6 @@ fn receipt_sweep_reclaims_dead_pid_roots_and_keeps_live_ones() {
     for dir in [&dead, &live, &legacy, &other] {
         std::fs::create_dir_all(dir).unwrap();
     }
-    // A published receipt does not spare a dead runner's root: the
-    // tempdir is one-run-owned, never shared.
     std::fs::write(dead.join("receipt.json"), "{}").unwrap();
     sweep_stale_sim_receipt_roots(tmp.path());
     assert!(live.is_dir(), "a concurrent live compile keeps its root");
@@ -253,14 +247,8 @@ fn reload_lane_reuses_the_compiled_session_and_isolates_its_chunk() {
     assert_eq!(std::fs::read(&main).unwrap(), original);
 }
 
-/// Assets are stubbed for EVERY sim child, rendering included: a stubbed
-/// image is one white texel, which is what a sim's layout and gameplay
-/// assertions sample. Only a declared or inherited "0" turns it off.
 #[test]
 fn every_sim_child_stubs_its_assets_unless_asked_not_to() {
-    // The inherited escape hatch is one-way: it can ask for real assets,
-    // never for stubs. A stray "1" must not strip pixels out of an
-    // image snapshot.
     assert_eq!(unstub_from(None), "1", "unset stays stubbed");
     assert_eq!(unstub_from(Some("0")), "0", "an inherited 0 unstubs");
     assert_eq!(
@@ -274,19 +262,11 @@ fn every_sim_child_stubs_its_assets_unless_asked_not_to() {
         "anything else is not an unstub request"
     );
 
-    // No ambient request, so the runner's own default, which every entry now
-    // takes. A fixture that needs the file's own texels declares
-    // `@sim_env("STONE_ASSET_STUB", "0")` and `preset_env` carries it.
     if std::env::var("STONE_ASSET_STUB").is_err() {
         assert_eq!(asset_stub_value(), "1", "the runner default is stubbed");
     }
 }
 
-/// `entry_renders` reads the EFFECTIVE value, last-wins. `@sim_render` is
-/// lowered to `SIM_DRAW=on_demand` before an explicit `@sim_env` is appended,
-/// so a sim carrying both is whatever it says last -- and that is the value
-/// its child actually boots with. Nothing schedules on it now, but the
-/// census and the capability docs classify sims by it.
 #[test]
 fn rendering_is_the_effective_last_wins_value() {
     let cases: &[(&[(&str, &str)], bool, &str)] = &[
@@ -324,11 +304,6 @@ fn rendering_is_the_effective_last_wins_value() {
     }
 }
 
-/// A MISSING image golden used to bootstrap itself from the current frame
-/// and count as a passing expect, so a sim whose goldens are untracked
-/// (`game/tests/sims/vfx_capture.snap/`, gitignored as display-specific)
-/// self-passed on any machine that had never run it -- the assertion was
-/// never evaluated. Only `--update-snapshots` may write a baseline.
 #[test]
 fn a_missing_image_golden_is_not_a_pass() {
     let dir = tempfile::tempdir().expect("tmp dir");
@@ -354,7 +329,6 @@ fn a_missing_image_golden_is_not_a_pass() {
         "and it must NOT have been written behind our back"
     );
 
-    // Both sides: with --update-snapshots, writing it is the point.
     let r = handle_image_snapshot(&img, &baseline, true).expect("no hard error");
     assert!(
         matches!(r, SnapResult::Wrote),
@@ -363,10 +337,6 @@ fn a_missing_image_golden_is_not_a_pass() {
     assert!(baseline.exists(), "the baseline is created under update");
 }
 
-/// The lane discriminant decides whether a child may touch the one live
-/// `IncrementalProject` session and the one `incremental.lua`. Getting it wrong in
-/// the permissive direction lets an ordinary child mutate build state
-/// shared with every other child once the suite runs in parallel.
 #[test]
 fn reload_lane_is_opt_in_via_stone_hot_reload() {
     let cases: &[(&[(&str, &str)], bool, &str)] = &[
@@ -414,8 +384,6 @@ fn only_a_non_reload_worker_boots_from_the_bytecode_image() {
     let bytecode = dir.join(rock_host::project::MAIN_BYTECODE_FILENAME);
     std::fs::write(&main, "-- source").unwrap();
 
-    // No image yet: both lanes run the source file. The fallback is what
-    // makes the dump best-effort rather than a new failure mode.
     assert_eq!(worker_chunk_path(dir, false), main);
     assert_eq!(worker_chunk_path(dir, true), main);
 
@@ -455,9 +423,6 @@ fn the_workload_env_applies_defaults_last_wins_and_keeps_out_literal() {
     assert!(out.contains(&("GAME_HISTORY_DIR".into(), "$OUT/history".into())));
 }
 
-/// Only the pair marks a lane: real assets with the cap declined. The
-/// runner's stub default and the baseline cap stand in for what a fixture
-/// does not say, last declaration wins, and the render flag is not read.
 #[test]
 fn entry_full_assets_needs_real_assets_and_no_image_cap() {
     const STUB_OFF: (&str, &str) = ("STONE_ASSET_STUB", "0");
@@ -518,8 +483,6 @@ fn the_classed_pool_caps_live_capped_tasks_and_runs_everything_once() {
     assert!(peak.load(Ordering::SeqCst) >= 1);
 }
 
-/// Both pools the lane runs beside: the plain one and the one with a capped
-/// class.
 #[test]
 fn the_pool_takes_the_reload_lanes_slot_back_when_the_lane_finishes() {
     let capped: Vec<bool> = (0..60).map(|i| i % 4 == 0).collect();
@@ -535,10 +498,6 @@ fn reload_lane_slot_returns(
     + Send,
 ) {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    // Ordered by events, not sleeps: tasks beside the lane hold until it
-    // ends, the lane ends once the narrowed pool is full, and after it
-    // three tasks must be live together. A missing widening leaves that
-    // barrier at two until the hang backstop, which every wait shares.
     let deadline = rock_core::clock::Instant::now() + test_utils::HANG_BACKSTOP;
     let wait_for = |done: &dyn Fn() -> bool| {
         while !done() && rock_core::clock::Instant::now() < deadline {
@@ -567,8 +526,6 @@ fn reload_lane_slot_returns(
         |width| pool(width, &task),
         || {
             wait_for(&|| live.load(Ordering::SeqCst) >= 2);
-            // A pool that ignored the lane's slot would start a third
-            // task in this window.
             std::thread::sleep(std::time::Duration::from_millis(40));
             lane_done.store(true, Ordering::SeqCst);
         },
@@ -599,10 +556,6 @@ fn lanes_dispatch_longest_first_with_untimed_lanes_last_in_plan_order() {
     assert_eq!(longest_first(&estimates), vec![2, 5, 0, 3, 1, 4]);
 }
 
-/// The job count is a safety bound, not a preference: it must never exceed
-/// what the machine can run, and `--update-snapshots` must pin to serial
-/// because it writes baseline files whose destinations are not proven
-/// unique before spawning.
 #[test]
 fn resolve_jobs_is_bounded_and_serial_for_snapshot_updates() {
     let (cores, budget) = (32, JobBudget { ram: 4, gpu: 4 });
@@ -610,13 +563,10 @@ fn resolve_jobs_is_bounded_and_serial_for_snapshot_updates() {
         cores,
         budget,
         &[
-            // No request takes the memory budget.
             (None, false, 4),
             (Some(1), false, 1),
             (Some(4), false, 4),
-            // 0 is meaningless; clamp up rather than deadlock on an empty pool.
             (Some(0), false, 1),
-            // --update-snapshots wins over ANY explicit request.
             (None, true, 1),
             (Some(8), true, 1),
         ],
@@ -645,16 +595,13 @@ fn a_request_above_only_the_free_gpu_budget_runs_at_that_budget() {
 #[test]
 fn a_request_above_the_known_lanes_is_narrowed_before_the_budget() {
     let (cores, budget) = (32, JobBudget { ram: 1, gpu: 1 });
-    // One name under a one-lane budget runs in its one lane.
     assert_eq!(
         resolve_jobs_with(narrow_to_lanes(Some(4), Some(1)), false, cores, budget).unwrap(),
         1
     );
-    // Two names still need two lanes, which the RAM budget refuses.
     let error =
         resolve_jobs_with(narrow_to_lanes(Some(4), Some(2)), false, cores, budget).unwrap_err();
     assert!(error.to_string().contains("--jobs 2 exceeds"), "{error}");
-    // Unknown lanes leave the request alone; no request stays no request.
     assert_eq!(narrow_to_lanes(Some(4), None), Some(4));
     assert_eq!(narrow_to_lanes(None, Some(2)), None);
     assert_eq!(narrow_to_lanes(Some(0), Some(2)), Some(0));
@@ -662,20 +609,16 @@ fn a_request_above_the_known_lanes_is_narrowed_before_the_budget() {
 
 #[test]
 fn the_default_job_count_leaves_a_fixed_gpu_memory_reserve() {
-    // Four lanes' worth above the reserve: four lanes.
     assert_eq!(
         vram_budgeted_jobs(32, Some(SIM_VRAM_RESERVE_MIB + 4 * SIM_LANE_VRAM_MIB + 1)),
         4
     );
-    // A small machine with a large card stays bounded by its cores.
     assert_eq!(
         vram_budgeted_jobs(2, Some(SIM_VRAM_RESERVE_MIB + 64 * SIM_LANE_VRAM_MIB)),
         2
     );
-    // Nothing above the reserve still runs one lane rather than none.
     assert_eq!(vram_budgeted_jobs(32, Some(SIM_VRAM_RESERVE_MIB)), 1);
     assert_eq!(vram_budgeted_jobs(32, Some(SIM_LANE_VRAM_MIB / 4)), 1);
-    // Without a reading (no NVIDIA tooling, e.g. macOS) the cores decide.
     assert_eq!(vram_budgeted_jobs(14, None), 14);
 }
 
@@ -706,13 +649,8 @@ fn a_declared_frame_count_is_the_entrys_budget() {
     let cases: &[(&[(&str, &str)], usize)] = &[
         (&[], DEFAULT_FRAME_BUDGET),
         (&[(COUNT, "90")], 90),
-        // The two watchdog sims in sample declare this; a runner that quietly
-        // capped them at the default would guard them with a bound nobody wrote.
         (&[(COUNT, "100000")], 100000),
-        // Other keys are not budgets.
         (&[("STONE_FX_OFF", "1")], DEFAULT_FRAME_BUDGET),
-        // The last declaration is the effective one, and an overridden
-        // invalid declaration is inert.
         (&[(COUNT, "80"), (COUNT, "90")], 90),
         (&[(COUNT, "bad"), (COUNT, "90")], 90),
     ];
@@ -735,7 +673,6 @@ fn a_declared_timeout_is_the_entrys_wall_budget() {
     let cases: &[(&[(&str, &str)], u64)] = &[
         (&[], sim_timeout_secs()),
         (&[(KEY, "1200")], 1200),
-        // Other keys are not budgets, and the last declaration wins.
         (&[("FRAME_COUNT", "90")], sim_timeout_secs()),
         (&[(KEY, "90"), (KEY, "1200")], 1200),
     ];
@@ -880,9 +817,6 @@ fn expect_ok(msg: &str) -> String {
     format!(r#"__SIM__ {{"op":"expect_ok","message":"{msg}","site":"f.rock:1"}}"#)
 }
 
-/// Operations inside the envelope are the sim's; boot and teardown
-/// logging outside it is not part of the entry but stays in the debugging
-/// stream.
 #[test]
 fn the_envelope_partitions_operations_and_logging() {
     let stream = vec![
@@ -903,8 +837,6 @@ fn the_envelope_partitions_operations_and_logging() {
     assert!(out.summary.diagnostics.contains("teardown"));
 }
 
-/// A child killed mid-entry leaves its entry open. That is the ONE
-/// tolerated gap, and it is recorded rather than read as a clean close.
 #[test]
 fn a_killed_child_leaves_its_entry_unterminated() {
     let out = entry_stream("a", [start("a"), expect_ok("partial")]);
@@ -976,8 +908,6 @@ fn malformed_entry_frame_counts_are_rejected() {
     }
 }
 
-/// Every other shape is a protocol violation, and none may be quietly
-/// absorbed into the record.
 #[test]
 fn malformed_envelopes_are_rejected_not_guessed_at() {
     let cases: Vec<(&str, Vec<String>)> = vec![
@@ -1046,10 +976,6 @@ fn requested_sim_names_resolve_to_registered_wire_names() {
     );
 }
 
-// A name the registry lacks used to pass through to the worker's entry
-// plan, where a name holding a line break (one argv element of
-// newline-joined names) split the plan line and killed the whole worker
-// with `malformed entry plan line: <a valid sim>`.
 #[test]
 fn requested_sim_names_that_are_not_sims_are_all_refused_before_boot() {
     let wires: Vec<String> = ["game::boots", "game::hover"]
@@ -1136,8 +1062,6 @@ fn entry_verdict_requires_stop_and_checks_without_failures_or_exclusion() {
 
 #[test]
 fn a_timeout_names_the_budget_that_fired() {
-    // The single-run message must state the entry's declared budget, not
-    // the process-wide default it overrode.
     let mut summary = stopped();
     summary.timed_out = true;
     summary.timeout_budget = Some(Duration::from_secs(2));
@@ -1251,8 +1175,6 @@ io.stderr:write('`alsa::poll()` returned POLLERR\n')
     );
 }
 
-// Each emission once ran two ffi.cdef parses, about 8 ctypes, so a long sim
-// overflowed LuaJIT's ctype table near 8,000 markers.
 #[test]
 fn many_sim_markers_do_not_exhaust_ffi_ctypes() {
     let child = run_with_production_emitter(
@@ -1388,8 +1310,6 @@ fn census_rankings_use_the_requested_per_frame_metric() {
 
 #[test]
 fn resolve_sim_sources_keeps_same_named_sims_in_their_own_files() {
-    // Two modules declare the same trailing segment; the receipt's
-    // per-wire entries disambiguate where a decl-segment scan errored.
     let root = tempfile::tempdir().unwrap();
     let proj = root.path().join("proj");
     let sims = proj.join("tests").join("sims");
@@ -1445,11 +1365,6 @@ fn image_snapshot_source_for_reports_a_wire_missing_from_the_registry() {
 
 #[test]
 fn prefix_with_site_keeps_origin_in_message() {
-    // Post-run image_snapshot failures clear `site` so
-    // `print()`'s "already-streamed" guard prints the line, but the
-    // origin still has to reach the user -- fold it into the
-    // message. Regression for the bug that hid every `diff > tol`
-    // line behind the streamed image_snapshot op announcement.
     assert_eq!(
         prefix_with_site("smoke:10", "diff 0.006 > tol 0.001"),
         "at smoke:10: diff 0.006 > tol 0.001"
