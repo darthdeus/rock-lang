@@ -350,7 +350,6 @@ mod mesh;
 mod mesh_capture;
 mod native_ledger;
 mod pixel_readback;
-mod proc;
 mod renderdoc;
 mod shader;
 mod sprite;

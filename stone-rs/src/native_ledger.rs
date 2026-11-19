@@ -10,8 +10,7 @@
 //! an id is never handed out twice in one process, so a destroyed-and-recreated
 //! resource is a DIFFERENT key rather than the same one. Fonts are the one
 //! ledger class outside it, and cannot join: a font id is its 1-based slot in
-//! the `FONTS` vec, so the vec IS the allocator. `stone_proc` is absent from
-//! the ledger for the same reason -- its handles are RECYCLED slots.
+//! the `FONTS` vec, so the vec IS the allocator.
 //!
 //! Class ORDER is ownership order. Two entries in `IMAGES` are projections of a
 //! resource owned elsewhere -- a font's atlas and the lazily-minted white
@@ -292,11 +291,6 @@ pub(crate) const NON_MINTING: &[(&str, &str)] = &[
         "outside by design: rock-log's log_once!/log_throttled! stores are \
          call-site keyed process state with no handle to account for.",
     ),
-    (
-        "stone_proc",
-        "outside by design: handles are RECYCLED slots, so they are not ids in \
-         the monotonic sense the ledger's set comparison needs.",
-    ),
 ];
 
 fn class_by_name(name: &str) -> Option<&'static NativeClass> {
@@ -423,8 +417,6 @@ mod tests {
                 "asset_watcher",
                 // Call-site-keyed dedup stores.
                 "log_dedup",
-                // Recycled slots by design.
-                "stone_proc",
             ],
             "every registry outside the mint seam is named with its coverage"
         );

@@ -53,9 +53,7 @@ impl Class {
     /// Fonts do not, and cannot: a font id is its 1-based slot in the `FONTS`
     /// vec, so the vec IS the allocator and the id carries an index the raster
     /// and atlas paths dereference. Handing it a number from a counter would
-    /// index the wrong slot. `stone_proc` is the same shape one step further --
-    /// its handles are RECYCLED slots -- which is why it is not a ledger class
-    /// at all and has its own occupancy-driven teardown.
+    /// index the wrong slot.
     ///
     /// A false here means id accounting cannot see the class; it does NOT mean
     /// the identity diff cannot. Fonts are covered on both ledger axes.

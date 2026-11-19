@@ -13,17 +13,17 @@ fn native_host_links_stone_without_a_lua_runtime() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn subprocess_liveness_has_a_canonical_byte_abi() {
+fn bool_export_returns_a_canonical_byte() {
     use std::process::Command;
 
     let luajit = gamelibs::host_dir().join("bin/luajit");
     let stone = stone_cdylib::artifact();
     let script = r#"
 local ffi = require("ffi")
-ffi.cdef[[uint8_t stone_proc_alive(int handle);]]
+ffi.cdef[[uint8_t stone_native_destroy(const char* class, uint64_t handle);]]
 local stone = ffi.load(assert(os.getenv("STONE_COUNTER_TEST_LIB")))
 for handle = 0, 8 do
-    assert(stone.stone_proc_alive(handle) == 0, "an empty subprocess slot must return byte zero")
+    assert(stone.stone_native_destroy("no-such-class", handle) == 0, "false must return byte zero")
 end
 "#;
     let output = Command::new(luajit)
@@ -33,7 +33,7 @@ end
         .unwrap();
     assert!(
         output.status.success(),
-        "subprocess byte ABI failed: {}",
+        "bool byte ABI failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }

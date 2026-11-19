@@ -795,15 +795,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         int stone_lua_alloc_counter_begin(void);
         int stone_lua_alloc_counter_end(void);
 
-        // Generic subprocess pipe (proc.rs) -- drives the chess UCI/Stockfish
-        // bridge. Handle is 1-based; 0 = spawn failed.
-        int stone_proc_spawn(const char* path);
-        void stone_proc_send(int handle, const char* line);
-        const char* stone_proc_poll_line(int handle);
-        uint8_t stone_proc_alive(int handle);
-        void stone_proc_kill(int handle);
-        int stone_proc_reset(void);
-        int stone_proc_occupied_count(void);
         const char* stone_native_live_handles(const char* class);
         uint8_t stone_native_destroy(const char* class, uint64_t handle);
         int stone_native_handle_state(const char* class, uint64_t handle);
@@ -1017,20 +1008,6 @@ fn stone_get_executable_path() -> string {
 
 pub extern(ffi, "stone") fn stone_file_modtime(path: string) -> float
 extern(ffi, "stone") fn stone_telemetry_close()
-
-// Generic subprocess pipe. poll_line returns a raw char* (empty string when no
-// line is queued); ffi_string copies it out. See proc.rs.
-pub extern(ffi, "stone") fn stone_proc_spawn(path: string) -> int
-pub extern(ffi, "stone") fn stone_proc_send(handle: int, line: string)
-pub extern(ffi, "stone") fn stone_proc_alive(handle: int) -> bool
-pub extern(ffi, "stone") fn stone_proc_kill(handle: int)
-extern(ffi, "stone") fn stone_proc_reset() -> int
-pub extern(ffi, "stone") fn stone_proc_occupied_count() -> int
-@inline inline(lua) fn stone_proc_poll_line_ptr(handle: int) -> any = "stone.stone_proc_poll_line(handle)"
-
-pub fn stone_proc_poll_line(handle: int) -> string {
-    return ffi_string(stone_proc_poll_line_ptr(handle), null)
-}
 
 // Exact live-handle sets for the native resource classes (native_ledger.rs).
 // An unknown class name answers NULL rather than an empty set, so a caller

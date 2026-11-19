@@ -330,32 +330,6 @@ fn sim_publish_log_clock() {
     log_set_now(time)
 }
 
-// Tear down every subprocess the entry left behind and fail the entry if one
-// could not be released. Ownership is the REGISTRY's, so `stone_proc_reset`
-// decides what to tear down. Run inside the entry's envelope so a leak is the
-// entry's failure rather than a line in the process log after its verdict is
-// sealed.
-fn sim_teardown_procs() {
-    let failed = stone_proc_reset()
-    let held = stone_proc_occupied_count()
-    if failed == 0 && held == 0 { return }
-    sim_emit("{{\"op\":\"expect_fail\",\"message\":\"subprocess teardown left "
-        + to_string(held) + " slot(s) occupied (" + to_string(failed)
-        + " could not be terminated)\",\"actual\":\"" + to_string(held)
-        + "\",\"expected\":\"0\"}}")
-}
-
-// Idempotent safety net for a process that ends without reaching an entry end --
-// a boot failure, or an `os_exit` from another guard. What a sim's RESULT
-// depends on is the per-entry teardown above.
-@shutdown fn sim_shutdown_procs() {
-    if !sim_mode_active() { return }
-    let failed = stone_proc_reset()
-    if failed > 0 {
-        log_error("SIM", "{failed} subprocess(es) could not be terminated at shutdown")
-    }
-}
-
 // Close the entry when its coroutine is terminal or it has burned its frame
 // budget; true means the process should exit.
 fn runner_sim_advance(frame: int) -> bool {
@@ -396,7 +370,6 @@ fn runner_sim_advance(frame: int) -> bool {
         sim_emit("{{\"op\":\"error\",\"message\":\"logged error: "
             + to_string(overflow) + " more record(s) past the collection cap\"}}")
     }
-    sim_teardown_procs()
     sim_emit("{{\"op\":\"entry_end\",\"name\":\"" + SIM_NAME
         + "\",\"frame_count\":" + to_string(frame_count)
         + ",\"frame_timing\":" + frame_timing + "}}")
