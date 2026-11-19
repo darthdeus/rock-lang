@@ -51,9 +51,7 @@ fn test_field_ref_arg_with_overload_set() {
 // A `FieldRef<T, V>` arg must coerce to a `ReadFieldRef<T, V>` param even when the
 // callee name carries more than one overload -- the multi-candidate path scores
 // through `fit_cost`, which must know the coercion, not just the single-
-// candidate bypass. Regression: a second `field_get` decl (a backend sibling
-// counted as a candidate) turned every `field_get(o, f: FieldRef<..>)` into
-// "No overload".
+// candidate bypass.
 fn field_get(a: int, b: int) -> int {
     return a + b
 }
