@@ -12,13 +12,34 @@ pub struct StdlibFile {
     pub display_path: &'static str,
 }
 
-static FILES: OnceLock<Vec<StdlibFile>> = OnceLock::new();
+static FILES: OnceLock<&'static [StdlibFile]> = OnceLock::new();
 
-/// The stdlib files, in load order. `unified.rock` is the core stdlib;
-/// `strings.rock` (portable string algorithms) and `json.rock` build on it.
-/// `js.rock` holds JS-backend bodies for stdlib fns defined in the others, and
-/// is LAST so adding one shifts no `__SITE__` line in a lua-emitting file.
-pub const STDLIB_NAMES: &[&str] = &[
+macro_rules! define_stdlib_files {
+    ($($name:literal),+ $(,)?) => {
+        /// The stdlib files, in load order. `unified.rock` is the core stdlib;
+        /// `strings.rock` (portable string algorithms) and `json.rock` build on it.
+        /// `js.rock` holds JS-backend bodies for stdlib fns defined in the others, and
+        /// is LAST so adding one shifts no `__SITE__` line in a lua-emitting file.
+        pub const STDLIB_NAMES: &[&str] = &[$($name),+];
+
+        /// The stdlib compiled into the binary: what [`stdlib_files`] serves when no
+        /// rung resolves on disk. `display_path` names no real file; on wasm it is
+        /// `/stdlib/<name>` so the playground keeps opening `file:///stdlib/<name>`,
+        /// elsewhere diagnostics show the `<embedded-stdlib>/` prefix.
+        static EMBEDDED_FILES: &[StdlibFile] = &[
+            $(StdlibFile {
+                name: $name,
+                contents: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib/", $name)),
+                #[cfg(target_arch = "wasm32")]
+                display_path: concat!("/stdlib/", $name),
+                #[cfg(not(target_arch = "wasm32"))]
+                display_path: concat!("<embedded-stdlib>/", $name),
+            }),+
+        ];
+    };
+}
+
+define_stdlib_files!(
     "unified.rock",
     "logging.rock",
     "vec.rock",
@@ -29,7 +50,7 @@ pub const STDLIB_NAMES: &[&str] = &[
     "json.rock",
     "shader.rock",
     "js.rock",
-];
+);
 
 #[cfg(not(target_arch = "wasm32"))]
 const BUILD_CHECKOUT_STDLIB: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib");
@@ -46,13 +67,9 @@ pub enum StdlibSource {
 /// packaged installation layout); else the build checkout's `stdlib/` when
 /// that directory exists; else the stdlib embedded in the binary.
 pub fn stdlib_origin() -> StdlibSource {
-    resolve_for_this_process()
-}
-
-fn resolve_for_this_process() -> StdlibSource {
     #[cfg(target_arch = "wasm32")]
     {
-        return StdlibSource::Embedded;
+        StdlibSource::Embedded
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -149,7 +166,7 @@ fn install_sources(exe: Option<&Path>, directory: &str) -> Option<PathBuf> {
 }
 
 pub fn stdlib_files() -> &'static [StdlibFile] {
-    FILES.get_or_init(|| match resolve_for_this_process() {
+    FILES.get_or_init(|| match stdlib_origin() {
         StdlibSource::Dir(dir) => STDLIB_NAMES
             .iter()
             .map(|&name| {
@@ -168,74 +185,13 @@ pub fn stdlib_files() -> &'static [StdlibFile] {
                     display_path: Box::leak(path.to_string_lossy().into_owned().into_boxed_str()),
                 }
             })
-            .collect(),
-        StdlibSource::Embedded => embedded_files(),
+            .collect::<Vec<_>>()
+            .leak(),
+        StdlibSource::Embedded => EMBEDDED_FILES,
     })
 }
 
 pub use rock_core::{is_stdlib_module_file, stdlib_file_id, stdlib_file_name};
-
-/// The stdlib compiled into the binary: what [`stdlib_files`] serves when no
-/// rung resolves on disk. `display_path` names no real file; on wasm it is
-/// `/stdlib/<name>` so the playground keeps opening `file:///stdlib/<name>`,
-/// elsewhere diagnostics show the `<embedded-stdlib>/` prefix.
-fn embedded_files() -> Vec<StdlibFile> {
-    #[cfg(target_arch = "wasm32")]
-    let dir = "/stdlib";
-    #[cfg(not(target_arch = "wasm32"))]
-    let dir = "<embedded-stdlib>";
-    STDLIB_NAMES
-        .iter()
-        .map(|&name| StdlibFile {
-            name,
-            contents: embedded_source(name),
-            display_path: Box::leak(format!("{dir}/{name}").into_boxed_str()),
-        })
-        .collect()
-}
-
-fn embedded_source(name: &str) -> &'static str {
-    match name {
-        "unified.rock" => include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../stdlib/unified.rock"
-        )),
-        "logging.rock" => include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../stdlib/logging.rock"
-        )),
-        "vec.rock" => include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../stdlib/vec.rock"
-        )),
-        "mat.rock" => include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../stdlib/mat.rock"
-        )),
-        "arena.rock" => include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../stdlib/arena.rock"
-        )),
-        "scene.rock" => include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../stdlib/scene.rock"
-        )),
-        "strings.rock" => include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../stdlib/strings.rock"
-        )),
-        "json.rock" => include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../stdlib/json.rock"
-        )),
-        "shader.rock" => include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../stdlib/shader.rock"
-        )),
-        "js.rock" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib/js.rock")),
-        _ => panic!("rock: `{name}` is not a stdlib file (see STDLIB_NAMES)"),
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -388,23 +344,13 @@ mod tests {
     }
 
     #[test]
-    fn build_checkout_stdlib_holds_every_file() {
-        for name in STDLIB_NAMES {
-            let path = Path::new(BUILD_CHECKOUT_STDLIB).join(name);
-            assert!(path.is_file(), "missing {}", path.display());
-        }
-    }
-
-    #[test]
     fn embedded_stdlib_matches_the_checkout() {
-        for name in STDLIB_NAMES {
+        for file in EMBEDDED_FILES {
+            let name = file.name;
             let on_disk = std::fs::read_to_string(Path::new(BUILD_CHECKOUT_STDLIB).join(name))
                 .expect("checkout stdlib readable");
-            assert_eq!(
-                embedded_source(name),
-                on_disk,
-                "{name} drifted from the checkout"
-            );
+            assert_eq!(file.contents, on_disk, "{name} drifted from the checkout");
+            assert_eq!(file.display_path, format!("<embedded-stdlib>/{name}"));
         }
     }
 }
