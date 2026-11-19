@@ -770,7 +770,7 @@ pub fn build_in(
     let pending = g.always_emitted_owners(ws);
     let t_seed = t.elapsed();
     let t = Instant::now();
-    let stats = g.run(ws, pending, true, false);
+    let stats = g.run(ws, pending, false);
     g.run_stats = stats;
     let t_run = t.elapsed();
     let t = Instant::now();
@@ -917,50 +917,23 @@ impl InstanceGraph {
         out
     }
 
-    /// Walk pending owners unconditionally, then follow demands for missing owners.
-    fn run(
-        &mut self,
-        ws: &Workspace,
-        mut pending: Vec<Owner>,
-        include_missing_roots: bool,
-        track_incremental_state: bool,
-    ) -> RunStats {
+    /// Walk pending owners, then every owner they newly demand. A fresh build
+    /// walks the roots too, and installs from its walkers.
+    fn run(&mut self, ws: &Workspace, mut pending: Vec<Owner>, update: bool) -> RunStats {
         let mut stats = RunStats::default();
-        if track_incremental_state {
-            self.last_run_owners.clear();
-            self.last_run_always_targets.clear();
-        }
-        // A build with nothing installed can install from its walkers.
-        // Debug logging selects the ordered path for comparison.
-        let fresh = include_missing_roots
-            && !track_incremental_state
-            && !log::log_enabled!(log::Level::Debug)
-            && !self.incremental_indexes
-            && self.contributions.is_empty()
-            && self.index.subst.is_empty()
-            && pending.iter().all(|owner| owner.instance().is_none());
-        if include_missing_roots {
-            for i in self.root_instances.clone() {
-                if !self.contributions.contains_key(&Owner::Instance(i.clone())) {
-                    pending.push(Owner::Instance(i));
-                }
-            }
-        }
         // A conformance tree is supplied by an owner's CALLER, so an owner
         // walked before its caller was re-walked read a stale one. Recorded
         // here and re-checked below rather than assumed away by walk order.
         let mut walked_with: FxHashMap<Instance, InstanceBoundTree> = FxHashMap::default();
-        if fresh {
+        if update {
+            self.last_run_owners.clear();
+            self.last_run_always_targets.clear();
+        } else {
+            pending.extend(self.root_instances.iter().cloned().map(Owner::Instance));
             pending = self.run_fresh_waves(ws, pending, &mut stats, &mut walked_with);
         }
         let mut queued: FxHashSet<Owner> = FxHashSet::default();
-        let mut unique_pending = Vec::with_capacity(pending.len());
-        for owner in pending {
-            if queued.insert(owner.clone()) {
-                unique_pending.push(owner);
-            }
-        }
-        pending = unique_pending;
+        pending.retain(|owner| queued.insert(owner.clone()));
         let mut rounds = 0usize;
         let interner = self.interner.clone();
         loop {
@@ -988,8 +961,7 @@ impl InstanceGraph {
                     }
                 };
                 for (owner, (tree, outcome)) in wave.into_iter().zip(walks) {
-                    let mut prepared_c =
-                        outcome.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                    let mut prepared_c = outcome;
                     let mut used_tree = owner.instance().map(|_| tree.unwrap_or_default());
                     queued.remove(&owner);
                     // Retraction can remove a pending instance's substitution mid-wave.
@@ -1013,12 +985,12 @@ impl InstanceGraph {
                         }
                         walked_with.insert(i.clone(), used_tree.expect("instance snapshot"));
                     }
-                    if track_incremental_state {
+                    if update {
                         self.last_run_owners.insert(owner.clone());
                     }
                     stats.expanded += 1;
                     let c = prepared_c.expect("walkable owner");
-                    for owner in self.install(owner, c, track_incremental_state) {
+                    for owner in self.install(owner, c, update) {
                         if queued.insert(owner.clone()) {
                             pending.push(owner);
                         }
@@ -1453,26 +1425,20 @@ struct OwnerWalk {
     inputs: WalkInputs,
 }
 
-/// A walk's result, or the panic of a walk that ran away from the thread
-/// installing it.
-type WalkOutcome = std::thread::Result<Option<Box<Contribution>>>;
-
 impl OwnerWalk {
-    fn run(&self, ws: &Workspace, interner: &MonoInterner) -> WalkOutcome {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // An instance whose substitution was retracted has nothing to
-            // walk; the install decides what that means.
-            if self.owner.instance().is_some() && self.inputs.subst.is_none() {
-                return None;
-            }
-            Some(expand(
-                ws,
-                interner,
-                &WalkScratch::default(),
-                &self.owner,
-                &self.inputs,
-            ))
-        }))
+    /// `None` for an instance whose substitution was retracted; the install
+    /// decides what that means.
+    fn run(&self, ws: &Workspace, interner: &MonoInterner) -> Option<Box<Contribution>> {
+        if self.owner.instance().is_some() && self.inputs.subst.is_none() {
+            return None;
+        }
+        Some(expand(
+            ws,
+            interner,
+            &WalkScratch::default(),
+            &self.owner,
+            &self.inputs,
+        ))
     }
 }
 
@@ -2036,7 +2002,7 @@ impl InstanceGraph {
         affected.extend(pending_roots);
         affected.sort();
         affected.dedup();
-        let run = self.run(ws, affected.clone(), false, true);
+        let run = self.run(ws, affected.clone(), true);
         self.run_stats = run;
         let revisited_owners = self.last_run_owners.clone();
         let changed_decls = changed.iter().filter_map(|(module, owner)| match owner {
