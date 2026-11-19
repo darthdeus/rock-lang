@@ -192,18 +192,13 @@ impl<'a> Builder<'a> {
         range: std::ops::Range<usize>,
     ) -> Vec<Idx<Inst>> {
         let stride = shape.leaf_count();
-        let raw = self.strided_stores_raw(elem);
         let slot = self.checked_column_index(vec, index);
         let data = self.read_field(vec, crate::names::ustr("_data"));
         range
             .map(|offset| {
                 let at = self.strided_slot_index(slot, stride, offset);
                 let stored = self.read_index(data, at, ContainerKind::VecStrideSlot);
-                if raw {
-                    stored
-                } else {
-                    self.emit_cur(Inst::VecStrideFalseToNil(stored))
-                }
+                self.strided_decode(elem, stored)
             })
             .collect()
     }
@@ -234,7 +229,6 @@ impl<'a> Builder<'a> {
         stride: usize,
         elem: ColumnElem,
     ) {
-        let raw = self.strided_stores_raw(elem);
         let data = self.read_field(vec, crate::names::ustr("_data"));
         let compact = stride <= 12;
         let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
@@ -257,11 +251,7 @@ impl<'a> Builder<'a> {
             } else if offset > 0 {
                 at = self.emit_cur(Inst::IntAdd(at, one));
             }
-            let value = if raw {
-                leaf
-            } else {
-                self.emit_cur(Inst::VecStrideNilToFalse(leaf))
-            };
+            let value = self.strided_encode(elem, leaf);
             self.write_index(data, at, value, ContainerKind::VecStrideSlot);
         }
     }
@@ -270,6 +260,22 @@ impl<'a> Builder<'a> {
     /// be corrupted by the flat-enum tier's nil-to-false densifying.
     pub(crate) fn strided_stores_raw(&self, elem: ColumnElem) -> bool {
         self.ws.struct_by_name.contains_key(&elem.name)
+    }
+
+    pub(crate) fn strided_encode(&mut self, elem: ColumnElem, leaf: Idx<Inst>) -> Idx<Inst> {
+        if self.strided_stores_raw(elem) {
+            leaf
+        } else {
+            self.emit_cur(Inst::VecStrideNilToFalse(leaf))
+        }
+    }
+
+    pub(crate) fn strided_decode(&mut self, elem: ColumnElem, stored: Idx<Inst>) -> Idx<Inst> {
+        if self.strided_stores_raw(elem) {
+            stored
+        } else {
+            self.emit_cur(Inst::VecStrideFalseToNil(stored))
+        }
     }
 
     /// The 0-based row a checked (backend-based) element index names.
@@ -1261,7 +1267,7 @@ impl<'a> Builder<'a> {
         } = key;
         if storage == FlatStorage::Columns && elem.nullable {
             return Err(gap(format!(
-                "cannot write `{field}` through an element of `[{}?]`; refine the                  element to non-null and store it whole",
+                "cannot write `{field}` through an element of `[{}?]`; refine the element to non-null and store it whole",
                 elem.name
             )));
         }
@@ -1298,14 +1304,9 @@ impl<'a> Builder<'a> {
                     elem.name
                 ))
             })?;
-        let raw = self.strided_stores_raw(elem);
         let data = self.read_field(vec, crate::names::ustr("_data"));
         for (offset, v) in offsets.into_iter().zip(leaves) {
-            let v = if raw {
-                v
-            } else {
-                self.emit_cur(Inst::VecStrideNilToFalse(v))
-            };
+            let v = self.strided_encode(elem, v);
             let at = self.strided_slot_index(slot, row.len(), offset);
             self.write_index(data, at, v, ContainerKind::VecStrideSlot);
         }

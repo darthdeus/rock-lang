@@ -2301,14 +2301,8 @@ impl<'a> Builder<'a> {
             let bundle = self.lower_expr_repr(expr)?;
             let leaves =
                 self.element_storage_leaves(&bundle, &shape, stride, elem, "strided literal")?;
-            if self.strided_stores_raw(elem) {
-                values.extend(leaves);
-            } else {
-                values.extend(
-                    leaves
-                        .into_iter()
-                        .map(|leaf| self.emit_cur(Inst::VecStrideNilToFalse(leaf))),
-                );
+            for leaf in leaves {
+                values.push(self.strided_encode(elem, leaf));
             }
         }
         let capacity = self.emit_cur(Inst::Const(Lit::Int(elems.len() as i64)));

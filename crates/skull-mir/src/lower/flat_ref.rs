@@ -950,13 +950,11 @@ impl<'a> Builder<'a> {
     pub(crate) fn flat_leaf_load(&mut self, place: FlatRefVal) -> Result<Idx<Inst>, CompilerError> {
         let (base, index, kind) = self.flat_leaf_slot(place)?;
         let value = self.read_index(base, index, kind);
-        Ok(
-            if kind == ContainerKind::VecStrideSlot && !self.strided_stores_raw(place.key.elem) {
-                self.emit_cur(Inst::VecStrideFalseToNil(value))
-            } else {
-                value
-            },
-        )
+        Ok(if kind == ContainerKind::VecStrideSlot {
+            self.strided_decode(place.key.elem, value)
+        } else {
+            value
+        })
     }
 
     pub(crate) fn flat_leaf_store(
@@ -965,12 +963,11 @@ impl<'a> Builder<'a> {
         value: Idx<Inst>,
     ) -> Result<(), CompilerError> {
         let (base, index, kind) = self.flat_leaf_slot(place)?;
-        let value =
-            if kind == ContainerKind::VecStrideSlot && !self.strided_stores_raw(place.key.elem) {
-                self.emit_cur(Inst::VecStrideNilToFalse(value))
-            } else {
-                value
-            };
+        let value = if kind == ContainerKind::VecStrideSlot {
+            self.strided_encode(place.key.elem, value)
+        } else {
+            value
+        };
         self.write_index(base, index, value, kind);
         Ok(())
     }
