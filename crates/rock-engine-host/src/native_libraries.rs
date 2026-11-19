@@ -102,6 +102,8 @@ fn cargo_command(manifest: &Path) -> Command {
     command
 }
 
+/// `watch_paths` come from the resolved dependency graph, about ten times costlier
+/// than reading the workspace's own packages, so only watching asks for them.
 fn cargo_library(lib: &NativeLibrary, watch: bool) -> Result<CargoLibrary> {
     let output = rock_host::timed(format!("{}: cargo metadata", lib.dst_stem), || {
         let mut command = cargo_command(&lib.manifest);

@@ -19,6 +19,7 @@ pub const CARGO_HARNESS_ENV_VARS: &[&str] = &[
 ];
 pub const CARGO_HARNESS_ENV_PREFIX: &str = "CARGO_PKG_";
 
+/// Nested cargo then fingerprints like a plain-shell build.
 pub fn strip_cargo_harness_env(cmd: &mut Command) {
     for var in CARGO_HARNESS_ENV_VARS {
         cmd.env_remove(var);

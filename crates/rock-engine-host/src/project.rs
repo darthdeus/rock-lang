@@ -17,6 +17,7 @@ pub fn is_game_project(path: &Path) -> Result<bool> {
 /// so concurrent one-shot builds cannot replace a running session.
 pub const STONE_SESSION_DIR: &str = "tmp/stone";
 
+/// One directory per (game, pid); `rock stone` prunes inactive sessions after seven days.
 pub fn stone_session_main_lua_path(game: &str, pid: u32) -> PathBuf {
     let name = Path::new(game)
         .file_name()
@@ -50,6 +51,8 @@ pub fn configured_stone_dir(path: &std::path::Path) -> Result<Option<std::path::
 
 pub(crate) const PROJECT_PARENTS: &[&str] = &["games"];
 
+/// Tries the path relative to cwd first, then `PROJECT_PARENTS` under `rock_dir()`.
+/// Zero or several matches reject with the candidates listed; never guess.
 pub fn resolve_project_dir(arg: &str) -> Result<PathBuf> {
     if let Ok(dir) = resolve_project_dir_in(Path::new(""), PROJECT_PARENTS, arg) {
         return Ok(dir);
@@ -63,6 +66,7 @@ pub fn resolve_project_dir(arg: &str) -> Result<PathBuf> {
     resolve_project_dir_in(Path::new(""), PROJECT_PARENTS, arg)
 }
 
+/// A literal directory wins over expansion; only a bare name expands against the parents.
 pub(crate) fn resolve_project_dir_in(base: &Path, parents: &[&str], arg: &str) -> Result<PathBuf> {
     let literal = base.join(arg);
     if literal.is_dir() {

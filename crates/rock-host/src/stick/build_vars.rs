@@ -85,6 +85,7 @@ pub fn resolve_build_vars(
         .or(build.default_channel.as_deref())
         .unwrap_or("dev")
         .to_string();
+    // Validated even with no channels list: accepting a typo would stamp it into release identity.
     if let Some(explicit) = channel_arg {
         if !build.channels.iter().any(|c| c == explicit) {
             anyhow::bail!(
@@ -240,6 +241,7 @@ fn validate_target_os(target: &str) -> Result<&str> {
 fn resolve_builtin(name: &str, channel: &str, target_os: Option<&str>) -> Result<String> {
     match name {
         "channel" => Ok(channel.to_string()),
+        // An explicit target is the artifact truth; the packaging host only when none is declared.
         "platform" => Ok(if let Some(target) = target_os {
             target.to_string()
         } else {

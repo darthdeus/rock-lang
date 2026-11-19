@@ -19,6 +19,7 @@ pub fn find_source_root(path: &Path) -> Option<PathBuf> {
     context_root_from_env().or_else(|| find_ancestor(path, is_dev_workspace))
 }
 
+/// A file never holds a marker, so a file path starts the walk at its directory.
 fn find_ancestor(path: &Path, is_root: impl Fn(&Path) -> bool) -> Option<PathBuf> {
     let start = fs_err::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     start
@@ -36,6 +37,8 @@ pub(crate) fn context_root_from_env() -> Option<PathBuf> {
     }
 }
 
+/// The exe's own install directory beats walking up from cwd: a release zip run inside
+/// another workspace must use its own lib/.
 fn release_root_from_exe() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let bin_dir = exe.parent()?;
@@ -51,6 +54,8 @@ pub fn find_project_root(path: &Path) -> Option<PathBuf> {
     find_ancestor(path, |dir| dir.join("stick.toml").exists())
 }
 
+/// Release layouts have native libraries staged under lib/ and no target dir, so commands
+/// must not shell out to cargo.
 pub fn is_release_layout() -> bool {
     is_release_layout_in(Path::new(&crate::rock_dir()))
 }
@@ -65,6 +70,7 @@ pub fn is_release_layout_in(root: &Path) -> bool {
         && !root.join("Cargo.toml").exists()
 }
 
+/// On failure a bare name lets process spawning report the OS lookup error.
 pub fn luajit_path() -> PathBuf {
     locate_luajit(
         std::env::var_os("ROCK_LUAJIT"),
@@ -157,6 +163,8 @@ pub fn default_main_lua_path() -> PathBuf {
     PathBuf::from(DEFAULT_OUTPUT_DIR).join(MAIN_LUA_FILENAME)
 }
 
+/// Rename into place so a concurrent reader (hot reload polling main.lua) never sees a
+/// truncated file.
 pub fn write_atomic(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
     use std::io::Write;
     write_atomic_streamed(path, |file| file.write_all(contents.as_ref()))
@@ -174,6 +182,7 @@ pub fn write_atomic_streamed(
     fs_err::create_dir_all(parent)?;
 
     // Same directory so the rename is atomic: a hot-reload poller must never read a truncated file.
+    // Same directory keeps `persist` an atomic same-filesystem rename.
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     write(tmp.as_file_mut())?;
     tmp.persist(path).map_err(|e| e.error)?;
@@ -199,6 +208,8 @@ pub fn find_rock_files_at_path(source_dir: impl AsRef<Path>) -> Result<Vec<Strin
         .collect())
 }
 
+/// Per-entry walk errors go to stderr: a permission error would otherwise masquerade as
+/// "module not found".
 pub fn walk_rock_files(source_dir: impl AsRef<Path>) -> Result<Vec<WalkedRockFile>> {
     use anyhow::Context;
     use walkdir::WalkDir;

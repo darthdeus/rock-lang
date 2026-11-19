@@ -20,6 +20,7 @@ unsafe extern "C" {
 #[cfg(target_os = "linux")]
 static INHERITED: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
+/// Applies the compiler's THP-off default unless the caller chose via `MIMALLOC_ALLOW_THP`.
 pub fn enter_compiler_process() -> io::Result<()> {
     if std::env::var_os("MIMALLOC_ALLOW_THP").is_some()
         || std::env::var_os("mimalloc_allow_thp").is_some()

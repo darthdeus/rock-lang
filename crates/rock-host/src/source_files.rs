@@ -42,6 +42,7 @@ fn load_paths(
     })
 }
 
+/// The `lstat`s run in parallel; the first failing file in order reports.
 pub fn production_only(
     sources: &SourceFiles,
     project_root: &Path,

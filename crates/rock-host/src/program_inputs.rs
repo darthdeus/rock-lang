@@ -29,6 +29,8 @@ pub fn ns_aliases(graph: Option<&PackageGraph>) -> NsAliases {
     graph.map(PackageGraph::ns_aliases).unwrap_or_default()
 }
 
+/// Sources without a real root package use the empty table; otherwise the root
+/// package's (graph id 0) manifest, which selected the files, supplies it.
 pub fn ns_aliases_for_sources<'a>(
     sources: impl IntoIterator<Item = (&'a str, Option<&'a PackageTag>)>,
 ) -> Result<NsAliases, CompilerError> {

@@ -231,6 +231,8 @@ impl Builder {
         config: &StickConfig,
         dependencies: &[PackageEdge],
     ) -> Result<()> {
+        // `a-b` and `a_b` normalize alike: two packages behind one alias are ambiguous,
+        // two aliases reaching one package are fine.
         let mut seen: HashMap<&str, &str> = HashMap::new();
         for edge in dependencies {
             if let Some(first_key) = seen.get(edge.alias.as_str()) {
@@ -270,6 +272,8 @@ impl Builder {
     }
 }
 
+/// `-` becomes `_`, case is preserved. Rejects empty, non-identifier and reserved keys
+/// so a manifest typo fails here.
 pub(crate) fn normalize_dep_key(key: &str) -> Result<String> {
     let alias = key.replace('-', "_");
     let mut chars = alias.chars();
@@ -346,10 +350,13 @@ impl PackageGraph {
         }
     }
 
+    /// Postorder (providers first, root last): the order source discovery loads packages in.
     pub fn load_order(&self) -> &[PackageId] {
         &self.load_order
     }
 
+    /// Deepest package wins on nesting; callers resolve filesystem aliases first. An
+    /// unresolvable path has no owner.
     pub fn package_of_file(&self, path: &Path) -> Option<PackageId> {
         let path = match fs_err::canonicalize(path) {
             Ok(path) => path,
@@ -390,6 +397,7 @@ impl PackageGraph {
         package_of(path) == Some(owner)
     }
 
+    /// Inactive source groups vanish before parsing and contribute nothing.
     pub fn includes_file(&self, owner: PackageId, path: &Path) -> bool {
         self.includes(owner, path, |path| self.package_of_file(path))
     }

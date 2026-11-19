@@ -41,6 +41,8 @@ struct ReceiptLib {
     staged_sha1: String,
 }
 
+/// Cargo resolves a relative `CARGO_TARGET_DIR` against the directory it was invoked
+/// from (`rock_host::rock_dir()`); resolve it the same way.
 fn cargo_target_dir(rock_root: &Path) -> PathBuf {
     match std::env::var_os("CARGO_TARGET_DIR").filter(|value| !value.is_empty()) {
         Some(value) => {
@@ -76,6 +78,7 @@ fn staged_cdylib_path(root: &Path, dst_stem: &str) -> PathBuf {
     root.join("tmp").join(cdylib_name(dst_stem))
 }
 
+// rustc escapes spaces and continuations, but leaves path separators literal.
 fn makefile_words(text: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
@@ -618,6 +621,8 @@ fn cargo_build_and_stage_lib(
     })
 }
 
+/// Accepted build receipts retain ownership; otherwise the source artifact and the
+/// published library must both match the recorded staging identity.
 pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
     if validate_receipted_lib(dst_stem)? {
         return Ok(());
@@ -634,6 +639,8 @@ pub fn stage_cdylib(src_stem: &str, dst_stem: &str) -> Result<()> {
         prepare_staged_cdylib(staging, dst_stem)
     })
     .map_err(|error| {
+        // `cargo build -p` can exit 0 without producing the cdylib (foreign target dir,
+        // crate-type without `cdylib`); the copy error alone names neither cause nor fix.
         if src.exists() {
             return error;
         }
@@ -842,6 +849,7 @@ pub fn prepare_engine_build_receipt(game_paths: &[String], path: &Path) -> Resul
 fn engine_build_receipt_json(receipt: &EngineBuildReceipt) -> Result<Vec<u8>> {
     Ok(serde_json::to_vec_pretty(&serde_json::json!({
         "version": receipt.version,
+        // Lets launchers reject older binaries that ignore ROCK_PREBUILT_GAME and invoke Cargo.
         "prebuilt_game_protocol": 1,
         "workspace": receipt.workspace,
         "libs": receipt.libs.iter().map(|lib| serde_json::json!({

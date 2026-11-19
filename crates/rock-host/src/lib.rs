@@ -54,6 +54,8 @@ pub(crate) fn resolve_rock_dir_with(
         .into_owned()
 }
 
+/// Order: `ROCK_DIR`, the running exe's location (release install or dev target/), the
+/// workspace root above cwd, then cwd.
 pub fn rock_dir() -> String {
     use std::sync::OnceLock;
     static CACHED: OnceLock<String> = OnceLock::new();

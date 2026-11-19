@@ -240,6 +240,7 @@ pub struct SourceGroupConfig {
 }
 
 impl StickConfig {
+    /// Missing `[language]` or `globals` keeps the permissive default.
     pub fn global_policy(&self) -> rock_core::source_code::GlobalPolicy {
         self.language
             .as_ref()
@@ -247,6 +248,7 @@ impl StickConfig {
             .unwrap_or(rock_core::source_code::GlobalPolicy::Any)
     }
 
+    /// Missing `[language]` or `identity_storage` means enforced.
     pub fn identity_storage(&self) -> rock_core::source_code::IdentityStorage {
         self.language
             .as_ref()
@@ -274,6 +276,8 @@ pub struct BuildVar {
     pub value: Option<String>,
     pub source_fingerprint: Option<SourceFingerprint>,
     pub channels: Option<Vec<String>>,
+    /// Per channel on purpose: a credential a dev build can lack is one a release build
+    /// cannot, so failure degrades to `default` only on these channels.
     pub optional_channels: Option<Vec<String>>,
     pub default: Option<String>,
     /// Hash the value into cache keys but never store it in plaintext in any
@@ -328,12 +332,15 @@ pub struct EngineConfig {
     pub needs: Vec<String>,
 }
 
+/// The CLI mirrors its comptime channel selection here; rock-host cannot read it.
 static INVOCATION_CHANNEL: Mutex<Option<String>> = Mutex::new(None);
 
 pub fn set_invocation_channel(channel: Option<String>) {
     *INVOCATION_CHANNEL.lock().expect("invocation channel lock") = channel;
 }
 
+/// Precedence: explicit `--channel`, then `default_channel`, then "dev". Mirrors
+/// `resolve_build_vars` so a dependency filter and a build var agree on the channel.
 pub fn resolved_channel_for(cfg: &StickConfig) -> String {
     if let Some(channel) = INVOCATION_CHANNEL
         .lock()
@@ -348,6 +355,7 @@ pub fn resolved_channel_for(cfg: &StickConfig) -> String {
         .unwrap_or_else(|| "dev".to_string())
 }
 
+/// A dependency with no declared channels matches everywhere.
 pub(crate) fn dependency_matches_channel(dep: &Dependency, channel: &str) -> bool {
     match dep {
         Dependency::Path(_) => true,
@@ -360,6 +368,7 @@ pub(crate) fn dependency_matches_channel(dep: &Dependency, channel: &str) -> boo
 #[derive(Debug, Clone)]
 pub struct Package {
     pub name: String,
+    /// `Option` so a minimal `[package]` manifest parses; `version()` defaults to "0.0.0".
     pub version: Option<String>,
     pub package_type: Option<PackageType>,
 }
@@ -390,6 +399,8 @@ pub enum Dependency {
 #[derive(Debug, Clone)]
 pub struct DetailedDependency {
     pub source: DependencySource,
+    /// Empty means every channel; a shipping channel excluding a dev-only package keeps
+    /// its symbols out of generated code.
     pub channels: Vec<String>,
 }
 
@@ -905,6 +916,8 @@ impl StickConfig {
         Self::new_from_str(&content)
     }
 
+    /// `Ok(None)` for no manifest, `Err` for a malformed one, so parse errors are not
+    /// taken for "no config".
     pub fn from_path_optional(path: &Path) -> Result<Option<Self>> {
         if !path
             .try_exists()
@@ -1035,6 +1048,8 @@ impl StickConfig {
         Ok(())
     }
 
+    /// False for a `lib` and when no `stick.toml` exists: a scratch file is not a closed
+    /// world for closed-world lints.
     pub fn is_bin_at(dir: &Path) -> bool {
         matches!(
             Self::find_from_dir(dir),

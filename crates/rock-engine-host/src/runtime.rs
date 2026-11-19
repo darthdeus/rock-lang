@@ -63,6 +63,8 @@ fn lib_path_value_in(root: &Path) -> String {
     }
 }
 
+/// `lib_path_value()` plus platform graphics libraries; Linux also gets the system
+/// Vulkan loader and driver directories when they
 /// exist; the bundled LuaJIT does not receive NixOS's nix-ld defaults itself.
 ///
 /// Rock's own dirs (SDK `lib/`, or `tmp` and cached gamelibs) come FIRST so the bundled
@@ -165,6 +167,8 @@ pub fn build_luajit_command(lua_file: &Path, app_args: &[String]) -> std::proces
     configure_command(command, true, true)
 }
 
+/// Arguments, cwd and unrelated environment overrides survive; the runtime owns
+/// LUA_PATH and the native library search path.
 pub fn configure_command(
     command: std::process::Command,
     lua: bool,

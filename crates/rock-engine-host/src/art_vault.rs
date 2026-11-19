@@ -44,6 +44,7 @@ pub fn expand_token(raw: &str, root: impl FnOnce() -> Result<PathBuf>) -> Result
     }
 }
 
+/// Callers compare canonical paths so a symlinked vault still matches.
 pub fn tokenize(path: &Path, root: &Path) -> Option<String> {
     let relative = path.strip_prefix(root).ok()?;
     Some(if relative.as_os_str().is_empty() {

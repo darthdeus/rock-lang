@@ -13,6 +13,7 @@ pub fn current_executable_image() -> std::io::Result<std::path::PathBuf> {
     Ok(executable)
 }
 
+/// A budgeting parent names this file for the process to report its phase in.
 pub const SPAWN_PHASE_FILE_ENV: &str = "ROCK_SPAWN_PHASE_FILE";
 
 pub fn report_spawn_phase(phase: &str) {
@@ -24,6 +25,8 @@ pub fn report_spawn_phase(phase: &str) {
     }
 }
 
+/// A panicked reader or failed read is a harness failure: truncated output would let
+/// the caller judge the program on bytes it never fully saw.
 pub fn join_drained_pipe(
     thread: std::thread::JoinHandle<std::io::Result<Vec<u8>>>,
     pipe: &str,

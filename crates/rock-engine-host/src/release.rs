@@ -9,6 +9,7 @@ use rock_host::stick::StickConfig;
 
 pub const ASSET_OVERLAYS_ENV: &str = "ROCK_ASSET_OVERLAYS";
 
+/// Identical sheets share a directory, so a key may belong to several lines; the first wins.
 pub fn bank_files(lines: &[visual_bank::Line]) -> BTreeMap<String, &visual_bank::Line> {
     let mut files = BTreeMap::new();
     for line in lines {
@@ -321,6 +322,7 @@ mod worktree_bank_tests {
     }
 }
 
+/// Bank inserts leave the selection unsorted; the caller sorts once after all of them.
 pub fn replace_release_asset(selection: &mut AssetSelection, asset: ReleaseAsset) {
     if let Some(existing) = selection
         .assets
@@ -414,6 +416,8 @@ fn insert_asset(
     }
 }
 
+/// A sibling marker proves `output_dir` was generated here and may be cleared; it sits
+/// beside the directory so the staged tree holds only shipped keys.
 pub(crate) fn staging_marker_path(output_dir: &Path) -> PathBuf {
     let name = output_dir
         .file_name()
