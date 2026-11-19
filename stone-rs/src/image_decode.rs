@@ -457,7 +457,8 @@ mod cap_tests {
 
     #[test]
     fn box_downsample_rounds_and_covers_every_texel() {
-        let cases: [(&str, &[u8], u32, u32, &[u8]); 2] = [
+        type Case = (&'static str, &'static [u8], u32, u32, &'static [u8]);
+        let cases: [Case; 2] = [
             (
                 "a fractional mean rounds to nearest",
                 &[0, 0, 0, 0, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5],
