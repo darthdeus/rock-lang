@@ -25,9 +25,6 @@ pub extern "C" fn stone_gl_finish() {
 pub extern "C" fn stone_gl_flush() {
     with_gl(|gl| unsafe { gl.flush() });
 }
-// =============================================================================
-// OpenGL / Canvas Functions
-// =============================================================================
 
 /// 0 = NEAREST, 1 = LINEAR, 2 = stable bilinear mip. Keep in sync with IMAGE_FILTER_* in
 /// stone/engine/lib.rock and the web `__sw_gl_filter`.
@@ -344,10 +341,6 @@ pub extern "C" fn stone_gl_pass_state_end(scope: u32) -> bool {
         restored
     })
 }
-
-// =============================================================================
-// GL write state probe: colour mask, clear colour, scissor
-// =============================================================================
 
 /// GL's current write state as `mask=RGBA clear=r,g,b,a scissor=on/off x,y,w,h`,
 /// with a masked-off channel shown as `-`. The fixture's oracle, and GL's own
