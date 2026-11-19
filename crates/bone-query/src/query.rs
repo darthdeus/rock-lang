@@ -4188,8 +4188,11 @@ pub(crate) fn render_fn_signature(
     f: &bone_semantic::hir::Function,
 ) -> String {
     let params = rendered_params(ws, &f.param_decls);
-    let ret = f
-        .return_ty
+    format_fn_signature(ws, name, &params, f.return_ty)
+}
+
+fn format_fn_signature(ws: &Workspace, name: Ustr, params: &[String], ret: Option<TyId>) -> String {
+    let ret = ret
         .map(|t| format!(" -> {}", ws.render(None, t)))
         .unwrap_or_default();
     format!(
@@ -4230,49 +4233,23 @@ pub(crate) fn render_fn_signature_with_defaults(
 ) -> String {
     let module = &ws.modules[fmid.index()];
     let f = &module.functions[fid];
-    let body = module
-        .bodies
-        .get(&bone_semantic::hir::BodyOwner::Function(fid));
-    let params: Vec<String> = f
-        .param_decls
-        .iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let base = format!("{}: {}", p.name, ws.render(None, p.ty));
-            if !p.has_default {
-                return base;
-            }
-            match param_default_src(ws, fmid, body, i, sources) {
-                Some(v) => format!("{base} = {v}"),
-                None => format!("{base} = .."),
-            }
-        })
-        .collect();
-    let ret = f
-        .return_ty
-        .map(|t| format!(" -> {}", ws.render(None, t)))
-        .unwrap_or_default();
-    format!(
-        "fn {}({}){}",
-        display_name(f.name.as_str()),
-        params.join(", "),
-        ret
-    )
-}
-
-fn param_default_src(
-    ws: &Workspace,
-    fmid: ModuleId,
-    body: Option<&bone_semantic::hir::Body>,
-    param_idx: usize,
-    sources: Option<&SourceMap>,
-) -> Option<String> {
-    let body = body?;
-    let dexpr = (*body.param_defaults.get(param_idx)?)?;
-    let (s, e) = body.expr_spans.get(dexpr)?.offset_range();
-    let file = ws.modules[fmid.index()].file;
-    let src = sources?.get(file.as_str())?;
-    src.get(s..e).map(|t| t.trim().to_string())
+    let default_at = |i: usize| {
+        let body = module.bodies.get(&hir::BodyOwner::Function(fid))?;
+        let expr = (*body.param_defaults.get(i)?)?;
+        let (start, end) = body.expr_spans.get(expr)?.offset_range();
+        sources?
+            .get(module.file.as_str())?
+            .get(start..end)
+            .map(str::trim)
+    };
+    let mut params = rendered_params(ws, &f.param_decls);
+    for (i, (param, rendered)) in f.param_decls.iter().zip(&mut params).enumerate() {
+        if param.has_default {
+            rendered.push_str(" = ");
+            rendered.push_str(default_at(i).unwrap_or(".."));
+        }
+    }
+    format_fn_signature(ws, f.name, &params, f.return_ty)
 }
 
 pub(crate) fn fn_ctags_signatures(
