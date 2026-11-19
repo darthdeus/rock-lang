@@ -1,8 +1,3 @@
-//! Target-specific ABI planning for one emitted function body.
-//!
-//! [`BackendFnAbiPlan`] owns the parameter and result representations plus
-//! derived transport facts, so callers and definitions consume the same plan.
-
 use rustc_hash::FxHashMap as HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -15,8 +10,6 @@ use super::{FieldShape, ScalarCtx, SpecSubst, ValueShape, ValueStorage, leaf_nam
 use crate::concrete::{ConcreteBodyPlan, ConcreteSignature};
 use crate::mir::FuncRef;
 
-/// The one declaration-level classification shared by the instance graph,
-/// artifact projection, and representation-boundary validation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BoundaryClass {
     Extern,
@@ -36,10 +29,6 @@ impl BoundaryClass {
     }
 }
 
-/// Classify only declaration-owned boundaries. Target capability and erased
-/// runtime membership are supplied by the graph/artifact owner; keeping those
-/// inputs out of this function prevents `@inline` from becoming an identity or
-/// representation decision.
 pub fn declared_boundary_class(f: &Function) -> Option<BoundaryClass> {
     if f.is_extern {
         return Some(BoundaryClass::Extern);
@@ -55,9 +44,6 @@ pub fn declared_boundary_class(f: &Function) -> Option<BoundaryClass> {
     f.inline_body.is_some().then_some(BoundaryClass::InlineBody)
 }
 
-/// Whether a declaration is an opaque boundary for scalarized value transport.
-/// `@scalar_abi` is a transport contract for inline text; it does not create an
-/// instance or change the declaration's boundary class.
 pub fn boundary_requires_boxed_representation(f: &Function) -> bool {
     match declared_boundary_class(f) {
         Some(BoundaryClass::Extern) => true,
@@ -68,8 +54,6 @@ pub fn boundary_requires_boxed_representation(f: &Function) -> bool {
     }
 }
 
-/// An interned physical representation.  Its numeric identity is meaningful
-/// only through the build-scoped arena carried by [`ScalarCtx`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RepId {
     arena: u64,
@@ -82,9 +66,6 @@ impl RepId {
     }
 }
 
-/// The use site is part of a representation key: a return tuple's element is
-/// not allowed to silently become a function parameter merely because its
-/// payload has the same leaves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RepUse {
     Parameter,
@@ -103,8 +84,6 @@ pub struct RepUseFacts {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RepGuarantees {
     pub nobox: bool,
-    /// Function-value and mixed scalar ABIs may carry reference types in an
-    /// explicit opaque slot while still flattening eligible value leaves.
     pub allow_opaque: bool,
 }
 
@@ -129,8 +108,7 @@ pub enum RepLayout {
     Tuple(TupleLayout),
 }
 
-/// The wire layout of a tuple. A nullable tuple transports its presence
-/// before the lanes of its elements.
+/// A nullable tuple transports its presence before its elements' lanes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TupleLayout {
     pub slots: Vec<RepId>,
@@ -189,8 +167,6 @@ impl RepLayout {
     }
 }
 
-/// One concrete physical answer in the target/use context supplied by the
-/// planner.  Backends may inspect it, but they do not derive another answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RepPlan {
     id: RepId,
@@ -200,12 +176,6 @@ pub struct RepPlan {
     storage: Option<ValueStorage>,
     column_eligible: bool,
     nobox: bool,
-    /// Whether the lane budget may replace this plan with its boxed form.
-    /// False when boxing would IMPLICITLY materialize a `nobox` child
-    /// ([`box_would_materialize_nobox`]), which the `nobox` guarantee forbids.
-    /// Derived once, from the concrete type being planned, and retained here so
-    /// that budgeting reads the planner's own answer instead of a parallel
-    /// per-signature flag list.
     boxable: bool,
 }
 
@@ -230,10 +200,6 @@ impl RepPlan {
         self.nobox
     }
 
-    /// Whether boxing this value is legal at all: an ordinary value whose box
-    /// would materialize a `nobox` descendant is not, so the lane budget must
-    /// leave it on the scalar wire. A `nobox` plan is already excluded by
-    /// [`RepPlan::nobox`], so this fact does not repeat that guarantee.
     pub fn boxable(&self) -> bool {
         self.boxable
     }
@@ -275,9 +241,6 @@ pub struct FunctionRepPlan {
     scalar_abi: bool,
 }
 
-/// The physical representation of an always-emitted global initializer.
-/// Globals have no callable `Instance`, so their result plan is carried on the
-/// lowered initializer itself rather than being smuggled through a function ABI.
 #[derive(Clone, Debug)]
 pub struct GlobalPlan {
     representation: RepId,
@@ -379,9 +342,6 @@ impl GlobalPlan {
         self.arena.get(self.representation).lanes(&self.arena)
     }
 
-    /// A build-independent description of the stored global representation.
-    /// `RepId` and the arena allocation order are deliberately absent: this is
-    /// the logical layout fingerprint, not a backend publication name.
     pub(crate) fn logical_fingerprint(&self) -> String {
         rep_logical_fingerprint(&self.arena, self.representation)
     }
@@ -404,18 +364,12 @@ impl FunctionRepPlan {
         self.scalar_abi
     }
 
-    /// A build-independent description of the function-value wire. `RepId`s
-    /// are only lookup handles into `arena`; the returned string contains the
-    /// recursive layouts they name, so a later artifact can compare it without
-    /// depending on arena allocation order.
     pub(crate) fn logical_fingerprint(&self, arena: &RepArena) -> String {
         let mut out = String::new();
         self.write_logical_fingerprint(arena, &mut out);
         out
     }
 
-    /// Appends [`Self::logical_fingerprint`]. Every body lowered asks for its
-    /// owner's, so the parts go straight into the caller's buffer.
     fn write_logical_fingerprint(&self, arena: &RepArena, out: &mut String) {
         use std::fmt::Write as _;
         out.push_str("params=[");
@@ -438,21 +392,12 @@ impl FunctionRepPlan {
     }
 }
 
-/// One memo table per QUESTION, because the same instance answers two of
-/// them differently: `Callee` is "the ABI a call site uses for the requested
-/// instance" (backend-variant selection included), `Owner` is "the ABI of this
-/// already-selected owner's own definition".
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum AbiQuestion {
     Callee,
     Owner,
 }
 
-/// ABI-plan memo counters, split by question so each carries its own
-/// denominator: `requests = hits + misses` per question, `stores` is the
-/// number of derivations committed (only `Ok` derivations store), and
-/// `duplicate_cold_stores` counts a store that found the key already present
-/// -- two workers racing the same cold key, each deriving.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AbiPlanMemoStats {
     pub owner_hits: u64,
@@ -499,7 +444,6 @@ impl AbiSlots {
     }
 }
 
-/// One worker's share of the memo counters.
 #[derive(Default)]
 struct AbiCounters {
     owner_hits: std::sync::atomic::AtomicU64,
@@ -510,11 +454,8 @@ struct AbiCounters {
     duplicate_cold_stores: std::sync::atomic::AtomicU64,
 }
 
-/// Build-scoped ABI memo owned by [`ScalarCtx`]. Context updates clear it;
-/// only successful plans are cached so failures retain their source spans.
 #[derive(Default)]
 pub(super) struct AbiPlanCache {
-    /// Shared by clones: the ids stay meaningful in every copy of the slots.
     ids: Arc<crate::instance::InstanceIndex>,
     slots: crate::append_vec::SlotTable<AbiSlots>,
     unique_keys: std::sync::atomic::AtomicU64,
@@ -600,7 +541,6 @@ impl AbiPlanCache {
         *self.unique_keys.get_mut() = 0;
     }
 
-    /// Lifetime counters plus the table's current population.
     pub(super) fn stats(&self) -> AbiPlanMemoStats {
         use std::sync::atomic::Ordering::Relaxed;
         let mut total = AbiPlanMemoStats {
@@ -619,21 +559,13 @@ impl AbiPlanCache {
     }
 }
 
-/// Build-scoped interned representation plans shared by ABI plans. Published
-/// plans and keys are immutable and append-only, so worker-local caches keyed
-/// by the unique arena id remain valid. Counters stay outside plan equality.
 pub struct RepArena {
-    /// Plans by index. Readers borrow them without a lock; new plans are
-    /// pushed only while `by_key` is write-locked, so an index and its key
-    /// are published together.
+    /// New plans are pushed only while `by_key` is write-locked, so an index and
+    /// its key are published together.
     plans: crate::append_vec::AppendVec<RepPlan>,
     by_key: RwLock<HashMap<RepKey, RepId>>,
     arena_id: u64,
-    /// The build's type arena; [`Self::facts`] is indexed by its ids.
     interner: Arc<crate::monoty::MonoInterner>,
-    /// Per-type answers, filled on first use: representation ids for each
-    /// use, and container plans. Lowering asks these per expression for a few
-    /// thousand distinct types, so the answer is one index away.
     facts: crate::append_vec::SlotTable<TypeFacts>,
 }
 
@@ -682,8 +614,7 @@ fn container_slot(target: FnBackend, family: super::container::ContainerFamily) 
 }
 
 struct TypeFacts {
-    /// Planned representation index plus one; zero is unplanned. Failed plans
-    /// are not recorded, so their errors are re-derived with each use's span.
+    /// Planned representation index plus one; zero is unplanned.
     reps: [std::sync::atomic::AtomicU32; REP_SLOTS],
     containers: [OnceLock<super::container::ContainerPlan>; TARGETS * CONTAINER_FAMILIES],
 }
@@ -726,8 +657,6 @@ enum RepKey {
 struct RepReadCache {
     arena_gen: u64,
     by_key: rustc_hash::FxHashMap<RepKey, RepId>,
-    /// [`rep_logical_fingerprint`] by plan index. Every body renders its ABI
-    /// fingerprint, and the bodies share a few hundred representations.
     fingerprints: Vec<Option<Arc<str>>>,
 }
 
@@ -746,7 +675,6 @@ thread_local! {
         std::cell::RefCell::new(RepReadCache::default());
 }
 
-/// Population of one [`RepArena`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RepArenaStats {
     pub plans: u64,
@@ -774,27 +702,18 @@ fn value_shape_facts(ws: &Workspace, name: Ustr) -> (Option<ValueStorage>, bool,
     )
 }
 
-/// Ordinary values with more than 48 payload leaves use one boxed slot on Lua
-/// call wires. Nullable presence is excluded from the count, and `nobox` values
-/// remain scalar at every width. One value at the cut passed and returned uses
-/// exactly [`SIGNATURE_SCALAR_LANE_BUDGET`] lanes.
+/// Ordinary values with more than this many payload leaves use one boxed slot
+/// on Lua call wires; `nobox` values stay scalar at every width.
 pub const WIDE_VALUE_PAYLOAD_LEAF_CUT: usize = 48;
 
-/// Maximum scalar lanes across a signature after per-value planning. Count
-/// every parameter and result lane, including nullable presence. While over
-/// budget, box the widest eligible ordinary value; `nobox` values are never
-/// candidates. Remaining overflow is diagnosed by Lua's frame-limit check.
+/// Maximum scalar lanes across a signature, counting every parameter and
+/// result lane including nullable presence.
 pub const SIGNATURE_SCALAR_LANE_BUDGET: usize = 96;
 
-/// The leaf count the per-value cut compares: the payload, without the nullable
-/// presence flag [`ValueShape::leaf_count`] includes.
 fn payload_leaf_count(shape: &ValueShape) -> usize {
     shape.leaf_count() - usize::from(shape.nullable)
 }
 
-/// Whether boxing a GC-table value would materialize a `nobox` child. Cdata
-/// and leaf-table boxes flatten child leaves; GC tables retain declared keys,
-/// so the materialization verifier rejects this case.
 fn box_would_materialize_nobox(ws: &Workspace, name: Ustr) -> bool {
     super::shape::planned_value(ws, name).is_some_and(|plan| plan_box_materializes_nobox(ws, &plan))
 }
@@ -812,9 +731,6 @@ fn plan_box_materializes_nobox(ws: &Workspace, plan: &super::shape::PlannedValue
     })
 }
 
-/// Select a leaf shape for scalar transport, or `None` for an opaque slot.
-/// `nobox` values always keep leaves; ordinary values may be boxed by ABI mode,
-/// tuple position, or the call-wire width cut. Storage width does not affect ABI.
 fn wire_value_shape(
     ws: &Workspace,
     ty: &crate::monoty::MonoTy,
@@ -851,7 +767,6 @@ fn declared_nobox(ws: &Workspace, ty: &crate::monoty::MonoTy) -> bool {
 }
 
 impl RepArena {
-    /// An arena whose type facts are indexed by `interner`'s ids.
     pub fn new(interner: Arc<crate::monoty::MonoInterner>) -> Self {
         static ARENA_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
@@ -872,8 +787,6 @@ impl RepArena {
             .get_or_init(self.interner.id_of(ty).index(), TypeFacts::default)
     }
 
-    /// [`ContainerPlan::for_type`](super::container::ContainerPlan::for_type),
-    /// answered once per type, family and target.
     pub(crate) fn container_plan(
         &self,
         target: FnBackend,
@@ -889,7 +802,6 @@ impl RepArena {
         Ok(slot.get_or_init(|| plan).clone())
     }
 
-    /// This arena's build generation, distinct for every arena in the process.
     pub(crate) fn generation(&self) -> u64 {
         self.arena_id
     }
@@ -930,7 +842,6 @@ impl RepArena {
         if std::ptr::eq(self, other) {
             return true;
         }
-        // Key aliases are lookup history, not additional physical plans.
         self.plans.len() == other.plans.len() && self.plans.iter().eq(other.plans.iter())
     }
 
@@ -945,10 +856,6 @@ impl RepArena {
         layout: RepLayout,
         storage: Option<ValueStorage>,
     ) -> RepId {
-        // Production mints a `Leaves` plan only through
-        // [`Self::intern_value_shape_plan`], which derives boxing legality from
-        // the concrete type; every other layout is not a lane-budget candidate,
-        // so the fact is vacuous here.
         self.intern_with_facts(target, use_context, layout, storage, false, false, true)
     }
 
@@ -1020,8 +927,6 @@ impl RepArena {
         if let Some(id) = self.lookup_key(&key) {
             return id;
         }
-        // The facts read only the shape's nominal name, so every type that
-        // plans to this key records the same answer whichever worker is first.
         let (storage, column_eligible, boxable) = value_shape_facts(ws, shape.name);
         let nobox = crate::lower::is_nobox_nominal(ws, shape.name);
         let id = self.intern_with_facts(
@@ -1093,9 +998,6 @@ impl RepArena {
         self.plans.get(id.index as usize)
     }
 
-    /// The value plans selected during this build. Late consumers receive this
-    /// catalog and retain the plan ID they use; they do not reconstruct one
-    /// from a nominal declaration.
     pub(crate) fn value_plan_catalog(&self) -> Vec<(Ustr, RepId)> {
         self.plans
             .iter()
@@ -1106,8 +1008,6 @@ impl RepArena {
             .collect()
     }
 
-    /// Plan the physical value representation of a nominal without letting a
-    /// backend recover storage from the declaration after lowering.
     pub fn plan_nominal_value(
         &self,
         ws: &Workspace,
@@ -1365,9 +1265,6 @@ impl RepArena {
         Ok(Some(out))
     }
 
-    /// Total physical planning for one concrete logical type. `Opaque` is an
-    /// explicit representation, not an absent answer; only a guarantee that
-    /// forbids that representation can produce an error.
     pub fn plan(
         &self,
         ws: &Workspace,
@@ -1471,10 +1368,6 @@ impl RepArena {
         }
     }
 
-    /// Box the widest eligible ordinary values until the signature fits the
-    /// lane budget. Ties choose earlier wire positions; `nobox` values and
-    /// values whose boxes would materialize a `nobox` child are ineligible.
-    /// Any remaining overflow is left for the backend frame-limit diagnostic.
     fn apply_lane_budget(
         &self,
         target: FnBackend,
@@ -1631,8 +1524,6 @@ impl RepArena {
         }
     }
 
-    /// [`Self::plan`] for one signature position that may fall back to an
-    /// opaque slot.
     fn plan_position(
         &self,
         ws: &Workspace,
@@ -1653,9 +1544,6 @@ impl RepArena {
         self.plan(ws, target, ty, use_context, &facts, guarantees)
     }
 
-    /// A function's result. A nullable tuple returns one box or nil: its box is
-    /// the flat wire, so a stored tuple passes through without being unpacked
-    /// and packed again, and a fresh one is one table the trace can sink.
     fn plan_result(
         &self,
         ws: &Workspace,
@@ -1802,12 +1690,6 @@ impl RepArena {
     }
 }
 
-/// The ABI of an ALREADY-SELECTED owner instance -- its concrete plan when the
-/// owner requires one, the opaque boundary otherwise. The one entry point for
-/// consumers holding a resolved owner (bound rewrites, inline snapshots,
-/// definition lowering); call-site resolution goes through
-/// `Builder::callee_abi_plan_for_instance`, which also selects the backend
-/// variant. Memoized under [`AbiQuestion::Owner`].
 pub fn owner_abi_plan(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -1817,9 +1699,6 @@ pub fn owner_abi_plan(
     owner_abi_plan_impl(ws, scx, plans, owner, None)
 }
 
-/// [`owner_abi_plan`] for the caller that already holds the owner's concrete
-/// plan -- definition lowering, whose standalone-specialization plans are not
-/// in the shared map. Same key, same memo, same derivation policy.
 pub fn owner_abi_plan_for_body(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -1858,9 +1737,6 @@ fn owner_abi_plan_impl(
     Ok(derived)
 }
 
-/// Resolve the declaration variant serving a requested call instance. JS keeps
-/// host mappings that have no Rock declaration, so it deliberately retains the
-/// requested instance for the emitter to handle later.
 pub(super) fn selected_abi_instance(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -1877,9 +1753,6 @@ pub(super) fn selected_abi_instance(
     }
 }
 
-/// The one memoized callee ABI question. It includes backend-variant selection,
-/// polymorphic-recursion rejection, and the sibling-signature fallback, so
-/// two consumers cannot silently ask different ABI questions.
 pub(super) fn callee_abi_plan_for_instance(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -1921,9 +1794,6 @@ pub(super) fn callee_abi_plan_for_instance(
         if selected.func != inst.func {
             selected_sibling_abi_plan(ws, scx, plans, &selected, plan)
         } else {
-            // The same derivation as the owner's own question, so share its
-            // memo: every called body otherwise derives its plan twice, once
-            // for its callers and once when it is lowered.
             owner_abi_plan_impl(ws, scx, plans, inst, Some(plan))?
         }
     };
@@ -1931,10 +1801,6 @@ pub(super) fn callee_abi_plan_for_instance(
     Ok(derived)
 }
 
-/// ABI for a selected backend sibling. Use its concrete plan when available,
-/// otherwise the canonical signature under the sibling declaration; siblings
-/// without body plans use the opaque boundary ABI. Callers memoize the result
-/// because signature fallback depends on the canonical instance.
 pub fn selected_sibling_abi_plan(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -1956,10 +1822,6 @@ pub fn selected_sibling_abi_plan(
     ))
 }
 
-/// Whether a callee is a Rock body subject that the concrete registry must
-/// contain. Foreign, compile-time expansion, and native-required intrinsic
-/// declarations still have an ABI, but no body plan exists for them because
-/// their backend or lowering arm supplies the body itself.
 pub fn requires_concrete_body_plan(ws: &Workspace, inst: &crate::instance::Instance) -> bool {
     let f = &ws.module(inst.func.module).functions[inst.func.func];
     !f.is_extern
@@ -1980,8 +1842,6 @@ struct AbiMode {
 
 impl AbiMode {
     fn nobox_only_for(self, ty: &crate::monoty::MonoTy) -> bool {
-        // Declared boundaries keep their nullable nominal transport. Only
-        // Rock bodies can adopt the ordinary value presence/leaf return.
         self.nobox_only
             || (self.fixed_nullable_transport
                 && matches!(ty,
@@ -2016,10 +1876,6 @@ fn declared_mono_type(
     }
 }
 
-/// The one ABI policy. PRIVATE: every consumer reads a [`BackendFnAbiPlan`].
-///
-/// Address-taken Rock bodies narrow to the `nobox` shapes an indirect caller can
-/// derive from the fn type; direct-only bodies may scalarize every eligible value.
 fn abi_mode_spec(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -2054,35 +1910,20 @@ fn abi_mode_spec(
     })
 }
 
-/// Target-specific ABI and transport facts for one emitted function body.
-/// Leaf spellings are derived lazily so ordinary lowering carries only wire shapes.
 #[derive(Clone, Debug)]
 pub struct BackendFnAbiPlan {
     pub subject: crate::instance::Instance,
-    /// The codegen backend this plan was built for. Part of the key: the same
-    /// body has a different ABI under `values_first_class` (GLSL) than under
-    /// luajit, and `result_lanes` is a JS transport fact.
     pub target: FnBackend,
-    /// The physical function signature. Every call, entry binder, return
-    /// lowerer, and publisher keeps these identities rather than rebuilding a
-    /// shape from the declaration.
     representation: FunctionRepPlan,
     arena: Arc<RepArena>,
     transport: Option<ParameterTransport>,
-    /// The body's parameter demand this transport was derived from, when
-    /// body edits can change it.
     parameter_demand: Option<u64>,
-    /// [`Self::logical_fingerprint`], spelled once: every body lowered under
-    /// this plan records it, and the plan is shared across those bodies.
     fingerprint: std::sync::OnceLock<String>,
 }
 
-/// One position of a function's wire: a declared parameter or the result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WirePosition {
-    /// Lua values it occupies.
     pub lanes: usize,
-    /// The nominal value type whose leaves it carries, if it is flattened.
     pub flattened: Option<Ustr>,
     pub nobox: bool,
     pub result: bool,
@@ -2094,9 +1935,6 @@ struct ParameterTransport {
     lanes: Vec<usize>,
 }
 
-/// Shared immutable ABI plan returned by cache-eligible consumers. The value
-/// constructors remain owned because boundary-only callers do not enter the
-/// build memo.
 pub type BackendFnAbiPlanHandle = Arc<BackendFnAbiPlan>;
 
 impl PartialEq for BackendFnAbiPlan {
@@ -2112,8 +1950,6 @@ impl PartialEq for BackendFnAbiPlan {
 
 impl Eq for BackendFnAbiPlan {}
 
-/// A boxed value child is read through its declared field position, which a
-/// narrowed parameter group no longer has.
 fn keeps_opaque_value_child(ws: &Workspace, shape: &ValueShape, kept: &[ustr::Ustr]) -> bool {
     let Some(sid) = ws.struct_by_name.get(&shape.name) else {
         return false;
@@ -2164,12 +2000,6 @@ pub(super) fn expanded_nullable_parameter_shape(ws: &Workspace, shape: &ValueSha
 }
 
 impl BackendFnAbiPlan {
-    /// ABI for an explicit opaque boundary instance.
-    ///
-    /// A boundary has no `ConcreteBodyPlan`, but its target-specific transport
-    /// still belongs to the same RepPlan arena. Keeping this entry named for the
-    /// boundary makes it impossible to mistake declaration substitution for a
-    /// Rock-body planning path.
     pub fn for_boundary_instance(
         ws: &Workspace,
         scx: &ScalarCtx,
@@ -2179,8 +2009,6 @@ impl BackendFnAbiPlan {
         Self::assemble(ws, scx, inst.clone(), &subst)
     }
 
-    /// Build the ABI from the graph-owned concrete signature. No declaration
-    /// substitution is reconstructed on this path.
     pub fn for_concrete_plan(ws: &Workspace, scx: &ScalarCtx, plan: &ConcreteBodyPlan) -> Self {
         let inst = plan
             .function_instance()
@@ -2188,10 +2016,6 @@ impl BackendFnAbiPlan {
         Self::for_concrete_signature(ws, scx, inst, &plan.signature)
     }
 
-    /// Build an ABI from a concrete signature owned by a target-selected
-    /// declaration. This covers backend siblings whose body is selected by the
-    /// artifact but whose logical signature was recorded on the canonical graph
-    /// instance.
     pub fn for_concrete_signature(
         ws: &Workspace,
         scx: &ScalarCtx,
@@ -2242,7 +2066,6 @@ impl BackendFnAbiPlan {
         abi
     }
 
-    /// ABI for a declaration-owned opaque boundary with no instance arguments.
     pub fn for_boundary_declaration(ws: &Workspace, scx: &ScalarCtx, decl: FuncRef) -> Self {
         Self::for_boundary_instance(ws, scx, &crate::instance::Instance::base(decl))
     }
@@ -2317,10 +2140,6 @@ impl BackendFnAbiPlan {
             || (!with_defaults && f.num_required != f.param_decls.len()))
     }
 
-    // Parameter transport can snapshot compact nullable children as scalar
-    // lanes without changing their field storage or widening the ABI budget.
-    // A defaulted parameter keeps its declared wire, which its default fill and
-    // omitted-argument nils are built against; the others still expand.
     fn expand_nullable_parameter_children(&mut self, ws: &Workspace, scx: &ScalarCtx) {
         self.fingerprint = std::sync::OnceLock::new();
         if !self.permits_parameter_transport(ws, scx, true) {
@@ -2361,14 +2180,9 @@ impl BackendFnAbiPlan {
 
     fn narrow_parameter_transport(&mut self, ws: &Workspace, scx: &ScalarCtx) {
         self.fingerprint = std::sync::OnceLock::new();
-        // Field demand does not read default expressions, so defaults keep the
-        // full transport here. A boxed signature qualifies too: dropping an
-        // unused parameter gives it a scalar wire.
         if !self.transport_candidate(ws, scx, false) || self.representation.params.is_empty() {
             return;
         }
-        // Every call site of such a function is a direct call the compiler
-        // lowers against this plan, so the transport follows the body.
         let demand = super::parameter_demand::of_function(ws, self.subject.func);
         self.parameter_demand = Some(super::parameter_demand::key(&demand));
         let Some(demand) = demand else {
@@ -2392,7 +2206,6 @@ impl BackendFnAbiPlan {
                 _ => None,
             };
             match (&demand[i], struct_leaves) {
-                // A parameter the body never names rides no lanes at all.
                 (Some(fields), None) if fields.is_empty() => {
                     self.representation.params[i] = self.arena.intern_with_facts(
                         self.target,
@@ -2446,8 +2259,6 @@ impl BackendFnAbiPlan {
         }
     }
 
-    /// Evaluate the original argument layout before dropping unused transport.
-    /// A projected layout is not a complete value and must never be boxed.
     pub(super) fn argument_shapes(&self) -> Vec<&RepLayout> {
         let reps = self.transport.as_ref().map_or_else(
             || self.param_reps(),
@@ -2479,8 +2290,6 @@ impl BackendFnAbiPlan {
         }
     }
 
-    /// Boxed parameters the callee never reads, so the call passes nothing for
-    /// them.
     pub(super) fn dropped_opaque_parameters(&self) -> Vec<usize> {
         let Some(transport) = &self.transport else {
             return Vec::new();
@@ -2498,7 +2307,6 @@ impl BackendFnAbiPlan {
             .collect()
     }
 
-    /// See [`crate::lower::parameter_demand_key`].
     pub fn parameter_demand_key(&self) -> Option<u64> {
         self.parameter_demand
     }
@@ -2507,7 +2315,6 @@ impl BackendFnAbiPlan {
         self.subject.func
     }
 
-    /// The scalarized wire, or `None` for the boxed ABI.
     pub(super) fn uses_scalar_abi(&self) -> bool {
         self.representation.uses_scalar_abi()
     }
@@ -2516,8 +2323,6 @@ impl BackendFnAbiPlan {
         &self.representation
     }
 
-    /// The ABI compatibility witness for a code slot. It deliberately expands
-    /// the representation through the arena instead of retaining a `RepId`.
     pub(crate) fn logical_fingerprint(&self) -> String {
         self.fingerprint
             .get_or_init(|| {
@@ -2549,26 +2354,20 @@ impl BackendFnAbiPlan {
             .and_then(|id| self.arena.value_shape(id))
     }
 
-    /// The declared return's tuple shape under this body's substitution.
     pub(crate) fn ret_tuple(&self) -> Option<&TupleLayout> {
         self.representation
             .result()
             .and_then(|id| self.arena.tuple_shape(id))
     }
 
-    /// Physical result lanes: zero for no return, one for an ordinary value,
-    /// or one per tuple slot/value leaf when the result splats. JS transports
-    /// lanes after the first through its scratch bank.
+    /// Physical result lanes. JS transports lanes after the first through its
+    /// scratch bank.
     pub fn result_lanes(&self) -> usize {
         self.representation.return_lanes()
     }
 
-    /// Depth-first leaf names for a scalar-ABI FOREIGN body (`@scalar_abi`):
-    /// each value param expands to `<base>__<leaf>`, the names the hand-written
-    /// body references; other params keep their name. `None` when this body
-    /// does not use the scalar ABI, and the caller emits the plain list. The
-    /// leaf ORDER matches `repr_to_leaves`, so def params line up with the
-    /// callsite splat positionally.
+    /// Leaf names `<base>__<leaf>` that a hand-written `@scalar_abi` foreign body
+    /// references, in `repr_to_leaves` order to match the call-site splat.
     pub fn lua_param_names(&self, ws: &Workspace) -> Option<Vec<String>> {
         self.scalar_param_labels(ws, false)
     }
@@ -2585,8 +2384,6 @@ impl BackendFnAbiPlan {
         Some(labels)
     }
 
-    /// Each declared parameter's wire position, then the result's. Read only
-    /// by the opt-in per-body cost dump.
     pub fn wire_positions(&self) -> Vec<WirePosition> {
         let position = |id: RepId, result: bool| {
             let plan = self.arena.get(id);
@@ -2608,9 +2405,6 @@ impl BackendFnAbiPlan {
             .collect()
     }
 
-    /// Per-DECLARED-param leaf width (a value-struct param's flattened leaf
-    /// count, 1 otherwise). Per declared param rather than per slot so a
-    /// defaulted value-struct param counts as its whole leaf group.
     pub fn param_leaf_widths(&self) -> Option<Vec<usize>> {
         self.uses_scalar_abi().then(|| {
             self.param_reps()
@@ -2727,10 +2521,6 @@ mod wide_value_cut_tests {
         }
     }
 
-    /// The cut compares the PAYLOAD, so `T` and `T?` answer alike. Reading
-    /// `leaf_count()` instead would make a value at exactly the cut box only
-    /// when it is nullable -- the census's "Observed: `leaf_count()` counts the
-    /// nullable presence flag".
     #[test]
     fn the_cut_reads_the_payload_not_the_presence_flag() {
         let cut = WIDE_VALUE_PAYLOAD_LEAF_CUT;
@@ -2750,8 +2540,6 @@ mod rep_read_cache_tests {
     use super::*;
     use bone_core::hir::FnBackend;
 
-    /// Two live arenas mint the same numeric ids for different plans; the
-    /// worker-local cache must never serve one arena's plan for the other's id.
     #[test]
     fn worker_local_reads_stay_arena_scoped() {
         let a = RepArena::default();
@@ -2782,8 +2570,6 @@ mod rep_read_cache_tests {
         );
     }
 
-    /// An insert AFTER this thread warmed its local cache must still be
-    /// readable -- a cold id reads through to the shared arena.
     #[test]
     fn a_post_warm_insert_reads_through() {
         let a = RepArena::default();

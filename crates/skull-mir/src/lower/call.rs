@@ -1,6 +1,3 @@
-//! Call lowering: direct and indirect calls, the scalar-ABI arg paths, tuple
-//! call trees, and the pack/leaf plumbing that decides whether a value crosses
-//! a call boundary as leaves or as a box.
 use super::*;
 use bone_core::hir_walk::HirChild;
 
@@ -263,19 +260,11 @@ fn preflight_collect_reads(
     });
 }
 
-/// Resolved identity and ABI facts for a direct call. Keeping the concrete
-/// callee, optional delivery instance, bound tree, and target ABI together
-/// ensures the arguments and emitted call use the same instance.
 pub(crate) struct DirectCall<'a> {
     pub(crate) tree: Option<bone_core::prelude::BoundTree>,
-    /// The concrete body delivered by this call, when it has one. An
-    /// [`Instance`](crate::instance::Instance) is the delivery identity rather
-    /// than a key plus a reconstructed substitution.
     pub(crate) delivery: Option<crate::instance::Instance>,
     pub(crate) callee_inst: crate::instance::Instance,
     pub(crate) plan: BackendFnAbiPlanHandle,
-    /// The site's resolved callee and the callee's own body plan, looked up
-    /// once for every reader of this call.
     callee: &'a crate::concrete::ConcreteCallee,
     callee_plan: Option<&'a crate::concrete::ConcreteBodyPlan>,
 }
@@ -394,9 +383,8 @@ impl<'a> Builder<'a> {
         {
             return Err(self.gap_here(format!("@preflight tail `{tail_name}` must be Rock-bodied, non-generic, take the context followed by the original arguments, and return the original type")));
         }
-        // The receiver must be the first source argument. A named receiver
-        // written after another argument cannot be moved without changing that
-        // argument's evaluation order.
+        // The receiver must be the first source argument: moving a later named
+        // receiver would change argument evaluation order.
         if arg_idxs.len() != callee.param_decls.len()
             || arg_idxs.len() < 2
             || arg_idxs
@@ -562,8 +550,6 @@ impl<'a> Builder<'a> {
         Ok(ValueRepr::Scalar(call))
     }
 
-    /// Whether the call at `e` passes a plain `[T]` receiver to the stdlib's
-    /// own Rock-bodied `name`. A user function may share the name.
     fn calls_stdlib_vec_fn(&self, e: Idx<Expr>, name: Ustr, recv: Idx<Expr>) -> bool {
         if self.body.arg_names.contains_key(&recv) || self.body.spread_args.contains(&recv) {
             return false;
@@ -646,7 +632,6 @@ impl<'a> Builder<'a> {
         let [owner, selector] = args.as_slice() else {
             return Err(self.gap_here("field_get requires an owner and selector"));
         };
-        // The field's own key is presence; its dotted keys hold the payload.
         let mut leaves = vec![self.read_index(*owner, *selector, ContainerKind::Map)];
         for path in value_leaf_paths(shape) {
             let suffix = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(&format!(
@@ -709,9 +694,6 @@ impl<'a> Builder<'a> {
         self.concrete_plans.contains_key(inst).then(|| inst.clone())
     }
 
-    /// The concrete signature of the callee planned at `e`, checked against
-    /// the identity the caller resolved for the same site. Resolved once per
-    /// call so the per-argument readers below do not repeat the site lookups.
     pub(crate) fn concrete_callee_signature(
         &self,
         e: Idx<Expr>,
@@ -745,7 +727,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// [`Self::concrete_callee_signature`] for a call already planned.
     pub(crate) fn direct_call_signature(
         &self,
         dc: &DirectCall<'a>,
@@ -770,8 +751,6 @@ impl<'a> Builder<'a> {
         self.concrete_param_ty_of(&signature, inst, pidx)
     }
 
-    /// Parameter `pidx` of an already resolved callee signature; a variadic
-    /// callee's trailing parameter covers every extra argument.
     pub(crate) fn concrete_param_ty_of(
         &self,
         signature: &crate::concrete::ConcreteSignature,
@@ -845,8 +824,6 @@ impl<'a> Builder<'a> {
         )
     }
 
-    /// Lower a call to a (boxed) single value — the scalar-ABI Group result is
-    /// `pack`ed to a cdata. ABI-boundary callers use [`Self::lower_call_repr`].
     pub(crate) fn lower_call(
         &mut self,
         e: Idx<Expr>,
@@ -857,9 +834,6 @@ impl<'a> Builder<'a> {
         self.pack_stored(r)
     }
 
-    /// Box `bundle` for a slot that stores it: a splatting tuple becomes the
-    /// flat wire every stored-box reader rebuilds from, so its `nobox` parts
-    /// never box; anything else packs as an ordinary escape.
     pub(crate) fn pack_stored(&mut self, bundle: ValueBundle) -> Result<Idx<Inst>, CompilerError> {
         let arena = self.scx.rep_arena();
         let splats = matches!(arena.layout(bundle.representation()), RepLayout::Tuple(shape) if shape.splats(arena));
@@ -869,9 +843,6 @@ impl<'a> Builder<'a> {
         self.pack_maybe_absent(bundle.into_value())
     }
 
-    /// Lower a call with its producer-owned representation. A scalar-ABI direct call
-    /// yields an unboxed `Group` (so a consuming ABI boundary splats it without a
-    /// round-trip through cdata); everything else is a `Scalar`.
     pub(crate) fn lower_call_repr(
         &mut self,
         e: Idx<Expr>,
@@ -920,9 +891,6 @@ impl<'a> Builder<'a> {
         if !self.scx.values_first_class {
             let ty = self.call_result_owner_ty(e, r)?;
             if let Some(ty) = ty {
-                // An opaque return can forward storage borrowed from a foreign
-                // body. Snapshot it at the consuming boundary, where projections
-                // can use leaves without first reconstructing its box.
                 let share = trusted && !matches!(r, ValueRepr::Scalar(_));
                 self.mark_boundary_value_repr(r, &ty, share)?;
             }
@@ -930,9 +898,6 @@ impl<'a> Builder<'a> {
         Ok(bundle)
     }
 
-    /// Storage reads carry the receiver's element type even though the inline
-    /// primitive is declared `any`. Its generic value children must retain
-    /// that owner type when the physical result is a group of borrowed leaves.
     fn call_result_owner_ty(
         &self,
         e: Idx<Expr>,
@@ -1035,18 +1000,12 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        // `tostring` of an enum, value record or handle is the structural
-        // rendering, never the backend's own rendering of its representation.
         if let Some((arg, _)) = self.dispatch().tostring_route(e) {
             return self
                 .with_site_expr(arg, |s| s.stringify_structural(arg))
                 .map(ValueRepr::Scalar)
                 .and_then(|value| self.value_bundle_for_expr(e, value));
         }
-        // The inline builtin `cast<T>(v)` is identity, so a `nobox` result can
-        // keep the argument representation instead of boxing and rereading its
-        // leaves. Match the resolved builtin, not its name, so a user `cast`
-        // function still emits its call.
         if let Callee::Unresolved { name, .. } = callee {
             if name.as_str() == "cast" && self.nobox_value_name(e).is_some() {
                 if let [inner] = arg_idxs[..] {
@@ -1056,12 +1015,8 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        // On Lua a value with no mutable heap storage is already the owner's
-        // copy, so `clone_into` is its argument; the inline body allocated a
-        // `seen` table per call even for a string. C keeps the call: its
-        // strings are bytes the destination owner must own. A column or
-        // strided Vec is copied per column on JS as well: the opaque body would
-        // walk `_data`, which that storage does not have.
+        // A column or strided Vec has no `_data` for the opaque `clone_into` body
+        // to walk, so it is copied per column.
         let gc_target = matches!(
             self.scx.target(),
             bone_core::hir::FnBackend::Lua | bone_core::hir::FnBackend::Js
@@ -1117,9 +1072,6 @@ impl<'a> Builder<'a> {
             ))));
             return self.value_bundle_for_expr(e, value);
         }
-        // Scalar arithmetic: rock desugars `+ - * / %` to `__op_*` calls; turn
-        // them back into native typed ops when both operands are scalars.
-        // (Non-scalar `__op_*` falls through to a real overload Call below.)
         if let Callee::Unresolved { name, .. } = callee {
             let n = name.as_str();
             if matches!(
@@ -1152,9 +1104,6 @@ impl<'a> Builder<'a> {
             let value = ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Bool(string_keys))));
             return self.value_bundle_for_expr(e, value);
         }
-        // Resolve the concrete element C type here so value-struct
-        // NativeBuffers need no handwritten constructor. Unsupported element
-        // types reject at the call span.
         if let Callee::Unresolved { name, .. } = callee {
             if name.as_str() == "native_buffer_alloc" {
                 let [n_arg] = arg_idxs[..] else {
@@ -1185,9 +1134,6 @@ impl<'a> Builder<'a> {
                 return self.value_bundle_for_expr(e, value);
             }
         }
-        // `xs.len()` / `vec_len(xs)` on a `[T]` is the stdlib's read of the
-        // length field. Emitting that read here spares the inliner two splices
-        // per site and gives a body that never inlines the same read.
         if let Callee::Unresolved { name, .. } = callee
             && matches!(name.as_str(), "len" | "vec_len")
             && let [recv] = arg_idxs[..]
@@ -1199,11 +1145,6 @@ impl<'a> Builder<'a> {
             let value = ValueRepr::Scalar(self.read_field(base, crate::names::ustr("len")));
             return self.value_bundle_for_expr(e, value);
         }
-        // `xs.push(v)` / `vec_push(xs, v)` onto a COLUMN-stored Vec. The stdlib
-        // push bodies write one element into a single `_data` backing, which
-        // column storage does not have -- so the call is replaced here, where
-        // the receiver's element type is concrete. (Inside `Vec<T>.push` itself
-        // the element is an opaque `T`, so the kind is undecidable there.)
         if let Callee::Unresolved { name, .. } = callee {
             if matches!(name.as_str(), "push" | "vec_push") {
                 if let [recv, item] = arg_idxs[..] {
@@ -1216,11 +1157,6 @@ impl<'a> Builder<'a> {
             if let Some(r) = self.flat_vec_data_primitive(e, name.as_str(), &arg_idxs)? {
                 return Ok(r);
             }
-            // `vec_new()` is the fourth boundary primitive, and the odd one out:
-            // its element type comes from the CALL's own type, not a receiver, so
-            // it cannot be read off an argument. It is also an opaque Lua
-            // boundary; the concrete plan must select the column representation
-            // before the body would otherwise expose a table-backed `_data`.
             if name.as_str() == "__vec_data_alloc" && arg_idxs.len() == 1 {
                 if let Some((elem, storage)) = self.vec_flat_elem_of(e)? {
                     let capacity = self.lower_expr(arg_idxs[0])?;
@@ -1235,18 +1171,9 @@ impl<'a> Builder<'a> {
                     return self.value_bundle_for_expr(e, value);
                 }
             }
-            // The Map surface. `get`/`table_unset` are the storage boundary the
-            // generic Rock bodies reach through -- `remove`, `contains`,
-            // `get_or_insert`, `update` and `upsert` are all built on them, so
-            // converting these converts that surface at once. `len`/`clear` are
-            // intercepted despite having working generic bodies: the generic
-            // `clear` unsets while iterating the very table it walks, and `len`
-            // counts a spine it can read in O(1).
             if let Some(r) = self.map_column_primitive(e, name.as_str(), &arg_idxs)? {
                 return Ok(r);
             }
-            // `map_new()` is the Map's `vec_new`: its value type comes from the
-            // CALL's own type, so it cannot be read off an argument.
             if name.as_str() == "map_new" && arg_idxs.is_empty() {
                 if let Some(elem) = self.map_column_value_of(e)? {
                     let value = ValueRepr::Scalar(self.empty_column_map(elem)?);
@@ -1265,12 +1192,6 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        // `on_killed(f)` / `on_resume(f)` inside a `co fn` register a lifecycle
-        // hook. bone desugars `on_killed { body }` to a call of an `on_killed`
-        // stub (which errors at runtime) with a `() => body` lambda. We capture
-        // it as `Inst::CoroHook` so the coroutine transform relocates the lambda
-        // to the constructor (a kill before the first resume must still fire).
-        // Outside a co fn (`resume_arg` unset) it falls through to the stub.
         if self.resume_arg.is_some() {
             if let Callee::Unresolved { name, .. } = callee {
                 let kind = match name.as_str() {
@@ -1281,10 +1202,6 @@ impl<'a> Builder<'a> {
                 };
                 if let Some(kind) = kind {
                     if let [arg] = arg_idxs[..] {
-                        // The hook is peeled to the constructor, which can only
-                        // re-render a LAMBDA LITERAL with the frame context -- any
-                        // other fn-typed expression (a named fn, a fn in a
-                        // variable) would silently install no hook. Reject.
                         if !matches!(self.body.expr_arena[arg], Expr::Lambda { .. }) {
                             return Err(gap(format!(
                                 "`{name}` argument must be a lambda literal (`() => ...`) -- the hook is relocated to construction time"
@@ -1298,12 +1215,6 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        // A concrete `c.resume()` / `c.resume(arg)` whose yield type is a flat enum:
-        // thread the value through the frame-slot channel instead of the type-erased
-        // generic `resume` return (which always boxes). `c.__advance(c, arg)` steps
-        // the coroutine (writing the leaves to reused `__y*` slots on the object,
-        // which IS the frame), then we read them back as an unboxed group -- no
-        // per-yield allocation.
         if let Callee::Unresolved { name, .. } = callee {
             if name.as_str() == "resume" && !arg_idxs.is_empty() {
                 if let Some(channel) = self.concrete_coroutine_channel(arg_idxs[0])? {
@@ -1322,10 +1233,6 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        // Bound-calls inside an `Iterator`-bounded body (`next(x)` / `iter(x)`
-        // where `x: I`): `iter` is IDENTITY (the arg is the iterator, no call);
-        // `next` is a placeholder [`Inst::CallBoundMulti`] -- the concrete
-        // callee is substituted per splice from the site's `BoundTree`.
         if let Some(inf) = self.inf {
             if inf.bound_identity_calls.contains(&e) {
                 let [arg] = arg_idxs[..] else {
@@ -1339,11 +1246,6 @@ impl<'a> Builder<'a> {
                     return Err(gap("bound `next` call with non-unary args"));
                 };
                 let arg_v = self.lower_expr(arg)?;
-                // Bound conformance fixes the SLOTS at exactly `(bool, E)`; `E`'s
-                // shape is this body's specialization to answer, so a value
-                // element arrives as leaves instead of one opaque slot. Leaving
-                // it opaque forces the splice to rebuild an aggregate, which a
-                // presence-carrying element cannot be rebuilt into.
                 let shape = self.bound_next_tuple_shape(gidx)?;
                 let dests = self.fresh_cells(shape.slot_count(self.scx.rep_arena()));
                 let call = self.emit_cur(Inst::CallBoundMulti {
@@ -1379,9 +1281,6 @@ impl<'a> Builder<'a> {
             return self.indirect_call_by_plan(abi, fieldv, call_args);
         }
         match callee {
-            // A transparent newtype constructor (`UserId(5)`) is identity at
-            // runtime -- the wrapped value IS the inner -- so it lowers to the
-            // single argument value, no call.
             Callee::Unresolved { name, .. } if self.ws.newtypes_by_name.contains_key(&name) => {
                 match arg_idxs.as_slice() {
                     [inner] => {
@@ -1391,14 +1290,7 @@ impl<'a> Builder<'a> {
                     _ => Err(gap(format!("newtype ctor `{name}` with non-unary args"))),
                 }
             }
-            // A statically-named function -> a `FuncRef` (mangling is codegen's
-            // job, not baked into the IR). On resolution failure, recover an
-            // INDIRECT call through a fn-typed global (`g(a)`).
             Callee::Unresolved { name, .. } => match self.resolve_funcref(e, name) {
-                // A `@struct_expand` fn is replaced
-                // by its literal pairs list -- recognized through the intrinsic
-                // registry off the resolved FuncRef, so no user fn is hijacked by
-                // name and the common non-intrinsic call pays only one field read.
                 Ok(func) => {
                     let value = match self.fn_expand_kind(func) {
                         Some(ExpandKind::SceneTypeKey) => {
@@ -1431,7 +1323,6 @@ impl<'a> Builder<'a> {
                     self.value_bundle_for_expr(e, value)
                 }
                 Err(gap_err) => {
-                    // `g(args)` where `g` is a fn-typed module global.
                     if !any_named && self.is_fn_global(name) {
                         let ty = self.ws.globals_by_name[&name];
                         let mono = crate::monoty::convert_decl(self.ws, ty, &SpecSubst::default())
@@ -1449,11 +1340,7 @@ impl<'a> Builder<'a> {
                     Err(gap_err)
                 }
             },
-            // A fn-typed local: load the cell and call through the value.
             Callee::Local(b) => {
-                // A nested fn: call the hoisted top-level fn by name (no closure).
-                // Under its scalar ABI (`nested_fn_abi`) value args splat to leaves
-                // and a value return arrives as leaves via `CallValueMulti`.
                 if let Some(abi) = self.nested_fn_globals.get(&raw(b)).cloned() {
                     self.f.hoisted_fn_globals.push(abi.hoisted);
                     let g = self.emit_cur(Inst::Global(abi.hoisted));
@@ -1503,7 +1390,6 @@ impl<'a> Builder<'a> {
                 {
                     return self.indirect_call_by_plan(abi, callee_v, &arg_idxs);
                 }
-                // Nothing `nobox` in the signature -- args are boxed.
                 let arg_vals: Vec<Idx<Inst>> = arg_idxs
                     .iter()
                     .map(|&a| self.lower_expr(a))
@@ -1514,7 +1400,6 @@ impl<'a> Builder<'a> {
                     self.value_bundle_for_expr(e, value)
                 }
             }
-            // A fn-typed expression result: lower it, call through it.
             Callee::Value(ve) => {
                 let abi = self.fn_value_rep_plan(
                     *self
@@ -1541,14 +1426,10 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Resolve the concrete callee, delivery instance, bound tree, and ABI for
-    /// this call site. The ABI is derived from the same instance that receives
-    /// the arguments.
     pub(crate) fn plan_direct_call(
         &mut self,
         e: Idx<Expr>,
     ) -> Result<DirectCall<'a>, CompilerError> {
-        // A dispatched helper shares the hole's expression, not its user call's bound tree.
         let tree = if matches!(self.cur_op, crate::site::SiteOp::DirectCall) {
             self.inf
                 .and_then(|i| i.bound_call_trees.get(&e))
@@ -1557,9 +1438,6 @@ impl<'a> Builder<'a> {
         } else {
             None
         };
-        // IDENTITY, computed beside the delivery decision and independent of it.
-        // A call the policy declines to specialize still names exactly one
-        // concrete instance, and this is where it says which.
         let callee = self.concrete_callee_entry(e, self.cur_op.clone())?;
         let concrete_plans: &'a crate::concrete::ConcretePlans = self.concrete_plans;
         let callee_plan = concrete_plans.get(&callee.instance).map(|plan| &**plan);
@@ -1577,9 +1455,6 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// Attach the bundle's identity records to the emitted call inst.
-    ///
-    /// Record all call identity and ABI facts from the same [`DirectCall`].
     pub(crate) fn record_call(
         &mut self,
         call: Idx<Inst>,
@@ -1640,9 +1515,6 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Tuple-return shape from the concrete callee ABI. Consumers must use the
-    /// callee's instantiation so generic tuple slots and presence agree with the
-    /// emitted call.
     pub(crate) fn call_ret_tuple_shape(
         &self,
         e: Idx<Expr>,
@@ -1654,8 +1526,6 @@ impl<'a> Builder<'a> {
         Ok(abi.ret_tuple().cloned())
     }
 
-    /// Lower a statically resolved call using its concrete ABI plan. Bounded
-    /// calls also attach their resolution tree to the emitted call for inlining.
     pub(crate) fn lower_direct_call_repr(
         &mut self,
         e: Idx<Expr>,
@@ -1663,14 +1533,9 @@ impl<'a> Builder<'a> {
         arg_idxs: &[Idx<Expr>],
         any_named: bool,
     ) -> Result<ValueBundle, CompilerError> {
-        // A specialized body and its call use the same ABI. Keep the shared
-        // generic body's boxed ABI when no specialized body is delivered; a
-        // column-specific body can be delivered directly. Record specialization
-        // identity on boxed calls too, since body lowering may still differ.
         let dc = self.plan_direct_call(e)?;
         let value = (|| -> Result<ValueRepr, CompilerError> {
             let callee = &self.ws.module(func.module).functions[func.func];
-            // Resolve phantom before tuple flattening can project from its nil placeholder.
             if arg_idxs.is_empty()
                 && callee
                     .inline_body
@@ -1692,9 +1557,6 @@ impl<'a> Builder<'a> {
                     .iter()
                     .any(|a| a.is_builtin("scalar_abi"));
             let ret_tuple = (!lua_opaque).then_some(declared_ret_tuple).flatten();
-            // A flat-stored element passed to a `ref` parameter, or a `ref` result
-            // addressing one, takes the flat-variant ABI (`flat_ref`). Only a
-            // direct call's own site has a flat plan.
             if matches!(self.cur_op, crate::site::SiteOp::DirectCall)
                 && let Some(plan) = self.flat_call_plan(e)?
             {
@@ -1725,8 +1587,6 @@ impl<'a> Builder<'a> {
         self.call_result_bundle(dc.plan.representation(), value)
     }
 
-    /// The argument list of a direct call under `dc`'s ABI: boxed, or splatted
-    /// to leaves for a scalar-ABI callee. A `ref` argument is its borrow.
     pub(crate) fn direct_call_args(
         &mut self,
         e: Idx<Expr>,
@@ -1783,7 +1643,6 @@ impl<'a> Builder<'a> {
         let shapes;
         let named_signature;
         let mode = if scalar_abi {
-            // The callee's use of a parameter cannot change admission at its boundary.
             let dropped = dc.plan.dropped_opaque_parameters();
             if !dropped.is_empty() {
                 let mut next_positional = 0;
@@ -1854,7 +1713,6 @@ impl<'a> Builder<'a> {
         dc.plan.transport_arguments(args)
     }
 
-    /// A direct call returning `value`'s leaves, `tuple`'s slots, or one value.
     fn emit_direct_call(
         &mut self,
         e: Idx<Expr>,
@@ -1878,9 +1736,6 @@ impl<'a> Builder<'a> {
         Ok(ValueRepr::Scalar(call))
     }
 
-    /// Capture tuple-return slots from a direct call. Rebuild splatting elements
-    /// from leaves and retain the concrete callee identity for bound-call
-    /// resolution and column-specialized bodies.
     pub(crate) fn emit_tuple_call_tree(
         &mut self,
         e: Idx<Expr>,
@@ -1899,9 +1754,6 @@ impl<'a> Builder<'a> {
         Ok(self.tuple_result(shape, &loads))
     }
 
-    /// The call-site result for a captured tuple return: the plain
-    /// `MakeTuple(slots)` when nothing splats, else the `Tuple` repr rebuilt
-    /// from the slots.
     pub(crate) fn tuple_result(&mut self, shape: &TupleLayout, slots: &[Idx<Inst>]) -> ValueRepr {
         if !shape.splats(self.scx.rep_arena()) {
             return ValueRepr::Scalar(self.emit_cur(Inst::MakeTuple(slots.to_vec())));
@@ -1910,8 +1762,6 @@ impl<'a> Builder<'a> {
         self.tuple_from_slots(shape, slots, &mut idx)
     }
 
-    /// Lower a function-value call using the ABI derived from its function type.
-    /// Splat value arguments and rebuild tuple/value returns from captured slots.
     pub(crate) fn indirect_call_by_plan(
         &mut self,
         plan: FunctionRepPlan,
@@ -1956,8 +1806,6 @@ impl<'a> Builder<'a> {
         ))
     }
 
-    /// Lower an opaque function-value call. Tuple returns use a multi-return
-    /// capture so no slots are lost before the tuple is packed.
     pub(crate) fn emit_call_value(
         &mut self,
         e: Idx<Expr>,
@@ -1975,9 +1823,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Lower a safe-navigation UFCS call with its already-lowered receiver in
-    /// parameter zero. Both ABI modes use the direct-call plan; value results
-    /// remain leaf-shaped for the safe-nav join.
     pub(crate) fn ufcs_call_repr(
         &mut self,
         e: Idx<Expr>,
@@ -2012,20 +1857,11 @@ impl<'a> Builder<'a> {
                 for &a in arg_idxs {
                     argv.push(self.lower_expr(a)?);
                 }
-                // A tuple-returning method splats N values, handed on UNPACKED: the
-                // per-slot join stores them slot-wise, so packing here would box a
-                // `nobox` element the wire just kept unboxed. A method whose own
-                // return is `(..)?` carries its presence tag in the repr, and the
-                // join forwards that tag rather than minting `true` -- `a?.m()` is
-                // absent when either link is.
                 let ret_tuple = dc.plan.ret_tuple();
                 return self.emit_direct_call(e, func, argv, None, ret_tuple, &dc);
             };
             let param_shapes = dc.plan.argument_shapes();
             let mut argv = Vec::new();
-            // The RECEIVER arrives already lowered, so it cannot go through
-            // `arg_values_for_slot`; a tuple receiver has no UFCS spelling, so
-            // `Leaves` is the only splatting slot reachable here.
             let receiver_slot =
                 *required_wire_slot(&param_shapes, 0, false, "UFCS receiver", |message| {
                     self.gap_here(message)
@@ -2089,8 +1925,6 @@ impl<'a> Builder<'a> {
         self.lower_call_arguments(e, arg_idxs, Some(func), Some(&names), mode, preflight)
     }
 
-    /// Evaluate in source order. Named and spread arguments can fill slots
-    /// out of order, so keep their wires until the full argument list is known.
     fn lower_call_arguments(
         &mut self,
         e: Idx<Expr>,
@@ -2249,24 +2083,16 @@ impl<'a> Builder<'a> {
         Ok(out)
     }
 
-    // Capture values before another argument or a spread override can change them.
     fn snapshot_call_bundle(&mut self, bundle: ValueBundle) -> Result<ValueBundle, CompilerError> {
         let representation = bundle.representation();
         let owned = self.snapshot_opaque_value(bundle.into_value())?;
         Ok(ValueBundle::new(representation, owned))
     }
 
-    // --- ValueRepr <-> leaves <-> cdata (the scalar-ABI conversions) ---
-
-    /// Materialize a `ValueRepr` as a single value — the one place a `Group`
-    /// becomes a real `<name>_ct(...)` cdata (an escape: stored/compared/boxed).
     pub(crate) fn pack(&mut self, r: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
         self.pack_boxed(r, BoxKind::Implicit)
     }
 
-    /// [`Self::pack`] with authorization carried through nested boxes. Explicit
-    /// materialization uses the same tier-specific constructors as ordinary
-    /// packing, while tagging each box with its authorization.
     pub(crate) fn pack_boxed(
         &mut self,
         r: ValueRepr,
@@ -2288,8 +2114,6 @@ impl<'a> Builder<'a> {
                 }
                 Ok(v)
             }
-            // A splatting tuple's box. Its `nobox` elements pack too, which is
-            // exactly how a whole-tuple use reaches the guarantee's rejection.
             ValueRepr::Tuple { parts, .. } => {
                 let vs = parts
                     .into_iter()
@@ -2297,8 +2121,6 @@ impl<'a> Builder<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(self.element_tuple(vs))
             }
-            // A flat-enum Group `[tag, _0.., <rec>..]` packs to the `{__variant}`
-            // box (`MakeEnumDyn`), the enum escape -- not a `<name>_ct` cdata.
             ValueRepr::Group { name, parts, .. }
                 if EnumPlan::for_name(self.ws, name).is_some_and(|plan| plan.flat().is_some()) =>
             {
@@ -2330,9 +2152,6 @@ impl<'a> Builder<'a> {
                 };
                 Ok(self.materialize_flat_cells(&shape, cells))
             }
-            // Ordinary nullable boxes preserve absence as nil. `nobox` groups
-            // bypass this path so nil-sensitive consumers handle their presence
-            // explicitly and SROA can still see the constructor.
             ValueRepr::Group {
                 name,
                 parts,
@@ -2350,11 +2169,6 @@ impl<'a> Builder<'a> {
                 parts,
                 present,
             } => {
-                // A leaf-table struct's physical keys ARE its leaves, so it
-                // packs through the flat `<Name>_lct` ctor. Packing it
-                // field-wise would box a flattened child under its declared
-                // name and violate the selected plan. Non-value Groups are
-                // enum/ordinary aggregate carriers and keep their own packer.
                 let storage = if self.is_value_struct(name) {
                     Some(
                         self.scx
@@ -2401,8 +2215,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// A flat tuple box of `slots`. Slots read in order straight out of one
-    /// flat box ARE that box: a tuple is immutable, so it is shared, not copied.
     fn flat_tuple_box(&mut self, slots: Vec<Idx<Inst>>) -> Idx<Inst> {
         match self.flat_box_of_slots(&slots) {
             Some(base) => base,
@@ -2410,8 +2222,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The flat box `value` is, or was read out of in full, found without
-    /// emitting anything.
     pub(crate) fn flat_box_of_repr(&self, value: &ValueRepr) -> Option<Idx<Inst>> {
         fn leaves(value: &ValueRepr, out: &mut Vec<Idx<Inst>>) {
             match value {
@@ -2432,7 +2242,6 @@ impl<'a> Builder<'a> {
         self.flat_box_of_slots(&out)
     }
 
-    /// The flat box `slots` were read out of, in order and in full.
     pub(crate) fn flat_box_of_slots(&self, slots: &[Idx<Inst>]) -> Option<Idx<Inst>> {
         let Some(&Inst::TupleIndex { base, index: 0 }) = slots.first().map(|&v| &self.f.insts[v])
         else {
@@ -2459,8 +2268,6 @@ impl<'a> Builder<'a> {
         let Some(shape) = self.scx.rep_arena().tuple_shape(bundle.representation()) else {
             return self.pack(bundle.value().clone());
         };
-        // A tuple that is already a box is that box: it is immutable, so it is
-        // shared. Only an element-wise box of a splatting tuple changes layout.
         if let ValueRepr::Scalar(boxed) = bundle.value()
             && !(shape.splats(self.scx.rep_arena()) && self.is_tuple_aggregate(*boxed))
         {
@@ -2477,14 +2284,10 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// Preserve absence as `nil` for a boxed consumer. Ordinary nullable boxes
-    /// take this path in `pack`; nullable `nobox` groups require it explicitly.
     pub(crate) fn pack_maybe_absent(&mut self, r: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
         self.pack_maybe_absent_boxed(r, BoxKind::Implicit)
     }
 
-    /// Pack a presence-carrying group as one typed nullable value. Parent
-    /// constructors need a single representation, so this does not emit a join.
     fn pack_typed_nullable(
         &mut self,
         name: Ustr,
@@ -2503,8 +2306,6 @@ impl<'a> Builder<'a> {
         Ok(self.emit_cur(Inst::MakeNullableValue { present, value }))
     }
 
-    /// [`Self::pack_maybe_absent`] carrying the box's authorization, the shape
-    /// `materialize(v)` of a nullable value takes.
     pub(crate) fn pack_maybe_absent_boxed(
         &mut self,
         r: ValueRepr,
@@ -2519,16 +2320,9 @@ impl<'a> Builder<'a> {
             return self.pack_boxed(value, kind);
         };
         let result = self.f.new_cell(None);
-        // The present arm is an ordinary whole-value box, so it goes through the
-        // same tier dispatch: a leaf-table or flat-enum payload has no
-        // declared-field ctor to take.
         self.nil_or_join(result, present, true, |s| s.pack_boxed(value, kind))
     }
 
-    /// The physical layout of GC-table value `name` when some field is stored
-    /// inline (a `nobox` child keyed by dotted leaf paths); `None` for every
-    /// other box, which keys each declared field whole. First-class targets
-    /// nest children as declared fields, so they never take this layout.
     pub(crate) fn gc_table_inline_layout(
         &self,
         name: Ustr,
@@ -2548,10 +2342,8 @@ impl<'a> Builder<'a> {
             .map_err(|e| self.gap_here(e.message))
     }
 
-    /// A GC-table Group's `<Name>_vt` operands, keyed as `layout` stores them:
-    /// a whole field packs, an inline child contributes its leaves. A presence
-    /// tag canonicalizes to `true`/`nil`, the form a `= null` write stores; the
-    /// scalar ABI spells absence `false`, and `__eq` compares tags per key.
+    /// A presence tag canonicalizes to `true`/`nil`, the form a `= null` write
+    /// stores; the scalar ABI spells absence `false`.
     fn gc_table_box_fields(
         &mut self,
         name: Ustr,
@@ -2598,13 +2390,7 @@ impl<'a> Builder<'a> {
         Ok(out)
     }
 
-    /// The `<name>_ct(..)` cdata for a Group's parts, with no presence test.
-    ///
-    /// The parts are in declared field order (the positional ctor ABI requires
-    /// it), so they line up with the declared names. The names let MIR passes
-    /// forward a `Field` read to its ctor operand (SROA), eliminating the cdata
-    /// when it never escapes. A payload-free enum field is just an `int` value
-    /// (Prim), packed like any primitive.
+    /// Parts are in declared field order, as the positional ctor ABI requires.
     fn pack_group_fields(
         &mut self,
         name: Ustr,
@@ -2622,15 +2408,9 @@ impl<'a> Builder<'a> {
             .into_iter()
             .enumerate()
             .map(|(i, p)| -> Result<(Ustr, Idx<Inst>), CompilerError> {
-                // A Group's parts are the nominal's declared fields, so the two
-                // always line up. Naming a part after its STRUCT instead would
-                // emit a ctor field the type does not have, and duplicate it for
-                // every part -- fabricated identity, not a usable fallback.
                 let fname = *names
                     .get(i)
                     .ok_or_else(|| self.gap_here("a planned value group has too many fields"))?;
-                // A nullable nobox field is observable as null through its
-                // parent, so its presence must reach the field.
                 if let ValueRepr::Group {
                     name,
                     parts,
@@ -2646,9 +2426,6 @@ impl<'a> Builder<'a> {
         Ok(self.emit_cur(ctor))
     }
 
-    /// Build collection arguments for an iterator witness from its selected
-    /// instance ABI. A boxed ABI takes the collection whole; a scalar ABI with
-    /// no first parameter is invalid rather than silently dropping the value.
     pub(crate) fn iter_witness_args(
         &mut self,
         inst: &crate::instance::Instance,
@@ -2677,8 +2454,6 @@ impl<'a> Builder<'a> {
         shape: &ValueShape,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         match r {
-            // A tuple at a value-shaped sink is a boxed source: pack and
-            // field-read, the `Scalar` treatment.
             ValueRepr::Tuple { .. } => {
                 let v = self.pack(r.clone())?;
                 self.repr_to_leaves_shape(&ValueRepr::Scalar(v), shape)
@@ -2788,8 +2563,6 @@ impl<'a> Builder<'a> {
                 }
             )
         {
-            // Dropping the presence leaf is valid only after the group proves
-            // the value is present.
             return Err(self.gap_here(format!(
                 "representation {:?} lost its presence witness before narrowing",
                 bundle.representation()
@@ -2883,8 +2656,6 @@ impl<'a> Builder<'a> {
                 }
             }
             RepLayout::Tuple(expected) => {
-                // A box of the tuple -- a nullable tuple's whole-value form -- is
-                // read through its slots, nil-tested when the slot is nullable.
                 if let ValueRepr::Scalar(_) = bundle.value()
                     && matches!(
                         self.scx.rep_arena().get(bundle.representation()).layout(),
@@ -2914,10 +2685,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Flatten a boxed value to its primitive leaves via chained reads (the inverse
-    /// of `pack`, used when a value arrives boxed). A flat ENUM box reads its box
-    /// keys (`__variant`, positional `[i+1]`, `.recfield`) in shape order; a cdata
-    /// value reads its `<name>_ct` fields.
     pub(crate) fn cdata_leaves(
         &mut self,
         v: Idx<Inst>,
@@ -2926,9 +2693,6 @@ impl<'a> Builder<'a> {
         self.cdata_leaf_range(v, shape, 0..shape.leaf_count())
     }
 
-    /// The same physical reader as a whole-box copy, limited to a contiguous
-    /// subtree of its existing representation shape. Nullable ancestors still
-    /// gate their selected payload reads.
     pub(crate) fn cdata_leaf_range(
         &mut self,
         v: Idx<Inst>,
@@ -2941,7 +2705,6 @@ impl<'a> Builder<'a> {
         self.cdata_leaf_demand(v, shape, &demand)
     }
 
-    /// Read selected leaves together, sharing parent loads and nullable guards.
     pub(crate) fn cdata_leaf_demand(
         &mut self,
         v: Idx<Inst>,
@@ -2952,9 +2715,7 @@ impl<'a> Builder<'a> {
         if let Some(es) =
             EnumPlan::for_name(self.ws, shape.name).and_then(|plan| plan.flat().cloned())
         {
-            // NIL-SAFE spread: the box may be `nil` (a null nullable enum), and
-            // `nil.__variant`/`nil[1]` would fault. Branch on nil -> all-nil leaves
-            // (tag = nil, the null sentinel); else spread the box's keys.
+            // The box may be `nil` (a null nullable enum), and `nil.__variant` faults.
             let n = es.leaf_count();
             let cells = self.fresh_cells(n);
             let nil_bb = self.f.new_block();
@@ -2985,17 +2746,7 @@ impl<'a> Builder<'a> {
                 .collect();
             return Ok(self.load_cells(&selected));
         }
-        // A shape with no nullable and no enum child anywhere is a plain key
-        // walk: the paths come from the one rule the uniform packer reads a
-        // global with too (`boxed_leaf_paths`), so the two readers cannot drift.
-        // Each intermediate box is loaded ONCE and its children read off it
-        // (a whole-value read wants every leaf anyway); the packer walks the
-        // same paths but re-reads the parent per leaf, keeping one leaf live.
         if self.shape_is_plain_keys(shape) {
-            // Include field-held boxes, including nullable payloads after their
-            // presence guard. boxed_leaf_paths checks the native storage plan;
-            // constructor-derived projections must keep logical paths so copy
-            // propagation can eliminate their intermediate value constructors.
             let mut root = v;
             while let Inst::Field { base, .. } = self.f.insts[root] {
                 root = base;
@@ -3031,9 +2782,8 @@ impl<'a> Builder<'a> {
             }
             return Ok(out);
         }
-        // A leaf-table box stores one key per leaf, so the split IS the key
-        // reads -- the exact inverse of the `<Name>_lct` ctor, including the
-        // presence key at a nullable child's own name.
+        // A leaf-table box stores one key per leaf, the inverse of the `<Name>_lct`
+        // ctor, with a nullable child's presence key at the child's own name.
         let storage = self
             .scx
             .rep_arena()
@@ -3047,8 +2797,7 @@ impl<'a> Builder<'a> {
                 .map(|path| self.read_value_field(v, path))
                 .collect());
         }
-        // A GC-table box keys an inline child's leaves by dotted path: the
-        // exact inverse of `gc_table_box_fields`, presence tag included.
+        // A GC-table box keys an inline child's leaves by dotted path.
         let inline = self.gc_table_inline_layout(shape.name)?;
         let mut out = Vec::new();
         let mut offset = 0;
@@ -3091,12 +2840,8 @@ impl<'a> Builder<'a> {
         Ok(out)
     }
 
-    /// The leaves of a NULLABLE nested child `fv`: the stored box may be
-    /// absent, so split it presence-aware rather than field-reading straight
-    /// off a possible nil. Mirrors `repr_to_leaves`' `Scalar(v) if
-    /// shape.nullable` arm exactly -- presence is `v ~= nil` as leaf 0, then
-    /// the child's own leaves, nils on the absent arm -- because the two must
-    /// agree leaf-for-leaf or `rebuild_from_leaves` indexes past the end.
+    /// Must agree leaf-for-leaf with `repr_to_leaves`' nullable `Scalar` arm, or
+    /// `rebuild_from_leaves` indexes past the end.
     fn nullable_child_leaf_demand(
         &mut self,
         fv: Idx<Inst>,
@@ -3175,8 +2920,6 @@ impl<'a> Builder<'a> {
         Ok(out)
     }
 
-    /// Select a declared subtree in the same depth-first leaf order consumed
-    /// by `rebuild_from_leaves` and the boxed physical reader.
     pub(crate) fn value_projection_range(
         &self,
         shape: &ValueShape,
@@ -3223,9 +2966,6 @@ impl<'a> Builder<'a> {
             })
     }
 
-    /// Whether every leaf of `shape` is reached by a plain key walk: no
-    /// nullable child (presence branch) and no flat enum child (tag spread)
-    /// anywhere.
     pub(crate) fn shape_is_plain_keys(&self, shape: &ValueShape) -> bool {
         if shape.nullable || EnumPlan::for_name(self.ws, shape.name).is_some() {
             return false;
@@ -3236,11 +2976,6 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// The key path from a box of `shape` (no nullable child anywhere) to each
-    /// of its leaves, in `repr_to_leaves` order. A leaf-table box keys every
-    /// leaf by its dotted path at the top level. Native boxes use their existing
-    /// primitive aliases, avoiding intermediate FFI descriptors while retaining
-    /// eager snapshot reads. A nested child consults its own storage.
     pub(crate) fn boxed_leaf_paths(
         &self,
         shape: &ValueShape,
@@ -3305,10 +3040,6 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Snapshot a boxed whole-value read by splitting it into leaves and
-    /// rebuilding a `Group`. Recurse into nested values so later place writes
-    /// cannot mutate the snapshot; GC leaf pointees remain shared. Preserve
-    /// physical read errors even when a resulting leaf is unused.
     pub(crate) fn boxed_value_copy_repr(
         &mut self,
         boxed: Idx<Inst>,
@@ -3322,9 +3053,6 @@ impl<'a> Builder<'a> {
         copy
     }
 
-    /// Copies are unrolled at compile time, so a copy of `name` inside its own
-    /// copy (`next: Node?` inside `Node`) would need a runtime copier. There
-    /// is none, so it is rejected rather than left sharing the child.
     fn enter_value_copy(&mut self, name: Ustr) -> Result<(), CompilerError> {
         if self.value_copy_stack.contains(&name) {
             return Err(self.gap_here(format!(
@@ -3335,8 +3063,6 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// The concrete type of `owner.field`. `owner_ty` substitutes a generic
-    /// owner's arguments when the field depends on them.
     fn value_field_ty(
         &self,
         owner: Ustr,
@@ -3371,9 +3097,6 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// The type of `owner.field` when its plan holds an ordinary value as one
-    /// opaque slot: a declared `V?`, or a generic `T`/`T?` instantiated at a
-    /// value.
     pub(crate) fn opaque_value_child(
         &self,
         owner: Ustr,
@@ -3400,8 +3123,6 @@ impl<'a> Builder<'a> {
         Ok(ordinary.then_some(ty))
     }
 
-    /// The owner type a nested field's copy needs: only a generic child
-    /// substitutes anything.
     fn nested_owner_ty(
         &self,
         owner: Ustr,
@@ -3415,9 +3136,6 @@ impl<'a> Builder<'a> {
         self.value_field_ty(owner, owner_ty, field).map(Some)
     }
 
-    /// A repr built from a source's leaves keeps each opaque value child as
-    /// the source's box: a read through it needs nothing more, and the copy
-    /// happens where the value escapes ([`Self::owned_value_children`]).
     pub(crate) fn mark_borrowed_value_children(
         &mut self,
         shape: &ValueShape,
@@ -3447,8 +3165,6 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Copy only children that stay opaque in the parameter wire. Expanded
-    /// children are snapshotted by the immediately following scalar reads.
     pub(crate) fn own_opaque_parameter_children(
         &mut self,
         r: ValueRepr,
@@ -3476,8 +3192,6 @@ impl<'a> Builder<'a> {
                     present,
                 })
             }
-            // The boundary immediately reads this box into primitive lanes.
-            // Those lanes, rather than a reconstructed box, own the snapshot.
             ValueRepr::Scalar(v)
                 if super::shape::planned_value(self.ws, shape.name).is_some_and(|plan| {
                     plan.shape
@@ -3491,9 +3205,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Own borrowed boxes at mutable escapes. Immutable boundaries may share
-    /// boxes whose source cannot be written through; mutable-place reads still
-    /// snapshot their children before reaching such a boundary.
     pub(crate) fn owned_value_children(
         &mut self,
         r: ValueRepr,
@@ -3549,8 +3260,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Retaining a value in cells loses its borrowed-box provenance. Snapshot
-    /// its children before a later expression can mutate their source.
     pub(crate) fn snapshot_opaque_value(
         &mut self,
         r: ValueRepr,
@@ -3563,9 +3272,6 @@ impl<'a> Builder<'a> {
                 {
                     let representation = s.concrete_rep_id(&ty, RepUse::Return, false, false)?;
                     if let Some(shape) = s.scx.rep_arena().value_shape(representation) {
-                        // Keep presence and leaves together instead of packing a
-                        // snapshot only to split it again. Wide values retain
-                        // the planner's boxed wire rather than widening a frame.
                         let leaves = s.nullable_value_leaves(*v, shape, |s, value, inner| {
                             let copy = s.boxed_copy_repr_of(value, inner, Some(payload))?;
                             let copy = s.owned_value_children(copy)?;
@@ -3605,8 +3311,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// [`Self::pack`] for a `let` binding whose children have already been
-    /// snapshotted. Shareable children can stay borrowed.
     pub(crate) fn pack_lent(&mut self, r: ValueRepr) -> Result<Idx<Inst>, CompilerError> {
         let outer = std::mem::replace(&mut self.shallow_pack, true);
         let packed = self.pack(r);
@@ -3689,7 +3393,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Whether copies use declared GC fields, including shared enum boxes.
     pub(crate) fn boxed_copy_uses_gc_fields(
         &self,
         shape: &ValueShape,
@@ -3706,9 +3409,6 @@ impl<'a> Builder<'a> {
                 == ValueStorage::GcTable)
     }
 
-    /// The copy of a non-null box of `shape`. Enums are immutable, so a GC-table
-    /// box's whole enum child is shared rather than split and rebuilt: only the
-    /// value's own storage has to be fresh. Every other box splits to leaves.
     fn boxed_copy_repr_of(
         &mut self,
         v: Idx<Inst>,
@@ -3739,8 +3439,6 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// One field of the GC-table copy protocol. Immediate projections use the
-    /// same ownership and physical layout rules as whole-value snapshots.
     pub(crate) fn boxed_gc_field_copy_repr(
         &mut self,
         v: Idx<Inst>,
@@ -3789,11 +3487,6 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// The `V?` twin of [`Self::boxed_value_copy_repr`]: an absent value has no
-    /// leaves to split, so the copy runs on the PRESENT arm only and `nil` threads
-    /// through untouched. The result is a single value (a fresh box or `nil`), not
-    /// a `Group` -- a Group carries no presence for `pack`, which would materialize
-    /// a box for an absent value and break `== null`.
     pub(crate) fn nullable_boxed_value_copy(
         &mut self,
         boxed: Idx<Inst>,
@@ -3802,7 +3495,6 @@ impl<'a> Builder<'a> {
     ) -> Result<Idx<Inst>, CompilerError> {
         let result = self.f.new_cell(None);
         let is_nil = self.is_nil(boxed);
-        // The child copies made while packing are this copy's descendants.
         self.nil_or_join(result, is_nil, false, |s| {
             let shape = s.nominal_rep_shape_required(name, false)?;
             s.enter_value_copy(name)?;
@@ -3814,9 +3506,6 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// A fresh box for a whole value of type `ty` that is already held by one
-    /// owner and is about to be stored into another. Anything other than an
-    /// ordinary (possibly nullable) value struct passes through unchanged.
     pub(crate) fn copied_value_box(
         &mut self,
         ty: &MonoTy,
@@ -3824,8 +3513,6 @@ impl<'a> Builder<'a> {
     ) -> Result<Idx<Inst>, CompilerError> {
         self.with_value_lending(false, |s| match s.copied_value_repr(ty, v)? {
             ValueRepr::Scalar(copy) if copy != v && ty.peel_nullable().1 => {
-                // An opaque child occupies one slot. Keep the nullable payload
-                // boxed rather than promoting its fields across later copies.
                 let nil = s.emit_cur(Inst::Const(Lit::Nil));
                 let present = s.emit_cur(Inst::NotEq(copy, nil));
                 Ok(s.emit_cur(Inst::MakeNullableValue {
@@ -3838,8 +3525,6 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// [`Self::copied_value_box`] before packing: a non-null copy stays a
-    /// `Group`, so a leaf consumer reads its parts and nothing is built.
     pub(crate) fn copied_value_repr(
         &mut self,
         ty: &MonoTy,
@@ -3865,14 +3550,6 @@ impl<'a> Builder<'a> {
         self.boxed_value_copy_repr(v, name, Some(payload))
     }
 
-    /// One element of an indexable collection, for the loop lowerings that bind a
-    /// whole element per iteration (`for x in coll`, `for (i, x) in enumerate`).
-    ///
-    /// Column storage has no element slot to index, so the read decomposes into K
-    /// leaf reads and packs -- the same shape `let v = xs[i]` takes, which means
-    /// SROA peels the pack wherever the binding is only projected from. Emitting a
-    /// whole-element `Index` here instead prevents column collections from compiling: it
-    /// reaches the emitter with no slot to name.
     pub(crate) fn loop_element_repr_at(
         &mut self,
         arr: Idx<Inst>,
@@ -3892,8 +3569,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Reconstruct a nested `Group` from a flat leaf list per `shape` (the inverse
-    /// of `repr_to_leaves`), consuming leaves depth-first from `*idx`.
     pub(crate) fn rebuild_from_leaves(
         shape: &ValueShape,
         leaves: &[Idx<Inst>],
@@ -3923,7 +3598,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Index of `field` in value struct `name`'s declared field order.
     pub(crate) fn field_index(&self, name: Ustr, field: Ustr) -> Option<usize> {
         let fields = self.struct_field_names(name);
         fields?.iter().position(|f| *f == field)
