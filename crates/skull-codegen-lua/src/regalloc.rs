@@ -1713,75 +1713,40 @@ pub(crate) fn nil_kills<'a>(
     }
     let s_count = (value_count + cell_count) as usize;
 
-    // The slots each emitted statement defines and then reads, per entry of
-    // `locals`: the liveness pass and the backward kill walk both read them.
-    // When only the folded values are quiet, the statements are the ones
-    // `locals` flattened, so each of its bits names the slot directly.
-    let slot_of = quiet.is_none().then(|| {
-        let cell_base = locals.v_words * 64;
-        let mut slot_of = vec![u32::MAX; cell_base + locals.cells.len()];
-        for (i, &v) in locals.values.iter().enumerate() {
-            slot_of[i] = value_colors[raw(v)];
-        }
-        for (i, c) in locals.cells.iter().enumerate() {
-            if let Some(c) = c {
-                slot_of[cell_base + i] = cell_slot[raw(*c)];
-            }
-        }
-        slot_of
-    });
-    let named = |slot_of: &[u32], bits: &[u32], slots: &mut Vec<u32>| {
-        slots.extend(
-            bits.iter()
-                .map(|&k| slot_of[k as usize])
-                .filter(|&s| s != u32::MAX),
-        )
-    };
     let value_slot = |v: Idx<Inst>| -> Option<u32> {
         let c = value_colors[raw(v)];
         (c != u32::MAX).then_some(c)
     };
+    let cell_slots = |c: Idx<Cell>, slots: &mut Vec<u32>| {
+        if cell_slot[raw(c)] != u32::MAX {
+            slots.push(cell_slot[raw(c)]);
+        }
+    };
     let leaf_slots = |leaves: &[u32], slots: &mut Vec<u32>| {
         Reads::values(func, inline, leaves, |v| slots.extend(value_slot(v)));
-        Reads::cells(func, inline, alias, leaves, |c| {
-            if cell_slot[raw(c)] != u32::MAX {
-                slots.push(cell_slot[raw(c)]);
+        Reads::cells(func, inline, alias, leaves, |c| cell_slots(c, slots));
+    };
+    // A folded statement defines no slot.
+    let entries = Entries::new(
+        func,
+        scope,
+        flow,
+        s_count,
+        |_, id, slots| {
+            if !inline[raw(id)] {
+                if func.insts[id].produces_value() {
+                    slots.extend(value_slot(id));
+                }
+                emitted_cell_defs(func, alias, id, &mut |c| cell_slots(c, slots));
             }
-        });
-    };
-    let slot_defs = |e: usize, id: Idx<Inst>, slots: &mut Vec<u32>| {
-        // A folded statement defines no slot: its entry in `locals` holds
-        // only the cell writes the colorer needs.
-        if inline[raw(id)] {
-            return;
-        }
-        if let Some(slot_of) = &slot_of {
-            named(slot_of, locals.entries.defs(e), slots);
-            return;
-        }
-        if func.insts[id].produces_value() {
-            slots.extend(value_slot(id));
-        }
-        emitted_cell_defs(func, alias, id, &mut |c| {
-            if cell_slot[raw(c)] != u32::MAX {
-                slots.push(cell_slot[raw(c)]);
+        },
+        |_, id, slots| {
+            if !inline[raw(id)] {
+                leaf_slots(reads.stmt(id), slots)
             }
-        });
-    };
-    let slot_uses = |e: usize, id: Idx<Inst>, slots: &mut Vec<u32>| {
-        if inline[raw(id)] {
-            return;
-        }
-        match &slot_of {
-            Some(slot_of) => named(slot_of, locals.entries.uses(e), slots),
-            None => leaf_slots(reads.stmt(id), slots),
-        }
-    };
-    let slot_term = |e: usize, b: Idx<Block>, slots: &mut Vec<u32>| match &slot_of {
-        Some(slot_of) => named(slot_of, locals.entries.uses(e), slots),
-        None => leaf_slots(reads.term(b), slots),
-    };
-    let entries = Entries::new(func, scope, flow, s_count, slot_defs, slot_uses, slot_term);
+        },
+        |_, b, slots| leaf_slots(reads.term(b), slots),
+    );
 
     let mut kills = NilKills {
         after_range: vec![(0, 0); func.insts.len()],
