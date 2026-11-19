@@ -1591,16 +1591,93 @@ pub extern "C" fn stone_get_font_atlas_size(
 }
 
 #[cfg(test)]
-mod font_census_tests {
+mod test_fixtures {
     use super::*;
-    use crate::image_texture::{live_texture_bytes, stone_get_image_size};
+    use std::ffi::CString;
 
-    const CENSUS_MAIN_PX: i32 = 32;
-    const CENSUS_EXTRA_PX: i32 = 48;
+    pub(super) const MAIN_PX: i32 = 32;
+    pub(super) const EXTRA_PX: i32 = 48;
 
-    fn fake_texture(n: u32) -> glow::Texture {
+    pub(super) fn fake_texture(n: u32) -> glow::Texture {
         glow::NativeTexture(std::num::NonZeroU32::new(n).expect("non-zero texture name"))
     }
+
+    pub(super) fn load_droid(size: c_int, residency: AtlasResidency) -> c_uint {
+        let path = CString::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../packages/stone/engine/assets/fonts/DroidSans.ttf"
+        ))
+        .expect("path");
+        let extra = CString::new("").expect("extra");
+        load_font_with_residency(path.as_ptr(), size, 0, extra.as_ptr(), residency)
+    }
+
+    /// A GPU-shaped font the way `rasterize_font` lays one out, minus the GL
+    /// work: the bakes are real, the texture names are fake (`first_texture`,
+    /// and one above it for the second instance), and uploads never see them.
+    pub(super) fn install_fake_gpu_font(first_texture: u32, extra_instance: bool) -> c_uint {
+        let bytes = FALLBACK_FONT.to_vec();
+        let faces = FaceSet::default();
+        let charset = Charset::default();
+        let main = rasterize_glyphs(&bytes, MAIN_PX, faces, &charset, "DroidSans")
+            .expect("DroidSans bakes at 32px");
+        let extra = extra_instance.then(|| {
+            rasterize_glyphs(&bytes, EXTRA_PX, faces, &charset, "DroidSans")
+                .expect("DroidSans bakes at 48px")
+        });
+
+        let glyphs = main.glyphs;
+        let mut instances = vec![AtlasInstance {
+            texture: fake_texture(first_texture),
+            glyphs: glyphs.clone(),
+            width: main.atlas_width as i32,
+            height: main.atlas_height as i32,
+            pixel_size: MAIN_PX,
+            image: None,
+            face_revision: 0,
+        }];
+        if let Some(extra) = extra {
+            instances.push(AtlasInstance {
+                texture: fake_texture(first_texture + 1),
+                glyphs: extra.glyphs,
+                width: extra.atlas_width as i32,
+                height: extra.atlas_height as i32,
+                pixel_size: EXTRA_PX,
+                image: None,
+                face_revision: 0,
+            });
+        }
+        let entry = FontEntry {
+            atlas_texture: Some(fake_texture(first_texture)),
+            glyphs,
+            faces,
+            charset,
+            unit_metrics: main.unit_metrics,
+            glyph_unit: main.glyph_unit.clone(),
+            font_data: Rc::new(bytes),
+            source_path: "DroidSans".to_owned(),
+            font_pixel_size: MAIN_PX,
+            atlas_width: main.atlas_width as i32,
+            atlas_height: main.atlas_height as i32,
+            instances,
+            face_revision: 0,
+            coverage_released: false,
+        };
+        let font_id = FONTS.with(|fonts| {
+            let mut fonts = fonts.borrow_mut();
+            fonts.push(Some(entry));
+            fonts.len() as c_uint
+        });
+        FONT_ATLAS_IMAGES.with(|imgs| imgs.borrow_mut().push(None));
+        font_id
+    }
+}
+
+#[cfg(test)]
+mod font_census_tests {
+    use super::test_fixtures::{install_fake_gpu_font, EXTRA_PX, MAIN_PX};
+    use super::*;
+    use crate::image_texture::{live_texture_bytes, stone_get_image_size};
 
     struct CensusFonts {
         fonts_len: usize,
@@ -1632,63 +1709,6 @@ mod font_census_tests {
         }
     }
 
-    /// A GPU-shaped font the way `rasterize_font` lays one out, minus the GL
-    /// work: the bakes are real, the texture names are fake, and the atlas
-    /// image getters never touch GL headless -- the swizzle is best-effort
-    /// and the IMAGES registration is unconditional.
-    fn install_census_font() -> c_uint {
-        let bytes = FALLBACK_FONT.to_vec();
-        let faces = FaceSet::default();
-        let charset = Charset::default();
-        let main = rasterize_glyphs(&bytes, CENSUS_MAIN_PX, faces, &charset, "DroidSans")
-            .expect("DroidSans bakes at 32px");
-        let extra = rasterize_glyphs(&bytes, CENSUS_EXTRA_PX, faces, &charset, "DroidSans")
-            .expect("DroidSans bakes at 48px");
-        let glyphs = main.glyphs;
-        let entry = FontEntry {
-            atlas_texture: Some(fake_texture(5201)),
-            glyphs: glyphs.clone(),
-            faces,
-            charset,
-            unit_metrics: main.unit_metrics,
-            glyph_unit: main.glyph_unit.clone(),
-            font_data: Rc::new(bytes),
-            source_path: "DroidSans".to_owned(),
-            font_pixel_size: CENSUS_MAIN_PX,
-            atlas_width: main.atlas_width as i32,
-            atlas_height: main.atlas_height as i32,
-            instances: vec![
-                AtlasInstance {
-                    texture: fake_texture(5201),
-                    glyphs: glyphs.clone(),
-                    width: main.atlas_width as i32,
-                    height: main.atlas_height as i32,
-                    pixel_size: CENSUS_MAIN_PX,
-                    image: None,
-                    face_revision: 0,
-                },
-                AtlasInstance {
-                    texture: fake_texture(5202),
-                    glyphs: extra.glyphs,
-                    width: extra.atlas_width as i32,
-                    height: extra.atlas_height as i32,
-                    pixel_size: CENSUS_EXTRA_PX,
-                    image: None,
-                    face_revision: 0,
-                },
-            ],
-            face_revision: 0,
-            coverage_released: false,
-        };
-        let font_id = FONTS.with(|fonts| {
-            let mut fonts = fonts.borrow_mut();
-            fonts.push(Some(entry));
-            fonts.len() as c_uint
-        });
-        FONT_ATLAS_IMAGES.with(|imgs| imgs.borrow_mut().push(None));
-        font_id
-    }
-
     /// Expected texel counts, re-baked in the test body so the oracle is the
     /// rasterizer's answer, not the fixture's.
     fn oracle_texels(pixel_size: i32) -> u64 {
@@ -1703,16 +1723,42 @@ mod font_census_tests {
         bake.atlas_width as u64 * bake.atlas_height as u64
     }
 
+    fn register_aliases(guard: &mut CensusFonts, font: c_uint) -> (u64, u64) {
+        let compat = stone_get_font_atlas_image(font);
+        assert_ne!(compat, 0, "the compat alias registers headless");
+        guard.note_image(compat);
+        let bucket = stone_get_font_instance_image(atlas_instance_id(font, 1));
+        assert_ne!(bucket, 0, "the bucket alias registers headless");
+        assert_ne!(bucket, compat, "a later bucket owns its texture");
+        guard.note_image(bucket);
+        (compat, bucket)
+    }
+
+    fn has_atlas(font: c_uint) -> bool {
+        let (mut w, mut h) = (0 as c_int, 0 as c_int);
+        stone_get_font_atlas_size(font, &mut w, &mut h)
+    }
+
+    fn glyph_a(font: c_uint) -> [c_float; 9] {
+        let mut glyph = [0.0 as c_float; 9];
+        assert!(
+            stone_get_glyph_info(font, 0, b'A' as c_int, glyph.as_mut_ptr()),
+            "the installed 'A' measures"
+        );
+        glyph
+    }
+
     /// Coverage atlases upload R8, one byte per texel, so the live-image
     /// census must count the alias at 1 B/texel, not the RGBA8 4.
     #[test]
     fn coverage_aliases_count_one_byte_per_texel_live() {
         let mut guard = CensusFonts::capture();
-        let font = install_census_font();
-        let texels = oracle_texels(CENSUS_MAIN_PX);
+        let font = install_fake_gpu_font(5201, true);
+        let texels = oracle_texels(MAIN_PX);
+        let extra_texels = oracle_texels(EXTRA_PX);
         assert!(
-            texels > 0,
-            "the oracle bake is a real atlas, not an empty fixture"
+            texels > 0 && extra_texels > 0,
+            "the oracle bakes are real atlases, not empty fixtures"
         );
 
         let before = live_texture_bytes();
@@ -1738,8 +1784,6 @@ mod font_census_tests {
             "the per-image census agrees with the live total"
         );
 
-        let extra_texels = oracle_texels(CENSUS_EXTRA_PX);
-        assert!(extra_texels > 0, "the second bake is a real atlas too");
         let before_extra = live_texture_bytes();
         let extra_image = stone_get_font_instance_image(atlas_instance_id(font, 1));
         assert_ne!(extra_image, 0, "the bucket image registers headless");
@@ -1760,29 +1804,18 @@ mod font_census_tests {
     #[test]
     fn release_coverage_drops_aliases_and_keeps_the_face() {
         let mut guard = CensusFonts::capture();
-        let font = install_census_font();
-        let main_texels = oracle_texels(CENSUS_MAIN_PX);
-        let extra_texels = oracle_texels(CENSUS_EXTRA_PX);
+        let font = install_fake_gpu_font(5201, true);
+        let main_texels = oracle_texels(MAIN_PX);
+        let extra_texels = oracle_texels(EXTRA_PX);
         assert!(
             main_texels > 0 && extra_texels > 0,
             "both oracle bakes are real atlases"
         );
-
-        let compat = stone_get_font_atlas_image(font);
-        assert_ne!(compat, 0, "the compat alias registers headless");
-        guard.note_image(compat);
-        let bucket = stone_get_font_instance_image(atlas_instance_id(font, 1));
-        assert_ne!(bucket, 0, "the bucket alias registers headless");
-        assert_ne!(bucket, compat, "a later bucket owns its texture");
-        guard.note_image(bucket);
+        register_aliases(&mut guard, font);
 
         let data_len = stone_font_data_len(font);
         assert!(data_len > 1000, "the installed face retains its TTF bytes");
-        let mut glyph_before = [0.0 as c_float; 9];
-        assert!(
-            stone_get_glyph_info(font, 0, b'A' as c_int, glyph_before.as_mut_ptr()),
-            "the installed 'A' measures"
-        );
+        let glyph_before = glyph_a(font);
         assert!(glyph_before[8] > 0.0, "the installed advance is positive");
 
         let before = live_texture_bytes();
@@ -1805,22 +1838,17 @@ mod font_census_tests {
             0,
             "no bucket survives the release"
         );
-        let (mut w, mut h) = (0 as c_int, 0 as c_int);
-        assert!(
-            !stone_get_font_atlas_size(font, &mut w, &mut h),
-            "a released atlas publishes no extent"
-        );
+        assert!(!has_atlas(font), "a released atlas publishes no extent");
         assert_eq!(
             stone_font_data_len(font),
             data_len,
             "the TTF bytes stay resident"
         );
-        let mut glyph_after = [0.0 as c_float; 9];
-        assert!(
-            stone_get_glyph_info(font, 0, b'A' as c_int, glyph_after.as_mut_ptr()),
-            "metrics answer after the release"
+        assert_eq!(
+            glyph_a(font),
+            glyph_before,
+            "metrics answer after the release and no metric moves"
         );
-        assert_eq!(glyph_after, glyph_before, "the release moves no metric");
         assert!(
             stone_font_release_coverage(font),
             "releasing twice is idempotent"
@@ -1836,7 +1864,7 @@ mod font_census_tests {
     #[test]
     fn reload_after_release_refreshes_metrics_and_keeps_coverage_down() {
         let mut guard = CensusFonts::capture();
-        let font = install_census_font();
+        let font = install_fake_gpu_font(5201, true);
         let compat = stone_get_font_atlas_image(font);
         assert_ne!(compat, 0, "the compat alias registers headless");
         guard.note_image(compat);
@@ -1861,11 +1889,7 @@ mod font_census_tests {
             file_len,
             "reload swaps the retained bytes"
         );
-        let (mut w, mut h) = (0 as c_int, 0 as c_int);
-        assert!(
-            !stone_get_font_atlas_size(font, &mut w, &mut h),
-            "coverage stays down across the reload"
-        );
+        assert!(!has_atlas(font), "coverage stays down across the reload");
         assert_eq!(
             stone_get_font_atlas_image_cached(font),
             0,
@@ -1876,12 +1900,7 @@ mod font_census_tests {
             after_release,
             "the reload re-uploads nothing"
         );
-        let mut glyph = [0.0 as c_float; 9];
-        assert!(
-            stone_get_glyph_info(font, 0, b'A' as c_int, glyph.as_mut_ptr()),
-            "the reloaded metrics answer"
-        );
-        assert!(glyph[8] > 0.0, "the reloaded advance is positive");
+        assert!(glyph_a(font)[8] > 0.0, "the reloaded advance is positive");
     }
 }
 
@@ -1931,24 +1950,8 @@ pub(crate) mod retained_bytes {
 
 #[cfg(test)]
 mod atlas_retention_tests {
+    use super::test_fixtures::load_droid;
     use super::*;
-    use std::ffi::CString;
-
-    fn load_metrics_font(size: c_int) -> c_uint {
-        let path = CString::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../packages/stone/engine/assets/fonts/DroidSans.ttf"
-        ))
-        .expect("path");
-        let extra = CString::new("").expect("extra");
-        load_font_with_residency(
-            path.as_ptr(),
-            size,
-            0,
-            extra.as_ptr(),
-            AtlasResidency::Metrics,
-        )
-    }
 
     fn atlas_extent(font_id: c_uint) -> (i32, i32) {
         let (mut w, mut h) = (0, 0);
@@ -1959,7 +1962,7 @@ mod atlas_retention_tests {
     #[test]
     fn a_loaded_font_retains_less_than_one_atlas_of_heap() {
         let before = retained_bytes::live();
-        let font = load_metrics_font(128);
+        let font = load_droid(128, AtlasResidency::Metrics);
         let retained = retained_bytes::live() - before;
         assert_ne!(font, 0);
         let (w, h) = atlas_extent(font);
@@ -2695,7 +2698,7 @@ mod atlas_face_tests {
 
     #[test]
     fn oblique_not_bold_antialiases_a_pixel_font() {
-        let font = pixel_font();
+        let font = crate::test_fonts::pixel_font();
         let clean = grid_gray_fraction(&font, 48.0);
         assert!(
             clean <= GRID_CLEAN,
@@ -2718,23 +2721,15 @@ mod atlas_face_tests {
              (got {bold:.3}); a guard that probed bold alone would report this font clean"
         );
     }
-
-    fn pixel_font() -> Vec<u8> {
-        crate::test_fonts::pixel_font()
-    }
 }
 
 #[cfg(test)]
 mod offgrid_tests {
     use super::*;
 
-    fn pixel_font() -> Vec<u8> {
-        crate::test_fonts::pixel_font()
-    }
-
     #[test]
     fn offgrid_detector_fires_only_off_grid() {
-        let font = pixel_font();
+        let font = crate::test_fonts::pixel_font();
         let font = font.as_slice();
 
         assert!(
@@ -2771,6 +2766,7 @@ mod offgrid_tests {
 
 #[cfg(test)]
 mod atlas_image_teardown_tests {
+    use super::test_fixtures::fake_texture;
     use super::*;
 
     #[test]
@@ -2782,10 +2778,6 @@ mod atlas_image_teardown_tests {
         let mut empty = None;
         retain_font_instance_image(&mut empty, 23);
         assert_eq!(empty, Some(23));
-    }
-
-    fn fake_texture(n: u32) -> glow::Texture {
-        glow::NativeTexture(std::num::NonZeroU32::new(n).expect("non-zero texture name"))
     }
 
     /// Register an atlas image the way `stone_get_font_atlas_image` does, minus
@@ -2815,19 +2807,20 @@ mod atlas_image_teardown_tests {
         id
     }
 
+    fn live_count(ids: &[u64]) -> usize {
+        IMAGES.with(|images| {
+            let images = images.borrow();
+            ids.iter().filter(|id| images.contains_key(id)).count()
+        })
+    }
+
     #[test]
     fn tearing_down_the_atlas_cache_retires_its_image_handles() {
         let first = cache_atlas_image(0, 4001);
         let second = cache_atlas_image(1, 4002);
         assert_ne!(first, second, "two atlas slots mint two image handles");
         assert_eq!(
-            IMAGES.with(|i| {
-                let i = i.borrow();
-                [first, second]
-                    .iter()
-                    .filter(|id| i.contains_key(id))
-                    .count()
-            }),
+            live_count(&[first, second]),
             2,
             "both atlas images are live before the teardown, which is the \
              population the assertion below is over"
@@ -2836,13 +2829,7 @@ mod atlas_image_teardown_tests {
         forget_all_atlas_images();
 
         assert_eq!(
-            IMAGES.with(|i| {
-                let i = i.borrow();
-                [first, second]
-                    .iter()
-                    .filter(|id| i.contains_key(id))
-                    .count()
-            }),
+            live_count(&[first, second]),
             0,
             "no atlas image may outlive the texture its font owned"
         );
@@ -2964,8 +2951,8 @@ mod charset_tests {
 
 #[cfg(test)]
 mod metrics_only_font_tests {
+    use super::test_fixtures::load_droid;
     use super::*;
-    use std::ffi::CString;
 
     #[test]
     fn multiline_measurement_uses_font_vertical_metrics() {
@@ -3019,13 +3006,7 @@ mod metrics_only_font_tests {
     }
 
     fn load(residency: AtlasResidency) -> c_uint {
-        let path = CString::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../packages/stone/engine/assets/fonts/DroidSans.ttf"
-        ))
-        .expect("path");
-        let extra = CString::new("").expect("extra");
-        load_font_with_residency(path.as_ptr(), 32, 0, extra.as_ptr(), residency)
+        load_droid(32, residency)
     }
 
     fn unit_metrics(font_id: c_uint) -> [f32; 5] {
@@ -3086,26 +3067,8 @@ mod metrics_only_font_tests {
     // rastering at a different density.
     #[test]
     fn unit_metrics_do_not_depend_on_the_raster_size() {
-        let path = CString::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../packages/stone/engine/assets/fonts/DroidSans.ttf"
-        ))
-        .expect("path");
-        let extra = CString::new("").expect("extra");
-        let small = load_font_with_residency(
-            path.as_ptr(),
-            16,
-            0,
-            extra.as_ptr(),
-            AtlasResidency::Metrics,
-        );
-        let large = load_font_with_residency(
-            path.as_ptr(),
-            96,
-            0,
-            extra.as_ptr(),
-            AtlasResidency::Metrics,
-        );
+        let small = load_droid(16, AtlasResidency::Metrics);
+        let large = load_droid(96, AtlasResidency::Metrics);
         assert_ne!(small, 0);
         assert_ne!(large, 0);
         assert_eq!(
@@ -3163,15 +3126,9 @@ mod metrics_only_font_tests {
 
 #[cfg(test)]
 mod reload_atomicity_tests {
+    use super::test_fixtures::{install_fake_gpu_font, MAIN_PX};
     use super::*;
     use std::ffi::CString;
-
-    const MAIN_PX: i32 = 32;
-    const EXTRA_PX: i32 = 48;
-
-    fn fake_texture(n: u32) -> glow::Texture {
-        glow::NativeTexture(std::num::NonZeroU32::new(n).expect("non-zero texture name"))
-    }
 
     /// Preserve the caller's font state and fault settings across assertion failures.
     struct ReloadFaults {
@@ -3198,66 +3155,6 @@ mod reload_atomicity_tests {
             FORCE_UPLOADS_OK.with(|f| f.set(self.uploads_ok));
             FAIL_DEPENDENT_RASTER.with(|f| f.set(self.fail_dependent_raster));
         }
-    }
-
-    /// A GPU-shaped font the way `rasterize_font` lays one out, minus the GL
-    /// work: the bakes are real, the texture names are fake, and uploads never
-    /// see them because the fault guard forces success.
-    fn install_font(extra_instance: bool) -> c_uint {
-        let bytes = FALLBACK_FONT.to_vec();
-        let faces = FaceSet::default();
-        let charset = Charset::default();
-        let main = rasterize_glyphs(&bytes, MAIN_PX, faces, &charset, "DroidSans")
-            .expect("DroidSans bakes at 32px");
-        let extra = extra_instance.then(|| {
-            rasterize_glyphs(&bytes, EXTRA_PX, faces, &charset, "DroidSans")
-                .expect("DroidSans bakes at 48px")
-        });
-
-        let glyphs = main.glyphs;
-        let mut instances = vec![AtlasInstance {
-            texture: fake_texture(5101),
-            glyphs: glyphs.clone(),
-            width: main.atlas_width as i32,
-            height: main.atlas_height as i32,
-            pixel_size: MAIN_PX,
-            image: None,
-            face_revision: 0,
-        }];
-        if let Some(extra) = extra {
-            instances.push(AtlasInstance {
-                texture: fake_texture(5102),
-                glyphs: extra.glyphs,
-                width: extra.atlas_width as i32,
-                height: extra.atlas_height as i32,
-                pixel_size: EXTRA_PX,
-                image: None,
-                face_revision: 0,
-            });
-        }
-        let entry = FontEntry {
-            atlas_texture: Some(fake_texture(5101)),
-            glyphs,
-            faces,
-            charset,
-            unit_metrics: main.unit_metrics,
-            glyph_unit: main.glyph_unit.clone(),
-            font_data: Rc::new(bytes),
-            source_path: "DroidSans".to_owned(),
-            font_pixel_size: MAIN_PX,
-            atlas_width: main.atlas_width as i32,
-            atlas_height: main.atlas_height as i32,
-            instances,
-            face_revision: 0,
-            coverage_released: false,
-        };
-        let font_id = FONTS.with(|fonts| {
-            let mut fonts = fonts.borrow_mut();
-            fonts.push(Some(entry));
-            fonts.len() as c_uint
-        });
-        FONT_ATLAS_IMAGES.with(|imgs| imgs.borrow_mut().push(None));
-        font_id
     }
 
     fn pixel_font_path() -> String {
@@ -3390,7 +3287,7 @@ mod reload_atomicity_tests {
     #[test]
     fn failed_coverage_refresh_leaves_the_old_atlas_and_bytes_in_place() {
         let _faults = ReloadFaults::set(true, true);
-        let font = install_font(true);
+        let font = install_fake_gpu_font(5101, true);
         let before = snapshot(font);
         assert!(
             !reload(font),
@@ -3402,7 +3299,7 @@ mod reload_atomicity_tests {
     #[test]
     fn successful_reload_replaces_atlas_bytes_and_revisions() {
         let _faults = ReloadFaults::set(true, false);
-        let font = install_font(true);
+        let font = install_fake_gpu_font(5101, true);
         assert!(reload(font), "an unforced reload must succeed");
         let new_bytes = std::fs::read(pixel_font_path()).expect("pixel font on disk");
         FONTS.with(|fonts| {
