@@ -1758,7 +1758,7 @@ fn file_limit_package(first: &str, second: Option<&str>) -> tempfile::TempDir {
     dir
 }
 
-type LimitedBuild = Result<super::SkullOutcome, super::SkullFailure>;
+type LimitedBuild = Result<super::SkullOutcome, crate::test_unit::UnitFailure>;
 
 fn build_with_limit(dir: &tempfile::TempDir, limit: Duration) -> LimitedBuild {
     super::skull_build_package_with_limit(dir.path().to_str().unwrap(), limit, 1, None)

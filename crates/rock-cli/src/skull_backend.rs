@@ -3,6 +3,7 @@
 use crate::Result;
 use crate::bone_backend::categorize;
 use crate::registry::ProgramKind;
+use crate::test_unit::UnitFailure;
 use bone_core::prelude::Instant;
 use colored::Colorize;
 use rock_core::CompilerError;
@@ -606,21 +607,6 @@ pub(crate) fn render_file_errs(file: &str, src: &str, errs: &[CompilerError]) ->
     crate::bone_backend::render_errs(&crate::common::single_source(file, src), errs)
 }
 
-#[derive(Debug)]
-struct SkullFailure {
-    reason: String,
-    rendered: String,
-}
-
-impl From<crate::registry::RuntimeFailure> for SkullFailure {
-    fn from(error: crate::registry::RuntimeFailure) -> Self {
-        Self {
-            reason: format!("{}: {}", error.reason, error.rendered),
-            rendered: error.rendered,
-        }
-    }
-}
-
 #[derive(Debug, Default)]
 struct SkullOutcome {
     passed: usize,
@@ -709,11 +695,8 @@ fn skull_build(
     file: &str,
     src: &str,
     filter: Option<&crate::test::TestFilter>,
-) -> std::result::Result<SkullOutcome, SkullFailure> {
-    crate::stone_runtime::prepare_unit(file).map_err(|e| SkullFailure {
-        reason: "sound bank preparation failed".to_string(),
-        rendered: format!("sound bank preparation failed for {file}: {e:#}"),
-    })?;
+) -> std::result::Result<SkullOutcome, UnitFailure> {
+    crate::test_unit::prepare_unit(file)?;
     let checked_tests = |ws: &_, mid, sources: &_| {
         let tests = crate::type_holes::module_tests(ws, mid, sources)?;
         Ok(tests.into_iter().map(|(_, test)| test).collect())
@@ -732,13 +715,13 @@ fn skull_build(
                     ..SkullOutcome::default()
                 });
             }
-            return Err(SkullFailure {
+            return Err(UnitFailure {
                 reason: categorize(&errs[0].message),
                 rendered: render_file_errs(file, src, &errs),
             });
         }
         Err(EmitFullErr::Discovery(e)) => {
-            return Err(SkullFailure {
+            return Err(UnitFailure {
                 reason: crate::test_unit::discovery_reason(&e),
                 rendered: render_file_errs(file, src, &[e]),
             });
@@ -748,7 +731,7 @@ fn skull_build(
     let host = crate::stone_runtime::program_host(crate::registry::TestUnit::File(
         std::path::Path::new(file),
     ))
-    .map_err(SkullFailure::from)?;
+    .map_err(UnitFailure::from)?;
     let lua = TestProgram {
         preamble: host.preamble,
         lua: emit.lua,
@@ -776,7 +759,7 @@ fn run_emitted_tests(
     shards: usize,
     filter: Option<&crate::test::TestFilter>,
     release_memory: bool,
-) -> std::result::Result<SkullOutcome, SkullFailure> {
+) -> std::result::Result<SkullOutcome, UnitFailure> {
     let lua = lua.into();
     assert_eq!(tests.len(), files.len());
     let mut skipped = 0;
@@ -796,19 +779,12 @@ fn run_emitted_tests(
     // Files without @tests still have a bounded load-only validity gate.
     if tests.is_empty() {
         if skipped == 0 {
-            let (script, excerpt) = write_test_program(lua, "").map_err(|e| SkullFailure {
-                reason: "invalid lua emitted (skull bug)".to_string(),
-                rendered: e.to_string(),
-            })?;
-            let run =
-                run_test_program(script.path(), limit, run_token(), 0, None).map_err(|e| {
-                    SkullFailure {
-                        reason: "invalid lua emitted (skull bug)".to_string(),
-                        rendered: e.to_string(),
-                    }
-                })?;
+            let (script, excerpt) = write_test_program(lua, "")
+                .map_err(|e| UnitFailure::new("invalid lua emitted (skull bug)", e))?;
+            let run = run_test_program(script.path(), limit, run_token(), 0, None)
+                .map_err(|e| UnitFailure::new("invalid lua emitted (skull bug)", e))?;
             if run.timed_out || !run.output.status.success() {
-                return Err(SkullFailure {
+                return Err(UnitFailure {
                     reason: format!(
                         "test program failed during module load: {}",
                         if run.timed_out {
@@ -847,10 +823,8 @@ fn run_emitted_tests(
         std::env::var_os("ROCK_TEST_SHARDS").is_some(),
     );
     let harness = build_test_harness(&tests, &token);
-    let (script, excerpt) = write_test_program(lua, &harness).map_err(|e| SkullFailure {
-        reason: "test run errored (skull bug)".to_string(),
-        rendered: e.to_string(),
-    })?;
+    let (script, excerpt) = write_test_program(lua, &harness)
+        .map_err(|e| UnitFailure::new("test run errored (skull bug)", e))?;
     drop(harness);
     // Per-file runs keep freed pages for the next compile; package runs only wait.
     if release_memory {
@@ -892,10 +866,7 @@ fn run_emitted_tests(
     let mut timings = Vec::new();
     let mut segments = Vec::new();
     for (shard, run) in runs.into_iter().enumerate() {
-        let run = run.map_err(|e| SkullFailure {
-            reason: "test run errored (skull bug)".to_string(),
-            rendered: e.to_string(),
-        })?;
+        let run = run.map_err(|e| UnitFailure::new("test run errored (skull bug)", e))?;
         for (process, segment) in run.into_iter().enumerate() {
             let label = if process == 0 {
                 format!("shard {}/{shards}: ", shard + 1)
@@ -918,12 +889,10 @@ fn run_emitted_tests(
 
         let markers = crate::test_protocol::parse_skull_markers(&stdout);
         if markers.is_none() && !run.timed_out && !died && run.running_test.is_none() {
-            return Err(SkullFailure {
-                reason: "invalid lua emitted (skull bug)".to_string(),
-                rendered: format!(
-                    "{label}{stdout}\n{stderr}\n\n--- emitted lua (truncated) ---\n{excerpt}"
-                ),
-            });
+            return Err(UnitFailure::new(
+                "invalid lua emitted (skull bug)",
+                format!("{label}{stdout}\n{stderr}\n\n--- emitted lua (truncated) ---\n{excerpt}"),
+            ));
         }
         let markers = markers.unwrap_or(crate::test_protocol::SkullMarkers {
             passed: 0,
@@ -938,10 +907,10 @@ fn run_emitted_tests(
         let mut value_fails = HashSet::new();
         for (name, val) in &markers.values {
             let Some(expect) = expects.get(name.as_str()) else {
-                return Err(SkullFailure {
-                    reason: "harness invariant breach (skull bug)".to_string(),
-                    rendered: format!("VALUE line for `{name}` without a returns expectation"),
-                });
+                return Err(UnitFailure::new(
+                    "harness invariant breach (skull bug)",
+                    format!("VALUE line for `{name}` without a returns expectation"),
+                ));
             };
             match crate::test_protocol::compare_value(
                 expect,
@@ -1294,7 +1263,7 @@ fn skull_build_package(
     dir: &str,
     shards: usize,
     filter: Option<&crate::test::TestFilter>,
-) -> std::result::Result<SkullOutcome, SkullFailure> {
+) -> std::result::Result<SkullOutcome, UnitFailure> {
     skull_build_package_with_limit(dir, TEST_CPU_LIMIT, shards, filter)
 }
 
@@ -1303,26 +1272,17 @@ fn skull_build_package_with_limit(
     limit: std::time::Duration,
     shards: usize,
     filter: Option<&crate::test::TestFilter>,
-) -> std::result::Result<SkullOutcome, SkullFailure> {
-    crate::stone_runtime::prepare_unit(dir).map_err(|e| SkullFailure {
-        reason: "sound bank preparation failed".to_string(),
-        rendered: format!("sound bank preparation failed for {dir}: {e:#}"),
-    })?;
-    let slot = crate::compile_slots::acquire(dir).map_err(|e| SkullFailure {
-        reason: "no compile slot".to_string(),
-        rendered: format!("{e:#}"),
-    })?;
+) -> std::result::Result<SkullOutcome, UnitFailure> {
+    crate::test_unit::prepare_unit(dir)?;
+    let slot = crate::test_unit::acquire_compile_slot(dir)?;
     let build = cli_build(CliBuildMode::PackageTests { dir }).map_err(|failure| match failure {
-        CliBuildFailure::Setup { context, error } => SkullFailure {
-            reason: context.unwrap_or("cannot load project").to_string(),
-            rendered: format!("{error:#}"),
-        },
+        CliBuildFailure::Setup { context, error } => UnitFailure::new(
+            context.unwrap_or("cannot load project"),
+            format!("{error:#}"),
+        ),
         CliBuildFailure::Compile {
             sources, errors, ..
-        } => SkullFailure {
-            reason: categorize(&errors[0].message),
-            rendered: render_project_errs(&sources, &errors),
-        },
+        } => UnitFailure::compile(&sources, &errors),
     })?;
     let CliBuild {
         sources,
@@ -1355,7 +1315,7 @@ fn skull_build_package_with_limit(
         dir,
         facts: &facts,
     })
-    .map_err(SkullFailure::from)?;
+    .map_err(UnitFailure::from)?;
     let lua = TestProgram {
         preamble: host.preamble,
         lua,
@@ -2149,7 +2109,7 @@ pub(crate) fn skull_test(
     let mut tests_total = 0usize; // individual @test functions executed
     let mut tests_passed = 0usize; // individual @test functions that passed
     let mut tests_skipped = 0usize;
-    let mut reason_counts: HashMap<String, usize> = HashMap::new();
+    let mut reasons: Vec<String> = Vec::new();
     let mut details: Vec<(String, String)> = Vec::new();
     let mut timings: Vec<(String, TestTiming)> = Vec::new();
 
@@ -2167,10 +2127,7 @@ pub(crate) fn skull_test(
             } else {
                 match fs_err::read_to_string(unit) {
                     Ok(src) => skull_build(unit, &src, filter),
-                    Err(e) => Err(SkullFailure {
-                        reason: e.to_string(),
-                        rendered: e.to_string(),
-                    }),
+                    Err(e) => Err(UnitFailure::new(e.to_string(), e)),
                 }
             }
         });
@@ -2205,37 +2162,32 @@ pub(crate) fn skull_test(
                 for diagnostic in diagnostics {
                     println!("  {diagnostic}");
                 }
-                *reason_counts
-                    .entry("@test execution failed".to_string())
-                    .or_insert(0) += 1;
+                reasons.push("@test execution failed".to_string());
                 for failure in fails {
                     println!("  {failure}");
                 }
             }
-            Ok(Err(SkullFailure { reason, rendered })) => {
+            Ok(Err(UnitFailure { reason, rendered })) => {
                 failed += 1;
                 println!("{:.<60} {}  {}", label, "FAILED".red(), reason.dimmed());
-                *reason_counts.entry(reason).or_insert(0) += 1;
+                reasons.push(reason);
                 if verbose {
                     details.push((label, rendered));
                 }
             }
             Err(panic) => {
                 failed += 1;
-                let msg = crate::common::panic_message(&*panic);
-                let reason = "bone panic (inference)".to_string();
-                println!("{:.<60} {}  {}", label, "PANIC".red().bold(), msg.dimmed());
-                *reason_counts.entry(reason).or_insert(0) += 1;
+                crate::test_unit::print_unit_panic(&label, &*panic);
+                reasons.push("bone panic (inference)".to_string());
                 if verbose {
-                    details.push((label, msg));
+                    details.push((label, crate::common::panic_message(&*panic)));
                 }
             }
         }
     }
 
-    if !reason_counts.is_empty() {
-        let mut rows: Vec<(String, usize)> = reason_counts.into_iter().collect();
-        rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    if !reasons.is_empty() {
+        let rows = crate::test_protocol::reason_histogram(reasons.iter().map(String::as_str));
         println!("\n{}", "=== failure reasons (skull) ===".bold());
         let shown = rows.len().min(25);
         for (reason, count) in rows.iter().take(shown) {

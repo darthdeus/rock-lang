@@ -36,13 +36,13 @@ pub(crate) fn glsl_test(paths: &[String], skip_gpu: bool) -> Result<()> {
     let file_count = outcomes.len();
 
     for (label, outcome) in outcomes {
-        match outcome {
-            Ok(Ok(UnitRun {
+        match crate::test_unit::unit_run(&label, outcome) {
+            Some(UnitRun {
                 outside_value_class: outside,
                 passed,
                 failed,
                 skips,
-            })) => {
+            }) => {
                 outside_value_class += outside;
                 passed_total += passed;
                 let any = passed + failed.len() + skips.len();
@@ -65,14 +65,7 @@ pub(crate) fn glsl_test(paths: &[String], skip_gpu: bool) -> Result<()> {
                 failed_total.extend(failed.iter().map(|d| format!("{d} [{PROFILE_NAME}]")));
                 skip_reasons.extend(skips.into_iter().map(|(_, reason)| reason));
             }
-            Ok(Err(failure)) => {
-                unit_failures += 1;
-                failure.print(&label);
-            }
-            Err(panic) => {
-                unit_failures += 1;
-                crate::test_unit::print_unit_panic(&label, &*panic);
-            }
+            None => unit_failures += 1,
         }
     }
 
@@ -148,12 +141,7 @@ fn build_unit(
     // Held through the tests: their shaders are emitted from the checked
     // workspace, which stays resident until the unit ends.
     let _slot = if is_package {
-        Some(
-            crate::compile_slots::acquire(unit).map_err(|error| UnitFailure {
-                reason: "no compile slot".to_string(),
-                rendered: format!("{error:#}"),
-            })?,
-        )
+        Some(crate::test_unit::acquire_compile_slot(unit)?)
     } else {
         None
     };

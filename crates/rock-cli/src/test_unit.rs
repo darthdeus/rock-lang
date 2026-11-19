@@ -7,6 +7,7 @@ use bone_semantic::inference::Workspace;
 use rock_core::{CompilerError, SourceFiles};
 use skull_mir::mir::FuncRef;
 
+#[derive(Debug)]
 pub(crate) struct UnitFailure {
     pub reason: String,
     pub rendered: String,
@@ -28,10 +29,58 @@ impl UnitFailure {
         }
     }
 
-    fn compile(sources: &SourceFiles, errs: &[CompilerError]) -> Self {
+    pub fn compile(sources: &SourceFiles, errs: &[CompilerError]) -> Self {
         UnitFailure {
             reason: categorize(&errs[0].message),
             rendered: crate::skull_backend::render_project_errs(sources, errs),
+        }
+    }
+
+    pub fn new(reason: impl Into<String>, rendered: impl std::fmt::Display) -> Self {
+        UnitFailure {
+            reason: reason.into(),
+            rendered: rendered.to_string(),
+        }
+    }
+}
+
+impl From<crate::registry::RuntimeFailure> for UnitFailure {
+    fn from(error: crate::registry::RuntimeFailure) -> Self {
+        Self {
+            reason: format!("{}: {}", error.reason, error.rendered),
+            rendered: error.rendered,
+        }
+    }
+}
+
+pub(crate) fn prepare_unit(unit: &str) -> Result<(), UnitFailure> {
+    crate::stone_runtime::prepare_unit(unit).map_err(|error| UnitFailure {
+        reason: "sound bank preparation failed".to_string(),
+        rendered: format!("sound bank preparation failed for {unit}: {error:#}"),
+    })
+}
+
+pub(crate) fn acquire_compile_slot(
+    unit: &str,
+) -> Result<crate::compile_slots::CompileSlot, UnitFailure> {
+    crate::compile_slots::acquire(unit)
+        .map_err(|error| UnitFailure::new("no compile slot", format!("{error:#}")))
+}
+
+/// Prints the `FAILED` or `PANIC` line of a unit that produced no run.
+pub(crate) fn unit_run<T>(
+    label: &str,
+    outcome: std::thread::Result<Result<T, UnitFailure>>,
+) -> Option<T> {
+    match outcome {
+        Ok(Ok(run)) => Some(run),
+        Ok(Err(failure)) => {
+            failure.print(label);
+            None
+        }
+        Err(panic) => {
+            print_unit_panic(label, &*panic);
+            None
         }
     }
 }
@@ -54,18 +103,17 @@ pub(crate) enum UnitCheck {
 }
 
 fn resolve_build_vars(ws: &mut Workspace, unit: &str) -> Result<(), UnitFailure> {
-    crate::comptime::stamp_workspace(ws, std::path::Path::new(unit)).map_err(|e| UnitFailure {
-        reason: "build var resolution failed".to_string(),
-        rendered: format!("build var resolution failed for {unit}: {e:#}"),
+    crate::comptime::stamp_workspace(ws, std::path::Path::new(unit)).map_err(|e| {
+        UnitFailure::new(
+            "build var resolution failed",
+            format!("build var resolution failed for {unit}: {e:#}"),
+        )
     })
 }
 
 /// Parse and bone-check one isolated test file with the stdlib.
 pub(crate) fn check_file(file: &str, build_vars: bool) -> Result<UnitCheck, UnitFailure> {
-    let src = fs_err::read_to_string(file).map_err(|e| UnitFailure {
-        reason: e.to_string(),
-        rendered: e.to_string(),
-    })?;
+    let src = fs_err::read_to_string(file).map_err(|e| UnitFailure::new(e.to_string(), e))?;
     let sources = crate::common::single_source(file, &src);
     let rejected =
         |errs: &[CompilerError]| match crate::skull_backend::all_tests_expect_compile_failure(
@@ -107,10 +155,7 @@ pub(crate) fn check_file(file: &str, build_vars: bool) -> Result<UnitCheck, Unit
 /// Assemble and bone-check a package with its tests as one workspace.
 pub(crate) fn check_package(dir: &str, build_vars: bool) -> Result<UnitCheck, UnitFailure> {
     let sources = rock_host::compilation_units::load_sources_for_project(std::path::Path::new(dir))
-        .map_err(|e| UnitFailure {
-            reason: "cannot load project".to_string(),
-            rendered: e.to_string(),
-        })?;
+        .map_err(|e| UnitFailure::new("cannot load project", e))?;
     let (mut ws, _entry) = crate::skull_backend::check_project(&sources)
         .map_err(|errs| UnitFailure::compile(&sources, &errs))?;
     if build_vars {

@@ -42,13 +42,13 @@ pub fn js_test(paths: &[String]) -> Result<()> {
     let file_count = outcomes.len();
 
     for (label, outcome) in outcomes {
-        match outcome {
-            Ok(Ok(JsUnitRun {
+        match crate::test_unit::unit_run(&label, outcome) {
+            Some(JsUnitRun {
                 passed,
                 fails,
                 skips,
                 other_backend,
-            })) => {
+            }) => {
                 tests_passed += passed;
                 tests_failed += fails.len();
                 tests_skipped += skips.len();
@@ -86,14 +86,7 @@ pub fn js_test(paths: &[String]) -> Result<()> {
                     }
                 }
             }
-            Ok(Err(failure)) => {
-                unit_failures += 1;
-                failure.print(&label);
-            }
-            Err(panic) => {
-                unit_failures += 1;
-                crate::test_unit::print_unit_panic(&label, &*panic);
-            }
+            None => unit_failures += 1,
         }
     }
 
@@ -143,12 +136,7 @@ pub fn js_test(paths: &[String]) -> Result<()> {
 }
 
 fn js_build_unit(unit: &str, is_package: bool) -> JsUnitOutcome {
-    if let Err(error) = crate::stone_runtime::prepare_unit(unit) {
-        return Err(UnitFailure {
-            reason: "sound bank preparation failed".to_string(),
-            rendered: format!("sound bank preparation failed for {unit}: {error:#}"),
-        });
-    }
+    crate::test_unit::prepare_unit(unit)?;
     match crate::test_unit::check_unit(unit, is_package, true)? {
         UnitCheck::Checked { ws, tests, sources } => js_run_tests(&ws, &tests, &|e| {
             crate::skull_backend::render_project_errs(&sources, std::slice::from_ref(e))
@@ -306,15 +294,15 @@ fn js_run_tests(
             });
         }
         _ => {
-            return Err(UnitFailure {
-                reason: "invalid JS emitted (js backend bug)".to_string(),
-                rendered: format!(
+            return Err(UnitFailure::new(
+                "invalid JS emitted (js backend bug)",
+                format!(
                     "stdout:\n{}\nstderr:\n{}\n\n--- emitted js (truncated) ---\n{}",
                     run.stdout,
                     run.stderr,
                     crate::skull_backend::program_excerpt(&[&program])
                 ),
-            });
+            ));
         }
     };
     fails.extend(markers.fails);
@@ -329,10 +317,10 @@ fn js_run_tests(
         .collect();
     for (name, val) in &markers.values {
         let Some(expect) = expects.get(name.as_str()) else {
-            return Err(UnitFailure {
-                reason: "harness invariant breach (js backend bug)".to_string(),
-                rendered: format!("VALUE line for `{name}` without a returns expectation"),
-            });
+            return Err(UnitFailure::new(
+                "harness invariant breach (js backend bug)",
+                format!("VALUE line for `{name}` without a returns expectation"),
+            ));
         };
         match crate::test_protocol::compare_value(expect, val, crate::test_protocol::FLOAT_REL_TOL)
         {
