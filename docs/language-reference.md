@@ -23,10 +23,7 @@ supported.
 
 Binary `+`, `-`, `*`, `/`, `%`, and `./` support user overloads. Other binary
 operator definitions are rejected; equality is not user-overloadable. Prefix
-`-` and `!` have separate callable families. The
-[operator table and tests](../crates/bone-semantic/tests/operator_table.rs)
-keep declarations aligned with dispatch.
-
+`-` and `!` have separate callable families.
 Numbers follow LuaJIT on every backend. `./` floors and `%` is
 `a - floor(a / b) * b`, so the remainder takes the divisor's sign. Dividing by
 zero is not an error: it yields `inf`, `-inf` or `nan`, for `uint` too.

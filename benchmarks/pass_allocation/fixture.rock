@@ -1,3 +1,5 @@
+struct SpriteMesh {}
+
 // Appended to declarations extracted by prepare.py from current Stone sources.
 struct Fixture { queue: [Pass], held: [Pass] }
 
