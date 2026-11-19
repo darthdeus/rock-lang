@@ -1176,6 +1176,22 @@ mod macos {
             );
         }
         #[test]
+        fn a_burst_of_saves_between_scans_is_one_change() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            let source = root.join("main.rock");
+            std::fs::write(&source, "seed").unwrap();
+            let mut observation = observation(root, FileWatcher::new());
+            for i in 0..10 {
+                std::fs::write(&source, format!("fn value() -> int {{ {i} }}\n")).unwrap();
+            }
+            assert_eq!(
+                observation.scan(false).unwrap().paths,
+                HashSet::from([source])
+            );
+            assert!(observation.scan(false).unwrap().paths.is_empty());
+        }
+        #[test]
         fn unchanged_asset_directories_reuse_entries_and_build_outputs_are_pruned() {
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path().canonicalize().unwrap();

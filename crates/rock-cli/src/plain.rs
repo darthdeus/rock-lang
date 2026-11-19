@@ -78,13 +78,6 @@ pub static COMMANDS: &[&CliCommand] = &[
         route: Route::Backend(Operation::Stone),
     },
     &CliCommand {
-        name: "stone-test",
-        route: Route::Direct(|cx| {
-            let path = cx.get_path_or_current()?;
-            crate::stone_test::run_stone_test(std::path::Path::new(&path))
-        }),
-    },
-    &CliCommand {
         name: "package",
         route: Route::Direct(|cx| {
             let output = cx
@@ -331,16 +324,7 @@ pub static OPTION_RULES: &[OptionRule] = &[OptionRule::TestFilter, OptionRule::S
 pub(crate) fn logs_invocation(command: &CliCommand) -> bool {
     matches!(
         command.cli_name(),
-        "compile"
-            | "test"
-            | "run"
-            | "watch"
-            | "lint"
-            | "fmt"
-            | "frame"
-            | "sim"
-            | "stone-test"
-            | "stone"
+        "compile" | "test" | "run" | "watch" | "lint" | "fmt" | "frame" | "sim" | "stone"
     )
 }
 

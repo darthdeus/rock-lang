@@ -2283,3 +2283,217 @@ fn plain_luajit_without_runtime_layout() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[cfg(test)]
+mod watch_route_tests {
+    //! Edits a watcher delivers, through the production `IncrementalProject`
+    //! route, checked by running the published Lua.
+
+    use super::super::{IncrementalProject, SkullReload};
+    use super::{ExecOutcome, ProjectFixture, exec_lua};
+    use std::path::Path;
+
+    fn run(program: &str) -> String {
+        match exec_lua(program) {
+            ExecOutcome::Output(output) => output,
+            ExecOutcome::Errored(error) => panic!("{error}\n--- program ---\n{program}"),
+        }
+    }
+
+    fn boot_files(files: &[(&str, &str)]) -> (tempfile::TempDir, IncrementalProject) {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, text) in files {
+            std::fs::write(dir.path().join(name), text).unwrap();
+        }
+        let project = IncrementalProject::init(
+            dir.path().to_str().unwrap(),
+            &dir.path().join("main.lua"),
+            &dir.path().join("incremental.lua"),
+        )
+        .expect("initial build");
+        (dir, project)
+    }
+
+    fn recompile(dir: &Path, project: &mut IncrementalProject, file: &str) -> SkullReload {
+        let path = dir.join(file);
+        project
+            .recompile(
+                std::slice::from_ref(&path),
+                &dir.join("main.lua"),
+                &dir.join("incremental.lua"),
+            )
+            .expect("recompile")
+    }
+
+    /// Callers bind their callees as upvalues, so an overlay that redefines
+    /// only the callee must rebind the caller too.
+    #[test]
+    fn a_callee_body_edit_reaches_its_bound_caller() {
+        let v0 = "global SCORE: int = 0\n\
+                  fn leaf(a: int) -> int { a + 1 }\n\
+                  @nomangle fn bump() { SCORE = leaf(SCORE) }\n";
+        let mut fx = ProjectFixture::boot(v0);
+        let before = fx.main_text();
+        assert!(before.contains("__rock_mk_bump"), "bump binds its callee");
+        let reload = fx.edit(&v0.replace("a + 1", "a + 10")).unwrap();
+        assert!(
+            matches!(reload, SkullReload::Incremental { .. }),
+            "{reload:?}"
+        );
+        let script = format!(
+            "_G.HOT_RELOAD = false\n{before}\nbump()\n\
+             _G.HOT_RELOAD = true\n{}\n_G.HOT_RELOAD = false\nbump()\nprint(SCORE)\n",
+            fx.overlay_text()
+        );
+        assert_eq!(run(&script).trim(), "11");
+    }
+
+    #[test]
+    fn a_caller_edit_keeps_the_abi_of_an_unchanged_cross_module_generic_callback() {
+        let caller = "global SCORE: int = 0\n\
+                      fn apply<T>(value: T, callback: fn(T) -> T) -> T { callback(value) }\n\
+                      @nomangle fn bump() { SCORE = SCORE + 1 }\n\
+                      @nomangle fn invoke() -> int { apply(7, unchanged) }\n";
+        let (dir, mut project) = boot_files(&[
+            ("stick.toml", "[package]\nname = \"callbackwatch\"\n"),
+            ("caller.rock", caller),
+            (
+                "callback.rock",
+                "fn unchanged(value: int) -> int { value + 3 }\n",
+            ),
+        ]);
+        let before = std::fs::read_to_string(dir.path().join("main.lua")).unwrap();
+        std::fs::write(
+            dir.path().join("caller.rock"),
+            caller.replace("apply(7, unchanged)", "apply(17, unchanged)"),
+        )
+        .unwrap();
+        let reload = recompile(dir.path(), &mut project, "caller.rock");
+        assert!(
+            matches!(reload, SkullReload::Incremental { .. }),
+            "{reload:?}"
+        );
+        let after = std::fs::read_to_string(dir.path().join("incremental.lua")).unwrap();
+        let script = format!(
+            "_G.HOT_RELOAD = false\n{before}\nassert(invoke() == 10)\nbump()\n\
+             _G.HOT_RELOAD = true\n{after}\n_G.HOT_RELOAD = false\n\
+             assert(invoke() == 20)\nbump()\nassert(SCORE == 2)\nprint('PASS')\n"
+        );
+        assert_eq!(run(&script).trim(), "PASS");
+    }
+
+    #[test]
+    fn a_global_type_change_restarts() {
+        let v0 = "struct Corpse { name: string }\n\
+                  global CORPSES: [Corpse] = []\n\
+                  fn count() -> int {\n  let n = 0\n  for c in CORPSES { n = n + 1 }\n  return n\n}\n";
+        let v1 = v0
+            .replace("[Corpse] = []", "Arena<Corpse> = arena_new()")
+            .replace("for c in", "for (e, c) in");
+        let mut fx = ProjectFixture::boot(v0);
+        let reload = fx.edit(&v1).unwrap();
+        assert!(
+            !matches!(
+                reload,
+                SkullReload::Incremental { .. } | SkullReload::NoChange
+            ),
+            "{reload:?}"
+        );
+    }
+
+    /// Global initializers have no function chunk, so their embed reads must
+    /// still reach the watch set.
+    #[test]
+    fn a_global_initializer_embed_is_watched_and_rebuilt() {
+        let (dir, mut project) = boot_files(&[
+            ("stick.toml", "[package]\nname = \"globalembedwatch\"\n"),
+            (
+                "main.rock",
+                "const BANNER: string = embed_string(\"banner.txt\")\nfn main() { print(BANNER) }\n",
+            ),
+            ("banner.txt", "global-embed-v1"),
+        ]);
+        let banner = dir.path().join("banner.txt").canonicalize().unwrap();
+        assert!(
+            project
+                .comptime_watch_files_with_hashes()
+                .iter()
+                .any(|(path, _)| path == &banner)
+        );
+        std::fs::write(&banner, "global-embed-v2").unwrap();
+        let reload = recompile(dir.path(), &mut project, "banner.txt");
+        assert!(matches!(reload, SkullReload::Full { .. }), "{reload:?}");
+        let main = std::fs::read_to_string(dir.path().join("main.lua")).unwrap();
+        assert!(main.contains("global-embed-v2") && !main.contains("global-embed-v1"));
+    }
+
+    /// Stone's `clear_all_systems` runs before every reload: the compiler-owned
+    /// shutdown plan must survive it unchanged, and `SIMS` must be emptied so
+    /// the reload re-registers each sim once.
+    #[test]
+    fn stone_reload_clear_keeps_the_lifecycle_plan_and_empties_sims() {
+        let manifest = "[package]\nname = \"deco_cleanup_test\"\ntype = \"bin\"\n\
+                        [language]\nmodules = \"v1\"\n\
+                        [dependencies]\nstone = { package = \"stone\" }\nstone-core = { package = \"stone-core\" }\n\
+                        [build]\nchannels = [\"dev\"]\ndefault_channel = \"dev\"\n\
+                        [build.vars]\nGIT_SHA = \"test\"\nBUILD_UNIX = \"0\"\nBUILD_DATE = \"test\"\n\
+                        CHANNEL = { builtin = \"channel\" }\nPLATFORM = { builtin = \"platform\" }\n";
+        let source = "use stone::*;\nuse stone_core::*;\n\
+                      @shutdown\nfn cleanup() {}\n\
+                      @sim\nco fn dummy_sim() -> Coroutine<Wait> {\n  yield wait_frame()\n}\n\
+                      fn main() {}\n";
+        let (dir, _project) = boot_files(&[("stick.toml", manifest), ("main.rock", source)]);
+        let main_lua = dir.path().join("main.lua");
+        let text = std::fs::read_to_string(&main_lua).unwrap();
+        // Either callee binding: `name = __rock_mk_name(...)` or `function name(`.
+        let clears: Vec<&str> = text
+            .lines()
+            .filter_map(|line| {
+                line.split_once(" = __rock_mk_")
+                    .map(|(name, _)| name)
+                    .or_else(|| {
+                        line.strip_prefix("function ")
+                            .and_then(|rest| rest.split_once('('))
+                            .map(|(name, _)| name)
+                    })
+            })
+            .filter(|name| name.starts_with("clear_all_systems_") && !name.contains("__"))
+            .collect();
+        assert_eq!(clears.len(), 1, "{clears:?}");
+        // HOT_RELOAD skips the entry wrapper and with it the native runtime.
+        let script = format!(
+            "local function load() _G.HOT_RELOAD = true dofile({path:?}) _G.HOT_RELOAD = false end\n\
+             local function sims() local n = 0 for _ in pairs(_G.SIMS) do n = n + 1 end return n end\n\
+             local function shutdowns() return _G.__ROCK_LIFECYCLE_PLAN.shutdown.len end\n\
+             load()\n\
+             local plan = shutdowns()\n\
+             assert(plan >= 1, 'the shutdown plan holds the handler')\n\
+             assert(sims() == 1, 'one sim after load')\n\
+             {clear}()\n\
+             assert(shutdowns() == plan, 'clear keeps the plan')\n\
+             assert(sims() == 0, 'clear empties SIMS')\n\
+             load()\n\
+             assert(shutdowns() == plan, 'reload keeps one plan')\n\
+             assert(sims() == 1, 'reload registers the sim once')\n\
+             print('PASS')\n",
+            path = main_lua.display().to_string(),
+            clear = clears[0],
+        );
+        // Stone's program is too large for the piped-stdin runner.
+        let script_path = dir.path().join("reload_clear.lua");
+        std::fs::write(&script_path, script).unwrap();
+        let output = std::process::Command::new(rock_engine_host::runtime::luajit_path())
+            .arg(&script_path)
+            .env("LUA_PATH", rock_engine_host::runtime::lua_path_value())
+            .env(
+                rock_engine_host::runtime::lib_path_var(),
+                rock_engine_host::runtime::lib_path_with_inherited(),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "PASS",
+            "{output:?}"
+        );
+    }
+}

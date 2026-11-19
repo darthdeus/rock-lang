@@ -406,7 +406,6 @@ pub mod headless_scope;
 mod log_record;
 pub mod package;
 pub(crate) mod stone_runtime;
-mod stone_test;
 pub(crate) mod stone_watch;
 
 mod run_sim;
