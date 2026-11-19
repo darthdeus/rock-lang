@@ -443,6 +443,7 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         uint8_t stone_image_is_stub(StoneImageHandle handle);
         uint8_t stone_probe_image_size(const char* path, int* width, int* height);
         uint64_t stone_get_image_byte_len(StoneImageHandle handle);
+        bool stone_supports_bc1(void);
         int stone_get_image_format(StoneImageHandle handle);
         uint8_t stone_image_exists(StoneImageHandle handle);
         uint32_t stone_get_image_texture(StoneImageHandle handle);
@@ -1423,6 +1424,7 @@ extern(ffi, "stone") fn stone_image_is_stub(handle: int) -> bool
 // stone_get_image_size by 4 overcounts R8 font aliases. The broad live total
 // also includes canvas attachments.
 pub extern(ffi, "stone") fn stone_get_image_byte_len(handle: int) -> int
+pub extern(ffi, "stone") fn stone_supports_bc1() -> bool
 pub extern(ffi, "stone") fn stone_get_image_format(handle: int) -> int
 
 // Rock-level helper returning a tuple. Dispatched by arg count: this

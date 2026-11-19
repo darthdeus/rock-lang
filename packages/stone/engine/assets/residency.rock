@@ -33,6 +33,8 @@ global RESIDENCY_BUDGET: int = max(0, get_env_int("STONE_RESIDENCY_BUDGET_MB", 2
 // A game with a total memory target gives the cache what its resources in use
 // leave. A smaller budget takes effect at the next trim.
 pub fn residency_set_budget(bytes: int) { RESIDENCY_BUDGET = max(0, bytes) }
+// Bytes of cached images nobody references.
+pub fn residency_cached_bytes() -> int { return RESIDENCY_CACHE.bytes }
 // Decoded bytes the native queue may hold past publication (RESIDENCY_BUDGET);
 // Prefetch submissions wait while the queue is fuller than this.
 global RESIDENCY_PREFETCH_INFLIGHT_BUDGET: int = 128 * 1024 * 1024

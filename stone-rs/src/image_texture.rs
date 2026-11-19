@@ -844,7 +844,7 @@ fn load_image(
     {
         ImageFormat::Bc5
     } else if path_str.ends_with(".dds") {
-        if format != ImageFormat::Rgba8 || !supports_bc1() {
+        if format != ImageFormat::Rgba8 || !stone_supports_bc1() {
             log_once!("IMAGE", "unsupported BC1 DDS load for {}", path_str);
             record_image_load(false, 0, elapsed_us(load_started));
             return 0;
@@ -1828,7 +1828,8 @@ pub extern "C" fn stone_get_image_byte_len(handle: u64) -> u64 {
     with_image(handle, |img| image_byte_len(handle, img)).unwrap_or(0)
 }
 
-fn supports_bc1() -> bool {
+#[no_mangle]
+pub extern "C" fn stone_supports_bc1() -> bool {
     with_gl(|gl| gl.supports_bc1()).unwrap_or(false)
 }
 
@@ -2038,7 +2039,7 @@ mod relight_rg8_gl_tests {
             return;
         }
         let _session = GlSession::start();
-        assert!(supports_bc1(), "test driver requires S3TC");
+        assert!(stone_supports_bc1(), "test driver requires S3TC");
         let mut dds = stone_texture::bc1_header(5, 3).unwrap().to_vec();
         // Transparent first block, solid red second block.
         dds.extend([0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
