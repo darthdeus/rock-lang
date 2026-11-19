@@ -562,10 +562,6 @@ fn presented_scene_sample_capture() {
         PRESENTED_SCENE_SAMPLE = null
         return
     }
-    if OUTPUT_HDR_CANVAS != null
-        && OUTPUT_HDR_CANVAS.handle == canvas.handle {
-        error("presented scene sample cannot alias OUTPUT_HDR_CANVAS")
-    }
     PRESENTED_SCENE_CONTENT_GENERATION += 1
     PRESENTED_SCENE_SAMPLE = PresentedSceneSample {
         canvas: canvas,

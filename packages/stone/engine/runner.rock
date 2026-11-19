@@ -1289,20 +1289,28 @@ fn frame_core_render_world() {
     profile_end("world_draw")
 }
 
-fn frame_core_render_late_draw_prepare() {
-    if !fx_disabled("ui") {
-        output_hdr_begin_frame()
-        profile_end("screen.output_hdr")
-    }
-}
-
 fn frame_core_render_late_draw() {
-    frame_core_render_late_draw_prepare()
     if !fx_disabled("ui") {
         profile_gpu_begin("screen.late_systems")
         run_late_draw_systems()
         profile_gpu_end("screen.late_systems")
     }
+}
+
+@test
+fn late_draw_keeps_profiler_sections_balanced() {
+    let saved_enabled = PERF_TIMELINE_ENABLED
+    let saved_phases = PERF_PHASES
+    defer {
+        PERF_TIMELINE_ENABLED = saved_enabled
+        PERF_PHASES = saved_phases
+    }
+    PERF_TIMELINE_ENABLED = true
+    PERF_PHASES = perf_phase_log_new()
+    profile_begin("test.enclosing")
+    frame_core_render_late_draw()
+    assert_eq(PERF_PHASES.section_depth, 1, "late draw closes only the sections it opens")
+    profile_end("test.enclosing")
 }
 
 fn frame_core_render_ui_flush() {
@@ -1312,9 +1320,7 @@ fn frame_core_render_ui_flush() {
     }
     // Last writer into the UI pool: world anchors project here, against the
     // frozen view, after the scene has been presented.
-    profile_gpu_begin("screen.ui_flush.output_hdr")
-    if !SIM_SKIP_SUBMIT { output_hdr_present(GpuTarget::Window) }
-    profile_gpu_end("screen.ui_flush.output_hdr")
+    if !SIM_SKIP_SUBMIT { text_render_order_present() }
     profile_gpu_begin("screen.ui_flush.world_overlay")
     flush_world_overlay()
     profile_gpu_end("screen.ui_flush.world_overlay")

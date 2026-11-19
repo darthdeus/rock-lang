@@ -227,7 +227,6 @@ fn uniform_block_dump_finish() {
     if let c = world_material_canvas { targets["material"] = json_int(c.handle.0) }
     if let c = world_normal_canvas { targets["normal"] = json_int(c.handle.0) }
     if let c = world_surface_owner_canvas { targets["surface_owner"] = json_int(c.handle.0) }
-    if let c = OUTPUT_HDR_CANVAS { targets["output_hdr"] = json_int(c.handle.0) }
     record["targets"] = json_object(targets)
     let shaders: [JsonValue] = []
     for (name, artifact) in GL_SHADER_ARTIFACTS {

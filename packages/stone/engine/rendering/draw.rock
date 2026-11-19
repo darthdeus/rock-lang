@@ -240,30 +240,11 @@ pub global outline_mask_written: bool = false
 // outline post-process edge-detects this mask to generate the outline.
 pub global outline_target_canvas: Canvas = NO_CANVAS
 pub global UI_RASTER_CANVAS: Canvas? = null
+// Never set; kept because downstream tooling still reads it.
 pub global OUTPUT_HDR_CANVAS: Canvas? = null
-// Whether OUTPUT_HDR_CANVAS holds this frame's content. Only the main menu's
-// TextArt writes the layer, so the first write of a frame creates (when
-// absent) and clears it and only a written frame presents it; once nothing
-// has written it for OUTPUT_HDR_RELEASE_FRAMES frames it is released. A
-// gameplay frame pays for neither the pass nor the rgba16f storage.
-global OUTPUT_HDR_WRITTEN: bool = false
-// Long enough that a menu skipping its write for a frame or two does not
-// churn the allocation.
-pub const OUTPUT_HDR_RELEASE_FRAMES: int = 30
-global OUTPUT_HDR_IDLE_FRAMES: int = 0
 global UI_RASTER_TARGET_SIZE: IVec2 = iv(0, 0)
-global OUTPUT_HDR_TARGET_SIZE: IVec2 = iv(0, 0)
 
 pub fn ensure_ui_raster_targets(view: FrameView) {
-    // The output HDR layer is created by its first writer at this extent; a
-    // stale one is dropped here so that writer re-creates it.
-    if OUTPUT_HDR_CANVAS != null
-            && (!canvas_is_live(OUTPUT_HDR_CANVAS)
-                || OUTPUT_HDR_TARGET_SIZE != view.ui_raster_size) {
-        output_hdr_release()
-    }
-    OUTPUT_HDR_TARGET_SIZE = view.ui_raster_size
-
     let scaled = view.ui_raster_size.x != view.drawable_size.x
         || view.ui_raster_size.y != view.drawable_size.y
     if !scaled {
@@ -320,61 +301,6 @@ fn submit_ui_blit(src: Canvas, target: GpuTarget, blend: BlendMode) {
 fn composite_scaled_ui(target: GpuTarget) {
     let src = UI_RASTER_CANVAS ?? return
     submit_ui_blit(src, target, BlendMode::Alpha)
-}
-
-fn output_hdr_release() {
-    if OUTPUT_HDR_CANVAS != null { destroy_canvas(OUTPUT_HDR_CANVAS) }
-    OUTPUT_HDR_CANVAS = null
-    OUTPUT_HDR_WRITTEN = false
-    OUTPUT_HDR_IDLE_FRAMES = 0
-}
-
-fn output_hdr_begin_frame() {
-    if OUTPUT_HDR_CANVAS != null {
-        OUTPUT_HDR_IDLE_FRAMES = if OUTPUT_HDR_WRITTEN { 0 } else { OUTPUT_HDR_IDLE_FRAMES + 1 }
-        if OUTPUT_HDR_IDLE_FRAMES >= OUTPUT_HDR_RELEASE_FRAMES { output_hdr_release() }
-    }
-    OUTPUT_HDR_WRITTEN = false
-}
-
-// This frame's layer if something wrote it; a stale layer is never presented.
-fn output_hdr_written_canvas() -> Canvas? {
-    if !OUTPUT_HDR_WRITTEN { return null }
-    return OUTPUT_HDR_CANVAS
-}
-
-fn output_hdr_present(target: GpuTarget) {
-    // The stamp marks the scene-present phase, which completed before this
-    // flush point whether or not the HDR layer exists (gameplay never writes
-    // it now that the layer is lazy); the early return is storage, not a
-    // skipped present.
-    text_render_order_present()
-    if OUTPUT_HDR_CANVAS == null { return }
-    let layer = output_hdr_written_canvas() ?? return
-    submit_ui_blit(layer, target, BlendMode::Premultiplied)
-}
-
-@test
-fn output_hdr_present_stamps_the_scene_present_without_a_layer() {
-    let prior_serial = TEXT_RENDER_ORDER_SERIAL
-    let prior_present = TEXT_OUTPUT_PRESENT_ORDER
-    let prior_canvas = OUTPUT_HDR_CANVAS
-    let prior_written = OUTPUT_HDR_WRITTEN
-    defer {
-        TEXT_RENDER_ORDER_SERIAL = prior_serial
-        TEXT_OUTPUT_PRESENT_ORDER = prior_present
-        OUTPUT_HDR_CANVAS = prior_canvas
-        OUTPUT_HDR_WRITTEN = prior_written
-    }
-    // Gameplay shape: no HDR layer (lazy, never written), so the old code
-    // returned before stamping.
-    OUTPUT_HDR_CANVAS = null
-    OUTPUT_HDR_WRITTEN = false
-    output_hdr_present(GpuTarget::Window)
-    assert(TEXT_RENDER_ORDER_SERIAL == prior_serial + 1,
-        "the scene present advances the render-order serial (stayed {prior_serial})")
-    assert(TEXT_OUTPUT_PRESENT_ORDER == TEXT_RENDER_ORDER_SERIAL,
-        "the present stamp takes the advanced serial (present {TEXT_OUTPUT_PRESENT_ORDER}, serial {TEXT_RENDER_ORDER_SERIAL})")
 }
 
 // One scene target slot at (rw, rh): the canvas already in the slot RESIZED to
