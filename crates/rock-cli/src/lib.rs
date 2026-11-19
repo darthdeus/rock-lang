@@ -134,14 +134,24 @@ pub struct Args {
     /// `from_matches`). Override with `--backend`.
     pub backend: Backend,
 
+    /// Build lint pass: `--no-lints` drops the `Warning`/`Advice` tiers from a
+    /// build's output; `--lint-summary` compacts them to one count line.
+    /// `Error`-severity findings render and fail the build under both.
     pub no_lints: bool,
     pub lint_summary: bool,
 
+    /// `rock lint --lints=a,b`: run exactly these lints instead of the default
+    /// tier. The only way to reach an opt-in lint (`bone_lints::OPT_IN_LINTS`),
+    /// which a build and the LSP never run. `rock lint` only -- a build's
+    /// catalog is not the author's to narrow per invocation.
     pub lints: Option<String>,
 
     /// `rock lint --union <lib>`: judge a library's reachability against every
     /// consumer in the repo at once, reporting only what none of them reach.
     pub union: bool,
+    /// Where `--union` looks for consumers. Defaults to the lib's parent, which
+    /// is right when the lib sits beside its consumers (`libs/example/`); a nested lib
+    /// (`libs/example-core`) needs the repo root passed explicitly.
     pub consumers: Option<String>,
 }
 

@@ -212,6 +212,9 @@ impl SimRunRecorder {
             .and_then(|state| state.events_path.clone())
     }
 
+    /// Allocate one logical occurrence ID for each requested entry. Duplicate
+    /// names intentionally receive different IDs; recovery reuses the ID from
+    /// the original plan rather than creating a second logical entry.
     pub(crate) fn plan_entries(&self, specs: &[String]) -> Vec<u64> {
         let mut ids = Vec::with_capacity(specs.len());
         for (sequence, spec) in specs.iter().enumerate() {
@@ -466,6 +469,9 @@ impl SimRunRecorder {
         );
     }
 
+    /// Write the terminal record. A missing terminal event is intentionally
+    /// meaningful: it identifies a process that stopped before the runner
+    /// could account for it.
     pub(crate) fn finish(&self, success: bool, error: Option<&str>) {
         let (planned, finalized, passed, run_id, already_finished) = match self.inner.lock() {
             Ok(mut state) => {

@@ -6,6 +6,9 @@ use rock_core::{CompilerError, SourceFiles};
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+/// How a build reports lint findings. Applies to `Warning`/`Advice` only --
+/// `Error` findings always render in full and always fail the build, which is
+/// what makes a correctness lint non-optional.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub(crate) enum LintReport {
     /// Render every finding spanned against its source, like a type error.
@@ -24,6 +27,9 @@ const POLICY_FULL: u8 = 1;
 const POLICY_SUMMARY: u8 = 2;
 const POLICY_OFF: u8 = 3;
 
+/// Install the invocation's reporting policy from the parsed flags. Called from
+/// the dispatcher; the build call sites are deep in the backend and have no
+/// `Args` to thread down.
 pub(crate) fn set_policy(report: LintReport) {
     POLICY.store(
         match report {
@@ -156,6 +162,9 @@ pub enum Scope {
     ProductionOnly,
 }
 
+/// The `SourceFiles` and lint root of a single-file build. `file` must be the
+/// same path the module was parsed under, or every span lookup misses and the
+/// findings render without their snippet.
 pub(crate) fn single_file_scope(file: &str, src: &str) -> (SourceFiles, std::path::PathBuf) {
     let sources = crate::common::single_source(file, src);
     let root = Path::new(file)
@@ -181,6 +190,9 @@ pub fn findings(
     )
 }
 
+/// [`findings`] for an explicit lint selection. `rock lint --lints=<names>`
+/// only: a BUILD always runs the default tier, so no invocation flag can drop
+/// a lint the compiler considers non-optional.
 pub fn findings_with(
     ws: &Workspace,
     sources: &SourceFiles,
@@ -307,6 +319,9 @@ mod tests {
 
     #[test]
     fn error_findings_gate_the_build_under_every_report_mode() {
+        // The load-bearing property: `--no-lints` and `--lint-summary` change
+        // what is PRINTED, never whether an Error-severity finding fails the
+        // build. `entity_across_yield`'s no-suppression argument rests on this.
         for mode in [LintReport::Full, LintReport::Summary, LintReport::Off] {
             let found = vec![
                 finding("unused_var", CompilerErrorLevel::Warning),

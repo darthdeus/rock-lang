@@ -6,6 +6,9 @@ use crate::*;
 /// Call once, before spawning application threads.
 pub fn main() {
     crate::compile_budget::mark_process_start();
+    // The command runs on its own thread because the main thread's stack is
+    // fixed by the OS (often 8 MiB) and compiler passes recurse over the
+    // source tree; see `rock_core::nesting` for the bound.
     let command = std::thread::Builder::new()
         .name("rock".into())
         .stack_size(rock_core::nesting::COMPILER_STACK_BYTES)
@@ -19,6 +22,9 @@ pub fn main() {
     }
 }
 
+/// Build rayon's global pool with the compiler stack; `threads` of `None`
+/// keeps rayon's default count. Ignore errors: a pool already initialized
+/// elsewhere is kept.
 #[cfg(not(feature = "sequential"))]
 fn install_compiler_pool(threads: Option<usize>) {
     let mut pool =
@@ -140,6 +146,9 @@ fn run_process() {
 }
 
 /// End a successful command without process teardown. The kernel reclaims
+/// the address space in one pass at exit; letting `exit` run would first have
+/// the allocator hand every page back with one `madvise` per span (about 75 ms
+/// after a large compile) and each thread release its heap.
 fn exit_without_teardown() -> ! {
     use std::io::Write;
     let _ = std::io::stdout().flush();
@@ -156,6 +165,10 @@ fn exit_without_teardown() -> ! {
     unsafe { libc::_exit(0) }
 }
 
+/// Whether the MIR verifier and the printer's scope guard run. Both catch
+/// only compiler bugs. An ordinary compile skips both; `rock test` keeps the
+/// guard, which is nearly free, but not the verifier, which costs a large
+/// test build over a tenth of its compile. `ROCK_MIR_CHECKS` sets both.
 fn mir_checks(command: Option<&str>, setting: Option<&str>) -> (bool, bool) {
     match skull_mir::verify::checks_requested(setting) {
         Some(on) => (on, on),
@@ -167,6 +180,9 @@ fn mir_checks(command: Option<&str>, setting: Option<&str>) -> (bool, bool) {
 mod tests {
     use super::mir_checks;
 
+    /// `(verifier, scope guard)`: `rock test` keeps the cheap printer guard
+    /// but not the MIR verifier, which costs a large program's test build
+    /// over a tenth of its compile.
     #[test]
     fn rock_test_keeps_only_the_scope_guard_unless_asked() {
         assert_eq!(mir_checks(Some("test"), None), (false, true));

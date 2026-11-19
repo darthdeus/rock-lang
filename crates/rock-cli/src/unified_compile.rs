@@ -19,12 +19,19 @@ pub(crate) fn discover_project_sources(project_dir: &Path) -> Result<SourceFiles
         )?;
         let mut dependency_files = Vec::new();
 
+        // Every package's walk and read is independent of the others,
+        // and each waits on the disk more than on a core; the packages
+        // run side by side and the first failing package in load
+        // order reports, as a serial loop would.
         let loaded: Vec<Result<SourceFiles>> = {
             use rayon::prelude::*;
             graph
                 .load_order()
                 .par_iter()
                 .map(|id| {
+                    // The root package loads from the INVOKED directory,
+                    // which can be a subdirectory of its manifest root;
+                    // dependencies always load their whole root.
                     let load_dir = if *id == graph.root() {
                         project_dir
                     } else {
@@ -36,6 +43,11 @@ pub(crate) fn discover_project_sources(project_dir: &Path) -> Result<SourceFiles
                 .collect()
         };
 
+        // Keep each dependency package's files in graph load order
+        // (providers before consumers), then the root package's files
+        // last. Global initializers are module-load effects, so a
+        // library must be ready before a consuming game's global
+        // initializer on both emitters.
         for (id, package_sources) in graph.load_order().iter().zip(loaded) {
             let node = graph.package(*id);
             let package_sources = package_sources?;

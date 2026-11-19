@@ -277,6 +277,10 @@ fn jobs_json(runnable: &[(String, ValueExpect, ValueTestShaders)]) -> String {
     serde_json::Value::Array(items).to_string()
 }
 
+/// Probe: can the runner create a GL context for `profile` here? An empty job
+/// exercises context creation and exits 0 on success, 2 on no-display/driver.
+/// Only an explicit GPU opt-out permits skipping exit 2. A spawn failure or
+/// any other exit code remains a hard error.
 fn probe_gl(runner: &std::path::Path, profile: &str, skip_gpu: bool) -> Result<bool> {
     match spawn_runner(runner, profile, "[]") {
         Ok((Some(0), _, _)) => Ok(true),
@@ -473,6 +477,11 @@ pub(crate) fn validate_workspace(dir: &str) -> Result<bone_semantic::inference::
     Ok(ws)
 }
 
+/// Split a single-file `#ifdef VERTEX` / `#ifdef PIXEL` shader into the two
+/// stage sources EXACTLY the way the engine loader does
+/// (`engine-rs/src/shader.rs`): inject `#define VERTEX` / `#define PIXEL` on the
+/// line after `#version`. Validating anything else would validate a shader the
+/// engine never compiles.
 fn split_stages(combined: &str) -> (String, String) {
     let insert_point = combined
         .find("#version")
@@ -536,6 +545,11 @@ fn compile_batch(
     Ok((passed, failed))
 }
 
+/// Locate the external GLSL runner binary: `ROCK_GLSL_RUNNER` override, then a
+/// sibling of the running `rock` binary (production + release layout), then one
+/// level up (cargo test binaries live in `target/<profile>/deps/`). Missing is
+/// a hard error: the runner is a workspace artifact, and a gate whose executor
+/// is absent must not read as green.
 fn locate_runner() -> Result<std::path::PathBuf> {
     if let Some(p) = std::env::var_os("ROCK_GLSL_RUNNER") {
         let p = std::path::PathBuf::from(p);

@@ -44,6 +44,17 @@ pub fn decode_png_rgba8(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
     Ok((info.width, info.height, rgba))
 }
 
+/// Max over 32x32-pixel blocks of the per-block mean absolute channel
+/// delta, normalized to [0, 1]. 0.0 = no above-floor difference (frames may
+/// still differ by 1 LSB per channel), 1.0 = max possible delta in some
+/// block. A whole-frame mean let a sprite-sized defect hide behind an
+/// unchanged background while the tolerance stayed fixed, so the oracle is
+/// the worst region, not the average pixel: a half-tile shift of one tile
+/// fails the default `image_snapshot` tol where the mean passed.
+/// Partial edge blocks average over their own pixels; no pixel is excluded.
+/// Per-channel deltas of 1 or less count as zero: a one-LSB noise budget,
+/// allowing small rounding differences between renderers. Deltas above the
+/// floor retain their full magnitude.
 pub fn image_diff(baseline: &Path, actual: &Path) -> Result<f64> {
     let (bw, bh, b) = decode_png_rgba8(baseline)?;
     let (aw, ah, a) = decode_png_rgba8(actual)?;

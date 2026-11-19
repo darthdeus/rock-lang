@@ -460,6 +460,9 @@ fn build_run_program(emitted: &skull_codegen_js::emit::JsProgram) -> String {
     p
 }
 
+/// True for the per-test reject a decorator-populated global read raises
+/// (`emit.rs` `discover_globals`) -- the marker that a whole-file emission (which
+/// runs the applications once) would lift the test.
 fn is_decorator_populated_reject(msg: &str) -> bool {
     msg.contains("is populated by decorator application")
 }

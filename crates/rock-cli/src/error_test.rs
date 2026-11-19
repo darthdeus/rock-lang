@@ -17,6 +17,9 @@ struct ErrorTestCase {
     name: String,
     files: Vec<(String, String)>,
     expected_error_kind: String,
+    /// `//! expect: <text>` lines: substrings the rejecting diagnostic must
+    /// contain. Empty means "any stage may reject, for any reason" -- the
+    /// original contract, kept for the cases that predate this.
     expected_reasons: Vec<String>,
 }
 
@@ -186,6 +189,9 @@ fn bone_check_case(
             Err(e) => return Err(error_text(&[e])), // hard tokenizer failure
         }
     }
+    // Total parse: a recoverable syntax error returns Ok with `recovery_errors`,
+    // so the rejection is the downstream gate in `check_with_stdlib`
+    // (`skull::pipeline::syntax_errors`), not the parse `match` above.
     crate::bone_backend::check_with_stdlib(user).map_err(|errs| error_text(&errs))
 }
 

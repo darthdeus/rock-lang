@@ -66,6 +66,9 @@ pub fn stub_for(full_lua: &str) -> &'static str {
     }
 }
 
+/// `main` is unmangled (no-mangle exception), so a bare `main()` entry runs
+/// it on both sides without computing a mangled name. Append AFTER the
+/// overlay so the overlay's fresh `main` wins over the stale baseline's.
 pub fn run_parts(parts: &[&str]) -> ExecOutcome {
     exec_lua(&parts.join("\n"))
 }

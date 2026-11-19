@@ -110,11 +110,17 @@ pub(crate) fn do_lint_union(lib: &str, consumers_root: Option<&str>) -> Result<(
     Ok(())
 }
 
+/// Analyze one candidate consumer. `Ok(None)` means it doesn't depend on the
+/// lib at all (not a consumer, not a skip). `Err` means it IS a consumer but
+/// could not be typechecked -- the caller must surface that, never absorb it.
 #[allow(clippy::type_complexity)]
 fn unreached_in(
     consumer: &Path,
     lib_root: &Path,
 ) -> Result<Option<(UnreachedKeys, Vec<bone_lints::Finding>, SourceFiles)>> {
+    // Whole-project scope on purpose: `tests/` holds `@sim`/`@test` roots, and a
+    // production-only source set would report every sim-only engine helper as
+    // dead.
     let sources = crate::unified_compile::discover_project_sources(consumer)?;
     let reaches_lib = sources.files.iter().any(|f| {
         let f = f.borrow();
