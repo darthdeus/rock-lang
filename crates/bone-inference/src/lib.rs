@@ -16,7 +16,7 @@ pub use bone_core::modules::{AccessSite, NsVisibility, PackageId};
 pub use bone_core::workspace::{
     BodyInference, ComptimeInputs, ComptimeVarValue, InferenceResult, Substitutions, Workspace,
 };
-pub use fields::{AccessDenied, FieldAccessNeed, field_access, struct_fields_of};
+pub use fields::struct_fields_of;
 pub use iter::{iterable_elem, iterator_elem};
 
 mod narrowing;
@@ -356,7 +356,7 @@ impl<'a> Gamma<'a> {
         resolve(self, TyId::Local(idx), span)
     }
 
-    pub fn assign_expr_type(
+    pub(crate) fn assign_expr_type(
         &mut self,
         c: BodyCtx,
         e: Idx<Expr>,

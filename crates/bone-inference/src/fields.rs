@@ -44,7 +44,6 @@ pub(crate) fn structs_with_field(gamma: &Gamma, field: Ustr) -> Vec<StructId> {
 }
 
 /// Keeps interface conformance decisions independent of diagnostic wording.
-#[derive(Debug)]
 pub(crate) enum StructFieldError {
     MissingField {
         struct_name: Option<Ustr>,
@@ -456,13 +455,12 @@ pub(crate) fn resolve_newtype(gamma: &Gamma, name: Ustr) -> Option<NewtypeId> {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum FieldAccessNeed {
+pub(crate) enum FieldAccessNeed {
     Read,
     Write,
 }
 
-#[derive(Clone, Debug)]
-pub enum AccessDenied {
+pub(crate) enum AccessDenied {
     NoSuchField {
         struct_name: Ustr,
         field: Ustr,
@@ -470,45 +468,35 @@ pub enum AccessDenied {
     Privilege {
         struct_name: Ustr,
         field: Ustr,
-        vis: NsVisibility,
         need: FieldAccessNeed,
     },
 }
 
 impl AccessDenied {
-    pub fn to_compiler_error(&self, span: Span) -> CompilerError {
-        match self {
-            AccessDenied::NoSuchField { struct_name, field } => CompilerError::new_with_label(
-                span,
-                format!("struct `{}` has no field `{}`", struct_name, field),
-            ),
+    pub(crate) fn to_compiler_error(&self, span: Span) -> CompilerError {
+        let msg = match self {
+            AccessDenied::NoSuchField { struct_name, field } => {
+                format!("struct `{struct_name}` has no field `{field}`")
+            }
             AccessDenied::Privilege {
                 struct_name,
                 field,
-                vis: _,
                 need,
             } => {
-                let msg = match need {
-                    FieldAccessNeed::Read => {
-                        format!(
-                            "field `{}` on struct `{}` is not accessible from this module",
-                            field, struct_name
-                        )
-                    }
-                    FieldAccessNeed::Write => {
-                        format!(
-                            "field `{}` on struct `{}` is not writable from this module",
-                            field, struct_name
-                        )
-                    }
+                let ability = match need {
+                    FieldAccessNeed::Read => "accessible",
+                    FieldAccessNeed::Write => "writable",
                 };
-                CompilerError::new_with_label(span, msg)
+                format!(
+                    "field `{field}` on struct `{struct_name}` is not {ability} from this module"
+                )
             }
-        }
+        };
+        CompilerError::new_with_label(span, msg)
     }
 }
 
-pub fn field_access(
+pub(crate) fn field_access(
     gamma: &Gamma,
     struct_key: Ustr,
     field: Ustr,
@@ -556,7 +544,6 @@ pub fn field_access(
         Err(AccessDenied::Privilege {
             struct_name: meta.name,
             field,
-            vis: vis.clone(),
             need,
         })
     }
