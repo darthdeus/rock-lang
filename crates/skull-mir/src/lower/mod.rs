@@ -2,8 +2,6 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-// Fx hashing: these maps are per-body scratch keyed by small ids and names,
-// where SipHash was a measurable share of lowering.
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::rc::Rc;
 use std::sync::OnceLock;
@@ -103,8 +101,6 @@ pub(crate) fn required_wire_slot<T>(
         .ok_or_else(|| missing(format!("{context} has no ABI slot {index}")))
 }
 
-/// Whether a fn with backend `b` can serve codegen `target`: an `Any` (portable
-/// Rock) body serves every target, else the backend must match exactly.
 fn serves_target(b: bone_core::hir::FnBackend, target: bone_core::hir::FnBackend) -> bool {
     use bone_core::hir::FnBackend;
     b == FnBackend::Any || b == target
@@ -118,16 +114,10 @@ pub fn parameter_demand_key(ws: &Workspace, func: FuncRef) -> u64 {
     parameter_demand::key(&parameter_demand::of_function(ws, func))
 }
 
-/// Value/enum REPRESENTATION analysis over a `Workspace` -- what a type looks
-/// like, as opposed to how a body lowers. Re-exported flat so the ~168 external
-/// `skull_mir::lower::*` call sites keep their paths.
 mod shape;
 mod sort_key;
 pub use shape::*;
 
-/// The backend ABI of one emitted body. The scalar-ABI POLICY lives inside and
-/// is private to it, so a definition and the call that targets it cannot reach
-/// it from two places.
 mod abi;
 pub use abi::{
     AbiPlanMemoStats, AbiQuestion, BackendFnAbiPlan, BackendFnAbiPlanHandle, BoundaryClass,
@@ -147,10 +137,6 @@ pub use struct_plan::{
 mod coroutine;
 pub use coroutine::CoroutinePlan;
 
-/// The `impl Builder` walk, split by topic. Each is a plain `impl Builder<'_>`
-/// block in a child module -- Rust allows the impl to be spread across the
-/// crate, and a child sees this module's private items, so nothing needed
-/// widening to make the split.
 mod call;
 mod container;
 pub use container::{ContainerFamily, ContainerPlan, ContainerStorage};
@@ -184,11 +170,7 @@ pub use storage::SYNTHESIZED_ENTRIES;
 mod structs;
 mod types;
 
-// Flat enum payload slots use dotted physical keys on the parent.
 
-/// Re-key relative embed leaf paths under an owning field: `[("x", v)]` under
-/// `p` becomes `[("p.x", v)]`. Relative paths let a leaf list be computed once
-/// and attached wherever the child is spliced.
 fn prefixed(field: Ustr, leaves: Vec<(Ustr, Idx<Inst>)>) -> Vec<(Ustr, Idx<Inst>)> {
     leaves
         .into_iter()
@@ -196,29 +178,20 @@ fn prefixed(field: Ustr, leaves: Vec<(Ustr, Idx<Inst>)>) -> Vec<(Ustr, Idx<Inst>
         .collect()
 }
 
-/// The parent-table slot holding a flattened enum field's discriminant (variant
-/// name string), e.g. field `sig` -> `sig.#`.
 fn flat_tag_slot(field: Ustr) -> Ustr {
     crate::names::ustr(format!("{field}.#").as_str())
 }
 
-/// The parent-table slot holding a flattened enum field's `i`th positional payload,
-/// e.g. field `sig` payload 0 -> `sig.0`.
 fn flat_payload_slot(field: Ustr, i: usize) -> Ustr {
     crate::names::ustr(format!("{field}.{i}").as_str())
 }
 
-/// The parent-table slot holding a flattened enum field's named (record) payload,
-/// e.g. field `shape` record field `r` -> `shape.r`.
 fn flat_named_slot(field: Ustr, rec_field: Ustr) -> Ustr {
     crate::names::ustr(format!("{field}.{rec_field}").as_str())
 }
 
-/// Every relative slot a flattened enum field occupies: discriminant, positional
-/// payloads, named payloads. A flat-enum field is MULTI-SLOT, so any site walking
-/// a struct's physical leaves must expand it -- treating the field name as one
-/// leaf silently splits the field across two encodings (the store writes
-/// `f.#`/`f.0`, the walker touches `f`).
+/// A flat-enum field is multi-slot: a walk over a struct's physical leaves
+/// must expand it rather than treat the field name as one leaf.
 fn flat_slot_names(field: Ustr, shape: &EnumFlatShape) -> Vec<Ustr> {
     let mut out = vec![flat_tag_slot(field)];
     for i in 0..shape.tuple_width() {
@@ -230,8 +203,6 @@ fn flat_slot_names(field: Ustr, shape: &EnumFlatShape) -> Vec<Ustr> {
     out
 }
 
-/// A flattened enum value's runtime cells: the discriminant + every union slot
-/// (positional tuple slots and named record slots), nil where unused.
 #[derive(Clone)]
 struct FlatCells {
     tag: Idx<Inst>,
@@ -239,27 +210,15 @@ struct FlatCells {
     named: Vec<(Ustr, Idx<Inst>)>,
 }
 
-/// One positional payload of a flat-enum construction: a source argument,
-/// lowered in place so it keeps its evaluation order, or a value the compiler
-/// already lowered (a `@struct_expand` field).
 enum FlatPayload {
     Expr(Idx<Expr>),
     Repr(ValueRepr),
 }
 
-/// A `match`/`if let`/`while let` scrutinee: either an ordinary lowered value, or a
-/// FLATTENED enum field still living as `parent.{prefix}__tag`/`__i` slots. The
-/// flat form lets the tag test + payload binds read the parent's slots directly --
-/// no box -- and only materializes (`scrut_value`) on a whole-value path.
 #[derive(Clone)]
 enum Scrut {
     Val(Idx<Inst>),
-    /// A tuple expression whose elements still carry their scalar
-    /// representations. Tuple patterns consume these directly; a whole-value
-    /// bind materializes the ordinary tuple and any escaping element.
     Tuple(Vec<Scrut>),
-    /// A value still held unpacked, beside the box a pattern reads when it needs
-    /// one value. A name binds the unpacked form, so an unused box is dead.
     Repr {
         repr: ValueRepr,
         boxed: Idx<Inst>,
@@ -269,9 +228,6 @@ enum Scrut {
         prefix: Ustr,
         shape: EnumFlatShape,
     },
-    /// A flat enum already threaded as scalar cells (a scalarized param/return or a
-    /// constructed-and-matched temporary) -- tag + payload values held directly, so
-    /// the tag test + payload binds need no box and no slot read.
     Cells {
         tag: Idx<Inst>,
         positional: Vec<Idx<Inst>>,
@@ -280,51 +236,23 @@ enum Scrut {
     },
 }
 
-/// Shared workspace facts about functions referenced as values.
 #[derive(Clone, Default)]
 struct ValueReferences {
     taken_by_ref: HashSet<Ustr>,
-    /// Per-body contribution: each body's set of fn-names it references by value.
-    /// Keyed by `(module, owner)` so a body edit can diff its OLD vs NEW set
-    /// without rescanning the whole workspace. Empty-contribution bodies are
-    /// omitted (absent == empty).
     per_body: HashMap<(ModuleId, BodyOwner), HashSet<Ustr>>,
-    /// Number of distinct bodies referencing each name by value.
-    /// `taken_by_ref == { name : count > 0 }`. Only a membership flip (0<->1)
-    /// changes scalar-ABI eligibility, so `ScalarCtx::update_body` reports exactly
-    /// those.
     ref_counts: HashMap<Ustr, u32>,
 }
 
-/// Workspace-wide scalar-ABI context. Address-taken functions use the
-/// type-derived fn-value ABI at their definitions and direct calls, so all three
-/// call forms agree without callee-identity analysis.
+/// Workspace-wide scalar-ABI context.
 pub struct ScalarCtx {
     global_read_checks: OnceLock<HashMap<Ustr, crate::global_storage::GlobalReadCheck>>,
     value_references: std::sync::Arc<ValueReferences>,
-    /// Use first-class value structs on targets with native aggregate values.
     values_first_class: bool,
     native_flat_enums: bool,
-    /// Keep value-struct Vec elements as first-class rows. Native backends use
-    /// their concrete aggregate layout directly instead of Lua's scalar-column
-    /// storage representation.
     row_value_containers: bool,
-    /// The codegen backend this lowering feeds. Drives backend-variant selection
-    /// at every resolved call ([`Builder::resolve_funcref`]): `Lua` rejects a
-    /// call whose only binding is a JS decl; `Js` swaps a call to its JS sibling
-    /// when the collapsed representative is a luajit-native variant. `Any`
-    /// disables the filtering entirely (the GLSL backend + generic/test callers).
     target: bone_core::hir::FnBackend,
-    /// Concrete plans and codegen share the same type arena.
     interner: std::sync::Arc<crate::monoty::MonoInterner>,
-    /// The build's one physical representation arena. It follows this context
-    /// so target-specific ABI identities survive from body entry through calls
-    /// and publishers.
     rep_arena: std::sync::Arc<abi::RepArena>,
-    /// Memoized [`BackendFnAbiPlan`] derivations. Lives here because a plan is
-    /// only valid under this context's target/value-mode/taken-by-ref state,
-    /// and [`ScalarCtx::update_body`] -- the one mutation crossing emissions --
-    /// clears it.
     abi_plans: abi::AbiPlanCache,
 }
 
@@ -344,9 +272,6 @@ impl Clone for ScalarCtx {
     }
 }
 
-/// The fn-names a single body references by value (`Expr::Global(name)` whose
-/// `name` is a function) — the way `let f = v2_sum` / passing `f` as an arg
-/// surfaces in HIR (a direct call's callee is a `Callee`, not an `Expr`).
 fn scan_body_value_refs(ws: &Workspace, body: &Body) -> HashSet<Ustr> {
     let mut set = HashSet::default();
     for (_, expr) in body.expr_arena.iter() {
@@ -380,10 +305,8 @@ impl ScalarCtx {
                         value_references.per_body.insert((module.id, *owner), set);
                     }
                 }
-                // Generated `@sim` registration passes each sim as a fn value,
-                // which no body scan sees. Its reference is permanent (adding or
-                // removing `@sim` is an interface edit), so it holds one count that
-                // no body edit can release.
+                // `@sim` registration takes each sim as a fn value outside any body scan, so
+                // it holds one permanent count no body edit can release.
                 for (_, f) in module.functions.iter() {
                     if f.annotations.iter().any(|a| a.is_builtin("sim")) {
                         *value_references.ref_counts.entry(f.name).or_insert(0) += 1;
@@ -394,9 +317,6 @@ impl ScalarCtx {
             value_references
         };
         let interner = std::sync::Arc::new(crate::monoty::MonoInterner::new());
-        // Default target is Lua: skull-codegen-lua is the primary consumer and its
-        // full + incremental paths build a `ScalarCtx::new`. The JS driver and the
-        // GLSL backend override via `with_target`.
         Self {
             global_read_checks: OnceLock::new(),
             value_references: std::sync::Arc::new(value_references),
@@ -422,10 +342,7 @@ impl ScalarCtx {
             .get_or_init(|| crate::global_storage::global_read_checks(ws, self))
     }
 
-    /// **The build's one type arena**, through which every [`Instance`] is
-    /// minted and read.
-    ///
-    /// [`Instance`]: crate::instance::Instance
+    /// The build's one type arena; every `Instance` is minted against it.
     pub fn interner(&self) -> &crate::monoty::MonoInterner {
         &self.interner
     }
@@ -469,9 +386,7 @@ impl ScalarCtx {
         self.abi_plans.store(question, inst, plan);
     }
 
-    /// ABI-plan memo counters. A full emission over a real workspace must show
-    /// hits: the duplicate-derivation population it exists to remove is the
-    /// normal case, not an optimization corner.
+    /// ABI-plan memo counters.
     pub fn abi_plan_stats(&self) -> AbiPlanMemoStats {
         self.abi_plans.stats()
     }
@@ -481,11 +396,7 @@ impl ScalarCtx {
         self.rep_arena.stats()
     }
 
-    /// Set the codegen backend this lowering feeds (see [`target`]).
-    /// The backend this context lowers for. Read by consumers that must ask the
-    /// EMITTER's own declaration selection rather than restate it -- the site
-    /// join compares a target-selected sibling against the target-neutral
-    /// graph's representative through `backend_variant`.
+    /// The backend this context lowers for.
     pub fn target(&self) -> bone_core::hir::FnBackend {
         self.target
     }
@@ -495,20 +406,14 @@ impl ScalarCtx {
         self
     }
 
-    /// Like [`new`](Self::new) but with the scalarized value ABI disabled: value
-    /// structs stay first-class single values everywhere (the GLSL backend's
-    /// requirement -- a `vecN` is not scalar leaves). See [`values_first_class`].
-    /// The GLSL backend does not participate in Lua/JS backend-variant selection,
-    /// so its target is `Any` (filtering disabled).
+    /// Like [`new`](Self::new) but value structs stay first-class values: a GLSL
+    /// `vecN` is not scalar leaves.
     pub fn new_values_first_class(ws: &Workspace) -> Self {
         Self::new_with_value_mode(ws, true)
     }
 
     /// Return names whose function-value uses change ABI eligibility after an edit.
     pub fn update_body(&mut self, ws: &Workspace, mid: ModuleId, owner: BodyOwner) -> Vec<Ustr> {
-        // An edit can flip taken-by-ref membership, and the memoized ABI plans
-        // read it -- drop them all rather than tracking which flips reach which
-        // plan. Cheaper than one stale plan is worth.
         self.abi_plans.clear();
         self.global_read_checks.take();
         if self.values_first_class {
@@ -548,14 +453,9 @@ impl ScalarCtx {
     }
 }
 
-/// A hoisted nested `fn`: the private top-level name it resolves to, and the
-/// value ABI its definition and every call site both read (so the two can never
-/// drift, the same single-gate discipline as [`BackendFnAbiPlan`]).
 #[derive(Clone)]
 struct NestedFn {
     hoisted: Ustr,
-    /// Declared param names, so a call site can place named args into slots
-    /// (`slotted_call_args`) exactly as a top-level callee's would be.
     param_names: Vec<Ustr>,
     representation: FunctionRepPlan,
     logical_type: MonoTy,
@@ -627,8 +527,6 @@ pub fn scalar_abi_param_collisions(
     out
 }
 
-/// A chunk of a `string.format` conversion string: a static literal, or a
-/// runtime int expression (dynamic width/precision) stringified into the format.
 enum FmtPiece {
     Lit(String),
     DynInt(Idx<Expr>),
@@ -662,8 +560,6 @@ fn fmt_pieces(
     if spec.alternate {
         buf.push('#');
     }
-    // Zero-pad only with a STATIC width (a dynamic width can't bake `0`+width
-    // into the literal; falls back to space pad).
     if spec.zero_pad && spec.width_expr.is_none() {
         buf.push('0');
     }
@@ -688,8 +584,6 @@ fn fmt_pieces(
     Some(pieces)
 }
 
-// A short tag for an unhandled expr variant, so a lowering gap names the form it
-// hit (`...: InterpolatedString`) -- the corpus coverage lens buckets on it.
 fn expr_tag(e: &Expr) -> &'static str {
     match e {
         Expr::As { .. } => "As",
@@ -713,7 +607,6 @@ fn raw(b: Idx<BindingInfo>) -> u32 {
     b.into_raw().into()
 }
 
-/// The `NativeBuffer*` nominal type names (T-typed + phantom-size variants).
 fn is_native_buffer(name: Ustr) -> bool {
     bone_core::modules::is_intrinsic_key_in(
         name,
@@ -729,7 +622,6 @@ fn is_native_buffer(name: Ustr) -> bool {
     )
 }
 
-/// The scalar class of an operand, for the native-arithmetic dispatch.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ArithTy {
     Int,
@@ -738,8 +630,6 @@ enum ArithTy {
     Str,
 }
 
-/// The typed native arithmetic instruction for an `__op_*` over two scalar
-/// values of the given classes (the build-time int/float/string split, D8).
 fn arith_inst(
     op: &str,
     lt: ArithTy,
@@ -759,9 +649,7 @@ fn arith_inst(
         "__op_mul" if float => Inst::FloatMul(lv, rv),
         "__op_mul" if lt == ArithTy::Uint && rt == ArithTy::Uint => Inst::UintMul(lv, rv),
         "__op_mul" => Inst::IntMul(lv, rv),
-        // `/` is always float division (Lua `/` promotes int operands);
-        // integer floor division is the separate `./` -> `__op_idiv`, which
-        // codegen renders `math.floor(a / b)`.
+        // Lua `/` is always float division; integer floor division is `__op_idiv`.
         "__op_div" => Inst::FloatDiv(lv, rv),
         "__op_idiv" if lt == ArithTy::Uint && rt == ArithTy::Uint => Inst::UintDiv(lv, rv),
         "__op_idiv" => Inst::IntDiv(lv, rv),
@@ -772,9 +660,6 @@ fn arith_inst(
     })
 }
 
-/// Physical owner shared by a concrete callable and its flat variants.
-/// Declaration names + rendered param types preserve non-generic cell names;
-/// generic instances use their canonical concrete symbol to keep cells distinct.
 fn static_owner_tag(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -796,7 +681,6 @@ fn static_owner_tag(
     crate::names::ustr(&format!("{}_{:06x}", name, h.finish() & 0xff_ffff))
 }
 
-/// Visit child contents to keep their arena indices out of the reload key.
 fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map::DefaultHasher) {
     hash_init_node(body, HirChild::Expr(e), h);
 }
@@ -810,7 +694,6 @@ fn hash_init_node(body: &Body, node: HirChild, h: &mut std::collections::hash_ma
         };
     }
 
-    // Cases that interleave payload with child hashes keep their own traversal.
     match node {
         HirChild::Expr(e) => match body.expr_arena[e] {
             Expr::Unit => tag!(0),
@@ -1100,10 +983,6 @@ fn hash_interp_spec(
     }
 }
 
-/// Names-and-tuples view of an irrefutable `let`/`for` pattern -- the shapes
-/// loop and tuple codegen bind directly, with no match tests. A newtype is
-/// transparent at runtime, so its pattern views as its inner. `None` means the
-/// pattern needs the general match machinery.
 #[derive(Clone, Debug)]
 pub(crate) enum BindingPattern {
     Leaf(Idx<BindingInfo>),
@@ -1129,9 +1008,8 @@ impl BindingPattern {
 pub(crate) fn binding_view(body: &Body, p: Idx<Pattern>) -> Option<BindingPattern> {
     match body.pattern_arena[p] {
         Pattern::Bind(b) => Some(BindingPattern::Leaf(b)),
-        // Transparent only down to a single name: a tuple INSIDE the newtype
-        // must consult the wrapped type's layout (a splatting tuple's box is
-        // flat), which the names-only fast path cannot.
+        // A tuple inside the newtype needs the wrapped type's layout: a splatting
+        // tuple's box is flat.
         Pattern::Newtype { sub, .. } => match body.pattern_arena[sub] {
             Pattern::Bind(b) => Some(BindingPattern::Leaf(b)),
             _ => None,
@@ -1145,9 +1023,8 @@ pub(crate) fn binding_view(body: &Body, p: Idx<Pattern>) -> Option<BindingPatter
     }
 }
 
-/// Lower one concrete body plan while resolving every concrete callee ABI from
-/// the same graph-owned plan set. A missing selected callee is an error rather
-/// than a fallback to declaration-shaped ABI facts.
+/// Lower one concrete body plan, resolving every callee ABI from the same
+/// graph-owned plan set.
 pub fn lower_instance_with_plans(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -1192,8 +1069,6 @@ fn lower_instance_with_plan_inner(
     let inf = ws
         .inference(mid)
         .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fid)));
-    // The plan audits below only ever fail on a compiler bug (a concrete plan
-    // the graph built incompletely), so they run with the debug checks.
     let audit = crate::verify::checks_enabled();
     if let Some(inf) = inf.filter(|_| audit) {
         validate_concrete_type_tables(
@@ -1266,9 +1141,6 @@ fn lower_body(
 
     let mut f = MirFunc::new(func.name);
     f.rep_arena = Some(scx.rep_arena().clone());
-    // A `co fn` lowers to an ordinary CFG with `Term::Yield`s + a resume-arg cell
-    // (the value `yield e` evaluates to). `skull-transform`'s coroutine pass then
-    // rewrites it into the stackless state machine.
     let resume_arg = func.is_coroutine.then(|| {
         let cell = f.new_cell(Some(crate::names::ustr("__resume_arg")));
         f.cells[cell].capture_identity = Some(crate::code_identity::CaptureIdentity::Generated {
@@ -1301,7 +1173,6 @@ fn lower_body(
     b.param_plan = Some(abi);
     b.fn_name_span = Some(func.name_span);
     b.site_owner = Some(subject.clone());
-    // Only statics and hoisted functions need the overload's owner name.
     if body
         .statement_arena
         .iter()
@@ -1370,9 +1241,8 @@ pub fn lower_global_with_plans(
     lower_global_with_call_context(ws, scx, scx, plan, concrete_plans, name)
 }
 
-/// Lower a global with a storage context and a possibly different call ABI
-/// context. Native C globals keep their scalarized storage while calls into
-/// ordinary C bodies use those bodies' first-class value ABI.
+/// Native C globals keep scalarized storage while calls into ordinary C bodies
+/// use those bodies' first-class value ABI.
 pub(crate) fn lower_global_with_call_context(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -1455,9 +1325,8 @@ fn lower_global_inner(
         None => CompilerError::new_no_location(error.message),
     })?;
     b.f.global_plan = Some(global_plan);
-    // A `nobox` global is category-2 storage: its concrete plan owns the layout,
-    // so the initializer RETURNS leaves and `mir_emit` binds one Lua global per
-    // leaf. Without this the body packs a box the verifier then rejects.
+    // A `nobox` global's initializer returns leaves; `mir_emit` binds one Lua
+    // global per leaf.
     b.ret_rep = (!scx.values_first_class).then(|| {
         b.f.global_plan
             .as_ref()
@@ -1566,8 +1435,6 @@ fn validate_always_plan(
     Ok(())
 }
 
-/// Whether a call to `owner` reads the signature of the callee's own body
-/// plan rather than the one the site recorded.
 fn callee_has_body_plan(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -1790,169 +1657,70 @@ struct Builder<'a> {
     call_scx: &'a ScalarCtx,
     concrete_plan: &'a ConcreteBodyPlan,
     concrete_plans: &'a ConcretePlans,
-    /// The enclosing fn's `generic_bounds`, parallel to its `generics`:
-    /// `Some(elem)` where a generic is declared `I: Iterator<elem>`. THE declared
-    /// source for a placeholder `next`'s element shape -- the call's inferred
-    /// type is checked once against the bound and does not carry the
-    /// instantiation, so reading the element off it plans the wrong shape.
+    /// `Some(elem)` where a generic is declared `I: Iterator<elem>`. A call's
+    /// inferred type does not carry the instantiation, so a placeholder `next`'s
+    /// element shape must come from here.
     generic_bounds: &'a [Option<TyId>],
     body: &'a Body,
     inf: Option<&'a BodyInference>,
     f: MirFunc,
     cur: Idx<Block>,
-    /// raw binding index -> the variable cell it maps to.
     binds: HashMap<u32, Idx<Cell>>,
-    /// Innermost-last `(continue target, break target, continue depth, break depth)`.
-    /// A break also leaves the scope owning a temporary loop generator.
     loop_targets: Vec<(Idx<Block>, Idx<Block>, usize, usize)>,
-    /// Break targets some `break` actually jumped to. A `while true` whose exit
-    /// was never targeted terminates the statement list (its fall-through is
-    /// unreachable), which is what lets a `while true { ... return ... }` co fn
-    /// body pass the non-unit fall-off rejection.
     used_break_targets: HashSet<Idx<Block>>,
-    /// Innermost-last stack of pending `defer` bodies per block scope; spliced
-    /// (LIFO) at block exit, before every `return` and at `break`/`continue`.
-    /// Each entry records how dying (error, or a co fn kill) reaches it; see
-    /// [`stmt::PendingDefer`].
     defers: Vec<Vec<(Idx<Expr>, stmt::PendingDefer)>>,
-    /// How a `defer` in the body being lowered registers (see
-    /// [`stmt::DeferMode`]). A lambda sets its own mode: inside a `co fn` it
-    /// is still an ordinary fn. Global initializers and decorators are
-    /// `Inline`: their units are not emitted under the unwind trampoline.
     defer_mode: stmt::DeferMode,
-    /// True while lowering a `defer` body (inline splice or terminal copy) --
-    /// `yield`/`await` inside a defer body is a compile error.
     in_defer_body: bool,
-    /// Last block of the detached walk of active loop-owned generators.
     owned_reload_tail: Option<Idx<Block>>,
-    /// In a `co fn`, the cell that `yield e` evaluates to (the value passed to
-    /// the next `resume(arg)`). `None` outside a coroutine.
     resume_arg: Option<Idx<Cell>>,
     param_reps: Vec<RepId>,
-    /// The ordinary body's ABI owns this immutable parameter slice.
     param_plan: Option<BackendFnAbiPlanHandle>,
     ret_rep: Option<RepId>,
-    /// The logical result type of the function, nested fn or lambda whose body is
-    /// being lowered; a `return` belongs to the innermost of them.
     ret_ty: Option<&'a MonoTy>,
-    /// The fn's name span, for spanned emit-time rejections that have no better
-    /// anchor (the non-unit-coroutine fall-off check). `None` for non-fn bodies.
     fn_name_span: Option<Span>,
-    /// The source span currently being lowered, maintained by [`Builder::lower_expr`].
-    /// Instructions a post-transform check can reject stamp it into
-    /// [`MirFunc::inst_spans`] so the diagnostic points at the construct rather
-    /// than at the enclosing fn.
     cur_span: Option<Span>,
     cur_expr: Option<Idx<Expr>>,
-    /// WHICH expression arena [`Self::cur_expr`] indexes. A struct-default
-    /// initializer is lowered from the declaring struct's `StructDefaults` body
-    /// into this CFG while `site_owner` still names the enclosing function, so
-    /// its index is only meaningful against THAT arena -- and the walk records
-    /// it under the same domain.
+    /// Which expression arena [`Self::cur_expr`] indexes: a struct-default
+    /// initializer lowers from its struct's `StructDefaults` body while `site_owner`
+    /// still names the enclosing function.
     cur_domain: crate::site::SiteDomain,
     site_owner: Option<crate::instance::Instance>,
     cur_op: crate::site::SiteOp,
-    /// A scalarized binding -> (its leaves, shape). A read of the binding
-    /// reconstructs the unboxed `Group` from these; a field read projects a
-    /// leaf directly (no cdata).
     group_binds: HashMap<u32, (Vec<GroupLeaf>, ValueShape)>,
-    /// Plain-cell `value` bindings first stored a freshly built box (a `let` of
-    /// a ctor or pack). A reassignment copies a box it did not build, so every
-    /// store stays a ctor and SROA can scalarize the binding. Whole-value uses
-    /// still copy ([`Self::boxed_value_local`]): SROA may decline the cell (a
-    /// closure touches it), and then its loads are the one shared box.
     owned_value_binds: HashSet<u32>,
-    /// Bindings some `ref` borrow in this body is rooted at
-    /// ([`Self::binding_ref_borrowed`]), collected on first use.
     ref_borrowed_binds: std::cell::OnceCell<(HashSet<u32>, HashSet<u32>)>,
-    /// Which bindings may live without a cell, computed on first use.
     body_facts: std::cell::OnceCell<BodyFacts>,
-    /// `let` bindings held as their value instead of a cell
-    /// ([`Self::bind_let_value`]).
     value_binds: HashMap<u32, Idx<Inst>>,
-    /// Scalar argument reads frozen before an annotated preflight call.
     preflight_reads: Vec<HashMap<u32, Idx<Inst>>>,
-    /// Value types whose copy is being emitted, outermost first: a recursive
-    /// `V?` child cannot be unrolled into its own copy ([`Self::enter_value_copy`]).
     value_copy_stack: Vec<Ustr>,
-    /// Opaque value children a copy or a binding read left as its source's
-    /// box, with their types ([`Self::owned_value_children`]).
     borrowed_value_children: HashMap<Idx<Inst>, std::borrow::Cow<'a, MonoTy>>,
-    /// Boxes held only by immutable values; owned storage still copies them.
     shareable_value_boxes: HashSet<Idx<Inst>>,
-    /// Source heap records may be supplied by a host with property callbacks.
-    /// Mark receivers while their source types are available; even generated
-    /// projections of embedded fields must retain that effect in MIR.
     callback_records: HashSet<Idx<Inst>>,
-    /// Shallow local snapshots cannot be lent across a call or return.
     unshareable_value_cells: HashSet<Idx<Cell>>,
-    /// `materialize(..)` calls that are an argument of an opaque boundary,
-    /// where a splatting tuple is boxed in its user layout.
     boundary_materializes: HashSet<Idx<Expr>>,
-    /// Tuple boxes built one value per element (`pack` of an unpacked tuple).
-    /// Every other box of a splatting tuple is the flat wire.
     element_tuples: HashSet<Idx<Inst>>,
-    /// Unwritten tuple bindings whose slots were read straight out of one flat
-    /// box: a whole-value use shares that box rather than packing a copy.
     tuple_bind_boxes: HashMap<u32, Idx<Inst>>,
-    /// Splatting tuple expressions whose scalar lowering is asking their repr.
     scalar_tuple_reentry: HashSet<Idx<Expr>>,
-    /// A local snapshot may defer child copies until its whole-value escape.
     shallow_pack: bool,
-    /// Immutable call, return and local uses may share proven immutable boxes.
     lending_pack: bool,
-    /// Right-hand sides of assignments into an `f32` field. Every assignment
-    /// path lowers its value through one of the expression entries, which
-    /// round these, so no store path needs its own rounding.
     f32_round_exprs: HashSet<Idx<Expr>>,
-    /// Check assignment RHS values before representation-specific stores.
     integer_field_checks: HashMap<Idx<Expr>, bool>,
-    /// The tuple twin of [`Self::group_binds`]: a NAME bound to a splatting
-    /// tuple holds its slot cells, so `if let t = <nullable tuple call>` can
-    /// rebuild the unboxed repr on each read of `t` instead of packing it.
-    /// Keyed the same way; the shape is stored non-nullable because presence
-    /// was already consumed by the branch that bound it.
     tuple_binds: HashMap<u32, (Vec<Idx<Cell>>, TupleLayout)>,
-    /// `static` locals: raw binding idx -> the private global cell name a read /
-    /// write of the binding resolves to (an `Inst::Global`/`StoreGlobal`, not a
-    /// local cell). Populated by `lower_static`.
     static_cells: HashMap<u32, Ustr>,
-    /// Owner tag baked into a static's cell name -- stable across body edits,
-    /// distinct per overload (fn name + rendered param types). NOT the mangled
-    /// name (skull-mir is upstream of the mangler); it only needs uniqueness +
-    /// stability, which mir_emit reads back verbatim from `MirFunc::statics`.
+    /// Owner tag baked into a static's cell name: stable across body edits and
+    /// distinct per overload. `mir_emit` reads it back verbatim.
     static_owner: Ustr,
-    /// Per static source-name counter (source order) so shadowing duplicates get
-    /// distinct cells and adding an unrelated static never renames siblings.
     static_counters: HashMap<Ustr, u32>,
-    /// Nested `fn` names: raw binding idx -> the hoisted `__local_*` global a
-    /// call / value-ref of the binding resolves to, plus its value ABI.
-    /// Inherited (cloned) by a nested fn's own builder so it can reference
-    /// itself + prior siblings.
     nested_fn_globals: HashMap<u32, NestedFn>,
-    /// Per nested-fn source-name counter (source order), the `static_counters`
-    /// analogue for shadowing duplicates.
     nested_fn_counters: HashMap<Ustr, u32>,
-    /// The one expression currently being lowered for its PRESENCE only (`x ==
-    /// null`): a `V?` place read there skips its copy-out, because a nil test
-    /// answers the same question without a cdata
-    /// ([`Builder::nullable_place_value_of`]). Exact node, never a subtree -- a
-    /// nested read that feeds a real whole-value use still copies.
+    /// The exact expression, never a subtree, lowered only for its presence; a
+    /// `V?` place read there skips its copy-out.
     presence_only: Option<Idx<Expr>>,
-    /// `ref` bindings to a flat-stored container element (a flat variant's
-    /// `ref` params and `let`s of a flat place), with the storage they address
-    /// ([`flat_ref`]).
     flat_ref_binds: HashMap<u32, FlatRefKey>,
-    /// The `(vec, slot)` cells of each [`Self::flat_ref_binds`] entry.
     flat_ref_cells: HashMap<u32, (Idx<Cell>, Idx<Cell>)>,
-    /// `ref` lets of a body scanned for its flat return, by initializer.
     flat_scan_lets: HashMap<u32, Idx<Expr>>,
-    /// Set when this body's `ref` result addresses a flat element: a return
-    /// is `vec, slot`.
     flat_ret: Option<FlatRefKey>,
-    /// The flat variants of the emitted root this builder lowers into.
     flat_variants: FlatVariantsHandle,
-    /// Innermost-last flat arguments of the calls being lowered.
     flat_arg_captures: Vec<FlatArgCapture>,
 }
 
@@ -2066,8 +1834,6 @@ impl<'a> Builder<'a> {
         self.body_facts.get_or_init(|| BodyFacts::of(self.body))
     }
 
-    /// A local that nothing writes, captures or borrows after its binding, so
-    /// it can be held as values with no cell.
     pub(crate) fn binding_stays_unwritten(&self, name: Idx<BindingInfo>) -> bool {
         // Shader lowering keeps the cell: the GLSL emitter names a local only
         // for a cell, and writes a value out at every use.
@@ -2080,7 +1846,6 @@ impl<'a> Builder<'a> {
             || self.body_facts().written.contains(&raw(name)))
     }
 
-    /// Read one leaf of a scalarized binding.
     pub(crate) fn read_leaf(&mut self, leaf: GroupLeaf) -> Idx<Inst> {
         match leaf {
             GroupLeaf::Cell(cell) => self.emit_cur(Inst::Load(cell)),
@@ -2088,9 +1853,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Bind a `let` to its value when nothing needs the binding as a cell: it
-    /// is never written again, never captured or borrowed, and holds no
-    /// aggregate (a value struct's whole read copies from its cell).
     pub(crate) fn bind_let_value(&mut self, name: Idx<BindingInfo>, value: Idx<Inst>) -> bool {
         if !self.binding_stays_unwritten(name) {
             return false;
@@ -2106,8 +1868,6 @@ impl<'a> Builder<'a> {
                     .nominal()
                     .is_some_and(|n| self.ws.struct_by_name.contains_key(&n)),
             });
-        // A read records its own logical type on an aggregate value, which
-        // the binding's type need not match (a newtype over it, a narrowing).
         if holds_aggregate
             || matches!(
                 self.f.insts[value],
@@ -2162,9 +1922,6 @@ impl<'a> Builder<'a> {
             .and_then(|id| self.scx.rep_arena().tuple_shape(id))
     }
 
-    /// [`gap`] anchored at the construct currently being lowered. Use wherever a
-    /// gap names a user-visible type or expression -- an unspanned one leaves the
-    /// reader with a whole project to search.
     fn gap_here(&self, msg: impl std::fmt::Display) -> CompilerError {
         match self.cur_span {
             Some(span) => {
@@ -2174,8 +1931,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Give a location-less error leaving a lowering scope the cursor's span,
-    /// before that scope restores the cursor. Innermost wins.
     fn located(&self, error: CompilerError) -> CompilerError {
         match self.cur_span {
             Some(span) => error.or_at(span),
@@ -2183,9 +1938,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// A representation-planning error, at its own span or else the cursor's.
-    /// End the current block with a branch to `nil_bb` when `v` is nil, else
-    /// to `value_bb`. Returns the nil test.
     pub(crate) fn branch_on_nil(
         &mut self,
         v: Idx<Inst>,
@@ -2210,7 +1962,6 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// A projection of a non-nil Rock value; still a mutable load at this point.
     fn read_value_field(&mut self, base: Idx<Inst>, field: Ustr) -> Idx<Inst> {
         self.emit_cur(Inst::Field {
             base,
@@ -2292,7 +2043,6 @@ impl<'a> Builder<'a> {
         self.store_cell(cell, value);
     }
 
-    /// A direct multi-return call into `dests`, and each dest loaded back.
     fn call_multi(
         &mut self,
         dests: Vec<Idx<Cell>>,
@@ -2304,7 +2054,6 @@ impl<'a> Builder<'a> {
         (call, self.load_cells(&loads_from))
     }
 
-    /// An indirect multi-return call into `dests`, and each dest loaded back.
     fn call_value_multi(
         &mut self,
         dests: Vec<Idx<Cell>>,
@@ -2376,7 +2125,6 @@ impl<'a> Builder<'a> {
                 }
             }
         }
-        // Record the source site before instruction indices enter later passes.
         let is_mint = self.cur_op == crate::site::SiteOp::FnValue;
         if is_call || is_mint {
             if let (Some(owner), Some(expr)) = (self.site_owner.clone(), self.cur_expr) {
@@ -2394,8 +2142,6 @@ impl<'a> Builder<'a> {
                 );
             }
         }
-        // Whatever follows a raising call lowers into a block nothing reaches,
-        // which cleanup drops. The raising block keeps its open terminator.
         if let Inst::Call { func, .. } = self.f.insts[id]
             && crate::intrinsics::never_returns(&self.ws.module(func.module).functions[func.func])
         {
@@ -2423,7 +2169,6 @@ impl<'a> Builder<'a> {
         value: Idx<Inst>,
         check: &crate::global_storage::GlobalReadCheck,
     ) {
-        // A typed assignment in this block already established a non-null value.
         if self.f.blocks[self.cur].insts.iter().any(|i| {
             matches!(self.f.insts[*i], Inst::StoreGlobal { name, .. } if crate::mangle::symbol_of_key(name) == check.probe)
         }) {
@@ -2476,10 +2221,6 @@ impl<'a> Builder<'a> {
         self.cur = next;
     }
 
-    /// The shared type/dispatch context this builder resolves through. Every
-    /// predicate below is a delegate: `DispatchCtx` is the one implementation,
-    /// so the instance walk asking the same question cannot get a second answer
-    /// (`skull_mir::lower::dispatch`).
     pub(crate) fn dispatch(&self) -> dispatch::DispatchCtx<'_> {
         dispatch::DispatchCtx {
             ws: self.ws,
@@ -2495,7 +2236,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Set the source expression for a synthesized call.
     fn with_site_expr<T>(&mut self, expr: Idx<Expr>, f: impl FnOnce(&mut Self) -> T) -> T {
         let outer = self.cur_expr.replace(expr);
         let out = f(self);
@@ -2514,10 +2254,6 @@ impl<'a> Builder<'a> {
         out
     }
 
-    /// Lower `f` with the site OPERATION overridden, restoring it after. The
-    /// witness and synthesized routes emit calls that belong to the enclosing
-    /// expression but are NOT its own call, and a `for` head carries several at
-    /// one expression -- so the operation has to be scoped, not global.
     fn with_site_op<T>(&mut self, op: crate::site::SiteOp, f: impl FnOnce(&mut Self) -> T) -> T {
         let outer = std::mem::replace(&mut self.cur_op, op);
         let out = f(self);
@@ -2525,10 +2261,6 @@ impl<'a> Builder<'a> {
         out
     }
 
-    /// Whether the current block is still open (no terminator set yet). A
-    /// diverging sub-expression (`return`/`break`/`continue`) sets a real
-    /// terminator, so after lowering it `is_open()` is false and the caller
-    /// must NOT append a fall-through `Store`/`Goto`.
     fn is_open(&self) -> bool {
         matches!(self.f.blocks[self.cur].term, Term::Unreachable)
     }
@@ -2543,9 +2275,8 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Give each boxed value parameter that this body `ref`-borrows its own
-    /// copy on entry: the caller may have lent it the caller's box
-    /// ([`Self::arg_values_for_slot`]), and the borrow writes in place.
+    /// A caller may lend its own box to a boxed value parameter, so a `ref`-borrowed
+    /// one is copied on entry.
     pub(crate) fn copy_ref_borrowed_params(
         &mut self,
         params: &[Idx<BindingInfo>],
@@ -2597,7 +2328,6 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Bind the parameter in physical slot order.
     pub(crate) fn bind_param_slot(
         &mut self,
         pb: Idx<BindingInfo>,
@@ -2618,8 +2348,6 @@ impl<'a> Builder<'a> {
                 match self.new_flat_enum_cells(pb, name, shape, owner)? {
                     Some(cells) => cells,
                     None => {
-                        // Refuses any nullable nesting, so a `Some` here means
-                        // every slot is a data leaf of the type it names.
                         let leaf_tys = self.value_shape_leaf_monos(shape);
                         (0..slot.slot_count(self.scx.rep_arena()))
                             .map(|li| {
@@ -2679,8 +2407,6 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// One admission rule for call-site constants and callee default guards.
-    /// `null` stays omitted; other unsupported expressions stay callee-bound.
     fn constant_param_default(
         &self,
         body: &Body,
@@ -2711,10 +2437,6 @@ impl<'a> Builder<'a> {
         Some(CallParamDefault::Scalar(literal))
     }
 
-    /// Recognize only a complete Vec3 literal or a constructor whose entire
-    /// body returns one. Read both arenas in their lexical owners, never lower
-    /// a foreign expression in the caller. Nonconstant inputs, spread/defaulted
-    /// constructor arguments and bodies with effects remain callee-side.
     fn constant_vector_default(
         &self,
         body: &Body,
@@ -2841,7 +2563,6 @@ impl<'a> Builder<'a> {
         Some(CallParamDefault::Vector { shape, literals })
     }
 
-    /// Emit simple defaults at same-target call sites to avoid optional argument guards.
     pub(crate) fn call_param_defaults(&self, func: FuncRef) -> Vec<Option<CallParamDefault>> {
         let module = self.ws.module(func.module);
         let decl = &module.functions[func.func];
@@ -2855,8 +2576,6 @@ impl<'a> Builder<'a> {
             .ws
             .inference(func.module)
             .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(func.func)));
-        // A foreign wrapper fills only literal defaults and has no Rock
-        // prologue to test the marker (`default_fill_prologue`).
         let rock_body = decl.inline_body.is_none() && !decl.is_extern;
         body.param_defaults
             .iter()
@@ -2918,7 +2637,6 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Opaque callers may omit arguments, so fill defaults in the callee too.
     fn fill_param_defaults(&mut self) -> Result<(), CompilerError> {
         let pbs: Vec<Idx<BindingInfo>> = self.body.param_bindings.into_iter().collect();
         let defaults = self.body.param_defaults.clone();
@@ -2934,8 +2652,7 @@ impl<'a> Builder<'a> {
             {
                 self.f.param_default_materialized.insert(i);
             }
-            // A scalarized value param's omitted arg arrives as N nils — guard on
-            // the FIRST leaf cell and fill all leaves from the default's leaves.
+            // An omitted scalarized value arg arrives as N nils; the first leaf is the guard.
             if let Some((leaves, shape)) = self.group_binds.get(&raw(pb)).cloned() {
                 let cells: Vec<Idx<Cell>> = leaves.iter().map(|l| l.cell()).collect();
                 for &cell in &cells {
@@ -3015,8 +2732,6 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Lower the body's root expression, ending the entry block in a `Return`.
-    /// A top-level `Block` is special-cased so a tail-less body returns bare.
     fn lower_root(&mut self) -> Result<(), CompilerError> {
         let Some(root) = self.body.root else {
             self.f.set_term(self.cur, Term::Return(vec![]));
@@ -3029,10 +2744,8 @@ impl<'a> Builder<'a> {
                 self.defers.pop();
                 return Ok(());
             }
-            // A coroutine result comes ONLY from explicit `return` statements
-            // (bone discards a co fn's body tail without coercing it to R), so
-            // ANY reachable body end -- bare fall-off or unchecked tail -- is a
-            // fall-off for the non-unit-R rejection below.
+            // bone discards a co fn's body tail without coercing it, so any reachable
+            // body end is a fall-off.
             if self.f.is_coroutine {
                 self.reject_nonunit_coroutine_falloff()?;
             }
@@ -3057,7 +2770,6 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Reachable fallthrough in a non-null, non-unit coroutine would publish a missing result.
     fn reject_nonunit_coroutine_falloff(&self) -> Result<(), CompilerError> {
         let plan = self.concrete_plan;
         let Some(result_id) = plan.signature.result else {
@@ -3097,7 +2809,6 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Forward the return slot plan through tail control flow.
     fn lower_return(&mut self, opt: Option<Idx<Expr>>) -> Result<(), CompilerError> {
         let direct = self.scx.target == bone_core::hir::FnBackend::Lua
             && !self.f.is_coroutine
@@ -3121,9 +2832,6 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// The return-value list for `opt`: under the scalar value ABI a value return
-    /// flattens to its leaf scalars (`return v0, v1, ...`); otherwise it's the
-    /// single (boxed) value, or empty for a bare return.
     pub(crate) fn return_leaves(
         &mut self,
         opt: Option<Idx<Expr>>,
@@ -3145,14 +2853,11 @@ impl<'a> Builder<'a> {
             let Expr::Block { statements, .. } = self.body.expr_arena[root] else {
                 return false;
             };
-            // The synthesized factory ends with this return. Nested user
-            // closures in its initializer retain their own no-box guarantees.
             statements.into_iter().next_back().is_some_and(|statement| {
                 matches!(self.body.statement_arena[statement], Statement::Return(Some(value)) if value == e)
             })
         });
         if json_default_return {
-            // Default metadata has an opaque ABI owned by the compiler.
             let repr = self.lower_expr_repr(e)?.into_value();
             return Ok(vec![self.materialize_repr(repr)?]);
         }
@@ -3163,8 +2868,6 @@ impl<'a> Builder<'a> {
                 )
             });
             if gpu_context {
-                // Shader planning consumes value-form control flow to retain
-                // GPU-only effects in a discarded tail expression.
                 self.lower_expr(e)?;
             } else {
                 self.lower_stmt_expr(e)?;
@@ -3201,7 +2904,6 @@ impl<'a> Builder<'a> {
                     .collect());
             }
             let r = self.lower_expr_repr(e)?;
-            // A terminating block returns a placeholder, not an aggregate to project.
             if !self.is_open() {
                 return Ok(Vec::new());
             }
@@ -3263,15 +2965,10 @@ impl<'a> Builder<'a> {
         out
     }
 
-    /// Whether `v` is a tuple box built one value per element, read back the
-    /// same way. Every other value of a splatting tuple type -- loaded,
-    /// returned, joined or read out of storage -- is the flat box, so this is
-    /// the one place layout is decided.
     pub(crate) fn is_tuple_aggregate(&self, v: Idx<Inst>) -> bool {
         self.element_tuples.contains(&v)
     }
 
-    /// Read the `width` slots of the flat tuple box `base`.
     pub(crate) fn flat_box_slots(&mut self, base: Idx<Inst>, width: usize) -> Vec<Idx<Inst>> {
         self.f.flat_box_widths.insert(base, width);
         (0..width)
@@ -3287,7 +2984,6 @@ impl<'a> Builder<'a> {
         self.f.flat_box_widths.get(&base).copied()
     }
 
-    /// A tuple box holding one value per element.
     pub(crate) fn element_tuple(&mut self, values: Vec<Idx<Inst>>) -> Idx<Inst> {
         let tuple = self.emit_cur(Inst::MakeTuple(values));
         self.element_tuples.insert(tuple);
@@ -3303,19 +2999,6 @@ impl<'a> Builder<'a> {
         self.flat_box_slots(v, n)
     }
 
-    /// Flatten a tuple repr to the slot values `shape` describes -- the tuple
-    /// analogue of [`Self::repr_to_leaves`]. A `Tuple` repr (a splatting call
-    /// forwarded straight out, or a tuple literal) yields its parts; anything
-    /// else is a packed tuple, so each element is read back with `TupleIndex`
-    /// and a `Leaves` slot is field-read off the box.
-    ///
-    /// This owns the leading presence at a nullable shape, both arms, so it is
-    /// the exact inverse of [`Self::tuple_from_slots`] -- one oracle for where
-    /// presence sits on the wire. A repr that carries its OWN tag forwards that
-    /// tag: `return maybe(b)` hands on the callee's presence, and synthesizing
-    /// `true` here instead reported every absent forward as present.
-    /// The `present, <slots...>` wire of a flat box that may be nil: tested at
-    /// runtime and read per arm, absent as `false` plus nils.
     fn nullable_box_slots(&mut self, boxed: Idx<Inst>, shape: &TupleLayout) -> Vec<Idx<Inst>> {
         let absent = self.absent_tuple_slots(shape);
         let cells = self.fresh_cells(absent.len());
@@ -3347,7 +3030,6 @@ impl<'a> Builder<'a> {
         r: ValueRepr,
         shape: &TupleLayout,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        // A phantom tuple has no aggregate to project; every wire slot is absent.
         if let ValueRepr::Scalar(v) = &r {
             if matches!(self.f.insts[*v], Inst::Const(Lit::Nil)) {
                 return Ok(self.absent_tuple_slots(shape));
@@ -3388,7 +3070,6 @@ impl<'a> Builder<'a> {
         for (&slot, part) in shape.slots.iter().zip(parts) {
             match self.scx.rep_arena().layout(slot) {
                 RepLayout::Opaque => out.push(self.pack(part)?),
-                // The iterator's missing element can leave an otherwise non-null slot empty.
                 RepLayout::Leaves(vs)
                     if !vs.nullable && !matches!(part, ValueRepr::Group { .. }) =>
                 {
@@ -3404,9 +3085,6 @@ impl<'a> Builder<'a> {
         Ok(out)
     }
 
-    /// Rebuild the tuple repr `shape` describes from a flat slot list -- the
-    /// inverse of [`Self::tuple_repr_to_slots`], used at a call site to hand a
-    /// destructure its elements without ever boxing a `nobox` one.
     pub(crate) fn tuple_from_slots(
         &mut self,
         shape: &TupleLayout,
@@ -3428,7 +3106,6 @@ impl<'a> Builder<'a> {
         ValueRepr::Tuple { parts, present }
     }
 
-    /// One element of [`Self::tuple_from_slots`], consuming its slots from `*idx`.
     fn slot_repr(&mut self, slot: &RepLayout, slots: &[Idx<Inst>], idx: &mut usize) -> ValueRepr {
         match slot {
             RepLayout::Opaque => {
@@ -3441,10 +3118,8 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The values ONE argument contributes to a flat call-argument list, per its
-    /// param slot. Every calling convention routes through this so a caller and
-    /// its callee cannot disagree about an argument's arity -- the failure mode
-    /// there is silent, since a short list is nil-filled rather than rejected.
+    /// Every calling convention routes through this: a short argument list is
+    /// nil-filled silently, so caller and callee must agree on arity.
     pub(crate) fn arg_values_for_slot(
         &mut self,
         slot: &RepLayout,
@@ -3465,8 +3140,6 @@ impl<'a> Builder<'a> {
             && self.boxed_value_local(b, a).is_some()
             && self.binding_value_is_shareable(b)
         {
-            // The callee can retain an immutable box. A later mutable store
-            // copies it, and an internal ref borrow owns its parameter on entry.
             return Ok(vec![self.emit_cur(Inst::Load(self.binds[&raw(b)]))]);
         }
         self.with_value_lending(lend, |s| {
@@ -3524,15 +3197,10 @@ pub fn param_null_overrides_default(ws: &Workspace, body: &Body, index: usize, t
     }
     match ty {
         TyId::Static(mid, idx) => matches!(ws.module(mid).ty_arena[idx], TypeExpr::Nullable(_)),
-        // Declared parameter types are lowered into the module's static arena.
         TyId::Local(_) => false,
     }
 }
 
-// -- Map value-struct key rejection (a fatal emit-time pass; see
-// `value_struct_map_key`). These mirror the `Lowerer` type helpers but take
-// `(ws, inf)` directly so the check runs without building a full lowering
-// context. --
 
 pub(crate) fn ty_node(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<TypeExpr> {
     match ty {
@@ -3554,7 +3222,6 @@ fn map_key_rejection_reason(
     k: TyId,
     depth: u32,
 ) -> Option<String> {
-    // A newtype chain is finite, but a malformed self-wrapping one must not spin.
     if depth > 8 {
         return None;
     }
@@ -3566,13 +3233,11 @@ fn map_key_rejection_reason(
             | BuiltinTy::F32
             | BuiltinTy::Bool
             | BuiltinTy::String
-            // Not key shapes, but nothing here can decide against them either.
             | BuiltinTy::Any
             | BuiltinTy::Unit
             | BuiltinTy::Never
             | BuiltinTy::Error,
         ) => None,
-        // A type parameter or an uninstantiated call-site var: undecidable here.
         TypeExpr::Generic(..) | TypeExpr::Infer(..) => None,
         TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } => {
             if let Some(nid) = ws.newtypes_by_name.get(&name) {
@@ -3582,10 +3247,8 @@ fn map_key_rejection_reason(
                     format!("`{name}` wraps {why}, and a newtype is keyed as what it wraps")
                 });
             }
-            // A payload-free enum lowers to an int ordinal, so it IS value-keyed.
-            // One payload variant is enough to make the type cdata- or
-            // table-carrying, and the key that misses is the payload-carrying
-            // one -- a `Color::Red` control would hit and hide it.
+            // A payload-free enum lowers to an int ordinal; one payload variant makes the
+            // type cdata- or table-carrying.
             if ws.enums_by_name.contains_key(&name) {
                 return (!is_payload_free_enum(ws, name)).then(|| {
                         format!(
@@ -3621,7 +3284,6 @@ fn map_key_rejection_reason(
     }
 }
 
-/// When `ty` resolves to `Map<K, V>` with an inadmissible `K`, returns why.
 fn map_key_rejected(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<String> {
     let ty = resolve_tyid(ws, inf, ty)?;
     let TypeExpr::App {
@@ -3652,9 +3314,8 @@ pub fn map_key_rejection(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)
     None
 }
 
-/// A GC-carrying `value` struct (table repr, no C layout) named at a nominal
-/// position. Not a legal C boundary type: no `ffi.cdef` typedef exists, so
-/// `ffi.new`/`sizeof`/`ffi.istype`/the extern ABI cannot name it.
+/// A GC-carrying `value` struct has no `ffi.cdef` typedef, so it cannot cross
+/// a C boundary.
 fn nominal_is_gc_value(ws: &Workspace, name: Ustr) -> bool {
     is_value_struct(ws, name)
         && !matches!(
@@ -3681,7 +3342,6 @@ fn gc_value_under_newtypes(
 /// Extern C signatures require value structs that can cross a genuine C boundary.
 pub fn gc_value_c_boundary(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)> {
     let module = ws.module(mid);
-    // 1. extern signatures: a param/return that is a GC-carrying value struct.
     for (_, f) in module.functions.iter() {
         if !f.is_extern {
             continue;
@@ -3736,14 +3396,7 @@ pub fn gc_value_c_boundary(ws: &Workspace, mid: ModuleId) -> Option<(String, Spa
     None
 }
 
-// -- compile-time expansion admission ---------------------------------------
-// The lowering expander replaces a valid call; this pass is the FATAL gate that
-// rejects source-independent misuse, including in bodies that never lower (an
-// uninstantiated generic). Layout-dependent checks stay in the concrete
-// expanders, where the retained instance substitution is available.
 
-/// Resolve a direct call through inference first, falling back to a
-/// unique workspace overload when inference did not record one.
 fn resolve_call_fn(
     ws: &Workspace,
     inf: &BodyInference,
@@ -3756,7 +3409,6 @@ fn resolve_call_fn(
     unique_fn(ws, name)
 }
 
-/// The one function declared under `name`, if exactly one is.
 fn unique_fn(ws: &Workspace, name: Ustr) -> Option<(ModuleId, Idx<Function>)> {
     match ws.functions_by_name.get(&name).map(|l| l.as_slice()) {
         Some([single]) => Some(*single),
@@ -3810,8 +3462,6 @@ fn struct_expand_rejection_for_call(
             ),
         );
     }
-    // Field layout belongs to the retained concrete expander. Source preflight
-    // keeps only the permanent arity and return-shape gate above.
     None
 }
 
@@ -3828,16 +3478,11 @@ pub struct ShaderCollection {
     pub contributions: std::collections::HashMap<(ModuleId, BodyOwner), Vec<ShaderPair>>,
 }
 
-/// Whether `f` is a `@shader` stage entry. Its program is registered as GLSL
-/// text, so it is no CPU root: a CPU artifact defines it only when ordinary code
-/// calls it.
+/// Whether `f` is a `@shader` stage entry: GLSL text, not a CPU root.
 pub fn is_shader_entry(f: &Function) -> bool {
     shader_stage_of(f).is_some()
 }
 
-/// The `@shader(<stage>)` stage of `f`, else `None`.
-/// A local read of the annotation (skull-codegen-glsl has the same helper, but
-/// skull-mir must not depend on it -- the layering constraint).
 fn shader_stage_of(f: &Function) -> Option<&'static str> {
     let ann = f.annotations.iter().find(|a| a.is_builtin("shader"))?;
     match ann.args.first().map(|a| &a.value) {
@@ -3851,11 +3496,6 @@ fn shader_stage_of(f: &Function) -> Option<&'static str> {
     }
 }
 
-/// Resolve one `rock_shader` argument to a direct reference to a top-level
-/// `@shader(<want_stage>)` fn. Rejects (spanned) a non-`Expr::Global` arg (a
-/// local, lambda, literal, call -- anything that is not a bare top-level fn
-/// name), a name that is not a unique top-level fn, a non-`@shader` fn, or a
-/// stage mismatch.
 fn resolve_shader_arg(
     ws: &Workspace,
     body: &Body,
@@ -3937,7 +3577,6 @@ fn shader_expand_rejection_for_call(
     resolve_shader_pair(ws, body, call, args).err()
 }
 
-/// Emit-time validation for source-independent `@uniform_expand` shape errors.
 fn uniform_expand_rejection_for_call(
     ws: &Workspace,
     body: &Body,
@@ -3966,7 +3605,6 @@ fn uniform_expand_rejection_for_call(
         [_, _, _] => {}
         _ => return reject(body.expr_spans[call], uniform_expand_arity_msg(fname)),
     }
-    // The uniform layout is derived only by the concrete expander.
     None
 }
 
@@ -4016,7 +3654,6 @@ fn uniform_values_rejection_for_call(
     None
 }
 
-/// Share comptime input resolution with validation.
 pub(crate) fn resolve_comptime_value(
     ws: &Workspace,
     body: &Body,
@@ -4049,11 +3686,6 @@ pub(crate) fn resolve_comptime_value(
                 value: var.value.clone(),
                 file_abs: None,
             }),
-            // A fully-default inputs struct means resolution never RAN for
-            // this compile (no stick.toml found, or an entry point that did
-            // not stamp declared inputs) -- blaming the project's [build.vars]
-            // there sent people at the wrong file. A stamped project always
-            // carries at least its embed_root.
             None if ws.comptime_inputs.embed_root.is_none()
                 && ws.comptime_inputs.vars.is_empty()
                 && ws.comptime_inputs.channel.is_empty() =>
@@ -4075,9 +3707,6 @@ pub(crate) fn resolve_comptime_value(
             )),
         },
         ExpandKind::EmbedString => {
-            // Resolution root: the nearest stick.toml at/above the CALLING
-            // file's dir: a library embeds its own files. Fall back to the
-            // invocation's embed_root for synthetic/test module files.
             let call_file = body.expr_spans[call_expr].file;
             let files = &ws.comptime_inputs.embed_files;
             let package_root = files.package_root(call_file.as_str());
@@ -4122,17 +3751,13 @@ pub(crate) fn resolve_comptime_value(
     }
 }
 
-/// A resolved comptime input: the value, plus (for embeds) the absolute path
-/// the read landed on -- what invalidation re-reads and the watcher watches.
 pub(crate) struct ResolvedComptime {
     pub value: String,
     pub file_abs: Option<Ustr>,
 }
 
-/// FATAL gate for `build_var` / `embed_string` misuse (non-literal argument,
-/// undeclared var, unreadable or escaping path), checked here so a body that
-/// never lowers is still validated. Shares
-/// [`resolve_comptime_value`] with the expander.
+/// Fatal gate for `build_var` / `embed_string` misuse, run even for bodies that
+/// never lower.
 pub fn comptime_input_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
     let module = ws.module(mid);
     let ir = ws.inference(mid)?;
@@ -4165,8 +3790,6 @@ pub fn comptime_input_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compile
     None
 }
 
-/// Emit-time validation for `@vertex_expand` calls: misuse is a spanned
-/// compile error, never a call that reaches the fn's error body.
 fn vertex_expand_rejection_for_call(
     ws: &Workspace,
     body: &Body,
@@ -4190,7 +3813,6 @@ fn vertex_expand_rejection_for_call(
     {
         return reject(call_span, vertex_expand_ret_msg(ws, fname, f.return_ty));
     }
-    // The element type and vertex plan belong to the concrete expander.
     None
 }
 
@@ -4229,9 +3851,8 @@ impl ExpansionRejections {
     }
 }
 
-/// Scan module `mid` once for every direct expansion call. The first rejection
-/// is retained per expansion category, then the categories are applied in the
-/// historical priority order rather than in lexical order.
+/// Scan module `mid` once for every direct expansion call; the first rejection
+/// per category wins, categories applied in fixed priority order.
 pub fn expansion_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
     let module = ws.module(mid);
     let ir = ws.inference(mid)?;
@@ -4289,11 +3910,8 @@ pub fn expansion_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerErro
     rejections.finish()
 }
 
-/// Every distinct `rock_shader` pair across the workspace, deduped by key and
-/// sorted by key (deterministic registration order -> byte-stable re-emission).
-/// The driver ([`skull::mir_emit`]) turns each into one top-level
-/// `__rock_shader_register`. Any resolution failure surfaces as `Err` (the fatal
-/// [`shader_expand_rejection`] gate runs first, so this is normally infallible).
+/// Every distinct `rock_shader` pair, deduped and sorted by key for
+/// byte-stable output.
 pub fn collect_shader_pairs(ws: &Workspace) -> Result<Vec<ShaderPair>, CompilerError> {
     Ok(collect_shader_collection(ws)?.pairs)
 }
@@ -4325,9 +3943,7 @@ pub fn body_has_shader_pipeline_call(ws: &Workspace, mid: ModuleId, owner: BodyO
     })
 }
 
-/// Collect the shader roots contributed by one body. Full construction calls
-/// this for every body; incremental repair calls it only for re-inferred
-/// bodies, so a body edit does not rediscover unrelated shader registrations.
+/// Collect the shader roots contributed by one body.
 pub fn collect_shader_body(
     ws: &Workspace,
     mid: ModuleId,
@@ -4379,8 +3995,6 @@ pub fn collect_shader_collection(ws: &Workspace) -> Result<ShaderCollection, Com
         .values()
         .flat_map(|&mid| ws.module(mid).bodies.keys().map(move |owner| (mid, *owner)))
         .collect();
-    // Each body is scanned on its own; the fold keeps the serial order, so
-    // the first registration of a key and the first error are the same ones.
     let scanned: Vec<_> = {
         use bone_core::prelude::*;
         keys.par_iter()
@@ -4406,9 +4020,8 @@ pub fn collect_shader_collection(ws: &Workspace) -> Result<ShaderCollection, Com
     })
 }
 
-/// Reject CPU-side calls to `@gpu_only` intrinsics and references to GPU-side
-/// functions as runtime fn values. Shader-pipeline expansion arguments are names,
-/// not runtime values, and remain legal.
+/// Reject CPU-side calls to `@gpu_only` intrinsics and GPU functions used as
+/// runtime fn values.
 pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
     let module = ws.module(mid);
     let ir = ws.inference(mid)?;
@@ -4542,8 +4155,6 @@ pub fn string_char_literal_out_of_range(ws: &Workspace, mid: ModuleId) -> Option
 #[cfg(test)]
 mod tests;
 
-/// One leaf of a scalarized binding ([`Builder::group_binds`]): its cell, or
-/// its value when the binding is never written ([`Builder::binding_stays_unwritten`]).
 #[derive(Clone, Copy)]
 pub(crate) enum GroupLeaf {
     Cell(Idx<Cell>),
@@ -4551,8 +4162,6 @@ pub(crate) enum GroupLeaf {
 }
 
 impl GroupLeaf {
-    /// The cell a write lands in. Only a binding that is never written holds
-    /// its leaves as values, so a write always finds cells.
     pub(crate) fn cell(self) -> Idx<Cell> {
         match self {
             Self::Cell(cell) => cell,
@@ -4561,14 +4170,10 @@ impl GroupLeaf {
     }
 }
 
-/// Per-body facts deciding whether a `let` may bind its value with no cell.
 #[derive(Default)]
 pub(crate) struct BodyFacts {
-    /// A lambda or `defer` may read bindings from another function body.
     may_capture: bool,
-    /// Bindings at the root of an assignment or increment target.
     written: HashSet<u32>,
-    /// `None` for a whole use, otherwise the directly projected fields.
     projected: HashMap<u32, Option<Vec<Ustr>>>,
 }
 
