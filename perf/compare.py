@@ -28,7 +28,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import budget as budget_tool  # noqa: E402
-from run import measurement_env  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 COMPILES = {"stone": "packages/stone", "match3": "demos/match3", "testbed": "demos/testbed"}
@@ -107,7 +106,7 @@ def main():
     workloads = [w for w in args.only.split(",") if w]
     if unknown := set(workloads) - set(WORKLOADS):
         parser.error(f"unknown workload(s): {', '.join(sorted(unknown))}")
-    env = measurement_env()
+    env = budget_tool.measurement_env()
     sys.stdout.reconfigure(line_buffering=True)
     print(f"{os.cpu_count()} cpus, load {os.getloadavg()[0]:.1f}, {args.runs} runs", file=sys.stderr)
 

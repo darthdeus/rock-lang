@@ -47,7 +47,7 @@ pressure. Changes to them need runtime measurements, not just smaller Lua.
 ## Measuring
 
 The compiler's benchmarks in `benchmarks/` exercise individual emitted shapes;
-`perf/` contains compile and LSP measurements. Compare builds against the same
+`perf/` contains compile measurements. Compare builds against the same
 source inputs and LuaJIT executable, alternate runs, and inspect the output as
 well as timing. A microbenchmark identifies the cost of a particular shape; it
 does not by itself establish a whole-application improvement.

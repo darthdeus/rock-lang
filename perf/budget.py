@@ -22,9 +22,9 @@ from pathlib import Path
 
 
 def measurement_env():
-    env = dict(os.environ)
-    env.update(ROCK_INVOCATION_LOG="off", ROCK_FRAME_COMPILE_CACHE="0",
-               ROCK_SIM_COMPILE_CACHE="0", ROCK_NO_WARNINGS="1")
+    # Compiler overrides from the shell must not leak into a measurement.
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("ROCK_", "SKULL_", "BONE_"))}
+    env.update(ROCK_INVOCATION_LOG="off")
     return env
 
 
@@ -71,19 +71,6 @@ def render(node, total, depth=0, lines=None):
     for pass_ in node.get("unit_cpu", []):
         lines.append(f"{'  ' * (depth + 1)}~ {pass_['name']:<30} {pass_['cpu_ms']:9.1f} ms unit cpu")
     return lines
-
-
-def flatten(node, prefix=""):
-    """`path -> wall_ms` for every node, for history rows and charts."""
-    path = f"{prefix}/{node['name']}" if prefix else node["name"]
-    out = {path: node["wall_ms"]}
-    for child in node.get("children", []):
-        out.update(flatten(child, path))
-    if "unit_cpu_ms" in node:
-        out[path + "#cpu"] = node["unit_cpu_ms"]
-        for pass_ in node.get("unit_cpu", []):
-            out[f"{path}#cpu/{pass_['name']}"] = pass_["cpu_ms"]
-    return out
 
 
 def main():

@@ -1,49 +1,14 @@
-# Compiler performance tracking
+# Compiler performance measurement
 
 `python3 perf/inventory.py` writes a source-size and test-location inventory to
 `target/inventory/index.html`. Track cleanup work in GitHub issues.
 
-Scripts that measure the compiler on the public corpora and chart the results
-over commits. Three questions: how long is a cold build, how long is an
-incremental rebuild after an edit, and how fast does the language server
-answer.
-
-## Measurements
-
-`perf/run.py` builds `target/release/rock` (or takes `--bin`) and, for each
-corpus (`packages/stone` and every project under `demos/` by default),
-records:
-
-| Metric | Source |
-|---|---|
-| cold `rock compile`, cold `rock check` | hyperfine wall time, several runs |
-| time budget of one cold compile | `ROCK_COMPILE_STATS` record, fastest of three |
-| parse, bone semantic, skull emit and setup phases | `rock backend-stats --format json` |
-| body edit to overlay, signature edit to full rebuild | `rock incremental-stats --format json` |
-| LSP update, hover, completion per edit kind | `rock lsp-survey --format json` |
-
-Each invocation appends one JSON row to the history file
-(`$ROCK_PERF_HISTORY`, default `~/.local/share/rock-lang/perf/history.jsonl`).
-The row carries the commit, whether the tree was dirty, the machine
-architecture and core count, and the load average, never a host name or a
-user path.
-
-```sh
-perf/run.py                       # build, measure HEAD, append, print deltas
-perf/run.py --no-build --runs 5   # quicker, reuse the existing release binary
-perf/run.py --quick --no-build    # about 10 s: iterate on a change, see deltas
-perf/report.py                    # write perf/report.html from the history
-perf/backfill.py --from 7d1204f0 --step 10   # measure past commits
-```
-
-`--quick` runs 3 hyperfine runs and 3 iterations on `packages/stone` only,
-skips the LSP survey, and writes to `quick.jsonl` beside the main history so
-iteration rows never enter the tracked series. `--only cold,incremental`
-narrows any run to the metric groups named (`cold`, `phases`,
-`incremental`, `lsp`). Each run prints its headline numbers with the
-percentage change from the previous row in the same file, so the loop while
-working on a change is: edit, `cargo build --release -p rock-cli --bin rock`,
-`perf/run.py --quick --no-build`, read the deltas.
+Scripts that measure the compiler on the public corpora: how long a cold
+build takes and where its time goes, what the emitted Lua consists of, and
+which source definitions cost the most to compile. The `rock backend-stats`,
+`rock incremental-stats` and `rock lsp-survey` subcommands measure the
+in-process phases, incremental rebuilds after an edit and the language
+server's answers.
 
 ## Comparing two compilers
 
@@ -86,12 +51,8 @@ perf/budget.py packages/stone            # compile three times, print the fastes
 perf/budget.py --record stats.jsonl      # print a record written elsewhere
 ```
 
-`perf/run.py` records the same tree per corpus (`--only budget`) and the
-report charts its main nodes over commits. Compare the summed unit times
-with each other and across commits, never with a wall window.
-
-`perf/report.html` is generated and not committed. Open it in a browser; the
-corpus selector switches every chart and the table.
+Compare the summed unit times with each other and across commits, never
+with a wall window.
 
 ## Reading the numbers
 
@@ -105,10 +66,9 @@ corpus selector switches every chart and the table.
 - `lsp-survey` times the language server's in-memory update; its signature
   edit inserts a required parameter, which the server tolerates with
   diagnostics, so it exercises the error path that the hot reload rejects.
-- Measurements are noisy on a loaded machine. The row records the load
-  average before and after; treat a point taken under load with suspicion
-  and rerun it (`perf/run.py` appends; `report.py` charts the latest row per
-  commit).
+- Measurements are noisy on a loaded machine; `perf/compare.py` prints the
+  load average before it starts. Treat a number taken under load with
+  suspicion and rerun it.
 
 ## The output census
 
