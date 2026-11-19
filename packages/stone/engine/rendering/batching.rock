@@ -20,6 +20,7 @@ pub fn gpu_programs_drain() {
     load_pending_shader_sources()
 }
 
+// Source pixels at 16 px per world unit.
 @pure
 fn sprite_default_world_size(source: IRect) -> Vec2 {
     return v(source.w, source.h) / 16.0
@@ -52,6 +53,7 @@ pub fn draw_sprite(
     shared_pipeline: bool = false,
     block: OwnedUniformBlock? = null,
 ) {
+    // Flat fields, no per-call command object: avoids per-sprite transient garbage.
     assert(block == null || (pipeline != null && !shared_pipeline),
         "per-draw uniform blocks require an independent shader submission")
     let batch = sprite_batch(image, layer, depth, blend, pixel_snap, normal,
@@ -244,6 +246,7 @@ pub fn draw_sprite_into(
     if has_outline {
         let o = outline.unwrap()
         if eid == 0 { eid = o.entity_id }
+        // The id test also keeps a NaN id out of OUTLINE_ENTRIES.
         if eid > 0 { register_outline_entry(eid, o) }
     }
 

@@ -1,5 +1,7 @@
 use stone::*
 
+// Readback goes through a saved PNG so rows read top-down.
+
 const OUTLINE_DETECT_VISIBLE: Color = color(0.0, 1.0, 0.0, 1.0)
 const OUTLINE_DETECT_OCCLUDED: Color = color(1.0, 0.0, 0.0, 1.0)
 

@@ -6,10 +6,14 @@ pub global hot_reload_script_path: string = ""
 pub global hot_reload_incremental_path: string = ""
 global hot_reload_incremental_modtime: float = 0.0
 
+// `tmp/main.lua` is one shared slot per worktree, so a concurrent command can
+// write the file this watcher polls; chunks naming another game are refused.
 pub global hot_reload_boot_source_dir: string = ""
 pub global hot_reload_refused_count: int = 0
 pub global hot_reload_full_count: int = 0
 
+// Only `rock stone` sets STONE_HOT_RELOAD=1. Other commands must never poll or
+// dofile an overlay: a stale incremental.lua would shadow the fresh main.lua.
 inline(lua) fn __hot_reload_enabled() -> bool = """
     return os.getenv("STONE_HOT_RELOAD") == "1"
 """
@@ -43,6 +47,7 @@ pub inline(lua) fn stone_reload_hold_status() -> string = """
     return acknowledged == requested and "held" or "holding"
 """
 
+// The identity is escaped on line 1 of the chunk; unescape before comparing.
 inline(lua) fn read_chunk_source_dir(path: string) -> string = """
     local f = io.open(path, "r")
     if not f then return "" end
@@ -58,6 +63,8 @@ pub inline(lua) fn current_game_source_dir() -> string = """
     return _G.__ROCK_GAME_SOURCE_DIR or ""
 """
 
+// Plain equality on purpose: an unidentified process then admits only an
+// unidentified chunk instead of accepting anything.
 pub @pure
 fn hot_reload_chunk_is_ours(boot_dir: string, chunk_dir: string) -> bool {
     return chunk_dir == boot_dir
@@ -78,6 +85,7 @@ fn check_hot_reload() {
         log_debug("HOT RELOAD", "Watching {hot_reload_script_path} (+ incremental.lua)")
     }
 
+    // Bare F5 is game input, so a manual reload requires Ctrl.
     if stone_is_key_down("f5") && (stone_is_key_down("lctrl") || stone_is_key_down("rctrl")) {
         log_debug("HOT RELOAD", "Manual reload triggered by Ctrl+F5")
         do_hot_reload()
@@ -97,6 +105,8 @@ fn check_hot_reload() {
         return
     }
 
+    // A full reload wins and wipes incremental.lua; its modtime is synced so the
+    // same tick does not also fire a stale light reload.
     if modtime > hot_reload_last_modtime {
         hot_reload_last_modtime = modtime
         let incr_now = file_modtime(hot_reload_incremental_path)
@@ -105,6 +115,7 @@ fn check_hot_reload() {
         return
     }
 
+    // The overlay is wiped at startup, so its first appearance is a real change.
     let incr_opt = file_modtime(hot_reload_incremental_path)
     if !is_null(incr_opt) {
         let incr = incr_opt
@@ -138,6 +149,8 @@ pub fn do_hot_reload() {
 
     let reload_start = stone_get_time()
 
+    // Identity before parse: load_chunk stashes the compiled function, so a refusal
+    // after it would leave a foreign chunk for the next run_loaded_chunk.
     let chunk_dir = read_chunk_source_dir(hot_reload_script_path)
     if !hot_reload_chunk_is_ours(hot_reload_boot_source_dir, chunk_dir) {
         hot_reload_refused_count = hot_reload_refused_count + 1
@@ -147,6 +160,8 @@ pub fn do_hot_reload() {
         return
     }
 
+    // Parse before clear_all_systems(), which is unrecoverable if the chunk does
+    // not load.
     let (parsed, parse_err) = load_chunk(hot_reload_script_path)
     if !parsed {
         log_error("HOT RELOAD", "parse failed, keeping the running code: {parse_err}")
@@ -175,6 +190,7 @@ pub fn do_hot_reload() {
     if success {
         hot_reload_full_count = hot_reload_full_count + 1
 
+        // Only additions run: old init entries already ran and may not be idempotent.
         for sys in lifecycle_systems("early_init") {
             if prev_init_names.get(sys.key) == null { sys.func(0) }
         }
@@ -187,6 +203,7 @@ pub fn do_hot_reload() {
 
         run_wire_systems()
 
+        // Callbacks fire last, so they see a fully re-wired world.
         __rock_fire_hot_reload_callbacks()
     }
 

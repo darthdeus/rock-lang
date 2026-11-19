@@ -21,6 +21,8 @@ fn mesh_batch_retention_key(z: int, counter: int) -> string {
     return "{batch_key_prefix(z, 0)}|sh0|mesh_{pad_int(counter, 4)}|{batch_key_state(DepthMode::Off, BlendMode::Alpha, false, TextureFilter::Nearest)}"
 }
 
+// The engine discards the world pool twice per frame: clear_batches after the
+// previous frame's flush, then the frame-start discard.
 fn mesh_batch_retention_frame(pool: RenderBatchPool, meshes: [SpriteMesh]) {
     discard_pool_batches(pool)
     RENDER_FRAME += 1

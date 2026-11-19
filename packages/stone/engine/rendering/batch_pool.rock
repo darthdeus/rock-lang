@@ -3,6 +3,7 @@ pub value RenderBatchPool {
     entries: Map<string, Entity<RenderBatch>>,
 }
 
+// Inline leaves of their owner, so refreshing a submission allocates no Entity table.
 pub nobox value RenderBatchHandle {
     present: bool = false,
     scene_id: int = 0,
@@ -31,6 +32,7 @@ pub fn RenderBatchHandle.entity(handle) -> Entity<RenderBatch>? {
     }
 }
 
+// Scalar lanes, so a push/pop does not box the pool and its Arena.
 pub nobox value RenderBatchScope {
     scene_id: int = 0,
     arena_id: int = 0,
@@ -105,6 +107,8 @@ pub fn RenderBatchPool.insert(pool, key: string, handle: Entity<RenderBatch>) ->
 fn render_batch_retire(rows: Arena<RenderBatch>, handle: Entity<RenderBatch>) {
     let batch = rows.get(handle) ?? return
     batch.pooled = false
+    // Arena.remove retains vacant payloads: detach captured graphs and foreign
+    // buffers so a retired slot does not extend their lifetime.
     batch.custom_draw = null
     batch.verts = __DUMMY_VERTEX_BUF
     batch.capacity = 0

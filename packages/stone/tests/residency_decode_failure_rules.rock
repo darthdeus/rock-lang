@@ -1,3 +1,5 @@
+// The placeholder texel contract, shared with the missing-image checker
+// (assets.rock): bright magenta cells on near-black, 2x2 cells.
 const RESIDENCY_DECODE_PLACEHOLDER_BRIGHT: int = 0xFF00CCFF
 const RESIDENCY_DECODE_PLACEHOLDER_DARK: int = 0x190019FF
 
@@ -41,6 +43,8 @@ fn residency_decode_failure_object(digest_char: string) -> [string] {
     let _ = create_directory(root)
     let _ = create_directory(root + "/.eat")
     let _ = create_directory(dir)
+    // The twin stays loose: one digest dir names one image, so a second file
+    // under it would alias the corrupt identity.
     let good = root + "/good-" + digest_char + ".png"
     let bad = dir + "/bad.png"
     residency_decode_failure_png(good, 4, 2)

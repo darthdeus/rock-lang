@@ -92,6 +92,8 @@ fn depth_preview_active_extent_matches_full_control() {
         let full = RENDER_VIEW.unwrap()
         depth_preview_render_world(full, 0.0, 0.5, "control frame")
         let control = depth_preview_sample("control frame")
+        // Establish non-0.5 backing everywhere before shrinking, so an unscaled
+        // preview samples something other than the live 0.5 frame.
         depth_preview_render_world(full, 6.5, 0.75, "backing frame")
         let control75 = depth_preview_sample("backing frame")
         assert(abs(control75[0] - control[0]) > 0.1 && abs(control75[1] - control[1]) > 0.1,

@@ -55,6 +55,8 @@ fn residency_prefetch_submits_while_under_budget() {
         residency_prefetch_advance()
         assert_eq(residency_state(small), ResidencyState::Loading, "advance drains the waiter")
         assert(!residency_prefetch_idle(), "loading prefetches are not idle")
+        // The blocking pump publishes Deferred results; the prepare flush only
+        // waits for Required ones.
         let _ = stone_service_image_uploads()
         assert_eq(residency_state(big), ResidencyState::Resident, "the pump publishes")
         assert_eq(residency_state(small), ResidencyState::Resident, "the drained waiter publishes")

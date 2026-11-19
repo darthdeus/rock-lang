@@ -78,6 +78,8 @@ pub fn with_scene_render_scope(view: FrameView, body: fn() -> ()) {
     let saved_world_pool = world.batches
     let saved_gizmo_pool = gizmo.batches
     let saved_shader = WATCHER.current_shader_name
+    // A nested render keeps its caller's snapshots alive; storage is reused by
+    // nesting depth instead of allocated per render.
     static block_snapshots: [[SceneRenderBlockSaved]] = []
     static block_depth = 0
     if block_snapshots.len() == block_depth { block_snapshots.push([]) }
@@ -145,6 +147,7 @@ pub fn with_scene_render_scope(view: FrameView, body: fn() -> ()) {
             scene_render_restore0(saved0)
             world.batches = saved_world_pool
             gizmo.batches = saved_gizmo_pool
+            // Rebind while marks are private: set_shader clears its activation map.
             if let shader = saved_shader { set_shader(shader) } else { end_shader() }
             scene_render_restore2(saved2)
             ENGINE.debug_graphics_stats = debug_stats

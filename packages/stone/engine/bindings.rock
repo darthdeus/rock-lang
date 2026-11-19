@@ -4,6 +4,7 @@ pub newtype ShaderId(int)
 pub newtype MeshId(int)
 pub struct SoundData {
     backend_id: int,
+    // "" for sounds with no watchable file (music streams from disk).
     path: string,
 }
 pub value Sound {
@@ -59,6 +60,7 @@ pub fn sampled_color_srgb(source: SampledTexture) -> bool {
 global IMAGE_SAMPLING: Map<int, TextureFilter> = map_new()
 
 pub fn register_image(handle: int, sampling: TextureFilter) -> Image {
+    // Never record `sampling` against handle 0: it is the shared white-pixel sentinel.
     if handle == 0 {
         return Image(0)
     }
@@ -187,6 +189,8 @@ pub fn sampled_texture_is_canvas(source: SampledTexture, canvas: Canvas) -> bool
     }
 }
 
+// A resize keeps the handle, and the pass executor derives input 0's UV scale
+// from the bound Canvas extent, so a cached binding must match both.
 pub fn sampled_texture_matches_canvas(source: SampledTexture, canvas: Canvas) -> bool {
     match source {
         SampledTexture::Image(_image) => return false,
@@ -461,6 +465,8 @@ pub fn image_storage_format(image: Image) -> ImageAssetFormat {
     }
 }
 
+// Voice(0) is the "never started" sentinel; every method is a no-op on it, since
+// 0 is never minted as a real voice id.
 pub newtype Voice(int)
 
 pub fn active(self: Voice) -> bool {
@@ -478,6 +484,10 @@ pub fn set_pan(self: Voice, pan: float) -> bool {
 }
 pub fn set_speed(self: Voice, speed: float) -> bool { return stone_voice_set_speed(self.0, speed) }
 
+// `speed` is a playback ratio (pitch and duration move together). `decay` caps
+// the play at N seconds of what is heard, measured after `speed`; 0 disables it.
+// `__SITE__` in a macro body resolves to the macro caller's position; a
+// transparent wrapper calls `_play_sound_impl` with the site it was given.
 macro play_sound(sound: expr, volume: expr = 1.0, speed: expr = 1.0, decay: expr = 0.0) {
     _play_sound_impl(sound, STONE_BUS_SFX, volume, speed, decay, false, __SITE__)
 }
@@ -536,6 +546,8 @@ pub fn _play_sound_impl(sound: Sound, bus: int, volume: float, speed: float, dec
         else { sync_decode_us = sound_residency_decode_sync(sound) }
     }
     let resident = known && stone_sound_playable(d.backend_id)
+    // Logged before the playback gate, so muted and headless runs still expose
+    // misses and synchronous decode cost.
     sfx_log_record(sound, bus, volume, speed, decay, looped, spatial, pan,
         muted, site, resident, sync_decode_us)
     if muted || !resident { return Voice(0) }
@@ -543,6 +555,7 @@ pub fn _play_sound_impl(sound: Sound, bus: int, volume: float, speed: float, dec
         spatial, pan))
 }
 
+// Seconds at the sample's own rate, before any playback speed.
 pub fn sound_duration(sound: Sound) -> float {
     let d = sound.data() ?? return 0.0
     return stone_get_sound_duration(d.backend_id)
@@ -643,6 +656,7 @@ fn new_shader_safe(source: string) -> (ShaderId?, string?) {
     return (ShaderId(handle), null)
 }
 
+// 0 is the window backbuffer.
 pub global CURRENT_CANVAS_HANDLE: int = 0
 
 fn set_canvas_handle(handle: int) {
@@ -694,6 +708,9 @@ pub fn canvas_read_pixels(canvas: Canvas) -> CanvasPixels {
         stone_canvas_active_h(canvas.handle.0))
 }
 
+/// A per-texel `read_canvas_pixel` synchronizes with the GPU on every call; a
+/// loop over texels reads the region once and samples it with
+/// `canvas_pixel_channel`.
 pub fn canvas_read_region(canvas: Canvas, x: int, y: int, w: int, h: int) -> CanvasPixels {
     sim_draw_on_demand()
     sim_submit_guard("canvas_read_region")
@@ -745,6 +762,8 @@ fn read_canvas_nearest_id(canvas: Canvas, x: int, y: int, side: int) -> int {
     return stone_read_canvas_nearest_id(canvas.handle.0, x, y, side)
 }
 
+/// Exact integer readback of an R32I canvas; CanvasPixels is f32 and loses ids
+/// above 2^24.
 pub value CanvasIds {
     x: int,
     y: int,
@@ -801,6 +820,8 @@ pub fn read_depth_pixel(canvas: Canvas, x: int, y: int) -> float {
     return stone_read_depth_pixel(canvas.handle.0, x, y)
 }
 
+// Each read returns the value from one frame ago. Allocate one slot per logical
+// reader; two call sites sharing a slot alias.
 pub newtype PixelReadbackId(int)
 pub struct PixelReadback {
     handle: PixelReadbackId,
@@ -818,6 +839,8 @@ pub fn pixel_readback_depth_new() -> PixelReadback {
     return PixelReadback { handle: PixelReadbackId(stone_pixel_readback_new(1)) }
 }
 
+// Submit while `canvas` has no pending writes (early in the frame); the result
+// is consumable next frame.
 pub fn pixel_readback_submit(slot: PixelReadback, canvas: Canvas, x: int, y: int) {
     sim_draw_on_demand()
     stone_pixel_readback_submit(slot.handle.0, canvas.handle.0, x, y)
@@ -828,6 +851,8 @@ pub fn pixel_readback_submit_area(slot: PixelReadback, canvas: Canvas, x: int, y
     stone_pixel_readback_submit_area(slot.handle.0, canvas.handle.0, x, y, side)
 }
 
+// Before any completed submit this returns the channel sentinel (0.0 color,
+// 1.0 depth).
 pub fn pixel_readback_consume(slot: PixelReadback) -> float {
     return stone_pixel_readback_consume(slot.handle.0)
 }
@@ -865,6 +890,8 @@ pub fn unset_depth_mode() {
     stone_set_depth_mode("always", false)
 }
 
+// The bound shader's vertex stage must emit raw NDC:
+// `gl_Position = vec4(aPos, 0.0, 1.0)` (no uProjection/uView).
 pub @inline inline(lua) fn draw_fullscreen_quad() = "stone.stone_draw_fullscreen_quad()"
 
 @inline inline(lua) fn set_fullscreen_uv_scale(sx: float, sy: float) = "stone.stone_set_fullscreen_uv_scale(sx, sy)"
@@ -984,6 +1011,8 @@ fn get_app_args() -> [string] {
 // mint is not a contract the caller can rely on.
 inline(lua) fn __app_args_raw() -> any = "return arg or {}"
 
+// Flushes immediately, so the data reaches the OS even when the process exits
+// via _exit() (which skips C stdio buffer flushing).
 @nomangle
 inline(lua) fn stone_write_stdout(s: string) = """
     io.write(s)

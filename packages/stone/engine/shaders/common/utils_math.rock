@@ -1,3 +1,5 @@
+// Shared CPU/GPU math: keep it strictly tier 0 so the profile pass accepts it.
+
 pub @inline @pure fn remap(value: float, min1: float, max1: float, min2: float, max2: float) -> float {
     return min2 + (value - min1) * (max2 - min2) / (max1 - min1)
 }
@@ -10,6 +12,7 @@ pub @inline @pure fn remap_to_01(value: float, min1: float, max1: float) -> floa
     return map01(value, min1, max1)
 }
 
+// GLSL sin and fract are per-component, so this is bit-identical to the vector form.
 pub @pure fn random2(p: Vec2) -> Vec2 {
     let da = p.dot(v(127.32, 231.4))
     let db = p.dot(v(12.3, 146.3))

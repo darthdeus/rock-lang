@@ -47,6 +47,7 @@ pub value SemanticShaderMember {
     capacity: int,
 }
 
+// Fingerprints carry 53 exact bits, wider than a value struct's int field.
 pub value SemanticShaderBlock {
     role: string,
     name: string,
@@ -560,6 +561,7 @@ fn load_pending_shader_sources() {
 fn rock_shader_compile_now(key: string, src: string, h: ShaderRegistrationKey, texture_slots: [string], blocks: [UniformBlockDecl], fullscreen_vertex: bool, semantic: SemanticShaderInterface) {
     let (shader, err) = new_shader_safe(src)
     if shader == null {
+        // Keep the previous program; the hash stays unset so the next reload retries.
         log_error("SHADER", "rock_shader: GL compile failed for {key}: {err}")
         return
     }
@@ -589,6 +591,7 @@ fn publish_shader_registration(key: string, sid: ShaderId, h: ShaderRegistration
     if existing != null {
         let superseded = existing.shader
         WATCHER.shaders.insert(key, WatcherShader { shader: sid })
+        // Destroy after the remap, so the key never names a destroyed program.
         if superseded.0 != sid.0 {
             stone_destroy_shader(transmute(superseded.0))
         }
@@ -656,9 +659,12 @@ fn bind_sampled_texture_slot(shader_name: string, slot: int, source: SampledText
     stone_bind_sampler(slot, texture_filter_to_int(sampling), sampled_texture_sampler_key(source))
 }
 
+// Per Pass draw, not per frame: frame-sticky marks would let an earlier pass hide a later pass
+// that forgot a slot. The audit removes the program's marks after every Pass draw.
 global TEXTURE_SLOT_FILLED: Map<string, int> = map_new()
 global UNFILLED_TEXTURE_SLOT_COUNT: int = 0
 
+// Shared textures remain filled for one program activation; set_shader clears this tier.
 global TEXTURE_SLOT_ACTIVATION: Map<string, int> = map_new()
 
 struct ShaderSharedTexture {
@@ -668,6 +674,8 @@ struct ShaderSharedTexture {
 }
 global SHADER_SHARED_TEXTURES: Map<string, [ShaderSharedTexture]> = map_new()
 
+// Rebound on every activation: binding once would leave it exposed to another program using
+// the same unit between two draws.
 pub fn shader_set_shared_texture(shader: string, sampler: string, source: SampledTexture,
                                   sampling: TextureFilter = TextureFilter::Nearest) {
     assert(shader_texture_slot(shader, sampler) >= 0, "shared texture requires a declared sampler")
@@ -724,6 +732,7 @@ fn clear_texture_slot_activation(shader_name: string) {
     TEXTURE_SLOT_ACTIVATION.remove(shader_name)
 }
 
+// Checks the program that just drew, then forgets the per-draw marks.
 pub fn audit_texture_slots_for_draw(shader_name: string) -> int {
     let declared = shader_texture_slot_count(shader_name)
     if declared == 0 {
@@ -735,6 +744,7 @@ pub fn audit_texture_slots_for_draw(shader_name: string) -> int {
     for slot in 0..declared {
         if (filled & (1 << slot)) == 0 {
             missing = missing + 1
+            // Explicit key: a site-keyed log_once would report only the first (shader, slot).
             log_once("SHADER",
                 "`{shader_name}` drew with slot {slot} of its @textures group never bound -- it reads whatever the previous draw left on that unit",
                 "unfilled-texture-slot:{shader_name}:{slot}")
@@ -765,6 +775,7 @@ fn bind_sampled_texture_slot_for_activation(source: SampledTexture, slot: int,
     return ok
 }
 
+// Resolves the slot rather than assuming one: slots are compiler-assigned per program.
 fn release_activation_sampler(shader_name: string, sampler: string) {
     let slot = shader_texture_slot_if_present(shader_name, sampler)
     if slot < 0 { return }
@@ -866,6 +877,8 @@ fn poll_and_reload_assets() {
     }
 }
 
+// A reload can change an image's pixel size in place (same handle); per-image caches compare
+// against this once per frame.
 global IMAGE_RELOAD_GEN: int = 0
 
 pub fn reload_changed_asset(changed: string) {
@@ -921,6 +934,8 @@ pub fn set_shader(shader_id: string) {
     }
 }
 
+// Clears the name with the bind: audit_implicit_texture_slot reads it, and a stale one would
+// attribute the next draw to this program.
 pub fn end_shader() {
     shader_release_shared_textures()
     unset_shader()

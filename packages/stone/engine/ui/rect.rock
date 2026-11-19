@@ -33,8 +33,11 @@ pub value UiRect {
     y: float,
     w: float,
     h: float,
+    // UI z-bucket: fills/outlines at z, text at z+1. Local to a surface: Output always draws
+    // above Composite.
     z: int = 0,
     ctx: int = 0,
+    // Design reference height; 0 = the context's own default.
     ref_h: float = 0.0,
 }
 
@@ -75,6 +78,7 @@ pub fn UiRect.text_scale(r) -> float {
     return if r.ctx == UI_CTX_COMPOSITE { r.ctx_scale() } else { FONT_RENDER_SCALE }
 }
 
+// Not a closure bracket: UiRect draw ops are the hot path and a per-op closure allocates.
 pub fn ui_ctx_push(r: UiRect) -> RenderBatchScope {
     let prev = CURRENT_UI_POOL
     if !prev.active() {
@@ -87,6 +91,7 @@ pub fn ui_ctx_pop(prev: RenderBatchScope) {
     CURRENT_UI_POOL = prev
 }
 
+// The pointer in target space (output px, or scene texels); null outside the presented scene.
 fn ui_ctx_target_pointer(ctx: int) -> Vec2? {
     if ctx != UI_CTX_COMPOSITE { return mouse_screen() }
     let view = PRESENTED_VIEW ?? return null
@@ -155,6 +160,7 @@ pub fn ui_to_screen(r: UiRect) -> UiRect {
 
 pub fn mouse_ui() -> Vec2 { return screen_to_design(mouse_screen()) }
 
+// Design units; measure_text returns screen px because it bakes in FONT_RENDER_SCALE.
 pub fn measure_ui(text: string, font_size: float, family: TextFamily? = null) -> Vec2 {
     return measure_text(text, font_size, family: family) / ui_effective_scale()
 }
@@ -393,6 +399,8 @@ pub @pure fn UiRect.take_center(r, size: Vec2) -> UiRect {
     return UiRect { ..r, x: r.x + (r.w - size.x) / 2, y: r.y + (r.h - size.y) / 2, w: size.x, h: size.y }
 }
 
+// Within one z, batches order by texture key, not push order; that is why text gets its own
+// bucket and overlays use .at_z(2+).
 pub fn ui_shape_batch(z: int) -> RenderBatch {
     return ensure_ui_batch(sampled_image(WHITE_PIXEL.unwrap()), RenderProps {
         z_layer: z,
@@ -402,11 +410,13 @@ pub fn ui_shape_batch(z: int) -> RenderBatch {
 
 pub @inline
 fn px_fill(pos: Vec2, size: Vec2, color: Color, z: int) {
+    // add_rect_vertices_of takes the rect center; `pos` is top-left.
     add_rect_vertices_of(ui_shape_batch(z), pos + size / 2, size, color, FillMode::Fill, 0.0, 0)
 }
 
 @inline
 fn px_outline(pos: Vec2, size: Vec2, color: Color, thickness: float, z: int) {
+    // UI batches render with an identity camera, so vertex units are px.
     add_rect_vertices_of(ui_shape_batch(z), pos + size / 2, size, color, FillMode::Outline, thickness, 0)
 }
 
@@ -590,6 +600,7 @@ pub fn UiRect.parametric_sprite(
     return batch
 }
 
+// uSize is rect design units (aspect + corner scale), uRadius corner px.
 pub value UiSdfBarU { uSize: Vec2, uRatio: float, uRadius: float, uFill: Vec4, uBg: Vec4, uTime: float }
 
 pub fn UiRect.sdf_bar(
@@ -721,6 +732,7 @@ fn UiRect.split_diagonal(r, tl_color: Color, br_color: Color) -> UiRect {
 pub @inline
 fn UiRect.progress(r, ratio: float, fill: Color, bg: Color) -> UiRect {
     r.fill(bg)
+    // Spread, not ui_rect: a fresh rect would default back to the output context.
     UiRect { ..r, w: r.w * clamp(ratio, 0.0, 1.0) }.fill(fill)
     return r
 }
@@ -751,6 +763,8 @@ pub @pure fn text_align_fracs(align: TextAlign) -> Vec2 {
     }
 }
 
+// Measurement and emission take the same context scale; FONT_RENDER_SCALE is the output
+// context's window factor and never reaches a composite rect.
 pub fn UiRect.text(
     r,
     text: string,
@@ -797,6 +811,7 @@ pub fn UiRect.text(
     }
     let frac = text_align_fracs(align)
     let anchor = v(s.x + s.w * frac.x, s.y + s.h * frac.y)
+    // Shadow and main share the z + 1 bucket and font-atlas batch, so push order holds.
     let prev = ui_ctx_push(r)
     let _ = text_layout_emit(layout, text_layout_aligned_origin(layout, anchor),
         color, r.z + 1, shadow: shadow)
@@ -1100,6 +1115,8 @@ pub fn ui_at_screen(screen_pos: Vec2, size: Vec2, pivot: Vec2 = v(0.5, 0.5)) -> 
     return ui_from_top_left(screen_to_design(screen_pos) - size * pivot, size)
 }
 
+// Projects against the frozen render view, not the presented one: the anchor is baked in at
+// the call, and every caller runs at draw stage.
 pub fn ui_at_world(pos: Vec2, size: Vec2, pivot: Vec2 = v(0.5, 0.5)) -> UiRect {
     let view = RENDER_VIEW ?? return ui_at_screen(v(0.0, 0.0), size, pivot)
     return ui_at_screen(world_to_screen_in(view, pos), size, pivot)

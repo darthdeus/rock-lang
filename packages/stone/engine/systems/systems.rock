@@ -37,6 +37,9 @@ pub value LifecycleDependency {
     fingerprint: string,
 }
 
+// `func` is a compiler-synthesized thunk of one signature for every entry:
+// process thunks ignore the argument; scene thunks resolve `scene_id`'s live
+// root.
 pub value LifecycleSystem {
     func: fn(int) -> (),
     name: string,
@@ -187,6 +190,7 @@ fn run_boot_phase(phase: string) {
         system.func(0)
         perf_phase_end(system_phase)
     }
+    // Required images must be ready for the next phase's draws and readback.
     let uploads_phase = perf_phase_begin("texture_uploads")
     stone_flush_image_uploads()
     perf_phase_end(uploads_phase)

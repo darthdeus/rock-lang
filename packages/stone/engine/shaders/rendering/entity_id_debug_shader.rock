@@ -1,3 +1,4 @@
+// An integer sampler: the id canvas is r32i, and a float sampler read is undefined.
 struct EntityIdTex {
     id_buffer: ISampler2D,
 }

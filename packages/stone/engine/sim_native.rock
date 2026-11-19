@@ -13,6 +13,7 @@ pub fn sim_native_split(csv: string) -> [string] {
     return csv.split(",")
 }
 
+// -1 when the class or field is absent; 0 is a legitimate value for every field.
 pub fn sim_native_id_field(class: string, field: string) -> int {
     let report = stone_native_id_accounting()
     if report == null { return -1 }
@@ -26,6 +27,7 @@ pub fn sim_native_id_field(class: string, field: string) -> int {
     return -1
 }
 
+// Callers must assert `classes`: a summary of zero classes reads like a clean world.
 pub fn sim_native_id_total(field: string) -> int {
     let report = stone_native_id_accounting()
     if report == null { return -1 }

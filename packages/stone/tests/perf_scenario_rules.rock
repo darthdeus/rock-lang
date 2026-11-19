@@ -162,6 +162,7 @@ fn perf_scenario_recorder_allocation_entry(which: int) {
     let start = max(warmup, 1)
     perf_scenario_window("steady", warmup, 4)
     perf_scenario_ready("recorder")
+    // A collection cannot hide setup allocation from the heap-delta check.
     __gc_collect_stop()
     let first_kb = 0.0
     let ordinary_kb = 0.0

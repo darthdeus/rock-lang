@@ -50,6 +50,7 @@ pub value GpuColorWrite { r: bool, g: bool, b: bool, a: bool }
 
 pub global GPU_WRITE_RGBA: GpuColorWrite = GpuColorWrite { r: true, g: true, b: true, a: true }
 
+// (u0, v0) is the UV at NDC (-1,-1) and (u1, v1) at NDC (+1,+1); v0 > v1 is the present's V flip.
 pub value GpuFullscreenGeometry { u0: float, v0: float, u1: float, v1: float }
 
 pub struct GpuDraw {
@@ -184,6 +185,8 @@ pub fn gpu_trace_take() -> [GpuTracedPass] {
     return taken
 }
 
+// These observers may retain a command after execution returns; callers may
+// reuse unpublished commands only when this is false.
 pub fn gpu_submission_retains_commands() -> bool {
     return GPU_TRACE_ON || UI_SUBMISSION_PROBE_ON || ENGINE.show_pipeline_inspector
 }
@@ -250,6 +253,8 @@ fn gpu_execute_pass(p: GpuPass, traced: [GpuTracedDraw]?, to_window: bool) -> bo
         CURRENT_CANVAS_HANDLE, gpu_execute_gl_pass, gpu_cleanup_gl_pass)
 }
 
+// Static arguments rather than a closure per pass. Re-raises the original
+// value after cleanup; pcall must not turn a failure into a successful submit.
 inline(lua) fn gpu_execute_gl_scoped(
     p: GpuPass, traced: [GpuTracedDraw]?, to_window: bool, blend: BlendMode, canvas: int,
     execute: fn(GpuPass, [GpuTracedDraw]?, bool) -> bool,
@@ -291,6 +296,7 @@ fn gpu_execute_gl_pass(p: GpuPass, traced: [GpuTracedDraw]?, to_window: bool) ->
         GpuTarget::Window => unset_canvas(),
     }
 
+    // After the target bind, which installs the target's own rect: the submitted viewport wins.
     stone_set_gl_viewport(p.viewport.x, p.viewport.y, p.viewport.w, p.viewport.h)
 
     match p.load {
@@ -361,7 +367,9 @@ fn gpu_execute_draw_resolved(d: GpuDraw, g: GpuFullscreenGeometry) {
     stone_draw_fullscreen_rect(g.u0, g.v0, g.u1, g.v1)
     if UI_SUBMISSION_PROBE_ON { stone_ui_probe_end_operation() }
 
+    // After the draw and before anything else binds: the marks describe this draw only.
     audit_texture_slots_for_draw(d.shader)
+    // Keep a plain loop: a one-binding fast path measured more trace aborts.
     for b in d.bindings { sampler_release_unit(b.slot) }
     end_shader()
 }

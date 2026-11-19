@@ -1,3 +1,5 @@
+// String offsets and lengths count native units (bytes on luajit).
+
 fn string.split(s, delimiter: string) -> [string] {
     let dl = delimiter.len()
     if dl == 0 { error("split: empty delimiter") }

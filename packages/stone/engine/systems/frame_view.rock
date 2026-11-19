@@ -10,6 +10,7 @@ pub value CrispArtRaster {
 
 pub enum SceneRaster {
     Native,
+    // round(drawable * k), 0 < k <= 1.
     OutputScale(float),
     CrispArt(CrispArtRaster),
     PixelPerfect(IVec2),
@@ -53,6 +54,8 @@ fn crisp_art_density(art: CrispArtRaster, world_view: Vec2, drawable: IVec2) -> 
     let s = art.max_scale
     while s >= 1 {
         let density = art.asset_ppwu * (s as float)
+        // The same ceiled candidate the resolver allocates: fit and allocation must not
+        // round differently.
         let cw = ceil(world_view.x * density)
         let ch = ceil(world_view.y * density)
         if cw <= (drawable.x as float) && ch <= (drawable.y as float) {
@@ -63,6 +66,7 @@ fn crisp_art_density(art: CrispArtRaster, world_view: Vec2, drawable: IVec2) -> 
     return 0.0
 }
 
+// Null for a zero-sized or minimized surface; rendering skips the frame.
 pub fn resolve_frame_view(
     logical_size: Vec2,
     drawable_size: IVec2,
@@ -108,6 +112,8 @@ pub fn resolve_frame_view(
             scene_scale = (scene.x as float) / vww
         },
         SceneRaster::CrispArt(art) => {
+            // Capacity is allocated once for the profile's worst case; zoom moves the active
+            // rectangle inside it, never the allocation.
             capacity = drawable_size
             let density = crisp_art_density(art, world_view, drawable_size)
             if density > 0.0 {
@@ -201,6 +207,7 @@ pub fn resolve_frame_view(
     }
 }
 
+// World -> logical output units (top-left origin, Y-down).
 pub @pure
 fn world_to_screen_in(view: FrameView, p: Vec2) -> Vec2 {
     let s = view.world_to_output_scale
@@ -223,6 +230,8 @@ fn screen_to_world_in(view: FrameView, p: Vec2) -> Vec2 {
     )
 }
 
+// Logical output point -> scene texel (top-left, Y-down, active-rect local);
+// null outside the presented scene rectangle.
 pub @pure
 fn output_to_scene_texel(view: FrameView, p: Vec2) -> Vec2? {
     let r = view.scene_output_rect
@@ -237,9 +246,13 @@ fn output_to_scene_texel(view: FrameView, p: Vec2) -> Vec2? {
 pub global camera: Camera2D = Camera2D { center: v(0.0, 0.0), visible_world_width: 40.0 }
 pub global editor_camera: Camera2D = Camera2D { center: v(0.0, 0.0), visible_world_width: 30.0 }
 
+// Resolved at the next render boundary, so a frame never sees half a change.
 pub global RENDER_CONFIG: RenderConfig = RenderConfig {}
 
+// The view whose pixels the player last saw; update-stage input and picking
+// use it.
 pub global PRESENTED_VIEW: FrameView? = null
+// Resolved after update systems position the camera, before draw systems.
 pub global RENDER_VIEW: FrameView? = null
 
 pub fn active_camera() -> Camera2D {
@@ -260,6 +273,8 @@ pub fn resolve_active_view() -> FrameView? {
     )
 }
 
+// Code that changes a camera and converts in the same update resolves through
+// this and uses the `_in` forms; it must not mutate a global half-resolved view.
 pub fn resolve_view_for(cam: Camera2D) -> FrameView? {
     return resolve_frame_view(screen_size(), drawable_size(), cam, RENDER_CONFIG)
 }

@@ -94,6 +94,8 @@ fn rect_quad_triangle_growth_and_reused_slots_match_vertex_bytes() {
     vertex_writer_assert_bytes(batch.vbo, expected, "rect quad and triangle after growth")
     vertex_writer_assert_zero_section(batch.vbo, batch.count, "rect quad and triangle")
 
+    // Reset keeps storage. Poison the old quad slots so the next writer must
+    // rewrite every field, including the default-zero section tail.
     rect_batch_reset(batch)
     for i in 0..6 { batch.vbo[i] = vertex_writer_dirty(200.0 + i as float * 20.0) }
     rect_batch_push_textured_quad4(batch,

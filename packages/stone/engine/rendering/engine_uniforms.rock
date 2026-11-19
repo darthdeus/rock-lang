@@ -17,6 +17,7 @@
 pub value EngineU {
     uProjection: Mat4,
     uView: Mat4,
+    // Isometric depth-remap band, in world y. South=0, north=1.
     uYBounds: Vec2,
     uScreenBounds: Vec2,
     uEngineTime: float,
@@ -25,6 +26,7 @@ pub value EngineU {
 
 pub global CAMERA_VIEW: Mat4 = mat4_identity()
 
+// world_to_screen is (v + offset) * scale, so the translation is +offset*scale.
 pub fn camera_view_matrix(offset: Vec2, scale: float) -> Mat4 {
     return Mat4 {
         c0: v(scale, 0.0, 0.0, 0.0),
@@ -34,10 +36,13 @@ pub fn camera_view_matrix(offset: Vec2, scale: float) -> Mat4 {
     }
 }
 
+// Not stone_get_time(): wall time ignores SIM_FIXED_DT and does not replay.
 pub fn shader_clock() -> float {
     return time
 }
 
+// Column stores: a whole Mat4 store constructs a value, and the camera is set
+// several times a frame.
 pub fn set_camera(offset: Vec2, scale: float) {
     CAMERA_VIEW.c0 = v(scale, 0.0, 0.0, 0.0)
     CAMERA_VIEW.c1 = v(0.0, scale, 0.0, 0.0)
@@ -52,6 +57,7 @@ pub fn reset_camera() {
     CAMERA_VIEW.c3 = v(0.0, 0.0, 0.0, 1.0)
 }
 
+// Compare leaves without constructing a Mat4 on the per-draw cache path.
 fn camera_view_is_identity() -> bool {
     return CAMERA_VIEW.c0.x == 1.0 && CAMERA_VIEW.c0.y == 0.0
         && CAMERA_VIEW.c0.z == 0.0 && CAMERA_VIEW.c0.w == 0.0
@@ -140,6 +146,9 @@ pub fn end_cleared_camera() {
     }
 }
 
+// `PresentSource` is for a canvas the present samples with a flip. Chosen by
+// the caller, never inferred from canvas binding: world geometry renders into
+// canvases too and needs `Direct`.
 pub enum TargetConvention {
     Direct,
     PresentSource,
@@ -182,6 +191,8 @@ pub fn engine_uniforms_for_extent_with_view(
 
 pub global ENGINE_BLOCK_PACKS: int = 0
 
+// Screen-space block reuse is keyed on the inputs and confined to an identity
+// view. Stamps start at 1, so a fresh entry's 0 never matches.
 global ENGINE_BLOCK_STAMP: int = 0
 global ENGINE_BLOCK_KEY_VALID: bool = false
 global ENGINE_BLOCK_KEY_W: float = 0.0

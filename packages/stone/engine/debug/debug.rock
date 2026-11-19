@@ -63,13 +63,16 @@ pub fn draw_depth_buffer_preview(x: float, y: float, w: float, h: float) {
     set_shader(depth_visualize_shader)
     shader_bind_canvas_depth(depth_visualize_shader, "depth_tex", screen_canvas)
     stone_set_viewport_rect(transmute(x), transmute(y), transmute(w), transmute(h))
+    // TexCoord must address the active extent in 0..1, not the whole backing texture.
     let uv = canvas_active_uv(screen_canvas)
     set_fullscreen_uv_scale(uv.x, uv.y)
     draw_fullscreen_quad()
     set_fullscreen_uv_scale(1.0, 1.0)
+    // Audit right after the draw, before anything else can bind.
     audit_texture_slots_for_draw(depth_visualize_shader)
     release_depth_sampler(depth_visualize_shader, "depth_tex")
     end_shader()
+    // Also restores the full viewport; there is no separate viewport reset.
     unset_canvas()
 }
 

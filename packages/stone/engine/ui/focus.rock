@@ -5,6 +5,7 @@ pub nobox value UiFocusItem {
 }
 
 pub struct UiFocusState {
+    // Grow-only pools swapped each frame.
     last: [UiFocusItem],
     last_count: int,
     cur: [UiFocusItem],
@@ -88,10 +89,12 @@ pub fn ui_nav_use(up: ActionDef, down: ActionDef, left: ActionDef, right: Action
     f.back = back
 }
 
+// Active focus scope for next frame's resolution.
 pub fn ui_focus_set_scope(scope: string) {
     UI_FOCUS.scope = scope
 }
 
+// Registers a focusable for next frame's resolution; declaration order is the nav order.
 pub fn ui_focus_item(id: int, r: UiRect, scope: string) {
     let f = UI_FOCUS
     f.cur_count = f.cur_count + 1
@@ -166,6 +169,9 @@ fn __focus_resolve(f: UiFocusState, n: int) {
     f.focused_idx[f.scope] = idx
 }
 
+// Runner-called right after ui_mouse_begin_frame: hot must be fresh for hover-steal. Nav edges
+// OR the action's pressed latch (a tap completed in one poll) with this core's own prev-down
+// snapshot (a sim's mid-frame injection, whose latch is rotated away before this runs).
 pub fn ui_focus_begin_frame() {
     let f = UI_FOCUS
     let tmp = f.last

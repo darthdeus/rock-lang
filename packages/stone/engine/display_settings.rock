@@ -93,6 +93,8 @@ global DS_APPLIED_VSYNC: int = -1
 global DS_APPLIED_RES: IVec2 = iv(-1, -1)
 global DS_APPLIED_FRAME_CAP: int = -1
 
+// Queues the push for the next frame boundary (display_settings_apply_pending):
+// a mid-frame window mode change or resize would tear the frame.
 pub fn apply_display_settings(s: DisplaySettings) {
     DISPLAY_SETTINGS = s
     DISPLAY_SETTINGS_APPLY_PENDING = true
@@ -105,7 +107,12 @@ fn display_settings_apply_pending() {
 }
 
 fn display_settings_push(s: DisplaySettings) {
+    // Each FFI runs only on change, so a re-queue with no delta cannot hitch the
+    // present.
     let mode_i = display_mode_to_int(s.mode)
+    // Fullscreen only: a live cross-output move of a windowed window desyncs tiling
+    // WMs. DS_APPLIED_DISPLAY changes only when the move runs, so a later switch to
+    // fullscreen still applies it.
     if s.display != DS_APPLIED_DISPLAY && mode_i != 0 {
         DS_APPLIED_DISPLAY = s.display
         stone_set_window_display(s.display)

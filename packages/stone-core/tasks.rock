@@ -123,6 +123,8 @@ fn poller_remove(poller: CoroutinePoller, slot: int, entry: CoState) {
     poller.entry_count -= 1
 }
 
+// Eager: runs the coroutine to its first yield now, so its state is seeded the
+// frame it spawns. A positive `delay` waits `Wait::Secs(delay)` unprimed.
 pub fn start<R>(coroutine: Coroutine<Wait, R>, poller: CoroutinePoller,
     delay: float = 0) -> Task<R> {
     let active = if delay > 0.0 { Wait::Secs(delay) } else { Wait::Frame }
@@ -141,6 +143,8 @@ fn co_double_poll_warn_enabled() -> bool {
     return enabled
 }
 
+// Stamps `last_tick_frame` but never reads it, so it works without stone;
+// same-frame skipping is `tick`'s job.
 pub fn poll<R>(pc: Task<R>, dt: float) -> bool {
     let state = pc.state.get() ?? return false
     return task_poll_step(pc, dt, state.clock.frame_index())
@@ -239,6 +243,8 @@ fn task_prime_owned(task: Task) {
 }
 
 pub struct CoState {
+    // Exactly one of `fetch` and `task` is set. `run` stores its Task directly:
+    // a closure capturing it would rebuild its tables on every call.
     fetch: (() -> Task?)? = null,
     task: Task? = null,
     clear: (() -> ())? = null,
@@ -328,6 +334,8 @@ fn coroutine_poller_step(poller: CoroutinePoller, selected: Task?) {
     }
 }
 
+// Polls unless already advanced this frame. A terminal task returns false
+// without re-polling: re-driving it re-fires its stale Wait's side effects.
 pub fn tick<R>(t: Task<R>, dt: float) -> bool {
     let state = t.state.get() ?? return false
     return task_tick_step(t, dt, state.clock.frame_index())
@@ -345,6 +353,12 @@ pub fn task_tick_step<R>(t: Task<R>, dt: float, frame: int) -> bool {
     if state.last_tick_frame == frame { return true }
     return task_poll_step(t, dt, frame)
 }
+
+// Combinator contract: children are driven by `tick`; every child is killed
+// through the combinator's `defer`, so a normal exit or a kill cascades to the
+// whole child tree; a child error propagates through `tick` while the defer
+// kills its siblings. Races scan in slot order and return on the first
+// completion, so a later sibling is not ticked that frame.
 
 pub fn take_result<R>(t: Task<R>) -> R {
     if completed(t.coroutine) {
@@ -519,6 +533,7 @@ pub co fn timeout_frames<R>(t: Task<R>, frames: int) -> Coroutine<Wait, R?> {
     return take_result(t)
 }
 
+// Replacements must share poller.clock so the frame guard stays meaningful.
 pub fn poll_co_owned(poller: CoroutinePoller, fetch: () -> Task?, clear: (() -> ())? = null) {
     poller_insert(poller, CoState { fetch: fetch, clear: clear, last: fetch() })
 }
@@ -537,6 +552,8 @@ pub fn run(poller: CoroutinePoller, coroutine: Coroutine<Wait>, delay: float = 0
     return t
 }
 
+// Assigns the field, registers, then primes, in that order, so pre-yield code
+// already sees `o.field != null`. `o.field = run(co)` would prime first.
 pub fn run_into<T>(poller: CoroutinePoller, o: T, f: FieldRef<T, Task?>,
     coroutine: Coroutine<Wait>) -> Task {
     let t = task_new_in(poller.scope, coroutine, poller.clock, Wait::Frame)
@@ -582,11 +599,15 @@ pub fn stop<R>(t: Task<R>) {
     task_abandon(t)
 }
 
+// Fires terminal defers and on_killed; a bare `o.field = null` abandons the
+// coroutine without running its defers.
 pub fn stop<T>(o: T, f: FieldRef<T, Task?>) {
     if let pc = field_get(o, f) { stop(pc) }
     field_set(o, f, null)
 }
 
+// Kills the outgoing coroutine first; a bare assignment over a live slot
+// abandons it without running its defers.
 pub fn replace<T>(o: T, f: FieldRef<T, Task?>, next: Task?) {
     if let pc = field_get(o, f) { stop(pc) }
     field_set(o, f, next)

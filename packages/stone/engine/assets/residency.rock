@@ -184,6 +184,7 @@ fn residency_evict_cached(key: string, entry: ResidencyCached) -> bool {
     return true
 }
 
+// A quiet flush (no frame waits) does no residency allocation or clock reads.
 pub fn residency_flush_required() {
     if RESIDENCY_FRAME_WAIT_PATHS.len() == 0 { stone_flush_image_uploads(); return }
     let t0 = stone_get_time()
@@ -337,6 +338,7 @@ pub fn residency_cold_arrival() {
     RESIDENCY_COLD_ARRIVAL_RENDERING = false
 }
 
+// frame_core_render_frame brackets every world render with these two.
 pub fn residency_cold_arrival_render_begin() {
     RESIDENCY_COLD_ARRIVAL_RENDERING = RESIDENCY_COLD_ARRIVAL_OPEN
 }
@@ -635,6 +637,7 @@ fn asset_report_font_rows(rows: [AssetReportRow]) {
         row.cpu_bytes = cpu
         row.detail = "metrics-only"
         rows.push(row)
+        // Instance zero aliases the compatibility atlas; count that texture only here.
         let instances = stone_font_atlas_instance_count(backend)
         for i in 0..instances {
             let image = stone_get_font_atlas_instance_image_at(backend, i)
@@ -659,6 +662,8 @@ fn asset_report_sound_rows(rows: [AssetReportRow]) {
         if data.path == "" {
             let held = stone_music_byte_len(backend)
             if held < 0 { continue }
+            // `music`, not `sound`: native sound and music ids are minted from separate
+            // spaces, so one number can name two assets.
             let row = asset_report_new_row("sound", "music:{backend}")
             row.format = "encoded"
             row.cpu_bytes = held
@@ -792,6 +797,8 @@ fn asset_report_snapshot(frame: int, event: string) -> (string, [JsonValue]) {
     return (json_encode_pretty(json_object(doc), ["assets"]), totals)
 }
 
+// Environment configuration is read once; disarmed frames only check flags and
+// allocate nothing.
 global ASSET_REPORT_DIR: string = ""
 global ASSET_REPORT_INTERVAL: int = 600
 global ASSET_REPORT_ARMED: bool = false

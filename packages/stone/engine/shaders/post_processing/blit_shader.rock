@@ -1,3 +1,4 @@
+// Never flips: orientation comes from the fullscreen quad stone_draw_fullscreen_quad selects.
 @shader(fragment)
 fn blit_frag(@textures t: InputTex, tc: Vec2) -> Vec4 {
     return texture(t.input_tex, tc)

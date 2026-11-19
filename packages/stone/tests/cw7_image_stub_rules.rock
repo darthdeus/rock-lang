@@ -1,3 +1,4 @@
+// Decoder policy is latched on first use.
 inline(lua) fn cw7_image_stub_process(stubbed: bool) = """
     local function quote(s) return "'" .. s:gsub("'", "'\\''") .. "'" end
     local mode = stubbed and "1" or "0"

@@ -74,6 +74,8 @@ pub fn ui_presence_progress(p: UiPresence) -> float {
     return clamp(p.opening_age / p.opening_duration, 0.0, 1.0)
 }
 
+// Progress 0 is fully dissolved. Completed skins take the ordinary path so steady-state panels
+// do not pay for a custom pipeline.
 pub fn ui_presence_skin_draw(r: UiRect, skin: UiSkin, progress: float, pipeline: Pipeline, tint: Color = WHITE) {
     let p = clamp(progress, 0.0, 1.0)
     if p >= 1.0 {

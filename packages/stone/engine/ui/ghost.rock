@@ -9,6 +9,7 @@ pub struct UiGhost {
     world_offset: Vec2 = v(0.0, 0.0),
     duration: float,
     grow: float,
+    // Fed `uDissolve` (age fraction, 0 whole -> 1 gone) per frame; null = plain alpha fade.
     pipeline: Pipeline? = null,
     age: float = 0.0,
 }
@@ -20,6 +21,7 @@ fn reset_ui_ghosts() {
     UI_GHOSTS.clear()
 }
 
+// grow: design px the rect expands per side over the full fade.
 pub fn ui_ghost_push(skin: Entity<UiSkin>, r: UiRect, duration: float = 0.15, grow: float = 6.0, pipeline: Pipeline? = null) {
     UI_GHOSTS.insert(UiGhost { skin: skin, rect: r, duration: duration, grow: grow, pipeline: pipeline })
 }

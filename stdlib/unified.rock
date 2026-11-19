@@ -101,6 +101,8 @@ value NativeBuffer<T> {
     len: int,
 }
 
+// Expanded by skull at every call site; `T` must be an FFI-clean value struct
+// or int/float/bool.
 @nowrite inline(lua) fn native_buffer_alloc<T>(n: int) -> NativeBuffer<T> = "error('native_buffer_alloc is a skull compiler intrinsic; a call reached runtime unexpanded')"
 
 @inline fn native_buffer_float(n: int) -> NativeBuffer<float> {
@@ -135,6 +137,9 @@ value NativeBuffer<T> {
     if i < 0 or i >= b.len then return nil end
     return b.ptr[i]
 """
+
+// Metric: `sorted` stays ascending so order statistics are index lookups;
+// `ring` is insertion order, giving the oldest sample to evict.
 
 value StatSummary {
     mean: float,
@@ -195,11 +200,13 @@ fn metric_percentile_index(p: int, n: int) -> int {
     return idx
 }
 
+// Only called from metric_add after it adds a sample, so count >= 1.
 fn metric_recompute(m: Metric) {
     let n = m.count
     let nf = n as float
     let mean = m.sum / nf
     m.mean = mean
+    // Clamp guards float cancellation in the sum_sq - mean^2 variance form.
     m.stddev = sqrt(max(0.0, m.sum_sq / nf - mean * mean))
     m.min = nb_get(m.sorted, 0)
     m.max = nb_get(m.sorted, n - 1)
@@ -208,6 +215,10 @@ fn metric_recompute(m: Metric) {
     m.p99 = nb_get(m.sorted, metric_percentile_index(99, n))
 }
 
+// Lower bound of `v` in sorted[0..n). Both loops have a literal bound, so the
+// trip count is one constant per metric instead of one side exit per scanned
+// index; once lo == hi the remaining steps write nothing. 16 steps cover n up
+// to 65536, 64 cover any int-sized n.
 fn metric_lower_bound(m: Metric, n: int, v: float, cap: int) -> int {
     let lo = 0
     let hi = n
@@ -237,11 +248,14 @@ fn metric_lower_bound(m: Metric, n: int, v: float, cap: int) -> int {
     return lo
 }
 
+// O(cap), zero allocation, uniform cost per call.
 fn metric_add(m: Metric, v: float) {
     let evicting = m.count >= m.cap
     let old = 0.0
 
     if evicting {
+        // Both buffers are written through nb_set, so the oldest sample is in
+        // `sorted` bit-for-bit and a lower bound lands on a copy of it.
         old = nb_get(m.ring, m.head)
         let oi = metric_lower_bound(m, m.count, old, m.cap)
         let q = metric_lower_bound(m, m.count, v, m.cap)
@@ -282,6 +296,8 @@ fn metric_add(m: Metric, v: float) {
     metric_recompute(m)
 }
 
+// Keeps the ring/sorted buffers: logically empty at count 0, so a window
+// restarts without reallocating.
 fn metric_reset(m: Metric) {
     m.head = 0
     m.count = 0
@@ -309,6 +325,7 @@ fn metric_snapshot(m: Metric) -> StatSummary {
     }
 }
 
+// i = 0 is the newest sample. Caller guarantees 0 <= i < m.count.
 fn metric_recent(m: Metric, i: int) -> float {
     let idx = ((m.head - 1 - i) % m.cap + m.cap) % m.cap
     return nb_get(m.ring, idx)
@@ -390,6 +407,7 @@ struct FlatVec<T> { buf: NativeBuffer<T>, len: int }   // buf.len = capacity
     fv.buf[i] = v
 }
 
+// Keeps the allocated capacity; a later push reuses it.
 @inline fn FlatVec<T>.clear(fv) {
     fv.len = 0
 }
@@ -400,6 +418,7 @@ struct FlatVec<T> { buf: NativeBuffer<T>, len: int }   // buf.len = capacity
     return fv.buf.ptr
 }
 
+// The key fn must be capture-free: a capturing lambda allocates per call.
 @inline fn FlatVec<T>.sort(fv, key_fn: (T) -> float) {
     for i in 1..fv.len {
         let x = fv.buf[i]
@@ -450,6 +469,7 @@ value NativeBufferU32 { ptr: PtrU32, len: int }
 @intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_i16(n: int) -> PtrI16 = 'return __rock_nb_alloc("int16_t", n)'
 @intrinsic @native_required @nomangle inline(lua) fn __nb_alloc_u32(n: int) -> PtrU32 = 'return __rock_nb_alloc("uint32_t", n)'
 
+// Off-heap storage, which `collectgarbage("count")` does not include.
 @nomangle inline(lua) fn native_buffer_offheap_bytes() -> int = "return __ROCK_NB_OFFHEAP_STATS.live_bytes"
 
 @inline fn native_buffer_u8(n: int)  -> NativeBufferU8  { return NativeBufferU8  { ptr: __nb_alloc_u8(n),  len: n } }
@@ -514,6 +534,8 @@ value NativeBufferU32 { ptr: PtrU32, len: int }
     end
 """
 
+// Copies share the descriptor table, so a field write lands on a fresh one
+// that keeps the leaf views, reseated when `ptr` changes.
 @nomangle inline(lua) fn __descriptor_with(d: any, field: string, v: any) -> any = """
     local out = {}
     for k, x in pairs(d) do out[k] = x end
@@ -526,6 +548,7 @@ value NativeBufferU32 { ptr: PtrU32, len: int }
     return setmetatable(out, getmetatable(d))
 """
 
+// Checks once per element, before its K leaf accesses index their views raw.
 @nowrite @nomangle inline(lua) fn __nb_checked_index(buf: any, i: int) -> int = """
     if i < 0 or i >= buf.len then
         error("NativeBuffer index out of bounds: index " .. tostring(i) ..
@@ -625,6 +648,8 @@ inline(lua) fn cache_owner_retire(owner: CacheOwner) -> bool = """
     return true
 """
 
+// A read also checks the entry's backing store, so a handle whose owner was
+// replaced reads cold rather than another store's value.
 @nomangle inline(lua) fn __weak_cache_write(name: string, scene: int, arena: int, slot: int, generation: int, backing: any, value: any) = """
     local owners = _G.__rock_weak_cache_owners
     if not owners then owners = {}; _G.__rock_weak_cache_owners = owners end
@@ -703,6 +728,7 @@ fn weak_cache_drop<T>(name: string, owner: Entity<T>) {
 
 @inline
 fn weak_cache_get<T, V>(name: string, owner: Scene<T>) -> V? {
+    // The typed getter keeps its oracle guard outside the hot loop.
     let backing = owner.get() ?? return null
     let value: V? = __weak_cache_scene_get(name, owner._scene_id, backing)
     return value
@@ -1155,6 +1181,7 @@ fn print_float(value: float) { print(to_string(value)) }
 
 @nowrite @intrinsic extern(lua) fn error(message: string)
 
+// A foreign value's __tostring callback can mutate Rock state.
 @intrinsic extern(lua) fn tostring(value: any) -> string
 
 fn to_string(value: int) -> string { return tostring(value) }
@@ -1547,6 +1574,8 @@ fn expect<T>(@unwraps value: T?, message: string) -> T {
     return phantom()
 }
 
+// Concrete overloads, not generic: an unconstrained `min<T>` shape-matches
+// every two-arg call and ties with specialized overloads like `Vec2.min`.
 @intrinsic @pure fn max(a: int, b: int) -> int {
     if a > b { return a } else { return b }
 }
@@ -1582,6 +1611,7 @@ fn expect<T>(@unwraps value: T?, message: string) -> T {
 @intrinsic @pure @inline inline(lua) fn int_to_float(value: int) -> float = "return value"
 @intrinsic @pure @inline inline(lua) fn to_float(value: int) -> float = "return value"
 
+// Taken as a fn value, so it needs a real JS sibling, not a template.
 @nowrite inline(lua) fn float_to_int(value: float) -> int = """
     if type(value) ~= "number" then
         error("Expected a number, got " .. type(value))
@@ -1765,10 +1795,14 @@ fn expect<T>(@unwraps value: T?, message: string) -> T {
     if c.__state < 0 then return "dead" else return "suspended" end
 """
 
+// Only natural completion makes result() trustworthy. Cancellation and an
+// escaping error leave completed() false, even though status() is "dead".
 @intrinsic inline(lua) fn completed<Y, R, N>(c: Coroutine<Y, R, N>) -> bool = """
     return c.__state == -3
 """
 
+// Liveness comes from `status()`, not a null sentinel, so a body that yields
+// null still produces real null elements.
 fn next<Y, R>(c: Coroutine<Y, R, ()>) -> (bool, Y) {
     let y = resume(c)
     if status(c) == "suspended" {
@@ -1813,6 +1847,8 @@ fn next<Y, R>(c: Coroutine<Y, R, ()>) -> (bool, Y) {
     __rock_coroutine_fire_hot_reload(c)
 """
 
+// on_resume and on_killed must be called inside a co fn body; the compiler
+// relocates the call to constructor time so the hook sees the first resume.
 inline(lua) fn on_resume(f: fn() -> ()) = """
     error("on_resume can only be called inside a co fn body")
 """
@@ -1853,6 +1889,7 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
     o[f] = v
 """
 
+// Both callers unset only present keys.
 @intrinsic @relocates @inline inline(lua) fn table_unset<K, V>(tbl: Map<K, V>, index: K) = """
     tbl[index] = nil
 """
@@ -1913,6 +1950,8 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
     end)
 """
 
+// `len` is passed in: a nullable field's column holds real nils, and `#` on a
+// table with holes is undefined, which would desync sibling columns.
 @nomangle inline(lua) fn __rock_col_insert(col: any, lua_index: int, len: int, value: any) = """
     for i = len, lua_index, -1 do col[i + 1] = col[i] end
     col[lua_index] = value
@@ -1929,6 +1968,8 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
     return physical
 """
 
+// Appends realize the reservation once; clear releases leaves, not backing
+// storage.
 @nomangle inline(lua) fn __rock_stride_reserve(vec: any, len: int) = """
     local h = rawget(vec, "@vec")
     if h.cap == 0 or h.reserved then return end
@@ -1988,6 +2029,7 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
     for i = 1, n * stride do data[i] = sorted[i] end
 """
 
+// Leaves are copied with explicit bounds because a raw row may hold nil.
 @nomangle inline(lua) fn __rock_stride_sort_leaves(vec: any, key_fn: any, stride: int) = """
     local n, data = vec.len or 0, vec._data
     local order = {}
@@ -2461,6 +2503,8 @@ const EPSILON: float = 0.0000001
     return o
 """
 
+// Returns nil when absent, so an absent embed reads as null rather than as a
+// struct assembled from stale leaves.
 @nomangle inline(lua) fn __rock_embed_view(t: any, prefix: string, ty: string, nullable: bool) -> any = """
     if nullable and t[prefix] == nil then return nil end
     local decl = _G.__ROCK_TYPE_TABLE[ty]
@@ -2480,6 +2524,8 @@ const EPSILON: float = 0.0000001
     return o
 """
 
+// Module-level so `table.sort` does not allocate a closure per inspect call
+// (FNEW abort).
 @nomangle inline(lua) fn __rock_inspect_key_lt(a: any, b: any) -> bool = """
     return tostring(a) < tostring(b)
 """
@@ -2492,6 +2538,8 @@ const EPSILON: float = 0.0000001
     table.sort(keys._data)
 """
 
+// Lua lowering folds this to the physical key kind in each concrete Map body;
+// other targets keep the generic comparator.
 @intrinsic @pure inline(lua) fn __map_keys_are_strings<K>(keys: [K]) -> bool = "return false"
 
 @intrinsic @nomangle inline(lua) fn inspect(obj: any, cycle_detect: bool = true, precision: int = -1) -> string = """
@@ -2796,6 +2844,8 @@ fn Map<K, V>.insert(map, key: K, value: V) {
     m.occupied_count = m.occupied_count - 1
 """
 
+// Allocates a slot on a miss; growth takes `data.len` with it, so the
+// caller's column store stays in bounds.
 @returns_nonneg @returns_index_below("m.data") @nomangle inline(lua) fn __map_col_slot(m: any, key: any) -> int = """
     local s = m.spine[key]
     if s ~= nil then return s end
@@ -2804,6 +2854,8 @@ fn Map<K, V>.insert(map, key: K, value: V) {
     return s
 """
 
+// -1 on a miss. Columns are never read at a missing key: the spine is the
+// presence.
 @returns_index_below("m.data") @nomangle inline(lua) fn __map_col_slot_of(m: any, key: any) -> int = """
     local s = m.spine[key]
     if s == nil then return -1 end
@@ -2824,6 +2876,8 @@ fn Map<K, V>.insert(map, key: K, value: V) {
     return s
 """
 
+// A map key is data and must never collide with a host object name; a Lua
+// table inherits nothing, the JS sibling uses a native Map.
 @nomangle inline(lua) fn __map_col_new_spine() -> any = """
     return {}
 """
@@ -2836,6 +2890,7 @@ fn Map<K, V>.insert(map, key: K, value: V) {
     return m.spine[key] ~= nil
 """
 
+// Capacity is retained, so a rebuild after `clear` allocates nothing.
 @nomangle inline(lua) fn __map_col_clear(m: any) = """
     for k, s in pairs(m.spine) do
         __slot_release(m, s)
@@ -2963,6 +3018,7 @@ fn Map<K, V>.upsert(map, key: K, value: V) -> V? {
     return result
 }
 
+// Inclusive on both ends; start + i*step avoids drift over many points.
 fn linspace(start: float, end_val: float, count: int) -> [float] {
     let result: [float] = []
     if count <= 0 { return result }
@@ -2996,12 +3052,17 @@ fn float_range(start: float, end_val: float, step: float) -> [float] {
     return result
 }
 
+// `_data` is 1-based with an explicit `len`, since `#t` is unreliable with
+// holes. Slots past `len` hold nil or false: an emitted `xs[i]` read takes a
+// truthy slot as in bounds without a check.
 struct Vec<T> {
     _data: any,
     len: int,
     storage: Storage = phantom(),
 }
 
+// skull inlines iter/next and FORL recovery re-emits a numeric `for`; pinned
+// by `for_real_vec_loop_is_forl_zero_alloc` in skull-codegen-lua.
 @consume struct VecIter<T> {
     vec: [T],
     i: int,
@@ -3144,6 +3205,8 @@ fn skip<I: Iterator<T>, T>(it: I, n: int) -> SkipIter<I, T> {
     return SkipIter { __inner: it, __n: n }
 }
 
+// Same shape as FilterIter (one fetch at the head, a skip edge back to it,
+// one return edge), so forl.rs peels it identically.
 @inline
 fn SkipIter<I: Iterator<T>, T>.next(it) -> (bool, T) {
     loop {
@@ -3167,6 +3230,7 @@ fn step_by<I: Iterator<T>, T>(it: I, n: int) -> StepByIter<I, T> {
     return StepByIter { __inner: it, __n: n, __skip: 0 }
 }
 
+// Same peelable shape as SkipIter.
 @inline
 fn StepByIter<I: Iterator<T>, T>.next(it) -> (bool, T) {
     loop {
@@ -3221,6 +3285,8 @@ fn ChainIter<I1: Iterator<T>, I2: Iterator<T>, T>.next(it) -> (bool, T) {
     return next(it.__b)
 }
 
+// `__cur` is a real field, not II?, so `next(it.__cur)` advances the stored
+// cursor rather than a throwaway copy.
 @consume struct FlattenIter<IO, II, T> {
     __outer: IO,
     __cur: II,
@@ -3302,6 +3368,7 @@ fn count<I: Iterator<T>, T>(it: I) -> int {
     return n
 }
 
+// `have` rather than `best == null`: at `T = E?` null is also a legal element.
 @inline
 fn min_by<I: Iterator<T>, T>(it: I, key: fn(T) -> float) -> T? {
     let best: T? = null
@@ -3318,6 +3385,7 @@ fn min_by<I: Iterator<T>, T>(it: I, key: fn(T) -> float) -> T? {
     return best
 }
 
+// Same sentinel collision as `min_by`.
 @inline
 fn max_by<I: Iterator<T>, T>(it: I, key: fn(T) -> float) -> T? {
     let best: T? = null
@@ -3348,6 +3416,7 @@ fn sum_f<I: Iterator<float>>(it: I) -> float {
     return acc
 }
 
+// `ago(0)` is the last push; iteration runs oldest to newest.
 struct RingBuffer<T> {
     data: [T],
     cap: int,
@@ -3382,6 +3451,8 @@ fn RingBuffer<T>.clear(rb) {
     rb.head = 0
 }
 
+// Holds the shared `data` descriptor, not the buffer: a mutable identity
+// cannot be stored in a field.
 @consume struct RingIter<T> {
     data: [T],
     oldest: int,
@@ -3438,6 +3509,7 @@ fn Vec<T>.sort<K>(vec, key_fn: fn(T) -> K) {
     error("__sort_key_lt must be compiler-expanded")
 """
 
+// An in-place heap keeps auxiliary space constant for every element storage.
 fn __vec_sort_by_key_leaves<T, K>(vec: [T], key_fn: fn(T) -> K) {
     let start = int(vec.len / 2)
     let end = vec.len
@@ -3464,6 +3536,7 @@ fn __vec_sort_by_key_leaves<T, K>(vec: [T], key_fn: fn(T) -> K) {
     }
 }
 
+// `0..n` ordered by `lt`, as 0-based row indices.
 inline(lua) fn __sort_rows(n: int, lt: fn(int, int) -> bool) -> [int] = """
     local order = {}
     for i = 1, n do order[i] = i - 1 end
@@ -3635,6 +3708,7 @@ fn Envelope.step_by(e, goal: float, step_dt: float) -> float {
 
 @nowrite @intrinsic @inline inline(lua) fn string.lower(s) -> string = "string.lower(s)"
 
+// 0-based unit index of the first plain-text match at or after `from`, or -1.
 @intrinsic @native_required inline(lua) fn string.find(s, substr: string, from: int = 0) -> int = """
     local pos = string.find(s, substr, from + 1, true)
     if pos then
@@ -3644,6 +3718,11 @@ fn Envelope.step_by(e, goal: float, step_dt: float) -> float {
     end
 """
 
+// For a caller that already validated the grammar (`parse_float` is checked).
+// `end_idx` is unused on luajit (strtod stops; strings are NUL-terminated).
+// `strtod_l` with a "C" locale keeps LC_NUMERIC from misreading `.`.
+// Keep this body free of closures: an UCLO in the hot path cannot be
+// recorded, so the locale setup lives in its own function.
 @intrinsic @native_required inline(lua) fn string.parse_float_at(s, start: int, end_idx: int) -> float = """
     local f = _G.__rock_parse_float_at or __rock_parse_float_at_setup()
     return f(s, start, end_idx)
@@ -3706,6 +3785,8 @@ double strtod_l(const char *nptr, char **endptr, __rock_locale_t loc);
     end
 """
 
+// One native unit (byte on luajit, UTF-16 unit on JS), or 0 out of bounds.
+// Do not do arithmetic on it across backends.
 @nowrite @intrinsic inline(lua) fn string.unit_at(s, index: int) -> int = """
     return string.byte(s, index + 1) or 0  -- Convert to 1-based, return 0 if out of bounds
 """

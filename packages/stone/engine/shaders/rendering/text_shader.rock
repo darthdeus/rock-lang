@@ -22,6 +22,7 @@ value TextVary {
     TexCoords: Vec2,
 }
 
+// text.rs binds the font atlas to unit 0, so `text` must be the only field.
 struct TextTex {
     text: Sampler2D,
 }

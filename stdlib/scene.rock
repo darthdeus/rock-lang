@@ -1,3 +1,5 @@
+// The process root, owner of every `arena_new()` Arena; never a Scene, it
+// keeps the registry dense from index 0.
 const __SCENE_RESERVED: int = 0
 const __SCENE_BUILDING: int = 1
 const __SCENE_LIVE: int = 2
@@ -169,6 +171,9 @@ fn __scene_rebuild_type_buckets() {
     }
 }
 
+// `graceful` runs teardown actions in registration order BEFORE any Arena is
+// retired, while their rows still resolve. A throwing closer propagates and
+// leaves the Scene queued with its rows intact.
 fn __scene_retire(scene_id: int, graceful: bool) {
     if graceful {
         let closers = __SCENE_REGISTRY.closers[scene_id]
@@ -194,6 +199,8 @@ fn __scene_retire(scene_id: int, graceful: bool) {
     __scene_type_bucket_remove(scene_id)
 }
 
+// Failure is `build` returning null, not a caught error: a pcall would
+// swallow failures that must propagate. The abort is graceful.
 fn scene_create<T>(build: fn(SceneBuilder) -> T?) -> Scene<T>? {
     let id = __scene_reserve()
     let root = build(SceneBuilder { _scene_id: id })
@@ -224,6 +231,8 @@ fn SceneBuilder.on_close(builder, action: () -> ()) {
     vec_push(__SCENE_REGISTRY.closers[scene_id], action)
 }
 
+// Runs on close, discard and construction abort, after semantic close
+// callbacks but before owned arena rows disappear.
 fn SceneBuilder.on_retire(builder, action: () -> ()) {
     let scene_id = builder._scene_id
     assert(__scene_state(scene_id) == __SCENE_BUILDING,
@@ -231,6 +240,8 @@ fn SceneBuilder.on_retire(builder, action: () -> ()) {
     vec_push(__SCENE_REGISTRY.retirers[scene_id], action)
 }
 
+// Lookup stops resolving immediately; the rows die at the next safe-point
+// drain.
 fn scene_close<T>(scene: Scene<T>) -> bool {
     let id = scene._scene_id
     if __scene_state(id) != __SCENE_LIVE { return false }
@@ -254,6 +265,9 @@ fn scene_on_close<T>(scene: Scene<T>, action: () -> ()) -> bool {
     return true
 }
 
+// The runner owns the one call, at `frame_core_end` after every update and
+// draw consumer has returned; a mid-frame call would invalidate rows a caller
+// up the stack still holds.
 fn __scene_drain_closed() -> int {
     let pending = __SCENE_REGISTRY.pending_close
     if vec_len(pending) == 0 { return 0 }
@@ -274,6 +288,8 @@ fn __scene_drain_closed() -> int {
     return drained
 }
 
+// Captures each typed bucket's length once per phase; newborns append beyond
+// these lengths until the next phase.
 fn __scene_begin_update_phase() {
     let lengths: [int] = []
     for i in 0..vec_len(__SCENE_REGISTRY.type_buckets) {

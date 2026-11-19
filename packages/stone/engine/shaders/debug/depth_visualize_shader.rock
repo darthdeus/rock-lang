@@ -9,6 +9,7 @@ struct DepthTex {
 
 @shader(fragment)
 fn depth_visualize_frag(@textures t: DepthTex, tc: Vec2) -> Vec4 {
+    // A DEPTH_COMPONENT texture holds its value in .x; the other components mean nothing.
     let depth = texture(t.depth_tex, tc).x
 
     let visualized = pow(depth, 2.2)

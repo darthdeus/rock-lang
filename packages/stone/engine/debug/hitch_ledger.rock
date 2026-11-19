@@ -39,13 +39,16 @@ pub struct HitchLedger {
     loud_ms: float,
     warmup_frames: int,
     window_secs: float,
+    // Negative until the first frame.
     window_start: float,
     dump_path: string,
+    // The ring: `count` records written; slot = count % HITCH_RING_FRAMES.
     frame: NativeBuffer<int>,
     frame_ms: NativeBuffer<float>,
     logic_ms: NativeBuffer<float>,
     render_ms: NativeBuffer<float>,
     present_ms: NativeBuffer<float>,
+    // Negative when the CPU clock is unknown.
     cpu_ms: NativeBuffer<float>,
     last_cpu_s: float,
     heap_kb: NativeBuffer<float>,
@@ -251,6 +254,7 @@ fn hitch_log_allowed(now: float) -> bool {
     return true
 }
 
+// Called once per completed frame, after its phase timers are final.
 fn hitch_frame_record(frame: int, frame_ms: float, t_ms: float, measured: bool) {
     if !HITCH.enabled && !PERF_FRAME_CAPTURE { return }
     gc_step_frame_close()

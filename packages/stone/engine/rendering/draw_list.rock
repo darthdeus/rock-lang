@@ -1,3 +1,5 @@
+// `Target` is the destination's own declared extent: logical window units for
+// the output, virtual texels for a pixel-perfect scene, canvas units for a canvas.
 pub enum DrawSpace {
     World,
     Target,
@@ -154,6 +156,8 @@ fn setup_draw_list_shader(shader: string, dl: DrawList, yb: Vec2) {
             set_camera(camera_offset_in(view), view.world_to_scene_scale)
             set_engine_uniforms(shader, yb)
         }
+        // The composite and user canvases are sampled with a flip, so they need the
+        // pre-compensating convention. Chosen here, never inferred from canvas binding.
         DrawSpace::Target => {
             reset_camera()
             let convention = if dl.dest == DrawDest::Composite || dl.canvas != null {
@@ -247,6 +251,8 @@ pub fn draw_list_destroy(dl: DrawList) {
     render_batch_pool_destroy(dl.batches)
 }
 
+// Binding the composite makes the identity camera mean virtual texels: its
+// active extent is the scene size.
 fn flush_pixel_screen() {
     if !pool_has_pending(pixel_screen.batches) { return }
     let dst = COMPOSITE_CANVAS ?? {
@@ -262,6 +268,8 @@ fn in_pool(dl: DrawList, body: fn() -> ()) {
     if dl.owns_pool { with_draw_pool(dl.batches, body) } else { body() }
 }
 
+// A World list on the Output needs the frozen render view, which does not exist
+// until updates finish, so its verbs queue (world_overlay.rock).
 fn dl_deferred(dl: DrawList) -> bool {
     return dl.dest == DrawDest::Output && dl.space == DrawSpace::World
 }
@@ -406,6 +414,7 @@ pub @intrinsic fn text(
                 TextPlacement::Output, start, output_z(z), color))
         }
         let f = DEFAULT_FONT ?? return
+        // `pixel_screen` is authored in scene texels and takes no window/DPI factor.
         let composite = dl.dest == DrawDest::Composite
         let rs = if composite { 1.0 } else { FONT_RENDER_SCALE }
         let physical = if composite { 1.0 } else { text_output_raster_density() }

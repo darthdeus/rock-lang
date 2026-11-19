@@ -95,6 +95,7 @@ fn draw_dev_error_badge() {
     let list = screen.take_top_center(v(width, rows.len() as float * DEV_ERROR_BADGE_ROW_HEIGHT))
         .at_z(DEV_ERROR_BADGE_Z)
     list.fill(DEV_ERROR_BADGE_BG)
+    // Cut rows to fit: an overflowing UiRect.text logs an ERROR the badge would count every frame.
     let room = width - 8.0
     for i in 0..rows.len() {
         let row = list.skip_top(i as float * DEV_ERROR_BADGE_ROW_HEIGHT).take_top(DEV_ERROR_BADGE_ROW_HEIGHT)

@@ -8,8 +8,11 @@ pub global FONT_RENDER_SCALE: float = 1.0
 pub global world_px: float = 1.0 / 16
 
 pub global CAMERA_TRAUMA: float = 0.0
+// Resolved once per frame in update_camera_shake, never per call: every consumer
+// of resolved_camera_center must agree, or the id buffer and colour pass diverge.
 pub global CAMERA_SHAKE_OFFSET: Vec2 = v(0.0, 0.0)
 
+// Peak displacement in world units at full trauma; a hard bound.
 pub const CAMERA_SHAKE_MAX: float = 0.18
 pub global CAMERA_SHAKE_SCALE: float = 1.0
 const CAMERA_TRAUMA_DECAY: float = 2.2
@@ -40,6 +43,7 @@ pub @update(stage = 0) fn update_camera_shake() {
 pub @pure fn camera_offset_in(view: FrameView) -> Vec2 {
     let src = view.scene_source_rect
     let s = view.world_to_scene_scale
+    // stone_set_camera measures Y from the raster's bottom.
     let bottom = (view.scene_size.y as float) - src.y - src.h
     return v(
         -view.resolved_camera_center.x + view.world_view_size.x / 2.0 + src.x / s,
@@ -47,6 +51,8 @@ pub @pure fn camera_offset_in(view: FrameView) -> Vec2 {
     )
 }
 
+// Top-left coordinates of the stored scene image, as canvas readback takes;
+// presentation flips it vertically.
 pub @pure fn world_to_scene_texel_in(view: FrameView, p: Vec2) -> Vec2 {
     return (p + camera_offset_in(view)) * view.world_to_scene_scale
 }
@@ -76,6 +82,8 @@ pub fn camera_world_viewport_size() -> Vec2 {
     return view.world_view_size
 }
 
+// `.x` = min, `.y` = max. A value Vec2 rather than a tuple, which would allocate
+// a table per call; this runs per sprite.
 pub fn camera_y_bounds() -> Vec2 {
     let center = camera_world_center()
     let half_size = camera_world_viewport_size() / 2

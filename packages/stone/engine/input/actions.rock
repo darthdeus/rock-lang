@@ -64,6 +64,8 @@ pub global ACTION_NAMES: [string] = []
 pub global ACTION_RUNTIME: Map<string, ActionRuntime> = map_new()
 global ACTION_CLAIMED_SCANCODES: [string] = []
 
+// While true, non-ui actions read false. Set each frame by the focus core (nav-mode focus
+// live), not by "any panel open".
 pub global UI_INPUT_CAPTURE: bool = false
 // Text fields capture UI actions too: Enter/Escape and printable bindings
 // belong to the editor until it submits or cancels. Code-native fields set
@@ -393,6 +395,7 @@ fn input_binding_pressed(binding: InputBinding) -> bool {
     }
 }
 
+// A press and release in one frame counts as not down, so that press still counts.
 fn input_binding_was_down(binding: InputBinding) -> bool {
     match binding {
         InputBinding::Key { scan, ctrl, shift, alt, gui } =>
@@ -497,6 +500,8 @@ pub fn pressed(a: ActionDef) -> bool {
     return false
 }
 
+// Capture does not gate releases: a hold begun before a panel opened must still terminate.
+// A release while another binding still holds the action is not a release.
 pub fn released(a: ActionDef) -> bool {
     if REBIND_CAPTURE { return false }
     let entry = ACTIONS.get(a.name()) ?? return false
@@ -535,6 +540,7 @@ fn action_binding_contribution(b: InputBinding) -> float {
     }
 }
 
+// Unrolled for the same reason as `down`.
 pub fn value(a: ActionDef) -> float {
     if !action_allowed(a) { return 0.0 }
     let entry = ACTIONS.get(a.name()) ?? return 0.0
@@ -653,6 +659,7 @@ fn pad_axis_label(axis: string, dir: int) -> string {
     return "Pad {axis} {if dir < 0 { "-" } else { "+" }}"
 }
 
+// One and two bindings take the straight-line path: no loop to compile, no scratch array.
 pub fn action_binding_labels(name: string) -> string {
     let bindings = action_bindings(name)
     let n = bindings.len()

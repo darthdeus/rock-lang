@@ -123,6 +123,7 @@ pub fn input_note_last_device(event: InputDeviceEvent) {
 
 pub fn input_last_device() -> InputDevice { return LAST_INPUT_DEVICE }
 
+// Back to boot input state, so a test does not see another test's holds or latches.
 fn input_reset_state() {
     SIM_INPUT_SYNTHETIC_ONLY = false
     LAST_INPUT_DEVICE = InputDevice::KeyboardMouse
@@ -302,6 +303,7 @@ fn input_headless_run() -> bool {
     return os_getenv("STONE_HEADLESS") != null
 }
 
+// Latched once for the whole run, before any game code reads an input predicate.
 pub fn input_resolve_authority() {
     let host_opt_in = os_getenv("SIM_INPUT_SYNTHETIC_ONLY") == "0"
     SIM_INPUT_SYNTHETIC_ONLY = !host_opt_in && (sim_mode_active() || input_headless_run())
@@ -438,6 +440,7 @@ pub @intrinsic fn is_key_pressed(key: string) -> bool {
     return a && !b
 }
 
+// The pressed latch is OR'd in so a sub-frame tap reports press and release on that frame.
 pub fn is_key_released(key: string) -> bool {
     if keys_down.get(key).unwrap_or(false) { return false }
     return keys_down_last.get(key).unwrap_or(false)
@@ -540,6 +543,7 @@ fn on_mouse_released(_x: float, _y: float, button: int) {
 
 fn input_physical_mouse_released(_x: float, _y: float, button: int) {
     let suppressed = physical_mouse_suppressed.get(button).unwrap_or(false)
+    // A press hidden from game input cannot close a game-visible hold.
     if physical_mouse_down.get(button).unwrap_or(false) && !suppressed {
         physical_mouse_released_this_frame.insert(button, true)
     }

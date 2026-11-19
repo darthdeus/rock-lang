@@ -1,3 +1,8 @@
+// A slot's index is its position in every column. A vacant slot keeps its
+// last generation complemented (`-1 - g`), so a slot is live exactly when its
+// generation equals the handle's, which is always >= 0.
+// `next_generation` advances on every insertion, reused slot or fresh, so
+// `clear()` can never reissue a generation a stale handle holds.
 struct ArenaStore<T> {
     _owner_scene_id: int,
     generations: [int],
@@ -36,6 +41,8 @@ global __ARENA_REGISTRY: ArenaRegistry = ArenaRegistry {
 @identity_erasure @inline
 fn __arena_store_erased<T>(store: ArenaStore<T>) -> any { return store }
 
+// Non-generic so a synthesized `Inst::Call` and `inline(lua)` walkers can
+// target it; the typed wrapper below recovers the element type.
 @inline @nomangle fn __arena_store_any(scene_id: int, arena_id: int) -> any? {
     let store = __ARENA_REGISTRY.stores.get(arena_id) ?? return null
     let owner: ArenaStore<int> = cast(store)
@@ -43,6 +50,8 @@ fn __arena_store_erased<T>(store: ArenaStore<T>) -> any { return store }
     return store
 }
 
+// `T` is pinned by the handle: the use site's expected `T?` would silently
+// instantiate the store's column as `[T?]`.
 fn __arena_store<T>(arena: Arena<T>) -> ArenaStore<T>? {
     let boxed = __arena_store_any(arena._scene_id, arena._arena_id)
     if is_null(boxed) { return null }
@@ -58,6 +67,8 @@ fn __arena_store_mut<T>(arena: Arena<T>) -> ArenaStore<T> {
     return store.unwrap()
 }
 
+// Its occupancy column is empty, so `data` and `generations` are never read
+// and their element type never matters.
 global __ARENA_DEAD_STORE: ArenaStore<int> = ArenaStore {
     _owner_scene_id: -1,
     generations: [], occupied: [], data: [], free_indices: [],
@@ -73,6 +84,7 @@ fn __arena_store_or_dead<T>(arena: Arena<T>) -> ArenaStore<T> {
     return found
 }
 
+// Non-generic for the `enumerate(arena)` lowering's synthesized call.
 @nomangle fn __arena_store_or_empty(scene_id: int, arena_id: int) -> any {
     let boxed = __arena_store_any(scene_id, arena_id)
     if is_null(boxed) { return __arena_store_erased(__ARENA_DEAD_STORE) }
@@ -222,6 +234,8 @@ fn Arena<T>.insert(arena, value: T) -> Entity<T> {
     let generation = store.next_generation
     store.next_generation = generation + 1
 
+    // Fresh slots arrive at the occupancy column's old length; the other two
+    // columns are still one short, which is the test for growing them.
     let slot = __slot_alloc(__arena_store_erased(store), store.occupied)
     if slot == vec_len(store.generations) {
         vec_push(store.generations, generation)
@@ -235,6 +249,7 @@ fn Arena<T>.insert(arena, value: T) -> Entity<T> {
     return entity_new(arena, slot, generation)
 }
 
+// The payload stays untouched; callers must reset every mutable field.
 fn Arena<T>.reuse_retained_entity(arena) -> Entity<T>? {
     let store = __arena_store_mut(arena)
     if store.free_indices.len() == 0 { return null }
@@ -282,6 +297,7 @@ fn Arena<T>.remove(arena, entity: Entity<T>) -> T? {
     let store = found
     let slot = entity._slot
     if !arena_slot_live(store, slot, entity._generation) { return null }
+    // `data[slot]` is left as-is: every read goes through the liveness test.
     __weak_cache_retire(entity._scene_id, entity._arena_id, slot)
     store.occupied.set(slot, false)
     store.generations.set(slot, -1 - entity._generation)
@@ -309,6 +325,8 @@ fn arena_slot_count<T>(arena: Arena<T>) -> int {
     return vec_len(found.occupied)
 }
 
+// Keeps the Arena ID and `next_generation`, so no pre-clear Entity can be
+// reissued.
 fn Arena<T>.clear(arena) {
     let store = __arena_store_mut(arena)
     __weak_cache_retire(arena._scene_id, arena._arena_id, -1)
@@ -326,6 +344,7 @@ fn Arena<T>.random(arena) -> (Entity<T>, T)? {
     let len = store.occupied_count
     if len == 0 { return null }
 
+    // random_int is half-open [min, max).
     let random_index = random_int(0, len)
     let current_count = 0
     let slots = vec_len(store.occupied)

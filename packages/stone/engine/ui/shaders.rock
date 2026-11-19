@@ -1,3 +1,6 @@
+// Field and param names are the binding contract: the UI batch supplies aPos/aTexCoord
+// attributes and uProjection/uView uniforms.
+
 pub value QuadVert { aPos: Vec2, aTexCoord: Vec2, aColor: Vec4 }
 pub value UiVary   { position: Vec4, TexCoord: Vec2, Color: Vec4 }
 pub value UiParamVary { position: Vec4, TexCoord: Vec2, @flat ParamIndex: float }
@@ -18,6 +21,7 @@ fn ui_param_vert(@attr a: Vertex, @engine e: EngineU) -> UiParamVary {
     }
 }
 
+// Signed distance to a rounded box at the origin, half-extents b, corner radius r; < 0 inside.
 pub fn sd_round_box(p: Vec2, b: Vec2, r: float) -> float {
     let qx = abs(p.x) - b.x + r
     let qy = abs(p.y) - b.y + r
@@ -25,6 +29,7 @@ pub fn sd_round_box(p: Vec2, b: Vec2, r: float) -> float {
     return min(max(qx, qy), 0.0) + outside.length() - r
 }
 
+// Works in height units (y in [-0.5, 0.5], x scaled by aspect) so corners stay crisp at any size.
 pub @shader(fragment)
 fn ui_sdf_bar_frag(
     vary: UiParamVary,

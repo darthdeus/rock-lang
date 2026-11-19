@@ -7,6 +7,7 @@ pub struct Particle {
     source: IRect,
     tint: Color,
 
+    // UI-space draws only (emit_ui_particle): pos is design px.
     z: int = 0,
     scale: float = 1.0,
     blend: BlendMode = BlendMode::Alpha,
@@ -56,6 +57,7 @@ fn update_particles() {
     }
 }
 
+// No world_frozen gate: pause/editor freeze the world sim, not UI particles.
 @update(stage = 80)
 fn update_ui_particles() {
     let s = ui_effective_scale()

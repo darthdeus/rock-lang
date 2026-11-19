@@ -325,6 +325,8 @@ macro sound_bank_play_step(bank: expr, handle: expr, step_index: expr) {
         -1, 0.0, 0.0, false, 0.0, __SITE__)
 }
 
+// `pitch_jitter` detunes each layer on its own roll; `level_jitter` (dB either
+// way) is rolled once per play and scales every layer of it.
 macro sound_bank_play_step_with(bank: expr, handle: expr, step_index: expr,
                                 volume: expr = 1.0, speed: expr = 1.0,
                                 decay: expr = 0.0, bus: expr = -1,

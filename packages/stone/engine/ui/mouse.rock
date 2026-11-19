@@ -35,6 +35,8 @@ pub nobox value UiMouseItem {
 }
 
 pub struct UiMouseState {
+    // Grow-only pools swapped each frame; counts track live items so steady-state frames
+    // allocate nothing.
     last: [UiMouseItem],
     last_count: int,
     cur: [UiMouseItem],
@@ -44,7 +46,11 @@ pub struct UiMouseState {
     active: int,
     clicked: int,    // id pressed this frame (edge, one frame only)
     was_down: bool,
+    // Set on a left press event, consumed at the next resolution: a sub-frame tap never shows
+    // in the level snapshot.
     press_event: bool,
+    // Press-time drag anchor in screen px, captured because design space moves with UI_SCALE.
+    // anchor_w == 0 means unset.
     anchor_x: float,
     anchor_y: float,
     anchor_w: float,
@@ -76,6 +82,8 @@ fn ui_mouse_state_new() -> UiMouseState {
 
 pub global UI_MOUSE: UiMouseState = ui_mouse_state_new()
 
+// Captures the rect in its target units (output px, or scene texels). Call on the widget's own
+// ui_clicked edge.
 pub fn ui_drag_anchor_set(r: UiRect) {
     let m = UI_MOUSE
     m.anchor_x = r.x
@@ -132,6 +140,8 @@ pub global UI_ID_DEBUG: UiIdDebug = ui_id_debug_new()
 
 pub const UI_ID_JOIN_FORMATS: int = 0
 
+// djb2 over "scope/label", masked to positive 31 bits (h*33 stays exact in a double). 0 is
+// the "none" sentinel, remapped to 1.
 inline(lua) fn __ui_id_hash(scope: string, label: string) -> int = """
     local h = 5381
     for i = 1, #scope do
@@ -209,6 +219,7 @@ pub fn ui_set_active(id: int) {
     UI_MOUSE.active = id
 }
 
+// Registers a hit rect for next frame's resolution.
 pub fn ui_mouse_item(id: int, r: UiRect, mask: UiAlphaMask? = null) {
     let m = UI_MOUSE
     m.cur_count = m.cur_count + 1
@@ -297,10 +308,13 @@ pub fn ui_mouse_begin_frame() {
     let hot_z = -1000000000
     for i in 0..m.last_count {
         let it = m.last[i]
+        // Consumed once; do not retain replaced asset masks in the pool.
         if it.mask != null { m.last[i].mask = null }
         if d.enabled { __ui_id_debug_check_registration(it.id, "mouse") }
         let mp = ui_ctx_pointer(it.ctx, it.ref_h) ?? continue
         if ui_mouse_item_contains(it, mp) {
+            // Surface order first (output UI draws after the present), then base z, group,
+            // local z, and registration order (>= so later ties win).
             let rank = ui_ctx_order(it.ctx)
             if rank > hot_rank || (rank == hot_rank
                     && (it.group_base_z > hot_base_z

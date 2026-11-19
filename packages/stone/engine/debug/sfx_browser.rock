@@ -1,3 +1,4 @@
+// The selected row's play number, not its position: positions shift with every play. 0 = none.
 global SFX_BROWSER_SEL_SEQ: int = 0
 global SFX_BROWSER_VOL: float = 1.0
 global SFX_BROWSER_SPEED: float = 1.0
@@ -127,6 +128,7 @@ const MIXER_MUTE_LIT: int = 0xff4040e0
 global MIXER_HOLD: NativeBuffer<float> = native_buffer_float(6)
 global MIXER_HOLD_AGE: NativeBuffer<float> = native_buffer_float(6)
 
+// dB scale, not clamped at 1.0: above unity is the clip.
 pub @pure fn mixer_meter_norm(amp: float) -> float {
     if amp <= 0.0 { return 0.0 }
     let db = 8.685889638065035 * log(amp)   // 20*log10(amp)
@@ -197,6 +199,7 @@ fn draw_mixer() {
         imgui_set_cursor_screen_pos(v(strip_x, origin.y))
         imgui_text(sfx_bus_name(bus))
 
+        // Edit the strip, never the bus: mixer_set_gain also recomputes every strip's applied gain.
         let strip = mixer_strip(bus)
         if strip != null {
             imgui_set_cursor_screen_pos(v(strip_x, bar_top))
@@ -246,6 +249,7 @@ fn draw_mixer() {
         }
     }
 
+    // The absolute text placement left the cursor on the last row; later widgets would overlap.
     imgui_set_cursor_screen_pos(after)
 }
 

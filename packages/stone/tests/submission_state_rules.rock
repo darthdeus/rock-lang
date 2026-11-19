@@ -112,6 +112,7 @@ fn submission_state_case(fail: bool, trace: bool, depth_compare: string) {
         for i in 0..actual.rgba.len {
             assert_eq(actual.rgba[i], expected.rgba[i], "the successor retains entry depth/blend/write behavior")
         }
+        // Cleanup must finish before a later successful transaction can run.
         assert(submit_pass(pass))
         assert_eq(stone_gl_blend_state(), blend)
         assert_eq(stone_gl_write_state(), write)

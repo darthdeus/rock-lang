@@ -7,6 +7,8 @@ struct TapNavActions {
     bk: ActionDef,
 }
 
+// Input and UI state back to boot, so no test sees another's holds, focus or
+// keyboard capture.
 fn tapnav_reset() {
     input_reset_state()
     UI_MOUSE = ui_mouse_state_new()
@@ -52,6 +54,8 @@ fn tapnav_register() {
     ui_focus_item(ui_id("ftap", "c"), r, "ftap")
 }
 
+// Production frame order (runner.rock): poll events, then the authority
+// projection, mouse/focus resolution, end-of-frame snapshot.
 fn tapnav_frame() {
     input_select_game_authority()
     ui_mouse_begin_frame()

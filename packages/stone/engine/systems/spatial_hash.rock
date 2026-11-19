@@ -1,3 +1,6 @@
+// Every buffer keeps its capacity across rebuilds; only logical counts reset.
+// Biased cell coordinates pack into one integer exactly, so distinct cells
+// never share a bucket.
 const SH_FAR: float = 1.0e30
 const SH_CELL_BIAS: int = 16777216
 const SH_CELL_STRIDE: int = 33554432
@@ -23,6 +26,8 @@ pub struct SpatialHash<T> {
     sorted: [int],
     sorted_count: int,
 
+    // Per-entry query stamp: a multi-cell entry is emitted once per query without
+    // allocating a set.
     stamp: [int],
     query_id: int,
 
@@ -78,10 +83,13 @@ fn sh_put_payload<T>(v: [T], i: int, x: T) {
     if i < vec_len(v) { v.set(i, x) } else { vec_push(v, x) }
 }
 
+// Placement writes at scattered offsets, so the array is sized before placing.
 fn sh_ensure_int(v: [int], n: int) {
     for _ in vec_len(v)..n { vec_push(v, 0) }
 }
 
+// Every exact query test is bounded by this box, so an entry can never be a hit
+// in a cell it was not bucketed into.
 fn sh_reach_half_x<T>(sh: SpatialHash<T>, entry: int) -> float {
     if sh.is_circle[entry] { return sh.w[entry] }
     return sh.w[entry] * 0.5
@@ -201,6 +209,8 @@ pub fn spatial_hash_build<T>(sh: SpatialHash<T>) {
         let cy0 = sh_cell_coord(sh_shape_min_y(sh, i), cs)
         let cy1 = sh_cell_coord(sh_shape_max_y(sh, i), cs)
 
+        // Must agree with the counting pass on every shape's cells, or placement writes
+        // outside the reserved range.
         if cx0 == cx1 && cy0 == cy1 {
             if let found = sh.cell_of.get(sh_cell_key(cx0, cy0)) {
                 let at = sh.starts[found] + sh.fill[found]
@@ -284,6 +294,7 @@ fn sh_layer_matches<T>(sh: SpatialHash<T>, entry: int, layer: int?) -> bool {
     return sh.layer[entry] == layer
 }
 
+// Results are live entry indices, valid until the next begin.
 pub fn spatial_hash_query_circle_all<T>(sh: SpatialHash<T>, pos: Vec2, radius: float,
                                     layer: int?, result: [int]) {
     result.clear()
@@ -389,6 +400,8 @@ pub fn spatial_hash_query_rect<T>(sh: SpatialHash<T>, pos: Vec2, size: Vec2,
     return result
 }
 
+// Amanatides-Woo traversal with early exit, sound because an entry is bucketed
+// into every cell it overlaps. Distances are the segment parameter t in [0, 1].
 fn spatial_hash_raycast_impl<T>(
     sh: SpatialHash<T>,
     start: Vec2,

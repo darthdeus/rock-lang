@@ -1,8 +1,11 @@
 // Stone library - OpenGL + ImGui wrapper
 
+// 0.0 until the runner writes the frame delta, so code run by an eager
+// `start()` prime before the first frame reads 0, not nil.
 pub global dt: float = 0.0
 pub global time: float = 0
 
+// Replay is exempt: the log carries the already-scaled dt.
 pub global TIME_SCALE: float = get_env_float("STONE_TIME_SCALE", 1.0)
 
 // Monotonic host-frame counter, bumped once per frame in the runner before any
@@ -128,6 +131,7 @@ fn stone_begin_frame() {
         stone_quit()
     }
     stone_begin_image_upload_frame()
+    // Preserve timeline uploads before the sole graphics-counter reset.
     perf_phase_frame_reset()
     stone_reset_frame_stats()
 }
@@ -169,6 +173,7 @@ const SDL_WINDOWPOS_CENTERED: int = 0x2FFF0000
 const SDLK_F1: int = 0x4000003A
 const SDLK_F12: int = 0x40000045
 
+// The unit-test host calls this stable name without booting the frame runner.
 pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(lua) fn setup_stone() = """
     -- Only define FFI types once to support hot reload
     if not _G._stone_ffi_defined then
@@ -843,6 +848,8 @@ extern(ffi, "stone") fn stone_gpu_timer_end()
 extern(ffi, "stone") fn stone_gpu_timer_poll_ms() -> float
 extern(ffi, "stone") fn stone_gpu_timed_pass_begin()
 extern(ffi, "stone") fn stone_gpu_timed_pass_end(tag: int)
+// GPU ms of the oldest finished timed pass; -1 when none is ready, -2 when this
+// context cannot time passes. Results arrive a few frames after the pass ran.
 pub extern(ffi, "stone") fn stone_gpu_timed_pass_poll_ms() -> float
 pub extern(ffi, "stone") fn stone_gpu_timed_pass_tag() -> int
 extern(ffi, "stone") fn stone_gpu_scopes_requested() -> bool
@@ -876,6 +883,7 @@ extern(ffi, "stone") fn stone_get_global_mouse_position(x: Ptr<int>, y: Ptr<int>
 // or coroutine yield. Pointer arguments stay JIT-able; struct-by-value returns
 // do not, so compound results use out-pointers.
 
+// Scalar out-param slots. Max simultaneous: 4 (window borders / image pixel).
 global FFI_INT_OUT_1: NativeBuffer<int> = native_buffer_int(1)
 global FFI_INT_OUT_2: NativeBuffer<int> = native_buffer_int(1)
 global FFI_INT_OUT_3: NativeBuffer<int> = native_buffer_int(1)
@@ -1161,6 +1169,8 @@ pub extern(ffi, "stone") fn stone_canvas_capacity_h(handle: int) -> int
 // case the old storage is put back.
 extern(ffi, "stone") fn stone_canvas_resize(handle: int, width: int, height: int) -> bool
 
+// Bit i enables COLOR_ATTACHMENT i; a clear bit below the highest set one writes
+// GL_NONE there.
 pub extern(ffi, "stone") fn stone_set_draw_buffer_mask(mask: int)
 
 // Allocate a single StoneEvent buffer for polling. Runtime value is
@@ -1284,6 +1294,8 @@ const IMAGE_LOAD_DEFERRED: int = 2
 const IMAGE_LOAD_DEPTH_RG8: int = 4
 const IMAGE_LOAD_MATERIAL_RG8: int = 8
 
+// Positive manifest dimensions let Deferred loads read entirely on the worker;
+// the decode must match them. Zero/zero keeps header admission.
 pub extern(ffi, "stone") fn stone_load_image(path: string, filter_mode: int, flags: int, width: int, height: int) -> int
 
 pub extern(ffi, "stone") fn stone_get_white_image() -> int
@@ -1340,6 +1352,8 @@ pub fn stone_log_records_text(level: int, max_rows: int) -> string {
 // which GLES does not have, and nothing in the engine calls it.
 pub extern(ffi, "stone") fn stone_image_read_texel(handle: int, x: int, y: int) -> int
 
+// mode < 0 releases the unit. `image` picks the matching wrap (a sampler
+// overrides the texture's own) and is 0 for a canvas, which is always clamped.
 pub extern(ffi, "stone") fn stone_bind_sampler(unit: int, mode: int, image: int)
 
 pub extern(ffi, "stone") fn stone_sampler_bound(unit: int) -> bool
@@ -1348,12 +1362,15 @@ pub extern(ffi, "stone") fn stone_unload_image(handle: int)
 
 pub extern(ffi, "stone") fn stone_reload_image(handle: int, path: string) -> bool
 
+// Publishes Required images, waiting for their decodes. A loaded handle and size
+// do not imply sampleable pixels: publication must precede any draw or readback.
 pub extern(ffi, "stone") fn stone_flush_image_uploads()
 pub extern(ffi, "stone") fn stone_set_frame_image_upload_budget(bytes: int)
 pub extern(ffi, "stone") fn stone_set_frame_image_upload_time_budget(microseconds: int)
 pub extern(ffi, "stone") fn stone_begin_image_upload_frame()
 pub extern(ffi, "stone") fn stone_image_uploads_pending() -> int
 extern(ffi, "stone") fn stone_image_require(handle: int) -> bool
+// True when no load for the handle waits to be published (not a liveness test).
 extern(ffi, "stone") fn stone_image_ready(handle: int) -> bool
 extern(ffi, "stone") fn stone_image_pending_bytes() -> int
 extern(ffi, "stone") fn stone_image_decode_failed(handle: int) -> bool
@@ -1393,6 +1410,7 @@ pub fn stone_image_data_get_pixel(handle: int, x: int, y: int) -> (float, float,
     return (FFI_FLOAT_OUT_1.ptr.read(), FFI_FLOAT_OUT_2.ptr.read(), FFI_FLOAT_OUT_3.ptr.read(), FFI_FLOAT_OUT_4.ptr.read())
 }
 
+// `rgba` must hold `pixel_count * 4` bytes.
 pub extern(ffi, "stone") fn stone_image_data_fill_rgba(handle: int, rgba: PtrU8, pixel_count: int)
 extern(ffi, "stone") fn stone_image_data_read_rgba(handle: int, rgba: PtrU8, pixel_count: int) -> bool
 
@@ -1499,6 +1517,7 @@ pub extern(ffi, "stone") fn stone_gl_error_count() -> int
 pub extern(ffi, "stone") fn stone_shader_error_count() -> int
 
 global STONE_CANVAS_RGBA8: int = 0
+// Bus ids, mirrored by BUS_* in stone-rs/src/audio.rs.
 pub const STONE_BUS_MASTER: int = 0
 pub const STONE_BUS_SFX: int = 1
 pub const STONE_BUS_MUSIC: int = 2
@@ -1543,6 +1562,8 @@ pub extern(ffi, "stone") fn stone_canvas_attach_color_target(color_handle: int, 
 
 pub extern(ffi, "stone") fn stone_clear_canvas(r: float, g: float, b: float, a: float)
 
+// The only defined clear for an integer (R32I) color buffer; glClear on one is
+// undefined.
 pub extern(ffi, "stone") fn stone_clear_canvas_int(draw_buffer: int, value: int)
 
 pub extern(ffi, "stone") fn stone_set_present_viewport(active: bool, x: int, y: int, w: int, h: int)
@@ -1561,6 +1582,8 @@ pub extern(ffi, "stone") fn stone_read_canvas_pixel(handle: int, x: int, y: int)
 pub extern(ffi, "stone") fn stone_read_canvas_pixel_channel(handle: int, x: int, y: int, channel: int) -> float
 extern(ffi, "stone") fn stone_read_canvas_nearest_id(handle: int, x: int, y: int, side: int) -> int
 
+// Pre-swap only: go through the runner's window-probe capture, never a direct
+// mid-frame call.
 extern(ffi, "stone") fn stone_read_window_rect(x: int, y: int, w: int, h: int, out: PtrU8)
 
 extern(ffi, "stone") fn stone_read_depth_pixel(handle: int, x: int, y: int) -> float
@@ -1783,6 +1806,7 @@ pub @nomangle value ImageLoadStats {
     max_wait_us: int,
 }
 
+// Allocates a GraphicsStats[1] per call.
 pub extern(ffi, "stone") fn stone_get_graphics_stats() -> GraphicsStats
 pub extern(ffi, "stone") fn stone_get_image_frame_stats() -> ImageLoadStats
 pub extern(ffi, "stone") fn stone_get_image_profile_stats() -> ImageLoadStats
@@ -1806,6 +1830,8 @@ global stats_history_shader_switches: [int] = []
 global stats_history_index: int = 0
 global stats_history_count: int = 0
 
+// The live counters reset at frame start, so update-stage readers see a
+// mid-frame value; this holds the last complete frame.
 pub global LAST_FRAME_GFX: GraphicsStats = GraphicsStats {
     draw_calls: 0, text_draw_calls: 0, canvas_switches: 0,
     shader_switches: 0, stream_upload_calls: 0, stream_storage_replacements: 0,
@@ -1876,6 +1902,7 @@ pub struct TextSpan {
     style: TextStyle = TextStyle {},
 }
 
+// Mirrors stone-rs `FaceSet`.
 pub value TextFaces {
     bold: bool = false,
     italic: bool = false,
@@ -1890,6 +1917,7 @@ const FACE_BOLD_ITALIC: int = 3
     return (if f.bold { 1 } else { 0 }) + (if f.italic { 2 } else { 0 })
 }
 
+// Face index in the order stone-rs `Face::ALL` bakes them.
 @pure fn style_face_index(s: TextStyle) -> int {
     if s.bold && s.italic { return FACE_BOLD_ITALIC }
     if s.bold { return FACE_BOLD }
@@ -1936,6 +1964,8 @@ pub fn declares_face(self: TextFamily, bold: bool = false, italic: bool = false)
     return true
 }
 
+// Kept so text drawn every frame without a family does not build one per call.
+// Callers do not mutate a family they are given.
 global DEFAULT_TEXT_FAMILY: TextFamily? = null
 
 pub fn text_family_or_default(family: TextFamily? = null) -> TextFamily {
@@ -2015,6 +2045,8 @@ pub extern(ffi, "stone") fn stone_font_data_len(font_id: int) -> int
 
 pub extern(ffi, "stone") fn stone_font_release_coverage(font_id: int) -> bool
 
+// `path` must already be asset_path-resolved: it is stored for hot reload, and a
+// relative path will not match.
 fn load_font_at_raster_size(path: string, base_pixel_size: int, raster_size: int,
     sampling: TextureFilter, raster: FontRasterPolicy, faces: TextFaces,
     initialize_batch: bool = true, native_em: int = 0,
@@ -2120,6 +2152,8 @@ pub fn unload_font(font: Font) {
     drop_text_batch_for(backend_id)
     font.handle.remove()
     let cur = DEFAULT_FONT
+    // Slot-only on purpose: `font` is proven live above, so a slot match means
+    // DEFAULT_FONT is this entity or already stale, and both should be nulled.
     if cur != null && cur.handle._slot == font.handle._slot {
         DEFAULT_FONT = null
     }
@@ -2342,7 +2376,10 @@ pub fn mouse_world() -> Vec2 {
     return screen_to_world(mouse_screen())
 }
 
+// Logical window size, refreshed once per frame after event poll so UI draws do
+// not cross FFI per call.
 pub global WINDOW_SIZE: Vec2 = v(0, 0)
+// Physical pixels; scene rasters allocate against this.
 pub global DRAWABLE_SIZE: IVec2 = iv(0, 0)
 
 fn refresh_window_size() {
@@ -2370,6 +2407,8 @@ pub inline(lua) fn pcall_dofile(path: string) -> (bool, string?) = """
     return true, null
 """
 
+// Parses without running, stashing the function for run_loaded_chunk, so a
+// caller can validate before destructive action.
 inline(lua) fn load_chunk(path: string) -> (bool, string?) = """
     local f, err = loadfile(path)
     if not f then

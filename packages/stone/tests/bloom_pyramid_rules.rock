@@ -1,5 +1,9 @@
 use stone::*
 
+// Distances are in level-0 pixels, which are half source pixels.
+
+// draw_rect_immediate's static batch keeps the first image it saw, so the
+// white image lives for the whole process.
 global BLOOM_PYRAMID_WHITE: Image? = null
 
 fn bloom_pyramid_white() -> Image {

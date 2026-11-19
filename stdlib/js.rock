@@ -15,9 +15,12 @@
 
 @nowrite @inline inline(js) fn format_float_roundtrip(value: float) -> string = "return String(value);"
 
+// UTF-16: a lone surrogate decodes to itself, one unit wide.
 @inline inline(js) fn __char_decode(s: string, i: int, b0: int) -> int = "return s.codePointAt(i);"
 @inline inline(js) fn __char_units(b0: int, cp: int) -> int = "return cp > 0xFFFF ? 2 : 1;"
 
+// The luajit `__slot_alloc` in unified.rock is the contract; this is the same
+// free list over a 0-based array.
 @nomangle inline(js) fn __slot_alloc(m: any, hw: any) -> int = """
   var fi = m.free_indices;
   var s;
@@ -101,6 +104,8 @@ inline(js) fn __sort_rows(n: int, lt: fn(int, int) -> bool) -> [int] = """
 
 @intrinsic @inline inline(js) fn table_len(tbl: any) -> int = "return __table_len(tbl);"
 
+// `len` rather than the array's length: a column reserved past `len` holds
+// stale slots, and shifting those would carry them into the live range.
 @nomangle inline(js) fn __rock_col_insert(col: any, lua_index: int, len: int, value: any) = """
   for (var i = len; i >= lua_index; i--) col[i] = col[i - 1];
   col[lua_index - 1] = value;
@@ -274,6 +279,8 @@ inline(js) fn __sort_rows(n: int, lt: fn(int, int) -> bool) -> [int] = """
   return out;
 """
 
+// Applies the key per comparison, as luajit does: a key fn with effects must
+// observe the same calls on both backends.
 @nomangle inline(js) fn __rock_col_sort_leaves(vec: any, key_fn: any, paths: any) = """
   var n = vec.len || 0;
   var width = paths.length;
@@ -297,6 +304,9 @@ inline(js) fn __sort_rows(n: int, lt: fn(int, int) -> bool) -> [int] = """
   }
 """
 
+// A native Map, not a plain object: spine keys are data, and an object would
+// coerce `1` and "1" together and inherit Object.prototype names. Vec `_data`
+// is 0-based here, so free-list push/pop run in the opposite order to luajit.
 @nomangle inline(js) fn __map_col_new_spine() -> any = """
   return new Map();
 """
@@ -381,6 +391,8 @@ inline(js) fn __sort_rows(n: int, lt: fn(int, int) -> bool) -> [int] = """
     }
 """
 
+// JS object keys are strings, so Scene-level names take an "n:" prefix to
+// stay apart from numeric Arena ids.
 @nomangle inline(js) fn __weak_cache_write(name: string, scene: int, arena: int, slot: int, generation: int, backing: any, value: any) = """
     var owners = globalThis.__rock_weak_cache_owners || (globalThis.__rock_weak_cache_owners = {});
     var scenes = owners[scene] || (owners[scene] = {});
@@ -468,6 +480,8 @@ inline(js) fn weak_cache_live(name: string) -> int = """
     return n;
 """
 
+// A WeakMap cannot be enumerated, so live entries are counted on store and
+// evict; an entry the collector reclaims with its owner is not subtracted.
 inline(js) fn weak_cache_get<V>(name: string, owner: CacheOwner) -> V? = """
     if (owner.retired) return null;
     var owners = globalThis.__rock_record_caches;
@@ -633,6 +647,7 @@ inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
     } else target[key] = absent ? null : value;
 """
 
+// Payload slots are 0-based here; luajit's are 1-based.
 @nomangle inline(js) fn __json_record_js_payload_get(value: any, shape: any, index: int) -> any = """
     var slot = shape.slot !== undefined ? shape.slot : index;
     if (!shape.leaves) return value[slot];

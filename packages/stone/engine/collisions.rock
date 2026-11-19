@@ -88,6 +88,7 @@ pub fn polygon_clip_rect(points: [Vec2], lo: Vec2, hi: Vec2) -> [Vec2] {
     return out
 }
 
+// `out` and `scratch` must be distinct caller-owned arrays.
 pub fn polygon_clip_rect_into(points: [Vec2], lo: Vec2, hi: Vec2,
     out: [Vec2], scratch: [Vec2]) {
     out.clear()

@@ -40,6 +40,7 @@ pub fn pipeline_inspector_frame_begin() {
     PIPELINE_PASS_LOG = []
 }
 
+// Guarded at the call site so the hot path is one branch while the window is closed.
 fn pipeline_inspector_record_batch(b: RenderBatch) {
     let shader = if b.pipeline != null { b.pipeline.shader_name } else { "default" }
     let nm = if b.normal != null { sampled_texture_key(b.normal) } else { "" }

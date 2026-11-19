@@ -18,6 +18,7 @@ pub fn window_probe_new(x: int, y: int, w: int, h: int) -> Entity<WindowProbe> {
     })
 }
 
+// Called immediately before the swap: the post-swap back buffer is undefined.
 fn capture_window_probes() {
     for (_e, p) in WINDOW_PROBES {
         stone_read_window_rect(p.x, p.y, p.w, p.h, p.buf.ptr)

@@ -15,6 +15,8 @@ value Sampler2D {
     error("texture_size() is GPU-only (shader fns are not CPU-callable)")
 """
 
+// GLSL ES gives isampler2D no default precision, so the emitter declares it
+// `highp` at the use site.
 value ISampler2D {
     __handle: int,
 }
@@ -74,6 +76,8 @@ struct UniformArray<T> { }
 
 value Bvec3 { x: bool, y: bool, z: bool }
 
+// A GLSL template renders `bvec3(...)` inline; a helper fn would collide with
+// the GLSL builtin type name.
 @intrinsic fn bvec3(x: bool, y: bool, z: bool) -> Bvec3 {
     return Bvec3 { x: x, y: y, z: z }
 }

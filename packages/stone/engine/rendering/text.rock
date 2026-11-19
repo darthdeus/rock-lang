@@ -8,6 +8,7 @@
 // `stone/engine/font_resolve.rock`; text-art effects live in
 // `stone/engine/ui/text_art.rock`.
 
+// Per-font slots are indexed by `font_id - 1` (stone-rs font ids are 1-based).
 pub global FONT_ATLASES: [Image] = []
 global FONT_PIXEL_SIZES: [int] = []
 global FONT_CAP_HEIGHTS: [float] = []     // legacy per-font 'X' coverage height in atlas px
@@ -131,6 +132,7 @@ fn init_text_batch_for(font: Font, atlas: bool = true) {
 
     let slot_count = stone_get_font_slot_count(d.backend_id)
     let cp_slots = map_new()
+    // From 127, not 128: the identity block's non-ASCII entry is published like any other.
     let slot = 127
     while slot < slot_count {
         let cp = stone_get_font_slot_codepoint(d.backend_id, slot)
@@ -239,6 +241,8 @@ fn drop_all_text_batches() {
     }
 }
 
+// A cached batch belongs to ONE pool: keyed with its pool so a surface switch
+// (pixel_screen vs screen) misses instead of hitting the other surface's batch.
 pub global TEXT_BATCH_CACHES: [Entity<RenderBatch>?] = []
 global TEXT_BATCH_POOLS: [RenderBatchPool?] = []
 
@@ -886,6 +890,8 @@ pub fn measure_text_of(font: Font, text: string, size: float, render_scale: floa
 // live here once. Plain and rich callers retain the same layout facts while
 // choosing their own color, face and surface conventions.
 
+// The codepoint starting at unit `i`. -1: `i` is not a lead unit, skipped by
+// every walker. -2: a malformed or truncated sequence starts here.
 pub inline(lua) fn text_codepoint_at(text: string, i: int) -> int = """
     local b = string.byte(text, i + 1)
     if b == nil then return -1 end
@@ -934,6 +940,8 @@ pub nobox value TextFlowMetrics {
 
 fn text_flow_paragraph_text(text: string) -> string {
     if text.find("\n") < 0 { return text }
+    // Admit the original bytes first: removing a newline could join two malformed
+    // UTF-8 halves into a valid glyph.
     for i in 0..text.len() {
         if text_codepoint_at(text, i) == -2 {
             error("ui_rich_flow: byte at offset {i} begins a malformed glyph")
@@ -963,6 +971,8 @@ pub fn text_flow_metrics(font: Font, text: string, style: TextStyle,
         ascent: metrics.ascent, below: metrics.line_height - metrics.ascent, plain }
 }
 
+// Keep the renderer's glyph-addition order: adding a measured word to a
+// measured prefix can round to the other side of a wrap boundary.
 pub fn text_flow_advance(metrics: TextFlowMetrics, text: string,
                          start: int, end: int, pen: float) -> float {
     let result = pen
@@ -1074,6 +1084,8 @@ struct TextLayoutCacheEntry {
 
 global TEXT_LAYOUT_CACHE: [TextLayoutCacheEntry] = []
 global TEXT_LAYOUT_CACHE_CLOCK: int = 0
+// Two map reads instead of a probe over cached variants, which was a standing
+// trace abort (register coalescing too complex).
 global TEXT_LAYOUT_CACHE_INDEX: Map<string, Map<int, int>> = map_new()
 pub global TEXT_LAYOUT_CACHE_HITS: int = 0
 pub global TEXT_LAYOUT_CACHE_INDEX_HITS: int = 0
@@ -1620,6 +1632,8 @@ fn text_layout_quantize(value: float, scale: float, modulus: int) -> int {
     return ((q % modulus) + modulus) % modulus
 }
 
+// Packed into 50 bits so it stays an exact integer in a Lua number. A hash, not
+// an identity: lookups confirm the exact fields.
 fn text_layout_variant_key(world_raster: bool, font_id: int, face: int,
                            align: TextAlign, cap_height: bool,
                            a: float, b: float, c: float) -> int {
@@ -2038,6 +2052,8 @@ fn text_world_layout_scaled(
     return text_layout_cached_world(font, text, scale_x, scale_y)
 }
 
+// `render_scale` is explicit: FONT_RENDER_SCALE is the output's window/DPI factor
+// and is wrong on a surface authored in scene texels.
 pub fn queue_ui_text_scaled(
     font: Font,
     text: string,
@@ -2209,6 +2225,7 @@ global TEXT_PREPARE_CACHE: Map<int, Map<string, string>> = map_new()
 global TEXT_PREPARE_CACHE_ENTRIES: int = 0
 global TEXT_PREPARE_CACHE_POLICY: TextMissingGlyphPolicy = TextMissingGlyphPolicy::Substitute
 
+// Must be called from every writer of GLYPH_CACHES and FONT_CP_SLOTS.
 fn text_prepare_cache_clear() {
     TEXT_PREPARE_CACHE = map_new()
     TEXT_PREPARE_CACHE_ENTRIES = 0

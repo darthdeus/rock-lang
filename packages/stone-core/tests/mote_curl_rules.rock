@@ -34,6 +34,8 @@ fn mote_curl_is_deterministic_and_divergence_free() {
         let a = mote_curl(p)
         let b = mote_curl(p)
         assert(a.x == b.x && a.y == b.y && a.z == b.z, "curl is deterministic")
+        // Match the curl's central-difference step so mixed partials cancel,
+        // even across lattice boundaries; only rounding remains.
         let dx = mote_curl(p + v(0.1, 0.0, 0.0)) - mote_curl(p - v(0.1, 0.0, 0.0))
         let dy = mote_curl(p + v(0.0, 0.1, 0.0)) - mote_curl(p - v(0.0, 0.1, 0.0))
         let dz = mote_curl(p + v(0.0, 0.0, 0.1)) - mote_curl(p - v(0.0, 0.0, 0.1))

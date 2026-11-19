@@ -31,6 +31,8 @@ pub global SKIN_GALLERY: SkinGalleryState = SkinGalleryState {
     env_checked: false,
 }
 
+// Keyed by "<Asset>.png". Seeded skins are shared by reference, so a gallery tweak lands in
+// the game's global too.
 pub global SKIN_GALLERY_SEED: Map<string, Entity<UiSkin>> = map_new()
 
 pub fn skin_gallery_seed(name: string, s: Entity<UiSkin>) {
@@ -53,6 +55,7 @@ pub @pure fn sg_seeded_mode(seed_count: int) -> bool {
     return seed_count > 0
 }
 
+// Seeded mode loads nothing: a second load cannot redeclare an image's filter.
 pub fn sg_load_entries(s: SkinGalleryState) {
     let entries: [SkinGalleryEntry] = vec_new()
 
@@ -69,6 +72,7 @@ pub fn sg_load_entries(s: SkinGalleryState) {
         }
         sort(names, n => n)
         for path in names {
+            // Prefer the handle the game loaded: a load redeclaring the filter is a hard error.
             let parts = path.split("/")
             let name = parts[parts.len() - 1]
             let img = image_asset_cached(path) ?? load_image_asset(path)

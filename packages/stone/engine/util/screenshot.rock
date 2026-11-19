@@ -10,10 +10,12 @@ global SCREENSHOT_PENDING: Vec<ScreenshotRequest> = vec_new()
 pub global SCREENSHOT_CAPTURE_FAILURES: int = 0
 pub global SCREENSHOT_COMPLETED_COUNT: int = 0
 pub global SCREENSHOT_LAST_COMPLETED_PATH: string = ""
+// The actual saved PNG size, which differs from the requested drawable size when max_size resizes.
 pub global SCREENSHOT_LAST_COMPLETED_WIDTH: int = 0
 pub global SCREENSHOT_LAST_COMPLETED_HEIGHT: int = 0
 
 global screenshot_taken_via_env: bool = false
+// Counts runner frames, including render-skipped seek frames, to share FRAME_COUNT's denominator.
 global screenshot_frame_counter: int = 0
 
 @init
@@ -32,6 +34,7 @@ fn screenshot_capture_failed(path: string, reason: string) {
     log_error("STONE", "Failed to save screenshot to {path}: {reason}")
 }
 
+// max_size <= 0 uses ENGINE.screenshot_max_size.
 pub fn take_screenshot(path: string = "screenshot.png", max_size: int = -1,
         on_complete: (fn(string, bool))? = null) {
     sim_submit_guard("take_screenshot")
@@ -82,6 +85,7 @@ fn update_screenshot_system() {
             let target_frame = get_env_int("FRAME_COUNT", 1)
             if target_frame < 1 { target_frame = 1 }
             if screenshot_frame_counter >= target_frame {
+                // The process chdirs to the workspace root; parallel runs need STONE_SCREENSHOT_PATH.
                 take_screenshot(os_getenv("STONE_SCREENSHOT_PATH") ?? "screenshot.png")
                 screenshot_taken_via_env = true
             }

@@ -82,6 +82,7 @@ fn tool_key_name(key: ToolKey) -> string {
     return id
 """
 
+// An unmapped name is reported once per name; a site-keyed log_once would swallow all but one.
 fn tool_key_id_dynamic(key: string) -> int {
     let id = __tool_imgui_key_id(key)
     if id == -1 {
@@ -162,6 +163,8 @@ fn tool_key_id(key: ToolKey) -> int {
     snap.ctrl = ctrl_down
 """
 
+// No clear step: the fixed key set overwrites both entries every frame, so the tables never
+// grow or allocate after the first frame.
 @nomangle inline(lua) fn __tool_snapshot_put(id: int, pressed: bool, down: bool) = """
     local snap = _G.__stone_tool_keys
     snap.pressed[id] = pressed
@@ -183,6 +186,7 @@ fn tool_key_id(key: ToolKey) -> int {
     return (snap and snap.ctrl) or false
 """
 
+// The sampler walks this list; a member missing from it reads as never pressed.
 const TOOL_KEY_ALL: [ToolKey] = [
     ToolKey::F3, ToolKey::F5, ToolKey::F6, ToolKey::F7, ToolKey::F8,
     ToolKey::F10, ToolKey::F11, ToolKey::F12,

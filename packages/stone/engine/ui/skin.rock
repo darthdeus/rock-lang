@@ -1,3 +1,5 @@
+// Region, corner and padding are in source px. corner == (0,0) marks a fixed-aspect asset,
+// drawn whole and never stretched.
 pub struct UiSkin {
     image: SampledTexture,
     source: IRect,
@@ -6,6 +8,7 @@ pub struct UiSkin {
     pad_t: float = 0.0,
     pad_r: float = 0.0,
     pad_b: float = 0.0,
+    // Source px -> design units.
     scale: float = 1.0,
     feel: string = "",
 }

@@ -1,3 +1,5 @@
+// Runs in LDR after ACES + exposure. Tint and saturation must be set explicitly: an unset
+// uniform is zero, which blacks the frame.
 pub value ColorGradeU {
     tint: Vec4,
     saturation: float,

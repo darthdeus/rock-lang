@@ -93,6 +93,7 @@ fn text_art_anonymous_measurement_case(font: Font, fail_after_measurement: bool 
 
     let layout = text_layout_build(font, "Editor retained label", 20.0, 1.0)
     let demand = text_layout_raster_demand(layout, null)
+    // Straddle a bucket boundary inside its downward hysteresis band.
     layout.raster_target_cap_height *= 97.0 / demand.required_pixel_em
     let retained = text_art_glyph_input(layout, TextArtFollow::StaticRun,
         text_layout_identity_poses(layout), consumer_key: "n5/measurement")

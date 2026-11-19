@@ -10,6 +10,8 @@ pub value Outline {
     flame_time: float? = null,
 }
 
+// Slot 0 of the detect shader's uniform arrays holds these fallbacks for ids
+// with no registered style.
 pub global OUTLINE_RADIUS: float = 7.0
 const OUTLINE_COLOR: Color = GREEN
 const OUTLINE_COLOR_OCCLUDED: Color = color(0.2, 0.6, 0.2, 0.8)
@@ -121,8 +123,12 @@ pub fn write_color_slot(buf: NativeBuffer<float>, slot: int, c: Color) {
     write_vec4_slot(buf, slot, c.r, c.g, c.b, c.a)
 }
 
+// The slot buffers are rewritten in place and read at upload, so the cached
+// Pass never rebuilds for them; only a keyed change rebuilds it.
 pub nobox value OutlinePassKey {
     linear_world: bool = false,
+    // Bump on any Pass shape change the key does not capture: the cached Pass
+    // survives hot reload.
     shape_version: int,
     radius: float,
     see_through_id: int = 0,
@@ -162,6 +168,7 @@ pub fn build_outline_detect_pass(
 ) -> Pass {
     return Pass {
         pipeline: OUTLINE_DETECT_PIPELINE,
+        // Slot order: target_mask 0, visible_id 1 (OutlineDetectTex field order).
         slot_inputs: [(sampled_canvas(mask), TextureFilter::Nearest), (sampled_canvas(visible), TextureFilter::Nearest)],
         // ORDER IS THE CONTRACT: these must match `outline_detect_frag`'s
         // `@size(N)` param order; nothing here names a member.
@@ -242,6 +249,8 @@ pub global OUTLINE_LAST_SCISSOR: IRect? = null
 
 pub const OUTLINE_SCISSOR_QUANTUM: int = 16
 
+// Scalars because a Vec2 pair would box on every compare across every mask
+// vertex. Invalid means cover the whole target.
 global OUTLINE_MASK_BOUNDS_VALID: bool = false
 global OUTLINE_MASK_BOUNDS_MIN_X: float = 0.0
 global OUTLINE_MASK_BOUNDS_MIN_Y: float = 0.0
@@ -301,6 +310,7 @@ fn outline_detect_scissor(view: FrameView, scan_radius: float, output: Canvas) -
 
     let lo = world_to_scene_texel_in(view, v(OUTLINE_MASK_BOUNDS_MIN_X, OUTLINE_MASK_BOUNDS_MIN_Y))
     let hi = world_to_scene_texel_in(view, v(OUTLINE_MASK_BOUNDS_MAX_X, OUTLINE_MASK_BOUNDS_MAX_Y))
+    // One texel over the radius: the mask rasterizes to whole texels.
     let pad = scan_radius + 1.0
     let x0 = min(lo.x, hi.x) - pad
     let x1 = max(lo.x, hi.x) + pad
@@ -385,6 +395,7 @@ fn apply_outline_overlay() {
 fn apply_outline_detect(view: FrameView, force_scan: bool) {
     profile_begin("outline_overlay")
 
+    // params.w carries the picking id so collisions never borrow another style.
     write_color_slot(OUTLINE_COLOR_SLOTS, 0, OUTLINE_COLOR)
     write_color_slot(OUTLINE_OCCLUDED_SLOTS, 0, OUTLINE_COLOR_OCCLUDED)
     write_vec4_slot(OUTLINE_PARAM_SLOTS, 0, OUTLINE_RADIUS, OUTLINE_FLAME, 0.0, 0.0)
@@ -500,6 +511,9 @@ fn adhoc_intermediate(w: int, h: int) -> AdhocIntermediate {
     return it
 }
 
+// Begin, pushes and end must share a frame. The camera is the caller's, not
+// the game's, since the projection derives from the target's size. `target`
+// must be rgba8 to be read back or saved.
 pub fn outline_canvas_begin(target: Canvas, style: Outline, cam_offset: Vec2, cam_scale: float) {
     let _ = outline_bracket_reject_stale()
     if ADHOC_IN_BRACKET {

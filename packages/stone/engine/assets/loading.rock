@@ -85,6 +85,8 @@ pub fn project_asset_path(relative_path: string) -> string {
     return "{GAME_SOURCE_DIR}/{relative_path}"
 }
 
+// Keyed by the roots table's identity: a full reload builds a fresh roots table,
+// so answers memoized against the previous roots cannot outlive them.
 @nomangle inline(lua) fn __asset_path_memo(relative_path: string, roots: [string]) -> string = """
     local m = _G.__stone_asset_path_memo
     if not m or m.roots ~= roots then return "" end
@@ -123,6 +125,8 @@ pub fn asset_path(relative_path: string) -> string {
         }
     }
 
+    // Only an overlay hit is memoized; a miss is not, so a file added to an overlay
+    // while the game runs is still found.
     return project_asset_path(relative_path)
 }
 
@@ -325,6 +329,8 @@ fn image_identity_record(resolved: string, identity: string) {
 fn image_identity_fresh(resolved: string, identity: string) {
     if identity == resolved { return }
     if let previous = IMAGE_IDENTITY_PATHS.get(identity) {
+        // A listed path may since have moved to another live identity; only forget
+        // the ones that still resolve here.
         for path in previous {
             if image_asset_key(path) == identity { IMAGE_RESOLVED_IDENTITY.remove(path) }
         }
@@ -436,6 +442,7 @@ fn development_missing_image(sampling: TextureFilter) -> Image {
     return image
 }
 
+// The result is unreferenced: a caller that keeps the handle acquires it.
 pub fn load_image_cached(
     resolved: string,
     canonical: string,
@@ -486,6 +493,8 @@ pub fn load_image_cached(
         deferred: class == ResidencyClass::Prefetch, format: format, logical_size: logical_size)
     image_load_diag_record(canonical, handle != 0)
     if handle == 0 {
+        // The path goes on the second line: the badge keys on the first, so every
+        // failed image is one counted row.
         if !ASSET_DEV_MODE {
             log_once("ASSETS", "image asset failed to load\n{canonical} (asset_path: {resolved})", "load_image_asset:{canonical}")
             return Image(0)
@@ -507,6 +516,8 @@ pub fn load_image_cached(
     return img
 }
 
+// Each call takes a reference that is never released, so trim cannot destroy a
+// texture the caller still draws.
 pub fn load_image_asset(path: string, sampling: TextureFilter = TextureFilter::Nearest,
     exact_texels: bool = false, format: ImageAssetFormat = ImageAssetFormat::Rgba8) -> Image {
     return acquire_image_resolved(asset_path(path), path, sampling, exact_texels: exact_texels,
@@ -559,6 +570,8 @@ pub fn image_asset_acquire_count(path: string, format: ImageAssetFormat = ImageA
 }
 
 pub fn release_image_asset(path: string, format: ImageAssetFormat = ImageAssetFormat::Rgba8) -> bool {
+    // A path releases only what it acquired: aliases share the identity count, but
+    // a release through one alias must not consume another's reference.
     let resolved = asset_path(path)
     let path_key = image_format_path(resolved, format)
     let held = IMAGE_PATH_REFS.get(path_key) ?? 0

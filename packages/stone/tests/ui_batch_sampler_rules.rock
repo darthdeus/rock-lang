@@ -387,6 +387,8 @@ fn ui_batch_secondary_samplers_released_after_draw() {
 
 @test
 fn ui_batch_sampler_fixture_restores_after_failure() {
+    // A passing run first, so the baseline includes the GPU host and the
+    // process-lifetime images the first draw mints.
     ui_batch_sampler_fixture(false)
     let before = stone_get_graphics_stats()
     let saved_pool = CURRENT_UI_POOL

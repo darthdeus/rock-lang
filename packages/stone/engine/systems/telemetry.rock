@@ -18,6 +18,9 @@ inline(lua) fn telemetry_configure_native(root: string, game: string, build: str
     return stone.stone_telemetry_configure(root, game, build, platform, channel, endpoint, token, explicit_reconsent)
 """
 
+// Ingest bounds: at most 32 keys of at most 64 characters; values are 64-bit
+// ints, finite floats, bools, strings of at most 256 characters, or arrays of at
+// most 32 of those. A payload breaking them is dropped, not truncated.
 pub struct TelemetryData {
     fields: Map<string, JsonValue>,
 }
@@ -68,6 +71,7 @@ fn TelemetryData.is_empty(d) -> bool {
     return d.fields.is_empty()
 }
 
+// "" is what the native side reads as "no data".
 fn telemetry_data_encode(data: TelemetryData?) -> string {
     let d = data ?? return ""
     if d.is_empty() { return "" }
@@ -96,6 +100,8 @@ pub fn telemetry_close() {
 
 @inline inline(lua) fn telemetry_close_native() = "stone.stone_telemetry_close()"
 
+// Last shutdown stage: closing the queue bounds the final upload, so anything to
+// record must be appended by an earlier stage.
 @shutdown(stage=900)
 fn telemetry_shutdown() {
     telemetry_close()

@@ -1,3 +1,5 @@
+// RectBatch is deferred: nothing reaches the GPU until a flush. Use the
+// *_immediate draws (draw.rock) around canvas switches or readback.
 pub const RECT_BATCH_VERTS_PER_RECT: int = 6
 
 // THE sprite vertex layout. One owner: this field order IS the GPU attribute
@@ -171,6 +173,7 @@ pub fn rect_batch_new(capacity: int, sampling: TextureFilter? = null,
     }
 }
 
+// Don't pass Image(0): it is the white-pixel sentinel; use rect_batch_new().
 pub fn rect_batch_new_textured(capacity: int, texture: SampledTexture,
     sampling: TextureFilter? = null, target: Canvas? = null,
     convention: TargetConvention = TargetConvention::PresentSource,
@@ -195,6 +198,7 @@ pub fn rect_batch_new_textured(capacity: int, texture: SampledTexture,
     m.capacity = new_cap
 }
 
+// For each append below: append(m, args) == tail(prepare(m), args).
 fn __sprite_mesh_prepare_append(m: SpriteMesh) -> SpriteMesh {
     if m.count >= m.capacity * RECT_BATCH_VERTS_PER_RECT {
         __grow_sprite_mesh_buf(m)
@@ -259,6 +263,8 @@ pub @pure fn vert(
 // Reuse the compiler's cached float view instead of casting another cdata.
 @inline inline(lua) fn __vertex_float_view(buf: NativeBuffer<Vertex>, at: int) -> Ptr<float> = 'return buf.__vf + at'
 
+// Keep these stores in Vertex field order; vertex_writer_bytes compares them
+// against typed stores, including every default-zero tail lane.
 @nowrite @inline inline(lua) fn __write_vertex(
     p: Ptr<float>, step: float,
     x: float, y: float, u: float, v_: float,
@@ -311,6 +317,7 @@ fn __rect_batch_push_textured_quad4(
     cursor = __write_vertex(cursor, step, bl.x, bl.y, u1, v2, r, g, b, a)
 }
 
+// V is not flipped here; pass v1/v2 in the orientation the texture needs.
 pub fn rect_batch_push_textured(b: RectBatch,
     x: float, y: float, w: float, h: float,
     u1: float, v1: float, u2: float, v2: float,
@@ -402,6 +409,7 @@ pub fn rect_batch_flush(b: RectBatch) {
     let count = b.count
     let sampling = resolve_sampling(tex, b.sampling)
     if b.target != null {
+        // Closure-free brackets: a closure would allocate on every flush.
         let prior_blend = CURRENT_BLEND
         let prior_canvas = CURRENT_CANVAS_HANDLE
         set_blend_mode(b.blend)
@@ -461,6 +469,8 @@ pub struct SpriteMesh {
     depth: DepthMode,
     blend: BlendMode,
     order: int = 0,           // intra-layer sub-sort (see RenderProps.order)
+    // Resolved at submit, so a mesh built before its image is registered resolves
+    // against the live declaration.
     sampling: TextureFilter? = null,
     unlit: bool = false,
     // Color-pass shader override, forwarded onto the submitted batch. Same contract as RenderBatch.pipeline: the shader
@@ -593,6 +603,8 @@ fn __sprite_mesh_push_segment(
     cursor = __write_vertex(cursor, step, brx, bry, bru, brv, br_, bg, bb, ba, b_py)
 }
 
+// Raw UVs, no atlas rect or texel inset: insetting would break the seam where
+// the scroll axis wraps.
 pub @preflight("__sprite_mesh_prepare_append", "__sprite_mesh_add_segment_tail") fn sprite_mesh_add_segment(
     m: SpriteMesh,
     a_left: Vec2, a_left_uv: Vec2, a_right: Vec2, a_right_uv: Vec2, a_color: Color,
@@ -624,6 +636,7 @@ fn __sprite_mesh_add_segment_tail(
     m.count = m.count + RECT_BATCH_VERTS_PER_RECT
 }
 
+// The y-sort key is the raw world anchor y, as on the sprite path; V is flipped for Y-up world.
 pub @preflight("__sprite_mesh_prepare_append", "__sprite_mesh_add_tail") fn sprite_mesh_add(
     m: SpriteMesh,
     pos: Vec2,
@@ -665,6 +678,8 @@ fn __sprite_mesh_add_tail(
     m.count = m.count + RECT_BATCH_VERTS_PER_RECT
 }
 
+// Corners in TL, TR, BR, BL order. `py` is the raw world anchor y, not a
+// remapped [0,1] value.
 pub @preflight("__sprite_mesh_prepare_append", "__sprite_mesh_add_quad_tail") fn sprite_mesh_add_quad(
     m: SpriteMesh,
     tl: Vec2, tr: Vec2, br: Vec2, bl: Vec2,
@@ -737,6 +752,7 @@ fn submit_mesh_into(
     batch.mesh_frame = RENDER_FRAME
 }
 
+// Padded counter: unpadded sorts mesh_10 before mesh_2.
 fn mesh_batch_key(m: SpriteMesh, eff: TextureFilter) -> string {
     let sh = if m.pipeline != null { m.pipeline.shader_name } else { "0" }
     if m.batch_key_counter == CUSTOM_DRAW_COUNTER && m.batch_key_z == m.z_layer

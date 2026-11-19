@@ -70,6 +70,8 @@ pub fn snapshot_history_jump(history: SnapshotHistory, idx: int) -> SnapshotHist
     return history.nodes[idx]
 }
 
+// Does not move the cursor: owners restore first, then call snapshot_history_jump
+// only after restoration succeeds.
 pub fn snapshot_history_undo_target(history: SnapshotHistory, live_changed: bool = false) -> int? {
     if history.nodes.len() == 0 { return null }
     if live_changed { return history.current }
@@ -112,6 +114,8 @@ pub fn snapshot_history_clamp(history: SnapshotHistory) {
     snapshot_history_rebuild(history, dead)
 }
 
+// Holding the old `nodes` array is not enough to roll back: rebuild rewrites
+// parent/children on the surviving node objects.
 pub fn snapshot_history_clone(history: SnapshotHistory) -> SnapshotHistory {
     let nodes: [SnapshotHistoryNode] = []
     for node in history.nodes {
@@ -277,6 +281,8 @@ fn snapshot_history_publication_fail(publication: SnapshotHistoryPublication, pa
     log_error("SNAPSHOT", "{kind} publication failed: {path}")
 }
 
+// Each poll submits or retires at most one IO job; only explicit completion
+// boundaries pass wait=true.
 pub fn snapshot_history_publication_poll(publication: SnapshotHistoryPublication, wait: bool = false) -> bool {
     if publication.done { return true }
     publication.progressed = true
@@ -448,6 +454,8 @@ pub fn snapshot_history_load_raw(raw: string, max_nodes: int, path: string, upgr
         if p > max_pid { max_pid = p }
         if version >= 2 { pending_snap = p }
     }
+    // Snapshot lines are stored unparsed, so a torn last record would survive to the
+    // first undo; validate it.
     if version >= 2 && order.len() > 0 {
         let tail = order[order.len() - 1]
         if json_decode(by_pid[tail].snap) == null {
@@ -464,6 +472,7 @@ pub fn snapshot_history_load_raw(raw: string, max_nodes: int, path: string, upgr
     for (i, pid) in enumerate(order) {
         let node = by_pid[pid]
         let parent = node.parent
+        // On disk `parent` is a pid; in memory it is the parent's index.
         let parent_index = -1
         if parent == -1 {
             if i != 0 { return null }
@@ -484,11 +493,14 @@ pub fn snapshot_history_load_raw(raw: string, max_nodes: int, path: string, upgr
         nodes,
         current: index_of[current_pid],
         next_pid: max_pid + 1,
+        // The records actually read: understating this hides pointer churn from
+        // snapshot_history_maybe_compact.
         log_records: records,
         max_nodes,
         storage_version: version,
         needs_checkpoint,
     }
+    // Appends must not mix formats in one file, so an older WAL is upgraded first.
     if upgrade && (version < SNAPSHOT_HISTORY_VERSION || needs_checkpoint) {
         if !snapshot_history_save(history, path, checkpoint: true) {
             log_error("SNAPSHOT", "failed to checkpoint loaded WAL v{version}: {path}")
@@ -505,6 +517,8 @@ pub fn snapshot_history_record_node(history: SnapshotHistory, node: SnapshotHist
     )
 }
 
+// Two lines: a header, then the snapshot verbatim. Compact json_encode output
+// never contains a literal newline; snapshot_history_snap_is_line enforces it.
 pub fn snapshot_history_node_record(node: SnapshotHistoryNode, ppid: int, pid: int) -> string {
     let entry: Map<string, JsonValue> = map_new()
     entry["pid"] = json_int(pid)

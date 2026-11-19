@@ -1,7 +1,11 @@
 pub value TonemapU {
     exposure: float,
+    // Scales bloom only; 0 makes bloom_tex genuinely ignored, which the no-bloom path binds.
     bloom_intensity: float,
+    // bloom_tex's active fraction differs from scene_tex's, so the executor supplies the ratio.
     bloom_uv: Vec2,
+    // Clamp into bloom_tex's active texel-centre box: a linear tap past the last centre blends
+    // in the stale margin.
     bloom_uv_lo: Vec2,
     bloom_uv_hi: Vec2,
 }
@@ -16,6 +20,7 @@ pub @pure fn aces_film(x: Vec3) -> Vec3 {
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0)
 }
 
+// Field order is the slot: scene_tex 0, bloom_tex 1.
 struct TonemapTex {
     scene_tex: Sampler2D,
     bloom_tex: Sampler2D,
@@ -41,7 +46,9 @@ pub value TonemapSplitU {
     bloom_uv: Vec2,
     bloom_uv_lo: Vec2,
     bloom_uv_hi: Vec2,
+    // log2 of the weighted exposure over `exposure`.
     weighted_stops: float,
+    // The weight's active fraction and texel-centre clamp, as for bloom_tex.
     weight_uv: Vec2,
     weight_uv_lo: Vec2,
     weight_uv_hi: Vec2,

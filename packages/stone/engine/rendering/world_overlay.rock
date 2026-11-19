@@ -20,6 +20,8 @@ pub enum OverlayVerb {
     Custom,
 }
 
+// Entries are reused across frames: each push writes every field its verb's
+// flush arm reads, the rest keep the previous occupant's values.
 pub struct OverlayCmd {
     verb: OverlayVerb,
     a: Vec2,          // world anchor, or a line's start
@@ -89,7 +91,10 @@ fn overlay_cmd(verb: OverlayVerb) -> OverlayCmd {
     return c
 }
 
+// Commands live one frame. Pooled entries still reference the retired prefix,
+// so reference fields are released explicitly.
 pub fn world_overlay_begin_frame() {
+    // +1: failed rich-text validation can leave the next unpublished slot filled.
     let clear_len = min(OVERLAY_CMD_LEN + 1, OVERLAY_CMDS.len())
     for i in 0..clear_len {
         let c = OVERLAY_CMDS[i]
@@ -264,6 +269,8 @@ pub fn rich_text_aligned_start(anchor: Vec2, width: float, ascent: float,
             ascent, cap_height, 0.0) })
 }
 
+// After the scene is presented and before the UI pool drains, so RENDER_VIEW is
+// this frame's frozen view.
 pub fn flush_world_overlay() {
     if OVERLAY_CMD_LEN == 0 { return }
     let view = RENDER_VIEW ?? return

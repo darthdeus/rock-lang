@@ -35,6 +35,8 @@ pub inline(lua) fn world_fixture_log_restore() = """
     _G.__world_fixture_logs = nil
 """
 
+// Error objects double as stop signals, so keep the raw value; a handler runs
+// before unwinding to retain the failing stack.
 pub @nomangle inline(lua) fn world_fixture_call(body: fn() -> (),
         handler: (fn(any) -> any)? = null) -> any = """
     local ok, value

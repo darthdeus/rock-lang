@@ -10,6 +10,8 @@ pub value FontSpec {
 
 pub global FONT_SPEC_CACHE: Map<string, Font> = map_new()
 
+// The key carries the whole policy: the same file under different raster,
+// sampling or face policies is a different atlas.
 fn font_spec_key(spec: FontSpec) -> string {
     let smp = if spec.sampling == TextureFilter::Nearest { "n" } else { "l" }
     let ras = if spec.raster == FontRasterPolicy::Fixed { "f" } else { "d" }

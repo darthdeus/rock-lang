@@ -31,6 +31,8 @@ pub @nomangle inline(lua) fn sim_defer_cleanup(cleanup: fn() -> ()) = """
     callbacks[#callbacks + 1] = cleanup
 """
 
+// Runs at the entry's end even when it failed; one broken cleanup does not stop
+// the others from restoring their state.
 pub @nomangle inline(lua) fn sim_cleanup_run() = """
     local callbacks = _G.__rock_sim_cleanups
     _G.__rock_sim_cleanups = nil
@@ -62,6 +64,8 @@ global SIM_TASK: Task? = null
 
 global SIM_NAME: string = ""
 pub global SIM_FRAME_BUDGET: int = -1
+// The sim budget is in game ticks: a watcher wait is a frozen frame, so host
+// wall-clock work cannot consume it.
 global SIM_ENTRY_TICK_START: int = 0
 global SIM_ENTRY_FRAME_START: int = 0
 global SIM_ENTRY_WALL_START_US: int = 0
@@ -134,6 +138,8 @@ fn sim_submit_guard(reader: string) {
     }
 }
 
+// Read once at boot and latch the result: a fixture can pause drawing mid-run.
+// `submit` mode is excluded because it runs the whole draw phase.
 pub fn sim_process_never_draws() -> bool {
     return sim_mode_active() && SIM_SKIP_RENDER
 }
@@ -232,6 +238,8 @@ fn sim_apply_fixed_dt() {
     }
 }
 
+// Called during init, before the rest of boot: vsync and frame-budget decisions
+// need to know a sim is coming.
 fn runner_load_sim() {
     SIM_NAME = os_getenv("ROCK_RUN_SIM") ?? ""
     if SIM_NAME == "" { return }
@@ -249,6 +257,8 @@ fn runner_begin_sim() {
     sim_start_entry(0)
 }
 
+// The entry's opening statements run before any frame restamps the clock;
+// unset, `__rock_log_now` falls back to os.clock() (CPU time).
 fn sim_publish_log_clock() {
     log_set_now(time)
 }
@@ -268,6 +278,8 @@ fn runner_sim_advance(frame: int) -> bool {
             + "{format_float(entry_secs * 1000.0 / float(frame_count), 0, 2)}ms/frame)")
     }
 
+    // stop_sim() checks read what this frame's draw produced, so they run here,
+    // after present and before the entry's envelope closes.
     sim_finish_stop()
 
     let frame_timing = sim_entry_frame_timing_json()
@@ -292,6 +304,8 @@ fn runner_sim_advance(frame: int) -> bool {
     return true
 }
 
+// Game code with irreversible side effects (writing authored files, network,
+// user settings) gates on this so sims cannot clobber committed state.
 pub fn sim_mode_active() -> bool {
     let name = os_getenv("ROCK_RUN_SIM") ?? return false
     return name != ""
@@ -599,6 +613,8 @@ macro shell(cmd: expr) {
     return true
 """
 
+// inline(lua) bodies are raw Lua: '\\' is one backslash. Every control character
+// is escaped, since a raw one makes the marker invalid JSON.
 @nomangle inline(lua) fn sim_json_escape(s: string) -> string = """
     return (s:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('%c', function(c)
         return string.format('\\u%04x', c:byte())
@@ -797,6 +813,7 @@ macro sim_between_float(actual: expr, low: expr, high: expr, message: expr) {
     _sim_between_float_impl(actual, low, high, message, __SITE__)
 }
 
+// Mirrors the .sim runner's `~=`: pass within `max(rel * |expected|, abs_min)`.
 pub fn _sim_approx_float_impl(actual: float, expected: float, rel: float, abs_min: float, message: string, site: string) {
     let diff = actual - expected
     let tol = (rel * expected.abs()).max(abs_min)
@@ -814,10 +831,13 @@ global SIM_STOP_SITE: string = ""
 global SIM_STOP_PENDING: bool = false
 
 pub fn _stop_sim_impl(site: string) {
+    // Recorded, not run: the checks read draw-phase state, and sampling here in
+    // update would read the previous frame. sim_finish_stop runs them.
     SIM_STOP_SITE = site
     SIM_STOP_PENDING = true
 }
 
+// Emits `stop` last, after whatever it found.
 fn sim_finish_stop() {
     let stop_sim_reached = SIM_STOP_PENDING
     let census = sim_alloc_census_json(stop_sim_reached, !SIM_SKIP_RENDER)
@@ -864,6 +884,7 @@ macro stop_sim() {
 
 global SIM_END_REQUESTED: bool = false
 
+// Call stop_sim() first for the stop checks; the caller should then only yield.
 pub fn sim_end_entry() {
     SIM_END_REQUESTED = true
 }

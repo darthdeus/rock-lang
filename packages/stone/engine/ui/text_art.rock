@@ -28,8 +28,10 @@ pub struct TextArtMaterial {
     pipeline: Pipeline,
     block: OwnedUniformBlock?,
     key: string,
+    // Slot 0 is the TextArt source; these occupy compiler-owned slots 1..N in declaration order.
     additional_inputs: [(SampledTexture, TextureFilter)] = [],
     radiance: TextArtRadianceMaterial? = null,
+    // Static data replaces slot 0 for the custom face and radiance passes.
     source_data: TextArtSourceMaterial? = null,
 }
 
@@ -193,6 +195,7 @@ pub value TextArtRasterDemand {
 }
 
 pub value TextArtAtlasInstance {
+    // Native handles include a generation above the low 32 bits.
     instance_id: float,
     bucket: int,
     pixel_size: int,

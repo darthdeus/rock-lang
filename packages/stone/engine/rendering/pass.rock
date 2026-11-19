@@ -83,9 +83,12 @@ pub struct Pass {
     scissor: IRect? = null,
     blend: BlendMode? = null,
     timed: int = -1,
+    // Bit N is attachment N (fragment output N); 0 writes attachment 0 alone. Requires an output.
     draw_buffers: int = 0,
 }
 
+// Copies on change so a retained earlier submission keeps its inputs; assign
+// the result back.
 pub fn Pass.with_canvas_input(p, slot: int, canvas: Canvas, sampling: TextureFilter) -> Pass {
     let current = p.slot_inputs[slot]
     if current.1 == sampling && sampled_texture_matches_canvas(current.0, canvas) { return p }
@@ -160,6 +163,7 @@ fn run_pass_scoped(p: Pass, previous_shader: string?, retain_shader: bool) -> bo
     let has_output = p.output != null
     if has_output {
         set_canvas(p.output.unwrap())
+        // After the bind: stone_set_canvas resets the scissor.
         if p.scissor != null {
             let r = p.scissor
             stone_set_scissor(true, r.x, r.y, r.w, r.h)
@@ -181,6 +185,7 @@ fn run_pass_scoped(p: Pass, previous_shader: string?, retain_shader: bool) -> bo
     }
 
     if has_output {
+        // Draw-buffer state is per framebuffer: reset it while the output is still bound.
         if p.draw_buffers != 0 { stone_set_draw_buffer_mask(1) }
         set_canvas_handle(previous_canvas)
     }
@@ -217,6 +222,7 @@ fn run_pass_body(p: Pass, shader_bound: bool, retain_shader: bool) {
         // derives Vertex's layout but leaves the one draw audit to this owner.
         let _ = __stone_draw_mesh_vertex(mesh.vbo, mesh.count, 0, 0, audit_inputs: false)
     } else {
+        // Fullscreen TexCoord addresses input 0's active rectangle in 0..1.
         if p.slot_inputs.len() > 0 {
             let uv = sampled_texture_active_uv(p.slot_inputs[0].0)
             set_fullscreen_uv_scale(uv.x, uv.y)
@@ -226,6 +232,7 @@ fn run_pass_body(p: Pass, shader_bound: bool, retain_shader: bool) {
             draw_fullscreen_quad()
         }
     }
+    // After the draw and before anything else binds: the marks describe this draw only.
     audit_texture_slots_for_draw(p.pipeline.shader_name)
     release_pass_input_units(p)
     if !retain_shader {
@@ -233,6 +240,7 @@ fn run_pass_body(p: Pass, shader_bound: bool, retain_shader: bool) {
     }
 }
 
+// Asked before clearing, so a rejected pass leaves its output alone.
 pub fn pass_input_rejection(p: Pass) -> string {
     if let mesh = p.geometry {
         if mesh.count <= 0 || mesh.count % 3 != 0 { return "geometry needs complete nonempty triangles" }

@@ -1,5 +1,6 @@
 pub struct MultiSound {
     sources: [Sound],
+    // Empty for ordinary pools; a compiled bank requires one gain per admitted source.
     gains: [float] = [],
     last: int = -1,
 }
@@ -73,6 +74,8 @@ pub fn random_sound_pick(multi_sound: MultiSound, speed: float = 1.0, pitch_jitt
         return null
     }
 
+    // The pick happens before the gate so a muted play still reaches play_sound,
+    // the single place that both gates and records.
     let index = 0
     if n > 1 && multi_sound.last >= 0 && multi_sound.last < n {
         index = presentation_random_int(0, n - 1)
@@ -97,6 +100,8 @@ pub fn _play_random_sound_impl(multi_sound: MultiSound, volume: float, speed: fl
                            spatial: bool, pan: float, site: string) -> Voice {
     let pick = random_sound_pick(multi_sound, speed, pitch_jitter)
     if pick == null { return Voice(0) }
+    // The impl, not the macro: `site` is the caller's, and the macro would stamp
+    // every random play with this line instead.
     let picked = pick
     return _play_sound_impl(picked.sound, bus, volume * picked.gain, picked.speed, decay, looped,
         site, spatial, pan)

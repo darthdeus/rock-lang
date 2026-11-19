@@ -18,6 +18,8 @@ pub @nomangle fn file_sync(filename: string) -> bool {
     return stone_file_sync(filename)
 }
 
+// A crash leaves an intact old or new file. The parent directory is not synced,
+// so this does not claim power-loss durability for a new directory entry.
 pub @nomangle fn file_write_atomic(filename: string, data: string) -> bool {
     let tmp = "{filename}.tmp"
     if !file_write(tmp, data) { return false }
@@ -41,6 +43,8 @@ pub @nomangle fn create_directory(name: string) -> bool {
     return os.time()
 """
 
+// Fixed under a sim so persisted stamps are byte-identical across runs; keyed on
+// sim_mode_active() so stamps taken during boot are fixed too.
 pub fn get_timestamp() -> int {
     if sim_mode_active() { return SIM_FIXED_EPOCH }
     return wall_clock_unix_seconds()

@@ -22,6 +22,7 @@ value Mat4 {
     return a.c0 * v.x + a.c1 * v.y + a.c2 * v.z + a.c3 * v.w
 }
 
+// Column-major: (A*B).col[j] = A * B.col[j].
 @pure operator *(a: Mat4, b: Mat4) -> Mat4 {
     return Mat4 {
         c0: a * b.c0,

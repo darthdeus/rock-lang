@@ -1,3 +1,4 @@
+// Profiler globals and native counters belong to the process, not a test shard.
 inline(lua) fn profiler_test_process(entry: string, which: int) = """
     local function quote(s) return "'" .. s:gsub("'", "'\\''") .. "'" end
     local library_key = ffi.os == "OSX" and "DYLD_LIBRARY_PATH" or "LD_LIBRARY_PATH"

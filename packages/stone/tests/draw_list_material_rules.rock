@@ -65,6 +65,8 @@ fn draw_list_material_fixture(fail_after_draw: bool) {
     let shader = rock_shader(sprite_batch_vert, draw_list_material_frag)
     WHITE_PIXEL = white
     let restore = () => {
+        // The intentional rejection escapes with_canvas/with_shader before
+        // their tails.
         for slot in 0..shader_texture_slot_count(shader) { sampler_release_unit(slot) }
         set_canvas_handle(saved_canvas)
         if saved_shader != null { set_shader(saved_shader) } else { unset_shader() }

@@ -1,3 +1,5 @@
+// Draws under the currently bound shader; use it for custom-shader geometry,
+// not the sprite path.
 pub struct GpuMesh {
     handle: MeshId,
     vert_count: int,
@@ -95,6 +97,7 @@ pub fn gpu_mesh_update_instances(m: GpuMesh, data: Ptr<float>, count: int) -> bo
     return true
 }
 
+// count < 0 = all instances. A negative result means nothing was drawn.
 pub fn gpu_mesh_draw(m: GpuMesh, tex: Image, count: int = -1) {
     let result = stone_mesh_draw(m.handle.0, tex.0, count)
     if result < 0 { return }

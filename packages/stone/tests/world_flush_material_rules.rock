@@ -203,6 +203,8 @@ fn retained_mesh_renders_across_frames_without_refill() {
         assert(r1 > 0.5 && r2 > 0.5, "the retained quad renders across frames without refill (r1={r1:.3} r2={r2:.3})")
         assert_eq(rm.mesh.count, 6, "retained contents survive draws")
 
+        // The depth key is the raw world anchor y; the shader remaps it per
+        // frame, which keeps retained vertices camera-independent.
         assert(abs(rm.mesh.vbo[0].pivot_y - pos.y) < 0.001,
             "vertex pivot_y is the raw world anchor y ({rm.mesh.vbo[0].pivot_y} vs {pos.y})")
 

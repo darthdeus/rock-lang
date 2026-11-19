@@ -1,3 +1,4 @@
+// The mixer is the only caller of bus_set_gain; settings and games edit strips.
 value MixerStrip {
     gain: float,
     mute: bool,
@@ -42,12 +43,15 @@ pub fn mixer_applied_gain(bus: int) -> float {
     return max(0.0, s.gain)
 }
 
+// Pushes every strip: soloing one changes the applied gain of the others.
 fn mixer_push() {
     for bus in MIXER_BUSES {
         bus_set_gain(bus, mixer_applied_gain(bus))
     }
 }
 
+// The fader position, ignoring mute and solo: persist this, never
+// mixer_applied_gain, or quitting while muted saves a gain of zero.
 pub fn mixer_gain_of(bus: int) -> float {
     let s = mixer_strip(bus)
     if s == null { return 0.0 }

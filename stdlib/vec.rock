@@ -161,6 +161,7 @@ fn Vec2.to_array(v) -> [float] {
     return v(a.x * cos - a.y * sin, a.x * sin + a.y * cos)
 }
 
+// Complex multiply: rotates by the angle of `rhs` and scales by |rhs|.
 @pure fn Vec2.rotate(a, rhs: Vec2) -> Vec2 {
     return v(a.x * rhs.x - a.y * rhs.y, a.x * rhs.y + a.y * rhs.x)
 }
@@ -227,6 +228,8 @@ fn presentation_random_around(position: Vec2, min: float, max: float) -> Vec2 {
 @pure fn Vec2.lerp(a, b: Vec2, t: float) -> Vec2 {
     return v(lerp(a.x, b.x, t), lerp(a.y, b.y, t))
 }
+
+// Vec3 convention: xy is the ground plane, z is height.
 
 @intrinsic @inline
 @pure fn v(x: float, y: float, z: float) -> Vec3 {

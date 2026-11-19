@@ -41,6 +41,7 @@ fn bind_batch_samplers(shader_id: string, batch: RenderBatch) {
     bind_sprite_material_texture(shader_id, batch.material)
 }
 
+// Unconditional because the binds are: a batch with no normal map still binds the white 1x1.
 fn release_batch_samplers(shader_id: string, batch: RenderBatch) {
     if let bindings = batch.geometry_bindings {
         for binding in bindings { sampler_release_unit(binding.slot) }

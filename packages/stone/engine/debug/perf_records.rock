@@ -1,3 +1,4 @@
+// Perf-only storage: fixed capacity allocated before the first frame.
 @nomangle inline(lua) fn perf_jit_health_active(active: bool) = """
     local state = _G.__stone_perf_jit_health
     if state == nil then
@@ -307,6 +308,8 @@ fn perf_measurement_complete() -> bool {
         && PERF_RECORDS.count == PERF_RECORDS.requested_frames
 }
 
+// Called after closing the preceding frame, before starting another; caps apply even
+// during readiness, warmup and allocation windows.
 fn perf_run_termination(frame: int, max_frames: int, elapsed: float, seconds: float) -> string {
     if PERF_FRAME_CAPTURE && perf_measurement_complete() {
         return if profiler_gc_window_pending() { "gc_window_incomplete" } else { "window_complete" }
@@ -349,6 +352,7 @@ fn perf_record_frame(frame: int, t_ms: float, ms: float, heap: float, delta: flo
     }
     nb_set(PERF_RECORDS.data, at + 15 + GC_STEP_FIELDS, images.load_us as float)
     nb_set(PERF_RECORDS.data, at + 16 + GC_STEP_FIELDS, images.wait_us as float)
+    // One native read into preallocated staging, then a fixed copy: no per-frame allocation.
     if JIT_NATIVE_READ_ENABLED {
         jit_native_health_frame_delta(PERF_RECORDS.jit_native_stage.ptr, JIT_NATIVE_COLUMNS)
     } else {

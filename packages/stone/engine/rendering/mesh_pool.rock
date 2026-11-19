@@ -1,3 +1,5 @@
+// FREE -> acquire -> PENDING -> render_batches -> IN_FLIGHT -> next frame's
+// clear_batches, after the mesh's batch is truncated -> FREE.
 pub global MESH_FREE: [SpriteMesh] = []
 pub global MESH_PENDING: [SpriteMesh] = []
 global MESH_IN_FLIGHT: [SpriteMesh] = []
@@ -37,6 +39,8 @@ pub fn acquire_mesh(
         }
     }
 
+    // Prefer the buffer this draw used last frame, else the smallest that fits, so
+    // the pool settles instead of regrowing small buffers.
     let fit = -1
     for i in 0..MESH_FREE.len() {
         let m = MESH_FREE[i]
@@ -65,10 +69,12 @@ pub fn acquire_mesh(
         m.blend = blend
         m.order = order
         m.unlit = unlit
+        // Reconfigure, never inherit: a pooled mesh carries the previous acquire's state.
         m.pipeline = pipeline
         m.normal = normal
         m.surface = surface
         m.auxiliary = null
+        // A scene drain can recycle this mesh again in the same frame.
         m.block_frame = -1
         m.sampling = sampling
         MESH_PENDING.push(m)
@@ -81,6 +87,7 @@ pub fn acquire_mesh(
     return m
 }
 
+// Counts snapshot here, so adds are legal any time between acquire and flush.
 pub fn flush_acquired_meshes() {
     for m in MESH_PENDING {
         if m.count > 0 {
@@ -91,6 +98,7 @@ pub fn flush_acquired_meshes() {
     MESH_PENDING.clear()
 }
 
+// Only after mesh batches are truncated: no queued draw reads the buffers.
 pub fn recycle_acquired_meshes() {
     for m in MESH_IN_FLIGHT {
         MESH_FREE.push(m)
@@ -150,6 +158,7 @@ pub fn reserve_quads(rm: RetainedMesh, n: int) {
     reserve_quads(rm.mesh, n)
 }
 
+// Each wrapper obeys add(rm, args) == tail(prepare(rm), args).
 fn __retained_mesh_prepare_append(rm: RetainedMesh) -> SpriteMesh {
     retained_mesh_gpu_release(rm)
     return __sprite_mesh_prepare_append(rm.mesh)

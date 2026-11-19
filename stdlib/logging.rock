@@ -62,6 +62,8 @@ fn log_info(category: string, msg: string) { __rock_log(2, category, msg) }
 fn log_debug(category: string, msg: string) { __rock_log(3, category, msg) }
 fn log_trace(category: string, msg: string) { __rock_log(4, category, msg) }
 
+// A differential harness drops a wall-clock record whole, so declare only a
+// record that says nothing else; see `wall_clock_ms` for a single value.
 fn log_wall_clock(category: string, msg: string) { __rock_log_wall_clock(2, category, msg) }
 
 @intrinsic inline(lua) fn log_set_level(level: int) = """
@@ -70,6 +72,10 @@ fn log_wall_clock(category: string, msg: string) { __rock_log_wall_clock(2, cate
     __rock_log_level = level
 """
 fn log_get_level() -> int { __rock_log_init(); return __rock_log_level }
+
+// log_once / log_throttled key on `__SITE__`. The plain names are ERROR and
+// ignore the level gate; the warn variants obey it. Both count every
+// occurrence for `log_suppression_summary`, not just the ones they emit.
 
 // @nomangle is ABI: raw Lua calls this by its bare name. The Stone engine's
 // inline(lua) bodies do (stone_file_read and stone_list_directory in
@@ -220,6 +226,8 @@ macro log_wall_clock_throttled(category: expr, msg: expr, interval_sec: expr) {
     _log_throttled_impl(1, category, msg, interval_sec, __SITE__, true)
 }
 
+// Clears every suppression record, including the summary latch: a partial
+// reset reports stale totals or silences the summary.
 @intrinsic @nomangle inline(lua) fn log_reset_dedup() = """
     __rock_log_dedup = {}
     __rock_log_throttle = {}

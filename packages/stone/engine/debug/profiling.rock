@@ -19,6 +19,8 @@ struct PerfPhaseLog {
     section_stack: NativeBuffer<int>, section_depth: int = 0,
 }
 
+// Reserve hash nodes once so first-seen section names index without allocating on a
+// measured frame.
 inline(lua) fn perf_phase_index_new(capacity: int) -> Map<string, int> = "return __rock_table_new(0, capacity)"
 
 inline(lua) fn perf_phase_vm_clock() -> float = """
@@ -62,6 +64,7 @@ inline(lua) fn perf_phase_image_stat(field: int) -> float = """
     return words[_G.__perf_phase_wait_word]
 """
 
+// Split exact integer bytes instead of rounding large counters into f32.
 fn perf_phase_upload_set(token: int, bytes: float) {
     let high = floor(bytes / 65536.0)
     nb_set(PERF_PHASES.upload_high, token, high as int)
@@ -160,6 +163,7 @@ fn perf_phase_section_merge(token: int) {
     let at = token * PERF_PHASE_COLUMNS
     if let previous = previous {
         let old = previous * PERF_PHASE_COLUMNS
+        // Only retire the just-closed tail row; live parents and children keep their handles.
         if token == PERF_PHASES.count - 1 && previous < token
                 && nb_get(PERF_PHASES.data, old + 1) >= 0.0
                 && nb_get(PERF_PHASES.data, old + 2) == nb_get(PERF_PHASES.data, at + 2) {
@@ -178,6 +182,8 @@ fn perf_phase_section_merge(token: int) {
     PERF_PHASES.section_rows[name] = token
 }
 
+// Called immediately before every stone_reset_frame_stats, including the first, so boot
+// uploads cannot disappear at a warmup or frame boundary.
 fn perf_phase_frame_reset() {
     if !PERF_TIMELINE_ENABLED { return }
     PERF_PHASES.upload_base += perf_phase_image_stat(0)
@@ -295,6 +301,7 @@ fn entry_log_new() -> EntryLog {
     }
 }
 
+// Zero-alloc: writes into dst's preallocated buffers.
 fn entry_log_copy(dst: EntryLog, src: EntryLog) {
     let n = src.count
     for i in 0..n {
@@ -335,6 +342,7 @@ pub struct ProfilerData {
     last_heap_growth_bytes: int,
     last_frame_collected: bool,
 
+    // Per-frame markers in wall-clock seconds; -1 = not marked this frame.
     frame_t0: float,
     frame_t_logic_end: float,
     frame_t_pre_swap: float,
@@ -430,6 +438,7 @@ inline(lua) fn gc_step_probe_init() = """
 inline(lua) fn gc_step_probe_read() = "local p = _G.__rock_gc_probe; p.read(p.values, 2)"
 inline(lua) fn gc_step_probe_value(i: int) -> float = "return tonumber(_G.__rock_gc_probe.values[i])"
 
+// Atomic time is a subset of entry/full time and must never be added to their sum.
 fn gc_step_frame_close() {
     if !GC_STEP_ENABLED { return }
     gc_step_probe_read()
@@ -766,6 +775,7 @@ fn sim_alloc_census_json(stop_sim_reached: bool, rendering_enabled: bool) -> str
     return "{{\"op\":\"allocation_census\",\"build_sha\":\"{__perf_build_sha()}\",\"rendering_enabled\":{rendering_enabled},\"warmup_frames_requested\":{SIM_ALLOC_CENSUS.warmup_frames_requested},\"warmup_frames\":{warmup_frames},\"frame_count\":{SIM_ALLOC_CENSUS.frame_count},\"measured_frames\":{SIM_ALLOC_CENSUS.measured_frames},\"initialization_gross_kb\":{SIM_ALLOC_CENSUS.initialization_kb},\"outside_frame_gross_kb\":{SIM_ALLOC_CENSUS.outside_frame_kb},\"warmup_gross_kb\":{SIM_ALLOC_CENSUS.warmup_kb},\"measured_gross_kb\":{SIM_ALLOC_CENSUS.measured_kb},\"total_gross_kb\":{SIM_ALLOC_CENSUS.initialization_kb + SIM_ALLOC_CENSUS.outside_frame_kb + SIM_ALLOC_CENSUS.warmup_kb + SIM_ALLOC_CENSUS.measured_kb},\"measured_allocator_calls\":{SIM_ALLOC_CENSUS.measured_calls},\"measured_allocation_calls\":{SIM_ALLOC_CENSUS.measured_allocation_calls},\"measured_reallocation_calls\":{SIM_ALLOC_CENSUS.measured_reallocation_calls},\"stop_sim_reached\":{stop_sim_reached},\"measurement_complete\":true}}"
 }
 
+// The GC-window sample is gross Lua allocator request volume, not heap growth or net live memory.
 pub inline(lua) fn __gc_collect_stop() = "collectgarbage('collect'); collectgarbage('stop')"
 pub inline(lua) fn __gc_restart() = "collectgarbage('restart')"
 pub global GC_WIN_N: int = -1            // -1 = env not yet read; 0 = disabled
@@ -794,6 +804,7 @@ global GC_WIN_NEGATIVE_SECTION_ID_RESULT: int = -1
 pub global GC_WIN_NEGATIVE_DELTA_KB_RESULT: float = -1.0
 global GC_WIN_CURRENT_FRAME_MAX_KB: float = 0.0
 global GC_WIN_CURRENT_FRAME_MAX_SECTION_ID: int = -1
+// Sized before the window opens, so every frame is kept and the hot path never allocates.
 global GC_WIN_FRAME_CAPACITY: int = 0
 global GC_WIN_FRAME_TOTAL_KB: NativeBuffer<float> = native_buffer_float(0)
 pub global GC_WIN_FRAME_SAMPLES: int = 0
@@ -850,6 +861,7 @@ global GC_WIN_UNKNOWN_NAME_COUNT: int = 0
 global GC_WIN_UNKNOWN_UNRETAINED: int = 0
 global GC_WIN_RUNNING_AT_NEGATIVE: bool = false
 
+// -1 = env unread; 0 = sections on; 1 = sections off.
 pub global PROFILER_SECTIONS_OFF: int = -1
 
 
@@ -858,8 +870,11 @@ fn profiler_capture_enabled() -> bool {
     return ENGINE.profiler_enabled
 }
 
+// Map.get on an existing key allocates nothing, so name -> id is allocation-free at steady state.
 pub global SECTION_IDS: Map<string, int> = map_new()
 pub global SECTION_NAMES: [string] = vec_new()
+// Admitted rows are the prefix [0, SECTION_COUNT); rows past it are spare capacity reserved by
+// the GC window.
 pub global SECTION_COUNT: int = 0
 global PROFILE_DECLARED_SECTIONS: [string] = vec_new()
 global SECTION_METRICS: Arena<Metric> = arena_new()
@@ -883,11 +898,15 @@ struct SectionWindow {
 }
 global SECTION_WINDOWS: [SectionWindow] = vec_new()
 global SECTION_HISTORY_DROPPED: int = 0
+// Runner frame of history sample 0.
 global SECTION_HISTORY_FIRST_FRAME: int = -1
 
+// Ordinary admission allocates, so the window reserves spare rows before its first measured
+// frame and a late section only writes into one.
 const MAX_GC_WINDOW_LATE_SECTIONS: int = 32
 const SECTION_ROW_PLACEHOLDER: string = "(spare section row)"
 global SECTION_LATE: NativeBuffer<int> = native_buffer_int(MAX_PROFILE_ENTRIES)
+// First row admitted while frozen, -1 outside a window; late rows run up to SECTION_COUNT.
 global SECTION_FROZEN_FIRST: int = -1
 pub global GC_WIN_LATE_SECTIONS: int = 0
 pub global GC_WIN_LATE_POOL_CAPACITY: int = 0
@@ -987,6 +1006,8 @@ fn section_observation_reset() {
 global SECTION_LAST_SECONDS: NativeBuffer<float> = native_buffer_float(MAX_PROFILE_ENTRIES)
 global SECTION_LAST_OBSERVATION_MS: NativeBuffer<float> = native_buffer_float(MAX_PROFILE_ENTRIES)
 
+// Once CUR overflows, every later begin in the frame is dropped, so open dropped scopes always
+// nest inside the recorded ones.
 pub global PROF_CUR: EntryLog = entry_log_new()
 pub global PROF_LAST: EntryLog = entry_log_new()
 global PROF_WORST: EntryLog = entry_log_new()
@@ -995,6 +1016,7 @@ pub global PROF_OPEN_TOP: int = 0
 global PROF_DROPPED_STACK: NativeBuffer<int> = native_buffer_int(MAX_PROFILE_ENTRIES)
 global PROF_DROPPED_TOP: int = 0
 
+// Self allocation = inclusive minus immediate children; totals are divided by GC_WIN_N at report.
 pub global GC_WIN_SECTION_INCLUSIVE_KB: NativeBuffer<float> = native_buffer_float(MAX_PROFILE_ENTRIES)
 pub global GC_WIN_SECTION_EXCLUSIVE_KB: NativeBuffer<float> = native_buffer_float(MAX_PROFILE_ENTRIES)
 pub global GC_WIN_SECTION_CALLS: NativeBuffer<int> = native_buffer_int(MAX_PROFILE_ENTRIES)
@@ -1010,6 +1032,7 @@ fn profiler_sections_off() -> bool {
 }
 
 pub fn gc_window_trace_begin() {
+    // Open the site era at the same boundary as the counters below, so no abort is lost.
     __stone_jit_abort_sites_open()
     GC_WIN_TRACE_AVAILABLE = jit_trace_counts_available()
     GC_WIN_TRACE_STARTS_BEGIN = jit_trace_count_of("starts")
@@ -1019,6 +1042,8 @@ pub fn gc_window_trace_begin() {
 
 pub fn gc_window_trace_end() {
     if !GC_WIN_TRACE_AVAILABLE { return }
+    // The recorder's own count, taken with the site snapshot: a delta of the process counter
+    // would include aborts landing between two statements.
     let (site_aborts, window_aborts) = __stone_jit_abort_sites_freeze()
     if site_aborts != window_aborts {
         log_warn("PERF", "JIT abort sites sum to {site_aborts} aborts but the recorder counted {window_aborts} in the window")
@@ -1111,6 +1136,7 @@ pub fn gc_window_clear_accounting() {
     GC_WIN_LATE_POOL_EXHAUSTED = 0
     GC_WIN_UNKNOWN_NAME_COUNT = 0
     GC_WIN_UNKNOWN_UNRETAINED = 0
+    // Reserve slots before the allocator window; discovery only replaces existing slots.
     while GC_WIN_UNKNOWN_NAMES.len() < MAX_GC_WINDOW_UNKNOWN_NAMES {
         GC_WIN_UNKNOWN_NAMES.push("")
         GC_WIN_UNKNOWN_PATHS.push("")
@@ -1247,6 +1273,7 @@ pub fn gc_window_record_frame_sample() {
     let index = GC_WIN_FRAME - GC_WIN_START
     let total_kb = GC_WIN_ACCOUNT_CURSOR_KB - GC_WIN_FRAME_START_KB
     if total_kb < 0.0 { GC_WIN_MONOTONIC_FAILURE = true }
+    // Only broken window geometry reaches this; late frames must never be dropped silently.
     if index < 0 || index >= GC_WIN_FRAME_CAPACITY {
         GC_WIN_MONOTONIC_FAILURE = true
         GC_WIN_FRAME_START_KB = GC_WIN_ACCOUNT_CURSOR_KB
@@ -1411,6 +1438,8 @@ fn section_rows_push() {
     SECTION_WINDOWS.push(section_window_new(SECTION_ROW_PLACEHOLDER))
 }
 
+// Writes only, creating no row, buffer, Map entry or name storage: this is what lets a frozen
+// registry admit.
 fn section_row_name(id: int, name: string) {
     SECTION_NAMES[id] = name
     if PERF_SECTION_HISTORY && PERF_FRAME_CAPTURE {
@@ -1438,6 +1467,8 @@ fn section_pool_reserve() {
     if missing > 0 { for _ in 0..missing { section_rows_push() } }
 }
 
+// Call before the window's first measured frame: spare rows must exist before the allocator
+// counter starts.
 pub fn gc_window_freeze_section_registry() {
     GC_WIN_SECTION_REGISTRY_FROZEN = true
     gc_window_clear_accounting()
@@ -1479,6 +1510,7 @@ pub fn section_is_late(id: int) -> bool {
     return id >= 0 && id < MAX_PROFILE_ENTRIES && nb_get(SECTION_LATE, id) != 0
 }
 
+// A declaration after the freeze is dropped: remembering it would allocate while measuring.
 pub fn profile_declare_section(name: string) {
     if GC_WIN_SECTION_REGISTRY_FROZEN { return }
     if section_id(name, "profile_declare_section") < 0 { return }
@@ -1486,6 +1518,7 @@ pub fn profile_declare_section(name: string) {
     PROFILE_DECLARED_SECTIONS.push(name)
 }
 
+// A frozen registry admits only from the spare pool and never allocates.
 pub fn section_id(name: string, registration_path: string = "section_id") -> int {
     let id = section_lookup(name)
     if id >= 0 { return id }
@@ -1535,6 +1568,7 @@ fn gc_window_unknown_section(name: string, registration_path: string) {
 }
 
 pub fn gc_window_unknown_sections_json() -> string {
+    // Even an explicit report request must not allocate inside collection.
     if GC_WIN_SECTION_REGISTRY_FROZEN && gc_window_collecting() { return "null" }
     let rows: [string] = []
     for i in 0..GC_WIN_UNKNOWN_NAME_COUNT {
@@ -1780,6 +1814,7 @@ pub fn profile_begin(name: string) {
             nb_set(PROF_DROPPED_STACK, PROF_DROPPED_TOP, id)
         }
         PROF_DROPPED_TOP += 1
+        // Keep depth balanced for the matching profile_end even though this event is not logged.
         PROFILER.current_depth += 1
         return ()
     }
@@ -1882,6 +1917,7 @@ pub fn profile_end(name: string) {
     PROF_OPEN_TOP = PROF_OPEN_TOP - 1
 }
 
+// Dropped scopes are innermost, so an end searches them before the recorded open stack.
 fn profile_end_dropped(id: int) -> bool {
     if PROF_DROPPED_TOP > MAX_PROFILE_ENTRIES {
         PROF_DROPPED_TOP = PROF_DROPPED_TOP - 1
@@ -2034,6 +2070,7 @@ fn gpu_timer_poll_ms() -> float {
     return stone_gpu_timer_poll_ms()
 }
 
+// The flag is read once so a disabled scope costs a branch, not an FFI call.
 fn gpu_scope_begin(name: string) {
     static on = stone_gpu_scopes_requested()
     if on { stone_gpu_scope_begin(name) }
@@ -2044,6 +2081,7 @@ fn gpu_scope_end() {
     if on { stone_gpu_scope_end() }
 }
 
+// The `pass:` prefix is joined natively so an enabled scope allocates no Lua string per pass.
 fn gpu_pass_scope_begin(shader_name: string) {
     static on = stone_gpu_scopes_requested()
     if on { stone_gpu_pass_scope_begin(shader_name) }
@@ -2054,6 +2092,7 @@ fn gpu_label_shader(handle: int, name: string) {
     if on { stone_gpu_label_shader(handle, name) }
 }
 
+// Close in reverse order of opening.
 fn profile_gpu_begin(name: string) {
     profile_begin(name)
     gpu_scope_begin(name)
@@ -2064,6 +2103,7 @@ fn profile_gpu_end(name: string) {
     profile_end(name)
 }
 
+// Frame-span markers are always on, not profiler-gated: the HUD FPS reads them every frame.
 fn profile_mark_logic_end() {
     PROFILER.frame_t_logic_end = stone_get_time()
     if PERF_TIMELINE_ENABLED {
@@ -2283,6 +2323,8 @@ fn profile_frame_end() {
         entry_log_copy(PROF_WORST, PROF_CUR)
     }
 
+    // Timing samples are per event; request samples are added once per frame, so their mean
+    // is exclusive KB/frame.
     let section_history = PERF_SECTION_HISTORY && PERF_FRAME_CAPTURE && !PROFILER.warmup_active
     for i in 0..PROF_CUR.count {
         let id = nb_get(PROF_CUR.name_id, i)
@@ -2385,6 +2427,8 @@ pub fn frame_timing_snapshot() -> FrameTimingSnapshot {
     }
 }
 
+// Queued into the ambient UI pool, which the runner makes OVERLAY_RENDER_BATCHES: it flushes
+// after stone_imgui_render(), so no imgui panel can cover it.
 @post_imgui_draw
 fn draw_fps_overlay() {
     if !ENGINE.show_fps { return () }
@@ -2415,6 +2459,8 @@ global FPS_OVERLAY_TEXT: string = ""
 global FPS_OVERLAY_TEXT_AGE: float = 0.0
 pub const FPS_TEXT_ORIGIN: Vec2 = v(10.0, 18.0)
 pub const FPS_BG_PAD: float = 5.0
+// Text and plate stay achromatic so a gate can tell them apart from what they cover by
+// channel spread.
 pub const FPS_TEXT_COLOR: Color = color(0.5, 0.5, 0.5, 1.0)
 pub global FPS_BG_COLOR: Color = color(0.04, 0.04, 0.04, 1.0)
 pub const FPS_BG_Z: int = PROFILER_UI_Z
@@ -2669,6 +2715,7 @@ pub fn prof_rebuild_rows() {
     }
 }
 
+// Must be pushed before render_ui_batches() flushes.
 pub fn draw_profiler_overlay() {
     if !ENGINE.profiler_enabled { return () }
 
@@ -3362,6 +3409,7 @@ fn __perf_json_gc_int(v: int, available: bool) -> string {
     return if available { "{v}" } else { "null" }
 }
 
+// Frame Metrics already store ms (metric_add scales by 1000).
 fn __perf_json_frame_ms(trailing: bool) -> string {
     let logic = __perf_json_metric(perf_frame_metric(FRAME_LOGIC_CPU, PERF_FRAME_LOGIC_CPU, trailing))
     let render = __perf_json_metric(perf_frame_metric(FRAME_RENDER_CPU, PERF_FRAME_RENDER_CPU, trailing))
@@ -3375,6 +3423,7 @@ fn __perf_json_frame_ms(trailing: bool) -> string {
 }
 
 fn __perf_json_section(s: ProfileStats) -> string {
+    // Section timing Metrics store seconds.
     let to_ms = 1000.0
     let mean_ms = s.mean * to_ms
     let avg_ms = if PERF_FRAME_CAPTURE { PERF_FRAME_RENDERED.mean } else { FRAME_RENDERED.mean }

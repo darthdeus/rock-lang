@@ -109,6 +109,7 @@ pub fn skin_button_state(id: int, r: UiRect, scope: string, feel: string, skin: 
     return ui_button_read_state(id)
 }
 
+// Call after the draw so the visual and the event agree on one frame.
 fn ui_button_edge(id: int) -> UiButtonEdge {
     if ui_clicked(id) { return UiButtonEdge::Mouse }
     if ui_focus_confirmed(id) { return UiButtonEdge::Focus }
@@ -142,6 +143,7 @@ pub fn ui_button_id(scope: string, label: string, key: string) -> int {
     return ui_id(scope, if key != "" { key } else { label })
 }
 
+// Disabled still registers, so it occludes items beneath it and swallows presses, but never fires.
 pub fn skin_button(r: UiRect, label: string, skin: Entity<UiSkin>, scope: string, key: string = "", font_size: float = 18.0, disabled: bool = false,
     selected: bool = false, selected_tint: Color = WHITE) -> bool {
     let resolved = skin.get().unwrap()
@@ -198,6 +200,7 @@ pub fn ui_slider_drag_active() -> bool {
     return ui_active(drag.id)
 }
 
+// Called by the mouse router before the host reads the drag signal.
 fn ui_slider_drag_begin_frame() {
     let drag = UI_SLIDER_DRAG ?? return
     let registered = false
@@ -211,6 +214,8 @@ fn ui_slider_drag_begin_frame() {
 
 pub fn ui_slider_drag_highlight() -> Color { return color(0.95, 0.72, 0.25, 1.0) }
 
+// While active, maps the pointer across the content channel captured in screen px on the press
+// edge: a live design-space mapping oscillates when the slider drives UI_SCALE.
 pub fn focus_slider(r: UiRect, key: string, val: float, min_v: float, max_v: float, skin: Entity<UiSkin>, fill: Color, scope: string, step: float = 0.0) -> float {
     let resolved = skin.get().unwrap()
     let id = ui_id(scope, key)
@@ -248,6 +253,7 @@ pub fn focus_slider(r: UiRect, key: string, val: float, min_v: float, max_v: flo
 
     let notch = if step > 0.0 { step } else { (max_v - min_v) / 20.0 }
     if !ui_active(id) && notch > 0.0 && floor((v - min_v) / notch + 0.5) != floor((v0 - min_v) / notch + 0.5) {
+        // Vec2 literal below: the local `v` shadows the constructor here.
         let tt = (v - min_v) / (max_v - min_v)
         ui_event(UiEvent::SliderTick, Vec2 { x: ch.x + ch.w * tt, y: ch.y + ch.h * 0.5 }, r, resolved.feel, skin)
     }
@@ -262,6 +268,7 @@ pub fn focus_slider(r: UiRect, key: string, val: float, min_v: float, max_v: flo
     return v
 }
 
+// Labels must be unique per row: they mint the per-tab mouse ids.
 pub fn focus_tab_row(r: UiRect, key: string, labels: [string], selected: int, skin: Entity<UiSkin>, scope: string, font_size: float = 18.0,
     selected_tint: Color = WHITE) -> int {
     let n = labels.len
@@ -552,6 +559,7 @@ pub fn focus_text_input(r: UiRect, id: int, value: string, skin: Entity<UiSkin>,
     return UiTextInputResult { value: display, submit: submit, cancel: cancel }
 }
 
+// Order-0 fill under the order-1 frame sprite in the same z bucket layers the frame over it.
 pub fn skin_progress(r: UiRect, ratio: float, skin: UiSkin, fill: Color) -> UiRect {
     let channel = r.content(skin)
     let w = channel.w * clamp(ratio, 0.0, 1.0)

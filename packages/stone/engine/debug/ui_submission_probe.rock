@@ -1,5 +1,7 @@
+// Disabled hooks allocate no payloads.
 pub global UI_SUBMISSION_PROBE_ON: bool = false
 pub global UI_SUBMISSION_PROBE_WINDOWLESS: bool = false
+// Only an explicit begin roots the payload builders in the emitted program.
 global UI_SUBMISSION_PROBE_BATCH_HOOK: (fn(string, RenderBatch, string, Vec2?))? = null
 global UI_SUBMISSION_PROBE_TEXT_HOOK: (fn(TextLayoutEmissionProbe, string))? = null
 global UI_SUBMISSION_PROBE_PASS_HOOK: (fn(GpuPass))? = null

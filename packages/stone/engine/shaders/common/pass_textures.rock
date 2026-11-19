@@ -6,6 +6,7 @@
 // A group forks the moment an entry needs a different sampler SET; sharing here
 // is only for entries whose set is literally identical.
 
+// `stone_draw_mesh` binds unit 0, so this must stay the group's only field.
 pub struct MainTex {
     uTexture: Sampler2D,
 }

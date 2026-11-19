@@ -105,6 +105,7 @@ fn encode_array(items: [JsonValue], parts: [string]) {
 }
 
 fn encode_object(m: Map<string, JsonValue>, parts: [string]) {
+    // Sorted keys keep the output deterministic.
     let keys = keys(m)
     sort(keys, k => k)
     parts.push("{{")
@@ -290,6 +291,7 @@ fn format_float(f: float) -> string {
     let i = f as int
     if (i as float) == f {
         let text = "{i}"
+        // Large integers can lose digits through the backend's tostring.
         if (f > -1e14 && f < 1e14) || text.parse_float().unwrap() == f {
             return text
         }
@@ -327,6 +329,8 @@ fn json_decode(s: string) -> JsonValue? {
     return v
 }
 
+// Inlined at typed readers so the whitespace loop's function entry is not
+// blacklisted; the graph parser keeps its call boundary.
 @inline fn parse_skip_ws_inline_at(src: string, at: int) -> int {
     let pos = at
     let len = src.len()
@@ -406,6 +410,8 @@ fn parse_string_raw_at(src: string, at: int, materialize: bool = true) -> (strin
     }
     pos = pos + 1
 
+    // `parts` stays null until the literal carries an escape, so escape-free
+    // strings return one substring without allocating the array or the join.
     let body_start = pos
     let segment_start = pos
     let parts: [string]? = null
@@ -512,6 +518,8 @@ fn parse_hex4_at(s: string, at: int) -> int? {
 @inline fn parse_number_scan_at(src: string, at: int) -> (int, bool, bool) {
     let pos = at
     let len = src.len()
+    // The grammar `[-] int [frac] [exp]` is enforced here, not by parse_float:
+    // Lua's tonumber accepts `2.e3`, `.5` and `01`.
     let is_float = false
     if pos < len && src.unit_at(pos) == 45 {
         pos = pos + 1
@@ -789,6 +797,8 @@ fn json_reader_validate(src: string, at: int, validation: JsonReaderValidation) 
     let depth = 0
     let starts: [int] = []
     let path = validation.path
+    // 0: value or empty array, 1: separator, 2: key or empty object,
+    // 3: key after comma, 4: value after comma.
     let state = 0
     let kind = 0
     while true {
@@ -1157,6 +1167,8 @@ fn JsonReaderArray.get_at(array, index: int) -> JsonReader {
     index: int = 0,
 }
 
+// Members stream in document order, duplicates included; consumers overwrite
+// earlier fields to keep JSON's last-member-wins behavior.
 fn json_reader_each_field(reader: JsonReader) -> JsonReaderFieldIter? {
     if let value = reader.value {
         let object = json_as_object(value) ?? return null

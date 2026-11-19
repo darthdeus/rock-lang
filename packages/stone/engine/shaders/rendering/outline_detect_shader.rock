@@ -24,6 +24,8 @@
 // payload outline.rock's build_outline_detect_pass supplies -- the order of the
 // pushes there is the order of the `@size(N)` params here.
 
+// Field order is the slot: target_mask 0, visible_id 1. Integer samplers: the id canvases are
+// r32i, and a float sampler read is undefined.
 struct OutlineDetectTex {
     target_mask: ISampler2D,
     visible_id: ISampler2D,
@@ -49,13 +51,17 @@ fn outline_detect_vert(@attr a: OutlineDetectVert) -> OutlineDetectVary {
 
 value OutlineDetectU {
     linear_world: bool = false,
+    // Scan ceiling in texels, and the slot-0 band width for ids without an entry.
     outline_radius: float,
     debug_classify: float,
     force_visible: float,
+    // camera_offset() in target pixels; subtracting it anchors the flame noise to the world.
     noise_origin: Vec2,
     see_through_id: int = 0,
 }
 
+// Slots 1..255 form a bounded hash table; params packs (band width, flame amount, phase,
+// picking id). Array sizes stay in sync with OUTLINE_MAX_ENTRIES in outline.rock.
 @shader(fragment)
 fn outline_detect_frag(
     vary: OutlineDetectVary,
@@ -153,6 +159,7 @@ fn outline_detect_frag(
     let hot = 1.0 - edge_t
 
     let res = texture_size(tex.target_mask)
+    // Y is added: TexCoord runs top-down while world Y runs up.
     let p = (vary.TexCoord * res - v(u.noise_origin.x, -u.noise_origin.y)) * 0.045
     let t = at(outline_params, slot).z
     let noise = flame_worley2(p, t)

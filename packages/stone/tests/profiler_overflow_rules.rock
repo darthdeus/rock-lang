@@ -1,3 +1,6 @@
+// Overflowed begins are dropped from the event bank. Their ends must unwind
+// only the dropped scopes, never a still-open recorded scope.
+
 fn profiler_overflow_fixture(body: fn()) {
     let enabled = ENGINE.profiler_enabled
     defer {

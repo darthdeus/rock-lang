@@ -4,6 +4,8 @@
 // rows are exactly its aborts (warmup sites do not leak in), an abort joins
 // its trace's start, and the top-N list never loses the total.
 
+// Fresh closures: an abort site is (func object, pc), so each call is a new
+// site even though the source line is shared.
 @nomangle inline(lua) fn jit_abort_sites_probe() -> any = "return function(x) local y = x + 1; return y end"
 
 @nomangle inline(lua) fn jit_abort_sites_probe_other() -> any = "return function(x) local y = x * 2; return y end"

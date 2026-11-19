@@ -106,16 +106,20 @@ fn pyramid_level_canvas(w: int, h: int) -> Canvas {
 
 pub global visible_id_canvas: Canvas = NO_CANVAS
 
+// Bit i enables COLOR_ATTACHMENT i; a clear bit below the highest set one writes
+// GL_NONE there. Attachment order: colour, id, material, normal, surface owner.
 pub const DRAW_BUFFERS_COLOR_ONLY: int = 0b00001
 pub const DRAW_BUFFERS_COLOR_AND_ID: int = 0b00011
 const DRAW_BUFFERS_COLOR_ID_MATERIAL: int = 0b00111
 pub const DRAW_BUFFERS_COLOR_ID_MATERIAL_NORMAL: int = 0b01111
 const DRAW_BUFFERS_FULL_SURFACE: int = 0b11111
+// The gap at bit 1 leaves the picking ID byte-exact under a material overlay.
 const DRAW_BUFFERS_COLOR_AND_MATERIAL: int = 0b00101
 const DRAW_BUFFERS_COLOR_MATERIAL_AND_NORMAL: int = 0b01101
 
 const DRAW_BUFFERS_CLEAR_WITH_OWNER: int = 0b10011
 
+// Material pixels are valid only where the matching visible ID names a receiver.
 pub global world_material_canvas: Canvas? = null
 
 pub fn ensure_world_material_canvas() -> Canvas {
@@ -171,6 +175,7 @@ pub global outline_mask_written: bool = false
 
 pub global outline_target_canvas: Canvas = NO_CANVAS
 pub global UI_RASTER_CANVAS: Canvas? = null
+// Never set; kept because downstream tooling still reads it.
 pub global OUTPUT_HDR_CANVAS: Canvas? = null
 global UI_RASTER_TARGET_SIZE: IVec2 = iv(0, 0)
 
@@ -269,6 +274,8 @@ fn create_render_canvases(rw: int, rh: int) {
     let old_outline_handle = outline_target_canvas.handle.0
     outline_target_canvas = scene_target(outline_target_canvas, rw, rh, "r32i", false)
 
+    // A resized mask keeps stale contents and must be cleared: the mask pass is
+    // skipped on frames that outline nothing.
     if old_outline_handle != 0 && outline_target_canvas.handle.0 == old_outline_handle {
         with_canvas(
             outline_target_canvas,
@@ -278,13 +285,17 @@ fn create_render_canvases(rw: int, rh: int) {
         )
     }
 
+    // COLOR_ATTACHMENT2..4 of screen_canvas: MRT requires them to match its extent.
     world_material_canvas = resize_lazy_scene_target(world_material_canvas, rw, rh)
     world_normal_canvas = resize_lazy_scene_target(world_normal_canvas, rw, rh)
     world_surface_owner_canvas = resize_lazy_scene_target(world_surface_owner_canvas, rw, rh)
 
+    // Re-attach on every build: it re-checks FBO completeness at the new extent.
     mrt_id_attached = stone_canvas_attach_id_target(screen_canvas.handle.0, visible_id_canvas.handle.0)
     if !mrt_id_attached {
         log_once("RENDER", "MRT id-target off (attach failed); color pass renders single-buffer -- world intact, entity-id/pick/outline blank")
+        // The per-frame id clear rides the MRT clear, which is now skipped; clear once
+        // so pick does not read undefined ids.
         with_canvas(
             visible_id_canvas,
             () => {
@@ -299,6 +310,8 @@ fn create_render_canvases(rw: int, rh: int) {
 pub global SCENE_CAPACITY: IVec2 = iv(0, 0)
 pub global SCENE_TARGET_REALLOCS: int = 0
 
+// Latched once at boot: fixtures toggle SIM_SKIP_RENDER in-body, and a live
+// decision would rebuild the target set mid-run.
 const SCENE_TARGET_TOKEN_EXTENT: int = 8
 global SCENE_TARGETS_TOKEN: bool = false
 
@@ -390,10 +403,13 @@ fn set_scene_active_rects(scene: IVec2) {
     set_pyramid_active(BLOOM_LEVELS, pyramid_active_step(scene))
 }
 
+// Call from update code, not while a world canvas is bound.
 pub fn ensure_scene_capacity(cap: IVec2) {
     if cap.x < 1 || cap.y < 1 { return }
     if SCENE_CAPACITY.x == cap.x && SCENE_CAPACITY.y == cap.y { return }
     let old = SCENE_CAPACITY
+    // A reallocation invalidates queued passes and the presented sample. Not on
+    // the first allocation: the pass queues are not initialized yet.
     if old.x > 0 && old.y > 0 {
         drop_queued_passes_on_target_rebuild()
         PRESENTED_SCENE_SAMPLE = null
@@ -416,6 +432,8 @@ fn handle_window_resized() {
     ensure_scene_capacity(view.scene_capacity)
 }
 
+// The id is read back as a float, exact below 2^24. Returns 0 rather than
+// failing when no id canvas is written (SIM_DRAW=commands).
 pub fn get_entity_id_at_pixel(screen_x: int, screen_y: int) -> int {
     sim_draw_on_demand()
     if screen_x < 0 || screen_y < 0 { return 0 }
@@ -463,6 +481,8 @@ pub fn get_nearest_entity_id_at_mouse(side: int) -> int {
     return get_nearest_entity_id_at_pixel(p.x, p.y, side)
 }
 
+// The pick submit is deferred to the next frame start: a mid-frame ReadPixels of
+// a canvas written this frame forces a TBDR pipeline drain.
 global PICK_DEFER_SLOT: PixelReadback? = null
 global PICK_DEFER_POS: IVec2 = iv(0, 0)
 global PICK_DEFER_SIDE: int = 0
@@ -690,6 +710,7 @@ pub fn emit_ellipse(
         register_outline_entry(mask_entity_id, outline)
     }
 
+    // A custom vertex shader reads the expanded triangle payload.
     let compact = pipeline == null || pipeline.shader_name == sprite_batch_shader
     add_ellipse_vertices_of(batch, p, radii, color, mode, entity_id,
         thickness: thickness, z_off: z_off, segments: segments, compact_native: compact)
@@ -869,6 +890,7 @@ fn _draw_line_dur(
     pipeline: Pipeline?,
     outline: Outline?
 ) {
+    // The shader name may be Frame text; the retained closure outlives it.
     let owned_pipeline = if let p = pipeline { pipeline_owned_in(p, duration_items.storage) } else { null }
     run_with_duration(duration, () => emit_line(a, b, color, width, entity_id, layer, depth, unlit: unlit,
         blend: blend, order: order, z_off: z_off, pipeline: owned_pipeline, outline: outline))
@@ -900,6 +922,7 @@ pub fn draw_polygon(
     }
 }
 
+// `size` is the em height in world units.
 pub fn draw_text(
     text: string,
     pos: Vec2,
@@ -1240,8 +1263,12 @@ pub fn immediate_shape_batch() -> RenderBatch {
     return b
 }
 
+// Returns 1 when it inherited the bound program (end is a no-op), 2 when it bound
+// sprite_basic under a cleared camera, and 0 when sprite_basic has no live
+// handle: the caller skips its draw and still calls end.
 fn begin_immediate_shader() -> int {
     if stone_current_shader_bound() {
+        // An inherited program keeps the previous draw's normal slot; an immediate shape has no normal sheet.
         if let current = WATCHER.current_shader_name {
             bind_sprite_normal_texture(current, null)
             bind_sprite_surface_texture(current, null)

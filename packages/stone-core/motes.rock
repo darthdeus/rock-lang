@@ -41,6 +41,8 @@ pub struct Mote {
     seed: float = 0.0,
     tint: Color = WHITE,
     size: float = 0.07,
+    // A ring of the last MOTE_TRAIL_N positions; `trail_head` is the next slot
+    // to overwrite once it is full.
     trail: [MoteWorldPoint] = [],
     trail_head: int = 0,
     floor_z: float? = null,
@@ -48,6 +50,7 @@ pub struct Mote {
     floor_friction: float = 1.0,
     drag: float = 1.0,
     curl: float = 1.0,
+    // Zero uses the shared mood's cap.
     max_speed: float = 0.0,
 }
 
@@ -96,6 +99,7 @@ pub fn default_mote_mood() -> MoteMood {
 
 @pure fn mote_hash3(x: float, y: float, z: float) -> float {
     let phase = (x * 127.1 + y * 311.7 + z * 74.7) * 0.15915494309189535
+    // Reduce to [-0.5, 0.5) before the polynomial.
     let u = phase - floor(phase + 0.5)
     let y = 16.0 * u * (0.5 - abs(u))
     let h = y * (0.775 + 0.225 * abs(y)) * 43758.5453
@@ -230,6 +234,8 @@ fn mote_effector_force(ef: MoteEffector, m: Mote) -> Vec3 {
     return v(0.0, 0.0, 0.0)
 }
 
+// Every mote arena shares this integrator: authoritative and decorative motes
+// must move identically or the digest pins the wrong dynamics.
 pub fn mote_integrate_arena_in(arena: Arena<Mote>, effectors: [MoteEffector],
                            mood: MoteMood, tick_dt: float) {
     for (e, m) in arena {
@@ -265,6 +271,8 @@ pub fn mote_integrate_arena_in(arena: Arena<Mote>, effectors: [MoteEffector],
         }
         m.pos = m.pos + m.vel * tick_dt
 
+        // Floor contact resolves after integration, so a step ending below the
+        // plane lands on it instead of tunnelling for a frame.
         if m.floor_z != null {
             let fz = m.floor_z
             if m.pos.z < fz {

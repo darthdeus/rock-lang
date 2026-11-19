@@ -16,6 +16,7 @@ pub struct Trail {
     max_vertices: int = 64,
     color_start: Color = WHITE,
     color_end: Color = Color { r: 1, g: 1, b: 1, a: 0 },
+    // Texture units per second of game time, along the scroll axis.
     scroll_speed: float = 1.0,
     axis: TrailAxis = TrailAxis::AlongU,
     blend: BlendMode = BlendMode::Additive,
@@ -24,6 +25,8 @@ pub struct Trail {
     enabled: bool = true,
 }
 
+// Sets REPEAT: the scroll coordinate leaves [0,1]. Trail textures must be
+// standalone images; atlas regions cannot repeat.
 pub fn trail_new(
     texture: Image,
     width: float = 1.0,
@@ -185,6 +188,8 @@ fn trail_batch_add_segment(
     batch.count += RECT_BATCH_VERTS_PER_RECT
 }
 
+// `pct` is anchored to world distance from the head, not point-count fraction,
+// so a young trail does not compress the whole gradient.
 pub fn trail_draw(t: Trail, texture: Image, phase: float, dl: DrawList = world, offset: Vec2 = zero(),
                   pipeline: Pipeline? = null) {
     if !t.has_head { return }

@@ -27,6 +27,7 @@ pub struct ShaderUniformBlock {
     size: int,
     fingerprint: int,
     members: [string],
+    // A member with capacity 0 is a scalar; array_block_push rejects writing into it.
     offsets: [int],
     kinds: [int],
     capacities: [int],
@@ -434,6 +435,7 @@ pub fn __array_push(shader_name: string, b: ShaderUniformBlock, cursor: int,
         return -1
     }
     let comps = wire_kind_components(want_kind)
+    // Offsets and strides are bytes; the views are 4-byte typed.
     let base = b.offsets[i] ./ 4
     let step = b.strides[i] ./ 4
     let e = 0
@@ -582,6 +584,7 @@ fn upload_owned_block(shader_name: string, b: OwnedUniformBlock) {
     }
 }
 
+// A macro so `u` is evaluated only after block allocation succeeds.
 macro pass_block(shader_name: expr, u: expr) {
     let pb = new_owned_block(shader_name, uniform_block_id(u), __SITE__)
     if pb != null {
@@ -656,6 +659,8 @@ pub fn owned_block_for(held: OwnedUniformBlock?, shader_name: string, fingerprin
     return new_owned_block(shader_name, fingerprint, site)
 }
 
+// `block_frame` keeps an occurrence slot reused by a different draw from
+// uploading last frame's pack.
 macro batch_block(b: expr, shader_name: expr, u: expr) {
     let bb = owned_block_for(b.block, shader_name, uniform_block_id(u), __SITE__)
     if bb != null {
@@ -710,6 +715,8 @@ pub fn set_uniform_block<T>(shader_name: string, u: T) {
     }
 }
 
+// `u` is evaluated once, inside the branch: uniform_block_id reads only its
+// type. Keeps the value off the hot path when the block is absent.
 macro set_uniform_block_if_present(shader_name: expr, u: expr) {
     if let entry = shader_block_by_fingerprint(shader_name, uniform_block_id(u)) {
         __upload_resolved_block(shader_name, entry, u, __SITE__)

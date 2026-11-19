@@ -64,6 +64,8 @@ fn bloom_sample(src: Sampler2D, uv: Vec2, lo: Vec2, hi: Vec2) -> Vec4 {
     return top + (bottom - top) * fraction.y
 }
 
+// Soft knee: ramps quadratically across [threshold - knee, threshold + knee]; knee <= 0 is a
+// hard cut.
 fn bloom_knee_extract(pixel: Vec4, threshold: float, knee: float) -> Vec4 {
     let brightness = max(max(pixel.r, pixel.g), pixel.b)
 
@@ -107,11 +109,15 @@ fn bloom_prefilter_frag(@textures t: SrcTex, @uniform u: BloomPrefilterU, tc: Ve
         u.threshold, u.knee) * u.gain
 }
 
+// Only the first pass carries a `gain` other than 1: later levels are weight-1 averages of the
+// one before, so scaling level 0 scales the stack.
 @shader(fragment)
 fn bloom_down_frag(@textures t: SrcTex, @uniform u: BloomDownU, tc: Vec2) -> Vec4 {
     return bloom_down_13(t.src_tex, tc, u.src_texel, u.src_uv_lo, u.src_uv_hi) * u.gain
 }
 
+// Output is added into the level above by BlendMode::Accumulate, so the returned alpha is
+// irrelevant. Level k lands at scatter^k.
 @shader(fragment)
 fn bloom_up_frag(@textures tex: SrcTex, @uniform u: BloomUpU, tc: Vec2) -> Vec4 {
     let t = u.src_texel

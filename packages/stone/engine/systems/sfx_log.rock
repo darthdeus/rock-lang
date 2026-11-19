@@ -1,5 +1,6 @@
 pub value SfxEvent {
     seq: int,
+    // Engine `time` (scaled game time).
     at: float,
     sound: Sound,
     path: string,
@@ -30,16 +31,20 @@ pub global SFX_LOG_HEAD: int = 0
 pub global SFX_LOG_SEQ: int = 0
 
 global SFX_LOG_SUPPRESS: bool = false
+// A host-minted handle for a tool press: never hash it into the desync hash.
 global SFX_REPLAY_VOICE: Voice = Voice(0)
 
 global SFX_LOG_PAUSED: bool = false
 global SFX_LOG_HELD_AT: float = 0.0
+// A hold freezes what is displayed, never what is recorded.
 pub global SFX_LOG_HELD_SEQ: int = 0
 
 pub fn sfx_log_holding() -> bool {
     return SFX_LOG_PAUSED
 }
 
+// Stamps the freeze clock on the rising edge only: the browser re-asserts the
+// hold every hovered frame.
 pub fn sfx_log_set_hold(held: bool) {
     let was = SFX_LOG_PAUSED
     SFX_LOG_PAUSED = held
@@ -148,6 +153,7 @@ pub fn sfx_log_by_seq(seq: int) -> SfxEvent? {
     return null
 }
 
+// Still goes through play_sound, so the mute gate stays the single gate.
 fn sfx_play_unlogged(sound: Sound, bus: int, volume: float, speed: float,
                      decay: float, looped: bool, spatial: bool, pan: float,
                      site: string) -> Voice {

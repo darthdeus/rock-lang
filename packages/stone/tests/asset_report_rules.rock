@@ -384,6 +384,7 @@ fn live_texture_bytes_include_mip_chain_and_canvas_storage() {
         assert(stone_image_storage_size(image) == (7, 5), "accounting uses full-size storage")
         let canvas = new_canvas(13, 7, "rgba8")
         defer { destroy_canvas(canvas) }
+        // RG8 levels are 7x5, 3x2 and 1x1; the canvas has RGBA8 texels.
         assert_eq(stone_get_image_byte_len(image), 84)
         assert_eq(stone_get_live_image_bytes() - images, 70)
         assert_eq(stone_get_live_mip_bytes() - mips, 14)

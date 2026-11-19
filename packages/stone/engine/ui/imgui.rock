@@ -97,6 +97,7 @@ pub fn imgui_default_scale() -> float {
 
 pub global IMGUI_SCALE: float = 1.0
 global _imgui_scale_applied: float = 0.0
+// Guards every style access so a failed imgui init cannot crash the scale path.
 pub global IMGUI_READY: bool = false
 
 // Applied once per process (survives hot reload) so the default dock layout
@@ -106,6 +107,8 @@ global IMGUI_DOCKSPACE_ID: int = -1
 
 global IMGUI_FRAME_OPEN: bool = false
 
+// Rescales from a baseline style captured on first call, so repeated calls do not accumulate
+// ScaleAllSizes' floor() truncation.
 pub inline(lua) fn imgui_apply_scale(s: float) = """
     local style = imgui.GetStyle()
     if _G.__imgui_base_style == nil then
@@ -669,6 +672,7 @@ pub @scalar_abi inline(lua) fn imgui_window_add_image_quad(
     imgui.Image(cache.tex, cache.s, cache.u1, cache.u2, cache.tint, cache.bg)
 """
 
+// Canvas textures are Y-flipped relative to imgui's UV convention, hence the (0,1)-(1,0) default.
 pub fn imgui_canvas_image(
     canvas: Canvas,
     size: Vec2,
@@ -681,6 +685,7 @@ pub fn imgui_canvas_image(
     imgui_canvas_image_raw(texture, size, uv1, uv2, color, border_color)
 }
 
+// imgui.ImageButton takes the background before the tint; only pixels catch a swap.
 pub @scalar_abi inline(lua) fn imgui_image_button_raw(
     id: string,
     texture: int,
@@ -715,6 +720,7 @@ pub fn imgui_begin_window(title: string, flags: int) -> bool {
     return open
 }
 
+// Returns false when collapsed; call imgui_end() regardless, since Begin/End must pair.
 fn imgui_begin_debug_window(title: string) -> bool {
     return imgui_begin_window(title, 4096 + 196608)
 }
@@ -799,6 +805,8 @@ pub inline(lua) fn imgui_wants_mouse() -> bool = """
     return imgui.C.igGetIO_Nil().WantCaptureMouse
 """
 
+// io.WantTextInput, not WantCaptureKeyboard, which is also true whenever a window merely holds
+// nav focus.
 pub inline(lua) fn imgui_wants_text_input() -> bool = """
     return imgui.C.igGetIO_Nil().WantTextInput
 """
@@ -810,6 +818,7 @@ inline(lua) fn imgui_enable_docking() = """
     io.ConfigFlags = bit.bor(io.ConfigFlags, 128)
 """
 
+// Submit each frame after NewFrame and before any window Begin.
 inline(lua) fn imgui_dockspace_over_viewport() -> int = """
     return imgui.DockSpaceOverViewport(0, imgui.GetMainViewport(), 8, nil)
 """
@@ -1137,10 +1146,12 @@ inline(lua) fn imgui_is_window_hovered() -> bool = """
     return imgui.IsWindowHovered(128)
 """
 
+// Global, not per-window, and true for keyboard activation too.
 pub inline(lua) fn imgui_is_any_item_active() -> bool = """
     return imgui.IsAnyItemActive()
 """
 
+// Must be called between begin/end.
 inline(lua) fn imgui_is_window_focused() -> bool = """
     return imgui.IsWindowFocused(0)
 """
@@ -1152,6 +1163,7 @@ pub @scalar_abi inline(lua) fn imgui_get_window_dock_placement() -> (int, int) =
     return tonumber(w.DockId), tonumber(w.DockOrder)
 """
 
+// The new tab may not exist until the dock node has submitted another frame.
 pub inline(lua) fn imgui_restore_window_tab_order(order: int) -> bool = """
     local w = imgui.GetCurrentWindow()
     if w.DockNode == nil or w.DockNode.TabBar == nil then return false end
@@ -1270,6 +1282,8 @@ pub fn imgui_total_vtx_count() -> int {
 // read; the sims here ask "did this body ever run", which is the question.
 global IMGUI_BODIES_RAN: Map<string, int> = map_new()
 
+// Off unless a sim asks: data-built ids would grow the map without bound. Latched once so the
+// hot path is a boolean test.
 global IMGUI_RECORD_BODIES: bool = false
 
 @init
@@ -1339,6 +1353,7 @@ pub fn imgui_test_note_item(id: string) {
 
 pub fn imgui_test_item_submitted(id: string) -> bool {
     let item = IMGUI_TEST_ITEMS.get(id) ?? return false
+    // Sims resume before draw, so the latest submitted item is one frame_seq old.
     let age = frame_seq - item.frame
     return age >= 0 && age <= 1
         && item.max.x > item.min.x && item.max.y > item.min.y

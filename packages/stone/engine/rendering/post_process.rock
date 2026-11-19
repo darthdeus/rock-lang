@@ -1,3 +1,4 @@
+// Hoisted so no Pipeline is allocated per frame.
 global BLUR_PIPELINE: Pipeline = pipeline(bloom_blur_shader)
 pub global POST_BLOOM_RUNS: int = 0
 pub global BLOOM_PREFILTER_PIPELINE: Pipeline = pipeline(bloom_prefilter_shader)
@@ -10,6 +11,8 @@ global UI_EFFECT_COMPOSITE_PIPELINE: Pipeline = pipeline(ui_effect_composite_sha
 pub global TEXT_ART_RESOLVE_PIPELINE: Pipeline = pipeline(text_art_resolve_shader)
 pub const COLOR_GRADE_PIPELINE: Pipeline = pipeline(color_grade_shader)
 
+// `blur_amount` scales the tap spacing, not a radius: above ~1 the taps comb.
+// Keep it near 1 and use blur_pyramid_passes for a wide blur.
 pub fn blur_canvas(
     input_canvas: Canvas,
     temp_canvas_1: Canvas,
@@ -121,6 +124,7 @@ fn present_letterbox_begin() {
     set_canvas_handle(0)
     stone_clear_canvas(0.0, 0.0, 0.0, 1.0)
     stone_set_present_viewport(true, vp.x, vp.y, vp.w, vp.h)
+    // Re-bind to apply the present viewport.
     set_canvas_handle(0)
 }
 
@@ -131,9 +135,13 @@ fn present_letterbox_end() {
         return
     }
     stone_set_present_viewport(false, 0, 0, 0, 0)
+    // Re-bind to restore the full-window viewport for UI/text/imgui.
     set_canvas_handle(0)
 }
 
+// The up chain adds into the same levels under BlendMode::Accumulate, so level 0
+// is the result and there is no clear on the way up. This gain normalizes the
+// stack to a weighted average; only the first pass carries it.
 fn pyramid_gain(levels: int, scatter: float) -> float {
     let sum = 0.0
     let w = 1.0
@@ -150,6 +158,8 @@ fn pyramid_texel(c: Canvas) -> Vec2 {
     return v(1.0 / c.width, 1.0 / c.height)
 }
 
+// Every kernel tap clamps into the active texels; clamp-to-edge stops only at
+// the capacity edge, which is stale.
 pub fn active_uv_lo(c: Canvas) -> Vec2 {
     return v(0.5 / c.width, 0.5 / c.height)
 }
@@ -414,6 +424,8 @@ pub fn fx_disabled(name: string) -> bool {
 
 fn post_processing() {
     let grading = FINAL_PASSES.len() > 0
+    // The composite stays at scene resolution; present_composite() is the frame's
+    // single resample, which keeps it a sharp bilinear.
     let tonemap_out = final_canvas
 
     if ENGINE.use_bloom && !fx_disabled("bloom") {

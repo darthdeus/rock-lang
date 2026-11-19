@@ -40,6 +40,8 @@ pub struct Prefab {
 }
 
 
+// Rebuilt every frame from authoritative data; adds return no handle, since one
+// would go stale at the next rebuild.
 pub global WORLD: SpatialHash<Entity<Prefab>?> = spatial_hash_new(8.0)
 
 @update(stage = 0)
@@ -47,6 +49,7 @@ fn update_world_clear() {
     spatial_hash_begin(WORLD)
 }
 
+// After all fill (stage 30) and before the earliest query (stage 40).
 @update(stage = 31)
 fn update_world_build() {
     spatial_hash_build(WORLD)

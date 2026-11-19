@@ -333,6 +333,7 @@ fn bindings_report_load_conflicts() {
     }
 }
 
+// Returns a rejection reason before any live bindings are changed.
 fn bindings_restore_json(raw: string) -> string? {
     let parsed = json_decode(raw)
     if parsed == null {

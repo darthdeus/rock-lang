@@ -22,6 +22,7 @@ pub enum BlendMode {
     Premultiplied, // src + dst*(1-src.a), including the coverage channel
 }
 
+// Mirrored in stone-rs (stone_set_blend_mode_i); keep them in sync.
 pub fn blend_mode_to_int(b: BlendMode) -> int {
     match b {
         BlendMode::Alpha => 0,

@@ -66,6 +66,7 @@ pub fn ui_bake_clear_canvas(canvas: Canvas) {
     )
 }
 
+// A paint callback and its equality policy stay fixed for one bake owner.
 pub fn ui_bake_inputs_equal<T>(a: T, b: T, equal: ((T, T) -> bool)? = null) -> bool {
     return if equal == null { a == b } else { equal(a, b) }
 }

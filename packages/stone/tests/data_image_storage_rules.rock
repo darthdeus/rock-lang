@@ -1,3 +1,6 @@
+// Storage of 16 KB or more is a pointer (`__rock_nb_alloc`) carrying neither
+// length nor array type, so the image takes both from the allocation record.
+
 value ImageVert {
     x: float,
     id: int,
