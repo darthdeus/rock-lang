@@ -1,12 +1,7 @@
-// JS backend deepcopy (T8d): the recursive `__rock_deepcopy_value` clone
-// (stdlib/unified.rock). On JS the shapes are plain objects (structs / env
-// records / boxes), arrays (a Vec's 1-indexed `_data`), Map, and TypedArray (a
-// NativeBuffer's `.ptr`); primitives and bare functions pass through by
-// identity. A `seen` map preserves the object graph -- shared references copy to
-// ONE object, and a cycle copies without recursing forever. Runs under BOTH
-// executors so the aliasing/cycle semantics are luajit-checked.
+// JS runtime helpers: deepcopy, put and try_call.
 
 struct Inner { v: int }
+
 struct State { a: Inner, b: Inner }
 
 // A shared inner struct copies ONCE: mutating via `a` shows through `b`; the
@@ -83,4 +78,66 @@ fn clone_into_copies_column_storage() -> int {
     points[0] = Vec2 { x: 9.0, y: 10.0 }
     copied.push(Vec2 { x: 5.0, y: 6.0 })
     return int(copied[0].x) * 100 + copied.len() * 10 + points.len()
+}
+
+@intrinsic @inline inline(lua) fn put(s: string) = "io.write(s)"
+
+// Bare `put` writes with no separators or newline: three calls -> "abc".
+@test(output = "abc")
+fn put_no_newline() {
+    put("a")
+    put("b")
+    put("c")
+}
+
+// Embedded `\n` from a `put` is preserved (only leading/trailing whitespace is
+// trimmed by the harness compare).
+@test(output = "x=1\ny=2")
+fn put_embedded_newline() {
+    put("x=1")
+    put("\n")
+    put("y=2")
+}
+
+// `put` and `print` share one buffer, in call order (`print` adds its newline).
+@test(output = "head\ntail")
+fn put_and_print_interleave() {
+    put("head\n")
+    print("tail")
+}
+
+@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
+    local ok, err = pcall(f)
+    return not ok
+"""
+
+@test(returns = 1)
+fn test_catches_error() -> int {
+    if try_call(() => { error("boom") }) { 1 } else { 0 }
+}
+
+@test(returns = 0)
+fn test_success_is_false() -> int {
+    if try_call(() => { let x = 1 + 1 }) { 1 } else { 0 }
+}
+
+// An out-of-bounds Vec read throws even when the value is discarded.
+@test(returns = 1)
+fn test_vec_oob_read_errors() -> int {
+    let xs = [1, 2, 3]
+    if try_call(() => { let _ = xs[10] }) { 1 } else { 0 }
+}
+
+// An in-bounds Vec read does not error.
+@test(returns = 0)
+fn test_vec_inbounds_ok() -> int {
+    let xs = [1, 2, 3]
+    if try_call(() => { let _ = xs[0] }) { 1 } else { 0 }
+}
+
+// A negative index also throws.
+@test(returns = 1)
+fn test_vec_negative_errors() -> int {
+    let xs = [1, 2, 3]
+    if try_call(() => { let _ = xs[-1] }) { 1 } else { 0 }
 }

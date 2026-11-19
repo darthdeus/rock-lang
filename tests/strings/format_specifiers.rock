@@ -1,4 +1,54 @@
-// Test formatting struct fields with precision specifiers
+// Format specifiers: grouping, struct fields and rejected controls.
+
+@test
+fn test_grouping_comma() {
+    let n = 1000000
+    assert_eq("{n:,}", "1,000,000")
+    assert_eq("{n:,d}", "1,000,000")
+    let x = 1234.5
+    assert_eq("{x:,.2f}", "1,234.50")
+    let neg = -1000000
+    assert_eq("{neg:,d}", "-1,000,000")
+    // Values under 1000 get no separator.
+    let small = 42
+    assert_eq("{small:,d}", "42")
+    let edge = 999
+    assert_eq("{edge:,d}", "999")
+    let thousand = 1000
+    assert_eq("{thousand:,d}", "1,000")
+    // Grouping is applied before padding; the resulting "1,000" has
+    // length 5, padded to 10 with leading spaces.
+    assert_eq("[{thousand:10,d}]", "[     1,000]")
+}
+
+@test
+fn test_grouping_underscore() {
+    let h = 0xdeadbeef
+    assert_eq("{h:_x}", "dead_beef")
+    let n = 1000000
+    assert_eq("{n:_d}", "1_000_000")
+}
+
+struct P { x: int }
+
+value ScalarBag { x: int, n: int }
+
+@test
+fn composite_without_numeric_flags() {
+    let p = P { x: 1 }
+    // These keep the widths from the rejected sign and zero-pad cases.
+    assert_eq("{p:12}", " P {{ x = 1 }}")
+    assert_eq("{p:}", "P {{ x = 1 }}")
+    let xs = [1, 2]
+    assert_eq("{xs:8}", "Vec {{ 1, 2 }}")
+}
+
+@test
+fn top_level_value_record_with_scalar_fields() {
+    let b = ScalarBag { x: 1, n: 5 }
+    assert_eq("{b}", "ScalarBag {{ x: 1, n: 5 }}")
+    assert_eq(tostring(b), "ScalarBag {{ x: 1, n: 5 }}")
+}
 
 struct FixVec2 {
     x: float,

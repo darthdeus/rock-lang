@@ -1,8 +1,4 @@
-// First end-to-end exercise of the declarative macro system.
-//
-// Status: tests 1 + 2 GREEN via the existing @inline pass. Test 3 (variadic
-// recursion) is RED and parked — needs list-substitution + splat-expansion
-// in the inline pass.
+// Macro basics: anaphoric bindings, path fragments and UFCS.
 
 // === Single-shape expansion (GREEN) ===
 
@@ -52,4 +48,80 @@ fn test_macro_variadic() {
     assert(sum_of() == 0, "empty variadic")
     assert(sum_of(1) == 1, "one arg")
     assert(sum_of(1, 2, 3, 4) == 10, "four args via recursive overload")
+}
+
+global ANA_GLOBAL: int = 1000
+
+macro ana_read_anaphoric() -> int {
+    ^ANA_GLOBAL
+}
+
+macro ana_read_global() -> int {
+    _G.ANA_GLOBAL
+}
+
+@test
+fn test_anaphoric_picks_caller_local_over_def_global() {
+    let ANA_GLOBAL = 42
+    assert_eq(ana_read_anaphoric(), 42)
+    assert_eq(ana_read_global(), 1000)
+}
+
+macro ana_double() -> int {
+    ^x * 2
+}
+
+@test
+fn test_anaphoric_local() {
+    let x = 7
+    assert_eq(ana_double(), 14)
+}
+
+mod pkg {
+    pub value Payload { value: int }
+    pub value Cell<T> { value: T }
+    pub fn source() -> int { 7 }
+}
+
+fn pkg::Payload.read<U>(self, _extra: U) -> int { self.value }
+
+macro holder(Prefix: ident) {
+    value Holder { item: Prefix::Payload }
+    fn make_holder() -> Holder { Holder { item: Prefix::Payload { value: 7 } } }
+}
+
+holder(pkg)
+
+macro generic_holder(Type: ty) { value GenericHolder { item: Type } }
+
+generic_holder!(pkg::Payload)
+
+macro typed_cell() -> pkg::Cell<int> { pkg::Cell { value: 5 } }
+
+@test fn namespace_fragments_keep_types_and_constructors() {
+    assert(make_holder().item.read(true) == ::pkg::source())
+    assert(typed_cell().value == 5)
+    let wrapped = GenericHolder { item: pkg::Payload { value: 9 } }
+    assert(wrapped.item.value == 9)
+}
+
+macro twice(x: expr) -> int { x + x }
+
+macro add(a: expr, b: expr) -> int { a + b }
+
+macro first_of(a: expr, b: expr, c: expr) -> int { a }
+
+struct Box { n: int }
+
+@test(returns = 84)
+fn ufcs_receiver_only() -> int {
+    return 42.twice()
+}
+
+@test
+fn ufcs_receiver_is_first_arg() {
+    assert_eq(3.add(4), 7)
+    assert_eq(10.first_of(20, 30), 10)
+    let b = Box { n: 6 }
+    assert_eq(b.n.twice(), 12)
 }

@@ -1,5 +1,4 @@
-// Int literals promote to float in arithmetic with float operands, including
-// float struct fields divided by int literals.
+// Literal and generic numeric promotion.
 
 @test(output = "5.14\n5\n50\n4.5\n60")
 fn test_literal_promotion_with_float_locals() {
@@ -56,4 +55,32 @@ fn test_vec2_like_construction() {
     let rect = UiRect { x: 10.0, y: 20.0, w: 100.0, h: 200.0 }
     let c = center(rect)
     print(c.x)
+}
+
+@test
+fn test_min_with_int_float() {
+    // This should promote both arguments to float
+    let result = min(3, 4.0);
+    assert_eq(result, 3.0);
+}
+
+@test
+fn test_max_with_int_float() {
+    // This should promote both arguments to float
+    let result = max(5.5, 2);
+    assert_eq(result, 5.5);
+}
+
+@test
+fn test_both_ints() {
+    // This should stay as int
+    let result = min(3, 4);
+    assert_eq(result, 3);
+}
+
+@test
+fn test_both_floats() {
+    // This should stay as float
+    let result = max(3.5, 4.5);
+    assert_eq(result, 4.5);
 }

@@ -1,5 +1,4 @@
-// `...rest` forwards a macro's captured variadic args wherever the body
-// names it, however deeply nested, but only while `rest` means the param.
+// Splat and spread in macros.
 
 macro sp_count() -> int {
     0
@@ -64,4 +63,18 @@ macro sp_shadowed(rest: ...expr) -> int {
 @test
 fn test_body_local_named_like_variadic_is_not_splatted() {
     assert(sp_shadowed(1, 2) == 42, "2 captured args + local 40")
+}
+
+struct AB { a: int, b: int }
+
+fn sum2(a: int, b: int) -> int { a + b }
+
+macro bundled(p: expr) {
+    sum2(..p)
+}
+
+@test(output = "3")
+fn test_spread_in_macro() {
+    let props = AB { a: 1, b: 2 }
+    print(bundled(props))
 }

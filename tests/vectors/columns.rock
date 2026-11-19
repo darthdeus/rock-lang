@@ -1,0 +1,112 @@
+// Column vecs: generic calls, zero-field, nobox and opaque container params.
+
+nobox value NV2 { x: float, y: float }
+
+fn pick<T>(xs: [T], i: int, f: fn(T) -> float) -> float {
+    return f(xs[i])
+}
+
+fn run(f: fn() -> int) -> int { return f() }
+
+@test(output = "9\n1")
+fn test_column_element_generic_call() {
+    let a: [NV2] = [NV2 { x: 3.0, y: 1.0 }, NV2 { x: 9.0, y: 2.0 }]
+    print(int(pick(a, 1, v => v.x)))
+    print(int(pick(a, 0, v => v.y)))
+}
+
+@test(output = "9")
+fn test_column_element_generic_call_inside_a_hoisted_lambda() {
+    let n = run(() => {
+        let a: [NV2] = [NV2 { x: 3.0, y: 1.0 }, NV2 { x: 9.0, y: 2.0 }]
+        return int(pick(a, 1, v => v.x))
+    })
+    print(n)
+}
+
+value Empty {}
+
+@nomangle inline(lua) fn zero_column_header_repr(v: any) -> string = "return v[\"@vec\"].repr"
+@nomangle inline(lua) fn zero_column_header_elem(v: any) -> string = "return v[\"@vec\"].elem"
+@nomangle inline(lua) fn zero_column_header_cap(v: any) -> int = "return v[\"@vec\"].cap"
+
+@test(output = "columns\nEmpty\n3\n3\nEmpty {{  }}", backends = "lua")
+fn test_zero_field_value_has_header_without_a_leaf_column() {
+    let a: [Empty] = [Empty {}, Empty {}, Empty {}]
+    print(zero_column_header_repr(a))
+    print(zero_column_header_elem(a))
+    print(zero_column_header_cap(a))
+    print(a.capacity())
+    print(inspect(a[0]))
+}
+
+@test
+fn push_then_read_each_leaf() {
+    let xs: [NV2] = []
+    xs.push(NV2 { x: 1.0, y: 2.0 })
+    xs.push(NV2 { x: 30.0, y: 40.0 })
+    assert_eq(xs[1].x, 30.0)
+    assert_eq(xs[0].y, 2.0)
+    assert_eq(xs.len, 2)
+}
+
+@test
+fn a_literal_fills_every_column() {
+    let xs: [NV2] = [NV2 { x: 5.0, y: 6.0 }, NV2 { x: 7.0, y: 8.0 }]
+    assert_eq(xs[1].y, 8.0)
+    assert_eq(xs.len, 2)
+}
+
+@test
+fn a_leaf_write_spares_its_sibling_column() {
+    let xs: [NV2] = [NV2 { x: 1.0, y: 2.0 }]
+    xs[0].x = 9.0
+    assert_eq(xs[0], NV2 { x: 9.0, y: 2.0 })
+}
+
+nobox value P { x: float, y: float }
+
+@nomangle inline(lua) fn probe_len<T>(v: [T]) -> int = """
+    if v._data == nil then return -1 end
+    return #v._data
+"""
+
+@test(output = "3", backends = "lua")
+fn a_boxed_element_through_the_same_body_is_correct() {
+    let xs: [int] = [1, 2, 3]
+    print("{probe_len(xs)}")
+}
+
+@nomangle inline(lua) fn header_repr(v: any) -> string = """
+    return v["@vec"].repr
+"""
+
+@test(output = "columns", backends = "lua")
+fn an_any_param_still_admits_a_column_vec() {
+    let xs: [P] = [P { x: 1.0, y: 2.0 }]
+    print("{header_repr(xs)}")
+}
+
+@nomangle inline(lua) fn opaque_t<T>(v: T) -> int = """
+    if v._data == nil then return -1 end
+    return #v._data
+"""
+
+@test(output = "3", backends = "lua")
+fn a_generic_param_bound_to_a_boxed_vec_is_correct() {
+    let xs: [int] = [1, 2, 3]
+    print("{opaque_t(xs)}")
+}
+
+// The type guard leads because indexing a number throws in Lua before the body
+// could answer, which would read as the rule firing.
+@nomangle inline(lua) fn opaque_scalar_t<T>(v: T) -> int = """
+    if type(v) ~= "table" then return -1 end
+    if v._data == nil then return -2 end
+    return #v._data
+"""
+
+@test(output = "-1", backends = "lua")
+fn a_generic_param_bound_to_a_scalar_is_admitted() {
+    print("{opaque_scalar_t(7)}")
+}

@@ -1,19 +1,17 @@
-// The admitted side of the operator-overloading gate. Its rejected side is
-// `tests/errors/non_overloadable_operator_def.rock.err`; together they cover
-// every symbol in `bone_core::hir::OPERATOR_FNS`, and
-// `crates/bone-semantic/tests/operator_table.rs` ties that table to the parser.
-//
-// Each operator returns a MARKER rather than the arithmetic answer, so a test
-// passes only if the user fn was actually called -- computing the right number
-// natively would not.
+// Overloadable operators and index writes.
 
 value Mark { v: int }
 
 operator +(a: Mark, b: Mark) -> int { return 1001 }
+
 operator -(a: Mark, b: Mark) -> int { return 1002 }
+
 operator *(a: Mark, b: Mark) -> int { return 1003 }
+
 operator /(a: Mark, b: Mark) -> int { return 1004 }
+
 operator %(a: Mark, b: Mark) -> int { return 1005 }
+
 operator ./(a: Mark, b: Mark) -> int { return 1006 }
 
 @test
@@ -47,4 +45,30 @@ fn a_newtype_still_derives_arithmetic_and_ordering() {
     assert((Tally(4) + Tally(5)).0 == 9, "derived add")
     assert(Tally(4) < Tally(5), "derived ordering survives the rejection")
     assert(Tally(9) >= Tally(9), "and so does the non-strict form")
+}
+
+@test
+fn test_eval_order_nested_writes() {
+    let arr = [10, 20, 30]
+    let i = 0
+    let bump = (v: int) => {
+        arr[i] = v + { i += 1; i }
+    }
+    bump(5)
+    // LHS captured i=0, RHS mutates i to 1: arr[0] = 5 + 1 = 6
+    assert_eq(arr[0], 6)
+    assert_eq(i, 1)
+    bump(50)
+    // arr[1] = 50 + 2 = 52
+    assert_eq(arr[1], 52)
+}
+
+@test(output = "4\n12")
+fn test_map_compound_assign() {
+    let m: Map<string, int> = map_new()
+    insert(m, "k", 3)
+    m["k"] += 1
+    print(unwrap(get(m, "k")))
+    m["k"] *= 3
+    print(unwrap(get(m, "k")))
 }

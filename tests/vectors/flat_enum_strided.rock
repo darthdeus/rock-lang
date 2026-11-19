@@ -1,6 +1,4 @@
-// A Vec of a wide numeric flat enum is stored as dense strided lanes. Its whole
-// mutating surface, the erased Lua array bridge, capacity accounting and
-// equality must behave as on boxed elements.
+// Flat enum elements in vecs, strided and wide.
 
 enum Kind { A, B }
 
@@ -47,6 +45,7 @@ fn strided_vec_preserves_the_complete_mutating_surface() {
 }
 
 nobox value Quad { a: int, b: int, c: int, d: int }
+
 enum QuadSlot { Entry(Quad), Overflow(int) }
 
 fn quad_score(slot: QuadSlot) -> int {
@@ -79,4 +78,38 @@ fn strided_vec_equality_compares_logical_elements_not_storage_metadata() {
     b.push(QuadSlot::Overflow(8))
     let c: [QuadSlot] = [QuadSlot::Entry(Quad { a: 1, b: 2, c: 3, d: 5 }), QuadSlot::Overflow(8)]
     print("{a == b},{a != b},{a == c},{a != c}")
+}
+
+nobox value Row_wide_flat_enum_eleme { a: int, b: int, c: int, d: int }
+
+enum Slot_wide_flat_enum_eleme { Entry(Row_wide_flat_enum_eleme), Overflow(int) }
+
+fn score_wide_flat_enum_eleme(slot: Slot_wide_flat_enum_eleme) -> int {
+    return match slot {
+        Slot_wide_flat_enum_eleme::Entry(row) => row.a * 1000 + row.b * 100 + row.c * 10 + row.d,
+        Slot_wide_flat_enum_eleme::Overflow(hidden) => hidden,
+    }
+}
+
+@test
+fn wide_flat_enum_vec_equality() {
+    let equal: [Slot_wide_flat_enum_eleme] = [Slot_wide_flat_enum_eleme::Entry(Row_wide_flat_enum_eleme { a: 1, b: 2, c: 3, d: 4 }), Slot_wide_flat_enum_eleme::Overflow(8)]
+    let grown: [Slot_wide_flat_enum_eleme] = []
+    grown.push(Slot_wide_flat_enum_eleme::Entry(Row_wide_flat_enum_eleme { a: 1, b: 2, c: 3, d: 4 }))
+    grown.push(Slot_wide_flat_enum_eleme::Overflow(8))
+    assert(equal == grown, "equal contents")
+    let differing: [Slot_wide_flat_enum_eleme] = [Slot_wide_flat_enum_eleme::Entry(Row_wide_flat_enum_eleme { a: 1, b: 2, c: 3, d: 5 }), Slot_wide_flat_enum_eleme::Overflow(8)]
+    assert(equal != differing, "a differing last leaf")
+}
+
+@test(returns = 12340807)
+fn wide_flat_enum_vec_mutation_and_sort() -> int {
+    let slots: [Slot_wide_flat_enum_eleme] = [Slot_wide_flat_enum_eleme::Entry(Row_wide_flat_enum_eleme { a: 1, b: 2, c: 3, d: 4 }), Slot_wide_flat_enum_eleme::Overflow(8)]
+    slots.insert_at(1, Slot_wide_flat_enum_eleme::Overflow(9))
+    let removed = slots.remove_at(0)
+    let copy = slots.clone()
+    copy.sort(score_wide_flat_enum_eleme)
+    slots.clear()
+    let spread: [Slot_wide_flat_enum_eleme] = [...copy, Slot_wide_flat_enum_eleme::Overflow(7)]
+    return score_wide_flat_enum_eleme(removed.unwrap()) * 10000 + score_wide_flat_enum_eleme(spread[0]) * 100 + score_wide_flat_enum_eleme(spread[2])
 }

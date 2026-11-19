@@ -1,7 +1,4 @@
-// Hand-written iterator protocol in the shape the for-loop desugar will emit
-// Pins the backend prerequisites:
-// generic cursor struct, field mutation through a param, (bool, E) tuple
-// return with phantom(), tuple destructuring in let, loop/break.
+// Manual iterator protocol and float ranges.
 
 struct ManualVecIter<T> {
     vec: [T],
@@ -58,4 +55,27 @@ fn manual_protocol_string_elems() {
         joined += x
     }
     assert_eq(joined, "abc")
+}
+
+@test
+fn test_linspace() {
+    // Evenly spaced from start to end inclusive.
+    assert_eq(linspace(0.0, 1.0, 5), [0.0, 0.25, 0.5, 0.75, 1.0])
+    assert_eq(linspace(0.0, 1.0, 2), [0.0, 1.0])
+    assert_eq(linspace(0.0, 1.0, 1), [0.0])
+    assert_eq(linspace(0.0, 1.0, 0).len, 0)
+    assert_eq(linspace(-1.0, 1.0, 5), [-1.0, -0.5, 0.0, 0.5, 1.0])
+}
+
+@test
+fn test_float_range() {
+    // The end is excluded.
+    assert_eq(float_range(0.0, 1.0, 0.25), [0.0, 0.25, 0.5, 0.75])
+    assert_eq(float_range(0.0, 1.0, 0.5), [0.0, 0.5])
+    assert_eq(float_range(0.0, 1.0, 2.0), [0.0])
+    assert_eq(float_range(10.0, 0.0, -3.0), [10.0, 7.0, 4.0, 1.0])
+    // Empty: start == end, zero step, step pointing away from the end.
+    assert_eq(float_range(0.0, 0.0, 0.1).len, 0)
+    assert_eq(float_range(0.0, 1.0, 0.0).len, 0)
+    assert_eq(float_range(0.0, 1.0, -0.5).len, 0)
 }

@@ -1,5 +1,4 @@
-// Overload resolution through named and positional arguments, and
-// multi-line inline(lua) function bodies.
+// Calls, recursion, overload identity and syntax forms.
 
 fn foo(a: int) -> string {
     return "one"
@@ -40,4 +39,101 @@ fn multiline_inline_lua_bodies() {
     print(shout("Hello, ", "Rock"))
     print("{f1()}{shout("ba", "r")}")
     print(scream("hello"))
+}
+
+fn countdown<T>(x: T, n: int) -> int {
+    if n <= 0 { return 0 }
+    return 1 + countdown(x, n - 1)
+}
+
+@test
+fn same_instance_recursion_runs() {
+    assert_eq(countdown(1, 5), 5)
+    assert_eq(countdown("s", 3), 3)
+}
+
+fn count(value: int) -> int {
+    static n = 0
+    n = n + 1
+    return n
+}
+
+fn count(value: string) -> int {
+    static n = 0
+    n = n + 1
+    return n
+}
+
+@test
+fn overload_statics_keep_separate_cells() {
+    assert_eq(count(41), 1)
+    assert_eq(count("hello"), 1)
+    assert_eq(count(41), 2)
+    assert_eq(count("hello"), 2)
+}
+
+fn void_fn() {
+    print("void")
+}
+
+fn string_fn() -> string {
+    "hello"
+}
+
+fn identity(s: string) -> string {
+    s
+}
+
+// fn() shorthand (defaults to fn() -> ())
+fn call_fn_shorthand(f: fn()) {
+    f()
+}
+
+fn call_fn_explicit_void(f: fn() -> ()) {
+    f()
+}
+
+fn call_paren_void(f: () -> ()) {
+    f()
+}
+
+fn call_fn_with_return(f: fn() -> string) -> string {
+    f()
+}
+
+fn call_paren_with_return(f: () -> string) -> string {
+    f()
+}
+
+fn call_fn_with_params(f: fn(string) -> string) -> string {
+    f("test")
+}
+
+fn call_paren_with_params(f: (string) -> string) -> string {
+    f("test")
+}
+
+// T -> U bare syntax (no parentheses around a single parameter)
+fn call_bare_syntax(f: string -> string) -> string {
+    f("test")
+}
+
+@test(output = "void\nvoid\nvoid")
+fn test_void_fn_type_syntaxes() {
+    call_fn_shorthand(void_fn)
+    call_fn_explicit_void(void_fn)
+    call_paren_void(void_fn)
+}
+
+@test(output = "hello\nhello")
+fn test_return_fn_type_syntaxes() {
+    print(call_fn_with_return(string_fn))
+    print(call_paren_with_return(string_fn))
+}
+
+@test(output = "test\ntest\ntest")
+fn test_param_fn_type_syntaxes() {
+    print(call_fn_with_params(identity))
+    print(call_paren_with_params(identity))
+    print(call_bare_syntax(identity))
 }

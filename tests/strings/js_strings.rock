@@ -1,14 +1,13 @@
-// JS backend inspect (T8d): the `__rock_inspect_value` pretty-printer
-// (stdlib/unified.rock) ported to the JS shapes -- structs `{__ty,..}` (sorted
-// keys, ` = ` sep), Vec `{_data,len}`, value structs, embedded children and
-// fn-records (opaque `function: ..` leaf). Runs under BOTH executors so the
-// rendering is luajit-checked. Scalars, maps, tuples, nesting and enums are
-// pinned byte-exact in inspect.rock.
+// String inspect and float parsing on the JS backend.
 
 struct Person { name: string, age: int }
+
 struct Point { x: int, y: int }
+
 struct Triple { a: int, b: int, c: int }
+
 struct EmptyRef {}
+
 value EmptyValue {}
 
 // A capturing lambda / fn value renders as an opaque `function: ..` leaf, never
@@ -33,12 +32,17 @@ fn exact_struct_renders() {
 // GC-free value structs use the same sorted equals-format as table-backed
 // structs. Wide nested values follow the generic multiline indentation too.
 value V2 { y: int, x: int }
+
 value IV { x: int, y: int }
+
 value NestedV { a: IV, b: int }
+
 value V3 { z: int, x: int, y: int }
+
 value V3Holder { item: V3, tag: int, extra: int }
 
 fn inspect_any(value: any) -> string { return inspect(value) }
+
 fn inspect_dynamic_v3_holder(item: V3) -> string {
     return inspect(V3Holder { item: item, tag: 9, extra: 4 })
 }
@@ -61,4 +65,81 @@ struct Holder { embed p: Point, tag: int }
 @test
 fn embed_field_render() {
     assert_eq(inspect(Holder { p: Point { x: 1, y: 2 }, tag: 3 }), "Holder {{ p = Point {{ x = 1, y = 2 }}, tag = 3 }}")
+}
+
+fn show(s: string) -> string {
+    let r = s.parse_float()
+    if r == null { "nil" } else { tostring(r) }
+}
+
+@test
+fn test_basic_forms() {
+    assert_eq(show("12"), "12")
+    assert_eq(show("1.5"), "1.5")
+    assert_eq(show("1e3"), "1000")
+    assert_eq(show("0x1A"), "26")
+    assert_eq(show("  3  "), "3")
+    assert_eq(show("12abc"), "nil")
+    assert_eq(show(""), "nil")
+    assert_eq(show("   "), "nil")
+}
+
+// A parsed value flows through arithmetic (it is a real float).
+@test(output = "7")
+fn test_arith() {
+    let a = "3.5".parse_float() ?? 0.0
+    let b = "3.5".parse_float() ?? 0.0
+    print(tostring(a + b))
+}
+
+// LuaJIT's tonumber also reads inf/infinity/nan in any case with an optional
+// sign, signed and fractional hex with a binary exponent, and `0b` binary. It
+// rejects the `0o` octal prefix that JS `Number` accepts.
+@test
+fn test_non_finite_spellings() {
+    assert_eq(show("inf"), "inf")
+    assert_eq(show("-INF"), "-inf")
+    assert_eq(show("+Infinity"), "inf")
+    assert_eq(show("  -infinity  "), "-inf")
+    assert_eq(show("nan"), "nan")
+    assert_eq(show("-NaN"), "nan")
+    assert_eq(show("infinit"), "nil")
+    assert_eq(show("infx"), "nil")
+    assert_eq(show("nan(1)"), "nil")
+}
+
+@test
+fn test_hex_forms() {
+    assert_eq(show("-0x10"), "-16")
+    assert_eq(show("+0x10"), "16")
+    assert_eq(show("0X1F"), "31")
+    assert_eq(show("0x1.8"), "1.5")
+    assert_eq(show("0x.8"), "0.5")
+    assert_eq(show("0x1p4"), "16")
+    assert_eq(show("0x1P-2"), "0.25")
+    assert_eq(show("0x1.8p1"), "3")
+    assert_eq(show("0x1e3"), "483")
+    assert_eq(show("0x"), "nil")
+    assert_eq(show("0x."), "nil")
+    assert_eq(show("0x1p"), "nil")
+    assert_eq(show("0x-1"), "nil")
+    assert_eq(show("0xG"), "nil")
+}
+
+@test
+fn test_prefixes_and_signs() {
+    assert_eq(show("0b101"), "5")
+    assert_eq(show("-0B11"), "-3")
+    assert_eq(show("0b102"), "nil")
+    assert_eq(show("0b1.1"), "nil")
+    assert_eq(show("0o17"), "nil")
+    assert_eq(show("-0"), "-0")
+    assert_eq(show("+.5"), "0.5")
+    assert_eq(show("1."), "1")
+    assert_eq(show("."), "nil")
+    assert_eq(show("1e"), "nil")
+    assert_eq(show("+-1"), "nil")
+    assert_eq(show("- 5"), "nil")
+    assert_eq(show("1_0"), "nil")
+    assert_eq(show("1e400"), "inf")
 }

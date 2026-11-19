@@ -1,5 +1,4 @@
-// Bounds checks on NativeBuffer<T>[i]: out-of-bounds reads/writes error via
-// the __nb_checked_get / __nb_checked_set helpers, unconditionally.
+// NativeBuffer bounds checks and bounds elision.
 
 @intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
     local ok, err = pcall(f)
@@ -33,3 +32,61 @@ fn out_of_bounds_access_errors() {
     assert(edge[3] == 42)
     assert(try_call(() => { let _x = edge[4] }), "read at len")
 }
+
+@test(output = "0 1 2 3 6")
+fn counted_fill_and_sum() {
+    let b = native_buffer_float(4)
+    for i in 0..b.len { b[i] = i as float }
+    let t = 0.0
+    for i in 0..b.len { t += b[i] }
+    print("{b[0]} {b[1]} {b[2]} {b[3]} {t}")
+}
+
+@test(output = "true")
+fn an_index_at_the_length_still_raises() {
+    let b = native_buffer_int(3)
+    let failed = try_call(() => {
+        for i in 0..b.len + 1 { b[i] = i }
+    })
+    print("{failed}")
+}
+
+fn set_slot(b: NativeBuffer<int>, i: int, v: int) -> bool {
+    if i < 0 || i >= b.len { return false }
+    b[i] = v
+    return true
+}
+
+@test(output = "true false false 7")
+fn a_guarded_slot_write() {
+    let b = native_buffer_int(3)
+    let a = set_slot(b, 1, 7)
+    let c = set_slot(b, 3, 8)
+    let d = set_slot(b, -1, 9)
+    print("{a} {c} {d} {b[1]}")
+}
+
+@test(output = "3")
+fn a_checked_read_covers_the_write_that_follows() {
+    let b = native_buffer_int(2)
+    b[1] = 2
+    let v = b[1]
+    b[1] = v + 1
+    print(b[1])
+}
+
+fn read_after_native_write(xs: [int], indices: NativeBuffer<int>) -> int {
+    if indices[0] < 0 || indices[0] >= xs.len() { return 0 }
+    nb_set(indices, 0, 999)
+    return xs[indices[0]]
+}
+
+@test(output = "true")
+fn native_write_invalidates_an_element_used_as_an_index() {
+    let indices = native_buffer_int(1)
+    indices[0] = 0
+    let xs = [7]
+    print(try_call(() => { let result = read_after_native_write(xs, indices) }))
+}
+
+fn main() {}

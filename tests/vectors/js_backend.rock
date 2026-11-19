@@ -1,10 +1,4 @@
-// Vec.sort corpus for the `--backend js` ratchet (T8d). The stdlib inline(lua)
-// `table.sort(_data, |a,b| key(a) < key(b))` maps to the `__vec_sort` runtime:
-// sort the logical `1..len` slice in place (index 0 is the layout hole),
-// key_fn invoked through `__rock_call`. luajit's table.sort is unstable and JS's
-// is stable, so tie-break order can differ between backends -- these tests
-// assert only order-invariant properties (the sorted key sequence), never a
-// specific tie order.
+// Vec sort and drain equality on the JS backend.
 
 fn show_ints(xs: [int]) -> string {
     let parts: [string] = []
@@ -45,4 +39,18 @@ fn test_sort_dup_keys_nondecreasing() -> int {
         if xs[i] > xs[i + 1] { ok = 0 }
     }
     ok
+}
+
+@test(output = "true true true true false")
+fn drained_vec_equals_fresh_literal() {
+    let popped = [1, 2, 3]
+    let _ = popped.pop()
+    let cleared = [1, 2, 3]
+    cleared.clear()
+    let empty: [int] = []
+    let removed = [1, 2, 3, 4]
+    let _ = removed.remove_at(1)
+    let swapped = [1, 2, 3, 4]
+    let _ = swapped.swap_remove(1)
+    print("{popped == [1, 2]} {cleared == empty} {removed == [1, 3, 4]} {swapped == [1, 4, 3]} {popped == [1, 9]}")
 }
