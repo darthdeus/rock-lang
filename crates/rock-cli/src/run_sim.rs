@@ -40,10 +40,8 @@ fn timeout_for(sim_name: &str, env_pairs: &[(String, String)]) -> Result<Duratio
     })
 }
 
-/// A hung tick never reaches the frame budget. Give each entry its own wall-clock deadline.
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
-/// Limit memory independently of the wall clock to contain runaway allocation.
 const DEFAULT_MEMORY_CAP_MB: u64 = 8192;
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize)]
@@ -149,8 +147,6 @@ fn shares_runner_address_space(pid: u32) -> bool {
     order == 0
 }
 
-/// The `/proc` memory fields of a live process, in MB, so a cap kill says
-/// whether the growth was heap, mapped files or shared memory.
 #[cfg(target_os = "linux")]
 fn process_memory_breakdown(pid: u32) -> String {
     let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
@@ -244,14 +240,12 @@ fn resolve_sim_name(wire_names: &[String], name: &str) -> std::result::Result<St
     }
 }
 
-/// Keep each invocation's chunks separate while sharing native libraries staged in tmp/.
 fn sim_output_dir() -> Result<TempDir> {
     fs_err::create_dir_all("tmp").context("creating tmp/ for sim output")?;
     let mut dir = tempfile::Builder::new()
         .prefix("sim-")
         .tempdir_in("tmp")
         .context("creating sim output directory")?;
-    // Keep the chunk on request so JIT traces can be mapped back to its lines.
     if std::env::var_os("ROCK_SIM_KEEP_BUILD").is_some() {
         dir.disable_cleanup(true);
         ::log::info!(target: "SIM", "retaining sim build at {}", dir.path().display());
@@ -302,8 +296,6 @@ struct PreparedSims {
     stone: Option<crate::skull_backend::IncrementalProject>,
 }
 
-/// The names and source mapping emitted by a sim compile, shared by in-process
-/// builds, compile receipts, and worker setup.
 #[derive(Debug)]
 struct SimRegistry {
     wire_names: Vec<String>,
@@ -602,7 +594,6 @@ fn load_sim_receipt(receipt_dir: &Path, project: &Path, output: &Path) -> Result
         .get("main_sha256")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| anyhow!("sim compile receipt has no main artifact hash"))?;
-    // Verify the copy that will run, even if the source changes during staging.
     let materialized = output.join(rock_host::project::MAIN_LUA_FILENAME);
     fs_err::copy(main_path, &materialized)?;
     if hash_file(&materialized)? != expected_main_hash {
@@ -691,7 +682,6 @@ fn consume_sim_receipt(
     })
 }
 
-/// Compile in a child so its compiler memory is reclaimed before workers spawn.
 fn prepare_sims_out_of_process(
     project_path: PathBuf,
     output_path: PathBuf,
@@ -708,8 +698,6 @@ fn prepare_sims_out_of_process(
         .canonicalize()
         .with_context(|| format!("canonicalize sim project {}", project_path.display()))?;
     fs_err::create_dir_all("tmp").context("creating tmp/ for the sim compile receipt")?;
-    // Pid-keyed so the next run can tell a concurrent live compile (pid
-    // alive: keep) from a killed runner's leftover (pid dead: sweep).
     let receipt_prefix = format!("{SIM_RECEIPT_PREFIX}{}-", std::process::id());
     let root = tempfile::Builder::new()
         .prefix(&receipt_prefix)
@@ -725,8 +713,6 @@ fn prepare_sims_out_of_process(
 
 const SIM_RECEIPT_PREFIX: &str = "sim-receipt-";
 
-/// Roots without a parseable runner pid predate pid-keying; only age can
-/// judge them, and no live compile runs this long.
 const STALE_RECEIPT_GRACE: Duration = Duration::from_secs(6 * 60 * 60);
 
 fn receipt_runner_pid(name: &str) -> Option<u32> {
@@ -737,10 +723,6 @@ fn receipt_runner_pid(name: &str) -> Option<u32> {
         .ok()
 }
 
-/// Remove `sim-receipt-*` roots whose runner is gone. A SIGKILLed runner
-/// skips its receipt tempdir's drop (~160 MB per game run); the next run
-/// reclaims it here. Best-effort: every decision errs toward keeping, and a
-/// removal failure is a diagnostic, never a run failure.
 fn sweep_stale_sim_receipt_roots(tmp: &Path) {
     let Ok(read) = std::fs::read_dir(tmp) else {
         return;
@@ -767,9 +749,6 @@ fn sweep_stale_sim_receipt_roots(tmp: &Path) {
     }
 }
 
-/// Compile `project` in a child `rock_exe sim --list` that publishes its receipt
-/// under `receipt_root`, with this invocation's flags that change what the
-/// compile builds or reports.
 fn compile_receipt_in_child(
     project_path: &Path,
     rock_exe: &Path,
@@ -777,8 +756,6 @@ fn compile_receipt_in_child(
     selection: &[String],
 ) -> Result<()> {
     rock_host::process_management::report_spawn_phase("compile");
-    // Bound like a worker: a SIGKILLed runner must not leave the compile
-    // running unparented (and publishing into a root nobody consumes).
     let mut cmd = std::process::Command::new(rock_exe);
     cmd.args(compile_child_invocation_args())
         .arg("sim")
@@ -815,9 +792,6 @@ fn compile_receipt_in_child(
     Ok(())
 }
 
-/// This invocation's flags that change what the sim compile builds or reports:
-/// the `[build.vars]` selection and the build lint policy. The
-/// compile child must see them, or it compiles something the run did not ask for.
 fn compile_child_invocation_args() -> Vec<String> {
     let mut args = crate::comptime::invocation_selection_args();
     match crate::lint_pass::policy() {
@@ -915,10 +889,6 @@ fn skull_compile_game_and_collect_sims_with_allocation(
     allocation_manifest: Option<&std::path::Path>,
     selection: &[String],
 ) -> Result<CompiledSims> {
-    // Session-based build (same machinery as `rock stone`, tests included so the
-    // `@sim` bodies are in the program). The live IncrementalProject is returned so the
-    // runner can serve mid-sim `reload_edit` ops through the REAL incremental
-    // path.
     let incremental_path = main_path.with_file_name("incremental.lua");
     let _activation = allocation_manifest.map(|_| skull::allocation_report::activation_scope(true));
     let mut selection_is_full = true;
@@ -1110,8 +1080,6 @@ fn compile_sims_with_allocation(
     )
 }
 
-/// The reload lane owns the live compile session and an isolated copy of the
-/// emitted chunk, so its edits cannot change what ordinary workers boot.
 pub(crate) struct ReloadLaneSession {
     stone: crate::skull_backend::IncrementalProject,
     output: String,
@@ -1138,7 +1106,6 @@ fn reload_lane_session(
             )?;
             stone
         }
-        // A receipt contains emitted code, but no editable compiler Session.
         None => compile_sims(project_path.to_path_buf(), dir.path().to_path_buf())?.stone,
     };
     if !quiet {
@@ -1151,7 +1118,6 @@ fn reload_lane_session(
     }))
 }
 
-/// Whether any selected entry opted into the hot-reload lane.
 fn any_reload_lane_selected(
     specs: &[String],
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
@@ -1207,7 +1173,6 @@ fn run_single_sim(
 ) -> Result<()> {
     let sim_name = &specs[0];
     let output = output_path.to_string_lossy();
-    // A reload sim needs the editable compiler session that a receipt omits.
     if prepared.stone.is_none() && entry_is_reload_lane(sim_name, &prepared.registry.env_by_wire) {
         let compiled = recorder.phase("compile_reload_session", || {
             compile_sims(project_path.to_path_buf(), output_path.to_path_buf())
@@ -1258,8 +1223,6 @@ fn run_single_sim(
     sim_outcome(&summary, sim_name)
 }
 
-/// The single-run result: the same predicate as [`entry_passed`], with the
-/// reason as the error.
 fn sim_outcome(summary: &SimSummary, sim_name: &str) -> Result<()> {
     if summary.excluded.is_some() {
         return Ok(());
@@ -1320,7 +1283,6 @@ fn run_named_entry(
     if name.is_empty() {
         return Err(anyhow!("sim got an empty sim name"));
     }
-    // Only a sim that opted into the reload lane may touch the session.
     let lane = if is_reload_lane(&env_pairs) {
         stone
     } else {
@@ -1349,7 +1311,6 @@ fn run_named_entry(
     if let (Some(recorder), Some(occurrence_id)) = (recorder, occurrence_id) {
         recorder.artifact_check_start(occurrence_id);
     }
-    // The sim's `cleanup_path` removals; `$OUT` itself goes with `out_dir`.
     for path in std::mem::take(&mut summary.cleanup_paths) {
         let _ = std::fs::remove_file(path);
     }
@@ -1388,8 +1349,6 @@ fn entry_excluded(summary: &SimSummary) -> bool {
     summary.excluded.is_some()
 }
 
-/// Whether an entry's summary is a clean pass (no fail, no timeout, no
-/// process error, reached `stop_sim()`, ran at least one check).
 fn entry_passed(summary: &SimSummary) -> bool {
     !entry_excluded(summary)
         && !summary.timed_out
@@ -1399,10 +1358,6 @@ fn entry_passed(summary: &SimSummary) -> bool {
         && summary.checks_accounted()
 }
 
-/// The word printed in a sim's verdict line. Derived from [`entry_passed`] so the
-/// human-facing report and the process exit status can never disagree -- this
-/// used to be computed from `has_failures()` alone, which printed `PASS` for a
-/// sim that aborted mid-body (an abort fails no expect).
 fn verdict_word(summary: &SimSummary) -> &'static str {
     if entry_excluded(summary) {
         "EXCLUDED"
@@ -1421,7 +1376,6 @@ pub(crate) fn do_run_sims(
     jobs: Option<usize>,
     full_asset_jobs: Option<usize>,
 ) -> Result<()> {
-    // One name: there is nothing to overlap, so `--jobs` does not apply.
     if names.len() == 1 && jobs.is_some_and(|j| j > 1) {
         resolve_jobs(jobs, Some(1), update_snapshots)?;
     }
@@ -1483,15 +1437,12 @@ fn do_run_sims_recorded(
         source_files,
     } = prepared.registry;
     let sim_sources = resolve_sim_sources(&project_path, &source_files)?;
-    // Source discovery takes precedence over selection errors for pooled runs.
     let specs = specs?;
     emit_bytecode_image(Path::new(output.as_ref()));
     if specs.is_empty() {
         return Err(anyhow!("no @sim coroutines found in project `{project}`"));
     }
     let entry_ids = recorder.plan_entries(&specs);
-    // Records print whole once every sim is done, so a named run says where
-    // to follow it live.
     if !suite && !quiet {
         if let Some(events) = recorder.events_path() {
             println!(
@@ -1502,7 +1453,6 @@ fn do_run_sims_recorded(
         }
     }
 
-    // Explicit requests narrow to their entries (see `resolve_jobs`).
     let lanes = (!suite).then_some(specs.len());
     let effective_jobs = resolve_pool_jobs(jobs, lanes, update_snapshots)?;
     let requested_full_asset_jobs = full_asset_jobs;
@@ -1518,7 +1468,6 @@ fn do_run_sims_recorded(
         &source_files,
     );
     let selected = specs.len();
-    // The suite skips manual sims; naming one runs it.
     let mut routine_specs = Vec::new();
     let mut routine_ids = Vec::new();
     for (name, id) in specs.into_iter().zip(entry_ids) {
@@ -1543,9 +1492,6 @@ fn do_run_sims_recorded(
         prepared.stone,
         quiet,
     )?;
-    // Concurrent children cannot stream: their progress lines would
-    // interleave. Buffered, not silenced: each record carries its diagnostics
-    // and sited failures.
     let results = SimRun {
         output: &output,
         env_by_wire: &env_by_wire,
@@ -1567,8 +1513,6 @@ fn do_run_sims_recorded(
     let (passed, excluded, failed) = tally_entries(&results);
     let excluded = excluded + manual_excluded;
 
-    // Result output, NOT logging: the verdict is this command's answer,
-    // consumed by the user / CI.
     let executed = selected - excluded;
     let excl_suffix = if excluded > 0 {
         format!(" (selected {selected}, {excluded} excluded)")
@@ -1596,7 +1540,6 @@ fn do_run_sims_recorded(
     Ok(())
 }
 
-/// Count `results`: (passed, excluded, failed names in `results` order).
 fn tally_entries(results: &[(String, SimSummary)]) -> (usize, usize, Vec<String>) {
     let mut passed = 0usize;
     let mut excluded = 0usize;
@@ -1774,7 +1717,6 @@ impl SimRun<'_> {
             .map(|(k, result)| (dispatch[k], result))
             .collect();
         results.extend(lane);
-        // Index occurrences so repeated names still produce one result per request.
         let ordered: Vec<_> = specs
             .iter()
             .enumerate()
@@ -1800,9 +1742,6 @@ impl SimRun<'_> {
     }
 }
 
-/// One entry's record with the child's retained stderr/stdout. A buffered
-/// record never streamed its per-expect lines, so it carries its own sited
-/// failures (`streamed = false`).
 fn print_record(display_name: &str, summary: &SimSummary, streamed: bool) {
     if !summary.diagnostics.is_empty() {
         eprint!("{}", summary.diagnostics);
@@ -1810,11 +1749,6 @@ fn print_record(display_name: &str, summary: &SimSummary, streamed: bool) {
     summary.print(display_name, streamed);
 }
 
-/// The one bounded scheduler. `task` is claimed by index off a shared cursor,
-/// so a task runs exactly once on at most `jobs` OS threads at a time, and the
-/// serial path is the same call with `jobs == 1` rather than a second code path
-/// that could drift from it. Results come back keyed by index; the CALLER
-/// decides the reporting order, because completion order is not deterministic.
 fn run_bounded<T, F>(width: &PoolWidth, n: usize, task: F) -> Vec<(usize, Result<T>)>
 where
     F: Fn(usize) -> Result<T> + Sync,
@@ -1846,12 +1780,8 @@ where
         .expect("no lane panicked while holding the results lock")
 }
 
-/// How many of a pool's `jobs` threads may be inside a task at once. A pool
-/// spawns every thread up front; a thread takes a slot before it claims work,
-/// so a narrower width holds threads back without claiming anything for them.
 struct PoolWidth {
     jobs: usize,
-    /// (width, live)
     slots: Mutex<(usize, usize)>,
     changed: std::sync::Condvar,
 }
@@ -1906,17 +1836,12 @@ impl Drop for PoolSlot<'_> {
     }
 }
 
-/// Pool dispatch order: longest recorded duration first, so the lanes that
-/// would set the suite's tail start while the pool is still full. The sort is
-/// stable, so equal and untimed lanes keep their planned order, after every
-/// timed one.
 fn longest_first(estimates: &[Option<u64>]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..estimates.len()).collect();
     order.sort_by_key(|&w| std::cmp::Reverse(estimates[w].unwrap_or(0)));
     order
 }
 
-/// The reload lane claims one job until its final entry completes.
 fn beside_reload_lane<A, B>(
     jobs: usize,
     lane_has_work: bool,
@@ -1941,7 +1866,6 @@ where
     })
 }
 
-/// Each reload entry at `indices`, one at a time through the lane's session.
 fn run_reload_lane_serially<T>(
     lane: Option<&mut ReloadLaneSession>,
     indices: &[usize],
@@ -1966,7 +1890,6 @@ fn run_reload_lane_serially<T>(
         .collect()
 }
 
-/// Bound full-asset workers independently of the total pool width.
 fn run_bounded_classed<T, F>(
     width: &PoolWidth,
     capped_jobs: usize,
@@ -2015,8 +1938,6 @@ where
                             if q.capped.is_empty() {
                                 break None;
                             }
-                            // Only capped work is left and the cap is reached:
-                            // wait for a capped slot, never spin.
                             q = freed.wait(q).unwrap();
                         }
                     };
@@ -2175,7 +2096,6 @@ fn census_rankings(
         .collect()
 }
 
-/// Allocation census runs opt in so ordinary sims do not pay for instrumentation.
 pub(crate) fn do_run_allocation_census(
     project: &str,
     names: &[String],
@@ -2436,8 +2356,6 @@ pub(crate) fn do_run_allocation_sites(
                 let status = verdict_word(&summary);
                 if status != "PASS" {
                     failed.push(display_name.clone());
-                    // The run was buffered; its child's stderr (a LuaJIT load
-                    // error included) exists only here.
                     print_record(&display_name, &summary, false);
                     if !activation_path.exists() {
                         records.push(serde_json::json!({
@@ -2586,7 +2504,6 @@ fn reload_ledger_summary(requests: &BTreeMap<u64, ReloadRequestState>) -> Reload
     summary
 }
 
-/// Apply a unique replacement against the session's current text, including earlier edits.
 fn service_reload_edit(
     stone: &mut crate::skull_backend::IncrementalProject,
     output: &str,
@@ -2643,8 +2560,6 @@ fn book_reload_request(
     Ok(request_id)
 }
 
-/// Account every completion the watcher has reported so far. True when one
-/// broke the ledger protocol.
 fn drain_reload_completions(
     completions: &mpsc::Receiver<ReloadCompletion>,
     ledger: &mut BTreeMap<u64, ReloadRequestState>,
@@ -2708,12 +2623,6 @@ fn terminate_reload_child(child: &mut crate::headless_scope::BoundChild) -> Resu
     child.wait().context("reaping sim after reload rejection")
 }
 
-/// Restore every reload_edit-touched file to its pre-sim text and remove the
-/// overlay. Both matter for the NEXT child in a suite run: `emit_overlay`
-/// accumulates, so an unreverted session would leak this sim's edits into a
-/// later reload sim's overlay -- and the in-game watcher fires on the
-/// overlay's first appearance (baseline modtime 0), so a leftover file would
-/// be dofile'd at that sim's startup.
 fn revert_reload_edits(
     stone: &mut crate::skull_backend::IncrementalProject,
     output: &str,
@@ -2727,24 +2636,16 @@ fn revert_reload_edits(
     crate::skull_backend::wipe_overlay(&incremental_path)
 }
 
-/// Whether a named entry belongs to the exclusive reload lane.
 fn entry_is_reload_lane(spec: &str, env_by_wire: &HashMap<String, Vec<(String, String)>>) -> bool {
     env_by_wire.get(spec).is_some_and(|e| is_reload_lane(e))
 }
 
-/// CPU bound on sim concurrency. Memory bounds are applied by `sim_job_budget`.
 fn sim_cpu_count() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
 }
 
-/// Resolve the cap on concurrently FULL-ASSET children (`entry_full_assets`).
-/// Such a child holds every image at the file's own size on the GPU (2-4 GB
-/// on the measured host, against 0.2-0.4 GB for any other child, rendering
-/// or not), so on a card with a fixed budget the number of them alive at
-/// once is what overflows, not the job count. `None` takes
-/// `DEFAULT_FULL_ASSET_JOBS`; anything requested is clamped into `1..=jobs`.
 fn resolve_full_asset_jobs(requested: Option<usize>, jobs: usize) -> usize {
     requested
         .unwrap_or(DEFAULT_FULL_ASSET_JOBS)
@@ -2753,7 +2654,6 @@ fn resolve_full_asset_jobs(requested: Option<usize>, jobs: usize) -> usize {
 
 const DEFAULT_FULL_ASSET_JOBS: usize = 2;
 
-/// Snapshot updates run serially because different sims can write the same baseline directory.
 pub(crate) fn resolve_jobs(
     requested: Option<usize>,
     lanes: Option<usize>,
@@ -2772,8 +2672,6 @@ pub(crate) fn resolve_jobs(
     Ok(jobs)
 }
 
-/// GPU load limits physical spawns, not the lifetime width of the task pool.
-/// Keep enough threads to recover capacity when another suite finishes.
 fn resolve_pool_jobs(
     requested: Option<usize>,
     lanes: Option<usize>,
@@ -2796,12 +2694,9 @@ fn narrow_to_lanes(requested: Option<usize>, lanes: Option<usize>) -> Option<usi
     requested.map(|jobs| lanes.map_or(jobs, |lanes| jobs.min(lanes.max(1))))
 }
 
-/// The default lane budgets, each at least one lane and at most the cores.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct JobBudget {
-    /// From total physical RAM: a fixed property of the host.
     ram: usize,
-    /// From GPU memory free at launch: a load reading.
     gpu: usize,
 }
 
@@ -2811,9 +2706,6 @@ impl JobBudget {
     }
 }
 
-/// One above only the free-GPU budget runs at that budget instead
-/// (GPU_JOBS_CLAMP): free VRAM measures what else
-/// is running, and load costs lanes, not the run.
 fn resolve_jobs_with(
     requested: Option<usize>,
     update_snapshots: bool,
@@ -2840,20 +2732,10 @@ fn resolve_jobs_with(
     Ok(jobs.clamp(1, cores.max(1)))
 }
 
-/// GPU memory one sim child is planned at. Measured 2026-09-22 on the Linux
-/// workstation (RTX 4090, game suite at `-j 6`, per-process `nvidia-smi`):
-/// long-lived workers peak at 2.0 GiB median and 3.8 GiB max as they run
-/// more sims, a one-shot child at ~0.3 GiB, and six lanes peaked at 12.8 GiB
-/// together.
 const SIM_LANE_VRAM_MIB: u64 = 2048;
 
-/// GPU memory a suite leaves free for the author's live session and anything
-/// started after it (author, 2026-09-22).
 const SIM_VRAM_RESERVE_MIB: u64 = 6 * 1024;
 
-/// Lanes affordable from the GPU memory free at launch less the reserve,
-/// bounded by the cores. A second suite launched meanwhile sees less free
-/// memory and takes fewer lanes. No reading leaves the cores in charge.
 fn vram_budgeted_jobs(cores: usize, free_vram_mib: Option<u64>) -> usize {
     let cores = cores.max(1);
     match free_vram_mib {
@@ -2865,10 +2747,6 @@ fn vram_budgeted_jobs(cores: usize, free_vram_mib: Option<u64>) -> usize {
     }
 }
 
-/// Total-RAM planning bound: the Studio's 36 GiB / 10 lanes avoided swap
-/// and beat 14 and 7 lanes at full-asset cap 2 in the same-SHA registry sweep.
-/// Retune only with paired wall-time, memory and swap evidence. Keep the ratio
-/// exact rather than rounding MiB.
 fn memory_budgets(
     cores: usize,
     total_ram_mib: Option<u64>,
@@ -2893,8 +2771,6 @@ fn total_system_memory_mib() -> Option<u64> {
     mib
 }
 
-/// Initial planning budgets, logged once. Physical GPU admission refreshes its
-/// own reading; only the CPU/RAM ceiling persists for the execution pool.
 fn sim_job_budget() -> JobBudget {
     static BUDGET: std::sync::OnceLock<JobBudget> = std::sync::OnceLock::new();
     *BUDGET.get_or_init(|| {
@@ -2921,7 +2797,6 @@ fn free_gpu_memory_mib() -> std::result::Result<Option<u64>, String> {
         .output()
     {
         Ok(output) => output,
-        // Hosts without NVIDIA tooling use the CPU/RAM budget.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("nvidia-smi: {error}")),
     };
@@ -2934,19 +2809,10 @@ fn free_gpu_memory_mib() -> std::result::Result<Option<u64>, String> {
         .ok_or_else(|| format!("nvidia-smi printed no free memory: {:?}", stdout.trim()))
 }
 
-/// The first GPU's free memory: the one GL contexts land on by default.
 fn parse_nvidia_smi_free_mib(stdout: &str) -> Option<u64> {
     stdout.lines().next()?.trim().parse().ok()
 }
 
-/// Dump the compiled `main.lua` in `output` to a LuaJIT bytecode image beside
-/// it, once per invocation, so every worker skips the source parse.
-///
-/// Parsing the 48MB `main.lua` costs a child ~300ms of its ~1.1s boot, and a
-/// full run boots ~150 children from the same file; the dump costs the parent
-/// one parse (~0.4s). Best-effort by design: a failed dump is logged and the
-/// workers run the source file, which is exactly what they ran before. A
-/// partial image is removed so `worker_chunk_path` cannot pick it up.
 fn emit_bytecode_image(output: &Path) {
     let lua_file = output.join(rock_host::project::MAIN_LUA_FILENAME);
     let bytecode = output.join(rock_host::project::MAIN_BYTECODE_FILENAME);
@@ -2975,7 +2841,6 @@ fn emit_bytecode_image(output: &Path) {
     }
 }
 
-/// Reload needs the source chunk to locate the overlay and recover the source directory.
 fn worker_chunk_path(output: &Path, reload: bool) -> PathBuf {
     let main = output.join(rock_host::project::MAIN_LUA_FILENAME);
     if reload {
@@ -2991,7 +2856,6 @@ pub(crate) fn is_reload_lane(env_pairs: &[(String, String)]) -> bool {
         .any(|(k, v)| k == "STONE_HOT_RELOAD" && v != "0")
 }
 
-/// Apply before sim-specific declarations. Limit texture storage without changing logical image sizes.
 const RUNNER_BASELINE_ENV: &[(&str, &str)] = &[
     ("ROCK_TEST_SEED", "42"),
     ("SIM_DRAW", "none"),
@@ -3005,7 +2869,6 @@ fn entry_renders(env: &[(String, String)]) -> bool {
     sim_env_value(env, "SIM_DRAW").is_some_and(|v| matches!(v, "on_demand" | "every_frame"))
 }
 
-/// Reserve a full-asset lane for uncapped real images, even when the sim does not draw.
 fn entry_full_assets(env: &[(String, String)], default_stub: &str) -> bool {
     let stub = sim_env_value(env, "STONE_ASSET_STUB").unwrap_or(default_stub);
     let cap_default = RUNNER_BASELINE_ENV
@@ -3017,9 +2880,6 @@ fn entry_full_assets(env: &[(String, String)], default_stub: &str) -> bool {
     stub == "0" && cap == "0"
 }
 
-/// The sim environment a child boots with, last value wins, sorted by key:
-/// the runner defaults under the declared pairs. `$OUT` stays unexpanded so a
-/// per-entry temp path does not make every run's workload distinct.
 fn workload_env(env: &[(String, String)]) -> Vec<(String, String)> {
     let mut effective: std::collections::BTreeMap<String, String> = RUNNER_BASELINE_ENV
         .iter()
@@ -3034,18 +2894,14 @@ fn workload_env(env: &[(String, String)]) -> Vec<(String, String)> {
     effective.into_iter().collect()
 }
 
-/// Sims that examine actual texels override the one-texel default.
 fn asset_stub_value() -> &'static str {
     unstub_override("STONE_ASSET_STUB")
 }
 
-/// The shell can request real assets. It cannot force stubs on pixel-reading sims.
 fn unstub_override(var: &str) -> &'static str {
     unstub_from(std::env::var(var).ok().as_deref())
 }
 
-/// The decision itself, separated from the lookup so it is testable without
-/// mutating the process environment out from under a parallel test.
 fn unstub_from(inherited: Option<&str>) -> &'static str {
     match inherited {
         Some("0") => "0",
@@ -3053,7 +2909,6 @@ fn unstub_from(inherited: Option<&str>) -> &'static str {
     }
 }
 
-/// One sim and the fresh child that runs it, with its own `out_dir`.
 #[derive(Clone)]
 struct WorkerPart {
     name: String,
@@ -3062,13 +2917,9 @@ struct WorkerPart {
     timeout: Duration,
     env: Vec<(String, String)>,
     occurrence_id: u64,
-    /// On-disk source from the compiled wire -> source mapping, for image
-    /// baseline lookup. `None` only when the wire missed the registry.
     source_file: Option<PathBuf>,
 }
 
-/// Interpret stderr as it arrives. A protocol error permanently closes the
-/// boundary channel, while live diagnostics and reload messages still drain.
 struct EntryStream {
     name: String,
     buffered: bool,
@@ -3243,7 +3094,6 @@ fn stderr_panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
     format!("stderr reader thread panicked; sim output may be incomplete: {panic:?}")
 }
 
-/// Admission namespace used by the physical worker spawn.
 fn sim_worker_slot_directory() -> PathBuf {
     #[cfg(unix)]
     {
@@ -3257,7 +3107,6 @@ fn sim_worker_slot_directory() -> PathBuf {
     }
 }
 
-/// Share CPU/RAM slots and fresh GPU admission across all physical spawns.
 fn acquire_worker_slot(
     label: &str,
 ) -> Result<(std::fs::File, u64, u64, BTreeMap<&'static str, u64>)> {
@@ -3297,9 +3146,6 @@ fn acquire_worker_slot(
         *waits.entry(reason).or_default() += blocked.elapsed();
     }
 }
-/// Inputs for one sim child: its part plus the run's reporting and session
-/// options. Named fields, not positionals, so a swapped boolean cannot
-/// silently change what a run records.
 struct ChildConfig<'a> {
     part: &'a WorkerPart,
     quiet: bool,
@@ -3317,8 +3163,6 @@ fn child_command(
     quiet: bool,
     census_warmup_frames: Option<usize>,
 ) -> (std::process::Command, PathBuf) {
-    // `$OUT` in env values resolves before luajit spawns, so env-var-driven
-    // config can point into the entry's tempdir.
     let out_str = part.out_dir.to_string_lossy().to_string();
     let preset_env: Vec<(String, String)> = part
         .env
@@ -3330,9 +3174,6 @@ fn child_command(
     let mut cmd = crate::headless_scope::headless_command(
         rock_engine_host::runtime::build_luajit_command(&lua_file, &[]),
     );
-    // Explicit `@sim_env` values win over the defaults because `preset_env`
-    // is layered after them. Image stubs are one white texel and audio is
-    // silent for every entry; sims that read texels or voices opt out.
     cmd.env("ROCK_RUN_SIM", &part.name)
         .env("FRAME_COUNT", part.frame_budget.to_string())
         .env("OUT", &part.out_dir)
@@ -3509,8 +3350,6 @@ fn spawn_readers(
     )
 }
 
-/// Applies one mid-sim `reload_edit`. Returns true when the child must be
-/// terminated because the request failed.
 fn handle_reload_request(
     req: ReloadEditReq,
     config: &ChildConfig<'_>,
@@ -3527,8 +3366,6 @@ fn handle_reload_request(
             return true;
         }
     };
-    // Only the reload lane owns a session; servicing an ordinary sim would
-    // mutate build state shared with every other child.
     let serviced = match stone.as_deref_mut() {
         Some(st) => {
             let mut apply = || service_reload_edit(st, config.output, &mut reload.pristine, &req);
@@ -3617,7 +3454,6 @@ fn wait_for_child(
                 });
             }
         }
-        // The recv timeout doubles as the child poll interval.
         match channels.requests.recv_timeout(Duration::from_millis(50)) {
             Ok(req) => {
                 if handle_reload_request(req, config, stone, reload) {
@@ -3907,7 +3743,6 @@ fn run_child(mut config: ChildConfig<'_>) -> Result<SimSummary> {
         }
     }
 
-    // A failed revert would poison every later sim in the suite.
     if let Some(st) = stone {
         let result = if reload.pristine.is_empty() {
             revert_reload_edits(st, output, &mut reload.pristine)
@@ -3933,9 +3768,6 @@ fn run_child(mut config: ChildConfig<'_>) -> Result<SimSummary> {
     Ok(summary)
 }
 
-/// How a worker process ended, for the entries it never started: its exit
-/// status (code or signal), whether the runner killed it and why, and the last
-/// lines of game stderr outside the `__SIM__` channel.
 fn describe_worker_end(
     status: &ExitStatus,
     timed_out: bool,
@@ -3968,9 +3800,6 @@ fn describe_worker_end(
     out
 }
 
-/// The on-disk source for a part's image baselines, from the compiled
-/// wire -> source mapping the part carries -- never a source-text scan, so
-/// same-named sims in different files resolve in their own files.
 fn snapshot_source_for(part: &WorkerPart) -> Result<PathBuf, String> {
     part.source_file.clone().ok_or_else(|| {
         format!(
@@ -3980,7 +3809,6 @@ fn snapshot_source_for(part: &WorkerPart) -> Result<PathBuf, String> {
     })
 }
 
-/// `foo/bar/baz.rock` -> `foo/bar/baz.snap`, beside the image baselines.
 fn snap_dir_for(source: &Path) -> PathBuf {
     let stem = source.file_stem().unwrap_or_default();
     let parent = source.parent().unwrap_or_else(|| Path::new("."));
@@ -3989,16 +3817,7 @@ fn snap_dir_for(source: &Path) -> PathBuf {
     parent.join(name)
 }
 
-/// Compare collected image snapshots with their baselines and record each
-/// result as an expect.
 fn process_image_snapshots(summary: &mut SimSummary, snap_dir: &Path, update: bool) {
-    // Post-run image_snapshot resolutions are NOT printed by the live stream
-    // (the stream only announces the op, not its diff result), so we
-    // pass an empty site -- that's the signal `SimSummary::print` uses
-    // to know "synthesized after run; please print." The original site
-    // is folded into the message so the user still sees where it came
-    // from. Fixed 2026-05-11 after the print() guard introduced in
-    // 2c78c5cef accidentally suppressed image_snapshot failures.
     for img in std::mem::take(&mut summary.image_snapshots) {
         let site = img.site.clone();
         if !img.save_ok {
@@ -4039,7 +3858,6 @@ fn process_image_snapshots(summary: &mut SimSummary, snap_dir: &Path, update: bo
                 site: String::new(),
             }),
         }
-        // Best-effort cleanup of the temp file.
         let _ = std::fs::remove_file(&img.path);
     }
 }
@@ -4079,11 +3897,6 @@ fn handle_image_snapshot(
         std::fs::copy(produced, baseline)?;
         return Ok(SnapResult::Wrote);
     }
-    // An assertion that cannot be evaluated is not satisfied. Bootstrapping a
-    // missing golden from the current frame and counting it as a passing expect
-    // meant a sim whose goldens are untracked -- `vfx_capture.snap/` is
-    // gitignored as display-specific -- self-passed on any machine that had
-    // never run it, proving nothing about the pixels it exists to check.
     if !baseline.exists() {
         return Ok(SnapResult::Fail(format!(
             "image_snapshot `{}` has no baseline at `{}`; re-run with --update-snapshots to \
@@ -4110,10 +3923,6 @@ fn handle_image_snapshot(
     }
 }
 
-/// A failure or error message paired with the workspace-relative site
-/// (`game/tests/sims/foo.rock:42`) it originated at, captured via
-/// `@call_site` in the sim runtime helpers. Empty `site` for messages
-/// the runner synthesizes itself (e.g. process failure / timeout).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SiteMessage {
     pub message: String,
@@ -4122,16 +3931,10 @@ pub(crate) struct SiteMessage {
 
 #[derive(Default)]
 struct SimSummary {
-    /// Passing expects, in emission order, with the site each came from.
-    /// A bare count could not tell two runs apart when one passed a
-    /// DIFFERENT assertion than the other.
     expects_pass: Vec<SiteMessage>,
     expects_fail: Vec<SiteMessage>,
     errors: Vec<SiteMessage>,
     saw_stop: bool,
-    /// Number of game-loop frames completed by this entry. The count comes
-    /// from the child-side envelope boundary, so it includes the final
-    /// presented frame and frozen watcher frames.
     frame_count: Option<usize>,
     process_id: Option<u32>,
     worker_attempt: Option<u64>,
@@ -4139,21 +3942,11 @@ struct SimSummary {
     image_snapshots: Vec<ImageSnapshotOp>,
     cleanup_paths: Vec<String>,
     timed_out: bool,
-    /// The wall-clock budget the timed-out entry ran under, when the runner
-    /// killed it: its declared budget or the process-wide default.
     timeout_budget: Option<Duration>,
     process_failure_code: Option<i32>,
-    /// Child diagnostics retained by a buffered (concurrent) run, emitted by
-    /// the caller inside the record lock. Empty when the run wrote them live.
     diagnostics: String,
-    /// Parent-side conservation evidence for the real watcher/publication
-    /// completion path. None means this entry issued no reload request.
     reload_ledger: Option<ReloadLedgerSummary>,
-    /// Why this entry was excluded from execution: `sim_exclude` at runtime, or
-    /// a manual sim the suite skips.
     excluded: Option<String>,
-    /// Why this entry runs no check (`sim_no_checks`): another test reads its
-    /// log or artifacts. Without it, an entry with no check fails.
     no_checks: Option<String>,
 }
 
@@ -4170,17 +3963,14 @@ impl SimSummary {
         !self.expects_fail.is_empty() || !self.errors.is_empty()
     }
 
-    /// Whether the entry ran a check, or declared why it runs none.
     fn checks_accounted(&self) -> bool {
         self.checks_ran() > 0 || self.no_checks.is_some()
     }
 
-    /// Every check the entry reported, passing or failing.
     fn checks_ran(&self) -> usize {
         self.expects_pass.len() + self.expects_fail.len() + self.image_snapshots.len()
     }
 
-    /// Buffered runs print all failures here. Live runs already printed sited failures.
     fn print(&self, sim_name: &str, streamed: bool) {
         for (label, messages) in [("error", &self.errors), ("FAIL", &self.expects_fail)] {
             for m in messages {
