@@ -1,4 +1,4 @@
-use crate::test_support::{diagnostic_messages, diagnostics};
+use crate::test_support::{diagnostic_messages, diagnostics, stdlib_modules};
 use bone_core::modules::{NsAliases, PackageAliases};
 use bone_semantic::prelude::*;
 use rock_core::source_code::{IdentityStorage, PackageTag};
@@ -18,13 +18,6 @@ fn check(src: &str) -> Result<Workspace, CompilerError> {
         &mut module,
         &NsAliases::default(),
     )
-}
-
-fn stdlib_modules() -> Vec<skull_parser::Ast> {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| parse_rock_with_file(f.contents, &rock_stdlib::stdlib_file_id(f.name)).unwrap())
-        .collect()
 }
 
 fn tag(id: u32, self_name: &str, identity_storage: IdentityStorage) -> PackageTag {
@@ -423,12 +416,13 @@ use lib::{Number, operator(*)};
 fn multiply(x: Number?, y: int) -> int { x * y }
 "#,
     );
-    let error = crate::test_support::check_types_embedded_with_stdlib(
+    let error = crate::test_support::check_types_embedded(
         &files,
         &[(
             "<stdlib>/operators.rock",
             "operator *(a: float, b: float) -> float { a }",
         )],
+        &[],
     )
     .unwrap_err();
     assert!(

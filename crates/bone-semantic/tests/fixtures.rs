@@ -10,7 +10,7 @@ fn check_rock(file_name: &str, contents: &str) -> Result {
     let modules = file_name.starts_with("modules_");
     let check = |src: &str| {
         if modules {
-            crate::test_support::check_types_embedded_with_cached_stdlib(
+            crate::test_support::check_types_embedded(
                 &crate::test_support::parse_embedded_files(src),
                 stdlib_sources(),
                 skull_parser::stdlib::cached()
@@ -142,12 +142,8 @@ fn check_std_fixture(contents: &str) -> Result {
         !user_files.is_empty(),
         "v1_default_prelude has no embedded file"
     );
-    crate::test_support::check_types_embedded_with_cached_stdlib(
-        &user_files,
-        stdlib_sources(),
-        cached_stdlib,
-    )
-    .map_err(|e| format!("v1 default prelude failed: {e}"))
+    crate::test_support::check_types_embedded(&user_files, stdlib_sources(), cached_stdlib)
+        .map_err(|e| format!("v1 default prelude failed: {e}"))
 }
 
 fn main() -> std::process::ExitCode {

@@ -19,67 +19,14 @@ pub fn render_err(sources: &[(&str, &str)], e: &CompilerError) -> String {
 
 /// Checks that every `//^ ty` marker in `src` names the type at its position.
 pub fn check_types(src: &str) -> Result<(), String> {
-    let srcs: &[(&str, &str)] = &[("<parse_rock>", src)];
-    let stage = |stage: &str, e: CompilerError| format!("{stage} failed\n{}", render_err(srcs, &e));
-
-    // The file name must match the `srcs` key so error rendering finds the source.
-    let module = parse_module(src, ustr("<parse_rock>")).map_err(|e| stage("parse_rock", e))?;
-
-    // `parse_module` recovers past a malformed item; the compile gate still rejects it.
-    if let Some(e) = module.recovery_errors.first() {
-        return Err(stage("parse_rock", e.clone()));
-    }
-
-    let ws = bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(
-        &mut [module],
-        &bone_core::modules::NsAliases::default(),
-    )
-    .map_err(|e| stage("semantic_pass", e))?;
-
-    if let Some(e) = first_error(&ws) {
-        return Err(stage("type-check", e.clone()));
-    }
-
-    let mid = ws
-        .source_modules()
-        .next()
-        .ok_or_else(|| "no user module after semantic_pass".to_string())?
-        .id;
-
-    let inf = ws
-        .inference(mid)
-        .ok_or_else(|| "no inference for user module".to_string())?;
-
-    let annotations = test_utils::extract_annotations(src);
-    if annotations.is_empty() {
+    let file = EmbeddedFile {
+        file: "<parse_rock>",
+        package: None,
+        src,
+    };
+    check_types_embedded(&[file], &[], &[])?;
+    if test_utils::extract_annotations(src).is_empty() {
         return Err("no //^ annotations in source".to_string());
-    }
-
-    for ((start, end), expected) in &annotations {
-        if expected == "?" {
-            return Err(stage("dump", dump_at(&ws, mid, inf, *start, *end)));
-        }
-
-        let actual = bone_semantic::query::type_at(&ws, mid, inf, *start).ok_or_else(|| {
-            stage(
-                "type_at",
-                CompilerError::new_with_label(
-                    Span::new(Ustr::from("<parse_rock>"), (0, 0), (0, 0), (*start, *end)),
-                    format!("no type at marker (expected `{expected}`)"),
-                ),
-            )
-        })?;
-
-        let actual_str = ws.render(actual.body, actual.ty);
-        if actual_str != **expected {
-            return Err(stage(
-                "type mismatch",
-                CompilerError::new_with_label(
-                    actual.span,
-                    format!("expected `{expected}`, found `{actual_str}`"),
-                ),
-            ));
-        }
     }
     Ok(())
 }
@@ -113,163 +60,45 @@ fn first_error(ws: &Workspace) -> Option<&CompilerError> {
         .min_by_key(|e| e.location.offset)
 }
 
-/// The `//^ ?` debug marker: labels every indexed node overlapping `[start, end)`.
-fn dump_at(
-    ws: &Workspace,
-    mid: ModuleId,
-    inf: &InferenceResult,
-    start: usize,
-    end: usize,
-) -> CompilerError {
-    let module = match ws.modules.get(mid.index()) {
-        Some(m) => m,
-        None => {
-            return CompilerError::new_with_label(
-                Span::unknown(),
-                format!("dump: module {:?} not in workspace", mid),
-            );
-        }
-    };
-
-    let mk_span = |s: usize, e: usize| Span::new(module.file, (0, 0), (0, 0), (s, e));
-
-    let mut labels: Vec<(usize, Span, String)> = Vec::new();
-
-    for item in module.item_index().find(start, end) {
-        let owner = item.val;
-        let Some(body) = module.bodies.get(&owner) else {
-            continue;
-        };
-
-        let bi = inf.per_fn.get(&owner);
-
-        for interval in body.node_index().find(start, end) {
-            let interval_span = mk_span(interval.start, interval.stop);
-
-            let (span, label) = match interval.val {
-                hir::NodeRef::StaticTy { mid, idx } => (
-                    interval_span,
-                    format!(
-                        "Ty {:?} = {}",
-                        interval.val,
-                        ws.render(None, hir::TyId::Static(mid, idx))
-                    ),
-                ),
-                hir::NodeRef::Expr(idx) => (
-                    body.expr_spans.get(idx).copied().unwrap_or(interval_span),
-                    format!(
-                        "Expr {:?} = {:?}",
-                        idx,
-                        bi.and_then(|b| b.expr_types.get(idx))
-                    ),
-                ),
-
-                hir::NodeRef::Statement(idx) => (
-                    body.statement_spans
-                        .get(idx)
-                        .copied()
-                        .unwrap_or(interval_span),
-                    format!("Stmt {:?}", idx),
-                ),
-
-                hir::NodeRef::Binding(idx) => (
-                    body.binding_spans
-                        .get(idx)
-                        .copied()
-                        .unwrap_or(interval_span),
-                    format!("Binding {:?} = {:?}", idx, body.binding_arena[idx].name),
-                ),
-
-                hir::NodeRef::LocalTy(idx) => (
-                    body.lowered_ty_spans
-                        .get(idx)
-                        .copied()
-                        .unwrap_or(interval_span),
-                    match bi {
-                        Some(b) => format!(
-                            "LocalTy {:?} = {}",
-                            idx,
-                            ws.render(Some(b), hir::TyId::Local(idx))
-                        ),
-                        None => format!("LocalTy {:?} = <body not inferred>", idx),
-                    },
-                ),
-            };
-
-            labels.push((interval.start, span, label));
-        }
-    }
-
-    labels.sort_by_key(|x| x.0);
-
-    let mut err = CompilerError::new_with_label(
-        mk_span(start, end),
-        format!("dump @ [{start}, {end}) - {} interval(s)", labels.len(),),
-    );
-
-    for (_, span, label) in labels {
-        err = err.with_label(span, label);
-    }
-
-    err
+pub fn stdlib_modules() -> Vec<skull_parser::Ast> {
+    rock_stdlib::stdlib_files()
+        .iter()
+        .map(|f| {
+            skull_parser::parse_module_clean(f.contents, ustr(&rock_stdlib::stdlib_file_id(f.name)))
+                .unwrap()
+        })
+        .collect()
 }
 
-pub struct PackageFixture<'a> {
-    pub file: &'a str,
-    /// `None` creates a standalone package; `Some((self_name, package_id))` stamps a
-    /// v1 package owner.
-    pub package: Option<(&'a str, u32)>,
-    pub src: &'a str,
-}
+pub use test_utils::{EmbeddedFile, parse_embedded_files};
 
-pub fn check_types_packages_with_stdlib(
-    files: &[PackageFixture<'_>],
-    stdlib_sources: &[(&str, &str)],
-) -> Result<(), String> {
-    check_types_packages_with_cached_stdlib(files, stdlib_sources, &[])
-}
-
-fn check_types_packages_with_cached_stdlib(
-    files: &[PackageFixture<'_>],
+/// Checks `files` (after the trusted stdlib, whose `//^` comments are not
+/// markers), with every package reachable under its own self name.
+/// `cached_stdlib`, when not empty, holds `stdlib_sources` already parsed.
+pub fn check_types_embedded(
+    files: &[EmbeddedFile<'_>],
     stdlib_sources: &[(&str, &str)],
     cached_stdlib: &[skull_parser::Ast],
 ) -> Result<(), String> {
-    if !cached_stdlib.is_empty() {
-        assert_eq!(cached_stdlib.len(), stdlib_sources.len());
-        for (module, (file, _)) in cached_stdlib.iter().zip(stdlib_sources) {
-            assert_eq!(module.file, ustr(file));
-        }
-    }
-    let mut all = Vec::with_capacity(stdlib_sources.len() + files.len());
-    all.extend(stdlib_sources.iter().map(|(file, src)| PackageFixture {
-        file,
-        package: None,
-        src,
-    }));
-    all.extend(files.iter().map(|file| PackageFixture {
-        file: file.file,
-        package: file.package,
-        src: file.src,
-    }));
-    check_types_packages_inner(&all, files, cached_stdlib)
-}
-
-fn check_types_packages_inner(
-    all_files: &[PackageFixture<'_>],
-    checked_files: &[PackageFixture<'_>],
-    cached_stdlib: &[skull_parser::Ast],
-) -> Result<(), String> {
-    let mut srcs: Vec<(&str, &str)> = Vec::new();
-    let mut modules = Vec::new();
-    for (i, f) in all_files.iter().enumerate() {
-        srcs.push((f.file, f.src));
-        let mut module = if let Some(module) = cached_stdlib.get(i) {
-            module.clone()
-        } else {
-            parse_module(f.src, ustr(f.file)).map_err(|e| render_err(&srcs, &e))?
+    let stdlib = stdlib_sources.iter().map(|&(file, src)| (file, None, src));
+    let checked = files.iter().map(|f| (f.file, f.package, f.src));
+    let all: Vec<EmbeddedFile<'_>> = stdlib
+        .chain(checked)
+        .map(|(file, package, src)| EmbeddedFile { file, package, src })
+        .collect();
+    let srcs: Vec<(&str, &str)> = all.iter().map(|f| (f.file, f.src)).collect();
+    let mut modules = Vec::with_capacity(all.len());
+    for (i, f) in all.iter().enumerate() {
+        let mut module = match cached_stdlib.get(i) {
+            Some(module) => {
+                assert_eq!(module.file, ustr(f.file));
+                module.clone()
+            }
+            None => parse_module(f.src, ustr(f.file)).map_err(|e| render_err(&srcs, &e))?,
         };
+        // `parse_module` recovers past a malformed item; the compile gate still rejects it.
         if let Some(e) = module.recovery_errors.first() {
-            return Err(render_err(&srcs, &e.clone()));
+            return Err(render_err(&srcs, e));
         }
         module.package = f
             .package
@@ -282,27 +111,24 @@ fn check_types_packages_inner(
         modules.push(module);
     }
 
-    let mut aliases = bone_core::modules::NsAliases::default();
-    let ids: Vec<(u32, &str)> = all_files
+    let ids: Vec<(u32, &str)> = all
         .iter()
         .filter_map(|f| f.package.map(|(name, id)| (id, name)))
         .collect();
+    let mut aliases = bone_core::modules::NsAliases::default();
     let mut seen = std::collections::HashSet::new();
-    for (id, name) in &ids {
-        if !seen.insert(*id) {
-            continue;
+    for &(id, name) in &ids {
+        if seen.insert(id) {
+            aliases.packages.push(bone_core::modules::PackageAliases {
+                id,
+                self_name: ustr(name),
+                aliases: ids
+                    .iter()
+                    .filter(|(other, _)| *other != id)
+                    .map(|&(other, other_name)| (ustr(other_name), other))
+                    .collect(),
+            });
         }
-        let self_u = ustr(name);
-        let entry = bone_core::modules::PackageAliases {
-            id: *id,
-            self_name: self_u,
-            aliases: ids
-                .iter()
-                .filter(|(other, _)| other != id)
-                .map(|(other, other_name)| (ustr(other_name), *other))
-                .collect(),
-        };
-        aliases.packages.push(entry);
     }
 
     let ws = bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(
@@ -310,65 +136,41 @@ fn check_types_packages_inner(
         &aliases,
     )
     .map_err(|e| render_err(&srcs, &e))?;
-
     if let Some(e) = first_error(&ws) {
         return Err(render_err(&srcs, e));
     }
 
-    for f in checked_files.iter() {
+    for f in files {
         let annotations = test_utils::extract_annotations(f.src);
         if annotations.is_empty() {
             continue;
         }
-        let mid = ws
-            .modules
-            .iter()
-            .find(|m| m.file == ustr(f.file))
-            .ok_or_else(|| format!("file {} missing from workspace", f.file))?
-            .id;
+        let mid = ws.module_ids[&ustr(f.file)];
         let inf = ws
             .inference(mid)
             .ok_or_else(|| format!("no inference for {}", f.file))?;
-        for ((start, _end), expected) in &annotations {
-            if expected == "?" {
-                return Err("`?` dump markers are not supported in package fixtures".to_string());
-            }
+        for ((start, end), expected) in &annotations {
+            let marker = Span::new(ustr(f.file), (0, 0), (0, 0), (*start, *end));
             let actual = bone_semantic::query::type_at(&ws, mid, inf, *start).ok_or_else(|| {
-                format!("no type at marker (expected `{expected}`) in {}", f.file)
+                render_err(
+                    &srcs,
+                    &CompilerError::new_with_label(
+                        marker,
+                        format!("no type at marker (expected `{expected}`)"),
+                    ),
+                )
             })?;
             let actual_str = ws.render(actual.body, actual.ty);
             if actual_str != **expected {
-                return Err(format!(
-                    "type mismatch in {}: expected `{expected}`, found `{actual_str}`",
-                    f.file
+                return Err(render_err(
+                    &srcs,
+                    &CompilerError::new_with_label(
+                        actual.span,
+                        format!("expected `{expected}`, found `{actual_str}`"),
+                    ),
                 ));
             }
         }
     }
     Ok(())
-}
-
-pub use test_utils::{EmbeddedFile, parse_embedded_files};
-
-pub fn check_types_embedded_with_stdlib(
-    files: &[EmbeddedFile<'_>],
-    stdlib_sources: &[(&str, &str)],
-) -> Result<(), String> {
-    check_types_embedded_with_cached_stdlib(files, stdlib_sources, &[])
-}
-
-pub fn check_types_embedded_with_cached_stdlib(
-    files: &[EmbeddedFile<'_>],
-    stdlib_sources: &[(&str, &str)],
-    cached_stdlib: &[skull_parser::Ast],
-) -> Result<(), String> {
-    let fixtures: Vec<PackageFixture<'_>> = files
-        .iter()
-        .map(|f| PackageFixture {
-            file: f.file,
-            package: f.package,
-            src: f.src,
-        })
-        .collect();
-    check_types_packages_with_cached_stdlib(&fixtures, stdlib_sources, cached_stdlib)
 }

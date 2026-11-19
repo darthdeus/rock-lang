@@ -2,16 +2,7 @@ use bone_core::hir::BodyOwner;
 use bone_semantic::prelude::*;
 
 fn checked(source: &str) -> Workspace {
-    let mut modules: Vec<_> = rock_stdlib::stdlib_files()
-        .iter()
-        .map(|file| {
-            skull_parser::parse_module_clean(
-                file.contents,
-                ustr(&rock_stdlib::stdlib_file_id(file.name)),
-            )
-            .unwrap()
-        })
-        .collect();
+    let mut modules = crate::test_support::stdlib_modules();
     modules.push(skull_parser::parse_module_clean(source, ustr("<test>")).unwrap());
     bone_semantic::semantic_passes::semantic_pass(&mut modules).unwrap()
 }
@@ -60,11 +51,7 @@ fn relocatable_refs_cannot_reach_coroutine_frames() {
              }}"
         );
         let ws = checked(&source);
-        let module = ws
-            .modules
-            .iter()
-            .find(|m| m.file == ustr("<test>"))
-            .unwrap();
+        let module = ws.module(ws.module_ids[&ustr("<test>")]);
         let fid = module
             .functions
             .iter()
