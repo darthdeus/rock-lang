@@ -1,4 +1,3 @@
-//! @no_check
 //! Nullable types: `T?`. A dedicated `TypeExpr::Nullable { inner }` wrapper
 //! (NOT a flag, NOT `App(Nullable)`). Slices, simplest first:
 //!   1. annotation lowering + render (`let x: int? = ...` -> `int?`)

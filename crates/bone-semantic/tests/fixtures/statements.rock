@@ -1,4 +1,3 @@
-//! @no_check
 //! Smoke: a nested block as a non-first statement type-checks.
 //!
 //! NOTE: this does NOT catch the statement-range-leak bug (inner `let b` leaking

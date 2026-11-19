@@ -1,12 +1,4 @@
-//! @no_check
-//! The function body's type must unify with the declared return type. Today
-//! `check_module` infers the body but discards its type (inference.rs ~line 311),
-//! so a mismatch is silently accepted. The @fail case pins that.
-//!
-//! IMPLEMENTER NOTE: the `pair`/`fst`/`wrap` helper bodies in tuples.rock /
-//! app_types.rock are already real (`(x, x)`, `p.0`, `[x]`) and agree with their
-//! declared returns, so enabling the check won't break them — just add the
-//! `check_module` unify (`unify(body_ty, f.return_ty, f.span)`).
+//! The function body's type must unify with the declared return type.
 
 //- body_return_ok
 fn f() -> int { 5 }

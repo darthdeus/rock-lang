@@ -1,9 +1,5 @@
-//! @no_check
 //! Tuple-literal expressions: `(a, b)` infers to `(A, B)`. Heterogeneous — each
-//! element keeps its own type (no element-unify, unlike arrays). Needs an
-//! `Expr::Tuple` variant + lowering (reuse `lower_exprs`) + inference (infer each
-//! element, build a `Tuple` type from the element types). Fails today at lowering
-//! ("unsupported expr").
+//! element keeps its own type (no element-unify, unlike arrays).
 //!
 //! Marker on the `let` binding (its inferred type).
 

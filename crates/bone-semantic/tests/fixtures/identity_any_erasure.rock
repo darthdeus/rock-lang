@@ -1,4 +1,3 @@
-//! @no_check
 //! Identity-to-`any` erasure: an `any` is ordinary storage, so an identity struct never
 //! coerces to one, directly, nullable or through `as`. Handles and values do.
 //! Stdlib-free: each section declares its own handles.

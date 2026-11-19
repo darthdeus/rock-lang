@@ -1,4 +1,3 @@
-//! @no_check
 //! Top-level statements (module globals): `global NAME: T = value` at module scope.
 //! Globals are always annotated, so the global's type IS its annotation; function
 //! bodies resolve it as a value of that type. The value is checked against the

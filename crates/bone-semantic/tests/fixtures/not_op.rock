@@ -1,7 +1,4 @@
-//! @no_check
 //! Logical negation: `!e`. Operand must be `bool`; result is `bool`.
-//! Needs `Expr::Not` HIR + lowering (`ExprKind::Not`) + inference
-//! (unify operand with bool, yield bool).
 
 //- not_bool_literal
 fn f() -> bool {

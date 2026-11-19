@@ -1,5 +1,3 @@
-//! @no_check
-
 //- generic_identity_body
 fn id<T>(x: T) -> T { x }
        //^ T

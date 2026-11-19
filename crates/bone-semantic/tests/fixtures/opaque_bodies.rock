@@ -1,8 +1,6 @@
-//! @no_check
 //! Opaque function bodies: `inline(lua)` / extern functions have no Rock body to
 //! infer. bone registers the signature (params + return type) and skips body
 //! inference, so callers resolve and typecheck against the declared signature.
-//! This is a prerequisite for loading the stdlib (almost all of it is inline lua).
 
 // an inline(lua) function is callable; its declared return type flows out.
 //- inline_lua_callable

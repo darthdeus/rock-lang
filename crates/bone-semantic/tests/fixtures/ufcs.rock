@@ -1,4 +1,3 @@
-//! @no_check
 //! UFCS method-call syntax: `x.foo(a)` desugars to `foo(x, a)` (receiver becomes
 //! the first argument). Parses as a FunctionCall whose callee is a FieldAccess;
 //! lowering prepends the receiver and routes through normal call resolution.

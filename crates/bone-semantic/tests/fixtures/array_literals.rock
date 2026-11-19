@@ -1,12 +1,7 @@
-//! @no_check
+//! Array-literal expressions: `[1, 2, 3]` infers to `[int]` (App Array). The
+//! element types unify together and the result wraps them in the Array ctor.
 //!
-//! Array-literal expressions: `[1, 2, 3]` infers to `[int]` (App Array).
-//! Needs an `Expr::Array` variant + lowering + element-type inference (unify the
-//! element types together, wrap the result in the Array ctor). Fails today at
-//! lowering ("Unsupported expr").
-//!
-//! Marker sits on the `let` binding name (its inferred type). Functions return
-//! `int` via a trailing `5` so the (unchecked) body-vs-return path is irrelevant.
+//! Marker sits on the `let` binding name (its inferred type).
 
 //- array_literal_int
 fn f() -> int {

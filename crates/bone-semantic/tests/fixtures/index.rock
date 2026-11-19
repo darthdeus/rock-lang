@@ -1,7 +1,5 @@
-//! @no_check
 //! Index expressions: `a[i]`. For `[T]` arrays the index is `int` and the
 //! result is `T`; for `Map<K, V>` the index is `K` and the result is `V`.
-//! Needs `Expr::Index` HIR + lowering (`ExprKind::Index`) + inference.
 
 //- index_array_int
 fn f() -> int {

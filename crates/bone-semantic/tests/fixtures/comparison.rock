@@ -1,4 +1,3 @@
-//! @no_check
 //! Comparison / logical operators carry operand constraints beyond "-> bool":
 //!   <, <=, >, >=  require numeric operands (int/float); int and float widen.
 //!   &&, ||        require bool operands.

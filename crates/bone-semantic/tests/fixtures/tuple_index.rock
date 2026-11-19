@@ -1,8 +1,6 @@
-//! @no_check
-//! Tuple indexing: `t.0`, `t.1`. Needs an `Expr::TupleIndex { tuple, index }`
-//! variant + lowering (`ExprKind::TupleIndex(base, idx)`) + inference (infer the
-//! base, require it to be a `Tuple`, project the index-th element type; error on
-//! out-of-bounds or non-tuple base). Fails today at lowering ("unsupported expr").
+//! Tuple indexing: `t.0`, `t.1`. The base must be a `Tuple`; the result is the
+//! index-th element type. An out-of-bounds index or a non-tuple base is an
+//! error.
 //!
 //! Marker on the `let` binding holding the projection.
 

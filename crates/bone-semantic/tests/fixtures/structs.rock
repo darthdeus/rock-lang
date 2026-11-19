@@ -1,9 +1,7 @@
-//! @no_check
 //! Structs, slice A: definitions + named-type resolution. A `struct` item
 //! registers a named type; its name resolves in type position (params, fields,
 //! returns). Field bodies can forward-reference structs declared later, so
 //! registration is two-pass (collect names, then lower field types).
-//! Literals (slice B) and field access (slice C) come next.
 
 // a struct name resolves as a parameter type, and renders as the name.
 //- struct_param_type

@@ -1,4 +1,3 @@
-//! @no_check
 //! Cast expressions: `e as T`. `as` is a checked explicit conversion -- the
 //! operand's inferred type must reach `T` through the closed conversion
 //! relation (`int`/`float` either way, or ordinary assignment compatibility).

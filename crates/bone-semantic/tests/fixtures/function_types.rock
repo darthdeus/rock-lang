@@ -1,8 +1,6 @@
-//! @no_check
 //! Function types in annotation position: `(P...) -> R`. These DO parse
 //! (`TypeExprKind::Function`), so this slice is independent of lambdas: it pins
-//! `lower_type_expr`'s Function arm (currently a `comp_error!` stub) and
-//! `render`'s Function arm (currently a `{:?}` debug stub). Markers sit on the
+//! `lower_type_expr`'s and `render`'s Function arms. Markers sit on the
 //! parameter name whose declared type is the function type.
 
 //- fn_type_param

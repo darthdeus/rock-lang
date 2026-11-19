@@ -1,4 +1,3 @@
-//! @no_check
 //! Parenthesized expressions: `(e)`. No HIR node -- lowering just unwraps to the
 //! inner expr, so `(e)` has exactly `e`'s type. Marker on the binding.
 

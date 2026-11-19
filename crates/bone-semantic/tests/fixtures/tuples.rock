@@ -1,5 +1,3 @@
-//! @no_check
-//!
 //! Tuple type lowering, substitution, and unification.
 //!
 //! Marker conventions:
@@ -11,9 +9,6 @@
 //!   - call results: marker on the callee name (matches generics.rock `id(5)`).
 //!
 //! Render format: `(int, int)` — parens, `, ` separator.
-//!
-//! Helper bodies are real (`pair` builds `(x, x)`, `fst` projects `p.0`), so they
-//! agree with their declared returns once body-vs-return checking lands.
 
 // --- lower + render tuple type annotations ---
 

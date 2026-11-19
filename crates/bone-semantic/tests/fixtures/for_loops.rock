@@ -1,4 +1,3 @@
-//! @no_check
 //! For loops: `for x in iter { body }`. The loop variable binds to the iterable's
 //! element type (range -> int, `[T]` -> T). The `for` itself is a statement (unit).
 //! `[T]` iterates via the iter/next protocol (stdlib `VecIter`); these fixtures

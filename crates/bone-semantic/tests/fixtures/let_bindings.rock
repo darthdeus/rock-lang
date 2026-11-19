@@ -1,5 +1,3 @@
-//! @no_check
-
 //- let_int
 fn f() -> int {
     let x = 5

@@ -1,5 +1,3 @@
-//! @no_check
-
 //- int_literal
 fn f() -> int { 5 }
               //^ int

@@ -1,4 +1,3 @@
-//! @no_check
 //! Identity storage. A `struct` has
 //! identity and lives only as an Arena row or a Scene/process root; every
 //! ordinary declaration position holds values or handles. Fields of structs

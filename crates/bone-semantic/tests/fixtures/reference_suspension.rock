@@ -1,4 +1,3 @@
-//! @no_check
 //! A frame ref may be used in the segment where it was acquired. A path
 //! that suspends must refresh the ref before using it again.
 

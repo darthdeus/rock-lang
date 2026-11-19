@@ -1,4 +1,3 @@
-//! @no_check
 //! Generic structs + App type application. `struct Box<T> { value: T }` stores a
 //! generic param; `Box<int>` is an App instantiation; field access substitutes
 //! the type argument (`b.value` on `Box<int>` is `int`, on `Box<string>` is

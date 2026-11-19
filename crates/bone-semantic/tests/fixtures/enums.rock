@@ -1,4 +1,3 @@
-//! @no_check
 //! Enum definitions (E1): an `enum` registers a nominal type whose name resolves
 //! in type position; variant payload types are lowered. Construction
 //! (`Color::Red`, `Shape::Circle(x)`) and `match` are separate slices.

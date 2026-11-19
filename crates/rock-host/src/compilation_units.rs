@@ -357,21 +357,11 @@ fn load_project_sources(files: &[PathBuf], project_dir: Option<&Path>) -> Result
     Ok(sources)
 }
 
-/// Helper function to load SourceFiles from a list of paths.
-///
-/// Files starting with `//! @no_check` are silently skipped — they
-/// exist on disk for non-compiler tooling (e.g. the bone test harness's
-/// section-based fixtures), but the LSP / compiler shouldn't try to
-/// type-check them. Without this, the bone fixtures fail with phantom
-/// duplicate-`fn` errors because each section reuses the same name.
 fn load_sources_from_paths(paths: &[PathBuf]) -> Result<SourceFiles> {
     let mut sources = Vec::new();
 
     for path in paths {
         let source_file: SourceFile = source_file_new_preprocessed(path)?;
-        if has_no_check_pragma(&source_file.contents) {
-            continue;
-        }
         sources.push(Arc::new(AtomicRefCell::new(source_file)));
     }
 
@@ -380,31 +370,4 @@ fn load_sources_from_paths(paths: &[PathBuf]) -> Result<SourceFiles> {
         package_roots: Vec::new(),
         ns_aliases: None,
     })
-}
-
-/// True iff the file's first non-blank line is `//! @no_check`.
-fn has_no_check_pragma(src: &str) -> bool {
-    for line in src.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        return trimmed == "//! @no_check";
-    }
-    false
-}
-
-#[cfg(test)]
-mod no_check_tests {
-    use super::has_no_check_pragma;
-
-    #[test]
-    fn pragma_must_be_the_first_non_blank_line() {
-        assert!(has_no_check_pragma("//! @no_check\n//- foo\n"));
-        assert!(has_no_check_pragma("   //! @no_check   \n"));
-        assert!(has_no_check_pragma("\n\n//! @no_check\n"));
-        assert!(!has_no_check_pragma("fn f() {}\n"));
-        assert!(!has_no_check_pragma("// regular comment\n//! @no_check\n"));
-        assert!(!has_no_check_pragma("//! @other_pragma\n"));
-    }
 }

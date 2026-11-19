@@ -1,8 +1,6 @@
-//! @no_check
 //! If-expressions: `if cond { a } else { b }`. The condition must be `bool`, and
-//! the two branches unify to the result type. `infer_expr` has
-//! `Expr::If => todo!()` and lowering rejects `ExprKind::If`, so these fail today
-//! at lowering. Marker on the `let` binding (the if's result type).
+//! the two branches unify to the result type. Marker on the `let` binding (the
+//! if's result type).
 
 //- if_basic
 fn f() -> int {

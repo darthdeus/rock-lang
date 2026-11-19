@@ -1,7 +1,5 @@
-//! @no_check
-//! Assignment: `x = v`, `p.field = v`. Plain `=` only for now (compound `+=`
-//! needs operator resolution; index assignment needs `Index`). Result is unit;
-//! the value must unify with the target's type.
+//! Assignment: `x = v`, `p.field = v`. Result is unit; the value must unify
+//! with the target's type.
 
 //- assign_var
 fn f() -> int {
