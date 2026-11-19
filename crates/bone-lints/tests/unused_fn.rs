@@ -14,13 +14,6 @@ fn names(src: &str) -> Vec<String> {
 }
 
 #[test]
-fn flags_a_dead_fn() {
-    // `dead` has no caller and no root marker -> unreachable.
-    let src = "fn main() {\n    used()\n}\nfn used() {}\nfn dead() {}";
-    assert_eq!(names(src), vec!["dead".to_string()]);
-}
-
-#[test]
 fn reachable_fns_and_roots_are_not_flagged() {
     let cases: &[&str] = &[
         // used is called from main

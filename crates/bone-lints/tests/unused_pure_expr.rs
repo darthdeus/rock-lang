@@ -1,9 +1,6 @@
-//! unused-pure-expr lint over bone HIR, run through `lint_workspace`.
-
 use crate::support::lint_only;
 use bone_lints::Finding;
 
-/// What `lint_workspace` reports, after `// rock: allow` suppression.
 fn findings(src: &str) -> Vec<Finding> {
     lint_only(&[("<unused_pure_expr>", src)], "unused_pure_expr")
 }
@@ -17,30 +14,26 @@ fn is_comparison(finding: &Finding) -> bool {
 }
 
 #[test]
-fn flags_a_comparison_statement() {
-    // The canonical bug: `==` where `=` was meant, result discarded.
-    let src = "fn f() -> int {\n    let x = 1\n    x == 1\n    x\n}";
-    let fs = findings(src);
-    assert_eq!(fs.len(), 1, "one discarded comparison, got {:?}", fs.len());
-    assert!(is_comparison(&fs[0]), "the `==` root is a comparison");
-}
-
-#[test]
-fn flags_the_canonical_enum_comparison_bug() {
-    // The real shipped bug: `mob.ai_state == MobAiState::Wander` in statement
-    // position. `==` lowers to BinOp even for enums; the EnumVariant RHS is a
-    // pure constructor, so the whole expr is side-effect-free.
-    let src = "enum S {\n    Wander,\n    Flee,\n}\n\
-               struct Mob {\n    ai_state: S,\n}\n\
-               fn tick(mob: Mob) -> int {\n    mob.ai_state == S::Wander\n    5\n}";
-    let fs = findings(src);
-    assert_eq!(
-        fs.len(),
-        1,
-        "the enum comparison is flagged, got {:?}",
-        fs.len()
-    );
-    assert!(is_comparison(&fs[0]));
+fn flagged_roots_are_classified() {
+    let cases: &[(&str, bool)] = &[
+        ("fn f() -> int {\n    let x = 1\n    x == 1\n    x\n}", true),
+        (
+            "enum S {\n    Wander,\n    Flee,\n}\n\
+             struct Mob {\n    ai_state: S,\n}\n\
+             fn tick(mob: Mob) -> int {\n    mob.ai_state == S::Wander\n    5\n}",
+            true,
+        ),
+        ("fn f() -> int {\n    let x = 1\n    x\n    3\n}", false),
+        (
+            "fn f() -> int {\n    let x = 1\n    x > 0 && x < 5\n    x\n}",
+            false,
+        ),
+    ];
+    for (src, comparison) in cases {
+        let fs = findings(src);
+        assert_eq!(fs.len(), 1, "{src}: {fs:?}");
+        assert_eq!(is_comparison(&fs[0]), *comparison, "{src}");
+    }
 }
 
 #[test]
@@ -114,25 +107,6 @@ fn discarded_pure_expressions_are_counted() {
     for (name, src, expected) in cases {
         assert_eq!(count(src), *expected, "{name}");
     }
-}
-
-#[test]
-fn flags_bare_variable_read() {
-    let src = "fn f() -> int {\n    let x = 1\n    x\n    3\n}";
-    let fs = findings(src);
-    assert_eq!(fs.len(), 1, "bare `x` read is a discarded pure expr");
-    assert!(!is_comparison(&fs[0]), "a var read is not a comparison");
-}
-
-#[test]
-fn flags_logical_binop() {
-    let src = "fn f() -> int {\n    let x = 1\n    x > 0 && x < 5\n    x\n}";
-    let fs = findings(src);
-    assert_eq!(fs.len(), 1, "`&&` root is a discarded pure expr");
-    assert!(
-        !is_comparison(&fs[0]),
-        "a logical `&&` root is generic, not a comparison"
-    );
 }
 
 #[test]

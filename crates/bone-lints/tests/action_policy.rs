@@ -1,5 +1,5 @@
 use bone_lints::{
-    ACTION_CALLERS, ActionLayerPolicy, IncrementalLintCache, LintCacheUpdate, LintOptions,
+    ACTION_CALLERS, ActionLayerPolicy, Finding, IncrementalLintCache, LintCacheUpdate, LintOptions,
     RAW_INPUT_CLASSIFICATION, RAW_INPUT_MIGRATION, lint_workspace,
 };
 use bone_semantic::prelude::*;
@@ -20,6 +20,12 @@ static POLICY: std::sync::LazyLock<ActionLayerPolicy> =
 fn workspace(file: &str, source: &str) -> Workspace {
     let ast = skull_parser::parse_module_clean(source, Ustr::from(file)).unwrap();
     semantic_pass(&mut [ast]).unwrap()
+}
+
+fn lint_one(file: &str, source: &str, options: &LintOptions) -> Vec<Finding> {
+    let ws = workspace(file, source);
+    let sources = [(Ustr::from(file), source)].into_iter().collect();
+    lint_workspace(&ws, &FxHashSet::default(), true, &sources, options)
 }
 
 const FILES: [(&str, &str); 2] = [
@@ -117,9 +123,7 @@ fn caller_policy_controls_root_prefix_registration_and_diagnostic() {
         ("game/tests/player.rock", 0),
         ("endgame/player.rock", 0),
     ] {
-        let ws = workspace(file, source);
-        let sources = [(Ustr::from(file), source)].into_iter().collect();
-        let found = lint_workspace(&ws, &FxHashSet::default(), true, &sources, &options);
+        let found = lint_one(file, source, &options);
         assert_eq!(found.len(), expected, "{file}: {found:?}");
         if expected == 1 {
             assert_eq!(
@@ -134,22 +138,16 @@ fn caller_policy_controls_root_prefix_registration_and_diagnostic() {
 fn raw_input_policy_controls_query_population_and_classes() {
     let file = "game/player.rock";
     let source = "extern(lua) fn read_button() -> bool\nextern(lua) fn other_button() -> bool\nfn main() {\n    // action-layer: pointer\n    if read_button() {}\n    if other_button() {}\n}\n";
-    let ws = workspace(file, source);
-    let sources = [(Ustr::from(file), source)].into_iter().collect();
     let options = LintOptions::only([
         RAW_INPUT_MIGRATION.to_owned(),
         RAW_INPUT_CLASSIFICATION.to_owned(),
     ])
     .with_action_policy(Some(&POLICY));
-    let found = lint_workspace(&ws, &FxHashSet::default(), true, &sources, &options);
+    let found = lint_one(file, source, &options);
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(found[0].lint, RAW_INPUT_MIGRATION);
     let unclassified = source.replace("action-layer: pointer", "action-layer: unknown");
-    let ws = workspace(file, &unclassified);
-    let sources = [(Ustr::from(file), unclassified.as_str())]
-        .into_iter()
-        .collect();
-    let found = lint_workspace(&ws, &FxHashSet::default(), true, &sources, &options);
+    let found = lint_one(file, &unclassified, &options);
     assert_eq!(found.len(), 2, "{found:?}");
     assert!(
         found

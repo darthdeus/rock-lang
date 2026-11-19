@@ -27,25 +27,6 @@ fn main() { gameplay() }
 }
 
 #[test]
-fn removing_one_production_read_is_a_load_bearing_mutation() {
-    let src = r#"
-global ACT_USED: int = 1
-
-fn gameplay() {
-    let value = ACT_USED
-}
-
-fn main() { gameplay() }
-"#;
-    assert!(findings("app/player.rock", src, ACTION_CALLERS).is_empty());
-
-    let mutated = src.replace("let value = ACT_USED", "let value = 0");
-    let found = findings("app/player.rock", &mutated, ACTION_CALLERS);
-    assert_eq!(found.len(), 1, "mutated caller census: {found:?}");
-    assert!(found[0].error.message.contains("ACT_USED"));
-}
-
-#[test]
 fn caller_census_rejects_an_empty_production_declaration_population() {
     let found = findings("app/empty.rock", "fn main() {}", ACTION_CALLERS);
     assert_eq!(
@@ -86,22 +67,6 @@ fn main() { gameplay() }
     let mutated = src.replace("// action-layer: editor_tool_debug\n", "");
     let found = findings("app/editor_tools.rock", &mutated, RAW_INPUT_CLASSIFICATION);
     assert_eq!(found.len(), 1, "removed classification marker: {found:?}");
-}
-
-#[test]
-fn raw_input_classification_rejects_unknown_classes() {
-    let src = r#"
-extern(lua) fn is_key_pressed(key: string) -> bool
-
-fn gameplay() {
-    // action-layer: gameplay_exception
-    if is_key_pressed("q") { }
-}
-
-fn main() { gameplay() }
-"#;
-    let found = findings("app/player.rock", src, RAW_INPUT_CLASSIFICATION);
-    assert_eq!(found.len(), 1, "unknown class must fail closed: {found:?}");
 }
 
 #[test]

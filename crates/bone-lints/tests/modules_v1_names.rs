@@ -8,14 +8,12 @@ use bone_semantic::prelude::*;
 
 fn lint(src: &str, file: &str, options: &LintOptions) -> Vec<Finding> {
     let mut module = skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse");
-    {
-        module.package = Some(skull_parser::PackageTag {
-            id: 0,
-            self_name: "lintv1".to_string(),
-            identity_storage: Default::default(),
-            root: String::new(),
-        });
-    }
+    module.package = Some(skull_parser::PackageTag {
+        id: 0,
+        self_name: "lintv1".to_string(),
+        identity_storage: Default::default(),
+        root: String::new(),
+    });
     crate::lint_asts(&mut [module], &[(file, src)], options, true)
 }
 
