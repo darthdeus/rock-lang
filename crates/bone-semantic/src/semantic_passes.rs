@@ -860,7 +860,7 @@ fn compute_export_reachability(
                         bone_lower::resolve::resolve_path_to_module(ws, &frag, &binding.target)
                     {
                         if target_pkg == pkg_id {
-                            let target_key = pkg.key_of(&target_path);
+                            let target_key = NsPackage::path_key(&target_path);
                             if reachable_modules.insert(target_key) {
                                 queue.push_back(target_key);
                             }

@@ -368,10 +368,6 @@ impl NsPackage {
             .join("::");
         Ustr::from(&joined)
     }
-
-    pub fn key_of(&self, segments: &[Ustr]) -> Ustr {
-        Self::path_key(segments)
-    }
 }
 
 impl NsTree {

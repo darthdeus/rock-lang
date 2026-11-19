@@ -2,7 +2,7 @@
 //! from the resolver (`bone_lower::resolve`); nothing here matches names
 //! against definitions itself.
 
-use bone_core::modules::{AccessSite, DefKind, DefMeta, FragmentScope, UsePathRef};
+use bone_core::modules::{AccessSite, DefKind, DefMeta, FragmentScope, NsPackage, UsePathRef};
 use bone_semantic::lower::resolve::{self, CalleeFamily, ResolvedKind};
 use bone_semantic::prelude::*;
 use bone_semantic::semantic_passes::{FragmentContribution, ScopeItem};
@@ -341,7 +341,7 @@ pub(crate) fn module_members(
     let children = ws
         .ns
         .package(package)
-        .and_then(|p| p.node(p.key_of(&path)))
+        .and_then(|p| p.node(NsPackage::path_key(&path)))
         .map(|node| node.children.keys().copied().collect::<Vec<_>>())
         .unwrap_or_default();
     for child in children {
