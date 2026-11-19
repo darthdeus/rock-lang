@@ -7,7 +7,7 @@ use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender, SyncSender, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
@@ -239,10 +239,7 @@ impl TelemetrySpool {
         data: Option<&str>,
     ) -> io::Result<()> {
         let events_path = self.events_path.clone();
-        self.record_stat_with_persist(name, timestamp, data, move |file| {
-            file.sync_all()?;
-            sync_parent(&events_path)
-        })
+        self.record_stat_with_persist(name, timestamp, data, sync_file_and_parent(&events_path))
     }
 
     #[cfg(test)]
@@ -259,10 +256,7 @@ impl TelemetrySpool {
 
     fn record_batch(&mut self, events: &[QueuedTelemetryEvent]) -> io::Result<()> {
         let events_path = self.events_path.clone();
-        self.record_batch_with_persist(events, move |file| {
-            file.sync_all()?;
-            sync_parent(&events_path)
-        })
+        self.record_batch_with_persist(events, sync_file_and_parent(&events_path))
     }
 
     fn record_batch_with_persist(
@@ -274,28 +268,15 @@ impl TelemetrySpool {
             return Ok(());
         }
         let io_lock = Arc::clone(&self.io_lock);
-        let _guard = io_lock
-            .lock()
-            .map_err(|_| io::Error::other("telemetry I/O lock was poisoned"))?;
+        let _guard = lock_io(&io_lock)?;
         if telemetry_revoked(&self.root) {
             let _ = discard_stats(&self.root);
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "telemetry consent was withdrawn",
-            ));
+            return Err(consent_withdrawn());
         }
         if !self.writable {
             return Err(io::Error::other("telemetry spool requires reopening"));
         }
-        let current_len = fs::metadata(&self.events_path)
-            .map(|metadata| metadata.len())
-            .or_else(|error| {
-                if error.kind() == io::ErrorKind::NotFound {
-                    Ok(0)
-                } else {
-                    Err(error)
-                }
-            })?;
+        let current_len = file_len(&self.events_path)?;
         if current_len >= MAX_SPOOL_BYTES {
             return Err(io::Error::new(io::ErrorKind::StorageFull, SpoolAtCapacity));
         }
@@ -340,20 +321,14 @@ impl TelemetrySpool {
         }
         if telemetry_revoked(&self.root) {
             discard_stats(&self.root)?;
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "telemetry consent was withdrawn",
-            ));
+            return Err(consent_withdrawn());
         }
         self.next_seq += events.len() as u64;
         Ok(())
     }
 
     fn discard_legacy_events(&self) -> io::Result<()> {
-        let _guard = self
-            .io_lock
-            .lock()
-            .map_err(|_| io::Error::other("telemetry I/O lock was poisoned"))?;
+        let _guard = lock_io(&self.io_lock)?;
         let raw = match fs::read_to_string(&self.events_path) {
             Ok(raw) => raw,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -368,16 +343,8 @@ impl TelemetrySpool {
         if !has_legacy {
             return Ok(());
         }
-        match fs::remove_file(&self.events_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        match fs::remove_file(self.events_path.with_file_name("cursor.log")) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
+        remove_if_present(&self.events_path)?;
+        remove_if_present(&self.events_path.with_file_name("cursor.log"))?;
         sync_parent(&self.events_path)
     }
 }
@@ -453,9 +420,7 @@ fn discard_stats(root: &Path) -> io::Result<()> {
 }
 
 fn discard_stats_with_io_lock(root: &Path, io_lock: &Mutex<()>) -> io::Result<()> {
-    let _guard = io_lock
-        .lock()
-        .map_err(|_| io::Error::other("telemetry I/O lock was poisoned"))?;
+    let _guard = lock_io(io_lock)?;
     discard_stats(root)
 }
 
@@ -508,10 +473,7 @@ fn load_consent_state_unlocked(root: &Path) -> io::Result<Option<ConsentState>> 
 #[cfg(test)]
 fn begin_consent_generation(root: &Path) -> io::Result<Uuid> {
     let path = consent_path(root);
-    begin_consent_generation_with_persist(root, |file| {
-        file.sync_all()?;
-        sync_parent(&path)
-    })
+    begin_consent_generation_with_persist(root, sync_file_and_parent(&path))
 }
 
 #[cfg(test)]
@@ -526,10 +488,7 @@ fn publish_withdrawal(root: &Path) -> io::Result<Uuid> {
     let _lock = ConsentJournalLock::acquire(root)?;
     publish_revocation(root)?;
     let path = consent_path(root);
-    append_consent_state_unlocked(root, false, |file| {
-        file.sync_all()?;
-        sync_parent(&path)
-    })
+    append_consent_state_unlocked(root, false, sync_file_and_parent(&path))
 }
 
 #[cfg(test)]
@@ -572,10 +531,7 @@ fn load_or_create_consent_generation(root: &Path) -> io::Result<Uuid> {
         if state.enabled {
             return Ok(state.generation);
         }
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "telemetry consent was withdrawn",
-        ));
+        return Err(consent_withdrawn());
     }
     if root.join("reports/stats").try_exists()? {
         return Err(io::Error::new(
@@ -584,25 +540,17 @@ fn load_or_create_consent_generation(root: &Path) -> io::Result<Uuid> {
         ));
     }
     let path = consent_path(root);
-    append_consent_state_unlocked(root, true, |file| {
-        file.sync_all()?;
-        sync_parent(&path)
-    })
+    append_consent_state_unlocked(root, true, sync_file_and_parent(&path))
 }
 
 fn prepare_opt_in(root: &Path) -> io::Result<Uuid> {
     let _lock = ConsentJournalLock::acquire(root)?;
     let path = consent_path(root);
-    let generation = append_consent_state_unlocked(root, true, |file| {
-        file.sync_all()?;
-        sync_parent(&path)
-    })?;
+    let generation = append_consent_state_unlocked(root, true, sync_file_and_parent(&path))?;
     discard_stats(root)?;
     let path = revocation_path(root);
-    match fs::remove_file(&path) {
-        Ok(()) => sync_parent(&path)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+    if remove_if_present(&path)? {
+        sync_parent(&path)?;
     }
     Ok(generation)
 }
@@ -806,6 +754,43 @@ fn truncate_torn_tail(path: &Path) -> io::Result<()> {
     sync_parent(path)
 }
 
+fn lock_io(lock: &Mutex<()>) -> io::Result<MutexGuard<'_, ()>> {
+    lock.lock()
+        .map_err(|_| io::Error::other("telemetry I/O lock was poisoned"))
+}
+
+fn consent_withdrawn() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "telemetry consent was withdrawn",
+    )
+}
+
+fn file_len(path: &Path) -> io::Result<u64> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error),
+    }
+}
+
+/// Removes `path`, answering whether it existed.
+fn remove_if_present(path: &Path) -> io::Result<bool> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// The durable persist step for an append: the file's bytes, then its directory entry.
+fn sync_file_and_parent(path: &Path) -> impl FnOnce(&fs::File) -> io::Result<()> + '_ {
+    move |file| {
+        file.sync_all()?;
+        sync_parent(path)
+    }
+}
+
 #[cfg(unix)]
 fn sync_parent(path: &Path) -> io::Result<()> {
     let parent = path
@@ -894,34 +879,19 @@ impl TelemetryDrain {
     }
 
     fn pending_bytes(&self) -> io::Result<u64> {
-        let len = match fs::metadata(&self.events_path) {
-            Ok(metadata) => metadata.len(),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
-            Err(error) => return Err(error),
-        };
+        let len = file_len(&self.events_path)?;
         Ok(len - self.cursor_for_len(len)?)
     }
 
     fn quarantine(&self, status: u16, body: &str) -> io::Result<()> {
-        let _guard = self
-            .io_lock
-            .lock()
-            .map_err(|_| io::Error::other("telemetry I/O lock was poisoned"))?;
+        let _guard = lock_io(&self.io_lock)?;
         truncate_torn_tail(&self.quarantine_path)?;
         let mut record = serde_json::to_vec(&serde_json::json!({
             "status": status,
             "body": body,
         }))?;
         record.push(b'\n');
-        let current_len = fs::metadata(&self.quarantine_path)
-            .map(|metadata| metadata.len())
-            .or_else(|error| {
-                if error.kind() == io::ErrorKind::NotFound {
-                    Ok(0)
-                } else {
-                    Err(error)
-                }
-            })?;
+        let current_len = file_len(&self.quarantine_path)?;
         if current_len.saturating_add(record.len() as u64) > MAX_SPOOL_BYTES {
             let file = OpenOptions::new()
                 .create(true)
@@ -931,10 +901,11 @@ impl TelemetryDrain {
             file.sync_all()?;
             sync_parent(&self.quarantine_path)?;
         }
-        append_transaction(&self.quarantine_path, &record, |file| {
-            file.sync_all()?;
-            sync_parent(&self.quarantine_path)
-        })
+        append_transaction(
+            &self.quarantine_path,
+            &record,
+            sync_file_and_parent(&self.quarantine_path),
+        )
         .map_err(|failure| failure.error)
     }
 
@@ -943,10 +914,7 @@ impl TelemetryDrain {
             .duration_since(UNIX_EPOCH)
             .map_err(|error| io::Error::other(format!("system clock before Unix epoch: {error}")))?
             .as_secs();
-        let _guard = self
-            .io_lock
-            .lock()
-            .map_err(|_| io::Error::other("telemetry I/O lock was poisoned"))?;
+        let _guard = lock_io(&self.io_lock)?;
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -987,18 +955,11 @@ impl TelemetryDrain {
     }
 
     fn reclaim_if_fully_acknowledged(&self) -> io::Result<()> {
-        let _guard = self
-            .io_lock
-            .lock()
-            .map_err(|_| io::Error::other("telemetry I/O lock was poisoned"))?;
+        let _guard = lock_io(&self.io_lock)?;
         let len = match fs::metadata(&self.events_path) {
             Ok(metadata) => metadata.len(),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                match fs::remove_file(&self.cursor_path) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error),
-                }
+                remove_if_present(&self.cursor_path)?;
                 return Ok(());
             }
             Err(error) => return Err(error),
@@ -1031,21 +992,9 @@ impl TelemetryDrain {
     }
 
     #[cfg(test)]
-    fn run_reclaiming(&self, mut send: impl FnMut(&str) -> io::Result<()>) -> io::Result<()> {
-        match self.run_while_reclaiming(
-            || true,
-            |body| match send(body) {
-                Ok(()) => UploadDisposition::Accepted,
-                Err(error) => UploadDisposition::Retry(error),
-            },
-        )? {
-            DrainOutcome::Complete => Ok(()),
-            DrainOutcome::Retry(error) | DrainOutcome::Blocked(error) => Err(error),
-            DrainOutcome::Cancelled => Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "telemetry drain cancelled",
-            )),
-        }
+    fn run_reclaiming(&self, send: impl FnMut(&str) -> io::Result<()>) -> io::Result<()> {
+        self.run(send)?;
+        self.reclaim_if_fully_acknowledged()
     }
 
     fn run_while_reclaiming(
@@ -1616,10 +1565,7 @@ impl TelemetryClient {
         let consent_generation = if explicit_reconsent {
             prepare_opt_in(root)?
         } else if telemetry_revoked(root) {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "telemetry consent was withdrawn",
-            ));
+            return Err(consent_withdrawn());
         } else {
             load_or_create_consent_generation(root)?
         };
