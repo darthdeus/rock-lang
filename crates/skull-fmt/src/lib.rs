@@ -1,13 +1,3 @@
-//! skull-fmt: a Rock source formatter built on `skull-parser`.
-//!
-//! Pipeline: parse the source with `skull_parser::parse_module` (raw AST,
-//! *never* cooked -- cook lowers surface syntax the formatter must preserve),
-//! walk the AST into a `Doc` layout IR (`doc`), and render. Comments and blank
-//! lines come from a separate `rock_tokenizer` pass attached by source position
-//! (`trivia`), since the parser discards trailing/inline comments.
-//!
-//! Public surface mirrors `rock_format`: `format_code(&str) -> String`.
-
 mod align;
 mod doc;
 mod printer;
@@ -61,7 +51,6 @@ pub fn try_format_named(
     let rendered = doc::render(&document, cfg.max_line_length, cfg.indent_size);
     let mut out = align::align(&rendered);
 
-    // A formatted file ends in exactly one newline.
     while out.ends_with('\n') {
         out.pop();
     }
@@ -81,7 +70,6 @@ pub fn try_format_named(
     Ok(out)
 }
 
-/// The comments of `src` as `//`/`/* */` source text, trimmed and sorted.
 fn comments(src: &str, file: Ustr) -> Result<Vec<String>, String> {
     let tokens = rock_tokenizer::Tokenizer::new(src, file)
         .tokenize()

@@ -1,5 +1,4 @@
 //! Minimal CLI: `skullfmt <file.rock>` prints the formatted source to stdout.
-//! A stepping stone toward wiring skull-fmt into `rock fmt`.
 
 use std::process::ExitCode;
 

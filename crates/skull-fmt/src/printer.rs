@@ -10,9 +10,6 @@ use rock_tokenizer::{TokenKind, Tokenizer};
 use skull_parser::ast::*;
 use ustr::Ustr;
 
-/// Identifier spelling for output. The tokenizer escapes Lua keywords used as
-/// Rock identifiers (`end` is stored as `__rock_end`); undo that so the source
-/// name is emitted. A non-keyword name passes through unchanged.
 fn kw(name: Ustr) -> String {
     Tokenizer::unescape_lua_keyword(name.as_str()).to_string()
 }
@@ -46,9 +43,6 @@ impl<'a> Printer<'a> {
         }
     }
 
-    /// The separator for an infix operator. The range operator `..` is set
-    /// tight (`a..b`) unless an operand edge is a `.`, which would fuse into
-    /// `...`; everything else gets one space on each side.
     fn binop_sep(&self, op: &TokenKind, left: Idx<ExprData>, right: Idx<ExprData>) -> Doc {
         match op {
             TokenKind::DoubleDot
@@ -70,12 +64,10 @@ impl<'a> Printer<'a> {
         Doc::text(self.slice(span).trim_end())
     }
 
-    /// Parser spans are byte offsets on UTF-8 boundaries in this source.
     fn slice_range(&self, b0: usize, b1: usize) -> &str {
         crate::trivia::source_slice(self.src, b0, b1)
     }
 
-    /// Detect an authored comma past whitespace and trailing line comments.
     fn source_trailing_comma(&self, last: Span) -> bool {
         let bytes = self.src.as_bytes();
         let mut i = last.offset_range().1.min(bytes.len());
@@ -94,18 +86,12 @@ impl<'a> Printer<'a> {
         false
     }
 
-    // ---- module -----------------------------------------------------------
-
     pub fn module(&self) -> Doc {
-        // The `mod a::b;` file header (v1) prints first, verbatim: it has no
-        // internal layout decisions. Its span ends before the `;`.
         let header = self
             .ast
             .module_header
             .as_ref()
             .map(|h| Doc::concat([self.raw(h.span), Doc::text(";")]));
-        // Render every item, then preserve hand-aligned runs of adjacent items
-        // verbatim (sfx.rock's aligned `global` declarations) before assembling.
         let item_spans: Vec<Span> = self.ast.items.iter().map(|it| it.span).collect();
         let item_eligible: Vec<bool> = self
             .ast
@@ -118,9 +104,6 @@ impl<'a> Printer<'a> {
                     && !matches!(it.kind, ItemKind::Comment(_))
             })
             .collect();
-        // A trailing-comment `Comment` item (re-emitted as a trailing comment on
-        // the preceding item) is transparent: it mustn't break an aligned run of
-        // globals that carry trailing comments (`global X: T = ..  // note`).
         let item_skip: Vec<bool> = self
             .ast
             .items
@@ -133,16 +116,12 @@ impl<'a> Printer<'a> {
             })
             .collect();
         let mut item_docs: Vec<Doc> = self.ast.items.iter().map(|it| self.item(it)).collect();
-        // Aligned items are sliced verbatim INCLUDING any trailing comment, so the
-        // author's `//`-column alignment survives (a re-applied comment would be
-        // re-spaced by the trailing-comment aligner).
         for k in self.aligned_indices(&item_spans, &item_eligible, &item_skip) {
             item_docs[k] = self.verbatim_full_line(item_spans[k]);
         }
 
         let mut parts = Vec::new();
         if let Some(h) = header {
-            // The file header leads the output with one blank line after it.
             parts.push(h);
             parts.push(hardline());
             parts.push(hardline());
@@ -151,9 +130,6 @@ impl<'a> Printer<'a> {
         let mut prev_was_comment = false;
         let mut prev_multiline = false;
         for (idx, item) in self.ast.items.iter().enumerate() {
-            // At the top level the parser captures a trailing comment as its own
-            // `Comment` item; trivia already re-emits it as a trailing comment on
-            // the preceding item, so skip it here to avoid double output.
             if matches!(item.kind, ItemKind::Comment(_))
                 && prev_end == Some(item.span.line_range().0)
             {
@@ -180,8 +156,6 @@ impl<'a> Printer<'a> {
         Doc::concat(parts)
     }
 
-    /// The source line an item begins on, including any annotations (used for
-    /// blank-line accounting).
     fn item_top_line(&self, item: &Item) -> usize {
         item.annotations
             .first()
@@ -189,24 +163,19 @@ impl<'a> Printer<'a> {
             .unwrap_or(item.span.line_range().0)
     }
 
-    /// The source line the item's own declaration (after annotations) begins on.
     fn item_decl_line(&self, item: &Item) -> usize {
         match &item.kind {
             ItemKind::Function(f) => f.keyword_span.unwrap_or(f.span).line_range().0,
             ItemKind::Global(g) => g.keyword_span.unwrap_or(g.span).line_range().0,
             ItemKind::Struct(s) => s.keyword_span.unwrap_or(s.span).line_range().0,
             ItemKind::Enum(e) => e.keyword_span.unwrap_or(e.span).line_range().0,
-            // Newtype has no keyword span; the name shares the `newtype` line.
             ItemKind::Newtype(n) => n.name.span.line_range().0,
             _ => item.span.line_range().0,
         }
     }
 
-    /// Multiline declarations get a blank line on either side.
     fn item_forces_blank(&self, item: &Item, item_doc: &Doc) -> bool {
         match &item.kind {
-            // A multi-line `{ .. }` def forces a blank; a single-line one
-            // (`enum E { A, B }`) stays adjacent to its neighbours.
             ItemKind::Struct(s) => {
                 !s.fields.is_empty() && s.span.line_range().0 != s.span.line_range().1
             }
@@ -215,9 +184,6 @@ impl<'a> Printer<'a> {
             }
             // inline-lua / extern fns: verbatim one-liner, never forces a blank.
             ItemKind::Function(f) if !matches!(f.body, FunctionBody::Rock(_)) => false,
-            // Rock-bodied fns (incl. block-bodied operators): a width-driven
-            // struct/if expansion isn't visible in the source span, so decide off
-            // the ACTUAL rendered output -- keeping the blank stable across passes.
             ItemKind::Function(_) => {
                 crate::doc::render(item_doc, self.cfg.max_line_length, self.cfg.indent_size)
                     .contains('\n')
@@ -226,8 +192,6 @@ impl<'a> Printer<'a> {
         }
     }
 
-    /// Items whose exact source spelling the raw AST cannot reconstruct, sliced
-    /// whole from source (`item.span` covers any prefix AND annotations).
     fn is_verbatim_item(&self, item: &Item) -> bool {
         match &item.kind {
             ItemKind::Decorator(_)
@@ -240,25 +204,17 @@ impl<'a> Printer<'a> {
         }
     }
 
-    /// A user operator overload, folded by the parser to `fn __op_*` and given a
-    /// parser-synthesized `@inline` annotation (`parser.rs`, "rock injects
-    /// @inline") whose span is the whole decl and has no source form.
     fn is_operator_item(&self, item: &Item) -> bool {
         matches!(&item.kind, ItemKind::Function(f) if f.name.name.starts_with("__op_"))
     }
 
     fn item(&self, item: &Item) -> Doc {
         if self.is_operator_item(item) {
-            // The synthetic `@inline` (span = whole decl) makes the structural
-            // path below print a phantom `@inline` and slice an empty decl after
-            // it. `item.span` already covers the real leading annotations, so
-            // slice the whole operator verbatim instead.
             let decl = self.slice(item.span).trim();
             let decl = decl.strip_suffix(';').unwrap_or(decl).trim_end();
             return self.with_trailing_comment(Doc::text(decl), item.span, 'N');
         }
         if self.is_verbatim_item(item) {
-            // Normalize the annotations while preserving the declaration source.
             let mut parts = Vec::new();
             if !item.annotations.is_empty() {
                 parts.extend(item_visibility(item.vis.as_ref()));
@@ -278,9 +234,6 @@ impl<'a> Printer<'a> {
             parts.push(Doc::text(decl));
             return self.with_trailing_comment(Doc::concat(parts), item.span, 'N');
         }
-        // Structurally printed declarations re-spell their keyword, so the
-        // visibility (which leads the item, annotations included) is printed
-        // here. Raw-sliced kinds already carry it in `item.span`.
         let structural = matches!(
             item.kind,
             ItemKind::Function(_)
@@ -298,8 +251,6 @@ impl<'a> Printer<'a> {
         let annos = &item.annotations;
         for (i, anno) in annos.iter().enumerate() {
             parts.push(self.with_trailing_comment(self.annotation(anno), anno.span, 'N'));
-            // Keep the annotation inline iff source had it on the same line as
-            // whatever follows (next annotation or the declaration).
             let next_line = annos
                 .get(i + 1)
                 .map(|a| a.span.line_range().0)
@@ -308,8 +259,6 @@ impl<'a> Printer<'a> {
                 parts.push(Doc::text(" "));
             } else {
                 parts.push(hardline());
-                // Standalone comments between annotation lines (the parser
-                // attaches none of them to the item, so recover from trivia).
                 for (_, t) in self
                     .trivia
                     .standalone_comments_between(anno.span.line_range().1, next_line)
@@ -319,10 +268,6 @@ impl<'a> Printer<'a> {
                 }
             }
         }
-        // Inline annotations (`@pure fn ..`) sit on the signature line; their
-        // width is where the signature actually starts, so the params-wrap
-        // decision must account for it. It's the width of the last rendered
-        // annotation line (0 when every annotation is on its own line).
         let head_col =
             crate::doc::render(&Doc::concat(parts.clone()), 1_000_000, self.cfg.indent_size)
                 .rsplit('\n')
@@ -335,13 +280,9 @@ impl<'a> Printer<'a> {
             ItemKind::Enum(e) => self.enum_def(e),
             ItemKind::Newtype(n) => self.newtype_def(n),
             ItemKind::Comment(text) => self.comment_node(item.span, text),
-            // Constructs whose source spelling the raw AST does not fully
-            // recover -- slice verbatim for now.
             ItemKind::Decorator(_)
             | ItemKind::CompilerDirective(_)
             | ItemKind::MacroInvocation { .. }
-            // `use` / inline `mod` print verbatim: the path/tree spelling is
-            // the source spelling (no internal layout decisions to re-flow).
             | ItemKind::Use(_)
             | ItemKind::Module(_) => self.raw(item.span),
         };
@@ -351,7 +292,6 @@ impl<'a> Printer<'a> {
         doc
     }
 
-    /// Parameter and field annotations are inline.
     fn leading_annotations(&self, annos: &[Annotation]) -> Vec<Doc> {
         annos
             .iter()
@@ -363,17 +303,11 @@ impl<'a> Printer<'a> {
         if anno.args.is_empty() {
             Doc::text(format!("@{}", kw(anno.name.name)))
         } else {
-            // Preserve the author's exact annotation form -- `@late_draw(stage=10)`
-            // stays as written, NOT normalized to `stage = 10`.
             self.raw(anno.span)
         }
     }
 
-    // ---- items ------------------------------------------------------------
-
     fn function(&self, f: &FunctionDef, head_col: usize) -> Doc {
-        // Non-Rock bodies (inline-lua / extern / ffi) and operator defs are
-        // sliced verbatim -- their source form isn't recoverable from the AST.
         let is_operator = f.name.name.starts_with("__op_");
         if !matches!(f.body, FunctionBody::Rock(_)) || is_operator {
             return self.raw(f.span);
@@ -387,10 +321,6 @@ impl<'a> Printer<'a> {
             return Doc::concat([sig, self.block(block)]);
         }
 
-        // A macro body's item declarations (`macro m() { fn f() {..} }`) are
-        // parked in `macro_items`, outside the block's statement list, so
-        // printing the block alone DELETED them. Keep such a body verbatim
-        // until the printer can interleave items with statements.
         if f.is_macro && !f.macro_items.is_empty() {
             let sig_start = f.keyword_span.unwrap_or(f.span);
             let block_span = self.ast.b(&block).span;
@@ -405,9 +335,6 @@ impl<'a> Printer<'a> {
         let keyword = if f.is_macro { "macro" } else { "fn" };
         let coroutine = if f.is_coroutine { "co " } else { "" };
         let mut sig = vec![Doc::text(format!("{coroutine}{keyword} "))];
-        // D-form: reprint `Type<path_gen>.name<method_gen>(recv, ..)` from the
-        // surface split point; the receiver param prints bare (its type lives in
-        // the path). `generics` is the merged list; `k` splits path vs method.
         if let Some((ty_ident, k)) = &f.receiver_surface {
             let k = *k;
             sig.push(Doc::text(kw(ty_ident.name)));
@@ -425,7 +352,6 @@ impl<'a> Printer<'a> {
             sig.push(Doc::text(" -> "));
             sig.push(self.type_expr(ret));
         }
-        // Lay out the signature alone so body width cannot wrap its parameters.
         sig.push(Doc::text(" {"));
         let sig_brace = crate::doc::render(
             &Doc::concat(sig),
@@ -455,8 +381,6 @@ impl<'a> Printer<'a> {
         Doc::concat(parts)
     }
 
-    /// `head {}` for a struct or enum with no entries, keeping any comment the
-    /// parser dropped from between the braces.
     fn empty_body(&self, head: Doc, span: Span) -> Doc {
         let (open_line, close_line) = span.line_range();
         let (lo, hi) = span.offset_range();
@@ -545,8 +469,6 @@ impl<'a> Printer<'a> {
     }
 
     fn variant(&self, v: &EnumVariant) -> Doc {
-        // A block comment among tuple/record fields (`Rect(float, /* w */ float)`)
-        // sits between field spans, not inside one -- slice the variant verbatim.
         self.maybe_verbatim_line(v.span, || self.variant_structural(v))
     }
 
@@ -580,7 +502,6 @@ impl<'a> Printer<'a> {
         Doc::text(format!("//{text}"))
     }
 
-    /// Slice single-line spans containing block comments with no structural home.
     fn maybe_verbatim_line(&self, span: Span, fallback: impl FnOnce() -> Doc) -> Doc {
         if span.line_range().0 == span.line_range().1
             && self
@@ -593,10 +514,6 @@ impl<'a> Printer<'a> {
         }
     }
 
-    /// Prepend an inline block comment the parser dropped from just before a
-    /// node (`/* second */ 2`, `/* y field */ y: 2`). Only a SAME-LINE leading
-    /// comment (gap is spaces/tabs, no newline) is inlined; an own-line block
-    /// comment is left for gap recovery so it stays on its own line.
     fn prepend_leading_block(&self, doc: Doc, node_start: usize) -> Doc {
         if let Some((cstart, cend)) = self.trivia.block_comment_ending_before(node_start) {
             let gap = self.slice_range(cend, node_start);
@@ -608,10 +525,6 @@ impl<'a> Printer<'a> {
         doc
     }
 
-    /// A `Comment` AST node (statement / item). The parser stores the inner text
-    /// only, losing whether it was `//` or `/* */`; slice the node's span to
-    /// preserve a block comment verbatim (`/* between */`, not `// between`).
-    /// `//` comments keep the reconstructed form (no source-whitespace churn).
     fn comment_node(&self, span: Span, text: &str) -> Doc {
         let src = self.slice(span);
         if src.trim_start().starts_with("/*") {
@@ -620,8 +533,6 @@ impl<'a> Printer<'a> {
             self.comment_line(text)
         }
     }
-
-    // ---- signatures -------------------------------------------------------
 
     fn generics(&self, generics: &[Generic]) -> Doc {
         if generics.is_empty() {
@@ -642,10 +553,6 @@ impl<'a> Printer<'a> {
         inline_comma_list("<", ">", items)
     }
 
-    /// A signature holding a comment [`Self::params_impl`] has no place for,
-    /// sliced from the keyword up to the body's `{`: any comment outside the
-    /// parentheses, or a block comment sharing a line inside them. A line
-    /// comment outside them would swallow the `{`, so the brace moves down.
     fn verbatim_signature(&self, start: Span, params: Span, body: Span) -> Option<Doc> {
         let sig_start = start.offset_range().0;
         let body_open = body.offset_range().0;
@@ -672,8 +579,6 @@ impl<'a> Printer<'a> {
         Some(Doc::concat([sig, separator]))
     }
 
-    /// `bare_first` (D-form) prints param 0 as just its name -- the receiver's
-    /// type comes from the path in the signature, not the param annotation.
     fn params_impl(&self, params: &[Param], params_span: Span, bare_first: bool) -> Doc {
         let param_doc = |p: &Param, bare: bool| {
             let mut parts = self.leading_annotations(&p.annotations);
@@ -691,10 +596,6 @@ impl<'a> Printer<'a> {
             }
             Doc::concat(parts)
         };
-        // A param trailing comment (`ox: float,  // offset x`), a comment on the
-        // `(` line or an own-line comment anywhere between the parentheses
-        // forces the comment-preserving multi-line layout. The parser drops the
-        // last two, so recover them from the source interval.
         let (open_line, close_line) = params_span.line_range();
         let (open_offset, close_offset) = params_span.offset_range();
         let open_comment = self
@@ -728,7 +629,6 @@ impl<'a> Printer<'a> {
             .iter()
             .enumerate()
             .map(|(i, p)| param_doc(p, bare_first && i == 0));
-        // Params wrap one-per-line when too wide, but take NO trailing comma.
         Doc::group(Doc::concat([
             Doc::text("("),
             Doc::indent(Doc::concat([
@@ -740,9 +640,6 @@ impl<'a> Printer<'a> {
         ]))
     }
 
-    // ---- blocks -----------------------------------------------------------
-
-    /// A simple single-line body can stay inline if it fits the width.
     fn block(&self, block_idx: Idx<BlockData>) -> Doc {
         let block = self.ast.b(&block_idx);
         let stmts = &block.statements;
@@ -768,7 +665,6 @@ impl<'a> Printer<'a> {
         self.expanded_block(stmts)
     }
 
-    /// Control-flow and match-arm bodies preserve their source line breaks.
     fn flow_block(&self, block_idx: Idx<BlockData>) -> Doc {
         if let Some(d) = self.inline_single_line_block(block_idx) {
             return d;
@@ -776,7 +672,6 @@ impl<'a> Printer<'a> {
         let block = self.ast.b(&block_idx);
         let stmts = &block.statements;
         if stmts.is_empty() {
-            // An empty body the author wrote inline (`_ => {}`) stays inline.
             return if block.span.line_range().0 == block.span.line_range().1 {
                 Doc::text("{}")
             } else {
@@ -795,10 +690,6 @@ impl<'a> Printer<'a> {
         ])
     }
 
-    /// A block the author wrote entirely on one source line, rendered inline as
-    /// `{ stmt; stmt }` (any statement count). `None` when the block spans
-    /// multiple source lines, is empty, or any statement carries a trailing
-    /// comment / is a `//` comment (a `//` would bury the rest of the line).
     fn inline_single_line_block(&self, block_idx: Idx<BlockData>) -> Option<Doc> {
         let block = self.ast.b(&block_idx);
         let stmts = &block.statements;
@@ -828,16 +719,9 @@ impl<'a> Printer<'a> {
         let spans: Vec<Span> = stmts.iter().map(|s| self.ast.s(s).span).collect();
         let is_comment = |i: usize| matches!(self.ast.s(&stmts[i]).kind, StatementKind::Comment(_));
 
-        // Group consecutive statements the author put on ONE source line
-        // (`a; b; c`) so they stay on that line -- a Comment statement stands
-        // alone. Only when the block spans multiple lines: a whole body minified
-        // onto one line (`fn f(){a;b;c}`) is still expanded one-per-line.
         let multi_line_block = stmts.first().zip(stmts.last()).is_some_and(|(f, l)| {
             self.ast.s(f).span.line_range().0 != self.ast.s(l).span.line_range().1
         });
-        // A group is sliced up to the end of its last source line, so a
-        // multi-line statement whose last line starts another statement would
-        // copy that statement into the slice as well as printing it.
         let ends_on_next_start = |i: usize| {
             spans[i].line_range().0 != spans[i].line_range().1
                 && spans
@@ -860,7 +744,6 @@ impl<'a> Printer<'a> {
                 groups.push(vec![i]);
             }
         }
-        // Per-group span (first statement start .. last statement end).
         let gspans: Vec<Span> = groups
             .iter()
             .map(|g| {
@@ -869,9 +752,6 @@ impl<'a> Printer<'a> {
                     .with_offset_range((f.offset_range().0, l.offset_range().1))
             })
             .collect();
-        // A multi-statement line is sliced verbatim (preserving the `;`
-        // separators and any column alignment); a lone statement renders
-        // structurally.
         let mut docs: Vec<Doc> = groups
             .iter()
             .zip(&gspans)
@@ -883,8 +763,6 @@ impl<'a> Printer<'a> {
                 }
             })
             .collect();
-        // Preserve hand-aligned runs of lone statements verbatim (incl. trailing
-        // comment). Multi-statement groups are already verbatim.
         let eligible: Vec<bool> = groups
             .iter()
             .zip(&gspans)
@@ -911,9 +789,6 @@ impl<'a> Printer<'a> {
                 }
             }
             let mut d = docs[gi].clone();
-            // A line starting with an infix operator (`-b`, `.x = 1`, `*p = 2`)
-            // continues the previous expression, so `a; -b` printed on two
-            // lines would reparse as `a - b`: keep the separator.
             let next_continues = groups.get(gi + 1).is_some_and(|ng| {
                 self.slice(spans[ng[0]])
                     .starts_with(['-', '+', '*', '&', '.'])
@@ -924,8 +799,6 @@ impl<'a> Printer<'a> {
             {
                 d = Doc::concat([d, Doc::text(";")]);
             }
-            // A verbatim group already carries its own comment; a `Comment`
-            // statement IS one. Otherwise attach the statement's trailing comment.
             if verbatim[gi] || is_comment(g[0]) {
                 parts.push(d);
             } else {
@@ -935,7 +808,6 @@ impl<'a> Printer<'a> {
         Doc::concat(parts)
     }
 
-    /// Render entries on separate lines with their source commas and comments.
     fn comma_block(
         &self,
         entries: impl IntoIterator<Item = (Doc, Span)>,
@@ -946,8 +818,6 @@ impl<'a> Printer<'a> {
         self.comma_block_before(entries, body_span, open, close, usize::MAX)
     }
 
-    /// [`Self::comma_block`] whose entries claim only trailing comments that
-    /// start before byte offset `comment_limit`.
     fn comma_block_before(
         &self,
         entries: impl IntoIterator<Item = (Doc, Span)>,
@@ -988,25 +858,14 @@ impl<'a> Printer<'a> {
                 }
             }
             body.push(self.prepend_leading_block(doc, espan.offset_range().0));
-            // Each entry's separator comma is source-derived: for constructs
-            // where it's syntactically required (struct/array/enum) the source
-            // always has it, so this matches forcing it; for match arms (where
-            // the separator is optional) it preserves the author's choice.
             if self.source_trailing_comma(espan) {
                 body.push(Doc::text(","));
             }
-            // Only the entry the comment actually trails claims it: with several
-            // entries on one source line (`0, 1, 2,  // Front`) the whitespace-
-            // between check leaves it to the last one.
             if let Some((text, col)) = self.claimed_comment_before(espan, comment_limit) {
                 body.push(self.sentinel(text, col, 'A'));
             }
             prev_end = Some(end);
         }
-        // A trailing INLINE block comment on the last entry (`3 /* end */`),
-        // between the entry and the close -- appended on the entry's line (the
-        // gap check bounds it: a comment in a later construct has non-whitespace
-        // -- the close delimiter -- before it and is rejected).
         if let Some(off) = last_off {
             if let Some((s, e)) = self.trivia.inline_block_starting_after(off) {
                 let gap = self.slice_range(off, s);
@@ -1015,13 +874,10 @@ impl<'a> Printer<'a> {
                 }
             }
         }
-        // Trailing standalone comments between the last entry and the `}` --
-        // `//` own-line and own-line `/* */`, in source-line order.
         if let Some((open_line, close)) = body_span {
             let prev = prev_end.unwrap_or(open_line);
             let tail = self.standalone_comments(prev, close);
             for (i, (_, d)) in tail.into_iter().enumerate() {
-                // The body already opened with a line break.
                 if i > 0 || prev_end.is_some() {
                     body.push(hardline());
                 }
@@ -1055,8 +911,6 @@ impl<'a> Printer<'a> {
         docs
     }
 
-    /// Keep the text of entries sharing a line. Render multiline entries
-    /// structurally so they can be indented at their new nesting depth.
     fn verbatim_rows(&self, rows: Vec<(Span, Doc)>, open: &str, close: &str) -> Doc {
         let last_span = rows.last().map(|(s, _)| *s);
         let mut groups = rows
@@ -1074,15 +928,12 @@ impl<'a> Printer<'a> {
                     body.push(hardline());
                 }
             }
-            // A lone element spanning >1 line recurses structurally; otherwise
-            // the whole source line (one or more elements) is sliced verbatim.
             if group.len() == 1 && group[0].0.line_range().0 != group[0].0.line_range().1 {
                 body.push(group[0].1.clone());
             } else if group
                 .iter()
                 .any(|(sp, _)| sp.line_range().0 != sp.line_range().1)
             {
-                // A verbatim slice would keep a multi-line element's old indent.
                 body.push(Doc::join(
                     Doc::text(", "),
                     group.iter().map(|(_, d)| d.clone()),
@@ -1105,8 +956,6 @@ impl<'a> Printer<'a> {
         ])
     }
 
-    /// The byte offset of the first non-whitespace character on the source line
-    /// containing `off` -- i.e. the line's first token, skipping leading indent.
     fn line_first_token_offset(&self, off: usize) -> usize {
         let b = self.src.as_bytes();
         let mut i = off.min(b.len());
@@ -1119,14 +968,9 @@ impl<'a> Printer<'a> {
         i
     }
 
-    /// Token boundaries and alignment columns marked by at least two spaces.
     fn aligned_columns(&self, line: &str) -> (HashSet<usize>, HashSet<usize>) {
         let b = line.as_bytes();
         let n = b.len();
-        // `bounds` = every token boundary column (start + end); `padded` = the
-        // boundaries of tokens reached via 2+ spaces of padding. Recording BOTH
-        // ends catches left-aligned columns (shared token START, `: Color`) AND
-        // right-aligned ones (shared token END, decimal-aligned `180.0` / `80.0`).
         let (mut bounds, mut padded) = (HashSet::new(), HashSet::new());
         let mut i = 0;
         while i < n {
@@ -1142,8 +986,6 @@ impl<'a> Printer<'a> {
             }
             let gap = i - gap_start;
             let tok_start = i;
-            // Consume the token: a maximal run of non-space chars, with string
-            // literals (which may contain spaces) treated as part of the token.
             let mut in_str = false;
             let mut q = 0u8;
             while i < n {
@@ -1163,8 +1005,6 @@ impl<'a> Printer<'a> {
                     i += 1;
                 }
             }
-            // The first token starts at column 0 (shared by all siblings at this
-            // indent) -- not an alignment point; its end still is.
             if tok_start != 0 {
                 bounds.insert(tok_start);
             }
@@ -1177,8 +1017,6 @@ impl<'a> Printer<'a> {
         (bounds, padded)
     }
 
-    /// Keep adjacent entries with shared padded token columns verbatim.
-    /// Skipped comments are transparent to alignment detection.
     fn aligned_indices(&self, spans: &[Span], eligible: &[bool], skip: &[bool]) -> Vec<usize> {
         let n = spans.len();
         let cols = |i: usize| self.aligned_columns(self.slice(spans[i]));
@@ -1221,16 +1059,10 @@ impl<'a> Printer<'a> {
         result
     }
 
-    /// The source occupying `span`, sliced verbatim (trailing whitespace trimmed)
-    /// -- used to preserve a hand-aligned line exactly.
     fn verbatim_line(&self, span: Span) -> Doc {
         Doc::text(self.slice(span).trim_end().to_string())
     }
 
-    /// Like `verbatim_line` but extends to the end of the source line, so a
-    /// trailing `// comment` is carried verbatim (no sentinel) -- the trailing-
-    /// comment aligner then leaves it alone, preserving the author's own
-    /// `//`-column alignment within a hand-aligned run.
     fn verbatim_full_line(&self, span: Span) -> Doc {
         let b = self.src.as_bytes();
         let stop = span.offset_range().1.min(b.len());
@@ -1238,9 +1070,6 @@ impl<'a> Printer<'a> {
         while end < b.len() && b[end] != b'\n' {
             end += 1;
         }
-        // Only a separator and trailing comment may ride along: other code on
-        // the line (a closing `})` of a one-line enclosing block, a following
-        // item) is printed by its own construct.
         let rest = self.slice_range(stop, end);
         let rest = rest.trim_start_matches(|c: char| c == ';' || c.is_whitespace());
         if !(rest.is_empty() || rest.starts_with("//")) {
@@ -1259,9 +1088,6 @@ impl<'a> Printer<'a> {
             .starts_with('{')
     }
 
-    /// A single statement that pins its enclosing `block` (fn/lambda body) to the
-    /// multi-line form: control-flow keeps a definition body expanded rather than
-    /// collapsing `fn f() { for .. {} }` onto one line.
     fn stmt_forces_multiline(&self, s: Idx<StatementData>) -> bool {
         match &self.ast.s(&s).kind {
             StatementKind::For(_)
@@ -1282,10 +1108,7 @@ impl<'a> Printer<'a> {
         }
     }
 
-    // ---- statements -------------------------------------------------------
-
     fn stmt(&self, s: Idx<StatementData>) -> Doc {
-        // Slice single-line statements whose inline block comments lack a structural slot.
         let mut span = self.ast.s(&s).span;
         if let Some((cs, ce)) = self
             .trivia
@@ -1302,7 +1125,6 @@ impl<'a> Printer<'a> {
     fn stmt_structural(&self, s: Idx<StatementData>) -> Doc {
         match &self.ast.s(&s).kind {
             StatementKind::Expression(e) => self.expr(*e),
-            // `use` prints verbatim (no internal layout decisions).
             StatementKind::Use(u) => self.raw(u.span),
             StatementKind::Let(l) => self.let_stmt(l),
             StatementKind::Static(st) => self.static_stmt(st),
@@ -1319,9 +1141,6 @@ impl<'a> Printer<'a> {
                 self.header_verbatim(self.ast.s(&s).span, f.body, || self.for_stmt(f))
             }
             StatementKind::While(w) => {
-                // `loop { .. }` parses as `while true { .. }` (same AST). Render
-                // an always-true condition back as `loop`, normalizing the
-                // literal `while true` spelling to it too (corpus rule).
                 let is_loop = matches!(self.ast.e(&w.condition).kind, ExprKind::Bool(true));
                 self.header_verbatim(self.ast.s(&s).span, w.body, || {
                     if is_loop {
@@ -1402,10 +1221,6 @@ impl<'a> Printer<'a> {
         Doc::concat(parts)
     }
 
-    /// A block comment in a control-flow HEADER (`for /* c */ v in /* c */ xs {`,
-    /// `if /* c */ cond {`) has no structural home. Slice the header (statement
-    /// start .. body `{`) verbatim, then render the body structurally. Only when
-    /// the header is a single source line; else fall back.
     fn header_verbatim(
         &self,
         stmt_span: Span,
@@ -1442,15 +1257,9 @@ impl<'a> Printer<'a> {
         Doc::concat(parts)
     }
 
-    // ---- expressions ------------------------------------------------------
-
     fn expr(&self, e: Idx<ExprData>) -> Doc {
         let data = self.ast.e(&e);
         match &data.kind {
-            // Atoms: take the source spelling verbatim (preserves literal form,
-            // e.g. float spelling, string escapes, hex case).
-            // Integer literals are verbatim except the base prefix, which is
-            // lowercased (`0X`/`0B`/`0O` -> `0x`/`0b`/`0o`); digit case is kept.
             ExprKind::Int(..) => Doc::text(normalize_int(self.slice(data.span).trim_end())),
 
             ExprKind::Null
@@ -1519,7 +1328,6 @@ impl<'a> Printer<'a> {
                 Doc::concat([self.expr(*x), Doc::surround("[", self.expr(*idx), "]")])
             }
 
-            // Multiline operators keep their authored placement.
             ExprKind::BinOp {
                 left, op, right, ..
             } => {
@@ -1543,8 +1351,6 @@ impl<'a> Printer<'a> {
                 CallSyntax::At | CallSyntax::AtMacro | CallSyntax::AtMethodMacro => {
                     self.at_call(*func, generic_args, args, syntax, data.span)
                 }
-                // No-parens surface form (`start_game "demo"` == `start_game("demo")`):
-                // re-emit it as `callee arg arg` rather than normalizing to parens.
                 CallSyntax::NoParens => Doc::concat([
                     self.expr(*func),
                     Doc::text(" "),
@@ -1556,8 +1362,6 @@ impl<'a> Printer<'a> {
                     self.call_args(args, data.span),
                 ]),
                 CallSyntax::MethodMacro if !args.is_empty() => {
-                    // The arg list's layout follows the method's own span, not
-                    // the receiver's (see `method_chain`).
                     let method = self.ast.e(func).span;
                     let own_span = data
                         .span
@@ -1590,8 +1394,6 @@ impl<'a> Printer<'a> {
                 bases,
                 fields,
             } => {
-                // Functional-update literals (`Foo { ..base, x: 1 }`) slice
-                // verbatim. Qualified literals also keep their source spelling.
                 if path.segments.len() == 1 && !path.from_root && bases.is_empty() {
                     self.struct_literal(kw(path.segments[0].name), fields, data.span)
                 } else {
@@ -1628,16 +1430,12 @@ impl<'a> Printer<'a> {
                 body,
             } => self.lambda(params, *return_ty, *body),
 
-            // Forms not yet built structurally -- slice verbatim so output is
-            // never corrupt. Refined in later phases.
             ExprKind::IfLetChain { .. }
             | ExprKind::SafeNavigationLet { .. }
             | ExprKind::YieldDelegate(_) => self.raw(data.span),
         }
     }
 
-    /// A member access receiver. A postfix `?` receiver keeps a space before
-    /// the `.`/`?.`, or it would fuse into `?.`/`??` and change the access.
     fn receiver(&self, x: Idx<ExprData>) -> Doc {
         let d = self.expr(x);
         if matches!(self.ast.e(&x).kind, ExprKind::QuestionMark(_)) {
@@ -1653,7 +1451,6 @@ impl<'a> Printer<'a> {
         return_ty: Option<Idx<TypeExprData>>,
         body: Idx<BlockData>,
     ) -> Doc {
-        // A single untyped param drops its parens: `(x) => e` -> `x => e`.
         let param_doc = if params.len() == 1 && params[0].ty.is_none() {
             Doc::text(kw(params[0].name.name))
         } else {
@@ -1664,8 +1461,6 @@ impl<'a> Printer<'a> {
                 ]),
                 None => Doc::text(kw(p.name.name)),
             });
-            // Lambda params stay flat (they're short, and breaking empty `()`
-            // produced a stray blank line on a wide enclosing line).
             inline_comma_list("(", ")", items)
         };
         let mut head = vec![param_doc];
@@ -1675,8 +1470,6 @@ impl<'a> Printer<'a> {
         }
         head.push(Doc::text(" => "));
 
-        // Brace form `=> { .. }` vs expression form `=> expr`. The body is always
-        // a block in the AST; the source tells us which the author wrote.
         if !self.block_has_braces(body) {
             if let Some(e) = self.arrow_body_expr(body) {
                 head.push(self.expr(e));
@@ -1691,9 +1484,6 @@ impl<'a> Printer<'a> {
         Doc::concat(head)
     }
 
-    /// For an arrow body the author wrote without braces (`x => expr`), the
-    /// parser stores a one-statement block holding either the expression or a
-    /// synthesized `return expr`. Recover that expression.
     fn arrow_body_expr(&self, body: Idx<BlockData>) -> Option<Idx<ExprData>> {
         let stmts = &self.ast.b(&body).statements;
         if stmts.len() != 1 {
@@ -1707,9 +1497,6 @@ impl<'a> Printer<'a> {
     }
 
     fn match_expr(&self, scrutinee: Idx<ExprData>, arms: &[MatchArm], span: Span) -> Doc {
-        // Preserve the author's layout: a match written on one source line stays
-        // inline (`match p { A => e, _ => null }`); multi-line expands one arm
-        // per line.
         if span.line_range().0 == span.line_range().1 {
             return Doc::concat([
                 Doc::text("match "),
@@ -1718,9 +1505,6 @@ impl<'a> Printer<'a> {
             ]);
         }
         let bodies: Vec<Span> = arms.iter().map(|a| self.ast.b(&a.body).span).collect();
-        // Full arm span (pattern .. body): the parser drops pattern spans, so the
-        // arm's start is recovered as the first token on the body's source line.
-        // Used only for alignment detection/slicing of single-line arms.
         let arm_spans: Vec<Span> = bodies
             .iter()
             .map(|b| {
@@ -1733,14 +1517,10 @@ impl<'a> Printer<'a> {
             .map(|b| b.line_range().0 == b.line_range().1)
             .collect();
         let mut docs: Vec<Doc> = arms.iter().map(|a| self.match_arm(a)).collect();
-        // Preserve a hand-aligned run of arms (`Variant   => 0` columns); the
-        // trailing comment is added by comma_block, not folded into `docs`.
         let no_skip = vec![false; arm_spans.len()];
         for k in self.aligned_indices(&arm_spans, &eligible, &no_skip) {
             docs[k] = self.verbatim_line(arm_spans[k]);
         }
-        // A block comment anywhere in a single-line arm (`1 /* c */ => e`,
-        // `_ => /* c */ e`) has no structural home -- slice the arm verbatim.
         for k in 0..arm_spans.len() {
             if eligible[k]
                 && self.trivia.has_block_comment_in(
@@ -1775,9 +1555,6 @@ impl<'a> Printer<'a> {
             parts.push(self.expr(g));
         }
         parts.push(Doc::text(" => "));
-        // Arm body: `=> expr` if the author wrote no braces, else a block that
-        // PRESERVES the author's layout -- a single-line `=> { stmt }` stays
-        // inline, a multi-line block stays expanded.
         if !self.block_has_braces(arm.body) {
             let stmts = &self.ast.b(&arm.body).statements;
             if stmts.len() == 1 {
@@ -1786,10 +1563,6 @@ impl<'a> Printer<'a> {
                         parts.push(self.expr(*e));
                         return Doc::concat(parts);
                     }
-                    // `=> e` desugars to a synthetic `return e`, so the parser
-                    // can't distinguish it from an EXPLICIT `=> return e` -- which
-                    // returns from the enclosing fn, NOT the arm value. Keep the
-                    // keyword when it actually precedes the value in source.
                     StatementKind::Return { value: Some(e), .. } => {
                         let stmt_start = self.ast.s(&stmts[0]).span.offset_range().0;
                         let val_start = self.ast.e(e).span.offset_range().0;
@@ -1807,9 +1580,6 @@ impl<'a> Printer<'a> {
         Doc::concat(parts)
     }
 
-    /// `f(args) @ rhs` -- the parser desugars this to `f(args, () => rhs)` with
-    /// `At` syntax, so the last arg is the synthesized `@`-lambda. Reconstruct
-    /// the surface form (normalizing `@` spacing).
     fn generic_call(
         &self,
         func: Idx<ExprData>,
@@ -1845,7 +1615,6 @@ impl<'a> Printer<'a> {
         };
         let body = *body;
         let f = self.ast.e(&func).span;
-        // A method macro's receiver is argument 0 and sits before the callee.
         let written_args = match syntax {
             CallSyntax::AtMethodMacro if !others.is_empty() => &others[1..],
             _ => others,
@@ -1853,7 +1622,6 @@ impl<'a> Printer<'a> {
         let head_span = match written_args.last() {
             None => f,
             Some(last) => {
-                // Exclude the trailing lambda from the head argument layout.
                 let last = self.ast.e(&last.value).span;
                 let (end, end_line) = self
                     .trivia
@@ -1890,8 +1658,6 @@ impl<'a> Printer<'a> {
         let rhs_expr = if !self.block_has_braces(body) {
             self.arrow_body_expr(body)
         } else if stmts.len() == 1 {
-            // `f() @ { stmt }` unwraps a single expression statement to the bare
-            // form `f() @ stmt` (the braces add nothing).
             match &self.ast.s(&stmts[0]).kind {
                 StatementKind::Expression(e) => Some(*e),
                 _ => None,
@@ -1902,7 +1668,6 @@ impl<'a> Printer<'a> {
         let rhs = rhs_expr
             .map(|e| self.expr(e))
             .unwrap_or_else(|| self.block(body));
-        // A comment after `@` would swallow the lambda body on that line.
         let rhs_line = rhs_expr
             .map(|e| self.ast.e(&e).span.line_range().0)
             .unwrap_or_else(|| self.ast.b(&body).span.line_range().0);
@@ -1923,17 +1688,12 @@ impl<'a> Printer<'a> {
     }
 
     fn call(&self, func: Idx<ExprData>, args: &[FunctionCallArg], span: Span) -> Doc {
-        // `a.b().c().d()` -- a chain of >=2 method calls -- lays out one call per
-        // line when it doesn't fit, instead of collapsing the chain and breaking
-        // the tail call's args.
         if let Some(chain) = self.method_chain(func, args, span) {
             return chain;
         }
         Doc::concat([self.expr(func), self.call_args(args, span)])
     }
 
-    /// The `(args)` part of a call -- everything after the callee. Split out so a
-    /// method-chain segment (`.method(args)`) can reuse it.
     fn call_args(&self, args: &[FunctionCallArg], span: Span) -> Doc {
         if args.is_empty() {
             return Doc::text("()");
@@ -1959,12 +1719,7 @@ impl<'a> Printer<'a> {
                 None => v,
             }
         };
-        // An arg trailing comment (`source.w, source.h,  // base size`), or a
-        // standalone comment among the args, forces the comment-preserving multi-
-        // line layout.
         let arg_span = |a: &FunctionCallArg| self.ast.e(&a.value).span;
-        // A `f $ x` call ends at its argument, so a comment after that argument
-        // trails the enclosing statement instead.
         let call_end = span.offset_range().1;
         let has_comments = args
             .iter()
@@ -1976,12 +1731,9 @@ impl<'a> Printer<'a> {
             || self
                 .trivia
                 .has_block_comment_in(span.offset_range().0, span.offset_range().1);
-        // A rendered line break can change how the next pass sees the call.
         let docs: Vec<Doc> = args.iter().map(render_arg).collect();
         let renders_multiline = docs.iter().any(Doc::has_hard_line);
         let source_multiline = span.line_range().0 != span.line_range().1 || renders_multiline;
-        // A trailing collection opening on the call line keeps its own indentation,
-        // including any comments it renders inside its delimiters.
         if source_multiline && self.hugs_trailing_arg(args, span) {
             let n = args.len();
             let mut parts = vec![Doc::text("(")];
@@ -1993,8 +1745,6 @@ impl<'a> Printer<'a> {
             parts.push(Doc::text(")"));
             return Doc::concat(parts);
         }
-        // Preserve the author's per-line argument grouping (hanging or exploded).
-        // Verbatim rows would copy a multi-line-rendering arg's one-line source.
         if !has_comments && source_multiline && !renders_multiline {
             if let Some(d) = self.call_arg_rows(args, span) {
                 return d;
@@ -2009,8 +1759,6 @@ impl<'a> Printer<'a> {
             };
             return self.comma_block_before(entries, body, "(", ")", call_end);
         }
-        // A non-trailing block lambda can expand while formatting. Break its
-        // argument list with it so the next pass sees the same call layout.
         if args[..args.len() - 1].iter().any(|arg| {
             matches!(&self.ast.e(&arg.value).kind, ExprKind::Lambda { body, .. }
                 if self.block_has_braces(*body))
@@ -2025,21 +1773,15 @@ impl<'a> Printer<'a> {
                 Doc::text(")"),
             ]));
         }
-        // Single-line source: stay inline.
         inline_comma_list("(", ")", docs)
     }
 
-    /// Render `recv.m1(..).m2(..)...` as a member chain when it has >=2 method
-    /// calls: flat if it fits, else the head on the first line and each remaining
-    /// `.method(args)` on its own indented line. Returns `None` when `func` isn't
-    /// a method access (so it isn't a chain).
     fn method_chain(
         &self,
         func: Idx<ExprData>,
         args: &[FunctionCallArg],
         span: Span,
     ) -> Option<Doc> {
-        // Collect segments outermost-first by walking the receiver spine.
         let mut segs: Vec<(Ustr, &[FunctionCallArg], Span)> = Vec::new();
         let mut cur_func = func;
         let mut cur_args = args;
@@ -2048,15 +1790,11 @@ impl<'a> Printer<'a> {
             let ExprKind::FieldAccess(recv, method) = &self.ast.e(&cur_func).kind else {
                 return None;
             };
-            // Lay out each segment's arguments independently of earlier chain breaks.
             let own_span = cur_span
                 .with_line_range((method.span.line_range().0, cur_span.line_range().1))
                 .with_col_range((method.span.col_range().0, cur_span.col_range().1))
                 .with_offset_range((method.span.offset_range().0, cur_span.offset_range().1));
             segs.push((method.name, cur_args, own_span));
-            // Continue the spine only while the receiver is itself a method call.
-            // A receiver call with explicit type arguments ends the spine: a
-            // chain segment has no place for `<T>`.
             if let ExprKind::FunctionCall {
                 func: rf,
                 args: ra,
@@ -2074,9 +1812,6 @@ impl<'a> Printer<'a> {
             }
             break *recv;
         };
-        // A single `.method(..)` the author broke onto its own line still lays
-        // out as a chain (`recv(..)\n    .method(..)`), preserving that break --
-        // the regular call path would join them and explode the method's args.
         let broken_single =
             segs.len() == 1 && segs[0].2.line_range().0 > self.ast.e(&base).span.line_range().1;
         if segs.len() < 2 && !broken_single {
@@ -2086,9 +1821,6 @@ impl<'a> Printer<'a> {
         let seg_doc = |(m, a, s): &(Ustr, &[FunctionCallArg], Span)| {
             Doc::concat([Doc::text(format!(".{}", kw(*m))), self.call_args(a, *s)])
         };
-        // A call receiver (`factory().a().b()`) -- or a single broken `.method` --
-        // keeps the base alone on the first line; a plain receiver (`r.a().b()`)
-        // keeps its first call with it.
         let base_is_call = matches!(&self.ast.e(&base).kind, ExprKind::FunctionCall { .. });
         let (head, tail) = if base_is_call || broken_single {
             (self.expr(base), &segs[..])
@@ -2098,10 +1830,6 @@ impl<'a> Printer<'a> {
                 &segs[1..],
             )
         };
-        // Preserve the author's layout: a chain written across multiple source
-        // lines breaks one call per line; one on a single line stays inline.
-        // A segment that renders across lines makes the chain multi-line on the
-        // next pass, so break it the same way now.
         let segs_docs: Vec<Doc> = tail.iter().map(seg_doc).collect();
         let source_multiline = span.line_range().0 != span.line_range().1
             || head.has_hard_line()
@@ -2117,10 +1845,6 @@ impl<'a> Printer<'a> {
         Some(Doc::concat([head, Doc::indent(Doc::concat(tail_docs))]))
     }
 
-    /// An argument that "hugs" the call parens when it's the sole argument: a
-    /// collection, struct literal or block lambda whose own delimiters provide line breaks,
-    /// so `f(Foo {\n  ..\n})` / `f([\n  ..\n])` keep the opening brace on the call
-    /// line rather than indenting the whole argument an extra level.
     fn is_huggable_arg(&self, e: Idx<ExprData>) -> bool {
         if let ExprKind::Lambda { body, .. } = &self.ast.e(&e).kind {
             return self.block_has_braces(*body);
@@ -2135,7 +1859,6 @@ impl<'a> Printer<'a> {
         )
     }
 
-    /// Whether the final collection opens alongside the call delimiter.
     fn hugs_trailing_arg(&self, args: &[FunctionCallArg], span: Span) -> bool {
         let Some(last) = args.last() else {
             return false;
@@ -2162,11 +1885,7 @@ impl<'a> Printer<'a> {
         last_line == prev_line
     }
 
-    /// Preserve per-line argument packing and hanging delimiters. Spreads
-    /// and multiline arguments need structural formatting instead.
     fn call_arg_rows(&self, args: &[FunctionCallArg], span: Span) -> Option<Doc> {
-        // (start_line, end_line, start_offset, end_offset) per arg, or None if the
-        // arg isn't a single-line non-splat value.
         let info = |a: &FunctionCallArg| -> Option<(usize, usize, usize, usize)> {
             if a.is_splat || a.is_spread {
                 return None;
@@ -2216,7 +1935,6 @@ impl<'a> Printer<'a> {
     }
 
     fn tuple(&self, items: &[Idx<ExprData>], span: Span) -> Doc {
-        // A singleton tuple needs a comma to distinguish it from grouping.
         let trailing = if items.len() == 1 { "," } else { "" };
         let docs: Vec<Doc> = items.iter().map(|i| self.expr(*i)).collect();
         if span.line_range().0 == span.line_range().1 && !docs.iter().any(Doc::has_hard_line) {
@@ -2238,24 +1956,17 @@ impl<'a> Printer<'a> {
         if items.is_empty() {
             return Doc::text(format!("{open}{close}"));
         }
-        // Preserve the author's layout: an array written across multiple source
-        // lines expands one element per line; one on a single line stays inline
-        // -- even past the width limit. Same rule as struct literals.
         let force = span.line_range().0 != span.line_range().1;
         if !force {
             let docs: Vec<Doc> = items.iter().map(|i| self.expr(*i)).collect();
             if !docs.iter().any(Doc::has_hard_line) {
                 return inline_comma_list(open, close, docs);
             }
-            // An element that renders across lines makes the array multi-line
-            // on the next pass: expand one element per line now.
             let entries = docs
                 .into_iter()
                 .zip(items.iter().map(|e| self.ast.e(e).span));
             return self.comma_block(entries, None, open, close);
         }
-        // Comment-bearing arrays route through comma_block (it preserves the
-        // comments). Otherwise preserve the author's row layout verbatim.
         let has_comments = items
             .iter()
             .any(|e| self.claimed_trailing_comment(self.ast.e(e).span).is_some())
@@ -2273,10 +1984,6 @@ impl<'a> Printer<'a> {
                 .collect();
             return self.verbatim_rows(rows, open, close);
         }
-        // Comment-bearing: comma_block recovers the interior comments, but each
-        // single-line element is sliced VERBATIM (not re-rendered structurally),
-        // so a hand-aligned data table that happens to carry a `//` comment keeps
-        // its column alignment (mobs.rock MOB_KINDS).
         let entries = items.iter().map(|e| {
             let s = self.ast.e(e).span;
             let doc = if s.line_range().0 == s.line_range().1 {
@@ -2304,10 +2011,6 @@ impl<'a> Printer<'a> {
             return Doc::text(format!("{name} {{}}"));
         }
         let field_doc = |names: &[Ident], value: &Idx<ExprData>| -> Doc {
-            // Shorthand `{ x }` parses as ([x], Ident(x)) where the value shares
-            // the key's source span; `{ x: x }` parses the same but with the
-            // value at a distinct span. Only collapse the former (preserve an
-            // explicit `x: x` the author wrote).
             if names.len() == 1 {
                 if let ExprKind::Ident(id) = &self.ast.e(value).kind {
                     if id.name == names[0].name
@@ -2323,7 +2026,6 @@ impl<'a> Printer<'a> {
             );
             Doc::concat([key, Doc::text(": "), self.expr(*value)])
         };
-        // A trailing comment after the closing brace belongs to the outer node.
         let field_has_comment = |value: &Idx<ExprData>| {
             let v = self.ast.e(value);
             match self.trivia.trailing_comment(v.span.line_range().1) {
@@ -2342,30 +2044,19 @@ impl<'a> Printer<'a> {
             || self
                 .trivia
                 .has_block_comment_in(span.offset_range().0, span.offset_range().1);
-        // Preserve the author's layout: a struct literal written across multiple
-        // source lines expands one-field-per-line; one written on a single line
-        // stays inline -- even past the width limit (a hand-compacted data-table
-        // row is kept, not exploded). Comments force the multi-line form.
         let source_multiline = span.line_range().0 != span.line_range().1;
-        // A one-line literal whose field renders across lines (a block lambda)
-        // expands one field per line, the layout the next pass preserves.
         let docs: Vec<Doc> = fields
             .iter()
             .map(|(names, value)| field_doc(names, value))
             .collect();
         let renders_multiline = !source_multiline && docs.iter().any(Doc::has_hard_line);
         if source_multiline || has_comments || renders_multiline {
-            // Comment-bearing literals route through comma_block (it preserves
-            // the comments). Otherwise preserve the author's row layout verbatim
-            // -- fields packed onto one source line stay packed, with their
-            // column alignment intact.
             if !has_comments && !renders_multiline {
                 let rows = fields
                     .iter()
                     .zip(docs)
                     .map(|((names, value), doc)| {
                         let v = self.ast.e(value).span;
-                        // The field's full source span: first key name -> value end.
                         let full = v
                             .with_line_range((names[0].span.line_range().0, v.line_range().1))
                             .with_col_range((names[0].span.col_range().0, v.col_range().1))
@@ -2384,7 +2075,6 @@ impl<'a> Printer<'a> {
             let entries = fields.iter().zip(docs).map(|((names, value), doc)| {
                 let v = self.ast.e(value).span;
                 let key = names[0].span;
-                // A leading block comment belongs before the whole field.
                 let span = v
                     .with_line_range((key.line_range().0, v.line_range().1))
                     .with_offset_range((key.offset_range().0, v.offset_range().1));
@@ -2409,13 +2099,9 @@ impl<'a> Printer<'a> {
         else_branch: Option<Idx<BlockData>>,
         if_span: Span,
     ) -> Doc {
-        // Break all branches together while keeping the authored placement of `else`.
         let mut parts = Vec::new();
         for (i, (cond, body)) in branches.iter().enumerate() {
             if i == 0 {
-                // A block comment in the first header (`if /* c */ cond /* c */ {`)
-                // has no structural home -- slice the header verbatim, then render
-                // the body structurally.
                 let body_span = self.ast.b(body).span;
                 if if_span.line_range().0 == body_span.line_range().0
                     && self
@@ -2447,9 +2133,6 @@ impl<'a> Printer<'a> {
             let eb_span = self.ast.b(&eb).span;
             let prev_end = self.ast.b(&branches.last().unwrap().1).span.line_range().1;
             if eb_span.line_range().0 > prev_end {
-                // `else` on its own line. If its body is single-line, slice the
-                // whole `else ... }` line verbatim so the author's brace
-                // alignment (`else       { .. }`) survives; otherwise structural.
                 parts.push(hardline());
                 if eb_span.line_range().0 == eb_span.line_range().1 {
                     let start = self.line_first_token_offset(eb_span.offset_range().0);
@@ -2465,17 +2148,9 @@ impl<'a> Printer<'a> {
                 parts.push(self.branch_body(eb));
             }
         }
-        // No enclosing group: each branch preserves its own source layout (the
-        // branch bodies emit hardlines when expanded), so the if isn't reflowed
-        // by width -- a one-line `if c { x }` stays one line, a multi-line one
-        // stays multi-line.
         Doc::concat(parts)
     }
 
-    /// An if/else branch body. Preserves the author's layout: a single-statement
-    /// branch the author wrote on one source line stays inline (`{ stmt }`);
-    /// anything multi-line in source (or multi-statement, or carrying its own
-    /// trailing comment) expands.
     fn branch_body(&self, block_idx: Idx<BlockData>) -> Doc {
         let block = self.ast.b(&block_idx);
         let stmts = &block.statements;
@@ -2498,12 +2173,8 @@ impl<'a> Printer<'a> {
         ])
     }
 
-    // ---- types ------------------------------------------------------------
-
     fn type_expr(&self, t: Idx<TypeExprData>) -> Doc {
         let data = self.ast.te(&t);
-        // A block comment inside a type (`(int, /* c */ int)`, `Foo<int /* c */>`)
-        // has no structural home -- slice the type verbatim.
         if data.span.line_range().0 == data.span.line_range().1
             && self
                 .trivia
@@ -2530,7 +2201,6 @@ impl<'a> Printer<'a> {
                 }
             }
             TypeExprKind::Ident(id) => Doc::text(kw(id.name)),
-            // Paths print verbatim: no internal spacing decisions.
             TypeExprKind::Path(_) | TypeExprKind::AppPath { .. } => self.raw(data.span),
             TypeExprKind::Array(el) => Doc::surround("[", self.type_expr(*el), "]"),
             TypeExprKind::App { ctor, args } => Doc::concat([
@@ -2540,7 +2210,6 @@ impl<'a> Printer<'a> {
             TypeExprKind::Tuple(tys) => {
                 inline_comma_list("(", ")", tys.iter().map(|t| self.type_expr(*t)))
             }
-            // Recover the spelling of function types from the start of the source span.
             TypeExprKind::Function { params, ret } => {
                 let source = self.slice(data.span).trim_start();
                 let starts_fn =
@@ -2581,8 +2250,6 @@ impl<'a> Printer<'a> {
             inner
         }
     }
-
-    // ---- patterns ---------------------------------------------------------
 
     fn pattern(&self, p: &Pattern) -> Doc {
         match p {
@@ -2650,20 +2317,8 @@ impl<'a> Printer<'a> {
         }
     }
 
-    // ---- trailing comments ------------------------------------------------
-
-    /// Append a trailing same-line comment to `doc` if one exists on the span's
-    /// final line and the span is single-line (so it can't misattach to a
-    /// nested construct's last line). Alignment is a later post-pass; for now a
-    /// fixed two-space gap.
-    /// The trailing comment a construct with this span actually claims: the one
-    /// on its last source line, IF nothing but whitespace/`;`/`,` sits between
-    /// the construct's end and the `//`. When several constructs share a source
-    /// line (`if c { a; b }  // cmt`, or `Foo { x }  // cmt`), the inner ones
-    /// have a `}` between them and the comment; only the outer one claims it.
     fn claimed_trailing_comment(&self, span: Span) -> Option<(&str, usize)> {
         let (text, col, offset) = self.trivia.trailing_comment(span.line_range().1)?;
-        // Some expression spans already include their trailing comment.
         if offset < span.offset_range().1 {
             return Some((text, col));
         }
@@ -2674,8 +2329,6 @@ impl<'a> Printer<'a> {
             .then_some((text, col))
     }
 
-    /// [`Self::claimed_trailing_comment`], for a comment that starts before
-    /// byte offset `limit`.
     fn claimed_comment_before(&self, span: Span, limit: usize) -> Option<(&str, usize)> {
         let (_, _, offset) = self.trivia.trailing_comment(span.line_range().1)?;
         (offset < limit)
@@ -2684,9 +2337,6 @@ impl<'a> Printer<'a> {
     }
 
     fn with_trailing_comment(&self, doc: Doc, span: Span, mode: char) -> Doc {
-        // The sentinel is appended at the end of `doc`, landing on the rendered
-        // last line -- correct whether the construct is one line or several (a
-        // call/array the formatter broke across lines).
         match self.claimed_trailing_comment(span) {
             Some((text, col)) => Doc::concat([doc, self.sentinel(text, col, mode)]),
             None => doc,
@@ -2713,8 +2363,6 @@ fn binop_str(op: &TokenKind) -> &'static str {
     }
 }
 
-/// Lowercase a numeric literal's base prefix (`0X`/`0B`/`0O`), preserving the
-/// digits' case (`0XFF` -> `0xFF`).
 fn normalize_int(s: &str) -> String {
     let bytes = s.as_bytes();
     if bytes.len() >= 2 && bytes[0] == b'0' && matches!(bytes[1], b'X' | b'B' | b'O') {
@@ -2728,8 +2376,6 @@ fn normalize_int(s: &str) -> String {
     }
 }
 
-/// The modules-v1 visibility modifier as written, with its trailing space;
-/// nothing when none was written.
 fn item_visibility(vis: Option<&Visibility>) -> Vec<Doc> {
     let text = match vis {
         None => return Vec::new(),

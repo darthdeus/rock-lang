@@ -16,21 +16,13 @@ pub struct Tokenizer<'a> {
     pub line: usize,
     pub column: usize,
 
-    // Byte position within `input` (NOT a char index). All ASCII fast-paths
-    // use this directly against `input.as_bytes()`. UTF-8 decoding goes
-    // through `decode_at` for `current` and `peek_n`.
     byte_index: usize,
 
-    // Track the last token for context-aware parsing
     last_token_kind: Option<TokenKind>,
 
-    // Track if we just skipped whitespace
     just_skipped_whitespace: bool,
 }
 
-/// Decode the UTF-8 char starting at byte index `i` in `bytes`, plus its
-/// length in bytes. ASCII fast-path (one byte) avoids the `str::from_utf8`
-/// machinery for the common case.
 #[inline(always)]
 fn decode_at(bytes: &[u8], i: usize) -> Option<(char, usize)> {
     let b = *bytes.get(i)?;
@@ -42,7 +34,6 @@ fn decode_at(bytes: &[u8], i: usize) -> Option<(char, usize)> {
     Some((c, c.len_utf8()))
 }
 
-/// Punctuation that is always exactly one character, whatever follows it.
 fn single_char_token(ch: char) -> Option<TokenKind> {
     Some(match ch {
         '(' => TokenKind::OpenParen,
@@ -131,19 +122,13 @@ impl<'a> Tokenizer<'a> {
     }
 
     pub fn advance(&mut self) {
-        // Before advancing, check if current char is a newline
-        // If so, the next character starts at column 0
         if self.current == Some('\n') {
             self.line += 1;
             self.column = 0;
         } else if self.current.is_some() {
-            // Only increment column if we're not at the start or after a newline
             self.column += 1;
         }
 
-        // Byte offset into the source buffer — matches `Span.offset_range()`
-        // and what `&str` slicing wants. Increment by the UTF-8 byte
-        // length of the consumed character.
         let bytes = self.input.as_bytes();
         if let Some(c) = self.current {
             let len = c.len_utf8();
@@ -182,9 +167,6 @@ impl<'a> Tokenizer<'a> {
     }
 
     fn skip_whitespace(&mut self) {
-        // Hot path: consume runs of plain space. Operate directly on bytes
-        // (ASCII) — no UTF-8 decode needed for ' '. Updates column/offset
-        // bookkeeping in lockstep with `advance` for a known-ASCII char.
         let bytes = self.input.as_bytes();
         let mut i = self.byte_index;
         let n = bytes.len();
@@ -202,8 +184,6 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
-    /// Scan ASCII directly, decoding Unicode letters inside the identifier.
-    /// Positions count bytes for offsets and characters for columns.
     fn read_ident(&mut self) -> &'a str {
         let input = self.input; // copy the &'a str out, decoupled from &mut self
         let bytes = input.as_bytes();
@@ -230,9 +210,6 @@ impl<'a> Tokenizer<'a> {
             }
         }
 
-        // One bookkeeping update for the whole identifier. Identifiers contain
-        // no newlines, so `line` is unchanged; `column` counts chars (not
-        // bytes) to match `advance`, and `byte_offset` counts bytes.
         self.byte_index = i;
         self.byte_offset += i - start;
         self.column += char_count;
@@ -240,7 +217,6 @@ impl<'a> Tokenizer<'a> {
         &input[start..i]
     }
 
-    /// Line comment text, leaving the newline for tokenization.
     fn read_line_rest(&mut self) -> &'a str {
         let input = self.input;
         let bytes = input.as_bytes();
@@ -261,8 +237,6 @@ impl<'a> Tokenizer<'a> {
         &input[start..i]
     }
 
-    /// Scan a plain double-quoted body. Leave the cursor in place if an
-    /// escape, line break, or interpolation needs the full string scanner.
     fn try_read_plain_string(&mut self) -> Option<&'a str> {
         let input = self.input;
         let bytes = input.as_bytes();
@@ -276,7 +250,6 @@ impl<'a> Tokenizer<'a> {
             }
             match bytes[j] {
                 b'"' => {
-                    // consume the body and the closing quote
                     self.byte_index = j + 1;
                     self.byte_offset += (j + 1) - start;
                     self.column += char_count + 1; // +1 for the closing quote
@@ -294,18 +267,14 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
-    /// Use the shared string scanner for escaped and multiline literals.
     fn read_string_literal(&mut self, start: usize) -> Result<TokenKind, CompilerError> {
         let open_span = self.start_span();
         let scan = crate::interp::scan_string(self.input, start);
-        // Triple-quoted inline bodies allow unmatched opening braces.
         let unclosed_hole = scan.flavor == crate::interp::Flavor::Quoted
             && matches!(
                 scan.pieces.last(),
                 Some(crate::interp::Piece::Hole { closed: false, .. })
             );
-        // The actionable hint steers toward `{{` for a literal open-brace, which
-        // is the only way in Rock to emit one.
         if !scan.terminated {
             self.advance_to(scan.end);
             return Err(CompilerError::new_with_label(
@@ -329,14 +298,8 @@ impl<'a> Tokenizer<'a> {
                 "unmatched `{` in string literal: use `{{` to emit a literal `{`".to_string(),
             ));
         }
-        // After the structural refusals above, so an unterminated literal is
-        // still reported as unterminated rather than as whatever escape its
-        // runaway body happened to contain first.
         if let Some(bad) = scan.bad_escapes.first() {
             let (at, len, message) = (bad.at, bad.len, bad.message.clone());
-            // Walk to the escape so the label carries its real line/column,
-            // then to its end, then past the literal: advance_to keeps
-            // line/column in step, so the cursor is where the caller expects.
             self.advance_to(at);
             let esc_start = self.start_span();
             self.advance_to(at + len);
@@ -354,8 +317,6 @@ impl<'a> Tokenizer<'a> {
         })
     }
 
-    /// Advance the cursor to byte index `target` (rounded up to a char
-    /// boundary), keeping line/column in step as [`Self::advance`] would.
     fn advance_to(&mut self, target: usize) {
         let bytes = self.input.as_bytes();
         let mut end = target.min(bytes.len());
@@ -757,7 +718,6 @@ impl<'a> Tokenizer<'a> {
                 if self.peek_n(1) == Some('"') && self.peek_n(2) == Some('"') {
                     self.read_string_literal(lit_at)?
                 } else {
-                    // Verbatim slice applies only without escapes or holes.
                     self.advance();
                     if let Some(body) = self.try_read_plain_string() {
                         TokenKind::String(body.into())
@@ -845,7 +805,6 @@ impl<'a> Tokenizer<'a> {
     }
 
     pub(crate) fn end_span(&self, start: LineCol) -> Span {
-        // Columns count characters; offsets count UTF-8 bytes.
         let end_col = self.column;
         let offset_range = (start.offset, self.byte_offset);
 
@@ -913,9 +872,6 @@ mod test {
 
     #[test]
     fn spans_after_slow_path_literals_count_lines_chars_and_bytes() {
-        // `é` is 2 bytes / 1 char. The triple literal ends on line 1 after
-        // `xé"""` (5 chars, 6 bytes) and a space, so `y` sits at line 1,
-        // column 6, byte 13.
         let src = "\"\"\"é\nxé\"\"\" y \"a{b}é\" z";
         let tokens = Tokenizer::from_code("t.rock", src).tokenize().unwrap();
         let y = &tokens[1].span;
@@ -926,7 +882,6 @@ mod test {
         assert_eq!(tokens[3].kind, TokenKind::Ident("z".into()));
         assert_eq!((z.line_range().0, z.col_range().0), (1, 16));
         assert_eq!(z.offset_range().0, 24);
-        // A bad escape on a later line is labelled at its own line and column.
         let err = Tokenizer::from_code("t.rock", "\"é\\\nab\\q\"")
             .tokenize()
             .unwrap_err();
@@ -964,13 +919,9 @@ mod escape_tests {
         assert_eq!(text(r#""\u{41}""#), "A");
         assert_eq!(text(r#""M\u{00c1}G""#), "M\u{00c1}G");
         assert_eq!(text(r#""\u{1F600}""#), "\u{1F600}");
-        // Hex is case-insensitive and 1..=6 digits, so the short and long
-        // spellings of one scalar agree.
         assert_eq!(text(r#""\u{c1}""#), text(r#""\u{0000C1}""#));
     }
 
-    // The emitted bytes are what a charset declaration is read as, so the
-    // escape has to produce UTF-8 rather than a lone char in some other width.
     #[test]
     fn an_astral_escape_emits_four_utf8_bytes() {
         let s = text(r#""\u{1F600}""#);
@@ -991,15 +942,10 @@ mod escape_tests {
         assert_eq!(text(r#""b\\b""#), "b\\b");
     }
 
-    // Silently dropping the backslash is what let `stdlib/json.rock` decode a
-    // JSON `\r` as the letter `r`. An unknown escape is a rejection, never a
-    // string the author did not write.
     #[test]
     fn an_unknown_escape_is_rejected() {
         assert!(rejection(r#""\q""#).contains("unknown string escape"));
         assert!(rejection(r#""C:\path""#).contains("unknown string escape"));
-        // The message names the raw-string escape hatch, which is the fix for
-        // every Windows path and regex in the corpus.
         assert!(rejection(r#""\d+""#).contains("r\"..\""));
     }
 
@@ -1015,21 +961,16 @@ mod escape_tests {
         assert!(rejection(r#""\u{1234567}""#).contains("at most six"));
     }
 
-    // Both ends of the scalar range, so the check is not a one-sided bound.
     #[test]
     fn a_non_scalar_codepoint_is_rejected() {
         assert!(rejection(r#""\u{D800}""#).contains("surrogate"));
         assert!(rejection(r#""\u{DFFF}""#).contains("surrogate"));
         assert!(rejection(r#""\u{110000}""#).contains("above"));
-        // And the neighbours that ARE scalars still lex, so the rejection is
-        // narrow rather than a range that swallowed them.
         assert_eq!(text(r#""\u{D7FF}""#), "\u{D7FF}");
         assert_eq!(text(r#""\u{E000}""#), "\u{E000}");
         assert_eq!(text(r#""\u{10FFFF}""#), "\u{10FFFF}");
     }
 
-    // Raw and triple-quoted flavors do not run the escape pass at all, so they
-    // are the escape hatch AND cannot be broken by a stricter one.
     #[test]
     fn flavors_without_an_escape_pass_are_untouched() {
         assert_eq!(text("r\"\\d+\""), "\\d+");
@@ -1037,22 +978,15 @@ mod escape_tests {
         assert_eq!(text("\"\"\"\\d+\"\"\""), "\\d+");
     }
 
-    // A wrapped literal is ONE line of text: the newline and the next line's
-    // indentation are both consumed. Dropping only the backslash left both in
-    // the string, which is what every wrapped message in the corpus was getting.
     #[test]
     fn a_backslash_before_a_newline_continues_the_line() {
         assert_eq!(text("\"one \\\n         two\""), "one two");
         assert_eq!(text("\"one \\\n\ttwo\""), "one two");
-        // Only leading horizontal space is eaten -- an intentional blank line
-        // still needs `\n`.
         assert_eq!(text("\"a\\\n  b\\nc\""), "ab\nc");
     }
 
     #[test]
     fn an_escape_inside_an_interpolation_hole_still_resolves() {
-        // The hole text is kept verbatim in the token; the escape pass runs
-        // when the hole is re-parsed, so the token keeps the source spelling.
         assert_eq!(text(r#""x={f("\u{41}")}""#), "x={f(\"\\u{41}\")}");
     }
 }

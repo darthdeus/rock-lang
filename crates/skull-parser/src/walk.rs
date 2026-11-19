@@ -253,7 +253,6 @@ impl Visit for Edges {
     fn block(&mut self, b: &Idx<BlockData>) {
         self.blocks.push(*b);
     }
-    // Pattern expressions are copied by grafting, but expansion does not visit them.
     fn pattern(&mut self, _: &Pattern) {}
 }
 

@@ -25,25 +25,11 @@ impl Ident {
 pub enum CallSyntax {
     Normal,
     At,
-    /// rock's no-parens call surface form (`foo a b` == `foo(a, b)`). Semantically
-    /// identical to `Normal` -- every consumer that cares about call semantics
-    /// treats it the same -- but kept distinct so the formatter can re-emit the
-    /// no-parens spelling instead of normalizing to `foo(a, b)`.
     NoParens,
-    /// Sigil macro call `name!(args)`. Resolves like `Normal`; kept so the
-    /// formatter re-emits the `!` that enables type-shaped arg parsing.
     Macro,
-    /// Method-form sigil macro call `recv.name!(args)`, desugared at parse
-    /// time to `name(recv, args)`: the receiver is the first arg. Resolves
-    /// like `Normal`.
     MethodMacro,
-    /// `name!(args) @ rhs`: a `Macro` call that took a trailing `@` lambda.
     AtMacro,
-    /// `recv.name!(args) @ rhs`: a `MethodMacro` call that took a trailing `@`
-    /// lambda.
     AtMethodMacro,
-    /// Type-shaped sigil arg `Name<A, B>`, parsed as a call of `Name` on the
-    /// type args so `expr_to_type_expr` can recover the type.
     TypeArgs,
 }
 
@@ -98,14 +84,9 @@ impl FormatSpec {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InterpolatedPart {
     Literal(Ustr),
-    /// An embedded `{expr[:spec]}`. The spec is `Some` only when a `:` format
-    /// specifier was written.
     Expr(Idx<ExprData>, Option<FormatSpec>),
 }
 
-/// A name path (modules-v1 grammar), including one-segment shorthand pattern
-/// names. Resolution (owner package, lexical first segment) is a lowering
-/// concern; the parser only records the segments.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Path {
     /// `::a::b` — anchored at the package root, bypassing local shadowing.
@@ -141,21 +122,13 @@ pub enum ExprKind {
     Null,
     Unit,
 
-    /// `?` / `?name` typed hole in value position. `(positional id, optional
-    /// name)`, mirroring rock. The id is drawn from the same per-module counter
-    /// as `TypeExprKind::Hole` so the rendered `?{id}` matches rock's.
     Hole(u32, Option<Ustr>),
 
     Ident(Ident),
-    /// `p::f`, `E::V`, `p::Type` — a modules-v1 value-position path. The
-    /// generic args of `p::Type<T>` (a type used as a value, not followed by
-    /// a call's parens) ride here; `p::f<T>(x)` puts them on the FunctionCall
-    /// like an unqualified generic call.
     Path {
         path: Path,
         generic_args: Vec<Idx<TypeExprData>>,
     },
-    /// A record literal; one unrooted segment is an unqualified type name.
     PathStructLiteral {
         path: Path,
         bases: Vec<Idx<ExprData>>,
@@ -165,18 +138,13 @@ pub enum ExprKind {
     Int(i64, Ustr),
     Float(OrderedFloat<f64>),
     String(Ustr),
-    /// `"text {expr} more"` — literal runs interleaved with embedded
-    /// expressions and their format specifications.
     InterpolatedString(Vec<InterpolatedPart>),
     Bool(bool),
 
     Paren(Idx<ExprData>),
 
-    /// `expr as Type`
     As(Idx<ExprData>, Idx<TypeExprData>),
-    /// bitcast<Type>(expr) preserves the low 32 bits between int and uint.
     Bitcast(Idx<ExprData>, Idx<TypeExprData>),
-    /// `(expr : Type)` - contextual ascription supplies an expected type.
     ParenAscription(Idx<ExprData>, Idx<TypeExprData>),
 
     Not(Idx<ExprData>),
@@ -185,8 +153,6 @@ pub enum ExprKind {
 
     FieldAccess(Idx<ExprData>, Ident),
     SafeNavigation(Idx<ExprData>, Ident),
-    /// `recv?.let { body }` — runs `body` with the unwrapped receiver bound to
-    /// `binding` (the receiver's ident name, else `value`).
     SafeNavigationLet {
         receiver: Idx<ExprData>,
         binding: Ident,
@@ -203,8 +169,6 @@ pub enum ExprKind {
 
     FunctionCall {
         func: Idx<ExprData>,
-        /// Explicit type arguments in `f<A, B>(...)`. Empty for inferred
-        /// calls and for every operator/macro call that has no written types.
         generic_args: Vec<Idx<TypeExprData>>,
         args: Vec<FunctionCallArg>,
         syntax: CallSyntax,
@@ -212,7 +176,6 @@ pub enum ExprKind {
 
     ArrayLiteral(Vec<Idx<ExprData>>),
 
-    /// Infix operators. Overloadable operators resolve during lowering.
     BinOp {
         left: Idx<ExprData>,
         op: TokenKind,
@@ -234,7 +197,6 @@ pub enum ExprKind {
         else_branch: Option<Idx<BlockData>>,
     },
 
-    /// Binding and condition clauses, including a single binding.
     IfLetChain {
         clauses: Vec<IfLetClause>,
         then_block: Idx<BlockData>,
@@ -246,28 +208,22 @@ pub enum ExprKind {
         value: Idx<ExprData>,
     },
 
-    /// `return [expr]` / `break` / `continue` / `yield [expr]` in value
-    /// position (statement forms are handled in `parse_statement`).
     ReturnExpr(Option<Idx<ExprData>>),
     BreakExpr,
     ContinueExpr,
     Yield(Option<Idx<ExprData>>),
     YieldDelegate(Idx<ExprData>),
 
-    /// `param => body` / `(a, b) => body`. Body is always a block.
     Lambda {
         params: Vec<LambdaParam>,
         return_ty: Option<Idx<TypeExprData>>,
         body: Idx<BlockData>,
     },
 
-    /// Leading `.field` — sibling field reference in a struct default.
     SiblingFieldRef(Ident),
 
-    /// `&name` — function reference (renders `&name`).
     FunctionRef(Ident),
 
-    /// `^name` resolves in the macro caller scope, bypassing hygiene.
     AnaphoricIdent(Ident),
 }
 
@@ -291,12 +247,10 @@ pub enum Pattern {
     Ident(Ident),
     Literal(Idx<ExprData>),
     Tuple(Vec<Pattern>),
-    /// A variant pattern. A one-segment path is a shorthand variant name.
     PathVariant {
         path: Path,
         args: Option<Vec<Pattern>>,
     },
-    /// A record pattern, including enum record variants and one-segment names.
     PathRecord {
         path: Path,
         fields: Vec<(Ident, Pattern)>,
@@ -329,11 +283,8 @@ pub enum StatementKind {
     Expression(Idx<ExprData>),
     Let(Let),
     Static(Static),
-    /// `use a::b;` inside a block (v1 block scope). Scoped from its
-    /// declaration to block end when module resolution lands.
     Use(UseDecl),
     NestedFn(NestedFn),
-    /// `return [expr]` — `keyword_span` is the `return` token (rock parity).
     Return {
         keyword_span: Option<Span>,
         value: Option<Idx<ExprData>>,
@@ -348,8 +299,6 @@ pub enum StatementKind {
     While(While),
     WhileLet(WhileLet),
     Defer(DeferKind),
-    /// `on_resume`/`on_killed`/`on_hot_reload { .. }` lifecycle-hook block in a
-    /// `co fn`. `name` is the hook keyword.
     LifecycleHook {
         keyword_span: Option<Span>,
         name: Ustr,
@@ -382,10 +331,6 @@ pub struct Let {
     pub else_block: Option<Idx<BlockData>>,
 }
 
-/// `static <name>[: T] = <init>` -- a local with private module-level storage
-/// that persists across calls, initialized on first reach. The initializer is
-/// mandatory (an immutable never-written static should be a `const`). Name is a
-/// plain ident; no destructuring binding.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Static {
     pub span: Span,
@@ -458,21 +403,17 @@ pub enum TypeExprKind {
     Int,
     Uint,
     Float,
-    /// `f64`: the explicit wide spelling of `float`, the same type.
     F64,
-    /// `f32`: narrow float storage, legal only as a field type.
     F32,
     Bool,
     Ref(Idx<TypeExprData>),
     Ident(Ident),
-    /// `a::b::T` (modules-v1) — a qualified type path.
     Path(Path),
     Array(Idx<TypeExprData>),
     App {
         ctor: Ident,
         args: Vec<Idx<TypeExprData>>,
     },
-    /// `a::b::T<A, B>` (modules-v1) — a qualified generic application.
     AppPath {
         ctor: Path,
         args: Vec<Idx<TypeExprData>>,
@@ -482,7 +423,6 @@ pub enum TypeExprKind {
         params: Vec<Idx<TypeExprData>>,
         ret: Idx<TypeExprData>,
     },
-    /// Inferred type hole: per-module id and optional name.
     Hole(u32, Option<Ustr>),
 }
 
@@ -498,9 +438,6 @@ pub struct Param {
     pub annotations: Vec<Annotation>,
 }
 
-/// A generic parameter `T`, `T = Default`, or `I: Iterator<T>`. Mirrors rock's
-/// `GenericParam` plus the bound: the only bound the compiler knows today is
-/// the builtin `Iterator<T>` (validated in bone, not here).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Generic {
     pub name: Ident,
@@ -516,22 +453,12 @@ pub enum FnBackend {
     Js,
 }
 
-/// How a function's body is provided. Mirrors rock's `BodySource`: a Rock body
-/// IS its block; non-Rock bodies (inline / extern) carry their own data and
-/// have no block at all (no placeholder). Only Rock functions have a block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FunctionBody {
-    /// `fn f() { .. }` — the Rock block (also a macro's expansion template).
     Rock(Idx<BlockData>),
-    /// `inline(<backend>) fn .. = """<src>"""` — raw backend source, emitted
-    /// verbatim by that backend. Bare `inline` defaults to [`FnBackend::Lua`].
     Inline(FnBackend, Ustr),
-    /// `extern(lua) fn` — an existing Lua global. No `ffi.cdef` is emitted; C
-    /// symbols go through `extern(ffi, "lib")`.
     ExternLua,
-    /// `extern(js) fn` — JS runtime-provided global symbol.
     ExternJs,
-    /// `extern(ffi, "lib") fn` — FFI lib wrapper.
     Ffi(Ustr),
 }
 
@@ -568,9 +495,6 @@ pub struct FunctionDef {
     pub is_synthetic: bool,
     /// A generated default or omission function for one JSON field.
     pub json_field_for: Option<(Ident, Ustr, JsonFieldOperation)>,
-    /// Item declarations in a macro body (`macro m() { fn f() {..} }`). Empty
-    /// for non-macros and expression-only macros. Spliced at module scope when
-    /// the macro is invoked as a top-level statement.
     pub macro_items: Vec<Item>,
     /// Written receiver tail and the formatter's split in the generics list.
     pub receiver_surface: Option<(Ident, usize)>,
@@ -600,9 +524,6 @@ pub struct Field {
     /// Leading `@name` / `@name(args)` on the field. Preserved for the
     /// bone-side registry pass; no skull consumer reads it yet.
     pub annotations: Vec<Annotation>,
-    /// `embed f: Foo` -- the field's leaves live in the parent and the field
-    /// has no independently storable aggregate (projection-only).
-    /// `embed` is CONTEXTUAL: `embed: int` is still a field named `embed`.
     pub is_embed: bool,
 }
 
@@ -664,9 +585,6 @@ pub enum CompilerDirective {
     End,
 }
 
-/// `@name` / `@name(args)` item annotation. Mirrors rock's `ItemAnnotation`;
-/// arg values are parsed as expressions (rock reclassifies simple ones but
-/// renders the same).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Annotation {
     pub span: Span,
@@ -684,21 +602,13 @@ pub struct AnnoArg {
 /// "not written" and takes the item-kind's default.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Visibility {
-    /// `private` / `pub(self)` — the defining module and its descendants.
     Private,
-    /// `pub` — any consumer with an accessible path.
     Pub,
-    /// `pub(super)` — the parent module and its descendants.
     PubSuper,
-    /// `pub(package)` — every module in the defining package.
     PubPackage,
-    /// `pub(in a::b)` — the named ancestor module and its descendants. The
-    /// path is package-root-relative.
     PubIn(Vec<Ident>),
 }
 
-/// The visibility modifiers one declaration may carry. Items use `vis`;
-/// stored fields additionally use `set_private` (`private(set)`).
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub(crate) struct VisMods {
     pub vis: Option<Visibility>,
@@ -706,9 +616,6 @@ pub(crate) struct VisMods {
     pub set_private: bool,
 }
 
-/// The file's module header: `mod a::b;` / `pub mod a::b;` — first
-/// non-comment item only, `;`-terminated. The header selects which logical
-/// module the REST of the file contributes to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModuleHeader {
     /// Package-root-relative module path (`mod combat::casting;` -> [combat,
@@ -728,8 +635,6 @@ pub struct UseDecl {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UseTree {
-    /// `a::b::c` with a trailing shape. `from_root` marks `::a::b`. Segments
-    /// may be the contextual words `self`/`super` (resolver's business).
     Path {
         from_root: bool,
         segments: Vec<Ident>,
@@ -739,16 +644,10 @@ pub enum UseTree {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UseSuffix {
-    /// `use a::b;` — bind `b`.
     Bind,
-    /// `use a::b as c;`
     BindAs(Ident),
-    /// `use a::*;` — immediate accessible members.
     Glob,
-    /// Operator family name and the written selector span.
     Operator { op: Ident, alias: Option<Ident> },
-    /// `use a::b::{ .. }` — sub-trees, each relative (`c`, `d::e as f`,
-    /// `self`, `operator(+)', nested braces).
     Nested(Vec<UseTree>),
 }
 
@@ -761,8 +660,6 @@ pub struct Item {
     pub vis: Option<Visibility>,
 }
 
-// Items live in a Vec, so a boxed function body would cost an allocation per
-// definition without saving anything.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ItemKind {
@@ -774,10 +671,7 @@ pub enum ItemKind {
     Global(GlobalDef),
     CompilerDirective(CompilerDirective),
     Comment(Ustr),
-    /// `pub mod x { .. }` — an inline module block (v1). Reopening a module
-    /// adds fragments; the namespace tree coalesces them.
     Module(ModBlock),
-    /// `use ...;` at item level.
     Use(UseDecl),
     /// A top-level macro invocation `name(args)` / `name!(args)` (sigil enables
     /// type-shaped args). Expansion replaces it with the macro's spliced items
@@ -802,9 +696,6 @@ pub struct ModBlock {
 /// item list. Children reference each other by `Idx` into these arenas.
 #[derive(Clone, Debug, Default)]
 pub struct Ast {
-    /// The module's source-file identity, as passed to `parse_module`. The id
-    /// for the whole module -- independent of item spans (which macro expansion
-    /// can retag) and defined even for an item-less module.
     pub file: Ustr,
     /// The owning package (set by the loader from the package graph; `None`
     /// for standalone/editor sources). Package loaders stamp graph facts here.
@@ -812,9 +703,6 @@ pub struct Ast {
     /// The file's `mod a::b;` header (v1), if the first non-comment item was
     /// one. Selects the logical module this file's items contribute to.
     pub module_header: Option<ModuleHeader>,
-    /// The owning package's mutable-global policy, stamped by the loader with
-    /// the other package facts. `Any` keeps standalone sources and packages
-    /// without the key on today's behavior.
     pub global_policy: rock_core::source_code::GlobalPolicy,
     pub exprs: Arena<ExprData>,
     pub stmts: Arena<StatementData>,
@@ -827,10 +715,6 @@ pub struct Ast {
     pub macro_param_refs: Vec<MacroParamRef>,
 }
 
-/// One macro parameter's occurrences within its macro definition: the
-/// declaration span followed by every use span in the template. Grouped per
-/// (macro, parameter); an IDE query finds the group whose any span covers the
-/// cursor and returns the lot.
 #[derive(Clone, Debug)]
 pub struct MacroParamRef {
     pub name: Ustr,

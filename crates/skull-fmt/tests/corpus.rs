@@ -11,7 +11,6 @@ struct Case {
     expected: String,
 }
 
-/// Every case in the corpus, in file order.
 fn cases() -> Vec<Case> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fmt");
     let mut files = Vec::new();
@@ -37,9 +36,6 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Split a `.rock.fmt` file into cases. A case is `//=== TEST CASE: name ===`
-/// then input then `//=== EXPECTED ===`+output OR `//=== NO CHANGE ===`
-/// (output == input).
 fn parse_cases(file: &str, text: &str) -> Vec<Case> {
     let mut cases = Vec::new();
     let lines: Vec<&str> = text.lines().collect();
@@ -107,8 +103,6 @@ fn corpus_cases_format_to_their_expected_output() {
     let mut failures = Vec::new();
     for c in &cases {
         let id = format!("{} :: {}", c.file, c.name);
-        // Only a `parse_error*` case may hold source that does not parse; it
-        // checks the passthrough, so a case cannot pass by accident.
         let parses = skull_parser::parse_module_clean(&c.input, "<corpus>".into()).is_ok();
         if parses == c.name.starts_with("parse_error") {
             failures.push(format!("{id}: parses is {parses}"));

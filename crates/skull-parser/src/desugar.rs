@@ -1,45 +1,17 @@
-//! Item-level synthesis for newtype operators and JSON field functions. There is no
-//! per-expression walk. Every expression desugar now lives in bone's `lower.rs`,
-//! consuming the raw AST directly:
-//!   - placeholder lambda (`_.f`, `_ > 0`  ->  `p => p.f`)  [D1]
-//!   - compound-assign (`a += b`)  [D2]
-//!   - `^name` anaphoric (resolves as a caller-scope ident)
-//!
-//! Never desugared at all: smart for-loop `.iter()` insertion [D3] and `.type_info` -> `type_of(obj)` [D4] (`type_of` is no
-//! fn/builtin). The `skull-cook-diff` oracle skips D1/D2 on rock's side
-//! (`SyntaxDesugarPass::raw_compound_assign`) so it still byte-compares the rest.
-//!
-//! `child_exprs` / `child_blocks` remain here as the shared structural
-//! child-edge enumeration used by `macro_expand`.
-
 use crate::ast::*;
 use rock_core::Span;
 use ustr::Ustr;
 
-/// Synthesize compiler-owned items. Every expression desugar (placeholder
-/// `_.f` [D1], compound-assign [D2], `^name` anaphoric, `.type_info` [D4]) is now
-/// handled directly in bone's `lower.rs` on the raw AST, so there is no
-/// per-expression walk here. Idempotent on already-cooked input.
 pub fn desugar(ast: &mut Ast) {
     synth_newtype_operators(ast);
     synth_json_default_factories(ast);
 }
 
-/// Append `@pure @inline fn __op_*(a: NT, b: NT)` operators for every newtype
-/// over a primitive (int/uint/float/string), mirroring rock's parser-side
-/// `synth_newtype_operator_items`. Newtypes are runtime-transparent, so each body
-/// is the raw Lua op over the unwrapped `a`/`b`. Self-returning arithmetic ops
-/// declare the newtype as their return; comparisons declare `bool`. Generic or
-/// non-primitive-wrapped newtypes derive nothing.
 fn synth_newtype_operators(ast: &mut Ast) {
-    // (op stem, lua body over raw a/b, returns Self else bool)
     let int_specs: &[(&str, &str, bool)] = &[
         ("__op_add", "a + b", true),
         ("__op_sub", "a - b", true),
         ("__op_mul", "a * b", true),
-        // int newtypes get `./` (floor) and NOT `/` (consistent with core
-        // ints post-float-div-migration; a newtype wanting float `/` unwraps
-        // first). Float newtypes keep `/` in float_specs below.
         ("__op_idiv", "math.floor(a / b)", true),
         ("__op_mod", "a % b", true),
         ("__op_lt", "a < b", false),
@@ -75,8 +47,6 @@ fn synth_newtype_operators(ast: &mut Ast) {
     ];
     let string_specs: &[(&str, &str, bool)] = &[("__op_add", "a .. b", true)];
 
-    // Collect targets first — the synthesis allocs into the type arena, so it
-    // can't hold an `items` borrow while building.
     let mut targets: Vec<(Ustr, Span, &[(&str, &str, bool)])> = Vec::new();
     for item in &ast.items {
         let ItemKind::Newtype(nt) = &item.kind else {
@@ -175,8 +145,6 @@ fn synth_newtype_operators(ast: &mut Ast) {
     }
 }
 
-/// Generate ordinary typed functions so default expressions and predicates use
-/// normal name resolution, call discovery, lowering and allocation rules.
 fn synth_json_default_factories(ast: &mut Ast) {
     if !ast.items.iter().any(|item| {
         matches!(&item.kind, ItemKind::Struct(s)

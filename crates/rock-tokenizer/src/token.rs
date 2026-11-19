@@ -1,7 +1,5 @@
 use crate::prelude::*;
 
-// All variants hold only Copy payloads (Ustr / i64 / OrderedFloat<f64>), so
-// TokenKind is Copy: clones become memcpys and Vec<Token>::clone bulk-copies.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TokenKind {
     Fn,
@@ -34,14 +32,10 @@ pub enum TokenKind {
     Type,
     As,
 
-    // Decorator definition keyword
-    // Note: "wrap" and "init" are contextual keywords, recognized only in decorator context
     Deco,
 
-    // Macro definition keyword (declarative macros)
     Macro,
 
-    // Preprocessor directives
     DirectiveIf,     // #if
     DirectiveElseIf, // #elseif
     DirectiveElse,   // #else
@@ -290,37 +284,18 @@ impl TokenKind {
             BitOr => left(29),
 
             Plus | Minus => left(31),
-            // `%` belongs with `*` and `/`, at the SAME level so the three are
-            // left-associative among themselves. It sat at 21 -- under the
-            // shifts and the comparisons, and under `+`/`-` -- so `a + b % c`
-            // was `(a + b) % c`, `a % b * c` was `a % (b * c)`, and `a % b < c`
-            // was `a % (b < c)`, which the typechecker rejected outright.
-            // Pinned by `tests/operators/precedence.rock`.
             Mul | Div | IntDiv | Mod => left(35),
 
             Dot | Colon => left(51),
 
             Dollar => right(1),
 
-            // Above every assignment form (Assign 5, the compound assigns 9)
-            // and below `||` (13), matching C#. At 3 it sat BELOW Assign, so
-            // `x = a ?? b` parsed as `(x = a) ?? b`: the assignment's RHS is
-            // parsed at min_bp 5, `??` stopped it, and the outer loop then
-            // took the whole assignment as the coalesce's left operand.
             DoubleQuestionMark => left(11),
 
             _ => None,
         }
     }
 
-    /// The overloadable binary operators (`+ - * / %`) and the base
-    /// name of the operator function `a OP b` desugars to. This is the
-    /// single source of truth for the operator-as-function mapping:
-    /// the parser emits a call to this name, and resolution / mangling
-    /// / codegen recognize it. `None` for every non-overloadable token
-    /// (`== < && ?? []` etc. stay dedicated nodes). The base name (no
-    /// type mangling) is what overload resolution keys on, exactly
-    /// like any other overloaded function.
     pub fn overloadable_binop_fn(&self) -> Option<&'static str> {
         Some(match self {
             TokenKind::Plus => "__op_add",

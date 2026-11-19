@@ -20,18 +20,6 @@ pub use rock_tokenizer::TokenKind;
 use rock_tokenizer::{Token, Tokenizer};
 use ustr::Ustr;
 
-/// Tokenize `source` with rock's tokenizer and parse it into an arena `Ast`.
-/// `file` is the source-file identity used for spans/diagnostics.
-///
-/// The parse is TOTAL: error recovery (for partial parses) records the dropped
-/// spans in `Ast.recovery_errors` and the best-effort tree is returned `Ok`
-/// regardless (rust-analyzer's model -- the tree always comes back). Only an
-/// unrecoverable tokenizer failure is a hard `Err`. Strictness is a DOWNSTREAM
-/// policy, not the parser's job: the CLI compile/test paths gate on
-/// `recovery_errors` (see `rock-cli` `check_modules` / `parse_user_modules`),
-/// while the interactive `Session`/LSP keep the partial tree so every feature
-/// (completion, hover, rename, inlay) works on broken code and the recovery
-/// errors surface as diagnostics.
 pub fn parse_module(source: &str, file: Ustr) -> Result<Ast, CompilerError> {
     parse_module_with_tokens(source, file, |_| ()).map(|(ast, ())| ast)
 }
@@ -49,15 +37,6 @@ pub fn parse_module_with_tokens<T>(
     Ok((ast, facts))
 }
 
-/// [`parse_module`] for a caller that has NO recovery story: a recovered syntax
-/// error is an `Err` here rather than a dropped item in an otherwise-`Ok` tree.
-///
-/// Test fixtures and corpus tools want this one. `parse_module(..).expect(..)`
-/// reads like it proves the source parsed, and does not -- a malformed item is
-/// silently absent from the AST, so the test runs against a partial workspace
-/// and passes for a reason that has nothing to do with its name. That is how a
-/// `""" .. """` inline body missing its `=` sat in the JS emitter fixtures:
-/// accepted, dropped, and the rejection under test came from a different path.
 pub fn parse_module_clean(source: &str, file: Ustr) -> Result<Ast, CompilerError> {
     let ast = parse_module(source, file)?;
     match ast.recovery_errors.first() {
@@ -66,12 +45,6 @@ pub fn parse_module_clean(source: &str, file: Ustr) -> Result<Ast, CompilerError
     }
 }
 
-/// Parse exactly ONE top-level item from `source` (the text of a single item),
-/// with spans anchored at `(offset, line, column)` -- the absolute position of
-/// `source[0]` within the outer file. Used by the incremental driver to re-parse
-/// just an edited item instead of the whole file: extract the item's text by its
-/// stored span, parse it here, and the resulting AST's spans line up with the
-/// rest of the file. `line`/`column` are 0-based (rock-core `Span` convention).
 pub fn parse_one_item(
     source: &str,
     file: Ustr,
@@ -82,10 +55,6 @@ pub fn parse_one_item(
     let tokens = Tokenizer::new_with_offset(source, file, offset, line, column).tokenize()?;
     let mut ast = Parser::new(tokens, source, offset).parse_single_item()?;
     ast.file = file;
-    // Total, like `parse_module`. The incremental fast path inspects
-    // `recovery_errors` itself: a body-level recovery (e.g. a stray `)` inside the
-    // edited item) makes it bail to a full reparse rather than installing a
-    // half-parsed item -- a caller policy, not a parse failure.
     Ok(ast)
 }
 

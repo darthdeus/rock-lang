@@ -1,9 +1,5 @@
 //! Round-trip checks the `tests/fmt` corpus cannot express and narrow line widths.
 
-/// Modules-v1 forms format unchanged and reparse clean. A v1 ascription keeps
-/// its `(expr : Type)` spelling (an infix re-print would not reparse), a file
-/// header keeps its `;` and one blank line
-/// after it, and a visibility ahead of an item's annotations survives.
 #[test]
 fn modules_v1_forms_format_unchanged() {
     let cfg = skull_fmt::FormatConfig::default();

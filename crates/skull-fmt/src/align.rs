@@ -1,30 +1,14 @@
-//! Trailing-comment column alignment, run as a post-pass over rendered text.
-//!
-//! The printer emits each trailing comment as `<code>\0<col>\0//<text>`, where
-//! `<col>` is the comment's original source column. This pass groups adjacent
-//! trailing-comment lines (same indentation, no intervening blank line) and
-//! aligns their `//` to a common column: `max(longest code + 2, widest original
-//! column)` -- i.e. it preserves the author's chosen column and only pulls
-//! stragglers into line, never narrowing below a two-space gap.
-//!
-//! Using an emitted sentinel (rather than scanning for `//`) means string
-//! literals containing `//` are never mistaken for comments.
-
 /// Marks a trailing comment in rendered output: `\0<origcol>\0//text`.
 pub const SENTINEL: char = '\u{0}';
 
 struct Trailing {
-    /// Display width of the code before the comment (column the code ends at).
     code_col: usize,
-    /// The comment's original source column (author's alignment intent).
     orig_col: usize,
-    /// Leading-whitespace width (group key).
     indent: usize,
     /// `A` always align, `P` align only if already aligned, `N` never align.
     mode: char,
 }
 
-/// Parse a line's trailing-comment sentinel `\0<mode><col>\0//text`, if present.
 fn parse(line: &str) -> Option<(String, Trailing, String)> {
     let first = line.find(SENTINEL)?;
     let rest = &line[first + SENTINEL.len_utf8()..];
@@ -53,8 +37,6 @@ pub fn align(text: &str) -> String {
     let lines: Vec<&str> = text.split('\n').collect();
     let parsed: Vec<Option<(String, Trailing, String)>> = lines.iter().map(|l| parse(l)).collect();
 
-    // Group adjacent trailing-comment lines: same indent, broken by a blank
-    // line or a line at a different indent.
     let mut col_for = vec![None; lines.len()];
     let mut i = 0;
     while i < lines.len() {
@@ -79,10 +61,6 @@ pub fn align(text: &str) -> String {
             }
             j += 1;
         }
-        // Decide the group's column. A lone comment, or a non-aligned group of
-        // statements/items, normalizes each to a two-space gap. Comma-block
-        // groups (`always`) and already-aligned statement groups align to the
-        // author's column (widest original `//`), clamped to longest code + 1.
         let mode = parsed[members[0]].as_ref().unwrap().1.mode;
         let orig_cols: Vec<usize> = members
             .iter()
@@ -97,10 +75,6 @@ pub fn align(text: &str) -> String {
             };
 
         if do_align {
-            // Statement groups ('P') keep at least a two-space gap after the
-            // longest code; comma-block groups ('A', struct fields / match arms)
-            // hug to one space after the longest. The author's column wins when
-            // they aligned to something wider.
             let min_gap = if mode == 'A' { 1 } else { 2 };
             let mut c = 0usize;
             for &m in &members {
@@ -111,8 +85,6 @@ pub fn align(text: &str) -> String {
                 col_for[m] = Some(c);
             }
         } else {
-            // Lone / non-aligned comment: preserve the author's gap (its original
-            // column), clamped to at least one space after the code.
             for &m in &members {
                 let t = &parsed[m].as_ref().unwrap().1;
                 col_for[m] = Some(t.orig_col.max(t.code_col + 1));

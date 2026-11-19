@@ -1,30 +1,11 @@
-//! The single scan of a string literal's body, over RAW source.
-//!
-//! Three consumers need the same answer and used to derive it three ways: the
-//! tokenizer (which `"` terminates the literal), the parser (where each `{...}`
-//! hole sits, so its sub-expression gets a real file span) and the LSP (which
-//! region a cursor is in). The parser's copy worked off the token's *processed*
-//! content and so drifted one byte per resolved escape and two per `"""`
-//! delimiter -- goto-definition and hover missed holes behind an escape.
-//!
-//! Every range here is a byte range into the `src` handed to [`scan_string`], so
-//! offsets are exact by construction rather than reconstructed. The scan never
-//! fails: an unterminated literal runs to end of input, which is what an editor
-//! buffer looks like between keystrokes.
-
 /// The delimiter style of a string literal, which decides its escape and
 /// interpolation rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flavor {
-    /// `"..."` -- backslash escapes, interpolation.
     Quoted,
-    /// `"""..."""` -- no escapes, interpolation.
     Triple,
-    /// `r"..."` -- neither.
     Raw,
-    /// `r"""..."""` -- neither.
     RawTriple,
-    /// `'...'` -- neither.
     SingleQuoted,
 }
 
@@ -70,15 +51,10 @@ impl Flavor {
         self == Flavor::Quoted
     }
 
-    /// Whether `{...}` opens an interpolation hole. Raw and single-quoted
-    /// literals are inert text.
     pub(crate) fn interpolates(self) -> bool {
         matches!(self, Flavor::Quoted | Flavor::Triple)
     }
 
-    /// Whether the closing delimiter still terminates the literal while inside a
-    /// hole. `"` does not (a hole may hold its own `"a"` literal); `"""` does,
-    /// so an unclosed brace can't swallow the rest of the file.
     fn closes_inside_hole(self) -> bool {
         self != Flavor::Quoted
     }
@@ -87,13 +63,10 @@ impl Flavor {
 /// One lexical piece of a literal's body, in `src` coordinates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Piece {
-    /// Literal text. `text` has backslash escapes resolved per the flavor;
-    /// `{{`/`}}` are left doubled -- collapsing them is the parser's step, since
-    /// the token's content keeps them.
-    Literal { range: (usize, usize), text: String },
-    /// A `{expr}` / `{expr:spec}` hole. `range` covers the braces; `expr` and
-    /// `spec` are the halves inside them. `closed` is false when the hole ran
-    /// into the literal's terminator or end of input without its `}`.
+    Literal {
+        range: (usize, usize),
+        text: String,
+    },
     Hole {
         range: (usize, usize),
         expr: (usize, usize),
@@ -126,15 +99,9 @@ pub struct Scan {
 }
 
 impl Scan {
-    /// A hole's expression source for the sub-parser, plus the map from each of
-    /// its byte offsets back to `src`. The enclosing literal's escape pass runs
-    /// here rather than at the token, so `"{f(\"a\")}"` reaches the parser as
-    /// `f("a")` while every offset still points at real source.
     pub fn hole_source(&self, src: &str, expr: (usize, usize)) -> (String, Vec<usize>) {
         let raw = &src[expr.0..expr.1];
         let mut out = String::with_capacity(raw.len());
-        // `map[k]` is the `src` offset of output byte `k`; the trailing entry
-        // maps the end, so an exclusive range maps as one.
         let mut map: Vec<usize> = Vec::with_capacity(raw.len() + 1);
         let mut i = 0;
         while i < raw.len() {
@@ -185,8 +152,6 @@ pub fn scan_string(src: &str, start: usize) -> Scan {
     let mut bad_escapes: Vec<BadEscape> = Vec::new();
     let mut lit_start = i;
     let mut lit_text = String::new();
-    // A literal piece ends at the next hole or at the closer; flush what has
-    // accumulated since `lit_start`.
     macro_rules! flush_literal {
         ($end:expr) => {{
             let end = $end;
@@ -235,8 +200,6 @@ pub fn scan_string(src: &str, start: usize) -> Scan {
             if let Some(ch) = e.ch {
                 lit_text.push(ch);
             }
-            // A trailing `\` resolves to itself with no following bytes, so
-            // this still advances and the loop cannot spin.
             i += 1 + e.len;
             continue;
         }
@@ -285,12 +248,7 @@ pub struct BadEscape {
     pub message: String,
 }
 
-/// One resolved escape: the char it denotes, and how many bytes FOLLOW the
-/// backslash. `bad` is set for an escape that does not denote anything, in
-/// which case `ch` is a best-effort stand-in that keeps the scan walking.
 struct Esc {
-    /// None for an escape that denotes no character at all -- a line
-    /// continuation is the only one.
     ch: Option<char>,
     len: usize,
     bad: Option<String>,
@@ -322,14 +280,8 @@ impl Esc {
 
 const RAW_HINT: &str = "; write `r\"..\"` for a literal backslash";
 
-/// Resolve the escape whose backslash sits just before `at`.
-///
-/// Unknown escapes REJECT rather than standing for the escaped char: silently
-/// dropping the backslash is how a `\r` becomes the letter `r`, which is a
-/// string the author did not write and which no test can see.
 fn resolve_escape(src: &str, at: usize) -> Esc {
     let Some(c) = src[at..].chars().next() else {
-        // Trailing `\` at end of input: keep it as itself for the partial tree.
         return Esc::ok('\\', 0);
     };
     let w = c.len_utf8();
@@ -339,11 +291,6 @@ fn resolve_escape(src: &str, at: usize) -> Esc {
         'r' => Esc::ok('\r', w),
         '\\' | '"' | '\'' => Esc::ok(c, w),
         'u' => resolve_unicode_escape(src, at + w),
-        // Line continuation: the newline and the next line's indentation are
-        // both consumed, so a wrapped message is one line of text. Dropping
-        // only the backslash would leave the newline and the indent IN the
-        // string, which is what every wrapped literal in the corpus was
-        // silently getting.
         '\n' => {
             let b = src.as_bytes();
             let mut j = at + w;
@@ -368,9 +315,6 @@ fn resolve_escape(src: &str, at: usize) -> Esc {
     }
 }
 
-/// `\u{H..}` -- one to six hex digits naming a Unicode scalar value. Braced
-/// rather than fixed-width so an astral codepoint is written directly; a
-/// surrogate is not a scalar and is refused at both ends of its range.
 fn resolve_unicode_escape(src: &str, at: usize) -> Esc {
     let b = src.as_bytes();
     if b.get(at) != Some(&b'{') {
@@ -385,8 +329,6 @@ fn resolve_unicode_escape(src: &str, at: usize) -> Esc {
     while i < b.len() && b[i] != b'}' {
         i += 1;
     }
-    // Span consumed on every exit below, so a rejection still advances past the
-    // whole escape and cannot cascade into the rest of the literal.
     let consumed = |end: usize| end - (at - 1);
     if i >= b.len() {
         return Esc::bad(
@@ -430,31 +372,19 @@ fn resolve_unicode_escape(src: &str, at: usize) -> Esc {
     }
 }
 
-/// Scan the hole opening at `src[open]` (a `{`). Returns the index just past its
-/// `}` (end of input when unclosed) and the piece.
 fn scan_hole(src: &str, open: usize, flavor: Flavor) -> (usize, Piece) {
     let b = src.as_bytes();
     let n = b.len();
     let close = flavor.close().as_bytes();
     let mut i = open + 1;
     let expr_start = i;
-    // Bracket depth WITHIN the hole, so a `:` or `}` belonging to a nested
-    // `(...)`/`[...]`/`{...}` (named args, struct literals) is not the spec
-    // split or the terminator.
     let mut depth: i32 = 0;
     let mut spec_start: Option<usize> = None;
     let mut expr_end = n;
     while i < n {
-        // `"""` still terminates its literal from inside a hole (see
-        // `closes_inside_hole`), so an unclosed brace can't run away.
-        // Regardless of bracket depth: an `inline(lua)` body's braces and
-        // quotes are text, and nothing inside a hole may outlive the literal.
         if flavor.closes_inside_hole() && b[i..].starts_with(close) {
             break;
         }
-        // A `\X` escape is consumed by the enclosing literal's escape pass, so
-        // `\"` inside a hole is an escaped quote, NOT the start of a nested
-        // literal. `hole_source` replays that pass for the sub-parser.
         if flavor.escapes() && b[i] == b'\\' {
             i += 1 + src[i + 1..].chars().next().map_or(0, char::len_utf8);
             continue;
@@ -473,7 +403,6 @@ fn scan_hole(src: &str, open: usize, flavor: Flavor) -> (usize, Piece) {
                     },
                 );
             }
-            // `::` is a path separator, not the spec split: `{Col::Green}`.
             b':' if depth == 0 && spec_start.is_none() && b.get(i + 1) == Some(&b':') => {
                 i += 2;
                 continue;
@@ -483,11 +412,6 @@ fn scan_hole(src: &str, open: usize, flavor: Flavor) -> (usize, Piece) {
                 i += 1;
                 continue;
             }
-            // A literal inside the hole is opaque: its quotes, braces and colons
-            // belong to it, not to the hole. Only `"..."` does this -- inside
-            // `\"\"\"` a lone `"` is ordinary text (that is the whole point of the
-            // form), so recursing there would let a stray `{` in an
-            // `inline(lua)` body run past the terminator.
             b'"' | b'\'' if !flavor.closes_inside_hole() => {
                 if let Some(inner) = Flavor::at(src, i) {
                     i = scan_string(src, i).end.max(i + inner.open().len());
@@ -502,7 +426,6 @@ fn scan_hole(src: &str, open: usize, flavor: Flavor) -> (usize, Piece) {
         }
         i += 1;
     }
-    // Unclosed hole: everything to the terminator (or end of input) is the expr.
     let end = i.min(n);
     expr_end = expr_end.min(end);
     let expr = (expr_start, spec_start.map_or(expr_end, |s| s - 1));

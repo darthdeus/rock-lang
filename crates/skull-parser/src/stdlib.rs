@@ -1,10 +1,3 @@
-//! The parsed stdlib: the one loader the CLI pipeline and the LSP session both
-//! warm from, so they cannot disagree about what a broken stdlib means.
-//!
-//! The stdlib has no recovery story -- a dropped item would surface later as
-//! "callee not found" in user code -- so any syntax error, recovered or not,
-//! fails the whole load with an error naming the file.
-
 use std::sync::{Arc, LazyLock};
 
 use rock_core::CompilerError;

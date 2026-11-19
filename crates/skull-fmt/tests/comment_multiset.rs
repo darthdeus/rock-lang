@@ -1,7 +1,3 @@
-//! Formatting must keep every comment. `try_format` refuses output whose
-//! comments differ from the input's, so a source that parses but does not
-//! format is a comment the printer lost.
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -19,7 +15,6 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The formatted source, or `None` when the source does not parse cleanly.
 fn format_v1(src: &str) -> Option<Result<String, String>> {
     let cfg = skull_fmt::FormatConfig::default();
     skull_parser::parse_module_clean(src, "<src>".into())
@@ -87,7 +82,6 @@ fn repository_sources_keep_every_comment() {
     let mut failures = Vec::new();
     for file in &files {
         let src = fs::read_to_string(file).expect("read a Rock source");
-        // Negative fixtures do not parse; the formatter leaves those alone.
         match format_v1(&src) {
             None => continue,
             Some(Ok(_)) => {}

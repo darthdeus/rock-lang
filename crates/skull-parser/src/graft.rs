@@ -1,30 +1,9 @@
-//! Deep-copy of AST subtrees: from one `Ast` into another, or within one.
-//!
-//! Macro expansion inlines a macro body (defined in module A's arena) at a call
-//! site in module B's arena, so the template's nodes are re-allocated into the
-//! caller. Compound-assign's read copy of an lvalue (`a += b` -> `a = a + b`)
-//! and repeated macro arguments copy within a single arena instead: `Idx` is a
-//! node's identity, so duplication re-allocates every node with remapped child
-//! indices.
-//!
-//! A copy can also rewrite what it copies ([`Rewrite`]): macro instantiation
-//! freshens the body's binders, stamps the call span and substitutes params in
-//! the same walk.
-
 use crate::ast::*;
 use crate::walk;
 use rock_core::Span;
 use ustr::Ustr;
 
-/// How a copy changes the expressions, statements and blocks it copies. Every
-/// hook defaults to leaving the node as it was, which is what [`Plain`] does.
-///
-/// Binders are reported as the walk meets them: `enter`/`exit` bracket a
-/// scope, and a binder is bound after the expressions that cannot see it (a
-/// `let`'s value, an `if let`'s scrutinee) were copied.
 pub(crate) trait Rewrite {
-    /// The span every copied node gets instead of its own; a stamped block
-    /// has no braces.
     fn stamp(&self) -> Option<Span> {
         None
     }
@@ -32,21 +11,15 @@ pub(crate) trait Rewrite {
     fn exit(&mut self) {}
     fn bind(&mut self, _name: &mut Ustr) {}
     fn bind_pattern(&mut self, _p: &mut Pattern) {}
-    /// The name a reference to `name` takes.
     fn resolve(&self, name: Ustr) -> Ustr {
         name
     }
-    /// The expression (in the destination arena) a reference to `name` is
-    /// replaced by a copy of.
     fn arg(&self, _name: Ustr) -> Option<Idx<ExprData>> {
         None
     }
-    /// The expressions a `...name` call argument forwards.
     fn splat(&self, _name: Ustr) -> Option<&[Idx<ExprData>]> {
         None
     }
-    /// The type (in the destination arena) a type named `name` is replaced by;
-    /// a declaration named `name` takes its name when it is a bare identifier.
     fn ty_arg(&self, _name: Ustr) -> Option<Idx<TypeExprData>> {
         None
     }

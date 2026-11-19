@@ -74,8 +74,6 @@ fn ident_spans(ast: &Ast, src: &str) -> Vec<(String, String)> {
 
 #[test]
 fn malformed_source_is_rejected_with_its_diagnostic() {
-    // An empty needle accepts any diagnostic; the point is that the source is
-    // not silently accepted.
     for (src, needle) in [
         ("nobox struct S { x: int }", "`nobox` requires `value`"),
         (
@@ -90,11 +88,8 @@ fn malformed_source_is_rejected_with_its_diagnostic() {
         ("struct Box<T { value: int }\n", ""),
         // A hole that fails to parse is never emitted as literal brace text.
         (r#"fn f() { let x = "{add2(2,}" }"#, ""),
-        // Field before base in a functional-update literal.
         ("fn f() { let x = P { a: 1, ..base } }", ""),
-        // Functional update on an enum variant is not supported.
         ("fn f() { let x = E::V { ..base, a: 1 } }", ""),
-        // `(a : int, b : int)` is not a typed-tuple literal.
         ("fn f() { let t = (a : int, b : int) }", "one expression"),
         (
             "fn f(a: int) { let t = (a, b : int) }",
@@ -138,9 +133,6 @@ fn malformed_source_is_rejected_with_its_diagnostic() {
 
 #[test]
 fn parse_module_clean_rejects_what_parse_module_recovers_from() {
-    // A fn body-less because its inline body lost its `=`: recovered, the
-    // item dropped, and `parse_module` still Ok. The strict form is the
-    // oracle a fixture helper needs.
     let src = "inline(lua) fn f(x: int) -> int \"\"\" return x \"\"\"\n";
     let lenient = parse_module(src, file()).expect("recovering parse still returns a tree");
     assert!(
@@ -166,7 +158,6 @@ fn nesting_beyond_the_limit_drops_only_its_item() {
         "}\n".repeat(depth)
     );
     let src = format!("{deep}fn after() {{\n    let broken =\n    let kept = 1\n}}\n");
-    // The parser recurses to the limit, so it needs the stack compiler threads get.
     let ast = std::thread::Builder::new()
         .stack_size(rock_core::nesting::COMPILER_STACK_BYTES)
         .spawn(move || parse_module(&src, Ustr::from("<deep>")).expect("tokenization"))
@@ -193,11 +184,6 @@ fn nesting_beyond_the_limit_drops_only_its_item() {
 
 #[test]
 fn item_recovery_does_not_swallow_the_next_fn() {
-    // An item error detected AT an item boundary leaves the parser sitting on
-    // the next `fn`. Recovery used to force-consume a token before scanning,
-    // so that `fn` was eaten and the whole following function vanished from
-    // the AST -- a valid item lost to a neighbour's error, which in the editor
-    // took hover/completion down with it.
     let src = "fn helper(a: int) -> int { return a * 2 }\n\
                fn incomplete(x: int) -> int\n\
                fn survivor() -> int { return 7 }\n";
@@ -233,10 +219,6 @@ fn recovery_preserves_fields_and_following_bindings() {
 
 #[test]
 fn interpolation_nested_hole_spans_are_file_offsets() {
-    // A hole inside a string that itself sits in a hole is scanned against
-    // the enclosing hole's cooked text; its offsets must still come out in
-    // file coordinates. The escaped form cooks `\"` away, so its map is not
-    // a plain shift.
     let src = "fn a() {}\n\
                fn b(y: int, z: int) -> string {\n    \
                    let s = \"v {y} w {if true { \"{z}\" } else { \"\" }}\"\n    \
@@ -246,8 +228,6 @@ fn interpolation_nested_hole_spans_are_file_offsets() {
     for (name, text) in ident_spans(&full, src) {
         assert_eq!(text, name, "ident span does not cover its source");
     }
-    // The single-item reparse starts its source mid-file, so a hole offset
-    // left relative to that slice lands `offset` bytes short.
     for (name, text) in ident_spans(&reparse_item(&full, src, 1), src) {
         assert_eq!(text, name, "reparsed ident span does not cover its source");
     }

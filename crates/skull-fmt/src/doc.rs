@@ -1,22 +1,7 @@
-//! A Wadler/Prettier-style document IR for layout.
-//!
-//! The formatter builds a `Doc` describing structure (text, breakable lines,
-//! groups, indentation) and `render` turns it into the final string by deciding,
-//! per `group`, whether it fits the target width in *flat* mode or must *break*.
-//! Width-driven wrapping is therefore declarative and idempotent by
-//! construction -- the renderer never re-measures already-emitted text.
-//!
-//! This module is layout only. Comments, blank lines and verbatim string/lua
-//! bodies are handled by the caller (verbatim text goes in via `Doc::text`).
-
-/// A line break that adapts to its enclosing group's mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LineKind {
-    /// Space when flat, newline when broken.
     Normal,
-    /// Nothing when flat, newline when broken.
     Soft,
-    /// Always a newline; forces every enclosing group to break.
     Hard,
 }
 
@@ -26,9 +11,7 @@ pub(crate) enum Doc {
     Text(String),
     Line(LineKind),
     Concat(Vec<Doc>),
-    /// Increase indentation by one unit for the contained doc's line breaks.
     Indent(Box<Doc>),
-    /// A unit that the renderer lays out flat if it fits, otherwise broken.
     Group(Box<Doc>),
 }
 
@@ -65,8 +48,6 @@ impl Doc {
         Doc::Concat(out)
     }
 
-    /// True if this doc contains a hard line, which forces breaking regardless
-    /// of width.
     pub(crate) fn has_hard_line(&self) -> bool {
         match self {
             Doc::Line(LineKind::Hard) => true,
@@ -97,10 +78,6 @@ enum Mode {
     Break,
 }
 
-/// Does the remaining work fit in `width` columns on the current line?
-///
-/// `width` is the columns left before the limit. Only content up to the next
-/// (break-mode) newline matters. A hard line in flat content makes it not fit.
 fn fits(mut width: isize, mut stack: Vec<(usize, Mode, &Doc)>) -> bool {
     while width >= 0 {
         let Some((indent, mode, doc)) = stack.pop() else {
@@ -123,11 +100,6 @@ fn fits(mut width: isize, mut stack: Vec<(usize, Mode, &Doc)>) -> bool {
                 }
             }
             Doc::Indent(d) => stack.push((indent + 1, mode, d)),
-            // An inner group that must break (it contains a hard line) ends the
-            // current line at its first break, so probe it in Break mode; a
-            // breakless inner group is assumed flat. This lets `head() @ [<multi-
-            // line>]` keep the head flat (the array breaks) while still breaking
-            // `(params) => long_body` (the breakless body overflows the line).
             Doc::Group(d) => {
                 let m = if d.has_hard_line() {
                     Mode::Break
@@ -146,7 +118,6 @@ fn fits(mut width: isize, mut stack: Vec<(usize, Mode, &Doc)>) -> bool {
 pub fn render(doc: &Doc, width: usize, indent_unit: usize) -> String {
     let mut out = String::new();
     let mut col: usize = 0;
-    // (indent level, mode, doc). Process LIFO.
     let mut stack: Vec<(usize, Mode, &Doc)> = vec![(0, Mode::Break, doc)];
 
     while let Some((indent, mode, d)) = stack.pop() {
@@ -154,8 +125,6 @@ pub fn render(doc: &Doc, width: usize, indent_unit: usize) -> String {
             Doc::Nil => {}
             Doc::Text(s) => {
                 out.push_str(s);
-                // Text may contain verbatim newlines (e.g. multiline strings);
-                // track the column from the last line so width stays accurate.
                 match s.rfind('\n') {
                     Some(pos) => col = s[pos + 1..].chars().count(),
                     None => col += s.chars().count(),
@@ -178,7 +147,6 @@ pub fn render(doc: &Doc, width: usize, indent_unit: usize) -> String {
                     }
                 },
                 Mode::Break => {
-                    // Trim trailing spaces on the line we are leaving.
                     while out.ends_with(' ') {
                         out.pop();
                     }
@@ -195,11 +163,6 @@ pub fn render(doc: &Doc, width: usize, indent_unit: usize) -> String {
             }
             Doc::Indent(sub) => stack.push((indent + 1, mode, sub)),
             Doc::Group(sub) => {
-                // A group lays out flat iff the group AND the rest of the
-                // current line (the continuation already on the stack, in their
-                // decided modes) fit before the next break. Measuring the
-                // continuation is what makes `(params) => long_body` break its
-                // params: the params alone fit, but params-plus-body do not.
                 let mut probe = stack.clone();
                 probe.push((indent, Mode::Flat, sub));
                 let flat_fits = !sub.has_hard_line() && fits(width as isize - col as isize, probe);
