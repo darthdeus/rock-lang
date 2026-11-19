@@ -11,7 +11,7 @@ use bone_core::prelude::Span;
 use bone_core::workspace::Workspace;
 use ustr::Ustr;
 
-use super::{FieldShape, ScalarCtx, SpecSubst, ValueShape, ValueStorage, slot_param_names};
+use super::{FieldShape, ScalarCtx, SpecSubst, ValueShape, ValueStorage, leaf_names};
 use crate::concrete::{ConcreteBodyPlan, ConcreteSignature};
 use crate::mir::FuncRef;
 
@@ -2570,20 +2570,19 @@ impl BackendFnAbiPlan {
     /// leaf ORDER matches `repr_to_leaves`, so def params line up with the
     /// callsite splat positionally.
     pub fn lua_param_names(&self, ws: &Workspace) -> Option<Vec<String>> {
+        self.scalar_param_labels(ws, false)
+    }
+
+    pub(super) fn scalar_param_labels(&self, ws: &Workspace, origins: bool) -> Option<Vec<String>> {
         if !self.uses_scalar_abi() {
             return None;
         }
         let f = &ws.module(self.decl().module).functions[self.decl().func];
-        let mut names = Vec::new();
+        let mut labels = Vec::new();
         for (pd, &id) in f.param_decls.iter().zip(self.param_reps()) {
-            slot_param_names(
-                &self.arena,
-                pd.name.as_str(),
-                self.arena.layout(id),
-                &mut names,
-            );
+            slot_param_labels(&self.arena, pd.name.as_str(), id, origins, &mut labels);
         }
-        Some(names)
+        Some(labels)
     }
 
     /// Each declared parameter's wire position, then the result's. Read only
@@ -2621,6 +2620,46 @@ impl BackendFnAbiPlan {
         })
     }
 }
+
+fn slot_param_labels(
+    arena: &RepArena,
+    base: &str,
+    id: RepId,
+    origins: bool,
+    out: &mut Vec<String>,
+) {
+    let sep = if origins { "." } else { "__" };
+    match arena.layout(id) {
+        RepLayout::Opaque => out.push(if origins {
+            format!("the declared param `{base}`")
+        } else {
+            base.to_string()
+        }),
+        RepLayout::Leaves(shape) => {
+            out.extend(leaf_names(shape, base, sep).into_iter().map(|path| {
+                if origins {
+                    format!("the leaf `{path}` of value param `{base}`")
+                } else {
+                    path
+                }
+            }))
+        }
+        RepLayout::Tuple(inner) => {
+            // The presence lane precedes the tuple's value slots.
+            if inner.nullable {
+                out.push(if origins {
+                    format!("the presence of nullable tuple param `{base}`")
+                } else {
+                    format!("{base}{sep}p")
+                });
+            }
+            for (i, &id) in inner.slots.iter().enumerate() {
+                slot_param_labels(arena, &format!("{base}{sep}{i}"), id, origins, out);
+            }
+        }
+    }
+}
+
 pub(crate) fn rep_logical_fingerprint(arena: &RepArena, id: RepId) -> String {
     rep_logical_fingerprint_shared(arena, id).to_string()
 }

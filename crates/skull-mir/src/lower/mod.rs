@@ -591,10 +591,11 @@ pub fn scalar_abi_param_collisions(
         return Vec::new();
     }
     let plan = BackendFnAbiPlan::for_boundary_declaration(ws, scx, fref);
-    let Some(names) = plan.lua_param_names(ws) else {
+    let (Some(names), Some(origins)) =
+        (plan.lua_param_names(ws), plan.scalar_param_labels(ws, true))
+    else {
         return Vec::new();
     };
-    let origins = scalar_abi_param_origins(ws, scx.rep_arena(), &plan);
     debug_assert_eq!(names.len(), origins.len(), "one derivation, two spellings");
 
     let mut out = Vec::new();
@@ -624,85 +625,6 @@ pub fn scalar_abi_param_collisions(
     }
     out
 }
-
-fn scalar_abi_param_origins(
-    ws: &Workspace,
-    arena: &RepArena,
-    plan: &BackendFnAbiPlan,
-) -> Vec<String> {
-    if !plan.uses_scalar_abi() {
-        return Vec::new();
-    }
-    let decl = plan.decl();
-    let f = &ws.module(decl.module).functions[decl.func];
-    let mut out = Vec::new();
-    for (pd, &id) in f.param_decls.iter().zip(plan.param_reps()) {
-        slot_param_origins(arena, pd.name.as_str(), arena.layout(id), &mut out);
-    }
-    out
-}
-
-/// Append `<base>__<leaf>` for every primitive leaf of `shape`, depth-first.
-/// `__` rather than `.` because these are Lua identifiers -- which is exactly
-/// what makes the encoding non-injective and needs
-/// [`value_leaf_name_collisions`] to guard it.
-fn leaf_param_names(base: &str, shape: &ValueShape, out: &mut Vec<String>) {
-    out.extend(leaf_names(shape, base, LEAF_PARAM_SEP));
-}
-
-/// The emitted param names ONE declared param contributes, per its wire slot.
-/// A tuple slot indexes into the base (`pq__0__x`) using the same `__` join the
-/// leaf encoding already uses, so the whole list stays one namespace and the
-/// injectivity check below sees tuple leaves like any other.
-fn slot_param_names(arena: &RepArena, base: &str, slot: &RepLayout, out: &mut Vec<String>) {
-    match slot {
-        RepLayout::Opaque => out.push(base.to_string()),
-        RepLayout::Leaves(shape) => leaf_param_names(base, shape, out),
-        RepLayout::Tuple(inner) => {
-            // The presence leads the slots, so it takes the FIRST name -- the
-            // order `bind_param_slot` binds cells in and `tuple_repr_to_slots`
-            // writes values in. Skipping it emits a list one short of
-            // `slot_count`, which Lua nil-fills rather than rejects.
-            if inner.nullable {
-                out.push(format!("{base}{LEAF_PARAM_SEP}p"));
-            }
-            for (i, s) in inner.slots.iter().enumerate() {
-                slot_param_names(
-                    arena,
-                    &format!("{base}{LEAF_PARAM_SEP}{i}"),
-                    arena.layout(*s),
-                    out,
-                );
-            }
-        }
-    }
-}
-
-/// [`slot_param_names`] in the human-facing spelling the collision diagnostic
-/// uses -- the same traversal, so a reported origin always names a real emitted
-/// param.
-fn slot_param_origins(arena: &RepArena, base: &str, slot: &RepLayout, out: &mut Vec<String>) {
-    match slot {
-        RepLayout::Opaque => out.push(format!("the declared param `{base}`")),
-        RepLayout::Leaves(shape) => out.extend(
-            leaf_names(shape, base, ".")
-                .into_iter()
-                .map(|p| format!("the leaf `{p}` of value param `{base}`")),
-        ),
-        RepLayout::Tuple(inner) => {
-            if inner.nullable {
-                out.push(format!("the presence of nullable tuple param `{base}`"));
-            }
-            for (i, s) in inner.slots.iter().enumerate() {
-                slot_param_origins(arena, &format!("{base}.{i}"), arena.layout(*s), out);
-            }
-        }
-    }
-}
-
-/// The Lua leaf-param separator, and the reason a `__`-bearing field name can
-/// collide with a nested path.
-const LEAF_PARAM_SEP: &str = "__";
 
 /// A chunk of a `string.format` conversion string: a static literal, or a
 /// runtime int expression (dynamic width/precision) stringified into the format.
