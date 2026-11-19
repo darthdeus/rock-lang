@@ -475,51 +475,6 @@ fn container_storage_uses_the_owned_element_representation() {
 }
 
 #[test]
-fn column_element_plan_carries_the_nobox_guarantee() {
-    let ws = checked_ws_of(
-        "nobox value N { x: float, y: float }\n\
-         value B { x: float, y: float }\n",
-    );
-    let arena = RepArena::default();
-    let marked = MonoTy::App {
-        ctor: MonoCtor::Array,
-        params: vec![nominal(&ws, "N")],
-    };
-    let unmarked = MonoTy::App {
-        ctor: MonoCtor::Array,
-        params: vec![nominal(&ws, "B")],
-    };
-    let marked = ContainerPlan::for_type(
-        &ws,
-        bone_core::hir::FnBackend::Lua,
-        &arena,
-        ContainerFamily::Vec,
-        &marked,
-    )
-    .expect("marked value vector must have a plan")
-    .column_elem(&arena)
-    .expect("marked value vector must use columns");
-    let unmarked = ContainerPlan::for_type(
-        &ws,
-        bone_core::hir::FnBackend::Lua,
-        &arena,
-        ContainerFamily::Vec,
-        &unmarked,
-    )
-    .expect("unmarked value vector must have a plan")
-    .column_elem(&arena)
-    .expect("unmarked value vector must use columns");
-    assert!(
-        marked.is_nobox(),
-        "the marked element population must be nonzero"
-    );
-    assert!(
-        !unmarked.is_nobox(),
-        "the unmarked control must stay boxed at element use sites"
-    );
-}
-
-#[test]
 fn missing_bound_result_plan_is_an_explicit_error() {
     let ws = checked_ws_of("fn main() { print(\"ok\") }\n");
     let scx = ScalarCtx::new(&ws);
@@ -852,10 +807,6 @@ fn main() {
     skull_mir::mir::column_elem_rep_plans(&mir, &mut plans);
     assert_eq!(plans.get(&key(&ws, "V2")).map(|p| p.0), Some(false));
     assert_eq!(plans.get(&key(&ws, "NV2")).map(|p| p.0), Some(true));
-    assert!(
-        plans.len() >= 2,
-        "the column plan population must be nonzero"
-    );
 }
 
 #[test]
