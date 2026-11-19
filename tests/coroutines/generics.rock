@@ -1,16 +1,18 @@
 // Generic calls from coroutine lambdas and detached regions, and generic result falloff.
+// Each generic-call case uses its own element type so no other site in the
+// file can supply the specialization it needs.
 
 // The step runs under the resume pcall, so a missing specialization would
 // surface as a wrong answer rather than a crash.
-global LAMBDA_LOG: [string] = []
+global LAMBDA_LOG: [float] = []
 
 co fn lambda_worker() -> Coroutine<int> {
-    let add = () => { LAMBDA_LOG.push("lam") }
+    let add = () => { LAMBDA_LOG.push(1.5) }
     add()
     yield 1
 }
 
-@test(output = "1 lam")
+@test(output = "1 1.5")
 fn a_generic_call_from_a_coroutine_lambda() {
     let c = lambda_worker()
     let _ = c.resume()
