@@ -855,13 +855,7 @@ mod tests {
     fn medium_open_grid_matches_full_chebyshev_reference() {
         let width = 129;
         let height = 129;
-        let mut walkable = padded_snapshot(width, height, false);
-        let padded_width = width + 2;
-        for y in 0..height {
-            for x in 0..width {
-                walkable[(y + 1) * padded_width + x + 1] = 1;
-            }
-        }
+        let walkable = interior_snapshot(width, height);
         let started = Instant::now();
         let result = compute_flow(
             width,
@@ -889,11 +883,7 @@ mod tests {
         shutdown();
         let width = 3;
         let height = 1;
-        let mut walkable = padded_snapshot(width, height, false);
-        let padded_width = width + 2;
-        for x in 1..=width {
-            walkable[padded_width + x] = 1;
-        }
+        let mut walkable = interior_snapshot(width, height);
         let handle = stone_flow_submit(
             width as i32,
             height as i32,

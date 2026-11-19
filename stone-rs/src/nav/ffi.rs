@@ -828,36 +828,45 @@ pub(super) fn shutdown() {
 }
 
 #[cfg(test)]
+pub(super) struct Owned(pub(super) int);
+
+#[cfg(test)]
+impl Drop for Owned {
+    fn drop(&mut self) {
+        stone_nav_free(self.0);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn create_open_graph() -> Owned {
+    let layout = [1.into(), 0.into(), 0.into()];
+    let count = (SPACE_SIZE * SPACE_SIZE) as usize;
+    let blocked = vec![0u8; count];
+    let values: Vec<NativeNavIntWire> = (0..count).map(|_| 0.into()).collect();
+    let graph = Owned(unsafe {
+        stone_nav_create(
+            layout.as_ptr(),
+            layout.len() as int,
+            blocked.as_ptr(),
+            values.as_ptr(),
+            values.as_ptr(),
+            count as int,
+            std::ptr::null(),
+            0,
+            8,
+        )
+    });
+    assert!(graph.0 > 0, "native graph creation succeeds");
+    graph
+}
+
+#[cfg(test)]
 mod fork_tests {
     use super::*;
 
-    struct Owned(int);
-    impl Drop for Owned {
-        fn drop(&mut self) {
-            stone_nav_free(self.0);
-        }
-    }
-
     #[test]
     fn fork_preserves_pending_budget_and_isolates_edits_and_retirement() {
-        let layout = [1.into(), 0.into(), 0.into()];
-        let count = (SPACE_SIZE * SPACE_SIZE) as usize;
-        let blocked = vec![0u8; count];
-        let values: Vec<NativeNavIntWire> = (0..count).map(|_| 0.into()).collect();
-        let parent = Owned(unsafe {
-            stone_nav_create(
-                layout.as_ptr(),
-                3,
-                blocked.as_ptr(),
-                values.as_ptr(),
-                values.as_ptr(),
-                count as int,
-                std::ptr::null(),
-                0,
-                8,
-            )
-        });
-        assert!(parent.0 > 0);
+        let parent = create_open_graph();
         assert_eq!(stone_nav_edit(parent.0, 0, 1, 0, 0, 0, 0, 0), 0);
         let rebuilding = Owned(stone_nav_fork(parent.0));
         assert_ne!(rebuilding.0, parent.0);

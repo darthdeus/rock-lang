@@ -287,36 +287,12 @@ fn reused_worker_scratch_preserves_routes_and_charged_work_across_graphs() {
 #[test]
 fn native_publication_waits_for_each_queued_deadline_in_fifo_order() {
     use super::ffi::{
-        stone_nav_create, stone_nav_edit, stone_nav_get, stone_nav_plan, stone_nav_request,
-        stone_nav_route_restore, stone_nav_step, NativeNavIntWire,
+        stone_nav_edit, stone_nav_get, stone_nav_plan, stone_nav_request, stone_nav_route_restore,
+        stone_nav_step, NativeNavIntWire,
     };
 
-    struct Handle(i64);
-    impl Drop for Handle {
-        fn drop(&mut self) {
-            super::ffi::stone_nav_free(self.0);
-        }
-    }
-
-    let layout = [1.into(), 0.into(), 0.into()];
-    let tile_count = (SPACE_SIZE * SPACE_SIZE) as usize;
-    let blocked = vec![0u8; tile_count];
-    let values: Vec<NativeNavIntWire> = (0..tile_count).map(|_| 0.into()).collect();
-    let handle = unsafe {
-        stone_nav_create(
-            layout.as_ptr(),
-            layout.len() as int,
-            blocked.as_ptr(),
-            values.as_ptr(),
-            values.as_ptr(),
-            tile_count as int,
-            std::ptr::null(),
-            0,
-            8,
-        )
-    };
-    assert!(handle > 0, "native graph creation succeeds");
-    let _handle = Handle(handle);
+    let _graph = super::ffi::create_open_graph();
+    let handle = _graph.0;
     assert_eq!(
         stone_nav_edit(handle, 0, NAV_UNBOUNDED_BUDGET, 0, 0, 0, 0, 0),
         1
