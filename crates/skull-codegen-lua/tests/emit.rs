@@ -96,10 +96,15 @@ fn emitted_symbol(lua: &str) -> &str {
         .unwrap()
 }
 
-fn emit_run(src: &str) -> (String, Option<skull_parser::CompilerError>) {
-    let (ws, mid) = stdlib_workspace(src);
-    let fid = test_fn(&ws, mid, "run");
-    let (func, interner) = common::lower_test_ref(&ws, mid, fid).expect("lower");
+fn emit_module(
+    mut modules: Vec<skull_parser::Ast>,
+    fn_name: &str,
+) -> (String, Option<skull_parser::CompilerError>) {
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
+    let fid = test_fn(&ws, mid, fn_name);
+    let (func, interner) = common::lower_test_ref(&ws, mid, fid)
+        .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     let ctx = CodegenCtx::new(&ws);
     let lua = emit_function(
         &ws,
@@ -115,33 +120,14 @@ fn emit_run(src: &str) -> (String, Option<skull_parser::CompilerError>) {
     (lua, ctx.take_rejection())
 }
 
-fn emit_dump(mut modules: Vec<skull_parser::Ast>, fn_name: &str) -> String {
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("user module id");
-    let fid = test_fn(&ws, mid, fn_name);
-    let (func, interner) = common::lower_test_ref(&ws, mid, fid)
-        .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
-    let ctx = CodegenCtx::new(&ws);
-    emit_function(
-        &ws,
-        &ctx,
-        &interner,
-        FuncRef {
-            module: mid,
-            func: fid,
-        },
-        &func,
-        None,
-    )
+fn emit_run(src: &str) -> (String, Option<skull_parser::CompilerError>) {
+    emit_module(stdlib_with(src), "run")
 }
 
 /// Stdlib-free: literals, vars, `let`, builtin comparisons, control flow.
 fn emit(src: &str, fn_name: &str) -> String {
     let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
-    emit_dump(vec![ast], fn_name)
+    emit_module(vec![ast], fn_name).0
 }
 
 #[test]
@@ -245,7 +231,7 @@ fn numeric_selection_through_local_copies_uses_native_minmax() {
     );
     assert!(
         lua.contains("math.min(") && lua.contains("math.max("),
-        "nil needs no register even with readers in different blocks:\n{lua}"
+        "{lua}"
     );
     check_selection_values(
         &lua,
@@ -282,7 +268,7 @@ fn numeric_selection_clamp_with_ordered_bounds_uses_native_minmax() {
         );
         assert!(
             lua.contains("math.max(") && lua.contains("math.min("),
-            "filter chain must stay zero-alloc, fully inlined:\n{lua}"
+            "{lua}"
         );
         check_selection_values(
             &lua,
@@ -373,10 +359,8 @@ end end end
 print('selection-ok flushes=' .. flushes)
 "#
     );
-    let run = luajit_ok(&driver, "");
-    let stdout = run;
+    let stdout = luajit_ok(&driver, "");
     assert!(stdout.starts_with("selection-ok flushes="), "{stdout}");
-    eprint!("{stdout}");
 }
 
 #[test]
@@ -392,7 +376,7 @@ fn numeric_selection_rejects_effectful_and_inclusive_branches() {
         let lua = emit_clean(src, "choose");
         assert!(
             !lua.contains("math.min(") && !lua.contains("math.max("),
-            "take_while chain must stay zero-alloc, fully inlined:\n{lua}"
+            "{lua}"
         );
     }
 }
@@ -922,7 +906,7 @@ fn arena_occupancy_reads_are_raw() {
 /// A call in the body that may shrink the vector keeps the loop's element
 /// read on its checked fallback.
 #[test]
-fn vec_loop_reads_its_element_directly() {
+fn a_shrinking_call_keeps_the_loop_element_fallback() {
     let lua = emit_inlined(
         "fn bump(xs: [int], x: int) -> int { if x < 0 { xs.pop() }; return x + 1 }
         fn sum_vec(xs: [int]) -> int {
@@ -947,7 +931,6 @@ fn vec_index_read_of_a_computed_operand_keeps_the_call() {
 fn pick(xs: [int]) -> int { return 1 }
 fn f(xs: [[int]], i: int) -> int { return xs[pick(xs[0])][i] }";
     let lua = emit(src, "f");
-    println!("{lua}");
     assert_eq!(lua.matches("pick").count(), 1, "{lua}");
 }
 
@@ -956,26 +939,15 @@ fn whole_gc_snapshots_read_only_demanded_leaves() {
     let src = include_str!("../../../tests/values/demanded_value_copy.rock");
     for name in ["consume", "read_only", "read_produced"] {
         let lua = emit_clean(src, name);
-        assert!(
-            !lua.contains(".ignored"),
-            "unused child read in {name}:\n{lua}"
-        );
-        assert!(
-            !lua.contains("unused7"),
-            "unused leaf read in {name}:\n{lua}"
-        );
-        assert!(
-            !lua.contains(".spare"),
-            "unused nested leaf in {name}:\n{lua}"
-        );
-        assert!(
-            !lua.contains("Detail_ct("),
-            "child repack in {name}:\n{lua}"
-        );
-        assert!(
-            !lua.contains("Snapshot_vt("),
-            "root repack in {name}:\n{lua}"
-        );
+        for unused in [
+            ".ignored",
+            "unused7",
+            ".spare",
+            "Detail_ct(",
+            "Snapshot_vt(",
+        ] {
+            assert!(!lua.contains(unused), "{unused} in {name}:\n{lua}");
+        }
     }
 }
 
@@ -1133,53 +1105,6 @@ fn counted_loop_store_within_the_length_is_raw() {
     assert!(!lua.contains("__vec_checked_set("), "{lua}");
 }
 
-/// A call in the body may shrink the vector, so the store keeps its check. A
-/// `@pure` callee keeps it too: the annotation admits `@debug_impure` callees
-/// and unverified opaque bodies, so it does not prove the vector untouched.
-#[test]
-fn a_call_in_the_loop_body_keeps_the_check_even_when_pure() {
-    let lua = emit_inlined(
-        "fn shrink(xs: [int]) { xs.pop() }
-        fn fill(xs: [int]) {
-            for i in 0..xs.len() { xs[i] = i; shrink(xs) }
-        }",
-        "fill",
-    );
-    assert!(lua.contains("__vec_checked_set("), "{lua}");
-    // A `@pure` callee is proven harmless by reading its body, not by the
-    // annotation: a `@pure` wrapper around a `@debug_impure` pop keeps the
-    // check, since the effect walk sees the pop.
-    let lua = emit_inlined(
-        "@pure fn weight(i: int) -> int { return i * 3 }
-        fn fill(xs: [int]) {
-            for i in 0..xs.len() { xs[i] = weight(i) }
-        }",
-        "fill",
-    );
-    assert!(!lua.contains("__vec_checked_set("), "{lua}");
-    let lua = emit_inlined(
-        "@debug_impure fn debug_pop(xs: [int]) -> int { xs.pop(); return 0 }
-        @pure fn via(xs: [int]) -> int { return debug_pop(xs) }
-        fn fill(xs: [int]) {
-            for i in 0..xs.len() { xs[i] = via(xs) }
-        }",
-        "fill",
-    );
-    assert!(lua.contains("__vec_checked_set("), "{lua}");
-}
-
-/// A foreign vector's backing table can call __newindex when push appends.
-#[test]
-fn a_push_in_the_loop_body_keeps_the_check() {
-    let lua = emit_inlined(
-        "fn fill(xs: [int], out: [int]) {
-            for i in 0..xs.len() { xs[i] = i; if i % 7 == 0 { out.push(i) } }
-        }",
-        "fill",
-    );
-    assert!(lua.contains("__vec_checked_set("), "{lua}");
-}
-
 /// A range guard dominating the store proves it; a second vector of unknown
 /// length keeps its check.
 #[test]
@@ -1243,14 +1168,11 @@ fn column_index_checks_require_a_strict_bound() {
     }
 }
 
-/// A call in the loop body keeps the proof when the whole-program effect
-/// table says the callee writes nothing the loop's facts depend on: a body
-/// that only reads, a body whose writes name other fields, a foreign C
-/// function, an opaque body marked `@nowrite`, and one marked
-/// `@writes_elems`. A body that pops, or writes the field the vector is
-/// read from, keeps the check.
+/// A counted loop's store stays raw across a call only when the callee's
+/// body, not its `@pure` annotation, proves the vector untouched; a `push`
+/// on another vector may run a foreign `__newindex`.
 #[test]
-fn a_callee_that_provably_leaves_the_vector_alone_keeps_the_proof() {
+fn loop_store_checks_follow_callee_effects() {
     let proven = |src: &str| !emit_inlined(src, "fill").contains("__vec_checked_set(");
     let kept = |src: &str| emit_inlined(src, "fill").contains("__vec_checked_set(");
     assert!(proven(
@@ -1295,6 +1217,24 @@ fn a_callee_that_provably_leaves_the_vector_alone_keeps_the_proof() {
     assert!(kept(
         "inline(lua) fn raw(i: int) -> int = \"return i\"
         fn fill(xs: [int]) { for i in 0..xs.len() { xs[i] = raw(i) } }"
+    ));
+    assert!(kept(
+        "fn shrink(xs: [int]) { xs.pop() }
+        fn fill(xs: [int]) { for i in 0..xs.len() { xs[i] = i; shrink(xs) } }"
+    ));
+    assert!(proven(
+        "@pure fn weight(i: int) -> int { return i * 3 }
+        fn fill(xs: [int]) { for i in 0..xs.len() { xs[i] = weight(i) } }"
+    ));
+    assert!(kept(
+        "@debug_impure fn debug_pop(xs: [int]) -> int { xs.pop(); return 0 }
+        @pure fn via(xs: [int]) -> int { return debug_pop(xs) }
+        fn fill(xs: [int]) { for i in 0..xs.len() { xs[i] = via(xs) } }"
+    ));
+    assert!(kept(
+        "fn fill(xs: [int], out: [int]) {
+            for i in 0..xs.len() { xs[i] = i; if i % 7 == 0 { out.push(i) } }
+        }"
     ));
 }
 
