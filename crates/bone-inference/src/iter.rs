@@ -157,14 +157,7 @@ pub(crate) fn builtin_enumerable(gamma: &Gamma, ty: TyId) -> bool {
             ctor: TypeCtor::Map,
             ..
         } => true,
-        TypeExpr::App {
-            ctor: TypeCtor::Nominal(n),
-            ..
-        } => {
-            bone_core::modules::is_intrinsic_key_in(n, &["NativeBuffer", "FlatVec"])
-                || bone_core::modules::is_intrinsic_key_in(n, INT_BUFFERS)
-        }
-        _ => false,
+        _ => buffer_elem(gamma, ty).is_some(),
     }
 }
 
@@ -307,26 +300,46 @@ pub(crate) fn resolve_for_iter_protocol(
     };
 
     let elem = for_iter_next_elem(gamma, next_ret, span)?;
-
-    // Resolve bounded `next` chains at the for-loop root; lowering uses this tree.
-    let next_callee = &gamma.workspace.module(next_fn.0).functions[next_fn.1];
-    let mut sub = BoundTree::default();
-    if next_callee.has_iterator_bounds() {
-        check_iterator_bounds(c, gamma, next_callee, &next_subs, &mut sub, true, 0, span)?;
-    }
-
+    let next = concrete_next(c, gamma, next_fn, next_subs, 0, span)?;
     gamma.out.for_iter_protocol.insert(
         iter_expr,
         ForIterInfo {
             iter: iter_witness,
-            next: BoundNext::Concrete {
-                func: next_fn,
-                sub,
-                next_generics: next_subs,
-            },
+            next,
         },
     );
     Ok(elem)
+}
+
+/// A resolved `next` witness, with the bounds of a bounded `next` resolved
+/// beneath it; lowering walks this tree.
+fn concrete_next(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    func: (ModuleId, Idx<Function>),
+    next_generics: FxHashMap<VarId, TyId>,
+    depth: usize,
+    span: Span,
+) -> Result<BoundNext, CompilerError> {
+    let next_callee = &gamma.workspace.module(func.0).functions[func.1];
+    let mut sub = BoundTree::default();
+    if next_callee.has_iterator_bounds() {
+        check_iterator_bounds(
+            c,
+            gamma,
+            next_callee,
+            &next_generics,
+            &mut sub,
+            true,
+            depth,
+            span,
+        )?;
+    }
+    Ok(BoundNext::Concrete {
+        func,
+        sub,
+        next_generics,
+    })
 }
 
 /// Check each iterator bound structurally and record its `next` witness.
@@ -426,28 +439,8 @@ pub(crate) fn check_iterator_bounds(
                     );
                 }
 
-                let next_callee = &gamma.workspace.module(next_fn.0).functions[next_fn.1];
-                let mut sub = BoundTree::default();
-                if next_callee.has_iterator_bounds() {
-                    check_iterator_bounds(
-                        c,
-                        gamma,
-                        next_callee,
-                        &next_subs,
-                        &mut sub,
-                        true,
-                        depth + 1,
-                        span,
-                    )?;
-                }
-                tree.next.insert(
-                    idx,
-                    BoundNext::Concrete {
-                        func: next_fn,
-                        sub,
-                        next_generics: next_subs,
-                    },
-                );
+                let next = concrete_next(c, gamma, next_fn, next_subs, depth + 1, span)?;
+                tree.next.insert(idx, next);
             }
         }
     }
