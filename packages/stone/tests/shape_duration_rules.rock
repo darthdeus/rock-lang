@@ -53,75 +53,48 @@ fn shape_duration_clear(pool: RenderBatchPool, mask: RenderBatchPool) {
     OUTLINE_ENTRIES.clear()
 }
 
-fn shape_duration_fixture(fail_after_draw: bool) {
+@test
+fn timed_shapes_keep_their_draw_options() {
+    gpu_test_host()
     let saved_dt = dt
     let saved_items = duration_items
     let saved_entries = OUTLINE_ENTRIES
     let saved_mask = OUTLINE_MASK_BATCHES
     let saved_pool = CURRENT_RENDER_POOL
     let saved_white = WHITE_PIXEL
-    let data = new_owned_image_data(1, 1)
-    image_data_set_pixel(data, 0, 0, 1.0, 1.0, 1.0, 1.0)
-    let white = new_owned_image_from_data(data, TextureFilter::Nearest)
-    release_owned_image_data(data)
+    let white = test_white_image()
     let pool = render_batch_pool_new()
     let mask = render_batch_pool_new()
+    defer {
+        CURRENT_RENDER_POOL = saved_pool
+        OUTLINE_MASK_BATCHES = saved_mask
+        OUTLINE_ENTRIES = saved_entries
+        duration_items = saved_items
+        dt = saved_dt
+        WHITE_PIXEL = saved_white
+        render_batch_pool_destroy(mask)
+        render_batch_pool_destroy(pool)
+        release_owned_image(white)
+    }
     WHITE_PIXEL = white
     dt = 0.25
     duration_items = []
     OUTLINE_ENTRIES = map_new()
     OUTLINE_MASK_BATCHES = mask
     CURRENT_RENDER_POOL = render_batch_scope(pool)
-    let failure = world_fixture_raised(() => {
-        shape_duration_draw(null, 7)
-        shape_duration_assert_drawn(pool, mask, 7, "untimed")
-        assert_eq(duration_items.len(), 0, "an untimed draw retains nothing")
-        shape_duration_clear(pool, mask)
 
-        shape_duration_draw(1.0, 9)
-        assert_eq(pool.len(), 0, "a timed draw defers to the duration update")
-        update_duration_items()
-        shape_duration_assert_drawn(pool, mask, 9, "timed")
-        shape_duration_clear(pool, mask)
+    shape_duration_draw(null, 7)
+    shape_duration_assert_drawn(pool, mask, 7, "untimed")
+    assert_eq(duration_items.len(), 0, "an untimed draw retains nothing")
+    shape_duration_clear(pool, mask)
 
-        update_duration_items()
-        assert_eq(duration_items.len(), 2, "both shapes stay retained before expiry")
-        shape_duration_assert_drawn(pool, mask, 9, "retained")
-        if fail_after_draw { error("intentional shape duration fixture failure") }
-    }, world_fixture_traceback)
-    CURRENT_RENDER_POOL = saved_pool
-    OUTLINE_MASK_BATCHES = saved_mask
-    OUTLINE_ENTRIES = saved_entries
-    duration_items = saved_items
-    dt = saved_dt
-    WHITE_PIXEL = saved_white
-    render_batch_pool_destroy(mask)
-    render_batch_pool_destroy(pool)
-    release_owned_image(white)
-    if let message = failure { error(message) }
-}
+    shape_duration_draw(1.0, 9)
+    assert_eq(pool.len(), 0, "a timed draw defers to the duration update")
+    update_duration_items()
+    shape_duration_assert_drawn(pool, mask, 9, "timed")
+    shape_duration_clear(pool, mask)
 
-@test
-fn timed_shapes_keep_their_draw_options() {
-    assert(stone_gpu_host_ensure())
-    let failure = world_fixture_raised(() => {
-        shape_duration_fixture(false)
-        let saved_dt = dt
-        let saved_items = duration_items.len()
-        let saved_entries = OUTLINE_ENTRIES
-        let saved_mask = OUTLINE_MASK_BATCHES
-        let saved_pool = current_render_pool()
-        let saved_white = WHITE_PIXEL
-        let before = stone_get_graphics_stats()
-        let failed = world_fixture_raised(() => shape_duration_fixture(true), world_fixture_traceback)
-        assert(failed != null && failed.contains("intentional shape duration fixture failure"))
-        assert_eq(dt, saved_dt, "fixture restores dt after failure")
-        assert_eq(duration_items.len(), saved_items, "fixture restores retained draws after failure")
-        assert(OUTLINE_ENTRIES == saved_entries, "fixture restores outline entries after failure")
-        assert(render_batch_pool_same(OUTLINE_MASK_BATCHES, saved_mask), "fixture restores the outline mask pool")
-        assert(render_batch_pool_same(current_render_pool(), saved_pool), "fixture restores the draw pool")
-        assert_eq(WHITE_PIXEL, saved_white, "fixture restores the shared white image")
-        assert_eq(stone_get_graphics_stats().images, before.images, "fixture releases its image after failure")
-    }, world_fixture_traceback)
-    if let message = failure { error(message) }
+    update_duration_items()
+    assert_eq(duration_items.len(), 2, "both shapes stay retained before expiry")
+    shape_duration_assert_drawn(pool, mask, 9, "retained")
 }

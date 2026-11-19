@@ -8,18 +8,14 @@ global BLOOM_PYRAMID_WHITE: Image? = null
 
 fn bloom_pyramid_white() -> Image {
     if let white = BLOOM_PYRAMID_WHITE { return white }
-    let data = new_owned_image_data(1, 1)
-    image_data_set_pixel(data, 0, 0, 1.0, 1.0, 1.0, 1.0)
-    let white = new_owned_image_from_data(data, TextureFilter::Nearest)
-    release_owned_image_data(data)
+    let white = test_white_image()
     BLOOM_PYRAMID_WHITE = white
     return white
 }
 
 fn bloom_pyramid_fixture(w: int, h: int, blob: float, brightness: float,
         body: fn(Canvas, [Canvas]) -> ()) {
-    setup_stone()
-    assert(stone_gpu_host_ensure())
+    gpu_test_host()
     let saved_canvas = CURRENT_CANVAS_HANDLE
     let saved_white = WHITE_PIXEL
     WHITE_PIXEL = bloom_pyramid_white()

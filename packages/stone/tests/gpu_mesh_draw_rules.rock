@@ -1,9 +1,5 @@
 use stone::*
 
-// GpuMesh through the real FFI chain (cdef, stone_mesh_* symbols, attribute
-// layout): an instanced draw renders one quad per instance and is counted as
-// instanced, a plain draw is not, and the path raises no GL error.
-
 value MeshProbeVertex { position: Vec2 }
 value MeshProbeInstance { offset: Vec2 }
 value MeshProbeVary { position: Vec4 }
@@ -16,20 +12,11 @@ fn mesh_probe_vert(@attr a: MeshProbeVertex, @instance instance: MeshProbeInstan
 @shader(fragment)
 fn mesh_probe_frag(_vary: MeshProbeVary) -> Vec4 { return v(1.0, 0.0, 0.0, 1.0) }
 
-fn gpu_mesh_draw_white() -> Image {
-    let data = new_owned_image_data(1, 1)
-    image_data_set_pixel(data, 0, 0, 1.0, 1.0, 1.0, 1.0)
-    let image = new_owned_image_from_data(data, TextureFilter::Nearest)
-    release_owned_image_data(data)
-    return image
-}
-
 @test
 fn gpu_mesh_instanced_draw_renders_each_instance_and_counts_once() {
-    setup_stone()
-    assert(stone_gpu_host_ensure())
+    gpu_test_host()
     let saved_canvas = CURRENT_CANVAS_HANDLE
-    let white = gpu_mesh_draw_white()
+    let white = test_white_image()
     let size = 64
     let target = new_canvas(float(size), float(size), "rgba8")
     let verts = native_buffer_float(8)
@@ -70,7 +57,6 @@ fn gpu_mesh_instanced_draw_renders_each_instance_and_counts_once() {
     assert(stone_read_canvas_pixel_channel(target.handle.0, size * 3 ./ 8, mid, 0) < 0.5,
         "the gap between instances stays clear")
 
-    // Reuse the same layout and allocation while moving and shrinking the live prefix.
     let retained_bytes = stone_mesh_bytes(mesh.handle.0)
     inst[0] = 0.0
     assert(gpu_mesh_update_instances(mesh, inst.ptr, 1))
@@ -130,15 +116,14 @@ fn mesh_surface_probe_frag(_vary: MeshProbeVary, @textures tex: MainTex) -> Mesh
 
 @test
 fn world_surface_mesh_order_interleaves_with_custom_rows_without_custom_uniforms() {
-    setup_stone()
-    assert(stone_gpu_host_ensure())
+    gpu_test_host()
     let saved_pool = RENDER_BATCHES
     let saved_white = WHITE_PIXEL
     let saved_scope = CURRENT_RENDER_POOL
     let saved_counter = CUSTOM_DRAW_COUNTER
     let saved_fast = WORLD_BATCH_FAST
     let pool = render_batch_pool_new()
-    let white = gpu_mesh_draw_white()
+    let white = test_white_image()
     let verts = native_buffer_float(6)
     let first = gpu_mesh_new(verts.ptr, 3, 2, [2], "triangles")
     let last = gpu_mesh_new(verts.ptr, 3, 2, [2], "triangles")

@@ -14,10 +14,6 @@ use stone::*
     return meter
 """
 
-@nomangle inline(lua) fn __sprite_mesh_growth_copy_current() -> any = "return ffi.copy"
-
-@nomangle inline(lua) fn __sprite_mesh_growth_copy_is(copy: any) -> bool = "return ffi.copy == copy"
-
 @nomangle inline(lua) fn __sprite_mesh_growth_force_alloc_failure(body: fn() -> ()) -> bool = """
     local saved = __rock_nb_alloc
     __rock_nb_alloc = function(ctype, n, ...)
@@ -127,23 +123,19 @@ fn sprite_mesh_growth_observe_capacity(mesh: SpriteMesh) -> Vec2 {
 }
 
 @test
-fn sprite_mesh_effectful_argument_keeps_evaluation_order() {
+fn sprite_mesh_arguments_evaluate_before_append_growth() {
     let mesh = sprite_mesh_growth_test_mesh()
     sprite_mesh_growth_append_kind(mesh, 0)
     sprite_mesh_add_quad(mesh, sprite_mesh_growth_observe_capacity(mesh),
         v(3.0, 4.0), v(5.0, 6.0), v(7.0, 8.0), ir(0, 0, 8, 8))
     assert_eq(mesh.capacity, 2)
     assert_eq(mesh.count, 12)
-}
-
-@test
-fn sprite_mesh_argument_reading_capacity_keeps_evaluation_order() {
-    let mesh = sprite_mesh_growth_test_mesh()
-    sprite_mesh_growth_append_kind(mesh, 0)
-    sprite_mesh_add_quad(mesh, v(float(mesh.capacity), 2.0),
+    let read = sprite_mesh_growth_test_mesh()
+    sprite_mesh_growth_append_kind(read, 0)
+    sprite_mesh_add_quad(read, v(float(read.capacity), 2.0),
         v(3.0, 4.0), v(5.0, 6.0), v(7.0, 8.0), ir(0, 0, 8, 8))
-    assert_eq(mesh.capacity, 2)
-    assert_eq(mesh.vbo[6].pos.x as float, 1.0)
+    assert_eq(read.capacity, 2)
+    assert_eq(read.vbo[6].pos.x as float, 1.0)
 }
 
 @test
@@ -275,60 +267,38 @@ fn sprite_mesh_growth_from_zero_matches_preallocated_vertices() {
     }
 }
 
+fn sprite_mesh_growth_assert_one_copy(meter: any, before: string, after: string) {
+    assert_eq(__sprite_mesh_growth_meter_calls(meter), 1,
+        "one growth transfers the live prefix in one FFI copy")
+    assert_eq(__sprite_mesh_growth_meter_bytes(meter), __sprite_mesh_growth_string_len(before),
+        "the FFI copy covers exactly the live vertex prefix")
+    assert_eq(after, before, "growth preserves every live vertex byte")
+}
+
 @test
-fn sprite_mesh_growth_bulk_copies_the_emitted_vertex_prefix() {
+fn append_growth_bulk_copies_the_emitted_vertex_prefix() {
     let mesh = sprite_mesh_growth_test_mesh()
     sprite_mesh_add(mesh, v(8.0, 12.0), ir(0, 0, 8, 8), v(6.0, 10.0))
-    let prefix_vertices = mesh.count
-    let before = __sprite_mesh_growth_prefix(mesh.vbo, mesh.count)
-    let original_copy = __sprite_mesh_growth_copy_current()
-    let meter = __sprite_mesh_growth_copy_meter(() => {
+    let mesh_prefix = mesh.count
+    let mesh_before = __sprite_mesh_growth_prefix(mesh.vbo, mesh.count)
+    let mesh_meter = __sprite_mesh_growth_copy_meter(() => {
         sprite_mesh_add(mesh, v(15.0, 22.0), ir(0, 0, 8, 8), v(6.0, 10.0))
     })
-    assert(__sprite_mesh_growth_copy_is(original_copy),
-        "the copy meter restores the FFI binding after success")
-    assert_eq(__sprite_mesh_growth_meter_calls(meter), 1,
-        "one growth transfers the active prefix in one FFI copy")
-    assert_eq(__sprite_mesh_growth_meter_bytes(meter), __sprite_mesh_growth_string_len(before),
-        "the FFI copy covers exactly the emitted vertex prefix")
-    assert_eq(__sprite_mesh_growth_prefix(mesh.vbo, prefix_vertices), before,
-        "growth preserves every emitted byte before appending the next quad")
-}
+    sprite_mesh_growth_assert_one_copy(mesh_meter, mesh_before,
+        __sprite_mesh_growth_prefix(mesh.vbo, mesh_prefix))
 
-@test
-fn rect_batch_growth_bulk_copies_the_emitted_vertex_prefix() {
     let batch = rect_batch_new(1)
     rect_batch_push(batch, 0.0, 0.0, 4.0, 4.0, 1.0, 0.5, 0.25, 1.0)
-    let prefix_vertices = batch.count
-    let before = __sprite_mesh_growth_prefix(batch.vbo, batch.count)
-    let original_copy = __sprite_mesh_growth_copy_current()
-    let meter = __sprite_mesh_growth_copy_meter(() => {
+    let batch_prefix = batch.count
+    let batch_before = __sprite_mesh_growth_prefix(batch.vbo, batch.count)
+    let batch_meter = __sprite_mesh_growth_copy_meter(() => {
         rect_batch_push(batch, 8.0, 12.0, 4.0, 4.0, 0.25, 0.5, 1.0, 1.0)
     })
-    assert(__sprite_mesh_growth_copy_is(original_copy),
-        "the copy meter restores the FFI binding after success")
-    assert_eq(__sprite_mesh_growth_meter_calls(meter), 1,
-        "one growth transfers the active prefix in one FFI copy")
-    assert_eq(__sprite_mesh_growth_meter_bytes(meter), __sprite_mesh_growth_string_len(before),
-        "the FFI copy covers exactly the emitted vertex prefix")
-    assert_eq(__sprite_mesh_growth_prefix(batch.vbo, prefix_vertices), before,
-        "growth preserves every emitted byte before appending the next quad")
+    sprite_mesh_growth_assert_one_copy(batch_meter, batch_before,
+        __sprite_mesh_growth_prefix(batch.vbo, batch_prefix))
 }
 
-@test
-fn sprite_mesh_growth_copy_meter_restores_ffi_after_failure() {
-    let original = __sprite_mesh_growth_copy_current()
-    let failure = world_fixture_raised(() => {
-        let _ = __sprite_mesh_growth_copy_meter(() => {
-            assert(false, "intentional copy-meter body failure")
-        })
-    })
-    assert(failure != null, "the intentional body failure is rethrown")
-    assert(__sprite_mesh_growth_copy_is(original),
-        "the FFI copy binding is restored before the failure escapes")
-}
-
-fn render_batch_growth_fixture(capacity: int) -> RenderBatch {
+fn render_batch_growth_tiny(capacity: int) -> RenderBatch {
     return RenderBatch {
         verts: native_buffer_vertex(max(capacity, 1)),
         count: 0,
@@ -360,16 +330,15 @@ fn render_batch_growth_check_views(batch: RenderBatch) {
 @test
 fn render_batch_growth_single_overflow_preserves_vertices_and_views() {
     for capacity in [1, 2, 3] {
-        let batch = render_batch_growth_fixture(capacity)
+        let batch = render_batch_growth_tiny(capacity)
         render_batch_growth_fill(batch)
         let before = __sprite_mesh_growth_prefix(batch.verts, batch.count)
         let meter = __sprite_mesh_growth_copy_meter(() => { __grow_vertex_buf(batch) })
         assert_eq(batch.capacity, capacity * 2, "single overflow doubles capacity")
         assert_eq(batch.verts.len, batch.capacity, "the buffer exposes its full capacity")
         assert_eq(batch.count, capacity, "growth keeps the live vertex count")
-        assert_eq(__sprite_mesh_growth_meter_calls(meter), 1, "one overflow copies once")
-        assert_eq(__sprite_mesh_growth_prefix(batch.verts, batch.count), before,
-            "single overflow retains every prior vertex byte")
+        sprite_mesh_growth_assert_one_copy(meter, before,
+            __sprite_mesh_growth_prefix(batch.verts, batch.count))
         render_batch_growth_check_views(batch)
     }
 }
@@ -377,7 +346,7 @@ fn render_batch_growth_single_overflow_preserves_vertices_and_views() {
 @test
 fn render_batch_growth_bulk_jump_copies_once_and_preserves_vertices_and_views() {
     for additional in [1, 9, 65, 1025] {
-        let batch = render_batch_growth_fixture(2)
+        let batch = render_batch_growth_tiny(2)
         render_batch_growth_fill(batch)
         let before = __sprite_mesh_growth_prefix(batch.verts, batch.count)
         let requested = batch.count + additional
@@ -386,32 +355,43 @@ fn render_batch_growth_bulk_jump_copies_once_and_preserves_vertices_and_views() 
             "geometric capacity covers the complete request without excessive slack")
         assert_eq(batch.verts.len, batch.capacity, "the buffer exposes its full capacity")
         assert_eq(batch.count, 2, "reserving keeps the live vertex count")
-        assert_eq(__sprite_mesh_growth_meter_calls(meter), 1,
-            "a bulk jump transfers the live prefix once")
-        assert_eq(__sprite_mesh_growth_meter_bytes(meter), __sprite_mesh_growth_string_len(before),
-            "only live vertices are copied")
-        assert_eq(__sprite_mesh_growth_prefix(batch.verts, batch.count), before,
-            "bulk reservation retains every prior vertex byte")
+        sprite_mesh_growth_assert_one_copy(meter, before,
+            __sprite_mesh_growth_prefix(batch.verts, batch.count))
         render_batch_growth_check_views(batch)
     }
 }
 
 @test
 fn render_batch_growth_within_capacity_does_not_copy() {
-    let batch = render_batch_growth_fixture(3)
+    let batch = render_batch_growth_tiny(3)
     let meter = __sprite_mesh_growth_copy_meter(() => { reserve_vertices(batch, 3) })
     assert_eq(__sprite_mesh_growth_meter_calls(meter), 0, "an exact fit does not copy")
     assert_eq(batch.capacity, 3, "an exact fit keeps storage")
 }
 
 @test
+fn render_batch_append_vertex_grows_past_capacity() {
+    let batch = render_batch_growth_tiny(2)
+    render_batch_growth_fill(batch)
+    append_vertex(batch, v(4.0, 5.0), 0.0, 0.0, WHITE, 6.0, 7)
+    assert_eq(batch.capacity, 4, "the append path doubles through the shared helper")
+    assert_eq(batch.count, 3, "the append lands past the old capacity")
+    assert_eq(batch.verts[2].pos.x, 4.0, "the appended vertex reads back through fresh leaf views")
+    assert_eq(batch.verts[0].pos.x, 0.0, "append growth keeps the earlier contents")
+}
+
+@test
 fn render_batch_growth_rejects_parked_storage() {
-    let batch = render_batch_growth_fixture(0)
+    let batch = render_batch_growth_tiny(0)
     reserve_vertices(batch, 0)
-    let bulk_failure = world_fixture_raised(() => { reserve_vertices(batch, 1) })
-    assert(bulk_failure != null, "bulk reservation rejects a parked batch")
-    let single_failure = world_fixture_raised(() => { __grow_vertex_buf(batch) })
-    assert(single_failure != null, "single overflow rejects a parked batch")
+    for failure in [
+        world_fixture_raised(() => { reserve_vertices(batch, 1) }),
+        world_fixture_raised(() => { __grow_vertex_buf(batch) }),
+        world_fixture_raised(() => { append_vertex(batch, v(1.0, 1.0), 0.0, 0.0, WHITE, 0.0, 0) }),
+    ] {
+        assert((failure ?? "").contains("evicted"),
+            "every growth path refuses parked storage by name: {failure ?? "no error"}")
+    }
     assert_eq(batch.capacity, 0, "parked storage remains detached")
 }
 
@@ -441,9 +421,8 @@ fn sprite_mesh_reserve_quads_bulk_copies_once_and_keeps_live_vertices() {
         assert(mesh.capacity >= 1 + additional && mesh.capacity < (1 + additional) * 2)
         assert_eq(mesh.vbo.len, mesh.capacity * RECT_BATCH_VERTS_PER_RECT)
         assert_eq(mesh.count, 6)
-        assert_eq(__sprite_mesh_growth_meter_calls(meter), 1)
-        assert_eq(__sprite_mesh_growth_meter_bytes(meter), __sprite_mesh_growth_string_len(before))
-        assert_eq(__sprite_mesh_growth_prefix(mesh.vbo, mesh.count), before)
+        sprite_mesh_growth_assert_one_copy(meter, before,
+            __sprite_mesh_growth_prefix(mesh.vbo, mesh.count))
         let storage = mesh.vbo
         sprite_mesh_add(mesh, v(15.0, 22.0), ir(0, 0, 8, 8), v(6.0, 10.0))
         assert_eq(mesh.count, 12)

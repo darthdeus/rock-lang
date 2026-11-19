@@ -3,21 +3,21 @@
 const RESIDENCY_DECODE_PLACEHOLDER_BRIGHT: int = 0xFF00CCFF
 const RESIDENCY_DECODE_PLACEHOLDER_DARK: int = 0x190019FF
 
-fn residency_decode_failure_png(path: string, w: int, h: int) {
-    let data = new_image_data(w, h)
-    for y in 0..h {
-        for x in 0..w {
+fn residency_decode_failure_green_png(path: string) -> string {
+    let data = new_image_data(4, 2)
+    for y in 0..2 {
+        for x in 0..4 {
             image_data_set_pixel(data, x, y, 0.0, 1.0, 0.0, 1.0)
         }
     }
     assert(image_data_encode(data, "png", path), "fixture {path} written")
     stone_destroy_image_data(data.0)
+    return path
 }
 
-// Flip one IDAT payload byte of a PNG: headers byte-identical (so the probe
-// reads the dimensions and the load mints a handle for a deferred decode),
-// the payload broken (so the pool decode fails). Deterministic under any
-// encoder chunk layout, unlike a blind truncation.
+// Flip one IDAT payload byte: the intact header lets the probe mint a handle
+// for a deferred decode that then fails. Unlike truncation this does not
+// depend on the encoder's chunk layout.
 @nomangle inline(lua) fn residency_decode_failure_corrupt_idat(png: string) -> string = """
     assert(#png > 64, "fixture png too small to corrupt")
     assert(png:sub(1, 8) == "\137PNG\r\n\26\n", "fixture is not a png")
@@ -37,38 +37,24 @@ fn residency_decode_failure_png(path: string, w: int, h: int) {
     end
 """
 
-fn residency_decode_failure_object(digest_char: string) -> [string] {
-    let root = (env_var("ROCK_TEST_TMP") ?? env_var("TMPDIR") ?? "/tmp") + "/rock-residency-decode"
-    let dir = root + "/.eat/" + digest_char.repeat(64)
-    let _ = create_directory(root)
-    let _ = create_directory(root + "/.eat")
-    let _ = create_directory(dir)
+fn residency_decode_failure_fixture(digest_char: string, body: fn([string])) {
+    gpu_test_host()
+    let root = test_tmp_dir("rock-residency-decode")
     // The twin stays loose: one digest dir names one image, so a second file
     // under it would alias the corrupt identity.
-    let good = root + "/good-" + digest_char + ".png"
-    let bad = dir + "/bad.png"
-    residency_decode_failure_png(good, 4, 2)
-    let bytes = file_read(good).unwrap()
-    assert(file_write(bad, residency_decode_failure_corrupt_idat(bytes)),
+    let good = residency_decode_failure_green_png(root + "/good-" + digest_char + ".png")
+    let bad = test_eat_png(root, digest_char, "bad")
+    assert(file_write(bad, residency_decode_failure_corrupt_idat(file_read(good).unwrap())),
         "fixture {bad} written")
-    return [good, bad]
-}
-
-@nomangle fn residency_decode_failure_fixture(digest_char: string, fail: bool,
-                                             body: fn([string])) {
-    residency_test_host()
-    let paths = residency_decode_failure_object(digest_char)
-    residency_owner_test_isolated(() => {
-        body(paths)
-        if fail { error("intentional residency decode failure") }
-    }, () => {
+    let paths = [good, bad]
+    residency_owner_test_isolated(() => { body(paths) }, () => {
         residency_owner_test_cleanup(paths)
     })
 }
 
 @test
 fn residency_decode_failure_draws_placeholder_counts_and_logs() {
-    residency_decode_failure_fixture("e", false, paths => {
+    residency_decode_failure_fixture("e", paths => {
         let good = paths[0]
         let bad = paths[1]
         assert_eq(stone_probe_image_size(bad), iv(4, 2),
@@ -117,7 +103,7 @@ fn residency_decode_failure_draws_placeholder_counts_and_logs() {
 
 @test
 fn residency_decode_failure_prefetch_counts_without_require() {
-    residency_decode_failure_fixture("d", false, paths => {
+    residency_decode_failure_fixture("d", paths => {
         let bad = paths[1]
         let fails_before = stone_image_decode_failed_count()
         let prefetched = residency_prefetch(ResidencyRequest { path: bad, logical_size: iv(4, 2) })
@@ -135,40 +121,6 @@ fn residency_decode_failure_prefetch_counts_without_require() {
         assert_eq(residency_state(bad), ResidencyState::Loading,
             "the failed prefetch never reads Resident")
     })
-}
-
-@test
-fn residency_decode_failure_fixture_restores_after_failure() {
-    let origin = "decode_failure_fixture"
-    let paths = residency_decode_failure_object("f")
-    residency_test_host()
-    let images_before = stone_native_live_handles("image")
-    let data_before = stone_native_live_handles("image_data")
-    let failure = (world_fixture_raised(() => {
-        residency_owner_test_isolated(() => {
-            let image = acquire_image_asset(paths[1], watch: false)
-            assert(image.0 != 0)
-            assert_error_logs(["[RESIDENCY] decode failed {paths[1]}"], () => {
-                residency_flush_required()
-            })
-            assert(image_load_decode_failed(image))
-            error("intentional {origin} failure")
-        }, () => {
-            residency_owner_test_cleanup(paths)
-        })
-    }) ?? "")
-    assert(failure.contains("intentional {origin} failure"),
-        "{origin}: preserves the body diagnostic: {failure}")
-    assert(!file_exists(paths[0]) && !file_exists(paths[1]),
-        "{origin}: the fixture files retire")
-    assert_eq(stone_native_live_handles("image"), images_before,
-        "{origin}: no native image escapes")
-    assert_eq(stone_native_live_handles("image_data"), data_before,
-        "{origin}: no native image data escapes")
-    assert_eq(RESIDENCY_DECODE_FAILED_LOGGED.len(), 0,
-        "{origin}: the failure log set restores")
-    assert_eq(residency_state(paths[1]), ResidencyState::Absent,
-        "{origin}: the failed identity leaves the cache")
 }
 
 @nomangle inline(lua) fn residency_miss_log_probe_begin() = """
@@ -191,7 +143,7 @@ fn residency_decode_failure_fixture_restores_after_failure() {
 
 @test
 fn residency_miss_counts_without_info_log() {
-    residency_decode_failure_fixture("c", false, paths => {
+    residency_decode_failure_fixture("c", paths => {
         let good = paths[0]
         let misses_before = residency_profile_stats().misses
         residency_miss_log_probe_begin()

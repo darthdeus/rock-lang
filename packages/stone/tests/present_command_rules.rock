@@ -17,18 +17,30 @@ fn present_command_allocation_window(source: Canvas, target: Canvas) -> (float, 
     return (kb, calls)
 }
 
-@test
-fn present_command_refresh_and_observer_ownership() {
-    setup_stone()
-    assert(stone_gpu_host_ensure())
+fn present_command_fixture(other_size: float, body: fn(Canvas, Canvas) -> ()) {
+    gpu_test_host()
     let source = new_canvas(8.0, 8.0, "rgba8")
-    let other = new_canvas(16.0, 16.0, "rgba8")
+    let other = new_canvas(other_size, other_size, "rgba8")
     let trace = GPU_TRACE_ON
     let inspector = ENGINE.show_pipeline_inspector
     let probe = UI_SUBMISSION_PROBE_ON
     let cached = PRESENT_COMPOSITE_COMMAND
+    defer {
+        GPU_TRACE_ON = trace
+        ENGINE.show_pipeline_inspector = inspector
+        UI_SUBMISSION_PROBE_ON = probe
+        PRESENT_COMMAND_TEST_RETAINED = null
+        PRESENT_COMPOSITE_COMMAND = cached
+        destroy_canvas(source)
+        destroy_canvas(other)
+    }
     PRESENT_COMPOSITE_COMMAND = null
-    world_fixture_with_cleanup(() => {
+    body(source, other)
+}
+
+@test
+fn present_command_refresh_and_observer_ownership() {
+    present_command_fixture(16.0, (source, other) => {
         for mode in 0..4 {
             GPU_TRACE_ON = mode == 1
             ENGINE.show_pipeline_inspector = mode == 2
@@ -58,29 +70,12 @@ fn present_command_refresh_and_observer_ownership() {
                 assert_eq(next.viewport.h, 5)
             }
         }
-    }, () => {
-        GPU_TRACE_ON = trace
-        ENGINE.show_pipeline_inspector = inspector
-        UI_SUBMISSION_PROBE_ON = probe
-        PRESENT_COMMAND_TEST_RETAINED = null
-        PRESENT_COMPOSITE_COMMAND = cached
-        destroy_canvas(source)
-        destroy_canvas(other)
-    }, world_fixture_traceback)
+    })
 }
 
 @test
 fn present_command_warmed_allocation_rule() {
-    setup_stone()
-    assert(stone_gpu_host_ensure())
-    let source = new_canvas(8.0, 8.0, "rgba8")
-    let target = new_canvas(8.0, 8.0, "rgba8")
-    let trace = GPU_TRACE_ON
-    let inspector = ENGINE.show_pipeline_inspector
-    let probe = UI_SUBMISSION_PROBE_ON
-    let cached = PRESENT_COMPOSITE_COMMAND
-    PRESENT_COMPOSITE_COMMAND = null
-    world_fixture_with_cleanup(() => {
+    present_command_fixture(8.0, (source, target) => {
         GPU_TRACE_ON = false
         ENGINE.show_pipeline_inspector = false
         UI_SUBMISSION_PROBE_ON = false
@@ -92,15 +87,7 @@ fn present_command_warmed_allocation_rule() {
         let calls = min(calls_a, calls_b)
         log_info("PERF", "PRESENT_COMMAND operations=1024 kb={kb} calls={calls}")
         assert(kb < 256.0, "warmed presentation avoids rebuilding command containers: {kb} KiB")
-    }, () => {
-        GPU_TRACE_ON = trace
-        ENGINE.show_pipeline_inspector = inspector
-        UI_SUBMISSION_PROBE_ON = probe
-        PRESENT_COMMAND_TEST_RETAINED = null
-        PRESENT_COMPOSITE_COMMAND = cached
-        destroy_canvas(source)
-        destroy_canvas(target)
-    }, world_fixture_traceback)
+    })
 }
 
 @test

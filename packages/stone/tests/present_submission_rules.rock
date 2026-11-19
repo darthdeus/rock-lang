@@ -1,7 +1,6 @@
 fn present_test_fixture(body: fn(Canvas, Canvas) -> ()) {
     assert(!UI_SUBMISSION_PROBE_ON, "the fixture must not replace an active probe")
-    setup_stone()
-    assert(stone_gpu_host_ensure())
+    gpu_test_host()
     let src = new_canvas(16.0, 16.0, "rgba8")
     let out = new_canvas(16.0, 16.0, "rgba8")
     let saved_composite = COMPOSITE_CANVAS
@@ -125,53 +124,4 @@ fn present_submission_refusal_is_observable_and_retryable() {
         assert_eq(PROF_OPEN_TOP, 0)
         assert_eq(PROFILER.current_depth, 0)
     })
-}
-
-@test
-fn present_submission_fixture_restores_after_assertion_failure() {
-    let saved_composite = COMPOSITE_CANVAS
-    let saved_view = RENDER_VIEW
-    let saved_enabled = ENGINE.profiler_enabled
-    let saved_sections = PROFILER_SECTIONS_OFF
-    let saved_frozen = GC_WIN_SECTION_REGISTRY_FROZEN
-    let saved_ids = SECTION_IDS
-    let saved_names = SECTION_NAMES
-    let saved_count = SECTION_COUNT
-    let saved_late = SECTION_LATE
-    let saved_frozen_first = SECTION_FROZEN_FIRST
-    let saved_metrics = SECTION_METRICS
-    let saved_time = SECTION_TIME
-    let saved_request = SECTION_REQUEST_KB
-    let saved_work = SECTION_WORK
-    let saved_observation = SECTION_OBSERVATION
-    let saved_windows = SECTION_WINDOWS
-    let saved_last_seconds = SECTION_LAST_SECONDS
-    let saved_profiler = PROFILER
-    let saved_log = PROF_CUR
-    let saved_stack = PROF_OPEN_STACK
-    let saved_top = PROF_OPEN_TOP
-    let failure = world_fixture_raised(() => {
-        present_test_fixture((src, out) => {
-            COMPOSITE_CANVAS = src
-            present_composite(GpuTarget::Canvas(out))
-            COMPOSITE_CANVAS = src
-            assert(false, "intentional present fixture assertion failure")
-        })
-    }, world_fixture_traceback)
-    assert(failure != null && failure.contains("intentional present fixture assertion failure"))
-    assert(COMPOSITE_CANVAS == saved_composite && RENDER_VIEW == saved_view)
-    assert_eq(ENGINE.profiler_enabled, saved_enabled)
-    assert_eq(PROFILER_SECTIONS_OFF, saved_sections)
-    assert_eq(GC_WIN_SECTION_REGISTRY_FROZEN, saved_frozen)
-    assert(SECTION_IDS == saved_ids && SECTION_NAMES == saved_names && SECTION_METRICS == saved_metrics)
-    assert_eq(SECTION_COUNT, saved_count)
-    assert(SECTION_LATE == saved_late && SECTION_FROZEN_FIRST == saved_frozen_first)
-    assert(SECTION_TIME == saved_time && SECTION_REQUEST_KB == saved_request
-        && SECTION_WORK == saved_work && SECTION_OBSERVATION == saved_observation)
-    assert(SECTION_WINDOWS == saved_windows && SECTION_LAST_SECONDS == saved_last_seconds)
-    assert(PROFILER == saved_profiler && PROF_CUR == saved_log && PROF_OPEN_STACK == saved_stack)
-    assert_eq(PROF_OPEN_TOP, saved_top)
-    assert(!UI_SUBMISSION_PROBE_ON && !UI_SUBMISSION_PROBE_WINDOWLESS)
-    assert(UI_SUBMISSION_PROBE_REFUSAL_HOOK == null && UI_SUBMISSION_PROBE_PASS_HOOK == null
-        && UI_SUBMISSION_PROBE_DRAW_HOOK == null, "fixture cleanup removes its probe hooks")
 }

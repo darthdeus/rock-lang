@@ -1,8 +1,7 @@
 use stone::*
 
 fn pass_rules_fixture(body: fn()) {
-    setup_stone()
-    assert(stone_gpu_host_ensure())
+    gpu_test_host()
     let saved_canvas = CURRENT_CANVAS_HANDLE
     let saved_frame = frame_seq
     let saved_weight = ENGINE.exposure_weight

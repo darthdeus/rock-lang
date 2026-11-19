@@ -7,8 +7,7 @@ fn shared_texture_test_frag(@textures t: SharedTextureTestTex, tc: Vec2) -> Vec4
 
 @test
 fn shared_shader_texture_rebinds_after_other_programs_and_updates_while_active() {
-    setup_stone()
-    assert(stone_gpu_host_ensure())
+    gpu_test_host()
     let saved_canvas = CURRENT_CANVAS_HANDLE
     let saved_shader = WATCHER.current_shader_name
     let saved_blend = CURRENT_BLEND

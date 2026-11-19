@@ -25,3 +25,45 @@ fn native_runner_test_boot(title: string) -> (StoneWindow, GameConfig) {
     timeline_init()
     return (window, config)
 }
+
+fn gpu_test_host() {
+    setup_stone()
+    assert(stone_gpu_host_ensure())
+}
+
+fn text_test_host() {
+    gpu_test_host()
+    assert(stone_text_init())
+}
+
+fn test_tmp_dir(name: string) -> string {
+    let dir = env_var("ROCK_TEST_TMP").unwrap() + "/" + name
+    let _ = create_directory(dir)
+    return dir
+}
+
+// One orange texel at (1, 1) on transparent black.
+fn test_png(path: string, w: int = 4, h: int = 2) -> string {
+    let data = new_image_data(w, h)
+    image_data_set_pixel(data, 1, 1, 1.0, 0.5, 0.0, 1.0)
+    assert(image_data_encode(data, "png", path), "fixture {path} written")
+    stone_destroy_image_data(data.0)
+    return path
+}
+
+// Files under one `.eat/<digest>` directory resolve to one image identity.
+fn test_eat_png(root: string, digest_char: string, name: string, w: int = 4, h: int = 2) -> string {
+    let dir = "{root}/.eat/{digest_char.repeat(64)}"
+    let _ = create_directory(root)
+    let _ = create_directory(root + "/.eat")
+    let _ = create_directory(dir)
+    return test_png("{dir}/{name}.png", w, h)
+}
+
+fn test_white_image() -> Image {
+    let data = new_owned_image_data(1, 1)
+    image_data_set_pixel(data, 0, 0, 1.0, 1.0, 1.0, 1.0)
+    let image = new_owned_image_from_data(data, TextureFilter::Nearest)
+    release_owned_image_data(data)
+    return image
+}

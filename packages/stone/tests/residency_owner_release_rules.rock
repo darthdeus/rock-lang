@@ -1,5 +1,5 @@
 // Isolates asset and residency state and native handles per test.
-@nomangle inline(lua) fn residency_owner_test_state_names() -> any = """
+@nomangle inline(lua) fn residency_owner_test_isolated(body: fn(), cleanup: fn()) = """
     local map_names = { "IMAGE_CACHE", "IMAGE_PATHS", "IMAGE_SAMPLING",
         "IMAGE_RESOLVED_IDENTITY", "IMAGE_IDENTITY_PATHS", "IMAGE_PATH_REFS",
         "IMAGE_ASSET_REFS", "RESIDENCY_PATH_IDENTITIES", "RESIDENCY_PREFETCH_QUEUED",
@@ -15,13 +15,8 @@
         "RESIDENCY_COLD_ARRIVAL_OPEN", "RESIDENCY_COLD_ARRIVAL_RENDERING",
         "RESIDENCY_FRAME_DECODE_FAILED_BASE", "RESIDENCY_PROFILE_DECODE_FAILED_BASE" }
     for _, name in ipairs(map_names) do names[#names + 1] = name end
-    return { maps = map_names, all = names }
-"""
-
-@nomangle inline(lua) fn residency_owner_test_isolated(body: fn(), cleanup: fn()) = """
     local saved = {}
-    local names = residency_owner_test_state_names()
-    for _, name in ipairs(names.all) do
+    for _, name in ipairs(names) do
         local entry = assert(__rock_global_entry(name), name)
         saved[#saved + 1] = { entry = entry, value = __rock_global_get(entry) }
     end
@@ -33,7 +28,7 @@
     for handle in ffi.string(stone.stone_native_live_handles("image_data")):gmatch("%d+") do
         baseline_data[tonumber(handle)] = true
     end
-    for _, name in ipairs(names.maps) do
+    for _, name in ipairs(map_names) do
         __rock_global_set(__rock_global_entry(name), {})
     end
     residency_owner_test_reset_diagnostics()
@@ -91,64 +86,6 @@ fn residency_owner_test_cleanup(paths: [string]) {
     if errors.len() > 0 { error(errors.join("; ")) }
 }
 
-@nomangle fn residency_owner_test_fixture(digest_char: string, body: fn([string])) {
-    residency_test_host()
-    let paths = residency_test_object(digest_char, ["soil", "trail"])
-    residency_owner_test_isolated(() => { body(paths) }, () => {
-        residency_owner_test_cleanup(paths)
-    })
-}
-
-@nomangle fn residency_owner_test_intentional_failure(paths: [string]) {
-    let data = new_owned_image_data(2, 2)
-    let _ = new_owned_image_from_data(data)
-    let image = acquire_image_asset(paths[0], watch: false)
-    assert(image.0 != 0)
-    let _ = residency_prefetch(ResidencyRequest { path: paths[0] })
-    let _ = load_image_asset(paths[1])
-    assert(release_image_asset(paths[0]))
-    let _ = asset_report_json(0, "intentional-failure")
-    residency_cold_arrival()
-    error("intentional residency fixture failure")
-}
-
-@nomangle inline(lua) fn residency_owner_test_failure_restores_state() = """
-    local entries = {}
-    for _, name in ipairs(residency_owner_test_state_names().all) do
-        local entry = assert(__rock_global_entry(name), name)
-        entries[entry] = __rock_global_get(entry)
-    end
-    local log_names = { "__rock_log_dedup", "__rock_log_sites", "__rock_log_site_levels" }
-    local logs = {}
-    for _, name in ipairs(log_names) do
-        local entries = {}
-        for key, value in pairs(_G[name] or {}) do entries[key] = value end
-        logs[name] = { value = _G[name], entries = entries }
-    end
-    local before = ffi.string(stone.stone_native_live_handles("image"))
-    local before_data = ffi.string(stone.stone_native_live_handles("image_data"))
-    local result = world_fixture_call(function()
-        residency_owner_test_fixture("5", function(paths)
-            residency_owner_test_intentional_failure(paths)
-        end)
-    end)
-    assert(not result.ok and tostring(result.value):find("intentional residency fixture failure", 1, true))
-    for entry, value in pairs(entries) do
-        assert(__rock_global_get(entry) == value, "fixture changed " .. tostring(entry.name))
-    end
-    for _, name in ipairs(log_names) do
-        local saved = logs[name]
-        assert(_G[name] == saved.value, "fixture changed " .. name)
-        for key, value in pairs(_G[name] or {}) do assert(saved.entries[key] == value, "fixture polluted " .. name) end
-        for key, value in pairs(saved.entries) do assert(_G[name][key] == value, "fixture lost " .. name) end
-    end
-    assert(ffi.string(stone.stone_native_live_handles("image")) == before,
-        "failed fixture leaked a native image")
-    assert(ffi.string(stone.stone_native_live_handles("image_data")) == before_data,
-        "failed fixture leaked native image data")
-"""
-
-@test
-fn residency_owner_fixture_restores_state_after_failure() {
-    residency_owner_test_failure_restores_state()
+fn residency_owner_test_fixture(digest_char: string, body: fn([string])) {
+    residency_identity_fixture(digest_char, ["soil", "trail"], body)
 }

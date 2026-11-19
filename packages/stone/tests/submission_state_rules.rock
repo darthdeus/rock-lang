@@ -19,8 +19,7 @@ fn submission_state_control(target: Canvas, source: Canvas) {
 }
 
 fn submission_state_case(fail: bool, trace: bool, depth_compare: string) {
-    setup_stone()
-    assert(stone_gpu_host_ensure())
+    gpu_test_host()
     let entry_blend = CURRENT_BLEND
     let entry_canvas = CURRENT_CANVAS_HANDLE
     let entry_shader = WATCHER.current_shader_name

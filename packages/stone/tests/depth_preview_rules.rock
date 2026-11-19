@@ -59,8 +59,7 @@ fn depth_preview_assert_grays_near(actual: [float], expected: [float], tolerance
 }
 
 fn depth_preview_fixture(body: fn() -> (), intentional_failure: bool = false) {
-    setup_stone()
-    assert(stone_gpu_host_ensure())
+    gpu_test_host()
     let saved_screen = screen_canvas
     let saved_camera = CAMERA_VIEW
     let saved_target = CURRENT_CANVAS_HANDLE

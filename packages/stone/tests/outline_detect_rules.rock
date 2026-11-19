@@ -6,7 +6,7 @@ const OUTLINE_DETECT_VISIBLE: Color = color(0.0, 1.0, 0.0, 1.0)
 const OUTLINE_DETECT_OCCLUDED: Color = color(1.0, 0.0, 0.0, 1.0)
 
 fn outline_detect_readback(out: Canvas, name: string) -> ImageData {
-    let path = (env_var("ROCK_TEST_TMP") ?? env_var("TMPDIR") ?? "/tmp") + "/rock-" + name + ".png"
+    let path = test_tmp_dir("rock-outline-detect") + "/" + name + ".png"
     assert(stone_canvas_save_png(out.handle.0, path), "the detect output saves as PNG")
     return load_image_data(path) ?? {
         assert(false, "the saved detect output reloads")

@@ -5,9 +5,7 @@ fn bookkeeping_test_interface(fingerprint: int) -> SemanticShaderInterface {
     }
 }
 
-@test
-fn selected_shader_interface_checks_live_public_semantics() {
-    let shader = "bookkeeping-public-semantics"
+fn bookkeeping_with_watcher(shader: string, body: fn() -> ()) {
     let saved_watcher = WATCHER
     let saved_generation = NEXT_SEMANTIC_SHADER_GENERATION
     WATCHER = FileWatcher { enabled: true, shaders: map_new(), current_shader_name: null }
@@ -16,50 +14,52 @@ fn selected_shader_interface_checks_live_public_semantics() {
         NEXT_SEMANTIC_SHADER_GENERATION = saved_generation
         GL_SHADER_SEMANTICS.remove(shader)
         GL_SHADER_ARTIFACTS.remove(shader)
+        REGISTERED_SHADER_HASHES.remove(shader)
     }
-    WATCHER.shaders.insert(shader, WatcherShader { shader: ShaderId(1) })
-    publish_gl_shader_semantic(shader, bookkeeping_test_interface(41))
-    let published = GL_SHADER_SEMANTICS.get(shader).unwrap()
-    assert_eq(selected_shader_interface(shader).unwrap().fingerprint, 41)
+    body()
+}
 
-    GL_SHADER_SEMANTICS.insert(shader, SemanticShaderGeneration {
-        interface: published.interface, generation: published.generation + 1,
+@test
+fn selected_shader_interface_checks_live_public_semantics() {
+    let shader = "bookkeeping-public-semantics"
+    bookkeeping_with_watcher(shader, () => {
+        WATCHER.shaders.insert(shader, WatcherShader { shader: ShaderId(1) })
+        publish_gl_shader_semantic(shader, bookkeeping_test_interface(41))
+        let published = GL_SHADER_SEMANTICS.get(shader).unwrap()
+        assert_eq(selected_shader_interface(shader).unwrap().fingerprint, 41)
+
+        GL_SHADER_SEMANTICS.insert(shader, SemanticShaderGeneration {
+            interface: published.interface, generation: published.generation + 1,
+        })
+        assert(selected_shader_interface(shader) == null, "a replaced public generation cannot select stale metadata")
+        GL_SHADER_SEMANTICS.insert(shader, SemanticShaderGeneration {
+            interface: bookkeeping_test_interface(42), generation: published.generation,
+        })
+        assert(selected_shader_interface(shader) == null, "a public fingerprint mutation cannot select stale metadata")
+        GL_SHADER_SEMANTICS.remove(shader)
+        assert(selected_shader_interface(shader) == null, "removed public metadata is not cached")
+        GL_SHADER_SEMANTICS.insert(shader, published)
+        assert_eq(selected_shader_interface(shader).unwrap().fingerprint, 41)
     })
-    assert(selected_shader_interface(shader) == null, "a replaced public generation cannot select stale metadata")
-    GL_SHADER_SEMANTICS.insert(shader, SemanticShaderGeneration {
-        interface: bookkeeping_test_interface(42), generation: published.generation,
-    })
-    assert(selected_shader_interface(shader) == null, "a public fingerprint mutation cannot select stale metadata")
-    GL_SHADER_SEMANTICS.remove(shader)
-    assert(selected_shader_interface(shader) == null, "removed public metadata is not cached")
-    GL_SHADER_SEMANTICS.insert(shader, published)
-    assert_eq(selected_shader_interface(shader).unwrap().fingerprint, 41)
 }
 
 @test
 fn selected_shader_interface_checks_watcher_replacement_and_republication() {
     let shader = "bookkeeping-watcher-republication"
-    let saved_watcher = WATCHER
-    let saved_generation = NEXT_SEMANTIC_SHADER_GENERATION
-    WATCHER = FileWatcher { enabled: true, shaders: map_new(), current_shader_name: null }
-    defer {
-        WATCHER = saved_watcher
-        NEXT_SEMANTIC_SHADER_GENERATION = saved_generation
-        GL_SHADER_SEMANTICS.remove(shader)
-        GL_SHADER_ARTIFACTS.remove(shader)
-    }
-    publish_gl_shader_semantic(shader, bookkeeping_test_interface(51))
-    let old_generation = GL_SHADER_SEMANTICS.get(shader).unwrap()
-    assert(selected_shader_interface(shader) == null, "metadata alone does not make a program live")
-    WATCHER.shaders.insert(shader, WatcherShader { shader: ShaderId(1) })
-    assert_eq(selected_shader_interface(shader).unwrap().fingerprint, 51)
-    WATCHER = FileWatcher { enabled: true, shaders: map_new(), current_shader_name: null }
-    assert(selected_shader_interface(shader) == null, "replacing WATCHER invalidates membership immediately")
-    WATCHER.shaders.insert(shader, WatcherShader { shader: ShaderId(2) })
-    publish_gl_shader_semantic(shader, bookkeeping_test_interface(52))
-    assert_eq(selected_shader_interface(shader).unwrap().fingerprint, 52, "republication selects the current artifact")
-    GL_SHADER_SEMANTICS.insert(shader, old_generation)
-    assert(selected_shader_interface(shader) == null, "republication invalidates the prior semantic generation")
+    bookkeeping_with_watcher(shader, () => {
+        publish_gl_shader_semantic(shader, bookkeeping_test_interface(51))
+        let old_generation = GL_SHADER_SEMANTICS.get(shader).unwrap()
+        assert(selected_shader_interface(shader) == null, "metadata alone does not make a program live")
+        WATCHER.shaders.insert(shader, WatcherShader { shader: ShaderId(1) })
+        assert_eq(selected_shader_interface(shader).unwrap().fingerprint, 51)
+        WATCHER = FileWatcher { enabled: true, shaders: map_new(), current_shader_name: null }
+        assert(selected_shader_interface(shader) == null, "replacing WATCHER invalidates membership immediately")
+        WATCHER.shaders.insert(shader, WatcherShader { shader: ShaderId(2) })
+        publish_gl_shader_semantic(shader, bookkeeping_test_interface(52))
+        assert_eq(selected_shader_interface(shader).unwrap().fingerprint, 52, "republication selects the current artifact")
+        GL_SHADER_SEMANTICS.insert(shader, old_generation)
+        assert(selected_shader_interface(shader) == null, "republication invalidates the prior semantic generation")
+    })
 }
 
 @test
@@ -106,20 +106,17 @@ fn texture_slot_marks_preserve_draw_and_activation_lifetimes() {
 }
 
 
-fn bookkeeping_registration_upgrade(native: bool) {
-    let shader = if native { "bookkeeping-native-upgrade" } else { "bookkeeping-registration-upgrade" }
+@test
+fn shader_registration_and_native_publication_restore_artifact_metadata_after_registry_upgrade() {
+    for native in [false, true] {
+        let shader = if native { "bookkeeping-native-upgrade" } else { "bookkeeping-registration-upgrade" }
+        bookkeeping_with_watcher(shader, () => { bookkeeping_registration_upgrade(shader, native) })
+    }
+}
+
+fn bookkeeping_registration_upgrade(shader: string, native: bool) {
     let src = "bookkeeping-registration-source"
     let wire = "SHADER_INTERFACE_V1\nfingerprint 61\nfullscreen 1\nstages 1\nstage fragment\nvertex_inputs 0\nvaryings 0\ngroups 0\narrays 0\ntextures none 0\ntexture_stages 0\nbare_samplers 0\noutput none\nend"
-    let saved_watcher = WATCHER
-    let saved_generation = NEXT_SEMANTIC_SHADER_GENERATION
-    WATCHER = FileWatcher { enabled: true, shaders: map_new(), current_shader_name: null }
-    defer {
-        WATCHER = saved_watcher
-        NEXT_SEMANTIC_SHADER_GENERATION = saved_generation
-        GL_SHADER_SEMANTICS.remove(shader)
-        GL_SHADER_ARTIFACTS.remove(shader)
-        REGISTERED_SHADER_HASHES.remove(shader)
-    }
     WATCHER.shaders.insert(shader, WatcherShader { shader: ShaderId(1) })
     REGISTERED_SHADER_HASHES.insert(shader, ShaderRegistrationKey {
         src_hash: __shader_src_hash(src), block_fingerprint: 0,
@@ -141,16 +138,6 @@ fn bookkeeping_registration_upgrade(native: bool) {
     __rock_shader_register(shader, src, [], [], [], [], [], [], [], [], [], [], [], true, wire)
     assert(selected_shader_interface(shader) == null, "unchanged registration does not revive an absent program")
     assert(!GL_SHADER_ARTIFACTS.contains(shader), "metadata recovery requires a live program")
-}
-
-@test
-fn shader_registration_restores_artifact_metadata_after_registry_upgrade() {
-    bookkeeping_registration_upgrade(false)
-}
-
-@test
-fn native_shader_publication_restores_artifact_metadata_after_registry_upgrade() {
-    bookkeeping_registration_upgrade(true)
 }
 
 @test

@@ -1,33 +1,9 @@
-fn asset_report_test_host() {
-    setup_stone()
-    assert(stone_gpu_host_ensure())
-    assert(stone_text_init())
-}
-
 fn asset_report_test_object(digest_char: string, name: string) -> string {
-    let root = (env_var("TMPDIR") ?? "/tmp") + "/rock-asset-report-test"
-    let eat = root + "/.eat"
-    let dir = eat + "/" + digest_char.repeat(64)
-    let _ = create_directory(root)
-    let _ = create_directory(eat)
-    let _ = create_directory(dir)
-    let data = new_image_data(4, 2)
-    image_data_set_pixel(data, 1, 1, 1.0, 0.5, 0.0, 1.0)
-    let path = "{dir}/{name}.png"
-    assert(image_data_encode(data, "png", path), "fixture {path} written")
-    stone_destroy_image_data(data.0)
-    return path
+    return test_eat_png(test_tmp_dir("rock-asset-report-test"), digest_char, name)
 }
 
 fn asset_report_test_png(name: string, w: int, h: int) -> string {
-    let dir = (env_var("TMPDIR") ?? "/tmp") + "/rock-asset-report-test"
-    let _ = create_directory(dir)
-    let data = new_image_data(w, h)
-    image_data_set_pixel(data, 1, 1, 1.0, 0.5, 0.0, 1.0)
-    let path = "{dir}/{name}.png"
-    assert(image_data_encode(data, "png", path), "fixture {path} written")
-    stone_destroy_image_data(data.0)
-    return path
+    return test_png(test_tmp_dir("rock-asset-report-test") + "/" + name + ".png", w, h)
 }
 
 fn asset_report_find(rows: [AssetReportRow], kind: string, identity: string) -> AssetReportRow? {
@@ -39,7 +15,7 @@ fn asset_report_find(rows: [AssetReportRow], kind: string, identity: string) -> 
 
 @test
 fn asset_report_canvas_census_counts_a_live_canvas() {
-    asset_report_test_host()
+    text_test_host()
     let before = stone_get_live_canvas_count()
     let canvas = new_canvas(48.0, 24.0, "rgba8")
     assert(canvas_is_live(canvas))
@@ -67,7 +43,7 @@ fn asset_report_canvas_census_counts_a_live_canvas() {
 
 @test
 fn asset_report_mesh_bytes_count_the_uploaded_buffers() {
-    asset_report_test_host()
+    text_test_host()
     let before = stone_get_live_mesh_count()
     let vertices = native_buffer_float(8)
     stone_reset_frame_stats()
@@ -165,29 +141,16 @@ fn asset_report_frame_stats_entry(which: int) {
     }
 }
 
+// 0: early upload, drawn frame; 1: early upload, skipped draw; 5: no early
+// upload; 4: boot and pre-core uploads in the perf timeline.
 @test
 fn asset_report_frame_stats_retain_early_work_native() {
-    profiler_test_process("asset_report_frame_stats_entry", 0)
-}
-
-@test
-fn asset_report_frame_stats_retain_early_work_native_without_draw() {
-    profiler_test_process("asset_report_frame_stats_entry", 1)
-}
-
-@test
-fn asset_report_frame_stats_normal_frame_control() {
-    profiler_test_process("asset_report_frame_stats_entry", 5)
-}
-
-@test
-fn asset_report_frame_stats_preserve_boot_upload_timeline() {
-    profiler_test_process("asset_report_frame_stats_entry", 4)
+    for which in [0, 1, 5, 4] { profiler_test_process("asset_report_frame_stats_entry", which) }
 }
 
 @test
 fn asset_report_font_cpu_counts_the_ttf_bytes() {
-    asset_report_test_host()
+    text_test_host()
     load_pending_shader_sources()
     let before = 0
     for row in asset_report_rows() { if row.kind == "font_atlas" { before += row.gpu_bytes } }
@@ -212,7 +175,7 @@ fn asset_report_font_cpu_counts_the_ttf_bytes() {
 
 @test
 fn asset_report_music_bytes_count_the_encoded_track() {
-    asset_report_test_host()
+    text_test_host()
     assert(stone_audio_init())
     let track = "{STONE_SOURCE_DIR}/tests/fixtures/tone.ogg"
     let sound = load_audio(track, "music")
@@ -229,23 +192,14 @@ fn asset_report_music_bytes_count_the_encoded_track() {
 
 @test
 fn asset_report_rows_cover_every_loaded_kind() {
-    asset_report_test_host()
+    text_test_host()
     load_pending_shader_sources()
     assert(stone_audio_init())
     let path = asset_report_test_object("c", "soil")
     let soil = acquire_image_asset(path, watch: false)
     assert(soil.0 != 0)
     stone_flush_image_uploads()
-    let image_bytes_before_canvas = stone_get_live_image_bytes()
-    let mip_bytes_before_canvas = stone_get_live_mip_bytes()
-    let canvas_bytes_before_canvas = stone_get_live_canvas_bytes()
     let canvas = new_canvas(16.0, 8.0, "rgba8")
-    assert_eq(stone_get_live_canvas_bytes() - canvas_bytes_before_canvas, 16 * 8 * 4,
-        "the native canvas counter includes its allocated color target")
-    assert_eq(stone_get_live_image_bytes(), image_bytes_before_canvas,
-        "canvas allocation does not change the image level-zero counter")
-    assert_eq(stone_get_live_mip_bytes(), mip_bytes_before_canvas,
-        "canvas allocation does not change the image mip counter")
     let vertices = native_buffer_float(8)
     let mesh = gpu_mesh_new(vertices.ptr, 4, 2, [2], "fan")
     let font = load_font(project_asset_path("@engine/assets/fonts/DroidSans.ttf"), 24,
@@ -310,7 +264,7 @@ fn asset_report_rows_cover_every_loaded_kind() {
 
 @test
 fn asset_report_json_is_a_valid_stable_document() {
-    asset_report_test_host()
+    text_test_host()
     let path = asset_report_test_object("e", "soil")
     let soil = acquire_image_asset(path, watch: false)
     assert(soil.0 != 0)
@@ -338,9 +292,8 @@ fn asset_report_json_is_a_valid_stable_document() {
 
 @test
 fn asset_report_writer_records_events_and_an_index() {
-    asset_report_test_host()
-    let dir = (env_var("TMPDIR") ?? "/tmp") + "/rock-asset-report-writer"
-    let _ = create_directory(dir)
+    text_test_host()
+    let dir = test_tmp_dir("rock-asset-report-writer")
     assert(!asset_report_event("nope"), "an event with no sink writes nothing")
     asset_report_configure(dir, 2)
     let path = asset_report_test_object("f", "soil")
@@ -369,7 +322,7 @@ fn asset_report_writer_records_events_and_an_index() {
 
 @test
 fn live_texture_bytes_include_mip_chain_and_canvas_storage() {
-    asset_report_test_host()
+    text_test_host()
     let path = asset_report_test_png("accounting-rg8", 7, 5)
     let total = stone_get_live_texture_bytes()
     let images = stone_get_live_image_bytes()

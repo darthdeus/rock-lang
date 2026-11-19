@@ -23,10 +23,7 @@ fn pass_geometry_keeps_authored_uv_rows_and_lighten_overlap() {
     pass_rules_fixture(() => {
         let target = pass_rules_flat_canvas(8, 0.0)
         defer destroy_canvas(target)
-        let data = new_owned_image_data(1, 1)
-        image_data_set_pixel(data, 0, 0, 1.0, 1.0, 1.0, 1.0)
-        let white = new_owned_image_from_data(data, TextureFilter::Nearest)
-        release_owned_image_data(data)
+        let white = test_white_image()
         defer release_owned_image(white)
         let image = sampled_image(white)
         let mesh = sprite_mesh_new(image, capacity: 2)

@@ -2,21 +2,14 @@ use stone::*
 
 const OUTLINE_CANVAS_STYLE: Outline = Outline { entity_id: 1, color: color(0.1, 1.0, 0.3, 1.0), width: 4.0 }
 
-fn outline_canvas_white() -> Image {
-    let data = new_owned_image_data(1, 1)
-    image_data_set_pixel(data, 0, 0, 1.0, 1.0, 1.0, 1.0)
-    let image = new_owned_image_from_data(data, TextureFilter::Nearest)
-    release_owned_image_data(data)
-    return image
-}
+fn outline_canvas_white() -> Image { return test_white_image() }
 
 fn outline_canvas_fixture(body: fn(SampledTexture) -> ()) {
-    setup_stone()
-    assert(stone_gpu_host_ensure())
+    gpu_test_host()
     let saved_canvas = CURRENT_CANVAS_HANDLE
     let saved_frame = frame_seq
     let saved_white = WHITE_PIXEL
-    let white = outline_canvas_white()
+    let white = test_white_image()
     WHITE_PIXEL = white
     defer {
         set_canvas_handle(saved_canvas)

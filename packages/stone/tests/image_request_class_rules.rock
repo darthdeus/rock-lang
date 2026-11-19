@@ -1,29 +1,25 @@
-fn image_class_test_host() {
-    setup_stone()
-    assert(stone_gpu_host_ensure())
-}
-
 fn image_class_test_fixture(large: bool = false) -> string {
+    gpu_test_host()
     let path = env_var("ROCK_TEST_TMP").unwrap() + "/rock-image-class-fixture.png"
-    let data = new_image_data(if large { 192 } else { 4 }, if large { 192 } else { 2 })
-    if large {
-        let state = 1
-        for y in 0..192 {
-            for x in 0..192 {
-                state = (state * 48271) % 2147483647
-                let r = (state % 256) as float / 255.0
-                state = (state * 48271) % 2147483647
-                let g = (state % 256) as float / 255.0
-                state = (state * 48271) % 2147483647
-                let b = (state % 256) as float / 255.0
-                image_data_set_pixel(data, x, y, r, g, b, 1.0)
-            }
+    if !large { return test_png(path) }
+    // Pseudo-random texels keep the PNG above 64 KiB.
+    let data = new_image_data(192, 192)
+    let state = 1
+    for y in 0..192 {
+        for x in 0..192 {
+            state = (state * 48271) % 2147483647
+            let r = (state % 256) as float / 255.0
+            state = (state * 48271) % 2147483647
+            let g = (state % 256) as float / 255.0
+            state = (state * 48271) % 2147483647
+            let b = (state % 256) as float / 255.0
+            image_data_set_pixel(data, x, y, r, g, b, 1.0)
         }
     }
     image_data_set_pixel(data, 1, 1, 1.0, 0.5, 0.0, 1.0)
     assert(image_data_encode(data, "png", path), "fixture {path} written")
     stone_destroy_image_data(data.0)
-    if large { assert(stone_file_size(path) > 64 * 1024) }
+    assert(stone_file_size(path) > 64 * 1024)
     return path
 }
 
@@ -47,7 +43,6 @@ fn image_class_bind_frag(vary: SpriteVary, @textures t: ImageClassBindTex) -> Ve
 
 @test
 fn binding_required_image_publishes_it() {
-    image_class_test_host()
     let path = image_class_test_fixture()
     defer { let _ = remove_file(path) }
     let pending = image_class_test_load(path, false)
@@ -75,7 +70,6 @@ fn binding_required_image_publishes_it() {
 
 @test
 fn unpublished_image_is_not_exposed_to_texture_sampling() {
-    image_class_test_host()
     let path = image_class_test_fixture()
     defer { let _ = remove_file(path) }
     let pending = image_class_test_load(path, false)
@@ -95,7 +89,6 @@ fn unpublished_image_is_not_exposed_to_texture_sampling() {
 
 @test
 fn image_load_ready_follows_publication_by_request_class() {
-    image_class_test_host()
     let path = image_class_test_fixture(large: true)
     stone_set_frame_image_upload_budget(0)
 
@@ -125,13 +118,11 @@ fn image_load_ready_follows_publication_by_request_class() {
     }
 
     for image in [required, deferred, pumped] { destroy_image(image) }
-    destroy_image(pumped)
     assert(remove_file(path))
 }
 
 @test
 fn image_destroy_before_publication_releases_pending_accounting() {
-    image_class_test_host()
     let path = image_class_test_fixture()
     stone_set_frame_image_upload_budget(0)
 

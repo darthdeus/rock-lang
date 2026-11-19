@@ -1,14 +1,9 @@
 use stone::*
 
-fn hot_reload_tmp(name: string) -> string {
-    return (env_var("ROCK_TEST_TMP") ?? env_var("TMPDIR") ?? "/tmp") + "/rock-hot-reload-" + name
-}
-
 @test
 fn image_hot_reload_redecodes_into_the_same_handle() {
-    setup_stone()
-    assert(stone_gpu_host_ensure())
-    let path = hot_reload_tmp("image.png")
+    gpu_test_host()
+    let path = test_tmp_dir("rock-hot-reload") + "/image.png"
     residency_owner_test_isolated(() => {
         assert(image_data_encode(new_image_data(2, 2), "png", path), "encode the initial 2x2 png")
         let img = load_image_asset(path)
@@ -32,11 +27,9 @@ fn hot_reload_repo_file(relative: string) -> string {
 
 @test
 fn font_hot_reload_rerasterizes_into_the_same_backend() {
-    setup_stone()
-    assert(stone_gpu_host_ensure())
-    assert(stone_text_init())
+    text_test_host()
     load_pending_shader_sources()
-    let tmp = hot_reload_tmp("font.ttf")
+    let tmp = test_tmp_dir("rock-hot-reload") + "/font.ttf"
     let font_a = hot_reload_repo_file(project_asset_path("@engine/assets/fonts/DroidSans.ttf"))
     let font_b = hot_reload_repo_file("{STONE_SOURCE_DIR}/tests/fixtures/pixel.ttf")
     assert(font_a != "" && font_b != "" && font_a != font_b, "two distinct fixture fonts read")

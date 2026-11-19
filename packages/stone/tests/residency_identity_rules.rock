@@ -1,30 +1,17 @@
-fn residency_test_host() {
-    setup_stone()
-    assert(stone_gpu_host_ensure())
-}
-
 fn residency_test_object(digest_char: string, names: [string], aliases: bool = true) -> [string] {
-    let base = (env_var("ROCK_TEST_TMP") ?? env_var("TMPDIR") ?? "/tmp") + "/rock-residency-identity"
-    let _ = create_directory(base)
-    let data = new_image_data(4, 2)
-    image_data_set_pixel(data, 1, 1, 1.0, 0.5, 0.0, 1.0)
+    let base = test_tmp_dir("rock-residency-identity")
     let paths: [string] = vec_new()
     for name in names {
-        let root = if aliases { "{base}/{name}" } else { base }
-        let dir = "{root}/.eat/{digest_char.repeat(64)}"
-        let _ = create_directory(root)
-        let _ = create_directory(root + "/.eat")
-        let _ = create_directory(dir)
-        let path = if aliases { "{dir}/sheet.png" } else { "{dir}/{name}.png" }
-        assert(image_data_encode(data, "png", path), "fixture {path} written")
-        paths.push(path)
+        paths.push(
+            if aliases { test_eat_png("{base}/{name}", digest_char, "sheet") }
+            else { test_eat_png(base, digest_char, name) }
+        )
     }
-    stone_destroy_image_data(data.0)
     return paths
 }
 
 fn residency_identity_fixture(digest: string, names: [string], body: fn([string]), aliases: bool = true) {
-    residency_test_host()
+    gpu_test_host()
     let paths = residency_test_object(digest, names, aliases)
     residency_owner_test_isolated(() => { body(paths) }, () => {
         residency_owner_test_cleanup(paths)
@@ -240,7 +227,7 @@ fn residency_a_mip_stable_image_counts_its_full_mip_chain() {
 @test
 fn residency_cold_arrival_window_closes_after_its_first_render() {
     // One Eat object per image: a shared digest would be one identity.
-    residency_test_host()
+    gpu_test_host()
     let paths: [string] = vec_new()
     for digest in ["1", "2", "3", "4", "5", "6", "7"] {
         for path in residency_test_object(digest, ["arrival"]) { paths.push(path) }

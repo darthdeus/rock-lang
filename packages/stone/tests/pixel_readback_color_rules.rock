@@ -1,7 +1,6 @@
 @test
 fn pixel_readback_color_poll_preserves_every_stored_channel() {
-    setup_stone()
-    assert(stone_gpu_host_ensure())
+    gpu_test_host()
     let saved_target = CURRENT_CANVAS_HANDLE
     let canvases = stone_get_graphics_stats().canvases
     let readbacks = stone_native_live_handles("pixel_readback").unwrap()

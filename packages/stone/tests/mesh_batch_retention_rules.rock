@@ -17,8 +17,15 @@ fn mesh_batch_retention_test_mesh(z: int) -> SpriteMesh {
     return mesh
 }
 
-fn mesh_batch_retention_key(z: int, counter: int) -> string {
-    return "{batch_key_prefix(z, 0)}|sh0|mesh_{pad_int(counter, 4)}|{batch_key_state(DepthMode::Off, BlendMode::Alpha, false, TextureFilter::Nearest)}"
+fn mesh_batch_retention_key(
+    z: int,
+    counter: int,
+    order: int = 0,
+    depth: DepthMode = DepthMode::Off,
+    blend: BlendMode = BlendMode::Alpha,
+    sampling: TextureFilter = TextureFilter::Nearest
+) -> string {
+    return "{batch_key_prefix(z, order)}|sh0|mesh_{pad_int(counter, 4)}|{batch_key_state(depth, blend, false, sampling)}"
 }
 
 // The engine discards the world pool twice per frame: clear_batches after the
@@ -89,22 +96,6 @@ fn reordered_meshes_flush_in_submission_order() {
     pool.clear()
 }
 
-@test
-fn a_mesh_state_change_reaches_its_kept_row() {
-    let pool = render_batch_pool_new()
-    let mesh = mesh_batch_retention_test_mesh(3)
-    mesh_batch_retention_frame(pool, [mesh])
-    mesh.blend = BlendMode::Additive
-    mesh.z_layer = 5
-    mesh_batch_retention_frame(pool, [mesh])
-    let key = "{batch_key_prefix(5, 0)}|sh0|mesh_0001|{batch_key_state(DepthMode::Off, BlendMode::Additive, false, TextureFilter::Nearest)}"
-    assert_eq(pool.keys(), [key], "the key follows the mesh state")
-    let batch = pool.get(key).unwrap()
-    assert(batch.blend == BlendMode::Additive && batch.z_layer == 5 && batch.unlit,
-        "the row follows the mesh state")
-    pool.clear()
-}
-
 fn mesh_batch_retention_single_key(pool: RenderBatchPool, mesh: SpriteMesh) -> string {
     mesh_batch_retention_frame(pool, [mesh])
     let keys = pool.keys()
@@ -118,24 +109,24 @@ fn each_key_input_change_rebuilds_the_mesh_key() {
     let mesh = mesh_batch_retention_test_mesh(3)
     let _ = mesh_batch_retention_single_key(pool, mesh)
     mesh.z_layer = 5
-    assert_eq(mesh_batch_retention_single_key(pool, mesh),
-        "{batch_key_prefix(5, 0)}|sh0|mesh_0001|{batch_key_state(DepthMode::Off, BlendMode::Alpha, false, TextureFilter::Nearest)}",
+    assert_eq(mesh_batch_retention_single_key(pool, mesh), mesh_batch_retention_key(5, 1),
         "the layer reaches the key")
     mesh.order = 2
-    assert_eq(mesh_batch_retention_single_key(pool, mesh),
-        "{batch_key_prefix(5, 2)}|sh0|mesh_0001|{batch_key_state(DepthMode::Off, BlendMode::Alpha, false, TextureFilter::Nearest)}",
+    assert_eq(mesh_batch_retention_single_key(pool, mesh), mesh_batch_retention_key(5, 1, 2),
         "the order reaches the key")
     mesh.depth = DepthMode::TestWrite
     assert_eq(mesh_batch_retention_single_key(pool, mesh),
-        "{batch_key_prefix(5, 2)}|sh0|mesh_0001|{batch_key_state(DepthMode::TestWrite, BlendMode::Alpha, false, TextureFilter::Nearest)}",
-        "the depth mode reaches the key")
-    mesh.blend = BlendMode::Multiply
-    assert_eq(mesh_batch_retention_single_key(pool, mesh),
-        "{batch_key_prefix(5, 2)}|sh0|mesh_0001|{batch_key_state(DepthMode::TestWrite, BlendMode::Multiply, false, TextureFilter::Nearest)}",
+        mesh_batch_retention_key(5, 1, 2, DepthMode::TestWrite), "the depth mode reaches the key")
+    mesh.blend = BlendMode::Additive
+    let blended = mesh_batch_retention_single_key(pool, mesh)
+    assert_eq(blended, mesh_batch_retention_key(5, 1, 2, DepthMode::TestWrite, BlendMode::Additive),
         "the blend mode reaches the key")
+    let row = pool.get(blended).unwrap()
+    assert(row.blend == BlendMode::Additive && row.z_layer == 5 && row.unlit,
+        "the kept row follows the mesh state; additive rows draw unlit")
     mesh.sampling = TextureFilter::Linear
     assert_eq(mesh_batch_retention_single_key(pool, mesh),
-        "{batch_key_prefix(5, 2)}|sh0|mesh_0001|{batch_key_state(DepthMode::TestWrite, BlendMode::Multiply, false, TextureFilter::Linear)}",
+        mesh_batch_retention_key(5, 1, 2, DepthMode::TestWrite, BlendMode::Additive, TextureFilter::Linear),
         "the sampling reaches the key")
     pool.clear()
 }

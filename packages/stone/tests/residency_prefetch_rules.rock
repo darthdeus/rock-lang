@@ -1,31 +1,9 @@
-fn residency_prefetch_test_image(digest: string, name: string, w: int, h: int) -> string {
-    let root = (env_var("ROCK_TEST_TMP") ?? env_var("TMPDIR") ?? "/tmp") + "/rock-residency-prefetch"
-    let eat = root + "/.eat"
-    let dir = eat + "/" + digest.repeat(64)
-    let _ = create_directory(root)
-    let _ = create_directory(eat)
-    let _ = create_directory(dir)
-    let data = new_image_data(w, h)
-    image_data_set_pixel(data, 1, 1, 1.0, 0.5, 0.0, 1.0)
-    let path = "{dir}/{name}.png"
-    assert(image_data_encode(data, "png", path), "fixture {path} written")
-    stone_destroy_image_data(data.0)
-    return path
-}
-
 fn residency_prefetch_fixture(body: fn([string])) {
-    residency_test_host()
-    let paths = [residency_prefetch_test_image("1", "small", 4, 2),
-        residency_prefetch_test_image("2", "big", 64, 64)]
+    gpu_test_host()
+    let root = test_tmp_dir("rock-residency-prefetch")
+    let paths = [test_eat_png(root, "1", "small"), test_eat_png(root, "2", "big", 64, 64)]
     residency_owner_test_isolated(() => { body(paths) }, () => {
         residency_owner_test_cleanup(paths)
-    })
-}
-
-@test
-fn residency_prefetch_idle_when_nothing_waits() {
-    residency_prefetch_fixture(paths => {
-        assert(residency_prefetch_idle(), "a fresh cache has nothing queued or loading")
     })
 }
 
@@ -34,8 +12,8 @@ fn residency_prefetch_submits_while_under_budget() {
     residency_prefetch_fixture(paths => {
         let small = paths[0]
         let big = paths[1]
-        let big_bytes = 64 * 64 * 4
-        residency_set_prefetch_budget(big_bytes)
+        assert(residency_prefetch_idle(), "a fresh cache has nothing queued or loading")
+        residency_set_prefetch_budget(64 * 64 * 4)
         let big_image = residency_prefetch(ResidencyRequest { path: big })
         assert(big_image.0 != 0, "the first prefetch submits at once")
         assert_eq(residency_state(big), ResidencyState::Loading, "the submitted prefetch is loading")

@@ -14,32 +14,21 @@ fn center_align_centers_cap_box_on_anchor() {
     let font = cap_center_test_font()
     defer { unload_font(font) }
     let anchor = v(200.0, 200.0)
+    let plain_y: float? = null
     for text in ["H", "Hg", "Ag"] {
         let layout = text_layout_build(font, text, 24.0, 1.0,
             align: TextAlign::Center)
         assert(layout.admitted_count > 0, "cap-center: {text} admits glyphs")
         let origin = text_layout_aligned_origin(layout, anchor)
+        let first_y = plain_y ?? origin.y
+        plain_y = first_y
+        assert_eq(origin.y, first_y, "cap-center: descenders in {text} do not move vertical centering")
         let cap_center = origin.y + layout.ascent
             - cap_center_cap_px(font, 24.0) * 0.5
         let drift = abs(cap_center - anchor.y)
         assert(drift < 0.01,
             "cap-center: {text} cap box centers on the anchor (drift {drift})")
     }
-}
-
-@test
-fn center_align_ignores_descenders() {
-    let font = cap_center_test_font()
-    defer { unload_font(font) }
-    let anchor = v(200.0, 200.0)
-    let plain = text_layout_aligned_origin(
-        text_layout_build(font, "H", 24.0, 1.0, align: TextAlign::Center),
-        anchor)
-    let desc = text_layout_aligned_origin(
-        text_layout_build(font, "Hg", 24.0, 1.0, align: TextAlign::Center),
-        anchor)
-    assert_eq(plain.y, desc.y,
-        "cap-center: descenders do not move vertical centering")
 }
 
 @test

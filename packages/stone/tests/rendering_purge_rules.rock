@@ -79,7 +79,7 @@ fn rendering_purge_contains(outer: Rect, inner: Rect) -> bool {
 
 @test
 fn rendering_purge_text_effect_bounds_contain_ink_shadow_and_filter() {
-    font_residency_test_host()
+    text_test_host()
     let font = load_font(FONT_RESIDENCY_PATH, 48, raster: FontRasterPolicy::Fixed).unwrap()
     defer { unload_font(font) }
     let layout = text_layout_build(font, "AB", 96.0, 1.0, align: TextAlign::TopLeft)

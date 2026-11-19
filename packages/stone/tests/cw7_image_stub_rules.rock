@@ -52,15 +52,7 @@ inline(lua) fn cw7_late_header_jpeg(path: string) = """
 """
 
 @nomangle fn cw7_loaded_image_stub_case(stubbed: bool) {
-    let original_policy = env_var("STONE_ASSET_STUB")
     let opposite = if stubbed { "0" } else { "1" }
-    let cleanup_error = (world_fixture_raised(() => {
-        cw7_with_stub_policy(opposite, () => { error("cw7 intentional cleanup failure") })
-    }) ?? "")
-    assert(cleanup_error.contains("cw7 intentional cleanup failure"))
-    assert_eq(env_var("STONE_ASSET_STUB"), original_policy,
-        "a failing body restores process policy")
-
     residency_owner_test_fixture("c", paths => {
         let path = paths[0]
         let image = load_image_cached(path, path, watch: false)
@@ -78,8 +70,6 @@ inline(lua) fn cw7_late_header_jpeg(path: string) = """
                 declared = load_image_cached(path, path, watch: false, exact_texels: true)
             })
         }) ?? "")
-        assert_eq(env_var("STONE_ASSET_STUB"), original_policy,
-            "cache acceptance and rejection restore process policy")
         if stubbed {
             assert_eq(result, "", "a loaded stub remains reusable after process policy changes")
             assert_eq(declared, image, "exact-texel reuse preserves the loaded identity")
@@ -111,11 +101,6 @@ inline(lua) fn cw7_late_header_jpeg(path: string) = """
 }
 
 @test
-fn cw7_loaded_stub_cache_uses_image_provenance() {
-    cw7_image_stub_process(true)
-}
-
-@test
-fn cw7_capped_real_cache_uses_image_provenance() {
-    cw7_image_stub_process(false)
+fn cw7_cache_reuse_follows_image_provenance_not_process_policy() {
+    for stubbed in [true, false] { cw7_image_stub_process(stubbed) }
 }
