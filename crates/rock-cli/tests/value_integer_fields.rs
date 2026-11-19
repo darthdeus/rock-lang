@@ -1,4 +1,21 @@
 use crate::support::{rock, text};
+use std::path::Path;
+
+/// Runs `source` with MIR checks on and asserts the range check stopped it.
+#[track_caller]
+fn assert_checked_store_fails(dir: &Path, backend: &str, source: &str, case: &str) {
+    std::fs::write(dir.join("store.rock"), source).unwrap();
+    let out = rock(dir)
+        .args(["run", "store.rock", "--backend", backend])
+        .env("ROCK_MIR_CHECKS", "1")
+        .output()
+        .unwrap();
+    let diagnostic = text(&out);
+    assert!(
+        !out.status.success() && diagnostic.contains("value struct integer field out of range"),
+        "{backend} {case}: {diagnostic}"
+    );
+}
 
 #[test]
 fn value_integer_field_literals_have_source_diagnostics() {
@@ -70,17 +87,11 @@ fn checked_value_integer_stores_do_not_depend_on_boxing() {
                          inline(js) fn invalid() -> {ty} = \"return {value};\"\n\
                          fn main() {{ {body} }}\n"
                     );
-                    std::fs::write(dir.path().join("store.rock"), source).unwrap();
-                    let out = rock(dir.path())
-                        .args(["run", "store.rock", "--backend", backend])
-                        .env("ROCK_MIR_CHECKS", "1")
-                        .output()
-                        .unwrap();
-                    let diagnostic = text(&out);
-                    assert!(
-                        !out.status.success()
-                            && diagnostic.contains("value struct integer field out of range"),
-                        "{backend} {ty} {value} {body}: {diagnostic}"
+                    assert_checked_store_fails(
+                        dir.path(),
+                        backend,
+                        &source,
+                        &format!("{ty} {value} {body}"),
                     );
                 }
             }
@@ -97,21 +108,11 @@ fn checked_value_int_increment_rejects_overflow() {
             "let v = V { x: -2147483648 }; --v.x",
             "let c = Cell { v: V { x: 2147483647 } }; ++c.v.x",
         ] {
-            std::fs::write(
-                dir.path().join("increment.rock"),
-                format!("value V {{ x: int }}\nstruct Cell {{ v: V }}\nfn main() {{ {body} }}\n"),
-            )
-            .unwrap();
-            let out = rock(dir.path())
-                .args(["run", "increment.rock", "--backend", backend])
-                .env("ROCK_MIR_CHECKS", "1")
-                .output()
-                .unwrap();
-            assert!(
-                !out.status.success()
-                    && text(&out).contains("value struct integer field out of range"),
-                "{backend} {body}: {}",
-                text(&out)
+            assert_checked_store_fails(
+                dir.path(),
+                backend,
+                &format!("value V {{ x: int }}\nstruct Cell {{ v: V }}\nfn main() {{ {body} }}\n"),
+                body,
             );
         }
     }

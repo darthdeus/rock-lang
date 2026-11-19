@@ -31,20 +31,23 @@ fn project(root: &Path, extra_release: &str) {
     .unwrap();
 }
 
+/// Releases the whole `assets` directory instead of the one owned file.
+fn release_all_assets(root: &Path) {
+    let path = root.join("stick.toml");
+    let config = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("assets/owned.txt", "assets");
+    std::fs::write(path, config).unwrap();
+}
+
 #[test]
-fn package_requires_an_explicit_output_directory() {
+fn package_requires_an_output_directory_and_packages_the_current_project() {
     let root = tempfile::tempdir().unwrap();
     project(root.path(), "");
     failure(
         run(root.path(), &["package"], None),
         "package requires --output <directory>",
     );
-}
-
-#[test]
-fn package_uses_the_current_project_and_selected_relative_output() {
-    let root = tempfile::tempdir().unwrap();
-    project(root.path(), "");
     success(run(root.path(), &["package", "--output", "dist"], None));
     let output = root.path().join("dist");
     assert!(!std::fs::read(output.join("main.bc")).unwrap().is_empty());
@@ -330,15 +333,11 @@ fn asset_check_verifies_pngs_and_digests_like_package() {
 fn undeclared_packaged_banks_warn_and_require_selected_dependencies() {
     let root = tempfile::tempdir().unwrap();
     project(root.path(), "");
-    let path = root.path().join("stick.toml");
-    let config = std::fs::read_to_string(&path)
-        .unwrap()
-        .replace("assets/owned.txt", "assets");
-    std::fs::write(path, config).unwrap();
+    release_all_assets(root.path());
     let digest = sheet(root.path(), 1);
     bank(root.path(), "assets/extra.jsonl", &digest, 2);
     let checked = run(root.path(), &["asset-check"], None);
-    assert!(crate::support::text(&checked).contains("not declared in [release].visual_banks"));
+    crate::support::assert_mentions(&checked, "not declared in [release].visual_banks");
     success(checked);
     std::fs::remove_dir_all(root.path().join(format!("assets/.eat/{digest}"))).unwrap();
     reject_both(root.path(), None, "missing selected file");
@@ -407,7 +406,7 @@ fn redundant_sheet_entries_warn_and_preserve_unrelated_overlay_assets() {
     std::fs::create_dir_all(root.path().join("assets/.eat")).unwrap();
     std::fs::rename(overlay.join(&directory), root.path().join(&directory)).unwrap();
     let checked = run(root.path(), &["asset-check"], Some(&overlay));
-    assert!(crate::support::text(&checked).contains("already supplied by visual bank"));
+    crate::support::assert_mentions(&checked, "already supplied by visual bank");
     success(checked);
     success(run(
         root.path(),
@@ -462,11 +461,7 @@ fn split_generations_and_malformed_banks_reject_both_commands() {
 fn declaring_a_bank_already_in_release_assets_deduplicates_it() {
     let root = tempfile::tempdir().unwrap();
     project(root.path(), "visual_banks = [\"assets/extra.jsonl\"]");
-    let path = root.path().join("stick.toml");
-    let text = std::fs::read_to_string(&path)
-        .unwrap()
-        .replace("assets/owned.txt", "assets");
-    std::fs::write(path, text).unwrap();
+    release_all_assets(root.path());
     let digest = sheet(root.path(), 1);
     bank(root.path(), "assets/extra.jsonl", &digest, 2);
     success(run(root.path(), &["package", "--output", "dist"], None));

@@ -5,7 +5,7 @@ use std::path::Path;
 
 /// A copy of the checkout's stdlib with `text` appended to `vec.rock`.
 fn stdlib_with(dir: &Path, text: &str) {
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stdlib");
+    let source = crate::support::repo_root().join("stdlib");
     for name in rock_stdlib::STDLIB_NAMES {
         let mut contents = std::fs::read_to_string(source.join(name)).unwrap();
         if *name == "vec.rock" {

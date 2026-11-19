@@ -1,20 +1,44 @@
 //! `ROCK_COMPILE_STATS=<file>` appends one compile budget record per compile:
 //! a tree whose every level sums to its parent, so a phase cannot hide.
-use crate::support::{PACKAGE_MAIN, rock};
+use crate::support::{PACKAGE_MAIN, read_jsonl, rock, success};
 use std::path::Path;
-use std::process::Output;
 
 fn project() -> tempfile::TempDir {
     crate::support::two_module_package("budget")
 }
 
-fn compile(root: &Path, stats: &Path, output: &Path) -> Output {
-    rock(root)
-        .args(["compile", ".", "--output"])
-        .arg(output)
-        .env("ROCK_COMPILE_STATS", stats)
-        .output()
-        .expect("start rock")
+/// `rock compile . --output <output>` with one of the two report variables set.
+fn compile_reporting(root: &Path, variable: &str, report: &Path, output: &Path) {
+    let other = if variable == "ROCK_COMPILE_STATS" {
+        "ROCK_BODY_COSTS"
+    } else {
+        "ROCK_COMPILE_STATS"
+    };
+    success(
+        rock(root)
+            .args(["compile", ".", "--output"])
+            .arg(output)
+            .env(variable, report)
+            .env_remove(other)
+            .output()
+            .expect("start rock"),
+    );
+}
+
+fn compile(root: &Path, stats: &Path, output: &Path) {
+    compile_reporting(root, "ROCK_COMPILE_STATS", stats, output);
+}
+
+fn body_costs(root: &Path, costs: &Path, output: &Path) -> Vec<serde_json::Value> {
+    compile_reporting(root, "ROCK_BODY_COSTS", costs, output);
+    read_jsonl(costs)
+}
+
+fn record_ending<'a>(records: &'a [serde_json::Value], name: &str) -> &'a serde_json::Value {
+    records
+        .iter()
+        .find(|r| r["name"].as_str().unwrap_or("").ends_with(name))
+        .unwrap_or_else(|| panic!("no record for {name}: {records:?}"))
 }
 
 fn ms(node: &serde_json::Value) -> f64 {
@@ -58,17 +82,10 @@ fn a_compile_appends_a_budget_whose_levels_sum_to_the_wall() {
     let root = project();
     let stats = root.path().join("stats.jsonl");
     let output = root.path().join("out.lua");
-    let out = compile(root.path(), &stats, &output);
-    assert!(
-        out.status.success(),
-        "exit {:?}\n{}",
-        out.status.code(),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let text = std::fs::read_to_string(&stats).expect("stats file written");
-    let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines.len(), 1, "one record per compile:\n{text}");
-    let record: serde_json::Value = serde_json::from_str(lines[0]).expect("JSON record");
+    compile(root.path(), &stats, &output);
+    let records = read_jsonl(&stats);
+    assert_eq!(records.len(), 1, "one record per compile: {records:?}");
+    let record = &records[0];
     assert_eq!(record["schema"], 2);
     assert_eq!(record["status"], "ok");
     assert_eq!(record["command"], "compile");
@@ -139,59 +156,22 @@ fn a_compile_appends_a_budget_whose_levels_sum_to_the_wall() {
     );
 }
 
-#[test]
-fn without_the_variable_nothing_is_written() {
-    let root = project();
-    let output = root.path().join("out.lua");
-    let out = rock(root.path())
-        .args(["compile", ".", "--output"])
-        .arg(&output)
-        .env_remove("ROCK_COMPILE_STATS")
-        .output()
-        .expect("start rock");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(!root.path().join("stats.jsonl").exists());
-}
-
-/// `ROCK_BODY_COSTS=<file>` writes one record per emitted body, named by its
-/// source definition, and leaves the output unchanged.
+/// Body costs leave the output unchanged, and a compile without
+/// `ROCK_COMPILE_STATS` writes no budget.
 #[test]
 fn body_costs_name_each_body_by_its_source_definition() {
     let root = project();
-    let costs = root.path().join("costs.jsonl");
     let attributed = root.path().join("attributed.lua");
-    let out = rock(root.path())
-        .args(["compile", ".", "--output"])
-        .arg(&attributed)
-        .env("ROCK_BODY_COSTS", &costs)
-        .env_remove("ROCK_COMPILE_STATS")
-        .output()
-        .expect("start rock");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let plain = root.path().join("plain.lua");
+    let records = body_costs(root.path(), &root.path().join("costs.jsonl"), &attributed);
     let stats = root.path().join("stats.jsonl");
-    assert!(compile(root.path(), &stats, &plain).status.success());
+    assert!(!stats.exists());
+    let plain = root.path().join("plain.lua");
+    compile(root.path(), &stats, &plain);
     assert_eq!(
         std::fs::read(&plain).unwrap(),
         std::fs::read(&attributed).unwrap()
     );
-    let records: Vec<serde_json::Value> = std::fs::read_to_string(&costs)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("one JSON record per line"))
-        .collect();
-    let main = records
-        .iter()
-        .find(|r| r["name"].as_str().unwrap_or("").ends_with("main::main"))
-        .unwrap_or_else(|| panic!("no record for main: {records:?}"));
+    let main = record_ending(&records, "main::main");
     assert!(main["file"].as_str().unwrap().ends_with("main.rock"));
     assert_eq!(main["kind"], "function");
     assert_eq!(main["symbol"], "main");
@@ -244,28 +224,12 @@ fn body_costs_record_the_value_types_a_signature_flattens() {
     )
     .unwrap();
     std::fs::write(root.path().join("main.rock"), WIDE).unwrap();
-    let costs = root.path().join("costs.jsonl");
-    let out = rock(root.path())
-        .args(["compile", ".", "--output"])
-        .arg(root.path().join("out.lua"))
-        .env("ROCK_BODY_COSTS", &costs)
-        .env_remove("ROCK_COMPILE_STATS")
-        .output()
-        .expect("start rock");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
+    let records = body_costs(
+        root.path(),
+        &root.path().join("costs.jsonl"),
+        &root.path().join("out.lua"),
     );
-    let records: Vec<serde_json::Value> = std::fs::read_to_string(&costs)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("one JSON record per line"))
-        .collect();
-    let spin = records
-        .iter()
-        .find(|r| r["name"].as_str().unwrap_or("").ends_with("main::spin"))
-        .unwrap_or_else(|| panic!("no record for spin: {records:?}"));
+    let spin = record_ending(&records, "main::spin");
     let wire = spin["wire"].as_array().expect("a wire list");
     assert_eq!(wire.len(), 3, "two parameters and a result: {wire:?}");
     assert_eq!(wire[0]["type"], "wide::main::Pose");
@@ -282,10 +246,7 @@ fn body_costs_record_the_value_types_a_signature_flattens() {
     assert_eq!(wire[1]["lanes"], 1);
     assert_eq!(wire[2]["type"], "wide::main::Pose");
     assert_eq!(wire[2]["result"], true);
-    let main = records
-        .iter()
-        .find(|r| r["name"].as_str().unwrap_or("").ends_with("main::main"))
-        .unwrap_or_else(|| panic!("no record for main: {records:?}"));
+    let main = record_ending(&records, "main::main");
     assert!(main.get("wire").is_none(), "nothing flattened: {main}");
 }
 
@@ -309,21 +270,14 @@ fn slow_build_var_commands_overlap_the_front_end() {
     .unwrap();
     let stats = root.path().join("stats.jsonl");
     let output = root.path().join("out.lua");
-    let out = compile(root.path(), &stats, &output);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    compile(root.path(), &stats, &output);
     assert!(
         std::fs::read_to_string(&output)
             .unwrap()
             .contains("late-value"),
         "the command's value is stamped"
     );
-    let text = std::fs::read_to_string(&stats).unwrap();
-    let record: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
-    let budget = &record["budget"];
+    let budget = &read_jsonl(&stats)[0]["budget"];
     let before_discovery = ms(child(budget, "build vars"));
     assert!(
         before_discovery < 500.0,

@@ -128,3 +128,31 @@ global seed: int = from_js(1)
         );
     }
 }
+
+/// Both failure paths: a throw under node and a value the host comparison
+/// rejects.
+#[test]
+fn failing_js_tests_exit_nonzero_and_name_each_failure() {
+    if !crate::support::require_node() {
+        return;
+    }
+    let (ok, text) = rock_test_source(
+        r#"
+@test
+fn deliberately_failing() {
+    assert(1 == 2, "this test is supposed to fail")
+}
+
+@test(returns = 43)
+fn mismatched_value() -> int { return 42 }
+"#,
+        &["--backend", "js"],
+    );
+    assert!(!ok, "failing @tests must exit nonzero:\n{text}");
+    assert!(text.contains("0/2 @tests passed (2 failed"), "{text}");
+    assert!(text.contains("FAIL deliberately_failing: error:"), "{text}");
+    assert!(
+        text.contains("FAIL mismatched_value: value mismatch: expected <43>"),
+        "{text}"
+    );
+}

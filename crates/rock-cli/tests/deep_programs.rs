@@ -1,7 +1,47 @@
 //! Function bodies a target refuses to load (LuaJIT's jump range, V8's parser
 //! depth) run when the emitter can flatten them and otherwise fail at compile
 //! time with a located error, never at the point the emitted chunk first runs.
-use crate::support::rock_test_source;
+use crate::support::{invoke, rock_test_source, text};
+
+fn nested_sum(depth: usize) -> String {
+    let sum = vec!["1"; depth].join(" + ");
+    format!("fn main() {{\n    let x = {sum}\n    print(x)\n}}\n")
+}
+
+fn nested_ifs(depth: usize) -> String {
+    let open = "if true {\n".repeat(depth);
+    let close = "}\n".repeat(depth);
+    format!("fn main() {{\n{open}print(1)\n{close}}}\n")
+}
+
+#[test]
+fn compile_accepts_deep_nesting_and_rejects_nesting_past_the_limit() {
+    let root = tempfile::tempdir().unwrap();
+    // The 100_000 ifs go deep enough that the parser's own descent needs the guard.
+    for (name, source, accepted) in [
+        ("sum2000", nested_sum(2000), true),
+        ("ifs2000", nested_ifs(2000), true),
+        ("sum20000", nested_sum(20_000), false),
+        ("ifs100000", nested_ifs(100_000), false),
+    ] {
+        let file = format!("{name}.rock");
+        std::fs::write(root.path().join(&file), source).unwrap();
+        let out = invoke(root.path(), &["compile", &file]);
+        assert_eq!(out.status.success(), accepted, "{name}: {}", text(&out));
+        if accepted {
+            assert!(
+                String::from_utf8_lossy(&out.stdout).contains("print"),
+                "{name}: no Lua emitted"
+            );
+        } else {
+            assert!(
+                text(&out).contains("nested too deeply"),
+                "{name}: {}",
+                text(&out)
+            );
+        }
+    }
+}
 
 fn else_if_chain(arms: usize) -> String {
     let mut src = "fn f(x: int) -> int {\n    let r = 0\n    if x == 0 { r = 0 }\n".to_string();

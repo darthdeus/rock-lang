@@ -46,6 +46,28 @@ pub fn text(out: &Output) -> String {
     ))
 }
 
+#[track_caller]
+pub fn assert_mentions(out: &Output, needle: &str) {
+    let text = text(out);
+    assert!(text.contains(needle), "missing {needle:?} in: {text}");
+}
+
+/// One JSON value per line of the file at `path`.
+pub fn read_jsonl(path: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("one JSON record per line"))
+        .collect()
+}
+
+/// Sends the command's stdout and stderr to a fresh file at `log`, so a
+/// long-lived child can be watched without filling a pipe.
+pub fn log_output<'a>(command: &'a mut Command, log: &Path) -> &'a mut Command {
+    let file = std::fs::File::create(log).unwrap();
+    command.stdout(file.try_clone().unwrap()).stderr(file)
+}
+
 /// Asserts the command succeeded and returns its stdout.
 #[track_caller]
 pub fn success(out: Output) -> String {

@@ -1,5 +1,5 @@
 //! The public CLI runs outside the monorepo with only a LuaJIT installation.
-use crate::support::{rock, text};
+use crate::support::{assert_mentions, read_jsonl, rock, text, write_files};
 use std::io::ErrorKind;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -12,14 +12,8 @@ fn invoke(root: &Path, args: &[&str]) -> Output {
         .expect("start public plain CLI")
 }
 
-fn write(root: &Path, name: &str, contents: impl AsRef<[u8]>) {
-    std::fs::write(root.join(name), contents).unwrap();
-}
-
-#[track_caller]
-fn assert_mentions(out: &Output, needle: &str) {
-    let text = text(out);
-    assert!(text.contains(needle), "missing {needle:?} in: {text}");
+fn write(root: &Path, name: &str, contents: impl AsRef<str>) {
+    write_files(root, &[(name, contents.as_ref())]);
 }
 
 #[test]
@@ -307,23 +301,17 @@ fn plain_identity_storage_follows_the_manifest_declaration() {
         &["check", ".", "--backend", "skull"],
         &["lsp", "diagnostics", "."],
     ];
-    let reports = |what: &str| {
+    let expect = |accepted: bool, what: &str| {
         for args in commands {
             let out = invoke(root.path(), args);
             let output = text(&out);
-            assert!(
+            assert_eq!(
                 output.contains("cannot store identity struct"),
+                !accepted,
                 "{what} {args:?}: {output}"
             );
-        }
-    };
-    let accepts = |what: &str| {
-        for args in commands {
-            let out = invoke(root.path(), args);
-            let output = text(&out);
-            assert!(out.status.success(), "{what} {args:?}: {output}");
             assert!(
-                !output.contains("cannot store identity struct"),
+                !accepted || out.status.success(),
                 "{what} {args:?}: {output}"
             );
         }
@@ -331,17 +319,17 @@ fn plain_identity_storage_follows_the_manifest_declaration() {
 
     write_source("");
     manifest("");
-    reports("a package name alone exempts nothing");
+    expect(false, "a package name alone exempts nothing");
     manifest("[language]\nidentity_storage = \"exempt\"\n");
-    accepts("a package declared exempt");
+    expect(true, "a package declared exempt");
     manifest("[language]\nidentity_storage = \"enforced\"\n");
-    reports("a package declared enforced");
+    expect(false, "a package declared enforced");
 
     write_source("mod nav::graph;\n");
     manifest("[language]\nmodules = \"v1\"\nidentity_storage = { exempt_modules = [\"nav\"] }\n");
-    accepts("a module under a declared exempt prefix");
+    expect(true, "a module under a declared exempt prefix");
     write_source("mod navigation;\n");
-    reports("a module that only shares the prefix's spelling");
+    expect(false, "a module that only shares the prefix's spelling");
 
     std::fs::remove_file(root.path().join("stick.toml")).unwrap();
     write_source("");
@@ -356,7 +344,7 @@ fn plain_identity_storage_follows_the_manifest_declaration() {
 #[test]
 fn plain_watch_resolves_project_outside_workspace() {
     use bone_core::prelude::Instant;
-    use std::process::{Child, Stdio};
+    use std::process::Child;
     use std::time::Duration;
     struct StopOnDrop<'a>(&'a mut Child);
     impl Drop for StopOnDrop<'_> {
@@ -380,15 +368,15 @@ fn plain_watch_resolves_project_outside_workspace() {
         if output.exists() {
             std::fs::remove_file(&output).unwrap();
         }
-        let stream = std::fs::File::create(&log).unwrap();
-        let mut child = rock(root.path())
-            .args(["watch", ".", "--output"])
-            .arg(&output)
-            .env("ROCK_LOG", "info")
-            .stdout(Stdio::from(stream.try_clone().unwrap()))
-            .stderr(Stdio::from(stream))
-            .spawn()
-            .unwrap();
+        let mut child = crate::support::log_output(
+            rock(root.path())
+                .args(["watch", ".", "--output"])
+                .arg(&output)
+                .env("ROCK_LOG", "info"),
+            &log,
+        )
+        .spawn()
+        .unwrap();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let stop = StopOnDrop(&mut child);
             let mut until = |ready: &dyn Fn(&str) -> bool| {
@@ -552,32 +540,33 @@ fn invalid_commands_and_options_report_their_exit_status_and_argument() {
     assert!(!root.path().join("tmp").exists());
 }
 
+/// `app/` printing 42 through its path dependency `lib/`.
+fn app_with_library(root: &Path) {
+    write_files(
+        root,
+        &[
+            (
+                "lib/stick.toml",
+                "[package]\nname = \"lib\"\ntype = \"lib\"\n[language]\nmodules = \"v1\"\n",
+            ),
+            ("lib/lib.rock", "pub fn answer() -> int { 42 }\n"),
+            (
+                "app/stick.toml",
+                "[package]\nname = \"app\"\ntype = \"bin\"\n[language]\nmodules = \"v1\"\n\
+                 [dependencies]\nlib = { path = \"../lib\" }\n",
+            ),
+            (
+                "app/main.rock",
+                "use lib::answer;\nfn main() { print(answer()) }\n",
+            ),
+        ],
+    );
+}
+
 #[test]
 fn run_loads_a_manifest_dependency() {
     let root = tempfile::tempdir().unwrap();
-    std::fs::create_dir(root.path().join("lib")).unwrap();
-    std::fs::create_dir(root.path().join("app")).unwrap();
-    write(
-        root.path(),
-        "lib/stick.toml",
-        "[package]\nname = \"lib\"\ntype = \"lib\"\n[language]\nmodules = \"v1\"\n",
-    );
-    write(
-        root.path(),
-        "lib/lib.rock",
-        "pub fn answer() -> int { 42 }\n",
-    );
-    write(
-        root.path(),
-        "app/stick.toml",
-        "[package]\nname = \"app\"\ntype = \"bin\"\n[language]\nmodules = \"v1\"\n\
-         [dependencies]\nlib = { path = \"../lib\" }\n",
-    );
-    write(
-        root.path(),
-        "app/main.rock",
-        "use lib::answer;\nfn main() { print(answer()) }\n",
-    );
+    app_with_library(root.path());
     let out = invoke(root.path(), &["run", "app"]);
     assert!(out.status.success(), "{}", text(&out));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "42\n");
@@ -649,30 +638,9 @@ fn plain_scan_assigns_no_archive_semantics() {
 #[test]
 fn lint_union_reports_consumer_discovery_failures() {
     let root = tempfile::tempdir().unwrap();
-    for name in ["library", "app", "candidate"] {
-        std::fs::create_dir(root.path().join(name)).unwrap();
-    }
-    write(
-        root.path(),
-        "library/stick.toml",
-        "[package]\nname = \"library\"\ntype = \"lib\"\n",
-    );
-    write(
-        root.path(),
-        "library/lib.rock",
-        "pub fn answer() -> int { 42 }\n",
-    );
-    write(
-        root.path(),
-        "app/stick.toml",
-        "[package]\nname = \"app\"\n[dependencies]\nlibrary = { path = \"../library\" }\n",
-    );
-    write(
-        root.path(),
-        "app/main.rock",
-        "use library::answer; fn main() { print(answer()) }\n",
-    );
-    let args = ["lint", "--union", "library", "--consumers", "."];
+    app_with_library(root.path());
+    std::fs::create_dir(root.path().join("candidate")).unwrap();
+    let args = ["lint", "--union", "lib", "--consumers", "."];
     let valid = invoke(root.path(), &args);
     assert!(valid.status.success(), "{}", text(&valid));
 
@@ -686,7 +654,7 @@ fn lint_union_reports_consumer_discovery_failures() {
     std::fs::remove_file(&manifest).unwrap();
     let not_directory = invoke(
         root.path(),
-        &["lint", "--union", "library", "--consumers", "app/main.rock"],
+        &["lint", "--union", "lib", "--consumers", "app/main.rock"],
     );
     assert!(!not_directory.status.success(), "{}", text(&not_directory));
     assert_mentions(&not_directory, "app/main.rock");
@@ -711,58 +679,6 @@ fn lint_union_reports_consumer_discovery_failures() {
         }
         let absent = invoke(root.path(), &args);
         assert!(absent.status.success(), "{}", text(&absent));
-    }
-}
-
-fn nested_programs(depth: usize) -> [(String, String); 2] {
-    let sum = vec!["1"; depth].join(" + ");
-    let ifs = format!(
-        "{}print(1)\n{}",
-        "if true {\n".repeat(depth),
-        "}\n".repeat(depth)
-    );
-    [
-        (
-            format!("sum{depth}"),
-            format!("fn main() {{\n    let x = {sum}\n    print(x)\n}}\n"),
-        ),
-        (format!("ifs{depth}"), format!("fn main() {{\n{ifs}}}\n")),
-    ]
-}
-
-#[test]
-fn plain_compiles_deeply_nested_generated_code() {
-    let root = tempfile::tempdir().unwrap();
-    for depth in [200, 2000] {
-        for (name, source) in nested_programs(depth) {
-            let file = format!("{name}.rock");
-            std::fs::write(root.path().join(&file), source).unwrap();
-            let out = invoke(root.path(), &["compile", &file]);
-            assert!(out.status.success(), "{name}: {}", text(&out));
-            assert!(
-                String::from_utf8_lossy(&out.stdout).contains("print"),
-                "{name}: no Lua emitted"
-            );
-        }
-    }
-}
-
-#[test]
-fn plain_rejects_nesting_beyond_the_limit_with_a_diagnostic() {
-    let root = tempfile::tempdir().unwrap();
-    // The ifs go deep enough that the parser's own descent needs the guard.
-    let [sum, _] = nested_programs(20_000);
-    let [_, ifs] = nested_programs(100_000);
-    for (name, source) in [sum, ifs] {
-        let file = format!("{name}.rock");
-        std::fs::write(root.path().join(&file), source).unwrap();
-        let out = invoke(root.path(), &["compile", &file]);
-        assert!(!out.status.success(), "{name} compiled");
-        assert!(
-            text(&out).contains("nested too deeply"),
-            "{name}: {}",
-            text(&out)
-        );
     }
 }
 
@@ -820,26 +736,17 @@ fn plain_writes_an_invocation_log_only_where_rock_invocation_log_names() {
         .output()
         .unwrap();
     assert!(!out.status.success(), "missing project must fail");
-    let records = std::fs::read_to_string(stone_log).unwrap_or_default();
-    let records: Vec<serde_json::Value> = records
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let records = read_jsonl(&stone_log);
     assert_eq!(records.len(), 1, "{}", text(&out));
     assert_eq!(records[0]["kind"], "stone");
     assert_ne!(records[0]["exit_code"], 0);
 }
 
-/// Publishes the built binary at `exe` without leaving its inode open for
-/// writing, so executing `exe` cannot fail with "Text file busy".
-///
-/// A plain copy holds the destination open for writing until it finishes, and a
-/// test thread that forks in that window passes the write fd to a child; the
-/// child keeps the inode write-referenced until it execs (O_CLOEXEC closes the
-/// fd only at exec), and neither closing our fd nor renaming the file clears
-/// that. A hard link never opens the inode for writing, so it removes the race
-/// wherever the built binary and the relocation dir share a filesystem; the copy
-/// fallback stages under a temporary name so `exe` never holds a partial file.
+/// Publishes the built binary at `exe` without opening it for writing where a
+/// hard link works, so a sibling test's forked child cannot hold a write
+/// descriptor that makes exec fail with ETXTBSY (see
+/// `test_utils::write_executable`). The copy fallback stages under a temporary
+/// name so `exe` never holds a partial file.
 fn relocate(from: &str, exe: &Path) {
     if std::fs::hard_link(from, exe).is_ok() {
         return;
@@ -849,9 +756,8 @@ fn relocate(from: &str, exe: &Path) {
     std::fs::rename(&staging, exe).expect("publish the relocated binary");
 }
 
-/// Starts the relocated binary, retrying while the copy fallback's write fd is
-/// still held by a sibling test's forked child (see `relocate`). A retry spans
-/// one fork-to-exec hop; the shared hang backstop keeps a persistent race reportable.
+/// Starts the relocated binary, retrying while the copy fallback's write
+/// descriptor is still held by a sibling test's forked child (see `relocate`).
 fn start_relocated(exe: &Path, root: &Path, args: &[&str]) -> Output {
     use bone_core::prelude::{Duration, Instant};
     let deadline = Instant::now() + test_utils::HANG_BACKSTOP;
@@ -920,29 +826,27 @@ fn plain_rejects_a_thread_count_that_is_not_a_count() {
     }
 }
 
-fn line_directive_project() -> tempfile::TempDir {
-    let root = tempfile::tempdir().unwrap();
-    write(
-        root.path(),
-        "main.rock",
-        "fn main() {\n    print(\"hi\")\n}\n",
-    );
-    write(
-        root.path(),
-        "stick.toml",
-        "[package]\nname = \"lines\"\ntype = \"bin\"\n",
-    );
-    root
-}
-
 #[test]
-fn plain_compile_numbers_lua_with_rock_lines_under_lua_line_directives() {
-    let root = line_directive_project();
-    let out = rock(root.path())
-        .args(["compile", ".", "numbered.lua"])
-        .env("ROCK_SKULL_LINE_DIRECTIVES", "1")
-        .output()
-        .unwrap();
+fn plain_lua_line_directives_number_dev_output_and_reject_a_release_channel() {
+    let root = tempfile::tempdir().unwrap();
+    write_files(
+        root.path(),
+        &[
+            ("main.rock", "fn main() {\n    print(\"hi\")\n}\n"),
+            (
+                "stick.toml",
+                "[package]\nname = \"lines\"\ntype = \"bin\"\n",
+            ),
+        ],
+    );
+    let directives = |args: &[&str]| {
+        rock(root.path())
+            .args(args)
+            .env("ROCK_SKULL_LINE_DIRECTIVES", "1")
+            .output()
+            .unwrap()
+    };
+    let out = directives(&["compile", ".", "numbered.lua"]);
     assert!(out.status.success(), "{}", text(&out));
     let numbered = std::fs::read_to_string(root.path().join("numbered.lua")).unwrap();
     assert!(
@@ -955,18 +859,9 @@ fn plain_compile_numbers_lua_with_rock_lines_under_lua_line_directives() {
     assert!(out.status.success(), "{}", text(&out));
     let plain = std::fs::read_to_string(root.path().join("plain.lua")).unwrap();
     assert!(!plain.lines().any(|line| line.starts_with('#')), "{plain}");
-}
-
-#[test]
-fn plain_lua_line_directives_reject_a_release_channel() {
-    let root = line_directive_project();
-    let out = rock(root.path())
-        .args(["compile", ".", "out.lua", "--channel", "steam"])
-        .env("ROCK_SKULL_LINE_DIRECTIVES", "1")
-        .output()
-        .unwrap();
-    assert!(!out.status.success(), "{}", text(&out));
-    assert_mentions(&out, "Lua line directives are a development option");
+    let release = directives(&["compile", ".", "out.lua", "--channel", "steam"]);
+    assert!(!release.status.success(), "{}", text(&release));
+    assert_mentions(&release, "Lua line directives are a development option");
 }
 
 #[test]
@@ -1205,16 +1100,9 @@ fn explicit_runner_policy_controls_admission_and_log_context() {
     let output = run(&policy.to_string());
     assert!(output.status.success(), "{}", text(&output));
     assert_mentions(&output, "took compile slot priority-0");
-    let record: serde_json::Value = serde_json::from_str(
-        std::fs::read_to_string(&log)
-            .unwrap()
-            .lines()
-            .next()
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(record["env"]["TASK_TAG"], "fixture");
-    assert!(record["env"].get("UNSELECTED_TAG").is_none());
+    let env = &read_jsonl(&log)[0]["env"];
+    assert_eq!(env["TASK_TAG"], "fixture");
+    assert!(env.get("UNSELECTED_TAG").is_none());
     for invalid in [
         "{bad".to_owned(),
         {

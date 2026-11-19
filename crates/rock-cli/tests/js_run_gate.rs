@@ -1,18 +1,7 @@
-//! End-to-end gate: `rock run <file> --backend js` emits the whole file as a
-//! node program (module ordering + `__G` ginit topo + decorator APPLICATIONS at
-//! module load + a co fn) and runs `main` end to end, producing byte-identical
-//! output to the luajit `rock run` of the same file.
-//!
-//! Drives the real binary on both backends so the whole driver path (capability
-//! gate -> emit_program -> node stream) is exercised, and pins the cross-backend
-//! parity `rock run` promises.
+//! `rock run --backend js` prints byte for byte what the luajit `rock run` of
+//! the same file or project prints.
 #![cfg(feature = "backend-js")]
 
-// Exercises: a registry global (SYSTEMS) populated by a `deco init` at module
-// load, two `@system`-applied fns (alpha with a literal `stage = 5`, beta
-// defaulted), a ginit dependency chain (DERIVED reads BASE), a co fn, and a
-// `main` that reads a derived global then iterates the registry calling each
-// registered fn value.
 const GATE: &str = r#"
 struct Sys {
     func: fn() -> (),
@@ -61,9 +50,6 @@ fn main() {
 
 const EXPECTED: &str = "derived=20\nalpha stage=5\nalpha\nbeta stage=100\nbeta\n1\n2\n";
 
-// `rock run <dir> --backend js` (project mode) -- a multi-file
-// project (main + a sibling module) emits via the deterministic module walk and
-// runs `main` end to end, byte-identical to the luajit `rock run` of the dir.
 const PROJECT_FILES: &[(&str, &str)] = &[
     ("stick.toml", "[package]\nname = \"proj\"\n"),
     ("math.rock", "fn square(x: int) -> int { return x * x }\n"),
@@ -83,8 +69,7 @@ const MODULES_V1_FILES: &[(&str, &str)] = &[
     ("main.rock", "fn main() { print(17) }\n"),
 ];
 
-// A file with no nullary `main` runs module-load effects only (ginit + deco
-// applications), matching luajit -- and prints nothing, exiting cleanly.
+// Without a nullary `main` only module-load effects run.
 const NO_MAIN: &str = "global X: int = 7\nfn helper() -> int { X + 1 }\n";
 
 /// `rock run <target>` prints `expected` on luajit and on node.

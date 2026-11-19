@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use crate::support::{rock, text};
+use crate::support::{assert_mentions, rock, text};
 use std::path::Path;
 use std::process::Output;
 
@@ -37,33 +37,18 @@ fn invoke(root: &Path, runner: &Path, shader: bool, skip: bool) -> Output {
 }
 
 #[test]
-fn gpu_commands_require_a_context_by_default() {
+fn an_unavailable_context_fails_gpu_commands_unless_skipped() {
     for shader in [false, true] {
         let root = tempfile::tempdir().unwrap();
         let runner = fixture(root.path(), 2);
-        let output = invoke(root.path(), &runner, shader, false);
-        let message = text(&output);
-        assert!(
-            !output.status.success(),
-            "missing profile accepted: {message}"
-        );
-        assert!(message.contains("330core"), "{message}");
-        assert!(
-            message.contains("display or GL driver unavailable"),
-            "{message}"
-        );
-        assert!(message.contains("--skip-gpu"), "{message}");
-    }
-}
-
-#[test]
-fn skip_gpu_explicitly_reports_unavailable_profiles() {
-    for shader in [false, true] {
-        let root = tempfile::tempdir().unwrap();
-        let runner = fixture(root.path(), 2);
-        let output = invoke(root.path(), &runner, shader, true);
-        assert!(output.status.success(), "{}", text(&output));
-        assert!(text(&output).contains("SKIPPED"), "{}", text(&output));
+        let required = invoke(root.path(), &runner, shader, false);
+        assert!(!required.status.success(), "{}", text(&required));
+        assert_mentions(&required, "330core");
+        assert_mentions(&required, "display or GL driver unavailable");
+        assert_mentions(&required, "--skip-gpu");
+        let skipped = invoke(root.path(), &runner, shader, true);
+        assert!(skipped.status.success(), "{}", text(&skipped));
+        assert_mentions(&skipped, "SKIPPED");
     }
 }
 
@@ -75,11 +60,7 @@ fn skip_gpu_keeps_runner_errors_hard() {
             let runner = fixture(root.path(), code);
             let output = invoke(root.path(), &runner, shader, true);
             assert!(!output.status.success());
-            assert!(
-                text(&output).contains(&format!("exited Some({code})")),
-                "{}",
-                text(&output)
-            );
+            assert_mentions(&output, &format!("exited Some({code})"));
         }
         let output = invoke(
             root.path(),
@@ -88,11 +69,7 @@ fn skip_gpu_keeps_runner_errors_hard() {
             true,
         );
         assert!(!output.status.success());
-        assert!(
-            text(&output).contains("missing stone-glsl-runner"),
-            "{}",
-            text(&output)
-        );
+        assert_mentions(&output, "missing stone-glsl-runner");
     }
 }
 
@@ -102,11 +79,7 @@ fn skip_gpu_is_limited_to_gpu_commands() {
     for args in [vec!["check", "--skip-gpu"], vec!["test", "--skip-gpu"]] {
         let output = crate::support::invoke(root.path(), &args);
         assert!(!output.status.success());
-        assert!(
-            text(&output).contains("supported only by"),
-            "{}",
-            text(&output)
-        );
+        assert_mentions(&output, "supported only by");
     }
 }
 
@@ -116,10 +89,6 @@ fn skip_gpu_still_executes_available_context() {
     let runner = fixture(root.path(), 0);
     let output = invoke(root.path(), &runner, false, true);
     assert!(output.status.success(), "{}", text(&output));
-    assert!(
-        text(&output).contains("1/1 value tests passed"),
-        "{}",
-        text(&output)
-    );
+    assert_mentions(&output, "1/1 value tests passed");
     assert!(!text(&output).contains("SKIPPED"), "{}", text(&output));
 }
