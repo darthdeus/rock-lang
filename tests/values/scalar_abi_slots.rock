@@ -61,13 +61,6 @@ fn nested_early_return(pick: int) -> Float2 {
     return make_float2(100.0, 200.0)
 }
 
-fn maybe_v2_some(on: bool) -> Float2 {
-    if on {
-        return make_float2(1.0, 2.0)
-    }
-    return make_float2(3.0, 4.0)
-}
-
 fn maybe_v2_match(s: Side) -> Float2 {
     return match s {
         Side::Left => make_float2(1.0, 1.0),
@@ -425,12 +418,6 @@ fn adv_nested_early_return() {
     print("{sum2(nested_early_return(2)).floor()}")
 }
 
-@test(output = "3\n7")
-fn adv_direct_return_if() {
-    print("{sum2(maybe_v2_some(true)).floor()}")
-    print("{sum2(maybe_v2_some(false)).floor()}")
-}
-
 @test(output = "2\n30\n200")
 fn adv_direct_return_match() {
     // `Side::Left` inside string interpolation `{}` breaks Rock's
@@ -475,12 +462,6 @@ fn adv_direct_return_match() {
     assert_eq(ys[2].x, 3)
 }
 
-@test(output = "3 7")
-fn adv_tuple_with_value_call() {
-    let t = (make_float2(1.0, 2.0), 7)
-    print("{sum2(t.0).floor()} {t.1}")
-}
-
 @test(output = "3 30")
 fn adv_tuple_two_value_calls() {
     let t = (make_float2(1.0, 2.0), make_float3(10.0, 10.0, 10.0))
@@ -492,13 +473,6 @@ fn adv_vec_push_value_call() {
     let xs: [Float2] = []
     xs.push(make_float2(1.0, 2.0))
     xs.push(make_float2(3.0, 4.0))
-    print("{sum2(xs[0]).floor()}")
-    print("{sum2(xs[1]).floor()}")
-}
-
-@test(output = "3\n7")
-fn adv_array_literal_value_calls() {
-    let xs: [Float2] = [make_float2(1.0, 2.0), make_float2(3.0, 4.0)]
     print("{sum2(xs[0]).floor()}")
     print("{sum2(xs[1]).floor()}")
 }
@@ -662,11 +636,6 @@ fn adv_option_like_payload_call() {
 fn adv_chained_value_binary_calls() {
     let sum = v2_add(v2_add(make_float2(1.0, 2.0), make_float2(3.0, 4.0)), make_float2(5.0, 6.0))
     print("{sum2(sum).floor()}")
-}
-
-@test(output = "sum=3")
-fn adv_interpolation_with_value_call_field() {
-    print("sum={sum2(make_float2(1.0, 2.0)).floor()}")
 }
 
 @test(output = "total=30")

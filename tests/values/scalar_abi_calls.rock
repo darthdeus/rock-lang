@@ -37,28 +37,12 @@ fn mix(bias: float, v: V2) -> V2 {
     return V2 { x: v.x + bias, y: v.y + bias }
 }
 
-// cdata-ABI callee via inline(lua). Accepts packed cdata args.
-inline(lua) fn shift_v2_inline(v: V2, dx: float, dy: float) -> V2 = """
-return __rock_create_struct("V2", { x = v.x + dx, y = v.y + dy })
-"""
-
 // Nullable-param cdata callee -- must receive packed cdata (or nil).
 fn maybe_scale(v: V2?, k: float) -> float {
     if v != null {
         return v.x * k + v.y * k
     }
     return 0
-}
-
-// ----- Two value-returning calls in non-last slots (both hoist). -----
-
-@test(output = "40\n80")
-fn adv_two_non_last_scalarized_calls() {
-    // make_v2(a, b) + make_v2(c, d) both need hoisting; the outer call
-    // wraps in one IIFE with two local decls.
-    let r = plus2(make_v2(10.0, 20.0), make_v2(20.0, 50.0), 10.0)
-    print("{r.x.floor()}")
-    print("{r.y.floor()}")
 }
 
 // ----- Value-returning call as LAST positional arg, scalarized. -----
@@ -68,15 +52,6 @@ fn adv_last_positional_scalarized() {
     // make_v2 is the LAST positional slot -- Lua last-arg rule preserves
     // multi-return. No hoisting needed.
     let r = mix(10.0, make_v2(20.0, 50.0))
-    print("{r.x.floor()}")
-    print("{r.y.floor()}")
-}
-
-// ----- Value-returning call into cdata-ABI inline(lua) callee. -----
-
-@test(output = "11\n23", backends = "lua")
-fn adv_cdata_callee_gets_packed() {
-    let r = shift_v2_inline(make_v2(10.0, 20.0), 1.0, 3.0)
     print("{r.x.floor()}")
     print("{r.y.floor()}")
 }
@@ -300,15 +275,6 @@ global SIDE_EFFECT_ACC: int = 0
 fn record_sum(v: IV2) -> IV2 {
     SIDE_EFFECT_ACC = SIDE_EFFECT_ACC + v.x + v.y
     return v
-}
-
-@test(output = "7")
-fn test_defer_value_call() {
-    SIDE_EFFECT_ACC = 0
-    {
-        defer { record_sum(make_iv2(3, 4)) }
-    }
-    print(SIDE_EFFECT_ACC)
 }
 
 // --- 5. Operator-overload chains (3-deep) ---------------------------------

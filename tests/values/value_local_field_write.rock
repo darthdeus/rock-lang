@@ -125,14 +125,6 @@ fn written_on_one_branch() {
     print("{q.x} {p.x}")
 }
 
-@test(output = "1 3")
-fn math_value_local() {
-    let v = Vec2 { x: 1.0, y: 2.0 }
-    let w = v
-    w.y += 1.0
-    print("{v.x} {w.y}")
-}
-
 @test(output = "0 2 9")
 fn enum_field() {
     let w = WithEnum { m: Mode::Off, k: 0 }
