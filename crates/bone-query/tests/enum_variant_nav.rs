@@ -42,42 +42,32 @@ fn hover(bone: &BoneWorkspace, p: Position) -> String {
     hover_markup(bone, PATH, p).unwrap_or_else(|| panic!("no hover at {p:?}"))
 }
 
-fn def(bone: &BoneWorkspace, p: Position) -> (u32, u32) {
-    let loc = bone
-        .definition(PATH, p)
-        .unwrap_or_else(|| panic!("no definition at {p:?}"));
-    (loc.range.start.line, loc.range.start.character)
-}
-
 #[test]
-fn hover_on_variants_and_enum_qualifiers() {
-    let cases: &[(&str, usize, &str)] = &[
-        // (marker, offset into it, expected); `(a` is the pattern, `(SpellKind` the construction
-        ("SpellState::Casting(a", 12, VARIANT_CASTING),
-        ("SpellState::Casting(a", 0, ENUM_BODY),
-        ("SpellState::Casting(SpellKind", 12, VARIANT_CASTING),
-        ("SpellState::Casting(SpellKind", 0, ENUM_BODY),
-        ("enum SpellState {", 5, ENUM_BODY),
-        ("Casting(SpellKind, float", 0, VARIANT_CASTING),
+fn hover_and_definition_on_variants_and_enum_qualifiers() {
+    let (variant, qualifier) = (Some((2, 4)), Some((0, 5)));
+    let cases: &[(&str, usize, &str, Option<(u32, u32)>)] = &[
+        // (marker, offset into it, hover, definition start); `(a` is the
+        // pattern, `(SpellKind` the construction
+        ("SpellState::Casting(a", 12, VARIANT_CASTING, variant),
+        ("SpellState::Casting(a", 0, ENUM_BODY, qualifier),
+        (
+            "SpellState::Casting(SpellKind",
+            12,
+            VARIANT_CASTING,
+            variant,
+        ),
+        ("SpellState::Casting(SpellKind", 0, ENUM_BODY, qualifier),
+        ("enum SpellState {", 5, ENUM_BODY, None),
+        ("Casting(SpellKind, float", 0, VARIANT_CASTING, None),
     ];
     let b = workspace(SRC);
-    for (marker, into, expected) in cases {
-        assert_eq!(hover(&b, pos(SRC, marker, *into)), *expected, "{marker}");
-    }
-}
-
-#[test]
-fn definition_on_variants_and_enum_qualifiers() {
-    let cases: &[(&str, usize, (u32, u32))] = &[
-        // (marker, offset into it, expected (line, char))
-        ("SpellState::Casting(a", 12, (2, 4)),
-        ("SpellState::Casting(a", 0, (0, 5)),
-        ("SpellState::Casting(SpellKind", 12, (2, 4)),
-        ("SpellState::Casting(SpellKind", 0, (0, 5)),
-    ];
-    let b = workspace(SRC);
-    for (marker, into, expected) in cases {
-        assert_eq!(def(&b, pos(SRC, marker, *into)), *expected, "{marker}");
+    for (marker, into, expected, def) in cases {
+        let at = pos(SRC, marker, *into);
+        assert_eq!(hover(&b, at), *expected, "{marker}");
+        if let Some((line, ch)) = def {
+            let loc = b.definition(PATH, at).expect("definition");
+            assert_eq!(loc.range.start, Position::new(*line, *ch), "{marker}");
+        }
     }
 }
 

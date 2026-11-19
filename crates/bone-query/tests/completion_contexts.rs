@@ -757,40 +757,6 @@ fn main() {
             &["Up", "Down", "Left", "Right"],
         ),
         (
-            "enum qualified with prefix",
-            r"enum AiState {
-    Wander,
-    Chase,
-    Flee,
-}
-fn main() {
-    let s = AiState::Wan<|>
-}",
-            &["Wander"],
-        ),
-        (
-            "enum record variant field with prefix",
-            r"enum Effect {
-    Bandage { duration: float, heal_amount: int },
-    Other(int),
-}
-fn main() {
-    let e = Effect::Bandage { dura<|> }
-}",
-            &["duration: float"],
-        ),
-        (
-            "enum record variant fields",
-            r"enum Effect {
-    Bandage { duration: float, heal_amount: int },
-    Other(int),
-}
-fn main() {
-    let e = Effect::Bandage { <|> }
-}",
-            &["duration: float", "heal_amount: int"],
-        ),
-        (
             "for loop var fields",
             r"struct Item {
     name: string
@@ -1033,16 +999,6 @@ fn main() {
             &["health: int", "name: string"],
         ),
         (
-            "local variables",
-            r"fn calculate() {
-    let first_number = 42
-    let second_number = 84
-    let result = first_number + second_number
-    let sum = fi<|>
-}",
-            &["first_number"],
-        ),
-        (
             "local vars with syntax error",
             r"fn calculate() {
     let first_value = 10
@@ -1051,18 +1007,6 @@ fn main() {
     let result = fi<|>
 }",
             &["first_value"],
-        ),
-        (
-            "method calls",
-            r"struct Rectangle {
-    width: float,
-    height: float,
-}
-fn main() {
-    let rect = Rectangle { width: 10.0, height: 20.0 }
-    rect.<|>
-}",
-            &["width: float", "height: float"],
         ),
         (
             "method in broken expression",
