@@ -27,8 +27,10 @@ fn main() {}
 "#,
         )],
     );
-    let out = crate::common::run_luajit(&format!("{}\nprint(probe())\n", emitted.lua));
-    assert_eq!(out, "0.5 AbiHandle 3");
+    assert_eq!(
+        crate::common::run_luajit(&format!("{}\nprint(probe())\n", emitted.lua)),
+        "0.5 AbiHandle 3"
+    );
 }
 
 #[test]

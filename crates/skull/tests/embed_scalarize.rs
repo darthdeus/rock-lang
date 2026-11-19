@@ -1,4 +1,4 @@
-use crate::common::{emit_module, function_body};
+use crate::common::{emit_module, emit_v1_package, function_body, mangled_name, run_luajit};
 
 const EMBED_LEAVES: &str = r#"
 struct Pt { x: int, y: int }
@@ -20,28 +20,18 @@ fn main() {
 "#;
 
 #[test]
-fn embed_ctor_splices_dotted_keys() {
+fn embed_leaves_are_constructed_read_and_written_in_the_parent() {
     let lua = emit_module(EMBED_LEAVES);
     let mk = function_body(&lua, "mk");
     assert!(mk.contains(r#"["p.x"]"#) && mk.contains(r#"["p.y"]"#));
     assert!(!mk.contains(r#""Pt""#));
     assert!(mk.contains("tag = "));
-}
-
-#[test]
-fn embed_leaf_read_indexes_the_parent() {
-    let lua = emit_module(EMBED_LEAVES);
-    let body = function_body(&lua, "read_leaf");
-    assert!(body.contains(r#"["p.x"]"#) && body.contains(r#"["p.y"]"#));
-    assert!(!body.contains(".p"));
-}
-
-#[test]
-fn embed_leaf_write_stores_into_the_parent() {
-    let lua = emit_module(EMBED_LEAVES);
-    let body = function_body(&lua, "write_leaf");
-    assert!(body.contains(r#"["p.x"] = "#));
-    assert!(!body.contains(".p"));
+    let read = function_body(&lua, "read_leaf");
+    assert!(read.contains(r#"["p.x"]"#) && read.contains(r#"["p.y"]"#));
+    assert!(!read.contains(".p"));
+    let write = function_body(&lua, "write_leaf");
+    assert!(write.contains(r#"["p.x"] = "#));
+    assert!(!write.contains(".p"));
 }
 
 const EMBED_NOBOX_VALUE: &str = r#"
@@ -171,19 +161,15 @@ inline(lua) fn embed_field_x(h: Holder) -> string = """
 fn probe() -> string { return embed_field_x(Holder { p: Pt { x: 4, y: 5 }, tag: 3 }) }
 fn main() {}
 "#;
-    let legacy =
-        crate::common::emit_module(&format!("{src}\nfn legacy_probe() {{ print(probe()) }}"));
-    let legacy_probe = crate::common::mangled_name(&legacy, "legacy_probe");
-    assert_eq!(
-        crate::common::run_luajit(&format!("{legacy}\n{legacy_probe}()\n")),
-        "4"
-    );
+    let legacy = emit_module(&format!("{src}\nfn legacy_probe() {{ print(probe()) }}"));
+    let legacy_probe = mangled_name(&legacy, "legacy_probe");
+    assert_eq!(run_luajit(&format!("{legacy}\n{legacy_probe}()\n")), "4");
 
     let v1_src = src.replace("fn probe()", "pub fn probe()");
-    let emitted = crate::common::emit_v1_package("v1embed", &[("main.rock", &v1_src)]);
-    let probe = crate::common::mangled_name(&emitted.lua, "probe");
+    let emitted = emit_v1_package("v1embed", &[("main.rock", &v1_src)]);
+    let probe = mangled_name(&emitted.lua, "probe");
     assert_eq!(
-        crate::common::run_luajit(&format!("{}\nprint({probe}())\n", emitted.lua)),
+        run_luajit(&format!("{}\nprint({probe}())\n", emitted.lua)),
         "4"
     );
     let keys: Vec<&str> = emitted

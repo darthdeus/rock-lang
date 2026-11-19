@@ -130,14 +130,16 @@ fn checked_native_store_invalidates_element_value_facts() {
 }
 "#,
     );
-    let output = run_luajit(&format!(
-        r#"{lua}
+    assert_eq!(
+        run_luajit(&format!(
+            r#"{lua}
 local ok, err = pcall(native_store_case)
 assert(not ok and tostring(err):find('Vec index out of bounds', 1, true), tostring(err))
 print('ok')
 "#
-    ));
-    assert_eq!(output.trim(), "ok");
+        )),
+        "ok"
+    );
 }
 
 #[test]

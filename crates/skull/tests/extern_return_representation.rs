@@ -214,11 +214,13 @@ fn main() {}
 "#,
         )],
     );
-    let out = crate::common::run_luajit(&format!(
-        "m = {{ ret_int = function() return 7 end, ret_bool = function() return 1 end }}\n{}\nprint(ret_int(), ret_bool())\n",
-        emitted.lua
-    ));
-    assert_eq!(out, "7\ttrue");
+    assert_eq!(
+        crate::common::run_luajit(&format!(
+            "m = {{ ret_int = function() return 7 end, ret_bool = function() return 1 end }}\n{}\nprint(ret_int(), ret_bool())\n",
+            emitted.lua
+        )),
+        "7\ttrue"
+    );
 }
 
 #[test]

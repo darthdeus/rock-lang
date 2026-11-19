@@ -107,8 +107,7 @@ fn main() { let _ = mk() }
     let lua = emit_module(src);
     let mk = mangled_name(&lua, "mk");
     let driver = format!("\nlocal a = {mk}()\nlocal b = {mk}()\nprint(rawequal(a, b))\n");
-    let out = run_luajit(&format!("{lua}{driver}"));
-    assert_eq!(out, "true");
+    assert_eq!(run_luajit(&format!("{lua}{driver}")), "true");
 }
 
 #[test]
@@ -126,8 +125,7 @@ fn main() { let g = transitive(7) print("{g()}") }
         lua.contains(&format!("function {m}__lambda0(c"))
             && lua.contains(&format!("function {m}__lambda1(c"))
     );
-    let out = run_main(&lua);
-    assert_eq!(out, "7");
+    assert_eq!(run_main(&lua), "7");
 }
 
 #[test]
@@ -149,6 +147,5 @@ fn main() { let f = split_probe() print("{f()}") }
         for k in pairs(_G) do if type(k) == \"string\" and k:match(\"^c%d+$\") then leaked[#leaked + 1] = k end end\n\
         table.sort(leaked)\n\
         print(#leaked == 0 and \"no-leak\" or table.concat(leaked, \",\"))\n";
-    let out = run_luajit(&format!("{lua}{driver}"));
-    assert_eq!(out, "3\nno-leak");
+    assert_eq!(run_luajit(&format!("{lua}{driver}")), "3\nno-leak");
 }

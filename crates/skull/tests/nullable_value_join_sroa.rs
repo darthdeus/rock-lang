@@ -143,8 +143,7 @@ fn if_let_join_of_nullable_value_field_builds_no_box() {
     for ctor in ["Tk_vt(", "Tk_ct(", "Ent_vt(", "Ent_ct("] {
         assert!(!body.contains(ctor));
     }
-    let out = run_main(&lua);
-    assert_eq!(out, "3 true 3 true false 4 true -1 false");
+    assert_eq!(run_main(&lua), "3 true 3 true false 4 true -1 false");
 }
 
 #[test]

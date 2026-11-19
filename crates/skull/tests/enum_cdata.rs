@@ -36,6 +36,7 @@ fn cdata_enum_emits_ctype_and_no_table() {
     assert!(!lua.contains("__variant = \"Circle\""));
     assert!(lua.contains("ffi.metatype, \"Shape\""));
     assert!(lua.contains(".__tag"));
+    assert_eq!(run_fn(&lua, "t"), "1 4 7 4 | 10");
 }
 
 const FIELD_SRC: &str = r#"
@@ -60,15 +61,6 @@ fn t() {
 fn main() { t() }
 "#;
 
-#[test]
-fn cdata_enum_as_value_struct_field() {
-    let lua = emit_module(FIELD_SRC);
-    assert!(lua.contains("} Cmd;") && lua.contains("Blend blend;"));
-
-    let prog = lua;
-    assert_eq!(run_fn(&prog, "t"), "15 30");
-}
-
 const MULTI_SRC: &str = r#"
 enum Shape { Circle(int), Rect(int, int), Point }
 fn area(s: Shape) -> int {
@@ -87,15 +79,6 @@ fn t() {
 }
 fn main() { t() }
 "#;
-
-#[test]
-fn cdata_enum_multi_field_tuple() {
-    let lua = emit_module(MULTI_SRC);
-    assert!(lua.contains("int _0; int _1; } Shape;"));
-
-    let prog = lua;
-    assert_eq!(run_fn(&prog, "t"), "15 12 0");
-}
 
 const RECORD_SRC: &str = r#"
 enum Shape { Circle(int), Box { w: int, h: int }, Point }
@@ -116,15 +99,6 @@ fn t() {
 }
 fn main() { t() }
 "#;
-
-#[test]
-fn cdata_enum_record_payload() {
-    let lua = emit_module(RECORD_SRC);
-    assert!(lua.contains("int _0; int _w; int _h; } Shape;"));
-
-    let prog = lua;
-    assert_eq!(run_fn(&prog, "t"), "15 12 0 | Shape::Box { h = 4, w = 3 }");
-}
 
 const PARAM_MATCH_SRC: &str = r#"
 enum Target { Screen, Canvas(int) }
@@ -151,7 +125,18 @@ fn matched_scalar_abi_enum_param_does_not_repack() {
 }
 
 #[test]
-fn cdata_enum_runs_correctly() {
-    let prog = emit_module(SRC);
-    assert_eq!(run_fn(&prog, "t"), "1 4 7 4 | 10");
+fn cdata_enum_payloads_share_one_ctype() {
+    for (src, cdef, expected) in [
+        (FIELD_SRC, "Blend blend;", "15 30"),
+        (MULTI_SRC, "int _0; int _1; } Shape;", "15 12 0"),
+        (
+            RECORD_SRC,
+            "int _0; int _w; int _h; } Shape;",
+            "15 12 0 | Shape::Box { h = 4, w = 3 }",
+        ),
+    ] {
+        let lua = emit_module(src);
+        assert!(lua.contains(cdef), "{cdef}");
+        assert_eq!(run_fn(&lua, "t"), expected);
+    }
 }

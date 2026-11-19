@@ -69,6 +69,5 @@ fn hoisted_package_value_ctor_uses_the_emitted_type_symbol() {
         &[("main.rock", PACKAGE_MAIN), ("a.rock", PACKAGE_MOD_A)],
     );
     assert!(emitted.lua.contains("__skull_kc_"));
-    let out = run_main(&emitted.lua);
-    assert_eq!(out, "3/7 1/1");
+    assert_eq!(run_main(&emitted.lua), "3/7 1/1");
 }

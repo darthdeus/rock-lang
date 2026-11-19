@@ -138,10 +138,16 @@ print('ok')
 }
 
 #[test]
-fn repeated_products_do_not_follow_changed_operands() {
-    for setup in ["width += 1", "height += 1", "if width > 0 { width += 1 }"] {
+fn repeated_products_do_not_follow_changed_operands_or_callbacks() {
+    for setup in [
+        "width += 1",
+        "height += 1",
+        "if width > 0 { width += 1 }",
+        "shrink(buf)",
+    ] {
         let lua = emit_module(&format!(
             r#"
+inline(lua) fn shrink(buf: NativeBuffer<int>) = "buf.len = 0"
 @nomangle fn changed_product(width: int, height: int) -> int {{
     let buf = native_buffer_int(width * height)
     {setup}
@@ -172,23 +178,6 @@ fn repeated_products_do_not_rebind_old_buffers_in_a_loop() {
     );
     assert_bounds_check(&lua, "old_product", true);
     run_bounds_error(&lua, "expect_bounds_error(old_product, 3)");
-}
-
-#[test]
-fn repeated_products_drop_bounds_across_callbacks() {
-    let lua = emit_module(
-        r#"
-inline(lua) fn shrink(buf: NativeBuffer<int>) = "buf.len = 0"
-@nomangle fn changed_product(width: int, height: int) -> int {
-    let buf = native_buffer_int(width * height)
-    shrink(buf)
-    for i in 0..width * height { buf[i] = i }
-    return 1
-}
-"#,
-    );
-    assert_bounds_check(&lua, "changed_product", true);
-    run_bounds_error(&lua, "expect_bounds_error(changed_product, 2, 3)");
 }
 
 #[test]

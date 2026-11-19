@@ -74,6 +74,5 @@ fn nullable_entity_field_assignment_and_consumers_round_trip() {
         "columns",
         Some("Entity")
     ));
-    let out = run_main(&lua);
-    assert_eq!(out, "41 3 true true 23 2 2 2 14");
+    assert_eq!(run_main(&lua), "41 3 true true 23 2 2 2 14");
 }

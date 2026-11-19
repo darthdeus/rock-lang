@@ -56,8 +56,7 @@ fn record_is_callable_via_call_metamethod() {
         __rock_code_slot_publish()\n\
         local rec = setmetatable({ __slot = __rock_code_slot_ref(\"record\"), x = 100 }, _G.__rock_fn_mt)\n\
         print(rec(5))\n";
-    let out = run_luajit(&format!("{lua}{driver}"));
-    assert_eq!(out, "105");
+    assert_eq!(run_luajit(&format!("{lua}{driver}")), "105");
 }
 
 #[test]
@@ -76,8 +75,7 @@ fn metatable_identity_preserved_across_reload() {
            print(\"PASS\")\n\
          else print(\"FAIL\") end\n"
     );
-    let out = run_luajit(&script);
-    assert_eq!(out, "PASS");
+    assert_eq!(run_luajit(&script), "PASS");
 }
 
 #[test]
@@ -96,8 +94,7 @@ end)
 local after = __rock_code_slot_ref("probe")
 if not ok and before == after and after() == 1 then print("PASS") else print("FAIL") end
 "#;
-    let out = run_luajit(&format!("{lua}{driver}"));
-    assert_eq!(out, "PASS");
+    assert_eq!(run_luajit(&format!("{lua}{driver}")), "PASS");
 }
 
 #[test]
@@ -120,8 +117,7 @@ if not ok and _G.__rock_lifecycle_plan_pending == nil
    and _G.__ROCK_LIFECYCLE_PLAN == old_plan and old_plan.update.len == 1
    and __rock_code_slot_ref("probe")() == 1 then print("PASS") else print("FAIL") end
 "#;
-    let out = run_luajit(&format!("{lua}{driver}"));
-    assert_eq!(out, "PASS");
+    assert_eq!(run_luajit(&format!("{lua}{driver}")), "PASS");
 }
 
 #[test]
@@ -145,8 +141,7 @@ if not ok and _G.__rock_definition_plan_pending == nil
    and old_plan.panels.len == 1
    and __rock_code_slot_ref("probe")() == 1 then print("PASS") else print("FAIL") end
 "#;
-    let out = run_luajit(&format!("{lua}{driver}"));
-    assert_eq!(out, "PASS");
+    assert_eq!(run_luajit(&format!("{lua}{driver}")), "PASS");
 }
 
 #[test]

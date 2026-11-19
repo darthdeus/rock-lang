@@ -13,8 +13,7 @@ fn main() { let f = mk_cap(5) print("{f()}") }
     assert!(body.contains("setmetatable({ __slot = __rock_code_slot_ref("));
     assert!(body.contains("__rock_fn_mt"));
     assert!(!body.contains("function("));
-    let out = run_main(&lua);
-    assert_eq!(out, "5");
+    assert_eq!(run_main(&lua), "5");
 }
 
 #[test]
@@ -39,8 +38,7 @@ fn main() {
     assert!(body.contains("= {v = "));
     assert!(body.contains("setmetatable({ __slot = __rock_code_slot_ref("));
     assert!(lua.contains(".v"));
-    let out = run_main(&lua);
-    assert_eq!(out, "0\n2");
+    assert_eq!(run_main(&lua), "0\n2");
 }
 
 #[test]
@@ -62,8 +60,7 @@ fn main() {
         body.contains("setmetatable({ __slot = __rock_code_slot_ref(")
     });
     assert!(outer_builds_inner);
-    let out = run_main(&lua);
-    assert_eq!(out, "9");
+    assert_eq!(run_main(&lua), "9");
 }
 
 #[test]
@@ -82,8 +79,7 @@ fn main() { print("{drive()}") }
 "#;
     let lua = emit_module(src);
     assert!(lua.contains("{v = "));
-    let out = run_main(&lua);
-    assert_eq!(out, "15");
+    assert_eq!(run_main(&lua), "15");
 }
 
 #[test]
@@ -101,8 +97,7 @@ fn main() { let _ = mk_snap(1) }
         for k, v in pairs(a) do if k ~= \"__slot\" and type(v) == \"function\" then extra = true end end\n\
         print(extra)\n"
     );
-    let out = run_luajit(&format!("{lua}{driver}"));
-    assert_eq!(out, "true\nfalse");
+    assert_eq!(run_luajit(&format!("{lua}{driver}")), "true\nfalse");
 }
 
 #[test]
@@ -121,8 +116,7 @@ fn main() {
         main()\n\
         local ok, res = pcall(function() return __H2.cb() end)\n\
         print(tostring(ok) .. \"\\t\" .. tostring(res):gsub(\":.*\", \"\"))\n";
-    let out = run_luajit(&format!("{lua}{driver}"));
-    assert_eq!(out, "true\t42");
+    assert_eq!(run_luajit(&format!("{lua}{driver}")), "true\t42");
 }
 
 #[test]
@@ -147,6 +141,5 @@ fn main() {
     let driver = "\n\
         main()\n\
         print(tostring(__O.get()) .. \"\\t\" .. tostring(__P.get()))\n";
-    let out = run_luajit(&format!("{lua}{driver}"));
-    assert_eq!(out, "12\t10");
+    assert_eq!(run_luajit(&format!("{lua}{driver}")), "12\t10");
 }

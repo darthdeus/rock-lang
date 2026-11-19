@@ -55,8 +55,10 @@ fn package() -> skull::mir_emit::MirEmit {
 #[test]
 fn v1_value_struct_and_enum_emit_runnable_lua() {
     let emitted = package();
-    let out = run_main(&emitted.lua);
-    assert_eq!(out, "s=3 c=blue n=7 t=v1ty::a::Color::Blue");
+    assert_eq!(
+        run_main(&emitted.lua),
+        "s=3 c=blue n=7 t=v1ty::a::Color::Blue"
+    );
 }
 
 #[test]
@@ -137,8 +139,7 @@ fn v1_mixed_enum_variants_construct_and_match() {
         "v1enum",
         &[("main.rock", PAYLOAD_MAIN), ("a.rock", PAYLOAD_MOD)],
     );
-    let out = run_main(&emitted.lua);
-    assert_eq!(out, "step2 jump13 pass 4");
+    assert_eq!(run_main(&emitted.lua), "step2 jump13 pass 4");
 }
 
 const SPEC_MAIN: &str = r#"
@@ -183,8 +184,7 @@ fn a_generic_specialized_at_a_v1_nominal_emits_runnable_lua() {
             .lua
             .contains(&format!("function is_empty_arr_T_{encoded}("))
     );
-    let out = run_main(&emitted.lua);
-    assert_eq!(out, "total=9");
+    assert_eq!(run_main(&emitted.lua), "total=9");
 }
 
 #[test]

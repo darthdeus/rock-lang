@@ -1,9 +1,7 @@
-use crate::common::{emit_mir, emit_module, run_fn};
+use crate::common::{emit_module, run_fn, try_emit_module};
 
 #[test]
 fn widened_enum_record_match_rejects_a_field_missing_from_its_variant() {
-    use crate::common::try_emit_module;
-
     const SRC: &str = r#"
 enum Choice { A { left: int, shared: int }, B { right: string, shared: string } }
 enum Other { A { ghost: int } }
@@ -17,8 +15,7 @@ fn read() -> int {
 fn main() { print(read()) }
 "#;
 
-    let emitted = try_emit_module(SRC);
-    assert!(emitted.is_err());
+    assert!(try_emit_module(SRC).is_err());
 }
 
 const SRC: &str = r#"
@@ -55,12 +52,8 @@ fn value_struct_with_enum_field_has_cdef_int_not_table() {
     assert_eq!(run_fn(&lua, "t"), "5 Add 5");
 }
 
-fn run_skull_test(src: &str, fn_name: &str) -> String {
-    run_fn(&emit_mir(src).lua, fn_name)
-}
-
 #[test]
-fn payload_free_enum_inspect_any_escape_increment4_sentinel() {
+fn payload_free_enum_inspects_as_its_ordinal() {
     const SRC: &str = r#"
 enum BlendMode { Normal, Additive, Multiply }
 @test
@@ -70,6 +63,5 @@ fn t() {
 }
 fn main() { t() }
 "#;
-    let stdout = run_skull_test(SRC, "t");
-    assert_eq!(stdout.trim(), "1");
+    assert_eq!(run_fn(&emit_module(SRC), "t"), "1");
 }

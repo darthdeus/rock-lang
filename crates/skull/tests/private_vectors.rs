@@ -149,15 +149,17 @@ inline(lua) fn arm(out: [int], xs: [int]) = """
 "#,
     );
     assert!(function_body(&lua, "generations").contains("__vec_checked_set"));
-    let output = run_luajit(&format!(
-        r#"{lua}
+    assert_eq!(
+        run_luajit(&format!(
+            r#"{lua}
 local xs={{len=3, _data={{0,0,0}}}}
 local ok, err=pcall(generations,xs)
 assert(not ok and tostring(err):find('out of bounds'))
 print('ok')
 "#
-    ));
-    assert_eq!(output.trim(), "ok");
+        )),
+        "ok"
+    );
 }
 
 #[test]
@@ -179,15 +181,17 @@ inline(lua) fn arm_alias(alias: any, xs: [int]) = """
 "#,
     );
     assert!(function_body(&lua, "self_item").contains("__vec_checked_set"));
-    let output = run_luajit(&format!(
-        r#"{lua}
+    assert_eq!(
+        run_luajit(&format!(
+            r#"{lua}
 local xs={{len=3, _data={{0,0,0}}}}
 local ok, err=pcall(self_item,xs)
 assert(not ok and tostring(err):find('out of bounds'))
 print('ok')
 "#
-    ));
-    assert_eq!(output.trim(), "ok");
+        )),
+        "ok"
+    );
 }
 
 #[test]

@@ -15,10 +15,12 @@ fn main() {
 "#,
     )
     .expect("emits");
-    let out = run_luajit(&format!(
-        "{lua}\nlocal ok, err = pcall(main)\nprint(ok, err ~= nil)\n"
-    ));
-    assert_eq!(out, "false\ttrue");
+    assert_eq!(
+        run_luajit(&format!(
+            "{lua}\nlocal ok, err = pcall(main)\nprint(ok, err ~= nil)\n"
+        )),
+        "false\ttrue"
+    );
 }
 
 #[test]

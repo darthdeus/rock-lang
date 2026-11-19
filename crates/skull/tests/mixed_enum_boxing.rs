@@ -86,16 +86,18 @@ print("ok")
 #[test]
 fn deepcopy_canonicalizes_mixed_units_and_keeps_payloads_owned() {
     let lua = emit_module(SRC);
-    let out = run_luajit(&format!(
-        r#"{lua}
+    assert_eq!(
+        run_luajit(&format!(
+            r#"{lua}
 assert(rawequal(copied(0), constant_unit()))
 local a, b = copied(1), copied(1)
 a[1] = "changed"
 assert(b[1] == "payload")
 print("ok")
 "#
-    ));
-    assert_eq!(out, "ok");
+        )),
+        "ok"
+    );
 }
 
 #[test]

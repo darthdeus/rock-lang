@@ -106,6 +106,5 @@ print(old.len .. ":" .. new.len .. ":" .. old._data[1].name .. ":" .. new._data[
 "#,
         v0.lua, v1.lua
     );
-    let out = run_luajit(&script);
-    assert_eq!(out, "2:2:removed:retained:added");
+    assert_eq!(run_luajit(&script), "2:2:removed:retained:added");
 }

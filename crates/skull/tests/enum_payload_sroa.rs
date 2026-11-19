@@ -253,17 +253,12 @@ fn main() { t() }
 "#;
 
 #[test]
-fn tuple_match_consumes_scalar_enum_params_without_boxes() {
+fn tuple_match_boxes_only_a_bound_enum_that_escapes() {
     let lua = emit_module(TUPLE_ENUM_MATCH);
     assert_eq!(run_fn(&lua, "t"), "true false true false 1 Key");
     let same = function_body(&lua, "same");
     assert!(!same.contains("{__variant = "));
     assert!(!same.contains("({"));
-}
-
-#[test]
-fn tuple_match_materializes_a_bound_enum_that_escapes() {
-    let lua = emit_module(TUPLE_ENUM_MATCH);
     let retain = function_body(&lua, "retain_first");
     assert!(retain.contains("{__variant = "));
 }
