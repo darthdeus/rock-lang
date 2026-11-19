@@ -32,7 +32,6 @@ fn ambient_settings(
             .any(|prefix| key.starts_with(prefix))
             || prefixes.iter().any(|prefix| key.starts_with(prefix)))
             && key != "ROCK_SIM_LOG_DIR"
-            && !key.starts_with("ROCK_SIM_WARN_")
             && key != "ROCK_LOG_EPOCH_MS"
     })
     .collect()
@@ -475,7 +474,6 @@ mod tests {
                 ("SIM_DT", "0.0333333333"),
                 ("ROCK_LOG_EPOCH_MS", epoch),
                 ("ROCK_SIM_LOG_DIR", "/tmp/history"),
-                ("ROCK_SIM_WARN_SECS", "30"),
                 ("PATH", "/usr/bin"),
             ]
             .map(|(key, value)| (key.to_string(), value.to_string()))
@@ -496,12 +494,7 @@ mod tests {
             first.get("ROCK_BUILD_COMMAND").map(String::as_str),
             Some("sim")
         );
-        for excluded in [
-            "ROCK_LOG_EPOCH_MS",
-            "ROCK_SIM_LOG_DIR",
-            "ROCK_SIM_WARN_SECS",
-            "PATH",
-        ] {
+        for excluded in ["ROCK_LOG_EPOCH_MS", "ROCK_SIM_LOG_DIR", "PATH"] {
             assert!(
                 !first.contains_key(excluded),
                 "{excluded} must stay out of the host"

@@ -59,7 +59,6 @@ pub fn resolve_build_vars(
     channel_arg: Option<&str>,
     target_os_arg: Option<&str>,
     overrides: &HashMap<String, String>,
-    build_command: Option<&str>,
 ) -> Result<ResolvedBuildVars> {
     let target_os = target_os_arg.map(validate_target_os).transpose()?;
     let Some(build) = cfg.build.as_ref() else {
@@ -164,9 +163,7 @@ pub fn resolve_build_vars(
                 name,
                 var,
                 fall_back: true,
-                run: Box::new(move || {
-                    run_var_cmd(name, cmd, var.secret, project_dir, channel, build_command)
-                }),
+                run: Box::new(move || run_var_cmd(name, cmd, var.secret, project_dir, channel)),
             });
             continue;
         } else {
@@ -278,7 +275,6 @@ fn resolve_source_revision(project_dir: &Path, channel: &str) -> Result<String> 
         false,
         project_dir,
         channel,
-        None,
     )
 }
 
@@ -288,7 +284,6 @@ fn run_var_cmd(
     secret: bool,
     project_dir: &Path,
     channel: &str,
-    build_command: Option<&str>,
 ) -> Result<String> {
     // The command text can carry the credential and a failing fetcher often echoes it; the
     // variable name and exit status stay, since neither can hold the value.
@@ -297,16 +292,10 @@ fn run_var_cmd(
     } else {
         format!("{cmd:?}")
     };
-    let mut command = std::process::Command::new("sh");
-    command
+    let output = std::process::Command::new("sh")
         .arg("-c")
         .arg(cmd)
         .current_dir(project_dir)
-        .env("ROCK_CHANNEL", channel);
-    if let Some(build_command) = build_command {
-        command.env("ROCK_BUILD_COMMAND", build_command);
-    }
-    let output = command
         .output()
         .map_err(|e| anyhow::anyhow!("[build.vars] {name}: failed to spawn {shown}: {e}"))?;
     if !output.status.success() {
@@ -353,7 +342,7 @@ mod tests {
     }
 
     fn resolve(cfg: &StickConfig, dir: &Path, channel: Option<&str>) -> Result<ResolvedBuildVars> {
-        resolve_build_vars(cfg, dir, channel, None, &HashMap::new(), None)
+        resolve_build_vars(cfg, dir, channel, None, &HashMap::new())
     }
 
     #[test]
@@ -400,9 +389,8 @@ mod tests {
         assert_eq!(declaration.vars, vec!["REV"]);
 
         let overrides = HashMap::from([("TREE".to_string(), "provided".to_string())]);
-        let overridden =
-            resolve_build_vars(&cfg, dir.path(), Some("steam"), None, &overrides, None)
-                .expect("an explicit override takes precedence over deferred resolution");
+        let overridden = resolve_build_vars(&cfg, dir.path(), Some("steam"), None, &overrides)
+            .expect("an explicit override takes precedence over deferred resolution");
         assert_eq!(overridden.vars["TREE"].value, "provided");
         assert!(!overridden.source_fingerprints.contains_key("TREE"));
     }
@@ -437,7 +425,6 @@ mod tests {
             Some("steam"),
             Some("windows"),
             &HashMap::new(),
-            None,
         )
         .unwrap();
         assert_eq!(win.vars["PLATFORM"].value, "windows");
@@ -447,7 +434,6 @@ mod tests {
             Some("web"),
             Some("windows"),
             &HashMap::new(),
-            None,
         )
         .unwrap();
         assert_eq!(web.vars["PLATFORM"].value, "windows");
@@ -462,9 +448,8 @@ mod tests {
         ));
         let dir = tempfile::tempdir().unwrap();
         for target in ["win64", "ios", "web"] {
-            let err =
-                resolve_build_vars(&cfg, dir.path(), None, Some(target), &HashMap::new(), None)
-                    .expect_err("unsupported target os must reject");
+            let err = resolve_build_vars(&cfg, dir.path(), None, Some(target), &HashMap::new())
+                .expect_err("unsupported target os must reject");
             assert!(
                 format!("{err}").contains(target),
                 "error names the bad target: {err}"
@@ -490,17 +475,15 @@ mod tests {
     }
 
     #[test]
-    fn cmd_runs_in_project_dir_with_rock_channel_and_trims_newline() {
+    fn cmd_runs_in_project_dir_and_trims_newline() {
         let cfg = fixture(concat!(
             "[package]\nname = \"x\"\n",
-            "[build]\nchannels = [\"dev\"]\ndefault_channel = \"dev\"\n",
-            "[build.vars]\nMARKER = { cmd = \"cat marker.txt\" }\nCHAN = { cmd = \"printenv ROCK_CHANNEL\" }\n",
+            "[build.vars]\nMARKER = { cmd = \"cat marker.txt\" }\n",
         ));
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("marker.txt"), "from-project-dir\n").unwrap();
         let resolved = resolve(&cfg, dir.path(), None).unwrap();
         assert_eq!(resolved.vars["MARKER"].value, "from-project-dir");
-        assert_eq!(resolved.vars["CHAN"].value, "dev");
     }
 
     #[cfg(unix)]
@@ -523,18 +506,6 @@ mod tests {
     }
 
     #[test]
-    fn cmd_sees_the_requested_build_command() {
-        let cfg = fixture(concat!(
-            "[package]\nname = \"x\"\n",
-            "[build.vars]\nCOMMAND = { cmd = \"printenv ROCK_BUILD_COMMAND\" }\n",
-        ));
-        let dir = tempfile::tempdir().unwrap();
-        let resolved =
-            resolve_build_vars(&cfg, dir.path(), None, None, &HashMap::new(), Some("sim")).unwrap();
-        assert_eq!(resolved.vars["COMMAND"].value, "sim");
-    }
-
-    #[test]
     fn override_wins_and_suppresses_the_source() {
         let cfg = fixture(concat!(
             "[package]\nname = \"x\"\n",
@@ -543,7 +514,7 @@ mod tests {
         ));
         let dir = tempfile::tempdir().unwrap();
         let overrides = HashMap::from([("TOKEN".to_string(), "override-value".to_string())]);
-        let resolved = resolve_build_vars(&cfg, dir.path(), None, None, &overrides, None).unwrap();
+        let resolved = resolve_build_vars(&cfg, dir.path(), None, None, &overrides).unwrap();
         assert_eq!(resolved.vars["TOKEN"].value, "override-value");
         assert!(
             resolved.vars["TOKEN"].secret,
@@ -611,7 +582,7 @@ mod tests {
         let cfg = fixture("[package]\nname = \"x\"\n[build]\nchannels = [\"dev\"]\n");
         let dir = tempfile::tempdir().unwrap();
         let overrides = HashMap::from([("NOPE".to_string(), "v".to_string())]);
-        let err = resolve_build_vars(&cfg, dir.path(), None, None, &overrides, None)
+        let err = resolve_build_vars(&cfg, dir.path(), None, None, &overrides)
             .expect_err("overriding an undeclared var must reject");
         assert!(
             format!("{err}").contains("NOPE"),

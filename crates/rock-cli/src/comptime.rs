@@ -90,10 +90,6 @@ pub(crate) fn inputs_for_entry_path(anchor: &Path) -> Result<ComptimeInputs> {
     inputs_for_project_dir(dir)
 }
 
-pub(crate) fn inputs_for_project_dir(dir: &Path) -> Result<ComptimeInputs> {
-    inputs_for_project_dir_as(dir, None)
-}
-
 pub(crate) enum ProjectInputs {
     Ready(ComptimeInputs),
     Resolving(std::thread::JoinHandle<Result<ComptimeInputs>>),
@@ -126,10 +122,7 @@ impl From<ComptimeInputs> for ProjectInputs {
     }
 }
 
-pub(crate) fn inputs_for_project_dir_as(
-    dir: &Path,
-    build_command: Option<&str>,
-) -> Result<ComptimeInputs> {
+pub(crate) fn inputs_for_project_dir(dir: &Path) -> Result<ComptimeInputs> {
     let selection = SELECTION.get();
     let stick = rock_host::stick::StickConfig::find_from_dir(dir)?;
     let Some((stick_path, cfg)) = stick else {
@@ -160,13 +153,12 @@ pub(crate) fn inputs_for_project_dir_as(
         .parent()
         .expect("stick.toml has a parent dir")
         .to_path_buf();
-    inputs_for_project_with_config(&project_dir, &cfg, build_command)
+    inputs_for_project_with_config(&project_dir, &cfg)
 }
 
 pub(crate) fn inputs_for_project_with_config(
     project_dir: &Path,
     cfg: &rock_host::stick::StickConfig,
-    build_command: Option<&str>,
 ) -> Result<ComptimeInputs> {
     let selection = SELECTION.get();
     let channel = selection.and_then(|s| s.channel.as_deref());
@@ -179,7 +171,6 @@ pub(crate) fn inputs_for_project_with_config(
         channel,
         selection.and_then(|s| s.target_os.as_deref()),
         overrides,
-        build_command,
     )?;
 
     let mut inputs = ComptimeInputs::default();

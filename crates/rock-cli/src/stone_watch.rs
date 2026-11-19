@@ -284,29 +284,27 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
     });
     let mut watched: std::collections::HashSet<PathBuf> = sound_paths.clone();
 
-    let initial_build = crate::frame_runtime::beside(
+    let initial_compilation_success = crate::frame_runtime::beside(
         || build_all_for_game(path),
         || {
             let result = crate::package::prepare_sound_bank(path)
-                .and_then(|_| compiler.compile(&std::collections::HashSet::new(), false))
-                .and_then(|_| compiler.artifact_fingerprint());
+                .and_then(|_| compiler.compile(&std::collections::HashSet::new(), false));
             Ok(match result {
-                Ok(build_id) => {
+                Ok(_) => {
                     reseed_comptime_watch(&compiler, &sound_paths, &mut watched, &comptime_watch);
-                    Some(build_id)
+                    true
                 }
                 Err(error) => {
                     log::error!(target: "STONE", "Initial compilation failed: {error}");
                     log::info!(target: "STONE", "watching for changes; game will start when compilation succeeds");
-                    None
+                    false
                 }
             })
         },
     )?;
-    let initial_compilation_success = initial_build.is_some();
 
-    let mut game_process = if let Some(build_id) = initial_build {
-        Some(start_game_process(&output_path, app_args, &build_id)?)
+    let mut game_process = if initial_compilation_success {
+        Some(start_game_process(&output_path, app_args)?)
     } else {
         None
     };
@@ -520,11 +518,10 @@ pub(crate) fn do_stone_watch(path: &str, quiet: bool, app_args: &[String]) -> Re
                 let action = if restarting { "restart" } else { "start" };
                 error!("fold before {action} failed: {e} ({action} may load a stale main.lua)");
             }
-            let build_id = compiler.artifact_fingerprint()?;
             if !restarting {
                 info!("First successful compilation! Starting game...");
             }
-            game_process = Some(start_game_process(&output_path, app_args, &build_id)?);
+            game_process = Some(start_game_process(&output_path, app_args)?);
             if restarting {
                 info!("Game process restarted");
             } else {
@@ -618,19 +615,13 @@ fn prune_stone_sessions(root: &std::path::Path) {
     }
 }
 
-fn start_game_process(
-    lua_file: &std::path::Path,
-    app_args: &[String],
-    build_id: &str,
-) -> Result<BoundChild> {
+fn start_game_process(lua_file: &std::path::Path, app_args: &[String]) -> Result<BoundChild> {
     let mut cmd = rock_engine_host::runtime::build_luajit_command(lua_file, app_args);
     cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
-    cmd.env("STONE_HOT_RELOAD", "1")
-        .env("STONE_BUILD_ID", build_id)
-        .env(
-            "STONE_RELOAD_CONTROL",
-            lua_file.with_file_name("reload.hold"),
-        );
+    cmd.env("STONE_HOT_RELOAD", "1").env(
+        "STONE_RELOAD_CONTROL",
+        lua_file.with_file_name("reload.hold"),
+    );
     Ok(crate::runtime_process::spawn_game(
         &mut cmd,
         lua_file.parent().unwrap(),

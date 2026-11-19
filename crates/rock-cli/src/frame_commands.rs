@@ -52,7 +52,6 @@ pub(crate) fn do_perf(
         rock_engine_host::runtime::build_luajit_command(lua_file, app_args),
     );
     apply_perf_env(&mut cmd);
-    cmd.env("STONE_BUILD_ID", &compiled.artifact_fingerprint);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     if std::env::var_os("ROCK_TEST_SEED").is_none() {
@@ -278,8 +277,7 @@ pub(crate) fn do_one_frame(
     cmd.env("FRAME_COUNT", frames.to_string())
         .env("TAKE_SCREENSHOT", "1") // Always take screenshot when running frames
         .env("STONE_HEADLESS", "1") // No visible window for frame runs
-        .env("ROCK_FRAME_WATCHDOG", "1")
-        .env("STONE_BUILD_ID", &compiled.artifact_fingerprint);
+        .env("ROCK_FRAME_WATCHDOG", "1");
     apply_headless_audio_env(&mut cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 

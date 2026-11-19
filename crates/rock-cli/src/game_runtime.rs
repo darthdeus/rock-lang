@@ -124,13 +124,6 @@ impl GameCompiler {
     pub fn package_roots(&self) -> Option<&[(u32, PathBuf)]> {
         self.stone.as_ref().map(|stone| stone.package_roots())
     }
-
-    pub fn artifact_fingerprint(&self) -> Result<String> {
-        self.stone
-            .as_ref()
-            .map(|stone| stone.artifact_fingerprint().to_string())
-            .ok_or_else(|| anyhow::anyhow!("compiler did not publish an Artifact fingerprint"))
-    }
 }
 
 #[test]

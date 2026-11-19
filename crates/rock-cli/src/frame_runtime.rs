@@ -4,7 +4,6 @@ use std::path::PathBuf;
 
 pub(crate) struct CompiledGame {
     pub lua_file: std::path::PathBuf,
-    pub artifact_fingerprint: String,
 }
 
 // Keep this directory alive until the child exits. The requested output directory
@@ -23,7 +22,7 @@ pub(crate) fn compile_frame_invocation(
     let project = project.to_string_lossy();
     let private_output = PathBuf::from(invocation.path().to_string_lossy().into_owned());
     let lua_file = private_output.join(rock_host::project::MAIN_LUA_FILENAME);
-    let artifact_fingerprint = with_game_prepared(&project, || {
+    with_game_prepared(&project, || {
         std::fs::create_dir_all(&private_output)
             .with_context(|| format!("create {}", private_output.display()))?;
         let compiler = rock_host::timed("compile", || {
@@ -33,9 +32,8 @@ pub(crate) fn compile_frame_invocation(
                 &lua_file.with_file_name("incremental.lua"),
             )
         })?;
-        let fingerprint = compiler.artifact_fingerprint().to_string();
         crate::allocator::drop_and_release_in_background(compiler);
-        Ok(fingerprint)
+        Ok(())
     })?;
     // Profiling tools inspect this diagnostic copy after the run. Execution uses
     // only the private file, so another invocation can safely replace this copy.
@@ -45,13 +43,7 @@ pub(crate) fn compile_frame_invocation(
             &PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME),
         )
     })?;
-    Ok((
-        invocation,
-        CompiledGame {
-            lua_file,
-            artifact_fingerprint,
-        },
-    ))
+    Ok((invocation, CompiledGame { lua_file }))
 }
 
 /// Install `source` as `destination` and wipe the overlay beside it, as a full

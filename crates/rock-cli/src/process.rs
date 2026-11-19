@@ -86,7 +86,6 @@ fn run_process() {
         crate::allocator::keep_freed_pages_for_reuse();
     }
 
-    unsafe { std::env::set_var("ROCK_BUILD_COMMAND", args.command.cli_name()) };
     // Line directives need a LuaJIT that reads them, which a release channel
     // does not promise; a release build keeps them off.
     if skull::line_directives_mode() {
