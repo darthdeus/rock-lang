@@ -272,24 +272,14 @@ mod tests {
     use std::time::Instant;
 
     fn run_watcher_test(name: &str, hot_reload: Option<&str>) {
-        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command
-            .args([name, "--exact", "--nocapture"])
-            .env("STONE_WATCH_TEST_CHILD", "1")
-            .env_remove("STONE_HOT_RELOAD");
+        let mut command = crate::test_support::child_test(name, "STONE_WATCH_TEST_CHILD", "1");
+        command.env_remove("STONE_HOT_RELOAD");
         if let Some(value) = hot_reload {
             command.env("STONE_HOT_RELOAD", value);
         }
-        let output = command.output().expect("run isolated watcher test");
-        assert!(
-            String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
-            "the child must select exactly one watcher test"
-        );
-        assert!(
-            output.status.success(),
-            "STONE_HOT_RELOAD={hot_reload:?}:\n{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+        crate::test_support::assert_child_passes(
+            &mut command,
+            &format!("STONE_HOT_RELOAD={hot_reload:?}"),
         );
     }
 

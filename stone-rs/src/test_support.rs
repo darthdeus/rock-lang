@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::ops::Deref;
 use std::path::Path;
 use std::process::Command;
@@ -32,25 +33,35 @@ pub(crate) fn fresh_root(prefix: &str) -> TestRoot {
     TestRoot(dir)
 }
 
+/// A command that reruns only `test` from this test binary, with `child_env`
+/// set so the child takes the test's fixture branch.
+pub(crate) fn child_test(test: &str, child_env: &str, value: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(std::env::current_exe().expect("locate test executable"));
+    command
+        .args([test, "--exact", "--nocapture"])
+        .env(child_env, value);
+    command
+}
+
+/// Run a `child_test` command; it must select one test and pass.
+pub(crate) fn assert_child_passes(command: &mut Command, context: &str) {
+    let output = command.output().expect("run isolated test fixture");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("running 1 test"),
+        "{context}: the child selected no test:\n{stdout}{stderr}"
+    );
+    assert!(output.status.success(), "{context}:\n{stdout}{stderr}");
+}
+
+/// Rerun `test` in a fresh process unless this is that process. True when the
+/// child ran, so the caller returns.
 pub(crate) fn in_isolated_child(test: &str, child_env: &str) -> bool {
     if std::env::var_os(child_env).is_some() {
         return false;
     }
-    let output = Command::new(std::env::current_exe().expect("locate test executable"))
-        .args([test, "--exact", "--nocapture"])
-        .env(child_env, "1")
-        .output()
-        .expect("run isolated test fixture");
-    assert!(
-        String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
-        "the child must select {test}"
-    );
-    assert!(
-        output.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_child_passes(&mut child_test(test, child_env, "1"), test);
     true
 }
 

@@ -2346,23 +2346,14 @@ mod relight_rg8_gl_tests {
     }
 
     fn run_isolated(child_test: &str) {
-        let output = Command::new(std::env::current_exe().expect("test binary path"))
-            .arg("--exact")
-            .arg(child_test)
-            .arg("--nocapture")
-            .env(CHILD_ENV, "1")
-            .env("STONE_HEADLESS", "1")
-            .env("SDL_VIDEODRIVER", "offscreen")
-            .env("LIBGL_ALWAYS_SOFTWARE", "1")
-            .env("STONE_ASSET_STUB", "0")
-            .env("STONE_IMAGE_MAX_SIDE", "0")
-            .output()
-            .expect("could not launch isolated GL upload test");
-        assert!(
-            output.status.success(),
-            "isolated GL upload test failed:\n{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+        crate::test_support::assert_child_passes(
+            crate::test_support::child_test(child_test, CHILD_ENV, "1")
+                .env("STONE_HEADLESS", "1")
+                .env("SDL_VIDEODRIVER", "offscreen")
+                .env("LIBGL_ALWAYS_SOFTWARE", "1")
+                .env("STONE_ASSET_STUB", "0")
+                .env("STONE_IMAGE_MAX_SIDE", "0"),
+            "isolated GL upload test",
         );
     }
 
@@ -2372,25 +2363,15 @@ mod relight_rg8_gl_tests {
             return true;
         }
         for cap in ["0", "3"] {
-            let output = Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    &format!("image_texture::relight_rg8_gl_tests::{name}"),
-                    "--nocapture",
-                ])
-                .env(CHILD, "1")
-                .env("STONE_HEADLESS", "1")
-                .env("SDL_VIDEODRIVER", "offscreen")
-                .env("LIBGL_ALWAYS_SOFTWARE", "1")
-                .env("STONE_ASSET_STUB", "0")
-                .env("STONE_IMAGE_MAX_SIDE", cap)
-                .output()
-                .expect("could not launch decode-failure GL test");
-            assert!(
-                output.status.success(),
-                "cap={cap}: {}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
+            let test = format!("image_texture::relight_rg8_gl_tests::{name}");
+            crate::test_support::assert_child_passes(
+                crate::test_support::child_test(&test, CHILD, "1")
+                    .env("STONE_HEADLESS", "1")
+                    .env("SDL_VIDEODRIVER", "offscreen")
+                    .env("LIBGL_ALWAYS_SOFTWARE", "1")
+                    .env("STONE_ASSET_STUB", "0")
+                    .env("STONE_IMAGE_MAX_SIDE", cap),
+                &format!("cap={cap}"),
             );
         }
         false

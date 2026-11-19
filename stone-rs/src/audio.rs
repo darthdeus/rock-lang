@@ -2448,12 +2448,11 @@ mod tests {
             ),
         ];
         for (env, no_device, stub) in cases {
-            let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
-            cmd.args([
-                "--exact",
+            let mut cmd = crate::test_support::child_test(
                 "audio::tests::automated_runs_default_to_device_free_audio",
-            ])
-            .env(CHILD, format!("{}{}", *no_device as u8, *stub as u8));
+                CHILD,
+                format!("{}{}", *no_device as u8, *stub as u8),
+            );
             for key in [
                 "STONE_AUDIO_STUB",
                 "STONE_HEADLESS",
@@ -2465,12 +2464,9 @@ mod tests {
             ] {
                 cmd.env_remove(key);
             }
-            let output = cmd.envs(env.iter().copied()).output().unwrap();
-            assert!(
-                output.status.success(),
-                "{env:?}: {}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
+            crate::test_support::assert_child_passes(
+                cmd.envs(env.iter().copied()),
+                &format!("{env:?}"),
             );
         }
     }
@@ -2495,17 +2491,9 @@ mod tests {
         if std::env::var(CHILD).as_deref() == Ok(test) {
             return false;
         }
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", test])
-            .env(CHILD, test)
-            .env("STONE_AUDIO_STUB", "0")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+        crate::test_support::assert_child_passes(
+            crate::test_support::child_test(test, CHILD, test).env("STONE_AUDIO_STUB", "0"),
+            test,
         );
         true
     }

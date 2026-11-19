@@ -1893,7 +1893,7 @@ mod tests {
     use once_cell::sync::Lazy;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     // `AppendWorker::report_failure` warns through a process-global 10 s
@@ -2574,14 +2574,14 @@ mod tests {
         let root = fresh_root();
         let owner = TelemetryRootLock::acquire(&root).unwrap().unwrap();
 
-        let status = Command::new(std::env::current_exe().unwrap())
-            .arg("telemetry::tests::one_preference_root_has_one_native_owner")
-            .arg("--exact")
-            .env("TELEMETRY_LOCK_CHILD_ROOT", &root)
-            .status()
-            .unwrap();
-
-        assert!(status.success());
+        crate::test_support::assert_child_passes(
+            &mut crate::test_support::child_test(
+                "telemetry::tests::one_preference_root_has_one_native_owner",
+                "TELEMETRY_LOCK_CHILD_ROOT",
+                &*root,
+            ),
+            "contended root lock",
+        );
         drop(owner);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2609,15 +2609,16 @@ mod tests {
         spool.record_stat("revoke-me", 1).unwrap();
         let child_gate = root.join("publish-revocation");
         let revocation = revocation_path(&root);
-        let child = Command::new(std::env::current_exe().unwrap())
-            .arg("telemetry::tests::another_process_can_revoke_a_retrying_uploader")
-            .arg("--exact")
-            .env("TELEMETRY_CLEAR_CHILD_ROOT", &root)
-            .env("TELEMETRY_CLEAR_CHILD_GATE", &child_gate)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let child = crate::test_support::child_test(
+            "telemetry::tests::another_process_can_revoke_a_retrying_uploader",
+            "TELEMETRY_CLEAR_CHILD_ROOT",
+            &*root,
+        )
+        .env("TELEMETRY_CLEAR_CHILD_GATE", &child_gate)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
         let (published_tx, published_rx) = mpsc::channel();
         let ingest = Ingest::start(move |request, _| {
             if request == 1 {
@@ -2803,12 +2804,13 @@ mod tests {
         let mut client = TelemetryClient::open(&root, identity(), "", "", false).unwrap();
         client.record_stat("revoke-me", 1).unwrap();
 
-        let child = Command::new(std::env::current_exe().unwrap())
-            .arg("telemetry::tests::another_process_revokes_an_idle_offline_owner")
-            .arg("--exact")
-            .env("TELEMETRY_OFFLINE_CLEAR_CHILD_ROOT", &root)
-            .output()
-            .unwrap();
+        let child = crate::test_support::child_test(
+            "telemetry::tests::another_process_revokes_an_idle_offline_owner",
+            "TELEMETRY_OFFLINE_CLEAR_CHILD_ROOT",
+            &*root,
+        )
+        .output()
+        .unwrap();
         let deadline = Instant::now() + Duration::from_millis(300);
         while root.join("reports/stats").exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));

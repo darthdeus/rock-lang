@@ -1196,28 +1196,10 @@ mod tests {
     use std::ffi::{CStr, CString};
 
     fn run_virtual_controller_test_in_child() -> bool {
-        const CHILD: &str = "STONE_VIRTUAL_CONTROLLER_TEST_CHILD";
-        if std::env::var_os(CHILD).is_some() {
-            return false;
-        }
-
-        let test = "input::tests::virtual_gamecontroller_exercises_production_sdl_controller_path";
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([test, "--exact", "--nocapture"])
-            .env(CHILD, "1")
-            .output()
-            .expect("run isolated virtual controller test");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stdout.contains("running 1 test"),
-            "child must select {test}:\n{stdout}\n{stderr}"
-        );
-        assert!(
-            output.status.success(),
-            "isolated virtual controller test failed:\n{stdout}\n{stderr}"
-        );
-        true
+        crate::test_support::in_isolated_child(
+            "input::tests::virtual_gamecontroller_exercises_production_sdl_controller_path",
+            "STONE_VIRTUAL_CONTROLLER_TEST_CHILD",
+        )
     }
 
     fn event_has_button(

@@ -583,10 +583,6 @@ pub extern "C" fn stone_free_string_array(arr: *mut *mut c_char, count: c_int) {
 #[cfg(test)]
 mod xfer_tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    static UNIQ: AtomicU32 = AtomicU32::new(0);
-
     fn fresh_root() -> crate::test_support::TestRoot {
         crate::test_support::fresh_root("stone_fsxfer_test_")
     }
@@ -832,8 +828,7 @@ mod xfer_tests {
 
     #[test]
     fn directory_ffi_lists_embedded_registry_entries() {
-        let n = UNIQ.fetch_add(1, Ordering::SeqCst);
-        let dir = format!("game/assets/embedded-list-{n}");
+        let dir = "game/assets/embedded-list";
         let key = CString::new(format!("{dir}/sound.ogg")).unwrap();
         let bytes = b"sound";
         crate::asset_registry::stone_register_asset(key.as_ptr(), bytes.as_ptr(), bytes.len());
