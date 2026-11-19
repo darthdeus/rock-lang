@@ -32,6 +32,9 @@ const HITCH_ALLOC_BURST_KB: float = 4096.0
 const HITCH_JIT_EVENTS: int = 8
 const HITCH_LOG_LINES_PER_SECOND: int = 4
 const HITCH_LOG_RESIDENCY_NAMES: int = 3
+// Unknown causes count as the last entry.
+const HITCH_CAUSES: [string] = ["gc", "alloc", "jit", "present", "upload", "residency", "blocked",
+    "logic", "render"]
 
 pub struct HitchLedger {
     enabled: bool,
@@ -76,25 +79,10 @@ pub struct HitchLedger {
     cur_slow_name: string,
     cur_slow_phase: string,
     win_hitches: int,
-    win_gc: int,
-    win_alloc: int,
-    win_jit: int,
-    win_present: int,
-    win_upload: int,
-    win_residency: int,
-    win_logic: int,
-    win_render: int,
-    win_blocked: int,
     total_hitches: int,
-    total_gc: int,
-    total_alloc: int,
-    total_jit: int,
-    total_present: int,
-    total_upload: int,
-    total_residency: int,
-    total_logic: int,
-    total_render: int,
-    total_blocked: int,
+    // Per HITCH_CAUSES entry.
+    win_causes: NativeBuffer<int>,
+    total_causes: NativeBuffer<int>,
     last_cause: string,
     last_slow_name: string,
     last_logic_system: string,
@@ -148,10 +136,10 @@ fn hitch_ledger_new() -> HitchLedger {
         cur_slow_ms: 0.0,
         cur_slow_name: "",
         cur_slow_phase: "",
-        win_hitches: 0, win_gc: 0, win_alloc: 0, win_jit: 0, win_present: 0,
-        win_upload: 0, win_residency: 0, win_logic: 0, win_render: 0, win_blocked: 0,
-        total_hitches: 0, total_gc: 0, total_alloc: 0, total_jit: 0,
-        total_present: 0, total_upload: 0, total_residency: 0, total_logic: 0, total_render: 0, total_blocked: 0,
+        win_hitches: 0,
+        total_hitches: 0,
+        win_causes: native_buffer_int(HITCH_CAUSES.len()),
+        total_causes: native_buffer_int(HITCH_CAUSES.len()),
         last_cause: "",
         last_slow_name: "",
         last_logic_system: "",
@@ -194,18 +182,24 @@ fn hitch_classify(frame_ms: float, logic_ms: float, render_ms: float,
     return "render"
 }
 
+fn hitch_cause_index(cause: string) -> int {
+    for i in 0..HITCH_CAUSES.len() { if HITCH_CAUSES[i] == cause { return i } }
+    return -1
+}
+
 fn hitch_tally(cause: string) {
     HITCH.win_hitches += 1
     HITCH.total_hitches += 1
-    if cause == "gc" { HITCH.win_gc += 1; HITCH.total_gc += 1 }
-    else if cause == "alloc" { HITCH.win_alloc += 1; HITCH.total_alloc += 1 }
-    else if cause == "jit" { HITCH.win_jit += 1; HITCH.total_jit += 1 }
-    else if cause == "present" { HITCH.win_present += 1; HITCH.total_present += 1 }
-    else if cause == "residency" { HITCH.win_residency += 1; HITCH.total_residency += 1 }
-    else if cause == "upload" { HITCH.win_upload += 1; HITCH.total_upload += 1 }
-    else if cause == "blocked" { HITCH.win_blocked += 1; HITCH.total_blocked += 1 }
-    else if cause == "logic" { HITCH.win_logic += 1; HITCH.total_logic += 1 }
-    else { HITCH.win_render += 1; HITCH.total_render += 1 }
+    let i = hitch_cause_index(cause)
+    let slot = if i >= 0 { i } else { HITCH_CAUSES.len() - 1 }
+    nb_set(HITCH.win_causes, slot, nb_get(HITCH.win_causes, slot) + 1)
+    nb_set(HITCH.total_causes, slot, nb_get(HITCH.total_causes, slot) + 1)
+}
+
+fn hitch_cause_counts(hitches: int, counts: NativeBuffer<int>) -> string {
+    let s = "hitches={hitches}"
+    for i in 0..HITCH_CAUSES.len() { s = "{s} {HITCH_CAUSES[i]}={nb_get(counts, i)}" }
+    return s
 }
 
 fn hitch_distinct_paths(paths: [string]) -> [string] {
@@ -349,31 +343,15 @@ fn hitch_frame_record(frame: int, frame_ms: float, t_ms: float, measured: bool) 
 
 fn hitch_window_summary() -> string {
     if !HITCH.enabled || HITCH.win_hitches == 0 { return "" }
-    let s = "hitches={HITCH.win_hitches} gc={HITCH.win_gc} alloc={HITCH.win_alloc} jit={HITCH.win_jit} present={HITCH.win_present} upload={HITCH.win_upload} residency={HITCH.win_residency} blocked={HITCH.win_blocked} logic={HITCH.win_logic} render={HITCH.win_render}"
+    let s = hitch_cause_counts(HITCH.win_hitches, HITCH.win_causes)
     HITCH.win_hitches = 0
-    HITCH.win_gc = 0
-    HITCH.win_alloc = 0
-    HITCH.win_jit = 0
-    HITCH.win_present = 0
-    HITCH.win_residency = 0
-    HITCH.win_upload = 0
-    HITCH.win_logic = 0
-    HITCH.win_render = 0
-    HITCH.win_blocked = 0
+    for i in 0..HITCH_CAUSES.len() { nb_set(HITCH.win_causes, i, 0) }
     return s
 }
 
 pub fn hitch_count_for(cause: string) -> int {
-    if cause == "gc" { return HITCH.total_gc }
-    if cause == "alloc" { return HITCH.total_alloc }
-    if cause == "jit" { return HITCH.total_jit }
-    if cause == "present" { return HITCH.total_present }
-    if cause == "residency" { return HITCH.total_residency }
-    if cause == "upload" { return HITCH.total_upload }
-    if cause == "logic" { return HITCH.total_logic }
-    if cause == "render" { return HITCH.total_render }
-    if cause == "blocked" { return HITCH.total_blocked }
-    return 0
+    let i = hitch_cause_index(cause)
+    return if i >= 0 { nb_get(HITCH.total_causes, i) } else { 0 }
 }
 
 fn hitch_ledger_flush() {
@@ -400,7 +378,7 @@ fn hitch_ledger_flush() {
         log_error("HITCH", "could not write the hitch ledger to {HITCH.dump_path}")
         return
     }
-    log_info("HITCH", "ledger: {n} rows -> {HITCH.dump_path} (hitches={HITCH.total_hitches} gc={HITCH.total_gc} alloc={HITCH.total_alloc} jit={HITCH.total_jit} present={HITCH.total_present} upload={HITCH.total_upload} residency={HITCH.total_residency} blocked={HITCH.total_blocked} logic={HITCH.total_logic} render={HITCH.total_render})")
+    log_info("HITCH", "ledger: {n} rows -> {HITCH.dump_path} ({hitch_cause_counts(HITCH.total_hitches, HITCH.total_causes)})")
 }
 
 @nomangle inline(lua) fn __hitch_write_file(path: string, text: string) -> bool = """
