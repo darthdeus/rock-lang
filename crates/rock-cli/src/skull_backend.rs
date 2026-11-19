@@ -1,8 +1,4 @@
 //! skull backend integration for `rock-cli` (`--backend skull`, the default).
-//!
-//! skull is the code generator over `bone`'s HIR (see the `skull` crate).
-//! Where `rock check` stops at type-checking, `--backend skull` emits Lua
-//! from bone's HIR and, for `test`/`run`, executes it with LuaJIT.
 
 use crate::Result;
 use crate::bone_backend::categorize;
@@ -25,10 +21,6 @@ fn skull_emit(file: &str, src: &str) -> std::result::Result<(String, bool), Vec<
     Ok((emit.lua, emit.emits_main))
 }
 
-/// A [`skull_emit_full`] failure. `Discovery` (a malformed `@test` annotation on
-/// a file bone ACCEPTED) is split from `Compile` so the expect-compile-failure
-/// escape in [`skull_build`] never absorbs it -- `@test(expect_failure = true,
-/// returns = 42)` must reject, not count as an expected compile failure.
 enum EmitFullErr {
     Compile(Vec<CompilerError>),
     Discovery(CompilerError),
@@ -43,8 +35,6 @@ impl EmitFullErr {
     }
 }
 
-/// The command line's [`skull::pipeline::CompileHost`]: alias tables from
-/// manifests on disk, the invocation's lint policy and compile measurements.
 struct CliCompileHost<'a> {
     sources: &'a SourceFiles,
     lint_root: &'a std::path::Path,
@@ -57,11 +47,7 @@ struct CliCompileHost<'a> {
 type PackageTestFns = Vec<(skull_mir::mir::FuncRef, skull::SkullTest)>;
 
 enum CliComptime<'a> {
-    /// Resolve from the entry path's enclosing project once the program
-    /// checks (single-file emission walks up, matching the JS single-file
-    /// path: the same source must agree across backends).
     FromEntry(&'a str),
-    /// A project build: resolving since before discovery.
     Project(Option<crate::comptime::ProjectInputs>),
 }
 
@@ -121,8 +107,6 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
     ) -> std::result::Result<bone_semantic::inference::ComptimeInputs, CompilerError> {
         let timer = Instant::now();
         let inputs = self.comptime_inputs()?;
-        // Every fingerprint owner looks its text up; one index over the
-        // sources instead of a scan per owner, built on the first lookup.
         let texts = std::cell::OnceCell::new();
         let resolved = crate::comptime::resolve_checked_inputs(ws, inputs, |file| {
             let texts: &rustc_hash::FxHashMap<String, usize> = texts.get_or_init(|| {
@@ -339,7 +323,6 @@ fn cli_build(mode: CliBuildMode<'_>) -> std::result::Result<CliBuild, CliBuildFa
     })
 }
 
-/// Use the real source path for spans and __SITE__.
 fn skull_emit_full(
     file: &str,
     src: &str,
@@ -363,35 +346,19 @@ fn skull_emit_full(
     Ok((build.compiled.emission, tests))
 }
 
-/// Wall-clock and attribution for one timed emit of a checked workspace,
-/// consumed by `backend-stats`.
 #[derive(Default, Clone)]
 pub(crate) struct SkullPhaseTimes {
-    /// Comptime/build-variable preparation after semantic checking and before
-    /// code generation. This is setup work, not semantic or emit self-time.
     pub workspace_setup: Duration,
     pub emit: Duration,
-    /// The last setup/emit failure, retained so measurement callers
-    /// cannot report a contradictory successful-looking zero population.
     pub failure: Option<CompilerError>,
     pub setup_failed: bool,
     pub emit_failed: bool,
-    /// skull's emit broken into coarse stages (lower / cleanup / emit-lua /
-    /// scaffold+misc), from `MirEmit::phases`. Empty if bone rejected the
-    /// workspace (emit never ran). Summed element-wise across timed runs.
     pub emit_phases: Vec<(&'static str, Duration)>,
-    /// skull's ABI-plan memo counters, from `MirEmit::abi_plan_stats`.
     pub abi_plan_stats: skull_mir::lower::AbiPlanMemoStats,
-    /// Shared-arena traffic split at the setup/fanout boundary, from
-    /// `MirEmit::arena_traffic`.
     pub arena_traffic: skull::mir_emit::ArenaTraffic,
-    /// Body-oriented lowering and transform attribution from `MirEmit`.
     pub attribution: skull::mir_emit::EmitAttribution,
-    /// Setup-lane populations and observed execution overlap from `MirEmit`.
     pub setup_lanes: skull::mir_emit::SetupLaneAttribution,
-    /// Graph operation census from `MirEmit`.
     pub graph_census: skull::instance_graph::RunStats,
-    /// Concrete-plan ownership census from `MirEmit`.
     pub concrete_stats: skull::concrete_body::ConcreteBuildStats,
 }
 
@@ -457,8 +424,6 @@ fn mount_user_modules(
     Ok((modules, entry_file))
 }
 
-/// [`skull_assemble_project`] then bone type-check; returns the workspace and
-/// the entry-module file path.
 pub(crate) fn check_project(
     sources: &SourceFiles,
 ) -> std::result::Result<(bone_semantic::inference::Workspace, ustr::Ustr), Vec<CompilerError>> {
@@ -469,7 +434,6 @@ pub(crate) fn check_project(
     ))
 }
 
-/// Run each test under pcall so a thrown error cannot stop its siblings.
 fn build_test_harness(tests: &[&skull::SkullTest], token: &str) -> String {
     let mut h = format!(
         "\nlocal __skull_token = {}\nlocal __skull_T = {{\n",
@@ -639,15 +603,10 @@ do
 end
 "#;
 
-/// Render single-file errors against `src`. `skull_emit_full` parses with the
-/// real `file` path as the span file id, so the source must be registered under
-/// that same id -- registering under a placeholder makes every span lookup fail
-/// ("Unable to fetch source") and silently drops the snippet + labels.
 pub(crate) fn render_file_errs(file: &str, src: &str, errs: &[CompilerError]) -> String {
     crate::bone_backend::render_errs(&crate::common::single_source(file, src), errs)
 }
 
-/// A skull failure: a short bucketed reason + the full rendered detail.
 #[derive(Debug)]
 struct SkullFailure {
     reason: String,
@@ -672,8 +631,6 @@ struct SkullOutcome {
     diagnostics: Vec<String>,
 }
 
-/// Wall time of one `@test` that finished, for the slowest-tests report and
-/// the `ROCK_TEST_TIMINGS` file.
 #[derive(Debug, Clone)]
 struct TestTiming {
     name: String,
@@ -749,10 +706,6 @@ fn timeout_cause(run: &crate::common::ProcessResult, limit: Duration) -> String 
     }
 }
 
-/// Run a source string through the full skull pipeline (bone type-check + skull
-/// codegen), confirm the emitted Lua loads, and execute its `@test` functions
-/// against the real (emitted) stdlib. `Err` = emit/load failure; `Ok` carries
-/// the pass/test-fail outcome. `filter` selects which `@test`s run.
 fn skull_build(
     file: &str,
     src: &str,
@@ -762,8 +715,6 @@ fn skull_build(
         reason: "sound bank preparation failed".to_string(),
         rendered: format!("sound bank preparation failed for {file}: {e:#}"),
     })?;
-    // bone type-check + skull emit. Errors here are bone's (most files) or a
-    // skull codegen gap; both carry a `CompilerError`.
     let checked_tests = |ws: &_, mid, sources: &_| {
         let tests = crate::type_holes::module_tests(ws, mid, sources)?;
         Ok(tests.into_iter().map(|(_, test)| test).collect())
@@ -771,9 +722,6 @@ fn skull_build(
     let (emit, tests) = match skull_emit_full(file, src, checked_tests) {
         Ok(v) => v,
         Err(EmitFullErr::Compile(errs)) => {
-            // A file whose `@test`s ALL expect failure is supposed to fail to
-            // compile — a bone rejection here is the expected (passing) outcome.
-            // (Mirrors the real rock runner's compile-Err branch.)
             if let Some(tests) = all_tests_expect_compile_failure(file, src) {
                 let selected = tests
                     .iter()
@@ -811,10 +759,6 @@ fn skull_build(
     run_emitted_tests(lua, &tests, &files, TEST_CPU_LIMIT, 1, filter, false)
 }
 
-/// The `@test` fns of `file` when there are some and EVERY one carries
-/// `expect_failure`/`@ignore` -- a compile rejection is then the expected
-/// (passing) outcome and each counts as a passing test. Shared by the luajit,
-/// JS and GLSL executors (all bone-type-check first, so the rule is identical).
 pub(crate) fn all_tests_expect_compile_failure(
     file: &str,
     src: &str,
@@ -896,8 +840,6 @@ fn run_emitted_tests(
         });
     }
 
-    // Run the @tests: emit + harness, capture each test's PASS/FAIL line.
-    // A stable key keeps existing tests in place when declarations are inserted.
     let token = run_token();
     let shards = resolve_test_shards(
         shards,
@@ -975,8 +917,6 @@ fn run_emitted_tests(
         let stderr = String::from_utf8_lossy(&run.output.stderr);
         let died = !run.output.status.success();
 
-        // No result lines and no test started => the module didn't even load
-        // (a skull bug), not a test failure.
         let markers = crate::test_protocol::parse_skull_markers(&stdout);
         if markers.is_none() && !run.timed_out && !died && run.running_test.is_none() {
             return Err(SkullFailure {
@@ -996,8 +936,6 @@ fn run_emitted_tests(
         passed += markers.passed;
         fails.extend(markers.fails);
 
-        // VALUE lines: compare the serialized return value HOST-side against
-        // the pinned `@test(returns = ...)` literal.
         let mut value_fails = HashSet::new();
         for (name, val) in &markers.values {
             let Some(expect) = expects.get(name.as_str()) else {
@@ -1018,8 +956,6 @@ fn run_emitted_tests(
                 }
             }
         }
-        // A shard's TIME lines follow its run order, so the j-th is test
-        // `indices[j]`; keying by it restores declaration order after merging.
         timings.extend(markers.times.iter().zip(indices).map(|(time, &index)| {
             (
                 index,
@@ -1117,28 +1053,15 @@ fn run_emitted_tests(
     })
 }
 
-/// Child CPU time one `@test` (or program loading) may use: a hang backstop,
-/// not a speed bound. A loaded host inflates a test's CPU time (memory
-/// reclaim, E-cores, busy SMT siblings): the slowest `project` test used 21 s on
-/// the build host at load 70 with little free memory, and 16 s under an all-core
-/// busy-loop burner.
 const TEST_CPU_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// One test process of a shard and the tests it was given.
 struct ShardRun {
     indices: Vec<usize>,
     run: crate::common::ProcessResult,
 }
 
-/// Processes a shard may start after the first. A stopped test is charged by
-/// name and the tests after it run in a fresh process; the cap bounds a
-/// defect that stops every test to a few process starts and budgets.
 const SHARD_RESTARTS: usize = 3;
 
-/// Run one shard's tests. When the process stops while a test runs (watchdog,
-/// crash, early exit), that test keeps the stopped run and the tests after it
-/// rerun in a fresh process, so one stopped test never takes the rest of the
-/// shard with it. `select` passes the indices even for a whole-program run.
 fn run_shard(
     script: &std::path::Path,
     limit: std::time::Duration,
@@ -1162,7 +1085,6 @@ fn run_shard(
             rest.len(),
             selection.as_deref(),
         )?;
-        // A test still running when the process ended is the one that stopped it.
         let resume_at = run
             .running_test
             .filter(|_| runs.len() < SHARD_RESTARTS)
@@ -1180,11 +1102,6 @@ fn run_shard(
     }
 }
 
-/// A per-run token for the harness's start markers, only distinct from
-/// accidental test output. Lead decision: the per-test limit is a hang guard
-/// for this repo's own tests, not a security boundary, so deliberate
-/// in-process forgery by Lua code (debug locals, readable harness source,
-/// intercepted harness writes) is out of scope.
 fn run_token() -> String {
     use std::hash::{BuildHasher, Hasher};
     let half = || {
@@ -1222,7 +1139,6 @@ impl From<String> for TestProgram {
     }
 }
 
-/// Keep emitted-program dumps in error reports manageable.
 pub(crate) fn program_excerpt(parts: &[&str]) -> String {
     let bytes: usize = parts.iter().map(|part| part.len()).sum();
     let mut head = String::with_capacity(bytes.min(4000));
@@ -1239,8 +1155,6 @@ pub(crate) fn program_excerpt(parts: &[&str]) -> String {
     head
 }
 
-/// A file avoids blocking on stdin before the startup watchdog is running, and
-/// lets every shard load the same program.
 fn write_test_program(
     program: TestProgram,
     harness: &str,
@@ -1262,8 +1176,6 @@ fn write_test_program(
     Ok((script, excerpt))
 }
 
-/// Run `script` under the per-test watchdog. `selection` restricts the run to
-/// one shard's tests (`ROCK_TEST_SHARD_TESTS`); `tests` counts the tests run.
 fn run_test_program(
     script: &std::path::Path,
     limit: std::time::Duration,
@@ -1276,8 +1188,6 @@ fn run_test_program(
 
     let mut command = rock_host::project::luajit_command();
     command.arg(script);
-    // Shards and concurrent runs share one worktree; each process gets its own
-    // scratch root, removed when this returns.
     let _scratch = crate::runtime_process::prepare_test(&mut command)?;
     // An inherited selection would silently narrow an unsharded run.
     match selection {
@@ -1338,7 +1248,6 @@ fn is_rock_test_source(path: &std::path::Path) -> bool {
     path.extension().is_some_and(|e| e == "rock") && !path.to_string_lossy().ends_with('~')
 }
 
-/// Package tests share one workspace. Loose files each compile independently.
 fn walk_test_units(
     path: &str,
     files: &mut Vec<String>,
@@ -1382,9 +1291,6 @@ fn walk_test_units(
     Ok(())
 }
 
-/// Assemble + type-check + emit a whole package (tests INCLUDED), then run its
-/// `@test`s. The package analogue of [`skull_build`]. Cross-file references
-/// resolve because every file is in one workspace.
 fn skull_build_package(
     dir: &str,
     shards: usize,
@@ -1399,7 +1305,6 @@ fn skull_build_package_with_limit(
     shards: usize,
     filter: Option<&crate::test::TestFilter>,
 ) -> std::result::Result<SkullOutcome, SkullFailure> {
-    // Like a game run, so tests never read a bank an earlier tree compiled.
     crate::stone_runtime::prepare_unit(dir).map_err(|e| SkullFailure {
         reason: "sound bank preparation failed".to_string(),
         rendered: format!("sound bank preparation failed for {dir}: {e:#}"),
@@ -1460,8 +1365,6 @@ fn skull_build_package_with_limit(
     run_emitted_tests(lua, &tests, &files, limit, shards, filter, true)
 }
 
-/// Package shard limit; the default resolves against the selected tests and
-/// program size in `run_emitted_tests`, before the program text is freed.
 fn test_shard_count() -> Result<usize> {
     let value = match std::env::var("ROCK_TEST_SHARDS") {
         Ok(value) => Some(value),
@@ -1511,7 +1414,6 @@ fn resolve_test_shards(
 #[path = "../tests/test_shards/policy.rs"]
 mod test_shard_policy;
 
-/// Read the checked FFI namespace without assigning runtime meaning to names.
 fn test_program_facts(
     ws: &bone_semantic::inference::Workspace,
 ) -> crate::registry::TestProgramFacts {
@@ -1530,11 +1432,6 @@ fn test_program_facts(
     crate::registry::TestProgramFacts { ffi_libraries }
 }
 
-/// The `@test` fns defined in the package rooted at `dir` -- its own source
-/// files and its `tests/`, but NOT stdlib or dependency packages (which live at
-/// other canonical paths). Module file paths are canonicalized absolute, so a
-/// prefix match against the canonicalized `dir` selects exactly this package.
-/// Carry each test's `FuncRef` so executors retain its source file.
 pub(crate) fn collect_package_test_fns(
     ws: &bone_semantic::inference::Workspace,
     dir: &str,
@@ -1568,10 +1465,6 @@ pub(crate) fn collect_package_test_fns(
     Ok(out)
 }
 
-/// Parse the `--profile` value for the `rock shader` entry forms -- the only
-/// command that selects a profile (in-game source is emitted once and adapted
-/// to the live GL context by the engine). No fallback: an unknown value rejects
-/// listing the valid ones.
 pub(crate) fn parse_glsl_profile(s: Option<&str>) -> Result<skull_codegen_glsl::GlslProfile> {
     use skull_codegen_glsl::GlslProfile;
     match s {
@@ -1617,7 +1510,6 @@ fn emit_shader_program_with_view(
     skull_codegen_glsl::emit_shader_with_view(ws, &shader_scx, program_view, profile)
 }
 
-/// Emit an entry or a library of GLSL functions. Only an entry carries a profile header.
 pub(crate) fn skull_shader(
     files: &[String],
     output: Option<String>,
@@ -1675,7 +1567,6 @@ pub(crate) fn skull_shader(
         })
         .collect::<Result<_>>()?;
 
-    // Pipeline form: any root is a `@shader(vertex)` entry.
     let is_pipeline = roots
         .iter()
         .any(|r| skull_codegen_glsl::is_vertex_shader_root(&ws, user_mid, r));
@@ -1718,9 +1609,6 @@ pub(crate) fn skull_shader(
             }
         }
     } else {
-        // The route-B fn library emits no `#version` line, so a profile cannot
-        // apply to it; the single-root fullscreen entry takes one like the
-        // pipeline form does.
         let is_entry = roots.len() == 1
             && skull_codegen_glsl::is_fragment_shader_root(&ws, user_mid, &roots[0]);
         if profile.is_some() && !is_entry {
@@ -1837,7 +1725,6 @@ pub(crate) fn skull_compile_single(path: &str, output: Option<String>) -> Result
             log::info!(target: "SKULL", "{} -> {}", path, out);
         }
         None => {
-            // Result output (the compiled Lua), not logging — pipeable.
             print!("{}", lua);
         }
     }
@@ -1954,8 +1841,6 @@ fn write_watch_output(
     Ok(emit_time)
 }
 
-/// `rock run <file> --backend skull` — emit Lua, append a `main()` call if the
-/// file defines one, and execute it.
 pub(crate) fn skull_run(path: &str, app_args: &[String]) -> Result<()> {
     if std::path::Path::new(path).is_dir() {
         return skull_run_project(path, app_args);
@@ -1970,15 +1855,10 @@ pub(crate) fn skull_run(path: &str, app_args: &[String]) -> Result<()> {
     crate::compile_cmd::run_program(&program)
 }
 
-/// Render a bone `CompilerError` against a whole project's source set, so spans
-/// resolve to the right file. Every discovered source is registered under its
-/// id-path (the same id used when parsing into a module).
 pub(crate) fn render_project_err(sources: &SourceFiles, e: &CompilerError) -> String {
     render_project_errs(sources, std::slice::from_ref(e))
 }
 
-/// [`render_project_err`] over every collected diagnostic, joined into one
-/// report — the CLI prints ALL of them, matching the LSP.
 pub(crate) fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError]) -> String {
     let mut sf = SourceFiles::empty();
     for file in &sources.files {
@@ -2064,7 +1944,6 @@ fn skull_emit_project_with_inputs(
     crate::bone_backend::log_compile_stats(&sources, &ws, compile, compile, None);
 
     let lua = GameProgram::new(lua, &ws);
-    // Overlap workspace destruction with the final output write or runtime launch.
     #[cfg(not(feature = "sequential"))]
     rayon::spawn(move || drop((ws, emission)));
     #[cfg(feature = "sequential")]
@@ -2072,10 +1951,6 @@ fn skull_emit_project_with_inputs(
     Ok((lua, emits_main))
 }
 
-/// Writes the emitted-site manifest to `explicit`, else to the path the
-/// environment names: `SKULL_ALLOCATION_REPORT`, or the
-/// `SKULL_ALLOCATION_ACTIVATION` capture with a `.manifest.txt` extension.
-/// Every compile that emits instrumented sites calls this.
 fn write_allocation_report(
     explicit: Option<&std::path::Path>,
     report: &skull::allocation_report::AllocationReport,
@@ -2099,7 +1974,6 @@ fn write_allocation_report(
         .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))
 }
 
-/// Emitted Lua with compiler-owned metadata, passed unchanged to the runtime host.
 pub struct GameProgram {
     comptime_inputs: bone_semantic::inference::ComptimeInputs,
     lua: String,
@@ -2114,9 +1988,6 @@ impl GameProgram {
     }
 }
 
-/// A checked sim declaration, in workspace/source order. Wire identities use
-/// the same derivation as the emitted registry; authored environment pairs
-/// retain their order. Runtime interpretation belongs to the host.
 pub struct SimDescriptor {
     pub module: bone_core::prelude::ModuleId,
     pub function: bone_core::prelude::Idx<bone_core::hir::Function>,
@@ -2161,13 +2032,7 @@ pub fn collect_sim_descriptors(ws: &bone_semantic::inference::Workspace) -> Vec<
     sims
 }
 
-/// `rock compile <project-dir> --backend skull` — assemble + type-check + emit
-/// the whole project to Lua and write it to `output` (or stdout). The directory
-/// analogue of the single-file [`skull_compile_single`] path; shares
-/// [`skull_emit_project`] with `run`.
 fn skull_compile_project(dir: &str, output: Option<String>) -> Result<()> {
-    // The build vars resolve on their own thread; time the compile still
-    // waits for them shows under prepare's "comptime inputs".
     let budget = crate::compile_budget::Scope::begin(dir);
     let inputs = crate::comptime::ProjectInputs::resolve(std::path::Path::new(dir));
     crate::compile_budget::phase("build vars");
@@ -2176,17 +2041,12 @@ fn skull_compile_project(dir: &str, output: Option<String>) -> Result<()> {
     Ok(())
 }
 
-/// Compile with pre-resolved host inputs and return the final recorded map,
-/// including compiler-derived declarations resolved after semantic checking.
-/// Packaging uses this map so metadata and executable reads agree.
 pub(crate) fn skull_compile_project_with_recorded_inputs(
     dir: &str,
     output: Option<String>,
     inputs: impl Into<crate::comptime::ProjectInputs>,
 ) -> Result<bone_semantic::inference::ComptimeInputs> {
     let budget = crate::compile_budget::Scope::begin(dir);
-    // The preamble reads only the project's manifest and files, so it is
-    // built while the program compiles.
     let preamble = {
         let dir = dir.to_string();
         std::thread::spawn(move || {
@@ -2194,10 +2054,6 @@ pub(crate) fn skull_compile_project_with_recorded_inputs(
         })
     };
     let (emit, emits_main) = skull_emit_project_with_inputs(dir, inputs.into())?;
-    // A game's runnable main.lua is the same shape run/engine produce via
-    // write_full_main: preamble (game source dir) + emit +
-    // __rock_main_wrapper(main). Without the preamble game asset paths are
-    // wrong; without the wrapper it never starts.
     let preamble = preamble
         .join()
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
@@ -2265,8 +2121,6 @@ pub(crate) fn collect_test_units(paths: &[String]) -> Result<(Vec<String>, Vec<S
     files.sort();
     files.dedup();
     package_dirs.sort();
-    // `project`, `project/`, `./project` and `project/tests` all name one package: dedup by
-    // its canonical root, keeping the first spelling as the unit label.
     let mut seen = HashSet::new();
     let mut unique = Vec::with_capacity(package_dirs.len());
     for dir in package_dirs {
@@ -2277,8 +2131,6 @@ pub(crate) fn collect_test_units(paths: &[String]) -> Result<(Vec<String>, Vec<S
     Ok((files, unique))
 }
 
-/// `test_threads` caps how many file units compile and run at once (default:
-/// one per CPU); packages run after them, one at a time.
 pub(crate) fn skull_test(
     paths: &[String],
     filter: Option<&crate::test::TestFilter>,
@@ -2302,7 +2154,6 @@ pub(crate) fn skull_test(
     let mut details: Vec<(String, String)> = Vec::new();
     let mut timings: Vec<(String, TestTiming)> = Vec::new();
 
-    // Sampling builds keep one stack for the profiler.
     let threads = if cfg!(feature = "sequential") {
         1
     } else {
@@ -2310,8 +2161,6 @@ pub(crate) fn skull_test(
             std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
         })
     };
-    // Files use the configured pool, while package workspaces stay serial.
-    // The common unit runner preserves result order and contains each panic.
     let outcomes =
         crate::test_unit::run_units(&files, &package_dirs, Some(threads), |unit, is_package| {
             if is_package {
@@ -2472,7 +2321,6 @@ pub(crate) fn skull_test(
         println!("  @test shards: {shards} LuaJIT processes per package (ROCK_TEST_SHARDS)");
     }
 
-    // Error-test fixtures (`.rock.err`) verify rejection in the shared front end.
     let err_start = Instant::now();
     let mut err_failed = 0usize;
     for path in paths {
@@ -2500,14 +2348,10 @@ pub(crate) fn skull_test(
 #[path = "skull_backend_tests.rs"]
 mod tests;
 
-// Edit helpers for `lsp-survey`.
-
 pub(crate) fn ms(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1000.0
 }
 
-/// Change a numeric literal in the compiler's body span, preserving its type.
-/// Token spans exclude digits in names, comments, strings and the signature.
 pub(crate) fn body_numeric_edit(
     text: &str,
     body_range: std::ops::Range<usize>,
@@ -2547,10 +2391,6 @@ pub(crate) fn body_numeric_edit(
     Ok(None)
 }
 
-// ---------------------------------------------------------------------------
-// Incremental compiler: two-file output (main.lua + incremental.lua)
-// ---------------------------------------------------------------------------
-
 pub(crate) fn skull_game_main<'a>(
     preamble: &'a str,
     program: &'a GameProgram,
@@ -2571,10 +2411,6 @@ fn write_program_parts(writer: &mut impl std::io::Write, parts: &[&str]) -> std:
     Ok(())
 }
 
-/// Remove the accumulated overlay. A missing file is the normal "no overlay yet"
-/// case and is fine; ANY other error is surfaced -- a stale `incremental.lua`
-/// left beside a fresh `main.lua` would reintroduce the overlay/main desync the
-/// two-file split exists to avoid.
 pub(crate) fn wipe_overlay(incremental_path: &std::path::Path) -> Result<()> {
     match std::fs::remove_file(incremental_path) {
         Ok(()) => Ok(()),
@@ -2586,10 +2422,6 @@ pub(crate) fn wipe_overlay(incremental_path: &std::path::Path) -> Result<()> {
     }
 }
 
-/// Write the full game-shaped `main.lua` and wipe any accumulated overlay -- the
-/// shared tail of every FULL (re)build: `init`, the interface-rebuild branch of
-/// `recompile`, and `force_full`. Returns the bytes written (the size the `Full`
-/// reload reports).
 pub fn write_full_main(
     preamble: &str,
     emit_lua: &GameProgram,
@@ -2628,24 +2460,14 @@ pub fn write_full_main(
     Ok(bytes)
 }
 
-/// What an incremental recompile produced. `cook_ms` is the front end (source
-/// re-read + per-file incremental cook + re-typecheck via `Session.update_file`);
-/// `emit_ms` is codegen + file write (`emit_overlay`/`emit_full`). `bytes` is the
-/// written output size -- for `Incremental` that's the overlay size, the headline
-/// signal for the overlay-size question.
 #[derive(Debug)]
 pub enum SkullReload {
-    /// Full rebuild after an interface or structural edit.
     Full {
         bytes: usize,
         cook_ms: f64,
         emit_ms: f64,
         write_ms: f64,
     },
-    /// Body edit: only `incremental.lua` rewritten (the overlay). `reinferred` is
-    /// the number of bodies this edit re-inferred (the edit's churn). `emit_ms` is
-    /// pure `emit_overlay`; `write_ms`
-    /// is the separate disk write of the overlay.
     Incremental {
         bytes: usize,
         reinferred: usize,
@@ -2653,31 +2475,19 @@ pub enum SkullReload {
         emit_ms: f64,
         write_ms: f64,
     },
-    /// A full artifact is required before the current process can observe this
-    /// update; no output was written on this path.
-    FullRequired { reasons: Vec<String> },
-    /// A type's runtime SHAPE changed:
-    /// live state cannot be migrated in place. Nothing was written -- the
-    /// supervisor must use the restart fallback. `types` names the drifted
-    /// types for the
-    /// why-log.
-    ShapeChanged { types: Vec<String> },
-    /// Nothing changed (content-hash no-op).
+    FullRequired {
+        reasons: Vec<String>,
+    },
+    ShapeChanged {
+        types: Vec<String>,
+    },
     NoChange,
 }
 
-/// Persistent incremental compile state: a warm bone `Session` + skull emit cache
-/// driving the two-file split. A body
-/// edit re-cooks just the edited file and writes a small `incremental.lua` the
-/// running game light-reloads; an interface/structural edit rewrites `main.lua`
-/// (full) and wipes the overlay.
 pub struct IncrementalProject {
     project: crate::live_project::LiveProject,
     cache: skull::mir_emit::SkullEmitCache,
     preamble: String,
-    /// Per-type layout hashes of the last program the game process could have
-    /// loaded. A full recompile whose hashes drifted returns
-    /// `SkullReload::ShapeChanged` (full-reconstruction request) instead of writing.
     shape_hashes: skull::ShapeHashes,
     artifact_fingerprint: String,
 }
@@ -2700,10 +2510,6 @@ fn emit_live_full(
 }
 
 impl IncrementalProject {
-    /// Initial build: warm the Session, `emit_full` -> game-shaped `main.lua`,
-    /// wipe `incremental.lua`. Errors render against the project sources.
-    /// Game build: excludes test-only files (tests/ dirs) so a broken sim/test
-    /// can't break the running game.
     pub fn init(
         dir: &str,
         main_path: &std::path::Path,
@@ -2721,8 +2527,6 @@ impl IncrementalProject {
         Self::init_impl(dir, main_path, incremental_path, true, None, |_| Ok(None))
     }
 
-    /// Compile checked sim identities selected by the caller. Selection runs
-    /// once on the same workspace used for emission; `None` emits every entry.
     pub fn init_for_sim_selection(
         dir: &str,
         main_path: &std::path::Path,
@@ -2806,7 +2610,6 @@ impl IncrementalProject {
         &self.artifact_fingerprint
     }
 
-    /// Source texts that produced this compilation.
     pub fn sources(&self) -> &SourceFiles {
         self.project.sources()
     }
@@ -2827,7 +2630,6 @@ impl IncrementalProject {
         })
     }
 
-    /// Apply against the live session without modifying the source file.
     pub fn apply_edit(
         &mut self,
         path: &std::path::Path,
@@ -2860,13 +2662,10 @@ impl IncrementalProject {
             })
     }
 
-    /// The current in-session text of a source (reflects prior `apply_edit`s,
-    /// which never touch disk). None if the path isn't a discovered source.
     pub(crate) fn source_text(&self, path: &std::path::Path) -> Option<String> {
         self.project.source_text(path)
     }
 
-    /// Package roots retained by the source discovery used by this session.
     pub fn package_roots(&self) -> &[(u32, std::path::PathBuf)] {
         &self.project.sources().package_roots
     }
@@ -2879,7 +2678,6 @@ impl IncrementalProject {
     /// compare against what was compiled rather than against the startup
     /// instant.
     pub(crate) fn comptime_watch_files_with_hashes(&self) -> Vec<(std::path::PathBuf, u64)> {
-        // File ids are already the absolute canonical path the resolver read.
         let mut files = self
             .cache
             .comptime_file_hashes()
@@ -2899,7 +2697,6 @@ impl IncrementalProject {
             .collect()
     }
 
-    /// Defer full publication when existing runtime state requires a restart.
     fn route_and_emit(
         &mut self,
         update: crate::live_project::LiveUpdate,
@@ -3073,7 +2870,6 @@ impl IncrementalProject {
         }
     }
 
-    /// A restarted process reads only main.lua, so fold its overlay before launch.
     pub fn force_full(
         &mut self,
         main_path: &std::path::Path,
@@ -3107,9 +2903,6 @@ impl IncrementalProject {
         )?;
         self.artifact_fingerprint = artifact_fingerprint;
         self.cache = cache; // resets changed_since_full -- the overlay is now folded in
-        // This program is what the (re)spawned process loads -- re-baseline the
-        // shape hashes to it, including drift that arrived via a recompile that
-        // bailed on a type error after mutating the session.
         self.shape_hashes = skull::type_shape_hashes(self.project.workspace())
             .map_err(|e| anyhow::anyhow!(e.message))?;
         Ok(())
