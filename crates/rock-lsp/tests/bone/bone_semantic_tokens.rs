@@ -1,5 +1,5 @@
-//! Bone emits indices into its own token-type and modifier legends; the server
-//! must remap them to the legend it advertises, or every client miscolors.
+//! Tokens must decode against the legend the server advertises, or every
+//! client miscolors.
 
 use crate::common::{bone_ws, uri};
 use lsp_types::*;

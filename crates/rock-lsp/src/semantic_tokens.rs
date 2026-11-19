@@ -1,87 +1,16 @@
 use bone_query::FileUriExt;
 use lsp_types::{
-    SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensDelta,
-    SemanticTokensDeltaParams, SemanticTokensFullDeltaResult, SemanticTokensLegend,
-    SemanticTokensParams, SemanticTokensRangeParams, Uri,
+    SemanticToken, SemanticTokens, SemanticTokensDelta, SemanticTokensDeltaParams,
+    SemanticTokensFullDeltaResult, SemanticTokensLegend, SemanticTokensParams,
+    SemanticTokensRangeParams, Uri,
 };
 
 use crate::LspWorkspace;
 
-/// Translate the classifier's indexes into the wire legend's stable order.
-fn remap_bone_token_types(tokens: &mut lsp_types::SemanticTokens) {
-    fn index_map<T: PartialEq>(bone: &[T], advertised: &[T]) -> Vec<u32> {
-        bone.iter()
-            .map(|t| advertised.iter().position(|a| a == t).unwrap_or(0) as u32)
-            .collect()
-    }
-
-    static MAPS: std::sync::LazyLock<(Vec<u32>, Vec<u32>)> = std::sync::LazyLock::new(|| {
-        let legend = get_semantic_tokens_legend();
-        (
-            index_map(&bone_query::semantic_tokens_legend(), &legend.token_types),
-            index_map(
-                &bone_query::semantic_tokens_modifiers_legend(),
-                &legend.token_modifiers,
-            ),
-        )
-    });
-    let (type_map, mod_map) = &*MAPS;
-    for tok in &mut tokens.data {
-        if let Some(&idx) = type_map.get(tok.token_type as usize) {
-            tok.token_type = idx;
-        }
-        if tok.token_modifiers_bitset != 0 {
-            let mut remapped = 0u32;
-            for (i, &target) in mod_map.iter().enumerate() {
-                if tok.token_modifiers_bitset & (1 << i) != 0 {
-                    remapped |= 1 << target;
-                }
-            }
-            tok.token_modifiers_bitset = remapped;
-        }
-    }
-}
-
 pub fn get_semantic_tokens_legend() -> SemanticTokensLegend {
     SemanticTokensLegend {
-        token_types: vec![
-            SemanticTokenType::NAMESPACE,
-            SemanticTokenType::TYPE,
-            SemanticTokenType::CLASS,
-            SemanticTokenType::ENUM,
-            SemanticTokenType::INTERFACE,
-            SemanticTokenType::STRUCT,
-            SemanticTokenType::TYPE_PARAMETER,
-            SemanticTokenType::PARAMETER,
-            SemanticTokenType::VARIABLE,
-            SemanticTokenType::PROPERTY,
-            SemanticTokenType::ENUM_MEMBER,
-            SemanticTokenType::FUNCTION,
-            SemanticTokenType::METHOD,
-            SemanticTokenType::MACRO,
-            SemanticTokenType::KEYWORD,
-            SemanticTokenType::COMMENT,
-            SemanticTokenType::STRING,
-            SemanticTokenType::NUMBER,
-            SemanticTokenType::REGEXP,
-            SemanticTokenType::OPERATOR,
-            SemanticTokenType::DECORATOR,
-        ],
-        token_modifiers: vec![
-            SemanticTokenModifier::DECLARATION,
-            SemanticTokenModifier::DEFINITION,
-            SemanticTokenModifier::READONLY,
-            SemanticTokenModifier::STATIC,
-            SemanticTokenModifier::DEPRECATED,
-            SemanticTokenModifier::ABSTRACT,
-            SemanticTokenModifier::ASYNC,
-            SemanticTokenModifier::MODIFICATION,
-            SemanticTokenModifier::DOCUMENTATION,
-            SemanticTokenModifier::DEFAULT_LIBRARY,
-            SemanticTokenModifier::new("nullable"),
-            // Use refined when flow analysis proves a nullable binding is non-null at this read.
-            SemanticTokenModifier::new("refined"),
-        ],
+        token_types: bone_query::semantic_tokens_legend(),
+        token_modifiers: bone_query::semantic_tokens_modifiers_legend(),
     }
 }
 
@@ -117,11 +46,11 @@ pub(crate) fn range_semantic_tokens(
     params: &SemanticTokensRangeParams,
 ) -> anyhow::Result<Option<SemanticTokens>> {
     let file_path = params.text_document.uri.to_file_path()?;
-    let mut tokens = workspace
-        .bone
-        .semantic_tokens_range(&file_path, params.range);
-    remap_bone_token_types(&mut tokens);
-    Ok(Some(tokens))
+    Ok(Some(
+        workspace
+            .bone
+            .semantic_tokens_range(&file_path, params.range),
+    ))
 }
 
 /// `uri` decodes to the key `bone.update` registers on didChange.
@@ -130,9 +59,7 @@ pub fn compute_semantic_tokens_workspace(
     uri: &Uri,
 ) -> anyhow::Result<SemanticTokens> {
     let file_path = uri.to_file_path()?;
-    let mut tokens = workspace.bone.semantic_tokens(&file_path);
-    remap_bone_token_types(&mut tokens);
-    Ok(tokens)
+    Ok(workspace.bone.semantic_tokens(&file_path))
 }
 
 /// A failed or empty recompute falls back to the cached tokens.
