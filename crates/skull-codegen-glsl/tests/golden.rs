@@ -27,18 +27,17 @@ fn nobox_vec2_stdlib() -> Vec<skull_parser::Ast> {
         .collect()
 }
 
-#[test]
-fn a_user_fn_named_like_an_intrinsic_is_its_own_function() {
-    let src = r#"
-        @pure fn abs(b: bool) -> int { if b { return 5 } return 7 }
-        @pure fn root() -> int { return abs(true) * 10 + abs(false) }
-    "#;
-    let glsl = emit(src, &["root"]).expect("emit");
-    assert_has(&glsl, "int abs_bool(bool b) {");
-    assert_has(&glsl, "return ((abs_bool(true) * 10) + abs_bool(false));");
-}
-
 cases! { golden:
+    a_user_fn_named_like_an_intrinsic_is_its_own_function(
+        r#"
+            @pure fn abs(b: bool) -> int { if b { return 5 } return 7 }
+            @pure fn root() -> int { return abs(true) * 10 + abs(false) }
+        "#,
+        "root",
+        &["int abs_bool(bool b) {", "return ((abs_bool(true) * 10) + abs_bool(false));"],
+        &[],
+    );
+
     generic_and_plain_callees(
         r#"
             @pure fn identity<T>(x: T) -> T { return x }
@@ -148,22 +147,18 @@ fn fragment_call_swizzles_evaluate_each_call_once() {
     }
 }
 
-#[test]
-fn param_loop_bound_not_folded() {
-    let src = r#"fn f(n: int) -> int {
-        let acc = 0
-        for i in 0..n { acc = acc + i }
-        return acc
-    }"#;
-    let glsl = emit(src, &["f"]).expect("emit");
-    assert!(
-        glsl.contains("t3 = n;"),
-        "param bound must stay a temp:\n{glsl}"
-    );
-    assert_has(&glsl, "for (; i < t3; i = i + 1) {");
-}
-
 cases! { golden:
+    param_loop_bound_not_folded(
+        r#"fn f(n: int) -> int {
+            let acc = 0
+            for i in 0..n { acc = acc + i }
+            return acc
+        }"#,
+        "f",
+        &["t3 = n;", "for (; i < t3; i = i + 1) {"],
+        &[],
+    );
+
     match_int_ladder(
         r#"@pure fn f(n: int) -> int {
             match n { 1 => { return 10 } 2 => { return 20 } _ => { return 0 } }
@@ -198,24 +193,17 @@ fn exhaustive_bool_match_expression_structures() {
     );
 }
 
-#[test]
-fn match_expression_ladder_is_not_folded() {
-    let src = r#"@pure fn f(n: int) -> int {
-        let x = match n { 1 => 10, 2 => 20, _ => 30 }
-        return x + 1
-    }"#;
-    let glsl = emit(src, &["f"]).expect("emit");
-    assert!(
-        glsl.contains("t1 = 10;"),
-        "n == 1 arm must survive; got:\n{glsl}"
-    );
-    assert!(
-        !glsl.contains("(n == 2) ? 20 : 30"),
-        "inner diamond must not fold past the outer arm's store; got:\n{glsl}"
-    );
-}
-
 cases! { golden:
+    match_expression_ladder_is_not_folded(
+        r#"@pure fn f(n: int) -> int {
+            let x = match n { 1 => 10, 2 => 20, _ => 30 }
+            return x + 1
+        }"#,
+        "f",
+        &["t1 = 10;"],
+        &["(n == 2) ? 20 : 30"],
+    );
+
     nested_while_loops(
         r#"fn f(n: int) -> int {
             let acc = 0
@@ -267,17 +255,17 @@ fn int_param_returned_from_float_fn() {
     assert_eq!(glsl.trim(), "float f_int(int i) {\n  return float(i);\n}");
 }
 
-#[test]
-fn int_arg_at_float_param() {
-    let src = r#"
-        @pure fn takes_float(x: float) -> float { return x }
-        @pure fn f(i: int) -> float { return takes_float(i) }
-    "#;
-    let glsl = emit(src, &["f"]).expect("emit");
-    assert_has(&glsl, "return takes_float_float(float(i));");
-}
-
 cases! { golden:
+    int_arg_at_float_param(
+        r#"
+            @pure fn takes_float(x: float) -> float { return x }
+            @pure fn f(i: int) -> float { return takes_float(i) }
+        "#,
+        "f",
+        &["return takes_float_float(float(i));"],
+        &[],
+    );
+
     int_in_mixed_arithmetic(
         r#"@pure fn f(x: float, i: int) -> float { return x + i }"#,
         "f",
@@ -288,6 +276,18 @@ cases! { golden:
         r#"fn f() -> float { let y: float = 0  return y }"#,
         "f",
         &["float y;\n  y = 0.0;\n  return y;"], &[],
+    );
+
+    glsl_emits_no_double_underscore_for_lua_escaped_names_or_idiv(
+        r#"
+            @pure fn compute(a: int, b: int) -> int {
+                let local = a ./ b
+                return local
+            }
+        "#,
+        "compute",
+        &["rock_idiv"],
+        &["__"],
     );
 }
 
@@ -333,25 +333,6 @@ fn helper_float_default_is_carried_on_desktop_profile() {
     for glsl in [&omitted, &explicit] {
         assert!(!glsl.contains("null"), "must not mention null:\n{glsl}");
     }
-}
-
-#[test]
-fn glsl_emits_no_double_underscore_for_lua_escaped_names_or_idiv() {
-    let src = r#"
-        @pure fn compute(a: int, b: int) -> int {
-            let local = a ./ b
-            return local
-        }
-    "#;
-    let glsl = emit(src, &["compute"]).expect("must emit GLSL");
-    assert!(
-        !glsl.contains("__"),
-        "GLSL identifiers must not contain reserved double underscores:\n{glsl}"
-    );
-    assert!(
-        glsl.contains("rock_idiv"),
-        "GLSL floored division helper must be emitted:\n{glsl}"
-    );
 }
 
 #[test]
