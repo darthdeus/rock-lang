@@ -86,3 +86,22 @@ fn test_white_image() -> Image {
     release_owned_image_data(data)
     return image
 }
+
+// Returns a closure that puts back the bound render state as it was now.
+fn render_state_saved() -> fn() -> () {
+    let saved_canvas = CURRENT_CANVAS_HANDLE
+    let saved_shader = WATCHER.current_shader_name
+    let saved_blend = CURRENT_BLEND
+    let saved_render_pool = CURRENT_RENDER_POOL
+    let saved_ui_pool = CURRENT_UI_POOL
+    return () => {
+        set_canvas_handle(saved_canvas)
+        if saved_shader != null { set_shader(saved_shader) } else { unset_shader() }
+        WATCHER.current_shader_name = saved_shader
+        set_blend_mode(saved_blend)
+        unset_depth_mode()
+        reset_camera()
+        CURRENT_RENDER_POOL = saved_render_pool
+        CURRENT_UI_POOL = saved_ui_pool
+    }
+}

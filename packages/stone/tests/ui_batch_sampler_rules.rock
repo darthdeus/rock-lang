@@ -106,24 +106,15 @@ fn ui_batch_sampler_guarded(body: fn(SampledTexture) -> ()) {
     setup_stone()
     assert(stone_gpu_host_ensure(), "borrow the process GPU host")
     assert(stone_sprite_init())
-    let saved_pool = CURRENT_UI_POOL
-    let saved_canvas = CURRENT_CANVAS_HANDLE
-    let saved_shader = WATCHER.current_shader_name
-    let saved_blend = CURRENT_BLEND
+    let restore_state = render_state_saved()
     let saved_serial = TEXT_RENDER_ORDER_SERIAL
     let saved_flush_order = TEXT_UI_FLUSH_ORDER
     let saved_white = WHITE_PIXEL
     defer {
+        restore_state()
         WHITE_PIXEL = saved_white
         TEXT_RENDER_ORDER_SERIAL = saved_serial
         TEXT_UI_FLUSH_ORDER = saved_flush_order
-        CURRENT_UI_POOL = saved_pool
-        set_canvas_handle(saved_canvas)
-        if saved_shader != null { set_shader(saved_shader) } else { unset_shader() }
-        WATCHER.current_shader_name = saved_shader
-        set_blend_mode(saved_blend)
-        unset_depth_mode()
-        reset_camera()
     }
     let white_img = ui_batch_sampler_solid(v(1.0, 1.0, 1.0, 1.0))
     defer { release_owned_image(white_img) }

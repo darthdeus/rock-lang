@@ -49,9 +49,7 @@ fn draw_list_material_batches_bind_independently_and_reject_missing_inputs() {
     gpu_test_host()
     let saved_white = WHITE_PIXEL
     let saved_canvas = CURRENT_CANVAS_HANDLE
-    let saved_shader = WATCHER.current_shader_name
-    let saved_blend = CURRENT_BLEND
-    let saved_pool = CURRENT_RENDER_POOL
+    let restore_state = render_state_saved()
     let white = test_white_image()
     let red = draw_list_material_edge(RED, BLUE)
     let green = draw_list_material_edge(GREEN, BLUE)
@@ -63,13 +61,7 @@ fn draw_list_material_batches_bind_independently_and_reject_missing_inputs() {
         // The intentional rejection escapes with_canvas/with_shader before
         // their tails.
         for slot in 0..shader_texture_slot_count(shader) { sampler_release_unit(slot) }
-        set_canvas_handle(saved_canvas)
-        if saved_shader != null { set_shader(saved_shader) } else { unset_shader() }
-        WATCHER.current_shader_name = saved_shader
-        set_blend_mode(saved_blend)
-        unset_depth_mode()
-        reset_camera()
-        CURRENT_RENDER_POOL = saved_pool
+        restore_state()
     }
     defer {
         restore()

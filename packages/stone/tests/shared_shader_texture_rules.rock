@@ -8,9 +8,7 @@ fn shared_texture_test_frag(@textures t: SharedTextureTestTex, tc: Vec2) -> Vec4
 @test
 fn shared_shader_texture_rebinds_after_other_programs_and_updates_while_active() {
     gpu_test_host()
-    let saved_canvas = CURRENT_CANVAS_HANDLE
-    let saved_shader = WATCHER.current_shader_name
-    let saved_blend = CURRENT_BLEND
+    let restore_state = render_state_saved()
     let state = stone_gl_pass_state_begin()
     assert(state != 0)
     let shader = pipeline(rock_shader(shared_texture_test_frag)).shader_name
@@ -20,9 +18,7 @@ fn shared_shader_texture_rebinds_after_other_programs_and_updates_while_active()
     defer {
         shader_clear_shared_textures(shader)
         end_shader()
-        set_canvas_handle(saved_canvas)
-        set_blend_mode(saved_blend)
-        if let prior = saved_shader { set_shader(prior) }
+        restore_state()
         assert(stone_gl_pass_state_end(state))
         destroy_canvas(out)
         destroy_canvas(blue)
