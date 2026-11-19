@@ -3101,87 +3101,50 @@ impl<'a> Builder<'a> {
             .collect()
     }
 
-    pub(crate) fn emit_param_default(
+    fn append_omitted_argument(
         &mut self,
-        default: &CallParamDefault,
+        out: &mut Vec<Idx<Inst>>,
+        default: Option<&CallParamDefault>,
         slot: &RepLayout,
-    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+    ) -> Result<(), CompilerError> {
         match default {
-            CallParamDefault::Scalar(lit) if slot.slot_count(self.scx.rep_arena()) == 1 => {
-                Ok(vec![self.emit_cur(Inst::Const(lit.clone()))])
+            Some(CallParamDefault::Scalar(lit)) if slot.slot_count(self.scx.rep_arena()) == 1 => {
+                out.push(self.emit_cur(Inst::Const(lit.clone())));
             }
-            // A scalarized nullable value tells omitted from null by its
-            // presence leaf, so an omitted one is nil in every leaf.
-            CallParamDefault::Scalar(Lit::Omitted) => Ok((0..slot
-                .slot_count(self.scx.rep_arena()))
-                .map(|_| self.emit_cur(Inst::Const(Lit::Nil)))
-                .collect()),
-            CallParamDefault::Vector { shape, literals } => {
+            // An absent scalarized argument needs nil in every lane of its slot.
+            None | Some(CallParamDefault::Scalar(Lit::Omitted)) => {
+                for _ in 0..slot.slot_count(self.scx.rep_arena()) {
+                    out.push(self.emit_cur(Inst::Const(Lit::Nil)));
+                }
+            }
+            Some(CallParamDefault::Vector { shape, literals }) => {
                 let leaves: Vec<_> = literals
                     .iter()
                     .map(|lit| self.emit_cur(Inst::Const(lit.clone())))
                     .collect();
                 match slot {
-                    RepLayout::Leaves(expected) if expected == shape => Ok(leaves),
+                    RepLayout::Leaves(expected) if expected == shape => out.extend(leaves),
                     RepLayout::Opaque => {
                         let parts = leaves.into_iter().map(ValueRepr::Scalar).collect();
-                        let value = self.pack(ValueRepr::Group {
+                        out.push(self.pack(ValueRepr::Group {
                             name: shape.name,
                             parts,
                             present: None,
-                        })?;
-                        Ok(vec![value])
+                        })?);
                     }
                     _ => {
-                        Err(self
-                            .gap_here("constant vector default does not match its parameter ABI"))
+                        return Err(self
+                            .gap_here("constant vector default does not match its parameter ABI"));
                     }
                 }
             }
-            _ => Err(self.gap_here("constant scalar default does not match its parameter ABI")),
-        }
-    }
-
-    /// Explicit values for the parameters a positional call left off the end:
-    /// a caller-supplied default ([`Self::call_param_defaults`]) becomes wire literals, a parameter without one keeps its
-    /// nil (one per wire slot) so the callee fills it, and the trailing nils Lua
-    /// would supply anyway are dropped. `param_shapes` is the scalar ABI's slot
-    /// table; `None` is the boxed ABI (one slot each).
-    pub(crate) fn trailing_default_args(
-        &mut self,
-        func: FuncRef,
-        provided: usize,
-        param_shapes: Option<&[&RepLayout]>,
-    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let defaults = self.call_param_defaults(func);
-        let slots_of = |i: usize| {
-            param_shapes
-                .and_then(|s| s.get(i))
-                .map_or(1, |s| s.slot_count(self.scx.rep_arena()))
-        };
-        let last = (provided..defaults.len())
-            .rev()
-            .find(|&i| defaults[i].is_some());
-        let Some(last) = last else {
-            return Ok(Vec::new());
-        };
-        let mut out = Vec::new();
-        for (i, default) in defaults.iter().enumerate().take(last + 1).skip(provided) {
-            match default {
-                Some(default) => {
-                    let slot = param_shapes
-                        .and_then(|shapes| shapes.get(i).copied())
-                        .unwrap_or(&RepLayout::Opaque);
-                    out.extend(self.emit_param_default(default, slot)?);
-                }
-                _ => {
-                    for _ in 0..slots_of(i) {
-                        out.push(self.emit_cur(Inst::Const(Lit::Nil)));
-                    }
-                }
+            _ => {
+                return Err(
+                    self.gap_here("constant scalar default does not match its parameter ABI")
+                );
             }
         }
-        Ok(out)
+        Ok(())
     }
 
     /// Opaque callers may omit arguments, so fill defaults in the callee too.

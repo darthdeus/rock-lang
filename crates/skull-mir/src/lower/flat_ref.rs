@@ -1,6 +1,6 @@
 //! Flat-stored element references carry their container and checked slot.
 //! A callee uses a specialized body for each argument storage signature.
-use super::call::DirectCall;
+use super::call::{DirectCall, call_argument_parameter, call_uses_parameter_slots};
 use super::*;
 use crate::instance::Instance;
 use bone_core::hir_walk::HirChild;
@@ -284,18 +284,10 @@ impl<'a> Builder<'a> {
         let mut flat_args = Vec::new();
         let mut next_pos = 0usize;
         for &a in &arg_idxs {
-            if self.body.spread_args.contains(&a) {
+            let Some(pidx) = call_argument_parameter(self.body, a, &mut next_pos, |name| {
+                decl.param_decls.iter().position(|p| p.name == name)
+            }) else {
                 continue;
-            }
-            let pidx = match self.body.arg_names.get(&a) {
-                Some(nm) => match decl.param_decls.iter().position(|p| p.name == *nm) {
-                    Some(i) => i,
-                    None => continue,
-                },
-                None => {
-                    next_pos += 1;
-                    next_pos - 1
-                }
             };
             if pidx >= sig.len() || !ref_args.contains(&a) {
                 continue;
@@ -636,9 +628,7 @@ impl<'a> Builder<'a> {
     ) -> Result<FlatCallOut, CompilerError> {
         let func = self.resolve_funcref(e, name)?;
         let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-        let any_named = arg_idxs
-            .iter()
-            .any(|a| self.body.arg_names.contains_key(a) || self.body.spread_args.contains(a));
+        let any_named = call_uses_parameter_slots(self.body, &arg_idxs);
         let dc = self.plan_direct_call(e)?;
         let plan = self
             .flat_call_plan(e)?
