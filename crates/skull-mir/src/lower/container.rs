@@ -282,29 +282,31 @@ impl ContainerPlan {
     }
 
     pub fn column_elem(&self, arena: &RepArena) -> Option<crate::mir::ColumnElem> {
-        let ContainerStorage::Columns { element } = self.storage else {
-            return None;
-        };
-        let shape = arena.value_shape(element)?;
-        Some(crate::mir::ColumnElem::planned(
-            shape.name,
-            shape.nullable,
-            self.element_rep(),
-            arena.get(self.element_rep()).nobox(),
-        ))
+        match self.flat_elem(arena)? {
+            (elem, FlatStorage::Columns) => Some(elem),
+            (_, FlatStorage::Strided) => None,
+        }
     }
 
-    pub fn strided_elem(&self, arena: &RepArena) -> Option<crate::mir::ColumnElem> {
-        let ContainerStorage::Strided { element } = self.storage else {
-            return None;
+    pub(crate) fn flat_elem(
+        &self,
+        arena: &RepArena,
+    ) -> Option<(crate::mir::ColumnElem, FlatStorage)> {
+        let (element, storage) = match self.storage {
+            ContainerStorage::Columns { element } => (element, FlatStorage::Columns),
+            ContainerStorage::Strided { element } => (element, FlatStorage::Strided),
+            ContainerStorage::Boxed { .. } | ContainerStorage::LeafAddressed { .. } => {
+                return None;
+            }
         };
         let shape = arena.value_shape(element)?;
-        Some(crate::mir::ColumnElem::planned(
+        let elem = crate::mir::ColumnElem::planned(
             shape.name,
             shape.nullable,
-            self.element_rep(),
-            arena.get(self.element_rep()).nobox(),
-        ))
+            element,
+            arena.get(element).nobox(),
+        );
+        Some((elem, storage))
     }
 
     pub(crate) fn ffi_element_name(&self, arena: &RepArena) -> Option<ustr::Ustr> {

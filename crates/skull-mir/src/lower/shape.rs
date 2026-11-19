@@ -968,8 +968,7 @@ pub(crate) enum SafeNavRecv {
 #[derive(Clone, Copy)]
 pub(crate) enum SpreadDest {
     Container(ContainerKind),
-    Columns(ColumnElem),
-    Strided(ColumnElem),
+    Flat(ColumnElem, FlatStorage),
 }
 
 /// The result repr of a swizzle: one selected component is the bare scalar;

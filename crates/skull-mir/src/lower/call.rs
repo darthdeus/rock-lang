@@ -1005,11 +1005,7 @@ impl<'a> Builder<'a> {
                     {
                         self.f.struct_registry_roots.insert(name);
                     }
-                    let flat_elem = match self.vec_column_elem_of(arg)? {
-                        Some(elem) => Some(elem),
-                        None => self.vec_strided_elem_of(arg)?,
-                    };
-                    if let Some(elem) = flat_elem {
+                    if let Some((elem, _)) = self.vec_flat_elem_of(arg)? {
                         if elem.is_nobox() {
                             return Err(CompilerError::new_with_label(
                                 self.body.expr_spans[e],
@@ -1077,7 +1073,7 @@ impl<'a> Builder<'a> {
                         !self.body.arg_names.contains_key(a) && !self.body.spread_args.contains(a)
                     });
                     if positional && self.resolves_to_inline_builtin(e, name) {
-                        if let Some(elem) = self.vec_strided_elem_of(value)? {
+                        if let Some((elem, flat)) = self.vec_flat_elem_of(value)? {
                             let ty = MonoTy::App {
                                 ctor: MonoCtor::Nominal(elem.name),
                                 params: Vec::new(),
@@ -1085,21 +1081,7 @@ impl<'a> Builder<'a> {
                             if super::shape::lua_value_is_immutable(self.ws, &ty) {
                                 let vec = self.lower_expr(value)?;
                                 self.lower_expr(storage)?;
-                                let value = self.clone_strided_data(vec, elem)?;
-                                return self.value_bundle_for_expr(e, value);
-                            }
-                        }
-                        if let Some(elem) = self.vec_column_elem_of(value)? {
-                            let ty = MonoTy::App {
-                                ctor: MonoCtor::Nominal(elem.name),
-                                params: Vec::new(),
-                            };
-                            // Immutable elements can share leaves, but the vector needs
-                            // independent columns. Mutable leaves still require deep cloning.
-                            if super::shape::lua_value_is_immutable(self.ws, &ty) {
-                                let vec = self.lower_expr(value)?;
-                                self.lower_expr(storage)?;
-                                let value = self.clone_column_data(vec, elem)?;
+                                let value = self.clone_flat_data(vec, elem, flat)?;
                                 return self.value_bundle_for_expr(e, value);
                             }
                         }
@@ -1225,12 +1207,8 @@ impl<'a> Builder<'a> {
         if let Callee::Unresolved { name, .. } = callee {
             if matches!(name.as_str(), "push" | "vec_push") {
                 if let [recv, item] = arg_idxs[..] {
-                    if let Some(elem) = self.vec_strided_elem_of(recv)? {
-                        let value = self.strided_push(recv, item, elem)?;
-                        return self.value_bundle_for_expr(e, value);
-                    }
-                    if let Some(elem) = self.vec_column_elem_of(recv)? {
-                        let value = self.column_push(recv, item, elem)?;
+                    if let Some((elem, storage)) = self.vec_flat_elem_of(recv)? {
+                        let value = self.flat_push(recv, item, elem, storage)?;
                         return self.value_bundle_for_expr(e, value);
                     }
                 }
@@ -1244,26 +1222,16 @@ impl<'a> Builder<'a> {
             // boundary; the concrete plan must select the column representation
             // before the body would otherwise expose a table-backed `_data`.
             if name.as_str() == "__vec_data_alloc" && arg_idxs.len() == 1 {
-                if let Some(elem) = self.vec_strided_elem_of(e)? {
+                if let Some((elem, storage)) = self.vec_flat_elem_of(e)? {
                     let capacity = self.lower_expr(arg_idxs[0])?;
-                    let value = ValueRepr::Scalar(self.empty_strided_vec(elem, capacity)?);
-                    return self.value_bundle_for_expr(e, value);
-                }
-                if let Some(elem) = self.vec_column_elem_of(e)? {
-                    let capacity = self.lower_expr(arg_idxs[0])?;
-                    let value = ValueRepr::Scalar(self.empty_column_vec(elem, capacity)?);
+                    let value = ValueRepr::Scalar(self.empty_flat_vec(elem, storage, capacity)?);
                     return self.value_bundle_for_expr(e, value);
                 }
             }
             if name.as_str() == "vec_new" && arg_idxs.is_empty() {
-                if let Some(elem) = self.vec_strided_elem_of(e)? {
+                if let Some((elem, storage)) = self.vec_flat_elem_of(e)? {
                     let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
-                    let value = ValueRepr::Scalar(self.empty_strided_vec(elem, capacity)?);
-                    return self.value_bundle_for_expr(e, value);
-                }
-                if let Some(elem) = self.vec_column_elem_of(e)? {
-                    let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
-                    let value = ValueRepr::Scalar(self.empty_column_vec(elem, capacity)?);
+                    let value = ValueRepr::Scalar(self.empty_flat_vec(elem, storage, capacity)?);
                     return self.value_bundle_for_expr(e, value);
                 }
             }
@@ -1286,16 +1254,13 @@ impl<'a> Builder<'a> {
                 }
             }
             if name.as_str() == "__rock_vec_from_lua_array" {
-                if let ([raw, len], Some(elem)) = (&arg_idxs[..], self.vec_strided_elem_of(e)?) {
+                if let ([raw, len], Some((elem, storage))) =
+                    (&arg_idxs[..], self.vec_flat_elem_of(e)?)
+                {
                     let raw = self.lower_expr(*raw)?;
                     let len = self.lower_expr(*len)?;
-                    let value = ValueRepr::Scalar(self.strided_vec_from_raw_array(raw, len, elem)?);
-                    return self.value_bundle_for_expr(e, value);
-                }
-                if let ([raw, len], Some(elem)) = (&arg_idxs[..], self.vec_column_elem_of(e)?) {
-                    let raw = self.lower_expr(*raw)?;
-                    let len = self.lower_expr(*len)?;
-                    let value = ValueRepr::Scalar(self.column_vec_from_raw_array(raw, len, elem)?);
+                    let value =
+                        ValueRepr::Scalar(self.flat_vec_from_raw_array(raw, len, elem, storage)?);
                     return self.value_bundle_for_expr(e, value);
                 }
             }
@@ -3914,13 +3879,12 @@ impl<'a> Builder<'a> {
         index: Idx<Inst>,
         kind: ContainerKind,
     ) -> Result<ValueRepr, CompilerError> {
+        if let Some((elem, storage)) = FlatStorage::of_vec_kind(kind) {
+            return self
+                .flat_element_repr(arr, index, elem, storage)
+                .map(ValueBundle::into_value);
+        }
         match kind {
-            ContainerKind::VecValueColumns(elem) => self
-                .column_element_repr(arr, index, elem)
-                .map(ValueBundle::into_value),
-            ContainerKind::VecValueStrided(elem) => self
-                .strided_element_repr(arr, index, elem)
-                .map(ValueBundle::into_value),
             ContainerKind::NativeBufferValue(elem) if self.is_leaf_addressed(elem)? => self
                 .nb_leaf_element_repr(arr, index, elem)
                 .map(ValueBundle::into_value),

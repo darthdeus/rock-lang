@@ -50,7 +50,85 @@ enum VecDataOp {
 }
 
 impl<'a> Builder<'a> {
-    pub(crate) fn clone_column_data(
+    pub(crate) fn flat_element_repr(
+        &mut self,
+        vec: Idx<Inst>,
+        index: Idx<Inst>,
+        elem: ColumnElem,
+        storage: FlatStorage,
+    ) -> Result<ValueBundle, CompilerError> {
+        match storage {
+            FlatStorage::Columns => self.column_element_repr(vec, index, elem),
+            FlatStorage::Strided => self.strided_element_repr(vec, index, elem),
+        }
+    }
+
+    pub(crate) fn flat_element_store(
+        &mut self,
+        vec: Idx<Inst>,
+        index: Idx<Inst>,
+        value: Idx<Expr>,
+        elem: ColumnElem,
+        storage: FlatStorage,
+    ) -> Result<(), CompilerError> {
+        let bundle = self.lower_expr_repr(value)?;
+        match storage {
+            FlatStorage::Columns => self.column_element_store_bundle(vec, index, &bundle, elem),
+            FlatStorage::Strided => self.strided_element_store_bundle(vec, index, &bundle, elem),
+        }
+    }
+
+    pub(crate) fn flat_append_bundle(
+        &mut self,
+        vec: Idx<Inst>,
+        bundle: &ValueBundle,
+        elem: ColumnElem,
+        storage: FlatStorage,
+    ) -> Result<(), CompilerError> {
+        match storage {
+            FlatStorage::Columns => self.column_append_bundle(vec, bundle, elem),
+            FlatStorage::Strided => self.strided_append_bundle(vec, bundle, elem),
+        }
+    }
+
+    pub(crate) fn flat_push(
+        &mut self,
+        recv: Idx<Expr>,
+        item: Idx<Expr>,
+        elem: ColumnElem,
+        storage: FlatStorage,
+    ) -> Result<ValueRepr, CompilerError> {
+        let vec = self.lower_expr(recv)?;
+        let bundle = self.lower_expr_repr(item)?;
+        self.flat_append_bundle(vec, &bundle, elem, storage)?;
+        Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))))
+    }
+
+    pub(crate) fn empty_flat_vec(
+        &mut self,
+        elem: ColumnElem,
+        storage: FlatStorage,
+        capacity: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        match storage {
+            FlatStorage::Columns => self.empty_column_vec(elem, capacity),
+            FlatStorage::Strided => self.empty_strided_vec(elem, capacity),
+        }
+    }
+
+    pub(crate) fn clone_flat_data(
+        &mut self,
+        vec: Idx<Inst>,
+        elem: ColumnElem,
+        storage: FlatStorage,
+    ) -> Result<ValueRepr, CompilerError> {
+        match storage {
+            FlatStorage::Columns => self.clone_column_data(vec, elem),
+            FlatStorage::Strided => self.clone_strided_data(vec, elem),
+        }
+    }
+
+    fn clone_column_data(
         &mut self,
         vec: Idx<Inst>,
         elem: ColumnElem,
@@ -79,7 +157,7 @@ impl<'a> Builder<'a> {
         })))
     }
 
-    pub(crate) fn clone_strided_data(
+    fn clone_strided_data(
         &mut self,
         vec: Idx<Inst>,
         elem: ColumnElem,
@@ -102,7 +180,7 @@ impl<'a> Builder<'a> {
         })))
     }
 
-    pub(crate) fn strided_element_repr(
+    fn strided_element_repr(
         &mut self,
         vec: Idx<Inst>,
         index: Idx<Inst>,
@@ -142,18 +220,7 @@ impl<'a> Builder<'a> {
             .collect()
     }
 
-    pub(crate) fn strided_element_store(
-        &mut self,
-        vec: Idx<Inst>,
-        index: Idx<Inst>,
-        value: Idx<Expr>,
-        elem: ColumnElem,
-    ) -> Result<(), CompilerError> {
-        let bundle = self.lower_expr_repr(value)?;
-        self.strided_element_store_bundle(vec, index, &bundle, elem)
-    }
-
-    pub(crate) fn strided_element_store_bundle(
+    fn strided_element_store_bundle(
         &mut self,
         vec: Idx<Inst>,
         index: Idx<Inst>,
@@ -253,19 +320,7 @@ impl<'a> Builder<'a> {
         }
     }
 
-    pub(crate) fn strided_push(
-        &mut self,
-        recv: Idx<Expr>,
-        item: Idx<Expr>,
-        elem: ColumnElem,
-    ) -> Result<ValueRepr, CompilerError> {
-        let vec = self.lower_expr(recv)?;
-        let bundle = self.lower_expr_repr(item)?;
-        self.strided_append_bundle(vec, &bundle, elem)?;
-        Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))))
-    }
-
-    pub(crate) fn strided_append_bundle(
+    fn strided_append_bundle(
         &mut self,
         vec: Idx<Inst>,
         bundle: &ValueBundle,
@@ -285,7 +340,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    pub(crate) fn empty_strided_vec(
+    fn empty_strided_vec(
         &mut self,
         elem: ColumnElem,
         capacity: Idx<Inst>,
@@ -317,7 +372,20 @@ impl<'a> Builder<'a> {
         })
     }
 
-    pub(crate) fn strided_vec_from_raw_array(
+    pub(crate) fn flat_vec_from_raw_array(
+        &mut self,
+        raw: Idx<Inst>,
+        len: Idx<Inst>,
+        elem: ColumnElem,
+        storage: FlatStorage,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        match storage {
+            FlatStorage::Columns => self.column_vec_from_raw_array(raw, len, elem),
+            FlatStorage::Strided => self.strided_vec_from_raw_array(raw, len, elem),
+        }
+    }
+
+    fn strided_vec_from_raw_array(
         &mut self,
         raw: Idx<Inst>,
         len: Idx<Inst>,
@@ -356,6 +424,42 @@ impl<'a> Builder<'a> {
         let next = self.int_plus_one(i);
         self.store_cell(cell, next);
         self.f.set_term(self.cur, Term::Goto(header));
+        self.cur = exit;
+        Ok(vec)
+    }
+
+    fn column_vec_from_raw_array(
+        &mut self,
+        raw: Idx<Inst>,
+        len: Idx<Inst>,
+        elem: ColumnElem,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let vec = self.empty_column_vec(elem, len)?;
+        let i_cell = self.f.new_cell(None);
+        let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
+        self.store_cell(i_cell, zero);
+
+        let header = self.f.new_block();
+        let body = self.f.new_block();
+        let exit = self.f.new_block();
+        self.f.set_term(self.cur, Term::Goto(header));
+
+        self.cur = header;
+        let i = self.emit_cur(Inst::Load(i_cell));
+        let cmp = self.emit_cur(Inst::IntLt(i, len));
+        self.branch_to(cmp, body, exit);
+
+        self.cur = body;
+        let i_now = self.emit_cur(Inst::Load(i_cell));
+        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
+        let one_based = self.emit_cur(Inst::IntAdd(i_now, one));
+        let value = self.read_index(raw, one_based, ContainerKind::VecColumn);
+        let bundle = ValueBundle::new(elem.representation(), ValueRepr::Scalar(value));
+        self.column_append_bundle(vec, &bundle, elem)?;
+        let next = self.emit_cur(Inst::IntAdd(i_now, one));
+        self.store_cell(i_cell, next);
+        self.f.set_term(self.cur, Term::Goto(header));
+
         self.cur = exit;
         Ok(vec)
     }
@@ -797,15 +901,7 @@ impl<'a> Builder<'a> {
             ("__rock_vec_to_lua_array", &[recv]) => (recv, VecDataOp::ToLua),
             _ => return Ok(None),
         };
-        let Some(plan) = self.container_plan_for(recv, ContainerFamily::Vec)? else {
-            return Ok(None);
-        };
-        let arena = self.scx.rep_arena();
-        let (elem, storage) = if let Some(elem) = plan.strided_elem(arena) {
-            (elem, FlatStorage::Strided)
-        } else if let Some(elem) = plan.column_elem(arena) {
-            (elem, FlatStorage::Columns)
-        } else {
+        let Some((elem, storage)) = self.vec_flat_elem_of(recv)? else {
             return Ok(None);
         };
 
@@ -813,19 +909,12 @@ impl<'a> Builder<'a> {
             VecDataOp::Get(index) => {
                 let vec = self.lower_expr(recv)?;
                 let index = self.lower_expr(index)?;
-                return match storage {
-                    FlatStorage::Columns => self.column_element_repr(vec, index, elem),
-                    FlatStorage::Strided => self.strided_element_repr(vec, index, elem),
-                }
-                .map(Some);
+                return self.flat_element_repr(vec, index, elem, storage).map(Some);
             }
             VecDataOp::Set(index, value) => {
                 let vec = self.lower_expr(recv)?;
                 let index = self.lower_expr(index)?;
-                match storage {
-                    FlatStorage::Columns => self.column_element_store(vec, index, value, elem)?,
-                    FlatStorage::Strided => self.strided_element_store(vec, index, value, elem)?,
-                }
+                self.flat_element_store(vec, index, value, elem, storage)?;
                 None
             }
             VecDataOp::Unset(index) => {
@@ -923,10 +1012,7 @@ impl<'a> Builder<'a> {
             }
             VecDataOp::Clone => {
                 let vec = self.lower_expr(recv)?;
-                Some(match storage {
-                    FlatStorage::Columns => self.clone_column_data(vec, elem)?,
-                    FlatStorage::Strided => self.clone_strided_data(vec, elem)?,
-                })
+                Some(self.clone_flat_data(vec, elem, storage)?)
             }
             VecDataOp::Sort(key) => {
                 let stride = (storage == FlatStorage::Strided)
@@ -999,7 +1085,7 @@ impl<'a> Builder<'a> {
         self.read_field(vec, crate::names::ustr(VEC_COLUMN_HEADER_FIELD))
     }
 
-    pub(crate) fn empty_column_vec(
+    fn empty_column_vec(
         &mut self,
         elem: ColumnElem,
         capacity: Idx<Inst>,
@@ -1110,58 +1196,7 @@ impl<'a> Builder<'a> {
         }
     }
 
-    pub(crate) fn column_vec_from_raw_array(
-        &mut self,
-        raw: Idx<Inst>,
-        len: Idx<Inst>,
-        elem: ColumnElem,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let vec = self.empty_column_vec(elem, len)?;
-        let i_cell = self.f.new_cell(None);
-        let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
-        self.store_cell(i_cell, zero);
-
-        let header = self.f.new_block();
-        let body = self.f.new_block();
-        let exit = self.f.new_block();
-        self.f.set_term(self.cur, Term::Goto(header));
-
-        self.cur = header;
-        let i = self.emit_cur(Inst::Load(i_cell));
-        let cmp = self.emit_cur(Inst::IntLt(i, len));
-        self.branch_to(cmp, body, exit);
-
-        self.cur = body;
-        let i_now = self.emit_cur(Inst::Load(i_cell));
-        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
-        let one_based = self.emit_cur(Inst::IntAdd(i_now, one));
-        let value = self.read_index(raw, one_based, ContainerKind::VecColumn);
-        let bundle = ValueBundle::new(elem.representation(), ValueRepr::Scalar(value));
-        self.column_append_bundle(vec, &bundle, elem)?;
-        let next = self.emit_cur(Inst::IntAdd(i_now, one));
-        self.store_cell(i_cell, next);
-        self.f.set_term(self.cur, Term::Goto(header));
-
-        self.cur = exit;
-        Ok(vec)
-    }
-
-    /// `xs.push(v)` onto a column-stored Vec: bump the shared `len` once, then
-    /// store leaf `k` into column `k` at the new slot. The element is consumed
-    /// as leaves (`repr_to_leaves`), so a literal argument never builds a box.
-    pub(crate) fn column_push(
-        &mut self,
-        recv: Idx<Expr>,
-        item: Idx<Expr>,
-        elem: ColumnElem,
-    ) -> Result<ValueRepr, CompilerError> {
-        let vec = self.lower_expr(recv)?;
-        let repr = self.lower_expr_repr(item)?;
-        self.column_append_bundle(vec, &repr, elem)?;
-        Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))))
-    }
-
-    pub(crate) fn column_append_bundle(
+    fn column_append_bundle(
         &mut self,
         vec: Idx<Inst>,
         bundle: &ValueBundle,
@@ -1369,19 +1404,6 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// `xs[i] = v` into a column-stored Vec: bounds-check once, then store leaf
-    /// `k` into column `k`. The element never materializes.
-    pub(crate) fn column_element_store(
-        &mut self,
-        vec: Idx<Inst>,
-        index: Idx<Inst>,
-        value: Idx<Expr>,
-        elem: ColumnElem,
-    ) -> Result<(), CompilerError> {
-        let repr = self.lower_expr_repr(value)?;
-        self.column_element_store_bundle(vec, index, &repr, elem)
-    }
-
     /// Emit a call to a non-generic synthesized runtime entry. Its
     /// `SiteOp::Synthesized(name)` keeps it distinct from the enclosing
     /// expression's own callee in the concrete call plan.
@@ -1580,9 +1602,6 @@ impl<'a> Builder<'a> {
         Ok(ValueBundle::new(elem.representation(), value))
     }
 
-    /// [`Self::column_element_store`] from an already-lowered repr, for a caller
-    /// that had to inspect the value's presence before choosing a block to store
-    /// in (the column Map's nullable arm).
     pub(crate) fn column_element_store_bundle(
         &mut self,
         vec: Idx<Inst>,

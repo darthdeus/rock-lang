@@ -175,7 +175,7 @@ impl<'a> Builder<'a> {
             if ContainerPlan::matches_type(family, ty) {
                 let plan = self.container_plan_for_type(ty, family)?;
                 let arena = self.scx.rep_arena();
-                return Ok(plan.column_elem(arena).is_some() || plan.strided_elem(arena).is_some());
+                return Ok(plan.flat_elem(arena).is_some());
             }
         }
         Ok(false)
@@ -191,11 +191,8 @@ impl<'a> Builder<'a> {
     }
 
     pub(crate) fn vec_kind(&self, e: Idx<Expr>) -> Result<ContainerKind, CompilerError> {
-        if let Some(elem) = self.vec_column_elem_of(e)? {
-            return Ok(ContainerKind::VecValueColumns(elem));
-        }
-        if let Some(elem) = self.vec_strided_elem_of(e)? {
-            return Ok(ContainerKind::VecValueStrided(elem));
+        if let Some((elem, storage)) = self.vec_flat_elem_of(e)? {
+            return Ok(storage.vec_kind(elem));
         }
         let elem = match self.concrete_expr_ty(e) {
             Some(MonoTy::App {
@@ -217,44 +214,24 @@ impl<'a> Builder<'a> {
         }
     }
 
-    pub(crate) fn vec_column_elem_of(
+    pub(crate) fn vec_flat_elem_of(
         &self,
         e: Idx<Expr>,
-    ) -> Result<Option<ColumnElem>, CompilerError> {
+    ) -> Result<Option<(ColumnElem, FlatStorage)>, CompilerError> {
         Ok(self
             .container_plan_for(e, ContainerFamily::Vec)?
-            .and_then(|plan| plan.column_elem(self.scx.rep_arena())))
+            .and_then(|plan| plan.flat_elem(self.scx.rep_arena())))
     }
 
-    pub(crate) fn vec_column_elem_for_type(
+    pub(crate) fn vec_flat_elem_for_type(
         &self,
         ty: &MonoTy,
-    ) -> Result<Option<ColumnElem>, CompilerError> {
+    ) -> Result<Option<(ColumnElem, FlatStorage)>, CompilerError> {
         if !ContainerPlan::matches_type(ContainerFamily::Vec, ty) {
             return Ok(None);
         }
         self.container_plan_for_type(ty, ContainerFamily::Vec)
-            .map(|plan| plan.column_elem(self.scx.rep_arena()))
-    }
-
-    pub(crate) fn vec_strided_elem_of(
-        &self,
-        e: Idx<Expr>,
-    ) -> Result<Option<ColumnElem>, CompilerError> {
-        Ok(self
-            .container_plan_for(e, ContainerFamily::Vec)?
-            .and_then(|plan| plan.strided_elem(self.scx.rep_arena())))
-    }
-
-    pub(crate) fn vec_strided_elem_for_type(
-        &self,
-        ty: &MonoTy,
-    ) -> Result<Option<ColumnElem>, CompilerError> {
-        if !ContainerPlan::matches_type(ContainerFamily::Vec, ty) {
-            return Ok(None);
-        }
-        self.container_plan_for_type(ty, ContainerFamily::Vec)
-            .map(|plan| plan.strided_elem(self.scx.rep_arena()))
+            .map(|plan| plan.flat_elem(self.scx.rep_arena()))
     }
 
     pub(crate) fn column_shape(&self, elem: ColumnElem) -> Result<ValueShape, CompilerError> {

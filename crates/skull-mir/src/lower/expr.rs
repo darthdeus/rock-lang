@@ -611,8 +611,7 @@ impl<'a> Builder<'a> {
             Expr::Array(elems) => self.lower_array_literal(e, elems),
             Expr::Index { base, index } => {
                 // Snapshot a whole value before later stores through the container.
-                if self.vec_column_elem_of(base)?.is_some()
-                    || self.vec_strided_elem_of(base)?.is_some()
+                if self.vec_flat_elem_of(base)?.is_some()
                     || (!self.scx.values_first_class
                         && (self.value_struct_of(e).is_some()
                             || self.nullable_place_value_of(e)?.is_some()))
@@ -1605,14 +1604,8 @@ impl<'a> Builder<'a> {
             // The synthesized store call belongs to the target expression.
             Expr::Index { base, index } => self.with_site_expr(target, |s| {
                 let (b, i, kind) = s.index_place(base, index)?;
-                // Column storage has no element slot: the write goes leaf-wise
-                // into K columns, so the value is consumed as a repr and never
-                // boxed. Mirrors `column_element_repr` on the read side.
-                if let ContainerKind::VecValueColumns(elem) = kind {
-                    return s.column_element_store(b, i, value, elem);
-                }
-                if let ContainerKind::VecValueStrided(elem) = kind {
-                    return s.strided_element_store(b, i, value, elem);
+                if let Some((elem, storage)) = FlatStorage::of_vec_kind(kind) {
+                    return s.flat_element_store(b, i, value, elem, storage);
                 }
                 // A column-stored Map has no slot at the key either: the write
                 // goes through the spine to a slot, then leaf-wise into `data`.
@@ -2386,23 +2379,15 @@ impl<'a> Builder<'a> {
         let has_spread = idxs
             .iter()
             .any(|&e| matches!(self.body.expr_arena[e], Expr::Spread(_)));
+        let flat_elem = match expected {
+            Some(ty) => self.vec_flat_elem_for_type(ty)?,
+            None => self.vec_flat_elem_of(lit)?,
+        };
         if !has_spread {
-            let strided_elem = match expected {
-                Some(ty) => self.vec_strided_elem_for_type(ty)?,
-                None => self.vec_strided_elem_of(lit)?,
-            };
-            if let Some(elem) = strided_elem {
-                return self.strided_vec_literal(&idxs, elem);
-            }
-            // Column storage: transpose the literal's elements into one array
-            // per leaf. Each element lowers as a repr, so no element box is
-            // built even for a literal with entries.
-            let column_elem = match expected {
-                Some(ty) => self.vec_column_elem_for_type(ty)?,
-                None => self.vec_column_elem_of(lit)?,
-            };
-            if let Some(elem) = column_elem {
-                return self.column_vec_literal(&idxs, elem);
+            match flat_elem {
+                Some((elem, FlatStorage::Columns)) => return self.column_vec_literal(&idxs, elem),
+                Some((elem, FlatStorage::Strided)) => return self.strided_vec_literal(&idxs, elem),
+                None => {}
             }
             let vs: Vec<Idx<Inst>> = idxs
                 .iter()
@@ -2410,36 +2395,15 @@ impl<'a> Builder<'a> {
                 .collect::<Result<_, _>>()?;
             return Ok(self.emit_cur(Inst::MakeVec(vs)));
         }
-        let strided_elem = match expected {
-            Some(ty) => self.vec_strided_elem_for_type(ty)?,
-            None => self.vec_strided_elem_of(lit)?,
-        };
-        if let Some(elem) = strided_elem {
+        if let Some((elem, storage)) = flat_elem {
             let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
-            let arr = self.empty_strided_vec(elem, capacity)?;
-            for &expr in &idxs {
-                if let Expr::Spread(inner) = self.body.expr_arena[expr] {
-                    self.spread_into(arr, inner, SpreadDest::Strided(elem))?;
-                } else {
-                    let bundle = self.lower_expr_repr(expr)?;
-                    self.strided_append_bundle(arr, &bundle, elem)?;
-                }
-            }
-            return Ok(arr);
-        }
-        let column_elem = match expected {
-            Some(ty) => self.vec_column_elem_for_type(ty)?,
-            None => self.vec_column_elem_of(lit)?,
-        };
-        if let Some(elem) = column_elem {
-            let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
-            let arr = self.empty_column_vec(elem, capacity)?;
+            let arr = self.empty_flat_vec(elem, storage, capacity)?;
             for &e in &idxs {
                 if let Expr::Spread(inner) = self.body.expr_arena[e] {
-                    self.spread_into(arr, inner, SpreadDest::Columns(elem))?;
+                    self.spread_into(arr, inner, SpreadDest::Flat(elem, storage))?;
                 } else {
                     let bundle = self.lower_expr_repr(e)?;
-                    self.column_append_bundle(arr, &bundle, elem)?;
+                    self.flat_append_bundle(arr, &bundle, elem, storage)?;
                 }
             }
             return Ok(arr);
@@ -2472,8 +2436,7 @@ impl<'a> Builder<'a> {
                 self.emit_cur(Inst::ArrayPush { arr, value, kind });
                 Ok(())
             }
-            SpreadDest::Columns(elem) => self.column_append_bundle(arr, &bundle, elem),
-            SpreadDest::Strided(elem) => self.strided_append_bundle(arr, &bundle, elem),
+            SpreadDest::Flat(elem, storage) => self.flat_append_bundle(arr, &bundle, elem, storage),
         }
     }
 
@@ -2489,10 +2452,7 @@ impl<'a> Builder<'a> {
                 self.emit_cur(Inst::ArrayPush { arr, value, kind });
                 Ok(())
             }
-            SpreadDest::Columns(elem) => {
-                self.append_spread_bundle(arr, ValueBundle::new(elem.representation(), value), dest)
-            }
-            SpreadDest::Strided(elem) => {
+            SpreadDest::Flat(elem, _) => {
                 self.append_spread_bundle(arr, ValueBundle::new(elem.representation(), value), dest)
             }
         }
@@ -2509,7 +2469,7 @@ impl<'a> Builder<'a> {
     ) -> Result<(), CompilerError> {
         if let Expr::Tuple(elements) = self.body.expr_arena[inner] {
             match dest {
-                SpreadDest::Columns(_) | SpreadDest::Strided(_) => {
+                SpreadDest::Flat(..) => {
                     for element in elements {
                         let bundle = self.lower_expr_repr(element)?;
                         self.append_spread_bundle(arr, bundle, dest)?;

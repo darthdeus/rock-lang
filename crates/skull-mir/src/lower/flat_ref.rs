@@ -13,6 +13,23 @@ pub(crate) enum FlatStorage {
     Strided,
 }
 
+impl FlatStorage {
+    pub(crate) fn of_vec_kind(kind: ContainerKind) -> Option<(ColumnElem, Self)> {
+        match kind {
+            ContainerKind::VecValueColumns(elem) => Some((elem, Self::Columns)),
+            ContainerKind::VecValueStrided(elem) => Some((elem, Self::Strided)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn vec_kind(self, elem: ColumnElem) -> ContainerKind {
+        match self {
+            Self::Columns => ContainerKind::VecValueColumns(elem),
+            Self::Strided => ContainerKind::VecValueStrided(elem),
+        }
+    }
+}
+
 /// What a flat `ref` addresses: the stored element and the dotted path of the
 /// nested value field inside it (empty for the whole element). Every key
 /// derived from it is static, so a body lowered for one key addresses leaves
@@ -153,11 +170,8 @@ impl<'a> Builder<'a> {
         &self,
         container: Idx<Expr>,
     ) -> Result<Option<(ColumnElem, FlatStorage)>, CompilerError> {
-        if let Some(elem) = self.vec_column_elem_of(container)? {
-            return Ok(Some((elem, FlatStorage::Columns)));
-        }
-        if let Some(elem) = self.vec_strided_elem_of(container)? {
-            return Ok(Some((elem, FlatStorage::Strided)));
+        if let Some(flat) = self.vec_flat_elem_of(container)? {
+            return Ok(Some(flat));
         }
         Ok(self
             .map_column_value_of(container)?

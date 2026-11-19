@@ -180,8 +180,10 @@ impl<'a> Builder<'a> {
             root = base;
         }
         let indexed = if let Expr::Index { base, index } = self.body.expr_arena[root] {
-            self.vec_strided_elem_of(base)?
-                .map(|elem| (base, index, elem))
+            match self.vec_flat_elem_of(base)? {
+                Some((elem, FlatStorage::Strided)) => Some((base, index, elem)),
+                _ => None,
+            }
         } else {
             None
         };
@@ -388,10 +390,8 @@ impl<'a> Builder<'a> {
     ) -> Result<ValueBundle, CompilerError> {
         let (b, kind) = self.lower_index_base(base)?;
         let i = self.lower_expr(index)?;
-        match kind {
-            ContainerKind::VecValueColumns(elem) => return self.column_element_repr(b, i, elem),
-            ContainerKind::VecValueStrided(elem) => return self.strided_element_repr(b, i, elem),
-            _ => {}
+        if let Some((elem, storage)) = FlatStorage::of_vec_kind(kind) {
+            return self.flat_element_repr(b, i, elem, storage);
         }
         if let Some(elem) = self.map_column_value_of(base)? {
             return self.map_column_index_repr(b, i, elem);
