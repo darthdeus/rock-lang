@@ -236,12 +236,11 @@ impl<'s, 'd, R: Rewrite> Graft<'s, 'd, R> {
                 && let ExprKind::Ident(id) = &self.source().exprs[a.value].kind
                 && let Some(values) = self.rw.splat(id.name).map(<[_]>::to_vec)
             {
-                args.extend(values.into_iter().map(|v| FunctionCallArg {
-                    name: None,
-                    value: clone_expr(self.dst, v),
-                    is_splat: false,
-                    is_spread: false,
-                }));
+                args.extend(
+                    values
+                        .into_iter()
+                        .map(|v| FunctionCallArg::positional(clone_expr(self.dst, v))),
+                );
             } else {
                 a.value = self.expr(a.value);
                 args.push(a);

@@ -60,6 +60,17 @@ pub struct FunctionCallArg {
     pub is_spread: bool,
 }
 
+impl FunctionCallArg {
+    pub(crate) fn positional(value: Idx<ExprData>) -> Self {
+        Self {
+            name: None,
+            value,
+            is_splat: false,
+            is_spread: false,
+        }
+    }
+}
+
 /// Formatting options, including dynamic width and precision expressions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FormatSpec {

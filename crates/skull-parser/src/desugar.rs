@@ -271,12 +271,7 @@ fn json_field_factory(
                 ExprKind::FunctionCall {
                     func: cast,
                     generic_args: vec![field_ty],
-                    args: vec![FunctionCallArg {
-                        name: None,
-                        value,
-                        is_splat: false,
-                        is_spread: false,
-                    }],
+                    args: vec![FunctionCallArg::positional(value)],
                     syntax: CallSyntax::Normal,
                 },
             );
@@ -285,12 +280,7 @@ fn json_field_factory(
                 ExprKind::FunctionCall {
                     func: predicate.expect("omission factory requires a predicate"),
                     generic_args: Vec::new(),
-                    args: vec![FunctionCallArg {
-                        name: None,
-                        value: typed,
-                        is_splat: false,
-                        is_spread: false,
-                    }],
+                    args: vec![FunctionCallArg::positional(typed)],
                     syntax: CallSyntax::Normal,
                 },
             );

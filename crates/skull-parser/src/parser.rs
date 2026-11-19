@@ -936,30 +936,36 @@ impl<'a> Parser<'a> {
         Ok(ItemKind::MacroInvocation { name, args, sigil })
     }
 
-    fn parse_sigil_call(&mut self, func: Idx<ExprData>) -> PResult<Idx<ExprData>> {
-        let start = self.ast.exprs[func].span;
+    fn parse_sigil_call(
+        &mut self,
+        func: Idx<ExprData>,
+        receiver: Option<Idx<ExprData>>,
+    ) -> PResult<Idx<ExprData>> {
+        let start = self.ast.exprs[receiver.unwrap_or(func)].span;
         self.expect(TokenKind::OpenParen)?;
         self.delimiter_depth += 1;
-        let args = self.parse_comma_list(TokenKind::CloseParen, |p| {
-            let is_splat = p.eat(TokenKind::TripleDot); // `inner!(...rest)`
-            let value = p.parse_macro_arg(true)?;
+        let mut args = self.parse_comma_list(TokenKind::CloseParen, |p| {
+            let is_splat = p.eat(TokenKind::TripleDot);
             Ok(FunctionCallArg {
-                name: None,
-                value,
                 is_splat,
-                is_spread: false,
+                ..FunctionCallArg::positional(p.parse_macro_arg(true)?)
             })
         })?;
         self.delimiter_depth -= 1;
         self.expect(TokenKind::CloseParen)?;
-        let span = self.span_from(start);
+        let syntax = if let Some(receiver) = receiver {
+            args.insert(0, FunctionCallArg::positional(receiver));
+            CallSyntax::MethodMacro
+        } else {
+            CallSyntax::Macro
+        };
         Ok(self.ast.expr(
-            span,
+            self.span_from(start),
             ExprKind::FunctionCall {
                 func,
                 generic_args: Vec::new(),
                 args,
-                syntax: CallSyntax::Macro,
+                syntax,
             },
         ))
     }
@@ -1010,13 +1016,7 @@ impl<'a> Parser<'a> {
                     .ast
                     .expr(start, ExprKind::Ident(Ident { span: start, name }));
                 let args = self.parse_bare_comma_list(TokenKind::GreaterThan, |p| {
-                    let value = p.parse_macro_arg(true)?;
-                    Ok(FunctionCallArg {
-                        name: None,
-                        value,
-                        is_splat: false,
-                        is_spread: false,
-                    })
+                    p.parse_macro_arg(true).map(FunctionCallArg::positional)
                 })?;
                 self.expect_generic_close()?;
                 let span = self.span_from(start);
@@ -2328,42 +2328,24 @@ impl<'a> Parser<'a> {
             }
 
             if op == TokenKind::Bang && self.peek_kind() == TokenKind::OpenParen {
-                match self.ast.exprs[left].kind.clone() {
-                    ExprKind::Ident(_) => {
-                        self.advance(); // `!`
-                        left = self.parse_sigil_call(left)?;
-                        continue;
+                let callee = match &self.ast.exprs[left].kind {
+                    ExprKind::Ident(_) => Some((left, None)),
+                    ExprKind::FieldAccess(receiver, method) => {
+                        let receiver = *receiver;
+                        let func = self.ast.expr(method.span, ExprKind::Ident(method.clone()));
+                        Some((func, Some(receiver)))
                     }
-                    ExprKind::FieldAccess(recv, method) => {
-                        self.advance(); // `!`
-                        let recv_span = self.ast.exprs[recv].span;
-                        let func = self.ast.expr(method.span, ExprKind::Ident(method));
-                        let call = self.parse_sigil_call(func)?;
-                        if let ExprKind::FunctionCall { args, syntax, .. } =
-                            &mut self.ast.exprs[call].kind
-                        {
-                            *syntax = CallSyntax::MethodMacro;
-                            args.insert(
-                                0,
-                                FunctionCallArg {
-                                    name: None,
-                                    value: recv,
-                                    is_splat: false,
-                                    is_spread: false,
-                                },
-                            );
-                        }
-                        let span = self.merge_spans(recv_span, self.ast.exprs[call].span);
-                        self.ast.exprs[call].span = span;
-                        left = call;
-                        continue;
-                    }
-                    _ => {}
+                    _ => None,
+                };
+                if let Some((func, receiver)) = callee {
+                    self.advance(); // `!`
+                    left = self.parse_sigil_call(func, receiver)?;
+                    continue;
                 }
             }
 
             if let Some(generic_args) = self.try_generic_call_args() {
-                left = self.parse_call_with_generics(left, generic_args)?;
+                left = self.parse_call(left, generic_args)?;
                 continue;
             }
 
@@ -2376,7 +2358,7 @@ impl<'a> Parser<'a> {
                 }
                 match op {
                     TokenKind::OpenParen => {
-                        left = self.parse_call_with_generics(left, Vec::new())?;
+                        left = self.parse_call(left, Vec::new())?;
                         continue;
                     }
                     TokenKind::OpenSquare => {
@@ -2525,10 +2507,8 @@ impl<'a> Parser<'a> {
             let is_splat = self.eat(TokenKind::TripleDot);
             let value = self.with_allow_literals(allow, |p| p.parse_expr(15))?;
             args.push(FunctionCallArg {
-                name: None,
-                value,
                 is_splat,
-                is_spread: false,
+                ..FunctionCallArg::positional(value)
             });
 
             if !no_parens_arg_continue(self.kind())
@@ -2583,12 +2563,7 @@ impl<'a> Parser<'a> {
                 ExprKind::FunctionCall {
                     func: left,
                     generic_args: Vec::new(),
-                    args: vec![FunctionCallArg {
-                        name: None,
-                        value: right,
-                        is_splat: false,
-                        is_spread: false,
-                    }],
+                    args: vec![FunctionCallArg::positional(right)],
                     syntax: CallSyntax::Normal,
                 },
             );
@@ -2652,7 +2627,7 @@ impl<'a> Parser<'a> {
         None
     }
 
-    fn parse_call_with_generics(
+    fn parse_call(
         &mut self,
         func: Idx<ExprData>,
         generic_args: Vec<Idx<TypeExprData>>,
@@ -2717,12 +2692,7 @@ impl<'a> Parser<'a> {
                 body,
             },
         );
-        let lambda_arg = FunctionCallArg {
-            name: None,
-            value: lambda,
-            is_splat: false,
-            is_spread: false,
-        };
+        let lambda_arg = FunctionCallArg::positional(lambda);
 
         if matches!(self.ast.exprs[left].kind, ExprKind::FunctionCall { .. }) {
             let new_span = self.node_span(left, body_span);
