@@ -306,7 +306,7 @@ impl<'a> Builder<'a> {
     pub(crate) fn flat_cells_to_repr(&self, shape: &EnumFlatShape, cells: FlatCells) -> ValueRepr {
         ValueRepr::Group {
             name: shape.name,
-            parts: cells.into_slots().map(ValueRepr::Scalar).collect(),
+            parts: cells.slots().map(ValueRepr::Scalar).collect(),
             present: None,
         }
     }

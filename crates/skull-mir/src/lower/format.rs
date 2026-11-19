@@ -552,7 +552,7 @@ impl<'a> Builder<'a> {
         // A value constructed in place has a constant tag. Only its arm is reachable;
         // the others would read slots holding nil or another variant's payload.
         let known = match scrut {
-            Scrut::Cells { tag, .. } => match self.f.insts[*tag] {
+            Scrut::Cells { cells, .. } => match self.f.insts[cells.tag] {
                 Inst::Const(Lit::Str(variant)) => Some(variant),
                 _ => None,
             },
@@ -586,8 +586,8 @@ impl<'a> Builder<'a> {
                                     self.nested_flat_enum_scrut(scrut, slot, &vs)?
                                 {
                                     // The nested tag shares its slot with other variants' payloads.
-                                    if let Scrut::Cells { tag, .. } = &mut inner {
-                                        *tag = self.native_leaf(*tag, &MonoTy::String);
+                                    if let Scrut::Cells { cells, .. } = &mut inner {
+                                        cells.tag = self.native_leaf(cells.tag, &MonoTy::String);
                                     }
                                     self.render_enum(child, vs.name, child_path, &inner)?
                                 } else {

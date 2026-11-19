@@ -232,10 +232,10 @@ impl FlatCells {
         }
     }
 
-    fn into_slots(self) -> impl Iterator<Item = Idx<Inst>> {
+    fn slots(&self) -> impl Iterator<Item = Idx<Inst>> + '_ {
         std::iter::once(self.tag)
-            .chain(self.positional)
-            .chain(self.named.into_iter().map(|(_, value)| value))
+            .chain(self.positional.iter().copied())
+            .chain(self.named.iter().map(|(_, value)| *value))
     }
 }
 
@@ -245,7 +245,6 @@ enum FlatPayload {
     Repr(ValueRepr),
 }
 
-#[derive(Clone)]
 enum Scrut {
     Val(Idx<Inst>),
     Tuple(Vec<Scrut>),
@@ -259,9 +258,7 @@ enum Scrut {
         shape: EnumFlatShape,
     },
     Cells {
-        tag: Idx<Inst>,
-        positional: Vec<Idx<Inst>>,
-        named: Vec<(Ustr, Idx<Inst>)>,
+        cells: FlatCells,
         shape: EnumFlatShape,
     },
 }

@@ -2779,8 +2779,8 @@ impl<'a> Builder<'a> {
             }
             self.f.set_term(self.cur, Term::Goto(join));
             self.cur = val_bb;
-            let leaves = self.spread_box_to_cells(v, &es).into_slots();
-            for (c, lv) in cells.iter().zip(leaves) {
+            let leaves = self.spread_box_to_cells(v, &es);
+            for (c, lv) in cells.iter().zip(leaves.slots()) {
                 self.store_cell(*c, lv);
             }
             self.f.set_term(self.cur, Term::Goto(join));

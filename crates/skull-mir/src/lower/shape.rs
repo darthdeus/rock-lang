@@ -696,7 +696,7 @@ pub(crate) fn planned_value_contains_flat_enum(ws: &Workspace, name: Ustr) -> bo
     planned_value(ws, name).is_some_and(|plan| contains(&plan))
 }
 
-fn enum_definition(ws: &Workspace, name: Ustr) -> Option<&EnumDef> {
+pub(super) fn enum_definition(ws: &Workspace, name: Ustr) -> Option<&EnumDef> {
     let id = ws.enums_by_name.get(&name)?;
     Some(&ws.modules[id.module.index()].enums[id.def])
 }
