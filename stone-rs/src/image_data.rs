@@ -3,13 +3,25 @@ use std::collections::HashMap;
 use std::ffi::{c_char, c_float, c_int, CStr};
 
 use crate::handles::Class;
-use crate::image_texture::with_image;
-use crate::{with_gl, LoadedImage, IMAGES};
+use crate::image_texture::{
+    create_filtered_image_texture, define_bound_image_texture, insert_image, with_image,
+    ImageFormat,
+};
+use crate::with_gl;
 
 struct ImageData {
     width: u32,
     height: u32,
     data: Vec<u8>,
+}
+
+impl ImageData {
+    fn pixel_offset(&self, x: c_int, y: c_int) -> Option<usize> {
+        if !(0..self.width as i32).contains(&x) || !(0..self.height as i32).contains(&y) {
+            return None;
+        }
+        Some((y as usize * self.width as usize + x as usize) * 4)
+    }
 }
 
 thread_local! {
@@ -119,17 +131,14 @@ pub extern "C" fn stone_image_data_set_pixel(
     a: c_float,
 ) {
     IMAGE_DATAS.with(|ids| {
-        if let Some(img_data) = ids.borrow_mut().get_mut(&handle) {
-            if x < 0 || x >= img_data.width as i32 || y < 0 || y >= img_data.height as i32 {
-                return;
-            }
-
-            let idx = ((y as usize) * (img_data.width as usize) + (x as usize)) * 4;
-            img_data.data[idx] = (r * 255.0) as u8;
-            img_data.data[idx + 1] = (g * 255.0) as u8;
-            img_data.data[idx + 2] = (b * 255.0) as u8;
-            img_data.data[idx + 3] = (a * 255.0) as u8;
-        }
+        let mut ids = ids.borrow_mut();
+        let Some(image) = ids.get_mut(&handle) else {
+            return;
+        };
+        let Some(offset) = image.pixel_offset(x, y) else {
+            return;
+        };
+        image.data[offset..offset + 4].copy_from_slice(&[r, g, b, a].map(|c| (c * 255.0) as u8));
     });
 }
 
@@ -189,54 +198,18 @@ pub extern "C" fn stone_image_data_get_pixel(
     a: *mut c_float,
 ) {
     IMAGE_DATAS.with(|ids| {
-        if let Some(img_data) = ids.borrow().get(&handle) {
-            if x < 0 || x >= img_data.width as i32 || y < 0 || y >= img_data.height as i32 {
-                unsafe {
-                    if !r.is_null() {
-                        *r = 0.0;
-                    }
-                    if !g.is_null() {
-                        *g = 0.0;
-                    }
-                    if !b.is_null() {
-                        *b = 0.0;
-                    }
-                    if !a.is_null() {
-                        *a = 0.0;
-                    }
-                }
-                return;
-            }
-
-            let idx = ((y as usize) * (img_data.width as usize) + (x as usize)) * 4;
-            unsafe {
-                if !r.is_null() {
-                    *r = img_data.data[idx] as f32 / 255.0;
-                }
-                if !g.is_null() {
-                    *g = img_data.data[idx + 1] as f32 / 255.0;
-                }
-                if !b.is_null() {
-                    *b = img_data.data[idx + 2] as f32 / 255.0;
-                }
-                if !a.is_null() {
-                    *a = img_data.data[idx + 3] as f32 / 255.0;
-                }
-            }
-        } else {
-            unsafe {
-                if !r.is_null() {
-                    *r = 0.0;
-                }
-                if !g.is_null() {
-                    *g = 0.0;
-                }
-                if !b.is_null() {
-                    *b = 0.0;
-                }
-                if !a.is_null() {
-                    *a = 0.0;
-                }
+        let ids = ids.borrow();
+        let rgba = ids
+            .get(&handle)
+            .and_then(|image| {
+                image
+                    .pixel_offset(x, y)
+                    .map(|offset| &image.data[offset..offset + 4])
+            })
+            .unwrap_or(&[0; 4]);
+        for (out, &channel) in [r, g, b, a].into_iter().zip(rgba) {
+            if !out.is_null() {
+                unsafe { *out = channel as f32 / 255.0 };
             }
         }
     });
@@ -450,9 +423,10 @@ pub extern "C" fn stone_new_image_from_data(data_handle: u64, filter_mode: i32) 
             }
         };
 
+        let size = (img_data.width, img_data.height);
         // Create OpenGL texture
         let texture = with_gl(|gl| unsafe {
-            let texture = match gl.create_texture() {
+            let texture = match create_filtered_image_texture(gl, filter_mode, gl_filter) {
                 Ok(t) => t,
                 Err(e) => {
                     crate::log_once!(
@@ -464,36 +438,7 @@ pub extern "C" fn stone_new_image_from_data(data_handle: u64, filter_mode: i32) 
                     return None;
                 }
             };
-            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MIN_FILTER,
-                crate::gl_state::gl_min_filter_for(filter_mode).unwrap() as i32,
-            );
-            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, gl_filter as i32);
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_S,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-            gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_T,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-
-            gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::RGBA8 as i32,
-                img_data.width as i32,
-                img_data.height as i32,
-                0,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(Some(&img_data.data)),
-            );
+            define_bound_image_texture(gl, size, ImageFormat::Rgba8, &img_data.data);
             if filter_mode == 2 {
                 gl.generate_mipmap(glow::TEXTURE_2D);
             }
@@ -504,19 +449,7 @@ pub extern "C" fn stone_new_image_from_data(data_handle: u64, filter_mode: i32) 
         match texture {
             Some(Some(tex)) => {
                 let id = crate::handles::mint(Class::Image);
-                IMAGES.with(|images| {
-                    images.borrow_mut().insert(
-                        id,
-                        LoadedImage {
-                            texture: tex,
-                            width: img_data.width,
-                            height: img_data.height,
-                            repeat: false,
-                            format: crate::image_texture::ImageFormat::Rgba8,
-                            stub: false,
-                        },
-                    );
-                });
+                insert_image(id, tex, size, ImageFormat::Rgba8, false);
                 if filter_mode == 2 {
                     crate::image_texture::register_mipmapped_image(id);
                 }

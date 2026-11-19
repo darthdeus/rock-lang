@@ -313,6 +313,28 @@ pub(crate) fn image_exists(handle: u64) -> bool {
     with_image(handle, |_| ()).is_some()
 }
 
+pub(crate) fn insert_image(
+    id: u64,
+    texture: glow::Texture,
+    size: (u32, u32),
+    format: ImageFormat,
+    stub: bool,
+) {
+    IMAGES.with(|images| {
+        images.borrow_mut().insert(
+            id,
+            LoadedImage {
+                texture,
+                width: size.0,
+                height: size.1,
+                format,
+                repeat: false,
+                stub,
+            },
+        );
+    });
+}
+
 pub(crate) fn register_mipmapped_image(handle: u64) {
     MIPMAPPED_IMAGES.with(|m| {
         m.borrow_mut().insert(handle);
@@ -411,14 +433,14 @@ fn record_storage(handle: u64, logical: (u32, u32), stored: (u32, u32)) {
 /// What GL stores for a headers-only image: one texel.
 const STUB_STORAGE: (u32, u32) = (1, 1);
 
-// Each stub owns its texture: unload and writers delete or redefine it, so a shared white
-// texture would be freed under other stubs.
-const STUB_RGBA8_TEXEL: [u8; 4] = [255, 255, 255, 255];
+const WHITE_RGBA8_TEXEL: [u8; 4] = [255, 255, 255, 255];
 const STUB_RG8_TEXEL: [u8; 2] = [255, 255];
 
+// Each stub owns its texture: unload and writers delete or redefine it, so a shared white
+// texture would be freed under other stubs.
 fn stub_texel(format: ImageFormat) -> &'static [u8] {
     match format {
-        ImageFormat::Rgba8 => &STUB_RGBA8_TEXEL,
+        ImageFormat::Rgba8 => &WHITE_RGBA8_TEXEL,
         ImageFormat::DepthRg8 | ImageFormat::MaterialRg8 => &STUB_RG8_TEXEL,
         ImageFormat::R8 => &[255],
         ImageFormat::Bc5 => &[255, 255, 0, 0, 0, 0, 0, 0, 255, 255, 0, 0, 0, 0, 0, 0],
@@ -445,19 +467,55 @@ pub(crate) unsafe fn with_rg_unpack_alignment<R>(
     result
 }
 
+/// # Safety
+/// The GL context must be current and `filter_mode` must be validated.
+pub(crate) unsafe fn create_filtered_image_texture(
+    gl: &crate::DebugGl,
+    filter_mode: i32,
+    magnification_filter: u32,
+) -> Result<glow::Texture, String> {
+    let texture = gl.create_texture()?;
+    gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_MIN_FILTER,
+        gl_state::gl_min_filter_for(filter_mode).unwrap() as i32,
+    );
+    gl.tex_parameter_i32(
+        glow::TEXTURE_2D,
+        glow::TEXTURE_MAG_FILTER,
+        magnification_filter as i32,
+    );
+    for axis in [glow::TEXTURE_WRAP_S, glow::TEXTURE_WRAP_T] {
+        gl.tex_parameter_i32(glow::TEXTURE_2D, axis, glow::CLAMP_TO_EDGE as i32);
+    }
+    Ok(texture)
+}
+
 unsafe fn tex_image_for_format(
     gl: &crate::DebugGl,
     texture: glow::Texture,
     width: u32,
     height: u32,
     format: ImageFormat,
-    pixels: Option<&[u8]>,
+    pixels: &[u8],
 ) {
     gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+    define_bound_image_texture(gl, (width, height), format, pixels);
+}
+
+/// # Safety
+/// The GL context must be current, with the texture bound and pixels laid out
+/// for `size` and `format`.
+pub(crate) unsafe fn define_bound_image_texture(
+    gl: &crate::DebugGl,
+    size: (u32, u32),
+    format: ImageFormat,
+    pixels: &[u8],
+) {
+    let (width, height) = size;
     if format.blocks().is_some() {
-        if let Some(blocks) = pixels {
-            gl.upload_compressed(format.gl_internal(), width as i32, height as i32, blocks);
-        }
+        gl.upload_compressed(format.gl_internal(), width as i32, height as i32, pixels);
         return;
     }
     with_rg_unpack_alignment(gl, format, || {
@@ -470,7 +528,7 @@ unsafe fn tex_image_for_format(
             0,
             format.gl_external(),
             glow::UNSIGNED_BYTE,
-            glow::PixelUnpackData::Slice(pixels),
+            glow::PixelUnpackData::Slice(Some(pixels)),
         );
     });
 }
@@ -529,19 +587,7 @@ fn register_loaded_image(
     stubbed: bool,
     path: &str,
 ) {
-    IMAGES.with(|images| {
-        images.borrow_mut().insert(
-            id,
-            LoadedImage {
-                texture,
-                repeat: false,
-                width: logical.0,
-                height: logical.1,
-                format,
-                stub: stubbed,
-            },
-        );
-    });
+    insert_image(id, texture, logical, format, stubbed);
     EXACT_TEXELS.with(|e| {
         if exact_texels {
             e.borrow_mut().insert(id);
@@ -918,7 +964,7 @@ fn load_image(
     let inline_bytes = pixels.as_ref().map_or(0, Vec::len);
     let texture_started = std::time::Instant::now();
     let texture = with_gl(|gl| unsafe {
-        let texture = match gl.create_texture() {
+        let texture = match create_filtered_image_texture(gl, filter_mode, gl_filter) {
             Ok(t) => t,
             Err(e) => {
                 log_once!(
@@ -930,33 +976,9 @@ fn load_image(
                 return None;
             }
         };
-        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-        gl.tex_parameter_i32(
-            glow::TEXTURE_2D,
-            glow::TEXTURE_MIN_FILTER,
-            gl_state::gl_min_filter_for(filter_mode).unwrap() as i32,
-        );
-        gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, gl_filter as i32);
-        gl.tex_parameter_i32(
-            glow::TEXTURE_2D,
-            glow::TEXTURE_WRAP_S,
-            glow::CLAMP_TO_EDGE as i32,
-        );
-        gl.tex_parameter_i32(
-            glow::TEXTURE_2D,
-            glow::TEXTURE_WRAP_T,
-            glow::CLAMP_TO_EDGE as i32,
-        );
-
+        // Async loads allocate and fill storage together to avoid a second pass.
         if let Some(data) = upload {
-            tex_image_for_format(
-                gl,
-                texture,
-                storage_width,
-                storage_height,
-                format,
-                Some(data),
-            );
+            tex_image_for_format(gl, texture, storage_width, storage_height, format, data);
             if filter_mode == 2 {
                 gl.generate_mipmap(glow::TEXTURE_2D);
             }
@@ -1164,7 +1186,7 @@ fn publish_image_pixels(
     };
     if !fresh
         && with_gl(|gl| unsafe {
-            tex_image_for_format(gl, target, stored.0, stored.1, format, Some(pixels));
+            tex_image_for_format(gl, target, stored.0, stored.1, format, pixels);
         })
         .is_none()
     {
@@ -1315,7 +1337,7 @@ fn define_image_storage(
 ) -> Option<glow::Texture> {
     let format = with_image(handle, |img| img.format)?;
     with_gl(|gl| unsafe {
-        tex_image_for_format(gl, texture, stored.0, stored.1, format, Some(data));
+        tex_image_for_format(gl, texture, stored.0, stored.1, format, data);
     })?;
     with_image_mut(handle, |img| {
         img.width = logical.0;
@@ -1572,14 +1594,7 @@ pub extern "C" fn stone_reload_image(handle: u64, path: *const c_char) -> bool {
     }
 
     let uploaded = with_gl(|gl| unsafe {
-        tex_image_for_format(
-            gl,
-            texture,
-            storage_width,
-            storage_height,
-            format,
-            Some(&data),
-        );
+        tex_image_for_format(gl, texture, storage_width, storage_height, format, &data);
     });
     if uploaded.is_none() {
         return false;
@@ -1616,20 +1631,7 @@ pub extern "C" fn stone_get_white_image() -> u64 {
                     return None;
                 }
             };
-            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-
-            let data: [u8; 4] = [255, 255, 255, 255];
-            gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::RGBA8 as i32,
-                1,
-                1,
-                0,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(Some(&data)),
-            );
+            tex_image_for_format(gl, texture, 1, 1, ImageFormat::Rgba8, &WHITE_RGBA8_TEXEL);
 
             Some(texture)
         });
@@ -1637,19 +1639,7 @@ pub extern "C" fn stone_get_white_image() -> u64 {
         match texture {
             Some(Some(tex)) => {
                 let id = crate::handles::mint(Class::Image);
-                IMAGES.with(|images| {
-                    images.borrow_mut().insert(
-                        id,
-                        LoadedImage {
-                            texture: tex,
-                            width: 1,
-                            height: 1,
-                            repeat: false,
-                            format: ImageFormat::Rgba8,
-                            stub: false,
-                        },
-                    );
-                });
+                insert_image(id, tex, (1, 1), ImageFormat::Rgba8, false);
                 *wi.borrow_mut() = Some(id);
                 id
             }
