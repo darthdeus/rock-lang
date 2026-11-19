@@ -461,92 +461,55 @@ fn gc_step_json() -> string {
     return "{{\"available\":{GC_STEP_ENABLED},\"basis\":\"collector-entry-wall-clock-v1\",\"atomic_is_subset\":true,\"phases\":[\"pause\",\"propagate\",\"atomic\",\"sweepstring\",\"sweep\",\"finalize\"]}}"
 }
 
+// Snapshot slots: gross, growth, free and shrink KB, then allocator, allocation,
+// reallocation and free call counts.
+const ALLOC_COUNTERS: int = 8
+const ALLOC_COUNTER_NAMES: [string] = ["lua_requests_kb", "lua_growth_kb", "lua_free_kb",
+    "lua_shrink_kb", "lua_allocator_calls", "lua_allocation_calls", "lua_reallocation_calls",
+    "lua_free_calls"]
+
+fn alloc_counters_read(dst: NativeBuffer<float>) {
+    nb_set(dst, 0, lua_alloc_gross_request_kb())
+    nb_set(dst, 1, lua_alloc_positive_growth_kb())
+    nb_set(dst, 2, lua_alloc_explicit_free_kb())
+    nb_set(dst, 3, lua_alloc_reallocation_shrink_kb())
+    nb_set(dst, 4, lua_alloc_call_count() as float)
+    nb_set(dst, 5, lua_alloc_allocation_call_count() as float)
+    nb_set(dst, 6, lua_alloc_reallocation_call_count() as float)
+    nb_set(dst, 7, lua_alloc_free_call_count() as float)
+}
+
 pub struct LiveAllocationCapture {
-    active: bool,
-    frame_open: bool,
-    exclusion_active: bool,
-    started_at: float,
-    observed_frames: int,
-    frame_gross_kb: float,
-    frame_growth_kb: float,
-    frame_free_kb: float,
-    frame_shrink_kb: float,
-    frame_calls: int,
-    frame_allocation_calls: int,
-    frame_reallocation_calls: int,
-    frame_free_calls: int,
-    exclusion_gross_kb: float,
-    exclusion_growth_kb: float,
-    exclusion_free_kb: float,
-    exclusion_shrink_kb: float,
-    exclusion_calls: int,
-    exclusion_allocation_calls: int,
-    exclusion_reallocation_calls: int,
-    exclusion_free_calls: int,
-    excluded_gross_kb: float,
-    excluded_growth_kb: float,
-    excluded_free_kb: float,
-    excluded_shrink_kb: float,
-    excluded_calls: int,
-    excluded_allocation_calls: int,
-    excluded_reallocation_calls: int,
-    excluded_free_calls: int,
+    active: bool = false,
+    frame_open: bool = false,
+    exclusion_active: bool = false,
+    started_at: float = 0.0,
+    observed_frames: int = 0,
+    frame_start: NativeBuffer<float>,
+    exclusion_start: NativeBuffer<float>,
+    excluded: NativeBuffer<float>,
+    now: NativeBuffer<float>,
+    per_frame: [Metric],
 }
 
 fn live_allocation_capture_new() -> LiveAllocationCapture {
+    let per_frame: [Metric] = []
+    for name in ALLOC_COUNTER_NAMES { per_frame.push(metric_new(name, MAX_FRAME_HISTORY)) }
     return LiveAllocationCapture {
-        active: false,
-        frame_open: false,
-        exclusion_active: false,
-        started_at: 0.0,
-        observed_frames: 0,
-        frame_gross_kb: 0.0,
-        frame_growth_kb: 0.0,
-        frame_free_kb: 0.0,
-        frame_shrink_kb: 0.0,
-        frame_calls: 0,
-        frame_allocation_calls: 0,
-        frame_reallocation_calls: 0,
-        frame_free_calls: 0,
-        exclusion_gross_kb: 0.0,
-        exclusion_growth_kb: 0.0,
-        exclusion_free_kb: 0.0,
-        exclusion_shrink_kb: 0.0,
-        exclusion_calls: 0,
-        exclusion_allocation_calls: 0,
-        exclusion_reallocation_calls: 0,
-        exclusion_free_calls: 0,
-        excluded_gross_kb: 0.0,
-        excluded_growth_kb: 0.0,
-        excluded_free_kb: 0.0,
-        excluded_shrink_kb: 0.0,
-        excluded_calls: 0,
-        excluded_allocation_calls: 0,
-        excluded_reallocation_calls: 0,
-        excluded_free_calls: 0,
+        frame_start: native_buffer_float(ALLOC_COUNTERS),
+        exclusion_start: native_buffer_float(ALLOC_COUNTERS),
+        excluded: native_buffer_float(ALLOC_COUNTERS),
+        now: native_buffer_float(ALLOC_COUNTERS),
+        per_frame,
     }
 }
 
 pub global LIVE_ALLOC_CAPTURE: LiveAllocationCapture = live_allocation_capture_new()
-pub global LIVE_ALLOC_GROSS_KB: Metric = metric_new("lua_requests_kb", MAX_FRAME_HISTORY)
-pub global LIVE_ALLOC_GROWTH_KB: Metric = metric_new("lua_growth_kb", MAX_FRAME_HISTORY)
-pub global LIVE_ALLOC_FREE_KB: Metric = metric_new("lua_free_kb", MAX_FRAME_HISTORY)
-pub global LIVE_ALLOC_SHRINK_KB: Metric = metric_new("lua_shrink_kb", MAX_FRAME_HISTORY)
-pub global LIVE_ALLOC_CALLS: Metric = metric_new("lua_allocator_calls", MAX_FRAME_HISTORY)
-pub global LIVE_ALLOC_ALLOCATION_CALLS: Metric = metric_new("lua_allocation_calls", MAX_FRAME_HISTORY)
-pub global LIVE_ALLOC_REALLOCATION_CALLS: Metric = metric_new("lua_reallocation_calls", MAX_FRAME_HISTORY)
-pub global LIVE_ALLOC_FREE_CALLS: Metric = metric_new("lua_free_calls", MAX_FRAME_HISTORY)
+
+fn live_allocation_mean(counter: int) -> float { return LIVE_ALLOC_CAPTURE.per_frame[counter].mean }
 
 fn live_allocation_capture_reset() {
     LIVE_ALLOC_CAPTURE = live_allocation_capture_new()
-    LIVE_ALLOC_GROSS_KB = metric_new("lua_requests_kb", MAX_FRAME_HISTORY)
-    LIVE_ALLOC_GROWTH_KB = metric_new("lua_growth_kb", MAX_FRAME_HISTORY)
-    LIVE_ALLOC_FREE_KB = metric_new("lua_free_kb", MAX_FRAME_HISTORY)
-    LIVE_ALLOC_SHRINK_KB = metric_new("lua_shrink_kb", MAX_FRAME_HISTORY)
-    LIVE_ALLOC_CALLS = metric_new("lua_allocator_calls", MAX_FRAME_HISTORY)
-    LIVE_ALLOC_ALLOCATION_CALLS = metric_new("lua_allocation_calls", MAX_FRAME_HISTORY)
-    LIVE_ALLOC_REALLOCATION_CALLS = metric_new("lua_reallocation_calls", MAX_FRAME_HISTORY)
-    LIVE_ALLOC_FREE_CALLS = metric_new("lua_free_calls", MAX_FRAME_HISTORY)
 }
 global PROFILER_ENABLED_PENDING: int = -1
 global PROFILER_ALLOC_COUNTER_OWNER: int = 0
@@ -586,65 +549,40 @@ fn profiler_allocator_shutdown() {
 }
 
 pub fn live_allocation_exclusion_begin() {
-    if !LIVE_ALLOC_CAPTURE.active || LIVE_ALLOC_CAPTURE.exclusion_active { return () }
-    LIVE_ALLOC_CAPTURE.exclusion_gross_kb = lua_alloc_gross_request_kb()
-    LIVE_ALLOC_CAPTURE.exclusion_growth_kb = lua_alloc_positive_growth_kb()
-    LIVE_ALLOC_CAPTURE.exclusion_free_kb = lua_alloc_explicit_free_kb()
-    LIVE_ALLOC_CAPTURE.exclusion_shrink_kb = lua_alloc_reallocation_shrink_kb()
-    LIVE_ALLOC_CAPTURE.exclusion_calls = lua_alloc_call_count()
-    LIVE_ALLOC_CAPTURE.exclusion_allocation_calls = lua_alloc_allocation_call_count()
-    LIVE_ALLOC_CAPTURE.exclusion_reallocation_calls = lua_alloc_reallocation_call_count()
-    LIVE_ALLOC_CAPTURE.exclusion_free_calls = lua_alloc_free_call_count()
-    LIVE_ALLOC_CAPTURE.exclusion_active = true
+    let c = LIVE_ALLOC_CAPTURE
+    if !c.active || c.exclusion_active { return () }
+    alloc_counters_read(c.exclusion_start)
+    c.exclusion_active = true
 }
 
 pub fn live_allocation_exclusion_end() {
-    if !LIVE_ALLOC_CAPTURE.active || !LIVE_ALLOC_CAPTURE.exclusion_active { return () }
-    LIVE_ALLOC_CAPTURE.excluded_gross_kb += lua_alloc_gross_request_kb() - LIVE_ALLOC_CAPTURE.exclusion_gross_kb
-    LIVE_ALLOC_CAPTURE.excluded_growth_kb += lua_alloc_positive_growth_kb() - LIVE_ALLOC_CAPTURE.exclusion_growth_kb
-    LIVE_ALLOC_CAPTURE.excluded_free_kb += lua_alloc_explicit_free_kb() - LIVE_ALLOC_CAPTURE.exclusion_free_kb
-    LIVE_ALLOC_CAPTURE.excluded_shrink_kb += lua_alloc_reallocation_shrink_kb() - LIVE_ALLOC_CAPTURE.exclusion_shrink_kb
-    LIVE_ALLOC_CAPTURE.excluded_calls += lua_alloc_call_count() - LIVE_ALLOC_CAPTURE.exclusion_calls
-    LIVE_ALLOC_CAPTURE.excluded_allocation_calls += lua_alloc_allocation_call_count() - LIVE_ALLOC_CAPTURE.exclusion_allocation_calls
-    LIVE_ALLOC_CAPTURE.excluded_reallocation_calls += lua_alloc_reallocation_call_count() - LIVE_ALLOC_CAPTURE.exclusion_reallocation_calls
-    LIVE_ALLOC_CAPTURE.excluded_free_calls += lua_alloc_free_call_count() - LIVE_ALLOC_CAPTURE.exclusion_free_calls
-    LIVE_ALLOC_CAPTURE.exclusion_active = false
+    let c = LIVE_ALLOC_CAPTURE
+    if !c.active || !c.exclusion_active { return () }
+    alloc_counters_read(c.now)
+    for i in 0..ALLOC_COUNTERS {
+        nb_set(c.excluded, i, nb_get(c.excluded, i) + nb_get(c.now, i) - nb_get(c.exclusion_start, i))
+    }
+    c.exclusion_active = false
 }
 
 fn live_allocation_frame_begin() {
-    if !LIVE_ALLOC_CAPTURE.active { return () }
-    LIVE_ALLOC_CAPTURE.exclusion_active = false
-    LIVE_ALLOC_CAPTURE.frame_gross_kb = lua_alloc_gross_request_kb()
-    LIVE_ALLOC_CAPTURE.frame_growth_kb = lua_alloc_positive_growth_kb()
-    LIVE_ALLOC_CAPTURE.frame_free_kb = lua_alloc_explicit_free_kb()
-    LIVE_ALLOC_CAPTURE.frame_shrink_kb = lua_alloc_reallocation_shrink_kb()
-    LIVE_ALLOC_CAPTURE.frame_calls = lua_alloc_call_count()
-    LIVE_ALLOC_CAPTURE.frame_allocation_calls = lua_alloc_allocation_call_count()
-    LIVE_ALLOC_CAPTURE.frame_reallocation_calls = lua_alloc_reallocation_call_count()
-    LIVE_ALLOC_CAPTURE.frame_free_calls = lua_alloc_free_call_count()
-    LIVE_ALLOC_CAPTURE.excluded_gross_kb = 0.0
-    LIVE_ALLOC_CAPTURE.excluded_growth_kb = 0.0
-    LIVE_ALLOC_CAPTURE.excluded_free_kb = 0.0
-    LIVE_ALLOC_CAPTURE.excluded_shrink_kb = 0.0
-    LIVE_ALLOC_CAPTURE.excluded_calls = 0
-    LIVE_ALLOC_CAPTURE.excluded_allocation_calls = 0
-    LIVE_ALLOC_CAPTURE.excluded_reallocation_calls = 0
-    LIVE_ALLOC_CAPTURE.excluded_free_calls = 0
-    LIVE_ALLOC_CAPTURE.frame_open = true
+    let c = LIVE_ALLOC_CAPTURE
+    if !c.active { return () }
+    c.exclusion_active = false
+    alloc_counters_read(c.frame_start)
+    for i in 0..ALLOC_COUNTERS { nb_set(c.excluded, i, 0.0) }
+    c.frame_open = true
 }
 
 fn live_allocation_frame_end() {
-    if !LIVE_ALLOC_CAPTURE.active || !LIVE_ALLOC_CAPTURE.frame_open { return () }
-    metric_add(LIVE_ALLOC_GROSS_KB, lua_alloc_gross_request_kb() - LIVE_ALLOC_CAPTURE.frame_gross_kb - LIVE_ALLOC_CAPTURE.excluded_gross_kb)
-    metric_add(LIVE_ALLOC_GROWTH_KB, lua_alloc_positive_growth_kb() - LIVE_ALLOC_CAPTURE.frame_growth_kb - LIVE_ALLOC_CAPTURE.excluded_growth_kb)
-    metric_add(LIVE_ALLOC_FREE_KB, lua_alloc_explicit_free_kb() - LIVE_ALLOC_CAPTURE.frame_free_kb - LIVE_ALLOC_CAPTURE.excluded_free_kb)
-    metric_add(LIVE_ALLOC_SHRINK_KB, lua_alloc_reallocation_shrink_kb() - LIVE_ALLOC_CAPTURE.frame_shrink_kb - LIVE_ALLOC_CAPTURE.excluded_shrink_kb)
-    metric_add(LIVE_ALLOC_CALLS, (lua_alloc_call_count() - LIVE_ALLOC_CAPTURE.frame_calls - LIVE_ALLOC_CAPTURE.excluded_calls) as float)
-    metric_add(LIVE_ALLOC_ALLOCATION_CALLS, (lua_alloc_allocation_call_count() - LIVE_ALLOC_CAPTURE.frame_allocation_calls - LIVE_ALLOC_CAPTURE.excluded_allocation_calls) as float)
-    metric_add(LIVE_ALLOC_REALLOCATION_CALLS, (lua_alloc_reallocation_call_count() - LIVE_ALLOC_CAPTURE.frame_reallocation_calls - LIVE_ALLOC_CAPTURE.excluded_reallocation_calls) as float)
-    metric_add(LIVE_ALLOC_FREE_CALLS, (lua_alloc_free_call_count() - LIVE_ALLOC_CAPTURE.frame_free_calls - LIVE_ALLOC_CAPTURE.excluded_free_calls) as float)
-    LIVE_ALLOC_CAPTURE.observed_frames += 1
-    LIVE_ALLOC_CAPTURE.frame_open = false
+    let c = LIVE_ALLOC_CAPTURE
+    if !c.active || !c.frame_open { return () }
+    alloc_counters_read(c.now)
+    for i in 0..ALLOC_COUNTERS {
+        metric_add(c.per_frame[i], nb_get(c.now, i) - nb_get(c.frame_start, i) - nb_get(c.excluded, i))
+    }
+    c.observed_frames += 1
+    c.frame_open = false
 }
 
 pub value SimAllocationCensus {
@@ -833,13 +771,7 @@ global GC_WIN_MUTATOR_CALLS_RESULT: int = -1
 global GC_WIN_JIT_CALLS_RESULT: int = -1
 global GC_WIN_GC_CALLS_RESULT: int = -1
 pub global GC_WIN_RESULT: float = -1.0   // gross Lua request KB/frame; -1 = unavailable
-global GC_WIN_POSITIVE_GROWTH_RESULT: float = -1.0
-global GC_WIN_EXPLICIT_FREE_RESULT: float = -1.0
-global GC_WIN_REALLOC_SHRINK_RESULT: float = -1.0
-global GC_WIN_ALLOC_CALLS_RESULT: int = -1
-global GC_WIN_ALLOCATION_CALLS_RESULT: int = -1
-global GC_WIN_REALLOCATION_CALLS_RESULT: int = -1
-global GC_WIN_FREE_CALLS_RESULT: int = -1
+global GC_WIN_ALLOC_TOTALS: NativeBuffer<float> = native_buffer_float(ALLOC_COUNTERS)
 global GC_WIN_ALLOC_STATS_AVAILABLE: bool = false
 pub global GC_WIN_SECTION_EXCLUSIVE_SUM_RESULT: float = -1.0
 pub global GC_WIN_UNSECTIONED_RESULT: float = -1.0
@@ -1125,13 +1057,6 @@ pub fn gc_window_clear_accounting() {
     GC_WIN_FRAME_P95_RESULT = -1.0
     GC_WIN_FRAME_P99_RESULT = -1.0
     GC_WIN_FRAME_MAX_RESULT = -1.0
-    GC_WIN_POSITIVE_GROWTH_RESULT = -1.0
-    GC_WIN_EXPLICIT_FREE_RESULT = -1.0
-    GC_WIN_REALLOC_SHRINK_RESULT = -1.0
-    GC_WIN_ALLOC_CALLS_RESULT = -1
-    GC_WIN_ALLOCATION_CALLS_RESULT = -1
-    GC_WIN_REALLOCATION_CALLS_RESULT = -1
-    GC_WIN_FREE_CALLS_RESULT = -1
     GC_WIN_ALLOC_STATS_AVAILABLE = false
     GC_WIN_SECTION_EXCLUSIVE_SUM_RESULT = -1.0
     GC_WIN_UNSECTIONED_RESULT = -1.0
@@ -1403,6 +1328,12 @@ pub fn gc_window_finish_with_total(total_kb: float) {
     }
 }
 
+fn gc_window_alloc_per_frame(counter: int) -> float {
+    return nb_get(GC_WIN_ALLOC_TOTALS, counter) / (GC_WIN_N as float)
+}
+
+fn gc_window_alloc_calls(counter: int) -> int { return nb_get(GC_WIN_ALLOC_TOTALS, counter) as int }
+
 fn gc_window_finish() {
     GC_WIN_SPLIT_AVAILABLE = lua_alloc_split_available()
     GC_WIN_MUTATOR_BYTES_RESULT = lua_alloc_origin_bytes(0)
@@ -1413,14 +1344,7 @@ fn gc_window_finish() {
     GC_WIN_GC_CALLS_RESULT = lua_alloc_origin_calls(2)
     gc_window_trace_end()
     gc_window_finish_with_total(GC_WIN_ACCOUNT_CURSOR_KB - GC_WIN_T0_KB)
-    let frames = GC_WIN_N as float
-    GC_WIN_POSITIVE_GROWTH_RESULT = lua_alloc_positive_growth_kb() / frames
-    GC_WIN_EXPLICIT_FREE_RESULT = lua_alloc_explicit_free_kb() / frames
-    GC_WIN_REALLOC_SHRINK_RESULT = lua_alloc_reallocation_shrink_kb() / frames
-    GC_WIN_ALLOC_CALLS_RESULT = lua_alloc_call_count()
-    GC_WIN_ALLOCATION_CALLS_RESULT = lua_alloc_allocation_call_count()
-    GC_WIN_REALLOCATION_CALLS_RESULT = lua_alloc_reallocation_call_count()
-    GC_WIN_FREE_CALLS_RESULT = lua_alloc_free_call_count()
+    alloc_counters_read(GC_WIN_ALLOC_TOTALS)
     GC_WIN_ALLOC_STATS_AVAILABLE = true
 }
 
@@ -2587,16 +2511,16 @@ pub fn prof_rebuild_rows() {
 
     let heap_mb = round_to_places(PROFILE_HEAP_KB.mean / 1024.0, 2)
     let heap_mb_max = round_to_places(PROFILE_HEAP_KB.max / 1024.0, 2)
-    let traffic = LIVE_ALLOC_GROSS_KB.mean
+    let traffic = live_allocation_mean(0)
     let traffic_col = if traffic > 64.0 { Color { r: 1.0, g: 0.75, b: 0.4, a: 1.0 } } else { white }
     let capture_s = max(0.0, stone_get_time() - LIVE_ALLOC_CAPTURE.started_at)
     let collector = if lua_gc_is_running() { "running" } else { "stopped" }
     prof_row("Lua memory  GC {collector}  {LIVE_ALLOC_CAPTURE.observed_frames} frames  {capture_s:.1f}s", white)
     prof_row("Heap {heap_mb} MB (max {heap_mb_max})  heap drops {PROFILER.heap_drops}", white)
-    prof_row("Requests {traffic:.2f} KB/f  {LIVE_ALLOC_CALLS.mean:.0f} calls/f", traffic_col)
-    prof_row("Growth {LIVE_ALLOC_GROWTH_KB.mean:.2f} KB/f", white)
-    prof_row("Release free {LIVE_ALLOC_FREE_KB.mean:.2f} + shrink {LIVE_ALLOC_SHRINK_KB.mean:.2f} KB/f", white)
-    prof_row("Call kinds alloc/realloc/free {LIVE_ALLOC_ALLOCATION_CALLS.mean:.0f}/{LIVE_ALLOC_REALLOCATION_CALLS.mean:.0f}/{LIVE_ALLOC_FREE_CALLS.mean:.0f} per frame", white)
+    prof_row("Requests {traffic:.2f} KB/f  {live_allocation_mean(4):.0f} calls/f", traffic_col)
+    prof_row("Growth {live_allocation_mean(1):.2f} KB/f", white)
+    prof_row("Release free {live_allocation_mean(2):.2f} + shrink {live_allocation_mean(3):.2f} KB/f", white)
+    prof_row("Call kinds alloc/realloc/free {live_allocation_mean(5):.0f}/{live_allocation_mean(6):.0f}/{live_allocation_mean(7):.0f} per frame", white)
     prof_row("", white)
 
     if PROFILER.frame_count > 0 {
@@ -2802,7 +2726,7 @@ pub fn gc_window_pretty_summary() -> string {
             / (TEXT_LAYOUT_CACHE_WINDOW_REQUESTS as float)
     } else { 0.0 }
     let allocator_stats = if GC_WIN_ALLOC_STATS_AVAILABLE {
-        "gross requests {GC_WIN_RESULT:.2f} KB/f, positive growth {GC_WIN_POSITIVE_GROWTH_RESULT:.2f} KB/f, explicit frees {GC_WIN_EXPLICIT_FREE_RESULT:.2f} KB/f, realloc shrinks {GC_WIN_REALLOC_SHRINK_RESULT:.2f} KB/f, calls alloc/realloc/free {GC_WIN_ALLOCATION_CALLS_RESULT}/{GC_WIN_REALLOCATION_CALLS_RESULT}/{GC_WIN_FREE_CALLS_RESULT}"
+        "gross requests {GC_WIN_RESULT:.2f} KB/f, positive growth {gc_window_alloc_per_frame(1):.2f} KB/f, explicit frees {gc_window_alloc_per_frame(2):.2f} KB/f, realloc shrinks {gc_window_alloc_per_frame(3):.2f} KB/f, calls alloc/realloc/free {gc_window_alloc_calls(5)}/{gc_window_alloc_calls(6)}/{gc_window_alloc_calls(7)}"
     } else { "allocator request detail unavailable" }
     let mode = if GC_WIN_MODE_RUNNING { "running" } else { "stopped" }
     return "GC-window ({validity}, mode={mode}, n={GC_WIN_N}) {allocator_stats}   exclusive sections {GC_WIN_SECTION_EXCLUSIVE_SUM_RESULT:.2f} KB/f   unsectioned {GC_WIN_UNSECTIONED_RESULT:.2f} KB/f   accounting residual {GC_WIN_RESIDUAL_RESULT:.4f} KB/f   section events {gc_window_section_event_count()}   frame-section slots {GC_WIN_FRAME_SECTION_SLOT_COUNT} overflow {GC_WIN_FRAME_SECTION_OVERFLOW}   late sections {GC_WIN_LATE_SECTIONS}/{GC_WIN_LATE_POOL_CAPACITY} pool exhausted {GC_WIN_LATE_POOL_EXHAUSTED}   unknown sections {GC_WIN_UNKNOWN_SECTIONS} {gc_window_unknown_sections_json()}\nGC-window frames mean {GC_WIN_FRAME_MEAN_RESULT:.2f} p50 {GC_WIN_FRAME_P50_RESULT:.2f} p95 {GC_WIN_FRAME_P95_RESULT:.2f} p99 {GC_WIN_FRAME_P99_RESULT:.2f} max {GC_WIN_FRAME_MAX_RESULT:.2f}   worst frame {GC_WIN_WORST_FRAME_INDEX_RESULT} total {GC_WIN_WORST_FRAME_TOTAL_KB_RESULT:.2f} KB; max single event {GC_WIN_WORST_FRAME_SECTION_KB_RESULT:.2f} KB in {max_event_section}\n{gc_window_worst_frame_pretty()}\nText-layout cache requests {TEXT_LAYOUT_CACHE_WINDOW_REQUESTS} hits {TEXT_LAYOUT_CACHE_WINDOW_HITS} misses {TEXT_LAYOUT_CACHE_WINDOW_MISSES} builds {TEXT_LAYOUT_CACHE_WINDOW_BUILDS} evictions {TEXT_LAYOUT_CACHE_WINDOW_EVICTIONS} high-water {TEXT_LAYOUT_CACHE_WINDOW_HIGH_WATER} examined avg {cache_examined:.2f} max {TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED} UI req/hit/miss/build/evict {TEXT_LAYOUT_CACHE_WINDOW_UI_REQUESTS}/{TEXT_LAYOUT_CACHE_WINDOW_UI_HITS}/{TEXT_LAYOUT_CACHE_WINDOW_UI_MISSES}/{TEXT_LAYOUT_CACHE_WINDOW_UI_BUILDS}/{TEXT_LAYOUT_CACHE_WINDOW_UI_EVICTIONS} world req/hit/miss/build/evict {TEXT_LAYOUT_CACHE_WINDOW_WORLD_REQUESTS}/{TEXT_LAYOUT_CACHE_WINDOW_WORLD_HITS}/{TEXT_LAYOUT_CACHE_WINDOW_WORLD_MISSES}/{TEXT_LAYOUT_CACHE_WINDOW_WORLD_BUILDS}/{TEXT_LAYOUT_CACHE_WINDOW_WORLD_EVICTIONS}\n"
@@ -3349,7 +3273,7 @@ fn __perf_json_memory() -> string {
     let trace = gc_window_trace_json(available)
     let requested_start = get_env_int("PERF_GC_WINDOW_START", 100)
     let after_warmup = os_getenv("PERF_GC_WINDOW_AFTER_WARMUP") == "1"
-    let gc_window = "{{\"requested_start_frame\":{requested_start},\"after_warmup\":{after_warmup},\"allocation_split\":{split},\"jit_trace\":{trace},\"start_frame\":{__perf_json_gc_int(GC_WIN_START, available)},\"requested_frames\":{requested},\"measured_frames\":{measured},\"available\":{available},\"valid\":{GC_WIN_ACCOUNTING_VALID},\"mode\":{mode},\"collector_running_at_start\":{collector_running_at_start},\"gross_request_kb_per_frame\":{__perf_json_gc_float(GC_WIN_RESULT, available)},\"positive_growth_kb_per_frame\":{__perf_json_gc_float(GC_WIN_POSITIVE_GROWTH_RESULT, allocator_available)},\"explicit_free_kb_per_frame\":{__perf_json_gc_float(GC_WIN_EXPLICIT_FREE_RESULT, allocator_available)},\"reallocation_shrink_kb_per_frame\":{__perf_json_gc_float(GC_WIN_REALLOC_SHRINK_RESULT, allocator_available)},\"allocator_calls\":{__perf_json_gc_int(GC_WIN_ALLOC_CALLS_RESULT, allocator_available)},\"allocation_calls\":{__perf_json_gc_int(GC_WIN_ALLOCATION_CALLS_RESULT, allocator_available)},\"reallocation_calls\":{__perf_json_gc_int(GC_WIN_REALLOCATION_CALLS_RESULT, allocator_available)},\"free_calls\":{__perf_json_gc_int(GC_WIN_FREE_CALLS_RESULT, allocator_available)},\"accounted_total_kb_per_frame\":{__perf_json_gc_float(GC_WIN_ACCOUNTED_TOTAL_RESULT, available)},\"sum_exclusive_section_kb_per_frame\":{__perf_json_gc_float(GC_WIN_SECTION_EXCLUSIVE_SUM_RESULT, available)},\"unsectioned_kb_per_frame\":{__perf_json_gc_float(GC_WIN_UNSECTIONED_RESULT, available)},\"accounting_residual_kb_per_frame\":{__perf_json_gc_float(GC_WIN_RESIDUAL_RESULT, available)},\"cursor_residual_kb_per_frame\":{__perf_json_gc_float(GC_WIN_CURSOR_RESIDUAL_RESULT, available)},\"frame_samples\":{__perf_json_gc_int(GC_WIN_FRAME_SAMPLES, available)},\"dropped_events\":{__perf_json_gc_int(GC_WIN_DROPPED_EVENTS, available)},\"unknown_sections\":{unknown_sections},\"unknown_section_diagnostics\":{unknown_diagnostics},\"late_sections\":{late_sections},\"late_pool_capacity\":{late_capacity},\"late_pool_exhausted\":{late_exhausted},\"frame_section_slots\":{__perf_json_gc_int(GC_WIN_FRAME_SECTION_SLOT_COUNT, available)},\"frame_section_overflow\":{__perf_json_gc_int(GC_WIN_FRAME_SECTION_OVERFLOW, available)},\"monotonic_failure\":{monotonic_failure},\"running_at_negative\":{running_at_negative},\"negative_sample\":{negative_sample},\"open_sections\":{__perf_json_gc_int(PROF_OPEN_TOP, available)},\"section_events\":{section_events},\"frame_distribution\":{distribution},\"worst_frame\":{worst_frame},\"text_layout_cache\":{cache}}}"
+    let gc_window = "{{\"requested_start_frame\":{requested_start},\"after_warmup\":{after_warmup},\"allocation_split\":{split},\"jit_trace\":{trace},\"start_frame\":{__perf_json_gc_int(GC_WIN_START, available)},\"requested_frames\":{requested},\"measured_frames\":{measured},\"available\":{available},\"valid\":{GC_WIN_ACCOUNTING_VALID},\"mode\":{mode},\"collector_running_at_start\":{collector_running_at_start},\"gross_request_kb_per_frame\":{__perf_json_gc_float(GC_WIN_RESULT, available)},\"positive_growth_kb_per_frame\":{__perf_json_gc_float(gc_window_alloc_per_frame(1), allocator_available)},\"explicit_free_kb_per_frame\":{__perf_json_gc_float(gc_window_alloc_per_frame(2), allocator_available)},\"reallocation_shrink_kb_per_frame\":{__perf_json_gc_float(gc_window_alloc_per_frame(3), allocator_available)},\"allocator_calls\":{__perf_json_gc_int(gc_window_alloc_calls(4), allocator_available)},\"allocation_calls\":{__perf_json_gc_int(gc_window_alloc_calls(5), allocator_available)},\"reallocation_calls\":{__perf_json_gc_int(gc_window_alloc_calls(6), allocator_available)},\"free_calls\":{__perf_json_gc_int(gc_window_alloc_calls(7), allocator_available)},\"accounted_total_kb_per_frame\":{__perf_json_gc_float(GC_WIN_ACCOUNTED_TOTAL_RESULT, available)},\"sum_exclusive_section_kb_per_frame\":{__perf_json_gc_float(GC_WIN_SECTION_EXCLUSIVE_SUM_RESULT, available)},\"unsectioned_kb_per_frame\":{__perf_json_gc_float(GC_WIN_UNSECTIONED_RESULT, available)},\"accounting_residual_kb_per_frame\":{__perf_json_gc_float(GC_WIN_RESIDUAL_RESULT, available)},\"cursor_residual_kb_per_frame\":{__perf_json_gc_float(GC_WIN_CURSOR_RESIDUAL_RESULT, available)},\"frame_samples\":{__perf_json_gc_int(GC_WIN_FRAME_SAMPLES, available)},\"dropped_events\":{__perf_json_gc_int(GC_WIN_DROPPED_EVENTS, available)},\"unknown_sections\":{unknown_sections},\"unknown_section_diagnostics\":{unknown_diagnostics},\"late_sections\":{late_sections},\"late_pool_capacity\":{late_capacity},\"late_pool_exhausted\":{late_exhausted},\"frame_section_slots\":{__perf_json_gc_int(GC_WIN_FRAME_SECTION_SLOT_COUNT, available)},\"frame_section_overflow\":{__perf_json_gc_int(GC_WIN_FRAME_SECTION_OVERFLOW, available)},\"monotonic_failure\":{monotonic_failure},\"running_at_negative\":{running_at_negative},\"negative_sample\":{negative_sample},\"open_sections\":{__perf_json_gc_int(PROF_OPEN_TOP, available)},\"section_events\":{section_events},\"frame_distribution\":{distribution},\"worst_frame\":{worst_frame},\"text_layout_cache\":{cache}}}"
     return "{{\"heap_kb\":{heap},\"heap_drops\":{PROFILER.heap_drops},\"gross_lua_alloc_request_kb_per_frame\":{__perf_json_gc_float(GC_WIN_RESULT, available)},\"gc_window\":{gc_window}}}"
 }
 
