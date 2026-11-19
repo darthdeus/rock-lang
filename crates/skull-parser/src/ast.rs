@@ -36,6 +36,7 @@ pub enum CallSyntax {
     /// Method-form sigil macro call `recv.name!(args)`, desugared at parse
     /// time to `name(recv, args)`: the receiver is the first arg. Resolves
     /// like `Normal`.
+    /// `recv.name!(args)`, parsed as `name(recv, args)`.
     MethodMacro,
     /// `name!(args) @ rhs`: a `Macro` call that took a trailing `@` lambda.
     AtMacro,
@@ -44,6 +45,7 @@ pub enum CallSyntax {
     AtMethodMacro,
     /// Type-shaped sigil arg `Name<A, B>`, parsed as a call of `Name` on the
     /// type args so `expr_to_type_expr` can recover the type.
+    /// Sigil arg `Name<A, B>`, a call of `Name` on the type args.
     TypeArgs,
 }
 
@@ -136,10 +138,12 @@ pub enum ExprKind {
     Null,
     Unit,
 
+    /// Shares the per-module id counter with `TypeExprKind::Hole`.
     Hole(u32, Option<Ustr>),
 
     Ident(Ident),
     Path(Path),
+    /// A one-segment unrooted path is an unqualified type name.
     PathStructLiteral {
         path: Path,
         bases: Vec<Idx<ExprData>>,
@@ -157,6 +161,7 @@ pub enum ExprKind {
     /// `expr as Type`
     As(Idx<ExprData>, Idx<TypeExprData>),
     /// bitcast<Type>(expr) preserves the low 32 bits between int and uint.
+    /// Preserves the low 32 bits between `int` and `uint`.
     Bitcast(Idx<ExprData>, Idx<TypeExprData>),
     /// `(expr : Type)` - contextual ascription supplies an expected type.
     ParenAscription(Idx<ExprData>, Idx<TypeExprData>),
@@ -167,6 +172,7 @@ pub enum ExprKind {
 
     FieldAccess(Idx<ExprData>, Ident),
     SafeNavigation(Idx<ExprData>, Ident),
+    /// `recv?.let { .. }`; `binding` is the receiver's ident, else `value`.
     SafeNavigationLet {
         receiver: Idx<ExprData>,
         binding: Ident,
@@ -211,6 +217,7 @@ pub enum ExprKind {
         else_branch: Option<Idx<BlockData>>,
     },
 
+    /// Also the single-binding `if let`.
     IfLetChain {
         clauses: Vec<IfLetClause>,
         then_block: Idx<BlockData>,
@@ -234,10 +241,13 @@ pub enum ExprKind {
         body: Idx<BlockData>,
     },
 
+    /// Leading `.field`: a sibling field in a struct field default.
     SiblingFieldRef(Ident),
 
+    /// `&name`
     FunctionRef(Ident),
 
+    /// `^name` resolves in the macro caller scope, bypassing hygiene.
     AnaphoricIdent(Ident),
 }
 
@@ -261,10 +271,12 @@ pub enum Pattern {
     Ident(Ident),
     Literal(Idx<ExprData>),
     Tuple(Vec<Pattern>),
+    /// A one-segment path is a shorthand variant name.
     PathVariant {
         path: Path,
         args: Option<Vec<Pattern>>,
     },
+    /// Also enum record variants; a one-segment path is a shorthand name.
     PathRecord {
         path: Path,
         fields: Vec<(Ident, Pattern)>,
@@ -313,6 +325,7 @@ pub enum StatementKind {
     While(While),
     WhileLet(WhileLet),
     Defer(DeferKind),
+    /// `on_resume`/`on_killed`/`on_hot_reload { .. }` in a `co fn`.
     LifecycleHook {
         keyword_span: Option<Span>,
         name: Ustr,
@@ -345,6 +358,9 @@ pub struct Let {
     pub else_block: Option<Idx<BlockData>>,
 }
 
+/// `static <name>[: T] = <init>`: a local whose storage persists across
+/// calls, initialized on first reach. The initializer is mandatory and the
+/// name is a plain ident.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Static {
     pub span: Span,
@@ -421,7 +437,9 @@ pub enum TypeExprKind {
     Int,
     Uint,
     Float,
+    /// The same type as `float`.
     F64,
+    /// Narrow float storage, legal only as a field type.
     F32,
     Bool,
     Ref(Idx<TypeExprData>),
@@ -456,6 +474,7 @@ pub struct Param {
     pub annotations: Vec<Annotation>,
 }
 
+/// The only bound the compiler knows is the builtin `Iterator<T>`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Generic {
     pub name: Ident,
@@ -474,7 +493,9 @@ pub enum FnBackend {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FunctionBody {
     Rock(Idx<BlockData>),
+    /// Raw backend source, emitted verbatim; bare `inline` means Lua.
     Inline(FnBackend, Ustr),
+    /// An existing Lua global; C symbols go through `Ffi`.
     ExternLua,
     ExternJs,
     Ffi(Ustr),
@@ -516,6 +537,8 @@ pub struct FunctionDef {
     /// Item declarations in a macro body (`macro m() { fn f() {..} }`). Empty
     /// for non-macros and expression-only macros. Spliced at module scope when
     /// the macro is invoked as a top-level statement.
+    /// Items in a macro body, spliced at module scope when the macro is
+    /// invoked as a top-level statement.
     pub macro_items: Vec<Item>,
     /// Written receiver tail and the formatter's split in the generics list.
     pub receiver_surface: Option<(Ident, usize)>,
@@ -548,6 +571,8 @@ pub struct Field {
     /// `embed f: Foo` -- the field's leaves live in the parent and the field
     /// has no independently storable aggregate (projection-only).
     /// `embed` is CONTEXTUAL: `embed: int` is still a field named `embed`.
+    /// `embed f: Foo`: the leaves live in the parent and the field has no
+    /// independently storable aggregate.
     pub is_embed: bool,
 }
 
@@ -626,10 +651,15 @@ pub struct AnnoArg {
 /// "not written" and takes the item-kind's default.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Visibility {
+    /// `private` / `pub(self)`: the defining module and its descendants.
     Private,
     Pub,
+    /// `pub(super)`: the parent module and its descendants.
     PubSuper,
+    /// `pub(package)`: every module in the defining package.
     PubPackage,
+    /// `pub(in a::b)`: that ancestor module, package-root-relative, and its
+    /// descendants.
     PubIn(Vec<Ident>),
 }
 
@@ -640,6 +670,8 @@ pub(crate) struct VisMods {
     pub set_private: bool,
 }
 
+/// `mod a::b;` as the first non-comment item: the rest of the file
+/// contributes to that module.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModuleHeader {
     /// Package-root-relative module path (`mod combat::casting;` -> [combat,
@@ -670,8 +702,12 @@ pub enum UseTree {
 pub enum UseSuffix {
     Bind,
     BindAs(Ident),
+    /// Immediate accessible members.
     Glob,
-    Operator { op: Ident, alias: Option<Ident> },
+    Operator {
+        op: Ident,
+        alias: Option<Ident>,
+    },
     Nested(Vec<UseTree>),
 }
 
@@ -697,6 +733,7 @@ pub enum ItemKind {
     Global(GlobalDef),
     CompilerDirective(CompilerDirective),
     Comment(Ustr),
+    /// `mod x { .. }`; reopening a module adds a fragment.
     Module(ModBlock),
     Use(UseDecl),
     /// A top-level macro invocation `name(args)` / `name!(args)` (sigil enables
@@ -725,6 +762,7 @@ pub struct Ast {
     /// The module's source-file identity, as passed to `parse_module`. The id
     /// for the whole module -- independent of item spans (which macro expansion
     /// can retag) and defined even for an item-less module.
+    /// Independent of item spans, which macro expansion can retag.
     pub file: Ustr,
     /// The owning package (set by the loader from the package graph; `None`
     /// for standalone/editor sources). Package loaders stamp graph facts here.
@@ -747,6 +785,7 @@ pub struct Ast {
     pub macro_param_refs: Vec<MacroParamRef>,
 }
 
+/// The declaration span first, then every use span in the template.
 #[derive(Clone, Debug)]
 pub struct MacroParamRef {
     pub name: Ustr,
