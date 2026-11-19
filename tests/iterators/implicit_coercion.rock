@@ -131,7 +131,7 @@ fn coerced_chain_in_string_interp() {
 // lambda callback that returns a Vec has its result coerced the same way, for
 // non-nullable, nullable and nobox elements alike, against the explicit-iter
 // control. A named fn returning a Vec is passed through a lambda; on its own
-// it is rejected (tests/errors/flat_map_fn_value_callback_result.rock.err).
+// it is rejected (tests/errors/nobox.rock.err).
 nobox value FmV2 { x: float, y: float }
 
 fn fm_pair(n: int) -> VecIter<int> { return [n, n].iter() }

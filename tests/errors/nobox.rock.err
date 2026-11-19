@@ -131,7 +131,7 @@ fn main() {
 // Interpolating a WHOLE tuple that carries one is the sink, and it is chosen
 // because it is PERMANENT: asking for a single runtime-typed value is F1
 // erasure, a justified box that is meant to stay a rejection
-// (`tests/errors/nobox_container_gaps.rock.err`). A tuple element in a COLLECTION used to
+// (`tests/errors/nobox.rock.err`). A tuple element in a COLLECTION used to
 // stand here and was the wrong choice -- that was an open gap, it closed, and
 // this case went green while the shader rule it guards was untouched. Do not
 // re-point this at a sink the matrix lists as live.
@@ -146,4 +146,381 @@ fn leaky_frag(tc: NV2) -> Vec4 {
 
 fn main() {
     let _ = leaky_frag(NV2 { x: 1.0, y: 2.0 })
+}
+
+//=== TEST CASE: whole_tuple_escape_of_a_nobox_Generic ===
+// NOT an unbuilt mechanism -- the guarantee firing, pinned so the boundary
+// cannot move unnoticed. A nullable tuple carrying a nobox element is bound and
+// used slot-wise (seventeen shapes in `tests/nobox/nullable_tuple.rock`), but
+// interpolating the WHOLE tuple asks for one value with a runtime type, which is
+// a box by definition -- the same justified-box class as `inspect` over a column
+// vec. Project the slots instead (`t.0.x`), or `materialize` deliberately.
+nobox value SNV { x: int, y: int }
+fn maybe(b: bool) -> (SNV, int)? {
+    if b { return (SNV { x: 3, y: 6 }, 1) }
+    return null
+}
+fn main() {
+    let t = maybe(true)
+    print("{t}")   // ERROR: the whole tuple escapes, so its nobox element boxes
+}
+
+//=== TEST CASE: inline_tuple_interpolation_of_a_nobox_Generic ===
+// The same boundary reached WITHOUT a binding. It rejects through a different
+// site (`stringify_non_null`, not the packed repr) and is pinned separately
+// because it once compiled while the bound form above rejected: the box had
+// already widened, so `inspect` walked a 3-slot table and would have rendered a
+// 3-tuple. That is a silent wrong answer, which the widened box cannot leave to
+// the residue check -- there is no `<name>_ct` left for it to find.
+nobox value INV { x: float, y: float }
+fn inv(k: float) -> INV { return INV { x: k, y: 2.0 } }
+fn main() {
+    print("{(inv(1.0), 1.0)}")   // ERROR: the widened box would render as a wider tuple
+}
+
+//=== TEST CASE: direct_inspect_of_a_tuple_carrying_a_nobox_Generic ===
+// The call-boundary spelling of the case above: `inspect` reached by name rather
+// than through interpolation. Pinned as its own case because the two are checked
+// at different sites and only one of them used to exist.
+nobox value DNV { x: float, y: float }
+fn dnv(k: float) -> DNV { return DNV { x: k, y: 2.0 } }
+fn main() {
+    print(inspect((dnv(1.0), 1.0)))   // ERROR: same widened box, reached by call
+}
+
+//=== TEST CASE: implicit_tuple_at_an_inline_body_Generic ===
+// The guarantee firing at a body the compiler cannot see into: it would be
+// handed the flat box and read a wider tuple. `materialize(t)` hands it one
+// boxed value per element (`tests/nobox/tuple.rock`).
+nobox value BNV { x: float, y: float }
+inline(lua) fn count(v: any) -> int = """ return #v """
+fn main() {
+    let t = (BNV { x: 1.0, y: 2.0 }, 3)
+    print(count(t))   // ERROR: a tuple carrying a nobox value cannot cross
+}
+
+//=== TEST CASE: coroutine_yields_a_bare_nobox_value_Generic ===
+// The yield channel threads flat-enum leaves through frame slots; a bare value
+// has no channel and rides the boxed `resume()` result.
+//! expect: nobox value `NV` survived lowering as an implicit materialization
+nobox value NV { x: int, y: int }
+co fn gen(k: int) -> Coroutine<NV> {
+    yield NV { x: k, y: k + 1 }   // ERROR: the yield value boxes
+}
+fn main() {
+    let c = gen(1)
+    print("{c.resume()?.x ?? -1}")
+}
+
+//=== TEST CASE: coroutine_returns_a_bare_nobox_value_Generic ===
+// `result()` reads one frame cell.
+//! expect: nobox value `NV` survived lowering as an implicit materialization
+nobox value NV { x: int, y: int }
+co fn finish(k: int) -> Coroutine<int, NV> {
+    yield k
+    return NV { x: k, y: 2 }   // ERROR: the result boxes
+}
+fn main() {
+    let c = finish(1)
+    let _a = c.resume()
+    let _b = c.resume()
+    print("{c.result()?.x ?? -1}")
+}
+
+//=== TEST CASE: static_local_holding_a_nobox_value_Generic ===
+// A `static` local is one private global cell plus a done flag. A nobox global
+// is one global per leaf; statics do not use that layout yet.
+//! expect: nobox value `NV` survived lowering as an implicit materialization
+nobox value NV { x: int, y: int }
+fn bump() -> int {
+    static s = NV { x: 1, y: 2 }   // ERROR: the static cell boxes
+    s = NV { x: s.x + 1, y: s.y }
+    return s.x
+}
+fn main() { print("{bump()}") }
+
+//=== TEST CASE: newtype_wrapping_a_nobox_value_Generic ===
+// A newtype is erased to what it wraps, but the value-shape oracles key on the
+// nominal name and do not see through the newtype to the nobox leaves.
+//! expect: nobox value `NV` survived lowering as an implicit materialization
+nobox value NV { x: int, y: int }
+newtype NT(NV)
+fn mk(k: int) -> NT {
+    return NT(NV { x: k, y: k + 1 })   // ERROR: the wrapped value boxes
+}
+fn main() {
+    let NT(v) = mk(4)
+    print("{v.x}")
+}
+
+//=== TEST CASE: generic_newtype_at_a_nobox_type_Generic ===
+//! expect: nobox value `NV` survived lowering as an implicit materialization
+nobox value NV { x: int, y: int }
+newtype GBox<T>(T)
+fn mk(k: int) -> GBox<NV>? {
+    if k < 0 { return null }
+    return GBox(NV { x: k, y: 7 })   // ERROR: the wrapped value boxes
+}
+fn main() { print("{mk(2) == null}") }
+
+//=== TEST CASE: generic_struct_field_at_a_nobox_type_Generic ===
+// A generic `T` field is one slot whatever `T` is, so `Wrap<NV>` would hold a
+// box. The concrete `struct W { v: NV }` splices the leaves and works.
+//! expect: nobox value `NV` survived lowering as an implicit materialization
+nobox value NV { x: int, y: int }
+struct Wrap<T> { v: T }
+fn wrap(k: int) -> Wrap<NV> {
+    return Wrap { v: NV { x: k, y: 1 } }   // ERROR: the generic field boxes
+}
+fn main() { print("{wrap(8).v.x}") }
+
+//=== TEST CASE: returns_disagree_across_swapped_recursion ===
+//! expect: returns a `ref` to a flat-stored container element on one path and a differently stored reference on another
+value Inner { v: int }
+value Cell { inner: Inner, w: int }
+value Outer { cell: Cell, z: int }
+
+// The swapped recursive call enters the other storage, so one instance
+// returns the vec element on one path and the nested field on the other.
+fn swap_pick(a: ref Cell, b: ref Cell, n: int) -> ref Cell {
+    if n == 0 { return a }
+    return swap_pick(b, a, n - 1)
+}
+
+fn bump(c: ref Cell) { c.w += 1 }
+
+fn main() {
+    let xs: [Cell] = [Cell { inner: Inner { v: 1 }, w: 2 }]
+    let os: [Outer] = [Outer { cell: Cell { inner: Inner { v: 3 }, w: 4 }, z: 5 }]
+    bump(swap_pick(xs[0], os[0].cell, 3))
+}
+
+//=== TEST CASE: safe_nav_call_cannot_receive_a_flat_ref_result ===
+//! expect: returns a `ref` to a flat-stored container element, which only a direct call can receive on this backend
+value Cell { w: int }
+
+fn borrow_cell(a: Arena<Cell>, e: Entity<Cell>) -> (ref Cell)? {
+    return a.borrow(e)
+}
+
+fn bump(c: ref Cell) { c.w += 1 }
+
+fn main() {
+    let a: Arena<Cell>? = arena_new()
+    let e = a.unwrap().insert(Cell { w: 1 })
+    let c = a?.borrow_cell(e)
+    if c != null { bump(c) }
+}
+
+//=== TEST CASE: whole_read_of_a_nullable_flat_ref_result ===
+//! expect: returns a nullable `ref` to a flat-stored `Cell`; bind it with `let` and check it for null before reading it
+value Cell { v: int, w: int }
+
+fn maybe(c: ref Cell, ok: bool) -> (ref Cell)? {
+    if ok { return c }
+    return null
+}
+
+fn same(c: ref Cell) -> bool {
+    return maybe(c, true) == Cell { v: 3, w: 4 }
+}
+
+fn main() {
+    let xs: [Cell] = [Cell { v: 3, w: 4 }]
+    print(same(xs[0]))
+}
+
+//=== TEST CASE: whole_read_of_a_nullable_flat_ref_binding ===
+//! expect: a nullable `ref` to a flat-stored container element can be compared with null
+value Cell { v: int, w: int }
+
+fn maybe(c: ref Cell, ok: bool) -> (ref Cell)? {
+    if ok { return c }
+    return null
+}
+
+fn read_through(c: ref Cell) -> bool {
+    let m = maybe(c, true)
+    return m == Cell { v: 3, w: 4 }
+}
+
+fn main() {
+    let xs: [Cell] = [Cell { v: 3, w: 4 }]
+    print(read_through(xs[0]))
+}
+
+//=== TEST CASE: named_fn_vec_result_Generic ===
+fn pair(n: int) -> [int] { return [n, n] }
+
+fn main() {
+    //! expect: this callback returns `[int]`, not an iterator; only a lambda's result is coerced
+    print([1, 2].flat_map(pair).count())
+}
+
+//=== TEST CASE: named_fn_nullable_vec_result_Generic ===
+fn pair(n: int?) -> [int?] { return [n, n] }
+
+fn main() {
+    let a: [int?] = [1, null]
+    //! expect: this callback returns `[int?]`, not an iterator
+    print(a.flat_map(pair).count())
+}
+
+//=== TEST CASE: native_buffer_alloc_generic_gc_value ===
+struct FlatVec<T> { buf: NativeBuffer<T>, len: int }
+
+value Named { s: string }   // string field -> GC-carrying value struct, no C layout
+
+@inline fn flat_vec_new<T>(cap: int) -> FlatVec<T> {
+    return FlatVec { buf: native_buffer_alloc(cap), len: 0 }
+}
+
+fn main() {
+    let fv: FlatVec<Named> = flat_vec_new(8)
+    print("{fv.len}")
+}
+
+//=== TEST CASE: native_buffer_alloc_heap_struct ===
+struct Heap { xs: [int] }
+
+fn bad(n: int) -> NativeBuffer<Heap> {
+    return native_buffer_alloc(n)
+}
+
+fn main() {
+    let b = bad(4)
+    print("{b.len}")
+}
+
+//=== TEST CASE: nb_index_must_be_int_Generic ===
+// Non-int index is rejected.
+//! expect: type mismatch: expected `int`, found `string`
+fn f(buf: NativeBuffer<float>) -> int {
+    let x = buf["nope"]
+    5
+}
+
+//=== TEST CASE: gc_value_extern_param_Generic ===
+value Bag { xs: [int], n: int }
+
+extern(lua) fn c_takes_bag(b: Bag) -> int
+
+fn main() {
+    print("{c_takes_bag(Bag { xs: [1], n: 2 })}")
+}
+
+//=== TEST CASE: gc_value_extern_return_Generic ===
+value Pair<T> { a: T, b: T }
+
+extern(lua) fn c_makes_pair() -> Pair<int>
+
+fn main() {
+    let p = c_makes_pair()
+    print("{p.a}")
+}
+
+//=== TEST CASE: gc_value_nativebuffer_alloc ===
+value Bag { xs: [int], n: int }
+
+fn nb_bag(n: int) -> NativeBuffer<Bag> {
+    return native_buffer_alloc(n)
+}
+
+fn main() {
+    let b = nb_bag(4)
+    print("{b.len}")
+}
+
+//=== TEST CASE: value_struct_map_key_annotation_Generic ===
+//! expect: `IVec2` is a `value` struct
+value IVec2 { x: int, y: int }
+
+fn main() {
+    let m: Map<IVec2, int> = map_new()
+    m[IVec2 { x: 1, y: 2 }] = 3
+    print("{m.len()}")
+}
+
+//=== TEST CASE: entity_map_key_Generic ===
+//! expect: `Entity` is a `value` struct
+struct Tag { v: int }
+
+fn main() {
+    let a: Arena<Tag> = arena_new()
+    let m: Map<Entity<Tag>, int> = map_new()
+    m[a.insert(Tag { v: 1 })] = 3
+    print("{m.len()}")
+}
+
+//=== TEST CASE: value_struct_map_key_inferred_Generic ===
+//! expect: `Coord` is a `value` struct
+value Coord { q: int, r: int }
+
+fn make() -> Coord { return Coord { q: 1, r: 2 } }
+
+fn main() {
+    let m = map_new()
+    let k = make()
+    m[k] = 7
+    print("{m.get(k)}")
+}
+
+//=== TEST CASE: tuple_map_key_Generic ===
+//! expect: a tuple is an aggregate
+fn main() {
+    let m: Map<(int, int), string> = map_new()
+    m.insert((1, 2), "a")
+    print("{m.get((1, 2)) ?? "MISS"}")
+}
+
+//=== TEST CASE: array_map_key_Generic ===
+//! expect: an array is an aggregate
+fn main() {
+    let m: Map<[int], string> = map_new()
+    m.insert([1, 2], "a")
+    print("{m.get([1, 2]) ?? "MISS"}")
+}
+
+//=== TEST CASE: boxed_struct_map_key_Generic ===
+//! expect: `Boxed` is a struct
+struct Boxed { a: int }
+
+fn main() {
+    let m: Map<Boxed, string> = map_new()
+    m.insert(Boxed { a: 1 }, "x")
+    print("{m.get(Boxed { a: 1 }) ?? "MISS"}")
+}
+
+//=== TEST CASE: payload_enum_map_key_Generic ===
+//! expect: `Ev` has payload-carrying variants
+enum Ev { Tick(int), Idle }
+
+fn main() {
+    let m: Map<Ev, string> = map_new()
+    m.insert(Ev::Tick(1), "x")
+    print("{m.get(Ev::Tick(1)) ?? "MISS"}")
+}
+
+//=== TEST CASE: newtype_over_value_struct_map_key_Generic ===
+//! expect: `WrapValue` wraps `VKey` is a `value` struct
+// The escape hatch the old diagnostic recommended: a `newtype` wrapping a
+// `value` struct is still cdata, so the wrapper reintroduces the defect the
+// rejection exists to stop.
+value VKey { a: int }
+newtype WrapValue(VKey)
+
+fn main() {
+    let m: Map<WrapValue, string> = map_new()
+    m.insert(WrapValue(VKey { a: 1 }), "x")
+    print("{m.len()}")
+}
+
+//=== TEST CASE: newtype_over_tuple_map_key_Generic ===
+//! expect: `WrapTuple` wraps a tuple is an aggregate
+newtype WrapTuple((int, int))
+
+fn main() {
+    let m: Map<WrapTuple, string> = map_new()
+    m.insert(WrapTuple((1, 2)), "x")
+    print("{m.len()}")
 }

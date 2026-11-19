@@ -1,5 +1,5 @@
 // A null-check narrow survives exactly the effects that cannot undo it. The
-// rejected shapes are in tests/errors/narrowing_effects.rock.err; these pin
+// rejected shapes are in tests/errors/nullable.rock.err; these pin
 // what still narrows, so the rule stays practical.
 
 struct G { f: int? }

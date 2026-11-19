@@ -1,5 +1,5 @@
 // texture() is GPU-only. CPU calls and fn-value references are compile errors
-// (tests/errors/texture_cpu_call.rock.err and skull's GPU-only fn-value test).
+// (tests/errors/gpu.rock.err and skull's GPU-only fn-value test).
 // A @shader(fragment) fn calling texture() still compiles because shader bodies
 // pass through the Lua backend.
 

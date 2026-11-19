@@ -2,7 +2,7 @@
 // another global, and lambdas stored in a struct field, directly in a global,
 // in array literals, capturing an initializer local, and with a nested lambda
 // in the body. Rejected initializers are in
-// tests/errors/global_initializers.rock.err.
+// tests/errors/assignment.rock.err.
 
 global good_global: int = 42
 

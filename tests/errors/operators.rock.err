@@ -1,0 +1,171 @@
+//=== TEST CASE: newtype_string_ordering_rejected_Generic ===
+// Ordering on a non-numeric newtype is rejected: the inner type (`string`) is
+// not orderable. (rock: "Ordering comparisons are only supported for numeric
+// types".)
+//! expect: ordering operators require numeric operands, got Name
+newtype Name(string)
+fn f() -> bool {
+    let a = Name("a")
+    let b = Name("b")
+    a < b
+}
+
+//=== TEST CASE: eq_Generic ===
+//! expect: operator `==` is not overloadable
+value V { a: int }
+operator ==(x: V, y: V) -> bool { return true }
+fn main() {}
+
+//=== TEST CASE: ne_Generic ===
+//! expect: operator `!=` is not overloadable
+value V { a: int }
+operator !=(x: V, y: V) -> bool { return true }
+fn main() {}
+
+//=== TEST CASE: lt_Generic ===
+//! expect: operator `<` is not overloadable
+value V { a: int }
+operator <(x: V, y: V) -> bool { return true }
+fn main() {}
+
+//=== TEST CASE: le_Generic ===
+//! expect: operator `<=` is not overloadable
+value V { a: int }
+operator <=(x: V, y: V) -> bool { return true }
+fn main() {}
+
+//=== TEST CASE: gt_Generic ===
+//! expect: operator `>` is not overloadable
+value V { a: int }
+operator >(x: V, y: V) -> bool { return true }
+fn main() {}
+
+//=== TEST CASE: ge_Generic ===
+//! expect: operator `>=` is not overloadable
+value V { a: int }
+operator >=(x: V, y: V) -> bool { return true }
+fn main() {}
+
+//=== TEST CASE: and_Generic ===
+//! expect: operator `&&` is not overloadable
+value V { a: int }
+operator &&(x: V, y: V) -> bool { return true }
+fn main() {}
+
+//=== TEST CASE: or_Generic ===
+//! expect: operator `||` is not overloadable
+value V { a: int }
+operator ||(x: V, y: V) -> bool { return true }
+fn main() {}
+
+//=== TEST CASE: not_Generic ===
+//! expect: operator `!` is not overloadable
+value V { a: int }
+operator !(x: V, y: V) -> bool { return true }
+fn main() {}
+
+//=== TEST CASE: bitnot_Generic ===
+//! expect: operator `~` is not overloadable
+value V { a: int }
+operator ~(x: V) -> V { return x }
+fn main() {}
+
+//=== TEST CASE: bitand_Generic ===
+//! expect: operator `&` is not overloadable
+value V { a: int }
+operator &(x: V, y: V) -> V { return x }
+fn main() {}
+
+//=== TEST CASE: bitor_Generic ===
+//! expect: operator `|` is not overloadable
+value V { a: int }
+operator |(x: V, y: V) -> V { return x }
+fn main() {}
+
+//=== TEST CASE: bitxor_Generic ===
+//! expect: operator `^` is not overloadable
+value V { a: int }
+operator ^(x: V, y: V) -> V { return x }
+fn main() {}
+
+//=== TEST CASE: shl_Generic ===
+//! expect: operator `<<` is not overloadable
+value V { a: int }
+operator <<(x: V, y: V) -> V { return x }
+fn main() {}
+
+//=== TEST CASE: shr_Generic ===
+//! expect: operator `>>` is not overloadable
+value V { a: int }
+operator >>(x: V, y: V) -> V { return x }
+fn main() {}
+
+//=== TEST CASE: index_Generic ===
+//! expect: operator `[]` is not overloadable
+value V { a: int }
+operator [](x: V, i: int) -> int { return 1 }
+fn main() {}
+
+// The reserved name is reserved in EVERY spelling, not just the `operator`
+// one with a Rock body. Both of these were accepted and ignored while the
+// rejection keyed on narrower guards; each is the same swallow wearing a
+// different hat.
+
+//=== TEST CASE: plain_fn_spelling_Generic ===
+//! expect: operator `==` is not overloadable
+value V { a: int }
+fn __op_eq(x: V, y: V) -> bool { return true }
+fn main() {}
+
+//=== TEST CASE: inline_backend_spelling_Generic ===
+//! expect: operator `==` is not overloadable
+value V { a: int }
+@pure @inline operator(lua) ==(x: V, y: V) -> bool = "return true"
+fn main() {}
+
+// The admitted side is NOT here: a rejection suite cannot express "accepted
+// and then actually dispatched", and acceptance alone would pass even if `+`
+// were silently ignored too. `tests/operators/overloadable.rock` covers all
+// six overloadable symbols by asserting each returns its marker.
+
+//=== TEST CASE: newtype_eq_with_int_IncompatibleNewtypeOperation ===
+newtype UserId(int)
+
+fn main() {
+    let user_id = UserId(42)
+    if user_id == 42 {
+        print("Equal")
+    }
+}
+
+//=== TEST CASE: newtype_ne_with_int_IncompatibleNewtypeOperation ===
+newtype UserId(int)
+
+fn main() {
+    let user_id = UserId(42)
+    if user_id != 10 {
+        print("Not equal")
+    }
+}
+
+//=== TEST CASE: int_eq_with_newtype_IncompatibleNewtypeOperation ===
+newtype UserId(int)
+
+fn main() {
+    let user_id = UserId(42)
+    if 42 == user_id {
+        print("Equal")
+    }
+}
+
+//=== TEST CASE: different_newtypes_comparison_IncompatibleNewtypeOperation ===
+newtype UserId(int)
+newtype Score(int)
+
+fn main() {
+    let id = UserId(1)
+    let score = Score(1)
+    if id == score {
+        print("Equal")
+    }
+}

@@ -1,8 +1,0 @@
-//=== TEST CASE: aggregate_as_rejects_Generic ===
-//! expect: cannot convert `Source` to `Target` with `as`; `as` converts only between numeric types, or where
-value Source { x: int }
-value Target { x: int }
-fn convert(value: Source) -> Target {
-    return value as Target
-}
-

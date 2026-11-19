@@ -1,8 +1,0 @@
-//! Error: @gpu_only on a non-@intrinsic fn is rejected (the marker is meaningless alone)
-
-//=== TEST CASE: gpu_only_without_intrinsic_Generic ===
-@gpu_only fn bogus() -> int {
-    return 1
-}
-
-fn main() {}

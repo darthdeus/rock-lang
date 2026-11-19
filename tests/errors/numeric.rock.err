@@ -1,0 +1,459 @@
+//=== TEST CASE: as_to_nominal_Generic ===
+// `as` cannot reinterpret `any` as a nominal type: that asserts a type without
+// static proof, a runtime nominal check, or backend representation validation.
+// `cast<T>` is the explicit escape hatch for erased storage and FFI recovery.
+//! expect: cannot convert `any` to `Point` with `as`; `as` converts only between numeric types, or where `any`
+struct Point { x: int, y: int }
+fn f(a: any) -> int {
+    let p = a as Point
+    5
+}
+
+//=== TEST CASE: aggregate_as_rejects_Generic ===
+//! expect: cannot convert `Source` to `Target` with `as`; `as` converts only between numeric types, or where
+value Source { x: int }
+value Target { x: int }
+fn convert(value: Source) -> Target {
+    return value as Target
+}
+
+//=== TEST CASE: reference_as_rejects_Generic ===
+//! expect: cannot convert `ref Source` to `ref Target` with `as`; `as` converts only between numeric types, or
+struct Source { x: int }
+struct Target { x: int }
+fn convert(value: ref Source) -> ref Target {
+    return value as ref Target
+}
+
+//=== TEST CASE: cast_string_to_int_MismatchedType ===
+//! expect: cannot convert `string` to `int` with `as`
+fn main() {
+    let value = "42" as int
+    print(value)
+}
+
+//=== TEST CASE: cast_int_to_string_MismatchedType ===
+//! expect: cannot convert `int` to `string` with `as`
+fn main() {
+    let value = 42 as string
+    print(value)
+}
+
+//=== TEST CASE: cast_bool_to_int_MismatchedType ===
+//! expect: cannot convert `bool` to `int` with `as`
+fn main() {
+    let value = true as int
+    print(value)
+}
+
+//=== TEST CASE: cast_struct_to_int_MismatchedType ===
+//! expect: cannot convert `Point` to `int` with `as`
+struct Point { x: int, y: int }
+
+fn main() {
+    let value = Point { x: 1, y: 2 } as int
+    print(value)
+}
+
+//=== TEST CASE: cast_any_to_nominal_MismatchedType ===
+//! expect: cannot convert `any` to `Point` with `as`
+struct Point { x: int, y: int }
+
+fn take(a: any) -> int {
+    let p = a as Point
+    p.x
+}
+
+fn main() {
+    print(take(Point { x: 1, y: 2 }))
+}
+
+// An empty array literal has no element type of its own. `[1, 2, 3] as [int]`
+// (tests/types/checked_ascription.rock) is the accepted control -- there the operand
+// types itself.
+//=== TEST CASE: cast_empty_array_unresolved_element_MismatchedType ===
+//! expect: cannot convert `[?E]` to `[int]` with `as`: the operand is not fully inferred on its own
+fn main() {
+    let value = [] as [int]
+    print(value.len())
+}
+
+// A bare `null` carries only a fresh variable. `(null : int?)` is the ascription
+// that legitimately binds it.
+//=== TEST CASE: cast_bare_null_unresolved_MismatchedType ===
+//! expect: cannot convert `null?` to `int?` with `as`: the operand is not fully inferred on its own
+fn main() {
+    let value = null as int?
+    print(value == null)
+}
+
+// The lambda infers as `fn(?a) -> ?a`; taking `int` from the cast target is the
+// contextual behaviour that belongs to ascription, not `as`.
+//=== TEST CASE: cast_deferred_lambda_param_MismatchedType ===
+//! expect: cannot convert `fn(?R) -> ?R` to `fn(int) -> int` with `as`: the operand is not fully inferred on its own
+fn main() {
+    let f = ((x) => x) as fn(int) -> int
+}
+
+// Same rule where the operand also has a deferred field access waiting on the
+// parameter's type: `as` may not discharge it either.
+//=== TEST CASE: cast_deferred_lambda_field_MismatchedType ===
+//! expect: cannot convert `fn(p) -> ?R` to `fn(Point) -> int` with `as`: the operand is not fully inferred on its own
+struct Point { x: int, y: int }
+
+fn main() {
+    let f = ((p) => p.x) as fn(Point) -> int
+}
+
+// `_` is an inference hole in type position, so a hole target has nothing to
+// validate against: the classification passes, and the surrounding expectation
+// then binds the hole. That laundered `42 as string`, which rejects directly.
+//=== TEST CASE: cast_target_hole_MismatchedType ===
+//! expect: cannot convert `int` to `_` with `as`: the target is not a written type
+fn main() {
+    let bad: string = 42 as _
+    print(bad)
+}
+
+// The hole does not have to be the whole target.
+//=== TEST CASE: cast_nested_target_hole_MismatchedType ===
+//! expect: cannot convert `[int]` to `[_]` with `as`: the target is not a written type
+fn main() {
+    let bad: [string] = [1, 2, 3] as [_]
+    print(bad.len())
+}
+
+// A hole target is rejected on its own terms, not only when it launders a bad
+// pair -- `as` validates a written type, and `_` is not one.
+//=== TEST CASE: cast_target_hole_identity_MismatchedType ===
+//! expect: cannot convert `int` to `_` with `as`: the target is not a written type
+fn main() {
+    let same: int = 42 as _
+    print(same)
+}
+
+//=== TEST CASE: ascribe_int_to_string_MismatchedType ===
+fn main() {
+    let value = (42 : string)
+    print(value)
+}
+
+//=== TEST CASE: ascribe_float_to_int_MismatchedType ===
+fn main() {
+    let value = (3.14 : int)
+    print(value)
+}
+
+//=== TEST CASE: ascribe_string_to_int_MismatchedType ===
+fn main() {
+    let value = ("42" : int)
+    print(value)
+}
+
+//=== TEST CASE: ascribe_generic_fn_value_MismatchedType ===
+fn identity<T>(x: T) -> T { x }
+
+fn main() {
+    let f = (identity : fn(int) -> int)
+    print(f(1))
+}
+
+//=== TEST CASE: float_to_int_param_fail_Generic ===
+// float -> int stays rejected everywhere
+//! expect: type mismatch: expected `int`, found `float`
+fn g(y: int) -> int { y }
+fn f() -> int { g(1.5) }
+
+//=== TEST CASE: float_to_int_let_fail_Generic ===
+//! expect: type mismatch: expected `int`, found `float`
+fn f() -> int {
+    let x: int = 1.5
+    x
+}
+
+//=== TEST CASE: float_return_as_int_fail_Generic ===
+//! expect: type mismatch: expected `int`, found `float`
+fn f() -> int { 1.5 }
+
+//=== TEST CASE: cast_strips_nullability ===
+fn maybe_int() -> int? {
+    return 1
+}
+fn main() {
+    let x: int = cast(maybe_int())
+    print("{x}")
+}
+
+//=== TEST CASE: transmute_strips_nullability ===
+// `transmute` is the other stdlib nullability-eraser; same judgement.
+struct Mob { hp: int }
+
+fn maybe_mob() -> Mob? {
+    return Mob { hp: 1 }
+}
+fn main() {
+    let m: Mob = transmute(maybe_mob())
+    print("{m.hp}")
+}
+
+//=== TEST CASE: nested_cast_outer_strip_rejects ===
+// The inner cast targets `int?` and preserves nullability, so it is clean; the
+// outer one is the strip. Each call is judged on its own arg/result pair, so
+// wrapping the launder in a preserving cast does not hide it.
+fn maybe_int() -> int? {
+    return 1
+}
+fn main() {
+    let inner: int? = cast(maybe_int())
+    let outer: int = cast(inner)
+    print("{outer}")
+}
+
+//=== TEST CASE: allow_of_another_lint_does_not_suppress ===
+// Suppression matches the lint NAME. An `allow` for a different lint sitting on
+// the same line leaves this one live.
+fn maybe_int() -> int? {
+    return 1
+}
+fn main() {
+    // rock: allow(unused_var)
+    let x: int = cast(maybe_int())
+    print("{x}")
+}
+
+//=== TEST CASE: f32_local_Generic ===
+//! expect: legal only as a struct field type
+fn main() {
+    let x: f32 = 0.5
+}
+
+//=== TEST CASE: f32_param_Generic ===
+//! expect: legal only as a struct field type
+fn half(x: f32) -> float {
+    return x
+}
+
+//=== TEST CASE: f32_generic_arg_Generic ===
+//! expect: legal only as a struct field type
+fn main() {
+    let xs: [f32] = []
+}
+
+//=== TEST CASE: f32_enum_payload_Generic ===
+//! expect: legal only as a struct field type
+enum Shape { Circle(f32) }
+
+//=== TEST CASE: negative_uint_literal_Generic ===
+//! expect: uint literal must be in the range 0..=4294967295, found -1
+fn f() -> uint { -1 }
+
+//=== TEST CASE: oversized_uint_literal_Generic ===
+//! expect: uint literal must be in the range 0..=4294967295, found 4294967296
+fn f() -> uint { 4294967296 }
+
+//=== TEST CASE: uint_is_not_int_Generic ===
+//! expect: type mismatch: expected `int`, found `uint`
+fn f(x: uint) -> int { x }
+
+//=== TEST CASE: uint_shift_count_Generic ===
+//! expect: uint shift count must be in the range 0..=31, found 32
+fn bad_shift(x: uint) -> uint { x << 32 }
+
+//=== TEST CASE: negative_uint_cast_Generic ===
+//! expect: numeric literal -1 is out of range for `Uint`
+fn bad_cast() -> uint { -1 as uint }
+
+//=== TEST CASE: mixed_uint_int_Generic ===
+//! expect: type mismatch: expected `uint`, found `float`
+fn mixed(x: uint, y: int) -> uint { x + y }
+
+//=== TEST CASE: mixed_uint_int_equality_Generic ===
+//! expect: type mismatch: expected `int`, found `uint`
+fn mixed_eq(x: uint, y: int) -> bool { x == y }
+
+//=== TEST CASE: value_int_literal_high_Generic ===
+//! expect: value struct `int` field must be in the range -2147483648..=2147483647
+value V { x: int }
+fn main() { let v = V { x: 2147483648 } }
+
+//=== TEST CASE: value_int_literal_low_Generic ===
+//! expect: value struct `int` field must be in the range -2147483648..=2147483647
+value V { x: int }
+fn main() { let v = V { x: -2147483649 } }
+
+//=== TEST CASE: value_int_assignment_Generic ===
+//! expect: value struct `int` field must be in the range -2147483648..=2147483647
+value V { x: int }
+fn main() { let v = V { x: 0 }; v.x = 4294967295 }
+
+//=== TEST CASE: value_int_default_Generic ===
+//! expect: value struct `int` field must be in the range -2147483648..=2147483647
+value V { x: int = 4294967295 }
+fn main() { let v = V {} }
+
+//=== TEST CASE: int_div_float_operand_unify ===
+fn main() {
+    let x = 3.0 ./ 2
+    print(x)
+}
+
+//=== TEST CASE: div_result_into_int_param_unify ===
+//! expect: use `./` for integer floor division
+fn foo(x: int) {}
+
+fn main() {
+    foo(3 / 4)   // ERROR: expected int, got float (use ./)
+}
+
+//=== TEST CASE: div_result_into_int_let_unify ===
+//! expect: use `./` for integer floor division
+fn main() {
+    let x: int = 3 / 4   // ERROR: expected int, got float (use ./)
+    print(x)
+}
+
+//=== TEST CASE: float_div_under_multiply_Generic ===
+// The hint follows the float through operators and a local binding.
+//! expect: `/` is float division; its `float` result does not fit `int` -- use `./` for integer floor division
+fn main() { let x: int = 2.0 * (3 / 4) }
+
+//=== TEST CASE: float_div_under_negation_Generic ===
+//! expect: `/` is float division; its `float` result does not fit `int` -- use `./` for integer floor division
+fn main() { let x: int = -(3 / 4) }
+
+//=== TEST CASE: float_div_through_let_Generic ===
+//! expect: `/` is float division; its `float` result does not fit `int` -- use `./` for integer floor division
+fn main() {
+    let h = 8 / 3
+    let x: int = 2 * h
+}
+
+//=== TEST CASE: int_newtype_slash_rejected_unify ===
+newtype Distance(int)
+
+fn main() {
+    let a = Distance(10)
+    let b = Distance(4)
+    print((a / b).0)   // ERROR: int newtype has `./`, not `/`
+}
+
+//=== TEST CASE: neg_bool_fail_Generic ===
+// negating a bool must fail the numeric constraint
+//! expect: operator `-` is not defined for `bool`
+fn f(b: bool) -> int {
+    let x = -b
+    5
+}
+
+//=== TEST CASE: neg_string_fail_Generic ===
+// negating a string must fail
+//! expect: operator `-` is not defined for `string`
+fn f(s: string) -> int {
+    let x = -s
+    5
+}
+
+//=== TEST CASE: not_int_fail_Generic ===
+// negating a non-bool must fail
+//! expect: operator `!` is not defined for `int`
+fn f() -> bool {
+    let b = !5
+    b
+}
+
+//=== TEST CASE: lt_bool_fail_Generic ===
+// ordering on bools must be rejected
+//! expect: ordering operators require numeric operands, got bool
+fn f() -> bool {
+    let b = true < false
+    b
+}
+
+//=== TEST CASE: lt_string_fail_Generic ===
+// ordering on non-numeric operands (string) must be rejected
+//! expect: ordering operators require numeric operands, got string
+fn f() -> bool {
+    "a" < "b"
+}
+
+//=== TEST CASE: and_int_fail_Generic ===
+//! expect: type mismatch: expected `bool`, found `int`
+fn f() -> bool {
+    let b = 1 && 2
+    b
+}
+
+//=== TEST CASE: or_int_fail_Generic ===
+//! expect: type mismatch: expected `bool`, found `int`
+fn f() -> bool {
+    let b = 1 || 0
+    b
+}
+
+//=== TEST CASE: eq_mismatch_fail_Generic ===
+//! expect: type mismatch: expected `bool`, found `int`
+fn f() -> bool {
+    let b = 1 == true
+    b
+}
+
+//=== TEST CASE: compare_nonnull_neq_null_Generic ===
+//! expect: Cannot compare non-nullable type 'int' with null
+fn f(x: int) -> bool {
+    x != null
+}
+
+//=== TEST CASE: compare_nonnull_eq_null_Generic ===
+//! expect: Cannot compare non-nullable type 'int' with null
+fn f(x: int) -> bool {
+    x == null
+}
+
+//=== TEST CASE: compare_nonnull_struct_to_null_Generic ===
+// a struct value is non-nullable too.
+//! expect: Cannot compare non-nullable type 'S' with null
+struct S { v: int }
+fn f(x: S) -> bool {
+    x != null
+}
+
+//=== TEST CASE: compare_assignment_refined_field_to_null_Generic ===
+// a nullable FIELD refined to non-null by a same-scope assignment is also dead
+// to check (a path-refinement pattern in one scope).
+//! expect: Cannot compare non-nullable type 'Inner' with null
+struct Inner { v: int }
+struct Top { inner: Inner? }
+fn f(t: Top) -> bool {
+    t.inner = Inner { v: 1 }
+    return t.inner != null
+}
+
+//=== TEST CASE: string_ordering_fail_Generic ===
+// concrete non-numeric ordering stays rejected
+//! expect: ordering operators require numeric operands, got string
+fn f() -> bool {
+    "a" < "b"
+}
+
+//=== TEST CASE: bool_ordering_fail_Generic ===
+//! expect: ordering operators require numeric operands, got bool
+fn f() -> bool {
+    true < false
+}
+
+//=== TEST CASE: sort_key_nullable_value_Generic ===
+// A struct or tuple sort key compares its leaves with `<`. An absent value has
+// no place in that order.
+//! expect: cannot sort by a key of type `Vec2?`: `Vec2?` may be absent
+struct It { id: int, p: Vec2? }
+fn main() {
+    let xs = [It { id: 1, p: null }, It { id: 2, p: v(1.0, 2.0) }]
+    xs.sort(x => x.p)
+}
+
+//=== TEST CASE: sort_key_bool_leaf_Generic ===
+//! expect: cannot sort by a key of type `(bool, int)`: `bool` has no order
+fn main() {
+    let ys = [1, 2]
+    ys.sort(y => (y > 1, y))
+}

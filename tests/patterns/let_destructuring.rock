@@ -1,6 +1,6 @@
 // `let` and `for` bind through full irrefutable patterns: struct records,
 // newtypes, tuples, and their nestings. Refutable patterns in `let`/`for`
-// are rejected (tests/errors/let.rock.err).
+// are rejected (tests/errors/assignment.rock.err).
 
 struct Point {
     x: int,

@@ -1,15 +1,3 @@
-//! Expr-position macro expansion. A `macro f(p: expr) { body }` is expanded
-//! away BEFORE type-checking: each call `f(arg)` is replaced by the macro body
-//! with `p` substituted by `arg`. Macro DEFINITIONS are then dropped -- they
-//! are not typed entities (their `expr`/`ident` params are meta-types, not real
-//! types; lowering a macro def as a regular fn is exactly what choked stdlib
-//! loading on "Unknown type name ident/expr"). Overload selection is by arity;
-//! trailing params with defaults widen the matchable arity range.
-//!
-//! Bodies here stay self-contained (comparisons / blocks / lets only) so they
-//! typecheck without stdlib. Real stdlib macros (assert_eq, log_*) reference
-//! `error`/`tostring`/`+` and are covered by every compile that loads the stdlib.
-
 //=== TEST CASE: macro_arity_mismatch_Generic ===
 // Calling a macro with no matching arity must fail.
 //! expect: `one` did not resolve to any definition
@@ -20,3 +8,111 @@ fn f(n: int) -> bool {
     one(n, n)
 }
 
+//=== TEST CASE: top_level_unknown_macro_rejects ===
+//! expect: no macro named `not_a_macro` exists
+not_a_macro()
+
+fn main() {
+    print("hi")
+}
+
+//=== TEST CASE: top_level_expression_macro_rejects ===
+//! expect: macro `say_hi` declares no items
+macro say_hi() {
+    print("hi")
+}
+
+say_hi()
+
+fn main() {
+    print("main")
+}
+
+//=== TEST CASE: top_level_arity_mismatch_rejects ===
+//! expect: macro `emit_one` declares no items for 2 arguments
+macro emit_one(T: ty) {
+    fn emitted_one(x: T) -> T { x }
+}
+
+emit_one(int, int)
+
+fn main() {
+    print("main")
+}
+
+//=== TEST CASE: top_level_statements_reject ===
+//! expect: statements in macro `emit_mixed` cannot run at the top level
+macro emit_mixed() {
+    fn emitted_mixed() -> int { 7 }
+    print("dropped")
+}
+
+emit_mixed()
+
+fn main() {
+    print(emitted_mixed())
+}
+
+//=== TEST CASE: expression_items_reject ===
+//! expect: items declared by macro `emit_fn` cannot be emitted where it is used as an expression
+macro emit_fn() -> int {
+    fn local_helper() -> int { 5 }
+    local_helper()
+}
+
+fn main() {
+    print(emit_fn())
+}
+
+//=== TEST CASE: expression_use_rejects ===
+//! expect: items declared by macro `emit_use` cannot be emitted where it is used as an expression
+macro emit_use() -> int {
+    use self::nowhere::thing;
+    1
+}
+
+fn main() {
+    print(emit_use())
+}
+
+//=== TEST CASE: macro_shadows_same_named_fn_Compiler ===
+macro foo(x: expr) -> int { x }
+fn foo(x: int) -> int { return x }
+
+fn main() {
+    let _ = foo(1)
+}
+
+//=== TEST CASE: unknown_label_Rejected ===
+macro three(a: expr, b: expr = 2, c: expr = 3) -> int { a + b + c }
+
+fn main() {
+    let _ = three(1, zzz: 3)   // ERROR: no parameter named `zzz`
+}
+
+//=== TEST CASE: label_repeated_Rejected ===
+macro three(a: expr, b: expr = 2, c: expr = 3) -> int { a + b + c }
+
+fn main() {
+    let _ = three(1, b: 3, b: 4)   // ERROR: `b` given twice
+}
+
+//=== TEST CASE: label_duplicates_a_positional_Rejected ===
+macro three(a: expr, b: expr = 2, c: expr = 3) -> int { a + b + c }
+
+fn main() {
+    let _ = three(1, 2, a: 3)   // ERROR: `a` already filled positionally
+}
+
+//=== TEST CASE: unknown_label_before_use_expansion_Rejected ===
+//! expect: macro `three` has no parameter named `zzz`
+// The macro label gate rejects before expansion and namespace registration.
+use stone::engine::State;
+
+fn print(a: int, b: int, c: int, d: int) {}
+
+macro three(a: expr, b: expr = 2, c: expr = 3) -> int { a + b + c }
+
+fn main() {
+    let _ = three(1, zzz: 3)
+}

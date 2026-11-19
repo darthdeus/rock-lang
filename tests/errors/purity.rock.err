@@ -1,0 +1,436 @@
+//=== TEST CASE: pure_reads_global_Generic ===
+//! expect: reads global `COUNTER`
+// Reads a mutable global — not a param or local. Verification errors
+// at the specific Ident site.
+global COUNTER: int = 0
+
+@pure
+fn bad_reads_global() -> int {
+    return COUNTER
+}
+
+//=== TEST CASE: pure_writes_global_Generic ===
+//! expect: performs an assignment (mutation)
+// Assigns to a mutable global — a mutation side effect.
+global COUNTER2: int = 0
+
+@pure
+fn bad_writes_global() -> int {
+    COUNTER2 = 5
+    return 0
+}
+
+//=== TEST CASE: pure_increments_global_Generic ===
+//! expect: performs an assignment (mutation)
+// Compound/increment is a mutation.
+global COUNTER3: int = 0
+
+@pure
+fn bad_increments_global() -> int {
+    COUNTER3 += 1
+    return 0
+}
+
+//=== TEST CASE: pure_calls_non_pure_Generic ===
+//! expect: calls `bump_tick` which is not provably pure
+// Calls a function whose body is not provably pure.
+global TICK: int = 0
+
+fn bump_tick() -> int {
+    TICK = TICK + 1
+    return TICK
+}
+
+@pure
+fn bad_calls_impure() -> int {
+    return bump_tick()
+}
+
+//=== TEST CASE: pure_mutates_param_field_Generic ===
+//! expect: performs an assignment (mutation)
+// Mutation through a parameter. Field assignment is a side effect
+// observable via the arg at the call site.
+struct Point { x: int, y: int }
+
+@pure
+fn bad_mutates_param(p: Point) -> int {
+    p.x = 99
+    return p.x
+}
+
+//=== TEST CASE: pure_heap_struct_literal_Generic ===
+//! expect: constructs a heap struct literal
+// Constructs a heap struct (non-value) whose identity is observable.
+struct NotAValue { n: int }
+
+@pure
+fn bad_heap_struct() -> NotAValue {
+    return NotAValue { n: 5 }
+}
+
+//=== TEST CASE: pure_array_literal_Generic ===
+//! expect: builds an array literal
+// Array literal allocates a heap table.
+@pure
+fn bad_array_literal() -> [int] {
+    return [1, 2, 3]
+}
+
+//=== TEST CASE: pure_lambda_Generic ===
+//! expect: creates a lambda
+// Lambda construction is rejected even when it captures nothing.
+@pure
+fn bad_lambda() -> (int) -> int {
+    return x => x + 1
+}
+
+//=== TEST CASE: pure_while_loop_with_mutation_Generic ===
+//! expect: performs an assignment (mutation)
+// Only the loop-body write violates purity; the condition reads no global.
+struct LoopPoint { x: int }
+
+@pure
+fn bad_while(p: LoopPoint, keep_going: bool) -> int {
+    while keep_going {
+        p.x = 5
+    }
+    return 0
+}
+
+//=== TEST CASE: pure_collection_index_Generic ===
+//! expect: indexes a collection
+// Index read from a collection — could read mutable state.
+@pure
+fn bad_index(v: Vec<int>) -> int {
+    return v[0]
+}
+
+//=== TEST CASE: pure_and_debug_impure_conflict_Generic ===
+//! expect: `@pure` and `@debug_impure` on the same function are contradictory
+// `@pure` (no side effects) and `@debug_impure` (debug-only side
+// effect) on the same function is a contradiction. Rejected at the
+// annotation-registration site in type_declaration_pass, before
+// purity verification runs.
+@pure
+@debug_impure
+fn bad_both() -> int {
+    return 1
+}
+
+//=== TEST CASE: pure_calls_unannotated_pure_Generic ===
+//! expect: calls `double_it` which is not provably pure
+// Calls a function that is genuinely pure but NOT annotated `@pure`. Under
+// the annotation-contract model (matching bone), a `@pure` body may only
+// call callees that are themselves annotated `@pure` -- being pure by
+// inference is not enough. The user vouches via the annotation; the callee's
+// own verification guarantees its body.
+fn double_it(x: int) -> int { return x + x }
+
+@pure
+fn bad_calls_unannotated_pure() -> int {
+    return double_it(21)
+}
+
+//=== TEST CASE: pure_reads_global_via_method_Generic ===
+//! expect: reads global `GLO`
+// Reading a mutable global in METHOD-RECEIVER position (`G.m()`) is a global
+// read, exactly like a bare `G`. The receiver sits in the call's `func` (a UFCS
+// `recv.method()` desugars to `method(recv)`), which the purity walker must
+// check -- not only the explicit args. The callee `double_val` is @pure, so the
+// only impurity is the read of `GLO` in receiver position.
+global GLO: int = 0
+@pure fn double_val(x: int) -> int { return x + x }
+@pure fn bad_reads_global_via_method() -> int { return GLO.double_val() }
+
+//=== TEST CASE: pure_mutates_own_local_int_Generic ===
+//! expect: performs an assignment (mutation)
+// PINNED CURRENT BEHAVIOR, believed OVER-RESTRICTIVE. `@pure` rejects EVERY
+// assignment form syntactically, without asking WHAT is mutated. This body is
+// referentially transparent -- `x` is a function-local that never escapes, so
+// the fn is a constant function of its (empty) arguments -- and is rejected
+// anyway. If purity becomes effect-aware (writes to non-escaping locals
+// allowed, writes to globals/params/captures still rejected), this case starts
+// COMPILING: delete it then, and move the shape to a positive `.rock` test.
+@pure
+fn pure_mutates_own_local() -> int {
+    let x = 1
+    x += 1
+    return x
+}
+
+//=== TEST CASE: pure_local_value_field_write_Generic ===
+//! expect: performs an assignment (mutation)
+// The user-reported shape (a shader helper): a `@pure` fn building a Vec2-like
+// value in a local and adjusting one component. The write itself is legal
+// (tests/values/value_local_field_write.rock); only this syntactic purity
+// rejection fires. Effect-aware purity would accept it (#107).
+value V2 { x: float, y: float }
+
+@pure
+fn pure_adjusts_local_value_component(res: V2) -> V2 {
+    let s = V2 { x: 0.5, y: 0.5 }
+    s.y *= res.y / res.x
+    return s
+}
+
+//=== TEST CASE: pure_interpolation_reads_global_Generic ===
+// A mutable global read inside an interpolated string is still a read.
+//! expect: reads global `SHOWN`
+global SHOWN: int = 0
+
+@pure
+fn bad_interpolates_global() -> string {
+    return "{SHOWN}"
+}
+
+//=== TEST CASE: pure_interpolation_format_spec_reads_global_Generic ===
+// So is one in a dynamic format precision.
+//! expect: reads global `DIGITS`
+global DIGITS: int = 2
+
+@pure
+fn bad_interpolates_precision(x: float) -> string {
+    return "{x:.{DIGITS}f}"
+}
+
+//=== TEST CASE: pure_safe_nav_call_arg_reads_global_Generic ===
+// The arguments of a `?.` method call are checked like any call's.
+//! expect: reads global `SCALE`
+global SCALE: int = 3
+struct Holder { v: int }
+fn times(h: Holder, k: int) -> int { h.v * k }
+
+@pure
+fn bad_safe_nav_arg(h: Holder?) -> int? {
+    return h?.times(SCALE)
+}
+
+//=== TEST CASE: pure_safe_nav_let_body_reads_global_Generic ===
+// The body of a `?.let` block is checked like any block.
+//! expect: reads global `OFFSET`
+global OFFSET: int = 1
+
+@pure
+fn bad_safe_nav_let(x: int?) -> int? {
+    return x?.let { x + OFFSET }
+}
+
+//=== TEST CASE: pure_calls_fn_value_Generic ===
+// A function value's body is unknown at the call: it may mutate anything it
+// captured. Only a resolved callee's own annotation can vouch for it.
+//! expect: calls a function value
+@pure
+fn bad_calls_fn_value(f: fn(int) -> int, x: int) -> int {
+    return f(x)
+}
+
+//=== TEST CASE: concrete_v_missing_field_fail_Generic ===
+// field that doesn't exist on the struct -> rejected
+//! expect: struct `Mob` has no field `nope`
+struct Mob { health: int, attack_co: int? }
+fn poll(f: FieldRef<Mob, int?>) {}
+fn main() {
+    poll(.nope)
+}
+
+//=== TEST CASE: concrete_v_widen_write_fail_Generic ===
+// INVARIANCE: a non-null `int` field cannot satisfy `FieldRef<Mob, int?>`
+// (you couldn't write null through it). Exact match required.
+//! expect: type mismatch: expected `int?`, found `int` -- a writable field reference is invariant, so
+struct Mob { health: int, attack_co: int? }
+fn poll(f: FieldRef<Mob, int?>) {}
+fn main() {
+    poll(.health)
+}
+
+//=== TEST CASE: concrete_v_narrow_read_fail_Generic ===
+// INVARIANCE other direction: a nullable field cannot satisfy
+// `FieldRef<Mob, int>` (a read yields int?, not int).
+//! expect: type mismatch: expected `int`, found `int?`
+struct Mob { health: int, attack_co: int? }
+fn take(f: FieldRef<Mob, int>) {}
+fn main() {
+    take(.attack_co)
+}
+
+//=== TEST CASE: bare_field_no_context_fail_Generic ===
+// ---------------------------------------------------------------------------
+// D. a bare `.field` with no expected FieldRef type is an error (same as a
+//    SiblingFieldRef outside a struct default).
+// ---------------------------------------------------------------------------
+//! expect: field reference `.attack_co` is only valid against an expected `FieldRef<T, V>` / `ReadFieldRef<T,
+struct Mob { health: int, attack_co: int? }
+fn main() {
+    let x = .attack_co
+    x
+}
+
+//=== TEST CASE: generic_container_wrong_field_fail_Generic ===
+// ---------------------------------------------------------------------------
+// G. wrong field on the container's T -- T is solved from the Entity<T> arg,
+//    and the named field doesn't exist on that struct.
+// ---------------------------------------------------------------------------
+//! expect: struct `Rock` has no field `attack_co`
+struct Mob { health: int, attack_co: int? }
+struct Rock { mass: int }
+struct Slot<T> { _index: int }
+fn poll_slot<T>(e: Slot<T>, f: FieldRef<T, int?>) {}
+fn main() {
+    let e: Slot<Rock> = Slot { _index: 0 }
+    poll_slot(e, .attack_co)
+}
+
+//=== TEST CASE: value_struct_writable_field_fail_Generic ===
+// ---------------------------------------------------------------------------
+// H. A writable ref into a value struct would write to a temporary copy.
+//    The WRITABLE former refuses. The read-only ReadFieldRef
+//    former accepts, which is what field_get takes.
+// ---------------------------------------------------------------------------
+//! expect: cannot form a writable field reference `.x` into `value` struct `FixVec2`: a value argument is a
+value FixVec2 { x: float, y: float }
+fn take(f: FieldRef<FixVec2, float>) {}
+fn main() {
+    let f: FieldRef<FixVec2, float> = .x
+    take(f)
+}
+
+//=== TEST CASE: write_field_ref_missing_field_fail_Generic ===
+//! expect: struct `Mob` has no field `nope`
+struct Mob { health: int, attack_co: int? }
+fn take(f: WriteFieldRef<Mob, int?>) {}
+fn main() {
+    take(.nope)
+}
+
+//=== TEST CASE: write_field_ref_widen_fail_Generic ===
+// INVARIANT in V, like `FieldRef`. Write-only contravariance would be sound but
+// has no consumer; invariance is the conservative choice and relaxing it later
+// is source-compatible.
+//! expect: type mismatch: expected `int?`, found `int` -- a writable field reference is invariant, so
+struct Mob { health: int, attack_co: int? }
+fn take(f: WriteFieldRef<Mob, int?>) {}
+fn main() {
+    take(.health)
+}
+
+//=== TEST CASE: write_field_ref_value_struct_fail_Generic ===
+// The write capability refuses a `value` struct T, same rule as `FieldRef`:
+// the object travels by copy, so the write would land on a temporary.
+//! expect: cannot form a writable field reference `.x` into `value` struct `FixVec2`: a value argument is a
+value FixVec2 { x: float, y: float }
+fn take(f: WriteFieldRef<FixVec2, float>) {}
+fn main() {
+    take(.x)
+}
+
+//=== TEST CASE: write_field_ref_arity_fail_Generic ===
+// Arity guard: the former takes exactly <Struct, FieldType>.
+//! expect: WriteFieldRef type must have exactly 2 type arguments (<Struct, FieldType>)
+struct Mob { health: int, attack_co: int? }
+fn take(f: WriteFieldRef<Mob>) {}
+fn main() {
+    take(.attack_co)
+}
+
+//=== TEST CASE: write_field_ref_no_coerce_to_field_ref_fail_Generic ===
+// ... and NOT back up: a write-only selector is not a full field ref.
+//! expect: No overload for `take` with argument types (WriteFieldRef<Mob, int?>)
+struct Mob { health: int, attack_co: int? }
+fn take(f: FieldRef<Mob, int?>) {}
+fn main() {
+    let f: WriteFieldRef<Mob, int?> = .attack_co
+    take(f)
+}
+
+//=== TEST CASE: write_field_ref_no_coerce_to_read_fail_Generic ===
+// THE EXTRACTION HOLE this former exists to close: a write-only selector must
+// not reach a readable one, or an embedded field's whole value could be read out.
+//! expect: No overload for `take` with argument types (WriteFieldRef<Mob, int?>)
+struct Mob { health: int, attack_co: int? }
+fn take(f: ReadFieldRef<Mob, int?>) {}
+fn main() {
+    let f: WriteFieldRef<Mob, int?> = .attack_co
+    take(f)
+}
+
+//=== TEST CASE: read_field_ref_no_coerce_to_write_fail_Generic ===
+// The other diagonal of the diamond: read-only does not grant write.
+//! expect: No overload for `take` with argument types (ReadFieldRef<Mob, int?>)
+struct Mob { health: int, attack_co: int? }
+fn take(f: WriteFieldRef<Mob, int?>) {}
+fn main() {
+    let f: ReadFieldRef<Mob, int?> = .attack_co
+    take(f)
+}
+
+//=== TEST CASE: write_field_ref_to_read_field_ref_Generic ===
+// The extraction hole `WriteFieldRef` exists to close: a write-only selector
+// must not reach a readable one, or an embedded field's whole value reads out.
+struct Mob { health: int, attack_co: int? }
+
+fn take_read(f: ReadFieldRef<Mob, int?>) {}
+
+fn main() {
+    let f: WriteFieldRef<Mob, int?> = .attack_co
+    take_read(f)   // ERROR: WriteFieldRef grants no whole-value read
+}
+
+//=== TEST CASE: write_field_ref_to_field_ref_Generic ===
+struct Mob { health: int, attack_co: int? }
+
+fn take_full(f: FieldRef<Mob, int?>) {}
+
+fn main() {
+    let f: WriteFieldRef<Mob, int?> = .attack_co
+    take_full(f)   // ERROR: a write-only selector is not a full field ref
+}
+
+//=== TEST CASE: read_field_ref_to_write_field_ref_Generic ===
+struct Mob { health: int, attack_co: int? }
+
+fn take_write(f: WriteFieldRef<Mob, int?>) {}
+
+fn main() {
+    let f: ReadFieldRef<Mob, int?> = .attack_co
+    take_write(f)   // ERROR: read-only does not grant write
+}
+
+//=== TEST CASE: write_field_ref_widen_to_nullable_Generic ===
+// INVARIANCE. `unify`'s `(_, Nullable)` arm widens on the right, so without the
+// explicit check a non-null `int` field satisfies a `<_, int?>` selector and
+// `field_set(m, f, null)` writes nil into a field typed `int`.
+struct Mob { health: int }
+
+fn take_write(f: WriteFieldRef<Mob, int?>) {}
+
+fn main() {
+    take_write(.health)   // ERROR: writable selectors are invariant in V
+}
+
+//=== TEST CASE: field_ref_widen_to_nullable_Generic ===
+struct Mob { health: int }
+
+fn take_full(f: FieldRef<Mob, int?>) {}
+
+fn main() {
+    take_full(.health)   // ERROR: writable selectors are invariant in V
+}
+
+//=== TEST CASE: write_field_ref_value_struct_Immutable ===
+// The write capability refuses a `value` struct T, same rule as `FieldRef`.
+value Pt { x: int, y: int }
+
+fn take_write(f: WriteFieldRef<Pt, int>) {}
+
+fn main() {
+    take_write(.x)   // ERROR: a write through a value copy would be lost
+}
+
+//=== TEST CASE: write_field_ref_arity_Generic ===
+struct Mob { health: int, attack_co: int? }
+
+fn take_write(f: WriteFieldRef<Mob>) {}   // ERROR: needs <Struct, FieldType>
+
+fn main() {
+    take_write(.attack_co)
+}

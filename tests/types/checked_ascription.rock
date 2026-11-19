@@ -1,6 +1,6 @@
 // Contextual ascription pushes its type into the operand as an expected type; `as` is a
 // checked explicit conversion. Rejections live in
-// tests/errors/checked_{ascription,cast}.rock.err.
+// tests/errors/numeric.rock.err.
 
 struct AscribedPoint { x: int, y: int }
 
@@ -47,7 +47,7 @@ fn test_numeric_conversions_survive() {
 }
 
 // `as` is not contextual: its operand must type itself. These are the nearest
-// accepted neighbours of the rejections in tests/errors/checked_cast.rock.err --
+// accepted neighbours of the rejections in tests/errors/numeric.rock.err --
 // in each the operand is already resolved before the target is consulted.
 @test(output = "3")
 fn test_cast_operand_types_itself_array() {
@@ -74,7 +74,7 @@ fn test_ascription_still_supplies_lambda_param_type() {
     print(f(7))
 }
 
-// `as` rejects `any -> Point` (tests/errors/checked_cast.rock.err); recovering a
+// `as` rejects `any -> Point` (tests/errors/numeric.rock.err); recovering a
 // concrete type out of `any` is `cast<T>`'s job, and it still works.
 @test(output = "5")
 fn test_cast_remains_the_any_escape_hatch() {

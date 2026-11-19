@@ -97,7 +97,7 @@ fn gc_coroutine_yield_value() {
 }
 
 // ----- 7. String interpolation of a container-carrying value is rejected at
-// compile time (tests/errors/enum_format_unsupported_payload.rock.err).
+// compile time (tests/errors/strings.rock.err).
 
 // ----- 8. Equality: scalar structural, GC-ref BY REFERENCE.
 

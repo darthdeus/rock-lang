@@ -1,0 +1,472 @@
+//=== TEST CASE: gpu_only_without_intrinsic_Generic ===
+@gpu_only fn bogus() -> int {
+    return 1
+}
+
+fn main() {}
+
+//=== TEST CASE: native_required_without_intrinsic_Generic ===
+@native_required inline(lua) fn spin(x: int) -> int = """
+    return x
+"""
+
+fn main() {
+    let _ = spin(1)
+}
+
+//=== TEST CASE: native_required_no_luajit_mapping_Generic ===
+@native_required @intrinsic fn spun(x: int) -> int {
+    return x
+}
+
+fn main() {
+    let _ = spun(1)
+}
+
+//=== TEST CASE: texture_direct_cpu_call_Generic ===
+fn use_texture() -> Vec4 {
+    let s = Sampler2D { __handle: 0 }
+    return texture(s, v(0.0, 0.0))
+}
+
+fn main() {
+    let _ = use_texture()
+}
+
+//=== TEST CASE: texture_size_direct_cpu_call_Generic ===
+fn use_texture_size() -> Vec2 {
+    let s = Sampler2D { __handle: 0 }
+    return texture_size(s)
+}
+
+fn main() {
+    let _ = use_texture_size()
+}
+
+//=== TEST CASE: fwidth_direct_cpu_call_Generic ===
+// The A2a fragment builtins are @gpu_only too -- a CPU call is a hard error.
+fn use_fwidth() -> float {
+    return fwidth(1.0)
+}
+
+fn main() {
+    let _ = use_fwidth()
+}
+
+//=== TEST CASE: frag_coord_direct_cpu_call_Generic ===
+fn use_frag_coord() -> Vec4 {
+    return frag_coord()
+}
+
+fn main() {
+    let _ = use_frag_coord()
+}
+
+//=== TEST CASE: at_direct_cpu_call_Generic ===
+fn use_at() -> float {
+    let arr = cast<UniformArray<float>>(0)
+    return at(arr, 0)
+}
+
+fn main() {
+    let _ = use_at()
+}
+
+//=== TEST CASE: vertex_id_direct_cpu_call_Generic ===
+fn use_vertex_id() -> int {
+    return vertex_id()
+}
+
+fn main() {
+    let _ = use_vertex_id()
+}
+
+//=== TEST CASE: discard_direct_cpu_call_Generic ===
+fn use_discard() {
+    discard()
+}
+
+fn main() {
+    use_discard()
+}
+
+//=== TEST CASE: arg_not_a_fn_reference_Generic ===
+value AV { p: Vec2 }
+value UV { m: Mat4 }
+value Vary { position: Vec4 }
+
+@shader(vertex)
+fn vtx(@attr a: AV, @uniform u: UV) -> Vary {
+    return Vary { position: u.m * Vec4 { x: a.p.x, y: a.p.y, z: 0.0, w: 1.0 } }
+}
+
+@shader(fragment)
+fn frg(vary: Vary) -> Vec4 { return Vec4 { x: 1.0, y: 0.0, z: 1.0, w: 1.0 } }
+
+fn main() {
+    let _ = rock_shader(3, frg)
+}
+
+//=== TEST CASE: arg_is_a_local_not_direct_reference_Generic ===
+value AV { p: Vec2 }
+value UV { m: Mat4 }
+value Vary { position: Vec4 }
+
+@shader(vertex)
+fn vtx(@attr a: AV, @uniform u: UV) -> Vary {
+    return Vary { position: u.m * Vec4 { x: a.p.x, y: a.p.y, z: 0.0, w: 1.0 } }
+}
+
+@shader(fragment)
+fn frg(vary: Vary) -> Vec4 { return Vec4 { x: 1.0, y: 0.0, z: 1.0, w: 1.0 } }
+
+fn main() {
+    let f = vtx
+    let _ = rock_shader(f, frg)
+}
+
+//=== TEST CASE: arg_is_not_a_shader_fn_Generic ===
+value AV { p: Vec2 }
+value UV { m: Mat4 }
+value Vary { position: Vec4 }
+
+fn plain() -> int { return 0 }
+
+@shader(fragment)
+fn frg(vary: Vary) -> Vec4 { return Vec4 { x: 1.0, y: 0.0, z: 1.0, w: 1.0 } }
+
+fn main() {
+    let _ = rock_shader(plain, frg)
+}
+
+//=== TEST CASE: swapped_vertex_and_fragment_Generic ===
+value AV { p: Vec2 }
+value UV { m: Mat4 }
+value Vary { position: Vec4 }
+
+@shader(vertex)
+fn vtx(@attr a: AV, @uniform u: UV) -> Vary {
+    return Vary { position: u.m * Vec4 { x: a.p.x, y: a.p.y, z: 0.0, w: 1.0 } }
+}
+
+@shader(fragment)
+fn frg(vary: Vary) -> Vec4 { return Vec4 { x: 1.0, y: 0.0, z: 1.0, w: 1.0 } }
+
+fn main() {
+    let _ = rock_shader(frg, vtx)
+}
+
+//=== TEST CASE: single_arg_vertex_fn_where_fragment_expected_Generic ===
+value AV { p: Vec2 }
+value UV { m: Mat4 }
+value Vary { position: Vec4 }
+
+@shader(vertex)
+fn vtx(@attr a: AV, @uniform u: UV) -> Vary {
+    return Vary { position: u.m * Vec4 { x: a.p.x, y: a.p.y, z: 0.0, w: 1.0 } }
+}
+
+fn main() {
+    let _ = rock_shader(vtx)
+}
+
+//=== TEST CASE: single_arg_not_a_shader_fn_Generic ===
+fn plain() -> int { return 0 }
+
+fn main() {
+    let _ = rock_shader(plain)
+}
+
+//=== TEST CASE: three_args_rejected_Generic ===
+value AV { p: Vec2 }
+value UV { m: Mat4 }
+value Vary { position: Vec4 }
+
+@shader(vertex)
+fn vtx(@attr a: AV, @uniform u: UV) -> Vary {
+    return Vary { position: u.m * Vec4 { x: a.p.x, y: a.p.y, z: 0.0, w: 1.0 } }
+}
+
+@shader(fragment)
+fn frg(vary: Vary) -> Vec4 { return Vec4 { x: 1.0, y: 0.0, z: 1.0, w: 1.0 } }
+
+fn main() {
+    let _ = rock_shader(vtx, frg, frg)
+}
+
+//=== TEST CASE: arg_not_value_struct_Generic ===
+enum E { F(float), I(int) }
+
+@struct_expand inline(lua) fn epairs<T>(u: T) -> [(string, E)] = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let _ = epairs(3)
+}
+
+//=== TEST CASE: field_type_no_matching_variant_Generic ===
+enum E { F(float), I(int) }
+value S { flag: bool }
+
+@struct_expand inline(lua) fn epairs<T>(u: T) -> [(string, E)] = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let _ = epairs(S { flag: true })
+}
+
+//=== TEST CASE: ambiguous_variant_payload_Generic ===
+enum Dup { A(float), B(float) }
+value S { x: float }
+
+@struct_expand inline(lua) fn dpairs<T>(u: T) -> [(string, Dup)] = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let _ = dpairs(S { x: 1.0 })
+}
+
+//=== TEST CASE: return_type_not_pairs_Generic ===
+value S { x: float }
+
+@struct_expand inline(lua) fn bad<T>(u: T) -> int = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let _ = bad(S { x: 1.0 })
+}
+
+//=== TEST CASE: nominal_field_vs_same_named_generic_payload_Generic ===
+// `A(T)` carries E's generic parameter, not the struct `T`; the two only
+// render alike.
+value T { x: float }
+enum E<T> { A(T), I(int) }
+value S { t: T, n: int }
+
+@struct_expand inline(lua) fn epairs<P>(u: P) -> [(string, E<float>)] = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let _ = epairs(S { t: T { x: 2.5 }, n: 3 })
+}
+
+//=== TEST CASE: intrinsic_declared_with_wrong_arity ===
+value U { a: float }
+
+// The rejection is about the DECLARATION, not the call: a call that disagrees
+// with a well-declared intrinsic is bone's ordinary "missing required argument",
+// which would pass this file without reaching the expansion at all.
+//
+// One argument IS a legal shape -- it is the layout-fingerprint form, which is
+// how a call site says which of a program's blocks it means. What makes this
+// one malformed is the RETURN TYPE: the fingerprint form declares `-> int`, and
+// a 1-arg fn returning unit is a packer missing its two views. The shape is
+// keyed on the declared return type, the way `@vertex_expand` keys on its own.
+@uniform_expand inline(lua) fn packu<T>(u: T) = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    packu(U { a: 1.0 })
+}
+
+//=== TEST CASE: third_arg_not_a_value_struct ===
+@uniform_expand inline(lua) fn packu<T>(fv: Ptr<float>, iv: Ptr<int>, u: T) = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let f = native_buffer_float(4)
+    let i = native_buffer_int(4)
+    packu(f.ptr, i.ptr, 7)
+}
+
+//=== TEST CASE: group_with_no_std140_form ===
+value Inner { a: float }
+value Outer { i: Inner, b: float }
+
+@uniform_expand inline(lua) fn packu<T>(fv: Ptr<float>, iv: Ptr<int>, u: T) = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let f = native_buffer_float(8)
+    let i = native_buffer_int(8)
+    packu(f.ptr, i.ptr, Outer { i: Inner { a: 1.0 }, b: 2.0 })
+}
+
+//=== TEST CASE: arg_not_a_buffer_Generic ===
+@vertex_expand inline(lua) fn vstride<T>(u: T) -> int = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let _ = vstride(3)
+}
+
+//=== TEST CASE: element_not_a_value_struct_Generic ===
+@vertex_expand inline(lua) fn vstride<T>(buf: NativeBuffer<T>) -> int = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let buf = native_buffer_int(4)
+    let _ = vstride(buf)
+}
+
+//=== TEST CASE: return_type_not_layout_Generic ===
+value Inst { pos: Vec2, rot: float }
+
+@vertex_expand inline(lua) fn vbad<T>(buf: FlatVec<T>) -> float = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let xs: FlatVec<Inst> = flat_vec_new()
+    let _ = vbad(xs)
+}
+
+//=== TEST CASE: integer_attribute_rejects_float_unit_Generic ===
+value WithId { pos: Vec2, id: int }
+
+@vertex_expand inline(lua) fn vsizes<T>(buf: FlatVec<T>) -> [int] = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let xs: FlatVec<WithId> = flat_vec_new()
+    let _ = vsizes(xs)
+}
+
+//=== TEST CASE: struct_expand_with_two_parameters ===
+//! expect: `@struct_expand` fn `epairs` takes exactly one argument
+enum E { F(float), I(int) }
+value S { x: float }
+
+@struct_expand inline(lua) fn epairs<T>(u: T, extra: int) -> [(string, E)] = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let _ = epairs(S { x: 1.0 }, 2)
+}
+
+//=== TEST CASE: vertex_expand_with_two_parameters ===
+//! expect: `@vertex_expand` fn `vstride` takes exactly one argument
+value Inst { pos: Vec2, rot: float }
+
+@vertex_expand inline(lua) fn vstride<T>(buf: FlatVec<T>, extra: int) -> int = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let xs: FlatVec<Inst> = flat_vec_new()
+    let _ = vstride(xs, 2)
+}
+
+//=== TEST CASE: uniform_expand_with_two_parameters ===
+//! expect: `@uniform_expand` fn `packu` takes either three arguments
+value U { a: float }
+
+@uniform_expand inline(lua) fn packu<T>(fv: Ptr<float>, u: T) = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let f = native_buffer_float(4)
+    packu(f.ptr, U { a: 1.0 })
+}
+
+//=== TEST CASE: uniform_values_with_two_parameters ===
+//! expect: `@uniform_values` fn `vals` takes exactly one uniform group
+value U { a: float }
+
+@uniform_values inline(lua) fn vals<T>(u: T, extra: int) -> SemanticUniformBlock = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    print(vals(U { a: 1.0 }, 2).leaves.len())
+}
+
+//=== TEST CASE: uniform_values_returning_a_non_packet ===
+//! expect: `@uniform_values` fn `vals` must return the canonical packet struct
+value U { a: float }
+
+@uniform_values inline(lua) fn vals<T>(u: T) -> int = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    print(vals(U { a: 1.0 }))
+}
+
+//=== TEST CASE: uniform_values_returning_a_packet_without_leaves ===
+//! expect: `BadPacket` needs a `[CanonicalUniformLeaf] leaves` field
+value U { a: float }
+struct BadPacket { fingerprint: int }
+
+@uniform_values inline(lua) fn vals<T>(u: T) -> BadPacket = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    print(vals(U { a: 1.0 }).fingerprint)
+}
+
+//=== TEST CASE: scene_handle_of_wrong_root_type_Generic ===
+struct RoomState { n: int }
+struct MenuState { label: string }
+
+fn main() {
+    let room: Scene<RoomState>? = scene_create((b) => {
+        let r: RoomState? = RoomState { n: 1 }
+        return r
+    })
+    let menu: Scene<MenuState> = room.unwrap()
+    print("{menu._scene_id}")
+}
+
+//=== TEST CASE: scene_root_used_as_other_root_Generic ===
+struct RoomState { n: int }
+struct MenuState { label: string }
+
+fn main() {
+    let room: Scene<RoomState>? = scene_create((b) => {
+        let r: RoomState? = RoomState { n: 1 }
+        return r
+    })
+    let menu: MenuState = room.unwrap().get().unwrap()
+    print(menu.label)
+}
+
+//=== TEST CASE: scene_owned_arena_of_wrong_element_Generic ===
+struct Actor { hp: int }
+struct Prop { solid: bool }
+struct RoomState { actors: Arena<Actor> }
+
+fn main() {
+    let room: Scene<RoomState>? = scene_create((b) => {
+        let r: RoomState? = RoomState { actors: b.arena() }
+        return r
+    })
+    let props: Arena<Prop> = room.unwrap().get().unwrap().actors
+    print("{props.len()}")
+}
+
+//=== TEST CASE: scene_create_root_type_mismatch_Generic ===
+struct RoomState { n: int }
+struct MenuState { label: string }
+
+fn main() {
+    let room: Scene<RoomState>? = scene_create((b) => {
+        let m: MenuState? = MenuState { label: "x" }
+        return m
+    })
+    print("{room.unwrap()._scene_id}")
+}

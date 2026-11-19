@@ -13,7 +13,7 @@
 //
 // The whole-tuple ESCAPE stays a rejection by design -- `print("{t}")` packs,
 // which is exactly how the guarantee stays honest. Pinned in
-// `tests/errors/nobox_container_gaps.rock.err`.
+// `tests/errors/nobox.rock.err`.
 
 nobox value NV { x: int, y: int }
 

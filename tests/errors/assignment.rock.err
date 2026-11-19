@@ -1,0 +1,553 @@
+//=== TEST CASE: assign_type_mismatch_Generic ===
+//! expect: type mismatch: expected `int`, found `bool`
+fn f() -> int {
+    let x = 5
+    x = true
+    x
+}
+
+//=== TEST CASE: incdec_string_NotNumeric ===
+//! expect: `++` needs a numeric target
+fn main() {
+    let s = "a"
+    s++
+}
+
+//=== TEST CASE: incdec_any_NotNumeric ===
+//! expect: `--` needs a numeric target
+fn main() {
+    let v: any = 1
+    v--
+}
+
+//=== TEST CASE: incdec_bool_NotNumeric ===
+//! expect: `++` needs a numeric target
+fn main() {
+    let b = true
+    b++
+}
+
+//=== TEST CASE: incdec_struct_NotNumeric ===
+//! expect: `++` needs a numeric target
+struct V { x: int }
+
+fn main() {
+    let v = V { x: 1 }
+    v++
+}
+
+//=== TEST CASE: incdec_string_newtype_NotNumeric ===
+//! expect: `++` needs a numeric target
+newtype Name(string)
+
+fn main() {
+    let n = Name("a")
+    n++
+}
+
+//=== TEST CASE: incdec_safe_nav_NotAPlace ===
+//! expect: `++` cannot be applied through `?.`
+struct V { x: int }
+
+fn main() {
+    let vs: [V?] = [V { x: 1 }]
+    vs[0]?.x++
+}
+
+//=== TEST CASE: predec_safe_nav_NotAPlace ===
+//! expect: `--` cannot be applied through `?.`
+struct V { x: int }
+
+fn main() {
+    let vs: [V?] = [V { x: 1 }]
+    --vs[0]?.x
+}
+
+//=== TEST CASE: incdec_call_result_NotAPlace ===
+//! expect: `++` needs a variable, field, or element
+fn f() -> int { return 1 }
+
+fn main() {
+    f()++
+}
+
+//=== TEST CASE: incdec_literal_NotAPlace ===
+//! expect: `++` needs a variable, field, or element
+fn main() {
+    1++
+}
+
+//=== TEST CASE: incdec_tuple_field_NotAPlace ===
+//! expect: `++` needs a variable, field, or element
+fn main() {
+    let u = (1, 2)
+    u.0++
+}
+
+//=== TEST CASE: assign_tuple_targets_NotAPlace ===
+//! expect: cannot assign to this expression
+fn main() {
+    let vs = [1, 2]
+    (vs[0], vs[1]) = (vs[1], vs[0])
+}
+
+//=== TEST CASE: assign_call_result_NotAPlace ===
+//! expect: cannot assign to this expression
+fn f() -> int { return 1 }
+
+fn main() {
+    f() = 1
+}
+
+//=== TEST CASE: compound_assign_call_result_NotAPlace ===
+//! expect: cannot assign to this expression
+fn f() -> int { return 1 }
+
+fn main() {
+    f() += 1
+}
+
+//=== TEST CASE: assign_tuple_field_NotAPlace ===
+//! expect: cannot assign to this expression
+fn main() {
+    let u = (1, 2)
+    u.0 = 3
+}
+
+//=== TEST CASE: assign_if_NotAPlace ===
+//! expect: cannot assign to this expression
+fn main() {
+    let a = 1
+    let b = 2
+    if a == 1 { a } else { b } = 3
+}
+
+//=== TEST CASE: compound_no_overload_Generic ===
+// no `__op_add(V2, int)` overload -- rejected.
+//! expect: No overload for `__op_add` with argument types (V2, int)
+struct V2 { x: int, y: int }
+fn __op_add(a: V2, b: V2) -> V2 { return a }
+fn f() -> int {
+    let v = V2 { x: 1, y: 1 }
+    v += 5
+    v.x
+}
+
+//=== TEST CASE: const_post_increment_Rejected ===
+const COUNTER: int = 0
+
+fn main() {
+    COUNTER++   // ERROR: cannot assign to const
+}
+
+//=== TEST CASE: const_post_decrement_Rejected ===
+const COUNTER: int = 10
+
+fn main() {
+    COUNTER--   // ERROR: cannot assign to const
+}
+
+//=== TEST CASE: assign_to_const_Generic ===
+//! expect: cannot assign to const `FOO`; consts are read-only
+const FOO: int = 5
+fn f() -> int {
+    let r = FOO
+    FOO = 6
+    return r
+}
+
+//=== TEST CASE: value_struct_field_set_Immutable ===
+//! expect: a value argument is a copy
+value Pt { x: int, y: int }
+
+fn main() {
+    let p = Pt { x: 1, y: 2 }
+    field_set(p, .x, 5)   // ERROR: field_set cannot write through a value
+}
+
+//=== TEST CASE: value_struct_field_set_param_Immutable ===
+//! expect: a value argument is a copy
+value Pt { x: int, y: int }
+
+fn set_x(p: Pt) {
+    field_set(p, .x, 5)   // ERROR: field_set cannot write through a value
+}
+
+fn main() {
+    set_x(Pt { x: 1, y: 2 })
+}
+
+//=== TEST CASE: value_field_write_through_call_temporary_Immutable ===
+//! expect: it is a temporary
+value Pt { x: int, y: int }
+struct Owner { p: Pt }
+
+fn mk() -> Owner { return Owner { p: Pt { x: 1, y: 1 } } }
+
+fn main() {
+    mk().p.x = 5   // ERROR: the owner is a temporary, not mutable storage
+}
+
+//=== TEST CASE: value_call_result_field_write_Immutable ===
+//! expect: it is a temporary
+value Pt { x: int, y: int }
+
+fn mk() -> Pt { return Pt { x: 1, y: 1 } }
+
+fn main() {
+    mk().x = 5   // ERROR: a call result is a temporary
+}
+
+//=== TEST CASE: let_annotation_mismatch_Generic ===
+// The initializer must match the annotation.
+//! expect: type mismatch: expected `bool`, found `int`
+fn f() -> int {
+    let x: bool = 5
+    x
+}
+
+//=== TEST CASE: else_must_diverge_NonDiverging ===
+// `let ... else` rejections
+//! expect: must diverge
+fn main() {
+    let v: int? = 5
+    let x = v else {
+        print("missing")
+    }
+    print(x)
+}
+
+//=== TEST CASE: else_value_tail_NonDiverging ===
+//! expect: must diverge
+fn f(v: int?) -> int {
+    let x = v else {
+        0
+    }
+    x
+}
+
+//=== TEST CASE: irrefutable_else_never_runs_Useless ===
+//! expect: never runs
+fn f(v: int) -> int {
+    let x = v else {
+        return 0
+    }
+    x
+}
+
+//=== TEST CASE: else_does_not_see_bindings_Scope ===
+//! expect: `x` did not resolve to any definition
+fn f(v: int?) -> int {
+    let x = v else {
+        return x
+    }
+    x
+}
+
+//=== TEST CASE: loop_with_break_does_not_diverge_NonDiverging ===
+//! expect: must diverge
+fn f(v: int?) -> int {
+    let x = v else {
+        loop {
+            break
+        }
+    }
+    x
+}
+fn main() {}
+
+//=== TEST CASE: loop_with_expression_break_does_not_diverge_NonDiverging ===
+//! expect: must diverge
+fn f(v: int?, w: int?) -> int {
+    let x = v else {
+        loop {
+            let y = w ?? break
+            print(y)
+        }
+    }
+    x
+}
+fn main() {}
+
+//=== TEST CASE: loop_with_let_else_break_does_not_diverge_NonDiverging ===
+//! expect: must diverge
+fn f(v: int?, w: int?) -> int {
+    let x = v else {
+        loop {
+            let y = w else { break }
+            print(y)
+        }
+    }
+    x
+}
+fn main() {}
+
+//=== TEST CASE: let_no_init_simple_Generic ===
+// `let` binding requires an initializer (uninitialized `let x: T` removed)
+//! expect: let without value is not supported
+// Uninitialized `let x: T` is disallowed — declare and assign in one
+// step (`let x = <value>`). Previously allowed (pre-declare a slot,
+// assign later); removed.
+fn test() -> int {
+    let x: int   // ERROR: `let` binding requires an initializer
+    x = 5
+    x
+}
+fn main() { let _ = test() }
+
+//=== TEST CASE: let_no_init_tuple_Generic ===
+//! expect: let without value is not supported
+fn test() {
+    let (x, y): (int, int)   // ERROR: `let` binding requires an initializer
+    x = 1
+    y = 2
+    print("{x} {y}")
+}
+fn main() { test() }
+
+//=== TEST CASE: let_no_init_value_struct_Generic ===
+//! expect: let without value is not supported
+value V2i { x: int, y: int }
+
+fn test() {
+    let v: V2i   // ERROR: `let` binding requires an initializer
+    v = V2i { x: 1, y: 2 }
+    print("{v.x} {v.y}")
+}
+fn main() { test() }
+
+//=== TEST CASE: let_enum_variant_Refutable ===
+// refutable patterns in `let`/`for` are rejected
+//
+// A `let` or `for` pattern must match every value of its type; a pattern
+// that can fail belongs in `match`, `if let`, or `let ... else`.
+//! expect: can fail
+enum Opt { None, Some(int) }
+fn main() {
+    let v = Opt::Some(1)
+    let Opt::Some(x) = v
+    print(x)
+}
+
+//=== TEST CASE: let_literal_Refutable ===
+//! expect: can fail
+fn main() {
+    let 5 = 5
+}
+
+//=== TEST CASE: let_tuple_literal_elem_Refutable ===
+//! expect: can fail
+fn main() {
+    let (a, 3) = (1, 3)
+    print(a)
+}
+
+//=== TEST CASE: for_enum_variant_Refutable ===
+//! expect: can fail
+enum Opt { None, Some(int) }
+fn main() {
+    let xs = [Opt::Some(1)]
+    for Opt::Some(x) in xs {
+        print(x)
+    }
+}
+
+//=== TEST CASE: annotated_tuple_mismatch_TypeMismatch ===
+//! expect: mismatch
+fn main() {
+    let (a, b): (int, string) = (1, 2)
+    print(a)
+}
+
+//=== TEST CASE: struct_field_literal_Refutable ===
+//! expect: can fail
+struct Point { x: int, y: int }
+fn main() {
+    let p = Point { x: 0, y: 1 }
+    let Point { x: 0, y } = p
+    print(y)
+}
+
+//=== TEST CASE: newtype_literal_Refutable ===
+//! expect: can fail
+newtype Id(int)
+fn main() {
+    let Id(0) = Id(1)
+}
+
+//=== TEST CASE: or_pattern_in_let_Parse ===
+//! expect: unexpected token
+enum Opt { None, Some(int) }
+fn main() {
+    let v = Opt::Some(1)
+    let Opt::Some(x) | Opt::None = v else {
+        return
+    }
+}
+
+//=== TEST CASE: guard_in_let_Parse ===
+//! expect: expected
+enum Opt { None, Some(int) }
+fn main() {
+    let v = Opt::Some(1)
+    let Opt::Some(x) if x > 0 = v else {
+        return
+    }
+    print(x)
+}
+
+//=== TEST CASE: basic_self_reference_Generic ===
+fn main() {
+    // This should fail - variable cannot reference itself in its own initializer
+    let x = x
+}
+
+//=== TEST CASE: self_reference_with_method_Generic ===
+fn main() {
+    // This should fail - variable cannot reference itself even with method call
+    let y = y.unwrap()
+}
+
+//=== TEST CASE: self_reference_with_type_annotation_Generic ===
+fn main() {
+    // This should fail - type annotation doesn't change the scoping rules
+    let z: int = z + 1
+}
+
+//=== TEST CASE: tuple_destructuring_self_reference_Generic ===
+fn main() {
+    // Even in tuple destructuring, variables shouldn't see themselves
+    let (x, y) = (x, 2)
+}
+
+//=== TEST CASE: self_reference_with_function_call_Generic ===
+fn identity(x: int) -> int {
+    return x
+}
+
+fn main() {
+    // This should fail - variable cannot reference itself even through function calls
+    let y = identity(y)
+}
+
+//=== TEST CASE: self_reference_complex_function_call_Generic ===
+fn scene_change(scene: int, transition_type: int) -> int {
+    return scene + transition_type
+}
+
+fn main() {
+    // This is the exact pattern from the original bug report
+    let menu_scene = scene_change(menu_scene, 1)
+}
+
+//=== TEST CASE: static_in_pure_fn_writes_globals_Generic ===
+//! expect: `@pure` function declares a `static` (writes module state)
+// The declaration itself writes module state; no extra assignment is needed.
+@pure
+fn p() -> int {
+    static n = 0
+    return n
+}
+fn main() { let _ = p() }
+
+//=== TEST CASE: static_in_co_fn_hard_reject_Generic ===
+//! expect: `static` is not allowed in a `co fn`
+// Inference rejects the declaration in a coroutine even without a later use.
+co fn gen() -> Coroutine<int> {
+    static scratch = 0
+    yield 1
+}
+fn main() { let c = gen()  let _ = c.resume() }
+
+//=== TEST CASE: static_init_reads_param_Generic ===
+//! expect: static initializer may not read local `count`
+// The initializer runs once, not per call -- a param read would silently
+// snapshot the first reaching call's value. Rejected.
+fn draw(count: int) -> int {
+    static scratch = count
+    return scratch
+}
+fn main() { let _ = draw(10) }
+
+//=== TEST CASE: static_init_reads_local_Generic ===
+//! expect: static initializer may not read local `base`
+// Same rule for an enclosing local.
+fn f() -> int {
+    let base = 7
+    static v = base + 1
+    return v
+}
+fn main() { let _ = f() }
+
+//=== TEST CASE: static_init_reads_sibling_static_Generic ===
+//! expect: static initializer may not read local `a`
+// A static initializer may not read another static (init-order hazard).
+fn f() -> int {
+    static a = 1
+    static b = a + 1
+    return b
+}
+fn main() { let _ = f() }
+
+//=== TEST CASE: static_init_reads_local_shadowing_global_Generic ===
+//! expect: static initializer may not read local `base`
+// Must ERROR on the local read, NOT silently bind the like-named global. This
+// is why enforcement is resolve-then-reject, not module-scope re-resolution.
+global base: int = 100
+fn f() -> int {
+    let base = 7
+    static v = base + 1   // binds the local `base` -> rejected (not the global)
+    return v
+}
+fn main() { let _ = f() }
+
+//=== TEST CASE: static_mangled_cell_name_unresolvable_from_source_Generic ===
+//! expect: `__static_f_n` did not resolve to any definition
+// This generated-looking name is absent from source scope. It is not the
+// current emitted cell spelling, so this alone does not prove cell privacy.
+fn f() -> int {
+    static n = 0
+    return __static_f_n
+}
+fn main() { let _ = f() }
+
+//=== TEST CASE: static_tuple_pattern_Generic ===
+//! expect: a `static` takes a plain name, not a pattern: give it one name and destructure from it
+fn f() {
+    static (a, b) = (1, 2)
+    print(a + b)
+}
+fn main() { f() }
+
+//=== TEST CASE: static_record_pattern_Generic ===
+//! expect: a `static` takes a plain name, not a pattern: give it one name and destructure from it
+struct P { x: int, y: int }
+fn f() {
+    static P { x, y } = P { x: 1, y: 2 }
+    print(x + y)
+}
+fn main() { f() }
+
+//=== TEST CASE: global_value_mismatch_Generic ===
+// the value must match the annotation.
+//! expect: type mismatch: expected `int`, found `string`
+global BAD: int = "hi"
+fn f() -> int {
+    5
+}
+
+//=== TEST CASE: undefined_name_UndefinedGlobal ===
+//! expect: `undefined_variable` did not resolve to any definition
+global bad_global: int = undefined_variable
+
+fn main() {
+    print("{bad_global}")
+}
+
+//=== TEST CASE: initializer_type_mismatch_TypeMismatch ===
+//! expect: type mismatch: expected `int`, found `string`
+global wrong_type: int = "not an int"
+
+fn main() {
+    print("{wrong_type}")
+}

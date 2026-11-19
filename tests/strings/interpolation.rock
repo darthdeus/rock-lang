@@ -254,7 +254,7 @@ fn test_null_nominals_render_nil() {
 }
 
 // `GcH` holds a container, which the structural formatter rejects even when
-// the value is null (tests/errors/enum_format_unsupported_payload.rock.err).
+// the value is null (tests/errors/strings.rock.err).
 @test(output = "nil nil")
 fn test_null_structs_render_nil() {
     let z = empty_box()

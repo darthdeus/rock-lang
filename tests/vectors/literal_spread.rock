@@ -1,6 +1,6 @@
 // `...` spread of struct values and tuples (literals, locals and call
 // results) inside array literals. Rejected spreads are in
-// tests/errors/types/struct_spread_heterogeneous.rock.err.
+// tests/errors/types.rock.err.
 
 struct FixVec2 {
     x: float,

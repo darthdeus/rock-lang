@@ -298,7 +298,7 @@ fn defer_in_a_block_sees_its_local() {
 
 @test(output = "body\n0\n1\n2\nlambda:7")
 fn defer_body_keeps_its_own_control_flow() {
-    // A `return` inside a `defer` body is rejected (tests/errors/defer.rock.err),
+    // A `return` inside a `defer` body is rejected (tests/errors/control_flow.rock.err),
     // but control flow that stays inside the body is fine: a loop it owns, and
     // a lambda returning from itself.
     defer {

@@ -1,8 +1,0 @@
-//=== TEST CASE: reference_as_rejects_Generic ===
-//! expect: cannot convert `ref Source` to `ref Target` with `as`; `as` converts only between numeric types, or
-struct Source { x: int }
-struct Target { x: int }
-fn convert(value: ref Source) -> ref Target {
-    return value as ref Target
-}
-

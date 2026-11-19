@@ -1,0 +1,424 @@
+//=== TEST CASE: co_fn_yield_type_mismatch_Generic ===
+// yield value type must match the coroutine's yield type Y.
+//! expect: type mismatch: expected `string`, found `int`
+co fn bad() -> Coroutine<string> {
+    yield 42
+}
+
+//=== TEST CASE: yield_star_type_mismatch_Generic ===
+// await over a coroutine whose yield type mismatches the outer is rejected.
+//! expect: type mismatch: expected `int`, found `string`
+co fn inner_str() -> Coroutine<string> {
+    yield "a"
+}
+co fn outer_int() -> Coroutine<int> {
+    await inner_str()
+}
+
+//=== TEST CASE: falloff_int_result ===
+// a `co fn` whose declared result R is a concrete non-unit,
+// non-nullable type must not be able to FALL OFF the end of its body:
+// bone coerces only explicit `return <expr>` statements to R (a
+// coroutine's body tail is discarded, never coerced), so a reachable
+// fall-off would stamp the completed terminal with `__return` nil --
+// and `result()`/`take_result` would hand out a nil typed as R. The
+// rejection is EMIT-time (skull-mir `lower_root`), on the bone-accepted
+// program. Unit R (the default) and nullable R (nil is a legal value)
+// stay admitted; a body whose end is unreachable (every path returns /
+// `while true`) is fine. A generic R is checked per concrete
+// instantiation: falling off at a non-unit, non-nullable R rejects,
+// including when the instantiation is reached through a generic caller
+// (tests/coroutines/generic_result_falloff.rock pins the admitted ones).
+//! expect: can fall off the end of its body, but its coroutine result type is not `()`
+co fn gen() -> Coroutine<int, string> {
+    yield 1
+}
+fn main() {
+    let c = gen()
+    resume(c)
+}
+
+//=== TEST CASE: falloff_after_conditional_return ===
+//! expect: can fall off the end of its body, but its coroutine result type is not `()`
+// One arm returns, the other falls through to the end -- the fall-off is
+// reachable, so it still rejects.
+co fn maybe(flag: bool) -> Coroutine<int, int> {
+    yield 1
+    if flag {
+        return 7
+    }
+}
+fn main() {
+    let c = maybe(true)
+    resume(c)
+}
+
+//=== TEST CASE: falloff_generic_result_at_int ===
+//! expect: can fall off the end of its body, but its coroutine result type is not `()`
+co fn gen<R>(x: R) -> Coroutine<int, R> {
+    yield 1
+}
+fn main() {
+    let c = gen(5)
+    resume(c)
+}
+
+//=== TEST CASE: falloff_generic_result_through_generic_caller ===
+//! expect: can fall off the end of its body, but its coroutine result type is not `()`
+co fn gen<R>(x: R) -> Coroutine<int, R> {
+    yield 1
+}
+co fn wrap<R>(x: R) -> Coroutine<int, R> {
+    let r = await gen(x)
+    return r
+}
+fn main() {
+    let c = wrap("s")
+    resume(c)
+}
+
+//=== TEST CASE: coroutine_cannot_receive_a_flat_element_ref ===
+// relocatable element references cannot be retained by coroutines.
+//! expect: cannot pass a reference into a relocatable Vec or Map element to `bump`: the reference is retained by a coroutine
+value Cell { w: int }
+co fn bump(c: ref Cell) -> Coroutine<int> {
+    c.w += 1
+    yield c.w
+}
+fn main() {
+    let xs: [Cell] = [Cell { w: 1 }]
+    let c = bump(xs[0])
+    resume(c)
+}
+
+//=== TEST CASE: coroutine_cannot_receive_a_forwarded_flat_element_ref ===
+//! expect: cannot pass a reference into a relocatable Vec or Map element to `relay`: the reference is retained by a coroutine
+value Cell { w: int }
+co fn bump(c: ref Cell) -> Coroutine<int> {
+    c.w += 1
+    yield c.w
+}
+fn relay(c: ref Cell) -> Coroutine<int> { return bump(c) }
+fn main() {
+    let xs: [Cell] = [Cell { w: 1 }]
+    let c = relay(xs[0])
+    resume(c)
+}
+
+//=== TEST CASE: coroutine_cannot_receive_a_map_element_ref ===
+//! expect: cannot pass a reference into a relocatable Vec or Map element to `bump`: the reference is retained by a coroutine
+value Cell { w: int }
+co fn bump(c: ref Cell) -> Coroutine<int> { yield c.w }
+fn main() {
+    let cells: Map<string, Cell> = map_new()
+    cells["a"] = Cell { w: 1 }
+    let task = bump(cells["a"])
+}
+
+//=== TEST CASE: coroutine_cannot_receive_an_explicit_vec_element_ref ===
+//! expect: cannot retain a reference into relocatable Vec or Map storage
+value Cell { w: int }
+co fn read(c: ref Cell) -> Coroutine<int> { yield c.w }
+fn main() {
+    let cells: [Cell] = [Cell { w: 1 }]
+    let borrowed: ref Cell = cells[0]
+    let task = read(borrowed)
+}
+
+//=== TEST CASE: coroutine_cannot_receive_an_explicit_map_element_ref ===
+//! expect: cannot retain a reference into relocatable Vec or Map storage
+value Cell { w: int }
+co fn read(c: ref Cell) -> Coroutine<int> { yield c.w }
+fn main() {
+    let cells: Map<string, Cell> = map_new()
+    cells["a"] = Cell { w: 1 }
+    let borrowed: ref Cell = cells["a"]
+    let task = read(borrowed)
+}
+
+//=== TEST CASE: overloaded_coroutine_cannot_receive_a_vec_element_ref ===
+//! expect: cannot pass a reference into a relocatable Vec or Map element to `read`: the reference is retained by a coroutine
+value Cell { w: int }
+co fn read(c: ref Cell) -> Coroutine<int> { yield c.w }
+fn main() {
+    let cells: [Cell] = [Cell { w: 1 }]
+    let task = read(cells[0])
+}
+
+//=== TEST CASE: overloaded_coroutine_cannot_receive_a_map_element_ref ===
+//! expect: cannot pass a reference into a relocatable Vec or Map element to `read`: the reference is retained by a coroutine
+value Cell { w: int }
+co fn read(c: ref Cell) -> Coroutine<int> { yield c.w }
+fn main() {
+    let cells: Map<string, Cell> = map_new()
+    cells["a"] = Cell { w: 1 }
+    let task = read(cells["a"])
+}
+
+//=== TEST CASE: coroutine_cannot_borrow_a_spread_vec_element_field ===
+//! expect: No overload for `read` with argument types (Wrapper)
+value Cell { w: int }
+value Wrapper { c: Cell }
+co fn read(c: ref Cell) -> Coroutine<int> { yield c.w }
+fn main() {
+    let cells: [Wrapper] = [Wrapper { c: Cell { w: 1 } }]
+    let task = read(..cells[0])
+}
+
+//=== TEST CASE: coroutine_cannot_borrow_a_spread_map_element_field ===
+//! expect: No overload for `read` with argument types (Wrapper)
+value Cell { w: int }
+value Wrapper { c: Cell }
+co fn read(c: ref Cell) -> Coroutine<int> { yield c.w }
+fn main() {
+    let cells: Map<string, Wrapper> = map_new()
+    cells["a"] = Wrapper { c: Cell { w: 1 } }
+    let task = read(..cells["a"])
+}
+
+//=== TEST CASE: resume_taking_coroutine_not_iterable_Rejected ===
+// a `Coroutine<Y, R, N>` with `N != ()` is NOT iterable -- the
+// stdlib `next` adapter is only defined for `N = ()`, because a
+// `for` head cannot supply the resume-arg the body's `let x = yield V`
+// expects. The mismatch rejects at the loop naturally (no `next`
+// overload fits), never a silent wrong-arity resume.
+//! expect: type `Coroutine<int, (), int>` is not iterable
+co fn echo() -> Coroutine<int, (), int> {
+    let x = yield 1
+    yield x
+}
+
+fn main() {
+    for v in echo() {
+        print(v)
+    }
+}
+
+//=== TEST CASE: co_fn_requires_coroutine_result_Generic ===
+// a co fn result annotation must be a Coroutine type.
+// This formerly claimed to reject the bounded call, but the invalid annotation
+// rejects first. The corrected chain runs in coroutine_bound_calls.rock.
+//! expect: Expected a Coroutine type, got int
+co fn worker(xs: [int]) -> int {
+    let evens = xs.iter().filter(x => x % 2 == 0).collect()
+    return evens.len
+}
+fn main() {
+    let n = worker([1, 2, 3, 4])
+    print("n={n}")
+}
+
+//=== TEST CASE: coroutine_return_r_mismatch_Generic ===
+// co fn `return e` checks e against R (the Coroutine's 2nd param), not the
+// whole Coroutine type. `Coroutine<int, string>` synthesizes N=(); R=string.
+// return value not matching R is rejected.
+//! expect: type mismatch: expected `string`, found `int`
+co fn g() -> Coroutine<int, string> {
+    return 42
+}
+
+//=== TEST CASE: parameter_used_after_yield_Generic ===
+//! expect: frame borrow is used after a coroutine suspension
+struct Player { hp: int }
+co fn tick(player: ref Player) -> Coroutine<int> {
+    yield 1
+    player.hp = 2
+}
+fn main() {}
+
+//=== TEST CASE: coroutine_cannot_borrow_a_temporary_Generic ===
+//! expect: a `ref` can only borrow a stable place (a local, field, or indexed slot)
+value Cell { hp: int }
+co fn read(cell: ref Cell) -> Coroutine<int> { yield cell.hp }
+fn main() { let task = read(Cell { hp: 1 }) }
+
+//=== TEST CASE: overloaded_coroutine_cannot_borrow_a_temporary_Generic ===
+//! expect: a `ref` can only borrow a stable place (a local, field, or indexed slot)
+value Cell { hp: int }
+value Other { hp: int }
+co fn read(cell: ref Cell) -> Coroutine<int> { yield cell.hp }
+co fn read(other: ref Other) -> Coroutine<int> { yield other.hp }
+fn main() { let task = read(Cell { hp: 1 }) }
+
+//=== TEST CASE: coroutine_cannot_borrow_a_copied_spread_field_Generic ===
+//! expect: a `ref` argument must be passed directly; call spreads supply copied fields
+value Cell { hp: int }
+value Wrapper { cell: Cell }
+co fn deferred_read(cell: ref Cell) -> Coroutine<int> { yield cell.hp }
+fn main() {
+    let wrapper = Wrapper { cell: Cell { hp: 1 } }
+    let task = deferred_read(..wrapper)
+}
+
+//=== TEST CASE: local_ref_used_after_yield_Generic ===
+//! expect: frame borrow is used after a coroutine suspension
+value Cell { hp: int }
+co fn tick() -> Coroutine<int> {
+    let cell = Cell { hp: 1 }
+    let borrowed: ref Cell = cell
+    yield 1
+    borrowed.hp = 2
+}
+fn main() {}
+
+//=== TEST CASE: alias_used_after_yield_Generic ===
+//! expect: frame borrow is used after a coroutine suspension
+value Cell { hp: int }
+co fn tick() -> Coroutine<int> {
+    let cell = Cell { hp: 1 }
+    let borrowed: ref Cell = cell
+    let alias = borrowed
+    yield 1
+    alias.hp = 2
+}
+fn main() {}
+
+//=== TEST CASE: conditional_yield_reaches_ref_use_Generic ===
+//! expect: frame borrow is used after a coroutine suspension
+value Cell { hp: int }
+co fn tick(pause: bool) -> Coroutine<int> {
+    let cell = Cell { hp: 1 }
+    let borrowed: ref Cell = cell
+    if pause { yield 1 }
+    borrowed.hp = 2
+}
+fn main() {}
+
+//=== TEST CASE: loop_backedge_reaches_ref_use_Generic ===
+//! expect: frame borrow is used after a coroutine suspension
+value Cell { hp: int }
+co fn tick() -> Coroutine<int> {
+    let cell = Cell { hp: 1 }
+    let borrowed: ref Cell = cell
+    while true {
+        borrowed.hp = 2
+        yield 1
+    }
+}
+fn main() {}
+
+//=== TEST CASE: defer_uses_ref_after_yield_Generic ===
+//! expect: frame borrow is used after a coroutine suspension
+value Cell { hp: int }
+co fn tick() -> Coroutine<int> {
+    let cell = Cell { hp: 1 }
+    let borrowed: ref Cell = cell
+    defer { borrowed.hp = 2 }
+    yield 1
+}
+fn main() {}
+
+//=== TEST CASE: ref_used_after_yield_past_let_else_Generic ===
+//! expect: frame borrow is used after a coroutine suspension
+value Cell { hp: int }
+co fn tick(vals: Map<string, int>) -> Coroutine<int> {
+    let cell = Cell { hp: 1 }
+    let borrowed: ref Cell = cell
+    yield 1
+    let v = vals.get("a") else {
+        return
+    }
+    borrowed.hp = v
+}
+fn main() {}
+
+//=== TEST CASE: temporary_ref_argument_Generic ===
+//! expect: a `ref` can only borrow a stable place (a local, field, or indexed slot)
+struct Player { hp: int }
+fn read_hp(player: ref Player) -> int { player.hp }
+fn main() { print(read_hp(Player { hp: 1 })) }
+
+//=== TEST CASE: closure_captures_ref_Generic ===
+//! expect: closure cannot capture frame reference `player`; capture an `Entity<T>` and resolve it inside the
+struct Player { hp: int }
+fn bad(player: ref Player) -> () -> int { return () => player.hp }
+
+//=== TEST CASE: return_local_place_Generic ===
+//! expect: cannot return a frame reference to a local place; return an input reference or a reference obtained
+struct Player { hp: int }
+fn bad() -> ref Player { let player = Player { hp: 1 }  return player }
+
+//=== TEST CASE: return_local_place_nested_fn_Generic ===
+//! expect: `bad` cannot store a frame reference in a persistent container or closure type
+struct Player { hp: int }
+fn outer() { fn bad() -> ref Player { let player = Player { hp: 1 }  player } }
+
+//=== TEST CASE: return_local_place_lambda_Generic ===
+//! expect: type mismatch: expected `ref Player`, found `Player` (different type constructors)
+struct Player { hp: int }
+fn bad() -> () -> ref Player { return () => { let player = Player { hp: 1 }  player } }
+
+//=== TEST CASE: frame_ref_source_marker_Generic ===
+//! expect: `@frame_ref_source` is reserved for the standard arena storage primitive
+@frame_ref_source fn bad() {}
+
+//=== TEST CASE: ref_erased_to_any_Generic ===
+//! expect: a frame reference cannot be erased to `any`
+struct Player { hp: int }
+fn main(player: ref Player) { let erased: any = player }
+
+//=== TEST CASE: ref_foreign_parameter_Generic ===
+//! expect: foreign or inline function `host` cannot carry a frame reference across an opaque boundary
+struct Player { hp: int }
+extern(lua) fn host(player: ref Player)
+
+//=== TEST CASE: ref_in_array_Generic ===
+//! expect: `retained` cannot store a frame reference in a persistent container or closure type
+struct Player { hp: int }
+fn main(player: ref Player) { let retained = [player] }
+
+//=== TEST CASE: ref_struct_field_Generic ===
+//! expect: field `player` cannot store a frame reference; store an `Entity<T>` or a value instead
+struct Player { hp: int }
+struct Holder { player: ref Player }
+
+//=== TEST CASE: ref_value_field_Generic ===
+//! expect: field `player` cannot store a frame reference; store an `Entity<T>` or a value instead
+struct Player { hp: int }
+value Holder { player: ref Player }
+
+//=== TEST CASE: ref_enum_payload_Generic ===
+//! expect: enum variant `Player` cannot store a frame reference; store an `Entity<T>` or a value instead
+struct Player { hp: int }
+enum Event { Player(ref Player) }
+
+//=== TEST CASE: ref_global_Generic ===
+//! expect: global `PLAYER` cannot store a frame reference; store an `Entity<T>` or a value instead
+struct Player { hp: int }
+global PLAYER: (ref Player)? = null
+
+//=== TEST CASE: ref_container_element_Generic ===
+//! expect: global `PLAYERS` cannot store a frame reference; store an `Entity<T>` or a value instead
+struct Player { hp: int }
+global PLAYERS: [ref Player]
+
+//=== TEST CASE: ref_static_local_Generic ===
+//! expect: a `static` local cannot store a frame reference; store an `Entity<T>` or a value instead
+struct Player { hp: int }
+fn keep() { static PLAYER: (ref Player)? = null }
+
+//=== TEST CASE: retained_vec_element_ref_Generic ===
+//! expect: cannot retain a reference into relocatable Vec or Map storage; pass the element directly to a `ref
+value Position { x: int }
+fn main() {
+    let positions = [Position { x: 1 }]
+    let position: ref Position = positions[0]
+    positions.push(Position { x: 2 })
+    position.x = 3
+}
+
+//=== TEST CASE: ref_helper_keeps_vec_element_origin_Generic ===
+//! expect: cannot retain a reference into relocatable Vec or Map storage; pass the element directly to a `ref
+value Position { x: int }
+fn same(position: ref Position) -> ref Position { return position }
+fn main() {
+    let positions = [Position { x: 1 }]
+    let position: ref Position = same(positions[0])
+    positions.push(Position { x: 2 })
+    position.x = 3
+}
+
+//=== TEST CASE: vec_header_does_not_pin_elements_Generic ===
+//! expect: cannot retain a reference into relocatable Vec or Map storage; pass the element directly to a `ref
+value Position { x: int }
+fn first(positions: [Position]) -> ref Position { return positions[0] }

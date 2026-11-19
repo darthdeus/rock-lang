@@ -1,0 +1,428 @@
+//=== TEST CASE: same_signature_uncalled_DuplicateSymbol ===
+//! expect: duplicate definition of `t()`: already defined at test.rock:1
+@test(output = "1") fn t() { print(1) }
+@test(output = "2") fn t() { print(2) }
+
+//=== TEST CASE: return_type_and_param_names_do_not_distinguish_DuplicateSymbol ===
+//! expect: duplicate definition of `f(int)`: already defined at test.rock:1
+fn f(x: int) -> int { x }
+fn f(y: int) -> float { 1.0 }
+
+fn main() {}
+
+//=== TEST CASE: receiver_form_is_the_same_function_DuplicateSymbol ===
+//! expect: duplicate definition of `g(P)`: already defined at test.rock:2
+struct P { x: int }
+fn P.g(p) -> int { 1 }
+fn g(p: P) -> int { 2 }
+
+fn main() {}
+
+//=== TEST CASE: same_generic_signature_DuplicateSymbol ===
+//! expect: duplicate definition of `id(T)`: already defined at test.rock:1
+fn id<T>(x: T) -> T { x }
+fn id<T>(x: T) -> T { x }
+
+fn main() {}
+
+//=== TEST CASE: same_signature_across_files_DuplicateSymbol ===
+//! expect: duplicate definition of `helper(string)`: already defined at a.rock:1
+//--- FILE: a.rock ---
+fn helper(s: string) -> int { 1 }
+//--- FILE: b.rock ---
+fn helper(s: string) -> int { 2 }
+
+fn main() {}
+
+//=== TEST CASE: same_arity_macros_DuplicateSymbol ===
+//! expect: duplicate definition of macro `dbl` taking 1 argument: already defined at test.rock:1
+macro dbl(x: expr) -> int { x + x }
+macro dbl(y: expr) -> int { y * 3 }
+
+fn main() {
+    print(dbl(2))
+}
+
+//=== TEST CASE: overlapping_macro_arity_DuplicateSymbol ===
+//! expect: duplicate definition of macro `pick` taking 1 argument: already defined at test.rock:1
+macro pick(x: expr, y: expr = 0) -> int { x + y }
+macro pick(x: expr) -> int { x }
+
+fn main() {
+    print(pick(2))
+}
+
+//=== TEST CASE: struct_and_enum_same_name_DuplicateSymbol ===
+//! expect: duplicate definition `Shape`
+struct Shape { x: int }
+enum Shape { Circle }
+
+fn main() {}
+
+//=== TEST CASE: enum_and_newtype_same_name_DuplicateSymbol ===
+//! expect: duplicate definition `Id`
+enum Id { A }
+newtype Id(int)
+
+fn main() {}
+
+//=== TEST CASE: struct_and_newtype_across_files_DuplicateSymbol ===
+//! expect: duplicate definition `Meters`
+//--- FILE: a.rock ---
+struct Meters { v: float }
+//--- FILE: b.rock ---
+newtype Meters(float)
+
+fn main() {}
+
+//=== TEST CASE: same_decorator_twice_DuplicateSymbol ===
+//! expect: duplicate definition of decorator `reg`: already defined at test.rock:1
+deco init reg {}
+deco init reg {}
+
+fn main() {}
+
+//=== TEST CASE: same_decorator_across_files_DuplicateSymbol ===
+//! expect: duplicate definition of decorator `reg`: already defined at a.rock:1
+//--- FILE: a.rock ---
+deco init reg {}
+//--- FILE: b.rock ---
+deco init reg {}
+
+fn main() {}
+
+//=== TEST CASE: decorator_params_do_not_distinguish_DuplicateSymbol ===
+//! expect: duplicate definition of decorator `reg`: already defined at test.rock:1
+deco init reg {}
+deco init reg(x: int) {}
+
+fn main() {}
+
+//=== TEST CASE: duplicate_struct_field_Generic ===
+//! expect: Duplicate field `x` in struct `Foo`
+struct Foo {
+    x: int,
+    x: float
+}
+
+fn main() {
+    print("duplicate struct field must not compile")
+}
+
+//=== TEST CASE: duplicate_value_struct_field_Generic ===
+//! expect: Duplicate field `x` in struct `P`
+value P {
+    x: int,
+    x: int
+}
+
+fn main() {
+    print("duplicate value-struct field must not compile (two `x` in the C layout)")
+}
+
+//=== TEST CASE: duplicate_enum_variant_Generic ===
+//! expect: Duplicate variant `Tick` in enum `Ev`
+enum Ev {
+    Tick,
+    Tick
+}
+
+fn main() {
+    print("duplicate enum variant must not compile")
+}
+
+//=== TEST CASE: duplicate_enum_variant_mixed_payload_Generic ===
+//! expect: Duplicate variant `Tick` in enum `Ev`
+enum Ev {
+    Tick(int),
+    Tick
+}
+
+fn main() {
+    print("same variant name with different payloads is still a duplicate")
+}
+
+//=== TEST CASE: duplicate_record_payload_field_Generic ===
+//! expect: Duplicate field `w` in variant `Rect` of enum `Shape`
+enum Shape {
+    Rect { w: int, w: int },
+    Dot
+}
+
+fn main() {
+    print("duplicate field in a record payload must not compile")
+}
+
+//=== TEST CASE: duplicate_enum_DuplicateSymbol ===
+//! expect: duplicate definition `DrawCommand`
+enum DrawCommand {
+    Rect { x: int, y: int, width: int, height: int },
+    Circle { x: int, y: int, radius: int }
+}
+
+// Duplicate definition
+enum DrawCommand {
+    Line { x1: int, y1: int, x2: int, y2: int }
+}
+
+fn main() {
+    print("Testing duplicate enum detection")
+}
+
+//=== TEST CASE: duplicate_struct_DuplicateSymbol ===
+//! expect: duplicate definition `Player`
+struct Player {
+    x: int,
+    y: int,
+    health: int
+}
+
+// Duplicate struct
+struct Player {
+    name: string,
+    score: int
+}
+
+fn main() {
+    print("Testing duplicate struct detection")
+}
+
+//=== TEST CASE: duplicate_newtype_DuplicateSymbol ===
+//! expect: duplicate definition `UserId`
+newtype UserId(int)
+
+// Duplicate newtype
+newtype UserId(string)
+
+fn main() {
+    print("Testing duplicate newtype detection")
+}
+
+//=== TEST CASE: duplicate_struct_across_modules_DuplicateSymbol ===
+//! expect: duplicate definition `Foo`
+//--- FILE: a.rock ---
+struct Foo { x: int }
+//--- FILE: b.rock ---
+struct Foo { y: string }
+
+fn main() {
+    print("Testing cross-module duplicate struct detection")
+}
+
+//=== TEST CASE: function_and_global_across_modules_DuplicateSymbol ===
+//! expect: duplicate definition `foo`
+//--- FILE: a.rock ---
+fn foo() -> int { 1 }
+//--- FILE: b.rock ---
+global foo: int = 2
+
+fn main() {
+    print("{foo}")
+}
+
+//=== TEST CASE: function_and_global_same_module_DuplicateSymbol ===
+//! expect: duplicate definition `foo`
+fn foo() -> int { 1 }
+global foo: int = 2
+
+fn main() {
+    print("{foo()}")
+}
+
+//=== TEST CASE: enum_cannot_shadow_stdlib_struct_DuplicateSymbol ===
+//! expect: types `Envelope` and `Envelope` would both emit as `Envelope`
+
+enum Envelope { Empty, Text(string) }
+
+fn main() {}
+
+//=== TEST CASE: undefined_function_SymbolNotFound ===
+fn main() {
+    undefined_function()
+}
+
+//=== TEST CASE: undefined_variable_Generic ===
+fn main() {
+    let x = undefined_var
+}
+
+// Regression: an undefined variable used as an OPERATOR argument must
+// still surface a diagnostic. The `__op_*` arg-inference path used to
+// `Err(_) => continue` (silently skip the check), so a broken `x + y`
+// produced wrong types while the same shape in a regular call errored.
+// The operators-as-functions arc rewrote that arm to propagate via `?`;
+// this pins the symmetry so it cannot silently regress.
+//=== TEST CASE: undefined_in_operator_arg_Generic ===
+fn main() {
+    let r = undefined_thing + 1
+}
+
+//=== TEST CASE: global_r1_Generic ===
+global r1: int = 100
+fn use_it(a: int) -> int { return a + r1 }
+fn main() { print("{use_it(7)}") }
+
+//=== TEST CASE: global_c0_Generic ===
+global c0: int = 5
+fn use_it(a: int) -> int { return a + c0 }
+fn main() { print("{use_it(1)}") }
+
+//=== TEST CASE: global_rock_env_Generic ===
+global __rock_env: int = 9
+fn use_it(a: int) -> int { return a + __rock_env }
+fn main() { print("{use_it(1)}") }
+
+//=== TEST CASE: nomangle_fn_r2_Generic ===
+@nomangle fn r2() -> int { return 3 }
+fn main() { print("{r2()}") }
+
+//=== TEST CASE: global_vs_lambda_Generic ===
+//! expect: compiler-reserved synthetic name
+global f_0__lambda0: int = 5
+fn f() { let g = () => 3 print("{g()}") }
+fn main() { f() }
+
+//=== TEST CASE: nomangle_fn_vs_lambda_Generic ===
+//! expect: compiler-reserved synthetic name
+@nomangle fn f_0__lambda0() -> int { return 7 }
+fn f() { let g = () => 3 print("{g()}") }
+fn main() { f() }
+
+//=== TEST CASE: nomangle_fn_vs_capturing_lambda_Generic ===
+//! expect: compiler-reserved synthetic name
+// A CAPTURING lambda (env record) routes through the same mint_synthetic guard
+// as the capture-free one.
+@nomangle fn cap_int__lambda0() -> int { return 7 }
+fn cap(x: int) -> fn() -> int { return () => x }
+fn main() { let f = cap(5) print("{f()}") }
+
+//=== TEST CASE: nomangle_fn_vs_hook_Generic ===
+//! expect: compiler-reserved synthetic name
+@nomangle fn worker_0__on_killed() -> int { return 999 }
+co fn worker() -> Coroutine<int> {
+    on_killed { }
+    yield 1
+}
+fn main() { let w = worker() }
+
+//=== TEST CASE: nomangle_fn_vs_step_Generic ===
+//! expect: compiler-reserved synthetic name
+@nomangle fn worker_0__step() -> int { return 1 }
+co fn worker() -> Coroutine<int> {
+    yield 1
+    yield 2
+}
+fn main() { let w = worker() }
+
+//=== TEST CASE: nomangle_fn_vs_specialized_lambda_Generic ===
+//! expect: compiler-reserved synthetic name
+// A specialized body names its lambdas after the instance symbol.
+@nomangle fn spec_T_spec_p_int__lambda0() -> int { return 7 }
+fn spec<T>(x: T) -> T { let g = () => x return g() }
+fn main() { print("{spec(5)}") print("{spec_T_spec_p_int__lambda0()}") }
+
+//=== TEST CASE: distinct_signatures_collide_Generic ===
+// `foo(int, int) -> int` and `foo_int(int) -> int` both mangle to `foo_int_int`.
+fn foo(x: int, y: int) -> int { return x }
+fn foo_int(x: int) -> int { return 0 }
+fn main() { let a = foo(1, 2) let b = foo_int(1) }
+
+//=== TEST CASE: mangled_equals_exempt_bare_name_Generic ===
+// `bar(int) -> int` mangles to `bar_int`, which is the bare name a
+// `@nomangle` fn `bar_int` keeps -- one emitted symbol for two functions.
+fn bar(x: int) -> int { return x }
+@nomangle fn bar_int() -> int { return 2 }
+fn main() { let a = bar(1) let b = bar_int() }
+
+//=== TEST CASE: misplaced_mod_header_rejects ===
+//! expect: `mod path;` is a file header and must be the file's first item
+fn main() {
+    print("hi")
+}
+
+mod combat;
+
+//=== TEST CASE: second_mod_header_rejects ===
+//! expect: a file has one `mod path;` header
+mod combat;
+mod casting;
+
+fn main() {
+    print("hi")
+}
+
+//=== TEST CASE: use_as_underscore_rejects ===
+//! expect: `use ... as _` has no activation semantics in modules-v1
+use stone::engine as _;
+
+fn main() {
+    print("hi")
+}
+
+//=== TEST CASE: private_set_on_item_rejects ===
+//! expect: `private(set)` applies to stored struct fields, not to items
+private(set) fn main() {
+    print("hi")
+}
+
+//=== TEST CASE: macro_generated_module_item_rejects ===
+//! expect: macro-generated `mod`/`use` is not supported
+macro emit_use() {
+    use stone::engine::State;
+}
+
+emit_use()
+
+fn main() {
+    print("hi")
+}
+
+//=== TEST CASE: unterminated_single_quoted_string ===
+//! expect: unterminated string literal
+fn main() {
+    let text = 'unterminated
+}
+
+//=== TEST CASE: compiler_directives_are_unsupported_items ===
+//! expect: Unsupported top level item
+#if lua
+fn selected() {}
+#elseif js
+fn selected() {}
+#else
+fn selected() {}
+#end
+
+//=== TEST CASE: block_use_is_unsupported ===
+//! expect: `use` declarations require module resolution
+fn main() {
+    use missing
+}
+
+//=== TEST CASE: symbolic_or_member_on_integer ===
+//! expect: cannot access field `or` on non-struct type int
+fn main() { 1.|| }
+
+//=== TEST CASE: hash_comments_keep_the_member_diagnostic ===
+//! expect: cannot access field `__rock_or` on non-struct type int
+#
+# comment
+#unknown
+#endif
+#ELSE
+fn main() {
+    let value = 1.or
+}
+#
+
+//=== TEST CASE: unterminated_block_comment ===
+//! expect: unterminated block comment
+fn main() {
+    print(1)
+}
+
+/* ERROR: unterminated block comment
+@test
+fn swallowed() {
+    assert(false)
+}

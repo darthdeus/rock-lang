@@ -1,0 +1,379 @@
+//=== TEST CASE: double_for_over_cursor_Generic ===
+//! expect: use of consumed binding
+fn main() {
+    let v = [1, 2, 3]
+    let it = v.iter()
+    let a = 0
+    for x in it { a += x }
+    let b = 0
+    for x in it { b += x }
+    print("{a} {b}")
+}
+
+//=== TEST CASE: for_then_terminal_Generic ===
+//! expect: use of consumed binding
+fn main() {
+    let v = [1, 2, 3]
+    let it = v.iter().map(x => x * 2)
+    let a = 0
+    for x in it { a += x }
+    let r = it.collect()
+    print("{a} {r.len}")
+}
+
+//=== TEST CASE: wrap_then_use_Generic ===
+//! expect: use of consumed binding
+fn main() {
+    let v = [1, 2, 3]
+    let it = v.iter()
+    let doubled = it.map(x => x * 2)
+    let a = 0
+    for x in it { a += x }
+    let b = 0
+    for x in doubled { b += x }
+    print("{a} {b}")
+}
+
+//=== TEST CASE: copy_then_use_Generic ===
+//! expect: use of consumed binding
+fn main() {
+    let v = [1, 2, 3]
+    let it = v.iter()
+    let alias = it
+    let a = 0
+    for x in alias { a += x }
+    let b = 0
+    for x in it { b += x }
+    print("{a} {b}")
+}
+
+//=== TEST CASE: loop_reuse_of_outer_cursor_Generic ===
+//! expect: cannot consume
+fn main() {
+    let v = [1, 2, 3]
+    let it = v.iter()
+    let total = 0
+    for round in 0..2 {
+        for x in it { total += x }
+    }
+    print("{total}")
+}
+
+//=== TEST CASE: both_branch_join_then_use_Generic ===
+//! expect: use of consumed binding
+fn check_both_branches(flag: bool) {
+    let it = [1, 2, 3].iter()
+    if flag {
+        let _ = it.collect()
+    } else {
+        let _ = it.collect()
+    }
+    let _ = it.collect()
+}
+fn main() { check_both_branches(true) }
+
+//=== TEST CASE: one_branch_join_then_use_Generic ===
+//! expect: use of consumed binding
+fn check_one_branch(flag: bool) {
+    let it = [1, 2, 3].iter()
+    if flag {
+        let _ = it.collect()
+    }
+    let _ = it.collect()
+}
+fn main() { check_one_branch(true) }
+
+//=== TEST CASE: partial_next_then_one_consume_then_reuse_Generic ===
+//! expect: use of consumed binding
+fn main() {
+    let it = [1, 2, 3].iter()
+    let (more, first) = it.next()
+    let _ = more
+    let _ = first
+    let rest = it.collect()
+    let again = it.collect()
+    print("{rest.len} {again.len}")
+}
+
+//=== TEST CASE: passing_to_consuming_function_then_reuse_Generic ===
+//! expect: use of consumed binding
+fn drain<I: Iterator<int>>(it: I) -> int {
+    return it.count()
+}
+
+fn main() {
+    let it = [1, 2, 3].iter()
+    let n = drain(it)
+    let again = drain(it)
+    print("{n} {again}")
+}
+
+//=== TEST CASE: captured_cursor_then_consume_Generic ===
+//! expect: use of consumed binding
+fn main() {
+    let it = [1, 2, 3].iter()
+    let read = () => it.count()
+    let n = it.count()
+    print("{n}")
+}
+
+//=== TEST CASE: cursor_binding_stored_in_field_then_reused_Generic ===
+//! expect: use of consumed binding
+struct Holder<I> {
+    cursor: I,
+}
+
+fn main() {
+    let it = [1, 2, 3].iter()
+    let holder = Holder { cursor: it }
+    let n = it.count()
+    print("{n}")
+}
+
+//=== TEST CASE: cursor_pushed_then_reused_Generic ===
+//! expect: use of consumed binding
+fn main() {
+    let cursors: [VecIter<int>] = []
+    let it = [1, 2, 3].iter()
+    cursors.push(it)
+    let n = it.count()
+    print("{n}")
+}
+
+//=== TEST CASE: cursor_returned_then_reused_Generic ===
+//! expect: use of consumed binding
+fn return_cursor(it: VecIter<int>) -> VecIter<int> {
+    return it
+}
+
+fn main() {
+    let it = [1, 2, 3].iter()
+    let returned = return_cursor(it)
+    let n = it.count()
+    print("{n} {returned.count()}")
+}
+
+//=== TEST CASE: user_consume_struct_double_use_Generic ===
+//! expect: use of consumed binding
+@consume
+struct Ticket {
+    id: int,
+}
+
+fn punch(t: Ticket) -> int {
+    return t.id
+}
+
+fn main() {
+    let t = Ticket { id: 7 }
+    let a = punch(t)
+    let b = punch(t)
+    print("{a} {b}")
+}
+
+//=== TEST CASE: consume_annotation_typo_UnknownAnnotation ===
+//! expect: unknown annotation `@consum`
+@consum
+struct Ticket {
+    id: int,
+}
+
+fn main() {
+    let t = Ticket { id: 7 }
+    let _ = t.id
+}
+
+//=== TEST CASE: bounded_generic_double_for_Generic ===
+//! expect: use of consumed binding `it`
+fn drain<I: Iterator<int>>(it: I) {
+    for x in it {}
+    for x in it {}
+}
+fn main() {}
+
+//=== TEST CASE: bounded_generic_next_after_for_Generic ===
+//! expect: use of consumed binding `it`
+fn drain<I: Iterator<int>>(it: I) {
+    for x in it {}
+    let _ = it.next()
+}
+fn main() {}
+
+//=== TEST CASE: bounded_generic_reassignment_consumes_rhs_Generic ===
+//! expect: use of consumed binding `fresh`
+fn drain<I: Iterator<int>>(it: I, fresh: I) {
+    for x in it {}
+    it = fresh
+    for x in it {}
+    for x in fresh {}
+}
+fn main() {}
+
+//=== TEST CASE: non_iterator_arg_fails_bound_Generic ===
+//! expect: `int` does not satisfy `Iterator<T>`: no `next(int) -> (bool, E)` function in scope
+struct Wrap<I> { inner: I }
+fn wrap_it<I: Iterator<T>, T>(x: I) -> Wrap<I> {
+    return Wrap { inner: x }
+}
+fn main() {
+    // `int` has no `next(int) -> (bool, E)` -- does not satisfy the bound.
+    let w = wrap_it(3)
+    let _ = w
+}
+
+//=== TEST CASE: unknown_bound_name_rejects_Generic ===
+//! expect: `Frobnicator` did not resolve to any definition
+fn take_foo<I: Frobnicator<T>, T>(x: I) -> int {
+    return 0
+}
+fn main() {
+    let _ = take_foo(3)
+}
+
+//=== TEST CASE: bound_on_struct_decl_rejects_Generic ===
+//! expect: generic bounds are not allowed on a struct; bounds only apply to fn generic parameters
+struct Holder<I: Iterator<T>, T> { it: I }
+fn main() {
+    let _ = 1
+}
+
+//=== TEST CASE: elem_type_mismatch_rejects_Generic ===
+//! expect: `VecIter<string>` satisfies `Iterator<string>`, but the bound requires `Iterator<int>`
+fn sum_ints<I: Iterator<int>>(it: I) -> int {
+    let total = 0
+    for x in it { total += x }
+    return total
+}
+fn main() {
+    let v = ["a", "b"]
+    // VecIter<string> satisfies Iterator<string>, not Iterator<int>.
+    let _ = sum_ints(v.iter())
+}
+
+//=== TEST CASE: multi_value_iterator_cannot_be_wrapped_Generic ===
+//! expect: `MultiIter` does not satisfy `Iterator<..>`: its `next` returns `(bool, int, int)`; a bound requires exactly `(bool, E)`
+struct Multi { n: int }
+struct MultiIter { cur: int, n: int }
+fn iter(m: Multi) -> MultiIter { return MultiIter { cur: 0, n: m.n } }
+fn next(it: MultiIter) -> (bool, int, int) {
+    if it.cur >= it.n { return (false, 0, 0) }
+    it.cur = it.cur + 1
+    return (true, it.cur, it.cur * 2)
+}
+fn main() {
+    let m = Multi { n: 3 }
+    // A 3-value `next` drives a `for` fine, but a bound requires exactly
+    // (bool, E), so wrapping it in map rejects. (Stdlib iterators all yield
+    // tuple ELEMENTS now -- enumerate/zip/pairs -- so only a user iterator
+    // can hit this.)
+    for x in m.iter().map(p => p) {
+        let _ = x
+    }
+}
+
+//=== TEST CASE: bounded_fn_as_value_rejects_Generic ===
+//! expect: `sum_it` has `Iterator` bounds and cannot be used as a value; call it directly
+fn sum_it<I: Iterator<int>>(it: I) -> int {
+    let total = 0
+    for x in it { total += x }
+    return total
+}
+fn main() {
+    // A bounded fn exists only inlined at call sites -- no runtime identity.
+    let f = sum_it
+    let _ = f
+}
+
+//=== TEST CASE: unbounded_generic_not_iterable_Generic ===
+//! expect: `I` is a generic type with no `Iterator` bound, so it cannot be iterated; declare it `I: Iterator<T>`
+fn each<I>(it: I) {
+    for x in it {
+        let _ = x
+    }
+}
+fn main() {
+    each([1, 2, 3])
+}
+
+//=== TEST CASE: no_iter_fn_for_struct_Generic ===
+struct Thing { n: int }
+fn main() {
+    for x in (Thing { n: 1 }) {
+        let _ = x
+    }
+}
+
+//=== TEST CASE: iter_but_no_next_Generic ===
+struct Bag { n: int }
+struct BagIter { bag: Bag, i: int }
+fn iter(b: Bag) -> BagIter {
+    return BagIter { bag: b, i: 0 }
+}
+fn main() {
+    // `iter(Bag)` resolves to BagIter, but there is no `next(BagIter)` -> reject.
+    for x in (Bag { n: 1 }) {
+        let _ = x
+    }
+}
+
+//=== TEST CASE: a_caller_generic_with_the_wrong_element_names_both_elements_Generic ===
+//! expect: `J` satisfies `Iterator<string>`, but the bound requires `Iterator<int>`
+fn total<I: Iterator<int>>(it: I) -> int {
+    return 0
+}
+
+fn total(x: bool) -> int {
+    return 1
+}
+
+fn fwd<J: Iterator<string>>(j: J) -> int {
+    return total(j)
+}
+
+//=== TEST CASE: a_lone_bounded_callee_reports_the_element_mismatch_Generic ===
+//! expect: type mismatch: expected `int`, found `string`
+fn total<I: Iterator<int>>(it: I) -> int {
+    return 0
+}
+
+fn fwd<J: Iterator<string>>(j: J) -> int {
+    return total(j)
+}
+
+//=== TEST CASE: tuple_first_on_non_tuple_Generic ===
+//! expect: Mob
+struct Mob {
+    health: int
+}
+
+global mobs: Arena<Mob> = arena_new()
+
+fn test() {
+    insert(mobs, Mob { health: 100 })
+
+    for mob_item in mobs {
+        let entity = tuple_first(mob_item)  // OK: mob_item is (Entity<Mob>, Mob)
+        let mob = tuple_second(mob_item)    // OK: extracts Mob from tuple
+
+        // This should be an error - mob is Mob type, not tuple
+        let wrong = tuple_first(mob)  // ERROR: Cannot unify types: Mob vs tuple
+    }
+}
+
+fn main() {
+    test()
+}
+
+//=== TEST CASE: access_after_alias_mutation_Generic ===
+//! expect: cannot access field
+value Place { x: int }
+struct Row { goal: Place? }
+fn clear(row: Row) { row.goal = null }
+fn f(row: Row) -> int {
+    let alias = row
+    if row.goal != null {
+        clear(alias)
+        return row.goal.x
+    }
+    0
+}

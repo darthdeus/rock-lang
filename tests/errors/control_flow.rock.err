@@ -1,0 +1,310 @@
+//=== TEST CASE: if_branch_mismatch_Generic ===
+// branches disagree (int vs string)
+//! expect: type mismatch: expected `string`, found `int`
+fn f() -> int {
+    let x = if true { 1 } else { "hi" }
+    x
+}
+
+//=== TEST CASE: if_cond_not_bool_Generic ===
+// condition is int, not bool
+//! expect: type mismatch: expected `bool`, found `int`
+fn f() -> int {
+    let x = if 5 { 1 } else { 2 }
+    x
+}
+
+//=== TEST CASE: value_let_no_else_fail_Generic ===
+// value position requires an else
+//! expect: `if` without a final `else` cannot be used as a value
+fn gives_int() -> int { 42 }
+fn f() -> int {
+    let x = 1
+    let u = if x == 1 { gives_int() }
+    x
+}
+
+//=== TEST CASE: value_let_annotated_no_else_fail_Generic ===
+//! expect: `if` without a final `else` cannot be used as a value
+fn gives_int() -> int { 42 }
+fn f() -> int {
+    let x = 1
+    let v: int = if x == 1 { gives_int() }
+    x
+}
+
+//=== TEST CASE: value_let_open_chain_fail_Generic ===
+//! expect: `if` without a final `else` cannot be used as a value
+fn f() -> int {
+    let x = 1
+    let u = if x == 1 { 10 } else if x == 2 { 20 }
+    x
+}
+
+//=== TEST CASE: value_let_closed_mismatched_fail_Generic ===
+//! expect: type mismatch: expected `string`, found `int`
+fn f() -> int {
+    let x = 1
+    let u = if x == 1 { 10 } else { "s" }
+    x
+}
+
+//=== TEST CASE: value_fn_tail_no_else_fail_Generic ===
+//! expect: `if` without a final `else` cannot be used as a value
+fn f(x: int) -> int {
+    if x == 1 {
+        10
+    }
+}
+
+//=== TEST CASE: value_iflet_no_else_fail_Generic ===
+// value if-let requires an else
+//! expect: `if let` without an `else` cannot be used as a value
+fn f() -> int {
+    let m: int? = 42
+    let u = if let n = m { n }
+    1
+}
+
+//=== TEST CASE: lambda_arg_int_ret_no_else_fail_Generic ===
+// an expected NON-unit return keeps the lambda body in value position
+//! expect: `if` without a final `else` cannot be used as a value
+fn run(cb: fn() -> int) -> int { cb() }
+fn f() -> int {
+    let r = run(() => {
+        let x = 1
+        if x == 1 { 42 }
+    })
+    r
+}
+
+//=== TEST CASE: lambda_bare_no_else_fail_Generic ===
+// an unconstrained lambda's body stays in value position (strict: its
+// return type is inferred from the tail)
+//! expect: `if` without a final `else` cannot be used as a value
+fn f() -> int {
+    let g = () => {
+        let x = 1
+        if x == 1 { 42 }
+    }
+    1
+}
+
+//=== TEST CASE: continue_in_multi_assign_rhs_ControlFlowInSubexpression ===
+//! expect: control flow (return/break/continue) is not allowed in an `if` used as a tuple element of a destructuring assignment
+fn test() {
+    for i in 0..10 {
+        let (x, y) = (1, if i > 5 { continue } else { i })
+    }
+}
+
+//=== TEST CASE: break_in_multi_assign_rhs_ControlFlowInSubexpression ===
+//! expect: control flow (return/break/continue) is not allowed in an `if` used as a tuple element of a destructuring assignment
+fn test() {
+    for i in 0..10 {
+        let (x, y) = (1, if i > 5 { break } else { i })
+    }
+}
+
+//=== TEST CASE: return_in_multi_assign_rhs_ControlFlowInSubexpression ===
+//! expect: control flow (return/break/continue) is not allowed in an `if` used as a tuple element of a destructuring assignment
+fn test() {
+    let (x, y) = (1, if true { return } else { 42 })
+}
+
+//=== TEST CASE: if_without_else_with_continue_MissingElseBranch ===
+//! expect: `if` without a final `else` cannot be used as a value
+fn test() {
+    for i in 0..10 {
+        let x = if i > 5 { continue }
+    }
+}
+
+//=== TEST CASE: if_without_else_with_break_MissingElseBranch ===
+//! expect: `if` without a final `else` cannot be used as a value
+fn test() {
+    for i in 0..10 {
+        let x = if i > 5 { break }
+    }
+}
+
+//=== TEST CASE: if_without_else_with_return_MissingElseBranch ===
+//! expect: `if` without a final `else` cannot be used as a value
+fn test() {
+    let x = if true { return }
+}
+
+//=== TEST CASE: continue_not_in_loop_InvalidContinue ===
+//! expect: `break`/`continue` is only valid inside a loop body
+fn test() {
+    if true { continue } else { 42 }
+}
+
+//=== TEST CASE: break_not_in_loop_InvalidBreak ===
+//! expect: `break`/`continue` is only valid inside a loop body
+fn test() {
+    if true { break } else { 42 }
+}
+
+//=== TEST CASE: chain_else_keeps_no_clause_narrowing_Generic ===
+//! expect: expects operands (int, int)
+// Every clause's miss lands in the same `else`, so a refinement proved by
+// one clause failing (here `x == null` being false) must NOT be assumed
+// there: the first clause missing can arrive with `x` still null.
+fn probe(m: Map<int, int>, x: int?) -> int {
+    if let a = m.get(1) && x == null {
+        return 1
+    } else {
+        return x + 100
+    }
+}
+fn main() {}
+
+//=== TEST CASE: chain_else_narrowing_condition_first_Generic ===
+//! expect: expects operands (int, int)
+// Same rule with the narrowing condition FIRST: its refinement is ambient
+// while the later clauses are checked, but it does not hold on the arrival
+// where the condition itself failed.
+fn probe(m: Map<int, int>, x: int?) -> int {
+    if x != null && let a = m.get(1) {
+        return a
+    } else {
+        return x + 100
+    }
+}
+fn main() {}
+
+//=== TEST CASE: chain_else_narrowing_condition_middle_Generic ===
+//! expect: expects operands (int, int)
+fn probe(m: Map<int, int>, w: int?, v: int?) -> int {
+    if let y = w && v != null && let z = m.get(1) {
+        return y + z
+    } else {
+        return v + 1
+    }
+}
+fn main() {}
+
+//=== TEST CASE: while_cond_not_bool_Generic ===
+// the condition must be bool.
+//! expect: type mismatch: expected `bool`, found `int`
+fn f() -> int {
+    while 5 {
+        let x = 1
+    }
+    5
+}
+
+//=== TEST CASE: for_tuple_arity_mismatch_Generic ===
+// Pattern arity must match the element's tuple arity. A `Map<K, V>` yields a
+// 2-tuple; a 3-binding pattern must be rejected.
+//! expect: tuple pattern expected 2 elements, but got 3
+fn f(m: Map<int, string>) -> int {
+    for (a, b, c) in m {
+        let p = a
+    }
+    5
+}
+
+//=== TEST CASE: for_tuple_on_scalar_Generic ===
+// Destructuring a non-tuple element with a tuple pattern must be rejected.
+// (The local protocol makes the array iterable, so the failure is the pattern
+// arity -- not a missing-iterator error.)
+//! expect: expected a tuple type in pattern, got int
+struct FIter<T> { last: T }
+fn iter<T>(v: [T]) -> FIter<T> { return FIter { last: v[0] } }
+fn next<T>(it: FIter<T>) -> (bool, T) { return (false, it.last) }
+fn f(xs: [int]) -> int {
+    for (a, b) in xs {
+        let p = a
+    }
+    5
+}
+
+
+//=== TEST CASE: element_annotation_mismatch_TypeMismatch ===
+//! expect: mismatch
+fn main() {
+    for x: string in [1, 2, 3] {
+        print(x)
+    }
+}
+
+//=== TEST CASE: element_annotation_on_destructuring_Generic ===
+//! expect: plain name
+fn main() {
+    for (a, b): (int, int) in [(1, 2)] {
+        print(a + b)
+    }
+}
+
+//=== TEST CASE: return_inside_defer_body_Generic ===
+//! expect: `return` is not allowed inside a `defer`
+// A deferred block runs while the function is already returning, so a
+// `return` in it has nothing to return from (it used to overflow the
+// compiler's stack: each return spliced the same defer again).
+fn t() -> int {
+    defer { return 1 }
+    2
+}
+fn main() { print(t()) }
+
+//=== TEST CASE: let_else_return_inside_defer_body_Generic ===
+//! expect: `return` is not allowed inside a `defer`
+fn t(v: int?) -> int {
+    defer {
+        let x = v else { return 0 }
+        print(x)
+    }
+    2
+}
+fn main() { print(t(1)) }
+
+//=== TEST CASE: missing_return_let_only_Generic ===
+//! expect: function `f` must return `int`, but its body has no return value
+fn f() -> int {
+    let x = 5
+}
+
+//=== TEST CASE: return_unit_mismatch_Generic ===
+// bare `return` (returns unit) in an int function must be rejected.
+//! expect: type mismatch: expected `int`, found `()`
+fn f() -> int {
+    let z = 1
+    return
+}
+
+//=== TEST CASE: bare_return_value_position_rejected_Generic ===
+// a bare `return` in VALUE position is still a unit return -- the position does
+// not change that it returns nothing where an int is declared. Must be rejected
+// (bone is intentionally stricter than rock here: rock accepts this).
+//! expect: type mismatch: expected `int`, found `()`
+fn f() -> int {
+    let x: int = return
+    x
+}
+
+//=== TEST CASE: body_return_mismatch_Generic ===
+// The body's tail must match the declared return type.
+//! expect: type mismatch: expected `int`, found `string`
+fn f() -> int { "hi" }
+
+//=== TEST CASE: return_value_from_unannotated_fn_Generic ===
+struct Trail { x: int }
+
+fn make() -> Trail {
+    return Trail { x: 1 }
+}
+
+fn no_annotation() {
+    return make()
+}
+
+fn main() {
+    no_annotation()
+}
+
+//=== TEST CASE: tail_less_block_cannot_supply_int_Generic ===
+//! expect: type mismatch: expected `int`, found `()`
+fn run(n: int) -> int { return n }
+fn main() { run({ let x = 1 }) }

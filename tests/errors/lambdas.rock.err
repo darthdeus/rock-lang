@@ -1,0 +1,228 @@
+//=== TEST CASE: lambda_body_type_error_Generic ===
+// the lambda body is type-checked: an ordering op on a bool body must fail
+//! expect: ordering operators require numeric operands, got bool
+fn f() -> int {
+    let g = (x: bool) => x < x
+    5
+}
+
+
+//=== TEST CASE: break_inside_lambda_in_loop_Generic ===
+//! expect: only valid inside a loop body
+// A lambda body is not the enclosing loop's body: it runs when called. The
+// enclosing loop must not make `break`/`continue` legal inside it (this used
+// to type-check and then crash the compiler).
+fn main() {
+    for i in [1, 2] {
+        let g = () => {
+            break
+        }
+        g()
+    }
+}
+
+//=== TEST CASE: continue_inside_lambda_in_loop_Generic ===
+//! expect: only valid inside a loop body
+fn main() {
+    let x: int? = null
+    for i in [1, 2] {
+        let g = () => {
+            let v = x else { continue }
+            v
+        }
+        print(g())
+    }
+}
+
+//=== TEST CASE: unpinned_lambda_param_errors_Generic ===
+//! expect: cannot infer type of lambda parameter `x`: annotate it or use the lambda
+struct W { a: float }
+operator *(l: W, r: int) -> W { return l }
+fn main() {
+    let f = x => x * 2
+}
+
+//=== TEST CASE: first_use_pins_second_conflicts_Generic ===
+//! expect: type mismatch: expected `W`, found `int`
+struct W { a: float }
+operator *(l: W, r: int) -> W { return l }
+fn main() {
+    let f = x => x * 2
+    let a = f(W { a: 1.0 })
+    let b = f(5)
+}
+
+//=== TEST CASE: solved_lambda_param_ambiguity_still_errors_Generic ===
+//! expect: Ambiguous overload for `amb` with argument types (int, int)
+fn amb(x: any, y: int) -> int { return 0 }
+fn amb(x: int, y: any) -> int { return 1 }
+fn main() {
+    let f = (x: int) => amb(x, 3)
+    let y = f(5)
+}
+
+//=== TEST CASE: lambda_param_monomorphic_fail_Generic ===
+// Lambda params with no annotation AND no expected-type slot (non-arg
+// position, e.g. `let f = x => ...`) get a fresh inference var rather than a
+// hard error. The var is constrained monomorphically by the body and by every
+// application site, and is left free (no error) if nothing constrains it.
+// Verified against real rock: `x => x * 2` => `fn(int) -> int`, identity applied
+// at int => `fn(int) -> int`, fully-unconstrained `x => x` is accepted, applying
+// one binding at two types is a unify error.
+// applying the same binding at two incompatible types is a unify error
+// (the param is one monomorphic var, not let-polymorphic)
+//! expect: type mismatch: expected `int`, found `string`
+fn f() -> int {
+    let g = x => x
+    let a = g(3)
+    let b = g("hi")
+    5
+}
+
+//=== TEST CASE: unpinned_lambda_param_mul_Generic ===
+// an unconstrained lambda param that no use in the body ever pins
+// has no type -- defer-to-use does not invent one. The local
+// `*(UnpinnedW, int)` overload ties with stdlib `*(int, int)`, so `x * 2` cannot
+// pick eagerly, and with no later call the param stays unresolved.
+struct UnpinnedW { a: float }
+
+operator *(l: UnpinnedW, r: int) -> UnpinnedW {
+    return UnpinnedW { a: l.a }
+}
+
+fn main() {
+    let f = x => x * 2
+    print("never calls f")
+}
+
+//=== TEST CASE: unpinned_placeholder_field_Generic ===
+struct UnpinnedP { x: int }
+struct UnpinnedQ { x: float }
+
+fn main() {
+    let get_x = _.x
+    print("never calls get_x")
+}
+
+//=== TEST CASE: placeholder_in_block_let_init_Generic ===
+//! expect: `_` placeholder cannot appear inside an explicit lambda or block expression
+// Original repro: inner `_.a` desugars to a lambda, gets bound to `z`,
+// then `z + 1` fails at runtime with "attempt to perform arithmetic
+// on a function value".
+struct Pair { a: int, b: int }
+fn main() {
+    let xs: [Pair] = [Pair { a: 10, b: 0 }, Pair { a: 20, b: 0 }]
+    let _ys = xs.map({ let z = _.a; z + 1 })
+}
+
+//=== TEST CASE: placeholder_in_single_expr_block_Generic ===
+//! expect: `_` placeholder cannot appear inside an explicit lambda or block expression
+// `xs.map({ _.a })` happened to work today (inner `_.a` becomes a
+// lambda, block tail evaluates to it). Banning it is a fair price for
+// a clean rule — and writing `xs.map(_.a)` directly is shorter anyway.
+struct Pair2 { a: int }
+fn main() {
+    let xs: [Pair2] = [Pair2 { a: 1 }]
+    let _ys = xs.map({ _.a })
+}
+
+//=== TEST CASE: placeholder_in_multi_stmt_block_Generic ===
+//! expect: `_` placeholder cannot appear inside an explicit lambda or block expression
+// Multiple statements with `_` somewhere in the middle.
+struct Pair3 { a: int, b: int }
+fn main() {
+    let xs: [Pair3] = [Pair3 { a: 1, b: 2 }]
+    let _ys = xs.map({
+        let unused = 0
+        let z = _.a
+        z + unused
+    })
+}
+
+//=== TEST CASE: placeholder_in_explicit_lambda_let_init_Generic ===
+//! expect: `_` placeholder cannot appear inside an explicit lambda or block expression
+// `_` inside the Let init of an explicit lambda's block. The walker
+// historically only visited Expression+Return stmts, so the inner `_`
+// silently desugared to its own lambda and the explicit-lambda guard
+// never fired. Now `lambda_contains_placeholder` walks Let too.
+fn main() {
+    let xs = [1, 2, 3]
+    let _ys = vec_map(xs, y => { let z = _ + y; z })
+}
+
+//=== TEST CASE: placeholder_in_explicit_lambda_for_body_Generic ===
+//! expect: `_` placeholder cannot appear inside an explicit lambda or block expression
+// Same shape, but the `_` is inside a For-stmt body within the explicit
+// lambda. Walker now visits For too.
+fn main() {
+    let xs: [[int]] = [[1, 2], [3, 4]]
+    let _ys = vec_map(xs, y => {
+        let acc = 0
+        for v in y { let _bad = _ + v }
+        acc
+    })
+}
+
+//=== TEST CASE: placeholder_in_explicit_lambda_while_body_Generic ===
+//! expect: `_` placeholder cannot appear inside an explicit lambda or block expression
+// `_` inside a While-stmt body of an explicit lambda. Walker visits While.
+fn main() {
+    let xs = [1, 2, 3]
+    let _ys = vec_map(xs, y => {
+        let i = 0
+        while i < 1 { let _bad = _ + y; i = i + 1 }
+        y
+    })
+}
+
+//=== TEST CASE: lambda_parameter_wrong_method_Generic ===
+struct Point {
+    x: int,
+    y: int,
+}
+
+fn main() {
+    let points = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]
+
+    // This should fail - Point doesn't match any `get` overload.
+    // (Before the unified get() accessors landed this produced a
+    // SymbolNotFound error; now `get` is a known symbol with several
+    // overloads for Vec/Map/HashMap/NativeBuffer, none of which match
+    // (Point, string) — so the error kind shifted to Generic.)
+    let result = points.map(p => p.get("x"))
+}
+
+//=== TEST CASE: yield_with_value_in_lambda_Generic ===
+//! expect: yield is only allowed in a coroutine (co fn)
+co fn gen() -> Coroutine<int> {
+    let f = () => yield 5
+    f()
+}
+fn main() {
+    let c = gen()
+    let _ = c.resume()
+}
+
+//=== TEST CASE: bare_yield_in_lambda_Generic ===
+//! expect: yield is only allowed in a coroutine (co fn)
+co fn gen() -> Coroutine<int> {
+    let f = () => yield
+    f()
+    yield 1
+}
+fn main() {
+    let c = gen()
+    let _ = c.resume()
+}
+
+//=== TEST CASE: yield_in_lambda_passed_to_map_Generic ===
+//! expect: yield is only allowed in a coroutine (co fn)
+co fn gen() -> Coroutine<int> {
+    let xs: [int] = [1, 2, 3]
+    let _ys = xs.map(x => yield x)
+    yield 0
+}
+fn main() {
+    let c = gen()
+    let _ = c.resume()
+}

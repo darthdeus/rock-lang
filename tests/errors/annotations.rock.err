@@ -1,0 +1,287 @@
+//=== TEST CASE: unknown_annotation_name_on_field_Generic ===
+//! expect: unknown annotation `@totally_unknown_anno`
+// Unknown name on a struct field -> reject.
+struct Widget {
+    @totally_unknown_anno
+    width: int
+}
+
+fn main() { print("{Widget { width: 4 }.width}") }
+
+//=== TEST CASE: disallowed_position_on_field_Generic ===
+//! expect: annotation `@nomangle` is not allowed on a struct field -- it applies to a fn or a struct
+// `@nomangle` applies to fn and struct items; on a field it is a
+// disallowed-position violation.
+struct Panel {
+    @nomangle
+    height: int
+}
+
+fn main() { print("{Panel { height: 5 }.height}") }
+
+//=== TEST CASE: bad_arity_on_field_Generic ===
+//! expect: annotation `@flat` takes no arguments
+// `@flat` is a nullary varying marker; supplying an arg is an arity
+// violation.
+value Vertex {
+    @flat(1)
+    layer: int
+}
+
+fn main() { print("{Vertex { layer: 6 }.layer}") }
+
+//=== TEST CASE: attr_on_field_Generic ===
+//! expect: annotation `@attr` is not allowed on a struct field -- it applies to a fn parameter
+// `@attr` is a param-only role marker; on a struct field it is a
+// disallowed-position violation.
+value Quad {
+    @attr
+    pos: Vec2
+}
+
+fn main() { print("{Quad { pos: v(0.0, 0.0) }.pos.x}") }
+
+//=== TEST CASE: unknown_annotation_name_on_item_Generic ===
+//! expect: unknown annotation `@totally_unknown_anno`
+// Unknown name -> reject (kills the typo class).
+@totally_unknown_anno
+fn helper() -> int { 1 }
+
+fn main() { print("{helper()}") }
+
+//=== TEST CASE: bad_arity_on_item_Generic ===
+//! expect: annotation `@ignore` takes no arguments
+// `@ignore` takes no args; supplying one is an arity violation.
+@ignore(5)
+fn tagged() -> int { 2 }
+
+fn main() { print("{tagged()}") }
+
+//=== TEST CASE: disallowed_position_on_item_Generic ===
+//! expect: annotation `@instance` is not allowed on a fn -- it applies to a fn parameter
+// `@instance` is a param-only annotation; on a fn item it is a
+// disallowed-position violation.
+@instance
+fn shade() -> int { 3 }
+
+fn main() { print("{shade()}") }
+
+//=== TEST CASE: uniform_on_item_Generic ===
+//! expect: annotation `@uniform` is not allowed on a fn -- it applies to a fn parameter
+// `@uniform` is a param-only role marker (GLSL vertex inputs); on a fn item
+// it is a disallowed-position violation.
+@uniform
+fn vertex_stage() -> int { 4 }
+
+fn main() { print("{vertex_stage()}") }
+
+//=== TEST CASE: nomangle_on_enum_Generic ===
+//! expect: annotation `@nomangle` is not allowed on an enum -- it applies to a fn or a struct
+// `@nomangle` keeps a fn's or a struct's declared symbol; an enum's symbol
+// feeds its variant singletons and names tables, which it does not cover.
+@nomangle
+enum Signal { On, Off }
+
+fn main() { print("{Signal::On}") }
+
+//=== TEST CASE: unknown_annotation_name_on_param_Generic ===
+//! expect: unknown annotation `@totally_unknown_anno`
+// Unknown name on a parameter -> reject.
+fn helper(@totally_unknown_anno a: int) -> int { a }
+
+fn main() { print("{helper(1)}") }
+
+//=== TEST CASE: disallowed_position_on_param_Generic ===
+//! expect: annotation `@nomangle` is not allowed on a fn parameter -- it applies to a fn or a struct
+// `@nomangle` applies to fn and struct items; on a parameter it is a
+// disallowed-position violation.
+fn keep(@nomangle a: int) -> int { a }
+
+fn main() { print("{keep(2)}") }
+
+//=== TEST CASE: bad_arg_kind_on_param_Generic ===
+//! expect: `@size` takes exactly one int argument: @size(32)
+// `@size` expects an int; a string is a bad arg-kind violation.
+fn sized(@size("nope") a: int) -> int { a }
+
+fn main() { print("{sized(3)}") }
+
+//=== TEST CASE: bad_arity_on_attr_param_Generic ===
+//! expect: annotation `@attr` takes no arguments
+// `@attr` is a nullary role marker; supplying an arg is an arity violation.
+fn shade(@attr(1) a: int) -> int { a }
+
+fn main() { print("{shade(4)}") }
+
+//=== TEST CASE: repr_opaque_on_a_regular_rock_fn_Generic ===
+//! expect: `@repr(opaque)` applies to a parameter of an `inline(..)` or `extern` boundary
+// The fn has a Rock body, so there is no opaque boundary to contract about.
+fn plain(@repr(opaque) v: int) -> int { v }
+
+fn main() { print("{plain(1)}") }
+
+//=== TEST CASE: repr_opaque_at_fn_item_position_Generic ===
+//! expect: annotation `@repr` is not allowed on a fn
+// It is a PARAMETER contract; on the item it names nothing.
+@repr(opaque) @nomangle inline(lua) fn item_level(v: any) -> int = """
+    return 1
+"""
+
+fn main() { print("{item_level(1)}") }
+
+//=== TEST CASE: repr_opaque_on_a_struct_field_Generic ===
+//! expect: annotation `@repr` is not allowed on a struct field
+// Struct fields have their own representation annotations (`@flat`); this is
+// not one of them.
+struct Holder { @repr(opaque) a: int }
+
+fn main() { print("{Holder { a: 1 }.a}") }
+
+//=== TEST CASE: repr_with_no_argument_Generic ===
+//! expect: `@repr` takes exactly one bare kind identifier: @repr(opaque)
+// `@repr` names WHICH contract; bare, it names none.
+@nomangle inline(lua) fn no_arg(@repr v: any) -> int = """
+    return 1
+"""
+
+fn main() { print("{no_arg(1)}") }
+
+//=== TEST CASE: repr_with_an_unknown_kind_Generic ===
+//! expect: unknown `@repr` kind `boxed` -- the only kind is `opaque`
+// `opaque` is the only kind. An unrecognized one must reject rather than be
+// read as "some contract".
+@nomangle inline(lua) fn bad_kind(@repr(boxed) v: any) -> int = """
+    return 1
+"""
+
+fn main() { print("{bad_kind(1)}") }
+
+//=== TEST CASE: repr_with_a_non_ident_argument_Generic ===
+//! expect: `@repr` takes exactly one bare kind identifier: @repr(opaque)
+// The kind is an identifier, not a string.
+@nomangle inline(lua) fn str_kind(@repr("opaque") v: any) -> int = """
+    return 1
+"""
+
+fn main() { print("{str_kind(1)}") }
+
+//=== TEST CASE: repr_with_extra_arguments_Generic ===
+//! expect: `@repr` takes exactly one bare kind identifier: @repr(opaque)
+// Exactly one argument.
+@nomangle inline(lua) fn extra(@repr(opaque, opaque) v: any) -> int = """
+    return 1
+"""
+
+fn main() { print("{extra(1)}") }
+
+//=== TEST CASE: missing_name_Generic ===
+//! expect: requires one nonempty string argument
+struct Row { @json_name internal: string }
+
+//=== TEST CASE: empty_name_Generic ===
+//! expect: requires one nonempty string argument
+struct Row { @json_name("") internal: string }
+
+//=== TEST CASE: numeric_name_Generic ===
+//! expect: requires one nonempty string argument
+struct Row { @json_name(1) internal: string }
+
+//=== TEST CASE: function_position_Generic ===
+//! expect: not allowed
+@json_name("external") fn example() {}
+
+//=== TEST CASE: duplicate_annotation_Generic ===
+//! expect: duplicate @json_name
+struct Row { @json_name("one") @json_name("two") value: int }
+
+//=== TEST CASE: duplicate_wire_name_Generic ===
+//! expect: duplicate JSON field name
+struct Row { @json_name("same") one: int, @json_name("same") two: int }
+
+//=== TEST CASE: collision_with_unrenamed_field_Generic ===
+//! expect: duplicate JSON field name
+struct Row { @json_name("two") one: int, two: int }
+
+//=== TEST CASE: default_requires_expression_Generic ===
+//! expect: require a declared default
+struct Row { @json_default value: int }
+
+//=== TEST CASE: skip_requires_expression_Generic ===
+//! expect: require a declared default
+struct Row { @json_skip value: int }
+
+//=== TEST CASE: default_field_position_Generic ===
+//! expect: not allowed
+@json_default fn example() {}
+
+//=== TEST CASE: skip_no_arguments_Generic ===
+//! expect: annotation `@json_skip` takes no arguments
+struct Row { @json_skip(1) value: int = 0 }
+
+//=== TEST CASE: deco_body_type_error_Generic ===
+// The body IS type-checked: assigning the string `target.name` to an `int`
+// local is a type error.
+//! expect: type mismatch: expected `int`, found `string`
+deco init bad {
+    let n: int = target.name
+}
+
+//=== TEST CASE: deco_init_type_mismatch_MismatchedType ===
+deco init bad_types {
+    let x: int = "hello"
+}
+
+@bad_types
+fn foo() {}
+
+fn main() {}
+
+//=== TEST CASE: deco_invalid_target_field_Generic ===
+deco init invalid_field {
+    let x = target.nonexistent_field
+}
+
+@invalid_field
+fn baz() {}
+
+fn main() {}
+
+//=== TEST CASE: deco_param_type_mismatch_MismatchedType ===
+deco init param_error(priority: int) {
+    let x: string = priority
+}
+
+@param_error(5)
+fn qux() {}
+
+fn main() {}
+
+//=== TEST CASE: js_only_extern_called_from_lua_Generic ===
+extern(js) fn js_only() -> int
+
+fn main() {
+    print("{js_only()}")
+}
+
+//=== TEST CASE: same_backend_duplicate_is_rejected_DuplicateSymbol ===
+//! expect: duplicate definition of `dup(int)`: already defined at test.rock:1
+inline(lua) fn dup(x: int) -> int = """return x + 1"""
+inline(lua) fn dup(x: int) -> int = """return x + 2"""
+
+fn main() {
+    print("{dup(1)}")
+}
+
+//=== TEST CASE: unknown_inline_backend_Generic ===
+inline(wasm) fn nope(x: int) -> int = """return x"""
+
+fn main() {
+    print("{nope(1)}")
+}
+
+//=== TEST CASE: array_unify_element_mismatch_Generic ===
+// element mismatch: [int] arg vs [bool] param must fail at unify
+//! expect: type mismatch: expected `bool`, found `int`
+fn wrap<T>(x: T) -> [T] { [x] }
+fn takes(p: [bool]) -> int { 5 }
+fn f() -> int { takes(wrap(5)) }

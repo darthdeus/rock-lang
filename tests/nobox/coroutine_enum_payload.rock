@@ -3,7 +3,7 @@
 // and a plain nobox local held across a yield. Each has an unmarked twin.
 //
 // Yielding or returning a BARE nobox value from a `co fn` is not built yet and
-// is pinned in tests/errors/nobox_unbuilt_positions.rock.err.
+// is pinned in tests/errors/nobox.rock.err.
 
 nobox value NV { x: int, y: int }
 value BV { x: int, y: int }

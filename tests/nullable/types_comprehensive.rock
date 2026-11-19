@@ -1,6 +1,6 @@
 // Nullable type behavior: syntax, struct fields, params, returns,
 // assignment promotion, inference, unwrap. Compile-time rejection
-// cases are in tests/errors/types/nullable_assignment.rock.err.
+// cases are in tests/errors/nullable.rock.err.
 
 struct Opt {
     val: int?

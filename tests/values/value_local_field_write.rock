@@ -4,7 +4,7 @@
 // copy observes the write: not the value it was copied from, not a caller's
 // argument, not a container it was pushed into. A call result or literal is
 // still a temporary, and `field_set` still cannot take a value
-// (tests/errors/value_struct_field_write.rock.err).
+// (tests/errors/assignment.rock.err).
 //
 // Sibling coverage: writes through mutable storage are
 // tests/values/place_leaf_write.rock and field_write_scalarized_local.rock.

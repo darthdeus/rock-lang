@@ -187,4 +187,4 @@ fn test_arity_dispatch_3_arms() {
 // === MACRO + FN MIXED OVERLOAD SET ===
 //
 // Macro/fn name collisions are a compile error, pinned by
-// `tests/errors/macro_name_collides_with_fn.rock.err`.
+// `tests/errors/macros.rock.err`.

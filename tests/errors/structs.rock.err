@@ -1,9 +1,3 @@
-//! Structs, slice A: definitions + named-type resolution. A `struct` item
-//! registers a named type; its name resolves in type position (params, fields,
-//! returns). Field bodies can forward-reference structs declared later, so
-//! registration is two-pass (collect names, then lower field types).
-//! Literals (slice B) and field access (slice C) come next.
-
 //=== TEST CASE: unknown_type_still_errors_Generic ===
 // a genuinely unknown type name is still rejected.
 //! expect: `Nope` did not resolve to any definition
@@ -57,3 +51,470 @@ fn f() -> int {
     5
 }
 
+//=== TEST CASE: non_default_field_required_Generic ===
+// A non-defaulted field is still required.
+//! expect: Missing field `kind` in struct `Slime` literal
+struct Slime { kind: int, health: int = 100 }
+fn f() -> int {
+    let s = Slime { health: 5 }
+    0
+}
+
+//=== TEST CASE: update_wrong_nominal_base_MismatchedType ===
+// Rule 6: the base must have the SAME nominal type as the literal.
+struct A { x: int, y: int }
+struct B { x: int, y: int }
+
+fn main() {
+    let a = A { x: 1, y: 2 }
+    let b = B { ..a, y: 9 }   // ERROR: base is `A`, literal is `B`
+    print(b.x)
+}
+
+//=== TEST CASE: update_two_bases_Generic ===
+// Rule 5: two same-type bases both supply every field (collision).
+struct P { x: int, y: int }
+
+fn main() {
+    let a = P { x: 1, y: 2 }
+    let b = P { x: 3, y: 4 }
+    let c = P { ..a, ..b }   // ERROR: at most one base allowed
+    print(c.x)
+}
+
+//=== TEST CASE: enum_payload_mismatch_Generic ===
+// wrong payload type is rejected.
+//! expect: type mismatch: expected `float`, found `bool`
+enum Shape { Circle(float), Rect(float, float) }
+fn f() -> Shape {
+    Shape::Circle(true)
+}
+
+//=== TEST CASE: embed_whole_value_binding_Generic ===
+//! expect: `p` is an `embed` field: it has no independently storable value
+// THE headline case: illegal even where flattening would physically be a no-op.
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt, tag: int }
+
+fn main() {
+    let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    let q = h.p   // ERROR: binds the whole embedded field
+    print("{q.x}")
+}
+
+//=== TEST CASE: embed_whole_value_return_Generic ===
+//! expect: `p` is an `embed` field: it has no independently storable value
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt, tag: int }
+
+fn leak(h: Holder) -> Pt {
+    return h.p   // ERROR: returns the whole embedded field
+}
+
+fn main() {
+    let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    print("{leak(h).x}")
+}
+
+//=== TEST CASE: embed_closure_capture_Generic ===
+//! expect: `p` is an `embed` field: it has no independently storable value
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt, tag: int }
+
+fn main() {
+    let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    let f = () => h.p   // ERROR: captures the whole embedded field
+    print("{f().x}")
+}
+
+//=== TEST CASE: embed_collection_element_Generic ===
+//! expect: `p` is an `embed` field: it has no independently storable value
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt, tag: int }
+
+fn main() {
+    let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    let xs = [h.p]   // ERROR: an embedded field cannot be a collection element
+    print("{xs.len}")
+}
+
+//=== TEST CASE: embed_any_boundary_Generic ===
+//! expect: `p` is an `embed` field: it has no independently storable value
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt, tag: int }
+
+fn main() {
+    let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    let a: any = h.p   // ERROR: erasing an embedded field materializes it
+    print("{a}")
+}
+
+//=== TEST CASE: embed_non_scalar_abi_callee_Generic ===
+//! expect: `p` is an `embed` field: it has no independently storable value
+// A `@nomangle` / `extern` / inline callee receives a BOX, so it is not a
+// scalar-ABI consumer even though the syntax looks like the legal call form.
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt, tag: int }
+
+@nomangle inline(lua) fn sink_pt(p: Pt) -> int = """
+    return p.x
+"""
+
+fn main() {
+    let h = Holder { p: Pt { x: 1, y: 2 }, tag: 3 }
+    print("{sink_pt(h.p)}")   // ERROR: callee does not take leaves
+}
+
+//=== TEST CASE: embed_readable_field_ref_Generic ===
+//! expect: a readable selector would hand out the whole value
+// The extraction hole `WriteFieldRef` closed: `.p` may satisfy a write-only
+// selector, but a readable one hands out the whole value.
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt, tag: int }
+
+fn read_slot(f: ReadFieldRef<Holder, Pt>) {}
+
+fn main() {
+    read_slot(.p)   // ERROR: no readable selector for an embedded field
+}
+
+//=== TEST CASE: embed_full_field_ref_Generic ===
+//! expect: a readable selector would hand out the whole value
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt, tag: int }
+
+fn rw_slot(f: FieldRef<Holder, Pt>) {}
+
+fn main() {
+    rw_slot(.p)   // ERROR: FieldRef coerces onward to a readable selector
+}
+
+//=== TEST CASE: embed_nullable_let_binding_Generic ===
+//! expect: `p` is an `embed` field: it has no independently storable value
+// Presence is a leaf, so presence ops are projections -- but `?.let` binds the
+// whole value.
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt?, tag: int }
+
+fn main() {
+    let h = Holder { p: null, tag: 3 }
+    let r = h.p?.let { 1 }   // ERROR: binds the whole embedded field
+    print("{r}")
+}
+
+//=== TEST CASE: embed_nullable_coalesce_Generic ===
+//! expect: `p` is an `embed` field: it has no independently storable value
+struct Pt { x: int, y: int }
+struct Holder { embed p: Pt?, tag: int }
+
+fn main() {
+    let h = Holder { p: null, tag: 3 }
+    let q = h.p ?? Pt { x: 0, y: 0 }   // ERROR: coalesces the whole field
+    print("{q.x}")
+}
+
+//=== TEST CASE: embed_primitive_Generic ===
+struct Holder { embed n: int }
+
+fn main() {
+    let h = Holder { n: 1 }
+    print("{h.n}")
+}
+
+//=== TEST CASE: embed_collection_Generic ===
+struct Holder { embed xs: [int] }
+
+fn main() {
+    let h = Holder { xs: [1] }
+    print("{h.xs.len}")
+}
+
+//=== TEST CASE: embed_any_Generic ===
+struct Holder { embed a: any }
+
+fn main() {
+    let h = Holder { a: 1 }
+    print("{h.a}")
+}
+
+//=== TEST CASE: embed_enum_Generic ===
+enum Color { Red, Green }
+struct Holder { embed c: Color }
+
+fn main() {
+    let h = Holder { c: Color::Red }
+    print("{h.c}")
+}
+
+//=== TEST CASE: embed_generic_param_Generic ===
+// A generic param has no statically known leaves at the declaration.
+struct Holder<T> { embed t: T }
+
+fn main() {
+    let h: Holder<int> = Holder { t: 1 }
+    print("{h.t}")
+}
+
+//=== TEST CASE: embed_self_cycle_Generic ===
+struct Node { embed next: Node, v: int }
+
+fn main() {
+    print("unreachable")
+}
+
+//=== TEST CASE: embed_mutual_cycle_Generic ===
+struct A { embed b: B, v: int }
+struct B { embed a: A, w: int }
+
+fn main() {
+    print("unreachable")
+}
+
+//=== TEST CASE: direct_self_RecursiveValue ===
+//! expect: recursive value type: Node -> Node; use a reference or handle
+value Node { v: int, next: Node }
+
+fn main() {
+    print("unreachable")
+}
+
+//=== TEST CASE: nullable_self_RecursiveValue ===
+//! expect: recursive value type: Chain -> Chain; use a reference or handle
+value Chain { n: int, next: Chain? }
+
+fn main() {
+    print("unused")
+}
+
+//=== TEST CASE: nullable_self_read_only_RecursiveValue ===
+//! expect: recursive value type: Chain -> Chain
+value Chain { n: int, next: Chain?, xs: [int] }
+struct ChainHolder { c: Chain }
+
+fn main() {
+    let h = ChainHolder { c: Chain { n: 0, next: Chain { n: 1, next: null, xs: [] }, xs: [] } }
+    print(h.c.next?.n ?? -1)
+}
+
+//=== TEST CASE: two_type_cycle_RecursiveValue ===
+//! expect: recursive value type: A -> B -> A; use a reference or handle
+value A { b: B? }
+value B { a: A }
+
+fn main() {
+    print("unused")
+}
+
+//=== TEST CASE: three_type_cycle_RecursiveValue ===
+//! expect: recursive value type: P -> Q -> R -> P; use a reference or handle
+value P { q: Q }
+value Q { r: R? }
+value R { p: P? }
+
+fn main() {
+    print("unused")
+}
+
+//=== TEST CASE: generic_instantiation_RecursiveValue ===
+//! expect: recursive value type: Node -> Box<Node> -> Node; use a reference or handle
+value Box<T> { t: T }
+value Node { v: int, child: Box<Node>? }
+
+fn main() {
+    print("unused")
+}
+
+//=== TEST CASE: nested_generic_instantiation_RecursiveValue ===
+//! expect: recursive value type: Node -> Pair<int, Wrap<Node>> -> Node
+value Wrap<T> { inner: T? }
+value Pair<A, B> { a: A, b: B }
+value Node { p: Pair<int, Wrap<Node>> }
+
+fn main() {
+    print("unused")
+}
+
+//=== TEST CASE: generic_self_RecursiveValue ===
+//! expect: recursive value type: Tree -> Tree
+value Tree<T> { v: T, left: Tree<T>? }
+
+fn main() {
+    print("unused")
+}
+
+//=== TEST CASE: tuple_field_RecursiveValue ===
+//! expect: recursive value type: Node -> Node
+value Node { v: int, pair: (int, Node)? }
+
+fn main() {
+    print("unused")
+}
+
+//=== TEST CASE: newtype_RecursiveValue ===
+//! expect: recursive value type: Node -> NodeId -> Node
+newtype NodeId(Node)
+value Node { v: int, parent: NodeId? }
+
+fn main() {
+    print("unused")
+}
+
+//=== TEST CASE: struct_field_fn_Generic ===
+//! expect: Reserved field name `__fn` in struct `Sneaky`: `__fn`, `__ty`, and `__variant` are runtime marker keys
+struct Sneaky {
+    __fn: int,
+}
+
+fn main() {
+    let a = Sneaky { __fn: 1 }
+    print("{a.__fn}")
+}
+
+//=== TEST CASE: struct_field_ty_Generic ===
+//! expect: Reserved field name `__ty` in struct `Tagged`: `__fn`, `__ty`, and `__variant` are runtime marker keys
+struct Tagged {
+    __ty: string,
+}
+
+fn main() {
+    let a = Tagged { __ty: "x" }
+    print(a.__ty)
+}
+
+//=== TEST CASE: struct_field_variant_Generic ===
+//! expect: Reserved field name `__variant` in struct `Var`: `__fn`, `__ty`, and `__variant` are runtime marker keys
+struct Var {
+    __variant: int,
+}
+
+fn main() {
+    let a = Var { __variant: 2 }
+    print("{a.__variant}")
+}
+
+//=== TEST CASE: value_struct_field_fn_Generic ===
+//! expect: Reserved field name `__fn` in struct `VSneaky`: `__fn`, `__ty`, and `__variant` are runtime marker keys
+value VSneaky {
+    __fn: int,
+}
+
+fn main() {
+    let a = VSneaky { __fn: 1 }
+    print("{a.__fn}")
+}
+
+//=== TEST CASE: value_struct_field_ty_Generic ===
+//! expect: Reserved field name `__ty` in struct `VTagged`: `__fn`, `__ty`, and `__variant` are runtime marker keys
+value VTagged {
+    __ty: int,
+}
+
+fn main() {
+    let a = VTagged { __ty: 3 }
+    print("{a.__ty}")
+}
+
+//=== TEST CASE: value_struct_field_variant_Generic ===
+//! expect: Reserved field name `__variant` in struct `VVar`: `__fn`, `__ty`, and `__variant` are runtime marker keys
+value VVar {
+    __variant: int,
+}
+
+fn main() {
+    let a = VVar { __variant: 2 }
+    print("{a.__variant}")
+}
+
+//=== TEST CASE: enum_record_variant_field_variant_Generic ===
+//! expect: Reserved field name `__variant` in variant `A` of enum `E`: `__fn`, `__ty`, and `__variant` are runtime marker keys
+enum E {
+    A { __variant: int },
+}
+
+fn main() {
+    let e = E::A { __variant: 1 }
+    print("ok")
+}
+
+//=== TEST CASE: enum_record_variant_field_fn_Generic ===
+//! expect: Reserved field name `__fn` in variant `B` of enum `F`: `__fn`, `__ty`, and `__variant` are runtime marker keys
+enum F {
+    B { __fn: int },
+}
+
+fn main() {
+    let f = F::B { __fn: 1 }
+    print("ok")
+}
+
+//=== TEST CASE: enum_record_variant_field_ty_Generic ===
+//! expect: Reserved field name `__ty` in variant `C` of enum `G`: `__fn`, `__ty`, and `__variant` are runtime marker keys
+enum G {
+    C { __ty: int },
+}
+
+fn main() {
+    let g = G::C { __ty: 1 }
+    print("ok")
+}
+
+//=== TEST CASE: direct_scalar_abi_call_Generic ===
+value V2 { x: float, y: float }
+value Bad { tl__x: float, tl: V2 }
+
+@scalar_abi inline(lua) fn ambiguous(r: Bad) -> float = """
+    return r__tl__x
+"""
+
+fn main() { let _ = ambiguous(Bad { tl__x: 1.0, tl: V2 { x: 2.0, y: 3.0 } }) }
+
+//=== TEST CASE: through_a_fn_value_Generic ===
+nobox value P { x: float, y: float }
+nobox value Bad { tl: P, tl__x: float }
+
+@scalar_abi inline(lua) fn probe(r: Bad) -> float = """
+    return r__tl__x * 1.0 + r__tl__y * 10.0
+"""
+
+fn apply(f: (Bad) -> float, r: Bad) -> float { return f(r) }
+
+fn main() {
+    let r = Bad { tl: P { x: 1.0, y: 2.0 }, tl__x: 900.0 }
+    print("{apply(probe, r)}")
+}
+
+//=== TEST CASE: sibling_param_collides_with_a_leaf_Generic ===
+// The value declaration is CLEAN here -- `V2 { x, y }` has no ambiguity of its
+// own. The collision is between the leaf `r.x` (emitted `r__x`) and the sibling
+// param literally named `r__x`, so only a signature-level check sees it. Emits
+// `collide(r__x, r__y, r__x)` and returns 103 instead of 5 when unchecked.
+value V2 { x: float, y: float }
+
+@scalar_abi inline(lua) fn collide(r: V2, r__x: float) -> float = """
+    return r__x + r__y
+"""
+
+fn main() { print("{collide(V2 { x: 2.0, y: 3.0 }, 100.0)}") }
+
+//=== TEST CASE: sibling_param_collides_with_a_nested_leaf_Generic ===
+// The same class one level deeper: the sibling param spells out a NESTED leaf.
+value V2 { x: float, y: float }
+value Rect { tl: V2, br: V2 }
+
+@scalar_abi inline(lua) fn collide2(r: Rect, r__tl__x: float) -> float = """
+    return r__tl__x + r__br__y
+"""
+
+fn main() { print("{collide2(Rect { tl: V2 { x: 1.0, y: 2.0 }, br: V2 { x: 3.0, y: 4.0 } }, 9.0)}") }
+
+//=== TEST CASE: deep_nesting_collision_Generic ===
+// Two levels down: `a.b.c` and a flat `a__b__c` join alike.
+value Inner { c: float }
+value Mid { b: Inner }
+value Deep { a: Mid, a__b__c: float }
+
+@scalar_abi inline(lua) fn deep(r: Deep) -> float = """
+    return r__a__b__c
+"""
+
+fn main() { let _ = deep(Deep { a: Mid { b: Inner { c: 1.0 } }, a__b__c: 2.0 }) }

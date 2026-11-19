@@ -1,0 +1,667 @@
+//=== TEST CASE: duplicate_wildcard_DuplicatePattern ===
+//! expect: duplicate wildcard pattern in match expression - only one unguarded `_` arm is allowed
+fn test() -> int {
+    let t = 1
+    match t {
+        0 => 10
+        1 => 20
+        _ => 30
+        _ => 40  // Duplicate wildcard - should be an error!
+    }
+}
+
+fn main() {
+    test()
+}
+
+//=== TEST CASE: multiple_duplicate_wildcards_DuplicatePattern ===
+//! expect: duplicate wildcard pattern in match expression - only one unguarded `_` arm is allowed
+fn test() -> int {
+    let t = 3
+    match t {
+        0 => 10
+        _ => 20
+        1 => 30
+        _ => 40  // Second wildcard - should be an error!
+        _ => 50  // Third wildcard - but error should trigger on the second one
+    }
+}
+
+fn main() {
+    test()
+}
+
+//=== TEST CASE: missing_plain_variant_NonExhaustive ===
+//! expect: Non-exhaustive match expression. Missing patterns: Blue
+enum Color { Red, Green, Blue }
+
+fn main() {
+    let color = Color::Red
+    let name = match color {
+        Color::Red => "red",
+        Color::Green => "green"
+    }
+    print(name)
+}
+
+//=== TEST CASE: missing_generic_variant_NonExhaustive ===
+//! expect: Non-exhaustive match expression. Missing patterns: None
+enum Option<T> {
+    None,
+    Some(T),
+}
+
+fn main() {
+    let opt: Option<int> = Option::Some(42)
+    let value = match opt {
+        Option::Some(n) => n
+    }
+    print("{value}")
+}
+
+//=== TEST CASE: single_range_NonExhaustive ===
+//! expect: Non-exhaustive match expression. Missing patterns: `..=0`, `11..`
+fn main() {
+    let x = 50
+    let result = match x {
+        1..=10 => "small"
+    }
+    print(result)
+}
+
+//=== TEST CASE: range_gap_NonExhaustive ===
+//! expect: Missing patterns: `6`
+fn main() {
+    let x = 6
+    let result = match x {
+        ..=0 => "low"
+        1..=5 => "mid"
+        7.. => "high"
+    }
+    print(result)
+}
+
+//=== TEST CASE: exclusive_end_gap_NonExhaustive ===
+//! expect: Missing patterns: `5`
+fn main() {
+    let x = 5
+    let result = match x {
+        ..=-1 => "negative"
+        0..5 => "small"
+        6.. => "large"
+    }
+    print(result)
+}
+
+//=== TEST CASE: overlapping_ranges_NonExhaustive ===
+//! expect: Missing patterns: `..=-1`, `21..`
+fn main() {
+    let x = 30
+    let result = match x {
+        0..=10 => "a"
+        5..=20 => "b"
+    }
+    print(result)
+}
+
+//=== TEST CASE: guarded_arm_does_not_cover_NonExhaustive ===
+//! expect: Missing patterns: `1..`
+fn main() {
+    let x = 3
+    let result = match x {
+        ..=0 => "low"
+        n if n > 0 => "high"
+    }
+    print(result)
+}
+
+//=== TEST CASE: guarded_range_does_not_cover_NonExhaustive ===
+//! expect: Missing patterns: `..=-1`
+fn main() {
+    let x = -3
+    let flag = false
+    let result = match x {
+        ..=-1 if flag => "negative"
+        0.. => "non-negative"
+    }
+    print(result)
+}
+
+//=== TEST CASE: literals_only_NonExhaustive ===
+//! expect: Missing patterns: `..=-1`, `3..`
+fn main() {
+    let x = 7
+    let result = match x {
+        0 => "zero"
+        1 => "one"
+        2 => "two"
+    }
+    print(result)
+}
+
+//=== TEST CASE: negative_ranges_NonExhaustive ===
+//! expect: Missing patterns: `0`
+fn main() {
+    let x = 0
+    let result = match x {
+        ..=-10 => "very negative"
+        -9..=-1 => "negative"
+        1.. => "positive"
+    }
+    print(result)
+}
+
+//=== TEST CASE: or_pattern_gap_NonExhaustive ===
+//! expect: Missing patterns: `2`
+fn main() {
+    let x = 2
+    let result = match x {
+        ..=1 | 3.. => "not two"
+    }
+    print(result)
+}
+
+//=== TEST CASE: statement_match_NonExhaustive ===
+//! expect: Missing patterns: `..=0`, `2..`
+fn main() {
+    let x = 4
+    match x {
+        1 => print("one")
+    }
+}
+
+//=== TEST CASE: tuple_int_columns_NonExhaustive ===
+//! expect: Non-exhaustive match expression. Missing patterns:
+//! expect: `(1.., 5..)`
+fn f(a: int, b: int) -> int {
+    return match (a, b) {
+        (0, x) => x,
+        (n, 1..5) => n,
+    }
+}
+
+fn main() {
+    print(f(1, 7))
+}
+
+//=== TEST CASE: tuple_bools_NonExhaustive ===
+//! expect: Non-exhaustive match expression. Missing patterns: `(true, false)`
+fn f(a: bool, b: bool) -> int {
+    return match (a, b) {
+        (true, true) => 1,
+        (false, _) => 2,
+    }
+}
+
+fn main() {
+    print(f(true, false))
+}
+
+//=== TEST CASE: tuple_enums_NonExhaustive ===
+//! expect: Non-exhaustive match expression. Missing patterns: `(C::R, C::G)`
+enum C { R, G }
+
+fn f(a: C, b: C) -> int {
+    return match (a, b) {
+        (C::R, C::R) => 1,
+        (C::G, _) => 2,
+    }
+}
+
+fn main() {
+    print(f(C::R, C::G))
+}
+
+//=== TEST CASE: enum_payload_int_NonExhaustive ===
+//! expect: Non-exhaustive match expression. Missing patterns: `Option::Some(..=-1)`, `Option::Some(1..)`
+enum Option<T> { None, Some(T) }
+
+fn f(o: Option<int>) -> int {
+    return match o {
+        Option::Some(0) => 1,
+        Option::None => 2,
+    }
+}
+
+fn main() {
+    print(f(Option::Some(5)))
+}
+
+//=== TEST CASE: enum_tuple_payload_NonExhaustive ===
+//! expect: Missing patterns: `Shape::Rect(..=-1, ..=0)`, `Shape::Rect(1.., ..=0)`
+enum Shape { Circle(int), Rect(int, int) }
+
+fn f(s: Shape) -> int {
+    return match s {
+        Shape::Circle(r) => r,
+        Shape::Rect(0, h) => h,
+        Shape::Rect(w, 1..) => w,
+    }
+}
+
+fn main() {
+    print(f(Shape::Rect(3, -1)))
+}
+
+//=== TEST CASE: nested_tuple_NonExhaustive ===
+//! expect: Missing patterns: `((..=-1, true), _)`, `((1.., true), _)`
+fn f(p: ((int, bool), int)) -> int {
+    return match p {
+        ((0, true), _) => 1,
+        ((_, false), _) => 2,
+    }
+}
+
+fn main() {
+    print(f(((1, true), 0)))
+}
+
+//=== TEST CASE: enum_in_enum_payload_NonExhaustive ===
+//! expect: Missing patterns: `Outer::Wrap(Inner::B)`
+enum Inner { A, B }
+enum Outer { Empty, Wrap(Inner) }
+
+fn f(o: Outer) -> int {
+    return match o {
+        Outer::Empty => 0,
+        Outer::Wrap(Inner::A) => 1,
+    }
+}
+
+fn main() {
+    print(f(Outer::Wrap(Inner::B)))
+}
+
+//=== TEST CASE: bool_NonExhaustive ===
+//! expect: Non-exhaustive match expression. Missing patterns: `false`
+fn f(a: bool) -> int {
+    return match a {
+        true => 1,
+    }
+}
+
+fn main() {
+    print(f(false))
+}
+
+//=== TEST CASE: string_literals_NonExhaustive ===
+//! expect: Non-exhaustive match expression. Missing patterns: `_`
+fn f(s: string) -> int {
+    return match s {
+        "a" => 1,
+        "b" => 2,
+    }
+}
+
+fn main() {
+    print(f("c"))
+}
+
+//=== TEST CASE: float_literals_NonExhaustive ===
+//! expect: Non-exhaustive match expression. Missing patterns: `_`
+fn f(x: float) -> int {
+    return match x {
+        1.0 => 1,
+        2.0 => 2,
+    }
+}
+
+fn main() {
+    print(f(3.0))
+}
+
+//=== TEST CASE: string_in_tuple_NonExhaustive ===
+//! expect: Missing patterns: `(_, false)`
+fn f(s: string, b: bool) -> int {
+    return match (s, b) {
+        ("a", _) => 1,
+        (_, true) => 2,
+    }
+}
+
+fn main() {
+    print(f("z", false))
+}
+
+//=== TEST CASE: record_variant_field_NonExhaustive ===
+//! expect: Missing patterns: `Shape::Circle { r: ..=-1 }`, `Shape::Circle { r: 1.. }`
+enum Shape { Circle { r: int }, Square { s: int } }
+
+fn f(s: Shape) -> int {
+    return match s {
+        Shape::Circle { r: 0 } => 0,
+        Shape::Square { s } => s,
+    }
+}
+
+fn main() {
+    print(f(Shape::Circle { r: 2 }))
+}
+
+//=== TEST CASE: struct_field_NonExhaustive ===
+//! expect: Missing patterns: `Point { x: ..=-1, .. }`, `Point { x: 1.., .. }`
+struct Point { x: int, y: int }
+
+fn f(p: Point) -> int {
+    return match p {
+        Point { x: 0, y } => y,
+    }
+}
+
+fn main() {
+    print(f(Point { x: 1, y: 2 }))
+}
+
+//=== TEST CASE: nullable_NonExhaustive ===
+//! expect: Missing patterns: `null`, `..=4`, `6..`
+fn f(a: int?) -> int {
+    return match a {
+        5 => 1,
+    }
+}
+
+fn main() {
+    print(f(null))
+}
+
+//=== TEST CASE: guarded_tuple_arm_does_not_cover_NonExhaustive ===
+//! expect: Missing patterns: `(false, _)`
+fn f(a: bool, b: int) -> int {
+    return match (a, b) {
+        (true, _) => 1,
+        (false, n) if n > 0 => 2,
+    }
+}
+
+fn main() {
+    print(f(false, -1))
+}
+
+//=== TEST CASE: or_pattern_of_tuples_NonExhaustive ===
+//! expect: Missing patterns: `(false, false)`, `(true, false)`
+fn f(a: bool, b: bool) -> int {
+    return match (a, b) {
+        (true, true) | (false, true) => 1,
+    }
+}
+
+fn main() {
+    print(f(true, false))
+}
+
+//=== TEST CASE: missing_patterns_capped_NonExhaustive ===
+//! expect: Missing patterns: `..=-1`, `1`, `3`, `5`, `7`, `9`, `11`, `13`, `15`, `17` and more
+fn f(x: int) -> int {
+    return match x {
+        0 => 0, 2 => 2, 4 => 4, 6 => 6, 8 => 8, 10 => 10,
+        12 => 12, 14 => 14, 16 => 16, 18 => 18, 20 => 20,
+    }
+}
+
+fn main() {
+    print(f(1))
+}
+
+//=== TEST CASE: struct_destructure_unknown_field_Generic ===
+struct P { x: int }
+
+fn f(p: P) -> int {
+    //! expect: struct `P` has no field `z`
+    match p {
+        P { z } => return z
+    }
+    return 0
+}
+
+fn main() { print(f(P { x: 1 })) }
+
+//=== TEST CASE: record_variant_other_variants_field_Generic ===
+enum E { A { a: int }, B { b: int } }
+
+fn g(e: E) -> int {
+    //! expect: record variant `A` has no field `b`
+    match e {
+        E::A { b } => return b,
+        E::B { b } => return b,
+    }
+    return 0
+}
+
+fn main() { print(g(E::A { a: 1 })) }
+
+//=== TEST CASE: unqualified_unknown_variant_rejected ===
+//! expect: enum `Choice` has no variant `Nope`
+enum Choice { A, B }
+
+fn f(c: Choice) -> int {
+    match c {
+        A => 1
+        Nope => 2   // ERROR: `Nope` is not a variant of `Choice`
+    }
+}
+
+fn main() {
+    print("{f(Choice::A)}")
+}
+
+//=== TEST CASE: if_let_variant_typo_Generic ===
+//! expect: has no variant `Rde`
+enum Color { Red, Green, Blue }
+fn main() {
+    let c = Color::Blue
+    if let Rde = c {
+        print("oops")
+    }
+}
+
+//=== TEST CASE: while_let_variant_typo_Generic ===
+//! expect: has no variant `Grene`
+enum Color { Red, Green, Blue }
+fn f(c: Color?) {
+    while let Grene = c {
+        break
+    }
+}
+fn main() {}
+
+//=== TEST CASE: let_variant_tag_is_refutable_Refutable ===
+//! expect: can fail
+enum Color { Red, Green, Blue }
+fn main() {
+    let c = Color::Blue
+    let Red = c
+}
+
+//=== TEST CASE: let_else_variant_typo_Generic ===
+//! expect: has no variant `Blu`
+enum Color { Red, Green, Blue }
+fn f(c: Color) -> int {
+    let Blu = c else {
+        return 0
+    }
+    1
+}
+fn main() {}
+
+//=== TEST CASE: comment_inside_pattern_Parse ===
+//! expect: a comment cannot appear inside a pattern
+struct P { x: int, y: int }
+fn main() {
+    let p = P { x: 1, y: 2 }
+    let P { x, /* mid */ y } = p
+    print(x + y)
+}
+
+//=== TEST CASE: unqualified_variant_arm_does_not_catch_all ===
+//! expect: Non-exhaustive match expression. Missing patterns: B
+enum Choice { A, B }
+
+fn f(c: Choice) -> int {
+    match c {
+        A => 1   // ERROR: `B` is uncovered; a bare `A` is a tag test, not a catch-all
+    }
+}
+
+fn main() {
+    print("{f(Choice::B)}")
+}
+
+//=== TEST CASE: non_exhaustive_empty_Generic ===
+// Empty match over a non-empty enum -> rejected.
+//! expect: Non-exhaustive match expression. Missing patterns: A, B
+enum E { A, B }
+fn f(e: E) -> int {
+    match e {
+    }
+    let r = 0
+    r
+}
+
+//=== TEST CASE: non_exhaustive_guarded_Generic ===
+// A guarded arm doesn't cover its variant -> A still missing -> rejected.
+//! expect: Non-exhaustive match expression. Missing patterns: A
+enum E { A, B }
+fn f(e: E, hot: bool) -> int {
+    match e {
+        E::A if hot => {}
+        E::B => {}
+    }
+    let r = 0
+    r
+}
+
+
+//=== TEST CASE: nullable_enum_missing_null_arm_Generic ===
+//! expect: null
+enum Sig { Idle, Num(int) }
+fn f(s: Sig?) -> int {
+    match s {
+        Sig::Idle => 0,
+        Sig::Num(x) => x,
+    }
+}
+fn main() {}
+
+//=== TEST CASE: match_arm_mismatch_Generic ===
+// arms whose bodies disagree are rejected.
+//! expect: type mismatch: expected `int`, found `string`
+enum Color { Red, Green, Blue }
+fn f(c: Color) -> int {
+    let r = match c {
+        Color::Red => 1,
+        _ => "no",
+    }
+    r
+}
+
+//=== TEST CASE: value_match_mismatched_fail_Generic ===
+//! expect: type mismatch: expected `int`, found `string`
+fn f() -> int {
+    let x = 1
+    let u = match x {
+        1 => 10,
+        _ => "s",
+    }
+    x
+}
+
+//=== TEST CASE: or_binding_rejected_Generic ===
+// Bindings in alternatives are rejected (rock's explicit v1 limitation).
+//! expect: or-patterns cannot bind variables, use `_` for payload
+enum E { A(int), B(int) }
+fn f(e: E) -> int {
+    match e { A(x) | B(x) => x }
+}
+
+//=== TEST CASE: or_mixed_literal_rejected_Generic ===
+// Mixed-type literal alternatives are rejected: a `string` literal cannot
+// coerce to the `int` scrutinee. (rock CURRENTLY accepts this -- a latent bug
+// where literal-pattern arms are not checked against the scrutinee type; bone
+// is correctly stricter. Flip only if rock's literal-pattern check is fixed.)
+//! expect: type mismatch: expected `int`, found `string`
+fn f(n: int) -> string {
+    match n { 1 | "two" => "x", _ => "y" }
+}
+
+//=== TEST CASE: tuple_on_non_tuple_rejected_Generic ===
+// A tuple pattern against a non-tuple scrutinee is rejected.
+//! expect: expected a tuple type in pattern, got int
+fn f(n: int) -> int {
+    match n { (a, b) => a, _ => 0 }
+}
+
+//=== TEST CASE: tuple_arity_mismatch_rejected_Generic ===
+// Element-count mismatch is rejected.
+//! expect: tuple pattern expected 2 elements, but got 3
+fn f(p: (int, int)) -> int {
+    match p { (a, b, c) => a, _ => 0 }
+}
+
+//=== TEST CASE: no_condition_chain_Parse ===
+//! expect: expected OpenCurly, got And
+// `while let` has no `&&` chains (unlike `if let`), so the scrutinee parses
+// at the same precedence as an if-let clause: the `&&` is a parse error,
+// never a silently bool-typed scrutinee.
+fn main() {
+    let v: int? = 1
+    while let x = v && x > 0 {
+        break
+    }
+}
+
+//=== TEST CASE: irrefutable_non_nullable_Useless ===
+//! expect: never runs
+// `while let` is `while true { let .. else { break } }`: a pattern that can
+// never miss over a non-nullable value is an infinite loop by construction.
+fn main() {
+    while let x = 5 {
+        print(x)
+        break
+    }
+}
+
+//=== TEST CASE: arity_mismatch_too_many_Generic ===
+//! expect: newtype pattern `UserId` takes exactly one argument
+newtype UserId(int)
+
+fn main() {
+    let user_id = UserId(42)
+    let UserId(a, b) = user_id
+    print(a)
+}
+
+//=== TEST CASE: nested_arity_mismatch_Generic ===
+//! expect: expected 2 subpatterns, but got 1
+enum Pair { Two(int, int) }
+newtype Wrap(Pair)
+
+fn main() {
+    let w = Wrap(Pair::Two(1, 2))
+    let Wrap(Two(x)) = w
+    print(x)
+}
+
+//=== TEST CASE: destructure_struct_with_newtype_Generic ===
+//! expect: cannot destructure this value with newtype pattern `UserId` - the value is not a newtype `UserId`
+newtype UserId(int)
+
+struct User {
+    id: int,
+    name: string,
+}
+
+fn main() {
+    let user = User { id: 42, name: "Alice" }
+    let UserId(x) = user
+    print(x)
+}
+
+//=== TEST CASE: destructure_int_with_newtype_Generic ===
+//! expect: cannot destructure this value with newtype pattern `UserId` - the value is not a newtype `UserId`
+newtype UserId(int)
+
+fn main() {
+    let x = 42
+    let UserId(id) = x
+    print(id)
+}

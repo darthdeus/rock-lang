@@ -1,0 +1,511 @@
+//=== TEST CASE: struct_to_struct_mismatch_MismatchedType ===
+struct Point { x: int, y: int }
+struct Color { r: int, g: int, b: int }
+
+// Error: Point parameter cannot have Color default
+fn bad_func(p: Point = Color { r: 255, g: 0, b: 0 }) {
+    print("This should not compile")
+}
+
+fn main() {
+    bad_func()
+}
+
+//=== TEST CASE: array_type_mismatch_MismatchedType ===
+// Error: int array parameter cannot have string array default
+fn bad_func(arr: [int] = ["hello", "world"]) {
+    print("This should not compile")
+}
+
+fn main() {
+    bad_func()
+}
+
+//=== TEST CASE: null_to_non_nullable_NullAssignmentToNonNullable ===
+struct Point { x: int, y: int }
+
+// Error: Cannot assign null to non-nullable type
+fn bad_func(p: Point = null) {
+    print("This should not compile")
+}
+
+fn main() {
+    bad_func()
+}
+
+//=== TEST CASE: function_type_default_mismatch_Generic ===
+fn dummy_int() -> int {
+    return 42
+}
+
+fn dummy_string() -> string {
+    return "hello"
+}
+
+// Error: Function returning string cannot be default for function returning int
+fn bad_func(f: fn() -> int = dummy_string) {
+    print(f())
+}
+
+fn main() {
+    bad_func()
+}
+
+//=== TEST CASE: enum_variant_default_mismatch_MismatchedType ===
+enum Result<T, E> {
+    Ok(T),
+    Err(E)
+}
+
+// Error: Result<string, string> cannot be default for Result<int, string>
+fn bad_func(r: Result<int, string> = Result::Ok("not an int")) {
+    print("This should not compile")
+}
+
+fn main() {
+    bad_func()
+}
+
+//=== TEST CASE: generic_struct_default_mismatch_MismatchedType ===
+struct Box<T> {
+    value: T
+}
+
+// Error: Box<string> cannot be default for Box<int>
+fn bad_func(b: Box<int> = Box { value: "hello" }) {
+    print("This should not compile")
+}
+
+fn main() {
+    bad_func()
+}
+
+//=== TEST CASE: string_to_int_mismatch_MismatchedType ===
+fn main() {
+    let x: int = "hello"  // This should fail - type mismatch
+}
+
+//=== TEST CASE: int_to_string_mismatch_MismatchedType ===
+fn main() {
+    let s: string = 42
+}
+
+//=== TEST CASE: array_element_mismatch_MismatchedType ===
+fn main() {
+    let numbers: [int] = [1, 2, "three"]
+}
+
+//=== TEST CASE: default_param_type_mismatch_MismatchedType ===
+// Error: int parameter cannot have string default
+fn bad_func(x: int = "hello") {
+    print(x)
+}
+
+fn main() {
+    bad_func()
+}
+
+//=== TEST CASE: nominal_mismatch_after_quiet_trial_Generic ===
+// A quiet failed trial (the nullable coerce) does not lose the reported types.
+//! expect: type mismatch: expected `Foo`, found `Bar`
+struct Foo { x: int }
+struct Bar { x: int }
+fn main() { let a: Foo? = Bar { x: 1 } }
+
+//=== TEST CASE: constructor_mismatch_Generic ===
+//! expect: type mismatch: expected `[int]`, found `Foo` (different type constructors)
+struct Foo { x: int }
+fn main() { let a: [int] = Foo { x: 1 } }
+
+//=== TEST CASE: heterogeneous_struct_spread_Generic ===
+struct Mixed {
+    name: string,
+    age: int,
+    score: float,
+}
+
+fn main() {
+    let person = Mixed { name: "Alice", age: 25, score: 95.5 }
+    let data: [int] = [...person, 100]
+}
+
+//=== TEST CASE: heterogeneous_tuple_spread_into_int_array_MismatchedType ===
+fn main() {
+    let floats = (1.0, 2.0, 3.0)
+    let data: [int] = [...floats, 4]
+}
+
+//=== TEST CASE: heterogeneous_tuple_spread_untyped_TypeMismatch ===
+// Every spread element must share the array element type.
+//! expect: type mismatch: expected `string`, found `int`
+fn main() {
+    let mixed = (1, "hello", 3.14)
+    let data = [...mixed]
+}
+
+//=== TEST CASE: tuple_unify_mismatch_Generic ===
+// element mismatch: (int, int) arg vs (int, bool) param fails at unify
+//! expect: type mismatch: expected `bool`, found `int`
+fn pair<T>(x: T) -> (T, T) { (x, x) }
+fn takes(p: (int, bool)) -> int { 5 }
+fn f() -> int { takes(pair(5)) }
+
+//=== TEST CASE: tuple_unify_length_mismatch_Generic ===
+// length mismatch: 2-tuple arg vs 3-tuple param fails at unify
+//! expect: Failed to unify (int, int) and (int, int, int), tuples of different length
+fn pair<T>(x: T) -> (T, T) { (x, x) }
+fn takes3(p: (int, int, int)) -> int { 5 }
+fn f() -> int { takes3(pair(5)) }
+
+//=== TEST CASE: tuple_index_oob_Generic ===
+// out-of-bounds index on a 2-tuple must error
+//! expect: tuple index 2 out of bounds (len 2)
+fn f() -> int {
+    let t = (1, true)
+    let x = t.2
+    5
+}
+
+//=== TEST CASE: tuple_index_non_tuple_Generic ===
+// indexing a non-tuple must error
+//! expect: cannot index a non-tuple type int
+fn f() -> int {
+    let y = 5
+    let x = y.0
+    5
+}
+
+//=== TEST CASE: negative_tuple_index ===
+//! expect: must be followed by an identifier or integer
+fn main() {
+    let t = (1, 2)
+    print(t.-1)   // ERROR: field access `.` must be followed by an identifier or integer
+}
+
+//=== TEST CASE: negative_safe_navigation_index ===
+//! expect: expected CloseParen
+fn main() {
+    let t: (int, int)? = (1, 2)
+    print(t?.-1)   // ERROR: expected CloseParen, got Int(-1)
+}
+
+//=== TEST CASE: index_array_bad_index_Generic ===
+// a non-int index into an array must fail
+//! expect: type mismatch: expected `int`, found `bool`
+fn f() -> int {
+    let xs = [1, 2, 3]
+    let x = xs[true]
+    5
+}
+
+//=== TEST CASE: index_map_bad_key_Generic ===
+// a wrong key type into a map must fail
+//! expect: type mismatch: expected `string`, found `int`
+fn f(m: Map<string, int>) -> int {
+    let v = m[5]
+    5
+}
+
+//=== TEST CASE: index_non_indexable_Generic ===
+// indexing a non-indexable type must fail
+//! expect: cannot index into type int
+fn f() -> int {
+    let y = 5
+    let x = y[0]
+    5
+}
+
+//=== TEST CASE: array_literal_heterogeneous_Generic ===
+// Array literal elements unify: int and bool do not.
+//! expect: type mismatch: expected `bool`, found `int`
+fn f() -> int {
+    let xs = [1, true]
+    5
+}
+
+//=== TEST CASE: array_int_to_float_rejected_MismatchedType ===
+//! expect: type mismatch: expected `float`, found `int`
+fn g() -> int {
+    let xs: [int] = [1, 2, 3]
+    let ys: [float] = xs
+    ys.len()
+}
+
+//=== TEST CASE: struct_missing_type_args_Generic ===
+//! expect: Generic type `GenericStruct` requires 1 type argument(s)
+struct GenericStruct<T> {
+    value: T
+}
+
+fn main() {
+    let x: GenericStruct = GenericStruct { value: 42 }
+    print(x.value)
+}
+
+//=== TEST CASE: enum_missing_type_args_Generic ===
+//! expect: Generic type `GenericEnum` requires 1 type argument(s)
+enum GenericEnum<T> {
+    Some(T),
+    None
+}
+
+fn main() {
+    let x: GenericEnum = GenericEnum::Some(42)
+    print("test")
+}
+
+//=== TEST CASE: entity_missing_type_args_Generic ===
+//! expect: Generic type `Entity` requires 1 type argument(s)
+fn main() {
+    let e: Entity = entity_new(arena_new(), 0, 0)
+    print("test")
+}
+
+//=== TEST CASE: arena_missing_type_args_Generic ===
+//! expect: Generic type `Arena` requires 1 type argument(s)
+fn main() {
+    let a: Arena = arena_new()
+    print("test")
+}
+
+//=== TEST CASE: function_param_missing_type_args_Generic ===
+//! expect: Generic type `Entity` requires 1 type argument(s)
+fn buggy_entity_equals(a: Entity, b: Entity) -> bool {
+    return true
+}
+
+fn main() {
+    print("test")
+}
+
+//=== TEST CASE: entity_invariance_MismatchedType ===
+//! expect: type mismatch: expected `float`, found `int`
+fn main() {
+    let arena: Arena<int> = arena_new()
+    let int_entity: Entity<int> = entity_new(arena, 1, 0)
+    // Entity<T> is invariant: Entity<int> is NOT an Entity<float>,
+    // even though a bare int widens to float.
+    let float_entity: Entity<float> = int_entity
+}
+
+//=== TEST CASE: custom_struct_invariance_MismatchedType ===
+//! expect: type mismatch: expected `float`, found `int`
+struct Container<T> {
+    item: T
+}
+
+fn process_float_container(c: Container<float>) {}
+
+fn main() {
+    let int_container: Container<int> = Container { item: 5 }
+    // Container<T> invariant: Container<int> is NOT a Container<float>.
+    process_float_container(int_container)
+}
+
+//=== TEST CASE: too_few_args_bare_Generic ===
+//! expect: Generic type `P` requires at least 1 type argument(s)
+struct P<T, U = int> {
+    a: T,
+    b: U,
+}
+
+fn main() {
+    let p: P = P { a: 1, b: 2 }
+}
+
+//=== TEST CASE: too_many_args_Generic ===
+//! expect: Generic type `P` expects 1 to 2 type argument(s), found 3
+struct P<T, U = int> {
+    a: T,
+    b: U,
+}
+
+fn main() {
+    let p: P<int, int, int> = P { a: 1, b: 2 }
+}
+
+//=== TEST CASE: non_trailing_default_Generic ===
+//! expect: type parameter `B` without a default follows defaulted `A`; defaults must be trailing
+struct Bad<A = int, B> {
+    a: A,
+    b: B,
+}
+
+fn main() {
+}
+
+//=== TEST CASE: fn_generic_default_Generic ===
+//! expect: default type params are not supported on fn generics
+fn f<T = int>(x: T) -> T {
+    x
+}
+
+fn main() {
+    f(1)
+}
+
+//=== TEST CASE: sibling_ref_default_Generic ===
+//! expect: default for type parameter `U` may not reference sibling type parameter `T`
+struct S<T, U = T> {
+    a: T,
+    b: U,
+}
+
+fn main() {
+}
+
+//=== TEST CASE: unsupported_shape_default_Generic ===
+//! expect: unsupported default for type parameter `U` on a struct: only builtin types and bare type names are supported
+struct S<T, U = [int]> {
+    a: T,
+    b: U,
+}
+
+fn main() {
+}
+
+//=== TEST CASE: unknown_name_default_Generic ===
+//! expect: `Nope` did not resolve to any definition
+struct S<T, U = Nope> {
+    a: T,
+    b: U,
+}
+
+fn main() {
+}
+
+//=== TEST CASE: hole_bound_to_nullable_generic_result ===
+//! expect: would contain itself
+fn create<T>() -> T? {
+    return null
+}
+
+fn main() {
+    let n: ? = create()   // ERROR: cannot infer a type
+}
+
+//=== TEST CASE: nested_array_param_TooDeep ===
+//! expect: nested too deeply
+fn f(x: [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[int]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]) {}
+
+fn main() {}
+
+//=== TEST CASE: nested_array_global_TooDeep ===
+//! expect: nested too deeply
+global g: [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[int]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]] = []
+
+fn main() {}
+
+//=== TEST CASE: vec_unknown_field_fail_Generic ===
+//! expect: struct `Vec` has no field `nope`
+fn f(v: [int]) -> int {
+    v.nope
+}
+
+//=== TEST CASE: vec2_component_out_of_arity_Rejected ===
+fn main() {
+    let p = v(1.0, 2.0)
+    let q = p.xz   // ERROR: Vec2 has no z component
+    print("{q.x}")
+}
+
+//=== TEST CASE: vec3_w_component_Rejected ===
+fn main() {
+    let p = v(1.0, 2.0, 3.0)
+    let q = p.xw   // ERROR: Vec3 has no w component
+    print("{q.x}")
+}
+
+//=== TEST CASE: mixed_alphabet_Rejected ===
+fn main() {
+    let c = v(1.0, 2.0, 3.0, 4.0)
+    let q = c.xg   // ERROR: mixed swizzle alphabets
+    print("{q.x}")
+}
+
+//=== TEST CASE: swizzle_assignment_Rejected ===
+fn main() {
+    let p = v(1.0, 2.0)
+    p.yx = v(3.0, 4.0)   // ERROR: swizzles are read-only
+}
+
+//=== TEST CASE: swizzle_compound_assignment_Rejected ===
+fn main() {
+    let p = v(1.0, 2.0)
+    p.xy += v(1.0, 1.0)   // ERROR: swizzles are read-only
+}
+
+//=== TEST CASE: swizzle_name_on_non_vec_struct_Rejected ===
+struct Foo { x: float }
+
+fn main() {
+    let f = Foo { x: 1.0 }
+    let q = f.yx   // ERROR: no such field on Foo
+    print("{q}")
+}
+
+//=== TEST CASE: too_long_swizzle_Rejected ===
+fn main() {
+    let p = v(1.0, 2.0)
+    let q = p.xyxyx   // ERROR: swizzles are at most 4 components
+    print("{q}")
+}
+
+//=== TEST CASE: vec_of_tuples_dot0_rejected_Generic ===
+// `[(A,B)].0` used to auto-project to `[A]` (map .0 over the vec). That
+// magic was removed -- a tuple index applies to a tuple/newtype, not a
+// vec of them. The explicit form is `pairs.map(_.0)`.
+fn test() -> int {
+    let pairs: [(int, string)] = [(1, "a"), (2, "b")]
+    let firsts = pairs.0  // ERROR: Expected tuple or newtype, found [(int, string)]
+    vec_len(firsts)
+}
+
+fn main() { let _ = test() }
+
+//=== TEST CASE: newtype_no_base_coercion_Generic ===
+// The wrapped base type does not implicitly become the newtype.
+//! expect: type mismatch: expected `UserId`, found `int`
+newtype UserId(int)
+fn f() -> int {
+    let bad: UserId = 5
+    0
+}
+
+//=== TEST CASE: newtype_construct_wrong_arg_Generic ===
+// Construction arg must match the wrapped type.
+//! expect: type mismatch: expected `int`, found `string`
+newtype UserId(int)
+fn f() -> int {
+    let id = UserId("nope")
+    0
+}
+
+//=== TEST CASE: map_key_value_conflict_TypeMismatch ===
+// Map<T, T> requires the key and value positions to bind the same T;
+// Map<int, string> binds T to two different types.
+//! expect: type mismatch: expected `int`, found `string`
+newtype Diag<T>(Map<T, T>)
+
+fn main() {
+    let m: Map<int, string> = map_new()
+    m[1] = "x"
+    let d = Diag(m)
+}
+
+//=== TEST CASE: non_app_arg_for_app_pattern_TypeMismatch ===
+// The pattern is Entity<T>; a plain int cannot match a type application.
+//! expect: type mismatch: expected `Entity<T>`, found `int`
+newtype Wrap<T>(Entity<T>)
+
+fn main() {
+    let w = Wrap(42)
+}
+
+//=== TEST CASE: multi_field_newtype_def_rejected ===
+//! expect: a newtype wraps exactly one type
+newtype Bad(int, string)
+
+fn main() {
+    print("never constructed")
+}

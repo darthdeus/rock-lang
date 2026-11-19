@@ -271,4 +271,4 @@ fn test_g_used_as_map_key() {
 }
 
 // Rejected unifications are in
-// tests/errors/newtypes/generic_unification.rock.err.
+// tests/errors/types.rock.err.

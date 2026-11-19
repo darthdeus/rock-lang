@@ -5,8 +5,7 @@
 // -- Projection --
 //
 // `embed`: the LEGAL half of projection-only -- everything that stays
-// leaf-wise. The rejection matrix is tests/errors/embed_projection_only.rock.err
-// and tests/errors/embed_site_legality.rock.err.
+// leaf-wise. The rejection matrix is tests/errors/structs.rock.err.
 //
 // This first section checks projection semantics. Later sections exercise
 // physical layout and reflection, including an explicitly inverted sentinel.

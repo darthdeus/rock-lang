@@ -1,0 +1,706 @@
+//=== TEST CASE: plain_fn_without_a_body ===
+// a function body must be a block or an inline string, never absent
+//
+// `finish_fn_def` answered a missing body with `extern_body.unwrap_or(ExternC)`.
+// Only the `extern fn` caller passes `Some`, so every other bodyless form --
+// plain `fn`, `co fn`, `operator`, `inline(<backend>) fn` -- silently became an
+// extern C declaration that type-checked and then failed at RUNTIME with
+// "attempt to call global 'c' (a nil value)". The comment there claimed the
+// non-extern callers never reached it; they did.
+//
+// An `extern(lua) fn f() -> int` (no body, no `= "..."`) is still legal and is
+// covered positively in the extern suite -- this rejection is for the forms
+// that are NOT foreign declarations.
+fn c(x: int) -> int
+
+fn main() {
+    let _ = c(1)
+}
+
+//=== TEST CASE: free_syntax_does_not_see_field_Generic ===
+//! expect: `f` did not resolve to any definition
+struct S { f: fn() -> int }
+fn g() -> int {
+    let s = S { f: () => 42 }
+    f(s)
+}
+
+//=== TEST CASE: lambda_values_eq_Generic ===
+// `==`/`!=` on fn-typed values is rejected: capture-free lambdas
+// share one hoisted fn value and capturing lambdas become per-creation
+// records, so fn identity is representation-dependent and never
+// meaningful.
+// Comparing a nullable fn against `null` stays legal (refinement).
+fn mk() -> fn() -> int { return () => 42 }
+
+fn main() {
+    let a = mk()
+    let b = mk()
+    if a == b { print("same") }   // ERROR: fn identity comparison
+}
+
+//=== TEST CASE: lambda_values_noteq_Generic ===
+fn mk() -> fn() -> int { return () => 42 }
+
+fn main() {
+    let a = mk()
+    let b = mk()
+    if a != b { print("diff") }   // ERROR: fn identity comparison
+}
+
+//=== TEST CASE: named_fn_values_eq_Generic ===
+fn foo() -> int { return 1 }
+
+fn main() {
+    let a = foo
+    let b = foo
+    if a == b { print("same") }   // ERROR: fn identity comparison
+}
+
+//=== TEST CASE: nullable_fn_values_eq_Generic ===
+fn main() {
+    let a: (fn() -> int)? = null
+    let b: (fn() -> int)? = null
+    if a == b { print("same") }   // ERROR: fn identity comparison (nullable strips)
+}
+
+//=== TEST CASE: generic_eq_capture_free_fn_arg_Generic ===
+// comparing fn values THROUGH a generic wrapper is rejected at the
+// call site. `fn same<T>(a: T, b: T) -> bool { a == b }` type-checks
+// (the operands are `T`, not a fn type), but a call that binds `T` to a
+// fn type reaches an `==` on fn values -- whose identity is not
+// meaningful (a capture-free lambda is one shared hoisted fn; a
+// capturing lambda is a fresh record per creation). The direct ban is
+// `lambda_values_eq` above; this closes the
+// generic bypass at the call site (bone-semantic fn_identity).
+// Aliased operands and forwarding through another generic follow.
+fn same<T>(a: T, b: T) -> bool { return a == b }
+fn mk() -> fn() -> int { return () => 1 }
+
+fn main() {
+    if same(mk(), mk()) { print("same") }   // ERROR: fn identity via generic
+}
+
+//=== TEST CASE: generic_eq_capturing_fn_arg_Generic ===
+fn same<T>(a: T, b: T) -> bool { return a == b }
+fn mk2(x: int) -> fn() -> int { return () => x }
+
+fn main() {
+    if same(mk2(1), mk2(1)) { print("same") }   // ERROR: fn identity via generic
+}
+
+//=== TEST CASE: generic_neq_fn_arg_Generic ===
+fn diff<T>(a: T, b: T) -> bool { return a != b }
+fn mk() -> fn() -> int { return () => 1 }
+
+fn main() {
+    if diff(mk(), mk()) { print("diff") }   // ERROR: fn identity via generic
+}
+
+//=== TEST CASE: generic_eq_nullable_fn_arg_Generic ===
+fn same<T>(a: T, b: T) -> bool { return a == b }
+fn mk() -> (fn() -> int)? { return () => 1 }
+
+fn main() {
+    if same(mk(), mk()) { print("same") }   // ERROR: nullable-fn identity via generic
+}
+
+// Aliasing ONE operand does not escape: `x` infers as `T`.
+//=== TEST CASE: generic_eq_single_unannotated_alias_Generic ===
+fn same<T>(a: T, b: T) -> bool { let x = a; return x == b }
+fn mk() -> fn() -> int { return () => 1 }
+
+fn main() {
+    if same(mk(), mk()) { print("same") }   // ERROR: `x` is still a T operand
+}
+
+// ANNOTATED aliases are T-typed too. (The unannotated both-alias form:
+// `generic_eq_fn_arg_both_unannotated_alias` below.)
+//=== TEST CASE: generic_eq_annotated_both_alias_Generic ===
+fn same<T>(a: T, b: T) -> bool { let x: T = a; let y: T = b; return x == y }
+fn mk() -> fn() -> int { return () => 1 }
+
+fn main() {
+    if same(mk(), mk()) { print("same") }   // ERROR: annotated aliases stay T-typed
+}
+
+//=== TEST CASE: generic_eq_fn_arg_both_unannotated_alias_Generic ===
+// aliasing BOTH operands of a generic `==` through unannotated lets
+// does not hide the comparison. `let x = a` infers `x: T`, and the
+// generic fn-eq summary (bone-semantic fn_identity) reads each
+// operand's INFERRED type, not its declared one, so `x == y` still
+// compares `T` and a call instantiating `T` with a fn type is
+// rejected.
+fn same<T>(a: T, b: T) -> bool { let x = a; let y = b; return x == y }
+fn mk() -> fn() -> int { return () => 1 }
+
+fn main() {
+    if same(mk(), mk()) { print("same") }   // ERROR: aliases are still T-typed
+}
+
+//=== TEST CASE: generic_eq_fn_arg_call_operands_Generic ===
+fn mk_t<T>(x: T) -> T { return x }
+fn same<T>(a: T, b: T) -> bool { return mk_t(a) == mk_t(b) }
+fn mk() -> fn() -> int { return () => 1 }
+
+fn main() {
+    if same(mk(), mk()) { print("same") }   // ERROR: call operands infer as T
+}
+
+//=== TEST CASE: generic_eq_fn_arg_transitive_Generic ===
+// forwarding a generic into a callee that `==`-compares it is itself
+// a comparison. `outer<T>` instantiates `same`'s compared generic with
+// its own `T`, so the generic fn-eq summary (bone-semantic
+// fn_identity, a whole-program fixpoint after inference) marks
+// `outer`'s `T` compared too, and `outer(mk(), mk())` is rejected.
+fn same<T>(a: T, b: T) -> bool { return a == b }
+fn outer<T>(a: T, b: T) -> bool { return same(a, b) }
+fn mk() -> fn() -> int { return () => 1 }
+
+fn main() {
+    if outer(mk(), mk()) { print("same") }   // ERROR: fn identity two levels down
+}
+
+//=== TEST CASE: generic_eq_fn_arg_transitive_two_levels_Generic ===
+fn same<T>(a: T, b: T) -> bool { return a == b }
+fn mid<U>(a: U, b: U) -> bool { return same(a, b) }
+fn outer<V>(a: V, b: V) -> bool { return mid(a, b) }
+fn mk() -> fn() -> int { return () => 1 }
+
+fn main() {
+    if outer(mk(), mk()) { print("same") }   // ERROR: fn identity three levels down
+}
+
+//=== TEST CASE: generic_eq_fn_arg_mutual_recursion_Generic ===
+fn ping<T>(a: T, b: T, n: int) -> bool {
+    if n == 0 { return a == b }
+    return pong(a, b, n - 1)
+}
+fn pong<T>(a: T, b: T, n: int) -> bool { return ping(a, b, n) }
+fn mk() -> fn() -> int { return () => 1 }
+
+fn main() {
+    if pong(mk(), mk(), 2) { print("same") }   // ERROR: compared through a cycle
+}
+
+//=== TEST CASE: expression_bodied_fn ===
+// an `= <body>` function body must be a string literal
+//
+// `= <expr>` parsed the expression, THREW IT AWAY, and kept an empty inline
+// source -- so `fn c(x: int) -> int = x + 1` emitted `function c(x) return end`
+// and answered nil. The comment called it recovery from a malformed inline
+// body, but it ran on the ordinary path and produced a silently wrong program.
+//
+// Rock has no expression-bodied function form. If one is ever wanted, it is a
+// language decision with a lowering behind it, not a parser fallthrough.
+// Reproduces identically on `operator` and on the `Type.method` form.
+fn c(x: int) -> int = x + 1
+
+fn main() {
+    let _ = c(1)
+}
+
+//=== TEST CASE: call_non_fn_fail_Generic ===
+// Calling a fn-typed parameter (callback). `f(x)` where `f: fn(A) -> B` resolves
+// the callee to a LOCAL binding (not a top-level fn), checks each arg against A
+// (with coercion), and yields B. Needed for the higher-order stdlib fns
+// (map/filter/find/any/all/sort) whose Rock bodies invoke their fn params.
+// calling a non-function local is an error
+//! expect: Attempted to call a non-function type int
+fn f(x: int) -> int {
+    x(5)
+}
+
+//=== TEST CASE: call_fn_wrong_arity_fail_Generic ===
+// wrong arity calling a fn value
+//! expect: Expected 1 to 1 arguments in call to value of type fn(T) -> U, but got 2
+fn apply<T, U>(f: fn(T) -> U, x: T) -> U {
+    f(x, x)
+}
+
+//=== TEST CASE: nominal_mismatch_names_both_types_Generic ===
+//! expect: type mismatch: expected `Mob`, found `Data`
+struct Mob { x: int }
+struct Data { y: int }
+fn take_mob(m: Mob) -> int { return m.x }
+fn caller(d: Data) -> int { return take_mob(d) }
+
+//=== TEST CASE: field_called_as_method_with_free_fn_Generic ===
+// A same-named free fn makes this a failed UFCS call; the error names the
+// field called with `()`.
+//! expect: `cooldown` is a field of `Data` (type `float`), not a method -- remove the `()` to read the field
+struct Data { cooldown: float = 1.5 }
+struct Thing { id: int }
+fn make() -> Data { return Data { cooldown: 2.0 } }
+fn cooldown(t: Thing) -> float { return 9.0 }
+fn caller() -> float { return make().cooldown() }
+
+//=== TEST CASE: field_called_as_method_without_free_fn_Generic ===
+//! expect: `cooldown` is a field of `Data` (type `float`), not a method -- remove the `()` to read the field
+struct Data { cooldown: float = 1.5 }
+fn make() -> Data { return Data { cooldown: 2.0 } }
+fn caller() -> float { return make().cooldown() }
+
+//=== TEST CASE: no_overload_lists_candidates_Generic ===
+//! expect: No overload for `draw`
+//! expect: draw(a: A, tag: int) -> int
+//! expect: draw(b: B) -> int
+struct A { i: int }
+struct B { i: int }
+struct C { i: int }
+fn draw(a: A, tag: int) -> int { return 0 }
+fn draw(b: B) -> int { return 0 }
+fn main() {
+    let c = C { i: 0 }
+    let _ = draw(c)
+}
+
+//=== TEST CASE: ambiguous_overload_lists_tied_candidates_Generic ===
+// `two(T, int)` and `two(int, T)` each pay one bare-hole slot against
+// `(int, int)`, so neither ranks above the other.
+//! expect: Ambiguous overload for `two`
+//! expect: two(a: T, b: int) -> string
+//! expect: two(a: int, b: T) -> string
+fn two<T>(a: T, b: int) -> string { return "left" }
+fn two<T>(a: int, b: T) -> string { return "right" }
+fn main() {
+    let _ = two(1, 2)
+}
+
+//=== TEST CASE: rejected_bound_reason_is_surfaced_Generic ===
+// The only near miss is an `Iterator`-bounded candidate whose parameters fit
+// but whose bound does not; the error says why.
+//! expect: No overload for `wrap`
+//! expect: does not satisfy
+struct Multi { i: int }
+fn next(it: Multi) -> (bool, int, int) { return (false, 0, 0) }
+fn wrap<I: Iterator<T>, T>(x: I, n: int) -> int { return n }
+fn wrap(x: string, n: int) -> int { return n }
+fn main() {
+    let m = Multi { i: 0 }
+    let _ = wrap(m, 1)
+}
+
+//=== TEST CASE: overloaded_fn_value_is_ambiguous_Generic ===
+// Same-signature backend siblings collapse to one value; real overloads do not.
+//! expect: ambiguous fn-value reference `pick`
+fn pick(x: int) -> int { return x }
+fn pick(x: float) -> float { return x }
+fn use_it() -> int {
+    let g = pick
+    return g(1)
+}
+
+//=== TEST CASE: named_and_positional_for_one_parameter_Generic ===
+//! expect: Multiple values provided for parameter `a`
+fn two(a: int, b: int) -> int { a + b }
+fn main() { two(1, a: 2) }
+
+//=== TEST CASE: spread_field_names_no_parameter_Generic ===
+//! expect: spread field `c` names no parameter of the callee
+struct ABC { a: int, b: int, c: int }
+fn two(a: int, b: int) -> int { a + b }
+fn main() {
+    let p = ABC { a: 1, b: 2, c: 3 }
+    two(..p)
+}
+
+//=== TEST CASE: named_argument_before_spread_Generic ===
+//! expect: parameter `a` is given before the spread that also supplies it
+struct AB { a: int, b: int }
+fn two(a: int, b: int) -> int { a + b }
+fn main() {
+    let p = AB { a: 1, b: 2 }
+    two(a: 9, ..p)
+}
+
+//=== TEST CASE: two_spreads_supply_one_parameter_Generic ===
+//! expect: two spreads both supply parameter `a`
+struct AB { a: int, b: int }
+struct AC { a: int, c: int }
+fn three(a: int, b: int, c: int) -> int { a + b + c }
+fn main() {
+    let x = AB { a: 1, b: 2 }
+    let y = AC { a: 8, c: 3 }
+    three(..x, ..y)
+}
+
+//=== TEST CASE: default_param_below_floor_Generic ===
+// Below the required-arg floor: `a` has no default, so g() must be rejected.
+//! expect: Missing required argument for parameter `a`
+fn g(a: int, b: int = 5) -> int { a }
+fn h() -> int {
+    let r = g()
+    r
+}
+
+//=== TEST CASE: default_param_too_many_Generic ===
+// Above the total param count must still be rejected.
+//! expect: Too many positional arguments, expected at most 2
+fn g(a: int, b: int = 5) -> int { a }
+fn h() -> int {
+    let r = g(1, 2, 3)
+    r
+}
+
+//=== TEST CASE: param_default_type_mismatch_Generic ===
+//! expect: type mismatch: expected `int`, found `string`
+fn f(x: int = "oops") -> int {
+    return x
+}
+fn use_f() -> int {
+    let r = f()
+    return r
+}
+
+//=== TEST CASE: param_default_refs_param_Generic ===
+// Params are NOT in scope inside defaults (rock: "defaults are injected at
+// the call site and other params are not in scope"), so a default referencing
+// a sibling param is rejected...
+//! expect: `a` did not resolve to any definition
+fn f2(a: int = 1, b: int = a) -> int {
+    let r = b
+    return r
+}
+
+//=== TEST CASE: param_default_inline_lua_non_literal_rejected_Generic ===
+// A foreign function's default must be a literal: its Lua wrapper and Rock
+// call sites can only supply a literal, so `h: H = H { v: 3 }` would arrive
+// as nil when omitted.
+//! expect: default of `h` on a foreign function must be a literal
+struct H { v: int }
+inline(lua) fn lua_h(h: H = H { v: 3 }) -> int = "return h.v"
+fn use_lua_h() -> int {
+    let r = lua_h()
+    return r
+}
+
+//=== TEST CASE: param_default_extern_ffi_non_literal_rejected_Generic ===
+//! expect: default of `n` on a foreign function must be a literal
+fn base() -> int {
+    return 4
+}
+extern(ffi, "c") fn ffi_n(n: int = base()) -> int
+fn use_ffi_n() -> int {
+    let r = ffi_n()
+    return r
+}
+
+//=== TEST CASE: named_args_unknown_rejected_Generic ===
+// Unknown param name is rejected.
+//! expect: unknown parameter `nope`
+fn g(a: int) -> int { a }
+fn f() -> int {
+    g(nope: 1)
+}
+
+//=== TEST CASE: unknown_named_param_fail_Generic ===
+// A named arg matching no parameter on ANY candidate must be rejected (the bug
+// silently accepted it as positional whenever the arity happened to line up).
+//! expect: No overload for `draw` with argument types (Image, int)
+struct Image { w: int }
+fn draw(image: Image) -> int { 0 }
+fn draw(image: Image, x: int) -> int { 1 }
+fn caller(img: Image) -> int {
+    draw(img, nope: 5)
+}
+
+//=== TEST CASE: duplicate_positional_and_named_fail_Generic ===
+// The same parameter supplied both positionally and by name must be rejected.
+//! expect: No overload for `f` with argument types (int, int, int)
+fn f(a: int, b: int = 0) -> int { a }
+fn f(a: int, b: int = 0, c: int = 0) -> int { a }
+fn caller() -> int {
+    f(1, 2, b: 3)
+}
+
+//=== TEST CASE: string_does_not_fit_nullable_float_fail_Generic ===
+// Fitting a nullable param through its inner type must not widen what fits:
+// a string still fits no `float?` candidate.
+//! expect: No overload for `label` with argument types (string, V2, float, string)
+struct Font { id: int }
+struct V2 { x: float }
+fn label(font: Font, text: string, x: float) -> int { 0 }
+fn label(text: string, pos: V2, size: float = 1.0, duration: float? = null) -> int { 1 }
+fn caller(p: V2) -> int {
+    label("hi", p, 8.0, duration: "soon")
+}
+
+//=== TEST CASE: spread_unmatched_field_Generic ===
+// Rule 2: every field of the spread struct must name a callee param.
+struct ABC { a: int, b: int, c: int }
+
+fn takes_ab(a: int, b: int) -> int { a + b }
+
+fn main() {
+    let p = ABC { a: 1, b: 2, c: 3 }
+    print(takes_ab(..p))   // ERROR: field `c` names no parameter
+}
+
+//=== TEST CASE: spread_named_before_spread_collision_Generic ===
+// Rule 4: an explicit named arg BEFORE a spread that also supplies it errors.
+struct AB { a: int, b: int }
+
+fn takes_ab2(a: int, b: int) -> int { a + b }
+
+fn main() {
+    let p = AB { a: 1, b: 2 }
+    print(takes_ab2(a: 9, ..p))   // ERROR: `a` given before the spread
+}
+
+//=== TEST CASE: spread_spread_collision_Generic ===
+// Rule 5: two spreads supplying the same param collide.
+struct AB2 { a: int, b: int }
+struct AC { a: int, c: int }
+
+fn takes_abc(a: int, b: int, c: int) -> int { a + b + c }
+
+fn main() {
+    let x = AB2 { a: 1, b: 2 }
+    let y = AC { a: 8, c: 3 }
+    print(takes_abc(..x, ..y))   // ERROR: both spreads supply `a`
+}
+
+//=== TEST CASE: spread_non_struct_operand_Generic ===
+// The spread operand must be a nominal struct with statically known fields.
+fn takes_a(a: int) -> int { a }
+
+fn main() {
+    let n = 5
+    print(takes_a(..n))   // ERROR: `int` is not a struct
+}
+
+//=== TEST CASE: no_matching_argument_types_Generic ===
+//! expect: No overload for `choose` with argument types (bool)
+fn choose(x: int) -> int { x }
+fn choose(x: string) -> int { len(x) }
+fn main() { let _ = choose(true) }
+
+//=== TEST CASE: no_matching_argument_count_Generic ===
+//! expect: No overload for `choose` with argument types (int, int)
+fn choose(x: int) -> int { x }
+fn choose(x: string) -> int { len(x) }
+fn main() { let _ = choose(1, 2) }
+
+//=== TEST CASE: no_viable_fail_Generic ===
+// No candidate accepts the argument types.
+//! expect: No overload for `pick` with argument types (string)
+fn pick(x: int) -> int { x }
+fn pick(x: bool) -> bool { x }
+fn f() -> int { pick("hi") }
+
+//=== TEST CASE: ambiguous_fail_Generic ===
+// Two candidates fit equally well -> ambiguous.
+//! expect: Ambiguous overload for `amb` with argument types (int, int)
+fn amb(x: any, y: int) -> int { 0 }
+fn amb(x: int, y: any) -> int { 1 }
+fn f() -> int { amb(2, 3) }
+
+//=== TEST CASE: no_overload_fail_Generic ===
+//! expect: No overload for `get` with argument types (Set<T>, int)
+struct Lst<T> { len: int }
+struct Set<T> { len: int }
+inline(lua) fn get<T>(v: Lst<T>, i: int) -> T = "return 0"
+fn f<T>(s: Set<T>) -> T {
+    get(s, 0)
+}
+
+//=== TEST CASE: ambiguous_fail_Generic ===
+//! expect: Ambiguous overload for `pick` with argument types (Box<T>)
+struct Box<T> { v: int }
+inline(lua) fn pick<T>(x: Box<T>) -> int = "return 0"
+inline(lua) fn pick<U>(x: Box<U>) -> int = "return 1"
+fn f<T>(b: Box<T>) -> int {
+    pick(b)
+}
+
+//=== TEST CASE: ufcs_receiver_mismatch_Generic ===
+// the receiver is type-checked against the first parameter.
+//! expect: type mismatch: expected `int`, found `bool`
+fn takes_int(x: int) -> int { x }
+fn f() -> int {
+    let b = true
+    let r = b.takes_int()
+    r
+}
+
+//=== TEST CASE: annotated_receiver_Generic ===
+//! expect: the receiver takes its type from the path; write it without a type annotation
+// The receiver takes its type from the path; annotating it is rejected.
+struct Mob { hp: int }
+fn Mob.take_damage(m: Mob, amount: int) -> int {
+    return m.hp - amount
+}
+fn main() {}
+
+//=== TEST CASE: no_receiver_param_Generic ===
+//! expect: the method form requires a receiver parameter
+// The method form requires a receiver parameter.
+struct Mob { hp: int }
+fn Mob.foo() -> int {
+    return 0
+}
+fn main() {}
+
+//=== TEST CASE: macro_dform_Generic ===
+//! expect: the method form `Type.name` is for functions, not macros
+// D-form is for functions, not macros.
+macro Mob.m() {
+    5
+}
+fn main() {}
+
+//=== TEST CASE: extern_dform_Generic ===
+//! expect: extern functions are foreign symbols and cannot declare a receiver path
+// Extern fns are foreign symbols; they cannot declare a receiver path.
+struct Mob { hp: int }
+extern(lua) fn Mob.x(m: Mob) -> int
+fn main() {}
+
+//=== TEST CASE: dup_generic_Generic ===
+//! expect: generic `A` is declared in both the receiver path and the method generics
+// A generic declared in both the receiver path and the method list.
+struct Pair<A, B> { a: A, b: B }
+fn Pair<A, B>.dup<A>(p) -> A {
+    return p.a
+}
+fn main() {}
+
+//=== TEST CASE: nested_path_Generic ===
+//! expect: the receiver path may have only one segment (`Type.name`)
+// A second dot-separated receiver segment is rejected; this is not a
+// check of module-qualified `lib::Type.method` syntax.
+struct Mob { hp: int }
+fn Mob.Sub.foo(m) -> int {
+    return 0
+}
+fn main() {}
+
+//=== TEST CASE: unknown_receiver_type_Unknown ===
+//! expect: `Ghost` did not resolve to any definition
+// Not a parse error -- desugars, then bone rejects the unknown param type.
+fn Ghost.haunt(g) -> int {
+    return 0
+}
+fn main() {}
+
+//=== TEST CASE: nested_fn_reads_enclosing_param_Generic ===
+//! expect: nested function may not read enclosing local `threshold`
+// A hoisted nested fn lives at module scope -- the enclosing param does not
+// exist there. Reading it is a compile error.
+fn outer(threshold: int) -> int {
+    fn keep(x: int) -> bool { x > threshold }
+    return if keep(5) { 1 } else { 0 }
+}
+fn main() { let _ = outer(3) }
+
+//=== TEST CASE: nested_fn_reads_enclosing_local_Generic ===
+//! expect: nested function may not read enclosing local `bonus`
+// Same rule for an enclosing local.
+fn outer() -> int {
+    let bonus = 10
+    fn add(x: int) -> int { x + bonus }
+    return add(5)
+}
+fn main() { let _ = outer() }
+
+//=== TEST CASE: nested_fn_with_generics_Generic ===
+//! expect: nested functions cannot be generic
+// v1: no generics on nested fns.
+fn outer() -> int {
+    fn id<T>(x: T) -> T { x }
+    return id(7)
+}
+fn main() { let _ = outer() }
+
+//=== TEST CASE: nested_fn_with_annotation_Generic ===
+//! expect: nested functions cannot have annotations
+// v1: no annotations on nested fns.
+fn outer() -> int {
+    @pure
+    fn inc(x: int) -> int { x + 1 }
+    return inc(7)
+}
+fn main() { let _ = outer() }
+
+//=== TEST CASE: nested_fn_forward_reference_Generic ===
+//! expect: `later` did not resolve to any definition
+// v1 decl-before-use: calling a nested fn before its declaration does not
+// resolve (there is no like-named top-level fn).
+fn outer() -> int {
+    let r = later(5)
+    fn later(x: int) -> int { x + 1 }
+    return r
+}
+fn main() { let _ = outer() }
+
+//=== TEST CASE: nested_fn_out_of_scope_Generic ===
+//! expect: `helper` did not resolve to any definition
+// A nested fn is block-scoped (privacy is a property): calling it outside the
+// block it is declared in does not resolve.
+fn outer() -> int {
+    {
+        fn helper(x: int) -> int { x + 1 }
+        let _ = helper(1)
+    }
+    return helper(2)
+}
+fn main() { let _ = outer() }
+
+//=== TEST CASE: nested_fn_mutual_recursion_Generic ===
+//! expect: `is_odd` did not resolve to any definition
+// v1 decl-before-use forbids mutual recursion: `is_even` calls `is_odd` before
+// it is declared.
+fn parity(n: int) -> bool {
+    fn is_even(k: int) -> bool { if k == 0 { return true }  return is_odd(k - 1) }
+    fn is_odd(k: int) -> bool { if k == 0 { return false }  return is_even(k - 1) }
+    return is_even(n)
+}
+fn main() { let _ = parity(4) }
+
+//=== TEST CASE: nested_fn_reads_enclosing_param_in_format_spec_Generic ===
+//! expect: nested function may not read enclosing local `digits`
+// A read in an interpolation's dynamic precision is a read like any other.
+fn outer(digits: int) -> string {
+    fn show(x: float) -> string { "{x:.{digits}f}" }
+    return show(1.5)
+}
+fn main() { let _ = outer(2) }
+
+//=== TEST CASE: field_ref_picked_slot_not_fieldref_Generic ===
+struct Mob { health: int }
+
+fn probe(a: int, b: int) -> int { return a + b }
+fn probe(a: string, b: int) -> int { return b }
+
+fn main() {
+    let m = Mob { health: 1 }
+    let r = probe(1, .health)
+    print("{r}")
+}
+
+//=== TEST CASE: inline_lua_arg_typechecked_Generic ===
+// the declared signature is still enforced at the call site.
+//! expect: type mismatch: expected `int`, found `bool`
+inline(lua) fn myadd(x: int, y: int) -> int = "return x + y"
+fn f() -> int {
+    let r = myadd(1, true)
+    r
+}
+
+//=== TEST CASE: polymorphic_recursion ===
+fn rec<T>(x: T, n: int) -> int {
+    if n <= 0 { return 0 }
+    return rec([x], n - 1)
+}
+
+fn main() {
+    print("{rec(1, 3)}")
+}
+
+//=== TEST CASE: extern_ffi_generic_return ===
+extern(ffi, "m") fn opaque_ret<T>() -> T
+
+fn main() {
+    print("unreachable")
+}

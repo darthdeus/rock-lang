@@ -493,7 +493,7 @@ fn sorting_by_a_scalar_key() {
 // Inside Rock code `materialize` of a tuple is the tuple itself: it is stored,
 // passed and matched like any other. A body the compiler cannot see into is
 // handed the tuple as the user wrote it, one boxed value per element, and an
-// implicit splatting tuple is rejected there (tests/errors/nobox_container_gaps).
+// implicit splatting tuple is rejected there (tests/errors/nobox.rock.err).
 
 fn lid<T>(v: T) -> T { return v }
 
