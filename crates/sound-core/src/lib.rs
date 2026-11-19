@@ -686,56 +686,33 @@ mod tests {
         }
     }
 
-    fn valid_project() -> &'static str {
-        r#"
-        {
-          "version": 2,
-          "normalization_lufs": -18.0,
-          "groups": {"fixture": {"gain_db": 0, "bus": "sfx"}},
-          "events": [
-            {
-              "id": "z.event",
-              "group": "fixture",
-              "steps": [{
-                "layers": [
-                  {
-                    "sources": ["assets/sfx/shared.ogg", "assets/sfx/alt.ogg"],
-                    "volume": 0.5,
-                    "reason": "fixture balance",
-                    "speed": 1.25,
-                    "offset": 0.0
-                  },
-                  {
-                    "sources": ["assets/sfx/shared.ogg"],
-                    "volume": 0.0,
-                    "speed": 0.5,
-                    "offset": 0.25
-                  }
-                ]
-              }]
-            },
-            {
-              "id": "a.event",
-              "group": "fixture",
-              "steps": [{
-                "layers": [{"sources": ["assets/sfx/solo.ogg"]}]
-              }]
-            },
-            {
-              "id": "unconsumed.event",
-              "group": "fixture",
-              "steps": [{
-                "layers": [{"sources": ["assets/sfx/shared.ogg"]}]
-              }]
-            }
-          ]
-        }
-        "#
+    fn valid_project() -> SoundProject {
+        project(&[
+            r#"{
+                "id": "z.event",
+                "group": "fixture",
+                "steps": [{"layers": [
+                    {
+                        "sources": ["assets/sfx/shared.ogg", "assets/sfx/alt.ogg"],
+                        "volume": 0.5,
+                        "reason": "fixture balance",
+                        "speed": 1.25
+                    },
+                    {"sources": ["assets/sfx/shared.ogg"], "volume": 0.0, "speed": 0.5, "offset": 0.25}
+                ]}]
+            }"#
+            .into(),
+            event_json("a.event", r#"{"sources": ["assets/sfx/solo.ogg"]}"#),
+            event_json(
+                "unconsumed.event",
+                r#"{"sources": ["assets/sfx/shared.ogg"]}"#,
+            ),
+        ])
     }
 
     #[test]
     fn valid_project_compiles_layers_variants_and_sorted_manifest() {
-        let project = parse_project(valid_project()).expect("valid project should parse");
+        let project = valid_project();
         let bank = compile_project(&project, &resolver(&[SHARED, ALT, SOLO]))
             .expect("valid project should compile");
 
@@ -750,7 +727,7 @@ mod tests {
 
     #[test]
     fn discovered_variants_compile_to_the_same_bank_as_explicit_sources() {
-        let mut explicit = parse_project(valid_project()).unwrap();
+        let mut explicit = valid_project();
         explicit.events[0].steps[0].layers[0].sources =
             vec![ALT.into(), SHARED.into(), SOLO.into()];
         let mut discovered = explicit.clone();
@@ -766,7 +743,7 @@ mod tests {
 
     #[test]
     fn missing_dependency_is_a_diagnostic() {
-        let project = parse_project(valid_project()).expect("valid project should parse");
+        let project = valid_project();
         let error = compile_project(&project, &resolver(&[SHARED, SOLO]))
             .expect_err("missing dependency should reject the project");
 
@@ -776,7 +753,7 @@ mod tests {
 
     #[test]
     fn development_compile_retains_missing_dependencies_for_runtime_silence() {
-        let project = parse_project(valid_project()).expect("valid project should parse");
+        let project = valid_project();
         let bank = compile_project_allowing_missing_assets(&project, &resolver(&[SHARED, SOLO]))
             .expect("a missing sound must not reject a development bank");
 

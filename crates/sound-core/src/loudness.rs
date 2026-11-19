@@ -93,7 +93,8 @@ impl MeasurementCache {
         hash.update(&bytes);
         let key = format!("{:x}", hash.finalize());
         self.cached(&key, || {
-            measure_bytes(bytes, path.extension().and_then(|s| s.to_str()), speed)
+            let audio = decode(bytes, path.extension().and_then(|s| s.to_str()))?;
+            measure_samples(&audio, speed)
         })
     }
     pub fn measure_mix(&self, layers: &[RenderLayer]) -> Result<SourceMeasurement, String> {
@@ -202,14 +203,6 @@ fn decode(bytes: Vec<u8>, extension: Option<&str>) -> Result<DecodedAudio, Strin
     Ok(decoded)
 }
 
-fn measure_bytes(
-    bytes: Vec<u8>,
-    extension: Option<&str>,
-    speed: f64,
-) -> Result<SourceMeasurement, String> {
-    measure_samples(&decode(bytes, extension)?, speed)
-}
-
 fn measure_samples(audio: &DecodedAudio, speed: f64) -> Result<SourceMeasurement, String> {
     let rate = (f64::from(audio.rate) * speed).round() as u32;
     let channels = audio.channels;
@@ -269,6 +262,8 @@ pub fn measure_mix(layers: &[RenderLayer]) -> Result<SourceMeasurement, String> 
     if channels > 2 {
         return Err("report mix rendering supports mono and stereo sources".into());
     }
+    const MIX_RATE: u32 = 48_000;
+    let rate = f64::from(MIX_RATE);
     let mut frames = 0;
     for (layer, audio) in layers.iter().zip(&decoded) {
         if !layer.gain.is_finite()
@@ -280,39 +275,40 @@ pub fn measure_mix(layers: &[RenderLayer]) -> Result<SourceMeasurement, String> 
             return Err("invalid render layer".into());
         }
         frames = frames.max(
-            (layer.offset * 48000.0).round() as usize
-                + ((audio.samples.len() / audio.channels) as f64 * 48000.0
+            (layer.offset * rate).round() as usize
+                + ((audio.samples.len() / audio.channels) as f64 * rate
                     / (audio.rate as f64 * layer.speed))
                     .ceil() as usize,
         );
     }
     let mut mixed = DecodedAudio {
-        rate: 48000,
+        rate: MIX_RATE,
         channels,
         samples: vec![0.0; frames * channels],
     };
     for (layer, audio) in layers.iter().zip(&decoded) {
-        let start = (layer.offset * 48000.0).round() as usize;
+        let start = (layer.offset * rate).round() as usize;
         let source_frames = audio.samples.len() / audio.channels;
+        let mono_gain = if audio.channels == 1 && channels == 2 {
+            std::f64::consts::FRAC_1_SQRT_2
+        } else {
+            1.0
+        };
         for frame in start..frames {
-            let position = (frame - start) as f64 * audio.rate as f64 * layer.speed / 48000.0;
+            let position = (frame - start) as f64 * audio.rate as f64 * layer.speed / rate;
             let index = position.floor() as usize;
             if index >= source_frames {
                 break;
             }
             let next = (index + 1).min(source_frames - 1);
             let fraction = position.fract();
-            for channel in 0..channels {
+            let frame_index = frame * channels;
+            let output = &mut mixed.samples[frame_index..frame_index + channels];
+            for (channel, sample) in output.iter_mut().enumerate() {
                 let source_channel = channel.min(audio.channels - 1);
                 let a = audio.samples[index * audio.channels + source_channel] as f64;
                 let b = audio.samples[next * audio.channels + source_channel] as f64;
-                let mono_gain = if audio.channels == 1 && channels == 2 {
-                    std::f64::consts::FRAC_1_SQRT_2
-                } else {
-                    1.0
-                };
-                mixed.samples[frame * channels + channel] +=
-                    ((a + (b - a) * fraction) * layer.gain * mono_gain) as f32;
+                *sample += ((a + (b - a) * fraction) * layer.gain * mono_gain) as f32;
             }
         }
     }

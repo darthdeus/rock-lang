@@ -1,8 +1,5 @@
 use sound_core::{AssetMapResolver, compile_project, parse_project, serialize_runtime_bank};
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 struct Fixture(tempfile::TempDir);
 impl Fixture {
@@ -19,9 +16,8 @@ impl Fixture {
     }
 }
 fn write_tone(path: &Path, amplitude: f32) {
-    let samples: Vec<f32> = (0..48000)
-        .map(|i| amplitude * (std::f32::consts::TAU * 1000.0 * i as f32 / 48000.0).sin())
-        .collect();
+    let samples =
+        (0..48000).map(|i| amplitude * (std::f32::consts::TAU * 1000.0 * i as f32 / 48000.0).sin());
     let bytes = (samples.len() * 4) as u32;
     let mut out = Vec::new();
     out.extend(b"RIFF");
@@ -46,12 +42,12 @@ fn project() -> serde_json::Value {
 }
 fn compile(value: &serde_json::Value, paths: &[(String, PathBuf)]) -> serde_json::Value {
     let project = parse_project(&value.to_string()).unwrap();
-    let resolver = AssetMapResolver::new(paths.iter().cloned().collect::<BTreeMap<_, _>>());
+    let resolver = AssetMapResolver::new(paths.iter().cloned().collect());
     let bank = compile_project(&project, &resolver).unwrap();
     serde_json::from_slice(&serialize_runtime_bank(&bank).unwrap()).unwrap()
 }
 fn gain(bank: &serde_json::Value, key: &str) -> f64 {
-    bank["normalizations"][key]["gain"].as_f64().unwrap_or(1.0)
+    bank["normalizations"][key]["gain"].as_f64().unwrap()
 }
 #[test]
 fn different_sources_have_equal_played_loudness_at_zero_offset() {
@@ -71,22 +67,17 @@ fn different_sources_have_equal_played_loudness_at_zero_offset() {
     );
 }
 #[test]
-fn an_event_without_a_group_fails_compile() {
-    let f = Fixture::new();
-    let resolver = AssetMapResolver::new(
-        [
-            ("assets/a.wav".into(), f.wav("a.wav", 0.1)),
-            ("assets/b.wav".into(), f.wav("b.wav", 0.01)),
-        ]
-        .into(),
-    );
+fn an_event_without_a_group_fails_to_parse() {
     let mut ungrouped = project();
     ungrouped["events"][0]
         .as_object_mut()
         .unwrap()
         .remove("group");
-    let result = parse_project(&ungrouped.to_string()).and_then(|p| compile_project(&p, &resolver));
-    assert!(result.is_err(), "ungrouped event must be rejected");
+    let error = parse_project(&ungrouped.to_string()).unwrap_err();
+    assert!(
+        error.to_string().contains("missing field `group`"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -122,17 +113,18 @@ fn played_peak_warning_does_not_reduce_source_or_layer_gains() {
     partial["events"][0]["steps"][0]["layers"]
         .as_array_mut()
         .unwrap()
-        .push(serde_json::json!({"sources":["assets/missing.wav"]}));
+        .insert(1, serde_json::json!({"sources":["assets/missing.wav"]}));
     let partial = sound_core::compile_project_allowing_missing_assets(
         &parse_project(&partial.to_string()).unwrap(),
         &resolver,
     )
     .unwrap();
     assert_eq!(
-        partial.played_peak_warnings().len(),
-        1,
-        "a missing layer must not hide the surviving layers' sum"
+        partial.played["tone"][0].sum, compiled.played["tone"][0].sum,
+        "the sum contains both playable layers"
     );
+    assert!(partial.played["tone"][0].layers[1].level.is_none());
+    assert_eq!(partial.played_peak_warnings(), warnings);
     let bank: serde_json::Value =
         serde_json::from_slice(&serialize_runtime_bank(&compiled).unwrap()).unwrap();
     let cache = sound_core::MeasurementCache::new(f.path().join("cache"));
@@ -158,35 +150,27 @@ fn played_peak_warning_does_not_reduce_source_or_layer_gains() {
         std::fs::copy(path, f.path().join(key)).unwrap();
     }
     std::fs::write(&project_path, value.to_string()).unwrap();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_sound-loudness"))
-        .args([
-            "report",
-            project_path.to_str().unwrap(),
-            f.path().to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let report = String::from_utf8(output.stdout).unwrap();
+    let loudness = |mode| {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_sound-loudness"))
+            .arg(mode)
+            .arg(&project_path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+    let report = String::from_utf8(loudness("report").stdout).unwrap();
     assert!(
         report
             .lines()
             .any(|line| line.contains("STEP_SUM") && line.contains("ABOVE_CEILING")),
         "{report}"
     );
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_sound-loudness"))
-        .args([
-            "compile",
-            project_path.to_str().unwrap(),
-            f.path().to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
+    let output = loudness("compile");
     assert!(String::from_utf8_lossy(&output.stderr).contains("WARNING tone"));
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),

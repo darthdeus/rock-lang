@@ -59,18 +59,24 @@ impl fmt::Display for PlayedPeakWarning {
     }
 }
 
-fn summarize(values: &[(f64, f64)]) -> Option<PlayedLevel> {
-    if values.is_empty() {
+fn summarize(values: impl Iterator<Item = (f64, f64)>) -> Option<PlayedLevel> {
+    let mut loudness = Vec::with_capacity(values.size_hint().0);
+    let mut true_peak_dbtp = f64::NEG_INFINITY;
+    for (level, peak) in values {
+        loudness.push(level);
+        true_peak_dbtp = true_peak_dbtp.max(peak);
+    }
+    let combinations = loudness.len();
+    if combinations == 0 {
         return None;
     }
-    let mut loudness: Vec<_> = values.iter().map(|v| v.0).collect();
     loudness.sort_by(f64::total_cmp);
     Some(PlayedLevel {
-        median_lufs: (loudness[(loudness.len() - 1) / 2] + loudness[loudness.len() / 2]) / 2.0,
+        median_lufs: (loudness[(combinations - 1) / 2] + loudness[combinations / 2]) / 2.0,
         min_lufs: loudness[0],
-        max_lufs: loudness[loudness.len() - 1],
-        true_peak_dbtp: values.iter().map(|v| v.1).fold(f64::NEG_INFINITY, f64::max),
-        combinations: values.len(),
+        max_lufs: loudness[combinations - 1],
+        true_peak_dbtp,
+        combinations,
     })
 }
 
@@ -90,16 +96,16 @@ pub fn measure_step<R: AssetResolver + ?Sized>(
         return Err("played step gains do not match its sources".into());
     }
     let mut combinations = vec![Vec::<RenderLayer>::new()];
-    for (li, layer) in step.layers.iter().enumerate() {
+    for (layer, gains) in step.layers.iter().zip(gains) {
         let mut next = Vec::new();
         for prior in &combinations {
-            for (si, source) in layer.sources.iter().enumerate() {
+            for (source, &gain) in layer.sources.iter().zip(gains) {
                 let mut combination = prior.clone();
                 combination.push(RenderLayer {
                     path: resolver
                         .resolve(source)
                         .ok_or_else(|| format!("missing source: {source}"))?,
-                    gain: gains[li][si],
+                    gain,
                     speed: f64::from(layer.speed),
                     offset: f64::from(layer.offset),
                 });
@@ -128,16 +134,14 @@ pub(crate) fn analyze_project<R: AssetResolver + ?Sized>(
         let mut steps = Vec::new();
         for step in &event.steps {
             let mut layers = Vec::new();
-            let mut available = step.clone();
+            let mut available = SoundStep { layers: Vec::new() };
             let mut gains = Vec::new();
-            for (li, layer) in step.layers.iter().enumerate() {
+            for mut layer in step.layers.iter().cloned() {
                 let mut sources = Vec::new();
                 let mut layer_gains = Vec::new();
-                available.layers[li]
-                    .sources
-                    .retain(|key| normalizations.contains_key(key));
-                let role_db = layer_gain_db(project, event, layer);
-                for key in &available.layers[li].sources {
+                layer.sources.retain(|key| normalizations.contains_key(key));
+                let role_db = layer_gain_db(project, event, &layer);
+                for key in &layer.sources {
                     let normalization = &normalizations[key];
                     let (loudness, peak) = if layer.speed == 1.0 {
                         (normalization.loudness_lufs, normalization.true_peak_dbtp)
@@ -159,36 +163,20 @@ pub(crate) fn analyze_project<R: AssetResolver + ?Sized>(
                     });
                     layer_gains.push(normalization.gain * db_gain(role_db));
                 }
-                let level = summarize(
-                    &sources
-                        .iter()
-                        .map(|s| (s.loudness_lufs, s.true_peak_dbtp))
-                        .collect::<Vec<_>>(),
-                );
+                let level = summarize(sources.iter().map(|s| (s.loudness_lufs, s.true_peak_dbtp)));
                 layers.push(PlayedLayer { sources, level });
-                gains.push(layer_gains);
+                // Partial development banks still sum every layer that can play.
+                if !layer.sources.is_empty() {
+                    available.layers.push(layer);
+                    gains.push(layer_gains);
+                }
             }
-            // Partial development banks still sum every layer that can play.
-            let (render_layers, render_gains): (Vec<_>, Vec<_>) = available
-                .layers
-                .into_iter()
-                .zip(gains)
-                .filter(|(layer, _)| !layer.sources.is_empty())
-                .unzip();
-            let sum = if render_layers.len() > 1 {
-                let rendered = measure_step(
-                    &SoundStep {
-                        layers: render_layers,
-                    },
-                    &render_gains,
-                    resolver,
-                    cache,
-                )?;
+            let sum = if available.layers.len() > 1 {
+                let rendered = measure_step(&available, &gains, resolver, cache)?;
                 summarize(
-                    &rendered
+                    rendered
                         .iter()
-                        .map(|m| (m.momentary_lufs, m.true_peak_dbtp))
-                        .collect::<Vec<_>>(),
+                        .map(|m| (m.momentary_lufs, m.true_peak_dbtp)),
                 )
             } else {
                 None
