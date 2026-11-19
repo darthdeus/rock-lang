@@ -29,45 +29,43 @@ pub fn stone_session_main_lua_path(game: &str, pid: u32) -> PathBuf {
         .join(MAIN_LUA_FILENAME)
 }
 
-pub fn configured_stone_dir(path: &std::path::Path) -> Result<Option<std::path::PathBuf>> {
+pub fn configured_stone_dir(path: &Path) -> Result<Option<PathBuf>> {
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let Some((config_path, _config)) = rock_host::stick::StickConfig::find_from_dir(&path)? else {
+    let Some((config_path, config)) = rock_host::stick::StickConfig::find_from_dir(&path)? else {
         return Ok(None);
     };
     let manifest_dir = config_path.parent().unwrap_or(&config_path);
-    let graph = rock_host::stick::graph::PackageGraph::build(manifest_dir)?;
-    let root = graph.root();
-    // Stone testing itself: the root IS the stone package, so resolve its own
-    // directory instead of reporting no Stone root (which fails global init).
-    if graph.package(root).manifest_name == "stone" {
-        return Ok(Some(graph.package(root).root.clone()));
-    }
+    let channel = rock_host::stick::resolved_channel_for(&config);
+    let graph =
+        rock_host::stick::graph::PackageGraph::build_with_channel(manifest_dir, &config, &channel)?;
     Ok(graph
         .packages()
         .iter()
-        .find(|package| package.id != root && package.manifest_name == "stone")
+        .find(|package| package.manifest_name == "stone")
         .map(|package| package.root.clone()))
 }
 
-pub(crate) const PROJECT_PARENTS: &[&str] = &["games"];
+const PROJECT_PARENTS: &[&str] = &["games"];
 
 /// Tries the path relative to cwd first, then `PROJECT_PARENTS` under `rock_dir()`.
 /// Zero or several matches reject with the candidates listed; never guess.
 pub fn resolve_project_dir(arg: &str) -> Result<PathBuf> {
-    if let Ok(dir) = resolve_project_dir_in(Path::new(""), PROJECT_PARENTS, arg) {
-        return Ok(dir);
-    }
-    let rock_root = PathBuf::from(rock_host::rock_dir());
-    if rock_root != Path::new("") && rock_root != Path::new(".") {
-        if let Ok(dir) = resolve_project_dir_in(&rock_root, PROJECT_PARENTS, arg) {
+    let local = resolve_project_dir_in(Path::new(""), PROJECT_PARENTS, arg);
+    if local.is_err() {
+        let root = rock_host::rock_dir();
+        let root = Path::new(&root);
+        if root != Path::new("")
+            && root != Path::new(".")
+            && let Ok(dir) = resolve_project_dir_in(root, PROJECT_PARENTS, arg)
+        {
             return Ok(dir);
         }
     }
-    resolve_project_dir_in(Path::new(""), PROJECT_PARENTS, arg)
+    local
 }
 
 /// A literal directory wins over expansion; only a bare name expands against the parents.
-pub(crate) fn resolve_project_dir_in(base: &Path, parents: &[&str], arg: &str) -> Result<PathBuf> {
+fn resolve_project_dir_in(base: &Path, parents: &[&str], arg: &str) -> Result<PathBuf> {
     let literal = base.join(arg);
     if literal.is_dir() {
         return Ok(literal);
@@ -129,7 +127,7 @@ mod tests {
             fs::create_dir_all(&path).unwrap();
             fs::write(path.join("stick.toml"), manifest).unwrap();
         }
-        for directory in ["wrapper", "game"] {
+        for directory in ["engine", "wrapper", "game"] {
             let project = root.join(directory);
             assert_eq!(
                 configured_stone_dir(&project).unwrap(),

@@ -1,5 +1,7 @@
 //! Bundled LuaJIT, native libraries and GPU launch environment.
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use rock_host::project::is_release_layout_in;
 
@@ -8,22 +10,17 @@ pub fn luajit_path() -> PathBuf {
         return PathBuf::from(path);
     }
 
-    let root = PathBuf::from(rock_host::rock_dir());
-
-    let release_path = if cfg!(target_os = "windows") {
-        root.join("bin").join("luajit.exe")
+    let binary = if cfg!(windows) {
+        "bin/luajit.exe"
     } else {
-        root.join("bin").join("luajit")
+        "bin/luajit"
     };
+    let release_path = Path::new(&rock_host::rock_dir()).join(binary);
     if release_path.exists() {
         return release_path;
     }
 
-    let bundled = gamelibs::host_dir().join(if cfg!(target_os = "windows") {
-        "bin/luajit.exe"
-    } else {
-        "bin/luajit"
-    });
+    let bundled = gamelibs::host_dir().join(binary);
     if bundled.is_file() {
         bundled
     } else {
@@ -31,39 +28,35 @@ pub fn luajit_path() -> PathBuf {
     }
 }
 
-pub(crate) fn lib_path_value() -> String {
-    lib_path_value_in(Path::new(&rock_host::rock_dir()))
-}
+const LIB_PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
 
 fn lib_path_value_in(root: &Path) -> String {
     // Release layout stages nothing into tmp/, so a worktree's tmp/ can only
     // hold stale dev-layout builds; searching it shadowed the SDK's libstone.
     if is_release_layout_in(root) {
-        let lib_str = root.join("lib").to_string_lossy().into_owned();
-        if cfg!(target_os = "windows") {
+        let lib = root.join("lib");
+        return if cfg!(windows) {
             // DLLs sit next to the executables in bin/.
-            let bin_str = root.join("bin").to_string_lossy().into_owned();
-            return format!("{};{}", lib_str, bin_str);
+            format!("{};{}", lib.display(), root.join("bin").display())
         } else {
-            return lib_str;
-        }
+            lib.to_string_lossy().into_owned()
+        };
     }
 
     // Dev layout: cached native libraries plus tmp/ rooted at rock_dir().
     // The prebuilt lib dir MUST be on the search path: stone's Rock global
     // initializer does ffi.load("libcimgui_complete.{dylib,so,dll}") before
     // stone_init has had a chance to dlopen anything via rpath.
-    let dev_tmp = root.join("tmp");
-    let dev_tmp_str = dev_tmp.to_string_lossy();
-    let prefix = gamelibs::host_dir();
-    if cfg!(target_os = "windows") {
-        format!("tmp;{};{}", dev_tmp_str, prefix.join("bin").display())
-    } else {
-        format!("tmp:{}:{}", dev_tmp_str, prefix.join("lib").display())
-    }
+    let native = gamelibs::host_dir().join(if cfg!(windows) { "bin" } else { "lib" });
+    let sep = LIB_PATH_SEPARATOR;
+    format!(
+        "tmp{sep}{}{sep}{}",
+        root.join("tmp").display(),
+        native.display()
+    )
 }
 
-/// `lib_path_value()` plus platform graphics libraries; Linux also gets the system
+/// The runtime library dirs plus platform graphics libraries; Linux also gets the system
 /// Vulkan loader and driver directories when they
 /// exist; the bundled LuaJIT does not receive NixOS's nix-ld defaults itself.
 ///
@@ -74,44 +67,32 @@ fn lib_path_value_in(root: &Path) -> String {
 /// gamelibs dir doesn't ship. On NixOS those deps live in nix-store dirs the
 /// user puts on the path (e.g. via `programs.nix-ld.libraries` ->
 /// `$NIX_LD_LIBRARY_PATH`); clobbering instead of appending drops them.
-#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
-fn lib_path_with_values(
-    inherited: Option<&std::ffi::OsStr>,
-    nix_ld: Option<&std::ffi::OsStr>,
-) -> String {
-    let mut value = lib_path_value();
-    let sep = if cfg!(target_os = "windows") {
-        ";"
-    } else {
-        ":"
+fn lib_path_with_values(inherited: Option<&OsStr>, nix_ld: Option<&OsStr>) -> String {
+    let mut value = lib_path_value_in(Path::new(&rock_host::rock_dir()));
+    let mut append = |path: &OsStr| {
+        if !path.is_empty() {
+            value.push(LIB_PATH_SEPARATOR);
+            value.push_str(&path.to_string_lossy());
+        }
     };
 
     #[cfg(target_os = "linux")]
     for path in linux_vulkan_library_paths() {
-        value.push_str(sep);
-        value.push_str(&path.to_string_lossy());
+        append(path.as_os_str());
     }
-
-    if let Some(inherited) = inherited {
-        if !inherited.is_empty() {
-            value.push_str(sep);
-            value.push_str(&inherited.to_string_lossy());
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    if let Some(nix_ld) = nix_ld {
-        if !nix_ld.is_empty() {
-            value.push_str(sep);
-            value.push_str(&nix_ld.to_string_lossy());
-        }
+    for path in [inherited, nix_ld].into_iter().flatten() {
+        append(path);
     }
     value
 }
 
 pub fn lib_path_with_inherited() -> String {
     let inherited = std::env::var_os(lib_path_var());
-    let nix_ld = std::env::var_os("NIX_LD_LIBRARY_PATH");
+    let nix_ld = if cfg!(target_os = "linux") {
+        std::env::var_os("NIX_LD_LIBRARY_PATH")
+    } else {
+        None
+    };
     lib_path_with_values(inherited.as_deref(), nix_ld.as_deref())
 }
 
@@ -122,7 +103,7 @@ pub fn linux_vulkan_library_paths() -> Vec<PathBuf> {
 
 #[cfg(target_os = "linux")]
 fn linux_vulkan_library_paths_from(nix_store: &Path, opengl_driver: &Path) -> Vec<PathBuf> {
-    let mut loader_paths = std::fs::read_dir(nix_store)
+    let mut paths = std::fs::read_dir(nix_store)
         .ok()
         .into_iter()
         .flatten()
@@ -135,9 +116,8 @@ fn linux_vulkan_library_paths_from(nix_store: &Path, opengl_driver: &Path) -> Ve
         .map(|path| path.join("lib"))
         .filter(|path| path.is_dir())
         .collect::<Vec<_>>();
-    loader_paths.sort();
+    paths.sort();
 
-    let mut paths = loader_paths;
     if opengl_driver.is_dir() {
         paths.push(opengl_driver.to_path_buf());
     }
@@ -155,55 +135,57 @@ pub fn lib_path_var() -> &'static str {
 }
 
 pub fn lua_path_value() -> String {
-    let root = rock_host::rock_dir();
-    let p = format!("{root}/?.lua;");
-
-    rock_host::project::lua_path_for(&luajit_path(), p)
+    lua_path_for(&luajit_path())
 }
 
-pub fn build_luajit_command(lua_file: &Path, app_args: &[String]) -> std::process::Command {
-    let mut command = rock_host::project::luajit_command();
+fn lua_path_for(luajit: &Path) -> String {
+    rock_host::project::lua_path_for(luajit, format!("{}/?.lua;", rock_host::rock_dir()))
+}
+
+pub fn build_luajit_command(lua_file: &Path, app_args: &[String]) -> Command {
+    let mut command = luajit_command(true);
     command.arg(lua_file).args(app_args);
-    configure_command(command, true, true)
+    configure_environment(command, true)
 }
 
 /// Arguments, cwd and unrelated environment overrides survive; the runtime owns
 /// LUA_PATH and the native library search path.
-pub fn configure_command(
-    command: std::process::Command,
-    lua: bool,
-    trace: bool,
-) -> std::process::Command {
-    let mut configured = if lua {
-        let mut configured = std::process::Command::new(luajit_path());
-        if trace && std::env::var("STONE_JV").as_deref() == Ok("1") {
-            configured.arg("-jv");
-        }
+pub fn configure_command(command: Command, lua: bool, trace: bool) -> Command {
+    let command = if lua {
+        let mut configured = luajit_command(trace);
         configured.args(command.get_args());
         if let Some(dir) = command.get_current_dir() {
             configured.current_dir(dir);
         }
         for (key, value) in command.get_envs() {
             match value {
-                Some(value) => {
-                    configured.env(key, value);
-                }
-                None => {
-                    configured.env_remove(key);
-                }
-            }
+                Some(value) => configured.env(key, value),
+                None => configured.env_remove(key),
+            };
         }
-        configured.env("LUA_PATH", lua_path_value());
         configured
     } else {
         command
     };
+    configure_environment(command, lua)
+}
+
+fn luajit_command(trace: bool) -> Command {
+    let mut command = Command::new(luajit_path());
+    if trace && std::env::var("STONE_JV").as_deref() == Ok("1") {
+        command.arg("-jv");
+    }
+    rock_host::compiler_thp::configure_runtime_command(&mut command);
+    command
+}
+
+fn configure_environment(mut command: Command, lua: bool) -> Command {
     // Retargeting creates a new Command, so restore its runtime pre-exec policy.
     if lua {
-        rock_host::compiler_thp::configure_runtime_command(&mut configured);
+        command.env("LUA_PATH", lua_path_for(Path::new(command.get_program())));
     }
-    configured.env(lib_path_var(), lib_path_with_inherited());
-    configured
+    command.env(lib_path_var(), lib_path_with_inherited());
+    command
 }
 
 #[cfg(test)]
