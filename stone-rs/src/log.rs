@@ -131,12 +131,6 @@ fn take_collected_error(
     take(&String::from_utf8_lossy(record)) as std::os::raw::c_int
 }
 
-/// Drop every collected record after the first `len`.
-#[no_mangle]
-pub extern "C" fn stone_log_truncate_collected_errors(len: std::os::raw::c_int) {
-    rock_log::truncate_collected_errors(len.max(0) as usize);
-}
-
 thread_local! {
     static LOG_RECORDS_REPLY: std::cell::RefCell<Option<std::ffi::CString>> =
         const { std::cell::RefCell::new(None) };

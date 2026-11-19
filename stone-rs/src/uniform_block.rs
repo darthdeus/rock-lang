@@ -364,13 +364,11 @@ unsafe fn stream_block(
 /// that draw goes through.
 ///
 /// Deliberately not an ambient "currently bound" tracker, which misattributes
-/// three ways: `track_text_draw_call` runs at the top of
+/// two ways: `track_text_draw_call` runs at the top of
 /// `draw_text_line_internal`, before the text program is bound and before the
 /// draw (so it credited whichever program came before, and fired even when the
-/// font was missing and nothing drew); `stone_set_shader(0)` leaves nothing
-/// bound, so a later unrelated draw would credit the stale entry; and
-/// `stone_sprite_draw_texture` falls back to a passed handle when no program is
-/// current, which an ambient tracker cannot see at all.
+/// font was missing and nothing drew), and `stone_set_shader(0)` leaves nothing
+/// bound, so a later unrelated draw would credit the stale entry.
 pub(crate) fn mark_program_drawn(program: glow::Program) {
     // One hash lookup on a map that holds ONLY block-owning programs, so the
     // overwhelmingly common case -- a draw through a program with no blocks --

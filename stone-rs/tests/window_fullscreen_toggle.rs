@@ -7,7 +7,7 @@ use std::ffi::CString;
 use stone_rs::{
     stone_create_window_ex, stone_get_fullscreen, stone_get_window_position, stone_get_window_size,
     stone_init, stone_poll_event, stone_set_fullscreen, stone_show_window,
-    stone_show_window_if_deferred, stone_teardown, stone_toggle_fullscreen, StoneEvent,
+    stone_show_window_if_deferred, stone_teardown, StoneEvent,
 };
 
 #[path = "support/private_display.rs"]
@@ -15,7 +15,7 @@ mod private_display;
 
 #[test]
 #[serial]
-fn toggle_fullscreen_restores_windowed_bounds() {
+fn fullscreen_round_trip_restores_windowed_bounds() {
     if !private_display::available() {
         return;
     }
@@ -36,14 +36,11 @@ fn toggle_fullscreen_restores_windowed_bounds() {
     let mut orig_y = 0;
     stone_get_window_position(&mut orig_x, &mut orig_y);
 
-    // Toggle to desktop fullscreen
-    let new_mode = stone_toggle_fullscreen();
-    assert_eq!(new_mode, 1);
+    stone_set_fullscreen(1);
     assert_eq!(stone_get_fullscreen(), 1);
 
-    // Toggle back to windowed: must restore original bounds
-    let restored_mode = stone_toggle_fullscreen();
-    assert_eq!(restored_mode, 0);
+    // Back to windowed: must restore original bounds
+    stone_set_fullscreen(0);
     assert_eq!(stone_get_fullscreen(), 0);
 
     let mut w = 0;
@@ -56,12 +53,12 @@ fn toggle_fullscreen_restores_windowed_bounds() {
     assert_eq!(
         (w, h),
         (orig_w, orig_h),
-        "toggling back to windowed must restore original size"
+        "returning to windowed must restore original size"
     );
     assert_eq!(
         (x, y),
         (orig_x, orig_y),
-        "toggling back to windowed must restore original position"
+        "returning to windowed must restore original position"
     );
 
     assert!(stone_teardown());
@@ -82,8 +79,6 @@ fn hidden_window_ignores_fullscreen_requests() {
     let window = stone_create_window_ex(title.as_ptr(), 200, 150, 480, 360, -1, true, 0);
     assert!(!window.is_null());
     stone_set_fullscreen(2);
-    assert_eq!(stone_get_fullscreen(), 0);
-    assert_eq!(stone_toggle_fullscreen(), 0);
     assert_eq!(stone_get_fullscreen(), 0);
 
     stone_show_window();
@@ -267,16 +262,17 @@ fn wm_fullscreen_exit_leaves_stone_windowed_at_the_wm_geometry() {
         stone_get_window_position(&mut x, &mut y);
         assert_eq!(((w, h), (x, y)), ((500, 400), (100, 100)));
 
-        assert_eq!(stone_toggle_fullscreen(), 1);
+        stone_set_fullscreen(1);
         run_frames(10);
-        assert_eq!(stone_toggle_fullscreen(), 0);
+        assert_eq!(stone_get_fullscreen(), 1);
+        stone_set_fullscreen(0);
         run_frames(10);
         stone_get_window_size(&mut w, &mut h);
         stone_get_window_position(&mut x, &mut y);
         assert_eq!(
             ((w, h), (x, y)),
             ((500, 400), (100, 100)),
-            "a later app-driven toggle restores the WM's windowed bounds"
+            "a later app-driven round trip restores the WM's windowed bounds"
         );
     }
 }

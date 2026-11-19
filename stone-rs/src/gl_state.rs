@@ -29,13 +29,6 @@ pub extern "C" fn stone_gl_flush() {
 // OpenGL / Canvas Functions
 // =============================================================================
 
-#[no_mangle]
-pub extern "C" fn stone_clear(r: c_float, g: c_float, b: c_float, a: c_float) {
-    with_gl(|gl| unsafe {
-        gl.clear_color(r, g, b, a);
-        gl.clear(glow::COLOR_BUFFER_BIT);
-    });
-}
 /// 0 = NEAREST, 1 = LINEAR, 2 = stable bilinear mip sampling. `None` for anything else: a texture filter has no
 /// sensible default to fall back to, and picking one silently is invisible
 /// until the texture magnifies. Keep in sync with the IMAGE_FILTER_* constants

@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::ffi::{c_float, c_int};
 
-use crate::{track_draw_call, with_gl, DebugGl, CURRENT_SHADER, SHADERS};
+use crate::{track_draw_call, with_gl, DebugGl, CURRENT_SHADER};
 
 struct SpriteState {
     vao: glow::VertexArray,
@@ -28,15 +28,6 @@ struct SpriteState {
     // Storage replaced per draw for explicit or scaled UV mappings.
     fs_quad_scaled_vao: glow::VertexArray,
     fs_quad_scaled_vbo: glow::Buffer,
-}
-
-// Resolve a registry program from a Rock shader handle (get_shader_handle);
-// None (unknown / 0 handle) is the caller's fail-closed signal. The immediate
-// and present sprite paths draw through the Rock-authored sprite_basic_shader,
-// resolved fresh by handle each draw (same pattern as text.rs); no cached GL
-// program, so a shader hot-reload re-points with zero staleness.
-fn resolve_program(shader: u32) -> Option<glow::Program> {
-    SHADERS.with(|s| s.borrow().get(&(shader as u64)).map(|sh| sh.program))
 }
 
 thread_local! {
@@ -353,113 +344,6 @@ pub(crate) fn shutdown() {
 #[no_mangle]
 pub extern "C" fn stone_current_shader_bound() -> bool {
     CURRENT_SHADER.with(|c| c.borrow().is_some())
-}
-
-#[no_mangle]
-pub extern "C" fn stone_sprite_draw_texture(
-    shader: u32,
-    tex: u32,
-    tw: c_int,
-    th: c_int,
-    x: c_float,
-    y: c_float,
-    w: c_float,
-    h: c_float,
-    sx: c_float,
-    sy: c_float,
-    sw: c_float,
-    sh: c_float,
-    rot: c_float,
-    scale_x: c_float,
-    scale_y: c_float,
-    r: c_float,
-    g: c_float,
-    b: c_float,
-    a: c_float,
-) {
-    SPRITE_STATE.with(|s| {
-        if let Some(ref state) = *s.borrow() {
-            with_gl(|gl| unsafe {
-                // Use whatever shader is currently bound, or fall back to the
-                // basic sprite program the caller named (get_shader_handle(
-                // sprite_basic_shader)). Standalone callers (draw_sampled_texture, the
-                // screen present) have no shader bound. Fail closed if neither
-                // resolves.
-                let current_shader = CURRENT_SHADER.with(|c| *c.borrow());
-                let active_shader = match current_shader.or_else(|| resolve_program(shader)) {
-                    Some(p) => p,
-                    None => {
-                        crate::log_once!("SPRITE", "stone_sprite_draw_texture: no shader bound and handle {} not in registry; skipping", shader);
-                        return;
-                    }
-                };
-                gl.use_program(Some(active_shader));
-
-                // Calculate UV coordinates
-                let u0 = sx / tw as f32;
-                let v0 = sy / th as f32;
-                let u1 = (sx + sw) / tw as f32;
-                let v1 = (sy + sh) / th as f32;
-
-                // Calculate scaled dimensions
-                let scaled_w = w * scale_x;
-                let scaled_h = h * scale_y;
-
-                // Generate vertices with rotation
-                let cos_r = rot.cos();
-                let sin_r = rot.sin();
-
-                // Vertices before rotation (centered at origin for rotation)
-                let corners = [
-                    (0.0, 0.0),
-                    (scaled_w, 0.0),
-                    (scaled_w, scaled_h),
-                    (0.0, scaled_h),
-                ];
-
-                // Apply rotation and translation
-                let mut rotated = [(0.0f32, 0.0f32); 4];
-                for (i, (cx, cy)) in corners.iter().enumerate() {
-                    let rx = cx * cos_r - cy * sin_r;
-                    let ry = cx * sin_r + cy * cos_r;
-                    rotated[i] = (x + rx, y + ry);
-                }
-
-                // Build vertex data: 6 vertices (2 triangles) * 8 floats each
-                let vertices: [f32; 48] = [
-                    // Triangle 1
-                    rotated[0].0, rotated[0].1, u0, v0, r, g, b, a,
-                    rotated[1].0, rotated[1].1, u1, v0, r, g, b, a,
-                    rotated[2].0, rotated[2].1, u1, v1, r, g, b, a,
-                    // Triangle 2
-                    rotated[0].0, rotated[0].1, u0, v0, r, g, b, a,
-                    rotated[2].0, rotated[2].1, u1, v1, r, g, b, a,
-                    rotated[3].0, rotated[3].1, u0, v1, r, g, b, a,
-                ];
-
-                // Bind sprite VAO. In core profile, draw_arrays requires a VAO
-                // to be current, and the caller binds none of its own.
-                gl.bind_vertex_array(Some(state.vao));
-
-                gl.bind_buffer(glow::ARRAY_BUFFER, Some(state.vbo));
-                if stream_vertices(gl, bytemuck::cast_slice(&vertices)).is_err() {
-                    gl.bind_vertex_array(None);
-                    return;
-                }
-
-                // Bind texture
-                gl.active_texture(glow::TEXTURE0);
-                if let Some(native_tex) = std::num::NonZeroU32::new(tex) {
-                    gl.bind_texture(glow::TEXTURE_2D, Some(glow::NativeTexture(native_tex)));
-                }
-
-                // Draw
-                gl.draw_arrays(glow::TRIANGLES, 0, 6);
-                crate::uniform_block::mark_program_drawn(active_shader);
-                track_draw_call();
-            });
-        }
-    });
 }
 
 thread_local! {

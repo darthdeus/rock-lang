@@ -1049,11 +1049,6 @@ fn scancode_value_entry(scancode: c_int) -> Option<&'static ScancodeToken> {
 }
 
 #[no_mangle]
-pub extern "C" fn stone_scancode_count() -> c_int {
-    SCANCODE_TOKENS.len() as c_int
-}
-
-#[no_mangle]
 pub extern "C" fn stone_scancode_token_at(index: c_int) -> *const c_char {
     if index < 0 {
         return ptr::null();

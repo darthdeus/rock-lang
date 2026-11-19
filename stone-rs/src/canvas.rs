@@ -730,7 +730,7 @@ pub(crate) fn live_canvas_ids() -> Vec<u64> {
 }
 
 /// Asset-report census over the canvas registry: population and one handle
-/// per index in id order (the `stone_get_live_image_handle` shape).
+/// per index in id order.
 #[no_mangle]
 pub extern "C" fn stone_get_live_canvas_count() -> c_int {
     get_canvas_count().min(c_int::MAX as usize) as c_int
@@ -770,73 +770,6 @@ pub extern "C" fn stone_canvas_report(handle: u64, width: *mut c_int, height: *m
         *height = h;
     }
     format
-}
-
-/// Return one canvas's CONTENTS to what creation leaves behind, keeping its
-/// logical identity: same handle, same FBO, same textures, same size. This is
-/// the sim worker's boundary operation for a canvas that SURVIVES an entry
-/// (`stone/engine/sim_native.rock`).
-///
-/// The live-handle sets cannot see this case at all. A boot canvas the entry
-/// merely PAINTED is neither an extra nor a missing -- it is present, at its
-/// boot id, holding the predecessor's pixels, which is how a scene composited
-/// over a non-blank target reached the next entry.
-///
-/// The clear is chosen by the canvas's own recorded format, not by one generic
-/// `glClear`: `glClear` on an INTEGER color buffer is undefined per spec, so an
-/// R32I id target goes through `glClearBufferiv` exactly as its own per-frame
-/// reset does. Returns false for a handle the registry does not know, so a
-/// caller cannot read "nothing to do" as success.
-#[no_mangle]
-pub extern "C" fn stone_canvas_reset_contents(handle: u64) -> bool {
-    if handle == 0 {
-        return false;
-    }
-    let Some(canvas) = lookup_canvas(handle) else {
-        return false;
-    };
-    // The ACTIVE RECT is contents too, and creation's value is known -- the
-    // canvas's full size -- so it resets rather than needing a snapshot. It is
-    // restored here rather than in an ambient row because it belongs to THIS
-    // handle: one process-wide row over N canvases could not say which canvas
-    // moved. Its exposed window is narrow but real -- `set_scene_active_rects`
-    // re-establishes it on the successor's first `frame_core_resolve_view` --
-    // so what crosses is every sim statement before that frame.
-    with_canvas_mut(handle, |c| {
-        c.active_w = c.width;
-        c.active_h = c.height;
-    });
-    with_gl(|gl| unsafe {
-        let previous = CURRENT_FBO.with(|c| *c.borrow());
-        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(canvas.fbo));
-
-        // A `glClear` is gated by the write state bound at the time, and the
-        // boundary inherits the PREDECESSOR's: a masked-off channel, or a
-        // scissor rect left from its last pass, turns this clear into a no-op
-        // or a partial one while it still reports success. These three are set
-        // to GL's own defaults, which is what the equivalent moment in a fresh
-        // process has, so establishing them moves the worker toward the
-        // fresh-process contract rather than away from it.
-        gl.disable(glow::SCISSOR_TEST);
-        gl.color_mask(true, true, true, true);
-
-        if canvas.int_format {
-            // Not maskable by glColorMask in the same way and undefined through
-            // glClear, so an id target clears through its own path.
-            gl.clear_buffer_i32_slice(glow::COLOR, 0, &[0, 0, 0, 0]);
-        } else {
-            gl.clear_color(0.0, 0.0, 0.0, 0.0);
-            gl.clear(glow::COLOR_BUFFER_BIT);
-        }
-        // A depth attachment is part of the same projection: stale depth
-        // rejects the successor's fragments even over a blank colour target.
-        // GL's post-creation value is 1.0 (the far plane).
-        if canvas.has_depth {
-            crate::gl_state::clear_depth_unmasked(gl, 1.0);
-        }
-        gl.bind_framebuffer(glow::FRAMEBUFFER, resolve_target(previous));
-    })
-    .is_some()
 }
 
 /// Re-specify one canvas's storage at `width` x `height`, keeping its handle,

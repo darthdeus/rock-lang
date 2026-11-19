@@ -727,14 +727,6 @@ pub extern "C" fn stone_flow_cancel(handle: u64) {
     }
 }
 
-/// Cancel all handles without resetting the monotonic handle namespace.
-#[no_mangle]
-pub extern "C" fn stone_flow_cancel_all() {
-    if let Some(service) = active_flow_service() {
-        service.cancel_all();
-    }
-}
-
 pub(crate) fn shutdown() {
     let service = flow_service_slot().lock().unwrap().take();
     if let Some(service) = service {
@@ -940,29 +932,6 @@ mod tests {
             0
         );
         assert_eq!(output, vec![0.0, 1.0, 2.0]);
-        assert_eq!(stone_flow_poll(handle), -1);
-        shutdown();
-    }
-
-    #[test]
-    fn ffi_cancel_all_expires_pending_handle() {
-        let _guard = FLOW_TEST_LOCK.lock().unwrap();
-        shutdown();
-        let width = 129;
-        let height = 129;
-        let walkable = interior_snapshot(width, height);
-        let handle = stone_flow_submit(
-            width as i32,
-            height as i32,
-            (width / 2) as i32,
-            (height / 2) as i32,
-            64,
-            walkable.as_ptr(),
-            walkable.len() as i64,
-        );
-        assert_ne!(handle, 0);
-        stone_flow_cancel_all();
-        assert_eq!(stone_flow_wait(handle), -1);
         assert_eq!(stone_flow_poll(handle), -1);
         shutdown();
     }

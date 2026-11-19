@@ -247,13 +247,6 @@ pub(crate) fn on_teardown() {
     }
 }
 
-/// Capture the next presented frame. Returns false + logs when the library
-/// is absent -- never a silent no-op.
-#[no_mangle]
-pub extern "C" fn stone_renderdoc_trigger_capture() -> bool {
-    trigger_capture()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

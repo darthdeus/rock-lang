@@ -779,9 +779,9 @@ fn set_shader_raw(shader: ShaderId) {
 
 pub fn unset_shader() {
     // Clears to "no shader" (CURRENT_SHADER = none). The default sprite
-    // program is NOT a "current shader": the standalone draw paths
-    // (stone_sprite_draw_texture, stone_draw_mesh) bind it and set its
-    // matrices at draw time when nothing is bound. Re-binding it here
+    // program is NOT a "current shader": the standalone draw path
+    // (stone_draw_mesh) binds it and sets its matrices at draw time when
+    // nothing is bound. Re-binding it here
     // made the driver revalidate its vertex shader against whatever VAO
     // each pass boundary left current (NVIDIA recompile, khr id 131218).
     stone_set_shader(0)

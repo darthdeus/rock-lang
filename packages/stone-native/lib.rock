@@ -39,7 +39,6 @@ pub @nomangle inline(lua) fn stone_native_load() = """
         const char* stone_log_scoped_errors(size_t* len);
         int stone_log_take_scoped_error(const uint8_t* record, size_t len);
         int stone_log_take_collected_error(const uint8_t* record, size_t len);
-        void stone_log_truncate_collected_errors(int len);
         uint8_t stone_actor_query_rect(const int* records, int64_t len, const int* candidates, int64_t candidate_len, int min_x, int min_y, int max_x, int max_y, bool include_uninstalled, int* output, int64_t output_len);
         double stone_terrain_noise(double x, double y);
         double stone_terrain_random(double x, double y, double stream, double seed);
@@ -55,7 +54,6 @@ pub @nomangle inline(lua) fn stone_native_load() = """
         int stone_flow_wait(uint64_t handle);
         int stone_flow_copy(uint64_t handle, float* output, int64_t len);
         void stone_flow_cancel(uint64_t handle);
-        void stone_flow_cancel_all(void);
         int64_t stone_relight_diff_submit(int64_t snapshot, int width, int samples, int border, const uint8_t* next, int64_t len);
         int stone_relight_diff_publish(uint64_t handle, float* region);
         void stone_relight_diff_cancel(uint64_t handle);
@@ -96,7 +94,6 @@ pub extern(ffi, "stone") fn stone_flow_poll(handle: int) -> int
 pub extern(ffi, "stone") fn stone_flow_wait(handle: int) -> int
 pub extern(ffi, "stone") fn stone_flow_copy(handle: int, output: Ptr<float>, len: int) -> int
 pub extern(ffi, "stone") fn stone_flow_cancel(handle: int)
-pub extern(ffi, "stone") fn stone_flow_cancel_all()
 
 pub extern(ffi, "stone") fn stone_relight_diff_submit(snapshot: int, width: int, samples: int, border: int, next: PtrU8, len: int) -> int
 pub extern(ffi, "stone") fn stone_relight_diff_publish(handle: int, region: Ptr<float>) -> int

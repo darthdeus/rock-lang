@@ -532,7 +532,7 @@ pub(crate) fn live_mesh_ids() -> Vec<u64> {
 }
 
 /// Asset-report census over the retained-mesh registry: population, one
-/// handle per index in id order (the `stone_get_live_image_handle` shape),
+/// handle per index in id order,
 /// and the uploaded bytes a handle holds. 0 for an unknown handle: it holds
 /// no buffer, so there is nothing to count.
 #[no_mangle]

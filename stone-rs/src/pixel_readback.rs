@@ -768,22 +768,6 @@ pub extern "C" fn stone_canvas_capture_cancel(id: u64) -> bool {
     stone_canvas_capture_release(id)
 }
 
-/// Cancel every capture owned by this GL thread and return the number retired.
-///
-/// Captures are deliberately transient rather than native-ledger handles: a
-/// save snapshot is never part of a worker's restored game world. The replay
-/// boundary and final teardown must still close them before their GL context is
-/// replaced, including when an entry aborts while a capture is pending.
-#[no_mangle]
-pub extern "C" fn stone_canvas_capture_cancel_all() -> c_int {
-    let captures = drain_canvas_captures();
-    let count = captures.len();
-    for capture in captures {
-        destroy_canvas_capture(capture);
-    }
-    c_int::try_from(count).unwrap_or(c_int::MAX)
-}
-
 /// Create a new pixel-readback slot. `is_depth = 0` for color (RGBA32F red
 /// channel), non-zero for depth. Returns 0 on GL failure.
 #[no_mangle]
@@ -830,7 +814,7 @@ pub(crate) fn live_readback_ids() -> Vec<u64> {
 /// are unreachable until a submit primes them again.
 ///
 /// Returns false for an unknown handle so the caller cannot report a reset it
-/// did not perform (the same asymmetry as `stone_canvas_reset_contents`).
+/// did not perform.
 #[no_mangle]
 pub extern "C" fn stone_pixel_readback_reset_contents(id: u64) -> bool {
     if id == 0 {
@@ -1381,8 +1365,8 @@ mod tests {
     use super::{
         buffer_from_name, canvas_capture_size, centered_read_rect, copy_rgba_rows_top_down,
         landed_prefix, nearest_int_id, poll_answer_landed, poll_ring_free_index,
-        readback_fence_ready, release_all, requested_side, stone_canvas_capture_cancel_all,
-        CanvasCapture, CanvasCaptureState, ReadRect, ReadShape, CANVAS_CAPTURES,
+        readback_fence_ready, release_all, requested_side, CanvasCapture, CanvasCaptureState,
+        ReadRect, ReadShape, CANVAS_CAPTURES,
     };
 
     #[test]
@@ -1546,27 +1530,6 @@ mod tests {
         let mut output = [0; 8];
         unsafe { copy_rgba_rows_top_down(source.as_ptr(), output.as_mut_ptr(), 1, 2) };
         assert_eq!(output, [20, 21, 22, 23, 10, 11, 12, 13]);
-    }
-
-    #[test]
-    fn worker_boundary_cancel_all_drains_transient_captures() {
-        CANVAS_CAPTURES.with(|captures| {
-            captures.borrow_mut().insert(
-                1,
-                CanvasCapture {
-                    pbo: buffer_from_name(1).unwrap(),
-                    fence: None,
-                    width: 1,
-                    height: 1,
-                    bytes: 4,
-                    state: CanvasCaptureState::Pending,
-                },
-            );
-        });
-
-        assert_eq!(stone_canvas_capture_cancel_all(), 1);
-        assert!(CANVAS_CAPTURES.with(|captures| captures.borrow().is_empty()));
-        assert_eq!(stone_canvas_capture_cancel_all(), 0);
     }
 
     #[test]

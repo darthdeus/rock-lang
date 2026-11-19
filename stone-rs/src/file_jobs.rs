@@ -1049,25 +1049,6 @@ impl Jobs {
         self.release_bytes(transaction.bytes);
         true
     }
-
-    fn reset_transactions(&mut self) -> usize {
-        let mut reset_count = 0;
-        let mut released_bytes = 0;
-        for (_, transaction) in self.transactions.drain() {
-            reset_count += 1;
-            released_bytes += transaction.bytes;
-        }
-        self.release_bytes(released_bytes);
-        self.pending.retain(|_, pending| {
-            let Some(cancellation) = &pending.cancellation else {
-                return true;
-            };
-            let _ = cancellation.cancel();
-            reset_count += 1;
-            false
-        });
-        reset_count
-    }
 }
 
 impl WorkerControl {
@@ -1851,11 +1832,6 @@ pub extern "C" fn stone_file_transaction_commit(transaction: i32) -> i32 {
 #[no_mangle]
 pub extern "C" fn stone_file_transaction_abort(transaction: i32) -> bool {
     jobs().lock().unwrap().abort_transaction(transaction)
-}
-
-#[no_mangle]
-pub extern "C" fn stone_file_transactions_reset() -> i32 {
-    jobs().lock().unwrap().reset_transactions() as i32
 }
 
 #[no_mangle]
@@ -3003,62 +2979,6 @@ mod tests {
         gate.release();
         assert_eq!(poll_queue(&queue, job, true), 1);
         assert_eq!(std::fs::read(path).unwrap(), b"before");
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn transaction_reset_detaches_transactions_and_preserves_legacy_jobs() {
-        let root = test_root();
-        let gate = Arc::new(TestGate::new());
-        let mut test_limits = limits(2, 64);
-        test_limits.max_open_transactions = 2;
-        let queue = Mutex::new(Jobs::new_with_gate(test_limits, Arc::clone(&gate)));
-        let open_transaction = queue.lock().unwrap().begin_transaction().unwrap();
-        let builder_bytes = b"builder".to_vec();
-        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
-            open_transaction,
-            root.join("builder"),
-            builder_bytes.clone(),
-            false,
-            false,
-        ));
-        let committed_transaction = queue.lock().unwrap().begin_transaction().unwrap();
-        let transaction_bytes = b"transaction".to_vec();
-        let transaction_path = root.join("transaction");
-        assert!(queue.lock().unwrap().add_transaction_fragment_owned(
-            committed_transaction,
-            transaction_path.clone(),
-            transaction_bytes.clone(),
-            false,
-            false,
-        ));
-        let job = queue
-            .lock()
-            .unwrap()
-            .commit_transaction(committed_transaction)
-            .unwrap();
-        gate.wait_until_entered();
-        let legacy_path = root.join("legacy");
-        let legacy_bytes = b"legacy";
-        let legacy_job = queued_write(&queue, legacy_path.clone(), legacy_bytes);
-        let reset_count = queue.lock().unwrap().reset_transactions();
-        assert_eq!(reset_count, 2);
-        assert!(queue.lock().unwrap().transactions.is_empty());
-        assert!(!queue.lock().unwrap().pending.contains_key(&job));
-        assert!(queue.lock().unwrap().pending.contains_key(&legacy_job));
-        assert_eq!(poll_queue(&queue, job, false), -1);
-        assert_eq!(
-            queue.lock().unwrap().accounting.load(Ordering::Acquire),
-            transaction_bytes.len() + legacy_bytes.len(),
-        );
-        let replacement = queue.lock().unwrap().begin_transaction().unwrap();
-        assert!(queue.lock().unwrap().abort_transaction(replacement));
-        gate.release();
-        assert_eq!(poll_queue(&queue, legacy_job, true), 1);
-        assert_eq!(queue.lock().unwrap().accounting.load(Ordering::Acquire), 0);
-        assert!(!transaction_path.exists());
-        assert!(!root.join("builder").exists());
-        assert_eq!(std::fs::read(legacy_path).unwrap(), legacy_bytes);
         let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -1424,11 +1424,6 @@ pub extern "C" fn stone_test_virtual_pad_detach(index: c_int) -> bool {
 }
 
 #[no_mangle]
-pub extern "C" fn stone_test_virtual_pad_cleanup() {
-    input::test_virtual_pad_cleanup();
-}
-
-#[no_mangle]
 pub extern "C" fn stone_pad_connected() -> bool {
     with_window(|window| window.controller_manager.borrow().connected()).unwrap_or(false)
 }
@@ -2288,59 +2283,6 @@ pub extern "C" fn stone_stop_text_input() {
     unsafe { sdl2::sys::SDL_StopTextInput() };
 }
 
-#[no_mangle]
-pub extern "C" fn stone_test_push_key_event(token: *const c_char, down: bool) -> bool {
-    if token.is_null() {
-        return false;
-    }
-    let token = unsafe { CStr::from_ptr(token) }.to_str().unwrap_or("");
-    let (keycode, scancode) = match token {
-        "lshift" => (
-            sdl2::keyboard::Keycode::LShift,
-            sdl2::keyboard::Scancode::LShift,
-        ),
-        "right" => (
-            sdl2::keyboard::Keycode::Right,
-            sdl2::keyboard::Scancode::Right,
-        ),
-        _ => return false,
-    };
-    let keymod = if token == "right" {
-        sdl2::keyboard::Mod::LSHIFTMOD.bits()
-    } else {
-        0
-    };
-    let window_id = with_window(|window| window.window.id()).unwrap_or(0);
-    let mut raw = sdl2::sys::SDL_Event {
-        key: sdl2::sys::SDL_KeyboardEvent {
-            type_: if down {
-                sdl2::sys::SDL_EventType::SDL_KEYDOWN as u32
-            } else {
-                sdl2::sys::SDL_EventType::SDL_KEYUP as u32
-            },
-            timestamp: 0,
-            windowID: window_id,
-            state: if down {
-                sdl2::sys::SDL_PRESSED as u8
-            } else {
-                sdl2::sys::SDL_RELEASED as u8
-            },
-            repeat: 0,
-            padding2: 0,
-            padding3: 0,
-            keysym: sdl2::sys::SDL_Keysym {
-                scancode: unsafe {
-                    std::mem::transmute::<u32, sdl2::sys::SDL_Scancode>(scancode as u32)
-                },
-                sym: keycode.into_i32(),
-                mod_: keymod,
-                unused: 0,
-            },
-        },
-    };
-    unsafe { sdl2::sys::SDL_PushEvent(&mut raw) == 1 }
-}
-
 /// Swap buffers
 #[no_mangle]
 pub extern "C" fn stone_swap_window(_window: *mut StoneWindow) {
@@ -3082,29 +3024,6 @@ pub extern "C" fn stone_set_fullscreen(mode: c_int) {
         }
         set_fullscreen_impl(window, mode);
     });
-}
-
-/// Toggle fullscreen mode between Desktop Fullscreen and Windowed.
-/// Preserves and restores windowed bounds. Returns the new mode (1 = Fullscreen, 0 = Windowed).
-#[no_mangle]
-pub extern "C" fn stone_toggle_fullscreen() -> c_int {
-    with_window_mut(|window| {
-        let is_fs = window.window.fullscreen_state() != sdl2::video::FullscreenType::Off;
-        if !display_change_allowed(window, "toggle_fullscreen") {
-            return is_fs as c_int;
-        }
-        let is_max = (window.window.window_flags()
-            & sdl2::sys::SDL_WindowFlags::SDL_WINDOW_MAXIMIZED as u32)
-            != 0;
-        if is_fs || is_max {
-            set_fullscreen_impl(window, 0);
-            0
-        } else {
-            set_fullscreen_impl(window, 1);
-            1
-        }
-    })
-    .unwrap_or(0)
 }
 
 /// Delay
@@ -3937,22 +3856,6 @@ pub extern "C" fn stone_get_live_canvas_bytes() -> u64 {
 }
 
 #[no_mangle]
-pub extern "C" fn stone_get_live_image_handle(index: c_int) -> u64 {
-    if index < 0 {
-        return 0;
-    }
-    IMAGES.with(|images| {
-        let mut entries: Vec<(u64, u32, u32)> = images
-            .borrow()
-            .iter()
-            .map(|(id, image)| (*id, image.width, image.height))
-            .collect();
-        entries.sort_unstable_by_key(|entry| entry.0);
-        entries.get(index as usize).map_or(0, |entry| entry.0)
-    })
-}
-
-#[no_mangle]
 pub extern "C" fn stone_reset_frame_stats() {
     FRAME_STATS.with(|fs| {
         let mut stats = fs.borrow_mut();
@@ -3982,7 +3885,7 @@ pub extern "C" fn stone_reset_frame_stats() {
 
 // Re-export sprite functions that are used internally or externally
 pub use mesh::{stone_mesh_create, stone_mesh_draw, stone_mesh_free, stone_mesh_set_instances};
-pub use sprite::{stone_draw_mesh, stone_sprite_draw_texture};
+pub use sprite::stone_draw_mesh;
 
 // Shader compile/link helpers now live in the shared `stone-gl` crate
 // (re-exported above for `crate::compile_shader` / `crate::link_program`).

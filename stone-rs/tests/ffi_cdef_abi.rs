@@ -9,17 +9,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Exports reached without a cdef: Lua C modules the runtime opens, the asset
-/// registry hosts fill from Rust, stone_telemetry_flush (the only production
-/// caller of the flush path the telemetry tests drive), and exports awaiting
-/// deletion.
+/// registry hosts fill from Rust, and stone_telemetry_flush, the only
+/// production caller of the flush path the telemetry tests drive.
 const EXPORTS_WITHOUT_CDEF: &[&str] = &[
     "luaopen_stone_lua_alloc_counter",
     "luaopen_stone_lua_jit_health",
     "stone_register_asset",
     "stone_telemetry_flush",
-    "stone_clear",
-    "stone_renderdoc_trigger_capture",
-    "stone_sprite_draw_texture",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]

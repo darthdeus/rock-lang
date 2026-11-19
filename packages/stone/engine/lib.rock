@@ -294,8 +294,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         uint8_t stone_test_virtual_pad_button(int index, const char* token, bool down);
         uint8_t stone_test_virtual_pad_axis(int index, const char* token, int value);
         uint8_t stone_test_virtual_pad_detach(int index);
-        void stone_test_virtual_pad_cleanup(void);
-        uint8_t stone_test_push_key_event(const char* token, bool down);
         uint8_t stone_pad_connected(void);
         const char* stone_pad_type_name(void);
         StoneWindow* stone_create_window_ex(const char* title, int x, int y, int width, int height, int display, bool resizable, int fullscreen);
@@ -306,7 +304,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         void stone_start_text_input(void);
         void stone_stop_text_input(void);
 
-        int stone_scancode_count(void);
         const char* stone_scancode_token_at(int index);
         const char* stone_scancode_token_for(int scancode);
         int stone_scancode_value(const char* token);
@@ -371,7 +368,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         uint8_t stone_file_jobs_test_entered(void);
         uint8_t stone_file_jobs_test_pause_publication(void);
         uint8_t stone_file_jobs_test_publication_entered(void);
-        int stone_file_transactions_reset(void);
         uint8_t stone_remove_file(const char* path);
         uint8_t stone_remove_dir(const char* path);
         uint8_t stone_file_sync(const char* path);
@@ -427,7 +423,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         void stone_set_vsync(int enabled);
         void stone_force_vsync_off(int force);
         void stone_set_fullscreen(int mode);
-        int stone_toggle_fullscreen(void);
         int stone_get_fullscreen(void);
         void stone_delay(uint32_t ms);
 
@@ -447,9 +442,7 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         void stone_image_storage_size(StoneImageHandle handle, int* width, int* height);
         uint8_t stone_image_is_stub(StoneImageHandle handle);
         uint8_t stone_probe_image_size(const char* path, int* width, int* height);
-        StoneImageHandle stone_get_live_image_handle(int index);
         uint64_t stone_get_image_byte_len(StoneImageHandle handle);
-        bool stone_supports_bc1(void);
         int stone_get_image_format(StoneImageHandle handle);
         uint8_t stone_image_exists(StoneImageHandle handle);
         uint32_t stone_get_image_texture(StoneImageHandle handle);
@@ -459,7 +452,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         void stone_log_collect_errors(void);
         const char* stone_log_collected_errors(size_t* len);
         int stone_log_take_collected_error(const uint8_t* record, size_t len);
-        void stone_log_truncate_collected_errors(int len);
         int64_t stone_image_read_texel(StoneImageHandle handle, int x, int y);
         void stone_bind_sampler(int unit, int mode, StoneImageHandle image);
         uint8_t stone_sampler_bound(int unit);
@@ -615,7 +607,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
 
         StoneCanvasHandle stone_create_canvas(int width, int height, int format, bool with_depth);
         void stone_destroy_canvas(StoneCanvasHandle handle);
-        uint8_t stone_canvas_reset_contents(StoneCanvasHandle handle);
         uint8_t stone_canvas_bound_as_target(StoneCanvasHandle handle);
         void stone_set_canvas(StoneCanvasHandle handle);
         void stone_set_canvas_active(StoneCanvasHandle handle, int w, int h);
@@ -642,7 +633,6 @@ pub @nomangle @allow(long_inline_lua, "ffi.cdef SDL/Stone C type block") inline(
         int stone_canvas_capture_poll(uint64_t id, uint8_t* out, int capacity);
         uint8_t stone_canvas_capture_release(uint64_t id);
         uint8_t stone_canvas_capture_cancel(uint64_t id);
-        int stone_canvas_capture_cancel_all(void);
         uint8_t stone_canvas_upload_rgba32f(StoneCanvasHandle handle, const float* pixels, int count);
         int  stone_canvas_read_region_rgba32f(StoneCanvasHandle handle, int x, int y, int w, int h, float* out, int capacity);
         int stone_canvas_read_region_i32(StoneCanvasHandle handle, int x, int y, int w, int h, int32_t* out, int capacity);
@@ -874,8 +864,6 @@ pub extern(ffi, "stone") fn stone_test_virtual_pad_attach() -> int
 pub extern(ffi, "stone") fn stone_test_virtual_pad_button(index: int, token: string, down: bool) -> bool
 pub extern(ffi, "stone") fn stone_test_virtual_pad_axis(index: int, token: string, value: int) -> bool
 pub extern(ffi, "stone") fn stone_test_virtual_pad_detach(index: int) -> bool
-extern(ffi, "stone") fn stone_test_virtual_pad_cleanup()
-pub extern(ffi, "stone") fn stone_test_push_key_event(token: string, down: bool) -> bool
 extern(ffi, "stone") fn stone_pad_connected() -> bool
 @inline inline(lua) fn stone_pad_type_name_ptr() -> any = "stone.stone_pad_type_name()"
 
@@ -925,7 +913,6 @@ pub extern(ffi, "stone") fn stone_gpu_scopes_reset_stats()
 extern(ffi, "stone") fn stone_set_vsync(enabled: int)
 extern(ffi, "stone") fn stone_force_vsync_off(force: int)
 extern(ffi, "stone") fn stone_set_fullscreen(mode: int)
-pub extern(ffi, "stone") fn stone_toggle_fullscreen() -> int
 pub extern(ffi, "stone") fn stone_get_fullscreen() -> int
 pub extern(ffi, "stone") fn stone_delay(ms: int)
 
@@ -1104,7 +1091,6 @@ pub extern(ffi, "stone") fn stone_file_jobs_test_release() -> bool
 pub extern(ffi, "stone") fn stone_file_jobs_test_entered() -> bool
 pub extern(ffi, "stone") fn stone_file_jobs_test_pause_publication() -> bool
 pub extern(ffi, "stone") fn stone_file_jobs_test_publication_entered() -> bool
-extern(ffi, "stone") fn stone_file_transactions_reset() -> int
 
 pub inline(lua) fn file_transaction_write(transaction: int, path: string, data: string, append: bool = false) -> bool = """
     return stone.stone_file_transaction_write(transaction, path, data, #data, append)
@@ -1327,7 +1313,6 @@ fn get_stone_event_text(event: StoneEvent) -> string {
     return ffi_string(get_stone_event_text_ptr(event), null)
 }
 
-pub extern(ffi, "stone") fn stone_scancode_count() -> int
 @inline inline(lua) fn stone_scancode_token_at_ptr(index: int) -> any = "stone.stone_scancode_token_at(index)"
 
 pub fn stone_scancode_token_at(index: int) -> string {
@@ -1455,14 +1440,12 @@ extern(ffi, "stone") fn stone_image_storage_size(handle: int, width: Ptr<int>, h
 
 extern(ffi, "stone") fn stone_image_is_stub(handle: int) -> bool
 
-pub extern(ffi, "stone") fn stone_get_live_image_handle(index: int) -> int
 
 // Honest GL bytes for one live image, including its mip chain when present.
 // The image census reads this per classified handle; multiplying
 // stone_get_image_size by 4 overcounts R8 font aliases. The broad live total
 // also includes canvas attachments.
 pub extern(ffi, "stone") fn stone_get_image_byte_len(handle: int) -> int
-pub extern(ffi, "stone") fn stone_supports_bc1() -> bool
 pub extern(ffi, "stone") fn stone_get_image_format(handle: int) -> int
 
 // Rock-level helper returning a tuple. Dispatched by arg count: this
@@ -1763,9 +1746,6 @@ extern(ffi, "stone") fn stone_create_canvas(width: int, height: int, format: int
 
 extern(ffi, "stone") fn stone_destroy_canvas(handle: int)
 
-// Return a canvas's CONTENTS to creation's, keeping its logical identity.
-// False for a handle the registry does not know (`sim_native.rock`).
-pub extern(ffi, "stone") fn stone_canvas_reset_contents(handle: int) -> bool
 
 // Whether a canvas has been bound as a render target since creation -- i.e.
 // whether its contents are still provably creation's (`sim_native.rock`).
@@ -1811,7 +1791,6 @@ pub extern(ffi, "stone") fn stone_canvas_capture_begin(handle: int) -> int
 pub extern(ffi, "stone") fn stone_canvas_capture_poll(id: int, out: PtrU8, capacity: int) -> int
 pub extern(ffi, "stone") fn stone_canvas_capture_release(id: int) -> bool
 pub extern(ffi, "stone") fn stone_canvas_capture_cancel(id: int) -> bool
-extern(ffi, "stone") fn stone_canvas_capture_cancel_all() -> int
 pub extern(ffi, "stone") fn stone_canvas_upload_rgba32f(handle: int, pixels: Ptr<float>, count: int) -> bool
 pub extern(ffi, "stone") fn stone_canvas_read_region_rgba32f(handle: int, x: int, y: int, w: int, h: int, out: Ptr<float>, capacity: int) -> int
 extern(ffi, "stone") fn stone_canvas_read_region_i32(handle: int, x: int, y: int, w: int, h: int, out: Ptr<int>, capacity: int) -> int
