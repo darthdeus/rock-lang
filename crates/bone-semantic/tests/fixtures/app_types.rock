@@ -1,5 +1,3 @@
-//! all lower to one `App { ctor, params }` (ctor = TypeCtor::Array | Map | ...).
-
 //- array_param
 fn f(p: [int]) -> int { 5 }
    //^ [int]

@@ -1,5 +1,3 @@
-//! `//^ ty` markers are checked in every embedded file.
-
 //- module_ownership_two_files_share_one_module
 //-- lib.rock @pkg=chess,1 @v1
 mod pieces;

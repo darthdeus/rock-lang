@@ -1,5 +1,3 @@
-//! Marker `//^` sits on the expression whose type is under test. The "refine"
-
 //- global_refine_basic
 value Player { name: string }
 global P: Player? = null

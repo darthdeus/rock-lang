@@ -1,5 +1,3 @@
-//-- <file> @pkg=<self_name>,<id> [@v1]`;
-
 //- a_package_unary_operator_declarations
 //-- package.rock
 struct P {

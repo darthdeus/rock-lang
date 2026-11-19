@@ -1,7 +1,3 @@
-//! Intra-`||` refinement: the RHS of `||` runs only when the LHS is false, so it
-//! `if c == null || !c.in_reach()` type-check -- the guard-combine of two
-//! DIVERGENCE from rock: rock does not narrow across `||` operands at all. bone implements the intended dual-of-`&&`
-
 //- refine_or_rhs_field
 struct S { v: int }
 fn f(x: S?) -> bool {

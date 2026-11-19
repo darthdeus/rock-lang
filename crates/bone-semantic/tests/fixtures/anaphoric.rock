@@ -1,7 +1,3 @@
-//! Anaphoric ident `^name`: the explicit opt-in for reading the CALLER's
-//! hygiene-renamed; `^name` escapes that rename, so after expansion it is an
-
-// `^x` reads the caller's local `x` (int).
 //- anaphoric_reads_caller_local
 macro grab_x() -> int {
     ^x

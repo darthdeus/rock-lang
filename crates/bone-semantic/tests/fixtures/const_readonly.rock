@@ -1,5 +1,3 @@
-//! Each section reads the global into `r` (a valid `//^` anchor) so the ONLY
-
 //- mutable_global_assign_ok
 global BAR: int = 5
 fn f() -> int {

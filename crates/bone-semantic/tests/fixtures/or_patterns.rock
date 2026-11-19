@@ -1,5 +1,3 @@
-//! Or-patterns `A | B | C` at the top of a match arm. Each alternative is
-
 //- or_unit_variants
 enum Faction { Hostile, Friendly, Pet, Neutral }
 fn is_friendly(f: Faction) -> bool {

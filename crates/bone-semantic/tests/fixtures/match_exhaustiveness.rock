@@ -1,5 +1,3 @@
-//! Each `@fail` section is otherwise well-formed (valid `//^` annotation) so the
-
 //- exhaustive_all_variants
 enum E { A, B, C }
 fn f(e: E) -> int {

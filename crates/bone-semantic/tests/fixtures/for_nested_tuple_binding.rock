@@ -1,5 +1,3 @@
-//! tree { Leaf(binding) | Tuple(Vec<BindingPattern>) } stored on `For` and
-
 //- for_nested_tuple
 struct FIter<T> { last: T }
 fn iter<T>(v: [T]) -> FIter<T> { return FIter { last: v[0] } }

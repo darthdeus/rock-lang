@@ -1,5 +1,3 @@
-//! Bitwise/shift operators (`& | ^ << >>`) and `~` are int->int. Unlike
-
 //- bitwise_binops
 fn f() -> int {
     let a = 4 & 6
