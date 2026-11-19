@@ -37,8 +37,7 @@ fn load_paths(
 
     Ok(SourceFiles {
         files,
-        package_roots: Vec::new(),
-        ns_aliases: None,
+        ..SourceFiles::empty()
     })
 }
 
@@ -66,11 +65,9 @@ pub fn source_file_new_with_context(path: impl AsRef<Path>) -> Result<SourceFile
     let canonical = fs_err::canonicalize(path.as_ref())?;
     let mut source = source_file_from_canonical_path(&canonical)?;
     let start_dir = canonical.parent().unwrap_or(&canonical);
-    if let Some((manifest, config)) = crate::stick::StickConfig::find_from_dir(start_dir)? {
-        let manifest_dir = manifest.parent().unwrap_or(&manifest);
-        let channel = crate::stick::resolved_channel_for(&config);
-        let graph =
-            crate::stick::graph::PackageGraph::build_with_channel(manifest_dir, &config, &channel)?;
+    if let Some((manifest_dir, graph)) =
+        crate::stick::graph::PackageGraph::find_from_dir(start_dir)?
+    {
         let owner = graph.package_of_file(&canonical).ok_or_else(|| {
             anyhow::anyhow!(
                 "file {} is not owned by the package graph rooted at {}",

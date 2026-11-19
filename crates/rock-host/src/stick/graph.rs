@@ -208,7 +208,6 @@ impl Builder {
                 target,
             });
         }
-        dependencies.sort_by(|a, b| a.declared_key.cmp(&b.declared_key));
         self.validate_dependency_aliases(config, &dependencies)?;
 
         self.stack.pop();
@@ -298,6 +297,16 @@ pub(crate) fn normalize_dep_key(key: &str) -> Result<String> {
 }
 
 impl PackageGraph {
+    pub(crate) fn find_from_dir(start_dir: &Path) -> Result<Option<(PathBuf, Self)>> {
+        let Some((manifest, config)) = StickConfig::find_from_dir(start_dir)? else {
+            return Ok(None);
+        };
+        let directory = manifest.parent().unwrap_or(&manifest);
+        let channel = super::resolved_channel_for(&config);
+        let graph = Self::build_with_channel(directory, &config, &channel)?;
+        Ok(Some((directory.to_path_buf(), graph)))
+    }
+
     pub fn build(manifest_dir: &Path) -> Result<PackageGraph> {
         let manifest_path = manifest_dir.join("stick.toml");
         let config = StickConfig::from_path(&manifest_path)?;
@@ -384,19 +393,6 @@ impl PackageGraph {
         best.map(|(id, _)| id)
     }
 
-    fn owns(
-        &self,
-        owner: PackageId,
-        path: &Path,
-        package_of: impl FnOnce(&Path) -> Option<PackageId>,
-    ) -> bool {
-        let node = self.package(owner);
-        if !path.starts_with(&node.root) {
-            return false;
-        }
-        package_of(path) == Some(owner)
-    }
-
     /// Inactive source groups vanish before parsing and contribute nothing.
     pub fn includes_file(&self, owner: PackageId, path: &Path) -> bool {
         self.includes(owner, path, |path| self.package_of_file(path))
@@ -408,14 +404,13 @@ impl PackageGraph {
         path: &Path,
         package_of: impl FnOnce(&Path) -> Option<PackageId>,
     ) -> bool {
-        if !self.owns(owner, path, package_of) {
-            return false;
-        }
-        !self
-            .package(owner)
-            .source_groups
-            .iter()
-            .any(|group| path.starts_with(&group.directory) && !group.active)
+        let node = self.package(owner);
+        path.starts_with(&node.root)
+            && package_of(path) == Some(owner)
+            && !node
+                .source_groups
+                .iter()
+                .any(|group| path.starts_with(&group.directory) && !group.active)
     }
 
     pub fn selected_rock_files(&self, owner: PackageId, directory: &Path) -> Result<Vec<PathBuf>> {

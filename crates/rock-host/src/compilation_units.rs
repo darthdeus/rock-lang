@@ -12,15 +12,9 @@ fn project_files(dir: &Path) -> Result<Vec<PathBuf>> {
     if is_tests_directory || !dir.join("stick.toml").exists() {
         return Ok(Vec::new());
     }
-    let Some((manifest, config)) = crate::stick::StickConfig::find_from_dir(dir)? else {
+    let Some((_, graph)) = crate::stick::graph::PackageGraph::find_from_dir(dir)? else {
         return Ok(Vec::new());
     };
-    let root = manifest.parent().unwrap_or(&manifest);
-    let graph = crate::stick::graph::PackageGraph::build_with_channel(
-        root,
-        &config,
-        &crate::stick::resolved_channel_for(&config),
-    )?;
     graph.selected_rock_files(graph.root(), dir)
 }
 
@@ -52,17 +46,8 @@ fn load_project_sources(files: &[PathBuf], project_dir: Option<&Path>) -> Result
     let mut graph = None;
 
     if let Some(project_dir) = project_dir {
-        if let Some((stick_path, stick_config)) =
-            crate::stick::StickConfig::find_from_dir(project_dir)?
+        if let Some((_, resolved)) = crate::stick::graph::PackageGraph::find_from_dir(project_dir)?
         {
-            let channel = crate::stick::resolved_channel_for(&stick_config);
-            let stick_dir = stick_path.parent().unwrap_or(&stick_path);
-            let resolved = crate::stick::graph::PackageGraph::build_with_channel(
-                stick_dir,
-                &stick_config,
-                &channel,
-            )?;
-
             for id in resolved.load_order() {
                 if *id == resolved.root() {
                     continue;
