@@ -1177,8 +1177,6 @@ inline(lua) fn same_ref<A, B>(@repr(opaque) a: A, @repr(opaque) b: B) -> bool = 
 @debug_impure
 @intrinsic extern(lua) fn print(args: ...any)
 
-fn print_float(value: float) { print(to_string(value)) }
-
 @nowrite @intrinsic extern(lua) fn error(message: string)
 
 // A foreign value's __tostring callback can mutate Rock state.
@@ -1260,20 +1258,6 @@ macro assert_ne(actual: expr, expected: expr, message: expr = "Values should not
     let __expected = expected
     if __actual == __expected {
         error("Assertion failed: " + tostring(message) + " (both values are: " + tostring(__actual) + ")")
-    }
-}
-
-fn assert_eq_simple<T>(actual: T, expected: T, message: string = "Values should be equal") {
-    if !(actual == expected) {
-        let error_msg = "Assertion failed: " + tostring(message) + " (expected: " + tostring(expected) + ", got: " + tostring(actual) + ")"
-        error(error_msg)
-    }
-}
-
-fn assert_ne_simple<T>(actual: T, expected: T, message: string = "Values should not be equal") {
-    if actual == expected {
-        let error_msg = "Assertion failed: " + tostring(message) + " (both values are: " + tostring(actual) + ")"
-        error(error_msg)
     }
 }
 
@@ -1859,10 +1843,6 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
 
 @nowrite @intrinsic inline(lua) fn table_new() -> any = """return {}"""
 
-@inline inline(lua) fn table_insert(tbl: any, value: any) = "table.insert(tbl, value)"
-
-@inline inline(lua) fn table_insert_at(tbl: any, index: int, value: any) = "table.insert(tbl, index, value)"
-
 // Trampoline primitives — these are one-line Lua bodies that the JIT
 // can't see through when emitted as a function (frame inlining tripped
 // `loop unroll limit reached` in per-frame paths like vec_push /
@@ -2200,12 +2180,6 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
     end
 """
 
-inline(lua) fn table_clear(tbl: any) = """
-    for k in pairs(tbl) do
-        tbl[k] = nil
-    end
-"""
-
 inline(lua) fn table_copy(tbl: any) -> any = """
     local copy = {}
     for k, v in pairs(tbl) do
@@ -2214,24 +2188,6 @@ inline(lua) fn table_copy(tbl: any) -> any = """
     setmetatable(copy, getmetatable(tbl))
     return copy
 """
-
-inline(lua) fn table_copy_array(tbl: any) -> any = """
-    local copy = {}
-    for i = 1, #tbl do
-        copy[i] = tbl[i]
-    end
-    return copy
-"""
-
-inline(lua) fn table_new_with_size(size: int) -> any = """
-    local tbl = {}
-    for i = 1, size do
-        tbl[i] = false  -- Pre-allocate with false values
-    end
-    return tbl
-"""
-
-@inline inline(lua) fn table_remove(t: any, key: any) -> any = "table.remove(t, key)"
 
 const PI: float = 3.141592653589793
 const TAU: float = 6.283185307179586
@@ -2706,30 +2662,9 @@ inline(lua) fn get_os() -> string = """
 @nowrite @intrinsic @inline inline(lua) fn phantom<T>() -> T = """return nil"""
 @intrinsic inline(lua) fn tuple_first<A, B>(tuple: (A, B)) -> A = """return tuple[1]"""
 @intrinsic inline(lua) fn tuple_second<A, B>(tuple: (A, B)) -> B = """return tuple[2]"""
-inline(lua) fn tuple_nth<A>(tuple: any, n: int) -> A = """return tuple[n]"""
 
 fn char_to_byte(c: string) -> int { return unit_at(c, 0) }
 
-
-// FFI helper functions for LuaJIT FFI interop
-@inline inline(lua) fn ffi_new(ty: string) -> any = "ffi.new(ty)"
-
-inline(lua) fn ffi_new_array(ty: string, size: int) -> any = """
-    local r = ffi.new(ty .. "[" .. size .. "]")
-    return r
-"""
-
-@inline inline(lua) fn ffi_new_with_init(ty: string, init: any) -> any = "ffi.new(ty, init)"
-
-@inline inline(lua) fn ffi_sizeof(ty: string) -> int = "ffi.sizeof(ty)"
-
-@inline inline(lua) fn ffi_typeof(ty: string) -> any = "ffi.typeof(ty)"
-
-@inline inline(lua) fn ffi_cast(ty: string, obj: any) -> any = "ffi.cast(ty, obj)"
-
-inline(lua) fn ffi_null() -> any = """
-    return nil
-"""
 
 inline(lua) fn ffi_string(ptr: any, len: int?) -> string = """
     local r
@@ -2740,31 +2675,6 @@ inline(lua) fn ffi_string(ptr: any, len: int?) -> string = """
     end
     return r
 """
-
-inline(lua) fn ffi_copy(dst: any, src: any, len: int?) = """
-    if len then
-        ffi.copy(dst, src, len)
-    else
-        ffi.copy(dst, src)
-    end
-"""
-
-inline(lua) fn ffi_fill(dst: any, len: int, value: int?) = """
-    if value then
-        ffi.fill(dst, len, value)
-    else
-        ffi.fill(dst, len)
-    end
-"""
-
-inline(lua) fn ffi_cdef(def: string) = """
-    _G._ffi_defined = _G._ffi_defined or {}
-    if not _G._ffi_defined[def] then
-        ffi.cdef(def)
-        _G._ffi_defined[def] = true
-    end
-"""
-
 
 @intrinsic fn map_new<K, V>() -> Map<K, V> {
     transmute(table_new())
