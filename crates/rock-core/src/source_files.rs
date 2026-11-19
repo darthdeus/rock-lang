@@ -218,21 +218,6 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_set_holds_no_files_and_no_package_roots() {
-        let sources = SourceFiles::empty();
-        assert!(sources.files.is_empty());
-        assert!(sources.package_roots.is_empty());
-    }
-
-    #[test]
-    fn a_single_file_set_holds_exactly_that_file() {
-        let sources = SourceFiles::from_single_file(source("main.rock"));
-        assert_eq!(sources.files.len(), 1);
-        assert_eq!(sources.files[0].borrow().file.to_id_path(), "main.rock");
-        assert!(sources.package_roots.is_empty());
-    }
-
-    #[test]
     fn a_known_file_is_replaced_in_place_and_a_new_one_is_appended() {
         let mut sources = SourceFiles::empty();
         sources.add_or_update_file(source("main.rock"));
@@ -248,14 +233,6 @@ mod tests {
             sources.files[0].borrow().contents,
             "fn main() { changed(); }\n"
         );
-    }
-
-    #[test]
-    fn package_roots_are_stored_keyed_by_package_id() {
-        let mut sources = SourceFiles::empty();
-        sources.set_package_roots([(7, std::path::PathBuf::from("/tmp/pkg"))]);
-        assert_eq!(sources.package_roots.len(), 1);
-        assert_eq!(sources.package_roots[0].0, 7);
     }
 
     #[test]

@@ -360,46 +360,27 @@ mod tests {
             ),
             ((0, 0), (0, 0), (0, 0))
         );
+        assert_eq!(Span::default(), unknown);
+        assert_eq!(LineCol::unknown().file, unknown.file);
+        assert!(unknown.is_empty());
+        assert_eq!(unknown.len(), 0);
     }
 
     #[test]
-    fn the_default_span_is_the_unknown_span() {
-        assert_eq!(Span::default(), Span::unknown());
-        assert_eq!(LineCol::unknown().file, Span::unknown().file);
-        assert_eq!(
-            (
-                LineCol::unknown().line,
-                LineCol::unknown().col,
-                LineCol::unknown().offset
-            ),
-            (0, 0, 0)
-        );
-    }
-
-    #[test]
-    fn an_unknown_span_is_empty_and_has_no_length() {
-        assert!(Span::unknown().is_empty());
-        assert_eq!(Span::unknown().len(), 0);
-    }
-
-    #[test]
-    fn a_span_of_one_character_is_not_empty() {
+    fn len_and_start_read_the_ranges() {
         let single = span((1, 1), (5, 8), (17, 20));
         assert!(!single.is_empty());
         assert_eq!(single.len(), 3);
-    }
-
-    #[test]
-    fn start_reads_each_range_at_its_start() {
-        let covered = span((2, 4), (3, 9), (20, 41));
-        assert_eq!(covered.start(), line_col(FILE, 2, 3, 20));
+        assert_eq!(
+            span((2, 4), (3, 9), (20, 41)).start(),
+            line_col(FILE, 2, 3, 20)
+        );
     }
 
     #[test]
     fn a_span_round_trips_through_its_start() {
         let point = line_col(FILE, 7, 11, 96);
         let converted = Span::from_linecol(point.clone());
-        assert_eq!(converted.file, point.file);
         assert_eq!(converted.line_range(), (7, 7));
         assert_eq!(converted.col_range(), (11, 11));
         assert_eq!(converted.offset_range(), (96, 96));

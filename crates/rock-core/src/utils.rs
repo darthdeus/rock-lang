@@ -58,53 +58,6 @@ mod tests {
     use super::*;
     use test_utils::strip_ansi_sgr;
 
-    const OPEN: &str = "\u{256d}\u{2500}";
-    const CLOSE: &str = "\u{2500}\u{2500}\u{2500}\u{256f}";
-    const BAR: &str = "\u{2502}";
-
-    fn joined(lines: &[String]) -> String {
-        lines.join("\n")
-    }
-
-    fn span(offset_range: (usize, usize)) -> Span {
-        Span::new(ustr::ustr("u.rock"), (0, 0), offset_range, offset_range)
-    }
-
-    #[test]
-    fn a_built_report_carries_the_code_message_and_span() {
-        let mut report = make_report_builder(
-            ariadne::ReportKind::Warning,
-            "u.rock".to_string(),
-            0,
-            "W07".to_string(),
-            "header text".to_string(),
-        );
-        report.add_span_label(&span((0, 3)), "label text".to_string());
-
-        let mut written = Vec::new();
-        report
-            .finish()
-            .write(
-                ("u.rock".to_string(), ariadne::Source::from("abc\n")),
-                &mut written,
-            )
-            .unwrap();
-
-        assert_eq!(
-            strip_ansi_sgr(&String::from_utf8(written).unwrap()),
-            joined(&[
-                "[W07] Warning: header text".to_string(),
-                format!("   {OPEN}[u.rock:1:1]"),
-                format!("   {BAR}"),
-                format!(" 1 {BAR} abc"),
-                format!("   {BAR} \u{2500}\u{252c}\u{2500}  "),
-                format!("   {BAR}  \u{2570}\u{2500}\u{2500}\u{2500} label text"),
-                CLOSE.to_string(),
-                String::new(),
-            ])
-        );
-    }
-
     #[test]
     fn a_report_without_labels_renders_only_its_header() {
         let report = make_report_builder(

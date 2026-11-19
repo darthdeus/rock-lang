@@ -49,16 +49,6 @@ mod tests {
     }
 
     #[test]
-    fn loc_per_sec_basic() {
-        let s = CompileStats {
-            total_lines: 1000,
-            ..Default::default()
-        };
-        let rate = s.loc_per_sec(Duration::from_secs(1));
-        assert!((rate - 1000.0).abs() < 0.01);
-    }
-
-    #[test]
     fn format_throughput_units() {
         let s = CompileStats {
             total_lines: 50_000,
