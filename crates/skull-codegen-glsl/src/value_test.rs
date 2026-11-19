@@ -85,6 +85,7 @@ pub fn emit_value_test(
         "{version}\n\n{defs}\nlayout(location = 0) out {out_ty} _rock_value_out;\n\
          void main() {{\n  _rock_value_out = {out_expr};\n}}\n"
     );
+    // Fullscreen triangle from gl_VertexID (core since GL 3.0 / ES 3.0): no vertex buffers.
     let vertex = format!(
         "{version}\nvoid main() {{\n  \
          vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n  \

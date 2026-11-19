@@ -135,6 +135,7 @@ fn escape(s: &str) -> String {
         .replace('\t', " ")
 }
 
+// Field order is drop order: gl before context before window before subsystems.
 struct GlCtx {
     gl: glow::Context,
     int_fbo: FboTarget,

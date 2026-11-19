@@ -234,6 +234,8 @@ impl FnEmit<'_> {
             if load_count.get(&rcell).copied().unwrap_or(0) != 1 {
                 continue;
             }
+            // The diamond arms must be the cell's only writers: a nested ladder folds its inner
+            // diamond while an outer arm also stores the cell, which would drop that case.
             if store_count.get(&rcell).copied().unwrap_or(0) != 2 {
                 continue;
             }
@@ -313,6 +315,8 @@ impl FnEmit<'_> {
         found
     }
 
+    // The fold moves the expression to the use, so its inputs must not be mutated in between:
+    // require the use in `join` with no store before it.
     fn use_hoistable_to(&self, rcell: Idx<Cell>, join: Idx<Block>) -> bool {
         for &iid in &self.f.blocks[join].insts {
             match self.f.insts[iid] {

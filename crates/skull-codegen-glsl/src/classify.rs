@@ -425,6 +425,7 @@ pub(crate) fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShap
     for (n, &i) in per_vertex.iter().chain(instanced.iter()).enumerate() {
         attr_params.push(i);
         let gl_fields = struct_gl_fields(ws, f.param_decls[i].ty, span, "attribute")?;
+        // GLSL forbids `in bool`.
         if let Some((n, _)) = gl_fields.iter().find(|&&(_, t)| t == GlslTy::Bool) {
             return Err(err(
                 span,
@@ -511,6 +512,7 @@ pub(crate) fn classify_varyings(
                 ),
             ));
         }
+        // GLSL forbids bool in/out variables, even flat.
         if fty == GlslTy::Bool {
             return Err(err(
                 span,

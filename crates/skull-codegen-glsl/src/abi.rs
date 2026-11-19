@@ -357,6 +357,8 @@ pub(crate) fn check_stage_sampler_budget(
     ))
 }
 
+// Bindings are fixed by role; slot 0 is reserved for `@engine` whether or not the program has
+// one, so the engine can reject a foreign block there. ES 3.0 guarantees 12 blocks per stage.
 pub(crate) const UNIFORM_BLOCK_BINDING_ENGINE: u32 = 0;
 pub(crate) const UNIFORM_BLOCK_BINDING_VERTEX: u32 = 1;
 pub(crate) const UNIFORM_BLOCK_BINDING_FRAGMENT: u32 = 2;

@@ -16,6 +16,7 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     ("sign", 1, "sign($1)"),
     ("pow", 2, "pow($1, $2)"),
     ("atan2", 2, "atan($1, $2)"),
+    // GLSL round() half-way rounding is implementation-defined.
     ("round", 1, "floor($1 + 0.5)"),
     ("min", 2, "min($1, $2)"),
     ("max", 2, "max($1, $2)"),
@@ -39,6 +40,7 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     ("zero", 0, "vec2(0.0)"),
     ("texture", 2, "texture($1, $2)"),
     ("texture_id", 2, "texture($1, $2).r"),
+    // textureSize returns ivec2; the wrap keeps the result a float Vec2.
     ("texture_size", 1, "vec2(textureSize($1, 0))"),
     ("frag_coord", 0, "gl_FragCoord"),
     ("fwidth", 1, "fwidth($1)"),
@@ -49,6 +51,7 @@ const GLSL_INTRINSICS: &[(&str, usize, &str)] = &[
     ("at", 2, "$1[$2]"),
     ("isnan", 1, "isnan($1)"),
     ("isinf", 1, "isinf($1)"),
+    // Inline: a helper fn named `bvec3` would collide with the builtin constructor.
     ("bvec3", 3, "bvec3($1, $2, $3)"),
     ("any", 1, "any($1)"),
     ("greater_than", 2, "greaterThan($1, $2)"),

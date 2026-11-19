@@ -334,6 +334,8 @@ impl FnEmit<'_> {
                 None => e.render_val(a),
             }
         };
+        // A mixed `v(rgb, 1.0)` ctor must not hit the arity-keyed scalar rows; GLSL
+        // constructors take mixed components natively.
         if name == "v"
             && param_types
                 .iter()
