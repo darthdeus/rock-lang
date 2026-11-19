@@ -1,22 +1,11 @@
-// Tests for log_once / log_throttled / log_reset_dedup / log_dedup_count.
-//
-// Design:
-//   - log_once(category, msg) — fires the first time at a given call site,
-//     suppresses every subsequent call from that same site.
-//   - log_throttled(category, msg, interval_sec) — fires at most once per
-//     interval at a given call site. Wraps log_throttled_with_now(os.clock()).
-//   - log_throttled_with_now(now_sec, ...) — testable seam: takes a synthetic
-//     timestamp instead of reading os.clock(). Used directly in tests below
-//     so timing is deterministic.
-//   - log_reset_dedup() — clears both dedup and throttle state. Tests call
-//     this at the start to be self-contained.
-//   - log_dedup_count() — number of unique sites currently remembered.
-//
-// log_* are macros that inject `__SITE__` per call site. The 3-arg
-// overload accepts an explicit site key — tests exercising multiple
-// lines pass it so calls share a dedup key.
+// Call-site deduplication and throttling in the stdlib logger: log_once fires
+// once per site, log_throttled at most once per interval per site (driven here
+// through the log_throttled_with_now clock seam or log_set_now), reset clears
+// every piece of suppression state, the suppression summary reports totals,
+// and warn-level variants obey the level gate. log_* are macros injecting
+// `__SITE__`; the 3-arg overload takes an explicit site key so calls on
+// different lines share one key.
 
-// log_once
 // dedup_count reflects the number of unique sites remembered.
 // log_once also prints, so the expected output is the [DC] line plus the count.
 @test(output = "[DC] x\n1")
@@ -64,7 +53,7 @@ fn test_log_dedup_count_many_sites() {
     }
 }
 
-// log_throttled — tested via the mockable seam log_throttled_with_now
+// log_throttled is driven through the log_throttled_with_now clock seam.
 // Two distinct sites are independent: both fire immediately, both then suppressed.
 @test(output = "[A] a\n[B] b")
 fn test_log_throttled_distinct_sites_independent() {
@@ -97,25 +86,9 @@ fn test_log_throttled_just_under_boundary_suppressed() {
     log_throttled_with_now(0.499, "E", "go", 0.5, "boundary")
 }
 
-// B3 (adversarial): edge-case interval values for log_throttled
-//
-// The throttle predicate is `(now - last) < interval`. With:
-//   - interval == 0.0  →  any non-negative delta is NOT < 0, so every call
-//                          fires. Useful as "no throttle".
-//   - interval == -1.0 →  same: any non-negative delta is NOT < -1, so every
-//                          call fires. Negative intervals are effectively the
-//                          same as 0.0 — no suppression.
-//   - interval == NaN  →  IEEE 754: every comparison with NaN is false. So
-//                          `(delta) < NaN` is false, and every call fires.
-//                          (If the comparison were the other direction it
-//                          could suppress forever — pinned here as "fires".)
-//
-// FINDING: NaN-as-interval does NOT cause silent forever-suppression because
-// the implementation puts NaN on the right-hand side of `<`, where any
-// comparison is false. If the predicate were ever rewritten as
-// `(now - last) >= interval` (negated), NaN would flip to suppress-forever.
-// Severity: documented behavior, not a bug.
-// Rock has no nan() literal; 0.0 / 0.0 constructs NaN.
+// The throttle predicate is `(now - last) < interval`, so a zero, negative or
+// NaN interval never suppresses (every comparison with NaN is false). A
+// negated rewrite would turn NaN into suppress-forever. 0.0 / 0.0 is NaN.
 @test(output = "[Z] go\n[Z] go\n[Z] go\n[N] go\n[N] go\n[N] go\n[NAN] go\n[NAN] go\n[NAN] go")
 fn test_log_throttled_degenerate_intervals_fire_every_call() {
     log_reset_dedup()
@@ -132,17 +105,8 @@ fn test_log_throttled_degenerate_intervals_fire_every_call() {
     log_throttled_with_now(2.0, "NAN", "go", nan, "nan-key")
 }
 
-// B9 (adversarial): log_once dedup key is the call site, NOT
-// (call_site, message). A single textual call site that emits
-// different messages on each invocation is still a single dedup
-// entry — only the first message ever prints.
-//
-// FINDING: this behavior is intentional. The
-// pin here is to keep us honest if anyone later "improves" dedup
-// to key on (site, msg) — that change would silently break the
-// established suppression contract for varying interpolated
-// messages and warrants its own discussion. Catching the
-// behavioral change at test time makes that visible.
+// The log_once dedup key is the call site, not (site, message): one site
+// emitting a different message each call prints only the first.
 @test(output = "[M] i=0")
 fn test_log_once_dedup_is_site_only_not_message() {
     log_reset_dedup()
@@ -152,10 +116,8 @@ fn test_log_once_dedup_is_site_only_not_message() {
     }
 }
 
-// Forwarding wrapper preserves outermost call site for dedup
-// Wrapper macro: __SITE__ resolves to the *user's* call site (where
-// `forward_once(...)` is written), not the macro body or any helper —
-// so 10 iterations all share one dedup key.
+// In a wrapper macro __SITE__ resolves to the user's call site, not the macro
+// body, so 10 iterations share one dedup key.
 macro forward_once(category: expr, msg: expr) {
     log_once(category, msg, __SITE__)
 }
@@ -213,8 +175,7 @@ fn test_log_throttled_falls_back_to_os_clock() {
 // throttle stamps, the counts and last messages the summary reads, and the
 // once-per-process latch that stops the summary running twice. Half a reset
 // is worse than none: the summary would then report totals for sites the
-// caller believes it cleared. The two backends had drifted here, one clearing
-// two tables and the other five.
+// caller believes it cleared.
 @test(output = "[A] first")
 fn test_log_reset_dedup_clears_what_the_summary_reads() {
     log_reset_dedup()
