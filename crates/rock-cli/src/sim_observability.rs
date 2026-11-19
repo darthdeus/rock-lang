@@ -121,9 +121,6 @@ struct State {
 static RUN_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 impl SimRunRecorder {
-    /// Start a recording under the configured history root. Relative roots
-    /// are resolved against the caller's current directory; discovering the
-    /// workspace does not change that directory.
     pub(crate) fn begin(
         project: &str,
         selection: &str,
@@ -215,9 +212,6 @@ impl SimRunRecorder {
             .and_then(|state| state.events_path.clone())
     }
 
-    /// Allocate one logical occurrence ID for each requested entry. Duplicate
-    /// names intentionally receive different IDs; recovery reuses the ID from
-    /// the original plan rather than creating a second logical entry.
     pub(crate) fn plan_entries(&self, specs: &[String]) -> Vec<u64> {
         let mut ids = Vec::with_capacity(specs.len());
         for (sequence, spec) in specs.iter().enumerate() {
@@ -303,9 +297,6 @@ impl SimRunRecorder {
         }
     }
 
-    /// The most recent finished duration of the entry `name` in this run's
-    /// project on this host, from earlier records under the history root. `None` until
-    /// `configure` names the project.
     pub(crate) fn recorded_duration_ms(&self, name: &str) -> Option<u64> {
         self.inner.lock().ok()?.timings.latest_duration_ms(name)
     }
@@ -475,9 +466,6 @@ impl SimRunRecorder {
         );
     }
 
-    /// Write the terminal record. A missing terminal event is intentionally
-    /// meaningful: it identifies a process that stopped before the runner
-    /// could account for it.
     pub(crate) fn finish(&self, success: bool, error: Option<&str>) {
         let (planned, finalized, passed, run_id, already_finished) = match self.inner.lock() {
             Ok(mut state) => {

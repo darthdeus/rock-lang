@@ -150,9 +150,6 @@ pub(crate) fn check_unit(
     }
 }
 
-/// Run files in input order, optionally on a bounded worker pool, then run
-/// package units serially. Catch panics per unit and return short labels in
-/// files-before-packages order.
 pub(crate) fn run_units<T: Send>(
     files: &[String],
     package_dirs: &[String],

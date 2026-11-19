@@ -185,9 +185,6 @@ fn emit_test_program(
 
     // (test index, per-test isolated defs) for tests emittable in ISOLATION.
     let mut supported: Vec<(usize, String)> = Vec::new();
-    // Test indices that reject ONLY because they read a decorator-populated
-    // global (the module-load side effect the per-test closure omits) -- lifted
-    // below by a whole-file emission that runs the applications once.
     let mut deco_pending: Vec<usize> = Vec::new();
     for (i, (fr, t)) in tests.iter().enumerate() {
         let js_name = format!("__t{i}");
@@ -463,9 +460,6 @@ fn build_run_program(emitted: &skull_codegen_js::emit::JsProgram) -> String {
     p
 }
 
-/// True for the per-test reject a decorator-populated global read raises
-/// (`emit.rs` `discover_globals`) -- the marker that a whole-file emission (which
-/// runs the applications once) would lift the test.
 fn is_decorator_populated_reject(msg: &str) -> bool {
     msg.contains("is populated by decorator application")
 }

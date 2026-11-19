@@ -9,9 +9,6 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 #[cfg(unix)]
 const SLOTS: usize = 256;
-// Read from a signal handler, so a lock-free table rather than a Mutex.
-// Sized for sim workers: one slot per live worker child up to the jobs
-// ceiling (hard-capped at the core count), plus the compile child.
 #[cfg(unix)]
 static BOUND: [AtomicI32; SLOTS] = [const { AtomicI32::new(0) }; SLOTS];
 #[cfg(unix)]

@@ -15,14 +15,8 @@ struct ErrorTest {
 #[derive(Debug)]
 struct ErrorTestCase {
     name: String,
-    /// Source files for this test case. Single-entry `[("test.rock", body)]` for the
-    /// common case; multiple entries when the body uses `//--- FILE: path ---` markers
-    /// to split across modules (for cross-module error scenarios).
     files: Vec<(String, String)>,
     expected_error_kind: String,
-    /// `//! expect: <text>` lines: substrings the rejecting diagnostic must
-    /// contain. Empty means "any stage may reject, for any reason" -- the
-    /// original contract, kept for the cases that predate this.
     expected_reasons: Vec<String>,
 }
 
@@ -130,11 +124,6 @@ fn parse_test_case_name(case_header: &str) -> Result<(String, String)> {
     }
 }
 
-/// Split a test-case body into one or more (path, contents) pairs.
-///
-/// If the body contains lines of the form `//--- FILE: <path> ---`, those act as
-/// file separators and each trailing block becomes a separate source file. With no
-/// markers the whole body is returned as a single `test.rock` file (legacy behavior).
 fn split_body_into_files(body_lines: &[&str]) -> Vec<(String, String)> {
     let is_marker = |line: &str| {
         let t = line.trim();
@@ -177,17 +166,6 @@ fn split_body_into_files(body_lines: &[&str]) -> Vec<(String, String)> {
     files
 }
 
-// ───────────────────────── bone/skull front-end suite ─────────────────────────
-//
-// Error-tests assert REJECTION, which happens in the front end before codegen --
-// so bone and skull (skull's front end IS bone) verify them identically. This
-// runs each `.rock.err` case through bone's shared front end; the `test`
-// command for either backend folds it in (like the LSP suite).
-
-/// Bone's verdict on a (multi-file) case. `None` == bone rejected it (a parse or
-/// type error), the expected outcome for a front-end error-test. `Some(ws)` ==
-/// bone ACCEPTED; the workspace is returned so skull emission can run on it
-/// (below) WITHOUT a second semantic pass.
 fn bone_check_case(
     files: &[(String, String)],
 ) -> Result<bone_semantic::inference::Workspace, String> {
@@ -208,15 +186,9 @@ fn bone_check_case(
             Err(e) => return Err(error_text(&[e])), // hard tokenizer failure
         }
     }
-    // Total parse: a recoverable syntax error returns Ok with `recovery_errors`,
-    // so the rejection is the downstream gate in `check_with_stdlib`
-    // (`skull::pipeline::syntax_errors`), not the parse `match` above.
     crate::bone_backend::check_with_stdlib(user).map_err(|errs| error_text(&errs))
 }
 
-/// Every message a rejection carries -- primary, labels, and the siblings a
-/// single-error return folded in. `//! expect:` matches against this text, so a
-/// case can pin the reason a stage rejected for, not merely that it rejected.
 fn error_text(errs: &[rock_core::errors::CompilerError]) -> String {
     fn push(out: &mut Vec<String>, e: &rock_core::errors::CompilerError) {
         out.push(e.message.clone());
@@ -414,9 +386,6 @@ fn contains_error_tests(dir: &Path) -> bool {
         .any(|e| is_error_test_file(e.path()))
 }
 
-/// The `.rock.err` directory `path` selects: an `errors` directory, the
-/// `errors` directory of a fixture or fixture subdirectory inside it, a
-/// directory's `errors` subdirectory, or a fixture's own directory.
 fn find_error_test_dir(path: &Path) -> Option<PathBuf> {
     if path.ends_with("errors") && path.is_dir() {
         return Some(path.to_path_buf());

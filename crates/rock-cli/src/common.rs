@@ -86,9 +86,6 @@ impl ProcessManager {
         )
     }
 
-    /// Bound program loading and test progress by the child's CPU time. Valid
-    /// START and TIME markers reset the CPU budget; a generous wall backstop
-    /// still catches a child blocked without consuming CPU.
     pub(crate) fn wait_with_test_watchdog(
         child: &mut Child,
         limit: Duration,
@@ -129,10 +126,6 @@ impl ProcessManager {
         let test_token = test_watch.as_ref().map(|watch| watch.token.clone());
         let child_pid = child.id();
 
-        // Spawn background threads to drain pipes continuously. This prevents
-        // the child from blocking on a full pipe buffer while the parent polls.
-        // A read error ends the thread with that error, and the join below
-        // fails the wait: truncated output must never be judged as complete.
         let stdout_thread = child.stdout.take().map(|mut h| {
             let progress_tx = progress_tx.clone();
             let test_token = test_token.clone();
@@ -403,9 +396,6 @@ impl ProcessManager {
     }
 }
 
-/// The wall backstop catches a child blocked without using CPU. A starved but
-/// busy child must reach its CPU budget first, so the floor leaves room for a
-/// loaded host even under a short CPU budget.
 pub(crate) fn test_watchdog_wall_backstop(cpu_limit: Duration) -> Duration {
     cpu_limit.saturating_mul(8).max(Duration::from_secs(60))
 }
@@ -466,9 +456,6 @@ enum ProcessProgress<P> {
     TestTime(usize),
 }
 
-/// A test harness's start and completion events. The token is generated per
-/// run and distinct from accidental test output, so marker-shaped output
-/// without this run's token is not an event.
 #[derive(Debug, Clone)]
 pub(crate) struct TestWatch {
     pub token: String,
@@ -681,10 +668,6 @@ pub struct ProcessResult<P = ()> {
     pub progress_stopped: bool,
 }
 
-/// Thread count requested by `ROCK_NUM_THREADS`, else `RAYON_NUM_THREADS`.
-/// It sizes both the compiler's global rayon pool and the C test pool.
-/// `0` asks for the default, as in rayon. A value that is not a count is an
-/// error: ignoring it would silently run with a different pool size.
 pub(crate) fn thread_count_request() -> std::result::Result<Option<usize>, String> {
     parse_thread_count_request(
         std::env::var("ROCK_NUM_THREADS").ok().as_deref(),
@@ -711,9 +694,6 @@ fn parse_thread_count_request(
     }
 }
 
-/// [`thread_count_request`] for pool construction. `rock_cli::main` rejects an
-/// invalid value at startup, so reaching the panic means a pool was built
-/// outside the CLI process lifecycle with a bad environment.
 #[cfg(not(feature = "sequential"))]
 pub(crate) fn requested_thread_count() -> Option<usize> {
     thread_count_request().unwrap_or_else(|error| panic!("{error}"))
@@ -767,9 +747,6 @@ mod tests {
 
     #[test]
     fn short_lived_child_is_reaped_without_a_full_poll_interval() {
-        // The child outlives the first try_wait, so the wait must sleep at
-        // least once. Take the fastest of several runs so a loaded machine
-        // cannot fail the test; a fixed 50ms poll can never get under 40ms.
         let fastest = (0..5)
             .map(|_| {
                 let mut child = std::process::Command::new("sleep")

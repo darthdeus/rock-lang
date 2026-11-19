@@ -68,9 +68,6 @@ fn diagnostic_copy(source: &std::path::Path, destination: &std::path::Path) -> R
     crate::skull_backend::wipe_overlay(&destination.with_file_name("incremental.lua"))
 }
 
-/// Runs `compile` with what a run compile needs: project resolution and the
-/// sound bank first, then the engine libraries beside the compile. The compile
-/// does not read the libraries, and they are built before the program starts.
 pub(crate) fn with_game_prepared<T>(path: &str, compile: impl FnOnce() -> Result<T>) -> Result<T> {
     let project = rock_host::timed("resolve project", || {
         rock_engine_host::project::resolve_project_dir(path)

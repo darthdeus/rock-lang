@@ -40,9 +40,6 @@ impl TestFilter {
     }
 }
 
-/// A `@test` fn found by the front-end-only fallback parse. The name and
-/// compile-failure flags support reporting; output and value expectations
-/// are verified on the typechecked path (`skull::SkullTest`).
 #[derive(Debug, Clone)]
 pub(crate) struct TestMetadata {
     pub name: String,
@@ -50,10 +47,6 @@ pub(crate) struct TestMetadata {
     pub expect_failure: bool,
 }
 
-/// Parse each source file (front end only, via `skull_parser`) and collect its
-/// `@test` fns with their `expect_failure` / `@ignore` flags. Files that don't
-/// parse cleanly are skipped — they can't contribute a discoverable test, and
-/// the caller only reaches here after a compile failure anyway.
 pub(crate) fn find_test_functions_from_sources(sources: &SourceFiles) -> Vec<TestMetadata> {
     let mut test_functions = Vec::new();
 

@@ -181,9 +181,6 @@ pub(crate) fn incremental_stats(
             let t = Instant::now();
             let reload = project.apply_edit(source, text, &main_path, &incremental_path);
             let wall_ms = t.elapsed().as_secs_f64() * 1000.0;
-            // A rejected edit rolls the project back to the previous text; the
-            // candidate is reported as an error rather than ending the survey,
-            // so one unlucky target cannot hide every other measurement.
             let reload = match reload {
                 Ok(reload) => reload,
                 Err(error) => {

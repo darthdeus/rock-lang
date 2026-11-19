@@ -218,9 +218,6 @@ fn exec_luajit_file(lua_file: &Path, app_args: &[String]) -> Result<()> {
 
     // The CLI goes silent here: the next output is whatever the game
     // prints once Stone's engine init runs. luajit loading +
-    // JIT-warming the generated main.lua and ffi.load-ing native libs
-    // can take seconds with no signal, making a slow/failed handoff
-    // look like a hang. Mark the boundary so it's attributable.
     let spawn_t = bone_core::prelude::Instant::now();
     log::info!(target: "RUN", "launching luajit -> {}", lua_file.display());
 

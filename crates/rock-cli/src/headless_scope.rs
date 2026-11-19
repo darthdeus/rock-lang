@@ -236,9 +236,6 @@ fn spawn_scoped(
     }
 }
 
-/// Names the likely cause when a scoped sim worker dies of SIGKILL the runner
-/// did not send: the slice budget, shared with every other headless run on the
-/// machine, was reached.
 pub fn outside_kill_note(status: &ExitStatus, runner_killed: bool) -> Option<String> {
     if runner_killed || !matches!(placement(), Placement::Scoped) {
         return None;

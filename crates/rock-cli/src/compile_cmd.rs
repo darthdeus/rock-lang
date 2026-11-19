@@ -21,9 +21,6 @@ pub(crate) fn run_lua_program(preamble: &str, lua: &GameProgram, emits_main: boo
     run_program(&crate::skull_backend::skull_game_main(preamble, lua, emits_main).concat())
 }
 
-/// Run `program` to completion, relay its output and exit with its status. A
-/// real program may run as long as it needs; only test harnesses impose a
-/// timeout.
 pub(crate) fn run_program(program: &str) -> Result<()> {
     match run_lua_code_with_timeout(program, None) {
         Ok(run) => {

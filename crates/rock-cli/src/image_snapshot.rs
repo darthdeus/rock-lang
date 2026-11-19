@@ -44,17 +44,6 @@ pub fn decode_png_rgba8(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
     Ok((info.width, info.height, rgba))
 }
 
-/// Max over 32x32-pixel blocks of the per-block mean absolute channel
-/// delta, normalized to [0, 1]. 0.0 = no above-floor difference (frames may
-/// still differ by 1 LSB per channel), 1.0 = max possible delta in some
-/// block. A whole-frame mean let a sprite-sized defect hide behind an
-/// unchanged background while the tolerance stayed fixed, so the oracle is
-/// the worst region, not the average pixel: a half-tile shift of one tile
-/// fails the default `image_snapshot` tol where the mean passed.
-/// Partial edge blocks average over their own pixels; no pixel is excluded.
-/// Per-channel deltas of 1 or less count as zero: a one-LSB noise budget,
-/// allowing small rounding differences between renderers. Deltas above the
-/// floor retain their full magnitude.
 pub fn image_diff(baseline: &Path, actual: &Path) -> Result<f64> {
     let (bw, bh, b) = decode_png_rgba8(baseline)?;
     let (aw, ah, a) = decode_png_rgba8(actual)?;
@@ -121,9 +110,6 @@ mod tests {
         image_diff(&baseline, &actual).unwrap()
     }
 
-    /// Control: per-channel deltas of exactly +1/-1 across full and partial
-    /// blocks diff exactly zero. The pair is NOT bit-identical (asserted on
-    /// the decoded bytes), so 0.0 means "no above-floor difference".
     #[test]
     fn deadband_plus_minus_one_counts_as_zero() {
         // 40x40 spans full 32px blocks plus partial edge blocks in both
@@ -151,10 +137,6 @@ mod tests {
         assert_eq!(diff, 0.0, "every channel within +-1 must count as zero");
     }
 
-    /// Control: per-channel deltas of exactly +2/-2 keep their full
-    /// magnitude. A uniform +-2 shift over exactly one full block diffs
-    /// 2/255, above the default snapshot tol: a wider deadband would read
-    /// 0.0 and a floor subtraction or halving would read 1/255.
     #[test]
     fn deadband_plus_minus_two_keeps_full_magnitude() {
         // Exactly one full 32px block: magnitude without partial-block
@@ -180,9 +162,6 @@ mod tests {
         );
     }
 
-    /// Control: a partial edge block averages over its own pixels. A
-    /// saturated 8x8 partial corner diffs 1/4: a full-block denominator
-    /// would read 1/64 and a whole-frame mean 1/100.
     #[test]
     fn partial_edge_block_uses_own_pixel_count() {
         // 40x40: blocks are 32+8 per dim, so the far corner is an 8x8

@@ -38,9 +38,6 @@ pub enum ProgramKind {
 
 pub type Handler = fn(&CommandContext) -> Result<()>;
 
-/// The operations a backend serves. A command whose route is
-/// `Route::Backend(op)` is dispatched to the selected backend's handler for
-/// `op`; the command registration supplies the user-facing name.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Operation {
     Test,

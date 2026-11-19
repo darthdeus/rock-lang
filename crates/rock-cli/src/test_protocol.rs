@@ -8,17 +8,11 @@ pub(crate) struct SkullMarkers {
     pub passed: usize,
     /// The `<detail>` of every `FAIL` line.
     pub fails: Vec<String>,
-    /// `(test name, serialized value)` of every `VALUE` line -- a
-    /// `@test(returns = ...)` fn that ran without error; the HOST compares the
-    /// value ([`compare_value`]) and turns it into pass/fail accounting.
     pub values: Vec<(String, String)>,
     /// Every `TIME` line: one per test the harness finished, in run order.
     pub times: Vec<TestTime>,
 }
 
-/// `__SKULL__\tTIME\t<name>\t<ms>\t<pass|fail|value>`: a test's wall time and
-/// the harness-side result; a `value` result is judged by the host. The Skull
-/// harness appends its run token and ordinal for watchdog progress tracking.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TestTime {
     pub name: String,
@@ -30,10 +24,6 @@ pub(crate) struct TestTime {
 /// `__SKULL__\tVALUE\t<name>\t<serialized>` result lines and the
 /// [`TestTime`] lines out of a test program's stdout. `None` = no valid result
 /// protocol: either no result lines at all (the program never reached the
-/// harness, an emit/load bug rather than a test failure) or a `__SKULL__` line
-/// of an unknown kind or shape, which is logged. Every caller treats `None` as
-/// a harness failure that shows the whole stdout; counting an unrecognized line
-/// as a pass would let a broken harness report green.
 pub(crate) fn parse_skull_markers(stdout: &str) -> Option<SkullMarkers> {
     let mut markers = SkullMarkers {
         passed: 0,
@@ -96,12 +86,6 @@ pub(crate) fn parse_skull_markers(stdout: &str) -> Option<SkullMarkers> {
 /// (luajit, node). GLSL passes its own, wider f32 tolerance.
 pub(crate) const FLOAT_REL_TOL: f64 = 1e-12;
 
-/// Compare a `VALUE` marker's serialized return value against the pinned
-/// `@test(returns = ...)` literal. Backend-neutral: the host parses the
-/// serialized value as f64 (or `true`/`false`) and compares numbers, so the
-/// executors' serializations need not be byte-identical. Int expectations are
-/// exact f64 equality (42 == 42.0); floats pass within `float_rel_tol`
-/// relative tolerance; bools are exact. `Err` carries the FAIL detail.
 pub(crate) fn compare_value(
     expect: &skull::ValueExpect,
     got: &str,
@@ -149,9 +133,6 @@ pub(crate) fn compare_value(
     }
 }
 
-/// Bucket reason strings into a histogram sorted by count desc, ties by reason
-/// asc (deterministic output; the JS run's skip histogram IS the emitter work
-/// list, so ordering must be stable).
 pub(crate) fn reason_histogram<'a>(
     reasons: impl IntoIterator<Item = &'a str>,
 ) -> Vec<(String, usize)> {

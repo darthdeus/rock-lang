@@ -9,9 +9,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
-/// Stamp the process's first Rust instant so the record's first node is the
-/// startup that precedes the compile; the loader and runtime init before
-/// `main` stay outside it.
 pub(crate) fn mark_process_start() {
     let _ = PROCESS_START.set(Instant::now());
 }
@@ -273,10 +270,6 @@ pub(crate) fn emission(emit: &skull::mir_emit::MirEmit) {
                 .insert("scaffold_ms".into(), json!(ms(scaffold)));
         }
         let mut codegen = Node::parent(&codegen.name, codegen.wall, vec![setup, fan_out, assembly]);
-        // Per-pass unit time summed over every lowered body: the fan-out, but
-        // also the decorators, globals and specializations assembly lowers
-        // serially. It overlaps across workers, so it is comparable between
-        // passes and across commits, not with any wall window.
         let cpu_total: Duration = cpu.iter().map(|(_, d)| *d).sum();
         codegen
             .extra

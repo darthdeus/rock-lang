@@ -13,9 +13,6 @@ use rock_host::stick::{PackageType, StickConfig};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-/// One consumer's verdict on the library: the key of every lib function it does
-/// NOT reach. Keyed by (file, line) -- the same source read by every consumer,
-/// so the keys line up for intersection.
 type UnreachedKeys = HashSet<(Ustr, usize)>;
 
 pub(crate) fn do_lint_union(lib: &str, consumers_root: Option<&str>) -> Result<()> {
@@ -25,10 +22,6 @@ pub(crate) fn do_lint_union(lib: &str, consumers_root: Option<&str>) -> Result<(
     if !lib_root.is_dir() {
         anyhow::bail!("lint --union: `{lib}` is not a directory (a library's root)");
     }
-    // The lib's parent by default -- `engine/` sits beside every game that uses
-    // it, so the common case needs no flag. Deriving this by walking up to a
-    // `.git` was tried and is a trap: a repo can sit anywhere above (`/tmp` is
-    // one on this machine), and the scan then walks a filesystem.
     let search_root = match consumers_root {
         Some(d) => Path::new(d)
             .canonicalize()
@@ -117,17 +110,11 @@ pub(crate) fn do_lint_union(lib: &str, consumers_root: Option<&str>) -> Result<(
     Ok(())
 }
 
-/// Analyze one candidate consumer. `Ok(None)` means it doesn't depend on the
-/// lib at all (not a consumer, not a skip). `Err` means it IS a consumer but
-/// could not be typechecked -- the caller must surface that, never absorb it.
 #[allow(clippy::type_complexity)]
 fn unreached_in(
     consumer: &Path,
     lib_root: &Path,
 ) -> Result<Option<(UnreachedKeys, Vec<bone_lints::Finding>, SourceFiles)>> {
-    // Whole-project scope on purpose: `tests/` holds `@sim`/`@test` roots, and a
-    // production-only source set would report every sim-only engine helper as
-    // dead.
     let sources = crate::unified_compile::discover_project_sources(consumer)?;
     let reaches_lib = sources.files.iter().any(|f| {
         let f = f.borrow();
@@ -148,9 +135,6 @@ fn unreached_in(
     Ok(Some((keys, findings, sources)))
 }
 
-/// Every `bin` package under `root`, skipping build/VCS directories and
-/// registered exclusions. A selected root is always scanned. Package sources
-/// are not searched for nested packages.
 pub fn bin_projects_under(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();

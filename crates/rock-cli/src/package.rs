@@ -241,9 +241,6 @@ pub fn run_package(project: &str, output: &Path) -> Result<()> {
         write_sound_bank(&assets_dir, &mut staged, sound)?;
     }
 
-    // Resolve once for the package and let the compiler return its recorded
-    // values for the manifest. In particular, a secret command is never run a
-    // second time merely to create the manifest.
     let inputs = match config.as_ref() {
         Some(config) => {
             crate::comptime::inputs_for_project_with_config(&project_abs, config, None)?

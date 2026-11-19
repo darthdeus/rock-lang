@@ -113,9 +113,6 @@ impl GameCompiler {
         Ok(())
     }
 
-    /// Comptime file inputs (`embed_string`) baked into the current program,
-    /// with the hash of the bytes the lowering baked in. The watcher treats
-    /// them as sources and seeds them against what was compiled.
     pub fn comptime_watch_files_with_hashes(&self) -> Vec<(PathBuf, u64)> {
         self.stone
             .as_ref()

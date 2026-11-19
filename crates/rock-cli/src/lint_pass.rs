@@ -6,9 +6,6 @@ use rock_core::{CompilerError, SourceFiles};
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
 
-/// How a build reports lint findings. Applies to `Warning`/`Advice` only --
-/// `Error` findings always render in full and always fail the build, which is
-/// what makes a correctness lint non-optional.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub(crate) enum LintReport {
     /// Render every finding spanned against its source, like a type error.
@@ -27,9 +24,6 @@ const POLICY_FULL: u8 = 1;
 const POLICY_SUMMARY: u8 = 2;
 const POLICY_OFF: u8 = 3;
 
-/// Install the invocation's reporting policy from the parsed flags. Called from
-/// the dispatcher; the build call sites are deep in the backend and have no
-/// `Args` to thread down.
 pub(crate) fn set_policy(report: LintReport) {
     POLICY.store(
         match report {
@@ -41,11 +35,6 @@ pub(crate) fn set_policy(report: LintReport) {
     );
 }
 
-/// Silence the soft tiers for a CORPUS run (`rock test <dir>`), which compiles
-/// hundreds of unrelated files in parallel. Per-file findings there are noise --
-/// the files are deliberate compiler-shape probes, not a project -- and the
-/// parallel runner would interleave them into unreadable output anyway. `Error`
-/// findings still gate every file; `rock lint <dir>` is the detail surface.
 pub(crate) fn set_corpus_mode() {
     set_policy(LintReport::Off);
 }
@@ -58,9 +47,6 @@ pub fn policy() -> LintReport {
     }
 }
 
-/// The live-build adapter for [`bone_lints::IncrementalLintCache`]. The cache
-/// owns derivation and invalidation; this edge owns the same report set,
-/// severity policy, and error return as the canonical full pass.
 pub(crate) fn run_build_lints_cached(
     cache: &mut bone_lints::IncrementalLintCache,
     ws: &Workspace,
@@ -117,11 +103,6 @@ pub(crate) fn rollback_build_lints_cached(
     })
 }
 
-/// Split findings by severity, emit the soft tiers per `mode`, and hand back the
-/// `Error`s. Pure apart from the printing, so the build gate is unit-testable
-/// without a workspace. `transmute_of_nullable` is the catalog's `Error` today;
-/// the point of build integration is that such a finding refuses the program
-/// rather than printing at an author who can ignore it.
 fn report(
     found: Vec<bone_lints::Finding>,
     sources: &SourceFiles,
@@ -175,9 +156,6 @@ pub enum Scope {
     ProductionOnly,
 }
 
-/// The `SourceFiles` and lint root of a single-file build. `file` must be the
-/// same path the module was parsed under, or every span lookup misses and the
-/// findings render without their snippet.
 pub(crate) fn single_file_scope(file: &str, src: &str) -> (SourceFiles, std::path::PathBuf) {
     let sources = crate::common::single_source(file, src);
     let root = Path::new(file)
@@ -203,9 +181,6 @@ pub fn findings(
     )
 }
 
-/// [`findings`] for an explicit lint selection. `rock lint --lints=<names>`
-/// only: a BUILD always runs the default tier, so no invocation flag can drop
-/// a lint the compiler considers non-optional.
 pub fn findings_with(
     ws: &Workspace,
     sources: &SourceFiles,
@@ -221,9 +196,6 @@ pub fn findings_with(
         // is not the author's to fix here, and a consumer must not fail a build on a
         // dependency's findings. Scanned rather than warm: an engine body calling
         // into game code is a real reachability edge, and dropping it would
-        // false-flag the game's callbacks as dead. Restricting the set also keeps
-        // the pass off the compile hot path -- a dependency's bodies are never
-        // walked for the per-body lints.
         let owned = owned_files(texts, root);
         let report: FxHashMap<Ustr, &str> = texts
             .iter()
@@ -335,9 +307,6 @@ mod tests {
 
     #[test]
     fn error_findings_gate_the_build_under_every_report_mode() {
-        // The load-bearing property: `--no-lints` and `--lint-summary` change
-        // what is PRINTED, never whether an Error-severity finding fails the
-        // build. `entity_across_yield`'s no-suppression argument rests on this.
         for mode in [LintReport::Full, LintReport::Summary, LintReport::Off] {
             let found = vec![
                 finding("unused_var", CompilerErrorLevel::Warning),

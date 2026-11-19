@@ -3,10 +3,6 @@ use super::compile_cmd;
 pub enum ExecOutcome {
     /// Clean run; holds full stdout (module load prints + test prints).
     Output(String),
-    /// Runtime error, lua load failure, spawn failure, or timeout -- carrying
-    /// the diagnostic. A test that pins a SPECIFIC failure has to be able to
-    /// tell it from an unrelated load error or a timeout; discarding the message
-    /// made every `Errored` arm accept any failure as proof.
     Errored(String),
 }
 
@@ -59,9 +55,6 @@ pub fn normalize_stdout(s: &str) -> String {
     out
 }
 
-/// Standalone `@test`/synthetic programs have no engine. Stub the full-reload
-/// registry reset only when a fixture emits one; body overlays refresh the
-/// CodeRefs already stored in registries.
 pub(crate) const SYS_STUB: &str = "function clear_all_systems() end\n";
 
 /// The stub is omitted when a fixture defines its own reset function.
@@ -73,9 +66,6 @@ pub fn stub_for(full_lua: &str) -> &'static str {
     }
 }
 
-/// `main` is unmangled (no-mangle exception), so a bare `main()` entry runs
-/// it on both sides without computing a mangled name. Append AFTER the
-/// overlay so the overlay's fresh `main` wins over the stale baseline's.
 pub fn run_parts(parts: &[&str]) -> ExecOutcome {
     exec_lua(&parts.join("\n"))
 }

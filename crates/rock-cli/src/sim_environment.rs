@@ -65,10 +65,6 @@ type FnKey = (
 type NameMap = std::collections::HashMap<ustr::Ustr, Vec<FnKey>>;
 
 /// Callee edges of one body: resolved calls and protocol dispatch from its
-/// inference, plus function-valued references from a body scan (a named fn
-/// passed as a value lowers to `Expr::Global`, never a call). Mirrors
-/// `bone_lints`' edge walk; bodies without inference (extern decls, opaque
-/// bodies) are leaves, matched by name at their callers instead.
 fn sim_callee_edges(
     ws: &bone_semantic::inference::Workspace,
     (mid, fid): FnKey,
@@ -156,18 +152,11 @@ fn sim_reaches(
     false
 }
 
-/// True when the function names one of [`SIM_PIXEL_ROOTS`] or a
-/// [`SIM_PIXEL_PREFIXES`] family. A new sim that captures is classified by
-/// its own calls, never by a name list.
 fn names_pixel_reader(ws: &bone_semantic::inference::Workspace, (mid, fid): FnKey) -> bool {
     let callee = &ws.module(mid).functions[fid];
     sim_name_reads_pixels(skull_mir::mangle::declared_name(callee.name.as_str()))
 }
 
-/// True when the body references a scene capacity global, one of
-/// [`SIM_CAPACITY_GLOBALS`]. Data globals lower to `Expr::Global` exactly
-/// like function-valued references; a name that resolves to no function is a
-/// data reference and is matched by declared (bare) name.
 fn references_capacity(
     ws: &bone_semantic::inference::Workspace,
     (mid, fid): FnKey,
@@ -210,9 +199,6 @@ pub(crate) fn apply(
             sim.env_pairs
                 .insert(0, ("SIM_DRAW".to_string(), "on_demand".to_string()));
         }
-        // Skipped when the sim declares any `STONE_WINDOW` (an explicit
-        // empty keeps the game's own size); prepended so the pair order
-        // reads default-first.
         let key = (sim.module, sim.function);
         let explicit_window = sim.env_pairs.iter().any(|(k, _)| k == "STONE_WINDOW");
         if !explicit_window
