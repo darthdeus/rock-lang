@@ -1,14 +1,9 @@
-//! Completion replay corpus, server half: with recording active, every completion
-//! response item carries a `rock.completionAccepted` command
-//! `[record_id, index, label]`, and executing that command (what the client
-//! does after inserting the item) appends one self-contained JSONL corpus
-//! row -- the buffer exactly as the ranker saw it, the full ranked list,
-//! and the accepted item. With recording off, items carry no command.
+//! With recording on, each completion item carries a `rock.completionAccepted`
+//! command, and executing it appends one self-contained JSONL corpus row.
 
-use bone_query::FileUriExt;
+use crate::common::{bone_ws, completion};
 use lsp_types::*;
 use rock_lsp::completion_record;
-use rock_lsp::{LspWorkspace, do_completion_workspace};
 
 const SRC: &str = "\
 struct IVec2 { x: int }
@@ -20,23 +15,11 @@ fn r(player: Player) {
 }
 ";
 
-fn completion_items(ws: &mut LspWorkspace, path: &std::path::Path) -> Vec<CompletionItem> {
-    let params = CompletionParams {
-        text_document_position: TextDocumentPositionParams::new(
-            TextDocumentIdentifier {
-                uri: Uri::from_file_path(path.to_str().unwrap()).unwrap(),
-            },
-            Position::new(5, 8),
-        ),
-        work_done_progress_params: Default::default(),
-        partial_result_params: Default::default(),
-        // cursor after `pg` inside `sfx(...)`.
-        context: None,
-    };
-    do_completion_workspace(ws, &params)
-        .unwrap()
-        .expect("completion response")
-        .items
+/// Completion after `pg` inside `sfx(...)`.
+fn complete_pg() -> CompletionList {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("main.rock");
+    completion(&mut bone_ws(&path, SRC), &path, 5, 8)
 }
 
 #[test]
@@ -57,18 +40,15 @@ fn recording_round_trip_tags_items_and_writes_corpus_row() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("main.rock");
     let corpus = dir.path().join("corpus.jsonl");
     completion_record::init_recorder_at(corpus.clone());
 
-    let mut ws = crate::common::bone_ws(&path, SRC);
-    let items = completion_items(&mut ws, &path);
+    let items = complete_pg().items;
     assert!(
         !items.is_empty(),
         "fixture must complete something for `pg`"
     );
 
-    // Every item carries the accept command: same record_id, own index+label.
     let first_cmd = items[0]
         .command
         .as_ref()
@@ -98,7 +78,6 @@ fn recording_round_trip_tags_items_and_writes_corpus_row() {
         assert_eq!(args[2].as_str(), Some(it.label.as_str()), "label arg");
     }
 
-    // Execute the command the way the client does on accept.
     let picked = items.len().min(2) - 1;
     let exec = ExecuteCommandParams {
         command: completion_record::ACCEPT_COMMAND.to_string(),
@@ -156,24 +135,20 @@ fn recording_round_trip_tags_items_and_writes_corpus_row() {
     assert!(completion_record::handle_execute_command(&bogus).is_err());
 }
 
+/// Bone filters and ranks by the typed prefix, so a response is not a
+/// superset the client can re-filter: a complete list made nvim-cmp freeze the
+/// empty-prefix order. The recording-on test runs in a child process, so this
+/// one sees recording off.
 #[test]
-fn recording_off_leaves_items_untagged() {
-    // The recording-on test runs in a child, leaving this process off even
-    // when libtest runs both tests concurrently or sequentially.
+fn completion_is_incomplete_and_untagged_when_recording_is_off() {
     assert!(
         std::env::var_os("ROCK_LSP_RECORD").is_none(),
         "test env must not set ROCK_LSP_RECORD"
     );
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("main.rock");
-    let mut ws = crate::common::bone_ws(&path, SRC);
-    let items = completion_items(&mut ws, &path);
-    assert!(!items.is_empty());
-    for it in &items {
-        assert!(
-            it.command.is_none(),
-            "item {} tagged while recording is off",
-            it.label
-        );
+    let list = complete_pg();
+    assert!(list.is_incomplete);
+    assert!(!list.items.is_empty());
+    for it in &list.items {
+        assert!(it.command.is_none(), "item {} tagged", it.label);
     }
 }

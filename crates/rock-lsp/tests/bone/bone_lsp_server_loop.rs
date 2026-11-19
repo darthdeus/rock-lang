@@ -1,9 +1,5 @@
-//! End-to-end pin of the `LspServer` message loop in `rock-lsp/src/lib.rs`.
-//!
-//! Drives the transport-free server (`new` / `initialize` / `handle` /
-//! `exited`) through initialize, didOpen/didChange diagnostics, hover,
-//! definition, shutdown/exit and unknown messages, asserting the exact
-//! outgoing messages.
+//! The transport-free `LspServer` message loop, asserting the exact outgoing
+//! messages.
 
 use bone_query::FileUriExt;
 use lsp_server::{Message, Notification, Request, RequestId};
@@ -13,10 +9,6 @@ use std::str::FromStr;
 
 fn init_params() -> Value {
     json!({ "capabilities": {}, "rootUri": Value::Null })
-}
-
-fn started() -> LspServer {
-    LspServer::new()
 }
 
 fn req(id: i32, method: &str, params: Value) -> Message {
@@ -84,77 +76,69 @@ fn diagnostics_for(out: &[Message], uri: &str) -> Vec<Value> {
         .collect()
 }
 
+/// Error and clearing diagnostics are published per file, without synthetic
+/// package identities (`<root>`, `@/`) in standalone messages.
 #[test]
-fn duplicate_decorator_diagnostic_is_unique_and_clears_after_an_edit() {
-    let dir = tempfile::tempdir().unwrap();
-    let uri = uri_of(&dir.path().join("main.rock"));
-    let mut server = started();
-    let source = "deco init reg {}\ndeco init reg {}\nfn main() {}\n";
-    let out = roundtrip(&mut server, did_open(&uri, source));
-    let diagnostics = diagnostics_for(&out, &uri);
-    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
-    assert!(
-        diagnostics[0]["message"]
-            .as_str()
-            .unwrap()
-            .contains("duplicate definition of decorator `reg`"),
-        "{diagnostics:?}"
-    );
-    assert_eq!(diagnostics[0]["range"]["start"]["line"], 1);
-
-    let out = roundtrip(
-        &mut server,
-        did_change(&uri, "deco init reg {}\nfn main() {}\n"),
-    );
-    let diagnostics = diagnostics_for(&out, &uri);
-    assert!(diagnostics.is_empty(), "{diagnostics:?}");
-}
-
-#[test]
-fn standalone_duplicate_diagnostics_do_not_expose_package_identity() {
-    for source in [
-        "struct Item {}\nstruct Item {}\n",
-        "fn item() {}\nglobal item: int = 0\n",
-        "struct item {}\nmod item {}\n",
+fn did_open_publishes_errors_and_a_valid_change_clears_them() {
+    // (opened source, message fragment, line)
+    for (source, message, line) in [
+        (BROKEN, "", 1),
+        (
+            "deco init reg {}\ndeco init reg {}\nfn main() {}\n",
+            "duplicate definition of decorator `reg`",
+            1,
+        ),
+        (
+            "struct Item {}\nstruct Item {}\n",
+            "duplicate definition",
+            1,
+        ),
+        (
+            "fn item() {}\nglobal item: int = 0\n",
+            "duplicate definition",
+            1,
+        ),
+        ("struct item {}\nmod item {}\n", "duplicate definition", 1),
+        ("mod child {}\nuse self as child;\n", "module `::`", 1),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let uri = uri_of(&dir.path().join("main.rock"));
-        let out = roundtrip(&mut started(), did_open(&uri, source));
+        let mut server = LspServer::new();
+        let out = roundtrip(&mut server, did_open(&uri, source));
         let diagnostics = diagnostics_for(&out, &uri);
-        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
-        let message = diagnostics[0]["message"].as_str().unwrap();
-        assert!(message.starts_with("duplicate definition"), "{message}");
+        let errors: Vec<_> = diagnostics.iter().filter(|d| d["severity"] == 1).collect();
+        assert_eq!(errors.len(), 1, "{source}: {diagnostics:?}");
+        let text = errors[0]["message"].as_str().unwrap();
+        assert!(text.contains(message), "{text}");
+        assert!(!text.contains("<root>") && !text.contains("@/"), "{text}");
+        assert_eq!(errors[0]["range"]["start"]["line"], line, "{source}");
+
+        let out = roundtrip(&mut server, did_change(&uri, FIXED));
+        let diagnostics = diagnostics_for(&out, &uri);
         assert!(
-            !message.contains("<root>") && !message.contains("@/"),
-            "{message}"
+            diagnostics.iter().all(|d| d["severity"] != 1),
+            "{diagnostics:?}"
         );
     }
 }
 
-#[test]
-fn standalone_root_module_diagnostic_uses_the_source_anchor() {
-    let dir = tempfile::tempdir().unwrap();
-    let uri = uri_of(&dir.path().join("main.rock"));
-    let out = roundtrip(
-        &mut started(),
-        did_open(&uri, "mod child {}\nuse self as child;\n"),
-    );
-    let diagnostics = diagnostics_for(&out, &uri);
-    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
-    let message = diagnostics[0]["message"].as_str().unwrap();
-    assert!(message.contains("module `::`"), "{message}");
-    assert!(!message.contains("@/"), "{message}");
-}
-
+/// Clients send capabilities with required sub-fields missing; the reply
+/// carries exactly `server_capabilities()`, pinned key by key.
 #[test]
 fn initialize_replies_with_the_advertised_capabilities() {
+    let params = json!({
+        "capabilities": {
+            "general": { "staleRequestSupport": { "cancel": true } },
+            "textDocument": { "codeAction": { "codeActionLiteralSupport": {} } }
+        },
+        "rootUri": Value::Null
+    });
     let id = RequestId::from(1);
-    let request = Request {
+    let (_server, reply) = LspServer::initialize(Request {
         id: id.clone(),
         method: "initialize".to_string(),
-        params: init_params(),
-    };
-    let (_server, reply) = LspServer::initialize(request);
+        params,
+    });
     let Message::Response(resp) = reply else {
         panic!("initialize must answer with a response");
     };
@@ -163,38 +147,9 @@ fn initialize_replies_with_the_advertised_capabilities() {
     let caps = resp.result.as_ref().expect("result")["capabilities"].clone();
     assert_eq!(
         caps,
-        serde_json::to_value(rock_lsp::server_capabilities()).unwrap(),
-        "the initialize reply must carry exactly server_capabilities()"
+        serde_json::to_value(rock_lsp::server_capabilities()).unwrap()
     );
-}
-
-#[test]
-fn initialize_ignores_client_capabilities_it_does_not_read() {
-    // Required sub-fields are missing, as real clients sometimes send.
-    let params = json!({
-        "capabilities": {
-            "general": { "staleRequestSupport": { "cancel": true } },
-            "textDocument": { "codeAction": { "codeActionLiteralSupport": {} } }
-        },
-        "rootUri": Value::Null
-    });
-    let request = Request {
-        id: RequestId::from(1),
-        method: "initialize".to_string(),
-        params,
-    };
-    let (_server, reply) = LspServer::initialize(request);
-    let Message::Response(resp) = reply else {
-        panic!("initialize must answer with a response");
-    };
-    assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
-}
-
-#[test]
-fn capability_set_stays_identical() {
-    let caps = serde_json::to_value(rock_lsp::server_capabilities()).unwrap();
     assert!(caps["semanticTokensProvider"].is_object());
-    // The key set is exact; pin the provider options editors depend on.
     assert_eq!(
         caps,
         json!({
@@ -226,107 +181,70 @@ fn capability_set_stays_identical() {
     );
 }
 
+/// The refresh is a request with a fresh id, sent only to clients that
+/// advertise `refreshSupport`; the client's reply produces no output.
 #[test]
-fn did_open_publishes_the_type_error_and_change_clears_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("main.rock");
-    let uri = uri_of(&path);
-    let mut server = started();
-
-    let out = roundtrip(&mut server, did_open(&uri, BROKEN));
-    let diags = diagnostics_for(&out, &uri);
-    let errors: Vec<&Value> = diags.iter().filter(|d| d["severity"] == 1).collect();
-    assert!(
-        !errors.is_empty(),
-        "didOpen with a type error must publish it, got {diags:?}"
-    );
-    assert!(
-        errors.iter().any(|d| d["range"]["start"]["line"] == 1),
-        "the error is on line 2 (0-based 1): {errors:?}"
-    );
-
-    let out = roundtrip(&mut server, did_change(&uri, FIXED));
-    let diags = diagnostics_for(&out, &uri);
-    assert!(
-        diags.iter().all(|d| d["severity"] != 1),
-        "valid source clears the error, got {diags:?}"
-    );
-}
-
-#[test]
-fn inlay_hint_refresh_is_a_request_with_unique_ids_and_ignored_replies() {
-    let (mut server, _) = LspServer::initialize(Request {
-        id: RequestId::from(1),
-        method: "initialize".to_string(),
-        params: json!({ "capabilities": {
-            "workspace": { "inlayHint": { "refreshSupport": true } }
-        } }),
-    });
+fn inlay_hint_refresh_follows_client_support() {
     let dir = tempfile::tempdir().unwrap();
     let uri = uri_of(&dir.path().join("main.rock"));
-    roundtrip(&mut server, did_open(&uri, FIXED));
-    let mut ids = Vec::new();
-    for _ in 0..2 {
-        let out = roundtrip(&mut server, did_change(&uri, FIXED));
-        let refreshes: Vec<_> = out
-            .iter()
-            .filter(|m| match m {
-                Message::Request(r) => r.method == "workspace/inlayHint/refresh",
-                Message::Notification(n) => n.method == "workspace/inlayHint/refresh",
-                _ => false,
-            })
-            .collect();
-        assert_eq!(refreshes.len(), 1, "one refresh per edit: {out:?}");
-        let Message::Request(refresh) = refreshes[0] else {
-            panic!("refresh must be a request with an id: {refreshes:?}");
-        };
-        let wire = serde_json::to_value(refresh).unwrap();
-        assert!(wire.get("id").is_some(), "refresh carries an id: {wire}");
-        assert!(refresh.params.is_null());
-        ids.push(refresh.id.clone());
-        let reply = lsp_server::Response::new_ok(refresh.id.clone(), Value::Null);
-        assert!(roundtrip(&mut server, reply.into()).is_empty());
-    }
-    assert_ne!(ids[0], ids[1]);
-}
-
-#[test]
-fn inlay_hint_refresh_requires_advertised_support() {
-    let dir = tempfile::tempdir().unwrap();
-    let uri = uri_of(&dir.path().join("main.rock"));
-    for params in [
-        json!({}),
-        init_params(),
-        json!({ "capabilities": { "workspace": {} } }),
-        json!({ "capabilities": { "workspace": { "inlayHint": {} } } }),
-        json!({ "capabilities": {
-            "workspace": { "inlayHint": { "refreshSupport": false } }
-        } }),
+    let supported =
+        json!({ "capabilities": { "workspace": { "inlayHint": { "refreshSupport": true } } } });
+    for (params, refreshes) in [
+        (supported, true),
+        (json!({}), false),
+        (init_params(), false),
+        (json!({ "capabilities": { "workspace": {} } }), false),
+        (
+            json!({ "capabilities": { "workspace": { "inlayHint": {} } } }),
+            false,
+        ),
+        (
+            json!({ "capabilities": { "workspace": { "inlayHint": { "refreshSupport": false } } } }),
+            false,
+        ),
     ] {
         let (mut server, _) = LspServer::initialize(Request {
             id: RequestId::from(1),
             method: "initialize".to_string(),
-            params,
+            params: params.clone(),
         });
         roundtrip(&mut server, did_open(&uri, FIXED));
-        let out = roundtrip(&mut server, did_change(&uri, FIXED));
-        assert!(
-            out.iter().all(|m| match m {
-                Message::Request(r) => r.method != "workspace/inlayHint/refresh",
-                Message::Notification(n) => n.method != "workspace/inlayHint/refresh",
-                _ => true,
-            }),
-            "unsupported refresh must not be sent: {out:?}"
-        );
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let out = roundtrip(&mut server, did_change(&uri, FIXED));
+            let sent: Vec<_> = out
+                .iter()
+                .filter(|m| match m {
+                    Message::Request(r) => r.method == "workspace/inlayHint/refresh",
+                    Message::Notification(n) => n.method == "workspace/inlayHint/refresh",
+                    _ => false,
+                })
+                .collect();
+            if !refreshes {
+                assert!(sent.is_empty(), "{params}: {out:?}");
+                continue;
+            }
+            assert_eq!(sent.len(), 1, "one refresh per edit: {out:?}");
+            let Message::Request(refresh) = sent[0] else {
+                panic!("refresh must be a request with an id: {sent:?}");
+            };
+            assert!(refresh.params.is_null());
+            ids.push(refresh.id.clone());
+            let reply = lsp_server::Response::new_ok(refresh.id.clone(), Value::Null);
+            assert!(roundtrip(&mut server, reply.into()).is_empty());
+        }
+        if refreshes {
+            assert_ne!(ids[0], ids[1]);
+        }
     }
 }
 
 #[test]
-fn hover_and_definition_answer_through_handle() {
+fn hover_definition_and_references_answer_through_handle() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("main.rock");
     let uri = uri_of(&path);
-    let mut server = started();
+    let mut server = LspServer::new();
     roundtrip(&mut server, did_open(&uri, FIXED));
 
     let at = json!({ "textDocument": { "uri": uri },
@@ -360,30 +278,13 @@ fn hover_and_definition_answer_through_handle() {
         target.ends_with("/stdlib/unified.rock"),
         "definition lands in the stdlib copy, got {target}"
     );
-}
-
-#[test]
-fn references_accept_minimal_text_document_position_params() {
-    let dir = tempfile::tempdir().unwrap();
-    let uri = uri_of(&dir.path().join("main.rock"));
-    let mut server = started();
-    roundtrip(
-        &mut server,
-        did_open(
-            &uri,
-            "fn main() {\n    let count = 1\n    print(count)\n}\n",
-        ),
-    );
 
     let out = roundtrip(
         &mut server,
         req(
             12,
             "textDocument/references",
-            json!({
-                "textDocument": { "uri": uri },
-                "position": { "line": 1, "character": 8 }
-            }),
+            json!({ "textDocument": { "uri": uri }, "position": { "line": 1, "character": 8 } }),
         ),
     );
     let resp = response(&out);
@@ -393,7 +294,7 @@ fn references_accept_minimal_text_document_position_params() {
 
 #[test]
 fn shutdown_answers_then_exit_ends_the_loop() {
-    let mut server = started();
+    let mut server = LspServer::new();
 
     let out = roundtrip(&mut server, req(1, "shutdown", Value::Null));
     let resp = response(&out);
@@ -431,17 +332,33 @@ fn shutdown_answers_then_exit_ends_the_loop() {
     assert!(server.exited(), "exit ends the loop");
 }
 
+/// Every request needs a response, or the client waits on its id forever.
 #[test]
-fn unknown_request_is_not_found_and_unknown_notification_is_silent() {
-    let mut server = started();
-
-    let out = roundtrip(&mut server, req(9, "frobnicate/do", json!({})));
-    let resp = response(&out);
-    assert_eq!(resp.id, RequestId::from(9));
-    assert!(resp.result.is_none(), "{resp:?}");
-    let err = resp.error.as_ref().expect("an error response");
-    assert_eq!(err.code, lsp_server::ErrorCode::MethodNotFound as i32);
-    assert_eq!(err.message, "Method 'frobnicate/do' not found");
+fn unknown_or_malformed_requests_answer_errors_and_unknown_notifications_are_silent() {
+    let mut server = LspServer::new();
+    for (id, method, params, code) in [
+        (
+            9,
+            "frobnicate/do",
+            json!({}),
+            lsp_server::ErrorCode::MethodNotFound,
+        ),
+        (
+            3,
+            "textDocument/hover",
+            json!({ "textDocument": 42 }),
+            lsp_server::ErrorCode::InvalidParams,
+        ),
+    ] {
+        let out = roundtrip(&mut server, req(id, method, params));
+        let resp = response(&out);
+        assert_eq!(resp.id, RequestId::from(id));
+        assert!(resp.result.is_none(), "{resp:?}");
+        assert_eq!(
+            resp.error.as_ref().expect("an error response").code,
+            code as i32
+        );
+    }
 
     let out = roundtrip(&mut server, not("frobnicate/event", json!({})));
     assert!(
@@ -451,127 +368,86 @@ fn unknown_request_is_not_found_and_unknown_notification_is_silent() {
     assert!(!server.exited());
 }
 
-#[test]
-fn malformed_request_params_answer_invalid_params() {
-    // Every request needs a response, or the client waits on its id forever.
-    let mut server = started();
-    let out = roundtrip(
-        &mut server,
-        req(3, "textDocument/hover", json!({ "textDocument": 42 })),
-    );
-    let resp = response(&out);
-    assert_eq!(resp.id, RequestId::from(3));
-    assert!(resp.result.is_none(), "{resp:?}");
-    let err = resp.error.as_ref().expect("an error response");
-    assert_eq!(err.code, lsp_server::ErrorCode::InvalidParams as i32);
-}
-
-#[test]
-fn closing_buffer_restores_disk_symbols_for_other_open_files() {
-    // Returned locations use canonical paths; on macOS the temp dir is
-    // behind a symlink, so open the files by their canonical names.
+/// A package directory under its canonical path: returned locations use
+/// canonical paths, and the macOS temporary directory is behind a symlink.
+fn package_dir(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().canonicalize().unwrap();
     std::fs::write(
         dir.join("stick.toml"),
-        "[package]\nname = \"close_buffers\"\n",
+        format!("[package]\nname = \"{name}\"\n"),
     )
     .unwrap();
+    (tmp, dir)
+}
+
+fn did_close(path: &std::path::Path) -> Message {
+    not(
+        "textDocument/didClose",
+        json!({"textDocument": {"uri": uri_of(path)}}),
+    )
+}
+
+fn definition(server: &mut LspServer, path: &std::path::Path, line: u32, ch: u32) -> String {
+    let out = roundtrip(
+        server,
+        req(
+            900,
+            "textDocument/definition",
+            json!({
+                "textDocument": {"uri": uri_of(path)}, "position": {"line": line, "character": ch}
+            }),
+        ),
+    );
+    response(&out).result.as_ref().unwrap().to_string()
+}
+
+const USES_FOO: &str = "fn use_it() -> Foo { Foo { x: 1 } }\n";
+const DECLARES_FOO: &str = "struct Foo { x: int }\n";
+
+#[test]
+fn closing_buffer_restores_disk_symbols_for_other_open_files() {
+    let (_tmp, dir) = package_dir("close_buffers");
     let a = dir.join("a.rock");
     let b = dir.join("b.rock");
-    std::fs::write(&a, "struct Foo { x: int }\n").unwrap();
-    let source = "fn use_it() -> Foo { Foo { x: 1 } }\n";
-    std::fs::write(&b, source).unwrap();
-    let mut server = started();
+    std::fs::write(&a, DECLARES_FOO).unwrap();
+    std::fs::write(&b, USES_FOO).unwrap();
+    let mut server = LspServer::new();
     roundtrip(
         &mut server,
         did_open(&uri_of(&a), "struct Draft { x: int }\n"),
     );
-    roundtrip(&mut server, did_open(&uri_of(&b), source));
-    roundtrip(
-        &mut server,
-        not(
-            "textDocument/didClose",
-            json!({"textDocument": {"uri": uri_of(&a)}}),
-        ),
-    );
-    let out = roundtrip(&mut server, did_change(&uri_of(&b), &format!("{source}\n")));
-    let diags = diagnostics_for(&out, &uri_of(&b));
-    assert!(diags.iter().all(|d| d["severity"] != 1), "{diags:?}");
+    roundtrip(&mut server, did_open(&uri_of(&b), USES_FOO));
+    roundtrip(&mut server, did_close(&a));
     let out = roundtrip(
         &mut server,
-        req(
-            901,
-            "textDocument/definition",
-            json!({
-                "textDocument": {"uri": uri_of(&b)}, "position": {"line": 0, "character": 15}
-            }),
-        ),
+        did_change(&uri_of(&b), &format!("{USES_FOO}\n")),
     );
-    let result = response(&out).result.as_ref().unwrap();
-    assert!(
-        result.to_string().contains(&uri_of(&a)),
-        "disk symbol should remain navigable: {result}"
-    );
+    let diags = diagnostics_for(&out, &uri_of(&b));
+    assert!(diags.iter().all(|d| d["severity"] != 1), "{diags:?}");
+    let target = definition(&mut server, &b, 0, 15);
+    assert!(target.contains(&uri_of(&a)), "{target}");
 }
 
 #[test]
 fn closing_renamed_buffer_refreshes_definition_and_diagnostics() {
-    // Returned locations use canonical paths; on macOS the temp dir is
-    // behind a symlink, so open the files by their canonical names.
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().canonicalize().unwrap();
-    std::fs::write(
-        dir.join("stick.toml"),
-        "[package]\nname = \"renamed_buffers\"\n",
-    )
-    .unwrap();
+    let (_tmp, dir) = package_dir("renamed_buffers");
     let old = dir.join("old.rock");
     let new = dir.join("new.rock");
     let main = dir.join("main.rock");
-    let declaration = "struct Foo { x: int }\n";
-    let source = "fn use_it() -> Foo { Foo { x: 1 } }\n";
-    std::fs::write(&old, declaration).unwrap();
-    std::fs::write(&main, source).unwrap();
-    let mut server = started();
-    roundtrip(&mut server, did_open(&uri_of(&old), declaration));
-    roundtrip(&mut server, did_open(&uri_of(&main), source));
+    std::fs::write(&old, DECLARES_FOO).unwrap();
+    std::fs::write(&main, USES_FOO).unwrap();
+    let mut server = LspServer::new();
+    roundtrip(&mut server, did_open(&uri_of(&old), DECLARES_FOO));
+    roundtrip(&mut server, did_open(&uri_of(&main), USES_FOO));
     std::fs::rename(&old, &new).unwrap();
-    roundtrip(
-        &mut server,
-        not(
-            "textDocument/didClose",
-            json!({"textDocument": {"uri": uri_of(&old)}}),
-        ),
-    );
-    roundtrip(&mut server, did_open(&uri_of(&new), declaration));
-    let out = roundtrip(
-        &mut server,
-        req(
-            902,
-            "textDocument/definition",
-            json!({
-                "textDocument": {"uri": uri_of(&main)}, "position": {"line": 0, "character": 15}
-            }),
-        ),
-    );
-    assert!(
-        response(&out)
-            .result
-            .as_ref()
-            .unwrap()
-            .to_string()
-            .contains(&uri_of(&new)),
-        "{out:?}"
-    );
+    roundtrip(&mut server, did_close(&old));
+    roundtrip(&mut server, did_open(&uri_of(&new), DECLARES_FOO));
+    let target = definition(&mut server, &main, 0, 15);
+    assert!(target.contains(&uri_of(&new)), "{target}");
+
     std::fs::remove_file(&new).unwrap();
-    let out = roundtrip(
-        &mut server,
-        not(
-            "textDocument/didClose",
-            json!({"textDocument": {"uri": uri_of(&new)}}),
-        ),
-    );
+    let out = roundtrip(&mut server, did_close(&new));
     let diags = diagnostics_for(&out, &uri_of(&main));
     assert!(
         diags

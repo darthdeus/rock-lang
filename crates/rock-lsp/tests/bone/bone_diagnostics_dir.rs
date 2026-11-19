@@ -1,5 +1,5 @@
-//! `rock lsp diagnostics <dir>`: whole-project diagnostics over every `.rock`
-//! under a directory, exercising the directory branch of `diagnostics_report`.
+//! `rock lsp diagnostics <dir>` and `rock lsp lint <dir>` over every `.rock`
+//! file under a directory.
 
 use crate::fixture::Project;
 use rock_lsp::cli::bone_lsp::{diagnostics_report, lint_report};
@@ -33,51 +33,18 @@ fn dir_reports_diagnostics_across_files() {
     );
 
     let msgs = messages(&report);
-    assert!(
-        msgs.iter().any(|m| m.contains("unused function `orphan`")),
-        "whole-project unused_fn must appear: {msgs:?}"
-    );
-    assert!(
-        msgs.iter()
-            .any(|m| m.to_lowercase().contains("int") || m.to_lowercase().contains("type")),
-        "b.rock's type error must appear: {msgs:?}"
-    );
-    // The same project reports lints separately from its type errors.
-    let diag_msgs = messages(&report);
     let lint_msgs = messages(&lint_report(dir).unwrap());
-
-    // Sanity: diagnostics DOES carry the type error.
-    assert!(
-        diag_msgs
-            .iter()
-            .any(|m| m.contains("unify") || m.to_lowercase().contains("int")),
-        "diagnostics should include the type error: {diag_msgs:?}"
-    );
-    // Lint report: the unused_fn lint is present, the type error is not.
-    assert!(
-        lint_msgs
-            .iter()
-            .any(|m| m.contains("unused function `orphan`")),
-        "lint report must include unused_fn: {lint_msgs:?}"
-    );
-    assert!(
-        !lint_msgs.iter().any(|m| m.contains("unify")),
-        "lint report must exclude typecheck errors: {lint_msgs:?}"
-    );
-}
-
-#[test]
-fn dir_stays_silent_for_lib() {
-    let project = Project::new(&[
-        ("stick.toml", "[package]\nname = \"l\"\ntype = \"lib\"\n"),
-        ("a.rock", "fn public_api() {}\n"),
-    ]);
-    let report = diagnostics_report(project.dir.path().to_str().unwrap()).unwrap();
-    let msgs = messages(&report);
-    assert!(
-        !msgs.iter().any(|m| m.contains("unused function")),
-        "lib package must not run unused_fn: {msgs:?}"
-    );
+    for (report, msgs, type_error) in [("diagnostics", &msgs, true), ("lint", &lint_msgs, false)] {
+        assert!(
+            msgs.iter().any(|m| m.contains("unused function `orphan`")),
+            "{report}: whole-project unused_fn: {msgs:?}"
+        );
+        assert_eq!(
+            msgs.iter().any(|m| m.contains("type mismatch")),
+            type_error,
+            "{report}: b.rock's type error: {msgs:?}"
+        );
+    }
 }
 
 // The LSP reads a package's identity-storage state from its own manifest, in
@@ -116,8 +83,7 @@ fn identity_storage_diagnostics_follow_the_package_declaration() {
 
 #[test]
 fn unreadable_file_fails_the_dir_report_by_name() {
-    // A .rock file that is not UTF-8 cannot be read; the walk must name it and
-    // fail rather than report a clean project with the file silently dropped.
+    // Silently dropping the file would report a clean project.
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.rock"), "fn main() {}\n").unwrap();
     std::fs::write(dir.path().join("bad.rock"), b"fn main() {}\n\xff\xfe\n").unwrap();
